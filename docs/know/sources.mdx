@@ -1,0 +1,32 @@
+---
+title: "Document Sources"
+description: "Ingest static files into the Organization Brain."
+---
+
+If your team relies on external SaaS platforms or legacy systems that can export data but don't support direct database connections, you can ingest static files (Sources) into the Organization Brain.
+
+## Uploading a document
+
+Navigate to **Brain &rarr; Sources** and use the **Upload Data** interface (or simply drop a file into the Corgtex Slack bot, if configured).
+
+Supported formats include:
+- PDF
+- DOCX
+- TXT
+- MD / MDX
+- CSV
+
+## The ingestion and chunking process
+
+When you upload a file, Corgtex doesn't just store the blob. The worker processes the file through our background pipeline:
+
+1. **Extraction:** Specialized parsers (like `pdf-parse` or `mammoth`) extract the raw text content.
+2. **Chunking & Storage:** The text is sliced into manageable semantic chunks (`KnowledgeChunk`), embedded, and saved to the vector database.
+
+## PII Classification
+
+Before any text is embedded, it runs through the Zero-LLM PII Regex Classifier. This is a crucial safety step that happens entirely locally (without sending your data to external APIs):
+
+- The system scans the chunks using deterministic regex patterns.
+- If it detects Personal Identifiable Information (PII) or confidential markers, it tags the chunk accordingly.
+- Tagged chunks are strictly isolated and are only returned to workflows explicitly authorized to handle them. They will *never* be exposed in standard conversational agent responses.
