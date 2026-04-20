@@ -1,3 +1,4 @@
+import { existsSync } from "fs";
 import { execFileSync } from "child_process";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -36,8 +37,13 @@ try {
     : defaultSeeds;
 
   for (const script of seedScripts) {
+    const resolved = path.resolve(rootDir, script);
+    if (!existsSync(resolved)) {
+      console.warn(`[start-web] ⚠️  Seed script not found, skipping: ${script}`);
+      continue;
+    }
     console.log(`[start-web] Running seed: ${script}`);
-    run(process.execPath, [path.resolve(rootDir, script)]);
+    run(process.execPath, [resolved]);
   }
 
   // 2.5. DB Health Check Audit
@@ -56,8 +62,9 @@ try {
   }
 
   // 3. Web Server
-  console.log("[start-web] Step 3: Starting Next.js Web Server...");
-  run(process.execPath, [nextBin, "start"], { cwd: path.join(rootDir, "apps", "web") });
+  const port = process.env.PORT || "3000";
+  console.log(`[start-web] Step 3: Starting Next.js Web Server on 0.0.0.0:${port}...`);
+  run(process.execPath, [nextBin, "start", "-H", "0.0.0.0", "-p", port], { cwd: path.join(rootDir, "apps", "web") });
 } catch (error) {
   console.error("[start-web] Startup sequence failed:", error.message);
   process.exit(1);
