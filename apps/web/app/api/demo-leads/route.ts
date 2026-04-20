@@ -23,20 +23,16 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    // Look up the workspace
-    const workspace = await prisma.workspace.findUnique({
+    // upsert the workspace to ensure it exists
+    const workspace = await prisma.workspace.upsert({
       where: { slug: "corgtex" },
+      update: {},
+      create: {
+        slug: "corgtex",
+        name: "Corgtex",
+        description: "Internal company operating environment for Corgtex",
+      },
     });
-
-    if (!workspace) {
-      // If the corgtex workspace isn't seeded yet, return a safe fallback or error.
-      // But typically we should just accept the lead if we can. 
-      // If we don't have the workspace, we fail gracefully.
-      return NextResponse.json(
-        { error: "Internal workspace not configured" },
-        { status: 500 },
-      );
-    }
 
     // Upsert the DemoLead (for backward compatibility)
     await prisma.demoLead.upsert({
