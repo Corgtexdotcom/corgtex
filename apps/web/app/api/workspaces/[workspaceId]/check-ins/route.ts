@@ -11,8 +11,10 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     
     // Ensure membership and get the memberId
     const membership = await requireWorkspaceMembership({ actor, workspaceId });
+
+    // Agent actors get null membership (by design) — they don't have personal check-ins
     if (!membership) {
-        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      return NextResponse.json({ checkIns: [] });
     }
 
     // Return the member's check-ins
