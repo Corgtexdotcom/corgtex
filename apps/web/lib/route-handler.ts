@@ -25,7 +25,7 @@ export function withWorkspaceRoute(
     req: NextRequest,
     context: {
       actor: AppActor;
-      membership: MembershipSummary | null;
+      membership: MembershipSummary | undefined;
       workspaceId: string;
       params: Record<string, string>;
     }
@@ -37,7 +37,7 @@ export function withWorkspaceRoute(
       const params = await ctx.params;
       const workspaceId = params.workspaceId;
       const membership = await requireWorkspaceMembership({ actor, workspaceId });
-      return await handler(req, { actor, membership, workspaceId, params });
+      return await handler(req, { actor, membership: membership ?? undefined, workspaceId, params });
     } catch (error) {
       return handleRouteError(error);
     }
