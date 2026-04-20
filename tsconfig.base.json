@@ -1,0 +1,30 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["dom", "dom.iterable", "es2022"],
+    "types": ["node"],
+    "allowJs": false,
+    "skipLibCheck": true,
+    "strict": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "jsx": "preserve",
+    "incremental": true,
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["apps/web/*"],
+      "@corgtex/shared": ["packages/shared/src/index.ts"],
+      "@corgtex/domain": ["packages/domain/src/index.ts"],
+      "@corgtex/workflows": ["packages/workflows/src/index.ts"],
+      "@corgtex/models": ["packages/models/src/index.ts"],
+      "@corgtex/knowledge": ["packages/knowledge/src/index.ts"],
+      "@corgtex/agents": ["packages/agents/src/index.ts"],
+      "@corgtex/storage": ["packages/storage/src/index.ts"],
+      "@corgtex/mcp": ["packages/mcp/src/index.ts"]
+    }
+  }
+}

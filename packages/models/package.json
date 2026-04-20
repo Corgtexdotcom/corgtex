@@ -1,0 +1,12 @@
+{
+  "name": "@corgtex/models",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@corgtex/shared": "0.1.0"
+  },
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}

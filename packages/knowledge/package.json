@@ -1,0 +1,17 @@
+{
+  "name": "@corgtex/knowledge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@corgtex/domain": "0.1.0",
+    "@corgtex/models": "0.1.0",
+    "@corgtex/shared": "0.1.0",
+    "@corgtex/storage": "0.1.0",
+    "mammoth": "^1.12.0",
+    "pdf-parse": "^2.4.5"
+  },
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "name": "@corgtex/workflows",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@corgtex/agents": "0.1.0",
+    "@corgtex/knowledge": "0.1.0",
+    "@corgtex/shared": "0.1.0"
+  },
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}

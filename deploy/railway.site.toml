@@ -1,0 +1,20 @@
+"$schema" = "https://railway.com/railway.schema.json"
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "/deploy/Dockerfile.site"
+watchPatterns = [
+  "apps/site/**",
+  "package.json",
+  "package-lock.json",
+  "tsconfig.base.json",
+  "deploy/Dockerfile.site",
+  "deploy/railway.site.toml",
+]
+
+[deploy]
+healthcheckPath = "/api/health"
+healthcheckTimeout = 60
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 5
+runtime = "V2"

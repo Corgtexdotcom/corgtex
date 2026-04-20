@@ -1,0 +1,4 @@
+ALTER TABLE "KnowledgeChunk"
+ADD COLUMN "sourceTitle" TEXT,
+ADD COLUMN "chunkIndex" INTEGER NOT NULL DEFAULT 0,
+ADD COLUMN "embedding" JSONB;

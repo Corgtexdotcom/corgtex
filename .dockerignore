@@ -1,0 +1,9 @@
+node_modules
+.next
+apps/web/.next
+.env
+.env.local
+*.log
+*.tsbuildinfo
+.git
+.claude

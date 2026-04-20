@@ -1,0 +1,87 @@
+import { NextRequest, NextResponse } from "next/server";
+import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
+import { createCorgtexMcpServer, authenticateMcpRequest } from "@corgtex/mcp";
+import { AppError } from "@corgtex/domain";
+
+/**
+ * POST /api/mcp — JSON-RPC endpoint for MCP tool/resource calls.
+ *
+ * Clients send JSON-RPC requests (initialize, tools/call, resources/read, etc.)
+ * and receive JSON-RPC responses, potentially as an SSE stream for
+ * long-running operations.
+ */
+export async function POST(request: NextRequest) {
+  let server;
+  try {
+    const authHeader = request.headers.get("authorization");
+    const sessionCtx = await authenticateMcpRequest(authHeader);
+    server = createCorgtexMcpServer(sessionCtx);
+
+    const transport = new WebStandardStreamableHTTPServerTransport({
+      sessionIdGenerator: undefined, // stateless — no session persistence
+      enableJsonResponse: true, // return JSON instead of SSE for stateless mode
+    });
+
+    await server.connect(transport);
+
+    const body = await request.json();
+
+    // The SDK requires Accept to include both application/json and text/event-stream.
+    // Some proxies (mcp-remote, curl) may not send both, so we patch the header.
+    const accept = request.headers.get("accept") ?? "";
+    const needsPatch = !accept.includes("text/event-stream") || !accept.includes("application/json");
+    let req: Request = request;
+    if (needsPatch) {
+      const patchedHeaders = new Headers(request.headers);
+      patchedHeaders.set("accept", "application/json, text/event-stream");
+      req = new Request(request.url, {
+        method: request.method,
+        headers: patchedHeaders,
+        body: JSON.stringify(body),
+      });
+    }
+
+    const response = await transport.handleRequest(req, { parsedBody: body });
+    
+    await server.close();
+    return response;
+  } catch (error) {
+    if (server) await server.close().catch(() => {});
+    
+    if (error instanceof AppError) {
+      return NextResponse.json(
+        { jsonrpc: "2.0", error: { code: -32000, message: error.message } },
+        { status: error.status },
+      );
+    }
+
+    console.error("[MCP] Unexpected error:", error);
+    return NextResponse.json(
+      { jsonrpc: "2.0", error: { code: -32603, message: "Internal server error" } },
+      { status: 500 },
+    );
+  }
+}
+
+/**
+ * GET /api/mcp — Server info endpoint.
+ * Returns basic info about the MCP server for discovery.
+ */
+export async function GET() {
+  return NextResponse.json({
+    name: "corgtex-mcp",
+    version: "1.0.0",
+    description: "Corgtex MCP Server — connect from ChatGPT, Claude, or Gemini to interact with your organization's governance platform.",
+    capabilities: {
+      tools: true,
+      resources: true,
+    },
+  });
+}
+
+/**
+ * DELETE /api/mcp — Session termination (stateless, no-op).
+ */
+export async function DELETE() {
+  return new NextResponse(null, { status: 204 });
+}

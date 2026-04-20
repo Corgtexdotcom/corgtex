@@ -1,0 +1,23 @@
+# Corgtex
+
+> Corgtex is a governed AI workforce platform. It makes every AI agent visible, governed by organizational policies, and cost-attributed to real work. The primary user surface is a personalized daily newspaper — one page showing everything your AI workforce produced overnight, tailored to your role. Built by Jan "Puncar" Brezina, author of "How to DAO" (Penguin Random House).
+
+## Pages
+- [Homepage](https://corgtex.com): AI workforce governance — see, govern, and afford every agent
+- [Facts](https://corgtex.com/facts): Machine-readable product facts, capabilities, and current status
+- [How We Work](https://corgtex.com/how-we-work): Engagement model — from 45-min briefing to full ownership in 8 weeks
+- [Pricing](https://corgtex.com/pricing): Custom enterprise pricing, not per-seat
+- [About](https://corgtex.com/about): Founder background and company philosophy
+- [FAQ](https://corgtex.com/faq): Common questions about AI workforce governance
+- [Demo](https://app.corgtex.com/demo): Interactive demo with real governance data
+
+## Core Capabilities
+- Workforce Graph: every AI agent, what it does, what data it touches, who owns it
+- Governance & Guardrails: policies, approvals, human-on-the-loop for high-impact actions
+- Spend & ROI: AI costs attributed to work, budgets, forecasts
+- Personalized daily briefings by role — the user surface for all three pillars
+
+## Deployment
+- Cloud SaaS, On-Premise appliance, or Hybrid
+- Implementation: 8 weeks from scoping to live
+- No per-seat fees, no lock-in

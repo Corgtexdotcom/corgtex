@@ -1,0 +1,176 @@
+type NodeEnv = "development" | "test" | "production";
+
+type RequiredOptions = {
+  testFallback?: string;
+};
+
+function required(name: string, options: RequiredOptions = {}) {
+  const value = process.env[name]?.trim();
+  if (!value) {
+    if (nodeEnv() === "test" && options.testFallback) {
+      return options.testFallback;
+    }
+    throw new Error(`Missing required environment variable: ${name}`);
+  }
+  return value;
+}
+
+function optional(name: string) {
+  const value = process.env[name]?.trim();
+  return value && value.length > 0 ? value : undefined;
+}
+
+function numberFromEnv(name: string, fallback: number) {
+  const value = optional(name);
+  if (!value) {
+    return fallback;
+  }
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    throw new Error(`Invalid numeric environment variable: ${name}`);
+  }
+  return parsed;
+}
+
+function booleanFromEnv(name: string, fallback: boolean) {
+  const value = optional(name);
+  if (!value) {
+    return fallback;
+  }
+  return value === "1" || value.toLowerCase() === "true";
+}
+
+function nodeEnv(): NodeEnv {
+  const value = optional("NODE_ENV");
+  if (!value) {
+    return "development";
+  }
+  if (value !== "development" && value !== "test" && value !== "production") {
+    throw new Error("Invalid NODE_ENV.");
+  }
+  return value;
+}
+
+type Env = {
+  readonly NODE_ENV: NodeEnv;
+  readonly DATABASE_URL: string;
+  readonly APP_URL: string;
+  readonly SESSION_COOKIE_SECRET: string;
+  readonly AGENT_API_KEY: string | undefined;
+  readonly AGENT_ALLOWED_WORKSPACE_IDS: string | undefined;
+  readonly MODEL_PROVIDER: string;
+  readonly MODEL_API_KEY: string | undefined;
+  readonly MODEL_BASE_URL: string | undefined;
+  readonly MODEL_CHAT_DEFAULT: string;
+  readonly MODEL_CHAT_FAST: string;
+  readonly MODEL_CHAT_STANDARD: string;
+  readonly MODEL_CHAT_QUALITY: string;
+  readonly MODEL_EMBEDDING_DEFAULT: string;
+  readonly AGENT_KILL_SWITCH: boolean;
+  readonly WORKSPACE_AGENT_MAX_CONCURRENCY: number;
+  readonly WORKER_POLL_INTERVAL_MS: number;
+  readonly WORKER_EVENT_BATCH_SIZE: number;
+  readonly WORKER_JOB_BATCH_SIZE: number;
+  readonly WORKER_HEALTH_PORT: number;
+  readonly RESEND_API_KEY: string | undefined;
+  readonly EMAIL_FROM: string;
+  readonly EMAIL_REPLY_TO: string | undefined;
+  readonly SENTRY_DSN: string | undefined;
+  readonly ENCRYPTION_KEY: string | undefined;
+};
+
+const TEST_DATABASE_URL = "postgresql://postgres:postgres@localhost:5432/corgtex_test";
+
+export const env: Env = {
+  get NODE_ENV() {
+    return nodeEnv();
+  },
+  get DATABASE_URL() {
+    return required("DATABASE_URL", { testFallback: TEST_DATABASE_URL });
+  },
+  get APP_URL() {
+    return optional("APP_URL") ?? "http://localhost:3000";
+  },
+  get SESSION_COOKIE_SECRET() {
+    if (nodeEnv() === "production") {
+      return required("SESSION_COOKIE_SECRET");
+    }
+    return optional("SESSION_COOKIE_SECRET") ?? "development-session-secret";
+  },
+  get AGENT_API_KEY() {
+    return optional("AGENT_API_KEY");
+  },
+  get AGENT_ALLOWED_WORKSPACE_IDS() {
+    return optional("AGENT_ALLOWED_WORKSPACE_IDS");
+  },
+  get MODEL_PROVIDER() {
+    return optional("MODEL_PROVIDER") ?? "openrouter";
+  },
+  get MODEL_API_KEY() {
+    return optional("MODEL_API_KEY");
+  },
+  get MODEL_BASE_URL() {
+    return optional("MODEL_BASE_URL") ?? "https://openrouter.ai/api/v1";
+  },
+  get MODEL_CHAT_DEFAULT() {
+    return optional("MODEL_CHAT_DEFAULT") ?? "google/gemma-4-26b-a4b-it";
+  },
+  get MODEL_CHAT_FAST() {
+    return optional("MODEL_CHAT_FAST") ?? "google/gemma-4-12b-it";
+  },
+  get MODEL_CHAT_STANDARD() {
+    return optional("MODEL_CHAT_STANDARD") ?? "google/gemma-4-31b-it";
+  },
+  get MODEL_CHAT_QUALITY() {
+    return optional("MODEL_CHAT_QUALITY") ?? "google/gemini-2.5-flash";
+  },
+  get MODEL_EMBEDDING_DEFAULT() {
+    return optional("MODEL_EMBEDDING_DEFAULT") ?? "google/gemini-embedding-001";
+  },
+  get AGENT_KILL_SWITCH() {
+    return booleanFromEnv("AGENT_KILL_SWITCH", false);
+  },
+  get WORKSPACE_AGENT_MAX_CONCURRENCY() {
+    return numberFromEnv("WORKSPACE_AGENT_MAX_CONCURRENCY", 4);
+  },
+  get WORKER_POLL_INTERVAL_MS() {
+    return numberFromEnv("WORKER_POLL_INTERVAL_MS", 2000);
+  },
+  get WORKER_EVENT_BATCH_SIZE() {
+    return numberFromEnv("WORKER_EVENT_BATCH_SIZE", 25);
+  },
+  get WORKER_JOB_BATCH_SIZE() {
+    return numberFromEnv("WORKER_JOB_BATCH_SIZE", 25);
+  },
+  get WORKER_HEALTH_PORT() {
+    return numberFromEnv("WORKER_HEALTH_PORT", 9090);
+  },
+  get RESEND_API_KEY() {
+    return optional("RESEND_API_KEY");
+  },
+  get EMAIL_FROM() {
+    return optional("EMAIL_FROM") ?? "Corgtex <onboarding@resend.dev>";
+  },
+  get EMAIL_REPLY_TO() {
+    return optional("EMAIL_REPLY_TO");
+  },
+  get SENTRY_DSN() {
+    return optional("NEXT_PUBLIC_SENTRY_DSN") ?? optional("SENTRY_DSN");
+  },
+  get ENCRYPTION_KEY() {
+    return optional("ENCRYPTION_KEY");
+  },
+};
+
+export function parseAllowedWorkspaceIds(raw = env.AGENT_ALLOWED_WORKSPACE_IDS) {
+  if (!raw) {
+    return new Set<string>();
+  }
+
+  return new Set(
+    raw
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean),
+  );
+}
