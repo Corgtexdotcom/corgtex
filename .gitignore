@@ -57,3 +57,7 @@ yarn-error.log*
 pnpm-debug.log*
 # local client deployment repos
 deploy-*/
+
+# Exclude sensitive data
+SEEDDATA/
+scripts/seed-*.mjs
