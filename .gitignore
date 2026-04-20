@@ -8,10 +8,26 @@
 /out/
 *.tsbuildinfo
 
-# local env files
+# local env files — NEVER commit secrets
 .env
 .env.*
 !.env.example
+
+# backup files that may contain secrets
+*.bak
+*.backup
+*.orig
+*.old
+*.save
+*.tmp
+
+# secret/credential files
+*.key
+*.secret
+*.credentials
+
+# docs
+.mintlify/
 
 # prisma
 /prisma/dev.db
