@@ -1,0 +1,43 @@
+# dependencies
+/node_modules
+**/node_modules
+
+# next.js
+/.next/
+**/.next/
+/out/
+*.tsbuildinfo
+
+# local env files
+.env
+.env.*
+!.env.example
+
+# prisma
+/prisma/dev.db
+/prisma/dev.db-journal
+
+# IDE
+.cursor/
+.vscode/
+*.swp
+*.swo
+
+# test output
+/test-results/
+
+# iCloud conflict duplicates
+* 2.*
+* 2/
+
+# misc
+.DS_Store
+*.pem
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+# local client deployment repos
+deploy-*/

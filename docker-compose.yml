@@ -1,0 +1,49 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: corgtex
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  web:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.web
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/corgtex?schema=public
+      APP_URL: http://localhost:3000
+      SESSION_COOKIE_SECRET: docker-dev-secret-change-in-production
+      MODEL_PROVIDER: fake
+      AGENT_KILL_SWITCH: "false"
+      WORKSPACE_AGENT_MAX_CONCURRENCY: "4"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.worker
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/corgtex?schema=public
+      MODEL_PROVIDER: fake
+      AGENT_KILL_SWITCH: "false"
+      WORKSPACE_AGENT_MAX_CONCURRENCY: "4"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:

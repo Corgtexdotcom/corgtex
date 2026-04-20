@@ -1,0 +1,26 @@
+{
+  "name": "@corgtex/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@corgtex/domain": "0.1.0",
+    "@corgtex/knowledge": "0.1.0",
+    "@corgtex/shared": "0.1.0",
+    "@corgtex/storage": "0.1.0",
+    "marked": "^18.0.0",
+    "next": "15.5.12",
+    "openid-client": "^6.8.3",
+    "react": "19.2.4",
+    "react-dom": "19.2.4"
+  },
+  "scripts": {
+    "dev": "dotenv -e ../../.env -- next dev",
+    "build": "next build",
+    "start:next": "next start",
+    "start": "node ../../scripts/start-web.mjs"
+  },
+  "devDependencies": {
+    "@types/marked": "^5.0.2"
+  }
+}

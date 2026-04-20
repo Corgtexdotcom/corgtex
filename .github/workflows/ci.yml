@@ -1,0 +1,147 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Lint, Typecheck & Test
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: corgtex_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d corgtex_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/corgtex_test?schema=public
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - run: npx prisma generate
+
+      - run: npm run lint
+
+      - run: npm run typecheck
+
+      - run: npm run prisma:validate
+
+      - run: npx prisma migrate deploy
+
+      - run: npx vitest run --project unit --project integration
+
+  db-sync:
+    name: Database Sync
+    runs-on: ubuntu-latest
+    needs: check
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: corgtex_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d corgtex_ci"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/corgtex_ci?schema=public
+      SHADOW_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres?schema=public
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - run: npx prisma generate
+
+      - run: npx prisma migrate diff --from-migrations prisma/migrations --to-schema-datamodel prisma/schema.prisma --shadow-database-url "$SHADOW_DATABASE_URL" --exit-code
+
+      - run: npx prisma migrate deploy
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    needs:
+      - check
+      - db-sync
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - run: npx prisma generate
+
+      - run: env -u DATABASE_URL -u SHADOW_DATABASE_URL npm run build
+
+      - run: npm run build:site
+
+
+  smoke-prod:
+    name: Production Smoke Test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    needs: build
+    steps:
+      - name: Wait for healthy deployment
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf https://app.corgtex.com/api/health > /dev/null 2>&1; then
+              echo "Health check passed on attempt $i"
+              exit 0
+            fi
+            echo "Attempt $i/30 — waiting 10s..."
+            sleep 10
+          done
+          echo "Deployment health check timed out after 5 minutes"
+          exit 1
+      
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx prisma generate
+      - run: node scripts/check-migration-health.mjs
+        env:
+          DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
+      - run: node scripts/railway-smoke.mjs https://app.corgtex.com ${{ secrets.ADMIN_EMAIL }} ${{ secrets.ADMIN_PASSWORD }}

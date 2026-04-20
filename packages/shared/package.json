@@ -1,0 +1,12 @@
+{
+  "name": "@corgtex/shared",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@prisma/client": "6.19.2"
+  },
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}

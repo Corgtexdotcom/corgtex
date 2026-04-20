@@ -1,0 +1,46 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: corgtex
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  web:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.web
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/corgtex
+      SESSION_COOKIE_SECRET: changeme_topsecret_production_cookie
+      ADMIN_EMAIL: admin@example.com
+      ADMIN_PASSWORD: changeme_admin_pass
+      WORKSPACE_NAME: Corgtex Demo
+      WORKSPACE_SLUG: corgtex-demo
+      APP_URL: http://localhost:3000
+
+  worker:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.worker
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/corgtex
+      APP_URL: http://localhost:3000
+
+volumes:
+  pgdata:

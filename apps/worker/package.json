@@ -1,0 +1,14 @@
+{
+  "name": "@corgtex/worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@corgtex/shared": "0.1.0",
+    "@corgtex/workflows": "0.1.0"
+  },
+  "scripts": {
+    "dev": "dotenv -e ../../.env -- tsx watch src/index.ts",
+    "start": "tsx src/index.ts"
+  }
+}
