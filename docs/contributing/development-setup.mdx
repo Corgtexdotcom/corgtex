@@ -1,0 +1,65 @@
+---
+title: "Development Setup"
+description: "Configure your local environment to contribute to Corgtex."
+---
+
+Welcome to the Corgtex engineering team. Follow this guide to set up your local development environment for the monorepo.
+
+## Prerequisites
+
+- Node.js version 22
+- Docker and Docker Compose (Desktop)
+- A GitHub account and local SSH keys configured
+
+## 1. Clone and Install
+
+```bash
+git clone https://github.com/corgtex/corgtex.git
+cd corgtex
+npm install
+```
+
+## 2. Infrastructure (Database)
+
+We use Docker Compose to run the local PostgreSQL database seamlessly alongside development.
+
+```bash
+docker compose up -d postgres
+```
+
+## 3. Environment Variables
+
+Copy the example file to set up your local `.env`. Ensure your database URL points to `localhost` (the default in the example).
+
+```bash
+cp .env.example .env
+```
+
+If you plan to test AI completions locally, you will need to add a valid `MODEL_API_KEY` (e.g., an OpenRouter or OpenAI token) and configure the relevant `MODEL_PROVIDER` in your `.env`.
+
+## 4. Prisma Setup
+
+Before you start the Next.js server, you must compile the Prisma Client and apply any pending database schema migrations.
+
+```bash
+# Generate the TypeScript client based on the current schema
+npm run prisma:generate
+
+# Apply migrations to your local Postgres container
+npm run prisma:migrate:deploy
+
+# Run the seed script to create the initial demo workspaces
+npm run prisma:seed
+```
+
+## 5. Run the Application
+
+Start the local development server:
+
+```bash
+npm run dev
+```
+
+This command leverages turborepo or standard npm workspaces to boot both the Next.js web application (usually on port `3000`) and the background worker process. 
+
+Open [http://localhost:3000](http://localhost:3000) to view the application. Log in using the credentials defined in your `ADMIN_EMAIL` and `ADMIN_PASSWORD` `.env` variables.

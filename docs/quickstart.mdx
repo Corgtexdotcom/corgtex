@@ -1,0 +1,53 @@
+---
+title: "Quickstart"
+description: "Launch a fully operational Corgtex instance in 5 minutes using Docker Compose."
+---
+
+You can spin up a fully operational Corgtex instance with sample data in a few minutes using Docker Compose. This includes the Next.js web application, the background worker, and a PostgreSQL database.
+
+<Steps>
+  <Step title="Clone the repository">
+    First, clone the Corgtex codebase to your local machine and navigate into the directory.
+
+    ```bash
+    git clone https://github.com/corgtex/corgtex.git
+    cd corgtex
+    ```
+  </Step>
+
+  <Step title="Start the stack">
+    We use Docker Compose to run the local PostgreSQL instance, the web application, and the worker process all at once.
+
+    ```bash
+    docker compose -f docker-compose.selfhost.yml up -d
+    ```
+    
+    <Info>
+      This command pulls down the necessary images, applies all database migrations, and provisions an initial example workspace.
+    </Info>
+  </Step>
+
+  <Step title="Access your workspace">
+    Visit your newly deployed instance in the browser:
+
+    [http://localhost:3000](http://localhost:3000)
+
+    You can log in using the default admin credentials specified in your `docker-compose.selfhost.yml` file.
+  </Step>
+</Steps>
+
+## Next Steps
+
+Now that your Corgtex instance is running, you can explore the three pillars of the platform:
+
+<CardGroup cols={3}>
+  <Card title="Connect Data" icon="database" href="/know/sources">
+    Upload your first documents to empower the Organization Brain.
+  </Card>
+  <Card title="Define Circles" icon="users" href="/decide/circles-and-roles">
+    Map out your organization's circles and role assignments.
+  </Card>
+  <Card title="View AI Costs" icon="chart-pie" href="/see/finance-overview">
+    Check the dashboard to track your AI workforce spending.
+  </Card>
+</CardGroup>

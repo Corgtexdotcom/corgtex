@@ -1,0 +1,49 @@
+---
+title: "Upgrades and Migrations"
+description: "How to safely update your self-hosted Corgtex instance."
+---
+
+As Corgtex evolves, you will periodically need to upgrade your self-hosted instance to receive new features, bug fixes, and security patches.
+
+Upgrading Corgtex consists of two main steps:
+1. Pulling the new Docker images (Web and Worker).
+2. Applying Prisma database migrations.
+
+## Performing an Upgrade
+
+Use the following sequence to safely upgrade your environment.
+
+<Steps>
+  <Step title="Back up your database">
+    Always perform a full `pg_dump` of your production database before applying any application updates.
+    ```bash
+    pg_dump -U postgres -h localhost -d corgtex -F c -f corgtex_backup.dump
+    ```
+  </Step>
+
+  <Step title="Pull the latest code">
+    If building from source, pull the latest changes from the upstream `main` branch.
+    ```bash
+    git pull origin main
+    ```
+  </Step>
+
+  <Step title="Rebuild and deploy">
+    Rebuild the Docker images and recreate the containers in detached mode.
+    ```bash
+    docker compose -f docker-compose.selfhost.yml up -d --build
+    ```
+  </Step>
+</Steps>
+
+## Automatic Database Migrations
+
+You generally **do not** need to run database migrations manually. 
+
+The Corgtex Dockerfiles use an `entrypoint.sh` script that automatically runs `npx prisma migrate deploy` before starting the Next.js server or the Node worker. 
+
+This ensures that the database schema is strictly synchronized with the application code booting up in the container. If a migration fails, the container boot sequence will abort, protecting your database state.
+
+<Warning>
+  Never run `prisma db push` on a production or self-hosted deployment. Always rely on the strict migration history applied by `prisma migrate deploy`.
+</Warning>

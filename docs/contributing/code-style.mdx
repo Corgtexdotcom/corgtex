@@ -1,0 +1,35 @@
+---
+title: "Code Style and Rules"
+description: "Conventions for writing TypeScript and Next.js code in Corgtex."
+---
+
+We enforce a strict, consistent codebase to ensure maintainability across the monorepo.
+
+## Formatting & Naming
+- **Imports:** Use `@/*` for `apps/web` modules and `@corgtex/*` for shared package entrypoints. Use type imports for type-only imports (`import type { X }`).
+- **Formatting:** Double quotes, no semicolons omission (we use semicolons), 2-space indent (enforced via Prettier).
+- **Naming:** `camelCase` for variables/functions, `PascalCase` for types/components, `UPPER_SNAKE` for constants/enums.
+- **Strict TypeScript:** No `.js` files allowed (`allowJs: false`).
+
+## Prisma Workflow Rules
+
+- **Schema changes:** If you change `prisma/schema.prisma`, proactively run `npm run prisma:migrate -- --name <descriptive_name>` and commit the generated SQL migration file.
+- **Migration changes:** If you change `prisma/migrations/**`, validate the migration path against a database before finishing, but do not create or apply schema changes with `prisma db push`.
+- **No Prisma diff, no Prisma commands:** If neither `prisma/schema.prisma` nor `prisma/migrations/**` changed, do not run Prisma migration commands.
+- **Build contract:** `npm run build` must stay database-independent. Never hide schema mutation inside generic scripts like `npm run build`.
+- **Forbidden contexts for `db push`:** Never use `prisma db push` in CI, Dockerfiles, production deploy flows, or as part of routine agent work in this repo.
+
+## Next.js Build Guardrails
+
+- **Database Page Caching:** All Prisma-dependent App Router pages MUST have `export const dynamic = "force-dynamic"`. Do not let Next.js attempt static database queries during the build phase.
+- **Build Pass:** Build-time database fallbacks are not an acceptable substitute for runtime configuration. The web build must continuously succeed without `DATABASE_URL` present in the environment.
+
+## Errors and Error Handling
+
+Throw `AppError(status, code, message)` from domain logic and convert it in Next.js route handlers with the `handleRouteError()` helper block from `apps/web/lib/http.ts`.
+
+## Database Conventions
+
+- All monetary values must be stored as `*Cents: Int` at the database level.
+- Use explicit UUIDs for all Record IDs. 
+- Rely on Prisma compound unique keys for lookups.
