@@ -1,0 +1,39 @@
+---
+title: "AI Agents and Visibility"
+description: "Manage credentials and review the execution logs of your AI workforce."
+---
+
+Managing your AI workforce requires knowing precisely what your agents are capable of, what tools they have access to, and how they behave in production.
+
+## Agent Credentials
+
+Agents act on behalf of your organization. Depending on your configuration, Corgtex provides mechanisms to manage their specific credentials.
+
+- **Platform Integrity:** The UI allows administrators to securely configure the API keys required to hit external model providers (OpenRouter, OpenAI) if you are self-hosting. 
+- **Tool Access:** Agents can be granted or denied access to specific platform tools based on the credentials assigned to their runtime profile.
+
+## The Workforce Graph
+
+The **Workforce Graph** provides visibility into every agent running within your environment. It maps out:
+- Which AI agent is assigned to which tasks.
+- Which specific roles "own" or manage those agents.
+- What data sets (Sources, Data Connectors) the agents are authorized to access.
+
+## Reviewing Agent Runs
+
+As agents execute tasks asynchronously (handled securely by `apps/worker`), they leave a dense audit trail. 
+
+You can view the execution logs of an **Agent Run**:
+- See the initial prompt or trigger.
+- Review the specific `AgentStep`s taken by the LLM.
+- Inspect the raw JSON payloads of any `AgentToolCall` (e.g., when the agent triggered a search against the Organization Brain or requested a status check).
+
+<Info>
+  **Human-on-the-loop:** For high-impact actions (like modifying a database record or submitting a proposal on behalf of a user), Corgtex agents can be constrained to require human approval before finalizing the execution.
+</Info>
+
+## The Daily Briefing
+
+Your window into this visibility is the **The Daily Surface**. 
+
+Corgtex synthesizes the activity of the AI workforce, highlighting only what is relevant to *your* assigned roles. The briefing surfaces anomalies, summarizations of completed agent runs, and alerts for governance proposals requiring your attention, ensuring you are never blinded by the speed of automated execution.
