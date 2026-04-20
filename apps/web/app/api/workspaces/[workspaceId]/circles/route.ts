@@ -15,7 +15,7 @@ export const POST = withWorkspaceRoute(async (req, { actor, workspaceId, members
     purposeMd: typeof body.purposeMd === "string" ? body.purposeMd : null,
     domainMd: typeof body.domainMd === "string" ? body.domainMd : null,
     maturityStage: typeof body.maturityStage === "string" ? body.maturityStage : undefined,
-    _membership: membership,
+    _membership: membership ?? undefined,
   });
   return NextResponse.json({ circle }, { status: 201 });
 });

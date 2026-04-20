@@ -13,7 +13,7 @@ export const POST = withWorkspaceRoute(async (req, { actor, workspaceId, members
     workspaceId,
     title: String(body.title ?? ""),
     bodyMd: typeof body.bodyMd === "string" ? body.bodyMd : null,
-    _membership: membership,
+    _membership: membership ?? undefined,
   });
   return NextResponse.json({ action }, { status: 201 });
 });
