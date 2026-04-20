@@ -1,0 +1,65 @@
+---
+title: "Configuration Reference"
+description: "Reference for environment variables used to configure a Corgtex deployment."
+---
+
+When [Self-Hosting](/deploy/docker-compose), you configure Corgtex using environment variables (typically stored in a `.env` file).
+
+## Core Application Settings
+
+The variables defined here are strictly required to start the web and worker processes successfully.
+
+| Variable | Description |
+|---|---|
+| `DATABASE_URL` | The PostgreSQL connection string. Must include credentials and the database name. Example: `postgresql://postgres:pass@localhost:5432/corgtex` |
+| `APP_URL` | The fully qualified base URL where the application is hosted (e.g. `https://app.corgtex.com`). Used for OAuth redirects and webhook signing. |
+| `SESSION_COOKIE_SECRET` | A 32+ character random string used for signing secure cookies. Never expose this. |
+
+## Initial Seeding Settings
+
+When you launch a fresh Corgtex instance, the database must be seeded with an initial workspace and an administrative user.
+
+| Variable | Description |
+|---|---|
+| `WORKSPACE_NAME` | The display name of the initial workspace (e.g., "Acme Corp"). |
+| `WORKSPACE_SLUG` | The URL-friendly identifier for the workspace (e.g., "acme-corp"). |
+| `ADMIN_EMAIL` | The email address for the initial bootstrap admin user. |
+| `ADMIN_PASSWORD` | The password for the initial bootstrap admin user. |
+
+## Model Provider Settings
+
+By default, the platform relies on external Large Language Models to power the Organization Brain and agents. While these are optional at startup, they are recommended for full functionality.
+
+| Variable | Description |
+|---|---|
+| `MODEL_PROVIDER` | Defines which LLM gateway to use. Valid options: `openrouter`, `openai`. |
+| `MODEL_API_KEY` | Your API key for the chosen provider. |
+| `MODEL_CHAT_DEFAULT` | The specific model string to use for conversational features (e.g., `google/gemma-4-31b-it`). |
+| `MODEL_EMBEDDING_DEFAULT` | The specific model string to use for vector embeddings (e.g., `text-embedding-3-small`). |
+
+<Info>
+  Setting `MODEL_PROVIDER` allows Corgtex's internal abstractions to handle the LLM routing without baking a specific vendor dependency into your infrastructure.
+</Info>
+
+## Example `.env` File
+
+```env
+# Database
+DATABASE_URL="postgresql://postgres:postgres@postgres:5432/corgtex"
+
+# Core App
+APP_URL="http://localhost:3000"
+SESSION_COOKIE_SECRET="changeme_topsecret_production_cookie"
+
+# Seed Data (First Workspace)
+WORKSPACE_NAME="Acme Demo"
+WORKSPACE_SLUG="acme-demo"
+ADMIN_EMAIL="admin@acme.com"
+ADMIN_PASSWORD="super_secret_password"
+
+# LLM Config (Optional)
+MODEL_PROVIDER="openrouter"
+MODEL_API_KEY="sk-or-v1-..."
+MODEL_CHAT_DEFAULT="anthropic/claude-3.5-sonnet"
+MODEL_EMBEDDING_DEFAULT="openai/text-embedding-3-small"
+```

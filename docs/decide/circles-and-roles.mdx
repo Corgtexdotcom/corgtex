@@ -1,0 +1,48 @@
+---
+title: "Circles and Roles"
+description: "Map your organization using dynamic circles and explicit role assignments."
+---
+
+In Corgtex, you do not use static org charts with rigid manager-subordinate hierarchies. Instead, you model your organization using **Circles** and **Roles**. 
+
+This allows you to decouple the *work* from the *people*, enabling profound flexibility as your organization scales.
+
+## Circles
+
+A **Circle** is a self-organizing team dedicated to a specific purpose. 
+
+- **Nesting:** Circles can contain sub-circles (e.g., a "Product" circle might contain "Design" and "Engineering" sub-circles).
+- **Autonomy:** Each circle operates with autonomy over its own domain, modifying its internal roles and policies as needed, provided it doesn't violate the constraints of its parent circle.
+
+### Creating a Circle
+
+To create a circle, you generally submit a governance [Proposal](/decide/proposals). The proposal defines:
+- **Name:** e.g., "Customer Success"
+- **Purpose:** The high-level objective of the circle.
+- **Domain:** The specific assets or processes the circle exclusively controls.
+- **Accountabilities:** The ongoing activities the circle is expected to perform.
+
+## Roles
+
+Within a circle, the work is broken down into **Roles**. 
+
+A Role is a distinct set of accountabilities and a defined purpose. For example, within the Marketing circle, you might have roles like "Social Media Lead", "Copywriter", and "Event Coordinator".
+
+### Role Assignments
+
+Once a Role is defined, you assign **Members** to it. 
+
+- A member can hold multiple roles across different circles. 
+- Assignments are not permanent employment contracts; they are fluid. If a role is no longer needed, it is deleted. If a person leaves a role, the role remains, ready for a new assignee.
+
+<Info>
+  **Core Roles:** Depending on your methodology configuration, Corgtex supports specific core roles (e.g., `FACILITATOR`, `LEAD_LINK`, `REP_LINK`) that have specialized permissions within the circle.
+</Info>
+
+## Visibility via the Workforce Graph
+
+The structure of your Circles, Roles, and the Members assigned to them make up the foundation of your **Workforce Graph**. Because this is all tracked explicitly in the Corgtex database:
+
+1. The AI instantly knows exactly who is responsible for what.
+2. If someone asks, "Who handles European vendor contracts?", the agent parses the role accountabilities and routes the user directly to the correct person. 
+3. There is no ambiguity about ownership.

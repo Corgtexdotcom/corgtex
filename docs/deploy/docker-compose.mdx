@@ -1,0 +1,71 @@
+---
+title: "Self-Hosting with Docker Compose"
+description: "Deploy the full Corgtex stack to your own infrastructure."
+---
+
+While our SaaS offering is the fastest way to get started, Corgtex's On-Premise and Hybrid deployment modes allow you to run the intelligence layer entirely on your own infrastructure so your data never leaves your building.
+
+The simplest way to deploy the stack is using Docker Compose.
+
+## Prerequisites
+
+Before starting, ensure your host machine has:
+- A modern Linux distribution (Ubuntu 22.04 LTS recommended)
+- Docker and Docker Compose installed
+- Node.js 22 (for optionally running local scripts)
+- At least 4GB of RAM and 2 vCPUs
+
+## The Deployment Guide
+
+<Steps>
+  <Step title="Clone the repository">
+    Download the Corgtex source code onto your host server.
+
+    ```bash
+    git clone https://github.com/corgtex/corgtex.git
+    cd corgtex
+    ```
+  </Step>
+
+  <Step title="Configure environment variables">
+    Copy the sample environment file to create your active configuration.
+
+    ```bash
+    cp .env.example .env
+    ```
+
+    Open `.env` in an editor and set your core variables. Pay special attention to the secrets.
+
+    ```env
+    # Required for production
+    SESSION_COOKIE_SECRET="generate_a_random_32_char_string"
+    APP_URL="https://your_domain.com"
+    ```
+
+    See the [Configuration Reference](/deploy/configuration) for a complete list of required and optional variables.
+  </Step>
+
+  <Step title="Start the stack">
+    Run the self-host compose file. This file starts the PostgreSQL database, the Next.js Web server, and the background Worker process.
+
+    ```bash
+    docker compose -f docker-compose.selfhost.yml up -d
+    ```
+  </Step>
+
+  <Step title="Access the application">
+    The web container exposes port `3000`. If you are running locally:
+
+    [http://localhost:3000](http://localhost:3000)
+
+    If you are deploying to a remote server, you should configure a reverse proxy (like Nginx, Traefik, or Caddy) to route external traffic to `127.0.0.1:3000` and handle TLS/SSL termination.
+  </Step>
+</Steps>
+
+## What's included in the Self-Host bundle?
+
+When you run `docker-compose.selfhost.yml`, you are launching three distinct services:
+
+1.  **`postgres`**: A `postgres:16-alpine` container running the core database and (`pgvector`). The data is persisted locally in a Docker volume.
+2.  **`web`**: The Next.js application that handles all API requests and user interface rendering.
+3.  **`worker`**: The background Node.js daemon that executes long-running tasks asynchronously.

@@ -1,0 +1,4 @@
+pilot-onboarding.md
+pr-assets/
+*.test.*
+node_modules

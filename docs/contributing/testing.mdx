@@ -1,0 +1,42 @@
+---
+title: "Testing"
+description: "How to run and write tests in Corgtex."
+---
+
+We use Vitest for unit testing and rely on end-to-end API workflows for integration coverage.
+
+## Running Tests
+
+There are several commands available for testing and code validation.
+
+```bash
+# Run unit tests
+npm test
+# OR
+npm run test:unit
+
+# Run a single specific test file
+npx vitest run packages/domain/src/runtime.test.ts
+
+# Run all static checks (lint + typecheck + prisma validate)
+npm run check
+```
+
+## Agent API Access (E2E Testing)
+
+We do not currently maintain a heavy suite of simulated Cypress/Playwright frontend E2E tests. Instead, we rely heavily on testing the system via the Agent API to mimic complex workflows.
+
+When `AGENT_API_KEY` is set in `.env`, an external script or testing suite can authenticate directly to the Local API for end-to-end testing:
+
+- **Header:** `Authorization: Bearer agent-<AGENT_API_KEY>`
+- **Base URL:** `http://localhost:3000` (or `NEXT_PUBLIC_APP_URL`)
+
+### Setup Agent E2E:
+1. Add `AGENT_API_KEY="your-secret-key"` to your development `.env`.
+2. Run `AGENT_API_KEY="your-secret-key" npm run prisma:seed` to ensure the agent programmatic user is created in the database.
+3. Start the Next.js server (`npm run dev`).
+4. Execute API requests against `/api/...` passing the Bearer token above.
+
+<Warning>
+  The agent user receives `ADMIN` role access in the default organization upon seeding. Wallet-dependent flows (e.g., optimistic finance workflows) may require additional setup configurations.
+</Warning>
