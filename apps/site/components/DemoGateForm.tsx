@@ -7,6 +7,7 @@ export function DemoGateForm() {
   const [email, setEmail] = useState("");
   const [loading, setLoading] = useState(false);
   const [showGate, setShowGate] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   // If they already submitted their email in the past, just show a plain link
   useEffect(() => {
@@ -22,6 +23,7 @@ export function DemoGateForm() {
     if (!email || !email.includes("@")) return;
 
     setLoading(true);
+    setError(null);
     try {
       const res = await fetch("/api/demo-leads", {
         method: "POST",
@@ -34,11 +36,11 @@ export function DemoGateForm() {
         const { demoUrl } = getSiteConfig();
         window.location.href = demoUrl;
       } else {
-        alert("Failed to access demo. Please try again.");
+        setError("Failed to access demo. Please try again.");
         setLoading(false);
       }
     } catch {
-      alert("Failed to access demo. Please try again.");
+      setError("Failed to access demo. Please try again.");
       setLoading(false);
     }
   };
@@ -53,19 +55,29 @@ export function DemoGateForm() {
   }
 
   return (
-    <form onSubmit={handleSubmit} className="demo-gate-form" style={{ display: "flex", gap: "8px", alignItems: "center", justifyContent: "center", flexWrap: "wrap" }}>
-      <input
-        type="email"
-        placeholder="Enter your email"
-        value={email}
-        onChange={(e) => setEmail(e.target.value)}
-        required
-        disabled={loading}
-        className="form-input"
-      />
-      <button type="submit" className="btn btn-secondary" disabled={loading}>
-        {loading ? "..." : "Access the Demo"}
-      </button>
-    </form>
+    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "8px" }}>
+      <form onSubmit={handleSubmit} className="demo-gate-form" style={{ display: "flex", gap: "8px", alignItems: "center", justifyContent: "center", flexWrap: "wrap" }}>
+        <input
+          type="email"
+          placeholder="Enter your email"
+          value={email}
+          onChange={(e) => {
+            setEmail(e.target.value);
+            if (error) setError(null);
+          }}
+          required
+          disabled={loading}
+          className="form-input"
+        />
+        <button type="submit" className="btn btn-secondary" disabled={loading}>
+          {loading ? "..." : "Access the Demo"}
+        </button>
+      </form>
+      {error && (
+        <p style={{ color: "var(--accent-red)", fontSize: "0.85rem", margin: 0 }}>
+          {error}
+        </p>
+      )}
+    </div>
   );
 }
