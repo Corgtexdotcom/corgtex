@@ -1,0 +1,39 @@
+---
+title: "Spend Requests"
+description: "Create, review, and approve financial expenditures using consent."
+---
+
+In Corgtex, spending company resources requires explicit visibility. Rather than asking a manager for permission behind closed doors, you submit a **Spend Request**.
+
+A Spend Request is a specialized kind of governance [Proposal](/decide/proposals) specifically designed for financial transactions. 
+
+## Submitting a Spend Request
+
+When a role-holder recognizes a financial need (e.g., buying a new tool, hiring a contractor, or increasing the token budget for an AI agent), they create a Spend Request:
+
+1. Navigate to the Finance tab of your Circle.
+2. Select **New Spend Request**.
+3. Specify the amount, the vendor, and the justification.
+4. **Link to a Tension:** Crucially, spend requests can be linked directly to an active Tension, providing immediate context for *why* the money is needed.
+
+## The Approval Flow
+
+Once submitted, the Spend Request enters an [Approval Flow](/decide/approval-flows).
+
+Instead of routing through a rigid chain of command (Manager &rarr; Director &rarr; VP), the request is exposed to the Circle and routed according to the configured policy. 
+
+### Optimistic, Consent-Based Approval
+Most modern organizations configure their spend requests to use **Consent**. 
+
+- The request is placed in front of the relevant reviewers (e.g., the `FINANCE_STEWARD` role). 
+- If no one raises a parameter objection within the defined window (e.g., 48 hours), the request automatically safely transitions to `APPROVED`. 
+- If someone spots an issue—perhaps the requested tool duplicates an existing license—they hit `BLOCK` and log their objection. The proposer and objector then integrate a solution asynchronously.
+
+## Mark as Paid and Reconciliation
+
+After approval, the Spend Request enters the execution phase:
+
+1. The transaction is made in the real world.
+2. An authorized role marks the request as `PAID`.
+3. The platform generates an internal `LedgerEntry` indicating the outflow.
+4. Later, the transaction enters `PENDING` reconciliation, waiting for a receipt or statement to be attached and verified to complete the audit trail.

@@ -1,0 +1,39 @@
+---
+title: "Search and Ask"
+description: "Retrieve knowledge instantly with semantic search and conversational AI."
+---
+
+Once your Organization Brain is populated with Articles, Sources, and External Data, you interact with it across the platform.
+
+There are two primary paradigms for retrieval: **Search** and **Ask**.
+
+## Semantic Search
+
+Unlike keyword-based search that relies on exact character matches, Corgtex uses semantic vectors.
+
+When you search for terms like *"How do we handle APAC vendor evaluations?"*, the system embeds your query and performs a nearest-neighbor vector search in the PostgreSQL database.
+
+This means the system understands **intent and context**, returning the relevant chunks even if the exact words "APAC" or "vendor evaluation" weren't explicitly written in that specific combination.
+
+## Ask (Conversational AI)
+
+The "Ask" interface (available in the web UI chat and via Slack integration) sits on top of the search layer to provide direct, conversational answers.
+
+### The Query Loop
+
+1. **User asks a question** (e.g., *"Why did we exit the APAC market in 2024?"*)
+2. **Retrieval**: Corgtex runs a semantic search against the Brain and retrieves the top most relevant chunks (respecting the user's RBAC permissions).
+3. **Synthesis**: The system injects these chunks into the context window of the LLM.
+4. **Response**: The AI synthesizes the answer directly from the provided data.
+5. **Citations**: The AI appends explicit citations linking back to the exact files, rows, or articles it used to generate the answer.
+
+<Check>
+  **Zero Hallucinations:** Because the agent is strictly instructed to only answer based on the retrieved context, you eliminate the risk of the model inventing company policy. 
+</Check>
+
+## Real-world impact
+
+When you see your entire workforce's knowledge:
+*   **No lost history:** Dissenting opinions, risk analysis, and board decisions are accessible instantly.
+*   **Faster onboarding:** New hires can simply ask the brain contextual questions instead of waiting on busy managers.
+*   **Cross-department visibility:** If two departments are unknowingly duplicating a vendor evaluation, the agent can flag the overlapping context when you query current active projects.

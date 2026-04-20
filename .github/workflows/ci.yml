@@ -114,6 +114,20 @@ jobs:
 
       - run: npm run build:site
 
+  docs:
+    name: Docs Validation
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm i -g mint
+      - run: mint validate
+        working-directory: docs
+      - run: mint broken-links
+        working-directory: docs
 
   smoke-prod:
     name: Production Smoke Test
