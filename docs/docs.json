@@ -1,0 +1,109 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "name": "Corgtex",
+  "theme": "mint",
+  "colors": {
+    "primary": "#1a1a1a",
+    "light": "#ffffff",
+    "dark": "#1a1a1a"
+  },
+  "topbarLinks": [
+    {
+      "name": "GitHub",
+      "url": "https://github.com/corgtex/corgtex"
+    },
+    {
+      "name": "Try the Demo",
+      "url": "https://app.corgtex.com/demo"
+    }
+  ],
+  "topbarCtaButton": {
+    "name": "Schedule Briefing",
+    "url": "https://calendar.app.google/jJd5yeSuDStVZm896"
+  },
+  "anchors": [
+    {
+      "name": "API Reference",
+      "icon": "code",
+      "url": "https://app.corgtex.com/api/docs"
+    }
+  ],
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Getting Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "architecture"
+            ]
+          },
+          {
+            "group": "Know (The Brain)",
+            "pages": [
+              "know/brain-overview",
+              "know/articles",
+              "know/sources",
+              "know/data-sources",
+              "know/search-and-ask"
+            ]
+          },
+          {
+            "group": "Decide (Governance)",
+            "pages": [
+              "decide/governance-overview",
+              "decide/circles-and-roles",
+              "decide/tensions",
+              "decide/proposals",
+              "decide/approval-flows"
+            ]
+          },
+          {
+            "group": "See (Visibility & Costs)",
+            "pages": [
+              "see/finance-overview",
+              "see/spend-requests",
+              "see/budgets",
+              "see/agents",
+              "see/webhooks"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Self-hosting",
+        "groups": [
+          {
+            "group": "Self-Hosting",
+            "pages": [
+              "deploy/docker-compose",
+              "deploy/configuration",
+              "deploy/enterprise",
+              "deploy/upgrades"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Contributing",
+        "groups": [
+          {
+            "group": "Contributing",
+            "pages": [
+              "contributing/development-setup",
+              "contributing/code-style",
+              "contributing/testing",
+              "contributing/pull-requests"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "footerSocials": {
+    "github": "https://github.com/corgtex/corgtex"
+  }
+}

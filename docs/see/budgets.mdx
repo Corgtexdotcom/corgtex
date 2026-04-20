@@ -1,0 +1,36 @@
+---
+title: "Budgets, Cycles, and Ledgers"
+description: "Allocate and track organizational resources dynamically."
+---
+
+Finance in Corgtex revolves around three interconnected models: **Cycles**, **Allocations**, and **Ledger Accounts**.
+
+## Cycles
+
+Annual budgets are often too rigid for fast-moving organizations. Corgtex introduces **Cycles** (e.g., Q1, 2024-H2, or Month-08). 
+
+Cycles define the temporal boundaries within which your financial goals are evaluated and resources are pooled.
+
+## Ledger Accounts
+
+A **Ledger Account** is the internal representation of funds. 
+
+- Every Circle can hold one or more Ledger Accounts (e.g., "Marketing Operational Budget", "Engineering Cloud Spend").
+- Ledger Accounts provide absolute transparency. The organization can see exactly what funds are available to a specific team at any given moment.
+- Whenever a [Spend Request](/see/spend-requests) is marked as Paid, a double-entry `LedgerEntry` is recorded against the specific Ledger Account.
+
+## Allocations
+
+An **Allocation** is the act of moving funds from a parent Circle's ledger down to a sub-circle's ledger for a specific Cycle.
+
+For example, the parent General Company Circle might allocate $50,000 to the Product Circle's ledger for the Q3 Cycle.
+
+### Top-Down vs Bottom-Up
+
+To create an Allocation, the parent circle usually reviews the historical spend and upcoming tensions of the sub-circle. Because all Tensions and Proposals are transparent on the platform, allocatees have unprecedented visibility into *why* the sub-circle needs the budget they are requesting.
+
+## AI Cost Budgets
+
+Beyond standard fiat currency, certain Ledger Accounts can be configured to represent **Model Usage Budgets**.
+
+Because AI agents consume tokens during execution, Corgtex allows you to manage this exposure securely. You can provision a specific monthly budget (e.g., $250 API exposure) to a Circle's agent pool. When the agent nears the 80% threshold, Corgtex alerts the relevant roles, preventing runaway infrastructural costs caused by unmonitored LLM loops.

@@ -1,0 +1,43 @@
+---
+title: "Enterprise Deployments"
+description: "Scale Corgtex using the Configuration Repo pattern."
+---
+
+While the standard Docker Compose method is perfect for evaluation and small setups, larger enterprises deploying Corgtex often need total data isolation, specific seeded configurations, and customized pre-flight scripts.
+
+We facilitate this requirement using a pattern we call the **Configuration Repo**.
+
+## The Configuration Repo Pattern
+
+Instead of maintaining a massive, tangled fork of the core `corgtex/corgtex` platform, you create a thin, private wrapper repository (e.g., `corgtex/deploy-acmecorp`).
+
+This private repository contains:
+1. Your company-specific deployment manifests (Helm charts, Terraform, advanced Docker Compose overrides).
+2. A customized `Dockerfile`.
+3. A `SEEDDATA/` directory containing your internal methodologies, policies, and bootstrap runbooks.
+4. A custom `.mjs` seed script.
+
+### Building from Source
+
+In your private Configuration Repo, your Dockerfile simply uses the official Corgtex open-source repository as the build context, and then injects your organization's specific data during the initialization phase.
+
+You instruct the standard Dockerfile to execute your seed script instead of the default SaaS seeds by overriding the `SEED_SCRIPTS` environment variable during image creation or container startup.
+
+```dockerfile
+# Example deploy-acmecorp/Dockerfile
+# Build from the core platform repository
+FROM corgtex/corgtex:latest
+
+# Inject custom enterprise seeds
+COPY ./SEEDDATA /app/SEEDDATA
+COPY ./seed-acme.mjs /app/scripts/seed-acme.mjs
+
+# Override the default startup sequence
+ENV SEED_SCRIPTS="scripts/seed-acme.mjs"
+```
+
+## Why this pattern?
+
+*   **Security:** Your specific organizational setup data remains in a private, access-controlled repository.
+*   **Upgradability:** Because you haven't forked the core application logic, you can seamlessly `docker pull` the latest upstream releases of the Corgtex platform without dealing with complex merge conflicts.
+*   **Isolation:** The platform remains completely stateless and unopinionated; all the specific methodology configurations (like Holacracy vs Sociocracy templates) are passed in externally at boot time.

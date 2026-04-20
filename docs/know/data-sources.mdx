@@ -1,0 +1,44 @@
+---
+title: "External Data Sources"
+description: "Sync your internal databases directly into the intelligence layer."
+---
+
+The most powerful way to feed the Organization Brain is by syncing your operational data. For internal tools (e.g., Metabase replicas, customer record databases) backed by relational databases like PostgreSQL, Corgtex can automatically ingest and update knowledge over time.
+
+## Setting up a PostgreSQL sync
+
+Follow these steps to connect a read-only PostgreSQL instance.
+
+<Steps>
+  <Step title="Provision a Read-Only User">
+    Provide explicit instructions to your DevOps team to generate a read-only Postgres user pointing to a securely accessible IP or Bastion host.
+
+    ```sql
+    CREATE USER corgtex_readonly WITH PASSWORD 'SecurePass!';
+    GRANT CONNECT ON DATABASE production TO corgtex_readonly;
+    GRANT USAGE ON SCHEMA public TO corgtex_readonly;
+    GRANT SELECT ON ALL TABLES IN SCHEMA public TO corgtex_readonly;
+    ```
+  </Step>
+
+  <Step title="Create the Data Source">
+    1. Navigate to **Workspace Settings &rarr; Data Sources**.
+    2. Click **New Database**.
+    3. Input the connection string (`postgres://...`) provided by your database administrator.
+  </Step>
+
+  <Step title="Configure Sync Preferences">
+    - Select the standard public tables you wish to index.
+    - Set the sync cadence (e.g., every 60 minutes, daily, etc.).
+  </Step>
+
+  <Step title="Sync and Verify">
+    Click **Sync Now** to schedule the first ingestion job. Keep an eye on the Dashboard UI—you should see chunk counts incrementing securely under `byodb:XXX` references.
+  </Step>
+</Steps>
+
+## How external syncs work
+
+During a sync event, the background worker fetches the selected rows, serializes them into text representations, and runs them through the same ingestion pipeline as static files (Chunking &rarr; PII Classification &rarr; Embedding).
+
+Because this happens incrementally on a schedule, your agents always have access to near real-time operational data without needing to query your production database live.

@@ -1,0 +1,42 @@
+---
+title: "The Organization Brain"
+sidebarTitle: "Overview"
+description: "Turn scattered institutional knowledge into a unified, actionable intelligence layer."
+---
+
+The Organization Brain is the foundation of Corgtex's **Know** pillar. It is a centralized, AI-powered knowledge base that stores, Indexes, and retrieves internal information securely. 
+
+Traditional wikis rely entirely on humans to keep them updated, resulting in stale, fragmented knowledge that is rarely accessed. The Organization Brain solves this by creating a unified intelligence layer built directly from your actual operating records, data sources, and governance decisions.
+
+## How it works
+
+The Brain operates by ingesting raw data, chunking it, and embedding it into an internal vector database (`pgvector`). This process enables:
+
+- **Grounded Answers:** When a team member asks a question via the chat or Slack integration, the AI references specific chunks from the Brain rather than its general training data. 
+- **Citations:** Every fact provided by the AI includes citations back to the original source material. No more institutional knowledge walking out the door—if it's in the data, the Brain knows it.
+- **Access Control:** The Brain respects Role-Based Access Control (RBAC). A user searching the Brain or chatting with an agent can only retrieve chunks of data that they have permission to see.
+
+## Populating the Brain
+
+There are three primary ways to fill the Organization Brain:
+
+<CardGroup cols={3}>
+  <Card title="Articles" icon="file-lines" href="/know/articles">
+    Traditional wiki pages written natively in Corgtex. Best for high-level manifestos, policies, and narrative guides.
+  </Card>
+  <Card title="Sources (Files)" icon="file-pdf" href="/know/sources">
+    Flat files (PDFs, docs) uploaded directly into the pipeline.
+  </Card>
+  <Card title="Data Sources" icon="server" href="/know/data-sources">
+    Automated imports from external relational databases.
+  </Card>
+</CardGroup>
+
+## The Ingestion Pipeline
+
+Whenever a source is uploaded or synced, it runs through the Corgtex ingestion workflow:
+
+1. **Extraction:** Text is pulled from the raw file or database row.
+2. **Chunking:** The text is split into semantic chunks.
+3. **Classification (Zero-LLM PII Regex):** Chunks are analyzed locally to flag PII (Personally Identifiable Information) or confidential markers, ensuring sensitive data doesn't leak into unrestricted workflows.
+4. **Embedding:** The chunks are converted into mathematical vectors and stored securely in the PostgreSQL database.

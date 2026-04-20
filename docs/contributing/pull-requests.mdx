@@ -1,0 +1,38 @@
+---
+title: "Branching and Pull Requests"
+description: "The standard workflow for merging code."
+---
+
+We use a standard feature-branch workflow. 
+
+## Branching Strategy
+
+- Every new feature, bug fix, or development step should be executed on a new branch.
+- Isolate your work so there are no overlaps in your PRs.
+- Use descriptive branch names (e.g., `feat/optimistic-finance`, `fix/login-crash`).
+
+## Submitting a Pull Request
+
+All new features must be tested (unit and E2E via the Agent API if applicable) before submitting.
+
+Once complete, push your branch and **always open a pull request immediately** using the GitHub CLI (`gh`). 
+
+### PR Content Requirements
+
+Every PR MUST include the following in its description to provide clear guidance for the reviewer:
+
+1. **Implementation Plan:** A summary of the original architectural plan or the tension being resolved.
+2. **Final Walkthrough:** A summary of what was actually built.
+3. **Visual Proof:** For ANY frontend-related changes, you must attach screen recordings (`.mp4` / `.webm`) or screenshots (`.png`) demonstrating the functionality working on your local branch.
+
+## CI Validation
+
+When you open a PR, GitHub Actions automatically runs our CI pipeline:
+
+1. Typechecking (`npm run typecheck`)
+2. Linting (`npm run lint`)
+3. **Documentation checks** (`mint validate`). If your PR breaks documentation formatting, it cannot be merged.
+
+## Automated Document Updates (Mintlify Workflows)
+
+When you merge a PR into `main`, our Mintlify AI workflow evaluates the code diff to determine if the documentation is now outdated. If so, an AI agent will automatically draft and propose a separate Pull Request to the documentation site to keep our technical narratives synchronized with the platform behavior.
