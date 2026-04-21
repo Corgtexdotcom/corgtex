@@ -41,5 +41,7 @@ export * from "./check-ins";
 export * from "./artifact-permissions";
 export * from "./objection-validation";
 export * from "./conversation-brain";
+export * from "./member-briefing";
 export * from "./sso";
 export * from "./cost-budget";
+export * from "./proposals";

@@ -231,3 +231,88 @@ export async function deactivateMember(actor: AppActor, params: {
     return updated;
   });
 }
+
+export async function getMemberProfile(workspaceId: string, memberId: string) {
+  const member = await prisma.member.findUnique({
+    where: { id: memberId },
+    include: {
+      user: {
+        select: {
+          id: true,
+          email: true,
+          displayName: true,
+        },
+      },
+      roleAssignments: {
+        include: {
+          role: {
+            include: {
+              circle: {
+                select: { id: true, name: true, maturityStage: true },
+              },
+            },
+          },
+        },
+      },
+      assignedActions: {
+        where: { status: 'OPEN' },
+        take: 5,
+        orderBy: { createdAt: 'desc' }
+      },
+      assignedTensions: {
+        where: { status: { in: ['OPEN', 'IN_PROGRESS'] } },
+        take: 5,
+        orderBy: { createdAt: 'desc' }
+      }
+    },
+  });
+
+  invariant(member && member.workspaceId === workspaceId, 404, "NOT_FOUND", "Member not found.");
+
+  const meetings = await prisma.meeting.findMany({
+    where: {
+      workspaceId,
+      participantIds: {
+        has: member.user.id,
+      },
+    },
+    orderBy: { recordedAt: 'desc' },
+    take: 5,
+  });
+
+  const recentActivity = await prisma.auditLog.findMany({
+    where: {
+      workspaceId,
+      actorUserId: member.user.id,
+    },
+    orderBy: { createdAt: 'desc' },
+    take: 10,
+  });
+
+  const proposals = await prisma.proposal.findMany({
+    where: {
+      workspaceId,
+      authorUserId: member.user.id,
+    },
+    orderBy: { createdAt: 'desc' },
+    take: 5,
+  });
+
+  const authoredTensions = await prisma.tension.findMany({
+    where: {
+      workspaceId,
+      authorUserId: member.user.id,
+      status: { in: ['OPEN', 'IN_PROGRESS'] }
+    },
+    orderBy: { createdAt: 'desc' },
+    take: 5,
+  });
+
+  return {
+    member,
+    meetings,
+    recentActivity,
+    proposals,
+    authoredTensions
+  };
+}
