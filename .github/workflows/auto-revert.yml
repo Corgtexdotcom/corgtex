@@ -2,7 +2,7 @@ name: Auto Revert on Smoke Failure
 
 # Fires when the CI workflow on `main` completes with a failing
 # `smoke-prod` job. Opens a revert PR labeled `auto-revert` targeting
-# the most recent merge commit. The Reviewer (Codex) merges the revert
+# the exact main commit whose smoke check failed. The Reviewer (Codex) merges the revert
 # immediately — plan-present / scope-check are relaxed for PRs that
 # carry the `auto-revert` label.
 #
@@ -15,7 +15,6 @@ on:
     branches: [main]
 
 permissions:
-  actions: write
   contents: write
   issues: write
   pull-requests: write
@@ -26,10 +25,20 @@ jobs:
     runs-on: ubuntu-latest
     if: ${{ github.event.workflow_run.conclusion == 'failure' }}
     steps:
+      - name: Verify auto-revert token is configured
+        env:
+          AUTO_REVERT_TOKEN: ${{ secrets.AUTO_REVERT_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "$AUTO_REVERT_TOKEN" ]; then
+            echo "AUTO_REVERT_TOKEN is required so revert PR events trigger normal pull_request CI."
+            exit 1
+          fi
+
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.AUTO_REVERT_TOKEN }}
 
       - name: Verify smoke-prod was the failing job
         id: check
@@ -77,7 +86,7 @@ jobs:
       - name: Open revert PR
         if: steps.check.outputs.trigger == 'true'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.AUTO_REVERT_TOKEN }}
           SUBJECT: ${{ steps.merge.outputs.subject }}
           SHORT: ${{ steps.merge.outputs.short }}
           RUN_URL: ${{ github.event.workflow_run.html_url }}
@@ -88,5 +97,5 @@ jobs:
             --head "$BRANCH" \
             --title "auto-revert: ${SUBJECT} (${SHORT})" \
             --label auto-revert \
+            --label forbidden-path-approved \
             --body "Production smoke test failed after the merge of \`${SHORT}\` (\"${SUBJECT}\"). This PR reverts that change. Failed CI run: ${RUN_URL}"
-          gh workflow run CI --ref "$BRANCH"

@@ -134,13 +134,14 @@ function ok(message) {
 }
 
 const branch = branchName();
+const labels = prLabels();
 
 if (branch === "main" || branch === "HEAD") {
   ok(`skipped on ${branch}`);
 }
 
-if (prLabels().has("auto-revert")) {
-  ok("auto-revert label present, plan checks skipped");
+if (labels.has("auto-revert") && mode === "present") {
+  ok("auto-revert label present, plan presence skipped");
 }
 
 const planPath = planPathFor(branch);
@@ -155,23 +156,24 @@ if (mode === "present") {
 const base = baseRef();
 
 if (mode === "scope") {
-  if (!existsSync(planPath)) {
-    fail(`missing plan file at ${planPath}`);
-  }
-  const planText = readFileSync(planPath, "utf8");
-  const allowlist = parseAllowlist(planText);
-  if (!allowlist || allowlist.length === 0) {
-    fail(`${planPath} has no "Files to touch" entries`);
-  }
   const files = changedFiles(base);
-  const outOfScope = files.filter((f) => f && !matchesAllowlist(f, allowlist));
-  if (outOfScope.length > 0) {
-    fail(
-      `${outOfScope.length} file(s) outside plan scope:\n  - ${outOfScope.join("\n  - ")}`,
-    );
+  if (!labels.has("auto-revert")) {
+    if (!existsSync(planPath)) {
+      fail(`missing plan file at ${planPath}`);
+    }
+    const planText = readFileSync(planPath, "utf8");
+    const allowlist = parseAllowlist(planText);
+    if (!allowlist || allowlist.length === 0) {
+      fail(`${planPath} has no "Files to touch" entries`);
+    }
+    const outOfScope = files.filter((f) => f && !matchesAllowlist(f, allowlist));
+    if (outOfScope.length > 0) {
+      fail(
+        `${outOfScope.length} file(s) outside plan scope:\n  - ${outOfScope.join("\n  - ")}`,
+      );
+    }
   }
 
-  const labels = prLabels();
   const forbidden = files.filter((f) =>
     FORBIDDEN_UNLABELED_PATHS.some((re) => re.test(f)),
   );
@@ -186,7 +188,6 @@ if (mode === "scope") {
 
 if (mode === "size") {
   const files = changedFiles(base);
-  const labels = prLabels();
   if (labels.has("large-change-approved")) {
     ok("large-change-approved label present, size check skipped");
   }
