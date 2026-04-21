@@ -1,4 +1,4 @@
-import { getMeeting } from "@corgtex/domain";
+import { getMeeting, getMeetingParticipants } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import Link from "next/link";
 import { renderMarkdown } from "@/lib/markdown";
@@ -26,6 +26,10 @@ export default async function MeetingDetailPage({
       </div>
     );
   }
+  
+  const participants = meeting.participantIds?.length > 0 
+    ? await getMeetingParticipants(workspaceId, meeting.participantIds)
+    : [];
 
   const getReactionCount = (proposal: any, type: string) => 
     proposal.reactions.filter((r: any) => r.reaction === type).length;
@@ -47,6 +51,35 @@ export default async function MeetingDetailPage({
           <span>{new Date(meeting.recordedAt).toLocaleString()}</span>
         </div>
       </header>
+      
+      {participants.length > 0 && (
+        <section className="ws-section" style={{ marginBottom: 48 }}>
+          <h2 className="nr-section-header">Participants</h2>
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {participants.map((p: any) => (
+              <Link 
+                key={p.id} 
+                href={`/workspaces/${workspaceId}/members/${p.id}`}
+                className="flex items-center gap-3 p-3 rounded-xl border bg-card hover:border-primary/50 transition-colors shadow-sm"
+                style={{ textDecoration: "none", color: "inherit" }}
+              >
+                <div className="flex-shrink-0 flex items-center justify-center w-10 h-10 rounded-full bg-primary/10 text-primary font-bold">
+                  {(p.user?.displayName || p.user?.email || "?").slice(0, 2).toUpperCase()}
+                </div>
+                <div>
+                  <div className="font-semibold text-sm">
+                    {p.user?.displayName || p.user?.email}
+                  </div>
+                  <div className="text-xs text-muted-foreground line-clamp-1">
+                    {p.roleAssignments[0]?.role.name || "Participant"}
+                    {p.roleAssignments.length > 1 && ` +${p.roleAssignments.length - 1} more`}
+                  </div>
+                </div>
+              </Link>
+            ))}
+          </div>
+        </section>
+      )}
 
       {meeting.summaryMd && (
         <section className="ws-section" style={{ marginBottom: 48 }}>
