@@ -119,7 +119,7 @@ export async function initiateAdviceProcessAction(formData: FormData) {
   refresh(workspaceId);
 }
 
-export async function recordAdviceAction(formData: FormData) {
+export async function recordAdviceAction(type: string, formData: FormData) {
   const _demoGuardWsId = formData.get("workspaceId") as string;
   if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
 
@@ -128,7 +128,7 @@ export async function recordAdviceAction(formData: FormData) {
   await recordAdvice(actor, {
     workspaceId,
     processId: asString(formData, "processId"),
-    type: asString(formData, "type") as "ENDORSE" | "CONCERN",
+    type: type as "ENDORSE" | "CONCERN",
     bodyMd: asString(formData, "bodyMd"),
   });
   refresh(workspaceId);

@@ -22,6 +22,7 @@ export async function createCircle(actor: AppActor, params: {
   name: string;
   purposeMd?: string | null;
   domainMd?: string | null;
+  parentCircleId?: string | null;
   maturityStage?: string;
   _membership?: import("@corgtex/shared").MembershipSummary | null;
 }) {
@@ -42,6 +43,7 @@ export async function createCircle(actor: AppActor, params: {
         name,
         purposeMd: params.purposeMd?.trim() || null,
         domainMd: params.domainMd?.trim() || null,
+        parentCircleId: params.parentCircleId || null,
         maturityStage: params.maturityStage || "GETTING_STARTED",
       },
     });
@@ -198,3 +200,62 @@ export async function suggestMaturityUpgrade(workspaceId: string, circleId: stri
   return { ready: false, reason: "Not enough recent activity to suggest upgrade." };
 }
 
+export type CircleTreeItem = {
+  id: string;
+  workspaceId: string;
+  parentCircleId: string | null;
+  name: string;
+  purposeMd: string | null;
+  domainMd: string | null;
+  maturityStage: string;
+  sortOrder: number;
+  createdAt: Date;
+  updatedAt: Date;
+  parentCircle: { id: string; name: string } | null;
+  roles: any[]; // we'll use generic any for role structure for now to keep it simple across packages
+  childCircles: CircleTreeItem[];
+};
+
+export async function listCircleTree(workspaceId: string) {
+  const circles = await prisma.circle.findMany({
+    where: { workspaceId },
+    include: {
+      parentCircle: { select: { id: true, name: true } },
+      roles: {
+        include: {
+          assignments: {
+            include: {
+              member: {
+                include: { user: { select: { displayName: true, email: true } } },
+              },
+            },
+          },
+        },
+        orderBy: { sortOrder: "asc" },
+      },
+    },
+    orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
+  });
+
+  return buildCircleTree(circles);
+}
+
+function buildCircleTree(flatList: any[]): CircleTreeItem[] {
+  const map = new Map<string, CircleTreeItem>();
+  const roots: CircleTreeItem[] = [];
+
+  for (const item of flatList) {
+    map.set(item.id, { ...item, childCircles: [] });
+  }
+
+  for (const item of flatList) {
+    const mapped = map.get(item.id)!;
+    if (item.parentCircleId && map.has(item.parentCircleId)) {
+      map.get(item.parentCircleId)!.childCircles.push(mapped);
+    } else {
+      roots.push(mapped);
+    }
+  }
+
+  return roots;
+}
