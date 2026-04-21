@@ -16,15 +16,14 @@ The agent user has ADMIN role in the default org. Wallet-dependent flows (e.g. v
 
 ## Frontend Browser Access (E2E UI Testing)
 
-When spinning up a browser subagent for end-to-end testing, **NEVER hardcode testing passwords or credentials directly in your prompts or output.**
+To log into the Next.js UI using the agent's browser, you must use the standard email/password login form with explicit testing credentials seeded into the database.
 
-Instead, ALWAYS securely retrieve the credentials from the local `.env` file first:
-- Read `AGENT_E2E_EMAIL`
-- Read `AGENT_E2E_PASSWORD`
+Never hardcode E2E passwords or credentials in prompts, commits, PR descriptions, or final output. Read `AGENT_E2E_EMAIL` and `AGENT_E2E_PASSWORD` from the local `.env` file when a browser test needs them, then pass the retrieved values only into the browser automation context needed for that test.
 
-Pass these retrieved string values directly into the browser subagent's task description parameter.
-
-*Note: For testing against local development instances, the default seed is `system+corgtex@corgtex.local`. For testing against the production `app.corgtex.com` dashboard, use the credentials as they exist in your `.env`.*
+**Setup:**
+1. Add `AGENT_E2E_EMAIL` and `AGENT_E2E_PASSWORD` to `.env` (defaults to `system+corgtex@corgtex.local` and `corgtex-test-agent-pw` if left blank).
+2. Run `npm run prisma:seed` locally to provision this dedicated user. The script will explicitly seed/update the testing user account so that testing passwords never drift.
+3. Instruct the browser subagent to log into the web application utilizing these credentials.
 
 ## Build & Test Commands
 - **Dev server:** `npm run dev` | **Build:** `npm run build` | **Lint:** `npm run lint` | **Typecheck:** `npm run typecheck`
