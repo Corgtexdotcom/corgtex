@@ -84,7 +84,7 @@ Mechanical, CI-enforced:
 Post-deploy safety is the `smoke-prod` job in `.github/workflows/ci.yml`.
 If it fails on `main`:
 
-- `.github/workflows/auto-revert.yml` opens a revert PR labeled `auto-revert`.
+- `.github/workflows/auto-revert.yml` opens a revert PR labeled `auto-revert`, `forbidden-path-approved`, and `large-change-approved`.
 - The workflow uses `AUTO_REVERT_TOKEN`, a repo secret backed by a bot or app token with `contents`, `pull_requests`, and `workflow` access, so the revert PR triggers normal `pull_request` CI.
 - The Reviewer merges the revert immediately; the same gating applies (required checks green) but the plan-present / scope-check steps are relaxed for `auto-revert`-labeled PRs.
 - The original PR is re-opened as draft with the failure logs attached. The Planner decides next steps.
