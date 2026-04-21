@@ -1,16 +1,21 @@
 # Contributing to Corgtex
 
-We love your input! We want to make contributing to this project as easy and transparent as possible, whether it's:
-- Reporting a bug
-- Discussing the current state of the code
-- Submitting a fix
-- Proposing new features
+Corgtex is developed by an autonomous three-agent pipeline (Planner →
+Executor → Reviewer). The canonical specification for how work moves
+through that pipeline lives in
+[`docs/contributing/agent-pipeline.mdx`](docs/contributing/agent-pipeline.mdx).
+Per-role rules that each AI agent's harness loads automatically live in
+[`AGENTS.md`](AGENTS.md).
+
+If you are a human contributing manually, follow the same branching and
+PR process documented below — you'll just be playing all three roles
+yourself.
 
 ## Development Setup
 
 ### Prerequisites
 
-- Node.js 22 (we recommend using `nvm` or `asdf`)
+- Node.js 22 (we recommend `nvm` or `asdf`)
 - Docker Desktop or equivalent (for PostgreSQL)
 
 ### 1. Clone & Install
@@ -23,8 +28,6 @@ npm install
 
 ### 2. Start PostgreSQL
 
-We use Docker to run a local Postgres instance required for Prisma.
-
 ```bash
 docker compose -f docker-compose.selfhost.yml up postgres -d
 ```
@@ -34,13 +37,8 @@ docker compose -f docker-compose.selfhost.yml up postgres -d
 ```bash
 cp .env.example .env
 
-# Generate Prisma client
 npm run prisma:generate
-
-# Apply migrations
 npm run prisma:migrate:deploy
-
-# Run initial seed
 npm run prisma:seed
 ```
 
@@ -54,32 +52,33 @@ The app will be available at [http://localhost:3000](http://localhost:3000).
 
 ## Testing
 
-Before submitting a Pull Request, ensure all tests and type checks pass:
+The canonical commands and testing philosophy are in
+[`AGENTS.md`](AGENTS.md#build-test-check). Before opening a PR, at
+minimum run:
 
 ```bash
-npm run check        # Run ESLint, TypeScript check, and Prisma schema validation
-npm run test:unit    # Run unit tests via Vitest
+npm run check        # lint + typecheck + prisma validate
+npm run test:unit    # Vitest unit suite
 ```
 
 ## Pull Request Process
 
-1. Fork the repo and create your branch from `main`.
-2. Ensure your PR is focused on a single change.
-3. If you're adding a new feature, make sure to add tests.
-4. Ensure the test suite passes (`npm run check` and `npm run test:unit`).
-5. Open your PR and include a detailed description of the changes.
+Every PR must originate from a plan file at `docs/plans/<branch>.md`
+(see [`docs/plans/_TEMPLATE.md`](docs/plans/_TEMPLATE.md)). The Reviewer
+rejects PRs without a plan, with out-of-scope file changes, or with
+missing acceptance criteria.
+
+The full workflow is documented in
+[`docs/contributing/agent-pipeline.mdx`](docs/contributing/agent-pipeline.mdx)
+and summarized per role in [`AGENTS.md`](AGENTS.md). Do not duplicate
+those rules here.
 
 ## Code Style
 
-- We use TypeScript (strict mode) everywhere.
+- TypeScript (strict mode) everywhere.
 - 2-space indentation, double quotes, semicolons.
-- Use `@/*` imports for App modules and `@corgtex/*` for shared package modules.
-- Read `AGENTS.md` for more architecture references.
+- `@/*` imports for `apps/web` modules; `@corgtex/*` for shared packages.
 
-## Architecture Guidelines
-
-- **Next.js App Router:** Ensure database-dependent pages are strictly dynamic (`export const dynamic = "force-dynamic"`). 
-- **Packages:** Keep business logic inside `packages/domain/`.
-- **Worker:** Background job dispatch goes into `apps/worker/` running through our outbox mechanism.
+Full conventions in [`AGENTS.md`](AGENTS.md#code-style).
 
 Thank you for contributing!

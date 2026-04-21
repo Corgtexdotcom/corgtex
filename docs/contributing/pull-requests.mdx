@@ -1,38 +1,70 @@
 ---
 title: "Branching and Pull Requests"
-description: "The standard workflow for merging code."
+description: "How PRs flow through the autonomous Planner → Executor → Reviewer pipeline."
 ---
 
-We use a standard feature-branch workflow. 
+Corgtex uses an autonomous three-agent pipeline for all development.
+The full specification is in [Agent Pipeline](/contributing/agent-pipeline).
+This page covers the PR-specific conventions that apply to every change.
 
-## Branching Strategy
+## Branching
 
-- Every new feature, bug fix, or development step should be executed on a new branch.
-- Isolate your work so there are no overlaps in your PRs.
-- Use descriptive branch names (e.g., `feat/optimistic-finance`, `fix/login-crash`).
+- One branch per plan. No overlapping scopes.
+- Descriptive names: `feat/optimistic-finance`, `fix/login-crash`, `docs/agent-pipeline`.
+- Branch name becomes the plan filename: `docs/plans/<branch>.md` (lowercased, `/` replaced by `-`).
 
-## Submitting a Pull Request
+## The plan is the contract
 
-All new features must be tested (unit and E2E via the Agent API if applicable) before submitting.
+Every PR is backed by a plan file at `docs/plans/<branch>.md`. The plan
+is the handoff between Planner, Executor, and Reviewer, and it is
+enforced mechanically:
 
-Once complete, push your branch and **always open a pull request immediately** using the GitHub CLI (`gh`). 
+- `plan-present` CI job fails if the plan file is missing.
+- `scope-check` CI job fails if any changed file is outside the plan's "Files to touch" allowlist.
+- The PR body must link to the plan file.
+- The Reviewer (Codex) rejects PRs whose plan lacks ticked acceptance criteria.
 
-### PR Content Requirements
+Copy [`docs/plans/_TEMPLATE.md`](https://github.com/corgtex/corgtex/blob/main/docs/plans/_TEMPLATE.md) to start.
 
-Every PR MUST include the following in its description to provide clear guidance for the reviewer:
+## Opening the PR
 
-1. **Implementation Plan:** A summary of the original architectural plan or the tension being resolved.
-2. **Final Walkthrough:** A summary of what was actually built.
-3. **Visual Proof:** For ANY frontend-related changes, you must attach screen recordings (`.mp4` / `.webm`) or screenshots (`.png`) demonstrating the functionality working on your local branch.
+The Executor opens the PR using `gh pr create` (installed via
+Homebrew; `/opt/homebrew/bin/gh` if not on `PATH`). The PR body:
 
-## CI Validation
+1. **Links to the plan file.**
+2. **Summarizes what shipped** — one or two sentences, the "walkthrough."
+3. **Attaches visual proof** (`.mp4` / `.webm` / `.png`) for any change under `apps/web/app/**` or `apps/web/components/**`.
 
-When you open a PR, GitHub Actions automatically runs our CI pipeline:
+Auto-merge is set by the Executor immediately (`gh pr merge --auto --squash`) so the PR merges as soon as the Reviewer approves and required checks are green.
 
-1. Typechecking (`npm run typecheck`)
-2. Linting (`npm run lint`)
-3. **Documentation checks** (`mint validate`). If your PR breaks documentation formatting, it cannot be merged.
+## CI gates
 
-## Automated Document Updates (Mintlify Workflows)
+Every PR must pass:
 
-When you merge a PR into `main`, our Mintlify AI workflow evaluates the code diff to determine if the documentation is now outdated. If so, an AI agent will automatically draft and propose a separate Pull Request to the documentation site to keep our technical narratives synchronized with the platform behavior.
+- `check` — lint, typecheck, Prisma validate, unit + integration tests.
+- `db-sync` — migration ↔ schema parity.
+- `build` — `env -u DATABASE_URL npm run build` (database-independent).
+- `docs` — `mint validate` and broken-link check.
+- `plan-present` — plan file exists for the branch.
+- `scope-check` — changed files ⊆ plan allowlist.
+- `gitleaks` — no secrets in the diff.
+- `diff-size` — ≤ 400 LOC of code, ≤ 15 files (unless `large-change-approved`).
+
+All of these are required by branch protection on `main`. The Reviewer
+cannot merge a PR whose required checks are red.
+
+## Labels
+
+- `forbidden-path-approved` — justification in the plan, required for changes to `deploy/**`, `.github/workflows/**`, `prisma/migrations/**`, `packages/domain/src/auth*.ts`, `apps/web/lib/auth.ts`.
+- `large-change-approved` — override for the 400 LOC / 15 file cap.
+- `halt-agents` — human stop; Reviewer will not merge, Executor will not push.
+- `force-merge` — human override, logged.
+- `needs-replan` — Executor is stuck; Planner picks up.
+- `auto-revert` — created by `.github/workflows/auto-revert.yml` after a failed `smoke-prod`.
+
+## Automated Document Updates
+
+When a PR merges to `main`, our Mintlify AI workflow evaluates the diff
+to determine if documentation is now outdated. If so, it drafts a
+separate PR against the docs site through the same Planner → Executor →
+Reviewer pipeline described above.

@@ -1,73 +1,136 @@
 # AGENTS.md
 
-## Agent API Access (E2E Testing)
+This file is loaded by every AI coding agent that works on this repo
+(Claude Code, Antigravity with Claude or Gemini, Codex). It is the
+single source of truth for how agents collaborate on Corgtex.
 
-When `AGENT_API_KEY` is set in `.env`, the agent can authenticate to the API for end-to-end testing:
+Corgtex uses a fully autonomous three-agent pipeline:
 
-- **Header:** `Authorization: Bearer agent-<AGENT_API_KEY>`
-- **Base URL:** `http://localhost:3000` (or `NEXT_PUBLIC_APP_URL`)
+- **Planner** (Claude) writes plans.
+- **Executor** (Gemini in Antigravity) implements and opens the PR.
+- **Reviewer** (Codex) approves or rejects the PR.
 
-**Setup:**
-1. Add `AGENT_API_KEY="your-secret-key"` to `.env` (never commit)
-2. Run `AGENT_API_KEY="your-secret-key" npm run prisma:seed` to create the agent user
-3. Use the header above when making API requests
+A human prompts each stage and can intervene via labels. No human
+reviews code line-by-line. The full specification lives in
+[docs/contributing/agent-pipeline.mdx](docs/contributing/agent-pipeline.mdx).
 
-The agent user has ADMIN role in the default org. Wallet-dependent flows (e.g. voting) require additional setup.
+---
 
-## Frontend Browser Access (E2E UI Testing)
+## Shared context (all agents read this)
 
-To log into the Next.js UI using the agent's browser, you must use the standard email/password login form with explicit testing credentials seeded into the database.
+### Build, test, check
 
-Never hardcode E2E passwords or credentials in prompts, commits, PR descriptions, or final output. Read `AGENT_E2E_EMAIL` and `AGENT_E2E_PASSWORD` from the local `.env` file when a browser test needs them, then pass the retrieved values only into the browser automation context needed for that test.
-
-**Setup:**
-1. Add `AGENT_E2E_EMAIL` and `AGENT_E2E_PASSWORD` to `.env` (defaults to `system+corgtex@corgtex.local` and `corgtex-test-agent-pw` if left blank).
-2. Run `npm run prisma:seed` locally to provision this dedicated user. The script will explicitly seed/update the testing user account so that testing passwords never drift.
-3. Instruct the browser subagent to log into the web application utilizing these credentials.
-
-## Build & Test Commands
 - **Dev server:** `npm run dev` | **Build:** `npm run build` | **Lint:** `npm run lint` | **Typecheck:** `npm run typecheck`
-- **All checks:** `npm run check` (lint + typecheck + prisma validate)
+- **All static checks:** `npm run check` (lint + typecheck + prisma validate)
 - **Unit tests:** `npm test` or `npm run test:unit` | **Single test:** `npx vitest run packages/domain/src/runtime.test.ts`
 - **Integration / E2E:** no dedicated `npm run test:integration` script exists today. For end-to-end coverage, run the app locally with `npm run dev` and use the agent API flow above. `docker-compose.yml` is available for local services, but there is no separate `docker-compose.test.yml`.
 - **Prisma:** `npm run prisma:generate` (required before tests), `npm run prisma:migrate`, `npm run prisma:migrate:deploy`
 
-## Prisma Workflow Rules
-- **Schema changes:** If you change `prisma/schema.prisma`, proactively run `npm run prisma:migrate -- --name <descriptive_name>` and commit the generated migration.
-- **Migration changes:** If you change `prisma/migrations/**`, validate the migration path against a database before finishing, but do not create or apply schema changes with `prisma db push`.
-- **No Prisma diff, no Prisma commands:** If neither `prisma/schema.prisma` nor `prisma/migrations/**` changed, do not run Prisma migration commands.
-- **Build contract:** `npm run build` must stay database-independent. Never hide schema mutation inside generic scripts like `npm run build`.
-- **Forbidden contexts for `db push`:** Never use `prisma db push` in CI, Dockerfiles, production deploy flows, or as part of routine agent work in this repo.
+### Architecture
 
-## Next.js Build Guardrails
-- If a page, layout, or `generateMetadata()` touches Prisma and is not already request-bound through `cookies()`, `headers()`, auth, or a route handler, make it runtime-only before merging.
-- Preferred fix: add explicit runtime-only behavior such as `export const dynamic = "force-dynamic"` when appropriate.
-- Build-time database fallbacks are not an acceptable substitute. The web build must continue to succeed without `DATABASE_URL`.
-
-## Architecture
 - **Framework:** Next.js 15 (App Router) + React 19 + TypeScript (strict) + Tailwind CSS 3
 - **Runtime split:** `apps/web/` serves the UI and route handlers; `apps/worker/` runs the outbox / workflow worker loop
-- **Packages:** `packages/domain/` for business logic, `packages/shared/` for env/db/types, `packages/workflows/` for event/job orchestration, `packages/knowledge/` for retrieval, `packages/models/` for model gateways, and `packages/agents/` for agent execution
-- **Database:** PostgreSQL via Prisma ORM (`prisma/schema.prisma`) covering workspaces, members, circles, proposals, approval flows, finance records, events, workflow jobs, agent runs, and retrieval artifacts
-- **Auth:** session-cookie auth and agent bearer auth are resolved in [apps/web/lib/auth.ts](apps/web/lib/auth.ts); workspace/agent authorization lives in [packages/domain/src/auth.ts](packages/domain/src/auth.ts) and [packages/domain/src/agent-auth.ts](packages/domain/src/agent-auth.ts)
+- **Packages:** `packages/domain/` for business logic, `packages/shared/` for env/db/types, `packages/workflows/` for event/job orchestration, `packages/knowledge/` for retrieval, `packages/models/` for model gateways, `packages/agents/` for agent execution
+- **Database:** PostgreSQL via Prisma ORM (`prisma/schema.prisma`)
+- **Auth:** session-cookie auth and agent bearer auth resolved in [apps/web/lib/auth.ts](apps/web/lib/auth.ts); workspace/agent authorization in [packages/domain/src/auth.ts](packages/domain/src/auth.ts) and [packages/domain/src/agent-auth.ts](packages/domain/src/agent-auth.ts)
 - **API routes:** `apps/web/app/api/**` use `NextResponse.json`; convert domain `AppError`s with `handleRouteError()` from [apps/web/lib/http.ts](apps/web/lib/http.ts)
-- **Tests:** Vitest runs `packages/**/*.test.ts` and `apps/**/*.test.ts` in a Node environment (`vitest.config.mts`)
 
-## Code Style
-- **Imports:** Use `@/*` for `apps/web` modules and `@corgtex/*` for shared package entrypoints. Use `type` imports for type-only imports (`import type { X }`)
-- **Formatting:** Double quotes, no semicolons omission (semicolons used), 2-space indent
-- **Naming:** camelCase for variables/functions, PascalCase for types/components, UPPER_SNAKE for constants/enums
-- **Errors:** Throw `AppError(status, code, message)` from domain logic and convert it in route handlers with `handleRouteError()`. No `.js` allowed (`allowJs: false`)
-- **DB:** All monetary values stored as `*Cents: Int`. UUIDs for all IDs. Use Prisma compound unique keys for lookups
+### Code style
 
-## Git & Branching Strategy
-- **Branching:** Every new feature or development should be on a new branch so there is no overlaps in PRs.
-- **Testing & PRs:** All new features must be end-to-end tested. Once complete, push the branch and ALWAYS open a pull request immediately using the GitHub CLI (`gh`). You must generate the PR using the `gh` tool automatically instead of providing manual web links. Note: The `gh` CLI is installed via Homebrew; if it's not in your PATH, invoke it explicitly via `/opt/homebrew/bin/gh`.
-- **PR Content Requirements:** Every PR MUST include the original implementation plan and the final walkthrough in its description to provide clear guidance for whoever is merging it. Furthermore, for ANY frontend-related changes, you must attach screen recordings and screenshots proving that the functionality works on your local branch.
+- **Imports:** `@/*` for `apps/web` modules; `@corgtex/*` for shared package entrypoints. Use `import type { X }` for type-only imports.
+- **Formatting:** double quotes, semicolons, 2-space indent.
+- **Naming:** camelCase (variables/functions), PascalCase (types/components), UPPER_SNAKE (constants/enums).
+- **No `.js`:** `allowJs: false`.
+- **Errors:** throw `AppError(status, code, message)` from domain logic; convert in route handlers with `handleRouteError()`.
+- **DB:** monetary values as `*Cents: Int`. UUIDs for all IDs. Use Prisma compound unique keys for lookups.
 
-## Deployment Invariants
-- **Database Page Caching:** All Prisma-dependent App Router pages MUST have `export const dynamic = "force-dynamic"`. Do not let Next.js attempt static database queries during build.
-- **Migration Execution:** Migrations are explicitly applied automatically at container startup via the `deploy/entrypoint.sh` script.
-- **Railway Configuration:** The `preDeployCommand` in Railway TOML files is **not reliable** when paired with `builder = "DOCKERFILE"`. Rely on the `entrypoint.sh`.
-- **Smoke Testing:** Any PR merging to `main` must pass a post-deploy smoke routine to ensure continuous availability.
-- **Docker Workspace Execution:** When executing root-level package.json scripts inside the production Docker container (e.g., in `entrypoint.sh`), ALWAYS invoke `node /app/scripts/...` directly with absolute paths. Do NOT use `npm run <script>`, as npm resolves the execution context into the child workspace (e.g., `@corgtex/web`) and will crash with a "Missing script" error.
+### Prisma workflow rules
+
+- **Schema changes:** if you change `prisma/schema.prisma`, run `npm run prisma:migrate -- --name <descriptive_name>` and commit the generated migration.
+- **Migration changes:** if you change `prisma/migrations/**`, validate against a database before finishing. Never use `prisma db push` to apply schema changes.
+- **No Prisma diff, no Prisma commands:** if neither `prisma/schema.prisma` nor `prisma/migrations/**` changed, do not run Prisma migration commands.
+- **Build contract:** `npm run build` must stay database-independent. Never hide schema mutation inside generic build scripts.
+- **Forbidden contexts for `db push`:** never in CI, Dockerfiles, production deploy flows, or routine agent work.
+
+### Next.js build guardrails
+
+- All Prisma-dependent App Router pages, layouts, and `generateMetadata()` functions that are not already request-bound (via `cookies()`, `headers()`, auth, or a route handler) MUST export `const dynamic = "force-dynamic"`.
+- Build-time database fallbacks are not an acceptable substitute. The web build must succeed without `DATABASE_URL`.
+
+### Deployment invariants
+
+- Migrations apply automatically at container startup via `deploy/entrypoint.sh`.
+- Railway's `preDeployCommand` is unreliable with `builder = "DOCKERFILE"`. Rely on `entrypoint.sh`.
+- Any PR merged to `main` must pass the post-deploy smoke routine; if it fails, `.github/workflows/auto-revert.yml` opens a revert PR.
+- When invoking root-level scripts inside the production Docker container, always use absolute paths: `node /app/scripts/...`. Never `npm run <script>` — npm resolves the context into the child workspace and crashes.
+
+### Secrets and credentials
+
+- Never hardcode secrets in code, commits, PR descriptions, or agent output.
+- E2E credentials: read `AGENT_E2E_EMAIL` and `AGENT_E2E_PASSWORD` from the local `.env`. Defaults are `system+corgtex@corgtex.local` / `corgtex-test-agent-pw` if unset. Run `npm run prisma:seed` to provision the user.
+- Agent API (E2E backend testing): set `AGENT_API_KEY` in `.env`, then run `AGENT_API_KEY="..." npm run prisma:seed`. Use header `Authorization: Bearer agent-<AGENT_API_KEY>` against `http://localhost:3000`. The agent user has ADMIN role in the default org; wallet-dependent flows need extra setup.
+
+---
+
+## For Planners (Claude)
+
+Your job is to produce a plan file and nothing else. Do not write
+implementation code.
+
+1. Create a new branch: `git checkout -b <type>/<short-slug>` (e.g. `feat/optimistic-finance`, `fix/login-crash`).
+2. Copy [docs/plans/_TEMPLATE.md](docs/plans/_TEMPLATE.md) to `docs/plans/<branch>.md`. The filename is the branch name, lowercased, with `/` replaced by `-`.
+3. Fill every section. The **Files to touch** section is a hard allowlist — the Executor cannot modify files outside it without first updating this file.
+4. Keep the diff small: target ≤ 400 LOC of code changes (docs don't count) and ≤ 15 files. If the work is bigger, split it into multiple plans.
+5. If the plan touches forbidden paths (`deploy/**`, `.github/workflows/**`, `prisma/migrations/**`, `packages/domain/src/auth*.ts`, `apps/web/lib/auth.ts`), state the justification in the plan and note that the PR will need the `forbidden-path-approved` label.
+6. Commit the plan file on the branch, push, and open a **draft** PR whose body is the contents of the plan file. Do not mark ready-for-review.
+
+Stop there. Hand off to the Executor.
+
+---
+
+## For Executors (Gemini in Antigravity)
+
+Your job is to implement the plan. You do not plan, and you do not
+merge.
+
+1. **First action:** `cat docs/plans/<branch>.md`. Echo the Acceptance criteria checklist into your first commit message so the Reviewer can diff intent vs. outcome.
+2. **Stay in scope:** only modify files listed in the plan's "Files to touch" section. If you discover the plan is wrong or incomplete, commit an update to the plan file first (separate commit), then write code. `scripts/check-plan.mjs` enforces this in CI.
+3. **Run the test plan locally** before pushing. Run `npm run check` and whatever the plan's "Test plan" specifies.
+4. **Open the PR as ready-for-review** once all acceptance criteria are ticked. Use `gh pr create`. If `gh` isn't on `PATH`, invoke `/opt/homebrew/bin/gh`. The PR body must link back to `docs/plans/<branch>.md`.
+5. **Frontend changes:** attach a screen recording (`.mp4` / `.webm`) or screenshots (`.png`) to the PR description. Any change under `apps/web/app/**` or `apps/web/components/**` requires visual proof.
+6. **CI fix loop cap:** if CI is red, you may push up to 3 fix commits. After the 3rd failed attempt, label the PR `needs-replan`, comment a summary, and stop. The human will re-prompt the Planner.
+7. **Never:** merge your own PR, use `--admin`, skip hooks with `--no-verify`, or run `prisma db push`. Never remove `export const dynamic = "force-dynamic"` from a Prisma-touching page. Never commit `.env` or any secret.
+
+Stop when the PR is open and CI is green. Hand off to the Reviewer.
+
+---
+
+## For Reviewers (Codex)
+
+Your job is to approve or reject the PR based on mechanical criteria.
+Do not write code. Do not merge if any criterion fails.
+
+Canonical checklist lives in [.codex/review.md](.codex/review.md).
+Summary:
+
+1. **Plan exists** at `docs/plans/<branch>.md` and is linked from the PR body.
+2. **Scope intact:** all changed files are in the plan's "Files to touch" allowlist (`scripts/check-plan.mjs` enforces).
+3. **Acceptance criteria all ticked** and each is reflected in code or CI output.
+4. **No forbidden-path changes** without the `forbidden-path-approved` label.
+5. **Diff within caps** (≤ 400 LOC of code, ≤ 15 files) unless `large-change-approved` is set.
+6. **No secrets** (gitleaks green), no `prisma db push`, no `--no-verify`, no `--admin`, no `force-dynamic` removed from Prisma pages.
+7. **Tests added** when `packages/domain/**` changed.
+8. **Visual proof attached** for any frontend-path change.
+9. **All required CI checks green.**
+
+If all pass, approve the PR. Auto-merge (set by the Executor via `gh pr merge --auto --squash`) will fire. If any fail, request changes with a comment pointing to the specific criterion; do not approve partially.
+
+---
+
+## Human override
+
+The human prompter can intervene at any time using PR labels:
+
+- `halt-agents` — Reviewer will not merge; Executor will not push further commits.
+- `force-merge` — human override. Logged in the PR and in the daily digest.
+- `needs-replan` — Executor sets this when stuck; Planner picks up.
