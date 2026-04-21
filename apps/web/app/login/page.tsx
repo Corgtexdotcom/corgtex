@@ -1,7 +1,5 @@
 import { LoginForm } from "./LoginForm";
 import { DemoButton } from "./DemoButton";
-import { SsoLoginForm } from "./SsoLoginForm";
-
 function singleSearchParam(value: string | string[] | undefined) {
   return Array.isArray(value) ? value[0] ?? "" : value ?? "";
 }
@@ -55,7 +53,6 @@ export default async function LoginPage({
         ) : null}
 
         <LoginForm />
-        <SsoLoginForm />
         <DemoButton />
       </section>
     </main>
