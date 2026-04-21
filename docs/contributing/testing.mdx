@@ -3,40 +3,69 @@ title: "Testing"
 description: "How to run and write tests in Corgtex."
 ---
 
-We use Vitest for unit testing and rely on end-to-end API workflows for integration coverage.
+We use Vitest for unit and integration tests and the Agent API for
+broader end-to-end coverage. The canonical list of commands lives in
+[`AGENTS.md`](https://github.com/corgtex/corgtex/blob/main/AGENTS.md)
+— this page documents the "why" and the E2E setup.
 
 ## Running Tests
 
-There are several commands available for testing and code validation.
-
 ```bash
-# Run unit tests
-npm test
-# OR
+# Static checks (lint + typecheck + prisma validate)
+npm run check
+
+# Unit tests
 npm run test:unit
 
-# Run a single specific test file
-npx vitest run packages/domain/src/runtime.test.ts
+# Integration tests (spins up docker-compose.test.yml, runs, tears down)
+npm run test:integration
 
-# Run all static checks (lint + typecheck + prisma validate)
-npm run check
+# Everything (unit + integration)
+npm run test:all
+
+# A single test file
+npx vitest run packages/domain/src/runtime.test.ts
 ```
 
-## Agent API Access (E2E Testing)
+Unit tests live next to source (`packages/**/*.test.ts`,
+`apps/**/*.test.ts`). Integration tests live under the Vitest
+`integration` project and require the test Postgres container.
 
-We do not currently maintain a heavy suite of simulated Cypress/Playwright frontend E2E tests. Instead, we rely heavily on testing the system via the Agent API to mimic complex workflows.
+## What the Reviewer expects
 
-When `AGENT_API_KEY` is set in `.env`, an external script or testing suite can authenticate directly to the Local API for end-to-end testing:
+The Reviewer (Codex) rejects a PR if:
 
-- **Header:** `Authorization: Bearer agent-<AGENT_API_KEY>`
-- **Base URL:** `http://localhost:3000` (or `NEXT_PUBLIC_APP_URL`)
+- Domain code under `packages/domain/**` changed without a
+  corresponding test update.
+- The plan's "Test plan" section lists commands that CI did not run.
 
-### Setup Agent E2E:
-1. Add `AGENT_API_KEY="your-secret-key"` to your development `.env`.
-2. Run `AGENT_API_KEY="your-secret-key" npm run prisma:seed` to ensure the agent programmatic user is created in the database.
-3. Start the Next.js server (`npm run dev`).
-4. Execute API requests against `/api/...` passing the Bearer token above.
+Write tests for new domain logic. Write them alongside the code, not as
+a follow-up PR.
+
+## Agent API (E2E)
+
+We do not maintain heavy Cypress / Playwright frontend suites. For
+backend end-to-end coverage we expose a dedicated Agent API that an
+external script or the pipeline itself can hit.
+
+Setup and credentials are documented in
+[`AGENTS.md`](https://github.com/corgtex/corgtex/blob/main/AGENTS.md#secrets-and-credentials).
+Summary:
+
+1. Set `AGENT_API_KEY` in `.env`.
+2. Run `AGENT_API_KEY="..." npm run prisma:seed` to create the agent user (ADMIN role in the default org).
+3. Start the server (`npm run dev`).
+4. Call `/api/...` with `Authorization: Bearer agent-<AGENT_API_KEY>`.
 
 <Warning>
-  The agent user receives `ADMIN` role access in the default organization upon seeding. Wallet-dependent flows (e.g., optimistic finance workflows) may require additional setup configurations.
+  The agent user has `ADMIN` role on the default organization. Wallet-dependent flows (e.g. optimistic finance) require additional setup.
 </Warning>
+
+## Frontend E2E via browser agent
+
+When a PR touches `apps/web/app/**` or `apps/web/components/**`, the
+Executor logs into the UI using seeded credentials and attaches a
+screen recording or screenshots to the PR. Credentials live in `.env`
+(`AGENT_E2E_EMAIL`, `AGENT_E2E_PASSWORD`) — never hardcoded, never in
+PR descriptions. See the secrets section of
+[`AGENTS.md`](https://github.com/corgtex/corgtex/blob/main/AGENTS.md#secrets-and-credentials).
