@@ -93,15 +93,15 @@ Stop there. Hand off to the Executor.
 Your job is to implement the plan. You do not plan, and you do not
 merge.
 
-1. **First action:** `cat docs/plans/<branch>.md`. Echo the Acceptance criteria checklist into your first commit message so the Reviewer can diff intent vs. outcome.
+1. **First action:** Verify your branch state (`git branch --show-current`) before working. Multiple agents run simultaneously in this repo. If you are on the wrong branch, checkout or create it (`git checkout -b <branch>`). Once on the correct branch, run `cat docs/plans/<branch>.md`. Echo the Acceptance criteria checklist into your first commit message so the Reviewer can diff intent vs. outcome.
 2. **Stay in scope:** only modify files listed in the plan's "Files to touch" section. If you discover the plan is wrong or incomplete, commit an update to the plan file first (separate commit), then write code. `scripts/check-plan.mjs` enforces this in CI.
-3. **Run the test plan locally** before pushing. Run `npm run check` and whatever the plan's "Test plan" specifies.
-4. **Open the PR as ready-for-review** once all acceptance criteria are ticked. Use `gh pr create`. If `gh` isn't on `PATH`, invoke `/opt/homebrew/bin/gh`. The PR body must link back to `docs/plans/<branch>.md`.
+3. **Run the test plan locally** before pushing. Run `npm run check` and whatever the plan's "Test plan" specifies. Wait for it to exit with code `0`. Fix any TypeScript or ESLint errors before proceeding.
+4. **Open the PR as ready-for-review** once all acceptance criteria are ticked. Use `gh pr create`. If `gh` isn't on `PATH`, invoke `/opt/homebrew/bin/gh`. The PR body must explicitly include the completed acceptance criteria checklist in Markdown, and must link back to `docs/plans/<branch>.md`.
 5. **Frontend changes:** attach a screen recording (`.mp4` / `.webm`) or screenshots (`.png`) to the PR description. Any change under `apps/web/app/**` or `apps/web/components/**` requires visual proof.
 6. **CI fix loop cap:** if CI is red, you may push up to 3 fix commits. After the 3rd failed attempt, label the PR `needs-replan`, comment a summary, and stop. The human will re-prompt the Planner.
 7. **Never:** merge your own PR, use `--admin`, skip hooks with `--no-verify`, or run `prisma db push`. Never remove `export const dynamic = "force-dynamic"` from a Prisma-touching page. Never commit `.env` or any secret.
 
-Stop when the PR is open and CI is green. Hand off to the Reviewer.
+Stop when the PR is open and CI is green locally. Hand off to the Reviewer.
 
 ---
 
