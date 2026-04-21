@@ -136,13 +136,26 @@ export default async function ProposalsPage({
                   </>
                 )}
                 {!isDemo && !proposal.isPrivate && proposal.status === "SUBMITTED" && (
-                <form action={reactToProposalAction} className="actions-inline">
-                  <input type="hidden" name="workspaceId" value={workspaceId} />
-                  <input type="hidden" name="proposalId" value={proposal.id} />
-                  <button type="submit" name="reaction" value="SUPPORT" className="secondary small">Support</button>
-                  <button type="submit" name="reaction" value="QUESTION" className="secondary small">Question</button>
-                  <button type="submit" name="reaction" value="CONCERN" className="warning small">Concern</button>
-                </form>
+                <div className="actions-inline">
+                  <form action={reactToProposalAction} className="actions-inline">
+                    <input type="hidden" name="workspaceId" value={workspaceId} />
+                    <input type="hidden" name="proposalId" value={proposal.id} />
+                    <input type="hidden" name="reaction" value="SUPPORT" />
+                    <button type="submit" className="secondary small">Support</button>
+                  </form>
+                  <form action={reactToProposalAction} className="actions-inline">
+                    <input type="hidden" name="workspaceId" value={workspaceId} />
+                    <input type="hidden" name="proposalId" value={proposal.id} />
+                    <input type="hidden" name="reaction" value="QUESTION" />
+                    <button type="submit" className="secondary small">Question</button>
+                  </form>
+                  <form action={reactToProposalAction} className="actions-inline">
+                    <input type="hidden" name="workspaceId" value={workspaceId} />
+                    <input type="hidden" name="proposalId" value={proposal.id} />
+                    <input type="hidden" name="reaction" value="CONCERN" />
+                    <button type="submit" className="warning small">Concern</button>
+                  </form>
+                </div>
                 )}
                 {!proposal.isPrivate && proposal.status === "ADVICE_GATHERING" && proposal.adviceProcess && (
                   <div style={{ padding: "16px", background: "rgba(255, 0, 128, 0.05)", borderLeft: "3px solid var(--accent)", marginTop: 12, borderRadius: 4, width: "100%" }}>
@@ -168,13 +181,13 @@ export default async function ProposalsPage({
                     </div>
                     
                     {!isDemo && (
-                      <form action={recordAdviceAction} className="stack" style={{ marginTop: 16 }}>
+                      <form className="stack" style={{ marginTop: 16 }}>
                         <input type="hidden" name="workspaceId" value={workspaceId} />
                         <input type="hidden" name="processId" value={proposal.adviceProcess.id} />
                         <textarea name="bodyMd" required placeholder="Leave your advice here..." style={{ minHeight: "60px" }}></textarea>
                         <div className="actions-inline">
-                          <button type="submit" name="type" value="ENDORSE" className="primary small">Endorse</button>
-                          <button type="submit" name="type" value="CONCERN" className="warning small">Raise Concern</button>
+                          <button formAction={recordAdviceAction.bind(null, "ENDORSE")} type="submit" className="primary small">Endorse</button>
+                          <button formAction={recordAdviceAction.bind(null, "CONCERN")} type="submit" className="warning small">Raise Concern</button>
                         </div>
                       </form>
                     )}
