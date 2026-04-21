@@ -51,6 +51,7 @@ export async function createTension(actor: AppActor, params: {
   assigneeMemberId?: string | null;
   proposalId?: string | null;
   isPrivate?: boolean;
+  meetingId?: string | null;
 }) {
   await requireWorkspaceMembership({
     actor,
@@ -72,6 +73,7 @@ export async function createTension(actor: AppActor, params: {
         assigneeMemberId: params.assigneeMemberId || null,
         proposalId: params.proposalId || null,
         isPrivate: params.isPrivate ?? false,
+        meetingId: params.meetingId || null,
         publishedAt: params.isPrivate ? null : new Date(),
       },
     });
