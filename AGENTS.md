@@ -14,6 +14,15 @@ When `AGENT_API_KEY` is set in `.env`, the agent can authenticate to the API for
 
 The agent user has ADMIN role in the default org. Wallet-dependent flows (e.g. voting) require additional setup.
 
+## Frontend Browser Access (E2E UI Testing)
+
+To log into the Next.js UI using the agent's browser, you must use the standard email/password login form with explicit testing credentials seeded into the database. 
+
+**Setup:**
+1. Add `AGENT_E2E_EMAIL` and `AGENT_E2E_PASSWORD` to `.env` (defaults to `system+corgtex@corgtex.local` and `corgtex-test-agent-pw` if left blank).
+2. Run `npm run prisma:seed` locally to provision this dedicated user. The script will explicitly seed/update the testing user account so that testing passwords never drift.
+3. Instruct the browser subagent to log into the web application utilizing these credentials.
+
 ## Build & Test Commands
 - **Dev server:** `npm run dev` | **Build:** `npm run build` | **Lint:** `npm run lint` | **Typecheck:** `npm run typecheck`
 - **All checks:** `npm run check` (lint + typecheck + prisma validate)
