@@ -79,6 +79,16 @@ const TOUR_STEPS: TourStep[] = [
   }
 ];
 
+const TOUR_KEY = (id: string) => `corgtex_tour_completed_${id}`;
+
+function markTourCompleted(workspaceId: string) {
+  localStorage.setItem(TOUR_KEY(workspaceId), "true");
+}
+
+function isTourCompleted(workspaceId: string) {
+  return localStorage.getItem(TOUR_KEY(workspaceId)) === "true";
+}
+
 export function DemoTour({ workspaceId }: { workspaceId: string }) {
   const router = useRouter();
   const pathname = usePathname();
@@ -91,6 +101,7 @@ export function DemoTour({ workspaceId }: { workspaceId: string }) {
     const driverObj = driver({
       showProgress: true,
       animate: true,
+      allowClose: true,
       steps: TOUR_STEPS.map((step, index) => ({
         element: step.element,
         popover: {
@@ -98,6 +109,7 @@ export function DemoTour({ workspaceId }: { workspaceId: string }) {
           onNextClick: () => {
             const nextStep = TOUR_STEPS[index + 1];
             if (!nextStep) {
+              markTourCompleted(workspaceId);
               driverObj.destroy();
               return;
             }
@@ -130,12 +142,9 @@ export function DemoTour({ workspaceId }: { workspaceId: string }) {
           }
         }
       })),
-      onDestroyStarted: () => {
-        if (targetStepIndexRef.current === null) {
-          // If we're not just navigating, mark as completed
-          localStorage.setItem(`corgtex_tour_completed_${workspaceId}`, "true");
-          driverObj.destroy();
-        }
+      onCloseClick: () => {
+        markTourCompleted(workspaceId);
+        driverObj.destroy();
       },
     });
 
@@ -154,11 +163,11 @@ export function DemoTour({ workspaceId }: { workspaceId: string }) {
   }, [router, workspaceId]);
 
   useEffect(() => {
-    const completed = localStorage.getItem(`corgtex_tour_completed_${workspaceId}`);
+    const completed = isTourCompleted(workspaceId);
     
     driverRef.current = initDriver();
 
-    if (completed !== "true") {
+    if (!completed) {
       // Start tour on first visit after a brief delay
       setTimeout(() => {
         driverRef.current?.drive(0);
