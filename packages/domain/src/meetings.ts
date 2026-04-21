@@ -59,6 +59,23 @@ export async function getMeeting(workspaceId: string, meetingId: string) {
   });
 }
 
+export async function getMeetingParticipants(workspaceId: string, participantIds: string[]) {
+  return prisma.member.findMany({
+    where: {
+      workspaceId,
+      userId: { in: participantIds },
+    },
+    include: {
+      user: { select: { displayName: true, email: true } },
+      roleAssignments: {
+        include: {
+          role: { select: { name: true } },
+        },
+      },
+    },
+  });
+}
+
 export async function createMeeting(actor: AppActor, params: {
   workspaceId: string;
   title?: string | null;
