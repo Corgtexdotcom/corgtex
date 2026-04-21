@@ -23,8 +23,7 @@ reviews code line-by-line. The full specification lives in
 - **Dev server:** `npm run dev` | **Build:** `npm run build` | **Lint:** `npm run lint` | **Typecheck:** `npm run typecheck`
 - **All static checks:** `npm run check` (lint + typecheck + prisma validate)
 - **Unit tests:** `npm test` or `npm run test:unit` | **Single test:** `npx vitest run packages/domain/src/runtime.test.ts`
-- **Integration tests:** `npm run test:integration` (spins up `docker-compose.test.yml`, runs the Vitest `integration` project, tears down)
-- **All tests:** `npm run test:all`
+- **Integration / E2E:** no dedicated `npm run test:integration` script exists today. For end-to-end coverage, run the app locally with `npm run dev` and use the agent API flow above. `docker-compose.yml` is available for local services, but there is no separate `docker-compose.test.yml`.
 - **Prisma:** `npm run prisma:generate` (required before tests), `npm run prisma:migrate`, `npm run prisma:migrate:deploy`
 
 ### Architecture
