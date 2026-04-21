@@ -16,7 +16,9 @@ The agent user has ADMIN role in the default org. Wallet-dependent flows (e.g. v
 
 ## Frontend Browser Access (E2E UI Testing)
 
-To log into the Next.js UI using the agent's browser, you must use the standard email/password login form with explicit testing credentials seeded into the database. 
+To log into the Next.js UI using the agent's browser, you must use the standard email/password login form with explicit testing credentials seeded into the database.
+
+Never hardcode E2E passwords or credentials in prompts, commits, PR descriptions, or final output. Read `AGENT_E2E_EMAIL` and `AGENT_E2E_PASSWORD` from the local `.env` file when a browser test needs them, then pass the retrieved values only into the browser automation context needed for that test.
 
 **Setup:**
 1. Add `AGENT_E2E_EMAIL` and `AGENT_E2E_PASSWORD` to `.env` (defaults to `system+corgtex@corgtex.local` and `corgtex-test-agent-pw` if left blank).
