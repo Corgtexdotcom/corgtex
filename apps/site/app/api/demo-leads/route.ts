@@ -14,8 +14,10 @@ export async function POST(request: NextRequest) {
 
   const { appUrl } = getSiteConfig();
 
+  const fetchUrl = process.env.NODE_ENV === "production" ? "https://app.corgtex.com/api/demo-leads" : `${appUrl}/api/demo-leads`;
+
   try {
-    const res = await fetch(`${appUrl}/api/demo-leads`, {
+    const res = await fetch(fetchUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -26,14 +28,16 @@ export async function POST(request: NextRequest) {
     });
 
     if (!res.ok) {
-      console.error(`Upstream error ${res.status}:`, await res.text().catch(() => ""));
-      return NextResponse.json({ error: "Failed to forward lead" }, { status: res.status });
+      const respText = await res.text().catch(() => "");
+      console.error(`Upstream error ${res.status}:`, respText);
+      return NextResponse.json({ error: `Upstream error ${res.status}: ${respText.substring(0, 50)}` }, { status: res.status });
     }
 
     const data = await res.json();
     return NextResponse.json(data, { status: res.status });
   } catch (error) {
+    const msg = error instanceof Error ? error.message : "Unknown error";
     console.error("Failed to forward demo lead:", error);
-    return NextResponse.json({ error: "Failed to forward lead" }, { status: 500 });
+    return NextResponse.json({ error: `Fetch Exception: ${msg}` }, { status: 500 });
   }
 }
