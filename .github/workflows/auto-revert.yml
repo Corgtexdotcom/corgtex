@@ -15,7 +15,9 @@ on:
     branches: [main]
 
 permissions:
+  actions: write
   contents: write
+  issues: write
   pull-requests: write
 
 jobs:
@@ -46,15 +48,12 @@ jobs:
             echo "No smoke failure; skipping auto-revert."
           fi
 
-      - name: Identify last merge commit
+      - name: Identify failed main commit
         if: steps.check.outputs.trigger == 'true'
         id: merge
         run: |
           set -euo pipefail
-          sha=$(git log -1 --merges --pretty=format:%H origin/main)
-          if [ -z "$sha" ]; then
-            sha=$(git log -1 --pretty=format:%H origin/main)
-          fi
+          sha="${{ github.event.workflow_run.head_sha }}"
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "short=$(git rev-parse --short "$sha")" >> "$GITHUB_OUTPUT"
           echo "subject=$(git log -1 --pretty=format:%s "$sha")" >> "$GITHUB_OUTPUT"
@@ -90,3 +89,4 @@ jobs:
             --title "auto-revert: ${SUBJECT} (${SHORT})" \
             --label auto-revert \
             --body "Production smoke test failed after the merge of \`${SHORT}\` (\"${SUBJECT}\"). This PR reverts that change. Failed CI run: ${RUN_URL}"
+          gh workflow run CI --ref "$BRANCH"
