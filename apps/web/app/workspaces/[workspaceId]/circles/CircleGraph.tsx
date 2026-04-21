@@ -114,8 +114,8 @@ export default function CircleGraph({ treeData, isDemo }: { treeData: any[]; isD
   }, [treeData, flattenTree, setNodes, setEdges]);
 
   const onNodeClick = useCallback((_: any, node: Node) => {
-    setNodes((nds) => 
-      nds.map((n) => ({
+    setNodes((nds: Node[]) => 
+      nds.map((n: Node) => ({
         ...n,
         selected: n.id === node.id
       }))
@@ -125,7 +125,7 @@ export default function CircleGraph({ treeData, isDemo }: { treeData: any[]; isD
 
   const handleClosePanel = () => {
     setSelectedCircleId(null);
-    setNodes((nds) => nds.map((n) => ({ ...n, selected: false })));
+    setNodes((nds: Node[]) => nds.map((n: Node) => ({ ...n, selected: false })));
   };
 
   return (
