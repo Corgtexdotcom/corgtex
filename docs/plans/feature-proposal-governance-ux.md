@@ -189,20 +189,20 @@ Replace the current reaction buttons section with:
 
 ## Acceptance criteria
 
-- [ ] ProposalReaction model updated: bodyMd, resolvedAt, resolvedNote fields added; unique constraint removed
-- [ ] Proposal model updated: autoApproveAt field added
-- [ ] Migration generated and applied successfully
-- [ ] Support button works (one-click, no text needed)
-- [ ] Reaction form allows posting text-based reactions (questions, concerns, suggestions)
-- [ ] Objection form requires text and creates a blocking objection
-- [ ] Reactions displayed as a threaded list with author, time, and text
-- [ ] Unresolved objections prevent proposal approval
-- [ ] Proposal author can resolve reactions and objections with a note
-- [ ] Auto-approval timer: submitting with a time window sets autoApproveAt
-- [ ] Auto-approval countdown displayed on the proposal
-- [ ] Circle filter works on the proposals list page
-- [ ] No TypeScript errors (`npm run typecheck`)
-- [ ] No lint errors (`npm run lint`)
+- [x] ProposalReaction model updated: bodyMd, resolvedAt, resolvedNote fields added; unique constraint removed
+- [x] Proposal model updated: autoApproveAt field added
+- [x] Migration generated and applied successfully
+- [x] Support button works (one-click, no text needed)
+- [x] Reaction form allows posting text-based reactions (questions, concerns, suggestions)
+- [x] Objection form requires text and creates a blocking objection
+- [x] Reactions displayed as a threaded list with author, time, and text
+- [x] Unresolved objections prevent proposal approval
+- [x] Proposal author can resolve reactions and objections with a note
+- [x] Auto-approval timer: submitting with a time window sets autoApproveAt
+- [x] Auto-approval countdown displayed on the proposal
+- [x] Circle filter works on the proposals list page
+- [x] No TypeScript errors (`npm run typecheck`)
+- [x] No lint errors (`npm run lint`)
 
 ## Test plan
 
