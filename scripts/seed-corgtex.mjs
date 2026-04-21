@@ -163,8 +163,8 @@ async function main() {
 
     await prisma.member.upsert({
       where: { workspaceId_userId: { workspaceId: wsId, userId: userRecord.id } },
-      update: { role: "MEMBER", isActive: true },
-      create: { workspaceId: wsId, userId: userRecord.id, role: "MEMBER", isActive: true }
+      update: { role: "ADMIN", isActive: true },
+      create: { workspaceId: wsId, userId: userRecord.id, role: "ADMIN", isActive: true }
     });
   }
 
