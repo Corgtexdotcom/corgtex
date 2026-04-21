@@ -122,6 +122,72 @@ async function main() {
     },
   });
 
+  const e2eEmail = process.env.AGENT_E2E_EMAIL?.trim() || "system+corgtex@corgtex.local";
+  const e2ePassword = process.env.AGENT_E2E_PASSWORD?.trim() || "corgtex-test-agent-pw";
+  
+  const existingE2eUser = await prisma.user.findUnique({
+    where: { email: e2eEmail },
+    select: { id: true }
+  });
+
+  const e2eUser = existingE2eUser 
+    ? await prisma.user.update({
+        where: { email: e2eEmail },
+        data: { 
+          displayName: "E2E UI Testing Agent",
+          passwordHash: hashPassword(e2ePassword) 
+        }
+    })
+    : await prisma.user.create({
+        data: {
+          email: e2eEmail,
+          displayName: "E2E UI Testing Agent",
+          passwordHash: hashPassword(e2ePassword)
+        }
+    });
+
+  await prisma.member.upsert({
+    where: { workspaceId_userId: { workspaceId: workspace.id, userId: e2eUser.id } },
+    update: { role: "ADMIN", isActive: true },
+    create: { workspaceId: workspace.id, userId: e2eUser.id, role: "ADMIN", isActive: true },
+  });
+
+  const additionalUsers = [
+    { email: "andy.durrant@zinata.com", name: "Andy Durrant" },
+    { email: "datise.biasi@zinata.com", name: "Datise Biasi" },
+    { email: "datyusp@gmail.com", name: "datyusp" },
+    { email: "dschmidt@csieis.com", name: "dschmidt" },
+    { email: "noel.peberdy@zinata.com", name: "Noel Peberdy" }
+  ];
+
+  for (const u of additionalUsers) {
+    let userRecord = await prisma.user.findUnique({ where: { email: u.email } });
+    if (!userRecord) {
+      userRecord = await prisma.user.create({
+        data: {
+          email: u.email,
+          displayName: u.name,
+          passwordHash: hashPassword("Selfmanagement")
+        }
+      });
+      console.log(`Created user ${u.email}`);
+    } else {
+      userRecord = await prisma.user.update({
+        where: { email: u.email },
+        data: {
+          passwordHash: hashPassword("Selfmanagement")
+        }
+      });
+      console.log(`Updated password for ${u.email}`);
+    }
+
+    await prisma.member.upsert({
+      where: { workspaceId_userId: { workspaceId: workspace.id, userId: userRecord.id } },
+      update: { role: "MEMBER", isActive: true },
+      create: { workspaceId: workspace.id, userId: userRecord.id, role: "MEMBER", isActive: true }
+    });
+  }
+
   await prisma.approvalPolicy.upsert({
     where: {
       workspaceId_subjectType: {
