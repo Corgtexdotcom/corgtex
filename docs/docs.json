@@ -96,7 +96,8 @@
               "contributing/development-setup",
               "contributing/code-style",
               "contributing/testing",
-              "contributing/pull-requests"
+              "contributing/pull-requests",
+              "contributing/agent-pipeline"
             ]
           }
         ]

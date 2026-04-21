@@ -1,0 +1,141 @@
+---
+title: "Agent Pipeline"
+description: "Canonical specification for the autonomous three-agent development pipeline."
+---
+
+Corgtex is developed by a fully autonomous three-agent pipeline. One
+human prompts each stage; no human reviews code. Safety comes from
+**vendor separation** (three different AI providers, none of which can
+paper over another's mistakes) plus **mechanical CI gates** (Codex
+cannot merge a PR whose required checks are red).
+
+This page is the canonical spec. `AGENTS.md` at the repo root is the
+per-role quick reference loaded by each agent's harness.
+
+## Roles
+
+| Role | Agent | Writes code? | Opens PR? | Merges? |
+| --- | --- | --- | --- | --- |
+| **Planner** | Claude (Claude Code or Antigravity) | No | Draft only | No |
+| **Executor** | Gemini in Antigravity | Yes | Yes (ready) | No |
+| **Reviewer** | Codex (GitHub App) | No | No | Yes (via approval + auto-merge) |
+
+The human prompts each agent and can intervene with PR labels.
+
+## Handoff artifact
+
+The single handoff artifact between all three agents is
+`docs/plans/<branch>.md`.
+
+- The branch name, lowercased with `/` replaced by `-`, is the filename.
+- The format is fixed by [`docs/plans/_TEMPLATE.md`](https://github.com/corgtex/corgtex/blob/main/docs/plans/_TEMPLATE.md).
+- The Planner writes it, the Executor reads it (first action on the branch), the Reviewer diffs the final code against it.
+- `scripts/check-plan.mjs` enforces that (a) the file exists and (b) changed files are a subset of the plan's "Files to touch" section.
+
+## Stage 1: Plan
+
+The Planner (Claude):
+
+1. Creates a new branch with a descriptive name.
+2. Copies the template to `docs/plans/<branch>.md` and fills every section.
+3. Commits and pushes the plan file.
+4. Opens a **draft** PR whose body is the plan.
+5. Stops. Does not write implementation code.
+
+## Stage 2: Execute
+
+The Executor (Gemini in Antigravity):
+
+1. First action: `cat docs/plans/<branch>.md`. Echoes the acceptance checklist into the first commit message.
+2. Implements strictly within the plan's "Files to touch" allowlist. Any scope change requires a commit updating the plan first.
+3. Runs the plan's test plan locally.
+4. Marks the PR ready-for-review via `gh pr ready`. Attaches visual proof for frontend changes.
+5. Sets auto-merge: `gh pr merge --auto --squash`. This fires the merge once Codex approves and CI is green.
+6. Respects the **CI fix cap**: 3 red-CI fix attempts, then labels the PR `needs-replan` and stops.
+
+## Stage 3: Review
+
+The Reviewer (Codex) applies the checklist in
+[`.codex/review.md`](https://github.com/corgtex/corgtex/blob/main/.codex/review.md):
+
+- Plan linked and present.
+- `scope-check` passes (changed files ⊆ allowlist).
+- Acceptance criteria all ticked and reflected in code.
+- No forbidden-path changes without `forbidden-path-approved`.
+- Diff within caps unless `large-change-approved`.
+- `gitleaks` green. No `db push`, no `--no-verify`, no removed `force-dynamic`.
+- Tests added when domain code changed.
+- Visual proof present for frontend changes.
+- All required CI checks green.
+
+Codex either approves (auto-merge fires) or requests changes (the
+Executor re-enters the fix loop).
+
+## Scope and caps
+
+Mechanical, CI-enforced:
+
+- **File allowlist:** changed files ⊆ plan's "Files to touch".
+- **Size cap:** ≤ 400 LOC of code (docs excluded) and ≤ 15 files per PR. Override with `large-change-approved` label plus justification in the plan.
+- **Forbidden paths:** `deploy/**`, `.github/workflows/**`, `prisma/migrations/**`, `packages/domain/src/auth*.ts`, `apps/web/lib/auth.ts`. Require `forbidden-path-approved` label plus justification.
+
+## Rollback
+
+Post-deploy safety is the `smoke-prod` job in `.github/workflows/ci.yml`.
+If it fails on `main`:
+
+- `.github/workflows/auto-revert.yml` opens a revert PR labeled `auto-revert`.
+- The Reviewer merges the revert immediately; the same gating applies (required checks green) but the plan-present / scope-check steps are relaxed for `auto-revert`-labeled PRs.
+- The original PR is re-opened as draft with the failure logs attached. The Planner decides next steps.
+
+**Rule: never investigate-then-fix on `main`. Revert first, always.**
+
+## Human intervention
+
+The human prompter controls the pipeline with PR labels:
+
+- `halt-agents` — the Reviewer will not merge and the Executor will stop pushing. Use when something looks wrong and you need to think.
+- `force-merge` — override the pipeline. Logged in the PR and in the daily digest. Rare.
+- `needs-replan` — set by the Executor when stuck, or by the human. The Planner picks up from the existing plan file and updates it.
+
+## Branch protection (required repo settings)
+
+This PR cannot set these; a human with repo admin must configure them
+in GitHub → Settings → Branches → `main`:
+
+- **Require a pull request before merging**: on.
+- **Require approvals**: 1.
+- **Dismiss stale approvals**: on.
+- **Require review from Code Owners**: off (no human owners in this pipeline).
+- **Require approval of the most recent reviewable push**: on.
+- **Require status checks to pass**: on. Required checks:
+  - `check` (existing)
+  - `db-sync` (existing)
+  - `build` (existing)
+  - `docs` (existing)
+  - `plan-present`
+  - `scope-check`
+  - `gitleaks`
+  - `diff-size`
+- **Require branches to be up to date**: on.
+- **Require conversation resolution**: on.
+- **Require merge queue**: on (prevents two Executor PRs from racing).
+- **Do not allow bypassing the above settings** (no admin bypass): on.
+- **Restrict who can push to matching branches**: allow only the Reviewer (Codex GitHub App) and the merge queue.
+
+## Codex configuration (required app settings)
+
+Configure Codex as a GitHub App on the repo with permission to:
+
+- Read pull requests and repository contents.
+- **Submit reviews** (approve / request changes).
+- **Merge pull requests** (for auto-merge to fire under Codex's identity).
+
+Its review rules live in [`.codex/review.md`](https://github.com/corgtex/corgtex/blob/main/.codex/review.md).
+
+<Warning>
+  If Codex cannot be configured as a *required* reviewer (only advisory),
+  the pipeline degrades to human-click merges. In that case, disable
+  auto-merge and the human clicks "Merge" after reading Codex's review.
+  Everything else in this spec still applies.
+</Warning>

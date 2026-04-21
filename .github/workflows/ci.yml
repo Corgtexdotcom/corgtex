@@ -129,6 +129,76 @@ jobs:
       - run: mint broken-links
         working-directory: docs
 
+  plan-present:
+    name: Plan Present
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Check plan file exists for branch
+        run: node scripts/check-plan.mjs --mode=present
+        env:
+          GITHUB_HEAD_REF: ${{ github.head_ref }}
+          GITHUB_BASE_REF: ${{ github.base_ref }}
+
+  scope-check:
+    name: Scope Check
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    needs: plan-present
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Fetch base ref
+        run: git fetch origin ${{ github.base_ref }} --depth=1
+      - name: Verify changed files are within plan scope
+        run: node scripts/check-plan.mjs --mode=scope
+        env:
+          GITHUB_HEAD_REF: ${{ github.head_ref }}
+          GITHUB_BASE_REF: ${{ github.base_ref }}
+          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+
+  diff-size:
+    name: Diff Size
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Fetch base ref
+        run: git fetch origin ${{ github.base_ref }} --depth=1
+      - name: Verify diff size within caps
+        run: node scripts/check-plan.mjs --mode=size
+        env:
+          GITHUB_HEAD_REF: ${{ github.head_ref }}
+          GITHUB_BASE_REF: ${{ github.base_ref }}
+          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+
+  gitleaks:
+    name: Secret Scan
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   smoke-prod:
     name: Production Smoke Test
     runs-on: ubuntu-latest
