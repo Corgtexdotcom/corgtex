@@ -104,14 +104,18 @@ export function ChatInterface({
     setEditingTopic(false);
     removeAttachment();
     setShowNewChat(true);
-    window.history.pushState({}, "", `/workspaces/${workspaceId}/chat`);
+    if (!compact) {
+      window.history.pushState({}, "", `/workspaces/${workspaceId}/chat`);
+    }
     setTimeout(() => inputRef.current?.focus(), 50);
   }
 
   function openConversation(id: string) {
     setShowNewChat(false);
     setEditingTopic(false);
-    window.history.pushState({}, "", `/workspaces/${workspaceId}/chat?session=${id}`);
+    if (!compact) {
+      window.history.pushState({}, "", `/workspaces/${workspaceId}/chat?session=${id}`);
+    }
     void loadConversation(id);
   }
 
@@ -167,7 +171,9 @@ export function ChatInterface({
         setConversations((prev) => [newSession, ...prev]);
         setSessionId(currentSessionId);
         setShowNewChat(false);
-        window.history.pushState({}, "", `/workspaces/${workspaceId}/chat?session=${currentSessionId}`);
+        if (!compact) {
+          window.history.pushState({}, "", `/workspaces/${workspaceId}/chat?session=${currentSessionId}`);
+        }
       } catch {
         setError("Failed to create conversation.");
         return;
