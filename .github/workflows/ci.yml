@@ -134,8 +134,21 @@ jobs:
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
     needs: build
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
+      - name: Skip if secrets not configured
+        id: check-secrets
+        run: |
+          if [ -z "${{ secrets.PRODUCTION_DATABASE_URL }}" ] || [ -z "${{ secrets.ADMIN_EMAIL }}" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "⚠️ Smoke test skipped — secrets not configured"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Wait for healthy deployment
+        if: steps.check-secrets.outputs.skip != 'true'
         run: |
           for i in $(seq 1 30); do
             if curl -sf https://app.corgtex.com/api/health > /dev/null 2>&1; then
@@ -149,13 +162,19 @@ jobs:
           exit 1
       
       - uses: actions/checkout@v4
+        if: steps.check-secrets.outputs.skip != 'true'
       - uses: actions/setup-node@v4
+        if: steps.check-secrets.outputs.skip != 'true'
         with:
           node-version: 22
           cache: npm
       - run: npm ci
+        if: steps.check-secrets.outputs.skip != 'true'
       - run: npx prisma generate
+        if: steps.check-secrets.outputs.skip != 'true'
       - run: node scripts/check-migration-health.mjs
+        if: steps.check-secrets.outputs.skip != 'true'
         env:
           DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
       - run: node scripts/railway-smoke.mjs https://app.corgtex.com ${{ secrets.ADMIN_EMAIL }} ${{ secrets.ADMIN_PASSWORD }}
+        if: steps.check-secrets.outputs.skip != 'true'
