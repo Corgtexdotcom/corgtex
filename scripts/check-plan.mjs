@@ -73,7 +73,10 @@ function changedFiles(base) {
   try {
     const out = sh(`git diff --name-only ${base}...HEAD`);
     return out ? out.split("\n") : [];
-  } catch {
+  } catch (err) {
+    if (process.env.GITHUB_ACTIONS === "true") {
+      fail(`unable to compute changed files against ${base}: ${err.message}`);
+    }
     // Fall back to uncommitted working-tree diff when running locally with no base.
     const out = sh("git diff --name-only HEAD");
     return out ? out.split("\n") : [];
