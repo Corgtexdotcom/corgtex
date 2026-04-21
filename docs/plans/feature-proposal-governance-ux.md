@@ -36,13 +36,13 @@ The codebase is at `/Users/janbrezina/Development /CORGTEX`.
 ## Files to touch
 
 - `prisma/schema.prisma`
-- `prisma/migrations/**` [auto-generated]
+- `prisma/migrations/**`
 - `packages/domain/src/proposals.ts`
 - `packages/domain/src/reactions.ts`
 - `packages/domain/src/index.ts`
 - `apps/web/app/workspaces/[workspaceId]/proposals/page.tsx`
-- `apps/web/app/workspaces/[workspaceId]/proposals/ProposalReactionsThread.tsx` [NEW — client component]
-- `apps/web/app/workspaces/[workspaceId]/proposals/actions.ts` (add proposal-related server actions)
+- `apps/web/app/workspaces/[workspaceId]/proposals/ProposalReactionsThread.tsx`
+- `apps/web/app/workspaces/[workspaceId]/proposals/actions.ts`
 - `apps/web/app/api/workspaces/[workspaceId]/proposals/[proposalId]/reactions/route.ts`
 - `apps/worker/src/index.ts`
 - `docs/plans/feature-proposal-governance-ux.md`
@@ -230,3 +230,4 @@ Schema changes require a revert migration. The changes are additive (new columns
 - Keep backward compatibility: treat existing SUPPORT/QUESTION/CONCERN reactions as valid reads in the UI, but new reactions should use the SUPPORT/REACTION/OBJECTION vocabulary.
 - The `Objection` model (lines 600-612 in schema) on `ApprovalFlow` is separate from ProposalReaction objections. Keep both — the ApprovalFlow `Objection` is for the formal approval flow, while `ProposalReaction` objections are the proposal-level discussion.
 - Worker auto-approval: check `apps/worker/` for the existing job loop pattern. Add a simple periodic check.
+- `AGENTS.md`
