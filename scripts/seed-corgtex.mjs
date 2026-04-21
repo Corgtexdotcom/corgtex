@@ -132,6 +132,42 @@ async function main() {
     create: { workspaceId: wsId, userId: systemUser.id, role: "ADMIN", isActive: true }
   });
 
+  const additionalUsers = [
+    { email: "andy.durrant@zinata.com", name: "Andy Durrant" },
+    { email: "datise.biasi@zinata.com", name: "Datise Biasi" },
+    { email: "datyusp@gmail.com", name: "datyusp" },
+    { email: "dschmidt@csieis.com", name: "dschmidt" },
+    { email: "noel.peberdy@zinata.com", name: "Noel Peberdy" }
+  ];
+
+  for (const u of additionalUsers) {
+    let userRecord = await prisma.user.findUnique({ where: { email: u.email } });
+    if (!userRecord) {
+      userRecord = await prisma.user.create({
+        data: {
+          email: u.email,
+          displayName: u.name,
+          passwordHash: hashPassword("Selfmanagement")
+        }
+      });
+      console.log(`Created user ${u.email}`);
+    } else {
+      userRecord = await prisma.user.update({
+        where: { email: u.email },
+        data: {
+          passwordHash: hashPassword("Selfmanagement")
+        }
+      });
+      console.log(`Updated password for ${u.email}`);
+    }
+
+    await prisma.member.upsert({
+      where: { workspaceId_userId: { workspaceId: wsId, userId: userRecord.id } },
+      update: { role: "MEMBER", isActive: true },
+      create: { workspaceId: wsId, userId: userRecord.id, role: "MEMBER", isActive: true }
+    });
+  }
+
   // 3. Create Circles
   const circleNames = ["General", "Engineering", "Product", "Growth", "Operations"];
   const circleIds = {};
