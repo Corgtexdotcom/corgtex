@@ -14,8 +14,8 @@ function publicUrl(name: string, fallback: string) {
 }
 
 export function getSiteConfig(): SiteConfig {
-  const siteUrl = publicUrl("NEXT_PUBLIC_SITE_URL", "http://localhost:3008");
-  const appUrl = publicUrl("NEXT_PUBLIC_APP_URL", "http://localhost:3000");
+  const siteUrl = publicUrl("NEXT_PUBLIC_SITE_URL", process.env.NODE_ENV === "production" ? "https://corgtex.com" : "http://localhost:3008");
+  const appUrl = publicUrl("NEXT_PUBLIC_APP_URL", process.env.NODE_ENV === "production" ? "https://app.corgtex.com" : "http://localhost:3000");
   const demoUrl = publicUrl("NEXT_PUBLIC_DEMO_URL", `${appUrl}/demo`);
   const bookDemoUrl = process.env.NEXT_PUBLIC_BOOK_DEMO_URL?.trim() || "https://calendly.com/corgtex/demo";
 
