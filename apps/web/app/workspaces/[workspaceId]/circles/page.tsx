@@ -1,4 +1,4 @@
-import { listCircles, listRoles, listRoleAssignments, listMembers } from "@corgtex/domain";
+import { listCircles, listCircleTree, listRoles, listRoleAssignments, listMembers } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import {
   createCircleAction,
@@ -9,18 +9,24 @@ import {
   unassignRoleAction,
 } from "../actions";
 import { prisma } from "@corgtex/shared";
+import CircleGraph from "./CircleGraph";
 
 export const dynamic = "force-dynamic";
 
 export default async function CirclesPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ workspaceId: string }>;
+  searchParams: Promise<{ view?: string }>;
 }) {
   const { workspaceId } = await params;
+  const { view } = await searchParams;
+  const viewMode = view === "list" ? "list" : "graph";
   await requirePageActor();
 
   let circles: Awaited<ReturnType<typeof listCircles>>;
+  let treeData: Awaited<ReturnType<typeof listCircleTree>>;
   let roles: Awaited<ReturnType<typeof listRoles>>;
   let assignments: Awaited<ReturnType<typeof listRoleAssignments>>;
   let members: Awaited<ReturnType<typeof listMembers>>;
@@ -30,13 +36,15 @@ export default async function CirclesPage({
     const currentWorkspace = await prisma.workspace.findUnique({ where: { id: workspaceId }, select: { slug: true } });
     isDemo = currentWorkspace?.slug === "jnj-demo";
 
-    const [c, r, a, m] = await Promise.all([
+    const [c, t, r, a, m] = await Promise.all([
       listCircles(workspaceId).catch(e => { console.error("[CirclesPage] listCircles failed:", e); throw e; }),
+      listCircleTree(workspaceId).catch(e => { console.error("[CirclesPage] listCircleTree failed:", e); throw e; }),
       listRoles(workspaceId).catch(e => { console.error("[CirclesPage] listRoles failed:", e); throw e; }),
       listRoleAssignments(workspaceId).catch(e => { console.error("[CirclesPage] listRoleAssignments failed:", e); throw e; }),
       listMembers(workspaceId).catch(e => { console.error("[CirclesPage] listMembers failed:", e); throw e; }),
     ]);
     circles = c;
+    treeData = t;
     roles = r;
     assignments = a;
     members = m;
@@ -62,12 +70,34 @@ export default async function CirclesPage({
   return (
     <>
       <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 32 }}>
-        <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2.5rem" }}>Circles &amp; Roles</h1>
-        <div className="nr-masthead-meta">
-          <span>Organizational structure, accountabilities, and role assignments.</span>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", flexWrap: "wrap", gap: "16px" }}>
+          <div>
+            <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2.5rem" }}>Circles &amp; Roles</h1>
+            <div className="nr-masthead-meta">
+              <span>Organizational structure, accountabilities, and role assignments.</span>
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: "8px" }}>
+            <a href={`/workspaces/${workspaceId}/circles?view=graph`} className="secondary small" style={{ opacity: viewMode === "graph" ? 1 : 0.6, background: viewMode === "graph" ? "var(--bg-alt)" : "transparent" }}>Graph View</a>
+            <a href={`/workspaces/${workspaceId}/circles?view=list`} className="secondary small" style={{ opacity: viewMode === "list" ? 1 : 0.6, background: viewMode === "list" ? "var(--bg-alt)" : "transparent" }}>List View</a>
+          </div>
         </div>
       </header>
 
+      {viewMode === "graph" ? (
+        <section className="ws-section" style={{ padding: "0 24px" }}>
+          {(!treeData || treeData.length === 0) ? (
+            <div className="nr-item" style={{ textAlign: "center", padding: "48px 24px" }}>
+              <h3 style={{ margin: "0 0 8px" }}>What is a Circle?</h3>
+              <p className="muted" style={{ margin: 0, maxWidth: 500, marginInline: "auto" }}>
+                Circles are autonomous teams with a clear purpose and domain. Start by creating your first circle below.
+              </p>
+            </div>
+          ) : (
+            <CircleGraph treeData={treeData} isDemo={isDemo} />
+          )}
+        </section>
+      ) : (
       <section className="ws-section">
         {(!circles || circles.length === 0) && (
           <div className="nr-item" style={{ textAlign: "center", padding: "48px 24px" }}>
@@ -165,6 +195,7 @@ export default async function CirclesPage({
           })}
         </div>
       </section>
+      )}
 
       {!isDemo && (
         <div>
@@ -178,6 +209,15 @@ export default async function CirclesPage({
                 <label>
                   Name
                   <input name="name" required />
+                </label>
+                <label>
+                  Parent Circle
+                  <select name="parentCircleId">
+                    <option value="">(None - Top Level)</option>
+                    {circles.map((circle) => (
+                      <option key={circle.id} value={circle.id}>{circle.name}</option>
+                    ))}
+                  </select>
                 </label>
                 <label>
                   Purpose
