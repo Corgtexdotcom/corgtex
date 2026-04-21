@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi, beforeEach } from "vitest";
 import { autoApproveProposals } from "./proposals";
 import { prisma } from "@corgtex/shared";
 
@@ -7,11 +7,15 @@ vi.mock("@corgtex/shared", () => ({
     proposal: {
       findMany: vi.fn(),
       update: vi.fn(),
+      findUniqueOrThrow: vi.fn(),
     },
+    $transaction: vi.fn(async (cb) => cb(prisma)),
   },
 }));
 
 describe("autoApproveProposals", () => {
+  beforeEach(() => { vi.clearAllMocks(); });
+
   it("approves proposals that are past their autoApproveAt date with no unresolved objections", async () => {
     vi.mocked(prisma.proposal.findMany).mockResolvedValueOnce([
       { id: "p1", workspaceId: "ws1", autoApproveAt: new Date(Date.now() - 1000) } as any,
