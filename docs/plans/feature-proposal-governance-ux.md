@@ -38,7 +38,9 @@ The codebase is at `/Users/janbrezina/Development /CORGTEX`.
 - `prisma/schema.prisma`
 - `prisma/migrations/**`
 - `packages/domain/src/proposals.ts`
+- `packages/domain/src/proposals.test.ts`
 - `packages/domain/src/reactions.ts`
+- `packages/domain/src/reactions.test.ts`
 - `packages/domain/src/index.ts`
 - `apps/web/app/workspaces/[workspaceId]/proposals/page.tsx`
 - `apps/web/app/workspaces/[workspaceId]/proposals/ProposalReactionsThread.tsx`
