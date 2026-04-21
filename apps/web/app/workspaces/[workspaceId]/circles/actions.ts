@@ -26,6 +26,7 @@ export async function createCircleAction(formData: FormData) {
     name: asString(formData, "name"),
     purposeMd: asOptional(formData, "purposeMd"),
     domainMd: asOptional(formData, "domainMd"),
+    parentCircleId: asOptional(formData, "parentCircleId"),
   });
   refresh(workspaceId);
 }
