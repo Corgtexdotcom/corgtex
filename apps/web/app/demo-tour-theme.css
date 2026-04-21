@@ -102,9 +102,27 @@
   color: var(--text);
 }
 
-/* Hide the default generic X close button inside the popover */
+/* Style the close/skip button */
 .driver-popover-close-btn {
-  display: none !important;
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  background: transparent;
+  border: none;
+  font-size: 0.8rem;
+  font-weight: 500;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 4px;
+}
+
+.driver-popover-close-btn::before {
+  content: "Skip";
+}
+
+/* Hide the default SVG X icon inside the close button */
+.driver-popover-close-btn svg {
+  display: none;
 }
 
 /* Watermark banner style */
