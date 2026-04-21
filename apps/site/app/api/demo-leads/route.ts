@@ -19,11 +19,16 @@ export async function POST(request: NextRequest) {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "x-forwarded-for": request.headers.get("x-forwarded-for") || "",
-        "x-real-ip": request.headers.get("x-real-ip") || "",
+        ...(request.headers.get("x-forwarded-for") ? { "x-forwarded-for": request.headers.get("x-forwarded-for")! } : {}),
+        ...(request.headers.get("x-real-ip") ? { "x-real-ip": request.headers.get("x-real-ip")! } : {}),
       },
       body: JSON.stringify(body),
     });
+
+    if (!res.ok) {
+      console.error(`Upstream error ${res.status}:`, await res.text().catch(() => ""));
+      return NextResponse.json({ error: "Failed to forward lead" }, { status: res.status });
+    }
 
     const data = await res.json();
     return NextResponse.json(data, { status: res.status });
