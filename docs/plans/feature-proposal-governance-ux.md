@@ -42,7 +42,10 @@ The codebase is at `/Users/janbrezina/Development /CORGTEX`.
 - `packages/domain/src/index.ts`
 - `apps/web/app/workspaces/[workspaceId]/proposals/page.tsx`
 - `apps/web/app/workspaces/[workspaceId]/proposals/ProposalReactionsThread.tsx` [NEW — client component]
-- `apps/web/app/workspaces/[workspaceId]/actions.ts` (add proposal-related server actions)
+- `apps/web/app/workspaces/[workspaceId]/proposals/actions.ts` (add proposal-related server actions)
+- `apps/web/app/api/workspaces/[workspaceId]/proposals/[proposalId]/reactions/route.ts`
+- `apps/worker/src/index.ts`
+- `docs/plans/feature-proposal-governance-ux.md`
 
 ## Schema changes
 
