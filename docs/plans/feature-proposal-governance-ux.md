@@ -46,6 +46,8 @@ The codebase is at `/Users/janbrezina/Development /CORGTEX`.
 - `apps/web/app/api/workspaces/[workspaceId]/proposals/[proposalId]/reactions/route.ts`
 - `apps/worker/src/index.ts`
 - `docs/plans/feature-proposal-governance-ux.md`
+- `AGENTS.md`
+- `docs/contributing/agent-pipeline.mdx`
 
 ## Schema changes
 
