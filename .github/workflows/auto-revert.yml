@@ -68,8 +68,38 @@ jobs:
           echo "short=$(git rev-parse --short "$sha")" >> "$GITHUB_OUTPUT"
           echo "subject=$(git log -1 --pretty=format:%s "$sha")" >> "$GITHUB_OUTPUT"
 
-      - name: Create revert branch
+      - name: Guard against revert loops
         if: steps.check.outputs.trigger == 'true'
+        id: guard
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          SHA: ${{ steps.merge.outputs.sha }}
+          SHORT: ${{ steps.merge.outputs.short }}
+        run: |
+          set -euo pipefail
+          branch="auto-revert/${SHORT}"
+          message=$(git log -1 --pretty=%B "$SHA")
+          if [ "${HEAD_BRANCH#auto-revert/}" != "$HEAD_BRANCH" ] || echo "$message" | grep -Eiq '(^auto-revert:|auto-revert/)'; then
+            echo "trigger=false" >> "$GITHUB_OUTPUT"
+            echo "Failed commit is already an auto-revert; skipping."
+            exit 0
+          fi
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+            echo "trigger=false" >> "$GITHUB_OUTPUT"
+            echo "Auto-revert branch already exists for $SHORT; skipping."
+            exit 0
+          fi
+          existing_pr=$(gh pr list --state open --head "$branch" --json number --jq '.[0].number // ""')
+          if [ -n "$existing_pr" ]; then
+            echo "trigger=false" >> "$GITHUB_OUTPUT"
+            echo "Auto-revert PR #$existing_pr already exists for $SHORT; skipping."
+            exit 0
+          fi
+          echo "trigger=true" >> "$GITHUB_OUTPUT"
+
+      - name: Create revert branch
+        if: steps.guard.outputs.trigger == 'true'
         env:
           SHA: ${{ steps.merge.outputs.sha }}
           SHORT: ${{ steps.merge.outputs.short }}
@@ -85,7 +115,7 @@ jobs:
           echo "BRANCH=$branch" >> "$GITHUB_ENV"
 
       - name: Open revert PR
-        if: steps.check.outputs.trigger == 'true'
+        if: steps.guard.outputs.trigger == 'true'
         env:
           GH_TOKEN: ${{ secrets.AUTO_REVERT_TOKEN }}
           SUBJECT: ${{ steps.merge.outputs.subject }}
