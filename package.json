@@ -16,6 +16,7 @@
   },
   "scripts": {
     "dev": "concurrently -k -n web,worker \"npm run dev:web\" \"npm run dev:worker\"",
+    "dev:crina": "concurrently -k -n web,worker \"DOTENV_CONFIG_PATH=.env.crina npm run dev:web\" \"DOTENV_CONFIG_PATH=.env.crina npm run dev:worker\"",
     "dev:web": "npm --workspace @corgtex/web run dev",
     "dev:worker": "npm --workspace @corgtex/worker run dev",
     "dev:site": "npm --workspace @corgtex/site run dev",
