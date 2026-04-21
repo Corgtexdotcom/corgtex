@@ -35,17 +35,17 @@ Safety comes from structural separation (three different vendors) plus mechanica
 
 ## Acceptance criteria
 
-- [ ] `AGENTS.md` restructured with explicit `## For Planners`, `## For Executors`, `## For Reviewers` sections; stale `npm run test:integration` claim fixed.
-- [ ] `docs/plans/_TEMPLATE.md` exists with the Goal / Out of scope / Files to touch / Acceptance / Test plan / Rollback format.
-- [ ] `docs/contributing/agent-pipeline.mdx` is the canonical spec for the three-agent flow (roles, handoff, labels, halt procedure, branch-protection requirements, rollback).
-- [ ] `CONTRIBUTING.md`, `docs/contributing/pull-requests.mdx`, `docs/contributing/testing.mdx` no longer duplicate rules — they link to AGENTS.md / agent-pipeline.
-- [ ] `scripts/check-plan.mjs` verifies (a) plan file exists for the branch and (b) changed files ⊆ plan's "Files to touch" allowlist. Exits non-zero on failure.
-- [ ] New CI jobs in `.github/workflows/ci.yml`: `plan-present`, `scope-check`, `gitleaks`, `diff-size`. Each runs only on pull requests.
-- [ ] `.github/workflows/auto-revert.yml` opens a revert PR when `smoke-prod` fails on `main`.
-- [ ] `.codex/review.md` contains the rejection criteria the Reviewer uses.
-- [ ] `docs/docs.json` navigation includes the new `agent-pipeline` page.
-- [ ] `npm run check` passes.
-- [ ] The scope-check script, when run locally against this branch, passes against this plan.
+- [x] `AGENTS.md` restructured with explicit `## For Planners`, `## For Executors`, `## For Reviewers` sections; stale `npm run test:integration` claim fixed.
+- [x] `docs/plans/_TEMPLATE.md` exists with the Goal / Out of scope / Files to touch / Acceptance / Test plan / Rollback format.
+- [x] `docs/contributing/agent-pipeline.mdx` is the canonical spec for the three-agent flow (roles, handoff, labels, halt procedure, branch-protection requirements, rollback).
+- [x] `CONTRIBUTING.md`, `docs/contributing/pull-requests.mdx`, `docs/contributing/testing.mdx` no longer duplicate rules — they link to AGENTS.md / agent-pipeline.
+- [x] `scripts/check-plan.mjs` verifies (a) plan file exists for the branch and (b) changed files ⊆ plan's "Files to touch" allowlist. Exits non-zero on failure.
+- [x] New CI jobs in `.github/workflows/ci.yml`: `plan-present`, `scope-check`, `gitleaks`, `diff-size`. Each runs only on pull requests.
+- [x] `.github/workflows/auto-revert.yml` opens a revert PR when `smoke-prod` fails on `main`.
+- [x] `.codex/review.md` contains the rejection criteria the Reviewer uses.
+- [x] `docs/docs.json` navigation includes the new `agent-pipeline` page.
+- [x] `npm run check` passes.
+- [x] The scope-check script, when run locally against this branch, passes against this plan.
 
 ## Test plan
 

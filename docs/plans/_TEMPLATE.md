@@ -1,6 +1,6 @@
-# Plan: <short title>
+# Plan: Short title
 
-<!--
+{/*
   This file is the canonical handoff from Planner (Claude) to Executor
   (Gemini in Antigravity) and to Reviewer (Codex). Copy this template to
   `docs/plans/<branch>.md`. The branch name, lowercased and with `/`
@@ -12,7 +12,7 @@
   Reviewer: reject the PR if changed files are not in "Files to touch",
   if any acceptance criterion is not ticked, or if the PR body does not
   link back to this file.
--->
+*/}
 
 ## Goal
 
