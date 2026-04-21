@@ -61,5 +61,6 @@ Pure docs + CI additions. Revert the PR; no database, no runtime, no user-facing
 ## Labels this PR needs
 
 - `forbidden-path-approved` — this PR modifies `.github/workflows/ci.yml` and adds `.github/workflows/auto-revert.yml`. That is the canonical justification: the whole point of this PR is to establish the CI gates that enforce the pipeline, which necessarily requires workflow changes. Subsequent PRs will not need this label unless they again touch CI, deploy, migrations, or auth.
+- `large-change-approved` — Codex review required additional auto-revert workflow and guardrail fixes after the PR was already near the 400 LOC cap. The added scope is limited to those review-blocking CI/pipeline fixes.
 
-Within the scope caps otherwise (12 files, 397 code LOC vs. caps of 15 / 400).
+Within the file-count cap otherwise (12 files vs. cap of 15).
