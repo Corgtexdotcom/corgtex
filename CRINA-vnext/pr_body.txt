@@ -1,0 +1,12 @@
+### Goal Description
+Standardize cross-environment E2E browser testing credentials.
+
+### Implementation Plan
+- Update `prisma/seed.mjs` to deterministically create `system+corgtex@corgtex.local` (default) or `AGENT_E2E_EMAIL` / `AGENT_E2E_PASSWORD` with the ADMIN role, ensuring it always resets the password appropriately for testing.
+- Document this behavior explicitly in `AGENTS.md` per repository rules.
+- Add baseline variable configuration to `.env.example`.
+
+### Walkthrough
+- Modified `prisma/seed.mjs` to bypass `SEED_RESET_PASSWORDS=false` strictness specifically for the E2E user, meaning the testing pipeline can guarantee the password is correct after every seed.
+- Verified Docker local compose instance accepts `system+corgtex@corgtex.local` + `corgtex-test-agent-pw` via Next.js login on port 3000.
+- Updated `AGENTS.md` and `.env.example` payload.
