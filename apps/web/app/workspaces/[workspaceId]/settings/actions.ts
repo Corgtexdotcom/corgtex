@@ -57,11 +57,12 @@ export async function createMemberAction(formData: FormData) {
     workspaceId,
     email: asString(formData, "email"),
     displayName: asOptional(formData, "displayName"),
+    password: require("crypto").randomUUID(),
     role: asString(formData, "role") as "CONTRIBUTOR" | "FACILITATOR" | "FINANCE_STEWARD" | "ADMIN",
   });
   
-  if (result.token) {
-    await sendInvitationEmail(result.user.email, result.user.displayName, result.token);
+  if ((result as any).token) {
+    await sendInvitationEmail(result.user.email, result.user.displayName, (result as any).token);
   }
   
   refresh(workspaceId);

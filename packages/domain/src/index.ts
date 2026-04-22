@@ -46,3 +46,7 @@ export * from "./cost-budget";
 export * from "./meeting-intelligence";
 export * from "./admin";
 export * from "./member-briefing";
+export * from "./goals";
+export * from "./admin";
+export * from "./meeting-intelligence";
+export * from "./stubs";
