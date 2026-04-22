@@ -18,6 +18,9 @@ function pageSuccessMessage(rawMessage: string | string[] | undefined) {
   if (message === "password-reset") {
     return "Your password has been reset. Please log in with your new password.";
   }
+  if (message === "account-ready") {
+    return "Your account setup is complete. Please log in.";
+  }
 
   return null;
 }

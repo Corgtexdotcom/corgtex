@@ -43,9 +43,15 @@ export default async function SettingsPage({
 
   // Lazy-load members only for the members tab to avoid N+1 and failure propagation
   let members: Awaited<ReturnType<typeof listMembersEnriched>> = [];
+  let isAdmin = false;
   if (tab === "members") {
     try {
       members = await listMembersEnriched(workspaceId, { includeInactive: true });
+      if (actor.kind === "agent") {
+        isAdmin = true;
+      } else {
+        isAdmin = members.find((m) => m.user.id === actor.user.id)?.role === "ADMIN";
+      }
     } catch (err) {
       console.error("[SettingsPage] Failed to fetch enriched members:", err);
     }
@@ -324,7 +330,7 @@ export default async function SettingsPage({
       )}
 
       {tab === "members" && (
-        <MembersTable workspaceId={workspaceId} members={members} />
+        <MembersTable workspaceId={workspaceId} members={members} isAdmin={isAdmin} />
       )}
 
       {tab === "agents" && (
