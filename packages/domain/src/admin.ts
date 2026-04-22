@@ -70,7 +70,6 @@ export async function adminAddToWorkspace(actor: AppActor, params: {
     workspaceId: params.workspaceId,
     email: user.email,
     displayName: user.displayName,
-    password: require("crypto").randomUUID(),
     role: params.role,
   });
 }

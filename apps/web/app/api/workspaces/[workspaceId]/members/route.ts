@@ -29,7 +29,6 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       workspaceId,
       email: String(body.email ?? ""),
       displayName: typeof body.displayName === "string" ? body.displayName : null,
-      password: require("crypto").randomUUID(),
       role: String(body.role ?? "CONTRIBUTOR") as "CONTRIBUTOR" | "FACILITATOR" | "FINANCE_STEWARD" | "ADMIN",
     });
     return NextResponse.json(member, { status: 201 });
