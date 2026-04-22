@@ -13,24 +13,35 @@ import {
 import '@xyflow/react/dist/style.css';
 import dagre from 'dagre';
 import CircleNode from "./CircleNode";
+import ExpandedCircleNode from "./ExpandedCircleNode";
 import CircleDetailPanel from "./CircleDetailPanel";
 import "./circle-graph.css";
 
 const nodeTypes = {
   circleNode: CircleNode,
+  expandedCircleNode: ExpandedCircleNode,
 };
 
 const dagreGraph = new dagre.graphlib.Graph();
 dagreGraph.setDefaultEdgeLabel(() => ({}));
 
-const nodeWidth = 260;
-const nodeHeight = 100;
+// Helper to estimate size
+function getNodeDimensions(isExpanded: boolean, roleCount: number) {
+  if (!isExpanded) {
+    return { width: 260, height: 100 };
+  }
+  // Base header size + roles space
+  return { width: 400, height: 150 + (roleCount * 100) };
+}
 
 function getLayoutedElements(nodes: Node[], edges: Edge[], direction = 'TB') {
-  dagreGraph.setGraph({ rankdir: direction });
+  dagreGraph.setGraph({ rankdir: direction, nodesep: 50, ranksep: 100 });
 
   nodes.forEach((node) => {
-    dagreGraph.setNode(node.id, { width: nodeWidth, height: nodeHeight });
+    const isExpanded = node.type === "expandedCircleNode";
+    const roleCount = (node.data as any).roles?.length || 0;
+    const { width, height } = getNodeDimensions(isExpanded, roleCount as number);
+    dagreGraph.setNode(node.id, { width, height });
   });
 
   edges.forEach((edge) => {
@@ -43,10 +54,14 @@ function getLayoutedElements(nodes: Node[], edges: Edge[], direction = 'TB') {
     const nodeWithPosition = dagreGraph.node(node.id);
     const newNode = { ...node };
 
+    const isExpanded = node.type === "expandedCircleNode";
+    const roleCount = (node.data as any).roles?.length || 0;
+    const { width, height } = getNodeDimensions(isExpanded, roleCount as number);
+
     // Dagre returns center coordinates, we need to adapt to top-left
     newNode.position = {
-      x: nodeWithPosition.x - nodeWidth / 2,
-      y: nodeWithPosition.y - nodeHeight / 2,
+      x: nodeWithPosition.x - width / 2,
+      y: nodeWithPosition.y - height / 2,
     };
 
     return newNode;
@@ -59,6 +74,7 @@ export default function CircleGraph({ treeData, isDemo }: { treeData: any[]; isD
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
   const [selectedCircleId, setSelectedCircleId] = useState<string | null>(null);
+  const [expandedCircleIds, setExpandedCircleIds] = useState<Set<string>>(new Set());
 
   // Flatten the tree to a single array of items with parent associations
   const flattenTree = useCallback((nodes: any[]): any[] => {
@@ -72,21 +88,43 @@ export default function CircleGraph({ treeData, isDemo }: { treeData: any[]; isD
     return result;
   }, []);
 
+  const handleCollapse = useCallback((id: string) => {
+    setExpandedCircleIds(prev => {
+      const next = new Set(prev);
+      next.delete(id);
+      return next;
+    });
+  }, []);
+
   useEffect(() => {
     const flatData = flattenTree(treeData);
     
-    const initialNodes: Node[] = flatData.map((item) => ({
-      id: item.id,
-      type: "circleNode",
-      position: { x: 0, y: 0 },
-      data: {
-        circleId: item.id,
-        name: item.name,
-        purposeMd: item.purposeMd,
-        maturityStage: item.maturityStage,
-        roleCount: item.roles?.length || 0,
-      },
-    }));
+    // Create initial nodes with the right type based on expanded state
+    const initialNodes: Node[] = flatData.map((item) => {
+      const isExpanded = expandedCircleIds.has(item.id);
+      return {
+        id: item.id,
+        type: isExpanded ? "expandedCircleNode" : "circleNode",
+        position: { x: 0, y: 0 },
+        data: {
+          circleId: item.id,
+          workspaceId: item.workspaceId,
+          name: item.name,
+          purposeMd: item.purposeMd,
+          maturityStage: item.maturityStage,
+          roleCount: item.roles?.length || 0,
+          roles: item.roles || [],
+          onCollapse: handleCollapse,
+          onExpand: (id: string) => {
+            setExpandedCircleIds(prev => {
+              const next = new Set(prev);
+              next.add(id);
+              return next;
+            });
+          },
+        },
+      };
+    });
 
     const initialEdges: Edge[] = flatData
       .filter((item) => item.parentCircleId)
@@ -105,13 +143,29 @@ export default function CircleGraph({ treeData, isDemo }: { treeData: any[]; isD
         initialEdges,
         'TB'
       );
+      // Preserve selection state
+      layoutedNodes.forEach(n => {
+        if (n.id === selectedCircleId) n.selected = true;
+      });
       setNodes(layoutedNodes);
       setEdges(layoutedEdges);
     } else {
       setNodes([]);
       setEdges([]);
     }
-  }, [treeData, flattenTree, setNodes, setEdges]);
+  }, [treeData, flattenTree, setNodes, setEdges, expandedCircleIds, handleCollapse, selectedCircleId]);
+
+  const onNodeDoubleClick = useCallback((_: any, node: Node) => {
+    setExpandedCircleIds(prev => {
+      const next = new Set(prev);
+      if (next.has(node.id)) {
+        next.delete(node.id);
+      } else {
+        next.add(node.id);
+      }
+      return next;
+    });
+  }, []);
 
   const onNodeClick = useCallback((_: any, node: Node) => {
     setNodes((nds: Node[]) => 
@@ -128,6 +182,7 @@ export default function CircleGraph({ treeData, isDemo }: { treeData: any[]; isD
     setNodes((nds: Node[]) => nds.map((n: Node) => ({ ...n, selected: false })));
   };
 
+
   return (
     <div style={{ width: "100%", height: "70vh", minHeight: 600, border: "1px solid var(--line)", borderRadius: "var(--radius-lg)", overflow: "hidden", position: "relative", background: "var(--bg)" }}>
       <ReactFlow
@@ -136,6 +191,7 @@ export default function CircleGraph({ treeData, isDemo }: { treeData: any[]; isD
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
         onNodeClick={onNodeClick}
+        onNodeDoubleClick={onNodeDoubleClick}
         nodeTypes={nodeTypes}
         fitView
         minZoom={0.2}
