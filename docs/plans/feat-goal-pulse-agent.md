@@ -226,7 +226,7 @@ Manual verification:
 3. Complete the action → verify goal-pulse agent fires → progress updates automatically
 4. Upload/create a meeting that mentions an active goal → verify GoalUpdate posted
 5. Check agent run logs → verify math-only path uses 0 tokens
-6. Check agent run logs → verify meeting path uses <5K tokens
+6. Check agent run logs → verify meeting path uses under 5K tokens
 7. Disable goal-pulse agent in agent config → verify it stops running
 
 ## Rollback

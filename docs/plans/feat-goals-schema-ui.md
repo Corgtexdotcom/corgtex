@@ -30,6 +30,11 @@ Add a goal alignment system that lets users create and visualize goals at three 
 - `apps/web/app/workspaces/[workspaceId]/goals/RecognitionCard.tsx`
 - `apps/web/app/workspaces/[workspaceId]/page.tsx`
 - `apps/web/app/workspaces/[workspaceId]/layout.tsx`
+- `apps/web/lib/nav-config.ts`
+- `packages/domain/src/stubs.ts`
+- `packages/domain/src/admin.ts`
+- `apps/web/app/api/workspaces/[workspaceId]/members/route.ts`
+- `apps/web/app/workspaces/[workspaceId]/settings/actions.ts`
 
 ## Schema changes
 
@@ -250,7 +255,7 @@ Actions: `createGoalAction`, `updateGoalAction`, `deleteGoalAction`, `addKeyResu
 
 **GoalProgress.tsx** — Animated progress bar:
 - CSS `transition: width 0.5s ease` for smooth animations
-- Color: green (>70%), yellow (40-70%), red (<40%)
+- Color: green (>70%), yellow (40-70%), red (under 40%)
 
 **RecognitionCard.tsx** — Recognition story card:
 - Narrative-first: story text is prominent, not metrics
