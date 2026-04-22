@@ -57,7 +57,6 @@ export async function createMemberAction(formData: FormData) {
     workspaceId,
     email: asString(formData, "email"),
     displayName: asOptional(formData, "displayName"),
-    password: require("crypto").randomUUID(),
     role: asString(formData, "role") as "CONTRIBUTOR" | "FACILITATOR" | "FINANCE_STEWARD" | "ADMIN",
   });
   
