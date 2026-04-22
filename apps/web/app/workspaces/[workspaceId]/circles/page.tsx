@@ -30,6 +30,7 @@ export default async function CirclesPage({
   let roles: Awaited<ReturnType<typeof listRoles>>;
   let assignments: Awaited<ReturnType<typeof listRoleAssignments>>;
   let members: Awaited<ReturnType<typeof listMembers>>;
+  let agentAssignments: any[] = [];
   let isDemo = false;
 
   try {
@@ -48,6 +49,11 @@ export default async function CirclesPage({
     roles = r;
     assignments = a;
     members = m;
+
+    agentAssignments = await prisma.circleAgentAssignment.findMany({
+      where: { circle: { workspaceId } },
+      include: { agentIdentity: true },
+    });
   } catch (error) {
     console.error("[CirclesPage] Failed to load circles data detailed:", error);
     return (
@@ -189,6 +195,42 @@ export default async function CirclesPage({
                       </div>
                     );
                   })}
+                </div>
+
+                <div className="nr-section-header" style={{ marginTop: 24, padding: "8px 0" }}>
+                  <h3 style={{ fontSize: "1.1rem", margin: 0 }}>Agent Members</h3>
+                </div>
+                <div>
+                  {(() => {
+                    const circleAgents = agentAssignments.filter((a: any) => a.circleId === circle.id);
+                    if (circleAgents.length === 0) {
+                      return <div className="nr-item-meta">No agents assigned to this circle.</div>;
+                    }
+                    return circleAgents.map((a: any) => (
+                      <div className="nr-item" key={a.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          <span title="Agent Member">🤖</span>
+                          <span style={{ fontWeight: 600 }}>{a.agentIdentity.displayName}</span>
+                          <span className="nr-item-meta" style={{ fontSize: "0.8rem", padding: "2px 6px", background: a.agentIdentity.memberType === "INTERNAL" ? "var(--accent-muted)" : "var(--bg-alt)", border: "1px solid var(--border)", borderRadius: 12 }}>
+                            {a.agentIdentity.memberType}
+                          </span>
+                        </div>
+                        {!isDemo && (
+                          <form action={async () => {
+                            "use server";
+                            const { removeAgentFromCircle } = await import("@corgtex/domain");
+                            const { requirePageActor } = await import("@/lib/auth");
+                            const { revalidatePath } = await import("next/cache");
+                            const actor = await requirePageActor();
+                            await removeAgentFromCircle(actor, { workspaceId, agentIdentityId: a.agentIdentityId, circleId: circle.id });
+                            revalidatePath(`/workspaces/${workspaceId}/circles`);
+                          }}>
+                            <button type="submit" className="danger small">Unassign</button>
+                          </form>
+                        )}
+                      </div>
+                    ));
+                  })()}
                 </div>
               </div>
             );
