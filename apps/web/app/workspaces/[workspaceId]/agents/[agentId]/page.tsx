@@ -8,10 +8,11 @@ import Link from "next/link";
 export const dynamic = "force-dynamic";
 
 export default async function AgentProfilePage({
-  params: { workspaceId, agentId },
+  params,
 }: {
-  params: { workspaceId: string; agentId: string };
+  params: Promise<{ workspaceId: string; agentId: string }>;
 }) {
+  const { workspaceId, agentId } = await params;
   const actor = await requirePageActor();
 
   const agent = await getAgentIdentity(actor, workspaceId, agentId).catch(() => null);

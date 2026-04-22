@@ -21,3 +21,4 @@ Integrate AI agents into the workspace governance structure as first-class membe
 - `packages/domain/src/agent-auth.ts`
 - `packages/domain/src/agent-identity.ts`
 - `scripts/seed-agent-identities.ts`
+- `docs/plans/feat-agent-circle-integration.md`
