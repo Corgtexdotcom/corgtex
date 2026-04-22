@@ -49,3 +49,14 @@ No logic changes are made. Purely file extraction.
 - [x] Ensure 0 behavioral changes
 - [x] No `any` type implicit errors
 - [x] All test suites pass
+
+## Test plan
+
+```
+npm run check
+npm run test:unit
+npx vitest run packages/agents/src/runtime.test.ts
+npx vitest run packages/workflows/src/outbox.test.ts
+npx vitest run packages/workflows/src/outbox.extended.test.ts
+npx vitest run packages/workflows/src/webhook-delivery.test.ts
+```
