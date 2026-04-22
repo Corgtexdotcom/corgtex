@@ -1,4 +1,4 @@
-import { getMeeting } from "@corgtex/domain";
+import { getMeeting, getMeetingParticipants } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import Link from "next/link";
 import { renderMarkdown } from "@/lib/markdown";
@@ -27,7 +27,9 @@ export default async function MeetingDetailPage({
     );
   }
   
-  const participants: any[] = [];
+  const participants = meeting.participantIds?.length > 0 
+    ? await getMeetingParticipants(workspaceId, meeting.participantIds)
+    : [];
 
   const getReactionCount = (proposal: any, type: string) => 
     proposal.reactions.filter((r: any) => r.reaction === type).length;
