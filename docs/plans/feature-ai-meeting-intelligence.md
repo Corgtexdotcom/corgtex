@@ -35,14 +35,18 @@ The codebase is at `/Users/janbrezina/Development /CORGTEX`.
 ## Files to touch
 
 - `packages/domain/src/meetings.ts`
-- `packages/domain/src/meeting-intelligence.ts` [NEW]
+- `packages/domain/src/meeting-intelligence.ts`
+- `packages/domain/src/meeting-intelligence.test.ts`
 - `packages/domain/src/index.ts`
+- `packages/domain/src/tensions.ts`
+- `packages/domain/src/proposals.ts`
 - `apps/web/app/workspaces/[workspaceId]/meetings/[meetingId]/page.tsx`
-- `apps/web/app/workspaces/[workspaceId]/meetings/[meetingId]/MeetingIntelligence.tsx` [NEW — client component]
-- `apps/web/app/workspaces/[workspaceId]/meetings/actions.ts` [NEW or extend existing]
-- `apps/web/app/workspaces/[workspaceId]/actions.ts` (add meeting intelligence actions)
+- `apps/web/app/workspaces/[workspaceId]/meetings/[meetingId]/MeetingIntelligence.tsx`
+- `apps/web/app/workspaces/[workspaceId]/meetings/actions.ts`
+- `apps/web/app/workspaces/[workspaceId]/actions.ts`
 - `prisma/schema.prisma`
-- `prisma/migrations/**` [auto-generated]
+- `prisma/migrations/20260421224945_add_meeting_insights/migration.sql`
+- `prisma/migrations/20260421225310_add_meeting_insights/migration.sql`
 
 ## Schema changes
 
@@ -234,17 +238,17 @@ Update `meetings/[meetingId]/page.tsx` to:
 
 ## Acceptance criteria
 
-- [ ] New `MeetingInsight` model added with proper migration
-- [ ] `extractMeetingInsights()` domain function works: takes a meeting with transcript → creates SUGGESTED insights via LLM
-- [ ] Meeting detail page shows a "Run AI Extraction" button when transcript exists but no insights
-- [ ] After extraction, facilitator sees grouped insight cards with Confirm/Dismiss controls
-- [ ] Confirming an insight marks it as CONFIRMED
-- [ ] Applying a confirmed insight creates the corresponding entity (tension/action/proposal) linked to the meeting
-- [ ] Dismissed insights are hidden from the default view
-- [ ] Meeting detail page shows a "Decisions & Outcomes" section for confirmed/applied items
-- [ ] No TypeScript errors (`npm run typecheck`)
-- [ ] No lint errors (`npm run lint`)
-- [ ] Meeting model gets `aiProcessedAt` field via migration
+- [x] New `MeetingInsight` model added with proper migration
+- [x] `extractMeetingInsights()` domain function works: takes a meeting with transcript → creates SUGGESTED insights via LLM
+- [x] Meeting detail page shows a "Run AI Extraction" button when transcript exists but no insights
+- [x] After extraction, facilitator sees grouped insight cards with Confirm/Dismiss controls
+- [x] Confirming an insight marks it as CONFIRMED
+- [x] Applying a confirmed insight creates the corresponding entity (tension/action/proposal) linked to the meeting
+- [x] Dismissed insights are hidden from the default view
+- [x] Meeting detail page shows a "Decisions & Outcomes" section for confirmed/applied items
+- [x] No TypeScript errors (`npm run typecheck`)
+- [x] No lint errors (`npm run lint`)
+- [x] Meeting model gets `aiProcessedAt` field via migration
 
 ## Test plan
 
