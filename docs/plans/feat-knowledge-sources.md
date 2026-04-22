@@ -20,17 +20,18 @@ Expand the **Settings → Data Sources** tab from a PostgreSQL-only database con
 - `apps/web/app/workspaces/[workspaceId]/settings/TextPasteUploader.tsx`
 - `apps/web/app/workspaces/[workspaceId]/settings/RecentUploads.tsx`
 - `apps/web/app/api/workspaces/[workspaceId]/data-sources/text-ingest/route.ts`
+- `docs/plans/feat-knowledge-sources.md`
 
 ## Acceptance criteria
 
-- [ ] Tab renamed to "Knowledge Sources"
-- [ ] File upload works via drag-and-drop for supported files
-- [ ] Multi-file selection works via file picker
-- [ ] Folder upload works via folder picker button
-- [ ] Plain text paste form accepts title, source type, and content and creates a BrainSource
-- [ ] Existing database connector functionality is preserved unchanged
-- [ ] Recently uploaded documents are listed
-- [ ] `npm run check` passes (lint + typecheck + prisma validate)
+- [x] Tab renamed to "Knowledge Sources"
+- [x] File upload works via drag-and-drop for supported files
+- [x] Multi-file selection works via file picker
+- [x] Folder upload works via folder picker button
+- [x] Plain text paste form accepts title, source type, and content and creates a BrainSource
+- [x] Existing database connector functionality is preserved unchanged
+- [x] Recently uploaded documents are listed
+- [x] `npm run check` passes (lint + typecheck + prisma validate)
 
 ## Test plan
 
