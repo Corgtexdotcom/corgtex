@@ -28,8 +28,13 @@ No logic changes are made. Purely file extraction.
 - `packages/workflows/src/handlers/**`
 - `packages/workflows/src/derive-jobs.ts`
 - `packages/workflows/src/derive-notifications.ts`
-- `packages/agents/src/*.test.ts`
-- `packages/workflows/src/*.test.ts`
+- `packages/agents/src/check-in-agent.test.ts`
+- `packages/agents/src/meeting-advisor.test.ts`
+- `packages/agents/src/runtime.test.ts`
+- `packages/workflows/src/outbox.extended.test.ts`
+- `packages/workflows/src/outbox.runtime.test.ts`
+- `packages/workflows/src/outbox.test.ts`
+- `packages/workflows/src/webhook-delivery.test.ts`
 - `packages/agents/src/brain-absorb.ts`
 
 ## Acceptance criteria
