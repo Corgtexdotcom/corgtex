@@ -43,6 +43,7 @@ export async function POST(
       agentKey: conversation.agentKey,
       userMessage,
       systemPrompt: conversation.systemPrompt,
+      actor,
     });
 
     const encoder = new TextEncoder();
