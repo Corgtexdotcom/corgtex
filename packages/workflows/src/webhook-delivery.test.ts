@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { deriveJobsForEvent } from "./outbox";
+import { deriveJobsForEvent } from "./derive-jobs";
 
 describe("webhook delivery integration with outbox", () => {
   it("deriveJobsForEvent still works correctly for standard events", () => {

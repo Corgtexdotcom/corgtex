@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { calculateRetryDelayMs, deriveJobsForEvent, deriveNotificationsForEvent, triageBucketStart } from "./outbox";
+import { calculateRetryDelayMs } from "./outbox";
+import { deriveJobsForEvent, triageBucketStart } from "./derive-jobs";
+import { deriveNotificationsForEvent } from "./derive-notifications";
 
 describe("deriveJobsForEvent", () => {
   it("creates a knowledge sync job for approved proposals", () => {

@@ -161,7 +161,7 @@ describe("agent runtime", () => {
 
   it("skips agent execution when the kill switch is enabled", async () => {
     envMock.AGENT_KILL_SWITCH = true;
-    const { runInboxTriageAgent } = await import("./runtime");
+    const { runInboxTriageAgent } = await import(".");
 
     await expect(runInboxTriageAgent({
       workspaceId: "ws-1",
@@ -192,7 +192,7 @@ describe("agent runtime", () => {
       usage: { provider: "fake", model: "fake", inputTokens: 1, outputTokens: 1, latencyMs: 1, estimatedCostUsd: "0.000000" },
     });
 
-    const { runActionExtractionAgent } = await import("./runtime");
+    const { runActionExtractionAgent } = await import(".");
     await runActionExtractionAgent({
       workspaceId: "ws-1",
       triggerRef: "job-2",
@@ -235,7 +235,7 @@ describe("agent runtime", () => {
       return 0;
     });
 
-    const { runMeetingSummaryAgent } = await import("./runtime");
+    const { runMeetingSummaryAgent } = await import(".");
     await runMeetingSummaryAgent({
       workspaceId: "ws-1",
       triggerRef: "job-waiting",
@@ -260,7 +260,7 @@ describe("agent runtime", () => {
       usage: { provider: "fake", model: "fake", inputTokens: 1, outputTokens: 1, latencyMs: 1, estimatedCostUsd: "0.000000" },
     });
 
-    const { runMeetingSummaryAgent } = await import("./runtime");
+    const { runMeetingSummaryAgent } = await import(".");
     await runMeetingSummaryAgent({
       workspaceId: "ws-1",
       triggerRef: "job-3",
@@ -305,7 +305,7 @@ describe("agent runtime", () => {
       usage: { provider: "fake", model: "fake", inputTokens: 1, outputTokens: 1, latencyMs: 1, estimatedCostUsd: "0.000000" },
     });
 
-    const { runProposalDraftingAgent } = await import("./runtime");
+    const { runProposalDraftingAgent } = await import(".");
     await runProposalDraftingAgent({
       workspaceId: "ws-1",
       triggerRef: "job-4",
@@ -344,7 +344,7 @@ describe("agent runtime", () => {
       usage: { provider: "fake", model: "fake", inputTokens: 1, outputTokens: 1, latencyMs: 1, estimatedCostUsd: "0.000000" },
     });
 
-    const { runConstitutionUpdateTriggerAgent } = await import("./runtime");
+    const { runConstitutionUpdateTriggerAgent } = await import(".");
     await runConstitutionUpdateTriggerAgent({
       workspaceId: "ws-1",
       triggerRef: "job-5",

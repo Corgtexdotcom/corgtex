@@ -102,7 +102,7 @@ describe("runMeetingSummaryAgent", () => {
   });
 
   it("completes without requiring a live database", async () => {
-    const { runMeetingSummaryAgent } = await import("./runtime");
+    const { runMeetingSummaryAgent } = await import(".");
 
     const result = await runMeetingSummaryAgent({
       workspaceId: "ws-1",
