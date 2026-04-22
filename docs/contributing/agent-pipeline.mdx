@@ -97,8 +97,19 @@ If it fails on `main`:
 The human prompter controls the pipeline with PR labels:
 
 - `halt-agents` — the Reviewer will not merge and the Executor will stop pushing. Use when something looks wrong and you need to think.
-- `force-merge` — override the pipeline. Logged in the PR and in the daily digest. Rare.
+- `force-merge` — override the pipeline. Logged in the PR and in the daily digest. Rare. May be applied and executed by an agent when the human explicitly instructs it via prompt (see below).
 - `needs-replan` — set by the Executor when stuck, or by the human. The Planner picks up from the existing plan file and updates it.
+
+### Human-directed agent bypass
+
+When a human explicitly instructs an agent (via prompt) to force-merge a PR:
+
+1. The agent adds the `force-merge` label to the PR.
+2. The agent adds a PR comment: `⚠️ Human-directed bypass: merged with --admin per explicit instruction.`
+3. The agent runs `gh pr merge <number> --admin --squash`.
+4. This is logged in the daily digest alongside all other `force-merge` events.
+
+**Scope:** This bypass covers branch protection (required reviews, status checks). It does **not** exempt the PR from secret scanning, `prisma db push` bans, or `--no-verify`.
 
 ## Branch protection (required repo settings)
 
@@ -122,7 +133,7 @@ in GitHub → Settings → Branches → `main`:
 - **Require branches to be up to date**: on.
 - **Require conversation resolution**: on.
 - **Require merge queue**: on (prevents two Executor PRs from racing).
-- **Do not allow bypassing the above settings** (no admin bypass): on.
+- **Do not allow bypassing the above settings** (no admin bypass): off — allows repo admins and human-directed agents to use `--admin` when needed.
 - **Restrict who can push to matching branches**: allow only the Reviewer (Codex GitHub App) and the merge queue.
 
 ## Codex configuration (required app settings)
