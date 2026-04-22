@@ -26,7 +26,7 @@ export function MemberBriefing({ workspaceId, memberId }: MemberBriefingProps) {
     startTransition(async () => {
       try {
         const result = await getAIProfileBriefingAction(workspaceId, memberId);
-        setData(result as unknown as BriefingData);
+        setData(result);
       } catch (err) {
         console.error(err);
         setError(true);
@@ -43,7 +43,7 @@ export function MemberBriefing({ workspaceId, memberId }: MemberBriefingProps) {
         <button
           onClick={generate}
           disabled={isPending}
-          className="actions-inline"
+          className="actions-inline px-3 py-1.5 text-sm border rounded-md"
         >
           {isPending ? "Generating..." : (data ? "Regenerate" : "Generate")}
         </button>
@@ -64,7 +64,7 @@ export function MemberBriefing({ workspaceId, memberId }: MemberBriefingProps) {
         )}
 
         {error && !isPending && (
-          <div className="text-danger text-sm py-4 flex items-center gap-2">
+          <div className="text-destructive text-sm py-4 flex items-center gap-2">
             ⚠️ Failed to generate briefing. Please try again.
           </div>
         )}

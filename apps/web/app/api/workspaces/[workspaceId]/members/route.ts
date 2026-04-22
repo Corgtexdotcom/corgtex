@@ -28,7 +28,6 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     const member = await createMember(actor, {
       workspaceId,
       email: String(body.email ?? ""),
-      password: String(body.password ?? ""),
       displayName: typeof body.displayName === "string" ? body.displayName : null,
       role: String(body.role ?? "CONTRIBUTOR") as "CONTRIBUTOR" | "FACILITATOR" | "FINANCE_STEWARD" | "ADMIN",
     });

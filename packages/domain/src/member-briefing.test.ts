@@ -1,49 +1,21 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect } from "vitest";
 import { generateMemberBriefing } from "./member-briefing";
-import * as membersModule from "./members";
-import { defaultModelGateway } from "@corgtex/models";
-
-vi.mock("./members", () => ({
-  getMemberProfile: vi.fn(),
-}));
-
-vi.mock("@corgtex/models", () => ({
-  defaultModelGateway: {
-    chat: vi.fn(),
-  },
-}));
+import type { AppActor } from "@corgtex/shared";
 
 describe("generateMemberBriefing", () => {
-  it("should return a formatted briefing using the model gateway", async () => {
-    // Setup mock profile
-    const mockProfile = {
-      member: {
-        user: { displayName: "Jan Brezina" },
-        roleAssignments: [
-          { role: { name: "Tech Lead", circle: { name: "General" } } }
-        ],
-        assignedActions: [
-          { title: "Fix the thing", status: "OPEN" }
-        ]
-      },
-      meetings: [
-        { title: "Weekly Sync", recordedAt: new Date(), summaryMd: "We talked about stuff" }
-      ],
-      authoredTensions: [
-        { title: "Too many meetings", status: "OPEN" }
-      ]
+  it("returns the default briefing shape for a member", async () => {
+    const mockActor: AppActor = {
+      kind: "user",
+      user: { id: "user-1", email: "test@example.com", displayName: "Test" },
     };
-    (membersModule.getMemberProfile as any).mockResolvedValue(mockProfile);
 
-    const actor = { kind: "user", user: { id: "u1", email: "jan@example.com" } } as any;
-    
-    const briefing = await generateMemberBriefing(actor, "w1", "m1");
+    const result = await generateMemberBriefing(mockActor, "workspace-1", "member-1");
 
-    expect(briefing).toEqual({
+    expect(result).toEqual({
       summary: "This is a generated AI summary for the member, synthesizing their recent priorities, meetings, and insights.",
       priorities: ["Resolve outstanding proposals", "Schedule sync for next quarter"],
       followUps: ["Review Q3 budget tension"],
-      insights: ["Highly active in Governance cluster"]
+      insights: ["Highly active in Governance cluster"],
     });
   });
 });
