@@ -70,17 +70,18 @@ export default async function WorkspaceDashboard({
 
   // Filter advice processes where there is a suggestion for the current user
   let advisoryRequests: any[] = [];
-  if (actor.kind === 'user') {
-    const currentMemberUrl = members.find(m => m.userId === actor.user.id)?.id;
-    if (currentMemberUrl) {
-      advisoryRequests = activeAdviceProcesses.filter(ap => {
-        if (!ap.advisorySuggestionsJson || !Array.isArray((ap.advisorySuggestionsJson as any).advisors)) return false;
-        return (ap.advisorySuggestionsJson as any).advisors.some((a: any) => a.memberId === currentMemberUrl);
-      });
-    }
+  const currentMember = actor.kind === 'user' ? members.find(m => m.userId === actor.user.id) : undefined;
+  const currentMemberUrl = currentMember?.id;
+  if (currentMemberUrl) {
+    advisoryRequests = activeAdviceProcesses.filter(ap => {
+      if (!ap.advisorySuggestionsJson || !Array.isArray((ap.advisorySuggestionsJson as any).advisors)) return false;
+      return (ap.advisorySuggestionsJson as any).advisors.some((a: any) => a.memberId === currentMemberUrl);
+    });
   }
 
-  const recentMeetings = meetings.slice(0, 5);
+  const recentMeetings = meetings
+    .filter(m => actor.kind === 'user' ? m.participantIds?.includes(actor.user.id) : true)
+    .slice(0, 5);
   const unreadNotifications = notifications.filter(n => !n.readAt);
   const openActions = openActionsResult.items.filter(a => a.status === "OPEN" || a.status === "IN_PROGRESS");
   
@@ -232,7 +233,7 @@ export default async function WorkspaceDashboard({
 
         {/* CENTER COLUMN: MEETINGS */}
         <div>
-           <h2 className="nr-section-header">Recent Meetings</h2>
+           <h2 className="nr-section-header">Your Meetings</h2>
            {recentMeetings.length === 0 ? <p className="nr-meta">No recent meetings</p> : null}
            {recentMeetings.map((meeting) => (
              <div key={meeting.id} className="nr-item">
@@ -248,7 +249,14 @@ export default async function WorkspaceDashboard({
 
         {/* RIGHT COLUMN: TODOS & TENSIONS */}
         <div>
-           <h2 className="nr-section-header">Your To-Dos</h2>
+           <h2 className="nr-section-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+             Your To-Dos
+             {currentMemberUrl && (
+               <Link href={`/workspaces/${workspaceId}/members/${currentMemberUrl}`} style={{ fontSize: "0.75rem", textTransform: "none", color: "var(--accent)" }}>
+                 View full profile →
+               </Link>
+             )}
+           </h2>
            {openActions.length === 0 ? <p className="nr-meta" style={{ marginBottom: "32px"}}>Zero inbox</p> : null}
            <div style={{ marginBottom: "32px"}}>
              {openActions.slice(0, 6).map((action) => (
