@@ -266,6 +266,8 @@ model Workspace {
   externalDataSources ExternalDataSource[]
   featureFlags        WorkspaceFeatureFlag[]
   meetingInsights     MeetingInsight[]
+  goals               Goal[]
+  recognitions        Recognition[]
 }
 
 model WorkspaceFeatureFlag {
@@ -361,6 +363,10 @@ model Member {
   adviceRecords           AdviceRecord[]
   impactFootprints        ImpactFootprint[]
   checkIns                CheckIn[]
+  ownedGoals              Goal[]
+  goalUpdates             GoalUpdate[]
+  recognitionsReceived    Recognition[]            @relation("RecognitionRecipient")
+  recognitionsGiven       Recognition[]            @relation("RecognitionAuthor")
 
   @@unique([workspaceId, userId])
   @@index([workspaceId, role])
@@ -404,6 +410,7 @@ model Circle {
   tensions     Tension[]
   proposals    Proposal[]
   policyCorpus PolicyCorpus[]
+  goals        Goal[]
 
   @@index([workspaceId])
 }
@@ -1741,4 +1748,133 @@ model MeetingInsight {
   reviewedByUser User?     @relation(fields: [reviewedByUserId], references: [id], onDelete: SetNull)
 
   @@index([workspaceId, meetingId, status])
+}
+
+enum GoalCadence {
+  WEEKLY
+  MONTHLY
+  QUARTERLY
+  ANNUAL
+  FIVE_YEAR
+  TEN_YEAR
+}
+
+enum GoalStatus {
+  DRAFT
+  ACTIVE
+  ON_TRACK
+  AT_RISK
+  BEHIND
+  COMPLETED
+  ABANDONED
+}
+
+enum GoalLevel {
+  COMPANY
+  CIRCLE
+  PERSONAL
+}
+
+model Goal {
+  id              String      @id @default(uuid())
+  workspaceId     String
+  parentGoalId    String?
+  circleId        String?
+  ownerMemberId   String?
+  title           String
+  descriptionMd   String?     @db.Text
+  level           GoalLevel   @default(COMPANY)
+  cadence         GoalCadence @default(QUARTERLY)
+  status          GoalStatus  @default(DRAFT)
+  progressPercent Int         @default(0)
+  targetDate      DateTime?
+  startDate       DateTime?
+  sortOrder       Int         @default(0)
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  workspace     Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  parentGoal    Goal?          @relation("GoalTree", fields: [parentGoalId], references: [id], onDelete: SetNull)
+  childGoals    Goal[]         @relation("GoalTree")
+  circle        Circle?        @relation(fields: [circleId], references: [id], onDelete: SetNull)
+  ownerMember   Member?        @relation(fields: [ownerMemberId], references: [id], onDelete: SetNull)
+  keyResults    KeyResult[]
+  updates       GoalUpdate[]
+  links         GoalLink[]
+  recognitions  Recognition[]
+
+  @@index([workspaceId, level, cadence])
+  @@index([workspaceId, status])
+  @@index([parentGoalId])
+  @@index([circleId])
+  @@index([ownerMemberId])
+}
+
+model KeyResult {
+  id              String   @id @default(uuid())
+  goalId          String
+  title           String
+  targetValue     Float?
+  currentValue    Float?   @default(0)
+  unit            String?
+  progressPercent Int      @default(0)
+  sortOrder       Int      @default(0)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  goal Goal @relation(fields: [goalId], references: [id], onDelete: Cascade)
+
+  @@index([goalId])
+}
+
+model GoalUpdate {
+  id             String      @id @default(uuid())
+  goalId         String
+  authorMemberId String?
+  source         String      @default("human")
+  bodyMd         String      @db.Text
+  newProgress    Int?
+  statusChange   GoalStatus?
+  createdAt      DateTime    @default(now())
+
+  goal         Goal    @relation(fields: [goalId], references: [id], onDelete: Cascade)
+  authorMember Member? @relation(fields: [authorMemberId], references: [id], onDelete: SetNull)
+
+  @@index([goalId, createdAt])
+}
+
+model GoalLink {
+  id         String   @id @default(uuid())
+  goalId     String
+  entityType String
+  entityId   String
+  confidence Float    @default(1.0)
+  linkedBy   String   @default("human")
+  createdAt  DateTime @default(now())
+
+  goal Goal @relation(fields: [goalId], references: [id], onDelete: Cascade)
+
+  @@unique([goalId, entityType, entityId])
+  @@index([entityType, entityId])
+}
+
+model Recognition {
+  id                String   @id @default(uuid())
+  workspaceId       String
+  goalId            String?
+  recipientMemberId String
+  authorMemberId    String
+  title             String
+  storyMd           String   @db.Text
+  valueTags         String[]
+  visibility        String   @default("WORKSPACE")
+  createdAt         DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  goal      Goal?     @relation(fields: [goalId], references: [id], onDelete: SetNull)
+  recipient Member    @relation("RecognitionRecipient", fields: [recipientMemberId], references: [id], onDelete: Cascade)
+  author    Member    @relation("RecognitionAuthor", fields: [authorMemberId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, createdAt])
+  @@index([recipientMemberId])
 }
