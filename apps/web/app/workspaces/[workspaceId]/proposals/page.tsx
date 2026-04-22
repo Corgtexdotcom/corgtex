@@ -65,10 +65,11 @@ export default async function ProposalsPage({
         <div style={{ marginBottom: 16 }}>
           <form method="get" style={{ display: "inline-block" }}>
             {statusFilter !== "ACTIVE" && <input type="hidden" name="status" value={statusFilter} />}
-            <select name="circleId" onChange={(e) => e.target.form?.submit()} defaultValue={circleFilter || ""} style={{ padding: "4px 8px", borderRadius: 4 }}>
+            <select name="circleId" defaultValue={circleFilter || ""} style={{ padding: "4px 8px", borderRadius: 4, marginRight: 8 }}>
               <option value="">All Circles</option>
               {circles.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
             </select>
+            <button type="submit" className="small secondary">Filter</button>
           </form>
         </div>
         <div className="nr-filter-bar">
@@ -103,7 +104,7 @@ export default async function ProposalsPage({
                   {proposal.status === "ADVICE_GATHERING" ? "GATHERING ADVICE" : proposal.status}
                 </span>
               </div>
-              <div className="nr-excerpt">{proposal.summary ?? proposal.bodyMd.slice(0, 150) + "..."}</div>
+              <div className="nr-excerpt">{proposal.summary ?? proposal.bodyMd.replace(/\0/g, "").slice(0, 150) + "..."}</div>
               
               <div className="nr-item-meta" style={{ marginTop: 8 }}>
                  {proposal.author.displayName || proposal.author.email} · {new Date(proposal.createdAt).toLocaleDateString()}

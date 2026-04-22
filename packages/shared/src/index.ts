@@ -8,3 +8,4 @@ export * from "./json";
 export * from "./email";
 export * from "./branding";
 export * from "./math";
+export * from './logger';
