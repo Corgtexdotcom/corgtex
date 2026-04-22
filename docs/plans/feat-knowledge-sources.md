@@ -21,6 +21,7 @@ Expand the **Settings → Data Sources** tab from a PostgreSQL-only database con
 - `apps/web/app/workspaces/[workspaceId]/settings/RecentUploads.tsx`
 - `apps/web/app/api/workspaces/[workspaceId]/data-sources/text-ingest/route.ts`
 - `docs/plans/feat-knowledge-sources.md`
+- `docs/assets/knowledge_sources_preview.png`
 
 ## Acceptance criteria
 
