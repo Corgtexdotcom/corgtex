@@ -19,6 +19,7 @@ No logic changes are made. Purely file extraction.
 - Extract workflow handlers to `handlers/`.
 
 ## Files to touch
+- `docs/plans/fix-agent-decomposition.md`
 - `packages/agents/src/runtime.ts`
 - `packages/agents/src/index.ts`
 - `packages/agents/src/agents/**`
