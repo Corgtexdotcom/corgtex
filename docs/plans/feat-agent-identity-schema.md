@@ -34,6 +34,8 @@ Introduce a first-class `AgentIdentity` model that makes AI agents organizationa
 - `apps/web/app/api/workspaces/[workspaceId]/agent-identities/[agentId]/route.ts`
 - `apps/web/app/api/workspaces/[workspaceId]/agent-identities/[agentId]/behavior/route.ts`
 - `docs/plans/feat-agent-identity-schema.md`
+- `docs/plans/agent-identity-api-proof.png`
+- `docs/plans/agent-identity-api-recording.webp`
 
 ## Acceptance criteria
 
