@@ -1,5 +1,5 @@
 import { env } from "@corgtex/shared";
-import { listAgentRuns, listRuntimeEvents, listRuntimeJobs, listMembers, listFailedJobs } from "@corgtex/domain";
+import { listAgentRuns, listRuntimeEvents, listRuntimeJobs, listMembers, listFailedJobs, getFailingAgents } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import {
   triggerAgentRunAction,
@@ -85,12 +85,13 @@ export default async function OperatorPage({
 }) {
   const { workspaceId } = await params;
   const actor = await requirePageActor();
-  const [agentRuns, events, jobs, members, failedJobs] = await Promise.all([
+  const [agentRuns, events, jobs, members, failedJobs, failingAgents] = await Promise.all([
     listAgentRuns(actor, workspaceId, { take: 15 }),
     listRuntimeEvents(actor, workspaceId, { take: 15 }),
     listRuntimeJobs(actor, workspaceId, { take: 15 }),
     listMembers(workspaceId),
     listFailedJobs(actor, workspaceId, { take: 50 }),
+    getFailingAgents(workspaceId),
   ]);
   const currentUserId = actor.kind === "user" ? actor.user.id : "";
   const currentMembership = members.find((m) => m.userId === currentUserId);
@@ -98,6 +99,11 @@ export default async function OperatorPage({
 
   return (
     <>
+      {failingAgents.length > 0 && (
+        <div className="panel danger" style={{ marginBottom: 24 }}>
+          <strong>⚠️ The following agents are failing:</strong> {failingAgents.join(", ")}. Please check the logs.
+        </div>
+      )}
       <div className="ws-page-header">
         <div className="row">
           <div>

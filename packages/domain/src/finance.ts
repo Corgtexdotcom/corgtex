@@ -993,3 +993,73 @@ export async function escalateSpendToProposal(actor: AppActor, params: {
     return proposal;
   });
 }
+export async function getSpend(actor: AppActor, params: { workspaceId: string; spendId: string }) {
+  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  return findSpendForWorkspace(prisma, params.workspaceId, params.spendId);
+}
+
+export async function updateSpend(actor: AppActor, params: {
+  workspaceId: string;
+  spendId: string;
+  amountCents?: number;
+  currency?: string;
+  category?: string;
+  description?: string;
+  vendor?: string | null;
+  ledgerAccountId?: string | null;
+}) {
+  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+
+  return prisma.$transaction(async (tx) => {
+    const spend = await findSpendForWorkspace(tx, params.workspaceId, params.spendId);
+    invariant(spend.status === "DRAFT", 400, "INVALID_STATE", "Only draft spend requests can be updated.");
+
+    const data: Record<string, unknown> = {};
+    if (params.amountCents !== undefined) {
+      invariant(Number.isInteger(params.amountCents) && params.amountCents > 0, 400, "INVALID_INPUT", "amountCents must be a positive integer.");
+      data.amountCents = params.amountCents;
+    }
+    if (params.currency !== undefined) {
+      data.currency = normalizeCurrencyCode(params.currency);
+    }
+    if (params.category !== undefined) {
+      const category = params.category.trim();
+      invariant(category.length > 0, 400, "INVALID_INPUT", "category is required.");
+      data.category = category;
+    }
+    if (params.description !== undefined) {
+      const description = params.description.trim();
+      invariant(description.length > 0, 400, "INVALID_INPUT", "description is required.");
+      data.description = description;
+    }
+    if (params.vendor !== undefined) data.vendor = params.vendor?.trim() || null;
+    if (params.ledgerAccountId !== undefined) {
+      if (params.ledgerAccountId) {
+        const account = await findLedgerAccountForWorkspace(tx, params.workspaceId, params.ledgerAccountId);
+        const cur = typeof data.currency === "string" ? data.currency : spend.currency;
+        invariant(account.currency === cur, 400, "INVALID_INPUT", "Ledger account currency must match the spend currency.");
+      }
+      data.ledgerAccountId = params.ledgerAccountId || null;
+    }
+
+    invariant(Object.keys(data).length > 0, 400, "INVALID_INPUT", "At least one field must be updated.");
+
+    const updated = await tx.spendRequest.update({
+      where: { id: params.spendId },
+      data,
+    });
+
+    await tx.auditLog.create({
+      data: {
+        workspaceId: params.workspaceId,
+        actorUserId: actor.kind === "user" ? actor.user.id : null,
+        action: "spend.updated",
+        entityType: "SpendRequest",
+        entityId: updated.id,
+        meta: { fields: Object.keys(data) },
+      },
+    });
+
+    return updated;
+  });
+}

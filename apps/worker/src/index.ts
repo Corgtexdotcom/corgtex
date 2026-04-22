@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
-import { prisma } from "@corgtex/shared";
+import { prisma, logger } from "@corgtex/shared";
 import { finalizeExpiredApprovalFlows, autoApproveProposals } from "@corgtex/domain";
 import { dispatchPendingEvents, runPendingJobs, scheduleDailyJobs, schedulePeriodicJobs } from "@corgtex/workflows";
 import * as Sentry from "@sentry/node";
@@ -41,15 +41,16 @@ let currentPollIntervalMs = POLL_INTERVAL_MS;
 function log(level: "info" | "warn" | "error", data: Record<string, unknown>) {
   const entry = {
     ts: new Date().toISOString(),
-    level,
     component: "worker",
     workerId,
     ...data,
   };
   if (level === "error") {
-    console.error(JSON.stringify(entry));
+    logger.error(JSON.stringify(entry));
+  } else if (level === "warn") {
+    logger.warn(JSON.stringify(entry));
   } else {
-    console.info(JSON.stringify(entry));
+    logger.info(JSON.stringify(entry));
   }
 }
 

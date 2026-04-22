@@ -9,6 +9,12 @@ vi.mock("@corgtex/shared", () => ({
       update: vi.fn(),
       findUniqueOrThrow: vi.fn(),
     },
+    auditLog: {
+      create: vi.fn(),
+    },
+    event: {
+      createMany: vi.fn(),
+    },
     $transaction: vi.fn(async (cb) => cb(prisma)),
   },
 }));

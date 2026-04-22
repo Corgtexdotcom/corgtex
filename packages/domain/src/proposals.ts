@@ -1,5 +1,5 @@
-import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
+import { prisma, logger } from "@corgtex/shared";
 import { appendEvents } from "./events";
 import { actorUserIdForWorkspace, requireWorkspaceMembership } from "./auth";
 import { getApprovalPolicy, ensureApprovalFlow } from "./approvals";
@@ -378,8 +378,28 @@ export async function autoApproveProposals(): Promise<number> {
       });
       approvedCount++;
     } catch (error) {
-      console.error(`Failed to auto-approve proposal ${p.id}`, error);
+      logger.error(`Failed to auto-approve proposal ${p.id}`, { error });
     }
   }
   return approvedCount;
+}
+export async function deleteProposal(actor: AppActor, params: { workspaceId: string; proposalId: string }) {
+  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  return prisma.$transaction(async (tx) => {
+    const proposal = await tx.proposal.findUnique({
+      where: { id: params.proposalId, workspaceId: params.workspaceId },
+    });
+    invariant(proposal, 404, "NOT_FOUND", "Proposal not found.");
+    invariant(proposal.status === "DRAFT", 400, "INVALID_STATE", "Only draft proposals can be deleted.");
+    await tx.auditLog.create({
+      data: {
+        workspaceId: params.workspaceId,
+        actorUserId: actor.kind === "user" ? actor.user.id : null,
+        action: "proposal.deleted",
+        entityType: "Proposal",
+        entityId: proposal.id,
+      },
+    });
+    return tx.proposal.delete({ where: { id: params.proposalId } });
+  });
 }
