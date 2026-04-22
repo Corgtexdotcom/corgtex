@@ -50,3 +50,4 @@ export * from "./goals";
 export * from "./admin";
 export * from "./meeting-intelligence";
 export * from "./stubs";
+export * from "./agent-identity";
