@@ -7,7 +7,8 @@ import { revalidatePath } from "next/cache";
 import {
   archiveProposal,
   createProposal,
-  reactToProposal,
+  postReaction,
+  resolveReaction,
   submitProposal,
   updateProposal,
   publishProposal,
@@ -59,6 +60,7 @@ export async function submitProposalAction(formData: FormData) {
   await submitProposal(actor, {
     workspaceId,
     proposalId: asString(formData, "proposalId"),
+    autoApproveHours: asOptionalInt(formData, "autoApproveHours"),
   });
   refresh(workspaceId);
 }
@@ -89,16 +91,31 @@ export async function publishProposalAction(formData: FormData) {
   refresh(workspaceId);
 }
 
-export async function reactToProposalAction(formData: FormData) {
+export async function postReactionAction(formData: FormData) {
   const _demoGuardWsId = formData.get("workspaceId") as string;
   if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
 
   const actor = await requirePageActor();
   const workspaceId = asString(formData, "workspaceId");
-  await reactToProposal(actor, {
+  await postReaction(actor, {
     workspaceId,
     proposalId: asString(formData, "proposalId"),
     reaction: asString(formData, "reaction"),
+    bodyMd: asOptional(formData, "bodyMd") || undefined,
+  });
+  refresh(workspaceId);
+}
+
+export async function resolveReactionAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  await resolveReaction(actor, {
+    workspaceId,
+    reactionId: asString(formData, "reactionId"),
+    resolvedNote: asString(formData, "resolvedNote"),
   });
   refresh(workspaceId);
 }
