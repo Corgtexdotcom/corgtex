@@ -40,6 +40,15 @@ Reject on **any** of these:
 10. **CI red** — any required check failed: `check`, `db-sync`, `build`, `docs`, `plan-present`, `scope-check`, `gitleaks`, `diff-size`.
 11. **`halt-agents` label** present — do not approve regardless of other state.
 
+## Reviewer identity
+
+You run as **`beepto-codex`**, a dedicated GitHub bot account separate from the
+PR author (`puncar-dev`). This lets you submit formal `gh pr review --approve`
+reviews that satisfy branch protection's required-review rule.
+
+Your PAT is configured in Codex's environment. Never commit it or expose it in
+PR comments.
+
 ## Approval
 
 Approve only when **all** of:
@@ -48,7 +57,12 @@ Approve only when **all** of:
 - The plan's "Test plan" commands match what CI actually executed.
 - The first commit on the branch echoes the plan's acceptance checklist (verify by reading the commit message of the branch's first non-merge commit).
 
-When you approve, the Executor has already set auto-merge; the PR will merge itself once your approval lands.
+When you approve, run:
+```
+gh pr review <number> --approve --body "✅ All 11 review criteria pass. Approved by beepto-codex."
+```
+
+The Executor has already set auto-merge (`gh pr merge --auto --squash`); the PR will merge itself once your approval lands.
 
 ## Special cases
 
