@@ -1,6 +1,6 @@
 import type { MemberRole } from "@prisma/client";
-import { prisma, hashPassword } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
+import { prisma, hashPassword, randomOpaqueToken, sha256 } from "@corgtex/shared";
 import { AppError, invariant } from "./errors";
 import { appendEvents } from "./events";
 import { requireWorkspaceMembership } from "./auth";
@@ -58,24 +58,62 @@ export async function listMembersEnriched(workspaceId: string, opts?: { includeI
   });
 }
 
-export async function createMember(actor: AppActor, params: {
+export async function bulkInviteMembers(actor: AppActor, params: {
   workspaceId: string;
-  email: string;
-  password: string;
-  displayName?: string | null;
-  role: MemberRole;
-}) {
+  members: { email: string; displayName?: string | null; role?: MemberRole }[];
+}): Promise<{ invited: number; details: { email: string; displayName: string | null; token: string }[]; errors: string[] }> {
   await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
     allowedRoles: ["ADMIN"],
   });
 
+  let invited = 0;
+  const errors: string[] = [];
+  const details: { email: string; displayName: string | null; token: string }[] = [];
+
+  for (const info of params.members) {
+    try {
+      const result = await createMember(actor, {
+        workspaceId: params.workspaceId,
+        email: info.email,
+        displayName: info.displayName,
+        role: info.role || "CONTRIBUTOR",
+      });
+      invited++;
+      details.push({
+        email: result.user.email,
+        displayName: result.user.displayName,
+        token: result.token,
+      });
+    } catch (e: any) {
+      errors.push(`Failed for ${info.email}: ${e.message}`);
+    }
+  }
+
+  return { invited, details, errors };
+}
+
+export async function createMember(actor: AppActor, params: {
+  workspaceId: string;
+  email: string;
+  displayName?: string | null;
+  role: MemberRole;
+  skipAdminCheck?: boolean;
+}) {
+  if (!params.skipAdminCheck) {
+    await requireWorkspaceMembership({
+      actor,
+      workspaceId: params.workspaceId,
+      allowedRoles: ["ADMIN"],
+    });
+  }
+
   const email = params.email.trim().toLowerCase();
   invariant(email.length > 0, 400, "INVALID_INPUT", "Email is required.");
-  invariant(params.password.length >= 8, 400, "INVALID_INPUT", "Password must be at least 8 characters.");
 
   return prisma.$transaction(async (tx) => {
+    const randomPassword = randomOpaqueToken();
     const user = await tx.user.upsert({
       where: { email },
       update: {
@@ -84,7 +122,7 @@ export async function createMember(actor: AppActor, params: {
       create: {
         email,
         displayName: params.displayName?.trim() || null,
-        passwordHash: hashPassword(params.password),
+        passwordHash: hashPassword(randomPassword),
       },
       select: {
         id: true,
@@ -140,7 +178,33 @@ export async function createMember(actor: AppActor, params: {
       },
     ]);
 
-    return { user, member };
+    const token = randomOpaqueToken();
+    await tx.passwordResetToken.create({
+      data: {
+        userId: user.id,
+        tokenHash: sha256(token),
+        expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+      },
+    });
+
+    return { user, member, token };
+  });
+}
+
+export async function inviteMember(actor: AppActor, params: {
+  workspaceId: string;
+  email: string;
+  displayName?: string | null;
+}) {
+  await requireWorkspaceMembership({
+    actor,
+    workspaceId: params.workspaceId,
+  });
+
+  return createMember(actor, {
+    ...params,
+    role: "CONTRIBUTOR",
+    skipAdminCheck: true,
   });
 }
 
@@ -148,6 +212,7 @@ export async function updateMember(actor: AppActor, params: {
   workspaceId: string;
   memberId: string;
   role?: MemberRole;
+  isActive?: boolean;
   displayName?: string | null;
 }) {
   await requireWorkspaceMembership({
@@ -165,6 +230,7 @@ export async function updateMember(actor: AppActor, params: {
 
     const memberData: Record<string, unknown> = {};
     if (params.role !== undefined) memberData.role = params.role;
+    if (params.isActive !== undefined) memberData.isActive = params.isActive;
 
     const updated = await tx.member.update({
       where: { id: params.memberId },
