@@ -6,6 +6,7 @@ export type CircleNodeData = {
   purposeMd: string | null;
   maturityStage: string;
   roleCount: number;
+  onExpand?: (circleId: string) => void;
 };
 
 export default function CircleNode({ data, selected }: { data: CircleNodeData; selected?: boolean }) {
@@ -28,7 +29,19 @@ export default function CircleNode({ data, selected }: { data: CircleNodeData; s
   return (
     <div className={`circle-node ${selected ? "selected" : ""}`}>
       <Handle type="target" position={Position.Top} style={{ visibility: "hidden" }} />
-      <div className="circle-node-title">{data.name}</div>
+      <div className="circle-node-title-row" style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+        <div className="circle-node-title">{data.name}</div>
+        {data.onExpand && (
+          <button 
+            type="button" 
+            className="expand-btn" 
+            onClick={(e) => { e.stopPropagation(); data.onExpand!(data.circleId); }}
+            style={{ fontSize: "12px", background: "var(--bg-alt)", border: "1px solid var(--line)", borderRadius: "var(--radius-sm)", padding: "2px 6px", cursor: "pointer" }}
+          >
+            Expand
+          </button>
+        )}
+      </div>
       {data.purposeMd && (
         <div className="circle-node-purpose">{data.purposeMd}</div>
       )}
