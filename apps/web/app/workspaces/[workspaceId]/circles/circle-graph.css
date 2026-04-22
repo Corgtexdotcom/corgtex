@@ -141,3 +141,144 @@
   border-color: var(--line);
   color: var(--text);
 }
+
+/* --- Expanded Circle Node Styles --- */
+
+.circle-node.expanded {
+  width: 400px;
+  background: var(--surface);
+  border-width: 2px;
+  box-shadow: var(--shadow-md);
+  padding: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.expanded-circle-header {
+  padding: 16px;
+  background: var(--surface-strong);
+  border-bottom: 1px solid var(--line);
+}
+
+.expanded-circle-title-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 4px;
+}
+
+.collapse-btn {
+  font-size: 0.75rem;
+  background: var(--bg-alt);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 2px 8px;
+  cursor: pointer;
+  color: var(--muted);
+}
+
+.collapse-btn:hover {
+  background: var(--line);
+  color: var(--text);
+}
+
+.expanded-circle-content {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  flex: 1;
+}
+
+.empty-roles, .unassigned-text {
+  font-size: 0.85rem;
+  color: var(--muted);
+  font-style: italic;
+}
+
+.role-card {
+  background: var(--surface-strong);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  display: flex;
+  flex-direction: column;
+}
+
+.role-card-header {
+  padding: 8px 12px;
+  border-bottom: 1px dashed var(--line);
+  font-size: 0.9rem;
+  background: var(--bg-alt);
+  border-top-left-radius: var(--radius-md);
+  border-top-right-radius: var(--radius-md);
+}
+
+.role-card-people {
+  padding: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* --- Person Chip / Agent Chip Styles --- */
+
+.person-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px 4px 4px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  text-decoration: none;
+  color: var(--text);
+  transition: border-color 0.2s, transform 0.1s;
+}
+
+.person-chip:hover {
+  border-color: var(--accent);
+  transform: translateY(-1px);
+}
+
+.person-avatar {
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  border-radius: 12px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.65rem;
+  font-weight: 600;
+}
+
+.person-info {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.1;
+}
+
+.person-name {
+  font-size: 0.75rem;
+  font-weight: 500;
+}
+
+.person-role-name {
+  font-size: 0.65rem;
+  color: var(--muted);
+}
+
+.agent-chip {
+  border-color: var(--accent-soft);
+  background: rgba(15, 23, 42, 0.02);
+}
+
+.agent-chip .person-avatar {
+  background: #f1f5f9;
+  color: #334155;
+  border: 1px solid var(--line);
+  font-size: 0.8rem;
+}

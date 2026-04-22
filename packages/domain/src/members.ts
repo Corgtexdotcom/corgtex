@@ -1,6 +1,6 @@
 import type { MemberRole } from "@prisma/client";
+import { prisma, hashPassword } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
-import { prisma, hashPassword, randomOpaqueToken, sha256 } from "@corgtex/shared";
 import { AppError, invariant } from "./errors";
 import { appendEvents } from "./events";
 import { requireWorkspaceMembership } from "./auth";
@@ -58,62 +58,24 @@ export async function listMembersEnriched(workspaceId: string, opts?: { includeI
   });
 }
 
-export async function bulkInviteMembers(actor: AppActor, params: {
+export async function createMember(actor: AppActor, params: {
   workspaceId: string;
-  members: { email: string; displayName?: string | null; role?: MemberRole }[];
-}): Promise<{ invited: number; details: { email: string; displayName: string | null; token: string }[]; errors: string[] }> {
+  email: string;
+  password: string;
+  displayName?: string | null;
+  role: MemberRole;
+}) {
   await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
     allowedRoles: ["ADMIN"],
   });
 
-  let invited = 0;
-  const errors: string[] = [];
-  const details: { email: string; displayName: string | null; token: string }[] = [];
-
-  for (const info of params.members) {
-    try {
-      const result = await createMember(actor, {
-        workspaceId: params.workspaceId,
-        email: info.email,
-        displayName: info.displayName,
-        role: info.role || "CONTRIBUTOR",
-      });
-      invited++;
-      details.push({
-        email: result.user.email,
-        displayName: result.user.displayName,
-        token: result.token,
-      });
-    } catch (e: any) {
-      errors.push(`Failed for ${info.email}: ${e.message}`);
-    }
-  }
-
-  return { invited, details, errors };
-}
-
-export async function createMember(actor: AppActor, params: {
-  workspaceId: string;
-  email: string;
-  displayName?: string | null;
-  role: MemberRole;
-  skipAdminCheck?: boolean;
-}) {
-  if (!params.skipAdminCheck) {
-    await requireWorkspaceMembership({
-      actor,
-      workspaceId: params.workspaceId,
-      allowedRoles: ["ADMIN"],
-    });
-  }
-
   const email = params.email.trim().toLowerCase();
   invariant(email.length > 0, 400, "INVALID_INPUT", "Email is required.");
+  invariant(params.password.length >= 8, 400, "INVALID_INPUT", "Password must be at least 8 characters.");
 
   return prisma.$transaction(async (tx) => {
-    const randomPassword = randomOpaqueToken();
     const user = await tx.user.upsert({
       where: { email },
       update: {
@@ -122,7 +84,7 @@ export async function createMember(actor: AppActor, params: {
       create: {
         email,
         displayName: params.displayName?.trim() || null,
-        passwordHash: hashPassword(randomPassword),
+        passwordHash: hashPassword(params.password),
       },
       select: {
         id: true,
@@ -178,33 +140,7 @@ export async function createMember(actor: AppActor, params: {
       },
     ]);
 
-    const token = randomOpaqueToken();
-    await tx.passwordResetToken.create({
-      data: {
-        userId: user.id,
-        tokenHash: sha256(token),
-        expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
-      },
-    });
-
-    return { user, member, token };
-  });
-}
-
-export async function inviteMember(actor: AppActor, params: {
-  workspaceId: string;
-  email: string;
-  displayName?: string | null;
-}) {
-  await requireWorkspaceMembership({
-    actor,
-    workspaceId: params.workspaceId,
-  });
-
-  return createMember(actor, {
-    ...params,
-    role: "CONTRIBUTOR",
-    skipAdminCheck: true,
+    return { user, member };
   });
 }
 
@@ -212,7 +148,6 @@ export async function updateMember(actor: AppActor, params: {
   workspaceId: string;
   memberId: string;
   role?: MemberRole;
-  isActive?: boolean;
   displayName?: string | null;
 }) {
   await requireWorkspaceMembership({
@@ -230,7 +165,6 @@ export async function updateMember(actor: AppActor, params: {
 
     const memberData: Record<string, unknown> = {};
     if (params.role !== undefined) memberData.role = params.role;
-    if (params.isActive !== undefined) memberData.isActive = params.isActive;
 
     const updated = await tx.member.update({
       where: { id: params.memberId },
@@ -296,4 +230,89 @@ export async function deactivateMember(actor: AppActor, params: {
 
     return updated;
   });
+}
+
+export async function getMemberProfile(workspaceId: string, memberId: string) {
+  const member = await prisma.member.findUnique({
+    where: { id: memberId },
+    include: {
+      user: {
+        select: {
+          id: true,
+          email: true,
+          displayName: true,
+        },
+      },
+      roleAssignments: {
+        include: {
+          role: {
+            include: {
+              circle: {
+                select: { id: true, name: true, maturityStage: true },
+              },
+            },
+          },
+        },
+      },
+      assignedActions: {
+        where: { status: 'OPEN' },
+        take: 5,
+        orderBy: { createdAt: 'desc' }
+      },
+      assignedTensions: {
+        where: { status: { in: ['OPEN', 'IN_PROGRESS'] } },
+        take: 5,
+        orderBy: { createdAt: 'desc' }
+      }
+    },
+  });
+
+  invariant(member && member.workspaceId === workspaceId, 404, "NOT_FOUND", "Member not found.");
+
+  const meetings = await prisma.meeting.findMany({
+    where: {
+      workspaceId,
+      participantIds: {
+        has: member.user.id,
+      },
+    },
+    orderBy: { recordedAt: 'desc' },
+    take: 5,
+  });
+
+  const recentActivity = await prisma.auditLog.findMany({
+    where: {
+      workspaceId,
+      actorUserId: member.user.id,
+    },
+    orderBy: { createdAt: 'desc' },
+    take: 10,
+  });
+
+  const proposals = await prisma.proposal.findMany({
+    where: {
+      workspaceId,
+      authorUserId: member.user.id,
+    },
+    orderBy: { createdAt: 'desc' },
+    take: 5,
+  });
+
+  const authoredTensions = await prisma.tension.findMany({
+    where: {
+      workspaceId,
+      authorUserId: member.user.id,
+      status: { in: ['OPEN', 'IN_PROGRESS'] }
+    },
+    orderBy: { createdAt: 'desc' },
+    take: 5,
+  });
+
+  return {
+    member,
+    meetings,
+    recentActivity,
+    proposals,
+    authoredTensions
+  };
 }
