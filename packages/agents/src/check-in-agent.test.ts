@@ -105,7 +105,7 @@ describe("runDailyCheckInAgent", () => {
   });
 
   it("creates a check-in without requiring a database", async () => {
-    const { runDailyCheckInAgent } = await import("./runtime");
+    const { runDailyCheckInAgent } = await import(".");
 
     const result = await runDailyCheckInAgent({
       workspaceId: "ws-1",
