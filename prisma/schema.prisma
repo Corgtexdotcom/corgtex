@@ -268,6 +268,7 @@ model Workspace {
   meetingInsights     MeetingInsight[]
   goals               Goal[]
   recognitions        Recognition[]
+  agentIdentities     AgentIdentity[]
 }
 
 model WorkspaceFeatureFlag {
@@ -310,7 +311,8 @@ model User {
   oauthConnections  OAuthConnection[]
   resetTokens       PasswordResetToken[]
   ssoIdentities     UserSsoIdentity[]
-  meetingInsights   MeetingInsight[]
+  meetingInsights          MeetingInsight[]
+  createdAgentIdentities   AgentIdentity[]    @relation("AgentIdentityCreator")
 }
 
 model Session {
@@ -411,6 +413,7 @@ model Circle {
   proposals    Proposal[]
   policyCorpus PolicyCorpus[]
   goals        Goal[]
+  agentAssignments CircleAgentAssignment[]
 
   @@index([workspaceId])
 }
@@ -431,6 +434,7 @@ model Role {
 
   circle      Circle           @relation(fields: [circleId], references: [id], onDelete: Cascade)
   assignments RoleAssignment[]
+  agentAssignments CircleAgentAssignment[]
 
   @@index([circleId])
 }
@@ -984,8 +988,9 @@ model AgentCredential {
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
 
-  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  createdBy User?     @relation("AgentCredentialCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  workspace       Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  createdBy       User?           @relation("AgentCredentialCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  agentIdentities AgentIdentity[]
 }
 
 model AgentRun {
@@ -1877,4 +1882,52 @@ model Recognition {
 
   @@index([workspaceId, createdAt])
   @@index([recipientMemberId])
+}
+
+// --- Agent Identity (first-class agent members) ---
+
+enum AgentMemberType {
+  INTERNAL
+  EXTERNAL
+}
+
+model AgentIdentity {
+  id                  String          @id @default(uuid())
+  workspaceId         String
+  agentKey            String
+  memberType          AgentMemberType @default(INTERNAL)
+  displayName         String
+  avatarUrl           String?
+  purposeMd           String?         @db.Text
+  behaviorMd          String?         @db.Text
+  isActive            Boolean         @default(true)
+  createdByUserId     String?
+  linkedCredentialId  String?
+  maxSpendPerRunCents Int?
+  maxRunsPerDay       Int?
+  maxRunsPerHour      Int?
+  createdAt           DateTime        @default(now())
+  updatedAt           DateTime        @updatedAt
+
+  workspace        Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  createdByUser    User?            @relation("AgentIdentityCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  linkedCredential AgentCredential? @relation(fields: [linkedCredentialId], references: [id], onDelete: SetNull)
+  circleAssignments CircleAgentAssignment[]
+
+  @@unique([workspaceId, agentKey])
+  @@index([workspaceId, isActive])
+}
+
+model CircleAgentAssignment {
+  id              String   @id @default(uuid())
+  circleId        String
+  agentIdentityId String
+  roleId          String?
+  assignedAt      DateTime @default(now())
+
+  circle        Circle        @relation(fields: [circleId], references: [id], onDelete: Cascade)
+  agentIdentity AgentIdentity @relation(fields: [agentIdentityId], references: [id], onDelete: Cascade)
+  role          Role?         @relation(fields: [roleId], references: [id], onDelete: SetNull)
+
+  @@unique([circleId, agentIdentityId])
 }

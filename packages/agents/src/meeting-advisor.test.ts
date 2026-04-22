@@ -28,6 +28,9 @@ const prismaMock = {
     update: vi.fn(),
   },
   $transaction: vi.fn(),
+  agentIdentity: {
+    findUnique: vi.fn(),
+  },
 };
 
 const envMock = {
@@ -51,6 +54,8 @@ vi.mock("@corgtex/domain", async (importOriginal) => {
     ...actual,
     isAgentEnabled: vi.fn().mockResolvedValue(true),
     getAgentModelOverride: vi.fn().mockResolvedValue(undefined),
+    resolveAgentIdentityLimits: vi.fn().mockResolvedValue(null),
+    resolveAgentBehaviorContext: vi.fn().mockResolvedValue(null),
   };
 });
 
@@ -99,6 +104,7 @@ describe("runMeetingSummaryAgent", () => {
 
     // Mock $transaction to execute the callback
     prismaMock.$transaction.mockReset().mockImplementation(async (fn: any) => fn(prismaMock));
+    prismaMock.agentIdentity.findUnique.mockReset().mockResolvedValue(null);
   });
 
   it("completes without requiring a live database", async () => {

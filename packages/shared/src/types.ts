@@ -12,6 +12,7 @@ export type AgentActor = {
   credentialId?: string;
   workspaceIds?: string[];
   scopes?: string[];
+  agentIdentityId?: string;
 };
 
 export type AppActor = HumanActor | AgentActor;

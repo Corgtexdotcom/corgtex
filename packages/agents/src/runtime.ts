@@ -7,6 +7,7 @@ import { defaultModelGateway, resolveModel } from "@corgtex/models";
 import { absorbSource } from "./brain-absorb";
 import { runBrainMaintenance } from "./brain-maintenance";
 import { isAgentEnabled, getAgentModelOverride, AGENT_REGISTRY, type RegisteredAgentKey } from "@corgtex/domain";
+import { resolveAgentIdentityLimits, resolveAgentBehaviorContext } from "@corgtex/domain";
 
 type AgentOutcome = {
   resultJson: Prisma.InputJsonValue;
@@ -135,6 +136,43 @@ async function executeAgentRun<TPayload extends Record<string, unknown>, TContex
     return { skipped: true, reason: "budget_exceeded" };
   }
 
+  // --- Per-agent identity rate / spend limits ---
+  const identityLimits = await resolveAgentIdentityLimits(params.workspaceId, params.agentKey);
+  if (identityLimits) {
+    if (!identityLimits.isActive) {
+      return { skipped: true, reason: "agent_identity_inactive" };
+    }
+
+    if (identityLimits.maxRunsPerDay != null) {
+      const todayStart = new Date();
+      todayStart.setHours(0, 0, 0, 0);
+      const todayCount = await prisma.agentRun.count({
+        where: {
+          workspaceId: params.workspaceId,
+          agentKey: params.agentKey,
+          createdAt: { gte: todayStart },
+        },
+      });
+      if (todayCount >= identityLimits.maxRunsPerDay) {
+        return { skipped: true, reason: "daily_rate_limit" };
+      }
+    }
+
+    if (identityLimits.maxRunsPerHour != null) {
+      const hourAgo = new Date(Date.now() - 60 * 60 * 1000);
+      const hourCount = await prisma.agentRun.count({
+        where: {
+          workspaceId: params.workspaceId,
+          agentKey: params.agentKey,
+          createdAt: { gte: hourAgo },
+        },
+      });
+      if (hourCount >= identityLimits.maxRunsPerHour) {
+        return { skipped: true, reason: "hourly_rate_limit" };
+      }
+    }
+  }
+
   const run = await prisma.agentRun.create({
     data: {
       workspaceId: params.workspaceId,
@@ -222,7 +260,19 @@ async function executeAgentRun<TPayload extends Record<string, unknown>, TContex
     const tier = AGENT_REGISTRY[params.agentKey as RegisteredAgentKey]?.defaultModelTier ?? "none";
     const model = resolveModel(tier, override);
 
+    // Resolve behavioral directives (workspace-level + per-agent)
+    const behaviorContext = await resolveAgentBehaviorContext(params.workspaceId, params.agentKey);
+
     const context = await helpers.step("load-context", params.payload, () => params.buildContext(helpers, run.id));
+
+    // Inject behavioral context into payload so agents can reference it in system prompts
+    if (behaviorContext) {
+      (context as Record<string, unknown>).__behaviorMd = behaviorContext;
+    }
+    if (identityLimits?.maxSpendPerRunCents != null) {
+      (context as Record<string, unknown>).__maxSpendPerRunCents = identityLimits.maxSpendPerRunCents;
+    }
+
     const outcome = await params.execute(context, helpers, run.id, model);
     const nextStatus: AgentRunStatus = outcome.approvalCheckpoint ? "WAITING_APPROVAL" : "COMPLETED";
 
