@@ -46,12 +46,13 @@ The Planner (Claude):
 
 The Executor (Gemini in Antigravity):
 
-1. First action: `cat docs/plans/<branch>.md`. Echoes the acceptance checklist into the first commit message.
-2. Implements strictly within the plan's "Files to touch" allowlist. Any scope change requires a commit updating the plan first.
-3. Runs the plan's test plan locally.
-4. Marks the PR ready-for-review via `gh pr ready`. Attaches visual proof for frontend changes.
-5. Sets auto-merge: `gh pr merge --auto --squash`. This fires the merge once Codex approves and CI is green.
-6. Respects the **CI fix cap**: 3 red-CI fix attempts, then labels the PR `needs-replan` and stops.
+1. **Verify branch:** First action is to run `git branch --show-current` to ensure branch correctness, since multiple agents often run concurrently in the workspace. Checkout or create the correct branch first.
+2. **Context:** Runs `cat docs/plans/<branch>.md` and echoes the acceptance checklist into the first commit message.
+3. **Implements strictly** within the plan's "Files to touch" allowlist. Any scope change requires a commit updating the plan first.
+4. **Validates locally:** Runs `npm run check` and whatever the plan's test plan specifies. Waits for these commands to complete entirely and strictly ensures there are no lint or compilation errors before pushing.
+5. **Opens the PR** via `gh pr create` (not just marking ready). The PR description must explicitly include the completed acceptance checklist in Markdown and link to the plan file. Attaches visual proof for frontend changes.
+6. **Sets auto-merge:** `gh pr merge --auto --squash`. This fires the merge once Codex approves and GitHub CI is green.
+7. **Respects the CI fix cap**: 3 red-CI fix attempts, then labels the PR `needs-replan` and stops.
 
 ## Stage 3: Review
 

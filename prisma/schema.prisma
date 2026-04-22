@@ -511,6 +511,7 @@ model Proposal {
   isPrivate    Boolean        @default(false)
   publishedAt  DateTime?
   decidedAt    DateTime?
+  autoApproveAt DateTime?
   createdAt    DateTime       @default(now())
   updatedAt    DateTime       @updatedAt
 
@@ -529,16 +530,19 @@ model Proposal {
 }
 
 model ProposalReaction {
-  id         String   @id @default(uuid())
-  proposalId String
-  userId     String
-  reaction   String
-  createdAt  DateTime @default(now())
+  id           String   @id @default(uuid())
+  proposalId   String
+  userId       String
+  reaction     String
+  bodyMd       String?  @db.Text
+  resolvedAt   DateTime?
+  resolvedNote String?
+  createdAt    DateTime @default(now())
 
   proposal Proposal @relation(fields: [proposalId], references: [id], onDelete: Cascade)
   user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  @@unique([proposalId, userId])
+  @@index([proposalId, createdAt])
 }
 
 model ApprovalPolicy {
