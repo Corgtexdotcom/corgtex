@@ -355,7 +355,6 @@ npm run dev
 No schema changes. Pure frontend + new domain functions. Safe to revert by reverting code changes.
 
 ## Technical notes for the executor
-- participantIds is a String[] stored on the Meeting model. Use { has: userId } for Prisma filtering.
+- `participantIds` is a `String[]` stored on the `Meeting` model. Use `{ has: userId }` for Prisma filtering.
 - The AI briefing should be generated on-demand (button click)
 - Ensure all new pages use force-dynamic.
-
