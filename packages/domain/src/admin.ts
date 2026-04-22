@@ -71,7 +71,6 @@ export async function adminAddToWorkspace(actor: AppActor, params: {
     email: user.email,
     displayName: user.displayName,
     role: params.role,
-    skipAdminCheck: true,
   });
 }
 
