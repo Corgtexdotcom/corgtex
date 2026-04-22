@@ -106,10 +106,14 @@ Stop when the PR is open and CI is green locally. Hand off to the Reviewer.
 
 ---
 
-## For Reviewers (Codex)
+## For Reviewers (Codex via `beepto-codex`)
 
 Your job is to approve or reject the PR based on mechanical criteria.
 Do not write code. Do not merge if any criterion fails.
+
+**GitHub identity:** The Reviewer runs as [`beepto-codex`](https://github.com/beepto-codex), a dedicated bot account with `write` access to the repository. This is a separate identity from the Executor (`puncar-dev`), which allows the Reviewer to submit formal GitHub approvals on PRs authored by the Executor.
+
+**Authentication:** Codex must be configured with a PAT belonging to `beepto-codex` (stored in the Codex environment, never committed). The PAT needs `repo` scope.
 
 Canonical checklist lives in [.codex/review.md](.codex/review.md).
 Summary:
@@ -124,7 +128,7 @@ Summary:
 8. **Visual proof attached** for any frontend-path change.
 9. **All required CI checks green.**
 
-If all pass, approve the PR. Auto-merge (set by the Executor via `gh pr merge --auto --squash`) will fire. If any fail, request changes with a comment pointing to the specific criterion; do not approve partially.
+If all pass, approve the PR using `gh pr review <number> --approve`. Auto-merge (set by the Executor via `gh pr merge --auto --squash`) will fire once the approval lands. If any fail, request changes with a comment pointing to the specific criterion; do not approve partially.
 
 ---
 
