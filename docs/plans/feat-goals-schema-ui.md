@@ -34,6 +34,7 @@ Add a goal alignment system that lets users create and visualize goals at three 
 - `packages/domain/src/stubs.ts`
 - `packages/domain/src/admin.ts`
 - `packages/domain/src/member-briefing.test.ts`
+- `packages/domain/src/goals.test.ts`
 - `apps/web/app/api/workspaces/[workspaceId]/members/route.ts`
 - `apps/web/app/workspaces/[workspaceId]/settings/actions.ts`
 - `docs/plans/feat-goal-pulse-agent.md`
@@ -283,22 +284,22 @@ Add "Goals" to the sidebar navigation. Use a target/bullseye icon. Place between
 
 ## Acceptance criteria
 
-- [ ] Goal, KeyResult, GoalUpdate, GoalLink, Recognition models created with proper migration
-- [ ] GoalCadence enum supports WEEKLY, MONTHLY, QUARTERLY, ANNUAL, FIVE_YEAR, TEN_YEAR
-- [ ] GoalLevel enum supports COMPANY, CIRCLE, PERSONAL
-- [ ] CRUD operations for goals, key results, goal links, recognitions work
-- [ ] `recomputeGoalProgress` correctly averages KR progress and rolls up to parent goals
-- [ ] Events emitted for goal.created, goal.updated, goal-link.created
-- [ ] Goals page shows hierarchical tree view with cadence-tab filtering
-- [ ] "My Slice" view shows member's goals with upward contribution links
-- [ ] Animated progress bars with color transitions (green/yellow/red)
-- [ ] Recognition stories can be created and displayed (no leaderboards)
-- [ ] Workspace homepage shows top-level goals in "Strategic Direction" section
-- [ ] "Goals" link added to workspace navigation
-- [ ] All new pages have `export const dynamic = "force-dynamic"`
-- [ ] No TypeScript errors (`npm run typecheck`)
-- [ ] No lint errors (`npm run lint`)
-- [ ] Prisma validates (`npm run prisma:validate`)
+- [x] Goal, KeyResult, GoalUpdate, GoalLink, Recognition models created with proper migration
+- [x] GoalCadence enum supports WEEKLY, MONTHLY, QUARTERLY, ANNUAL, FIVE_YEAR, TEN_YEAR
+- [x] GoalLevel enum supports COMPANY, CIRCLE, PERSONAL
+- [x] CRUD operations for goals, key results, goal links, recognitions work
+- [x] `recomputeGoalProgress` correctly averages KR progress and rolls up to parent goals
+- [x] Events emitted for goal.created, goal.updated, goal-link.created
+- [x] Goals page shows hierarchical tree view with cadence-tab filtering
+- [x] "My Slice" view shows member's goals with upward contribution links
+- [x] Animated progress bars with color transitions (green/yellow/red)
+- [x] Recognition stories can be created and displayed (no leaderboards)
+- [x] Workspace homepage shows top-level goals in "Strategic Direction" section
+- [x] "Goals" link added to workspace navigation
+- [x] All new pages have `export const dynamic = "force-dynamic"`
+- [x] No TypeScript errors (`npm run typecheck`)
+- [x] No lint errors (`npm run lint`)
+- [x] Prisma validates (`npm run prisma:validate`)
 
 ## Test plan
 
