@@ -43,4 +43,5 @@ export * from "./objection-validation";
 export * from "./conversation-brain";
 export * from "./sso";
 export * from "./cost-budget";
+export * from "./meeting-intelligence";
 export * from "./admin";

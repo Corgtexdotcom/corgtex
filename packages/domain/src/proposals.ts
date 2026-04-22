@@ -49,6 +49,7 @@ export async function createProposal(actor: AppActor, params: {
   bodyMd: string;
   circleId?: string | null;
   isPrivate?: boolean;
+  meetingId?: string | null;
 }) {
   await requireWorkspaceMembership({
     actor,
@@ -71,6 +72,7 @@ export async function createProposal(actor: AppActor, params: {
         bodyMd,
         circleId: params.circleId || null,
         isPrivate: params.isPrivate ?? false,
+        meetingId: params.meetingId || null,
         publishedAt: params.isPrivate ? null : new Date(),
       },
     });
