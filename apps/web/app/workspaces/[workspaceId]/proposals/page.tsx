@@ -1,10 +1,11 @@
 import { listProposals } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
+import { ProposalReactionsThread } from "./ProposalReactionsThread";
 import {
   createProposalAction,
   submitProposalAction,
-  reactToProposalAction,
+  postReactionAction,
   archiveProposalAction,
   publishProposalAction,
   initiateAdviceProcessAction,
@@ -25,14 +26,16 @@ export default async function ProposalsPage({
 }) {
   const { workspaceId } = await params;
   const actor = await requirePageActor();
-  const [{ items: proposals }, currentWorkspace] = await Promise.all([
-    listProposals(actor, workspaceId, { take: 50 }),
-    prisma.workspace.findUnique({ where: { id: workspaceId }, select: { slug: true } }),
-  ]);
-  const isDemo = currentWorkspace?.slug === "jnj-demo";
-
   const resolvedSearch = searchParams ? await searchParams : {};
   const statusFilter = typeof resolvedSearch.status === "string" ? resolvedSearch.status : "ACTIVE";
+  const circleFilter = typeof resolvedSearch.circleId === "string" ? resolvedSearch.circleId : null;
+
+  const [{ items: proposals }, currentWorkspace, circles] = await Promise.all([
+    listProposals(actor, workspaceId, { take: 50, circleId: circleFilter }),
+    prisma.workspace.findUnique({ where: { id: workspaceId }, select: { slug: true } }),
+    prisma.circle.findMany({ where: { workspaceId }, select: { id: true, name: true }, orderBy: { name: "asc" } }),
+  ]);
+  const isDemo = currentWorkspace?.slug === "jnj-demo";
 
   const groupedProposals = {
     PRIVATE: proposals.filter((p) => p.isPrivate),
@@ -59,6 +62,15 @@ export default async function ProposalsPage({
       </header>
 
       <section className="ws-section">
+        <div style={{ marginBottom: 16 }}>
+          <form method="get" style={{ display: "inline-block" }}>
+            {statusFilter !== "ACTIVE" && <input type="hidden" name="status" value={statusFilter} />}
+            <select name="circleId" onChange={(e) => e.target.form?.submit()} defaultValue={circleFilter || ""} style={{ padding: "4px 8px", borderRadius: 4 }}>
+              <option value="">All Circles</option>
+              {circles.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+          </form>
+        </div>
         <div className="nr-filter-bar">
           {(["PRIVATE", "ACTIVE", "DRAFT", "SUBMITTED", "ADVICE_GATHERING", "RESOLVED", "ARCHIVED"] as const).map((s) => (
             <a 
@@ -126,6 +138,7 @@ export default async function ProposalsPage({
                     <form action={submitProposalAction} style={{ display: "inline-block" }}>
                       <input type="hidden" name="workspaceId" value={workspaceId} />
                       <input type="hidden" name="proposalId" value={proposal.id} />
+                      <input type="number" name="autoApproveHours" placeholder="Auto-approve in hours (e.g. 48)" defaultValue={48} style={{ width: "200px", marginRight: 8, display: "inline-block", padding: "4px 8px" }} />
                       <button type="submit" className="secondary small">Submit for approval</button>
                     </form>
                     <form action={initiateAdviceProcessAction} style={{ display: "inline-block" }}>
@@ -136,26 +149,14 @@ export default async function ProposalsPage({
                   </>
                 )}
                 {!isDemo && !proposal.isPrivate && proposal.status === "SUBMITTED" && (
-                <div className="actions-inline">
-                  <form action={reactToProposalAction} className="actions-inline">
-                    <input type="hidden" name="workspaceId" value={workspaceId} />
-                    <input type="hidden" name="proposalId" value={proposal.id} />
-                    <input type="hidden" name="reaction" value="SUPPORT" />
-                    <button type="submit" className="secondary small">Support</button>
-                  </form>
-                  <form action={reactToProposalAction} className="actions-inline">
-                    <input type="hidden" name="workspaceId" value={workspaceId} />
-                    <input type="hidden" name="proposalId" value={proposal.id} />
-                    <input type="hidden" name="reaction" value="QUESTION" />
-                    <button type="submit" className="secondary small">Question</button>
-                  </form>
-                  <form action={reactToProposalAction} className="actions-inline">
-                    <input type="hidden" name="workspaceId" value={workspaceId} />
-                    <input type="hidden" name="proposalId" value={proposal.id} />
-                    <input type="hidden" name="reaction" value="CONCERN" />
-                    <button type="submit" className="warning small">Concern</button>
-                  </form>
-                </div>
+                  <>
+                    {proposal.autoApproveAt && (
+                      <div style={{ fontSize: "0.85rem", color: "var(--accent)", marginTop: 8 }}>
+                         Auto-approves {new Date(proposal.autoApproveAt).toLocaleString()} if no unresolved objections
+                      </div>
+                    )}
+                    <ProposalReactionsThread workspaceId={workspaceId} proposal={proposal} currentUserId={actor.kind === "user" ? actor.user.id : null} />
+                  </>
                 )}
                 {!proposal.isPrivate && proposal.status === "ADVICE_GATHERING" && proposal.adviceProcess && (
                   <div style={{ padding: "16px", background: "rgba(255, 0, 128, 0.05)", borderLeft: "3px solid var(--accent)", marginTop: 12, borderRadius: 4, width: "100%" }}>

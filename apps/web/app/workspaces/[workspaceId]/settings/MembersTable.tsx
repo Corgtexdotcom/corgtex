@@ -2,7 +2,7 @@
 
 import { useState, useMemo } from "react";
 import Link from "next/link";
-import { updateMemberAction, deactivateMemberAction, createMemberAction } from "../actions";
+import { updateMemberAction, deactivateMemberAction, createMemberAction, inviteMemberAction, bulkInviteAction } from "../actions";
 
 // Use the type directly from what we fetch to avoid schema type friction in client components
 type EnrichedMember = {
@@ -29,9 +29,11 @@ type EnrichedMember = {
 export function MembersTable({
   workspaceId,
   members,
+  isAdmin,
 }: {
   workspaceId: string;
   members: EnrichedMember[];
+  isAdmin?: boolean;
 }) {
   const [searchQuery, setSearchQuery] = useState("");
   const [roleFilter, setRoleFilter] = useState<string>("ALL");
@@ -108,13 +110,13 @@ export function MembersTable({
         </div>
       </div>
 
-      {/* Add Member Collapsible */}
+      {/* Invite Member Collapsible */}
       <details style={{ background: "var(--bg)", border: "1px dashed var(--line)", borderRadius: 8 }}>
         <summary className="nr-section-header" style={{ borderTop: "none", display: "block", padding: "16px", margin: 0, cursor: "pointer", color: "var(--accent)" }}>
-          <span style={{ fontWeight: 600 }}>+ Add member</span>
+          <span style={{ fontWeight: 600 }}>+ {isAdmin ? "Invite member" : "Invite colleague"}</span>
         </summary>
         <div style={{ padding: "0 16px 16px" }}>
-          <form action={createMemberAction} className="stack nr-form-section" style={{ marginTop: 8 }}>
+          <form action={isAdmin ? createMemberAction : inviteMemberAction} className="stack nr-form-section" style={{ marginTop: 8 }}>
             <input type="hidden" name="workspaceId" value={workspaceId} />
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
               <label>
@@ -126,25 +128,47 @@ export function MembersTable({
                 <input name="email" type="email" required />
               </label>
             </div>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
-              <label>
-                Password
-                <input name="password" type="password" required minLength={8} />
-              </label>
-              <label>
-                System Role
-                <select name="role" defaultValue="CONTRIBUTOR">
-                  <option value="CONTRIBUTOR">Contributor</option>
-                  <option value="FACILITATOR">Facilitator</option>
-                  <option value="FINANCE_STEWARD">Finance Steward</option>
-                  <option value="ADMIN">Admin</option>
-                </select>
-              </label>
-            </div>
-            <button type="submit" style={{ alignSelf: "flex-start" }}>Add member</button>
+            {isAdmin && (
+              <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 16 }}>
+                <label>
+                  System Role
+                  <select name="role" defaultValue="CONTRIBUTOR">
+                    <option value="CONTRIBUTOR">Contributor</option>
+                    <option value="FACILITATOR">Facilitator</option>
+                    <option value="FINANCE_STEWARD">Finance Steward</option>
+                    <option value="ADMIN">Admin</option>
+                  </select>
+                </label>
+              </div>
+            )}
+            <button type="submit" style={{ alignSelf: "flex-start" }}>{isAdmin ? "Invite member" : "Invite colleague"}</button>
           </form>
         </div>
       </details>
+
+      {isAdmin && (
+        <details style={{ background: "var(--bg)", border: "1px dashed var(--line)", borderRadius: 8, marginTop: 16 }}>
+          <summary className="nr-section-header" style={{ borderTop: "none", display: "block", padding: "16px", margin: 0, cursor: "pointer", color: "var(--accent)" }}>
+            <span style={{ fontWeight: 600 }}>+ Bulk Invite (Admins)</span>
+          </summary>
+          <div style={{ padding: "0 16px 16px" }}>
+            <form action={bulkInviteAction} className="stack nr-form-section" style={{ marginTop: 8 }}>
+              <input type="hidden" name="workspaceId" value={workspaceId} />
+              <label>
+                Paste CSV Lines (Name, Email, Role)
+                <textarea 
+                  name="csvData" 
+                  rows={4} 
+                  placeholder="John Doe, john@example.com, CONTRIBUTOR&#10;Jane Smith, jane@example.com, ADMIN"
+                  style={{ fontFamily: 'monospace', width: '100%', padding: '8px' }}
+                  required
+                />
+              </label>
+              <button type="submit" style={{ alignSelf: "flex-start" }}>Send Bulk Invites</button>
+            </form>
+          </div>
+        </details>
+      )}
 
       {/* Filters Bar */}
       <div style={{ display: "flex", flexWrap: "wrap", gap: 16, alignItems: "center", justifyContent: "space-between" }}>
@@ -261,7 +285,7 @@ export function MembersTable({
                           name="role" 
                           defaultValue={member.role}
                           onChange={(e) => e.target.form?.requestSubmit()}
-                          disabled={!member.isActive}
+                          disabled={!member.isActive || !isAdmin}
                           style={{ padding: "4px 8px", fontSize: "0.75rem", background: "transparent", border: "none" }}
                         >
                           <option value="CONTRIBUTOR">Contributor</option>

@@ -6,10 +6,13 @@ import { getApprovalPolicy, ensureApprovalFlow } from "./approvals";
 import { invariant } from "./errors";
 import { privacyFilter } from "./privacy";
 
-export async function listProposals(actor: AppActor, workspaceId: string, opts?: { take?: number; skip?: number }) {
+export async function listProposals(actor: AppActor, workspaceId: string, opts?: { take?: number; skip?: number; circleId?: string | null }) {
   const take = opts?.take ?? 20;
   const skip = opts?.skip ?? 0;
-  const where = { workspaceId, ...privacyFilter(actor) };
+  const where: any = { workspaceId, ...privacyFilter(actor) };
+  if (opts?.circleId !== undefined) {
+    where.circleId = opts.circleId;
+  }
 
   const [items, total] = await Promise.all([
     prisma.proposal.findMany({
@@ -199,7 +202,7 @@ export async function archiveProposal(actor: AppActor, params: {
   });
 }
 
-export async function submitProposal(actor: AppActor, params: { workspaceId: string; proposalId: string }) {
+export async function submitProposal(actor: AppActor, params: { workspaceId: string; proposalId: string; autoApproveHours?: number }) {
   await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
@@ -223,12 +226,15 @@ export async function submitProposal(actor: AppActor, params: { workspaceId: str
       createdByUserId: actor.kind === "user" ? actor.user.id : null,
     });
 
+    const autoApproveAt = params.autoApproveHours ? new Date(Date.now() + params.autoApproveHours * 60 * 60 * 1000) : null;
+
     await tx.proposal.update({
       where: { id: proposal.id },
       data: {
         status: "SUBMITTED",
         isPrivate: false,
         publishedAt: proposal.publishedAt || new Date(),
+        autoApproveAt,
       },
     });
 
@@ -321,4 +327,59 @@ export async function publishProposal(actor: AppActor, params: {
 
     return updated;
   });
+}
+
+export async function autoApproveProposals(): Promise<number> {
+  const now = new Date();
+  
+  const proposalsToApprove = await prisma.proposal.findMany({
+    where: {
+      status: "SUBMITTED",
+      autoApproveAt: { lt: now, not: null },
+      reactions: {
+        none: {
+          reaction: "OBJECTION",
+          resolvedAt: null
+        }
+      }
+    },
+    select: { id: true, workspaceId: true }
+  });
+
+  if (proposalsToApprove.length === 0) return 0;
+
+  let approvedCount = 0;
+  for (const p of proposalsToApprove) {
+    try {
+      await prisma.$transaction(async (tx) => {
+        await tx.proposal.update({
+          where: { id: p.id },
+          data: { status: "APPROVED", decidedAt: now },
+        });
+
+        await tx.auditLog.create({
+          data: {
+            workspaceId: p.workspaceId,
+            action: "proposal.auto_approved",
+            entityType: "Proposal",
+            entityId: p.id,
+          },
+        });
+
+        await appendEvents(tx, [
+          {
+            workspaceId: p.workspaceId,
+            type: "proposal.auto_approved",
+            aggregateType: "Proposal",
+            aggregateId: p.id,
+            payload: { proposalId: p.id },
+          },
+        ]);
+      });
+      approvedCount++;
+    } catch (error) {
+      console.error(`Failed to auto-approve proposal ${p.id}`, error);
+    }
+  }
+  return approvedCount;
 }
