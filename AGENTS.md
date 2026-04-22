@@ -99,7 +99,8 @@ merge.
 4. **Open the PR as ready-for-review** once all acceptance criteria are ticked. Use `gh pr create`. If `gh` isn't on `PATH`, invoke `/opt/homebrew/bin/gh`. The PR body must explicitly include the completed acceptance criteria checklist in Markdown, and must link back to `docs/plans/<branch>.md`.
 5. **Frontend changes:** attach a screen recording (`.mp4` / `.webm`) or screenshots (`.png`) to the PR description. Any change under `apps/web/app/**` or `apps/web/components/**` requires visual proof.
 6. **CI fix loop cap:** if CI is red, you may push up to 3 fix commits. After the 3rd failed attempt, label the PR `needs-replan`, comment a summary, and stop. The human will re-prompt the Planner.
-7. **Never:** merge your own PR, use `--admin`, skip hooks with `--no-verify`, or run `prisma db push`. Never remove `export const dynamic = "force-dynamic"` from a Prisma-touching page. Never commit `.env` or any secret.
+7. **Never (default):** merge your own PR, use `--admin`, skip hooks with `--no-verify`, or run `prisma db push`. Never remove `export const dynamic = "force-dynamic"` from a Prisma-touching page. Never commit `.env` or any secret.
+8. **Human-directed bypass:** If the human explicitly instructs you via prompt to force-merge a specific PR, you may: (a) add the `force-merge` label, (b) run `gh pr merge <number> --admin --squash`, (c) add a PR comment: `⚠️ Human-directed bypass: merged with --admin per explicit instruction.` This is the **only** exception to rule 7's ban on `--admin` and self-merging. You must still never skip `--no-verify`, run `prisma db push`, or commit secrets.
 
 Stop when the PR is open and CI is green locally. Hand off to the Reviewer.
 
@@ -118,7 +119,7 @@ Summary:
 3. **Acceptance criteria all ticked** and each is reflected in code or CI output.
 4. **No forbidden-path changes** without the `forbidden-path-approved` label.
 5. **Diff within caps** (≤ 400 LOC of code, ≤ 15 files) unless `large-change-approved` is set.
-6. **No secrets** (gitleaks green), no `prisma db push`, no `--no-verify`, no `--admin`, no `force-dynamic` removed from Prisma pages.
+6. **No secrets** (gitleaks green), no `prisma db push`, no `--no-verify`, no `force-dynamic` removed from Prisma pages. `--admin` is forbidden unless the `force-merge` label is present and the PR comment trail documents the human directive.
 7. **Tests added** when `packages/domain/**` changed.
 8. **Visual proof attached** for any frontend-path change.
 9. **All required CI checks green.**
@@ -132,5 +133,16 @@ If all pass, approve the PR. Auto-merge (set by the Executor via `gh pr merge --
 The human prompter can intervene at any time using PR labels:
 
 - `halt-agents` — Reviewer will not merge; Executor will not push further commits.
-- `force-merge` — human override. Logged in the PR and in the daily digest.
+- `force-merge` — human override. Logged in the PR and in the daily digest. When applied by an agent acting on explicit human instruction, the agent must add a PR comment documenting the directive and may use `--admin` to merge.
 - `needs-replan` — Executor sets this when stuck; Planner picks up.
+
+### Human-directed agent bypass
+
+When a human explicitly instructs an agent (via prompt) to force-merge a PR:
+
+1. The agent adds the `force-merge` label to the PR.
+2. The agent adds a PR comment: `⚠️ Human-directed bypass: merged with --admin per explicit instruction.`
+3. The agent runs `gh pr merge <number> --admin --squash`.
+4. This is logged in the daily digest alongside all other `force-merge` events.
+
+**Scope:** This bypass covers branch protection (required reviews, status checks). It does **not** exempt the PR from secret scanning, `prisma db push` bans, or `--no-verify`.
