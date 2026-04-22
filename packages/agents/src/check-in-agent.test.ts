@@ -27,6 +27,9 @@ const prismaMock = {
     create: vi.fn(),
   },
   $transaction: vi.fn(),
+  agentIdentity: {
+    findUnique: vi.fn(),
+  },
 };
 
 const envMock = {
@@ -53,6 +56,8 @@ vi.mock("@corgtex/domain", async (importOriginal) => {
     createCheckIn: createCheckInMock,
     isAgentEnabled: vi.fn().mockResolvedValue(true),
     getAgentModelOverride: vi.fn().mockResolvedValue(undefined),
+    resolveAgentIdentityLimits: vi.fn().mockResolvedValue(null),
+    resolveAgentBehaviorContext: vi.fn().mockResolvedValue(null),
   };
 });
 
@@ -101,6 +106,7 @@ describe("runDailyCheckInAgent", () => {
     prismaMock.event.create.mockReset().mockResolvedValue({ id: "event-1" });
     prismaMock.modelUsageBudget.findUnique.mockReset().mockResolvedValue(null);
     prismaMock.$transaction.mockReset().mockImplementation(async (fn: any) => fn(prismaMock));
+    prismaMock.agentIdentity.findUnique.mockReset().mockResolvedValue(null);
     createCheckInMock.mockReset().mockResolvedValue({ id: "checkin-1" });
   });
 
