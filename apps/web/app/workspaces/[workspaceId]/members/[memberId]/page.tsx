@@ -1,166 +1,183 @@
+import { getMemberProfile } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
-import { prisma } from "@corgtex/shared";
-import { getMemberExpertiseProfile, getLatestImpactFootprint } from "@corgtex/domain";
+import { notFound } from "next/navigation";
 import Link from "next/link";
-import { endorseMemberExpertiseAction } from "../../actions";
 
 export const dynamic = "force-dynamic";
 
-
-export default async function MemberProfilePage({
-  params,
-}: {
+interface PageProps {
   params: Promise<{ workspaceId: string; memberId: string }>;
-}) {
+}
+
+function getInitials(name?: string | null, email?: string) {
+  if (name) {
+    const parts = name.split(" ");
+    return parts.length >= 2
+      ? `${parts[0][0]}${parts[1][0]}`.toUpperCase()
+      : name.slice(0, 2).toUpperCase();
+  }
+  return email ? email.slice(0, 2).toUpperCase() : "?";
+}
+
+export default async function MemberProfilePage({ params }: PageProps) {
   const { workspaceId, memberId } = await params;
-  const actor = await requirePageActor();
+  await requirePageActor();
 
-  const member = await prisma.member.findUnique({
-    where: { id: memberId, workspaceId },
-    include: {
-      user: { select: { id: true, displayName: true, email: true } },
-      roleAssignments: {
-        include: { role: { include: { circle: true } } },
-      },
-      authoredAdviceProcesses: {
-        where: { status: "EXECUTED" },
-        include: { proposal: { select: { title: true } } },
-        take: 5,
-        orderBy: { executedAt: "desc" }
-      },
-      adviceRecords: {
-        include: { process: { include: { proposal: { select: { title: true } } } } },
-        take: 5,
-        orderBy: { createdAt: "desc" }
-      }
-    },
-  });
-
-  if (!member) {
-    return <div>Member not found</div>;
+  let data;
+  try {
+    data = await getMemberProfile(workspaceId, memberId);
+  } catch (error) {
+    notFound();
   }
 
-  const expertise = await getMemberExpertiseProfile(actor, workspaceId, memberId);
-  const footprint = await getLatestImpactFootprint(actor, workspaceId, memberId);
+  const { member, meetings, proposals, authoredTensions, recentActivity } = data;
 
   return (
     <>
       <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 32 }}>
-        <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2.5rem" }}>
-          {member.user.displayName || member.user.email}
-        </h1>
-        <div className="nr-masthead-meta">
-          <span className="tag info">{member.role}</span>
+        <Link
+          href={`/workspaces/${workspaceId}/circles`}
+          style={{ textDecoration: "none", color: "var(--muted)", fontSize: "0.85rem", marginBottom: 16, display: "inline-block" }}
+        >
+          ← Back to Graph
+        </Link>
+        <div style={{ display: "flex", alignItems: "center", gap: 24, marginTop: 16 }}>
+          <div style={{ 
+            width: 80, 
+            height: 80, 
+            borderRadius: 40, 
+            background: "var(--accent-soft)", 
+            color: "var(--accent)", 
+            display: "flex", 
+            alignItems: "center", 
+            justifyContent: "center",
+            fontSize: "2rem",
+            fontWeight: 600
+          }}>
+            {getInitials(member.user?.displayName, member.user?.email)}
+          </div>
+          <div>
+            <h1 style={{ border: "none", padding: 0, margin: "0 0 8px 0", fontSize: "2rem" }}>
+              {member.user?.displayName || "Unknown User"}
+            </h1>
+            <div className="nr-masthead-meta" style={{ display: "flex", gap: 12, alignItems: "center" }}>
+              <span>{member.user?.email}</span>
+              <span className="badge-getting-started" style={{ padding: "2px 8px", borderRadius: 12, fontSize: "0.75rem", background: "var(--surface)", border: "1px solid var(--line)" }}>
+                {member.role}
+              </span>
+            </div>
+          </div>
         </div>
       </header>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "24px" }}>
-        
-        {/* Left Column: Impact Footprint & Recent Activity */}
-        <div className="stack">
-          <section className="ws-section">
-            <h2 className="nr-section-header">Impact Footprint (Last 90 Days)</h2>
-            {footprint ? (
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px" }}>
-                <div className="nr-stat-card">
-                  <div className="nr-stat-value">{footprint.tensionsResolved}</div>
-                  <div className="nr-stat-label">Tensions Resolved</div>
-                </div>
-                <div className="nr-stat-card">
-                  <div className="nr-stat-value">{footprint.actionsCompleted}</div>
-                  <div className="nr-stat-label">Actions Completed</div>
-                </div>
-                <div className="nr-stat-card">
-                  <div className="nr-stat-value">{footprint.proposalsExecuted}</div>
-                  <div className="nr-stat-label">Decisions Executed</div>
-                </div>
-                <div className="nr-stat-card">
-                  <div className="nr-stat-value">{footprint.adviceGiven}</div>
-                  <div className="nr-stat-label">Advice Given</div>
-                </div>
-              </div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 32 }}>
+        <div style={{ flex: 2, minWidth: 300 }}>
+          <section className="ws-section" style={{ marginBottom: 32 }}>
+            <h2 className="nr-section-header">Roles & Circles</h2>
+            {member.roleAssignments.length === 0 ? (
+              <p className="muted italic">No roles assigned.</p>
             ) : (
-              <p className="muted">Impact Footprint has not been calculated yet. It will update during the next governance cycle.</p>
+              <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+                {member.roleAssignments.map((ra) => (
+                  <div key={ra.id} className="nr-item">
+                    <div className="nr-item-meta" style={{ marginBottom: 4 }}>
+                      <Link href={`/workspaces/${workspaceId}/circles`} style={{ color: "var(--accent)", textDecoration: "none" }}>
+                        {ra.role.circle?.name || "No Circle"} Circle
+                      </Link>
+                    </div>
+                    <strong className="nr-item-title">{ra.role.name}</strong>
+                    {ra.role.purposeMd && (
+                      <div className="nr-excerpt" style={{ marginTop: 8 }}>
+                        {ra.role.purposeMd}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+
+          <section className="ws-section" style={{ marginBottom: 32 }}>
+            <h2 className="nr-section-header">Recent Proposals</h2>
+            {proposals.length === 0 ? (
+              <p className="muted italic">No recent proposals.</p>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {proposals.map((p) => (
+                  <Link
+                    key={p.id}
+                    href={`/workspaces/${workspaceId}/proposals/${p.id}`}
+                    className="nr-item row"
+                    style={{ textDecoration: "none", color: "inherit", display: "flex", justifyContent: "space-between" }}
+                  >
+                    <span>{p.title || "Untitled"}</span>
+                    <span className="muted" style={{ fontSize: "0.8rem", textTransform: "uppercase" }}>{p.status}</span>
+                  </Link>
+                ))}
+              </div>
             )}
           </section>
 
           <section className="ws-section">
-            <h2 className="nr-section-header">Recent Contributions</h2>
-            
-            <h3 style={{ fontSize: "1rem", marginTop: 16 }}>Authored Decisions</h3>
-            {member.authoredAdviceProcesses.length === 0 && <p className="muted">None yet</p>}
-            <ul style={{ paddingLeft: 20 }}>
-              {member.authoredAdviceProcesses.map(ap => (
-                <li key={ap.id}>
-                  <Link href={`/workspaces/${workspaceId}/proposals/${ap.proposalId}`}>
-                    {ap.proposal.title}
-                  </Link>
-                </li>
-              ))}
-            </ul>
-
-            <h3 style={{ fontSize: "1rem", marginTop: 16 }}>Advice Given</h3>
-            {member.adviceRecords.length === 0 && <p className="muted">None yet</p>}
-            <ul style={{ paddingLeft: 20 }}>
-              {member.adviceRecords.map(ar => (
-                <li key={ar.id}>
-                  {ar.type === "ENDORSE" ? "👍" : "⚠️"} {ar.type.toLowerCase()} on{" "}
-                  <Link href={`/workspaces/${workspaceId}/proposals/${ar.process.proposalId}`}>
-                    {ar.process.proposal.title}
-                  </Link>
-                </li>
-              ))}
-            </ul>
-          </section>
-        </div>
-
-        {/* Right Column: Roles & Expertise */}
-        <div className="stack">
-          <section className="ws-section">
-            <h2 className="nr-section-header">Current Roles</h2>
-            {member.roleAssignments.length === 0 && <p className="muted">No roles assigned.</p>}
-            {member.roleAssignments.map(ra => (
-              <div key={ra.id} className="nr-item" style={{ marginBottom: 12 }}>
-                <strong>{ra.role.name}</strong>
-                <div className="muted" style={{ fontSize: "0.85rem" }}>
-                  Circle: {ra.role.circle.name}
-                </div>
-              </div>
-            ))}
-          </section>
-
-          <section className="ws-section">
-            <h2 className="nr-section-header">Expertise Profile</h2>
-            {expertise.length === 0 && <p className="muted">No expertise claimed or inferred yet.</p>}
-            <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
-              {expertise.map(exp => (
-                <div key={exp.id} className="nr-item" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px" }}>
-                  <div>
-                    <strong>{exp.expertiseTag.label}</strong>
-                    <div style={{ fontSize: "0.85rem", marginTop: 4 }}>
-                      <span className={`tag ${exp.level === "AUTHORITY" ? "danger" : exp.level === "EXPERT" ? "warning" : "info"}`}>
-                        {exp.level}
-                      </span>
-                      <span className="muted" style={{ marginLeft: 8 }}>
-                        {exp.endorsedCount} endorsements
-                      </span>
-                    </div>
+            <h2 className="nr-section-header">Active Tensions</h2>
+            {authoredTensions.length === 0 && member.assignedTensions.length === 0 ? (
+              <p className="muted italic">No active tensions.</p>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {[...authoredTensions, ...member.assignedTensions].reduce((acc: any[], curr) => {
+                  if (!acc.find(item => item.id === curr.id)) acc.push(curr);
+                  return acc;
+                }, []).map((t) => (
+                  <div key={t.id} className="nr-item row" style={{ display: "flex", justifyContent: "space-between" }}>
+                    <span>{t.title || "Untitled"}</span>
+                    <span className="muted" style={{ fontSize: "0.8rem", textTransform: "uppercase" }}>{t.status}</span>
                   </div>
-                  
-                  {actor.kind === "user" && member.userId !== actor.user.id && (
-                    <form action={endorseMemberExpertiseAction}>
-                      <input type="hidden" name="workspaceId" value={workspaceId} />
-                      <input type="hidden" name="memberId" value={member.id} />
-                      <input type="hidden" name="tagId" value={exp.expertiseTagId} />
-                      <button type="submit" className="secondary small">Endorse</button>
-                    </form>
-                  )}
-                </div>
-              ))}
-            </div>
+                ))}
+              </div>
+            )}
           </section>
         </div>
 
+        <div style={{ flex: 1, minWidth: 300 }}>
+          <section className="ws-section" style={{ marginBottom: 32 }}>
+            <h2 className="nr-section-header">Recent Meetings</h2>
+            {meetings.length === 0 ? (
+              <p className="muted italic">No recent meetings.</p>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {meetings.map((m) => (
+                  <Link
+                    key={m.id}
+                    href={`/workspaces/${workspaceId}/meetings/${m.id}`}
+                    className="nr-item"
+                    style={{ textDecoration: "none", color: "inherit", display: "block" }}
+                  >
+                    <div style={{ fontWeight: 500 }}>{m.title || "Untitled Meeting"}</div>
+                    <div className="nr-item-meta mt-1">
+                      {new Date(m.recordedAt).toLocaleDateString()}
+                    </div>
+                  </Link>
+                ))}
+              </div>
+            )}
+          </section>
+
+          <section className="ws-section">
+            <h2 className="nr-section-header">Recent Activity</h2>
+            {recentActivity.length === 0 ? (
+              <p className="muted italic">No recent activity.</p>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {recentActivity.map((log) => (
+                  <div key={log.id} style={{ fontSize: "0.85rem", padding: "8px 0", borderBottom: "1px solid var(--line)" }}>
+                    <div style={{ color: "var(--text)", fontWeight: 500, marginBottom: 2 }}>{log.action}</div>
+                    <div className="muted">{new Date(log.createdAt).toLocaleDateString()}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+        </div>
       </div>
     </>
   );
