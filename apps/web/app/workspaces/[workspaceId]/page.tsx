@@ -9,6 +9,8 @@ import {
   markAllNotificationsReadAction,
 } from "./actions";
 import Link from "next/link";
+import { GoalProgress } from "./goals/GoalProgress";
+import { RecognitionCard } from "./goals/RecognitionCard";
 
 export const dynamic = "force-dynamic";
 
@@ -34,7 +36,9 @@ export default async function WorkspaceDashboard({
     chunksCount,
     workspaceData,
     recentPublishedBase,
-    activeAdviceProcesses
+    activeAdviceProcesses,
+    strategicGoals,
+    recentRecognition
   ] = await Promise.all([
     listTensions(actor, workspaceId, { take: 10 }),
     listMembers(workspaceId),
@@ -62,6 +66,16 @@ export default async function WorkspaceDashboard({
     prisma.adviceProcess.findMany({
       where: { workspaceId, status: { in: ["GATHERING", "READY"] } },
       include: { proposal: { select: { id: true, title: true } } },
+      orderBy: { createdAt: "desc" },
+    }),
+    prisma.goal.findMany({
+      where: { workspaceId, level: "COMPANY", status: { notIn: ["DRAFT", "ABANDONED"] } },
+      orderBy: [{ sortOrder: "asc" }, { createdAt: "desc" }],
+      take: 4,
+    }),
+    prisma.recognition.findFirst({
+      where: { workspaceId },
+      include: { author: { include: { user: true } }, recipient: { include: { user: true } } },
       orderBy: { createdAt: "desc" },
     })
   ]);
@@ -290,6 +304,42 @@ export default async function WorkspaceDashboard({
            </div>
         </div>
       </section>
+
+      <hr className="nr-divider" />
+
+      <h2 className="nr-section-header" style={{ borderTop: "none", fontSize: "1.2rem", marginBottom: "24px" }}>
+        Strategic Direction
+        <Link href={`/workspaces/${workspaceId}/goals`} className="nr-link" style={{ float: "right", fontSize: "0.85rem", marginTop: "4px" }}>View All →</Link>
+      </h2>
+      <div style={{ display: "flex", gap: "24px", flexWrap: "wrap", marginBottom: "32px" }}>
+        <div style={{ flex: "2 1 400px" }}>
+          {strategicGoals.length === 0 ? <p className="nr-meta">No active company goals.</p> : null}
+          {strategicGoals.map(goal => (
+            <div key={goal.id} className="nr-item" style={{ border: "1px solid var(--line)", borderRadius: "8px", padding: "16px", marginBottom: "12px", backgroundColor: "var(--bg-surface)" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "8px" }}>
+                <h4 style={{ margin: 0, fontSize: "1.05rem", fontWeight: 600 }}>{goal.title}</h4>
+                <div className="nr-meta">{goal.cadence.replace("_", " ")}</div>
+              </div>
+              <div style={{ marginBottom: "8px" }}>
+                <GoalProgress percent={goal.progressPercent} />
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.8rem", color: "var(--muted)" }}>
+                <span>{goal.progressPercent}% achieved</span>
+                {goal.targetDate && (
+                  <span suppressHydrationWarning>{Math.max(0, Math.ceil((new Date(goal.targetDate).getTime() - Date.now()) / (1000 * 60 * 60 * 24)))} days remaining</span>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+        
+        {recentRecognition && (
+          <div style={{ flex: "1 1 300px" }}>
+            <h3 style={{ fontSize: "0.9rem", color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "12px" }}>Recent Recognition</h3>
+            <RecognitionCard recognition={recentRecognition} />
+          </div>
+        )}
+      </div>
 
       <hr className="nr-divider" />
 
