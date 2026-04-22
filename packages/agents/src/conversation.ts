@@ -8,6 +8,18 @@ import { getWorkspaceOverviewTool, queryTensionsTool, queryActionsTool, queryPro
 import { searchBrainTool, searchBrain } from "./tools/knowledge";
 import { createTensionTool, updateTensionTool, createActionTool, updateActionTool, createProposalTool, createTensionAction, updateTensionAction, createActionItemAction, updateActionItemAction, createProposalAction } from "./tools/mutations";
 import { saveToBrainTool, saveToBrainAction } from "./tools/brain-save";
+import {
+  listMembersTool,
+  getMemberProfileTool,
+  updateMemberTool,
+  assignRoleTool,
+  unassignRoleTool,
+  listMembersAction,
+  getMemberProfileAction,
+  updateMemberAction,
+  assignRoleAction,
+  unassignRoleAction
+} from "./tools/members";
 import type { AppActor } from "@corgtex/shared";
 
 const MAX_HISTORY_TURNS = 20;
@@ -42,6 +54,13 @@ Be concise, direct, and action-oriented. When relevant, cite workspace knowledge
 If the user wants to create something (proposal, tension, action), help them draft it and suggest they use the appropriate workspace tool to submit it.
 If the user asks to upload or ingest a file (e.g. meeting minutes, feedback), instruct them to use the attachment icon (+) in the chat input. When a user message contains '[Attached file: ...]', acknowledge that it has been queued for Brain absorption and answer based on the provided text if available.
 If the user explicitly asks you to save, upload, store, or remember content (e.g., "save this transcript", "upload this to the brain", "remember this for later"), invoke 'save_to_brain' immediately with the relevant content. You do NOT need to save regular conversation — that happens automatically in the nightly batch. Only use this tool when the user explicitly requests immediate storage.
+MEMBER MANAGEMENT TOOLS (permission-aware — mirrors your access level):
+- 'list_members' — full member list with emails, roles, and assignments
+- 'get_member_profile' — detailed profile for a specific member
+- 'update_member' — change a member's workspace role or deactivate (ADMIN only)
+- 'assign_role' — assign a member to a governance role in a circle (FACILITATOR/ADMIN)
+- 'unassign_role' — remove a member from a governance role (FACILITATOR/ADMIN)
+
 If the user wants to schedule a meeting or find availability, ALWAYS invoke the 'check_calendar_availability' tool first using full ISO 8601 UTC dates (e.g., 2026-04-10T09:00:00Z) based on their local time/date request. If availability allows, automatically invoke 'schedule_meeting' to book it natively!`,
 
   "proposal-drafting": `You are a proposal drafting assistant for a self-managing organization. Help the user:
@@ -62,6 +81,7 @@ type ConversationContext = {
   agentKey: string;
   userMessage: string;
   systemPrompt?: string | null;
+  actor?: AppActor;
 };
 
 const TOOLS = [
@@ -79,6 +99,11 @@ const TOOLS = [
   updateActionTool,
   createProposalTool,
   saveToBrainTool,
+  listMembersTool,
+  getMemberProfileTool,
+  updateMemberTool,
+  assignRoleTool,
+  unassignRoleTool,
 ];
 
 const TOOL_HANDLERS: Record<string, (actor: AppActor, ctx: ConversationContext, args: any) => Promise<unknown>> = {
@@ -96,6 +121,11 @@ const TOOL_HANDLERS: Record<string, (actor: AppActor, ctx: ConversationContext, 
   update_action: updateActionItemAction,
   create_proposal: createProposalAction,
   save_to_brain: async (actor, ctx, args) => saveToBrainAction(actor, ctx, args),
+  list_members: async (actor, ctx) => listMembersAction(actor, ctx),
+  get_member_profile: async (actor, ctx, args) => getMemberProfileAction(actor, ctx, args),
+  update_member: async (actor, ctx, args) => updateMemberAction(actor, ctx, args),
+  assign_role: async (actor, ctx, args) => assignRoleAction(actor, ctx, args),
+  unassign_role: async (actor, ctx, args) => unassignRoleAction(actor, ctx, args),
 };
 
 
@@ -220,7 +250,7 @@ export async function processConversationTurn(ctx: ConversationContext): Promise
   if (response.tool_calls && response.tool_calls.length > 0) {
     messages.push({ role: "assistant", content: response.content || "", tool_calls: response.tool_calls });
     
-    const actor: AppActor = {
+    const actor: AppActor = ctx.actor ?? {
       kind: "agent",
       authProvider: "bootstrap",
       label: "chat-agent",
@@ -374,7 +404,7 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
   if (firstResult.tool_calls && firstResult.tool_calls.length > 0) {
     messages.push({ role: "assistant", content: firstResult.content || "", tool_calls: firstResult.tool_calls });
     
-    const actor: AppActor = {
+    const actor: AppActor = ctx.actor ?? {
       kind: "agent",
       authProvider: "bootstrap",
       label: "chat-agent",
