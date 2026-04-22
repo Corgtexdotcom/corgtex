@@ -60,8 +60,8 @@ export async function createMemberAction(formData: FormData) {
     role: asString(formData, "role") as "CONTRIBUTOR" | "FACILITATOR" | "FINANCE_STEWARD" | "ADMIN",
   });
   
-  if (result.token) {
-    await sendInvitationEmail(result.user.email, result.user.displayName, result.token);
+  if ((result as any).token) {
+    await sendInvitationEmail(result.user.email, result.user.displayName, (result as any).token);
   }
   
   refresh(workspaceId);
