@@ -17,9 +17,35 @@ import {
   addMemberExpertise,
   endorseMemberExpertise,
   upsertSsoConfig,
-  updateModelUsageBudget
+  updateModelUsageBudget,
+  inviteMember,
+  bulkInviteMembers
 } from "@corgtex/domain";
+import { sendEmail } from "@corgtex/shared";
 
+async function sendInvitationEmail(email: string, displayName: string | null, token: string) {
+  const appUrl = process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000";
+  const resetUrl = `${appUrl}/setup-account/${token}`;
+
+  try {
+    await sendEmail({
+      to: email,
+      subject: `You've been invited to Corgtex`,
+      html: `
+        <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto; padding: 40px 20px;">
+          <h2>Join Corgtex</h2>
+          <p>Hi ${displayName || 'there'},</p>
+          <p>You have been invited to join a workspace on Corgtex.</p>
+          <div style="margin: 32px 0;">
+            <a href="${resetUrl}" style="background-color: #111; color: #fff; padding: 12px 24px; border-radius: 6px; text-decoration: none; display: inline-block;">Set up your account</a>
+          </div>
+        </div>
+      `,
+    });
+  } catch (error) {
+    console.error("Failed to send invitation email:", error);
+  }
+}
 
 export async function createMemberAction(formData: FormData) {
   const _demoGuardWsId = formData.get("workspaceId") as string;
@@ -27,13 +53,61 @@ export async function createMemberAction(formData: FormData) {
 
   const actor = await requirePageActor();
   const workspaceId = asString(formData, "workspaceId");
-  await createMember(actor, {
+  const result = await createMember(actor, {
     workspaceId,
     email: asString(formData, "email"),
-    password: asString(formData, "password"),
     displayName: asOptional(formData, "displayName"),
     role: asString(formData, "role") as "CONTRIBUTOR" | "FACILITATOR" | "FINANCE_STEWARD" | "ADMIN",
   });
+  
+  if (result.token) {
+    await sendInvitationEmail(result.user.email, result.user.displayName, result.token);
+  }
+  
+  refresh(workspaceId);
+}
+
+export async function inviteMemberAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  const result = await inviteMember(actor, {
+    workspaceId,
+    email: asString(formData, "email"),
+    displayName: asOptional(formData, "displayName"),
+  });
+  await sendInvitationEmail(result.user.email, result.user.displayName, result.token);
+  refresh(workspaceId);
+}
+
+export async function bulkInviteAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  const rawCsv = asString(formData, "csvData");
+  
+  const parsed = rawCsv.split("\n").map(line => {
+    const parts = line.split(",").map(p => p.trim());
+    return {
+      displayName: parts[0] || null,
+      email: parts[1] || "",
+      role: (parts[2] || "CONTRIBUTOR") as any,
+    };
+  }).filter(m => m.email);
+
+  const result = await bulkInviteMembers(actor, {
+    workspaceId,
+    members: parsed,
+  });
+
+  for (const detail of result.details) {
+    await sendInvitationEmail(detail.email, detail.displayName, detail.token);
+  }
+
   refresh(workspaceId);
 }
 

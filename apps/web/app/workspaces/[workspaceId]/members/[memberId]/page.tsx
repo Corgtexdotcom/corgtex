@@ -28,9 +28,13 @@ export default async function MemberProfilePage({ params }: PageProps) {
   }
 
   await requireWorkspaceMembership({ actor, workspaceId });
-  
-  const data = await getMemberProfile(workspaceId, memberId).catch(() => null);
-  if (!data) return notFound();
+
+  let data;
+  try {
+    data = await getMemberProfile(workspaceId, memberId);
+  } catch (error) {
+    notFound();
+  }
 
   const { member, meetings, proposals, authoredTensions, recentActivity } = data;
 
@@ -39,7 +43,7 @@ export default async function MemberProfilePage({ params }: PageProps) {
       <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 32 }}>
         <Link
           href={`/workspaces/${workspaceId}/members`}
-          className="inline-flex items-center text-sm font-medium text-muted-foreground hover:text-foreground transition-colors"
+          style={{ textDecoration: "none", color: "var(--muted)", fontSize: "0.85rem", marginBottom: 16, display: "inline-block" }}
         >
           ← Back to Team
         </Link>
@@ -79,9 +83,9 @@ export default async function MemberProfilePage({ params }: PageProps) {
             {member.roleAssignments.length === 0 ? (
               <p className="muted italic">No roles assigned.</p>
             ) : (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {member.roleAssignments.map((ra: any) => (
-                  <div key={ra.id} className="p-4 rounded-xl border bg-card shadow-sm">
+              <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+                {member.roleAssignments.map((ra) => (
+                  <div key={ra.id} className="nr-item">
                     <div className="nr-item-meta" style={{ marginBottom: 4 }}>
                       <Link href={`/workspaces/${workspaceId}/circles`} style={{ color: "var(--accent)", textDecoration: "none" }}>
                         {ra.role.circle?.name || "No Circle"} Circle
@@ -104,16 +108,19 @@ export default async function MemberProfilePage({ params }: PageProps) {
             {proposals.length === 0 ? (
               <p className="muted italic">No recent proposals.</p>
             ) : (
-              <ul className="space-y-3">
-                {proposals.map((p: any) => (
-                  <li key={p.id} className="p-3 rounded-lg border bg-card text-sm shadow-sm hover:border-primary/50 transition-colors cursor-pointer" onClick={() => window.location.href = `/workspaces/${workspaceId}/proposals/${p.id}`}>
-                    <div style={{ display: "flex", justifyContent: "space-between" }}>
-                      <span>{p.title || "Untitled"}</span>
-                      <span className="muted" style={{ fontSize: "0.8rem", textTransform: "uppercase" }}>{p.status}</span>
-                    </div>
-                  </li>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {proposals.map((p) => (
+                  <Link
+                    key={p.id}
+                    href={`/workspaces/${workspaceId}/proposals/${p.id}`}
+                    className="nr-item row"
+                    style={{ textDecoration: "none", color: "inherit", display: "flex", justifyContent: "space-between" }}
+                  >
+                    <span>{p.title || "Untitled"}</span>
+                    <span className="muted" style={{ fontSize: "0.8rem", textTransform: "uppercase" }}>{p.status}</span>
+                  </Link>
                 ))}
-              </ul>
+              </div>
             )}
           </section>
 
@@ -122,19 +129,17 @@ export default async function MemberProfilePage({ params }: PageProps) {
             {authoredTensions.length === 0 && member.assignedTensions.length === 0 ? (
               <p className="muted italic">No active tensions.</p>
             ) : (
-              <ul className="space-y-3">
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                 {[...authoredTensions, ...member.assignedTensions].reduce((acc: any[], curr) => {
                   if (!acc.find(item => item.id === curr.id)) acc.push(curr);
                   return acc;
-                }, []).map((t: any) => (
-                  <li key={t.id} className="p-3 rounded-lg border bg-card text-sm shadow-sm">
-                    <div style={{ display: "flex", justifyContent: "space-between" }}>
-                      <span>{t.title || "Untitled"}</span>
-                      <span className="muted" style={{ fontSize: "0.8rem", textTransform: "uppercase" }}>{t.status}</span>
-                    </div>
-                  </li>
+                }, []).map((t) => (
+                  <div key={t.id} className="nr-item row" style={{ display: "flex", justifyContent: "space-between" }}>
+                    <span>{t.title || "Untitled"}</span>
+                    <span className="muted" style={{ fontSize: "0.8rem", textTransform: "uppercase" }}>{t.status}</span>
+                  </div>
                 ))}
-              </ul>
+              </div>
             )}
           </section>
         </div>
@@ -145,8 +150,8 @@ export default async function MemberProfilePage({ params }: PageProps) {
             {meetings.length === 0 ? (
               <p className="muted italic">No recent meetings.</p>
             ) : (
-              <div className="space-y-3">
-                {meetings.map((m: any) => (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {meetings.map((m) => (
                   <Link
                     key={m.id}
                     href={`/workspaces/${workspaceId}/meetings/${m.id}`}
@@ -154,9 +159,9 @@ export default async function MemberProfilePage({ params }: PageProps) {
                     style={{ textDecoration: "none", color: "inherit", display: "block" }}
                   >
                     <div style={{ fontWeight: 500 }}>{m.title || "Untitled Meeting"}</div>
-                    <p className="text-sm text-foreground/60 flex items-center gap-1.5 pt-2">
-                      📅 Member since {new Date(member.joinedAt).toLocaleDateString()}
-                    </p>
+                    <div className="nr-item-meta mt-1">
+                      {new Date(m.recordedAt).toLocaleDateString()}
+                    </div>
                   </Link>
                 ))}
               </div>
@@ -177,6 +182,10 @@ export default async function MemberProfilePage({ params }: PageProps) {
                 ))}
               </div>
             )}
+          </section>
+
+          <section className="ws-section" style={{ marginTop: 32 }}>
+            <MemberBriefing workspaceId={workspaceId} memberId={memberId} />
           </section>
         </div>
       </div>
