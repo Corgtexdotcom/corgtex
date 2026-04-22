@@ -53,6 +53,9 @@ const prismaMock = {
   notification: {
     createMany: vi.fn(),
   },
+  agentIdentity: {
+    findUnique: vi.fn(),
+  },
   $transaction: vi.fn(),
 };
 
@@ -86,6 +89,8 @@ vi.mock("@corgtex/domain", async (importOriginal) => {
     ...actual,
     isAgentEnabled: vi.fn().mockResolvedValue(true),
     getAgentModelOverride: vi.fn().mockResolvedValue(undefined),
+    resolveAgentIdentityLimits: vi.fn().mockResolvedValue(null),
+    resolveAgentBehaviorContext: vi.fn().mockResolvedValue(null),
   };
 });
 
@@ -143,6 +148,7 @@ describe("agent runtime", () => {
     prismaMock.event.create.mockReset().mockResolvedValue({ id: "event-1" });
     prismaMock.modelUsageBudget.findUnique.mockReset().mockResolvedValue(null);
     prismaMock.member.findMany.mockReset().mockResolvedValue([]);
+    prismaMock.agentIdentity.findUnique.mockReset().mockResolvedValue(null);
 
     // Mock $transaction to execute the callback
     prismaMock.$transaction.mockReset().mockImplementation(async (fn: any) => fn(prismaMock));
