@@ -1,7 +1,8 @@
-import { getMemberProfile } from "@corgtex/domain";
+import { getMemberProfile, requireWorkspaceMembership } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { notFound } from "next/navigation";
 import Link from "next/link";
+import { MemberBriefing } from "./MemberBriefing";
 
 export const dynamic = "force-dynamic";
 
@@ -21,7 +22,12 @@ function getInitials(name?: string | null, email?: string) {
 
 export default async function MemberProfilePage({ params }: PageProps) {
   const { workspaceId, memberId } = await params;
-  await requirePageActor();
+  const actor = await requirePageActor();
+  if (!actor || actor.kind !== "user") {
+    notFound();
+  }
+
+  await requireWorkspaceMembership({ actor, workspaceId });
 
   let data;
   try {
@@ -36,10 +42,10 @@ export default async function MemberProfilePage({ params }: PageProps) {
     <>
       <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 32 }}>
         <Link
-          href={`/workspaces/${workspaceId}/circles`}
+          href={`/workspaces/${workspaceId}/members`}
           style={{ textDecoration: "none", color: "var(--muted)", fontSize: "0.85rem", marginBottom: 16, display: "inline-block" }}
         >
-          ← Back to Graph
+          ← Back to Team
         </Link>
         <div style={{ display: "flex", alignItems: "center", gap: 24, marginTop: 16 }}>
           <div style={{ 
@@ -176,6 +182,10 @@ export default async function MemberProfilePage({ params }: PageProps) {
                 ))}
               </div>
             )}
+          </section>
+
+          <section className="ws-section" style={{ marginTop: 32 }}>
+            <MemberBriefing workspaceId={workspaceId} memberId={memberId} />
           </section>
         </div>
       </div>
