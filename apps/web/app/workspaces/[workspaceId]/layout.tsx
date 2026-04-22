@@ -74,6 +74,18 @@ export default async function WorkspaceLayout({
               ))}
             </div>
           ))}
+
+          {current?.slug === "corgtex" && actor.kind === "user" && actor.user.email === "janbrezina@icloud.com" && (
+            <div style={{ marginBottom: "16px" }}>
+              <div className="muted" style={{ fontSize: "0.75rem", textTransform: "uppercase", letterSpacing: "0.05em", padding: "0 12px", marginBottom: "4px", fontWeight: 600 }}>
+                Global Admin
+              </div>
+              <a href={`/workspaces/${workspaceId}/admin`} className="ws-nav-link">
+                <span className="ws-nav-icon">✧</span>
+                Platform Admin
+              </a>
+            </div>
+          )}
         </nav>
 
         <div className="ws-sidebar-footer">
