@@ -47,6 +47,7 @@ The codebase is at `/Users/janbrezina/Development /CORGTEX`.
 - `prisma/schema.prisma`
 - `prisma/migrations/20260421224945_add_meeting_insights/migration.sql`
 - `prisma/migrations/20260421225310_add_meeting_insights/migration.sql`
+- `docs/plans/feature-ai-meeting-intelligence.md`
 
 ## Schema changes
 
