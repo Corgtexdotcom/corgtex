@@ -2,6 +2,9 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+import { FileUploader } from "./FileUploader";
+import { TextPasteUploader } from "./TextPasteUploader";
+import { RecentUploads } from "./RecentUploads";
 
 type DataSource = {
   id: string;
@@ -16,7 +19,7 @@ type DataSource = {
   createdAt: string;
 };
 
-export function DataSourcesManager({ workspaceId, dataSources }: { workspaceId: string; dataSources: DataSource[] }) {
+export function DataSourcesManager({ workspaceId, dataSources, documents }: { workspaceId: string; dataSources: DataSource[]; documents: any[] }) {
   const router = useRouter();
   const [isAdding, setIsAdding] = useState(false);
   const [label, setLabel] = useState("");
@@ -106,13 +109,20 @@ export function DataSourcesManager({ workspaceId, dataSources }: { workspaceId: 
   return (
     <section className="stack" style={{ gap: 40 }}>
       <div>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 32 }}>
           <div>
-            <h2 className="nr-section-header">External Data Sources</h2>
-            <p className="nr-item-meta" style={{ fontSize: "0.85rem", marginBottom: 16 }}>
-              Connect read-only databases to sync data into the Knowledge Brain.
+            <h2 className="nr-section-header" style={{ marginBottom: 8, borderBottom: 'none' }}>Knowledge Sources</h2>
+            <p className="nr-item-meta" style={{ fontSize: "0.85rem", marginBottom: 0 }}>
+              Ingest files, raw text, and external databases into the Knowledge Brain.
             </p>
           </div>
+        </div>
+        
+        <FileUploader workspaceId={workspaceId} />
+        <TextPasteUploader workspaceId={workspaceId} />
+
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 40, marginBottom: 16 }}>
+          <h2 className="nr-section-header" style={{ margin: 0, border: 'none' }}>External Databases</h2>
           <button className="small" onClick={() => setIsAdding(!isAdding)}>
             {isAdding ? "Cancel" : "+ Add Database"}
           </button>
@@ -199,6 +209,8 @@ export function DataSourcesManager({ workspaceId, dataSources }: { workspaceId: 
             </div>
           ))}
         </div>
+        
+        <RecentUploads documents={documents} />
       </div>
     </section>
   );

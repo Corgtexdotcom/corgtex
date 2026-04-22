@@ -1,4 +1,4 @@
-import { DEFAULT_SCOPES, SCOPE_REGISTRY, listMembersEnriched, listAgentCredentials, listWebhookEndpoints, listInboundWebhooks, listAgentConfigs, listOAuthApps, getSsoConfigByWorkspace, getModelUsageBudget } from "@corgtex/domain";
+import { DEFAULT_SCOPES, SCOPE_REGISTRY, listMembersEnriched, listAgentCredentials, listWebhookEndpoints, listInboundWebhooks, listAgentConfigs, listOAuthApps, getSsoConfigByWorkspace, getModelUsageBudget, listDocuments } from "@corgtex/domain";
 import { prisma } from "@corgtex/shared";
 import { requirePageActor } from "@/lib/auth";
 import { headers } from "next/headers";
@@ -71,14 +71,20 @@ export default async function SettingsPage({
   }
 
   let dataSources: any[] = [];
+  let documents: any[] = [];
   if (tab === "data-sources") {
     try {
-      dataSources = await prisma.externalDataSource.findMany({
-        where: { workspaceId },
-        orderBy: { createdAt: "desc" },
-      });
+      const [sources, docs] = await Promise.all([
+        prisma.externalDataSource.findMany({
+          where: { workspaceId },
+          orderBy: { createdAt: "desc" },
+        }),
+        listDocuments(workspaceId)
+      ]);
+      dataSources = sources;
+      documents = docs;
     } catch (err) {
-      console.error("[SettingsPage] Failed to fetch data sources:", err);
+      console.error("[SettingsPage] Failed to fetch data/knowledge sources:", err);
     }
   }
 
@@ -121,7 +127,7 @@ export default async function SettingsPage({
           href={`/workspaces/${workspaceId}/settings?tab=data-sources`}
           className={`nr-tab ${tab === "data-sources" ? "nr-tab-active" : ""}`}
         >
-          Data Sources
+          Knowledge Sources
         </a>
       </div>
 
@@ -341,7 +347,7 @@ export default async function SettingsPage({
       )}
 
       {tab === "data-sources" && (
-        <DataSourcesManager workspaceId={workspaceId} dataSources={dataSources} />
+        <DataSourcesManager workspaceId={workspaceId} dataSources={dataSources} documents={documents} />
       )}
     </>
   );
