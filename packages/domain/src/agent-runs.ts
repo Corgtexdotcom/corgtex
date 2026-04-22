@@ -179,3 +179,32 @@ export async function resolveAgentRun(actor: AppActor, params: {
     },
   });
 }
+
+export async function getFailingAgents(workspaceId: string): Promise<string[]> {
+  const recentRuns = await prisma.agentRun.findMany({
+    where: { workspaceId },
+    orderBy: { createdAt: "desc" },
+    take: 100,
+    select: { agentKey: true, status: true },
+  });
+
+  const failuresByKey: Record<string, number> = {};
+  for (const run of recentRuns) {
+    if (run.status === "FAILED") {
+      failuresByKey[run.agentKey] = (failuresByKey[run.agentKey] || 0) + 1;
+    } else if (run.status === "COMPLETED") {
+      // Reset if we see a success before we hit 3 failures
+      if (!failuresByKey[run.agentKey] || failuresByKey[run.agentKey] < 3) {
+        failuresByKey[run.agentKey] = -100; // prevent this agent from being marked as failing
+      }
+    }
+  }
+
+  const failingAgents = [];
+  for (const [agentKey, failureCount] of Object.entries(failuresByKey)) {
+    if (failureCount >= 3) {
+      failingAgents.push(agentKey);
+    }
+  }
+  return failingAgents;
+}
