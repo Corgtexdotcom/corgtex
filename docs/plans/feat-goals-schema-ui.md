@@ -37,6 +37,7 @@ Add a goal alignment system that lets users create and visualize goals at three 
 - `apps/web/app/api/workspaces/[workspaceId]/members/route.ts`
 - `apps/web/app/workspaces/[workspaceId]/settings/actions.ts`
 - `docs/plans/feat-goal-pulse-agent.md`
+- `docs/plans/feat-goals-schema-ui.md`
 
 ## Schema changes
 
