@@ -176,7 +176,6 @@ export default async function SettingsPage({
                      createdAt: app.createdAt
                    }))}
                  />
-              </div>
             </section>
           </div>
 
