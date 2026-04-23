@@ -15,7 +15,9 @@ import {
   initiateAdviceProcess,
   recordAdvice,
   withdrawAdviceProcess,
-  executeAdviceProcessDecision
+  executeAdviceProcessDecision,
+  postDeliberationEntry,
+  resolveDeliberationEntry
 } from "@corgtex/domain";
 
 
@@ -174,6 +176,36 @@ export async function executeAdviceProcessDecisionAction(formData: FormData) {
     workspaceId,
     processId: asString(formData, "processId"),
     decisionMd: asOptional(formData, "decisionMd") || undefined,
+  });
+  refresh(workspaceId);
+}
+
+export async function postDeliberationEntryAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  await postDeliberationEntry(actor, {
+    workspaceId,
+    parentType: "PROPOSAL",
+    parentId: asString(formData, "proposalId"),
+    entryType: asString(formData, "entryType"),
+    bodyMd: asString(formData, "bodyMd"),
+  });
+  refresh(workspaceId);
+}
+
+export async function resolveDeliberationEntryAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  await resolveDeliberationEntry(actor, {
+    workspaceId,
+    entryId: asString(formData, "entryId"),
+    resolvedNote: asOptional(formData, "resolvedNote") || undefined,
   });
   refresh(workspaceId);
 }
