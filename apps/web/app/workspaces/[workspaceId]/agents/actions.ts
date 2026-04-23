@@ -5,11 +5,6 @@ import { enforceDemoGuard } from "@/lib/demo-guard";
 import { updateAgentConfig, updateAgentIdentity } from "@corgtex/domain";
 import { revalidatePath } from "next/cache";
 
-import { updateModelUsageBudgetAction as updateBudget } from "../settings/actions";
-
-export async function updateModelUsageBudgetAction(formData: FormData) {
-  return updateBudget(formData);
-}
 
 export async function toggleAgentAction(workspaceId: string, agentKey: string, enabled: boolean) {
   const actor = await requirePageActor();
