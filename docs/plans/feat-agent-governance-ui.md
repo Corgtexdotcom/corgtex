@@ -23,6 +23,7 @@ Any backend schema changes. This is purely a UI refactor and consolidation of ex
 - `docs/assets/agent-gov-access.png`
 - `docs/assets/agent-gov-observability.png`
 - `docs/assets/agent-gov-spend.png`
+- `docs/plans/feat-agent-governance-ui.md`
 
 ## Acceptance criteria
 - [x] Added new nav group before "System" with "Agent Governance" link.
