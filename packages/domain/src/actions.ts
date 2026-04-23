@@ -4,6 +4,7 @@ import { appendEvents } from "./events";
 import { actorUserIdForWorkspace, requireWorkspaceMembership } from "./auth";
 import { recordAudit } from "./audit-trail";
 import { invariant } from "./errors";
+import { parseMentions, createMentionNotifications } from "./mentions";
 
 import { privacyFilter } from "./privacy";
 
@@ -80,6 +81,17 @@ export async function createAction(actor: AppActor, params: {
       },
     });
 
+    const { memberIds, circleIds } = parseMentions(action.bodyMd);
+    await createMentionNotifications(tx, {
+      workspaceId: params.workspaceId,
+      actorUserId: authorUserId,
+      entityType: "Action",
+      entityId: action.id,
+      title: `You were mentioned in an action`,
+      memberIds,
+      circleIds,
+    });
+
     await recordAudit(tx, actor, {
       workspaceId: params.workspaceId,
       action: "action.created",
@@ -147,6 +159,19 @@ export async function updateAction(actor: AppActor, params: {
       where: { id: params.actionId },
       data,
     });
+
+    if (params.bodyMd !== undefined && params.bodyMd !== action.bodyMd) {
+      const { memberIds, circleIds } = parseMentions(updated.bodyMd);
+      await createMentionNotifications(tx, {
+        workspaceId: params.workspaceId,
+        actorUserId: actor.kind === "user" ? actor.user.id : "",
+        entityType: "Action",
+        entityId: updated.id,
+        title: `You were mentioned in an action`,
+        memberIds,
+        circleIds,
+      });
+    }
 
     await recordAudit(tx, actor, {
       workspaceId: params.workspaceId,
@@ -242,6 +267,56 @@ export async function publishAction(actor: AppActor, params: {
       {
         workspaceId: params.workspaceId,
         type: "action.published",
+        aggregateType: "Action",
+        aggregateId: updated.id,
+        payload: { actionId: updated.id },
+      },
+    ]);
+
+    return updated;
+  });
+}
+
+export async function resolveAction(actor: AppActor, params: {
+  workspaceId: string;
+  actionId: string;
+  resolvedVia?: string;
+  _membership?: import("@corgtex/shared").MembershipSummary | null;
+}) {
+  await requireWorkspaceMembership({
+    actor,
+    workspaceId: params.workspaceId,
+    resolvedMembership: params._membership,
+  });
+
+  return prisma.$transaction(async (tx) => {
+    const action = await tx.action.findUnique({
+      where: { id: params.actionId },
+    });
+
+    invariant(action && action.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Action not found.");
+    invariant(action.status !== "COMPLETED", 400, "INVALID_STATE", "Action is already resolved.");
+
+    const updated = await tx.action.update({
+      where: { id: params.actionId },
+      data: {
+        status: "COMPLETED",
+        resolvedVia: params.resolvedVia?.trim() || null,
+        resolvedAt: new Date(),
+      },
+    });
+
+    await recordAudit(tx, actor, {
+      workspaceId: params.workspaceId,
+      action: "action.resolved",
+      entityType: "Action",
+      entityId: updated.id,
+    });
+
+    await appendEvents(tx, [
+      {
+        workspaceId: params.workspaceId,
+        type: "action.resolved",
         aggregateType: "Action",
         aggregateId: updated.id,
         payload: { actionId: updated.id },
