@@ -1,53 +1,53 @@
 export type NavItem = {
   href: string;
-  label: string;
+  labelKey: string;
   icon: string;
 };
 
 export type NavGroup = {
-  label: string;
+  labelKey: string;
   items: NavItem[];
 };
 
 export const WORKSPACE_NAV_GROUPS: NavGroup[] = [
   {
-    label: "Workspace",
+    labelKey: "workspace",
     items: [
-      { href: "", label: "Home", icon: "◉" },
-      { href: "/goals", label: "Goals", icon: "⌾" },
-      { href: "/brain", label: "Brain", icon: "◈" },
-      { href: "/members", label: "Members", icon: "⌂" },
+      { href: "", labelKey: "home", icon: "◉" },
+      { href: "/goals", labelKey: "goals", icon: "⌾" },
+      { href: "/brain", labelKey: "brain", icon: "◈" },
+      { href: "/members", labelKey: "members", icon: "⌂" },
     ],
   },
   {
-    label: "Operations",
+    labelKey: "operations",
     items: [
-      { href: "/tensions", label: "Tensions", icon: "▵" },
-      { href: "/actions", label: "Actions", icon: "✓" },
-      { href: "/meetings", label: "Meetings", icon: "▫" },
-      { href: "/leads", label: "Relationships", icon: "⊕" }, // Unified to "Relationships"
+      { href: "/tensions", labelKey: "tensions", icon: "▵" },
+      { href: "/actions", labelKey: "actions", icon: "✓" },
+      { href: "/meetings", labelKey: "meetings", icon: "▫" },
+      { href: "/leads", labelKey: "relationships", icon: "⊕" }, // Unified to "Relationships"
     ],
   },
   {
-    label: "Governance",
+    labelKey: "governance",
     items: [
-      { href: "/proposals", label: "Proposals", icon: "▤" },
-      { href: "/circles", label: "Circles", icon: "◎" },
-      { href: "/cycles", label: "Cycles", icon: "↻" },
+      { href: "/proposals", labelKey: "proposals", icon: "▤" },
+      { href: "/circles", labelKey: "circles", icon: "◎" },
+      { href: "/cycles", labelKey: "cycles", icon: "↻" },
     ],
   },
   {
-    label: "Finance",
+    labelKey: "finance",
     items: [
-      { href: "/finance", label: "Finance", icon: "¤" },
+      { href: "/finance", labelKey: "finance", icon: "¤" },
     ],
   },
   {
-    label: "System",
+    labelKey: "system",
     items: [
-      { href: "/governance", label: "OS Metrics", icon: "◒" },
-      { href: "/audit", label: "Audit Trail", icon: "⚲" },
-      { href: "/settings", label: "Settings & Agents", icon: "⎈" },
+      { href: "/governance", labelKey: "osMetrics", icon: "◒" },
+      { href: "/audit", labelKey: "auditTrail", icon: "⚲" },
+      { href: "/settings", labelKey: "settingsAgents", icon: "⎈" },
     ],
   },
 ];
