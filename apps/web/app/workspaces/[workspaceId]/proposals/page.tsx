@@ -195,7 +195,7 @@ export default async function ProposalsPage({
                     )}
 
                     {actor.kind === "user" && proposal.authorUserId === actor.user.id && !isDemo && (
-                      <div className="actions-inline" style={{ marginTop: 16, paddingTop: 16, borderTop: "1px solid var(--border-color)" }}>
+                      <div className="actions-inline" style={{ marginTop: 16, paddingTop: 16, borderTop: "1px solid var(--line)" }}>
                         <form action={executeAdviceProcessDecisionAction} className="actions-inline">
                           <input type="hidden" name="workspaceId" value={workspaceId} />
                           <input type="hidden" name="processId" value={proposal.adviceProcess.id} />

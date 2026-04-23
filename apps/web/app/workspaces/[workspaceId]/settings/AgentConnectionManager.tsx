@@ -196,7 +196,7 @@ export function AgentConnectionManager({ workspaceId, mcpUrl, initialCredentials
     const { provider, token } = setupData;
 
     return (
-      <div className="panel" style={{ background: "var(--surface)", border: "1px solid var(--border)", padding: 20, borderRadius: 8, marginTop: 16 }}>
+      <div className="panel" style={{ background: "var(--surface)", border: "1px solid var(--line)", padding: 20, borderRadius: 8, marginTop: 16 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
           <h3 style={{ margin: 0, color: "var(--accent)" }}>{provider} Setup</h3>
           <button className="button small secondary" onClick={() => setSetupData(null)}>Done</button>
@@ -216,7 +216,7 @@ export function AgentConnectionManager({ workspaceId, mcpUrl, initialCredentials
               Open your Terminal application and paste this entire block, then restart Claude:
             </p>
             <div style={{ position: "relative", marginBottom: 24 }}>
-              <pre style={{ background: "black", padding: 16, borderRadius: 6, fontSize: "0.85rem", overflowX: "auto", border: "1px solid var(--border)", margin: 0 }}>
+              <pre style={{ background: "black", padding: 16, borderRadius: 6, fontSize: "0.85rem", overflowX: "auto", border: "1px solid var(--line)", margin: 0 }}>
                 <code style={{ fontFamily: "monospace", color: "#e2e8f0" }}>{`cat > ~/Library/Application\\ Support/Claude/claude_desktop_config.json << 'EOF'
 {
   "mcpServers": {
@@ -250,7 +250,7 @@ EOF`}</code>
               Open Claude Desktop → Settings → Developer → Edit Config, and paste this JSON:
             </p>
             <div style={{ position: "relative" }}>
-              <pre style={{ background: "black", padding: 16, borderRadius: 6, fontSize: "0.85rem", overflowX: "auto", border: "1px solid var(--border)", margin: 0 }}>
+              <pre style={{ background: "black", padding: 16, borderRadius: 6, fontSize: "0.85rem", overflowX: "auto", border: "1px solid var(--line)", margin: 0 }}>
                 <code style={{ fontFamily: "monospace", color: "#e2e8f0" }}>{`{
   "mcpServers": {
     "corgtex": {
@@ -283,7 +283,7 @@ EOF`}</code>
               Go to <strong>Settings → Developer → Work with Apps</strong>. When adding an MCP server, copy and paste this command:
             </p>
             <div style={{ position: "relative", marginBottom: 16 }}>
-              <pre style={{ background: "black", padding: 16, paddingRight: 100, borderRadius: 6, fontSize: "0.85rem", overflowX: "auto", border: "1px solid var(--border)", margin: 0, whiteSpace: "pre-wrap", wordBreak: "break-all" }}>
+              <pre style={{ background: "black", padding: 16, paddingRight: 100, borderRadius: 6, fontSize: "0.85rem", overflowX: "auto", border: "1px solid var(--line)", margin: 0, whiteSpace: "pre-wrap", wordBreak: "break-all" }}>
                 <code style={{ fontFamily: "monospace", color: "#e2e8f0" }}>{`npx -y mcp-remote@latest ${mcpUrl} --header "Authorization: Bearer ${token}"`}</code>
               </pre>
               <button
@@ -333,7 +333,7 @@ EOF`}</code>
         const missing = credential ? missingScopes(credential, defaultScopes) : [];
 
         return (
-          <div key={provider} className="panel" style={{ padding: 16, border: "1px solid var(--border)", borderRadius: 8 }}>
+          <div key={provider} className="panel" style={{ padding: 16, border: "1px solid var(--line)", borderRadius: 8 }}>
             <div className="row" style={{ alignItems: "center", justifyContent: "space-between" }}>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>

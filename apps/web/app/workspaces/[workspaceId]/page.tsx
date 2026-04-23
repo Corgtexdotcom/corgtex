@@ -350,7 +350,7 @@ export default async function WorkspaceDashboard({
         <div style={{ flex: "2 1 400px" }}>
           {strategicGoals.length === 0 ? <p className="nr-meta">No active company goals.</p> : null}
           {strategicGoals.map(goal => (
-            <div key={goal.id} className="nr-item" style={{ border: "1px solid var(--line)", borderRadius: "8px", padding: "16px", marginBottom: "12px", backgroundColor: "var(--bg-surface)" }}>
+            <div key={goal.id} className="nr-item" style={{ border: "1px solid var(--line)", borderRadius: "8px", padding: "16px", marginBottom: "12px", backgroundColor: "var(--surface)" }}>
               <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "8px" }}>
                 <h4 style={{ margin: 0, fontSize: "1.05rem", fontWeight: 600 }}>{goal.title}</h4>
                 <div className="nr-meta">{goal.cadence.replace("_", " ")}</div>
@@ -382,7 +382,7 @@ export default async function WorkspaceDashboard({
       <div style={{ display: "flex", gap: "16px", overflowX: "auto", paddingBottom: "16px", marginBottom: "32px", WebkitOverflowScrolling: "touch" }}>
         {recentlyPublished.length === 0 ? <p className="nr-meta">No items published yet.</p> : null}
         {recentlyPublished.map(item => (
-          <Link key={item.kind + item.id} href={item.link} style={{ display: "block", flex: "0 0 280px", border: "1px solid var(--line)", borderRadius: "8px", padding: "16px", textDecoration: "none", color: "inherit", backgroundColor: "var(--bg-surface)" }}>
+          <Link key={item.kind + item.id} href={item.link} style={{ display: "block", flex: "0 0 280px", border: "1px solid var(--line)", borderRadius: "8px", padding: "16px", textDecoration: "none", color: "inherit", backgroundColor: "var(--surface)" }}>
             <div style={{ fontSize: "0.75rem", textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--muted)", marginBottom: "8px", fontWeight: "bold" }}>{item.kind}</div>
             <div style={{ fontSize: "1rem", fontWeight: 600, marginBottom: "8px", lineHeight: "1.3" }}>{item.title}</div>
             <div style={{ fontSize: "0.8rem", color: "var(--muted)" }}>
