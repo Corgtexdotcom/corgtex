@@ -1,7 +1,7 @@
 import { listProposals } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
-import { ProposalReactionsThread } from "./ProposalReactionsThread";
+import Link from "next/link";
 import {
   createProposalAction,
   submitProposalAction,
@@ -94,7 +94,12 @@ export default async function ProposalsPage({
             </div>
           )}
           {displayProposals.map((proposal) => (
-            <div className="nr-item" key={proposal.id}>
+            <Link 
+              key={proposal.id} 
+              href={`/workspaces/${workspaceId}/proposals/${proposal.id}`}
+              className="nr-item" 
+              style={{ display: "block", textDecoration: "none", color: "inherit", cursor: "pointer", transition: "background 0.2s" }}
+            >
               <div className="row" style={{ alignItems: "center" }}>
                 <strong className="nr-item-title">
                   {proposal.isPrivate && <span title="Private draft" style={{ marginRight: 6 }}>🔒</span>}
@@ -104,11 +109,16 @@ export default async function ProposalsPage({
                   {proposal.status === "ADVICE_GATHERING" ? "GATHERING ADVICE" : proposal.status}
                 </span>
               </div>
-              <div className="nr-excerpt">{proposal.summary ?? proposal.bodyMd.replace(/\0/g, "").slice(0, 150) + "..."}</div>
+              <div className="nr-excerpt" style={{ marginTop: 6, color: "var(--muted)" }}>
+                {proposal.summary ?? proposal.bodyMd.replace(/\0/g, "").slice(0, 150) + "..."}
+              </div>
               
-              <div className="nr-item-meta" style={{ marginTop: 8 }}>
-                 {proposal.author.displayName || proposal.author.email} · {new Date(proposal.createdAt).toLocaleDateString()}
-                 {" · "} Support: {getReactionCount(proposal, "SUPPORT")} {" · "} Questions: {getReactionCount(proposal, "QUESTION")} {" · "} Concerns: {getReactionCount(proposal, "CONCERN")}
+              <div className="nr-item-meta" style={{ marginTop: 12 }}>
+                 <span>{proposal.author.displayName || proposal.author.email}</span>
+                 <span style={{ margin: "0 8px" }}>·</span>
+                 <span>{new Date(proposal.createdAt).toLocaleDateString()}</span>
+                 <span style={{ margin: "0 8px" }}>·</span>
+                 <span>{proposal.reactions.length} entries</span>
               </div>
 
               {(proposal.tensions?.length > 0 || proposal.actions?.length > 0) && (
@@ -125,100 +135,7 @@ export default async function ProposalsPage({
                   ))}
                 </div>
               )}
-
-              <div className="actions-inline" style={{ marginTop: 12 }}>
-                {!isDemo && proposal.isPrivate && (
-                  <form action={publishProposalAction}>
-                    <input type="hidden" name="workspaceId" value={workspaceId} />
-                    <input type="hidden" name="proposalId" value={proposal.id} />
-                    <button type="submit" className="primary small">Publish Draft</button>
-                  </form>
-                )}
-                {!isDemo && proposal.status === "DRAFT" && (
-                  <>
-                    <form action={submitProposalAction} style={{ display: "inline-block" }}>
-                      <input type="hidden" name="workspaceId" value={workspaceId} />
-                      <input type="hidden" name="proposalId" value={proposal.id} />
-                      <input type="number" name="autoApproveHours" placeholder="Auto-approve in hours (e.g. 48)" defaultValue={48} style={{ width: "200px", marginRight: 8, display: "inline-block", padding: "4px 8px" }} />
-                      <button type="submit" className="secondary small">Submit for approval</button>
-                    </form>
-                    <form action={initiateAdviceProcessAction} style={{ display: "inline-block" }}>
-                      <input type="hidden" name="workspaceId" value={workspaceId} />
-                      <input type="hidden" name="proposalId" value={proposal.id} />
-                      <button type="submit" className="primary small">Start Advice Process</button>
-                    </form>
-                  </>
-                )}
-                {!isDemo && !proposal.isPrivate && proposal.status === "SUBMITTED" && (
-                  <>
-                    {proposal.autoApproveAt && (
-                      <div style={{ fontSize: "0.85rem", color: "var(--accent)", marginTop: 8 }}>
-                         Auto-approves {new Date(proposal.autoApproveAt).toLocaleString()} if no unresolved objections
-                      </div>
-                    )}
-                    <ProposalReactionsThread workspaceId={workspaceId} proposal={proposal} currentUserId={actor.kind === "user" ? actor.user.id : null} />
-                  </>
-                )}
-                {!proposal.isPrivate && proposal.status === "ADVICE_GATHERING" && proposal.adviceProcess && (
-                  <div style={{ padding: "16px", background: "rgba(255, 0, 128, 0.05)", borderLeft: "3px solid var(--accent)", marginTop: 12, borderRadius: 4, width: "100%" }}>
-                    <h4 style={{ margin: "0 0 8px 0" }}>Advice Process Active</h4>
-                    {proposal.adviceProcess.advisorySuggestionsJson && typeof proposal.adviceProcess.advisorySuggestionsJson === "object" && Array.isArray((proposal.adviceProcess.advisorySuggestionsJson as any).advisors) && (proposal.adviceProcess.advisorySuggestionsJson as any).advisors.length > 0 && (
-                      <div className="muted" style={{ marginBottom: 12, fontSize: "0.85rem" }}>
-                        <strong>AI Recommended Advisors:</strong>{" "}
-                        {(proposal.adviceProcess.advisorySuggestionsJson as any).advisors.map((a: any) => (
-                          <span key={a.memberId} title={a.reason} style={{ textDecoration: "underline dotted", cursor: "help", marginRight: 8 }}>{a.name}</span>
-                        ))}
-                      </div>
-                    )}
-                    <div style={{ display: "flex", gap: "16px", flexDirection: "column" }}>
-                      {proposal.adviceProcess.records.map((r: any) => (
-                        <div key={r.id} style={{ fontSize: "0.9rem" }}>
-                          <strong>{r.member.user.displayName || r.member.user.email}</strong> 
-                          <span className={`tag ${r.type === "ENDORSE" ? "success" : "warning"}`} style={{ marginLeft: 8, fontSize: "0.7rem" }}>
-                            {r.type}
-                          </span>
-                          <div style={{ marginTop: 4 }}>{r.bodyMd}</div>
-                        </div>
-                      ))}
-                    </div>
-                    
-                    {!isDemo && (
-                      <form className="stack" style={{ marginTop: 16 }}>
-                        <input type="hidden" name="workspaceId" value={workspaceId} />
-                        <input type="hidden" name="processId" value={proposal.adviceProcess.id} />
-                        <textarea name="bodyMd" required placeholder="Leave your advice here..." style={{ minHeight: "60px" }}></textarea>
-                        <div className="actions-inline">
-                          <button formAction={recordAdviceAction.bind(null, "ENDORSE")} type="submit" className="primary small">Endorse</button>
-                          <button formAction={recordAdviceAction.bind(null, "CONCERN")} type="submit" className="warning small">Raise Concern</button>
-                        </div>
-                      </form>
-                    )}
-
-                    {actor.kind === "user" && proposal.authorUserId === actor.user.id && !isDemo && (
-                      <div className="actions-inline" style={{ marginTop: 16, paddingTop: 16, borderTop: "1px solid var(--border-color)" }}>
-                        <form action={executeAdviceProcessDecisionAction} className="actions-inline">
-                          <input type="hidden" name="workspaceId" value={workspaceId} />
-                          <input type="hidden" name="processId" value={proposal.adviceProcess.id} />
-                          <button type="submit" className="primary small">Execute Decision</button>
-                        </form>
-                        <form action={withdrawAdviceProcessAction} className="actions-inline">
-                          <input type="hidden" name="workspaceId" value={workspaceId} />
-                          <input type="hidden" name="processId" value={proposal.adviceProcess.id} />
-                          <button type="submit" className="danger small">Withdraw</button>
-                        </form>
-                      </div>
-                    )}
-                  </div>
-                )}
-                {!isDemo && (proposal.status === "DRAFT" || proposal.status === "APPROVED" || proposal.status === "REJECTED") && (
-                  <form action={archiveProposalAction}>
-                    <input type="hidden" name="workspaceId" value={workspaceId} />
-                    <input type="hidden" name="proposalId" value={proposal.id} />
-                    <button type="submit" className="warning small">Archive</button>
-                  </form>
-                )}
-              </div>
-            </div>
+            </Link>
           ))}
         </div>
       </section>
