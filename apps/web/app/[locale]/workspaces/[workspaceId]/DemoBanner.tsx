@@ -1,6 +1,6 @@
 "use client";
 
-import "../../demo-tour-theme.css";
+import "../../../demo-tour-theme.css";
 
 export function DemoBanner() {
   return (

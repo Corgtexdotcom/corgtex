@@ -35,6 +35,10 @@ Install `next-intl`, restructure routes under a `[locale]` dynamic segment, crea
 - `apps/web/app/oauth/**`
 - `apps/web/lib/nav-config.ts`
 - `docs/plans/feat-i18n-foundation.md`
+- `apps/web/app/[locale]/error.tsx`
+- `apps/web/app/[locale]/workspaces/**`
+- `apps/web/next.config.ts`
+- `apps/web/package.json`
 
 ## Acceptance criteria
 
