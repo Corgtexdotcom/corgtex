@@ -42,6 +42,31 @@ export async function listProposals(actor: AppActor, workspaceId: string, opts?:
   return { items, total, take, skip };
 }
 
+export async function getProposal(actor: AppActor, params: {
+  workspaceId: string;
+  proposalId: string;
+}) {
+  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  const proposal = await prisma.proposal.findUnique({
+    where: { id: params.proposalId },
+    include: {
+      author: { select: { id: true, displayName: true, email: true } },
+      circle: { select: { id: true, name: true } },
+      tensions: { select: { id: true, title: true, status: true } },
+      actions: { select: { id: true, title: true, status: true } },
+      adviceProcess: {
+        include: {
+          records: {
+            include: { member: { include: { user: { select: { displayName: true, email: true } } } } }
+          }
+        }
+      },
+    },
+  });
+  invariant(proposal && proposal.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Proposal not found.");
+  return proposal;
+}
+
 export async function createProposal(actor: AppActor, params: {
   workspaceId: string;
   title: string;
