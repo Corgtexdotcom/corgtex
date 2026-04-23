@@ -1,6 +1,9 @@
 import type { NextConfig } from "next";
 import path from "node:path";
+import createNextIntlPlugin from 'next-intl/plugin';
 import { withSentryConfig } from "@sentry/nextjs";
+
+const withNextIntl = createNextIntlPlugin('./i18n/request.ts');
 
 const nextConfig: NextConfig = {
   outputFileTracingRoot: path.join(process.cwd(), "../.."),
@@ -15,7 +18,7 @@ const nextConfig: NextConfig = {
   serverExternalPackages: ["pdf-parse", "mammoth"],
 };
 
-export default withSentryConfig(nextConfig, {
+export default withSentryConfig(withNextIntl(nextConfig), {
   // For all available options, see:
   // https://github.com/getsentry/sentry-webpack-plugin#options
   org: process.env.SENTRY_ORG,
