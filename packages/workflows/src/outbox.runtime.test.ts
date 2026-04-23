@@ -21,6 +21,10 @@ vi.mock("@corgtex/shared", async (importOriginal) => {
   };
 });
 
+vi.mock("./handlers/agent-dispatch", () => ({
+  runAgentWorkflowJob: runAgentWorkflowJobMock,
+}));
+
 vi.mock("@corgtex/agents", () => ({
   runAgentWorkflowJob: runAgentWorkflowJobMock,
 }));

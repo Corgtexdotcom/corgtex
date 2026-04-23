@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { deriveJobsForEvent, deriveNotificationsForEvent, triageBucketStart } from "./outbox";
+import { deriveJobsForEvent, triageBucketStart } from "./derive-jobs";
+import { deriveNotificationsForEvent } from "./derive-notifications";
 
 describe("deriveJobsForEvent edge cases", () => {
   it("returns empty for unknown event types", () => {
