@@ -269,6 +269,7 @@ model Workspace {
   goals               Goal[]
   recognitions        Recognition[]
   agentIdentities     AgentIdentity[]
+  deliberationEntries DeliberationEntry[]
 }
 
 model WorkspaceFeatureFlag {
@@ -313,6 +314,7 @@ model User {
   ssoIdentities     UserSsoIdentity[]
   meetingInsights          MeetingInsight[]
   createdAgentIdentities   AgentIdentity[]    @relation("AgentIdentityCreator")
+  deliberationEntries      DeliberationEntry[]
 }
 
 model Session {
@@ -554,6 +556,26 @@ model ProposalReaction {
   user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([proposalId, createdAt])
+}
+
+model DeliberationEntry {
+  id              String    @id @default(uuid())
+  workspaceId     String
+  parentType      String    // "PROPOSAL" | "SPEND" | "TENSION" | "MEETING" | "BRAIN_ARTICLE"
+  parentId        String
+  authorUserId    String
+  entryType       String    // "SUPPORT" | "QUESTION" | "CONCERN" | "OBJECTION" | "REACTION" | "ADVICE_REQUEST"
+  bodyMd          String?   @db.Text
+  targetMemberId  String?   // For ADVICE_REQUEST: which member is being asked
+  resolvedAt      DateTime?
+  resolvedNote    String?
+  createdAt       DateTime  @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  author    User      @relation(fields: [authorUserId], references: [id], onDelete: Cascade)
+
+  @@index([parentType, parentId, createdAt])
+  @@index([workspaceId, parentType])
 }
 
 model ApprovalPolicy {
