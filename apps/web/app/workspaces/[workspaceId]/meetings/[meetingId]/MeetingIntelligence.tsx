@@ -29,7 +29,7 @@ export default function MeetingIntelligence({
     if (!hasTranscript) return null;
 
     return (
-      <section className="ws-section" style={{ marginBottom: 48, background: "var(--bg-subtle)", padding: 24, borderRadius: 8 }}>
+      <section className="ws-section" style={{ marginBottom: 48, background: "var(--bg-alt)", padding: 24, borderRadius: 8 }}>
         <h2 className="nr-section-header" style={{ borderTop: "none", marginTop: 0 }}>AI Meeting Intelligence</h2>
         <p className="muted">No insights extracted yet. You can run the AI extraction to find decisions, tensions, action items, and proposals in the transcript.</p>
         <button 
@@ -112,7 +112,7 @@ export default function MeetingIntelligence({
                     {insight.sourceQuote && (
                       <details style={{ marginTop: 8 }}>
                         <summary style={{ cursor: "pointer", fontSize: "0.82rem", color: "var(--accent)" }}>Source Quote</summary>
-                        <blockquote style={{ fontSize: "0.82rem", margin: "4px 0 0 0", paddingLeft: 8, borderLeft: "2px solid var(--border)" }}>
+                        <blockquote style={{ fontSize: "0.82rem", margin: "4px 0 0 0", paddingLeft: 8, borderLeft: "2px solid var(--line)" }}>
                           {insight.sourceQuote}
                         </blockquote>
                       </details>

@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { ThemeProvider } from "./ThemeProvider";
 import { Inter, Playfair_Display, Montserrat } from "next/font/google";
 import "./globals.css";
 
@@ -17,8 +18,12 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" className={`${inter.variable} ${playfair.variable} ${montserrat.variable}`}>
-      <body>{children}</body>
+    <html lang="en" className={`${inter.variable} ${playfair.variable} ${montserrat.variable}`} suppressHydrationWarning>
+      <body>
+        <ThemeProvider>
+          {children}
+        </ThemeProvider>
+      </body>
     </html>
   );
 }

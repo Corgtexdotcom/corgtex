@@ -30,7 +30,7 @@ export function SsoLoginForm() {
   }
 
   return (
-    <form action="/api/auth/sso/init" method="GET" className="stack" style={{ marginTop: 20, paddingTop: 20, borderTop: "1px solid var(--border)" }}>
+    <form action="/api/auth/sso/init" method="GET" className="stack" style={{ marginTop: 20, paddingTop: 20, borderTop: "1px solid var(--line)" }}>
       <p className="muted" style={{ fontSize: 13, marginBottom: 10 }}>
         Enter your work email to continue to your organization&apos;s identity provider.
       </p>
