@@ -31,6 +31,7 @@ export default async function CirclesPage({
   let assignments: Awaited<ReturnType<typeof listRoleAssignments>>;
   let members: Awaited<ReturnType<typeof listMembers>>;
   let agentAssignments: any[] = [];
+  let allAgents: any[] = [];
   let isDemo = false;
 
   try {
@@ -53,6 +54,10 @@ export default async function CirclesPage({
     agentAssignments = await prisma.circleAgentAssignment.findMany({
       where: { circle: { workspaceId } },
       include: { agentIdentity: true },
+    });
+    
+    allAgents = await prisma.agentIdentity.findMany({
+      where: { workspaceId, isActive: true }
     });
   } catch (error) {
     console.error("[CirclesPage] Failed to load circles data detailed:", error);
@@ -231,6 +236,30 @@ export default async function CirclesPage({
                       </div>
                     ));
                   })()}
+                </div>
+                
+                <div style={{ marginTop: 12, paddingTop: 8, borderTop: "1px dashed var(--border)" }}>
+                  {!isDemo && (
+                    <form action={async (formData: FormData) => {
+                      "use server";
+                      const agentIdentityId = formData.get("agentIdentityId") as string;
+                      if (!agentIdentityId) return;
+                      const { assignAgentToCircle } = await import("@corgtex/domain");
+                      const { requirePageActor } = await import("@/lib/auth");
+                      const { revalidatePath } = await import("next/cache");
+                      const actor = await requirePageActor();
+                      await assignAgentToCircle(actor, { workspaceId, agentIdentityId, circleId: circle.id });
+                      revalidatePath(`/workspaces/${workspaceId}/circles`);
+                    }} className="actions-inline">
+                      <select name="agentIdentityId" style={{ width: "auto", minWidth: 120 }} required>
+                        <option value="">-- Select Agent --</option>
+                        {allAgents.map((agent: any) => (
+                          <option key={agent.id} value={agent.id}>{agent.displayName}</option>
+                        ))}
+                      </select>
+                      <button type="submit" className="secondary small">Assign Agent</button>
+                    </form>
+                  )}
                 </div>
               </div>
             );

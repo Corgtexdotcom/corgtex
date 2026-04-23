@@ -20,6 +20,7 @@ export function AgentProfileClient({
 }) {
   const [behaviorMd, setBehaviorMd] = useState(agent.behaviorMd || "");
   const [isPending, startTransition] = useTransition();
+  const [selectedCircleId, setSelectedCircleId] = useState("");
 
   const handleSaveBehavior = () => {
     startTransition(async () => {
@@ -125,17 +126,29 @@ export function AgentProfileClient({
             {unassignedCircles.length > 0 && (
               <div className="p-4 bg-stone-50 border-t border-stone-100">
                 <h4 className="text-xs font-semibold text-stone-500 uppercase tracking-wider mb-3">Assign to circle</h4>
-                <div className="flex flex-wrap gap-2">
-                  {unassignedCircles.map((circle) => (
-                    <button
-                      key={circle.id}
-                      className="secondary small"
-                      onClick={() => handleAssignCircle(circle.id)}
-                      disabled={isPending}
-                    >
-                      + {circle.name}
-                    </button>
-                  ))}
+                <div className="flex gap-2">
+                  <select 
+                    value={selectedCircleId} 
+                    onChange={(e) => setSelectedCircleId(e.target.value)}
+                    className="border border-stone-200 rounded px-2 py-1 text-sm flex-1"
+                  >
+                    <option value="">-- Select Circle --</option>
+                    {unassignedCircles.map((circle) => (
+                      <option key={circle.id} value={circle.id}>{circle.name}</option>
+                    ))}
+                  </select>
+                  <button
+                    className="secondary small"
+                    onClick={() => {
+                      if (selectedCircleId) {
+                        handleAssignCircle(selectedCircleId);
+                        setSelectedCircleId("");
+                      }
+                    }}
+                    disabled={isPending || !selectedCircleId}
+                  >
+                    Assign
+                  </button>
                 </div>
               </div>
             )}
