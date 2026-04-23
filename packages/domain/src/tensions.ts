@@ -3,6 +3,7 @@ import type { AppActor } from "@corgtex/shared";
 import { appendEvents } from "./events";
 import { actorUserIdForWorkspace, requireWorkspaceMembership } from "./auth";
 import { invariant } from "./errors";
+import { parseMentions, createMentionNotifications } from "./mentions";
 
 import { privacyFilter } from "./privacy";
 
@@ -78,6 +79,17 @@ export async function createTension(actor: AppActor, params: {
       },
     });
 
+    const { memberIds, circleIds } = parseMentions(tension.bodyMd);
+    await createMentionNotifications(tx, {
+      workspaceId: params.workspaceId,
+      actorUserId: authorUserId,
+      entityType: "Tension",
+      entityId: tension.id,
+      title: `You were mentioned in a tension`,
+      memberIds,
+      circleIds,
+    });
+
     await tx.auditLog.create({
       data: {
         workspaceId: params.workspaceId,
@@ -146,6 +158,19 @@ export async function updateTension(actor: AppActor, params: {
       where: { id: params.tensionId },
       data,
     });
+
+    if (params.bodyMd !== undefined && params.bodyMd !== tension.bodyMd) {
+      const { memberIds, circleIds } = parseMentions(updated.bodyMd);
+      await createMentionNotifications(tx, {
+        workspaceId: params.workspaceId,
+        actorUserId: actor.kind === "user" ? actor.user.id : "",
+        entityType: "Tension",
+        entityId: updated.id,
+        title: `You were mentioned in a tension`,
+        memberIds,
+        circleIds,
+      });
+    }
 
     await tx.auditLog.create({
       data: {
@@ -278,6 +303,57 @@ export async function publishTension(actor: AppActor, params: {
       {
         workspaceId: params.workspaceId,
         type: "tension.published",
+        aggregateType: "Tension",
+        aggregateId: updated.id,
+        payload: { tensionId: updated.id },
+      },
+    ]);
+
+    return updated;
+  });
+}
+
+export async function resolveTension(actor: AppActor, params: {
+  workspaceId: string;
+  tensionId: string;
+  resolvedVia?: string;
+}) {
+  await requireWorkspaceMembership({
+    actor,
+    workspaceId: params.workspaceId,
+  });
+
+  return prisma.$transaction(async (tx) => {
+    const tension = await tx.tension.findUnique({
+      where: { id: params.tensionId },
+    });
+
+    invariant(tension && tension.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Tension not found.");
+    invariant(tension.status !== "COMPLETED", 400, "INVALID_STATE", "Tension is already resolved.");
+
+    const updated = await tx.tension.update({
+      where: { id: params.tensionId },
+      data: {
+        status: "COMPLETED",
+        resolvedVia: params.resolvedVia?.trim() || null,
+        resolvedAt: new Date(),
+      },
+    });
+
+    await tx.auditLog.create({
+      data: {
+        workspaceId: params.workspaceId,
+        actorUserId: actor.kind === "user" ? actor.user.id : null,
+        action: "tension.resolved",
+        entityType: "Tension",
+        entityId: updated.id,
+      },
+    });
+
+    await appendEvents(tx, [
+      {
+        workspaceId: params.workspaceId,
+        type: "tension.resolved",
         aggregateType: "Tension",
         aggregateId: updated.id,
         payload: { tensionId: updated.id },

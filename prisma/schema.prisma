@@ -269,6 +269,7 @@ model Workspace {
   goals               Goal[]
   recognitions        Recognition[]
   agentIdentities     AgentIdentity[]
+  comments            Comment[]
 }
 
 model WorkspaceFeatureFlag {
@@ -313,6 +314,7 @@ model User {
   ssoIdentities     UserSsoIdentity[]
   meetingInsights          MeetingInsight[]
   createdAgentIdentities   AgentIdentity[]    @relation("AgentIdentityCreator")
+  comments          Comment[]             @relation("CommentAuthor")
 }
 
 model Session {
@@ -466,6 +468,8 @@ model Action {
   proposal         Proposal?    @relation(fields: [proposalId], references: [id], onDelete: SetNull)
   isPrivate        Boolean      @default(false)
   publishedAt      DateTime?
+  resolvedVia      String?
+  resolvedAt       DateTime?
   createdAt        DateTime     @default(now())
   updatedAt        DateTime     @updatedAt
 
@@ -495,6 +499,7 @@ model Tension {
   meetingId        String?
   isPrivate        Boolean       @default(false)
   publishedAt      DateTime?
+  resolvedAt       DateTime?
   createdAt        DateTime      @default(now())
   updatedAt        DateTime      @updatedAt
 
@@ -1930,4 +1935,25 @@ model CircleAgentAssignment {
   role          Role?         @relation(fields: [roleId], references: [id], onDelete: SetNull)
 
   @@unique([circleId, agentIdentityId])
+}
+
+model Comment {
+  id                 String    @id @default(uuid())
+  workspaceId        String
+  entityType         String
+  entityId           String
+  authorUserId       String
+  bodyMd             String    @db.Text
+  mentionedMemberIds String[]
+  mentionedCircleIds String[]
+  resolvedAt         DateTime?
+  resolvedNote       String?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  author    User      @relation("CommentAuthor", fields: [authorUserId], references: [id], onDelete: Restrict)
+
+  @@index([workspaceId, entityType, entityId])
+  @@index([workspaceId, authorUserId])
 }

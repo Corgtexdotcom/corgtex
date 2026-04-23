@@ -23,13 +23,13 @@ Add a single polymorphic `Comment` table that lets workspace members discuss any
 
 ## Acceptance criteria
 
-- [ ] `Comment` model added to Prisma schema
-- [ ] `Action` model updated with `resolvedVia` and `resolvedAt`
-- [ ] `Tension` model updated with `resolvedAt`
-- [ ] Prisma migration generated successfully
-- [ ] `mentions.ts` created with mention parsing logic and notification creation
-- [ ] `comments.ts` created with CRUD operations for comments and mentions parsing
-- [ ] Domain files (`tensions.ts`, `actions.ts`, `goals.ts`, `proposals.ts`) parse mentions on create/update and have resolution logic where appropriate.
+- [x] `Comment` model added to Prisma schema
+- [x] `Action` model updated with `resolvedVia` and `resolvedAt`
+- [x] `Tension` model updated with `resolvedAt`
+- [x] Prisma migration generated successfully
+- [x] `mentions.ts` created with mention parsing logic and notification creation
+- [x] `comments.ts` created with CRUD operations for comments and mentions parsing
+- [x] Domain files (`tensions.ts`, `actions.ts`, `goals.ts`, `proposals.ts`) parse mentions on create/update and have resolution logic where appropriate.
 
 ## Test plan
 

@@ -5,6 +5,7 @@ import { actorUserIdForWorkspace, requireWorkspaceMembership } from "./auth";
 import { getApprovalPolicy, ensureApprovalFlow } from "./approvals";
 import { invariant } from "./errors";
 import { privacyFilter } from "./privacy";
+import { parseMentions, createMentionNotifications } from "./mentions";
 
 export async function listProposals(actor: AppActor, workspaceId: string, opts?: { take?: number; skip?: number; circleId?: string | null }) {
   const take = opts?.take ?? 20;
@@ -77,6 +78,17 @@ export async function createProposal(actor: AppActor, params: {
       },
     });
 
+    const { memberIds, circleIds } = parseMentions(proposal.bodyMd);
+    await createMentionNotifications(tx, {
+      workspaceId: params.workspaceId,
+      actorUserId: authorUserId,
+      entityType: "Proposal",
+      entityId: proposal.id,
+      title: `You were mentioned in a proposal`,
+      memberIds,
+      circleIds,
+    });
+
     await tx.auditLog.create({
       data: {
         workspaceId: params.workspaceId,
@@ -144,6 +156,19 @@ export async function updateProposal(actor: AppActor, params: {
       where: { id: params.proposalId },
       data,
     });
+
+    if (params.bodyMd !== undefined && params.bodyMd !== proposal.bodyMd) {
+      const { memberIds, circleIds } = parseMentions(updated.bodyMd);
+      await createMentionNotifications(tx, {
+        workspaceId: params.workspaceId,
+        actorUserId: actor.kind === "user" ? actor.user.id : "",
+        entityType: "Proposal",
+        entityId: updated.id,
+        title: `You were mentioned in a proposal`,
+        memberIds,
+        circleIds,
+      });
+    }
 
     await tx.auditLog.create({
       data: {

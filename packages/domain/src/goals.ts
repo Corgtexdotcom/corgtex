@@ -4,6 +4,7 @@ import { appendEvents } from "./events";
 import { requireWorkspaceMembership } from "./auth";
 import { recordAudit } from "./audit-trail";
 import { invariant } from "./errors";
+import { parseMentions, createMentionNotifications } from "./mentions";
 import type { GoalLevel, GoalCadence, GoalStatus } from "@prisma/client";
 
 export async function createGoal(
@@ -47,6 +48,17 @@ export async function createGoal(
         circleId: params.circleId || null,
         ownerMemberId: params.ownerMemberId || null,
       },
+    });
+
+    const { memberIds, circleIds } = parseMentions(goal.descriptionMd);
+    await createMentionNotifications(tx, {
+      workspaceId: params.workspaceId,
+      actorUserId: actor.kind === "user" ? actor.user.id : "",
+      entityType: "Goal",
+      entityId: goal.id,
+      title: `You were mentioned in a goal`,
+      memberIds,
+      circleIds,
     });
 
     await recordAudit(tx, actor, {
@@ -125,6 +137,19 @@ export async function updateGoal(
       where: { id: params.goalId },
       data,
     });
+
+    if (params.descriptionMd !== undefined && params.descriptionMd !== goal.descriptionMd) {
+      const { memberIds, circleIds } = parseMentions(updated.descriptionMd);
+      await createMentionNotifications(tx, {
+        workspaceId: params.workspaceId,
+        actorUserId: actor.kind === "user" ? actor.user.id : "",
+        entityType: "Goal",
+        entityId: updated.id,
+        title: `You were mentioned in a goal`,
+        memberIds,
+        circleIds,
+      });
+    }
 
     await recordAudit(tx, actor, {
       workspaceId: params.workspaceId,
