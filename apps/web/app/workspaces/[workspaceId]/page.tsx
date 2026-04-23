@@ -14,6 +14,23 @@ import { RecognitionCard } from "./goals/RecognitionCard";
 
 export const dynamic = "force-dynamic";
 
+function resolveEntityUrl(
+  workspaceId: string,
+  entityType: string | null,
+  entityId: string | null
+): string | null {
+  if (!entityType || !entityId) return null;
+  const t = entityType.toLowerCase();
+  if (t === "proposal") return `/workspaces/${workspaceId}/proposals`;
+  if (t === "tension") return `/workspaces/${workspaceId}/tensions`;
+  if (t === "action") return `/workspaces/${workspaceId}/actions`;
+  if (t === "meeting") return `/workspaces/${workspaceId}/meetings`;
+  if (t === "adviceprocess") return `/workspaces/${workspaceId}/proposals?status=ADVICE_GATHERING`;
+  if (t === "advicerecord") return `/workspaces/${workspaceId}/proposals?status=ADVICE_GATHERING`;
+  if (t === "spend" || t === "spendrequest") return `/workspaces/${workspaceId}/finance`;
+  return null;
+}
+
 export default async function WorkspaceDashboard({
   params,
 }: {
@@ -166,7 +183,16 @@ export default async function WorkspaceDashboard({
                 <strong>{pendingFlows.length} Approval{pendingFlows.length > 1 ? "s" : ""} Pending</strong>
                 {pendingFlows.slice(0, 2).map((flow) => (
                   <div key={flow.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
-                    <span style={{ fontSize: "0.8rem" }}>{flow.subjectType}</span>
+                    {(() => {
+                      const href = resolveEntityUrl(workspaceId, flow.subjectType, flow.subjectId);
+                      return href ? (
+                        <Link href={href} style={{ fontSize: "0.8rem", color: "inherit", textDecoration: "underline dotted" }}>
+                          {flow.subjectType}
+                        </Link>
+                      ) : (
+                        <span style={{ fontSize: "0.8rem" }}>{flow.subjectType}</span>
+                      );
+                    })()}
                     <form action={decideApprovalAction} className="actions-inline" style={{ display: "inline-flex" }}>
                       <input type="hidden" name="workspaceId" value={workspaceId} />
                       <input type="hidden" name="flowId" value={flow.id} />
@@ -194,9 +220,18 @@ export default async function WorkspaceDashboard({
                     <button type="submit" style={{ padding: "0 6px", fontSize: "0.7rem", minHeight: 0, background: "transparent", color: "var(--warning)"}}>Mark read</button>
                   </form>
                 </div>
-                {unreadNotifications.slice(0, 2).map((n) => (
-                  <div key={n.id} style={{ fontSize: "0.8rem", marginBottom: 2 }}>{n.title}</div>
-                ))}
+                {unreadNotifications.slice(0, 2).map((n) => {
+                  const href = resolveEntityUrl(workspaceId, n.entityType, n.entityId);
+                  return (
+                    <div key={n.id} style={{ fontSize: "0.8rem", marginBottom: 2 }}>
+                      {href ? (
+                        <Link href={href} style={{ color: "inherit", textDecoration: "underline dotted" }}>
+                          {n.title}
+                        </Link>
+                      ) : n.title}
+                    </div>
+                  );
+                })}
               </div>
             )}
 
