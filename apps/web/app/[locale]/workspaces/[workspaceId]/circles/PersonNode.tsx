@@ -19,7 +19,7 @@ export default function PersonNode({ person }: { person: PersonData }) {
   return (
     <Link href={`/workspaces/${person.workspaceId}/members/${person.memberId}`} className={`person-chip ${isAgent ? "agent-chip" : ""}`}>
       <div className="person-avatar">
-        {isAgent ? "🤖" : initials}
+        {isAgent ? "⬡" : initials}
       </div>
       <div className="person-info">
         <span className="person-name">{person.displayName || person.email}</span>

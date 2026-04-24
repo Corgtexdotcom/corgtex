@@ -142,7 +142,7 @@ export default async function BrainPage({
                   {typeArticles.map((a) => (
                     <li key={a.id} style={{ marginBottom: "12px" }}>
                       <a href={`/workspaces/${workspaceId}/brain/${a.slug}`} style={{ fontSize: "0.95rem", fontWeight: 500 }}>
-                        {a.isPrivate && <span title={t("privateDraft")} style={{ marginRight: 6 }}>🔒</span>}
+                        {a.isPrivate && <span title={t("privateDraft")} style={{ marginRight: 6 }}>◆</span>}
                         {a.title}
                       </a>
                       {a.authority === "AUTHORITATIVE" && <span style={{ fontSize: "0.6rem", padding: "1px 4px", background: "var(--accent)", color: "white", borderRadius: "2px", marginLeft: "6px", verticalAlign: "middle" }}>{t("core")}</span>}

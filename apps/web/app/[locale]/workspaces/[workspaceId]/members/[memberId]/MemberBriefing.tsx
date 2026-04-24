@@ -38,7 +38,7 @@ export function MemberBriefing({ workspaceId, memberId }: MemberBriefingProps) {
     <div className="rounded-xl border bg-gradient-to-br from-indigo-50/50 to-white p-6 shadow-sm overflow-hidden relative">
       <div className="flex items-center justify-between mb-4 relative z-10">
         <h3 className="text-lg font-semibold flex items-center gap-2">
-          ✨ AI Briefing
+          ✧ AI Briefing
         </h3>
         <button
           onClick={generate}
@@ -58,14 +58,14 @@ export function MemberBriefing({ workspaceId, memberId }: MemberBriefingProps) {
 
         {isPending && (
           <div className="py-8 flex flex-col items-center justify-center text-muted animate-pulse">
-            <div className="text-2xl mx-auto mb-3 animate-bounce">✨</div>
+            <div className="text-2xl mx-auto mb-3 animate-bounce">✧</div>
             <p className="text-sm">Synthesizing recent activity...</p>
           </div>
         )}
 
         {error && !isPending && (
           <div className="text-danger text-sm py-4 flex items-center gap-2">
-            ⚠️ Failed to generate briefing. Please try again.
+            △ Failed to generate briefing. Please try again.
           </div>
         )}
 

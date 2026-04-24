@@ -101,7 +101,7 @@ export default async function OperatorPage({
     <>
       {failingAgents.length > 0 && (
         <div className="panel danger" style={{ marginBottom: 24 }}>
-          <strong>⚠️ The following agents are failing:</strong> {failingAgents.join(", ")}. Please check the logs.
+          <strong>△ The following agents are failing:</strong> {failingAgents.join(", ")}. Please check the logs.
         </div>
       )}
       <div className="ws-page-header">
