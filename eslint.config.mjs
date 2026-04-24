@@ -26,6 +26,13 @@ export default [
   },
   {
     rules: {
+      "no-restricted-syntax": [
+        "error",
+        {
+          selector: "Literal[value=/[\\p{Emoji_Presentation}\\uFE0F]/u]",
+          message: "Emoji characters are not allowed. Use monochrome Unicode glyphs from the design system (see nav-config.ts for reference).",
+        },
+      ],
       "@next/next/no-html-link-for-pages": "off",
     },
   },
