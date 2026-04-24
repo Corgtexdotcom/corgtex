@@ -43,6 +43,7 @@
     "prisma:seed": "node prisma/seed.mjs",
     "seed:brain": "node scripts/seed-brain.mjs",
     "seed:jnj-demo": "node scripts/seed-jnj-demo.mjs",
+    "contrast-audit": "node scripts/contrast-audit.mjs",
     "check": "npm run lint && npm run typecheck && npm run prisma:validate"
   },
   "dependencies": {
