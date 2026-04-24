@@ -81,7 +81,7 @@ export default async function TensionsPage({
             <div className="nr-item" key={tension.id}>
               <div className="row" style={{ alignItems: "center" }}>
                 <strong className="nr-item-title">
-                  {tension.isPrivate && <span title="Private inbox item" style={{ marginRight: 6 }}>🔒</span>}
+                  {tension.isPrivate && <span title="Private inbox item" style={{ marginRight: 6 }}>◆</span>}
                   <a href={`/workspaces/${workspaceId}/tensions/${tension.id}`} style={{ color: "inherit" }}>
                     {tension.title}
                   </a>

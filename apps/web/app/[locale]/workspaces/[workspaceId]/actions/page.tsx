@@ -73,7 +73,7 @@ export default async function ActionsPage({
             <div className="nr-item" key={action.id}>
               <div className="row" style={{ alignItems: "center" }}>
                 <strong className="nr-item-title">
-                  {action.isPrivate && <span title="Private (only visible to you)" style={{ marginRight: 6 }}>🔒</span>}
+                  {action.isPrivate && <span title="Private (only visible to you)" style={{ marginRight: 6 }}>◆</span>}
                   {action.title}
                 </strong>
                 <span className={`tag ${action.status === "OPEN" ? "warning" : action.status === "IN_PROGRESS" ? "info" : "success"}`}>{action.status}</span>
