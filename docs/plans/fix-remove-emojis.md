@@ -26,3 +26,8 @@ Remove all colorful OS-rendered emojis from the UI and replace them with monochr
 - [x] `eslint.config.mjs` is updated with a `no-restricted-syntax` rule to block future emoji usage.
 - [x] `AGENTS.md` is updated with a rule to enforce monochrome glyphs.
 - [x] Visual proof attached.
+
+## Test plan
+
+- `npm run check` — lint, typecheck, prisma validate
+- `npm run build` — production build without DB
