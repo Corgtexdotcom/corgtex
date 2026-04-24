@@ -118,12 +118,6 @@ export default async function SettingsPage({
           Members
         </a>
         <a
-          href={`/workspaces/${workspaceId}/settings?tab=agents`}
-          className={`nr-tab ${tab === "agents" ? "nr-tab-active" : ""}`}
-        >
-          Agents
-        </a>
-        <a
           href={`/workspaces/${workspaceId}/settings?tab=data-sources`}
           className={`nr-tab ${tab === "data-sources" ? "nr-tab-active" : ""}`}
         >
@@ -166,22 +160,6 @@ export default async function SettingsPage({
             <SsoConfigManager workspaceId={workspaceId} configs={ssoConfigs} />
 
             <section className="stack" style={{ gap: 40 }}>
-              <div>
-                <h2 className="nr-section-header">Agent credentials (MCP)</h2>
-                <p className="nr-item-meta" style={{ fontSize: "0.85rem", marginBottom: 16 }}>
-                  Create credentials to connect external AI clients (like Claude or Cursor) to your workspace via the Model Context Protocol (MCP).
-                </p>
-
-                <AgentConnectionManager
-                  workspaceId={workspaceId}
-                  mcpUrl={mcpUrl}
-                  initialCredentials={credentials}
-                  defaultScopes={DEFAULT_SCOPES}
-                  scopeRegistry={SCOPE_REGISTRY}
-                />
-              </div>
-
-              <div>
                  <h2 className="nr-section-header">Custom GPTs</h2>
                  <p className="nr-item-meta" style={{ fontSize: "0.85rem", marginBottom: 16 }}>
                    Set up a dedicated Custom GPT for your organization inside ChatGPT.
@@ -198,7 +176,6 @@ export default async function SettingsPage({
                      createdAt: app.createdAt
                    }))}
                  />
-              </div>
             </section>
           </div>
 
@@ -337,13 +314,6 @@ export default async function SettingsPage({
 
       {tab === "members" && (
         <MembersTable workspaceId={workspaceId} members={members} isAdmin={isAdmin} />
-      )}
-
-      {tab === "agents" && (
-        <>
-          <AgentBudgetManager workspaceId={workspaceId} budget={budget ? { monthlyCostCapUsd: Number(budget.monthlyCostCapUsd), alertThresholdPct: budget.alertThresholdPct, periodStartDay: budget.periodStartDay } : null} />
-          <AgentSettingsClient workspaceId={workspaceId} agents={agents} />
-        </>
       )}
 
       {tab === "data-sources" && (
