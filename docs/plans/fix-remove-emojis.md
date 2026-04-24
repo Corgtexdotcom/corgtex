@@ -31,3 +31,7 @@ Remove all colorful OS-rendered emojis from the UI and replace them with monochr
 
 - `npm run check` — lint, typecheck, prisma validate
 - `npm run build` — production build without DB
+
+## Labels this PR needs
+
+- `large-change-approved` — 16 files (1 over the 15-file cap), all small surgical emoji replacements
