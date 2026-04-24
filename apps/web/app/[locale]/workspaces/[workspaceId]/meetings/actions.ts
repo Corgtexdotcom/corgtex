@@ -10,6 +10,8 @@ import {
   dismissInsight,
   applyInsight,
   confirmAllInsights,
+  postDeliberationEntry,
+  resolveDeliberationEntry,
 } from "@corgtex/domain";
 
 export async function createMeetingAction(formData: FormData) {
@@ -75,5 +77,37 @@ export async function confirmAllInsightsAction(formData: FormData) {
   const meetingId = formData.get("meetingId") as string;
   
   await confirmAllInsights(actor, { workspaceId, meetingId });
+  refresh(workspaceId);
+}
+
+export async function postMeetingDeliberationAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  
+  await postDeliberationEntry(actor, {
+    workspaceId,
+    parentType: "MEETING",
+    parentId: asString(formData, "parentId"),
+    entryType: asString(formData, "entryType") as any,
+    bodyMd: asString(formData, "bodyMd"),
+  });
+  refresh(workspaceId);
+}
+
+export async function resolveMeetingDeliberationAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  
+  await resolveDeliberationEntry(actor, {
+    workspaceId,
+    entryId: asString(formData, "entryId"),
+    resolvedNote: asOptional(formData, "resolvedNote") || undefined,
+  });
   refresh(workspaceId);
 }
