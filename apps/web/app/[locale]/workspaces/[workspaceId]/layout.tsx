@@ -7,7 +7,9 @@ import { DemoTour } from "./DemoTour";
 import { DemoBanner } from "./DemoBanner";
 import { CommandPalette } from "./CommandPalette";
 import { CommandMenuButton } from "./CommandMenuButton";
-import { ThemeToggle } from "../../ThemeToggle";
+import { getTranslations } from "next-intl/server";
+import { LanguageSwitcher } from "./LanguageSwitcher";
+import { ThemeToggle } from "../../../ThemeToggle";
 
 export const dynamic = "force-dynamic";
 
@@ -33,13 +35,15 @@ export default async function WorkspaceLayout({
   const { workspaceId } = await params;
   const actor = await requirePageActor();
   const userId = actor.kind === "user" ? actor.user.id : null;
-  const [workspaces, unreadCount, conversationsResult] = await Promise.all([
+  const [workspaces, unreadCount, conversationsResult, multilingualFlag] = await Promise.all([
     listActorWorkspaces(actor),
     userId ? countUnreadNotifications(userId, workspaceId) : Promise.resolve(0),
-    listConversations(actor, workspaceId, { take: 30 }).catch(() => ({ items: [], total: 0, take: 30, skip: 0 }))
+    listConversations(actor, workspaceId, { take: 30 }).catch(() => ({ items: [], total: 0, take: 30, skip: 0 })),
+    prisma.workspaceFeatureFlag.findFirst({ where: { workspaceId, flag: "MULTILINGUAL", enabled: true } })
   ]);
   const current = workspaces.find((w: Workspace) => w.id === workspaceId);
   const conversations = conversationsResult.items;
+  const tNav = await getTranslations("nav");
 
   return (
     <div className="ws-layout">
@@ -56,9 +60,9 @@ export default async function WorkspaceLayout({
 
         <nav className="ws-nav">
           {navGroups.map((group) => (
-            <div key={group.label} style={{ marginBottom: "16px" }}>
+            <div key={group.labelKey} style={{ marginBottom: "16px" }}>
               <div className="muted" style={{ fontSize: "0.75rem", textTransform: "uppercase", letterSpacing: "0.05em", padding: "0 12px", marginBottom: "4px", fontWeight: 600 }}>
-                {group.label}
+                {tNav(group.labelKey as any)}
               </div>
               {group.items.map((item) => (
                 <a
@@ -67,7 +71,7 @@ export default async function WorkspaceLayout({
                   className="ws-nav-link"
                 >
                   <span className="ws-nav-icon">{item.icon}</span>
-                  {item.label}
+                  {tNav(item.labelKey as any)}
                   {item.href === "" && unreadCount > 0 && (
                     <span className="ws-notif-badge">{unreadCount}</span>
                   )}
@@ -90,6 +94,7 @@ export default async function WorkspaceLayout({
         </nav>
 
         <div className="ws-sidebar-footer">
+          {!!multilingualFlag && <LanguageSwitcher />}
           <CommandMenuButton />
           <ThemeToggle />
           

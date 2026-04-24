@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import { driver } from "driver.js";
 import "driver.js/dist/driver.css";
-import "../../demo-tour-theme.css";
+import "../../../demo-tour-theme.css";
 
 interface TourStep {
   path: string;
