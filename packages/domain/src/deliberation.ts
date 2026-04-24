@@ -151,7 +151,9 @@ export async function resolveDeliberationEntry(actor: AppActor, params: {
       }
     }
 
-    invariant(isAdmin || isParentAuthor, 403, "FORBIDDEN", "Only the parent author or a workspace admin can resolve this entry.");
+    const isEntryAuthor = entry.authorUserId === actorUserId;
+
+    invariant(isAdmin || isParentAuthor || isEntryAuthor, 403, "FORBIDDEN", "Only the entry author, parent author, or a workspace admin can resolve this entry.");
 
     const updated = await tx.deliberationEntry.update({
       where: { id: entry.id },
