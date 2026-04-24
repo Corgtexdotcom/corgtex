@@ -23,6 +23,7 @@ Roll out the `DeliberationThread` component to finance (spend requests), tension
 - `apps/web/app/[locale]/workspaces/[workspaceId]/meetings/actions.ts`
 - `apps/web/app/[locale]/workspaces/[workspaceId]/actions.ts`
 - `packages/domain/src/tensions.ts`
+- `packages/domain/src/tensions.test.ts`
 - `scripts/migrate-to-deliberation.ts`
 - `docs/plans/feat-deliberation-rollout.md`
 - `docs/assets/deliberation_flow_test.mp4`
