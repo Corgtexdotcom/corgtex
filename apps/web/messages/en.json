@@ -7,7 +7,8 @@
     "cancel": "Cancel",
     "save": "Save",
     "loading": "Loading...",
-    "error": "An error occurred"
+    "error": "An error occurred",
+    "language": "Language"
   },
   "nav": {
     "workspace": "Workspace",
@@ -55,6 +56,12 @@
     "setupAccountTitle": "Set Up Account",
     "setupAccountSubtitle": "Choose a secure password to activate your account.",
     "setPasswordButton": "Set Password",
-    "settingUp": "Setting up..."
+    "settingUp": "Setting up...",
+    "newPasswordLabel": "New Password",
+    "confirmPasswordLabel": "Confirm Password",
+    "backToLogin": "← Back to login",
+    "checkYourEmail": "Check your email",
+    "emailSentDescription": "If an account with that email exists, we've sent a password reset link. The link expires in 15 minutes.",
+    "enterEmailDescription": "Enter your email address and we'll send you a link to reset your password."
   }
 }

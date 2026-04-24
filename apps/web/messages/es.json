@@ -7,7 +7,8 @@
     "cancel": "Cancelar",
     "save": "Guardar",
     "loading": "Cargando...",
-    "error": "Ocurrió un error"
+    "error": "Ocurrió un error",
+    "language": "Idioma"
   },
   "nav": {
     "workspace": "Espacio de trabajo",
@@ -54,7 +55,13 @@
     "resetting": "Restableciendo...",
     "setupAccountTitle": "Configurar cuenta",
     "setupAccountSubtitle": "Elige una contraseña segura para activar tu cuenta.",
-    "setPasswordButton": "Establecer contraseña",
-    "settingUp": "Configurando..."
+    "setPasswordButton": "Establecer Contraseña",
+    "settingUp": "Configurando...",
+    "newPasswordLabel": "Nueva Contraseña",
+    "confirmPasswordLabel": "Confirmar Contraseña",
+    "backToLogin": "← Volver a iniciar sesión",
+    "checkYourEmail": "Revisa tu correo",
+    "emailSentDescription": "Si existe una cuenta con ese correo, hemos enviado un enlace para restablecer la contraseña. El enlace caduca en 15 minutos.",
+    "enterEmailDescription": "Ingresa tu dirección de correo electrónico y te enviaremos un enlace para restablecer tu contraseña."
   }
 }

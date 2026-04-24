@@ -22,11 +22,11 @@ apps/web/messages/es.json
 docs/assets/visual_proof_pr2.png
 
 ## Acceptance Criteria
-- [ ] All auth form components use `useTranslations()` — zero hardcoded English in auth pages
-- [ ] All visible text in workspace layout uses `t()`
-- [ ] Dashboard page uses `t()` for all visible strings
-- [ ] ICU pluralization used for count-dependent text
-- [ ] Date formatting uses `next-intl` formatter
-- [ ] Goals, Members, Brain index pages fully translated
-- [ ] `messages/en.json` and `messages/es.json` updated with all new keys
-- [ ] `npm run check` passes
+- [x] All auth form components use `useTranslations()` — zero hardcoded English in auth pages
+- [x] All visible text in workspace layout uses `t()`
+- [x] Dashboard page uses `t()` for all visible strings
+- [x] ICU pluralization used for count-dependent text
+- [x] Date formatting uses `next-intl` formatter
+- [x] Goals, Members, Brain index pages fully translated
+- [x] `messages/en.json` and `messages/es.json` updated with all new keys
+- [x] `npm run check` passes
