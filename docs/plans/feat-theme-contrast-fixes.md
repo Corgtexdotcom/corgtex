@@ -38,21 +38,23 @@ Add missing theme tokens (e.g. `--accent-fg`) and migrate hardcoded color usages
 - `apps/web/lib/components/DeliberationComposer.tsx`
 - `docs/plans/feat-theme-contrast-fixes.md`
 - `docs/assets/feat-theme-contrast-fixes.png`
+- `scripts/contrast-audit.mjs`
 
 ## Acceptance criteria
 
-- [ ] Add 8 new semantic tokens (e.g. `--accent-fg`, `--pending`) to `globals.css` `:root` and `.dark` block.
-- [ ] Add the 8 new tokens to `tailwind.config.ts`.
-- [ ] Fix 6 contrast violation rules in `globals.css`.
-- [ ] Migrate hardcoded colors to semantic theme tokens in all components listed in "Files to touch".
-- [ ] Ensure `button` text color inverts properly on dark mode.
-- [ ] `npm run check` and `npm run build` must succeed.
+- [x] Add 8 new semantic tokens (e.g. `--accent-fg`, `--pending`) to `globals.css` `:root` and `.dark` block.
+- [x] Add the 8 new tokens to `tailwind.config.ts`.
+- [x] Fix 6 contrast violation rules in `globals.css`.
+- [x] Migrate hardcoded colors to semantic theme tokens in all components listed in "Files to touch".
+- [x] Ensure `button` text color inverts properly on dark mode.
+- [x] `npm run check` and `npm run build` must succeed.
 
 ## Test plan
 
 ```
 npm run check
 npm run build
+node scripts/contrast-audit.mjs
 ```
 
 ## Rollback

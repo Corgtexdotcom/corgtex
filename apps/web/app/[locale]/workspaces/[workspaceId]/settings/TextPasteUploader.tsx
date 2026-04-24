@@ -49,7 +49,7 @@ export function TextPasteUploader({ workspaceId }: { workspaceId: string }) {
       <h3>Paste Text Content</h3>
       <p className="nr-item-meta" style={{ marginBottom: 16 }}>Paste raw transcripts, notes, or ad-hoc content directly.</p>
       
-      {error && <div style={{ color: "#842029", padding: "8px", background: "#f8d7da" }}>{error}</div>}
+      {error && <div style={{ color: "var(--danger)", padding: "8px", background: "var(--danger-soft)" }}>{error}</div>}
       
       <label>
         Title (optional)
