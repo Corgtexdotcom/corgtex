@@ -29,8 +29,8 @@ export default async function OAuthAuthorizePage(props: Props) {
   if (!clientId || !redirectUri) {
     return (
       <div className="flex h-screen w-full items-center justify-center p-4">
-        <div className="w-full max-w-sm rounded-[var(--radius-xl)] bg-[var(--surface-sunken)] p-6 text-center ring-1 ring-[var(--border-subtle)]">
-          <p className="text-[var(--text-danger)]">Invalid authorization request (missing client_id or redirect_uri).</p>
+        <div className="w-full max-w-sm rounded-[var(--radius-lg)] bg-[var(--surface-sunken)] p-6 text-center ring-1 ring-[var(--line-subtle)]">
+          <p className="text-[var(--danger)]">Invalid authorization request (missing client_id or redirect_uri).</p>
         </div>
       </div>
     );
@@ -41,8 +41,8 @@ export default async function OAuthAuthorizePage(props: Props) {
   if (!app) {
     return (
       <div className="flex h-screen w-full items-center justify-center p-4">
-        <div className="w-full max-w-sm rounded-[var(--radius-xl)] bg-[var(--surface-sunken)] p-6 text-center ring-1 ring-[var(--border-subtle)]">
-          <p className="text-[var(--text-danger)]">Invalid client configuration.</p>
+        <div className="w-full max-w-sm rounded-[var(--radius-lg)] bg-[var(--surface-sunken)] p-6 text-center ring-1 ring-[var(--line-subtle)]">
+          <p className="text-[var(--danger)]">Invalid client configuration.</p>
         </div>
       </div>
     );
@@ -51,8 +51,8 @@ export default async function OAuthAuthorizePage(props: Props) {
   if (!isAllowedOAuthRedirectUri(app.redirectUris, redirectUri)) {
     return (
       <div className="flex h-screen w-full items-center justify-center p-4">
-        <div className="w-full max-w-sm rounded-[var(--radius-xl)] bg-[var(--surface-sunken)] p-6 text-center ring-1 ring-[var(--border-subtle)]">
-          <p className="text-[var(--text-danger)]">Redirect URI is not registered for this integration.</p>
+        <div className="w-full max-w-sm rounded-[var(--radius-lg)] bg-[var(--surface-sunken)] p-6 text-center ring-1 ring-[var(--line-subtle)]">
+          <p className="text-[var(--danger)]">Redirect URI is not registered for this integration.</p>
         </div>
       </div>
     );
@@ -67,8 +67,8 @@ export default async function OAuthAuthorizePage(props: Props) {
   if (!targetWorkspace) {
     return (
       <div className="flex h-screen w-full items-center justify-center p-4">
-        <div className="w-full max-w-sm rounded-[var(--radius-xl)] bg-[var(--surface-sunken)] p-6 text-center ring-1 ring-[var(--border-subtle)]">
-          <p className="text-[var(--text-danger)]">You do not have access to the workspace ({app.workspaceId}) associated with this integration.</p>
+        <div className="w-full max-w-sm rounded-[var(--radius-lg)] bg-[var(--surface-sunken)] p-6 text-center ring-1 ring-[var(--line-subtle)]">
+          <p className="text-[var(--danger)]">You do not have access to the workspace ({app.workspaceId}) associated with this integration.</p>
         </div>
       </div>
     );
@@ -83,23 +83,23 @@ export default async function OAuthAuthorizePage(props: Props) {
   }
 
   return (
-    <div className="relative flex min-h-screen flex-col items-center justify-center bg-[var(--bg-canvas)] p-4 sm:p-8">
+    <div className="relative flex min-h-screen flex-col items-center justify-center bg-[var(--bg)] p-4 sm:p-8">
       <div className="absolute right-4 top-4">
       </div>
 
       <div className="w-full max-w-[440px]">
         <div className="mb-8 flex flex-col items-center justify-center gap-4 text-center">
-          <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-[var(--surface-elevated)] ring-1 ring-[var(--border-subtle)]">
+          <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-[var(--surface-strong)] ring-1 ring-[var(--line-subtle)]">
             <span className="text-2xl font-bold">GPT</span>
           </div>
           <div className="text-[var(--text-muted)]">connecting to</div>
-          <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-[var(--surface-elevated)] ring-1 ring-[var(--border-subtle)]">
-            <span className="text-xl font-bold text-[var(--accent-red)]">Corgtex</span>
+          <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-[var(--surface-strong)] ring-1 ring-[var(--line-subtle)]">
+            <span className="text-xl font-bold text-[var(--danger)]">Corgtex</span>
           </div>
         </div>
 
         <div className="ui-card overflow-hidden">
-          <div className="border-b border-[var(--border-subtle)] bg-[var(--surface-sunken)] px-6 py-5">
+          <div className="border-b border-[var(--line-subtle)] bg-[var(--surface-sunken)] px-6 py-5">
             <h1 className="text-xl font-bold text-[var(--text-strong)]">
               Approve connection
             </h1>
@@ -108,7 +108,7 @@ export default async function OAuthAuthorizePage(props: Props) {
             </p>
           </div>
 
-          <div className="px-6 py-6 border-b border-[var(--border-subtle)]">
+          <div className="px-6 py-6 border-b border-[var(--line-subtle)]">
              <h3 className="text-sm font-medium text-[var(--text-strong)] mb-4">
               This will allow the Custom GPT to:
             </h3>
@@ -117,7 +117,7 @@ export default async function OAuthAuthorizePage(props: Props) {
                 const known = isKnownScope(scope) ? SCOPE_REGISTRY[scope as keyof typeof SCOPE_REGISTRY] : null;
                 return (
                   <li key={scope} className="flex flex-col gap-1 items-start text-sm">
-                    <span className="font-medium text-[var(--text-strong)] bg-[var(--surface-sunken)] border border-[var(--border-subtle)] px-2 py-0.5 rounded text-xs">{known?.label || scope}</span>
+                    <span className="font-medium text-[var(--text-strong)] bg-[var(--surface-sunken)] border border-[var(--line-subtle)] px-2 py-0.5 rounded text-xs">{known?.label || scope}</span>
                     <span className="text-[var(--text-muted)]">{known?.description || "Custom permission"}</span>
                   </li>
                 );
@@ -127,7 +127,7 @@ export default async function OAuthAuthorizePage(props: Props) {
 
           <div className="px-6 py-6 bg-[var(--surface-sunken)]">
             <p className="text-xs text-[var(--text-muted)] mb-4 leading-relaxed">
-              By authorizing this app, you are sharing your organizational data with the AI provider (OpenAI) running the Custom GPT. Your data will be governed by their <Link href="https://openai.com/privacy-policy" target="_blank" className="text-[var(--accent-red)] hover:underline">Privacy Policy</Link>. Make sure you trust this integration.
+              By authorizing this app, you are sharing your organizational data with the AI provider (OpenAI) running the Custom GPT. Your data will be governed by their <Link href="https://openai.com/privacy-policy" target="_blank" className="text-[var(--danger)] hover:underline">Privacy Policy</Link>. Make sure you trust this integration.
             </p>
 
             <form action="/api/oauth/authorize" method="POST" className="flex flex-col gap-3">

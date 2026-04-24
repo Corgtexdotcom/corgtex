@@ -1,6 +1,7 @@
 import type { Config } from "tailwindcss";
 
 const config: Config = {
+  darkMode: "class",
   content: [
     "./app/**/*.{js,ts,jsx,tsx,mdx}",
     "./components/**/*.{js,ts,jsx,tsx,mdx}",
@@ -23,6 +24,15 @@ const config: Config = {
         'warning-soft': 'var(--warning-soft)',
         success: 'var(--success)',
         'success-soft': 'var(--success-soft)',
+        'surface-sunken': 'var(--surface-sunken)',
+        'line-subtle': 'var(--line-subtle)',
+        'text-strong': 'var(--text-strong)',
+        info: 'var(--info)',
+        'info-soft': 'var(--info-soft)',
+        danger: 'var(--danger)',
+        'danger-soft': 'var(--danger-soft)',
+        'danger-border': 'var(--danger-border)',
+        'warning-bg': 'var(--warning-bg)',
       },
       fontFamily: {
         playfair: ['var(--font-playfair)', 'serif'],

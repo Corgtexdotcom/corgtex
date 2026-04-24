@@ -44,7 +44,7 @@ export function ProposalReactionsThread({
                 <span className="muted" style={{ marginLeft: 8 }}>{new Date(o.createdAt).toLocaleString()}</span>
                 <div style={{ marginTop: 4 }}>{o.bodyMd}</div>
                 {o.resolvedAt ? (
-                  <div style={{ marginTop: 8, padding: "8px", background: "var(--bg-muted, #f1f5f9)", borderRadius: 4 }}>
+                  <div style={{ marginTop: 8, padding: "8px", background: "var(--bg-alt, #f1f5f9)", borderRadius: 4 }}>
                     <strong>✅ Resolved: </strong> {o.resolvedNote}
                   </div>
                 ) : (
@@ -64,11 +64,11 @@ export function ProposalReactionsThread({
       )}
 
       {reactions.length > 0 && (
-        <div style={{ padding: "16px", background: "var(--bg-muted, #f8fafc)", borderRadius: 4, marginBottom: 16 }}>
+        <div style={{ padding: "16px", background: "var(--bg-alt, #f8fafc)", borderRadius: 4, marginBottom: 16 }}>
           <h4 style={{ margin: "0 0 12px 0" }}>Reactions ({reactions.length})</h4>
           <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
             {reactions.map((r: any) => (
-              <div key={r.id} style={{ fontSize: "0.85rem", borderBottom: "1px solid var(--border-color)", paddingBottom: "12px" }}>
+              <div key={r.id} style={{ fontSize: "0.85rem", borderBottom: "1px solid var(--line)", paddingBottom: "12px" }}>
                 <strong>💬 {r.user.displayName || r.user.email}</strong>
                 <span className="muted" style={{ marginLeft: 8 }}>{new Date(r.createdAt).toLocaleString()}</span>
                 <div style={{ marginTop: 4 }}>{r.bodyMd}</div>

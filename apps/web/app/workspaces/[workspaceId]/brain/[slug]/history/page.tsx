@@ -39,7 +39,7 @@ export default async function BrainArticleHistoryPage({
               {v.agentRunId && <div className="muted">Changed by agent run {v.agentRunId.slice(0, 8)}</div>}
               <details style={{ marginTop: 8 }}>
                 <summary style={{ cursor: "pointer", color: "var(--accent)" }}>View body</summary>
-                <pre style={{ whiteSpace: "pre-wrap", fontSize: "0.85rem", marginTop: 8, padding: 8, background: "var(--bg-secondary)", borderRadius: 4 }}>
+                <pre style={{ whiteSpace: "pre-wrap", fontSize: "0.85rem", marginTop: 8, padding: 8, background: "var(--bg-alt)", borderRadius: 4 }}>
                   {v.bodyMd}
                 </pre>
               </details>
