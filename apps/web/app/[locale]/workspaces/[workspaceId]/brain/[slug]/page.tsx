@@ -103,7 +103,7 @@ export default async function BrainArticlePage({
               </select>
             </div>
             <textarea name="bodyMd" defaultValue={article.bodyMd} rows={10} style={{ width: "100%", padding: "12px", fontSize: "0.9rem", border: "1px solid var(--line)", borderRadius: "4px", fontFamily: "monospace", lineHeight: 1.4 }} />
-            <button type="submit" style={{ padding: "8px 16px", background: "var(--text)", color: "white", border: "none", borderRadius: "4px", cursor: "pointer", fontWeight: 600, alignSelf: "flex-start" }}>{t("updateArticle")}</button>
+            <button type="submit" style={{ padding: "8px 16px", background: "var(--text-strong)", color: "var(--bg)", border: "none", borderRadius: "4px", cursor: "pointer", fontWeight: 600, alignSelf: "flex-start" }}>{t("updateArticle")}</button>
           </form>
         </article>
 
