@@ -24,6 +24,7 @@ Build the reusable `DeliberationThread` UI component and apply it to proposals. 
 - `apps/web/app/workspaces/[workspaceId]/actions.ts`
 - `apps/web/app/globals.css`
 - `docs/plans/feat-deliberation-ui.md`
+- `docs/assets/visual_proof_41.png`
 
 ## Acceptance criteria
 
