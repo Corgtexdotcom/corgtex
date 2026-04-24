@@ -8,7 +8,9 @@ import {
   deleteTension,
   updateTension,
   upvoteTension,
-  publishTension
+  publishTension,
+  postDeliberationEntry,
+  resolveDeliberationEntry
 } from "@corgtex/domain";
 
 
@@ -78,6 +80,38 @@ export async function publishTensionAction(formData: FormData) {
   await publishTension(actor, {
     workspaceId,
     tensionId: asString(formData, "tensionId"),
+  });
+  refresh(workspaceId);
+}
+
+export async function postTensionDeliberationAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  
+  await postDeliberationEntry(actor, {
+    workspaceId,
+    parentType: "TENSION",
+    parentId: asString(formData, "parentId"),
+    entryType: asString(formData, "entryType") as any,
+    bodyMd: asString(formData, "bodyMd"),
+  });
+  refresh(workspaceId);
+}
+
+export async function resolveTensionDeliberationAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  
+  await resolveDeliberationEntry(actor, {
+    workspaceId,
+    entryId: asString(formData, "entryId"),
+    resolvedNote: asOptional(formData, "resolvedNote") || undefined,
   });
   refresh(workspaceId);
 }

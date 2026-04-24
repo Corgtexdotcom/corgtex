@@ -619,7 +619,14 @@ export async function markSpendPaid(actor: AppActor, params: {
     // Can be paid from SUBMITTED if there are no open objections
     let isSubmittedWithoutObjections = false;
     if (spend.status === "SUBMITTED") {
-      const openObjectionsCount = spend.comments.filter(c => c.isObjection && !c.resolvedAt).length;
+      const openObjectionsCount = await tx.deliberationEntry.count({
+        where: {
+          parentType: "SPEND",
+          parentId: spend.id,
+          entryType: "OBJECTION",
+          resolvedAt: null,
+        }
+      });
       isSubmittedWithoutObjections = openObjectionsCount === 0;
     }
 
