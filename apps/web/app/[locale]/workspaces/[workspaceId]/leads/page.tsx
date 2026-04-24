@@ -253,7 +253,7 @@ export default async function LeadsPage({
             {recentActivities.map(activity => (
               <div key={activity.id} className="item" style={{ display: "flex", gap: "16px" }}>
                 <div style={{ width: "40px", height: "40px", borderRadius: "50%", background: "var(--accent-soft)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "1.2rem", flexShrink: 0 }}>
-                  {activity.type === "EMAIL" ? "✉️" : activity.type === "MEETING" ? "📅" : activity.type === "CALL" ? "📞" : "📝"}
+                  {activity.type === "EMAIL" ? "✉" : activity.type === "MEETING" ? "▫" : activity.type === "CALL" ? "☏" : "✎"}
                 </div>
                 <div>
                   <div className="row" style={{ justifyContent: "flex-start", gap: "8px", marginBottom: "4px" }}>

@@ -40,6 +40,7 @@ reviews code line-by-line. The full specification lives in
 - **Imports:** `@/*` for `apps/web` modules; `@corgtex/*` for shared package entrypoints. Use `import type { X }` for type-only imports.
 - **Formatting:** double quotes, semicolons, 2-space indent.
 - **Naming:** camelCase (variables/functions), PascalCase (types/components), UPPER_SNAKE (constants/enums).
+- **Icons:** Never use emoji characters (🌙, 🤖, 💾, etc.) in UI code. Use monochrome Unicode glyphs consistent with `apps/web/lib/nav-config.ts`. The ESLint `no-restricted-syntax` rule enforces this.
 - **No `.js`:** `allowJs: false`.
 - **Errors:** throw `AppError(status, code, message)` from domain logic; convert in route handlers with `handleRouteError()`.
 - **DB:** monetary values as `*Cents: Int`. UUIDs for all IDs. Use Prisma compound unique keys for lookups.

@@ -119,8 +119,8 @@ export default function MeetingIntelligence({
                     )}
                   </div>
                   <div style={{ display: "flex", gap: 8 }}>
-                    <button className="btn" onClick={actionItem(confirmInsightAction, insight.id)}>✅ Confirm</button>
-                    <button className="btn" onClick={actionItem(dismissInsightAction, insight.id)}>❌ Dismiss</button>
+                    <button className="btn" onClick={actionItem(confirmInsightAction, insight.id)}>✓ Confirm</button>
+                    <button className="btn" onClick={actionItem(dismissInsightAction, insight.id)}>✕ Dismiss</button>
                   </div>
                 </div>
               </div>

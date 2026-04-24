@@ -214,7 +214,7 @@ export default async function CirclesPage({
                     return circleAgents.map((a: any) => (
                       <div className="nr-item" key={a.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                          <span title="Agent Member">🤖</span>
+                          <span title="Agent Member">⬡</span>
                           <span style={{ fontWeight: 600 }}>{a.agentIdentity.displayName}</span>
                           <span className="nr-item-meta" style={{ fontSize: "0.8rem", padding: "2px 6px", background: a.agentIdentity.memberType === "INTERNAL" ? "var(--accent-muted)" : "var(--bg-alt)", border: "1px solid var(--border)", borderRadius: 12 }}>
                             {a.agentIdentity.memberType}

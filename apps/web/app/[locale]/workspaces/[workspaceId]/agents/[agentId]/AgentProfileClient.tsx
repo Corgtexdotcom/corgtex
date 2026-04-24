@@ -65,7 +65,7 @@ export function AgentProfileClient({
         <section className="bg-white rounded-xl shadow-sm border border-stone-200 overflow-hidden">
           <div className="bg-stone-50 border-b border-stone-200 px-6 py-4 flex items-center justify-between">
             <h2 className="text-lg font-serif text-stone-900 flex items-center gap-2">
-              <span className="text-stone-500">⚙️</span>
+              <span className="text-stone-500">⎈</span>
               Behavior Config
             </h2>
             <button
@@ -73,7 +73,7 @@ export function AgentProfileClient({
               onClick={handleSaveBehavior}
               disabled={isPending}
             >
-              <span>💾</span> Save
+              <span>↓</span> Save
             </button>
           </div>
           <div className="p-6">
@@ -92,7 +92,7 @@ export function AgentProfileClient({
         <section className="bg-white rounded-xl shadow-sm border border-stone-200 overflow-hidden">
           <div className="bg-stone-50 border-b border-stone-200 px-6 py-4">
             <h2 className="text-lg font-serif text-stone-900 flex items-center gap-2">
-              <span className="text-stone-500">🔴</span>
+              <span className="text-stone-500">●</span>
               Circle Assignments
             </h2>
           </div>
@@ -112,7 +112,7 @@ export function AgentProfileClient({
                       onClick={() => handleRemoveFromCircle(assignment.circle.id)}
                       disabled={isPending}
                     >
-                      <span>🗑️</span>
+                      <span>✕</span>
                     </button>
                   </li>
                 ))}
@@ -160,7 +160,7 @@ export function AgentProfileClient({
         <section className="bg-white rounded-xl shadow-sm border border-stone-200 overflow-hidden">
           <div className="p-6 text-center">
             <div className="mx-auto h-12 w-12 rounded-full bg-emerald-50 text-emerald-600 flex items-center justify-center mb-4">
-              <span className="text-xl">💰</span>
+              <span className="text-xl">¤</span>
             </div>
             <h3 className="text-sm font-medium text-stone-500">30-Day Spend</h3>
             <p className="text-3xl font-serif text-stone-900 mt-2">
@@ -172,7 +172,7 @@ export function AgentProfileClient({
         <section className="bg-white rounded-xl shadow-sm border border-stone-200 overflow-hidden">
           <div className="bg-stone-50 border-b border-stone-200 px-6 py-4">
             <h2 className="text-sm font-semibold uppercase tracking-wider text-stone-500 flex items-center gap-2">
-              <span>⚡</span>
+              <span>⚙</span>
               Recent Activity
             </h2>
           </div>
