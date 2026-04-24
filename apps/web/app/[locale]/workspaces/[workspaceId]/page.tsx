@@ -11,6 +11,7 @@ import {
 import Link from "next/link";
 import { GoalProgress } from "./goals/GoalProgress";
 import { RecognitionCard } from "./goals/RecognitionCard";
+import { getTranslations, getFormatter } from "next-intl/server";
 
 export const dynamic = "force-dynamic";
 
@@ -38,6 +39,8 @@ export default async function WorkspaceDashboard({
 }) {
   const { workspaceId } = await params;
   const actor = await requirePageActor();
+  const t = await getTranslations("dashboard");
+  const format = await getFormatter();
 
   const [
     { items: tensions },
@@ -118,15 +121,10 @@ export default async function WorkspaceDashboard({
   
   const totalAttentionItems = pendingFlows.length + pendingAgentApprovals + unreadNotifications.length + advisoryRequests.length;
 
-  const ageText = (date: Date) => {
-    const days = Math.floor((Date.now() - new Date(date).getTime()) / (1000 * 60 * 60 * 24));
-    if (days === 0) return "today";
-    if (days === 1) return "yesterday";
-    return `${days}d ago`;
-  };
+  const ageText = (date: Date) => format.relativeTime(date);
 
   const d = new Date();
-  const dateString = d.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+  const dateString = format.dateTime(d, { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
 
   // Separate latest authoritative articles
   const allArticles = articlesResult.items;
@@ -160,11 +158,11 @@ export default async function WorkspaceDashboard({
         <div className="nr-masthead-meta">
           <span suppressHydrationWarning>{dateString}</span>
           <form action={`/workspaces/${workspaceId}/brain`} method="GET" style={{ display: "flex", gap: "8px", alignItems: "center", marginLeft: "16px" }}>
-            <span style={{ fontSize: "0.75rem", color: "var(--muted)", textTransform: "none" }}>Search:</span>
+            <span style={{ fontSize: "0.75rem", color: "var(--muted)", textTransform: "none" }}>{t("searchLabel")}</span>
             <input 
               name="q"
               type="text" 
-              placeholder="Wiki, meetings..." 
+              placeholder={t("searchPlaceholder")} 
               style={{ padding: "4px 8px", fontSize: "0.85rem", border: "1px solid var(--line)", borderRadius: "4px" }}
             />
           </form>
@@ -174,13 +172,13 @@ export default async function WorkspaceDashboard({
       {totalAttentionItems > 0 && (
         <div className="nr-attention">
           <div style={{ paddingRight: "16px", minWidth: "180px", fontWeight: 600, color: "var(--warning)" }}>
-            {totalAttentionItems} item{totalAttentionItems > 1 ? "s" : ""} need{totalAttentionItems === 1 ? "s" : ""} attention
+            {t("itemsNeedAttention", { count: totalAttentionItems })}
           </div>
           
           <div style={{ display: "flex", flex: 1, gap: "16px", flexWrap: "wrap" }}>
             {pendingFlows.length > 0 && (
               <div className="nr-attention-block">
-                <strong>{pendingFlows.length} Approval{pendingFlows.length > 1 ? "s" : ""} Pending</strong>
+                <strong>{t("approvalsPending", { count: pendingFlows.length })}</strong>
                 {pendingFlows.slice(0, 2).map((flow) => (
                   <div key={flow.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
                     {(() => {
@@ -196,7 +194,7 @@ export default async function WorkspaceDashboard({
                     <form action={decideApprovalAction} className="actions-inline" style={{ display: "inline-flex" }}>
                       <input type="hidden" name="workspaceId" value={workspaceId} />
                       <input type="hidden" name="flowId" value={flow.id} />
-                      <button type="submit" name="choice" value={flow.mode === "CONSENT" ? "AGREE" : "APPROVE"} style={{ padding: "2px 6px", fontSize: "0.7rem", minHeight: 0 }}>Approve</button>
+                      <button type="submit" name="choice" value={flow.mode === "CONSENT" ? "AGREE" : "APPROVE"} style={{ padding: "2px 6px", fontSize: "0.7rem", minHeight: 0 }}>{t("approve")}</button>
                     </form>
                   </div>
                 ))}
@@ -205,19 +203,19 @@ export default async function WorkspaceDashboard({
             
             {pendingAgentApprovals > 0 && (
               <div className="nr-attention-block">
-                <strong>Agent Runs</strong>
-                <span style={{ fontSize: "0.8rem" }}>{pendingAgentApprovals} run(s) waiting review</span>
-                <Link href={`/workspaces/${workspaceId}/operator`} style={{ display: "block", fontSize: "0.8rem", marginTop: 4, textDecoration: "underline" }}>Review →</Link>
+                <strong>{t("agentRuns")}</strong>
+                <span style={{ fontSize: "0.8rem" }}>{t("runsWaitingReview", { count: pendingAgentApprovals })}</span>
+                <Link href={`/workspaces/${workspaceId}/operator`} style={{ display: "block", fontSize: "0.8rem", marginTop: 4, textDecoration: "underline" }}>{t("review")}</Link>
               </div>
             )}
 
             {unreadNotifications.length > 0 && (
               <div className="nr-attention-block">
                 <div style={{ display: "flex", justifyContent: "space-between" }}>
-                  <strong>Notifications</strong>
+                  <strong>{t("notifications")}</strong>
                   <form action={markAllNotificationsReadAction}>
                     <input type="hidden" name="workspaceId" value={workspaceId} />
-                    <button type="submit" style={{ padding: "0 6px", fontSize: "0.7rem", minHeight: 0, background: "transparent", color: "var(--warning)"}}>Mark read</button>
+                    <button type="submit" style={{ padding: "0 6px", fontSize: "0.7rem", minHeight: 0, background: "transparent", color: "var(--warning)"}}>{t("markRead")}</button>
                   </form>
                 </div>
                 {unreadNotifications.slice(0, 2).map((n) => {
@@ -237,7 +235,7 @@ export default async function WorkspaceDashboard({
 
             {advisoryRequests.length > 0 && (
               <div className="nr-attention-block" style={{ borderLeft: "3px solid var(--info)" }}>
-                <strong>{advisoryRequests.length} Advisory Request{advisoryRequests.length > 1 ? "s" : ""}</strong>
+                <strong>{t("advisoryRequests", { count: advisoryRequests.length })}</strong>
                 {advisoryRequests.slice(0, 2).map((ap: any) => (
                   <div key={ap.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
                     <Link href={`/workspaces/${workspaceId}/proposals?status=ADVICE_GATHERING`} style={{ fontSize: "0.8rem", textDecoration: "none", color: "inherit" }}>
@@ -245,7 +243,7 @@ export default async function WorkspaceDashboard({
                     </Link>
                   </div>
                 ))}
-                {advisoryRequests.length > 2 && <div style={{ fontSize: "0.7rem", color: "var(--muted)" }}>+ {advisoryRequests.length - 2} more</div>}
+                {advisoryRequests.length > 2 && <div style={{ fontSize: "0.7rem", color: "var(--muted)" }}>{t("more", { count: advisoryRequests.length - 2 })}</div>}
               </div>
             )}
           </div>
@@ -256,14 +254,14 @@ export default async function WorkspaceDashboard({
       <section className="nr-hero">
         {/* LEFT COLUMN: FEATURED */}
         <div>
-          <h2 className="nr-section-header">Featured Knowledge</h2>
+          <h2 className="nr-section-header">{t("featuredKnowledge")}</h2>
           {featuredArticle && (
             <div style={{ marginBottom: "24px" }}>
-              <div className="nr-meta">{featuredArticle.type} · Updated <span suppressHydrationWarning>{ageText(featuredArticle.updatedAt)}</span></div>
+              <div className="nr-meta">{featuredArticle.type} · {t("updated")} <span suppressHydrationWarning>{ageText(featuredArticle.updatedAt)}</span></div>
               <Link href={`/workspaces/${workspaceId}/brain/${featuredArticle.slug}`} style={{ textDecoration: "none" }}>
                 <h3 className="nr-lead-headline">{featuredArticle.title}</h3>
                 <p className="nr-excerpt">{featuredArticle.bodyMd.replace(/[#*`_]/g, '').slice(0, 200)}...</p>
-                <span className="nr-link">Read full article →</span>
+                <span className="nr-link">{t("readFullArticle")}</span>
               </Link>
             </div>
           )}
@@ -282,31 +280,31 @@ export default async function WorkspaceDashboard({
 
         {/* CENTER COLUMN: MEETINGS */}
         <div>
-           <h2 className="nr-section-header">Your Meetings</h2>
-           {recentMeetings.length === 0 ? <p className="nr-meta">No recent meetings</p> : null}
+           <h2 className="nr-section-header">{t("yourMeetings")}</h2>
+           {recentMeetings.length === 0 ? <p className="nr-meta">{t("noRecentMeetings")}</p> : null}
            {recentMeetings.map((meeting) => (
              <div key={meeting.id} className="nr-item">
-               <div className="nr-item-title">{meeting.title || `${meeting.source} Meeting`}</div>
-               <div className="nr-item-meta" suppressHydrationWarning>{new Date(meeting.recordedAt).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}</div>
+               <div className="nr-item-title">{meeting.title || `${meeting.source} ${t("meeting")}`}</div>
+               <div className="nr-item-meta" suppressHydrationWarning>{format.dateTime(new Date(meeting.recordedAt), { month: "short", day: "numeric", year: "numeric" })}</div>
                {meeting.summaryMd && <div style={{ fontSize: "0.85rem", marginTop: "6px", lineHeight: 1.4, color: "#475569" }}>{meeting.summaryMd.slice(0, 100)}...</div>}
              </div>
            ))}
            <div style={{ marginTop: "16px" }}>
-             <Link href={`/workspaces/${workspaceId}/meetings`} className="nr-link">View all transcripts →</Link>
+             <Link href={`/workspaces/${workspaceId}/meetings`} className="nr-link">{t("viewAllTranscripts")}</Link>
            </div>
         </div>
 
         {/* RIGHT COLUMN: TODOS & TENSIONS */}
         <div>
            <h2 className="nr-section-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-             Your To-Dos
+             {t("yourToDos")}
              {currentMemberUrl && (
                <Link href={`/workspaces/${workspaceId}/members/${currentMemberUrl}`} style={{ fontSize: "0.75rem", textTransform: "none", color: "var(--accent)" }}>
-                 View full profile →
+                 {t("viewFullProfile")}
                </Link>
              )}
            </h2>
-           {openActions.length === 0 ? <p className="nr-meta" style={{ marginBottom: "32px"}}>Zero inbox</p> : null}
+           {openActions.length === 0 ? <p className="nr-meta" style={{ marginBottom: "32px"}}>{t("zeroInbox")}</p> : null}
            <div style={{ marginBottom: "32px"}}>
              {openActions.slice(0, 6).map((action) => (
                <div key={action.id} className="nr-item" style={{ display: "flex", gap: "8px", alignItems: "baseline", borderBottom: "none", padding: "6px 0" }}>
@@ -316,7 +314,7 @@ export default async function WorkspaceDashboard({
              ))}
            </div>
 
-           <h2 className="nr-section-header">Active Tensions</h2>
+           <h2 className="nr-section-header">{t("activeTensions")}</h2>
            <div style={{ marginBottom: "16px" }}>
              {tensions.filter(t => t.status === "OPEN" || t.status === "IN_PROGRESS").slice(0, 4).map((tension) => (
                <div key={tension.id} className="nr-item" style={{ padding: "8px 0" }}>
@@ -328,12 +326,12 @@ export default async function WorkspaceDashboard({
              ))}
            </div>
            
-           <h2 className="nr-section-header" style={{ marginTop: "32px"}}>Live Activity</h2>
+           <h2 className="nr-section-header" style={{ marginTop: "32px"}}>{t("liveActivity")}</h2>
            <div className="nr-activity">
              {auditLogs.slice(0, 5).map(log => (
                <div key={log.id} style={{ fontSize: "0.85rem", padding: "8px 0", borderBottom: "1px solid var(--line)" }}>
                  <span style={{ color: "var(--muted)", marginRight: "6px" }} suppressHydrationWarning>{ageText(log.createdAt)}</span>
-                 <span>{log.actorUserId ? "Someone" : "System"} {log.action.replace(/\./g, " ")} on {log.entityType}</span>
+                 <span>{log.actorUserId ? t("someone") : t("system")} {log.action.replace(/\./g, " ")} {t("activityOn")} {log.entityType}</span>
                </div>
              ))}
            </div>
@@ -343,12 +341,12 @@ export default async function WorkspaceDashboard({
       <hr className="nr-divider" />
 
       <h2 className="nr-section-header" style={{ borderTop: "none", fontSize: "1.2rem", marginBottom: "24px" }}>
-        Strategic Direction
-        <Link href={`/workspaces/${workspaceId}/goals`} className="nr-link" style={{ float: "right", fontSize: "0.85rem", marginTop: "4px" }}>View All →</Link>
+        {t("strategicDirection")}
+        <Link href={`/workspaces/${workspaceId}/goals`} className="nr-link" style={{ float: "right", fontSize: "0.85rem", marginTop: "4px" }}>{t("viewAll")}</Link>
       </h2>
       <div style={{ display: "flex", gap: "24px", flexWrap: "wrap", marginBottom: "32px" }}>
         <div style={{ flex: "2 1 400px" }}>
-          {strategicGoals.length === 0 ? <p className="nr-meta">No active company goals.</p> : null}
+          {strategicGoals.length === 0 ? <p className="nr-meta">{t("noActiveGoals")}</p> : null}
           {strategicGoals.map(goal => (
             <div key={goal.id} className="nr-item" style={{ border: "1px solid var(--line)", borderRadius: "8px", padding: "16px", marginBottom: "12px", backgroundColor: "var(--surface)" }}>
               <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "8px" }}>
@@ -359,9 +357,9 @@ export default async function WorkspaceDashboard({
                 <GoalProgress percent={goal.progressPercent} />
               </div>
               <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.8rem", color: "var(--muted)" }}>
-                <span>{goal.progressPercent}% achieved</span>
+                <span>{t("achieved", { percent: goal.progressPercent })}</span>
                 {goal.targetDate && (
-                  <span suppressHydrationWarning>{Math.max(0, Math.ceil((new Date(goal.targetDate).getTime() - Date.now()) / (1000 * 60 * 60 * 24)))} days remaining</span>
+                  <span suppressHydrationWarning>{t("daysRemaining", { count: Math.max(0, Math.ceil((new Date(goal.targetDate).getTime() - Date.now()) / (1000 * 60 * 60 * 24))) })}</span>
                 )}
               </div>
             </div>
@@ -370,7 +368,7 @@ export default async function WorkspaceDashboard({
         
         {recentRecognition && (
           <div style={{ flex: "1 1 300px" }}>
-            <h3 style={{ fontSize: "0.9rem", color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "12px" }}>Recent Recognition</h3>
+            <h3 style={{ fontSize: "0.9rem", color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "12px" }}>{t("recentRecognition")}</h3>
             <RecognitionCard recognition={recentRecognition} />
           </div>
         )}
@@ -378,15 +376,15 @@ export default async function WorkspaceDashboard({
 
       <hr className="nr-divider" />
 
-      <h2 className="nr-section-header" style={{ borderTop: "none", fontSize: "1.2rem", marginBottom: "24px" }}>Recently Published</h2>
+      <h2 className="nr-section-header" style={{ borderTop: "none", fontSize: "1.2rem", marginBottom: "24px" }}>{t("recentlyPublished")}</h2>
       <div style={{ display: "flex", gap: "16px", overflowX: "auto", paddingBottom: "16px", marginBottom: "32px", WebkitOverflowScrolling: "touch" }}>
-        {recentlyPublished.length === 0 ? <p className="nr-meta">No items published yet.</p> : null}
+        {recentlyPublished.length === 0 ? <p className="nr-meta">{t("noItemsPublished")}</p> : null}
         {recentlyPublished.map(item => (
           <Link key={item.kind + item.id} href={item.link} style={{ display: "block", flex: "0 0 280px", border: "1px solid var(--line)", borderRadius: "8px", padding: "16px", textDecoration: "none", color: "inherit", backgroundColor: "var(--surface)" }}>
             <div style={{ fontSize: "0.75rem", textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--muted)", marginBottom: "8px", fontWeight: "bold" }}>{item.kind}</div>
             <div style={{ fontSize: "1rem", fontWeight: 600, marginBottom: "8px", lineHeight: "1.3" }}>{item.title}</div>
             <div style={{ fontSize: "0.8rem", color: "var(--muted)" }}>
-              By {item.author?.displayName || "System"} · {ageText(item.publishedAt!)}
+              {t("by")} {item.author?.displayName || t("system")} · {ageText(item.publishedAt!)}
             </div>
           </Link>
         ))}
@@ -394,7 +392,7 @@ export default async function WorkspaceDashboard({
 
       <hr className="nr-divider" />
 
-      <h2 className="nr-section-header" style={{ borderTop: "none", fontSize: "1.2rem", marginBottom: "24px" }}>Wiki &amp; Knowledge Index</h2>
+      <h2 className="nr-section-header" style={{ borderTop: "none", fontSize: "1.2rem", marginBottom: "24px" }}>{t("wikiIndex")}</h2>
       <div className="nr-category-grid">
         {sortedCategories.map(([category, items]) => (
           <div key={category} className="nr-category">
@@ -404,7 +402,7 @@ export default async function WorkspaceDashboard({
                 <li key={item.id}><Link href={`/workspaces/${workspaceId}/brain/${item.slug}`}>{item.title}</Link></li>
               ))}
               {items.length > 4 && (
-                <li><Link href={`/workspaces/${workspaceId}/brain`} style={{ color: "var(--muted)", fontStyle: "italic", fontSize: "0.8rem" }}>+ {items.length - 4} more</Link></li>
+                <li><Link href={`/workspaces/${workspaceId}/brain`} style={{ color: "var(--muted)", fontStyle: "italic", fontSize: "0.8rem" }}>{t("more", { count: items.length - 4 })}</Link></li>
               )}
             </ul>
           </div>
@@ -412,7 +410,7 @@ export default async function WorkspaceDashboard({
       </div>
 
       <div className="nr-footer">
-        {allArticles.length} articles · {meetings.length} meetings · {chunksCount} knowledge chunks · {members.length} members
+        {t("footerStats", { articles: allArticles.length, meetings: meetings.length, chunks: chunksCount, members: members.length })}
       </div>
     </>
   );

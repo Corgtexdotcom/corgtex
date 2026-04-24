@@ -1,9 +1,11 @@
+import { useTranslations } from "next-intl";
 import React from"react";
 import { getGoalTree, getMyGoalSlice, listRecognitions, requireWorkspaceMembership } from"@corgtex/domain";
 import { requirePageActor } from"@/lib/auth";
 import { GoalProgress } from"./GoalProgress";
 import { RecognitionCard } from"./RecognitionCard";
 import type { GoalCadence } from"@prisma/client";
+import { getTranslations } from "next-intl/server";
 
 export const dynamic ="force-dynamic";
 
@@ -17,6 +19,7 @@ export default async function GoalsPage({
  const { workspaceId } = await params;
  const { view ="tree", cadence ="QUARTERLY" } = await searchParams;
  const actor = await requirePageActor();
+ const t = await getTranslations("goals");
 
  let tree: any[] = [];
  let mySlice: any[] = [];
@@ -38,7 +41,7 @@ export default async function GoalsPage({
 
  const cadences: { id: string; label: string }[] = [
  { id:"TEN_YEAR", label:"10Y" },
- { id:"FIVE_YEAR", label:"5Y" },
+ { id:"FIVE_YEAR", label:"Annual" },
  { id:"ANNUAL", label:"Annual" },
  { id:"QUARTERLY", label:"Quarterly" },
  { id:"MONTHLY", label:"Monthly" },
@@ -49,8 +52,8 @@ export default async function GoalsPage({
  <div className="max-w-5xl mx-auto p-6 space-y-8">
  <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-line pb-4">
  <div>
- <h1 className="text-3xl font-bold text-text">Strategic Goals</h1>
- <p className="text-muted mt-1">Align organization, circle, and personal objectives.</p>
+ <h1 className="text-3xl font-bold text-text">{t("title")}</h1>
+ <p className="text-muted mt-1">{t("description")}</p>
  </div>
  
  <div className="flex mt-2 sm:mt-0 glass-panel rounded-lg overflow-hidden border border-line p-1">
@@ -60,7 +63,7 @@ export default async function GoalsPage({
  view ==="tree" ?"bg-black text-white shadow-sm" :"text-muted hover:text-text"
  }`}
  >
- Tree View
+ {t("treeView")}
  </a>
  <a
  href={`/workspaces/${workspaceId}/goals?view=slice&cadence=${cadence}`}
@@ -68,7 +71,7 @@ export default async function GoalsPage({
  view ==="slice" ?"bg-black text-white shadow-sm" :"text-muted hover:text-text"
  }`}
  >
- My Slice
+ {t("mySlice")}
  </a>
  </div>
  </div>
@@ -94,7 +97,7 @@ export default async function GoalsPage({
  <div className="space-y-4">
  {tree.length === 0 ? (
  <div className="p-12 text-center text-muted bg-surface-strong rounded-xl border border-dashed border-line">
- No {cadence.toLowerCase().replace("_","")} goals found.
+ {t("noGoalsFound", { cadence: cadence.toLowerCase().replace("_","") })}
  </div>
 ) : (
  tree.map(goal => (
@@ -108,11 +111,11 @@ export default async function GoalsPage({
  {view ==="slice" && (
  <div className="space-y-8">
  <div>
- <h3 className="text-xl font-semibold mb-4 text-text">My Active Goals</h3>
+ <h3 className="text-xl font-semibold mb-4 text-text">{t("myActiveGoals")}</h3>
  <div className="space-y-4">
  {mySlice.length === 0 ? (
  <div className="p-8 text-center text-muted bg-surface-strong rounded-xl border border-dashed border-line">
- You don&apos;t own any goals right now.
+ {t("noOwnedGoals")}
  </div>
 ) : (
  mySlice.map(goal => (
@@ -125,7 +128,7 @@ export default async function GoalsPage({
  </div>
  {goal.parentGoal && (
  <div className="text-sm text-muted mb-3 flex items-center">
- <span className="mr-1">↗ contributes to:</span>
+ <span className="mr-1">↗ {t("contributesTo")}</span>
  <span className="font-medium text-text">
  {goal.parentGoal.circle?.name ? `[${goal.parentGoal.circle.name}] ` :""} 
  {goal.parentGoal.title}
@@ -140,11 +143,11 @@ export default async function GoalsPage({
  </div>
 
  <div>
- <h3 className="text-xl font-semibold mb-4 text-text">Recent Recognitions</h3>
+ <h3 className="text-xl font-semibold mb-4 text-text">{t("recentRecognitions")}</h3>
  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
  {recognitions.length === 0 ? (
  <div className="col-span-full p-8 text-center text-muted bg-surface-strong rounded-xl border border-dashed border-line">
- No recognitions yet. Keep doing great work!
+ {t("noRecognitions")}
  </div>
 ) : (
  recognitions.map(rec => (
@@ -160,6 +163,13 @@ export default async function GoalsPage({
 }
 
 function GoalNode({ goal, level }: { goal: any; level: number }) {
+ return (
+ <GoalNodeInner goal={goal} level={level} />
+ );
+}
+
+function GoalNodeInner({ goal, level }: { goal: any; level: number }) {
+ const t = useTranslations("goals");
  return (
  <div className={`border border-line rounded-lg bg-surface-strong shadow-sm overflow-hidden mb-3`} style={{ marginLeft: `${level * 1.5}rem` }}>
  <div className="p-4">
@@ -184,7 +194,7 @@ function GoalNode({ goal, level }: { goal: any; level: number }) {
 ) : (
  <div className="w-4 h-4 rounded-full bg-accent-soft" />
 )}
- <span>{goal.ownerMember.user?.displayName ||"Unknown"}</span>
+ <span>{goal.ownerMember.user?.displayName || t("unknown")}</span>
  </div>
 )}
  </div>
@@ -194,14 +204,14 @@ function GoalNode({ goal, level }: { goal: any; level: number }) {
  </span>
  {goal.targetDate && (
  <span className="text-xs mt-1 text-muted">
- Target: {new Date(goal.targetDate).toLocaleDateString()}
+ {t("target")} {new Date(goal.targetDate).toLocaleDateString()}
  </span>
 )}
  </div>
  </div>
  
  <div className="mt-3 flex items-center justify-between text-xs text-muted mb-1">
- <span>Overall Progress</span>
+ <span>{t("overallProgress")}</span>
  <span className="font-medium text-text">{goal.progressPercent}%</span>
  </div>
  <GoalProgress percent={goal.progressPercent} />
