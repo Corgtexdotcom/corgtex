@@ -35,7 +35,7 @@ export function MemberBriefing({ workspaceId, memberId }: MemberBriefingProps) {
   };
 
   return (
-    <div className="rounded-xl border bg-gradient-to-br from-indigo-50/50 to-white dark:from-indigo-950/20 dark:to-background p-6 shadow-sm overflow-hidden relative">
+    <div className="rounded-xl border bg-gradient-to-br from-indigo-50/50 to-white p-6 shadow-sm overflow-hidden relative">
       <div className="flex items-center justify-between mb-4 relative z-10">
         <h3 className="text-lg font-semibold flex items-center gap-2">
           ✨ AI Briefing
@@ -51,33 +51,33 @@ export function MemberBriefing({ workspaceId, memberId }: MemberBriefingProps) {
 
       <div className="relative z-10">
         {!data && !isPending && !error && (
-          <div className="text-muted-foreground text-sm py-4">
+          <div className="text-muted text-sm py-4">
             Click generate to create a personalized AI summary of this member&apos;s current priorities, meetings, and insights.
           </div>
         )}
 
         {isPending && (
-          <div className="py-8 flex flex-col items-center justify-center text-muted-foreground animate-pulse">
+          <div className="py-8 flex flex-col items-center justify-center text-muted animate-pulse">
             <div className="text-2xl mx-auto mb-3 animate-bounce">✨</div>
             <p className="text-sm">Synthesizing recent activity...</p>
           </div>
         )}
 
         {error && !isPending && (
-          <div className="text-destructive text-sm py-4 flex items-center gap-2">
+          <div className="text-danger text-sm py-4 flex items-center gap-2">
             ⚠️ Failed to generate briefing. Please try again.
           </div>
         )}
 
         {data && !isPending && (
-          <div className="space-y-6 text-sm animate-in fade-in slide-in-from-bottom-2 duration-500">
+          <div className="space-y-6 text-sm duration-500">
             <div className="leading-relaxed font-medium">
               {data.summary}
             </div>
 
             {data.priorities.length > 0 && (
               <div>
-                <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2">Top Priorities</h4>
+                <h4 className="text-xs font-semibold uppercase tracking-wider text-muted mb-2">Top Priorities</h4>
                 <ul className="space-y-2">
                   {data.priorities.map((item, idx) => (
                     <li key={idx} className="flex gap-2">
@@ -91,7 +91,7 @@ export function MemberBriefing({ workspaceId, memberId }: MemberBriefingProps) {
 
             {data.followUps.length > 0 && (
               <div>
-                <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2">Meeting Follow-ups</h4>
+                <h4 className="text-xs font-semibold uppercase tracking-wider text-muted mb-2">Meeting Follow-ups</h4>
                 <ul className="space-y-2">
                   {data.followUps.map((item, idx) => (
                     <li key={idx} className="flex gap-2">
@@ -105,7 +105,7 @@ export function MemberBriefing({ workspaceId, memberId }: MemberBriefingProps) {
 
             {data.insights.length > 0 && (
               <div>
-                <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2">Key Insights</h4>
+                <h4 className="text-xs font-semibold uppercase tracking-wider text-muted mb-2">Key Insights</h4>
                 <ul className="space-y-2">
                   {data.insights.map((item, idx) => (
                     <li key={idx} className="flex gap-2">
