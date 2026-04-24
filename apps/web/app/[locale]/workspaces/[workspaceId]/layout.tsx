@@ -9,7 +9,7 @@ import { CommandPalette } from "./CommandPalette";
 import { CommandMenuButton } from "./CommandMenuButton";
 import { getTranslations } from "next-intl/server";
 import { LanguageSwitcher } from "./LanguageSwitcher";
-import { ThemeToggle } from "../../ThemeToggle";
+import { ThemeToggle } from "../../../ThemeToggle";
 
 export const dynamic = "force-dynamic";
 
