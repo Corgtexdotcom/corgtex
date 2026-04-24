@@ -45,3 +45,46 @@ describe("resolveAgentActorFromBearer", () => {
     await expect(resolveAgentActorFromBearer("bearer-something-else")).resolves.toBeNull();
   });
 });
+
+vi.mock("@corgtex/shared", async (importOriginal) => {
+  const actual = await importOriginal<any>();
+  return {
+    ...actual,
+    prisma: {
+      ...actual.prisma,
+      agentCredential: { findUnique: vi.fn(), update: vi.fn() },
+      agentIdentity: { findFirst: vi.fn(), create: vi.fn() },
+    },
+  };
+});
+
+describe("credentialAgentAuthProvider", () => {
+  it("resolves external agent identity from credential", async () => {
+    const { prisma } = await import("@corgtex/shared");
+    const { credentialAgentAuthProvider } = await import("./agent-auth");
+
+    vi.mocked(prisma.agentCredential.findUnique).mockResolvedValue({
+      id: "cred-1",
+      workspaceId: "ws-1",
+      label: "My Agent",
+      scopes: ["read"],
+      isActive: true,
+    } as any);
+
+    vi.mocked(prisma.agentIdentity.findFirst).mockResolvedValue({
+      id: "identity-1",
+    } as any);
+
+    const actor = await credentialAgentAuthProvider.resolve("agentc-some-token");
+
+    expect(actor).toEqual({
+      kind: "agent",
+      authProvider: "credential",
+      credentialId: "cred-1",
+      label: "My Agent",
+      workspaceIds: ["ws-1"],
+      scopes: ["read"],
+      agentIdentityId: "identity-1",
+    });
+  });
+});

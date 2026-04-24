@@ -3,8 +3,7 @@ import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
 import { invariant } from "./errors";
-
-// ---------------------------------------------------------------------------
+import { AGENT_REGISTRY } from "./agent-registry";// ---------------------------------------------------------------------------
 // CRUD — AgentIdentity
 // ---------------------------------------------------------------------------
 
@@ -114,6 +113,7 @@ export async function getAgentIdentity(actor: AppActor, workspaceId: string, age
           role: { select: { id: true, name: true } },
         },
       },
+      createdByUser: { select: { id: true, displayName: true } },
     },
   });
   invariant(identity, 404, "NOT_FOUND", "Agent identity not found.");
@@ -135,6 +135,38 @@ export async function deactivateAgentIdentity(
   return prisma.agentIdentity.update({
     where: { id: agentIdentityId },
     data: { isActive: false },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// External Agent Linking
+// ---------------------------------------------------------------------------
+
+export async function getOrCreateExternalAgentIdentity(
+  workspaceId: string,
+  credentialId: string,
+  label: string,
+  createdByUserId: string | null,
+) {
+  const existing = await prisma.agentIdentity.findFirst({
+    where: { workspaceId, linkedCredentialId: credentialId },
+  });
+  if (existing) {
+    return existing;
+  }
+
+  // Create a unique key for the external agent using credentialId
+  const agentKey = `ext_${credentialId.substring(0, 8)}`;
+
+  return prisma.agentIdentity.create({
+    data: {
+      workspaceId,
+      agentKey,
+      memberType: "EXTERNAL",
+      displayName: label,
+      linkedCredentialId: credentialId,
+      createdByUserId,
+    },
   });
 }
 
@@ -273,6 +305,27 @@ export async function updateWorkspaceAgentBehavior(
 
 // ---------------------------------------------------------------------------
 // Runtime helpers (called from packages/agents)
+// ---------------------------------------------------------------------------
+
+export async function seedAgentIdentities(workspaceId: string) {
+  for (const [agentKey, definition] of Object.entries(AGENT_REGISTRY)) {
+    const existing = await prisma.agentIdentity.findUnique({
+      where: { workspaceId_agentKey: { workspaceId, agentKey } },
+    });
+    if (!existing) {
+      await prisma.agentIdentity.create({
+        data: {
+          workspaceId,
+          agentKey,
+          memberType: "INTERNAL",
+          displayName: definition.label,
+          purposeMd: definition.description,
+        },
+      });
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 
 export async function resolveAgentIdentityLimits(workspaceId: string, agentKey: string) {
