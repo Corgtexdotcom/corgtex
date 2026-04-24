@@ -57,7 +57,7 @@ export function FileUploader({ workspaceId }: { workspaceId: string }) {
   const [isDragging, setIsDragging] = useState(false);
 
   return (
-    <div className="nr-form-section stack" style={{ marginBottom: 32, padding: 24, border: "2px dashed var(--line)", borderRadius: 8, background: isDragging ? "var(--bg-hover)" : "transparent" }}
+    <div className="nr-form-section stack" style={{ marginBottom: 32, padding: 24, border: "2px dashed var(--line)", borderRadius: 8, background: isDragging ? "var(--accent-soft)" : "transparent" }}
         onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
         onDragLeave={() => setIsDragging(false)}
         onDrop={(e) => { e.preventDefault(); setIsDragging(false); handleFiles(e.dataTransfer.files); }}
