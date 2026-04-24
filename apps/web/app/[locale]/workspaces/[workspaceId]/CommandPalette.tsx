@@ -6,11 +6,7 @@ import { useTranslations } from "next-intl";
 
 import { WORKSPACE_NAV_GROUPS as navGroups } from "@/lib/nav-config";
 
-const actionItems = [
-  { href: "/tensions?open=new", label: "Create Tension", icon: "+", desc: "Log a new tension" },
-  { href: "/proposals?open=new", label: "New Proposal", icon: "+", desc: "Draft a new proposal" },
-  { href: "/actions?open=new", label: "New Action", icon: "+", desc: "Track a new task" },
-];
+// We'll move actionItems inside the component so we can use translations.
 
 type Workspace = { id: string; name: string };
 
@@ -32,6 +28,7 @@ export function CommandPalette({
 }) {
   const router = useRouter();
   const tNav = useTranslations("nav");
+  const tCmd = useTranslations("commandPalette");
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -64,6 +61,12 @@ export function CommandPalette({
 
   if (!open) return null;
 
+  const actionItems = [
+    { href: "/tensions?open=new", label: tCmd("createTension"), icon: "+", desc: tCmd("createTensionDesc") },
+    { href: "/proposals?open=new", label: tCmd("newProposal"), icon: "+", desc: tCmd("newProposalDesc") },
+    { href: "/actions?open=new", label: tCmd("newAction"), icon: "+", desc: tCmd("newActionDesc") },
+  ];
+
   // Build the unified list of commands
   const allCommands: CommandItem[] = [];
 
@@ -74,7 +77,7 @@ export function CommandPalette({
       label: item.label,
       icon: item.icon,
       desc: item.desc,
-      group: "Quick Actions",
+      group: tCmd("quickActions"),
       onSelect: () => {
         router.push(`/workspaces/${workspaceId}${item.href}`);
         setOpen(false);
@@ -89,7 +92,7 @@ export function CommandPalette({
         id: `nav-${item.labelKey}`,
         label: tNav(item.labelKey as any),
         icon: item.icon,
-        group: "Navigation",
+        group: tCmd("navigation"),
         onSelect: () => {
           router.push(`/workspaces/${workspaceId}${item.href}`);
           setOpen(false);
@@ -106,7 +109,7 @@ export function CommandPalette({
         id: `ws-${w.id}`,
         label: w.name,
         icon: "◫",
-        group: "Switch Workspace",
+        group: tCmd("switchWorkspace"),
         onSelect: () => {
           router.push(`/workspaces/${w.id}`);
           setOpen(false);
@@ -172,7 +175,7 @@ export function CommandPalette({
         <input
           autoFocus
           className="cmd-input"
-          placeholder="Type a command or search..."
+          placeholder={tCmd("placeholder")}
           value={search}
           onChange={(e) => {
             setSearch(e.target.value);
@@ -182,7 +185,7 @@ export function CommandPalette({
         />
         <div className="cmd-list" ref={listRef}>
           {filteredCommands.length === 0 ? (
-            <div className="cmd-empty">No results found for &quot;{search}&quot;</div>
+            <div className="cmd-empty">{tCmd("noResults", { query: search })}</div>
           ) : (
             Object.entries(commandsByGroup).map(([group, cmds]) => (
               <div key={group} className="cmd-group">
@@ -203,7 +206,7 @@ export function CommandPalette({
                         <span>{cmd.label}</span>
                         {cmd.desc && <span className="cmd-item-desc">{cmd.desc}</span>}
                       </div>
-                      {group === "Quick Actions" && !isActive && <span className="cmd-kbd">↵</span>}
+                      {group === tCmd("quickActions") && !isActive && <span className="cmd-kbd">↵</span>}
                     </button>
                   );
                 })}
