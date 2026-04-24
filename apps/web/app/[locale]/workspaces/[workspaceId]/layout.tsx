@@ -9,6 +9,7 @@ import { CommandPalette } from "./CommandPalette";
 import { CommandMenuButton } from "./CommandMenuButton";
 import { getTranslations } from "next-intl/server";
 import { LanguageSwitcher } from "./LanguageSwitcher";
+import { ThemeToggle } from "../../ThemeToggle";
 
 export const dynamic = "force-dynamic";
 
@@ -95,6 +96,7 @@ export default async function WorkspaceLayout({
         <div className="ws-sidebar-footer">
           {!!multilingualFlag && <LanguageSwitcher />}
           <CommandMenuButton />
+          <ThemeToggle />
           
           <form action={logoutAction} style={{ marginTop: "4px" }}>
             <button type="submit" className="ws-nav-link ws-logout-btn">Logout</button>

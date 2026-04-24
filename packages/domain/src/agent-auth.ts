@@ -2,6 +2,7 @@ import { env, parseAllowedWorkspaceIds, prisma, randomOpaqueToken, sha256 } from
 import type { AppActor } from "@corgtex/shared";
 import { AppError, invariant } from "./errors";
 import { requireWorkspaceMembership } from "./auth";
+import { getOrCreateExternalAgentIdentity } from "./agent-identity";
 
 const BOOTSTRAP_AGENT_LABEL = "bootstrap-agent";
 const BOOTSTRAP_PREFIX = "agent-";
@@ -174,6 +175,13 @@ export const credentialAgentAuthProvider: AgentAuthProvider = {
       },
     });
 
+    const identity = await getOrCreateExternalAgentIdentity(
+      credential.workspaceId,
+      credential.id,
+      credential.label,
+      null, // Assuming no user id from just credential resolve
+    );
+
     return {
       kind: "agent",
       authProvider: "credential",
@@ -181,6 +189,7 @@ export const credentialAgentAuthProvider: AgentAuthProvider = {
       label: credential.label,
       workspaceIds: [credential.workspaceId],
       scopes: credential.scopes,
+      agentIdentityId: identity?.id,
     };
   },
 };

@@ -28,7 +28,9 @@
     "system": "System",
     "osMetrics": "OS Metrics",
     "auditTrail": "Audit Trail",
-    "settingsAgents": "Settings & Agents",
+    "settings": "Settings",
+    "aiGovernance": "AI Governance",
+    "agentGovernance": "Agent Governance",
     "globalAdmin": "Global Admin",
     "platformAdmin": "Platform Admin"
   },

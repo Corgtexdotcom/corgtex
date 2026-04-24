@@ -28,7 +28,9 @@
     "system": "Sistema",
     "osMetrics": "Métricas del SO",
     "auditTrail": "Registro de auditoría",
-    "settingsAgents": "Configuración y Agentes",
+    "settings": "Configuración",
+    "aiGovernance": "Gobernanza de IA",
+    "agentGovernance": "Gobernanza de Agentes",
     "globalAdmin": "Admin. Global",
     "platformAdmin": "Admin. de Plataforma"
   },
