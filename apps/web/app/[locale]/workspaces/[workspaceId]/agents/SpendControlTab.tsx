@@ -2,10 +2,7 @@ import { getModelUsageSummary, getModelUsageBudget, listAgentIdentities } from "
 import { AgentBudgetManager } from "../settings/agents/AgentBudgetManager";
 import { AgentSpendLimits } from "./AgentSpendLimits";
 import type { AppActor } from "@corgtex/shared";
-
-function formatUsd(value: number) {
-  return `$${value.toFixed(value >= 0.01 ? 4 : 6)}`;
-}
+import { getTranslations } from "next-intl/server";
 
 export async function SpendControlTab({
   workspaceId,
@@ -19,53 +16,56 @@ export async function SpendControlTab({
     getModelUsageBudget(actor, workspaceId),
     listAgentIdentities(actor, workspaceId),
   ]);
+  const t = await getTranslations("agents");
+
+  const formatUsd = (value: number) => `$${value.toFixed(value >= 0.01 ? 4 : 6)}`;
 
   return (
     <div className="stack" style={{ gap: 40 }}>
       {/* Workspace Budget Manager */}
       <section>
-        <h2 className="nr-section-header">Workspace Budget</h2>
+        <h2 className="nr-section-header">{t("spendBudgetTitle")}</h2>
         <p className="nr-item-meta" style={{ fontSize: "0.85rem", marginBottom: 16 }}>
-          Set an overall monthly spending limit for AI model usage across all agents in this workspace.
+          {t("spendBudgetDesc")}
         </p>
         <AgentBudgetManager workspaceId={workspaceId} budget={budget ? { monthlyCostCapUsd: Number(budget.monthlyCostCapUsd), alertThresholdPct: budget.alertThresholdPct, periodStartDay: budget.periodStartDay } : null} />
       </section>
 
       <section>
-        <h2 className="nr-section-header">Per-Agent Limits</h2>
+        <h2 className="nr-section-header">{t("spendLimitsTitle")}</h2>
         <p className="nr-item-meta" style={{ fontSize: "0.85rem", marginBottom: 16 }}>
-          Set restrictive spend limits per run and max runs per day for individual agents to prevent runaway costs.
+          {t("spendLimitsDesc")}
         </p>
         <AgentSpendLimits workspaceId={workspaceId} agents={agentIdentities} />
       </section>
 
       {/* Cost Dashboard */}
       <section>
-        <h2 className="nr-section-header" style={{ marginBottom: 24 }}>Cost Analytics</h2>
+        <h2 className="nr-section-header" style={{ marginBottom: 24 }}>{t("spendAnalyticsTitle")}</h2>
 
         <div className="nr-stat-bar" style={{ marginBottom: 40 }}>
           <div className="nr-stat" style={{ display: "flex", flexDirection: "column" }}>
             <strong style={{ fontSize: "1.3rem" }}>{formatUsd(usageSummary.totalCostUsd)}</strong>
-            <span className="nr-meta">Total Cost (30d)</span>
+            <span className="nr-meta">{t("spendTotalCost")}</span>
           </div>
           <span className="nr-stat-sep" />
           <div className="nr-stat" style={{ display: "flex", flexDirection: "column" }}>
             <strong style={{ fontSize: "1.3rem" }}>{usageSummary.totalTokens.toLocaleString()}</strong>
-            <span className="nr-meta">Total Tokens</span>
+            <span className="nr-meta">{t("spendTotalTokens")}</span>
           </div>
           <span className="nr-stat-sep" />
           <div className="nr-stat" style={{ display: "flex", flexDirection: "column" }}>
             <strong style={{ fontSize: "1.3rem" }}>{usageSummary.totalCalls}</strong>
-            <span className="nr-meta">API Calls</span>
+            <span className="nr-meta">{t("spendApiCalls")}</span>
           </div>
         </div>
 
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(340px, 1fr))", gap: "40px" }}>
           {/* By Model */}
           <section>
-            <h3 className="nr-section-header" style={{ fontSize: "1rem" }}>Cost by Model</h3>
+            <h3 className="nr-section-header" style={{ fontSize: "1rem" }}>{t("spendCostByModel")}</h3>
             <div>
-              {usageSummary.byModel.length === 0 && <p className="nr-item-meta">No model usage data.</p>}
+              {usageSummary.byModel.length === 0 && <p className="nr-item-meta">{t("spendNoModelData")}</p>}
               {usageSummary.byModel.map((m) => (
                 <div key={`${m.provider}:${m.model}`} className="nr-item" style={{ padding: "12px 0" }}>
                   <div className="row">
@@ -102,9 +102,9 @@ export async function SpendControlTab({
 
           {/* By Agent */}
           <section>
-            <h3 className="nr-section-header" style={{ fontSize: "1rem" }}>Cost by Agent</h3>
+            <h3 className="nr-section-header" style={{ fontSize: "1rem" }}>{t("spendCostByAgent")}</h3>
             <div>
-              {usageSummary.byAgent.length === 0 && <p className="nr-item-meta">No agent usage data.</p>}
+              {usageSummary.byAgent.length === 0 && <p className="nr-item-meta">{t("spendNoAgentData")}</p>}
               {usageSummary.byAgent.map((a) => (
                 <div key={a.agentKey} className="nr-item" style={{ padding: "12px 0" }}>
                   <div className="row">
@@ -140,9 +140,9 @@ export async function SpendControlTab({
 
         {/* Daily usage */}
         <section style={{ marginTop: 40 }}>
-          <h3 className="nr-section-header" style={{ fontSize: "1rem" }}>Daily Usage (30d)</h3>
+          <h3 className="nr-section-header" style={{ fontSize: "1rem" }}>{t("spendDailyUsage")}</h3>
           <div>
-            {usageSummary.byDay.length === 0 && <p className="nr-item-meta">No daily usage data.</p>}
+            {usageSummary.byDay.length === 0 && <p className="nr-item-meta">{t("spendNoDailyData")}</p>}
             {usageSummary.byDay.map((d) => (
               <div key={d.date} className="nr-item" style={{ padding: "12px 0", borderBottom: "1px dashed var(--line)" }}>
                 <div className="row">
