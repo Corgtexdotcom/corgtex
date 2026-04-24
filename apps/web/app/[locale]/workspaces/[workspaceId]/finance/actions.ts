@@ -15,6 +15,8 @@ import {
   addSpendComment,
   resolveSpendObjection,
   escalateSpendToProposal,
+  postDeliberationEntry,
+  resolveDeliberationEntry,
 } from "@corgtex/domain";
 
 
@@ -185,6 +187,38 @@ export async function escalateSpendToProposalAction(formData: FormData) {
   await escalateSpendToProposal(actor, {
     workspaceId,
     spendId: asString(formData, "spendId"),
+  });
+  refresh(workspaceId);
+}
+
+export async function postSpendDeliberationAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  
+  await postDeliberationEntry(actor, {
+    workspaceId,
+    parentType: "SPEND",
+    parentId: asString(formData, "parentId"),
+    entryType: asString(formData, "entryType") as any,
+    bodyMd: asString(formData, "bodyMd"),
+  });
+  refresh(workspaceId);
+}
+
+export async function resolveSpendDeliberationAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  
+  await resolveDeliberationEntry(actor, {
+    workspaceId,
+    entryId: asString(formData, "entryId"),
+    resolvedNote: asOptional(formData, "resolvedNote") || undefined,
   });
   refresh(workspaceId);
 }
