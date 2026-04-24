@@ -141,6 +141,6 @@ describe("deliberation", () => {
       workspaceId,
       entryId: entry.id,
       resolvedNote: "Not allowed"
-    })).rejects.toThrow(/Only the parent author or a workspace admin can resolve/);
+    })).rejects.toThrow(/Only the entry author, parent author, or a workspace admin can resolve/);
   });
 });
