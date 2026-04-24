@@ -41,8 +41,8 @@ Install `next-intl`, restructure routes under a `[locale]` dynamic segment, crea
 - `apps/web/lib/components/**`
 - `apps/web/next.config.ts`
 - `apps/web/package.json`
-- `visual_proof_en.png`
-- `visual_proof_es.png`
+- `docs/assets/visual_proof_en.png`
+- `docs/assets/visual_proof_es.png`
 
 ## Acceptance criteria
 
