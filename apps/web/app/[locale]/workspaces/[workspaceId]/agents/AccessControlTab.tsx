@@ -2,6 +2,7 @@ import { AgentConnectionManager } from "../settings/AgentConnectionManager";
 import { AgentModelOverride } from "./AgentModelOverride";
 import { listAgentCredentials, listAgentConfigs, DEFAULT_SCOPES, SCOPE_REGISTRY } from "@corgtex/domain";
 import type { AppActor } from "@corgtex/shared";
+import { getTranslations } from "next-intl/server";
 
 export async function AccessControlTab({
   workspaceId,
@@ -16,13 +17,14 @@ export async function AccessControlTab({
     listAgentCredentials(actor, workspaceId),
     listAgentConfigs(actor, workspaceId),
   ]);
+  const t = await getTranslations("agents");
 
   return (
     <div className="stack" style={{ gap: 40 }}>
       <section>
-        <h2 className="nr-section-header">Agent Model Overrides</h2>
+        <h2 className="nr-section-header">{t("overridesTitle")}</h2>
         <p className="nr-item-meta" style={{ fontSize: "0.85rem", marginBottom: 16 }}>
-          Override the default model used for each agent based on your cost and quality preferences.
+          {t("overridesDesc")}
         </p>
 
         <div className="stack" style={{ gap: 16 }}>
@@ -39,9 +41,9 @@ export async function AccessControlTab({
       </section>
 
       <section>
-        <h2 className="nr-section-header">Agent credentials (MCP)</h2>
+        <h2 className="nr-section-header">{t("credentialsTitle")}</h2>
         <p className="nr-item-meta" style={{ fontSize: "0.85rem", marginBottom: 16 }}>
-          Create credentials to connect external AI clients (like Claude or Cursor) to your workspace via the Model Context Protocol (MCP).
+          {t("credentialsDesc")}
         </p>
 
         <AgentConnectionManager
