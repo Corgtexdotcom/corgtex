@@ -65,6 +65,23 @@ export async function postDeliberationEntry(actor: AppActor, params: {
       return entry;
     }
 
+    if (params.parentType === "SPEND" && params.entryType === "OBJECTION") {
+      const spend = await tx.spendRequest.findUnique({ where: { id: params.parentId } });
+      if (spend && spend.status === "SUBMITTED") {
+        await tx.spendRequest.update({
+          where: { id: spend.id },
+          data: { status: "OBJECTED" },
+        });
+        await appendEvents(tx, [{
+          workspaceId: params.workspaceId,
+          type: "spend.objected",
+          aggregateType: "SpendRequest",
+          aggregateId: spend.id,
+          payload: { spendId: spend.id },
+        }]);
+      }
+    }
+
     await tx.auditLog.create({
       data: {
         workspaceId: params.workspaceId,
@@ -121,6 +138,9 @@ export async function resolveDeliberationEntry(actor: AppActor, params: {
     } else if (entry.parentType === "TENSION") {
       const parent = await tx.tension.findUnique({ where: { id: entry.parentId }, select: { authorUserId: true } });
       isParentAuthor = parent?.authorUserId === actorUserId;
+    } else if (entry.parentType === "MEETING") {
+      const parent = await tx.meeting.findUnique({ where: { id: entry.parentId }, select: { participantIds: true } });
+      isParentAuthor = parent?.participantIds.includes(actorUserId) ?? false;
     } else if (entry.parentType === "BRAIN_ARTICLE") {
       const parent = await tx.brainArticle.findUnique({ where: { id: entry.parentId }, select: { ownerMemberId: true } });
       if (parent?.ownerMemberId) {
@@ -131,7 +151,9 @@ export async function resolveDeliberationEntry(actor: AppActor, params: {
       }
     }
 
-    invariant(isAdmin || isParentAuthor, 403, "FORBIDDEN", "Only the parent author or a workspace admin can resolve this entry.");
+    const isEntryAuthor = entry.authorUserId === actorUserId;
+
+    invariant(isAdmin || isParentAuthor || isEntryAuthor, 403, "FORBIDDEN", "Only the entry author, parent author, or a workspace admin can resolve this entry.");
 
     const updated = await tx.deliberationEntry.update({
       where: { id: entry.id },
@@ -140,6 +162,26 @@ export async function resolveDeliberationEntry(actor: AppActor, params: {
         resolvedNote: params.resolvedNote?.trim() || null,
       }
     });
+
+    if (entry.parentType === "SPEND" && entry.entryType === "OBJECTION") {
+      const spend = await tx.spendRequest.findUnique({ where: { id: entry.parentId } });
+      if (spend && spend.status === "OBJECTED") {
+        const otherOpenObjections = await tx.deliberationEntry.count({
+          where: {
+            parentType: "SPEND",
+            parentId: spend.id,
+            entryType: "OBJECTION",
+            resolvedAt: null,
+          }
+        });
+        if (otherOpenObjections === 0) {
+          await tx.spendRequest.update({
+            where: { id: spend.id },
+            data: { status: "SUBMITTED" },
+          });
+        }
+      }
+    }
 
     await tx.auditLog.create({
       data: {
