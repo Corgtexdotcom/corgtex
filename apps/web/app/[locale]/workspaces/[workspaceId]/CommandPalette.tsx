@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
+import { useTranslations } from "next-intl";
 
 import { WORKSPACE_NAV_GROUPS as navGroups } from "@/lib/nav-config";
 
@@ -30,6 +31,7 @@ export function CommandPalette({
   workspaces: Workspace[];
 }) {
   const router = useRouter();
+  const tNav = useTranslations("nav");
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -84,8 +86,8 @@ export function CommandPalette({
   for (const group of navGroups) {
     allCommands.push(
       ...group.items.map((item) => ({
-        id: `nav-${item.label}`,
-        label: item.label,
+        id: `nav-${item.labelKey}`,
+        label: tNav(item.labelKey as any),
         icon: item.icon,
         group: "Navigation",
         onSelect: () => {
