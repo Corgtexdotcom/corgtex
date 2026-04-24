@@ -63,14 +63,6 @@
     "checkYourEmail": "Revisa tu correo",
     "emailSentDescription": "Si existe una cuenta con ese correo, hemos enviado un enlace para restablecer la contraseña. El enlace caduca en 15 minutos.",
     "enterEmailDescription": "Ingresa tu dirección de correo electrónico y te enviaremos un enlace para restablecer tu contraseña."
-    "setPasswordButton": "Establecer contraseña",
-    "settingUp": "Configurando...",
-    "newPasswordLabel": "Nueva contraseña",
-    "confirmPasswordLabel": "Confirmar contraseña",
-    "backToLogin": "← Volver al inicio de sesión",
-    "checkYourEmail": "Revisa tu correo",
-    "emailSentDescription": "Si existe una cuenta con ese correo, le hemos enviado un enlace para restablecer la contraseña. El enlace expira en 15 minutos.",
-    "enterEmailDescription": "Ingresa tu correo electrónico y te enviaremos un enlace para restablecer tu contraseña."
   },
   "dashboard": {
     "searchLabel": "Buscar:",
