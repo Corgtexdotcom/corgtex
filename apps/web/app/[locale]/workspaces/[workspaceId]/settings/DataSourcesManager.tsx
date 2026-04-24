@@ -131,7 +131,7 @@ export function DataSourcesManager({ workspaceId, dataSources, documents }: { wo
         {isAdding && (
           <form className="nr-form-section stack" style={{ marginBottom: 32, padding: 24, border: "1px solid var(--line)" }} onSubmit={handleSave}>
             <h3>Add PostgreSQL Database</h3>
-            {testingError && <div style={{ color: "#842029", padding: "8px", background: "#f8d7da" }}>{testingError}</div>}
+            {testingError && <div style={{ color: "var(--danger)", padding: "8px", background: "var(--danger-soft)" }}>{testingError}</div>}
             
             <label>
               Label
@@ -202,7 +202,7 @@ export function DataSourcesManager({ workspaceId, dataSources, documents }: { wo
                 Last Sync: {source.lastSyncAt ? new Date(source.lastSyncAt).toLocaleString() : "Never"}
               </div>
               {source.lastSyncError && (
-                <div style={{ color: "#842029", fontSize: "0.85rem", marginTop: 4 }}>
+                <div style={{ color: "var(--danger)", fontSize: "0.85rem", marginTop: 4 }}>
                   Error: {source.lastSyncError}
                 </div>
               )}

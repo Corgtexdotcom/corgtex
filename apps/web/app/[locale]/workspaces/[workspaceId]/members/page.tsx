@@ -47,8 +47,8 @@ export default async function MembersPage({
                     width: 48, 
                     height: 48, 
                     borderRadius: 24, 
-                    background: isAgent ? "#f1f5f9" : "var(--accent-soft)", 
-                    color: isAgent ? "#334155" : "var(--accent)", 
+                    background: isAgent ? "var(--surface-sunken)" : "var(--accent-soft)", 
+                    color: isAgent ? "var(--text-strong)" : "var(--accent)", 
                     border: isAgent ? "1px solid var(--line)" : "none",
                     display: "flex", 
                     alignItems: "center", 
@@ -106,7 +106,7 @@ export default async function MembersPage({
                       <div className="muted" style={{ fontSize: "0.8rem", marginBottom: 4 }}>
                         Key: {agent.agentKey}
                       </div>
-                      <div style={{ fontSize: "0.75rem", background: agent.memberType === "INTERNAL" ? "#fef3c7" : "#f3e8ff", color: agent.memberType === "INTERNAL" ? "#92400e" : "#6b21a8", display: "inline-block", padding: "2px 8px", borderRadius: "12px", border: `1px solid ${agent.memberType === "INTERNAL" ? "#fde68a" : "#e9d5ff"}`, marginRight: 4 }}>
+                      <div style={{ fontSize: "0.75rem", background: agent.memberType === "INTERNAL" ? "var(--warning-soft)" : "var(--info-soft)", color: agent.memberType === "INTERNAL" ? "var(--warning)" : "var(--info)", display: "inline-block", padding: "2px 8px", borderRadius: "12px", border: `1px solid ${agent.memberType === "INTERNAL" ? "var(--warning)" : "var(--info)"}`, marginRight: 4 }}>
                         {agent.memberType === "INTERNAL" ? t("builtIn") : t("personalAgent")}
                       </div>
                       {!agent.isActive && (
