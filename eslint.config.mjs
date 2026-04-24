@@ -29,7 +29,7 @@ export default [
       "no-restricted-syntax": [
         "error",
         {
-          selector: "Literal[value=/[\\p{Emoji_Presentation}\\uFE0F]/u]",
+          selector: "Literal[value=/[\\p{Emoji_Presentation}\\uFE0F]/u], JSXText[value=/[\\p{Emoji_Presentation}\\uFE0F]/u], TemplateElement[value.raw=/[\\p{Emoji_Presentation}\\uFE0F]/u]",
           message: "Emoji characters are not allowed. Use monochrome Unicode glyphs from the design system (see nav-config.ts for reference).",
         },
       ],
