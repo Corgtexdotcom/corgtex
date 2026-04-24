@@ -32,7 +32,7 @@ export default async function TensionDetailPage({
           </a>
         </div>
         <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2.5rem" }}>
-          {tension.isPrivate && <span title="Private inbox item" style={{ marginRight: 6 }}>🔒</span>}
+          {tension.isPrivate && <span title="Private inbox item" style={{ marginRight: 6 }}>◆</span>}
           {tension.title}
         </h1>
         <div className="nr-masthead-meta" style={{ marginTop: 12 }}>

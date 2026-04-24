@@ -174,11 +174,11 @@ Rules:
         role: "system",
         content: `You are generating a Daily Digest / Newspaper for the workspace based on yesterday's conversations.
 Format it as a markdown article containing these sections:
-- 🗞️ Key Decisions Made
-- 🎯 Action Items Identified
-- 💬 Conversation Highlights
-- 😊 Team Pulse (aggregate sentiment)
-- ⚡ Emerging Tensions (recurring themes)`
+- ✧ Key Decisions Made
+- ✓ Action Items Identified
+- ▫ Conversation Highlights
+- ● Team Pulse (aggregate sentiment)
+- △ Emerging Tensions (recurring themes)`
       },
       {
         role: "user",
@@ -243,7 +243,7 @@ Output clean HTML suitable for email (use inline styles).`
 
     await sendEmail({
       to: member.user.email,
-      subject: `🗞️ ${digestTitle} — Your Personal Briefing`,
+      subject: `✉ ${digestTitle} — Your Personal Briefing`,
       html: personalizedDigest.content,
     });
   }
