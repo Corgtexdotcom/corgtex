@@ -5,6 +5,7 @@ Remove all colorful OS-rendered emojis from the UI and replace them with monochr
 - `apps/web/app/ThemeToggle.tsx`
 - `apps/web/app/[locale]/workspaces/[workspaceId]/members/page.tsx`
 - `apps/web/app/[locale]/workspaces/[workspaceId]/tensions/page.tsx`
+- `apps/web/app/[locale]/workspaces/[workspaceId]/tensions/[tensionId]/page.tsx`
 
 - `apps/web/app/[locale]/workspaces/[workspaceId]/brain/page.tsx`
 - `apps/web/app/[locale]/workspaces/[workspaceId]/actions/page.tsx`
@@ -15,6 +16,7 @@ Remove all colorful OS-rendered emojis from the UI and replace them with monochr
 - `apps/web/app/[locale]/workspaces/[workspaceId]/operator/page.tsx`
 - `apps/web/app/[locale]/workspaces/[workspaceId]/members/[memberId]/MemberBriefing.tsx`
 - `apps/web/app/[locale]/workspaces/[workspaceId]/leads/page.tsx`
+- `packages/agents/src/daily-digest.ts`
 - `eslint.config.mjs`
 - `AGENTS.md`
 - `docs/plans/fix-remove-emojis.md`
