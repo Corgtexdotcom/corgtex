@@ -5,25 +5,28 @@ import { useFormStatus } from "react-dom";
 import { setupAccountAction } from "./actions";
 import { initialResetPasswordState } from "./state";
 import Link from "next/link";
+import { useTranslations } from "next-intl";
 
 function SubmitButton() {
   const { pending } = useFormStatus();
+  const t = useTranslations("auth");
 
   return (
     <button type="submit" disabled={pending}>
-      {pending ? "Setting up..." : "Set Password"}
+      {pending ? t("settingUp") : t("setPasswordButton")}
     </button>
   );
 }
 
 export function SetupAccountForm({ token }: { token: string }) {
   const [state, formAction] = useActionState(setupAccountAction, initialResetPasswordState);
+  const t = useTranslations("auth");
 
   return (
     <form action={formAction} className="stack" style={{ marginTop: 20 }}>
       <input type="hidden" name="token" value={token} />
       <label>
-        New Password
+        {t("newPasswordLabel")}
         <input
           name="password"
           type="password"
@@ -34,7 +37,7 @@ export function SetupAccountForm({ token }: { token: string }) {
         />
       </label>
       <label>
-        Confirm Password
+        {t("confirmPasswordLabel")}
         <input
           name="confirmPassword"
           type="password"
@@ -50,7 +53,7 @@ export function SetupAccountForm({ token }: { token: string }) {
       ) : null}
       <SubmitButton />
       <Link href="/login" className="muted" style={{ fontSize: 14, marginTop: 8, display: "inline-block" }}>
-        ← Back to login
+        {t("backToLogin")}
       </Link>
     </form>
   );

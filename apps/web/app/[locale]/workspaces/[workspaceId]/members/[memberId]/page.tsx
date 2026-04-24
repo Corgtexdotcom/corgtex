@@ -3,6 +3,7 @@ import { requirePageActor } from "@/lib/auth";
 import { notFound } from "next/navigation";
 import Link from "next/link";
 import { MemberBriefing } from "./MemberBriefing";
+import { getTranslations } from "next-intl/server";
 
 export const dynamic = "force-dynamic";
 
@@ -23,6 +24,7 @@ function getInitials(name?: string | null, email?: string) {
 export default async function MemberProfilePage({ params }: PageProps) {
   const { workspaceId, memberId } = await params;
   const actor = await requirePageActor();
+  const t = await getTranslations("members");
   if (!actor || actor.kind !== "user") {
     notFound();
   }
@@ -45,7 +47,7 @@ export default async function MemberProfilePage({ params }: PageProps) {
           href={`/workspaces/${workspaceId}/members`}
           style={{ textDecoration: "none", color: "var(--muted)", fontSize: "0.85rem", marginBottom: 16, display: "inline-block" }}
         >
-          ← Back to Team
+          {t("backToTeam")}
         </Link>
         <div style={{ display: "flex", alignItems: "center", gap: 24, marginTop: 16 }}>
           <div style={{ 
@@ -64,7 +66,7 @@ export default async function MemberProfilePage({ params }: PageProps) {
           </div>
           <div>
             <h1 style={{ border: "none", padding: 0, margin: "0 0 8px 0", fontSize: "2rem" }}>
-              {member.user?.displayName || "Unknown User"}
+              {member.user?.displayName || t("unknownUser")}
             </h1>
             <div className="nr-masthead-meta" style={{ display: "flex", gap: 12, alignItems: "center" }}>
               <span>{member.user?.email}</span>
@@ -79,16 +81,16 @@ export default async function MemberProfilePage({ params }: PageProps) {
       <div style={{ display: "flex", flexWrap: "wrap", gap: 32 }}>
         <div style={{ flex: 2, minWidth: 300 }}>
           <section className="ws-section" style={{ marginBottom: 32 }}>
-            <h2 className="nr-section-header">Roles & Circles</h2>
+            <h2 className="nr-section-header">{t("rolesAndCircles")}</h2>
             {member.roleAssignments.length === 0 ? (
-              <p className="muted italic">No roles assigned.</p>
+              <p className="muted italic">{t("noRoles")}</p>
             ) : (
               <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
                 {member.roleAssignments.map((ra) => (
                   <div key={ra.id} className="nr-item">
                     <div className="nr-item-meta" style={{ marginBottom: 4 }}>
                       <Link href={`/workspaces/${workspaceId}/circles`} style={{ color: "var(--accent)", textDecoration: "none" }}>
-                        {ra.role.circle?.name || "No Circle"} Circle
+                        {ra.role.circle?.name || t("noCircle")} Circle
                       </Link>
                     </div>
                     <strong className="nr-item-title">{ra.role.name}</strong>
@@ -104,9 +106,9 @@ export default async function MemberProfilePage({ params }: PageProps) {
           </section>
 
           <section className="ws-section" style={{ marginBottom: 32 }}>
-            <h2 className="nr-section-header">Recent Proposals</h2>
+            <h2 className="nr-section-header">{t("recentProposals")}</h2>
             {proposals.length === 0 ? (
-              <p className="muted italic">No recent proposals.</p>
+              <p className="muted italic">{t("noRecentProposals")}</p>
             ) : (
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                 {proposals.map((p) => (
@@ -116,7 +118,7 @@ export default async function MemberProfilePage({ params }: PageProps) {
                     className="nr-item row"
                     style={{ textDecoration: "none", color: "inherit", display: "flex", justifyContent: "space-between" }}
                   >
-                    <span>{p.title || "Untitled"}</span>
+                    <span>{p.title || t("untitled")}</span>
                     <span className="muted" style={{ fontSize: "0.8rem", textTransform: "uppercase" }}>{p.status}</span>
                   </Link>
                 ))}
@@ -125,17 +127,17 @@ export default async function MemberProfilePage({ params }: PageProps) {
           </section>
 
           <section className="ws-section">
-            <h2 className="nr-section-header">Active Tensions</h2>
+            <h2 className="nr-section-header">{t("activeTensions")}</h2>
             {authoredTensions.length === 0 && member.assignedTensions.length === 0 ? (
-              <p className="muted italic">No active tensions.</p>
+              <p className="muted italic">{t("noActiveTensions")}</p>
             ) : (
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                 {[...authoredTensions, ...member.assignedTensions].reduce((acc: any[], curr) => {
                   if (!acc.find(item => item.id === curr.id)) acc.push(curr);
                   return acc;
-                }, []).map((t) => (
+                }, []).map((t: any) => (
                   <div key={t.id} className="nr-item row" style={{ display: "flex", justifyContent: "space-between" }}>
-                    <span>{t.title || "Untitled"}</span>
+                    <span>{t.title || t("untitled")}</span>
                     <span className="muted" style={{ fontSize: "0.8rem", textTransform: "uppercase" }}>{t.status}</span>
                   </div>
                 ))}
@@ -146,9 +148,9 @@ export default async function MemberProfilePage({ params }: PageProps) {
 
         <div style={{ flex: 1, minWidth: 300 }}>
           <section className="ws-section" style={{ marginBottom: 32 }}>
-            <h2 className="nr-section-header">Recent Meetings</h2>
+            <h2 className="nr-section-header">{t("recentMeetings")}</h2>
             {meetings.length === 0 ? (
-              <p className="muted italic">No recent meetings.</p>
+              <p className="muted italic">{t("noRecentMeetings")}</p>
             ) : (
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                 {meetings.map((m) => (
@@ -158,7 +160,7 @@ export default async function MemberProfilePage({ params }: PageProps) {
                     className="nr-item"
                     style={{ textDecoration: "none", color: "inherit", display: "block" }}
                   >
-                    <div style={{ fontWeight: 500 }}>{m.title || "Untitled Meeting"}</div>
+                    <div style={{ fontWeight: 500 }}>{m.title || t("untitled")}</div>
                     <div className="nr-item-meta mt-1">
                       {new Date(m.recordedAt).toLocaleDateString()}
                     </div>
@@ -169,9 +171,9 @@ export default async function MemberProfilePage({ params }: PageProps) {
           </section>
 
           <section className="ws-section">
-            <h2 className="nr-section-header">Recent Activity</h2>
+            <h2 className="nr-section-header">{t("recentActivity")}</h2>
             {recentActivity.length === 0 ? (
-              <p className="muted italic">No recent activity.</p>
+              <p className="muted italic">{t("noRecentActivity")}</p>
             ) : (
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                 {recentActivity.map((log) => (
