@@ -92,7 +92,7 @@ Your primary objective is to assist team members in participating effectively wi
 4. Keep tone professional, authoritative, and concise.`;
 
     return (
-      <div className="panel" style={{ background: "var(--surface)", border: "1px solid var(--border)", padding: 20, borderRadius: 8, marginTop: 16 }}>
+      <div className="panel" style={{ background: "var(--surface)", border: "1px solid var(--line)", padding: 20, borderRadius: 8, marginTop: 16 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
           <h3 style={{ margin: 0, color: "var(--accent)" }} className="row gap-2">ChatGPT Custom GPT Setup</h3>
           <button className="button small secondary" onClick={() => setSetupData(null)}>Done</button>
@@ -115,14 +115,14 @@ Your primary objective is to assist team members in participating effectively wi
           <li>
             <strong>Set Instructions</strong>
             <p className="muted mt-1 mb-2">Paste this template into the <strong>Instructions</strong> box:</p>
-            <textarea readOnly value={systemPromptTemplate} rows={5} className="w-full text-xs font-mono p-2 bg-[var(--surface-sunken)] border border-[var(--border)] rounded" />
+            <textarea readOnly value={systemPromptTemplate} rows={5} className="w-full text-xs font-mono p-2 bg-[var(--surface-sunken)] border border-[var(--line)] rounded" />
           </li>
 
           <li>
             <strong>Add Action Schema</strong>
             <p className="muted mt-1 mb-2">Scroll down to <strong>Actions</strong> and click <strong>Create new action</strong>. Click <strong>Import from URL</strong> and paste:</p>
             <div className="row gap-2">
-              <input readOnly value={setupData.schemaUrl} className="flex-1 bg-[var(--surface-sunken)] text-xs font-mono p-2 rounded border border-[var(--border)]" />
+              <input readOnly value={setupData.schemaUrl} className="flex-1 bg-[var(--surface-sunken)] text-xs font-mono p-2 rounded border border-[var(--line)]" />
             </div>
           </li>
 
@@ -153,7 +153,7 @@ Your primary objective is to assist team members in participating effectively wi
   return (
     <div className="stack" style={{ gap: 16 }}>
       
-      <div className="panel" style={{ padding: 16, border: "1px solid var(--border)", borderRadius: 8 }}>
+      <div className="panel" style={{ padding: 16, border: "1px solid var(--line)", borderRadius: 8 }}>
         <div className="row" style={{ alignItems: "center", justifyContent: "space-between" }}>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -181,7 +181,7 @@ Your primary objective is to assist team members in participating effectively wi
         {setupData && renderSetupInstructions()}
 
         {activeApps.length > 0 && (
-          <div className="mt-4 pt-4 border-t border-[var(--border)] stack gap-3">
+          <div className="mt-4 pt-4 border-t border-[var(--line)] stack gap-3">
              {activeApps.map(app => (
                <div key={app.id} className="row justify-between text-sm">
                  <div>

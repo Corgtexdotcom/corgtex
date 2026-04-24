@@ -43,11 +43,17 @@ export const WORKSPACE_NAV_GROUPS: NavGroup[] = [
     ],
   },
   {
+    labelKey: "aiGovernance",
+    items: [
+      { href: "/agents", labelKey: "agentGovernance", icon: "⬡" },
+    ],
+  },
+  {
     labelKey: "system",
     items: [
       { href: "/governance", labelKey: "osMetrics", icon: "◒" },
       { href: "/audit", labelKey: "auditTrail", icon: "⚲" },
-      { href: "/settings", labelKey: "settingsAgents", icon: "⎈" },
+      { href: "/settings", labelKey: "settings", icon: "⎈" },
     ],
   },
 ];
