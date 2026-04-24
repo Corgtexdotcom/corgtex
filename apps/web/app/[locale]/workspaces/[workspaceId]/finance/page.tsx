@@ -12,9 +12,14 @@ import {
   addSpendCommentAction,
   resolveSpendObjectionAction,
   escalateSpendToProposalAction,
+  postSpendDeliberationAction,
+  resolveSpendDeliberationAction,
 } from "../actions";
 import Link from "next/link";
 import { prisma } from "@corgtex/shared";
+import { DeliberationThread } from "@/lib/components/DeliberationThread";
+import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
+import { listDeliberationEntries } from "@corgtex/domain";
 
 export const dynamic = "force-dynamic";
 
@@ -33,7 +38,7 @@ export default async function FinancePage({
   searchParams?: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const { workspaceId } = await params;
-  await requirePageActor();
+  const actor = await requirePageActor();
   const resolvedSearch = searchParams ? await searchParams : {};
   const activeTab = typeof resolvedSearch.tab === "string" ? resolvedSearch.tab : "spends";
   const statusFilter = typeof resolvedSearch.status === "string" ? resolvedSearch.status : "ALL";
@@ -46,6 +51,13 @@ export default async function FinancePage({
   const isDemo = currentWorkspace?.slug === "jnj-demo";
   const spends = spendsResult.items;
   const ledgerAccounts = ledgerAccountsResult.items;
+
+  const spendsToFetch = spends.filter(s => s.status === "SUBMITTED" || s.status === "OBJECTED");
+  const entriesPromises = spendsToFetch.map(async (s) => {
+    const entries = await listDeliberationEntries(actor, { workspaceId, parentType: "SPEND", parentId: s.id });
+    return [s.id, entries] as const;
+  });
+  const entriesMap = new Map(await Promise.all(entriesPromises));
 
   // Totals
   const totalSubmitted = spends.filter((s) => s.status === "SUBMITTED").reduce((a, s) => a + s.amountCents, 0);
@@ -237,43 +249,29 @@ export default async function FinancePage({
                           <details style={{ display: "inline-block" }}>
                             <summary className="fin-action-btn" style={{ cursor: "pointer" }}>⋯</summary>
                             <div className="fin-dropdown" style={{ width: 320, padding: "16px" }}>
-                              {spend.comments && spend.comments.length > 0 && (
-                                <div className="fin-thread">
-                                  {spend.comments.map((comment: any) => (
-                                    <div key={comment.id} className={`fin-comment ${comment.isObjection ? 'fin-comment-objection' : ''} ${comment.resolvedAt ? 'fin-comment-resolved' : ''}`}>
-                                      <div className="fin-comment-meta">
-                                        <span>{comment.author.displayName || comment.author.email}</span>
-                                        <span>{new Date(comment.createdAt).toLocaleDateString()}</span>
-                                      </div>
-                                      {comment.isObjection && !comment.resolvedAt && (
-                                        <div style={{ marginBottom: "8px" }}><span className="fin-objection-badge">OBJECTION</span></div>
-                                      )}
-                                      <div className="nr-markdown" style={{ fontSize: "0.85rem", margin: 0 }}>
-                                        {comment.bodyMd}
-                                      </div>
-                                      {comment.isObjection && !comment.resolvedAt && (
-                                        <form action={resolveSpendObjectionAction} style={{ marginTop: "8px" }}>
-                                          <input type="hidden" name="workspaceId" value={workspaceId} />
-                                          <input type="hidden" name="spendId" value={spend.id} />
-                                          <input type="hidden" name="commentId" value={comment.id} />
-                                          <button type="submit" className="button button-small" style={{ fontSize: "0.75rem", padding: "2px 8px" }}>Resolve</button>
-                                        </form>
-                                      )}
-                                    </div>
-                                  ))}
-                                </div>
-                              )}
+                              <DeliberationThread 
+                                entries={(entriesMap.get(spend.id) || []).map((e: any) => ({
+                                  ...e,
+                                  authorName: e.author?.displayName || e.author?.email || "Unknown",
+                                  authorInitials: (e.author?.displayName || e.author?.email || "?").substring(0, 2).toUpperCase()
+                                }))} 
+                                canResolve={true}
+                                resolveAction={resolveSpendDeliberationAction} 
+                                hiddenFields={{ workspaceId, parentId: spend.id }}
+                              />
 
                               {(spend.status === "SUBMITTED" || spend.status === "OBJECTED") && (
-                                <form action={addSpendCommentAction} className="stack nr-form-section" style={{ marginTop: 0, paddingBottom: 16, borderBottom: "1px solid var(--line)" }}>
-                                  <input type="hidden" name="workspaceId" value={workspaceId} />
-                                  <input type="hidden" name="spendId" value={spend.id} />
-                                  <textarea name="bodyMd" required placeholder="Add a comment or objection..." style={{ minHeight: "60px", fontSize: "0.85rem", padding: "8px", width: "100%", borderRadius: "4px", border: "1px solid var(--line)" }} />
-                                  <div style={{ display: "flex", gap: "8px" }}>
-                                    <button type="submit" className="button" style={{ flex: 1, padding: "4px 8px", fontSize: "0.8rem" }}>Comment</button>
-                                    <button type="submit" name="isObjection" value="true" className="button" style={{ flex: 1, padding: "4px 8px", fontSize: "0.8rem", color: "var(--danger)", borderColor: "var(--danger)" }}>Raise Objection</button>
-                                  </div>
-                                </form>
+                                <div style={{ marginTop: 16, paddingBottom: 16, borderBottom: "1px solid var(--line)" }}>
+                                  <DeliberationComposer
+                                    postAction={postSpendDeliberationAction}
+                                    hiddenFields={{ workspaceId, parentId: spend.id }}
+                                    entryTypes={[
+                                      { value: "REACTION", label: "Comment", variant: "secondary" }, 
+                                      { value: "CONCERN", label: "Concern", variant: "warning" }, 
+                                      { value: "OBJECTION", label: "Objection", variant: "danger" }
+                                    ]}
+                                  />
+                                </div>
                               )}
 
                               {spend.status === "OBJECTED" && (

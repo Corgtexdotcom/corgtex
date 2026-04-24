@@ -287,3 +287,18 @@ export async function publishTension(actor: AppActor, params: {
     return updated;
   });
 }
+
+export async function getTension(actor: AppActor, params: { workspaceId: string; tensionId: string }) {
+  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  const tension = await prisma.tension.findUnique({
+    where: { id: params.tensionId },
+    include: {
+      author: { select: { id: true, displayName: true, email: true } },
+      circle: { select: { id: true, name: true } },
+      proposal: { select: { id: true, title: true, status: true } },
+      upvotes: true,
+    },
+  });
+  invariant(tension && tension.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Tension not found.");
+  return tension;
+}

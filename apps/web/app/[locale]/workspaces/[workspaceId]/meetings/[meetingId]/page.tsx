@@ -2,6 +2,10 @@ import { getMeeting, getMeetingParticipants } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import Link from "next/link";
 import { renderMarkdown } from "@/lib/markdown";
+import { DeliberationThread } from "@/lib/components/DeliberationThread";
+import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
+import { listDeliberationEntries } from "@corgtex/domain";
+import { postMeetingDeliberationAction, resolveMeetingDeliberationAction } from "../actions";
 
 export const dynamic = "force-dynamic";
 
@@ -12,9 +16,15 @@ export default async function MeetingDetailPage({
   params: Promise<{ workspaceId: string; meetingId: string }>;
 }) {
   const { workspaceId, meetingId } = await params;
-  await requirePageActor();
+  const actor = await requirePageActor();
 
   const meeting = await getMeeting(workspaceId, meetingId);
+  const meetingEntries = await listDeliberationEntries(actor, { workspaceId, parentType: "MEETING", parentId: meetingId });
+  const mappedEntries = meetingEntries.map((e: any) => ({
+    ...e,
+    authorName: e.author?.displayName || e.author?.email || "Unknown",
+    authorInitials: (e.author?.displayName || e.author?.email || "?").substring(0, 2).toUpperCase()
+  }));
 
   if (!meeting) {
     return (
@@ -165,6 +175,22 @@ export default async function MeetingDetailPage({
           </details>
         </section>
       )}
+
+      <section className="ws-section" style={{ marginBottom: 48 }}>
+        <h2 className="nr-section-header">Discussion</h2>
+        <DeliberationThread entries={mappedEntries} canResolve={true} resolveAction={resolveMeetingDeliberationAction} hiddenFields={{ workspaceId, parentId: meetingId }} />
+        <div style={{ marginTop: 24 }}>
+          <DeliberationComposer 
+            postAction={postMeetingDeliberationAction} 
+            hiddenFields={{ workspaceId, parentId: meetingId }}
+            entryTypes={[
+              { value: "QUESTION", label: "Question", variant: "info" }, 
+              { value: "REACTION", label: "Comment", variant: "secondary" }, 
+              { value: "CONCERN", label: "Concern", variant: "warning" }
+            ]}
+          />
+        </div>
+      </section>
     </>
   );
 }
