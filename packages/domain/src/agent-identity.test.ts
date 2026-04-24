@@ -9,6 +9,7 @@ import {
   updateAgentBehavior,
   getWorkspaceAgentBehavior,
   updateWorkspaceAgentBehavior,
+  getOrCreateExternalAgentIdentity,
 } from "./agent-identity";
 import { prisma } from "@corgtex/shared";
 
@@ -184,5 +185,40 @@ describe("agent-identity", () => {
     });
 
     expect(result.behaviorMd).toBe("Global rules.");
+  });
+
+  describe("getOrCreateExternalAgentIdentity", () => {
+    it("returns existing identity if it exists", async () => {
+      const existing = { id: "ext-1", linkedCredentialId: "cred-1" };
+      vi.mocked(prisma.agentIdentity.findFirst).mockResolvedValue(existing as any);
+
+      const result = await getOrCreateExternalAgentIdentity("ws-1", "cred-1", "Label", null);
+
+      expect(prisma.agentIdentity.findFirst).toHaveBeenCalledWith({
+        where: { workspaceId: "ws-1", linkedCredentialId: "cred-1" },
+      });
+      expect(result).toEqual(existing);
+      expect(prisma.agentIdentity.create).not.toHaveBeenCalled();
+    });
+
+    it("creates new external identity if it does not exist", async () => {
+      vi.mocked(prisma.agentIdentity.findFirst).mockResolvedValue(null);
+      const created = { id: "ext-1", linkedCredentialId: "cred-123", agentKey: "ext_cred-123" };
+      vi.mocked(prisma.agentIdentity.create).mockResolvedValue(created as any);
+
+      const result = await getOrCreateExternalAgentIdentity("ws-1", "cred-12345678", "My Agent", "user-1");
+
+      expect(prisma.agentIdentity.create).toHaveBeenCalledWith({
+        data: {
+          workspaceId: "ws-1",
+          agentKey: "ext_cred-123",
+          memberType: "EXTERNAL",
+          displayName: "My Agent",
+          linkedCredentialId: "cred-12345678",
+          createdByUserId: "user-1",
+        },
+      });
+      expect(result).toEqual(created);
+    });
   });
 });

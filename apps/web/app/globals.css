@@ -25,6 +25,46 @@
   --radius-lg: 16px;
   --radius-full: 9999px;
   --transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* NEW semantic tokens */
+  --surface-sunken: #f1f5f9;
+  --line-subtle: #f1f5f9;
+  --text-strong: #0f172a;
+  --info: #0369a1;
+  --info-soft: #e0f2fe;
+  --danger: #991b1b;
+  --danger-soft: #fef2f2;
+  --danger-border: #fecaca;
+  --warning-bg: #fffbeb;
+}
+
+.dark {
+  color-scheme: dark;
+  --bg: #0f172a;
+  --bg-alt: #1e293b;
+  --surface: rgba(30, 41, 59, 0.85);
+  --surface-strong: #1e293b;
+  --surface-sunken: #0f172a;
+  --line: #334155;
+  --line-subtle: #1e293b;
+  --text: #f1f5f9;
+  --text-strong: #ffffff;
+  --muted: #94a3b8;
+  --accent: #f1f5f9;
+  --accent-soft: rgba(241, 245, 249, 0.08);
+  --warning: #fbbf24;
+  --warning-soft: rgba(251, 191, 36, 0.12);
+  --warning-bg: rgba(251, 191, 36, 0.08);
+  --success: #4ade80;
+  --success-soft: rgba(74, 222, 128, 0.12);
+  --info: #38bdf8;
+  --info-soft: rgba(56, 189, 248, 0.12);
+  --danger: #f87171;
+  --danger-soft: rgba(248, 113, 113, 0.12);
+  --danger-border: rgba(248, 113, 113, 0.25);
+  --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.4);
 }
 
 * {
@@ -156,7 +196,7 @@ select {
   padding: 10px 14px;
   font: inherit;
   color: var(--text);
-  background: #ffffff;
+  background: var(--surface-strong);
   transition: var(--transition);
   box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.02);
 }
@@ -239,8 +279,8 @@ button.warning {
 }
 
 .tag.info {
-  background: #e0f2fe;
-  color: #0369a1;
+  background: var(--info-soft);
+  color: var(--info);
 }
 
 .actions-inline {
@@ -339,6 +379,15 @@ button:disabled {
   color: var(--warning);
 }
 
+.nr-error-msg {
+  padding: 16px;
+  background: var(--danger-soft);
+  border: 1px solid var(--danger-border);
+  color: var(--danger);
+  border-radius: var(--radius-md);
+  margin-bottom: 24px;
+}
+
 .nested-item {
   background: var(--bg);
   border: 1px solid var(--line);
@@ -432,7 +481,7 @@ button:disabled {
 .ws-notif-badge {
   margin-left: auto;
   background: var(--accent);
-  color: white;
+  color: var(--surface);
   font-size: 0.7rem;
   font-weight: 700;
   padding: 2px 7px;
@@ -556,13 +605,13 @@ button:disabled {
   padding: 12px 18px;
   border-radius: 14px;
   font-size: 0.9rem;
-  color: white;
+  color: var(--surface);
   animation: toast-in 0.25s ease;
 }
 
 .toast-success { background: var(--accent); }
-.toast-error { background: #842029; }
-.toast-info { background: #0c5460; }
+.toast-error { background: var(--danger); }
+.toast-info { background: var(--info); }
 
 @keyframes toast-in {
   from { opacity: 0; transform: translateY(12px); }
@@ -610,7 +659,7 @@ button:disabled {
 }
 
 .md-editor-tab[data-active="true"] {
-  background: white;
+  background: var(--surface-strong);
 }
 
 .md-editor-preview {
@@ -618,7 +667,7 @@ button:disabled {
   border-radius: 0 0 14px 14px;
   padding: 12px;
   min-height: 92px;
-  background: white;
+  background: var(--surface-strong);
   line-height: 1.55;
 }
 
@@ -830,7 +879,7 @@ button:disabled {
 .chat-message.user {
   align-self: flex-end;
   background: var(--accent);
-  color: white;
+  color: var(--surface);
   padding: 12px 16px;
   border-bottom-right-radius: 2px;
 }
@@ -1196,13 +1245,13 @@ button:disabled {
 
 .fin-status-filter-active {
   background: var(--accent);
-  color: white;
+  color: var(--surface);
   border-color: var(--accent);
 }
 
 .fin-status-filter-active:hover {
   background: var(--accent);
-  color: white;
+  color: var(--surface);
 }
 
 .fin-table-wrap {
@@ -1232,7 +1281,7 @@ button:disabled {
 
 .fin-table td {
   padding: 8px 12px;
-  border-bottom: 1px solid #f1f5f9;
+  border-bottom: 1px solid var(--line-subtle);
   vertical-align: middle;
 }
 
@@ -1279,9 +1328,9 @@ button:disabled {
 
 .fin-status-draft { background: var(--accent-soft); color: var(--muted); }
 .fin-status-submitted { background: var(--warning-soft); color: var(--warning); }
-.fin-status-approved { background: #dbeafe; color: #1d4ed8; }
+.fin-status-approved { background: var(--info-soft); color: var(--info); }
 .fin-status-paid { background: var(--success-soft); color: var(--success); }
-.fin-status-rejected { background: #fee2e2; color: #b91c1c; }
+.fin-status-rejected { background: var(--danger-soft); color: var(--danger); }
 
 .fin-recon-badge {
   font-size: 0.75rem;
@@ -1294,7 +1343,7 @@ button:disabled {
 }
 
 .fin-recon-statement_attached {
-  color: #1d4ed8;
+  color: var(--info);
 }
 
 .fin-action-btn {
@@ -1446,7 +1495,7 @@ button:disabled {
 
 .wiki-list-item {
   padding: 10px 0;
-  border-bottom: 1px solid #f1f5f9;
+  border-bottom: 1px solid var(--line-subtle);
   display: block;
   text-decoration: none;
   color: var(--text);
@@ -1480,7 +1529,7 @@ a.wiki-list-item:hover {
 
 .wiki-list-item .wiki-item-excerpt {
   font-size: 0.85rem;
-  color: #475569;
+  color: var(--muted);
   margin-top: 4px;
   line-height: 1.45;
   display: -webkit-box;
@@ -1513,7 +1562,7 @@ a.wiki-list-item:hover {
   display: flex;
   gap: 10px;
   padding: 7px 0;
-  border-bottom: 1px solid #f1f5f9;
+  border-bottom: 1px solid var(--line-subtle);
   align-items: flex-start;
   font-size: 0.85rem;
 }
@@ -1554,7 +1603,7 @@ a.wiki-list-item:hover {
   border: 1.5px solid var(--warning-soft);
   border-left: 3px solid var(--warning);
   border-radius: 6px;
-  background: #fffbeb;
+  background: var(--warning-bg);
   margin-bottom: 24px;
 }
 
@@ -1610,7 +1659,7 @@ a.wiki-list-item:hover {
 .cmd-dialog {
   width: 100%;
   max-width: 600px;
-  background: rgba(255, 255, 255, 0.85);
+  background: var(--surface);
   backdrop-filter: blur(24px);
   -webkit-backdrop-filter: blur(24px);
   border: 1px solid rgba(255, 255, 255, 0.5);
@@ -1632,7 +1681,7 @@ a.wiki-list-item:hover {
 }
 
 .cmd-input::placeholder {
-  color: #94a3b8;
+  color: var(--muted);
 }
 
 .cmd-list {
@@ -1842,7 +1891,7 @@ a.wiki-list-item:hover {
   .nr-tab { @apply py-3 font-semibold text-[0.95rem] no-underline text-muted border-b-2 border-transparent -mb-[1px] hover:text-text; }
   .nr-tab-active { @apply text-text border-text; }
   
-  .nr-table-wrap { @apply border border-line rounded bg-white; }
+  .nr-table-wrap { @apply border border-line rounded bg-surface-strong; }
   .nr-table { @apply w-full border-collapse text-[0.85rem]; }
   .nr-table th, .nr-table td { @apply text-left px-4 py-3 border-b border-line; }
   .nr-table th { @apply font-playfair italic text-base bg-bg-alt text-muted; }
