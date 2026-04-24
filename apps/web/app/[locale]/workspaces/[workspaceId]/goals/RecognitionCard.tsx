@@ -18,7 +18,7 @@ export function RecognitionCard({ recognition }: { recognition: any }) {
  {recognition.valueTags && recognition.valueTags.length > 0 && (
  <div className="flex flex-wrap gap-2 mt-4 pt-4 border-t border-line-subtle">
  {recognition.valueTags.map((tag: string, idx: number) => (
- <span key={idx} className="px-2 py-1 bg-blue-50 text-blue-700 text-xs rounded-full inline-block">
+ <span key={idx} className="px-2 py-1 bg-info-soft text-info text-xs rounded-full inline-block">
  {tag}
  </span>
 ))}
