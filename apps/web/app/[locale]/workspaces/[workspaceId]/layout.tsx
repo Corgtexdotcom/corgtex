@@ -44,6 +44,7 @@ export default async function WorkspaceLayout({
   const current = workspaces.find((w: Workspace) => w.id === workspaceId);
   const conversations = conversationsResult.items;
   const tNav = await getTranslations("nav");
+  const tCommon = await getTranslations("common");
 
   return (
     <div className="ws-layout">
@@ -83,11 +84,11 @@ export default async function WorkspaceLayout({
           {current?.slug === "corgtex" && actor.kind === "user" && actor.user.email === "janbrezina@icloud.com" && (
             <div style={{ marginBottom: "16px" }}>
               <div className="muted" style={{ fontSize: "0.75rem", textTransform: "uppercase", letterSpacing: "0.05em", padding: "0 12px", marginBottom: "4px", fontWeight: 600 }}>
-                Global Admin
+                {tNav("globalAdmin")}
               </div>
               <a href={`/workspaces/${workspaceId}/admin`} className="ws-nav-link">
                 <span className="ws-nav-icon">✧</span>
-                Platform Admin
+                {tNav("platformAdmin")}
               </a>
             </div>
           )}
@@ -99,7 +100,7 @@ export default async function WorkspaceLayout({
           <ThemeToggle />
           
           <form action={logoutAction} style={{ marginTop: "4px" }}>
-            <button type="submit" className="ws-nav-link ws-logout-btn">Logout</button>
+            <button type="submit" className="ws-nav-link ws-logout-btn">{tCommon("logout")}</button>
           </form>
         </div>
       </aside>
