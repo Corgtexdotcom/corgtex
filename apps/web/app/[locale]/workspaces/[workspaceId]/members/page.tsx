@@ -56,7 +56,7 @@ export default async function MembersPage({
                     fontWeight: 600,
                     fontSize: "1.1rem"
                   }}>
-                    {isAgent ? "🤖" : initials}
+                    {isAgent ? "⬡" : initials}
                   </div>
                   <div>
                     <h3 style={{ margin: "0 0 4px", fontSize: "1rem" }}>{displayName}</h3>
@@ -99,7 +99,7 @@ export default async function MembersPage({
                       fontWeight: 600,
                       fontSize: "1.1rem"
                     }}>
-                      🤖
+                      ⬡
                     </div>
                     <div>
                       <h3 style={{ margin: "0 0 4px", fontSize: "1rem" }}>{agent.displayName}</h3>
