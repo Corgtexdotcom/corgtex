@@ -39,6 +39,7 @@ Add missing theme tokens (e.g. `--accent-fg`) and migrate hardcoded color usages
 - `docs/plans/feat-theme-contrast-fixes.md`
 - `docs/assets/feat-theme-contrast-fixes.png`
 - `scripts/contrast-audit.mjs`
+- `package.json`
 
 ## Acceptance criteria
 
