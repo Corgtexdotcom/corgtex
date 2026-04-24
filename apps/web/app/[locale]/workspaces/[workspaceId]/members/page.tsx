@@ -1,6 +1,7 @@
 import { listMembersEnriched, listAgentIdentities } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import Link from "next/link";
+import { getTranslations } from "next-intl/server";
 
 export const dynamic = "force-dynamic";
 
@@ -11,6 +12,7 @@ export default async function MembersPage({
 }) {
   const { workspaceId } = await params;
   const actor = await requirePageActor();
+  const t = await getTranslations("members");
 
   const members = await listMembersEnriched(workspaceId, { includeInactive: false });
   const agents = await listAgentIdentities(actor, workspaceId);
@@ -18,9 +20,9 @@ export default async function MembersPage({
   return (
     <>
       <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 32 }}>
-        <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2.5rem" }}>Members</h1>
+        <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2.5rem" }}>{t("title")}</h1>
         <div className="nr-masthead-meta">
-          <span>Everyone in your workspace.</span>
+          <span>{t("description")}</span>
         </div>
       </header>
 
@@ -74,7 +76,7 @@ export default async function MembersPage({
         {agents.length > 0 && (
           <>
             <div className="nr-section-header" style={{ marginTop: 48, marginBottom: 24, padding: "8px 0" }}>
-              <h2 style={{ fontSize: "1.5rem", margin: 0, borderTop: "2px solid var(--text)", paddingTop: 16 }}>Agent Members</h2>
+              <h2 style={{ fontSize: "1.5rem", margin: 0, borderTop: "2px solid var(--text)", paddingTop: 16 }}>{t("agentMembers")}</h2>
             </div>
             <div style={{ display: "grid", gap: "16px", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))" }}>
               {agents.map((agent: any) => (
@@ -105,16 +107,16 @@ export default async function MembersPage({
                         Key: {agent.agentKey}
                       </div>
                       <div style={{ fontSize: "0.75rem", background: agent.memberType === "INTERNAL" ? "#fef3c7" : "#f3e8ff", color: agent.memberType === "INTERNAL" ? "#92400e" : "#6b21a8", display: "inline-block", padding: "2px 8px", borderRadius: "12px", border: `1px solid ${agent.memberType === "INTERNAL" ? "#fde68a" : "#e9d5ff"}`, marginRight: 4 }}>
-                        {agent.memberType === "INTERNAL" ? "Built-in" : "Personal Agent"}
+                        {agent.memberType === "INTERNAL" ? t("builtIn") : t("personalAgent")}
                       </div>
                       {!agent.isActive && (
                         <div style={{ fontSize: "0.75rem", background: "var(--bg-alt)", color: "var(--text-muted)", display: "inline-block", padding: "2px 8px", borderRadius: "12px", border: "1px solid var(--line)" }}>
-                          Inactive
+                          {t("inactive")}
                         </div>
                       )}
                       {agent.circleAssignments && agent.circleAssignments.length > 0 && (
                         <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", marginTop: 4 }}>
-                          In {agent.circleAssignments.length} circle{agent.circleAssignments.length > 1 ? "s" : ""}
+                          {t("inCircles", { count: agent.circleAssignments.length })}
                         </div>
                       )}
                     </div>
