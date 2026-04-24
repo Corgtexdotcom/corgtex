@@ -23,9 +23,9 @@ export function ThemeToggle() {
   };
 
   const getIcon = () => {
-    if (theme === "system") return "💻";
-    if (theme === "light") return "☀️";
-    return "🌙";
+    if (theme === "system") return "◐";
+    if (theme === "light") return "○";
+    return "☽";
   };
 
   return (
