@@ -3,9 +3,11 @@
 import { useTransition } from "react";
 import { updateAgentModelAction } from "./actions";
 import type { AgentConfigSummary } from "@corgtex/domain";
+import { useTranslations } from "next-intl";
 
 export function AgentModelOverride({ workspaceId, agent }: { workspaceId: string, agent: AgentConfigSummary }) {
   const [isPending, startTransition] = useTransition();
+  const t = useTranslations("agents");
 
   const handleModelChange = (modelOverride: string) => {
     startTransition(() => {
@@ -21,10 +23,10 @@ export function AgentModelOverride({ workspaceId, agent }: { workspaceId: string
       className="nr-input"
       style={{ minWidth: 200, padding: "8px 12px" }}
     >
-      <option value="default">Default ({agent.defaultModelTier})</option>
-      <option value="google/gemma-4-12b-it">Fast (Gemma 12B)</option>
-      <option value="google/gemma-4-31b-it">Standard (Gemma 31B)</option>
-      <option value="google/gemini-2.5-flash">Quality (Gemini 2.5 Flash)</option>
+      <option value="default">{t("modelDefault", { tier: agent.defaultModelTier })}</option>
+      <option value="google/gemma-4-12b-it">{t("modelFast")}</option>
+      <option value="google/gemma-4-31b-it">{t("modelStandard")}</option>
+      <option value="google/gemini-2.5-flash">{t("modelQuality")}</option>
     </select>
   );
 }

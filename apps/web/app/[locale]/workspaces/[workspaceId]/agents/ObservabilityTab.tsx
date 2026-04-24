@@ -1,19 +1,6 @@
 import { listAgentRuns, getAgentRunTrace } from "@corgtex/domain";
 import type { AppActor } from "@corgtex/shared";
-
-function formatDateTime(value: Date | string | null | undefined) {
-  if (!value) return "N/A";
-  return new Date(value).toLocaleString("en-US", {
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  });
-}
-
-function formatUsd(value: number) {
-  return `$${value.toFixed(value >= 0.01 ? 4 : 6)}`;
-}
+import { getTranslations, getFormatter } from "next-intl/server";
 
 function statusColor(status: string): string {
   if (status === "COMPLETED" || status === "DELIVERED") return "var(--accent)";
@@ -38,10 +25,13 @@ export async function ObservabilityTab({
     ? await getAgentRunTrace(actor, workspaceId, searchParams.agentRunId)
     : null;
 
+  const t = await getTranslations("agents");
+  const format = await getFormatter();
+
   return (
     <div style={{ display: "flex", gap: "40px", flexWrap: "wrap" }}>
       <section style={{ flex: "1 1 300px" }}>
-        <h2 className="nr-section-header">Recent Agent Runs</h2>
+        <h2 className="nr-section-header">{t("observabilityTitle")}</h2>
         <div>
           {agentRuns.map((run) => (
             <a
@@ -68,19 +58,24 @@ export async function ObservabilityTab({
                 {run.goal.slice(0, 80)}{run.goal.length > 80 ? "..." : ""}
               </div>
               <div className="nr-item-meta" style={{ fontSize: "0.78rem", marginTop: 4 }}>
-                {formatDateTime(run.startedAt ?? run.createdAt)}
+                {run.startedAt || run.createdAt ? format.dateTime(new Date(run.startedAt ?? run.createdAt), {
+                  month: "short",
+                  day: "numeric",
+                  hour: "numeric",
+                  minute: "2-digit"
+                }) : "N/A"}
               </div>
             </a>
           ))}
-          {agentRuns.length === 0 && <p className="nr-item-meta">No agent runs found.</p>}
+          {agentRuns.length === 0 && <p className="nr-item-meta">{t("noRuns")}</p>}
         </div>
       </section>
 
       <section style={{ flex: "2 1 400px" }}>
         <h2 className="nr-section-header">
           {selectedRunTrace
-            ? `Trace: ${selectedRunTrace.agentKey}`
-            : "Select an agent run for trace details"}
+            ? t("traceTitleSelected", { agentKey: selectedRunTrace.agentKey })
+            : t("traceTitleUnselected")}
         </h2>
         {selectedRunTrace ? (
           <div className="stack" style={{ gap: 24 }}>
@@ -93,25 +88,25 @@ export async function ObservabilityTab({
               fontSize: "0.85rem",
             }}>
               <div className="row" style={{ marginBottom: 8 }}>
-                <strong>Goal:</strong>
+                <strong>{t("traceGoal")}</strong>
                 <span>{selectedRunTrace.goal}</span>
               </div>
               <div className="row" style={{ marginBottom: 8 }}>
-                <span className="nr-item-meta">Status</span>
+                <span className="nr-item-meta">{t("traceStatus")}</span>
                 <span style={{ color: statusColor(selectedRunTrace.status), fontWeight: 600 }}>
                   {selectedRunTrace.status}
                 </span>
               </div>
               <div className="row" style={{ marginBottom: 8 }}>
-                <span className="nr-item-meta">Trigger</span>
+                <span className="nr-item-meta">{t("traceTrigger")}</span>
                 <span>{selectedRunTrace.triggerType} {selectedRunTrace.triggerRef ?? ""}</span>
               </div>
               <div className="row">
-                <span className="nr-item-meta">Duration</span>
+                <span className="nr-item-meta">{t("traceDuration")}</span>
                 <span>
                   {selectedRunTrace.startedAt && selectedRunTrace.completedAt
                     ? `${Math.round((new Date(selectedRunTrace.completedAt).getTime() - new Date(selectedRunTrace.startedAt).getTime()) / 1000)}s`
-                    : "In progress"}
+                    : t("traceInProgress")}
                 </span>
               </div>
             </div>
@@ -119,7 +114,7 @@ export async function ObservabilityTab({
             {/* Steps timeline */}
             {selectedRunTrace.steps.length > 0 && (
               <div>
-                <h3 className="nr-section-header" style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Steps</h3>
+                <h3 className="nr-section-header" style={{ fontSize: "0.9rem", color: "var(--muted)" }}>{t("traceSteps")}</h3>
                 <div>
                   {selectedRunTrace.steps.map((step, idx) => (
                     <div key={step.id} className="nr-item" style={{ padding: "12px 0", position: "relative", borderBottom: idx === selectedRunTrace.steps.length - 1 ? "none" : "1px dashed var(--line)" }}>
@@ -146,7 +141,7 @@ export async function ObservabilityTab({
                       {step.outputJson && (
                         <details style={{ marginTop: 6, marginLeft: 22 }}>
                           <summary className="nr-meta" style={{ cursor: "pointer", fontSize: "0.75rem" }}>
-                            Output
+                            {t("traceOutput")}
                           </summary>
                           <pre style={{
                             fontSize: "0.72rem",
@@ -171,7 +166,7 @@ export async function ObservabilityTab({
             {/* Tool calls */}
             {selectedRunTrace.toolCalls.length > 0 && (
               <div>
-                <h3 className="nr-section-header" style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Tool Calls</h3>
+                <h3 className="nr-section-header" style={{ fontSize: "0.9rem", color: "var(--muted)" }}>{t("traceToolCalls")}</h3>
                 <div>
                   {selectedRunTrace.toolCalls.map((tc, idx) => (
                     <div key={tc.id} className="nr-item" style={{ padding: "12px 0", borderBottom: idx === selectedRunTrace.toolCalls.length - 1 ? "none" : "1px dashed var(--line)" }}>
@@ -190,7 +185,7 @@ export async function ObservabilityTab({
                         {tc.inputJson && (
                           <details>
                             <summary className="nr-meta" style={{ cursor: "pointer", fontSize: "0.75rem" }}>
-                              Input
+                              {t("traceInput")}
                             </summary>
                             <pre style={{
                               fontSize: "0.72rem",
@@ -209,7 +204,7 @@ export async function ObservabilityTab({
                         {tc.outputJson && (
                           <details>
                             <summary className="nr-meta" style={{ cursor: "pointer", fontSize: "0.75rem" }}>
-                              Output
+                              {t("traceOutput")}
                             </summary>
                             <pre style={{
                               fontSize: "0.72rem",
@@ -235,7 +230,7 @@ export async function ObservabilityTab({
             {/* Model usage */}
             {selectedRunTrace.modelUsage.length > 0 && (
               <div>
-                <h3 className="nr-section-header" style={{ fontSize: "0.9rem", color: "var(--muted)" }}>Model Usage</h3>
+                <h3 className="nr-section-header" style={{ fontSize: "0.9rem", color: "var(--muted)" }}>{t("traceModelUsage")}</h3>
                 <div>
                   {selectedRunTrace.modelUsage.map((mu, idx) => (
                     <div key={mu.id} className="nr-item" style={{ padding: "8px 0", borderBottom: idx === selectedRunTrace.modelUsage.length - 1 ? "none" : "1px dashed var(--line)" }}>
@@ -245,7 +240,7 @@ export async function ObservabilityTab({
                       </div>
                       <div className="nr-item-meta" style={{ fontSize: "0.78rem", marginTop: 4 }}>
                         {mu.inputTokens} in &middot; {mu.outputTokens} out &middot; {mu.latencyMs}ms
-                        {mu.estimatedCostUsd && ` · ${formatUsd(Number(mu.estimatedCostUsd))}`}
+                        {mu.estimatedCostUsd && t("traceCost", { cost: `$${Number(mu.estimatedCostUsd).toFixed(Number(mu.estimatedCostUsd) >= 0.01 ? 4 : 6)}` })}
                       </div>
                     </div>
                   ))}
@@ -257,7 +252,7 @@ export async function ObservabilityTab({
             {selectedRunTrace.resultJson && (
               <details style={{ borderTop: "1px dashed var(--line)", paddingTop: 16 }}>
                 <summary className="nr-meta" style={{ cursor: "pointer", fontSize: "0.85rem" }}>
-                  Full result JSON
+                  {t("traceFullResult")}
                 </summary>
                 <pre style={{
                   fontSize: "0.75rem",
@@ -275,7 +270,7 @@ export async function ObservabilityTab({
             )}
           </div>
         ) : (
-          <p className="nr-item-meta">Click an agent run on the left to view its full execution trace.</p>
+          <p className="nr-item-meta">{t("traceClickLeft")}</p>
         )}
       </section>
     </div>

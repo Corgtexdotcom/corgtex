@@ -2,6 +2,7 @@ import { getModelUsageSummary, listAgentIdentities, listAgentConfigs } from "@co
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { AgentRegistryToggle } from "./AgentRegistryToggle";
+import { getTranslations } from "next-intl/server";
 
 export async function AgentRegistryTab({
   workspaceId,
@@ -25,13 +26,14 @@ export async function AgentRegistryTab({
   const lastRunMap = new Map(lastRuns.map((r) => [r.agentKey, r.createdAt]));
   const usageMap = new Map(usageSummary.byAgent.map((u) => [u.agentKey, u]));
   const configMap = new Map(configs.map((c) => [c.agentKey, c]));
+  const t = await getTranslations("agents");
 
   return (
     <section className="stack" style={{ gap: 24 }}>
       <div>
-        <h2 className="nr-section-header">Agent Registry</h2>
+        <h2 className="nr-section-header">{t("registryTitle")}</h2>
         <p className="nr-item-meta" style={{ fontSize: "0.85rem", marginBottom: 16 }}>
-          Manage all enabled agents in this workspace. View their recent activity, cost tier, and status.
+          {t("registryDesc")}
         </p>
       </div>
 
@@ -62,22 +64,22 @@ export async function AgentRegistryTab({
                   )}
                   {configInfo && identity.isActive && (
                     <span className="nr-tag" style={{ borderColor: costBadgeColor, color: costBadgeColor }}>
-                      {costTier} cost
+                      {t("costBadge", { tier: costTier })}
                     </span>
                   )}
                   {!identity.isActive && (
                     <span className="nr-tag" style={{ borderColor: "var(--red-600)", color: "var(--red-600)" }}>
-                      Disabled
+                      {t("disabled")}
                     </span>
                   )}
                 </div>
                 
                 <div className="nr-item-meta" style={{ display: "flex", gap: 24, fontSize: "0.85rem" }}>
-                  <span><strong style={{ color: "var(--fg)" }}>Agent Key:</strong> {identity.agentKey}</span>
-                  <span><strong style={{ color: "var(--fg)" }}>30d Runs:</strong> {usage?.callCount || 0}</span>
-                  <span><strong style={{ color: "var(--fg)" }}>30d Cost:</strong> ${usage?.totalCostUsd.toFixed(4) || "0.0000"}</span>
+                  <span><strong style={{ color: "var(--fg)" }}>{t("agentKey")}</strong> {identity.agentKey}</span>
+                  <span><strong style={{ color: "var(--fg)" }}>{t("runs30d")}</strong> {usage?.callCount || 0}</span>
+                  <span><strong style={{ color: "var(--fg)" }}>{t("cost30d")}</strong> ${usage?.totalCostUsd.toFixed(4) || "0.0000"}</span>
                   {lastRun && (
-                    <span><strong style={{ color: "var(--fg)" }}>Last Run:</strong> {lastRun.toLocaleDateString()} {lastRun.toLocaleTimeString()}</span>
+                    <span><strong style={{ color: "var(--fg)" }}>{t("lastRun")}</strong> {lastRun.toLocaleDateString()} {lastRun.toLocaleTimeString()}</span>
                   )}
                 </div>
               </div>
@@ -94,7 +96,7 @@ export async function AgentRegistryTab({
         })}
         {identities.length === 0 && (
           <div className="nr-item-meta" style={{ padding: "40px 0", textAlign: "center" }}>
-            No agents registered in this workspace yet.
+            {t("noAgents")}
           </div>
         )}
       </div>
