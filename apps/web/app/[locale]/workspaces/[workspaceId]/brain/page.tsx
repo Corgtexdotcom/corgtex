@@ -105,7 +105,7 @@ export default async function BrainPage({
               rows={3} 
               style={{ width: "100%", padding: "12px", fontSize: "1rem", border: "1px solid var(--line)", borderRadius: "4px", marginBottom: "8px" }}
             />
-            <button type="submit" style={{ padding: "8px 16px", background: "var(--accent)", color: "white", border: "none", borderRadius: "4px", cursor: "pointer" }}>{t("synthesizeAnswer")}</button>
+            <button type="submit" style={{ padding: "8px 16px", background: "var(--accent)", color: "var(--accent-fg)", border: "none", borderRadius: "4px", cursor: "pointer" }}>{t("synthesizeAnswer")}</button>
           </form>
 
           {answer && (
@@ -142,10 +142,10 @@ export default async function BrainPage({
                   {typeArticles.map((a) => (
                     <li key={a.id} style={{ marginBottom: "12px" }}>
                       <a href={`/workspaces/${workspaceId}/brain/${a.slug}`} style={{ fontSize: "0.95rem", fontWeight: 500 }}>
-                        {a.isPrivate && <span title={t("privateDraft")} style={{ marginRight: 6 }}>🔒</span>}
+                        {a.isPrivate && <span title={t("privateDraft")} style={{ marginRight: 6 }}>◆</span>}
                         {a.title}
                       </a>
-                      {a.authority === "AUTHORITATIVE" && <span style={{ fontSize: "0.6rem", padding: "1px 4px", background: "var(--accent)", color: "white", borderRadius: "2px", marginLeft: "6px", verticalAlign: "middle" }}>{t("core")}</span>}
+                      {a.authority === "AUTHORITATIVE" && <span style={{ fontSize: "0.6rem", padding: "1px 4px", background: "var(--accent)", color: "var(--accent-fg)", borderRadius: "2px", marginLeft: "6px", verticalAlign: "middle" }}>{t("core")}</span>}
                       {a.authority === "DRAFT" && <span style={{ fontSize: "0.6rem", padding: "1px 4px", background: "var(--warning-soft)", color: "var(--warning)", borderRadius: "2px", marginLeft: "6px", verticalAlign: "middle" }}>{t("draft")}</span>}
                       <div style={{ fontSize: "0.8rem", color: "var(--muted)", marginTop: "2px" }}>{a.bodyMd.replace(/[#*]/g, '').slice(0, 80)}...</div>
                     </li>
@@ -219,7 +219,7 @@ export default async function BrainPage({
                 <input type="checkbox" name="isPrivate" defaultChecked />
                 <span>{t("privateDraftOnlyMe")}</span>
               </label>
-              <button type="submit" style={{ padding: "8px", background: "var(--text)", color: "white", border: "none", borderRadius: "4px", cursor: "pointer", fontWeight: 600 }}>{t("create")}</button>
+              <button type="submit" style={{ padding: "8px", background: "var(--text-strong)", color: "var(--bg)", border: "none", borderRadius: "4px", cursor: "pointer", fontWeight: 600 }}>{t("create")}</button>
             </form>
           </div>
 

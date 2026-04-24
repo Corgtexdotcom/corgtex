@@ -286,7 +286,7 @@ export default async function WorkspaceDashboard({
              <div key={meeting.id} className="nr-item">
                <div className="nr-item-title">{meeting.title || `${meeting.source} ${t("meeting")}`}</div>
                <div className="nr-item-meta" suppressHydrationWarning>{format.dateTime(new Date(meeting.recordedAt), { month: "short", day: "numeric", year: "numeric" })}</div>
-               {meeting.summaryMd && <div style={{ fontSize: "0.85rem", marginTop: "6px", lineHeight: 1.4, color: "#475569" }}>{meeting.summaryMd.slice(0, 100)}...</div>}
+               {meeting.summaryMd && <div style={{ fontSize: "0.85rem", marginTop: "6px", lineHeight: 1.4, color: "var(--text-muted)" }}>{meeting.summaryMd.slice(0, 100)}...</div>}
              </div>
            ))}
            <div style={{ marginTop: "16px" }}>
