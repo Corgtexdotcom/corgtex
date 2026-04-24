@@ -1,7 +1,7 @@
 "use client";
 
 import { usePathname, useRouter } from "@/i18n/routing";
-import { useLocale } from "next-intl";
+import { useLocale, useTranslations } from "next-intl";
 
 export function LanguageSwitcher() {
   const locale = useLocale();
@@ -13,10 +13,12 @@ export function LanguageSwitcher() {
     router.replace(pathname, { locale: newLocale });
   };
 
+  const t = useTranslations("common");
+
   return (
-    <div style={{ marginBottom: 16, padding: "0 12px" }}>
-      <label className="muted" style={{ fontSize: "0.75rem", display: "block", marginBottom: 4 }}>
-        Language
+    <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "8px 16px", borderTop: "1px solid var(--line)" }}>
+      <label htmlFor="language-switcher" className="muted" style={{ fontSize: "0.85rem", margin: 0 }}>
+        {t("language")}
       </label>
       <select 
         value={locale} 

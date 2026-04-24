@@ -6,6 +6,7 @@ import Link from "next/link";
 import { renderMarkdown } from "@/lib/markdown";
 import { revalidatePath } from "next/cache";
 import { prisma } from "@corgtex/shared";
+import { getTranslations } from "next-intl/server";
 
 export const dynamic = "force-dynamic";
 
@@ -17,6 +18,7 @@ export default async function BrainArticlePage({
 }) {
   const { workspaceId, slug } = await params;
   const actor = await requirePageActor();
+  const t = await getTranslations("brain");
 
   const article = await getArticle(actor, { workspaceId, slug });
   if (!article) notFound();
@@ -61,7 +63,7 @@ export default async function BrainArticlePage({
     <>
       <div className="nr-masthead" style={{ textAlign: "left", marginBottom: 32 }}>
         <p className="nr-meta" style={{ marginBottom: "12px", display: "flex", gap: "12px" }}>
-          <span><Link href={`/workspaces/${workspaceId}/brain`} style={{ color: "inherit", textDecoration: "none" }}>← Back to Index</Link></span>
+          <span><Link href={`/workspaces/${workspaceId}/brain`} style={{ color: "inherit", textDecoration: "none" }}>{t("backToIndex")}</Link></span>
           <span>·</span>
           <span>{article.type}</span>
           <span>·</span>
@@ -70,7 +72,7 @@ export default async function BrainArticlePage({
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", borderBottom: "1px solid var(--line)", paddingBottom: 16 }}>
           <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2.5rem", maxWidth: "800px" }}>{article.title}</h1>
           <span style={{ fontSize: "0.85rem", color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.05em" }}>
-            Updated {ageText(article.updatedAt)}
+            {t("updated", { time: ageText(article.updatedAt) })}
           </span>
         </div>
       </div>
@@ -86,7 +88,7 @@ export default async function BrainArticlePage({
 
           <hr className="nr-divider" style={{ margin: "48px 0" }} />
           
-          <h3 style={{ fontSize: "1rem", color: "var(--muted)", marginBottom: "16px" }}>Editor</h3>
+          <h3 style={{ fontSize: "1rem", color: "var(--muted)", marginBottom: "16px" }}>{t("editor")}</h3>
           <form action={updateArticleAction} style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
             <div style={{ display: "flex", gap: "8px" }}>
               <select name="type" defaultValue={article.type} style={{ flex: 1, padding: "8px", fontSize: "0.85rem", border: "1px solid var(--line)" }}>
@@ -101,13 +103,13 @@ export default async function BrainArticlePage({
               </select>
             </div>
             <textarea name="bodyMd" defaultValue={article.bodyMd} rows={10} style={{ width: "100%", padding: "12px", fontSize: "0.9rem", border: "1px solid var(--line)", borderRadius: "4px", fontFamily: "monospace", lineHeight: 1.4 }} />
-            <button type="submit" style={{ padding: "8px 16px", background: "var(--text)", color: "white", border: "none", borderRadius: "4px", cursor: "pointer", fontWeight: 600, alignSelf: "flex-start" }}>Update Article</button>
+            <button type="submit" style={{ padding: "8px 16px", background: "var(--text)", color: "white", border: "none", borderRadius: "4px", cursor: "pointer", fontWeight: 600, alignSelf: "flex-start" }}>{t("updateArticle")}</button>
           </form>
         </article>
 
         {/* Sidebar */}
         <aside style={{ borderLeft: "1px solid var(--line)", paddingLeft: "32px", paddingRight: "16px" }}>
-          <h3 style={{ fontSize: "0.85rem", textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--text)", marginBottom: "16px" }}>Related in Wiki</h3>
+          <h3 style={{ fontSize: "0.85rem", textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--text)", marginBottom: "16px" }}>{t("relatedInWiki")}</h3>
           <ul style={{ display: "flex", flexDirection: "column", gap: "12px", padding: 0, margin: 0, listStyle: "none" }}>
             {otherArticles.map((a) => (
               <li key={a.id}>
@@ -121,7 +123,7 @@ export default async function BrainArticlePage({
 
           {sources.length > 0 && (
             <>
-              <h3 style={{ fontSize: "0.85rem", textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--text)", marginTop: "32px", marginBottom: "16px" }}>Knowledge Sources</h3>
+              <h3 style={{ fontSize: "0.85rem", textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--text)", marginTop: "32px", marginBottom: "16px" }}>{t("knowledgeSources")}</h3>
               <ul style={{ display: "flex", flexDirection: "column", gap: "12px", padding: 0, margin: 0, listStyle: "none" }}>
                 {sources.map((s) => (
                   <li key={s.id} style={{ fontSize: "0.85rem", paddingBottom: "8px", borderBottom: "1px dashed var(--line)" }}>
@@ -130,7 +132,7 @@ export default async function BrainArticlePage({
                       <span>{s.sourceType}</span>
                       {s.fileStorageKey && (
                         <a href={`/api/workspaces/${workspaceId}/brain/sources/${s.id}/file`} target="_blank" rel="noreferrer" style={{ textDecoration: "underline", color: "inherit" }}>
-                          View Source
+                          {t("viewSource")}
                         </a>
                       )}
                     </div>
