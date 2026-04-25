@@ -7,6 +7,7 @@ import {
   deleteTensionAction,
   publishTensionAction,
 } from "../actions";
+import { getTranslations } from "next-intl/server";
 
 export const dynamic = "force-dynamic";
 
@@ -19,6 +20,7 @@ export default async function TensionsPage({
 }) {
   const { workspaceId } = await params;
   const actor = await requirePageActor();
+  const t = await getTranslations("tensions");
   const [{ items: tensions }, { items: proposals }] = await Promise.all([
     listTensions(actor, workspaceId, { take: 50 }),
     listProposals(actor, workspaceId, { take: 50 }),
@@ -49,9 +51,9 @@ export default async function TensionsPage({
   return (
     <>
       <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 32 }}>
-        <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2.5rem" }}>Tensions</h1>
+        <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2.5rem" }}>{t("pageTitle")}</h1>
         <div className="nr-masthead-meta">
-          <span>Issues, gaps, and opportunities sensed across the workspace.</span>
+          <span>{t("pageDescription")}</span>
         </div>
       </header>
 
@@ -71,7 +73,7 @@ export default async function TensionsPage({
         <div>
           {(!displayTensions || displayTensions.length === 0) && (
             <div className="nr-item" style={{ textAlign: "center", padding: "48px 24px" }}>
-              <h3 style={{ margin: "0 0 8px" }}>What is a Tension?</h3>
+              <h3 style={{ margin: "0 0 8px" }}>{t("whatIsTensionTitle")}</h3>
               <p className="muted" style={{ margin: 0, maxWidth: 500, marginInline: "auto" }}>
                 A tension is any gap between what is and what could be. It&apos;s the most important signal in a self-managed organization. File a tension whenever you sense an opportunity for improvement.
               </p>
@@ -81,7 +83,7 @@ export default async function TensionsPage({
             <div className="nr-item" key={tension.id}>
               <div className="row" style={{ alignItems: "center" }}>
                 <strong className="nr-item-title">
-                  {tension.isPrivate && <span title="Private inbox item" style={{ marginRight: 6 }}>◆</span>}
+                  {tension.isPrivate && <span title={t("privateInboxTooltip")} style={{ marginRight: 6 }}>◆</span>}
                   <a href={`/workspaces/${workspaceId}/tensions/${tension.id}`} style={{ color: "inherit" }}>
                     {tension.title}
                   </a>
@@ -92,7 +94,7 @@ export default async function TensionsPage({
               
               <div className="nr-item-meta" style={{ marginTop: 8 }}>
                 {tension.author.displayName || tension.author.email} · {ageText(tension.createdAt)}
-                {" · "} {tension.upvotes.length} upvotes {" · "} Priority {tension.priority}
+                {" · "} {tension.upvotes.length} upvotes {" · "} Priority {t("priorityN", { priority: tension.priority })}
                 {tension.proposal && ` · Linked to Proposal: ${tension.proposal.title}`}
               </div>
 
@@ -101,7 +103,7 @@ export default async function TensionsPage({
                   <form action={publishTensionAction}>
                     <input type="hidden" name="workspaceId" value={workspaceId} />
                     <input type="hidden" name="tensionId" value={tension.id} />
-                    <button type="submit" className="primary small">Publish to Workspace</button>
+                    <button type="submit" className="primary small">{t("btnPublish")}</button>
                   </form>
                 )}
                 {!tension.isPrivate && tension.status === "OPEN" && (
@@ -109,7 +111,7 @@ export default async function TensionsPage({
                     <input type="hidden" name="workspaceId" value={workspaceId} />
                     <input type="hidden" name="tensionId" value={tension.id} />
                     <input type="hidden" name="status" value="IN_PROGRESS" />
-                    <button type="submit" className="secondary small">Start</button>
+                    <button type="submit" className="secondary small">{t("btnStart")}</button>
                   </form>
                 )}
                 {!tension.isPrivate && (tension.status === "OPEN" || tension.status === "IN_PROGRESS") && (
@@ -117,20 +119,20 @@ export default async function TensionsPage({
                     <input type="hidden" name="workspaceId" value={workspaceId} />
                     <input type="hidden" name="tensionId" value={tension.id} />
                     <input type="hidden" name="status" value="COMPLETED" />
-                    <button type="submit" className="secondary small">Resolve</button>
+                    <button type="submit" className="secondary small">{t("btnResolve")}</button>
                   </form>
                 )}
                 {!tension.isPrivate && (
                 <form action={upvoteTensionAction}>
                   <input type="hidden" name="workspaceId" value={workspaceId} />
                   <input type="hidden" name="tensionId" value={tension.id} />
-                  <button type="submit" className="secondary small">Upvote</button>
+                  <button type="submit" className="secondary small">{t("btnUpvote")}</button>
                 </form>
                 )}
                 <form action={deleteTensionAction}>
                   <input type="hidden" name="workspaceId" value={workspaceId} />
                   <input type="hidden" name="tensionId" value={tension.id} />
-                  <button type="submit" className="danger small">Delete</button>
+                  <button type="submit" className="danger small">{t("btnDelete")}</button>
                 </form>
               </div>
             </div>
@@ -141,22 +143,22 @@ export default async function TensionsPage({
       <section className="ws-section">
         <details open={resolvedSearch.open === "new"}>
           <summary className="nr-hide-marker" style={{ cursor: "pointer", fontWeight: 600, color: "var(--accent)" }}>
-            <span className="nr-section-header" style={{ borderTop: "none", display: "inline-block", padding: 0, margin: 0 }}>+ New tension</span>
+            <span className="nr-section-header" style={{ borderTop: "none", display: "inline-block", padding: 0, margin: 0 }}>{t("newTensionTitle")}</span>
           </summary>
           <form action={createTensionAction} className="stack nr-form-section">
             <input type="hidden" name="workspaceId" value={workspaceId} />
             <label>
-              Title
+              {t("formTitle")}
               <input name="title" required />
             </label>
             <label>
-              Description
+              {t("formDescription")}
               <textarea name="bodyMd" />
             </label>
             <label>
-              Link to Proposal
+              {t("formLinkToProposal")}
               <select name="proposalId" defaultValue="">
-                <option value="">None</option>
+                <option value="">{t("formNone")}</option>
                 {activeProposals.map((p) => (
                   <option value={p.id} key={p.id}>{p.title}</option>
                 ))}
@@ -164,9 +166,9 @@ export default async function TensionsPage({
             </label>
             <label style={{ display: "flex", alignItems: "center", gap: "8px", fontWeight: "normal", cursor: "pointer" }}>
               <input type="checkbox" name="isPrivate" defaultChecked />
-              <span>Private inbox (only visible to me)</span>
+              <span>{t("formPrivateInbox")}</span>
             </label>
-            <button type="submit">Create tension</button>
+            <button type="submit">{t("btnCreateTension")}</button>
           </form>
         </details>
       </section>

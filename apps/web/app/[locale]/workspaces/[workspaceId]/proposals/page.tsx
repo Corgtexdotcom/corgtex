@@ -5,6 +5,7 @@ import {
   createProposalAction,
   archiveProposalAction,
 } from "../actions";
+import { getTranslations } from "next-intl/server";
 import { prisma } from "@corgtex/shared";
 
 export const dynamic = "force-dynamic";
@@ -18,6 +19,7 @@ export default async function ProposalsPage({
 }) {
   const { workspaceId } = await params;
   const actor = await requirePageActor();
+  const t = await getTranslations("proposals");
   const resolvedSearch = searchParams ? await searchParams : {};
   const statusFilter = typeof resolvedSearch.status === "string" ? resolvedSearch.status : "ACTIVE";
   const circleFilter = typeof resolvedSearch.circleId === "string" ? resolvedSearch.circleId : null;
@@ -44,9 +46,9 @@ export default async function ProposalsPage({
   return (
     <>
       <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 32 }}>
-        <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2.5rem" }}>Proposals</h1>
+        <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2.5rem" }}>{t("pageTitle")}</h1>
         <div className="nr-masthead-meta">
-          <span>Governance proposals for policy changes, new processes, and decisions.</span>
+          <span>{t("pageDescription")}</span>
         </div>
       </header>
 
@@ -55,10 +57,10 @@ export default async function ProposalsPage({
           <form method="get" style={{ display: "inline-block" }}>
             {statusFilter !== "ACTIVE" && <input type="hidden" name="status" value={statusFilter} />}
             <select name="circleId" defaultValue={circleFilter || ""} style={{ padding: "4px 8px", borderRadius: 4, marginRight: 8 }}>
-              <option value="">All Circles</option>
+              <option value="">{t("filterAllCircles")}</option>
               {circles.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
             </select>
-            <button type="submit" className="small secondary">Filter</button>
+            <button type="submit" className="small secondary">{t("filterBtn")}</button>
           </form>
         </div>
         <div className="nr-filter-bar">
@@ -68,7 +70,7 @@ export default async function ProposalsPage({
               href={`?status=${s}`} 
               className={`nr-filter-item ${statusFilter === s ? "nr-filter-active" : ""}`}
             >
-              {s === "ADVICE_GATHERING" ? "Advice Process" : s.charAt(0) + s.slice(1).toLowerCase()} ({groupedProposals[s].length})
+              {s === "ACTIVE" ? t("statusActive") : s === "DRAFT" ? t("statusDraft") : s === "SUBMITTED" ? t("statusSubmitted") : s === "ADVICE_GATHERING" ? t("statusAdviceGathering") : s === "RESOLVED" ? t("statusResolved") : s === "ARCHIVED" ? t("statusArchived") : s.charAt(0) + s.slice(1).toLowerCase()} ({groupedProposals[s].length})
             </a>
           ))}
         </div>
@@ -76,9 +78,9 @@ export default async function ProposalsPage({
         <div>
           {(!displayProposals || displayProposals.length === 0) && (
             <div className="nr-item" style={{ textAlign: "center", padding: "48px 24px" }}>
-              <h3 style={{ margin: "0 0 8px" }}>What is a Proposal?</h3>
+              <h3 style={{ margin: "0 0 8px" }}>{t("whatIsProposalTitle")}</h3>
               <p className="muted" style={{ margin: 0, maxWidth: 500, marginInline: "auto" }}>
-                Proposals are how decisions get made. Draft a proposal, gather advice from stakeholders, and let the team decide by consent.
+                {t("whatIsProposalDesc")}
               </p>
             </div>
           )}
@@ -87,11 +89,11 @@ export default async function ProposalsPage({
               <a href={`/workspaces/${workspaceId}/proposals/${proposal.id}`} style={{ display: "block", textDecoration: "none", color: "inherit" }}>
                 <div className="row" style={{ alignItems: "center" }}>
                   <strong className="nr-item-title">
-                    {proposal.isPrivate && <span title="Private draft" className="tag info" style={{ marginRight: 6 }}>Private</span>}
+                    {proposal.isPrivate && <span title={t("privateDraftTooltip")} className="tag info" style={{ marginRight: 6 }}>{t("tagPrivate")}</span>}
                     {proposal.title}
                   </strong>
                   <span className={`tag ${proposal.status === "DRAFT" ? "info" : proposal.status === "SUBMITTED" ? "warning" : proposal.status === "ADVICE_GATHERING" ? "info" : proposal.status === "APPROVED" ? "success" : proposal.status === "REJECTED" ? "danger" : ""}`}>
-                    {proposal.status === "ADVICE_GATHERING" ? "GATHERING ADVICE" : proposal.status}
+                    {proposal.status === "ADVICE_GATHERING" ? t("tagGatheringAdvice") : proposal.status}
                   </span>
                 </div>
                 <div className="nr-excerpt" style={{ marginTop: "8px" }}>
@@ -105,12 +107,12 @@ export default async function ProposalsPage({
                   <div style={{ marginTop: 8, fontSize: "0.82rem", display: "flex", gap: "8px", flexWrap: "wrap" }}>
                     {proposal.tensions?.map((t: any) => (
                       <span key={t.id} className="tag info" style={{ padding: "2px 6px", fontSize: "0.75rem" }}>
-                        Tension: {t.title}
+                        {t("tensionTag", { title: t.title })}
                       </span>
                     ))}
                     {proposal.actions?.map((a: any) => (
                       <span key={a.id} className="tag info" style={{ padding: "2px 6px", fontSize: "0.75rem" }}>
-                        Action: {a.title}
+                        {t("actionTag", { title: a.title })}
                       </span>
                     ))}
                   </div>
@@ -122,7 +124,7 @@ export default async function ProposalsPage({
                   <form action={archiveProposalAction}>
                     <input type="hidden" name="workspaceId" value={workspaceId} />
                     <input type="hidden" name="proposalId" value={proposal.id} />
-                    <button type="submit" className="warning small">Archive</button>
+                    <button type="submit" className="warning small">{t("btnArchive")}</button>
                   </form>
                 </div>
               )}
@@ -135,27 +137,27 @@ export default async function ProposalsPage({
         <section className="ws-section">
           <details open={resolvedSearch.open === "new"}>
             <summary className="nr-hide-marker" style={{ cursor: "pointer", fontWeight: 600, color: "var(--accent)" }}>
-              <span className="nr-section-header" style={{ borderTop: "none", display: "inline-block", padding: 0, margin: 0 }}>+ Draft a proposal</span>
+              <span className="nr-section-header" style={{ borderTop: "none", display: "inline-block", padding: 0, margin: 0 }}>{t("newProposalTitle")}</span>
             </summary>
             <form action={createProposalAction} className="stack nr-form-section" style={{ marginTop: "16px" }}>
               <input type="hidden" name="workspaceId" value={workspaceId} />
               <label>
-                Title
+                {t("formTitle")}
                 <input name="title" required />
               </label>
               <label>
-                Summary
+                {t("formSummary")}
                 <input name="summary" />
               </label>
               <label>
-                Body
-                <MarkdownEditor name="bodyMd" required placeholder="Write proposal content in markdown..." />
+                {t("formBody")}
+                <MarkdownEditor name="bodyMd" required placeholder={t("formBodyPlaceholder")} />
               </label>
               <label style={{ display: "flex", alignItems: "center", gap: "8px", fontWeight: "normal", cursor: "pointer" }}>
                 <input type="checkbox" name="isPrivate" defaultChecked />
-                <span>Private draft (only visible to me)</span>
+                <span>{t("formPrivateDraft")}</span>
               </label>
-              <button type="submit">Create draft proposal</button>
+              <button type="submit">{t("btnCreateDraft")}</button>
             </form>
           </details>
         </section>

@@ -12,6 +12,7 @@ export default async function BrainSourcesPage({
 }) {
   const { workspaceId } = await params;
   const actor = await requirePageActor();
+  const t = await getTranslations("brain");
   const { items: sources } = await listSources(actor, { workspaceId, take: 50 });
 
   return (
