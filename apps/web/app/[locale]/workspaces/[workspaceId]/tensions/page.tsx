@@ -45,8 +45,24 @@ export default async function TensionsPage({
 
   const ageText = (date: Date) => {
     const days = Math.floor((Date.now() - new Date(date).getTime()) / (1000 * 60 * 60 * 24));
-    return days === 0 ? "today" : `${days}d ago`;
+    return days === 0 ? t("ageToday") : t("ageDaysAgo", { days });
   };
+
+  const statusLabel = (status: string) => {
+    const labels: Record<string, string> = {
+      MY_INBOX: t("statusMyInbox"),
+      OPEN: t("statusOpen"),
+      IN_PROGRESS: t("statusInProgress"),
+      COMPLETED: t("statusCompleted"),
+      ALL: t("statusAll"),
+    };
+    return labels[status] ?? status;
+  };
+
+  const statusFilters = (["MY_INBOX", "OPEN", "IN_PROGRESS", "COMPLETED", "ALL"] as const).map((status) => ({
+    status,
+    label: statusLabel(status),
+  }));
 
   return (
     <>
@@ -59,13 +75,13 @@ export default async function TensionsPage({
 
       <section className="ws-section">
         <div className="nr-filter-bar">
-          {(["MY_INBOX", "OPEN", "IN_PROGRESS", "COMPLETED", "ALL"] as const).map((s) => (
+          {statusFilters.map(({ status, label }) => (
             <a 
-              key={s} 
-              href={`?status=${s}`} 
-              className={`nr-filter-item ${statusFilter === s ? "nr-filter-active" : ""}`}
+              key={status}
+              href={`?status=${status}`}
+              className={`nr-filter-item ${statusFilter === status ? "nr-filter-active" : ""}`}
             >
-              {s.replace("_", " ")} ({groupedTensions[s].length})
+              {t("filterWithCount", { label, count: groupedTensions[status].length })}
             </a>
           ))}
         </div>
@@ -75,7 +91,7 @@ export default async function TensionsPage({
             <div className="nr-item" style={{ textAlign: "center", padding: "48px 24px" }}>
               <h3 style={{ margin: "0 0 8px" }}>{t("whatIsTensionTitle")}</h3>
               <p className="muted" style={{ margin: 0, maxWidth: 500, marginInline: "auto" }}>
-                A tension is any gap between what is and what could be. It&apos;s the most important signal in a self-managed organization. File a tension whenever you sense an opportunity for improvement.
+                {t("whatIsTensionDesc")}
               </p>
             </div>
           )}
@@ -88,14 +104,18 @@ export default async function TensionsPage({
                     {tension.title}
                   </a>
                 </strong>
-                <span className={`tag ${tension.status === "OPEN" ? "warning" : tension.status === "IN_PROGRESS" ? "info" : "success"}`}>{tension.status}</span>
+                <span className={`tag ${tension.status === "OPEN" ? "warning" : tension.status === "IN_PROGRESS" ? "info" : "success"}`}>{statusLabel(tension.status)}</span>
               </div>
               {tension.bodyMd && <div className="nr-excerpt">{tension.bodyMd}</div>}
               
               <div className="nr-item-meta" style={{ marginTop: 8 }}>
-                {tension.author.displayName || tension.author.email} · {ageText(tension.createdAt)}
-                {" · "} {tension.upvotes.length} upvotes {" · "} Priority {t("priorityN", { priority: tension.priority })}
-                {tension.proposal && ` · Linked to Proposal: ${tension.proposal.title}`}
+                {t("tensionMeta", {
+                  author: tension.author.displayName || tension.author.email || t("authorUnknown"),
+                  age: ageText(tension.createdAt),
+                  upvotes: t("upvotes", { count: tension.upvotes.length }),
+                  priority: t("priorityN", { priority: tension.priority }),
+                })}
+                {tension.proposal && t("linkedProposalMeta", { title: tension.proposal.title })}
               </div>
 
               <div className="actions-inline" style={{ marginTop: 12 }}>
