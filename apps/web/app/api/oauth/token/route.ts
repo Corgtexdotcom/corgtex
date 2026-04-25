@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { handleRouteError } from "@/lib/http";
 import { exchangeAuthorizationCode, refreshAccessToken } from "@corgtex/domain";
 import { AppError } from "@corgtex/domain";
 
@@ -101,7 +102,6 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(oauthErrorResponse, { status: error.status });
     }
 
-    console.error("[OAuth Token Error]", error);
-    return NextResponse.json({ error: "server_error", error_description: "Internal server error" }, { status: 500 });
+    return handleRouteError(error);
   }
 }

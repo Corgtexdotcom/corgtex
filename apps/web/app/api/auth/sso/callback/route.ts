@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
+import { handleRouteError } from "@/lib/http";
 import { createSession, linkOrProvisionSsoUser } from "@corgtex/domain";
 import { prisma } from "@corgtex/shared";
 import { setSessionCookie } from "@/lib/auth";
@@ -27,56 +28,56 @@ function claimString(claims: Record<string, unknown>, key: string) {
 }
 
 export async function GET(request: Request) {
-  const { searchParams } = new URL(request.url);
-  const code = searchParams.get("code");
-  const state = searchParams.get("state");
-  const error = searchParams.get("error");
-
-  if (error || !code) {
-    return NextResponse.redirect(new URL("/login?error=sso-failed", request.url));
-  }
-
-  const cookieStore = await cookies();
-  const savedState = cookieStore.get("sso_state")?.value;
-  const expectedNonce = cookieStore.get("sso_nonce")?.value;
-  const pkceCodeVerifier = cookieStore.get("sso_pkce_verifier")?.value;
-  const workspaceId = cookieStore.get("sso_workspace_id")?.value;
-  const provider = cookieStore.get("sso_provider")?.value;
-
-  cookieStore.delete("sso_state");
-  cookieStore.delete("sso_nonce");
-  cookieStore.delete("sso_pkce_verifier");
-  cookieStore.delete("sso_workspace_id");
-  cookieStore.delete("sso_provider");
-
-  if (
-    !state ||
-    state !== savedState ||
-    !expectedNonce ||
-    !pkceCodeVerifier ||
-    !workspaceId ||
-    (provider !== "GOOGLE" && provider !== "MICROSOFT")
-  ) {
-    return NextResponse.redirect(new URL("/login?error=invalid-state", request.url));
-  }
-
-  const config = await prisma.workspaceSsoConfig.findUnique({
-    where: {
-      workspaceId_provider: {
-        workspaceId,
-        provider,
-      }
-    },
-    include: {
-      workspace: true
-    }
-  });
-
-  if (!config || !config.isEnabled) {
-    return NextResponse.redirect(new URL("/login?error=sso-not-configured", request.url));
-  }
-
   try {
+    const { searchParams } = new URL(request.url);
+    const code = searchParams.get("code");
+    const state = searchParams.get("state");
+    const error = searchParams.get("error");
+
+    if (error || !code) {
+      return NextResponse.redirect(new URL("/login?error=sso-failed", request.url));
+    }
+
+    const cookieStore = await cookies();
+    const savedState = cookieStore.get("sso_state")?.value;
+    const expectedNonce = cookieStore.get("sso_nonce")?.value;
+    const pkceCodeVerifier = cookieStore.get("sso_pkce_verifier")?.value;
+    const workspaceId = cookieStore.get("sso_workspace_id")?.value;
+    const provider = cookieStore.get("sso_provider")?.value;
+
+    cookieStore.delete("sso_state");
+    cookieStore.delete("sso_nonce");
+    cookieStore.delete("sso_pkce_verifier");
+    cookieStore.delete("sso_workspace_id");
+    cookieStore.delete("sso_provider");
+
+    if (
+      !state ||
+      state !== savedState ||
+      !expectedNonce ||
+      !pkceCodeVerifier ||
+      !workspaceId ||
+      (provider !== "GOOGLE" && provider !== "MICROSOFT")
+    ) {
+      return NextResponse.redirect(new URL("/login?error=invalid-state", request.url));
+    }
+
+    const config = await prisma.workspaceSsoConfig.findUnique({
+      where: {
+        workspaceId_provider: {
+          workspaceId,
+          provider,
+        }
+      },
+      include: {
+        workspace: true
+      }
+    });
+
+    if (!config || !config.isEnabled) {
+      return NextResponse.redirect(new URL("/login?error=sso-not-configured", request.url));
+    }
+
     const oidcConfig = await oidc.discovery(
       providerIssuer(provider),
       config.clientId,
@@ -127,8 +128,7 @@ export async function GET(request: Request) {
     await setSessionCookie(session.token, session.expiresAt);
 
     return NextResponse.redirect(new URL(`/workspaces/${config.workspace.slug}`, request.url));
-  } catch (err) {
-    console.error("SSO Provisioning failed:", err);
-    return NextResponse.redirect(new URL("/login?error=sso-provisioning", request.url));
+  } catch (error) {
+    return handleRouteError(error);
   }
 }

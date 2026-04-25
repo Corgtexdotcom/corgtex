@@ -1,17 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 
-const { requirePageActor, requireWorkspaceMembership, prismaMock } = vi.hoisted(() => ({
+const { requirePageActor, saveOAuthConnectionAndEnqueueCalendarSync } = vi.hoisted(() => ({
   requirePageActor: vi.fn(),
-  requireWorkspaceMembership: vi.fn(),
-  prismaMock: {
-    oAuthConnection: {
-      upsert: vi.fn(),
-    },
-    workflowJob: {
-      create: vi.fn(),
-    },
-  },
+  saveOAuthConnectionAndEnqueueCalendarSync: vi.fn(),
 }));
 
 vi.mock("@/lib/auth", () => ({
@@ -19,11 +11,7 @@ vi.mock("@/lib/auth", () => ({
 }));
 
 vi.mock("@corgtex/domain", () => ({
-  requireWorkspaceMembership,
-}));
-
-vi.mock("@corgtex/shared", () => ({
-  prisma: prismaMock,
+  saveOAuthConnectionAndEnqueueCalendarSync,
 }));
 
 beforeEach(() => {
@@ -45,14 +33,7 @@ describe("GET /api/integrations/[provider]/callback", () => {
       kind: "user",
       user: { id: "user-1" },
     });
-    requireWorkspaceMembership.mockResolvedValue({
-      workspaceId: "ws-1",
-      userId: "user-1",
-      role: "ADMIN",
-      isActive: true,
-    });
-    prismaMock.oAuthConnection.upsert.mockResolvedValue({ id: "conn-1" });
-    prismaMock.workflowJob.create.mockResolvedValue({ id: "job-1" });
+    saveOAuthConnectionAndEnqueueCalendarSync.mockResolvedValue({ id: "conn-1" });
 
     const fetchMock = vi.mocked(fetch);
     fetchMock
@@ -72,22 +53,21 @@ describe("GET /api/integrations/[provider]/callback", () => {
       { params: Promise.resolve({ provider: "google" }) },
     );
 
-    expect(requireWorkspaceMembership).toHaveBeenCalledWith({
-      actor: {
+    expect(saveOAuthConnectionAndEnqueueCalendarSync).toHaveBeenCalledWith(
+      {
         kind: "user",
         user: { id: "user-1" },
       },
-      workspaceId: "ws-1",
-    });
-    expect(prismaMock.workflowJob.create).toHaveBeenCalledWith({
-      data: {
+      {
         workspaceId: "ws-1",
-        type: "calendar.sync",
-        payload: {
-          connectionId: "conn-1",
-        },
+        provider: "GOOGLE",
+        accessToken: "access-token",
+        refreshToken: "refresh-token",
+        expiresIn: 3600,
+        providerAccountId: "google-user-1",
+        scopes: ["calendar", "profile"],
       },
-    });
+    );
     expect(response.headers.get("location")).toBe("http://localhost:3000/workspaces/ws-1/settings?success=google_connected");
   });
 });

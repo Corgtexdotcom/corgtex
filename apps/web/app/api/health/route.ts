@@ -1,6 +1,22 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@corgtex/shared";
 
+function handleRouteError(error: unknown) {
+  console.error("Healthcheck failed.", error);
+
+  return NextResponse.json(
+    {
+      status: "degraded",
+      service: "web",
+      database: "down",
+      schema: "unknown",
+      app: "corgtex",
+      auth: "password-session",
+    },
+    { status: 503 },
+  );
+}
+
 async function hasRequiredBrainTables() {
   const [result] = await prisma.$queryRaw<Array<{ ready: boolean }>>`
     SELECT bool_and(to_regclass(required.name) IS NOT NULL) AS "ready"
@@ -85,18 +101,6 @@ export async function GET() {
       apiLoginPath: "/api/auth/login",
     });
   } catch (error) {
-    console.error("Healthcheck failed.", error);
-
-    return NextResponse.json(
-      {
-        status: "degraded",
-        service: "web",
-        database: "down",
-        schema: "unknown",
-        app: "corgtex",
-        auth: "password-session",
-      },
-      { status: 503 },
-    );
+    return handleRouteError(error);
   }
 }

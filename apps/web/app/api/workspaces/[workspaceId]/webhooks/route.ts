@@ -1,24 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { listWebhookEndpoints, createWebhookEndpoint } from "@corgtex/domain";
-import { resolveRequestActor } from "@/lib/auth";
+import { withWorkspaceRoute } from "@/lib/route-handler";
 
-export async function GET(
-  request: NextRequest,
-  { params }: { params: Promise<{ workspaceId: string }> }
-) {
-  const { workspaceId } = await params;
-  const actor = await resolveRequestActor(request);
-
+export const GET = withWorkspaceRoute(async (_request: NextRequest, { actor, workspaceId }) => {
   const endpoints = await listWebhookEndpoints(actor, workspaceId);
   return NextResponse.json(endpoints);
-}
+});
 
-export async function POST(
-  request: NextRequest,
-  { params }: { params: Promise<{ workspaceId: string }> }
-) {
-  const { workspaceId } = await params;
-  const actor = await resolveRequestActor(request);
+export const POST = withWorkspaceRoute(async (request: NextRequest, { actor, workspaceId }) => {
   const body = await request.json();
 
   const endpoint = await createWebhookEndpoint(actor, {
@@ -29,4 +18,4 @@ export async function POST(
   });
 
   return NextResponse.json(endpoint, { status: 201 });
-}
+});

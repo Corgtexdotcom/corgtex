@@ -23,9 +23,9 @@ reviews code line-by-line. The full specification lives in
 - **Dev server:** `npm run dev` | **Build:** `npm run build` | **Lint:** `npm run lint` | **Typecheck:** `npm run typecheck`
 - **All static checks:** `npm run check` (lint + typecheck + prisma validate)
 - **Unit tests:** `npm test` or `npm run test:unit` | **Single test:** `npx vitest run packages/domain/src/runtime.test.ts`
-- **Integration tests:** `npm run test:integration` (uses `docker-compose.test.yml`) | **All tests:** `npm run test:all`
-- **E2E:** run the app locally with `npm run dev` and use the agent API flow below.
-- **Prisma:** `npm run prisma:generate` (required before tests), `npm run prisma:migrate`, `npm run prisma:migrate:deploy`
+- **Integration tests:** `npm run test:integration` (starts `docker-compose.test.yml`, runs the Vitest `integration` project, tears it down) | **All tests:** `npm run test:all`
+- **E2E agent flow:** `npm run prisma:seed`, `npm run seed:e2e`, set `AGENT_API_KEY`, run `npm run dev`, then use the Agent API flow below.
+- **Prisma / seeds:** `npm run prisma:generate` (required before tests), `npm run prisma:migrate`, `npm run prisma:migrate:deploy`, `npm run prisma:seed`, `npm run seed:e2e`, `npm run seed:pilot-tester`, `npm run seed:demo`, `npm run seed:jnj-demo`
 
 ### Architecture
 
@@ -69,8 +69,9 @@ reviews code line-by-line. The full specification lives in
 ### Secrets and credentials
 
 - Never hardcode secrets in code, commits, PR descriptions, or agent output.
-- E2E credentials: read `AGENT_E2E_EMAIL` and `AGENT_E2E_PASSWORD` from the local `.env`. Defaults are `system+corgtex@corgtex.local` / `corgtex-test-agent-pw` if unset. Run `npm run prisma:seed` to provision the user.
-- Agent API (E2E backend testing): set `AGENT_API_KEY` in `.env`, then run `AGENT_API_KEY="..." npm run prisma:seed`. Use header `Authorization: Bearer agent-<AGENT_API_KEY>` against `http://localhost:3000`. The agent user has ADMIN role in the default org; wallet-dependent flows need extra setup.
+- Production bootstrap seed: `npm run prisma:seed` provisions the configured workspace/admin/system baseline only. It does not create demo, JNJ, or E2E fixture users.
+- E2E UI credentials: read `AGENT_E2E_EMAIL` and `AGENT_E2E_PASSWORD` from the local `.env`. Defaults are `system+corgtex@corgtex.local` / `corgtex-test-agent-pw` if unset. Run `npm run seed:e2e` after `npm run prisma:seed` to provision the E2E UI user.
+- Agent API (E2E backend testing): set `AGENT_API_KEY` in `.env`. Use header `Authorization: Bearer agent-<AGENT_API_KEY>` against `http://localhost:3000`. `AGENT_API_KEY` is runtime auth config, not startup seed data. The bootstrap agent has ADMIN-equivalent access to allowed workspaces; wallet-dependent flows need extra setup.
 
 ---
 

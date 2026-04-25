@@ -42,7 +42,8 @@ Auto-merge is set by the Executor immediately (`gh pr merge --auto --squash`) so
 
 Every PR must pass:
 
-- `check` — lint, typecheck, Prisma validate, unit + integration tests.
+- `check` — lint, typecheck, Prisma validate.
+- `test:unit` / `test:integration` / `test:all` — Vitest unit and DB-backed integration coverage. `test:integration` uses `docker-compose.test.yml`.
 - `db-sync` — migration ↔ schema parity.
 - `build` — `env -u DATABASE_URL npm run build` (database-independent).
 - `docs` — `mint validate` and broken-link check.
