@@ -20,11 +20,14 @@
   "scripts": {
     "dev": "dotenv -e ../../.env -- next dev",
     "build": "next build",
+    "analyze": "cross-env ANALYZE=true next build",
     "start:next": "next start",
     "start": "node ../../scripts/start-web.mjs"
   },
   "devDependencies": {
+    "@next/bundle-analyzer": "^16.2.4",
     "@types/marked": "^5.0.2",
-    "@types/sanitize-html": "^2.16.1"
+    "@types/sanitize-html": "^2.16.1",
+    "cross-env": "^10.1.0"
   }
 }
