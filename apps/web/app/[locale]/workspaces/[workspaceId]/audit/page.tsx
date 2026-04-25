@@ -1,5 +1,6 @@
 import { listAuditLogs, getModelUsageSummary, listAgentRuns, getAgentRunTrace, getStorageUsageSummary } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
+import { getTranslations } from "next-intl/server";
 
 export const dynamic = "force-dynamic";
 
@@ -40,6 +41,7 @@ export default async function AuditPage({
   const { workspaceId } = await params;
   const search = await searchParams;
   const actor = await requirePageActor();
+  const t = await getTranslations("audit");
   const tab = search.tab ?? "audit";
 
   const auditLogs = await listAuditLogs(actor, workspaceId, {
@@ -61,9 +63,9 @@ export default async function AuditPage({
   return (
     <>
       <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 32 }}>
-        <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2.5rem" }}>Audit &amp; Observability</h1>
+        <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2.5rem" }}>{t("pageTitle")}</h1>
         <div className="nr-masthead-meta">
-          <span>Decision trail, agent traces, and model usage analytics.</span>
+          <span>{t("pageDescription")}</span>
         </div>
       </header>
 
@@ -92,7 +94,7 @@ export default async function AuditPage({
             {search.entityType && search.entityId && (
               <span>
                 {" "}Filtered to <strong>{search.entityType}</strong>: {search.entityId}.{" "}
-                <a href={`/workspaces/${workspaceId}/audit?tab=audit`}>Clear filter</a>
+                <a href={`/workspaces/${workspaceId}/audit?tab=audit`}>{t("clearFilter")}</a>
               </span>
             )}
           </p>

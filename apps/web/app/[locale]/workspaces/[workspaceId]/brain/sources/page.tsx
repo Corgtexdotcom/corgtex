@@ -1,6 +1,7 @@
 import { listSources } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { ingestSourceAction } from "../actions";
+import { getTranslations } from "next-intl/server";
 
 export const dynamic = "force-dynamic";
 
@@ -12,6 +13,7 @@ export default async function BrainSourcesPage({
 }) {
   const { workspaceId } = await params;
   const actor = await requirePageActor();
+  const t = await getTranslations("brain");
   const { items: sources } = await listSources(actor, { workspaceId, take: 50 });
 
   return (

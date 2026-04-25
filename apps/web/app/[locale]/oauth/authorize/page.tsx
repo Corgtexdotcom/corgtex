@@ -2,6 +2,7 @@ import { requirePageActor } from "@/lib/auth";
 import { getOAuthAppByClientId, isAllowedOAuthRedirectUri, listActorWorkspaces } from "@corgtex/domain";
 import { SCOPE_REGISTRY, isKnownScope } from "@corgtex/domain";
 import Link from "next/link";
+import { getTranslations } from "next-intl/server";
 
 export const dynamic = "force-dynamic";
 
@@ -16,6 +17,7 @@ type Props = {
 
 export default async function OAuthAuthorizePage(props: Props) {
   const searchParams = await props.searchParams;
+  const t = await getTranslations("oauth");
 
   // Re-verify auth - if they aren't logged in, Next.js / requirePageActor
   // should ideally redirect here after login, but for now we expect them logged in
@@ -30,7 +32,7 @@ export default async function OAuthAuthorizePage(props: Props) {
     return (
       <div className="flex h-screen w-full items-center justify-center p-4">
         <div className="w-full max-w-sm rounded-[var(--radius-lg)] bg-[var(--surface-sunken)] p-6 text-center ring-1 ring-[var(--line-subtle)]">
-          <p className="text-[var(--danger)]">Invalid authorization request (missing client_id or redirect_uri).</p>
+          <p className="text-[var(--danger)]">{t("invalidAuthRequest")}</p>
         </div>
       </div>
     );
@@ -42,7 +44,7 @@ export default async function OAuthAuthorizePage(props: Props) {
     return (
       <div className="flex h-screen w-full items-center justify-center p-4">
         <div className="w-full max-w-sm rounded-[var(--radius-lg)] bg-[var(--surface-sunken)] p-6 text-center ring-1 ring-[var(--line-subtle)]">
-          <p className="text-[var(--danger)]">Invalid client configuration.</p>
+          <p className="text-[var(--danger)]">{t("invalidClientConfig")}</p>
         </div>
       </div>
     );
@@ -52,7 +54,7 @@ export default async function OAuthAuthorizePage(props: Props) {
     return (
       <div className="flex h-screen w-full items-center justify-center p-4">
         <div className="w-full max-w-sm rounded-[var(--radius-lg)] bg-[var(--surface-sunken)] p-6 text-center ring-1 ring-[var(--line-subtle)]">
-          <p className="text-[var(--danger)]">Redirect URI is not registered for this integration.</p>
+          <p className="text-[var(--danger)]">{t("invalidRedirectUri")}</p>
         </div>
       </div>
     );
@@ -68,7 +70,7 @@ export default async function OAuthAuthorizePage(props: Props) {
     return (
       <div className="flex h-screen w-full items-center justify-center p-4">
         <div className="w-full max-w-sm rounded-[var(--radius-lg)] bg-[var(--surface-sunken)] p-6 text-center ring-1 ring-[var(--line-subtle)]">
-          <p className="text-[var(--danger)]">You do not have access to the workspace ({app.workspaceId}) associated with this integration.</p>
+          <p className="text-[var(--danger)]">{t("noWorkspaceAccess", { workspaceId: app.workspaceId })}</p>
         </div>
       </div>
     );
@@ -92,7 +94,7 @@ export default async function OAuthAuthorizePage(props: Props) {
           <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-[var(--surface-strong)] ring-1 ring-[var(--line-subtle)]">
             <span className="text-2xl font-bold">GPT</span>
           </div>
-          <div className="text-[var(--text-muted)]">connecting to</div>
+          <div className="text-[var(--text-muted)]">{t("connectingTo")}</div>
           <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-[var(--surface-strong)] ring-1 ring-[var(--line-subtle)]">
             <span className="text-xl font-bold text-[var(--danger)]">Corgtex</span>
           </div>
@@ -101,16 +103,20 @@ export default async function OAuthAuthorizePage(props: Props) {
         <div className="ui-card overflow-hidden">
           <div className="border-b border-[var(--line-subtle)] bg-[var(--surface-sunken)] px-6 py-5">
             <h1 className="text-xl font-bold text-[var(--text-strong)]">
-              Approve connection
+              {t("approveConnection")}
             </h1>
             <p className="mt-1 text-sm text-[var(--text-muted)]">
-              <strong>{app.name}</strong> wants to connect to your workspace <strong>{targetWorkspace.name}</strong>.
+              {t.rich("connectionPrompt", {
+                appName: app.name,
+                workspaceName: targetWorkspace.name,
+                strong: (chunks) => <strong>{chunks}</strong>
+              })}
             </p>
           </div>
 
           <div className="px-6 py-6 border-b border-[var(--line-subtle)]">
              <h3 className="text-sm font-medium text-[var(--text-strong)] mb-4">
-              This will allow the Custom GPT to:
+              {t("allowCustomGptTo")}
             </h3>
             <ul className="space-y-3">
               {displayScopes.map((scope) => {
@@ -118,7 +124,7 @@ export default async function OAuthAuthorizePage(props: Props) {
                 return (
                   <li key={scope} className="flex flex-col gap-1 items-start text-sm">
                     <span className="font-medium text-[var(--text-strong)] bg-[var(--surface-sunken)] border border-[var(--line-subtle)] px-2 py-0.5 rounded text-xs">{known?.label || scope}</span>
-                    <span className="text-[var(--text-muted)]">{known?.description || "Custom permission"}</span>
+                    <span className="text-[var(--text-muted)]">{known?.description || t("customPermission")}</span>
                   </li>
                 );
               })}
@@ -127,7 +133,9 @@ export default async function OAuthAuthorizePage(props: Props) {
 
           <div className="px-6 py-6 bg-[var(--surface-sunken)]">
             <p className="text-xs text-[var(--text-muted)] mb-4 leading-relaxed">
-              By authorizing this app, you are sharing your organizational data with the AI provider (OpenAI) running the Custom GPT. Your data will be governed by their <Link href="https://openai.com/privacy-policy" target="_blank" className="text-[var(--danger)] hover:underline">Privacy Policy</Link>. Make sure you trust this integration.
+              {t.rich("privacyWarning", {
+                link: (chunks) => <Link href="https://openai.com/privacy-policy" target="_blank" className="text-[var(--danger)] hover:underline">{chunks}</Link>
+              })}
             </p>
 
             <form action="/api/oauth/authorize" method="POST" className="flex flex-col gap-3">
@@ -137,18 +145,18 @@ export default async function OAuthAuthorizePage(props: Props) {
               <input type="hidden" name="scopes" value={displayScopes.join(" ")} />
 
               <button type="submit" className="button w-full py-2.5 text-base shadow-[0_2px_10px_rgba(255,80,80,0.2)]">
-                Allow access
+                {t("allowAccess")}
               </button>
 
               <Link href={deniedRedirectUrl.toString()} className="block text-center w-full text-[var(--text-muted)] hover:text-[var(--text-strong)] py-2">
-                  Cancel
+                  {t("cancel")}
               </Link>
             </form>
           </div>
         </div>
 
         <div className="mt-8 text-center text-xs text-[var(--text-muted)]">
-          Secured by Corgtex Auth
+          {t("securedBy")}
         </div>
       </div>
     </div>

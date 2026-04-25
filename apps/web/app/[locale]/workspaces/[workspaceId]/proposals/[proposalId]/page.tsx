@@ -6,6 +6,7 @@ import { renderMarkdown } from "@/lib/markdown";
 import { DeliberationThread } from "@/lib/components/DeliberationThread";
 import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
 import { postDeliberationEntryAction, resolveDeliberationEntryAction } from "../actions";
+import { getTranslations } from "next-intl/server";
 
 export const dynamic = "force-dynamic";
 
@@ -16,6 +17,7 @@ export default async function ProposalDetailPage({
 }) {
   const { workspaceId, proposalId } = await params;
   const actor = await requirePageActor();
+  const t = await getTranslations("proposals");
 
   const proposal = await getProposal(actor, { workspaceId, proposalId });
   if (!proposal) notFound();
@@ -49,7 +51,7 @@ export default async function ProposalDetailPage({
     <>
       <div className="nr-masthead" style={{ textAlign: "left", marginBottom: 32 }}>
         <p className="nr-meta" style={{ marginBottom: "12px", display: "flex", gap: "12px" }}>
-          <span><Link href={`/workspaces/${workspaceId}/proposals`} style={{ color: "inherit", textDecoration: "none" }}>← Back to Proposals</Link></span>
+          <span><Link href={`/workspaces/${workspaceId}/proposals`} style={{ color: "inherit", textDecoration: "none" }}>{t("backToProposals")}</Link></span>
           <span>·</span>
           <span>{proposal.author.displayName || proposal.author.email}</span>
           <span>·</span>
@@ -58,7 +60,7 @@ export default async function ProposalDetailPage({
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", borderBottom: "1px solid var(--line)", paddingBottom: 16 }}>
           <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2.5rem", maxWidth: "800px" }}>{proposal.title}</h1>
           <span style={{ fontSize: "0.85rem", color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.05em" }}>
-            Updated {ageText(proposal.updatedAt)}
+            {t("updatedAt", { date: ageText(proposal.updatedAt) })}
           </span>
         </div>
       </div>
@@ -74,12 +76,12 @@ export default async function ProposalDetailPage({
 
           <hr className="nr-divider" style={{ margin: "48px 0" }} />
 
-          <h3 className="font-playfair font-semibold mb-6 text-[1.4rem]">Deliberation</h3>
+          <h3 className="font-playfair font-semibold mb-6 text-[1.4rem]">{t("sectionDeliberation")}</h3>
           <DeliberationThread
             entries={deliberationEntries.map((e) => ({
               id: e.id,
               entryType: e.entryType,
-              authorName: e.author?.displayName || "Unknown",
+              authorName: e.author?.displayName || t("authorUnknown"),
               authorInitials: (e.author?.displayName || "U").substring(0, 2).toUpperCase(),
               bodyMd: e.bodyMd,
               createdAt: e.createdAt,
@@ -96,10 +98,10 @@ export default async function ProposalDetailPage({
               postAction={postDeliberationEntryAction}
               hiddenFields={{ workspaceId, proposalId }}
               entryTypes={[
-                { value: "SUPPORT", label: "Support", variant: "success" },
-                { value: "QUESTION", label: "Question", variant: "info" },
-                { value: "CONCERN", label: "Concern", variant: "warning" },
-                { value: "OBJECTION", label: "Objection", variant: "danger" },
+                { value: "SUPPORT", label: t("entrySupport"), variant: "success" },
+                { value: "QUESTION", label: t("entryQuestion"), variant: "info" },
+                { value: "CONCERN", label: t("entryConcern"), variant: "warning" },
+                { value: "OBJECTION", label: t("entryObjection"), variant: "danger" },
               ]}
             />
           )}
@@ -112,18 +114,18 @@ export default async function ProposalDetailPage({
               <form action="../actions/submit" method="post" style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
                 <input type="hidden" name="workspaceId" value={workspaceId} />
                 <input type="hidden" name="proposalId" value={proposal.id} />
-                <button formAction="../actions/submit" className="w-full">Submit Proposal</button>
+                <button formAction="../actions/submit" className="w-full">{t("btnSubmitProposal")}</button>
               </form>
             </div>
           )}
           
-          <h3 style={{ fontSize: "0.85rem", textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--text)", marginBottom: "16px" }}>About</h3>
+          <h3 style={{ fontSize: "0.85rem", textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--text)", marginBottom: "16px" }}>{t("aboutTitle")}</h3>
           <div className="nr-meta mb-4">
-            <strong>Created:</strong> {new Date(proposal.createdAt).toLocaleDateString()}
+            <strong>{t("aboutCreated")}</strong> {new Date(proposal.createdAt).toLocaleDateString()}
           </div>
           {proposal.summary && (
             <div className="nr-meta mb-4">
-              <strong>Summary:</strong> {proposal.summary}
+              <strong>{t("aboutSummary")}</strong> {proposal.summary}
             </div>
           )}
         </aside>

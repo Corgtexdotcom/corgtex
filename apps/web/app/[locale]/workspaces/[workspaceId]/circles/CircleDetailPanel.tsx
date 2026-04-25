@@ -1,4 +1,5 @@
 "use client";
+import { useTranslations } from "next-intl";
 
 export default function CircleDetailPanel({
   open,
@@ -13,6 +14,7 @@ export default function CircleDetailPanel({
   onClose: () => void;
   isDemo: boolean;
 }) {
+  const t = useTranslations("circles");
   function findCircle(id: string | null, nodes: any[]): any {
     if (!id) return null;
     for (const node of nodes) {
@@ -30,7 +32,7 @@ export default function CircleDetailPanel({
       <div className={`slide-over-overlay ${open ? "open" : ""}`} onClick={onClose} />
       <div className={`slide-over-panel ${open ? "open" : ""}`}>
         <div className="slide-over-header">
-          <h2 className="slide-over-title">{circle?.name || "Circle Details"}</h2>
+          <h2 className="slide-over-title">{circle ? t("circleTitle", { name: circle.name }) : t("circleDetailsTitle")}</h2>
           <button onClick={onClose} aria-label="Close" style={{ background: "transparent", border: "none", cursor: "pointer", fontSize: "1.2rem", color: "var(--muted)" }}>×</button>
         </div>
         
@@ -38,27 +40,27 @@ export default function CircleDetailPanel({
           {circle ? (
             <div className="stack">
               <div>
-                <strong style={{ display: "block", marginBottom: 4 }}>Purpose</strong>
-                <p className="nr-excerpt" style={{ margin: 0 }}>{circle.purposeMd || "No purpose defined."}</p>
+                <strong style={{ display: "block", marginBottom: 4 }}>{t("labelPurpose")}</strong>
+                <p className="nr-excerpt" style={{ margin: 0 }}>{circle.purposeMd || t("noPurpose")}</p>
               </div>
               
               {circle.domainMd && (
                 <div>
-                  <strong style={{ display: "block", marginBottom: 4 }}>Domain</strong>
+                  <strong style={{ display: "block", marginBottom: 4 }}>{t("labelDomain")}</strong>
                   <p className="nr-item-meta" style={{ margin: 0 }}>{circle.domainMd}</p>
                 </div>
               )}
 
               <div>
-                <strong style={{ display: "block", marginBottom: 4 }}>Maturity Stage</strong>
+                <strong style={{ display: "block", marginBottom: 4 }}>{t("labelMaturityStage")}</strong>
                 <div style={{ padding: "8px 12px", background: "var(--bg-alt)", borderRadius: "var(--radius-sm)", fontSize: "0.85rem", display: "inline-block" }}>
                   {circle.maturityStage}
                 </div>
               </div>
 
               <div>
-                <strong style={{ display: "block", marginBottom: 16 }}>Roles ({circle.roles?.length || 0})</strong>
-                {!circle.roles?.length && <p className="nr-item-meta">No roles in this circle yet.</p>}
+                <strong style={{ display: "block", marginBottom: 16 }}>{t("labelRoles", { count: circle.roles?.length || 0 })}</strong>
+                {!circle.roles?.length && <p className="nr-item-meta">{t("noRolesInCircle")}</p>}
                 
                 <div className="stack" style={{ gap: 12 }}>
                   {circle.roles?.map((role: any) => (
@@ -67,17 +69,17 @@ export default function CircleDetailPanel({
                       {role.purposeMd && <div className="nr-excerpt" style={{ fontSize: "0.8rem", marginTop: 4 }}>{role.purposeMd}</div>}
                       
                       <div style={{ marginTop: 12 }}>
-                        <strong style={{ fontSize: "0.75rem", color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.05em" }}>Assigned to:</strong>
+                        <strong style={{ fontSize: "0.75rem", color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.05em" }}>{t("labelAssignedTo")}</strong>
                         {role.assignments?.length > 0 ? (
                           <div style={{ marginTop: 4, display: "flex", flexWrap: "wrap", gap: 6 }}>
                             {role.assignments.map((a: any) => (
                               <span key={a.id} style={{ display: "inline-flex", background: "var(--bg)", padding: "2px 8px", borderRadius: "12px", fontSize: "0.75rem", border: "1px solid var(--line)", whiteSpace: "nowrap" }}>
-                                {a.member?.user?.displayName || a.member?.user?.email || "Unknown"}
+                                {a.member?.user?.displayName || a.member?.user?.email || t("unknownMember")}
                               </span>
                             ))}
                           </div>
                         ) : (
-                          <div className="nr-item-meta" style={{ marginTop: 4 }}>Unassigned</div>
+                          <div className="nr-item-meta" style={{ marginTop: 4 }}>{t("unassigned")}</div>
                         )}
                       </div>
                     </div>
@@ -87,12 +89,12 @@ export default function CircleDetailPanel({
               
               {!isDemo && (
                 <div style={{ marginTop: 32, paddingTop: 16, borderTop: "1px solid var(--line)" }}>
-                   <p className="muted" style={{ fontSize: "0.85rem" }}>To edit roles or settings, switch to the List view.</p>
+                   <p className="muted" style={{ fontSize: "0.85rem" }}>{t("editPrompt")}</p>
                 </div>
               )}
             </div>
           ) : (
-            <p className="muted">Select a circle to view its details.</p>
+            <p className="muted">{t("selectCirclePrompt")}</p>
           )}
         </div>
       </div>
