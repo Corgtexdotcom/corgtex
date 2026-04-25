@@ -19,7 +19,7 @@ export async function POST(
   const { workspaceId } = await params;
 
   // Rate limit
-  const rateLimited = rateLimitWebhookIngest(request, workspaceId);
+  const rateLimited = await rateLimitWebhookIngest(request, workspaceId);
   if (rateLimited) return rateLimited;
 
   const source = request.nextUrl.searchParams.get("source") ?? "generic";

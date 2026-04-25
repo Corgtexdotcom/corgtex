@@ -56,6 +56,9 @@ type Env = {
   readonly DATABASE_URL: string;
   readonly APP_URL: string;
   readonly SESSION_COOKIE_SECRET: string;
+  readonly SESSION_LAST_SEEN_WRITE_INTERVAL_MS: number;
+  readonly REDIS_URL: string | undefined;
+  readonly REDIS_KEY_PREFIX: string;
   readonly AGENT_API_KEY: string | undefined;
   readonly AGENT_ALLOWED_WORKSPACE_IDS: string | undefined;
   readonly MODEL_PROVIDER: string;
@@ -96,6 +99,15 @@ export const env: Env = {
       return required("SESSION_COOKIE_SECRET");
     }
     return optional("SESSION_COOKIE_SECRET") ?? "development-session-secret";
+  },
+  get SESSION_LAST_SEEN_WRITE_INTERVAL_MS() {
+    return numberFromEnv("SESSION_LAST_SEEN_WRITE_INTERVAL_MS", 5 * 60 * 1000);
+  },
+  get REDIS_URL() {
+    return optional("REDIS_URL");
+  },
+  get REDIS_KEY_PREFIX() {
+    return optional("REDIS_KEY_PREFIX") ?? "corgtex";
   },
   get AGENT_API_KEY() {
     return optional("AGENT_API_KEY");

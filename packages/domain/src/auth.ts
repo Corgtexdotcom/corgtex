@@ -1,5 +1,5 @@
 import type { MemberRole } from "@prisma/client";
-import { prisma, hashPassword, parseAllowedWorkspaceIds, randomOpaqueToken, sha256, verifyPassword } from "@corgtex/shared";
+import { env, prisma, hashPassword, parseAllowedWorkspaceIds, randomOpaqueToken, sha256, verifyPassword } from "@corgtex/shared";
 import type { AppActor, MembershipSummary } from "@corgtex/shared";
 import { AppError, invariant } from "./errors";
 
@@ -85,6 +85,7 @@ export async function registerUser(params: { email: string; password: string; di
 }
 
 export async function resolveSessionActor(token: string): Promise<AppActor | null> {
+  const now = new Date();
   const session = await prisma.session.findUnique({
     where: { tokenHash: sha256(token) },
     include: {
@@ -99,16 +100,22 @@ export async function resolveSessionActor(token: string): Promise<AppActor | nul
     },
   });
 
-  if (!session || session.expiresAt <= new Date()) {
+  if (!session || session.expiresAt <= now) {
     return null;
   }
 
-  await prisma.session.update({
-    where: { id: session.id },
-    data: {
-      lastSeenAt: new Date(),
-    },
-  });
+  const lastSeenRefreshBefore = new Date(now.getTime() - env.SESSION_LAST_SEEN_WRITE_INTERVAL_MS);
+  if (session.lastSeenAt <= lastSeenRefreshBefore) {
+    await prisma.session.updateMany({
+      where: {
+        id: session.id,
+        lastSeenAt: { lte: lastSeenRefreshBefore },
+      },
+      data: {
+        lastSeenAt: now,
+      },
+    });
+  }
 
   return {
     kind: "user",

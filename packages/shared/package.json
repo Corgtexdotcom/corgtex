@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "@prisma/client": "6.19.2"
+    "@prisma/client": "6.19.2",
+    "redis": "^5.12.1"
   },
   "exports": {
     ".": "./src/index.ts"

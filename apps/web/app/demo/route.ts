@@ -11,7 +11,7 @@ function getRequestHeaderValue(request: NextRequest, headerName: string) {
 }
 
 export async function GET(request: NextRequest) {
-  const rateLimited = rateLimitAuth(request);
+  const rateLimited = await rateLimitAuth(request);
   if (rateLimited) return rateLimited;
 
   try {

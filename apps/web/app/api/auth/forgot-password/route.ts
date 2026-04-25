@@ -37,7 +37,7 @@ export async function POST(request: NextRequest) {
     const email = String(body.email ?? "").trim().toLowerCase();
 
     // Rate limit before doing any work
-    const rateLimited = rateLimitPasswordReset(request, email);
+    const rateLimited = await rateLimitPasswordReset(request, email);
     if (rateLimited) return rateLimited;
 
     const result = await requestPasswordReset(email);
