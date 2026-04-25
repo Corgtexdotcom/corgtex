@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getConversation, addConversationTurn, renameConversation, deleteConversation } from "@corgtex/domain";
-import { prisma } from "@corgtex/shared";
 import { processConversationTurnStream } from "@corgtex/agents";
 import { defaultModelGateway } from "@corgtex/models";
 import { resolveRequestActor } from "@/lib/auth";
@@ -91,9 +90,10 @@ export async function POST(
                 });
                 const generatedTopic = titleResponse.content.trim().slice(0, 80);
                 if (generatedTopic) {
-                  await prisma.conversationSession.update({
-                    where: { id: conversationId },
-                    data: { topic: generatedTopic },
+                  await renameConversation(actor, {
+                    workspaceId,
+                    conversationId,
+                    topic: generatedTopic,
                   });
                   controller.enqueue(
                     encoder.encode(`data: ${JSON.stringify({ topic: generatedTopic })}\n\n`)

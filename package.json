@@ -42,6 +42,7 @@
     "prisma:validate": "prisma validate",
     "prisma:seed": "npm run seed:base",
     "seed:base": "node prisma/seed.mjs",
+    "seed:e2e": "node scripts/seed-e2e.mjs",
     "seed:pilot-tester": "node scripts/seed-pilot-tester.mjs",
     "seed:demo": "node scripts/seed-corgtex.mjs && node scripts/seed-jnj-demo.mjs",
     "seed:brain": "node scripts/seed-brain.mjs",

@@ -1,38 +1,17 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { prisma } from "@corgtex/shared";
-import { AppError } from "@corgtex/domain";
+import { AppError, createExternalDataSource, listExternalDataSources } from "@corgtex/domain";
 import { withWorkspaceRoute } from "@/lib/route-handler";
 import { encrypt } from "@corgtex/connectors-sql";
 
 export const dynamic = "force-dynamic";
 
-const dataSourceSelect = {
-  id: true,
-  workspaceId: true,
-  label: true,
-  driverType: true,
-  selectedTables: true,
-  pullCadenceMinutes: true,
-  cursorColumn: true,
-  lastSyncAt: true,
-  lastSyncError: true,
-  isActive: true,
-  createdAt: true,
-  updatedAt: true,
-} as const;
-
-export const GET = withWorkspaceRoute(async (request, { workspaceId, membership }) => {
+export const GET = withWorkspaceRoute(async (request, { actor, workspaceId, membership }) => {
   if (membership?.role !== "ADMIN") {
     throw new AppError(403, "FORBIDDEN", "Requires admin access");
   }
 
-  const sources = await prisma.externalDataSource.findMany({
-    where: { workspaceId },
-    orderBy: { createdAt: "desc" },
-    select: dataSourceSelect,
-  });
-
+  const sources = await listExternalDataSources(actor, workspaceId);
   return NextResponse.json(sources);
 });
 
@@ -45,7 +24,7 @@ const createSchema = z.object({
   cursorColumn: z.string().min(1).default("updated_at"),
 });
 
-export const POST = withWorkspaceRoute(async (request, { workspaceId, membership }) => {
+export const POST = withWorkspaceRoute(async (request, { actor, workspaceId, membership }) => {
   if (membership?.role !== "ADMIN") {
     throw new AppError(403, "FORBIDDEN", "Requires admin access");
   }
@@ -53,17 +32,14 @@ export const POST = withWorkspaceRoute(async (request, { workspaceId, membership
   const json = await request.json();
   const parsed = createSchema.parse(json);
 
-  const source = await prisma.externalDataSource.create({
-    data: {
-      workspaceId,
-      label: parsed.label,
-      driverType: parsed.driverType,
-      connectionStringEnc: encrypt(parsed.connectionString),
-      selectedTables: parsed.selectedTables,
-      pullCadenceMinutes: parsed.pullCadenceMinutes,
-      cursorColumn: parsed.cursorColumn,
-    },
-    select: dataSourceSelect,
+  const source = await createExternalDataSource(actor, {
+    workspaceId,
+    label: parsed.label,
+    driverType: parsed.driverType,
+    connectionStringEnc: encrypt(parsed.connectionString),
+    selectedTables: parsed.selectedTables,
+    pullCadenceMinutes: parsed.pullCadenceMinutes,
+    cursorColumn: parsed.cursorColumn,
   });
 
   return NextResponse.json(source);

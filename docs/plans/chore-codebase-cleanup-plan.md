@@ -9,6 +9,10 @@
 
 Make the codebase cleanup invariants enforceable instead of implicit: remove exported placeholder domain APIs, move the remaining app-layer writes behind domain services, keep production startup from running demo/test seed data by default, replace the current dummy integration test with meaningful DB-backed coverage, and update AGENTS/docs so agents run the scripts that actually exist.
 
+## Risk tier
+
+- high
+
 ## Out of scope
 
 - Prisma schema or migration changes.
@@ -25,6 +29,7 @@ Make the codebase cleanup invariants enforceable instead of implicit: remove exp
 - `docs/contributing/testing.mdx`
 - `docs/contributing/development-setup.mdx`
 - `docs/contributing/pull-requests.mdx`
+- `docs/assets/chore-codebase-cleanup-plan/brain-proof.png`
 - `prisma/seed.mjs`
 - `scripts/start-web.mjs`
 - `scripts/seed-e2e.mjs`
@@ -32,6 +37,7 @@ Make the codebase cleanup invariants enforceable instead of implicit: remove exp
 - `packages/domain/src/stubs.ts`
 - `packages/domain/src/crm.ts`
 - `packages/domain/src/integrations.ts`
+- `packages/domain/src/codebase-cleanup.integration.test.ts`
 - `packages/shared/src/dummy.integration.test.ts`
 - `apps/web/app/api/demo-leads/route.ts`
 - `apps/web/app/api/integrations/[provider]/callback/route.ts`
@@ -56,22 +62,22 @@ Suggested shape:
 
 ## Acceptance criteria
 
-- [ ] `packages/domain/src/stubs.ts` is deleted and `packages/domain/src/index.ts` no longer exports `./stubs`.
-- [ ] A repository search finds no exported domain placeholder implementations using `null as any` / `(...args: any[])`.
-- [ ] The demo lead POST route delegates all workspace/demo lead/CRM contact persistence to a domain service.
-- [ ] The OAuth callback route delegates OAuth connection persistence and calendar sync job creation to domain service code.
-- [ ] External data source create/update/delete and manual sync writes are performed by domain service code, including knowledge chunk cleanup on delete.
-- [ ] Brain article inline edits use `updateArticle()`, data-source text ingest uses `ingestSource()`, and conversation auto-title uses `renameConversation()` instead of direct app-layer Prisma writes.
-- [ ] `apps/web/app/**` and `apps/web/lib/**` contain no Prisma write calls or `prisma.$transaction` calls outside tests.
-- [ ] `scripts/start-web.mjs` no longer runs demo/test fixture seed scripts by default; any extra startup seed scripts require an explicit environment variable.
-- [ ] `prisma/seed.mjs` no longer provisions E2E users or reads `AGENT_E2E_EMAIL` / `AGENT_E2E_PASSWORD`.
-- [ ] A dedicated E2E seed script is available through `package.json` and provisions the E2E UI user from `AGENT_E2E_EMAIL` / `AGENT_E2E_PASSWORD`.
-- [ ] Docs explain that `AGENT_API_KEY` is required at runtime for Agent API E2E calls, not as part of production startup seeding.
-- [ ] Integration test coverage includes at least two meaningful DB-backed checks beyond `SELECT 1`, exercising domain mutation behavior and persisted side effects.
-- [ ] The old dummy integration test body is removed or replaced.
-- [ ] `AGENTS.md` and contributing docs accurately describe `npm run test:integration`, `docker-compose.test.yml`, the scope of `npm run check`, production seed behavior, demo seed behavior, and E2E seed behavior.
-- [ ] No Prisma schema or migration files are changed.
-- [ ] Because this touches `apps/web/app/**`, the PR description includes visual proof that the Brain article page still renders after the server-action rewiring.
+- [x] `packages/domain/src/stubs.ts` is deleted and `packages/domain/src/index.ts` no longer exports `./stubs`.
+- [x] A repository search finds no exported domain placeholder implementations using `null as any` / `(...args: any[])`.
+- [x] The demo lead POST route delegates all workspace/demo lead/CRM contact persistence to a domain service.
+- [x] The OAuth callback route delegates OAuth connection persistence and calendar sync job creation to domain service code.
+- [x] External data source create/update/delete and manual sync writes are performed by domain service code, including knowledge chunk cleanup on delete.
+- [x] Brain article inline edits use `updateArticle()`, data-source text ingest uses `ingestSource()`, and conversation auto-title uses `renameConversation()` instead of direct app-layer Prisma writes.
+- [x] `apps/web/app/**` and `apps/web/lib/**` contain no Prisma write calls or `prisma.$transaction` calls outside tests.
+- [x] `scripts/start-web.mjs` no longer runs demo/test fixture seed scripts by default; any extra startup seed scripts require an explicit environment variable.
+- [x] `prisma/seed.mjs` no longer provisions E2E users or reads `AGENT_E2E_EMAIL` / `AGENT_E2E_PASSWORD`.
+- [x] A dedicated E2E seed script is available through `package.json` and provisions the E2E UI user from `AGENT_E2E_EMAIL` / `AGENT_E2E_PASSWORD`.
+- [x] Docs explain that `AGENT_API_KEY` is required at runtime for Agent API E2E calls, not as part of production startup seeding.
+- [x] Integration test coverage includes at least two meaningful DB-backed checks beyond `SELECT 1`, exercising domain mutation behavior and persisted side effects.
+- [x] The old dummy integration test body is removed or replaced with domain-owned coverage.
+- [x] `AGENTS.md` and contributing docs accurately describe `npm run test:integration`, `docker-compose.test.yml`, the scope of `npm run check`, production seed behavior, demo seed behavior, and E2E seed behavior.
+- [x] No Prisma schema or migration files are changed.
+- [x] Because this touches `apps/web/app/**`, the PR description includes visual proof that the Brain article page still renders after the server-action rewiring.
 
 ## Test plan
 
