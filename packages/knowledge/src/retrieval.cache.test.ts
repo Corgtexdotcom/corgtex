@@ -50,11 +50,13 @@ vi.mock("@corgtex/models", () => ({
 }));
 
 import { syncKnowledgeForSource } from "./chunks";
+import { resetLocalCacheStore } from "@corgtex/shared";
 import { answerKnowledgeQuestion, searchIndexedKnowledge, invalidateKnowledgeCache } from "./retrieval";
 
 describe("knowledge retrieval cache", () => {
-  beforeEach(() => {
-    invalidateKnowledgeCache();
+  beforeEach(async () => {
+    resetLocalCacheStore();
+    await invalidateKnowledgeCache();
 
     prismaMock.knowledgeChunk.findMany.mockReset();
     prismaMock.knowledgeChunk.deleteMany.mockReset();

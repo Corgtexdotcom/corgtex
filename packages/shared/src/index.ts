@@ -1,4 +1,5 @@
 export * from "./crypto";
+export * from "./cache";
 export * from "./db";
 export * from "./db-errors";
 export * from "./env";
@@ -8,4 +9,5 @@ export * from "./json";
 export * from "./email";
 export * from "./branding";
 export * from "./math";
+export * from "./redis";
 export * from './logger';

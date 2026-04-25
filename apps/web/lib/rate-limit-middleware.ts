@@ -2,9 +2,9 @@ import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { checkRateLimit, RATE_LIMITS } from "@corgtex/shared";
 
-export function rateLimitWebhookIngest(request: NextRequest, workspaceId: string): NextResponse | null {
+export async function rateLimitWebhookIngest(request: NextRequest, workspaceId: string): Promise<NextResponse | null> {
   const key = `ws:${workspaceId}:webhook-ingest`;
-  const result = checkRateLimit(key, RATE_LIMITS.WEBHOOK_INGEST_PER_WORKSPACE);
+  const result = await checkRateLimit(key, RATE_LIMITS.WEBHOOK_INGEST_PER_WORKSPACE);
 
   if (!result.allowed) {
     return NextResponse.json(
@@ -21,9 +21,9 @@ export function rateLimitWebhookIngest(request: NextRequest, workspaceId: string
   return null;
 }
 
-export function rateLimitAuth(request: NextRequest): NextResponse | null {
+export async function rateLimitAuth(request: NextRequest): Promise<NextResponse | null> {
   const key = `ip:${clientIp(request)}:auth`;
-  const result = checkRateLimit(key, RATE_LIMITS.AUTH_PER_IP);
+  const result = await checkRateLimit(key, RATE_LIMITS.AUTH_PER_IP);
 
   if (!result.allowed) {
     return NextResponse.json(
@@ -40,10 +40,10 @@ export function rateLimitAuth(request: NextRequest): NextResponse | null {
   return null;
 }
 
-export function rateLimitPasswordReset(request: NextRequest, email: string): NextResponse | null {
+export async function rateLimitPasswordReset(request: NextRequest, email: string): Promise<NextResponse | null> {
   const ip = clientIp(request);
 
-  const ipResult = checkRateLimit(`ip:${ip}:password-reset`, RATE_LIMITS.PASSWORD_RESET_PER_IP);
+  const ipResult = await checkRateLimit(`ip:${ip}:password-reset`, RATE_LIMITS.PASSWORD_RESET_PER_IP);
   if (!ipResult.allowed) {
     return NextResponse.json(
       { error: "Too many password reset requests" },
@@ -56,7 +56,7 @@ export function rateLimitPasswordReset(request: NextRequest, email: string): Nex
     );
   }
 
-  const emailResult = checkRateLimit(`email:${email}:password-reset`, RATE_LIMITS.PASSWORD_RESET_PER_EMAIL);
+  const emailResult = await checkRateLimit(`email:${email}:password-reset`, RATE_LIMITS.PASSWORD_RESET_PER_EMAIL);
   if (!emailResult.allowed) {
     return NextResponse.json(
       { error: "Too many password reset requests" },
