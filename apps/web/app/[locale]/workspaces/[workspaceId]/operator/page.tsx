@@ -171,7 +171,7 @@ export default async function OperatorPage({
                     </div>
                     <strong>{run.goal}</strong>
                     <div className="muted">{summarizeRun(run)}</div>
-                    <div className="muted">{`${t("startedAt")} ${formatDateTime(run.startedAt ?? run.createdAt, t("notSet"))}`}</div>
+                    <div className="muted">{t("startedAtMeta", { date: formatDateTime(run.startedAt ?? run.createdAt, t("notSet")) })}</div>
                   </div>
                   {run.status === "WAITING_APPROVAL" && canOperate && (
                     <form action={resolveAgentRunAction} className="actions-inline">
@@ -199,7 +199,13 @@ export default async function OperatorPage({
                             <span className="tag">{usage.provider}</span>
                           </div>
                           <div className="muted">
-                            {usage.model} · {usage.inputTokens} in · {usage.outputTokens} out · {usage.latencyMs} ms · {formatUsd(parseCostUsd(usage.estimatedCostUsd))}
+                            {t("usageDetail", {
+                              model: usage.model,
+                              inputTokens: usage.inputTokens,
+                              outputTokens: usage.outputTokens,
+                              latency: usage.latencyMs,
+                              cost: formatUsd(parseCostUsd(usage.estimatedCostUsd)),
+                            })}
                           </div>
                         </div>
                       ))}
@@ -236,7 +242,11 @@ export default async function OperatorPage({
                   <span className={`status-chip ${event.status === "FAILED" ? "warning" : ""}`}>{event.status}</span>
                 </div>
                 <div className="muted">
-                  {`${event.aggregateType ?? "Event"} · ${formatDateTime(event.createdAt, t("notSet"))} · ${t("labelAttempts")} ${event.attempts}`}
+                  {t("eventMeta", {
+                    aggregateType: event.aggregateType ?? t("eventFallback"),
+                    date: formatDateTime(event.createdAt, t("notSet")),
+                    attempts: event.attempts,
+                  })}
                 </div>
                 {event.error && <p className="muted" style={{ margin: "8px 0 0", color: "#b45309" }}>{event.error}</p>}
                 {canOperate && (
@@ -261,7 +271,10 @@ export default async function OperatorPage({
                   <span className={`status-chip ${job.status === "FAILED" ? "warning" : ""}`}>{job.status}</span>
                 </div>
                 <div className="muted">
-                  {`${t("labelAttempts")} ${job.attempts} · ${t("labelRunAfter")} ${formatDateTime(job.runAfter, t("notSet"))}`}
+                  {t("jobMeta", {
+                    attempts: job.attempts,
+                    date: formatDateTime(job.runAfter, t("notSet")),
+                  })}
                 </div>
                 {job.error && <p className="muted" style={{ margin: "8px 0 0", color: "#b45309" }}>{job.error}</p>}
                 {canOperate && (
@@ -288,7 +301,10 @@ export default async function OperatorPage({
                   <span className={`status-chip ${job.status === "FAILED" ? "warning" : ""}`}>{job.status}</span>
                 </div>
                 <div className="muted">
-                  {`${t("labelAttempts")} ${job.attempts} · ${t("labelFailedAt")} ${formatDateTime(job.updatedAt ?? job.createdAt, t("notSet"))}`}
+                  {t("failedJobMeta", {
+                    attempts: job.attempts,
+                    date: formatDateTime(job.updatedAt ?? job.createdAt, t("notSet")),
+                  })}
                 </div>
                 {job.error && <p className="muted" style={{ margin: "8px 0 0", color: "#b45309" }}>{job.error}</p>}
                 {canOperate && (
