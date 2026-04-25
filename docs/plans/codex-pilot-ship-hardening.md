@@ -11,6 +11,10 @@ Make pilot support and agent testing access explicit, reliable, and auditable wi
 - Agent/bootstrap credential redesign beyond tester login support.
 - Retrieval, worker scaling, model-cost, or queue architecture changes.
 
+## Risk tier
+
+high
+
 ## Files to touch
 
 - `apps/web/app/[locale]/workspaces/[workspaceId]/admin/actions.ts`
