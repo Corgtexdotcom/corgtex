@@ -29,7 +29,7 @@ high
 - [x] `WorkspaceAgentConfig` has a `governancePolicy` string field in Prisma.
 - [x] `AgentRunStep` has a `humanFeedback` string field in Prisma.
 - [x] Agent Governance page has a high-level summary dashboard above the tabs.
-- [x] New "Inbox" tab displays agent runs in `WAITING_APPROVAL` / `NEEDS_INPUT`.
+- [x] New "Inbox" tab displays agent runs in `WAITING_APPROVAL` status.
 - [x] Inbox items show the agent's context and allow humans to submit free-text feedback.
 - [x] Registry tab allows editing and saving plain-text governance policies per agent.
 - [x] Tests and linters pass (`npm run check`).
