@@ -81,7 +81,7 @@ export default async function AgentProfilePage({
             <p className="mt-2 text-stone-600 max-w-2xl">{agent.purposeMd || t("noPurpose")}</p>
             {agent.memberType === "EXTERNAL" && agent.createdByUser && (
               <p className="mt-1 text-sm text-stone-500">
-                {t("connectedBy", { name: agent.createdByUser.displayName })}
+                {t("connectedBy", { name: agent.createdByUser.displayName ?? "" })}
               </p>
             )}
             <p className="mt-1 text-sm text-stone-400 font-mono">{t("key", { key: agent.agentKey })}</p>

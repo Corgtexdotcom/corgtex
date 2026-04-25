@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback } from "react";
+import { useTranslations } from "next-intl";
 import { marked } from "marked";
 
 type ConversationSummary = {
@@ -40,6 +41,7 @@ export function ChatInterface({
   activeSessionId: string | null;
   compact?: boolean;
 }) {
+  const t = useTranslations("chat");
   const [conversations, setConversations] = useState(initialConversations);
   const [sessionId, setSessionId] = useState<string | null>(activeSessionId);
   const [turns, setTurns] = useState<Turn[]>([]);
