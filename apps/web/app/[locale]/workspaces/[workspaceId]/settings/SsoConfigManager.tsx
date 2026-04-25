@@ -1,6 +1,7 @@
 "use client";
 
 import { upsertSsoConfigAction } from "./actions";
+import { useTranslations } from "next-intl";
 
 type SsoConfig = {
   provider: string;
@@ -18,18 +19,19 @@ export function SsoConfigManager({
 }) {
   const googleConfig = configs.find(c => c.provider === "GOOGLE");
   const microsoftConfig = configs.find(c => c.provider === "MICROSOFT");
+  const t = useTranslations("settings");
 
   return (
     <section>
-      <h2 className="nr-section-header">Single Sign-On (SSO)</h2>
+      <h2 className="nr-section-header">{t("sectionSso")}</h2>
       <p className="nr-item-meta" style={{ fontSize: "0.85rem", marginBottom: 16 }}>
-        Configure enterprise login for your workspace.
+        {t("descSso")}
       </p>
 
       {/* Google SSO */}
       <details style={{ marginBottom: 16 }}>
         <summary className="nr-section-header" style={{ borderTop: "none", display: "inline-block", padding: 0, margin: 0, cursor: "pointer", color: googleConfig?.isEnabled ? "var(--accent)" : "inherit" }}>
-          {googleConfig?.isEnabled ? "▶ Google Workspace (Active)" : "▶ Google Workspace (Disabled)"}
+          {googleConfig?.isEnabled ? t("ssoGoogleActive") : t("ssoGoogleDisabled")}
         </summary>
         <form action={upsertSsoConfigAction} className="stack nr-form-section" style={{ marginTop: 8 }}>
           <input type="hidden" name="workspaceId" value={workspaceId} />
@@ -37,30 +39,30 @@ export function SsoConfigManager({
           
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
             <label>
-              Client ID
+              {t("labelClientId")}
               <input name="clientId" defaultValue={googleConfig?.clientId} required />
             </label>
             <label>
-              Client Secret
+              {t("labelClientSecret")}
               <input name="clientSecret" type="password" placeholder={googleConfig ? "********" : ""} required={!googleConfig} />
             </label>
           </div>
           <label>
-            Allowed Domains (comma-separated)
+            {t("labelAllowedDomains")}
             <input name="allowedDomains" defaultValue={googleConfig?.allowedDomains.join(", ")} placeholder="acme.com, acmecorp.com" required />
           </label>
           <label style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8 }}>
             <input type="checkbox" name="isEnabled" defaultChecked={googleConfig?.isEnabled} value="true" />
-            Enable Google SSO
+            {t("enableGoogleSso")}
           </label>
-          <button type="submit" className="small" style={{ width: "fit-content" }}>Save Google SSO</button>
+          <button type="submit" className="small" style={{ width: "fit-content" }}>{t("btnSaveGoogleSso")}</button>
         </form>
       </details>
 
       {/* Microsoft SSO */}
       <details>
         <summary className="nr-section-header" style={{ borderTop: "none", display: "inline-block", padding: 0, margin: 0, cursor: "pointer", color: microsoftConfig?.isEnabled ? "var(--accent)" : "inherit" }}>
-          {microsoftConfig?.isEnabled ? "▶ Microsoft 365 (Active)" : "▶ Microsoft 365 (Disabled)"}
+          {microsoftConfig?.isEnabled ? t("ssoMicrosoftActive") : t("ssoMicrosoftDisabled")}
         </summary>
         <form action={upsertSsoConfigAction} className="stack nr-form-section" style={{ marginTop: 8 }}>
           <input type="hidden" name="workspaceId" value={workspaceId} />
@@ -68,23 +70,23 @@ export function SsoConfigManager({
           
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
             <label>
-              Client ID
+              {t("labelClientId")}
               <input name="clientId" defaultValue={microsoftConfig?.clientId} required />
             </label>
             <label>
-              Client Secret
+              {t("labelClientSecret")}
               <input name="clientSecret" type="password" placeholder={microsoftConfig ? "********" : ""} required={!microsoftConfig} />
             </label>
           </div>
           <label>
-            Allowed Domains (comma-separated)
+            {t("labelAllowedDomains")}
             <input name="allowedDomains" defaultValue={microsoftConfig?.allowedDomains.join(", ")} placeholder="acme.com, acmecorp.com" required />
           </label>
           <label style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8 }}>
             <input type="checkbox" name="isEnabled" defaultChecked={microsoftConfig?.isEnabled} value="true" />
-            Enable Microsoft SSO
+            {t("enableMicrosoftSso")}
           </label>
-          <button type="submit" className="small" style={{ width: "fit-content" }}>Save Microsoft SSO</button>
+          <button type="submit" className="small" style={{ width: "fit-content" }}>{t("btnSaveMicrosoftSso")}</button>
         </form>
       </details>
     </section>

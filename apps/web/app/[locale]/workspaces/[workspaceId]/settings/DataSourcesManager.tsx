@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { FileUploader } from "./FileUploader";
 import { TextPasteUploader } from "./TextPasteUploader";
 import { RecentUploads } from "./RecentUploads";
+import { useTranslations } from "next-intl";
 
 type DataSource = {
   id: string;
@@ -30,6 +31,7 @@ export function DataSourcesManager({ workspaceId, dataSources, documents }: { wo
   const [selectedTables, setSelectedTables] = useState<string[]>([]);
   const [cursorColumn, setCursorColumn] = useState("updated_at");
   const [pullCadenceMinutes, setPullCadenceMinutes] = useState(60);
+  const t = useTranslations("settings");
 
   async function handleTestConnection(e: React.FormEvent) {
     e.preventDefault();
@@ -111,9 +113,9 @@ export function DataSourcesManager({ workspaceId, dataSources, documents }: { wo
       <div>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 32 }}>
           <div>
-            <h2 className="nr-section-header" style={{ marginBottom: 8, borderBottom: 'none' }}>Knowledge Sources</h2>
+            <h2 className="nr-section-header" style={{ marginBottom: 8, borderBottom: 'none' }}>{t("sectionKnowledgeSources")}</h2>
             <p className="nr-item-meta" style={{ fontSize: "0.85rem", marginBottom: 0 }}>
-              Ingest files, raw text, and external databases into the Knowledge Brain.
+              {t("descKnowledgeSources")}
             </p>
           </div>
         </div>
@@ -122,44 +124,44 @@ export function DataSourcesManager({ workspaceId, dataSources, documents }: { wo
         <TextPasteUploader workspaceId={workspaceId} />
 
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 40, marginBottom: 16 }}>
-          <h2 className="nr-section-header" style={{ margin: 0, border: 'none' }}>External Databases</h2>
+          <h2 className="nr-section-header" style={{ margin: 0, border: 'none' }}>{t("sectionExternalDatabases")}</h2>
           <button className="small" onClick={() => setIsAdding(!isAdding)}>
-            {isAdding ? "Cancel" : "+ Add Database"}
+            {isAdding ? t("btnCancel") : t("btnAddDatabase")}
           </button>
         </div>
 
         {isAdding && (
           <form className="nr-form-section stack" style={{ marginBottom: 32, padding: 24, border: "1px solid var(--line)" }} onSubmit={handleSave}>
-            <h3>Add PostgreSQL Database</h3>
+            <h3>{t("titleAddPostgres")}</h3>
             {testingError && <div style={{ color: "var(--danger)", padding: "8px", background: "var(--danger-soft)" }}>{testingError}</div>}
             
             <label>
-              Label
-              <input required value={label} onChange={e => setLabel(e.target.value)} placeholder="Production DB" />
+              {t("labelLabel")}
+              <input required value={label} onChange={e => setLabel(e.target.value)} placeholder={t("placeholderLabel")} />
             </label>
             <label>
-              Connection String
-              <input required type="password" value={connectionString} onChange={e => setConnectionString(e.target.value)} placeholder="postgres://user:pass@host:5432/db" />
+              {t("labelConnectionString")}
+              <input required type="password" value={connectionString} onChange={e => setConnectionString(e.target.value)} placeholder={t("placeholderConnectionString")} />
             </label>
             <label>
-              Pull Cadence (minutes)
+              {t("labelPullCadence")}
               <input required type="number" min="5" value={pullCadenceMinutes} onChange={e => setPullCadenceMinutes(parseInt(e.target.value))} />
             </label>
             <label>
-              Cursor Column
-              <input required value={cursorColumn} onChange={e => setCursorColumn(e.target.value)} placeholder="updated_at" />
+              {t("labelCursorColumn")}
+              <input required value={cursorColumn} onChange={e => setCursorColumn(e.target.value)} placeholder={t("placeholderCursorColumn")} />
             </label>
 
             <div className="actions-inline">
               <button type="button" className="secondary small" disabled={isTesting || !connectionString} onClick={handleTestConnection}>
-                {isTesting ? "Testing..." : "Test Connection"}
+                {isTesting ? t("btnTesting") : t("btnTestConnection")}
               </button>
-              <button type="submit" className="small" disabled={isTesting || selectedTables.length === 0}>Save Database</button>
+              <button type="submit" className="small" disabled={isTesting || selectedTables.length === 0}>{t("btnSaveDatabase")}</button>
             </div>
 
             {availableTables.length > 0 && (
               <div className="stack" style={{ gap: 8 }}>
-                <strong>Select tables to sync</strong>
+                <strong>{t("labelSelectTables")}</strong>
                 {availableTables.map((table) => (
                   <label key={table} style={{ display: "flex", alignItems: "center", gap: 8 }}>
                     <input
@@ -177,7 +179,7 @@ export function DataSourcesManager({ workspaceId, dataSources, documents }: { wo
 
         <div>
           {dataSources.length === 0 && !isAdding && (
-            <p className="nr-item-meta">No external data sources configured.</p>
+            <p className="nr-item-meta">{t("noExternalSources")}</p>
           )}
           
           {dataSources.map(source => (
@@ -188,22 +190,22 @@ export function DataSourcesManager({ workspaceId, dataSources, documents }: { wo
                   <span className="tag" style={{ marginLeft: 8 }}>{source.driverType}</span>
                 </div>
                 <div className="actions-inline">
-                  <button onClick={() => handleSync(source.id)} className="secondary small">Sync Now</button>
-                  <button onClick={() => handleDelete(source.id)} className="danger small">Delete</button>
+                  <button onClick={() => handleSync(source.id)} className="secondary small">{t("btnSyncNow")}</button>
+                  <button onClick={() => handleDelete(source.id)} className="danger small">{t("btnDelete")}</button>
                 </div>
               </div>
               <div className="nr-item-meta" style={{ fontSize: "0.85rem", marginTop: 8 }}>
-                Cadence: {source.pullCadenceMinutes}m | Status: {source.isActive ? "Active" : "Inactive"}
+                {t("metaCadence", { minutes: source.pullCadenceMinutes, status: source.isActive ? t("statusActive") : t("statusInactive") })}
               </div>
               <div className="nr-item-meta" style={{ fontSize: "0.85rem", marginTop: 4 }}>
-                Tables: {source.selectedTables.join(", ") || "None"} | Cursor: {source.cursorColumn}
+                {t("metaTables", { tables: source.selectedTables.join(", ") || t("valNone"), cursor: source.cursorColumn })}
               </div>
               <div className="nr-item-meta" style={{ fontSize: "0.85rem", marginTop: 4 }}>
-                Last Sync: {source.lastSyncAt ? new Date(source.lastSyncAt).toLocaleString() : "Never"}
+                {t("metaLastSync", { date: source.lastSyncAt ? new Date(source.lastSyncAt).toLocaleString() : t("valNever") })}
               </div>
               {source.lastSyncError && (
                 <div style={{ color: "var(--danger)", fontSize: "0.85rem", marginTop: 4 }}>
-                  Error: {source.lastSyncError}
+                  {t("metaError", { error: source.lastSyncError })}
                 </div>
               )}
             </div>
