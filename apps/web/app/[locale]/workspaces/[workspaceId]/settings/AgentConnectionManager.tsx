@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+import { useTranslations } from "next-intl";
 
 type Credential = {
   id: string;
@@ -35,6 +36,7 @@ export function AgentConnectionManager({ workspaceId, mcpUrl, initialCredentials
   const [grantingId, setGrantingId] = useState<string | null>(null);
   const [setupData, setSetupData] = useState<{ provider: Provider; token: string; credentialId: string } | null>(null);
   const [copied, setCopied] = useState(false);
+  const t = useTranslations("settings");
 
   const activeCredentials = credentials.filter(c => c.isActive);
   const optionalScopes = Object.entries(scopeRegistry)
@@ -49,7 +51,7 @@ export function AgentConnectionManager({ workspaceId, mcpUrl, initialCredentials
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ label: provider, scopes: defaultScopes }),
       });
-      if (!res.ok) throw new Error("Failed to create credential");
+      if (!res.ok) throw new Error(t("errorCreateCredential"));
       const data = await res.json();
 
       setCredentials(prev => [data.credential, ...prev]);
@@ -57,20 +59,20 @@ export function AgentConnectionManager({ workspaceId, mcpUrl, initialCredentials
       router.refresh();
     } catch (err) {
       console.error(err);
-      alert("Failed to connect agent");
+      alert(t("errorConnectAgent"));
     } finally {
       setLoadingProvider(null);
     }
   };
 
   const handleRevoke = async (credentialId: string) => {
-    if (!confirm("Are you sure you want to disconnect this integration?")) return;
+    if (!confirm(t("confirmDisconnect"))) return;
 
     try {
       const res = await fetch(`/api/workspaces/${workspaceId}/agent-credentials/${credentialId}/revoke`, {
         method: "POST",
       });
-      if (!res.ok) throw new Error("Failed to revoke credential");
+      if (!res.ok) throw new Error(t("errorRevokeCredential"));
 
       setCredentials(prev => prev.filter(c => c.id !== credentialId));
       if (setupData?.credentialId === credentialId) {
@@ -79,7 +81,7 @@ export function AgentConnectionManager({ workspaceId, mcpUrl, initialCredentials
       router.refresh();
     } catch (err) {
       console.error(err);
-      alert("Failed to disconnect agent");
+      alert(t("errorDisconnectAgent"));
     }
   };
 
@@ -91,7 +93,7 @@ export function AgentConnectionManager({ workspaceId, mcpUrl, initialCredentials
       const res = await fetch(`/api/workspaces/${workspaceId}/agent-credentials/${credentialId}/rotate`, {
         method: "POST",
       });
-      if (!res.ok) throw new Error("Failed to rotate credential");
+      if (!res.ok) throw new Error(t("errorRotateCredential"));
       const data = await res.json();
 
       setCredentials(prev => prev.map(c => c.id === credentialId ? data.credential : c));
@@ -99,7 +101,7 @@ export function AgentConnectionManager({ workspaceId, mcpUrl, initialCredentials
       router.refresh();
     } catch (err) {
       console.error(err);
-      alert("Failed to rotate token");
+      alert(t("errorRotateToken"));
     } finally {
       setLoadingProvider(null);
     }
@@ -118,13 +120,13 @@ export function AgentConnectionManager({ workspaceId, mcpUrl, initialCredentials
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ scopes: target }),
       });
-      if (!res.ok) throw new Error("Failed to grant scopes");
+      if (!res.ok) throw new Error(t("errorGrantScopes"));
       const data = await res.json();
       setCredentials(prev => prev.map(c => c.id === credentialId ? data.credential : c));
       router.refresh();
     } catch (err) {
       console.error(err);
-      alert("Failed to grant scopes");
+      alert(t("errorGrantScopes"));
     } finally {
       setGrantingId(null);
     }
@@ -160,10 +162,10 @@ export function AgentConnectionManager({ workspaceId, mcpUrl, initialCredentials
         {missing.length > 0 && (
           <span
             className="tag"
-            title={`Missing: ${missing.join(", ")}`}
+            title={t("lblMissing", { missing: missing.join(", ") })}
             style={{ fontSize: "0.7rem", padding: "2px 8px", background: "rgba(255,165,0,0.15)", border: "1px dashed rgba(255,165,0,0.5)" }}
           >
-            {missing.length} missing
+            {t("lblMissingCount", { count: missing.length })}
           </span>
         )}
       </div>
@@ -184,7 +186,7 @@ export function AgentConnectionManager({ workspaceId, mcpUrl, initialCredentials
             disabled={grantingId === cred.id}
             title={scope}
           >
-            Grant {scopeRegistry[scope]?.label ?? scope}
+            {t("btnGrantScope", { scope: scopeRegistry[scope]?.label ?? scope })}
           </button>
         ))}
       </div>
@@ -198,22 +200,22 @@ export function AgentConnectionManager({ workspaceId, mcpUrl, initialCredentials
     return (
       <div className="panel" style={{ background: "var(--surface)", border: "1px solid var(--line)", padding: 20, borderRadius: 8, marginTop: 16 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-          <h3 style={{ margin: 0, color: "var(--accent)" }}>{provider} Setup</h3>
-          <button className="button small secondary" onClick={() => setSetupData(null)}>Done</button>
+          <h3 style={{ margin: 0, color: "var(--accent)" }}>{t("titleProviderSetup", { provider })}</h3>
+          <button className="button small secondary" onClick={() => setSetupData(null)}>{t("btnDone")}</button>
         </div>
 
         <div style={{ padding: "12px", background: "rgba(255, 165, 0, 0.1)", border: "1px solid rgba(255, 165, 0, 0.3)", borderRadius: "6px", marginBottom: "20px" }}>
-          <strong style={{ display: "block", marginBottom: "4px" }}>Save your token</strong>
-          <span className="muted" style={{ fontSize: "0.85rem" }}>You won&apos;t be able to see this token again after you close this panel.</span>
+          <strong style={{ display: "block", marginBottom: "4px" }}>{t("titleSaveToken")}</strong>
+          <span className="muted" style={{ fontSize: "0.85rem" }}>{t("descSaveToken")}</span>
         </div>
 
         {provider === "Claude Desktop" && (
           <>
             <p className="muted" style={{ fontSize: "0.85rem", marginBottom: 12 }}>
-              <strong>Option 1: Quick Setup (Terminal)</strong>
+              <strong>{t("opt1QuickSetup")}</strong>
             </p>
             <p className="muted" style={{ fontSize: "0.85rem", marginBottom: 8 }}>
-              Open your Terminal application and paste this entire block, then restart Claude:
+              {t("descQuickSetup")}
             </p>
             <div style={{ position: "relative", marginBottom: 24 }}>
               <pre style={{ background: "black", padding: 16, borderRadius: 6, fontSize: "0.85rem", overflowX: "auto", border: "1px solid var(--line)", margin: 0 }}>
@@ -239,15 +241,15 @@ EOF`}</code>
                 className="button small"
                 style={{ position: "absolute", top: 12, right: 12 }}
               >
-                {copied ? "Copied!" : "Copy"}
+                {copied ? t("btnCopied") : t("btnCopy")}
               </button>
             </div>
 
             <p className="muted" style={{ fontSize: "0.85rem", marginBottom: 12 }}>
-              <strong>Option 2: Manual Setup</strong>
+              <strong>{t("opt2ManualSetup")}</strong>
             </p>
             <p className="muted" style={{ fontSize: "0.85rem", marginBottom: 12 }}>
-              Open Claude Desktop → Settings → Developer → Edit Config, and paste this JSON:
+              {t("descManualSetup")}
             </p>
             <div style={{ position: "relative" }}>
               <pre style={{ background: "black", padding: 16, borderRadius: 6, fontSize: "0.85rem", overflowX: "auto", border: "1px solid var(--line)", margin: 0 }}>
@@ -271,7 +273,7 @@ EOF`}</code>
                 className="button small"
                 style={{ position: "absolute", top: 12, right: 12 }}
               >
-                {copied ? "Copied!" : "Copy JSON"}
+                {copied ? t("btnCopied") : t("btnCopyJson")}
               </button>
             </div>
           </>
@@ -280,7 +282,7 @@ EOF`}</code>
         {provider === "ChatGPT" && (
           <>
             <p className="muted" style={{ fontSize: "0.85rem", marginBottom: 12 }}>
-              Go to <strong>Settings → Developer → Work with Apps</strong>. When adding an MCP server, copy and paste this command:
+              {t("descChatGptSetup")}
             </p>
             <div style={{ position: "relative", marginBottom: 16 }}>
               <pre style={{ background: "black", padding: 16, paddingRight: 100, borderRadius: 6, fontSize: "0.85rem", overflowX: "auto", border: "1px solid var(--line)", margin: 0, whiteSpace: "pre-wrap", wordBreak: "break-all" }}>
@@ -291,7 +293,7 @@ EOF`}</code>
                 className="button small"
                 style={{ position: "absolute", top: 12, right: 12 }}
               >
-                {copied ? "Copied!" : "Copy Cmd"}
+                {copied ? t("btnCopied") : t("btnCopyCmd")}
               </button>
             </div>
           </>
@@ -300,7 +302,7 @@ EOF`}</code>
         {provider === "Cursor" && (
           <>
             <p className="muted" style={{ fontSize: "0.85rem", marginBottom: 12 }}>
-              Go to <strong>Settings → Features → MCP</strong>. Click <em>+ Add New MCP Server</em>. Select type <strong>SSE</strong>, paste the Endpoint URL, and add the Authorization header below:
+              {t("descCursorSetup")}
             </p>
             <div style={{ display: "grid", gap: "12px" }}>
               <div>
@@ -339,18 +341,18 @@ EOF`}</code>
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                   <strong style={{ fontSize: "1rem" }}>{provider}</strong>
                   {isConnected && (
-                    <span className="tag" style={{ background: "var(--accent-soft)", fontWeight: "bold" }}>Connected</span>
+                    <span className="tag" style={{ background: "var(--accent-soft)", fontWeight: "bold" }}>{t("lblConnected")}</span>
                   )}
                   {isConnected && missing.length > 0 && (
                     <span className="tag" style={{ background: "rgba(255,165,0,0.15)", border: "1px dashed rgba(255,165,0,0.5)", fontWeight: "bold" }}>
-                      Needs scope upgrade
+                      {t("lblNeedsScopeUpgrade")}
                     </span>
                   )}
                 </div>
                 <div className="muted" style={{ fontSize: "0.85rem", marginTop: 4 }}>
                   {isConnected
-                    ? `Last used: ${credential.lastUsedAt ? new Date(credential.lastUsedAt).toLocaleDateString() : "Never"}`
-                    : `Connect Corgtex to ${provider}`
+                    ? t("lblLastUsed", { date: credential.lastUsedAt ? new Date(credential.lastUsedAt).toLocaleDateString() : t("valNever") })
+                    : t("lblConnectProvider", { provider })
                   }
                 </div>
                 {isConnected && (
@@ -368,7 +370,7 @@ EOF`}</code>
                     onClick={() => handleConnect(provider)}
                     disabled={loadingProvider === provider}
                   >
-                    {loadingProvider === provider ? "Connecting..." : "Connect"}
+                    {loadingProvider === provider ? t("btnConnecting") : t("btnConnect")}
                   </button>
                 ) : (
                   <>
@@ -377,24 +379,24 @@ EOF`}</code>
                         className="button"
                         onClick={() => handleGrantMissing(credential.id)}
                         disabled={grantingId === credential.id}
-                        title={`Grant ${missing.length} missing scope(s) without rotating the token`}
+                        title={t("titleGrantMissing", { count: missing.length })}
                       >
-                        {grantingId === credential.id ? "Granting..." : `Grant ${missing.length} missing`}
+                        {grantingId === credential.id ? t("btnGranting") : t("btnGrantMissingCount", { count: missing.length })}
                       </button>
                     )}
                     <button
                       className="button secondary"
                       onClick={() => handleRotate(provider, credential.id)}
                       disabled={loadingProvider === provider}
-                      title="Issue a new token (same scopes). The old token stops working."
+                      title={t("titleRotateToken")}
                     >
-                      Rotate token
+                      {t("btnRotateToken")}
                     </button>
                     <button
                       className="button secondary danger"
                       onClick={() => handleRevoke(credential.id)}
                     >
-                      Disconnect
+                      {t("btnDisconnect")}
                     </button>
                   </>
                 )}
@@ -409,7 +411,7 @@ EOF`}</code>
       {/* Show custom/unknown credentials that were created outside this UI */}
       {activeCredentials.filter(c => !PROVIDERS.includes(c.label as Provider)).length > 0 && (
         <div style={{ marginTop: 24 }}>
-          <h3 style={{ fontSize: "0.95rem", marginBottom: 12 }}>Other Connections</h3>
+          <h3 style={{ fontSize: "0.95rem", marginBottom: 12 }}>{t("titleOtherConnections")}</h3>
           <div className="list">
             {activeCredentials.filter(c => !PROVIDERS.includes(c.label as Provider)).map((cred) => {
               const missing = missingScopes(cred, defaultScopes);
@@ -417,15 +419,15 @@ EOF`}</code>
                 <div className="item" key={cred.id}>
                   <div className="row">
                     <strong>{cred.label}</strong>
-                    <span className="tag">Active</span>
+                    <span className="tag">{t("lblActive")}</span>
                     {missing.length > 0 && (
                       <span className="tag" style={{ background: "rgba(255,165,0,0.15)", border: "1px dashed rgba(255,165,0,0.5)" }}>
-                        Needs scope upgrade
+                        {t("lblNeedsScopeUpgrade")}
                       </span>
                     )}
                   </div>
                   <div className="muted" style={{ fontSize: "0.85rem" }}>
-                    Last used {cred.lastUsedAt ? new Date(cred.lastUsedAt).toLocaleDateString() : "Never"}
+                    {t("lblLastUsedOther", { date: cred.lastUsedAt ? new Date(cred.lastUsedAt).toLocaleDateString() : t("valNever") })}
                   </div>
                   {renderScopeChips(cred)}
                   {renderOptionalScopeGrants(cred)}
@@ -436,14 +438,14 @@ EOF`}</code>
                         onClick={() => handleGrantMissing(cred.id)}
                         disabled={grantingId === cred.id}
                       >
-                        {grantingId === cred.id ? "Granting..." : `Grant ${missing.length} missing`}
+                        {grantingId === cred.id ? t("btnGranting") : t("btnGrantMissingCount", { count: missing.length })}
                       </button>
                     )}
                     <button
                       className="button secondary danger small"
                       onClick={() => handleRevoke(cred.id)}
                     >
-                      Disconnect
+                      {t("btnDisconnect")}
                     </button>
                   </div>
                 </div>
