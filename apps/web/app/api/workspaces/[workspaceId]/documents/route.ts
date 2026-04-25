@@ -1,6 +1,7 @@
 import type { Prisma } from "@prisma/client";
 import { NextRequest, NextResponse } from "next/server";
 import { AppError, createDocument, listDocuments, requireWorkspaceMembership } from "@corgtex/domain";
+import type { ArchiveFilter } from "@corgtex/domain";
 import { ingestFile } from "@corgtex/knowledge";
 import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
@@ -37,7 +38,8 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     const { workspaceId } = await params;
     const actor = await resolveRequestActor(request);
     await requireWorkspaceMembership({ actor, workspaceId });
-    const documents = await listDocuments(workspaceId);
+    const archiveFilter = request.nextUrl.searchParams.get("archiveFilter") as ArchiveFilter | null;
+    const documents = await listDocuments(workspaceId, { archiveFilter: archiveFilter ?? undefined });
     return NextResponse.json({ documents });
   } catch (error) {
     return handleRouteError(error);

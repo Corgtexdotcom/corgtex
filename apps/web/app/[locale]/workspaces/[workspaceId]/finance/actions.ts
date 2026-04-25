@@ -6,6 +6,8 @@ import { asString, asOptional, asOptionalInt, refresh } from "../action-utils";
 import {
   createLedgerAccount,
   createSpend,
+  deleteLedgerAccount,
+  deleteSpend,
   linkSpendLedgerAccount,
   markSpendPaid,
   submitSpend,
@@ -100,6 +102,32 @@ export async function updateLedgerAccountAction(formData: FormData) {
     name: formData.has("name") ? asOptional(formData, "name") ?? undefined : undefined,
     currency: formData.has("currency") ? asOptional(formData, "currency") ?? undefined : undefined,
     type: formData.has("type") ? asOptional(formData, "type") : undefined,
+  });
+  refresh(workspaceId);
+}
+
+export async function archiveSpendAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  await deleteSpend(actor, {
+    workspaceId,
+    spendId: asString(formData, "spendId"),
+  });
+  refresh(workspaceId);
+}
+
+export async function archiveLedgerAccountAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  await deleteLedgerAccount(actor, {
+    workspaceId,
+    accountId: asString(formData, "accountId"),
   });
   refresh(workspaceId);
 }

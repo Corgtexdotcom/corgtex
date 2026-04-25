@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { createLedgerAccount, listLedgerAccounts, requireWorkspaceMembership } from "@corgtex/domain";
+import type { ArchiveFilter } from "@corgtex/domain";
 import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError, validateBody } from "@/lib/http";
 
@@ -16,7 +17,8 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     const actor = await resolveRequestActor(request);
     const { workspaceId } = await params;
     await requireWorkspaceMembership({ actor, workspaceId });
-    const ledgerAccounts = await listLedgerAccounts(workspaceId);
+    const archiveFilter = request.nextUrl.searchParams.get("archiveFilter") as ArchiveFilter | null;
+    const ledgerAccounts = await listLedgerAccounts(workspaceId, { archiveFilter: archiveFilter ?? undefined });
     return NextResponse.json({ ledgerAccounts });
   } catch (error) {
     return handleRouteError(error);

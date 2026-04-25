@@ -1,9 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createCircle, listCircles } from "@corgtex/domain";
+import type { ArchiveFilter } from "@corgtex/domain";
 import { withWorkspaceRoute } from "@/lib/route-handler";
 
 export const GET = withWorkspaceRoute(async (req, { workspaceId }) => {
-  const circles = await listCircles(workspaceId);
+  const archiveFilter = req.nextUrl.searchParams.get("archiveFilter") as ArchiveFilter | null;
+  const circles = await listCircles(workspaceId, { archiveFilter: archiveFilter ?? undefined });
   return NextResponse.json({ circles });
 });
 

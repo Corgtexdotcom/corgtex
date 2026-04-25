@@ -2,11 +2,12 @@ import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { appendEvents } from "./events";
 import { requireWorkspaceMembership } from "./auth";
+import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { invariant } from "./errors";
 
-export async function listMeetings(workspaceId: string) {
+export async function listMeetings(workspaceId: string, opts?: { archiveFilter?: ArchiveFilter }) {
   return prisma.meeting.findMany({
-    where: { workspaceId },
+    where: { workspaceId, ...archiveFilterWhere(opts?.archiveFilter) },
     orderBy: { recordedAt: "desc" },
   });
 }
@@ -16,6 +17,7 @@ export async function getMeeting(workspaceId: string, meetingId: string) {
     where: {
       id: meetingId,
       workspaceId,
+      archivedAt: null,
     },
     include: {
       proposals: {
@@ -149,29 +151,12 @@ export async function deleteMeeting(actor: AppActor, params: {
     allowedRoles: ["ADMIN"],
   });
 
-  return prisma.$transaction(async (tx) => {
-    const meeting = await tx.meeting.findUnique({
-      where: {
-        id: params.meetingId,
-        workspaceId: params.workspaceId,
-      },
-    });
-
-    invariant(meeting, 404, "NOT_FOUND", "Meeting not found.");
-
-    await tx.meeting.delete({ where: { id: meeting.id } });
-
-    await tx.auditLog.create({
-      data: {
-        workspaceId: params.workspaceId,
-        actorUserId: actor.kind === "user" ? actor.user.id : null,
-        action: "meeting.deleted",
-        entityType: "Meeting",
-        entityId: meeting.id,
-        meta: { title: meeting.title, source: meeting.source },
-      },
-    });
-
-    return { id: meeting.id };
+  await archiveWorkspaceArtifact(actor, {
+    workspaceId: params.workspaceId,
+    entityType: "Meeting",
+    entityId: params.meetingId,
+    reason: "Archived from meeting delete path.",
   });
+
+  return { id: params.meetingId };
 }

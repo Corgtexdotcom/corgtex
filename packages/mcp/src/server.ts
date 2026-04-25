@@ -16,6 +16,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import {
   listProposals,
+  archiveWorkspaceArtifact,
   createProposal,
   updateProposal,
   archiveProposal,
@@ -58,9 +59,14 @@ import {
   listPolicyCorpus,
   getApprovalPolicies,
   createSpend,
+  deleteLedgerAccount,
+  deleteSpend,
   submitSpend,
   listSpends,
   listLedgerAccounts,
+  listArchivedWorkspaceArtifacts,
+  purgeWorkspaceArtifact,
+  restoreWorkspaceArtifact,
 } from "@corgtex/domain";
 import { searchIndexedKnowledge } from "@corgtex/knowledge";
 import { processConversationTurn } from "@corgtex/agents";
@@ -517,14 +523,14 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
 
   server.tool(
     "delete_action",
-    "Permanently delete an action.",
+    "Archive an action so it stops appearing in active views. The record remains recoverable from the archive.",
     {
       actionId: z.string(),
     },
     async ({ actionId }: { actionId: string }) => {
       requireScope(sessionCtx, "actions:write");
       const result = await deleteAction(actor, { workspaceId, actionId });
-      return jsonResult({ id: result.id, deleted: true });
+      return jsonResult({ id: result.id, archived: true, webUrl: webUrl(workspaceId, `/audit?tab=archive`) });
     },
   );
 
@@ -631,14 +637,14 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
 
   server.tool(
     "delete_tension",
-    "Permanently delete a tension.",
+    "Archive a tension so it stops appearing in active views. The record remains recoverable from the archive.",
     {
       tensionId: z.string(),
     },
     async ({ tensionId }: { tensionId: string }) => {
       requireScope(sessionCtx, "tensions:write");
       const result = await deleteTension(actor, { workspaceId, tensionId });
-      return jsonResult({ id: result.id, deleted: true });
+      return jsonResult({ id: result.id, archived: true, webUrl: webUrl(workspaceId, `/audit?tab=archive`) });
     },
   );
 
@@ -813,14 +819,14 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
 
   server.tool(
     "delete_meeting",
-    "Permanently delete a meeting and its transcript. Admin-only.",
+    "Archive a meeting and its transcript so it stops appearing in active views. Admin-only.",
     {
       meetingId: z.string(),
     },
     async ({ meetingId }: { meetingId: string }) => {
       requireScope(sessionCtx, "meetings:write");
       const result = await deleteMeeting(actor, { workspaceId, meetingId });
-      return jsonResult({ id: result.id, deleted: true });
+      return jsonResult({ id: result.id, archived: true, webUrl: webUrl(workspaceId, `/audit?tab=archive`) });
     },
   );
 
@@ -961,14 +967,14 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
 
   server.tool(
     "delete_article",
-    "Permanently delete a Brain article and its indexed knowledge chunks.",
+    "Archive a Brain article so it stops appearing in active views. Indexed chunks are kept until an explicit purge.",
     {
       slug: z.string(),
     },
     async ({ slug }: { slug: string }) => {
       requireScope(sessionCtx, "brain:write");
       const result = await deleteArticle(actor, { workspaceId, slug });
-      return jsonResult({ id: result.id, deleted: true });
+      return jsonResult({ id: result.id, archived: true, webUrl: webUrl(workspaceId, `/audit?tab=archive`) });
     },
   );
 
@@ -1374,6 +1380,19 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
   );
 
   server.tool(
+    "archive_spend",
+    "Archive a spend request so it stops appearing in active finance views. Submitted or paid spend remains recoverable and auditable.",
+    {
+      spendId: z.string(),
+    },
+    async ({ spendId }: { spendId: string }) => {
+      requireScope(sessionCtx, "finance:write");
+      const result = await deleteSpend(actor, { workspaceId, spendId });
+      return jsonResult({ id: result.id, archived: true, webUrl: webUrl(workspaceId, `/audit?tab=archive`) });
+    },
+  );
+
+  server.tool(
     "list_ledger_accounts",
     "List ledger accounts (checking, savings, credit, etc) in the workspace.",
     {},
@@ -1388,6 +1407,98 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         balanceCents: a.balanceCents,
       }));
       return jsonResult(simplified);
+    },
+  );
+
+  server.tool(
+    "archive_ledger_account",
+    "Archive a ledger account so it is hidden from active finance views. Ledger entries are preserved.",
+    {
+      accountId: z.string(),
+    },
+    async ({ accountId }: { accountId: string }) => {
+      requireScope(sessionCtx, "finance:write");
+      const result = await deleteLedgerAccount(actor, { workspaceId, accountId });
+      return jsonResult({ id: result.id, archived: true, webUrl: webUrl(workspaceId, `/audit?tab=archive`) });
+    },
+  );
+
+  server.tool(
+    "archive_artifact",
+    "Archive any supported workspace artifact by entity type and id. Normal destructive actions should use archive, not purge.",
+    {
+      entityType: z.string(),
+      entityId: z.string(),
+      reason: z.string().optional(),
+    },
+    async ({ entityType, entityId, reason }: { entityType: string; entityId: string; reason?: string }) => {
+      requireScope(sessionCtx, "archive:write");
+      const archived = await archiveWorkspaceArtifact(actor, {
+        workspaceId,
+        entityType,
+        entityId,
+        reason: reason ?? null,
+      });
+      return jsonResult({ id: archived.id, archived: true, webUrl: webUrl(workspaceId, `/audit?tab=archive`) });
+    },
+  );
+
+  server.tool(
+    "list_archived_artifacts",
+    "List archived workspace artifacts for recovery and audit. Admin/privileged archive scope only.",
+    {
+      entityType: z.string().optional(),
+      take: z.number().optional(),
+      skip: z.number().optional(),
+      includeRestored: z.boolean().optional(),
+      includePurged: z.boolean().optional(),
+    },
+    async (params: {
+      entityType?: string;
+      take?: number;
+      skip?: number;
+      includeRestored?: boolean;
+      includePurged?: boolean;
+    }) => {
+      requireScope(sessionCtx, "archive:read");
+      const items = await listArchivedWorkspaceArtifacts(actor, {
+        workspaceId,
+        entityType: params.entityType,
+        take: params.take,
+        skip: params.skip,
+        includeRestored: params.includeRestored,
+        includePurged: params.includePurged,
+      });
+      return jsonResult({ items, webUrl: webUrl(workspaceId, `/audit?tab=archive`) });
+    },
+  );
+
+  server.tool(
+    "restore_artifact",
+    "Restore an archived workspace artifact back to active views. Admin/privileged archive scope only.",
+    {
+      entityType: z.string(),
+      entityId: z.string(),
+    },
+    async ({ entityType, entityId }: { entityType: string; entityId: string }) => {
+      requireScope(sessionCtx, "archive:write");
+      const restored = await restoreWorkspaceArtifact(actor, { workspaceId, entityType, entityId });
+      return jsonResult({ id: restored.id, restored: true, webUrl: webUrl(workspaceId, `/audit?tab=archive`) });
+    },
+  );
+
+  server.tool(
+    "purge_artifact",
+    "Permanently purge an eligible archived workspace artifact. This is restricted, requires a reason, and refuses immutable finance/audit history.",
+    {
+      entityType: z.string(),
+      entityId: z.string(),
+      reason: z.string().min(1),
+    },
+    async ({ entityType, entityId, reason }: { entityType: string; entityId: string; reason: string }) => {
+      requireScope(sessionCtx, "archive:write");
+      const result = await purgeWorkspaceArtifact(actor, { workspaceId, entityType, entityId, reason });
+      return jsonResult({ id: result.id, purged: true, webUrl: webUrl(workspaceId, `/audit?tab=archive`) });
     },
   );
 

@@ -79,6 +79,7 @@ describe("getProposal", () => {
       where: {
         id: "p-private",
         workspaceId: "ws-1",
+        archivedAt: null,
         OR: [
           { isPrivate: false },
           { isPrivate: true, authorUserId: "u-1" },
@@ -116,6 +117,7 @@ describe("getProposal", () => {
       where: {
         id: "p-private",
         workspaceId: "ws-1",
+        archivedAt: null,
         OR: [
           { isPrivate: false },
           { isPrivate: true, authorUserId: "u-admin" },

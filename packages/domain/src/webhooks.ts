@@ -1,16 +1,17 @@
 import { prisma, toInputJson } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
+import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { invariant } from "./errors";
 import { randomBytes, createHmac } from "node:crypto";
 
 // --- Webhook Endpoints (outbound) ---
 
-export async function listWebhookEndpoints(actor: AppActor, workspaceId: string) {
+export async function listWebhookEndpoints(actor: AppActor, workspaceId: string, opts?: { archiveFilter?: ArchiveFilter }) {
   await requireWorkspaceMembership({ actor, workspaceId, allowedRoles: ["ADMIN"] });
 
   return prisma.webhookEndpoint.findMany({
-    where: { workspaceId },
+    where: { workspaceId, ...archiveFilterWhere(opts?.archiveFilter) },
     orderBy: { createdAt: "desc" },
     select: {
       id: true,
@@ -66,7 +67,7 @@ export async function updateWebhookEndpoint(actor: AppActor, params: {
   }
 
   const endpoint = await prisma.webhookEndpoint.findFirst({
-    where: { id: params.endpointId, workspaceId: params.workspaceId },
+    where: { id: params.endpointId, workspaceId: params.workspaceId, archivedAt: null },
   });
   invariant(endpoint, 404, "NOT_FOUND", "Webhook endpoint not found.");
 
@@ -87,12 +88,14 @@ export async function deleteWebhookEndpoint(actor: AppActor, params: {
 }) {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, allowedRoles: ["ADMIN"] });
 
-  const endpoint = await prisma.webhookEndpoint.findFirst({
-    where: { id: params.endpointId, workspaceId: params.workspaceId },
+  await archiveWorkspaceArtifact(actor, {
+    workspaceId: params.workspaceId,
+    entityType: "WebhookEndpoint",
+    entityId: params.endpointId,
+    reason: "Archived from webhook delete path.",
   });
-  invariant(endpoint, 404, "NOT_FOUND", "Webhook endpoint not found.");
 
-  return prisma.webhookEndpoint.delete({ where: { id: params.endpointId } });
+  return { id: params.endpointId };
 }
 
 export async function rotateWebhookSecret(actor: AppActor, params: {
@@ -102,7 +105,7 @@ export async function rotateWebhookSecret(actor: AppActor, params: {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, allowedRoles: ["ADMIN"] });
 
   const endpoint = await prisma.webhookEndpoint.findFirst({
-    where: { id: params.endpointId, workspaceId: params.workspaceId },
+    where: { id: params.endpointId, workspaceId: params.workspaceId, archivedAt: null },
   });
   invariant(endpoint, 404, "NOT_FOUND", "Webhook endpoint not found.");
 

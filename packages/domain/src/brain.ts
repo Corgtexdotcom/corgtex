@@ -4,6 +4,7 @@ import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { appendEvents } from "./events";
 import { requireWorkspaceMembership } from "./auth";
+import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { invariant } from "./errors";
 
 // ---------------------------------------------------------------------------
@@ -195,12 +196,11 @@ export async function getArticle(actor: AppActor, params: {
     workspaceId: params.workspaceId,
   });
 
-  const article = await prisma.brainArticle.findUnique({
+  const article = await prisma.brainArticle.findFirst({
     where: {
-      workspaceId_slug: {
-        workspaceId: params.workspaceId,
-        slug: params.slug,
-      },
+      workspaceId: params.workspaceId,
+      slug: params.slug,
+      archivedAt: null,
     },
     include: {
       ownerMember: {
@@ -258,6 +258,7 @@ export async function listArticles(actor: AppActor, params: {
   stale?: boolean;
   take?: number;
   skip?: number;
+  archiveFilter?: ArchiveFilter;
 }) {
   const membership = await requireWorkspaceMembership({
     actor,
@@ -275,6 +276,7 @@ export async function listArticles(actor: AppActor, params: {
     workspaceId: params.workspaceId,
     ...(params.type ? { type: params.type } : {}),
     ...(params.authority ? { authority: params.authority } : {}),
+    ...archiveFilterWhere(params.archiveFilter),
   };
 
   const where: Prisma.BrainArticleWhereInput = {
@@ -333,41 +335,13 @@ export async function deleteArticle(actor: AppActor, params: {
     workspaceId: params.workspaceId,
   });
 
-  return prisma.$transaction(async (tx) => {
-    const article = await tx.brainArticle.findUnique({
-      where: {
-        workspaceId_slug: {
-          workspaceId: params.workspaceId,
-          slug: params.slug,
-        },
-      },
-    });
-
-    invariant(article, 404, "NOT_FOUND", "Article not found.");
-
-    await tx.brainArticle.delete({ where: { id: article.id } });
-
-    await tx.knowledgeChunk.deleteMany({
-      where: {
-        workspaceId: params.workspaceId,
-        sourceType: "BRAIN_ARTICLE",
-        sourceId: article.id,
-      },
-    });
-
-    await tx.auditLog.create({
-      data: {
-        workspaceId: params.workspaceId,
-        actorUserId: actor.kind === "user" ? actor.user.id : null,
-        action: "brain-article.deleted",
-        entityType: "BrainArticle",
-        entityId: article.id,
-        meta: { title: article.title, slug: article.slug },
-      },
-    });
-
-    return { id: article.id };
+  const archived = await archiveWorkspaceArtifact(actor, {
+    workspaceId: params.workspaceId,
+    entityType: "BrainArticle",
+    entityId: params.slug,
+    reason: "Archived from Brain article delete path.",
   });
+  return { id: archived.id };
 }
 
 export async function listArticleVersions(actor: AppActor, params: {
@@ -465,6 +439,7 @@ export async function listSources(actor: AppActor, params: {
   absorbed?: boolean;
   take?: number;
   skip?: number;
+  archiveFilter?: ArchiveFilter;
 }) {
   await requireWorkspaceMembership({
     actor,
@@ -476,6 +451,7 @@ export async function listSources(actor: AppActor, params: {
 
   const where: Prisma.BrainSourceWhereInput = {
     workspaceId: params.workspaceId,
+    ...archiveFilterWhere(params.archiveFilter),
   };
 
   if (params.absorbed === true) {
@@ -523,31 +499,14 @@ export async function deleteSource(actor: AppActor, params: {
     allowedRoles: ["ADMIN"],
   });
 
-  return prisma.$transaction(async (tx) => {
-    const source = await tx.brainSource.findUnique({
-      where: {
-        id: params.sourceId,
-        workspaceId: params.workspaceId,
-      },
-    });
-
-    invariant(source, 404, "NOT_FOUND", "Source not found.");
-
-    await tx.brainSource.delete({ where: { id: source.id } });
-
-    await tx.auditLog.create({
-      data: {
-        workspaceId: params.workspaceId,
-        actorUserId: actor.kind === "user" ? actor.user.id : null,
-        action: "brain-source.deleted",
-        entityType: "BrainSource",
-        entityId: source.id,
-        meta: { sourceType: source.sourceType, tier: source.tier },
-      },
-    });
-
-    return { id: source.id };
+  await archiveWorkspaceArtifact(actor, {
+    workspaceId: params.workspaceId,
+    entityType: "BrainSource",
+    entityId: params.sourceId,
+    reason: "Archived from Brain source delete path.",
   });
+
+  return { id: params.sourceId };
 }
 
 // ---------------------------------------------------------------------------
