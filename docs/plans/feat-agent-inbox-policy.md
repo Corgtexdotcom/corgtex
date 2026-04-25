@@ -3,6 +3,9 @@
 ## Goal
 Elevate Agent Governance by replacing rigid hardcoded toggles with versioned, plain-text governance policies per agent, and introducing an "Agent Inbox" tab. The inbox treats `WAITING_APPROVAL` states as "Agents asking humans for input" rather than bureaucratic gates, fostering a more conversational human-in-the-loop workflow.
 
+## Risk tier
+high
+
 ## Out of scope
 - Cryptographic signing of audit logs (V1 relies on simple exports, to be done later).
 - Visual Access Topology map (P1 phase, out of scope for this PR).
