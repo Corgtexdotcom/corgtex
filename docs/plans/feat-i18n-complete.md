@@ -21,9 +21,12 @@ The objective is to finalize the internationalization (i18n) of the Corgtex plat
 - `apps/web/app/[locale]/workspaces/[workspaceId]/settings/TextPasteUploader.tsx`
 - `apps/web/app/[locale]/workspaces/[workspaceId]/settings/agents/AgentBudgetManager.tsx`
 - `apps/web/app/[locale]/workspaces/[workspaceId]/settings/agents/AgentSettingsClient.tsx`
+- `apps/web/app/[locale]/workspaces/[workspaceId]/settings/expertise/page.tsx`
+- `apps/web/app/[locale]/workspaces/[workspaceId]/settings/page.tsx`
 - `apps/web/messages/en.json`
 - `apps/web/messages/es.json`
 - `docs/plans/feat-i18n-complete.md`
+- `docs/assets/visual_proof_feat_i18n_complete.png`
 
 ## Acceptance criteria
 
