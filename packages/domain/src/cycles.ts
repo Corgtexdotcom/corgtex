@@ -3,6 +3,7 @@ import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { actorUserIdForWorkspace, requireWorkspaceMembership } from "./auth";
 import { appendEvents } from "./events";
+import { archiveFilterWhere, type ArchiveFilter } from "./archive";
 import { invariant } from "./errors";
 
 const MUTABLE_CYCLE_STATUSES = new Set<CycleStatus>(["PLANNED", "OPEN_UPDATES", "OPEN_ALLOCATIONS", "REVIEW"]);
@@ -31,12 +32,12 @@ export function normalizeAllocationPoints(points: number) {
   return points;
 }
 
-export async function listCycles(workspaceId: string, opts?: { take?: number; skip?: number }) {
+export async function listCycles(workspaceId: string, opts?: { take?: number; skip?: number; archiveFilter?: ArchiveFilter }) {
   const take = opts?.take ?? 20;
   const skip = opts?.skip ?? 0;
   const [items, total] = await Promise.all([
     prisma.cycle.findMany({
-      where: { workspaceId },
+      where: { workspaceId, ...archiveFilterWhere(opts?.archiveFilter) },
       include: {
         updates: {
           include: {
@@ -74,7 +75,7 @@ export async function listCycles(workspaceId: string, opts?: { take?: number; sk
       take,
       skip,
     }),
-    prisma.cycle.count({ where: { workspaceId } }),
+    prisma.cycle.count({ where: { workspaceId, ...archiveFilterWhere(opts?.archiveFilter) } }),
   ]);
 
   return { items, total, take, skip };
@@ -92,7 +93,7 @@ async function findCycleForWorkspace(tx: typeof prisma | Parameters<Parameters<t
   const cycle = await tx.cycle.findUnique({
     where: { id: cycleId },
   });
-  invariant(cycle && cycle.workspaceId === workspaceId, 404, "NOT_FOUND", "Cycle not found.");
+  invariant(cycle && cycle.workspaceId === workspaceId && !cycle.archivedAt, 404, "NOT_FOUND", "Cycle not found.");
   return cycle;
 }
 

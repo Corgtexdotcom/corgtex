@@ -2,15 +2,16 @@ import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { appendEvents } from "./events";
 import { actorUserIdForWorkspace, requireWorkspaceMembership } from "./auth";
+import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { invariant } from "./errors";
 
 import { privacyFilter } from "./privacy";
 
-export async function listTensions(actor: AppActor, workspaceId: string, opts?: { take?: number; skip?: number }) {
+export async function listTensions(actor: AppActor, workspaceId: string, opts?: { take?: number; skip?: number; archiveFilter?: ArchiveFilter }) {
   const take = opts?.take ?? 20;
   const skip = opts?.skip ?? 0;
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
-  const where = { workspaceId, ...privacyFilter(actor, membership) };
+  const where = { workspaceId, ...privacyFilter(actor, membership), ...archiveFilterWhere(opts?.archiveFilter) };
 
   const [items, total] = await Promise.all([
     prisma.tension.findMany({
@@ -185,28 +186,14 @@ export async function deleteTension(actor: AppActor, params: {
     workspaceId: params.workspaceId,
   });
 
-  return prisma.$transaction(async (tx) => {
-    const tension = await tx.tension.findUnique({
-      where: { id: params.tensionId },
-    });
-
-    invariant(tension && tension.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Tension not found.");
-
-    await tx.tension.delete({ where: { id: params.tensionId } });
-
-    await tx.auditLog.create({
-      data: {
-        workspaceId: params.workspaceId,
-        actorUserId: actor.kind === "user" ? actor.user.id : null,
-        action: "tension.deleted",
-        entityType: "Tension",
-        entityId: params.tensionId,
-        meta: { title: tension.title },
-      },
-    });
-
-    return { id: params.tensionId };
+  await archiveWorkspaceArtifact(actor, {
+    workspaceId: params.workspaceId,
+    entityType: "Tension",
+    entityId: params.tensionId,
+    reason: "Archived from tension delete path.",
   });
+
+  return { id: params.tensionId };
 }
 
 export async function upvoteTension(actor: AppActor, params: {

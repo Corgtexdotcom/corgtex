@@ -3,15 +3,16 @@ import type { AppActor } from "@corgtex/shared";
 import { appendEvents } from "./events";
 import { actorUserIdForWorkspace, requireWorkspaceMembership } from "./auth";
 import { recordAudit } from "./audit-trail";
+import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { invariant } from "./errors";
 
 import { privacyFilter } from "./privacy";
 
-export async function listActions(actor: AppActor, workspaceId: string, opts?: { take?: number; skip?: number }) {
+export async function listActions(actor: AppActor, workspaceId: string, opts?: { take?: number; skip?: number; archiveFilter?: ArchiveFilter }) {
   const take = opts?.take ?? 20;
   const skip = opts?.skip ?? 0;
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
-  const where = { workspaceId, ...privacyFilter(actor, membership) };
+  const where = { workspaceId, ...privacyFilter(actor, membership), ...archiveFilterWhere(opts?.archiveFilter) };
   
   const [items, total] = await Promise.all([
     prisma.action.findMany({
@@ -185,25 +186,14 @@ export async function deleteAction(actor: AppActor, params: {
     resolvedMembership: params._membership,
   });
 
-  return prisma.$transaction(async (tx) => {
-    const action = await tx.action.findUnique({
-      where: { id: params.actionId },
-    });
-
-    invariant(action && action.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Action not found.");
-
-    await tx.action.delete({ where: { id: params.actionId } });
-
-    await recordAudit(tx, actor, {
-      workspaceId: params.workspaceId,
-      action: "action.deleted",
-      entityType: "Action",
-      entityId: params.actionId,
-      meta: { title: action.title },
-    });
-
-    return { id: params.actionId };
+  await archiveWorkspaceArtifact(actor, {
+    workspaceId: params.workspaceId,
+    entityType: "Action",
+    entityId: params.actionId,
+    reason: "Archived from action delete path.",
   });
+
+  return { id: params.actionId };
 }
 
 export async function publishAction(actor: AppActor, params: {

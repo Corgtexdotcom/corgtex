@@ -9,7 +9,10 @@ const { prismaMock } = vi.hoisted(() => {
       findFirst: vi.fn(),
       findUnique: vi.fn(),
       create: vi.fn(),
-      delete: vi.fn(),
+      update: vi.fn(),
+    },
+    workspaceArchiveRecord: {
+      create: vi.fn(),
     },
     auditLog: {
       create: vi.fn(),
@@ -53,7 +56,7 @@ describe("meetings domain", () => {
     const { listMeetings } = await import("./meetings");
     await expect(listMeetings("workspace-1")).resolves.toEqual([{ id: "meeting-1" }]);
     expect(prismaMock.meeting.findMany).toHaveBeenCalledWith({
-      where: { workspaceId: "workspace-1" },
+      where: { workspaceId: "workspace-1", archivedAt: null },
       orderBy: { recordedAt: "desc" },
     });
   });
@@ -113,18 +116,25 @@ describe("meetings domain", () => {
     });
   });
 
-  it("deleteMeeting deletes an existing meeting", async () => {
-    prismaMock.meeting.findUnique.mockResolvedValue({
+  it("deleteMeeting archives an existing meeting", async () => {
+    prismaMock.meeting.findFirst.mockResolvedValue({
       id: "meeting-1",
+      workspaceId: "workspace-1",
       title: "Weekly",
       source: "zoom",
+      archivedAt: null,
     });
-    prismaMock.meeting.delete.mockResolvedValue({ id: "meeting-1" });
+    prismaMock.meeting.update.mockResolvedValue({ id: "meeting-1", archivedAt: new Date("2026-04-25T12:00:00.000Z") });
+    prismaMock.workspaceArchiveRecord.create.mockResolvedValue({});
 
     const { deleteMeeting } = await import("./meetings");
     await expect(deleteMeeting(actor, {
       workspaceId: "workspace-1",
       meetingId: "meeting-1",
     })).resolves.toEqual({ id: "meeting-1" });
+    expect(prismaMock.meeting.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "meeting-1" },
+      data: expect.objectContaining({ archivedAt: expect.any(Date) }),
+    }));
   });
 });

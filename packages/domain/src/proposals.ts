@@ -5,12 +5,13 @@ import { actorUserIdForWorkspace, requireWorkspaceMembership } from "./auth";
 import { getApprovalPolicy, ensureApprovalFlow } from "./approvals";
 import { invariant } from "./errors";
 import { privacyFilter } from "./privacy";
+import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 
-export async function listProposals(actor: AppActor, workspaceId: string, opts?: { take?: number; skip?: number; circleId?: string | null }) {
+export async function listProposals(actor: AppActor, workspaceId: string, opts?: { take?: number; skip?: number; circleId?: string | null; archiveFilter?: ArchiveFilter }) {
   const take = opts?.take ?? 20;
   const skip = opts?.skip ?? 0;
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
-  const where: any = { workspaceId, ...privacyFilter(actor, membership) };
+  const where: any = { workspaceId, ...privacyFilter(actor, membership), ...archiveFilterWhere(opts?.archiveFilter) };
   if (opts?.circleId !== undefined) {
     where.circleId = opts.circleId;
   }
@@ -53,6 +54,7 @@ export async function getProposal(actor: AppActor, params: {
       id: params.proposalId,
       workspaceId: params.workspaceId,
       ...privacyFilter(actor, membership),
+      archivedAt: null,
     },
     include: {
       author: { select: { id: true, displayName: true, email: true } },
@@ -199,36 +201,11 @@ export async function archiveProposal(actor: AppActor, params: {
     workspaceId: params.workspaceId,
   });
 
-  return prisma.$transaction(async (tx) => {
-    const proposal = await tx.proposal.findUnique({
-      where: { id: params.proposalId },
-    });
-
-    invariant(proposal && proposal.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Proposal not found.");
-    invariant(
-      proposal.status === "DRAFT" || proposal.status === "APPROVED" || proposal.status === "REJECTED",
-      400,
-      "INVALID_STATE",
-      "Only draft, approved, or rejected proposals can be archived.",
-    );
-
-    const updated = await tx.proposal.update({
-      where: { id: params.proposalId },
-      data: { status: "ARCHIVED" },
-    });
-
-    await tx.auditLog.create({
-      data: {
-        workspaceId: params.workspaceId,
-        actorUserId: actor.kind === "user" ? actor.user.id : null,
-        action: "proposal.archived",
-        entityType: "Proposal",
-        entityId: updated.id,
-        meta: {},
-      },
-    });
-
-    return updated;
+  return archiveWorkspaceArtifact(actor, {
+    workspaceId: params.workspaceId,
+    entityType: "Proposal",
+    entityId: params.proposalId,
+    reason: "Archived from proposal archive path.",
   });
 }
 
@@ -365,6 +342,7 @@ export async function autoApproveProposals(): Promise<number> {
   const proposalsToApprove = await prisma.proposal.findMany({
     where: {
       status: "SUBMITTED",
+      archivedAt: null,
       autoApproveAt: { lt: now, not: null },
       reactions: {
         none: {
@@ -415,21 +393,10 @@ export async function autoApproveProposals(): Promise<number> {
 }
 export async function deleteProposal(actor: AppActor, params: { workspaceId: string; proposalId: string }) {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
-  return prisma.$transaction(async (tx) => {
-    const proposal = await tx.proposal.findUnique({
-      where: { id: params.proposalId, workspaceId: params.workspaceId },
-    });
-    invariant(proposal, 404, "NOT_FOUND", "Proposal not found.");
-    invariant(proposal.status === "DRAFT", 400, "INVALID_STATE", "Only draft proposals can be deleted.");
-    await tx.auditLog.create({
-      data: {
-        workspaceId: params.workspaceId,
-        actorUserId: actor.kind === "user" ? actor.user.id : null,
-        action: "proposal.deleted",
-        entityType: "Proposal",
-        entityId: proposal.id,
-      },
-    });
-    return tx.proposal.delete({ where: { id: params.proposalId } });
+  return archiveWorkspaceArtifact(actor, {
+    workspaceId: params.workspaceId,
+    entityType: "Proposal",
+    entityId: params.proposalId,
+    reason: "Archived from proposal delete path.",
   });
 }

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createCycle, listCycles, requireWorkspaceMembership } from "@corgtex/domain";
+import type { ArchiveFilter } from "@corgtex/domain";
 import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
 
@@ -8,7 +9,8 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     const actor = await resolveRequestActor(request);
     const { workspaceId } = await params;
     await requireWorkspaceMembership({ actor, workspaceId });
-    const cycles = await listCycles(workspaceId);
+    const archiveFilter = request.nextUrl.searchParams.get("archiveFilter") as ArchiveFilter | null;
+    const cycles = await listCycles(workspaceId, { archiveFilter: archiveFilter ?? undefined });
     return NextResponse.json({ cycles });
   } catch (error) {
     return handleRouteError(error);

@@ -3,13 +3,15 @@ import type { AppActor } from "@corgtex/shared";
 import { appendEvents } from "./events";
 import { requireWorkspaceMembership } from "./auth";
 import { recordAudit } from "./audit-trail";
+import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { invariant } from "./errors";
 
-export async function listCircles(workspaceId: string) {
+export async function listCircles(workspaceId: string, opts?: { archiveFilter?: ArchiveFilter }) {
   return prisma.circle.findMany({
-    where: { workspaceId },
+    where: { workspaceId, ...archiveFilterWhere(opts?.archiveFilter) },
     include: {
       roles: {
+        where: { archivedAt: null },
         orderBy: { sortOrder: "asc" },
       },
     },
@@ -95,7 +97,7 @@ export async function updateCircle(actor: AppActor, params: {
       where: { id: params.circleId },
     });
 
-    invariant(circle && circle.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Circle not found.");
+    invariant(circle && circle.workspaceId === params.workspaceId && !circle.archivedAt, 404, "NOT_FOUND", "Circle not found.");
 
     const data: Record<string, unknown> = {};
     if (params.name !== undefined) {
@@ -137,25 +139,14 @@ export async function deleteCircle(actor: AppActor, params: {
     resolvedMembership: params._membership,
   });
 
-  return prisma.$transaction(async (tx) => {
-    const circle = await tx.circle.findUnique({
-      where: { id: params.circleId },
-    });
-
-    invariant(circle && circle.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Circle not found.");
-
-    await tx.circle.delete({ where: { id: params.circleId } });
-
-    await recordAudit(tx, actor, {
-      workspaceId: params.workspaceId,
-      action: "circle.deleted",
-      entityType: "Circle",
-      entityId: params.circleId,
-      meta: { name: circle.name },
-    });
-
-    return { id: params.circleId };
+  await archiveWorkspaceArtifact(actor, {
+    workspaceId: params.workspaceId,
+    entityType: "Circle",
+    entityId: params.circleId,
+    reason: "Archived from circle delete path.",
   });
+
+  return { id: params.circleId };
 }
 
 export async function suggestMaturityUpgrade(workspaceId: string, circleId: string) {
@@ -167,6 +158,7 @@ export async function suggestMaturityUpgrade(workspaceId: string, circleId: stri
           status: {
             in: ["COMPLETED", "CANCELLED"],
           },
+          archivedAt: null,
           updatedAt: {
             gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000), // last 30 days
           },
@@ -216,12 +208,13 @@ export type CircleTreeItem = {
   childCircles: CircleTreeItem[];
 };
 
-export async function listCircleTree(workspaceId: string) {
+export async function listCircleTree(workspaceId: string, opts?: { archiveFilter?: ArchiveFilter }) {
   const circles = await prisma.circle.findMany({
-    where: { workspaceId },
+    where: { workspaceId, ...archiveFilterWhere(opts?.archiveFilter) },
     include: {
       parentCircle: { select: { id: true, name: true } },
       roles: {
+        where: { archivedAt: null },
         include: {
           assignments: {
             include: {

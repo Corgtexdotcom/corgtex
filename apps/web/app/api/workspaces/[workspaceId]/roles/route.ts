@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { createRole, listRoles, requireWorkspaceMembership } from "@corgtex/domain";
+import type { ArchiveFilter } from "@corgtex/domain";
 import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError, validateBody } from "@/lib/http";
 
@@ -18,7 +19,8 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     const { workspaceId } = await params;
     const actor = await resolveRequestActor(request);
     await requireWorkspaceMembership({ actor, workspaceId });
-    const roles = await listRoles(workspaceId);
+    const archiveFilter = request.nextUrl.searchParams.get("archiveFilter") as ArchiveFilter | null;
+    const roles = await listRoles(workspaceId, { archiveFilter: archiveFilter ?? undefined });
     return NextResponse.json({ roles });
   } catch (error) {
     console.error("[RolesAPI GET]", error);

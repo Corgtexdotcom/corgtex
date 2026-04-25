@@ -2,13 +2,16 @@ import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { appendEvents } from "./events";
 import { requireWorkspaceMembership } from "./auth";
+import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { invariant } from "./errors";
 
-export async function listRoles(workspaceId: string) {
+export async function listRoles(workspaceId: string, opts?: { archiveFilter?: ArchiveFilter }) {
   return prisma.role.findMany({
     where: {
+      ...archiveFilterWhere(opts?.archiveFilter),
       circle: {
         workspaceId,
+        archivedAt: null,
       },
     },
     include: {
@@ -47,10 +50,11 @@ export async function createRole(actor: AppActor, params: {
       select: {
         id: true,
         workspaceId: true,
+        archivedAt: true,
       },
     });
 
-    invariant(circle && circle.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Circle not found.");
+    invariant(circle && circle.workspaceId === params.workspaceId && !circle.archivedAt, 404, "NOT_FOUND", "Circle not found.");
 
     const sortOrder = await tx.role.count({
       where: { circleId: circle.id },
@@ -129,7 +133,7 @@ export async function updateRole(actor: AppActor, params: {
       include: { circle: { select: { workspaceId: true } } },
     });
 
-    invariant(role && role.circle.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Role not found.");
+    invariant(role && role.circle.workspaceId === params.workspaceId && !role.archivedAt, 404, "NOT_FOUND", "Role not found.");
 
     const data: Record<string, unknown> = {};
     if (params.name !== undefined) {
@@ -179,29 +183,14 @@ export async function deleteRole(actor: AppActor, params: {
     allowedRoles: ["FACILITATOR", "ADMIN"],
   });
 
-  return prisma.$transaction(async (tx) => {
-    const role = await tx.role.findUnique({
-      where: { id: params.roleId },
-      include: { circle: { select: { workspaceId: true } } },
-    });
-
-    invariant(role && role.circle.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Role not found.");
-
-    await tx.role.delete({ where: { id: params.roleId } });
-
-    await tx.auditLog.create({
-      data: {
-        workspaceId: params.workspaceId,
-        actorUserId: actor.kind === "user" ? actor.user.id : null,
-        action: "role.deleted",
-        entityType: "Role",
-        entityId: params.roleId,
-        meta: { name: role.name },
-      },
-    });
-
-    return { id: params.roleId };
+  await archiveWorkspaceArtifact(actor, {
+    workspaceId: params.workspaceId,
+    entityType: "Role",
+    entityId: params.roleId,
+    reason: "Archived from role delete path.",
   });
+
+  return { id: params.roleId };
 }
 
 export async function assignRole(actor: AppActor, params: {
@@ -220,7 +209,7 @@ export async function assignRole(actor: AppActor, params: {
       where: { id: params.roleId },
       include: { circle: { select: { workspaceId: true } } },
     });
-    invariant(role && role.circle.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Role not found.");
+    invariant(role && role.circle.workspaceId === params.workspaceId && !role.archivedAt, 404, "NOT_FOUND", "Role not found.");
 
     const member = await tx.member.findUnique({
       where: { id: params.memberId },
@@ -272,7 +261,7 @@ export async function unassignRole(actor: AppActor, params: {
       where: { id: params.roleId },
       include: { circle: { select: { workspaceId: true } } },
     });
-    invariant(role && role.circle.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Role not found.");
+    invariant(role && role.circle.workspaceId === params.workspaceId && !role.archivedAt, 404, "NOT_FOUND", "Role not found.");
 
     const assignment = await tx.roleAssignment.findUnique({
       where: {
@@ -309,7 +298,9 @@ export async function listRoleAssignments(workspaceId: string) {
       role: {
         circle: {
           workspaceId,
+          archivedAt: null,
         },
+        archivedAt: null,
       },
     },
     include: {

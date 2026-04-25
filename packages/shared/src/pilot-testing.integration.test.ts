@@ -28,7 +28,7 @@ describe("pilot tester scripts", () => {
     }
   });
 
-  it("seeds a tester that can create artifacts and archive/cancel its test artifacts", async () => {
+  it("seeds a tester that can create artifacts and archive its test artifacts", async () => {
     const suffix = Date.now().toString(36);
     const workspace = await prisma.workspace.create({
       data: {
@@ -70,14 +70,20 @@ describe("pilot tester scripts", () => {
     });
 
     await expect(prisma.proposal.findUniqueOrThrow({ where: { id: proposal.id } }))
-      .resolves.toMatchObject({ status: "ARCHIVED" });
+      .resolves.toMatchObject({ status: "ARCHIVED", archivedAt: expect.any(Date) });
     await expect(prisma.tension.findUniqueOrThrow({ where: { id: tension.id } }))
-      .resolves.toMatchObject({ status: "CANCELLED" });
+      .resolves.toMatchObject({ archivedAt: expect.any(Date) });
 
     await expect(prisma.auditLog.count({
       where: {
         workspaceId: workspace.id,
-        action: { in: ["test_artifact.proposal_archived", "test_artifact.tension_cancelled"] },
+        action: "test_artifact.archived",
+      },
+    })).resolves.toBe(2);
+    await expect(prisma.workspaceArchiveRecord.count({
+      where: {
+        workspaceId: workspace.id,
+        entityType: { in: ["Proposal", "Tension"] },
       },
     })).resolves.toBe(2);
   });

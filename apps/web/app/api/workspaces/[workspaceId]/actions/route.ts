@@ -1,9 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createAction, listActions } from "@corgtex/domain";
+import type { ArchiveFilter } from "@corgtex/domain";
 import { withWorkspaceRoute } from "@/lib/route-handler";
 
 export const GET = withWorkspaceRoute(async (req, { actor, workspaceId }) => {
-  const actions = await listActions(actor, workspaceId);
+  const archiveFilter = req.nextUrl.searchParams.get("archiveFilter") as ArchiveFilter | null;
+  const actions = await listActions(actor, workspaceId, { archiveFilter: archiveFilter ?? undefined });
   return NextResponse.json({ actions });
 });
 

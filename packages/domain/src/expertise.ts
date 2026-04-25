@@ -2,6 +2,7 @@ import type { Prisma } from "@prisma/client";
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
+import { archiveFilterWhere, type ArchiveFilter } from "./archive";
 import { invariant } from "./errors";
 
 // Helper function to create a slug
@@ -15,10 +16,10 @@ function slugify(text: string) {
     .replace(/--+/g, "-"); // Replace multiple - with single -
 }
 
-export async function listExpertiseTags(actor: AppActor, workspaceId: string) {
+export async function listExpertiseTags(actor: AppActor, workspaceId: string, opts?: { archiveFilter?: ArchiveFilter }) {
   await requireWorkspaceMembership({ actor, workspaceId });
   return prisma.expertiseTag.findMany({
-    where: { workspaceId },
+    where: { workspaceId, ...archiveFilterWhere(opts?.archiveFilter) },
     orderBy: { label: "asc" },
   });
 }
@@ -205,7 +206,7 @@ export async function findExpertsByTag(actor: AppActor, workspaceId: string, tag
 
   return prisma.memberExpertise.findMany({
     where: {
-      expertiseTag: { workspaceId, slug: tagSlug },
+      expertiseTag: { workspaceId, slug: tagSlug, archivedAt: null },
     },
     include: {
       member: {
