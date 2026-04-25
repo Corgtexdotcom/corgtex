@@ -1,36 +1,37 @@
 import { requirePageActor } from "@/lib/auth";
+import { handleRouteError } from "@/lib/http";
 import { type NextRequest, NextResponse } from "next/server";
 import { saveOAuthConnectionAndEnqueueCalendarSync } from "@corgtex/domain";
 
 export async function GET(request: NextRequest, props: { params: Promise<{ provider: string }> }) {
-  const params = await props.params;
-  const actor = await requirePageActor();
-
-  if (actor.kind !== "user") {
-    return NextResponse.json({ error: "Only users can perform OAuth flows" }, { status: 403 });
-  }
-
-  const protocol = request.headers.get("x-forwarded-proto") || "http";
-  const host = request.headers.get("host") || "localhost:3000";
-  const appUrl = `${protocol}://${host}`;
-
-  const { provider } = params;
-  const code = request.nextUrl.searchParams.get("code");
-  const state = request.nextUrl.searchParams.get("state");
-  const error = request.nextUrl.searchParams.get("error");
-
-  const [userId, workspaceId] = (state || "").split(":");
-  const returnUrl = workspaceId ? `/workspaces/${workspaceId}/settings` : "/";
-
-  if (error) {
-    return NextResponse.redirect(new URL(`${returnUrl}?error=${error}`, appUrl));
-  }
-
-  if (!code || !state || actor.user.id !== userId) {
-    return NextResponse.redirect(new URL(`${returnUrl}?error=invalid_request`, appUrl));
-  }
-
   try {
+    const params = await props.params;
+    const actor = await requirePageActor();
+
+    if (actor.kind !== "user") {
+      return NextResponse.json({ error: "Only users can perform OAuth flows" }, { status: 403 });
+    }
+
+    const protocol = request.headers.get("x-forwarded-proto") || "http";
+    const host = request.headers.get("host") || "localhost:3000";
+    const appUrl = `${protocol}://${host}`;
+
+    const { provider } = params;
+    const code = request.nextUrl.searchParams.get("code");
+    const state = request.nextUrl.searchParams.get("state");
+    const error = request.nextUrl.searchParams.get("error");
+
+    const [userId, workspaceId] = (state || "").split(":");
+    const returnUrl = workspaceId ? `/workspaces/${workspaceId}/settings` : "/";
+
+    if (error) {
+      return NextResponse.redirect(new URL(`${returnUrl}?error=${error}`, appUrl));
+    }
+
+    if (!code || !state || actor.user.id !== userId) {
+      return NextResponse.redirect(new URL(`${returnUrl}?error=invalid_request`, appUrl));
+    }
+
     if (provider === "google") {
       const clientId = process.env.GOOGLE_CLIENT_ID;
       const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
@@ -116,8 +117,7 @@ export async function GET(request: NextRequest, props: { params: Promise<{ provi
     }
 
     return NextResponse.redirect(new URL(`${returnUrl}?error=unsupported_provider`, appUrl));
-  } catch (error: any) {
-    console.error(`OAuth callback error for ${provider}:`, error);
-    return NextResponse.redirect(new URL(`${returnUrl}?error=connection_failed`, appUrl));
+  } catch (error) {
+    return handleRouteError(error);
   }
 }
