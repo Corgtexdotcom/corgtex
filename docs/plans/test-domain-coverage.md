@@ -30,6 +30,7 @@ lifecycle (auth → workspace → membership → roles → notifications → mee
 
 ## Files to touch
 
+- `docs/plans/test-domain-coverage.md`
 - `packages/domain/src/auth.test.ts`
 - `packages/domain/src/members.test.ts`
 - `packages/domain/src/roles.test.ts`
@@ -40,8 +41,8 @@ lifecycle (auth → workspace → membership → roles → notifications → mee
 ## Acceptance criteria
 
 - [ ] `auth.test.ts` covers: `loginUserWithPassword` (success, wrong password, missing email), `registerUser` (success, duplicate, short password), `resolveSessionActor` (valid, expired, null), `requireWorkspaceMembership` (user member, user non-member, agent allowed, agent blocked, global operator), `clearSession`, `isGlobalOperator`, `listActorWorkspaces` (user, agent, operator).
-- [ ] `members.test.ts` covers: `listMembers`, `createMember` (success, duplicate), `inviteMember` (success, already exists), `updateMember` (role change, deactivation guard), `deactivateMember` (success, self-deactivation blocked), `getMemberProfile`.
-- [ ] `roles.test.ts` covers: `listRoles`, `createRole` (success, duplicate name), `updateRole`, `deleteRole` (success, role with assignments), `assignRole` (success, already assigned), `unassignRole`, `listRoleAssignments`.
+- [ ] `members.test.ts` covers: `listMembers`, `createMember` (success, existing user/member upsert path), `inviteMember` (success, existing user/member path), `updateMember` (role change, missing member guard), `deactivateMember` (success, already deactivated guard), `getMemberProfile`.
+- [ ] `roles.test.ts` covers: `listRoles`, `createRole` (success, missing circle/name guards), `updateRole`, `deleteRole` (success, missing role guard), `assignRole` (success, missing member guard), `unassignRole`, `listRoleAssignments`.
 - [ ] `workspaces.test.ts` covers: `createWorkspace` (success, missing name), `listWorkspaces`.
 - [ ] `notifications.test.ts` covers: `listNotifications`, `countUnreadNotifications`, `markNotificationRead`, `markAllNotificationsRead`.
 - [ ] `meetings.test.ts` covers: `listMeetings`, `getMeeting` (found, not found), `createMeeting` (success, missing fields), `deleteMeeting`.
