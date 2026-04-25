@@ -1,5 +1,6 @@
 import { resolveOAuthAccessToken } from "@corgtex/domain";
 import { AppError } from "@corgtex/domain";
+import { checkRateLimit, RATE_LIMITS } from "@corgtex/shared";
 import { NextRequest } from "next/server";
 
 /**
@@ -22,6 +23,11 @@ export async function requireGptAuth(request: NextRequest, requiredScope?: strin
 
   if (requiredScope && !session.scopes.includes(requiredScope)) {
     throw new AppError(403, "FORBIDDEN", `Missing required scope: ${requiredScope}`);
+  }
+
+  const rateLimit = await checkRateLimit(`ws:${session.workspaceId}:gpt-api`, RATE_LIMITS.API_PER_WORKSPACE);
+  if (!rateLimit.allowed) {
+    throw new AppError(429, "RATE_LIMITED", "GPT API rate limit exceeded.");
   }
 
   return session;

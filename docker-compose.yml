@@ -15,6 +15,16 @@ services:
       timeout: 5s
       retries: 5
 
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
   web:
     build:
       context: .
@@ -23,6 +33,7 @@ services:
       - "3000:3000"
     environment:
       DATABASE_URL: postgresql://postgres:postgres@db:5432/corgtex?schema=public
+      REDIS_URL: redis://redis:6379
       APP_URL: http://localhost:3000
       SESSION_COOKIE_SECRET: docker-dev-secret-change-in-production
       MODEL_PROVIDER: fake
@@ -31,6 +42,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      redis:
+        condition: service_healthy
 
   worker:
     build:
@@ -38,11 +51,14 @@ services:
       dockerfile: deploy/Dockerfile.worker
     environment:
       DATABASE_URL: postgresql://postgres:postgres@db:5432/corgtex?schema=public
+      REDIS_URL: redis://redis:6379
       MODEL_PROVIDER: fake
       AGENT_KILL_SWITCH: "false"
       WORKSPACE_AGENT_MAX_CONCURRENCY: "4"
     depends_on:
       db:
+        condition: service_healthy
+      redis:
         condition: service_healthy
 
 volumes:
