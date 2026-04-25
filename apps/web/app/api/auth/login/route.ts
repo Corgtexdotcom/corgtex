@@ -6,7 +6,7 @@ import { rateLimitAuth } from "@/lib/rate-limit-middleware";
 
 export async function POST(request: NextRequest) {
   // Rate limit auth attempts
-  const rateLimited = rateLimitAuth(request);
+  const rateLimited = await rateLimitAuth(request);
   if (rateLimited) return rateLimited;
 
   try {

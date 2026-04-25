@@ -6,46 +6,46 @@ describe("rate-limiter", () => {
     resetAllRateLimits();
   });
 
-  it("allows requests within the limit", () => {
+  it("allows requests within the limit", async () => {
     const opts = { windowMs: 60_000, limit: 3 };
-    const r1 = checkRateLimit("test:1", opts);
+    const r1 = await checkRateLimit("test:1", opts);
     expect(r1.allowed).toBe(true);
     expect(r1.remaining).toBe(2);
 
-    const r2 = checkRateLimit("test:1", opts);
+    const r2 = await checkRateLimit("test:1", opts);
     expect(r2.allowed).toBe(true);
     expect(r2.remaining).toBe(1);
 
-    const r3 = checkRateLimit("test:1", opts);
+    const r3 = await checkRateLimit("test:1", opts);
     expect(r3.allowed).toBe(true);
     expect(r3.remaining).toBe(0);
   });
 
-  it("blocks requests exceeding the limit", () => {
+  it("blocks requests exceeding the limit", async () => {
     const opts = { windowMs: 60_000, limit: 2 };
-    checkRateLimit("test:2", opts);
-    checkRateLimit("test:2", opts);
+    await checkRateLimit("test:2", opts);
+    await checkRateLimit("test:2", opts);
 
-    const r3 = checkRateLimit("test:2", opts);
+    const r3 = await checkRateLimit("test:2", opts);
     expect(r3.allowed).toBe(false);
     expect(r3.remaining).toBe(0);
   });
 
-  it("isolates different keys", () => {
+  it("isolates different keys", async () => {
     const opts = { windowMs: 60_000, limit: 1 };
-    const r1 = checkRateLimit("key-a", opts);
+    const r1 = await checkRateLimit("key-a", opts);
     expect(r1.allowed).toBe(true);
 
-    const r2 = checkRateLimit("key-b", opts);
+    const r2 = await checkRateLimit("key-b", opts);
     expect(r2.allowed).toBe(true);
 
-    const r3 = checkRateLimit("key-a", opts);
+    const r3 = await checkRateLimit("key-a", opts);
     expect(r3.allowed).toBe(false);
   });
 
-  it("returns a future resetAtMs", () => {
+  it("returns a future resetAtMs", async () => {
     const opts = { windowMs: 60_000, limit: 5 };
-    const result = checkRateLimit("test:reset", opts);
+    const result = await checkRateLimit("test:reset", opts);
     expect(result.resetAtMs).toBeGreaterThan(Date.now());
   });
 

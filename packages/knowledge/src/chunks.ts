@@ -88,10 +88,10 @@ export async function syncKnowledgeForSource(params: {
       sourceId: params.sourceId,
     },
   });
+  await invalidateKnowledgeCache(params.workspaceId);
 
   const chunks = chunkText(params.content);
   if (chunks.length === 0) {
-    invalidateKnowledgeCache(params.workspaceId);
     return 0;
   }
 
@@ -126,7 +126,7 @@ export async function syncKnowledgeForSource(params: {
     }),
   });
 
-  invalidateKnowledgeCache(params.workspaceId);
+  await invalidateKnowledgeCache(params.workspaceId);
   return chunks.length;
 }
 
