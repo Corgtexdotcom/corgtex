@@ -32,6 +32,7 @@ export function LoginForm() {
           required
           autoComplete="email"
           defaultValue={state.email}
+          suppressHydrationWarning
         />
       </label>
       <label>
@@ -42,6 +43,7 @@ export function LoginForm() {
           required
           minLength={8}
           autoComplete="current-password"
+          suppressHydrationWarning
         />
       </label>
       <div style={{ textAlign: "right", marginTop: -4 }}>

@@ -87,7 +87,7 @@ export function ChatInterface({
     } catch {
       setError(t("errorFailedToLoad"));
     }
-  }, [workspaceId]);
+  }, [t, workspaceId]);
 
   useEffect(() => {
     if (activeSessionId) {
