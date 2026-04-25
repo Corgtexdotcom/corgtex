@@ -16,6 +16,7 @@ export type AgentConfigSummary = {
   outputs: readonly string[];
   enabled: boolean;
   modelOverride: string | null;
+  governancePolicy: string | null;
   configJson: any;
 };
 
@@ -44,6 +45,7 @@ export async function listAgentConfigs(actor: AppActor, workspaceId: string): Pr
       outputs: meta.outputs,
       enabled: override ? override.enabled : true,
       modelOverride: override?.modelOverride ?? null,
+      governancePolicy: override?.governancePolicy ?? null,
       configJson: override?.configJson ?? {},
     });
   }
@@ -58,6 +60,7 @@ export async function updateAgentConfig(
     agentKey: string;
     enabled?: boolean;
     modelOverride?: string | null;
+    governancePolicy?: string | null;
     configJson?: any;
   }
 ) {
@@ -84,11 +87,13 @@ export async function updateAgentConfig(
       agentKey: params.agentKey,
       enabled: params.enabled ?? true,
       modelOverride: params.modelOverride ?? null,
+      governancePolicy: params.governancePolicy ?? null,
       configJson: params.configJson ?? {},
     },
     update: {
       ...(params.enabled !== undefined && { enabled: params.enabled }),
       ...(params.modelOverride !== undefined && { modelOverride: params.modelOverride }),
+      ...(params.governancePolicy !== undefined && { governancePolicy: params.governancePolicy }),
       ...(params.configJson !== undefined && { configJson: params.configJson }),
     },
   });
@@ -119,4 +124,15 @@ export async function getAgentModelOverride(workspaceId: string, agentKey: strin
   });
 
   return config?.modelOverride ?? null;
+}
+
+export async function getAgentGovernancePolicy(workspaceId: string, agentKey: string): Promise<string | null> {
+  const config = await prisma.workspaceAgentConfig.findUnique({
+    where: {
+      workspaceId_agentKey: { workspaceId, agentKey },
+    },
+    select: { governancePolicy: true },
+  });
+
+  return config?.governancePolicy ?? null;
 }
