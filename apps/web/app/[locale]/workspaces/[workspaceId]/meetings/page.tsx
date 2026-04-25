@@ -16,6 +16,7 @@ export default async function MeetingsPage({
   const { workspaceId } = await params;
   await requirePageActor();
   const meetings = await listMeetings(workspaceId);
+  const t = await getTranslations("meetings");
 
   return (
     <>
