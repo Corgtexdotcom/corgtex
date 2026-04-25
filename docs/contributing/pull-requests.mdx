@@ -20,8 +20,8 @@ is the handoff between Planner, Executor, and Reviewer, and it is
 enforced mechanically:
 
 - `plan-present` CI job fails if the plan file is missing.
-- `scope-check` CI job fails if any changed file is outside the plan's "Files to touch" allowlist.
-- The PR body must link to the plan file.
+- `scope-check` CI job fails if any changed file is outside the plan's "Files to touch" allowlist, except visual proof under `docs/assets/<branch-slug>/`.
+- The PR body must link to the plan file and state the risk tier.
 - The Reviewer (Codex) rejects PRs whose plan lacks ticked acceptance criteria.
 
 Copy [`docs/plans/_TEMPLATE.md`](https://github.com/corgtex/corgtex/blob/main/docs/plans/_TEMPLATE.md) to start.
@@ -32,8 +32,9 @@ The Executor opens the PR using `gh pr create` (installed via
 Homebrew; `/opt/homebrew/bin/gh` if not on `PATH`). The PR body:
 
 1. **Links to the plan file.**
-2. **Summarizes what shipped** — one or two sentences, the "walkthrough."
-3. **Attaches visual proof** (`.mp4` / `.webm` / `.png`) for any change under `apps/web/app/**` or `apps/web/components/**`.
+2. **States the risk tier** — `low`, `standard`, or `high`.
+3. **Summarizes what shipped** — one or two sentences, the "walkthrough."
+4. **Links committed visual proof** under `docs/assets/<branch-slug>/` for any change under `apps/web/app/**`, `apps/web/components/**`, or `apps/web/lib/components/**`.
 
 Auto-merge is set by the Executor immediately (`gh pr merge --auto --squash`) so the PR merges as soon as the Reviewer approves and required checks are green.
 
@@ -46,9 +47,9 @@ Every PR must pass:
 - `build` — `env -u DATABASE_URL npm run build` (database-independent).
 - `docs` — `mint validate` and broken-link check.
 - `plan-present` — plan file exists for the branch.
-- `scope-check` — changed files ⊆ plan allowlist.
+- `scope-check` — changed files ⊆ plan allowlist, validates policy checks, and allows branch visual proof.
 - `gitleaks` — no secrets in the diff.
-- `diff-size` — ≤ 400 LOC of code, ≤ 15 files (unless `large-change-approved`).
+- `diff-size` — risk-tier caps: `low` ≤ 1200 non-doc LOC / 50 files, `standard` ≤ 800 / 25, `high` ≤ 400 / 15.
 
 All of these are required by branch protection on `main`. The Reviewer
 cannot merge a PR whose required checks are red.
@@ -56,7 +57,7 @@ cannot merge a PR whose required checks are red.
 ## Labels
 
 - `forbidden-path-approved` — justification in the plan, required for changes to `deploy/**`, `.github/workflows/**`, `prisma/migrations/**`, `packages/domain/src/auth*.ts`, `apps/web/lib/auth.ts`.
-- `large-change-approved` — override for the 400 LOC / 15 file cap.
+- `large-change-approved` — override for the selected risk-tier cap.
 - `halt-agents` — human stop; Reviewer will not merge, Executor will not push.
 - `force-merge` — human override, logged.
 - `needs-replan` — Executor is stuck; Planner picks up.

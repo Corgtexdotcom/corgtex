@@ -4,8 +4,9 @@
 // Modes:
 //   --mode=present   — verify docs/plans/<branch>.md exists.
 //   --mode=scope     — verify changed files ⊆ plan's "Files to touch" allowlist.
-//   --mode=size      — verify diff is within caps (≤ 400 LOC of code, ≤ 15 files)
-//                      unless the PR carries the `large-change-approved` label.
+//   --mode=size      — verify diff is within risk-tier caps unless the PR carries
+//                      the `large-change-approved` label.
+//   --mode=policy    — verify review blockers that should be caught before Codex.
 //
 // Reads branch/base/labels from env (GitHub Actions) or from git/flags locally.
 // Exits non-zero on violation; prints a one-line CI-friendly reason.
@@ -22,12 +23,13 @@ const args = Object.fromEntries(
 );
 
 const mode = args.mode;
-if (!["present", "scope", "size"].includes(mode)) {
-  console.error("usage: check-plan.mjs --mode=<present|scope|size>");
+if (!["present", "scope", "size", "policy"].includes(mode)) {
+  console.error("usage: check-plan.mjs --mode=<present|scope|size|policy>");
   process.exit(2);
 }
 
 const DOCS_EXTENSIONS = new Set([".md", ".mdx"]);
+const PROOF_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".webp", ".mp4", ".webm"]);
 const FORBIDDEN_UNLABELED_PATHS = [
   /^deploy\//,
   /^\.github\/workflows\//,
@@ -35,8 +37,18 @@ const FORBIDDEN_UNLABELED_PATHS = [
   /^packages\/domain\/src\/auth.*\.ts$/,
   /^apps\/web\/lib\/auth\.ts$/,
 ];
-const MAX_CODE_LOC = 400;
-const MAX_FILES = 15;
+const RISK_CAPS = {
+  low: { codeLoc: 1200, files: 50 },
+  standard: { codeLoc: 800, files: 25 },
+  high: { codeLoc: 400, files: 15 },
+};
+const UI_PATHS = [
+  /^apps\/web\/app\//,
+  /^apps\/web\/components\//,
+  /^apps\/web\/lib\/components\//,
+];
+const DOMAIN_SOURCE = /^packages\/domain\/src\/.*\.ts$/;
+const DOMAIN_TEST = /^packages\/domain\/.*\.test\.ts$/;
 
 function sh(cmd) {
   return execSync(cmd, { encoding: "utf8" }).trim();
@@ -54,9 +66,12 @@ function baseRef() {
   return "origin/main";
 }
 
+function branchSlug(branch) {
+  return branch.toLowerCase().replace(/\//g, "-");
+}
+
 function planPathFor(branch) {
-  const slug = branch.toLowerCase().replace(/\//g, "-");
-  return path.join("docs", "plans", `${slug}.md`);
+  return path.join("docs", "plans", `${branchSlug(branch)}.md`);
 }
 
 function prLabels() {
@@ -71,8 +86,12 @@ function prLabels() {
 
 function changedFiles(base) {
   try {
-    const out = sh(`git diff --name-only ${base}...HEAD`);
-    return out ? out.split("\n") : [];
+    const outputs = [sh(`git diff --name-only ${base}...HEAD`)];
+    if (process.env.GITHUB_ACTIONS !== "true") {
+      outputs.push(sh("git diff --name-only --cached"));
+      outputs.push(sh("git diff --name-only"));
+    }
+    return [...new Set(outputs.flatMap((out) => (out ? out.split("\n") : [])))];
   } catch (err) {
     if (process.env.GITHUB_ACTIONS === "true") {
       fail(`unable to compute changed files against ${base}: ${err.message}`);
@@ -102,6 +121,46 @@ function parseAllowlist(planText) {
   return entries;
 }
 
+function parseRiskTier(planText) {
+  const lines = planText.split("\n");
+  for (const line of lines) {
+    const inline = line.match(/risk tier\s*[:—-]\s*`?(low|standard|high)`?/i);
+    if (inline) return inline[1].toLowerCase();
+  }
+
+  let inSection = false;
+  for (const line of lines) {
+    if (/^#{2,3}\s+Risk tier\s*$/.test(line)) {
+      inSection = true;
+      continue;
+    }
+    if (inSection && /^#{1,3}\s+\S/.test(line)) break;
+    if (!inSection) continue;
+    const value = line.match(/^\s*(?:[-*]\s+)?`?(low|standard|high)`?\s*$/i);
+    if (value) return value[1].toLowerCase();
+  }
+
+  return null;
+}
+
+function parseAcceptanceCriteria(planText) {
+  const criteria = [];
+  let inSection = false;
+  for (const line of planText.split("\n")) {
+    if (/^#{2,3}\s+Acceptance criteria\s*$/.test(line)) {
+      inSection = true;
+      continue;
+    }
+    if (inSection && /^#{1,3}\s+\S/.test(line)) break;
+    if (!inSection) continue;
+    const item = line.match(/^\s*[-*]\s+\[([ xX])\]\s+(.+)$/);
+    if (item) {
+      criteria.push({ checked: item[1].toLowerCase() === "x", text: item[2] });
+    }
+  }
+  return criteria;
+}
+
 function matchesAllowlist(file, allowlist) {
   for (const pattern of allowlist) {
     if (pattern === file) return true;
@@ -124,6 +183,52 @@ function matchesAllowlist(file, allowlist) {
     }
   }
   return false;
+}
+
+function isProofAsset(file, branch) {
+  const prefix = `docs/assets/${branchSlug(branch)}/`;
+  return file.startsWith(prefix) && PROOF_EXTENSIONS.has(path.extname(file).toLowerCase());
+}
+
+function isUiFile(file) {
+  return UI_PATHS.some((re) => re.test(file));
+}
+
+function isDomainSourceFile(file) {
+  return DOMAIN_SOURCE.test(file) && !DOMAIN_TEST.test(file);
+}
+
+function isEnvFile(file) {
+  return /(^|\/)\.env($|[.\w-])/.test(file);
+}
+
+function isExecutablePolicyFile(file) {
+  if (/^(scripts|deploy|\.github\/workflows)\//.test(file)) return true;
+  if (/Dockerfile$/.test(file)) return true;
+  return [".js", ".mjs", ".cjs", ".ts", ".tsx", ".sh", ".bash", ".zsh", ".yml", ".yaml", ".json"].includes(
+    path.extname(file),
+  );
+}
+
+function addedDiffLines(base) {
+  const outputs = [sh(`git diff --unified=0 --no-ext-diff ${base}...HEAD`)];
+  if (process.env.GITHUB_ACTIONS !== "true") {
+    outputs.push(sh("git diff --unified=0 --no-ext-diff --cached"));
+    outputs.push(sh("git diff --unified=0 --no-ext-diff"));
+  }
+  const out = outputs.filter(Boolean).join("\n");
+  const lines = [];
+  let currentFile = "";
+  for (const line of out.split("\n")) {
+    const fileMatch = line.match(/^\+\+\+ b\/(.+)$/);
+    if (fileMatch) {
+      currentFile = fileMatch[1];
+      continue;
+    }
+    if (!line.startsWith("+") || line.startsWith("+++")) continue;
+    lines.push({ file: currentFile, text: line.slice(1) });
+  }
+  return lines;
 }
 
 function fail(message) {
@@ -169,7 +274,9 @@ if (mode === "scope") {
     if (!allowlist || allowlist.length === 0) {
       fail(`${planPath} has no "Files to touch" entries`);
     }
-    const outOfScope = files.filter((f) => f && !matchesAllowlist(f, allowlist));
+    const outOfScope = files.filter(
+      (f) => f && !matchesAllowlist(f, allowlist) && !isProofAsset(f, branch),
+    );
     if (outOfScope.length > 0) {
       fail(
         `${outOfScope.length} file(s) outside plan scope:\n  - ${outOfScope.join("\n  - ")}`,
@@ -194,16 +301,34 @@ if (mode === "size") {
   if (labels.has("large-change-approved")) {
     ok("large-change-approved label present, size check skipped");
   }
-  if (files.length > MAX_FILES) {
+  if (!existsSync(planPath)) {
+    fail(`missing plan file at ${planPath}`);
+  }
+  const planText = readFileSync(planPath, "utf8");
+  const riskTier = parseRiskTier(planText);
+  if (!riskTier) {
+    fail(`${planPath} is missing a valid "Risk tier" of low, standard, or high`);
+  }
+  const forbidden = files.filter((f) =>
+    FORBIDDEN_UNLABELED_PATHS.some((re) => re.test(f)),
+  );
+  const effectiveRiskTier = forbidden.length > 0 ? "high" : riskTier;
+  const caps = RISK_CAPS[effectiveRiskTier];
+
+  if (files.length > caps.files) {
     fail(
-      `${files.length} files changed, cap is ${MAX_FILES}. Split the PR or add "large-change-approved".`,
+      `${files.length} files changed, ${effectiveRiskTier} risk cap is ${caps.files}. Split the PR or add "large-change-approved".`,
     );
   }
   // Count LOC of non-doc files only.
   let codeLoc = 0;
   try {
-    const numstat = sh(`git diff --numstat ${base}...HEAD`);
-    for (const line of numstat.split("\n")) {
+    const numstats = [sh(`git diff --numstat ${base}...HEAD`)];
+    if (process.env.GITHUB_ACTIONS !== "true") {
+      numstats.push(sh("git diff --numstat --cached"));
+      numstats.push(sh("git diff --numstat"));
+    }
+    for (const line of numstats.filter(Boolean).join("\n").split("\n")) {
       if (!line) continue;
       const [addedRaw, removedRaw, ...rest] = line.split("\t");
       const added = Number(addedRaw);
@@ -217,10 +342,77 @@ if (mode === "size") {
   } catch (err) {
     fail(`unable to compute diff size: ${err.message}`);
   }
-  if (codeLoc > MAX_CODE_LOC) {
+  if (codeLoc > caps.codeLoc) {
     fail(
-      `${codeLoc} LOC of code changed, cap is ${MAX_CODE_LOC}. Split the PR or add "large-change-approved".`,
+      `${codeLoc} LOC of code changed, ${effectiveRiskTier} risk cap is ${caps.codeLoc}. Split the PR or add "large-change-approved".`,
     );
   }
-  ok(`${files.length} file(s), ${codeLoc} code LOC within caps`);
+  ok(`${files.length} file(s), ${codeLoc} code LOC within ${effectiveRiskTier} risk caps`);
+}
+
+if (mode === "policy") {
+  if (labels.has("auto-revert")) {
+    ok("auto-revert label present, policy skipped");
+  }
+  if (!existsSync(planPath)) {
+    fail(`missing plan file at ${planPath}`);
+  }
+
+  const files = changedFiles(base);
+  const planText = readFileSync(planPath, "utf8");
+  const riskTier = parseRiskTier(planText);
+  if (!riskTier) {
+    fail(`${planPath} is missing a valid "Risk tier" of low, standard, or high`);
+  }
+
+  const envFiles = files.filter(isEnvFile);
+  if (envFiles.length > 0) {
+    fail(`environment file changes are forbidden:\n  - ${envFiles.join("\n  - ")}`);
+  }
+
+  const domainSourceChanged = files.some(isDomainSourceFile);
+  const domainTestChanged = files.some((f) => DOMAIN_TEST.test(f));
+  if (domainSourceChanged && !domainTestChanged) {
+    fail("packages/domain source changed without a packages/domain *.test.ts change");
+  }
+
+  const uiChanged = files.some(isUiFile);
+  const proofFiles = files.filter((f) => isProofAsset(f, branch));
+  if (uiChanged && proofFiles.length === 0) {
+    fail(`UI files changed; add committed visual proof under docs/assets/${branchSlug(branch)}/`);
+  }
+
+  if (process.env.PR_DRAFT !== "true") {
+    const criteria = parseAcceptanceCriteria(planText);
+    if (criteria.length === 0) {
+      fail(`${planPath} has no acceptance criteria checklist`);
+    }
+    const unticked = criteria.filter((criterion) => !criterion.checked);
+    if (unticked.length > 0) {
+      fail(
+        `ready PR has unticked acceptance criteria:\n  - ${unticked
+          .map((criterion) => criterion.text)
+          .join("\n  - ")}`,
+      );
+    }
+  }
+
+  const patternHits = [];
+  for (const { file, text } of addedDiffLines(base)) {
+    if (file === "scripts/check-plan.mjs") continue;
+    if (/--no-verify/.test(text) && isExecutablePolicyFile(file)) {
+      patternHits.push(`${file}: added --no-verify`);
+    }
+    if (/prisma\s+db\s+push/.test(text) && isExecutablePolicyFile(file)) {
+      patternHits.push(`${file}: added prisma db push`);
+    }
+    if (/--admin/.test(text) && isExecutablePolicyFile(file) && !labels.has("force-merge")) {
+      patternHits.push(`${file}: added --admin without force-merge label`);
+    }
+  }
+  if (patternHits.length > 0) {
+    fail(`forbidden diff pattern(s):\n  - ${patternHits.join("\n  - ")}`);
+  }
+
+  ok(`${riskTier} risk policy checks passed`);
 }
