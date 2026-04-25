@@ -3,6 +3,7 @@
 import { useState, useMemo } from "react";
 import Link from "next/link";
 import { updateMemberAction, deactivateMemberAction, createMemberAction, inviteMemberAction, bulkInviteAction } from "../actions";
+import { useTranslations } from "next-intl";
 
 // Use the type directly from what we fetch to avoid schema type friction in client components
 type EnrichedMember = {
@@ -39,6 +40,7 @@ export function MembersTable({
   const [roleFilter, setRoleFilter] = useState<string>("ALL");
   const [statusFilter, setStatusFilter] = useState<"ACTIVE" | "ALL">("ACTIVE");
   const [circleFilter, setCircleFilter] = useState<string>("ALL");
+  const t = useTranslations("settings");
 
   // Extract unique circles for the dropdown
   const allCircles = useMemo(() => {
@@ -99,49 +101,49 @@ export function MembersTable({
       <div className="nr-stat-bar" style={{ padding: "16px 20px" }}>
         <div className="nr-stat" style={{ display: "flex", flexDirection: "column" }}>
           <strong style={{ fontSize: "1.3rem" }}>{activeCount}</strong>
-          <span className="nr-meta">Active Members {totalCount > activeCount && `(${totalCount - activeCount} inactive)`}</span>
+          <span className="nr-meta">{t("statActiveMembers", { inactiveInfo: totalCount > activeCount ? t("inactiveInfo", { count: totalCount - activeCount }) : "" })}</span>
         </div>
         <span className="nr-stat-sep" />
         <div className="nr-stat" style={{ display: "flex", flexDirection: "column" }}>
           <strong style={{ fontSize: "1rem", lineHeight: "1.2rem" }}>
-            {adminCount} Admins · {contributorCount} Contributors {facilitatorCount > 0 && `· ${facilitatorCount} Facilitators`}
+            {t("statRoleDistribution", { admin: adminCount, contributor: contributorCount, facilitatorInfo: facilitatorCount > 0 ? t("facilitatorInfo", { count: facilitatorCount }) : "" })}
           </strong>
-          <span className="nr-meta">Role Distribution</span>
+          <span className="nr-meta">{t("labelRoleDistribution")}</span>
         </div>
       </div>
 
       {/* Invite Member Collapsible */}
       <details style={{ background: "var(--bg)", border: "1px dashed var(--line)", borderRadius: 8 }}>
         <summary className="nr-section-header" style={{ borderTop: "none", display: "block", padding: "16px", margin: 0, cursor: "pointer", color: "var(--accent)" }}>
-          <span style={{ fontWeight: 600 }}>+ {isAdmin ? "Invite member" : "Invite colleague"}</span>
+          <span style={{ fontWeight: 600 }}>{isAdmin ? t("btnInviteMember") : t("btnInviteColleague")}</span>
         </summary>
         <div style={{ padding: "0 16px 16px" }}>
           <form action={isAdmin ? createMemberAction : inviteMemberAction} className="stack nr-form-section" style={{ marginTop: 8 }}>
             <input type="hidden" name="workspaceId" value={workspaceId} />
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
               <label>
-                Name
+                {t("labelName")}
                 <input name="displayName" />
               </label>
               <label>
-                Email
+                {t("labelEmail")}
                 <input name="email" type="email" required />
               </label>
             </div>
             {isAdmin && (
               <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 16 }}>
                 <label>
-                  System Role
+                  {t("labelSystemRole")}
                   <select name="role" defaultValue="CONTRIBUTOR">
-                    <option value="CONTRIBUTOR">Contributor</option>
-                    <option value="FACILITATOR">Facilitator</option>
-                    <option value="FINANCE_STEWARD">Finance Steward</option>
-                    <option value="ADMIN">Admin</option>
+                    <option value="CONTRIBUTOR">{t("roleContributor")}</option>
+                    <option value="FACILITATOR">{t("roleFacilitator")}</option>
+                    <option value="FINANCE_STEWARD">{t("roleFinanceSteward")}</option>
+                    <option value="ADMIN">{t("roleAdmin")}</option>
                   </select>
                 </label>
               </div>
             )}
-            <button type="submit" style={{ alignSelf: "flex-start" }}>{isAdmin ? "Invite member" : "Invite colleague"}</button>
+            <button type="submit" style={{ alignSelf: "flex-start" }}>{isAdmin ? t("btnInviteMember").replace("+ ", "") : t("btnInviteColleague").replace("+ ", "")}</button>
           </form>
         </div>
       </details>
@@ -149,22 +151,22 @@ export function MembersTable({
       {isAdmin && (
         <details style={{ background: "var(--bg)", border: "1px dashed var(--line)", borderRadius: 8, marginTop: 16 }}>
           <summary className="nr-section-header" style={{ borderTop: "none", display: "block", padding: "16px", margin: 0, cursor: "pointer", color: "var(--accent)" }}>
-            <span style={{ fontWeight: 600 }}>+ Bulk Invite (Admins)</span>
+            <span style={{ fontWeight: 600 }}>{t("btnBulkInvite")}</span>
           </summary>
           <div style={{ padding: "0 16px 16px" }}>
             <form action={bulkInviteAction} className="stack nr-form-section" style={{ marginTop: 8 }}>
               <input type="hidden" name="workspaceId" value={workspaceId} />
               <label>
-                Paste CSV Lines (Name, Email, Role)
+                {t("labelPasteCsv")}
                 <textarea 
                   name="csvData" 
                   rows={4} 
-                  placeholder="John Doe, john@example.com, CONTRIBUTOR&#10;Jane Smith, jane@example.com, ADMIN"
+                  placeholder={t("placeholderCsv")}
                   style={{ fontFamily: 'monospace', width: '100%', padding: '8px' }}
                   required
                 />
               </label>
-              <button type="submit" style={{ alignSelf: "flex-start" }}>Send Bulk Invites</button>
+              <button type="submit" style={{ alignSelf: "flex-start" }}>{t("btnSendBulkInvites")}</button>
             </form>
           </div>
         </details>
@@ -176,7 +178,7 @@ export function MembersTable({
         <div style={{ display: "flex", flexWrap: "wrap", gap: 16, alignItems: "center" }}>
           <input
             type="text"
-            placeholder="Search name, email, role..."
+            placeholder={t("placeholderSearchMembers")}
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             style={{ width: "240px", fontSize: "0.85rem", padding: "8px 12px" }}
@@ -187,7 +189,7 @@ export function MembersTable({
             onChange={(e) => setCircleFilter(e.target.value)}
             style={{ width: "200px", fontSize: "0.85rem", padding: "8px 12px" }}
           >
-            <option value="ALL">All Circles</option>
+            <option value="ALL">{t("optionAllCircles")}</option>
             {allCircles.map(c => (
               <option key={c.id} value={c.id}>{c.name}</option>
             ))}
@@ -201,7 +203,7 @@ export function MembersTable({
                 onChange={(e) => setStatusFilter(e.target.checked ? "ALL" : "ACTIVE")} 
                 style={{ margin: 0 }}
               />
-              Show deactivated
+              {t("labelShowDeactivated")}
             </label>
           </div>
         </div>
@@ -215,7 +217,7 @@ export function MembersTable({
               className={roleFilter === r ? "button small" : "button secondary small"}
               style={{ padding: "4px 10px", fontSize: "0.75rem", borderRadius: 16 }}
             >
-              {r === "ALL" ? "All Roles" : r.replace("_", " ")}
+              {r === "ALL" ? t("optionAllRoles") : t(`role${r.split("_").map(w => w.charAt(0) + w.slice(1).toLowerCase()).join("")}` as any)}
             </button>
           ))}
         </div>
@@ -226,21 +228,21 @@ export function MembersTable({
         <table className="nr-table" style={{ width: "100%", borderCollapse: "collapse", textAlign: "left", fontSize: "0.85rem" }}>
           <thead>
             <tr style={{ borderBottom: "1px dashed var(--line)", background: "rgba(0,0,0,0.02)" }}>
-              <th style={{ padding: "12px 16px", fontWeight: 600 }}>Name</th>
-              <th style={{ padding: "12px 16px", fontWeight: 600 }}>Email</th>
-              <th style={{ padding: "12px 16px", fontWeight: 600 }}>Org Roles</th>
-              <th style={{ padding: "12px 16px", fontWeight: 600 }}>Circles</th>
-              <th style={{ padding: "12px 16px", fontWeight: 600 }}>System Role</th>
-              <th style={{ padding: "12px 16px", fontWeight: 600 }}>Joined</th>
-              <th style={{ padding: "12px 16px", fontWeight: 600 }}>Status</th>
-              <th style={{ padding: "12px 16px", fontWeight: 600 }}>Actions</th>
+              <th style={{ padding: "12px 16px", fontWeight: 600 }}>{t("colName")}</th>
+              <th style={{ padding: "12px 16px", fontWeight: 600 }}>{t("colEmail")}</th>
+              <th style={{ padding: "12px 16px", fontWeight: 600 }}>{t("colOrgRoles")}</th>
+              <th style={{ padding: "12px 16px", fontWeight: 600 }}>{t("colCircles")}</th>
+              <th style={{ padding: "12px 16px", fontWeight: 600 }}>{t("labelSystemRole")}</th>
+              <th style={{ padding: "12px 16px", fontWeight: 600 }}>{t("colJoined")}</th>
+              <th style={{ padding: "12px 16px", fontWeight: 600 }}>{t("colStatus")}</th>
+              <th style={{ padding: "12px 16px", fontWeight: 600 }}>{t("colActions")}</th>
             </tr>
           </thead>
           <tbody>
             {filteredMembers.length === 0 ? (
               <tr>
                 <td colSpan={8} style={{ padding: "32px", textAlign: "center", color: "var(--muted)" }}>
-                  {members.length === 0 ? "Unable to load members or workspace is empty." : "No members found matching your filters."}
+                  {members.length === 0 ? t("msgEmptyMembers") : t("msgNoMatchingMembers")}
                 </td>
               </tr>
             ) : (
@@ -288,10 +290,10 @@ export function MembersTable({
                           disabled={!member.isActive || !isAdmin}
                           style={{ padding: "4px 8px", fontSize: "0.75rem", background: "transparent", border: "none" }}
                         >
-                          <option value="CONTRIBUTOR">Contributor</option>
-                          <option value="FACILITATOR">Facilitator</option>
-                          <option value="FINANCE_STEWARD">Finance Steward</option>
-                          <option value="ADMIN">Admin</option>
+                          <option value="CONTRIBUTOR">{t("roleContributor")}</option>
+                          <option value="FACILITATOR">{t("roleFacilitator")}</option>
+                          <option value="FINANCE_STEWARD">{t("roleFinanceSteward")}</option>
+                          <option value="ADMIN">{t("roleAdmin")}</option>
                         </select>
                       </form>
                     </td>
@@ -300,9 +302,9 @@ export function MembersTable({
                     </td>
                     <td style={{ padding: "12px 16px" }}>
                       {member.isActive ? (
-                        <span style={{ color: "var(--success, #155724)", fontSize: "0.75rem", fontWeight: 600 }}>Active</span>
+                        <span style={{ color: "var(--success, #155724)", fontSize: "0.75rem", fontWeight: 600 }}>{t("statusActive")}</span>
                       ) : (
-                        <span style={{ color: "var(--muted)", fontSize: "0.75rem", fontWeight: 600 }}>Deactivated</span>
+                        <span style={{ color: "var(--muted)", fontSize: "0.75rem", fontWeight: 600 }}>{t("statusDeactivated")}</span>
                       )}
                     </td>
                     <td style={{ padding: "12px 16px" }}>
@@ -310,14 +312,14 @@ export function MembersTable({
                         <form action={deactivateMemberAction}>
                           <input type="hidden" name="workspaceId" value={workspaceId} />
                           <input type="hidden" name="memberId" value={member.id} />
-                          <button type="submit" className="danger small" style={{ padding: "4px 8px", fontSize: "0.7rem" }}>Deactivate</button>
+                          <button type="submit" className="danger small" style={{ padding: "4px 8px", fontSize: "0.7rem" }}>{t("btnDeactivate")}</button>
                         </form>
                       ) : (
                         <form action={updateMemberAction}>
                            <input type="hidden" name="workspaceId" value={workspaceId} />
                            <input type="hidden" name="memberId" value={member.id} />
                            <input type="hidden" name="isActive" value="true" />
-                           <button type="submit" className="secondary small" style={{ padding: "4px 8px", fontSize: "0.7rem" }} disabled title="Reactivation requires API / DB update currently">Reactivate</button>
+                           <button type="submit" className="secondary small" style={{ padding: "4px 8px", fontSize: "0.7rem" }} disabled title="Reactivation requires API / DB update currently">{t("btnReactivate")}</button>
                         </form>
                       )}
                     </td>
