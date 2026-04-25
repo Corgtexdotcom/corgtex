@@ -234,18 +234,22 @@
     "viewSource": "View Source"
   },
   "chat": {
+    "attachedFileMessage": "[Attached file: {fileName}]\n*(File uploaded and queued for Brain absorption)*\n\n{message}",
     "authorCorgtex": "Corgtex",
     "btnAttach": "+",
     "btnBack": "← Back",
     "btnBackToConversations": "←",
     "btnExpandChat": "⛶",
+    "btnRemoveAttachment": "✕",
     "btnSend": "Send",
     "conversationsTitle": "Conversations",
     "emptyStateDesc": "Ask about your workspace, draft proposals, or explore knowledge.",
     "emptyStateTitle": "Start a conversation",
+    "emptyPreview": "...",
     "errorFailedToCreate": "Failed to create conversation.",
     "errorFailedToLoad": "Failed to load conversation.",
     "errorFailedToSend": "Failed to send message.",
+    "errorStreamUnavailable": "Response stream is unavailable.",
     "newConversation": "New Conversation",
     "noConversations": "No conversations yet",
     "pageDescription": "Interact with Corgtex and your workspace data.",
@@ -255,7 +259,11 @@
     "starter2": "Help me draft a proposal for...",
     "starter3": "Summarize recent meeting decisions",
     "thinking": "Thinking...",
-    "titleClickToRename": "Click to rename"
+    "titleAttachFile": "Attach a file",
+    "titleBackToConversations": "Back to conversations",
+    "titleClickToRename": "Click to rename",
+    "titleExpandChat": "Expand chat",
+    "titleRemoveAttachment": "Remove attachment"
   },
   "circles": {
     "agentMembersTitle": "Agent Members",
