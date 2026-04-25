@@ -1,11 +1,14 @@
-### Goal Description
-[Provide a brief description of the problem, any background context, and what the change accomplishes.]
+### Plan
+[Link to `docs/plans/<branch>.md`.]
 
-### Implementation Plan
-[Copy over your approved implementation plan]
+### Risk Tier
+[low | standard | high]
 
 ### Walkthrough
-[Copy over your final walkthrough summarizing what was built]
+[Summarize what shipped in one or two sentences.]
+
+### Acceptance Criteria
+- [ ] ...
 
 ### Visual Proof
-[Mandatory for frontend/UI changes: Attach screenshots or screen recordings showcasing the new behavior. If no UI changes were made, you may delete this section.]
+[Required for frontend/UI changes: link committed screenshots or recordings under `docs/assets/<branch-slug>/`. Delete this section if no UI paths changed.]

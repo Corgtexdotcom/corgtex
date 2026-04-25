@@ -23,7 +23,8 @@ reviews code line-by-line. The full specification lives in
 - **Dev server:** `npm run dev` | **Build:** `npm run build` | **Lint:** `npm run lint` | **Typecheck:** `npm run typecheck`
 - **All static checks:** `npm run check` (lint + typecheck + prisma validate)
 - **Unit tests:** `npm test` or `npm run test:unit` | **Single test:** `npx vitest run packages/domain/src/runtime.test.ts`
-- **Integration / E2E:** no dedicated `npm run test:integration` script exists today. For end-to-end coverage, run the app locally with `npm run dev` and use the agent API flow above. `docker-compose.yml` is available for local services, but there is no separate `docker-compose.test.yml`.
+- **Integration tests:** `npm run test:integration` (uses `docker-compose.test.yml`) | **All tests:** `npm run test:all`
+- **E2E:** run the app locally with `npm run dev` and use the agent API flow below.
 - **Prisma:** `npm run prisma:generate` (required before tests), `npm run prisma:migrate`, `npm run prisma:migrate:deploy`
 
 ### Architecture
@@ -80,8 +81,11 @@ implementation code.
 
 1. Create a new branch: `git checkout -b <type>/<short-slug>` (e.g. `feat/optimistic-finance`, `fix/login-crash`).
 2. Copy [docs/plans/_TEMPLATE.md](docs/plans/_TEMPLATE.md) to `docs/plans/<branch>.md`. The filename is the branch name, lowercased, with `/` replaced by `-`.
-3. Fill every section. The **Files to touch** section is a hard allowlist — the Executor cannot modify files outside it without first updating this file.
-4. Keep the diff small: target ≤ 400 LOC of code changes (docs don't count) and ≤ 15 files. If the work is bigger, split it into multiple plans.
+3. Fill every section, including **Risk tier** (`low`, `standard`, or `high`). The **Files to touch** section is a hard allowlist — the Executor cannot modify files outside it without first updating this file.
+4. Pick the smallest honest risk tier:
+   - `low`: docs, copy, styles, or tightly scoped non-security changes. Cap: ≤ 1200 non-doc LOC and ≤ 50 files.
+   - `standard`: normal product or domain work. Cap: ≤ 800 non-doc LOC and ≤ 25 files.
+   - `high`: auth, permissions, migrations, deploy, workflows, security-sensitive logic, or broad shared behavior. Cap: ≤ 400 non-doc LOC and ≤ 15 files.
 5. If the plan touches forbidden paths (`deploy/**`, `.github/workflows/**`, `prisma/migrations/**`, `packages/domain/src/auth*.ts`, `apps/web/lib/auth.ts`), state the justification in the plan and note that the PR will need the `forbidden-path-approved` label.
 6. Commit the plan file on the branch, push, and open a **draft** PR whose body is the contents of the plan file. Do not mark ready-for-review.
 
@@ -94,11 +98,11 @@ Stop there. Hand off to the Executor.
 Your job is to implement the plan. You do not plan, and you do not
 merge.
 
-1. **First action:** Verify your branch state (`git branch --show-current`) before working. Multiple agents run simultaneously in this repo. If you are on the wrong branch, checkout or create it (`git checkout -b <branch>`). Once on the correct branch, run `cat docs/plans/<branch>.md`. Echo the Acceptance criteria checklist into your first commit message so the Reviewer can diff intent vs. outcome.
+1. **First action:** Verify your branch state (`git branch --show-current`) before working. Multiple agents run simultaneously in this repo. If you are on the wrong branch, checkout or create it (`git checkout -b <branch>`). Once on the correct branch, run `cat docs/plans/<branch>.md`.
 2. **Stay in scope:** only modify files listed in the plan's "Files to touch" section. If you discover the plan is wrong or incomplete, commit an update to the plan file first (separate commit), then write code. `scripts/check-plan.mjs` enforces this in CI.
 3. **Run the test plan locally** before pushing. Run `npm run check` and whatever the plan's "Test plan" specifies. Wait for it to exit with code `0`. Fix any TypeScript or ESLint errors before proceeding.
 4. **Open the PR as ready-for-review** once all acceptance criteria are ticked. Use `gh pr create`. If `gh` isn't on `PATH`, invoke `/opt/homebrew/bin/gh`. The PR body must explicitly include the completed acceptance criteria checklist in Markdown, and must link back to `docs/plans/<branch>.md`.
-5. **Frontend changes:** attach a screen recording (`.mp4` / `.webm`) or screenshots (`.png`) to the PR description. Any change under `apps/web/app/**` or `apps/web/components/**` requires visual proof. **You must run the app locally and capture actual proof of the feature running. Do not submit AI-generated mockups or generic placeholders.**
+5. **Frontend changes:** commit actual visual proof (`.png`, `.jpg`, `.jpeg`, `.webp`, `.mp4`, or `.webm`) under `docs/assets/<branch-slug>/` and link it from the PR body. Any change under `apps/web/app/**`, `apps/web/components/**`, or `apps/web/lib/components/**` requires proof. **You must run the app locally and capture actual proof of the feature running. Do not submit AI-generated mockups or generic placeholders.**
 6. **CI fix loop cap:** if CI is red, you may push up to 3 fix commits. After the 3rd failed attempt, label the PR `needs-replan`, comment a summary, and stop. The human will re-prompt the Planner.
 7. **Never (default):** merge your own PR, use `--admin`, skip hooks with `--no-verify`, or run `prisma db push`. Never remove `export const dynamic = "force-dynamic"` from a Prisma-touching page. Never commit `.env` or any secret.
 8. **Human-directed bypass:** If the human explicitly instructs you via prompt to force-merge a specific PR, you may: (a) add the `force-merge` label, (b) run `gh pr merge <number> --admin --squash`, (c) add a PR comment: `⚠️ Human-directed bypass: merged with --admin per explicit instruction.` This is the **only** exception to rule 7's ban on `--admin` and self-merging. You must still never skip `--no-verify`, run `prisma db push`, or commit secrets.
@@ -120,13 +124,13 @@ Canonical checklist lives in [.codex/review.md](.codex/review.md).
 Summary:
 
 1. **Plan exists** at `docs/plans/<branch>.md` and is linked from the PR body.
-2. **Scope intact:** all changed files are in the plan's "Files to touch" allowlist (`scripts/check-plan.mjs` enforces).
+2. **Scope intact:** all changed files are in the plan's "Files to touch" allowlist, except visual proof under `docs/assets/<branch-slug>/` (`scripts/check-plan.mjs` enforces).
 3. **Acceptance criteria all ticked** and each is reflected in code or CI output.
 4. **No forbidden-path changes** without the `forbidden-path-approved` label.
-5. **Diff within caps** (≤ 400 LOC of code, ≤ 15 files) unless `large-change-approved` is set.
+5. **Diff within risk-tier caps** unless `large-change-approved` is set.
 6. **No secrets** (gitleaks green), no `prisma db push`, no `--no-verify`, no `force-dynamic` removed from Prisma pages. `--admin` is forbidden unless the `force-merge` label is present and the PR comment trail documents the human directive.
 7. **Tests added** when `packages/domain/**` changed.
-8. **Visual proof attached** for any frontend-path change.
+8. **Committed visual proof present** for any frontend-path change.
 9. **All required CI checks green.**
 10. **No objective logic flaws** (e.g., race conditions, unhandled rejections, security vulnerabilities).
 

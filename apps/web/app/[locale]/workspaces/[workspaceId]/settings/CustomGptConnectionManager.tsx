@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+import { useTranslations } from "next-intl";
 
 type OAuthAppInfo = {
   id: string;
@@ -26,13 +27,14 @@ export function CustomGptConnectionManager({ workspaceId, mcpUrl, oauthApps }: P
   const [apps, setApps] = useState<OAuthAppInfo[]>(oauthApps);
   const [loading, setLoading] = useState(false);
   const [setupData, setSetupData] = useState<{ clientId: string; clientSecret: string; authorizeUrl: string; tokenUrl: string; schemaUrl: string; orgName: string } | null>(null);
+  const t = useTranslations("settings");
 
   const activeApps = apps.filter(c => c.isActive);
 
   const handleConnect = async () => {
     setLoading(true);
     try {
-      const orgNameInput = prompt("Enter a short name/identifier for this workspace (used in the GPT system prompt, e.g. Acme Corp):");
+      const orgNameInput = prompt(t("promptOrgName"));
       if (!orgNameInput) return; // cancelled
 
       const res = await fetch(`/api/workspaces/${workspaceId}/oauth-apps`, {
@@ -49,7 +51,7 @@ export function CustomGptConnectionManager({ workspaceId, mcpUrl, oauthApps }: P
       });
       if (!res.ok) {
         const err = await res.json();
-        throw new Error(err.error || "Failed to create OAuth App");
+        throw new Error(err.error || t("errorCreateOauthApp"));
       }
       const data = await res.json();
 
@@ -67,7 +69,7 @@ export function CustomGptConnectionManager({ workspaceId, mcpUrl, oauthApps }: P
       router.refresh();
     } catch (err: any) {
       console.error(err);
-      alert(err.message || "Failed to connect Custom GPT");
+      alert(err.message || t("errorConnectCustomGpt"));
     } finally {
       setLoading(false);
     }
@@ -94,13 +96,13 @@ Your primary objective is to assist team members in participating effectively wi
     return (
       <div className="panel" style={{ background: "var(--surface)", border: "1px solid var(--line)", padding: 20, borderRadius: 8, marginTop: 16 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-          <h3 style={{ margin: 0, color: "var(--accent)" }} className="row gap-2">ChatGPT Custom GPT Setup</h3>
-          <button className="button small secondary" onClick={() => setSetupData(null)}>Done</button>
+          <h3 style={{ margin: 0, color: "var(--accent)" }} className="row gap-2">{t("titleCustomGptSetup")}</h3>
+          <button className="button small secondary" onClick={() => setSetupData(null)}>{t("btnDone")}</button>
         </div>
 
         <div style={{ padding: "12px", background: "rgba(255, 165, 0, 0.1)", border: "1px solid rgba(255, 165, 0, 0.3)", borderRadius: "6px", marginBottom: "20px" }}>
-          <strong style={{ display: "block", marginBottom: "4px" }}>Save your Client Secret</strong>
-          <span className="muted" style={{ fontSize: "0.85rem" }}>You won&apos;t be able to see this secret again after you close this panel.</span>
+          <strong style={{ display: "block", marginBottom: "4px" }}>{t("titleSaveClientSecret")}</strong>
+          <span className="muted" style={{ fontSize: "0.85rem" }}>{t("descSaveClientSecret")}</span>
           <div className="mt-2 row gap-2">
             <code style={{ flex: 1, padding: "4px 8px", background: "rgba(0,0,0,0.2)", borderRadius: 4 }}>{setupData.clientSecret}</code>
           </div>
@@ -108,42 +110,42 @@ Your primary objective is to assist team members in participating effectively wi
 
         <ol className="stack" style={{ gap: 16, paddingLeft: 16, fontSize: "0.85rem", margin: 0 }}>
           <li>
-            <strong>Create GPT</strong>
-            <p className="muted mt-1">Go to <a href="https://chatgpt.com/gpts/editor" target="_blank" rel="noreferrer" style={{color: "var(--accent)"}}>ChatGPT -&gt; Explore -&gt; Create</a></p>
+            <strong>{t("stepCreateGpt")}</strong>
+            <p className="muted mt-1">{t("stepCreateGptDesc")} <a href="https://chatgpt.com/gpts/editor" target="_blank" rel="noreferrer" style={{color: "var(--accent)"}}>ChatGPT -&gt; Explore -&gt; Create</a></p>
           </li>
           
           <li>
-            <strong>Set Instructions</strong>
-            <p className="muted mt-1 mb-2">Paste this template into the <strong>Instructions</strong> box:</p>
+            <strong>{t("stepSetInstructions")}</strong>
+            <p className="muted mt-1 mb-2">{t("stepSetInstructionsDesc")}</p>
             <textarea readOnly value={systemPromptTemplate} rows={5} className="w-full text-xs font-mono p-2 bg-[var(--surface-sunken)] border border-[var(--line)] rounded" />
           </li>
 
           <li>
-            <strong>Add Action Schema</strong>
-            <p className="muted mt-1 mb-2">Scroll down to <strong>Actions</strong> and click <strong>Create new action</strong>. Click <strong>Import from URL</strong> and paste:</p>
+            <strong>{t("stepAddActionSchema")}</strong>
+            <p className="muted mt-1 mb-2">{t("stepAddActionSchemaDesc")}</p>
             <div className="row gap-2">
               <input readOnly value={setupData.schemaUrl} className="flex-1 bg-[var(--surface-sunken)] text-xs font-mono p-2 rounded border border-[var(--line)]" />
             </div>
           </li>
 
           <li>
-            <strong>Configure OAuth</strong>
-            <p className="muted mt-1 mb-2">Click the gear icon next to <strong>Authentication</strong>, select <strong>OAuth</strong>, and paste:</p>
+            <strong>{t("stepConfigureOauth")}</strong>
+            <p className="muted mt-1 mb-2">{t("stepConfigureOauthDesc")}</p>
             <div className="grid grid-cols-[120px_1fr] gap-2 items-center">
-              <span className="text-right text-xs">Client ID</span>
+              <span className="text-right text-xs">{t("labelOauthClientId")}</span>
               <input readOnly value={setupData.clientId} className="bg-[var(--surface-sunken)] text-xs font-mono p-1 rounded border border-[var(--line)]" />
-              <span className="text-right text-xs">Client Secret</span>
-              <span className="text-xs muted">(from the orange box above)</span>
-              <span className="text-right text-xs">Authorization URL</span>
+              <span className="text-right text-xs">{t("labelOauthClientSecret")}</span>
+              <span className="text-xs muted">{t("descFromOrangeBox")}</span>
+              <span className="text-right text-xs">{t("labelAuthUrl")}</span>
               <input readOnly value={setupData.authorizeUrl} className="bg-[var(--surface-sunken)] text-xs font-mono p-1 rounded border border-[var(--line)]" />
-              <span className="text-right text-xs">Token URL</span>
+              <span className="text-right text-xs">{t("labelTokenUrl")}</span>
               <input readOnly value={setupData.tokenUrl} className="bg-[var(--surface-sunken)] text-xs font-mono p-1 rounded border border-[var(--line)]" />
             </div>
           </li>
           
           <li>
-            <strong>Finalize Callback URL</strong>
-            <p className="muted mt-1">After saving, ChatGPT will generate a <strong>Callback URL</strong> at the bottom of the Action screen. Note it down—you must update this App integration later if you want strict security, though it defaults to allowing any ChatGPT OAuth flow.</p>
+            <strong>{t("stepFinalizeCallback")}</strong>
+            <p className="muted mt-1">{t("stepFinalizeCallbackDesc")}</p>
           </li>
         </ol>
       </div>
@@ -159,11 +161,11 @@ Your primary objective is to assist team members in participating effectively wi
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
               <strong style={{ fontSize: "1rem" }}>ChatGPT</strong>
               {activeApps.length > 0 && (
-                <span className="tag" style={{ background: "var(--accent-soft)", fontWeight: "bold" }}>Connected</span>
+                <span className="tag" style={{ background: "var(--accent-soft)", fontWeight: "bold" }}>{t("statusConnected")}</span>
               )}
             </div>
             <div className="muted" style={{ fontSize: "0.85rem", marginTop: 4 }}>
-              Setup a personalized Custom GPT for this workspace. Requires ChatGPT Plus.
+              {t("descChatGpt")}
             </div>
           </div>
 
@@ -173,7 +175,7 @@ Your primary objective is to assist team members in participating effectively wi
               onClick={handleConnect}
               disabled={loading}
             >
-              {loading ? "..." : "+ Add Integration"}
+              {loading ? "..." : t("btnAddIntegration")}
             </button>
           </div>
         </div>
