@@ -33,6 +33,8 @@ Improve platform performance and database scalability as the data and user base 
 - `prisma/migrations/**`
 - `apps/web/package.json`
 - `apps/web/next.config.ts`
+- `docs/plans/feat-performance-scale.md`
+- `package-lock.json`
 
 ## Acceptance criteria
 
