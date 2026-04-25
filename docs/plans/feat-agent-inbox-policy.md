@@ -22,7 +22,7 @@ high
 - `packages/domain/src/agent-runs.ts`
 - `packages/domain/src/agent-config.test.ts`
 - `packages/domain/src/agent-runs.test.ts`
-- `docs/assets/visual_proof_agent_inbox.png`
+- `docs/assets/feat-agent-inbox-policy/visual_proof_agent_inbox.png`
 - `docs/plans/feat-agent-inbox-policy.md`
 
 ## Acceptance criteria
