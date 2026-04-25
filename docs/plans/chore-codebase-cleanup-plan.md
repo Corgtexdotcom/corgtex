@@ -35,6 +35,7 @@ Make the codebase cleanup invariants enforceable instead of implicit: remove exp
 - `packages/shared/src/dummy.integration.test.ts`
 - `apps/web/app/api/demo-leads/route.ts`
 - `apps/web/app/api/integrations/[provider]/callback/route.ts`
+- `apps/web/app/api/integrations/[provider]/callback/route.test.ts`
 - `apps/web/app/api/workspaces/[workspaceId]/data-sources/**`
 - `apps/web/app/api/workspaces/[workspaceId]/conversations/[conversationId]/route.ts`
 - `apps/web/app/[locale]/workspaces/[workspaceId]/brain/[slug]/page.tsx`
