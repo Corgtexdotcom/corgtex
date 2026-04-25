@@ -36,11 +36,11 @@ Improve platform performance and database scalability as the data and user base 
 
 ## Acceptance criteria
 
-- [ ] `@@index([workspaceId, status])` or similar required indexes are added to `AgentRun` and `AgentStep` in `prisma/schema.prisma`.
-- [ ] A new Prisma migration is generated and committed (`npm run prisma:migrate -- --name perf_indexes`).
-- [ ] `@next/bundle-analyzer` and `cross-env` are added as devDependencies in `apps/web/package.json`.
-- [ ] An `"analyze"` script is available in `apps/web/package.json` and `next.config.ts` wraps the config with `withBundleAnalyzer`.
-- [ ] The `npm run check` pipeline passes successfully locally without type or lint errors.
+- [x] `@@index([workspaceId, status])` or similar required indexes are added to `AgentRun` and `AgentStep` in `prisma/schema.prisma`.
+- [x] A new Prisma migration is generated and committed (`npm run prisma:migrate -- --name perf_indexes`).
+- [x] `@next/bundle-analyzer` and `cross-env` are added as devDependencies in `apps/web/package.json`.
+- [x] An `"analyze"` script is available in `apps/web/package.json` and `next.config.ts` wraps the config with `withBundleAnalyzer`.
+- [x] The `npm run check` pipeline passes successfully locally without type or lint errors.
 
 ## Test plan
 
