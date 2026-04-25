@@ -1,4 +1,4 @@
-import { listActorWorkspaces, countUnreadNotifications, listConversations } from "@corgtex/domain";
+import { isGlobalOperator, listActorWorkspaces, countUnreadNotifications, listConversations } from "@corgtex/domain";
 import { workspaceBranding, prisma } from "@corgtex/shared";
 import type { Metadata } from "next";
 import { logoutAction, requirePageActor } from "@/lib/auth";
@@ -81,7 +81,7 @@ export default async function WorkspaceLayout({
             </div>
           ))}
 
-          {current?.slug === "corgtex" && actor.kind === "user" && actor.user.email === "janbrezina@icloud.com" && (
+          {isGlobalOperator(actor) && (
             <div style={{ marginBottom: "16px" }}>
               <div className="muted" style={{ fontSize: "0.75rem", textTransform: "uppercase", letterSpacing: "0.05em", padding: "0 12px", marginBottom: "4px", fontWeight: 600 }}>
                 {tNav("globalAdmin")}
