@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { handleRouteError } from "@/lib/http";
 import { env } from "@corgtex/shared";
 
 function jsonBodySchema(properties: Record<string, unknown>, required: string[]) {
@@ -24,7 +25,8 @@ const paginationParameters = [
 const okResponse = { "200": { description: "Successful response" } };
 
 export async function GET() {
-  const origin = env.APP_URL.replace(/\/$/, "");
+  try {
+    const origin = env.APP_URL.replace(/\/$/, "");
 
   const schema = {
     openapi: "3.1.0",
@@ -177,5 +179,8 @@ export async function GET() {
     },
   };
 
-  return NextResponse.json(schema);
+    return NextResponse.json(schema);
+  } catch (error) {
+    return handleRouteError(error);
+  }
 }
