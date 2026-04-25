@@ -1,8 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
+import { z } from "zod";
 import { requestPasswordReset } from "@corgtex/domain";
 import { sendEmail } from "@corgtex/shared";
-import { handleRouteError } from "@/lib/http";
+import { handleRouteError, validateBody } from "@/lib/http";
 import { rateLimitPasswordReset } from "@/lib/rate-limit-middleware";
+
+const forgotPasswordSchema = z.object({
+  email: z.string().trim().min(1),
+});
 
 function buildResetEmailHtml(resetUrl: string, displayName: string | null) {
   return `
@@ -33,8 +38,8 @@ function buildResetEmailHtml(resetUrl: string, displayName: string | null) {
 
 export async function POST(request: NextRequest) {
   try {
-    const body = (await request.json()) as { email?: unknown };
-    const email = String(body.email ?? "").trim().toLowerCase();
+    const body = await validateBody(request, forgotPasswordSchema);
+    const email = body.email.toLowerCase();
 
     // Rate limit before doing any work
     const rateLimited = await rateLimitPasswordReset(request, email);

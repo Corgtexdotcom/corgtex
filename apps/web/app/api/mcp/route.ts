@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
+import { handleRouteError } from "@/lib/http";
 import { createCorgtexMcpServer, authenticateMcpRequest } from "@corgtex/mcp";
-import { AppError } from "@corgtex/domain";
 
 /**
  * POST /api/mcp — JSON-RPC endpoint for MCP tool/resource calls.
@@ -47,19 +47,7 @@ export async function POST(request: NextRequest) {
     return response;
   } catch (error) {
     if (server) await server.close().catch(() => {});
-    
-    if (error instanceof AppError) {
-      return NextResponse.json(
-        { jsonrpc: "2.0", error: { code: -32000, message: error.message } },
-        { status: error.status },
-      );
-    }
-
-    console.error("[MCP] Unexpected error:", error);
-    return NextResponse.json(
-      { jsonrpc: "2.0", error: { code: -32603, message: "Internal server error" } },
-      { status: 500 },
-    );
+    return handleRouteError(error);
   }
 }
 
@@ -68,20 +56,28 @@ export async function POST(request: NextRequest) {
  * Returns basic info about the MCP server for discovery.
  */
 export async function GET() {
-  return NextResponse.json({
-    name: "corgtex-mcp",
-    version: "1.0.0",
-    description: "Corgtex MCP Server — connect from ChatGPT, Claude, or Gemini to interact with your organization's governance platform.",
-    capabilities: {
-      tools: true,
-      resources: true,
-    },
-  });
+  try {
+    return NextResponse.json({
+      name: "corgtex-mcp",
+      version: "1.0.0",
+      description: "Corgtex MCP Server — connect from ChatGPT, Claude, or Gemini to interact with your organization's governance platform.",
+      capabilities: {
+        tools: true,
+        resources: true,
+      },
+    });
+  } catch (error) {
+    return handleRouteError(error);
+  }
 }
 
 /**
  * DELETE /api/mcp — Session termination (stateless, no-op).
  */
 export async function DELETE() {
-  return new NextResponse(null, { status: 204 });
+  try {
+    return new NextResponse(null, { status: 204 });
+  } catch (error) {
+    return handleRouteError(error);
+  }
 }

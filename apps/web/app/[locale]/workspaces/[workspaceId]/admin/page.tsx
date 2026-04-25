@@ -5,6 +5,8 @@ import { isGlobalOperator, listAllWorkspaces, listAllUsers } from "@corgtex/doma
 import { AdminDashboardClient } from "./AdminDashboardClient";
 import { getTranslations } from "next-intl/server";
 
+export const dynamic = "force-dynamic";
+
 export default async function GlobalAdminPage({ params }: { params: Promise<{ workspaceId: string }> }) {
   const { workspaceId } = await params;
   const actor = await requirePageActor();
