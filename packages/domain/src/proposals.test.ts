@@ -95,4 +95,32 @@ describe("getProposal", () => {
     const actor = { kind: "user", user: { id: "u-2" } } as any;
     await expect(getProposal(actor, { workspaceId: "ws-1", proposalId: "p-private" })).rejects.toThrow("Proposal not found.");
   });
+
+  it("does not let workspace admins bypass private proposal ownership", async () => {
+    const { getProposal } = await import("./proposals");
+    const { requireWorkspaceMembership } = await import("./auth");
+
+    vi.mocked(requireWorkspaceMembership).mockResolvedValueOnce({
+      id: "mem-admin",
+      workspaceId: "ws-1",
+      userId: "u-admin",
+      role: "ADMIN",
+      isActive: true,
+    } as any);
+    vi.mocked(prisma.proposal.findFirst).mockResolvedValueOnce(null);
+
+    const actor = { kind: "user", user: { id: "u-admin", globalRole: "USER" } } as any;
+    await expect(getProposal(actor, { workspaceId: "ws-1", proposalId: "p-private" })).rejects.toThrow("Proposal not found.");
+
+    expect(prisma.proposal.findFirst).toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        id: "p-private",
+        workspaceId: "ws-1",
+        OR: [
+          { isPrivate: false },
+          { isPrivate: true, authorUserId: "u-admin" },
+        ],
+      },
+    }));
+  });
 });
