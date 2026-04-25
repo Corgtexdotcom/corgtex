@@ -1,7 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
+import { z } from "zod";
 import { createProposal, listProposals, requireWorkspaceMembership } from "@corgtex/domain";
 import { resolveRequestActor } from "@/lib/auth";
-import { handleRouteError } from "@/lib/http";
+import { handleRouteError, validateBody } from "@/lib/http";
+
+const createProposalSchema = z.object({
+  title: z.string().trim().min(1),
+  summary: z.string().optional().nullable(),
+  bodyMd: z.string(),
+});
 
 export async function GET(request: NextRequest, { params }: { params: Promise<{ workspaceId: string }> }) {
   try {
@@ -19,12 +26,12 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   try {
     const actor = await resolveRequestActor(request);
     const { workspaceId } = await params;
-    const body = (await request.json()) as { title?: unknown; summary?: unknown; bodyMd?: unknown };
+    const body = await validateBody(request, createProposalSchema);
     const proposal = await createProposal(actor, {
       workspaceId,
-      title: String(body.title ?? ""),
-      summary: typeof body.summary === "string" ? body.summary : null,
-      bodyMd: String(body.bodyMd ?? ""),
+      title: body.title,
+      summary: body.summary ?? null,
+      bodyMd: body.bodyMd,
     });
     return NextResponse.json({ proposal }, { status: 201 });
   } catch (error) {
