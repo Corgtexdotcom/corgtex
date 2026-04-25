@@ -3,6 +3,7 @@ import type { AppActor, MembershipSummary } from "@corgtex/shared";
 import { appendEvents } from "./events";
 import { requireWorkspaceMembership } from "./auth";
 import { recordAudit } from "./audit-trail";
+import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { invariant } from "./errors";
 import type { GoalLevel, GoalCadence, GoalStatus } from "@prisma/client";
 
@@ -103,7 +104,7 @@ export async function updateGoal(
       where: { id: params.goalId },
     });
 
-    invariant(goal && goal.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Goal not found.");
+    invariant(goal && goal.workspaceId === params.workspaceId && !goal.archivedAt, 404, "NOT_FOUND", "Goal not found.");
 
     const data: Record<string, unknown> = {};
     if (params.title !== undefined) {
@@ -165,22 +166,11 @@ export async function deleteGoal(
     resolvedMembership: params._membership,
   });
 
-  return prisma.$transaction(async (tx) => {
-    const goal = await tx.goal.findUnique({
-      where: { id: params.goalId },
-    });
-
-    invariant(goal && goal.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Goal not found.");
-
-    await tx.goal.delete({ where: { id: params.goalId } });
-
-    await recordAudit(tx, actor, {
-      workspaceId: params.workspaceId,
-      action: "goal.deleted",
-      entityType: "Goal",
-      entityId: params.goalId,
-      meta: { title: goal.title },
-    });
+  await archiveWorkspaceArtifact(actor, {
+    workspaceId: params.workspaceId,
+    entityType: "Goal",
+    entityId: params.goalId,
+    reason: "Archived from goal delete path.",
   });
 }
 
@@ -227,7 +217,7 @@ export async function getGoal(
     },
   });
 
-  invariant(goal && goal.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Goal not found.");
+  invariant(goal && goal.workspaceId === params.workspaceId && !goal.archivedAt, 404, "NOT_FOUND", "Goal not found.");
   return goal;
 }
 
@@ -241,6 +231,7 @@ export async function listGoals(
     ownerMemberId?: string | null;
     status?: GoalStatus;
     parentGoalId?: string | null;
+    archiveFilter?: ArchiveFilter;
     _membership?: MembershipSummary | null;
   }
 ) {
@@ -250,7 +241,7 @@ export async function listGoals(
     resolvedMembership: params._membership,
   });
 
-  const query: any = { workspaceId: params.workspaceId };
+  const query: any = { workspaceId: params.workspaceId, ...archiveFilterWhere(params.archiveFilter) };
   if (params.level !== undefined) query.level = params.level;
   if (params.cadence !== undefined) query.cadence = params.cadence;
   if (params.circleId !== undefined) query.circleId = params.circleId;

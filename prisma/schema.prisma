@@ -275,6 +275,7 @@ model Workspace {
   recognitions        Recognition[]
   agentIdentities     AgentIdentity[]
   deliberationEntries DeliberationEntry[]
+  archiveRecords      WorkspaceArchiveRecord[]
 }
 
 model WorkspaceFeatureFlag {
@@ -409,6 +410,9 @@ model Circle {
   domainMd       String?
   maturityStage  String   @default("GETTING_STARTED")
   sortOrder      Int      @default(0)
+  archivedAt     DateTime?
+  archivedByUserId String?
+  archiveReason String?
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
@@ -424,6 +428,7 @@ model Circle {
   agentAssignments CircleAgentAssignment[]
 
   @@index([workspaceId])
+  @@index([workspaceId, archivedAt])
 }
 
 model Role {
@@ -437,6 +442,9 @@ model Role {
   isCoreRole       Boolean  @default(false)
   coreRoleType     String?
   sortOrder        Int      @default(0)
+  archivedAt       DateTime?
+  archivedByUserId String?
+  archiveReason    String?
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 
@@ -445,6 +453,7 @@ model Role {
   agentAssignments CircleAgentAssignment[]
 
   @@index([circleId])
+  @@index([circleId, archivedAt])
 }
 
 model RoleAssignment {
@@ -474,6 +483,9 @@ model Action {
   proposal         Proposal?    @relation(fields: [proposalId], references: [id], onDelete: SetNull)
   isPrivate        Boolean      @default(false)
   publishedAt      DateTime?
+  archivedAt       DateTime?
+  archivedByUserId String?
+  archiveReason    String?
   createdAt        DateTime     @default(now())
   updatedAt        DateTime     @updatedAt
 
@@ -483,6 +495,7 @@ model Action {
   assigneeMember Member?   @relation("ActionAssignee", fields: [assigneeMemberId], references: [id], onDelete: SetNull)
 
   @@index([workspaceId, status])
+  @@index([workspaceId, archivedAt])
 }
 
 model Tension {
@@ -503,6 +516,9 @@ model Tension {
   meetingId        String?
   isPrivate        Boolean       @default(false)
   publishedAt      DateTime?
+  archivedAt       DateTime?
+  archivedByUserId String?
+  archiveReason    String?
   createdAt        DateTime      @default(now())
   updatedAt        DateTime      @updatedAt
 
@@ -514,6 +530,7 @@ model Tension {
   upvotes        TensionUpvote[]
 
   @@index([workspaceId, status])
+  @@index([workspaceId, archivedAt])
 }
 
 model Proposal {
@@ -531,6 +548,9 @@ model Proposal {
   publishedAt  DateTime?
   decidedAt    DateTime?
   autoApproveAt DateTime?
+  archivedAt    DateTime?
+  archivedByUserId String?
+  archiveReason String?
   createdAt    DateTime       @default(now())
   updatedAt    DateTime       @updatedAt
 
@@ -546,6 +566,7 @@ model Proposal {
   adviceProcess AdviceProcess?
 
   @@index([workspaceId, status])
+  @@index([workspaceId, archivedAt])
 }
 
 model ProposalReaction {
@@ -665,12 +686,17 @@ model Cycle {
   startDate     DateTime
   endDate       DateTime
   pointsPerUser Int         @default(100)
+  archivedAt    DateTime?
+  archivedByUserId String?
+  archiveReason String?
   createdAt     DateTime    @default(now())
   updatedAt     DateTime    @updatedAt
 
   workspace   Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   updates     CycleUpdate[]
   allocations Allocation[]
+
+  @@index([workspaceId, archivedAt])
 }
 
 model CycleUpdate {
@@ -715,12 +741,17 @@ model LedgerAccount {
   currency     String
   type         String   @default("MANUAL")
   balanceCents Int      @default(0)
+  archivedAt   DateTime?
+  archivedByUserId String?
+  archiveReason String?
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
   workspace     Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   entries       LedgerEntry[]
   spendRequests SpendRequest[]
+
+  @@index([workspaceId, archivedAt])
 }
 
 model LedgerEntry {
@@ -762,6 +793,9 @@ model SpendRequest {
   statementMimeType    String?
   statementUploadedAt  DateTime?
   reconciledAt         DateTime?
+  archivedAt           DateTime?
+  archivedByUserId     String?
+  archiveReason        String?
   createdAt            DateTime                  @default(now())
   updatedAt            DateTime                  @updatedAt
 
@@ -773,6 +807,7 @@ model SpendRequest {
 
   @@index([workspaceId, status])
   @@index([workspaceId, reconciliationStatus])
+  @@index([workspaceId, archivedAt])
 }
 
 model SpendProposalLink {
@@ -813,6 +848,9 @@ model Meeting {
   participantIds String[]
   decisionsJson  Json?
   aiProcessedAt  DateTime?
+  archivedAt     DateTime?
+  archivedByUserId String?
+  archiveReason  String?
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
 
@@ -822,6 +860,7 @@ model Meeting {
   insights  MeetingInsight[]
 
   @@index([workspaceId, recordedAt])
+  @@index([workspaceId, archivedAt])
 }
 
 model Document {
@@ -833,12 +872,16 @@ model Document {
   storageKey  String
   textContent String?  @db.Text
   metadata    Json?
+  archivedAt  DateTime?
+  archivedByUserId String?
+  archiveReason String?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 
   @@index([workspaceId, source])
+  @@index([workspaceId, archivedAt])
 }
 
 model PolicyCorpus {
@@ -909,6 +952,32 @@ model AuditLog {
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 
   @@index([workspaceId, createdAt])
+}
+
+model WorkspaceArchiveRecord {
+  id               String    @id @default(uuid())
+  workspaceId      String
+  entityType       String
+  entityId         String
+  entityLabel      String?
+  previousState    Json?
+  archiveReason    String?
+  archivedByUserId String?
+  archivedByLabel  String?
+  archivedAt       DateTime  @default(now())
+  restoredByUserId String?
+  restoredAt       DateTime?
+  purgedByUserId   String?
+  purgedAt         DateTime?
+  purgeReason      String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, entityType, archivedAt])
+  @@index([workspaceId, restoredAt])
+  @@index([entityType, entityId])
 }
 
 model Event {
@@ -1187,6 +1256,9 @@ model BrainArticle {
   lastVerifiedAt  DateTime?
   staleAfterDays  Int                   @default(90)
   sourceIds       String[]
+  archivedAt      DateTime?
+  archivedByUserId String?
+  archiveReason   String?
   createdAt       DateTime              @default(now())
   updatedAt       DateTime              @updatedAt
 
@@ -1200,6 +1272,7 @@ model BrainArticle {
   @@unique([workspaceId, slug])
   @@index([workspaceId, type])
   @@index([workspaceId, authority])
+  @@index([workspaceId, archivedAt])
 }
 
 model BrainArticleVersion {
@@ -1232,6 +1305,9 @@ model BrainSource {
   fileMimeType   String?
   fileSizeBytes  Int?
   absorbedAt     DateTime?
+  archivedAt     DateTime?
+  archivedByUserId String?
+  archiveReason  String?
   createdAt      DateTime        @default(now())
 
   workspace    Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
@@ -1239,6 +1315,7 @@ model BrainSource {
 
   @@index([workspaceId, sourceType])
   @@index([workspaceId, absorbedAt])
+  @@index([workspaceId, archivedAt])
 }
 
 model BrainBacklink {
@@ -1305,6 +1382,9 @@ model WebhookEndpoint {
   eventTypes  String[]              @default([])
   status      WebhookEndpointStatus @default(ACTIVE)
   metadata    Json?
+  archivedAt  DateTime?
+  archivedByUserId String?
+  archiveReason String?
   createdAt   DateTime              @default(now())
   updatedAt   DateTime              @updatedAt
 
@@ -1312,6 +1392,7 @@ model WebhookEndpoint {
   deliveries WebhookDelivery[]
 
   @@index([workspaceId, status])
+  @@index([workspaceId, archivedAt])
 }
 
 enum WebhookDeliveryStatus {
@@ -1388,6 +1469,9 @@ model ExpertiseTag {
   label       String
   slug        String
   description String?
+  archivedAt  DateTime?
+  archivedByUserId String?
+  archiveReason String?
   createdAt   DateTime @default(now())
 
   workspace Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
@@ -1395,6 +1479,7 @@ model ExpertiseTag {
 
   @@unique([workspaceId, slug])
   @@index([workspaceId])
+  @@index([workspaceId, archivedAt])
 }
 
 enum ExpertiseLevel {
@@ -1541,6 +1626,9 @@ model CrmContact {
   tags        String[] @default([])
   avatarUrl   String?
   lastSeenAt  DateTime @default(now())
+  archivedAt  DateTime?
+  archivedByUserId String?
+  archiveReason String?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
@@ -1550,6 +1638,7 @@ model CrmContact {
 
   @@unique([workspaceId, email])
   @@index([workspaceId, createdAt])
+  @@index([workspaceId, archivedAt])
 }
 
 model CrmDeal {
@@ -1563,6 +1652,9 @@ model CrmDeal {
   closedAt    DateTime?
   ownerUserId String? // Workspace member who owns this deal
   notes       String?      @db.Text
+  archivedAt  DateTime?
+  archivedByUserId String?
+  archiveReason String?
   createdAt   DateTime     @default(now())
   updatedAt   DateTime     @updatedAt
 
@@ -1572,6 +1664,7 @@ model CrmDeal {
 
   @@index([workspaceId, stage])
   @@index([contactId])
+  @@index([workspaceId, archivedAt])
 }
 
 model CrmActivity {
@@ -1602,12 +1695,16 @@ model WorkspaceAgentConfig {
   modelOverride String?
   governancePolicy String? @db.Text
   configJson    Json     @default("{}")
+  archivedAt    DateTime?
+  archivedByUserId String?
+  archiveReason String?
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 
   @@unique([workspaceId, agentKey])
+  @@index([workspaceId, archivedAt])
 }
 
 model WorkspaceSsoConfig {
@@ -1662,6 +1759,9 @@ model OAuthApp {
   redirectUris String[]
   scopes       String[]
   isActive     Boolean  @default(true)
+  archivedAt   DateTime?
+  archivedByUserId String?
+  archiveReason String?
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
@@ -1669,6 +1769,7 @@ model OAuthApp {
   authCodes OAuthAuthorizationCode[]
 
   @@index([workspaceId])
+  @@index([workspaceId, archivedAt])
 }
 
 model OAuthAuthorizationCode {
@@ -1718,6 +1819,9 @@ model ExternalDataSource {
   lastSyncAt          DateTime?
   lastSyncError       String?
   isActive            Boolean   @default(true)
+  archivedAt          DateTime?
+  archivedByUserId    String?
+  archiveReason       String?
   createdAt           DateTime  @default(now())
   updatedAt           DateTime  @updatedAt
 
@@ -1725,6 +1829,7 @@ model ExternalDataSource {
   syncLogs  ExternalDataSyncLog[]
 
   @@index([workspaceId, isActive])
+  @@index([workspaceId, archivedAt])
 }
 
 model ExternalDataSyncLog {
@@ -1826,6 +1931,9 @@ model Goal {
   targetDate      DateTime?
   startDate       DateTime?
   sortOrder       Int         @default(0)
+  archivedAt      DateTime?
+  archivedByUserId String?
+  archiveReason   String?
   createdAt       DateTime    @default(now())
   updatedAt       DateTime    @updatedAt
 
@@ -1841,6 +1949,7 @@ model Goal {
 
   @@index([workspaceId, level, cadence])
   @@index([workspaceId, status])
+  @@index([workspaceId, archivedAt])
   @@index([parentGoalId])
   @@index([circleId])
   @@index([ownerMemberId])
@@ -1937,6 +2046,9 @@ model AgentIdentity {
   maxSpendPerRunCents Int?
   maxRunsPerDay       Int?
   maxRunsPerHour      Int?
+  archivedAt          DateTime?
+  archivedByUserId    String?
+  archiveReason       String?
   createdAt           DateTime        @default(now())
   updatedAt           DateTime        @updatedAt
 
@@ -1947,6 +2059,7 @@ model AgentIdentity {
 
   @@unique([workspaceId, agentKey])
   @@index([workspaceId, isActive])
+  @@index([workspaceId, archivedAt])
 }
 
 model CircleAgentAssignment {

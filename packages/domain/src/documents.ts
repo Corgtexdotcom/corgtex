@@ -3,13 +3,12 @@ import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { appendEvents } from "./events";
 import { requireWorkspaceMembership } from "./auth";
+import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { invariant } from "./errors";
 
-import { defaultStorage } from "@corgtex/storage";
-
-export async function listDocuments(workspaceId: string) {
+export async function listDocuments(workspaceId: string, opts?: { archiveFilter?: ArchiveFilter }) {
   return prisma.document.findMany({
-    where: { workspaceId },
+    where: { workspaceId, ...archiveFilterWhere(opts?.archiveFilter) },
     orderBy: { createdAt: "desc" },
   });
 }
@@ -91,38 +90,12 @@ export async function deleteDocument(actor: AppActor, params: {
     allowedRoles: ["ADMIN"],
   });
 
-  return prisma.$transaction(async (tx) => {
-    const document = await tx.document.findUnique({
-      where: {
-        id: params.documentId,
-        workspaceId: params.workspaceId,
-      },
-    });
-
-    invariant(document, 404, "NOT_FOUND", "Document not found.");
-
-    await tx.document.delete({ where: { id: document.id } });
-
-    if (document.storageKey) {
-      try {
-        await defaultStorage.delete(document.storageKey);
-      } catch (err) {
-        // Log but don't fail the transaction if storage delete fails
-        console.error("Failed to delete document blob from storage", err);
-      }
-    }
-
-    await tx.auditLog.create({
-      data: {
-        workspaceId: params.workspaceId,
-        actorUserId: actor.kind === "user" ? actor.user.id : null,
-        action: "document.deleted",
-        entityType: "Document",
-        entityId: document.id,
-        meta: { title: document.title, source: document.source, storageKey: document.storageKey },
-      },
-    });
-
-    return { id: document.id };
+  await archiveWorkspaceArtifact(actor, {
+    workspaceId: params.workspaceId,
+    entityType: "Document",
+    entityId: params.documentId,
+    reason: "Archived from document delete path.",
   });
+
+  return { id: params.documentId };
 }

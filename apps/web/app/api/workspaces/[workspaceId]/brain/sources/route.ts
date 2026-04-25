@@ -1,6 +1,7 @@
 import type { BrainSourceType } from "@prisma/client";
 import { NextRequest, NextResponse } from "next/server";
 import { ingestSource, listSources } from "@corgtex/domain";
+import type { ArchiveFilter } from "@corgtex/domain";
 import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
 
@@ -13,8 +14,9 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     const absorbed = absorbedParam === "true" ? true : absorbedParam === "false" ? false : undefined;
     const take = Number(url.searchParams.get("take")) || undefined;
     const skip = Number(url.searchParams.get("skip")) || undefined;
+    const archiveFilter = url.searchParams.get("archiveFilter") as ArchiveFilter | null;
 
-    const result = await listSources(actor, { workspaceId, absorbed, take, skip });
+    const result = await listSources(actor, { workspaceId, absorbed, take, skip, archiveFilter: archiveFilter ?? undefined });
     return NextResponse.json(result);
   } catch (error) {
     return handleRouteError(error);

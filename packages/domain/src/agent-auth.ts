@@ -31,6 +31,8 @@ const CREDENTIAL_PREFIX = "agentc-";
 export const SCOPE_REGISTRY = {
   // ---- core read/chat ----
   "workspace:read":      { label: "Read workspace info",        group: "core",       default: true,  description: "Workspace name, description, and aggregate counts." },
+  "archive:read":        { label: "Read archived records",      group: "core",       default: false, description: "List archived workspace artifacts for recovery and audit." },
+  "archive:write":       { label: "Restore and purge archives", group: "core",       default: false, description: "Restore archived records or purge eligible archived records. Sensitive — opt-in." },
   "brain:read":          { label: "Search the Brain",           group: "core",       default: true,  description: "Semantic search over policies, meeting notes, proposals, and other indexed content." },
   "conversations:write": { label: "Chat with Corgtex",          group: "core",       default: true,  description: "Send messages to the Corgtex assistant (server-side LLM call)." },
 
