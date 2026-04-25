@@ -2,6 +2,7 @@
 
 import { useState, useRef } from "react";
 import { useRouter } from "next/navigation";
+import { useTranslations } from "next-intl";
 
 const MAX_SIZE = 25 * 1024 * 1024; // 25MB
 
@@ -11,6 +12,7 @@ export function FileUploader({ workspaceId }: { workspaceId: string }) {
   const [uploadStatus, setUploadStatus] = useState<{name: string; status: 'uploading' | 'done' | 'error', error?: string}[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
+  const t = useTranslations("settings");
 
   const handleFiles = async (files: FileList | null) => {
     if (!files || files.length === 0) return;
@@ -62,15 +64,15 @@ export function FileUploader({ workspaceId }: { workspaceId: string }) {
         onDragLeave={() => setIsDragging(false)}
         onDrop={(e) => { e.preventDefault(); setIsDragging(false); handleFiles(e.dataTransfer.files); }}
     >
-      <h3>Upload Files &amp; Folders</h3>
-      <p className="nr-item-meta">Drag and drop files here to upload (PDF, DOCX, TXT, MD, CSV, JSON max 25MB).</p>
+      <h3>{t("titleUploadFiles")}</h3>
+      <p className="nr-item-meta">{t("descUploadFiles")}</p>
       
       <div className="actions-inline" style={{ marginTop: 16 }}>
         <button type="button" className="small" onClick={() => fileInputRef.current?.click()}>
-          Select Files
+          {t("btnSelectFiles")}
         </button>
         <button type="button" className="secondary small" onClick={() => folderInputRef.current?.click()}>
-          Select Folder
+          {t("btnSelectFolder")}
         </button>
       </div>
       
@@ -83,9 +85,9 @@ export function FileUploader({ workspaceId }: { workspaceId: string }) {
             {uploadStatus.map((s, i) => (
                <div key={i} className="row" style={{ fontSize: '0.85rem' }}>
                   <span style={{flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap'}}>{s.name}</span>
-                  {s.status === 'uploading' && <span style={{color: 'var(--accent)'}}>Uploading...</span>}
-                  {s.status === 'done' && <span style={{color: '#198754'}}>Done</span>}
-                  {s.status === 'error' && <span style={{color: '#dc3545'}}>Error: {s.error}</span>}
+                  {s.status === 'uploading' && <span style={{color: 'var(--accent)'}}>{t("statusUploading")}</span>}
+                  {s.status === 'done' && <span style={{color: '#198754'}}>{t("statusDone")}</span>}
+                  {s.status === 'error' && <span style={{color: '#dc3545'}}>{t("uploadError", { error: s.error || t("valUnknown") })}</span>}
                </div>
             ))}
          </div>
