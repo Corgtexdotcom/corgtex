@@ -1046,6 +1046,7 @@ model AgentRun {
   conversationTurns ConversationTurn[]
 
   @@index([workspaceId, agentKey, createdAt])
+  @@index([workspaceId, status])
 }
 
 model AgentToolCall {
