@@ -5,10 +5,10 @@ vi.mock("@corgtex/shared", async (importOriginal) => {
   const mockedPrisma = {
     ...actual.prisma,
     agentStep: { update: vi.fn() },
-    agentRun: { update: vi.fn(), findMany: vi.fn() },
+    agentRun: { update: vi.fn(), findUnique: vi.fn(), findMany: vi.fn() },
   };
   mockedPrisma.$transaction = vi.fn(async (cb) => cb(mockedPrisma));
-  
+
   return {
     ...actual,
     prisma: mockedPrisma,
@@ -17,9 +17,14 @@ vi.mock("@corgtex/shared", async (importOriginal) => {
 
 describe("agent-runs", () => {
   describe("submitAgentFeedback", () => {
-    it("updates the step with feedback and resumes the run", async () => {
+    it("verifies run ownership, scopes step update by agentRunId, and resumes the run", async () => {
       const { prisma } = await import("@corgtex/shared");
       const { submitAgentFeedback } = await import("./agent-runs");
+
+      // Run exists in the workspace
+      vi.mocked(prisma.agentRun.findUnique).mockResolvedValue({
+        id: "run-1",
+      } as any);
 
       vi.mocked(prisma.agentStep.update).mockResolvedValue({
         id: "step-1",
@@ -45,9 +50,16 @@ describe("agent-runs", () => {
         feedback: "proceed",
       });
 
+      // Verify the run was looked up scoped to workspace
+      expect(prisma.agentRun.findUnique).toHaveBeenCalledWith({
+        where: { id: "run-1", workspaceId: "ws-1" },
+        select: { id: true },
+      });
+
       expect(result.id).toBe("step-1");
+      // Step update must be scoped by agentRunId to prevent cross-run writes
       expect(prisma.agentStep.update).toHaveBeenCalledWith({
-        where: { id: "step-1" },
+        where: { id: "step-1", agentRunId: "run-1" },
         data: expect.objectContaining({ humanFeedback: "proceed", status: "COMPLETED" }),
       });
       expect(prisma.agentRun.update).toHaveBeenCalledWith({
