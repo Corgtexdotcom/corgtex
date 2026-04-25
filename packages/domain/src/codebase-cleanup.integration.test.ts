@@ -9,6 +9,7 @@ import {
   enqueueExternalDataSourceSync,
   updateExternalDataSource,
 } from "./integrations";
+import { purgeWorkspaceArtifact } from "./archive";
 
 const prisma = getPrismaClient();
 
@@ -132,9 +133,19 @@ describe("database-backed domain integration", () => {
       sourceId: source.id,
     });
 
-    await expect(
-      prisma.externalDataSource.findUnique({ where: { id: source.id } }),
-    ).resolves.toBeNull();
+    const archived = await prisma.externalDataSource.findUniqueOrThrow({ where: { id: source.id } });
+    expect(archived.archivedAt).toBeTruthy();
+    expect(archived.isActive).toBe(false);
+    await expect(prisma.knowledgeChunk.count({ where: { workspaceId } })).resolves.toBe(1);
+
+    await purgeWorkspaceArtifact(actor, {
+      workspaceId,
+      entityType: "ExternalDataSource",
+      entityId: source.id,
+      reason: "Integration cleanup purge.",
+    });
+
+    await expect(prisma.externalDataSource.findUnique({ where: { id: source.id } })).resolves.toBeNull();
     await expect(prisma.knowledgeChunk.count({ where: { workspaceId } })).resolves.toBe(0);
   });
 });

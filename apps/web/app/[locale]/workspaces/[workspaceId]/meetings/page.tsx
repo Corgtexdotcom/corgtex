@@ -1,6 +1,6 @@
 import { listMeetings } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
-import { createMeetingAction } from "../actions";
+import { archiveMeetingAction, createMeetingAction } from "../actions";
 import { getTranslations } from "next-intl/server";
 import Link from "next/link";
 
@@ -28,26 +28,29 @@ export default async function MeetingsPage({
       </header>
 
       <section className="ws-section">
-        {meetings.length === 0 && <p className="nr-meta">No meetings ingested yet.</p>}
+        {meetings.length === 0 && <p className="nr-meta">{t("noMeetings")}</p>}
         {meetings.length > 0 && (
           <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
             {/* Featured latest meeting */}
-            <Link href={`/workspaces/${workspaceId}/meetings/${meetings[0].id}`} style={{ textDecoration: "none", color: "inherit", display: "block" }}>
-              <div style={{ borderBottom: "1px solid var(--line)", paddingBottom: "24px", marginBottom: "8px" }}>
+            <div style={{ borderBottom: "1px solid var(--line)", paddingBottom: "24px", marginBottom: "8px" }}>
+              <Link href={`/workspaces/${workspaceId}/meetings/${meetings[0].id}`} style={{ textDecoration: "none", color: "inherit", display: "block" }}>
                 <div className="nr-meta" style={{ marginBottom: "8px" }}>{meetings[0].source}</div>
-                <h2 className="nr-lead-headline" style={{ fontSize: "1.8rem" }}>{meetings[0].title ?? "Untitled meeting"}</h2>
+                <h2 className="nr-lead-headline" style={{ fontSize: "1.8rem" }}>{meetings[0].title ?? t("untitledMeeting")}</h2>
                 <div className="nr-item-meta" style={{ marginBottom: "12px" }}>{new Date(meetings[0].recordedAt).toLocaleString()}</div>
-                {meetings[0].summaryMd && (
-                  <p className="nr-excerpt">{meetings[0].summaryMd}</p>
-                )}
-              </div>
-            </Link>
+                {meetings[0].summaryMd && <p className="nr-excerpt">{meetings[0].summaryMd}</p>}
+              </Link>
+              <form action={archiveMeetingAction} style={{ marginTop: 12 }}>
+                <input type="hidden" name="workspaceId" value={workspaceId} />
+                <input type="hidden" name="meetingId" value={meetings[0].id} />
+                <button type="submit" className="danger small">{t("btnArchiveMeeting")}</button>
+              </form>
+            </div>
 
             {/* Other meetings list */}
             {meetings.slice(1).map((meeting) => (
-              <Link href={`/workspaces/${workspaceId}/meetings/${meeting.id}`} key={meeting.id} style={{ textDecoration: "none", color: "inherit" }}>
-                <div className="nr-item">
-                  <div className="nr-item-title">{meeting.title ?? "Untitled meeting"}</div>
+              <div className="nr-item" key={meeting.id}>
+                <Link href={`/workspaces/${workspaceId}/meetings/${meeting.id}`} style={{ textDecoration: "none", color: "inherit" }}>
+                  <div className="nr-item-title">{meeting.title ?? t("untitledMeeting")}</div>
                   <div className="nr-item-meta">
                     {new Date(meeting.recordedAt).toLocaleString()} • {meeting.source}
                   </div>
@@ -56,8 +59,13 @@ export default async function MeetingsPage({
                       {meeting.summaryMd}
                     </div>
                   )}
-                </div>
-              </Link>
+                </Link>
+                <form action={archiveMeetingAction} style={{ marginTop: 8 }}>
+                  <input type="hidden" name="workspaceId" value={workspaceId} />
+                  <input type="hidden" name="meetingId" value={meeting.id} />
+                  <button type="submit" className="danger small">{t("btnArchive")}</button>
+                </form>
+              </div>
             ))}
           </div>
         )}
@@ -72,29 +80,29 @@ export default async function MeetingsPage({
             <form action={createMeetingAction} className="stack panel">
               <input type="hidden" name="workspaceId" value={workspaceId} />
               <label>
-                Title
+                {t("formTitle")}
                 <input name="title" />
               </label>
               <div className="actions-inline">
                 <label style={{ flex: 1 }}>
-                  Source
+                  {t("formSource")}
                   <input name="source" defaultValue="manual" required />
                 </label>
                 <label style={{ flex: 1 }}>
-                  Recorded at
+                  {t("formRecordedAt")}
                   <input name="recordedAt" type="datetime-local" required />
                 </label>
               </div>
               <label>
-                Participant IDs
+                {t("formParticipantIds")}
                 <input name="participantIds" placeholder={t("formParticipantIdsPlaceholder")} />
               </label>
               <label>
-                Summary
+                {t("formSummary")}
                 <textarea name="summaryMd" />
               </label>
               <label>
-                Transcript
+                {t("formTranscript")}
                 <textarea name="transcript" />
               </label>
               <button type="submit">{t("btnIngest")}</button>

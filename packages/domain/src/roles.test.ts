@@ -6,11 +6,14 @@ const { prismaMock } = vi.hoisted(() => {
     $transaction: vi.fn(),
     role: {
       findMany: vi.fn(),
+      findFirst: vi.fn(),
       findUnique: vi.fn(),
       count: vi.fn(),
       create: vi.fn(),
       update: vi.fn(),
-      delete: vi.fn(),
+    },
+    workspaceArchiveRecord: {
+      create: vi.fn(),
     },
     circle: {
       findUnique: vi.fn(),
@@ -67,15 +70,17 @@ describe("roles domain", () => {
     await expect(listRoles("workspace-1")).resolves.toEqual([{ id: "role-1" }]);
     expect(prismaMock.role.findMany).toHaveBeenCalledWith(expect.objectContaining({
       where: {
+        archivedAt: null,
         circle: {
           workspaceId: "workspace-1",
+          archivedAt: null,
         },
       },
     }));
   });
 
   it("createRole creates a role with trimmed fields", async () => {
-    prismaMock.circle.findUnique.mockResolvedValue({ id: "circle-1", workspaceId: "workspace-1" });
+    prismaMock.circle.findUnique.mockResolvedValue({ id: "circle-1", workspaceId: "workspace-1", archivedAt: null });
     prismaMock.role.count.mockResolvedValue(2);
     prismaMock.role.create.mockResolvedValue({ id: "role-1", name: "Lead", circle: { id: "circle-1", name: "Circle" } });
 
@@ -129,7 +134,7 @@ describe("roles domain", () => {
   });
 
   it("updateRole updates provided fields", async () => {
-    prismaMock.role.findUnique.mockResolvedValue({ id: "role-1", circle: { workspaceId: "workspace-1" } });
+    prismaMock.role.findUnique.mockResolvedValue({ id: "role-1", archivedAt: null, circle: { workspaceId: "workspace-1" } });
     prismaMock.role.update.mockResolvedValue({ id: "role-1", name: "Updated" });
 
     const { updateRole } = await import("./roles");
@@ -143,19 +148,24 @@ describe("roles domain", () => {
     }));
   });
 
-  it("deleteRole deletes an existing role", async () => {
-    prismaMock.role.findUnique.mockResolvedValue({ id: "role-1", name: "Lead", circle: { workspaceId: "workspace-1" } });
-    prismaMock.role.delete.mockResolvedValue({ id: "role-1" });
+  it("deleteRole archives an existing role", async () => {
+    prismaMock.role.findFirst.mockResolvedValue({ id: "role-1", name: "Lead", archivedAt: null, circle: { workspaceId: "workspace-1" } });
+    prismaMock.role.update.mockResolvedValue({ id: "role-1", archivedAt: new Date("2026-04-25T12:00:00.000Z") });
+    prismaMock.workspaceArchiveRecord.create.mockResolvedValue({});
 
     const { deleteRole } = await import("./roles");
     await expect(deleteRole(actor, {
       workspaceId: "workspace-1",
       roleId: "role-1",
     })).resolves.toEqual({ id: "role-1" });
+    expect(prismaMock.role.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "role-1" },
+      data: expect.objectContaining({ archivedAt: expect.any(Date) }),
+    }));
   });
 
   it("deleteRole rejects a missing role", async () => {
-    prismaMock.role.findUnique.mockResolvedValue(null);
+    prismaMock.role.findFirst.mockResolvedValue(null);
 
     const { deleteRole } = await import("./roles");
     await expect(deleteRole(actor, {
@@ -168,7 +178,7 @@ describe("roles domain", () => {
   });
 
   it("assignRole upserts an assignment", async () => {
-    prismaMock.role.findUnique.mockResolvedValue({ id: "role-1", circle: { workspaceId: "workspace-1" } });
+    prismaMock.role.findUnique.mockResolvedValue({ id: "role-1", archivedAt: null, circle: { workspaceId: "workspace-1" } });
     prismaMock.member.findUnique.mockResolvedValue({ id: "member-1", workspaceId: "workspace-1", isActive: true });
     prismaMock.roleAssignment.upsert.mockResolvedValue({ id: "assignment-1" });
 
@@ -181,7 +191,7 @@ describe("roles domain", () => {
   });
 
   it("assignRole rejects a missing member", async () => {
-    prismaMock.role.findUnique.mockResolvedValue({ id: "role-1", circle: { workspaceId: "workspace-1" } });
+    prismaMock.role.findUnique.mockResolvedValue({ id: "role-1", archivedAt: null, circle: { workspaceId: "workspace-1" } });
     prismaMock.member.findUnique.mockResolvedValue(null);
 
     const { assignRole } = await import("./roles");
@@ -196,7 +206,7 @@ describe("roles domain", () => {
   });
 
   it("unassignRole deletes an existing assignment", async () => {
-    prismaMock.role.findUnique.mockResolvedValue({ id: "role-1", circle: { workspaceId: "workspace-1" } });
+    prismaMock.role.findUnique.mockResolvedValue({ id: "role-1", archivedAt: null, circle: { workspaceId: "workspace-1" } });
     prismaMock.roleAssignment.findUnique.mockResolvedValue({ id: "assignment-1" });
     prismaMock.roleAssignment.delete.mockResolvedValue({ id: "assignment-1" });
 
@@ -216,8 +226,10 @@ describe("roles domain", () => {
     expect(prismaMock.roleAssignment.findMany).toHaveBeenCalledWith(expect.objectContaining({
       where: {
         role: {
+          archivedAt: null,
           circle: {
             workspaceId: "workspace-1",
+            archivedAt: null,
           },
         },
       },

@@ -2,6 +2,7 @@ import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import type { OAuthConnection, OAuthProvider, Prisma } from "@prisma/client";
 import { requireWorkspaceMembership } from "./auth";
+import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { invariant } from "./errors";
 
 const dataSourceSelect = {
@@ -15,6 +16,8 @@ const dataSourceSelect = {
   lastSyncAt: true,
   lastSyncError: true,
   isActive: true,
+  archivedAt: true,
+  archiveReason: true,
   createdAt: true,
   updatedAt: true,
 } satisfies Prisma.ExternalDataSourceSelect;
@@ -99,11 +102,11 @@ async function requireDataSourceAdmin(actor: AppActor, workspaceId: string) {
   });
 }
 
-export async function listExternalDataSources(actor: AppActor, workspaceId: string) {
+export async function listExternalDataSources(actor: AppActor, workspaceId: string, opts?: { archiveFilter?: ArchiveFilter }) {
   await requireDataSourceAdmin(actor, workspaceId);
 
   return prisma.externalDataSource.findMany({
-    where: { workspaceId },
+    where: { workspaceId, ...archiveFilterWhere(opts?.archiveFilter) },
     orderBy: { createdAt: "desc" },
     select: dataSourceSelect,
   });
@@ -117,7 +120,7 @@ export async function getExternalDataSource(actor: AppActor, params: {
   await requireDataSourceAdmin(actor, params.workspaceId);
 
   const source = await prisma.externalDataSource.findFirst({
-    where: { id: params.sourceId, workspaceId: params.workspaceId },
+    where: { id: params.sourceId, workspaceId: params.workspaceId, archivedAt: null },
     select: {
       ...dataSourceSelect,
       ...(params.includeSyncLogs
@@ -174,7 +177,7 @@ export async function updateExternalDataSource(actor: AppActor, params: {
 
   return prisma.$transaction(async (tx) => {
     const source = await tx.externalDataSource.findFirst({
-      where: { id: params.sourceId, workspaceId: params.workspaceId },
+      where: { id: params.sourceId, workspaceId: params.workspaceId, archivedAt: null },
       select: { id: true },
     });
 
@@ -202,30 +205,14 @@ export async function deleteExternalDataSource(actor: AppActor, params: {
 }) {
   await requireDataSourceAdmin(actor, params.workspaceId);
 
-  return prisma.$transaction(async (tx) => {
-    const source = await tx.externalDataSource.findFirst({
-      where: { id: params.sourceId, workspaceId: params.workspaceId },
-      select: { id: true },
-    });
-
-    invariant(source, 404, "NOT_FOUND", "Data source not found");
-
-    await tx.knowledgeChunk.deleteMany({
-      where: {
-        workspaceId: params.workspaceId,
-        sourceType: "EXTERNAL_DATABASE",
-        sourceId: {
-          startsWith: `byodb:${params.sourceId}:`,
-        },
-      },
-    });
-
-    await tx.externalDataSource.delete({
-      where: { id: params.sourceId },
-    });
-
-    return { id: params.sourceId };
+  await archiveWorkspaceArtifact(actor, {
+    workspaceId: params.workspaceId,
+    entityType: "ExternalDataSource",
+    entityId: params.sourceId,
+    reason: "Archived from data source delete path.",
   });
+
+  return { id: params.sourceId };
 }
 
 export async function enqueueExternalDataSourceSync(actor: AppActor, params: {
@@ -236,7 +223,7 @@ export async function enqueueExternalDataSourceSync(actor: AppActor, params: {
 
   return prisma.$transaction(async (tx) => {
     const source = await tx.externalDataSource.findFirst({
-      where: { id: params.sourceId, workspaceId: params.workspaceId },
+      where: { id: params.sourceId, workspaceId: params.workspaceId, archivedAt: null },
       select: { id: true },
     });
 

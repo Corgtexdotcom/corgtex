@@ -2,6 +2,7 @@ import type { AgentMemberType } from "@prisma/client";
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
+import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { invariant } from "./errors";
 import { AGENT_REGISTRY } from "./agent-registry";// ---------------------------------------------------------------------------
 // CRUD — AgentIdentity
@@ -64,7 +65,7 @@ export async function updateAgentIdentity(
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, allowedRoles: ["ADMIN"] });
 
   const existing = await prisma.agentIdentity.findFirst({
-    where: { id: params.agentIdentityId, workspaceId: params.workspaceId },
+    where: { id: params.agentIdentityId, workspaceId: params.workspaceId, archivedAt: null },
   });
   invariant(existing, 404, "NOT_FOUND", "Agent identity not found.");
 
@@ -84,11 +85,11 @@ export async function updateAgentIdentity(
   });
 }
 
-export async function listAgentIdentities(actor: AppActor, workspaceId: string) {
+export async function listAgentIdentities(actor: AppActor, workspaceId: string, opts?: { archiveFilter?: ArchiveFilter }) {
   await requireWorkspaceMembership({ actor, workspaceId });
 
   return prisma.agentIdentity.findMany({
-    where: { workspaceId },
+    where: { workspaceId, ...archiveFilterWhere(opts?.archiveFilter) },
     include: {
       circleAssignments: {
         include: {
@@ -105,7 +106,7 @@ export async function getAgentIdentity(actor: AppActor, workspaceId: string, age
   await requireWorkspaceMembership({ actor, workspaceId });
 
   const identity = await prisma.agentIdentity.findFirst({
-    where: { id: agentIdentityId, workspaceId },
+    where: { id: agentIdentityId, workspaceId, archivedAt: null },
     include: {
       circleAssignments: {
         include: {
@@ -128,13 +129,15 @@ export async function deactivateAgentIdentity(
   await requireWorkspaceMembership({ actor, workspaceId, allowedRoles: ["ADMIN"] });
 
   const existing = await prisma.agentIdentity.findFirst({
-    where: { id: agentIdentityId, workspaceId },
+    where: { id: agentIdentityId, workspaceId, archivedAt: null },
   });
   invariant(existing, 404, "NOT_FOUND", "Agent identity not found.");
 
-  return prisma.agentIdentity.update({
-    where: { id: agentIdentityId },
-    data: { isActive: false },
+  return archiveWorkspaceArtifact(actor, {
+    workspaceId,
+    entityType: "AgentIdentity",
+    entityId: agentIdentityId,
+    reason: "Archived from agent identity deactivate path.",
   });
 }
 
