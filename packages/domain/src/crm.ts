@@ -5,6 +5,81 @@ import { requireWorkspaceMembership } from "./auth";
 import { invariant } from "./errors";
 import { CrmDealStage, CrmActivityType } from "@prisma/client";
 
+const DEFAULT_DEMO_WORKSPACE = {
+  slug: "corgtex",
+  name: "Corgtex",
+  description: "Internal company operating environment for Corgtex",
+};
+
+export async function captureDemoLead(params: {
+  email: string;
+  source?: string;
+  workspaceSlug?: string;
+  workspaceName?: string;
+  workspaceDescription?: string;
+}) {
+  const email = params.email.trim().toLowerCase();
+  invariant(email.length > 0 && email.includes("@"), 400, "INVALID_INPUT", "Valid email is required.");
+
+  const workspaceSlug = params.workspaceSlug?.trim() || DEFAULT_DEMO_WORKSPACE.slug;
+  const workspaceName = params.workspaceName?.trim() || DEFAULT_DEMO_WORKSPACE.name;
+  const workspaceDescription = params.workspaceDescription?.trim() || DEFAULT_DEMO_WORKSPACE.description;
+  const source = params.source?.trim() || "demo_gate";
+  const [localPart, domainPart] = email.split("@");
+  const name = localPart.replace(/[^a-zA-Z0-9]/g, " ");
+
+  return prisma.$transaction(async (tx) => {
+    const workspace = await tx.workspace.upsert({
+      where: { slug: workspaceSlug },
+      update: {},
+      create: {
+        slug: workspaceSlug,
+        name: workspaceName,
+        description: workspaceDescription,
+      },
+    });
+
+    const demoLead = await tx.demoLead.upsert({
+      where: {
+        workspaceId_email: {
+          workspaceId: workspace.id,
+          email,
+        },
+      },
+      update: {
+        lastSeenAt: new Date(),
+        visitCount: { increment: 1 },
+      },
+      create: {
+        workspaceId: workspace.id,
+        email,
+        source,
+      },
+    });
+
+    const contact = await tx.crmContact.upsert({
+      where: {
+        workspaceId_email: {
+          workspaceId: workspace.id,
+          email,
+        },
+      },
+      update: {
+        lastSeenAt: new Date(),
+      },
+      create: {
+        workspaceId: workspace.id,
+        email,
+        name,
+        company: domainPart,
+        source,
+      },
+    });
+
+    return { workspace, demoLead, contact };
+  });
+}
+
 // --- CONTACTS ---
 
 export async function listContacts(actor: AppActor, workspaceId: string, opts?: { take?: number; skip?: number; query?: string }) {

@@ -1,5 +1,23 @@
 import { prisma } from "@corgtex/shared";
-import type { OAuthConnection } from "@prisma/client";
+import type { AppActor } from "@corgtex/shared";
+import type { OAuthConnection, OAuthProvider, Prisma } from "@prisma/client";
+import { requireWorkspaceMembership } from "./auth";
+import { invariant } from "./errors";
+
+const dataSourceSelect = {
+  id: true,
+  workspaceId: true,
+  label: true,
+  driverType: true,
+  selectedTables: true,
+  pullCadenceMinutes: true,
+  cursorColumn: true,
+  lastSyncAt: true,
+  lastSyncError: true,
+  isActive: true,
+  createdAt: true,
+  updatedAt: true,
+} satisfies Prisma.ExternalDataSourceSelect;
 
 function parseMicrosoftDateTime(value: { dateTime?: string | null; timeZone?: string | null }) {
   const raw = value.dateTime?.trim();
@@ -16,6 +34,227 @@ function parseMicrosoftDateTime(value: { dateTime?: string | null; timeZone?: st
   }
 
   return new Date(raw);
+}
+
+export async function saveOAuthConnectionAndEnqueueCalendarSync(actor: AppActor, params: {
+  workspaceId?: string | null;
+  provider: OAuthProvider;
+  providerAccountId: string;
+  accessToken: string;
+  refreshToken?: string | null;
+  expiresIn?: number | null;
+  scopes?: string[];
+}) {
+  invariant(actor.kind === "user", 403, "FORBIDDEN", "Only users can connect OAuth providers.");
+
+  if (params.workspaceId) {
+    await requireWorkspaceMembership({
+      actor,
+      workspaceId: params.workspaceId,
+    });
+  }
+
+  return prisma.$transaction(async (tx) => {
+    const connection = await tx.oAuthConnection.upsert({
+      where: { userId_provider: { userId: actor.user.id, provider: params.provider } },
+      update: {
+        accessToken: params.accessToken,
+        refreshToken: params.refreshToken || undefined,
+        expiresAt: params.expiresIn ? new Date(Date.now() + params.expiresIn * 1000) : null,
+        providerAccountId: params.providerAccountId,
+        scopes: params.scopes ?? [],
+      },
+      create: {
+        userId: actor.user.id,
+        provider: params.provider,
+        accessToken: params.accessToken,
+        refreshToken: params.refreshToken || null,
+        expiresAt: params.expiresIn ? new Date(Date.now() + params.expiresIn * 1000) : null,
+        providerAccountId: params.providerAccountId,
+        scopes: params.scopes ?? [],
+      },
+    });
+
+    if (params.workspaceId) {
+      await tx.workflowJob.create({
+        data: {
+          workspaceId: params.workspaceId,
+          type: "calendar.sync",
+          payload: {
+            connectionId: connection.id,
+          },
+        },
+      });
+    }
+
+    return connection;
+  });
+}
+
+async function requireDataSourceAdmin(actor: AppActor, workspaceId: string) {
+  await requireWorkspaceMembership({
+    actor,
+    workspaceId,
+    allowedRoles: ["ADMIN"],
+  });
+}
+
+export async function listExternalDataSources(actor: AppActor, workspaceId: string) {
+  await requireDataSourceAdmin(actor, workspaceId);
+
+  return prisma.externalDataSource.findMany({
+    where: { workspaceId },
+    orderBy: { createdAt: "desc" },
+    select: dataSourceSelect,
+  });
+}
+
+export async function getExternalDataSource(actor: AppActor, params: {
+  workspaceId: string;
+  sourceId: string;
+  includeSyncLogs?: boolean;
+}) {
+  await requireDataSourceAdmin(actor, params.workspaceId);
+
+  const source = await prisma.externalDataSource.findFirst({
+    where: { id: params.sourceId, workspaceId: params.workspaceId },
+    select: {
+      ...dataSourceSelect,
+      ...(params.includeSyncLogs
+        ? {
+          syncLogs: {
+            orderBy: { startedAt: "desc" },
+            take: 10,
+          },
+        }
+        : {}),
+    },
+  });
+
+  invariant(source, 404, "NOT_FOUND", "Data source not found");
+  return source;
+}
+
+export async function createExternalDataSource(actor: AppActor, params: {
+  workspaceId: string;
+  label: string;
+  driverType: string;
+  connectionStringEnc: string;
+  selectedTables: string[];
+  pullCadenceMinutes: number;
+  cursorColumn: string;
+}) {
+  await requireDataSourceAdmin(actor, params.workspaceId);
+
+  return prisma.externalDataSource.create({
+    data: {
+      workspaceId: params.workspaceId,
+      label: params.label,
+      driverType: params.driverType,
+      connectionStringEnc: params.connectionStringEnc,
+      selectedTables: params.selectedTables,
+      pullCadenceMinutes: params.pullCadenceMinutes,
+      cursorColumn: params.cursorColumn,
+    },
+    select: dataSourceSelect,
+  });
+}
+
+export async function updateExternalDataSource(actor: AppActor, params: {
+  workspaceId: string;
+  sourceId: string;
+  label?: string;
+  connectionStringEnc?: string;
+  selectedTables?: string[];
+  pullCadenceMinutes?: number;
+  cursorColumn?: string;
+  isActive?: boolean;
+}) {
+  await requireDataSourceAdmin(actor, params.workspaceId);
+
+  return prisma.$transaction(async (tx) => {
+    const source = await tx.externalDataSource.findFirst({
+      where: { id: params.sourceId, workspaceId: params.workspaceId },
+      select: { id: true },
+    });
+
+    invariant(source, 404, "NOT_FOUND", "Data source not found");
+
+    const data: Prisma.ExternalDataSourceUpdateInput = {};
+    if (params.label !== undefined) data.label = params.label;
+    if (params.connectionStringEnc !== undefined) data.connectionStringEnc = params.connectionStringEnc;
+    if (params.selectedTables !== undefined) data.selectedTables = params.selectedTables;
+    if (params.pullCadenceMinutes !== undefined) data.pullCadenceMinutes = params.pullCadenceMinutes;
+    if (params.cursorColumn !== undefined) data.cursorColumn = params.cursorColumn;
+    if (params.isActive !== undefined) data.isActive = params.isActive;
+
+    return tx.externalDataSource.update({
+      where: { id: params.sourceId },
+      data,
+      select: dataSourceSelect,
+    });
+  });
+}
+
+export async function deleteExternalDataSource(actor: AppActor, params: {
+  workspaceId: string;
+  sourceId: string;
+}) {
+  await requireDataSourceAdmin(actor, params.workspaceId);
+
+  return prisma.$transaction(async (tx) => {
+    const source = await tx.externalDataSource.findFirst({
+      where: { id: params.sourceId, workspaceId: params.workspaceId },
+      select: { id: true },
+    });
+
+    invariant(source, 404, "NOT_FOUND", "Data source not found");
+
+    await tx.knowledgeChunk.deleteMany({
+      where: {
+        workspaceId: params.workspaceId,
+        sourceType: "EXTERNAL_DATABASE",
+        sourceId: {
+          startsWith: `byodb:${params.sourceId}:`,
+        },
+      },
+    });
+
+    await tx.externalDataSource.delete({
+      where: { id: params.sourceId },
+    });
+
+    return { id: params.sourceId };
+  });
+}
+
+export async function enqueueExternalDataSourceSync(actor: AppActor, params: {
+  workspaceId: string;
+  sourceId: string;
+}) {
+  await requireDataSourceAdmin(actor, params.workspaceId);
+
+  return prisma.$transaction(async (tx) => {
+    const source = await tx.externalDataSource.findFirst({
+      where: { id: params.sourceId, workspaceId: params.workspaceId },
+      select: { id: true },
+    });
+
+    invariant(source, 404, "NOT_FOUND", "Data source not found");
+
+    const timestamp = Date.now();
+    return tx.workflowJob.upsert({
+      where: { dedupeKey: `manual-sync-${params.sourceId}-${timestamp}` },
+      update: {},
+      create: {
+        workspaceId: params.workspaceId,
+        eventId: null,
+        type: "data-source.sync",
+        payload: { sourceId: params.sourceId },
+        dedupeKey: `manual-sync-${params.sourceId}-${timestamp}`,
+      },
+    });
+  });
 }
 
 export async function refreshOAuthTokenIfNeeded(connectionId: string): Promise<OAuthConnection> {
