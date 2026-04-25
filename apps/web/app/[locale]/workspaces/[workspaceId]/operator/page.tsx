@@ -189,7 +189,7 @@ export default async function OperatorPage({
                       ))}
                     </div>
                     <div className="muted">
-                      {t("usageSummary", { input: totalUsage.inputTokens, output: totalUsage.outputTokens, latency: totalUsage.latencyMs, cost: formatUsd(totalUsage.estimatedCostUsd) })}
+                      {t("usageSummary", { inTokens: totalUsage.inputTokens, outTokens: totalUsage.outputTokens, latency: totalUsage.latencyMs, cost: formatUsd(totalUsage.estimatedCostUsd) })}
                     </div>
                     <div className="list">
                       {run.modelUsageSummary.map((usage) => (

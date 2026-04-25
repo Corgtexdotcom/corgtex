@@ -10,6 +10,7 @@ The goal of this phase is to complete the localization of the remaining modules 
 
 - `apps/web/app/[locale]/error.tsx`
 - `apps/web/app/[locale]/oauth/authorize/page.tsx`
+- `apps/web/app/[locale]/login/LoginForm.tsx`
 - `apps/web/app/[locale]/workspaces/[workspaceId]/CommandMenuButton.tsx`
 - `apps/web/app/[locale]/workspaces/[workspaceId]/actions/page.tsx`
 - `apps/web/app/[locale]/workspaces/[workspaceId]/admin/AdminDashboardClient.tsx`
@@ -44,6 +45,12 @@ The goal of this phase is to complete the localization of the remaining modules 
 - `apps/web/app/[locale]/workspaces/create/page.tsx`
 - `apps/web/messages/en.json`
 - `apps/web/messages/es.json`
+- `docs/client-readiness-2026-04-25.md`
+- `docs/assets/client-readiness-2026-04-25/**`
+- `docs/assets/feat-i18n-phase2/proof.png`
+- `docs/assets/feat-i18n-phase2/verify-login-clean.png`
+- `docs/plans/feat-i18n-phase2.md`
+- `scripts/client-readiness-smoke.mjs`
 - `docs/assets/i18n-phase2/proof.png`
 - `docs/plans/feat-i18n-phase2.md`
 
@@ -51,6 +58,8 @@ The goal of this phase is to complete the localization of the remaining modules 
 
 - `npm run check` passes.
 - English and Spanish JSON files are 100% in sync with valid keys.
+- Local client-readiness smoke can be rerun with `node scripts/client-readiness-smoke.mjs <base-url> docs/assets/client-readiness-2026-04-25`.
+- Client-readiness screenshots and QA results are committed under `docs/assets/client-readiness-2026-04-25/`.
 
 ## Acceptance criteria
 
@@ -58,3 +67,11 @@ The goal of this phase is to complete the localization of the remaining modules 
 - [x] No hardcoded UI strings remain in the touched files
 - [x] All keys in `en.json` and `es.json` sync perfectly
 - [x] CI is fully green (TypeScript, ESLint)
+- [x] Missing command menu translations are present in English and Spanish
+- [x] Login hydration warnings are suppressed for the controlled email and password fields
+- [x] A client-readiness report and screenshots are committed for the audited local seeded app
+- [x] A reusable Playwright client-readiness smoke script is available for repeat verification
+
+## Labels this PR needs
+
+- `large-change-approved` - broad i18n migration and committed client-readiness evidence exceed the standard risk-tier file cap.
