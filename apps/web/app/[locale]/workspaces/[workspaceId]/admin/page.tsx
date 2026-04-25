@@ -4,6 +4,8 @@ import { prisma } from "@corgtex/shared";
 import { isGlobalOperator, listAllWorkspaces, listAllUsers } from "@corgtex/domain";
 import { AdminDashboardClient } from "./AdminDashboardClient";
 
+export const dynamic = "force-dynamic";
+
 export default async function GlobalAdminPage({ params }: { params: Promise<{ workspaceId: string }> }) {
   const { workspaceId } = await params;
   const actor = await requirePageActor();

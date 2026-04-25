@@ -46,15 +46,15 @@ per AGENTS.md build guardrails.
 
 ## Acceptance criteria
 
-- [ ] All 13 API route files use `handleRouteError()` in their catch blocks — either directly or via `withRoute`/`withWorkspaceRoute`.
-- [ ] Zero API route files under `apps/web/app/api/` have unhandled top-level exceptions (every exported handler is wrapped in try/catch or a route wrapper).
-- [ ] `apps/web/app/api/oauth/token/route.ts` preserves its OAuth-specific error format (`error`/`error_description`) while still falling through to `handleRouteError` for unexpected errors.
-- [ ] `apps/web/app/api/oauth/authorize/route.ts` preserves its OAuth-specific redirect behavior while adding a catch-all for unexpected errors.
-- [ ] `apps/web/app/api/workspaces/[workspaceId]/webhooks/route.ts` is wrapped with `withWorkspaceRoute` (it already calls `resolveRequestActor` manually).
-- [ ] `apps/web/app/api/workspaces/[workspaceId]/oauth-apps/route.ts` catch block uses `handleRouteError(error)` instead of `error.message`.
-- [ ] `apps/web/app/[locale]/workspaces/[workspaceId]/admin/page.tsx` exports `const dynamic = "force-dynamic"`.
-- [ ] `npm run check` passes (lint + typecheck + prisma validate).
-- [ ] `npm run test:unit` passes with 0 failures.
+- [x] All 13 API route files use `handleRouteError()` in their catch blocks — either directly or via `withRoute`/`withWorkspaceRoute`.
+- [x] Zero API route files under `apps/web/app/api/` have unhandled top-level exceptions (every exported handler is wrapped in try/catch or a route wrapper).
+- [x] `apps/web/app/api/oauth/token/route.ts` preserves its OAuth-specific error format (`error`/`error_description`) while still falling through to `handleRouteError` for unexpected errors.
+- [x] `apps/web/app/api/oauth/authorize/route.ts` preserves its OAuth-specific redirect behavior while adding a catch-all for unexpected errors.
+- [x] `apps/web/app/api/workspaces/[workspaceId]/webhooks/route.ts` is wrapped with `withWorkspaceRoute` (it already calls `resolveRequestActor` manually).
+- [x] `apps/web/app/api/workspaces/[workspaceId]/oauth-apps/route.ts` catch block uses `handleRouteError(error)` instead of `error.message`.
+- [x] `apps/web/app/[locale]/workspaces/[workspaceId]/admin/page.tsx` exports `const dynamic = "force-dynamic"`.
+- [x] `npm run check` passes (lint + typecheck + prisma validate).
+- [x] `npm run test:unit` passes with 0 failures.
 
 ## Test plan
 
@@ -73,4 +73,4 @@ error strings.
 
 ## Labels this PR needs
 
-(none)
+- `large-change-approved`
