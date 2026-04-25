@@ -1075,6 +1075,7 @@ model AgentStep {
   startedAt   DateTime?
   completedAt DateTime?
   error       String?
+  humanFeedback String?         @db.Text
   createdAt   DateTime            @default(now())
 
   agentRun AgentRun @relation(fields: [agentRunId], references: [id], onDelete: Cascade)
@@ -1598,6 +1599,7 @@ model WorkspaceAgentConfig {
   agentKey      String
   enabled       Boolean  @default(true)
   modelOverride String?
+  governancePolicy String? @db.Text
   configJson    Json     @default("{}")
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
