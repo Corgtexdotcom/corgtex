@@ -1,5 +1,6 @@
 import { Handle, Position } from "@xyflow/react";
 import PersonNode, { PersonData } from "./PersonNode";
+import { useTranslations } from "next-intl";
 
 export type ExpandedCircleNodeData = {
   circleId: string;
@@ -13,6 +14,7 @@ export type ExpandedCircleNodeData = {
 };
 
 export default function ExpandedCircleNode({ data, selected }: { data: ExpandedCircleNodeData; selected?: boolean }) {
+  const t = useTranslations("circles");
   const getBadgeClass = (stage: string) => {
     switch (stage) {
       case "BUILDING_MUSCLE": return "badge-building-muscle";
@@ -23,9 +25,9 @@ export default function ExpandedCircleNode({ data, selected }: { data: ExpandedC
 
   const getStageLabel = (stage: string) => {
     switch (stage) {
-      case "BUILDING_MUSCLE": return "Building Muscle";
-      case "FULL_O2": return "Full O2";
-      default: return "Getting Started";
+      case "BUILDING_MUSCLE": return t("stageBuildingMuscle");
+      case "FULL_O2": return t("stageFullO2");
+      default: return t("stageGettingStarted");
     }
   };
 
@@ -40,9 +42,7 @@ export default function ExpandedCircleNode({ data, selected }: { data: ExpandedC
             type="button" 
             className="collapse-btn" 
             onClick={(e) => { e.stopPropagation(); data.onCollapse(data.circleId); }}
-          >
-            Collapse
-          </button>
+          >{t("btnCollapse")}</button>
         </div>
         {data.purposeMd && (
           <div className="circle-node-purpose">{data.purposeMd}</div>
@@ -52,14 +52,14 @@ export default function ExpandedCircleNode({ data, selected }: { data: ExpandedC
             {getStageLabel(data.maturityStage)}
           </span>
           <span className="circle-node-roles">
-            {data.roleCount} {data.roleCount === 1 ? "role" : "roles"}
+            {data.roleCount === 1 ? t("roleCountSingle", { count: data.roleCount }) : t("roleCountPlural", { count: data.roleCount })}
           </span>
         </div>
       </div>
 
       <div className="expanded-circle-content">
         {data.roles?.length === 0 && (
-          <div className="empty-roles">No roles in this circle</div>
+          <div className="empty-roles">{t("emptyRoles")}</div>
         )}
         
         {data.roles?.map((role) => {
@@ -72,7 +72,7 @@ export default function ExpandedCircleNode({ data, selected }: { data: ExpandedC
               
               <div className="role-card-people">
                 {assignments.length === 0 && (
-                  <span className="unassigned-text">Unassigned</span>
+                  <span className="unassigned-text">{t("unassigned")}</span>
                 )}
                 {assignments.map((assignment: any) => {
                   const personData: PersonData = {

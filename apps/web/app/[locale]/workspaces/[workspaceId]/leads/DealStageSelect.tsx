@@ -1,6 +1,7 @@
 "use client";
 
 import { updateDealAction } from "../actions";
+import { useTranslations } from "next-intl";
 
 export function DealStageSelect({
   workspaceId,
@@ -11,6 +12,7 @@ export function DealStageSelect({
   dealId: string;
   currentStage: string;
 }) {
+  const t = useTranslations("leads");
   return (
     <form action={updateDealAction} style={{ flex: 1 }}>
       <input type="hidden" name="workspaceId" value={workspaceId} />
@@ -21,12 +23,12 @@ export function DealStageSelect({
         onChange={(e) => e.target.form?.requestSubmit()}
         style={{ padding: "4px", fontSize: "0.75rem" }}
       >
-        <option value="LEAD">Lead</option>
-        <option value="QUALIFIED">Qualified</option>
-        <option value="PROPOSAL">Proposal</option>
-        <option value="NEGOTIATION">Negotiate</option>
-        <option value="CLOSED_WON">Won</option>
-        <option value="CLOSED_LOST">Lost</option>
+        <option value="LEAD">{t("stageLead")}</option>
+        <option value="QUALIFIED">{t("stageQualified")}</option>
+        <option value="PROPOSAL">{t("stageProposal")}</option>
+        <option value="NEGOTIATION">{t("stageNegotiate")}</option>
+        <option value="CLOSED_WON">{t("stageWon")}</option>
+        <option value="CLOSED_LOST">{t("stageLost")}</option>
       </select>
     </form>
   );

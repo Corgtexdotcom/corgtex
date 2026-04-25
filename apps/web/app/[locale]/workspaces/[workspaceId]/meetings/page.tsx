@@ -1,6 +1,7 @@
 import { listMeetings } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { createMeetingAction } from "../actions";
+import { getTranslations } from "next-intl/server";
 import Link from "next/link";
 
 export const dynamic = "force-dynamic";
@@ -15,13 +16,14 @@ export default async function MeetingsPage({
   const { workspaceId } = await params;
   await requirePageActor();
   const meetings = await listMeetings(workspaceId);
+  const t = await getTranslations("meetings");
 
   return (
     <>
       <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 32 }}>
-        <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2.5rem" }}>Board Meetings</h1>
+        <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2.5rem" }}>{t("pageTitle")}</h1>
         <div className="nr-masthead-meta">
-          <span>{meetings.length} meeting(s) recorded</span>
+          <span>{t("meetingsRecorded", { count: meetings.length })}</span>
         </div>
       </header>
 
@@ -64,7 +66,7 @@ export default async function MeetingsPage({
       <div style={{ marginTop: "48px", borderTop: "2px solid var(--line)", paddingTop: "32px" }}>
         <details>
           <summary className="nr-hide-marker" style={{ cursor: "pointer", fontWeight: 600, color: "var(--accent)" }}>
-            <span className="nr-section-header" style={{ borderTop: "none", display: "inline-block", padding: 0, margin: 0 }}>+ Ingest New Meeting</span>
+            <span className="nr-section-header" style={{ borderTop: "none", display: "inline-block", padding: 0, margin: 0 }}>{t("newMeetingTitle")}</span>
           </summary>
           <div style={{ marginTop: "24px" }}>
             <form action={createMeetingAction} className="stack panel">
@@ -85,7 +87,7 @@ export default async function MeetingsPage({
               </div>
               <label>
                 Participant IDs
-                <input name="participantIds" placeholder="comma,separated,userIds" />
+                <input name="participantIds" placeholder={t("formParticipantIdsPlaceholder")} />
               </label>
               <label>
                 Summary
@@ -95,7 +97,7 @@ export default async function MeetingsPage({
                 Transcript
                 <textarea name="transcript" />
               </label>
-              <button type="submit">Ingest meeting</button>
+              <button type="submit">{t("btnIngest")}</button>
             </form>
           </div>
         </details>
