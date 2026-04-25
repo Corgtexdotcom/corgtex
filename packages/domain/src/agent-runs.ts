@@ -193,9 +193,16 @@ export async function submitAgentFeedback(actor: AppActor, params: {
   });
 
   return prisma.$transaction(async (tx) => {
-    // Save feedback to the step
+    // Verify the run belongs to this workspace before touching the step
+    const run = await tx.agentRun.findUnique({
+      where: { id: params.agentRunId, workspaceId: params.workspaceId },
+      select: { id: true },
+    });
+    invariant(run, 404, "NOT_FOUND", "Agent run not found in this workspace.");
+
+    // Save feedback to the step — scope by agentRunId to prevent cross-run writes
     const step = await tx.agentStep.update({
-      where: { id: params.stepId },
+      where: { id: params.stepId, agentRunId: params.agentRunId },
       data: {
         humanFeedback: params.feedback,
         status: "COMPLETED",
