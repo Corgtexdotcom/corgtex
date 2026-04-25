@@ -17,7 +17,7 @@ import { randomUUID } from "node:crypto";
 // ---------------------------------------------------------------------------
 const BASE_URL = process.argv[2] || process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000";
 const AGENT_API_KEY = process.env.AGENT_API_KEY || "";
-const ADMIN_EMAIL = process.env.ADMIN_EMAIL || "janbrezina@icloud.com";
+const ADMIN_EMAIL = process.env.ADMIN_EMAIL || "";
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "";
 const TEST_ID = randomUUID().slice(0, 8);
 
@@ -28,6 +28,10 @@ const WORKER_POLL_INTERVAL_MS = 3_000;
 // Pre-flight checks
 if (!AGENT_API_KEY) {
   console.error("⚠️  AGENT_API_KEY is not set — agent-scoped tests will fail.");
+}
+if (!ADMIN_EMAIL) {
+  console.error("ADMIN_EMAIL is required. Set it via environment variable.");
+  process.exit(1);
 }
 if (!ADMIN_PASSWORD) {
   console.error("💀 ADMIN_PASSWORD is required. Set it via environment variable.");

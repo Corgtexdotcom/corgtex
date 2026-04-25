@@ -1,8 +1,10 @@
-import type { MemberRole, User } from "@prisma/client";
+import type { GlobalRole, MemberRole, User } from "@prisma/client";
 
 export type HumanActor = {
   kind: "user";
-  user: Pick<User, "id" | "email" | "displayName">;
+  user: Pick<User, "id" | "email" | "displayName"> & {
+    globalRole?: GlobalRole;
+  };
 };
 
 export type AgentActor = {
