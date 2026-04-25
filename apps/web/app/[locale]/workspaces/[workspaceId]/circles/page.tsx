@@ -10,6 +10,7 @@ import {
 } from "../actions";
 import { prisma } from "@corgtex/shared";
 import CircleGraph from "./CircleGraph";
+import { getTranslations } from "next-intl/server";
 
 export const dynamic = "force-dynamic";
 
@@ -24,6 +25,7 @@ export default async function CirclesPage({
   const { view } = await searchParams;
   const viewMode = view === "list" ? "list" : "graph";
   await requirePageActor();
+  const t = await getTranslations("circles");
 
   let circles: Awaited<ReturnType<typeof listCircles>>;
   let treeData: Awaited<ReturnType<typeof listCircleTree>>;
@@ -64,13 +66,13 @@ export default async function CirclesPage({
     return (
       <>
         <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 32 }}>
-          <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2.5rem" }}>Circles &amp; Roles</h1>
+          <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2.5rem" }}>{t("pageTitle")}</h1>
         </header>
         <section className="ws-section">
           <div className="nr-item" style={{ textAlign: "center", padding: "48px 24px" }}>
-            <h3 style={{ margin: "0 0 8px" }}>Unable to load circles</h3>
+            <h3 style={{ margin: "0 0 8px" }}>{t("errorLoadTitle")}</h3>
             <p className="muted" style={{ margin: 0, maxWidth: 500, marginInline: "auto" }}>
-              There was a problem loading the organizational structure. This has been logged and the team has been notified. Please try refreshing.
+              {t("errorLoadDesc")}
             </p>
           </div>
         </section>
@@ -83,14 +85,14 @@ export default async function CirclesPage({
       <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 32 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", flexWrap: "wrap", gap: "16px" }}>
           <div>
-            <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2.5rem" }}>Circles &amp; Roles</h1>
+            <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2.5rem" }}>{t("pageTitle")}</h1>
             <div className="nr-masthead-meta">
-              <span>Organizational structure, accountabilities, and role assignments.</span>
+              <span>{t("pageDescription")}</span>
             </div>
           </div>
           <div style={{ display: "flex", gap: "8px" }}>
-            <a href={`/workspaces/${workspaceId}/circles?view=graph`} className="secondary small" style={{ opacity: viewMode === "graph" ? 1 : 0.6, background: viewMode === "graph" ? "var(--bg-alt)" : "transparent" }}>Graph View</a>
-            <a href={`/workspaces/${workspaceId}/circles?view=list`} className="secondary small" style={{ opacity: viewMode === "list" ? 1 : 0.6, background: viewMode === "list" ? "var(--bg-alt)" : "transparent" }}>List View</a>
+            <a href={`/workspaces/${workspaceId}/circles?view=graph`} className="secondary small" style={{ opacity: viewMode === "graph" ? 1 : 0.6, background: viewMode === "graph" ? "var(--bg-alt)" : "transparent" }}>{t("btnGraphView")}</a>
+            <a href={`/workspaces/${workspaceId}/circles?view=list`} className="secondary small" style={{ opacity: viewMode === "list" ? 1 : 0.6, background: viewMode === "list" ? "var(--bg-alt)" : "transparent" }}>{t("btnListView")}</a>
           </div>
         </div>
       </header>
@@ -99,9 +101,9 @@ export default async function CirclesPage({
         <section className="ws-section" style={{ padding: "0 24px" }}>
           {(!treeData || treeData.length === 0) ? (
             <div className="nr-item" style={{ textAlign: "center", padding: "48px 24px" }}>
-              <h3 style={{ margin: "0 0 8px" }}>What is a Circle?</h3>
+              <h3 style={{ margin: "0 0 8px" }}>{t("whatIsCircleTitle")}</h3>
               <p className="muted" style={{ margin: 0, maxWidth: 500, marginInline: "auto" }}>
-                Circles are autonomous teams with a clear purpose and domain. Start by creating your first circle below.
+                {t("whatIsCircleDescGraph")}
               </p>
             </div>
           ) : (
@@ -112,9 +114,9 @@ export default async function CirclesPage({
       <section className="ws-section">
         {(!circles || circles.length === 0) && (
           <div className="nr-item" style={{ textAlign: "center", padding: "48px 24px" }}>
-            <h3 style={{ margin: "0 0 8px" }}>What is a Circle?</h3>
+            <h3 style={{ margin: "0 0 8px" }}>{t("whatIsCircleTitle")}</h3>
             <p className="muted" style={{ margin: 0, maxWidth: 500, marginInline: "auto" }}>
-              Circles are autonomous teams with a clear purpose and domain. Start by creating your first circle.
+              {t("whatIsCircleDescList")}
             </p>
           </div>
         )}
@@ -125,24 +127,24 @@ export default async function CirclesPage({
               <div key={circle.id} style={{ marginBottom: 48 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
                   <h2 className="nr-section-header" style={{ flex: 1, borderTop: "2px solid var(--text)" }}>
-                    {circle.name} Circle
+                    {t("circleTitle", { name: circle.name })}
                   </h2>
                   {!isDemo && (
                     <form action={deleteCircleAction} style={{ marginLeft: 16 }}>
                       <input type="hidden" name="workspaceId" value={workspaceId} />
                       <input type="hidden" name="circleId" value={circle.id} />
-                      <button type="submit" className="danger small">Delete Circle</button>
+                      <button type="submit" className="danger small">{t("btnDeleteCircle")}</button>
                     </form>
                   )}
                 </div>
                 
                 <div style={{ marginBottom: 24 }}>
                   {circle.purposeMd && <div className="nr-excerpt">{circle.purposeMd}</div>}
-                  {circle.domainMd && <div className="nr-item-meta">Domain: {circle.domainMd}</div>}
+                  {circle.domainMd && <div className="nr-item-meta">{t("domain", { domain: circle.domainMd })}</div>}
                 </div>
 
                 <div>
-                  {circleRoles.length === 0 && <div className="nr-item-meta">No roles in this circle yet.</div>}
+                  {circleRoles.length === 0 && <div className="nr-item-meta">{t("noRoles")}</div>}
                   {circleRoles.map((role) => {
                     const roleAssignments = assignments.filter((a) => a.role?.id === role.id);
                     return (
@@ -154,7 +156,7 @@ export default async function CirclesPage({
                               <form action={deleteRoleAction}>
                                 <input type="hidden" name="workspaceId" value={workspaceId} />
                                 <input type="hidden" name="roleId" value={role.id} />
-                                <button type="submit" className="danger small">Delete</button>
+                                <button type="submit" className="danger small">{t("btnDelete")}</button>
                               </form>
                             </div>
                           )}
@@ -171,13 +173,13 @@ export default async function CirclesPage({
                             <div style={{ marginBottom: 6 }}>
                               {roleAssignments.map((a) => (
                                 <div key={a.id} className="row" style={{ fontSize: "0.85rem", padding: "4px 0" }}>
-                                  <span>Member: {a.member?.user?.displayName ?? a.member?.user?.email ?? "Unknown"}</span>
+                                  <span>{t("memberAssignment", { name: a.member?.user?.displayName ?? a.member?.user?.email ?? t("memberUnknown") })}</span>
                                   {!isDemo && (
                                     <form action={unassignRoleAction}>
                                       <input type="hidden" name="workspaceId" value={workspaceId} />
                                       <input type="hidden" name="roleId" value={role.id} />
                                       <input type="hidden" name="memberId" value={a.member?.id} />
-                                      <button type="submit" className="danger small">Unassign</button>
+                                      <button type="submit" className="danger small">{t("btnUnassign")}</button>
                                     </form>
                                   )}
                                 </div>
@@ -193,7 +195,7 @@ export default async function CirclesPage({
                                   <option key={m.id} value={m.id}>{m.user.displayName ?? m.user.email}</option>
                                 ))}
                               </select>
-                              <button type="submit" className="secondary small">Assign Member</button>
+                              <button type="submit" className="secondary small">{t("btnAssignMember")}</button>
                             </form>
                           )}
                         </div>
@@ -203,18 +205,18 @@ export default async function CirclesPage({
                 </div>
 
                 <div className="nr-section-header" style={{ marginTop: 24, padding: "8px 0" }}>
-                  <h3 style={{ fontSize: "1.1rem", margin: 0 }}>Agent Members</h3>
+                  <h3 style={{ fontSize: "1.1rem", margin: 0 }}>{t("agentMembersTitle")}</h3>
                 </div>
                 <div>
                   {(() => {
                     const circleAgents = agentAssignments.filter((a: any) => a.circleId === circle.id);
                     if (circleAgents.length === 0) {
-                      return <div className="nr-item-meta">No agents assigned to this circle.</div>;
+                      return <div className="nr-item-meta">{t("noAgentsAssigned")}</div>;
                     }
                     return circleAgents.map((a: any) => (
                       <div className="nr-item" key={a.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                          <span title="Agent Member">⬡</span>
+                          <span title={t("agentTooltip")}>⬡</span>
                           <span style={{ fontWeight: 600 }}>{a.agentIdentity.displayName}</span>
                           <span className="nr-item-meta" style={{ fontSize: "0.8rem", padding: "2px 6px", background: a.agentIdentity.memberType === "INTERNAL" ? "var(--accent-muted)" : "var(--bg-alt)", border: "1px solid var(--border)", borderRadius: 12 }}>
                             {a.agentIdentity.memberType}
@@ -230,7 +232,7 @@ export default async function CirclesPage({
                             await removeAgentFromCircle(actor, { workspaceId, agentIdentityId: a.agentIdentityId, circleId: circle.id });
                             revalidatePath(`/workspaces/${workspaceId}/circles`);
                           }}>
-                            <button type="submit" className="danger small">Unassign</button>
+                            <button type="submit" className="danger small">{t("btnUnassign")}</button>
                           </form>
                         )}
                       </div>
@@ -252,12 +254,12 @@ export default async function CirclesPage({
                       revalidatePath(`/workspaces/${workspaceId}/circles`);
                     }} className="actions-inline">
                       <select name="agentIdentityId" style={{ width: "auto", minWidth: 120 }} required>
-                        <option value="">-- Select Agent --</option>
+                        <option value="">{t("selectAgentOption")}</option>
                         {allAgents.map((agent: any) => (
                           <option key={agent.id} value={agent.id}>{agent.displayName}</option>
                         ))}
                       </select>
-                      <button type="submit" className="secondary small">Assign Agent</button>
+                      <button type="submit" className="secondary small">{t("btnAssignAgent")}</button>
                     </form>
                   )}
                 </div>
@@ -273,32 +275,32 @@ export default async function CirclesPage({
           <section className="ws-section" style={{ flex: 1 }}>
             <details>
               <summary className="nr-hide-marker" style={{ cursor: "pointer", fontWeight: 600, color: "var(--accent)" }}>
-                <span className="nr-section-header" style={{ borderTop: "none", display: "inline-block", padding: 0, margin: 0 }}>+ Create Circle</span>
+                <span className="nr-section-header" style={{ borderTop: "none", display: "inline-block", padding: 0, margin: 0 }}>{t("newCircleTitle")}</span>
               </summary>
               <form action={createCircleAction} className="stack nr-form-section">
                 <input type="hidden" name="workspaceId" value={workspaceId} />
                 <label>
-                  Name
+                  {t("formName")}
                   <input name="name" required />
                 </label>
                 <label>
-                  Parent Circle
+                  {t("formParentCircle")}
                   <select name="parentCircleId">
-                    <option value="">(None - Top Level)</option>
+                    <option value="">{t("formParentCircleNone")}</option>
                     {circles.map((circle) => (
                       <option key={circle.id} value={circle.id}>{circle.name}</option>
                     ))}
                   </select>
                 </label>
                 <label>
-                  Purpose
+                  {t("formPurpose")}
                   <textarea name="purposeMd" />
                 </label>
                 <label>
-                  Domain
+                  {t("formDomain")}
                   <textarea name="domainMd" />
                 </label>
-                <button type="submit">Create circle</button>
+                <button type="submit">{t("btnCreateCircle")}</button>
               </form>
             </details>
           </section>
@@ -306,12 +308,12 @@ export default async function CirclesPage({
           <section className="ws-section" style={{ flex: 1 }}>
             <details>
               <summary className="nr-hide-marker" style={{ cursor: "pointer", fontWeight: 600, color: "var(--accent)" }}>
-                <span className="nr-section-header" style={{ borderTop: "none", display: "inline-block", padding: 0, margin: 0 }}>+ Create Role</span>
+                <span className="nr-section-header" style={{ borderTop: "none", display: "inline-block", padding: 0, margin: 0 }}>{t("newRoleTitle")}</span>
               </summary>
               <form action={createRoleAction} className="stack nr-form-section">
                 <input type="hidden" name="workspaceId" value={workspaceId} />
                 <label>
-                  Circle
+                  {t("formCircle")}
                   <select name="circleId" required defaultValue={circles[0]?.id ?? ""}>
                     {circles.map((circle) => (
                       <option key={circle.id} value={circle.id}>{circle.name}</option>
@@ -319,18 +321,18 @@ export default async function CirclesPage({
                   </select>
                 </label>
                 <label>
-                  Name
+                  {t("formName")}
                   <input name="name" required />
                 </label>
                 <label>
-                  Purpose
+                  {t("formPurpose")}
                   <textarea name="purposeMd" />
                 </label>
                 <label>
-                  Accountabilities
-                  <textarea name="accountabilities" placeholder="One per line" />
+                  {t("formAccountabilities")}
+                  <textarea name="accountabilities" placeholder={t("formAccountabilitiesPlaceholder")} />
                 </label>
-                <button type="submit" disabled={circles.length === 0}>Create role</button>
+                <button type="submit" disabled={circles.length === 0}>{t("btnCreateRole")}</button>
               </form>
             </details>
           </section>

@@ -77,13 +77,13 @@ export function ChatInterface({
   const loadConversation = useCallback(async (id: string) => {
     try {
       const res = await fetch(`/api/workspaces/${workspaceId}/conversations/${id}`);
-      if (!res.ok) throw new Error("Failed to load conversation");
+      if (!res.ok) throw new Error(t("errorFailedToLoad"));
       const data = await res.json();
       setTurns(data.conversation.turns);
       setSessionId(id);
       setError(null);
     } catch {
-      setError("Failed to load conversation.");
+      setError(t("errorFailedToLoad"));
     }
   }, [workspaceId]);
 
@@ -175,7 +175,7 @@ export function ChatInterface({
           window.history.pushState({}, "", `/workspaces/${workspaceId}/chat?session=${currentSessionId}`);
         }
       } catch {
-        setError("Failed to create conversation.");
+        setError(t("errorFailedToCreate"));
         return;
       }
     }
@@ -223,7 +223,7 @@ export function ChatInterface({
 
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.error || "Failed to send message");
+        throw new Error(errData.error || t("errorFailedToSend"));
       }
       if (!res.body) {
         throw new Error("Response stream is unavailable.");
@@ -296,7 +296,7 @@ export function ChatInterface({
         )
       );
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to send message.");
+      setError(err instanceof Error ? err.message : t("errorFailedToSend"));
       setTurns((prev) => prev.filter((turn) => turn.id !== optimisticTurn.id));
     } finally {
       setLoading(false);
@@ -431,9 +431,9 @@ export function ChatInterface({
 
                 <div className="chat-starters">
                   {[
-                    "What tensions are currently open?",
-                    "Help me draft a proposal for...",
-                    "Summarize recent meeting decisions",
+                    t("starter1"),
+                    t("starter2"),
+                    t("starter3"),
                   ].map((starter) => (
                     <button
                       key={starter}
@@ -465,7 +465,7 @@ export function ChatInterface({
                   ) : (
                     <div className="chat-message assistant">
                       <div className="chat-message-author">Corgtex</div>
-                      <div className="chat-typing">Thinking...</div>
+                      <div className="chat-typing">{t("thinking")}</div>
                     </div>
                   )}
                 </div>
@@ -512,7 +512,7 @@ export function ChatInterface({
               value={input}
               onChange={(event) => setInput(event.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder="Type a message..."
+              placeholder={t("placeholderTypeMessage")}
               rows={1}
               disabled={loading}
               className="chat-input"

@@ -1,5 +1,6 @@
 import type { AppActor } from "@corgtex/shared";
 import { submitAgentFeedbackAction } from "./actions";
+import { useTranslations } from "next-intl";
 
 export function AgentInboxTab({
   workspaceId,
@@ -10,18 +11,19 @@ export function AgentInboxTab({
   actor: AppActor;
   pendingRuns: any[]; // Any is fine here, it comes from listAgentRuns which has complex type
 }) {
+  const t = useTranslations("agents");
   return (
     <div className="stack" style={{ gap: 24 }}>
       <section>
-        <h2 className="nr-section-header">Questions from Agents</h2>
+        <h2 className="nr-section-header">{t("inboxTitle")}</h2>
         <p className="nr-item-meta" style={{ fontSize: "0.85rem", marginBottom: 16 }}>
-          Agents will pause and ask for your input here when they encounter ambiguity or reach a policy threshold.
+          {t("inboxDesc")}
         </p>
 
         {pendingRuns.length === 0 ? (
           <div className="nr-item" style={{ textAlign: "center", padding: "40px 20px" }}>
-            <strong style={{ display: "block" }}>Inbox zero!</strong>
-            <span className="nr-item-meta">No agents are currently waiting for your input.</span>
+            <strong style={{ display: "block" }}>{t("inboxZero")}</strong>
+            <span className="nr-item-meta">{t("inboxNoAgents")}</span>
           </div>
         ) : (
           <div className="stack" style={{ gap: 16 }}>
@@ -39,15 +41,15 @@ export function AgentInboxTab({
                   </div>
                   
                   <div>
-                    <strong style={{ display: "block", marginBottom: 4 }}>Goal:</strong>
+                    <strong style={{ display: "block", marginBottom: 4 }}>{t("traceGoal")}</strong>
                     <div className="nr-excerpt">{run.goal}</div>
                   </div>
 
                   {lastStep && (
                     <div style={{ background: "var(--bg-subtle)", padding: 12, borderRadius: 8, border: "1px dashed var(--line)" }}>
-                      <strong style={{ display: "block", marginBottom: 4 }}>Agent is asking:</strong>
+                      <strong style={{ display: "block", marginBottom: 4 }}>{t("agentAsking")}</strong>
                       <div className="nr-excerpt" style={{ color: "var(--text)" }}>
-                        {lastStep.outputJson?.question || "Waiting for input..."}
+                        {lastStep.outputJson?.question || t("waitingInput")}
                       </div>
                       
                       <form action={submitAgentFeedbackAction} style={{ marginTop: 16 }}>
@@ -58,11 +60,11 @@ export function AgentInboxTab({
                         <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
                           <textarea 
                             name="feedback"
-                            placeholder="Type your response or instruction to the agent..."
+                            placeholder={t("replyPlaceholder")}
                             style={{ flex: 1, minHeight: 60, padding: 8, borderRadius: 6, border: "1px solid var(--line)", background: "transparent", color: "var(--text)" }}
                             required
                           />
-                          <button type="submit" className="primary small">Reply</button>
+                          <button type="submit" className="primary small">{t("btnReply")}</button>
                         </div>
                       </form>
                     </div>

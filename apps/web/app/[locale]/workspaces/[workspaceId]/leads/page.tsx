@@ -8,6 +8,7 @@ import {
   createDealAction,
 } from "../actions";
 import { DealStageSelect } from "./DealStageSelect";
+import { getTranslations } from "next-intl/server";
 
 export const dynamic = "force-dynamic";
 
@@ -20,6 +21,7 @@ export default async function LeadsPage({
 }) {
   const { workspaceId } = await params;
   const actor = await requirePageActor();
+  const t = await getTranslations("leads");
   
   // They must be a member
   try {
@@ -77,15 +79,15 @@ export default async function LeadsPage({
 
   const ageText = (date: Date) => {
     const days = Math.floor((Date.now() - new Date(date).getTime()) / (1000 * 60 * 60 * 24));
-    return days === 0 ? "today" : `${days}d ago`;
+    return days === 0 ? t("ageToday") : t("ageDaysAgo", { days });
   };
 
   return (
     <>
       <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 32 }}>
-        <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2.5rem" }}>Relationships</h1>
+        <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2.5rem" }}>{t("pageTitle")}</h1>
         <div className="nr-masthead-meta">
-          <span>Manage contacts, leads, and pipeline deals.</span>
+          <span>{t("pageDescription")}</span>
         </div>
       </header>
 
@@ -93,19 +95,19 @@ export default async function LeadsPage({
         <div className="ws-stat-row">
           <div className="ws-stat-card">
             <strong>{totalContacts}</strong>
-            <span>Total Contacts</span>
+            <span>{t("statTotalContacts")}</span>
           </div>
           <div className="ws-stat-card">
             <strong>{activeDeals.length}</strong>
-            <span>Active Deals</span>
+            <span>{t("statActiveDeals")}</span>
           </div>
           <div className="ws-stat-card">
             <strong>{formatCurrency(pipelineValue)}</strong>
-            <span>Pipeline Value</span>
+            <span>{t("statPipelineValue")}</span>
           </div>
           <div className="ws-stat-card">
             <strong>{closedWon.length}</strong>
-            <span>Deals Won</span>
+            <span>{t("statDealsWon")}</span>
           </div>
         </div>
 
@@ -127,40 +129,40 @@ export default async function LeadsPage({
             <div style={{ marginBottom: "24px", display: "flex", justifyContent: "flex-end" }}>
               <details style={{ width: "100%" }}>
                 <summary className="link-button small" style={{ cursor: "pointer", marginLeft: "auto", display: "inline-flex" }}>
-                  + New Contact
+                  {t("btnNewContact")}
                 </summary>
                 <form action={createContactAction} className="stack nr-form-section" style={{ marginTop: 16 }}>
                   <input type="hidden" name="workspaceId" value={workspaceId} />
                   <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px" }}>
-                    <label>Email <input type="email" name="email" required /></label>
-                    <label>Name <input type="text" name="name" /></label>
-                    <label>Company <input type="text" name="company" /></label>
-                    <label>Title <input type="text" name="title" /></label>
+                    <label>{t("formEmail")} <input type="email" name="email" required /></label>
+                    <label>{t("formName")} <input type="text" name="name" /></label>
+                    <label>{t("formCompany")} <input type="text" name="company" /></label>
+                    <label>{t("formTitle")} <input type="text" name="title" /></label>
                   </div>
-                  <button type="submit" style={{ width: "fit-content" }}>Create Contact</button>
+                  <button type="submit" style={{ width: "fit-content" }}>{t("btnCreateContact")}</button>
                 </form>
               </details>
             </div>
 
             {contacts.length === 0 ? (
-              <p className="muted">No contacts yet. Adding demo form leads or creating them manually will show them here.</p>
+              <p className="muted">{t("noContacts")}</p>
             ) : (
               <div style={{ overflowX: "auto" }}>
                 <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem" }}>
                   <thead>
                     <tr style={{ borderBottom: "2px solid var(--line)", textAlign: "left" }}>
-                      <th style={{ padding: "12px 8px" }}>Contact</th>
-                      <th style={{ padding: "12px 8px" }}>Company</th>
-                      <th style={{ padding: "12px 8px" }}>Source</th>
-                      <th style={{ padding: "12px 8px" }}>Created</th>
-                      <th style={{ padding: "12px 8px" }}>Actions</th>
+                      <th style={{ padding: "12px 8px" }}>{t("colContact")}</th>
+                      <th style={{ padding: "12px 8px" }}>{t("colCompany")}</th>
+                      <th style={{ padding: "12px 8px" }}>{t("colSource")}</th>
+                      <th style={{ padding: "12px 8px" }}>{t("colCreated")}</th>
+                      <th style={{ padding: "12px 8px" }}>{t("colActions")}</th>
                     </tr>
                   </thead>
                   <tbody>
                     {contacts.map((contact) => (
                       <tr key={contact.id} style={{ borderBottom: "1px solid var(--line)" }}>
                         <td style={{ padding: "12px 8px" }}>
-                          <div style={{ fontWeight: 600, color: "var(--text)" }}>{contact.name || "Unknown"}</div>
+                          <div style={{ fontWeight: 600, color: "var(--text)" }}>{contact.name || t("unknownContact")}</div>
                           <div className="muted" style={{ fontSize: "0.8rem" }}>{contact.email}</div>
                         </td>
                         <td style={{ padding: "12px 8px" }}>
@@ -179,7 +181,7 @@ export default async function LeadsPage({
                               <form action={deleteContactAction}>
                                 <input type="hidden" name="workspaceId" value={workspaceId} />
                                 <input type="hidden" name="contactId" value={contact.id} />
-                                <button type="submit" className="danger small" style={{ width: "100%", whiteSpace: "nowrap" }}>Delete</button>
+                                <button type="submit" className="danger small" style={{ width: "100%", whiteSpace: "nowrap" }}>{t("btnDelete")}</button>
                               </form>
                             </div>
                           </details>
@@ -198,22 +200,22 @@ export default async function LeadsPage({
             <div style={{ marginBottom: "24px", display: "flex", justifyContent: "flex-end" }}>
               <details style={{ width: "100%" }}>
                 <summary className="link-button small" style={{ cursor: "pointer", marginLeft: "auto", display: "inline-flex" }}>
-                  + New Deal
+                  {t("btnNewDeal")}
                 </summary>
                 <form action={createDealAction} className="stack nr-form-section" style={{ marginTop: 16 }}>
                   <input type="hidden" name="workspaceId" value={workspaceId} />
                   <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px" }}>
                     <label>
-                      Contact
+                      {t("formContact")}
                       <select name="contactId" required>
-                        <option value="">Select a contact...</option>
+                        <option value="">{t("selectContact")}</option>
                         {contacts.map((c) => <option key={c.id} value={c.id}>{c.name || c.email}</option>)}
                       </select>
                     </label>
-                    <label>Deal Title <input type="text" name="title" required /></label>
-                    <label>Value (USD) <input type="number" name="value" step="0.01" min="0" /></label>
+                    <label>Deal {t("formTitle")} <input type="text" name="title" required /></label>
+                    <label>{t("formValue")} <input type="number" name="value" step="0.01" min="0" /></label>
                   </div>
-                  <button type="submit" style={{ width: "fit-content" }}>Create Deal</button>
+                  <button type="submit" style={{ width: "fit-content" }}>{t("btnCreateDeal")}</button>
                 </form>
               </details>
             </div>
@@ -222,7 +224,7 @@ export default async function LeadsPage({
               {(["LEAD", "QUALIFIED", "PROPOSAL", "NEGOTIATION", "CLOSED_WON", "CLOSED_LOST"] as const).map(stage => (
                 <div key={stage} style={{ flex: "0 0 300px", background: "var(--bg-alt)", borderRadius: "12px", padding: "16px" }}>
                   <div style={{ fontWeight: 600, marginBottom: "16px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                    {stage.replace("_", " ")}
+                    {stage === "LEAD" ? t("stageLead") : stage === "QUALIFIED" ? t("stageQualified") : stage === "PROPOSAL" ? t("stageProposal") : stage === "NEGOTIATION" ? t("stageNegotiate") : stage === "CLOSED_WON" ? t("stageWon") : t("stageLost")}
                     <span className="muted" style={{ fontSize: "0.8rem", background: "rgba(0,0,0,0.05)", padding: "2px 8px", borderRadius: "99px" }}>
                       {(dealsByStage[stage] || []).length}
                     </span>
@@ -249,7 +251,7 @@ export default async function LeadsPage({
 
         {view === "activity" && (
           <div className="stack">
-            {recentActivities.length === 0 && <p className="muted">No recent activity.</p>}
+            {recentActivities.length === 0 && <p className="muted">{t("noActivity")}</p>}
             {recentActivities.map(activity => (
               <div key={activity.id} className="item" style={{ display: "flex", gap: "16px" }}>
                 <div style={{ width: "40px", height: "40px", borderRadius: "50%", background: "var(--accent-soft)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "1.2rem", flexShrink: 0 }}>
@@ -266,10 +268,10 @@ export default async function LeadsPage({
                   </div>
                   <div className="row" style={{ fontSize: "0.8rem" }}>
                     {activity.contact && (
-                      <span className="muted">Contact: <strong>{activity.contact.name || activity.contact.email}</strong></span>
+                      <span className="muted">{t("activityContact")} <strong>{activity.contact.name || activity.contact.email}</strong></span>
                     )}
                     {activity.deal && (
-                      <span className="muted">Deal: <strong>{activity.deal.title}</strong></span>
+                      <span className="muted">{t("activityDeal")} <strong>{activity.deal.title}</strong></span>
                     )}
                   </div>
                 </div>

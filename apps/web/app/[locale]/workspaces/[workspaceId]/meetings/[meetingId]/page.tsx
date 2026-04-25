@@ -1,5 +1,6 @@
 import { getMeeting, getMeetingParticipants } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
+import { getTranslations } from "next-intl/server";
 import Link from "next/link";
 import { renderMarkdown } from "@/lib/markdown";
 import { DeliberationThread } from "@/lib/components/DeliberationThread";
@@ -17,6 +18,7 @@ export default async function MeetingDetailPage({
 }) {
   const { workspaceId, meetingId } = await params;
   const actor = await requirePageActor();
+  const t = await getTranslations("meetings");
 
   const meeting = await getMeeting(workspaceId, meetingId);
   const meetingEntries = await listDeliberationEntries(actor, { workspaceId, parentType: "MEETING", parentId: meetingId });
@@ -55,7 +57,7 @@ export default async function MeetingDetailPage({
       <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 32 }}>
         <div className="nr-meta" style={{ marginBottom: "8px" }}>{meeting.source}</div>
         <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2.5rem" }}>
-          {meeting.title || "Untitled Meeting"}
+          {meeting.title || t("untitledMeeting")}
         </h1>
         <div className="nr-masthead-meta">
           <span>{new Date(meeting.recordedAt).toLocaleString()}</span>
@@ -147,12 +149,12 @@ export default async function MeetingDetailPage({
                   <div style={{ marginTop: 8, fontSize: "0.82rem", display: "flex", gap: "8px", flexWrap: "wrap" }}>
                     {proposal.tensions?.map((t: any) => (
                       <span key={t.id} className="tag info" style={{ padding: "2px 6px", fontSize: "0.75rem" }}>
-                        Tension: {t.title}
+                        {t("tensionTag", { title: t.title })}
                       </span>
                     ))}
                     {proposal.actions?.map((a: any) => (
                       <span key={a.id} className="tag info" style={{ padding: "2px 6px", fontSize: "0.75rem" }}>
-                        Action: {a.title}
+                        {t("actionTag", { title: a.title })}
                       </span>
                     ))}
                   </div>
@@ -167,7 +169,7 @@ export default async function MeetingDetailPage({
         <section className="ws-section" style={{ marginBottom: 48 }}>
           <details>
             <summary style={{ cursor: "pointer", fontWeight: 600, color: "var(--accent)" }}>
-              <span className="nr-section-header" style={{ borderTop: "none", display: "inline-block", padding: 0, margin: 0 }}>View Full Transcript</span>
+              <span className="nr-section-header" style={{ borderTop: "none", display: "inline-block", padding: 0, margin: 0 }}>{t("btnViewTranscript")}</span>
             </summary>
             <div style={{ marginTop: "24px", whiteSpace: "pre-wrap", fontSize: "0.9rem", color: "var(--text)" }}>
               {meeting.transcript}

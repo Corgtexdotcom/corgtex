@@ -3,6 +3,7 @@ import { requirePageActor } from "@/lib/auth";
 import { DeliberationThread } from "@/lib/components/DeliberationThread";
 import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
 import { postTensionDeliberationAction, resolveTensionDeliberationAction } from "../actions";
+import { getTranslations } from "next-intl/server";
 
 export const dynamic = "force-dynamic";
 
@@ -13,6 +14,7 @@ export default async function TensionDetailPage({
 }) {
   const { workspaceId, tensionId } = await params;
   const actor = await requirePageActor();
+  const t = await getTranslations("tensions");
   const tension = await getTension(actor, { workspaceId, tensionId });
   const entries = await listDeliberationEntries(actor, { workspaceId, parentType: "TENSION", parentId: tensionId });
   const mappedEntries = entries.map((e: any) => ({
@@ -28,7 +30,7 @@ export default async function TensionDetailPage({
       <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 32 }}>
         <div style={{ marginBottom: 16 }}>
           <a href={`/workspaces/${workspaceId}/tensions`} style={{ textDecoration: "none", color: "var(--muted)" }}>
-            ← Back to Tensions
+            {t("backToTensions")}
           </a>
         </div>
         <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2.5rem" }}>
@@ -64,10 +66,10 @@ export default async function TensionDetailPage({
             postAction={postTensionDeliberationAction}
             hiddenFields={{ workspaceId, parentId: tensionId }}
             entryTypes={[
-              { value: "SUPPORT", label: "Support", variant: "success" },
-              { value: "QUESTION", label: "Question", variant: "info" },
-              { value: "CONCERN", label: "Concern", variant: "warning" },
-              { value: "REACTION", label: "Reaction", variant: "secondary" }
+              { value: "SUPPORT", label: t("entrySupport"), variant: "success" },
+              { value: "QUESTION", label: t("entryQuestion"), variant: "info" },
+              { value: "CONCERN", label: t("entryConcern"), variant: "warning" },
+              { value: "REACTION", label: t("entryReaction"), variant: "secondary" }
             ]}
           />
         </div>

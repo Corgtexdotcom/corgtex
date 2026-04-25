@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useTranslations } from "next-intl";
 import { type MeetingInsight } from "@prisma/client";
 import { 
   extractInsightsAction, 

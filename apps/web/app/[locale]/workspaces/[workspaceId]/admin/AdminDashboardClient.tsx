@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { adminResetPasswordAction, adminAddToWorkspaceAction, adminRemoveFromWorkspaceAction } from "./actions";
+import { useTranslations } from "next-intl";
 
 type WorkspaceItem = { id: string; slug: string; name: string; createdAt: Date; memberCount: number };
 type UserItem = {
@@ -18,6 +19,7 @@ export function AdminDashboardClient({
   workspaces: WorkspaceItem[];
   users: UserItem[];
 }) {
+  const t = useTranslations("admin");
   const [tab, setTab] = useState<"users" | "workspaces">("users");
   const [userQuery, setUserQuery] = useState("");
   const [selectedUser, setSelectedUser] = useState<UserItem | null>(null);
@@ -30,8 +32,8 @@ export function AdminDashboardClient({
   return (
     <div className="stack">
       <div className="nr-tabs" style={{ marginBottom: 16 }}>
-        <button className={tab === "users" ? "active" : ""} onClick={() => { setTab("users"); setSelectedUser(null); }}>Users</button>
-        <button className={tab === "workspaces" ? "active" : ""} onClick={() => setTab("workspaces")}>Workspaces</button>
+        <button className={tab === "users" ? "active" : ""} onClick={() => { setTab("users"); setSelectedUser(null); }}>{t("usersTab")}</button>
+        <button className={tab === "workspaces" ? "active" : ""} onClick={() => setTab("workspaces")}>{t("workspacesTab")}</button>
       </div>
 
       {tab === "workspaces" && (
@@ -39,10 +41,10 @@ export function AdminDashboardClient({
           <table className="nr-table">
             <thead>
               <tr>
-                <th>Workspace</th>
-                <th>Slug</th>
-                <th>Created</th>
-                <th>Members</th>
+                <th>{t("colWorkspace")}</th>
+                <th>{t("colSlug")}</th>
+                <th>{t("colCreated")}</th>
+                <th>{t("colMembers")}</th>
               </tr>
             </thead>
             <tbody>
@@ -63,7 +65,7 @@ export function AdminDashboardClient({
         <section className="panel stack">
           <input 
             type="search" 
-            placeholder="Search users by email or name..." 
+            placeholder={t("placeholderSearchUsers")} 
             value={userQuery} 
             onChange={(e) => setUserQuery(e.target.value)}
             style={{ width: "100%", maxWidth: 400 }}
@@ -72,10 +74,10 @@ export function AdminDashboardClient({
           <table className="nr-table">
             <thead>
               <tr>
-                <th>User</th>
-                <th>Email</th>
-                <th>Memberships</th>
-                <th>Actions</th>
+                <th>{t("colUser")}</th>
+                <th>{t("colEmail")}</th>
+                <th>{t("titleMemberships")}</th>
+                <th>{t("colActions")}</th>
               </tr>
             </thead>
             <tbody>
@@ -83,9 +85,9 @@ export function AdminDashboardClient({
                 <tr key={u.id}>
                   <td><strong>{u.displayName || "—"}</strong></td>
                   <td>{u.email}</td>
-                  <td>{u.memberships.length} workspaces</td>
+                  <td>{t("workspaceCount", { count: u.memberships.length })}</td>
                   <td>
-                    <button className="small secondary" onClick={() => setSelectedUser(u)}>Manage</button>
+                    <button className="small secondary" onClick={() => setSelectedUser(u)}>{t("btnManage")}</button>
                   </td>
                 </tr>
               ))}
@@ -97,29 +99,29 @@ export function AdminDashboardClient({
       {tab === "users" && selectedUser && (
         <section className="panel stack">
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <h2 className="title-md">Managing {selectedUser.email}</h2>
-            <button className="small" onClick={() => setSelectedUser(null)}>← Back to List</button>
+            <h2 className="title-md">{t("managingUser", { email: selectedUser.email })}</h2>
+            <button className="small" onClick={() => setSelectedUser(null)}>{t("btnBackToList")}</button>
           </div>
           
           <div style={{ display: "flex", gap: 16, marginTop: 16 }}>
             <form action={adminResetPasswordAction}>
               <input type="hidden" name="workspaceId" value={workspaceId} />
               <input type="hidden" name="email" value={selectedUser.email} />
-              <button type="submit" className="secondary danger">Trigger Password Reset Email</button>
+              <button type="submit" className="secondary danger">{t("btnTriggerPasswordReset")}</button>
             </form>
           </div>
 
-          <h3 className="title-sm" style={{ marginTop: 24, borderBottom: "1px solid var(--line)", paddingBottom: 8 }}>Memberships</h3>
+          <h3 className="title-sm" style={{ marginTop: 24, borderBottom: "1px solid var(--line)", paddingBottom: 8 }}>{t("titleMemberships")}</h3>
           {selectedUser.memberships.length === 0 ? (
-            <p className="muted">Has no active memberships.</p>
+            <p className="muted">{t("noMemberships")}</p>
           ) : (
             <table className="nr-table" style={{ marginTop: 16 }}>
               <thead>
                 <tr>
-                  <th>Workspace</th>
-                  <th>Role</th>
-                  <th>Status</th>
-                  <th>Actions</th>
+                  <th>{t("colWorkspace")}</th>
+                  <th>{t("colRole")}</th>
+                  <th>{t("colStatus")}</th>
+                  <th>{t("colActions")}</th>
                 </tr>
               </thead>
               <tbody>
@@ -127,12 +129,12 @@ export function AdminDashboardClient({
                   <tr key={m.id}>
                     <td>{m.workspace.name} <code>({m.workspace.slug})</code></td>
                     <td>{m.role}</td>
-                    <td>{m.isActive ? "Active" : "Inactive"}</td>
+                    <td>{m.isActive ? t("statusActive") : t("statusInactive")}</td>
                     <td>
                       <form action={adminRemoveFromWorkspaceAction}>
                         <input type="hidden" name="workspaceId" value={workspaceId} />
                         <input type="hidden" name="memberId" value={m.id} />
-                        <button type="submit" className="small danger" style={{ padding: "4px 8px" }}>Remove</button>
+                        <button type="submit" className="small danger" style={{ padding: "4px 8px" }}>{t("btnRemove")}</button>
                       </form>
                     </td>
                   </tr>
@@ -143,7 +145,7 @@ export function AdminDashboardClient({
 
           <details style={{ background: "var(--bg)", border: "1px dashed var(--line)", borderRadius: 8, marginTop: 24 }}>
             <summary className="nr-section-header" style={{ borderTop: "none", display: "block", padding: "16px", margin: 0, cursor: "pointer", color: "var(--accent)" }}>
-              <span style={{ fontWeight: 600 }}>+ Add to Workspace</span>
+              <span style={{ fontWeight: 600 }}>{t("btnAddWorkspace")}</span>
             </summary>
             <div style={{ padding: "0 16px 16px" }}>
               <form action={adminAddToWorkspaceAction} className="stack nr-form-section" style={{ marginTop: 8 }}>
@@ -151,23 +153,23 @@ export function AdminDashboardClient({
                 <input type="hidden" name="userId" value={selectedUser.id} />
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
                   <label>
-                    Target Workspace
+                    {t("labelTargetWorkspace")}
                     <select name="targetWorkspaceId" required>
-                      <option value="">Select workspace...</option>
+                      <option value="">{t("selectWorkspace")}</option>
                       {workspaces.map(w => (
                         <option key={w.id} value={w.id}>{w.name} ({w.slug})</option>
                       ))}
                     </select>
                   </label>
                   <label>
-                    Role
+                    {t("colRole")}
                     <select name="role" defaultValue="CONTRIBUTOR">
-                      <option value="CONTRIBUTOR">Contributor</option>
-                      <option value="ADMIN">Admin</option>
+                      <option value="CONTRIBUTOR">{t("roleContributor")}</option>
+                      <option value="ADMIN">{t("roleAdmin")}</option>
                     </select>
                   </label>
                 </div>
-                <button type="submit" style={{ alignSelf: "flex-start" }}>Add to workspace</button>
+                <button type="submit" style={{ alignSelf: "flex-start" }}>{t("addToWorkspaceBtn")}</button>
               </form>
             </div>
           </details>
