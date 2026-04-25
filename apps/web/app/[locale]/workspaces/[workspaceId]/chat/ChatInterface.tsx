@@ -159,7 +159,7 @@ export function ChatInterface({
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ agentKey: "assistant" }),
         });
-        if (!res.ok) throw new Error("Failed to create session");
+        if (!res.ok) throw new Error(t("errorFailedToCreate"));
         const data = await res.json();
         currentSessionId = data.session.id as string;
         const newSession: ConversationSummary = {
@@ -195,7 +195,10 @@ export function ChatInterface({
           body: formData,
         });
         if (uploadRes.ok) {
-          userMessage = `[Attached file: ${attachedFile.name}]\n*(File uploaded and queued for Brain absorption)*\n\n${userMessage}`;
+          userMessage = t("attachedFileMessage", {
+            fileName: attachedFile.name,
+            message: userMessage,
+          });
         }
       } catch {
         // Continue sending the message even if the attachment upload fails.
@@ -228,7 +231,7 @@ export function ChatInterface({
         throw new Error(errData.error || t("errorFailedToSend"));
       }
       if (!res.body) {
-        throw new Error("Response stream is unavailable.");
+        throw new Error(t("errorStreamUnavailable"));
       }
 
       const reader = res.body.getReader();
@@ -332,7 +335,7 @@ export function ChatInterface({
             }}
             type="button"
           >
-            ← Back
+            {t("btnBack")}
           </button>
         </div>
       )}
@@ -341,8 +344,15 @@ export function ChatInterface({
         {(!isFullScreen && (!compact || (!sessionId && !showNewChat))) && (
           <div className="chat-sidebar" style={compact ? { width: "100%", borderRight: "none" } : undefined}>
             <div className="chat-sidebar-header">
-              <h2>Conversations</h2>
-              <button className="chat-new-btn" type="button" onClick={openNewConversation}>+</button>
+              <h2>{t("conversationsTitle")}</h2>
+              <button
+                aria-label={t("newConversation")}
+                className="chat-new-btn"
+                type="button"
+                onClick={openNewConversation}
+              >
+                {t("btnAttach")}
+              </button>
             </div>
             <div className="chat-session-list">
               {conversations.map((conversation) => (
@@ -352,9 +362,9 @@ export function ChatInterface({
                   onClick={() => openConversation(conversation.id)}
                   className={`chat-session-item ${conversation.id === sessionId ? "active" : ""}`}
                 >
-                  <div className="chat-session-topic">{conversation.topic || "New Conversation"}</div>
+                  <div className="chat-session-topic">{conversation.topic || t("newConversation")}</div>
                   <div className="chat-session-meta">
-                    <div className="chat-session-preview">{conversation.lastMessage || "..."}</div>
+                    <div className="chat-session-preview">{conversation.lastMessage || t("emptyPreview")}</div>
                     <div className="chat-session-time">
                       {new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" }).format(new Date(conversation.updatedAt))}
                     </div>
@@ -363,7 +373,7 @@ export function ChatInterface({
               ))}
               {conversations.length === 0 && (
                 <div style={{ padding: "32px 16px", textAlign: "center", color: "var(--muted)", fontSize: "0.85rem" }}>
-                  No conversations yet
+                  {t("noConversations")}
                 </div>
               )}
             </div>
@@ -379,9 +389,10 @@ export function ChatInterface({
                   <button
                     onClick={() => { setSessionId(null); setShowNewChat(false); setEditingTopic(false); }}
                     style={{ background: "none", border: "none", cursor: "pointer", color: "var(--muted)", padding: "0 4px" }}
-                    title="Back to conversations"
+                    title={t("titleBackToConversations")}
+                    type="button"
                   >
-                    ←
+                    {t("btnBackToConversations")}
                   </button>
                 )}
                 {editingTopic ? (
@@ -400,7 +411,7 @@ export function ChatInterface({
                 ) : (
                   <div
                     style={{ fontWeight: 600, fontSize: "0.95rem", cursor: sessionId ? "pointer" : "default" }}
-                    title={sessionId ? "Click to rename" : undefined}
+                    title={sessionId ? t("titleClickToRename") : undefined}
                     onClick={() => {
                       if (!sessionId) return;
                       const currentTopic = conversations.find((c) => c.id === sessionId)?.topic || "";
@@ -408,17 +419,17 @@ export function ChatInterface({
                       setEditingTopic(true);
                     }}
                   >
-                    {conversations.find((conversation) => conversation.id === sessionId)?.topic || "New Conversation"}
+                    {conversations.find((conversation) => conversation.id === sessionId)?.topic || t("newConversation")}
                   </div>
                 )}
               </div>
               <button
                 className="chat-fullscreen-toggle"
                 onClick={() => setIsFullScreen(true)}
-                title="Expand chat"
+                title={t("titleExpandChat")}
                 type="button"
               >
-                ⛶
+                {t("btnExpandChat")}
               </button>
             </div>
           )}
@@ -426,9 +437,9 @@ export function ChatInterface({
           <div className="chat-messages">
             {turns.length === 0 ? (
               <div className="chat-empty">
-                <h2>Start a conversation</h2>
+                <h2>{t("emptyStateTitle")}</h2>
                 <div className="chat-empty-desc">
-                  Ask about your workspace, draft proposals, or explore knowledge.
+                  {t("emptyStateDesc")}
                 </div>
 
                 <div className="chat-starters">
@@ -458,7 +469,7 @@ export function ChatInterface({
                   </div>
                   {turn.assistantMessage ? (
                     <div className="chat-message assistant">
-                      <div className="chat-message-author">Corgtex</div>
+                      <div className="chat-message-author">{t("authorCorgtex")}</div>
                       <div
                         className="markdown-body"
                         dangerouslySetInnerHTML={{ __html: renderAssistantMarkdown(turn.assistantMessage) }}
@@ -466,7 +477,7 @@ export function ChatInterface({
                     </div>
                   ) : (
                     <div className="chat-message assistant">
-                      <div className="chat-message-author">Corgtex</div>
+                      <div className="chat-message-author">{t("authorCorgtex")}</div>
                       <div className="chat-typing">{t("thinking")}</div>
                     </div>
                   )}
@@ -485,7 +496,14 @@ export function ChatInterface({
           {attachedFile && (
             <div className="chat-attachment-bar">
               <span className="chat-attachment-name">{attachedFile.name}</span>
-              <button onClick={removeAttachment} className="chat-attachment-remove" type="button">✕</button>
+              <button
+                aria-label={t("titleRemoveAttachment")}
+                onClick={removeAttachment}
+                className="chat-attachment-remove"
+                type="button"
+              >
+                {t("btnRemoveAttachment")}
+              </button>
             </div>
           )}
 
@@ -503,11 +521,11 @@ export function ChatInterface({
             <button
               onClick={() => fileInputRef.current?.click()}
               className="chat-upload-btn"
-              title="Attach a file"
+              title={t("titleAttachFile")}
               type="button"
               disabled={loading}
             >
-              +
+              {t("btnAttach")}
             </button>
             <textarea
               ref={inputRef}
@@ -525,7 +543,7 @@ export function ChatInterface({
               className="chat-send-btn"
               type="button"
             >
-              Send
+              {t("btnSend")}
             </button>
           </div>
         </div>
