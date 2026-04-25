@@ -17,16 +17,19 @@ Elevate Agent Governance by replacing rigid hardcoded toggles with versioned, pl
 - `apps/web/app/[locale]/workspaces/[workspaceId]/agents/actions.ts`
 - `packages/domain/src/agent-config.ts`
 - `packages/domain/src/agent-runs.ts`
+- `packages/domain/src/agent-config.test.ts`
+- `packages/domain/src/agent-runs.test.ts`
 - `docs/assets/visual_proof_agent_inbox.png`
+- `docs/plans/feat-agent-inbox-policy.md`
 
 ## Acceptance criteria
-- [ ] `WorkspaceAgentConfig` has a `governancePolicy` string field in Prisma.
-- [ ] `AgentRunStep` has a `humanFeedback` string field in Prisma.
-- [ ] Agent Governance page has a high-level summary dashboard above the tabs.
-- [ ] New "Inbox" tab displays agent runs in `WAITING_APPROVAL` / `NEEDS_INPUT`.
-- [ ] Inbox items show the agent's context and allow humans to submit free-text feedback.
-- [ ] Registry tab allows editing and saving plain-text governance policies per agent.
-- [ ] Tests and linters pass (`npm run check`).
+- [x] `WorkspaceAgentConfig` has a `governancePolicy` string field in Prisma.
+- [x] `AgentRunStep` has a `humanFeedback` string field in Prisma.
+- [x] Agent Governance page has a high-level summary dashboard above the tabs.
+- [x] New "Inbox" tab displays agent runs in `WAITING_APPROVAL` / `NEEDS_INPUT`.
+- [x] Inbox items show the agent's context and allow humans to submit free-text feedback.
+- [x] Registry tab allows editing and saving plain-text governance policies per agent.
+- [x] Tests and linters pass (`npm run check`).
 
 ## Test plan
 ```
