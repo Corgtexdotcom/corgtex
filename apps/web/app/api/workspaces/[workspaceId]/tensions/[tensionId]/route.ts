@@ -1,24 +1,33 @@
 import { NextRequest, NextResponse } from "next/server";
+import { z } from "zod";
 import { updateTension, deleteTension } from "@corgtex/domain";
 import { resolveRequestActor } from "@/lib/auth";
-import { handleRouteError } from "@/lib/http";
+import { handleRouteError, validateBody } from "@/lib/http";
 
 type Params = { params: Promise<{ workspaceId: string; tensionId: string }> };
+const updateTensionSchema = z.object({
+  title: z.string().trim().min(1).optional(),
+  bodyMd: z.string().optional().nullable(),
+  status: z.enum(["OPEN", "IN_PROGRESS", "COMPLETED", "CANCELLED"]).optional(),
+  circleId: z.string().optional().nullable(),
+  assigneeMemberId: z.string().optional().nullable(),
+  priority: z.number().int().optional(),
+});
 
 export async function PATCH(request: NextRequest, { params }: Params) {
   try {
     const actor = await resolveRequestActor(request);
     const { workspaceId, tensionId } = await params;
-    const body = await request.json();
+    const body = await validateBody(request, updateTensionSchema);
     const tension = await updateTension(actor, {
       workspaceId,
       tensionId,
-      title: typeof body.title === "string" ? body.title : undefined,
+      title: body.title,
       bodyMd: body.bodyMd !== undefined ? (typeof body.bodyMd === "string" ? body.bodyMd : null) : undefined,
-      status: body.status ?? undefined,
+      status: body.status,
       circleId: body.circleId !== undefined ? body.circleId : undefined,
       assigneeMemberId: body.assigneeMemberId !== undefined ? body.assigneeMemberId : undefined,
-      priority: typeof body.priority === "number" ? body.priority : undefined,
+      priority: body.priority,
     });
     return NextResponse.json({ tension });
   } catch (error) {

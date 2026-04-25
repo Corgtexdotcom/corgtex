@@ -1,7 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
+import { z } from "zod";
 import { createLedgerAccount, listLedgerAccounts, requireWorkspaceMembership } from "@corgtex/domain";
 import { resolveRequestActor } from "@/lib/auth";
-import { handleRouteError } from "@/lib/http";
+import { handleRouteError, validateBody } from "@/lib/http";
+
+const ledgerAccountSchema = z.object({
+  name: z.string().trim().min(1),
+  currency: z.string().trim().min(1),
+  type: z.string().trim().min(1).optional().nullable(),
+  balanceCents: z.coerce.number().int().optional(),
+});
 
 export async function GET(request: NextRequest, { params }: { params: Promise<{ workspaceId: string }> }) {
   try {
@@ -19,18 +27,13 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   try {
     const actor = await resolveRequestActor(request);
     const { workspaceId } = await params;
-    const body = (await request.json()) as {
-      name?: unknown;
-      currency?: unknown;
-      type?: unknown;
-      balanceCents?: unknown;
-    };
+    const body = await validateBody(request, ledgerAccountSchema);
     const ledgerAccount = await createLedgerAccount(actor, {
       workspaceId,
-      name: String(body.name ?? ""),
-      currency: String(body.currency ?? ""),
-      type: typeof body.type === "string" ? body.type : null,
-      balanceCents: body.balanceCents !== undefined ? Number.parseInt(String(body.balanceCents), 10) : 0,
+      name: body.name,
+      currency: body.currency,
+      type: body.type ?? null,
+      balanceCents: body.balanceCents ?? 0,
     });
     return NextResponse.json({ ledgerAccount }, { status: 201 });
   } catch (error) {
