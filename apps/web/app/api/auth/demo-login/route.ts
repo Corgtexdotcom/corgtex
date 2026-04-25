@@ -5,7 +5,7 @@ import { demoWorkspacePath, issueDemoSession, setDemoSessionCookie } from "@/lib
 
 export async function POST(request: NextRequest) {
   // We rate limit this similarly to regular auth
-  const rateLimited = rateLimitAuth(request);
+  const rateLimited = await rateLimitAuth(request);
   if (rateLimited) return rateLimited;
 
   try {

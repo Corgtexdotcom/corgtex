@@ -1,5 +1,5 @@
 import type { AppActor } from "@corgtex/shared";
-import { prisma } from "@corgtex/shared";
+import { checkRateLimit, prisma, RATE_LIMITS } from "@corgtex/shared";
 import { withAgentRunModelUsageSummary } from "./agent-run-usage";
 import { requireWorkspaceMembership } from "./auth";
 import { invariant } from "./errors";
@@ -104,6 +104,9 @@ export async function triggerAgentRun(actor: AppActor, params: {
     workspaceId: params.workspaceId,
     allowedRoles: ["ADMIN", "FACILITATOR"],
   });
+
+  const rateLimit = await checkRateLimit(`ws:${params.workspaceId}:agent-runs`, RATE_LIMITS.AGENT_PER_WORKSPACE);
+  invariant(rateLimit.allowed, 429, "RATE_LIMITED", "Agent run rate limit exceeded.");
 
   if (params.agentKey === "proposal-drafting") {
     invariant(Boolean(params.prompt?.trim()), 400, "INVALID_INPUT", "Proposal drafting requires a prompt.");
