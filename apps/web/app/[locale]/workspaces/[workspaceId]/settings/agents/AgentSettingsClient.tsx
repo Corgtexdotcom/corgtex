@@ -3,9 +3,11 @@
 import { useTransition } from"react";
 import { toggleAgentAction, updateAgentModelAction } from"./actions";
 import type { AgentConfigSummary } from"@corgtex/domain";
+import { useTranslations } from "next-intl";
 
 export function AgentSettingsClient({ workspaceId, agents }: { workspaceId: string, agents: AgentConfigSummary[] }) {
  const [isPending, startTransition] = useTransition();
+ const t = useTranslations("settings");
 
  const handleToggle = (agentKey: string, currentEnabled: boolean) => {
  startTransition(() => {
@@ -22,8 +24,8 @@ export function AgentSettingsClient({ workspaceId, agents }: { workspaceId: stri
  return (
  <div className="space-y-6">
  <div>
- <h2 className="text-2xl font-semibold mb-2">Agent Settings</h2>
- <p className="text-muted mb-6">Manage AI agents, set model overrides, and monitor cost implications for your workspace.</p>
+ <h2 className="text-2xl font-semibold mb-2">{t("titleAgentSettings")}</h2>
+ <p className="text-muted mb-6">{t("descAgentSettings")}</p>
  </div>
 
  <div className="bg-surface-strong border border-line rounded-xl overflow-hidden shadow-sm">
@@ -43,9 +45,9 @@ export function AgentSettingsClient({ workspaceId, agents }: { workspaceId: stri
  agent.costTier ==="free" ?"bg-green-100 text-green-700" :
  agent.costTier ==="low" ?"bg-blue-100 text-blue-700" :
  agent.costTier ==="medium" ?"bg-yellow-100 text-yellow-700" :
-"bg-red-100 text-red-700"
+ "bg-red-100 text-red-700"
  }`}>
- {agent.costTier} cost
+ {t("lblCost", { tier: agent.costTier })}
  </span>
  </div>
  
@@ -55,10 +57,10 @@ export function AgentSettingsClient({ workspaceId, agents }: { workspaceId: stri
  
  <div className="text-xs font-mono text-muted flex flex-wrap gap-x-4 gap-y-1 mt-3">
  <div className="flex items-center gap-1.5">
- <span className="text-muted">IN:</span> {agent.inputs.join(",")}
+ <span className="text-muted">{t("lblIn")}</span> {agent.inputs.join(",")}
  </div>
  <div className="flex items-center gap-1.5">
- <span className="text-muted">OUT:</span> {agent.outputs.join(",")}
+ <span className="text-muted">{t("lblOut")}</span> {agent.outputs.join(",")}
  </div>
  </div>
  </div>
@@ -67,7 +69,7 @@ export function AgentSettingsClient({ workspaceId, agents }: { workspaceId: stri
  <div className="flex flex-row lg:flex-col items-center lg:items-end justify-between gap-4 shrink-0">
  <div className="flex items-center gap-3">
  <label className="text-sm font-medium text-text">
- Status
+ {t("lblStatus")}
  </label>
  <button
  type="button"
@@ -85,7 +87,7 @@ export function AgentSettingsClient({ workspaceId, agents }: { workspaceId: stri
 
  <div className="flex items-center gap-3">
  <label className="text-sm font-medium text-text">
- Model
+ {t("lblModel")}
  </label>
  <select
  disabled={agent.defaultModelTier ==="none" || isPending}
@@ -93,10 +95,10 @@ export function AgentSettingsClient({ workspaceId, agents }: { workspaceId: stri
  onChange={(e) => handleModelChange(agent.agentKey, e.target.value)}
  className="text-sm border border-line rounded-md bg-surface-strong text-text py-1.5 px-3 disabled:opacity-50"
  >
- <option value="default">Default ({agent.defaultModelTier})</option>
- <option value="google/gemma-4-12b-it">Fast (Gemma 12B)</option>
- <option value="google/gemma-4-31b-it">Standard (Gemma 31B)</option>
- <option value="google/gemini-2.5-flash">Quality (Gemini 2.5 Flash)</option>
+ <option value="default">{t("lblDefault")} ({agent.defaultModelTier})</option>
+ <option value="google/gemma-4-12b-it">{t("optFast")} (Gemma 12B)</option>
+ <option value="google/gemma-4-31b-it">{t("optStandard")} (Gemma 31B)</option>
+ <option value="google/gemini-2.5-flash">{t("optQuality")} (Gemini 2.5 Flash)</option>
  </select>
  </div>
  </div>

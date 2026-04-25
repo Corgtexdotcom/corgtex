@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+import { useTranslations } from "next-intl";
 
 const SOURCE_TYPES = ["MEETING","TICKET","PR","RFC","INCIDENT","SLACK","CUSTOMER_FEEDBACK","COMPETITOR","RESEARCH","ARTICLE","DOC","RUNBOOK","EMAIL","FILE_UPLOAD"];
 
@@ -13,6 +14,7 @@ export function TextPasteUploader({ workspaceId }: { workspaceId: string }) {
   const [channel, setChannel] = useState("");
   const [content, setContent] = useState("");
   const [error, setError] = useState("");
+  const t = useTranslations("settings");
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -46,37 +48,37 @@ export function TextPasteUploader({ workspaceId }: { workspaceId: string }) {
 
   return (
     <form className="nr-form-section stack" style={{ marginBottom: 32, padding: 24, border: "1px solid var(--line)", borderRadius: 8 }} onSubmit={handleSubmit}>
-      <h3>Paste Text Content</h3>
-      <p className="nr-item-meta" style={{ marginBottom: 16 }}>Paste raw transcripts, notes, or ad-hoc content directly.</p>
+      <h3>{t("titlePasteText")}</h3>
+      <p className="nr-item-meta" style={{ marginBottom: 16 }}>{t("descPasteText")}</p>
       
       {error && <div style={{ color: "var(--danger)", padding: "8px", background: "var(--danger-soft)" }}>{error}</div>}
       
       <label>
-        Title (optional)
-        <input value={title} onChange={e => setTitle(e.target.value)} placeholder="e.g. Q3 Roadmap Planning Meeting" />
+        {t("labelTitleOptional")}
+        <input value={title} onChange={e => setTitle(e.target.value)} placeholder={t("placeholderTitle")} />
       </label>
       
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
         <label>
-          Source Type
+          {t("labelSourceType")}
           <select value={sourceType} onChange={e => setSourceType(e.target.value)}>
             {SOURCE_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
           </select>
         </label>
         <label>
-          Channel/Tag (optional)
-          <input value={channel} onChange={e => setChannel(e.target.value)} placeholder="#engineering, repo name..." />
+          {t("labelChannel")}
+          <input value={channel} onChange={e => setChannel(e.target.value)} placeholder={t("placeholderChannel")} />
         </label>
       </div>
       
       <label>
-        Content
-        <textarea required value={content} onChange={e => setContent(e.target.value)} rows={6} placeholder="Paste your text here..." />
+        {t("labelContent")}
+        <textarea required value={content} onChange={e => setContent(e.target.value)} rows={6} placeholder={t("placeholderContent")} />
       </label>
       
       <div style={{ marginTop: 8 }}>
         <button type="submit" disabled={isSubmitting || !content.trim()}>
-          {isSubmitting ? "Ingesting..." : "Ingest Text"}
+          {isSubmitting ? t("btnIngesting") : t("btnIngestText")}
         </button>
       </div>
     </form>
