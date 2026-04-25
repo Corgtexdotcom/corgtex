@@ -180,6 +180,41 @@ export async function resolveAgentRun(actor: AppActor, params: {
   });
 }
 
+export async function submitAgentFeedback(actor: AppActor, params: {
+  workspaceId: string;
+  agentRunId: string;
+  stepId: string;
+  feedback: string;
+}) {
+  await requireWorkspaceMembership({
+    actor,
+    workspaceId: params.workspaceId,
+    allowedRoles: ["ADMIN", "FACILITATOR"],
+  });
+
+  return prisma.$transaction(async (tx) => {
+    // Save feedback to the step
+    const step = await tx.agentStep.update({
+      where: { id: params.stepId },
+      data: {
+        humanFeedback: params.feedback,
+        status: "COMPLETED",
+        completedAt: new Date(),
+      },
+    });
+
+    // Resume the run
+    await tx.agentRun.update({
+      where: { id: params.agentRunId, workspaceId: params.workspaceId },
+      data: {
+        status: "PENDING", // Ready for worker to pick up again
+      },
+    });
+
+    return step;
+  });
+}
+
 export async function getFailingAgents(workspaceId: string): Promise<string[]> {
   const recentRuns = await prisma.agentRun.findMany({
     where: { workspaceId },

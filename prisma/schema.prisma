@@ -9,6 +9,11 @@ datasource db {
   extensions = [vector]
 }
 
+enum GlobalRole {
+  USER
+  OPERATOR
+}
+
 enum MemberRole {
   CONTRIBUTOR
   FACILITATOR
@@ -291,6 +296,7 @@ model User {
   email             String                @unique
   displayName       String?
   passwordHash      String
+  globalRole        GlobalRole            @default(USER)
   createdAt         DateTime              @default(now())
   updatedAt         DateTime              @updatedAt
   sessions          Session[]
@@ -1069,6 +1075,7 @@ model AgentStep {
   startedAt   DateTime?
   completedAt DateTime?
   error       String?
+  humanFeedback String?         @db.Text
   createdAt   DateTime            @default(now())
 
   agentRun AgentRun @relation(fields: [agentRunId], references: [id], onDelete: Cascade)
@@ -1592,6 +1599,7 @@ model WorkspaceAgentConfig {
   agentKey      String
   enabled       Boolean  @default(true)
   modelOverride String?
+  governancePolicy String? @db.Text
   configJson    Json     @default("{}")
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
