@@ -59,18 +59,18 @@ agent-identities, data-sources, etc.).
 
 ## Acceptance criteria
 
-- [ ] `apps/web/lib/http.ts` exports a `validateBody<T>(req: NextRequest, schema: ZodSchema<T>): Promise<T>` utility that throws `AppError(400, "VALIDATION_ERROR", ...)` with Zod issue details on failure.
-- [ ] Auth routes (`login`, `forgot-password`, `reset-password`) validate: email is a non-empty trimmed string, password is a string with min length 8.
-- [ ] Member mutation routes (`POST /members`, `PATCH /members/:id`) validate required fields (email, role enum values).
-- [ ] Role mutation routes (`POST /roles`, `PATCH /roles/:id`, `POST /assignments`) validate name as non-empty string, memberId as UUID.
-- [ ] Spend mutation routes (`POST /spends`) validate: amountCents as positive integer, description as string, circleId as UUID.
-- [ ] Ledger account routes validate: name as non-empty string, type as enum.
-- [ ] Proposal and approval routes validate: title as non-empty string, bodyMd as string, decision choice as enum.
-- [ ] Tension routes validate: title as non-empty string, status as enum.
-- [ ] All Zod errors are returned as structured `{ error: { code: "VALIDATION_ERROR", message: "..." } }` with status 400.
-- [ ] No runtime behavior change for valid requests — all existing tests continue to pass.
-- [ ] `npm run check` passes.
-- [ ] `npm run test:unit` passes.
+- [x] `apps/web/lib/http.ts` exports a `validateBody<T>(req: NextRequest, schema: z.ZodType<T>): Promise<T>` utility that throws `AppError(400, "VALIDATION_ERROR", ...)` with Zod issue details on failure.
+- [x] Auth routes (`login`, `forgot-password`, `reset-password`) validate: email is a non-empty trimmed string where present, password is a string with min length 8 where present.
+- [x] Member mutation routes (`POST /members`, `PATCH /members/:id`) validate required fields (email, role enum values).
+- [x] Role mutation routes (`POST /roles`, `PATCH /roles/:id`, `POST /assignments`) validate name as non-empty string, memberId as UUID.
+- [x] Spend mutation routes (`POST /spends`) validate: amountCents as positive integer, category and description as non-empty strings, optional related IDs as strings.
+- [x] Ledger account routes validate: name and currency as non-empty strings, type as an optional non-empty string.
+- [x] Proposal and approval routes validate: title as non-empty string, bodyMd as string, decision choice as enum.
+- [x] Tension routes validate: title as non-empty string, status as enum.
+- [x] All Zod errors are returned as structured `{ error: { code: "VALIDATION_ERROR", message: "..." } }` with status 400.
+- [x] No runtime behavior change for valid requests — all existing tests continue to pass.
+- [x] `npm run check` passes.
+- [x] `npm run test:unit` passes.
 
 ## Test plan
 

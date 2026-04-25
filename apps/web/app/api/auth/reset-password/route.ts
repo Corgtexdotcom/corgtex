@@ -1,14 +1,20 @@
 import { NextRequest, NextResponse } from "next/server";
+import { z } from "zod";
 import { consumePasswordReset } from "@corgtex/domain";
-import { handleRouteError } from "@/lib/http";
+import { handleRouteError, validateBody } from "@/lib/http";
+
+const resetPasswordSchema = z.object({
+  token: z.string().min(1),
+  password: z.string().min(8),
+});
 
 export async function POST(request: NextRequest) {
   try {
-    const body = (await request.json()) as { token?: unknown; password?: unknown };
+    const body = await validateBody(request, resetPasswordSchema);
 
     const result = await consumePasswordReset({
-      token: String(body.token ?? ""),
-      newPassword: String(body.password ?? ""),
+      token: body.token,
+      newPassword: body.password,
     });
 
     return NextResponse.json(result);

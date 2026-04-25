@@ -1,8 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
+import { z } from "zod";
 import { listActorWorkspaces, loginUserWithPassword } from "@corgtex/domain";
 import { isDatabaseUnavailableError, sessionCookieName } from "@corgtex/shared";
-import { handleRouteError, serviceUnavailableResponse } from "@/lib/http";
+import { handleRouteError, serviceUnavailableResponse, validateBody } from "@/lib/http";
 import { rateLimitAuth } from "@/lib/rate-limit-middleware";
+
+const loginSchema = z.object({
+  email: z.string().trim().min(1),
+  password: z.string().min(8),
+});
 
 export async function POST(request: NextRequest) {
   // Rate limit auth attempts
@@ -10,10 +16,10 @@ export async function POST(request: NextRequest) {
   if (rateLimited) return rateLimited;
 
   try {
-    const body = (await request.json()) as { email?: unknown; password?: unknown };
+    const body = await validateBody(request, loginSchema);
     const result = await loginUserWithPassword({
-      email: String(body.email ?? ""),
-      password: String(body.password ?? ""),
+      email: body.email,
+      password: body.password,
     });
 
     const actor = {
