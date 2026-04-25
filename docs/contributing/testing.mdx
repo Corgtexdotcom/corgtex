@@ -37,7 +37,10 @@ The Reviewer (Codex) rejects a PR if:
 
 - Domain code under `packages/domain/**` changed without a
   corresponding test update.
-- The plan's "Test plan" section lists commands that CI did not run.
+- A frontend path changes without committed visual proof under
+  `docs/assets/<branch-slug>/`.
+- The plan's "Test plan" section lists commands that were neither run
+  locally nor covered by CI.
 
 Write tests for new domain logic. Write them alongside the code, not as
 a follow-up PR.
@@ -63,9 +66,10 @@ Summary:
 
 ## Frontend E2E via browser agent
 
-When a PR touches `apps/web/app/**` or `apps/web/components/**`, the
-Executor logs into the UI using seeded credentials and attaches a
-screen recording or screenshots to the PR. Credentials live in `.env`
-(`AGENT_E2E_EMAIL`, `AGENT_E2E_PASSWORD`) — never hardcoded, never in
-PR descriptions. See the secrets section of
+When a PR touches `apps/web/app/**`, `apps/web/components/**`, or
+`apps/web/lib/components/**`, the Executor logs into the UI using
+seeded credentials and commits a screen recording or screenshot under
+`docs/assets/<branch-slug>/`. Credentials live in `.env`
+(`AGENT_E2E_EMAIL`, `AGENT_E2E_PASSWORD`) — never hardcoded, never in PR
+descriptions. See the secrets section of
 [`AGENTS.md`](https://github.com/corgtex/corgtex/blob/main/AGENTS.md#secrets-and-credentials).
