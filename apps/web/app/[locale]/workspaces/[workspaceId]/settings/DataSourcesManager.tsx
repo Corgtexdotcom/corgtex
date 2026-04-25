@@ -101,8 +101,8 @@ export function DataSourcesManager({ workspaceId, dataSources, documents }: { wo
     alert("Sync triggered!");
   }
 
-  async function handleDelete(sourceId: string) {
-    if (confirm("Delete this data source and all its knowledge chunks?")) {
+  async function handleArchive(sourceId: string) {
+    if (confirm("Archive this data source? It will be hidden from active views but can be restored from Audit.")) {
       await fetch(`/api/workspaces/${workspaceId}/data-sources/${sourceId}`, { method: "DELETE" });
       router.refresh();
     }
@@ -191,7 +191,7 @@ export function DataSourcesManager({ workspaceId, dataSources, documents }: { wo
                 </div>
                 <div className="actions-inline">
                   <button onClick={() => handleSync(source.id)} className="secondary small">{t("btnSyncNow")}</button>
-                  <button onClick={() => handleDelete(source.id)} className="danger small">{t("btnDelete")}</button>
+                  <button onClick={() => handleArchive(source.id)} className="danger small">{t("btnDelete")}</button>
                 </div>
               </div>
               <div className="nr-item-meta" style={{ fontSize: "0.85rem", marginTop: 8 }}>

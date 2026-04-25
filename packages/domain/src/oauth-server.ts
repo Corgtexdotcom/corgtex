@@ -2,6 +2,7 @@ import { prisma, randomOpaqueToken, sha256 } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { AppError, invariant } from "./errors";
 import { requireWorkspaceMembership } from "./auth";
+import { archiveFilterWhere, type ArchiveFilter } from "./archive";
 
 const DEFAULT_GPT_OAUTH_SCOPES = ["chat", "read", "write"];
 const GPT_OAUTH_SCOPES = new Set(DEFAULT_GPT_OAUTH_SCOPES);
@@ -102,7 +103,7 @@ export async function createOAuthApp(actor: AppActor, params: {
   };
 }
 
-export async function listOAuthApps(actor: AppActor, workspaceId: string) {
+export async function listOAuthApps(actor: AppActor, workspaceId: string, opts?: { archiveFilter?: ArchiveFilter }) {
   await requireWorkspaceMembership({
     actor,
     workspaceId,
@@ -110,7 +111,11 @@ export async function listOAuthApps(actor: AppActor, workspaceId: string) {
   });
 
   return prisma.oAuthApp.findMany({
-    where: { workspaceId, isActive: true },
+    where: {
+      workspaceId,
+      ...(opts?.archiveFilter === "archived" || opts?.archiveFilter === "all" ? {} : { isActive: true }),
+      ...archiveFilterWhere(opts?.archiveFilter),
+    },
     orderBy: { createdAt: "desc" },
   });
 }
@@ -120,7 +125,7 @@ export async function getOAuthAppByClientId(clientId: string) {
     where: { clientId },
   });
 
-  if (!app || !app.isActive) {
+  if (!app || !app.isActive || app.archivedAt) {
     throw new AppError(404, "NOT_FOUND", "OAuth app not found or inactive.");
   }
 

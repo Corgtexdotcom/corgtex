@@ -1,6 +1,7 @@
-import { listAuditLogs, getModelUsageSummary, listAgentRuns, getAgentRunTrace, getStorageUsageSummary } from "@corgtex/domain";
+import { listAuditLogs, getModelUsageSummary, listAgentRuns, getAgentRunTrace, getStorageUsageSummary, listArchivedWorkspaceArtifacts } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { getTranslations } from "next-intl/server";
+import { purgeArchivedArtifactAction, restoreArchivedArtifactAction } from "./actions";
 
 export const dynamic = "force-dynamic";
 
@@ -36,7 +37,16 @@ export default async function AuditPage({
   searchParams,
 }: {
   params: Promise<{ workspaceId: string }>;
-  searchParams: Promise<{ entityType?: string; entityId?: string; agentRunId?: string; tab?: string }>;
+  searchParams: Promise<{
+    entityType?: string;
+    entityId?: string;
+    agentRunId?: string;
+    tab?: string;
+    archiveEntityType?: string;
+    archiveActor?: string;
+    archiveReason?: string;
+    archiveDateFrom?: string;
+  }>;
 }) {
   const { workspaceId } = await params;
   const search = await searchParams;
@@ -54,6 +64,26 @@ export default async function AuditPage({
   const storageSummary = await getStorageUsageSummary(actor, workspaceId);
 
   const agentRuns = await listAgentRuns(actor, workspaceId, { take: 10 });
+  const archivedArtifacts = await listArchivedWorkspaceArtifacts(actor, {
+    workspaceId,
+    entityType: search.archiveEntityType,
+    take: 100,
+  });
+  const archiveActorQuery = search.archiveActor?.trim().toLowerCase() ?? "";
+  const archiveReasonQuery = search.archiveReason?.trim().toLowerCase() ?? "";
+  const archiveDateFrom = search.archiveDateFrom ? new Date(search.archiveDateFrom) : null;
+  const filteredArchivedArtifacts = archivedArtifacts.filter((item) => {
+    if (archiveActorQuery && !(item.archivedByLabel ?? item.archivedByUserId ?? "").toLowerCase().includes(archiveActorQuery)) {
+      return false;
+    }
+    if (archiveReasonQuery && !(item.archiveReason ?? "").toLowerCase().includes(archiveReasonQuery)) {
+      return false;
+    }
+    if (archiveDateFrom && !Number.isNaN(archiveDateFrom.getTime()) && new Date(item.archivedAt) < archiveDateFrom) {
+      return false;
+    }
+    return true;
+  });
 
   // If a specific agent run is selected, get its trace
   const selectedRunTrace = search.agentRunId
@@ -75,31 +105,31 @@ export default async function AuditPage({
           href={`/workspaces/${workspaceId}/audit?tab=audit`}
           className={`nr-tab ${tab === "audit" ? "nr-tab-active" : ""}`}
         >
-          Audit Trail
+          {t("tabAudit")}
         </a>
         <a
-          href={`/workspaces/${workspaceId}/audit?tab=audit`}
-          className={`nr-tab ${tab === "audit" ? "nr-tab-active" : ""}`}
+          href={`/workspaces/${workspaceId}/audit?tab=archive`}
+          className={`nr-tab ${tab === "archive" ? "nr-tab-active" : ""}`}
         >
-          Audit Trail
+          {t("tabArchive")}
         </a>
       </div>
 
       {/* Audit Trail Tab */}
       {tab === "audit" && (
         <section>
-          <h2 className="nr-section-header">Decision Trail</h2>
+          <h2 className="nr-section-header">{t("sectionDecisionTrail")}</h2>
           <p className="nr-item-meta" style={{ fontSize: "0.85rem", marginBottom: 16 }}>
-            Every action taken in this workspace, by humans and agents.
+            {t("decisionTrailDesc")}
             {search.entityType && search.entityId && (
               <span>
-                {" "}Filtered to <strong>{search.entityType}</strong>: {search.entityId}.{" "}
+                {" "}{t("filteredTo", { type: search.entityType, id: search.entityId })}{" "}
                 <a href={`/workspaces/${workspaceId}/audit?tab=audit`}>{t("clearFilter")}</a>
               </span>
             )}
           </p>
           <div>
-            {auditLogs.length === 0 && <p className="nr-item-meta">No audit entries found.</p>}
+            {auditLogs.length === 0 && <p className="nr-item-meta">{t("noAuditEntries")}</p>}
             {auditLogs.map((log) => (
               <div className="nr-item" key={log.id} style={{ padding: "12px 0" }}>
                 <div className="row">
@@ -111,13 +141,13 @@ export default async function AuditPage({
                 <div className="nr-item-meta" style={{ fontSize: "0.82rem", marginTop: 4 }}>
                   {log.entityType} &middot; {log.entityId.slice(0, 12)}...
                   {log.actorUserId && (
-                    <span> &middot; Actor: {log.actorUserId.slice(0, 8)}...</span>
+                    <span> &middot; {t("actor", { id: `${log.actorUserId.slice(0, 8)}...` })}</span>
                   )}
                 </div>
                 {log.meta && typeof log.meta === "object" && (
                   <details style={{ marginTop: 8 }}>
                     <summary className="nr-meta" style={{ cursor: "pointer", fontSize: "0.78rem" }}>
-                      Metadata
+                      {t("metadata")}
                     </summary>
                     <pre style={{
                       fontSize: "0.75rem",
@@ -139,16 +169,87 @@ export default async function AuditPage({
         </section>
       )}
 
+      {tab === "archive" && (
+        <section>
+          <h2 className="nr-section-header">{t("sectionArchivedRecords")}</h2>
+          <form className="nr-filter-bar" action={`/workspaces/${workspaceId}/audit`} style={{ alignItems: "flex-end" }}>
+            <input type="hidden" name="tab" value="archive" />
+            <label style={{ display: "grid", gap: 4 }}>
+              <span className="nr-item-meta">{t("archiveFilterEntity")}</span>
+              <input name="archiveEntityType" defaultValue={search.archiveEntityType ?? ""} placeholder={t("archiveFilterEntityPlaceholder")} />
+            </label>
+            <label style={{ display: "grid", gap: 4 }}>
+              <span className="nr-item-meta">{t("archiveFilterActor")}</span>
+              <input name="archiveActor" defaultValue={search.archiveActor ?? ""} placeholder={t("archiveFilterActorPlaceholder")} />
+            </label>
+            <label style={{ display: "grid", gap: 4 }}>
+              <span className="nr-item-meta">{t("archiveFilterReason")}</span>
+              <input name="archiveReason" defaultValue={search.archiveReason ?? ""} placeholder={t("archiveFilterReasonPlaceholder")} />
+            </label>
+            <label style={{ display: "grid", gap: 4 }}>
+              <span className="nr-item-meta">{t("archiveFilterArchivedAfter")}</span>
+              <input name="archiveDateFrom" type="date" defaultValue={search.archiveDateFrom ?? ""} />
+            </label>
+            <button type="submit" className="button secondary">{t("btnFilter")}</button>
+            <a className="button secondary" href={`/workspaces/${workspaceId}/audit?tab=archive`}>{t("btnClear")}</a>
+          </form>
+
+          {filteredArchivedArtifacts.length === 0 && (
+            <p className="nr-item-meta" style={{ marginTop: 16 }}>{t("noArchivedRecords")}</p>
+          )}
+
+          {filteredArchivedArtifacts.map((item) => (
+            <div className="nr-item" key={item.id} style={{ padding: "16px 0" }}>
+              <div className="row" style={{ alignItems: "flex-start", gap: 16 }}>
+                <div style={{ flex: 1 }}>
+                  <strong className="nr-item-title">{item.entityLabel ?? item.entityId}</strong>
+                  <div className="nr-item-meta" style={{ marginTop: 4 }}>
+                    {item.entityType} &middot; {item.entityId.slice(0, 12)}... &middot; {t("archivedAt", { date: formatDateTime(item.archivedAt) })}
+                  </div>
+                  <div className="nr-item-meta" style={{ marginTop: 4 }}>
+                    {t("archivedBy", { actor: item.archivedByLabel ?? item.archivedByUserId ?? t("unknownActor") })}
+                    {item.archiveReason ? ` · ${t("archiveReason", { reason: item.archiveReason })}` : ""}
+                  </div>
+                </div>
+                <div className="actions-inline" style={{ alignItems: "flex-start" }}>
+                  <form action={restoreArchivedArtifactAction}>
+                    <input type="hidden" name="workspaceId" value={workspaceId} />
+                    <input type="hidden" name="entityType" value={item.entityType} />
+                    <input type="hidden" name="entityId" value={item.entityId} />
+                    <button type="submit" className="button secondary">{t("btnRestore")}</button>
+                  </form>
+                  <details style={{ position: "relative" }}>
+                    <summary className="button danger" style={{ cursor: "pointer", listStyle: "none" }}>{t("btnPurge")}</summary>
+                    <div className="fin-dropdown" style={{ right: 0, width: 320, padding: 16 }}>
+                      <form action={purgeArchivedArtifactAction} className="stack">
+                        <input type="hidden" name="workspaceId" value={workspaceId} />
+                        <input type="hidden" name="entityType" value={item.entityType} />
+                        <input type="hidden" name="entityId" value={item.entityId} />
+                        <label>
+                          {t("labelRequiredReason")}
+                          <textarea name="reason" required placeholder={t("placeholderPurgeReason")} />
+                        </label>
+                        <button type="submit" className="danger">{t("btnPermanentlyPurge")}</button>
+                      </form>
+                    </div>
+                  </details>
+                </div>
+              </div>
+            </div>
+          ))}
+        </section>
+      )}
+
       {/* Agent Traces Tab Removed */}
       {(tab === "agents" || tab === "costs") && (
         <section>
           <div className="nr-item" style={{ padding: "40px", textAlign: "center", background: "var(--accent-soft)" }}>
-            <h2 style={{ marginBottom: 16 }}>Moved to Agent Governance</h2>
+            <h2 style={{ marginBottom: 16 }}>{t("movedTitle")}</h2>
             <p className="nr-item-meta" style={{ marginBottom: 24 }}>
-              Agent traces and cost analytics have moved to the dedicated Agent Governance center.
+              {t("movedDesc")}
             </p>
             <a href={`/workspaces/${workspaceId}/agents?tab=observability`} className="button secondary">
-              Go to Agent Governance
+              {t("btnGoToAgents")}
             </a>
           </div>
         </section>

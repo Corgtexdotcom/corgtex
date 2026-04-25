@@ -34,6 +34,13 @@ vi.mock("@corgtex/shared", () => ({
     member: {
       findUnique: vi.fn(),
     },
+    workspaceArchiveRecord: {
+      create: vi.fn(),
+    },
+    auditLog: {
+      create: vi.fn(),
+    },
+    $transaction: vi.fn(async (cb) => cb(prisma)),
   },
 }));
 
@@ -97,7 +104,9 @@ describe("agent-identity", () => {
     const result = await listAgentIdentities(adminActor, wsId);
     expect(result).toEqual([]);
     expect(prisma.agentIdentity.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { workspaceId: wsId } }),
+      expect.objectContaining({
+        where: { workspaceId: wsId, archivedAt: null },
+      }),
     );
   });
 

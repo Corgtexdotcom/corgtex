@@ -4,6 +4,7 @@ import type { AppActor } from "@corgtex/shared";
 import { actorUserIdForWorkspace, requireWorkspaceMembership } from "./auth";
 import { appendEvents } from "./events";
 import { getApprovalPolicy } from "./approvals";
+import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { invariant } from "./errors";
 
 function requireFinanceAccess(actor: AppActor, workspaceId: string) {
@@ -64,7 +65,7 @@ async function findSpendForWorkspace(
     },
   });
 
-  invariant(spend && spend.workspaceId === workspaceId, 404, "NOT_FOUND", "Spend request not found.");
+  invariant(spend && spend.workspaceId === workspaceId && !spend.archivedAt, 404, "NOT_FOUND", "Spend request not found.");
   return spend;
 }
 
@@ -76,7 +77,7 @@ async function findLedgerAccountForWorkspace(
   const account = await tx.ledgerAccount.findUnique({
     where: { id: accountId },
   });
-  invariant(account && account.workspaceId === workspaceId, 404, "NOT_FOUND", "Ledger account not found.");
+  invariant(account && account.workspaceId === workspaceId && !account.archivedAt, 404, "NOT_FOUND", "Ledger account not found.");
   return account;
 }
 
@@ -133,12 +134,12 @@ async function ensureSpendLedgerEntry(tx: Prisma.TransactionClient, spend: {
   return entry;
 }
 
-export async function listSpends(workspaceId: string, opts?: { take?: number; skip?: number }) {
+export async function listSpends(workspaceId: string, opts?: { take?: number; skip?: number; archiveFilter?: ArchiveFilter }) {
   const take = opts?.take ?? 20;
   const skip = opts?.skip ?? 0;
   const [items, total] = await Promise.all([
     prisma.spendRequest.findMany({
-      where: { workspaceId },
+      where: { workspaceId, ...archiveFilterWhere(opts?.archiveFilter) },
       include: {
         requester: {
           select: {
@@ -176,23 +177,24 @@ export async function listSpends(workspaceId: string, opts?: { take?: number; sk
       take,
       skip,
     }),
-    prisma.spendRequest.count({ where: { workspaceId } }),
+    prisma.spendRequest.count({ where: { workspaceId, ...archiveFilterWhere(opts?.archiveFilter) } }),
   ]);
   return { items, total, take, skip };
 }
 
-export async function listLedgerAccounts(workspaceId: string, opts?: { take?: number; skip?: number }) {
+export async function listLedgerAccounts(workspaceId: string, opts?: { take?: number; skip?: number; archiveFilter?: ArchiveFilter }) {
   const take = opts?.take ?? 20;
   const skip = opts?.skip ?? 0;
   const [items, total] = await Promise.all([
     prisma.ledgerAccount.findMany({
-      where: { workspaceId },
+      where: { workspaceId, ...archiveFilterWhere(opts?.archiveFilter) },
       include: {
         entries: {
           orderBy: { effectiveAt: "desc" },
           take: 5,
         },
         spendRequests: {
+          where: { archivedAt: null },
           select: {
             id: true,
             status: true,
@@ -208,7 +210,7 @@ export async function listLedgerAccounts(workspaceId: string, opts?: { take?: nu
       take,
       skip,
     }),
-    prisma.ledgerAccount.count({ where: { workspaceId } }),
+    prisma.ledgerAccount.count({ where: { workspaceId, ...archiveFilterWhere(opts?.archiveFilter) } }),
   ]);
 
   return { items, total, take, skip };
@@ -1069,4 +1071,26 @@ export async function updateSpend(actor: AppActor, params: {
 
     return updated;
   });
+}
+
+export async function deleteSpend(actor: AppActor, params: { workspaceId: string; spendId: string }) {
+  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  await archiveWorkspaceArtifact(actor, {
+    workspaceId: params.workspaceId,
+    entityType: "SpendRequest",
+    entityId: params.spendId,
+    reason: "Archived from spend delete path.",
+  });
+  return { id: params.spendId };
+}
+
+export async function deleteLedgerAccount(actor: AppActor, params: { workspaceId: string; accountId: string }) {
+  await requireFinanceAccess(actor, params.workspaceId);
+  await archiveWorkspaceArtifact(actor, {
+    workspaceId: params.workspaceId,
+    entityType: "LedgerAccount",
+    entityId: params.accountId,
+    reason: "Archived from ledger account delete path.",
+  });
+  return { id: params.accountId };
 }

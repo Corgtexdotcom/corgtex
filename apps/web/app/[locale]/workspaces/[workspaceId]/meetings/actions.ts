@@ -5,6 +5,7 @@ import { requirePageActor } from "@/lib/auth";
 import { asString, asOptional, asOptionalInt, refresh } from "../action-utils";
 import {
   createMeeting,
+  deleteMeeting,
   extractMeetingInsights,
   confirmInsight,
   dismissInsight,
@@ -31,6 +32,19 @@ export async function createMeetingAction(formData: FormData) {
       .split(",")
       .map((value) => value.trim())
       .filter(Boolean),
+  });
+  refresh(workspaceId);
+}
+
+export async function archiveMeetingAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  await deleteMeeting(actor, {
+    workspaceId,
+    meetingId: asString(formData, "meetingId"),
   });
   refresh(workspaceId);
 }

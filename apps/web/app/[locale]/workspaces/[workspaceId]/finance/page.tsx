@@ -5,6 +5,8 @@ import {
   submitSpendAction,
   markSpendPaidAction,
   linkSpendLedgerAccountAction,
+  archiveLedgerAccountAction,
+  archiveSpendAction,
   uploadSpendStatementAction,
   updateSpendReconciliationAction,
   createLedgerAccountAction,
@@ -336,6 +338,11 @@ export default async function FinancePage({
                                   </form>
                                 </>
                               )}
+                              <form action={archiveSpendAction} className="fin-dropdown-form">
+                                <input type="hidden" name="workspaceId" value={workspaceId} />
+                                <input type="hidden" name="spendId" value={spend.id} />
+                                <button type="submit" className="fin-action-btn" style={{ color: "#842029" }}>Archive spend</button>
+                              </form>
                             </div>
                           </details>
                         </td>
@@ -417,6 +424,11 @@ export default async function FinancePage({
                               <input name="currency" defaultValue={account.currency} placeholder={t("formCurrency")} />
                               <input name="type" defaultValue={account.type} placeholder={t("formType")} />
                               <button type="submit" className="fin-action-btn">{t("btnSave")}</button>
+                            </form>
+                            <form action={archiveLedgerAccountAction} className="fin-dropdown-form">
+                              <input type="hidden" name="workspaceId" value={workspaceId} />
+                              <input type="hidden" name="accountId" value={account.id} />
+                              <button type="submit" className="fin-action-btn" style={{ color: "#842029" }}>Archive account</button>
                             </form>
                           </div>
                         </details>
