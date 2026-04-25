@@ -1,42 +1,35 @@
 import { requirePageActor } from "@/lib/auth";
+import { handleRouteError } from "@/lib/http";
 import { type NextRequest, NextResponse } from "next/server";
-import { prisma } from "@corgtex/shared";
-import { requireWorkspaceMembership } from "@corgtex/domain";
+import { saveOAuthConnectionAndEnqueueCalendarSync } from "@corgtex/domain";
 
 export async function GET(request: NextRequest, props: { params: Promise<{ provider: string }> }) {
-  const params = await props.params;
-  const actor = await requirePageActor();
-
-  if (actor.kind !== "user") {
-    return NextResponse.json({ error: "Only users can perform OAuth flows" }, { status: 403 });
-  }
-
-  const protocol = request.headers.get("x-forwarded-proto") || "http";
-  const host = request.headers.get("host") || "localhost:3000";
-  const appUrl = `${protocol}://${host}`;
-
-  const { provider } = params;
-  const code = request.nextUrl.searchParams.get("code");
-  const state = request.nextUrl.searchParams.get("state");
-  const error = request.nextUrl.searchParams.get("error");
-
-  const [userId, workspaceId] = (state || "").split(":");
-  const returnUrl = workspaceId ? `/workspaces/${workspaceId}/settings` : "/";
-
-  if (error) {
-    return NextResponse.redirect(new URL(`${returnUrl}?error=${error}`, appUrl));
-  }
-
-  if (!code || !state || actor.user.id !== userId) {
-    return NextResponse.redirect(new URL(`${returnUrl}?error=invalid_request`, appUrl));
-  }
-
   try {
-    if (workspaceId) {
-      await requireWorkspaceMembership({
-        actor,
-        workspaceId,
-      });
+    const params = await props.params;
+    const actor = await requirePageActor();
+
+    if (actor.kind !== "user") {
+      return NextResponse.json({ error: "Only users can perform OAuth flows" }, { status: 403 });
+    }
+
+    const protocol = request.headers.get("x-forwarded-proto") || "http";
+    const host = request.headers.get("host") || "localhost:3000";
+    const appUrl = `${protocol}://${host}`;
+
+    const { provider } = params;
+    const code = request.nextUrl.searchParams.get("code");
+    const state = request.nextUrl.searchParams.get("state");
+    const error = request.nextUrl.searchParams.get("error");
+
+    const [userId, workspaceId] = (state || "").split(":");
+    const returnUrl = workspaceId ? `/workspaces/${workspaceId}/settings` : "/";
+
+    if (error) {
+      return NextResponse.redirect(new URL(`${returnUrl}?error=${error}`, appUrl));
+    }
+
+    if (!code || !state || actor.user.id !== userId) {
+      return NextResponse.redirect(new URL(`${returnUrl}?error=invalid_request`, appUrl));
     }
 
     if (provider === "google") {
@@ -68,37 +61,15 @@ export async function GET(request: NextRequest, props: { params: Promise<{ provi
       const profileData = await profileResponse.json();
       if (!profileResponse.ok) throw new Error(profileData.error?.message || "Failed to fetch profile");
 
-      const connection = await prisma.oAuthConnection.upsert({
-        where: { userId_provider: { userId: actor.user.id, provider: "GOOGLE" } },
-        update: {
-          accessToken: tokenData.access_token,
-          refreshToken: tokenData.refresh_token || undefined,
-          expiresAt: tokenData.expires_in ? new Date(Date.now() + tokenData.expires_in * 1000) : null,
-          providerAccountId: profileData.id,
-          scopes: tokenData.scope?.split(" ") || [],
-        },
-        create: {
-          userId: actor.user.id,
-          provider: "GOOGLE",
-          accessToken: tokenData.access_token,
-          refreshToken: tokenData.refresh_token,
-          expiresAt: tokenData.expires_in ? new Date(Date.now() + tokenData.expires_in * 1000) : null,
-          providerAccountId: profileData.id,
-          scopes: tokenData.scope?.split(" ") || [],
-        },
+      await saveOAuthConnectionAndEnqueueCalendarSync(actor, {
+        workspaceId,
+        provider: "GOOGLE",
+        accessToken: String(tokenData.access_token),
+        refreshToken: typeof tokenData.refresh_token === "string" ? tokenData.refresh_token : null,
+        expiresIn: typeof tokenData.expires_in === "number" ? tokenData.expires_in : null,
+        providerAccountId: String(profileData.id),
+        scopes: typeof tokenData.scope === "string" ? tokenData.scope.split(" ") : [],
       });
-
-      if (workspaceId) {
-        await prisma.workflowJob.create({
-          data: {
-            workspaceId,
-            type: "calendar.sync",
-            payload: {
-              connectionId: connection.id,
-            },
-          },
-        });
-      }
 
       return NextResponse.redirect(new URL(`${returnUrl}?success=google_connected`, appUrl));
     }
@@ -132,44 +103,21 @@ export async function GET(request: NextRequest, props: { params: Promise<{ provi
       const profileData = await profileResponse.json();
       if (!profileResponse.ok) throw new Error(profileData.error?.message || "Failed to fetch profile");
 
-      const connection = await prisma.oAuthConnection.upsert({
-        where: { userId_provider: { userId: actor.user.id, provider: "MICROSOFT" } },
-        update: {
-          accessToken: tokenData.access_token,
-          refreshToken: tokenData.refresh_token || undefined,
-          expiresAt: tokenData.expires_in ? new Date(Date.now() + tokenData.expires_in * 1000) : null,
-          providerAccountId: profileData.id,
-          scopes: tokenData.scope?.split(" ") || [],
-        },
-        create: {
-          userId: actor.user.id,
-          provider: "MICROSOFT",
-          accessToken: tokenData.access_token,
-          refreshToken: tokenData.refresh_token,
-          expiresAt: tokenData.expires_in ? new Date(Date.now() + tokenData.expires_in * 1000) : null,
-          providerAccountId: profileData.id,
-          scopes: tokenData.scope?.split(" ") || [],
-        },
+      await saveOAuthConnectionAndEnqueueCalendarSync(actor, {
+        workspaceId,
+        provider: "MICROSOFT",
+        accessToken: String(tokenData.access_token),
+        refreshToken: typeof tokenData.refresh_token === "string" ? tokenData.refresh_token : null,
+        expiresIn: typeof tokenData.expires_in === "number" ? tokenData.expires_in : null,
+        providerAccountId: String(profileData.id),
+        scopes: typeof tokenData.scope === "string" ? tokenData.scope.split(" ") : [],
       });
-
-      if (workspaceId) {
-        await prisma.workflowJob.create({
-          data: {
-            workspaceId,
-            type: "calendar.sync",
-            payload: {
-              connectionId: connection.id,
-            },
-          },
-        });
-      }
 
       return NextResponse.redirect(new URL(`${returnUrl}?success=microsoft_connected`, appUrl));
     }
 
     return NextResponse.redirect(new URL(`${returnUrl}?error=unsupported_provider`, appUrl));
-  } catch (error: any) {
-    console.error(`OAuth callback error for ${provider}:`, error);
-    return NextResponse.redirect(new URL(`${returnUrl}?error=connection_failed`, appUrl));
+  } catch (error) {
+    return handleRouteError(error);
   }
 }

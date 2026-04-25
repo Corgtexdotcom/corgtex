@@ -1,7 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
+import { z } from "zod";
 import { createRole, listRoles, requireWorkspaceMembership } from "@corgtex/domain";
 import { resolveRequestActor } from "@/lib/auth";
-import { handleRouteError } from "@/lib/http";
+import { handleRouteError, validateBody } from "@/lib/http";
+
+const createRoleSchema = z.object({
+  circleId: z.uuid(),
+  name: z.string().trim().min(1),
+  purposeMd: z.string().optional().nullable(),
+  accountabilities: z.array(z.string()).optional(),
+  artifacts: z.array(z.string()).optional(),
+  coreRoleType: z.string().optional().nullable(),
+});
 
 export async function GET(request: NextRequest, { params }: { params: Promise<{ workspaceId: string }> }) {
   try {
@@ -20,27 +30,16 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   try {
     const actor = await resolveRequestActor(request);
     const { workspaceId } = await params;
-    const body = (await request.json()) as {
-      circleId?: unknown;
-      name?: unknown;
-      purposeMd?: unknown;
-      accountabilities?: unknown;
-      artifacts?: unknown;
-      coreRoleType?: unknown;
-    };
+    const body = await validateBody(request, createRoleSchema);
 
     const role = await createRole(actor, {
       workspaceId,
-      circleId: String(body.circleId ?? ""),
-      name: String(body.name ?? ""),
-      purposeMd: typeof body.purposeMd === "string" ? body.purposeMd : null,
-      accountabilities: Array.isArray(body.accountabilities)
-        ? body.accountabilities.map((value) => String(value))
-        : [],
-      artifacts: Array.isArray(body.artifacts)
-        ? body.artifacts.map((value) => String(value))
-        : [],
-      coreRoleType: typeof body.coreRoleType === "string" ? body.coreRoleType : null,
+      circleId: body.circleId,
+      name: body.name,
+      purposeMd: body.purposeMd ?? null,
+      accountabilities: body.accountabilities ?? [],
+      artifacts: body.artifacts ?? [],
+      coreRoleType: body.coreRoleType ?? null,
     });
 
     return NextResponse.json(role, { status: 201 });
