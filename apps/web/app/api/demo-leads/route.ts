@@ -5,7 +5,7 @@ import { rateLimitAuth } from "@/lib/rate-limit-middleware";
 export const dynamic = "force-dynamic";
 
 export async function POST(request: NextRequest) {
-  const rateLimited = rateLimitAuth(request);
+  const rateLimited = await rateLimitAuth(request);
   if (rateLimited) return rateLimited;
 
   let body: unknown;

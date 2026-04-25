@@ -1,5 +1,5 @@
 import type { KnowledgeSourceType, Prisma } from "@prisma/client";
-import { prisma, cosineSimilarity } from "@corgtex/shared";
+import { getCacheJson, getCacheVersion, incrementCacheVersion, prisma, cosineSimilarity, setCacheJson } from "@corgtex/shared";
 import { defaultModelGateway } from "@corgtex/models";
 import type { SensitivityLabel } from "./sensitivity";
 
@@ -29,14 +29,6 @@ const DEFAULT_SEARCH_LIMIT = 5;
 const DEFAULT_ANSWER_LIMIT = 8;
 const DEFAULT_LEXICAL_WEIGHT = 0.35;
 const DEFAULT_SEMANTIC_WEIGHT = 0.65;
-const searchCache = new Map<string, { expiresAt: number; value: KnowledgeSearchResult[] }>();
-const answerCache = new Map<string, {
-  expiresAt: number;
-  value: {
-    answer: string;
-    citations: KnowledgeCitation[];
-  };
-}>();
 
 function parseWeight(value: string | undefined, fallback: number) {
   const parsed = Number(value);
@@ -84,13 +76,16 @@ function lexicalScore(query: string, content: string, title?: string | null) {
 
 function searchCacheKey(params: {
   workspaceId: string;
+  cacheVersion: string;
   query: string;
   limit?: number;
   sourceTypes?: KnowledgeSourceType[];
   maxSensitivity?: SensitivityLabel;
 }) {
   return [
+    "knowledge-search",
     params.workspaceId,
+    params.cacheVersion,
     params.query.trim().toLowerCase(),
     String(params.limit ?? DEFAULT_SEARCH_LIMIT),
     [...(params.sourceTypes ?? [])].sort().join(","),
@@ -100,62 +95,34 @@ function searchCacheKey(params: {
 
 function answerCacheKey(params: {
   workspaceId: string;
+  cacheVersion: string;
   question: string;
   limit?: number;
 }) {
   return [
+    "knowledge-answer",
     params.workspaceId,
+    params.cacheVersion,
     params.question.trim().toLowerCase(),
     String(params.limit ?? DEFAULT_ANSWER_LIMIT),
   ].join("::");
 }
 
-function getCachedValue<T>(cache: Map<string, { expiresAt: number; value: T }>, key: string) {
-  const hit = cache.get(key);
-  if (!hit) {
-    return null;
-  }
-
-  if (hit.expiresAt <= Date.now()) {
-    cache.delete(key);
-    return null;
-  }
-
-  return hit.value;
+async function knowledgeCacheVersion(workspaceId: string) {
+  const [globalVersion, workspaceVersion] = await Promise.all([
+    getCacheVersion("knowledge:all"),
+    getCacheVersion(`knowledge:${workspaceId}`),
+  ]);
+  return `${globalVersion}:${workspaceVersion}`;
 }
 
-function setCachedValue<T>(cache: Map<string, { expiresAt: number; value: T }>, key: string, value: T) {
-  if (cache.size > 200) {
-    const oldestKey = cache.keys().next().value;
-    if (oldestKey !== undefined) {
-       cache.delete(oldestKey);
-    }
-  }
-
-  cache.set(key, {
-    expiresAt: Date.now() + SEARCH_CACHE_TTL_MS,
-    value,
-  });
-}
-
-export function invalidateKnowledgeCache(workspaceId?: string) {
+export async function invalidateKnowledgeCache(workspaceId?: string) {
   if (!workspaceId) {
-    searchCache.clear();
-    answerCache.clear();
+    await incrementCacheVersion("knowledge:all");
     return;
   }
 
-  for (const key of searchCache.keys()) {
-    if (key.startsWith(`${workspaceId}::`)) {
-      searchCache.delete(key);
-    }
-  }
-
-  for (const key of answerCache.keys()) {
-    if (key.startsWith(`${workspaceId}::`)) {
-      answerCache.delete(key);
-    }
-  }
+  await incrementCacheVersion(`knowledge:${workspaceId}`);
 }
 
 
@@ -173,14 +140,16 @@ export async function searchIndexedKnowledge(params: {
     return [] as KnowledgeSearchResult[];
   }
 
+  const cacheVersion = await knowledgeCacheVersion(params.workspaceId);
   const cacheKey = searchCacheKey({
     workspaceId: params.workspaceId,
+    cacheVersion,
     query,
     limit: params.limit,
     sourceTypes: params.sourceTypes,
     maxSensitivity: params.maxSensitivity,
   });
-  const cached = getCachedValue(searchCache, cacheKey);
+  const cached = await getCacheJson<KnowledgeSearchResult[]>(cacheKey);
   if (cached) {
     return cached;
   }
@@ -277,7 +246,7 @@ export async function searchIndexedKnowledge(params: {
     };
   });
 
-  setCachedValue(searchCache, cacheKey, results);
+  await setCacheJson(cacheKey, results, SEARCH_CACHE_TTL_MS);
   return results;
 }
 
@@ -288,8 +257,12 @@ export async function answerKnowledgeQuestion(params: {
   workflowJobId?: string;
   agentRunId?: string;
 }) {
-  const cacheKey = answerCacheKey(params);
-  const cached = getCachedValue(answerCache, cacheKey);
+  const cacheVersion = await knowledgeCacheVersion(params.workspaceId);
+  const cacheKey = answerCacheKey({ ...params, cacheVersion });
+  const cached = await getCacheJson<{
+    answer: string;
+    citations: KnowledgeCitation[];
+  }>(cacheKey);
   if (cached) {
     return cached;
   }
@@ -307,7 +280,7 @@ export async function answerKnowledgeQuestion(params: {
       answer: "I could not find relevant indexed knowledge for that question.",
       citations: [] as KnowledgeCitation[],
     };
-    setCachedValue(answerCache, cacheKey, empty);
+    await setCacheJson(cacheKey, empty, SEARCH_CACHE_TTL_MS);
     return empty;
   }
 
@@ -338,6 +311,6 @@ export async function answerKnowledgeQuestion(params: {
     answer: response.content,
     citations: citations.map(({ score, ...citation }) => citation),
   };
-  setCachedValue(answerCache, cacheKey, answer);
+  await setCacheJson(cacheKey, answer, SEARCH_CACHE_TTL_MS);
   return answer;
 }
