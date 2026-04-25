@@ -24,27 +24,28 @@ try {
 
   run(prismaBin, ["migrate", "deploy"]);
 
-  if (process.env.SEED_SCRIPTS) {
-    console.log("[start-web] Step 2: Running explicitly configured seed scripts");
-    const seedScripts = process.env.SEED_SCRIPTS.split(",").filter(Boolean);
+  // 2. Seeds
+  console.log("[start-web] Step 2: Running Production Bootstrap Seed");
+  run(process.execPath, [path.join(rootDir, "prisma", "seed.mjs")]);
 
-    for (const script of seedScripts) {
-      const resolved = path.resolve(rootDir, script);
-      if (!existsSync(resolved)) {
-        console.warn(`[start-web] Seed script not found, skipping: ${script}`);
-        continue;
-      }
-      console.log(`[start-web] Running seed: ${script}`);
-      run(process.execPath, [resolved]);
+  const seedScripts = process.env.SEED_SCRIPTS
+    ? process.env.SEED_SCRIPTS.split(",").map((script) => script.trim()).filter(Boolean)
+    : [];
+
+  for (const script of seedScripts) {
+    const resolved = path.resolve(rootDir, script);
+    if (!existsSync(resolved)) {
+      console.warn(`[start-web] Seed script not found, skipping: ${script}`);
+      continue;
     }
-  } else {
-    console.log("[start-web] Step 2: No seed scripts configured");
+    console.log(`[start-web] Running explicit extra seed: ${script}`);
+    run(process.execPath, [resolved]);
   }
 
   // 2.5. DB Health Check Audit
   console.log("[start-web] Step 2.5: Verifying DB Migrations before Next.js");
   try {
-    const { PrismaClient } = await import('@prisma/client');
+    const { PrismaClient } = await import("@prisma/client");
     const prisma = new PrismaClient();
     const failedMigrationsRaw = await prisma.$queryRaw`
       SELECT migration_name FROM _prisma_migrations 
@@ -52,7 +53,7 @@ try {
     `;
     console.log("[start-web] Migrations requiring attention:", failedMigrationsRaw);
     await prisma.$disconnect();
-  } catch(e) {
+  } catch (e) {
     console.log("[start-web] Failed DB check:", e.message);
   }
 

@@ -56,12 +56,13 @@ Setup and credentials are documented in
 Summary:
 
 1. Set `AGENT_API_KEY` in `.env`.
-2. Run `AGENT_API_KEY="..." npm run prisma:seed` to create the agent user (ADMIN role in the default org).
-3. Start the server (`npm run dev`).
-4. Call `/api/...` with `Authorization: Bearer agent-<AGENT_API_KEY>`.
+2. Run `npm run prisma:seed` to create the production bootstrap workspace/admin baseline.
+3. Run `npm run seed:e2e` to create the E2E UI user from `AGENT_E2E_EMAIL` / `AGENT_E2E_PASSWORD`.
+4. Start the server (`npm run dev`).
+5. Call `/api/...` with `Authorization: Bearer agent-<AGENT_API_KEY>`.
 
 <Warning>
-  The agent user has `ADMIN` role on the default organization. Wallet-dependent flows (e.g. optimistic finance) require additional setup.
+  `AGENT_API_KEY` is runtime authentication configuration for the Agent API, not seed data. The bootstrap agent has ADMIN-equivalent access to allowed workspaces. Wallet-dependent flows (e.g. optimistic finance) require additional setup.
 </Warning>
 
 ## Frontend E2E via browser agent
