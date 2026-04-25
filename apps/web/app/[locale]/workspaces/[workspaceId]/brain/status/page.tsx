@@ -1,5 +1,6 @@
 import { getBrainStatus, listArticles } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
+import { getTranslations } from "next-intl/server";
 
 export const dynamic = "force-dynamic";
 

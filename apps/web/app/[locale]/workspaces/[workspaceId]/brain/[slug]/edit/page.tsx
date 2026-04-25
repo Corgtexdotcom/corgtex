@@ -1,6 +1,7 @@
 import { getArticle } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { updateArticleAction } from "../../actions";
+import { getTranslations } from "next-intl/server";
 
 export const dynamic = "force-dynamic";
 

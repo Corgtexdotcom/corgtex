@@ -45,6 +45,7 @@ The goal of this phase is to complete the localization of the remaining modules 
 - `apps/web/messages/en.json`
 - `apps/web/messages/es.json`
 - `docs/assets/i18n-phase2/proof.png`
+- `docs/plans/feat-i18n-phase2.md`
 
 ## Test plan
 
