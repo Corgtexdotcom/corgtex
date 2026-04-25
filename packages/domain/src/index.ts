@@ -5,6 +5,7 @@ export * from "./agent-registry";
 export * from "./agent-config";
 export * from "./brain";
 export * from "./audit-trail";
+export * from "./archive";
 export * from "./agent-memory";
 export * from "./agent-runs";
 export * from "./approvals";

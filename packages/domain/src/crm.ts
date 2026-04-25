@@ -2,6 +2,7 @@ import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { appendEvents } from "./events";
 import { requireWorkspaceMembership } from "./auth";
+import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { invariant } from "./errors";
 import { CrmDealStage, CrmActivityType } from "@prisma/client";
 
@@ -82,13 +83,13 @@ export async function captureDemoLead(params: {
 
 // --- CONTACTS ---
 
-export async function listContacts(actor: AppActor, workspaceId: string, opts?: { take?: number; skip?: number; query?: string }) {
+export async function listContacts(actor: AppActor, workspaceId: string, opts?: { take?: number; skip?: number; query?: string; archiveFilter?: ArchiveFilter }) {
   await requireWorkspaceMembership({ actor, workspaceId });
   
   const take = opts?.take ?? 50;
   const skip = opts?.skip ?? 0;
   
-  let where: any = { workspaceId };
+  let where: any = { workspaceId, ...archiveFilterWhere(opts?.archiveFilter) };
   if (opts?.query) {
     where = {
       ...where,
@@ -125,6 +126,7 @@ export async function getContact(actor: AppActor, params: { workspaceId: string;
     where: { id: params.contactId },
     include: {
       deals: {
+        where: { archivedAt: null },
         orderBy: { updatedAt: "desc" },
       },
       activities: {
@@ -134,7 +136,7 @@ export async function getContact(actor: AppActor, params: { workspaceId: string;
     },
   });
   
-  invariant(contact && contact.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Contact not found.");
+  invariant(contact && contact.workspaceId === params.workspaceId && !contact.archivedAt, 404, "NOT_FOUND", "Contact not found.");
   return contact;
 }
 
@@ -206,7 +208,7 @@ export async function updateContact(actor: AppActor, params: {
 
   return prisma.$transaction(async (tx) => {
     const contact = await tx.crmContact.findUnique({ where: { id: params.contactId } });
-    invariant(contact && contact.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Contact not found.");
+    invariant(contact && contact.workspaceId === params.workspaceId && !contact.archivedAt, 404, "NOT_FOUND", "Contact not found.");
 
     const data: any = {};
     if (params.email !== undefined) {
@@ -243,36 +245,25 @@ export async function updateContact(actor: AppActor, params: {
 export async function deleteContact(actor: AppActor, params: { workspaceId: string; contactId: string }) {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
 
-  return prisma.$transaction(async (tx) => {
-    const contact = await tx.crmContact.findUnique({ where: { id: params.contactId } });
-    invariant(contact && contact.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Contact not found.");
-
-    await tx.crmContact.delete({ where: { id: params.contactId } });
-
-    await tx.auditLog.create({
-      data: {
-        workspaceId: params.workspaceId,
-        actorUserId: actor.kind === "user" ? actor.user.id : null,
-        action: "crm.contact.deleted",
-        entityType: "CrmContact",
-        entityId: params.contactId,
-        meta: { email: contact.email },
-      },
-    });
-
-    return { id: params.contactId };
+  await archiveWorkspaceArtifact(actor, {
+    workspaceId: params.workspaceId,
+    entityType: "CrmContact",
+    entityId: params.contactId,
+    reason: "Archived from contact delete path.",
   });
+
+  return { id: params.contactId };
 }
 
 // --- DEALS ---
 
-export async function listDeals(actor: AppActor, workspaceId: string, opts?: { take?: number; skip?: number; stage?: CrmDealStage }) {
+export async function listDeals(actor: AppActor, workspaceId: string, opts?: { take?: number; skip?: number; stage?: CrmDealStage; archiveFilter?: ArchiveFilter }) {
   await requireWorkspaceMembership({ actor, workspaceId });
   
   const take = opts?.take ?? 100;
   const skip = opts?.skip ?? 0;
   
-  const where: any = { workspaceId };
+  const where: any = { workspaceId, ...archiveFilterWhere(opts?.archiveFilter) };
   if (opts?.stage) {
     where.stage = opts.stage;
   }
@@ -311,7 +302,7 @@ export async function createDeal(actor: AppActor, params: {
 
   return prisma.$transaction(async (tx) => {
     const contact = await tx.crmContact.findUnique({ where: { id: params.contactId } });
-    invariant(contact && contact.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Contact not found.");
+    invariant(contact && contact.workspaceId === params.workspaceId && !contact.archivedAt, 404, "NOT_FOUND", "Contact not found.");
 
     const deal = await tx.crmDeal.create({
       data: {
@@ -364,7 +355,7 @@ export async function updateDeal(actor: AppActor, params: {
 
   return prisma.$transaction(async (tx) => {
     const deal = await tx.crmDeal.findUnique({ where: { id: params.dealId } });
-    invariant(deal && deal.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Deal not found.");
+    invariant(deal && deal.workspaceId === params.workspaceId && !deal.archivedAt, 404, "NOT_FOUND", "Deal not found.");
 
     const data: any = {};
     if (params.title !== undefined) {
@@ -408,25 +399,14 @@ export async function updateDeal(actor: AppActor, params: {
 export async function deleteDeal(actor: AppActor, params: { workspaceId: string; dealId: string }) {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
 
-  return prisma.$transaction(async (tx) => {
-    const deal = await tx.crmDeal.findUnique({ where: { id: params.dealId } });
-    invariant(deal && deal.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Deal not found.");
-
-    await tx.crmDeal.delete({ where: { id: params.dealId } });
-
-    await tx.auditLog.create({
-      data: {
-        workspaceId: params.workspaceId,
-        actorUserId: actor.kind === "user" ? actor.user.id : null,
-        action: "crm.deal.deleted",
-        entityType: "CrmDeal",
-        entityId: params.dealId,
-        meta: { title: deal.title },
-      },
-    });
-
-    return { id: params.dealId };
+  await archiveWorkspaceArtifact(actor, {
+    workspaceId: params.workspaceId,
+    entityType: "CrmDeal",
+    entityId: params.dealId,
+    reason: "Archived from deal delete path.",
   });
+
+  return { id: params.dealId };
 }
 
 // --- ACTIVITIES ---
@@ -448,11 +428,11 @@ export async function createActivity(actor: AppActor, params: {
   return prisma.$transaction(async (tx) => {
     if (params.contactId) {
       const contact = await tx.crmContact.findUnique({ where: { id: params.contactId } });
-      invariant(contact && contact.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Contact not found.");
+      invariant(contact && contact.workspaceId === params.workspaceId && !contact.archivedAt, 404, "NOT_FOUND", "Contact not found.");
     }
     if (params.dealId) {
       const deal = await tx.crmDeal.findUnique({ where: { id: params.dealId } });
-      invariant(deal && deal.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Deal not found.");
+      invariant(deal && deal.workspaceId === params.workspaceId && !deal.archivedAt, 404, "NOT_FOUND", "Deal not found.");
     }
 
     const activity = await tx.crmActivity.create({

@@ -1,6 +1,7 @@
 import type { BrainArticleAuthority, BrainArticleType } from "@prisma/client";
 import { NextRequest, NextResponse } from "next/server";
 import { createArticle, listArticles } from "@corgtex/domain";
+import type { ArchiveFilter } from "@corgtex/domain";
 import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
 
@@ -14,6 +15,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     const stale = url.searchParams.get("stale") === "true";
     const take = Number(url.searchParams.get("take")) || undefined;
     const skip = Number(url.searchParams.get("skip")) || undefined;
+    const archiveFilter = url.searchParams.get("archiveFilter") as ArchiveFilter | null;
 
     const result = await listArticles(actor, {
       workspaceId,
@@ -22,6 +24,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       stale: stale || undefined,
       take,
       skip,
+      archiveFilter: archiveFilter ?? undefined,
     });
     return NextResponse.json(result);
   } catch (error) {

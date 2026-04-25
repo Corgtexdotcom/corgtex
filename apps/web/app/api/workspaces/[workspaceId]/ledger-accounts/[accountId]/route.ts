@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
-import { updateLedgerAccount } from "@corgtex/domain";
+import { deleteLedgerAccount, updateLedgerAccount } from "@corgtex/domain";
 import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError, validateBody } from "@/lib/http";
 
@@ -24,6 +24,17 @@ export async function PATCH(request: NextRequest, { params }: Params) {
       type: body.type !== undefined ? body.type : undefined,
     });
     return NextResponse.json({ ledgerAccount });
+  } catch (error) {
+    return handleRouteError(error);
+  }
+}
+
+export async function DELETE(request: NextRequest, { params }: Params) {
+  try {
+    const actor = await resolveRequestActor(request);
+    const { workspaceId, accountId } = await params;
+    await deleteLedgerAccount(actor, { workspaceId, accountId });
+    return NextResponse.json({ ok: true });
   } catch (error) {
     return handleRouteError(error);
   }

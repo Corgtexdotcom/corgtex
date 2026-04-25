@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { AppError, createExternalDataSource, listExternalDataSources } from "@corgtex/domain";
+import type { ArchiveFilter } from "@corgtex/domain";
 import { withWorkspaceRoute } from "@/lib/route-handler";
 import { encrypt } from "@corgtex/connectors-sql";
 
@@ -11,7 +12,8 @@ export const GET = withWorkspaceRoute(async (request, { actor, workspaceId, memb
     throw new AppError(403, "FORBIDDEN", "Requires admin access");
   }
 
-  const sources = await listExternalDataSources(actor, workspaceId);
+  const archiveFilter = request.nextUrl.searchParams.get("archiveFilter") as ArchiveFilter | null;
+  const sources = await listExternalDataSources(actor, workspaceId, { archiveFilter: archiveFilter ?? undefined });
   return NextResponse.json(sources);
 });
 
