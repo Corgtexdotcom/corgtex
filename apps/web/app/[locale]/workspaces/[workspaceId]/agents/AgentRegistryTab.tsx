@@ -2,6 +2,7 @@ import { getModelUsageSummary, listAgentIdentities, listAgentConfigs } from "@co
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { AgentRegistryToggle } from "./AgentRegistryToggle";
+import { updateAgentGovernancePolicyAction } from "./actions";
 import { getTranslations } from "next-intl/server";
 
 export async function AgentRegistryTab({
@@ -50,7 +51,8 @@ export async function AgentRegistryTab({
           else if (costTier === "high" || costTier === "very-high") costBadgeColor = "var(--red-600)";
 
           return (
-            <div key={identity.id} className="nr-item" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <div key={identity.id} className="nr-item" style={{ display: "flex", flexDirection: "column", padding: 0 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: 16 }}>
               <div className="stack" style={{ gap: 8 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
                   <h3 style={{ margin: 0, fontSize: "1.1rem", fontWeight: 600 }}>{identity.displayName}</h3>
@@ -92,6 +94,30 @@ export async function AgentRegistryTab({
                 />
               </div>
             </div>
+            
+            <details style={{ padding: "0 16px 16px 16px", marginTop: -8 }}>
+              <summary className="nr-meta" style={{ cursor: "pointer", fontSize: "0.85rem", color: "var(--accent)" }}>
+                Edit Governance Policy
+              </summary>
+              <form action={updateAgentGovernancePolicyAction} style={{ marginTop: 12 }}>
+                <input type="hidden" name="workspaceId" value={workspaceId} />
+                <input type="hidden" name="agentKey" value={identity.agentKey} />
+                
+                <p className="nr-item-meta" style={{ fontSize: "0.8rem", marginBottom: 8 }}>
+                  Define plain-text boundaries, instructions, and thresholds for this agent. These rules are prepended to the agent&apos;s system prompt at runtime.
+                </p>
+                <textarea 
+                  name="governancePolicy" 
+                  defaultValue={configInfo?.governancePolicy ?? ""} 
+                  placeholder="e.g., Always ask a human before committing any financial transaction over $50."
+                  style={{ width: "100%", minHeight: 80, padding: 12, borderRadius: 8, border: "1px solid var(--line)", background: "transparent", color: "var(--text)", fontFamily: "monospace", fontSize: "0.85rem", marginBottom: 12 }}
+                />
+                <div>
+                  <button type="submit" className="secondary small">Save Policy</button>
+                </div>
+              </form>
+            </details>
+          </div>
           );
         })}
         {identities.length === 0 && (
