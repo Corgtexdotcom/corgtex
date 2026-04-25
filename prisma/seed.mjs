@@ -47,6 +47,7 @@ async function main() {
         where: { email: adminEmail },
         data: {
           displayName: "Admin",
+          globalRole: "OPERATOR",
           ...(resetPasswords ? { passwordHash: hashPassword(adminPassword) } : {}),
         },
       })
@@ -55,6 +56,7 @@ async function main() {
           email: adminEmail,
           displayName: "Admin",
           passwordHash: hashPassword(adminPassword),
+          globalRole: "OPERATOR",
         },
       });
 
@@ -122,35 +124,37 @@ async function main() {
     },
   });
 
-  const e2eEmail = process.env.AGENT_E2E_EMAIL?.trim() || "system+corgtex@corgtex.local";
-  const e2ePassword = process.env.AGENT_E2E_PASSWORD?.trim() || "corgtex-test-agent-pw";
-  
-  const existingE2eUser = await prisma.user.findUnique({
-    where: { email: e2eEmail },
-    select: { id: true }
-  });
+  if (process.env.SEED_E2E_USER?.trim().toLowerCase() === "true") {
+    const e2eEmail = required("AGENT_E2E_EMAIL").toLowerCase();
+    const e2ePassword = required("AGENT_E2E_PASSWORD");
 
-  const e2eUser = existingE2eUser 
-    ? await prisma.user.update({
-        where: { email: e2eEmail },
-        data: { 
-          displayName: "E2E UI Testing Agent",
-          passwordHash: hashPassword(e2ePassword) 
-        }
-    })
-    : await prisma.user.create({
-        data: {
-          email: e2eEmail,
-          displayName: "E2E UI Testing Agent",
-          passwordHash: hashPassword(e2ePassword)
-        }
+    const existingE2eUser = await prisma.user.findUnique({
+      where: { email: e2eEmail },
+      select: { id: true }
     });
 
-  await prisma.member.upsert({
-    where: { workspaceId_userId: { workspaceId: workspace.id, userId: e2eUser.id } },
-    update: { role: "ADMIN", isActive: true },
-    create: { workspaceId: workspace.id, userId: e2eUser.id, role: "ADMIN", isActive: true },
-  });
+    const e2eUser = existingE2eUser
+      ? await prisma.user.update({
+          where: { email: e2eEmail },
+          data: {
+            displayName: "E2E UI Testing Agent",
+            passwordHash: hashPassword(e2ePassword)
+          }
+      })
+      : await prisma.user.create({
+          data: {
+            email: e2eEmail,
+            displayName: "E2E UI Testing Agent",
+            passwordHash: hashPassword(e2ePassword)
+          }
+      });
+
+    await prisma.member.upsert({
+      where: { workspaceId_userId: { workspaceId: workspace.id, userId: e2eUser.id } },
+      update: { role: "ADMIN", isActive: true },
+      create: { workspaceId: workspace.id, userId: e2eUser.id, role: "ADMIN", isActive: true },
+    });
+  }
 
   await prisma.approvalPolicy.upsert({
     where: {

@@ -22,28 +22,23 @@ try {
   // 1. Prisma Migrations
   console.log("[start-web] Step 1: Database Migrations");
 
-
-
   run(prismaBin, ["migrate", "deploy"]);
 
-  // 2. Seeds
-  console.log("[start-web] Step 2: Running Seeds");
-  run(process.execPath, [path.join(rootDir, "prisma", "seed.mjs")]);
+  if (process.env.SEED_SCRIPTS) {
+    console.log("[start-web] Step 2: Running explicitly configured seed scripts");
+    const seedScripts = process.env.SEED_SCRIPTS.split(",").filter(Boolean);
 
-  // Default: SaaS multi-tenant seeds. Enterprise deploys override via SEED_SCRIPTS env var.
-  const defaultSeeds = ["scripts/seed-corgtex.mjs", "scripts/seed-jnj-demo.mjs"];
-  const seedScripts = process.env.SEED_SCRIPTS
-    ? process.env.SEED_SCRIPTS.split(",").filter(Boolean)
-    : defaultSeeds;
-
-  for (const script of seedScripts) {
-    const resolved = path.resolve(rootDir, script);
-    if (!existsSync(resolved)) {
-      console.warn(`[start-web] ⚠️  Seed script not found, skipping: ${script}`);
-      continue;
+    for (const script of seedScripts) {
+      const resolved = path.resolve(rootDir, script);
+      if (!existsSync(resolved)) {
+        console.warn(`[start-web] Seed script not found, skipping: ${script}`);
+        continue;
+      }
+      console.log(`[start-web] Running seed: ${script}`);
+      run(process.execPath, [resolved]);
     }
-    console.log(`[start-web] Running seed: ${script}`);
-    run(process.execPath, [resolved]);
+  } else {
+    console.log("[start-web] Step 2: No seed scripts configured");
   }
 
   // 2.5. DB Health Check Audit

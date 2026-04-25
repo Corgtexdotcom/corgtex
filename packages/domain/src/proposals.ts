@@ -9,7 +9,8 @@ import { privacyFilter } from "./privacy";
 export async function listProposals(actor: AppActor, workspaceId: string, opts?: { take?: number; skip?: number; circleId?: string | null }) {
   const take = opts?.take ?? 20;
   const skip = opts?.skip ?? 0;
-  const where: any = { workspaceId, ...privacyFilter(actor) };
+  const membership = await requireWorkspaceMembership({ actor, workspaceId });
+  const where: any = { workspaceId, ...privacyFilter(actor, membership) };
   if (opts?.circleId !== undefined) {
     where.circleId = opts.circleId;
   }
@@ -46,9 +47,13 @@ export async function getProposal(actor: AppActor, params: {
   workspaceId: string;
   proposalId: string;
 }) {
-  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
-  const proposal = await prisma.proposal.findUnique({
-    where: { id: params.proposalId },
+  const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  const proposal = await prisma.proposal.findFirst({
+    where: {
+      id: params.proposalId,
+      workspaceId: params.workspaceId,
+      ...privacyFilter(actor, membership),
+    },
     include: {
       author: { select: { id: true, displayName: true, email: true } },
       circle: { select: { id: true, name: true } },
@@ -63,7 +68,7 @@ export async function getProposal(actor: AppActor, params: {
       },
     },
   });
-  invariant(proposal && proposal.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Proposal not found.");
+  invariant(proposal, 404, "NOT_FOUND", "Proposal not found.");
   return proposal;
 }
 
