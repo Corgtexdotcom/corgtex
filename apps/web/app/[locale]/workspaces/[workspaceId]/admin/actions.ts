@@ -1,8 +1,8 @@
 "use server";
 
 import { requirePageActor } from "@/lib/auth";
-import { asString, asOptional, refresh } from "../action-utils";
-import { adminTriggerPasswordReset, adminAddToWorkspace, adminRemoveFromWorkspace } from "@corgtex/domain";
+import { asString, refresh } from "../action-utils";
+import { adminTriggerPasswordReset, adminAddToWorkspace, adminRemoveFromWorkspace, isGlobalOperator } from "@corgtex/domain";
 import { sendEmail, prisma } from "@corgtex/shared";
 import { notFound } from "next/navigation";
 
@@ -12,7 +12,7 @@ async function verifyGlobalAdmin(workspaceId: string) {
     where: { id: workspaceId }
   });
 
-  if (!workspace || workspace.slug !== "corgtex" || actor.kind !== "user" || actor.user.email !== "janbrezina@icloud.com") {
+  if (!workspace || !isGlobalOperator(actor)) {
     notFound();
   }
   return actor;

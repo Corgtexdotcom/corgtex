@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 vi.mock("@corgtex/shared", () => ({
   prisma: {
     tension: {
-      findUnique: vi.fn().mockResolvedValue({
+      findFirst: vi.fn().mockResolvedValue({
         id: "t-1",
         workspaceId: "ws-1",
         title: "Test tension",
@@ -30,8 +30,15 @@ describe("getTension", () => {
       workspaceId: "ws-1",
     });
 
-    expect(prisma.tension.findUnique).toHaveBeenCalledWith({
-      where: { id: "t-1" },
+    expect(prisma.tension.findFirst).toHaveBeenCalledWith({
+      where: {
+        id: "t-1",
+        workspaceId: "ws-1",
+        OR: [
+          { isPrivate: false },
+          { isPrivate: true, authorUserId: "u-1" },
+        ],
+      },
       include: {
         author: { select: { id: true, displayName: true, email: true } },
         circle: { select: { id: true, name: true } },
@@ -41,5 +48,15 @@ describe("getTension", () => {
     });
 
     expect(result.title).toBe("Test tension");
+  });
+
+  it("does not expose private tensions to non-authors by direct id", async () => {
+    const { getTension } = await import("./tensions");
+    const { prisma } = await import("@corgtex/shared");
+
+    vi.mocked(prisma.tension.findFirst).mockResolvedValueOnce(null);
+
+    const actor = { kind: "user", user: { id: "u-2" } } as any;
+    await expect(getTension(actor, { workspaceId: "ws-1", tensionId: "t-private" })).rejects.toThrow("Tension not found.");
   });
 });

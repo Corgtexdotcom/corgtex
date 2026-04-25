@@ -10,7 +10,8 @@ import { privacyFilter } from "./privacy";
 export async function listActions(actor: AppActor, workspaceId: string, opts?: { take?: number; skip?: number }) {
   const take = opts?.take ?? 20;
   const skip = opts?.skip ?? 0;
-  const where = { workspaceId, ...privacyFilter(actor) };
+  const membership = await requireWorkspaceMembership({ actor, workspaceId });
+  const where = { workspaceId, ...privacyFilter(actor, membership) };
   
   const [items, total] = await Promise.all([
     prisma.action.findMany({

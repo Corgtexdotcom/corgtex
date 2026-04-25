@@ -3,15 +3,10 @@ import type { AppActor } from "@corgtex/shared";
 import { AppError } from "./errors";
 import { requestPasswordReset } from "./password-reset";
 import { createMember } from "./members";
-
-function requireGlobalAdmin(actor: AppActor) {
-  if (actor.kind !== "user" || actor.user.email !== "janbrezina@icloud.com") {
-    throw new AppError(403, "FORBIDDEN", "Only global admins can perform this action.");
-  }
-}
+import { requireGlobalOperator } from "./auth";
 
 export async function listAllWorkspaces(actor: AppActor) {
-  requireGlobalAdmin(actor);
+  requireGlobalOperator(actor);
   const workspaces = await prisma.workspace.findMany({
     orderBy: { createdAt: "desc" },
     include: {
@@ -30,7 +25,7 @@ export async function listAllWorkspaces(actor: AppActor) {
 }
 
 export async function listAllUsers(actor: AppActor) {
-  requireGlobalAdmin(actor);
+  requireGlobalOperator(actor);
   return prisma.user.findMany({
     orderBy: { email: "asc" },
     include: {
@@ -44,7 +39,7 @@ export async function listAllUsers(actor: AppActor) {
 }
 
 export async function adminTriggerPasswordReset(actor: AppActor, email: string) {
-  requireGlobalAdmin(actor);
+  requireGlobalOperator(actor);
   
   const result = await requestPasswordReset(email);
   if (!result) {
@@ -58,7 +53,7 @@ export async function adminAddToWorkspace(actor: AppActor, params: {
   workspaceId: string;
   role: "CONTRIBUTOR" | "FACILITATOR" | "FINANCE_STEWARD" | "ADMIN";
 }) {
-  requireGlobalAdmin(actor);
+  requireGlobalOperator(actor);
   
   const user = await prisma.user.findUnique({
     where: { id: params.userId },
@@ -77,7 +72,7 @@ export async function adminAddToWorkspace(actor: AppActor, params: {
 export async function adminRemoveFromWorkspace(actor: AppActor, params: {
   memberId: string;
 }) {
-  requireGlobalAdmin(actor);
+  requireGlobalOperator(actor);
   
   // Hard delete member.
   await prisma.member.delete({
