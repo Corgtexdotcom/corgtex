@@ -60,4 +60,44 @@ describe("listActorWorkspaces", () => {
       where: { id: { in: ["env-ws"] } },
     }));
   });
+
+  it("lists every workspace for global operators", async () => {
+    findMany.mockResolvedValue([]);
+
+    const { listActorWorkspaces, requireWorkspaceMembership } = await import("./auth");
+
+    await listActorWorkspaces({
+      kind: "user",
+      user: {
+        id: "user-1",
+        email: "operator@example.com",
+        displayName: "Operator",
+        globalRole: "OPERATOR",
+      },
+    });
+
+    expect(findMany.mock.calls[0]?.[0].where).toBeUndefined();
+
+    const membership = await requireWorkspaceMembership({
+      actor: {
+        kind: "user",
+        user: {
+          id: "user-1",
+          email: "operator@example.com",
+          displayName: "Operator",
+          globalRole: "OPERATOR",
+        },
+      },
+      workspaceId: "ws-1",
+      allowedRoles: ["ADMIN"],
+    });
+
+    expect(membership).toEqual({
+      id: "global-operator",
+      workspaceId: "ws-1",
+      userId: "user-1",
+      role: "ADMIN",
+      isActive: true,
+    });
+  });
 });

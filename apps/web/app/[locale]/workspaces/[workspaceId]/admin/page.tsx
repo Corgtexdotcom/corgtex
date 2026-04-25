@@ -1,7 +1,7 @@
 import { requirePageActor } from "@/lib/auth";
 import { notFound } from "next/navigation";
 import { prisma } from "@corgtex/shared";
-import { listAllWorkspaces, listAllUsers } from "@corgtex/domain";
+import { isGlobalOperator, listAllWorkspaces, listAllUsers } from "@corgtex/domain";
 import { AdminDashboardClient } from "./AdminDashboardClient";
 
 export default async function GlobalAdminPage({ params }: { params: Promise<{ workspaceId: string }> }) {
@@ -12,7 +12,7 @@ export default async function GlobalAdminPage({ params }: { params: Promise<{ wo
     where: { id: workspaceId }
   });
 
-  if (!workspace || workspace.slug !== "corgtex" || actor.kind !== "user" || actor.user.email !== "janbrezina@icloud.com") {
+  if (!workspace || !isGlobalOperator(actor)) {
     notFound();
   }
 

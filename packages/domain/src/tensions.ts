@@ -9,7 +9,8 @@ import { privacyFilter } from "./privacy";
 export async function listTensions(actor: AppActor, workspaceId: string, opts?: { take?: number; skip?: number }) {
   const take = opts?.take ?? 20;
   const skip = opts?.skip ?? 0;
-  const where = { workspaceId, ...privacyFilter(actor) };
+  const membership = await requireWorkspaceMembership({ actor, workspaceId });
+  const where = { workspaceId, ...privacyFilter(actor, membership) };
 
   const [items, total] = await Promise.all([
     prisma.tension.findMany({
@@ -289,9 +290,13 @@ export async function publishTension(actor: AppActor, params: {
 }
 
 export async function getTension(actor: AppActor, params: { workspaceId: string; tensionId: string }) {
-  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
-  const tension = await prisma.tension.findUnique({
-    where: { id: params.tensionId },
+  const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  const tension = await prisma.tension.findFirst({
+    where: {
+      id: params.tensionId,
+      workspaceId: params.workspaceId,
+      ...privacyFilter(actor, membership),
+    },
     include: {
       author: { select: { id: true, displayName: true, email: true } },
       circle: { select: { id: true, name: true } },
@@ -299,6 +304,6 @@ export async function getTension(actor: AppActor, params: { workspaceId: string;
       upvotes: true,
     },
   });
-  invariant(tension && tension.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Tension not found.");
+  invariant(tension, 404, "NOT_FOUND", "Tension not found.");
   return tension;
 }

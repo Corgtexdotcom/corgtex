@@ -15,6 +15,7 @@ export async function loginUserWithPassword(params: { email: string; password: s
       id: true,
       email: true,
       displayName: true,
+      globalRole: true,
       passwordHash: true,
     },
   });
@@ -41,6 +42,7 @@ export async function loginUserWithPassword(params: { email: string; password: s
       id: user.id,
       email: user.email,
       displayName: user.displayName,
+      globalRole: user.globalRole,
     },
   };
 }
@@ -91,6 +93,7 @@ export async function resolveSessionActor(token: string): Promise<AppActor | nul
           id: true,
           email: true,
           displayName: true,
+          globalRole: true,
         },
       },
     },
@@ -111,6 +114,16 @@ export async function resolveSessionActor(token: string): Promise<AppActor | nul
     kind: "user",
     user: session.user,
   };
+}
+
+export function isGlobalOperator(actor: AppActor) {
+  return actor.kind === "user" && actor.user.globalRole === "OPERATOR";
+}
+
+export function requireGlobalOperator(actor: AppActor) {
+  if (!isGlobalOperator(actor)) {
+    throw new AppError(403, "FORBIDDEN", "Only global operators can perform this action.");
+  }
 }
 
 export async function clearSession(token: string) {
@@ -150,9 +163,9 @@ export async function requireWorkspaceMembership(params: {
     return null;
   }
 
-  if (params.actor.user.email === "janbrezina@icloud.com") {
+  if (isGlobalOperator(params.actor)) {
     return {
-      id: "global-admin",
+      id: "global-operator",
       workspaceId: params.workspaceId,
       userId: params.actor.user.id,
       role: "ADMIN",
@@ -242,7 +255,7 @@ export async function listActorWorkspaces(actor: AppActor) {
     });
   }
 
-  if (actor.user.email === "janbrezina@icloud.com") {
+  if (isGlobalOperator(actor)) {
     return prisma.workspace.findMany({
       select: {
         id: true,
