@@ -2,6 +2,7 @@ import { requirePageActor } from "@/lib/auth";
 import { prisma } from "@corgtex/shared";
 import { createExpertiseTagAction, addMemberExpertiseAction } from "../../actions";
 import { listExpertiseTags } from "@corgtex/domain";
+import { getTranslations } from "next-intl/server";
 
 export const dynamic = "force-dynamic";
 
@@ -21,23 +22,24 @@ export default async function ExpertiseSettingsPage({
   });
 
   const allTags = await listExpertiseTags(actor, workspaceId);
+  const t = await getTranslations("settings");
 
   return (
     <>
       <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 32 }}>
-        <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2.5rem" }}>Expertise Tracking</h1>
+        <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2.5rem" }}>{t("expertisePageTitle")}</h1>
         <div className="nr-masthead-meta">
-          <span>Manage workspace expertise tags and self-declare your own skills.</span>
+          <span>{t("expertisePageDescription")}</span>
         </div>
       </header>
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "24px" }}>
         <section className="ws-section stack">
-          <h2 className="nr-section-header">Workspace Tags</h2>
-          <p className="muted">These tags help Corgtex route proposals to the right advisors.</p>
+          <h2 className="nr-section-header">{t("sectionWorkspaceTags")}</h2>
+          <p className="muted">{t("descWorkspaceTags")}</p>
           
           <div className="nr-filter-bar" style={{ flexWrap: "wrap" }}>
-            {allTags.length === 0 && <span className="muted">No tags defined yet.</span>}
+            {allTags.length === 0 && <span className="muted">{t("noTags")}</span>}
             {allTags.map(tag => (
               <span key={tag.id} className="nr-filter-item" title={tag.description || tag.slug}>
                 {tag.label}
@@ -47,28 +49,28 @@ export default async function ExpertiseSettingsPage({
 
           <details>
             <summary className="nr-hide-marker" style={{ cursor: "pointer", fontWeight: 600, color: "var(--accent)", marginTop: 16 }}>
-              + Add new tag
+              {t("btnAddTag")}
             </summary>
             <form action={createExpertiseTagAction} className="stack nr-form-section">
               <input type="hidden" name="workspaceId" value={workspaceId} />
               <label>
-                Label / Topic
-                <input name="label" required placeholder="e.g. React.js, HR Policies, Legal" />
+                {t("labelTopic")}
+                <input name="label" required placeholder={t("placeholderTopic")} />
               </label>
               <label>
-                Description (Optional)
-                <input name="description" placeholder="Brief explanation of this expertise" />
+                {t("labelDescription")}
+                <input name="description" placeholder={t("placeholderDescription")} />
               </label>
-              <button type="submit">Create Tag</button>
+              <button type="submit">{t("btnCreateTag")}</button>
             </form>
           </details>
         </section>
 
         <section className="ws-section stack">
-          <h2 className="nr-section-header">My Declared Expertise</h2>
+          <h2 className="nr-section-header">{t("sectionMyExpertise")}</h2>
           {member ? (
             <>
-              {member.expertise.length === 0 && <p className="muted">You haven&apos;t claimed any expertise yet.</p>}
+              {member.expertise.length === 0 && <p className="muted">{t("noClaimedExpertise")}</p>}
               <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
                 {member.expertise.map(exp => (
                   <div key={exp.id} className="nr-item" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
@@ -80,39 +82,39 @@ export default async function ExpertiseSettingsPage({
 
               <details>
                 <summary className="nr-hide-marker" style={{ cursor: "pointer", fontWeight: 600, color: "var(--accent)", marginTop: 16 }}>
-                  + Claim Expertise
+                  {t("btnClaimExpertise")}
                 </summary>
                 {allTags.length > 0 ? (
                   <form action={addMemberExpertiseAction} className="stack nr-form-section">
                     <input type="hidden" name="workspaceId" value={workspaceId} />
                     <input type="hidden" name="memberId" value={member.id} />
                     <label>
-                      Expertise Area
+                      {t("labelExpertiseArea")}
                       <select name="tagId" required>
-                        <option value="">-- Select Tag --</option>
+                        <option value="">{t("selectTag")}</option>
                         {allTags.map(tag => (
                           <option key={tag.id} value={tag.id}>{tag.label}</option>
                         ))}
                       </select>
                     </label>
                     <label>
-                      My Level
+                      {t("labelLevel")}
                       <select name="level" required defaultValue="PRACTITIONER">
-                        <option value="LEARNING">Learning (Some familiarity)</option>
-                        <option value="PRACTITIONER">Practitioner (Competent, daily use)</option>
-                        <option value="EXPERT">Expert (Go-to person)</option>
-                        <option value="AUTHORITY">Authority (Thought leader)</option>
+                        <option value="LEARNING">{t("levelLearning")}</option>
+                        <option value="PRACTITIONER">{t("levelPractitioner")}</option>
+                        <option value="EXPERT">{t("levelExpert")}</option>
+                        <option value="AUTHORITY">{t("levelAuthority")}</option>
                       </select>
                     </label>
-                    <button type="submit">Add to Profile</button>
+                    <button type="submit">{t("btnAddToProfile")}</button>
                   </form>
                 ) : (
-                  <p className="muted">Create some workspace tags first.</p>
+                  <p className="muted">{t("createTagsFirst")}</p>
                 )}
               </details>
             </>
           ) : (
-            <p className="muted">Unable to load your profile.</p>
+            <p className="muted">{t("profileUnavailable")}</p>
           )}
         </section>
       </div>
