@@ -11,11 +11,12 @@ import {
   resolveAgentRunAction,
   discardFailedJobAction,
 } from "../actions";
+import { getTranslations } from "next-intl/server";
 
 export const dynamic = "force-dynamic";
 
-function formatDateTime(value: Date | string | null | undefined) {
-  if (!value) return "Not set";
+function formatDateTime(value: Date | string | null | undefined, notSetStr: string) {
+  if (!value) return notSetStr;
   return new Date(value).toLocaleString("en-US", {
     month: "short",
     day: "numeric",
@@ -85,6 +86,7 @@ export default async function OperatorPage({
 }) {
   const { workspaceId } = await params;
   const actor = await requirePageActor();
+  const t = await getTranslations("operator");
   const [agentRuns, events, jobs, members, failedJobs, failingAgents] = await Promise.all([
     listAgentRuns(actor, workspaceId, { take: 15 }),
     listRuntimeEvents(actor, workspaceId, { take: 15 }),
@@ -101,58 +103,58 @@ export default async function OperatorPage({
     <>
       {failingAgents.length > 0 && (
         <div className="panel danger" style={{ marginBottom: 24 }}>
-          <strong>△ The following agents are failing:</strong> {failingAgents.join(", ")}. Please check the logs.
+          <strong>{t("agentsFailing", { agents: failingAgents.join(", ") })}</strong>
         </div>
       )}
       <div className="ws-page-header">
         <div className="row">
           <div>
-            <h1>Operator</h1>
-            <p>Agent runs, event dispatch, workflow jobs, and runtime inspection.</p>
+            <h1>{t("pageTitle")}</h1>
+            <p>{t("pageDescription")}</p>
           </div>
           <span className={`tag ${env.AGENT_KILL_SWITCH ? "warning" : ""}`}>
-            {env.AGENT_KILL_SWITCH ? "Kill switch active" : "Agents enabled"}
+            {env.AGENT_KILL_SWITCH ? t("killSwitchActive") : t("agentsEnabled")}
           </span>
         </div>
       </div>
 
       <section className="ws-section">
-        <h2>Agent runs</h2>
+        <h2>{t("sectionAgentRuns")}</h2>
         {canOperate && (
           <form action={triggerAgentRunAction} className="stack panel" style={{ marginBottom: 16 }}>
             <input type="hidden" name="workspaceId" value={workspaceId} />
             <div className="actions-inline">
               <label style={{ flex: 1 }}>
-                Agent
+                {t("formAgent")}
                 <select name="agentKey" defaultValue="proposal-drafting">
-                  <option value="inbox-triage">Inbox triage</option>
-                  <option value="meeting-summary">Meeting summary</option>
-                  <option value="action-extraction">Action extraction</option>
-                  <option value="proposal-drafting">Proposal drafting</option>
-                  <option value="constitution-update-trigger">Constitution update trigger</option>
-                  <option value="finance-reconciliation-prep">Finance reconciliation prep</option>
+                  <option value="inbox-triage">{t("agentInboxTriage")}</option>
+                  <option value="meeting-summary">{t("agentMeetingSummary")}</option>
+                  <option value="action-extraction">{t("agentActionExtraction")}</option>
+                  <option value="proposal-drafting">{t("agentProposalDrafting")}</option>
+                  <option value="constitution-update-trigger">{t("agentConstitutionUpdate")}</option>
+                  <option value="finance-reconciliation-prep">{t("agentFinancePrep")}</option>
                 </select>
               </label>
               <label style={{ flex: 1 }}>
-                Meeting ID
-                <input name="meetingId" placeholder="Optional" />
+                {t("formMeetingId")}
+                <input name="meetingId" placeholder={t("placeholderOptional")} />
               </label>
             </div>
             <div className="actions-inline">
               <label style={{ flex: 1 }}>
-                Proposal ID
-                <input name="proposalId" placeholder="Optional" />
+                {t("formProposalId")}
+                <input name="proposalId" placeholder={t("placeholderOptional")} />
               </label>
               <label style={{ flex: 1 }}>
-                Spend ID
-                <input name="spendId" placeholder="Optional" />
+                {t("formSpendId")}
+                <input name="spendId" placeholder={t("placeholderOptional")} />
               </label>
             </div>
             <label>
-              Prompt
-              <textarea name="prompt" placeholder="Required for proposal drafting. Optional guidance for other agents." />
+              {t("formPrompt")}
+              <textarea name="prompt" placeholder={t("placeholderPrompt")} />
             </label>
-            <button type="submit" disabled={env.AGENT_KILL_SWITCH}>Queue agent run</button>
+            <button type="submit" disabled={env.AGENT_KILL_SWITCH}>{t("btnQueueAgent")}</button>
           </form>
         )}
         <div className="list">
@@ -169,13 +171,13 @@ export default async function OperatorPage({
                     </div>
                     <strong>{run.goal}</strong>
                     <div className="muted">{summarizeRun(run)}</div>
-                    <div className="muted">Started {formatDateTime(run.startedAt ?? run.createdAt)}</div>
+                    <div className="muted">{`${t("startedAt")} ${formatDateTime(run.startedAt ?? run.createdAt, t("notSet"))}`}</div>
                   </div>
                   {run.status === "WAITING_APPROVAL" && canOperate && (
                     <form action={resolveAgentRunAction} className="actions-inline">
                       <input type="hidden" name="workspaceId" value={workspaceId} />
                       <input type="hidden" name="agentRunId" value={run.id} />
-                      <button type="submit" name="status" value="COMPLETED" className="small secondary">Mark Resolved</button>
+                      <button type="submit" name="status" value="COMPLETED" className="small secondary">{t("btnMarkResolved")}</button>
                     </form>
                   )}
                 </div>
@@ -187,7 +189,7 @@ export default async function OperatorPage({
                       ))}
                     </div>
                     <div className="muted">
-                      Usage {totalUsage.inputTokens} in · {totalUsage.outputTokens} out · {totalUsage.latencyMs} ms · {formatUsd(totalUsage.estimatedCostUsd)}
+                      {t("usageSummary", { input: totalUsage.inputTokens, output: totalUsage.outputTokens, latency: totalUsage.latencyMs, cost: formatUsd(totalUsage.estimatedCostUsd) })}
                     </div>
                     <div className="list">
                       {run.modelUsageSummary.map((usage) => (
@@ -225,7 +227,7 @@ export default async function OperatorPage({
 
       <div className="ws-columns">
         <section className="ws-section">
-          <h2>Events</h2>
+          <h2>{t("sectionEvents")}</h2>
           <div className="list">
             {events.map((event) => (
               <div className="item" key={event.id}>
@@ -234,14 +236,14 @@ export default async function OperatorPage({
                   <span className={`status-chip ${event.status === "FAILED" ? "warning" : ""}`}>{event.status}</span>
                 </div>
                 <div className="muted">
-                  {event.aggregateType ?? "Event"} · {formatDateTime(event.createdAt)} · attempts {event.attempts}
+                  {`${event.aggregateType ?? "Event"} · ${formatDateTime(event.createdAt, t("notSet"))} · ${t("labelAttempts")} ${event.attempts}`}
                 </div>
                 {event.error && <p className="muted" style={{ margin: "8px 0 0", color: "#b45309" }}>{event.error}</p>}
                 {canOperate && (
                   <form action={replayEventAction} style={{ marginTop: 8 }}>
                     <input type="hidden" name="workspaceId" value={workspaceId} />
                     <input type="hidden" name="eventId" value={event.id} />
-                    <button type="submit" className="secondary small">Replay</button>
+                    <button type="submit" className="secondary small">{t("btnReplay")}</button>
                   </form>
                 )}
               </div>
@@ -250,7 +252,7 @@ export default async function OperatorPage({
         </section>
 
         <section className="ws-section">
-          <h2>Workflow jobs</h2>
+          <h2>{t("sectionWorkflowJobs")}</h2>
           <div className="list">
             {jobs.map((job) => (
               <div className="item" key={job.id}>
@@ -259,14 +261,14 @@ export default async function OperatorPage({
                   <span className={`status-chip ${job.status === "FAILED" ? "warning" : ""}`}>{job.status}</span>
                 </div>
                 <div className="muted">
-                  Attempts {job.attempts} · run after {formatDateTime(job.runAfter)}
+                  {`${t("labelAttempts")} ${job.attempts} · ${t("labelRunAfter")} ${formatDateTime(job.runAfter, t("notSet"))}`}
                 </div>
                 {job.error && <p className="muted" style={{ margin: "8px 0 0", color: "#b45309" }}>{job.error}</p>}
                 {canOperate && (
                   <form action={replayWorkflowJobAction} style={{ marginTop: 8 }}>
                     <input type="hidden" name="workspaceId" value={workspaceId} />
                     <input type="hidden" name="workflowJobId" value={job.id} />
-                    <button type="submit" className="secondary small">Replay</button>
+                    <button type="submit" className="secondary small">{t("btnReplay")}</button>
                   </form>
                 )}
               </div>
@@ -275,10 +277,10 @@ export default async function OperatorPage({
         </section>
 
         <section className="ws-section">
-          <h2>Failed Jobs (DLQ)</h2>
+          <h2>{t("sectionFailedJobs")}</h2>
           <div className="list">
             {failedJobs.length === 0 ? (
-              <p className="muted">No failed jobs in the DLQ.</p>
+              <p className="muted">{t("noFailedJobs")}</p>
             ) : failedJobs.map((job) => (
               <div className="item" key={job.id}>
                 <div className="row">
@@ -286,7 +288,7 @@ export default async function OperatorPage({
                   <span className={`status-chip ${job.status === "FAILED" ? "warning" : ""}`}>{job.status}</span>
                 </div>
                 <div className="muted">
-                  Attempts {job.attempts} · failed {formatDateTime(job.updatedAt ?? job.createdAt)}
+                  {`${t("labelAttempts")} ${job.attempts} · ${t("labelFailedAt")} ${formatDateTime(job.updatedAt ?? job.createdAt, t("notSet"))}`}
                 </div>
                 {job.error && <p className="muted" style={{ margin: "8px 0 0", color: "#b45309" }}>{job.error}</p>}
                 {canOperate && (
@@ -294,12 +296,12 @@ export default async function OperatorPage({
                     <form action={replayWorkflowJobAction}>
                       <input type="hidden" name="workspaceId" value={workspaceId} />
                       <input type="hidden" name="workflowJobId" value={job.id} />
-                      <button type="submit" className="secondary small">Retry</button>
+                      <button type="submit" className="secondary small">{t("btnRetry")}</button>
                     </form>
                     <form action={discardFailedJobAction}>
                       <input type="hidden" name="workspaceId" value={workspaceId} />
                       <input type="hidden" name="workflowJobId" value={job.id} />
-                      <button type="submit" className="secondary small danger">Discard</button>
+                      <button type="submit" className="secondary small danger">{t("btnDiscard")}</button>
                     </form>
                   </div>
                 )}

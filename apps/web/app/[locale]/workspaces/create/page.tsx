@@ -1,33 +1,35 @@
 import { createWorkspaceAction } from "@/lib/workspace-actions";
 import { requirePageActor } from "@/lib/auth";
+import { getTranslations } from "next-intl/server";
 
 export const dynamic = "force-dynamic";
 
 
 export default async function CreateWorkspacePage() {
   await requirePageActor();
+  const t = await getTranslations("common");
 
   return (
     <main className="login-shell" style={{ maxWidth: 600, margin: "auto", paddingTop: 80 }}>
       <section className="panel">
-        <span className="tag">Unified interface</span>
-        <h1>Create Workspace</h1>
-        <p className="muted">Set up a new workspace for your team.</p>
+        <span className="tag">{t("unifiedInterface")}</span>
+        <h1>{t("createWorkspace")}</h1>
+        <p className="muted">{t("setupWorkspace")}</p>
         
         <form action={createWorkspaceAction} className="stack" style={{ marginTop: 24 }}>
           <label>
-            Name
-            <input name="name" required placeholder="My Awesome Team" />
+            {t("name")}
+            <input name="name" required placeholder={t("myAwesomeTeam")} />
           </label>
           <label>
-            Slug
-            <input name="slug" required pattern="[a-z0-9-]+" placeholder="team-slug" />
+            {t("slug")}
+            <input name="slug" required pattern="[a-z0-9-]+" placeholder={t("teamSlug")} />
           </label>
           <label>
-            Description
-            <textarea name="description" placeholder="What is this workspace for?" />
+            {t("description")}
+            <textarea name="description" placeholder={t("whatIsThisWorkspaceFor")} />
           </label>
-          <button type="submit">Create workspace</button>
+          <button type="submit">{t("createWorkspace")}</button>
         </form>
       </section>
     </main>

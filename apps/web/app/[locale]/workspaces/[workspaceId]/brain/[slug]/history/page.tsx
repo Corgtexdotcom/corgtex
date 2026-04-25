@@ -11,6 +11,7 @@ export default async function BrainArticleHistoryPage({
 }) {
   const { workspaceId, slug } = await params;
   const actor = await requirePageActor();
+  const t = await getTranslations("brain");
   const [article, versions] = await Promise.all([
     getArticle(actor, { workspaceId, slug }),
     listArticleVersions(actor, { workspaceId, slug }),

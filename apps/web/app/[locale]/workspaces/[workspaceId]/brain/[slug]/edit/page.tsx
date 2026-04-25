@@ -12,6 +12,7 @@ export default async function BrainArticleEditPage({
 }) {
   const { workspaceId, slug } = await params;
   const actor = await requirePageActor();
+  const t = await getTranslations("brain");
   const article = await getArticle(actor, { workspaceId, slug });
 
   return (
@@ -47,7 +48,7 @@ export default async function BrainArticleEditPage({
           </label>
         </div>
         <label>
-          Body (Markdown)
+          {t("bodyMd")}
           <textarea name="bodyMd" rows={20} defaultValue={article.bodyMd} required />
         </label>
         <label>
