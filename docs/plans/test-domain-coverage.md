@@ -28,6 +28,10 @@ lifecycle (auth → workspace → membership → roles → notifications → mee
 - Refactoring domain module code — tests are additive only.
 - Changes to any non-test source file.
 
+## Forbidden path justification
+
+- `packages/domain/src/auth.test.ts` matches the auth forbidden-path pattern, but this PR adds tests only and does not modify authentication source logic.
+
 ## Files to touch
 
 - `docs/plans/test-domain-coverage.md`
@@ -40,15 +44,15 @@ lifecycle (auth → workspace → membership → roles → notifications → mee
 
 ## Acceptance criteria
 
-- [ ] `auth.test.ts` covers: `loginUserWithPassword` (success, wrong password, missing email), `registerUser` (success, duplicate, short password), `resolveSessionActor` (valid, expired, null), `requireWorkspaceMembership` (user member, user non-member, agent allowed, agent blocked, global operator), `clearSession`, `isGlobalOperator`, `listActorWorkspaces` (user, agent, operator).
-- [ ] `members.test.ts` covers: `listMembers`, `createMember` (success, existing user/member upsert path), `inviteMember` (success, existing user/member path), `updateMember` (role change, missing member guard), `deactivateMember` (success, already deactivated guard), `getMemberProfile`.
-- [ ] `roles.test.ts` covers: `listRoles`, `createRole` (success, missing circle/name guards), `updateRole`, `deleteRole` (success, missing role guard), `assignRole` (success, missing member guard), `unassignRole`, `listRoleAssignments`.
-- [ ] `workspaces.test.ts` covers: `createWorkspace` (success, missing name), `listWorkspaces`.
-- [ ] `notifications.test.ts` covers: `listNotifications`, `countUnreadNotifications`, `markNotificationRead`, `markAllNotificationsRead`.
-- [ ] `meetings.test.ts` covers: `listMeetings`, `getMeeting` (found, not found), `createMeeting` (success, missing fields), `deleteMeeting`.
-- [ ] All tests use `vi.mock("@corgtex/shared")` with Prisma mocks, consistent with the existing test pattern in `auth.session.test.ts` and `circles.test.ts`.
-- [ ] `npm run test:unit` passes with 0 failures.
-- [ ] `npm run check` (lint + typecheck + prisma validate) passes.
+- [x] `auth.test.ts` covers: `loginUserWithPassword` (success, wrong password, missing email), `registerUser` (success, duplicate, short password), `resolveSessionActor` (valid, expired, null), `requireWorkspaceMembership` (user member, user non-member, agent allowed, agent blocked, global operator), `clearSession`, `isGlobalOperator`, `listActorWorkspaces` (user, agent, operator).
+- [x] `members.test.ts` covers: `listMembers`, `createMember` (success, existing user/member upsert path), `inviteMember` (success, existing user/member path), `updateMember` (role change, missing member guard), `deactivateMember` (success, already deactivated guard), `getMemberProfile`.
+- [x] `roles.test.ts` covers: `listRoles`, `createRole` (success, missing circle/name guards), `updateRole`, `deleteRole` (success, missing role guard), `assignRole` (success, missing member guard), `unassignRole`, `listRoleAssignments`.
+- [x] `workspaces.test.ts` covers: `createWorkspace` (success, missing name), `listWorkspaces`.
+- [x] `notifications.test.ts` covers: `listNotifications`, `countUnreadNotifications`, `markNotificationRead`, `markAllNotificationsRead`.
+- [x] `meetings.test.ts` covers: `listMeetings`, `getMeeting` (found, not found), `createMeeting` (success, missing fields), `deleteMeeting`.
+- [x] All tests use `vi.mock("@corgtex/shared")` with Prisma mocks, consistent with the existing test pattern in `auth.session.test.ts` and `circles.test.ts`.
+- [x] `npm run test:unit` passes with 0 failures.
+- [x] `npm run check` (lint + typecheck + prisma validate) passes.
 
 ## Test plan
 
@@ -70,4 +74,5 @@ migration. Safe to revert by deleting the test files. No ordering constraints.
 
 ## Labels this PR needs
 
-(none)
+- `forbidden-path-approved`
+- `large-change-approved`
