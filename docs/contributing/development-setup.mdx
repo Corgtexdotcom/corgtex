@@ -48,8 +48,17 @@ npm run prisma:generate
 # Apply migrations to your local Postgres container
 npm run prisma:migrate:deploy
 
-# Run the seed script to create the initial demo workspaces
+# Run the production bootstrap seed to create the configured workspace/admin baseline
 npm run prisma:seed
+
+# Optional: create the E2E UI user from AGENT_E2E_EMAIL / AGENT_E2E_PASSWORD
+npm run seed:e2e
+
+# Optional: load all demo fixtures explicitly
+npm run seed:demo
+
+# Optional: load only the JNJ demo fixture explicitly
+npm run seed:jnj-demo
 ```
 
 ## 5. Run the Application

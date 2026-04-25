@@ -1,5 +1,5 @@
 import type { BrainArticleType, BrainArticleAuthority } from "@prisma/client";
-import { getArticle, listArticles } from "@corgtex/domain";
+import { getArticle, listArticles, updateArticle } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { notFound } from "next/navigation";
 import Link from "next/link";
@@ -51,9 +51,12 @@ export default async function BrainArticlePage({
     const type = formData.get("type") as BrainArticleType;
     const authority = formData.get("authority") as BrainArticleAuthority;
     
-    await prisma.brainArticle.update({
-      where: { id: article.id },
-      data: { bodyMd, type, authority },
+    await updateArticle(actor, {
+      workspaceId,
+      slug,
+      bodyMd,
+      type,
+      authority,
     });
     
     revalidatePath(`/workspaces/${workspaceId}/brain/${slug}`);

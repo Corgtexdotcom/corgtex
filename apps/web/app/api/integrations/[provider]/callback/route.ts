@@ -1,7 +1,6 @@
 import { requirePageActor } from "@/lib/auth";
 import { type NextRequest, NextResponse } from "next/server";
-import { prisma } from "@corgtex/shared";
-import { requireWorkspaceMembership } from "@corgtex/domain";
+import { saveOAuthConnectionAndEnqueueCalendarSync } from "@corgtex/domain";
 
 export async function GET(request: NextRequest, props: { params: Promise<{ provider: string }> }) {
   const params = await props.params;
@@ -32,13 +31,6 @@ export async function GET(request: NextRequest, props: { params: Promise<{ provi
   }
 
   try {
-    if (workspaceId) {
-      await requireWorkspaceMembership({
-        actor,
-        workspaceId,
-      });
-    }
-
     if (provider === "google") {
       const clientId = process.env.GOOGLE_CLIENT_ID;
       const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
@@ -68,37 +60,15 @@ export async function GET(request: NextRequest, props: { params: Promise<{ provi
       const profileData = await profileResponse.json();
       if (!profileResponse.ok) throw new Error(profileData.error?.message || "Failed to fetch profile");
 
-      const connection = await prisma.oAuthConnection.upsert({
-        where: { userId_provider: { userId: actor.user.id, provider: "GOOGLE" } },
-        update: {
-          accessToken: tokenData.access_token,
-          refreshToken: tokenData.refresh_token || undefined,
-          expiresAt: tokenData.expires_in ? new Date(Date.now() + tokenData.expires_in * 1000) : null,
-          providerAccountId: profileData.id,
-          scopes: tokenData.scope?.split(" ") || [],
-        },
-        create: {
-          userId: actor.user.id,
-          provider: "GOOGLE",
-          accessToken: tokenData.access_token,
-          refreshToken: tokenData.refresh_token,
-          expiresAt: tokenData.expires_in ? new Date(Date.now() + tokenData.expires_in * 1000) : null,
-          providerAccountId: profileData.id,
-          scopes: tokenData.scope?.split(" ") || [],
-        },
+      await saveOAuthConnectionAndEnqueueCalendarSync(actor, {
+        workspaceId,
+        provider: "GOOGLE",
+        accessToken: String(tokenData.access_token),
+        refreshToken: typeof tokenData.refresh_token === "string" ? tokenData.refresh_token : null,
+        expiresIn: typeof tokenData.expires_in === "number" ? tokenData.expires_in : null,
+        providerAccountId: String(profileData.id),
+        scopes: typeof tokenData.scope === "string" ? tokenData.scope.split(" ") : [],
       });
-
-      if (workspaceId) {
-        await prisma.workflowJob.create({
-          data: {
-            workspaceId,
-            type: "calendar.sync",
-            payload: {
-              connectionId: connection.id,
-            },
-          },
-        });
-      }
 
       return NextResponse.redirect(new URL(`${returnUrl}?success=google_connected`, appUrl));
     }
@@ -132,37 +102,15 @@ export async function GET(request: NextRequest, props: { params: Promise<{ provi
       const profileData = await profileResponse.json();
       if (!profileResponse.ok) throw new Error(profileData.error?.message || "Failed to fetch profile");
 
-      const connection = await prisma.oAuthConnection.upsert({
-        where: { userId_provider: { userId: actor.user.id, provider: "MICROSOFT" } },
-        update: {
-          accessToken: tokenData.access_token,
-          refreshToken: tokenData.refresh_token || undefined,
-          expiresAt: tokenData.expires_in ? new Date(Date.now() + tokenData.expires_in * 1000) : null,
-          providerAccountId: profileData.id,
-          scopes: tokenData.scope?.split(" ") || [],
-        },
-        create: {
-          userId: actor.user.id,
-          provider: "MICROSOFT",
-          accessToken: tokenData.access_token,
-          refreshToken: tokenData.refresh_token,
-          expiresAt: tokenData.expires_in ? new Date(Date.now() + tokenData.expires_in * 1000) : null,
-          providerAccountId: profileData.id,
-          scopes: tokenData.scope?.split(" ") || [],
-        },
+      await saveOAuthConnectionAndEnqueueCalendarSync(actor, {
+        workspaceId,
+        provider: "MICROSOFT",
+        accessToken: String(tokenData.access_token),
+        refreshToken: typeof tokenData.refresh_token === "string" ? tokenData.refresh_token : null,
+        expiresIn: typeof tokenData.expires_in === "number" ? tokenData.expires_in : null,
+        providerAccountId: String(profileData.id),
+        scopes: typeof tokenData.scope === "string" ? tokenData.scope.split(" ") : [],
       });
-
-      if (workspaceId) {
-        await prisma.workflowJob.create({
-          data: {
-            workspaceId,
-            type: "calendar.sync",
-            payload: {
-              connectionId: connection.id,
-            },
-          },
-        });
-      }
 
       return NextResponse.redirect(new URL(`${returnUrl}?success=microsoft_connected`, appUrl));
     }
