@@ -1,5 +1,6 @@
 import { getBrainStatus, listArticles } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
+import { getTranslations } from "next-intl/server";
 
 export const dynamic = "force-dynamic";
 
@@ -11,6 +12,7 @@ export default async function BrainStatusPage({
 }) {
   const { workspaceId } = await params;
   const actor = await requirePageActor();
+  const t = await getTranslations("brain");
 
   const [status, { items: staleArticles }] = await Promise.all([
     getBrainStatus(actor, { workspaceId }),

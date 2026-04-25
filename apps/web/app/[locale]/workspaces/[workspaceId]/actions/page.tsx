@@ -6,6 +6,7 @@ import {
   deleteActionAction,
   publishActionAction,
 } from "../actions";
+import { getTranslations } from "next-intl/server";
 
 export const dynamic = "force-dynamic";
 
@@ -18,6 +19,7 @@ export default async function ActionsPage({
 }) {
   const { workspaceId } = await params;
   const actor = await requirePageActor();
+  const t = await getTranslations("actions");
   const [{ items: actions }, { items: proposals }] = await Promise.all([
     listActions(actor, workspaceId, { take: 50 }),
     listProposals(actor, workspaceId, { take: 50 }),
@@ -48,9 +50,9 @@ export default async function ActionsPage({
   return (
     <>
       <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 32 }}>
-        <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2.5rem" }}>Actions</h1>
+        <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2.5rem" }}>{t("pageTitle")}</h1>
         <div className="nr-masthead-meta">
-          <span>Tracked tasks, follow-ups, and commitments across circles.</span>
+          <span>{t("pageDescription")}</span>
         </div>
       </header>
 
@@ -62,18 +64,18 @@ export default async function ActionsPage({
               href={`?status=${s}`} 
               className={`nr-filter-item ${statusFilter === s ? "nr-filter-active" : ""}`}
             >
-              {s.replace("_", " ")} ({groupedActions[s].length})
+              {s === "PERSONAL" ? t("statusPersonal") : s === "OPEN" ? t("statusOpen") : s === "IN_PROGRESS" ? t("statusInProgress") : s === "COMPLETED" ? t("statusCompleted") : t("statusAll")} ({groupedActions[s].length})
             </a>
           ))}
         </div>
 
         <div>
-          {displayActions.length === 0 && <p className="muted">No actions found.</p>}
+          {displayActions.length === 0 && <p className="muted">{t("noActionsFound")}</p>}
           {displayActions.map((action) => (
             <div className="nr-item" key={action.id}>
               <div className="row" style={{ alignItems: "center" }}>
                 <strong className="nr-item-title">
-                  {action.isPrivate && <span title="Private (only visible to you)" style={{ marginRight: 6 }}>◆</span>}
+                  {action.isPrivate && <span title={t("privateTooltip")} style={{ marginRight: 6 }}>◆</span>}
                   {action.title}
                 </strong>
                 <span className={`tag ${action.status === "OPEN" ? "warning" : action.status === "IN_PROGRESS" ? "info" : "success"}`}>{action.status}</span>
@@ -81,10 +83,10 @@ export default async function ActionsPage({
               {action.bodyMd && <div className="nr-excerpt">{action.bodyMd}</div>}
               
               <div className="nr-item-meta" style={{ marginTop: 8 }}>
-                 Creator: {action.author.displayName || action.author.email} · {ageText(action.createdAt)}
-                 {action.assigneeMember && ` · Assignee: ${action.assigneeMember.user.displayName || action.assigneeMember.user.email}`}
-                 {action.dueAt && ` · Due: ${new Date(action.dueAt).toLocaleDateString()}`}
-                 {action.proposal && ` · Linked to Proposal: ${action.proposal.title}`}
+                 {t("metaCreator", { name: action.author.displayName || action.author.email })} · {ageText(action.createdAt)}
+                 {action.assigneeMember && ` · ${t("metaAssignee", { name: action.assigneeMember.user.displayName || action.assigneeMember.user.email })}`}
+                 {action.dueAt && ` · ${t("metaDue", { date: new Date(action.dueAt).toLocaleDateString() })}`}
+                 {action.proposal && ` · ${t("metaLinkedToProposal", { title: action.proposal.title })}`}
               </div>
 
               <div className="actions-inline" style={{ marginTop: 12 }}>
@@ -92,7 +94,7 @@ export default async function ActionsPage({
                   <form action={publishActionAction}>
                     <input type="hidden" name="workspaceId" value={workspaceId} />
                     <input type="hidden" name="actionId" value={action.id} />
-                    <button type="submit" className="primary small">Publish to Workspace</button>
+                    <button type="submit" className="primary small">{t("btnPublish")}</button>
                   </form>
                 )}
                 {!action.isPrivate && action.status === "OPEN" && (
@@ -100,7 +102,7 @@ export default async function ActionsPage({
                     <input type="hidden" name="workspaceId" value={workspaceId} />
                     <input type="hidden" name="actionId" value={action.id} />
                     <input type="hidden" name="status" value="IN_PROGRESS" />
-                    <button type="submit" className="secondary small">Start</button>
+                    <button type="submit" className="secondary small">{t("btnStart")}</button>
                   </form>
                 )}
                 {!action.isPrivate && (action.status === "OPEN" || action.status === "IN_PROGRESS") && (
@@ -108,7 +110,7 @@ export default async function ActionsPage({
                     <input type="hidden" name="workspaceId" value={workspaceId} />
                     <input type="hidden" name="actionId" value={action.id} />
                     <input type="hidden" name="status" value="COMPLETED" />
-                    <button type="submit" className="secondary small">Complete</button>
+                    <button type="submit" className="secondary small">{t("btnComplete")}</button>
                   </form>
                 )}
                 {!action.isPrivate && (action.status === "OPEN" || action.status === "IN_PROGRESS") && (
@@ -116,13 +118,13 @@ export default async function ActionsPage({
                     <input type="hidden" name="workspaceId" value={workspaceId} />
                     <input type="hidden" name="actionId" value={action.id} />
                     <input type="hidden" name="status" value="CANCELLED" />
-                    <button type="submit" className="warning small">Cancel</button>
+                    <button type="submit" className="warning small">{t("btnCancel")}</button>
                   </form>
                 )}
                 <form action={deleteActionAction}>
                   <input type="hidden" name="workspaceId" value={workspaceId} />
                   <input type="hidden" name="actionId" value={action.id} />
-                  <button type="submit" className="danger small">Delete</button>
+                  <button type="submit" className="danger small">{t("btnDelete")}</button>
                 </form>
               </div>
             </div>
@@ -133,22 +135,22 @@ export default async function ActionsPage({
       <section className="ws-section">
         <details open={resolvedSearch.open === "new"}>
           <summary className="nr-hide-marker" style={{ cursor: "pointer", fontWeight: 600, color: "var(--accent)" }}>
-            <span className="nr-section-header" style={{ borderTop: "none", display: "inline-block", padding: 0, margin: 0 }}>+ Create action</span>
+            <span className="nr-section-header" style={{ borderTop: "none", display: "inline-block", padding: 0, margin: 0 }}>{t("newActionTitle")}</span>
           </summary>
           <form action={createActionAction} className="stack nr-form-section">
             <input type="hidden" name="workspaceId" value={workspaceId} />
             <label>
-              Title
+              {t("formTitle")}
               <input name="title" required />
             </label>
             <label>
-              Notes
+              {t("formNotes")}
               <textarea name="bodyMd" />
             </label>
             <label>
-              Link to Proposal
+              {t("formLinkToProposal")}
               <select name="proposalId" defaultValue="">
-                <option value="">None</option>
+                <option value="">{t("formNone")}</option>
                 {activeProposals.map((p) => (
                   <option value={p.id} key={p.id}>{p.title}</option>
                 ))}
@@ -156,9 +158,9 @@ export default async function ActionsPage({
             </label>
             <label style={{ display: "flex", alignItems: "center", gap: "8px", fontWeight: "normal", cursor: "pointer" }}>
               <input type="checkbox" name="isPrivate" defaultChecked />
-              <span>Private list (only visible to me)</span>
+              <span>{t("formPrivateList")}</span>
             </label>
-            <button type="submit">Create action</button>
+            <button type="submit">{t("btnCreateAction")}</button>
           </form>
         </details>
       </section>

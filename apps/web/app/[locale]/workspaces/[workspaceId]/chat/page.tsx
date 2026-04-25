@@ -1,5 +1,6 @@
 import { listConversations } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
+import { getTranslations } from "next-intl/server";
 import { ChatInterface } from "./ChatInterface";
 
 export const dynamic = "force-dynamic";
@@ -15,15 +16,16 @@ export default async function ChatPage({
   const { workspaceId } = await params;
   const { session: activeSessionId } = await searchParams;
   const actor = await requirePageActor();
+  const t = await getTranslations("chat");
 
   const { items: conversations } = await listConversations(actor, workspaceId, { take: 30 });
 
   return (
     <>
       <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 32 }}>
-        <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2.5rem" }}>Agent Chat</h1>
+        <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2.5rem" }}>{t("pageTitle")}</h1>
         <div className="nr-masthead-meta">
-          <span>Interact with Corgtex and your workspace data.</span>
+          <span>{t("pageDescription")}</span>
         </div>
       </header>
       <ChatInterface

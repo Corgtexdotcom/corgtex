@@ -13,6 +13,7 @@ import {
   triggerAgentRunAction,
 } from "../actions";
 import { prisma } from "@corgtex/shared";
+import { getTranslations } from "next-intl/server";
 
 export const dynamic = "force-dynamic";
 
@@ -22,11 +23,11 @@ function scoreColor(score: number): string {
   return "#842029";
 }
 
-function scoreLabel(score: number): string {
-  if (score >= 75) return "Mature";
-  if (score >= 50) return "Developing";
-  if (score >= 25) return "Emerging";
-  return "Initial";
+function scoreLabel(score: number, t: any): string {
+  if (score >= 75) return t("scoreLabelMature");
+  if (score >= 50) return t("scoreLabelDeveloping");
+  if (score >= 25) return t("scoreLabelEmerging");
+  return t("scoreLabelInitial");
 }
 
 export default async function GovernancePage({
@@ -36,6 +37,7 @@ export default async function GovernancePage({
 }) {
   const { workspaceId } = await params;
   const actor = await requirePageActor();
+  const t = await getTranslations("governance");
 
   const constitutionResult = await listConstitutionVersions(actor, workspaceId, { take: 10 }).catch(() => ({ items: [], total: 0 }));
   const constitutions = constitutionResult.items;
@@ -51,23 +53,23 @@ export default async function GovernancePage({
     <>
       <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 32 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
-          <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2.5rem" }}>Governance</h1>
+          <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2.5rem" }}>{t("pageTitle")}</h1>
           {!isDemo && (
             <div className="actions-inline">
               <form action={recalculateGovernanceScoreAction}>
                 <input type="hidden" name="workspaceId" value={workspaceId} />
-                <button type="submit" className="secondary small">Recalculate Score</button>
+                <button type="submit" className="secondary small">{t("btnRecalculate")}</button>
               </form>
               <form action={triggerAgentRunAction}>
                 <input type="hidden" name="workspaceId" value={workspaceId} />
                 <input type="hidden" name="agentKey" value="constitution-synthesis" />
-                <button type="submit" className="secondary small">Synthesize Constitution</button>
+                <button type="submit" className="secondary small">{t("btnSynthesize")}</button>
               </form>
             </div>
           )}
         </div>
         <div className="nr-masthead-meta">
-          <span>Organizational metrics, constitution, and approval policies.</span>
+          <span>{t("pageDescription")}</span>
         </div>
       </header>
 
@@ -75,7 +77,7 @@ export default async function GovernancePage({
       {latestScore ? (
         <div style={{ marginBottom: 48 }}>
           <div className="row" style={{ marginBottom: 16 }}>
-            <h2 className="nr-section-header" style={{ flex: 1, borderTop: "2px solid var(--text)", margin: 0 }}>Governance Maturity</h2>
+            <h2 className="nr-section-header" style={{ flex: 1, borderTop: "2px solid var(--text)", margin: 0 }}>{t("sectionGovernanceMaturity")}</h2>
             <div style={{
               fontSize: "1.5rem",
               fontWeight: 800,
@@ -84,7 +86,7 @@ export default async function GovernancePage({
             }}>
               {latestScore.overallScore}/100
               <span style={{ fontSize: "0.82rem", fontWeight: 600, marginLeft: 8 }}>
-                {scoreLabel(latestScore.overallScore)}
+                {scoreLabel(latestScore.overallScore, t)}
               </span>
             </div>
           </div>
@@ -93,38 +95,38 @@ export default async function GovernancePage({
               <strong style={{ color: scoreColor(latestScore.participationPct) }}>
                 {latestScore.participationPct}%
               </strong>
-              <span>Participation</span>
+              <span>{t("statParticipation")}</span>
             </div>
             <div className="ws-stat-card" style={{ border: "1px dashed var(--line)", background: "transparent", boxShadow: "none" }}>
               <strong style={{ color: scoreColor(Math.max(0, 100 - latestScore.decisionVelocityHrs)) }}>
                 {latestScore.decisionVelocityHrs}h
               </strong>
-              <span>Avg Decision Time</span>
+              <span>{t("statAvgDecisionTime")}</span>
             </div>
             <div className="ws-stat-card" style={{ border: "1px dashed var(--line)", background: "transparent", boxShadow: "none" }}>
               <strong style={{ color: scoreColor(latestScore.policyCoverage) }}>
                 {latestScore.policyCoverage}%
               </strong>
-              <span>Policy Coverage</span>
+              <span>{t("statPolicyCoverage")}</span>
             </div>
             <div className="ws-stat-card" style={{ border: "1px dashed var(--line)", background: "transparent", boxShadow: "none" }}>
               <strong style={{ color: scoreColor(latestScore.tensionResolutionPct) }}>
                 {latestScore.tensionResolutionPct}%
               </strong>
-              <span>Tension Resolution</span>
+              <span>{t("statTensionResolution")}</span>
             </div>
             <div className="ws-stat-card" style={{ border: "1px dashed var(--line)", background: "transparent", boxShadow: "none" }}>
               <strong style={{ color: scoreColor(latestScore.constitutionFreshness) }}>
                 {latestScore.constitutionFreshness}%
               </strong>
-              <span>Constitution Freshness</span>
+              <span>{t("statConstitutionFreshness")}</span>
             </div>
           </div>
 
           {scoreHistory.length > 1 && (
             <details style={{ marginTop: 8 }}>
               <summary className="nr-meta" style={{ cursor: "pointer", fontSize: "0.82rem" }}>
-                Score history ({scoreHistory.length} records)
+                {t("scoreHistory", { count: scoreHistory.length })}
               </summary>
               <div style={{ marginTop: 8 }}>
                 {scoreHistory.map((s) => (
@@ -145,14 +147,14 @@ export default async function GovernancePage({
         </div>
       ) : (
         <div style={{ marginBottom: 48 }}>
-          <p className="nr-item-meta">No governance score calculated yet. Click &ldquo;Recalculate Score&rdquo; above.</p>
+          <p className="nr-item-meta">{t("noGovernanceScore")}</p>
         </div>
       )}
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(340px, 1fr))", gap: "40px", marginBottom: 48 }}>
         {/* Constitution */}
         <div>
-          <h2 className="nr-section-header">Constitution</h2>
+          <h2 className="nr-section-header">{t("sectionConstitution")}</h2>
           {currentConstitution ? (
             <>
               <div className="row" style={{ marginBottom: 12 }}>
@@ -176,19 +178,19 @@ export default async function GovernancePage({
               </div>
               {currentConstitution.diffSummary && (
                 <div style={{ marginTop: 12, padding: 12, background: "var(--accent-soft)", borderRadius: 8, fontSize: "0.85rem" }}>
-                  <strong>Changes in v{currentConstitution.version}:</strong>
+                  <strong>{t("changesInVersion", { version: currentConstitution.version })}</strong>
                   <div style={{ marginTop: 4 }}>{currentConstitution.diffSummary}</div>
                 </div>
               )}
             </>
           ) : (
-            <p className="nr-item-meta">No constitution yet. Approve proposals to build a policy corpus, then synthesize.</p>
+            <p className="nr-item-meta">{t("noConstitution")}</p>
           )}
 
           {constitutions.length > 1 && (
             <details style={{ marginTop: 16 }}>
               <summary className="nr-meta" style={{ cursor: "pointer", fontSize: "0.82rem" }}>
-                Version history ({constitutions.length} versions)
+                {t("versionHistory", { count: constitutions.length })}
               </summary>
               <div style={{ marginTop: 8 }}>
                 {constitutions.map((c) => (
@@ -213,9 +215,9 @@ export default async function GovernancePage({
 
         {/* Policy Corpus */}
         <div>
-          <h2 className="nr-section-header">Policy Corpus ({policies.length})</h2>
+          <h2 className="nr-section-header">{t("sectionPolicyCorpus", { count: policies.length })}</h2>
           {policies.length === 0 ? (
-            <p className="nr-item-meta">No accepted policies yet. Submit and approve proposals to build the corpus.</p>
+            <p className="nr-item-meta">{t("noPolicies")}</p>
           ) : (
             <div>
               {policies.map((p) => (
@@ -225,11 +227,11 @@ export default async function GovernancePage({
                     {p.circle && <span className="tag">{p.circle.name}</span>}
                   </div>
                   <div className="nr-item-meta" style={{ fontSize: "0.82rem", marginTop: 4 }}>
-                    From: {p.proposal.title} &middot; Accepted {new Date(p.acceptedAt).toLocaleDateString()}
+                    {t("policyAccepted", { title: p.proposal.title, date: new Date(p.acceptedAt).toLocaleDateString() })}
                   </div>
                   <details style={{ marginTop: 8 }}>
                     <summary className="nr-meta" style={{ cursor: "pointer", fontSize: "0.82rem" }}>
-                      View policy text
+                      {t("viewPolicyText")}
                     </summary>
                     <div style={{
                       marginTop: 8,
@@ -253,9 +255,9 @@ export default async function GovernancePage({
 
       {/* Approval Policies */}
       <div style={{ marginTop: 20 }}>
-        <h2 className="nr-section-header">Approval Policies</h2>
+        <h2 className="nr-section-header">{t("sectionApprovalPolicies")}</h2>
         <p className="nr-item-meta" style={{ fontSize: "0.85rem", marginBottom: 16 }}>
-          Configure how decisions are made for proposals and spend requests.
+          {t("approvalPoliciesDesc")}
         </p>
         <div>
           {approvalPolicies.map((policy) => (
@@ -269,30 +271,30 @@ export default async function GovernancePage({
                 </div>
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12 }}>
                   <label>
-                    Mode
+                    {t("labelMode")}
                     <select name="mode" defaultValue={policy.mode}>
-                      <option value="CONSENT">Consent</option>
-                      <option value="CONSENSUS">Consensus</option>
-                      <option value="MAJORITY">Majority</option>
-                      <option value="SINGLE">Single</option>
+                      <option value="CONSENT">{t("modeConsent")}</option>
+                      <option value="CONSENSUS">{t("modeConsensus")}</option>
+                      <option value="MAJORITY">{t("modeMajority")}</option>
+                      <option value="SINGLE">{t("modeSingle")}</option>
                     </select>
                   </label>
                   <label>
-                    Quorum %
+                    {t("labelQuorum")}
                     <input type="number" name="quorumPercent" defaultValue={policy.quorumPercent} min={0} max={100} />
                   </label>
                   <label>
-                    Min Approvers
+                    {t("labelMinApprovers")}
                     <input type="number" name="minApproverCount" defaultValue={policy.minApproverCount} min={1} />
                   </label>
                   <label>
-                    Decision Window (hours)
+                    {t("labelDecisionWindow")}
                     <input type="number" name="decisionWindowHours" defaultValue={policy.decisionWindowHours} min={1} />
                   </label>
                 </div>
                 {!isDemo && (
                   <div style={{ marginTop: 12 }}>
-                    <button type="submit" className="secondary small">Update Policy</button>
+                    <button type="submit" className="secondary small">{t("btnUpdatePolicy")}</button>
                   </div>
                 )}
               </form>

@@ -20,6 +20,7 @@ import { prisma } from "@corgtex/shared";
 import { DeliberationThread } from "@/lib/components/DeliberationThread";
 import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
 import { listDeliberationEntries } from "@corgtex/domain";
+import { getTranslations } from "next-intl/server";
 
 export const dynamic = "force-dynamic";
 
@@ -39,6 +40,7 @@ export default async function FinancePage({
 }) {
   const { workspaceId } = await params;
   const actor = await requirePageActor();
+  const t = await getTranslations("finance");
   const resolvedSearch = searchParams ? await searchParams : {};
   const activeTab = typeof resolvedSearch.tab === "string" ? resolvedSearch.tab : "spends";
   const statusFilter = typeof resolvedSearch.status === "string" ? resolvedSearch.status : "ALL";
@@ -81,30 +83,30 @@ export default async function FinancePage({
     : spends.filter((s) => s.status === statusFilter);
 
   const tabs = [
-    { key: "spends", label: "Spend Requests" },
-    { key: "accounts", label: "Ledger Accounts" },
+    { key: "spends", label: t("tabSpends") },
+    { key: "accounts", label: t("tabAccounts") },
   ];
 
   return (
     <>
       <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 32 }}>
-        <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2.5rem" }}>Finance</h1>
+        <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2.5rem" }}>{t("pageTitle")}</h1>
         <div className="nr-masthead-meta">
-          <span>Spend tracking, ledger accounts, and reconciliation.</span>
+          <span>{t("pageDescription")}</span>
         </div>
       </header>
 
       {/* Summary Bar */}
       <div className="nr-stat-bar">
-        <span className="nr-stat"><strong>{fmt(totalAll)}</strong> total</span>
+        <span className="nr-stat">{t("statTotal", { amount: fmt(totalAll) })}</span>
         <span className="nr-stat-sep">·</span>
-        <span className="nr-stat" style={{ color: "var(--warning)" }}><strong>{fmt(totalSubmitted)}</strong> pending</span>
+        <span className="nr-stat" style={{ color: "var(--warning)" }}>{t("statPending", { amount: fmt(totalSubmitted) })}</span>
         <span className="nr-stat-sep">·</span>
-        <span className="nr-stat"><strong>{fmt(totalApproved)}</strong> approved</span>
+        <span className="nr-stat">{t("statApproved", { amount: fmt(totalApproved) })}</span>
         <span className="nr-stat-sep">·</span>
-        <span className="nr-stat" style={{ color: "var(--success)" }}><strong>{fmt(totalPaid)}</strong> paid</span>
+        <span className="nr-stat" style={{ color: "var(--success)" }}>{t("statPaid", { amount: fmt(totalPaid) })}</span>
         <span className="nr-stat-sep">·</span>
-        <span className="nr-stat"><strong>{ledgerAccounts.length}</strong> accounts</span>
+        <span className="nr-stat">{t("statAccounts", { count: ledgerAccounts.length })}</span>
       </div>
 
       {/* Tab Bar */}
@@ -137,45 +139,45 @@ export default async function FinancePage({
       {activeTab === "spends" && (
         <section style={{ marginTop: 20 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" }}>
-            <h2 className="nr-section-header" style={{ margin: 0 }}>Spend Requests</h2>
+            <h2 className="nr-section-header" style={{ margin: 0 }}>{t("tabSpends")}</h2>
             {!isDemo && (
               <details className="fin-inline-create" style={{ position: "relative" }}>
-                <summary className="button button-primary" style={{ cursor: "pointer", listStyle: "none" }}>+ Add Spend Request</summary>
+                <summary className="button button-primary" style={{ cursor: "pointer", listStyle: "none" }}>{t("btnAddSpend")}</summary>
                 <div className="fin-dropdown" style={{ right: 0, minWidth: "320px", marginTop: "8px" }}>
                   <form action={createSpendAction} className="stack nr-form-section" style={{ marginTop: 0 }}>
                     <input type="hidden" name="workspaceId" value={workspaceId} />
                     <label>
-                      Amount ($)
+                      {t("colAmount")}
                       <input name="amount" type="number" step="0.01" min="0.01" required />
                     </label>
                     <div className="actions-inline">
                       <label style={{ flex: 1 }}>
-                        Currency
+                        {t("formCurrency")}
                         <input name="currency" defaultValue="USD" required />
                       </label>
                       <label style={{ flex: 1 }}>
-                        Category
+                        {t("formCategory")}
                         <input name="category" required />
                       </label>
                     </div>
                     <label>
-                      Description
+                      {t("formDescription")}
                       <textarea name="description" required />
                     </label>
                     <label>
-                      Vendor
+                      {t("colVendor")}
                       <input name="vendor" />
                     </label>
                     <label>
-                      Ledger Account
+                      {t("formLedgerAccount")}
                       <select name="ledgerAccountId" defaultValue="">
-                        <option value="">Unassigned</option>
+                        <option value="">{t("unassigned")}</option>
                         {ledgerAccounts.map((account) => (
                           <option key={account.id} value={account.id}>{account.name} ({account.currency})</option>
                         ))}
                       </select>
                     </label>
-                    <button type="submit">Create Spend Draft</button>
+                    <button type="submit">{t("btnCreateSpend")}</button>
                   </form>
                 </div>
               </details>
@@ -189,27 +191,27 @@ export default async function FinancePage({
                 href={`?tab=spends&status=${s}`}
                 className={`nr-filter-item ${statusFilter === s ? "nr-filter-active" : ""}`}
               >
-                {s === "ALL" ? "All" : s.charAt(0) + s.slice(1).toLowerCase()} ({statusCounts[s]})
+                {s === "ALL" ? t("filterAll") : s.charAt(0) + s.slice(1).toLowerCase()} ({statusCounts[s]})
               </Link>
             ))}
           </div>
 
-          {filteredSpends.length === 0 && <p className="muted" style={{ fontSize: "0.85rem", marginTop: 16 }}>No spend requests match this filter.</p>}
+          {filteredSpends.length === 0 && <p className="muted" style={{ fontSize: "0.85rem", marginTop: 16 }}>{t("noSpends")}</p>}
 
           {filteredSpends.length > 0 && (
             <div className="nr-table-wrap">
               <table className="nr-table">
                 <thead>
                   <tr>
-                    <th>Date</th>
-                    <th>Category</th>
-                    <th>Description</th>
-                    <th>Vendor</th>
-                    <th style={{ textAlign: "right" }}>Amount</th>
-                    <th>Status</th>
-                    <th>Account</th>
-                    <th>Reconciled</th>
-                    {!isDemo && <th>Actions</th>}
+                    <th>{t("colDate")}</th>
+                    <th>{t("formCategory")}</th>
+                    <th>{t("colDescription")}</th>
+                    <th>{t("colVendor")}</th>
+                    <th style={{ textAlign: "right" }}>{t("colAmount")}</th>
+                    <th>{t("colStatus")}</th>
+                    <th>{t("colAccount")}</th>
+                    <th>{t("statusReconciled")}</th>
+                    {!isDemo && <th>{t("colActions")}</th>}
                   </tr>
                 </thead>
                 <tbody>
@@ -243,7 +245,7 @@ export default async function FinancePage({
                             <form action={submitSpendAction} style={{ display: "inline" }}>
                               <input type="hidden" name="workspaceId" value={workspaceId} />
                               <input type="hidden" name="spendId" value={spend.id} />
-                              <button type="submit" className="fin-action-btn">Submit</button>
+                              <button type="submit" className="fin-action-btn">{t("btnSubmit")}</button>
                             </form>
                           )}
                           <details style={{ display: "inline-block" }}>
@@ -252,7 +254,7 @@ export default async function FinancePage({
                               <DeliberationThread 
                                 entries={(entriesMap.get(spend.id) || []).map((e: any) => ({
                                   ...e,
-                                  authorName: e.author?.displayName || e.author?.email || "Unknown",
+                                  authorName: e.author?.displayName || e.author?.email || t("unknownAuthor"),
                                   authorInitials: (e.author?.displayName || e.author?.email || "?").substring(0, 2).toUpperCase()
                                 }))} 
                                 canResolve={true}
@@ -266,9 +268,9 @@ export default async function FinancePage({
                                     postAction={postSpendDeliberationAction}
                                     hiddenFields={{ workspaceId, parentId: spend.id }}
                                     entryTypes={[
-                                      { value: "REACTION", label: "Comment", variant: "secondary" }, 
-                                      { value: "CONCERN", label: "Concern", variant: "warning" }, 
-                                      { value: "OBJECTION", label: "Objection", variant: "danger" }
+                                      { value: "REACTION", label: t("typeComment"), variant: "secondary" }, 
+                                      { value: "CONCERN", label: t("typeConcern"), variant: "warning" }, 
+                                      { value: "OBJECTION", label: t("typeObjection"), variant: "danger" }
                                     ]}
                                   />
                                 </div>
@@ -278,7 +280,7 @@ export default async function FinancePage({
                                 <form action={escalateSpendToProposalAction} className="fin-dropdown-form" style={{ marginTop: "16px" }}>
                                   <input type="hidden" name="workspaceId" value={workspaceId} />
                                   <input type="hidden" name="spendId" value={spend.id} />
-                                  <button type="submit" className="fin-action-btn" style={{ color: "var(--warning)" }}>Escalate to Proposal</button>
+                                  <button type="submit" className="fin-action-btn" style={{ color: "var(--warning)" }}>{t("btnEscalate")}</button>
                                 </form>
                               )}
 
@@ -288,23 +290,23 @@ export default async function FinancePage({
                                   <input type="hidden" name="spendId" value={spend.id} />
                                   <input
                                     name="receiptUrl"
-                                    placeholder="Receipt URL"
+                                    placeholder={t("placeholderReceiptUrl")}
                                     defaultValue={spend.receiptUrl ?? ""}
                                     required
                                   />
-                                  <button type="submit" className="fin-action-btn fin-action-pay">Mark paid</button>
+                                  <button type="submit" className="fin-action-btn fin-action-pay">{t("btnMarkPaid")}</button>
                                 </form>
                               )}
                               <form action={linkSpendLedgerAccountAction} className="fin-dropdown-form">
                                 <input type="hidden" name="workspaceId" value={workspaceId} />
                                 <input type="hidden" name="spendId" value={spend.id} />
                                 <select name="ledgerAccountId" defaultValue={spend.ledgerAccountId ?? ""}>
-                                  <option value="">Unlinked</option>
+                                  <option value="">{t("unlinked")}</option>
                                   {ledgerAccounts.map((a) => (
                                     <option key={a.id} value={a.id}>{a.name}</option>
                                   ))}
                                 </select>
-                                <button type="submit" className="fin-action-btn">Link</button>
+                                <button type="submit" className="fin-action-btn">{t("btnLink")}</button>
                               </form>
                               {spend.status === "PAID" && (
                                 <>
@@ -313,24 +315,24 @@ export default async function FinancePage({
                                     <input type="hidden" name="spendId" value={spend.id} />
                                     <input
                                       name="storageKey"
-                                      placeholder="Statement storage key"
+                                      placeholder={t("placeholderStorageKey")}
                                       defaultValue={spend.statementStorageKey ?? ""}
                                       required
                                     />
-                                    <input name="fileName" placeholder="File name" defaultValue={spend.statementFileName ?? ""} />
-                                    <input name="mimeType" placeholder="MIME type" defaultValue={spend.statementMimeType ?? ""} />
-                                    <button type="submit" className="fin-action-btn">Attach statement</button>
+                                    <input name="fileName" placeholder={t("placeholderFileName")} defaultValue={spend.statementFileName ?? ""} />
+                                    <input name="mimeType" placeholder={t("placeholderMimeType")} defaultValue={spend.statementMimeType ?? ""} />
+                                    <button type="submit" className="fin-action-btn">{t("btnAttachStatement")}</button>
                                   </form>
                                   <form action={updateSpendReconciliationAction} className="fin-dropdown-form">
                                     <input type="hidden" name="workspaceId" value={workspaceId} />
                                     <input type="hidden" name="spendId" value={spend.id} />
                                     <select name="status" defaultValue={spend.reconciliationStatus}>
-                                      <option value="PENDING">Pending</option>
-                                      <option value="STATEMENT_ATTACHED">Statement</option>
-                                      <option value="RECONCILED">Reconciled</option>
+                                      <option value="PENDING">{t("statusPending")}</option>
+                                      <option value="STATEMENT_ATTACHED">{t("statusStatement")}</option>
+                                      <option value="RECONCILED">{t("statusReconciled")}</option>
                                     </select>
-                                    <input name="note" placeholder="Note" defaultValue={spend.reconciliationNote ?? ""} />
-                                    <button type="submit" className="fin-action-btn">Save</button>
+                                    <input name="note" placeholder={t("placeholderNote")} defaultValue={spend.reconciliationNote ?? ""} />
+                                    <button type="submit" className="fin-action-btn">{t("btnSave")}</button>
                                   </form>
                                 </>
                               )}
@@ -351,47 +353,47 @@ export default async function FinancePage({
       {activeTab === "accounts" && (
         <section style={{ marginTop: 20 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" }}>
-            <h2 className="nr-section-header" style={{ margin: 0 }}>Ledger Accounts</h2>
+            <h2 className="nr-section-header" style={{ margin: 0 }}>{t("ledgerAccounts")}</h2>
             {!isDemo && (
               <details className="fin-inline-create" style={{ position: "relative" }}>
-                <summary className="button button-primary" style={{ cursor: "pointer", listStyle: "none" }}>+ Add Ledger Account</summary>
+                <summary className="button button-primary" style={{ cursor: "pointer", listStyle: "none" }}>{t("btnAddAccount")}</summary>
                 <div className="fin-dropdown" style={{ right: 0, minWidth: "320px", marginTop: "8px" }}>
                   <form action={createLedgerAccountAction} className="stack nr-form-section" style={{ marginTop: 0 }}>
                     <input type="hidden" name="workspaceId" value={workspaceId} />
                     <label>
-                      Account Name
+                      {t("colAccountName")}
                       <input name="name" required />
                     </label>
                     <div className="actions-inline">
                       <label style={{ flex: 1 }}>
-                        Currency
+                        {t("formCurrency")}
                         <input name="currency" defaultValue="USD" required />
                       </label>
                       <label style={{ flex: 1 }}>
-                        Type
+                        {t("formType")}
                         <input name="type" defaultValue="MANUAL" />
                       </label>
                     </div>
                     <label>
-                      Opening Balance (cents)
+                      {t("formOpeningBalance")}
                       <input name="balanceCents" type="number" defaultValue={0} />
                     </label>
-                    <button type="submit">Create Account</button>
+                    <button type="submit">{t("btnCreateAccount")}</button>
                   </form>
                 </div>
               </details>
             )}
           </div>
-          {ledgerAccounts.length === 0 && <p className="muted">No ledger accounts defined yet.</p>}
+          {ledgerAccounts.length === 0 && <p className="muted">{t("noAccounts")}</p>}
           <div className="nr-table-wrap">
             <table className="nr-table">
               <thead>
                 <tr>
-                  <th>Account Name</th>
-                  <th>Type</th>
-                  <th>Currency</th>
-                  <th style={{ textAlign: "right" }}>Balance</th>
-                  {!isDemo && <th>Actions</th>}
+                  <th>{t("colAccountName")}</th>
+                  <th>{t("formType")}</th>
+                  <th>{t("formCurrency")}</th>
+                  <th style={{ textAlign: "right" }}>{t("colBalance")}</th>
+                  {!isDemo && <th>{t("colActions")}</th>}
                 </tr>
               </thead>
               <tbody>
@@ -406,15 +408,15 @@ export default async function FinancePage({
                     {!isDemo && (
                       <td>
                         <details style={{ display: "inline-block" }}>
-                          <summary className="fin-action-btn" style={{ cursor: "pointer" }}>Edit</summary>
+                          <summary className="fin-action-btn" style={{ cursor: "pointer" }}>{t("btnEdit")}</summary>
                           <div className="fin-dropdown">
                             <form action={updateLedgerAccountAction} className="fin-dropdown-form">
                               <input type="hidden" name="workspaceId" value={workspaceId} />
                               <input type="hidden" name="accountId" value={account.id} />
-                              <input name="name" defaultValue={account.name} placeholder="Name" />
-                              <input name="currency" defaultValue={account.currency} placeholder="Currency" />
-                              <input name="type" defaultValue={account.type} placeholder="Type" />
-                              <button type="submit" className="fin-action-btn">Save</button>
+                              <input name="name" defaultValue={account.name} placeholder={t("formAccountName")} />
+                              <input name="currency" defaultValue={account.currency} placeholder={t("formCurrency")} />
+                              <input name="type" defaultValue={account.type} placeholder={t("formType")} />
+                              <button type="submit" className="fin-action-btn">{t("btnSave")}</button>
                             </form>
                           </div>
                         </details>
