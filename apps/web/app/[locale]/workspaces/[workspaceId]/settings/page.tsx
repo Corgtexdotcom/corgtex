@@ -15,6 +15,7 @@ import { AgentSettingsClient } from "./agents/AgentSettingsClient";
 import { AgentBudgetManager } from "./agents/AgentBudgetManager";
 import { SsoConfigManager } from "./SsoConfigManager";
 import { DataSourcesManager } from "./DataSourcesManager";
+import { getTranslations, getFormatter } from "next-intl/server";
 
 export const dynamic = "force-dynamic";
 
@@ -93,13 +94,15 @@ export default async function SettingsPage({
   const protocol = host.includes("localhost") ? "http" : "https";
   const origin = `${protocol}://${host}`;
   const mcpUrl = `${origin}/api/mcp`;
+  const t = await getTranslations("settings");
+  const format = await getFormatter();
 
   return (
     <>
       <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 32 }}>
-        <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2.5rem" }}>Settings</h1>
+        <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2.5rem" }}>{t("pageTitle")}</h1>
         <div className="nr-masthead-meta">
-          <span>Workspace members, approval policies, and agent credentials.</span>
+          <span>{t("pageDescription")}</span>
         </div>
       </header>
 
@@ -109,19 +112,19 @@ export default async function SettingsPage({
           href={`/workspaces/${workspaceId}/settings?tab=general`}
           className={`nr-tab ${tab === "general" ? "nr-tab-active" : ""}`}
         >
-          General
+          {t("tabGeneral")}
         </a>
         <a
           href={`/workspaces/${workspaceId}/settings?tab=members`}
           className={`nr-tab ${tab === "members" ? "nr-tab-active" : ""}`}
         >
-          Members
+          {t("tabMembers")}
         </a>
         <a
           href={`/workspaces/${workspaceId}/settings?tab=data-sources`}
           className={`nr-tab ${tab === "data-sources" ? "nr-tab-active" : ""}`}
         >
-          Knowledge Sources
+          {t("tabKnowledgeSources")}
         </a>
       </div>
 
@@ -129,28 +132,28 @@ export default async function SettingsPage({
         <>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(340px, 1fr))", gap: "40px", marginBottom: 48 }}>
             <section>
-              <h2 className="nr-section-header">My Integrations</h2>
+              <h2 className="nr-section-header">{t("sectionMyIntegrations")}</h2>
               <p className="nr-item-meta" style={{ fontSize: "0.85rem", marginBottom: 16 }}>
-                Connect your personal accounts to give the agent access to your calendar and context.
+                {t("descMyIntegrations")}
               </p>
               <div>
                 <div className="nr-item" style={{ padding: "12px 0" }}>
                   <div className="row">
-                    <strong className="nr-item-title">Google Calendar</strong>
+                    <strong className="nr-item-title">{t("integrationGoogle")}</strong>
                     {userConnections.find((c) => c.provider === "GOOGLE") ? (
-                      <span className="tag" style={{ background: "var(--accent-soft)" }}>Connected</span>
+                      <span className="tag" style={{ background: "var(--accent-soft)" }}>{t("statusConnected")}</span>
                     ) : (
-                      <a href={`/api/integrations/google/connect?workspaceId=${workspaceId}`} className="button secondary small">Connect Google</a>
+                      <a href={`/api/integrations/google/connect?workspaceId=${workspaceId}`} className="button secondary small">{t("btnConnectGoogle")}</a>
                     )}
                   </div>
                 </div>
                 <div className="nr-item" style={{ padding: "12px 0" }}>
                   <div className="row">
-                    <strong className="nr-item-title">Microsoft Outlook</strong>
+                    <strong className="nr-item-title">{t("integrationMicrosoft")}</strong>
                     {userConnections.find((c) => c.provider === "MICROSOFT") ? (
-                      <span className="tag" style={{ background: "var(--accent-soft)" }}>Connected</span>
+                      <span className="tag" style={{ background: "var(--accent-soft)" }}>{t("statusConnected")}</span>
                     ) : (
-                      <a href={`/api/integrations/microsoft/connect?workspaceId=${workspaceId}`} className="button secondary small">Connect Microsoft</a>
+                      <a href={`/api/integrations/microsoft/connect?workspaceId=${workspaceId}`} className="button secondary small">{t("btnConnectMicrosoft")}</a>
                     )}
                   </div>
                 </div>
@@ -160,9 +163,9 @@ export default async function SettingsPage({
             <SsoConfigManager workspaceId={workspaceId} configs={ssoConfigs} />
 
             <section className="stack" style={{ gap: 40 }}>
-                 <h2 className="nr-section-header">Custom GPTs</h2>
+                 <h2 className="nr-section-header">{t("sectionCustomGpts")}</h2>
                  <p className="nr-item-meta" style={{ fontSize: "0.85rem", marginBottom: 16 }}>
-                   Set up a dedicated Custom GPT for your organization inside ChatGPT.
+                   {t("descCustomGpts")}
                  </p>
                  <CustomGptConnectionManager
                    workspaceId={workspaceId}
@@ -182,36 +185,36 @@ export default async function SettingsPage({
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(340px, 1fr))", gap: "40px" }}>
             {/* Outbound Webhooks */}
             <section>
-              <h2 className="nr-section-header">Outbound Webhooks</h2>
+              <h2 className="nr-section-header">{t("sectionOutboundWebhooks")}</h2>
               <p className="nr-item-meta" style={{ fontSize: "0.85rem", marginBottom: 16 }}>
-                Receive HTTP POST notifications when events occur in your workspace.
+                {t("descOutboundWebhooks")}
               </p>
 
               <details>
-                <summary className="nr-hide-marker nr-section-header" style={{ borderTop: "none", display: "inline-block", padding: 0, margin: 0, cursor: "pointer", color: "var(--accent)" }}>+ Add Webhook</summary>
+                <summary className="nr-hide-marker nr-section-header" style={{ borderTop: "none", display: "inline-block", padding: 0, margin: 0, cursor: "pointer", color: "var(--accent)" }}>{t("btnAddWebhook")}</summary>
                 <form action={createWebhookEndpointAction} className="stack nr-form-section" style={{ marginTop: 8 }}>
                   <input type="hidden" name="workspaceId" value={workspaceId} />
                   <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
                     <label>
-                      URL (HTTPS)
-                      <input name="url" type="url" required placeholder="https://example.com/webhook" />
+                      {t("labelWebhookUrl")}
+                      <input name="url" type="url" required placeholder={t("placeholderWebhookUrl")} />
                     </label>
                     <label>
-                      Label
-                      <input name="label" placeholder="My integration" />
+                      {t("labelWebhookLabel")}
+                      <input name="label" placeholder={t("placeholderWebhookLabel")} />
                     </label>
                   </div>
                   <label>
-                    Event types (comma-separated, leave empty for all)
-                    <input name="eventTypes" placeholder="proposal.submitted, meeting.created, action.created" />
+                    {t("labelEventTypes")}
+                    <input name="eventTypes" placeholder={t("placeholderEventTypes")} />
                   </label>
-                  <button type="submit" className="small">Add Webhook</button>
+                  <button type="submit" className="small">{t("btnSubmitAddWebhook")}</button>
                 </form>
               </details>
 
               <div>
                 {webhookEndpoints.length === 0 && (
-                  <p className="nr-item-meta">No outbound webhooks configured.</p>
+                  <p className="nr-item-meta">{t("noOutboundWebhooks")}</p>
                 )}
                 {webhookEndpoints.map((ep) => (
                   <div className="nr-item" key={ep.id} style={{ padding: "12px 0" }}>
@@ -233,9 +236,9 @@ export default async function SettingsPage({
                         Events: {ep.eventTypes.join(", ")}
                       </div>
                     )}
-                    <div className="nr-item-meta" style={{ fontSize: "0.82rem", marginTop: 2 }}>
-                      {"_count" in ep ? `${(ep as Record<string, unknown>)._count && typeof (ep as Record<string, unknown>)._count === "object" ? ((ep as Record<string, unknown>)._count as Record<string, number>).deliveries ?? 0 : 0} deliveries` : ""}
-                      {" · "}Created {new Date(ep.createdAt).toLocaleDateString()}
+                    <div className="nr-item-meta" style={{ fontSize: "0.82rem", marginTop: 2 }} suppressHydrationWarning>
+                      {"_count" in ep ? t("webhookDeliveries", { count: ((ep as Record<string, unknown>)._count && typeof (ep as Record<string, unknown>)._count === "object" ? ((ep as Record<string, unknown>)._count as Record<string, number>).deliveries ?? 0 : 0) }) : ""}
+                      {" · "}{t("createdOn")} {format.dateTime(new Date(ep.createdAt))}
                     </div>
                     <div className="actions-inline" style={{ marginTop: 8 }}>
                       {ep.status === "ACTIVE" ? (
@@ -243,25 +246,25 @@ export default async function SettingsPage({
                           <input type="hidden" name="workspaceId" value={workspaceId} />
                           <input type="hidden" name="endpointId" value={ep.id} />
                           <input type="hidden" name="status" value="PAUSED" />
-                          <button type="submit" className="secondary small">Pause</button>
+                          <button type="submit" className="secondary small">{t("btnPause")}</button>
                         </form>
                       ) : (
                         <form action={updateWebhookEndpointAction}>
                           <input type="hidden" name="workspaceId" value={workspaceId} />
                           <input type="hidden" name="endpointId" value={ep.id} />
                           <input type="hidden" name="status" value="ACTIVE" />
-                          <button type="submit" className="secondary small">Activate</button>
+                          <button type="submit" className="secondary small">{t("btnActivate")}</button>
                         </form>
                       )}
                       <form action={rotateWebhookSecretAction}>
                         <input type="hidden" name="workspaceId" value={workspaceId} />
                         <input type="hidden" name="endpointId" value={ep.id} />
-                        <button type="submit" className="secondary small">Rotate Secret</button>
+                        <button type="submit" className="secondary small">{t("btnRotateSecret")}</button>
                       </form>
                       <form action={deleteWebhookEndpointAction}>
                         <input type="hidden" name="workspaceId" value={workspaceId} />
                         <input type="hidden" name="endpointId" value={ep.id} />
-                        <button type="submit" className="danger small">Delete</button>
+                        <button type="submit" className="danger small">{t("btnDelete")}</button>
                       </form>
                     </div>
                   </div>
@@ -271,32 +274,32 @@ export default async function SettingsPage({
 
             {/* Inbound Webhooks */}
             <section>
-              <h2 className="nr-section-header">Inbound Webhooks</h2>
+              <h2 className="nr-section-header">{t("sectionInboundWebhooks")}</h2>
               <p className="nr-item-meta" style={{ fontSize: "0.85rem", marginBottom: 16 }}>
-                External systems can send events to <code style={{ fontSize: "0.8rem", background: "transparent", border: "1px dashed var(--line)" }}>/api/webhooks/{workspaceId}/ingest?source=slack|calendar|generic</code>
+                {t("descInboundWebhooks")} <code style={{ fontSize: "0.8rem", background: "transparent", border: "1px dashed var(--line)" }}>/api/webhooks/{workspaceId}/ingest?source=slack|calendar|generic</code>
               </p>
               <div>
                 {inboundWebhooks.length === 0 && (
-                  <p className="nr-item-meta">No inbound webhooks received yet.</p>
+                  <p className="nr-item-meta">{t("noInboundWebhooks")}</p>
                 )}
                 {inboundWebhooks.map((wh) => (
                   <div className="nr-item" key={wh.id} style={{ padding: "12px 0" }}>
                     <div className="row">
                       <span className="tag">{wh.source}</span>
-                      <span className="nr-item-meta" style={{ fontSize: "0.82rem" }}>
-                        {new Date(wh.createdAt).toLocaleString()}
+                      <span className="nr-item-meta" style={{ fontSize: "0.82rem" }} suppressHydrationWarning>
+                        {format.dateTime(new Date(wh.createdAt), { dateStyle: "short", timeStyle: "short" })}
                       </span>
                       {wh.processedAt ? (
-                        <span style={{ color: "var(--accent)", fontSize: "0.82rem" }}>Processed</span>
+                        <span style={{ color: "var(--accent)", fontSize: "0.82rem" }}>{t("statusProcessed")}</span>
                       ) : wh.error ? (
-                        <span style={{ color: "#842029", fontSize: "0.82rem" }}>Error</span>
+                        <span style={{ color: "#842029", fontSize: "0.82rem" }}>{t("statusError")}</span>
                       ) : (
-                        <span className="nr-item-meta" style={{ fontSize: "0.82rem" }}>Pending</span>
+                        <span className="nr-item-meta" style={{ fontSize: "0.82rem" }}>{t("statusPending")}</span>
                       )}
                     </div>
                     {wh.externalId && (
                       <div className="nr-item-meta" style={{ fontSize: "0.82rem", marginTop: 4 }}>
-                        External ID: {wh.externalId}
+                        {t("externalId", { id: wh.externalId })}
                       </div>
                     )}
                     {wh.error && (
