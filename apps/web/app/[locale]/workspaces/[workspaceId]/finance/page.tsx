@@ -83,8 +83,8 @@ export default async function FinancePage({
     : spends.filter((s) => s.status === statusFilter);
 
   const tabs = [
-    { key: "spends", label: t("spendRequests") },
-    { key: "accounts", label: t("ledgerAccounts") },
+    { key: "spends", label: t("tabSpends") },
+    { key: "accounts", label: t("tabAccounts") },
   ];
 
   return (
@@ -98,15 +98,15 @@ export default async function FinancePage({
 
       {/* Summary Bar */}
       <div className="nr-stat-bar">
-        <span className="nr-stat"><strong>{fmt(totalAll)}</strong> {t("total")}</span>
+        <span className="nr-stat">{t("statTotal", { amount: fmt(totalAll) })}</span>
         <span className="nr-stat-sep">·</span>
-        <span className="nr-stat" style={{ color: "var(--warning)" }}><strong>{fmt(totalSubmitted)}</strong> {t("statusPending")}</span>
+        <span className="nr-stat" style={{ color: "var(--warning)" }}>{t("statPending", { amount: fmt(totalSubmitted) })}</span>
         <span className="nr-stat-sep">·</span>
-        <span className="nr-stat"><strong>{fmt(totalApproved)}</strong> {t("approved")}</span>
+        <span className="nr-stat">{t("statApproved", { amount: fmt(totalApproved) })}</span>
         <span className="nr-stat-sep">·</span>
-        <span className="nr-stat" style={{ color: "var(--success)" }}><strong>{fmt(totalPaid)}</strong> {t("paid")}</span>
+        <span className="nr-stat" style={{ color: "var(--success)" }}>{t("statPaid", { amount: fmt(totalPaid) })}</span>
         <span className="nr-stat-sep">·</span>
-        <span className="nr-stat"><strong>{ledgerAccounts.length}</strong> {t("accountsCount")}</span>
+        <span className="nr-stat">{t("statAccounts", { count: ledgerAccounts.length })}</span>
       </div>
 
       {/* Tab Bar */}
@@ -139,7 +139,7 @@ export default async function FinancePage({
       {activeTab === "spends" && (
         <section style={{ marginTop: 20 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" }}>
-            <h2 className="nr-section-header" style={{ margin: 0 }}>{t("spendRequests")}</h2>
+            <h2 className="nr-section-header" style={{ margin: 0 }}>{t("tabSpends")}</h2>
             {!isDemo && (
               <details className="fin-inline-create" style={{ position: "relative" }}>
                 <summary className="button button-primary" style={{ cursor: "pointer", listStyle: "none" }}>{t("btnAddSpend")}</summary>
@@ -191,7 +191,7 @@ export default async function FinancePage({
                 href={`?tab=spends&status=${s}`}
                 className={`nr-filter-item ${statusFilter === s ? "nr-filter-active" : ""}`}
               >
-                {s === "ALL" ? t("all") : s.charAt(0) + s.slice(1).toLowerCase()} ({statusCounts[s]})
+                {s === "ALL" ? t("filterAll") : s.charAt(0) + s.slice(1).toLowerCase()} ({statusCounts[s]})
               </Link>
             ))}
           </div>
