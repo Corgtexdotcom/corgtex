@@ -6,8 +6,7 @@
   `docs/plans/<branch>.md`. The branch name, lowercased and with `/`
   replaced by `-`, is the filename.
 
-  Executor: your first action on this branch is to `cat` this file and
-  echo the Acceptance criteria checklist into your first commit message.
+  Executor: your first action on this branch is to `cat` this file.
 
   Reviewer: reject the PR if changed files are not in "Files to touch",
   if any acceptance criterion is not ticked, or if the PR body does not
@@ -19,6 +18,15 @@
 One paragraph. What are we trying to accomplish and why. Ground it in a
 concrete user-visible outcome or a concrete engineering invariant.
 
+## Risk tier
+
+Replace this section with exactly one list item whose value is `low`,
+`standard`, or `high`. Guidance:
+
+- `low` — docs, copy, styles, or tightly scoped non-security changes.
+- `standard` — normal product or domain work.
+- `high` — auth, permissions, migrations, deploy, workflows, security-sensitive logic, or broad shared behavior.
+
 ## Out of scope
 
 Bullet list of things that could plausibly be bundled in but won't be.
@@ -28,7 +36,8 @@ This is load-bearing: Reviewer uses it to reject scope creep.
 
 Markdown list. Each item is a backtick-wrapped path or glob, one per
 line. `scripts/check-plan.mjs` parses this section literally — anything
-outside this list will fail `scope-check` in CI.
+outside this list will fail `scope-check` in CI, except committed visual
+proof under `docs/assets/<branch-slug>/`.
 
 - `path/to/file.ts`
 - `path/to/dir/**`
@@ -64,7 +73,7 @@ rule in `docs/contributing/agent-pipeline.mdx`. Common ones:
 
 - `forbidden-path-approved` — touches `deploy/**`, `.github/workflows/**`,
   `prisma/migrations/**`, or auth files. Requires justification above.
-- `large-change-approved` — diff exceeds the 400-LOC / 15-file cap.
-  Requires justification above.
+- `large-change-approved` — diff exceeds the risk-tier cap. Requires
+  justification above.
 
 Leave this section empty if none apply.

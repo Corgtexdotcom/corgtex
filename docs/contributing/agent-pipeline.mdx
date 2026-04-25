@@ -30,14 +30,14 @@ The single handoff artifact between all three agents is
 - The branch name, lowercased with `/` replaced by `-`, is the filename.
 - The format is fixed by [`docs/plans/_TEMPLATE.md`](https://github.com/corgtex/corgtex/blob/main/docs/plans/_TEMPLATE.md).
 - The Planner writes it, the Executor reads it (first action on the branch), the Reviewer diffs the final code against it.
-- `scripts/check-plan.mjs` enforces that (a) the file exists and (b) changed files are a subset of the plan's "Files to touch" section.
+- `scripts/check-plan.mjs` enforces that (a) the file exists, (b) changed files are a subset of the plan's "Files to touch" section, and (c) the PR satisfies the selected risk tier.
 
 ## Stage 1: Plan
 
 The Planner (Claude):
 
 1. Creates a new branch with a descriptive name.
-2. Copies the template to `docs/plans/<branch>.md` and fills every section.
+2. Copies the template to `docs/plans/<branch>.md` and fills every section, including `Risk tier`.
 3. Commits and pushes the plan file.
 4. Opens a **draft** PR whose body is the plan.
 5. Stops. Does not write implementation code.
@@ -47,10 +47,10 @@ The Planner (Claude):
 The Executor (Gemini in Antigravity):
 
 1. **Verify branch:** First action is to run `git branch --show-current` to ensure branch correctness, since multiple agents often run concurrently in the workspace. Checkout or create the correct branch first.
-2. **Context:** Runs `cat docs/plans/<branch>.md` and echoes the acceptance checklist into the first commit message.
+2. **Context:** Runs `cat docs/plans/<branch>.md`.
 3. **Implements strictly** within the plan's "Files to touch" allowlist. Any scope change requires a commit updating the plan first.
 4. **Validates locally:** Runs `npm run check` and whatever the plan's test plan specifies. Waits for these commands to complete entirely and strictly ensures there are no lint or compilation errors before pushing.
-5. **Opens the PR** via `gh pr create` (not just marking ready). The PR description must explicitly include the completed acceptance checklist in Markdown and link to the plan file. Attaches visual proof for frontend changes.
+5. **Opens the PR** via `gh pr create` (not just marking ready). The PR description must explicitly include the risk tier, completed acceptance checklist, and a link to the plan file. Frontend changes must include committed visual proof under `docs/assets/<branch-slug>/`.
 6. **Sets auto-merge:** `gh pr merge --auto --squash`. This fires the merge once Codex approves and GitHub CI is green.
 7. **Respects the CI fix cap**: 3 red-CI fix attempts, then labels the PR `needs-replan` and stops.
 
@@ -60,13 +60,13 @@ The Reviewer (Codex) applies the checklist in
 [`.codex/review.md`](https://github.com/corgtex/corgtex/blob/main/.codex/review.md):
 
 - Plan linked and present.
-- `scope-check` passes (changed files ⊆ allowlist).
+- `scope-check` passes (changed files ⊆ allowlist, except branch visual proof).
 - Acceptance criteria all ticked and reflected in code.
 - No forbidden-path changes without `forbidden-path-approved`.
-- Diff within caps unless `large-change-approved`.
+- Diff within risk-tier caps unless `large-change-approved`.
 - `gitleaks` green. No `db push`, no `--no-verify`, no removed `force-dynamic`.
 - Tests added when domain code changed.
-- Visual proof present for frontend changes.
+- Committed visual proof present for frontend changes.
 - All required CI checks green.
 
 Codex either approves (auto-merge fires) or requests changes (the
@@ -76,9 +76,11 @@ Executor re-enters the fix loop).
 
 Mechanical, CI-enforced:
 
-- **File allowlist:** changed files ⊆ plan's "Files to touch".
-- **Size cap:** ≤ 400 LOC of code (docs excluded) and ≤ 15 files per PR. Override with `large-change-approved` label plus justification in the plan.
+- **File allowlist:** changed files ⊆ plan's "Files to touch", except committed visual proof under `docs/assets/<branch-slug>/`.
+- **Risk tiers:** `low` is ≤ 1200 non-doc LOC and ≤ 50 files; `standard` is ≤ 800 non-doc LOC and ≤ 25 files; `high` is ≤ 400 non-doc LOC and ≤ 15 files.
+- **Size override:** use `large-change-approved` only when the PR exceeds the selected risk-tier cap, with justification in the plan.
 - **Forbidden paths:** `deploy/**`, `.github/workflows/**`, `prisma/migrations/**`, `packages/domain/src/auth*.ts`, `apps/web/lib/auth.ts`. Require `forbidden-path-approved` label plus justification.
+- **Forbidden-path risk:** forbidden-path changes are evaluated against the high-risk cap unless `large-change-approved` is present.
 
 ## Rollback
 
@@ -122,14 +124,14 @@ in GitHub → Settings → Branches → `main`:
 - **Require review from Code Owners**: off (no human owners in this pipeline).
 - **Require approval of the most recent reviewable push**: on.
 - **Require status checks to pass**: on. Required checks:
-  - `check` (existing)
-  - `db-sync` (existing)
-  - `build` (existing)
-  - `docs` (existing)
-  - `plan-present`
-  - `scope-check`
-  - `gitleaks`
-  - `diff-size`
+  - `Lint, Typecheck & Test`
+  - `Database Sync`
+  - `Build`
+  - `Docs Validation`
+  - `Plan Present`
+  - `Scope Check`
+  - `Secret Scan`
+  - `Diff Size`
 - **Require branches to be up to date**: on.
 - **Require conversation resolution**: on.
 - **Require merge queue**: on (prevents two Executor PRs from racing).
