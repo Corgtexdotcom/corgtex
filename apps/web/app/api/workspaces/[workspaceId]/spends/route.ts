@@ -1,7 +1,19 @@
 import { NextRequest, NextResponse } from "next/server";
+import { z } from "zod";
 import { createSpend, listSpends, requireWorkspaceMembership } from "@corgtex/domain";
 import { resolveRequestActor } from "@/lib/auth";
-import { handleRouteError } from "@/lib/http";
+import { handleRouteError, validateBody } from "@/lib/http";
+
+const createSpendSchema = z.object({
+  amountCents: z.coerce.number().int().positive(),
+  currency: z.string().trim().min(1),
+  category: z.string().trim().min(1),
+  description: z.string().trim().min(1),
+  vendor: z.string().optional().nullable(),
+  proposalId: z.string().optional().nullable(),
+  ledgerAccountId: z.string().optional().nullable(),
+  requesterEmail: z.string().optional().nullable(),
+});
 
 export async function GET(request: NextRequest, { params }: { params: Promise<{ workspaceId: string }> }) {
   try {
@@ -19,26 +31,17 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   try {
     const actor = await resolveRequestActor(request);
     const { workspaceId } = await params;
-    const body = (await request.json()) as {
-      amountCents?: unknown;
-      currency?: unknown;
-      category?: unknown;
-      description?: unknown;
-      vendor?: unknown;
-      proposalId?: unknown;
-      ledgerAccountId?: unknown;
-      requesterEmail?: unknown;
-    };
+    const body = await validateBody(request, createSpendSchema);
     const spend = await createSpend(actor, {
       workspaceId,
-      amountCents: Number.parseInt(String(body.amountCents ?? "0"), 10),
-      currency: String(body.currency ?? ""),
-      category: String(body.category ?? ""),
-      description: String(body.description ?? ""),
-      vendor: typeof body.vendor === "string" ? body.vendor : null,
-      proposalId: typeof body.proposalId === "string" ? body.proposalId : null,
-      ledgerAccountId: typeof body.ledgerAccountId === "string" ? body.ledgerAccountId : null,
-      requesterEmail: typeof body.requesterEmail === "string" ? body.requesterEmail : null,
+      amountCents: body.amountCents,
+      currency: body.currency,
+      category: body.category,
+      description: body.description,
+      vendor: body.vendor ?? null,
+      proposalId: body.proposalId ?? null,
+      ledgerAccountId: body.ledgerAccountId ?? null,
+      requesterEmail: body.requesterEmail ?? null,
     });
     return NextResponse.json({ spend }, { status: 201 });
   } catch (error) {

@@ -1,7 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
+import { z } from "zod";
 import { createMember, listMembers, requireWorkspaceMembership } from "@corgtex/domain";
 import { resolveRequestActor } from "@/lib/auth";
-import { handleRouteError } from "@/lib/http";
+import { handleRouteError, validateBody } from "@/lib/http";
+
+const memberRoleSchema = z.enum(["CONTRIBUTOR", "FACILITATOR", "FINANCE_STEWARD", "ADMIN"]);
+const createMemberSchema = z.object({
+  email: z.string().trim().min(1),
+  displayName: z.string().optional().nullable(),
+  role: memberRoleSchema.optional(),
+});
 
 export async function GET(request: NextRequest, { params }: { params: Promise<{ workspaceId: string }> }) {
   try {
@@ -19,17 +27,12 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   try {
     const actor = await resolveRequestActor(request);
     const { workspaceId } = await params;
-    const body = (await request.json()) as {
-      email?: unknown;
-      password?: unknown;
-      displayName?: unknown;
-      role?: unknown;
-    };
+    const body = await validateBody(request, createMemberSchema);
     const member = await createMember(actor, {
       workspaceId,
-      email: String(body.email ?? ""),
-      displayName: typeof body.displayName === "string" ? body.displayName : null,
-      role: String(body.role ?? "CONTRIBUTOR") as "CONTRIBUTOR" | "FACILITATOR" | "FINANCE_STEWARD" | "ADMIN",
+      email: body.email,
+      displayName: body.displayName ?? null,
+      role: body.role ?? "CONTRIBUTOR",
     });
     return NextResponse.json(member, { status: 201 });
   } catch (error) {
