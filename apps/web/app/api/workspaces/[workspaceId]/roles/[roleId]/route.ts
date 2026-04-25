@@ -1,22 +1,30 @@
 import { NextRequest, NextResponse } from "next/server";
+import { z } from "zod";
 import { updateRole, deleteRole } from "@corgtex/domain";
 import { resolveRequestActor } from "@/lib/auth";
-import { handleRouteError } from "@/lib/http";
+import { handleRouteError, validateBody } from "@/lib/http";
 
 type Params = { params: Promise<{ workspaceId: string; roleId: string }> };
+const updateRoleSchema = z.object({
+  name: z.string().trim().min(1).optional(),
+  purposeMd: z.string().optional().nullable(),
+  accountabilities: z.array(z.string()).optional(),
+  artifacts: z.array(z.string()).optional(),
+  coreRoleType: z.string().optional().nullable(),
+});
 
 export async function PATCH(request: NextRequest, { params }: Params) {
   try {
     const actor = await resolveRequestActor(request);
     const { workspaceId, roleId } = await params;
-    const body = await request.json();
+    const body = await validateBody(request, updateRoleSchema);
     const role = await updateRole(actor, {
       workspaceId,
       roleId,
-      name: typeof body.name === "string" ? body.name : undefined,
+      name: body.name,
       purposeMd: body.purposeMd !== undefined ? (typeof body.purposeMd === "string" ? body.purposeMd : null) : undefined,
-      accountabilities: Array.isArray(body.accountabilities) ? body.accountabilities : undefined,
-      artifacts: Array.isArray(body.artifacts) ? body.artifacts : undefined,
+      accountabilities: body.accountabilities,
+      artifacts: body.artifacts,
       coreRoleType: body.coreRoleType !== undefined ? (typeof body.coreRoleType === "string" ? body.coreRoleType : null) : undefined,
     });
     return NextResponse.json({ role });

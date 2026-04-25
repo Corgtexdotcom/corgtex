@@ -1,7 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
+import { z } from "zod";
 import { createTension, listTensions, requireWorkspaceMembership } from "@corgtex/domain";
 import { resolveRequestActor } from "@/lib/auth";
-import { handleRouteError } from "@/lib/http";
+import { handleRouteError, validateBody } from "@/lib/http";
+
+const createTensionSchema = z.object({
+  title: z.string().trim().min(1),
+  bodyMd: z.string().optional().nullable(),
+});
 
 export async function GET(request: NextRequest, { params }: { params: Promise<{ workspaceId: string }> }) {
   try {
@@ -19,11 +25,11 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   try {
     const actor = await resolveRequestActor(request);
     const { workspaceId } = await params;
-    const body = (await request.json()) as { title?: unknown; bodyMd?: unknown };
+    const body = await validateBody(request, createTensionSchema);
     const tension = await createTension(actor, {
       workspaceId,
-      title: String(body.title ?? ""),
-      bodyMd: typeof body.bodyMd === "string" ? body.bodyMd : null,
+      title: body.title,
+      bodyMd: body.bodyMd ?? null,
     });
     return NextResponse.json({ tension }, { status: 201 });
   } catch (error) {
