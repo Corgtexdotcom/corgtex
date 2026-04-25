@@ -28,7 +28,7 @@ export default async function LeadsPage({
     const membership = await prisma.member.findUnique({
       where: { workspaceId_userId: { workspaceId, userId: actor.kind === "user" ? actor.user.id : "" } }
     });
-    if (!membership) throw new Error("Not a member");
+    if (!membership) throw new Error(t("errorNotMember"));
   } catch (error) {
     redirect("/");
   }
@@ -82,6 +82,32 @@ export default async function LeadsPage({
     return days === 0 ? t("ageToday") : t("ageDaysAgo", { days });
   };
 
+  const viewLabels: Record<string, string> = {
+    contacts: t("tabContacts"),
+    pipeline: t("tabPipeline"),
+    activity: t("tabActivity"),
+  };
+
+  const activityIcon = (type: string) => {
+    const labels: Record<string, string> = {
+      EMAIL: t("activityIconEmail"),
+      MEETING: t("activityIconMeeting"),
+      CALL: t("activityIconCall"),
+      NOTE: t("activityIconNote"),
+    };
+    return labels[type] ?? t("activityIconDefault");
+  };
+
+  const activityTypeLabel = (type: string) => {
+    const labels: Record<string, string> = {
+      EMAIL: t("activityTypeEmail"),
+      MEETING: t("activityTypeMeeting"),
+      CALL: t("activityTypeCall"),
+      NOTE: t("activityTypeNote"),
+    };
+    return labels[type] ?? type;
+  };
+
   return (
     <>
       <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 32 }}>
@@ -117,9 +143,8 @@ export default async function LeadsPage({
               key={s} 
               href={`?view=${s}`} 
               className={`nr-filter-item ${view === s ? "nr-filter-active" : ""}`}
-              style={{ textTransform: "capitalize" }}
             >
-              {s}
+              {viewLabels[s]}
             </a>
           ))}
         </div>
@@ -166,7 +191,7 @@ export default async function LeadsPage({
                           <div className="muted" style={{ fontSize: "0.8rem" }}>{contact.email}</div>
                         </td>
                         <td style={{ padding: "12px 8px" }}>
-                          {contact.company || <span className="muted">—</span>}
+                          {contact.company || <span className="muted">{t("emptyValue")}</span>}
                         </td>
                         <td style={{ padding: "12px 8px" }}>
                           <span className="tag">{contact.source}</span>
@@ -176,7 +201,12 @@ export default async function LeadsPage({
                         </td>
                         <td style={{ padding: "12px 8px" }}>
                           <details style={{ position: "relative" }}>
-                            <summary style={{ cursor: "pointer", color: "var(--accent)", listStyle: "none" }}>⋯</summary>
+                            <summary
+                              aria-label={t("titleContactActions")}
+                              style={{ cursor: "pointer", color: "var(--accent)", listStyle: "none" }}
+                            >
+                              {t("btnContactActions")}
+                            </summary>
                             <div style={{ position: "absolute", right: 0, top: "100%", background: "white", padding: 8, border: "1px solid var(--line)", borderRadius: 8, zIndex: 10, boxShadow: "var(--shadow-md)" }}>
                               <form action={deleteContactAction}>
                                 <input type="hidden" name="workspaceId" value={workspaceId} />
@@ -212,7 +242,7 @@ export default async function LeadsPage({
                         {contacts.map((c) => <option key={c.id} value={c.id}>{c.name || c.email}</option>)}
                       </select>
                     </label>
-                    <label>Deal {t("formTitle")} <input type="text" name="title" required /></label>
+                    <label>{t("formDealTitle")} <input type="text" name="title" required /></label>
                     <label>{t("formValue")} <input type="number" name="value" step="0.01" min="0" /></label>
                   </div>
                   <button type="submit" style={{ width: "fit-content" }}>{t("btnCreateDeal")}</button>
@@ -255,12 +285,12 @@ export default async function LeadsPage({
             {recentActivities.map(activity => (
               <div key={activity.id} className="item" style={{ display: "flex", gap: "16px" }}>
                 <div style={{ width: "40px", height: "40px", borderRadius: "50%", background: "var(--accent-soft)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "1.2rem", flexShrink: 0 }}>
-                  {activity.type === "EMAIL" ? "✉" : activity.type === "MEETING" ? "▫" : activity.type === "CALL" ? "☏" : "✎"}
+                  {activityIcon(activity.type)}
                 </div>
                 <div>
                   <div className="row" style={{ justifyContent: "flex-start", gap: "8px", marginBottom: "4px" }}>
                     <strong style={{ fontSize: "0.95rem" }}>{activity.title}</strong>
-                    <span className="tag">{activity.type}</span>
+                    <span className="tag">{activityTypeLabel(activity.type)}</span>
                     <span className="muted" style={{ fontSize: "0.8rem", marginLeft: "auto" }}>{ageText(activity.createdAt)}</span>
                   </div>
                   <div style={{ fontSize: "0.85rem", color: "var(--text)", lineHeight: 1.5, marginBottom: "8px" }}>
