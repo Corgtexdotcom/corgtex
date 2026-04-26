@@ -24,7 +24,7 @@
   --radius-md: 12px;
   --radius-lg: 16px;
   --radius-full: 9999px;
-  --transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  --transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.2s cubic-bezier(0.4, 0, 0.2, 1), box-shadow 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 
   /* NEW semantic tokens */
   --surface-sunken: #f1f5f9;
@@ -45,6 +45,22 @@
   --code-bg: #1e293b;
   --code-fg: #e2e8f0;
 }
+
+.dark html,
+.dark body {
+  background-image:
+    radial-gradient(circle at top right, rgba(241, 245, 249, 0.02), transparent 40%),
+    radial-gradient(circle at bottom left, rgba(241, 245, 249, 0.02), transparent 40%);
+}
+
+
+.dark html,
+.dark body {
+  background-image:
+    radial-gradient(circle at top right, rgba(241, 245, 249, 0.02), transparent 40%),
+    radial-gradient(circle at bottom left, rgba(241, 245, 249, 0.02), transparent 40%);
+}
+
 
 .dark {
   color-scheme: dark;
@@ -108,7 +124,7 @@ body {
 
 a {
   color: inherit;
-  transition: var(--transition);
+  transition: background-color 0.15s, border-color 0.15s, color 0.15s, var(--transition);
 }
 
 a:hover {
@@ -140,7 +156,7 @@ a:hover {
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-sm);
   padding: 24px;
-  transition: var(--transition);
+  transition: background-color 0.15s, border-color 0.15s, color 0.15s, var(--transition);
 }
 
 .panel:hover {
@@ -170,7 +186,7 @@ a:hover {
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
   padding: 16px;
-  transition: var(--transition);
+  transition: background-color 0.15s, border-color 0.15s, color 0.15s, var(--transition);
   text-decoration: none;
   display: block;
   box-shadow: var(--shadow-sm);
@@ -213,7 +229,7 @@ select {
   font: inherit;
   color: var(--text);
   background: var(--surface-strong);
-  transition: var(--transition);
+  transition: background-color 0.15s, border-color 0.15s, color 0.15s, var(--transition);
   box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.02);
 }
 
@@ -239,7 +255,7 @@ button {
   font: inherit;
   font-weight: 500;
   cursor: pointer;
-  transition: var(--transition);
+  transition: background-color 0.15s, border-color 0.15s, color 0.15s, var(--transition);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -362,7 +378,7 @@ button:disabled {
   background: var(--surface-strong);
   color: var(--accent);
   font-weight: 600;
-  transition: var(--transition);
+  transition: background-color 0.15s, border-color 0.15s, color 0.15s, var(--transition);
 }
 
 .link-button:hover {
@@ -409,7 +425,7 @@ button:disabled {
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
   padding: 14px;
-  transition: var(--transition);
+  transition: background-color 0.15s, border-color 0.15s, color 0.15s, var(--transition);
 }
 
 @media (max-width: 720px) {
@@ -736,7 +752,7 @@ button:disabled {
   border: 1px solid var(--line);
   text-decoration: none;
   background: var(--surface-strong);
-  transition: var(--transition);
+  transition: background-color 0.15s, border-color 0.15s, color 0.15s, var(--transition);
 }
 
 .chat-new-btn:hover {
@@ -764,7 +780,7 @@ button:disabled {
   font: inherit;
   color: var(--text);
   text-decoration: none;
-  transition: var(--transition);
+  transition: background-color 0.15s, border-color 0.15s, color 0.15s, var(--transition);
 }
 
 .chat-session-item:last-child {
@@ -871,7 +887,7 @@ button:disabled {
   border-bottom: 1px dashed var(--line);
   padding: 0 0 4px 0;
   border-radius: 0;
-  transition: var(--transition);
+  transition: background-color 0.15s, border-color 0.15s, color 0.15s, var(--transition);
 }
 
 .chat-starters button:hover {
@@ -963,7 +979,7 @@ button:disabled {
   justify-content: center;
   font-size: 1.2rem;
   color: var(--text);
-  transition: var(--transition);
+  transition: background-color 0.15s, border-color 0.15s, color 0.15s, var(--transition);
   flex-shrink: 0;
   line-height: 1;
   padding: 0;
@@ -1006,7 +1022,7 @@ button:disabled {
   font-size: 0.9rem;
   padding: 2px 6px;
   border-radius: 4px;
-  transition: var(--transition);
+  transition: background-color 0.15s, border-color 0.15s, color 0.15s, var(--transition);
 }
 
 .chat-attachment-remove:hover {
@@ -1044,7 +1060,7 @@ button:disabled {
   cursor: pointer;
   font-size: 1rem;
   color: var(--muted);
-  transition: var(--transition);
+  transition: background-color 0.15s, border-color 0.15s, color 0.15s, var(--transition);
   margin-left: 8px;
   flex-shrink: 0;
 }
@@ -1169,34 +1185,7 @@ button:disabled {
 
 /* ── Finance Accounting ── */
 
-.fin-tab-bar {
-  display: flex;
-  gap: 0;
-  border-bottom: 2px solid var(--line);
-  margin-bottom: 20px;
-}
 
-.fin-tab {
-  padding: 10px 20px;
-  font-size: 0.9rem;
-  font-weight: 500;
-  color: var(--muted);
-  text-decoration: none;
-  border-bottom: 2px solid transparent;
-  margin-bottom: -2px;
-  transition: var(--transition);
-}
-
-.fin-tab:hover {
-  color: var(--text);
-  opacity: 1;
-}
-
-.fin-tab-active {
-  color: var(--text);
-  font-weight: 600;
-  border-bottom-color: var(--accent);
-}
 
 .fin-account-chips {
   display: flex;
@@ -1236,78 +1225,7 @@ button:disabled {
   letter-spacing: 0.04em;
 }
 
-.fin-status-filters {
-  display: flex;
-  gap: 4px;
-  flex-wrap: wrap;
-  margin-bottom: 16px;
-}
 
-.fin-status-filter {
-  font-size: 0.82rem;
-  padding: 4px 12px;
-  border-radius: 14px;
-  text-decoration: none;
-  color: var(--muted);
-  border: 1px solid var(--line);
-  transition: var(--transition);
-}
-
-.fin-status-filter:hover {
-  background: var(--accent-soft);
-  color: var(--text);
-  opacity: 1;
-}
-
-.fin-status-filter-active {
-  background: var(--accent);
-  color: var(--surface);
-  border-color: var(--accent);
-}
-
-.fin-status-filter-active:hover {
-  background: var(--accent);
-  color: var(--surface);
-}
-
-.fin-table-wrap {
-  overflow-x: auto;
-}
-
-.fin-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 0.85rem;
-}
-
-.fin-table th {
-  text-align: left;
-  padding: 8px 12px;
-  font-weight: 600;
-  font-size: 0.78rem;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--muted);
-  border-bottom: 2px solid var(--line);
-  white-space: nowrap;
-  position: sticky;
-  top: 0;
-  background: var(--bg);
-}
-
-.fin-table td {
-  padding: 8px 12px;
-  border-bottom: 1px solid var(--line-subtle);
-  vertical-align: middle;
-}
-
-.fin-table tbody tr:hover {
-  background: var(--accent-soft);
-}
-
-.fin-table tbody tr:last-child td {
-  border-bottom: none;
-}
 
 .fin-td-date {
   white-space: nowrap;
@@ -1316,7 +1234,7 @@ button:disabled {
 }
 
 .fin-td-desc {
-  max-width: 220px;
+  max-width: 180px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1373,7 +1291,7 @@ button:disabled {
   background: none;
   cursor: pointer;
   color: var(--text);
-  transition: var(--transition);
+  transition: background-color 0.15s, border-color 0.15s, color 0.15s, var(--transition);
   margin-right: 4px;
 }
 
@@ -1804,6 +1722,22 @@ a.wiki-list-item:hover {
 
 /* ── Responsive ── */
 
+@media (max-width: 1100px) {
+  .ws-layout {
+    grid-template-columns: 240px minmax(0, 1fr);
+  }
+
+  .ws-agent-sidebar {
+    display: none;
+  }
+
+  .ws-main-content {
+    max-width: none;
+    padding-left: 24px;
+    padding-right: 24px;
+  }
+}
+
 @media (max-width: 720px) {
   .ws-layout {
     grid-template-columns: 1fr;
@@ -1903,20 +1837,20 @@ a.wiki-list-item:hover {
   .nr-markdown h1, .nr-markdown h2, .nr-markdown h3 { @apply font-inter leading-[1.3] mt-[1.5em] mb-[0.5em] uppercase; }
 
   /* ── UI Spacing and Alignment (Newsroom) ── */
-  .nr-filter-bar { @apply flex flex-wrap gap-3 mb-6; }
+  .nr-filter-bar { @apply flex flex-nowrap gap-3 mb-6 overflow-x-auto pb-1; }
   .nr-filter-item { @apply text-muted no-underline font-semibold text-[0.85rem] tracking-[0.05em] px-3 py-[6px] rounded-full border border-line transition-all hover:text-text hover:border-text; }
   .nr-filter-active { @apply bg-accent !text-accent-fg border-accent; }
   
-  .nr-stat-bar { @apply flex flex-wrap items-baseline gap-4 mb-8 pb-4 border-b border-line text-[0.9rem]; }
+  .nr-stat-bar { @apply flex flex-wrap items-baseline gap-x-4 gap-y-1 mb-6 pb-3 border-b border-line text-[0.85rem]; }
   .nr-stat-sep { @apply text-line; }
   
   .nr-tab-bar { @apply flex gap-6 mb-6 border-b border-line; }
   .nr-tab { @apply py-3 font-semibold text-[0.95rem] no-underline text-muted border-b-2 border-transparent -mb-[1px] hover:text-text; }
   .nr-tab-active { @apply text-text border-text; }
   
-  .nr-table-wrap { @apply border border-line rounded bg-surface-strong; }
+  .nr-table-wrap { @apply border border-line rounded bg-surface-strong overflow-x-auto; }
   .nr-table { @apply w-full border-collapse text-[0.85rem]; }
-  .nr-table th, .nr-table td { @apply text-left px-4 py-3 border-b border-line; }
+  .nr-table th, .nr-table td { @apply text-left px-3 py-2 border-b border-line; }
   .nr-table th { @apply font-playfair italic text-base bg-bg-alt text-muted; }
   .nr-table tr:last-child td { @apply border-b-0; }
   
