@@ -326,7 +326,7 @@ export async function getMemberProfile(workspaceId: string, memberId: string) {
         orderBy: { createdAt: "desc" },
       },
       assignedTensions: {
-        where: { status: { in: ["OPEN", "IN_PROGRESS"] } },
+        where: { status: "OPEN" },
         take: 5,
         orderBy: { createdAt: "desc" },
       },
@@ -368,7 +368,7 @@ export async function getMemberProfile(workspaceId: string, memberId: string) {
     where: {
       workspaceId,
       authorUserId: member.user.id,
-      status: { in: ["OPEN", "IN_PROGRESS"] },
+      status: "OPEN",
     },
     orderBy: { createdAt: "desc" },
     take: 5,

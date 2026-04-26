@@ -8,7 +8,7 @@ export function normalizeProposalReaction(reaction: string) {
   const normalized = reaction.trim().toUpperCase();
   invariant(normalized.length > 0, 400, "INVALID_INPUT", "reaction is required.");
   invariant(normalized.length <= 32, 400, "INVALID_INPUT", "reaction must be 32 characters or fewer.");
-  invariant(["SUPPORT", "REACTION", "OBJECTION", "QUESTION", "CONCERN"].includes(normalized), 400, "INVALID_INPUT", "Invalid reaction type.");
+  invariant(["REACTION", "OBJECTION"].includes(normalized), 400, "INVALID_INPUT", "Invalid reaction type.");
   return normalized;
 }
 
@@ -71,13 +71,6 @@ export async function postReaction(actor: AppActor, params: {
         }
       });
       invariant(isCircleMember, 403, "FORBIDDEN", "Only circle members can raise objections on circle-scoped proposals.");
-    }
-
-    if (reaction === "SUPPORT") {
-      const existing = await tx.proposalReaction.findFirst({
-        where: { proposalId: params.proposalId, userId: actor.user.id, reaction: "SUPPORT" }
-      });
-      if (existing) return existing;
     }
 
     const proposalReaction = await tx.proposalReaction.create({

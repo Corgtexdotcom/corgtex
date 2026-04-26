@@ -77,8 +77,9 @@ export async function createAction(actor: AppActor, params: {
         assigneeMemberId: params.assigneeMemberId || null,
         dueAt: params.dueAt ?? null,
         proposalId: params.proposalId || null,
-        isPrivate: params.isPrivate ?? false,
-        publishedAt: params.isPrivate ? null : new Date(),
+        status: "DRAFT",
+        isPrivate: params.isPrivate ?? true,
+        publishedAt: null,
       },
     });
 
@@ -112,7 +113,7 @@ export async function updateAction(actor: AppActor, params: {
   actionId: string;
   title?: string;
   bodyMd?: string | null;
-  status?: "OPEN" | "IN_PROGRESS" | "COMPLETED" | "CANCELLED";
+  status?: "DRAFT" | "OPEN" | "IN_PROGRESS" | "COMPLETED";
   circleId?: string | null;
   assigneeMemberId?: string | null;
   dueAt?: Date | null;
@@ -139,7 +140,13 @@ export async function updateAction(actor: AppActor, params: {
       data.title = title;
     }
     if (params.bodyMd !== undefined) data.bodyMd = params.bodyMd?.trim() || null;
-    if (params.status !== undefined) data.status = params.status;
+    if (params.status !== undefined) {
+      data.status = params.status;
+      if (params.status !== "DRAFT") {
+        data.isPrivate = false;
+        data.publishedAt = action.publishedAt || new Date();
+      }
+    }
     if (params.circleId !== undefined) data.circleId = params.circleId || null;
     if (params.assigneeMemberId !== undefined) data.assigneeMemberId = params.assigneeMemberId || null;
     if (params.dueAt !== undefined) data.dueAt = params.dueAt;
@@ -218,7 +225,7 @@ export async function publishAction(actor: AppActor, params: {
 
     const updated = await tx.action.update({
       where: { id: params.actionId },
-      data: { isPrivate: false, publishedAt: new Date() },
+      data: { status: "OPEN", isPrivate: false, publishedAt: new Date() },
     });
 
     await recordAudit(tx, actor, {

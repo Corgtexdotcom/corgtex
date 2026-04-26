@@ -3,7 +3,14 @@ import { normalizeProposalReaction } from "./reactions";
 
 describe("normalizeProposalReaction", () => {
   it("normalizes valid reactions", () => {
-    expect(normalizeProposalReaction(" support ")).toBe("SUPPORT");
+    expect(normalizeProposalReaction(" reaction ")).toBe("REACTION");
+    expect(normalizeProposalReaction(" objection ")).toBe("OBJECTION");
+  });
+
+  it("rejects legacy deliberation types", () => {
+    expect(() => normalizeProposalReaction("support")).toThrowError("Invalid reaction type.");
+    expect(() => normalizeProposalReaction("question")).toThrowError("Invalid reaction type.");
+    expect(() => normalizeProposalReaction("concern")).toThrowError("Invalid reaction type.");
   });
 
   it("rejects blank reactions", () => {
@@ -49,15 +56,15 @@ vi.mock("./auth", () => ({
 }));
 
 describe("postReaction", () => {
-  it("allows posting a support reaction", async () => {
+  it("allows posting a reaction", async () => {
     vi.mocked(prisma.proposal.findUnique).mockResolvedValueOnce({ workspaceId: "ws1" } as any);
-    vi.mocked(prisma.proposalReaction.create).mockResolvedValueOnce({ id: "r1", reaction: "SUPPORT" } as any);
+    vi.mocked(prisma.proposalReaction.create).mockResolvedValueOnce({ id: "r1", reaction: "REACTION" } as any);
     const result = await postReaction({ kind: "user", user: { id: "user1", email: "user@example.com" }, getWorkspaceRole: () => "MEMBER" } as any, {
       workspaceId: "ws1",
       proposalId: "p1",
-      reaction: "SUPPORT",
+      reaction: "REACTION",
     });
-    expect(result.reaction).toBe("SUPPORT");
+    expect(result.reaction).toBe("REACTION");
   });
 });
 

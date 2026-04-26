@@ -232,6 +232,8 @@ export async function postSpendDeliberationAction(formData: FormData) {
     parentId: asString(formData, "parentId"),
     entryType: asString(formData, "entryType") as any,
     bodyMd: asString(formData, "bodyMd"),
+    targetMemberId: asOptional(formData, "targetMemberId") || undefined,
+    targetCircleId: asOptional(formData, "targetCircleId") || undefined,
   });
   refresh(workspaceId);
 }
@@ -246,7 +248,7 @@ export async function resolveSpendDeliberationAction(formData: FormData) {
   await resolveDeliberationEntry(actor, {
     workspaceId,
     entryId: asString(formData, "entryId"),
-    resolvedNote: asOptional(formData, "resolvedNote") || undefined,
+    resolvedNote: asString(formData, "resolvedNote"),
   });
   refresh(workspaceId);
 }
