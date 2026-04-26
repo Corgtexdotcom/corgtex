@@ -277,6 +277,7 @@ export async function submitProposal(actor: AppActor, params: { workspaceId: str
         payload: {
           proposalId: proposal.id,
           flowId: flow.id,
+          title: proposal.title,
         },
       },
     ]);

@@ -22,10 +22,10 @@ function resolveEntityUrl(
 ): string | null {
   if (!entityType || !entityId) return null;
   const t = entityType.toLowerCase();
-  if (t === "proposal") return `/workspaces/${workspaceId}/proposals`;
+  if (t === "proposal") return `/workspaces/${workspaceId}/proposals/${entityId}`;
   if (t === "tension") return `/workspaces/${workspaceId}/tensions`;
   if (t === "action") return `/workspaces/${workspaceId}/actions`;
-  if (t === "meeting") return `/workspaces/${workspaceId}/meetings`;
+  if (t === "meeting") return `/workspaces/${workspaceId}/meetings/${entityId}`;
   if (t === "adviceprocess") return `/workspaces/${workspaceId}/proposals?status=OPEN`;
   if (t === "advicerecord") return `/workspaces/${workspaceId}/proposals?status=OPEN`;
   if (t === "spend" || t === "spendrequest") return `/workspaces/${workspaceId}/finance`;
@@ -46,7 +46,7 @@ export default async function WorkspaceDashboard({
     { items: tensions },
     members,
     notifications,
-    pendingFlows,
+    pendingFlowsRaw,
     openActionsResult,
     activeTensionsResult,
     pendingAgentApprovals,
@@ -68,6 +68,20 @@ export default async function WorkspaceDashboard({
       include: { decisions: true },
       orderBy: { createdAt: "desc" },
       take: 5,
+    }).then(async (flows) => {
+      // Resolve entity labels for each flow so the UI can show what the approval is about
+      const enriched = await Promise.all(flows.map(async (flow) => {
+        let subjectLabel: string | null = null;
+        if (flow.subjectType === "PROPOSAL") {
+          const p = await prisma.proposal.findUnique({ where: { id: flow.subjectId }, select: { title: true } });
+          subjectLabel = p?.title ?? null;
+        } else if (flow.subjectType === "SPEND") {
+          const s = await prisma.spendRequest.findUnique({ where: { id: flow.subjectId }, select: { description: true } });
+          subjectLabel = s?.description ?? null;
+        }
+        return { ...flow, subjectLabel };
+      }));
+      return enriched;
     }),
     listActions(actor, workspaceId, { take: 10 }),
     prisma.tension.count({ where: { workspaceId, status: "OPEN", OR: [{ isPrivate: false }, { authorUserId: actor.kind === 'user' ? actor.user.id : '' }] } }),
@@ -116,6 +130,7 @@ export default async function WorkspaceDashboard({
   const recentMeetings = meetings
     .filter(m => actor.kind === 'user' ? m.participantIds?.includes(actor.user.id) : true)
     .slice(0, 5);
+  const pendingFlows = pendingFlowsRaw;
   const unreadNotifications = notifications.filter(n => !n.readAt);
   const openActions = openActionsResult.items.filter(a => a.status === "OPEN" || a.status === "IN_PROGRESS");
   
@@ -179,25 +194,32 @@ export default async function WorkspaceDashboard({
             {pendingFlows.length > 0 && (
               <div className="nr-attention-block">
                 <strong>{t("approvalsPending", { count: pendingFlows.length })}</strong>
-                {pendingFlows.slice(0, 2).map((flow) => (
-                  <div key={flow.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
-                    {(() => {
-                      const href = resolveEntityUrl(workspaceId, flow.subjectType, flow.subjectId);
-                      return href ? (
-                        <Link href={href} style={{ fontSize: "0.8rem", color: "inherit", textDecoration: "underline dotted" }}>
-                          {flow.subjectType}
-                        </Link>
-                      ) : (
-                        <span style={{ fontSize: "0.8rem" }}>{flow.subjectType}</span>
-                      );
-                    })()}
-                    <form action={decideApprovalAction} className="actions-inline" style={{ display: "inline-flex" }}>
-                      <input type="hidden" name="workspaceId" value={workspaceId} />
-                      <input type="hidden" name="flowId" value={flow.id} />
-                      <button type="submit" name="choice" value={flow.mode === "CONSENT" ? "AGREE" : "APPROVE"} style={{ padding: "2px 6px", fontSize: "0.7rem", minHeight: 0 }}>{t("approve")}</button>
-                    </form>
-                  </div>
-                ))}
+                {pendingFlows.slice(0, 2).map((flow) => {
+                  const href = resolveEntityUrl(workspaceId, flow.subjectType, flow.subjectId);
+                  const label = (flow as any).subjectLabel || flow.subjectType;
+                  const typeLabel = flow.subjectType.charAt(0) + flow.subjectType.slice(1).toLowerCase();
+                  return (
+                    <div key={flow.id} style={{ marginBottom: 6 }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: "0.7rem", textTransform: "uppercase", letterSpacing: "0.04em", color: "var(--muted)", marginBottom: 2 }}>{typeLabel}</div>
+                          {href ? (
+                            <Link href={href} style={{ fontSize: "0.8rem", color: "inherit", textDecoration: "underline dotted", lineHeight: 1.3, display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                              {label}
+                            </Link>
+                          ) : (
+                            <span style={{ fontSize: "0.8rem", lineHeight: 1.3 }}>{label}</span>
+                          )}
+                        </div>
+                        <form action={decideApprovalAction} className="actions-inline" style={{ display: "inline-flex", marginLeft: 8, flexShrink: 0 }}>
+                          <input type="hidden" name="workspaceId" value={workspaceId} />
+                          <input type="hidden" name="flowId" value={flow.id} />
+                          <button type="submit" name="choice" value={flow.mode === "CONSENT" ? "AGREE" : "APPROVE"} style={{ padding: "2px 6px", fontSize: "0.7rem", minHeight: 0 }}>{t("approve")}</button>
+                        </form>
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             )}
             
@@ -218,15 +240,25 @@ export default async function WorkspaceDashboard({
                     <button type="submit" style={{ padding: "0 6px", fontSize: "0.7rem", minHeight: 0, background: "transparent", color: "var(--warning)"}}>{t("markRead")}</button>
                   </form>
                 </div>
-                {unreadNotifications.slice(0, 2).map((n) => {
+                {unreadNotifications.slice(0, 3).map((n) => {
                   const href = resolveEntityUrl(workspaceId, n.entityType, n.entityId);
                   return (
-                    <div key={n.id} style={{ fontSize: "0.8rem", marginBottom: 2 }}>
-                      {href ? (
-                        <Link href={href} style={{ color: "inherit", textDecoration: "underline dotted" }}>
-                          {n.title}
-                        </Link>
-                      ) : n.title}
+                    <div key={n.id} style={{ marginBottom: 6, borderBottom: "1px solid var(--line)", paddingBottom: 6 }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+                        {href ? (
+                          <Link href={href} style={{ fontSize: "0.85rem", fontWeight: 600, color: "inherit", textDecoration: "underline dotted", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                            {n.title}
+                          </Link>
+                        ) : (
+                          <span style={{ fontSize: "0.85rem", fontWeight: 600, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{n.title}</span>
+                        )}
+                        <span style={{ fontSize: "0.7rem", color: "var(--muted)", marginLeft: 8, flexShrink: 0 }} suppressHydrationWarning>{ageText(n.createdAt)}</span>
+                      </div>
+                      {n.bodyMd && (
+                        <div style={{ fontSize: "0.75rem", color: "var(--muted)", marginTop: 2, lineHeight: 1.3 }}>
+                          {n.bodyMd.replace(/\*\*/g, "").slice(0, 100)}
+                        </div>
+                      )}
                     </div>
                   );
                 })}
