@@ -105,7 +105,30 @@ describe("deriveJobsForEvent", () => {
 });
 
 describe("deriveNotificationsForEvent", () => {
-  it("creates a notification for submitted proposals", () => {
+  it("creates a notification for submitted proposals with title", () => {
+    const notifications = deriveNotificationsForEvent({
+      type: "proposal.submitted",
+      workspaceId: "workspace-1",
+      aggregateType: "Proposal",
+      aggregateId: "proposal-1",
+      payload: {
+        proposalId: "proposal-1",
+        title: "Adopt async standup policy",
+      },
+    });
+
+    expect(notifications).toEqual([
+      {
+        type: "proposal.submitted",
+        entityType: "Proposal",
+        entityId: "proposal-1",
+        title: "Proposal for review: Adopt async standup policy",
+        bodyMd: "The proposal **Adopt async standup policy** is awaiting approval.",
+      },
+    ]);
+  });
+
+  it("falls back to generic text when proposal title is missing", () => {
     const notifications = deriveNotificationsForEvent({
       type: "proposal.submitted",
       workspaceId: "workspace-1",
@@ -123,6 +146,53 @@ describe("deriveNotificationsForEvent", () => {
         entityId: "proposal-1",
         title: "Proposal submitted for review",
         bodyMd: "A proposal is awaiting approval in the workspace dashboard.",
+      },
+    ]);
+  });
+
+  it("creates a notification for proposal.opened events (the actual domain event)", () => {
+    const notifications = deriveNotificationsForEvent({
+      type: "proposal.opened",
+      workspaceId: "workspace-1",
+      aggregateType: "Proposal",
+      aggregateId: "proposal-1",
+      payload: {
+        proposalId: "proposal-1",
+        flowId: "flow-1",
+        title: "Hire a PM for growth",
+      },
+    });
+
+    expect(notifications).toEqual([
+      {
+        type: "proposal.opened",
+        entityType: "Proposal",
+        entityId: "proposal-1",
+        title: "Proposal for review: Hire a PM for growth",
+        bodyMd: "The proposal **Hire a PM for growth** is awaiting approval.",
+      },
+    ]);
+  });
+
+  it("creates a notification for spend.opened events", () => {
+    const notifications = deriveNotificationsForEvent({
+      type: "spend.opened",
+      workspaceId: "workspace-1",
+      aggregateType: "SpendRequest",
+      aggregateId: "spend-1",
+      payload: {
+        spendId: "spend-1",
+        title: "AWS hosting for Q3",
+      },
+    });
+
+    expect(notifications).toEqual([
+      {
+        type: "spend.opened",
+        entityType: "SpendRequest",
+        entityId: "spend-1",
+        title: "Spend review: AWS hosting for Q3",
+        bodyMd: "The spend request **AWS hosting for Q3** is awaiting finance review.",
       },
     ]);
   });

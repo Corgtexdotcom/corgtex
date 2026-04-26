@@ -34,6 +34,19 @@ vi.mock("./auth", () => ({
   actorUserIdForWorkspace: vi.fn().mockResolvedValue("u-1"),
 }));
 
+vi.mock("./events", () => ({
+  appendEvents: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock("./approvals", () => ({
+  ensureApprovalFlow: vi.fn().mockResolvedValue({ id: "flow-1" }),
+  getApprovalPolicy: vi.fn().mockResolvedValue({
+    mode: "CONSENT",
+    decisionWindowHours: 168,
+    requireProposalLink: false,
+  }),
+}));
+
 describe("autoApproveProposals", () => {
   beforeEach(() => { vi.clearAllMocks(); });
 
@@ -150,5 +163,50 @@ describe("getProposal", () => {
         ],
       },
     }));
+  });
+});
+
+describe("submitProposal event payload", () => {
+  beforeEach(() => { vi.clearAllMocks(); });
+
+  it("emits proposal.opened event with title in the payload", async () => {
+    const { appendEvents } = await import("./events");
+
+    // Mock findUnique used inside submitProposal to fetch the draft
+    (prisma.proposal as any).findUnique = vi.fn().mockResolvedValue({
+      id: "p-1",
+      workspaceId: "ws-1",
+      title: "Adopt async standup policy",
+      status: "DRAFT",
+    });
+
+    // Mock the update and approvalFlow.update
+    (prisma.proposal as any).update = vi.fn().mockResolvedValue({
+      id: "p-1",
+      status: "OPEN",
+    });
+    (prisma as any).approvalFlow = {
+      update: vi.fn().mockResolvedValue({}),
+    };
+
+    const { submitProposal } = await import("./proposals");
+    const actor = { kind: "user", user: { id: "u-1" } } as any;
+
+    await submitProposal(actor, {
+      workspaceId: "ws-1",
+      proposalId: "p-1",
+    });
+
+    expect(appendEvents).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "proposal.opened",
+          payload: expect.objectContaining({
+            title: "Adopt async standup policy",
+          }),
+        }),
+      ]),
+    );
   });
 });
