@@ -435,7 +435,7 @@ model CommunicationMessage {
   workspace    Workspace                 @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   entityLinks  CommunicationEntityLink[]
 
-  @@unique([installationId, externalChannelId, externalMessageId])
+  @@unique([installationId, externalChannelId, externalMessageId], map: "CommunicationMessage_installation_channel_message_key")
   @@index([workspaceId, provider, receivedAt])
   @@index([workspaceId, expiresRawAt])
 }
