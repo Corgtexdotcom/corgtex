@@ -1185,8 +1185,6 @@ button:disabled {
 
 /* ── Finance Accounting ── */
 
-
-
 .fin-account-chips {
   display: flex;
   gap: 12px;
@@ -1224,8 +1222,6 @@ button:disabled {
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
-
-
 
 .fin-td-date {
   white-space: nowrap;
@@ -1873,4 +1869,20 @@ a.wiki-list-item:hover {
   .delib-target-select { @apply text-[0.8rem] px-2 py-1 rounded border border-line bg-bg-alt text-text; }
   .fin-discussion-cell { @apply bg-bg-alt border-t-0; }
   .fin-discussion-panel { @apply border border-line rounded p-4 my-2 bg-surface; }
+}
+
+@media (max-width: 1100px) {
+  .ws-layout {
+    grid-template-columns: 240px minmax(0, 1fr);
+  }
+
+  .ws-agent-sidebar {
+    display: none;
+  }
+
+  .ws-main-content {
+    max-width: none;
+    padding-left: 24px;
+    padding-right: 24px;
+  }
 }
