@@ -12,6 +12,38 @@ UPDATE "DeliberationEntry"
 SET "entryType" = 'REACTION'
 WHERE "entryType" <> 'OBJECTION';
 
+INSERT INTO "DeliberationEntry" (
+  "id",
+  "workspaceId",
+  "parentType",
+  "parentId",
+  "authorUserId",
+  "entryType",
+  "bodyMd",
+  "targetMemberId",
+  "targetCircleId",
+  "resolvedAt",
+  "resolvedNote",
+  "createdAt"
+)
+SELECT
+  'legacy-spend-comment-' || comment."id",
+  spend."workspaceId",
+  'SPEND',
+  comment."spendId",
+  comment."authorUserId",
+  'OBJECTION',
+  comment."bodyMd",
+  NULL,
+  NULL,
+  NULL,
+  NULL,
+  comment."createdAt"
+FROM "SpendComment" AS comment
+INNER JOIN "SpendRequest" AS spend ON spend."id" = comment."spendId"
+WHERE comment."isObjection" = true
+  AND comment."resolvedAt" IS NULL;
+
 UPDATE "Proposal"
 SET "resolutionOutcome" = CASE
   WHEN "status"::text = 'APPROVED' THEN 'ADOPTED'::"ProposalResolutionOutcome"
