@@ -42,9 +42,9 @@ export default async function ProposalDetailPage({
 
   const ageText = (date: Date) => {
     const days = Math.floor((Date.now() - new Date(date).getTime()) / (1000 * 60 * 60 * 24));
-    if (days === 0) return "today";
-    if (days === 1) return "yesterday";
-    return `${days}d ago`;
+    if (days === 0) return t("ageToday");
+    if (days === 1) return t("ageYesterday");
+    return t("ageDaysAgo", { count: days });
   };
 
   const statusClass = (() => {
