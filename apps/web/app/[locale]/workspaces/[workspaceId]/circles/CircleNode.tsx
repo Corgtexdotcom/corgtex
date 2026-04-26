@@ -1,4 +1,7 @@
+"use client";
+
 import { Handle, Position } from "@xyflow/react";
+import { useTranslations } from "next-intl";
 
 export type CircleNodeData = {
   circleId: string;
@@ -10,6 +13,8 @@ export type CircleNodeData = {
 };
 
 export default function CircleNode({ data, selected }: { data: CircleNodeData; selected?: boolean }) {
+  const t = useTranslations("circles");
+
   const getBadgeClass = (stage: string) => {
     switch (stage) {
       case "BUILDING_MUSCLE": return "badge-building-muscle";
@@ -20,9 +25,9 @@ export default function CircleNode({ data, selected }: { data: CircleNodeData; s
 
   const getStageLabel = (stage: string) => {
     switch (stage) {
-      case "BUILDING_MUSCLE": return "Building Muscle";
-      case "FULL_O2": return "Full O2";
-      default: return "Getting Started";
+      case "BUILDING_MUSCLE": return t("stageBuildingMuscle");
+      case "FULL_O2": return t("stageFullO2");
+      default: return t("stageGettingStarted");
     }
   };
 
@@ -38,7 +43,7 @@ export default function CircleNode({ data, selected }: { data: CircleNodeData; s
             onClick={(e) => { e.stopPropagation(); data.onExpand!(data.circleId); }}
             style={{ fontSize: "12px", background: "var(--bg-alt)", border: "1px solid var(--line)", borderRadius: "var(--radius-sm)", padding: "2px 6px", cursor: "pointer" }}
           >
-            Expand
+            {t("expand")}
           </button>
         )}
       </div>
@@ -50,7 +55,7 @@ export default function CircleNode({ data, selected }: { data: CircleNodeData; s
           {getStageLabel(data.maturityStage)}
         </span>
         <span className="circle-node-roles">
-          {data.roleCount} {data.roleCount === 1 ? "role" : "roles"}
+          {t("roleCount", { count: data.roleCount })}
         </span>
       </div>
       <Handle type="source" position={Position.Bottom} style={{ visibility: "hidden" }} />

@@ -1,6 +1,7 @@
 "use client";
 
 import { useTransition } from "react";
+import { useTranslations } from "next-intl";
 import { toggleAgentAction } from "./actions";
 
 export function AgentRegistryToggle({ 
@@ -13,6 +14,7 @@ export function AgentRegistryToggle({
   enabled: boolean; 
 }) {
   const [isPending, startTransition] = useTransition();
+  const t = useTranslations("agents");
 
   const handleToggle = () => {
     startTransition(() => {
@@ -25,6 +27,8 @@ export function AgentRegistryToggle({
       type="button"
       disabled={isPending}
       onClick={handleToggle}
+      aria-label={enabled ? t("disableAgent") : t("enableAgent")}
+      title={enabled ? t("disableAgent") : t("enableAgent")}
       className={`relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed ${
         enabled ? "bg-black dark:bg-white" : "bg-zinc-200 dark:bg-zinc-800"
       }`}
