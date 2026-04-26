@@ -425,6 +425,7 @@ export async function submitSpend(actor: AppActor, params: { workspaceId: string
         aggregateId: spend.id,
         payload: {
           spendId: spend.id,
+          title: spend.description,
         },
       },
     ]);
