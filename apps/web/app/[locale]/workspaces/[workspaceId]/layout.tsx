@@ -10,6 +10,7 @@ import { CommandMenuButton } from "./CommandMenuButton";
 import { getTranslations } from "next-intl/server";
 import { LanguageSwitcher } from "./LanguageSwitcher";
 import { ThemeToggle } from "../../../ThemeToggle";
+import { filterNavGroupsByFeatureFlags, getWorkspaceFeatureFlags } from "@/lib/workspace-feature-flags";
 
 export const dynamic = "force-dynamic";
 
@@ -35,20 +36,21 @@ export default async function WorkspaceLayout({
   const { workspaceId } = await params;
   const actor = await requirePageActor();
   const userId = actor.kind === "user" ? actor.user.id : null;
-  const [workspaces, unreadCount, conversationsResult, multilingualFlag] = await Promise.all([
+  const [workspaces, unreadCount, conversationsResult, featureFlags] = await Promise.all([
     listActorWorkspaces(actor),
     userId ? countUnreadNotifications(userId, workspaceId) : Promise.resolve(0),
     listConversations(actor, workspaceId, { take: 30 }).catch(() => ({ items: [], total: 0, take: 30, skip: 0 })),
-    prisma.workspaceFeatureFlag.findFirst({ where: { workspaceId, flag: "MULTILINGUAL", enabled: true } })
+    getWorkspaceFeatureFlags(workspaceId),
   ]);
   const current = workspaces.find((w: Workspace) => w.id === workspaceId);
   const conversations = conversationsResult.items;
+  const visibleNavGroups = filterNavGroupsByFeatureFlags(navGroups, featureFlags);
   const tNav = await getTranslations("nav");
   const tCommon = await getTranslations("common");
 
   return (
     <div className="ws-layout">
-      <CommandPalette workspaceId={workspaceId} workspaces={workspaces} />
+      <CommandPalette workspaceId={workspaceId} workspaces={workspaces} navGroups={visibleNavGroups} />
       <aside className="ws-sidebar">
         <div className="ws-sidebar-header">
           <a href="/" className="ws-logo">{current ? workspaceBranding(current).primaryName : "Corgtex"}</a>
@@ -60,7 +62,7 @@ export default async function WorkspaceLayout({
         </div>
 
         <nav className="ws-nav">
-          {navGroups.map((group) => (
+          {visibleNavGroups.map((group) => (
             <div key={group.labelKey} style={{ marginBottom: "16px" }}>
               <div className="muted" style={{ fontSize: "0.75rem", textTransform: "uppercase", letterSpacing: "0.05em", padding: "0 12px", marginBottom: "4px", fontWeight: 600 }}>
                 {tNav(group.labelKey as any)}
@@ -95,7 +97,7 @@ export default async function WorkspaceLayout({
         </nav>
 
         <div className="ws-sidebar-footer">
-          {!!multilingualFlag && <LanguageSwitcher />}
+          {featureFlags.MULTILINGUAL && <LanguageSwitcher />}
           <CommandMenuButton />
           <ThemeToggle />
           

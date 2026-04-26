@@ -2,6 +2,7 @@ import { listMembersEnriched, listAgentIdentities } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import Link from "next/link";
 import { getTranslations } from "next-intl/server";
+import { getWorkspaceFeatureFlags } from "@/lib/workspace-feature-flags";
 
 export const dynamic = "force-dynamic";
 
@@ -13,9 +14,10 @@ export default async function MembersPage({
   const { workspaceId } = await params;
   const actor = await requirePageActor();
   const t = await getTranslations("members");
+  const featureFlags = await getWorkspaceFeatureFlags(workspaceId);
 
   const members = await listMembersEnriched(workspaceId, { includeInactive: false });
-  const agents = await listAgentIdentities(actor, workspaceId);
+  const agents = featureFlags.AGENT_GOVERNANCE ? await listAgentIdentities(actor, workspaceId) : [];
 
   return (
     <>
