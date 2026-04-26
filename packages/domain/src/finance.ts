@@ -7,6 +7,8 @@ import { getApprovalPolicy } from "./approvals";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { invariant } from "./errors";
 
+const LEGACY_SPEND_COMMENT_ENTRY_ID_PREFIX = "legacy-spend-comment-";
+
 function requireFinanceAccess(actor: AppActor, workspaceId: string) {
   return requireWorkspaceMembership({
     actor,
@@ -150,16 +152,33 @@ async function countOpenSpendObjections(
         resolvedAt: null,
       },
     }),
-    tx.spendComment.count({
+    tx.spendComment.findMany({
       where: {
         spendId,
         isObjection: true,
         resolvedAt: null,
       },
+      select: { id: true },
     }),
   ]);
 
-  return deliberationObjections + legacyCommentObjections;
+  if (legacyCommentObjections.length === 0) {
+    return deliberationObjections;
+  }
+
+  const representedLegacyCommentCount = await tx.deliberationEntry.count({
+    where: {
+      id: {
+        in: legacyCommentObjections.map(({ id }) => `${LEGACY_SPEND_COMMENT_ENTRY_ID_PREFIX}${id}`),
+      },
+      workspaceId,
+      parentType: "SPEND",
+      parentId: spendId,
+      entryType: "OBJECTION",
+    },
+  });
+
+  return deliberationObjections + legacyCommentObjections.length - representedLegacyCommentCount;
 }
 
 export async function listSpends(workspaceId: string, opts?: { take?: number; skip?: number; archiveFilter?: ArchiveFilter }) {
