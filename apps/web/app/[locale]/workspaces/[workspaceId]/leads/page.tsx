@@ -9,6 +9,7 @@ import {
 } from "../actions";
 import { DealStageSelect } from "./DealStageSelect";
 import { getTranslations } from "next-intl/server";
+import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
 
 export const dynamic = "force-dynamic";
 
@@ -20,6 +21,7 @@ export default async function LeadsPage({
   searchParams?: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const { workspaceId } = await params;
+  await requireWorkspaceFeature(workspaceId, "RELATIONSHIPS");
   const actor = await requirePageActor();
   const t = await getTranslations("leads");
   

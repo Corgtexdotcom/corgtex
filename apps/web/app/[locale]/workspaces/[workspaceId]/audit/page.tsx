@@ -2,6 +2,8 @@ import { listAuditLogs, getModelUsageSummary, listAgentRuns, getAgentRunTrace, g
 import { requirePageActor } from "@/lib/auth";
 import { getTranslations } from "next-intl/server";
 import { purgeArchivedArtifactAction, restoreArchivedArtifactAction } from "./actions";
+import { notFound } from "next/navigation";
+import { getWorkspaceFeatureFlags } from "@/lib/workspace-feature-flags";
 
 export const dynamic = "force-dynamic";
 
@@ -53,6 +55,10 @@ export default async function AuditPage({
   const actor = await requirePageActor();
   const t = await getTranslations("audit");
   const tab = search.tab ?? "audit";
+  const featureFlags = await getWorkspaceFeatureFlags(workspaceId);
+  if (!featureFlags.AGENT_GOVERNANCE && (tab === "agents" || tab === "costs" || search.agentRunId)) {
+    notFound();
+  }
 
   const auditLogs = await listAuditLogs(actor, workspaceId, {
     take: 50,
