@@ -103,7 +103,7 @@ export default async function OperatorPage({
     <>
       {failingAgents.length > 0 && (
         <div className="panel danger" style={{ marginBottom: 24 }}>
-          <strong>{t("agentsFailing", { agents: failingAgents.join(", ") })}</strong>
+          <strong>{t("failingAgents", { agents: failingAgents.join(", ") })}</strong>
         </div>
       )}
       <div className="ws-page-header">
