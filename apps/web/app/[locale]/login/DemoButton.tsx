@@ -1,9 +1,11 @@
 "use client";
 
 import { useState } from "react";
+import { useTranslations } from "next-intl";
 
 export function DemoButton() {
   const [isLoading, setIsLoading] = useState(false);
+  const t = useTranslations("demo");
 
   const handleDemoLogin = async () => {
     setIsLoading(true);
@@ -18,11 +20,11 @@ export function DemoButton() {
         // Force a hard navigation to clear any cached states
         window.location.href = `/workspaces/${data.workspaceId}`;
       } else {
-        alert("Demo environment is currently unavailable. Please try again later.");
+        alert(t("unavailable"));
         setIsLoading(false);
       }
     } catch (e) {
-      alert("Failed to connect to demo environment.");
+      alert(t("connectionFailed"));
       setIsLoading(false);
     }
   };
@@ -30,7 +32,7 @@ export function DemoButton() {
   return (
     <div style={{ marginTop: 24, paddingTop: 24, borderTop: "1px solid var(--line)" }}>
       <p style={{ fontSize: "0.85rem", color: "var(--muted)", marginBottom: 12, textAlign: "center" }}>
-        Want to see how it works?
+        {t("prompt")}
       </p>
       <button 
         type="button" 
@@ -43,7 +45,7 @@ export function DemoButton() {
           fontWeight: 600
         }}
       >
-        {isLoading ? "Preparing Demo..." : "Explore Live Demo — Johnson & Johnson"}
+        {isLoading ? t("preparing") : t("explore")}
       </button>
     </div>
   );

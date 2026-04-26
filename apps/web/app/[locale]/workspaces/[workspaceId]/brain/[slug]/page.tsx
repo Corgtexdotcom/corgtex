@@ -38,9 +38,9 @@ export default async function BrainArticlePage({
 
   const ageText = (date: Date) => {
     const days = Math.floor((Date.now() - new Date(date).getTime()) / (1000 * 60 * 60 * 24));
-    if (days === 0) return "today";
-    if (days === 1) return "yesterday";
-    return `${days}d ago`;
+    if (days === 0) return t("today");
+    if (days === 1) return t("yesterday");
+    return t("daysAgo", { count: days });
   };
 
   const htmlContent = renderMarkdown(article.bodyMd);
@@ -100,9 +100,9 @@ export default async function BrainArticlePage({
                 ))}
               </select>
               <select name="authority" defaultValue={article.authority} style={{ flex: 1, padding: "8px", fontSize: "0.85rem", border: "1px solid var(--line)" }}>
-                <option value="DRAFT">Draft</option>
-                <option value="REFERENCE">Reference</option>
-                <option value="AUTHORITATIVE">Authoritative</option>
+                <option value="DRAFT">{t("authorityDraft")}</option>
+                <option value="REFERENCE">{t("authorityReference")}</option>
+                <option value="AUTHORITATIVE">{t("authorityAuthoritative")}</option>
               </select>
             </div>
             <textarea name="bodyMd" defaultValue={article.bodyMd} rows={10} style={{ width: "100%", padding: "12px", fontSize: "0.9rem", border: "1px solid var(--line)", borderRadius: "4px", fontFamily: "monospace", lineHeight: 1.4 }} />

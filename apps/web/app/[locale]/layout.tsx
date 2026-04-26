@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import { Inter, Playfair_Display, Montserrat } from "next/font/google";
 import "../globals.css";
 import { NextIntlClientProvider } from 'next-intl';
-import { getMessages } from 'next-intl/server';
+import { getMessages, getTranslations } from 'next-intl/server';
 import { routing } from '@/i18n/routing';
 import { notFound } from 'next/navigation';
 import { ThemeProvider } from "../ThemeProvider";
@@ -11,10 +11,14 @@ const inter = Inter({ subsets: ["latin"], variable: "--font-inter", display: "sw
 const playfair = Playfair_Display({ subsets: ["latin"], variable: "--font-playfair", display: "swap" });
 const montserrat = Montserrat({ weight: ["900"], subsets: ["latin"], variable: "--font-montserrat", display: "swap" });
 
-export const metadata: Metadata = {
-  title: "Corgtex",
-  description: "Corgtex — AI-native workspace operating system.",
-};
+export async function generateMetadata(): Promise<Metadata> {
+  const t = await getTranslations("metadata");
+
+  return {
+    title: t("title"),
+    description: t("description"),
+  };
+}
 
 export default async function RootLayout({
   children,
