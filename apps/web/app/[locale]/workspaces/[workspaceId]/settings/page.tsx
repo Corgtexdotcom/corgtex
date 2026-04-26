@@ -16,6 +16,8 @@ import { AgentBudgetManager } from "./agents/AgentBudgetManager";
 import { SsoConfigManager } from "./SsoConfigManager";
 import { DataSourcesManager } from "./DataSourcesManager";
 import { getTranslations, getFormatter } from "next-intl/server";
+import { notFound } from "next/navigation";
+import { getWorkspaceFeatureFlags } from "@/lib/workspace-feature-flags";
 
 export const dynamic = "force-dynamic";
 
@@ -31,6 +33,10 @@ export default async function SettingsPage({
   const search = await searchParams;
   const actor = await requirePageActor();
   const tab = search.tab ?? "general";
+  const featureFlags = await getWorkspaceFeatureFlags(workspaceId);
+  if (!featureFlags.AGENT_GOVERNANCE && tab === "agents") {
+    notFound();
+  }
 
   // Load core user constraints that apply to both tabs
   const [credentials, webhookEndpoints, inboundWebhooks, userConnections, oauthApps, ssoConfigs] = await Promise.all([
