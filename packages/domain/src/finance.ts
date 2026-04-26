@@ -135,6 +135,33 @@ async function ensureSpendLedgerEntry(tx: Prisma.TransactionClient, spend: {
   return entry;
 }
 
+async function countOpenSpendObjections(
+  tx: Prisma.TransactionClient,
+  workspaceId: string,
+  spendId: string,
+) {
+  const [deliberationObjections, legacyCommentObjections] = await Promise.all([
+    tx.deliberationEntry.count({
+      where: {
+        workspaceId,
+        parentType: "SPEND",
+        parentId: spendId,
+        entryType: "OBJECTION",
+        resolvedAt: null,
+      },
+    }),
+    tx.spendComment.count({
+      where: {
+        spendId,
+        isObjection: true,
+        resolvedAt: null,
+      },
+    }),
+  ]);
+
+  return deliberationObjections + legacyCommentObjections;
+}
+
 export async function listSpends(workspaceId: string, opts?: { take?: number; skip?: number; archiveFilter?: ArchiveFilter }) {
   const take = opts?.take ?? 20;
   const skip = opts?.skip ?? 0;
@@ -623,14 +650,7 @@ export async function markSpendPaid(actor: AppActor, params: {
     // Can be paid from OPEN if there are no open objections; payment resolves the request as approved.
     let isOpenWithoutObjections = false;
     if (spend.status === "OPEN") {
-      const openObjectionsCount = await tx.deliberationEntry.count({
-        where: {
-          parentType: "SPEND",
-          parentId: spend.id,
-          entryType: "OBJECTION",
-          resolvedAt: null,
-        }
-      });
+      const openObjectionsCount = await countOpenSpendObjections(tx, params.workspaceId, spend.id);
       isOpenWithoutObjections = openObjectionsCount === 0;
     }
 
@@ -934,15 +954,7 @@ export async function escalateSpendToProposal(actor: AppActor, params: {
 
   return prisma.$transaction(async (tx) => {
     const spend = await findSpendForWorkspace(tx, params.workspaceId, params.spendId);
-    const openObjections = await tx.deliberationEntry.count({
-      where: {
-        workspaceId: params.workspaceId,
-        parentType: "SPEND",
-        parentId: spend.id,
-        entryType: "OBJECTION",
-        resolvedAt: null,
-      },
-    });
+    const openObjections = await countOpenSpendObjections(tx, params.workspaceId, spend.id);
     invariant(spend.status === "OPEN" && openObjections > 0, 400, "INVALID_STATE", "Only open spends with unresolved objections can be escalated.");
 
     // Create a new proposal

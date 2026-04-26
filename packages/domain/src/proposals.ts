@@ -354,16 +354,25 @@ export async function autoApproveProposals(): Promise<number> {
   for (const p of proposalsToApprove) {
     try {
       const didApprove = await prisma.$transaction(async (tx) => {
-        const openObjections = await tx.deliberationEntry.count({
-          where: {
-            workspaceId: p.workspaceId,
-            parentType: "PROPOSAL",
-            parentId: p.id,
-            entryType: "OBJECTION",
-            resolvedAt: null,
-          },
-        });
-        if (openObjections > 0) {
+        const [openDeliberationObjections, openReactionObjections] = await Promise.all([
+          tx.deliberationEntry.count({
+            where: {
+              workspaceId: p.workspaceId,
+              parentType: "PROPOSAL",
+              parentId: p.id,
+              entryType: "OBJECTION",
+              resolvedAt: null,
+            },
+          }),
+          tx.proposalReaction.count({
+            where: {
+              proposalId: p.id,
+              reaction: "OBJECTION",
+              resolvedAt: null,
+            },
+          }),
+        ]);
+        if (openDeliberationObjections + openReactionObjections > 0) {
           return false;
         }
 
