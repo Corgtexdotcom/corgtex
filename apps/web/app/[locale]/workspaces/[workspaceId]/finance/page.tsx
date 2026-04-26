@@ -132,7 +132,7 @@ export default async function FinancePage({
 
   return (
     <>
-      <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 32 }}>
+      <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 24 }}>
         <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2.5rem" }}>{t("pageTitle")}</h1>
         <div className="nr-masthead-meta">
           <span>{t("pageDescription")}</span>
