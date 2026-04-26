@@ -11,7 +11,10 @@ const { prismaMock, txMock } = vi.hoisted(() => {
     spendRequest,
     auditLog: { create: vi.fn() },
     deliberationEntry: { count: vi.fn() },
-    spendComment: { count: vi.fn() },
+    spendComment: {
+      count: vi.fn(),
+      findMany: vi.fn(),
+    },
   };
   const prisma = {
     member: { findFirst: vi.fn() },
@@ -119,6 +122,7 @@ describe("markSpendPaid", () => {
     txMock.auditLog.create.mockResolvedValue({});
     txMock.deliberationEntry.count.mockResolvedValue(0);
     txMock.spendComment.count.mockResolvedValue(0);
+    txMock.spendComment.findMany.mockResolvedValue([]);
   });
 
   function openSpend() {
@@ -160,7 +164,7 @@ describe("markSpendPaid", () => {
     const { markSpendPaid } = await import("./finance");
 
     txMock.spendRequest.findUnique.mockResolvedValue(openSpend());
-    txMock.spendComment.count.mockResolvedValue(1);
+    txMock.spendComment.findMany.mockResolvedValue([{ id: "comment-1" }]);
 
     await expect(markSpendPaid(
       { kind: "user", user: { id: "usr-finance" } } as any,
@@ -168,6 +172,40 @@ describe("markSpendPaid", () => {
     )).rejects.toMatchObject({ code: "INVALID_STATE" });
 
     expect(txMock.spendRequest.update).not.toHaveBeenCalled();
+  });
+
+  it("does not block payment after a migrated legacy objection entry is resolved", async () => {
+    const { markSpendPaid } = await import("./finance");
+    const spend = openSpend();
+    const updatedSpend = {
+      ...spend,
+      status: "RESOLVED",
+      resolutionOutcome: "APPROVED",
+      receiptUrl: "https://receipt.test/1",
+      spentAt: new Date(),
+    };
+
+    txMock.spendRequest.findUnique.mockResolvedValue(spend);
+    txMock.spendComment.findMany.mockResolvedValue([{ id: "comment-1" }]);
+    txMock.deliberationEntry.count
+      .mockResolvedValueOnce(0)
+      .mockResolvedValueOnce(1);
+    txMock.spendRequest.update.mockResolvedValue(updatedSpend);
+
+    await expect(markSpendPaid(
+      { kind: "user", user: { id: "usr-finance" } } as any,
+      { workspaceId: "ws-1", spendId: "sp-1", receiptUrl: "https://receipt.test/1" },
+    )).resolves.toBe(updatedSpend);
+
+    expect(txMock.deliberationEntry.count).toHaveBeenLastCalledWith({
+      where: {
+        id: { in: ["legacy-spend-comment-comment-1"] },
+        workspaceId: "ws-1",
+        parentType: "SPEND",
+        parentId: "sp-1",
+        entryType: "OBJECTION",
+      },
+    });
   });
 
   it("marks an open spend paid when it has no unresolved objections", async () => {
