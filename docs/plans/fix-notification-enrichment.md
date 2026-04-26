@@ -27,6 +27,7 @@ name mismatch, and improves the dashboard notification UI with deep links and co
 - `packages/workflows/src/outbox.test.ts`
 - `apps/web/app/[locale]/workspaces/[workspaceId]/page.tsx`
 - `packages/domain/src/proposals.test.ts`
+- `packages/domain/src/finance.test.ts`
 - `docs/plans/fix-notification-enrichment.md`
 
 ## Acceptance criteria
@@ -37,12 +38,13 @@ name mismatch, and improves the dashboard notification UI with deep links and co
 - [x] Approval flow cards show the proposal/spend title instead of raw type
 - [x] Notification cards deep-link to the specific entity page
 - [x] Notification cards show body text and age
-- [x] All tests pass (11/11)
+- [x] Domain tests prove proposal.opened and spend.opened payloads include title
+- [x] All tests pass
 
 ## Test plan
 
 ```
-npx vitest run packages/workflows/src/outbox.test.ts
+npx vitest run packages/domain/src/proposals.test.ts packages/domain/src/finance.test.ts packages/workflows/src/outbox.test.ts
 ```
 
 ## Rollback

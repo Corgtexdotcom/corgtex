@@ -238,3 +238,74 @@ describe("markSpendPaid", () => {
     }));
   });
 });
+
+describe("submitSpend event payload", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    txMock.auditLog.create.mockResolvedValue({});
+    txMock.deliberationEntry.count.mockResolvedValue(0);
+    txMock.spendComment.count.mockResolvedValue(0);
+    txMock.spendComment.findMany.mockResolvedValue([]);
+  });
+
+  it("emits spend.opened event with title (description) in the payload", async () => {
+    const { appendEvents } = await import("./events");
+    const { ensureApprovalFlow, getApprovalPolicy } = await import("./approvals");
+
+    vi.mocked(appendEvents).mockResolvedValue(undefined);
+    vi.mocked(ensureApprovalFlow as any).mockResolvedValue({ id: "flow-1" });
+    vi.mocked(getApprovalPolicy as any).mockResolvedValue({
+      mode: "CONSENT",
+      decisionWindowHours: 168,
+      requireProposalLink: false,
+    });
+
+    txMock.spendRequest.findUnique.mockResolvedValue({
+      id: "sp-1",
+      workspaceId: "ws-1",
+      requesterUserId: "usr-1",
+      status: "DRAFT",
+      description: "Annual SaaS license renewal",
+      amountCents: 5000,
+      currency: "USD",
+      category: "software",
+      vendor: null,
+      receiptUrl: null,
+      spentAt: null,
+      ledgerAccountId: null,
+      archivedAt: null,
+      proposalLinks: [],
+      comments: [],
+    });
+
+    txMock.spendRequest.update.mockResolvedValue({
+      id: "sp-1",
+      status: "OPEN",
+    });
+
+    // Mock approvalFlow.update on the tx proxy
+    (txMock as any).approvalFlow = {
+      update: vi.fn().mockResolvedValue({}),
+    };
+
+    const { submitSpend } = await import("./finance");
+    const actor = { kind: "user", user: { id: "usr-1" } } as any;
+
+    await submitSpend(actor, {
+      workspaceId: "ws-1",
+      spendId: "sp-1",
+    });
+
+    expect(appendEvents).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "spend.opened",
+          payload: expect.objectContaining({
+            title: "Annual SaaS license renewal",
+          }),
+        }),
+      ]),
+    );
+  });
+});
