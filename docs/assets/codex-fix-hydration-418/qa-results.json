@@ -1,0 +1,202 @@
+{
+  "used": "agent-e2e",
+  "routeResults": [
+    {
+      "name": "desktop-home",
+      "route": "/workspaces/e2d1d5ca-0795-470c-a47f-298ef1e50fa2",
+      "status": 200
+    },
+    {
+      "name": "desktop-goals",
+      "route": "/workspaces/e2d1d5ca-0795-470c-a47f-298ef1e50fa2/goals",
+      "status": 200
+    },
+    {
+      "name": "desktop-brain",
+      "route": "/workspaces/e2d1d5ca-0795-470c-a47f-298ef1e50fa2/brain",
+      "status": 200
+    },
+    {
+      "name": "desktop-brain-sources",
+      "route": "/workspaces/e2d1d5ca-0795-470c-a47f-298ef1e50fa2/brain/sources",
+      "status": 200
+    },
+    {
+      "name": "desktop-brain-status",
+      "route": "/workspaces/e2d1d5ca-0795-470c-a47f-298ef1e50fa2/brain/status",
+      "status": 200
+    },
+    {
+      "name": "desktop-members",
+      "route": "/workspaces/e2d1d5ca-0795-470c-a47f-298ef1e50fa2/members",
+      "status": 200
+    },
+    {
+      "name": "desktop-tensions",
+      "route": "/workspaces/e2d1d5ca-0795-470c-a47f-298ef1e50fa2/tensions",
+      "status": 200
+    },
+    {
+      "name": "desktop-actions",
+      "route": "/workspaces/e2d1d5ca-0795-470c-a47f-298ef1e50fa2/actions",
+      "status": 200
+    },
+    {
+      "name": "desktop-meetings",
+      "route": "/workspaces/e2d1d5ca-0795-470c-a47f-298ef1e50fa2/meetings",
+      "status": 200
+    },
+    {
+      "name": "desktop-leads",
+      "route": "/workspaces/e2d1d5ca-0795-470c-a47f-298ef1e50fa2/leads",
+      "status": 200
+    },
+    {
+      "name": "desktop-proposals",
+      "route": "/workspaces/e2d1d5ca-0795-470c-a47f-298ef1e50fa2/proposals",
+      "status": 200
+    },
+    {
+      "name": "desktop-circles",
+      "route": "/workspaces/e2d1d5ca-0795-470c-a47f-298ef1e50fa2/circles",
+      "status": 200
+    },
+    {
+      "name": "desktop-cycles",
+      "route": "/workspaces/e2d1d5ca-0795-470c-a47f-298ef1e50fa2/cycles",
+      "status": 200
+    },
+    {
+      "name": "desktop-finance",
+      "route": "/workspaces/e2d1d5ca-0795-470c-a47f-298ef1e50fa2/finance",
+      "status": 200
+    },
+    {
+      "name": "desktop-agents",
+      "route": "/workspaces/e2d1d5ca-0795-470c-a47f-298ef1e50fa2/agents",
+      "status": 200
+    },
+    {
+      "name": "desktop-governance",
+      "route": "/workspaces/e2d1d5ca-0795-470c-a47f-298ef1e50fa2/governance",
+      "status": 200
+    },
+    {
+      "name": "desktop-audit",
+      "route": "/workspaces/e2d1d5ca-0795-470c-a47f-298ef1e50fa2/audit",
+      "status": 200
+    },
+    {
+      "name": "desktop-settings",
+      "route": "/workspaces/e2d1d5ca-0795-470c-a47f-298ef1e50fa2/settings",
+      "status": 200
+    },
+    {
+      "name": "desktop-chat",
+      "route": "/workspaces/e2d1d5ca-0795-470c-a47f-298ef1e50fa2/chat",
+      "status": 200
+    },
+    {
+      "name": "desktop-operator",
+      "route": "/workspaces/e2d1d5ca-0795-470c-a47f-298ef1e50fa2/operator",
+      "status": 200
+    },
+    {
+      "name": "mobile-home",
+      "route": "/workspaces/e2d1d5ca-0795-470c-a47f-298ef1e50fa2",
+      "status": 200
+    },
+    {
+      "name": "mobile-goals",
+      "route": "/workspaces/e2d1d5ca-0795-470c-a47f-298ef1e50fa2/goals",
+      "status": 200
+    },
+    {
+      "name": "mobile-brain",
+      "route": "/workspaces/e2d1d5ca-0795-470c-a47f-298ef1e50fa2/brain",
+      "status": 200
+    },
+    {
+      "name": "mobile-brain-sources",
+      "route": "/workspaces/e2d1d5ca-0795-470c-a47f-298ef1e50fa2/brain/sources",
+      "status": 200
+    },
+    {
+      "name": "mobile-brain-status",
+      "route": "/workspaces/e2d1d5ca-0795-470c-a47f-298ef1e50fa2/brain/status",
+      "status": 200
+    },
+    {
+      "name": "mobile-members",
+      "route": "/workspaces/e2d1d5ca-0795-470c-a47f-298ef1e50fa2/members",
+      "status": 200
+    },
+    {
+      "name": "mobile-tensions",
+      "route": "/workspaces/e2d1d5ca-0795-470c-a47f-298ef1e50fa2/tensions",
+      "status": 200
+    },
+    {
+      "name": "mobile-actions",
+      "route": "/workspaces/e2d1d5ca-0795-470c-a47f-298ef1e50fa2/actions",
+      "status": 200
+    },
+    {
+      "name": "mobile-meetings",
+      "route": "/workspaces/e2d1d5ca-0795-470c-a47f-298ef1e50fa2/meetings",
+      "status": 200
+    },
+    {
+      "name": "mobile-leads",
+      "route": "/workspaces/e2d1d5ca-0795-470c-a47f-298ef1e50fa2/leads",
+      "status": 200
+    },
+    {
+      "name": "mobile-proposals",
+      "route": "/workspaces/e2d1d5ca-0795-470c-a47f-298ef1e50fa2/proposals",
+      "status": 200
+    },
+    {
+      "name": "mobile-circles",
+      "route": "/workspaces/e2d1d5ca-0795-470c-a47f-298ef1e50fa2/circles",
+      "status": 200
+    },
+    {
+      "name": "mobile-cycles",
+      "route": "/workspaces/e2d1d5ca-0795-470c-a47f-298ef1e50fa2/cycles",
+      "status": 200
+    },
+    {
+      "name": "mobile-finance",
+      "route": "/workspaces/e2d1d5ca-0795-470c-a47f-298ef1e50fa2/finance",
+      "status": 200
+    },
+    {
+      "name": "mobile-agents",
+      "route": "/workspaces/e2d1d5ca-0795-470c-a47f-298ef1e50fa2/agents",
+      "status": 200
+    },
+    {
+      "name": "mobile-governance",
+      "route": "/workspaces/e2d1d5ca-0795-470c-a47f-298ef1e50fa2/governance",
+      "status": 200
+    },
+    {
+      "name": "mobile-audit",
+      "route": "/workspaces/e2d1d5ca-0795-470c-a47f-298ef1e50fa2/audit",
+      "status": 200
+    },
+    {
+      "name": "mobile-settings",
+      "route": "/workspaces/e2d1d5ca-0795-470c-a47f-298ef1e50fa2/settings",
+      "status": 200
+    },
+    {
+      "name": "mobile-chat",
+      "route": "/workspaces/e2d1d5ca-0795-470c-a47f-298ef1e50fa2/chat",
+      "status": 200
+    }
+  ],
+  "findings": [],
+  "consoleErrors": []
+}
