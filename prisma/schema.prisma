@@ -22,26 +22,28 @@ enum MemberRole {
 }
 
 enum ActionStatus {
+  DRAFT
   OPEN
   IN_PROGRESS
   COMPLETED
-  CANCELLED
 }
 
 enum TensionStatus {
+  DRAFT
   OPEN
-  IN_PROGRESS
-  COMPLETED
-  CANCELLED
+  RESOLVED
 }
 
 enum ProposalStatus {
   DRAFT
-  SUBMITTED
-  ADVICE_GATHERING
-  APPROVED
-  REJECTED
-  ARCHIVED
+  OPEN
+  RESOLVED
+}
+
+enum ProposalResolutionOutcome {
+  ADOPTED
+  NOT_ADOPTED
+  WITHDRAWN
 }
 
 enum ApprovalMode {
@@ -70,11 +72,14 @@ enum ApprovalDecisionChoice {
 
 enum SpendStatus {
   DRAFT
-  SUBMITTED
-  OBJECTED
+  OPEN
+  RESOLVED
+}
+
+enum SpendResolutionOutcome {
   APPROVED
   REJECTED
-  PAID
+  WITHDRAWN
 }
 
 enum SpendReconciliationStatus {
@@ -378,6 +383,7 @@ model Member {
   goalUpdates             GoalUpdate[]
   recognitionsReceived    Recognition[]            @relation("RecognitionRecipient")
   recognitionsGiven       Recognition[]            @relation("RecognitionAuthor")
+  targetedDeliberationEntries DeliberationEntry[]   @relation("DeliberationTargetMember")
 
   @@unique([workspaceId, userId])
   @@index([workspaceId, role])
@@ -426,6 +432,7 @@ model Circle {
   policyCorpus PolicyCorpus[]
   goals        Goal[]
   agentAssignments CircleAgentAssignment[]
+  targetedDeliberationEntries DeliberationEntry[] @relation("DeliberationTargetCircle")
 
   @@index([workspaceId])
   @@index([workspaceId, archivedAt])
@@ -476,7 +483,7 @@ model Action {
   assigneeMemberId String?
   title            String
   bodyMd           String?
-  status           ActionStatus @default(OPEN)
+  status           ActionStatus @default(DRAFT)
   dueAt            DateTime?
   completedVia     String?
   proposalId       String?
@@ -506,7 +513,7 @@ model Tension {
   assigneeMemberId String?
   title            String
   bodyMd           String?
-  status           TensionStatus @default(OPEN)
+  status           TensionStatus @default(DRAFT)
   priority         Int           @default(0)
   urgency          Int?          @default(0)
   importance       Int?          @default(0)
@@ -543,6 +550,7 @@ model Proposal {
   summary      String?
   bodyMd       String
   status       ProposalStatus @default(DRAFT)
+  resolutionOutcome ProposalResolutionOutcome?
   decisionMd   String?
   isPrivate    Boolean        @default(false)
   publishedAt  DateTime?
@@ -591,18 +599,23 @@ model DeliberationEntry {
   parentType      String    // "PROPOSAL" | "SPEND" | "TENSION" | "MEETING" | "BRAIN_ARTICLE"
   parentId        String
   authorUserId    String
-  entryType       String    // "SUPPORT" | "QUESTION" | "CONCERN" | "OBJECTION" | "REACTION" | "ADVICE_REQUEST"
+  entryType       String    // "REACTION" | "OBJECTION"
   bodyMd          String?   @db.Text
   targetMemberId  String?   // For ADVICE_REQUEST: which member is being asked
+  targetCircleId  String?
   resolvedAt      DateTime?
   resolvedNote    String?
   createdAt       DateTime  @default(now())
 
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   author    User      @relation(fields: [authorUserId], references: [id], onDelete: Cascade)
+  targetMember Member? @relation("DeliberationTargetMember", fields: [targetMemberId], references: [id], onDelete: SetNull)
+  targetCircle Circle? @relation("DeliberationTargetCircle", fields: [targetCircleId], references: [id], onDelete: SetNull)
 
   @@index([parentType, parentId, createdAt])
   @@index([workspaceId, parentType])
+  @@index([targetCircleId])
+  @@index([targetMemberId])
 }
 
 model ApprovalPolicy {
@@ -778,6 +791,7 @@ model SpendRequest {
   workspaceId          String
   requesterUserId      String
   status               SpendStatus               @default(DRAFT)
+  resolutionOutcome    SpendResolutionOutcome?
   amountCents          Int
   currency             String
   category             String

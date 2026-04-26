@@ -192,6 +192,8 @@ export async function postDeliberationEntryAction(formData: FormData) {
     parentId: asString(formData, "proposalId"),
     entryType: asString(formData, "entryType"),
     bodyMd: asString(formData, "bodyMd"),
+    targetMemberId: asOptional(formData, "targetMemberId") || undefined,
+    targetCircleId: asOptional(formData, "targetCircleId") || undefined,
   });
   refresh(workspaceId);
 }
@@ -205,7 +207,7 @@ export async function resolveDeliberationEntryAction(formData: FormData) {
   await resolveDeliberationEntry(actor, {
     workspaceId,
     entryId: asString(formData, "entryId"),
-    resolvedNote: asOptional(formData, "resolvedNote") || undefined,
+    resolvedNote: asString(formData, "resolvedNote"),
   });
   refresh(workspaceId);
 }

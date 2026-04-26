@@ -134,27 +134,27 @@ describe("workspace archive domain", () => {
       workspaceId: "workspace-1",
       title: "Proposal",
       archivedAt: new Date("2026-04-25T12:00:00.000Z"),
-      status: "ARCHIVED",
+      status: "RESOLVED",
     });
     prismaMock.workspaceArchiveRecord.findFirst.mockResolvedValue({
       id: "archive-1",
       previousState: { status: "APPROVED" },
     });
-    prismaMock.proposal.update.mockResolvedValue({ id: "proposal-1", status: "APPROVED", archivedAt: null });
+    prismaMock.proposal.update.mockResolvedValue({ id: "proposal-1", status: "RESOLVED", archivedAt: null });
 
     const { restoreWorkspaceArtifact } = await import("./archive");
     await expect(restoreWorkspaceArtifact(actor, {
       workspaceId: "workspace-1",
       entityType: "Proposal",
       entityId: "proposal-1",
-    })).resolves.toMatchObject({ id: "proposal-1", status: "APPROVED" });
+    })).resolves.toMatchObject({ id: "proposal-1", status: "RESOLVED" });
 
     expect(prismaMock.proposal.update).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
         archivedAt: null,
         archivedByUserId: null,
         archiveReason: null,
-        status: "APPROVED",
+        status: "RESOLVED",
       }),
     }));
   });
@@ -165,7 +165,7 @@ describe("workspace archive domain", () => {
       workspaceId: "workspace-1",
       description: "Submitted spend",
       archivedAt: new Date("2026-04-25T12:00:00.000Z"),
-      status: "SUBMITTED",
+      status: "OPEN",
     });
     prismaMock.workspaceArchiveRecord.findFirst.mockResolvedValue({ id: "archive-1" });
 
@@ -260,7 +260,7 @@ describe("workspace archive domain", () => {
       requesterUserId: "requester-1",
       description: "Submitted spend",
       archivedAt: null,
-      status: "SUBMITTED",
+      status: "OPEN",
     });
 
     const { archiveWorkspaceArtifact } = await import("./archive");
@@ -290,7 +290,7 @@ describe("workspace archive domain", () => {
       requesterUserId: "requester-2",
       description: "Submitted spend",
       archivedAt: null,
-      status: "SUBMITTED",
+      status: "OPEN",
     });
     prismaMock.spendRequest.update.mockResolvedValue({ id: "spend-1", archivedAt: new Date("2026-04-25T12:00:00.000Z") });
 

@@ -10,6 +10,7 @@ type DeliberationEntry = {
   createdAt: Date;
   resolvedAt?: Date | null;
   resolvedNote?: string | null;
+  targetLabel?: string | null;
 };
 
 type DeliberationThreadProps = {
@@ -21,9 +22,6 @@ type DeliberationThreadProps = {
 
 function getTypeBadgeProps(type: string) {
   const t = type.toUpperCase();
-  if (t === "SUPPORT") return { label: "Support", tagClass: "success", avatarClass: "delib-avatar-support" };
-  if (t === "QUESTION") return { label: "Question", tagClass: "info", avatarClass: "delib-avatar-question" };
-  if (t === "CONCERN") return { label: "Concern", tagClass: "warning", avatarClass: "delib-avatar-concern" };
   if (t === "OBJECTION") return { label: "Objection", tagClass: "danger", avatarClass: "delib-avatar-objection" };
   return { label: "Reaction", tagClass: "", avatarClass: "delib-avatar-reaction" };
 }
@@ -48,6 +46,12 @@ export function DeliberationThread({ entries, canResolve, resolveAction, hiddenF
               <div style={{ fontWeight: 600 }}>{entry.authorName}</div>
               <div className="muted" style={{ margin: "0 4px" }}>·</div>
               <div className="muted">{formatDateTime(entry.createdAt)}</div>
+              {entry.targetLabel && (
+                <>
+                  <div className="muted" style={{ margin: "0 4px" }}>·</div>
+                  <div className="muted">{entry.targetLabel}</div>
+                </>
+              )}
               <div className={`tag ${tagClass}`} style={{ marginLeft: "auto" }}>{label}</div>
             </div>
 
@@ -65,7 +69,7 @@ export function DeliberationThread({ entries, canResolve, resolveAction, hiddenF
             )}
 
             {!isResolved && canResolve && (
-              <form action={resolveAction} style={{ marginTop: "12px", display: "flex", gap: "8px", alignItems: "center" }}>
+              <form action={resolveAction} style={{ marginTop: "12px", display: "flex", gap: "8px", alignItems: "center", width: "100%" }}>
                 <input type="hidden" name="entryId" value={entry.id} />
                 {Object.entries(hiddenFields).map(([k, v]) => (
                   <input key={k} type="hidden" name={k} value={v} />
@@ -73,10 +77,11 @@ export function DeliberationThread({ entries, canResolve, resolveAction, hiddenF
                 <input
                   type="text"
                   name="resolvedNote"
-                  placeholder="Resolution note (optional)..."
-                  style={{ fontSize: "0.85rem", padding: "6px 10px", flex: 1 }}
+                  placeholder="What changed, or why is this resolved?"
+                  required
+                  style={{ fontSize: "0.85rem", padding: "6px 10px", flex: "1 1 220px", minWidth: 0, width: "auto" }}
                 />
-                <button type="submit" className="secondary small">Resolve</button>
+                <button type="submit" className="secondary small" style={{ flex: "0 0 auto" }}>Resolve</button>
               </form>
             )}
           </div>

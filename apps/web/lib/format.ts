@@ -30,7 +30,7 @@ export function statusColor(status: string): string {
   if (status === "DRAFT") return "var(--muted)";
   if (status === "ACTIVE") return "var(--text)";
   if (status === "PUBLISHED") return "var(--text)";
-  if (status === "SUBMITTED" || status === "PENDING") return "var(--warning)";
+  if (status === "OPEN" || status === "SUBMITTED" || status === "PENDING") return "var(--warning)";
   if (status === "APPROVED" || status === "PAID" || status === "SUCCESS") return "var(--success)";
   if (status === "REJECTED" || status === "FAILED") return "var(--error)";
   if (status === "RESOLVED") return "var(--success)";

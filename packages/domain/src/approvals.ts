@@ -230,7 +230,8 @@ async function applySubjectOutcome(tx: Prisma.TransactionClient, params: {
     const proposal = await tx.proposal.update({
       where: { id: params.flow.subjectId },
       data: {
-        status: "APPROVED",
+        status: "RESOLVED",
+        resolutionOutcome: "ADOPTED",
         decidedAt: new Date(),
         decisionMd: approvalDecisionMd({
           mode: params.flow.mode,
@@ -266,7 +267,8 @@ async function applySubjectOutcome(tx: Prisma.TransactionClient, params: {
     await tx.proposal.update({
       where: { id: params.flow.subjectId },
       data: {
-        status: "REJECTED",
+        status: "RESOLVED",
+        resolutionOutcome: "NOT_ADOPTED",
         decidedAt: new Date(),
         decisionMd: approvalDecisionMd({
           mode: params.flow.mode,
@@ -283,14 +285,14 @@ async function applySubjectOutcome(tx: Prisma.TransactionClient, params: {
   if (params.status === "APPROVED" && params.flow.subjectType === "SPEND") {
     await tx.spendRequest.update({
       where: { id: params.flow.subjectId },
-      data: { status: "APPROVED" },
+      data: { status: "RESOLVED", resolutionOutcome: "APPROVED" },
     });
   }
 
   if (params.status === "REJECTED" && params.flow.subjectType === "SPEND") {
     await tx.spendRequest.update({
       where: { id: params.flow.subjectId },
-      data: { status: "REJECTED" },
+      data: { status: "RESOLVED", resolutionOutcome: "REJECTED" },
     });
   }
 }

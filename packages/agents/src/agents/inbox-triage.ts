@@ -31,15 +31,13 @@ export async function runInboxTriageAgent(params: {
         prisma.tension.count({
           where: {
             workspaceId: params.workspaceId,
-            status: {
-              in: ["OPEN", "IN_PROGRESS"],
-            },
+            status: "OPEN",
           },
         }),
         prisma.proposal.count({
           where: {
             workspaceId: params.workspaceId,
-            status: "SUBMITTED",
+            status: "OPEN",
           },
         }),
       ]);
@@ -76,4 +74,3 @@ export async function runInboxTriageAgent(params: {
     },
   });
 }
-
