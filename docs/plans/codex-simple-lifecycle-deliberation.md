@@ -63,6 +63,7 @@ Simplify Corgtex work item flows around practical draft, open, and resolved life
 - `packages/domain/src/tensions.ts`
 - `packages/mcp/src/server.ts`
 - `packages/mcp/src/server.test.ts`
+- `packages/shared/src/pilot-testing.integration.test.ts`
 - `prisma/schema.prisma`
 - `prisma/migrations/20260425233000_simple_lifecycle_deliberation/**`
 - `scripts/cleanup-test-artifacts.mjs`
@@ -86,6 +87,7 @@ npm run prisma:migrate -- --name simple_lifecycle_deliberation
 npx prisma migrate status
 npm run check
 npx vitest run packages/domain/src/proposals.test.ts packages/domain/src/finance.test.ts packages/domain/src/tensions.test.ts packages/domain/src/deliberation.test.ts packages/domain/src/archive.test.ts packages/domain/src/reactions.test.ts packages/mcp/src/server.test.ts
+npx vitest run --project integration packages/shared/src/pilot-testing.integration.test.ts
 npm run build
 ```
 
