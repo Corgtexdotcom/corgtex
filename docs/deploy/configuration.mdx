@@ -41,6 +41,40 @@ By default, the platform relies on external Large Language Models to power the O
   Setting `MODEL_PROVIDER` allows Corgtex's internal abstractions to handle the LLM routing without baking a specific vendor dependency into your infrastructure.
 </Info>
 
+## Performance and Session Coordination
+
+Production and client instances should use Redis for shared short-lived state. Postgres remains the permanent source of truth.
+
+| Variable | Description |
+|---|---|
+| `REDIS_URL` | Redis connection string used for shared rate limiting, short-lived Brain retrieval cache, and session heartbeat throttling. Required for scaled production/client deployments. |
+| `REDIS_KEY_PREFIX` | Prefix for Redis keys. Use a deployment-specific value such as `corgtex-prod` or `crina-prod` so environments do not collide. |
+| `SESSION_LAST_SEEN_WRITE_INTERVAL_MS` | Optional session heartbeat throttle. Defaults to `300000` (5 minutes). |
+
+On Railway, add a Redis service in the same project and environment as the app, then set `REDIS_URL` on every runtime service that handles requests or jobs, normally web and worker. Use Railway reference variables, for example:
+
+```env
+REDIS_URL="${{Redis.REDIS_URL}}"
+REDIS_KEY_PREFIX="client-slug-prod"
+```
+
+## Object Storage
+
+File uploads and Brain source downloads use an S3-compatible storage backend. Client instances that allow uploads must configure this for every runtime service that touches uploads, normally web and worker.
+
+| Variable | Description |
+|---|---|
+| `S3_ENDPOINT` | S3-compatible endpoint. For Railway buckets this is the bucket credential endpoint. |
+| `S3_BUCKET_NAME` | Bucket name used by the app. |
+| `AWS_S3_BUCKET_NAME` | Compatibility alias for bucket name. Set to the same value as `S3_BUCKET_NAME`. |
+| `S3_REGION` | Storage region. Railway buckets commonly use `auto`. |
+| `S3_ACCESS_KEY_ID` | S3-compatible access key ID. |
+| `S3_SECRET_ACCESS_KEY` | S3-compatible secret access key. |
+| `S3_ACCESS_KEY` | Compatibility alias for access key ID. Set to the same value as `S3_ACCESS_KEY_ID`. |
+| `S3_SECRET_KEY` | Compatibility alias for secret access key. Set to the same value as `S3_SECRET_ACCESS_KEY`. |
+
+On Railway, create or reuse a project bucket, read its S3-compatible credentials with the Railway dashboard or CLI, and set the variables above on web and worker. Do not print access keys or secret keys in logs, PRs, tickets, or support messages.
+
 ## Example `.env` File
 
 ```env
@@ -62,4 +96,18 @@ MODEL_PROVIDER="openrouter"
 MODEL_API_KEY="sk-or-v1-..."
 MODEL_CHAT_DEFAULT="anthropic/claude-3.5-sonnet"
 MODEL_EMBEDDING_DEFAULT="openai/text-embedding-3-small"
+
+# Redis (Production / Client Instances)
+REDIS_URL="redis://redis:6379"
+REDIS_KEY_PREFIX="corgtex-local"
+
+# S3-Compatible Storage
+S3_ENDPOINT="https://storage.example.com"
+S3_BUCKET_NAME="corgtex"
+AWS_S3_BUCKET_NAME="corgtex"
+S3_REGION="auto"
+S3_ACCESS_KEY_ID="..."
+S3_SECRET_ACCESS_KEY="..."
+S3_ACCESS_KEY="..."
+S3_SECRET_KEY="..."
 ```
