@@ -26,6 +26,7 @@ name mismatch, and improves the dashboard notification UI with deep links and co
 - `packages/workflows/src/derive-notifications.ts`
 - `packages/workflows/src/outbox.test.ts`
 - `apps/web/app/[locale]/workspaces/[workspaceId]/page.tsx`
+- `packages/domain/src/proposals.test.ts`
 - `docs/plans/fix-notification-enrichment.md`
 
 ## Acceptance criteria
