@@ -8,7 +8,7 @@ import { runAgentWorkflowJob } from "./handlers";
 import { syncBrainArticleKnowledge } from "@corgtex/knowledge";
 
 import { runDailyDigest } from "@corgtex/agents";
-import { createWebhookDeliveries, deliverWebhook, fetchCalendarEvents } from "@corgtex/domain";
+import { createWebhookDeliveries, deliverWebhook, processSlackInboundEvent, purgeExpiredCommunicationMessages } from "@corgtex/domain";
 
 const DEFAULT_BATCH_SIZE = 25;
 const MAX_ATTEMPTS = 5;
@@ -349,6 +349,19 @@ async function handleJob(job: ClaimedJob) {
     return;
   }
 
+  if (job.type === "communication.slack.event") {
+    const inboundEventId = (payload as { inboundEventId?: string }).inboundEventId;
+    if (inboundEventId) {
+      await processSlackInboundEvent(inboundEventId);
+    }
+    return;
+  }
+
+  if (job.type === "communication.raw-retention") {
+    await purgeExpiredCommunicationMessages(job.workspaceId);
+    return;
+  }
+
   if (job.type === "agent.inbox-triage") {
     const result = await runAgentWorkflowJob(job);
     if (result && typeof result === "object" && "skipped" in result && result.reason === "concurrency_limit") {
@@ -512,6 +525,13 @@ export async function scheduleDailyJobs() {
         type: "brain.daily-digest",
         payload: { dateISO: now.toISOString() },
         dedupeKey: `${workspace.id}:daily-digest:${todayISO}`,
+      });
+      await enqueueJob(tx, {
+        workspaceId: workspace.id,
+        eventId,
+        type: "communication.raw-retention",
+        payload: { dateISO: now.toISOString() },
+        dedupeKey: `${workspace.id}:communication-retention:${todayISO}`,
       });
       scheduledCount++;
     }

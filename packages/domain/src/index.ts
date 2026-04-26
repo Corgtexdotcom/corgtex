@@ -13,6 +13,7 @@ export * from "./auth";
 export * from "./circles";
 export * from "./constitutions";
 export * from "./conversations";
+export * from "./communication";
 export * from "./cycles";
 export * from "./documents";
 export * from "./errors";

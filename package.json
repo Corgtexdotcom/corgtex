@@ -56,6 +56,7 @@
     "@prisma/client": "6.19.2",
     "@sentry/nextjs": "9.1.0",
     "@sentry/node": "9.1.0",
+    "@slack/web-api": "^7.15.1",
     "@types/dagre": "^0.7.54",
     "@xyflow/react": "^12.10.2",
     "dagre": "^0.8.5",

@@ -110,6 +110,33 @@ enum WorkflowJobStatus {
   CANCELLED
 }
 
+enum CommunicationProvider {
+  SLACK
+  TEAMS
+  GOOGLE_CHAT
+}
+
+enum CommunicationInstallationStatus {
+  ACTIVE
+  DISCONNECTED
+  ERROR
+}
+
+enum CommunicationEventStatus {
+  PENDING
+  PROCESSED
+  IGNORED
+  FAILED
+}
+
+enum CommunicationChannelKind {
+  PUBLIC
+  PRIVATE
+  DIRECT
+  GROUP
+  UNKNOWN
+}
+
 enum KnowledgeSourceType {
   DOCUMENT
   MEETING
@@ -224,63 +251,69 @@ enum SensitivityLabel {
 }
 
 model Workspace {
-  id                  String                 @id @default(uuid())
-  slug                String                 @unique
-  name                String
-  description         String?
-  createdAt           DateTime               @default(now())
-  updatedAt           DateTime               @updatedAt
-  members             Member[]
-  circles             Circle[]
-  actions             Action[]
-  tensions            Tension[]
-  proposals           Proposal[]
-  approvalFlows       ApprovalFlow[]
-  approvalPolicy      ApprovalPolicy[]
-  cycles              Cycle[]
-  ledgerAccounts      LedgerAccount[]
-  ledgerEntries       LedgerEntry[]
-  spendRequests       SpendRequest[]
-  meetings            Meeting[]
-  documents           Document[]
-  policyCorpus        PolicyCorpus[]
-  constitutions       Constitution[]
-  governanceScores    GovernanceScore[]
-  auditLogs           AuditLog[]
-  events              Event[]
-  workflowJobs        WorkflowJob[]
-  knowledge           KnowledgeChunk[]
-  modelUsage          ModelUsage[]
-  agentRuns           AgentRun[]
-  agentCreds          AgentCredential[]
-  notifications       Notification[]
-  conversations       ConversationSession[]
-  agentMemories       AgentMemory[]
-  webhookEndpoints    WebhookEndpoint[]
-  inboundWebhooks     InboundWebhook[]
-  brainArticles       BrainArticle[]
-  brainSources        BrainSource[]
-  brainBacklinks      BrainBacklink[]
-  expertiseTags       ExpertiseTag[]
-  adviceProcesses     AdviceProcess[]
-  impactFootprints    ImpactFootprint[]
-  checkIns            CheckIn[]
-  demoLeads           DemoLead[]
-  crmContacts         CrmContact[]
-  crmDeals            CrmDeal[]
-  crmActivities       CrmActivity[]
-  agentConfigs        WorkspaceAgentConfig[]
-  oauthApps           OAuthApp[]
-  ssoConfigs          WorkspaceSsoConfig[]
-  modelUsageBudget    ModelUsageBudget?
-  externalDataSources ExternalDataSource[]
-  featureFlags        WorkspaceFeatureFlag[]
-  meetingInsights     MeetingInsight[]
-  goals               Goal[]
-  recognitions        Recognition[]
-  agentIdentities     AgentIdentity[]
-  deliberationEntries DeliberationEntry[]
-  archiveRecords      WorkspaceArchiveRecord[]
+  id                         String                      @id @default(uuid())
+  slug                       String                      @unique
+  name                       String
+  description                String?
+  createdAt                  DateTime                    @default(now())
+  updatedAt                  DateTime                    @updatedAt
+  members                    Member[]
+  circles                    Circle[]
+  actions                    Action[]
+  tensions                   Tension[]
+  proposals                  Proposal[]
+  approvalFlows              ApprovalFlow[]
+  approvalPolicy             ApprovalPolicy[]
+  cycles                     Cycle[]
+  ledgerAccounts             LedgerAccount[]
+  ledgerEntries              LedgerEntry[]
+  spendRequests              SpendRequest[]
+  meetings                   Meeting[]
+  documents                  Document[]
+  policyCorpus               PolicyCorpus[]
+  constitutions              Constitution[]
+  governanceScores           GovernanceScore[]
+  auditLogs                  AuditLog[]
+  events                     Event[]
+  workflowJobs               WorkflowJob[]
+  knowledge                  KnowledgeChunk[]
+  modelUsage                 ModelUsage[]
+  agentRuns                  AgentRun[]
+  agentCreds                 AgentCredential[]
+  notifications              Notification[]
+  conversations              ConversationSession[]
+  agentMemories              AgentMemory[]
+  webhookEndpoints           WebhookEndpoint[]
+  inboundWebhooks            InboundWebhook[]
+  brainArticles              BrainArticle[]
+  brainSources               BrainSource[]
+  brainBacklinks             BrainBacklink[]
+  expertiseTags              ExpertiseTag[]
+  adviceProcesses            AdviceProcess[]
+  impactFootprints           ImpactFootprint[]
+  checkIns                   CheckIn[]
+  demoLeads                  DemoLead[]
+  crmContacts                CrmContact[]
+  crmDeals                   CrmDeal[]
+  crmActivities              CrmActivity[]
+  agentConfigs               WorkspaceAgentConfig[]
+  oauthApps                  OAuthApp[]
+  ssoConfigs                 WorkspaceSsoConfig[]
+  modelUsageBudget           ModelUsageBudget?
+  externalDataSources        ExternalDataSource[]
+  featureFlags               WorkspaceFeatureFlag[]
+  meetingInsights            MeetingInsight[]
+  goals                      Goal[]
+  recognitions               Recognition[]
+  agentIdentities            AgentIdentity[]
+  deliberationEntries        DeliberationEntry[]
+  communicationInstallations CommunicationInstallation[]
+  communicationExternalUsers CommunicationExternalUser[]
+  communicationChannels      CommunicationChannel[]
+  communicationMessages      CommunicationMessage[]
+  communicationInboundEvents CommunicationInboundEvent[]
+  communicationEntityLinks   CommunicationEntityLink[]
+  archiveRecords             WorkspaceArchiveRecord[]
 }
 
 model WorkspaceFeatureFlag {
@@ -297,36 +330,189 @@ model WorkspaceFeatureFlag {
   @@unique([workspaceId, flag])
 }
 
-model User {
+model CommunicationInstallation {
+  id                  String                          @id @default(uuid())
+  workspaceId         String
+  provider            CommunicationProvider
+  externalWorkspaceId String
+  externalOrgId       String?
+  externalTeamName    String?
+  appId               String?
+  botUserId           String?
+  botTokenEnc         String?
+  scopes              String[]                        @default([])
+  optionalScopes      String[]                        @default([])
+  settings            Json?
+  status              CommunicationInstallationStatus @default(ACTIVE)
+  installedByUserId   String?
+  installedAt         DateTime                        @default(now())
+  disconnectedAt      DateTime?
+  lastEventAt         DateTime?
+  lastError           String?
+  createdAt           DateTime                        @default(now())
+  updatedAt           DateTime                        @updatedAt
+
+  workspace     Workspace                   @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  externalUsers CommunicationExternalUser[]
+  channels      CommunicationChannel[]
+  messages      CommunicationMessage[]
+  inboundEvents CommunicationInboundEvent[]
+  entityLinks   CommunicationEntityLink[]
+
+  @@unique([provider, externalWorkspaceId])
+  @@index([workspaceId, provider, status])
+}
+
+model CommunicationExternalUser {
+  id             String                @id @default(uuid())
+  installationId String
+  workspaceId    String
+  provider       CommunicationProvider
+  externalUserId String
+  userId         String?
+  memberId       String?
+  email          String?
+  displayName    String?
+  isBot          Boolean               @default(false)
+  isDeleted      Boolean               @default(false)
+  rawProfile     Json?
+  lastSeenAt     DateTime?
+  createdAt      DateTime              @default(now())
+  updatedAt      DateTime              @updatedAt
+
+  installation CommunicationInstallation @relation(fields: [installationId], references: [id], onDelete: Cascade)
+  workspace    Workspace                 @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([installationId, externalUserId])
+  @@index([workspaceId, provider])
+  @@index([workspaceId, userId])
+}
+
+model CommunicationChannel {
+  id                String                   @id @default(uuid())
+  installationId    String
+  workspaceId       String
+  provider          CommunicationProvider
+  externalChannelId String
+  name              String?
+  kind              CommunicationChannelKind @default(UNKNOWN)
+  isIngestEnabled   Boolean                  @default(true)
+  isArchived        Boolean                  @default(false)
+  lastSeenAt        DateTime?
+  createdAt         DateTime                 @default(now())
+  updatedAt         DateTime                 @updatedAt
+
+  installation CommunicationInstallation @relation(fields: [installationId], references: [id], onDelete: Cascade)
+  workspace    Workspace                 @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([installationId, externalChannelId])
+  @@index([workspaceId, provider, isIngestEnabled])
+}
+
+model CommunicationMessage {
   id                String                @id @default(uuid())
-  email             String                @unique
-  displayName       String?
-  passwordHash      String
-  globalRole        GlobalRole            @default(USER)
+  installationId    String
+  workspaceId       String
+  provider          CommunicationProvider
+  externalMessageId String
+  externalChannelId String
+  externalUserId    String?
+  threadExternalId  String?
+  text              String?
+  textRedactedAt    DateTime?
+  messageTs         DateTime?
+  permalink         String?
+  raw               Json?
+  isBot             Boolean               @default(false)
+  isHidden          Boolean               @default(false)
+  isDeleted         Boolean               @default(false)
+  receivedAt        DateTime              @default(now())
+  expiresRawAt      DateTime?
   createdAt         DateTime              @default(now())
   updatedAt         DateTime              @updatedAt
-  sessions          Session[]
-  memberships       Member[]
-  authoredActions   Action[]              @relation("ActionAuthor")
-  authoredTensions  Tension[]             @relation("TensionAuthor")
-  authoredProposals Proposal[]            @relation("ProposalAuthor")
-  spendRequests     SpendRequest[]        @relation("SpendRequester")
-  spendComments     SpendComment[]        @relation("SpendCommentAuthor")
-  cycleUpdates      CycleUpdate[]
-  allocationsFrom   Allocation[]          @relation("AllocFrom")
-  allocationsTo     Allocation[]          @relation("AllocTo")
-  reactions         ProposalReaction[]
-  objections        Objection[]
-  tensionUpvotes    TensionUpvote[]
-  agentCreds        AgentCredential[]     @relation("AgentCredentialCreator")
-  notifications     Notification[]
-  conversations     ConversationSession[]
-  oauthConnections  OAuthConnection[]
-  resetTokens       PasswordResetToken[]
-  ssoIdentities     UserSsoIdentity[]
-  meetingInsights          MeetingInsight[]
-  createdAgentIdentities   AgentIdentity[]    @relation("AgentIdentityCreator")
-  deliberationEntries      DeliberationEntry[]
+
+  installation CommunicationInstallation @relation(fields: [installationId], references: [id], onDelete: Cascade)
+  workspace    Workspace                 @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  entityLinks  CommunicationEntityLink[]
+
+  @@unique([installationId, externalChannelId, externalMessageId])
+  @@index([workspaceId, provider, receivedAt])
+  @@index([workspaceId, expiresRawAt])
+}
+
+model CommunicationInboundEvent {
+  id              String                   @id @default(uuid())
+  installationId  String?
+  workspaceId     String?
+  provider        CommunicationProvider
+  externalEventId String?
+  eventType       String
+  dedupeKey       String                   @unique
+  payload         Json
+  status          CommunicationEventStatus @default(PENDING)
+  processedAt     DateTime?
+  error           String?
+  receivedAt      DateTime                 @default(now())
+  createdAt       DateTime                 @default(now())
+  updatedAt       DateTime                 @updatedAt
+
+  installation CommunicationInstallation? @relation(fields: [installationId], references: [id], onDelete: SetNull)
+  workspace    Workspace?                 @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId, provider, status])
+  @@index([provider, externalEventId])
+}
+
+model CommunicationEntityLink {
+  id             String                @id @default(uuid())
+  installationId String
+  workspaceId    String
+  provider       CommunicationProvider
+  messageId      String?
+  externalUserId String?
+  entityType     String
+  entityId       String
+  action         String
+  createdAt      DateTime              @default(now())
+
+  installation CommunicationInstallation @relation(fields: [installationId], references: [id], onDelete: Cascade)
+  workspace    Workspace                 @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  message      CommunicationMessage?     @relation(fields: [messageId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId, entityType, entityId])
+  @@index([installationId, action])
+}
+
+model User {
+  id                     String                @id @default(uuid())
+  email                  String                @unique
+  displayName            String?
+  passwordHash           String
+  globalRole             GlobalRole            @default(USER)
+  createdAt              DateTime              @default(now())
+  updatedAt              DateTime              @updatedAt
+  sessions               Session[]
+  memberships            Member[]
+  authoredActions        Action[]              @relation("ActionAuthor")
+  authoredTensions       Tension[]             @relation("TensionAuthor")
+  authoredProposals      Proposal[]            @relation("ProposalAuthor")
+  spendRequests          SpendRequest[]        @relation("SpendRequester")
+  spendComments          SpendComment[]        @relation("SpendCommentAuthor")
+  cycleUpdates           CycleUpdate[]
+  allocationsFrom        Allocation[]          @relation("AllocFrom")
+  allocationsTo          Allocation[]          @relation("AllocTo")
+  reactions              ProposalReaction[]
+  objections             Objection[]
+  tensionUpvotes         TensionUpvote[]
+  agentCreds             AgentCredential[]     @relation("AgentCredentialCreator")
+  notifications          Notification[]
+  conversations          ConversationSession[]
+  oauthConnections       OAuthConnection[]
+  resetTokens            PasswordResetToken[]
+  ssoIdentities          UserSsoIdentity[]
+  meetingInsights        MeetingInsight[]
+  createdAgentIdentities AgentIdentity[]       @relation("AgentIdentityCreator")
+  deliberationEntries    DeliberationEntry[]
 }
 
 model Session {
@@ -366,24 +552,24 @@ model Member {
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  roleAssignments         RoleAssignment[]
-  assignedActions         Action[]                 @relation("ActionAssignee")
-  assignedTensions        Tension[]                @relation("TensionAssignee")
-  approvalDecisions       ApprovalDecision[]
-  ownedBrainArticles      BrainArticle[]
-  authoredBrainSources    BrainSource[]
-  brainDiscussionThreads  BrainDiscussionThread[]
-  brainDiscussionComments BrainDiscussionComment[]
-  expertise               MemberExpertise[]
-  authoredAdviceProcesses AdviceProcess[]          @relation("AdviceProcessAuthor")
-  adviceRecords           AdviceRecord[]
-  impactFootprints        ImpactFootprint[]
-  checkIns                CheckIn[]
-  ownedGoals              Goal[]
-  goalUpdates             GoalUpdate[]
-  recognitionsReceived    Recognition[]            @relation("RecognitionRecipient")
-  recognitionsGiven       Recognition[]            @relation("RecognitionAuthor")
-  targetedDeliberationEntries DeliberationEntry[]   @relation("DeliberationTargetMember")
+  roleAssignments             RoleAssignment[]
+  assignedActions             Action[]                 @relation("ActionAssignee")
+  assignedTensions            Tension[]                @relation("TensionAssignee")
+  approvalDecisions           ApprovalDecision[]
+  ownedBrainArticles          BrainArticle[]
+  authoredBrainSources        BrainSource[]
+  brainDiscussionThreads      BrainDiscussionThread[]
+  brainDiscussionComments     BrainDiscussionComment[]
+  expertise                   MemberExpertise[]
+  authoredAdviceProcesses     AdviceProcess[]          @relation("AdviceProcessAuthor")
+  adviceRecords               AdviceRecord[]
+  impactFootprints            ImpactFootprint[]
+  checkIns                    CheckIn[]
+  ownedGoals                  Goal[]
+  goalUpdates                 GoalUpdate[]
+  recognitionsReceived        Recognition[]            @relation("RecognitionRecipient")
+  recognitionsGiven           Recognition[]            @relation("RecognitionAuthor")
+  targetedDeliberationEntries DeliberationEntry[]      @relation("DeliberationTargetMember")
 
   @@unique([workspaceId, userId])
   @@index([workspaceId, role])
@@ -408,55 +594,55 @@ model CheckIn {
 }
 
 model Circle {
-  id             String   @id @default(uuid())
-  workspaceId    String
-  parentCircleId String?
-  name           String
-  purposeMd      String?
-  domainMd       String?
-  maturityStage  String   @default("GETTING_STARTED")
-  sortOrder      Int      @default(0)
-  archivedAt     DateTime?
+  id               String    @id @default(uuid())
+  workspaceId      String
+  parentCircleId   String?
+  name             String
+  purposeMd        String?
+  domainMd         String?
+  maturityStage    String    @default("GETTING_STARTED")
+  sortOrder        Int       @default(0)
+  archivedAt       DateTime?
   archivedByUserId String?
-  archiveReason String?
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  archiveReason    String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
 
-  workspace    Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  parentCircle Circle?        @relation("CircleTree", fields: [parentCircleId], references: [id], onDelete: SetNull)
-  childCircles Circle[]       @relation("CircleTree")
-  roles        Role[]
-  actions      Action[]
-  tensions     Tension[]
-  proposals    Proposal[]
-  policyCorpus PolicyCorpus[]
-  goals        Goal[]
-  agentAssignments CircleAgentAssignment[]
-  targetedDeliberationEntries DeliberationEntry[] @relation("DeliberationTargetCircle")
+  workspace                   Workspace               @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  parentCircle                Circle?                 @relation("CircleTree", fields: [parentCircleId], references: [id], onDelete: SetNull)
+  childCircles                Circle[]                @relation("CircleTree")
+  roles                       Role[]
+  actions                     Action[]
+  tensions                    Tension[]
+  proposals                   Proposal[]
+  policyCorpus                PolicyCorpus[]
+  goals                       Goal[]
+  agentAssignments            CircleAgentAssignment[]
+  targetedDeliberationEntries DeliberationEntry[]     @relation("DeliberationTargetCircle")
 
   @@index([workspaceId])
   @@index([workspaceId, archivedAt])
 }
 
 model Role {
-  id               String   @id @default(uuid())
+  id               String    @id @default(uuid())
   circleId         String
   name             String
   purposeMd        String?
   accountabilities String[]
   artifacts        String[]
   metricsMd        String?
-  isCoreRole       Boolean  @default(false)
+  isCoreRole       Boolean   @default(false)
   coreRoleType     String?
-  sortOrder        Int      @default(0)
+  sortOrder        Int       @default(0)
   archivedAt       DateTime?
   archivedByUserId String?
   archiveReason    String?
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
 
-  circle      Circle           @relation(fields: [circleId], references: [id], onDelete: Cascade)
-  assignments RoleAssignment[]
+  circle           Circle                  @relation(fields: [circleId], references: [id], onDelete: Cascade)
+  assignments      RoleAssignment[]
   agentAssignments CircleAgentAssignment[]
 
   @@index([circleId])
@@ -541,26 +727,26 @@ model Tension {
 }
 
 model Proposal {
-  id           String         @id @default(uuid())
-  workspaceId  String
-  authorUserId String
-  circleId     String?
-  meetingId    String?
-  title        String
-  summary      String?
-  bodyMd       String
-  status       ProposalStatus @default(DRAFT)
+  id                String                     @id @default(uuid())
+  workspaceId       String
+  authorUserId      String
+  circleId          String?
+  meetingId         String?
+  title             String
+  summary           String?
+  bodyMd            String
+  status            ProposalStatus             @default(DRAFT)
   resolutionOutcome ProposalResolutionOutcome?
-  decisionMd   String?
-  isPrivate    Boolean        @default(false)
-  publishedAt  DateTime?
-  decidedAt    DateTime?
-  autoApproveAt DateTime?
-  archivedAt    DateTime?
-  archivedByUserId String?
-  archiveReason String?
-  createdAt    DateTime       @default(now())
-  updatedAt    DateTime       @updatedAt
+  decisionMd        String?
+  isPrivate         Boolean                    @default(false)
+  publishedAt       DateTime?
+  decidedAt         DateTime?
+  autoApproveAt     DateTime?
+  archivedAt        DateTime?
+  archivedByUserId  String?
+  archiveReason     String?
+  createdAt         DateTime                   @default(now())
+  updatedAt         DateTime                   @updatedAt
 
   workspace     Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   author        User                @relation("ProposalAuthor", fields: [authorUserId], references: [id], onDelete: Restrict)
@@ -578,14 +764,14 @@ model Proposal {
 }
 
 model ProposalReaction {
-  id           String   @id @default(uuid())
+  id           String    @id @default(uuid())
   proposalId   String
   userId       String
   reaction     String
-  bodyMd       String?  @db.Text
+  bodyMd       String?   @db.Text
   resolvedAt   DateTime?
   resolvedNote String?
-  createdAt    DateTime @default(now())
+  createdAt    DateTime  @default(now())
 
   proposal Proposal @relation(fields: [proposalId], references: [id], onDelete: Cascade)
   user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -594,23 +780,23 @@ model ProposalReaction {
 }
 
 model DeliberationEntry {
-  id              String    @id @default(uuid())
-  workspaceId     String
-  parentType      String    // "PROPOSAL" | "SPEND" | "TENSION" | "MEETING" | "BRAIN_ARTICLE"
-  parentId        String
-  authorUserId    String
-  entryType       String    // "REACTION" | "OBJECTION"
-  bodyMd          String?   @db.Text
-  targetMemberId  String?   // For ADVICE_REQUEST: which member is being asked
-  targetCircleId  String?
-  resolvedAt      DateTime?
-  resolvedNote    String?
-  createdAt       DateTime  @default(now())
+  id             String    @id @default(uuid())
+  workspaceId    String
+  parentType     String // "PROPOSAL" | "SPEND" | "TENSION" | "MEETING" | "BRAIN_ARTICLE"
+  parentId       String
+  authorUserId   String
+  entryType      String // "REACTION" | "OBJECTION"
+  bodyMd         String?   @db.Text
+  targetMemberId String? // For ADVICE_REQUEST: which member is being asked
+  targetCircleId String?
+  resolvedAt     DateTime?
+  resolvedNote   String?
+  createdAt      DateTime  @default(now())
 
-  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  author    User      @relation(fields: [authorUserId], references: [id], onDelete: Cascade)
-  targetMember Member? @relation("DeliberationTargetMember", fields: [targetMemberId], references: [id], onDelete: SetNull)
-  targetCircle Circle? @relation("DeliberationTargetCircle", fields: [targetCircleId], references: [id], onDelete: SetNull)
+  workspace    Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  author       User      @relation(fields: [authorUserId], references: [id], onDelete: Cascade)
+  targetMember Member?   @relation("DeliberationTargetMember", fields: [targetMemberId], references: [id], onDelete: SetNull)
+  targetCircle Circle?   @relation("DeliberationTargetCircle", fields: [targetCircleId], references: [id], onDelete: SetNull)
 
   @@index([parentType, parentId, createdAt])
   @@index([workspaceId, parentType])
@@ -691,19 +877,19 @@ model Objection {
 }
 
 model Cycle {
-  id            String      @id @default(uuid())
-  workspaceId   String
-  name          String
-  cadence       String
-  status        CycleStatus @default(PLANNED)
-  startDate     DateTime
-  endDate       DateTime
-  pointsPerUser Int         @default(100)
-  archivedAt    DateTime?
+  id               String      @id @default(uuid())
+  workspaceId      String
+  name             String
+  cadence          String
+  status           CycleStatus @default(PLANNED)
+  startDate        DateTime
+  endDate          DateTime
+  pointsPerUser    Int         @default(100)
+  archivedAt       DateTime?
   archivedByUserId String?
-  archiveReason String?
-  createdAt     DateTime    @default(now())
-  updatedAt     DateTime    @updatedAt
+  archiveReason    String?
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
 
   workspace   Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   updates     CycleUpdate[]
@@ -748,17 +934,17 @@ model Allocation {
 }
 
 model LedgerAccount {
-  id           String   @id @default(uuid())
-  workspaceId  String
-  name         String
-  currency     String
-  type         String   @default("MANUAL")
-  balanceCents Int      @default(0)
-  archivedAt   DateTime?
+  id               String    @id @default(uuid())
+  workspaceId      String
+  name             String
+  currency         String
+  type             String    @default("MANUAL")
+  balanceCents     Int       @default(0)
+  archivedAt       DateTime?
   archivedByUserId String?
-  archiveReason String?
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  archiveReason    String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
 
   workspace     Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   entries       LedgerEntry[]
@@ -851,22 +1037,22 @@ model SpendComment {
 }
 
 model Meeting {
-  id             String    @id @default(uuid())
-  workspaceId    String
-  title          String?
-  source         String
-  externalId     String?   @unique
-  recordedAt     DateTime
-  transcript     String?   @db.Text
-  summaryMd      String?   @db.Text
-  participantIds String[]
-  decisionsJson  Json?
-  aiProcessedAt  DateTime?
-  archivedAt     DateTime?
+  id               String    @id @default(uuid())
+  workspaceId      String
+  title            String?
+  source           String
+  externalId       String?   @unique
+  recordedAt       DateTime
+  transcript       String?   @db.Text
+  summaryMd        String?   @db.Text
+  participantIds   String[]
+  decisionsJson    Json?
+  aiProcessedAt    DateTime?
+  archivedAt       DateTime?
   archivedByUserId String?
-  archiveReason  String?
-  createdAt      DateTime  @default(now())
-  updatedAt      DateTime  @updatedAt
+  archiveReason    String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
 
   workspace Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   proposals Proposal[]
@@ -878,19 +1064,19 @@ model Meeting {
 }
 
 model Document {
-  id          String   @id @default(uuid())
-  workspaceId String
-  title       String
-  source      String
-  mimeType    String?
-  storageKey  String
-  textContent String?  @db.Text
-  metadata    Json?
-  archivedAt  DateTime?
+  id               String    @id @default(uuid())
+  workspaceId      String
+  title            String
+  source           String
+  mimeType         String?
+  storageKey       String
+  textContent      String?   @db.Text
+  metadata         Json?
+  archivedAt       DateTime?
   archivedByUserId String?
-  archiveReason String?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  archiveReason    String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
 
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 
@@ -1150,17 +1336,17 @@ model AgentToolCall {
 }
 
 model AgentStep {
-  id          String              @id @default(uuid())
-  agentRunId  String
-  name        String
-  status      AgentToolCallStatus @default(PENDING)
-  inputJson   Json?
-  outputJson  Json?
-  startedAt   DateTime?
-  completedAt DateTime?
-  error       String?
-  humanFeedback String?         @db.Text
-  createdAt   DateTime            @default(now())
+  id            String              @id @default(uuid())
+  agentRunId    String
+  name          String
+  status        AgentToolCallStatus @default(PENDING)
+  inputJson     Json?
+  outputJson    Json?
+  startedAt     DateTime?
+  completedAt   DateTime?
+  error         String?
+  humanFeedback String?             @db.Text
+  createdAt     DateTime            @default(now())
 
   agentRun AgentRun @relation(fields: [agentRunId], references: [id], onDelete: Cascade)
 
@@ -1256,25 +1442,25 @@ model AgentMemory {
 // --- Brain (Company Knowledge Wiki) ---
 
 model BrainArticle {
-  id              String                @id @default(uuid())
-  workspaceId     String
-  slug            String
-  title           String
-  type            BrainArticleType
-  authority       BrainArticleAuthority @default(DRAFT)
-  bodyMd          String                @db.Text
-  frontmatterJson Json?
-  ownerMemberId   String?
-  isPrivate       Boolean               @default(false)
-  publishedAt     DateTime?
-  lastVerifiedAt  DateTime?
-  staleAfterDays  Int                   @default(90)
-  sourceIds       String[]
-  archivedAt      DateTime?
+  id               String                @id @default(uuid())
+  workspaceId      String
+  slug             String
+  title            String
+  type             BrainArticleType
+  authority        BrainArticleAuthority @default(DRAFT)
+  bodyMd           String                @db.Text
+  frontmatterJson  Json?
+  ownerMemberId    String?
+  isPrivate        Boolean               @default(false)
+  publishedAt      DateTime?
+  lastVerifiedAt   DateTime?
+  staleAfterDays   Int                   @default(90)
+  sourceIds        String[]
+  archivedAt       DateTime?
   archivedByUserId String?
-  archiveReason   String?
-  createdAt       DateTime              @default(now())
-  updatedAt       DateTime              @updatedAt
+  archiveReason    String?
+  createdAt        DateTime              @default(now())
+  updatedAt        DateTime              @updatedAt
 
   workspace     Workspace               @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   ownerMember   Member?                 @relation(fields: [ownerMemberId], references: [id], onDelete: SetNull)
@@ -1304,25 +1490,25 @@ model BrainArticleVersion {
 }
 
 model BrainSource {
-  id             String          @id @default(uuid())
-  workspaceId    String
-  sourceType     BrainSourceType
-  tier           Int
-  externalId     String?
-  authorMemberId String?
-  channel        String?
-  title          String?
-  content        String          @db.Text
-  metadata       Json?
-  fileStorageKey String?
-  fileName       String?
-  fileMimeType   String?
-  fileSizeBytes  Int?
-  absorbedAt     DateTime?
-  archivedAt     DateTime?
+  id               String          @id @default(uuid())
+  workspaceId      String
+  sourceType       BrainSourceType
+  tier             Int
+  externalId       String?
+  authorMemberId   String?
+  channel          String?
+  title            String?
+  content          String          @db.Text
+  metadata         Json?
+  fileStorageKey   String?
+  fileName         String?
+  fileMimeType     String?
+  fileSizeBytes    Int?
+  absorbedAt       DateTime?
+  archivedAt       DateTime?
   archivedByUserId String?
-  archiveReason  String?
-  createdAt      DateTime        @default(now())
+  archiveReason    String?
+  createdAt        DateTime        @default(now())
 
   workspace    Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   authorMember Member?   @relation(fields: [authorMemberId], references: [id], onDelete: SetNull)
@@ -1388,19 +1574,19 @@ enum WebhookEndpointStatus {
 }
 
 model WebhookEndpoint {
-  id          String                @id @default(uuid())
-  workspaceId String
-  url         String
-  secret      String
-  label       String?
-  eventTypes  String[]              @default([])
-  status      WebhookEndpointStatus @default(ACTIVE)
-  metadata    Json?
-  archivedAt  DateTime?
+  id               String                @id @default(uuid())
+  workspaceId      String
+  url              String
+  secret           String
+  label            String?
+  eventTypes       String[]              @default([])
+  status           WebhookEndpointStatus @default(ACTIVE)
+  metadata         Json?
+  archivedAt       DateTime?
   archivedByUserId String?
-  archiveReason String?
-  createdAt   DateTime              @default(now())
-  updatedAt   DateTime              @updatedAt
+  archiveReason    String?
+  createdAt        DateTime              @default(now())
+  updatedAt        DateTime              @updatedAt
 
   workspace  Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   deliveries WebhookDelivery[]
@@ -1478,15 +1664,15 @@ model OAuthConnection {
 // --- Expertise Tracking ---
 
 model ExpertiseTag {
-  id          String   @id @default(uuid())
-  workspaceId String
-  label       String
-  slug        String
-  description String?
-  archivedAt  DateTime?
+  id               String    @id @default(uuid())
+  workspaceId      String
+  label            String
+  slug             String
+  description      String?
+  archivedAt       DateTime?
   archivedByUserId String?
-  archiveReason String?
-  createdAt   DateTime @default(now())
+  archiveReason    String?
+  createdAt        DateTime  @default(now())
 
   workspace Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   members   MemberExpertise[]
@@ -1629,22 +1815,22 @@ enum CrmActivityType {
 }
 
 model CrmContact {
-  id          String   @id @default(uuid())
-  workspaceId String
-  email       String
-  name        String?
-  company     String?
-  title       String?
-  phone       String?
-  source      String   @default("manual") // manual, demo_gate, import, api
-  tags        String[] @default([])
-  avatarUrl   String?
-  lastSeenAt  DateTime @default(now())
-  archivedAt  DateTime?
+  id               String    @id @default(uuid())
+  workspaceId      String
+  email            String
+  name             String?
+  company          String?
+  title            String?
+  phone            String?
+  source           String    @default("manual") // manual, demo_gate, import, api
+  tags             String[]  @default([])
+  avatarUrl        String?
+  lastSeenAt       DateTime  @default(now())
+  archivedAt       DateTime?
   archivedByUserId String?
-  archiveReason String?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  archiveReason    String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
 
   workspace  Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   deals      CrmDeal[]
@@ -1656,21 +1842,21 @@ model CrmContact {
 }
 
 model CrmDeal {
-  id          String       @id @default(uuid())
-  workspaceId String
-  contactId   String
-  title       String
-  stage       CrmDealStage @default(LEAD)
-  valueCents  Int? // Monetary values as cents per repo convention
-  currency    String       @default("USD")
-  closedAt    DateTime?
-  ownerUserId String? // Workspace member who owns this deal
-  notes       String?      @db.Text
-  archivedAt  DateTime?
+  id               String       @id @default(uuid())
+  workspaceId      String
+  contactId        String
+  title            String
+  stage            CrmDealStage @default(LEAD)
+  valueCents       Int? // Monetary values as cents per repo convention
+  currency         String       @default("USD")
+  closedAt         DateTime?
+  ownerUserId      String? // Workspace member who owns this deal
+  notes            String?      @db.Text
+  archivedAt       DateTime?
   archivedByUserId String?
-  archiveReason String?
-  createdAt   DateTime     @default(now())
-  updatedAt   DateTime     @updatedAt
+  archiveReason    String?
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
 
   workspace  Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   contact    CrmContact    @relation(fields: [contactId], references: [id], onDelete: Cascade)
@@ -1702,18 +1888,18 @@ model CrmActivity {
 }
 
 model WorkspaceAgentConfig {
-  id            String   @id @default(uuid())
-  workspaceId   String
-  agentKey      String
-  enabled       Boolean  @default(true)
-  modelOverride String?
-  governancePolicy String? @db.Text
-  configJson    Json     @default("{}")
-  archivedAt    DateTime?
+  id               String    @id @default(uuid())
+  workspaceId      String
+  agentKey         String
+  enabled          Boolean   @default(true)
+  modelOverride    String?
+  governancePolicy String?   @db.Text
+  configJson       Json      @default("{}")
+  archivedAt       DateTime?
   archivedByUserId String?
-  archiveReason String?
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  archiveReason    String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
 
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 
@@ -1765,19 +1951,19 @@ model ModelUsageBudget {
 }
 
 model OAuthApp {
-  id           String   @id @default(uuid())
-  workspaceId  String
-  clientId     String   @unique
-  clientSecret String // hashed
-  name         String
-  redirectUris String[]
-  scopes       String[]
-  isActive     Boolean  @default(true)
-  archivedAt   DateTime?
+  id               String    @id @default(uuid())
+  workspaceId      String
+  clientId         String    @unique
+  clientSecret     String // hashed
+  name             String
+  redirectUris     String[]
+  scopes           String[]
+  isActive         Boolean   @default(true)
+  archivedAt       DateTime?
   archivedByUserId String?
-  archiveReason String?
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  archiveReason    String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
 
   workspace Workspace                @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   authCodes OAuthAuthorizationCode[]
@@ -1931,35 +2117,35 @@ enum GoalLevel {
 }
 
 model Goal {
-  id              String      @id @default(uuid())
-  workspaceId     String
-  parentGoalId    String?
-  circleId        String?
-  ownerMemberId   String?
-  title           String
-  descriptionMd   String?     @db.Text
-  level           GoalLevel   @default(COMPANY)
-  cadence         GoalCadence @default(QUARTERLY)
-  status          GoalStatus  @default(DRAFT)
-  progressPercent Int         @default(0)
-  targetDate      DateTime?
-  startDate       DateTime?
-  sortOrder       Int         @default(0)
-  archivedAt      DateTime?
+  id               String      @id @default(uuid())
+  workspaceId      String
+  parentGoalId     String?
+  circleId         String?
+  ownerMemberId    String?
+  title            String
+  descriptionMd    String?     @db.Text
+  level            GoalLevel   @default(COMPANY)
+  cadence          GoalCadence @default(QUARTERLY)
+  status           GoalStatus  @default(DRAFT)
+  progressPercent  Int         @default(0)
+  targetDate       DateTime?
+  startDate        DateTime?
+  sortOrder        Int         @default(0)
+  archivedAt       DateTime?
   archivedByUserId String?
-  archiveReason   String?
-  createdAt       DateTime    @default(now())
-  updatedAt       DateTime    @updatedAt
+  archiveReason    String?
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
 
-  workspace     Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  parentGoal    Goal?          @relation("GoalTree", fields: [parentGoalId], references: [id], onDelete: SetNull)
-  childGoals    Goal[]         @relation("GoalTree")
-  circle        Circle?        @relation(fields: [circleId], references: [id], onDelete: SetNull)
-  ownerMember   Member?        @relation(fields: [ownerMemberId], references: [id], onDelete: SetNull)
-  keyResults    KeyResult[]
-  updates       GoalUpdate[]
-  links         GoalLink[]
-  recognitions  Recognition[]
+  workspace    Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  parentGoal   Goal?         @relation("GoalTree", fields: [parentGoalId], references: [id], onDelete: SetNull)
+  childGoals   Goal[]        @relation("GoalTree")
+  circle       Circle?       @relation(fields: [circleId], references: [id], onDelete: SetNull)
+  ownerMember  Member?       @relation(fields: [ownerMemberId], references: [id], onDelete: SetNull)
+  keyResults   KeyResult[]
+  updates      GoalUpdate[]
+  links        GoalLink[]
+  recognitions Recognition[]
 
   @@index([workspaceId, level, cadence])
   @@index([workspaceId, status])
@@ -2066,9 +2252,9 @@ model AgentIdentity {
   createdAt           DateTime        @default(now())
   updatedAt           DateTime        @updatedAt
 
-  workspace        Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  createdByUser    User?            @relation("AgentIdentityCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
-  linkedCredential AgentCredential? @relation(fields: [linkedCredentialId], references: [id], onDelete: SetNull)
+  workspace         Workspace               @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  createdByUser     User?                   @relation("AgentIdentityCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  linkedCredential  AgentCredential?        @relation(fields: [linkedCredentialId], references: [id], onDelete: SetNull)
   circleAssignments CircleAgentAssignment[]
 
   @@unique([workspaceId, agentKey])
