@@ -31,7 +31,10 @@ export default async function RootLayout({
 
   return (
     <html lang={locale} className={`${inter.variable} ${playfair.variable} ${montserrat.variable}`} suppressHydrationWarning>
-      <body>
+      <body
+        className={`${inter.variable} ${playfair.variable} font-sans`}
+        style={{ background: "var(--bg)" }}
+      >
         <ThemeProvider>
           <NextIntlClientProvider messages={messages}>
             {children}
