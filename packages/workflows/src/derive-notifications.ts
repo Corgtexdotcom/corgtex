@@ -47,23 +47,27 @@ export function deriveNotificationsForEvent(event: {
   const entityId = event.aggregateId ?? null;
   const title = readPayloadString(event.payload, "title");
 
-  if (event.type === "proposal.submitted") {
+  if (event.type === "proposal.submitted" || event.type === "proposal.opened") {
     return [{
       type: event.type,
       entityType,
       entityId,
-      title: "Proposal submitted for review",
-      bodyMd: "A proposal is awaiting approval in the workspace dashboard.",
+      title: title ? `Proposal for review: ${title}` : "Proposal submitted for review",
+      bodyMd: title
+        ? `The proposal **${title}** is awaiting approval.`
+        : "A proposal is awaiting approval in the workspace dashboard.",
     }] satisfies NotificationDraft[];
   }
 
-  if (event.type === "spend.submitted") {
+  if (event.type === "spend.submitted" || event.type === "spend.opened") {
     return [{
       type: event.type,
       entityType,
       entityId,
-      title: "Spend request submitted for review",
-      bodyMd: "A spend request is awaiting finance review in the workspace dashboard.",
+      title: title ? `Spend review: ${title}` : "Spend request submitted for review",
+      bodyMd: title
+        ? `The spend request **${title}** is awaiting finance review.`
+        : "A spend request is awaiting finance review in the workspace dashboard.",
     }] satisfies NotificationDraft[];
   }
 
