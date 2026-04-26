@@ -45,7 +45,7 @@ describe("createCorgtexMcpServer", () => {
     });
   });
 
-  it("returns the submitted spend identifier from create_spend", async () => {
+  it("returns the opened spend identifier from create_spend", async () => {
     const { createCorgtexMcpServer } = await import("./server");
 
     const server = createCorgtexMcpServer({
@@ -79,7 +79,7 @@ describe("createCorgtexMcpServer", () => {
     );
     expect(JSON.parse(response.content[0].text)).toEqual({
       id: "spend-1",
-      status: "SUBMITTED",
+      status: "OPEN",
       webUrl: "https://app.test/workspaces/ws-1/finance/spend/spend-1",
     });
   });

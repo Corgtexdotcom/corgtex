@@ -40,7 +40,8 @@ export async function updateTensionAction(formData: FormData) {
     workspaceId,
     tensionId: asString(formData, "tensionId"),
     title: asOptional(formData, "title") ?? undefined,
-    status: asOptional(formData, "status") as "OPEN" | "IN_PROGRESS" | "COMPLETED" | "CANCELLED" | null ?? undefined,
+    status: asOptional(formData, "status") as "DRAFT" | "OPEN" | "RESOLVED" | null ?? undefined,
+    resolvedVia: asOptional(formData, "resolvedVia") ?? undefined,
   });
   refresh(workspaceId);
 }
@@ -97,6 +98,8 @@ export async function postTensionDeliberationAction(formData: FormData) {
     parentId: asString(formData, "parentId"),
     entryType: asString(formData, "entryType") as any,
     bodyMd: asString(formData, "bodyMd"),
+    targetMemberId: asOptional(formData, "targetMemberId") || undefined,
+    targetCircleId: asOptional(formData, "targetCircleId") || undefined,
   });
   refresh(workspaceId);
 }
@@ -111,7 +114,7 @@ export async function resolveTensionDeliberationAction(formData: FormData) {
   await resolveDeliberationEntry(actor, {
     workspaceId,
     entryId: asString(formData, "entryId"),
-    resolvedNote: asOptional(formData, "resolvedNote") || undefined,
+    resolvedNote: asString(formData, "resolvedNote"),
   });
   refresh(workspaceId);
 }

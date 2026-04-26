@@ -26,16 +26,15 @@ export default async function TensionsPage({
     listProposals(actor, workspaceId, { take: 50 }),
   ]);
 
-  const activeProposals = proposals.filter(p => p.status === "DRAFT" || p.status === "SUBMITTED");
+  const activeProposals = proposals.filter((p) => p.status === "DRAFT" || p.status === "OPEN");
 
   const resolvedSearch = searchParams ? await searchParams : {};
   const statusFilter = typeof resolvedSearch.status === "string" ? resolvedSearch.status : "OPEN";
 
   const groupedTensions = {
-    MY_INBOX: tensions.filter((t) => t.isPrivate),
+    DRAFT: tensions.filter((tension) => tension.status === "DRAFT"),
     OPEN: tensions.filter((t) => t.status === "OPEN" && !t.isPrivate),
-    IN_PROGRESS: tensions.filter((t) => t.status === "IN_PROGRESS" && !t.isPrivate),
-    COMPLETED: tensions.filter((t) => t.status === "COMPLETED" && !t.isPrivate),
+    RESOLVED: tensions.filter((tension) => tension.status === "RESOLVED" && !tension.isPrivate),
     ALL: tensions,
   };
 
@@ -50,16 +49,15 @@ export default async function TensionsPage({
 
   const statusLabel = (status: string) => {
     const labels: Record<string, string> = {
-      MY_INBOX: t("statusMyInbox"),
+      DRAFT: t("statusDraft"),
       OPEN: t("statusOpen"),
-      IN_PROGRESS: t("statusInProgress"),
-      COMPLETED: t("statusCompleted"),
+      RESOLVED: t("statusResolved"),
       ALL: t("statusAll"),
     };
     return labels[status] ?? status;
   };
 
-  const statusFilters = (["MY_INBOX", "OPEN", "IN_PROGRESS", "COMPLETED", "ALL"] as const).map((status) => ({
+  const statusFilters = (["DRAFT", "OPEN", "RESOLVED", "ALL"] as const).map((status) => ({
     status,
     label: statusLabel(status),
   }));
@@ -104,7 +102,7 @@ export default async function TensionsPage({
                     {tension.title}
                   </a>
                 </strong>
-                <span className={`tag ${tension.status === "OPEN" ? "warning" : tension.status === "IN_PROGRESS" ? "info" : "success"}`}>{statusLabel(tension.status)}</span>
+                <span className={`tag ${tension.status === "DRAFT" ? "info" : tension.status === "OPEN" ? "warning" : "success"}`}>{statusLabel(tension.status)}</span>
               </div>
               {tension.bodyMd && <div className="nr-excerpt">{tension.bodyMd}</div>}
               
@@ -119,7 +117,7 @@ export default async function TensionsPage({
               </div>
 
               <div className="actions-inline" style={{ marginTop: 12 }}>
-                {tension.isPrivate && (
+                {tension.status === "DRAFT" && (
                   <form action={publishTensionAction}>
                     <input type="hidden" name="workspaceId" value={workspaceId} />
                     <input type="hidden" name="tensionId" value={tension.id} />
@@ -127,20 +125,16 @@ export default async function TensionsPage({
                   </form>
                 )}
                 {!tension.isPrivate && tension.status === "OPEN" && (
-                  <form action={updateTensionAction}>
-                    <input type="hidden" name="workspaceId" value={workspaceId} />
-                    <input type="hidden" name="tensionId" value={tension.id} />
-                    <input type="hidden" name="status" value="IN_PROGRESS" />
-                    <button type="submit" className="secondary small">{t("btnStart")}</button>
-                  </form>
-                )}
-                {!tension.isPrivate && (tension.status === "OPEN" || tension.status === "IN_PROGRESS") && (
-                  <form action={updateTensionAction}>
-                    <input type="hidden" name="workspaceId" value={workspaceId} />
-                    <input type="hidden" name="tensionId" value={tension.id} />
-                    <input type="hidden" name="status" value="COMPLETED" />
-                    <button type="submit" className="secondary small">{t("btnResolve")}</button>
-                  </form>
+                  <details>
+                    <summary className="secondary small nr-hide-marker" style={{ cursor: "pointer" }}>{t("btnResolve")}</summary>
+                    <form action={updateTensionAction} className="actions-inline" style={{ marginTop: 8 }}>
+                      <input type="hidden" name="workspaceId" value={workspaceId} />
+                      <input type="hidden" name="tensionId" value={tension.id} />
+                      <input type="hidden" name="status" value="RESOLVED" />
+                      <input name="resolvedVia" placeholder={t("placeholderResolvedVia")} required />
+                      <button type="submit" className="secondary small">{t("btnResolve")}</button>
+                    </form>
+                  </details>
                 )}
                 {!tension.isPrivate && (
                 <form action={upvoteTensionAction}>

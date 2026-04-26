@@ -51,7 +51,7 @@ export async function initiateAdviceProcess(
 
     await tx.proposal.update({
       where: { id: params.proposalId },
-      data: { status: "ADVICE_GATHERING" },
+      data: { status: "OPEN" },
     });
 
     await tx.event.create({
@@ -181,7 +181,8 @@ export async function executeAdviceProcessDecision(
     await tx.proposal.update({
       where: { id: process.proposalId },
       data: {
-        status: "APPROVED",
+        status: "RESOLVED",
+        resolutionOutcome: "ADOPTED",
         decisionMd: params.decisionMd?.trim() || null,
         decidedAt: new Date(),
       },

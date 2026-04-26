@@ -22,7 +22,7 @@ export const queryTensionsTool: ModelTool = {
     parameters: {
       type: "object",
       properties: {
-        status: { type: "string", description: "Filter by status: OPEN, COMPLETED, CANCELLED" },
+        status: { type: "string", description: "Filter by status: DRAFT, OPEN, RESOLVED" },
         assigneeId: { type: "string", description: "Filter by assigned member ID" },
       },
     },
@@ -37,7 +37,7 @@ export const queryActionsTool: ModelTool = {
     parameters: {
       type: "object",
       properties: {
-        status: { type: "string", description: "Filter by status: OPEN, COMPLETED, CANCELLED" },
+        status: { type: "string", description: "Filter by status: DRAFT, OPEN, IN_PROGRESS, COMPLETED" },
         assigneeId: { type: "string", description: "Filter by assigned member ID" },
       },
     },
@@ -52,7 +52,7 @@ export const queryProposalsTool: ModelTool = {
     parameters: {
       type: "object",
       properties: {
-        status: { type: "string", description: "Filter by status: DRAFT, PROPOSED, EXECUTED, REJECTED, WITHDRAWN" },
+        status: { type: "string", description: "Filter by status: DRAFT, OPEN, RESOLVED" },
       },
     },
   },
@@ -76,7 +76,7 @@ export async function getWorkspaceOverview(workspaceId: string) {
     prisma.circle.count({ where: { workspaceId } }),
     prisma.tension.count({ where: { workspaceId, status: "OPEN" } }),
     prisma.action.count({ where: { workspaceId, status: "OPEN" } }),
-    prisma.proposal.count({ where: { workspaceId, status: { in: ["DRAFT", "SUBMITTED"] } } }),
+    prisma.proposal.count({ where: { workspaceId, status: { in: ["DRAFT", "OPEN"] } } }),
   ]);
 
   return { memberCount, circleCount, openTensions, openActions, activeProposals };

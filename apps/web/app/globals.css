@@ -1343,6 +1343,8 @@ button:disabled {
 }
 
 .fin-status-draft { background: var(--surface-sunken); color: var(--muted); }
+.fin-status-open { background: var(--warning-soft); color: var(--warning); }
+.fin-status-resolved { background: var(--info-soft); color: var(--info); }
 .fin-status-submitted { background: var(--warning-soft); color: var(--warning); }
 .fin-status-approved { background: var(--info-soft); color: var(--info); }
 .fin-status-paid { background: var(--success-soft); color: var(--success); }
@@ -1930,4 +1932,11 @@ a.wiki-list-item:hover {
   .fin-comment-meta { @apply flex justify-between text-muted text-[0.75rem] mb-1 font-mono items-center; }
   .fin-objection-badge { @apply text-danger text-[0.65rem] font-bold px-1 py-0.5 border border-danger rounded uppercase tracking-wider; }
   .fin-status-objected { @apply bg-danger-soft text-danger border-danger-border; }
+  .delib-composer-toolbar { @apply flex flex-wrap items-center gap-2; }
+  .delib-inline-tags { @apply flex items-center gap-2; }
+  .delib-inline-tag { @apply text-[0.75rem] font-semibold px-2 py-1 rounded-full border border-line bg-transparent text-muted; }
+  .delib-inline-tag-active { @apply bg-accent text-accent-fg border-accent; }
+  .delib-target-select { @apply text-[0.8rem] px-2 py-1 rounded border border-line bg-bg-alt text-text; }
+  .fin-discussion-cell { @apply bg-bg-alt border-t-0; }
+  .fin-discussion-panel { @apply border border-line rounded p-4 my-2 bg-surface; }
 }

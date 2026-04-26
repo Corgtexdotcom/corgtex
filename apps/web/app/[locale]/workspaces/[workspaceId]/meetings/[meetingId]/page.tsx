@@ -5,6 +5,7 @@ import Link from "next/link";
 import { renderMarkdown } from "@/lib/markdown";
 import { DeliberationThread } from "@/lib/components/DeliberationThread";
 import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
+import { getDeliberationTargets } from "@/lib/deliberation-targets";
 import { listDeliberationEntries } from "@corgtex/domain";
 import { postMeetingDeliberationAction, resolveMeetingDeliberationAction } from "../actions";
 
@@ -22,10 +23,16 @@ export default async function MeetingDetailPage({
 
   const meeting = await getMeeting(workspaceId, meetingId);
   const meetingEntries = await listDeliberationEntries(actor, { workspaceId, parentType: "MEETING", parentId: meetingId });
+  const deliberationTargets = await getDeliberationTargets({ actor, workspaceId });
   const mappedEntries = meetingEntries.map((e: any) => ({
     ...e,
     authorName: e.author?.displayName || e.author?.email || "Unknown",
-    authorInitials: (e.author?.displayName || e.author?.email || "?").substring(0, 2).toUpperCase()
+    authorInitials: (e.author?.displayName || e.author?.email || "?").substring(0, 2).toUpperCase(),
+    targetLabel: e.targetCircle
+      ? `Circle: ${e.targetCircle.name}`
+      : e.targetMember
+        ? `Person: ${e.targetMember.user.displayName || e.targetMember.user.email}`
+        : null,
   }));
 
   if (!meeting) {
@@ -42,9 +49,6 @@ export default async function MeetingDetailPage({
   const participants = meeting.participantIds?.length > 0 
     ? await getMeetingParticipants(workspaceId, meeting.participantIds)
     : [];
-
-  const getReactionCount = (proposal: any, type: string) => 
-    proposal.reactions.filter((r: any) => r.reaction === type).length;
 
   return (
     <>
@@ -112,7 +116,7 @@ export default async function MeetingDetailPage({
               <div className="item" key={tension.id}>
                 <div className="row">
                   <strong>{tension.title}</strong>
-                  <span className={`tag ${tension.status === 'OPEN' ? 'warning' : 'success'}`}>
+                  <span className={`tag ${tension.status === "DRAFT" ? "info" : tension.status === "OPEN" ? "warning" : "success"}`}>
                     {tension.status}
                   </span>
                 </div>
@@ -134,22 +138,21 @@ export default async function MeetingDetailPage({
               <div className="item" key={proposal.id}>
                 <div className="row">
                   <strong>{proposal.title}</strong>
-                  <span className={`tag ${proposal.status === "DRAFT" ? "info" : proposal.status === "SUBMITTED" ? "warning" : proposal.status === "APPROVED" ? "success" : proposal.status === "REJECTED" ? "danger" : ""}`}>
-                    {proposal.status}
+                  <span className={`tag ${proposal.status === "DRAFT" ? "info" : proposal.status === "OPEN" ? "warning" : proposal.resolutionOutcome === "ADOPTED" ? "success" : proposal.status === "RESOLVED" ? "info" : ""}`}>
+                    {proposal.status === "RESOLVED" && proposal.resolutionOutcome ? `${proposal.status} · ${proposal.resolutionOutcome.replace("_", " ")}` : proposal.status}
                   </span>
                 </div>
                 <div className="muted">{proposal.summary ?? proposal.bodyMd.slice(0, 150) + "..."}</div>
                 
                 <div className="muted" style={{ fontSize: "0.82rem", marginTop: 8 }}>
                    {proposal.author?.displayName || proposal.author?.email} · {new Date(proposal.createdAt).toLocaleDateString()}
-                   {" · "} Support: {getReactionCount(proposal, "SUPPORT")} {" · "} Questions: {getReactionCount(proposal, "QUESTION")} {" · "} Concerns: {getReactionCount(proposal, "CONCERN")}
                 </div>
 
                 {(proposal.tensions?.length > 0 || proposal.actions?.length > 0) && (
                   <div style={{ marginTop: 8, fontSize: "0.82rem", display: "flex", gap: "8px", flexWrap: "wrap" }}>
-                    {proposal.tensions?.map((t: any) => (
-                      <span key={t.id} className="tag info" style={{ padding: "2px 6px", fontSize: "0.75rem" }}>
-                        {t("tensionTag", { title: t.title })}
+                    {proposal.tensions?.map((linkedTension: any) => (
+                      <span key={linkedTension.id} className="tag info" style={{ padding: "2px 6px", fontSize: "0.75rem" }}>
+                        {t("tensionTag", { title: linkedTension.title })}
                       </span>
                     ))}
                     {proposal.actions?.map((a: any) => (
@@ -185,10 +188,11 @@ export default async function MeetingDetailPage({
           <DeliberationComposer 
             postAction={postMeetingDeliberationAction} 
             hiddenFields={{ workspaceId, parentId: meetingId }}
+            targetOptions={deliberationTargets.options}
+            defaultTargetValue={deliberationTargets.defaultValue}
             entryTypes={[
-              { value: "QUESTION", label: "Question", variant: "info" }, 
-              { value: "REACTION", label: "Comment", variant: "secondary" }, 
-              { value: "CONCERN", label: "Concern", variant: "warning" }
+              { value: "REACTION", label: "Reaction", variant: "secondary" },
+              { value: "OBJECTION", label: "Objection", variant: "danger" },
             ]}
           />
         </div>

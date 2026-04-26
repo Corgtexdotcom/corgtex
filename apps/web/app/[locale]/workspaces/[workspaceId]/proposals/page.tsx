@@ -21,27 +21,25 @@ export default async function ProposalsPage({
   const actor = await requirePageActor();
   const t = await getTranslations("proposals");
   const resolvedSearch = searchParams ? await searchParams : {};
-  const statusFilter = typeof resolvedSearch.status === "string" ? resolvedSearch.status : "ACTIVE";
+  const statusFilter = typeof resolvedSearch.status === "string" ? resolvedSearch.status : "OPEN";
   const circleFilter = typeof resolvedSearch.circleId === "string" ? resolvedSearch.circleId : null;
+  const archiveFilter = statusFilter === "ARCHIVED" ? "archived" : "active";
 
   const [{ items: proposals }, currentWorkspace, circles] = await Promise.all([
-    listProposals(actor, workspaceId, { take: 50, circleId: circleFilter }),
+    listProposals(actor, workspaceId, { take: 50, circleId: circleFilter, archiveFilter }),
     prisma.workspace.findUnique({ where: { id: workspaceId }, select: { slug: true } }),
     prisma.circle.findMany({ where: { workspaceId }, select: { id: true, name: true }, orderBy: { name: "asc" } }),
   ]);
   const isDemo = currentWorkspace?.slug === "jnj-demo";
 
   const groupedProposals = {
-    PRIVATE: proposals.filter((p) => p.isPrivate),
-    ACTIVE: proposals.filter((p) => (p.status === "DRAFT" || p.status === "SUBMITTED" || p.status === "ADVICE_GATHERING") && !p.isPrivate),
-    DRAFT: proposals.filter((p) => p.status === "DRAFT" && !p.isPrivate),
-    SUBMITTED: proposals.filter((p) => p.status === "SUBMITTED" && !p.isPrivate),
-    ADVICE_GATHERING: proposals.filter((p) => p.status === "ADVICE_GATHERING" && !p.isPrivate),
-    RESOLVED: proposals.filter((p) => (p.status === "APPROVED" || p.status === "REJECTED") && !p.isPrivate),
-    ARCHIVED: proposals.filter((p) => p.status === "ARCHIVED" && !p.isPrivate),
+    DRAFT: proposals.filter((p) => p.status === "DRAFT"),
+    OPEN: proposals.filter((p) => p.status === "OPEN" && !p.isPrivate),
+    RESOLVED: proposals.filter((p) => p.status === "RESOLVED" && !p.isPrivate),
+    ARCHIVED: proposals.filter((p) => Boolean(p.archivedAt)),
   };
 
-  const displayProposals = groupedProposals[statusFilter as keyof typeof groupedProposals] || groupedProposals.ACTIVE;
+  const displayProposals = groupedProposals[statusFilter as keyof typeof groupedProposals] || groupedProposals.OPEN;
 
   return (
     <>
@@ -55,7 +53,7 @@ export default async function ProposalsPage({
       <section className="ws-section">
         <div style={{ marginBottom: 16 }}>
           <form method="get" style={{ display: "inline-block" }}>
-            {statusFilter !== "ACTIVE" && <input type="hidden" name="status" value={statusFilter} />}
+            {statusFilter !== "OPEN" && <input type="hidden" name="status" value={statusFilter} />}
             <select name="circleId" defaultValue={circleFilter || ""} style={{ padding: "4px 8px", borderRadius: 4, marginRight: 8 }}>
               <option value="">{t("filterAllCircles")}</option>
               {circles.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
@@ -64,13 +62,13 @@ export default async function ProposalsPage({
           </form>
         </div>
         <div className="nr-filter-bar">
-          {(["PRIVATE", "ACTIVE", "DRAFT", "SUBMITTED", "ADVICE_GATHERING", "RESOLVED", "ARCHIVED"] as const).map((s) => (
+          {(["DRAFT", "OPEN", "RESOLVED", "ARCHIVED"] as const).map((s) => (
             <a 
               key={s} 
               href={`?status=${s}`} 
               className={`nr-filter-item ${statusFilter === s ? "nr-filter-active" : ""}`}
             >
-              {s === "ACTIVE" ? t("statusActive") : s === "DRAFT" ? t("statusDraft") : s === "SUBMITTED" ? t("statusSubmitted") : s === "ADVICE_GATHERING" ? t("statusAdviceGathering") : s === "RESOLVED" ? t("statusResolved") : s === "ARCHIVED" ? t("statusArchived") : s.charAt(0) + s.slice(1).toLowerCase()} ({groupedProposals[s].length})
+              {s === "DRAFT" ? t("statusDraft") : s === "OPEN" ? t("statusOpen") : s === "RESOLVED" ? t("statusResolved") : t("statusArchived")} ({groupedProposals[s].length})
             </a>
           ))}
         </div>
@@ -89,11 +87,11 @@ export default async function ProposalsPage({
               <a href={`/workspaces/${workspaceId}/proposals/${proposal.id}`} style={{ display: "block", textDecoration: "none", color: "inherit" }}>
                 <div className="row" style={{ alignItems: "center" }}>
                   <strong className="nr-item-title">
-                    {proposal.isPrivate && <span title={t("privateDraftTooltip")} className="tag info" style={{ marginRight: 6 }}>{t("tagPrivate")}</span>}
+                    {proposal.status === "DRAFT" && <span title={t("privateDraftTooltip")} className="tag info" style={{ marginRight: 6 }}>{t("statusDraft")}</span>}
                     {proposal.title}
                   </strong>
-                  <span className={`tag ${proposal.status === "DRAFT" ? "info" : proposal.status === "SUBMITTED" ? "warning" : proposal.status === "ADVICE_GATHERING" ? "info" : proposal.status === "APPROVED" ? "success" : proposal.status === "REJECTED" ? "danger" : ""}`}>
-                    {proposal.status === "ADVICE_GATHERING" ? t("tagGatheringAdvice") : proposal.status}
+                  <span className={`tag ${proposal.status === "DRAFT" ? "info" : proposal.status === "OPEN" ? "warning" : proposal.resolutionOutcome === "ADOPTED" ? "success" : proposal.status === "RESOLVED" ? "info" : ""}`}>
+                    {proposal.status === "RESOLVED" && proposal.resolutionOutcome ? `${proposal.status} · ${proposal.resolutionOutcome.replace("_", " ")}` : proposal.status}
                   </span>
                 </div>
                 <div className="nr-excerpt" style={{ marginTop: "8px" }}>
@@ -105,9 +103,9 @@ export default async function ProposalsPage({
                 
                 {(proposal.tensions?.length > 0 || proposal.actions?.length > 0) && (
                   <div style={{ marginTop: 8, fontSize: "0.82rem", display: "flex", gap: "8px", flexWrap: "wrap" }}>
-                    {proposal.tensions?.map((t: any) => (
-                      <span key={t.id} className="tag info" style={{ padding: "2px 6px", fontSize: "0.75rem" }}>
-                        {t("tensionTag", { title: t.title })}
+                    {proposal.tensions?.map((linkedTension: any) => (
+                      <span key={linkedTension.id} className="tag info" style={{ padding: "2px 6px", fontSize: "0.75rem" }}>
+                        {t("tensionTag", { title: linkedTension.title })}
                       </span>
                     ))}
                     {proposal.actions?.map((a: any) => (
@@ -119,7 +117,7 @@ export default async function ProposalsPage({
                 )}
               </a>
 
-              {!isDemo && (proposal.status === "DRAFT" || proposal.status === "APPROVED" || proposal.status === "REJECTED") && (
+              {!isDemo && (proposal.status === "DRAFT" || proposal.status === "RESOLVED") && (
                 <div style={{ position: "absolute", bottom: "16px", right: "16px" }}>
                   <form action={archiveProposalAction}>
                     <input type="hidden" name="workspaceId" value={workspaceId} />
