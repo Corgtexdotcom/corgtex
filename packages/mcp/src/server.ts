@@ -88,9 +88,9 @@ function jsonResult(value: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] };
 }
 
-const PROPOSAL_STATUS = ["DRAFT", "SUBMITTED", "ADVICE_GATHERING", "APPROVED", "REJECTED", "ARCHIVED"] as const;
-const ACTION_STATUS = ["OPEN", "IN_PROGRESS", "COMPLETED", "CANCELLED"] as const;
-const TENSION_STATUS = ["OPEN", "IN_PROGRESS", "COMPLETED", "CANCELLED"] as const;
+const PROPOSAL_STATUS = ["DRAFT", "OPEN", "RESOLVED"] as const;
+const ACTION_STATUS = ["DRAFT", "OPEN", "IN_PROGRESS", "COMPLETED"] as const;
+const TENSION_STATUS = ["DRAFT", "OPEN", "RESOLVED"] as const;
 const MEMBER_ROLE = ["CONTRIBUTOR", "FACILITATOR", "FINANCE_STEWARD", "ADMIN"] as const;
 const CYCLE_STATUS = ["PLANNED", "OPEN_UPDATES", "OPEN_ALLOCATIONS", "REVIEW", "FINALIZED"] as const;
 const BRAIN_ARTICLE_TYPE = [
@@ -209,7 +209,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       ]);
 
       const recentActions = actions.items
-        .filter((a) => a.status !== "COMPLETED" && a.status !== "CANCELLED")
+        .filter((a) => a.status !== "COMPLETED")
         .map((a) => ({
           id: a.id,
           title: a.title,
@@ -220,11 +220,11 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         }));
 
       const inFlightProposals = proposals.items
-        .filter((p) => p.status === "DRAFT" || p.status === "SUBMITTED" || p.status === "ADVICE_GATHERING")
-        .map((p) => ({ id: p.id, title: p.title, status: p.status, createdAt: p.createdAt }));
+        .filter((p) => p.status === "DRAFT" || p.status === "OPEN")
+        .map((p) => ({ id: p.id, title: p.title, status: p.status, resolutionOutcome: p.resolutionOutcome, createdAt: p.createdAt }));
 
       const freshTensions = tensions.items
-        .filter((t) => new Date(t.createdAt) >= since || t.status === "OPEN" || t.status === "IN_PROGRESS")
+        .filter((t) => new Date(t.createdAt) >= since || t.status === "OPEN")
         .slice(0, 20)
         .map((t) => ({ id: t.id, title: t.title, status: t.status, createdAt: t.createdAt }));
 
@@ -240,7 +240,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         }));
 
       const pendingSpends = spends.items
-        .filter((s) => s.status === "DRAFT" || s.status === "SUBMITTED")
+        .filter((s) => s.status === "DRAFT" || s.status === "OPEN")
         .map((s) => ({
           id: s.id,
           amountCents: s.amountCents,
@@ -321,7 +321,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
   // @ts-expect-error — MCP SDK overload triggers TS2589 with zod schemas
   server.tool(
     "create_proposal",
-    "Create a new governance proposal draft. Starts in DRAFT and must be submitted separately for approval.",
+    "Create a new governance proposal draft. Starts in DRAFT and must be opened separately with the circle.",
     {
       title: z.string().describe("Proposal title"),
       bodyMd: z.string().describe("Proposal body in Markdown"),
@@ -369,7 +369,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
 
   server.tool(
     "submit_proposal",
-    "Submit a DRAFT proposal for approval. Opens an approval flow per the workspace's approval policy.",
+    "Open a DRAFT proposal with the circle. Starts an approval flow per the workspace's approval policy.",
     {
       proposalId: z.string(),
     },
@@ -379,7 +379,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       return jsonResult({
         id: result.proposalId,
         flowId: result.flowId,
-        status: "SUBMITTED",
+        status: "OPEN",
         webUrl: webUrl(workspaceId, `/proposals/${result.proposalId}`),
       });
     },
@@ -387,7 +387,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
 
   server.tool(
     "archive_proposal",
-    "Archive a DRAFT, APPROVED, or REJECTED proposal so it stops appearing in active lists.",
+    "Archive a draft or resolved proposal so it stops appearing in active lists.",
     {
       proposalId: z.string(),
     },
@@ -589,6 +589,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       circleId: z.string().optional(),
       assigneeMemberId: z.string().optional(),
       priority: z.number().optional(),
+      resolvedVia: z.string().optional().describe("Required when setting status to RESOLVED"),
     },
     async (params: {
       tensionId: string;
@@ -598,6 +599,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       circleId?: string;
       assigneeMemberId?: string;
       priority?: number;
+      resolvedVia?: string;
     }) => {
       requireScope(sessionCtx, "tensions:write");
       const updated = await updateTension(actor, {
@@ -609,6 +611,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         circleId: params.circleId,
         assigneeMemberId: params.assigneeMemberId,
         priority: params.priority,
+        resolvedVia: params.resolvedVia,
       });
       return jsonResult({
         id: updated.id,
@@ -1283,7 +1286,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
 
   server.tool(
     "create_spend",
-    "Create AND submit a spend request in one call (legacy convenience). To create-then-review-then-submit, use create_spend_draft + submit_spend instead.",
+    "Create and open a spend request in one call (legacy convenience). To create-then-review-then-open, use create_spend_draft + submit_spend instead.",
     {
       amountCents: z.number().describe("Amount in cents"),
       currency: z.string().describe("Currency code (e.g. USD)"),
@@ -1313,7 +1316,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       const submitted = await submitSpend(actor, { workspaceId, spendId: spend.id });
       return jsonResult({
         id: submitted.spendId,
-        status: "SUBMITTED",
+        status: "OPEN",
         webUrl: webUrl(workspaceId, `/finance/spend/${submitted.spendId}`),
       });
     },
@@ -1364,7 +1367,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
 
   server.tool(
     "submit_spend",
-    "Submit a DRAFT spend request. Submitted spends are payable unless they receive an unresolved objection.",
+    "Open a DRAFT spend request. Open spends are payable unless they receive an unresolved objection.",
     {
       spendId: z.string(),
     },
@@ -1373,7 +1376,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       const submitted = await submitSpend(actor, { workspaceId, spendId });
       return jsonResult({
         id: submitted.spendId,
-        status: "SUBMITTED",
+        status: "OPEN",
         webUrl: webUrl(workspaceId, `/finance/spend/${submitted.spendId}`),
       });
     },

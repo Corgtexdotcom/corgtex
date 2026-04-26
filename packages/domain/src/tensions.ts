@@ -74,9 +74,10 @@ export async function createTension(actor: AppActor, params: {
         circleId: params.circleId || null,
         assigneeMemberId: params.assigneeMemberId || null,
         proposalId: params.proposalId || null,
-        isPrivate: params.isPrivate ?? false,
+        status: "DRAFT",
+        isPrivate: params.isPrivate ?? true,
         meetingId: params.meetingId || null,
-        publishedAt: params.isPrivate ? null : new Date(),
+        publishedAt: null,
       },
     });
 
@@ -113,7 +114,8 @@ export async function updateTension(actor: AppActor, params: {
   tensionId: string;
   title?: string;
   bodyMd?: string | null;
-  status?: "OPEN" | "IN_PROGRESS" | "COMPLETED" | "CANCELLED";
+  status?: "DRAFT" | "OPEN" | "RESOLVED";
+  resolvedVia?: string | null;
   circleId?: string | null;
   assigneeMemberId?: string | null;
   priority?: number;
@@ -138,7 +140,21 @@ export async function updateTension(actor: AppActor, params: {
       data.title = title;
     }
     if (params.bodyMd !== undefined) data.bodyMd = params.bodyMd?.trim() || null;
-    if (params.status !== undefined) data.status = params.status;
+    if (params.status !== undefined) {
+      data.status = params.status;
+      if (params.status !== "DRAFT") {
+        data.isPrivate = false;
+        data.publishedAt = tension.publishedAt || new Date();
+      }
+      if (params.status === "RESOLVED") {
+        const resolvedVia = params.resolvedVia?.trim() || "";
+        invariant(resolvedVia.length > 0, 400, "INVALID_INPUT", "Resolution note is required.");
+        data.resolvedVia = resolvedVia;
+      }
+    }
+    if (params.resolvedVia !== undefined && params.status !== "RESOLVED") {
+      data.resolvedVia = params.resolvedVia?.trim() || null;
+    }
     if (params.circleId !== undefined) data.circleId = params.circleId || null;
     if (params.assigneeMemberId !== undefined) data.assigneeMemberId = params.assigneeMemberId || null;
     if (params.priority !== undefined) data.priority = params.priority;
@@ -248,7 +264,7 @@ export async function publishTension(actor: AppActor, params: {
 
     const updated = await tx.tension.update({
       where: { id: params.tensionId },
-      data: { isPrivate: false, publishedAt: new Date() },
+      data: { status: "OPEN", isPrivate: false, publishedAt: new Date() },
     });
 
     await tx.auditLog.create({

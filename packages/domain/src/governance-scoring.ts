@@ -81,7 +81,7 @@ export async function calculateGovernanceScore(workspaceId: string, periodStart:
   // 4. Tension resolution (0-100)
   let tensionResolutionPct = 0;
   if (tensions.length > 0) {
-    const resolved = tensions.filter((t) => t.status === "COMPLETED").length;
+    const resolved = tensions.filter((t) => t.status === "RESOLVED").length;
     tensionResolutionPct = Math.round((resolved / tensions.length) * 100);
   }
 

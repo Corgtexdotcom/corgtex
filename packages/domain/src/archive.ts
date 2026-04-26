@@ -210,13 +210,17 @@ const ENTITY_CONFIGS: Record<ArchiveEntityType, ArchiveConfig> = {
     delegate: "proposal",
     findWhere: directWorkspace,
     label: titleOrName,
-    archiveData: () => ({ status: "ARCHIVED" }),
     restoreData: (previousState) => {
       const previousStatus = typeof previousState?.status === "string" ? previousState.status : "DRAFT";
-      return { status: previousStatus };
+      const status = previousStatus === "SUBMITTED" || previousStatus === "ADVICE_GATHERING"
+        ? "OPEN"
+        : previousStatus === "APPROVED" || previousStatus === "REJECTED" || previousStatus === "ARCHIVED"
+          ? "RESOLVED"
+          : previousStatus;
+      return { status };
     },
     canPurge: async (_tx, record) => {
-      invariant(record.status === "DRAFT" || record.status === "ARCHIVED", 400, "INVALID_STATE", "Only draft or archived proposals can be purged.");
+      invariant(record.status === "DRAFT" || record.archivedAt, 400, "INVALID_STATE", "Only draft or archived proposals can be purged.");
     },
   },
   Role: {

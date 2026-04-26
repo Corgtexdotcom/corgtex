@@ -103,9 +103,9 @@ export async function createProposal(actor: AppActor, params: {
         summary: params.summary?.trim() || null,
         bodyMd,
         circleId: params.circleId || null,
-        isPrivate: params.isPrivate ?? false,
+        isPrivate: params.isPrivate ?? true,
         meetingId: params.meetingId || null,
-        publishedAt: params.isPrivate ? null : new Date(),
+        publishedAt: null,
       },
     });
 
@@ -223,7 +223,7 @@ export async function submitProposal(actor: AppActor, params: { workspaceId: str
     });
 
     invariant(proposal && proposal.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Proposal not found.");
-    invariant(proposal.status === "DRAFT", 400, "INVALID_STATE", "Only draft proposals can be submitted.");
+    invariant(proposal.status === "DRAFT", 400, "INVALID_STATE", "Only draft proposals can be opened.");
 
     const flow = await ensureApprovalFlow(tx, {
       workspaceId: params.workspaceId,
@@ -238,7 +238,7 @@ export async function submitProposal(actor: AppActor, params: { workspaceId: str
     await tx.proposal.update({
       where: { id: proposal.id },
       data: {
-        status: "SUBMITTED",
+        status: "OPEN",
         isPrivate: false,
         publishedAt: proposal.publishedAt || new Date(),
         autoApproveAt,
@@ -261,7 +261,7 @@ export async function submitProposal(actor: AppActor, params: { workspaceId: str
       data: {
         workspaceId: params.workspaceId,
         actorUserId: actor.kind === "user" ? actor.user.id : null,
-        action: "proposal.submitted",
+        action: "proposal.opened",
         entityType: "Proposal",
         entityId: proposal.id,
         meta: { flowId: flow.id },
@@ -271,7 +271,7 @@ export async function submitProposal(actor: AppActor, params: { workspaceId: str
     await appendEvents(tx, [
       {
         workspaceId: params.workspaceId,
-        type: "proposal.submitted",
+        type: "proposal.opened",
         aggregateType: "Proposal",
         aggregateId: proposal.id,
         payload: {
@@ -341,15 +341,9 @@ export async function autoApproveProposals(): Promise<number> {
   
   const proposalsToApprove = await prisma.proposal.findMany({
     where: {
-      status: "SUBMITTED",
+      status: "OPEN",
       archivedAt: null,
       autoApproveAt: { lt: now, not: null },
-      reactions: {
-        none: {
-          reaction: "OBJECTION",
-          resolvedAt: null
-        }
-      }
     },
     select: { id: true, workspaceId: true }
   });
@@ -359,10 +353,23 @@ export async function autoApproveProposals(): Promise<number> {
   let approvedCount = 0;
   for (const p of proposalsToApprove) {
     try {
-      await prisma.$transaction(async (tx) => {
+      const didApprove = await prisma.$transaction(async (tx) => {
+        const openObjections = await tx.deliberationEntry.count({
+          where: {
+            workspaceId: p.workspaceId,
+            parentType: "PROPOSAL",
+            parentId: p.id,
+            entryType: "OBJECTION",
+            resolvedAt: null,
+          },
+        });
+        if (openObjections > 0) {
+          return false;
+        }
+
         await tx.proposal.update({
           where: { id: p.id },
-          data: { status: "APPROVED", decidedAt: now },
+          data: { status: "RESOLVED", resolutionOutcome: "ADOPTED", decidedAt: now },
         });
 
         await tx.auditLog.create({
@@ -383,8 +390,9 @@ export async function autoApproveProposals(): Promise<number> {
             payload: { proposalId: p.id },
           },
         ]);
+        return true;
       });
-      approvedCount++;
+      if (didApprove) approvedCount++;
     } catch (error) {
       logger.error(`Failed to auto-approve proposal ${p.id}`, { error });
     }

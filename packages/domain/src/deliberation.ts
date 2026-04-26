@@ -3,9 +3,8 @@ import { prisma } from "@corgtex/shared";
 import { requireWorkspaceMembership, actorUserIdForWorkspace } from "./auth";
 import { invariant } from "./errors";
 import { appendEvents } from "./events";
-import { sha256 } from "@corgtex/shared";
 
-const VALID_ENTRY_TYPES = ["SUPPORT", "QUESTION", "CONCERN", "OBJECTION", "REACTION", "ADVICE_REQUEST"];
+const VALID_ENTRY_TYPES = ["REACTION", "OBJECTION"];
 const VALID_PARENT_TYPES = ["PROPOSAL", "SPEND", "TENSION", "MEETING", "BRAIN_ARTICLE"];
 
 export async function postDeliberationEntry(actor: AppActor, params: {
@@ -15,6 +14,7 @@ export async function postDeliberationEntry(actor: AppActor, params: {
   entryType: string;
   bodyMd?: string;
   targetMemberId?: string;
+  targetCircleId?: string;
 }) {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
   const authorUserId = await actorUserIdForWorkspace(actor, params.workspaceId);
@@ -22,64 +22,41 @@ export async function postDeliberationEntry(actor: AppActor, params: {
   invariant(VALID_ENTRY_TYPES.includes(params.entryType), 400, "INVALID_INPUT", `Invalid entryType: ${params.entryType}`);
   invariant(VALID_PARENT_TYPES.includes(params.parentType), 400, "INVALID_INPUT", `Invalid parentType: ${params.parentType}`);
 
-  if (params.entryType === "OBJECTION") {
-    invariant(params.bodyMd && params.bodyMd.trim().length > 0, 400, "INVALID_INPUT", "Objections require a non-empty bodyMd.");
-  }
+  const bodyMd = params.bodyMd?.trim() || "";
+  invariant(bodyMd.length > 0, 400, "INVALID_INPUT", "Deliberation entries require a non-empty bodyMd.");
+  invariant(!(params.targetMemberId && params.targetCircleId), 400, "INVALID_INPUT", "Choose either a person or a circle target, not both.");
 
   return prisma.$transaction(async (tx) => {
-    let entry: any = null;
-    let didCreate = true;
+    if (params.targetMemberId) {
+      const targetMember = await tx.member.findUnique({ where: { id: params.targetMemberId } });
+      invariant(targetMember && targetMember.workspaceId === params.workspaceId && targetMember.isActive, 400, "INVALID_INPUT", "Target member must belong to this workspace.");
+    }
+    if (params.targetCircleId) {
+      const targetCircle = await tx.circle.findUnique({ where: { id: params.targetCircleId } });
+      invariant(targetCircle && targetCircle.workspaceId === params.workspaceId && !targetCircle.archivedAt, 400, "INVALID_INPUT", "Target circle must belong to this workspace.");
+    }
 
-    if (params.entryType === "SUPPORT") {
-      const hash = sha256(`${params.workspaceId}:${params.parentType}:${params.parentId}:${authorUserId}`).substring(0, 32);
-      const deterministicId = `supp-${hash}`;
-
-      const rows: any[] = await tx.$queryRaw`
-        INSERT INTO "DeliberationEntry" ("id", "workspaceId", "parentType", "parentId", "authorUserId", "entryType", "bodyMd", "targetMemberId", "createdAt")
-        VALUES (${deterministicId}, ${params.workspaceId}, ${params.parentType}, ${params.parentId}, ${authorUserId}, ${params.entryType}, ${params.bodyMd?.trim() || null}, ${params.targetMemberId || null}, NOW())
-        ON CONFLICT ("id") DO NOTHING
-        RETURNING *;
-      `;
-
-      if (rows.length === 0) {
-        didCreate = false;
-        entry = await tx.deliberationEntry.findUnique({ where: { id: deterministicId } });
-      } else {
-        entry = rows[0];
+    const entry = await tx.deliberationEntry.create({
+      data: {
+        workspaceId: params.workspaceId,
+        parentType: params.parentType,
+        parentId: params.parentId,
+        authorUserId,
+        entryType: params.entryType,
+        bodyMd,
+        targetMemberId: params.targetMemberId || null,
+        targetCircleId: params.targetCircleId || null,
       }
-    } else {
-      entry = await tx.deliberationEntry.create({
-        data: {
-          workspaceId: params.workspaceId,
-          parentType: params.parentType,
-          parentId: params.parentId,
-          authorUserId,
-          entryType: params.entryType,
-          bodyMd: params.bodyMd?.trim() || null,
-          targetMemberId: params.targetMemberId || null,
-        }
-      });
-    }
-
-    if (!didCreate && entry) {
-      return entry;
-    }
+    });
 
     if (params.parentType === "SPEND" && params.entryType === "OBJECTION") {
-      const spend = await tx.spendRequest.findUnique({ where: { id: params.parentId } });
-      if (spend && spend.status === "SUBMITTED") {
-        await tx.spendRequest.update({
-          where: { id: spend.id },
-          data: { status: "OBJECTED" },
-        });
-        await appendEvents(tx, [{
-          workspaceId: params.workspaceId,
-          type: "spend.objected",
-          aggregateType: "SpendRequest",
-          aggregateId: spend.id,
-          payload: { spendId: spend.id },
-        }]);
-      }
+      await appendEvents(tx, [{
+        workspaceId: params.workspaceId,
+        type: "spend.objected",
+        aggregateType: "SpendRequest",
+        aggregateId: params.parentId,
+        payload: { spendId: params.parentId },
+      }]);
     }
 
     await tx.auditLog.create({
@@ -115,11 +92,13 @@ export async function postDeliberationEntry(actor: AppActor, params: {
 export async function resolveDeliberationEntry(actor: AppActor, params: {
   workspaceId: string;
   entryId: string;
-  resolvedNote?: string;
+  resolvedNote: string;
 }) {
   const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
   const actorUserId = await actorUserIdForWorkspace(actor, params.workspaceId);
   const isAdmin = membership ? membership.role === "ADMIN" : actor.kind === "agent";
+  const resolvedNote = params.resolvedNote?.trim() || "";
+  invariant(resolvedNote.length > 0, 400, "INVALID_INPUT", "Resolution note is required.");
 
   return prisma.$transaction(async (tx) => {
     const entry = await tx.deliberationEntry.findUnique({
@@ -159,29 +138,9 @@ export async function resolveDeliberationEntry(actor: AppActor, params: {
       where: { id: entry.id },
       data: {
         resolvedAt: new Date(),
-        resolvedNote: params.resolvedNote?.trim() || null,
+        resolvedNote,
       }
     });
-
-    if (entry.parentType === "SPEND" && entry.entryType === "OBJECTION") {
-      const spend = await tx.spendRequest.findUnique({ where: { id: entry.parentId } });
-      if (spend && spend.status === "OBJECTED") {
-        const otherOpenObjections = await tx.deliberationEntry.count({
-          where: {
-            parentType: "SPEND",
-            parentId: spend.id,
-            entryType: "OBJECTION",
-            resolvedAt: null,
-          }
-        });
-        if (otherOpenObjections === 0) {
-          await tx.spendRequest.update({
-            where: { id: spend.id },
-            data: { status: "SUBMITTED" },
-          });
-        }
-      }
-    }
 
     await tx.auditLog.create({
       data: {
@@ -216,6 +175,23 @@ export async function listDeliberationEntries(actor: AppActor, params: {
           id: true,
           displayName: true,
           email: true,
+        }
+      },
+      targetCircle: {
+        select: {
+          id: true,
+          name: true,
+        }
+      },
+      targetMember: {
+        include: {
+          user: {
+            select: {
+              id: true,
+              displayName: true,
+              email: true,
+            }
+          }
         }
       }
     },

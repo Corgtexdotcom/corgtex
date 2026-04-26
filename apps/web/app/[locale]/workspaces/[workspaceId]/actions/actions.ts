@@ -37,7 +37,7 @@ export async function updateActionAction(formData: FormData) {
     workspaceId,
     actionId: asString(formData, "actionId"),
     title: asOptional(formData, "title") ?? undefined,
-    status: asOptional(formData, "status") as "OPEN" | "IN_PROGRESS" | "COMPLETED" | "CANCELLED" | null ?? undefined,
+    status: asOptional(formData, "status") as "DRAFT" | "OPEN" | "IN_PROGRESS" | "COMPLETED" | null ?? undefined,
   });
   refresh(workspaceId);
 }

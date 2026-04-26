@@ -155,9 +155,7 @@ export async function suggestMaturityUpgrade(workspaceId: string, circleId: stri
     include: {
       tensions: {
         where: {
-          status: {
-            in: ["COMPLETED", "CANCELLED"],
-          },
+          status: "RESOLVED",
           archivedAt: null,
           updatedAt: {
             gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000), // last 30 days
