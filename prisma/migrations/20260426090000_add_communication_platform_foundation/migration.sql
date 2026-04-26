@@ -159,7 +159,7 @@ CREATE UNIQUE INDEX "CommunicationChannel_installationId_externalChannelId_key" 
 CREATE INDEX "CommunicationChannel_workspaceId_provider_isIngestEnabled_idx" ON "CommunicationChannel"("workspaceId", "provider", "isIngestEnabled");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "CommunicationMessage_installationId_externalChannelId_externalMessageId_key" ON "CommunicationMessage"("installationId", "externalChannelId", "externalMessageId");
+CREATE UNIQUE INDEX "CommunicationMessage_installation_channel_message_key" ON "CommunicationMessage"("installationId", "externalChannelId", "externalMessageId");
 
 -- CreateIndex
 CREATE INDEX "CommunicationMessage_workspaceId_provider_receivedAt_idx" ON "CommunicationMessage"("workspaceId", "provider", "receivedAt");
