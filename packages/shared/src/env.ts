@@ -80,6 +80,10 @@ type Env = {
   readonly EMAIL_REPLY_TO: string | undefined;
   readonly SENTRY_DSN: string | undefined;
   readonly ENCRYPTION_KEY: string | undefined;
+  readonly SLACK_CLIENT_ID: string | undefined;
+  readonly SLACK_CLIENT_SECRET: string | undefined;
+  readonly SLACK_SIGNING_SECRET: string | undefined;
+  readonly SLACK_APP_ID: string | undefined;
 };
 
 const TEST_DATABASE_URL = "postgresql://postgres:postgres@localhost:5432/corgtex_test";
@@ -171,6 +175,18 @@ export const env: Env = {
   },
   get ENCRYPTION_KEY() {
     return optional("ENCRYPTION_KEY");
+  },
+  get SLACK_CLIENT_ID() {
+    return optional("SLACK_CLIENT_ID");
+  },
+  get SLACK_CLIENT_SECRET() {
+    return optional("SLACK_CLIENT_SECRET");
+  },
+  get SLACK_SIGNING_SECRET() {
+    return optional("SLACK_SIGNING_SECRET");
+  },
+  get SLACK_APP_ID() {
+    return optional("SLACK_APP_ID");
   },
 };
 
