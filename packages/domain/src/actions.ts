@@ -220,7 +220,7 @@ export async function publishAction(actor: AppActor, params: {
     });
 
     invariant(action && action.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Action not found.");
-    invariant(action.isPrivate, 400, "INVALID_STATE", "Action is already public.");
+    invariant(action.status === "DRAFT", 400, "INVALID_STATE", "Only draft actions can be opened.");
     invariant(actor.kind === "user" && action.authorUserId === actor.user.id, 403, "FORBIDDEN", "Only the author can publish this action.");
 
     const updated = await tx.action.update({

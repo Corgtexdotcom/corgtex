@@ -22,7 +22,7 @@ export async function createActionAction(formData: FormData) {
     title: asString(formData, "title"),
     bodyMd: asOptional(formData, "bodyMd"),
     proposalId: asOptional(formData, "proposalId"),
-    isPrivate: formData.get("isPrivate") === "on",
+    isPrivate: formData.has("isPrivate") ? formData.get("isPrivate") === "on" : true,
   });
   refresh(workspaceId);
 }

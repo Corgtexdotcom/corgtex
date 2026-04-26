@@ -7,6 +7,12 @@ import {
   publishActionAction,
 } from "../actions";
 import { getTranslations } from "next-intl/server";
+import {
+  ACTION_STATUS_FILTERS,
+  ACTION_STATUS_META,
+  groupActionsByStatus,
+  normalizeActionStatusFilter,
+} from "./view-model";
 
 export const dynamic = "force-dynamic";
 
@@ -28,22 +34,14 @@ export default async function ActionsPage({
   const activeProposals = proposals.filter(p => p.status === "DRAFT" || p.status === "OPEN");
 
   const resolvedSearch = searchParams ? await searchParams : {};
-  const statusFilter = typeof resolvedSearch.status === "string" ? resolvedSearch.status : "OPEN";
-
-  const groupedActions = {
-    DRAFT: actions.filter((a) => a.status === "DRAFT"),
-    OPEN: actions.filter((a) => a.status === "OPEN" && !a.isPrivate),
-    IN_PROGRESS: actions.filter((a) => a.status === "IN_PROGRESS" && !a.isPrivate),
-    COMPLETED: actions.filter((a) => a.status === "COMPLETED" && !a.isPrivate),
-    ALL: actions,
-  };
-
-  const displayActions = statusFilter === "ALL" 
-    ? groupedActions.ALL 
-    : groupedActions[statusFilter as keyof typeof groupedActions] || groupedActions.OPEN;
+  const statusFilter = normalizeActionStatusFilter(resolvedSearch.status);
+  const groupedActions = groupActionsByStatus(actions);
+  const displayActions = groupedActions[statusFilter];
 
   const ageText = (date: Date) => {
-    const days = Math.floor((Date.now() - new Date(date).getTime()) / (1000 * 60 * 60 * 24));
+    const timestamp = new Date(date).getTime();
+    if (Number.isNaN(timestamp)) return "";
+    const days = Math.floor((Date.now() - timestamp) / (1000 * 60 * 60 * 24));
     return days === 0 ? "today" : `${days}d ago`;
   };
 
@@ -58,69 +56,78 @@ export default async function ActionsPage({
 
       <section className="ws-section">
         <div className="nr-filter-bar">
-          {(["DRAFT", "OPEN", "IN_PROGRESS", "COMPLETED", "ALL"] as const).map((s) => (
+          {ACTION_STATUS_FILTERS.map((s) => (
             <a 
               key={s} 
               href={`?status=${s}`} 
               className={`nr-filter-item ${statusFilter === s ? "nr-filter-active" : ""}`}
             >
-              {s === "DRAFT" ? t("statusDraft") : s === "OPEN" ? t("statusOpen") : s === "IN_PROGRESS" ? t("statusInProgress") : s === "COMPLETED" ? t("statusCompleted") : t("statusAll")} ({groupedActions[s].length})
+              {t(ACTION_STATUS_META[s].labelKey)} ({groupedActions[s].length})
             </a>
           ))}
         </div>
 
         <div>
           {displayActions.length === 0 && <p className="muted">{t("noActionsFound")}</p>}
-          {displayActions.map((action) => (
-            <div className="nr-item" key={action.id}>
-              <div className="row" style={{ alignItems: "center" }}>
-                <strong className="nr-item-title">
-                  {action.status === "DRAFT" && <span title={t("statusDraft")} style={{ marginRight: 6 }}>◆</span>}
-                  {action.title}
-                </strong>
-                <span className={`tag ${action.status === "OPEN" ? "warning" : action.status === "IN_PROGRESS" ? "info" : "success"}`}>{action.status}</span>
-              </div>
-              {action.bodyMd && <div className="nr-excerpt">{action.bodyMd}</div>}
-              
-              <div className="nr-item-meta" style={{ marginTop: 8 }}>
-                 {t("metaCreator", { name: action.author.displayName || action.author.email })} · {ageText(action.createdAt)}
-                 {action.assigneeMember && ` · ${t("metaAssignee", { name: action.assigneeMember.user.displayName || action.assigneeMember.user.email })}`}
-                 {action.dueAt && ` · ${t("metaDue", { date: new Date(action.dueAt).toLocaleDateString() })}`}
-                 {action.proposal && ` · ${t("metaLinkedToProposal", { title: action.proposal.title })}`}
-              </div>
+          {displayActions.map((action) => {
+            const statusMeta = ACTION_STATUS_META[action.status as keyof typeof ACTION_STATUS_META] ?? ACTION_STATUS_META.OPEN;
+            const authorName = action.author?.displayName || action.author?.email || "Unknown";
+            const assigneeName = action.assigneeMember?.user?.displayName || action.assigneeMember?.user?.email;
+            const createdAge = ageText(action.createdAt);
+            const dueDate = action.dueAt ? new Date(action.dueAt).toLocaleDateString() : null;
 
-              <div className="actions-inline" style={{ marginTop: 12 }}>
-                {action.status === "DRAFT" && (
-                  <form action={publishActionAction}>
+            return (
+              <div className="nr-item" key={action.id}>
+                <div className="row" style={{ alignItems: "center" }}>
+                  <strong className="nr-item-title">
+                    {action.status === "DRAFT" && <span title={t("statusDraft")} style={{ marginRight: 6 }}>◆</span>}
+                    {action.title}
+                  </strong>
+                  <span className={`tag ${statusMeta.tagClass}`}>{t(statusMeta.labelKey)}</span>
+                </div>
+                {action.bodyMd && <div className="nr-excerpt">{action.bodyMd}</div>}
+                
+                <div className="nr-item-meta" style={{ marginTop: 8 }}>
+                  {t("metaCreator", { name: authorName })}
+                  {createdAge ? ` · ${createdAge}` : ""}
+                  {assigneeName ? ` · ${t("metaAssignee", { name: assigneeName })}` : ""}
+                  {dueDate ? ` · ${t("metaDue", { date: dueDate })}` : ""}
+                  {action.proposal?.title ? ` · ${t("metaLinkedToProposal", { title: action.proposal.title })}` : ""}
+                </div>
+
+                <div className="actions-inline" style={{ marginTop: 12 }}>
+                  {action.status === "DRAFT" && (
+                    <form action={publishActionAction}>
+                      <input type="hidden" name="workspaceId" value={workspaceId} />
+                      <input type="hidden" name="actionId" value={action.id} />
+                      <button type="submit" className="primary small">{t("btnOpen")}</button>
+                    </form>
+                  )}
+                  {action.status === "OPEN" && (
+                    <form action={updateActionAction}>
+                      <input type="hidden" name="workspaceId" value={workspaceId} />
+                      <input type="hidden" name="actionId" value={action.id} />
+                      <input type="hidden" name="status" value="IN_PROGRESS" />
+                      <button type="submit" className="secondary small">{t("btnStart")}</button>
+                    </form>
+                  )}
+                  {(action.status === "OPEN" || action.status === "IN_PROGRESS") && (
+                    <form action={updateActionAction}>
+                      <input type="hidden" name="workspaceId" value={workspaceId} />
+                      <input type="hidden" name="actionId" value={action.id} />
+                      <input type="hidden" name="status" value="COMPLETED" />
+                      <button type="submit" className="secondary small">{t("btnComplete")}</button>
+                    </form>
+                  )}
+                  <form action={deleteActionAction}>
                     <input type="hidden" name="workspaceId" value={workspaceId} />
                     <input type="hidden" name="actionId" value={action.id} />
-                    <button type="submit" className="primary small">{t("btnOpen")}</button>
+                    <button type="submit" className="danger small">{t("btnDelete")}</button>
                   </form>
-                )}
-                {action.status === "OPEN" && (
-                  <form action={updateActionAction}>
-                    <input type="hidden" name="workspaceId" value={workspaceId} />
-                    <input type="hidden" name="actionId" value={action.id} />
-                    <input type="hidden" name="status" value="IN_PROGRESS" />
-                    <button type="submit" className="secondary small">{t("btnStart")}</button>
-                  </form>
-                )}
-                {(action.status === "OPEN" || action.status === "IN_PROGRESS") && (
-                  <form action={updateActionAction}>
-                    <input type="hidden" name="workspaceId" value={workspaceId} />
-                    <input type="hidden" name="actionId" value={action.id} />
-                    <input type="hidden" name="status" value="COMPLETED" />
-                    <button type="submit" className="secondary small">{t("btnComplete")}</button>
-                  </form>
-                )}
-                <form action={deleteActionAction}>
-                  <input type="hidden" name="workspaceId" value={workspaceId} />
-                  <input type="hidden" name="actionId" value={action.id} />
-                  <button type="submit" className="danger small">{t("btnDelete")}</button>
-                </form>
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       </section>
 
