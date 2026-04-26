@@ -152,3 +152,10 @@ describe("getProposal", () => {
     }));
   });
 });
+
+describe("proposal event payload contract", () => {
+  it("submitProposal is exported and callable", async () => {
+    const mod = await import("./proposals");
+    expect(typeof mod.submitProposal).toBe("function");
+  });
+});
