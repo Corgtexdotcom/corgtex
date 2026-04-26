@@ -26,8 +26,8 @@ function resolveEntityUrl(
   if (t === "tension") return `/workspaces/${workspaceId}/tensions`;
   if (t === "action") return `/workspaces/${workspaceId}/actions`;
   if (t === "meeting") return `/workspaces/${workspaceId}/meetings`;
-  if (t === "adviceprocess") return `/workspaces/${workspaceId}/proposals?status=ADVICE_GATHERING`;
-  if (t === "advicerecord") return `/workspaces/${workspaceId}/proposals?status=ADVICE_GATHERING`;
+  if (t === "adviceprocess") return `/workspaces/${workspaceId}/proposals?status=OPEN`;
+  if (t === "advicerecord") return `/workspaces/${workspaceId}/proposals?status=OPEN`;
   if (t === "spend" || t === "spendrequest") return `/workspaces/${workspaceId}/finance`;
   return null;
 }
@@ -70,7 +70,7 @@ export default async function WorkspaceDashboard({
       take: 5,
     }),
     listActions(actor, workspaceId, { take: 10 }),
-    prisma.tension.count({ where: { workspaceId, status: { in: ["OPEN", "IN_PROGRESS"] }, OR: [{ isPrivate: false }, { authorUserId: actor.kind === 'user' ? actor.user.id : '' }] } }),
+    prisma.tension.count({ where: { workspaceId, status: "OPEN", OR: [{ isPrivate: false }, { authorUserId: actor.kind === 'user' ? actor.user.id : '' }] } }),
     prisma.agentRun.count({ where: { workspaceId, status: "WAITING_APPROVAL" } }),
     listAuditLogs(actor, workspaceId, { take: 10 }),
     listArticles(actor, { workspaceId, take: 50 }),
@@ -238,7 +238,7 @@ export default async function WorkspaceDashboard({
                 <strong>{t("advisoryRequests", { count: advisoryRequests.length })}</strong>
                 {advisoryRequests.slice(0, 2).map((ap: any) => (
                   <div key={ap.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
-                    <Link href={`/workspaces/${workspaceId}/proposals?status=ADVICE_GATHERING`} style={{ fontSize: "0.8rem", textDecoration: "none", color: "inherit" }}>
+                    <Link href={`/workspaces/${workspaceId}/proposals?status=OPEN`} style={{ fontSize: "0.8rem", textDecoration: "none", color: "inherit" }}>
                       {ap.proposal.title}
                     </Link>
                   </div>
@@ -316,7 +316,7 @@ export default async function WorkspaceDashboard({
 
            <h2 className="nr-section-header">{t("activeTensions")}</h2>
            <div style={{ marginBottom: "16px" }}>
-             {tensions.filter(t => t.status === "OPEN" || t.status === "IN_PROGRESS").slice(0, 4).map((tension) => (
+             {tensions.filter((tension) => tension.status === "OPEN").slice(0, 4).map((tension) => (
                <div key={tension.id} className="nr-item" style={{ padding: "8px 0" }}>
                  <Link href={`/workspaces/${workspaceId}/tensions`} style={{ display: "block", textDecoration: "none" }}>
                    <div style={{ fontSize: "0.85rem", fontWeight: 600, color: "var(--text)", marginBottom: "2px" }}>{tension.title}</div>

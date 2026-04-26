@@ -263,7 +263,6 @@ async function main() {
       entityType: "Proposal",
       delegate: "proposal",
       records: proposals,
-      archiveData: () => ({ status: "ARCHIVED" }),
     });
     counts.Meeting = await archiveBatch(tx, { ...base, entityType: "Meeting", delegate: "meeting", records: meetings });
     counts.SpendRequest = await archiveBatch(tx, { ...base, entityType: "SpendRequest", delegate: "spendRequest", records: spends });

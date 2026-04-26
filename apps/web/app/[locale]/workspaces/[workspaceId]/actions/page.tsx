@@ -25,13 +25,13 @@ export default async function ActionsPage({
     listProposals(actor, workspaceId, { take: 50 }),
   ]);
   
-  const activeProposals = proposals.filter(p => p.status === "DRAFT" || p.status === "SUBMITTED");
+  const activeProposals = proposals.filter(p => p.status === "DRAFT" || p.status === "OPEN");
 
   const resolvedSearch = searchParams ? await searchParams : {};
   const statusFilter = typeof resolvedSearch.status === "string" ? resolvedSearch.status : "OPEN";
 
   const groupedActions = {
-    PERSONAL: actions.filter((a) => a.isPrivate),
+    DRAFT: actions.filter((a) => a.status === "DRAFT"),
     OPEN: actions.filter((a) => a.status === "OPEN" && !a.isPrivate),
     IN_PROGRESS: actions.filter((a) => a.status === "IN_PROGRESS" && !a.isPrivate),
     COMPLETED: actions.filter((a) => a.status === "COMPLETED" && !a.isPrivate),
@@ -58,13 +58,13 @@ export default async function ActionsPage({
 
       <section className="ws-section">
         <div className="nr-filter-bar">
-          {(["PERSONAL", "OPEN", "IN_PROGRESS", "COMPLETED", "ALL"] as const).map((s) => (
+          {(["DRAFT", "OPEN", "IN_PROGRESS", "COMPLETED", "ALL"] as const).map((s) => (
             <a 
               key={s} 
               href={`?status=${s}`} 
               className={`nr-filter-item ${statusFilter === s ? "nr-filter-active" : ""}`}
             >
-              {s === "PERSONAL" ? t("statusPersonal") : s === "OPEN" ? t("statusOpen") : s === "IN_PROGRESS" ? t("statusInProgress") : s === "COMPLETED" ? t("statusCompleted") : t("statusAll")} ({groupedActions[s].length})
+              {s === "DRAFT" ? t("statusDraft") : s === "OPEN" ? t("statusOpen") : s === "IN_PROGRESS" ? t("statusInProgress") : s === "COMPLETED" ? t("statusCompleted") : t("statusAll")} ({groupedActions[s].length})
             </a>
           ))}
         </div>
@@ -75,7 +75,7 @@ export default async function ActionsPage({
             <div className="nr-item" key={action.id}>
               <div className="row" style={{ alignItems: "center" }}>
                 <strong className="nr-item-title">
-                  {action.isPrivate && <span title={t("privateTooltip")} style={{ marginRight: 6 }}>◆</span>}
+                  {action.status === "DRAFT" && <span title={t("statusDraft")} style={{ marginRight: 6 }}>◆</span>}
                   {action.title}
                 </strong>
                 <span className={`tag ${action.status === "OPEN" ? "warning" : action.status === "IN_PROGRESS" ? "info" : "success"}`}>{action.status}</span>
@@ -90,14 +90,14 @@ export default async function ActionsPage({
               </div>
 
               <div className="actions-inline" style={{ marginTop: 12 }}>
-                {action.isPrivate && (
+                {action.status === "DRAFT" && (
                   <form action={publishActionAction}>
                     <input type="hidden" name="workspaceId" value={workspaceId} />
                     <input type="hidden" name="actionId" value={action.id} />
-                    <button type="submit" className="primary small">{t("btnPublish")}</button>
+                    <button type="submit" className="primary small">{t("btnOpen")}</button>
                   </form>
                 )}
-                {!action.isPrivate && action.status === "OPEN" && (
+                {action.status === "OPEN" && (
                   <form action={updateActionAction}>
                     <input type="hidden" name="workspaceId" value={workspaceId} />
                     <input type="hidden" name="actionId" value={action.id} />
@@ -105,20 +105,12 @@ export default async function ActionsPage({
                     <button type="submit" className="secondary small">{t("btnStart")}</button>
                   </form>
                 )}
-                {!action.isPrivate && (action.status === "OPEN" || action.status === "IN_PROGRESS") && (
+                {(action.status === "OPEN" || action.status === "IN_PROGRESS") && (
                   <form action={updateActionAction}>
                     <input type="hidden" name="workspaceId" value={workspaceId} />
                     <input type="hidden" name="actionId" value={action.id} />
                     <input type="hidden" name="status" value="COMPLETED" />
                     <button type="submit" className="secondary small">{t("btnComplete")}</button>
-                  </form>
-                )}
-                {!action.isPrivate && (action.status === "OPEN" || action.status === "IN_PROGRESS") && (
-                  <form action={updateActionAction}>
-                    <input type="hidden" name="workspaceId" value={workspaceId} />
-                    <input type="hidden" name="actionId" value={action.id} />
-                    <input type="hidden" name="status" value="CANCELLED" />
-                    <button type="submit" className="warning small">{t("btnCancel")}</button>
                   </form>
                 )}
                 <form action={deleteActionAction}>
@@ -155,10 +147,6 @@ export default async function ActionsPage({
                   <option value={p.id} key={p.id}>{p.title}</option>
                 ))}
               </select>
-            </label>
-            <label style={{ display: "flex", alignItems: "center", gap: "8px", fontWeight: "normal", cursor: "pointer" }}>
-              <input type="checkbox" name="isPrivate" defaultChecked />
-              <span>{t("formPrivateList")}</span>
             </label>
             <button type="submit">{t("btnCreateAction")}</button>
           </form>

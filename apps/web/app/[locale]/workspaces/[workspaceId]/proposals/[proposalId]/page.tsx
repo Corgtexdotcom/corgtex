@@ -5,7 +5,8 @@ import { requirePageActor } from "@/lib/auth";
 import { renderMarkdown } from "@/lib/markdown";
 import { DeliberationThread } from "@/lib/components/DeliberationThread";
 import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
-import { postDeliberationEntryAction, resolveDeliberationEntryAction } from "../actions";
+import { getDeliberationTargets } from "@/lib/deliberation-targets";
+import { postDeliberationEntryAction, resolveDeliberationEntryAction, submitProposalAction } from "../actions";
 import { getTranslations } from "next-intl/server";
 
 export const dynamic = "force-dynamic";
@@ -27,6 +28,7 @@ export default async function ProposalDetailPage({
     parentType: "PROPOSAL",
     parentId: proposalId,
   });
+  const deliberationTargets = await getDeliberationTargets({ actor, workspaceId, parentCircleId: proposal.circleId });
 
   const htmlContent = renderMarkdown(proposal.bodyMd);
 
@@ -39,9 +41,9 @@ export default async function ProposalDetailPage({
 
   const statusClass = (() => {
     if (proposal.status === "DRAFT") return "info";
-    if (proposal.status === "SUBMITTED" || proposal.status === "ADVICE_GATHERING") return "warning";
-    if (proposal.status === "APPROVED") return "success";
-    if (proposal.status === "REJECTED") return "danger";
+    if (proposal.status === "OPEN") return "warning";
+    if (proposal.resolutionOutcome === "ADOPTED") return "success";
+    if (proposal.status === "RESOLVED") return "info";
     return "";
   })();
 
@@ -55,7 +57,9 @@ export default async function ProposalDetailPage({
           <span>·</span>
           <span>{proposal.author.displayName || proposal.author.email}</span>
           <span>·</span>
-          <span className={`tag ${statusClass}`}>{proposal.status}</span>
+          <span className={`tag ${statusClass}`}>
+            {proposal.status === "RESOLVED" && proposal.resolutionOutcome ? `${proposal.status} · ${proposal.resolutionOutcome.replace("_", " ")}` : proposal.status}
+          </span>
         </p>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", borderBottom: "1px solid var(--line)", paddingBottom: 16 }}>
           <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2.5rem", maxWidth: "800px" }}>{proposal.title}</h1>
@@ -87,20 +91,26 @@ export default async function ProposalDetailPage({
               createdAt: e.createdAt,
               resolvedAt: e.resolvedAt,
               resolvedNote: e.resolvedNote,
+              targetLabel: e.targetCircle
+                ? `Circle: ${e.targetCircle.name}`
+                : e.targetMember
+                  ? `Person: ${e.targetMember.user.displayName || e.targetMember.user.email}`
+                  : null,
             }))}
             canResolve={isAuthor || actor.kind === "agent"}
             resolveAction={resolveDeliberationEntryAction}
             hiddenFields={{ workspaceId, proposalId }}
           />
 
-          {(proposal.status === "SUBMITTED" || proposal.status === "ADVICE_GATHERING") && (
+          {proposal.status === "OPEN" && (
             <DeliberationComposer
               postAction={postDeliberationEntryAction}
               hiddenFields={{ workspaceId, proposalId }}
+              title={t("sectionDeliberation")}
+              targetOptions={deliberationTargets.options}
+              defaultTargetValue={deliberationTargets.defaultValue}
               entryTypes={[
-                { value: "SUPPORT", label: t("entrySupport"), variant: "success" },
-                { value: "QUESTION", label: t("entryQuestion"), variant: "info" },
-                { value: "CONCERN", label: t("entryConcern"), variant: "warning" },
+                { value: "REACTION", label: t("entryReaction"), variant: "secondary" },
                 { value: "OBJECTION", label: t("entryObjection"), variant: "danger" },
               ]}
             />
@@ -111,10 +121,10 @@ export default async function ProposalDetailPage({
         <aside style={{ borderLeft: "1px solid var(--line)", paddingLeft: "32px", paddingRight: "16px" }}>
           {isAuthor && proposal.status === "DRAFT" && (
             <div className="stack mb-8">
-              <form action="../actions/submit" method="post" style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+              <form action={submitProposalAction} style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
                 <input type="hidden" name="workspaceId" value={workspaceId} />
                 <input type="hidden" name="proposalId" value={proposal.id} />
-                <button formAction="../actions/submit" className="w-full">{t("btnSubmitProposal")}</button>
+                <button className="w-full">{t("btnSubmitProposal")}</button>
               </form>
             </div>
           )}

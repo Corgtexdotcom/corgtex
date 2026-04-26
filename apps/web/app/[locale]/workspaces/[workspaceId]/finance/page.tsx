@@ -1,36 +1,46 @@
-import { listSpends, listLedgerAccounts } from "@corgtex/domain";
+import { Fragment } from "react";
+import Link from "next/link";
+import { listDeliberationEntries, listLedgerAccounts, listSpends } from "@corgtex/domain";
+import { prisma } from "@corgtex/shared";
 import { requirePageActor } from "@/lib/auth";
+import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
+import { DeliberationThread } from "@/lib/components/DeliberationThread";
+import { getDeliberationTargets } from "@/lib/deliberation-targets";
+import { getTranslations } from "next-intl/server";
 import {
-  createSpendAction,
-  submitSpendAction,
-  markSpendPaidAction,
-  linkSpendLedgerAccountAction,
   archiveLedgerAccountAction,
   archiveSpendAction,
-  uploadSpendStatementAction,
-  updateSpendReconciliationAction,
   createLedgerAccountAction,
-  updateLedgerAccountAction,
-  addSpendCommentAction,
-  resolveSpendObjectionAction,
+  createSpendAction,
   escalateSpendToProposalAction,
+  linkSpendLedgerAccountAction,
+  markSpendPaidAction,
   postSpendDeliberationAction,
   resolveSpendDeliberationAction,
+  submitSpendAction,
+  updateLedgerAccountAction,
+  updateSpendReconciliationAction,
+  uploadSpendStatementAction,
 } from "../actions";
-import Link from "next/link";
-import { prisma } from "@corgtex/shared";
-import { DeliberationThread } from "@/lib/components/DeliberationThread";
-import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
-import { listDeliberationEntries } from "@corgtex/domain";
-import { getTranslations } from "next-intl/server";
 
 export const dynamic = "force-dynamic";
 
+const spendFilters = ["ALL", "DRAFT", "OPEN", "BLOCKED", "RESOLVED", "PAID", "RECONCILED"] as const;
+type SpendFilter = (typeof spendFilters)[number];
 
 function fmt(cents: number, currency: string = "USD") {
   const abs = Math.abs(cents / 100);
   const sign = cents < 0 ? "-" : "";
   return `${sign}$${abs.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${currency}`;
+}
+
+function normalizeFilter(value: string | string[] | undefined): SpendFilter {
+  if (typeof value !== "string") return "ALL";
+  return spendFilters.includes(value as SpendFilter) ? (value as SpendFilter) : "ALL";
+}
+
+function outcomeLabel(outcome?: string | null) {
+  return outcome ? outcome.replace("_", " ") : null;
 }
 
 export default async function FinancePage({
@@ -45,44 +55,75 @@ export default async function FinancePage({
   const t = await getTranslations("finance");
   const resolvedSearch = searchParams ? await searchParams : {};
   const activeTab = typeof resolvedSearch.tab === "string" ? resolvedSearch.tab : "spends";
-  const statusFilter = typeof resolvedSearch.status === "string" ? resolvedSearch.status : "ALL";
+  const statusFilter = normalizeFilter(resolvedSearch.status);
+  const activeDiscussionId = typeof resolvedSearch.discuss === "string" ? resolvedSearch.discuss : null;
 
-  const [spendsResult, ledgerAccountsResult, currentWorkspace] = await Promise.all([
+  const [spendsResult, ledgerAccountsResult, currentWorkspace, deliberationTargets] = await Promise.all([
     listSpends(workspaceId, { take: 200 }),
     listLedgerAccounts(workspaceId, { take: 50 }),
     prisma.workspace.findUnique({ where: { id: workspaceId }, select: { slug: true } }),
+    getDeliberationTargets({ actor, workspaceId }),
   ]);
   const isDemo = currentWorkspace?.slug === "jnj-demo";
   const spends = spendsResult.items;
   const ledgerAccounts = ledgerAccountsResult.items;
 
-  const spendsToFetch = spends.filter(s => s.status === "SUBMITTED" || s.status === "OBJECTED");
-  const entriesPromises = spendsToFetch.map(async (s) => {
-    const entries = await listDeliberationEntries(actor, { workspaceId, parentType: "SPEND", parentId: s.id });
-    return [s.id, entries] as const;
-  });
-  const entriesMap = new Map(await Promise.all(entriesPromises));
+  const entriesMap = new Map(
+    await Promise.all(
+      spends.map(async (spend) => {
+        const entries = await listDeliberationEntries(actor, {
+          workspaceId,
+          parentType: "SPEND",
+          parentId: spend.id,
+        });
+        return [spend.id, entries] as const;
+      }),
+    ),
+  );
 
-  // Totals
-  const totalSubmitted = spends.filter((s) => s.status === "SUBMITTED").reduce((a, s) => a + s.amountCents, 0);
-  const totalApproved = spends.filter((s) => s.status === "APPROVED").reduce((a, s) => a + s.amountCents, 0);
-  const totalPaid = spends.filter((s) => s.status === "PAID").reduce((a, s) => a + s.amountCents, 0);
-  const totalAll = spends.reduce((a, s) => a + s.amountCents, 0);
+  const unresolvedObjectionCount = (spendId: string) => (
+    (entriesMap.get(spendId) || []).filter((entry) => entry.entryType === "OBJECTION" && !entry.resolvedAt).length
+  );
+  const isBlocked = (spendId: string) => unresolvedObjectionCount(spendId) > 0;
+  const isPaid = (spend: { spentAt?: Date | null }) => Boolean(spend.spentAt);
 
-  // Status counts
-  const statusCounts = {
+  const totalOpen = spends.filter((spend) => spend.status === "OPEN").reduce((sum, spend) => sum + spend.amountCents, 0);
+  const totalApproved = spends
+    .filter((spend) => spend.status === "RESOLVED" && spend.resolutionOutcome === "APPROVED")
+    .reduce((sum, spend) => sum + spend.amountCents, 0);
+  const totalPaid = spends.filter(isPaid).reduce((sum, spend) => sum + spend.amountCents, 0);
+  const totalAll = spends.reduce((sum, spend) => sum + spend.amountCents, 0);
+
+  const statusCounts: Record<SpendFilter, number> = {
     ALL: spends.length,
-    DRAFT: spends.filter((s) => s.status === "DRAFT").length,
-    SUBMITTED: spends.filter((s) => s.status === "SUBMITTED").length,
-    OBJECTED: spends.filter((s) => s.status === "OBJECTED").length,
-    APPROVED: spends.filter((s) => s.status === "APPROVED").length,
-    PAID: spends.filter((s) => s.status === "PAID").length,
-    REJECTED: spends.filter((s) => s.status === "REJECTED").length,
+    DRAFT: spends.filter((spend) => spend.status === "DRAFT").length,
+    OPEN: spends.filter((spend) => spend.status === "OPEN").length,
+    BLOCKED: spends.filter((spend) => isBlocked(spend.id)).length,
+    RESOLVED: spends.filter((spend) => spend.status === "RESOLVED").length,
+    PAID: spends.filter(isPaid).length,
+    RECONCILED: spends.filter((spend) => spend.reconciliationStatus === "RECONCILED").length,
   };
 
-  const filteredSpends = statusFilter === "ALL"
-    ? spends
-    : spends.filter((s) => s.status === statusFilter);
+  const filteredSpends = spends.filter((spend) => {
+    if (statusFilter === "ALL") return true;
+    if (statusFilter === "BLOCKED") return isBlocked(spend.id);
+    if (statusFilter === "PAID") return isPaid(spend);
+    if (statusFilter === "RECONCILED") return spend.reconciliationStatus === "RECONCILED";
+    return spend.status === statusFilter;
+  });
+
+  const filterLabel = (filter: SpendFilter) => {
+    const labels: Record<SpendFilter, string> = {
+      ALL: t("filterAll"),
+      DRAFT: t("statusDraft"),
+      OPEN: t("statusOpen"),
+      BLOCKED: t("statusBlocked"),
+      RESOLVED: t("statusResolved"),
+      PAID: t("statusPaid"),
+      RECONCILED: t("statusReconciled"),
+    };
+    return labels[filter];
+  };
 
   const tabs = [
     { key: "spends", label: t("tabSpends") },
@@ -98,11 +139,10 @@ export default async function FinancePage({
         </div>
       </header>
 
-      {/* Summary Bar */}
       <div className="nr-stat-bar">
         <span className="nr-stat">{t("statTotal", { amount: fmt(totalAll) })}</span>
         <span className="nr-stat-sep">·</span>
-        <span className="nr-stat" style={{ color: "var(--warning)" }}>{t("statPending", { amount: fmt(totalSubmitted) })}</span>
+        <span className="nr-stat" style={{ color: "var(--warning)" }}>{t("statOpen", { amount: fmt(totalOpen) })}</span>
         <span className="nr-stat-sep">·</span>
         <span className="nr-stat">{t("statApproved", { amount: fmt(totalApproved) })}</span>
         <span className="nr-stat-sep">·</span>
@@ -111,7 +151,6 @@ export default async function FinancePage({
         <span className="nr-stat">{t("statAccounts", { count: ledgerAccounts.length })}</span>
       </div>
 
-      {/* Tab Bar */}
       <div className="nr-tab-bar">
         {tabs.map((tab) => (
           <Link
@@ -124,7 +163,6 @@ export default async function FinancePage({
         ))}
       </div>
 
-      {/* Account Chips */}
       {ledgerAccounts.length > 0 && (
         <div className="fin-account-chips">
           {ledgerAccounts.map((account) => (
@@ -137,7 +175,6 @@ export default async function FinancePage({
         </div>
       )}
 
-      {/* Spend Requests Tab */}
       {activeTab === "spends" && (
         <section style={{ marginTop: 20 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" }}>
@@ -185,15 +222,15 @@ export default async function FinancePage({
               </details>
             )}
           </div>
-          {/* Status filter */}
+
           <div className="nr-filter-bar">
-            {(["ALL", "DRAFT", "SUBMITTED", "OBJECTED", "APPROVED", "PAID", "REJECTED"] as const).map((s) => (
+            {spendFilters.map((filter) => (
               <Link
-                key={s}
-                href={`?tab=spends&status=${s}`}
-                className={`nr-filter-item ${statusFilter === s ? "nr-filter-active" : ""}`}
+                key={filter}
+                href={`?tab=spends&status=${filter}`}
+                className={`nr-filter-item ${statusFilter === filter ? "nr-filter-active" : ""}`}
               >
-                {s === "ALL" ? t("filterAll") : s.charAt(0) + s.slice(1).toLowerCase()} ({statusCounts[s]})
+                {filterLabel(filter)} ({statusCounts[filter]})
               </Link>
             ))}
           </div>
@@ -212,143 +249,186 @@ export default async function FinancePage({
                     <th style={{ textAlign: "right" }}>{t("colAmount")}</th>
                     <th>{t("colStatus")}</th>
                     <th>{t("colAccount")}</th>
-                    <th>{t("statusReconciled")}</th>
+                    <th>{t("colReconciled")}</th>
                     {!isDemo && <th>{t("colActions")}</th>}
                   </tr>
                 </thead>
                 <tbody>
-                  {filteredSpends.map((spend) => (
-                    <tr key={spend.id}>
-                      <td className="fin-td-date">
-                        {new Date(spend.createdAt).toLocaleDateString(undefined, { month: "short", day: "numeric" })}
-                      </td>
-                      <td>{spend.category}</td>
-                      <td className="fin-td-desc">{spend.description}</td>
-                      <td>{spend.vendor || "—"}</td>
-                      <td style={{ textAlign: "right", fontWeight: 600, fontFamily: "'IBM Plex Mono', monospace" }}>
-                        {fmt(spend.amountCents, spend.currency)}
-                      </td>
-                      <td>
-                        <span className={`fin-status-badge fin-status-${spend.status.toLowerCase()}`}>
-                          {spend.status}
-                        </span>
-                      </td>
-                      <td className="fin-td-account">
-                        {spend.ledgerAccount ? spend.ledgerAccount.name : "—"}
-                      </td>
-                      <td>
-                        <span className={`fin-recon-badge fin-recon-${spend.reconciliationStatus.toLowerCase()}`}>
-                          {spend.reconciliationStatus === "PENDING" ? "—" : spend.reconciliationStatus}
-                        </span>
-                      </td>
-                      {!isDemo && (
-                        <td className="fin-td-actions">
-                          {spend.status === "DRAFT" && (
-                            <form action={submitSpendAction} style={{ display: "inline" }}>
-                              <input type="hidden" name="workspaceId" value={workspaceId} />
-                              <input type="hidden" name="spendId" value={spend.id} />
-                              <button type="submit" className="fin-action-btn">{t("btnSubmit")}</button>
-                            </form>
-                          )}
-                          <details style={{ display: "inline-block" }}>
-                            <summary className="fin-action-btn" style={{ cursor: "pointer" }}>⋯</summary>
-                            <div className="fin-dropdown" style={{ width: 320, padding: "16px" }}>
-                              <DeliberationThread 
-                                entries={(entriesMap.get(spend.id) || []).map((e: any) => ({
-                                  ...e,
-                                  authorName: e.author?.displayName || e.author?.email || t("unknownAuthor"),
-                                  authorInitials: (e.author?.displayName || e.author?.email || "?").substring(0, 2).toUpperCase()
-                                }))} 
-                                canResolve={true}
-                                resolveAction={resolveSpendDeliberationAction} 
-                                hiddenFields={{ workspaceId, parentId: spend.id }}
-                              />
+                  {filteredSpends.map((spend) => {
+                    const entries = entriesMap.get(spend.id) || [];
+                    const objectionCount = unresolvedObjectionCount(spend.id);
+                    const canPay = !spend.spentAt && (
+                      (spend.status === "OPEN" && objectionCount === 0) ||
+                      (spend.status === "RESOLVED" && spend.resolutionOutcome === "APPROVED")
+                    );
+                    const discussionHref = activeDiscussionId === spend.id
+                      ? `?tab=spends&status=${statusFilter}`
+                      : `?tab=spends&status=${statusFilter}&discuss=${spend.id}`;
 
-                              {(spend.status === "SUBMITTED" || spend.status === "OBJECTED") && (
-                                <div style={{ marginTop: 16, paddingBottom: 16, borderBottom: "1px solid var(--line)" }}>
+                    return (
+                      <Fragment key={spend.id}>
+                        <tr>
+                          <td className="fin-td-date">
+                            {new Date(spend.createdAt).toLocaleDateString(undefined, { month: "short", day: "numeric" })}
+                          </td>
+                          <td>{spend.category}</td>
+                          <td className="fin-td-desc">{spend.description}</td>
+                          <td>{spend.vendor || "—"}</td>
+                          <td style={{ textAlign: "right", fontWeight: 600, fontFamily: "'IBM Plex Mono', monospace" }}>
+                            {fmt(spend.amountCents, spend.currency)}
+                          </td>
+                          <td>
+                            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+                              <span className={`fin-status-badge fin-status-${spend.status.toLowerCase()}`}>
+                                {filterLabel(spend.status as SpendFilter)}
+                              </span>
+                              {spend.resolutionOutcome && (
+                                <span className={`tag ${spend.resolutionOutcome === "REJECTED" ? "danger" : "success"}`}>
+                                  {outcomeLabel(spend.resolutionOutcome)}
+                                </span>
+                              )}
+                              {objectionCount > 0 && (
+                                <span className="tag danger">{t("blockedCount", { count: objectionCount })}</span>
+                              )}
+                              {spend.spentAt && <span className="tag success">{t("statusPaid")}</span>}
+                            </div>
+                          </td>
+                          <td className="fin-td-account">
+                            {spend.ledgerAccount ? spend.ledgerAccount.name : "—"}
+                          </td>
+                          <td>
+                            <span className={`fin-recon-badge fin-recon-${spend.reconciliationStatus.toLowerCase()}`}>
+                              {spend.reconciliationStatus === "PENDING" ? "—" : spend.reconciliationStatus.replace("_", " ")}
+                            </span>
+                          </td>
+                          {!isDemo && (
+                            <td className="fin-td-actions">
+                              {spend.status === "DRAFT" && (
+                                <form action={submitSpendAction} style={{ display: "inline" }}>
+                                  <input type="hidden" name="workspaceId" value={workspaceId} />
+                                  <input type="hidden" name="spendId" value={spend.id} />
+                                  <button type="submit" className="fin-action-btn">{t("btnOpen")}</button>
+                                </form>
+                              )}
+                              <Link href={discussionHref} className="fin-action-btn">
+                                {activeDiscussionId === spend.id ? t("btnCloseDiscussion") : t("btnDiscuss")}
+                              </Link>
+                              <details style={{ display: "inline-block" }}>
+                                <summary className="fin-action-btn" style={{ cursor: "pointer" }}>{t("btnEdit")}</summary>
+                                <div className="fin-dropdown" style={{ width: 320, padding: "16px" }}>
+                                  {canPay && (
+                                    <form action={markSpendPaidAction} className="fin-dropdown-form">
+                                      <input type="hidden" name="workspaceId" value={workspaceId} />
+                                      <input type="hidden" name="spendId" value={spend.id} />
+                                      <input
+                                        name="receiptUrl"
+                                        placeholder={t("placeholderReceiptUrl")}
+                                        defaultValue={spend.receiptUrl ?? ""}
+                                        required
+                                      />
+                                      <button type="submit" className="fin-action-btn fin-action-pay">{t("btnMarkPaid")}</button>
+                                    </form>
+                                  )}
+                                  <form action={linkSpendLedgerAccountAction} className="fin-dropdown-form">
+                                    <input type="hidden" name="workspaceId" value={workspaceId} />
+                                    <input type="hidden" name="spendId" value={spend.id} />
+                                    <select name="ledgerAccountId" defaultValue={spend.ledgerAccountId ?? ""}>
+                                      <option value="">{t("unlinked")}</option>
+                                      {ledgerAccounts.map((account) => (
+                                        <option key={account.id} value={account.id}>{account.name}</option>
+                                      ))}
+                                    </select>
+                                    <button type="submit" className="fin-action-btn">{t("btnLink")}</button>
+                                  </form>
+                                  {spend.spentAt && (
+                                    <>
+                                      <form action={uploadSpendStatementAction} className="fin-dropdown-form">
+                                        <input type="hidden" name="workspaceId" value={workspaceId} />
+                                        <input type="hidden" name="spendId" value={spend.id} />
+                                        <input
+                                          name="storageKey"
+                                          placeholder={t("placeholderStorageKey")}
+                                          defaultValue={spend.statementStorageKey ?? ""}
+                                          required
+                                        />
+                                        <input name="fileName" placeholder={t("placeholderFileName")} defaultValue={spend.statementFileName ?? ""} />
+                                        <input name="mimeType" placeholder={t("placeholderMimeType")} defaultValue={spend.statementMimeType ?? ""} />
+                                        <button type="submit" className="fin-action-btn">{t("btnAttachStatement")}</button>
+                                      </form>
+                                      <form action={updateSpendReconciliationAction} className="fin-dropdown-form">
+                                        <input type="hidden" name="workspaceId" value={workspaceId} />
+                                        <input type="hidden" name="spendId" value={spend.id} />
+                                        <select name="status" defaultValue={spend.reconciliationStatus}>
+                                          <option value="PENDING">{t("statusPending")}</option>
+                                          <option value="STATEMENT_ATTACHED">{t("statusStatement")}</option>
+                                          <option value="RECONCILED">{t("statusReconciled")}</option>
+                                        </select>
+                                        <input name="note" placeholder={t("placeholderNote")} defaultValue={spend.reconciliationNote ?? ""} />
+                                        <button type="submit" className="fin-action-btn">{t("btnSave")}</button>
+                                      </form>
+                                    </>
+                                  )}
+                                  <form action={archiveSpendAction} className="fin-dropdown-form">
+                                    <input type="hidden" name="workspaceId" value={workspaceId} />
+                                    <input type="hidden" name="spendId" value={spend.id} />
+                                    <button type="submit" className="fin-action-btn" style={{ color: "#842029" }}>{t("btnArchiveSpend")}</button>
+                                  </form>
+                                </div>
+                              </details>
+                            </td>
+                          )}
+                        </tr>
+                        {activeDiscussionId === spend.id && (
+                          <tr>
+                            <td colSpan={isDemo ? 8 : 9} className="fin-discussion-cell">
+                              <div className="fin-discussion-panel">
+                                <DeliberationThread
+                                  entries={entries.map((entry) => ({
+                                    id: entry.id,
+                                    entryType: entry.entryType,
+                                    authorName: entry.author?.displayName || entry.author?.email || t("unknownAuthor"),
+                                    authorInitials: (entry.author?.displayName || entry.author?.email || "?").substring(0, 2).toUpperCase(),
+                                    bodyMd: entry.bodyMd,
+                                    createdAt: entry.createdAt,
+                                    resolvedAt: entry.resolvedAt,
+                                    resolvedNote: entry.resolvedNote,
+                                    targetLabel: entry.targetCircle
+                                      ? `Circle: ${entry.targetCircle.name}`
+                                      : entry.targetMember
+                                        ? `Person: ${entry.targetMember.user.displayName || entry.targetMember.user.email}`
+                                        : null,
+                                  }))}
+                                  canResolve
+                                  resolveAction={resolveSpendDeliberationAction}
+                                  hiddenFields={{ workspaceId, parentId: spend.id }}
+                                />
+                                {spend.status === "OPEN" && (
                                   <DeliberationComposer
                                     postAction={postSpendDeliberationAction}
                                     hiddenFields={{ workspaceId, parentId: spend.id }}
+                                    title={t("discussionTitle")}
+                                    targetOptions={deliberationTargets.options}
+                                    defaultTargetValue={deliberationTargets.defaultValue}
                                     entryTypes={[
-                                      { value: "REACTION", label: t("typeComment"), variant: "secondary" }, 
-                                      { value: "CONCERN", label: t("typeConcern"), variant: "warning" }, 
-                                      { value: "OBJECTION", label: t("typeObjection"), variant: "danger" }
+                                      { value: "REACTION", label: t("typeReaction"), variant: "secondary" },
+                                      { value: "OBJECTION", label: t("typeObjection"), variant: "danger" },
                                     ]}
                                   />
-                                </div>
-                              )}
-
-                              {spend.status === "OBJECTED" && (
-                                <form action={escalateSpendToProposalAction} className="fin-dropdown-form" style={{ marginTop: "16px" }}>
-                                  <input type="hidden" name="workspaceId" value={workspaceId} />
-                                  <input type="hidden" name="spendId" value={spend.id} />
-                                  <button type="submit" className="fin-action-btn" style={{ color: "var(--warning)" }}>{t("btnEscalate")}</button>
-                                </form>
-                              )}
-
-                              {(spend.status === "APPROVED" || (spend.status === "SUBMITTED" && (!spend.comments || spend.comments.filter((c: any) => c.isObjection && !c.resolvedAt).length === 0))) && (
-                                <form action={markSpendPaidAction} className="fin-dropdown-form" style={{ marginTop: "16px" }}>
-                                  <input type="hidden" name="workspaceId" value={workspaceId} />
-                                  <input type="hidden" name="spendId" value={spend.id} />
-                                  <input
-                                    name="receiptUrl"
-                                    placeholder={t("placeholderReceiptUrl")}
-                                    defaultValue={spend.receiptUrl ?? ""}
-                                    required
-                                  />
-                                  <button type="submit" className="fin-action-btn fin-action-pay">{t("btnMarkPaid")}</button>
-                                </form>
-                              )}
-                              <form action={linkSpendLedgerAccountAction} className="fin-dropdown-form">
-                                <input type="hidden" name="workspaceId" value={workspaceId} />
-                                <input type="hidden" name="spendId" value={spend.id} />
-                                <select name="ledgerAccountId" defaultValue={spend.ledgerAccountId ?? ""}>
-                                  <option value="">{t("unlinked")}</option>
-                                  {ledgerAccounts.map((a) => (
-                                    <option key={a.id} value={a.id}>{a.name}</option>
-                                  ))}
-                                </select>
-                                <button type="submit" className="fin-action-btn">{t("btnLink")}</button>
-                              </form>
-                              {spend.status === "PAID" && (
-                                <>
-                                  <form action={uploadSpendStatementAction} className="fin-dropdown-form">
+                                )}
+                                {objectionCount > 0 && (
+                                  <form action={escalateSpendToProposalAction} className="fin-dropdown-form" style={{ marginTop: 16, maxWidth: 260 }}>
                                     <input type="hidden" name="workspaceId" value={workspaceId} />
                                     <input type="hidden" name="spendId" value={spend.id} />
-                                    <input
-                                      name="storageKey"
-                                      placeholder={t("placeholderStorageKey")}
-                                      defaultValue={spend.statementStorageKey ?? ""}
-                                      required
-                                    />
-                                    <input name="fileName" placeholder={t("placeholderFileName")} defaultValue={spend.statementFileName ?? ""} />
-                                    <input name="mimeType" placeholder={t("placeholderMimeType")} defaultValue={spend.statementMimeType ?? ""} />
-                                    <button type="submit" className="fin-action-btn">{t("btnAttachStatement")}</button>
+                                    <button type="submit" className="fin-action-btn" style={{ color: "var(--warning)" }}>{t("btnEscalate")}</button>
                                   </form>
-                                  <form action={updateSpendReconciliationAction} className="fin-dropdown-form">
-                                    <input type="hidden" name="workspaceId" value={workspaceId} />
-                                    <input type="hidden" name="spendId" value={spend.id} />
-                                    <select name="status" defaultValue={spend.reconciliationStatus}>
-                                      <option value="PENDING">{t("statusPending")}</option>
-                                      <option value="STATEMENT_ATTACHED">{t("statusStatement")}</option>
-                                      <option value="RECONCILED">{t("statusReconciled")}</option>
-                                    </select>
-                                    <input name="note" placeholder={t("placeholderNote")} defaultValue={spend.reconciliationNote ?? ""} />
-                                    <button type="submit" className="fin-action-btn">{t("btnSave")}</button>
-                                  </form>
-                                </>
-                              )}
-                              <form action={archiveSpendAction} className="fin-dropdown-form">
-                                <input type="hidden" name="workspaceId" value={workspaceId} />
-                                <input type="hidden" name="spendId" value={spend.id} />
-                                <button type="submit" className="fin-action-btn" style={{ color: "#842029" }}>Archive spend</button>
-                              </form>
-                            </div>
-                          </details>
-                        </td>
-                      )}
-                    </tr>
-                  ))}
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                        )}
+                      </Fragment>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -356,7 +436,6 @@ export default async function FinancePage({
         </section>
       )}
 
-      {/* Ledger Accounts Tab */}
       {activeTab === "accounts" && (
         <section style={{ marginTop: 20 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" }}>
@@ -428,7 +507,7 @@ export default async function FinancePage({
                             <form action={archiveLedgerAccountAction} className="fin-dropdown-form">
                               <input type="hidden" name="workspaceId" value={workspaceId} />
                               <input type="hidden" name="accountId" value={account.id} />
-                              <button type="submit" className="fin-action-btn" style={{ color: "#842029" }}>Archive account</button>
+                              <button type="submit" className="fin-action-btn" style={{ color: "#842029" }}>{t("btnArchiveAccount")}</button>
                             </form>
                           </div>
                         </details>
@@ -441,7 +520,6 @@ export default async function FinancePage({
           </div>
         </section>
       )}
-
     </>
   );
 }

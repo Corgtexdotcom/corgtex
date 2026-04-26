@@ -26,12 +26,13 @@ export const updateTensionTool: ModelTool = {
   type: "function",
   function: {
     name: "update_tension",
-    description: "Update an existing tension (e.g. change status to COMPLETED, change assignee, or update body).",
+    description: "Update an existing tension (e.g. resolve it with a note, change assignee, or update body).",
     parameters: {
       type: "object",
       properties: {
         tensionId: { type: "string", description: "The UUID of the tension to update" },
-        status: { type: "string", description: "OPEN, COMPLETED, or CANCELLED" },
+        status: { type: "string", description: "DRAFT, OPEN, or RESOLVED" },
+        resolvedVia: { type: "string", description: "Required when setting status to RESOLVED" },
         title: { type: "string" },
         bodyMd: { type: "string" },
         assigneeMemberId: { type: "string", description: "Set or clear the assigned member UUID" },
@@ -69,7 +70,7 @@ export const updateActionTool: ModelTool = {
       type: "object",
       properties: {
         actionId: { type: "string" },
-        status: { type: "string", description: "OPEN, COMPLETED, or CANCELLED" },
+        status: { type: "string", description: "DRAFT, OPEN, IN_PROGRESS, or COMPLETED" },
         title: { type: "string" },
         bodyMd: { type: "string" },
         assigneeMemberId: { type: "string" },
@@ -137,6 +138,7 @@ export async function updateTensionAction(actor: AppActor, ctx: any, args: any) 
     title: args.title,
     bodyMd: args.bodyMd,
     assigneeMemberId: args.assigneeMemberId,
+    resolvedVia: args.resolvedVia,
   });
 
   await appendAuditMeta("Tension", result.id, "tension.updated", {

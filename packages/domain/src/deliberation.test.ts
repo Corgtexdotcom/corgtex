@@ -7,6 +7,7 @@ describe("deliberation", () => {
   let workspaceId: string;
   let adminActor: AppActor;
   let memberActor: AppActor;
+  let memberId: string;
   let proposalId: string;
 
   beforeEach(async () => {
@@ -26,9 +27,10 @@ describe("deliberation", () => {
     const memberUser = await prisma.user.create({
       data: { email: `member-${Date.now()}-${Math.random()}@test.com`, passwordHash: "x", displayName: "Member" }
     });
-    await prisma.member.create({
+    const member = await prisma.member.create({
       data: { workspaceId, userId: memberUser.id, role: "CONTRIBUTOR" }
     });
+    memberId = member.id;
     memberActor = { kind: "user", user: memberUser };
 
     const proposal = await prisma.proposal.create({
@@ -47,11 +49,11 @@ describe("deliberation", () => {
       workspaceId,
       parentType: "PROPOSAL",
       parentId: proposalId,
-      entryType: "QUESTION",
+      entryType: "REACTION",
       bodyMd: "What is this?"
     });
 
-    expect(entry.entryType).toBe("QUESTION");
+    expect(entry.entryType).toBe("REACTION");
     expect(entry.bodyMd).toBe("What is this?");
 
     const list = await listDeliberationEntries(adminActor, {
@@ -71,43 +73,46 @@ describe("deliberation", () => {
       parentId: proposalId,
       entryType: "OBJECTION",
       bodyMd: ""
-    })).rejects.toThrow(/Objections require a non-empty bodyMd/);
+    })).rejects.toThrow(/Deliberation entries require a non-empty bodyMd/);
   });
 
-  it("deduplicates SUPPORT entries", async () => {
+  it("allows multiple reaction entries", async () => {
     const entry1 = await postDeliberationEntry(memberActor, {
       workspaceId,
       parentType: "PROPOSAL",
       parentId: proposalId,
-      entryType: "SUPPORT"
+      entryType: "REACTION",
+      bodyMd: "First reaction"
     });
 
     const entry2 = await postDeliberationEntry(memberActor, {
       workspaceId,
       parentType: "PROPOSAL",
       parentId: proposalId,
-      entryType: "SUPPORT"
+      entryType: "REACTION",
+      bodyMd: "Second reaction"
     });
 
-    expect(entry1.id).toBe(entry2.id);
+    expect(entry1.id).not.toBe(entry2.id);
 
     const list = await listDeliberationEntries(adminActor, {
       workspaceId,
       parentType: "PROPOSAL",
       parentId: proposalId,
     });
-    expect(list.length).toBe(1);
+    expect(list.length).toBe(2);
   });
 
-  it("accepts targetMemberId for ADVICE_REQUEST", async () => {
+  it("accepts targetMemberId for a reaction", async () => {
     const entry = await postDeliberationEntry(memberActor, {
       workspaceId,
       parentType: "PROPOSAL",
       parentId: proposalId,
-      entryType: "ADVICE_REQUEST",
-      targetMemberId: "some-member-id"
+      entryType: "REACTION",
+      bodyMd: "Please review this.",
+      targetMemberId: memberId
     });
-    expect(entry.targetMemberId).toBe("some-member-id");
+    expect(entry.targetMemberId).toBe(memberId);
   });
 
   it("resolves an entry", async () => {
@@ -115,7 +120,7 @@ describe("deliberation", () => {
       workspaceId,
       parentType: "PROPOSAL",
       parentId: proposalId,
-      entryType: "CONCERN",
+      entryType: "OBJECTION",
       bodyMd: "I am concerned."
     });
 
@@ -134,7 +139,8 @@ describe("deliberation", () => {
       workspaceId,
       parentType: "PROPOSAL",
       parentId: proposalId,
-      entryType: "QUESTION",
+      entryType: "REACTION",
+      bodyMd: "Needs a change."
     });
 
     await expect(resolveDeliberationEntry(memberActor, {

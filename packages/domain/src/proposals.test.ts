@@ -3,6 +3,9 @@ import { autoApproveProposals } from "./proposals";
 import { prisma } from "@corgtex/shared";
 
 vi.mock("@corgtex/shared", () => ({
+  logger: {
+    error: vi.fn(),
+  },
   prisma: {
     proposal: {
       findMany: vi.fn(),
@@ -15,6 +18,12 @@ vi.mock("@corgtex/shared", () => ({
     },
     event: {
       createMany: vi.fn(),
+    },
+    deliberationEntry: {
+      count: vi.fn(),
+    },
+    proposalReaction: {
+      count: vi.fn(),
     },
     $transaction: vi.fn(async (cb) => cb(prisma)),
   },
@@ -32,20 +41,37 @@ describe("autoApproveProposals", () => {
     vi.mocked(prisma.proposal.findMany).mockResolvedValueOnce([
       { id: "p1", workspaceId: "ws1", autoApproveAt: new Date(Date.now() - 1000) } as any,
     ]);
-    vi.mocked(prisma.proposal.update).mockResolvedValueOnce({ id: "p1", status: "APPROVED" } as any);
+    vi.mocked(prisma.deliberationEntry.count).mockResolvedValueOnce(0 as any);
+    vi.mocked(prisma.proposalReaction.count).mockResolvedValueOnce(0 as any);
+    vi.mocked(prisma.proposal.update).mockResolvedValueOnce({ id: "p1", status: "RESOLVED", resolutionOutcome: "ADOPTED" } as any);
 
     await autoApproveProposals();
 
     expect(prisma.proposal.update).toHaveBeenCalledWith(expect.objectContaining({
       where: { id: "p1" },
-      data: expect.objectContaining({ status: "APPROVED" }),
+      data: expect.objectContaining({ status: "RESOLVED", resolutionOutcome: "ADOPTED" }),
     }));
   });
 
   it("does not approve proposals if they have unresolved objections", async () => {
-    // Return empty since the db query is supposed to filter them out
-    vi.mocked(prisma.proposal.findMany).mockResolvedValueOnce([]);
-    
+    vi.mocked(prisma.proposal.findMany).mockResolvedValueOnce([
+      { id: "p1", workspaceId: "ws1", autoApproveAt: new Date(Date.now() - 1000) } as any,
+    ]);
+    vi.mocked(prisma.deliberationEntry.count).mockResolvedValueOnce(1 as any);
+    vi.mocked(prisma.proposalReaction.count).mockResolvedValueOnce(0 as any);
+
+    await autoApproveProposals();
+
+    expect(prisma.proposal.update).not.toHaveBeenCalled();
+  });
+
+  it("does not approve proposals if they have unresolved legacy reaction objections", async () => {
+    vi.mocked(prisma.proposal.findMany).mockResolvedValueOnce([
+      { id: "p1", workspaceId: "ws1", autoApproveAt: new Date(Date.now() - 1000) } as any,
+    ]);
+    vi.mocked(prisma.deliberationEntry.count).mockResolvedValueOnce(0 as any);
+    vi.mocked(prisma.proposalReaction.count).mockResolvedValueOnce(1 as any);
+
     await autoApproveProposals();
 
     expect(prisma.proposal.update).not.toHaveBeenCalled();

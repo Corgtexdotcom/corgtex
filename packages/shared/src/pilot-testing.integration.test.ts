@@ -70,7 +70,7 @@ describe("pilot tester scripts", () => {
     });
 
     await expect(prisma.proposal.findUniqueOrThrow({ where: { id: proposal.id } }))
-      .resolves.toMatchObject({ status: "ARCHIVED", archivedAt: expect.any(Date) });
+      .resolves.toMatchObject({ status: "DRAFT", archivedAt: expect.any(Date) });
     await expect(prisma.tension.findUniqueOrThrow({ where: { id: tension.id } }))
       .resolves.toMatchObject({ archivedAt: expect.any(Date) });
 

@@ -8,7 +8,8 @@ type Params = { params: Promise<{ workspaceId: string; tensionId: string }> };
 const updateTensionSchema = z.object({
   title: z.string().trim().min(1).optional(),
   bodyMd: z.string().optional().nullable(),
-  status: z.enum(["OPEN", "IN_PROGRESS", "COMPLETED", "CANCELLED"]).optional(),
+  status: z.enum(["DRAFT", "OPEN", "RESOLVED"]).optional(),
+  resolvedVia: z.string().optional().nullable(),
   circleId: z.string().optional().nullable(),
   assigneeMemberId: z.string().optional().nullable(),
   priority: z.number().int().optional(),
@@ -25,6 +26,7 @@ export async function PATCH(request: NextRequest, { params }: Params) {
       title: body.title,
       bodyMd: body.bodyMd !== undefined ? (typeof body.bodyMd === "string" ? body.bodyMd : null) : undefined,
       status: body.status,
+      resolvedVia: body.resolvedVia !== undefined ? body.resolvedVia : undefined,
       circleId: body.circleId !== undefined ? body.circleId : undefined,
       assigneeMemberId: body.assigneeMemberId !== undefined ? body.assigneeMemberId : undefined,
       priority: body.priority,
