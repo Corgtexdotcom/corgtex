@@ -25,7 +25,9 @@ export async function runFinanceReconciliationPrepAgent(params: {
       const spends = await prisma.spendRequest.findMany({
         where: {
           workspaceId: params.workspaceId,
-          status: "PAID",
+          status: "RESOLVED",
+          resolutionOutcome: "APPROVED",
+          spentAt: { not: null },
           reconciliationStatus: {
             not: "RECONCILED",
           },
@@ -95,4 +97,3 @@ export async function runFinanceReconciliationPrepAgent(params: {
     },
   });
 }
-

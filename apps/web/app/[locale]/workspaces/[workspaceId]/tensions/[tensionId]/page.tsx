@@ -2,6 +2,7 @@ import { getTension, listDeliberationEntries } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { DeliberationThread } from "@/lib/components/DeliberationThread";
 import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
+import { getDeliberationTargets } from "@/lib/deliberation-targets";
 import { postTensionDeliberationAction, resolveTensionDeliberationAction } from "../actions";
 import { getTranslations } from "next-intl/server";
 
@@ -17,17 +18,23 @@ export default async function TensionDetailPage({
   const t = await getTranslations("tensions");
   const tension = await getTension(actor, { workspaceId, tensionId });
   const entries = await listDeliberationEntries(actor, { workspaceId, parentType: "TENSION", parentId: tensionId });
+  const deliberationTargets = await getDeliberationTargets({ actor, workspaceId, parentCircleId: tension.circleId });
   const mappedEntries = entries.map((e: any) => ({
     ...e,
     authorName: e.author?.displayName || e.author?.email || t("authorUnknown"),
-    authorInitials: (e.author?.displayName || e.author?.email || t("authorInitialsUnknown")).substring(0, 2).toUpperCase()
+    authorInitials: (e.author?.displayName || e.author?.email || t("authorInitialsUnknown")).substring(0, 2).toUpperCase(),
+    targetLabel: e.targetCircle
+      ? `Circle: ${e.targetCircle.name}`
+      : e.targetMember
+        ? `Person: ${e.targetMember.user.displayName || e.targetMember.user.email}`
+        : null,
   }));
 
   const statusLabel = (status: string) => {
     const labels: Record<string, string> = {
+      DRAFT: t("statusDraft"),
       OPEN: t("statusOpen"),
-      IN_PROGRESS: t("statusInProgress"),
-      COMPLETED: t("statusCompleted"),
+      RESOLVED: t("statusResolved"),
     };
     return labels[status] ?? status;
   };
@@ -47,7 +54,7 @@ export default async function TensionDetailPage({
           {tension.title}
         </h1>
         <div className="nr-masthead-meta" style={{ marginTop: 12 }}>
-          <span className={`tag ${tension.status === "OPEN" ? "warning" : tension.status === "IN_PROGRESS" ? "info" : "success"}`}>
+          <span className={`tag ${tension.status === "DRAFT" ? "info" : tension.status === "OPEN" ? "warning" : "success"}`}>
             {statusLabel(tension.status)}
           </span>
           <span>{t("detailAuthorMeta", { author: tension.author.displayName || tension.author.email || t("authorUnknown") })}</span>
@@ -70,18 +77,20 @@ export default async function TensionDetailPage({
       <section className="ws-section" style={{ marginBottom: 48 }}>
         <h2 className="nr-section-header">{t("sectionDiscussion")}</h2>
         <DeliberationThread entries={mappedEntries} canResolve={true} resolveAction={resolveTensionDeliberationAction} hiddenFields={{ workspaceId, parentId: tensionId }} />
+        {tension.status === "OPEN" && (
         <div style={{ marginTop: 24 }}>
           <DeliberationComposer
             postAction={postTensionDeliberationAction}
             hiddenFields={{ workspaceId, parentId: tensionId }}
+            targetOptions={deliberationTargets.options}
+            defaultTargetValue={deliberationTargets.defaultValue}
             entryTypes={[
-              { value: "SUPPORT", label: t("entrySupport"), variant: "success" },
-              { value: "QUESTION", label: t("entryQuestion"), variant: "info" },
-              { value: "CONCERN", label: t("entryConcern"), variant: "warning" },
-              { value: "REACTION", label: t("entryReaction"), variant: "secondary" }
+              { value: "REACTION", label: t("entryReaction"), variant: "secondary" },
+              { value: "OBJECTION", label: t("entryObjection"), variant: "danger" },
             ]}
           />
         </div>
+        )}
       </section>
     </>
   );

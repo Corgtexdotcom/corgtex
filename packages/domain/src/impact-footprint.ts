@@ -42,7 +42,7 @@ export async function calculateImpactFootprint(workspaceId: string, memberId: st
       where: {
         workspaceId,
         assigneeMemberId: memberId,
-        status: "COMPLETED",
+        status: "RESOLVED",
         updatedAt: { gte: periodStart, lte: periodEnd },
       },
     }),

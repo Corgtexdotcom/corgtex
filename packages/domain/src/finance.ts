@@ -7,6 +7,8 @@ import { getApprovalPolicy } from "./approvals";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { invariant } from "./errors";
 
+const LEGACY_SPEND_COMMENT_ENTRY_ID_PREFIX = "legacy-spend-comment-";
+
 function requireFinanceAccess(actor: AppActor, workspaceId: string) {
   return requireWorkspaceMembership({
     actor,
@@ -46,6 +48,7 @@ async function findSpendForWorkspace(
             select: {
               id: true,
               status: true,
+              resolutionOutcome: true,
             },
           },
         },
@@ -132,6 +135,50 @@ async function ensureSpendLedgerEntry(tx: Prisma.TransactionClient, spend: {
   });
 
   return entry;
+}
+
+async function countOpenSpendObjections(
+  tx: Prisma.TransactionClient,
+  workspaceId: string,
+  spendId: string,
+) {
+  const [deliberationObjections, legacyCommentObjections] = await Promise.all([
+    tx.deliberationEntry.count({
+      where: {
+        workspaceId,
+        parentType: "SPEND",
+        parentId: spendId,
+        entryType: "OBJECTION",
+        resolvedAt: null,
+      },
+    }),
+    tx.spendComment.findMany({
+      where: {
+        spendId,
+        isObjection: true,
+        resolvedAt: null,
+      },
+      select: { id: true },
+    }),
+  ]);
+
+  if (legacyCommentObjections.length === 0) {
+    return deliberationObjections;
+  }
+
+  const representedLegacyCommentCount = await tx.deliberationEntry.count({
+    where: {
+      id: {
+        in: legacyCommentObjections.map(({ id }) => `${LEGACY_SPEND_COMMENT_ENTRY_ID_PREFIX}${id}`),
+      },
+      workspaceId,
+      parentType: "SPEND",
+      parentId: spendId,
+      entryType: "OBJECTION",
+    },
+  });
+
+  return deliberationObjections + legacyCommentObjections.length - representedLegacyCommentCount;
 }
 
 export async function listSpends(workspaceId: string, opts?: { take?: number; skip?: number; archiveFilter?: ArchiveFilter }) {
@@ -347,14 +394,16 @@ export async function submitSpend(actor: AppActor, params: { workspaceId: string
         invariant(false, 400, "INVALID_POLICY", "This workspace requires a linked proposal before spend submission.");
       }
 
-      const hasApprovedProposal = spend.proposalLinks.some((link) => link.proposal.status === "APPROVED");
+      const hasApprovedProposal = spend.proposalLinks.some((link) => (
+        link.proposal.status === "RESOLVED" && link.proposal.resolutionOutcome === "ADOPTED"
+      ));
       invariant(hasApprovedProposal, 400, "INVALID_POLICY", "This workspace requires a linked approved proposal before spend submission.");
     }
 
     await tx.spendRequest.update({
       where: { id: spend.id },
       data: {
-        status: "SUBMITTED",
+        status: "OPEN",
       },
     });
 
@@ -362,7 +411,7 @@ export async function submitSpend(actor: AppActor, params: { workspaceId: string
       data: {
         workspaceId: params.workspaceId,
         actorUserId: actor.kind === "user" ? actor.user.id : null,
-        action: "spend.submitted",
+        action: "spend.opened",
         entityType: "SpendRequest",
         entityId: spend.id,
       },
@@ -371,7 +420,7 @@ export async function submitSpend(actor: AppActor, params: { workspaceId: string
     await appendEvents(tx, [
       {
         workspaceId: params.workspaceId,
-        type: "spend.submitted",
+        type: "spend.opened",
         aggregateType: "SpendRequest",
         aggregateId: spend.id,
         payload: {
@@ -568,7 +617,7 @@ export async function linkSpendLedgerAccount(actor: AppActor, params: {
       },
     });
 
-    if (updated.status === "PAID" && updated.ledgerAccountId && !existingEntry) {
+    if (updated.spentAt && updated.ledgerAccountId && !existingEntry) {
       await ensureSpendLedgerEntry(tx, updated);
     }
 
@@ -615,28 +664,20 @@ export async function markSpendPaid(actor: AppActor, params: {
   return prisma.$transaction(async (tx) => {
     const spend = await findSpendForWorkspace(tx, params.workspaceId, params.spendId);
     
-    // Check if spend can be marked as paid
-    const isApproved = spend.status === "APPROVED";
+    const isApproved = spend.status === "RESOLVED" && spend.resolutionOutcome === "APPROVED";
     
-    // Can be paid from SUBMITTED if there are no open objections
-    let isSubmittedWithoutObjections = false;
-    if (spend.status === "SUBMITTED") {
-      const openObjectionsCount = await tx.deliberationEntry.count({
-        where: {
-          parentType: "SPEND",
-          parentId: spend.id,
-          entryType: "OBJECTION",
-          resolvedAt: null,
-        }
-      });
-      isSubmittedWithoutObjections = openObjectionsCount === 0;
+    // Can be paid from OPEN if there are no open objections; payment resolves the request as approved.
+    let isOpenWithoutObjections = false;
+    if (spend.status === "OPEN") {
+      const openObjectionsCount = await countOpenSpendObjections(tx, params.workspaceId, spend.id);
+      isOpenWithoutObjections = openObjectionsCount === 0;
     }
 
     invariant(
-      isApproved || isSubmittedWithoutObjections, 
+      isApproved || isOpenWithoutObjections,
       400, 
       "INVALID_STATE", 
-      "Spend must be APPROVED or SUBMITTED with no open objections to be marked paid."
+      "Spend must be approved or open with no unresolved objections to be marked paid."
     );
 
     if (spend.ledgerAccountId) {
@@ -647,7 +688,8 @@ export async function markSpendPaid(actor: AppActor, params: {
     const updated = await tx.spendRequest.update({
       where: { id: spend.id },
       data: {
-        status: "PAID",
+        status: "RESOLVED",
+        resolutionOutcome: "APPROVED",
         receiptUrl,
         spentAt: new Date(),
       },
@@ -699,7 +741,7 @@ export async function uploadSpendStatement(actor: AppActor, params: {
 
   return prisma.$transaction(async (tx) => {
     const spend = await findSpendForWorkspace(tx, params.workspaceId, params.spendId);
-    invariant(spend.status === "PAID", 400, "INVALID_STATE", "Only paid spends can attach a statement.");
+    invariant(spend.spentAt, 400, "INVALID_STATE", "Only paid spends can attach a statement.");
 
     const updated = await tx.spendRequest.update({
       where: { id: spend.id },
@@ -754,7 +796,7 @@ export async function updateSpendReconciliation(actor: AppActor, params: {
 
   return prisma.$transaction(async (tx) => {
     const spend = await findSpendForWorkspace(tx, params.workspaceId, params.spendId);
-    invariant(spend.status === "PAID", 400, "INVALID_STATE", "Only paid spends can be reconciled.");
+    invariant(spend.spentAt, 400, "INVALID_STATE", "Only paid spends can be reconciled.");
     if (params.status === "STATEMENT_ATTACHED") {
       invariant(Boolean(spend.statementStorageKey), 400, "INVALID_STATE", "Attach a statement before moving to STATEMENT_ATTACHED.");
     }
@@ -827,13 +869,8 @@ export async function addSpendComment(actor: AppActor, params: {
       },
     });
 
-    // If it's an objection and the spend is SUBMITTED, it moves to OBJECTED
-    if (isObjection && spend.status === "SUBMITTED") {
-      await tx.spendRequest.update({
-        where: { id: spend.id },
-        data: { status: "OBJECTED" },
-      });
-      
+    // Objection is now a derived side state. Keep the spend lifecycle at OPEN.
+    if (isObjection && spend.status === "OPEN") {
       await appendEvents(tx, [{
         workspaceId: params.workspaceId,
         type: "spend.objected",
@@ -904,13 +941,7 @@ export async function resolveSpendObjection(actor: AppActor, params: {
       },
     });
 
-    // If spend was OBJECTED and there are no more open objections, it goes back to SUBMITTED
-    if (spend.status === "OBJECTED" && otherOpenObjections === 0) {
-      await tx.spendRequest.update({
-        where: { id: spend.id },
-        data: { status: "SUBMITTED" },
-      });
-    }
+    // Spend lifecycle no longer changes when objections open or close.
 
     await tx.auditLog.create({
       data: {
@@ -942,7 +973,8 @@ export async function escalateSpendToProposal(actor: AppActor, params: {
 
   return prisma.$transaction(async (tx) => {
     const spend = await findSpendForWorkspace(tx, params.workspaceId, params.spendId);
-    invariant(spend.status === "OBJECTED", 400, "INVALID_STATE", "Only objected spends can be escalated.");
+    const openObjections = await countOpenSpendObjections(tx, params.workspaceId, spend.id);
+    invariant(spend.status === "OPEN" && openObjections > 0, 400, "INVALID_STATE", "Only open spends with unresolved objections can be escalated.");
 
     // Create a new proposal
     const proposal = await tx.proposal.create({
@@ -968,8 +1000,7 @@ export async function escalateSpendToProposal(actor: AppActor, params: {
       },
     });
 
-    // Leave the spend in OBJECTED state until the proposal is resolved 
-    // We could make an ESCALATED state, but OBJECTED works fine for now as it blocks payment natively
+    // Leave the spend open. Unresolved deliberation objections keep it blocked.
     
     await tx.auditLog.create({
       data: {

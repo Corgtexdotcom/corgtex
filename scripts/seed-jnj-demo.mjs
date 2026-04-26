@@ -142,19 +142,19 @@ const MEETINGS = [
 ];
 
 const TENSIONS = [
-  { title: "STELARA biosimilar erosion risk", status: "IN_PROGRESS", assignee: null,
+  { title: "STELARA biosimilar erosion risk", status: "OPEN", assignee: null,
     body: "With STELARA facing biosimilar competition soon, we need a definitive strategy to transition patients and secure revenue lines via TREMFYA and other immunology assets." },
   { title: "Scope 3 Supplier Emissions Tracking", status: "OPEN", assignee: null,
     body: "We cannot accurately report our full Health for Humanity climate impact without better data from our top 50 tier-1 suppliers." },
   { title: "Oncology R&D Budget Constraints", status: "OPEN", assignee: null,
     body: "CARVYKTI scale-up requires more capital to expand manufacturing capacity and clinical trials for earlier lines of therapy." },
-  { title: "Abiomed International Rollout Velocity", status: "IN_PROGRESS", assignee: null,
+  { title: "Abiomed International Rollout Velocity", status: "OPEN", assignee: null,
     body: "European expansion for Abiomed is lagging behind financial models. Need dedicated commercial teams in the DACH region." },
   { title: "AI Integration in Drug Discovery", status: "OPEN", assignee: null,
     body: "Competitors are accelerating lead optimization using generative AI. We lack a unified AI infrastructure across the R&D segment." },
   { title: "Post-Kenvue Brand Identity Transition", status: "OPEN", assignee: "vbroadhurst",
     body: "Need to fully distinguish J&J as an enterprise exclusively focused on healthcare innovation." },
-  { title: "MedTech Regulatory Approval Delays in EU", status: "IN_PROGRESS", assignee: "tschmid",
+  { title: "MedTech Regulatory Approval Delays in EU", status: "OPEN", assignee: "tschmid",
     body: "MDR compliance is creating a bottleneck for our Vision products in specific EU markets." },
   { title: "Clinical Staff Retention in Key R&D Sites", status: "OPEN", assignee: "pfasolo",
     body: "We are seeing 15% attrition in our clinical site management talent, primarily to biotech startups." }
@@ -173,27 +173,27 @@ const ACTIONS = [
 
 const PROPOSALS = [
   { 
-    title: "Expand DARZALEX Subcutaneous Roll-out to APAC Markets", status: "APPROVED", author: "jtaubert", circle: "innovative-medicine", publishedAt: nDaysAgo(60),
+    title: "Expand DARZALEX Subcutaneous Roll-out to APAC Markets", status: "RESOLVED", resolutionOutcome: "ADOPTED", author: "jtaubert", circle: "innovative-medicine", publishedAt: nDaysAgo(60),
     summary: "Approval to increase marketing spend for the subcutaneous formulation rollout in key APAC regions.",
     body: "We are seeking $12.5M to aggressively launch the DARZALEX FASPRO formula in Japan and South Korea, targeting a 15% share capture in Q1."
   },
   { 
-    title: "Establish AI Center of Excellence for Drug Discovery", status: "SUBMITTED", author: "jreed", circle: "rd", publishedAt: nDaysAgo(4),
+    title: "Establish AI Center of Excellence for Drug Discovery", status: "OPEN", author: "jreed", circle: "rd", publishedAt: nDaysAgo(4),
     summary: "Formation of an internal COE to standardize generative AI tooling.",
     body: "Currently, AI usage is fragmented across R&D. This proposal establishes a $20M fund to build a centralized infrastructure leveraging Azure ML."
   },
   { 
-    title: "Mandate Tier-1 Supplier ESG Reporting", status: "ADVICE_GATHERING", author: "vbroadhurst", circle: "esg", publishedAt: nDaysAgo(2),
+    title: "Mandate Tier-1 Supplier ESG Reporting", status: "OPEN", author: "vbroadhurst", circle: "esg", publishedAt: nDaysAgo(2),
     summary: "Require our top 50 suppliers to report Scope 1-3 emissions bi-annually via the EcoVadis platform.",
     body: "To hit our Health for Humanity target, we must mandate that all Tier-1 suppliers onboard onto our reporting framework before Q4. We will cover the first-year licensing costs."
   },
   { 
-    title: "Q1 2025 Capital Allocation Amendment", status: "APPROVED", author: "jwolk", circle: "finance", publishedAt: nDaysAgo(45),
+    title: "Q1 2025 Capital Allocation Amendment", status: "RESOLVED", resolutionOutcome: "ADOPTED", author: "jwolk", circle: "finance", publishedAt: nDaysAgo(45),
     summary: "Rebalance capital toward R&D and aggressive debt retirement.",
     body: "This amendment shifts $800M from general corporate purposes directly into the R&D Innovation Grant account."
   },
   { 
-    title: "Robotic Surgery Platform: Phase II Scale-Up", status: "SUBMITTED", author: "tschmid", circle: "medtech", publishedAt: nDaysAgo(10),
+    title: "Robotic Surgery Platform: Phase II Scale-Up", status: "OPEN", author: "tschmid", circle: "medtech", publishedAt: nDaysAgo(10),
     summary: "Funding for advanced clinical validation of the Monarch system.",
     body: "Proposing $45M over two years to accelerate multi-center validation for bronchoscopy procedures."
   },
@@ -203,27 +203,27 @@ const PROPOSALS = [
     body: "We need cross-pollination. This framework will subsidize short-term assignments across segments."
   },
   { 
-    title: "CARVYKTI Manufacturing Capacity Expansion", status: "APPROVED", author: "jreed", circle: "innovative-medicine", publishedAt: nDaysAgo(25),
+    title: "CARVYKTI Manufacturing Capacity Expansion", status: "RESOLVED", resolutionOutcome: "ADOPTED", author: "jreed", circle: "innovative-medicine", publishedAt: nDaysAgo(25),
     summary: "Significant investment in cell-therapy manufacturing nodes.",
     body: "Demand outpaces supply. We are requesting an immediate $350M CapEx release to construct two new clean-room facilities."
   },
   { 
-    title: "Revise Executive Compensation Structure", status: "ARCHIVED", author: "pfasolo", circle: "board", publishedAt: nDaysAgo(80),
+    title: "Revise Executive Compensation Structure", status: "RESOLVED", resolutionOutcome: "WITHDRAWN", author: "pfasolo", circle: "board", publishedAt: nDaysAgo(80), archivedAt: nDaysAgo(70),
     summary: "Shift LTI weighting toward ESG metrics.",
     body: "Proposal to link 15% of the long-term incentive plan to our Health for Humanity diversity goals."
   },
   { 
-    title: "Global Clinical Trial Data Sharing Framework", status: "ADVICE_GATHERING", author: "jreed", circle: "rd", publishedAt: nDaysAgo(8),
+    title: "Global Clinical Trial Data Sharing Framework", status: "OPEN", author: "jreed", circle: "rd", publishedAt: nDaysAgo(8),
     summary: "Standardize how we share anonymized trial data with academic partners.",
     body: "We need a governed process for accelerating academic research through secured data enclaves."
   },
   { 
-    title: "MedTech Digital Twin Manufacturing Pilot", status: "SUBMITTED", author: "tschmid", circle: "medtech", publishedAt: nDaysAgo(15),
+    title: "MedTech Digital Twin Manufacturing Pilot", status: "OPEN", author: "tschmid", circle: "medtech", publishedAt: nDaysAgo(15),
     summary: "Deploying digital twins in our orthopedics manufacturing line.",
     body: "Propose a pilot with Siemens to reduce waste by 12% via real-time twin simulation."
   },
   { 
-    title: "Supplier Diversity Spending Target for FY2026", status: "APPROVED", author: "vbroadhurst", circle: "esg", publishedAt: nDaysAgo(50),
+    title: "Supplier Diversity Spending Target for FY2026", status: "RESOLVED", resolutionOutcome: "ADOPTED", author: "vbroadhurst", circle: "esg", publishedAt: nDaysAgo(50),
     summary: "Commit to $5B in spend with diverse suppliers.",
     body: "Continuing our commitment to economic inclusion across our global procurement network."
   },
@@ -248,16 +248,16 @@ const LEDGER_ACCOUNTS = [
 ];
 
 const SPENDS = [
-  { desc: "Q4 DARZALEX Marketing Campaign – APAC", cat: "Marketing", vendor: "Publicis Health", amountCents: 125000000, status: "PAID" },
-  { desc: "Abiomed EU Commercial Team Hiring", cat: "HR/Recruiting", vendor: "Internal", amountCents: 45000000, status: "APPROVED" },
-  { desc: "CARVYKTI Manufacturing Scale-up Phase 1", cat: "Manufacturing", vendor: "Lilly Engineering", amountCents: 320000000, status: "SUBMITTED" },
-  { desc: "Health for Humanity Annual Report", cat: "PR/Comms", vendor: "Edelman", amountCents: 8500000, status: "PAID" },
-  { desc: "AI Infrastructure Pilot – Azure ML", cat: "Technology", vendor: "Microsoft", amountCents: 32000000, status: "SUBMITTED" },
+  { desc: "Q4 DARZALEX Marketing Campaign – APAC", cat: "Marketing", vendor: "Publicis Health", amountCents: 125000000, status: "RESOLVED", resolutionOutcome: "APPROVED", paid: true },
+  { desc: "Abiomed EU Commercial Team Hiring", cat: "HR/Recruiting", vendor: "Internal", amountCents: 45000000, status: "RESOLVED", resolutionOutcome: "APPROVED" },
+  { desc: "CARVYKTI Manufacturing Scale-up Phase 1", cat: "Manufacturing", vendor: "Lilly Engineering", amountCents: 320000000, status: "OPEN" },
+  { desc: "Health for Humanity Annual Report", cat: "PR/Comms", vendor: "Edelman", amountCents: 8500000, status: "RESOLVED", resolutionOutcome: "APPROVED", paid: true },
+  { desc: "AI Infrastructure Pilot – Azure ML", cat: "Technology", vendor: "Microsoft", amountCents: 32000000, status: "OPEN" },
   { desc: "Board Strategic Offsite – Q2 2025", cat: "Travel/Events", vendor: "Four Seasons", amountCents: 4200000, status: "DRAFT" },
-  { desc: "Clinical Trial Phase III – TREMFYA", cat: "R&D", vendor: "Covance", amountCents: 180000000, status: "APPROVED" },
-  { desc: "Supplier ESG Monitoring Platform", cat: "Technology", vendor: "EcoVadis", amountCents: 17500000, status: "SUBMITTED" },
-  { desc: "Robotic Surgery Training Program", cat: "Education", vendor: "Intuitive Surgical", amountCents: 29000000, status: "APPROVED" },
-  { desc: "Patent Filing – Novel CAR-T Vector", cat: "Legal", vendor: "Fish & Richardson", amountCents: 6500000, status: "PAID" }
+  { desc: "Clinical Trial Phase III – TREMFYA", cat: "R&D", vendor: "Covance", amountCents: 180000000, status: "RESOLVED", resolutionOutcome: "APPROVED" },
+  { desc: "Supplier ESG Monitoring Platform", cat: "Technology", vendor: "EcoVadis", amountCents: 17500000, status: "OPEN" },
+  { desc: "Robotic Surgery Training Program", cat: "Education", vendor: "Intuitive Surgical", amountCents: 29000000, status: "RESOLVED", resolutionOutcome: "APPROVED" },
+  { desc: "Patent Filing – Novel CAR-T Vector", cat: "Legal", vendor: "Fish & Richardson", amountCents: 6500000, status: "RESOLVED", resolutionOutcome: "APPROVED", paid: true }
 ];
 
 const CONSTITUTION = `# Our Credo & Organizational Constitution
@@ -457,9 +457,11 @@ async function main() {
           summary: p.summary,
           bodyMd: p.body,
           status: p.status,
+          resolutionOutcome: p.resolutionOutcome ?? null,
           isPrivate: false,
           publishedAt: p.publishedAt,
-          decidedAt: (p.status === 'APPROVED' || p.status === 'REJECTED') ? p.publishedAt : null
+          decidedAt: p.status === "RESOLVED" ? p.publishedAt : null,
+          archivedAt: p.archivedAt ?? null
         }
       });
       // seed reactions sporadically
@@ -485,7 +487,7 @@ async function main() {
   // 10. Advice Process
   const apTitle1 = "Mandate Tier-1 Supplier ESG Reporting";
   const apProp1 = createdProposals[apTitle1];
-  if (apProp1 && apProp1.status === "ADVICE_GATHERING") {
+  if (apProp1 && apProp1.status === "OPEN") {
     let ap = await prisma.adviceProcess.findUnique({ where: { proposalId: apProp1.id } });
     if (!ap) {
       ap = await prisma.adviceProcess.create({
@@ -514,7 +516,7 @@ async function main() {
 
   const apTitle2 = "Global Clinical Trial Data Sharing Framework";
   const apProp2 = createdProposals[apTitle2];
-  if (apProp2 && apProp2.status === "ADVICE_GATHERING") {
+  if (apProp2 && apProp2.status === "OPEN") {
     let ap = await prisma.adviceProcess.findUnique({ where: { proposalId: apProp2.id } });
     if (!ap) {
       ap = await prisma.adviceProcess.create({
@@ -579,7 +581,8 @@ async function main() {
           amountCents: sp.amountCents,
           currency: "USD",
           status: sp.status,
-          spentAt: sp.status === "PAID" ? nDaysAgo(5) : null
+          resolutionOutcome: sp.resolutionOutcome ?? null,
+          spentAt: sp.paid ? nDaysAgo(5) : null
         }
       });
     }
@@ -594,7 +597,7 @@ async function main() {
   ];
   for (const pol of policies) {
     const prop = createdProposals[pol.pTitle];
-    if (prop && prop.status === 'APPROVED') {
+    if (prop && prop.status === "RESOLVED" && prop.resolutionOutcome === "ADOPTED") {
       const exists = await prisma.policyCorpus.findFirst({ where: { workspaceId: wsId, proposalId: prop.id } });
       if (!exists) {
         await prisma.policyCorpus.create({
