@@ -29,6 +29,14 @@ export default async function ProposalDetailPage({
     parentId: proposalId,
   });
   const deliberationTargets = await getDeliberationTargets({ actor, workspaceId, parentCircleId: proposal.circleId });
+  const targetOptions = deliberationTargets.options.map((option) => ({
+    ...option,
+    label: option.value.startsWith("circle:")
+      ? t("targetCircle", { name: option.label.replace(/^Circle: /, "") })
+      : option.value.startsWith("member:")
+        ? t("targetPerson", { name: option.label.replace(/^Person: /, "") })
+        : option.label,
+  }));
 
   const htmlContent = renderMarkdown(proposal.bodyMd);
 
@@ -92,9 +100,9 @@ export default async function ProposalDetailPage({
               resolvedAt: e.resolvedAt,
               resolvedNote: e.resolvedNote,
               targetLabel: e.targetCircle
-                ? `Circle: ${e.targetCircle.name}`
+                ? t("targetCircle", { name: e.targetCircle.name })
                 : e.targetMember
-                  ? `Person: ${e.targetMember.user.displayName || e.targetMember.user.email}`
+                  ? t("targetPerson", { name: e.targetMember.user.displayName || e.targetMember.user.email })
                   : null,
             }))}
             canResolve={isAuthor || actor.kind === "agent"}
@@ -107,7 +115,7 @@ export default async function ProposalDetailPage({
               postAction={postDeliberationEntryAction}
               hiddenFields={{ workspaceId, proposalId }}
               title={t("sectionDeliberation")}
-              targetOptions={deliberationTargets.options}
+              targetOptions={targetOptions}
               defaultTargetValue={deliberationTargets.defaultValue}
               entryTypes={[
                 { value: "REACTION", label: t("entryReaction"), variant: "secondary" },

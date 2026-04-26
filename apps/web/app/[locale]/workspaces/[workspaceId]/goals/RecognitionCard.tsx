@@ -1,14 +1,16 @@
 import React from"react";
+import { useTranslations } from "next-intl";
 
 export function RecognitionCard({ recognition }: { recognition: any }) {
- const author = recognition.author?.user?.displayName ||"Someone";
- const recipient = recognition.recipient?.user?.displayName ||"Someone";
+ const t = useTranslations("goals");
+ const author = recognition.author?.user?.displayName || t("someone");
+ const recipient = recognition.recipient?.user?.displayName || t("someone");
  
  return (
  <div className="bg-surface-strong border border-line rounded-lg p-5 mb-4 shadow-sm">
  <div className="flex items-center text-sm text-muted mb-3">
  <span className="font-medium text-text mr-1">{author}</span>
- <span>recognized</span>
+ <span>{t("recognized")}</span>
  <span className="font-medium text-text ml-1">{recipient}</span>
  </div>
  <h4 className="text-lg font-semibold text-text mb-2">{recognition.title}</h4>

@@ -51,24 +51,24 @@ export default async function AgentGovernancePage({
       <div className="ws-stat-row" style={{ marginBottom: 32 }}>
         <div className="ws-stat-card">
           <strong style={{ color: "var(--text)" }}>{activeAgentsCount}</strong>
-          <span>Active Agents</span>
+          <span>{t("statActiveAgents")}</span>
         </div>
         <div className="ws-stat-card">
           <strong style={{ color: runsPending.length > 0 ? "var(--warning)" : "var(--text)" }}>
             {runsPending.length}
           </strong>
-          <span>Questions Pending</span>
+          <span>{t("statQuestionsPending")}</span>
         </div>
         <div className="ws-stat-card">
           <strong style={{ color: runsFailed.length > 0 ? "var(--danger)" : "var(--text)" }}>
             {runsFailed.length}
           </strong>
-          <span>Recent Failures</span>
+          <span>{t("statRecentFailures")}</span>
         </div>
       </div>
 
       <div className="nr-tab-bar" style={{ marginBottom: 32 }}>
-        <a href={`/workspaces/${workspaceId}/agents?tab=inbox`} className={`nr-tab ${tab === "inbox" ? "nr-tab-active" : ""}`}>Inbox{runsPending.length > 0 ? ` (${runsPending.length})` : ""}</a>
+        <a href={`/workspaces/${workspaceId}/agents?tab=inbox`} className={`nr-tab ${tab === "inbox" ? "nr-tab-active" : ""}`}>{t("tabInbox")}{runsPending.length > 0 ? ` (${runsPending.length})` : ""}</a>
         <a href={`/workspaces/${workspaceId}/agents?tab=registry`} className={`nr-tab ${tab === "registry" ? "nr-tab-active" : ""}`}>{t("tabRegistry")}</a>
         <a href={`/workspaces/${workspaceId}/agents?tab=access`} className={`nr-tab ${tab === "access" ? "nr-tab-active" : ""}`}>{t("tabAccess")}</a>
         <a href={`/workspaces/${workspaceId}/agents?tab=observability`} className={`nr-tab ${tab === "observability" ? "nr-tab-active" : ""}`}>{t("tabObservability")}</a>
