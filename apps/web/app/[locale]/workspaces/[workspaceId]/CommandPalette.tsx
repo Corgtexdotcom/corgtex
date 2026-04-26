@@ -4,7 +4,7 @@ import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 
-import { WORKSPACE_NAV_GROUPS as navGroups } from "@/lib/nav-config";
+import type { NavGroup } from "@/lib/nav-config";
 
 // We'll move actionItems inside the component so we can use translations.
 
@@ -22,9 +22,11 @@ type CommandItem = {
 export function CommandPalette({
   workspaceId,
   workspaces,
+  navGroups,
 }: {
   workspaceId: string;
   workspaces: Workspace[];
+  navGroups: NavGroup[];
 }) {
   const router = useRouter();
   const tNav = useTranslations("nav");
