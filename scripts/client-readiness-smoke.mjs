@@ -9,7 +9,15 @@ const outDir = path.resolve(outDirArg || "docs/assets/client-readiness-2026-04-2
 const email = process.env.AGENT_E2E_EMAIL || "system+corgtex@corgtex.local";
 const password = process.env.AGENT_E2E_PASSWORD || "corgtex-test-agent-pw";
 
-const desktopRoutes = [
+function csvSet(name) {
+  return new Set((process.env[name] || "").split(",").map((value) => value.trim()).filter(Boolean));
+}
+
+const routeNameFilter = csvSet("CLIENT_READINESS_ROUTE_NAMES");
+const excludedRoutePaths = csvSet("CLIENT_READINESS_EXCLUDE_ROUTES");
+const expectedDisabledRoutePaths = csvSet("CLIENT_READINESS_EXPECT_DISABLED_ROUTES");
+
+const routeCatalog = [
   ["home", ""],
   ["goals", "/goals"],
   ["brain", "/brain"],
@@ -31,6 +39,13 @@ const desktopRoutes = [
   ["chat", "/chat"],
   ["operator", "/operator"],
 ];
+
+const desktopRoutes = routeCatalog.filter(([name, suffix]) => {
+  if (routeNameFilter.size > 0 && !routeNameFilter.has(name)) return false;
+  if (excludedRoutePaths.has(suffix)) return false;
+  if (expectedDisabledRoutePaths.has(suffix)) return false;
+  return true;
+});
 
 const mobileRoutes = desktopRoutes.filter(([name]) => name !== "operator");
 
@@ -74,6 +89,19 @@ async function captureRoute(page, locale, workspacePath, name, suffix, viewport,
   await captureScreenshot(page, `${prefix}${name}.png`);
 }
 
+async function verifyDisabledRoute(page, locale, workspacePath, suffix, findings, routeResults) {
+  const routeName = suffix.replace(/^\//, "").replace(/[^a-z0-9_-]+/gi, "-") || "home";
+  const target = routeUrl(locale, workspacePath, suffix);
+  const response = await page.goto(target, { waitUntil: "domcontentloaded" });
+  await waitForPageSettled(page);
+  const status = response?.status() ?? 0;
+  routeResults.push({ name: `disabled-${routeName}`, route: `${workspacePath}${suffix}`, status });
+  if (status < 400) {
+    findings.push({ name: `disabled-${routeName}`, route: target, status, expected: "disabled" });
+    await captureScreenshot(page, `disabled-${routeName}-visible.png`);
+  }
+}
+
 async function main() {
   await mkdir(outDir, { recursive: true });
 
@@ -83,12 +111,12 @@ async function main() {
   const consoleErrors = [];
   const findings = [];
   const routeResults = [];
-  let expectedInvalidRoute404 = false;
+  let expectedNotFoundRoute = false;
 
   page.on("console", (message) => {
     if (message.type() === "error") {
       if (
-        expectedInvalidRoute404 &&
+        expectedNotFoundRoute &&
         message.text().includes("Failed to load resource: the server responded with a status of 404")
       ) {
         return;
@@ -132,11 +160,19 @@ async function main() {
     );
   }
 
-  expectedInvalidRoute404 = true;
+  expectedNotFoundRoute = true;
   await page.goto(routeUrl(locale, workspacePath, "/not-a-real-client-readiness-route"), { waitUntil: "domcontentloaded" });
   await waitForPageSettled(page);
   await captureScreenshot(page, "desktop-invalid-route.png");
-  expectedInvalidRoute404 = false;
+  expectedNotFoundRoute = false;
+
+  if (expectedDisabledRoutePaths.size > 0) {
+    expectedNotFoundRoute = true;
+    for (const suffix of expectedDisabledRoutePaths) {
+      await verifyDisabledRoute(page, locale, workspacePath, suffix, findings, routeResults);
+    }
+    expectedNotFoundRoute = false;
+  }
 
   for (const [name, suffix] of mobileRoutes) {
     await captureRoute(

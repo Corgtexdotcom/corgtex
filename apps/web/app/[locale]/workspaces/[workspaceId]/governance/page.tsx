@@ -14,6 +14,7 @@ import {
 } from "../actions";
 import { prisma } from "@corgtex/shared";
 import { getTranslations } from "next-intl/server";
+import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
 
 export const dynamic = "force-dynamic";
 
@@ -36,6 +37,7 @@ export default async function GovernancePage({
   params: Promise<{ workspaceId: string }>;
 }) {
   const { workspaceId } = await params;
+  await requireWorkspaceFeature(workspaceId, "OS_METRICS");
   const actor = await requirePageActor();
   const t = await getTranslations("governance");
 
