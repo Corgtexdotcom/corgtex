@@ -1,5 +1,5 @@
 import { renderMarkdown } from "@/lib/markdown";
-import { formatDateTime } from "@/lib/format";
+import { useFormatter, useTranslations } from "next-intl";
 
 type DeliberationEntry = {
   id: string;
@@ -20,19 +20,22 @@ type DeliberationThreadProps = {
   hiddenFields: Record<string, string>;
 };
 
-function getTypeBadgeProps(type: string) {
-  const t = type.toUpperCase();
-  if (t === "OBJECTION") return { label: "Objection", tagClass: "danger", avatarClass: "delib-avatar-objection" };
-  return { label: "Reaction", tagClass: "", avatarClass: "delib-avatar-reaction" };
+function getTypeBadgeProps(type: string, t: (key: "entryObjection" | "entryReaction") => string) {
+  const entryType = type.toUpperCase();
+  if (entryType === "OBJECTION") return { label: t("entryObjection"), tagClass: "danger", avatarClass: "delib-avatar-objection" };
+  return { label: t("entryReaction"), tagClass: "", avatarClass: "delib-avatar-reaction" };
 }
 
 export function DeliberationThread({ entries, canResolve, resolveAction, hiddenFields }: DeliberationThreadProps) {
+  const t = useTranslations("deliberation");
+  const format = useFormatter();
+
   if (entries.length === 0) return null;
 
   return (
     <div className="delib-thread">
       {entries.map((entry) => {
-        const { label, tagClass, avatarClass } = getTypeBadgeProps(entry.entryType);
+        const { label, tagClass, avatarClass } = getTypeBadgeProps(entry.entryType, t);
         const isResolved = !!entry.resolvedAt;
         const isObjection = entry.entryType.toUpperCase() === "OBJECTION";
 
@@ -45,7 +48,14 @@ export function DeliberationThread({ entries, canResolve, resolveAction, hiddenF
               <div className={`delib-avatar ${avatarClass}`}>{entry.authorInitials}</div>
               <div style={{ fontWeight: 600 }}>{entry.authorName}</div>
               <div className="muted" style={{ margin: "0 4px" }}>·</div>
-              <div className="muted">{formatDateTime(entry.createdAt)}</div>
+              <div className="muted">
+                {format.dateTime(entry.createdAt, {
+                  month: "short",
+                  day: "numeric",
+                  hour: "numeric",
+                  minute: "2-digit",
+                })}
+              </div>
               {entry.targetLabel && (
                 <>
                   <div className="muted" style={{ margin: "0 4px" }}>·</div>
@@ -64,7 +74,7 @@ export function DeliberationThread({ entries, canResolve, resolveAction, hiddenF
 
             {isResolved && entry.resolvedNote && (
               <div className="delib-resolve-note">
-                <strong>Resolved:</strong> {entry.resolvedNote}
+                <strong>{t("resolved")}:</strong> {entry.resolvedNote}
               </div>
             )}
 
@@ -77,11 +87,11 @@ export function DeliberationThread({ entries, canResolve, resolveAction, hiddenF
                 <input
                   type="text"
                   name="resolvedNote"
-                  placeholder="What changed, or why is this resolved?"
+                  placeholder={t("resolvePlaceholder")}
                   required
                   style={{ fontSize: "0.85rem", padding: "6px 10px", flex: "1 1 220px", minWidth: 0, width: "auto" }}
                 />
-                <button type="submit" className="secondary small" style={{ flex: "0 0 auto" }}>Resolve</button>
+                <button type="submit" className="secondary small" style={{ flex: "0 0 auto" }}>{t("resolve")}</button>
               </form>
             )}
           </div>

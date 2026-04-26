@@ -155,7 +155,17 @@
     "spend30d": "30-Day Spend",
     "recentActivity": "Recent Activity",
     "noGoal": "No goal specified",
-    "noRecentActivity": "No recent activity."
+    "noRecentActivity": "No recent activity.",
+    "disableAgent": "Disable agent",
+    "enableAgent": "Enable agent",
+    "statActiveAgents": "Active Agents",
+    "statQuestionsPending": "Questions Pending",
+    "statRecentFailures": "Recent Failures",
+    "tabInbox": "Inbox",
+    "editGovernancePolicy": "Edit Governance Policy",
+    "governancePolicyDesc": "Define plain-text boundaries, instructions, and thresholds for this agent. These rules are prepended to the agent's system prompt at runtime.",
+    "governancePolicyPlaceholder": "e.g., Always ask a human before committing any financial transaction over $50.",
+    "savePolicy": "Save Policy"
   },
   "audit": {
     "archiveFilterActor": "Actor",
@@ -220,7 +230,12 @@
     "setupAccountSubtitle": "Choose a secure password to activate your account.",
     "setupAccountTitle": "Set Up Account",
     "welcomeSubtitle": "Your organization's operating system. Log in to access your workspace.",
-    "welcomeTitle": "Welcome to Corgtex"
+    "welcomeTitle": "Welcome to Corgtex",
+    "ssoRedirecting": "Redirecting...",
+    "ssoContinue": "Continue with SSO",
+    "ssoSignIn": "Sign in with Google / Microsoft",
+    "ssoDescription": "Enter your work email to continue to your organization's identity provider.",
+    "workEmailLabel": "Work Email"
   },
   "brain": {
     "agentSynthesis": "Agent Synthesis",
@@ -254,7 +269,64 @@
     "updateArticle": "Update Article",
     "updated": "Updated {time}",
     "viewMore": "View {count} more...",
-    "viewSource": "View Source"
+    "viewSource": "View Source",
+    "today": "today",
+    "yesterday": "yesterday",
+    "daysAgo": "{count}d ago",
+    "authorityDraft": "Draft",
+    "authorityReference": "Reference",
+    "authorityAuthoritative": "Authoritative",
+    "authorityHistorical": "Historical",
+    "untitledSourceMeeting": "Untitled {source} Meeting",
+    "editArticleTitle": "Edit: {title}",
+    "labelTitle": "Title",
+    "labelType": "Type",
+    "labelAuthority": "Authority",
+    "labelChangeSummary": "Change summary (optional)",
+    "placeholderChangeSummary": "What changed?",
+    "saveChanges": "Save changes",
+    "cancel": "Cancel",
+    "historyTitle": "History: {title}",
+    "backToArticle": "Back to article",
+    "noPreviousVersions": "No previous versions. The article has not been edited since creation.",
+    "version": "Version {version}",
+    "changedByAgentRun": "Changed by agent run {id}",
+    "viewBody": "View body",
+    "sourcesTitle": "Brain Sources",
+    "sourcesDescription": "Raw sources ingested into the brain. Agents absorb these into wiki articles.",
+    "ingestRawFiles": "Ingest raw files",
+    "fileToIngest": "File to ingest (PDF, DOCX, CSV, TXT, JSON)",
+    "uploadAndMap": "Upload and Map to Brain",
+    "ingestTextSource": "Ingest text source",
+    "placeholderSourceTitle": "Source title (optional)",
+    "labelSourceType": "Source type",
+    "labelTier": "Tier",
+    "tierCore": "1 - Core",
+    "tierRelational": "2 - Relational",
+    "tierContext": "3 - Context",
+    "labelChannel": "Channel (optional)",
+    "placeholderChannel": "#engineering, repo name, meeting name...",
+    "labelContent": "Content",
+    "placeholderSourceContent": "Paste the source content here...",
+    "ingestSource": "Ingest source",
+    "sourcesCount": "Sources ({count})",
+    "tierLabel": "Tier {tier}",
+    "absorbed": "Absorbed",
+    "pending": "Pending",
+    "systemAuthor": "System",
+    "download": "Download",
+    "noSourcesIngested": "No sources ingested yet.",
+    "statusTitle": "Brain Status",
+    "totalArticles": "Total Articles",
+    "stale": "Stale",
+    "pendingSources": "Pending Sources",
+    "openThreads": "Open Threads",
+    "orphans": "Orphans",
+    "unowned": "Unowned",
+    "articlesByType": "Articles by type",
+    "articlesByAuthority": "Articles by authority",
+    "staleArticlesNeedReview": "Stale articles (need review)",
+    "updatedDate": "Updated {date}"
   },
   "chat": {
     "attachedFileMessage": "[Attached file: {fileName}]\n*(File uploaded and queued for Brain absorption)*\n\n{message}",
@@ -343,7 +415,10 @@
     "unknownMember": "Unknown",
     "whatIsCircleDescGraph": "Circles are autonomous teams with a clear purpose and domain. Start by creating your first circle below.",
     "whatIsCircleDescList": "Circles are autonomous teams with a clear purpose and domain. Start by creating your first circle.",
-    "whatIsCircleTitle": "What is a Circle?"
+    "whatIsCircleTitle": "What is a Circle?",
+    "expand": "Expand",
+    "closePanel": "Close panel",
+    "roleCount": "{count, plural, one {# role} other {# roles}}"
   },
   "commandPalette": {
     "createTension": "Create Tension",
@@ -529,7 +604,9 @@
     "typeReaction": "Reaction",
     "unassigned": "Unassigned",
     "unknownAuthor": "Unknown",
-    "unlinked": "Unlinked"
+    "unlinked": "Unlinked",
+    "targetCircle": "Circle: {name}",
+    "targetPerson": "Person: {name}"
   },
   "goals": {
     "contributesTo": "contributes to:",
@@ -544,7 +621,9 @@
     "target": "Target:",
     "title": "Strategic Goals",
     "treeView": "Tree View",
-    "unknown": "Unknown"
+    "unknown": "Unknown",
+    "someone": "Someone",
+    "recognized": "recognized"
   },
   "governance": {
     "approvalPoliciesDesc": "Configure how decisions are made for proposals and spend requests.",
@@ -673,7 +752,36 @@
     "typeConcern": "Concern",
     "typeQuestion": "Question",
     "unknownAuthor": "Unknown",
-    "untitledMeeting": "Untitled Meeting"
+    "untitledMeeting": "Untitled Meeting",
+    "targetCircle": "Circle: {name}",
+    "targetPerson": "Person: {name}",
+    "participants": "Participants",
+    "participant": "Participant",
+    "moreRoles": " +{count} more",
+    "summary": "Summary",
+    "tensionsRaised": "Tensions Raised",
+    "proposalsCreated": "Proposals Created",
+    "discussion": "Discussion",
+    "entryReaction": "Reaction",
+    "entryObjection": "Objection",
+    "aiIntelligenceTitle": "AI Meeting Intelligence",
+    "noInsightsDescription": "No insights extracted yet. You can run the AI extraction to find decisions, tensions, action items, and proposals in the transcript.",
+    "extracting": "Extracting...",
+    "runAiExtraction": "Run AI Extraction",
+    "suggestedItems": "AI suggested {count} items for review",
+    "confirmAll": "Confirm All",
+    "highConfidence": "High Confidence",
+    "lowConfidence": "Low Confidence",
+    "assigneeHint": "Assignee hint:",
+    "sourceQuote": "Source Quote",
+    "confirmInsight": "Confirm",
+    "dismissInsight": "Dismiss",
+    "insightType": {
+      "decision": "decisions",
+      "tension": "tensions",
+      "action_item": "action items",
+      "proposal": "proposals"
+    }
   },
   "members": {
     "activeTensions": "Active Tensions",
@@ -805,7 +913,9 @@
     "tensionTag": "Tension: {title}",
     "updatedAt": "Updated {date}",
     "whatIsProposalDesc": "Proposals are how decisions get made. Draft a proposal, open it with the circle, then resolve it with an outcome.",
-    "whatIsProposalTitle": "What is a Proposal?"
+    "whatIsProposalTitle": "What is a Proposal?",
+    "targetCircle": "Circle: {name}",
+    "targetPerson": "Person: {name}"
   },
   "settings": {
     "btnActivate": "Activate",
@@ -1047,7 +1157,16 @@
     "uploadError": "Error: {error}",
     "valNever": "Never",
     "valNone": "None",
-    "webhookDeliveries": "{count} deliveries"
+    "webhookDeliveries": "{count} deliveries",
+    "errorTestConnection": "Failed to test connection",
+    "errorSave": "Failed to save",
+    "alertSyncTriggered": "Sync triggered.",
+    "confirmArchiveDataSource": "Archive this data source? It will be hidden from active views but can be restored from Audit.",
+    "unknownUser": "Unknown",
+    "reactivationDisabledTitle": "Reactivation requires an API or database update currently",
+    "labelEndpointUrl": "Endpoint URL",
+    "labelAuthorizationHeaderValue": "Authorization Header Value",
+    "stepCreateGptLink": "ChatGPT -> Explore -> Create"
   },
   "tensions": {
     "ageDaysAgo": "{days}d ago",
@@ -1097,6 +1216,61 @@
     "tensionMeta": "{author} · {age} · {upvotes} · Priority {priority}",
     "upvotes": "{count, plural, =1 {# upvote} other {# upvotes}}",
     "whatIsTensionDesc": "A tension is any gap between what is and what could be. It's the most important signal in a self-managed organization. File a tension whenever you sense an opportunity for improvement.",
-    "whatIsTensionTitle": "What is a Tension?"
+    "whatIsTensionTitle": "What is a Tension?",
+    "targetCircle": "Circle: {name}",
+    "targetPerson": "Person: {name}"
+  },
+  "metadata": {
+    "title": "Corgtex",
+    "description": "Corgtex - AI-native workspace operating system."
+  },
+  "demo": {
+    "unavailable": "Demo environment is currently unavailable. Please try again later.",
+    "connectionFailed": "Failed to connect to demo environment.",
+    "prompt": "Want to see how it works?",
+    "preparing": "Preparing demo...",
+    "explore": "Explore Live Demo - Johnson & Johnson",
+    "readOnlyBanner": "This demo is read-only. You can inspect the workspace freely, but modifications are disabled.",
+    "restartTour": "Restart Tour",
+    "tour": {
+      "welcomeTitle": "Welcome to Corgtex",
+      "welcomeDescription": "You're about to explore how Johnson & Johnson - a $89B company with 138,000 employees - could run on self-management. This demo is populated with real public J&J data.",
+      "newspaperTitle": "Your Daily Newspaper",
+      "newspaperDescription": "Every morning, this is what you see. A living newspaper of your organization - featured knowledge, recent meetings, active tensions, and to-dos.",
+      "memoryTitle": "Organizational Memory",
+      "memoryDescription": "Every piece of knowledge - from board meetings to R&D reports - is automatically processed by AI into a searchable encyclopedia.",
+      "structureTitle": "Structure Without Hierarchy",
+      "structureDescription": "Instead of departments and managers, the organization runs on circles - self-governing teams with clear purposes and distributed authority.",
+      "decisionsTitle": "Consent-Based Decisions",
+      "decisionsDescription": "Proposals turn tensions into action through consent-based governance. No politics, no management committees - just reasoned objections.",
+      "askTitle": "Ask Anything",
+      "askDescription": "The AI assistant knows everything in the Brain. Ask it about any topic, draft proposals, or get context for decisions.",
+      "exploreTitle": "Your Turn to Explore",
+      "exploreDescription": "Tour complete! You now have full access to explore Johnson & Johnson's governance through Corgtex. The workspace is read-only, but feel free to click around."
+    }
+  },
+  "shared": {
+    "markdownEditor": {
+      "write": "Write",
+      "preview": "Preview",
+      "emptyPreview": "Nothing to preview."
+    },
+    "dialog": {
+      "close": "Close"
+    }
+  },
+  "deliberation": {
+    "entryPosted": "Entry posted successfully.",
+    "entryPostFailed": "Failed to post entry.",
+    "entryPlaceholder": "Write your entry in markdown...",
+    "targetAriaLabel": "Deliberation target",
+    "noTarget": "No target",
+    "posting": "Posting...",
+    "postEntry": "Post Entry",
+    "entryReaction": "Reaction",
+    "entryObjection": "Objection",
+    "resolved": "Resolved",
+    "resolvePlaceholder": "What changed, or why is this resolved?",
+    "resolve": "Resolve"
   }
 }
