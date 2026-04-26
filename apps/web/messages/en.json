@@ -1,5 +1,8 @@
 {
   "actions": {
+    "ageDaysAgo": "{count}d ago",
+    "ageToday": "today",
+    "ageYesterday": "yesterday",
     "btnCancel": "Cancel",
     "btnComplete": "Complete",
     "btnCreateAction": "Create action",
