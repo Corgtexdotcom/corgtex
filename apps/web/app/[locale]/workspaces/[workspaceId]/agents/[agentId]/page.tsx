@@ -5,6 +5,7 @@ import { AgentProfileClient } from "./AgentProfileClient";
 import { notFound } from "next/navigation";
 import Link from "next/link";
 import { getTranslations } from "next-intl/server";
+import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
 
 export const dynamic = "force-dynamic";
 
@@ -14,6 +15,7 @@ export default async function AgentProfilePage({
   params: Promise<{ workspaceId: string; agentId: string }>;
 }) {
   const { workspaceId, agentId } = await params;
+  await requireWorkspaceFeature(workspaceId, "AGENT_GOVERNANCE");
   const actor = await requirePageActor();
   const t = await getTranslations("agents");
 

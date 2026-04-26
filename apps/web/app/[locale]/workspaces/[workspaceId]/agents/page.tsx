@@ -7,6 +7,7 @@ import { SpendControlTab } from "./SpendControlTab";
 import { AgentInboxTab } from "./AgentInboxTab";
 import { listAgentConfigs, listAgentRuns } from "@corgtex/domain";
 import { getTranslations } from "next-intl/server";
+import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
 
 export const dynamic = "force-dynamic";
 
@@ -18,6 +19,7 @@ export default async function AgentGovernancePage({
   searchParams: Promise<{ tab?: string; agentRunId?: string }>;
 }) {
   const { workspaceId } = await params;
+  await requireWorkspaceFeature(workspaceId, "AGENT_GOVERNANCE");
   const search = await searchParams;
   const actor = await requirePageActor();
   const tab = search.tab ?? "inbox";
