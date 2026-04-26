@@ -3,6 +3,7 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { useTranslations } from "next-intl";
 import { marked } from "marked";
+import { formatConversationDate } from "./date-format";
 
 type ConversationSummary = {
   id: string;
@@ -366,7 +367,7 @@ export function ChatInterface({
                   <div className="chat-session-meta">
                     <div className="chat-session-preview">{conversation.lastMessage || t("emptyPreview")}</div>
                     <div className="chat-session-time">
-                      {new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" }).format(new Date(conversation.updatedAt))}
+                      {formatConversationDate(conversation.updatedAt)}
                     </div>
                   </div>
                 </button>
