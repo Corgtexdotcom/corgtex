@@ -20,7 +20,10 @@ Simplify Corgtex work item flows around practical draft, open, and resolved life
 - `docs/plans/codex-simple-lifecycle-deliberation.md`
 - `docs/assets/codex-simple-lifecycle-deliberation/**`
 - `apps/web/app/[locale]/workspaces/[workspaceId]/actions/actions.ts`
+- `apps/web/app/[locale]/workspaces/[workspaceId]/actions/actions.test.ts`
 - `apps/web/app/[locale]/workspaces/[workspaceId]/actions/page.tsx`
+- `apps/web/app/[locale]/workspaces/[workspaceId]/actions/view-model.test.ts`
+- `apps/web/app/[locale]/workspaces/[workspaceId]/actions/view-model.ts`
 - `apps/web/app/[locale]/workspaces/[workspaceId]/finance/actions.ts`
 - `apps/web/app/[locale]/workspaces/[workspaceId]/finance/page.tsx`
 - `apps/web/app/[locale]/workspaces/[workspaceId]/meetings/[meetingId]/page.tsx`
@@ -45,6 +48,7 @@ Simplify Corgtex work item flows around practical draft, open, and resolved life
 - `packages/agents/src/tools/mutations.ts`
 - `packages/agents/src/tools/workspace.ts`
 - `packages/domain/src/actions.ts`
+- `packages/domain/src/actions.test.ts`
 - `packages/domain/src/advice-process.ts`
 - `packages/domain/src/approvals.ts`
 - `packages/domain/src/archive.test.ts`
@@ -79,6 +83,7 @@ Simplify Corgtex work item flows around practical draft, open, and resolved life
 - [x] User-facing copy says drafts are opened with the circle/team and resolved flows require an explanatory note.
 - [x] Domain tests cover lifecycle migration effects, deliberation posting and resolution, finance payment gating, proposal resolution, tension resolution, and archive behavior.
 - [x] Browser proof is committed for the simplified finance, proposal, tension, and action flows.
+- [x] Action draft creation, draft tab rendering, open/start/complete/archive lifecycle, and bad public draft recovery are regression-tested.
 
 ## Test plan
 
@@ -88,6 +93,7 @@ npm run prisma:migrate -- --name simple_lifecycle_deliberation
 npx prisma migrate status
 npm run check
 npx vitest run packages/domain/src/proposals.test.ts packages/domain/src/finance.test.ts packages/domain/src/tensions.test.ts packages/domain/src/deliberation.test.ts packages/domain/src/archive.test.ts packages/domain/src/reactions.test.ts packages/mcp/src/server.test.ts
+npx vitest run --project unit apps/web/app/[locale]/workspaces/[workspaceId]/actions/actions.test.ts apps/web/app/[locale]/workspaces/[workspaceId]/actions/view-model.test.ts packages/domain/src/actions.test.ts
 npx vitest run --project integration packages/shared/src/pilot-testing.integration.test.ts
 npm run build
 ```
