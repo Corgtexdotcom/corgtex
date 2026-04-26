@@ -52,6 +52,7 @@ Simplify Corgtex work item flows around practical draft, open, and resolved life
 - `packages/domain/src/circles.ts`
 - `packages/domain/src/deliberation.test.ts`
 - `packages/domain/src/deliberation.ts`
+- `packages/domain/src/finance.test.ts`
 - `packages/domain/src/finance.ts`
 - `packages/domain/src/governance-scoring.ts`
 - `packages/domain/src/impact-footprint.ts`
