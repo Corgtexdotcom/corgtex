@@ -25,7 +25,8 @@ export function AgentModelOverride({ workspaceId, agent }: { workspaceId: string
     >
       <option value="default">{t("modelDefault", { tier: agent.defaultModelTier })}</option>
       <option value="google/gemma-4-12b-it">{t("modelFast")}</option>
-      <option value="google/gemma-4-31b-it">{t("modelStandard")}</option>
+      <option value="qwen/qwen3-32b">{t("modelDefaultTier")}</option>
+      <option value="meta-llama/llama-4-scout">{t("modelStandard")}</option>
       <option value="google/gemini-2.5-flash">{t("modelQuality")}</option>
     </select>
   );
