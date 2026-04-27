@@ -10,6 +10,9 @@ import {
   listMembersEnriched,
   listWebhookEndpoints,
   requireWorkspaceMembership,
+  getUserProfile,
+  listUserSessions,
+  getUserNotificationPreferences
 } from "@corgtex/domain";
 import { env, prisma } from "@corgtex/shared";
 import { requirePageActor } from "@/lib/auth";
@@ -27,6 +30,7 @@ import { AgentSettingsClient } from "./agents/AgentSettingsClient";
 import { AgentBudgetManager } from "./agents/AgentBudgetManager";
 import { SsoConfigManager } from "./SsoConfigManager";
 import { DataSourcesManager } from "./DataSourcesManager";
+import { UserSettingsPanel } from "./UserSettingsPanel";
 import { getTranslations, getFormatter } from "next-intl/server";
 import { notFound } from "next/navigation";
 import { getWorkspaceFeatureFlags } from "@/lib/workspace-feature-flags";
@@ -113,6 +117,26 @@ export default async function SettingsPage({
     }
   }
 
+  let userProfile: any = null;
+  let userSessions: any[] = [];
+  let userPrefs: any[] = [];
+  if (tab === "user") {
+    try {
+      const { sha256, sessionCookieName } = await import("@corgtex/shared");
+      const cookieStore = await import("next/headers").then(m => m.cookies());
+      const token = cookieStore.get(sessionCookieName())?.value;
+      const tokenHash = token ? sha256(token) : undefined;
+      
+      [userProfile, userSessions, userPrefs] = await Promise.all([
+        getUserProfile(actor, workspaceId),
+        listUserSessions(actor, tokenHash),
+        getUserNotificationPreferences(actor)
+      ]);
+    } catch (err) {
+      console.error("[SettingsPage] Failed to fetch user profile data:", err);
+    }
+  }
+
   const headersList = await headers();
   const host = headersList.get("host") || "localhost:3000";
   const protocol = host.includes("localhost") ? "http" : "https";
@@ -152,7 +176,22 @@ export default async function SettingsPage({
         >
           {t("tabKnowledgeSources")}
         </a>
+        <a
+          href={`/workspaces/${workspaceId}/settings?tab=user`}
+          className={`nr-tab ${tab === "user" ? "nr-tab-active" : ""}`}
+        >
+          {t("tabUser")}
+        </a>
       </div>
+
+      {tab === "user" && userProfile && (
+        <UserSettingsPanel 
+          workspaceId={workspaceId} 
+          profile={userProfile} 
+          sessions={userSessions} 
+          preferences={userPrefs} 
+        />
+      )}
 
       {tab === "general" && (
         <>

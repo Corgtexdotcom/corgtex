@@ -124,7 +124,10 @@ export async function GET(request: Request) {
       displayName: claims ? claimString(claims, "name") : undefined,
     });
 
-    const session = await createSession(user.id);
+    const session = await createSession(user.id, {
+      ipAddress: request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || request.headers.get("x-real-ip") || null,
+      userAgent: request.headers.get("user-agent") || null,
+    });
     await setSessionCookie(session.token, session.expiresAt);
 
     return NextResponse.redirect(new URL(`/workspaces/${config.workspace.slug}`, request.url));

@@ -20,6 +20,8 @@ export async function POST(request: NextRequest) {
     const result = await loginUserWithPassword({
       email: body.email,
       password: body.password,
+      ipAddress: request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || request.headers.get("x-real-ip") || null,
+      userAgent: request.headers.get("user-agent") || null,
     });
 
     const actor = {
