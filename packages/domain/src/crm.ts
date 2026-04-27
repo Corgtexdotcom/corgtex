@@ -450,3 +450,382 @@ export async function createActivity(actor: AppActor, params: {
     return activity;
   });
 }
+
+// --- QUALIFICATIONS ---
+
+export async function submitQualification(params: {
+  token: string;
+  companyName: string;
+  website: string;
+  roleTitle?: string;
+  aiExperience: string;
+  helpNeeded: string;
+}) {
+  const lead = await prisma.demoLead.findUnique({
+    where: { qualifyToken: params.token },
+    include: { workspace: true },
+  });
+  invariant(lead, 400, "INVALID_INPUT", "Invalid qualification token.");
+
+  return prisma.$transaction(async (tx) => {
+    const qualification = await tx.crmQualification.create({
+      data: {
+        workspaceId: lead.workspaceId,
+        demoLeadId: lead.id,
+        responseChannel: "form",
+        companyName: params.companyName.trim(),
+        website: params.website.trim(),
+        roleTitle: params.roleTitle?.trim() || null,
+        aiExperience: params.aiExperience.trim(),
+        helpNeeded: params.helpNeeded.trim(),
+        status: "PENDING_REVIEW",
+      },
+    });
+
+    await appendEvents(tx, [
+      {
+        workspaceId: lead.workspaceId,
+        type: "crm.qualification.submitted",
+        aggregateType: "CrmQualification",
+        aggregateId: qualification.id,
+        payload: { qualificationId: qualification.id, email: lead.email },
+      },
+    ]);
+
+    return qualification;
+  });
+}
+
+export async function receiveEmailReply(params: {
+  fromEmail: string;
+  subject: string;
+  bodyText: string;
+}) {
+  const email = params.fromEmail.trim().toLowerCase();
+  
+  const lead = await prisma.demoLead.findFirst({
+    where: { email },
+    orderBy: { createdAt: 'desc' },
+  });
+  
+  invariant(lead, 404, "NOT_FOUND", "No matching DemoLead found for inbound reply.");
+
+  return prisma.$transaction(async (tx) => {
+    const qualification = await tx.crmQualification.create({
+      data: {
+        workspaceId: lead.workspaceId,
+        demoLeadId: lead.id,
+        responseChannel: "email_reply",
+        rawEmailReply: params.bodyText.trim(),
+        rawEmailSubject: params.subject.trim(),
+        status: "PENDING_REVIEW",
+      },
+    });
+
+    await appendEvents(tx, [
+      {
+        workspaceId: lead.workspaceId,
+        type: "crm.qualification.submitted",
+        aggregateType: "CrmQualification",
+        aggregateId: qualification.id,
+        payload: { qualificationId: qualification.id, email: lead.email, channel: "email_reply" },
+      },
+    ]);
+
+    return qualification;
+  });
+}
+
+export async function listQualifications(actor: AppActor, workspaceId: string, opts?: { status?: string; take?: number; skip?: number }) {
+  await requireWorkspaceMembership({ actor, workspaceId });
+  
+  const take = opts?.take ?? 50;
+  const skip = opts?.skip ?? 0;
+  
+  const where: any = { workspaceId };
+  if (opts?.status) {
+    where.status = opts.status;
+  }
+
+  const [items, total] = await Promise.all([
+    prisma.crmQualification.findMany({
+      where,
+      include: {
+        demoLead: {
+          select: { email: true, source: true, createdAt: true },
+        },
+      },
+      orderBy: { createdAt: "desc" },
+      take,
+      skip,
+    }),
+    prisma.crmQualification.count({ where }),
+  ]);
+  
+  return { items, total, take, skip };
+}
+
+export async function approveQualification(actor: AppActor, params: { workspaceId: string; qualificationId: string }) {
+  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+
+  const qual = await prisma.crmQualification.findUnique({
+    where: { id: params.qualificationId },
+    include: { demoLead: true },
+  });
+  invariant(qual && qual.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Qualification not found.");
+  invariant(qual.status === "PENDING_REVIEW", 400, "INVALID_STATE", "Qualification is not pending review.");
+
+  return prisma.$transaction(async (tx) => {
+    const updated = await tx.crmQualification.update({
+      where: { id: qual.id },
+      data: {
+        status: "APPROVED",
+        reviewedAt: new Date(),
+        reviewedByUserId: actor.kind === "user" ? actor.user.id : null,
+      },
+    });
+
+    if (qual.companyName || qual.website) {
+      await tx.crmContact.updateMany({
+        where: { workspaceId: params.workspaceId, email: qual.demoLead.email },
+        data: {
+          company: qual.companyName || undefined,
+        },
+      });
+    }
+
+    await appendEvents(tx, [
+      {
+        workspaceId: params.workspaceId,
+        type: "crm.qualification.approved",
+        aggregateType: "CrmQualification",
+        aggregateId: qual.id,
+        payload: { qualificationId: qual.id, email: qual.demoLead.email },
+      },
+    ]);
+
+    return updated;
+  });
+}
+
+export async function rejectQualification(actor: AppActor, params: { workspaceId: string; qualificationId: string; note?: string }) {
+  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+
+  const qual = await prisma.crmQualification.findUnique({ where: { id: params.qualificationId } });
+  invariant(qual && qual.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Qualification not found.");
+
+  return prisma.$transaction(async (tx) => {
+    return tx.crmQualification.update({
+      where: { id: qual.id },
+      data: {
+        status: "REJECTED",
+        reviewedAt: new Date(),
+        reviewedByUserId: actor.kind === "user" ? actor.user.id : null,
+        reviewNote: params.note || null,
+      },
+    });
+  });
+}
+
+export async function sendSchedulingLinkEmail(qualificationId: string) {
+  const qual = await prisma.crmQualification.findUnique({
+    where: { id: qualificationId },
+    include: { demoLead: true },
+  });
+  invariant(qual, 404, "NOT_FOUND", "Qualification not found");
+  invariant(qual.status === "APPROVED", 400, "INVALID_STATE", "Qualification must be approved to send scheduling link.");
+  if (qual.schedulingEmailSentAt) return;
+
+  // assume valid usage
+  await prisma.crmQualification.update({
+    where: { id: qual.id },
+    data: { schedulingEmailSentAt: new Date() },
+  });
+}
+
+// --- CONVERSATIONS ---
+
+export async function syncEmailReplyToConversation(params: {
+  fromEmail: string;
+  subject: string;
+  bodyText: string;
+}) {
+  const email = params.fromEmail.trim().toLowerCase();
+  
+  const lead = await prisma.demoLead.findFirst({
+    where: { email },
+    orderBy: { createdAt: 'desc' },
+  });
+  
+  if (!lead) return null;
+
+  let conversation = await prisma.crmConversation.findFirst({
+    where: { workspaceId: lead.workspaceId, demoLeadId: lead.id },
+  });
+
+  if (!conversation) {
+    const contact = await prisma.crmContact.findFirst({
+      where: { workspaceId: lead.workspaceId, email },
+    });
+    if (!contact) return null;
+
+    conversation = await prisma.crmConversation.create({
+      data: {
+        workspaceId: lead.workspaceId,
+        demoLeadId: lead.id,
+        contactId: contact.id,
+        subject: params.subject.trim(),
+      },
+    });
+  }
+
+  const message = await prisma.crmConversationMessage.create({
+    data: {
+      conversationId: conversation.id,
+      senderType: "LEAD",
+      senderEmail: email,
+      bodyMd: params.bodyText.trim(),
+    },
+  });
+
+  await prisma.crmConversation.update({
+    where: { id: conversation.id },
+    data: { updatedAt: new Date() },
+  });
+
+  return message;
+}
+
+export async function createConversationMessage(actor: AppActor, params: {
+  workspaceId: string;
+  conversationId: string;
+  bodyMd: string;
+  senderType: "LEAD" | "ADMIN" | "SYSTEM";
+  senderEmail?: string;
+}) {
+  const conversation = await prisma.crmConversation.findUnique({
+    where: { id: params.conversationId },
+    include: { contact: true, demoLead: true },
+  });
+  invariant(conversation && conversation.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Conversation not found.");
+
+  return prisma.$transaction(async (tx) => {
+    const message = await tx.crmConversationMessage.create({
+      data: {
+        conversationId: conversation.id,
+        senderType: params.senderType,
+        senderEmail: params.senderEmail || (params.senderType === "ADMIN" && actor.kind === "user" ? actor.user.email : null),
+        senderUserId: params.senderType === "ADMIN" && actor.kind === "user" ? actor.user.id : null,
+        bodyMd: params.bodyMd.trim(),
+        isRead: params.senderType === "ADMIN",
+      },
+    });
+
+    await tx.crmConversation.update({
+      where: { id: conversation.id },
+      data: { updatedAt: new Date() },
+    });
+
+    return message;
+  });
+}
+
+export async function getCrmConversation(actor: AppActor, params: { workspaceId: string; conversationId: string }) {
+  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+
+  const conversation = await prisma.crmConversation.findUnique({
+    where: { id: params.conversationId },
+    include: {
+      contact: true,
+      demoLead: true,
+      deal: true,
+      messages: {
+        orderBy: { createdAt: "asc" },
+        include: { senderUser: { select: { id: true, email: true } } },
+      },
+    },
+  });
+  invariant(conversation && conversation.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Conversation not found.");
+
+  return conversation;
+}
+
+export async function listCrmConversations(actor: AppActor, workspaceId: string, opts?: { contactId?: string; demoLeadId?: string; take?: number; skip?: number }) {
+  await requireWorkspaceMembership({ actor, workspaceId });
+  
+  const take = opts?.take ?? 50;
+  const skip = opts?.skip ?? 0;
+  
+  const where: any = { workspaceId };
+  if (opts?.contactId) where.contactId = opts.contactId;
+  if (opts?.demoLeadId) where.demoLeadId = opts.demoLeadId;
+
+  const [items, total] = await Promise.all([
+    prisma.crmConversation.findMany({
+      where,
+      include: {
+        contact: { select: { id: true, name: true, email: true, company: true } },
+        demoLead: { select: { id: true, email: true } },
+        messages: { orderBy: { createdAt: "desc" }, take: 1 },
+      },
+      orderBy: { updatedAt: "desc" },
+      take,
+      skip,
+    }),
+    prisma.crmConversation.count({ where }),
+  ]);
+  
+  return { items, total, take, skip };
+}
+
+// --- PROVISIONING ---
+
+export async function provisionProspectWorkspace(actor: AppActor, params: {
+  demoLeadId: string;
+  adminEmail: string;
+  crmWorkspaceId: string;
+}) {
+  await requireWorkspaceMembership({ actor, workspaceId: params.crmWorkspaceId });
+  invariant(actor.kind === "user", 403, "FORBIDDEN", "Only human users can provision prospect workspaces.");
+
+  const lead = await prisma.demoLead.findUnique({ where: { id: params.demoLeadId } });
+  invariant(lead && lead.workspaceId === params.crmWorkspaceId, 404, "NOT_FOUND", "Demo lead not found");
+
+  const existing = await prisma.crmProspectWorkspace.findFirst({
+    where: { demoLeadId: lead.id, crmWorkspaceId: params.crmWorkspaceId },
+  });
+  if (existing) return existing;
+
+  return prisma.$transaction(async (tx) => {
+    const newWorkspaceName = `Demo Workspace (${lead.email})`;
+    const newWorkspaceSlug = `demo-${Date.now()}`;
+    const targetWorkspace = await tx.workspace.create({
+      data: {
+        name: newWorkspaceName,
+        slug: newWorkspaceSlug,
+      },
+    });
+
+    const prospectWorkspace = await tx.crmProspectWorkspace.create({
+      data: {
+        crmWorkspaceId: params.crmWorkspaceId,
+        demoLeadId: lead.id,
+        targetWorkspaceId: targetWorkspace.id,
+        adminEmail: params.adminEmail,
+        status: "ACTIVE",
+      },
+    });
+
+    await appendEvents(tx, [
+      {
+        workspaceId: params.crmWorkspaceId,
+        type: "crm.prospect_workspace.provisioned",
+        aggregateType: "CrmProspectWorkspace",
+        aggregateId: prospectWorkspace.id,
+        payload: { targetWorkspaceId: targetWorkspace.id, adminEmail: params.adminEmail },
+      },
+    ]);
+
+    return prospectWorkspace;
+  });
+}
