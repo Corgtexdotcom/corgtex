@@ -1,6 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { handleRouteError } from "@/lib/http";
-import { exchangeAuthorizationCode, refreshAccessToken } from "@corgtex/domain";
+import {
+  exchangeAuthorizationCode,
+  exchangeMcpAuthorizationCode,
+  getMcpOAuthClientByClientId,
+  refreshAccessToken,
+  refreshMcpAccessToken,
+} from "@corgtex/domain";
 import { AppError } from "@corgtex/domain";
 
 export async function POST(request: NextRequest) {
@@ -41,9 +47,32 @@ export async function POST(request: NextRequest) {
     if (grantType === "authorization_code") {
       const code = bodyData.code;
       const redirectUri = bodyData.redirect_uri;
+      const codeVerifier = bodyData.code_verifier;
+      const resource = bodyData.resource;
 
       if (!code || !redirectUri) {
         return NextResponse.json({ error: "invalid_request", error_description: "Missing code or redirect_uri" }, { status: 400 });
+      }
+
+      const mcpClient = await getMcpOAuthClientByClientId(clientId).catch(() => null);
+      if (mcpClient) {
+        if (!codeVerifier) {
+          return NextResponse.json({ error: "invalid_request", error_description: "Missing PKCE code_verifier" }, { status: 400 });
+        }
+        const tokens = await exchangeMcpAuthorizationCode({
+          code,
+          clientId,
+          redirectUri,
+          codeVerifier,
+          resource,
+        });
+
+        return NextResponse.json(tokens, {
+          headers: {
+            "Cache-Control": "no-store",
+            "Pragma": "no-cache"
+          }
+        });
       }
 
       if (!clientSecret) {
@@ -71,6 +100,21 @@ export async function POST(request: NextRequest) {
 
       if (!refreshToken) {
         return NextResponse.json({ error: "invalid_request", error_description: "Missing refresh_token" }, { status: 400 });
+      }
+
+      const mcpClient = await getMcpOAuthClientByClientId(clientId).catch(() => null);
+      if (mcpClient) {
+        const tokens = await refreshMcpAccessToken({
+          refreshToken,
+          clientId,
+        });
+
+        return NextResponse.json(tokens, {
+          headers: {
+            "Cache-Control": "no-store",
+            "Pragma": "no-cache"
+          }
+        });
       }
 
       const tokens = await refreshAccessToken({
