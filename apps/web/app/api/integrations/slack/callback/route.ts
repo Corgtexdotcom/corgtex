@@ -3,11 +3,7 @@ import { cookies } from "next/headers";
 import { requirePageActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
 import { exchangeSlackOAuthCode, readSlackOAuthState, saveSlackInstallation } from "@corgtex/domain";
-import { env } from "@corgtex/shared";
-
-function appOrigin(request: Request) {
-  return env.APP_URL || new URL(request.url).origin;
-}
+import { appRedirectUrl, rethrowNextRedirectError, slackCallbackRedirectUri } from "../oauth";
 
 export async function GET(request: Request) {
   try {
@@ -18,7 +14,7 @@ export async function GET(request: Request) {
     const error = url.searchParams.get("error");
 
     if (error || !code || !state) {
-      return NextResponse.redirect(new URL("/workspaces?error=slack-oauth-failed", request.url));
+      return NextResponse.redirect(appRedirectUrl(request, "/workspaces?error=slack-oauth-failed"));
     }
 
     const cookieStore = await cookies();
@@ -28,18 +24,19 @@ export async function GET(request: Request) {
     const parsed = readSlackOAuthState(state);
 
     if (!savedState || !savedNonce || state !== savedState || !parsed || parsed.nonce !== savedNonce) {
-      return NextResponse.redirect(new URL("/workspaces?error=slack-invalid-state", request.url));
+      return NextResponse.redirect(appRedirectUrl(request, "/workspaces?error=slack-invalid-state"));
     }
 
-    const redirectUri = `${appOrigin(request)}/api/integrations/slack/callback`;
+    const redirectUri = slackCallbackRedirectUri(request);
     const oauthResponse = await exchangeSlackOAuthCode(code, redirectUri);
     await saveSlackInstallation(actor, {
       workspaceId: parsed.workspaceId,
       oauthResponse,
     });
 
-    return NextResponse.redirect(new URL(`/workspaces/${parsed.workspaceId}/settings?tab=general&slack=connected`, request.url));
+    return NextResponse.redirect(appRedirectUrl(request, `/workspaces/${parsed.workspaceId}/settings?tab=general&slack=connected`));
   } catch (error) {
+    rethrowNextRedirectError(error);
     return handleRouteError(error);
   }
 }
