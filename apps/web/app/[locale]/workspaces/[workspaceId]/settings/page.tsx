@@ -1,4 +1,5 @@
 import {
+  AppError,
   getMemberInvitePolicy,
   getModelUsageBudget,
   getSsoConfigByWorkspace,
@@ -69,7 +70,15 @@ export default async function SettingsPage({
   let invitePolicy: Awaited<ReturnType<typeof getMemberInvitePolicy>> = "ADMINS_ONLY";
   let inviteRequests: Awaited<ReturnType<typeof listMemberInviteRequests>> = [];
   if (tab === "members") {
-    const membership = await requireWorkspaceMembership({ actor, workspaceId });
+    let membership: Awaited<ReturnType<typeof requireWorkspaceMembership>>;
+    try {
+      membership = await requireWorkspaceMembership({ actor, workspaceId });
+    } catch (error) {
+      if (error instanceof AppError && error.status === 403) {
+        notFound();
+      }
+      throw error;
+    }
     isAdmin = membership?.role === "ADMIN";
     try {
       members = await listMembersEnriched(workspaceId, { includeInactive: true });
