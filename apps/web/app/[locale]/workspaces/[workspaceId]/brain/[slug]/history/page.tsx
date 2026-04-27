@@ -22,25 +22,25 @@ export default async function BrainArticleHistoryPage({
     <>
       <div className="ws-page-header">
         <div className="row">
-          <h1>History: {article.title}</h1>
-          <a href={`/workspaces/${workspaceId}/brain/${slug}`} className="link-button small">Back to article</a>
+          <h1>{t("historyTitle", { title: article.title })}</h1>
+          <a href={`/workspaces/${workspaceId}/brain/${slug}`} className="link-button small">{t("backToArticle")}</a>
         </div>
       </div>
 
       {versions.length === 0 ? (
-        <p className="muted">No previous versions. The article has not been edited since creation.</p>
+        <p className="muted">{t("noPreviousVersions")}</p>
       ) : (
         <div className="list">
           {versions.map((v) => (
             <div className="item" key={v.id}>
               <div className="row">
-                <strong>Version {v.version}</strong>
+                <strong>{t("version", { version: v.version })}</strong>
                 <span className="muted">{new Date(v.createdAt).toLocaleString()}</span>
               </div>
               {v.changeSummary && <p style={{ margin: "4px 0" }}>{v.changeSummary}</p>}
-              {v.agentRunId && <div className="muted">Changed by agent run {v.agentRunId.slice(0, 8)}</div>}
+              {v.agentRunId && <div className="muted">{t("changedByAgentRun", { id: v.agentRunId.slice(0, 8) })}</div>}
               <details style={{ marginTop: 8 }}>
-                <summary style={{ cursor: "pointer", color: "var(--accent)" }}>View body</summary>
+                <summary style={{ cursor: "pointer", color: "var(--accent)" }}>{t("viewBody")}</summary>
                 <pre style={{ whiteSpace: "pre-wrap", fontSize: "0.85rem", marginTop: 8, padding: 8, background: "var(--bg-alt)", borderRadius: 4 }}>
                   {v.bodyMd}
                 </pre>

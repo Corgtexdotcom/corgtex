@@ -9,6 +9,7 @@ import {
   deleteAllocationAction,
 } from "../actions";
 import { getTranslations } from "next-intl/server";
+import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
 
 export const dynamic = "force-dynamic";
 
@@ -18,6 +19,7 @@ export default async function CyclesPage({
   params: Promise<{ workspaceId: string }>;
 }) {
   const { workspaceId } = await params;
+  await requireWorkspaceFeature(workspaceId, "CYCLES");
   const actor = await requirePageActor();
   const t = await getTranslations("cycles");
   const currentUserId = actor.kind === "user" ? actor.user.id : "";

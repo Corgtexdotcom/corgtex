@@ -2,19 +2,22 @@
 
 import { useState } from "react";
 import { useFormStatus } from "react-dom";
+import { useTranslations } from "next-intl";
 
 function SsoSubmitButton() {
   const { pending } = useFormStatus();
+  const t = useTranslations("auth");
 
   return (
     <button type="submit" disabled={pending} className="button-outline">
-      {pending ? "Redirecting..." : "Continue with SSO"}
+      {pending ? t("ssoRedirecting") : t("ssoContinue")}
     </button>
   );
 }
 
 export function SsoLoginForm() {
   const [showSso, setShowSso] = useState(false);
+  const t = useTranslations("auth");
 
   if (!showSso) {
     return (
@@ -24,7 +27,7 @@ export function SsoLoginForm() {
         style={{ width: "100%", marginTop: 10 }}
         onClick={() => setShowSso(true)}
       >
-        Sign in with Google / Microsoft
+        {t("ssoSignIn")}
       </button>
     );
   }
@@ -32,10 +35,10 @@ export function SsoLoginForm() {
   return (
     <form action="/api/auth/sso/init" method="GET" className="stack" style={{ marginTop: 20, paddingTop: 20, borderTop: "1px solid var(--line)" }}>
       <p className="muted" style={{ fontSize: 13, marginBottom: 10 }}>
-        Enter your work email to continue to your organization&apos;s identity provider.
+        {t("ssoDescription")}
       </p>
       <label>
-        Work Email
+        {t("workEmailLabel")}
         <input
           name="email"
           type="email"

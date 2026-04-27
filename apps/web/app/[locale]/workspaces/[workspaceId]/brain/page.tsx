@@ -177,7 +177,7 @@ export default async function BrainPage({
             {meetings.slice(0, 20).map(m => (
               <div key={m.id} style={{ marginBottom: "12px" }}>
                 <a href={`/workspaces/${workspaceId}/meetings`} style={{ display: "block", textDecoration: "none", color: "var(--text)" }}>
-                  <div style={{ fontSize: "0.85rem", fontWeight: 600 }}>{m.title || `Untitled ${m.source} Meeting`}</div>
+                  <div style={{ fontSize: "0.85rem", fontWeight: 600 }}>{m.title || t("untitledSourceMeeting", { source: m.source })}</div>
                   <div className="nr-meta">{new Date(m.recordedAt).toLocaleDateString()}</div>
                 </a>
               </div>
@@ -209,9 +209,9 @@ export default async function BrainPage({
                   ))}
                 </select>
                 <select name="authority" style={{ flex: 1, padding: "8px", fontSize: "0.85rem", border: "1px solid var(--line)" }}>
-                  <option value="DRAFT">Draft</option>
-                  <option value="REFERENCE">Reference</option>
-                  <option value="AUTHORITATIVE">Authoritative</option>
+                  <option value="DRAFT">{t("authorityDraft")}</option>
+                  <option value="REFERENCE">{t("authorityReference")}</option>
+                  <option value="AUTHORITATIVE">{t("authorityAuthoritative")}</option>
                 </select>
               </div>
               <textarea name="bodyMd" required placeholder={t("bodyMd")} rows={4} style={{ padding: "8px", fontSize: "0.85rem", border: "1px solid var(--line)", borderRadius: "4px", fontFamily: "monospace" }} />

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useCallback } from "react";
+import { useTranslations } from "next-intl";
 
 export function MarkdownEditor({
   name,
@@ -15,6 +16,7 @@ export function MarkdownEditor({
 }) {
   const [value, setValue] = useState(defaultValue ?? "");
   const [preview, setPreview] = useState(false);
+  const t = useTranslations("shared.markdownEditor");
 
   const handleChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setValue(e.target.value);
@@ -28,18 +30,18 @@ export function MarkdownEditor({
           className={`md-editor-tab ${!preview ? "md-editor-tab-active" : ""}`}
           onClick={() => setPreview(false)}
         >
-          Write
+          {t("write")}
         </button>
         <button
           type="button"
           className={`md-editor-tab ${preview ? "md-editor-tab-active" : ""}`}
           onClick={() => setPreview(true)}
         >
-          Preview
+          {t("preview")}
         </button>
       </div>
       <div className="md-editor-preview" style={{ display: preview ? "block" : "none" }}>
-        {value || <span className="muted">Nothing to preview.</span>}
+        {value || <span className="muted">{t("emptyPreview")}</span>}
       </div>
       <textarea
         name={name}
