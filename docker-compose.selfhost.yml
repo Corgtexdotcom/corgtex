@@ -24,9 +24,9 @@ services:
         condition: service_healthy
     environment:
       DATABASE_URL: postgresql://postgres:postgres@postgres:5432/corgtex
-      SESSION_COOKIE_SECRET: changeme_topsecret_production_cookie
+      SESSION_COOKIE_SECRET: "<replace-with-32-character-random-secret>"
       ADMIN_EMAIL: admin@example.com
-      ADMIN_PASSWORD: changeme_admin_pass
+      ADMIN_PASSWORD: "<replace-with-bootstrap-admin-password>"
       WORKSPACE_NAME: Corgtex Demo
       WORKSPACE_SLUG: corgtex-demo
       APP_URL: http://localhost:3000

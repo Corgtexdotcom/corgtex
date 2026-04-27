@@ -28,6 +28,20 @@
 
 # docs
 .mintlify/
+docs/assets/
+docs/pr-assets/
+docs/plans/
+docs/partner-analysis/
+docs/*handover*.md
+docs/client-readiness-*.md
+docs/pilot-*.md
+docs/future-work*.md
+docs/industrial-*.md
+docs/slack-app-manifest.yml
+
+# local agent planning and generated artifacts
+.agents/plans/
+.artifacts/
 
 # prisma
 /prisma/dev.db
