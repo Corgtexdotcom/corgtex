@@ -5,7 +5,7 @@ import { chromium } from "playwright";
 const [, , baseUrlArg, outDirArg] = process.argv;
 
 const baseUrl = (baseUrlArg || process.env.CLIENT_READINESS_BASE_URL || "http://localhost:3000").replace(/\/$/, "");
-const outDir = path.resolve(outDirArg || process.env.CLIENT_READINESS_OUT_DIR || "docs/assets/client-readiness-2026-04-25");
+const outDir = path.resolve(outDirArg || process.env.CLIENT_READINESS_OUT_DIR || ".artifacts/client-readiness");
 const email = process.env.AGENT_E2E_EMAIL || "system+corgtex@corgtex.local";
 const password = process.env.AGENT_E2E_PASSWORD || "corgtex-test-agent-pw";
 const loginLocale = process.env.CLIENT_READINESS_LOCALE || "en";

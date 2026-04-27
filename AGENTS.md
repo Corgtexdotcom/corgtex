@@ -73,22 +73,29 @@ reviews code line-by-line. The full specification lives in
 - E2E UI credentials: read `AGENT_E2E_EMAIL` and `AGENT_E2E_PASSWORD` from the local `.env`. Defaults are `system+corgtex@corgtex.local` / `corgtex-test-agent-pw` if unset. Run `npm run seed:e2e` after `npm run prisma:seed` to provision the E2E UI user.
 - Agent API (E2E backend testing): set `AGENT_API_KEY` in `.env`. Use header `Authorization: Bearer agent-<AGENT_API_KEY>` against `http://localhost:3000`. `AGENT_API_KEY` is runtime auth config, not startup seed data. The bootstrap agent has ADMIN-equivalent access to allowed workspaces; wallet-dependent flows need extra setup.
 
+### Public docs hygiene
+
+- `docs/` is only for public documentation-site files. Do not commit private/client/partner notes, handoff docs, agent plans, Slack manifests, screenshots, recordings, or generated QA output under `docs/`.
+- Generated proof belongs in PR attachments, CI artifacts, private artifact links, or ignored local `.artifacts/` output.
+- Local pre-PR plan drafts belong under ignored `.agents/plans/`; the reviewed plan contract lives in the PR body and remains visible as GitHub PR metadata.
+- PR-body plans must be public-safe. Do not include private keys, API tokens, passwords, raw credentials, secret values, or customer-private facts. `scripts/check-plan.mjs` blocks obvious credential patterns in PR-body plans, but agents are still responsible for keeping plan prose sanitized.
+
 ---
 
 ## For Planners (Claude)
 
-Your job is to produce a plan file and nothing else. Do not write
+Your job is to produce a PR-body plan contract and nothing else. Do not write
 implementation code.
 
 1. Create a new branch: `git checkout -b <type>/<short-slug>` (e.g. `feat/optimistic-finance`, `fix/login-crash`).
-2. Copy [docs/plans/_TEMPLATE.md](docs/plans/_TEMPLATE.md) to `docs/plans/<branch>.md`. The filename is the branch name, lowercased, with `/` replaced by `-`.
-3. Fill every section, including **Risk tier** (`low`, `standard`, or `high`). The **Files to touch** section is a hard allowlist — the Executor cannot modify files outside it without first updating this file.
+2. Copy [.agents/plan-template.md](.agents/plan-template.md) into the draft PR body. For local checks before a PR exists, copy it to `.agents/plans/<branch>.md`; that directory is ignored and must not be committed.
+3. Fill every section, including **Risk tier** (`low`, `standard`, or `high`). The **Files to touch** section is a hard allowlist — the Executor cannot modify files outside it without first updating the PR body plan.
 4. Pick the smallest honest risk tier:
    - `low`: docs, copy, styles, or tightly scoped non-security changes. Cap: ≤ 1200 non-doc LOC and ≤ 50 files.
    - `standard`: normal product or domain work. Cap: ≤ 800 non-doc LOC and ≤ 25 files.
    - `high`: auth, permissions, migrations, deploy, workflows, security-sensitive logic, or broad shared behavior. Cap: ≤ 400 non-doc LOC and ≤ 15 files.
 5. If the plan touches forbidden paths (`deploy/**`, `.github/workflows/**`, `prisma/migrations/**`, `packages/domain/src/auth*.ts`, `apps/web/lib/auth.ts`), state the justification in the plan and note that the PR will need the `forbidden-path-approved` label.
-6. Commit the plan file on the branch, push, and open a **draft** PR whose body is the contents of the plan file. Do not mark ready-for-review.
+6. Push the branch and open a **draft** PR whose body is the completed public-safe plan. Do not commit local plan files. Do not mark ready-for-review.
 
 Stop there. Hand off to the Executor.
 
@@ -99,11 +106,11 @@ Stop there. Hand off to the Executor.
 Your job is to implement the plan. You do not plan, and you do not
 merge.
 
-1. **First action:** Verify your branch state (`git branch --show-current`) before working. Multiple agents run simultaneously in this repo. If you are on the wrong branch, checkout or create it (`git checkout -b <branch>`). Once on the correct branch, run `cat docs/plans/<branch>.md`.
-2. **Stay in scope:** only modify files listed in the plan's "Files to touch" section. If you discover the plan is wrong or incomplete, commit an update to the plan file first (separate commit), then write code. `scripts/check-plan.mjs` enforces this in CI.
+1. **First action:** Verify your branch state (`git branch --show-current`) before working. Multiple agents run simultaneously in this repo. If you are on the wrong branch, checkout or create it (`git checkout -b <branch>`). Once on the correct branch, read the PR body plan. If the PR does not exist yet, read `.agents/plans/<branch>.md`.
+2. **Stay in scope:** only modify files listed in the plan's "Files to touch" section. If you discover the plan is wrong or incomplete, update the PR body plan before writing code. `scripts/check-plan.mjs` enforces this in CI.
 3. **Run the test plan locally** before pushing. Run `npm run check` and whatever the plan's "Test plan" specifies. Wait for it to exit with code `0`. Fix any TypeScript or ESLint errors before proceeding.
-4. **Open the PR as ready-for-review** once all acceptance criteria are ticked. Use `gh pr create`. If `gh` isn't on `PATH`, invoke `/opt/homebrew/bin/gh`. The PR body must explicitly include the completed acceptance criteria checklist in Markdown, and must link back to `docs/plans/<branch>.md`.
-5. **Frontend changes:** commit actual visual proof (`.png`, `.jpg`, `.jpeg`, `.webp`, `.mp4`, or `.webm`) under `docs/assets/<branch-slug>/` and link it from the PR body. Any change under `apps/web/app/**`, `apps/web/components/**`, or `apps/web/lib/components/**` requires proof. **You must run the app locally and capture actual proof of the feature running. Do not submit AI-generated mockups or generic placeholders.**
+4. **Open the PR as ready-for-review** once all acceptance criteria are ticked. Use `gh pr create`. If `gh` isn't on `PATH`, invoke `/opt/homebrew/bin/gh`. The PR body must explicitly include the completed acceptance criteria checklist in Markdown.
+5. **Frontend changes:** add actual visual proof links in the PR body's **Visual Proof** section. Use PR attachments, CI-uploaded artifacts, or another private artifact link. Any change under `apps/web/app/**`, `apps/web/components/**`, or `apps/web/lib/components/**` requires proof. **You must run the app locally and capture actual proof of the feature running. Do not submit AI-generated mockups or generic placeholders. Do not commit screenshots, recordings, or generated QA output under `docs/assets/`.**
 6. **CI fix loop cap:** if CI is red, you may push up to 3 fix commits. After the 3rd failed attempt, label the PR `needs-replan`, comment a summary, and stop. The human will re-prompt the Planner.
 7. **Never (default):** merge your own PR, use `--admin`, skip hooks with `--no-verify`, or run `prisma db push`. Never remove `export const dynamic = "force-dynamic"` from a Prisma-touching page. Never commit `.env` or any secret.
 8. **Human-directed bypass:** If the human explicitly instructs you via prompt to force-merge a specific PR, you may: (a) add the `force-merge` label, (b) run `gh pr merge <number> --admin --squash`, (c) add a PR comment: `⚠️ Human-directed bypass: merged with --admin per explicit instruction.` This is the **only** exception to rule 7's ban on `--admin` and self-merging. You must still never skip `--no-verify`, run `prisma db push`, or commit secrets.
@@ -124,14 +131,14 @@ Do not write code. Do not merge if any criterion fails.
 Canonical checklist lives in [.codex/review.md](.codex/review.md).
 Summary:
 
-1. **Plan exists** at `docs/plans/<branch>.md` and is linked from the PR body.
-2. **Scope intact:** all changed files are in the plan's "Files to touch" allowlist, except visual proof under `docs/assets/<branch-slug>/` (`scripts/check-plan.mjs` enforces).
+1. **Plan exists** in the PR body.
+2. **Scope intact:** all changed files are in the plan's "Files to touch" allowlist (`scripts/check-plan.mjs` enforces).
 3. **Acceptance criteria all ticked** and each is reflected in code or CI output.
 4. **No forbidden-path changes** without the `forbidden-path-approved` label.
 5. **Diff within risk-tier caps** unless `large-change-approved` is set.
 6. **No secrets** (gitleaks green), no `prisma db push`, no `--no-verify`, no `force-dynamic` removed from Prisma pages. `--admin` is forbidden unless the `force-merge` label is present and the PR comment trail documents the human directive.
 7. **Tests added** when `packages/domain/**` changed.
-8. **Committed visual proof present** for any frontend-path change.
+8. **PR-body visual proof present** for any frontend-path change.
 9. **All required CI checks green.**
 10. **No objective logic flaws** (e.g., race conditions, unhandled rejections, security vulnerabilities).
 

@@ -14,7 +14,7 @@ Follow these steps to connect a read-only PostgreSQL instance.
     Provide explicit instructions to your DevOps team to generate a read-only Postgres user pointing to a securely accessible IP or Bastion host.
 
     ```sql
-    CREATE USER corgtex_readonly WITH PASSWORD 'SecurePass!';
+    CREATE USER corgtex_readonly WITH PASSWORD '<replace-with-generated-password>';
     GRANT CONNECT ON DATABASE production TO corgtex_readonly;
     GRANT USAGE ON SCHEMA public TO corgtex_readonly;
     GRANT SELECT ON ALL TABLES IN SCHEMA public TO corgtex_readonly;

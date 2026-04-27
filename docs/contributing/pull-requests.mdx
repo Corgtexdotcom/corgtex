@@ -11,30 +11,37 @@ This page covers the PR-specific conventions that apply to every change.
 
 - One branch per plan. No overlapping scopes.
 - Descriptive names: `feat/optimistic-finance`, `fix/login-crash`, `docs/agent-pipeline`.
-- Branch name becomes the plan filename: `docs/plans/<branch>.md` (lowercased, `/` replaced by `-`).
+- The plan contract lives in the PR body. Before the PR exists, agents may keep a local ignored copy at `.agents/plans/<branch>.md`.
 
 ## The plan is the contract
 
-Every PR is backed by a plan file at `docs/plans/<branch>.md`. The plan
+Every PR is backed by a plan contract in the PR body. The plan
 is the handoff between Planner, Executor, and Reviewer, and it is
 enforced mechanically:
 
-- `plan-present` CI job fails if the plan file is missing.
-- `scope-check` CI job fails if any changed file is outside the plan's "Files to touch" allowlist, except visual proof under `docs/assets/<branch-slug>/`.
-- The PR body must link to the plan file and state the risk tier.
+- `plan-present` CI job fails if the PR body does not contain a valid plan.
+- `scope-check` CI job fails if any changed file is outside the plan's "Files to touch" allowlist.
+- The PR body must state the risk tier.
 - The Reviewer (Codex) rejects PRs whose plan lacks ticked acceptance criteria.
 
-Copy [`docs/plans/_TEMPLATE.md`](https://github.com/corgtex/corgtex/blob/main/docs/plans/_TEMPLATE.md) to start.
+Copy [`/.agents/plan-template.md`](https://github.com/corgtex/corgtex/blob/main/.agents/plan-template.md) to start.
+
+PR-body plans remain visible in GitHub PR metadata. That is acceptable
+for normal execution plans, but plans must stay public-safe: no private
+keys, API tokens, passwords, raw credentials, secret values, or
+customer-private facts. `scripts/check-plan.mjs` blocks obvious
+credential patterns in the PR body; sensitive context should live in an
+approved private system and be referenced only generically.
 
 ## Opening the PR
 
 The Executor opens the PR using `gh pr create` (installed via
 Homebrew; `/opt/homebrew/bin/gh` if not on `PATH`). The PR body:
 
-1. **Links to the plan file.**
+1. **Contains the full plan contract.**
 2. **States the risk tier** — `low`, `standard`, or `high`.
 3. **Summarizes what shipped** — one or two sentences, the "walkthrough."
-4. **Links committed visual proof** under `docs/assets/<branch-slug>/` for any change under `apps/web/app/**`, `apps/web/components/**`, or `apps/web/lib/components/**`.
+4. **Links actual visual proof** in the **Visual Proof** section for any change under `apps/web/app/**`, `apps/web/components/**`, or `apps/web/lib/components/**`. Use PR attachments, CI-uploaded artifacts, or another private artifact link; do not commit generated screenshots or recordings under `docs/assets/`.
 
 Auto-merge is set by the Executor immediately (`gh pr merge --auto --squash`) so the PR merges as soon as the Reviewer approves and required checks are green.
 
@@ -46,14 +53,23 @@ Every PR must pass:
 - `test:unit` / `test:integration` / `test:all` — Vitest unit and DB-backed integration coverage. `test:integration` uses `docker-compose.test.yml`.
 - `db-sync` — migration ↔ schema parity.
 - `build` — `env -u DATABASE_URL npm run build` (database-independent).
-- `docs` — `mint validate` and broken-link check.
-- `plan-present` — plan file exists for the branch.
-- `scope-check` — changed files ⊆ plan allowlist, validates policy checks, and allows branch visual proof.
+- `docs` — public docs guard, `mint validate`, and broken-link check.
+- `plan-present` — PR body contains the plan contract.
+- `scope-check` — changed files ⊆ plan allowlist and policy checks pass.
 - `gitleaks` — no secrets in the diff.
 - `diff-size` — risk-tier caps: `low` ≤ 1200 non-doc LOC / 50 files, `standard` ≤ 800 / 25, `high` ≤ 400 / 15.
 
 All of these are required by branch protection on `main`. The Reviewer
 cannot merge a PR whose required checks are red.
+
+## Public docs hygiene
+
+The `docs/` tree is only for the public documentation site. Private or
+client-specific notes, partner analysis, handoff docs, generated QA
+output, screenshots, recordings, Slack manifests, and agent plan files
+must stay out of `docs/` and out of Git history. Keep local generated
+output under `.artifacts/`, and use PR attachments, CI artifacts, or
+private artifact links for review proof.
 
 ## Labels
 
