@@ -31,6 +31,7 @@ const SLACK_REQUIRED_SCOPES = [
 
 const SLACK_BROAD_INGESTION_SCOPES = ["channels:history"] as const;
 const SLACK_RAW_RETENTION_DAYS = 30;
+const INACTIVE_SLACK_INSTALLATION_ERROR = "Slack installation is not active.";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -285,6 +286,8 @@ export async function ingestCommunicationEvent(provider: CommunicationProvider, 
   }
 
   const installation = teamId ? await slackInstallationByTeam(teamId) : null;
+  const activeInstallation = installation?.status === "ACTIVE" ? installation : null;
+  const ignoredReason = installation ? INACTIVE_SLACK_INSTALLATION_ERROR : "No Corgtex Slack installation matched this event.";
   const inbound = await prisma.communicationInboundEvent.create({
     data: {
       provider: "SLACK",
@@ -294,25 +297,25 @@ export async function ingestCommunicationEvent(provider: CommunicationProvider, 
       eventType,
       dedupeKey,
       payload: toInputJson(rawEvent),
-      status: installation ? "PENDING" : "IGNORED",
-      error: installation ? null : "No active Corgtex Slack installation matched this event.",
+      status: activeInstallation ? "PENDING" : "IGNORED",
+      error: activeInstallation ? null : ignoredReason,
     },
   });
 
-  if (!installation) {
+  if (!activeInstallation) {
     return { inboundEventId: inbound.id, duplicate: false, ignored: true };
   }
 
   await prisma.$transaction(async (tx) => {
     await tx.communicationInstallation.update({
-      where: { id: installation.id },
+      where: { id: activeInstallation.id },
       data: { lastEventAt: new Date(), lastError: null },
     });
     await tx.workflowJob.upsert({
       where: { dedupeKey: `${inbound.id}:communication-slack-event` },
       update: {},
       create: {
-        workspaceId: installation.workspaceId,
+        workspaceId: activeInstallation.workspaceId,
         type: "communication.slack.event",
         payload: { inboundEventId: inbound.id },
         dedupeKey: `${inbound.id}:communication-slack-event`,
@@ -486,9 +489,18 @@ export async function processSlackInboundEvent(inboundEventId: string) {
 
   const payload = inbound.payload as Record<string, unknown>;
   const event = isRecord(payload.event) ? payload.event : payload;
+  const isDisconnectEvent = event.type === "app_uninstalled" || event.type === "tokens_revoked";
+
+  if (!isDisconnectEvent && inbound.installation.status !== "ACTIVE") {
+    await prisma.communicationInboundEvent.update({
+      where: { id: inbound.id },
+      data: { status: "IGNORED", processedAt: new Date(), error: INACTIVE_SLACK_INSTALLATION_ERROR },
+    });
+    return;
+  }
 
   try {
-    if (event.type === "app_uninstalled" || event.type === "tokens_revoked") {
+    if (isDisconnectEvent) {
       await prisma.communicationInstallation.update({
         where: { id: inbound.installation.id },
         data: { status: "DISCONNECTED", botTokenEnc: null, disconnectedAt: new Date() },
