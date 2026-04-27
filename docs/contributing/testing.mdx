@@ -37,8 +37,8 @@ The Reviewer (Codex) rejects a PR if:
 
 - Domain code under `packages/domain/**` changed without a
   corresponding test update.
-- A frontend path changes without committed visual proof under
-  `docs/assets/<branch-slug>/`.
+- A frontend path changes without actual visual proof linked from the
+  PR body's **Visual Proof** section.
 - The plan's "Test plan" section lists commands that were neither run
   locally nor covered by CI.
 
@@ -69,8 +69,9 @@ Summary:
 
 When a PR touches `apps/web/app/**`, `apps/web/components/**`, or
 `apps/web/lib/components/**`, the Executor logs into the UI using
-seeded credentials and commits a screen recording or screenshot under
-`docs/assets/<branch-slug>/`. Credentials live in `.env`
-(`AGENT_E2E_EMAIL`, `AGENT_E2E_PASSWORD`) — never hardcoded, never in PR
-descriptions. See the secrets section of
+seeded credentials and links a screen recording, screenshot, or CI
+artifact from the PR body's **Visual Proof** section. Generated browser
+artifacts belong under `.artifacts/` or in CI artifacts, not under
+`docs/assets/`. Credentials live in `.env` (`AGENT_E2E_EMAIL`,
+`AGENT_E2E_PASSWORD`) — never hardcoded, never in PR descriptions. See the secrets section of
 [`AGENTS.md`](https://github.com/corgtex/corgtex/blob/main/AGENTS.md#secrets-and-credentials).
