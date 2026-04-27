@@ -254,7 +254,7 @@ export function MembersTable({
                   <tr key={member.id} style={{ borderBottom: "1px dashed var(--line)", opacity: member.isActive ? 1 : 0.6 }}>
                     <td style={{ padding: "12px 16px", fontWeight: 500 }}>
                       <Link href={`/workspaces/${workspaceId}/members/${member.id}`} style={{ color: "inherit", textDecoration: "none" }}>
-                        {member.user.displayName || "Unknown"}
+                        {member.user.displayName || t("unknownUser")}
                       </Link>
                     </td>
                     <td style={{ padding: "12px 16px", color: "var(--muted)" }}>
@@ -273,7 +273,7 @@ export function MembersTable({
                           )}
                         </div>
                       ) : (
-                        <span className="muted" style={{ fontSize: "0.75rem" }}>None</span>
+                        <span className="muted" style={{ fontSize: "0.75rem" }}>{t("valNone")}</span>
                       )}
                     </td>
                     <td style={{ padding: "12px 16px", color: "var(--muted)", fontSize: "0.8rem" }}>
@@ -319,7 +319,7 @@ export function MembersTable({
                            <input type="hidden" name="workspaceId" value={workspaceId} />
                            <input type="hidden" name="memberId" value={member.id} />
                            <input type="hidden" name="isActive" value="true" />
-                           <button type="submit" className="secondary small" style={{ padding: "4px 8px", fontSize: "0.7rem" }} disabled title="Reactivation requires API / DB update currently">{t("btnReactivate")}</button>
+                           <button type="submit" className="secondary small" style={{ padding: "4px 8px", fontSize: "0.7rem" }} disabled title={t("reactivationDisabledTitle")}>{t("btnReactivate")}</button>
                         </form>
                       )}
                     </td>

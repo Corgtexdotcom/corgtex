@@ -306,17 +306,17 @@ EOF`}</code>
             </p>
             <div style={{ display: "grid", gap: "12px" }}>
               <div>
-                <strong style={{ fontSize: "0.8rem", display: "block", marginBottom: "4px" }}>Endpoint URL</strong>
+                <strong style={{ fontSize: "0.8rem", display: "block", marginBottom: "4px" }}>{t("labelEndpointUrl")}</strong>
                 <div style={{ display: "flex", gap: "8px" }}>
                   <input readOnly value={mcpUrl} style={{ flex: 1, fontFamily: "monospace" }} />
-                  <button className="button secondary" onClick={() => handleCopy(mcpUrl)}>Copy</button>
+                  <button className="button secondary" onClick={() => handleCopy(mcpUrl)}>{t("btnCopy")}</button>
                 </div>
               </div>
               <div>
-                <strong style={{ fontSize: "0.8rem", display: "block", marginBottom: "4px" }}>Authorization Header Value</strong>
+                <strong style={{ fontSize: "0.8rem", display: "block", marginBottom: "4px" }}>{t("labelAuthorizationHeaderValue")}</strong>
                 <div style={{ display: "flex", gap: "8px" }}>
                   <input readOnly value={`Bearer ${token}`} style={{ flex: 1, fontFamily: "monospace" }} />
-                  <button className="button secondary" onClick={() => handleCopy(`Bearer ${token}`)}>Copy</button>
+                  <button className="button secondary" onClick={() => handleCopy(`Bearer ${token}`)}>{t("btnCopy")}</button>
                 </div>
               </div>
             </div>

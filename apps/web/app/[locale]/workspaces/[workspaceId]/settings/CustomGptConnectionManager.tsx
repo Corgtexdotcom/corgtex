@@ -111,7 +111,7 @@ Your primary objective is to assist team members in participating effectively wi
         <ol className="stack" style={{ gap: 16, paddingLeft: 16, fontSize: "0.85rem", margin: 0 }}>
           <li>
             <strong>{t("stepCreateGpt")}</strong>
-            <p className="muted mt-1">{t("stepCreateGptDesc")} <a href="https://chatgpt.com/gpts/editor" target="_blank" rel="noreferrer" style={{color: "var(--accent)"}}>ChatGPT -&gt; Explore -&gt; Create</a></p>
+            <p className="muted mt-1">{t("stepCreateGptDesc")} <a href="https://chatgpt.com/gpts/editor" target="_blank" rel="noreferrer" style={{color: "var(--accent)"}}>{t("stepCreateGptLink")}</a></p>
           </li>
           
           <li>
