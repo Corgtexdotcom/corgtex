@@ -11,14 +11,20 @@ import {
   updateCycle,
   upsertCycleUpdate
 } from "@corgtex/domain";
+import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
 
+async function requireCyclesEnabled(formData: FormData) {
+  const workspaceId = asString(formData, "workspaceId");
+  await requireWorkspaceFeature(workspaceId, "CYCLES");
+  return workspaceId;
+}
 
 export async function createCycleAction(formData: FormData) {
   const _demoGuardWsId = formData.get("workspaceId") as string;
   if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
 
   const actor = await requirePageActor();
-  const workspaceId = asString(formData, "workspaceId");
+  const workspaceId = await requireCyclesEnabled(formData);
   await createCycle(actor, {
     workspaceId,
     name: asString(formData, "name"),
@@ -35,7 +41,7 @@ export async function updateCycleAction(formData: FormData) {
   if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
 
   const actor = await requirePageActor();
-  const workspaceId = asString(formData, "workspaceId");
+  const workspaceId = await requireCyclesEnabled(formData);
   await updateCycle(actor, {
     workspaceId,
     cycleId: asString(formData, "cycleId"),
@@ -56,7 +62,7 @@ export async function upsertCycleUpdateAction(formData: FormData) {
   if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
 
   const actor = await requirePageActor();
-  const workspaceId = asString(formData, "workspaceId");
+  const workspaceId = await requireCyclesEnabled(formData);
   await upsertCycleUpdate(actor, {
     workspaceId,
     cycleId: asString(formData, "cycleId"),
@@ -75,7 +81,7 @@ export async function createAllocationAction(formData: FormData) {
   if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
 
   const actor = await requirePageActor();
-  const workspaceId = asString(formData, "workspaceId");
+  const workspaceId = await requireCyclesEnabled(formData);
   await createAllocation(actor, {
     workspaceId,
     cycleId: asString(formData, "cycleId"),
@@ -92,7 +98,7 @@ export async function updateAllocationAction(formData: FormData) {
   if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
 
   const actor = await requirePageActor();
-  const workspaceId = asString(formData, "workspaceId");
+  const workspaceId = await requireCyclesEnabled(formData);
   await updateAllocation(actor, {
     workspaceId,
     cycleId: asString(formData, "cycleId"),
@@ -109,7 +115,7 @@ export async function deleteAllocationAction(formData: FormData) {
   if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
 
   const actor = await requirePageActor();
-  const workspaceId = asString(formData, "workspaceId");
+  const workspaceId = await requireCyclesEnabled(formData);
   await deleteAllocation(actor, {
     workspaceId,
     cycleId: asString(formData, "cycleId"),
