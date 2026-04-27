@@ -2,7 +2,6 @@ import { createHash } from "node:crypto";
 import { prisma, randomOpaqueToken, sha256, env } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { AppError, invariant } from "./errors";
-import { requireWorkspaceMembership } from "./auth";
 import { ALL_SCOPES, type AgentScope } from "./agent-auth";
 
 const MCP_CLIENT_PREFIX = "mcp_client_";
@@ -202,6 +201,35 @@ function verifyPkce(params: {
   }
 }
 
+async function hasActiveMcpWorkspaceMembership(params: {
+  userId: string;
+  workspaceId: string;
+}) {
+  const membership = await prisma.member.findUnique({
+    where: {
+      workspaceId_userId: {
+        workspaceId: params.workspaceId,
+        userId: params.userId,
+      },
+    },
+    select: {
+      id: true,
+      isActive: true,
+    },
+  });
+
+  return Boolean(membership?.isActive);
+}
+
+async function requireActiveMcpWorkspaceMembership(params: {
+  userId: string;
+  workspaceId: string;
+}) {
+  if (!(await hasActiveMcpWorkspaceMembership(params))) {
+    throw new AppError(403, "NOT_A_MEMBER", "You are not an active member of this workspace.");
+  }
+}
+
 export function isAllowedMcpRedirectUri(registeredRedirectUris: string[], redirectUri: string) {
   return registeredRedirectUris.includes(redirectUri);
 }
@@ -297,7 +325,7 @@ export async function issueMcpAuthorizationCode(actor: AppActor, params: {
   }
 
   const client = await getMcpOAuthClientByClientId(params.clientId);
-  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  await requireActiveMcpWorkspaceMembership({ userId: actor.user.id, workspaceId: params.workspaceId });
 
   if (!isAllowedMcpRedirectUri(client.redirectUris, params.redirectUri)) {
     throw new AppError(400, "INVALID_INPUT", "Redirect URI is not registered for this MCP client.");
@@ -371,6 +399,7 @@ export async function exchangeMcpAuthorizationCode(params: {
   if (!instance) {
     throw new AppError(403, "FORBIDDEN", "The target Corgtex instance is no longer registered.");
   }
+  await requireActiveMcpWorkspaceMembership({ userId: authCode.userId, workspaceId: authCode.workspaceId });
 
   await prisma.mcpOAuthAuthorizationCode.update({
     where: { id: authCode.id },
@@ -447,6 +476,7 @@ export async function refreshMcpAccessToken(params: {
   if (!getMcpConnectorInstance(token.instanceSlug)) {
     throw new AppError(403, "FORBIDDEN", "The target Corgtex instance is no longer registered.");
   }
+  await requireActiveMcpWorkspaceMembership({ userId: token.userId, workspaceId: token.workspaceId });
 
   const accessToken = `${MCP_ACCESS_TOKEN_PREFIX}${randomOpaqueToken()}`;
   const refreshToken = `${MCP_REFRESH_TOKEN_PREFIX}${randomOpaqueToken()}`;
@@ -516,6 +546,9 @@ export async function resolveMcpOAuthAccessToken(tokenString: string, expectedRe
     return null;
   }
   if (!getMcpConnectorInstance(token.instanceSlug)) {
+    return null;
+  }
+  if (!(await hasActiveMcpWorkspaceMembership({ userId: token.userId, workspaceId: token.workspaceId }))) {
     return null;
   }
 
