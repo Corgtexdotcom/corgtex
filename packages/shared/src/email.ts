@@ -1,4 +1,5 @@
 import { env } from "./env";
+import { Resend } from "resend";
 
 export async function sendEmail(params: {
   to: string;
@@ -13,26 +14,19 @@ export async function sendEmail(params: {
     return;
   }
 
+  const resend = new Resend(apiKey);
   const replyTo = params.replyTo ?? env.EMAIL_REPLY_TO;
 
-  const res = await fetch("https://api.resend.com/emails", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      from: env.EMAIL_FROM,
-      to: params.to,
-      subject: params.subject,
-      html: params.html,
-      ...(replyTo ? { reply_to: replyTo } : {}),
-    }),
+  const { error } = await resend.emails.send({
+    from: env.EMAIL_FROM,
+    to: params.to,
+    subject: params.subject,
+    html: params.html,
+    ...(replyTo ? { reply_to: replyTo } : {}),
   });
 
-  if (!res.ok) {
-    const body = await res.text();
-    console.error("[email] Resend API error:", res.status, body);
-    throw new Error(`Email send failed: ${res.status}`);
+  if (error) {
+    console.error("[email] Resend API error:", error);
+    throw new Error(`Email send failed: ${error.message}`);
   }
 }
