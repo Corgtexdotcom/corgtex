@@ -11,35 +11,58 @@ export type WorkspaceFeatureFlag =
 export type WorkspaceFeatureFlagMap = Record<WorkspaceFeatureFlag, boolean>;
 
 export const DEFAULT_WORKSPACE_FEATURE_FLAGS: WorkspaceFeatureFlagMap = {
+  GOALS: true,
   RELATIONSHIPS: true,
+  CYCLES: true,
   AGENT_GOVERNANCE: true,
   OS_METRICS: true,
   MULTILINGUAL: false,
 };
 
 const WORKSPACE_FEATURE_FLAG_VALUES: WorkspaceFeatureFlag[] = [
+  "GOALS",
   "RELATIONSHIPS",
+  "CYCLES",
   "AGENT_GOVERNANCE",
   "OS_METRICS",
   "MULTILINGUAL",
 ];
+
+const CRINA_STABLE_WORKSPACE_SLUGS = new Set(["crina"]);
+
+const CRINA_STABLE_FEATURE_FLAGS: Partial<WorkspaceFeatureFlagMap> = {
+  GOALS: false,
+  RELATIONSHIPS: false,
+  CYCLES: false,
+  AGENT_GOVERNANCE: false,
+  OS_METRICS: false,
+};
 
 function isKnownWorkspaceFeatureFlag(flag: string): flag is WorkspaceFeatureFlag {
   return WORKSPACE_FEATURE_FLAG_VALUES.includes(flag as WorkspaceFeatureFlag);
 }
 
 export async function getWorkspaceFeatureFlags(workspaceId: string): Promise<WorkspaceFeatureFlagMap> {
-  const flags = { ...DEFAULT_WORKSPACE_FEATURE_FLAGS };
-  const records = await prisma.workspaceFeatureFlag.findMany({
-    where: {
-      workspaceId,
-      flag: { in: WORKSPACE_FEATURE_FLAG_VALUES },
-    },
-    select: {
-      flag: true,
-      enabled: true,
-    },
-  });
+  const [workspace, records] = await Promise.all([
+    prisma.workspace.findUnique({
+      where: { id: workspaceId },
+      select: { slug: true },
+    }),
+    prisma.workspaceFeatureFlag.findMany({
+      where: {
+        workspaceId,
+        flag: { in: WORKSPACE_FEATURE_FLAG_VALUES },
+      },
+      select: {
+        flag: true,
+        enabled: true,
+      },
+    }),
+  ]);
+  const flags = {
+    ...DEFAULT_WORKSPACE_FEATURE_FLAGS,
+    ...(workspace && CRINA_STABLE_WORKSPACE_SLUGS.has(workspace.slug) ? CRINA_STABLE_FEATURE_FLAGS : {}),
+  };
 
   for (const record of records) {
     if (isKnownWorkspaceFeatureFlag(record.flag)) {
