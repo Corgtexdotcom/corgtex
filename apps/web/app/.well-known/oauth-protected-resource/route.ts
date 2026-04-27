@@ -1,12 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { ALL_SCOPES, getMcpPublicUrl } from "@corgtex/domain";
-
-function originFromRequest(request: NextRequest) {
-  return new URL(request.url).origin;
-}
+import { getPublicOrigin } from "@/lib/public-origin";
 
 export async function GET(request: NextRequest) {
-  const origin = originFromRequest(request);
+  const origin = getPublicOrigin(request);
   return NextResponse.json({
     resource: getMcpPublicUrl(origin),
     authorization_servers: [origin],
