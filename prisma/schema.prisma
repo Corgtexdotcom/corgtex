@@ -257,72 +257,76 @@ enum SensitivityLabel {
 }
 
 model Workspace {
-  id                         String                      @id @default(uuid())
-  slug                       String                      @unique
-  name                       String
-  description                String?
-  createdAt                  DateTime                    @default(now())
-  updatedAt                  DateTime                    @updatedAt
-  members                    Member[]
-  memberInviteRequests       MemberInviteRequest[]
-  circles                    Circle[]
-  actions                    Action[]
-  tensions                   Tension[]
-  proposals                  Proposal[]
-  approvalFlows              ApprovalFlow[]
-  approvalPolicy             ApprovalPolicy[]
-  cycles                     Cycle[]
-  ledgerAccounts             LedgerAccount[]
-  ledgerEntries              LedgerEntry[]
-  spendRequests              SpendRequest[]
-  meetings                   Meeting[]
-  documents                  Document[]
-  policyCorpus               PolicyCorpus[]
-  constitutions              Constitution[]
-  governanceScores           GovernanceScore[]
-  auditLogs                  AuditLog[]
-  events                     Event[]
-  workflowJobs               WorkflowJob[]
-  knowledge                  KnowledgeChunk[]
-  modelUsage                 ModelUsage[]
-  agentRuns                  AgentRun[]
-  agentCreds                 AgentCredential[]
-  notifications              Notification[]
-  conversations              ConversationSession[]
-  agentMemories              AgentMemory[]
-  webhookEndpoints           WebhookEndpoint[]
-  inboundWebhooks            InboundWebhook[]
-  brainArticles              BrainArticle[]
-  brainSources               BrainSource[]
-  brainBacklinks             BrainBacklink[]
-  expertiseTags              ExpertiseTag[]
-  adviceProcesses            AdviceProcess[]
-  impactFootprints           ImpactFootprint[]
-  checkIns                   CheckIn[]
-  demoLeads                  DemoLead[]
-  crmContacts                CrmContact[]
-  crmDeals                   CrmDeal[]
-  crmActivities              CrmActivity[]
-  agentConfigs               WorkspaceAgentConfig[]
-  oauthApps                  OAuthApp[]
-  mcpOAuthCodes              McpOAuthAuthorizationCode[]
-  mcpOAuthTokens             McpOAuthAccessToken[]
-  ssoConfigs                 WorkspaceSsoConfig[]
-  modelUsageBudget           ModelUsageBudget?
-  externalDataSources        ExternalDataSource[]
-  featureFlags               WorkspaceFeatureFlag[]
-  meetingInsights            MeetingInsight[]
-  goals                      Goal[]
-  recognitions               Recognition[]
-  agentIdentities            AgentIdentity[]
-  deliberationEntries        DeliberationEntry[]
-  communicationInstallations CommunicationInstallation[]
-  communicationExternalUsers CommunicationExternalUser[]
-  communicationChannels      CommunicationChannel[]
-  communicationMessages      CommunicationMessage[]
-  communicationInboundEvents CommunicationInboundEvent[]
-  communicationEntityLinks   CommunicationEntityLink[]
-  archiveRecords             WorkspaceArchiveRecord[]
+  id                            String                      @id @default(uuid())
+  slug                          String                      @unique
+  name                          String
+  description                   String?
+  createdAt                     DateTime                    @default(now())
+  updatedAt                     DateTime                    @updatedAt
+  members                       Member[]
+  memberInviteRequests          MemberInviteRequest[]
+  circles                       Circle[]
+  actions                       Action[]
+  tensions                      Tension[]
+  proposals                     Proposal[]
+  approvalFlows                 ApprovalFlow[]
+  approvalPolicy                ApprovalPolicy[]
+  cycles                        Cycle[]
+  ledgerAccounts                LedgerAccount[]
+  ledgerEntries                 LedgerEntry[]
+  spendRequests                 SpendRequest[]
+  meetings                      Meeting[]
+  documents                     Document[]
+  policyCorpus                  PolicyCorpus[]
+  constitutions                 Constitution[]
+  governanceScores              GovernanceScore[]
+  auditLogs                     AuditLog[]
+  events                        Event[]
+  workflowJobs                  WorkflowJob[]
+  knowledge                     KnowledgeChunk[]
+  modelUsage                    ModelUsage[]
+  agentRuns                     AgentRun[]
+  agentCreds                    AgentCredential[]
+  notifications                 Notification[]
+  conversations                 ConversationSession[]
+  agentMemories                 AgentMemory[]
+  webhookEndpoints              WebhookEndpoint[]
+  inboundWebhooks               InboundWebhook[]
+  brainArticles                 BrainArticle[]
+  brainSources                  BrainSource[]
+  brainBacklinks                BrainBacklink[]
+  expertiseTags                 ExpertiseTag[]
+  adviceProcesses               AdviceProcess[]
+  impactFootprints              ImpactFootprint[]
+  checkIns                      CheckIn[]
+  demoLeads                     DemoLead[]
+  crmContacts                   CrmContact[]
+  crmDeals                      CrmDeal[]
+  crmActivities                 CrmActivity[]
+  agentConfigs                  WorkspaceAgentConfig[]
+  oauthApps                     OAuthApp[]
+  mcpOAuthCodes                 McpOAuthAuthorizationCode[]
+  mcpOAuthTokens                McpOAuthAccessToken[]
+  ssoConfigs                    WorkspaceSsoConfig[]
+  modelUsageBudget              ModelUsageBudget?
+  externalDataSources           ExternalDataSource[]
+  featureFlags                  WorkspaceFeatureFlag[]
+  meetingInsights               MeetingInsight[]
+  goals                         Goal[]
+  recognitions                  Recognition[]
+  agentIdentities               AgentIdentity[]
+  deliberationEntries           DeliberationEntry[]
+  communicationInstallations    CommunicationInstallation[]
+  communicationExternalUsers    CommunicationExternalUser[]
+  communicationChannels         CommunicationChannel[]
+  communicationMessages         CommunicationMessage[]
+  communicationInboundEvents    CommunicationInboundEvent[]
+  communicationEntityLinks      CommunicationEntityLink[]
+  archiveRecords                WorkspaceArchiveRecord[]
+  crmQualifications             CrmQualification[]
+  crmConversations              CrmConversation[]
+  crmProspectWorkspacesAsCrm    CrmProspectWorkspace[]      @relation("CrmWorkspace")
+  crmProspectWorkspacesAsTarget CrmProspectWorkspace[]      @relation("TargetWorkspace")
 }
 
 model WorkspaceFeatureFlag {
@@ -493,37 +497,39 @@ model CommunicationEntityLink {
 }
 
 model User {
-  id                     String                @id @default(uuid())
-  email                  String                @unique
-  displayName            String?
-  passwordHash           String
-  globalRole             GlobalRole            @default(USER)
-  createdAt              DateTime              @default(now())
-  updatedAt              DateTime              @updatedAt
-  sessions               Session[]
-  memberships            Member[]
-  authoredActions        Action[]              @relation("ActionAuthor")
-  authoredTensions       Tension[]             @relation("TensionAuthor")
-  authoredProposals      Proposal[]            @relation("ProposalAuthor")
-  spendRequests          SpendRequest[]        @relation("SpendRequester")
-  spendComments          SpendComment[]        @relation("SpendCommentAuthor")
-  cycleUpdates           CycleUpdate[]
-  allocationsFrom        Allocation[]          @relation("AllocFrom")
-  allocationsTo          Allocation[]          @relation("AllocTo")
-  reactions              ProposalReaction[]
-  objections             Objection[]
-  tensionUpvotes         TensionUpvote[]
-  agentCreds             AgentCredential[]     @relation("AgentCredentialCreator")
-  notifications          Notification[]
-  conversations          ConversationSession[]
-  oauthConnections       OAuthConnection[]
-  mcpOAuthCodes          McpOAuthAuthorizationCode[]
-  mcpOAuthTokens         McpOAuthAccessToken[]
-  resetTokens            PasswordResetToken[]
-  ssoIdentities          UserSsoIdentity[]
-  meetingInsights        MeetingInsight[]
-  createdAgentIdentities AgentIdentity[]       @relation("AgentIdentityCreator")
-  deliberationEntries    DeliberationEntry[]
+  id                      String                      @id @default(uuid())
+  email                   String                      @unique
+  displayName             String?
+  passwordHash            String
+  globalRole              GlobalRole                  @default(USER)
+  createdAt               DateTime                    @default(now())
+  updatedAt               DateTime                    @updatedAt
+  sessions                Session[]
+  memberships             Member[]
+  authoredActions         Action[]                    @relation("ActionAuthor")
+  authoredTensions        Tension[]                   @relation("TensionAuthor")
+  authoredProposals       Proposal[]                  @relation("ProposalAuthor")
+  spendRequests           SpendRequest[]              @relation("SpendRequester")
+  spendComments           SpendComment[]              @relation("SpendCommentAuthor")
+  cycleUpdates            CycleUpdate[]
+  allocationsFrom         Allocation[]                @relation("AllocFrom")
+  allocationsTo           Allocation[]                @relation("AllocTo")
+  reactions               ProposalReaction[]
+  objections              Objection[]
+  tensionUpvotes          TensionUpvote[]
+  agentCreds              AgentCredential[]           @relation("AgentCredentialCreator")
+  notifications           Notification[]
+  conversations           ConversationSession[]
+  oauthConnections        OAuthConnection[]
+  mcpOAuthCodes           McpOAuthAuthorizationCode[]
+  mcpOAuthTokens          McpOAuthAccessToken[]
+  resetTokens             PasswordResetToken[]
+  ssoIdentities           UserSsoIdentity[]
+  meetingInsights         MeetingInsight[]
+  createdAgentIdentities  AgentIdentity[]             @relation("AgentIdentityCreator")
+  deliberationEntries     DeliberationEntry[]
+  crmConversationMessages CrmConversationMessage[]
+  reviewedQualifications  CrmQualification[]          @relation("QualificationReviewer")
 }
 
 model Session {
@@ -1814,15 +1820,27 @@ model ImpactFootprint {
 }
 
 model DemoLead {
-  id          String   @id @default(uuid())
-  workspaceId String
-  email       String
-  source      String   @default("demo_gate")
-  createdAt   DateTime @default(now())
-  lastSeenAt  DateTime @default(now())
-  visitCount  Int      @default(1)
-
-  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  id                    String                 @id @default(uuid())
+  workspaceId           String
+  email                 String
+  source                String                 @default("demo_gate")
+  createdAt             DateTime               @default(now())
+  lastSeenAt            DateTime               @default(now())
+  visitCount            Int                    @default(1)
+  qualifyToken          String?                @unique
+  companyHint           String?
+  ipCountry             String?
+  referrerUrl           String?
+  utmSource             String?
+  utmMedium             String?
+  utmCampaign           String?
+  welcomeEmailSentAt    DateTime?
+  convertedAt           DateTime?
+  convertedContactId    String?
+  workspace             Workspace              @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  crmQualifications     CrmQualification[]
+  crmConversations      CrmConversation[]
+  crmProspectWorkspaces CrmProspectWorkspace[]
 
   @@unique([workspaceId, email])
   @@index([workspaceId, createdAt])
@@ -1865,9 +1883,10 @@ model CrmContact {
   createdAt        DateTime  @default(now())
   updatedAt        DateTime  @updatedAt
 
-  workspace  Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  deals      CrmDeal[]
-  activities CrmActivity[]
+  workspace        Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  deals            CrmDeal[]
+  activities       CrmActivity[]
+  crmConversations CrmConversation[]
 
   @@unique([workspaceId, email])
   @@index([workspaceId, createdAt])
@@ -1891,9 +1910,10 @@ model CrmDeal {
   createdAt        DateTime     @default(now())
   updatedAt        DateTime     @updatedAt
 
-  workspace  Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  contact    CrmContact    @relation(fields: [contactId], references: [id], onDelete: Cascade)
-  activities CrmActivity[]
+  workspace        Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  contact          CrmContact        @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  activities       CrmActivity[]
+  crmConversations CrmConversation[]
 
   @@index([workspaceId, stage])
   @@index([contactId])
@@ -2040,16 +2060,16 @@ model OAuthAccessToken {
 }
 
 model McpOAuthClient {
-  id                      String    @id @default(uuid())
-  clientId                String    @unique
+  id                      String   @id @default(uuid())
+  clientId                String   @unique
   clientSecret            String?
   name                    String
   redirectUris            String[]
   scopes                  String[]
-  tokenEndpointAuthMethod String    @default("none")
-  isActive                Boolean   @default(true)
-  createdAt               DateTime  @default(now())
-  updatedAt               DateTime  @updatedAt
+  tokenEndpointAuthMethod String   @default("none")
+  isActive                Boolean  @default(true)
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
 
   authCodes    McpOAuthAuthorizationCode[]
   accessTokens McpOAuthAccessToken[]
@@ -2377,4 +2397,102 @@ model CircleAgentAssignment {
   role          Role?         @relation(fields: [roleId], references: [id], onDelete: SetNull)
 
   @@unique([circleId, agentIdentityId])
+}
+
+model CrmQualification {
+  id                    String    @id @default(uuid())
+  workspaceId           String
+  demoLeadId            String
+  responseChannel       String
+  companyName           String?
+  website               String?
+  roleTitle             String?
+  aiExperience          String?
+  helpNeeded            String?
+  rawEmailReply         String?   @db.Text
+  rawEmailSubject       String?
+  status                String    @default("PENDING_REVIEW") // PENDING_REVIEW, APPROVED, REJECTED
+  reviewNote            String?   @db.Text
+  reviewedByUserId      String?
+  reviewedAt            DateTime?
+  schedulingEmailSentAt DateTime?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  workspace  Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  demoLead   DemoLead  @relation(fields: [demoLeadId], references: [id], onDelete: Cascade)
+  reviewedBy User?     @relation("QualificationReviewer", fields: [reviewedByUserId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId, status])
+  @@index([demoLeadId])
+}
+
+model CrmConversation {
+  id          String   @id @default(uuid())
+  workspaceId String
+  demoLeadId  String?
+  contactId   String?
+  dealId      String?
+  subject     String?
+  status      String   @default("OPEN") // OPEN, CLOSED, SNOOZED
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  workspace Workspace                @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  demoLead  DemoLead?                @relation(fields: [demoLeadId], references: [id], onDelete: SetNull)
+  contact   CrmContact?              @relation(fields: [contactId], references: [id], onDelete: SetNull)
+  deal      CrmDeal?                 @relation(fields: [dealId], references: [id], onDelete: SetNull)
+  messages  CrmConversationMessage[]
+
+  @@index([workspaceId, status])
+  @@index([demoLeadId])
+  @@index([contactId])
+}
+
+model CrmConversationMessage {
+  id             String   @id @default(uuid())
+  conversationId String
+  senderType     String // LEAD, ADMIN, SYSTEM
+  senderUserId   String? // if ADMIN
+  senderEmail    String? // if LEAD or ADMIN (fallback)
+  bodyMd         String   @db.Text
+  isRead         Boolean  @default(false)
+  createdAt      DateTime @default(now())
+
+  conversation CrmConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  senderUser   User?           @relation(fields: [senderUserId], references: [id], onDelete: SetNull)
+
+  @@index([conversationId, createdAt])
+}
+
+model CrmProspectWorkspace {
+  id                String   @id @default(uuid())
+  crmWorkspaceId    String
+  demoLeadId        String
+  targetWorkspaceId String
+  adminEmail        String
+  status            String   @default("PROVISIONING") // PROVISIONING, ACTIVE, SUSPENDED
+  provisionedAt     DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  crmWorkspace    Workspace @relation("CrmWorkspace", fields: [crmWorkspaceId], references: [id], onDelete: Cascade)
+  targetWorkspace Workspace @relation("TargetWorkspace", fields: [targetWorkspaceId], references: [id], onDelete: Cascade)
+  demoLead        DemoLead  @relation(fields: [demoLeadId], references: [id], onDelete: Cascade)
+
+  @@index([crmWorkspaceId, status])
+  @@index([demoLeadId])
+  @@index([targetWorkspaceId])
+}
+
+model InstanceRegistry {
+  id               String    @id @default(uuid())
+  label            String
+  url              String    @unique
+  environment      String    @default("production") // "production", "staging"
+  notes            String?   @db.Text
+  lastHealthCheck  DateTime?
+  lastHealthStatus String?
+  lastHealthError  String?   @db.Text
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
 }
