@@ -1,8 +1,9 @@
-import { listMembersEnriched, listAgentIdentities, requireWorkspaceMembership } from "@corgtex/domain";
+import { AppError, listMembersEnriched, listAgentIdentities, requireWorkspaceMembership } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import Link from "next/link";
 import { getTranslations } from "next-intl/server";
 import { getWorkspaceFeatureFlags } from "@/lib/workspace-feature-flags";
+import { notFound } from "next/navigation";
 
 export const dynamic = "force-dynamic";
 
@@ -14,9 +15,16 @@ export default async function MembersPage({
   const { workspaceId } = await params;
   const actor = await requirePageActor();
   const t = await getTranslations("members");
-  const featureFlags = await getWorkspaceFeatureFlags(workspaceId);
-  await requireWorkspaceMembership({ actor, workspaceId });
+  try {
+    await requireWorkspaceMembership({ actor, workspaceId });
+  } catch (error) {
+    if (error instanceof AppError && error.status === 403) {
+      notFound();
+    }
+    throw error;
+  }
 
+  const featureFlags = await getWorkspaceFeatureFlags(workspaceId);
   const members = await listMembersEnriched(workspaceId, { includeInactive: false });
   const agents = featureFlags.AGENT_GOVERNANCE ? await listAgentIdentities(actor, workspaceId) : [];
 
