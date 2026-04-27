@@ -4,7 +4,12 @@ import type { AppActor, MembershipSummary } from "@corgtex/shared";
 import { AppError, invariant } from "./errors";
 
 const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 14;
-export async function loginUserWithPassword(params: { email: string; password: string }) {
+export async function loginUserWithPassword(params: {
+  email: string;
+  password: string;
+  ipAddress?: string | null;
+  userAgent?: string | null;
+}) {
   const email = params.email.trim().toLowerCase();
   invariant(email.length > 0, 400, "INVALID_INPUT", "Email is required.");
   invariant(params.password.length >= 8, 400, "INVALID_INPUT", "Password must be at least 8 characters.");
@@ -24,15 +29,9 @@ export async function loginUserWithPassword(params: { email: string; password: s
     throw new AppError(401, "UNAUTHENTICATED", "Invalid email or password.");
   }
 
-  const token = randomOpaqueToken();
-  const expiresAt = new Date(Date.now() + SESSION_TTL_MS);
-
-  await prisma.session.create({
-    data: {
-      userId: user.id,
-      tokenHash: sha256(token),
-      expiresAt,
-    },
+  const { token, expiresAt } = await createSession(user.id, {
+    ipAddress: params.ipAddress,
+    userAgent: params.userAgent,
   });
 
   return {
@@ -47,15 +46,20 @@ export async function loginUserWithPassword(params: { email: string; password: s
   };
 }
 
-export async function createSession(userId: string) {
+export async function createSession(
+  userId: string,
+  meta: { ipAddress?: string | null; userAgent?: string | null } = {}
+) {
   const token = randomOpaqueToken();
-  const expiresAt = new Date(Date.now() + 1000 * 60 * 60 * 24 * 14);
+  const expiresAt = new Date(Date.now() + SESSION_TTL_MS);
 
   await prisma.session.create({
     data: {
       userId,
       tokenHash: sha256(token),
       expiresAt,
+      ipAddress: meta.ipAddress,
+      userAgent: meta.userAgent,
     },
   });
 
