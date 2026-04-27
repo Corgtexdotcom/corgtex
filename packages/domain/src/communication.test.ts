@@ -24,6 +24,7 @@ const { prismaMock, txMock, createActionMock } = vi.hoisted(() => {
         upsert: vi.fn(),
       },
       communicationMessage: {
+        upsert: vi.fn(),
         updateMany: vi.fn(),
       },
       communicationEntityLink: {
@@ -130,6 +131,69 @@ describe("communication Slack integration", () => {
         payload: { inboundEventId: "inbound-1" },
       }),
     }));
+  });
+
+  it("ignores Slack events for disconnected installations without enqueueing jobs", async () => {
+    const { ingestCommunicationEvent } = await import("./communication");
+    prismaMock.communicationInboundEvent.findUnique.mockResolvedValueOnce(null);
+    prismaMock.communicationInstallation.findUnique.mockResolvedValueOnce({
+      id: "install-1",
+      workspaceId: "workspace-1",
+      status: "DISCONNECTED",
+    });
+    prismaMock.communicationInboundEvent.create.mockResolvedValueOnce({
+      id: "inbound-ignored",
+    });
+
+    const result = await ingestCommunicationEvent("SLACK", {
+      team_id: "T1",
+      event_id: "EvDisconnected",
+      event: { type: "message", text: "do not retain this text" },
+    });
+
+    expect(result).toEqual({ inboundEventId: "inbound-ignored", duplicate: false, ignored: true });
+    expect(prismaMock.communicationInboundEvent.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        installationId: "install-1",
+        workspaceId: "workspace-1",
+        status: "IGNORED",
+        error: "Slack installation is not active.",
+      }),
+    }));
+    expect(txMock.workflowJob.upsert).not.toHaveBeenCalled();
+    expect(txMock.communicationInstallation.update).not.toHaveBeenCalled();
+  });
+
+  it("does not process stale queued Slack events after installation disconnect", async () => {
+    const { processSlackInboundEvent } = await import("./communication");
+    prismaMock.communicationInboundEvent.findUnique.mockResolvedValueOnce({
+      id: "inbound-1",
+      provider: "SLACK",
+      payload: {
+        event: {
+          type: "message",
+          channel: "C1",
+          ts: "1710000000.000100",
+          text: "do not retain this text",
+        },
+      },
+      installation: {
+        id: "install-1",
+        workspaceId: "workspace-1",
+        status: "DISCONNECTED",
+      },
+    });
+
+    await processSlackInboundEvent("inbound-1");
+
+    expect(prismaMock.communicationInboundEvent.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "inbound-1" },
+      data: expect.objectContaining({
+        status: "IGNORED",
+        error: "Slack installation is not active.",
+      }),
+    }));
+    expect(prismaMock.communicationMessage.upsert).not.toHaveBeenCalled();
   });
 
   it("creates private action drafts from Slack slash commands", async () => {
