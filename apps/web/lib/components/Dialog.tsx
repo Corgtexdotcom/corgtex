@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useCallback } from "react";
+import { useTranslations } from "next-intl";
 
 export function Dialog({
   open,
@@ -14,6 +15,7 @@ export function Dialog({
   children: React.ReactNode;
 }) {
   const dialogRef = useRef<HTMLDialogElement>(null);
+  const t = useTranslations("shared.dialog");
 
   useEffect(() => {
     const dialog = dialogRef.current;
@@ -40,7 +42,7 @@ export function Dialog({
       <div className="dialog-content">
         <div className="dialog-header">
           <h2>{title}</h2>
-          <button type="button" className="dialog-close" onClick={onClose} aria-label="Close">
+          <button type="button" className="dialog-close" onClick={onClose} aria-label={t("close")}>
             &times;
           </button>
         </div>

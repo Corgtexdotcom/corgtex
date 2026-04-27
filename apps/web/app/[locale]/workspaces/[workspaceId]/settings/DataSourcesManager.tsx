@@ -53,7 +53,7 @@ export function DataSourcesManager({ workspaceId, dataSources, documents }: { wo
       setAvailableTables(data.tables ?? []);
       setSelectedTables(data.tables?.slice(0, 1) ?? []);
     } else {
-      setTestingError(data.error?.message || "Failed to test connection");
+      setTestingError(data.error?.message || t("errorTestConnection"));
     }
 
     setIsTesting(false);
@@ -84,7 +84,7 @@ export function DataSourcesManager({ workspaceId, dataSources, documents }: { wo
       setCursorColumn("updated_at");
     } else {
       const data = await res.json();
-      setTestingError(data.error?.message || "Failed to save");
+      setTestingError(data.error?.message || t("errorSave"));
     }
   }
 
@@ -98,11 +98,11 @@ export function DataSourcesManager({ workspaceId, dataSources, documents }: { wo
 
   async function handleSync(sourceId: string) {
     await fetch(`/api/workspaces/${workspaceId}/data-sources/${sourceId}/sync`, { method: "POST" });
-    alert("Sync triggered!");
+    alert(t("alertSyncTriggered"));
   }
 
   async function handleArchive(sourceId: string) {
-    if (confirm("Archive this data source? It will be hidden from active views but can be restored from Audit.")) {
+    if (confirm(t("confirmArchiveDataSource"))) {
       await fetch(`/api/workspaces/${workspaceId}/data-sources/${sourceId}`, { method: "DELETE" });
       router.refresh();
     }
