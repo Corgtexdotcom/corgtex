@@ -43,7 +43,7 @@ export function AdminWorkspaceMemberPanel({ workspaceId, targetWorkspaceId }: Pr
                 <option value="CONTRIBUTOR">{t("roleContributor")}</option>
                 <option value="ADMIN">{t("roleAdmin")}</option>
                 <option value="FACILITATOR">{t("roleFacilitator")}</option>
-                <option value="FINANCE">{t("roleFinance")}</option>
+                <option value="FINANCE_STEWARD">{t("roleFinance")}</option>
               </select>
               <SubmitButton>{t("btnAddMember")}</SubmitButton>
             </div>
@@ -74,7 +74,7 @@ export function AdminWorkspaceMemberPanel({ workspaceId, targetWorkspaceId }: Pr
                         <option value="CONTRIBUTOR">{t("roleContributor")}</option>
                         <option value="ADMIN">{t("roleAdmin")}</option>
                         <option value="FACILITATOR">{t("roleFacilitator")}</option>
-                        <option value="FINANCE">{t("roleFinance")}</option>
+                        <option value="FINANCE_STEWARD">{t("roleFinance")}</option>
                       </select>
                     </form>
                   </td>

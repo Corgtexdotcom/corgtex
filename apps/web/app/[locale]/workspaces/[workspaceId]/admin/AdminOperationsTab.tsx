@@ -93,7 +93,7 @@ export function AdminOperationsTab({ data, workspaceId }: Props) {
                   </td>
                   <td style={{ padding: 12 }}>{inst.environment || "—"}</td>
                   <td style={{ padding: 12 }}>
-                    {inst.lastHealthCheckAt ? new Date(inst.lastHealthCheckAt).toLocaleString() : "Never"}
+                    {inst.lastHealthCheck ? new Date(inst.lastHealthCheck).toLocaleString() : "Never"}
                   </td>
                   <td style={{ padding: 12 }}>
                     {inst.lastHealthStatus === "ok" ? (
