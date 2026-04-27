@@ -493,27 +493,27 @@ model CommunicationEntityLink {
 }
 
 model User {
-  id                     String                @id @default(uuid())
-  email                  String                @unique
+  id                     String                      @id @default(uuid())
+  email                  String                      @unique
   displayName            String?
   passwordHash           String
-  globalRole             GlobalRole            @default(USER)
-  createdAt              DateTime              @default(now())
-  updatedAt              DateTime              @updatedAt
+  globalRole             GlobalRole                  @default(USER)
+  createdAt              DateTime                    @default(now())
+  updatedAt              DateTime                    @updatedAt
   sessions               Session[]
   memberships            Member[]
-  authoredActions        Action[]              @relation("ActionAuthor")
-  authoredTensions       Tension[]             @relation("TensionAuthor")
-  authoredProposals      Proposal[]            @relation("ProposalAuthor")
-  spendRequests          SpendRequest[]        @relation("SpendRequester")
-  spendComments          SpendComment[]        @relation("SpendCommentAuthor")
+  authoredActions        Action[]                    @relation("ActionAuthor")
+  authoredTensions       Tension[]                   @relation("TensionAuthor")
+  authoredProposals      Proposal[]                  @relation("ProposalAuthor")
+  spendRequests          SpendRequest[]              @relation("SpendRequester")
+  spendComments          SpendComment[]              @relation("SpendCommentAuthor")
   cycleUpdates           CycleUpdate[]
-  allocationsFrom        Allocation[]          @relation("AllocFrom")
-  allocationsTo          Allocation[]          @relation("AllocTo")
+  allocationsFrom        Allocation[]                @relation("AllocFrom")
+  allocationsTo          Allocation[]                @relation("AllocTo")
   reactions              ProposalReaction[]
   objections             Objection[]
   tensionUpvotes         TensionUpvote[]
-  agentCreds             AgentCredential[]     @relation("AgentCredentialCreator")
+  agentCreds             AgentCredential[]           @relation("AgentCredentialCreator")
   notifications          Notification[]
   conversations          ConversationSession[]
   oauthConnections       OAuthConnection[]
@@ -522,7 +522,7 @@ model User {
   resetTokens            PasswordResetToken[]
   ssoIdentities          UserSsoIdentity[]
   meetingInsights        MeetingInsight[]
-  createdAgentIdentities AgentIdentity[]       @relation("AgentIdentityCreator")
+  createdAgentIdentities AgentIdentity[]             @relation("AgentIdentityCreator")
   deliberationEntries    DeliberationEntry[]
 }
 
@@ -2040,16 +2040,16 @@ model OAuthAccessToken {
 }
 
 model McpOAuthClient {
-  id                      String    @id @default(uuid())
-  clientId                String    @unique
+  id                      String   @id @default(uuid())
+  clientId                String   @unique
   clientSecret            String?
   name                    String
   redirectUris            String[]
   scopes                  String[]
-  tokenEndpointAuthMethod String    @default("none")
-  isActive                Boolean   @default(true)
-  createdAt               DateTime  @default(now())
-  updatedAt               DateTime  @updatedAt
+  tokenEndpointAuthMethod String   @default("none")
+  isActive                Boolean  @default(true)
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
 
   authCodes    McpOAuthAuthorizationCode[]
   accessTokens McpOAuthAccessToken[]
@@ -2377,4 +2377,17 @@ model CircleAgentAssignment {
   role          Role?         @relation(fields: [roleId], references: [id], onDelete: SetNull)
 
   @@unique([circleId, agentIdentityId])
+}
+
+model InstanceRegistry {
+  id               String    @id @default(uuid())
+  label            String
+  url              String    @unique
+  environment      String    @default("production")
+  notes            String?
+  lastHealthCheck  DateTime?
+  lastHealthStatus String?
+  lastHealthError  String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
 }
