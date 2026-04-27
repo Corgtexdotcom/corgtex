@@ -58,6 +58,16 @@ REDIS_URL="${{Redis.REDIS_URL}}"
 REDIS_KEY_PREFIX="client-slug-prod"
 ```
 
+## Corgtex Connector Settings
+
+These variables configure the remote MCP connector used by ChatGPT, Claude, Cursor, and other MCP clients.
+
+| Variable | Description |
+|---|---|
+| `MCP_PUBLIC_URL` | Public connector URL shown in the UI and used as the OAuth resource audience. Defaults to `${APP_URL}/mcp`. For the central connector, use a stable URL such as `https://mcp.corgtex.com/mcp`. |
+| `MCP_DEFAULT_INSTANCE_SLUG` | Optional instance slug for this deployment. If omitted, Corgtex uses `WORKSPACE_SLUG` or infers `crina` from a Crina host name. |
+| `MCP_INSTANCE_REGISTRY` | Optional JSON array of registered connector instances. Each entry supports `slug`, `displayName`, `baseUrl`, `workspaceIds`, `workspaceSlugs`, and `status`. Unknown workspaces are rejected when a registry is configured. |
+
 ## Object Storage
 
 File uploads and Brain source downloads use an S3-compatible storage backend. Client instances that allow uploads must configure this for every runtime service that touches uploads, normally web and worker.

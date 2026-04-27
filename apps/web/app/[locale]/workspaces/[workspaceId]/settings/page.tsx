@@ -1,5 +1,17 @@
-import { DEFAULT_SCOPES, SCOPE_REGISTRY, getMemberInvitePolicy, listMemberInviteRequests, listMembersEnriched, listAgentCredentials, listWebhookEndpoints, listInboundWebhooks, listAgentConfigs, listOAuthApps, getSsoConfigByWorkspace, getModelUsageBudget, listDocuments, listCommunicationInstallations, requireWorkspaceMembership } from "@corgtex/domain";
-import { prisma } from "@corgtex/shared";
+import {
+  getMemberInvitePolicy,
+  getModelUsageBudget,
+  getSsoConfigByWorkspace,
+  listAgentConfigs,
+  listCommunicationInstallations,
+  listDocuments,
+  listInboundWebhooks,
+  listMemberInviteRequests,
+  listMembersEnriched,
+  listWebhookEndpoints,
+  requireWorkspaceMembership,
+} from "@corgtex/domain";
+import { env, prisma } from "@corgtex/shared";
 import { requirePageActor } from "@/lib/auth";
 import { headers } from "next/headers";
 import {
@@ -9,8 +21,7 @@ import {
   rotateWebhookSecretAction,
   disconnectCommunicationInstallationAction,
 } from "../actions";
-import { AgentConnectionManager } from "./AgentConnectionManager";
-import { CustomGptConnectionManager } from "./CustomGptConnectionManager";
+import { CorgtexConnectorManager } from "./CorgtexConnectorManager";
 import { MembersTable } from "./MembersTable";
 import { AgentSettingsClient } from "./agents/AgentSettingsClient";
 import { AgentBudgetManager } from "./agents/AgentBudgetManager";
@@ -43,12 +54,10 @@ export default async function SettingsPage({
   }
 
   // Load core user constraints that apply to both tabs
-  const [credentials, webhookEndpoints, inboundWebhooks, userConnections, oauthApps, ssoConfigs, communicationInstallations] = await Promise.all([
-    listAgentCredentials(actor, workspaceId).catch(() => []),
+  const [webhookEndpoints, inboundWebhooks, userConnections, ssoConfigs, communicationInstallations] = await Promise.all([
     listWebhookEndpoints(actor, workspaceId).catch(() => []),
     listInboundWebhooks(actor, workspaceId, { take: 20 }).catch(() => []),
     actor.kind === "user" ? prisma.oAuthConnection.findMany({ where: { userId: actor.user.id } }).catch(() => []) : Promise.resolve([]),
-    listOAuthApps(actor, workspaceId).catch(() => []),
     getSsoConfigByWorkspace(actor, workspaceId).catch(() => []),
     listCommunicationInstallations(actor, workspaceId).catch(() => []),
   ]);
@@ -108,7 +117,7 @@ export default async function SettingsPage({
   const host = headersList.get("host") || "localhost:3000";
   const protocol = host.includes("localhost") ? "http" : "https";
   const origin = `${protocol}://${host}`;
-  const mcpUrl = `${origin}/api/mcp`;
+  const connectorUrl = env.MCP_PUBLIC_URL ?? `${origin}/mcp`;
   const t = await getTranslations("settings");
   const format = await getFormatter();
 
@@ -212,22 +221,11 @@ export default async function SettingsPage({
             <SsoConfigManager workspaceId={workspaceId} configs={ssoConfigs} />
 
             <section className="stack" style={{ gap: 40 }}>
-                 <h2 className="nr-section-header">{t("sectionCustomGpts")}</h2>
+                 <h2 className="nr-section-header">{t("sectionCorgtexConnector")}</h2>
                  <p className="nr-item-meta" style={{ fontSize: "0.85rem", marginBottom: 16 }}>
-                   {t("descCustomGpts")}
+                   {t("descCorgtexConnector")}
                  </p>
-                 <CustomGptConnectionManager
-                   workspaceId={workspaceId}
-                   mcpUrl={mcpUrl}
-                   oauthApps={oauthApps.map(app => ({
-                     id: app.id,
-                     clientId: app.clientId,
-                     name: app.name,
-                     redirectUris: app.redirectUris,
-                     isActive: app.isActive,
-                     createdAt: app.createdAt
-                   }))}
-                 />
+                 <CorgtexConnectorManager connectorUrl={connectorUrl} />
             </section>
           </div>
 
