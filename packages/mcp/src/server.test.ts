@@ -51,6 +51,7 @@ describe("createCorgtexMcpServer", () => {
     const server = createCorgtexMcpServer({
       actor: { kind: "agent", authProvider: "bootstrap" } as any,
       workspaceId: "ws-1",
+      authKind: "agent",
     });
 
     const createSpendTool = (server as any)._registeredTools.create_spend;
@@ -81,6 +82,34 @@ describe("createCorgtexMcpServer", () => {
       id: "spend-1",
       status: "OPEN",
       webUrl: "https://app.test/workspaces/ws-1/finance/spend/spend-1",
+    });
+  });
+
+  it("annotates read-only and destructive tools for connector approval reviews", async () => {
+    const { createCorgtexMcpServer } = await import("./server");
+
+    const server = createCorgtexMcpServer({
+      actor: { kind: "agent", authProvider: "bootstrap" } as any,
+      workspaceId: "ws-1",
+      authKind: "agent",
+    });
+
+    expect((server as any)._registeredTools.search.annotations).toMatchObject({
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    });
+    expect((server as any)._registeredTools.fetch.annotations).toMatchObject({
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    });
+    expect((server as any)._registeredTools.delete_action.annotations).toMatchObject({
+      readOnlyHint: false,
+      destructiveHint: true,
+      openWorldHint: false,
     });
   });
 });

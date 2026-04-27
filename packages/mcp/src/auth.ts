@@ -1,6 +1,6 @@
 import type { AppActor } from "@corgtex/shared";
 import { env } from "@corgtex/shared";
-import { resolveAgentActorFromBearer, describeScope } from "@corgtex/domain";
+import { resolveAgentActorFromBearer, describeScope, resolveMcpOAuthAccessToken } from "@corgtex/domain";
 import { AppError } from "@corgtex/domain";
 
 /**
@@ -9,6 +9,10 @@ import { AppError } from "@corgtex/domain";
 export type McpSessionContext = {
   actor: AppActor;
   workspaceId: string;
+  authKind: "agent" | "oauth";
+  scopes?: string[];
+  instanceSlug?: string;
+  resource?: string | null;
 };
 
 /**
@@ -27,7 +31,10 @@ function settingsUrl(workspaceId: string): string {
  *
  * Returns the session context that every MCP tool / resource handler receives.
  */
-export async function authenticateMcpRequest(authorizationHeader: string | null): Promise<McpSessionContext> {
+export async function authenticateMcpRequest(
+  authorizationHeader: string | null,
+  options: { resourceUrl?: string } = {},
+): Promise<McpSessionContext> {
   if (!authorizationHeader?.startsWith("Bearer ")) {
     throw new AppError(401, "UNAUTHENTICATED", "Missing or invalid Authorization header. Use: Bearer <token>");
   }
@@ -37,22 +44,39 @@ export async function authenticateMcpRequest(authorizationHeader: string | null)
     throw new AppError(401, "UNAUTHENTICATED", "Empty bearer token.");
   }
 
-  const actor = await resolveAgentActorFromBearer(token);
-  if (!actor) {
-    throw new AppError(401, "UNAUTHENTICATED", "Invalid or expired agent credential.");
+  const agentActor = await resolveAgentActorFromBearer(token);
+  if (agentActor) {
+    if (agentActor.kind !== "agent") {
+      throw new AppError(403, "FORBIDDEN", "MCP access requires an agent credential.");
+    }
+
+    // Agent credentials are scoped to exactly one workspace
+    const workspaceId = agentActor.workspaceIds?.[0];
+    if (!workspaceId) {
+      throw new AppError(403, "FORBIDDEN", "Agent credential is not scoped to any workspace.");
+    }
+
+    return {
+      actor: agentActor,
+      workspaceId,
+      authKind: "agent",
+      scopes: agentActor.scopes,
+    };
   }
 
-  if (actor.kind !== "agent") {
-    throw new AppError(403, "FORBIDDEN", "MCP access requires an agent credential.");
+  const oauthSession = await resolveMcpOAuthAccessToken(token, options.resourceUrl);
+  if (oauthSession) {
+    return {
+      actor: oauthSession.actor,
+      workspaceId: oauthSession.workspaceId,
+      authKind: "oauth",
+      scopes: oauthSession.scopes,
+      instanceSlug: oauthSession.instanceSlug,
+      resource: oauthSession.resource,
+    };
   }
 
-  // Agent credentials are scoped to exactly one workspace
-  const workspaceId = actor.workspaceIds?.[0];
-  if (!workspaceId) {
-    throw new AppError(403, "FORBIDDEN", "Agent credential is not scoped to any workspace.");
-  }
-
-  return { actor, workspaceId };
+  throw new AppError(401, "UNAUTHENTICATED", "Invalid or expired MCP credential.");
 }
 
 /**
@@ -60,6 +84,21 @@ export async function authenticateMcpRequest(authorizationHeader: string | null)
  * Bootstrap agents (AGENT_API_KEY) bypass scope checks.
  */
 export function requireScope(ctx: McpSessionContext, scope: string): void {
+  if (ctx.scopes && !ctx.scopes.includes(scope)) {
+    const label = ctx.actor.kind === "agent" ? ctx.actor.label ?? "this credential" : "this connector";
+    const url = settingsUrl(ctx.workspaceId);
+    const purpose = describeScope(scope);
+    throw new AppError(
+      403,
+      "FORBIDDEN",
+      [
+        `MCP credential is missing the required scope: ${scope} (${purpose})`,
+        `Credential: "${label}".`,
+        `An admin can grant this permission from ${url}.`,
+      ].join(" "),
+    );
+  }
+
   if (ctx.actor.kind !== "agent") {
     return;
   }

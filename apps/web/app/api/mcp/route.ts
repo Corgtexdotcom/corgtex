@@ -2,6 +2,23 @@ import { NextRequest, NextResponse } from "next/server";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { handleRouteError } from "@/lib/http";
 import { createCorgtexMcpServer, authenticateMcpRequest } from "@corgtex/mcp";
+import { AppError, getMcpPublicUrl } from "@corgtex/domain";
+
+function protectedResourceMetadataUrl(request: NextRequest) {
+  return `${new URL(request.url).origin}/.well-known/oauth-protected-resource`;
+}
+
+function mcpAuthErrorResponse(request: NextRequest, error: AppError) {
+  return NextResponse.json(
+    { error: { code: error.code, message: error.message } },
+    {
+      status: error.status,
+      headers: {
+        "WWW-Authenticate": `Bearer resource_metadata="${protectedResourceMetadataUrl(request)}"`,
+      },
+    },
+  );
+}
 
 /**
  * POST /api/mcp — JSON-RPC endpoint for MCP tool/resource calls.
@@ -14,7 +31,9 @@ export async function POST(request: NextRequest) {
   let server;
   try {
     const authHeader = request.headers.get("authorization");
-    const sessionCtx = await authenticateMcpRequest(authHeader);
+    const sessionCtx = await authenticateMcpRequest(authHeader, {
+      resourceUrl: request.url,
+    });
     server = createCorgtexMcpServer(sessionCtx);
 
     const transport = new WebStandardStreamableHTTPServerTransport({
@@ -47,6 +66,9 @@ export async function POST(request: NextRequest) {
     return response;
   } catch (error) {
     if (server) await server.close().catch(() => {});
+    if (error instanceof AppError && error.status === 401) {
+      return mcpAuthErrorResponse(request, error);
+    }
     return handleRouteError(error);
   }
 }
@@ -55,12 +77,17 @@ export async function POST(request: NextRequest) {
  * GET /api/mcp — Server info endpoint.
  * Returns basic info about the MCP server for discovery.
  */
-export async function GET() {
+export async function GET(request: NextRequest) {
   try {
+    const origin = new URL(request.url).origin;
     return NextResponse.json({
       name: "corgtex-mcp",
       version: "1.0.0",
       description: "Corgtex MCP Server — connect from ChatGPT, Claude, or Gemini to interact with your organization's governance platform.",
+      url: getMcpPublicUrl(origin),
+      authorization: {
+        protectedResourceMetadataUrl: protectedResourceMetadataUrl(request),
+      },
       capabilities: {
         tools: true,
         resources: true,
