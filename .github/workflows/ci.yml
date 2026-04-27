@@ -124,6 +124,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - run: node scripts/check-public-docs.mjs
       - run: npm i -g mint
       - run: mint validate
         working-directory: docs
@@ -141,12 +142,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Check plan file exists for branch
+      - name: Check PR body plan exists
         run: node scripts/check-plan.mjs --mode=present
         env:
           GITHUB_HEAD_REF: ${{ github.head_ref }}
           GITHUB_BASE_REF: ${{ github.base_ref }}
           PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          PR_BODY: ${{ github.event.pull_request.body }}
 
   scope-check:
     name: Scope Check
@@ -168,6 +170,7 @@ jobs:
           GITHUB_HEAD_REF: ${{ github.head_ref }}
           GITHUB_BASE_REF: ${{ github.base_ref }}
           PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          PR_BODY: ${{ github.event.pull_request.body }}
       - name: Verify agent policy checks
         run: node scripts/check-plan.mjs --mode=policy
         env:
@@ -175,6 +178,7 @@ jobs:
           GITHUB_BASE_REF: ${{ github.base_ref }}
           PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
           PR_DRAFT: ${{ github.event.pull_request.draft }}
+          PR_BODY: ${{ github.event.pull_request.body }}
 
   diff-size:
     name: Diff Size
@@ -195,6 +199,7 @@ jobs:
           GITHUB_HEAD_REF: ${{ github.head_ref }}
           GITHUB_BASE_REF: ${{ github.base_ref }}
           PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          PR_BODY: ${{ github.event.pull_request.body }}
 
   gitleaks:
     name: Secret Scan

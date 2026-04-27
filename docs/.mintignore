@@ -1,4 +1,12 @@
-pilot-onboarding.md
+assets/
 pr-assets/
+plans/
+partner-analysis/
+*handover*.md
+client-readiness-*.md
+pilot-*.md
+future-work*.md
+industrial-*.md
+slack-app-manifest.yml
 *.test.*
 node_modules
