@@ -33,9 +33,12 @@ export default async function SettingsPage({
   const { workspaceId } = await params;
   const search = await searchParams;
   const actor = await requirePageActor();
-  const tab = search.tab ?? "general";
   const featureFlags = await getWorkspaceFeatureFlags(workspaceId);
+  const tab = search.tab ?? (featureFlags.SETTINGS_GENERAL ? "general" : "members");
   if (!featureFlags.AGENT_GOVERNANCE && tab === "agents") {
+    notFound();
+  }
+  if (!featureFlags.SETTINGS_GENERAL && search.tab === "general") {
     notFound();
   }
 
@@ -117,12 +120,14 @@ export default async function SettingsPage({
 
       {/* Tab navigation */}
       <div className="nr-tab-bar" style={{ marginBottom: 32 }}>
-        <a
-          href={`/workspaces/${workspaceId}/settings?tab=general`}
-          className={`nr-tab ${tab === "general" ? "nr-tab-active" : ""}`}
-        >
-          {t("tabGeneral")}
-        </a>
+        {featureFlags.SETTINGS_GENERAL && (
+          <a
+            href={`/workspaces/${workspaceId}/settings?tab=general`}
+            className={`nr-tab ${tab === "general" ? "nr-tab-active" : ""}`}
+          >
+            {t("tabGeneral")}
+          </a>
+        )}
         <a
           href={`/workspaces/${workspaceId}/settings?tab=members`}
           className={`nr-tab ${tab === "members" ? "nr-tab-active" : ""}`}

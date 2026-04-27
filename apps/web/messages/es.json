@@ -1135,6 +1135,7 @@
     "statusPending": "Pendiente",
     "statusProcessed": "Procesado",
     "statusUploading": "Subiendo...",
+    "colEmail": "Correo",
     "stepAddActionSchema": "Agregar esquema de acción",
     "stepAddActionSchemaDesc": "Desplázate hasta Acciones y haz clic en Crear nueva acción. Haz clic en Importar desde URL y pega:",
     "stepConfigureOauth": "Configurar OAuth",
