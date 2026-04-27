@@ -212,7 +212,7 @@ export function UserSettingsPanel({
       {profile.member && (
         <div className="nr-form-section">
           <h2>{t("sectionWorkspaceIdentity")}</h2>
-          <div className="grid" style={{ gridTemplateColumns: '1fr 1fr', gap: 24 }}>
+          <div className="grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))', gap: 24 }}>
             <div className="nested-item">
               <label style={{ display: 'block', marginBottom: 8, fontWeight: 600 }}>Roles & Circles</label>
               {profile.member.roleAssignments.length > 0 ? (
@@ -242,6 +242,21 @@ export function UserSettingsPanel({
                   <span className="text-muted">No expertise claimed.</span>
                 )}
               </div>
+            </div>
+
+            <div className="nested-item">
+              <label style={{ display: 'block', marginBottom: 8, fontWeight: 600 }}>Recent Recognitions</label>
+              {profile.member.recognitionsReceived && profile.member.recognitionsReceived.length > 0 ? (
+                <ul style={{ margin: 0, paddingLeft: 20 }}>
+                  {profile.member.recognitionsReceived.map((rec: any) => (
+                    <li key={rec.id} style={{ marginBottom: 4, fontSize: '0.9rem' }}>
+                      <span className="text-muted">From {rec.author?.user?.displayName || "Someone"}:</span> <em>&quot;{rec.message}&quot;</em>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <span className="text-muted">No recognitions yet.</span>
+              )}
             </div>
           </div>
         </div>
