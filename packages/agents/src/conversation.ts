@@ -2,6 +2,7 @@ import { prisma } from "@corgtex/shared";
 import { searchIndexedKnowledge } from "@corgtex/knowledge";
 import { defaultModelGateway } from "@corgtex/models";
 import { loadRelevantMemories, storeAgentMemory } from "@corgtex/domain";
+import { env } from "@corgtex/shared";
 import type { ChatMessage } from "@corgtex/models";
 import { checkCalendarAvailabilityTool, scheduleMeetingTool, checkCalendarAvailability, scheduleMeeting } from "./tools/calendar";
 import { getWorkspaceOverviewTool, queryTensionsTool, queryActionsTool, queryProposalsTool, queryOrgStructureTool, getWorkspaceOverview, queryTensions, queryActions, queryProposals, queryOrgStructure } from "./tools/workspace";
@@ -239,6 +240,7 @@ export async function processConversationTurn(ctx: ConversationContext): Promise
 
   const response = await defaultModelGateway.chat({
     workspaceId: ctx.workspaceId,
+    model: env.MODEL_CHAT_CONVERSATION,
     taskType: "AGENT",
     messages,
     tools: TOOLS,
@@ -274,6 +276,7 @@ export async function processConversationTurn(ctx: ConversationContext): Promise
 
     const followup = await defaultModelGateway.chat({
       workspaceId: ctx.workspaceId,
+      model: env.MODEL_CHAT_CONVERSATION,
       taskType: "AGENT",
       messages,
       tools: TOOLS,
@@ -385,6 +388,7 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
 
   const iterator = defaultModelGateway.chatStream({
     workspaceId: ctx.workspaceId,
+    model: env.MODEL_CHAT_CONVERSATION,
     taskType: "AGENT",
     messages,
     tools: TOOLS,
@@ -428,6 +432,7 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
 
     const followupIterator = defaultModelGateway.chatStream({
       workspaceId: ctx.workspaceId,
+      model: env.MODEL_CHAT_CONVERSATION,
       taskType: "AGENT",
       messages,
       tools: TOOLS,

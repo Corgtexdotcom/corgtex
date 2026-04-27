@@ -67,7 +67,7 @@ describe("openAICompatibleModelGateway", () => {
       MODEL_API_KEY: "test-key",
       MODEL_BASE_URL: "https://openrouter.ai/api/v1",
       APP_URL: "https://corgtex.example.test",
-      MODEL_CHAT_DEFAULT: "google/gemma-4-31b-it",
+      MODEL_CHAT_DEFAULT: "qwen/qwen3-32b",
     });
 
     const fetchMock = vi.fn()
@@ -102,7 +102,7 @@ describe("openAICompatibleModelGateway", () => {
     });
     expect(init.signal).toBeInstanceOf(AbortSignal);
     expect(body).toMatchObject({
-      model: "google/gemma-4-31b-it",
+      model: "qwen/qwen3-32b",
       provider: {
         allow_fallbacks: true,
         data_collection: "deny",
