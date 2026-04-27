@@ -21,7 +21,7 @@ export async function GET(request: NextRequest) {
 export async function DELETE(request: NextRequest) {
   try {
     const actor = await resolveRequestActor(request);
-    
+
     const url = new URL(request.url);
     const sessionId = url.searchParams.get("sessionId");
     const revokeAllOther = url.searchParams.get("revokeAllOther") === "true";

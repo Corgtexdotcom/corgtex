@@ -135,7 +135,7 @@ export default async function SettingsPage({
       const cookieStore = await import("next/headers").then(m => m.cookies());
       const token = cookieStore.get(sessionCookieName())?.value;
       const tokenHash = token ? sha256(token) : undefined;
-      
+
       [userProfile, userSessions, userPrefs] = await Promise.all([
         getUserProfile(actor, workspaceId),
         listUserSessions(actor, tokenHash),
@@ -194,11 +194,11 @@ export default async function SettingsPage({
       </div>
 
       {tab === "user" && userProfile && (
-        <UserSettingsPanel 
-          workspaceId={workspaceId} 
-          profile={userProfile} 
-          sessions={userSessions} 
-          preferences={userPrefs} 
+        <UserSettingsPanel
+          workspaceId={workspaceId}
+          profile={userProfile}
+          sessions={userSessions}
+          preferences={userPrefs}
         />
       )}
 

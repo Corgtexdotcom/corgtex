@@ -137,12 +137,12 @@ export function UserSettingsPanel({
       {/* 1. Profile Card */}
       <div className="nr-form-section">
         <h2>{t("sectionProfile")}</h2>
-        
+
         {error && <div className="form-message form-message-error mb-4">{error}</div>}
 
         <div className="user-profile-card">
-          <div 
-            className="avatar-upload" 
+          <div
+            className="avatar-upload"
             onClick={() => fileInputRef.current?.click()}
             title={t("btnUploadAvatar")}
           >
@@ -156,34 +156,34 @@ export function UserSettingsPanel({
             <div className="avatar-overlay">
               {t("btnUploadAvatar")}
             </div>
-            <input 
-              type="file" 
-              accept="image/*" 
-              ref={fileInputRef} 
-              style={{ display: "none" }} 
-              onChange={handleAvatarUpload} 
+            <input
+              type="file"
+              accept="image/*"
+              ref={fileInputRef}
+              style={{ display: "none" }}
+              onChange={handleAvatarUpload}
             />
           </div>
 
           <form onSubmit={handleProfileSave} className="stack" style={{ flex: 1, gap: 16 }}>
             <div>
               <label>{t("labelDisplayName")}</label>
-              <input 
-                type="text" 
-                className="nr-input" 
-                value={displayName} 
-                onChange={(e) => setDisplayName(e.target.value)} 
-                required 
+              <input
+                type="text"
+                className="nr-input"
+                value={displayName}
+                onChange={(e) => setDisplayName(e.target.value)}
+                required
               />
             </div>
-            
+
             <div>
               <label>{t("labelBio")}</label>
-              <textarea 
-                className="nr-input" 
-                rows={3} 
-                value={bio} 
-                onChange={(e) => setBio(e.target.value)} 
+              <textarea
+                className="nr-input"
+                rows={3}
+                value={bio}
+                onChange={(e) => setBio(e.target.value)}
                 placeholder="Brief summary about yourself..."
               />
             </div>
@@ -219,7 +219,7 @@ export function UserSettingsPanel({
                 <ul style={{ margin: 0, paddingLeft: 20 }}>
                   {profile.member.roleAssignments.map((ra: any) => (
                     <li key={ra.id}>
-                      <strong>{ra.role.name}</strong> 
+                      <strong>{ra.role.name}</strong>
                       {ra.role.circle && <span className="text-muted"> in {ra.role.circle.name}</span>}
                     </li>
                   ))}
@@ -271,13 +271,13 @@ export function UserSettingsPanel({
               {notifTypes.map(nt => {
                 const pref = preferences.find(p => p.notifType === nt.type);
                 const currentVal = pref ? pref.channel : (nt.type === "*" ? "IN_APP" : "USE_DEFAULT");
-                
+
                 return (
                   <tr key={nt.type}>
                     <td style={{ fontWeight: nt.type === "*" ? 600 : 400 }}>{nt.label}</td>
                     <td style={{ width: 180 }}>
-                      <select 
-                        className="nr-input" 
+                      <select
+                        className="nr-input"
                         style={{ padding: "6px 10px" }}
                         value={currentVal}
                         onChange={(e) => handlePrefChange(nt.type, e.target.value)}
@@ -304,36 +304,36 @@ export function UserSettingsPanel({
 
         <div className="nested-item mb-6">
           <label style={{ display: 'block', marginBottom: 16, fontWeight: 600 }}>{t("btnChangePassword")}</label>
-          
+
           {passwordError && <div className="form-message form-message-error mb-4">{passwordError}</div>}
-          
+
           <form onSubmit={handlePasswordSubmit} className="stack" style={{ gap: 16 }}>
             <div>
-              <input 
-                type="password" 
-                className="nr-input" 
-                placeholder={t("labelCurrentPassword")} 
-                value={currentPassword} 
-                onChange={e => setCurrentPassword(e.target.value)} 
-                required 
+              <input
+                type="password"
+                className="nr-input"
+                placeholder={t("labelCurrentPassword")}
+                value={currentPassword}
+                onChange={e => setCurrentPassword(e.target.value)}
+                required
               />
             </div>
             <div className="row" style={{ gap: 16 }}>
-              <input 
-                type="password" 
-                className="nr-input" 
-                placeholder={t("labelNewPassword")} 
-                value={newPassword} 
-                onChange={e => setNewPassword(e.target.value)} 
-                required 
+              <input
+                type="password"
+                className="nr-input"
+                placeholder={t("labelNewPassword")}
+                value={newPassword}
+                onChange={e => setNewPassword(e.target.value)}
+                required
               />
-              <input 
-                type="password" 
-                className="nr-input" 
-                placeholder={t("labelConfirmPassword")} 
-                value={confirmPassword} 
-                onChange={e => setConfirmPassword(e.target.value)} 
-                required 
+              <input
+                type="password"
+                className="nr-input"
+                placeholder={t("labelConfirmPassword")}
+                value={confirmPassword}
+                onChange={e => setConfirmPassword(e.target.value)}
+                required
               />
             </div>
             <div>
@@ -345,21 +345,21 @@ export function UserSettingsPanel({
         <div className="nested-item">
           <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
             <label style={{ fontWeight: 600, margin: 0 }}>Active Sessions</label>
-            <button 
-              className="danger small" 
+            <button
+              className="danger small"
               onClick={() => handleSessionRevoke(undefined, true)}
               disabled={sessions.length <= 1}
             >
               {t("btnRevokeAllSessions")}
             </button>
           </div>
-          
+
           <div className="session-list">
             {sessions.map(s => {
               // Parse User Agent basically
               const browser = s.userAgent?.includes("Chrome") ? "Chrome" : s.userAgent?.includes("Firefox") ? "Firefox" : s.userAgent?.includes("Safari") ? "Safari" : "Browser";
               const os = s.userAgent?.includes("Mac") ? "macOS" : s.userAgent?.includes("Win") ? "Windows" : s.userAgent?.includes("Linux") ? "Linux" : "Unknown OS";
-              
+
               return (
                 <div key={s.id} className="session-card">
                   <div>

@@ -13,7 +13,7 @@ export async function GET(request: NextRequest) {
   try {
     const actor = await resolveRequestActor(request);
     const workspaceId = request.headers.get("x-workspace-id") || ""; // We might need to pass this somehow or just skip member lookup if not provided
-    
+
     // In the context of settings, they are in a workspace, but profile is global.
     // However, we want to show their workspace identity. We'll extract workspaceId from query string if available.
     const url = new URL(request.url);
