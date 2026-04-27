@@ -50,7 +50,7 @@
     "seed:jnj-demo": "node scripts/seed-jnj-demo.mjs",
     "cleanup:test-artifacts": "node scripts/cleanup-test-artifacts.mjs",
     "contrast-audit": "node scripts/contrast-audit.mjs",
-    "smoke:crina": "CLIENT_READINESS_ROUTE_NAMES=home,brain,members,tensions,actions,meetings,proposals,circles,finance,audit,settings,chat CLIENT_READINESS_EXPECT_DISABLED_ROUTES=/leads,/agents,/governance,/settings?tab=agents node scripts/client-readiness-smoke.mjs",
+    "smoke:crina": "CLIENT_READINESS_ROUTE_NAMES=home,brain,members,tensions,actions,meetings,proposals,circles,finance,audit,settings,chat CLIENT_READINESS_EXPECT_DISABLED_ROUTES=/goals,/leads,/cycles,/agents,/governance,/settings?tab=agents node scripts/client-readiness-smoke.mjs",
     "check": "npm run lint && npm run typecheck && npm run prisma:validate"
   },
   "dependencies": {

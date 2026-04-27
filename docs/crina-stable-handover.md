@@ -19,11 +19,13 @@ Included modules:
 
 Postponed modules:
 
+- Goals
 - Relationships / CRM pipeline
+- Cycles / resource allocation
 - Agent Governance
 - OS Metrics / OS Matrix
 
-These postponed modules are disabled with workspace feature flags and should be hidden from navigation, hidden from the command palette, and blocked by direct route access.
+These postponed modules are disabled with workspace feature flags and should be hidden from navigation, hidden from the command palette, and blocked by direct route access. The `crina` workspace slug also carries safe default disables for these modules, so CRINA remains locked down even if the explicit feature flag rows are missing.
 
 ## Environment
 
@@ -95,7 +97,7 @@ Manual checks before handover:
 - Tensions, actions, meetings, proposals, circles, finance, audit, members, and settings load.
 - A user can create a tension, action, meeting, proposal, and spend request.
 - Audit records appear for user actions.
-- `/leads`, `/agents`, and `/governance` return not found or another blocked response.
+- `/goals`, `/leads`, `/cycles`, `/agents`, and `/governance` return not found or another blocked response.
 
 ## Handover Notes
 
