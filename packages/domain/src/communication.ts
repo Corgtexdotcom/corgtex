@@ -14,10 +14,32 @@ import { requireWorkspaceMembership } from "./auth";
 import { createAction, publishAction } from "./actions";
 import { ingestSource } from "./brain";
 import { invariant } from "./errors";
-import { createProposal } from "./proposals";
+import { createProposal, submitProposal } from "./proposals";
 import { createTension, publishTension } from "./tensions";
 
 export type CommunicationWorkItemKind = "ACTION" | "TENSION" | "PROPOSAL" | "BRAIN_NOTE";
+export type SlackAgentSource = "slash_command" | "app_mention" | "message_shortcut";
+
+export type SlackAgentJobPayload = {
+  source: SlackAgentSource;
+  installationId: string;
+  workspaceId: string;
+  actorUserId: string;
+  externalUserId: string;
+  prompt: string;
+  channelId?: string | null;
+  threadTs?: string | null;
+  messageTs?: string | null;
+  messageText?: string | null;
+  sourceMessageId?: string | null;
+  inboundEventId?: string | null;
+  responseUrlEnc?: string | null;
+};
+
+export type SlackAgentDelivery = {
+  text: string;
+  blocks?: unknown[];
+};
 
 const SLACK_REQUIRED_SCOPES = [
   "commands",
@@ -39,6 +61,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function asString(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function appUrl(path = "") {
@@ -74,6 +100,17 @@ function slackTimestampToDate(ts: string | null) {
 
 function rawRetentionDate() {
   return new Date(Date.now() + SLACK_RAW_RETENTION_DAYS * 24 * 60 * 60 * 1000);
+}
+
+function compactJsonObject<T extends Record<string, unknown>>(value: T) {
+  return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined)) as T;
+}
+
+export function stripSlackBotMention(text: string, botUserId?: string | null) {
+  const mentionPattern = botUserId
+    ? new RegExp(`<@${escapeRegExp(botUserId)}(?:\\|[^>]+)?>`, "g")
+    : /^<@[A-Z0-9]+(?:\|[^>]+)?>\s*/g;
+  return text.replace(mentionPattern, "").trim();
 }
 
 export function slackOAuthScopes() {
@@ -480,6 +517,106 @@ async function ingestSlackMessage(installation: { id: string; workspaceId: strin
   });
 }
 
+async function persistSlackSourceMessage(installation: {
+  id: string;
+  workspaceId: string;
+  provider: CommunicationProvider;
+}, params: {
+  channelId: string;
+  messageTs: string;
+  externalUserId?: string | null;
+  threadTs?: string | null;
+  text?: string | null;
+  raw?: Record<string, unknown>;
+}) {
+  if (!params.channelId || !params.messageTs) return null;
+
+  await ensureSlackChannel(installation, {
+    channel: params.channelId,
+  });
+
+  return prisma.communicationMessage.upsert({
+    where: {
+      installationId_externalChannelId_externalMessageId: {
+        installationId: installation.id,
+        externalChannelId: params.channelId,
+        externalMessageId: params.messageTs,
+      },
+    },
+    update: {
+      externalUserId: params.externalUserId || null,
+      threadExternalId: params.threadTs || null,
+      text: params.text || null,
+      raw: toInputJson(params.raw ?? {}),
+      messageTs: slackTimestampToDate(params.messageTs),
+      expiresRawAt: rawRetentionDate(),
+      isBot: false,
+      isHidden: false,
+      isDeleted: false,
+    },
+    create: {
+      installationId: installation.id,
+      workspaceId: installation.workspaceId,
+      provider: "SLACK",
+      externalMessageId: params.messageTs,
+      externalChannelId: params.channelId,
+      externalUserId: params.externalUserId || null,
+      threadExternalId: params.threadTs || null,
+      text: params.text || null,
+      raw: toInputJson(params.raw ?? {}),
+      messageTs: slackTimestampToDate(params.messageTs),
+      expiresRawAt: rawRetentionDate(),
+      isBot: false,
+      isHidden: false,
+      isDeleted: false,
+    },
+    select: { id: true },
+  });
+}
+
+function slackAgentDedupeKey(payload: SlackAgentJobPayload) {
+  if (payload.inboundEventId) return `${payload.inboundEventId}:communication-slack-agent`;
+  if (payload.sourceMessageId) return `${payload.sourceMessageId}:communication-slack-agent:${payload.source}`;
+  const channel = payload.channelId ?? "no-channel";
+  const message = payload.messageTs ?? payload.threadTs ?? createHmac("sha256", "slack-agent").update(payload.prompt).digest("hex");
+  return `${payload.installationId}:${payload.source}:${channel}:${message}:communication-slack-agent`;
+}
+
+export async function enqueueSlackAgentJob(payload: SlackAgentJobPayload) {
+  const normalized = compactJsonObject({
+    ...payload,
+    channelId: payload.channelId ?? null,
+    threadTs: payload.threadTs ?? null,
+    messageTs: payload.messageTs ?? null,
+    messageText: payload.messageText ?? null,
+    sourceMessageId: payload.sourceMessageId ?? null,
+    inboundEventId: payload.inboundEventId ?? null,
+    responseUrlEnc: payload.responseUrlEnc ?? null,
+  });
+
+  return prisma.workflowJob.upsert({
+    where: { dedupeKey: slackAgentDedupeKey(payload) },
+    update: {},
+    create: {
+      workspaceId: payload.workspaceId,
+      type: "communication.slack.agent",
+      payload: toInputJson(normalized) as Prisma.InputJsonObject,
+      dedupeKey: slackAgentDedupeKey(payload),
+    },
+  });
+}
+
+function slackAgentWorkingResponse() {
+  return {
+    response_type: "ephemeral",
+    text: "Corgtex is working on that.",
+    blocks: [{
+      type: "section",
+      text: { type: "mrkdwn", text: "Corgtex is working on that. I will reply here with what I did." },
+    }],
+  };
+}
+
 export async function processSlackInboundEvent(inboundEventId: string) {
   const inbound = await prisma.communicationInboundEvent.findUnique({
     where: { id: inboundEventId },
@@ -514,16 +651,45 @@ export async function processSlackInboundEvent(inboundEventId: string) {
       }
     } else if (event.type === "app_mention") {
       const token = encryptedBotToken(inbound.installation);
-      await sendSlackMessage(inbound.installation.id, {
-        channel: asString(event.channel),
-        threadTs: asString(event.ts) || undefined,
-      }, [{
-        type: "section",
-        text: {
-          type: "mrkdwn",
-          text: "I can capture work into Corgtex. Try `/corgtex action ...`, `/corgtex tension ...`, `/corgtex proposal ...`, or open my Home tab for your brief.",
-        },
-      }], token);
+      const externalUserId = asString(event.user);
+      const actor = externalUserId ? await resolveHumanActorForSlackUser(inbound.installation.id, externalUserId) : null;
+      const channelId = asString(event.channel);
+      const messageTs = asString(event.ts) || asString(event.event_ts);
+      const threadTs = asString(event.thread_ts) || messageTs;
+      if (!actor) {
+        const accountResponse = slackAccountLinkResponse(inbound.installation.workspaceId);
+        if (channelId) {
+          await sendSlackMessage(inbound.installation.id, {
+            channel: channelId,
+            threadTs: threadTs || undefined,
+          }, accountResponse.blocks, token);
+        }
+      } else if (channelId && messageTs) {
+        const text = asString(event.text);
+        const prompt = stripSlackBotMention(text, inbound.installation.botUserId) || "brief";
+        const sourceMessage = await persistSlackSourceMessage(inbound.installation, {
+          channelId,
+          messageTs,
+          threadTs,
+          externalUserId,
+          text,
+          raw: event,
+        });
+        await enqueueSlackAgentJob({
+          source: "app_mention",
+          installationId: inbound.installation.id,
+          workspaceId: inbound.installation.workspaceId,
+          actorUserId: actor.user.id,
+          externalUserId,
+          prompt,
+          channelId,
+          threadTs,
+          messageTs,
+          messageText: text,
+          sourceMessageId: sourceMessage?.id ?? null,
+          inboundEventId: inbound.id,
+        });
+      }
     }
 
     await prisma.communicationInboundEvent.update({
@@ -553,21 +719,48 @@ export async function createWorkItemFromCommunicationSource(actor: AppActor, par
   bodyMd?: string | null;
   sourceMessageId?: string | null;
   externalUserId?: string | null;
+  assigneeMemberId?: string | null;
+  dueAt?: Date | string | null;
+  open?: boolean;
 }) {
   const title = params.title.trim();
   invariant(title.length > 0, 400, "INVALID_INPUT", "Title is required.");
   const sourceNote = params.sourceMessageId ? `\n\n---\nCaptured from ${params.provider} source message.` : "";
   const bodyMd = `${params.bodyMd?.trim() || title}${sourceNote}`;
+  const dueAt = typeof params.dueAt === "string" ? new Date(params.dueAt) : params.dueAt ?? null;
+  const normalizedDueAt = dueAt instanceof Date && Number.isFinite(dueAt.getTime()) ? dueAt : null;
 
   let result: { entityType: string; entityId: string };
   if (params.kind === "ACTION") {
-    const action = await createAction(actor, { workspaceId: params.workspaceId, title, bodyMd, isPrivate: true });
+    const action = await createAction(actor, {
+      workspaceId: params.workspaceId,
+      title,
+      bodyMd,
+      assigneeMemberId: params.assigneeMemberId ?? null,
+      dueAt: normalizedDueAt,
+      isPrivate: true,
+    });
+    if (params.open) {
+      await publishAction(actor, { workspaceId: params.workspaceId, actionId: action.id });
+    }
     result = { entityType: "Action", entityId: action.id };
   } else if (params.kind === "TENSION") {
-    const tension = await createTension(actor, { workspaceId: params.workspaceId, title, bodyMd, isPrivate: true });
+    const tension = await createTension(actor, {
+      workspaceId: params.workspaceId,
+      title,
+      bodyMd,
+      assigneeMemberId: params.assigneeMemberId ?? null,
+      isPrivate: true,
+    });
+    if (params.open) {
+      await publishTension(actor, { workspaceId: params.workspaceId, tensionId: tension.id });
+    }
     result = { entityType: "Tension", entityId: tension.id };
   } else if (params.kind === "PROPOSAL") {
     const proposal = await createProposal(actor, { workspaceId: params.workspaceId, title, summary: title, bodyMd, isPrivate: true });
+    if (params.open) {
+      await submitProposal(actor, { workspaceId: params.workspaceId, proposalId: proposal.id });
+    }
     result = { entityType: "Proposal", entityId: proposal.id };
   } else {
     const source = await ingestSource(actor, {
@@ -603,6 +796,7 @@ export async function createWorkItemFromCommunicationSource(actor: AppActor, par
   return {
     ...result,
     webUrl: entityUrl(params.workspaceId, result.entityType, result.entityId),
+    opened: Boolean(params.open && params.kind !== "BRAIN_NOTE"),
   };
 }
 
@@ -665,6 +859,7 @@ export async function handleSlackCommand(payload: URLSearchParams) {
   const [commandRaw, ...rest] = rawText.split(/\s+/);
   const command = commandRaw?.toLowerCase() || "brief";
   const text = rest.join(" ").trim();
+  const legacyCommands = new Set(["brief", "action", "tension", "proposal"]);
 
   if (command === "brief") {
     const [actions, tensions, proposals] = await Promise.all([
@@ -684,10 +879,25 @@ export async function handleSlackCommand(payload: URLSearchParams) {
   }
 
   const kind = command === "action" ? "ACTION" : command === "tension" ? "TENSION" : command === "proposal" ? "PROPOSAL" : null;
-  if (!kind || !text) {
+  if (!kind && rawText) {
+    const responseUrl = payload.get("response_url") ?? "";
+    await enqueueSlackAgentJob({
+      source: "slash_command",
+      installationId: installation.id,
+      workspaceId: installation.workspaceId,
+      actorUserId: actor.user.id,
+      externalUserId,
+      prompt: rawText,
+      channelId: payload.get("channel_id") || null,
+      responseUrlEnc: responseUrl ? encryptSecret(responseUrl) : null,
+    });
+    return slackAgentWorkingResponse();
+  }
+
+  if (!kind || !text || !legacyCommands.has(command)) {
     return {
       response_type: "ephemeral",
-      text: "Use `/corgtex brief`, `/corgtex action <text>`, `/corgtex tension <text>`, or `/corgtex proposal <text>`.",
+      text: "Use `/corgtex <plain text>`, `/corgtex brief`, `/corgtex action <text>`, `/corgtex tension <text>`, or `/corgtex proposal <text>`.",
     };
   }
 
@@ -711,53 +921,37 @@ export async function handleSlackInteraction(payload: Record<string, unknown>) {
   if (!actor) return slackAccountLinkResponse(installation.workspaceId);
 
   if (payload.type === "message_action") {
-    const triggerId = asString(payload.trigger_id);
     const message = isRecord(payload.message) ? payload.message : {};
     const channel = isRecord(payload.channel) ? asString(payload.channel.id) : "";
     const messageTs = asString(message.ts);
     const messageText = asString(message.text);
-    await slackClient(encryptedBotToken(installation)).views.open({
-      trigger_id: triggerId,
-      view: {
-        type: "modal",
-        callback_id: "corgtex_capture_modal",
-        title: { type: "plain_text", text: "Send to Corgtex" },
-        submit: { type: "plain_text", text: "Create draft" },
-        close: { type: "plain_text", text: "Cancel" },
-        private_metadata: JSON.stringify({ channel, messageTs, messageText, externalUserId }),
-        blocks: [
-          {
-            type: "input",
-            block_id: "kind",
-            label: { type: "plain_text", text: "Create" },
-            element: {
-              type: "static_select",
-              action_id: "value",
-              initial_option: { text: { type: "plain_text", text: "Action" }, value: "ACTION" },
-              options: [
-                { text: { type: "plain_text", text: "Action" }, value: "ACTION" },
-                { text: { type: "plain_text", text: "Tension" }, value: "TENSION" },
-                { text: { type: "plain_text", text: "Proposal" }, value: "PROPOSAL" },
-                { text: { type: "plain_text", text: "Brain note" }, value: "BRAIN_NOTE" },
-              ],
-            },
-          },
-          {
-            type: "input",
-            block_id: "title",
-            label: { type: "plain_text", text: "Title" },
-            element: { type: "plain_text_input", action_id: "value", initial_value: messageText.slice(0, 120) || "Slack capture" },
-          },
-          {
-            type: "input",
-            block_id: "body",
-            label: { type: "plain_text", text: "Details" },
-            element: { type: "plain_text_input", action_id: "value", multiline: true, initial_value: messageText || "Captured from Slack." },
-          },
-        ],
-      },
+    const threadTs = asString(message.thread_ts) || messageTs;
+    const sourceMessage = channel && messageTs
+      ? await persistSlackSourceMessage(installation, {
+        channelId: channel,
+        messageTs,
+        threadTs,
+        externalUserId: asString(message.user) || null,
+        text: messageText,
+        raw: { messageAction: true, message },
+      })
+      : null;
+    const responseUrl = asString(payload.response_url);
+    await enqueueSlackAgentJob({
+      source: "message_shortcut",
+      installationId: installation.id,
+      workspaceId: installation.workspaceId,
+      actorUserId: actor.user.id,
+      externalUserId,
+      prompt: messageText ? `Act on this Slack message:\n${messageText}` : "Capture this Slack message in Corgtex.",
+      channelId: channel || null,
+      threadTs,
+      messageTs,
+      messageText,
+      sourceMessageId: sourceMessage?.id ?? null,
+      responseUrlEnc: responseUrl ? encryptSecret(responseUrl) : null,
     });
-    return {};
+    return slackAgentWorkingResponse();
   }
 
   if (payload.type === "view_submission") {
@@ -848,6 +1042,92 @@ export async function sendSlackMessage(installationId: string, target: {
     unfurl_links: false,
     unfurl_media: false,
   });
+}
+
+export async function sendSlackEphemeralMessage(installationId: string, target: {
+  channel: string;
+  user: string;
+}, blocks: unknown[], text = "Corgtex update") {
+  const installation = await prisma.communicationInstallation.findUnique({
+    where: { id: installationId },
+  });
+  invariant(installation, 404, "NOT_FOUND", "Slack installation not found.");
+
+  return slackClient(encryptedBotToken(installation)).chat.postEphemeral({
+    channel: target.channel,
+    user: target.user,
+    text,
+    blocks: blocks as any,
+  });
+}
+
+async function postSlackResponseUrl(responseUrlEnc: string, delivery: SlackAgentDelivery) {
+  const response = await fetch(decryptSecret(responseUrlEnc), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      response_type: "ephemeral",
+      replace_original: false,
+      text: delivery.text,
+      blocks: delivery.blocks,
+    }),
+  });
+  invariant(response.ok, 502, "SLACK_RESPONSE_FAILED", "Slack response URL rejected the agent reply.");
+}
+
+export async function deliverSlackAgentResponse(payload: SlackAgentJobPayload, delivery: SlackAgentDelivery) {
+  if (payload.responseUrlEnc) {
+    await postSlackResponseUrl(payload.responseUrlEnc, delivery);
+    return;
+  }
+
+  if (payload.source === "app_mention" && payload.channelId) {
+    await sendSlackMessage(payload.installationId, {
+      channel: payload.channelId,
+      threadTs: payload.threadTs ?? payload.messageTs ?? undefined,
+    }, delivery.blocks ?? [{
+      type: "section",
+      text: { type: "mrkdwn", text: delivery.text },
+    }]);
+    return;
+  }
+
+  if (payload.channelId && payload.externalUserId) {
+    await sendSlackEphemeralMessage(payload.installationId, {
+      channel: payload.channelId,
+      user: payload.externalUserId,
+    }, delivery.blocks ?? [{
+      type: "section",
+      text: { type: "mrkdwn", text: delivery.text },
+    }], delivery.text);
+  }
+}
+
+export async function fetchSlackThreadMessages(installationId: string, params: {
+  channelId: string;
+  threadTs: string;
+  limit?: number;
+}) {
+  const installation = await prisma.communicationInstallation.findUnique({
+    where: { id: installationId },
+  });
+  invariant(installation, 404, "NOT_FOUND", "Slack installation not found.");
+
+  try {
+    const response = await slackClient(encryptedBotToken(installation)).conversations.replies({
+      channel: params.channelId,
+      ts: params.threadTs,
+      limit: params.limit ?? 20,
+    });
+    return (response.messages ?? []).map((message) => ({
+      user: asString(message.user),
+      text: asString(message.text),
+      ts: asString(message.ts),
+      threadTs: asString(message.thread_ts),
+    })).filter((message) => message.text.length > 0);
+  } catch {
+    return [];
+  }
 }
 
 export async function publishSlackHome(installationId: string, externalUserId: string) {

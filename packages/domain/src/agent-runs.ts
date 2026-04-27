@@ -17,7 +17,8 @@ export type AgentKey =
   | "advice-routing"
   | "process-linting"
   | "daily-check-in"
-  | "spend-submission";
+  | "spend-submission"
+  | "slack-agent";
 
 function jobTypeForAgent(agentKey: AgentKey) {
   switch (agentKey) {
@@ -47,6 +48,8 @@ function jobTypeForAgent(agentKey: AgentKey) {
       return "agent.daily-check-in";
     case "spend-submission":
       return "agent.spend-submission";
+    case "slack-agent":
+      return "communication.slack.agent";
   }
 }
 

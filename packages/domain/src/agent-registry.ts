@@ -139,6 +139,16 @@ export const AGENT_REGISTRY = {
     inputs: ["24h conversation history"],
     outputs: ["digest article", "person profile updates", "personalized emails"],
   },
+  "slack-agent": {
+    label: "Slack Agent",
+    description: "Interprets plain Slack requests and creates or drafts bounded Corgtex work items.",
+    category: "operations",
+    canDisable: true,
+    defaultModelTier: "standard" as const,
+    costTier: "medium" as const,
+    inputs: ["Slack prompt", "workspace context", "thread context"],
+    outputs: ["Slack reply", "created Corgtex records"],
+  },
 } as const;
 
 export type RegisteredAgentKey = keyof typeof AGENT_REGISTRY;
