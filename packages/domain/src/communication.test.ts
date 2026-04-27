@@ -19,6 +19,9 @@ const { prismaMock, txMock, createActionMock } = vi.hoisted(() => {
         findUnique: vi.fn(),
         update: vi.fn(),
       },
+      communicationChannel: {
+        upsert: vi.fn(),
+      },
       communicationExternalUser: {
         findUnique: vi.fn(),
         upsert: vi.fn(),
@@ -32,6 +35,9 @@ const { prismaMock, txMock, createActionMock } = vi.hoisted(() => {
       },
       user: {
         findUnique: vi.fn(),
+      },
+      workflowJob: {
+        upsert: vi.fn(),
       },
     },
     createActionMock: vi.fn(),
@@ -64,6 +70,7 @@ vi.mock("./tensions", () => ({
 
 vi.mock("./proposals", () => ({
   createProposal: vi.fn(),
+  submitProposal: vi.fn(),
 }));
 
 vi.mock("./brain", () => ({
@@ -225,6 +232,145 @@ describe("communication Slack integration", () => {
       isPrivate: true,
     }));
     expect(response.text).toContain("Action draft created");
+  });
+
+  it("enqueues plain Slack slash command text for the Slack agent", async () => {
+    const { handleSlackCommand } = await import("./communication");
+    prismaMock.communicationInstallation.findUnique.mockResolvedValueOnce({
+      id: "install-1",
+      workspaceId: "workspace-1",
+      provider: "SLACK",
+      status: "ACTIVE",
+      botTokenEnc: "enc:bot-token",
+    });
+    prismaMock.communicationExternalUser.findUnique.mockResolvedValueOnce({ userId: "user-1" });
+    prismaMock.user.findUnique.mockResolvedValueOnce({
+      id: "user-1",
+      email: "user@example.test",
+      displayName: "User",
+      globalRole: "USER",
+    });
+    prismaMock.workflowJob.upsert.mockResolvedValueOnce({ id: "job-1" });
+
+    const response = await handleSlackCommand(new URLSearchParams({
+      team_id: "T1",
+      user_id: "U1",
+      channel_id: "C1",
+      response_url: "https://hooks.slack.test/response",
+      text: "Jan should follow up with Milan tomorrow",
+    }));
+
+    expect(createActionMock).not.toHaveBeenCalled();
+    expect(prismaMock.workflowJob.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({
+        workspaceId: "workspace-1",
+        type: "communication.slack.agent",
+        payload: expect.objectContaining({
+          source: "slash_command",
+          prompt: "Jan should follow up with Milan tomorrow",
+          channelId: "C1",
+          responseUrlEnc: "enc:https://hooks.slack.test/response",
+        }),
+      }),
+    }));
+    expect(response.text).toContain("working");
+  });
+
+  it("enqueues app mentions with the bot mention stripped", async () => {
+    const { processSlackInboundEvent } = await import("./communication");
+    prismaMock.communicationInboundEvent.findUnique.mockResolvedValueOnce({
+      id: "inbound-1",
+      provider: "SLACK",
+      payload: {
+        event: {
+          type: "app_mention",
+          channel: "C1",
+          user: "U1",
+          ts: "1710000000.000100",
+          text: "<@UBOT> turn this into a tension",
+        },
+      },
+      installation: {
+        id: "install-1",
+        workspaceId: "workspace-1",
+        provider: "SLACK",
+        status: "ACTIVE",
+        botUserId: "UBOT",
+        botTokenEnc: "enc:bot-token",
+      },
+    });
+    prismaMock.communicationExternalUser.findUnique.mockResolvedValueOnce({ userId: "user-1" });
+    prismaMock.user.findUnique.mockResolvedValueOnce({
+      id: "user-1",
+      email: "user@example.test",
+      displayName: "User",
+      globalRole: "USER",
+    });
+    prismaMock.communicationChannel.upsert.mockResolvedValueOnce({ id: "channel-1", kind: "PUBLIC", isIngestEnabled: true });
+    prismaMock.communicationMessage.upsert.mockResolvedValueOnce({ id: "message-1" });
+    prismaMock.workflowJob.upsert.mockResolvedValueOnce({ id: "job-1" });
+
+    await processSlackInboundEvent("inbound-1");
+
+    expect(prismaMock.workflowJob.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: { dedupeKey: "inbound-1:communication-slack-agent" },
+      create: expect.objectContaining({
+        type: "communication.slack.agent",
+        payload: expect.objectContaining({
+          source: "app_mention",
+          prompt: "turn this into a tension",
+          threadTs: "1710000000.000100",
+          sourceMessageId: "message-1",
+        }),
+      }),
+    }));
+  });
+
+  it("runs the Slack agent for message shortcuts instead of opening the legacy modal", async () => {
+    const { handleSlackInteraction } = await import("./communication");
+    prismaMock.communicationInstallation.findUnique.mockResolvedValueOnce({
+      id: "install-1",
+      workspaceId: "workspace-1",
+      provider: "SLACK",
+      status: "ACTIVE",
+      botTokenEnc: "enc:bot-token",
+    });
+    prismaMock.communicationExternalUser.findUnique.mockResolvedValueOnce({ userId: "user-1" });
+    prismaMock.user.findUnique.mockResolvedValueOnce({
+      id: "user-1",
+      email: "user@example.test",
+      displayName: "User",
+      globalRole: "USER",
+    });
+    prismaMock.communicationChannel.upsert.mockResolvedValueOnce({ id: "channel-1", kind: "PUBLIC", isIngestEnabled: true });
+    prismaMock.communicationMessage.upsert.mockResolvedValueOnce({ id: "message-1" });
+    prismaMock.workflowJob.upsert.mockResolvedValueOnce({ id: "job-1" });
+
+    const response = await handleSlackInteraction({
+      type: "message_action",
+      team: { id: "T1" },
+      user: { id: "U1" },
+      channel: { id: "C1" },
+      response_url: "https://hooks.slack.test/response",
+      message: {
+        user: "U2",
+        ts: "1710000000.000100",
+        text: "We need clearer ownership for onboarding.",
+      },
+    });
+
+    expect(prismaMock.workflowJob.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({
+        type: "communication.slack.agent",
+        payload: expect.objectContaining({
+          source: "message_shortcut",
+          prompt: "Act on this Slack message:\nWe need clearer ownership for onboarding.",
+          sourceMessageId: "message-1",
+          responseUrlEnc: "enc:https://hooks.slack.test/response",
+        }),
+      }),
+    }));
+    expect(response.text).toContain("working");
   });
 
   it("purges expired raw message content while preserving rows", async () => {

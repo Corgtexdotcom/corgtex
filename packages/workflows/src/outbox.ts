@@ -7,8 +7,8 @@ import { handleGovernanceScoring } from "./handlers";
 import { runAgentWorkflowJob } from "./handlers";
 import { syncBrainArticleKnowledge } from "@corgtex/knowledge";
 
-import { runDailyDigest } from "@corgtex/agents";
-import { createWebhookDeliveries, deliverWebhook, processSlackInboundEvent, purgeExpiredCommunicationMessages } from "@corgtex/domain";
+import { runDailyDigest, runSlackAgent } from "@corgtex/agents";
+import { createWebhookDeliveries, deliverWebhook, processSlackInboundEvent, purgeExpiredCommunicationMessages, type SlackAgentJobPayload } from "@corgtex/domain";
 
 const DEFAULT_BATCH_SIZE = 25;
 const MAX_ATTEMPTS = 5;
@@ -353,6 +353,19 @@ async function handleJob(job: ClaimedJob) {
     const inboundEventId = (payload as { inboundEventId?: string }).inboundEventId;
     if (inboundEventId) {
       await processSlackInboundEvent(inboundEventId);
+    }
+    return;
+  }
+
+  if (job.type === "communication.slack.agent") {
+    const slackPayload = payload as SlackAgentJobPayload;
+    const result = await runSlackAgent({
+      ...slackPayload,
+      workspaceId: job.workspaceId,
+      workflowJobId: job.id,
+    });
+    if (result && typeof result === "object" && "skipped" in result && result.reason === "concurrency_limit") {
+      throw new RetryableWorkflowJobError("Agent concurrency limit reached.");
     }
     return;
   }

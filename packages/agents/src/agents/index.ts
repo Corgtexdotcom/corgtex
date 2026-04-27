@@ -9,3 +9,4 @@ export * from "./advice-routing";
 export * from "./process-linting";
 export * from "./daily-check-in";
 export * from "./spend-submission";
+export * from "./slack-agent";
