@@ -6,6 +6,7 @@ import type { NavGroup, WorkspaceNavFeatureFlag } from "@/lib/nav-config";
 
 export type WorkspaceFeatureFlag =
   | WorkspaceNavFeatureFlag
+  | "SETTINGS_GENERAL"
   | "MULTILINGUAL";
 
 export type WorkspaceFeatureFlagMap = Record<WorkspaceFeatureFlag, boolean>;
@@ -16,6 +17,7 @@ export const DEFAULT_WORKSPACE_FEATURE_FLAGS: WorkspaceFeatureFlagMap = {
   CYCLES: true,
   AGENT_GOVERNANCE: true,
   OS_METRICS: true,
+  SETTINGS_GENERAL: true,
   MULTILINGUAL: false,
 };
 
@@ -25,6 +27,7 @@ const WORKSPACE_FEATURE_FLAG_VALUES: WorkspaceFeatureFlag[] = [
   "CYCLES",
   "AGENT_GOVERNANCE",
   "OS_METRICS",
+  "SETTINGS_GENERAL",
   "MULTILINGUAL",
 ];
 
@@ -36,6 +39,7 @@ const CRINA_STABLE_FEATURE_FLAGS: Partial<WorkspaceFeatureFlagMap> = {
   CYCLES: false,
   AGENT_GOVERNANCE: false,
   OS_METRICS: false,
+  SETTINGS_GENERAL: false,
 };
 
 function isKnownWorkspaceFeatureFlag(flag: string): flag is WorkspaceFeatureFlag {
