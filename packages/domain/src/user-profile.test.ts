@@ -66,7 +66,14 @@ describe("User Profile Domain", () => {
       const result = await updateUserProfile(mockActor as any, { displayName: "New Name", bio: "New Bio" });
       expect(prisma.user.update).toHaveBeenCalledWith({
         where: { id: "u1" },
-        data: { displayName: "New Name", bio: "New Bio", avatarUrl: undefined },
+        data: { displayName: "New Name", bio: "New Bio" },
+        select: {
+          id: true,
+          email: true,
+          displayName: true,
+          bio: true,
+          avatarUrl: true,
+        },
       });
       expect(result.displayName).toBe("New Name");
     });
