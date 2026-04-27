@@ -437,16 +437,26 @@
     "switchWorkspace": "Cambiar espacio de trabajo"
   },
   "common": {
+    "aiBriefing": "Resumen de IA",
+    "aiBriefingEmpty": "Genera un resumen conciso para este miembro.",
     "appName": "Corgtex",
     "approve": "Aprobar",
+    "briefingFailed": "No se pudo generar el resumen.",
     "cancel": "Cancelar",
     "commandMenu": "Menú de comandos",
     "error": "Ocurrió un error",
+    "generate": "Generar",
+    "generating": "Generando...",
+    "keyInsights": "Hallazgos clave",
     "language": "Idioma",
     "loading": "Cargando...",
     "logout": "Cerrar sesión",
+    "meetingFollowUps": "Seguimientos de reuniones",
+    "regenerate": "Regenerar",
     "save": "Guardar",
-    "search": "Buscar"
+    "search": "Buscar",
+    "synthesizing": "Sintetizando...",
+    "topPriorities": "Prioridades principales"
   },
   "cycles": {
     "btnCreateAllocation": "Crear asignación",

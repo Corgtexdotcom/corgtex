@@ -1,4 +1,4 @@
-import { getMemberProfile, requireWorkspaceMembership } from "@corgtex/domain";
+import { AppError, getMemberProfile, requireWorkspaceMembership } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { notFound } from "next/navigation";
 import Link from "next/link";
@@ -29,7 +29,14 @@ export default async function MemberProfilePage({ params }: PageProps) {
     notFound();
   }
 
-  await requireWorkspaceMembership({ actor, workspaceId });
+  try {
+    await requireWorkspaceMembership({ actor, workspaceId });
+  } catch (error) {
+    if (error instanceof AppError && error.status === 403) {
+      notFound();
+    }
+    throw error;
+  }
 
   let data;
   try {
