@@ -72,6 +72,7 @@ type Env = {
   readonly MODEL_CHAT_FAST: string;
   readonly MODEL_CHAT_STANDARD: string;
   readonly MODEL_CHAT_QUALITY: string;
+  readonly MODEL_CHAT_CONVERSATION: string;
   readonly MODEL_EMBEDDING_DEFAULT: string;
   readonly AGENT_KILL_SWITCH: boolean;
   readonly WORKSPACE_AGENT_MAX_CONCURRENCY: number;
@@ -145,16 +146,19 @@ export const env: Env = {
     return optional("MODEL_BASE_URL") ?? "https://openrouter.ai/api/v1";
   },
   get MODEL_CHAT_DEFAULT() {
-    return optional("MODEL_CHAT_DEFAULT") ?? "google/gemma-4-26b-a4b-it";
+    return optional("MODEL_CHAT_DEFAULT") ?? "qwen/qwen3-32b";
   },
   get MODEL_CHAT_FAST() {
     return optional("MODEL_CHAT_FAST") ?? "google/gemma-4-12b-it";
   },
   get MODEL_CHAT_STANDARD() {
-    return optional("MODEL_CHAT_STANDARD") ?? "google/gemma-4-31b-it";
+    return optional("MODEL_CHAT_STANDARD") ?? "meta-llama/llama-4-scout";
   },
   get MODEL_CHAT_QUALITY() {
     return optional("MODEL_CHAT_QUALITY") ?? "google/gemini-2.5-flash";
+  },
+  get MODEL_CHAT_CONVERSATION() {
+    return optional("MODEL_CHAT_CONVERSATION") ?? "google/gemini-2.5-flash";
   },
   get MODEL_EMBEDDING_DEFAULT() {
     return optional("MODEL_EMBEDDING_DEFAULT") ?? "google/gemini-embedding-001";
