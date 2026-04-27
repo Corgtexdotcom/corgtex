@@ -1,4 +1,4 @@
-import { DEFAULT_SCOPES, SCOPE_REGISTRY, listMembersEnriched, listAgentCredentials, listWebhookEndpoints, listInboundWebhooks, listAgentConfigs, listOAuthApps, getSsoConfigByWorkspace, getModelUsageBudget, listDocuments } from "@corgtex/domain";
+import { DEFAULT_SCOPES, SCOPE_REGISTRY, getMemberInvitePolicy, listMemberInviteRequests, listMembersEnriched, listAgentCredentials, listWebhookEndpoints, listInboundWebhooks, listAgentConfigs, listOAuthApps, getSsoConfigByWorkspace, getModelUsageBudget, listDocuments, requireWorkspaceMembership } from "@corgtex/domain";
 import { prisma } from "@corgtex/shared";
 import { requirePageActor } from "@/lib/auth";
 import { headers } from "next/headers";
@@ -51,13 +51,16 @@ export default async function SettingsPage({
   // Lazy-load members only for the members tab to avoid N+1 and failure propagation
   let members: Awaited<ReturnType<typeof listMembersEnriched>> = [];
   let isAdmin = false;
+  let invitePolicy: Awaited<ReturnType<typeof getMemberInvitePolicy>> = "ADMINS_ONLY";
+  let inviteRequests: Awaited<ReturnType<typeof listMemberInviteRequests>> = [];
   if (tab === "members") {
+    const membership = await requireWorkspaceMembership({ actor, workspaceId });
+    isAdmin = membership?.role === "ADMIN";
     try {
       members = await listMembersEnriched(workspaceId, { includeInactive: true });
-      if (actor.kind === "agent") {
-        isAdmin = true;
-      } else {
-        isAdmin = members.find((m) => m.user.id === actor.user.id)?.role === "ADMIN";
+      invitePolicy = await getMemberInvitePolicy(workspaceId);
+      if (isAdmin) {
+        inviteRequests = await listMemberInviteRequests(actor, { workspaceId, status: "PENDING" });
       }
     } catch (err) {
       console.error("[SettingsPage] Failed to fetch enriched members:", err);
@@ -322,7 +325,13 @@ export default async function SettingsPage({
       )}
 
       {tab === "members" && (
-        <MembersTable workspaceId={workspaceId} members={members} isAdmin={isAdmin} />
+        <MembersTable
+          workspaceId={workspaceId}
+          members={members}
+          isAdmin={isAdmin}
+          invitePolicy={invitePolicy}
+          inviteRequests={inviteRequests}
+        />
       )}
 
       {tab === "data-sources" && (

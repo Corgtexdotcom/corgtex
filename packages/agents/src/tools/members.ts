@@ -40,7 +40,7 @@ export const updateMemberTool: ModelTool = {
   type: "function",
   function: {
     name: "update_member",
-    description: "Update a member's core workspace role (CONTRIBUTOR, FACILITATOR, ADMIN) or their active status. This requires ADMIN permissions.",
+    description: "Update a member's email, display name, core workspace role (CONTRIBUTOR, FACILITATOR, FINANCE_STEWARD, ADMIN), or active status. This requires ADMIN permissions.",
     parameters: {
       type: "object",
       properties: {
@@ -48,6 +48,7 @@ export const updateMemberTool: ModelTool = {
         role: { type: "string", description: "CONTRIBUTOR, FACILITATOR, FINANCE_STEWARD, or ADMIN" },
         isActive: { type: "boolean", description: "Set to false to deactivate the member" },
         displayName: { type: "string" },
+        email: { type: "string" },
       },
       required: ["memberId"],
     },
@@ -103,6 +104,7 @@ export async function updateMemberAction(actor: AppActor, ctx: any, args: any) {
     role: args.role as MemberRole | undefined,
     isActive: args.isActive,
     displayName: args.displayName,
+    email: args.email,
   });
   return { success: true, memberId: updated.id, role: updated.role, isActive: updated.isActive };
 }
