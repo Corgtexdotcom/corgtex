@@ -6,6 +6,7 @@ import { GoalProgress } from"./GoalProgress";
 import { RecognitionCard } from"./RecognitionCard";
 import type { GoalCadence } from"@prisma/client";
 import { getTranslations } from "next-intl/server";
+import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
 
 export const dynamic ="force-dynamic";
 
@@ -17,6 +18,7 @@ export default async function GoalsPage({
  searchParams: Promise<{ view?: string; cadence?: string }>;
 }) {
  const { workspaceId } = await params;
+ await requireWorkspaceFeature(workspaceId, "GOALS");
  const { view ="tree", cadence ="QUARTERLY" } = await searchParams;
  const actor = await requirePageActor();
  const t = await getTranslations("goals");
