@@ -97,7 +97,8 @@ export function AgentSettingsClient({ workspaceId, agents }: { workspaceId: stri
  >
  <option value="default">{t("lblDefault")} ({agent.defaultModelTier})</option>
  <option value="google/gemma-4-12b-it">{t("optFast")} (Gemma 12B)</option>
- <option value="google/gemma-4-31b-it">{t("optStandard")} (Gemma 31B)</option>
+ <option value="qwen/qwen3-32b">{t("optDefault")} (Qwen 3 32B)</option>
+ <option value="meta-llama/llama-4-scout">{t("optStandard")} (Llama 4 Scout)</option>
  <option value="google/gemini-2.5-flash">{t("optQuality")} (Gemini 2.5 Flash)</option>
  </select>
  </div>

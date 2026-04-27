@@ -71,7 +71,8 @@ Required environment variables for the core application (usually set in `.env` o
 **Model Provider Settings (Optional but recommended):**
 - `MODEL_PROVIDER`: Set to `openrouter` or `openai`
 - `MODEL_API_KEY`: Your API key
-- `MODEL_CHAT_DEFAULT`: e.g., `google/gemma-4-31b-it`
+- `MODEL_CHAT_DEFAULT`: e.g., `qwen/qwen3-32b`
+- `MODEL_CHAT_CONVERSATION`: e.g., `google/gemini-2.5-flash` (used for interactive chat)
 - `MODEL_EMBEDDING_DEFAULT`: e.g., `google/gemini-embedding-001`
 
 ## Enterprise Deployment (Configuration Repo Pattern)
