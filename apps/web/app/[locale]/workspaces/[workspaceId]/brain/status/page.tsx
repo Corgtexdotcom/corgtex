@@ -22,39 +22,39 @@ export default async function BrainStatusPage({
   return (
     <>
       <div className="ws-page-header">
-        <h1>Brain Status</h1>
+        <h1>{t("statusTitle")}</h1>
       </div>
 
       <div className="ws-stat-row">
         <div className="ws-stat-card">
           <strong>{status.totalArticles}</strong>
-          <span>Total Articles</span>
+          <span>{t("totalArticles")}</span>
         </div>
         <div className="ws-stat-card">
           <strong>{status.staleArticles}</strong>
-          <span>Stale</span>
+          <span>{t("stale")}</span>
         </div>
         <div className="ws-stat-card">
           <strong>{status.unabsorbedSources}</strong>
-          <span>Pending Sources</span>
+          <span>{t("pendingSources")}</span>
         </div>
         <div className="ws-stat-card">
           <strong>{status.openDiscussionThreads}</strong>
-          <span>Open Threads</span>
+          <span>{t("openThreads")}</span>
         </div>
         <div className="ws-stat-card">
           <strong>{status.orphanArticles}</strong>
-          <span>Orphans</span>
+          <span>{t("orphans")}</span>
         </div>
         <div className="ws-stat-card">
           <strong>{status.unownedArticles}</strong>
-          <span>Unowned</span>
+          <span>{t("unowned")}</span>
         </div>
       </div>
 
       <div className="ws-columns">
         <div className="panel">
-          <h2>Articles by type</h2>
+          <h2>{t("articlesByType")}</h2>
           <div className="list">
             {Object.entries(status.articleCountByType).sort(([, a], [, b]) => b - a).map(([type, count]) => (
               <div className="item" key={type}>
@@ -68,7 +68,7 @@ export default async function BrainStatusPage({
         </div>
 
         <div className="panel">
-          <h2>Articles by authority</h2>
+          <h2>{t("articlesByAuthority")}</h2>
           <div className="list">
             {Object.entries(status.articleCountByAuthority).sort(([, a], [, b]) => b - a).map(([auth, count]) => (
               <div className="item" key={auth}>
@@ -84,7 +84,7 @@ export default async function BrainStatusPage({
 
       {staleArticles.length > 0 && (
         <section className="ws-section" style={{ marginTop: 20 }}>
-          <h2>Stale articles (need review)</h2>
+          <h2>{t("staleArticlesNeedReview")}</h2>
           <div className="list">
             {staleArticles.map((a) => (
               <a className="item" key={a.id} href={`/workspaces/${workspaceId}/brain/${a.slug}`}>
@@ -96,7 +96,7 @@ export default async function BrainStatusPage({
                   </div>
                 </div>
                 <div className="muted">
-                  Updated {new Date(a.updatedAt).toLocaleDateString()}
+                  {t("updatedDate", { date: new Date(a.updatedAt).toLocaleDateString() })}
                   {a.ownerMember && ` · ${a.ownerMember.user.displayName ?? a.ownerMember.user.email}`}
                 </div>
               </a>
