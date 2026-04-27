@@ -2,7 +2,15 @@ import { NextRequest, NextResponse } from "next/server";
 import { unstable_rethrow } from "next/navigation";
 import { requirePageActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
-import { getOAuthAppByClientId, isAllowedOAuthRedirectUri, issueAuthorizationCode } from "@corgtex/domain";
+import {
+  getMcpOAuthClientByClientId,
+  getMcpPublicUrl,
+  getOAuthAppByClientId,
+  isAllowedMcpRedirectUri,
+  isAllowedOAuthRedirectUri,
+  issueAuthorizationCode,
+  issueMcpAuthorizationCode,
+} from "@corgtex/domain";
 import { z } from "zod";
 
 // This is the endpoint ChatGPT calls to start the OAuth flow.
@@ -16,17 +24,43 @@ export async function GET(request: NextRequest) {
     const state = url.searchParams.get("state");
     const responseType = url.searchParams.get("response_type"); // expected: "code"
     const scopeString = url.searchParams.get("scope") || "";
+    const codeChallenge = url.searchParams.get("code_challenge") || "";
+    const codeChallengeMethod = url.searchParams.get("code_challenge_method") || "";
+    const resource = url.searchParams.get("resource") || "";
 
     if (!clientId || !redirectUri || responseType !== "code") {
       return NextResponse.json({ error: "invalid_request", message: "Missing required parameters (client_id, redirect_uri) or invalid response_type" }, { status: 400 });
     }
 
-    // The Custom GPT should specify the workspace in the request, or we can use the app's workspaceId
+    const mcpClient = await getMcpOAuthClientByClientId(clientId).catch(() => null);
+    if (mcpClient) {
+      if (!isAllowedMcpRedirectUri(mcpClient.redirectUris, redirectUri)) {
+        return NextResponse.json({ error: "invalid_request", message: "Redirect URI is not registered" }, { status: 400 });
+      }
+      if (!codeChallenge || codeChallengeMethod !== "S256") {
+        return NextResponse.json({ error: "invalid_request", message: "MCP connector OAuth requires S256 PKCE" }, { status: 400 });
+      }
+
+      await requirePageActor();
+
+      const consentUrl = new URL("/oauth/authorize", request.url);
+      consentUrl.searchParams.set("client_id", clientId);
+      consentUrl.searchParams.set("redirect_uri", redirectUri);
+      consentUrl.searchParams.set("state", state || "");
+      consentUrl.searchParams.set("scope", scopeString);
+      consentUrl.searchParams.set("code_challenge", codeChallenge);
+      consentUrl.searchParams.set("code_challenge_method", codeChallengeMethod);
+      if (resource) {
+        consentUrl.searchParams.set("resource", resource);
+      }
+
+      return NextResponse.redirect(consentUrl);
+    }
+
     const app = await getOAuthAppByClientId(clientId).catch(() => null);
     if (!app) {
       return NextResponse.json({ error: "invalid_client", message: "Unknown client_id" }, { status: 400 });
     }
-
     if (!isAllowedOAuthRedirectUri(app.redirectUris, redirectUri)) {
       return NextResponse.json({ error: "invalid_request", message: "Redirect URI is not registered" }, { status: 400 });
     }
@@ -74,6 +108,10 @@ export async function POST(request: NextRequest) {
       redirectUri: z.string(),
       state: z.string().optional(),
       scopes: z.string().optional(),
+      workspaceId: z.string().optional(),
+      codeChallenge: z.string().optional(),
+      codeChallengeMethod: z.string().optional(),
+      resource: z.string().optional(),
     });
 
     const parsed = schema.safeParse(jsBody);
@@ -82,17 +120,33 @@ export async function POST(request: NextRequest) {
     }
     const body = parsed.data;
 
-    const app = await getOAuthAppByClientId(body.clientId);
     const scopeArray = (body.scopes || "").split(" ").filter(Boolean);
-    const effectiveScopes = scopeArray.length > 0 ? scopeArray : app.scopes;
+    const mcpClient = await getMcpOAuthClientByClientId(body.clientId).catch(() => null);
+    let code: string;
 
-    // Issue code
-    const code = await issueAuthorizationCode(actor, {
-      clientId: body.clientId,
-      workspaceId: app.workspaceId,
-      redirectUri: body.redirectUri,
-      scopes: effectiveScopes,
-    });
+    if (mcpClient) {
+      if (!body.workspaceId) {
+        return NextResponse.json({ error: "invalid_request", message: "Workspace is required" }, { status: 400 });
+      }
+      code = await issueMcpAuthorizationCode(actor, {
+        clientId: body.clientId,
+        workspaceId: body.workspaceId,
+        redirectUri: body.redirectUri,
+        scopes: scopeArray.length > 0 ? scopeArray : undefined,
+        codeChallenge: body.codeChallenge ?? "",
+        codeChallengeMethod: body.codeChallengeMethod ?? "",
+        resource: body.resource || getMcpPublicUrl(new URL(request.url).origin),
+      });
+    } else {
+      const app = await getOAuthAppByClientId(body.clientId);
+      const effectiveScopes = scopeArray.length > 0 ? scopeArray : app.scopes;
+      code = await issueAuthorizationCode(actor, {
+        clientId: body.clientId,
+        workspaceId: app.workspaceId,
+        redirectUri: body.redirectUri,
+        scopes: effectiveScopes,
+      });
+    }
 
     // Build redirect back to ChatGPT
     const redirectUrl = new URL(body.redirectUri);

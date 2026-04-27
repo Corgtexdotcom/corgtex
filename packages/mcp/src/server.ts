@@ -88,6 +88,43 @@ function jsonResult(value: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] };
 }
 
+function structuredJsonResult(value: Record<string, unknown>) {
+  return {
+    content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }],
+    structuredContent: value,
+  };
+}
+
+const DESTRUCTIVE_TOOL_NAMES = new Set([
+  "archive_proposal",
+  "delete_action",
+  "delete_tension",
+  "deactivate_member",
+  "delete_meeting",
+  "delete_article",
+  "delete_ledger_account",
+  "delete_spend",
+  "archive_spend",
+  "archive_ledger_account",
+  "archive_artifact",
+  "purge_artifact",
+]);
+
+function annotationsForTool(name: string) {
+  const readOnlyHint = /^(search|fetch|list_|get_|daily_overview$)/.test(name);
+  const destructiveHint = DESTRUCTIVE_TOOL_NAMES.has(name);
+  return {
+    title: name
+      .split("_")
+      .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+      .join(" "),
+    readOnlyHint,
+    destructiveHint,
+    idempotentHint: readOnlyHint,
+    openWorldHint: false,
+  };
+}
+
 const PROPOSAL_STATUS = ["DRAFT", "OPEN", "RESOLVED"] as const;
 const ACTION_STATUS = ["DRAFT", "OPEN", "IN_PROGRESS", "COMPLETED"] as const;
 const TENSION_STATUS = ["DRAFT", "OPEN", "RESOLVED"] as const;
@@ -114,13 +151,15 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
   });
 
   const { actor, workspaceId } = sessionCtx;
+  const tool = (name: string, description: string, inputSchema: Record<string, unknown>, handler: unknown) =>
+    server.tool(name, description, inputSchema, annotationsForTool(name), handler);
 
   // ===========================================================================
   // CONVERSATION + SEARCH
   // ===========================================================================
 
   // @ts-expect-error — MCP SDK overload triggers TS2589 with zod schemas
-  server.tool(
+  tool(
     "chat",
     "Send a message to Corgtex, the AI governance assistant. Returns Corgtex's response with full organizational knowledge context. This invokes an LLM call on the server side.",
     {
@@ -139,7 +178,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
   );
 
-  server.tool(
+  tool(
     "search_knowledge",
     "Search Corgtex's organizational knowledge base (Brain). Returns relevant document chunks from policies, meeting notes, proposals, and other indexed content. Does NOT invoke an LLM — just retrieval.",
     {
@@ -157,11 +196,81 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
   );
 
+  tool(
+    "search",
+    "Search Corgtex knowledge for ChatGPT, Claude, Cursor, and other MCP clients. Returns fetchable result IDs and short snippets.",
+    {
+      query: z.string().describe("The search query"),
+      limit: z.number().optional().describe("Max results to return (default 5)"),
+    },
+    async ({ query, limit }: { query: string; limit?: number }) => {
+      requireScope(sessionCtx, "brain:read");
+      const results = await searchIndexedKnowledge({
+        workspaceId,
+        query,
+        limit: limit ?? 5,
+      });
+      const mapped = results.map((result) => ({
+        id: result.chunkId,
+        title: result.title ?? `${result.sourceType} ${result.sourceId}`,
+        text: result.snippet,
+        url: webUrl(workspaceId, `/brain?source=${encodeURIComponent(result.sourceId)}`),
+        metadata: {
+          sourceType: result.sourceType,
+          sourceId: result.sourceId,
+          chunkIndex: result.chunkIndex,
+          score: result.score,
+        },
+      }));
+      return structuredJsonResult({ results: mapped });
+    },
+  );
+
+  tool(
+    "fetch",
+    "Fetch the full Corgtex knowledge chunk for a result returned by search.",
+    {
+      id: z.string().describe("The search result ID returned by the search tool"),
+    },
+    async ({ id }: { id: string }) => {
+      requireScope(sessionCtx, "brain:read");
+      const chunk = await prisma.knowledgeChunk.findFirst({
+        where: { id, workspaceId },
+        select: {
+          id: true,
+          sourceType: true,
+          sourceId: true,
+          sourceTitle: true,
+          chunkIndex: true,
+          content: true,
+          metadata: true,
+          createdAt: true,
+        },
+      });
+      if (!chunk) {
+        return structuredJsonResult({ error: "Not found", id });
+      }
+      return structuredJsonResult({
+        id: chunk.id,
+        title: chunk.sourceTitle ?? `${chunk.sourceType} ${chunk.sourceId}`,
+        text: chunk.content,
+        url: webUrl(workspaceId, `/brain?source=${encodeURIComponent(chunk.sourceId)}`),
+        metadata: {
+          sourceType: chunk.sourceType,
+          sourceId: chunk.sourceId,
+          chunkIndex: chunk.chunkIndex,
+          createdAt: chunk.createdAt,
+          raw: chunk.metadata,
+        },
+      });
+    },
+  );
+
   // ===========================================================================
   // WORKSPACE OVERVIEW
   // ===========================================================================
 
-  server.tool(
+  tool(
     "get_workspace_info",
     "Get basic workspace information including name, description, and aggregate counts.",
     {},
@@ -185,7 +294,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
   );
 
-  server.tool(
+  tool(
     "daily_overview",
     "Get a one-call daily digest of recent workspace activity: open actions, in-flight proposals, fresh tensions, recent meetings, and pending spend requests within a configurable window. Defaults to the last 24 hours.",
     {
@@ -273,7 +382,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
   // PROPOSALS
   // ===========================================================================
 
-  server.tool(
+  tool(
     "list_proposals",
     "List governance proposals in the workspace.",
     {
@@ -295,7 +404,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
   );
 
-  server.tool(
+  tool(
     "get_proposal",
     "Get the full record for a single proposal, including author and current status.",
     {
@@ -319,7 +428,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
   );
 
   // @ts-expect-error — MCP SDK overload triggers TS2589 with zod schemas
-  server.tool(
+  tool(
     "create_proposal",
     "Create a new governance proposal draft. Starts in DRAFT and must be opened separately with the circle.",
     {
@@ -339,7 +448,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
   );
 
-  server.tool(
+  tool(
     "update_proposal",
     "Update a draft proposal's title, body, summary, or owning circle. Only DRAFT proposals can be edited.",
     {
@@ -367,7 +476,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
   );
 
-  server.tool(
+  tool(
     "submit_proposal",
     "Open a DRAFT proposal with the circle. Starts an approval flow per the workspace's approval policy.",
     {
@@ -385,7 +494,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
   );
 
-  server.tool(
+  tool(
     "archive_proposal",
     "Archive a draft or resolved proposal so it stops appearing in active lists.",
     {
@@ -402,7 +511,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
   );
 
-  server.tool(
+  tool(
     "publish_proposal",
     "Publish a private draft proposal so other members can see it. Author-only — agents cannot publish on a user's behalf.",
     {
@@ -423,7 +532,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
   // ACTIONS
   // ===========================================================================
 
-  server.tool(
+  tool(
     "list_actions",
     "List action items (todos / commitments) in the workspace.",
     {
@@ -446,7 +555,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
   );
 
-  server.tool(
+  tool(
     "create_action",
     "Create a new action item.",
     {
@@ -464,7 +573,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
   );
 
-  server.tool(
+  tool(
     "update_action",
     "Update an action's title, body, status, circle, assignee, or due date. Pass only the fields you want to change.",
     {
@@ -504,7 +613,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
   );
 
-  server.tool(
+  tool(
     "complete_action",
     "Mark an action as COMPLETED. Convenience wrapper around update_action.",
     {
@@ -521,7 +630,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
   );
 
-  server.tool(
+  tool(
     "delete_action",
     "Archive an action so it stops appearing in active views. The record remains recoverable from the archive.",
     {
@@ -538,7 +647,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
   // TENSIONS
   // ===========================================================================
 
-  server.tool(
+  tool(
     "list_tensions",
     "List tensions (issues/concerns raised by members).",
     {
@@ -560,7 +669,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
   );
 
-  server.tool(
+  tool(
     "create_tension",
     "File a new tension (issue/concern).",
     {
@@ -578,7 +687,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
   );
 
-  server.tool(
+  tool(
     "update_tension",
     "Update a tension's title, body, status, circle, assignee, or priority. Pass only the fields you want to change.",
     {
@@ -621,7 +730,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
   );
 
-  server.tool(
+  tool(
     "upvote_tension",
     "Upvote a tension to signal support. User-only — agents cannot upvote on a user's behalf.",
     {
@@ -638,7 +747,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
   );
 
-  server.tool(
+  tool(
     "delete_tension",
     "Archive a tension so it stops appearing in active views. The record remains recoverable from the archive.",
     {
@@ -655,7 +764,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
   // MEMBERS
   // ===========================================================================
 
-  server.tool(
+  tool(
     "list_members",
     "List all active members of the workspace with their roles.",
     {},
@@ -673,7 +782,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
   );
 
-  server.tool(
+  tool(
     "create_member",
     "Onboard a new member. Creates the user account if it doesn't exist, adds them to the workspace with the chosen role, and issues a setup link token. Admin-only.",
     {
@@ -699,7 +808,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
   );
 
-  server.tool(
+  tool(
     "update_member",
     "Update a member's email, role, display name, or active status. Admin-only.",
     {
@@ -729,7 +838,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
   );
 
-  server.tool(
+  tool(
     "deactivate_member",
     "Deactivate a member (offboarding). They lose workspace access but their history is preserved. Admin-only.",
     {
@@ -750,7 +859,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
   // MEETINGS
   // ===========================================================================
 
-  server.tool(
+  tool(
     "list_meetings",
     "List meetings in the workspace with their summaries.",
     {},
@@ -769,7 +878,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
   );
 
-  server.tool(
+  tool(
     "get_meeting",
     "Get the full record for a single meeting, including transcript, summary, linked proposals, and tensions raised.",
     {
@@ -786,7 +895,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
   );
 
-  server.tool(
+  tool(
     "upload_meeting",
     "Upload meeting minutes / transcript / summary. The content is added to the workspace and indexed into the Brain so search_knowledge can find it within ~1 minute.",
     {
@@ -824,7 +933,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
   );
 
-  server.tool(
+  tool(
     "delete_meeting",
     "Archive a meeting and its transcript so it stops appearing in active views. Admin-only.",
     {
@@ -841,7 +950,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
   // BRAIN — articles + discussions
   // ===========================================================================
 
-  server.tool(
+  tool(
     "list_articles",
     "List Brain articles (policies, runbooks, decisions, glossaries, …). Filter by type, authority, or staleness.",
     {
@@ -881,7 +990,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
   );
 
-  server.tool(
+  tool(
     "get_article",
     "Get the full Markdown body and metadata for a Brain article by slug.",
     {
@@ -897,7 +1006,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
   );
 
-  server.tool(
+  tool(
     "create_article",
     "Create a new Brain article (policy, runbook, decision, etc). The body is Markdown; wikilinks like [[slug]] are auto-linked.",
     {
@@ -935,7 +1044,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
   );
 
-  server.tool(
+  tool(
     "update_article",
     "Update a Brain article. Pass `changeSummary` to label the version snapshot. The previous body is preserved as a version row.",
     {
@@ -972,7 +1081,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
   );
 
-  server.tool(
+  tool(
     "delete_article",
     "Archive a Brain article so it stops appearing in active views. Indexed chunks are kept until an explicit purge.",
     {
@@ -985,7 +1094,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
   );
 
-  server.tool(
+  tool(
     "publish_article",
     "Publish a private draft article so other members can see it. Author-only — agents cannot publish on a user's behalf.",
     {
@@ -1002,7 +1111,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
   );
 
-  server.tool(
+  tool(
     "create_discussion_thread",
     "Open a discussion thread on a Brain article. Posts an initial comment in the same call. User-only — agents cannot create threads.",
     {
@@ -1033,7 +1142,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
   );
 
-  server.tool(
+  tool(
     "add_discussion_comment",
     "Add a comment to an existing Brain discussion thread.",
     {
@@ -1047,7 +1156,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
   );
 
-  server.tool(
+  tool(
     "resolve_discussion",
     "Mark a Brain discussion thread as RESOLVED.",
     {
@@ -1064,7 +1173,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
   // CYCLES
   // ===========================================================================
 
-  server.tool(
+  tool(
     "list_cycles",
     "List all cycles (sprints / planning periods) in the workspace.",
     {
@@ -1078,7 +1187,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
   );
 
-  server.tool(
+  tool(
     "get_cycle",
     "Get a cycle with its updates and allocations.",
     {
@@ -1094,7 +1203,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
   );
 
-  server.tool(
+  tool(
     "list_cycle_updates",
     "List the updates posted by members during a cycle.",
     {
@@ -1107,7 +1216,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
   );
 
-  server.tool(
+  tool(
     "list_allocations",
     "List point allocations made by members within a cycle.",
     {
@@ -1120,7 +1229,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
   );
 
-  server.tool(
+  tool(
     "create_cycle",
     "Create a new cycle. Facilitator/Admin only.",
     {
@@ -1148,7 +1257,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
   );
 
-  server.tool(
+  tool(
     "update_cycle",
     "Update a cycle's metadata or status. Facilitator/Admin only.",
     {
@@ -1192,7 +1301,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
   // CIRCLES (org structure)
   // ===========================================================================
 
-  server.tool(
+  tool(
     "list_circles",
     "List all circles (teams / domains) in the workspace, including their roles.",
     {},
@@ -1216,7 +1325,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
   // GOVERNANCE (constitution + policies)
   // ===========================================================================
 
-  server.tool(
+  tool(
     "get_constitution",
     "Get the current workspace constitution. Also exposed as the corgtex://workspace/constitution resource for clients that prefer that interface.",
     {},
@@ -1231,7 +1340,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
   );
 
-  server.tool(
+  tool(
     "list_policies",
     "List the active policy corpus — every accepted proposal that became a workspace policy.",
     {},
@@ -1250,7 +1359,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
   );
 
-  server.tool(
+  tool(
     "list_approval_policies",
     "List the approval policies that govern how proposals get accepted/rejected (modes, thresholds, decision windows).",
     {},
@@ -1265,7 +1374,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
   // FINANCE
   // ===========================================================================
 
-  server.tool(
+  tool(
     "list_spends",
     "List spend requests in the workspace.",
     {
@@ -1288,7 +1397,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
   );
 
-  server.tool(
+  tool(
     "create_spend",
     "Create and open a spend request in one call (legacy convenience). To create-then-review-then-open, use create_spend_draft + submit_spend instead.",
     {
@@ -1326,7 +1435,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
   );
 
-  server.tool(
+  tool(
     "create_spend_draft",
     "Create a spend request as a DRAFT (not yet submitted for approval). Pair with `submit_spend` when ready.",
     {
@@ -1369,7 +1478,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
   );
 
-  server.tool(
+  tool(
     "submit_spend",
     "Open a DRAFT spend request. Open spends are payable unless they receive an unresolved objection.",
     {
@@ -1386,7 +1495,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
   );
 
-  server.tool(
+  tool(
     "archive_spend",
     "Archive a spend request so it stops appearing in active finance views. Submitted or paid spend remains recoverable and auditable.",
     {
@@ -1399,7 +1508,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
   );
 
-  server.tool(
+  tool(
     "list_ledger_accounts",
     "List ledger accounts (checking, savings, credit, etc) in the workspace.",
     {},
@@ -1417,7 +1526,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
   );
 
-  server.tool(
+  tool(
     "archive_ledger_account",
     "Archive a ledger account so it is hidden from active finance views. Ledger entries are preserved.",
     {
@@ -1430,7 +1539,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
   );
 
-  server.tool(
+  tool(
     "archive_artifact",
     "Archive any supported workspace artifact by entity type and id. Normal destructive actions should use archive, not purge.",
     {
@@ -1450,7 +1559,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
   );
 
-  server.tool(
+  tool(
     "list_archived_artifacts",
     "List archived workspace artifacts for recovery and audit. Admin/privileged archive scope only.",
     {
@@ -1480,7 +1589,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
   );
 
-  server.tool(
+  tool(
     "restore_artifact",
     "Restore an archived workspace artifact back to active views. Admin/privileged archive scope only.",
     {
@@ -1494,7 +1603,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
   );
 
-  server.tool(
+  tool(
     "purge_artifact",
     "Permanently purge an eligible archived workspace artifact. This is restricted, requires a reason, and refuses immutable finance/audit history.",
     {
@@ -1509,7 +1618,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
   );
 
-  server.tool(
+  tool(
     "list_ledger_transactions",
     "List ledger entries (transactions) for the workspace, optionally scoped to a single account. Returns most-recent-first.",
     {
