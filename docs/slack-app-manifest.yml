@@ -1,0 +1,52 @@
+display_information:
+  name: Corgtex
+  description: Capture work from Slack into Corgtex and show a personal operating brief.
+features:
+  app_home:
+    home_tab_enabled: true
+    messages_tab_enabled: true
+    messages_tab_read_only_enabled: false
+  bot_user:
+    display_name: Corgtex
+    always_online: false
+  slash_commands:
+    - command: /corgtex
+      url: https://app.corgtex.com/api/integrations/slack/commands
+      description: Create Corgtex drafts or view your brief.
+      usage_hint: brief | action <text> | tension <text> | proposal <text>
+      should_escape: false
+  shortcuts:
+    - name: Send to Corgtex
+      type: message
+      callback_id: corgtex_message_capture
+      description: Create a Corgtex draft from a Slack message.
+oauth_config:
+  redirect_urls:
+    - https://app.corgtex.com/api/integrations/slack/callback
+  scopes:
+    bot:
+      - commands
+      - chat:write
+      - app_mentions:read
+      - users:read
+      - users:read.email
+      - channels:read
+      - reactions:read
+    bot_optional:
+      - channels:history
+settings:
+  event_subscriptions:
+    request_url: https://app.corgtex.com/api/integrations/slack/events
+    bot_events:
+      - app_home_opened
+      - app_mention
+      - message.channels
+      - reaction_added
+      - tokens_revoked
+      - app_uninstalled
+  interactivity:
+    is_enabled: true
+    request_url: https://app.corgtex.com/api/integrations/slack/interactivity
+  org_deploy_enabled: false
+  socket_mode_enabled: false
+  token_rotation_enabled: false

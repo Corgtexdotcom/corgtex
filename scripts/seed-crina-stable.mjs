@@ -431,9 +431,12 @@ async function main() {
   });
 
   const featureFlagValues = [
+    ["GOALS", false],
     ["RELATIONSHIPS", false],
+    ["CYCLES", false],
     ["AGENT_GOVERNANCE", false],
     ["OS_METRICS", false],
+    ["SETTINGS_GENERAL", false],
     ["MULTILINGUAL", boolFromEnv("CRINA_ENABLE_MULTILINGUAL")],
   ];
   for (const [flag, enabled] of featureFlagValues) {
@@ -540,7 +543,7 @@ async function main() {
         entityType: "Workspace",
         entityId: workspace.id,
         meta: {
-          disabledFeatures: ["RELATIONSHIPS", "AGENT_GOVERNANCE", "OS_METRICS"],
+          disabledFeatures: ["GOALS", "RELATIONSHIPS", "CYCLES", "AGENT_GOVERNANCE", "OS_METRICS", "SETTINGS_GENERAL"],
           sampleDataSeeded: seedSampleData,
         },
       },

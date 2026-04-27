@@ -1,4 +1,4 @@
-import { DEFAULT_SCOPES, SCOPE_REGISTRY, getMemberInvitePolicy, listMemberInviteRequests, listMembersEnriched, listAgentCredentials, listWebhookEndpoints, listInboundWebhooks, listAgentConfigs, listOAuthApps, getSsoConfigByWorkspace, getModelUsageBudget, listDocuments, requireWorkspaceMembership } from "@corgtex/domain";
+import { DEFAULT_SCOPES, SCOPE_REGISTRY, getMemberInvitePolicy, listMemberInviteRequests, listMembersEnriched, listAgentCredentials, listWebhookEndpoints, listInboundWebhooks, listAgentConfigs, listOAuthApps, getSsoConfigByWorkspace, getModelUsageBudget, listDocuments, listCommunicationInstallations, requireWorkspaceMembership } from "@corgtex/domain";
 import { prisma } from "@corgtex/shared";
 import { requirePageActor } from "@/lib/auth";
 import { headers } from "next/headers";
@@ -7,6 +7,7 @@ import {
   updateWebhookEndpointAction,
   deleteWebhookEndpointAction,
   rotateWebhookSecretAction,
+  disconnectCommunicationInstallationAction,
 } from "../actions";
 import { AgentConnectionManager } from "./AgentConnectionManager";
 import { CustomGptConnectionManager } from "./CustomGptConnectionManager";
@@ -32,21 +33,26 @@ export default async function SettingsPage({
   const { workspaceId } = await params;
   const search = await searchParams;
   const actor = await requirePageActor();
-  const tab = search.tab ?? "general";
   const featureFlags = await getWorkspaceFeatureFlags(workspaceId);
+  const tab = search.tab ?? (featureFlags.SETTINGS_GENERAL ? "general" : "members");
   if (!featureFlags.AGENT_GOVERNANCE && tab === "agents") {
+    notFound();
+  }
+  if (!featureFlags.SETTINGS_GENERAL && search.tab === "general") {
     notFound();
   }
 
   // Load core user constraints that apply to both tabs
-  const [credentials, webhookEndpoints, inboundWebhooks, userConnections, oauthApps, ssoConfigs] = await Promise.all([
+  const [credentials, webhookEndpoints, inboundWebhooks, userConnections, oauthApps, ssoConfigs, communicationInstallations] = await Promise.all([
     listAgentCredentials(actor, workspaceId).catch(() => []),
     listWebhookEndpoints(actor, workspaceId).catch(() => []),
     listInboundWebhooks(actor, workspaceId, { take: 20 }).catch(() => []),
     actor.kind === "user" ? prisma.oAuthConnection.findMany({ where: { userId: actor.user.id } }).catch(() => []) : Promise.resolve([]),
     listOAuthApps(actor, workspaceId).catch(() => []),
     getSsoConfigByWorkspace(actor, workspaceId).catch(() => []),
+    listCommunicationInstallations(actor, workspaceId).catch(() => []),
   ]);
+  const slackInstallation = communicationInstallations.find((installation) => installation.provider === "SLACK" && installation.status === "ACTIVE");
 
   // Lazy-load members only for the members tab to avoid N+1 and failure propagation
   let members: Awaited<ReturnType<typeof listMembersEnriched>> = [];
@@ -117,12 +123,14 @@ export default async function SettingsPage({
 
       {/* Tab navigation */}
       <div className="nr-tab-bar" style={{ marginBottom: 32 }}>
-        <a
-          href={`/workspaces/${workspaceId}/settings?tab=general`}
-          className={`nr-tab ${tab === "general" ? "nr-tab-active" : ""}`}
-        >
-          {t("tabGeneral")}
-        </a>
+        {featureFlags.SETTINGS_GENERAL && (
+          <a
+            href={`/workspaces/${workspaceId}/settings?tab=general`}
+            className={`nr-tab ${tab === "general" ? "nr-tab-active" : ""}`}
+          >
+            {t("tabGeneral")}
+          </a>
+        )}
         <a
           href={`/workspaces/${workspaceId}/settings?tab=members`}
           className={`nr-tab ${tab === "members" ? "nr-tab-active" : ""}`}
@@ -165,6 +173,38 @@ export default async function SettingsPage({
                       <a href={`/api/integrations/microsoft/connect?workspaceId=${workspaceId}`} className="button secondary small">{t("btnConnectMicrosoft")}</a>
                     )}
                   </div>
+                </div>
+                <div className="nr-item" style={{ padding: "12px 0" }}>
+                  <div className="row">
+                    <strong className="nr-item-title">Slack workspace</strong>
+                    {slackInstallation ? (
+                      <span className="tag" style={{ background: "var(--accent-soft)" }}>Connected</span>
+                    ) : (
+                      <a href={`/api/integrations/slack/install?workspaceId=${workspaceId}`} className="button secondary small">Connect Slack</a>
+                    )}
+                  </div>
+                  {slackInstallation ? (
+                    <div className="stack" style={{ gap: 8, marginTop: 8 }}>
+                      <p className="nr-item-meta" style={{ fontSize: "0.82rem", margin: 0 }}>
+                        {slackInstallation.externalTeamName || slackInstallation.externalWorkspaceId} · {slackInstallation._count.channels} channels · {slackInstallation._count.messages} captured messages
+                      </p>
+                      <p className="nr-item-meta" style={{ fontSize: "0.82rem", margin: 0 }}>
+                        Public-channel messages are used for aggregate briefings and work capture. Raw Slack message text is deleted after 30 days; source metadata, generated summaries, and Corgtex links are preserved.
+                      </p>
+                      <p className="nr-item-meta" style={{ fontSize: "0.82rem", margin: 0 }}>
+                        Granted scopes: {slackInstallation.scopes.length > 0 ? slackInstallation.scopes.join(", ") : "none recorded"}
+                      </p>
+                      <form action={disconnectCommunicationInstallationAction}>
+                        <input type="hidden" name="workspaceId" value={workspaceId} />
+                        <input type="hidden" name="installationId" value={slackInstallation.id} />
+                        <button type="submit" className="danger small">Disconnect Slack</button>
+                      </form>
+                    </div>
+                  ) : (
+                    <p className="nr-item-meta" style={{ fontSize: "0.82rem", marginTop: 8 }}>
+                      Slack can feed the daily Corgtex newspaper, App Home brief, commands, and message captures. Private channels and DMs are not ingested in the MVP.
+                    </p>
+                  )}
                 </div>
               </div>
             </section>

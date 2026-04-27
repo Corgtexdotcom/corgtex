@@ -5,6 +5,7 @@ import { AGENT_REGISTRY, getAgentModelOverride } from "@corgtex/domain";
 import { 
   batchIngestDailyConversations, 
   createArticle, 
+  listSlackMessagesForDigest,
   updateArticle, 
   rebuildBacklinks 
 } from "@corgtex/domain";
@@ -51,9 +52,10 @@ export async function runDailyDigest(params: {
       }
     }
   });
+  const slackMessages = await listSlackMessagesForDigest(params.workspaceId, since);
 
-  if (sessions.length === 0) {
-    return { success: true, message: "No conversations to digest." };
+  if (sessions.length === 0 && slackMessages.length === 0) {
+    return { success: true, message: "No conversations or Slack messages to digest." };
   }
 
   // 3. Extract member insights and update PERSON profiles
@@ -161,7 +163,17 @@ Rules:
   }
 
   // 4. Generate org-wide Digest
-  const allTranscripts = sessions.map(s => s.turns.map(t => `${s.user.displayName}: ${t.userMessage}\nAssistant: ${t.assistantMessage}`).join("\n")).join("\n\n---\n\n").slice(0, 10000);
+  const conversationTranscripts = sessions.map(s => s.turns.map(t => `${s.user.displayName}: ${t.userMessage}\nAssistant: ${t.assistantMessage}`).join("\n")).join("\n\n---\n\n");
+  const slackTranscript = slackMessages.map((message) => {
+    const speaker = message.externalUserId ?? "Slack";
+    const channel = message.externalChannelId;
+    const text = message.text ?? "";
+    return `[Slack #${channel}] ${speaker}: ${text}`;
+  }).join("\n");
+  const allTranscripts = [
+    conversationTranscripts ? `Corgtex conversations:\n${conversationTranscripts}` : "",
+    slackTranscript ? `Slack public-channel messages:\n${slackTranscript}` : "",
+  ].filter(Boolean).join("\n\n---\n\n").slice(0, 12000);
 
   const digestResult = await defaultModelGateway.chat({
     model,
@@ -252,6 +264,7 @@ Output clean HTML suitable for email (use inline styles).`
     success: true,
     digestSlug,
     processedSessions: sessions.length,
+    processedSlackMessages: slackMessages.length,
     updatedProfiles: memberUpdates.length
   };
 }

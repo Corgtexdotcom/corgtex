@@ -19,14 +19,22 @@ export default async function TensionDetailPage({
   const tension = await getTension(actor, { workspaceId, tensionId });
   const entries = await listDeliberationEntries(actor, { workspaceId, parentType: "TENSION", parentId: tensionId });
   const deliberationTargets = await getDeliberationTargets({ actor, workspaceId, parentCircleId: tension.circleId });
+  const targetOptions = deliberationTargets.options.map((option) => ({
+    ...option,
+    label: option.value.startsWith("circle:")
+      ? t("targetCircle", { name: option.label.replace(/^Circle: /, "") })
+      : option.value.startsWith("member:")
+        ? t("targetPerson", { name: option.label.replace(/^Person: /, "") })
+        : option.label,
+  }));
   const mappedEntries = entries.map((e: any) => ({
     ...e,
     authorName: e.author?.displayName || e.author?.email || t("authorUnknown"),
     authorInitials: (e.author?.displayName || e.author?.email || t("authorInitialsUnknown")).substring(0, 2).toUpperCase(),
     targetLabel: e.targetCircle
-      ? `Circle: ${e.targetCircle.name}`
+      ? t("targetCircle", { name: e.targetCircle.name })
       : e.targetMember
-        ? `Person: ${e.targetMember.user.displayName || e.targetMember.user.email}`
+        ? t("targetPerson", { name: e.targetMember.user.displayName || e.targetMember.user.email })
         : null,
   }));
 
@@ -82,7 +90,7 @@ export default async function TensionDetailPage({
           <DeliberationComposer
             postAction={postTensionDeliberationAction}
             hiddenFields={{ workspaceId, parentId: tensionId }}
-            targetOptions={deliberationTargets.options}
+            targetOptions={targetOptions}
             defaultTargetValue={deliberationTargets.defaultValue}
             entryTypes={[
               { value: "REACTION", label: t("entryReaction"), variant: "secondary" },
