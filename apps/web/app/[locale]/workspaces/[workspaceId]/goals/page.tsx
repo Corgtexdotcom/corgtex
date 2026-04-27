@@ -41,7 +41,7 @@ export default async function GoalsPage({
 
  const cadences: { id: string; label: string }[] = [
  { id:"TEN_YEAR", label:"10Y" },
- { id:"FIVE_YEAR", label:"Annual" },
+ { id:"FIVE_YEAR", label:"5Y" },
  { id:"ANNUAL", label:"Annual" },
  { id:"QUARTERLY", label:"Quarterly" },
  { id:"MONTHLY", label:"Monthly" },
