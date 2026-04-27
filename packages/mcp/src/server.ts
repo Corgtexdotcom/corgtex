@@ -675,19 +675,17 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
 
   server.tool(
     "create_member",
-    "Onboard a new member. Creates the user account if it doesn't exist and adds them to the workspace with the chosen role. Admin-only.",
+    "Onboard a new member. Creates the user account if it doesn't exist, adds them to the workspace with the chosen role, and issues a setup link token. Admin-only.",
     {
       email: z.string(),
-      password: z.string().describe("Initial password (≥8 chars). User can rotate later."),
       role: z.enum(MEMBER_ROLE),
       displayName: z.string().optional(),
     },
-    async (params: { email: string; password: string; role: typeof MEMBER_ROLE[number]; displayName?: string }) => {
+    async (params: { email: string; role: typeof MEMBER_ROLE[number]; displayName?: string }) => {
       requireScope(sessionCtx, "members:write");
       const result = await createMember(actor, {
         workspaceId,
         email: params.email,
-        password: params.password,
         role: params.role,
         displayName: params.displayName,
       });
@@ -703,23 +701,29 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
 
   server.tool(
     "update_member",
-    "Update a member's role or display name. Admin-only.",
+    "Update a member's email, role, display name, or active status. Admin-only.",
     {
       memberId: z.string(),
       role: z.enum(MEMBER_ROLE).optional(),
       displayName: z.string().optional(),
+      email: z.string().optional(),
+      isActive: z.boolean().optional(),
     },
-    async (params: { memberId: string; role?: typeof MEMBER_ROLE[number]; displayName?: string }) => {
+    async (params: { memberId: string; role?: typeof MEMBER_ROLE[number]; displayName?: string; email?: string; isActive?: boolean }) => {
       requireScope(sessionCtx, "members:write");
       const updated = await updateMember(actor, {
         workspaceId,
         memberId: params.memberId,
         role: params.role,
         displayName: params.displayName,
+        email: params.email,
+        isActive: params.isActive,
       });
       return jsonResult({
         id: updated.id,
         role: updated.role,
+        isActive: updated.isActive,
+        email: updated.user.email,
         webUrl: webUrl(workspaceId, `/settings?tab=members`),
       });
     },

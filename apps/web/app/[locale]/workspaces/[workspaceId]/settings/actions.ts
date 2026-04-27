@@ -19,7 +19,12 @@ import {
   upsertSsoConfig,
   updateModelUsageBudget,
   inviteMember,
-  bulkInviteMembers
+  bulkInviteMembers,
+  updateMemberInvitePolicy,
+  requestMemberInvite,
+  approveMemberInviteRequest,
+  rejectMemberInviteRequest,
+  resendMemberAccessLink,
 } from "@corgtex/domain";
 import { sendEmail } from "@corgtex/shared";
 
@@ -64,6 +69,20 @@ export async function createMemberAction(formData: FormData) {
     await sendInvitationEmail(result.user.email, result.user.displayName, (result as any).token);
   }
   
+  refresh(workspaceId);
+}
+
+export async function requestMemberInviteAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  await requestMemberInvite(actor, {
+    workspaceId,
+    email: asString(formData, "email"),
+    displayName: asOptional(formData, "displayName"),
+  });
   refresh(workspaceId);
 }
 
@@ -117,11 +136,20 @@ export async function updateMemberAction(formData: FormData) {
 
   const actor = await requirePageActor();
   const workspaceId = asString(formData, "workspaceId");
-  await updateMember(actor, {
+  const isActiveRaw = asOptional(formData, "isActive");
+  const result = await updateMember(actor, {
     workspaceId,
     memberId: asString(formData, "memberId"),
-    role: asOptional(formData, "role") as "CONTRIBUTOR" | "FACILITATOR" | "FINANCE_STEWARD" | "ADMIN" | undefined ?? undefined,
+    role: formData.has("role")
+      ? asString(formData, "role") as "CONTRIBUTOR" | "FACILITATOR" | "FINANCE_STEWARD" | "ADMIN"
+      : undefined,
+    email: formData.has("email") ? asOptional(formData, "email") : undefined,
+    displayName: formData.has("displayName") ? asOptional(formData, "displayName") : undefined,
+    isActive: isActiveRaw === null ? undefined : isActiveRaw === "true",
   });
+  if (result.setupToken) {
+    await sendInvitationEmail(result.user.email, result.user.displayName, result.setupToken);
+  }
   refresh(workspaceId);
 }
 
@@ -134,6 +162,60 @@ export async function deactivateMemberAction(formData: FormData) {
   await deactivateMember(actor, {
     workspaceId,
     memberId: asString(formData, "memberId"),
+  });
+  refresh(workspaceId);
+}
+
+export async function resendMemberAccessLinkAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  const result = await resendMemberAccessLink(actor, {
+    workspaceId,
+    memberId: asString(formData, "memberId"),
+  });
+  await sendInvitationEmail(result.user.email, result.user.displayName, result.token);
+  refresh(workspaceId);
+}
+
+export async function updateMemberInvitePolicyAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  await updateMemberInvitePolicy(actor, {
+    workspaceId,
+    policy: asString(formData, "policy") as "ADMINS_ONLY" | "MEMBERS_CAN_INVITE" | "MEMBERS_CAN_REQUEST",
+  });
+  refresh(workspaceId);
+}
+
+export async function approveMemberInviteRequestAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  const result = await approveMemberInviteRequest(actor, {
+    workspaceId,
+    requestId: asString(formData, "requestId"),
+  });
+  await sendInvitationEmail(result.user.email, result.user.displayName, result.token);
+  refresh(workspaceId);
+}
+
+export async function rejectMemberInviteRequestAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  await rejectMemberInviteRequest(actor, {
+    workspaceId,
+    requestId: asString(formData, "requestId"),
   });
   refresh(workspaceId);
 }
