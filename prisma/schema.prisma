@@ -21,6 +21,12 @@ enum MemberRole {
   ADMIN
 }
 
+enum MemberInviteRequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
 enum ActionStatus {
   DRAFT
   OPEN
@@ -258,6 +264,7 @@ model Workspace {
   createdAt                  DateTime                    @default(now())
   updatedAt                  DateTime                    @updatedAt
   members                    Member[]
+  memberInviteRequests       MemberInviteRequest[]
   circles                    Circle[]
   actions                    Action[]
   tensions                   Tension[]
@@ -553,6 +560,8 @@ model Member {
   user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   roleAssignments             RoleAssignment[]
+  inviteRequestsMade          MemberInviteRequest[]    @relation("MemberInviteRequestRequester")
+  inviteRequestsDecided       MemberInviteRequest[]    @relation("MemberInviteRequestDecider")
   assignedActions             Action[]                 @relation("ActionAssignee")
   assignedTensions            Tension[]                @relation("TensionAssignee")
   approvalDecisions           ApprovalDecision[]
@@ -573,6 +582,26 @@ model Member {
 
   @@unique([workspaceId, userId])
   @@index([workspaceId, role])
+}
+
+model MemberInviteRequest {
+  id                String                    @id @default(uuid())
+  workspaceId       String
+  requesterMemberId String
+  deciderMemberId   String?
+  email             String
+  displayName       String?
+  status            MemberInviteRequestStatus @default(PENDING)
+  createdAt         DateTime                  @default(now())
+  decidedAt         DateTime?
+
+  workspace       Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  requesterMember Member    @relation("MemberInviteRequestRequester", fields: [requesterMemberId], references: [id], onDelete: Cascade)
+  deciderMember   Member?   @relation("MemberInviteRequestDecider", fields: [deciderMemberId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId, status, createdAt])
+  @@index([requesterMemberId])
+  @@index([deciderMemberId])
 }
 
 model CheckIn {
