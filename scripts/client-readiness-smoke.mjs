@@ -5,9 +5,10 @@ import { chromium } from "playwright";
 const [, , baseUrlArg, outDirArg] = process.argv;
 
 const baseUrl = (baseUrlArg || process.env.CLIENT_READINESS_BASE_URL || "http://localhost:3000").replace(/\/$/, "");
-const outDir = path.resolve(outDirArg || "docs/assets/client-readiness-2026-04-25");
+const outDir = path.resolve(outDirArg || process.env.CLIENT_READINESS_OUT_DIR || "docs/assets/client-readiness-2026-04-25");
 const email = process.env.AGENT_E2E_EMAIL || "system+corgtex@corgtex.local";
 const password = process.env.AGENT_E2E_PASSWORD || "corgtex-test-agent-pw";
+const loginLocale = process.env.CLIENT_READINESS_LOCALE || "en";
 
 function csvSet(name) {
   return new Set((process.env[name] || "").split(",").map((value) => value.trim()).filter(Boolean));
@@ -128,7 +129,7 @@ async function main() {
     consoleErrors.push({ type: "pageerror", text: error.message });
   });
 
-  await page.goto(`${baseUrl}/en/login`, { waitUntil: "domcontentloaded" });
+  await page.goto(`${baseUrl}/${loginLocale}/login`, { waitUntil: "domcontentloaded" });
   await waitForPageSettled(page);
   await captureScreenshot(page, "00-login.png");
   await page.fill('input[name="email"]', email);
