@@ -437,16 +437,26 @@
     "switchWorkspace": "Switch Workspace"
   },
   "common": {
+    "aiBriefing": "AI briefing",
+    "aiBriefingEmpty": "Generate a concise briefing for this member.",
     "appName": "Corgtex",
     "approve": "Approve",
+    "briefingFailed": "Could not generate the briefing.",
     "cancel": "Cancel",
     "commandMenu": "Command menu",
     "error": "An error occurred",
+    "generate": "Generate",
+    "generating": "Generating...",
+    "keyInsights": "Key insights",
     "language": "Language",
     "loading": "Loading...",
     "logout": "Logout",
+    "meetingFollowUps": "Meeting follow-ups",
+    "regenerate": "Regenerate",
     "save": "Save",
-    "search": "Search"
+    "search": "Search",
+    "synthesizing": "Synthesizing...",
+    "topPriorities": "Top priorities"
   },
   "cycles": {
     "btnCreateAllocation": "Create allocation",
