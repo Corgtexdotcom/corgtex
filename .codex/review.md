@@ -11,16 +11,17 @@ Per-role rules live in [`AGENTS.md`](../AGENTS.md).
 
 ## Before reviewing
 
-1. Read `docs/plans/<branch>.md` for this PR. If it is missing, request changes with the reason "no plan file." Do not proceed.
-2. Read the PR body. It must link to the plan file and state the risk tier.
-3. Read the full diff.
+1. Read the PR body plan for this PR. If it is missing, request changes with the reason "no PR-body plan." Do not proceed.
+2. The PR body must state the risk tier and include the completed plan contract.
+3. Confirm the PR-body plan is public-safe and does not include private keys, API tokens, passwords, raw credentials, secret values, or customer-private facts.
+4. Read the full diff.
 
 ## Hard rejection criteria (request changes, do not approve)
 
 Reject on **any** of these:
 
-1. **No plan file** at `docs/plans/<branch>.md`, or the PR body does not link to it.
-2. **Out-of-scope files** — any changed file is not in the plan's "Files to touch" allowlist, except visual proof under `docs/assets/<branch-slug>/`. (CI job `scope-check` catches this; if the job is red, do not approve.)
+1. **No PR-body plan** or missing risk tier in the PR body.
+2. **Out-of-scope files** — any changed file is not in the plan's "Files to touch" allowlist. (CI job `scope-check` catches this; if the job is red, do not approve.)
 3. **Unticked acceptance criteria** in the plan, or a ticked criterion whose implementation is missing in the diff.
 4. **Forbidden path** changed without the `forbidden-path-approved` label:
    - `deploy/**`
@@ -34,16 +35,18 @@ Reject on **any** of these:
    - `high`: > 400 non-doc LOC or > 15 files.
    - Forbidden-path changes use the high-risk cap unless `large-change-approved` is present.
 6. **Secrets** — gitleaks red, or any `.env` / `.env.*` file added / modified, or hardcoded credentials in the diff.
+   Also reject if the PR-body plan itself contains private keys, API tokens, passwords, raw credentials, secret values, or customer-private facts.
 7. **Forbidden commands / patterns** in the diff:
    - `prisma db push` anywhere in CI, Dockerfiles, or scripts run by deploy.
    - `--no-verify` in any script or doc.
    - `--admin` in any script or diff **unless** the `force-merge` label is present and the PR comment trail includes a human-directed bypass comment from the merging agent.
    - Removal of `export const dynamic = "force-dynamic"` from any App Router file under `apps/web/app/**` that imports Prisma (directly or transitively through `@corgtex/shared` db helpers).
 8. **Missing tests** — `packages/domain/**` source changed and no `*.test.ts` under `packages/domain/**` changed in the same PR.
-9. **Missing visual proof** — any file under `apps/web/app/**`, `apps/web/components/**`, or `apps/web/lib/components/**` changed and no committed proof asset exists under `docs/assets/<branch-slug>/`.
+9. **Missing visual proof** — any file under `apps/web/app/**`, `apps/web/components/**`, or `apps/web/lib/components/**` changed and the PR body's **Visual Proof** section is empty or missing.
 10. **CI red** — any required check failed: `Lint, Typecheck & Test`, `Database Sync`, `Build`, `Docs Validation`, `Plan Present`, `Scope Check`, `Secret Scan`, or `Diff Size`.
 11. **`halt-agents` label** present — do not approve regardless of other state.
-12. **Objective Logic Flaws** — any objective, critical logic or security bug detected (e.g., race conditions, unhandled promise rejections, insecure direct object references, or missing database indexes that cause critical bottlenecks). Do NOT reject for subjective style or architecture.
+12. **Private docs/artifacts committed** — any private/client/partner notes, handoff docs, agent plans, generated QA output, screenshots, recordings, Slack manifests, or other non-public documentation-site files appear under `docs/`.
+13. **Objective Logic Flaws** — any objective, critical logic or security bug detected (e.g., race conditions, unhandled promise rejections, insecure direct object references, or missing database indexes that cause critical bottlenecks). Do NOT reject for subjective style or architecture.
 
 ## Reviewer identity
 
@@ -78,5 +81,5 @@ The Executor has already set auto-merge (`gh pr merge --auto --squash`); the PR 
 ## Tone of review comments
 
 - One comment per failed criterion. Quote the rule, point at the file / line, say what must change.
-- You may leave **non-blocking advisory comments** (e.g., "Consider using Promise.all here for better performance") as inline PR comments. However, do NOT reject the PR for subjective style, architecture, minor plan wording, or other code taste. Those are out of scope — the Planner owns design and the Executor owns implementation. Reject ONLY for the 12 hard rejection criteria.
+- You may leave **non-blocking advisory comments** (e.g., "Consider using Promise.all here for better performance") as inline PR comments. However, do NOT reject the PR for subjective style, architecture, minor plan wording, or other code taste. Those are out of scope — the Planner owns design and the Executor owns implementation. Reject ONLY for the hard rejection criteria above.
 - If multiple criteria fail, list all of them in a single review, not one per comment.

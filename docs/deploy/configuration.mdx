@@ -93,17 +93,17 @@ DATABASE_URL="postgresql://postgres:postgres@postgres:5432/corgtex"
 
 # Core App
 APP_URL="http://localhost:3000"
-SESSION_COOKIE_SECRET="changeme_topsecret_production_cookie"
+SESSION_COOKIE_SECRET="<replace-with-32-character-random-secret>"
 
 # Seed Data (First Workspace)
 WORKSPACE_NAME="Acme Demo"
 WORKSPACE_SLUG="acme-demo"
 ADMIN_EMAIL="admin@acme.com"
-ADMIN_PASSWORD="super_secret_password"
+ADMIN_PASSWORD="<replace-with-bootstrap-admin-password>"
 
 # LLM Config (Optional)
 MODEL_PROVIDER="openrouter"
-MODEL_API_KEY="sk-or-v1-..."
+MODEL_API_KEY="<replace-with-provider-api-key>"
 MODEL_CHAT_DEFAULT="anthropic/claude-3.5-sonnet"
 MODEL_EMBEDDING_DEFAULT="openai/text-embedding-3-small"
 
