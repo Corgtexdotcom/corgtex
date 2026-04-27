@@ -38,6 +38,7 @@ export default defineConfig({
         test: {
           name: "integration",
           include: ["packages/**/*.integration.test.ts", "apps/**/*.integration.test.ts"],
+          fileParallelism: false,
           globalSetup: ["./vitest.globalSetup.ts"],
           env: {
             DATABASE_URL: integrationDatabaseUrl,

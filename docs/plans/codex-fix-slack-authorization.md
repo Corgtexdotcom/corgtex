@@ -13,6 +13,7 @@ Fix the production Slack OAuth flow so Corgtex and Slack use the same configured
 - Changing Slack ingestion, command, interactivity, or event-processing behavior.
 - Adding new Slack scopes beyond the scopes already requested by the app.
 - Changing authentication, membership, or workspace permission rules.
+- Changing integration test behavior beyond serializing integration test files to avoid cross-file database cleanup races.
 
 ## Files to touch
 
@@ -24,6 +25,7 @@ Fix the production Slack OAuth flow so Corgtex and Slack use the same configured
 - `docs/deploy/slack-app-setup.mdx`
 - `docs/docs.json`
 - `docs/plans/codex-fix-slack-authorization.md`
+- `vitest.config.mts`
 
 ## Acceptance criteria
 
@@ -33,6 +35,7 @@ Fix the production Slack OAuth flow so Corgtex and Slack use the same configured
 - [x] Next.js auth redirects from Slack routes are rethrown instead of being converted into generic 500 responses.
 - [x] Internal Slack setup docs state that the manifest must be applied to the Slack app whose Client ID is deployed.
 - [x] Unit coverage exists for the install and callback redirect behavior.
+- [x] Integration test files run serially so database cleanup in one integration test cannot race another test file.
 
 ## Test plan
 
@@ -47,4 +50,3 @@ curl -i -X POST https://app.corgtex.com/api/integrations/slack/events -H 'Conten
 This is a code and documentation change only. Revert the PR if needed, then redeploy the previous web service version. The Slack app configuration can remain in place because the redirect URL and manifest endpoints are the intended production configuration.
 
 ## Labels this PR needs
-
