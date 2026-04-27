@@ -305,6 +305,8 @@ model Workspace {
   crmActivities              CrmActivity[]
   agentConfigs               WorkspaceAgentConfig[]
   oauthApps                  OAuthApp[]
+  mcpOAuthCodes              McpOAuthAuthorizationCode[]
+  mcpOAuthTokens             McpOAuthAccessToken[]
   ssoConfigs                 WorkspaceSsoConfig[]
   modelUsageBudget           ModelUsageBudget?
   externalDataSources        ExternalDataSource[]
@@ -515,6 +517,8 @@ model User {
   notifications          Notification[]
   conversations          ConversationSession[]
   oauthConnections       OAuthConnection[]
+  mcpOAuthCodes          McpOAuthAuthorizationCode[]
+  mcpOAuthTokens         McpOAuthAccessToken[]
   resetTokens            PasswordResetToken[]
   ssoIdentities          UserSsoIdentity[]
   meetingInsights        MeetingInsight[]
@@ -2033,6 +2037,76 @@ model OAuthAccessToken {
 
   @@index([tokenHash])
   @@index([refreshHash])
+}
+
+model McpOAuthClient {
+  id                      String    @id @default(uuid())
+  clientId                String    @unique
+  clientSecret            String?
+  name                    String
+  redirectUris            String[]
+  scopes                  String[]
+  tokenEndpointAuthMethod String    @default("none")
+  isActive                Boolean   @default(true)
+  createdAt               DateTime  @default(now())
+  updatedAt               DateTime  @updatedAt
+
+  authCodes    McpOAuthAuthorizationCode[]
+  accessTokens McpOAuthAccessToken[]
+
+  @@index([createdAt])
+}
+
+model McpOAuthAuthorizationCode {
+  id                  String    @id @default(uuid())
+  clientId            String
+  userId              String
+  workspaceId         String
+  instanceSlug        String
+  code                String    @unique
+  scopes              String[]
+  redirectUri         String
+  resource            String?
+  codeChallenge       String
+  codeChallengeMethod String
+  expiresAt           DateTime
+  usedAt              DateTime?
+  createdAt           DateTime  @default(now())
+
+  client    McpOAuthClient @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  user      User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workspace Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([code])
+  @@index([clientId])
+  @@index([userId, workspaceId])
+}
+
+model McpOAuthAccessToken {
+  id               String    @id @default(uuid())
+  clientId         String
+  userId           String
+  workspaceId      String
+  instanceSlug     String
+  tokenHash        String    @unique
+  refreshHash      String?   @unique
+  scopes           String[]
+  resource         String?
+  expiresAt        DateTime
+  refreshExpiresAt DateTime?
+  revokedAt        DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  client    McpOAuthClient @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  user      User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workspace Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([tokenHash])
+  @@index([refreshHash])
+  @@index([clientId])
+  @@index([userId, workspaceId])
+  @@index([workspaceId, instanceSlug])
 }
 
 model ExternalDataSource {
