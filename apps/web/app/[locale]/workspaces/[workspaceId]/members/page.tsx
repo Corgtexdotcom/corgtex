@@ -1,4 +1,4 @@
-import { listMembersEnriched, listAgentIdentities } from "@corgtex/domain";
+import { listMembersEnriched, listAgentIdentities, requireWorkspaceMembership } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import Link from "next/link";
 import { getTranslations } from "next-intl/server";
@@ -15,6 +15,7 @@ export default async function MembersPage({
   const actor = await requirePageActor();
   const t = await getTranslations("members");
   const featureFlags = await getWorkspaceFeatureFlags(workspaceId);
+  await requireWorkspaceMembership({ actor, workspaceId });
 
   const members = await listMembersEnriched(workspaceId, { includeInactive: false });
   const agents = featureFlags.AGENT_GOVERNANCE ? await listAgentIdentities(actor, workspaceId) : [];
