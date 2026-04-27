@@ -63,15 +63,27 @@ npm run test:unit    # Vitest unit suite
 
 ## Pull Request Process
 
-Every PR must originate from a plan file at `docs/plans/<branch>.md`
-(see [`docs/plans/_TEMPLATE.md`](docs/plans/_TEMPLATE.md)). The Reviewer
-rejects PRs without a plan, with out-of-scope file changes, or with
-missing acceptance criteria.
+Every PR must include the plan contract in the PR body (see
+[`.agents/plan-template.md`](.agents/plan-template.md)). The Reviewer
+rejects PRs without a PR-body plan, with out-of-scope file changes, or
+with missing acceptance criteria. Local pre-PR plan drafts belong under
+`.agents/plans/`, which is ignored and must not be committed. PR-body
+plans remain visible in GitHub PR metadata, so keep them public-safe:
+no private keys, API tokens, passwords, raw credentials, secret values,
+or customer-private facts.
 
 The full workflow is documented in
 [`docs/contributing/agent-pipeline.mdx`](docs/contributing/agent-pipeline.mdx)
 and summarized per role in [`AGENTS.md`](AGENTS.md). Do not duplicate
 those rules here.
+
+## Public Docs Hygiene
+
+The `docs/` tree is only for the public documentation site. Do not
+commit private/client/partner notes, handoff docs, agent plans, PR proof
+assets, screenshots, recordings, generated QA output, or Slack manifests
+under `docs/`. Use PR attachments, CI artifacts, or ignored local
+`.artifacts/` output for generated proof.
 
 ## Code Style
 
