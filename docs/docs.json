@@ -81,6 +81,7 @@
             "pages": [
               "deploy/docker-compose",
               "deploy/configuration",
+              "deploy/slack-app-setup",
               "deploy/enterprise",
               "deploy/upgrades"
             ]
