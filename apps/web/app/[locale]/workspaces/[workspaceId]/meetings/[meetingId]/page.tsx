@@ -1,6 +1,6 @@
 import { getMeeting, getMeetingParticipants } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
-import { getTranslations } from "next-intl/server";
+import { getFormatter, getTranslations } from "next-intl/server";
 import Link from "next/link";
 import { renderMarkdown } from "@/lib/markdown";
 import { DeliberationThread } from "@/lib/components/DeliberationThread";
@@ -20,27 +20,36 @@ export default async function MeetingDetailPage({
   const { workspaceId, meetingId } = await params;
   const actor = await requirePageActor();
   const t = await getTranslations("meetings");
+  const format = await getFormatter();
 
   const meeting = await getMeeting(workspaceId, meetingId);
   const meetingEntries = await listDeliberationEntries(actor, { workspaceId, parentType: "MEETING", parentId: meetingId });
   const deliberationTargets = await getDeliberationTargets({ actor, workspaceId });
+  const targetOptions = deliberationTargets.options.map((option) => ({
+    ...option,
+    label: option.value.startsWith("circle:")
+      ? t("targetCircle", { name: option.label.replace(/^Circle: /, "") })
+      : option.value.startsWith("member:")
+        ? t("targetPerson", { name: option.label.replace(/^Person: /, "") })
+        : option.label,
+  }));
   const mappedEntries = meetingEntries.map((e: any) => ({
     ...e,
-    authorName: e.author?.displayName || e.author?.email || "Unknown",
+    authorName: e.author?.displayName || e.author?.email || t("unknownAuthor"),
     authorInitials: (e.author?.displayName || e.author?.email || "?").substring(0, 2).toUpperCase(),
     targetLabel: e.targetCircle
-      ? `Circle: ${e.targetCircle.name}`
+      ? t("targetCircle", { name: e.targetCircle.name })
       : e.targetMember
-        ? `Person: ${e.targetMember.user.displayName || e.targetMember.user.email}`
+        ? t("targetPerson", { name: e.targetMember.user.displayName || e.targetMember.user.email })
         : null,
   }));
 
   if (!meeting) {
     return (
       <div className="ws-page-header">
-        <h1>Meeting not found</h1>
+        <h1>{t("meetingNotFound")}</h1>
         <Link href={`/workspaces/${workspaceId}/meetings`} className="nr-meta" style={{ textDecoration: "underline" }}>
-          &larr; Back to meetings
+          {t("backToMeetings")}
         </Link>
       </div>
     );
@@ -54,7 +63,7 @@ export default async function MeetingDetailPage({
     <>
       <div style={{ marginBottom: "32px" }}>
         <Link href={`/workspaces/${workspaceId}/meetings`} className="nr-meta" style={{ textDecoration: "none" }}>
-          &larr; Back to Board Meetings
+          {t("backToBoardMeetings")}
         </Link>
       </div>
 
@@ -64,13 +73,13 @@ export default async function MeetingDetailPage({
           {meeting.title || t("untitledMeeting")}
         </h1>
         <div className="nr-masthead-meta">
-          <span>{new Date(meeting.recordedAt).toLocaleString()}</span>
+          <span>{format.dateTime(meeting.recordedAt, { dateStyle: "medium", timeStyle: "short" })}</span>
         </div>
       </header>
       
       {participants.length > 0 && (
         <section className="ws-section" style={{ marginBottom: 48 }}>
-          <h2 className="nr-section-header">Participants</h2>
+          <h2 className="nr-section-header">{t("participants")}</h2>
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             {participants.map((p: any) => (
               <Link 
@@ -87,8 +96,8 @@ export default async function MeetingDetailPage({
                     {p.user?.displayName || p.user?.email}
                   </div>
                   <div className="text-xs text-muted-foreground line-clamp-1">
-                    {p.roleAssignments[0]?.role.name || "Participant"}
-                    {p.roleAssignments.length > 1 && ` +${p.roleAssignments.length - 1} more`}
+                    {p.roleAssignments[0]?.role.name || t("participant")}
+                    {p.roleAssignments.length > 1 && t("moreRoles", { count: p.roleAssignments.length - 1 })}
                   </div>
                 </div>
               </Link>
@@ -99,7 +108,7 @@ export default async function MeetingDetailPage({
 
       {meeting.summaryMd && (
         <section className="ws-section" style={{ marginBottom: 48 }}>
-          <h2 className="nr-section-header">Summary</h2>
+          <h2 className="nr-section-header">{t("summary")}</h2>
           <div 
             className="nr-excerpt" 
             style={{ fontSize: "1rem", lineHeight: 1.6 }}
@@ -110,7 +119,7 @@ export default async function MeetingDetailPage({
 
       {meeting.tensions.length > 0 && (
         <section className="ws-section" style={{ marginBottom: 48 }}>
-          <h2 className="nr-section-header">Tensions Raised</h2>
+          <h2 className="nr-section-header">{t("tensionsRaised")}</h2>
           <div className="list">
             {meeting.tensions.map(tension => (
               <div className="item" key={tension.id}>
@@ -132,7 +141,7 @@ export default async function MeetingDetailPage({
 
       {meeting.proposals.length > 0 && (
         <section className="ws-section" style={{ marginBottom: 48 }}>
-          <h2 className="nr-section-header">Proposals Created</h2>
+          <h2 className="nr-section-header">{t("proposalsCreated")}</h2>
           <div className="list">
             {meeting.proposals.map(proposal => (
               <div className="item" key={proposal.id}>
@@ -145,7 +154,7 @@ export default async function MeetingDetailPage({
                 <div className="muted">{proposal.summary ?? proposal.bodyMd.slice(0, 150) + "..."}</div>
                 
                 <div className="muted" style={{ fontSize: "0.82rem", marginTop: 8 }}>
-                   {proposal.author?.displayName || proposal.author?.email} · {new Date(proposal.createdAt).toLocaleDateString()}
+                   {proposal.author?.displayName || proposal.author?.email} · {format.dateTime(proposal.createdAt, { dateStyle: "medium" })}
                 </div>
 
                 {(proposal.tensions?.length > 0 || proposal.actions?.length > 0) && (
@@ -182,17 +191,17 @@ export default async function MeetingDetailPage({
       )}
 
       <section className="ws-section" style={{ marginBottom: 48 }}>
-        <h2 className="nr-section-header">Discussion</h2>
+        <h2 className="nr-section-header">{t("discussion")}</h2>
         <DeliberationThread entries={mappedEntries} canResolve={true} resolveAction={resolveMeetingDeliberationAction} hiddenFields={{ workspaceId, parentId: meetingId }} />
         <div style={{ marginTop: 24 }}>
           <DeliberationComposer 
             postAction={postMeetingDeliberationAction} 
             hiddenFields={{ workspaceId, parentId: meetingId }}
-            targetOptions={deliberationTargets.options}
+            targetOptions={targetOptions}
             defaultTargetValue={deliberationTargets.defaultValue}
             entryTypes={[
-              { value: "REACTION", label: "Reaction", variant: "secondary" },
-              { value: "OBJECTION", label: "Objection", variant: "danger" },
+              { value: "REACTION", label: t("entryReaction"), variant: "secondary" },
+              { value: "OBJECTION", label: t("entryObjection"), variant: "danger" },
             ]}
           />
         </div>

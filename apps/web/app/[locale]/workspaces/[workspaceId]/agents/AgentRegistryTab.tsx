@@ -97,23 +97,23 @@ export async function AgentRegistryTab({
             
             <details style={{ padding: "0 16px 16px 16px", marginTop: -8 }}>
               <summary className="nr-meta" style={{ cursor: "pointer", fontSize: "0.85rem", color: "var(--accent)" }}>
-                Edit Governance Policy
+                {t("editGovernancePolicy")}
               </summary>
               <form action={updateAgentGovernancePolicyAction} style={{ marginTop: 12 }}>
                 <input type="hidden" name="workspaceId" value={workspaceId} />
                 <input type="hidden" name="agentKey" value={identity.agentKey} />
                 
                 <p className="nr-item-meta" style={{ fontSize: "0.8rem", marginBottom: 8 }}>
-                  Define plain-text boundaries, instructions, and thresholds for this agent. These rules are prepended to the agent&apos;s system prompt at runtime.
+                  {t("governancePolicyDesc")}
                 </p>
                 <textarea 
                   name="governancePolicy" 
                   defaultValue={configInfo?.governancePolicy ?? ""} 
-                  placeholder="e.g., Always ask a human before committing any financial transaction over $50."
+                  placeholder={t("governancePolicyPlaceholder")}
                   style={{ width: "100%", minHeight: 80, padding: 12, borderRadius: 8, border: "1px solid var(--line)", background: "transparent", color: "var(--text)", fontFamily: "monospace", fontSize: "0.85rem", marginBottom: 12 }}
                 />
                 <div>
-                  <button type="submit" className="secondary small">Save Policy</button>
+                  <button type="submit" className="secondary small">{t("savePolicy")}</button>
                 </div>
               </form>
             </details>

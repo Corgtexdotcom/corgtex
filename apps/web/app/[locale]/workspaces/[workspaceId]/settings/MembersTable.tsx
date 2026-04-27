@@ -322,7 +322,7 @@ export function MembersTable({
                   <tr key={member.id} style={{ borderBottom: "1px dashed var(--line)", opacity: member.isActive ? 1 : 0.6 }}>
                     <td style={{ padding: "12px 16px", fontWeight: 500 }}>
                       <Link href={`/workspaces/${workspaceId}/members/${member.id}`} style={{ color: "inherit", textDecoration: "none" }}>
-                        {member.user.displayName || "Unknown"}
+                        {member.user.displayName || t("unknownUser")}
                       </Link>
                     </td>
                     <td style={{ padding: "12px 16px", color: "var(--muted)" }}>{member.user.email}</td>
@@ -339,10 +339,10 @@ export function MembersTable({
                           )}
                         </div>
                       ) : (
-                        <span className="muted" style={{ fontSize: "0.75rem" }}>{t("none")}</span>
+                        <span className="muted" style={{ fontSize: "0.75rem" }}>{t("valNone")}</span>
                       )}
                     </td>
-                    <td style={{ padding: "12px 16px", color: "var(--muted)", fontSize: "0.8rem" }}>{memberCircles.join(", ") || t("none")}</td>
+                    <td style={{ padding: "12px 16px", color: "var(--muted)", fontSize: "0.8rem" }}>{memberCircles.join(", ") || t("valNone")}</td>
                     <td style={{ padding: "12px 16px" }}>{t(roleLabelKey(member.role) as any)}</td>
                     <td style={{ padding: "12px 16px" }}>
                       <span style={{ color: member.isActive ? "var(--success, #155724)" : "var(--muted)", fontSize: "0.75rem", fontWeight: 600 }}>

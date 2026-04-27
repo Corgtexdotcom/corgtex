@@ -67,6 +67,14 @@ export default async function FinancePage({
   const isDemo = currentWorkspace?.slug === "jnj-demo";
   const spends = spendsResult.items;
   const ledgerAccounts = ledgerAccountsResult.items;
+  const targetOptions = deliberationTargets.options.map((option) => ({
+    ...option,
+    label: option.value.startsWith("circle:")
+      ? t("targetCircle", { name: option.label.replace(/^Circle: /, "") })
+      : option.value.startsWith("member:")
+        ? t("targetPerson", { name: option.label.replace(/^Person: /, "") })
+        : option.label,
+  }));
 
   const entriesMap = new Map(
     await Promise.all(
@@ -393,9 +401,9 @@ export default async function FinancePage({
                                     resolvedAt: entry.resolvedAt,
                                     resolvedNote: entry.resolvedNote,
                                     targetLabel: entry.targetCircle
-                                      ? `Circle: ${entry.targetCircle.name}`
+                                      ? t("targetCircle", { name: entry.targetCircle.name })
                                       : entry.targetMember
-                                        ? `Person: ${entry.targetMember.user.displayName || entry.targetMember.user.email}`
+                                        ? t("targetPerson", { name: entry.targetMember.user.displayName || entry.targetMember.user.email })
                                         : null,
                                   }))}
                                   canResolve
@@ -407,7 +415,7 @@ export default async function FinancePage({
                                     postAction={postSpendDeliberationAction}
                                     hiddenFields={{ workspaceId, parentId: spend.id }}
                                     title={t("discussionTitle")}
-                                    targetOptions={deliberationTargets.options}
+                                    targetOptions={targetOptions}
                                     defaultTargetValue={deliberationTargets.defaultValue}
                                     entryTypes={[
                                       { value: "REACTION", label: t("typeReaction"), variant: "secondary" },
