@@ -14,6 +14,7 @@ import {
   updateMemberInvitePolicyAction,
 } from "../actions";
 import { useTranslations } from "next-intl";
+import { Dialog } from "@/lib/components/Dialog";
 
 type InvitePolicy = "ADMINS_ONLY" | "MEMBERS_CAN_INVITE" | "MEMBERS_CAN_REQUEST";
 
@@ -74,6 +75,7 @@ export function MembersTable({
   const [roleFilter, setRoleFilter] = useState<string>("ALL");
   const [statusFilter, setStatusFilter] = useState<"ACTIVE" | "ALL">("ACTIVE");
   const [circleFilter, setCircleFilter] = useState<string>("ALL");
+  const [editingMember, setEditingMember] = useState<EnrichedMember | null>(null);
   const t = useTranslations("settings");
 
   const allCircles = useMemo(() => {
@@ -352,37 +354,14 @@ export function MembersTable({
                     <td style={{ padding: "12px 16px", minWidth: 260 }}>
                       {isAdmin ? (
                         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                          <details>
-                            <summary className="button secondary small" style={{ display: "inline-block", cursor: "pointer" }}>{t("btnEditMember")}</summary>
-                            <form action={updateMemberAction} className="stack nr-form-section" style={{ marginTop: 12, minWidth: 260 }}>
-                              <input type="hidden" name="workspaceId" value={workspaceId} />
-                              <input type="hidden" name="memberId" value={member.id} />
-                              <label>
-                                {t("labelName")}
-                                <input name="displayName" defaultValue={member.user.displayName ?? ""} />
-                              </label>
-                              <label>
-                                {t("labelEmail")}
-                                <input name="email" type="email" defaultValue={member.user.email} required />
-                              </label>
-                              <label>
-                                {t("labelSystemRole")}
-                                <select name="role" defaultValue={member.role}>
-                                  {MEMBER_ROLES.map((role) => (
-                                    <option key={role} value={role}>{t(roleLabelKey(role) as any)}</option>
-                                  ))}
-                                </select>
-                              </label>
-                              <label>
-                                {t("colStatus")}
-                                <select name="isActive" defaultValue={member.isActive ? "true" : "false"}>
-                                  <option value="true">{t("statusActive")}</option>
-                                  <option value="false">{t("statusDeactivated")}</option>
-                                </select>
-                              </label>
-                              <button type="submit" className="small" style={{ alignSelf: "flex-start" }}>{t("btnSaveMember")}</button>
-                            </form>
-                          </details>
+                          <button
+                            type="button"
+                            className="secondary small"
+                            onClick={() => setEditingMember(member)}
+                            style={{ alignSelf: "flex-start" }}
+                          >
+                            {t("btnEditMember")}
+                          </button>
                           <form action={resendMemberAccessLinkAction}>
                             <input type="hidden" name="workspaceId" value={workspaceId} />
                             <input type="hidden" name="memberId" value={member.id} />
@@ -400,6 +379,50 @@ export function MembersTable({
           </tbody>
         </table>
       </div>
+
+      {editingMember && (
+        <Dialog open={true} onClose={() => setEditingMember(null)} title={t("btnEditMember")}>
+          <form
+            action={(formData) => {
+              updateMemberAction(formData);
+              setEditingMember(null);
+            }}
+            className="stack nr-form-section"
+          >
+            <input type="hidden" name="workspaceId" value={workspaceId} />
+            <input type="hidden" name="memberId" value={editingMember.id} />
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 16 }}>
+              <label>
+                {t("labelName")}
+                <input name="displayName" defaultValue={editingMember.user.displayName ?? ""} />
+              </label>
+              <label>
+                {t("labelEmail")}
+                <input name="email" type="email" defaultValue={editingMember.user.email} required />
+              </label>
+            </div>
+            <label>
+              {t("labelSystemRole")}
+              <select name="role" defaultValue={editingMember.role}>
+                {MEMBER_ROLES.map((role) => (
+                  <option key={role} value={role}>{t(roleLabelKey(role) as any)}</option>
+                ))}
+              </select>
+            </label>
+            <label>
+              {t("colStatus")}
+              <select name="isActive" defaultValue={editingMember.isActive ? "true" : "false"}>
+                <option value="true">{t("statusActive")}</option>
+                <option value="false">{t("statusDeactivated")}</option>
+              </select>
+            </label>
+            <div style={{ display: "flex", gap: 12, marginTop: 16 }}>
+              <button type="submit" className="small">{t("btnSaveMember")}</button>
+              <button type="button" className="secondary small" onClick={() => setEditingMember(null)}>{t("btnCancel")}</button>
+            </div>
+          </form>
+        </Dialog>
+      )}
     </div>
   );
 }
