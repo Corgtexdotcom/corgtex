@@ -61,3 +61,4 @@ deploy-*/
 # Exclude sensitive data
 SEEDDATA/
 scripts/seed-*.mjs
+!scripts/seed-industrial-vilassarenca-stable.mjs
