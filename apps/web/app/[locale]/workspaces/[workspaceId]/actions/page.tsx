@@ -42,7 +42,9 @@ export default async function ActionsPage({
     const timestamp = new Date(date).getTime();
     if (Number.isNaN(timestamp)) return "";
     const days = Math.floor((Date.now() - timestamp) / (1000 * 60 * 60 * 24));
-    return days === 0 ? "today" : `${days}d ago`;
+    if (days === 0) return t("ageToday");
+    if (days === 1) return t("ageYesterday");
+    return t("ageDaysAgo", { count: days });
   };
 
   return (

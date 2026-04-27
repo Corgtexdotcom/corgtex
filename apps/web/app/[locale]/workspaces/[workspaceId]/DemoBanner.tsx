@@ -1,18 +1,21 @@
 "use client";
 
 import "../../../demo-tour-theme.css";
+import { useTranslations } from "next-intl";
 
 export function DemoBanner() {
+  const t = useTranslations("demo");
+
   return (
     <div className="demo-tour-banner">
       <div>
-        This demo is read-only. You can inspect the workspace freely, but modifications are disabled.
+        {t("readOnlyBanner")}
       </div>
       <button 
         className="demo-tour-restart-btn"
         onClick={() => window.dispatchEvent(new CustomEvent("corgtex:restart-tour"))}
       >
-        Restart Tour
+        {t("restartTour")}
       </button>
     </div>
   );
