@@ -1,0 +1,31 @@
+---
+title: "Slack App Setup"
+description: "Configure the production Slack app used by Corgtex."
+---
+
+Corgtex Slack authorization depends on the Slack app configuration and the deployed environment variables referring to the same Slack app. If these drift, Slack will reject installation before Corgtex receives the OAuth callback.
+
+## Production OAuth URLs
+
+For the hosted Corgtex app, configure these URLs in Slack App Management:
+
+| Slack setting | URL |
+|---|---|
+| OAuth Redirect URL | `https://app.corgtex.com/api/integrations/slack/callback` |
+| Slash command request URL | `https://app.corgtex.com/api/integrations/slack/commands` |
+| Events request URL | `https://app.corgtex.com/api/integrations/slack/events` |
+| Interactivity request URL | `https://app.corgtex.com/api/integrations/slack/interactivity` |
+
+The checked-in manifest at `docs/slack-app-manifest.yml` is the source of truth for the Corgtex Slack app configuration. Apply it to the same Slack app whose Client ID is deployed as `SLACK_CLIENT_ID`.
+
+## Deployment Checks
+
+Before testing an install, verify in the deployment platform that the runtime has `APP_URL=https://app.corgtex.com` and has non-empty values for `SLACK_CLIENT_ID`, `SLACK_CLIENT_SECRET`, `SLACK_APP_ID`, `SLACK_SIGNING_SECRET`, and `ENCRYPTION_KEY`. Do not print or paste secret values into logs, tickets, PRs, or chat.
+
+The Slack Client ID in production must match the Slack app where the redirect URL and request URLs were configured. A common failure mode is updating a development Slack app while production still points at a different Client ID.
+
+## Install Flow
+
+Start the install from Corgtex workspace settings with **Connect Slack**. Do not start from Slack App Management directly, because Corgtex generates a short-lived workspace-bound OAuth state cookie before sending the browser to Slack.
+
+After installation, verify the workspace settings page shows Slack as connected, then test `/corgtex brief`, an app mention, and a message shortcut capture in Slack.
