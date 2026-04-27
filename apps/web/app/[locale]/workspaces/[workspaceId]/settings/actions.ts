@@ -25,6 +25,7 @@ import {
   approveMemberInviteRequest,
   rejectMemberInviteRequest,
   resendMemberAccessLink,
+  disconnectCommunicationInstallation,
 } from "@corgtex/domain";
 import { sendEmail } from "@corgtex/shared";
 
@@ -227,6 +228,16 @@ export async function markAllNotificationsReadAction(formData: FormData) {
   const actor = await requirePageActor();
   const workspaceId = asString(formData, "workspaceId");
   await markAllNotificationsRead(actor, workspaceId);
+  refresh(workspaceId);
+}
+
+export async function disconnectCommunicationInstallationAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  await disconnectCommunicationInstallation(actor, asString(formData, "installationId"));
   refresh(workspaceId);
 }
 

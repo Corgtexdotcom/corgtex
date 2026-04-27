@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useTransition } from "react";
+import { useTranslations } from "next-intl";
 import { FormMessage } from "./FormMessage";
 
 type DeliberationComposerProps = {
@@ -17,6 +18,7 @@ export function DeliberationComposer({ postAction, hiddenFields, entryTypes, tar
   const [selectedTarget, setSelectedTarget] = useState(defaultTargetValue);
   const [isPending, startTransition] = useTransition();
   const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
+  const t = useTranslations("deliberation");
 
   const handleSubmit = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -33,13 +35,13 @@ export function DeliberationComposer({ postAction, hiddenFields, entryTypes, tar
     startTransition(async () => {
       try {
         await postAction(formData);
-        setMessage({ type: "success", text: "Entry posted successfully." });
+        setMessage({ type: "success", text: t("entryPosted") });
         const form = e.target as HTMLFormElement;
         form.reset();
         // Clear message after a short delay or just leave it
         setTimeout(() => setMessage(null), 3000);
       } catch (err: any) {
-        setMessage({ type: "error", text: err.message || "Failed to post entry." });
+        setMessage({ type: "error", text: err.message || t("entryPostFailed") });
       }
     });
   };
@@ -62,7 +64,7 @@ export function DeliberationComposer({ postAction, hiddenFields, entryTypes, tar
         <textarea
           name="bodyMd"
           required
-          placeholder="Write your entry in markdown..."
+          placeholder={t("entryPlaceholder")}
           rows={4}
           disabled={isPending}
           style={{ width: "100%", padding: "12px", borderRadius: "8px", border: "1px solid var(--line)" }}
@@ -83,20 +85,20 @@ export function DeliberationComposer({ postAction, hiddenFields, entryTypes, tar
           </div>
           {targetOptions.length > 0 && (
             <select
-              aria-label="Deliberation target"
+              aria-label={t("targetAriaLabel")}
               value={selectedTarget}
               onChange={(event) => setSelectedTarget(event.target.value)}
               disabled={isPending}
               className="delib-target-select"
             >
-              <option value="">No target</option>
+              <option value="">{t("noTarget")}</option>
               {targetOptions.map((option) => (
                 <option key={option.value} value={option.value}>{option.label}</option>
               ))}
             </select>
           )}
           <button type="submit" disabled={isPending} className="small">
-            {isPending ? "Posting..." : "Post Entry"}
+            {isPending ? t("posting") : t("postEntry")}
           </button>
         </div>
       </form>

@@ -33,7 +33,7 @@ export default function CircleDetailPanel({
       <div className={`slide-over-panel ${open ? "open" : ""}`}>
         <div className="slide-over-header">
           <h2 className="slide-over-title">{circle ? t("circleTitle", { name: circle.name }) : t("circleDetailsTitle")}</h2>
-          <button onClick={onClose} aria-label="Close" style={{ background: "transparent", border: "none", cursor: "pointer", fontSize: "1.2rem", color: "var(--muted)" }}>×</button>
+          <button onClick={onClose} aria-label={t("closePanel")} style={{ background: "transparent", border: "none", cursor: "pointer", fontSize: "1.2rem", color: "var(--muted)" }}>×</button>
         </div>
         
         <div className="slide-over-content">

@@ -1,7 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import { useRouter, usePathname } from "next/navigation";
+import { useTranslations } from "next-intl";
 import { driver } from "driver.js";
 import "driver.js/dist/driver.css";
 import "../../../demo-tour-theme.css";
@@ -17,68 +18,6 @@ interface TourStep {
   };
 }
 
-const TOUR_STEPS: TourStep[] = [
-  {
-    path: "/",
-    popover: {
-      title: "Welcome to Corgtex",
-      description: "You're about to explore how Johnson & Johnson — a $89B company with 138,000 employees — could run on self-management. This demo is populated with real public J&J data.",
-    },
-  },
-  {
-    path: "/",
-    element: ".ws-main-content",
-    popover: {
-      title: "Your Daily Newspaper",
-      description: "Every morning, this is what you see. A living newspaper of your organization — featured knowledge, recent meetings, active tensions, and to-dos.",
-      side: "top",
-    },
-  },
-  {
-    path: "/brain",
-    element: ".ws-main-content",
-    popover: {
-      title: "Organizational Memory",
-      description: "Every piece of knowledge — from board meetings to R&D reports — is automatically processed by AI into a searchable encyclopedia.",
-      side: "top",
-    },
-  },
-  {
-    path: "/circles",
-    element: ".ws-main-content",
-    popover: {
-      title: "Structure Without Hierarchy",
-      description: "Instead of departments and managers, the organization runs on circles — self-governing teams with clear purposes and distributed authority.",
-      side: "top",
-    },
-  },
-  {
-    path: "/proposals",
-    element: ".ws-main-content",
-    popover: {
-      title: "Consent-Based Decisions",
-      description: "Proposals turn tensions into action through consent-based governance. No politics, no management committees — just reasoned objections.",
-      side: "top",
-    },
-  },
-  {
-    path: "/",
-    element: ".ws-agent-sidebar",
-    popover: {
-      title: "Ask Anything",
-      description: "The AI assistant knows everything in the Brain. Ask it about any topic, draft proposals, or get context for decisions.",
-      side: "left",
-    },
-  },
-  {
-    path: "/",
-    popover: {
-      title: "Your Turn to Explore",
-      description: "Tour complete! You now have full access to explore Johnson & Johnson's governance through Corgtex. The workspace is read-only, but feel free to click around.",
-    },
-  }
-];
-
 const TOUR_KEY = (id: string) => `corgtex_tour_completed_${id}`;
 
 function markTourCompleted(workspaceId: string) {
@@ -92,22 +31,83 @@ function isTourCompleted(workspaceId: string) {
 export function DemoTour({ workspaceId }: { workspaceId: string }) {
   const router = useRouter();
   const pathname = usePathname();
+  const t = useTranslations("demo.tour");
   const driverRef = useRef<ReturnType<typeof driver> | null>(null);
   const targetStepIndexRef = useRef<number | null>(null);
 
-
+  const tourSteps: TourStep[] = useMemo(() => [
+    {
+      path: "/",
+      popover: {
+        title: t("welcomeTitle"),
+        description: t("welcomeDescription"),
+      },
+    },
+    {
+      path: "/",
+      element: ".ws-main-content",
+      popover: {
+        title: t("newspaperTitle"),
+        description: t("newspaperDescription"),
+        side: "top",
+      },
+    },
+    {
+      path: "/brain",
+      element: ".ws-main-content",
+      popover: {
+        title: t("memoryTitle"),
+        description: t("memoryDescription"),
+        side: "top",
+      },
+    },
+    {
+      path: "/circles",
+      element: ".ws-main-content",
+      popover: {
+        title: t("structureTitle"),
+        description: t("structureDescription"),
+        side: "top",
+      },
+    },
+    {
+      path: "/proposals",
+      element: ".ws-main-content",
+      popover: {
+        title: t("decisionsTitle"),
+        description: t("decisionsDescription"),
+        side: "top",
+      },
+    },
+    {
+      path: "/",
+      element: ".ws-agent-sidebar",
+      popover: {
+        title: t("askTitle"),
+        description: t("askDescription"),
+        side: "left",
+      },
+    },
+    {
+      path: "/",
+      popover: {
+        title: t("exploreTitle"),
+        description: t("exploreDescription"),
+      },
+    },
+  ], [t]);
 
   const initDriver = useCallback(() => {
     const driverObj = driver({
       showProgress: true,
       animate: true,
       allowClose: true,
-      steps: TOUR_STEPS.map((step, index) => ({
+      steps: tourSteps.map((step, index) => ({
         element: step.element,
         popover: {
           ...step.popover,
           onNextClick: () => {
-            const nextStep = TOUR_STEPS[index + 1];
+            const nextStep = tourSteps[index + 1];
             if (!nextStep) {
               markTourCompleted(workspaceId);
               driverObj.destroy();
@@ -126,7 +126,7 @@ export function DemoTour({ workspaceId }: { workspaceId: string }) {
             }
           },
           onPrevClick: () => {
-            const prevStep = TOUR_STEPS[index - 1];
+            const prevStep = tourSteps[index - 1];
             if (!prevStep) return;
 
             const currentPath = window.location.pathname;
@@ -149,7 +149,7 @@ export function DemoTour({ workspaceId }: { workspaceId: string }) {
     });
 
     return driverObj;
-  }, [router, workspaceId]);
+  }, [router, tourSteps, workspaceId]);
 
   const restartTour = useCallback(() => {
     const homePath = `/workspaces/${workspaceId}`;
