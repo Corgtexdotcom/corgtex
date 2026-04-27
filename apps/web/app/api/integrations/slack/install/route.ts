@@ -4,10 +4,7 @@ import { requirePageActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
 import { createSlackOAuthState, slackOAuthScopes } from "@corgtex/domain";
 import { env } from "@corgtex/shared";
-
-function appOrigin(request: Request) {
-  return env.APP_URL || new URL(request.url).origin;
-}
+import { appRedirectUrl, rethrowNextRedirectError, slackCallbackRedirectUri } from "../oauth";
 
 export async function GET(request: Request) {
   try {
@@ -15,11 +12,11 @@ export async function GET(request: Request) {
     const url = new URL(request.url);
     const workspaceId = url.searchParams.get("workspaceId");
     if (!workspaceId) {
-      return NextResponse.redirect(new URL("/workspaces?error=missing-workspace", request.url));
+      return NextResponse.redirect(appRedirectUrl(request, "/workspaces?error=missing-workspace"));
     }
 
     if (!env.SLACK_CLIENT_ID) {
-      return NextResponse.redirect(new URL(`/workspaces/${workspaceId}/settings?slack=not-configured`, request.url));
+      return NextResponse.redirect(appRedirectUrl(request, `/workspaces/${workspaceId}/settings?slack=not-configured`));
     }
 
     const state = createSlackOAuthState(workspaceId);
@@ -32,7 +29,7 @@ export async function GET(request: Request) {
       sameSite: "lax",
     });
 
-    const redirectUri = `${appOrigin(request)}/api/integrations/slack/callback`;
+    const redirectUri = slackCallbackRedirectUri(request);
     const authorize = new URL("https://slack.com/oauth/v2/authorize");
     authorize.searchParams.set("client_id", env.SLACK_CLIENT_ID);
     authorize.searchParams.set("scope", slackOAuthScopes());
@@ -41,6 +38,7 @@ export async function GET(request: Request) {
 
     return NextResponse.redirect(authorize);
   } catch (error) {
+    rethrowNextRedirectError(error);
     return handleRouteError(error);
   }
 }
