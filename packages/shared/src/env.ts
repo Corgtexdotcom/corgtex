@@ -55,6 +55,10 @@ type Env = {
   readonly NODE_ENV: NodeEnv;
   readonly DATABASE_URL: string;
   readonly APP_URL: string;
+  readonly MCP_PUBLIC_URL: string | undefined;
+  readonly MCP_INSTANCE_REGISTRY: string | undefined;
+  readonly MCP_DEFAULT_INSTANCE_SLUG: string | undefined;
+  readonly WORKSPACE_SLUG: string | undefined;
   readonly SESSION_COOKIE_SECRET: string;
   readonly SESSION_LAST_SEEN_WRITE_INTERVAL_MS: number;
   readonly REDIS_URL: string | undefined;
@@ -97,6 +101,18 @@ export const env: Env = {
   },
   get APP_URL() {
     return optional("APP_URL") ?? "http://localhost:3000";
+  },
+  get MCP_PUBLIC_URL() {
+    return optional("MCP_PUBLIC_URL");
+  },
+  get MCP_INSTANCE_REGISTRY() {
+    return optional("MCP_INSTANCE_REGISTRY");
+  },
+  get MCP_DEFAULT_INSTANCE_SLUG() {
+    return optional("MCP_DEFAULT_INSTANCE_SLUG");
+  },
+  get WORKSPACE_SLUG() {
+    return optional("WORKSPACE_SLUG");
   },
   get SESSION_COOKIE_SECRET() {
     if (nodeEnv() === "production") {
