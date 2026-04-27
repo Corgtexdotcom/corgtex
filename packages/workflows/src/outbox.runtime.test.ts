@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { prismaMock, txMock, runAgentWorkflowJobMock } = vi.hoisted(() => ({
+const { prismaMock, txMock, runAgentWorkflowJobMock, processSlackInboundEventMock, purgeExpiredCommunicationMessagesMock } = vi.hoisted(() => ({
   prismaMock: {
     $transaction: vi.fn(),
     workflowJob: {
@@ -11,6 +11,8 @@ const { prismaMock, txMock, runAgentWorkflowJobMock } = vi.hoisted(() => ({
     $queryRaw: vi.fn(),
   },
   runAgentWorkflowJobMock: vi.fn(),
+  processSlackInboundEventMock: vi.fn(),
+  purgeExpiredCommunicationMessagesMock: vi.fn(),
 }));
 
 vi.mock("@corgtex/shared", async (importOriginal) => {
@@ -39,6 +41,8 @@ vi.mock("@corgtex/domain", () => ({
   deliverWebhook: vi.fn(),
   syncBrainArticleKnowledge: vi.fn(),
   fetchCalendarEvents: vi.fn(),
+  processSlackInboundEvent: processSlackInboundEventMock,
+  purgeExpiredCommunicationMessages: purgeExpiredCommunicationMessagesMock,
 }));
 
 import { runPendingJobs } from "./outbox";
@@ -49,6 +53,8 @@ describe("runPendingJobs", () => {
     prismaMock.workflowJob.update.mockReset().mockResolvedValue({ id: "job-1" });
     txMock.$queryRaw.mockReset().mockResolvedValue([]);
     runAgentWorkflowJobMock.mockReset();
+    processSlackInboundEventMock.mockReset();
+    purgeExpiredCommunicationMessagesMock.mockReset();
   });
 
   it("requeues agent jobs when execution is skipped by the concurrency gate", async () => {
@@ -82,6 +88,28 @@ describe("runPendingJobs", () => {
         error: "Agent concurrency limit reached.",
         lockedAt: null,
         lockedBy: null,
+      }),
+    });
+  });
+
+  it("dispatches Slack communication event jobs", async () => {
+    txMock.$queryRaw.mockResolvedValue([
+      {
+        id: "job-1",
+        workspaceId: "ws-1",
+        type: "communication.slack.event",
+        payload: { inboundEventId: "inbound-1" },
+        attempts: 1,
+      },
+    ]);
+
+    await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
+
+    expect(processSlackInboundEventMock).toHaveBeenCalledWith("inbound-1");
+    expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({
+      where: { id: "job-1" },
+      data: expect.objectContaining({
+        status: "COMPLETED",
       }),
     });
   });
