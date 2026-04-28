@@ -222,6 +222,24 @@ jobs:
           gitleaks git . --redact --verbose \
             --log-opts="${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
 
+  client-data-scan:
+    name: Client Data Scan
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Fetch base ref
+        run: git fetch origin ${{ github.base_ref }} --depth=1
+      - name: Scan for client data leaks
+        run: node scripts/check-client-data-leak.mjs
+        env:
+          GITHUB_BASE_REF: ${{ github.base_ref }}
+
   smoke-prod:
     name: Production Smoke Test
     runs-on: ubuntu-latest
