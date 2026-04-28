@@ -54,3 +54,5 @@ export * from "./admin";
 export * from "./meeting-intelligence";
 export * from "./agent-identity";
 export * from "./deliberation";
+export * from "./user-profile";
+export * from "./avatar";

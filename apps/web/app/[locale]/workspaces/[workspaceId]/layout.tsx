@@ -101,6 +101,10 @@ export default async function WorkspaceLayout({
           <CommandMenuButton />
           <ThemeToggle />
           
+          <a href={`/workspaces/${workspaceId}/settings?tab=user`} className="ws-nav-link ws-logout-btn" style={{ marginTop: "4px" }}>
+            {tNav("settings")} (User)
+          </a>
+
           <form action={logoutAction} style={{ marginTop: "4px" }}>
             <button type="submit" className="ws-nav-link ws-logout-btn">{tCommon("logout")}</button>
           </form>

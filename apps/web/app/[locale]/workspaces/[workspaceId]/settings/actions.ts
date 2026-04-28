@@ -400,3 +400,25 @@ export async function updateModelUsageBudgetAction(formData: FormData) {
 
   refresh(workspaceId);
 }
+
+export async function updateProfileAction(
+  workspaceId: string,
+  data: { displayName?: string; bio?: string }
+) {
+  const actor = await requirePageActor();
+  const { updateUserProfile } = await import("@corgtex/domain");
+  await updateUserProfile(actor, data);
+  refresh(workspaceId);
+  return { success: true };
+}
+
+export async function updateNotificationPrefAction(
+  workspaceId: string,
+  data: { notifType: string; channel: string }
+) {
+  const actor = await requirePageActor();
+  const { updateNotificationPreference } = await import("@corgtex/domain");
+  await updateNotificationPreference(actor, data);
+  refresh(workspaceId);
+  return { success: true };
+}
