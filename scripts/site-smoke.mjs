@@ -2,7 +2,7 @@ const [, , siteUrlArg, appUrlArg] = process.argv;
 
 const siteUrl = siteUrlArg || "http://localhost:3008";
 const appUrl = appUrlArg || "http://localhost:3000";
-const expectedDemoUrl = "https://crinaweb-production.up.railway.app";
+const expectedDemoUrl = process.env.DEMO_APP_URL || "https://app.corgtex.com";
 
 function expect(condition, message) {
   if (!condition) {

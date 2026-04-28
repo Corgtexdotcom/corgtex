@@ -69,12 +69,6 @@ function normalizeBaseUrl(value: string): string {
 function inferDefaultInstanceSlug() {
   if (env.MCP_DEFAULT_INSTANCE_SLUG) return env.MCP_DEFAULT_INSTANCE_SLUG;
   if (env.WORKSPACE_SLUG) return env.WORKSPACE_SLUG;
-  try {
-    const host = new URL(env.APP_URL).hostname.toLowerCase();
-    if (host.includes("crina")) return "crina";
-  } catch {
-    // Ignore malformed env here; APP_URL validation happens where the URL is used.
-  }
   return "corgtex";
 }
 
@@ -82,7 +76,7 @@ function defaultInstance(): McpConnectorInstance {
   const slug = inferDefaultInstanceSlug();
   return {
     slug,
-    displayName: slug === "crina" ? "Crina" : "Corgtex",
+    displayName: slug.charAt(0).toUpperCase() + slug.slice(1),
     baseUrl: normalizeBaseUrl(env.APP_URL),
     workspaceIds: [],
     workspaceSlugs: env.WORKSPACE_SLUG ? [env.WORKSPACE_SLUG] : [],

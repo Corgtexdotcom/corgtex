@@ -54,7 +54,7 @@ const ARTICLES = [
   { title: "Customer Acquisition Strategy", type: "STRATEGY", authority: "AUTHORITATIVE",
     body: `# Customer Acquisition Strategy\n\nUtilizing "How to DAO" assets as lead magnets. All website visitors triggering the demo must enter their email, funneling them into the platform as a \`DemoLead\` tracked in the internal Corgtex workspace UI.` },
   { title: "Multi-Workspace Model", type: "STRATEGY", authority: "AUTHORITATIVE",
-    body: `# Multi-Workspace Model\n\nOne codebase serving \`crina\` (Client), \`jnj-demo\` (Public Demo), and \`corgtex\` (Internal Dogfood & Company Home). Each accesses the same feature deployments without cross-client codebase branching.` },
+    body: `# Multi-Workspace Model\n\nOne codebase serving multiple client workspaces, public demos, and the internal dogfood workspace. Each accesses the same feature deployments without cross-client codebase branching.` },
   
   // PROCESS
   { title: "Deployment Pipeline", type: "PROCESS", authority: "REFERENCE",

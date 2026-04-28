@@ -72,7 +72,16 @@ pnpm-debug.log*
 # local client deployment repos
 deploy-*/
 
-# Exclude sensitive data
+# Exclude sensitive / private client data
 SEEDDATA/
-scripts/seed-*.mjs
-!scripts/seed-industrial-vilassarenca-stable.mjs
+.private-seeds/
+
+# Block ALL client-specific seed scripts. Private client data MUST NOT be
+# committed to this public repository. Use the generic seed-client-stable.mjs
+# entrypoint and inject config via CLIENT_SEED_CONFIG_JSON env var.
+scripts/seed-*-stable.mjs
+!scripts/seed-client-stable.mjs
+scripts/seed-*-brain.mjs
+
+# Client readiness smoke output
+.artifacts/
