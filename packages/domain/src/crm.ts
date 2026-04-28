@@ -55,6 +55,7 @@ export async function captureDemoLead(params: {
         workspaceId: workspace.id,
         email,
         source,
+        qualifyToken: crypto.randomUUID(),
       },
     });
 

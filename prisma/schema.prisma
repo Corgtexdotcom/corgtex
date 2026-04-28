@@ -1856,6 +1856,8 @@ model DemoLead {
   welcomeEmailSentAt    DateTime?
   convertedAt           DateTime?
   convertedContactId    String?
+  followUpCount         Int                    @default(0)
+  lastFollowUpAt        DateTime?
   workspace             Workspace              @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   crmQualifications     CrmQualification[]
   crmConversations      CrmConversation[]

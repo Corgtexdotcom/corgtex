@@ -149,6 +149,36 @@ export const AGENT_REGISTRY = {
     inputs: ["Slack prompt", "workspace context", "thread context"],
     outputs: ["Slack reply", "created Corgtex records"],
   },
+  "crm-email-extraction": {
+    label: "CRM Email Extraction",
+    description: "Extracts structured qualification data from raw email replies.",
+    category: "crm",
+    canDisable: true,
+    defaultModelTier: "standard" as const,
+    costTier: "low" as const,
+    inputs: ["raw email reply"],
+    outputs: ["structured qualification fields"],
+  },
+  "crm-drip-followup": {
+    label: "CRM Drip Follow-Up",
+    description: "Generates and sends personalized follow-up emails to non-responding leads.",
+    category: "crm",
+    canDisable: true,
+    defaultModelTier: "excellent" as const,
+    costTier: "low" as const,
+    inputs: ["lead context", "follow-up number"],
+    outputs: ["personalized email"],
+  },
+  "crm-lead-enrichment": {
+    label: "CRM Lead Enrichment",
+    description: "Enriches a qualified CRM contact by searching the web and applying high-confidence data.",
+    category: "crm",
+    canDisable: true,
+    defaultModelTier: "quality" as const,
+    costTier: "medium" as const,
+    inputs: ["contact email"],
+    outputs: ["company description", "industry", "headquarters"],
+  },
 } as const;
 
 export type RegisteredAgentKey = keyof typeof AGENT_REGISTRY;
