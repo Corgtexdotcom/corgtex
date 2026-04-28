@@ -2504,16 +2504,77 @@ model CrmProspectWorkspace {
 }
 
 model InstanceRegistry {
-  id               String    @id @default(uuid())
-  label            String
-  url              String    @unique
-  environment      String    @default("production")
-  notes            String?
-  lastHealthCheck  DateTime?
-  lastHealthStatus String?
-  lastHealthError  String?
-  createdAt        DateTime  @default(now())
-  updatedAt        DateTime  @updatedAt
+  id                         String                @id @default(uuid())
+  label                      String
+  url                        String                @unique
+  environment                String                @default("production")
+  notes                      String?
+  customerSlug               String?               @unique
+  region                     String?
+  dataResidency              String?
+  customDomain               String?
+  supportOwnerEmail          String?
+  provisioningStatus         String                @default("draft")
+  bootstrapStatus            String                @default("not_started")
+  releaseVersion             String?
+  releaseImageTag            String?
+  railwayProjectId           String?
+  railwayEnvironmentId       String?
+  railwayWebServiceId        String?
+  railwayWorkerServiceId     String?
+  railwayPostgresServiceId   String?
+  railwayRedisServiceId      String?
+  storageBucketName          String?
+  bootstrapBundleUri         String?
+  bootstrapBundleChecksum    String?
+  bootstrapBundleSchemaVersion String?
+  lastProvisioningError      String?
+  lastHealthCheck            DateTime?
+  lastHealthStatus           String?
+  lastHealthError            String?
+  lastWorkerHealthCheck      DateTime?
+  lastWorkerHealthStatus     String?
+  lastReleaseCheck           DateTime?
+  createdAt                  DateTime              @default(now())
+  updatedAt                  DateTime              @updatedAt
+
+  events HostedInstanceEvent[]
+
+  @@index([provisioningStatus])
+  @@index([bootstrapStatus])
+  @@index([region])
+}
+
+model HostedInstanceEvent {
+  id          String   @id @default(uuid())
+  instanceId  String?
+  actorUserId String?
+  action      String
+  meta        Json?
+  createdAt   DateTime @default(now())
+
+  instance InstanceRegistry? @relation(fields: [instanceId], references: [id], onDelete: SetNull)
+
+  @@index([instanceId, createdAt])
+  @@index([action, createdAt])
+}
+
+model InstanceBootstrapRun {
+  id             String    @id @default(uuid())
+  customerSlug   String
+  bundleUri      String
+  bundleChecksum String
+  schemaVersion  String
+  requestedBy    String?
+  status         String    @default("pending")
+  error          String?
+  appliedAt      DateTime?
+  expiresAt      DateTime
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@unique([customerSlug, bundleChecksum])
+  @@index([customerSlug, status])
 }
 
 model ProcurementSetupSession {

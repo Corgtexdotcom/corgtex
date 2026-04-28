@@ -52,7 +52,8 @@
     "contrast-audit": "node scripts/contrast-audit.mjs",
     "smoke:client": "node scripts/client-readiness-smoke.mjs",
     "check:public-docs": "node scripts/check-public-docs.mjs",
-    "check": "npm run lint && npm run typecheck && npm run prisma:validate && npm run check:public-docs"
+    "check:private-boundary": "node scripts/check-private-boundary.mjs",
+    "check": "npm run lint && npm run typecheck && npm run prisma:validate && npm run check:public-docs && npm run check:private-boundary"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

@@ -50,6 +50,8 @@ jobs:
 
       - run: npm run prisma:validate
 
+      - run: npm run check:private-boundary
+
       - run: npx prisma migrate deploy
 
       - run: npx vitest run --project unit --project integration
@@ -125,6 +127,7 @@ jobs:
         with:
           node-version: 22
       - run: node scripts/check-public-docs.mjs
+      - run: node scripts/check-private-boundary.mjs
       - run: npm i -g mint
       - run: mint validate
         working-directory: docs
