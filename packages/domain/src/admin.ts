@@ -13,6 +13,7 @@ import {
   provisionRailwayCustomerStack,
   upgradeRailwayCustomerRelease,
   type RailwayClient,
+  type RailwayRuntimeServiceSource,
 } from "./railway-client";
 
 const HOSTED_PROVISIONING_STATUSES = new Set([
@@ -532,8 +533,10 @@ export async function provisionHostedCustomerInstance(actor: AppActor, params: {
   supportOwnerEmail?: string | null;
   releaseVersion?: string | null;
   releaseImageTag: string;
-  webImage: string;
-  workerImage: string;
+  webImage?: string | null;
+  workerImage?: string | null;
+  webSource?: RailwayRuntimeServiceSource | null;
+  workerSource?: RailwayRuntimeServiceSource | null;
   bootstrapBundleUri?: string | null;
   bootstrapBundleChecksum?: string | null;
   bootstrapBundleSchemaVersion?: string | null;
@@ -600,6 +603,8 @@ export async function provisionHostedCustomerInstance(actor: AppActor, params: {
       region: params.region,
       webImage: params.webImage,
       workerImage: params.workerImage,
+      webSource: params.webSource,
+      workerSource: params.workerSource,
       customDomain: params.customDomain,
       variables: buildHostedCustomerRuntimeVariables({
         customerSlug,
@@ -652,8 +657,10 @@ export async function upgradeHostedInstanceRelease(actor: AppActor, params: {
   instanceId: string;
   releaseVersion?: string | null;
   releaseImageTag: string;
-  webImage: string;
-  workerImage: string;
+  webImage?: string | null;
+  workerImage?: string | null;
+  webSource?: RailwayRuntimeServiceSource | null;
+  workerSource?: RailwayRuntimeServiceSource | null;
   variables?: Record<string, string>;
 }, railwayClient: RailwayClient = createRailwayClientFromEnv()) {
   requireGlobalOperator(actor);
@@ -689,6 +696,8 @@ export async function upgradeHostedInstanceRelease(actor: AppActor, params: {
       workerServiceId: instance.railwayWorkerServiceId,
       webImage: params.webImage,
       workerImage: params.workerImage,
+      webSource: params.webSource,
+      workerSource: params.workerSource,
       variables: {
         CORGTEX_RELEASE_IMAGE_TAG: params.releaseImageTag,
         ...(releaseVersion ? { CORGTEX_RELEASE_VERSION: releaseVersion } : {}),

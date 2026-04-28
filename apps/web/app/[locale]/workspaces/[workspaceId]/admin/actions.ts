@@ -20,7 +20,8 @@ import {
   suspendHostedInstance,
   triggerHostedInstanceBootstrap,
   upgradeHostedInstanceRelease,
-  getWorkspaceAdminDetail
+  getWorkspaceAdminDetail,
+  type RailwayRuntimeServiceSource
 } from "@corgtex/domain";
 import { sendEmail, prisma } from "@corgtex/shared";
 import { notFound } from "next/navigation";
@@ -36,6 +37,41 @@ async function verifyGlobalAdmin(workspaceId: string) {
     notFound();
   }
   return actor;
+}
+
+function optionalString(formData: FormData, name: string) {
+  const value = formData.get(name);
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+}
+
+function looksLikeGitSha(value: string) {
+  return /^[a-f0-9]{7,40}$/i.test(value.trim());
+}
+
+function serviceSourceFromForm(
+  formData: FormData,
+  prefix: "web" | "worker",
+  releaseImageTag: string,
+): RailwayRuntimeServiceSource | null {
+  const repo = optionalString(formData, `${prefix}Repo`);
+  if (!repo) {
+    return null;
+  }
+  const commitSha = optionalString(formData, `${prefix}CommitSha`)
+    ?? (looksLikeGitSha(releaseImageTag) ? releaseImageTag.trim() : null);
+
+  return {
+    repo,
+    branch: optionalString(formData, `${prefix}Branch`),
+    commitSha,
+    rootDirectory: optionalString(formData, `${prefix}RootDirectory`),
+    dockerfilePath: optionalString(formData, `${prefix}DockerfilePath`),
+    startCommand: optionalString(formData, `${prefix}StartCommand`),
+  };
 }
 
 export async function adminResetPasswordAction(formData: FormData) {
@@ -241,6 +277,9 @@ export async function adminRegisterInstanceAction(formData: FormData) {
 export async function adminProvisionHostedCustomerAction(formData: FormData) {
   const workspaceId = asString(formData, "workspaceId");
   const actor = await verifyGlobalAdmin(workspaceId);
+  const webImage = optionalString(formData, "webImage");
+  const workerImage = optionalString(formData, "workerImage");
+  const releaseImageTag = asString(formData, "releaseImageTag");
 
   await provisionHostedCustomerInstance(actor, {
     label: asString(formData, "label"),
@@ -250,9 +289,11 @@ export async function adminProvisionHostedCustomerAction(formData: FormData) {
     customDomain: formData.get("customDomain") as string | null,
     supportOwnerEmail: formData.get("supportOwnerEmail") as string | null,
     releaseVersion: formData.get("releaseVersion") as string | null,
-    releaseImageTag: asString(formData, "releaseImageTag"),
-    webImage: asString(formData, "webImage"),
-    workerImage: asString(formData, "workerImage"),
+    releaseImageTag,
+    webImage,
+    workerImage,
+    webSource: webImage ? null : serviceSourceFromForm(formData, "web", releaseImageTag),
+    workerSource: workerImage ? null : serviceSourceFromForm(formData, "worker", releaseImageTag),
     bootstrapBundleUri: formData.get("bootstrapBundleUri") as string | null,
     bootstrapBundleChecksum: formData.get("bootstrapBundleChecksum") as string | null,
     bootstrapBundleSchemaVersion: formData.get("bootstrapBundleSchemaVersion") as string | null,
@@ -291,13 +332,18 @@ export async function adminSuspendHostedInstanceAction(formData: FormData) {
 export async function adminUpgradeHostedInstanceAction(formData: FormData) {
   const workspaceId = asString(formData, "workspaceId");
   const actor = await verifyGlobalAdmin(workspaceId);
+  const webImage = optionalString(formData, "webImage");
+  const workerImage = optionalString(formData, "workerImage");
+  const releaseImageTag = asString(formData, "releaseImageTag");
 
   await upgradeHostedInstanceRelease(actor, {
     instanceId: asString(formData, "instanceId"),
     releaseVersion: formData.get("releaseVersion") as string | null,
-    releaseImageTag: asString(formData, "releaseImageTag"),
-    webImage: asString(formData, "webImage"),
-    workerImage: asString(formData, "workerImage"),
+    releaseImageTag,
+    webImage,
+    workerImage,
+    webSource: webImage ? null : serviceSourceFromForm(formData, "web", releaseImageTag),
+    workerSource: workerImage ? null : serviceSourceFromForm(formData, "worker", releaseImageTag),
   });
 
   refresh(workspaceId);

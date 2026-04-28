@@ -565,6 +565,7 @@ describe("Platform Admin Tools", () => {
         .mockResolvedValueOnce({})
         .mockResolvedValueOnce({})
         .mockResolvedValueOnce({})
+        .mockResolvedValueOnce({})
         .mockResolvedValueOnce({ customDomainCreate: { domain: "acme.corgtex.com" } }),
     } as any;
 
@@ -610,7 +611,7 @@ describe("Platform Admin Tools", () => {
     expect(prisma.instanceRegistry.upsert).toHaveBeenCalledWith(expect.not.objectContaining({
       create: expect.objectContaining({ railwayApiToken: expect.anything() }),
     }));
-    expect(railwayClient.graphql).toHaveBeenCalledTimes(7);
+    expect(railwayClient.graphql).toHaveBeenCalledTimes(8);
   });
 
   it("provisionHostedCustomerInstance rejects EU data residency outside EU regions", async () => {
