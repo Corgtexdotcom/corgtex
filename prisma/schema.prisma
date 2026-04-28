@@ -500,6 +500,8 @@ model User {
   id                      String                      @id @default(uuid())
   email                   String                      @unique
   displayName             String?
+  bio                     String?                     @db.Text
+  avatarUrl               String?                     @db.Text
   passwordHash            String
   globalRole              GlobalRole                  @default(USER)
   createdAt               DateTime                    @default(now())
@@ -528,6 +530,7 @@ model User {
   meetingInsights         MeetingInsight[]
   createdAgentIdentities  AgentIdentity[]             @relation("AgentIdentityCreator")
   deliberationEntries     DeliberationEntry[]
+  notificationPrefs       NotificationPreference[]
   crmConversationMessages CrmConversationMessage[]
   reviewedQualifications  CrmQualification[]          @relation("QualificationReviewer")
 }
@@ -539,6 +542,8 @@ model Session {
   expiresAt  DateTime
   lastSeenAt DateTime @default(now())
   createdAt  DateTime @default(now())
+  ipAddress  String?  @db.VarChar(45)
+  userAgent  String?  @db.Text
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -1420,6 +1425,18 @@ model Notification {
   user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([workspaceId, userId, readAt])
+}
+
+model NotificationPreference {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  notifType String   @db.VarChar(100)
+  channel   String   @default("IN_APP") @db.VarChar(50)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, notifType])
 }
 
 model ConversationSession {
@@ -2488,11 +2505,11 @@ model InstanceRegistry {
   id               String    @id @default(uuid())
   label            String
   url              String    @unique
-  environment      String    @default("production") // "production", "staging"
-  notes            String?   @db.Text
+  environment      String    @default("production")
+  notes            String?
   lastHealthCheck  DateTime?
   lastHealthStatus String?
-  lastHealthError  String?   @db.Text
+  lastHealthError  String?
   createdAt        DateTime  @default(now())
   updatedAt        DateTime  @updatedAt
 }

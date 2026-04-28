@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { ALL_SCOPES } from "@corgtex/domain";
+import { getPublicOrigin } from "@/lib/public-origin";
 
 export async function GET(request: NextRequest) {
-  const origin = new URL(request.url).origin;
+  const origin = getPublicOrigin(request);
   return NextResponse.json({
     issuer: origin,
     authorization_endpoint: `${origin}/api/oauth/authorize`,
