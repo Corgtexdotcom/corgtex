@@ -34,6 +34,11 @@ async function sendInvitationEmail(email: string, displayName: string | null, to
   const resetUrl = `${appUrl}/setup-account/${token}`;
 
   try {
+    if (!process.env.RESEND_API_KEY) {
+      console.warn("RESEND_API_KEY missing, not sending email");
+      return { sent: false, error: "RESEND_API_KEY is not configured on the server." };
+    }
+
     await sendEmail({
       to: email,
       subject: `You've been invited to Corgtex`,
@@ -48,110 +53,146 @@ async function sendInvitationEmail(email: string, displayName: string | null, to
         </div>
       `,
     });
-  } catch (error) {
+    return { sent: true };
+  } catch (error: any) {
     console.error("Failed to send invitation email:", error);
+    return { sent: false, error: error.message || String(error) };
   }
 }
 
 export async function createMemberAction(formData: FormData) {
-  const _demoGuardWsId = formData.get("workspaceId") as string;
-  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+  try {
+    const _demoGuardWsId = formData.get("workspaceId") as string;
+    if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
 
-  const actor = await requirePageActor();
-  const workspaceId = asString(formData, "workspaceId");
-  const result = await createMember(actor, {
-    workspaceId,
-    email: asString(formData, "email"),
-    displayName: asOptional(formData, "displayName"),
-    role: asString(formData, "role") as "CONTRIBUTOR" | "FACILITATOR" | "FINANCE_STEWARD" | "ADMIN",
-  });
-  
-  if ((result as any).token) {
-    await sendInvitationEmail(result.user.email, result.user.displayName, (result as any).token);
+    const actor = await requirePageActor();
+    const workspaceId = asString(formData, "workspaceId");
+    const result = await createMember(actor, {
+      workspaceId,
+      email: asString(formData, "email"),
+      displayName: asOptional(formData, "displayName"),
+      role: asString(formData, "role") as "CONTRIBUTOR" | "FACILITATOR" | "FINANCE_STEWARD" | "ADMIN",
+    });
+    
+    let emailStatus: { sent: boolean; error?: string } | undefined;
+    if ((result as any).token) {
+      emailStatus = await sendInvitationEmail(result.user.email, result.user.displayName, (result as any).token);
+    }
+    
+    refresh(workspaceId);
+    return { success: true, emailStatus };
+  } catch (error: any) {
+    return { success: false, error: error.message || "Failed to create member." };
   }
-  
-  refresh(workspaceId);
 }
 
 export async function requestMemberInviteAction(formData: FormData) {
-  const _demoGuardWsId = formData.get("workspaceId") as string;
-  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+  try {
+    const _demoGuardWsId = formData.get("workspaceId") as string;
+    if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
 
-  const actor = await requirePageActor();
-  const workspaceId = asString(formData, "workspaceId");
-  await requestMemberInvite(actor, {
-    workspaceId,
-    email: asString(formData, "email"),
-    displayName: asOptional(formData, "displayName"),
-  });
-  refresh(workspaceId);
+    const actor = await requirePageActor();
+    const workspaceId = asString(formData, "workspaceId");
+    await requestMemberInvite(actor, {
+      workspaceId,
+      email: asString(formData, "email"),
+      displayName: asOptional(formData, "displayName"),
+    });
+    refresh(workspaceId);
+    return { success: true };
+  } catch (error: any) {
+    return { success: false, error: error.message || "Failed to request member invite." };
+  }
 }
 
 export async function inviteMemberAction(formData: FormData) {
-  const _demoGuardWsId = formData.get("workspaceId") as string;
-  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+  try {
+    const _demoGuardWsId = formData.get("workspaceId") as string;
+    if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
 
-  const actor = await requirePageActor();
-  const workspaceId = asString(formData, "workspaceId");
-  const result = await inviteMember(actor, {
-    workspaceId,
-    email: asString(formData, "email"),
-    displayName: asOptional(formData, "displayName"),
-  });
-  await sendInvitationEmail(result.user.email, result.user.displayName, result.token);
-  refresh(workspaceId);
+    const actor = await requirePageActor();
+    const workspaceId = asString(formData, "workspaceId");
+    const result = await inviteMember(actor, {
+      workspaceId,
+      email: asString(formData, "email"),
+      displayName: asOptional(formData, "displayName"),
+    });
+    const emailStatus = await sendInvitationEmail(result.user.email, result.user.displayName, result.token);
+    refresh(workspaceId);
+    return { success: true, emailStatus };
+  } catch (error: any) {
+    return { success: false, error: error.message || "Failed to invite member." };
+  }
 }
 
 export async function bulkInviteAction(formData: FormData) {
-  const _demoGuardWsId = formData.get("workspaceId") as string;
-  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+  try {
+    const _demoGuardWsId = formData.get("workspaceId") as string;
+    if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
 
-  const actor = await requirePageActor();
-  const workspaceId = asString(formData, "workspaceId");
-  const rawCsv = asString(formData, "csvData");
-  
-  const parsed = rawCsv.split("\n").map(line => {
-    const parts = line.split(",").map(p => p.trim());
-    return {
-      displayName: parts[0] || null,
-      email: parts[1] || "",
-      role: (parts[2] || "CONTRIBUTOR") as any,
-    };
-  }).filter(m => m.email);
+    const actor = await requirePageActor();
+    const workspaceId = asString(formData, "workspaceId");
+    const rawCsv = asString(formData, "csvData");
+    
+    const parsed = rawCsv.split("\n").map(line => {
+      const parts = line.split(",").map(p => p.trim());
+      return {
+        displayName: parts[0] || null,
+        email: parts[1] || "",
+        role: (parts[2] || "CONTRIBUTOR") as any,
+      };
+    }).filter(m => m.email);
 
-  const result = await bulkInviteMembers(actor, {
-    workspaceId,
-    members: parsed,
-  });
+    const result = await bulkInviteMembers(actor, {
+      workspaceId,
+      members: parsed,
+    });
 
-  for (const detail of result.details) {
-    await sendInvitationEmail(detail.email, detail.displayName, detail.token);
+    let overallEmailStatus: { sent: boolean; error?: string } = { sent: true, error: undefined };
+    for (const detail of result.details) {
+      const st = await sendInvitationEmail(detail.email, detail.displayName, detail.token);
+      if (!st.sent) {
+        overallEmailStatus.sent = false;
+        overallEmailStatus.error = st.error || "Failed to send to one or more members.";
+      }
+    }
+
+    refresh(workspaceId);
+    return { success: true, invitedCount: result.invited, emailStatus: overallEmailStatus };
+  } catch (error: any) {
+    return { success: false, error: error.message || "Failed to bulk invite members." };
   }
-
-  refresh(workspaceId);
 }
 
 export async function updateMemberAction(formData: FormData) {
-  const _demoGuardWsId = formData.get("workspaceId") as string;
-  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+  try {
+    const _demoGuardWsId = formData.get("workspaceId") as string;
+    if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
 
-  const actor = await requirePageActor();
-  const workspaceId = asString(formData, "workspaceId");
-  const isActiveRaw = asOptional(formData, "isActive");
-  const result = await updateMember(actor, {
-    workspaceId,
-    memberId: asString(formData, "memberId"),
-    role: formData.has("role")
-      ? asString(formData, "role") as "CONTRIBUTOR" | "FACILITATOR" | "FINANCE_STEWARD" | "ADMIN"
-      : undefined,
-    email: formData.has("email") ? asOptional(formData, "email") : undefined,
-    displayName: formData.has("displayName") ? asOptional(formData, "displayName") : undefined,
-    isActive: isActiveRaw === null ? undefined : isActiveRaw === "true",
-  });
-  if (result.setupToken) {
-    await sendInvitationEmail(result.user.email, result.user.displayName, result.setupToken);
+    const actor = await requirePageActor();
+    const workspaceId = asString(formData, "workspaceId");
+    const isActiveRaw = asOptional(formData, "isActive");
+    const result = await updateMember(actor, {
+      workspaceId,
+      memberId: asString(formData, "memberId"),
+      role: formData.has("role")
+        ? asString(formData, "role") as "CONTRIBUTOR" | "FACILITATOR" | "FINANCE_STEWARD" | "ADMIN"
+        : undefined,
+      email: formData.has("email") ? asOptional(formData, "email") : undefined,
+      displayName: formData.has("displayName") ? asOptional(formData, "displayName") : undefined,
+      isActive: isActiveRaw === null ? undefined : isActiveRaw === "true",
+    });
+    
+    let emailStatus: { sent: boolean; error?: string } | undefined;
+    if (result.setupToken) {
+      emailStatus = await sendInvitationEmail(result.user.email, result.user.displayName, result.setupToken);
+    }
+    
+    refresh(workspaceId);
+    return { success: true, emailStatus };
+  } catch (error: any) {
+    return { success: false, error: error.message || "Failed to update member." };
   }
-  refresh(workspaceId);
 }
 
 export async function deactivateMemberAction(formData: FormData) {
@@ -168,17 +209,22 @@ export async function deactivateMemberAction(formData: FormData) {
 }
 
 export async function resendMemberAccessLinkAction(formData: FormData) {
-  const _demoGuardWsId = formData.get("workspaceId") as string;
-  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+  try {
+    const _demoGuardWsId = formData.get("workspaceId") as string;
+    if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
 
-  const actor = await requirePageActor();
-  const workspaceId = asString(formData, "workspaceId");
-  const result = await resendMemberAccessLink(actor, {
-    workspaceId,
-    memberId: asString(formData, "memberId"),
-  });
-  await sendInvitationEmail(result.user.email, result.user.displayName, result.token);
-  refresh(workspaceId);
+    const actor = await requirePageActor();
+    const workspaceId = asString(formData, "workspaceId");
+    const result = await resendMemberAccessLink(actor, {
+      workspaceId,
+      memberId: asString(formData, "memberId"),
+    });
+    const emailStatus = await sendInvitationEmail(result.user.email, result.user.displayName, result.token);
+    refresh(workspaceId);
+    return { success: true, emailStatus };
+  } catch (error: any) {
+    return { success: false, error: error.message || "Failed to resend access link." };
+  }
 }
 
 export async function updateMemberInvitePolicyAction(formData: FormData) {
@@ -195,30 +241,40 @@ export async function updateMemberInvitePolicyAction(formData: FormData) {
 }
 
 export async function approveMemberInviteRequestAction(formData: FormData) {
-  const _demoGuardWsId = formData.get("workspaceId") as string;
-  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+  try {
+    const _demoGuardWsId = formData.get("workspaceId") as string;
+    if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
 
-  const actor = await requirePageActor();
-  const workspaceId = asString(formData, "workspaceId");
-  const result = await approveMemberInviteRequest(actor, {
-    workspaceId,
-    requestId: asString(formData, "requestId"),
-  });
-  await sendInvitationEmail(result.user.email, result.user.displayName, result.token);
-  refresh(workspaceId);
+    const actor = await requirePageActor();
+    const workspaceId = asString(formData, "workspaceId");
+    const result = await approveMemberInviteRequest(actor, {
+      workspaceId,
+      requestId: asString(formData, "requestId"),
+    });
+    const emailStatus = await sendInvitationEmail(result.user.email, result.user.displayName, result.token);
+    refresh(workspaceId);
+    return { success: true, emailStatus };
+  } catch (error: any) {
+    return { success: false, error: error.message || "Failed to approve invite request." };
+  }
 }
 
 export async function rejectMemberInviteRequestAction(formData: FormData) {
-  const _demoGuardWsId = formData.get("workspaceId") as string;
-  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+  try {
+    const _demoGuardWsId = formData.get("workspaceId") as string;
+    if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
 
-  const actor = await requirePageActor();
-  const workspaceId = asString(formData, "workspaceId");
-  await rejectMemberInviteRequest(actor, {
-    workspaceId,
-    requestId: asString(formData, "requestId"),
-  });
-  refresh(workspaceId);
+    const actor = await requirePageActor();
+    const workspaceId = asString(formData, "workspaceId");
+    await rejectMemberInviteRequest(actor, {
+      workspaceId,
+      requestId: asString(formData, "requestId"),
+    });
+    refresh(workspaceId);
+    return { success: true };
+  } catch (error: any) {
+    return { success: false, error: error.message || "Failed to reject invite request." };
+  }
 }
 
 export async function markAllNotificationsReadAction(formData: FormData) {
