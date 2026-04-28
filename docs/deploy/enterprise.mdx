@@ -25,9 +25,9 @@ The operator UI and internal automation both use the same global-operator domain
 
 ### Private bootstrap bundles
 
-Customer bootstrap data is delivered through a private signed bundle reference. The customer runtime accepts a one-time internal bootstrap request, downloads the private bundle, verifies its SHA-256 checksum, applies the generic stable-client seed logic, and records only status metadata in the database.
+Customer bootstrap data is delivered through a private signed bundle reference. The customer runtime accepts a one-time internal bootstrap request, verifies that the bearer token hashes to the runtime-configured `CORGTEX_INSTANCE_BOOTSTRAP_TOKEN_HASH`, verifies the request signature and bundle SHA-256 checksum, applies the generic stable-client seed logic, and records only status metadata in the database.
 
-The bundle contains configuration and seed content required for that customer. The control plane stores only the bundle URI, checksum, schema version, and status. Runtime secrets remain in the deployment platform or private bundle delivery system.
+The bundle contains configuration and seed content required for that customer. The control plane stores only the bundle URI, checksum, schema version, and status. Runtime secrets remain in the deployment platform or private bundle delivery system, and the bootstrap bearer token is stored only as a hash plus consumed-at metadata in the customer runtime.
 
 ### Configuration-only customization
 

@@ -93,7 +93,8 @@ These variables are only needed by the internal Corgtex Ops control plane or by 
 |---|---|
 | `RAILWAY_API_TOKEN` | Railway API token used by the internal control plane to provision customer projects and services. Store only as a deployment secret. |
 | `RAILWAY_GRAPHQL_ENDPOINT` | Optional override for Railway's GraphQL endpoint. Leave unset unless Railway support directs otherwise. |
-| `CORGTEX_INSTANCE_BOOTSTRAP_TOKEN` | One-time or rotated bearer token accepted by a customer runtime's internal bootstrap endpoint. |
+| `CORGTEX_INSTANCE_BOOTSTRAP_TOKEN_HASH` | SHA-256 hash of the one-time bearer token accepted by a customer runtime's internal bootstrap endpoint. Prefer this over storing the raw token. |
+| `CORGTEX_INSTANCE_BOOTSTRAP_TOKEN` | Legacy raw-token fallback for bootstrap endpoints. Use only while rotating to `CORGTEX_INSTANCE_BOOTSTRAP_TOKEN_HASH`. |
 | `CORGTEX_RELEASE_VERSION` | Release version reported by `/api/health` for fleet drift checks. |
 | `CORGTEX_RELEASE_IMAGE_TAG` | Immutable image tag reported by `/api/health` and used by the control plane for customer deployments. |
 

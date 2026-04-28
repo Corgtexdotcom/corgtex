@@ -61,11 +61,15 @@ CREATE TABLE "InstanceBootstrapRun" (
   "error" TEXT,
   "appliedAt" TIMESTAMP(3),
   "expiresAt" TIMESTAMP(3) NOT NULL,
+  "bootstrapTokenHash" TEXT,
+  "bootstrapTokenExpiresAt" TIMESTAMP(3),
+  "bootstrapTokenConsumedAt" TIMESTAMP(3),
   "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
   "updatedAt" TIMESTAMP(3) NOT NULL,
 
   CONSTRAINT "InstanceBootstrapRun_pkey" PRIMARY KEY ("id")
 );
 
+CREATE UNIQUE INDEX "InstanceBootstrapRun_bootstrapTokenHash_key" ON "InstanceBootstrapRun"("bootstrapTokenHash");
 CREATE UNIQUE INDEX "InstanceBootstrapRun_customerSlug_bundleChecksum_key" ON "InstanceBootstrapRun"("customerSlug", "bundleChecksum");
 CREATE INDEX "InstanceBootstrapRun_customerSlug_status_idx" ON "InstanceBootstrapRun"("customerSlug", "status");

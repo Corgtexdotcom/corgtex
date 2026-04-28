@@ -2560,18 +2560,21 @@ model HostedInstanceEvent {
 }
 
 model InstanceBootstrapRun {
-  id             String    @id @default(uuid())
-  customerSlug   String
-  bundleUri      String
-  bundleChecksum String
-  schemaVersion  String
-  requestedBy    String?
-  status         String    @default("pending")
-  error          String?
-  appliedAt      DateTime?
-  expiresAt      DateTime
-  createdAt      DateTime  @default(now())
-  updatedAt      DateTime  @updatedAt
+  id                       String    @id @default(uuid())
+  customerSlug             String
+  bundleUri                String
+  bundleChecksum           String
+  schemaVersion            String
+  requestedBy              String?
+  status                   String    @default("pending")
+  error                    String?
+  appliedAt                DateTime?
+  expiresAt                DateTime
+  bootstrapTokenHash       String?   @unique
+  bootstrapTokenExpiresAt  DateTime?
+  bootstrapTokenConsumedAt DateTime?
+  createdAt                DateTime  @default(now())
+  updatedAt                DateTime  @updatedAt
 
   @@unique([customerSlug, bundleChecksum])
   @@index([customerSlug, status])

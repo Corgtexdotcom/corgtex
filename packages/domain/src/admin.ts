@@ -1,3 +1,5 @@
+import { createHash, createHmac } from "node:crypto";
+
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import type { MemberRole, Prisma } from "@prisma/client";
@@ -68,6 +70,32 @@ function assertDataResidency(region: string, dataResidency: string) {
 
 function actorUserId(actor: AppActor) {
   return actor.kind === "user" ? actor.user.id : null;
+}
+
+function sha256Hex(value: string) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function hmacSha256Hex(secret: string, value: string) {
+  return createHmac("sha256", secret).update(value).digest("hex");
+}
+
+function bootstrapSignaturePayload(params: {
+  customerSlug: string;
+  bundleUri: string;
+  checksum: string;
+  schemaVersion: string;
+  expiresAt: string;
+  tokenHash: string;
+}) {
+  return JSON.stringify({
+    customerSlug: params.customerSlug,
+    bundleUri: params.bundleUri,
+    checksum: params.checksum.toLowerCase(),
+    schemaVersion: params.schemaVersion,
+    expiresAt: params.expiresAt,
+    tokenHash: params.tokenHash.toLowerCase(),
+  });
 }
 
 export function buildHostedCustomerRuntimeVariables(params: {
@@ -714,11 +742,24 @@ export async function triggerHostedInstanceBootstrap(actor: AppActor, params: {
   invariant(instance.bootstrapBundleUri, 400, "INVALID_INPUT", "Instance is missing a bootstrap bundle URI.");
   invariant(instance.bootstrapBundleChecksum, 400, "INVALID_INPUT", "Instance is missing a bootstrap bundle checksum.");
   invariant(instance.bootstrapBundleSchemaVersion, 400, "INVALID_INPUT", "Instance is missing a bootstrap bundle schema version.");
+  const token = params.token.trim();
+  invariant(token, 400, "INVALID_INPUT", "Bootstrap token is required.");
+
+  const expiresAt = params.expiresAt.toISOString();
+  const tokenHash = sha256Hex(token);
+  const signaturePayload = bootstrapSignaturePayload({
+    customerSlug: instance.customerSlug,
+    bundleUri: instance.bootstrapBundleUri,
+    checksum: instance.bootstrapBundleChecksum,
+    schemaVersion: instance.bootstrapBundleSchemaVersion,
+    expiresAt,
+    tokenHash,
+  });
 
   const response = await fetch(`${instance.url.replace(/\/$/, "")}/api/internal/instance-bootstrap`, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${params.token}`,
+      Authorization: `Bearer ${token}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
@@ -726,7 +767,9 @@ export async function triggerHostedInstanceBootstrap(actor: AppActor, params: {
       bundleUri: instance.bootstrapBundleUri,
       checksum: instance.bootstrapBundleChecksum,
       schemaVersion: instance.bootstrapBundleSchemaVersion,
-      expiresAt: params.expiresAt.toISOString(),
+      expiresAt,
+      tokenHash,
+      signature: hmacSha256Hex(token, signaturePayload),
     }),
   });
 
@@ -742,7 +785,7 @@ export async function triggerHostedInstanceBootstrap(actor: AppActor, params: {
   await recordHostedInstanceEvent(actor, instance.id, "hosted_instance.bootstrap_triggered", {
     status: response.status,
     ok: response.ok,
-    expiresAt: params.expiresAt.toISOString(),
+    expiresAt,
   });
   return updated;
 }

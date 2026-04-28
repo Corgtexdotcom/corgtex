@@ -1,6 +1,10 @@
 import { AppError } from "./errors";
 
-const DEFAULT_RAILWAY_GRAPHQL_ENDPOINT = "https://backboard.railway.app/graphql/v2";
+const DEFAULT_RAILWAY_GRAPHQL_ENDPOINT = "https://backboard.railway.com/graphql/v2";
+const POSTGRES_SERVICE_NAME = "Postgres";
+const REDIS_SERVICE_NAME = "Redis";
+const POSTGRES_VOLUME_MOUNT_PATH = "/var/lib/postgresql/data";
+const REDIS_VOLUME_MOUNT_PATH = "/bitnami";
 
 type FetchLike = typeof fetch;
 
@@ -97,6 +101,32 @@ export function createRailwayClientFromEnv() {
   });
 }
 
+function runtimeVariablesWithBackingServices(variables: Record<string, string>) {
+  return {
+    DATABASE_URL: `\${{${POSTGRES_SERVICE_NAME}.DATABASE_URL}}`,
+    REDIS_URL: `\${{${REDIS_SERVICE_NAME}.REDIS_URL}}`,
+    ...variables,
+  };
+}
+
+function postgresServiceVariables() {
+  return {
+    POSTGRES_DB: "railway",
+    POSTGRES_USER: "postgres",
+    POSTGRES_PASSWORD: "${{secret(32)}}",
+    PGDATA: `${POSTGRES_VOLUME_MOUNT_PATH}/pgdata`,
+    DATABASE_URL: `postgresql://\${{${POSTGRES_SERVICE_NAME}.POSTGRES_USER}}:\${{${POSTGRES_SERVICE_NAME}.POSTGRES_PASSWORD}}@\${{${POSTGRES_SERVICE_NAME}.RAILWAY_PRIVATE_DOMAIN}}:5432/\${{${POSTGRES_SERVICE_NAME}.POSTGRES_DB}}`,
+  };
+}
+
+function redisServiceVariables() {
+  return {
+    ALLOW_EMPTY_PASSWORD: "no",
+    REDIS_PASSWORD: "${{secret(32)}}",
+    REDIS_URL: `redis://default:\${{${REDIS_SERVICE_NAME}.REDIS_PASSWORD}}@\${{${REDIS_SERVICE_NAME}.RAILWAY_PRIVATE_DOMAIN}}:6379`,
+  };
+}
+
 export async function provisionRailwayCustomerStack(
   client: RailwayClient,
   input: RailwayProvisioningInput,
@@ -155,14 +185,14 @@ export async function provisionRailwayCustomerStack(
         projectId: $projectId
         environmentId: $environmentId
         name: "Postgres"
-        source: { image: "postgres:16-alpine" }
+        source: { image: "ghcr.io/railwayapp-templates/postgres-ssl:17" }
         region: $region
       }) { id }
       redis: serviceCreate(input: {
         projectId: $projectId
         environmentId: $environmentId
         name: "Redis"
-        source: { image: "redis:7-alpine" }
+        source: { image: "bitnami/redis:7.2.5" }
         region: $region
       }) { id }
     }`,
@@ -176,35 +206,123 @@ export async function provisionRailwayCustomerStack(
   );
 
   await client.graphql<unknown>(
-    `mutation UpsertVariables(
+    `mutation CreateBackingServiceVolumes(
       $projectId: String!
       $environmentId: String!
-      $serviceId: String!
-      $variables: EnvironmentVariables!
+      $postgresServiceId: String!
+      $redisServiceId: String!
+      $postgresMountPath: String!
+      $redisMountPath: String!
     ) {
-      variableCollectionUpsert(input: {
+      postgres: volumeCreate(input: {
         projectId: $projectId
         environmentId: $environmentId
-        serviceId: $serviceId
-        variables: $variables
+        serviceId: $postgresServiceId
+        name: "postgres-data"
+        mountPath: $postgresMountPath
+      }) { id }
+      redis: volumeCreate(input: {
+        projectId: $projectId
+        environmentId: $environmentId
+        serviceId: $redisServiceId
+        name: "redis-data"
+        mountPath: $redisMountPath
+      }) { id }
+    }`,
+    {
+      projectId,
+      environmentId,
+      postgresServiceId: services.postgres.id,
+      redisServiceId: services.redis.id,
+      postgresMountPath: POSTGRES_VOLUME_MOUNT_PATH,
+      redisMountPath: REDIS_VOLUME_MOUNT_PATH,
+    },
+  );
+
+  await client.graphql<unknown>(
+    `mutation UpsertBackingServiceVariables(
+      $projectId: String!
+      $environmentId: String!
+      $postgresServiceId: String!
+      $redisServiceId: String!
+      $postgresVariables: EnvironmentVariables!
+      $redisVariables: EnvironmentVariables!
+    ) {
+      postgres: variableCollectionUpsert(input: {
+        projectId: $projectId
+        environmentId: $environmentId
+        serviceId: $postgresServiceId
+        variables: $postgresVariables
+        replace: false
+      })
+      redis: variableCollectionUpsert(input: {
+        projectId: $projectId
+        environmentId: $environmentId
+        serviceId: $redisServiceId
+        variables: $redisVariables
+        replace: false
       })
     }`,
     {
       projectId,
       environmentId,
-      serviceId: services.web.id,
-      variables: input.variables,
+      postgresServiceId: services.postgres.id,
+      redisServiceId: services.redis.id,
+      postgresVariables: postgresServiceVariables(),
+      redisVariables: redisServiceVariables(),
     },
   );
 
   await client.graphql<unknown>(
-    `mutation DeployServices($webServiceId: String!, $workerServiceId: String!, $environmentId: String!) {
+    `mutation UpsertVariables(
+      $projectId: String!
+      $environmentId: String!
+      $webServiceId: String!
+      $workerServiceId: String!
+      $variables: EnvironmentVariables!
+    ) {
+      web: variableCollectionUpsert(input: {
+        projectId: $projectId
+        environmentId: $environmentId
+        serviceId: $webServiceId
+        variables: $variables
+        replace: false
+      })
+      worker: variableCollectionUpsert(input: {
+        projectId: $projectId
+        environmentId: $environmentId
+        serviceId: $workerServiceId
+        variables: $variables
+        replace: false
+      })
+    }`,
+    {
+      projectId,
+      environmentId,
+      webServiceId: services.web.id,
+      workerServiceId: services.worker.id,
+      variables: runtimeVariablesWithBackingServices(input.variables),
+    },
+  );
+
+  await client.graphql<unknown>(
+    `mutation DeployServices(
+      $webServiceId: String!
+      $workerServiceId: String!
+      $postgresServiceId: String!
+      $redisServiceId: String!
+      $environmentId: String!
+    ) {
       web: serviceInstanceRedeploy(serviceId: $webServiceId, environmentId: $environmentId)
       worker: serviceInstanceRedeploy(serviceId: $workerServiceId, environmentId: $environmentId)
+      postgres: serviceInstanceRedeploy(serviceId: $postgresServiceId, environmentId: $environmentId)
+      redis: serviceInstanceRedeploy(serviceId: $redisServiceId, environmentId: $environmentId)
     }`,
     {
       webServiceId: services.web.id,
       workerServiceId: services.worker.id,
+      postgresServiceId: services.postgres.id,
+      redisServiceId: services.redis.id,
       environmentId,
     },
   );
@@ -276,13 +394,21 @@ export async function upgradeRailwayCustomerRelease(
       `mutation UpsertUpgradeVariables(
         $projectId: String!
         $environmentId: String!
-        $serviceId: String!
+        $webServiceId: String!
+        $workerServiceId: String!
         $variables: EnvironmentVariables!
       ) {
-        variableCollectionUpsert(input: {
+        web: variableCollectionUpsert(input: {
           projectId: $projectId
           environmentId: $environmentId
-          serviceId: $serviceId
+          serviceId: $webServiceId
+          variables: $variables
+          replace: false
+        })
+        worker: variableCollectionUpsert(input: {
+          projectId: $projectId
+          environmentId: $environmentId
+          serviceId: $workerServiceId
           variables: $variables
           replace: false
         })
@@ -290,7 +416,8 @@ export async function upgradeRailwayCustomerRelease(
       {
         projectId: input.projectId,
         environmentId: input.environmentId,
-        serviceId: input.webServiceId,
+        webServiceId: input.webServiceId,
+        workerServiceId: input.workerServiceId,
         variables: input.variables,
       },
     );

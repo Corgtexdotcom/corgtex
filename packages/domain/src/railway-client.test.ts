@@ -62,6 +62,8 @@ describe("Railway client", () => {
       })
       .mockResolvedValueOnce({})
       .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({})
       .mockResolvedValueOnce({ customDomainCreate: { domain: "acme.corgtex.com" } });
 
     const result = await provisionRailwayCustomerStack({ graphql }, {
@@ -85,13 +87,31 @@ describe("Railway client", () => {
       redisServiceId: "redis-1",
       webDomain: "acme.corgtex.com",
     });
-    expect(graphql).toHaveBeenCalledTimes(5);
-    expect(graphql.mock.calls[2][1]).toMatchObject({
+    expect(graphql).toHaveBeenCalledTimes(7);
+    expect(graphql.mock.calls[1][0]).toContain("ghcr.io/railwayapp-templates/postgres-ssl:17");
+    expect(graphql.mock.calls[1][0]).toContain("bitnami/redis:7.2.5");
+    expect(graphql.mock.calls[2][0]).toContain("volumeCreate");
+    expect(graphql.mock.calls[3][1]).toMatchObject({
       projectId: "project-1",
       environmentId: "env-1",
-      serviceId: "web-1",
+      postgresServiceId: "postgres-1",
+      redisServiceId: "redis-1",
+      postgresVariables: expect.objectContaining({
+        DATABASE_URL: expect.stringContaining("${{Postgres."),
+      }),
+      redisVariables: expect.objectContaining({
+        REDIS_URL: expect.stringContaining("${{Redis."),
+      }),
+    });
+    expect(graphql.mock.calls[4][1]).toMatchObject({
+      projectId: "project-1",
+      environmentId: "env-1",
+      webServiceId: "web-1",
+      workerServiceId: "worker-1",
       variables: {
         APP_URL: "https://acme.corgtex.com",
+        DATABASE_URL: "${{Postgres.DATABASE_URL}}",
+        REDIS_URL: "${{Redis.REDIS_URL}}",
       },
     });
   });
@@ -129,7 +149,8 @@ describe("Railway client", () => {
     expect(graphql.mock.calls[1][1]).toMatchObject({
       projectId: "project-1",
       environmentId: "env-1",
-      serviceId: "web-1",
+      webServiceId: "web-1",
+      workerServiceId: "worker-1",
       variables: {
         CORGTEX_RELEASE_IMAGE_TAG: "sha-2",
       },

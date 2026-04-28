@@ -1,3 +1,5 @@
+import { createHash, createHmac } from "node:crypto";
+
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import * as admin from "./admin";
 import { prisma } from "@corgtex/shared";
@@ -81,6 +83,10 @@ vi.mock("./password-reset", () => ({
 }));
 
 const dummyActor = { userId: "operator_1" } as any;
+
+function sha256Hex(value: string) {
+  return createHash("sha256").update(value).digest("hex");
+}
 
 // ── Tests ──────────────────────────────────────────────────────────
 
@@ -557,6 +563,8 @@ describe("Platform Admin Tools", () => {
         })
         .mockResolvedValueOnce({})
         .mockResolvedValueOnce({})
+        .mockResolvedValueOnce({})
+        .mockResolvedValueOnce({})
         .mockResolvedValueOnce({ customDomainCreate: { domain: "acme.corgtex.com" } }),
     } as any;
 
@@ -602,6 +610,7 @@ describe("Platform Admin Tools", () => {
     expect(prisma.instanceRegistry.upsert).toHaveBeenCalledWith(expect.not.objectContaining({
       create: expect.objectContaining({ railwayApiToken: expect.anything() }),
     }));
+    expect(railwayClient.graphql).toHaveBeenCalledTimes(7);
   });
 
   it("provisionHostedCustomerInstance rejects EU data residency outside EU regions", async () => {
@@ -712,6 +721,54 @@ describe("Platform Admin Tools", () => {
     }, { graphql: vi.fn() } as any)).rejects.toMatchObject({
       code: "INVALID_INPUT",
       message: "Instance is missing a Railway project ID.",
+    });
+  });
+
+  it("triggerHostedInstanceBootstrap signs a one-time token without storing the raw token", async () => {
+    (prisma.instanceRegistry.findUniqueOrThrow as any).mockResolvedValueOnce({
+      id: "inst_1",
+      url: "https://acme.corgtex.com",
+      customerSlug: "acme-prod",
+      bootstrapBundleUri: "https://private.example/bundle.json",
+      bootstrapBundleChecksum: "a".repeat(64),
+      bootstrapBundleSchemaVersion: "stable-client-v1",
+    });
+    (prisma.instanceRegistry.update as any).mockResolvedValue({
+      id: "inst_1",
+      bootstrapStatus: "bootstrapping",
+    });
+    global.fetch = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+
+    const expiresAt = new Date("2026-05-01T10:00:00.000Z");
+    await admin.triggerHostedInstanceBootstrap(dummyActor, {
+      instanceId: "inst_1",
+      token: "one-time-bootstrap-token",
+      expiresAt,
+    });
+
+    const [, request] = (global.fetch as any).mock.calls[0];
+    const body = JSON.parse(request.body);
+    const tokenHash = sha256Hex("one-time-bootstrap-token");
+    const expectedPayload = JSON.stringify({
+      customerSlug: "acme-prod",
+      bundleUri: "https://private.example/bundle.json",
+      checksum: "a".repeat(64),
+      schemaVersion: "stable-client-v1",
+      expiresAt: expiresAt.toISOString(),
+      tokenHash,
+    });
+
+    expect(request.headers.Authorization).toBe("Bearer one-time-bootstrap-token");
+    expect(body).toMatchObject({
+      customerSlug: "acme-prod",
+      tokenHash,
+      signature: createHmac("sha256", "one-time-bootstrap-token").update(expectedPayload).digest("hex"),
+    });
+    expect(JSON.stringify(body)).not.toContain("one-time-bootstrap-token");
+    expect(prisma.hostedInstanceEvent.create).toHaveBeenCalledWith({
+      data: expect.not.objectContaining({
+        meta: expect.objectContaining({ token: expect.anything() }),
+      }),
     });
   });
 
