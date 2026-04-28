@@ -181,4 +181,12 @@ export const RATE_LIMITS = {
   PASSWORD_RESET_PER_EMAIL: { windowMs: 3_600_000, limit: 3, failClosed: true },
   /** Password reset requests per IP per hour */
   PASSWORD_RESET_PER_IP: { windowMs: 3_600_000, limit: 10, failClosed: true },
+  /** Self-serve procurement workspace creations per IP per hour */
+  PROCUREMENT_SETUP_PER_IP: { windowMs: 3_600_000, limit: 10, failClosed: true },
+  /** Self-serve procurement workspace creations per admin email per day */
+  PROCUREMENT_SETUP_PER_EMAIL: { windowMs: 86_400_000, limit: 3, failClosed: true },
+  /** Self-serve procurement workspace creations per company/domain per day */
+  PROCUREMENT_SETUP_PER_COMPANY: { windowMs: 86_400_000, limit: 5, failClosed: true },
+  /** Initial self-serve setup member invitation writes per setup session per hour */
+  PROCUREMENT_SETUP_INVITES_PER_SESSION: { windowMs: 3_600_000, limit: 20, failClosed: true },
 } as const;
