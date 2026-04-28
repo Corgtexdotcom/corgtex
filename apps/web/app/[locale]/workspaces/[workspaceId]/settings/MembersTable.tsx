@@ -383,19 +383,12 @@ export function MembersTable({
                           >
                             {t("btnEditMember")}
                           </button>
-                          <button
-                            type="button"
-                            className="secondary small"
-                            style={{ padding: "4px 8px", fontSize: "0.7rem" }}
-                            onClick={async () => {
-                              const fd = new FormData();
-                              fd.append("workspaceId", workspaceId);
-                              fd.append("memberId", member.id);
-                              await handleActionWithToast(resendMemberAccessLinkAction, fd, "Access link sent successfully");
-                            }}
-                          >
-                            {t("btnResendAccessLink")}
-                          </button>
+                          <button type="button" className="secondary small" style={{ padding: "4px 8px", fontSize: "0.7rem" }} onClick={async () => {
+                            const fd = new FormData();
+                            fd.append("workspaceId", workspaceId);
+                            fd.append("memberId", member.id);
+                            await handleActionWithToast(resendMemberAccessLinkAction, fd, "Access link sent successfully");
+                          }}>{t("btnResendAccessLink")}</button>
                         </div>
                       ) : (
                         <span className="muted" style={{ fontSize: "0.75rem" }}>{t("noMemberActions")}</span>
@@ -412,8 +405,9 @@ export function MembersTable({
       {editingMember && (
         <Dialog open={true} onClose={() => setEditingMember(null)} title={t("btnEditMember")}>
           <form
-            action={async (formData) => {
-              await handleActionWithToast(updateMemberAction, formData, "Member updated successfully");
+            onSubmit={async (e) => {
+              e.preventDefault();
+              await handleActionWithToast(updateMemberAction, new FormData(e.currentTarget), "Member updated successfully");
               setEditingMember(null);
             }}
             className="stack nr-form-section"
