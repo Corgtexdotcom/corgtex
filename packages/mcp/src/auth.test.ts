@@ -34,7 +34,7 @@ describe("authenticateMcpRequest", () => {
       actor: { kind: "user", user: { id: "user-1", email: "user@example.com", displayName: "User" } },
       workspaceId: "ws-1",
       scopes: ["brain:read"],
-      instanceSlug: "crina",
+      instanceSlug: "client-a",
       resource: "https://mcp.corgtex.com/mcp",
     });
 
@@ -48,7 +48,7 @@ describe("authenticateMcpRequest", () => {
       authKind: "oauth",
       workspaceId: "ws-1",
       scopes: ["brain:read"],
-      instanceSlug: "crina",
+      instanceSlug: "client-a",
     });
   });
 
@@ -60,7 +60,7 @@ describe("authenticateMcpRequest", () => {
       authKind: "oauth",
       workspaceId: "ws-1",
       scopes: ["brain:read"],
-      instanceSlug: "crina",
+      instanceSlug: "client-a",
     }, "actions:write")).toThrow("MCP credential is missing the required scope");
   });
 
