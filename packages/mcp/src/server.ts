@@ -33,6 +33,8 @@ import {
   upvoteTension,
   listMembers,
   createMember,
+  bulkInviteMembers,
+  sendMemberSetupEmail,
   updateMember,
   deactivateMember,
   listMeetings,
@@ -123,6 +125,10 @@ function annotationsForTool(name: string) {
     idempotentHint: readOnlyHint,
     openWorldHint: false,
   };
+}
+
+function hasScope(ctx: McpSessionContext, scope: string) {
+  return !ctx.scopes || ctx.scopes.includes(scope);
 }
 
 const PROPOSAL_STATUS = ["DRAFT", "OPEN", "RESOLVED"] as const;
@@ -784,7 +790,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
 
   tool(
     "create_member",
-    "Onboard a new member. Creates the user account if it doesn't exist, adds them to the workspace with the chosen role, and issues a setup link token. Admin-only.",
+    "Onboard a new member. Creates the user account if it doesn't exist, adds them to the workspace with the chosen role, and emails the setup link. Requires members:write.",
     {
       email: z.string(),
       role: z.enum(MEMBER_ROLE),
@@ -797,16 +803,62 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         email: params.email,
         role: params.role,
         displayName: params.displayName,
+        skipAdminCheck: true,
+      });
+      const emailStatus = await sendMemberSetupEmail({
+        email: result.user.email,
+        displayName: result.user.displayName,
+        token: result.token,
       });
       return jsonResult({
         id: result.member.id,
         userId: result.user.id,
         email: result.user.email,
         role: result.member.role,
+        emailStatus,
         webUrl: webUrl(workspaceId, `/settings?tab=members`),
       });
     },
   );
+
+  if (hasScope(sessionCtx, "members:write")) {
+    tool(
+      "bulk_invite_members",
+      "Onboard up to 50 members at once. Creates accounts if needed, adds them to the workspace, and emails setup links. Requires members:write.",
+      {
+        members: z.array(z.object({
+          email: z.string(),
+          displayName: z.string().optional(),
+          role: z.enum(["CONTRIBUTOR", "FACILITATOR", "FINANCE_STEWARD"]).optional(),
+        })).min(1).max(50),
+      },
+      async (params: { members: { email: string; displayName?: string; role?: "CONTRIBUTOR" | "FACILITATOR" | "FINANCE_STEWARD" }[] }) => {
+        requireScope(sessionCtx, "members:write");
+        const result = await bulkInviteMembers(actor, {
+          workspaceId,
+          members: params.members,
+          skipAdminCheck: true,
+        });
+        const emailStatus = await Promise.all(result.details.map((detail) =>
+          sendMemberSetupEmail({
+            email: detail.email,
+            displayName: detail.displayName,
+            token: detail.token,
+          }),
+        ));
+        return jsonResult({
+          invited: result.invited,
+          details: result.details.map((detail) => ({
+            email: detail.email,
+            displayName: detail.displayName,
+          })),
+          errors: result.errors,
+          emailStatus,
+          webUrl: webUrl(workspaceId, `/settings?tab=members`),
+        });
+      },
+    );
+  }
 
   tool(
     "update_member",
