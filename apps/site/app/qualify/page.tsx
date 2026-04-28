@@ -41,7 +41,8 @@ function QualifyFormInner() {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch("/api/demo-leads/qualify", {
+      const appUrl = process.env.NEXT_PUBLIC_APP_URL || "https://app.corgtex.com";
+      const res = await fetch(`${appUrl}/api/demo-leads/qualify`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
