@@ -83,6 +83,7 @@ type Env = {
   readonly RESEND_API_KEY: string | undefined;
   readonly EMAIL_FROM: string;
   readonly EMAIL_REPLY_TO: string | undefined;
+  readonly PROCUREMENT_NOTIFY_EMAIL: string | undefined;
   readonly SENTRY_DSN: string | undefined;
   readonly ENCRYPTION_KEY: string | undefined;
   readonly SLACK_CLIENT_ID: string | undefined;
@@ -189,6 +190,9 @@ export const env: Env = {
   },
   get EMAIL_REPLY_TO() {
     return optional("EMAIL_REPLY_TO");
+  },
+  get PROCUREMENT_NOTIFY_EMAIL() {
+    return optional("PROCUREMENT_NOTIFY_EMAIL");
   },
   get SENTRY_DSN() {
     return optional("NEXT_PUBLIC_SENTRY_DSN") ?? optional("SENTRY_DSN");
