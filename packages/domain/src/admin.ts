@@ -35,8 +35,23 @@ const HOSTED_BOOTSTRAP_STATUSES = new Set([
 ]);
 
 type InstanceHealthPayload = {
+  status?: string;
+  database?: string;
+  schema?: string;
   release?: { imageTag?: string | null };
   runtime?: { redis?: string; storage?: string };
+};
+
+export type HostedInstanceReadinessCheck = {
+  key: string;
+  label: string;
+  status: "ok" | "warning" | "missing";
+  detail: string;
+};
+
+export type HostedInstanceReadiness = {
+  status: "ready" | "attention";
+  checks: HostedInstanceReadinessCheck[];
 };
 
 function normalizeSlug(value: string) {
@@ -376,9 +391,13 @@ export async function adminCreateWorkspace(actor: AppActor, params: {
 
 export async function listExternalInstances(actor: AppActor) {
   requireGlobalOperator(actor);
-  return prisma.instanceRegistry.findMany({
+  const instances = await prisma.instanceRegistry.findMany({
     orderBy: { createdAt: "desc" }
   });
+  return instances.map((instance) => ({
+    ...instance,
+    readiness: buildHostedInstanceReadiness(instance),
+  }));
 }
 
 export async function listHostedInstanceEvents(actor: AppActor, instanceId: string) {
@@ -402,6 +421,7 @@ export async function registerExternalInstance(actor: AppActor, params: {
   supportOwnerEmail?: string;
   releaseVersion?: string;
   releaseImageTag?: string;
+  storageBucketName?: string;
   bootstrapBundleUri?: string;
   bootstrapBundleChecksum?: string;
   bootstrapBundleSchemaVersion?: string;
@@ -420,6 +440,7 @@ export async function registerExternalInstance(actor: AppActor, params: {
       supportOwnerEmail: normalizeOptional(params.supportOwnerEmail),
       releaseVersion: normalizeOptional(params.releaseVersion),
       releaseImageTag: normalizeOptional(params.releaseImageTag),
+      storageBucketName: normalizeOptional(params.storageBucketName),
       bootstrapBundleUri: normalizeOptional(params.bootstrapBundleUri),
       bootstrapBundleChecksum: normalizeOptional(params.bootstrapBundleChecksum),
       bootstrapBundleSchemaVersion: normalizeOptional(params.bootstrapBundleSchemaVersion),
@@ -455,9 +476,25 @@ export async function probeExternalInstanceHealth(actor: AppActor, id: string) {
     health = await res.json().catch(() => null) as InstanceHealthPayload | null;
     if (res.ok) {
       status = "ok";
+      const runtimeErrors = [];
+      if (health?.database && health.database !== "up") {
+        runtimeErrors.push(`Database ${health.database}`);
+      }
+      if (health?.schema && health.schema !== "ready") {
+        runtimeErrors.push(`Schema ${health.schema}`);
+      }
+      if (health?.runtime?.redis && health.runtime.redis !== "configured") {
+        runtimeErrors.push(`Redis ${health.runtime.redis}`);
+      }
+      if (health?.runtime?.storage && health.runtime.storage !== "configured") {
+        runtimeErrors.push(`Storage ${health.runtime.storage}`);
+      }
       if (instance.releaseImageTag && health?.release?.imageTag && health.release.imageTag !== instance.releaseImageTag) {
+        runtimeErrors.push(`Release drift: expected ${instance.releaseImageTag}, got ${health.release.imageTag}`);
+      }
+      if (runtimeErrors.length > 0) {
         status = "degraded";
-        error = `Release drift: expected ${instance.releaseImageTag}, got ${health.release.imageTag}`;
+        error = runtimeErrors.join("; ");
       }
     } else {
       status = "degraded";
@@ -537,6 +574,7 @@ export async function provisionHostedCustomerInstance(actor: AppActor, params: {
   workerImage?: string | null;
   webSource?: RailwayRuntimeServiceSource | null;
   workerSource?: RailwayRuntimeServiceSource | null;
+  storageBucketName?: string | null;
   bootstrapBundleUri?: string | null;
   bootstrapBundleChecksum?: string | null;
   bootstrapBundleSchemaVersion?: string | null;
@@ -562,6 +600,7 @@ export async function provisionHostedCustomerInstance(actor: AppActor, params: {
       supportOwnerEmail: normalizeOptional(params.supportOwnerEmail),
       releaseVersion: normalizeOptional(params.releaseVersion),
       releaseImageTag: params.releaseImageTag,
+      storageBucketName: normalizeOptional(params.storageBucketName),
       bootstrapBundleUri: normalizeOptional(params.bootstrapBundleUri),
       bootstrapBundleChecksum: normalizeOptional(params.bootstrapBundleChecksum),
       bootstrapBundleSchemaVersion: normalizeOptional(params.bootstrapBundleSchemaVersion),
@@ -580,6 +619,7 @@ export async function provisionHostedCustomerInstance(actor: AppActor, params: {
       supportOwnerEmail: normalizeOptional(params.supportOwnerEmail),
       releaseVersion: normalizeOptional(params.releaseVersion),
       releaseImageTag: params.releaseImageTag,
+      storageBucketName: normalizeOptional(params.storageBucketName),
       bootstrapBundleUri: normalizeOptional(params.bootstrapBundleUri),
       bootstrapBundleChecksum: normalizeOptional(params.bootstrapBundleChecksum),
       bootstrapBundleSchemaVersion: normalizeOptional(params.bootstrapBundleSchemaVersion),
@@ -593,6 +633,7 @@ export async function provisionHostedCustomerInstance(actor: AppActor, params: {
     region: params.region,
     dataResidency: params.dataResidency,
     releaseImageTag: params.releaseImageTag,
+    storageBucketConfigured: Boolean(params.storageBucketName),
     hasBootstrapBundle: Boolean(params.bootstrapBundleUri),
   });
 
@@ -651,6 +692,131 @@ export async function provisionHostedCustomerInstance(actor: AppActor, params: {
     });
     throw error;
   }
+}
+
+function readinessCheck(
+  key: string,
+  label: string,
+  ok: boolean,
+  detail: string,
+  missingDetail: string,
+  statusWhenFalse: "warning" | "missing" = "missing",
+): HostedInstanceReadinessCheck {
+  return {
+    key,
+    label,
+    status: ok ? "ok" : statusWhenFalse,
+    detail: ok ? detail : missingDetail,
+  };
+}
+
+export function buildHostedInstanceReadiness(instance: {
+  url?: string | null;
+  customDomain?: string | null;
+  region?: string | null;
+  dataResidency?: string | null;
+  supportOwnerEmail?: string | null;
+  provisioningStatus?: string | null;
+  bootstrapStatus?: string | null;
+  releaseImageTag?: string | null;
+  releaseVersion?: string | null;
+  railwayProjectId?: string | null;
+  railwayEnvironmentId?: string | null;
+  railwayWebServiceId?: string | null;
+  railwayWorkerServiceId?: string | null;
+  railwayPostgresServiceId?: string | null;
+  railwayRedisServiceId?: string | null;
+  storageBucketName?: string | null;
+  lastHealthStatus?: string | null;
+  lastHealthError?: string | null;
+  lastHealthCheck?: Date | string | null;
+  lastReleaseCheck?: Date | string | null;
+}) {
+  const railwayServicesPresent = Boolean(
+    instance.railwayProjectId
+    && instance.railwayEnvironmentId
+    && instance.railwayWebServiceId
+    && instance.railwayWorkerServiceId
+    && instance.railwayPostgresServiceId
+    && instance.railwayRedisServiceId,
+  );
+  const healthOk = instance.lastHealthStatus === "ok";
+  const releasePinned = Boolean(instance.releaseImageTag || instance.releaseVersion);
+  const releaseVerified = releasePinned && Boolean(instance.lastReleaseCheck) && !instance.lastHealthError?.includes("Release drift:");
+  const runtimeVerified = healthOk && !instance.lastHealthError;
+
+  const checks: HostedInstanceReadinessCheck[] = [
+    readinessCheck(
+      "railway_project",
+      "Railway services",
+      railwayServicesPresent,
+      "Project, environment, web, worker, Postgres, and Redis IDs are recorded.",
+      "Record the Railway project, environment, web, worker, Postgres, and Redis IDs.",
+    ),
+    readinessCheck(
+      "region",
+      "Region and residency",
+      Boolean(instance.region && instance.dataResidency),
+      `${instance.region} / ${instance.dataResidency}`,
+      "Record the customer region and data residency.",
+    ),
+    readinessCheck(
+      "domain",
+      "Production domain",
+      Boolean(instance.url && instance.customDomain),
+      instance.customDomain || instance.url || "Domain recorded.",
+      "Record the customer custom domain and production URL.",
+      "warning",
+    ),
+    readinessCheck(
+      "storage",
+      "Railway Bucket storage",
+      Boolean(instance.storageBucketName),
+      instance.storageBucketName || "Storage bucket recorded.",
+      "Record the Railway Bucket name for this customer.",
+    ),
+    readinessCheck(
+      "health",
+      "Runtime health",
+      runtimeVerified,
+      "Web health, database, schema, Redis, storage, and release are healthy.",
+      instance.lastHealthError || "Run a health probe after all runtime variables are configured.",
+    ),
+    readinessCheck(
+      "release",
+      "Pinned release",
+      releaseVerified,
+      instance.releaseImageTag || instance.releaseVersion || "Release verified.",
+      releasePinned ? "Run a health probe to verify the pinned release." : "Record a release tag or version before onboarding.",
+    ),
+    readinessCheck(
+      "bootstrap",
+      "Bootstrap status",
+      instance.bootstrapStatus === "applied",
+      "Bootstrap has been applied.",
+      "Mark bootstrap applied only after the production seed has completed.",
+    ),
+    readinessCheck(
+      "support_owner",
+      "Support owner",
+      Boolean(instance.supportOwnerEmail),
+      instance.supportOwnerEmail || "Support owner recorded.",
+      "Record the Corgtex support owner for this customer.",
+      "warning",
+    ),
+    readinessCheck(
+      "provisioning",
+      "Ops status",
+      instance.provisioningStatus === "active",
+      "Ops marks this customer active.",
+      `Current status is ${instance.provisioningStatus || "unknown"}.`,
+    ),
+  ];
+
+  return {
+    status: checks.every((check) => check.status === "ok") ? "ready" : "attention",
+    checks,
+  } satisfies HostedInstanceReadiness;
 }
 
 export async function upgradeHostedInstanceRelease(actor: AppActor, params: {
