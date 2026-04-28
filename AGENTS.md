@@ -35,6 +35,12 @@ reviews code line-by-line. The full specification lives in
 - **Database:** PostgreSQL via Prisma ORM (`prisma/schema.prisma`)
 - **Auth:** session-cookie auth and agent bearer auth resolved in [apps/web/lib/auth.ts](apps/web/lib/auth.ts); workspace/agent authorization in [packages/domain/src/auth.ts](packages/domain/src/auth.ts) and [packages/domain/src/agent-auth.ts](packages/domain/src/agent-auth.ts)
 - **API routes:** `apps/web/app/api/**` use `NextResponse.json`; convert domain `AppError`s with `handleRouteError()` from [apps/web/lib/http.ts](apps/web/lib/http.ts)
+- **Cross-origin integration:** The marketing site (`apps/site`, origin `NEXT_PUBLIC_SITE_URL`) and the web app (`apps/web`, origin `NEXT_PUBLIC_APP_URL`) run on separate domains. Any `apps/web` API route that accepts requests from the site must implement an `OPTIONS` handler and return `Access-Control-Allow-Origin` headers scoped to `NEXT_PUBLIC_SITE_URL`. Never use a wildcard `*` for cross-app CORS.
+
+### Security defaults
+
+- **Webhook endpoints:** Every new webhook route under `apps/web/app/api/webhooks/**` must verify the request origin via signature, shared secret, or bearer token before mutating any state. Unverified webhook endpoints are treated as security vulnerabilities by the Reviewer.
+- **Server actions:** Every server action that mutates workspace-scoped data must call `requireWorkspaceMembership()` (or an equivalent domain-level authorization guard) before performing the write. `requirePageActor()` alone is insufficient — it only proves the user is logged in, not that they belong to the target workspace.
 
 ### Code style
 
@@ -109,6 +115,8 @@ merge.
 1. **First action:** Verify your branch state (`git branch --show-current`) before working. Multiple agents run simultaneously in this repo. If you are on the wrong branch, checkout or create it (`git checkout -b <branch>`). Once on the correct branch, read the PR body plan. If the PR does not exist yet, read `.agents/plans/<branch>.md`.
 2. **Stay in scope:** only modify files listed in the plan's "Files to touch" section. If you discover the plan is wrong or incomplete, update the PR body plan before writing code. `scripts/check-plan.mjs` enforces this in CI.
 3. **Run the test plan locally** before pushing. Run `npm run check` and whatever the plan's "Test plan" specifies. Wait for it to exit with code `0`. Fix any TypeScript or ESLint errors before proceeding.
+3a. **Domain test coverage:** If the plan adds or modifies files under `packages/domain/**`, you must create or update the corresponding `*.test.ts` file in the same package *before* opening the PR. The Reviewer will reject any PR that changes domain source without same-package test coverage (Criterion 7).
+3b. **Acceptance criteria traceability:** Before checking off an acceptance criterion, verify that *every* sub-requirement it describes is actually implemented. If a criterion says "A and B both do X", confirm both A and B do X — do not check the box after only implementing A. Run the relevant code paths locally or via tests to confirm.
 4. **Open the PR as ready-for-review** once all acceptance criteria are ticked. Use `gh pr create`. If `gh` isn't on `PATH`, invoke `/opt/homebrew/bin/gh`. The PR body must explicitly include the completed acceptance criteria checklist in Markdown.
 5. **Frontend changes:** add actual visual proof links in the PR body's **Visual Proof** section. Use PR attachments, CI-uploaded artifacts, or another private artifact link. Any change under `apps/web/app/**`, `apps/web/components/**`, or `apps/web/lib/components/**` requires proof. **You must run the app locally and capture actual proof of the feature running. Do not submit AI-generated mockups or generic placeholders. Do not commit screenshots, recordings, or generated QA output under `docs/assets/`.**
 6. **CI fix loop cap:** if CI is red, you may push up to 3 fix commits. After the 3rd failed attempt, label the PR `needs-replan`, comment a summary, and stop. The human will re-prompt the Planner.
