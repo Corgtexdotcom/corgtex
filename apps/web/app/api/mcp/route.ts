@@ -1,11 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { handleRouteError } from "@/lib/http";
+import { getPublicOrigin, getPublicRequestUrl } from "@/lib/public-origin";
 import { createCorgtexMcpServer, authenticateMcpRequest } from "@corgtex/mcp";
 import { AppError, getMcpPublicUrl } from "@corgtex/domain";
 
 function protectedResourceMetadataUrl(request: NextRequest) {
-  return `${new URL(request.url).origin}/.well-known/oauth-protected-resource`;
+  return `${getPublicOrigin(request)}/.well-known/oauth-protected-resource`;
 }
 
 function mcpAuthErrorResponse(request: NextRequest, error: AppError) {
@@ -32,7 +33,7 @@ export async function POST(request: NextRequest) {
   try {
     const authHeader = request.headers.get("authorization");
     const sessionCtx = await authenticateMcpRequest(authHeader, {
-      resourceUrl: request.url,
+      resourceUrl: getPublicRequestUrl(request),
     });
     server = createCorgtexMcpServer(sessionCtx);
 
@@ -79,7 +80,7 @@ export async function POST(request: NextRequest) {
  */
 export async function GET(request: NextRequest) {
   try {
-    const origin = new URL(request.url).origin;
+    const origin = getPublicOrigin(request);
     return NextResponse.json({
       name: "corgtex-mcp",
       version: "1.0.0",
