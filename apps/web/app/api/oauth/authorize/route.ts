@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { unstable_rethrow } from "next/navigation";
 import { requirePageActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
+import { getPublicOrigin } from "@/lib/public-origin";
 import {
   getMcpOAuthClientByClientId,
   getMcpPublicUrl,
@@ -43,7 +44,7 @@ export async function GET(request: NextRequest) {
 
       await requirePageActor();
 
-      const consentUrl = new URL("/oauth/authorize", request.url);
+      const consentUrl = new URL("/oauth/authorize", getPublicOrigin(request));
       consentUrl.searchParams.set("client_id", clientId);
       consentUrl.searchParams.set("redirect_uri", redirectUri);
       consentUrl.searchParams.set("state", state || "");
@@ -69,7 +70,7 @@ export async function GET(request: NextRequest) {
     await requirePageActor();
 
     // Create a URL pointing to our UI consent page
-    const consentUrl = new URL("/oauth/authorize", request.url);
+    const consentUrl = new URL("/oauth/authorize", getPublicOrigin(request));
     consentUrl.searchParams.set("client_id", clientId);
     consentUrl.searchParams.set("redirect_uri", redirectUri);
     consentUrl.searchParams.set("state", state || "");
@@ -135,7 +136,7 @@ export async function POST(request: NextRequest) {
         scopes: scopeArray.length > 0 ? scopeArray : undefined,
         codeChallenge: body.codeChallenge ?? "",
         codeChallengeMethod: body.codeChallengeMethod ?? "",
-        resource: body.resource || getMcpPublicUrl(new URL(request.url).origin),
+        resource: body.resource || getMcpPublicUrl(getPublicOrigin(request)),
       });
     } else {
       const app = await getOAuthAppByClientId(body.clientId);
