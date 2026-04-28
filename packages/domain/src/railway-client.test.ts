@@ -64,6 +64,7 @@ describe("Railway client", () => {
       .mockResolvedValueOnce({})
       .mockResolvedValueOnce({})
       .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({})
       .mockResolvedValueOnce({ customDomainCreate: { domain: "acme.corgtex.com" } });
 
     const result = await provisionRailwayCustomerStack({ graphql }, {
@@ -87,11 +88,20 @@ describe("Railway client", () => {
       redisServiceId: "redis-1",
       webDomain: "acme.corgtex.com",
     });
-    expect(graphql).toHaveBeenCalledTimes(7);
+    expect(graphql).toHaveBeenCalledTimes(8);
     expect(graphql.mock.calls[1][0]).toContain("ghcr.io/railwayapp-templates/postgres-ssl:17");
     expect(graphql.mock.calls[1][0]).toContain("bitnami/redis:7.2.5");
-    expect(graphql.mock.calls[2][0]).toContain("volumeCreate");
-    expect(graphql.mock.calls[3][1]).toMatchObject({
+    expect(graphql.mock.calls[1][0]).not.toContain("region: $region");
+    expect(graphql.mock.calls[2][0]).toContain("serviceInstanceUpdate");
+    expect(graphql.mock.calls[2][1]).toMatchObject({
+      environmentId: "env-1",
+      webInput: { region: "eu-west4" },
+      workerInput: { region: "eu-west4" },
+      postgresInput: { region: "eu-west4" },
+      redisInput: { region: "eu-west4" },
+    });
+    expect(graphql.mock.calls[3][0]).toContain("volumeCreate");
+    expect(graphql.mock.calls[4][1]).toMatchObject({
       projectId: "project-1",
       environmentId: "env-1",
       postgresServiceId: "postgres-1",
@@ -103,7 +113,7 @@ describe("Railway client", () => {
         REDIS_URL: expect.stringContaining("${{Redis."),
       }),
     });
-    expect(graphql.mock.calls[4][1]).toMatchObject({
+    expect(graphql.mock.calls[5][1]).toMatchObject({
       projectId: "project-1",
       environmentId: "env-1",
       webServiceId: "web-1",
@@ -113,6 +123,96 @@ describe("Railway client", () => {
         DATABASE_URL: "${{Postgres.DATABASE_URL}}",
         REDIS_URL: "${{Redis.REDIS_URL}}",
       },
+    });
+    expect(graphql.mock.calls[6][0]).toContain("serviceInstanceDeployV2");
+  });
+
+  it("provisions runtime services from the public repo with Dockerfile settings", async () => {
+    const graphql = vi.fn()
+      .mockResolvedValueOnce({ projectCreate: { id: "project-1", defaultEnvironment: { id: "env-1" } } })
+      .mockResolvedValueOnce({
+        web: { id: "web-1" },
+        worker: { id: "worker-1" },
+        postgres: { id: "postgres-1" },
+        redis: { id: "redis-1" },
+      })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({});
+
+    await provisionRailwayCustomerStack({ graphql }, {
+      projectName: "corgtex-acme",
+      environmentName: "production",
+      region: "us-west2",
+      webSource: {
+        repo: "Corgtexdotcom/corgtex",
+        branch: "main",
+        commitSha: "abc123",
+        dockerfilePath: "deploy/Dockerfile.web",
+      },
+      workerSource: {
+        repo: "Corgtexdotcom/corgtex",
+        branch: "main",
+        commitSha: "abc123",
+        dockerfilePath: "deploy/Dockerfile.worker",
+      },
+      variables: {
+        APP_URL: "https://acme.corgtex.com",
+      },
+    });
+
+    expect(graphql).toHaveBeenCalledTimes(7);
+    expect(graphql.mock.calls[1][1]).toMatchObject({
+      webSource: { repo: "Corgtexdotcom/corgtex" },
+      webBranch: "main",
+      workerSource: { repo: "Corgtexdotcom/corgtex" },
+      workerBranch: "main",
+    });
+    expect(graphql.mock.calls[2][1]).toMatchObject({
+      webInput: {
+        region: "us-west2",
+        dockerfilePath: "deploy/Dockerfile.web",
+      },
+      workerInput: {
+        region: "us-west2",
+        dockerfilePath: "deploy/Dockerfile.worker",
+      },
+    });
+    expect(graphql.mock.calls[6][1]).toMatchObject({
+      webCommitSha: "abc123",
+      workerCommitSha: "abc123",
+    });
+  });
+
+  it("rejects runtime services without an image or repository source", async () => {
+    await expect(provisionRailwayCustomerStack({ graphql: vi.fn() }, {
+      projectName: "corgtex-acme",
+      environmentName: "production",
+      region: "us-west2",
+      workerImage: "ghcr.io/corgtex/worker:sha-1",
+      variables: {},
+    })).rejects.toMatchObject({
+      status: 400,
+      code: "INVALID_INPUT",
+      message: "Web service requires either a Docker image or a repository source.",
+    });
+  });
+
+  it("rejects ambiguous runtime services with both image and repository source", async () => {
+    await expect(provisionRailwayCustomerStack({ graphql: vi.fn() }, {
+      projectName: "corgtex-acme",
+      environmentName: "production",
+      region: "us-west2",
+      webImage: "ghcr.io/corgtex/web:sha-1",
+      webSource: { repo: "Corgtexdotcom/corgtex" },
+      workerImage: "ghcr.io/corgtex/worker:sha-1",
+      variables: {},
+    })).rejects.toMatchObject({
+      status: 400,
+      code: "INVALID_INPUT",
+      message: "Web service must use either a Docker image or a repository source, not both.",
     });
   });
 
@@ -143,8 +243,8 @@ describe("Railway client", () => {
       environmentId: "env-1",
       webServiceId: "web-1",
       workerServiceId: "worker-1",
-      webImage: "ghcr.io/corgtex/web:sha-2",
-      workerImage: "ghcr.io/corgtex/worker:sha-2",
+      webInput: { source: { image: "ghcr.io/corgtex/web:sha-2" } },
+      workerInput: { source: { image: "ghcr.io/corgtex/worker:sha-2" } },
     });
     expect(graphql.mock.calls[1][1]).toMatchObject({
       projectId: "project-1",
@@ -155,5 +255,6 @@ describe("Railway client", () => {
         CORGTEX_RELEASE_IMAGE_TAG: "sha-2",
       },
     });
+    expect(graphql.mock.calls[2][0]).toContain("serviceInstanceDeployV2");
   });
 });

@@ -84,11 +84,43 @@ export function AdminOperationsTab({ data, workspaceId }: Props) {
                 </div>
                 <div className="form-group">
                   <label>Web image</label>
-                  <input type="text" name="webImage" className="input" required placeholder="ghcr.io/corgtexdotcom/corgtex/web:sha-..." />
+                  <input type="text" name="webImage" className="input" placeholder="ghcr.io/corgtexdotcom/corgtex/web:sha-..." />
                 </div>
                 <div className="form-group">
                   <label>Worker image</label>
-                  <input type="text" name="workerImage" className="input" required placeholder="ghcr.io/corgtexdotcom/corgtex/worker:sha-..." />
+                  <input type="text" name="workerImage" className="input" placeholder="ghcr.io/corgtexdotcom/corgtex/worker:sha-..." />
+                </div>
+                <div className="form-group">
+                  <label>Web repo</label>
+                  <input type="text" name="webRepo" className="input" defaultValue="Corgtexdotcom/corgtex" />
+                </div>
+                <div className="form-group">
+                  <label>Web branch</label>
+                  <input type="text" name="webBranch" className="input" defaultValue="main" />
+                </div>
+                <div className="form-group">
+                  <label>Web Dockerfile</label>
+                  <input type="text" name="webDockerfilePath" className="input" defaultValue="deploy/Dockerfile.web" />
+                </div>
+                <div className="form-group">
+                  <label>Worker repo</label>
+                  <input type="text" name="workerRepo" className="input" defaultValue="Corgtexdotcom/corgtex" />
+                </div>
+                <div className="form-group">
+                  <label>Worker branch</label>
+                  <input type="text" name="workerBranch" className="input" defaultValue="main" />
+                </div>
+                <div className="form-group">
+                  <label>Worker Dockerfile</label>
+                  <input type="text" name="workerDockerfilePath" className="input" defaultValue="deploy/Dockerfile.worker" />
+                </div>
+                <div className="form-group">
+                  <label>Web commit</label>
+                  <input type="text" name="webCommitSha" className="input" placeholder="optional commit SHA" />
+                </div>
+                <div className="form-group">
+                  <label>Worker commit</label>
+                  <input type="text" name="workerCommitSha" className="input" placeholder="optional commit SHA" />
                 </div>
                 <div className="form-group">
                   <label>Bundle URI</label>
@@ -234,8 +266,16 @@ export function AdminOperationsTab({ data, workspaceId }: Props) {
                         <input type="hidden" name="instanceId" value={inst.id} />
                         <input type="text" name="releaseVersion" className="input" placeholder="Release version" />
                         <input type="text" name="releaseImageTag" className="input" placeholder="sha-..." required />
-                        <input type="text" name="webImage" className="input" placeholder="Web image" required />
-                        <input type="text" name="workerImage" className="input" placeholder="Worker image" required />
+                        <input type="text" name="webImage" className="input" placeholder="Web image" />
+                        <input type="text" name="workerImage" className="input" placeholder="Worker image" />
+                        <input type="text" name="webRepo" className="input" defaultValue="Corgtexdotcom/corgtex" placeholder="Web repo" />
+                        <input type="text" name="webBranch" className="input" defaultValue="main" placeholder="Web branch" />
+                        <input type="text" name="webDockerfilePath" className="input" defaultValue="deploy/Dockerfile.web" placeholder="Web Dockerfile" />
+                        <input type="text" name="webCommitSha" className="input" placeholder="Web commit SHA" />
+                        <input type="text" name="workerRepo" className="input" defaultValue="Corgtexdotcom/corgtex" placeholder="Worker repo" />
+                        <input type="text" name="workerBranch" className="input" defaultValue="main" placeholder="Worker branch" />
+                        <input type="text" name="workerDockerfilePath" className="input" defaultValue="deploy/Dockerfile.worker" placeholder="Worker Dockerfile" />
+                        <input type="text" name="workerCommitSha" className="input" placeholder="Worker commit SHA" />
                         <SubmitButton variant="secondary" className="btn-sm">Upgrade release</SubmitButton>
                       </form>
                     )}

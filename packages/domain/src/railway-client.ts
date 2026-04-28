@@ -7,6 +7,7 @@ const POSTGRES_VOLUME_MOUNT_PATH = "/var/lib/postgresql/data";
 const REDIS_VOLUME_MOUNT_PATH = "/bitnami";
 
 type FetchLike = typeof fetch;
+type RailwayBuilder = "HEROKU" | "NIXPACKS" | "PAKETO" | "RAILPACK";
 
 type GraphqlResponse<T> = {
   data?: T;
@@ -23,12 +24,24 @@ export type RailwayClientOptions = {
   fetchImpl?: FetchLike;
 };
 
+export type RailwayRuntimeServiceSource = {
+  repo?: string | null;
+  branch?: string | null;
+  commitSha?: string | null;
+  rootDirectory?: string | null;
+  dockerfilePath?: string | null;
+  startCommand?: string | null;
+  builder?: RailwayBuilder | null;
+};
+
 export type RailwayProvisioningInput = {
   projectName: string;
   environmentName: string;
   region: string;
-  webImage: string;
-  workerImage: string;
+  webImage?: string | null;
+  workerImage?: string | null;
+  webSource?: RailwayRuntimeServiceSource | null;
+  workerSource?: RailwayRuntimeServiceSource | null;
   variables: Record<string, string>;
   customDomain?: string | null;
 };
@@ -48,8 +61,10 @@ export type RailwayReleaseUpgradeInput = {
   environmentId: string;
   webServiceId: string;
   workerServiceId: string;
-  webImage: string;
-  workerImage: string;
+  webImage?: string | null;
+  workerImage?: string | null;
+  webSource?: RailwayRuntimeServiceSource | null;
+  workerSource?: RailwayRuntimeServiceSource | null;
   variables?: Record<string, string>;
 };
 
@@ -127,10 +142,88 @@ function redisServiceVariables() {
   };
 }
 
+function normalizeOptional(value: string | null | undefined) {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : null;
+}
+
+type RuntimeServiceSpec = {
+  source: { image?: string; repo?: string };
+  branch?: string | null;
+  commitSha?: string | null;
+  rootDirectory?: string | null;
+  dockerfilePath?: string | null;
+  startCommand?: string | null;
+  builder?: RailwayBuilder | null;
+};
+
+function requireRuntimeServiceSpec(
+  label: string,
+  image: string | null | undefined,
+  source: RailwayRuntimeServiceSource | null | undefined,
+): RuntimeServiceSpec {
+  const normalizedImage = normalizeOptional(image);
+  const repo = normalizeOptional(source?.repo);
+
+  if (normalizedImage && repo) {
+    throw new AppError(400, "INVALID_INPUT", `${label} must use either a Docker image or a repository source, not both.`);
+  }
+
+  if (normalizedImage) {
+    return {
+      source: { image: normalizedImage },
+    };
+  }
+
+  if (!repo) {
+    throw new AppError(400, "INVALID_INPUT", `${label} requires either a Docker image or a repository source.`);
+  }
+
+  return {
+    source: { repo },
+    branch: normalizeOptional(source?.branch),
+    commitSha: normalizeOptional(source?.commitSha),
+    rootDirectory: normalizeOptional(source?.rootDirectory),
+    dockerfilePath: normalizeOptional(source?.dockerfilePath),
+    startCommand: normalizeOptional(source?.startCommand),
+    builder: source?.builder ?? null,
+  };
+}
+
+function serviceInstanceSettings(spec: RuntimeServiceSpec, region?: string) {
+  const input: Record<string, unknown> = {};
+  if (region) {
+    input.region = region;
+  }
+  if (spec.rootDirectory) {
+    input.rootDirectory = spec.rootDirectory;
+  }
+  if (spec.dockerfilePath) {
+    input.dockerfilePath = spec.dockerfilePath;
+  }
+  if (spec.startCommand) {
+    input.startCommand = spec.startCommand;
+  }
+  if (spec.builder) {
+    input.builder = spec.builder;
+  }
+  return input;
+}
+
+function serviceInstanceUpdateInput(spec: RuntimeServiceSpec, region?: string) {
+  return {
+    source: spec.source,
+    ...serviceInstanceSettings(spec, region),
+  };
+}
+
 export async function provisionRailwayCustomerStack(
   client: RailwayClient,
   input: RailwayProvisioningInput,
 ): Promise<RailwayProvisioningResult> {
+  const webSpec = requireRuntimeServiceSpec("Web service", input.webImage, input.webSource);
+  const workerSpec = requireRuntimeServiceSpec("Worker service", input.workerImage, input.workerSource);
+
   const project = await client.graphql<{
     projectCreate: { id: string; defaultEnvironment: { id: string } | null };
   }>(
@@ -163,45 +256,91 @@ export async function provisionRailwayCustomerStack(
     `mutation CreateServices(
       $projectId: String!
       $environmentId: String!
-      $region: String!
-      $webImage: String!
-      $workerImage: String!
+      $webSource: ServiceSourceInput!
+      $webBranch: String
+      $workerSource: ServiceSourceInput!
+      $workerBranch: String
     ) {
       web: serviceCreate(input: {
         projectId: $projectId
         environmentId: $environmentId
         name: "web"
-        source: { image: $webImage }
-        region: $region
+        source: $webSource
+        branch: $webBranch
       }) { id }
       worker: serviceCreate(input: {
         projectId: $projectId
         environmentId: $environmentId
         name: "worker"
-        source: { image: $workerImage }
-        region: $region
+        source: $workerSource
+        branch: $workerBranch
       }) { id }
       postgres: serviceCreate(input: {
         projectId: $projectId
         environmentId: $environmentId
         name: "Postgres"
         source: { image: "ghcr.io/railwayapp-templates/postgres-ssl:17" }
-        region: $region
       }) { id }
       redis: serviceCreate(input: {
         projectId: $projectId
         environmentId: $environmentId
         name: "Redis"
         source: { image: "bitnami/redis:7.2.5" }
-        region: $region
       }) { id }
     }`,
     {
       projectId,
       environmentId,
-      region: input.region,
-      webImage: input.webImage,
-      workerImage: input.workerImage,
+      webSource: webSpec.source,
+      webBranch: webSpec.branch,
+      workerSource: workerSpec.source,
+      workerBranch: workerSpec.branch,
+    },
+  );
+
+  await client.graphql<unknown>(
+    `mutation ConfigureServiceInstances(
+      $environmentId: String!
+      $webServiceId: String!
+      $workerServiceId: String!
+      $postgresServiceId: String!
+      $redisServiceId: String!
+      $webInput: ServiceInstanceUpdateInput!
+      $workerInput: ServiceInstanceUpdateInput!
+      $postgresInput: ServiceInstanceUpdateInput!
+      $redisInput: ServiceInstanceUpdateInput!
+    ) {
+      web: serviceInstanceUpdate(
+        serviceId: $webServiceId
+        environmentId: $environmentId
+        input: $webInput
+      )
+      worker: serviceInstanceUpdate(
+        serviceId: $workerServiceId
+        environmentId: $environmentId
+        input: $workerInput
+      )
+      postgres: serviceInstanceUpdate(
+        serviceId: $postgresServiceId
+        environmentId: $environmentId
+        input: $postgresInput
+      )
+      redis: serviceInstanceUpdate(
+        serviceId: $redisServiceId
+        environmentId: $environmentId
+        input: $redisInput
+      )
+    }`,
+    {
+      environmentId,
+      webServiceId: services.web.id,
+      workerServiceId: services.worker.id,
+      postgresServiceId: services.postgres.id,
+      redisServiceId: services.redis.id,
+      webInput: serviceInstanceSettings(webSpec, input.region),
+      workerInput: serviceInstanceSettings(workerSpec, input.region),
+      postgresInput: { region: input.region },
+      redisInput: { region: input.region },
     },
   );
 
@@ -312,11 +451,13 @@ export async function provisionRailwayCustomerStack(
       $postgresServiceId: String!
       $redisServiceId: String!
       $environmentId: String!
+      $webCommitSha: String
+      $workerCommitSha: String
     ) {
-      web: serviceInstanceRedeploy(serviceId: $webServiceId, environmentId: $environmentId)
-      worker: serviceInstanceRedeploy(serviceId: $workerServiceId, environmentId: $environmentId)
-      postgres: serviceInstanceRedeploy(serviceId: $postgresServiceId, environmentId: $environmentId)
-      redis: serviceInstanceRedeploy(serviceId: $redisServiceId, environmentId: $environmentId)
+      web: serviceInstanceDeployV2(serviceId: $webServiceId, environmentId: $environmentId, commitSha: $webCommitSha)
+      worker: serviceInstanceDeployV2(serviceId: $workerServiceId, environmentId: $environmentId, commitSha: $workerCommitSha)
+      postgres: serviceInstanceDeployV2(serviceId: $postgresServiceId, environmentId: $environmentId)
+      redis: serviceInstanceDeployV2(serviceId: $redisServiceId, environmentId: $environmentId)
     }`,
     {
       webServiceId: services.web.id,
@@ -324,6 +465,8 @@ export async function provisionRailwayCustomerStack(
       postgresServiceId: services.postgres.id,
       redisServiceId: services.redis.id,
       environmentId,
+      webCommitSha: webSpec.commitSha,
+      workerCommitSha: workerSpec.commitSha,
     },
   );
 
@@ -361,31 +504,34 @@ export async function upgradeRailwayCustomerRelease(
   client: RailwayClient,
   input: RailwayReleaseUpgradeInput,
 ): Promise<RailwayReleaseUpgradeResult> {
+  const webSpec = requireRuntimeServiceSpec("Web service", input.webImage, input.webSource);
+  const workerSpec = requireRuntimeServiceSpec("Worker service", input.workerImage, input.workerSource);
+
   await client.graphql<unknown>(
-    `mutation UpdateServiceImages(
+    `mutation UpdateServiceSources(
       $environmentId: String!
       $webServiceId: String!
       $workerServiceId: String!
-      $webImage: String!
-      $workerImage: String!
+      $webInput: ServiceInstanceUpdateInput!
+      $workerInput: ServiceInstanceUpdateInput!
     ) {
       web: serviceInstanceUpdate(
         serviceId: $webServiceId
         environmentId: $environmentId
-        input: { source: { image: $webImage } }
-      ) { id }
+        input: $webInput
+      )
       worker: serviceInstanceUpdate(
         serviceId: $workerServiceId
         environmentId: $environmentId
-        input: { source: { image: $workerImage } }
-      ) { id }
+        input: $workerInput
+      )
     }`,
     {
       environmentId: input.environmentId,
       webServiceId: input.webServiceId,
       workerServiceId: input.workerServiceId,
-      webImage: input.webImage,
-      workerImage: input.workerImage,
+      webInput: serviceInstanceUpdateInput(webSpec),
+      workerInput: serviceInstanceUpdateInput(workerSpec),
     },
   );
 
@@ -427,14 +573,22 @@ export async function upgradeRailwayCustomerRelease(
     web: string | null;
     worker: string | null;
   }>(
-    `mutation RedeployUpdatedServices($webServiceId: String!, $workerServiceId: String!, $environmentId: String!) {
-      web: serviceInstanceRedeploy(serviceId: $webServiceId, environmentId: $environmentId)
-      worker: serviceInstanceRedeploy(serviceId: $workerServiceId, environmentId: $environmentId)
+    `mutation DeployUpdatedServices(
+      $webServiceId: String!
+      $workerServiceId: String!
+      $environmentId: String!
+      $webCommitSha: String
+      $workerCommitSha: String
+    ) {
+      web: serviceInstanceDeployV2(serviceId: $webServiceId, environmentId: $environmentId, commitSha: $webCommitSha)
+      worker: serviceInstanceDeployV2(serviceId: $workerServiceId, environmentId: $environmentId, commitSha: $workerCommitSha)
     }`,
     {
       webServiceId: input.webServiceId,
       workerServiceId: input.workerServiceId,
       environmentId: input.environmentId,
+      webCommitSha: webSpec.commitSha,
+      workerCommitSha: workerSpec.commitSha,
     },
   );
 
