@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import { prisma, logger } from "@corgtex/shared";
 import { finalizeExpiredApprovalFlows, autoApproveProposals } from "@corgtex/domain";
-import { dispatchPendingEvents, runPendingJobs, scheduleDailyJobs, schedulePeriodicJobs } from "@corgtex/workflows";
+import { dispatchPendingEvents, runPendingJobs, scheduleDailyJobs, schedulePeriodicJobs, scheduleDripCampaigns } from "@corgtex/workflows";
 import * as Sentry from "@sentry/node";
 
 if (process.env.SENTRY_DSN) {
@@ -68,6 +68,7 @@ async function tick() {
     const processed = await runPendingJobs(workerId, JOB_BATCH_SIZE);
     const scheduled = await scheduleDailyJobs();
     const scheduledPeriodic = await schedulePeriodicJobs();
+    const scheduledDrip = await scheduleDripCampaigns();
 
     tickCount++;
     totalDispatched += dispatched;

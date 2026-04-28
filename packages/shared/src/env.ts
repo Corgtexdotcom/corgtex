@@ -72,6 +72,7 @@ type Env = {
   readonly MODEL_CHAT_FAST: string;
   readonly MODEL_CHAT_STANDARD: string;
   readonly MODEL_CHAT_QUALITY: string;
+  readonly MODEL_CHAT_EXCELLENT: string;
   readonly MODEL_CHAT_CONVERSATION: string;
   readonly MODEL_EMBEDDING_DEFAULT: string;
   readonly AGENT_KILL_SWITCH: boolean;
@@ -157,6 +158,9 @@ export const env: Env = {
   },
   get MODEL_CHAT_QUALITY() {
     return optional("MODEL_CHAT_QUALITY") ?? "google/gemini-2.5-flash";
+  },
+  get MODEL_CHAT_EXCELLENT() {
+    return optional("MODEL_CHAT_EXCELLENT") ?? "openai/gpt-4o";
   },
   get MODEL_CHAT_CONVERSATION() {
     return optional("MODEL_CHAT_CONVERSATION") ?? "google/gemini-2.5-flash";

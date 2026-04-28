@@ -10,3 +10,6 @@ export * from "./process-linting";
 export * from "./daily-check-in";
 export * from "./spend-submission";
 export * from "./slack-agent";
+export * from "./crm-email-extraction";
+export * from "./crm-drip-followup";
+export * from "./crm-lead-enrichment";

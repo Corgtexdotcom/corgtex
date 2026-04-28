@@ -11,7 +11,7 @@ export type AgentConfigSummary = {
   category: string;
   canDisable: boolean;
   costTier: "free" | "low" | "medium" | "high" | "very-high";
-  defaultModelTier: "fast" | "standard" | "quality" | "none";
+  defaultModelTier: "fast" | "standard" | "quality" | "excellent" | "none";
   inputs: readonly string[];
   outputs: readonly string[];
   enabled: boolean;

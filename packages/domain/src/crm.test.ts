@@ -342,4 +342,34 @@ describe("CRM domain", () => {
       ).rejects.toThrow();
     });
   });
+
+  describe("applyExtractionResult", () => {
+    it("updates only null fields", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { applyExtractionResult } = await import("./crm-extraction");
+
+      vi.mocked(prisma.crmQualification.findUnique).mockResolvedValue({
+        id: "qual-1",
+        workspaceId: "ws-1",
+        companyName: null,
+        website: "https://existing.com",
+        aiExperience: null,
+        helpNeeded: null,
+      } as any);
+
+      await applyExtractionResult("ws-1", "qual-1", {
+        companyName: "Extracted Corp",
+        website: "https://new.com",
+        aiExperience: "Beginner",
+      });
+
+      expect(prisma.crmQualification.update).toHaveBeenCalledWith({
+        where: { id: "qual-1" },
+        data: {
+          companyName: "Extracted Corp",
+          aiExperience: "Beginner",
+        },
+      });
+    });
+  });
 });
