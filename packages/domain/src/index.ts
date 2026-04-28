@@ -26,6 +26,7 @@ export * from "./meetings";
 export * from "./members";
 export * from "./notifications";
 export * from "./proposals";
+export * from "./procurement";
 export * from "./reactions";
 export * from "./roles";
 export * from "./runtime";
