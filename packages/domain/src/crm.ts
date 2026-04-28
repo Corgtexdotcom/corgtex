@@ -611,11 +611,14 @@ export async function approveQualification(actor: AppActor, params: { workspaceI
 export async function rejectQualification(actor: AppActor, params: { workspaceId: string; qualificationId: string; note?: string }) {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
 
-  const qual = await prisma.crmQualification.findUnique({ where: { id: params.qualificationId } });
+  const qual = await prisma.crmQualification.findUnique({ 
+    where: { id: params.qualificationId },
+    include: { demoLead: true } 
+  });
   invariant(qual && qual.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Qualification not found.");
 
   return prisma.$transaction(async (tx) => {
-    return tx.crmQualification.update({
+    const updated = await tx.crmQualification.update({
       where: { id: qual.id },
       data: {
         status: "REJECTED",
@@ -624,6 +627,18 @@ export async function rejectQualification(actor: AppActor, params: { workspaceId
         reviewNote: params.note || null,
       },
     });
+
+    await appendEvents(tx, [
+      {
+        workspaceId: params.workspaceId,
+        type: "crm.qualification.rejected",
+        aggregateType: "CrmQualification",
+        aggregateId: qual.id,
+        payload: { qualificationId: qual.id, email: qual.demoLead.email },
+      },
+    ]);
+
+    return updated;
   });
 }
 
@@ -703,6 +718,8 @@ export async function createConversationMessage(actor: AppActor, params: {
   senderType: "LEAD" | "ADMIN" | "SYSTEM";
   senderEmail?: string;
 }) {
+  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+
   const conversation = await prisma.crmConversation.findUnique({
     where: { id: params.conversationId },
     include: { contact: true, demoLead: true },
