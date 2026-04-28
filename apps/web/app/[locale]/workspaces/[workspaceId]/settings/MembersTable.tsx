@@ -195,16 +195,18 @@ export function MembersTable({
                   </div>
                 </div>
                 <div style={{ display: "flex", gap: 8 }}>
-                  <form action={(fd) => handleActionWithToast(approveMemberInviteRequestAction, fd, "Invite request approved")}>
-                    <input type="hidden" name="workspaceId" value={workspaceId} />
-                    <input type="hidden" name="requestId" value={request.id} />
-                    <button type="submit" className="small">{t("btnApprove")}</button>
-                  </form>
-                  <form action={(fd) => handleActionWithToast(rejectMemberInviteRequestAction, fd, "Invite request rejected")}>
-                    <input type="hidden" name="workspaceId" value={workspaceId} />
-                    <input type="hidden" name="requestId" value={request.id} />
-                    <button type="submit" className="secondary small">{t("btnReject")}</button>
-                  </form>
+                  <button type="button" className="small" onClick={async () => {
+                    const fd = new FormData();
+                    fd.append("workspaceId", workspaceId);
+                    fd.append("requestId", request.id);
+                    await handleActionWithToast(approveMemberInviteRequestAction, fd, "Invite request approved");
+                  }}>{t("btnApprove")}</button>
+                  <button type="button" className="secondary small" onClick={async () => {
+                    const fd = new FormData();
+                    fd.append("workspaceId", workspaceId);
+                    fd.append("requestId", request.id);
+                    await handleActionWithToast(rejectMemberInviteRequestAction, fd, "Invite request rejected");
+                  }}>{t("btnReject")}</button>
                 </div>
               </div>
             ))}
@@ -220,7 +222,7 @@ export function MembersTable({
             </span>
           </summary>
           <div style={{ padding: "0 16px 16px" }}>
-            <form action={(fd) => handleActionWithToast(canRequestInvite ? requestMemberInviteAction : isAdmin ? createMemberAction : inviteMemberAction, fd, canRequestInvite ? "Invite requested successfully" : "Member invited successfully")} className="stack nr-form-section" style={{ marginTop: 8 }}>
+            <form onSubmit={async (e) => { e.preventDefault(); await handleActionWithToast(canRequestInvite ? requestMemberInviteAction : isAdmin ? createMemberAction : inviteMemberAction, new FormData(e.currentTarget), canRequestInvite ? "Invite requested successfully" : "Member invited successfully"); }} className="stack nr-form-section" style={{ marginTop: 8 }}>
               <input type="hidden" name="workspaceId" value={workspaceId} />
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 16 }}>
                 <label>
@@ -254,7 +256,7 @@ export function MembersTable({
             <span style={{ fontWeight: 600 }}>{t("btnBulkInvite")}</span>
           </summary>
           <div style={{ padding: "0 16px 16px" }}>
-            <form action={(fd) => handleActionWithToast(bulkInviteAction, fd, "Bulk invites sent successfully")} className="stack nr-form-section" style={{ marginTop: 8 }}>
+            <form onSubmit={async (e) => { e.preventDefault(); await handleActionWithToast(bulkInviteAction, new FormData(e.currentTarget), "Bulk invites sent successfully"); }} className="stack nr-form-section" style={{ marginTop: 8 }}>
               <input type="hidden" name="workspaceId" value={workspaceId} />
               <label>
                 {t("labelPasteCsv")}
@@ -381,11 +383,19 @@ export function MembersTable({
                           >
                             {t("btnEditMember")}
                           </button>
-                          <form action={(fd) => handleActionWithToast(resendMemberAccessLinkAction, fd, "Access link sent successfully")}>
-                            <input type="hidden" name="workspaceId" value={workspaceId} />
-                            <input type="hidden" name="memberId" value={member.id} />
-                            <button type="submit" className="secondary small" style={{ padding: "4px 8px", fontSize: "0.7rem" }}>{t("btnResendAccessLink")}</button>
-                          </form>
+                          <button
+                            type="button"
+                            className="secondary small"
+                            style={{ padding: "4px 8px", fontSize: "0.7rem" }}
+                            onClick={async () => {
+                              const fd = new FormData();
+                              fd.append("workspaceId", workspaceId);
+                              fd.append("memberId", member.id);
+                              await handleActionWithToast(resendMemberAccessLinkAction, fd, "Access link sent successfully");
+                            }}
+                          >
+                            {t("btnResendAccessLink")}
+                          </button>
                         </div>
                       ) : (
                         <span className="muted" style={{ fontSize: "0.75rem" }}>{t("noMemberActions")}</span>
