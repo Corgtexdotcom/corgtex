@@ -53,9 +53,6 @@ const INTENTS = new Set<SlackAgentIntent>([
 const UNSUPPORTED_OPERATION_RE =
   /\b(delete|remove|archive|deactivate|invite|change role|grant|revoke|permission|submit spend|create spend|approve spend|pay|payment|reimburse|expense|notify everyone|broadcast|message everyone)\b/i;
 
-const CAPABILITIES_PROMPT_RE =
-  /(^|\b)(help|commands?|capabilities|examples?|what can (you|corgtex) do|how (can|do) i use (you|corgtex)|what does (this|the) slack integration do)(\b|$)/i;
-
 function clampConfidence(value: unknown) {
   const numeric = typeof value === "number" ? value : Number(value);
   if (!Number.isFinite(numeric)) return 0;
@@ -90,8 +87,24 @@ function isUnsupportedOperation(prompt: string, extraction: SlackAgentExtraction
   return extraction.intent === "unsupported" || UNSUPPORTED_OPERATION_RE.test(prompt);
 }
 
+function normalizeCapabilitiesPrompt(prompt: string) {
+  return prompt
+    .replace(/<@[A-Z0-9]+(?:\|[^>]+)?>/gi, " ")
+    .replace(/[?.!]+$/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
 function isCapabilitiesPrompt(prompt: string) {
-  return CAPABILITIES_PROMPT_RE.test(prompt.replace(/<@[A-Z0-9]+(?:\|[^>]+)?>/gi, " "));
+  const normalized = normalizeCapabilitiesPrompt(prompt);
+  if (/^(help|commands?|capabilities|examples?)$/.test(normalized)) return true;
+  if (/^(show|give|list|tell me|what are) (me )?(the )?(commands?|capabilities|examples?)( for (slack|corgtex|you))?$/.test(normalized)) {
+    return true;
+  }
+  if (/^what can (you|corgtex) do( (from|in|on) slack)?( now| here)?$/.test(normalized)) return true;
+  if (/^how (can|do) i use (you|corgtex)( (from|in|on) slack)?$/.test(normalized)) return true;
+  return /^what does (this|the) slack integration do$/.test(normalized);
 }
 
 function renderCapabilitiesResponse() {

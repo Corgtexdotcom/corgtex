@@ -281,6 +281,30 @@ describe("runSlackAgent", () => {
     expect(deliverSlackAgentResponseMock.mock.calls[0][1].text).toContain("Try `/corgtex Jan should follow up with Milan tomorrow`");
   });
 
+  it("does not treat creation prompts containing help as capabilities questions", async () => {
+    extractMock.mockResolvedValueOnce({
+      output: {
+        intent: "create_action",
+        confidence: 0.89,
+        title: "Help Jan follow up",
+        bodyMd: "Help Jan follow up tomorrow.",
+        assigneeHint: "Milan",
+        dueDateISO: "2026-04-28T16:00:00.000Z",
+      },
+    });
+
+    const { runSlackAgent } = await import("./slack-agent");
+    await runSlackAgent({ ...basePayload(), prompt: "help Jan follow up tomorrow" });
+
+    expect(extractMock).toHaveBeenCalled();
+    expect(createWorkItemMock).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({
+      kind: "ACTION",
+      title: "Help Jan follow up",
+      open: true,
+    }));
+    expect(deliverSlackAgentResponseMock.mock.calls[0][1].text).not.toContain("I can turn plain Slack text into Corgtex work");
+  });
+
   it("declines unsupported destructive requests without creating records", async () => {
     extractMock.mockResolvedValueOnce({
       output: {
