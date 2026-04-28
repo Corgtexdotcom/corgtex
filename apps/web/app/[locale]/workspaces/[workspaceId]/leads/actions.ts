@@ -10,7 +10,12 @@ import {
   createDeal,
   updateDeal,
   deleteDeal,
-  createActivity
+  createActivity,
+  approveQualification,
+  rejectQualification,
+  sendSchedulingLinkEmail,
+  createConversationMessage,
+  provisionProspectWorkspace
 } from "@corgtex/domain";
 
 
@@ -131,5 +136,73 @@ export async function createActivityAction(formData: FormData) {
     contactId: asOptional(formData, "contactId"),
     dealId: asOptional(formData, "dealId"),
   });
+  refresh(workspaceId);
+}
+
+// --- QUALIFICATION REVIEW ACTIONS ---
+
+export async function approveQualificationAction(formData: FormData) {
+  const workspaceId = asString(formData, "workspaceId");
+  await enforceDemoGuard(workspaceId);
+
+  const actor = await requirePageActor();
+  const qualificationId = asString(formData, "qualificationId");
+
+  await approveQualification(actor, { workspaceId, qualificationId });
+  
+  sendSchedulingLinkEmail(qualificationId).catch(err => {
+    console.error("Failed to send scheduling email:", err);
+  });
+  
+  refresh(workspaceId);
+}
+
+export async function rejectQualificationAction(formData: FormData) {
+  const workspaceId = asString(formData, "workspaceId");
+  await enforceDemoGuard(workspaceId);
+
+  const actor = await requirePageActor();
+  
+  await rejectQualification(actor, {
+    workspaceId,
+    qualificationId: asString(formData, "qualificationId"),
+    note: asOptional(formData, "note") ?? undefined,
+  });
+  
+  refresh(workspaceId);
+}
+
+// --- CONVERSATION ACTIONS ---
+
+export async function createConversationMessageAction(formData: FormData) {
+  const workspaceId = asString(formData, "workspaceId");
+  await enforceDemoGuard(workspaceId);
+
+  const actor = await requirePageActor();
+  
+  await createConversationMessage(actor, {
+    workspaceId,
+    conversationId: asString(formData, "conversationId"),
+    bodyMd: asString(formData, "bodyMd"),
+    senderType: "ADMIN",
+  });
+  
+  refresh(workspaceId);
+}
+
+// --- PROVISIONING ACTIONS ---
+
+export async function provisionProspectWorkspaceAction(formData: FormData) {
+  const workspaceId = asString(formData, "workspaceId");
+  await enforceDemoGuard(workspaceId);
+
+  const actor = await requirePageActor();
+  
+  await provisionProspectWorkspace(actor, {
+    crmWorkspaceId: workspaceId,
+    demoLeadId: asString(formData, "demoLeadId"),
+    adminEmail: asString(formData, "adminEmail"),
+  });
+  
   refresh(workspaceId);
 }

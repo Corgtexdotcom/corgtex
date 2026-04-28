@@ -1,11 +1,15 @@
 import { requirePageActor } from "@/lib/auth";
 import { prisma } from "@corgtex/shared";
-import { listContacts, listDeals } from "@corgtex/domain";
+import { listContacts, listDeals, listQualifications, listCrmConversations } from "@corgtex/domain";
 import { redirect } from "next/navigation";
 import { 
   createContactAction, 
   deleteContactAction,
   createDealAction,
+  approveQualificationAction,
+  rejectQualificationAction,
+  createConversationMessageAction,
+  provisionProspectWorkspaceAction
 } from "../actions";
 import { DealStageSelect } from "./DealStageSelect";
 import { getTranslations } from "next-intl/server";
@@ -42,9 +46,13 @@ export default async function LeadsPage({
   let totalContacts = 0;
   let deals: any[] = [];
   let recentActivities: any[] = [];
+  let pendingQualifications: any[] = [];
+  let approvedQualifications: any[] = [];
+  let conversations: any[] = [];
+  let prospectWorkspaces: any[] = [];
 
   try {
-    const [cResult, dResult, aResult] = await Promise.all([
+    const [cResult, dResult, aResult, qResult, approvedResult, convResult, pwResult] = await Promise.all([
       listContacts(actor, workspaceId, { take: 50 }),
       listDeals(actor, workspaceId, { take: 50 }),
       prisma.crmActivity.findMany({
@@ -55,12 +63,24 @@ export default async function LeadsPage({
         },
         orderBy: { createdAt: "desc" },
         take: 10
+      }),
+      listQualifications(actor, workspaceId, { status: "PENDING_REVIEW" }),
+      listQualifications(actor, workspaceId, { status: "APPROVED" }),
+      listCrmConversations(actor, workspaceId, { take: 20 }),
+      prisma.crmProspectWorkspace.findMany({
+        where: { crmWorkspaceId: workspaceId },
+        include: { demoLead: true, targetWorkspace: true },
+        orderBy: { provisionedAt: "desc" }
       })
     ]);
     contacts = cResult.items;
     totalContacts = cResult.total;
     deals = dResult.items;
     recentActivities = aResult;
+    pendingQualifications = qResult.items;
+    approvedQualifications = approvedResult.items;
+    conversations = convResult.items;
+    prospectWorkspaces = pwResult;
   } catch (error) {
     // CRM tables might not be seeded or present in this environment, fallback safely
   }
@@ -88,6 +108,9 @@ export default async function LeadsPage({
     contacts: t("tabContacts"),
     pipeline: t("tabPipeline"),
     activity: t("tabActivity"),
+    review: "Review Queue",
+    conversations: "Conversations",
+    instances: "Instances",
   };
 
   const activityIcon = (type: string) => {
@@ -140,7 +163,7 @@ export default async function LeadsPage({
         </div>
 
         <div className="nr-filter-bar">
-          {(["contacts", "pipeline", "activity"] as const).map((s) => (
+          {(["contacts", "pipeline", "activity", "review", "conversations", "instances"] as const).map((s) => (
             <a 
               key={s} 
               href={`?view=${s}`} 
@@ -306,6 +329,116 @@ export default async function LeadsPage({
                       <span className="muted">{t("activityDeal")} <strong>{activity.deal.title}</strong></span>
                     )}
                   </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {view === "review" && (
+          <div className="stack">
+            {pendingQualifications.length === 0 && <p className="muted">No pending qualifications in queue</p>}
+            {pendingQualifications.map(qual => (
+              <div key={qual.id} className="item" style={{ padding: 16 }}>
+                <div className="row">
+                  <strong>{qual.demoLead.email}</strong>
+                  <span className="tag">{qual.responseChannel}</span>
+                </div>
+                <div style={{ marginTop: 16, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, fontSize: "0.85rem" }}>
+                  {qual.companyName && <div><span className="muted">Company:</span> {qual.companyName}</div>}
+                  {qual.website && <div><span className="muted">Website:</span> {qual.website}</div>}
+                  {qual.aiExperience && <div style={{ gridColumn: "1 / -1" }}><span className="muted">AI Exp:</span> {qual.aiExperience}</div>}
+                  {qual.helpNeeded && <div style={{ gridColumn: "1 / -1" }}><span className="muted">Needs:</span> {qual.helpNeeded}</div>}
+                  {qual.rawEmailReply && <div style={{ gridColumn: "1 / -1" }}><span className="muted">Raw Reply:</span> {qual.rawEmailReply}</div>}
+                </div>
+                <div className="row" style={{ marginTop: 16, justifyContent: "flex-start", gap: 8 }}>
+                  <form action={approveQualificationAction}>
+                    <input type="hidden" name="workspaceId" value={workspaceId} />
+                    <input type="hidden" name="qualificationId" value={qual.id} />
+                    <button type="submit" className="small">Approve & Send Demo</button>
+                  </form>
+                  <form action={rejectQualificationAction}>
+                    <input type="hidden" name="workspaceId" value={workspaceId} />
+                    <input type="hidden" name="qualificationId" value={qual.id} />
+                    <button type="submit" className="danger small">Reject</button>
+                  </form>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {view === "conversations" && (
+          <div className="stack">
+            {conversations.length === 0 && <p className="muted">No active conversations</p>}
+            {conversations.map(conv => (
+              <div key={conv.id} className="item" style={{ padding: 16 }}>
+                <div className="row">
+                  <strong>{conv.subject}</strong>
+                  <span className="tag">{conv.status}</span>
+                </div>
+                <div className="muted" style={{ fontSize: "0.85rem", marginTop: 4 }}>
+                  {conv.contact ? (conv.contact.name || conv.contact.email) : conv.demoLead?.email}
+                </div>
+                {conv.messages && conv.messages[0] && (
+                  <div style={{ marginTop: 12, background: "var(--bg-alt)", padding: 12, borderRadius: 8, fontSize: "0.85rem" }}>
+                    <strong>{conv.messages[0].senderType === "LEAD" ? "Lead" : "Staff"}</strong>: {conv.messages[0].bodyMd}
+                  </div>
+                )}
+                
+                <details style={{ marginTop: 12 }}>
+                  <summary className="link-button small" style={{ cursor: "pointer" }}>Reply to Conversation</summary>
+                  <form action={createConversationMessageAction} className="stack nr-form-section" style={{ marginTop: 12 }}>
+                    <input type="hidden" name="workspaceId" value={workspaceId} />
+                    <input type="hidden" name="conversationId" value={conv.id} />
+                    <textarea name="bodyMd" required placeholder="Type your reply here..." rows={3} style={{ width: "100%", padding: 8, border: "1px solid var(--line)", borderRadius: 8 }}></textarea>
+                    <button type="submit" className="small" style={{ width: "fit-content" }}>Send Reply</button>
+                  </form>
+                </details>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {view === "instances" && (
+          <div className="stack">
+            <div style={{ marginBottom: "24px", display: "flex", justifyContent: "flex-end" }}>
+              <details style={{ width: "100%" }}>
+                <summary className="link-button small" style={{ cursor: "pointer", marginLeft: "auto", display: "inline-flex" }}>
+                  Provision New Instance
+                </summary>
+                <form action={provisionProspectWorkspaceAction} className="stack nr-form-section" style={{ marginTop: 16 }}>
+                  <input type="hidden" name="workspaceId" value={workspaceId} />
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: "16px" }}>
+                    <label>
+                      Select Prospect
+                      <select name="demoLeadId" required>
+                        <option value="">Choose Lead...</option>
+                        {approvedQualifications.map((q: any) => (
+                          <option key={q.demoLeadId} value={q.demoLeadId}>{q.companyName || q.demoLead?.email || "Unknown Lead"}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>Admin Email <input type="email" name="adminEmail" required /></label>
+                  </div>
+                  <button type="submit" style={{ width: "fit-content" }}>Provision Demo Workspace</button>
+                </form>
+              </details>
+            </div>
+
+            {prospectWorkspaces.length === 0 && <p className="muted">No instances provisioned yet</p>}
+            {prospectWorkspaces.map(pw => (
+              <div key={pw.id} className="item" style={{ padding: 16 }}>
+                <div className="row">
+                  <strong>{pw.targetWorkspace?.name || "Demo Workspace"}</strong>
+                  <span className="tag" style={{ background: pw.status === "ACTIVE" ? "var(--success)" : "var(--bg-alt)", color: pw.status === "ACTIVE" ? "white" : "inherit" }}>
+                    {pw.status}
+                  </span>
+                </div>
+                <div className="muted" style={{ fontSize: "0.85rem", marginTop: 8 }}>
+                  <div>Lead: {pw.demoLead?.email}</div>
+                  <div>Admin: {pw.adminEmail}</div>
+                  <div>Provisioned: {new Date(pw.provisionedAt).toLocaleDateString()}</div>
                 </div>
               </div>
             ))}
