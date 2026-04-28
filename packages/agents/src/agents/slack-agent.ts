@@ -19,6 +19,7 @@ type SlackAgentIntent =
   | "create_tension"
   | "create_proposal"
   | "capture_note"
+  | "capabilities"
   | "answer_question"
   | "summarize_thread"
   | "unsupported";
@@ -43,6 +44,7 @@ const INTENTS = new Set<SlackAgentIntent>([
   "create_tension",
   "create_proposal",
   "capture_note",
+  "capabilities",
   "answer_question",
   "summarize_thread",
   "unsupported",
@@ -83,6 +85,40 @@ function normalizeExtraction(output: Record<string, unknown>, fallbackPrompt: st
 
 function isUnsupportedOperation(prompt: string, extraction: SlackAgentExtraction) {
   return extraction.intent === "unsupported" || UNSUPPORTED_OPERATION_RE.test(prompt);
+}
+
+function normalizeCapabilitiesPrompt(prompt: string) {
+  return prompt
+    .replace(/<@[A-Z0-9]+(?:\|[^>]+)?>/gi, " ")
+    .replace(/[?.!]+$/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function isCapabilitiesPrompt(prompt: string) {
+  const normalized = normalizeCapabilitiesPrompt(prompt);
+  if (/^(help|commands?|capabilities|examples?)$/.test(normalized)) return true;
+  if (/^(show|give|list|tell me|what are) (me )?(the )?(commands?|capabilities|examples?)( for (slack|corgtex|you))?$/.test(normalized)) {
+    return true;
+  }
+  if (/^what can (you|corgtex) do( (from|in|on) slack)?( now| here)?$/.test(normalized)) return true;
+  if (/^how (can|do) i use (you|corgtex)( (from|in|on) slack)?$/.test(normalized)) return true;
+  return /^what does (this|the) slack integration do$/.test(normalized);
+}
+
+function renderCapabilitiesResponse() {
+  return {
+    done: [
+      "I can turn plain Slack text into Corgtex work: actions, tensions, proposals, notes, briefs, questions, and thread summaries.",
+      "Use `/corgtex ...`, mention `@Corgtex ...`, or use the message shortcut on a Slack message or thread.",
+      "When confidence is high, I can create and open/publish supported Corgtex items; when it is lower, I create drafts or ask a clarifying question.",
+    ],
+    couldNot: [
+      "I do not run deletes, role changes, invites, permission changes, spend/payment actions, or broad notifications from Slack.",
+    ],
+    next: "Try `/corgtex Jan should follow up with Milan tomorrow` or `@Corgtex turn this thread into a proposal`.",
+  };
 }
 
 function parseDueDate(value: string | null) {
@@ -276,6 +312,27 @@ export async function runSlackAgent(params: SlackAgentJobPayload & {
         return { resultJson: { status: "NO_ACTOR", delivery } };
       }
 
+      if (isCapabilitiesPrompt(params.prompt)) {
+        const parts = renderCapabilitiesResponse();
+        const response = renderSlackResponse(parts);
+        const delivery = await helpers.tool("slack.reply", {
+          reason: "capabilities",
+          source: params.source,
+          channelId: params.channelId ?? null,
+          responseUrl: Boolean(params.responseUrlEnc),
+        }, () => deliverSafely(params, response));
+
+        return {
+          resultJson: {
+            intent: "capabilities",
+            confidence: 1,
+            created: [],
+            ...parts,
+            delivery,
+          },
+        };
+      }
+
       const extraction = await helpers.tool("model.extract", { prompt: params.prompt }, async () => defaultModelGateway.extract({
         model,
         workspaceId: params.workspaceId,
@@ -284,7 +341,7 @@ export async function runSlackAgent(params: SlackAgentJobPayload & {
         instruction: [
           "Classify a plain Slack request for Corgtex.",
           "Return JSON only with intent, confidence, title, bodyMd, assigneeHint, dueDateISO, publish, needsAdviceRouting, answer, couldNot, and next.",
-          "Allowed intents: brief, create_action, create_tension, create_proposal, capture_note, answer_question, summarize_thread, unsupported.",
+          "Allowed intents: brief, create_action, create_tension, create_proposal, capture_note, capabilities, answer_question, summarize_thread, unsupported.",
           "Use unsupported for destructive, admin, financial, permission, invite, role, delete, archive, payment, or broad-notification requests.",
           "For action due dates, resolve relative dates using the provided userTimezone and current time; otherwise use UTC.",
         ].join(" "),
@@ -332,6 +389,11 @@ export async function runSlackAgent(params: SlackAgentJobPayload & {
           agentRunId: runId,
         }));
         done.push(answer.answer);
+      } else if (parsed.intent === "capabilities") {
+        const parts = renderCapabilitiesResponse();
+        done.push(...parts.done);
+        couldNot.push(...parts.couldNot);
+        next = next ?? parts.next;
       } else if (parsed.intent === "summarize_thread") {
         const threadMessages = Array.isArray(context.threadMessages) ? context.threadMessages : [];
         if (threadMessages.length === 0) {
