@@ -74,7 +74,7 @@ export async function createMemberAction(formData: FormData) {
       role: asString(formData, "role") as "CONTRIBUTOR" | "FACILITATOR" | "FINANCE_STEWARD" | "ADMIN",
     });
     
-    let emailStatus: { sent: boolean; error?: string } = { sent: false, error: "No setup token generated." };
+    let emailStatus: { sent: boolean; error?: string } | undefined;
     if ((result as any).token) {
       emailStatus = await sendInvitationEmail(result.user.email, result.user.displayName, (result as any).token);
     }
@@ -183,7 +183,7 @@ export async function updateMemberAction(formData: FormData) {
       isActive: isActiveRaw === null ? undefined : isActiveRaw === "true",
     });
     
-    let emailStatus: { sent: boolean; error?: string } = { sent: false, error: "No setup token generated." };
+    let emailStatus: { sent: boolean; error?: string } | undefined;
     if (result.setupToken) {
       emailStatus = await sendInvitationEmail(result.user.email, result.user.displayName, result.setupToken);
     }
