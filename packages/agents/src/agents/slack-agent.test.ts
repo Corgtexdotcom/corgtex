@@ -270,6 +270,17 @@ describe("runSlackAgent", () => {
     expect(deliverSlackAgentResponseMock.mock.calls[0][1].text).toContain("not confident");
   });
 
+  it("answers capabilities questions without calling the model", async () => {
+    const { runSlackAgent } = await import("./slack-agent");
+    await runSlackAgent({ ...basePayload(), prompt: "what can you do from Slack now?" });
+
+    expect(extractMock).not.toHaveBeenCalled();
+    expect(answerKnowledgeQuestionMock).not.toHaveBeenCalled();
+    expect(createWorkItemMock).not.toHaveBeenCalled();
+    expect(deliverSlackAgentResponseMock.mock.calls[0][1].text).toContain("actions, tensions, proposals");
+    expect(deliverSlackAgentResponseMock.mock.calls[0][1].text).toContain("Try `/corgtex Jan should follow up with Milan tomorrow`");
+  });
+
   it("declines unsupported destructive requests without creating records", async () => {
     extractMock.mockResolvedValueOnce({
       output: {
