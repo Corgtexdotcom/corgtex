@@ -77,7 +77,7 @@ export async function adminCreateMemberAction(formData: FormData) {
   });
 
   const appUrl = process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000";
-  const setupUrl = res.token ? `${appUrl}/setup/${res.token}` : null;
+  const setupUrl = res.token ? `${appUrl}/setup-account/${res.token}` : null;
 
   if (res.token) {
     await sendEmail({
@@ -151,7 +151,7 @@ export async function adminResendAccessLinkAction(formData: FormData) {
   });
 
   const appUrl = process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000";
-  const setupUrl = `${appUrl}/setup/${res.token}`;
+  const setupUrl = `${appUrl}/setup-account/${res.token}`;
 
   await sendEmail({
     to: res.user.email,
