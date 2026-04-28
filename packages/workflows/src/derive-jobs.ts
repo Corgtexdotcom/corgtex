@@ -198,7 +198,7 @@ export function deriveJobsForEvent(event: {
     }
   }
 
-  if (event.type === "brain-article.created" || event.type === "brain-article.updated") {
+  if (event.type === "brain-article.created" || event.type === "brain-article.updated" || event.type === "brain-article.published") {
     const payload = event.payload as { articleId?: string };
     if (payload.articleId && event.workspaceId) {
       jobs.push({
