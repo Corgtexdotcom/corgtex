@@ -1,43 +1,45 @@
 ---
 title: "Enterprise Deployments"
-description: "Scale Corgtex using the Configuration Repo pattern."
+description: "Scale Corgtex with hosted managed instances and private bootstrap bundles."
 ---
 
-While the standard Docker Compose method is perfect for evaluation and small setups, larger enterprises deploying Corgtex often need total data isolation, specific seeded configurations, and customized pre-flight scripts.
+While the standard Docker Compose method is perfect for evaluation and small setups, larger enterprises deploying Corgtex often need total data isolation, region-specific hosting, specific seeded configurations, and auditable operator support.
 
-We facilitate this requirement using a pattern we call the **Configuration Repo**.
+For hosted customers, Corgtex uses a **managed instance** model. Each real customer receives a dedicated runtime stack with its own web service, worker service, Postgres database, Redis service, object storage, custom domain, and region. Shared multi-tenant deployments are reserved for demos and trials.
 
-## The Configuration Repo Pattern
+## Hosted Managed Instances
 
-Instead of maintaining a massive, tangled fork of the core `corgtex/corgtex` platform, you create a thin, private wrapper repository (e.g., `corgtex/deploy-acmecorp`).
+The public Apache-licensed Corgtex repository remains the complete core product. Customer data, customer-specific seed content, private deployment metadata, and operational credentials never live in this public repository.
 
-This private repository contains:
-1. Your company-specific deployment manifests (Helm charts, Terraform, advanced Docker Compose overrides).
-2. A customized `Dockerfile`.
-3. A `SEEDDATA/` directory containing your internal methodologies, policies, and bootstrap runbooks.
-4. A custom `.mjs` seed script.
+Corgtex operators manage hosted instances through a dedicated internal control-plane instance. The control plane stores operational metadata such as customer slug, region, release image tag, Railway resource IDs, custom domain, health status, and bootstrap status. It does not store raw seed bundle content or provider API tokens.
 
-### Building from Source
+### Release images
 
-In your private Configuration Repo, your Dockerfile simply uses the official Corgtex open-source repository as the build context, and then injects your organization's specific data during the initialization phase.
+Hosted customer deployments use immutable release images for the web and worker services. These images are published from tagged releases and pinned by release tag or git SHA. Mutable branch deployments are for internal staging only.
 
-You instruct the standard Dockerfile to execute your seed script instead of the default SaaS seeds by overriding the `SEED_SCRIPTS` environment variable during image creation or container startup.
+The control plane records the target release and checks it against `/api/health`. Operators upgrade customers by selecting the next pinned web and worker image tags, letting Railway redeploy both services, probing health, and auditing the result.
 
-```dockerfile
-# Example deploy-acmecorp/Dockerfile
-# Build from the core platform repository
-FROM corgtex/corgtex:latest
+### Control-plane APIs
 
-# Inject custom enterprise seeds
-COPY ./SEEDDATA /app/SEEDDATA
-COPY ./seed-acme.mjs /app/scripts/seed-acme.mjs
+The operator UI and internal automation both use the same global-operator domain layer. Internal API routes under `/api/admin/hosted-instances` can list and provision managed customers, and per-instance routes can trigger health probes, bootstrap, suspension, and release upgrades. These APIs are for the Corgtex Ops deployment only and must not be exposed as customer-facing product APIs.
 
-# Override the default startup sequence
-ENV SEED_SCRIPTS="scripts/seed-acme.mjs"
-```
+### Private bootstrap bundles
 
-## Why this pattern?
+Customer bootstrap data is delivered through a private signed bundle reference. The customer runtime accepts a one-time internal bootstrap request, downloads the private bundle, verifies its SHA-256 checksum, applies the generic stable-client seed logic, and records only status metadata in the database.
 
-*   **Security:** Your specific organizational setup data remains in a private, access-controlled repository.
-*   **Upgradability:** Because you haven't forked the core application logic, you can seamlessly `docker pull` the latest upstream releases of the Corgtex platform without dealing with complex merge conflicts.
-*   **Isolation:** The platform remains completely stateless and unopinionated; all the specific methodology configurations (like Holacracy vs Sociocracy templates) are passed in externally at boot time.
+The bundle contains configuration and seed content required for that customer. The control plane stores only the bundle URI, checksum, schema version, and status. Runtime secrets remain in the deployment platform or private bundle delivery system.
+
+### Configuration-only customization
+
+Hosted v1 supports customization through configuration: feature flags, workspace seed config, policies, branding/copy, connectors, region, domains, and model/provider settings. Customer-specific code forks and dynamic private packages are not part of hosted v1.
+
+## Configuration Repo Pattern
+
+Customer-owned or self-hosted deployments may later use a private Configuration Repo. That lane is intentionally separate from hosted v1. If used, the private repo must stay thin and contain deployment overlays or bundle references only, not a fork of the core application.
+
+## Why this pattern works
+
+*   **Security:** Your specific organizational setup data remains in private storage or private operational systems.
+*   **Upgradability:** Hosted customers run pinned release images, so upgrades can be planned, probed, rolled back, and audited.
+*   **Isolation:** Real customers do not share a database or runtime stack by default. Region-specific customers can be hosted in-region.
+*   **Agent safety:** Public-repo guardrails scan ignored files as well as tracked files, so private seed files cannot safely sit inside the public checkout.

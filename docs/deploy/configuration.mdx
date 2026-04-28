@@ -85,6 +85,29 @@ File uploads and Brain source downloads use an S3-compatible storage backend. Cl
 
 On Railway, create or reuse a project bucket, read its S3-compatible credentials with the Railway dashboard or CLI, and set the variables above on web and worker. Do not print access keys or secret keys in logs, PRs, tickets, or support messages.
 
+## Hosted Control Plane Settings
+
+These variables are only needed by the internal Corgtex Ops control plane or by customer runtimes receiving one-time bootstrap requests.
+
+| Variable | Description |
+|---|---|
+| `RAILWAY_API_TOKEN` | Railway API token used by the internal control plane to provision customer projects and services. Store only as a deployment secret. |
+| `RAILWAY_GRAPHQL_ENDPOINT` | Optional override for Railway's GraphQL endpoint. Leave unset unless Railway support directs otherwise. |
+| `CORGTEX_INSTANCE_BOOTSTRAP_TOKEN` | One-time or rotated bearer token accepted by a customer runtime's internal bootstrap endpoint. |
+| `CORGTEX_RELEASE_VERSION` | Release version reported by `/api/health` for fleet drift checks. |
+| `CORGTEX_RELEASE_IMAGE_TAG` | Immutable image tag reported by `/api/health` and used by the control plane for customer deployments. |
+
+The internal control plane exposes operator-only routes for automation:
+
+| Route | Purpose |
+|---|---|
+| `GET /api/admin/hosted-instances` | List managed customer instances and their operational status. |
+| `POST /api/admin/hosted-instances` | Provision a dedicated customer project from pinned release images and private bundle metadata. |
+| `POST /api/admin/hosted-instances/:instanceId/health` | Probe the customer runtime health endpoint and record release drift. |
+| `POST /api/admin/hosted-instances/:instanceId/bootstrap` | Trigger one-time private bundle bootstrap on the customer runtime. |
+| `POST /api/admin/hosted-instances/:instanceId/upgrade` | Update pinned release images and redeploy web and worker services. |
+| `POST /api/admin/hosted-instances/:instanceId/suspend` | Mark a customer instance suspended in the control plane. |
+
 ## Example `.env` File
 
 ```env

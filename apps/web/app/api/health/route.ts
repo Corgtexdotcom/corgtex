@@ -10,11 +10,32 @@ function handleRouteError(error: unknown) {
       service: "web",
       database: "down",
       schema: "unknown",
-      app: "corgtex",
-      auth: "password-session",
-    },
+        app: "corgtex",
+        auth: "password-session",
+        release: releaseFingerprint(),
+        runtime: runtimeFingerprint(),
+      },
     { status: 503 },
   );
+}
+
+function releaseFingerprint() {
+  return {
+    version: process.env.CORGTEX_RELEASE_VERSION || process.env.npm_package_version || "development",
+    imageTag: process.env.CORGTEX_RELEASE_IMAGE_TAG || null,
+    gitSha: process.env.RAILWAY_GIT_COMMIT_SHA || process.env.GITHUB_SHA || null,
+  };
+}
+
+function runtimeFingerprint() {
+  return {
+    redis: process.env.REDIS_URL ? "configured" : "missing",
+    storage: (
+      process.env.S3_BUCKET_NAME
+      || process.env.AWS_S3_BUCKET_NAME
+      || process.env.R2_BUCKET_NAME
+    ) ? "configured" : "missing",
+  };
 }
 
 async function hasRequiredBrainTables() {
@@ -78,9 +99,11 @@ export async function GET() {
           service: "web",
           database: "up",
           schema: "stale",
-          app: "corgtex",
-          auth: "password-session",
-          missing: {
+            app: "corgtex",
+            auth: "password-session",
+            release: releaseFingerprint(),
+            runtime: runtimeFingerprint(),
+            missing: {
             brainTables: !brainTablesReady,
             knowledgeSourceType: !knowledgeSourceTypeReady,
             migrations: !migrationsHealthy,
@@ -97,6 +120,8 @@ export async function GET() {
       schema: "ready",
       app: "corgtex",
       auth: "password-session",
+      release: releaseFingerprint(),
+      runtime: runtimeFingerprint(),
       loginPath: "/login",
       apiLoginPath: "/api/auth/login",
     });

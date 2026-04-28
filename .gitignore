@@ -75,6 +75,7 @@ deploy-*/
 # Exclude sensitive / private client data
 SEEDDATA/
 .private-seeds/
+.private-customer-terms
 
 # Block ALL client-specific seed scripts. Private client data MUST NOT be
 # committed to this public repository. Use the generic seed-client-stable.mjs

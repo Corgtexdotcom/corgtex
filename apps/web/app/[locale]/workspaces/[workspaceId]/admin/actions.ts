@@ -14,8 +14,12 @@ import {
   adminResendAccessLink,
   adminCreateWorkspace,
   registerExternalInstance,
+  provisionHostedCustomerInstance,
   removeExternalInstance,
   probeExternalInstanceHealth,
+  suspendHostedInstance,
+  triggerHostedInstanceBootstrap,
+  upgradeHostedInstanceRelease,
   getWorkspaceAdminDetail
 } from "@corgtex/domain";
 import { sendEmail, prisma } from "@corgtex/shared";
@@ -219,6 +223,39 @@ export async function adminRegisterInstanceAction(formData: FormData) {
     label: asString(formData, "label"),
     environment: formData.get("environment") as string | undefined,
     notes: formData.get("notes") as string | undefined,
+    customerSlug: formData.get("customerSlug") as string | undefined,
+    region: formData.get("region") as string | undefined,
+    dataResidency: formData.get("dataResidency") as string | undefined,
+    customDomain: formData.get("customDomain") as string | undefined,
+    supportOwnerEmail: formData.get("supportOwnerEmail") as string | undefined,
+    releaseVersion: formData.get("releaseVersion") as string | undefined,
+    releaseImageTag: formData.get("releaseImageTag") as string | undefined,
+    bootstrapBundleUri: formData.get("bootstrapBundleUri") as string | undefined,
+    bootstrapBundleChecksum: formData.get("bootstrapBundleChecksum") as string | undefined,
+    bootstrapBundleSchemaVersion: formData.get("bootstrapBundleSchemaVersion") as string | undefined,
+  });
+
+  refresh(workspaceId);
+}
+
+export async function adminProvisionHostedCustomerAction(formData: FormData) {
+  const workspaceId = asString(formData, "workspaceId");
+  const actor = await verifyGlobalAdmin(workspaceId);
+
+  await provisionHostedCustomerInstance(actor, {
+    label: asString(formData, "label"),
+    customerSlug: asString(formData, "customerSlug"),
+    region: asString(formData, "region"),
+    dataResidency: asString(formData, "dataResidency"),
+    customDomain: formData.get("customDomain") as string | null,
+    supportOwnerEmail: formData.get("supportOwnerEmail") as string | null,
+    releaseVersion: formData.get("releaseVersion") as string | null,
+    releaseImageTag: asString(formData, "releaseImageTag"),
+    webImage: asString(formData, "webImage"),
+    workerImage: asString(formData, "workerImage"),
+    bootstrapBundleUri: formData.get("bootstrapBundleUri") as string | null,
+    bootstrapBundleChecksum: formData.get("bootstrapBundleChecksum") as string | null,
+    bootstrapBundleSchemaVersion: formData.get("bootstrapBundleSchemaVersion") as string | null,
   });
 
   refresh(workspaceId);
@@ -238,6 +275,43 @@ export async function adminProbeInstanceHealthAction(formData: FormData) {
   const actor = await verifyGlobalAdmin(workspaceId);
   
   await probeExternalInstanceHealth(actor, asString(formData, "instanceId"));
+
+  refresh(workspaceId);
+}
+
+export async function adminSuspendHostedInstanceAction(formData: FormData) {
+  const workspaceId = asString(formData, "workspaceId");
+  const actor = await verifyGlobalAdmin(workspaceId);
+
+  await suspendHostedInstance(actor, asString(formData, "instanceId"));
+
+  refresh(workspaceId);
+}
+
+export async function adminUpgradeHostedInstanceAction(formData: FormData) {
+  const workspaceId = asString(formData, "workspaceId");
+  const actor = await verifyGlobalAdmin(workspaceId);
+
+  await upgradeHostedInstanceRelease(actor, {
+    instanceId: asString(formData, "instanceId"),
+    releaseVersion: formData.get("releaseVersion") as string | null,
+    releaseImageTag: asString(formData, "releaseImageTag"),
+    webImage: asString(formData, "webImage"),
+    workerImage: asString(formData, "workerImage"),
+  });
+
+  refresh(workspaceId);
+}
+
+export async function adminTriggerBootstrapAction(formData: FormData) {
+  const workspaceId = asString(formData, "workspaceId");
+  const actor = await verifyGlobalAdmin(workspaceId);
+
+  await triggerHostedInstanceBootstrap(actor, {
+    instanceId: asString(formData, "instanceId"),
+    token: asString(formData, "bootstrapToken"),
+    expiresAt: new Date(asString(formData, "expiresAt")),
+  });
 
   refresh(workspaceId);
 }
