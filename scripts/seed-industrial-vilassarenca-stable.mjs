@@ -117,6 +117,7 @@ await seedStableClient({
     button: "Configurar cuenta",
   },
   featureFlags: {
+    GOALS: true,
     RELATIONSHIPS: false,
     AGENT_GOVERNANCE: false,
     OS_METRICS: false,

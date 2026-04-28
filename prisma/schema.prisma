@@ -327,6 +327,8 @@ model Workspace {
   crmConversations              CrmConversation[]
   crmProspectWorkspacesAsCrm    CrmProspectWorkspace[]      @relation("CrmWorkspace")
   crmProspectWorkspacesAsTarget CrmProspectWorkspace[]      @relation("TargetWorkspace")
+  procurementSetupSessions      ProcurementSetupSession[]
+  procurementBillingHandoffs    ProcurementBillingHandoff[]
 }
 
 model WorkspaceFeatureFlag {
@@ -2512,4 +2514,65 @@ model InstanceRegistry {
   lastHealthError  String?
   createdAt        DateTime  @default(now())
   updatedAt        DateTime  @updatedAt
+}
+
+model ProcurementSetupSession {
+  id                   String   @id @default(uuid())
+  workspaceId          String
+  tokenHash            String   @unique
+  status               String   @default("ACTIVE")
+  companyName          String
+  adminEmail           String
+  billingContactEmail  String
+  planLabel            String   @default("manual-invoice-v1")
+  acceptedTermsVersion String
+  sourceAgent          Json?
+  emailStatus          Json?
+  invitedEmployeeCount Int      @default(0)
+  maxEmployeeInvites   Int      @default(50)
+  expiresAt            DateTime
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId])
+  @@index([adminEmail])
+  @@index([expiresAt])
+}
+
+model ProcurementBillingHandoff {
+  id                      String    @id @default(uuid())
+  workspaceId             String    @unique
+  companyName             String
+  adminEmail              String
+  billingContactEmail     String
+  planLabel               String    @default("manual-invoice-v1")
+  sourceAgent             Json?
+  status                  String    @default("PENDING_MANUAL_INVOICE")
+  notificationEmailSentAt DateTime?
+  notificationError       String?
+  createdAt               DateTime  @default(now())
+  updatedAt               DateTime  @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([status])
+  @@index([adminEmail])
+}
+
+model ProcurementIdempotencyKey {
+  id             String   @id @default(uuid())
+  scope          String
+  keyHash        String   @unique
+  requestHash    String
+  responseJson   Json?
+  workspaceId    String?
+  setupSessionId String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([scope, createdAt])
+  @@index([workspaceId])
+  @@index([setupSessionId])
 }

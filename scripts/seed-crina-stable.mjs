@@ -431,7 +431,7 @@ async function main() {
   });
 
   const featureFlagValues = [
-    ["GOALS", false],
+    ["GOALS", true],
     ["RELATIONSHIPS", false],
     ["CYCLES", false],
     ["AGENT_GOVERNANCE", false],
