@@ -15,6 +15,7 @@ import {
 } from "../actions";
 import { useTranslations } from "next-intl";
 import { Dialog } from "@/lib/components/Dialog";
+import { useToast } from "@/lib/components/Toast";
 
 type InvitePolicy = "ADMINS_ONLY" | "MEMBERS_CAN_INVITE" | "MEMBERS_CAN_REQUEST";
 
@@ -77,6 +78,24 @@ export function MembersTable({
   const [circleFilter, setCircleFilter] = useState<string>("ALL");
   const [editingMember, setEditingMember] = useState<EnrichedMember | null>(null);
   const t = useTranslations("settings");
+  const { addToast } = useToast();
+
+  const handleActionWithToast = async (actionFn: (formData: FormData) => Promise<any>, formData: FormData, successMsg: string) => {
+    try {
+      const result = await actionFn(formData);
+      if (result && result.success === false) {
+        addToast(result.error || "Action failed", "error");
+        return;
+      }
+      if (result?.emailStatus && !result.emailStatus.sent) {
+        addToast(`${successMsg}. However, the email failed to send: ${result.emailStatus.error}`, "info");
+      } else {
+        addToast(successMsg, "success");
+      }
+    } catch (e: any) {
+      addToast(e.message || "An error occurred", "error");
+    }
+  };
 
   const allCircles = useMemo(() => {
     const circles = new Map<string, { id: string; name: string }>();
@@ -176,12 +195,12 @@ export function MembersTable({
                   </div>
                 </div>
                 <div style={{ display: "flex", gap: 8 }}>
-                  <form action={approveMemberInviteRequestAction}>
+                  <form action={(fd) => handleActionWithToast(approveMemberInviteRequestAction, fd, "Invite request approved")}>
                     <input type="hidden" name="workspaceId" value={workspaceId} />
                     <input type="hidden" name="requestId" value={request.id} />
                     <button type="submit" className="small">{t("btnApprove")}</button>
                   </form>
-                  <form action={rejectMemberInviteRequestAction}>
+                  <form action={(fd) => handleActionWithToast(rejectMemberInviteRequestAction, fd, "Invite request rejected")}>
                     <input type="hidden" name="workspaceId" value={workspaceId} />
                     <input type="hidden" name="requestId" value={request.id} />
                     <button type="submit" className="secondary small">{t("btnReject")}</button>
@@ -201,7 +220,7 @@ export function MembersTable({
             </span>
           </summary>
           <div style={{ padding: "0 16px 16px" }}>
-            <form action={canRequestInvite ? requestMemberInviteAction : isAdmin ? createMemberAction : inviteMemberAction} className="stack nr-form-section" style={{ marginTop: 8 }}>
+            <form action={(fd) => handleActionWithToast(canRequestInvite ? requestMemberInviteAction : isAdmin ? createMemberAction : inviteMemberAction, fd, canRequestInvite ? "Invite requested successfully" : "Member invited successfully")} className="stack nr-form-section" style={{ marginTop: 8 }}>
               <input type="hidden" name="workspaceId" value={workspaceId} />
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 16 }}>
                 <label>
@@ -235,7 +254,7 @@ export function MembersTable({
             <span style={{ fontWeight: 600 }}>{t("btnBulkInvite")}</span>
           </summary>
           <div style={{ padding: "0 16px 16px" }}>
-            <form action={bulkInviteAction} className="stack nr-form-section" style={{ marginTop: 8 }}>
+            <form action={(fd) => handleActionWithToast(bulkInviteAction, fd, "Bulk invites sent successfully")} className="stack nr-form-section" style={{ marginTop: 8 }}>
               <input type="hidden" name="workspaceId" value={workspaceId} />
               <label>
                 {t("labelPasteCsv")}
@@ -362,7 +381,7 @@ export function MembersTable({
                           >
                             {t("btnEditMember")}
                           </button>
-                          <form action={resendMemberAccessLinkAction}>
+                          <form action={(fd) => handleActionWithToast(resendMemberAccessLinkAction, fd, "Access link sent successfully")}>
                             <input type="hidden" name="workspaceId" value={workspaceId} />
                             <input type="hidden" name="memberId" value={member.id} />
                             <button type="submit" className="secondary small" style={{ padding: "4px 8px", fontSize: "0.7rem" }}>{t("btnResendAccessLink")}</button>
@@ -383,8 +402,8 @@ export function MembersTable({
       {editingMember && (
         <Dialog open={true} onClose={() => setEditingMember(null)} title={t("btnEditMember")}>
           <form
-            action={(formData) => {
-              updateMemberAction(formData);
+            action={async (formData) => {
+              await handleActionWithToast(updateMemberAction, formData, "Member updated successfully");
               setEditingMember(null);
             }}
             className="stack nr-form-section"
