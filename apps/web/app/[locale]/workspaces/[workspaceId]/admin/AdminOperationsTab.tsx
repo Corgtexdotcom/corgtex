@@ -24,6 +24,14 @@ interface Props {
   };
 }
 
+function readinessLabel(status?: string) {
+  return status === "ready" ? "Ready" : "Needs attention";
+}
+
+function readinessColor(status?: string) {
+  return status === "ready" ? "var(--green-11)" : "var(--orange-11)";
+}
+
 export function AdminOperationsTab({ data, workspaceId }: Props) {
   const t = useTranslations("admin");
   const [showRegister, setShowRegister] = useState(false);
@@ -89,6 +97,10 @@ export function AdminOperationsTab({ data, workspaceId }: Props) {
                 <div className="form-group">
                   <label>Worker image</label>
                   <input type="text" name="workerImage" className="input" placeholder="ghcr.io/corgtexdotcom/corgtex/worker:sha-..." />
+                </div>
+                <div className="form-group">
+                  <label>Railway bucket</label>
+                  <input type="text" name="storageBucketName" className="input" placeholder="customer-bucket-name" />
                 </div>
                 <div className="form-group">
                   <label>Web repo</label>
@@ -175,6 +187,10 @@ export function AdminOperationsTab({ data, workspaceId }: Props) {
                   <label>Release image tag</label>
                   <input type="text" name="releaseImageTag" className="input" placeholder="sha-..." />
                 </div>
+                <div className="form-group">
+                  <label>Railway bucket</label>
+                  <input type="text" name="storageBucketName" className="input" placeholder="customer-bucket-name" />
+                </div>
               </div>
               <div style={{ display: "flex", justifyContent: "flex-end" }}>
                 <SubmitButton>{t("registerInstance")}</SubmitButton>
@@ -192,6 +208,7 @@ export function AdminOperationsTab({ data, workspaceId }: Props) {
                 <th style={{ padding: 12 }}>{t("instanceEnvironment")}</th>
                   <th style={{ padding: 12 }}>Region</th>
                   <th style={{ padding: 12 }}>Release</th>
+                  <th style={{ padding: 12 }}>Readiness</th>
                   <th style={{ padding: 12 }}>Provisioning</th>
                   <th style={{ padding: 12 }}>Bootstrap</th>
                   <th style={{ padding: 12 }}>{t("instanceLastChecked")}</th>
@@ -202,7 +219,7 @@ export function AdminOperationsTab({ data, workspaceId }: Props) {
             <tbody>
               {data.instances.length === 0 ? (
                 <tr>
-                  <td colSpan={10} style={{ padding: 24, textAlign: "center" }} className="muted">
+                  <td colSpan={11} style={{ padding: 24, textAlign: "center" }} className="muted">
                     No instances registered.
                   </td>
                 </tr>
@@ -217,6 +234,26 @@ export function AdminOperationsTab({ data, workspaceId }: Props) {
                   <td style={{ padding: 12 }}>{inst.environment || "—"}</td>
                   <td style={{ padding: 12 }}>{inst.region || "—"}</td>
                   <td style={{ padding: 12 }}>{inst.releaseImageTag || inst.releaseVersion || "—"}</td>
+                  <td style={{ padding: 12, minWidth: 220 }}>
+                    <details>
+                      <summary style={{ color: readinessColor(inst.readiness?.status), fontWeight: 600 }}>
+                        {readinessLabel(inst.readiness?.status)}
+                      </summary>
+                      <div style={{ display: "grid", gap: 4, marginTop: 8 }}>
+                        {(inst.readiness?.checks ?? []).map((check: any) => (
+                          <div key={check.key} className="text-sm">
+                            <span style={{
+                              color: check.status === "ok" ? "var(--green-11)" : check.status === "warning" ? "var(--orange-11)" : "var(--red-11)",
+                              fontWeight: 600,
+                            }}>
+                              {check.label}
+                            </span>
+                            <div className="muted">{check.detail}</div>
+                          </div>
+                        ))}
+                      </div>
+                    </details>
+                  </td>
                   <td style={{ padding: 12 }}>{inst.provisioningStatus || "draft"}</td>
                   <td style={{ padding: 12 }}>{inst.bootstrapStatus || "not_started"}</td>
                   <td style={{ padding: 12 }}>

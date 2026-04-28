@@ -82,6 +82,7 @@ describe("hosted instance admin API", () => {
         releaseImageTag: "sha-1",
         webImage: "ghcr.io/corgtex/web:sha-1",
         workerImage: "ghcr.io/corgtex/worker:sha-1",
+        storageBucketName: "customer-bucket",
         bootstrapBundleUri: "https://private.example/bundle.json",
         bootstrapBundleChecksum: "a".repeat(64),
         bootstrapBundleSchemaVersion: "stable-client-v1",
@@ -98,6 +99,12 @@ describe("hosted instance admin API", () => {
     });
     expect(provisionHostedCustomerInstance).toHaveBeenCalledWith(
       { kind: "user", user: { id: "operator_1" } },
+      expect.objectContaining({
+        storageBucketName: "customer-bucket",
+      }),
+    );
+    expect(provisionHostedCustomerInstance).toHaveBeenCalledWith(
+      expect.anything(),
       expect.not.objectContaining({
         seedContent: expect.anything(),
         bundleContent: expect.anything(),

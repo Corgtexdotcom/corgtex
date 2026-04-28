@@ -20,6 +20,7 @@ const provisionHostedInstanceSchema = z.object({
   releaseImageTag: z.string().trim().min(1),
   webImage: z.string().trim().min(1).nullable().optional(),
   workerImage: z.string().trim().min(1).nullable().optional(),
+  storageBucketName: z.string().trim().min(1).nullable().optional(),
   webSource: z.object({
     repo: z.string().trim().min(1),
     branch: z.string().trim().min(1).nullable().optional(),

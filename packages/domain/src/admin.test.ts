@@ -425,6 +425,7 @@ describe("Platform Admin Tools", () => {
       customerSlug: "acme",
       region: "eu-west4",
       releaseImageTag: "sha-1",
+      storageBucketName: "customer-bucket",
     });
 
     expect(requireGlobalOperator).toHaveBeenCalledWith(dummyActor);
@@ -437,6 +438,7 @@ describe("Platform Admin Tools", () => {
         customerSlug: "acme",
         region: "eu-west4",
         releaseImageTag: "sha-1",
+        storageBucketName: "customer-bucket",
       }),
     });
     expect(prisma.hostedInstanceEvent.create).toHaveBeenCalledWith({
@@ -546,6 +548,32 @@ describe("Platform Admin Tools", () => {
     });
   });
 
+  it("probeExternalInstanceHealth marks missing runtime dependencies as degraded", async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: vi.fn().mockResolvedValue({
+        database: "up",
+        schema: "ready",
+        runtime: {
+          redis: "configured",
+          storage: "missing",
+        },
+        release: { imageTag: null },
+      }),
+    });
+
+    await admin.probeExternalInstanceHealth(dummyActor, "inst_1");
+
+    expect(prisma.instanceRegistry.update).toHaveBeenCalledWith({
+      where: { id: "inst_1" },
+      data: expect.objectContaining({
+        lastHealthStatus: "degraded",
+        lastHealthError: "Storage missing",
+        provisioningStatus: "degraded",
+      }),
+    });
+  });
+
   it("provisionHostedCustomerInstance records Railway resources without storing secrets", async () => {
     (prisma.instanceRegistry.update as any).mockResolvedValue({
       id: "inst_1",
@@ -579,6 +607,7 @@ describe("Platform Admin Tools", () => {
       releaseImageTag: "sha-1",
       webImage: "ghcr.io/corgtex/web:sha-1",
       workerImage: "ghcr.io/corgtex/worker:sha-1",
+      storageBucketName: "customer-bucket",
       bootstrapBundleUri: "https://private.example/bundle.json",
       bootstrapBundleChecksum: "a".repeat(64),
       bootstrapBundleSchemaVersion: "stable-client-v1",
@@ -593,6 +622,7 @@ describe("Platform Admin Tools", () => {
       create: expect.objectContaining({
         provisioningStatus: "provisioning",
         bootstrapStatus: "pending",
+        storageBucketName: "customer-bucket",
         bootstrapBundleUri: "https://private.example/bundle.json",
         bootstrapBundleChecksum: "a".repeat(64),
       }),
@@ -646,6 +676,48 @@ describe("Platform Admin Tools", () => {
       CORGTEX_RELEASE_VERSION: "0.1.0",
       MODEL_PROVIDER: "openrouter",
     });
+  });
+
+  it("buildHostedInstanceReadiness returns ready only when Ops has complete hosted customer metadata", () => {
+    const result = admin.buildHostedInstanceReadiness({
+      url: "https://acme.corgtex.com",
+      customDomain: "acme.corgtex.com",
+      region: "us-west2",
+      dataResidency: "us",
+      supportOwnerEmail: "ops@corgtex.com",
+      provisioningStatus: "active",
+      bootstrapStatus: "applied",
+      releaseImageTag: "sha-1",
+      railwayProjectId: "project-1",
+      railwayEnvironmentId: "env-1",
+      railwayWebServiceId: "web-1",
+      railwayWorkerServiceId: "worker-1",
+      railwayPostgresServiceId: "postgres-1",
+      railwayRedisServiceId: "redis-1",
+      storageBucketName: "customer-bucket",
+      lastHealthStatus: "ok",
+      lastHealthError: null,
+      lastHealthCheck: new Date(),
+      lastReleaseCheck: new Date(),
+    });
+
+    expect(result.status).toBe("ready");
+    expect(result.checks.every((check) => check.status === "ok")).toBe(true);
+  });
+
+  it("buildHostedInstanceReadiness flags incomplete hosted customer metadata", () => {
+    const result = admin.buildHostedInstanceReadiness({
+      url: "https://acme.corgtex.com",
+      provisioningStatus: "draft",
+      bootstrapStatus: "not_started",
+    });
+
+    expect(result.status).toBe("attention");
+    expect(result.checks).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: "railway_project", status: "missing" }),
+      expect.objectContaining({ key: "storage", status: "missing" }),
+      expect.objectContaining({ key: "bootstrap", status: "missing" }),
+    ]));
   });
 
   it("upgradeHostedInstanceRelease updates Railway service images and records the target release", async () => {
