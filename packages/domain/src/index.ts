@@ -48,6 +48,7 @@ export * from "./sso";
 export * from "./cost-budget";
 export * from "./meeting-intelligence";
 export * from "./admin";
+export * from "./railway-client";
 export * from "./member-briefing";
 export * from "./goals";
 export * from "./admin";
