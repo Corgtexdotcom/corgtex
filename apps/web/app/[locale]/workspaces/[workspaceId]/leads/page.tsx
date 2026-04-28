@@ -47,11 +47,12 @@ export default async function LeadsPage({
   let deals: any[] = [];
   let recentActivities: any[] = [];
   let pendingQualifications: any[] = [];
+  let approvedQualifications: any[] = [];
   let conversations: any[] = [];
   let prospectWorkspaces: any[] = [];
 
   try {
-    const [cResult, dResult, aResult, qResult, convResult, pwResult] = await Promise.all([
+    const [cResult, dResult, aResult, qResult, approvedResult, convResult, pwResult] = await Promise.all([
       listContacts(actor, workspaceId, { take: 50 }),
       listDeals(actor, workspaceId, { take: 50 }),
       prisma.crmActivity.findMany({
@@ -64,6 +65,7 @@ export default async function LeadsPage({
         take: 10
       }),
       listQualifications(actor, workspaceId, { status: "PENDING_REVIEW" }),
+      listQualifications(actor, workspaceId, { status: "APPROVED" }),
       listCrmConversations(actor, workspaceId, { take: 20 }),
       prisma.crmProspectWorkspace.findMany({
         where: { crmWorkspaceId: workspaceId },
@@ -76,6 +78,7 @@ export default async function LeadsPage({
     deals = dResult.items;
     recentActivities = aResult;
     pendingQualifications = qResult.items;
+    approvedQualifications = approvedResult.items;
     conversations = convResult.items;
     prospectWorkspaces = pwResult;
   } catch (error) {
@@ -411,8 +414,8 @@ export default async function LeadsPage({
                       Select Prospect
                       <select name="demoLeadId" required>
                         <option value="">Choose Lead...</option>
-                        {contacts.filter((c: any) => c.demoLeadId).map((c: any) => (
-                          <option key={c.demoLeadId} value={c.demoLeadId}>{c.name || c.email}</option>
+                        {approvedQualifications.map((q: any) => (
+                          <option key={q.demoLeadId} value={q.demoLeadId}>{q.companyName || q.demoLead?.email || "Unknown Lead"}</option>
                         ))}
                       </select>
                     </label>

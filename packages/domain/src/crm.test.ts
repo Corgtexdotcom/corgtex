@@ -230,6 +230,7 @@ describe("CRM domain", () => {
         id: "qual-2",
         workspaceId: "ws-1",
         status: "PENDING_REVIEW",
+        demoLead: { email: "demo@acme.com" }
       } as any);
 
       const result = await rejectQualification(dummyActor, {
