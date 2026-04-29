@@ -1,5 +1,5 @@
 import type { BrainArticleType, BrainArticleAuthority } from "@prisma/client";
-import { getArticle, listArticles, updateArticle } from "@corgtex/domain";
+import { getArticle, listArticles, requireWorkspaceMembership, updateArticle } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { notFound } from "next/navigation";
 import Link from "next/link";
@@ -7,6 +7,7 @@ import { renderMarkdown } from "@/lib/markdown";
 import { revalidatePath } from "next/cache";
 import { prisma } from "@corgtex/shared";
 import { getTranslations } from "next-intl/server";
+import { publishArticleAction, returnArticleToDraftAction } from "../actions";
 
 export const dynamic = "force-dynamic";
 
@@ -22,6 +23,10 @@ export default async function BrainArticlePage({
 
   const article = await getArticle(actor, { workspaceId, slug });
   if (!article) notFound();
+  const membership = await requireWorkspaceMembership({ actor, workspaceId });
+  const canManage = actor.kind === "agent"
+    || membership?.role === "ADMIN"
+    || (Boolean(article.ownerMemberId) && article.ownerMemberId === membership?.id);
 
   // Load sidebar navigation
   const { items: allArticles } = await listArticles(actor, { workspaceId, take: 50 });
@@ -72,6 +77,27 @@ export default async function BrainArticlePage({
           <span>·</span>
           <span>{article.authority}</span>
         </p>
+        {canManage && (
+          <div className="actions-inline" style={{ marginBottom: 16 }}>
+            {article.isPrivate && article.authority === "DRAFT" && (
+              <form action={publishArticleAction}>
+                <input type="hidden" name="workspaceId" value={workspaceId} />
+                <input type="hidden" name="slug" value={article.slug} />
+                <button type="submit" className="primary small">{t("open")}</button>
+              </form>
+            )}
+            {!article.isPrivate && (
+              <form action={returnArticleToDraftAction}>
+                <input type="hidden" name="workspaceId" value={workspaceId} />
+                <input type="hidden" name="slug" value={article.slug} />
+                <button type="submit" className="secondary small">{t("returnToDraft")}</button>
+              </form>
+            )}
+            {article.authority === "DRAFT" && (
+              <Link href={`/workspaces/${workspaceId}/brain/${article.slug}/edit`} className="secondary small">{t("edit")}</Link>
+            )}
+          </div>
+        )}
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", borderBottom: "1px solid var(--line)", paddingBottom: 16 }}>
           <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2.5rem", maxWidth: "800px" }}>{article.title}</h1>
           <span style={{ fontSize: "0.85rem", color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.05em" }}>
@@ -91,6 +117,8 @@ export default async function BrainArticlePage({
 
           <hr className="nr-divider" style={{ margin: "48px 0" }} />
           
+          {canManage && article.authority === "DRAFT" && (
+          <>
           <h3 style={{ fontSize: "1rem", color: "var(--muted)", marginBottom: "16px" }}>{t("editor")}</h3>
           <form action={updateArticleAction} style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
             <div style={{ display: "flex", gap: "8px" }}>
@@ -108,6 +136,8 @@ export default async function BrainArticlePage({
             <textarea name="bodyMd" defaultValue={article.bodyMd} rows={10} style={{ width: "100%", padding: "12px", fontSize: "0.9rem", border: "1px solid var(--line)", borderRadius: "4px", fontFamily: "monospace", lineHeight: 1.4 }} />
             <button type="submit" style={{ padding: "8px 16px", background: "var(--text-strong)", color: "var(--bg)", border: "none", borderRadius: "4px", cursor: "pointer", fontWeight: 600, alignSelf: "flex-start" }}>{t("updateArticle")}</button>
           </form>
+          </>
+          )}
         </article>
 
         {/* Sidebar */}

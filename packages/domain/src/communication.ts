@@ -1135,7 +1135,7 @@ function publishActionBlocks(entityType: string, entityId: string) {
     type: "actions",
     elements: [{
       type: "button",
-      text: { type: "plain_text", text: entityType === "Action" ? "Publish action" : "Publish tension" },
+      text: { type: "plain_text", text: entityType === "Action" ? "Open action" : "Open tension" },
       action_id: entityType === "Action" ? "corgtex_publish_action" : "corgtex_publish_tension",
       value: JSON.stringify({ entityType, entityId }),
     }],
@@ -1307,11 +1307,11 @@ export async function handleSlackInteraction(payload: Record<string, unknown>) {
     const value = JSON.parse(asString(action?.value) || "{}") as { entityType?: string; entityId?: string };
     if (actionId === "corgtex_publish_action" && value.entityId) {
       await publishAction(actor, { workspaceId: installation.workspaceId, actionId: value.entityId });
-      return { response_type: "ephemeral", text: "Action published." };
+      return { response_type: "ephemeral", text: "Action opened." };
     }
     if (actionId === "corgtex_publish_tension" && value.entityId) {
       await publishTension(actor, { workspaceId: installation.workspaceId, tensionId: value.entityId });
-      return { response_type: "ephemeral", text: "Tension published." };
+      return { response_type: "ephemeral", text: "Tension opened." };
     }
   }
 

@@ -9,6 +9,7 @@ import {
   updateTension,
   upvoteTension,
   publishTension,
+  returnTensionToDraft,
   postDeliberationEntry,
   resolveDeliberationEntry
 } from "@corgtex/domain";
@@ -41,9 +42,11 @@ export async function updateTensionAction(formData: FormData) {
     workspaceId,
     tensionId: asString(formData, "tensionId"),
     title: asOptional(formData, "title") ?? undefined,
+    bodyMd: formData.has("bodyMd") ? asOptional(formData, "bodyMd") : undefined,
     status: asOptional(formData, "status") as "DRAFT" | "OPEN" | "RESOLVED" | null ?? undefined,
     resolvedVia: asOptional(formData, "resolvedVia") ?? undefined,
     raisedByMemberId: formData.has("raisedByMemberId") ? asOptional(formData, "raisedByMemberId") : undefined,
+    priority: formData.has("priority") ? Number.parseInt(asString(formData, "priority"), 10) : undefined,
   });
   refresh(workspaceId);
 }
@@ -81,6 +84,19 @@ export async function publishTensionAction(formData: FormData) {
   const actor = await requirePageActor();
   const workspaceId = asString(formData, "workspaceId");
   await publishTension(actor, {
+    workspaceId,
+    tensionId: asString(formData, "tensionId"),
+  });
+  refresh(workspaceId);
+}
+
+export async function returnTensionToDraftAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  await returnTensionToDraft(actor, {
     workspaceId,
     tensionId: asString(formData, "tensionId"),
   });

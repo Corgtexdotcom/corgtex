@@ -7,7 +7,8 @@ import {
   createAction,
   deleteAction,
   updateAction,
-  publishAction
+  publishAction,
+  returnActionToDraft
 } from "@corgtex/domain";
 
 
@@ -37,6 +38,7 @@ export async function updateActionAction(formData: FormData) {
     workspaceId,
     actionId: asString(formData, "actionId"),
     title: asOptional(formData, "title") ?? undefined,
+    bodyMd: formData.has("bodyMd") ? asOptional(formData, "bodyMd") : undefined,
     status: asOptional(formData, "status") as "DRAFT" | "OPEN" | "IN_PROGRESS" | "COMPLETED" | null ?? undefined,
   });
   refresh(workspaceId);
@@ -62,6 +64,19 @@ export async function publishActionAction(formData: FormData) {
   const actor = await requirePageActor();
   const workspaceId = asString(formData, "workspaceId");
   await publishAction(actor, {
+    workspaceId,
+    actionId: asString(formData, "actionId"),
+  });
+  refresh(workspaceId);
+}
+
+export async function returnActionToDraftAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  await returnActionToDraft(actor, {
     workspaceId,
     actionId: asString(formData, "actionId"),
   });

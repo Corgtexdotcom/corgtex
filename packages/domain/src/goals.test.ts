@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { addKeyResult, createGoal, recomputeGoalProgress, updateGoal } from "./goals";
+import { addKeyResult, createGoal, recomputeGoalProgress, returnGoalToDraft, updateGoal } from "./goals";
 import { prisma } from "@corgtex/shared";
 
 vi.mock("@corgtex/shared", () => ({
@@ -83,7 +83,7 @@ describe("Goals Domain", () => {
           data: expect.objectContaining({
             title: "Test Goal",
             level: "COMPANY",
-            status: "ACTIVE",
+            status: "DRAFT",
           }),
         })
       );
@@ -184,6 +184,9 @@ describe("Goals Domain", () => {
         id: "goal-1",
         workspaceId: "ws-1",
         archivedAt: null,
+        parentGoalId: null,
+        ownerMemberId: "member-1",
+        status: "ACTIVE",
       } as any);
       vi.mocked(prisma.goal.update).mockResolvedValueOnce({
         id: "goal-1",
@@ -206,6 +209,35 @@ describe("Goals Domain", () => {
       expect(prisma.goal.update).toHaveBeenCalledWith(expect.objectContaining({
         where: { id: "goal-1" },
         data: { status: "ON_TRACK", progressPercent: 65 },
+      }));
+    });
+
+    it("returns an active goal to draft for the owner", async () => {
+      vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce({
+        id: "goal-1",
+        workspaceId: "ws-1",
+        archivedAt: null,
+        parentGoalId: null,
+        ownerMemberId: "member-1",
+        status: "ACTIVE",
+      } as any);
+      vi.mocked(prisma.goal.update).mockResolvedValueOnce({
+        id: "goal-1",
+        workspaceId: "ws-1",
+        status: "DRAFT",
+      } as any);
+
+      await expect(returnGoalToDraft(actor, {
+        workspaceId: "ws-1",
+        goalId: "goal-1",
+      })).resolves.toMatchObject({
+        id: "goal-1",
+        status: "DRAFT",
+      });
+
+      expect(prisma.goal.update).toHaveBeenCalledWith(expect.objectContaining({
+        where: { id: "goal-1" },
+        data: { status: "DRAFT" },
       }));
     });
   });

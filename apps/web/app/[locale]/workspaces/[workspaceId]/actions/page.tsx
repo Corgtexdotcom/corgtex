@@ -1,10 +1,11 @@
-import { listActions, listProposals } from "@corgtex/domain";
+import { listActions, listProposals, requireWorkspaceMembership } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import {
   createActionAction,
   updateActionAction,
   deleteActionAction,
   publishActionAction,
+  returnActionToDraftAction,
 } from "../actions";
 import { getTranslations } from "next-intl/server";
 import {
@@ -26,6 +27,7 @@ export default async function ActionsPage({
   const { workspaceId } = await params;
   const actor = await requirePageActor();
   const t = await getTranslations("actions");
+  const membership = await requireWorkspaceMembership({ actor, workspaceId });
   const [{ items: actions }, { items: proposals }] = await Promise.all([
     listActions(actor, workspaceId, { take: 50 }),
     listProposals(actor, workspaceId, { take: 50 }),
@@ -37,6 +39,9 @@ export default async function ActionsPage({
   const statusFilter = normalizeActionStatusFilter(resolvedSearch.status);
   const groupedActions = groupActionsByStatus(actions);
   const displayActions = groupedActions[statusFilter];
+  const canManageAction = (action: { authorUserId: string }) => actor.kind === "agent"
+    || membership?.role === "ADMIN"
+    || (actor.kind === "user" && action.authorUserId === actor.user.id);
 
   const ageText = (date: Date) => {
     const timestamp = new Date(date).getTime();
@@ -77,6 +82,7 @@ export default async function ActionsPage({
             const assigneeName = action.assigneeMember?.user?.displayName || action.assigneeMember?.user?.email;
             const createdAge = ageText(action.createdAt);
             const dueDate = action.dueAt ? new Date(action.dueAt).toLocaleDateString() : null;
+            const canManage = canManageAction(action);
 
             return (
               <div className="nr-item" key={action.id}>
@@ -98,11 +104,18 @@ export default async function ActionsPage({
                 </div>
 
                 <div className="actions-inline" style={{ marginTop: 12 }}>
-                  {action.status === "DRAFT" && (
+                  {canManage && action.status === "DRAFT" && (
                     <form action={publishActionAction}>
                       <input type="hidden" name="workspaceId" value={workspaceId} />
                       <input type="hidden" name="actionId" value={action.id} />
                       <button type="submit" className="primary small">{t("btnOpen")}</button>
+                    </form>
+                  )}
+                  {canManage && (action.status === "OPEN" || action.status === "IN_PROGRESS") && (
+                    <form action={returnActionToDraftAction}>
+                      <input type="hidden" name="workspaceId" value={workspaceId} />
+                      <input type="hidden" name="actionId" value={action.id} />
+                      <button type="submit" className="secondary small">{t("btnReturnToDraft")}</button>
                     </form>
                   )}
                   {action.status === "OPEN" && (
@@ -127,6 +140,24 @@ export default async function ActionsPage({
                     <button type="submit" className="danger small">{t("btnDelete")}</button>
                   </form>
                 </div>
+                {canManage && action.status === "DRAFT" && (
+                  <details style={{ marginTop: 12 }}>
+                    <summary className="secondary small nr-hide-marker" style={{ cursor: "pointer", display: "inline-block" }}>{t("btnEdit")}</summary>
+                    <form action={updateActionAction} className="stack nr-form-section" style={{ marginTop: 12 }}>
+                      <input type="hidden" name="workspaceId" value={workspaceId} />
+                      <input type="hidden" name="actionId" value={action.id} />
+                      <label>
+                        {t("formTitle")}
+                        <input name="title" defaultValue={action.title} required />
+                      </label>
+                      <label>
+                        {t("formNotes")}
+                        <textarea name="bodyMd" defaultValue={action.bodyMd ?? ""} />
+                      </label>
+                      <button type="submit" className="secondary small">{t("btnSaveDraft")}</button>
+                    </form>
+                  </details>
+                )}
               </div>
             );
           })}

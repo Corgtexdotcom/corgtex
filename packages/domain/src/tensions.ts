@@ -5,6 +5,7 @@ import { appendEvents } from "./events";
 import { actorUserIdForWorkspace, requireWorkspaceMembership } from "./auth";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { invariant } from "./errors";
+import { requireDraftManager } from "./draft-permissions";
 
 import { privacyFilter } from "./privacy";
 
@@ -151,7 +152,7 @@ export async function updateTension(actor: AppActor, params: {
   priority?: number;
   isPrivate?: boolean;
 }) {
-  await requireWorkspaceMembership({
+  const membership = await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
   });
@@ -164,6 +165,17 @@ export async function updateTension(actor: AppActor, params: {
     invariant(tension && tension.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Tension not found.");
 
     const data: Record<string, unknown> = {};
+    const editsDraftContent = params.title !== undefined
+      || params.bodyMd !== undefined
+      || params.circleId !== undefined
+      || params.assigneeMemberId !== undefined
+      || params.raisedByMemberId !== undefined
+      || params.priority !== undefined
+      || params.isPrivate !== undefined;
+    if (editsDraftContent) {
+      invariant(tension.status === "DRAFT", 400, "INVALID_STATE", "Only draft tensions can be edited.");
+      await requireDraftManager({ actor, workspaceId: params.workspaceId, record: tension, resolvedMembership: membership });
+    }
     if (params.title !== undefined) {
       const title = params.title.trim();
       invariant(title.length > 0, 400, "INVALID_INPUT", "Tension title is required.");
@@ -171,6 +183,15 @@ export async function updateTension(actor: AppActor, params: {
     }
     if (params.bodyMd !== undefined) data.bodyMd = params.bodyMd?.trim() || null;
     if (params.status !== undefined) {
+      if (params.status === "DRAFT") {
+        invariant(tension.status === "OPEN", 400, "INVALID_STATE", "Only open tensions can be returned to draft.");
+        await requireDraftManager({ actor, workspaceId: params.workspaceId, record: tension, resolvedMembership: membership });
+        data.isPrivate = true;
+        data.publishedAt = null;
+        data.resolvedVia = null;
+      } else if (tension.status === "DRAFT") {
+        await requireDraftManager({ actor, workspaceId: params.workspaceId, record: tension, resolvedMembership: membership });
+      }
       data.status = params.status;
       if (params.status !== "DRAFT") {
         data.isPrivate = false;
@@ -281,7 +302,7 @@ export async function publishTension(actor: AppActor, params: {
   workspaceId: string;
   tensionId: string;
 }) {
-  await requireWorkspaceMembership({
+  const membership = await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
   });
@@ -293,7 +314,8 @@ export async function publishTension(actor: AppActor, params: {
 
     invariant(tension && tension.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Tension not found.");
     invariant(tension.isPrivate, 400, "INVALID_STATE", "Tension is already public.");
-    invariant(actor.kind === "user" && tension.authorUserId === actor.user.id, 403, "FORBIDDEN", "Only the author can publish this tension.");
+    invariant(tension.status === "DRAFT", 400, "INVALID_STATE", "Only draft tensions can be opened.");
+    await requireDraftManager({ actor, workspaceId: params.workspaceId, record: tension, resolvedMembership: membership });
 
     const updated = await tx.tension.update({
       where: { id: params.tensionId },
@@ -315,6 +337,59 @@ export async function publishTension(actor: AppActor, params: {
       {
         workspaceId: params.workspaceId,
         type: "tension.published",
+        aggregateType: "Tension",
+        aggregateId: updated.id,
+        payload: { tensionId: updated.id },
+      },
+    ]);
+
+    return updated;
+  });
+}
+
+export async function returnTensionToDraft(actor: AppActor, params: {
+  workspaceId: string;
+  tensionId: string;
+}) {
+  const membership = await requireWorkspaceMembership({
+    actor,
+    workspaceId: params.workspaceId,
+  });
+
+  return prisma.$transaction(async (tx) => {
+    const tension = await tx.tension.findUnique({
+      where: { id: params.tensionId },
+    });
+
+    invariant(tension && tension.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Tension not found.");
+    invariant(tension.status === "OPEN", 400, "INVALID_STATE", "Only open tensions can be returned to draft.");
+    await requireDraftManager({ actor, workspaceId: params.workspaceId, record: tension, resolvedMembership: membership });
+
+    const updated = await tx.tension.update({
+      where: { id: params.tensionId },
+      data: {
+        status: "DRAFT",
+        isPrivate: true,
+        publishedAt: null,
+        resolvedVia: null,
+      },
+    });
+
+    await tx.auditLog.create({
+      data: {
+        workspaceId: params.workspaceId,
+        actorUserId: actor.kind === "user" ? actor.user.id : null,
+        action: "tension.returned_to_draft",
+        entityType: "Tension",
+        entityId: updated.id,
+        meta: { title: updated.title },
+      },
+    });
+
+    await appendEvents(tx, [
+      {
+        workspaceId: params.workspaceId,
+        type: "tension.returned_to_draft",
         aggregateType: "Tension",
         aggregateId: updated.id,
         payload: { tensionId: updated.id },

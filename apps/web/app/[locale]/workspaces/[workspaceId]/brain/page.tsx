@@ -1,7 +1,7 @@
 import { getBrainStatus, listArticles, requireWorkspaceMembership, listMeetings, listDocuments } from "@corgtex/domain";
 import { answerKnowledgeQuestion, searchIndexedKnowledge } from "@corgtex/knowledge";
 import { requirePageActor } from "@/lib/auth";
-import { createArticleAction } from "./actions";
+import { createArticleAction, publishArticleAction, returnArticleToDraftAction } from "./actions";
 import { getTranslations } from "next-intl/server";
 
 export const dynamic = "force-dynamic";
@@ -15,7 +15,7 @@ export default async function BrainPage({
 }) {
   const { workspaceId } = await params;
   const actor = await requirePageActor();
-  await requireWorkspaceMembership({ actor, workspaceId });
+  const membership = await requireWorkspaceMembership({ actor, workspaceId });
   const t = await getTranslations("brain");
   const resolvedSearch = searchParams ? await searchParams : {};
   const query = typeof resolvedSearch.q === "string" ? resolvedSearch.q : "";
@@ -53,6 +53,9 @@ export default async function BrainPage({
 
   // Sort groups alphabetically
   const sortedTypes = [...byType.entries()].sort(([a], [b]) => a.localeCompare(b));
+  const canManageArticle = (article: { ownerMemberId?: string | null }) => actor.kind === "agent"
+    || membership?.role === "ADMIN"
+    || (Boolean(article.ownerMemberId) && article.ownerMemberId === membership?.id);
 
   return (
     <>
@@ -139,7 +142,9 @@ export default async function BrainPage({
               <div key={type} className="nr-category">
                 <h3>{type}</h3>
                 <ul>
-                  {typeArticles.map((a) => (
+                  {typeArticles.map((a) => {
+                    const canManage = canManageArticle(a);
+                    return (
                     <li key={a.id} style={{ marginBottom: "12px" }}>
                       <a href={`/workspaces/${workspaceId}/brain/${a.slug}`} style={{ fontSize: "0.95rem", fontWeight: 500 }}>
                         {a.isPrivate && <span title={t("privateDraft")} style={{ marginRight: 6 }}>◆</span>}
@@ -148,8 +153,29 @@ export default async function BrainPage({
                       {a.authority === "AUTHORITATIVE" && <span style={{ fontSize: "0.6rem", padding: "1px 4px", background: "var(--accent)", color: "var(--accent-fg)", borderRadius: "2px", marginLeft: "6px", verticalAlign: "middle" }}>{t("core")}</span>}
                       {a.authority === "DRAFT" && <span style={{ fontSize: "0.6rem", padding: "1px 4px", background: "var(--warning-soft)", color: "var(--warning)", borderRadius: "2px", marginLeft: "6px", verticalAlign: "middle" }}>{t("draft")}</span>}
                       <div style={{ fontSize: "0.8rem", color: "var(--muted)", marginTop: "2px" }}>{a.bodyMd.replace(/[#*]/g, '').slice(0, 80)}...</div>
+                      {canManage && (
+                        <div className="actions-inline" style={{ marginTop: 6 }}>
+                          {a.isPrivate && a.authority === "DRAFT" && (
+                            <form action={publishArticleAction}>
+                              <input type="hidden" name="workspaceId" value={workspaceId} />
+                              <input type="hidden" name="slug" value={a.slug} />
+                              <button type="submit" className="secondary small">{t("open")}</button>
+                            </form>
+                          )}
+                          {!a.isPrivate && (
+                            <form action={returnArticleToDraftAction}>
+                              <input type="hidden" name="workspaceId" value={workspaceId} />
+                              <input type="hidden" name="slug" value={a.slug} />
+                              <button type="submit" className="secondary small">{t("returnToDraft")}</button>
+                            </form>
+                          )}
+                          {a.authority === "DRAFT" && (
+                            <a href={`/workspaces/${workspaceId}/brain/${a.slug}/edit`} className="secondary small">{t("edit")}</a>
+                          )}
+                        </div>
+                      )}
                     </li>
-                  ))}
+                  );})}
                 </ul>
               </div>
             ))}

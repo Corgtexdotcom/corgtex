@@ -5,6 +5,7 @@ import { enforceDemoGuard } from "@/lib/demo-guard";
 import {
   createGoal,
   updateGoal,
+  returnGoalToDraft,
   deleteGoal,
   addKeyResult,
   updateKeyResult,
@@ -121,7 +122,7 @@ export async function createGoalFormAction(formData: FormData) {
     descriptionMd: asOptional(formData, "descriptionMd"),
     level: asString(formData, "level") as GoalLevel,
     cadence: asString(formData, "cadence") as GoalCadence,
-    status: (asOptional(formData, "status") as GoalStatus | null) ?? "ACTIVE",
+    status: (asOptional(formData, "status") as GoalStatus | null) ?? "DRAFT",
     startDate: optionalDate(formData, "startDate"),
     targetDate: optionalDate(formData, "targetDate"),
     parentGoalId: asOptional(formData, "parentGoalId"),
@@ -152,6 +153,19 @@ export async function updateGoalFormAction(formData: FormData) {
     parentGoalId: formData.has("parentGoalId") ? asOptional(formData, "parentGoalId") : undefined,
     circleId: formData.has("circleId") ? asOptional(formData, "circleId") : undefined,
     ownerMemberId: formData.has("ownerMemberId") ? asOptional(formData, "ownerMemberId") : undefined,
+  });
+  refresh(workspaceId);
+}
+
+export async function returnGoalToDraftFormAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = await requireGoalsEnabled(formData);
+  await returnGoalToDraft(actor, {
+    workspaceId,
+    goalId: asString(formData, "goalId"),
   });
   refresh(workspaceId);
 }

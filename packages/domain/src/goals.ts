@@ -5,6 +5,7 @@ import { requireWorkspaceMembership } from "./auth";
 import { recordAudit } from "./audit-trail";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { invariant } from "./errors";
+import { requireDraftManager } from "./draft-permissions";
 import type { GoalLevel, GoalCadence, GoalStatus, Prisma } from "@prisma/client";
 
 type GoalKeyResultInput = {
@@ -24,7 +25,7 @@ function clampProgressPercent(value: number, fieldName = "Progress") {
 
 function keyResultProgress(keyResult: GoalKeyResultInput) {
   if (keyResult.targetValue && keyResult.targetValue > 0) {
-    return Math.min(100, Math.max(0, Math.round(((keyResult.currentValue || 0) / keyResult.targetValue) * 100)));
+    return clampProgressPercent(((keyResult.currentValue || 0) / keyResult.targetValue) * 100, "Key result progress");
   }
   return 0;
 }
@@ -32,7 +33,7 @@ function keyResultProgress(keyResult: GoalKeyResultInput) {
 async function assertGoalInWorkspace(tx: Prisma.TransactionClient, workspaceId: string, goalId: string) {
   const goal = await tx.goal.findUnique({
     where: { id: goalId },
-    select: { id: true, workspaceId: true, archivedAt: true },
+    select: { id: true, workspaceId: true, archivedAt: true, parentGoalId: true, ownerMemberId: true, status: true },
   });
   invariant(goal && goal.workspaceId === workspaceId && !goal.archivedAt, 404, "NOT_FOUND", "Goal not found.");
   return goal;
@@ -145,7 +146,7 @@ export async function createGoal(
         descriptionMd: params.descriptionMd || null,
         level: params.level ?? "COMPANY",
         cadence: params.cadence ?? "QUARTERLY",
-        status: params.status ?? "ACTIVE",
+        status: params.status ?? "DRAFT",
         progressPercent,
         targetDate: params.targetDate || null,
         startDate: params.startDate || null,
@@ -208,14 +209,14 @@ export async function updateGoal(
     _membership?: MembershipSummary | null;
   }
 ) {
-  await requireWorkspaceMembership({
+  const membership = await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
     resolvedMembership: params._membership,
   });
 
   return prisma.$transaction(async (tx) => {
-    await assertGoalInWorkspace(tx, params.workspaceId, params.goalId);
+    const goal = await assertGoalInWorkspace(tx, params.workspaceId, params.goalId);
     await validateGoalReferences(tx, {
       workspaceId: params.workspaceId,
       currentGoalId: params.goalId,
@@ -225,6 +226,29 @@ export async function updateGoal(
     });
 
     const data: Record<string, unknown> = {};
+    const editsDraftContent = params.title !== undefined
+      || params.descriptionMd !== undefined
+      || params.level !== undefined
+      || params.cadence !== undefined
+      || params.targetDate !== undefined
+      || params.startDate !== undefined
+      || params.parentGoalId !== undefined
+      || params.circleId !== undefined
+      || params.ownerMemberId !== undefined;
+    const changesWorkflow = params.status !== undefined || params.progressPercent !== undefined;
+
+    if (editsDraftContent) {
+      invariant(goal.status === "DRAFT", 400, "INVALID_STATE", "Only draft goals can be edited.");
+      await requireDraftManager({ actor, workspaceId: params.workspaceId, record: goal, resolvedMembership: membership });
+    }
+    if (changesWorkflow) {
+      if (params.status === "DRAFT") {
+        invariant(["ACTIVE", "ON_TRACK", "AT_RISK", "BEHIND"].includes(goal.status), 400, "INVALID_STATE", "Only active goals can be returned to draft.");
+      } else if (goal.status === "COMPLETED" || goal.status === "ABANDONED") {
+        invariant(params.progressPercent === undefined && params.status === undefined, 400, "INVALID_STATE", "Completed or abandoned goals cannot be changed.");
+      }
+      await requireDraftManager({ actor, workspaceId: params.workspaceId, record: goal, resolvedMembership: membership });
+    }
     if (params.title !== undefined) {
       const title = params.title.trim();
       invariant(title.length > 0, 400, "INVALID_INPUT", "Goal title is required.");
@@ -268,6 +292,19 @@ export async function updateGoal(
     ]);
 
     return updated;
+  });
+}
+
+export async function returnGoalToDraft(actor: AppActor, params: {
+  workspaceId: string;
+  goalId: string;
+  _membership?: MembershipSummary | null;
+}) {
+  return updateGoal(actor, {
+    workspaceId: params.workspaceId,
+    goalId: params.goalId,
+    status: "DRAFT",
+    _membership: params._membership,
   });
 }
 
@@ -399,7 +436,7 @@ export async function addKeyResult(
     _membership?: MembershipSummary | null;
   }
 ) {
-  await requireWorkspaceMembership({
+  const membership = await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
     resolvedMembership: params._membership,
@@ -413,6 +450,8 @@ export async function addKeyResult(
     select: { id: true, workspaceId: true, archivedAt: true, ownerMemberId: true, status: true },
   });
   invariant(goal && goal.workspaceId === params.workspaceId && !goal.archivedAt, 404, "NOT_FOUND", "Goal not found.");
+  invariant(goal.status === "DRAFT", 400, "INVALID_STATE", "Only draft goals can be edited.");
+  await requireDraftManager({ actor, workspaceId: params.workspaceId, record: goal, resolvedMembership: membership });
 
   const progressPercent = keyResultProgress(params);
 
@@ -444,7 +483,7 @@ export async function updateKeyResult(
     _membership?: MembershipSummary | null;
   }
 ) {
-  await requireWorkspaceMembership({
+  const membership = await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
     resolvedMembership: params._membership,
@@ -455,6 +494,8 @@ export async function updateKeyResult(
     include: { goal: true },
   });
   invariant(kr && kr.goal.workspaceId === params.workspaceId && !kr.goal.archivedAt, 404, "NOT_FOUND", "Key Result not found.");
+  invariant(kr.goal.status === "DRAFT", 400, "INVALID_STATE", "Only draft goals can be edited.");
+  await requireDraftManager({ actor, workspaceId: params.workspaceId, record: kr.goal, resolvedMembership: membership });
 
   const data: any = {};
   if (params.title !== undefined) {
@@ -493,7 +534,7 @@ export async function deleteKeyResult(
     _membership?: MembershipSummary | null;
   }
 ) {
-  await requireWorkspaceMembership({
+  const membership = await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
     resolvedMembership: params._membership,
@@ -504,6 +545,8 @@ export async function deleteKeyResult(
     include: { goal: true },
   });
   invariant(kr && kr.goal.workspaceId === params.workspaceId && !kr.goal.archivedAt, 404, "NOT_FOUND", "Key Result not found.");
+  invariant(kr.goal.status === "DRAFT", 400, "INVALID_STATE", "Only draft goals can be edited.");
+  await requireDraftManager({ actor, workspaceId: params.workspaceId, record: kr.goal, resolvedMembership: membership });
 
   await prisma.keyResult.delete({ where: { id: params.krId } });
   await recomputeGoalProgress(kr.goalId);

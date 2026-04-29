@@ -9,6 +9,7 @@ import {
   createProposal,
   postReaction,
   resolveReaction,
+  returnProposalToDraft,
   submitProposal,
   updateProposal,
   publishProposal,
@@ -63,6 +64,19 @@ export async function submitProposalAction(formData: FormData) {
     workspaceId,
     proposalId: asString(formData, "proposalId"),
     autoApproveHours: asOptionalInt(formData, "autoApproveHours"),
+  });
+  refresh(workspaceId);
+}
+
+export async function returnProposalToDraftAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  await returnProposalToDraft(actor, {
+    workspaceId,
+    proposalId: asString(formData, "proposalId"),
   });
   refresh(workspaceId);
 }

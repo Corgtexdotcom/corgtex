@@ -1,6 +1,6 @@
 import { Fragment } from "react";
 import Link from "next/link";
-import { listDeliberationEntries, listLedgerAccounts, listSpends } from "@corgtex/domain";
+import { listDeliberationEntries, listLedgerAccounts, listSpends, requireWorkspaceMembership } from "@corgtex/domain";
 import { prisma } from "@corgtex/shared";
 import { requirePageActor } from "@/lib/auth";
 import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
@@ -16,8 +16,10 @@ import {
   linkSpendLedgerAccountAction,
   markSpendPaidAction,
   postSpendDeliberationAction,
+  returnSpendToDraftAction,
   resolveSpendDeliberationAction,
   submitSpendAction,
+  updateSpendAction,
   updateLedgerAccountAction,
   updateSpendReconciliationAction,
   uploadSpendStatementAction,
@@ -53,13 +55,14 @@ export default async function FinancePage({
   const { workspaceId } = await params;
   const actor = await requirePageActor();
   const t = await getTranslations("finance");
+  const membership = await requireWorkspaceMembership({ actor, workspaceId });
   const resolvedSearch = searchParams ? await searchParams : {};
   const activeTab = typeof resolvedSearch.tab === "string" ? resolvedSearch.tab : "spends";
   const statusFilter = normalizeFilter(resolvedSearch.status);
   const activeDiscussionId = typeof resolvedSearch.discuss === "string" ? resolvedSearch.discuss : null;
 
   const [spendsResult, ledgerAccountsResult, currentWorkspace, deliberationTargets] = await Promise.all([
-    listSpends(workspaceId, { take: 200 }),
+    listSpends(actor, workspaceId, { take: 200 }),
     listLedgerAccounts(workspaceId, { take: 50 }),
     prisma.workspace.findUnique({ where: { id: workspaceId }, select: { slug: true } }),
     getDeliberationTargets({ actor, workspaceId }),
@@ -92,6 +95,10 @@ export default async function FinancePage({
   );
   const isBlocked = (spendId: string) => unresolvedObjectionCount(spendId) > 0;
   const isPaid = (spend: { spentAt?: Date | null }) => Boolean(spend.spentAt);
+  const canManageSpend = (spend: { requesterUserId: string }) => actor.kind === "agent"
+    || membership?.role === "ADMIN"
+    || (actor.kind === "user" && spend.requesterUserId === actor.user.id);
+
   const totalOpen = spends.filter((spend) => spend.status === "OPEN").reduce((sum, spend) => sum + spend.amountCents, 0);
   const totalApproved = spends
     .filter((spend) => spend.status === "RESOLVED" && spend.resolutionOutcome === "APPROVED")
@@ -266,6 +273,7 @@ export default async function FinancePage({
                       (spend.status === "OPEN" && objectionCount === 0) ||
                       (spend.status === "RESOLVED" && spend.resolutionOutcome === "APPROVED")
                     );
+                    const canManage = canManageSpend(spend);
                     const discussionHref = activeDiscussionId === spend.id
                       ? `?tab=spends&status=${statusFilter}`
                       : `?tab=spends&status=${statusFilter}&discuss=${spend.id}`;
@@ -308,11 +316,18 @@ export default async function FinancePage({
                           </td>
                           {!isDemo && (
                             <td className="fin-td-actions">
-                              {spend.status === "DRAFT" && (
+                              {canManage && spend.status === "DRAFT" && (
                                 <form action={submitSpendAction} style={{ display: "inline" }}>
                                   <input type="hidden" name="workspaceId" value={workspaceId} />
                                   <input type="hidden" name="spendId" value={spend.id} />
                                   <button type="submit" className="fin-action-btn">{t("btnOpen")}</button>
+                                </form>
+                              )}
+                              {canManage && spend.status === "OPEN" && !spend.spentAt && spend.reconciliationStatus === "PENDING" && (
+                                <form action={returnSpendToDraftAction} style={{ display: "inline" }}>
+                                  <input type="hidden" name="workspaceId" value={workspaceId} />
+                                  <input type="hidden" name="spendId" value={spend.id} />
+                                  <button type="submit" className="fin-action-btn">{t("btnReturnToDraft")}</button>
                                 </form>
                               )}
                               <Link href={discussionHref} className="fin-action-btn">
@@ -321,6 +336,24 @@ export default async function FinancePage({
                               <details style={{ display: "inline-block" }}>
                                 <summary className="fin-action-btn" style={{ cursor: "pointer" }}>{t("btnEdit")}</summary>
                                 <div className="fin-dropdown" style={{ width: 320, padding: "16px" }}>
+                                  {canManage && spend.status === "DRAFT" && (
+                                    <form action={updateSpendAction} className="fin-dropdown-form">
+                                      <input type="hidden" name="workspaceId" value={workspaceId} />
+                                      <input type="hidden" name="spendId" value={spend.id} />
+                                      <input name="amount" type="number" step="0.01" min="0.01" defaultValue={(spend.amountCents / 100).toFixed(2)} required />
+                                      <input name="currency" defaultValue={spend.currency} required />
+                                      <input name="category" defaultValue={spend.category} required />
+                                      <textarea name="description" defaultValue={spend.description} required />
+                                      <input name="vendor" defaultValue={spend.vendor ?? ""} placeholder={t("colVendor")} />
+                                      <select name="ledgerAccountId" defaultValue={spend.ledgerAccountId ?? ""}>
+                                        <option value="">{t("unassigned")}</option>
+                                        {ledgerAccounts.map((account) => (
+                                          <option key={account.id} value={account.id}>{account.name} ({account.currency})</option>
+                                        ))}
+                                      </select>
+                                      <button type="submit" className="fin-action-btn">{t("btnSaveDraft")}</button>
+                                    </form>
+                                  )}
                                   {canPay && (
                                     <form action={markSpendPaidAction} className="fin-dropdown-form">
                                       <input type="hidden" name="workspaceId" value={workspaceId} />

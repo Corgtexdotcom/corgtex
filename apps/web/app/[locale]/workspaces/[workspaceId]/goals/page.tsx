@@ -17,6 +17,7 @@ import {
   addKeyResultFormAction,
   archiveGoalFormAction,
   createGoalFormAction,
+  returnGoalToDraftFormAction,
   updateGoalFormAction,
 } from "./actions";
 import type { GoalCadence, GoalLevel, GoalStatus } from "@prisma/client";
@@ -48,7 +49,7 @@ export default async function GoalsPage({
   const actor = await requirePageActor();
   const t = await getTranslations("goals");
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
-  const canManageGoals = actor.kind === "agent" || Boolean(membership);
+  const canManageAnyGoal = actor.kind === "agent" || membership?.role === "ADMIN";
 
   const [allGoals, circles, members] = await Promise.all([
     listGoals(actor, { workspaceId }),
@@ -134,7 +135,7 @@ export default async function GoalsPage({
                 </label>
                 <label style={{ flex: 1 }}>
                   {t("formStatus")}
-                  <select name="status" defaultValue="ACTIVE">
+                  <select name="status" defaultValue="DRAFT">
                     {STATUSES.map((status) => (
                       <option key={status} value={status}>{status}</option>
                     ))}
@@ -230,7 +231,8 @@ export default async function GoalsPage({
                   allGoals={allGoals}
                   circles={circles}
                   members={members}
-                  canManageGoals={canManageGoals}
+                  canManageAnyGoal={canManageAnyGoal}
+                  membershipId={membership?.id ?? null}
                 />
               ))
             )}
@@ -299,7 +301,8 @@ function GoalNode({
   allGoals,
   circles,
   members,
-  canManageGoals,
+  canManageAnyGoal,
+  membershipId,
 }: {
   workspaceId: string;
   goal: any;
@@ -307,7 +310,8 @@ function GoalNode({
   allGoals: any[];
   circles: any[];
   members: any[];
-  canManageGoals: boolean;
+  canManageAnyGoal: boolean;
+  membershipId: string | null;
 }) {
   return (
     <GoalNodeInner
@@ -317,7 +321,8 @@ function GoalNode({
       allGoals={allGoals}
       circles={circles}
       members={members}
-      canManageGoals={canManageGoals}
+      canManageAnyGoal={canManageAnyGoal}
+      membershipId={membershipId}
     />
   );
 }
@@ -329,7 +334,8 @@ function GoalNodeInner({
   allGoals,
   circles,
   members,
-  canManageGoals,
+  canManageAnyGoal,
+  membershipId,
 }: {
   workspaceId: string;
   goal: any;
@@ -337,9 +343,12 @@ function GoalNodeInner({
   allGoals: any[];
   circles: any[];
   members: any[];
-  canManageGoals: boolean;
+  canManageAnyGoal: boolean;
+  membershipId: string | null;
 }) {
   const t = useTranslations("goals");
+  const canManage = canManageAnyGoal || (Boolean(goal.ownerMemberId) && goal.ownerMemberId === membershipId);
+  const canReturnToDraft = ["ACTIVE", "ON_TRACK", "AT_RISK", "BEHIND"].includes(goal.status);
   return (
     <div className="border border-line rounded-lg bg-surface-strong shadow-sm overflow-hidden mb-3" style={{ marginLeft: `${level * 1.5}rem` }}>
       <div className="p-4">
@@ -360,7 +369,11 @@ function GoalNodeInner({
             {goal.descriptionMd && <div className="text-sm text-muted mt-1 whitespace-pre-wrap">{goal.descriptionMd}</div>}
             {goal.ownerMember && (
               <div className="text-sm text-muted flex items-center gap-1.5 mb-2 mt-2">
-                <div className="w-4 h-4 rounded-full bg-accent-soft" />
+                {goal.ownerMember.user?.avatarUrl ? (
+                  <img src={goal.ownerMember.user.avatarUrl} alt="" className="w-4 h-4 rounded-full" />
+                ) : (
+                  <div className="w-4 h-4 rounded-full bg-accent-soft" />
+                )}
                 <span>{goal.ownerMember.user?.displayName || t("unknown")}</span>
               </div>
             )}
@@ -396,8 +409,25 @@ function GoalNodeInner({
           </div>
         )}
 
-        {canManageGoals && (
+        {canManage && (
         <div className="mt-4 pt-3 border-t border-line-subtle space-y-3">
+          <div className="actions-inline">
+            {goal.status === "DRAFT" && (
+              <form action={updateGoalFormAction}>
+                <input type="hidden" name="workspaceId" value={workspaceId} />
+                <input type="hidden" name="goalId" value={goal.id} />
+                <input type="hidden" name="status" value="ACTIVE" />
+                <button type="submit" className="primary small">{t("btnOpen")}</button>
+              </form>
+            )}
+            {canReturnToDraft && (
+              <form action={returnGoalToDraftFormAction}>
+                <input type="hidden" name="workspaceId" value={workspaceId} />
+                <input type="hidden" name="goalId" value={goal.id} />
+                <button type="submit" className="secondary small">{t("btnReturnToDraft")}</button>
+              </form>
+            )}
+          </div>
           <form action={updateGoalFormAction} className="actions-inline">
             <input type="hidden" name="workspaceId" value={workspaceId} />
             <input type="hidden" name="goalId" value={goal.id} />
@@ -410,6 +440,7 @@ function GoalNodeInner({
             <button type="submit" className="secondary small">{t("btnSaveGoal")}</button>
           </form>
 
+          {goal.status === "DRAFT" && (
           <details>
             <summary className="nr-hide-marker" style={{ cursor: "pointer", fontSize: "0.85rem", color: "var(--accent)", fontWeight: 600 }}>
               {t("btnEdit")}
@@ -482,10 +513,12 @@ function GoalNodeInner({
                   </select>
                 </label>
               </div>
-              <button type="submit" className="secondary small">{t("btnSaveGoal")}</button>
+              <button type="submit" className="secondary small">{t("btnSaveDraft")}</button>
             </form>
           </details>
+          )}
 
+          {goal.status === "DRAFT" && (
           <details>
             <summary className="nr-hide-marker" style={{ cursor: "pointer", fontSize: "0.85rem", color: "var(--accent)", fontWeight: 600 }}>
               {t("addKeyResultTitle")}
@@ -500,6 +533,7 @@ function GoalNodeInner({
               <button type="submit" className="secondary small">{t("btnAddKeyResult")}</button>
             </form>
           </details>
+          )}
 
           <form action={archiveGoalFormAction}>
             <input type="hidden" name="workspaceId" value={workspaceId} />
@@ -521,7 +555,8 @@ function GoalNodeInner({
               allGoals={allGoals}
               circles={circles}
               members={members}
-              canManageGoals={canManageGoals}
+              canManageAnyGoal={canManageAnyGoal}
+              membershipId={membershipId}
             />
           ))}
         </div>
