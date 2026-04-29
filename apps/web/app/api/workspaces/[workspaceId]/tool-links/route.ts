@@ -4,6 +4,7 @@ import { createWorkspaceToolLink, listWorkspaceToolLinks } from "@corgtex/domain
 import type { ArchiveFilter } from "@corgtex/domain";
 import { validateBody } from "@/lib/http";
 import { withWorkspaceRoute } from "@/lib/route-handler";
+import { disabledWorkspaceFeatureResponse } from "@/lib/workspace-feature-route";
 
 export const dynamic = "force-dynamic";
 
@@ -23,6 +24,9 @@ const toolLinkSchema = z.object({
 });
 
 export const GET = withWorkspaceRoute(async (request, { actor, workspaceId }) => {
+  const disabled = await disabledWorkspaceFeatureResponse(workspaceId, "TOOL_LINKS");
+  if (disabled) return disabled;
+
   const archiveFilter = request.nextUrl.searchParams.get("archiveFilter") as ArchiveFilter | null;
   const links = await listWorkspaceToolLinks(actor, {
     workspaceId,
@@ -32,6 +36,9 @@ export const GET = withWorkspaceRoute(async (request, { actor, workspaceId }) =>
 });
 
 export const POST = withWorkspaceRoute(async (request, { actor, workspaceId }) => {
+  const disabled = await disabledWorkspaceFeatureResponse(workspaceId, "TOOL_LINKS");
+  if (disabled) return disabled;
+
   const parsed = await validateBody(request, toolLinkSchema);
   const link = await createWorkspaceToolLink(actor, {
     workspaceId,

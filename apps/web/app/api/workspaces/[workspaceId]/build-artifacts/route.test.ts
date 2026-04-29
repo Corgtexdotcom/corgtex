@@ -1,4 +1,4 @@
-import { NextRequest } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const listBuildArtifacts = vi.fn();
@@ -7,6 +7,7 @@ const getBuildArtifact = vi.fn();
 const updateBuildArtifact = vi.fn();
 const addBuildArtifactAsset = vi.fn();
 const revokeBuildArtifactPublicAccess = vi.fn();
+const disabledWorkspaceFeatureResponse = vi.fn();
 
 const actor = {
   kind: "user",
@@ -52,6 +53,10 @@ vi.mock("@/lib/route-handler", () => ({
   },
 }));
 
+vi.mock("@/lib/workspace-feature-route", () => ({
+  disabledWorkspaceFeatureResponse,
+}));
+
 function context(params: Record<string, string>) {
   return { params: Promise.resolve(params) };
 }
@@ -65,6 +70,7 @@ describe("build artifact workspace API routes", () => {
     updateBuildArtifact.mockResolvedValue({ id: "artifact-1", title: "Updated" });
     addBuildArtifactAsset.mockResolvedValue({ asset: { id: "asset-1" }, artifact: { id: "artifact-1" } });
     revokeBuildArtifactPublicAccess.mockResolvedValue({ id: "artifact-1", visibility: "REVOKED" });
+    disabledWorkspaceFeatureResponse.mockResolvedValue(null);
   });
 
   it("lists and creates artifacts for an authenticated workspace", async () => {
@@ -99,6 +105,21 @@ describe("build artifact workspace API routes", () => {
       workspaceId: "workspace-1",
       title: "Tools proof",
     }));
+  });
+
+  it("returns the feature guard response before touching artifact data", async () => {
+    disabledWorkspaceFeatureResponse.mockResolvedValueOnce(
+      NextResponse.json({ error: { code: "NOT_FOUND", message: "Not found." } }, { status: 404 }),
+    );
+
+    const { GET } = await import("./route");
+    const response = await GET(
+      new NextRequest("http://localhost/api/workspaces/workspace-1/build-artifacts"),
+      context({ workspaceId: "workspace-1" }),
+    );
+
+    expect(response.status).toBe(404);
+    expect(listBuildArtifacts).not.toHaveBeenCalled();
   });
 
   it("gets and updates artifact details", async () => {

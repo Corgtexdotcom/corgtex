@@ -3,6 +3,7 @@ import { z } from "zod";
 import { listBuildArtifacts, upsertBuildArtifact } from "@corgtex/domain";
 import { validateBody } from "@/lib/http";
 import { withWorkspaceRoute } from "@/lib/route-handler";
+import { disabledWorkspaceFeatureResponse } from "@/lib/workspace-feature-route";
 
 export const dynamic = "force-dynamic";
 
@@ -24,6 +25,9 @@ const artifactSchema = z.object({
 });
 
 export const GET = withWorkspaceRoute(async (request, { actor, workspaceId }) => {
+  const disabled = await disabledWorkspaceFeatureResponse(workspaceId, "BUILD_ARTIFACTS");
+  if (disabled) return disabled;
+
   const status = request.nextUrl.searchParams.get("status");
   const artifacts = await listBuildArtifacts(actor, {
     workspaceId,
@@ -33,6 +37,9 @@ export const GET = withWorkspaceRoute(async (request, { actor, workspaceId }) =>
 });
 
 export const POST = withWorkspaceRoute(async (request, { actor, workspaceId }) => {
+  const disabled = await disabledWorkspaceFeatureResponse(workspaceId, "BUILD_ARTIFACTS");
+  if (disabled) return disabled;
+
   const parsed = await validateBody(request, artifactSchema);
   const artifact = await upsertBuildArtifact(actor, {
     workspaceId,

@@ -3,6 +3,7 @@ import { z } from "zod";
 import { archiveWorkspaceToolLink, getWorkspaceToolLink, updateWorkspaceToolLink } from "@corgtex/domain";
 import { validateBody } from "@/lib/http";
 import { withWorkspaceRoute } from "@/lib/route-handler";
+import { disabledWorkspaceFeatureResponse } from "@/lib/workspace-feature-route";
 
 export const dynamic = "force-dynamic";
 
@@ -22,6 +23,9 @@ const updateToolLinkSchema = z.object({
 });
 
 export const GET = withWorkspaceRoute(async (_request, { actor, workspaceId, params }) => {
+  const disabled = await disabledWorkspaceFeatureResponse(workspaceId, "TOOL_LINKS");
+  if (disabled) return disabled;
+
   const link = await getWorkspaceToolLink(actor, {
     workspaceId,
     toolLinkId: params.toolLinkId,
@@ -30,6 +34,9 @@ export const GET = withWorkspaceRoute(async (_request, { actor, workspaceId, par
 });
 
 export const PATCH = withWorkspaceRoute(async (request, { actor, workspaceId, params }) => {
+  const disabled = await disabledWorkspaceFeatureResponse(workspaceId, "TOOL_LINKS");
+  if (disabled) return disabled;
+
   const parsed = await validateBody(request, updateToolLinkSchema);
   const link = await updateWorkspaceToolLink(actor, {
     workspaceId,
@@ -40,6 +47,9 @@ export const PATCH = withWorkspaceRoute(async (request, { actor, workspaceId, pa
 });
 
 export const DELETE = withWorkspaceRoute(async (request, { actor, workspaceId, params }) => {
+  const disabled = await disabledWorkspaceFeatureResponse(workspaceId, "TOOL_LINKS");
+  if (disabled) return disabled;
+
   await archiveWorkspaceToolLink(actor, {
     workspaceId,
     toolLinkId: params.toolLinkId,

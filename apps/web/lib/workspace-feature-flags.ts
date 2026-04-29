@@ -13,6 +13,8 @@ export type WorkspaceFeatureFlagMap = Record<WorkspaceFeatureFlag, boolean>;
 
 export const DEFAULT_WORKSPACE_FEATURE_FLAGS: WorkspaceFeatureFlagMap = {
   GOALS: true,
+  TOOL_LINKS: false,
+  BUILD_ARTIFACTS: false,
   RELATIONSHIPS: true,
   CYCLES: true,
   AGENT_GOVERNANCE: true,
@@ -23,6 +25,8 @@ export const DEFAULT_WORKSPACE_FEATURE_FLAGS: WorkspaceFeatureFlagMap = {
 
 const WORKSPACE_FEATURE_FLAG_VALUES: WorkspaceFeatureFlag[] = [
   "GOALS",
+  "TOOL_LINKS",
+  "BUILD_ARTIFACTS",
   "RELATIONSHIPS",
   "CYCLES",
   "AGENT_GOVERNANCE",
@@ -65,6 +69,11 @@ export async function requireWorkspaceFeature(workspaceId: string, flag: Workspa
   if (!flags[flag]) {
     notFound();
   }
+}
+
+export async function isWorkspaceFeatureEnabled(workspaceId: string, flag: WorkspaceFeatureFlag) {
+  const flags = await getWorkspaceFeatureFlags(workspaceId);
+  return flags[flag];
 }
 
 export type WorkspaceNavCapabilityMap = Partial<Record<WorkspaceNavCapability, boolean>>;

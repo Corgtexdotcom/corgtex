@@ -370,7 +370,11 @@ function GoalNodeInner({
             {goal.ownerMember && (
               <div className="text-sm text-muted flex items-center gap-1.5 mb-2 mt-2">
                 {goal.ownerMember.user?.avatarUrl ? (
-                  <img src={goal.ownerMember.user.avatarUrl} alt="" className="w-4 h-4 rounded-full" />
+                  <span
+                    aria-hidden="true"
+                    className="w-4 h-4 rounded-full bg-center bg-cover"
+                    style={{ backgroundImage: `url(${JSON.stringify(goal.ownerMember.user.avatarUrl)})` }}
+                  />
                 ) : (
                   <div className="w-4 h-4 rounded-full bg-accent-soft" />
                 )}
