@@ -35,6 +35,7 @@ type ArchiveEntityType =
   | "SpendRequest"
   | "Tension"
   | "WebhookEndpoint"
+  | "WorkspaceToolLink"
   | "WorkspaceAgentConfig";
 
 type ArchiveConfig = {
@@ -272,6 +273,22 @@ const ENTITY_CONFIGS: Record<ArchiveEntityType, ArchiveConfig> = {
     archiveAllowedRoles: ["ADMIN"],
     archiveData: () => ({ status: "DISABLED" }),
     restoreData: () => ({ status: "ACTIVE" }),
+  },
+  WorkspaceToolLink: {
+    entityType: "WorkspaceToolLink",
+    delegate: "workspaceToolLink",
+    findWhere: directWorkspace,
+    label: titleOrName,
+    canArchive: async ({ actor, membership, record }) => {
+      if (actor.kind === "agent") return;
+      if (membership && (membership.role === "ADMIN" || membership.role === "FACILITATOR")) return;
+      invariant(
+        record.createdByUserId && actor.kind === "user" && record.createdByUserId === actor.user.id,
+        403,
+        "FORBIDDEN",
+        "Only the creator, facilitators, or admins can archive this tool link.",
+      );
+    },
   },
   WorkspaceAgentConfig: {
     entityType: "WorkspaceAgentConfig",

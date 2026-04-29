@@ -20,7 +20,12 @@ export default async function TensionDetailPage({
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
   const entries = await listDeliberationEntries(actor, { workspaceId, parentType: "TENSION", parentId: tensionId });
   const deliberationTargets = await getDeliberationTargets({ actor, workspaceId, parentCircleId: tension.circleId });
-  const targetOptions = deliberationTargets.options;
+  const targetOptions = deliberationTargets.options.map((option) => ({
+    ...option,
+    label: option.kind === "circle"
+      ? t("targetCircle", { name: option.name })
+      : t("targetPerson", { name: option.name }),
+  }));
   const mappedEntries = entries.map((e: any) => ({
     ...e,
     authorName: e.author?.displayName || e.author?.email || t("authorUnknown"),

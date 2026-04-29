@@ -70,7 +70,12 @@ export default async function FinancePage({
   const isDemo = currentWorkspace?.slug === "jnj-demo";
   const spends = spendsResult.items;
   const ledgerAccounts = ledgerAccountsResult.items;
-  const targetOptions = deliberationTargets.options;
+  const targetOptions = deliberationTargets.options.map((option) => ({
+    ...option,
+    label: option.kind === "circle"
+      ? t("targetCircle", { name: option.name })
+      : t("targetPerson", { name: option.name }),
+  }));
 
   const entriesMap = new Map(
     await Promise.all(

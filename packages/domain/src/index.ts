@@ -42,6 +42,7 @@ export * from "./advice-process";
 export * from "./impact-footprint";
 export * from "./privacy";
 export * from "./draft-permissions";
+export * from "./tool-links";
 
 export * from "./check-ins";
 export * from "./artifact-permissions";

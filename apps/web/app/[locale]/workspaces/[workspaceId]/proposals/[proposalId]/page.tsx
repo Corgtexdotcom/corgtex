@@ -31,7 +31,12 @@ export default async function ProposalDetailPage({
     parentId: proposalId,
   });
   const deliberationTargets = await getDeliberationTargets({ actor, workspaceId, parentCircleId: proposal.circleId });
-  const targetOptions = deliberationTargets.options;
+  const targetOptions = deliberationTargets.options.map((option) => ({
+    ...option,
+    label: option.kind === "circle"
+      ? t("targetCircle", { name: option.name })
+      : t("targetPerson", { name: option.name }),
+  }));
 
   const htmlContent = renderMarkdown(proposal.bodyMd);
 

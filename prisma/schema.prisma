@@ -343,6 +343,7 @@ model Workspace {
   crmProspectWorkspacesAsTarget CrmProspectWorkspace[]      @relation("TargetWorkspace")
   procurementSetupSessions      ProcurementSetupSession[]
   procurementBillingHandoffs    ProcurementBillingHandoff[]
+  toolLinks                     WorkspaceToolLink[]
 }
 
 model WorkspaceFeatureFlag {
@@ -551,6 +552,7 @@ model User {
   reviewedQualifications  CrmQualification[]           @relation("QualificationReviewer")
   controlPlaneAccess      ControlPlaneInstanceAccess[]
   supportOperations       SupportOperation[]           @relation("SupportOperationActor")
+  createdToolLinks        WorkspaceToolLink[]          @relation("WorkspaceToolLinkCreator")
 }
 
 model Session {
@@ -671,9 +673,9 @@ model Circle {
   createdAt        DateTime  @default(now())
   updatedAt        DateTime  @updatedAt
 
-  workspace                   Workspace               @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  parentCircle                Circle?                 @relation("CircleTree", fields: [parentCircleId], references: [id], onDelete: SetNull)
-  childCircles                Circle[]                @relation("CircleTree")
+  workspace                   Workspace                    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  parentCircle                Circle?                      @relation("CircleTree", fields: [parentCircleId], references: [id], onDelete: SetNull)
+  childCircles                Circle[]                     @relation("CircleTree")
   roles                       Role[]
   actions                     Action[]
   tensions                    Tension[]
@@ -681,10 +683,55 @@ model Circle {
   policyCorpus                PolicyCorpus[]
   goals                       Goal[]
   agentAssignments            CircleAgentAssignment[]
-  targetedDeliberationEntries DeliberationEntry[]     @relation("DeliberationTargetCircle")
+  targetedDeliberationEntries DeliberationEntry[]          @relation("DeliberationTargetCircle")
+  toolLinkTags                WorkspaceToolLinkCircleTag[]
 
   @@index([workspaceId])
   @@index([workspaceId, archivedAt])
+}
+
+model WorkspaceToolLink {
+  id                  String    @id @default(uuid())
+  workspaceId         String
+  createdByUserId     String?
+  title               String
+  url                 String    @db.Text
+  category            String    @default("OTHER")
+  descriptionMd       String?   @db.Text
+  accessNotesMd       String?   @db.Text
+  previewTitle        String?
+  previewDescription  String?   @db.Text
+  previewImageUrl     String?   @db.Text
+  previewFaviconUrl   String?   @db.Text
+  credentialLabel     String?
+  credentialSecretEnc String?   @db.Text
+  archivedAt          DateTime?
+  archivedByUserId    String?
+  archiveReason       String?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  workspace  Workspace                    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  createdBy  User?                        @relation("WorkspaceToolLinkCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  circleTags WorkspaceToolLinkCircleTag[]
+
+  @@index([workspaceId, archivedAt])
+  @@index([workspaceId, category])
+  @@index([workspaceId, createdAt])
+  @@index([createdByUserId])
+}
+
+model WorkspaceToolLinkCircleTag {
+  id         String   @id @default(uuid())
+  toolLinkId String
+  circleId   String
+  createdAt  DateTime @default(now())
+
+  toolLink WorkspaceToolLink @relation(fields: [toolLinkId], references: [id], onDelete: Cascade)
+  circle   Circle            @relation(fields: [circleId], references: [id], onDelete: Cascade)
+
+  @@unique([toolLinkId, circleId])
+  @@index([circleId])
 }
 
 model Role {
