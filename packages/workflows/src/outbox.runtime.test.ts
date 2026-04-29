@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { prismaMock, txMock, runAgentWorkflowJobMock, runSlackAgentMock, processSlackInboundEventMock, purgeExpiredCommunicationMessagesMock, syncSlackPublicArchiveForWorkspaceMock, isAgentEnabledMock } = vi.hoisted(() => ({
+const { prismaMock, txMock, runAgentWorkflowJobMock, runSlackAgentMock, processSlackInboundEventMock, purgeExpiredCommunicationMessagesMock, syncSlackPublicArchiveForWorkspaceMock, runMeetingAgendaThreadEditMock, isAgentEnabledMock } = vi.hoisted(() => ({
   prismaMock: {
     $transaction: vi.fn(),
     workflowJob: {
@@ -24,6 +24,7 @@ const { prismaMock, txMock, runAgentWorkflowJobMock, runSlackAgentMock, processS
   processSlackInboundEventMock: vi.fn(),
   purgeExpiredCommunicationMessagesMock: vi.fn(),
   syncSlackPublicArchiveForWorkspaceMock: vi.fn(),
+  runMeetingAgendaThreadEditMock: vi.fn(),
   isAgentEnabledMock: vi.fn(),
 }));
 
@@ -54,6 +55,7 @@ vi.mock("@corgtex/domain", () => ({
   processSlackInboundEvent: processSlackInboundEventMock,
   purgeExpiredCommunicationMessages: purgeExpiredCommunicationMessagesMock,
   syncSlackPublicArchiveForWorkspace: syncSlackPublicArchiveForWorkspaceMock,
+  runMeetingAgendaThreadEdit: runMeetingAgendaThreadEditMock,
   isAgentEnabled: isAgentEnabledMock,
 }));
 
@@ -77,6 +79,7 @@ describe("runPendingJobs", () => {
     processSlackInboundEventMock.mockReset();
     purgeExpiredCommunicationMessagesMock.mockReset();
     syncSlackPublicArchiveForWorkspaceMock.mockReset();
+    runMeetingAgendaThreadEditMock.mockReset();
     isAgentEnabledMock.mockReset().mockResolvedValue(false);
   });
 
@@ -194,6 +197,47 @@ describe("runPendingJobs", () => {
       prompt: "Create an action",
       workflowJobId: "job-1",
     }));
+    expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({
+      where: { id: "job-1" },
+      data: expect.objectContaining({
+        status: "COMPLETED",
+      }),
+    });
+  });
+
+  it("dispatches Slack agenda edit jobs", async () => {
+    txMock.$queryRaw.mockResolvedValue([
+      {
+        id: "job-1",
+        workspaceId: "ws-1",
+        type: "meeting.agenda.edit",
+        payload: {
+          meetingId: "meeting-1",
+          actorUserId: "user-1",
+          installationId: "install-1",
+          channelId: "C1",
+          threadTs: "1710000000.000100",
+          messageTs: "1710000001.000100",
+          messageText: "Add Bob's detail",
+        },
+        attempts: 1,
+      },
+    ]);
+    runMeetingAgendaThreadEditMock.mockResolvedValue({ edited: true });
+
+    await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
+
+    expect(runMeetingAgendaThreadEditMock).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      workflowJobId: "job-1",
+      meetingId: "meeting-1",
+      actorUserId: "user-1",
+      installationId: "install-1",
+      channelId: "C1",
+      threadTs: "1710000000.000100",
+      messageTs: "1710000001.000100",
+      messageText: "Add Bob's detail",
+    });
     expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({
       where: { id: "job-1" },
       data: expect.objectContaining({
