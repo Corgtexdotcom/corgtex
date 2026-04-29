@@ -12,6 +12,7 @@ const { prismaMock, txMock, createActionMock, slackWebClientMock } = vi.hoisted(
       join: vi.fn(),
       history: vi.fn(),
       replies: vi.fn(),
+      info: vi.fn(),
     },
     oauth: {
       v2: { access: vi.fn() },
@@ -19,6 +20,7 @@ const { prismaMock, txMock, createActionMock, slackWebClientMock } = vi.hoisted(
     chat: {
       postMessage: vi.fn(),
       postEphemeral: vi.fn(),
+      update: vi.fn(),
     },
     views: {
       publish: vi.fn(),
@@ -49,6 +51,9 @@ const { prismaMock, txMock, createActionMock, slackWebClientMock } = vi.hoisted(
       communicationMessage: {
         upsert: vi.fn(),
         updateMany: vi.fn(),
+      },
+      meeting: {
+        findFirst: vi.fn(),
       },
       communicationEntityLink: {
         create: vi.fn(),
@@ -130,6 +135,9 @@ describe("communication Slack integration", () => {
     slackWebClientMock.conversations.list.mockReset();
     slackWebClientMock.conversations.join.mockReset();
     slackWebClientMock.conversations.history.mockReset();
+    slackWebClientMock.conversations.info.mockReset();
+    slackWebClientMock.chat.update.mockReset();
+    prismaMock.meeting.findFirst.mockReset();
   });
 
   it("verifies Slack request signatures", async () => {
@@ -451,6 +459,105 @@ describe("communication Slack integration", () => {
         }),
       }),
     }));
+  });
+
+  it("routes app mentions in agenda threads to agenda editing", async () => {
+    const { processSlackInboundEvent } = await import("./communication");
+    prismaMock.communicationInboundEvent.findUnique.mockResolvedValueOnce({
+      id: "inbound-agenda",
+      provider: "SLACK",
+      payload: {
+        event: {
+          type: "app_mention",
+          channel: "C1",
+          user: "U1",
+          ts: "1710000001.000100",
+          thread_ts: "1710000000.000100",
+          text: "<@UBOT> add Bob's detail to action item 2",
+        },
+      },
+      installation: {
+        id: "install-1",
+        workspaceId: "workspace-1",
+        provider: "SLACK",
+        status: "ACTIVE",
+        botUserId: "UBOT",
+        botTokenEnc: "enc:bot-token",
+      },
+    });
+    prismaMock.communicationExternalUser.findUnique.mockResolvedValueOnce({ userId: "user-1" });
+    prismaMock.user.findUnique.mockResolvedValueOnce({
+      id: "user-1",
+      email: "user@example.test",
+      displayName: "User",
+      globalRole: "USER",
+    });
+    prismaMock.communicationChannel.upsert.mockResolvedValueOnce({ id: "channel-1", kind: "PUBLIC", isIngestEnabled: true });
+    prismaMock.communicationMessage.upsert.mockResolvedValueOnce({ id: "message-1" });
+    prismaMock.meeting.findFirst.mockResolvedValueOnce({ id: "meeting-1" });
+    prismaMock.workflowJob.upsert.mockResolvedValueOnce({ id: "job-1" });
+
+    await processSlackInboundEvent("inbound-agenda");
+
+    expect(prismaMock.workflowJob.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: { dedupeKey: "inbound-agenda:meeting-agenda-edit" },
+      create: expect.objectContaining({
+        type: "meeting.agenda.edit",
+        payload: expect.objectContaining({
+          meetingId: "meeting-1",
+          actorUserId: "user-1",
+          installationId: "install-1",
+          channelId: "C1",
+          threadTs: "1710000000.000100",
+          messageTs: "1710000001.000100",
+          messageText: "add Bob's detail to action item 2",
+          sourceMessageId: "message-1",
+        }),
+      }),
+    }));
+  });
+
+  it("validates Slack agenda channels before saving", async () => {
+    const { validateSlackPostTarget } = await import("./communication");
+    prismaMock.communicationInstallation.findUnique.mockResolvedValueOnce({
+      id: "install-1",
+      botTokenEnc: "enc:bot-token",
+    });
+    slackWebClientMock.conversations.info.mockResolvedValueOnce({
+      channel: {
+        id: "C1",
+        name: "all-corgtex",
+        is_archived: false,
+        is_member: true,
+      },
+    });
+
+    await expect(validateSlackPostTarget("install-1", "<#C1|all-corgtex>")).resolves.toEqual({
+      ok: true,
+      channelId: "C1",
+      channelName: "all-corgtex",
+    });
+  });
+
+  it("rejects Slack agenda channels where the bot is not a member", async () => {
+    const { validateSlackPostTarget } = await import("./communication");
+    prismaMock.communicationInstallation.findUnique.mockResolvedValueOnce({
+      id: "install-1",
+      botTokenEnc: "enc:bot-token",
+    });
+    slackWebClientMock.conversations.info.mockResolvedValueOnce({
+      channel: {
+        id: "C1",
+        name: "new-channel",
+        is_archived: false,
+        is_member: false,
+      },
+    });
+
+    await expect(validateSlackPostTarget("install-1", "C1")).resolves.toMatchObject({
+      ok: false,
+      code: "SLACK_CHANNEL_NOT_JOINED",
+    });
   });
 
   it("runs the Slack agent for message shortcuts instead of opening the legacy modal", async () => {

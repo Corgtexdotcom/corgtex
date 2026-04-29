@@ -15,6 +15,7 @@ import {
   processSlackInboundEvent,
   purgeExpiredCommunicationMessages,
   runMeetingAgendaPreparation,
+  runMeetingAgendaThreadEdit,
   runMeetingInsightsExtraction,
   syncSlackPublicArchiveForWorkspace,
   type SlackAgentJobPayload,
@@ -368,6 +369,40 @@ async function handleJob(job: ClaimedJob) {
     const meetingId = (payload as { meetingId?: string }).meetingId;
     if (meetingId) {
       await runMeetingInsightsExtraction({ workspaceId: job.workspaceId, meetingId });
+    }
+    return;
+  }
+
+  if (job.type === "meeting.agenda.edit") {
+    const editPayload = payload as {
+      meetingId?: string;
+      actorUserId?: string;
+      installationId?: string;
+      channelId?: string;
+      threadTs?: string;
+      messageTs?: string;
+      messageText?: string;
+    };
+    if (
+      editPayload.meetingId
+      && editPayload.actorUserId
+      && editPayload.installationId
+      && editPayload.channelId
+      && editPayload.threadTs
+      && editPayload.messageTs
+      && editPayload.messageText
+    ) {
+      await runMeetingAgendaThreadEdit({
+        workspaceId: job.workspaceId,
+        workflowJobId: job.id,
+        meetingId: editPayload.meetingId,
+        actorUserId: editPayload.actorUserId,
+        installationId: editPayload.installationId,
+        channelId: editPayload.channelId,
+        threadTs: editPayload.threadTs,
+        messageTs: editPayload.messageTs,
+        messageText: editPayload.messageText,
+      });
     }
     return;
   }

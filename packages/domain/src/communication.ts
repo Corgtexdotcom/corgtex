@@ -41,6 +41,16 @@ export type SlackAgentDelivery = {
   blocks?: unknown[];
 };
 
+export type SlackPostTargetValidation = {
+  ok: true;
+  channelId: string;
+  channelName: string | null;
+} | {
+  ok: false;
+  code: string;
+  message: string;
+};
+
 const SLACK_REQUIRED_SCOPES = [
   "commands",
   "chat:write",
@@ -137,6 +147,12 @@ function shouldSkipSlackArchiveMessage(message: Record<string, unknown>) {
 
 function compactJsonObject<T extends Record<string, unknown>>(value: T) {
   return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined)) as T;
+}
+
+function normalizeSlackChannelId(value: string) {
+  const trimmed = value.trim();
+  const mention = trimmed.match(/^<#([^|>]+)(?:\|[^>]+)?>$/);
+  return mention?.[1] ?? trimmed;
 }
 
 export function stripSlackBotMention(text: string, botUserId?: string | null) {
@@ -898,6 +914,54 @@ export async function enqueueSlackAgentJob(payload: SlackAgentJobPayload) {
   });
 }
 
+async function agendaMeetingForSlackThread(workspaceId: string, channelId: string, threadTs: string) {
+  if (!channelId || !threadTs) return null;
+  return prisma.meeting.findFirst({
+    where: {
+      workspaceId,
+      agendaChannelId: channelId,
+      agendaMessageTs: threadTs,
+      agendaPostedAt: { not: null },
+      archivedAt: null,
+    },
+    select: { id: true },
+  });
+}
+
+async function enqueueSlackAgendaEditJob(payload: {
+  workspaceId: string;
+  meetingId: string;
+  actorUserId: string;
+  installationId: string;
+  channelId: string;
+  threadTs: string;
+  messageTs: string;
+  messageText: string;
+  sourceMessageId?: string | null;
+  inboundEventId: string;
+}) {
+  return prisma.workflowJob.upsert({
+    where: { dedupeKey: `${payload.inboundEventId}:meeting-agenda-edit` },
+    update: {},
+    create: {
+      workspaceId: payload.workspaceId,
+      type: "meeting.agenda.edit",
+      payload: toInputJson({
+        meetingId: payload.meetingId,
+        actorUserId: payload.actorUserId,
+        installationId: payload.installationId,
+        channelId: payload.channelId,
+        threadTs: payload.threadTs,
+        messageTs: payload.messageTs,
+        messageText: payload.messageText,
+        sourceMessageId: payload.sourceMessageId ?? null,
+        inboundEventId: payload.inboundEventId,
+      }) as Prisma.InputJsonObject,
+      dedupeKey: `${payload.inboundEventId}:meeting-agenda-edit`,
+    },
+  });
+}
+
 function slackAgentWorkingResponse() {
   return {
     response_type: "ephemeral",
@@ -967,20 +1031,36 @@ export async function processSlackInboundEvent(inboundEventId: string) {
           text,
           raw: event,
         });
-        await enqueueSlackAgentJob({
-          source: "app_mention",
-          installationId: inbound.installation.id,
-          workspaceId: inbound.installation.workspaceId,
-          actorUserId: actor.user.id,
-          externalUserId,
-          prompt,
-          channelId,
-          threadTs,
-          messageTs,
-          messageText: text,
-          sourceMessageId: sourceMessage?.id ?? null,
-          inboundEventId: inbound.id,
-        });
+        const agendaMeeting = await agendaMeetingForSlackThread(inbound.installation.workspaceId, channelId, threadTs);
+        if (agendaMeeting) {
+          await enqueueSlackAgendaEditJob({
+            workspaceId: inbound.installation.workspaceId,
+            meetingId: agendaMeeting.id,
+            actorUserId: actor.user.id,
+            installationId: inbound.installation.id,
+            channelId,
+            threadTs,
+            messageTs,
+            messageText: prompt,
+            sourceMessageId: sourceMessage?.id ?? null,
+            inboundEventId: inbound.id,
+          });
+        } else {
+          await enqueueSlackAgentJob({
+            source: "app_mention",
+            installationId: inbound.installation.id,
+            workspaceId: inbound.installation.workspaceId,
+            actorUserId: actor.user.id,
+            externalUserId,
+            prompt,
+            channelId,
+            threadTs,
+            messageTs,
+            messageText: text,
+            sourceMessageId: sourceMessage?.id ?? null,
+            inboundEventId: inbound.id,
+          });
+        }
       }
     }
 
@@ -1336,6 +1416,94 @@ export async function sendSlackMessage(installationId: string, target: {
     unfurl_links: false,
     unfurl_media: false,
   });
+}
+
+export async function updateSlackMessage(installationId: string, target: {
+  channel: string;
+  ts: string;
+}, blocks: unknown[], text = "Corgtex update") {
+  const installation = await prisma.communicationInstallation.findUnique({
+    where: { id: installationId },
+  });
+  invariant(installation, 404, "NOT_FOUND", "Slack installation not found.");
+
+  return slackClient(encryptedBotToken(installation)).chat.update({
+    channel: target.channel,
+    ts: target.ts,
+    text,
+    blocks: blocks as any,
+  });
+}
+
+export async function validateSlackPostTarget(installationId: string, rawChannelId: string): Promise<SlackPostTargetValidation> {
+  const channelId = normalizeSlackChannelId(rawChannelId);
+  if (!channelId) {
+    return {
+      ok: false,
+      code: "SLACK_CHANNEL_REQUIRED",
+      message: "Choose a Slack channel for agenda posting.",
+    };
+  }
+
+  const installation = await prisma.communicationInstallation.findUnique({
+    where: { id: installationId },
+    select: { id: true, botTokenEnc: true },
+  });
+  invariant(installation, 404, "NOT_FOUND", "Slack installation not found.");
+
+  try {
+    const response = await slackClient(encryptedBotToken(installation)).conversations.info({
+      channel: channelId,
+    });
+    const channel = isRecord(response.channel) ? response.channel : null;
+    if (!channel) {
+      return {
+        ok: false,
+        code: "SLACK_CHANNEL_NOT_FOUND",
+        message: "Slack channel not found. Use a channel ID like C0123456789.",
+      };
+    }
+    if (Boolean(channel.is_archived)) {
+      return {
+        ok: false,
+        code: "SLACK_CHANNEL_ARCHIVED",
+        message: "Choose an active Slack channel for agenda posting.",
+      };
+    }
+    if (!Boolean(channel.is_member)) {
+      return {
+        ok: false,
+        code: "SLACK_CHANNEL_NOT_JOINED",
+        message: "Invite Corgtex to this channel first, then save agenda posting again.",
+      };
+    }
+    return {
+      ok: true,
+      channelId,
+      channelName: asString(channel.name) || asString(channel.name_normalized) || null,
+    };
+  } catch (error) {
+    const slackCode = (error as { data?: { error?: string } }).data?.error;
+    if (slackCode === "not_in_channel") {
+      return {
+        ok: false,
+        code: "SLACK_CHANNEL_NOT_JOINED",
+        message: "Invite Corgtex to this channel first, then save agenda posting again.",
+      };
+    }
+    if (slackCode === "channel_not_found") {
+      return {
+        ok: false,
+        code: "SLACK_CHANNEL_NOT_FOUND",
+        message: "Slack channel not found. Use a channel ID like C0123456789.",
+      };
+    }
+    return {
+      ok: false,
+      code: "SLACK_CHANNEL_INVALID",
+      message: "Corgtex could not validate that Slack channel. Confirm the channel ID and app membership.",
+    };
+  }
 }
 
 export async function sendSlackEphemeralMessage(installationId: string, target: {

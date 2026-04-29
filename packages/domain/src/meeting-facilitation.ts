@@ -3,7 +3,7 @@ import { prisma, toInputJson, type AppActor } from "@corgtex/shared";
 import type { MeetingInsightType, Prisma } from "@prisma/client";
 import { requireWorkspaceMembership } from "./auth";
 import { invariant } from "./errors";
-import { sendSlackMessage } from "./communication";
+import { fetchSlackThreadMessages, sendSlackMessage, updateSlackMessage, validateSlackPostTarget } from "./communication";
 import { extractMeetingInsights } from "./meeting-intelligence";
 
 type AgendaSection = {
@@ -21,6 +21,13 @@ type AgendaJson = {
   title: string;
   intro?: string | null;
   sections: AgendaSection[];
+};
+
+type AgendaEditOutput = {
+  action: "update" | "clarify";
+  changeSummary?: string | null;
+  clarification?: string | null;
+  agenda?: AgendaJson | null;
 };
 
 type AgendaSettings = {
@@ -204,6 +211,22 @@ async function activeSlackInstallation(workspaceId: string) {
   });
 }
 
+async function attendeeMentionsForContext(installationId: string, workspaceId: string, attendees: Array<{ email: string; name: string | null }>) {
+  const externalUsers = await prisma.communicationExternalUser.findMany({
+    where: {
+      installationId,
+      workspaceId,
+      email: { in: attendees.map((attendee) => attendee.email) },
+    },
+    select: { email: true, externalUserId: true },
+  });
+  const slackUsersByEmail = new Map(externalUsers.map((user) => [user.email?.toLowerCase(), user.externalUserId]));
+  return attendees.map((attendee) => {
+    const externalUserId = slackUsersByEmail.get(attendee.email.toLowerCase());
+    return externalUserId ? `<@${externalUserId}>` : attendee.name || attendee.email;
+  });
+}
+
 async function scheduleNextAgendaJob(workspaceId: string, settings: AgendaSettings) {
   const runAfter = nextAgendaRunAfter(settings);
   await prisma.workflowJob.upsert({
@@ -251,11 +274,16 @@ export async function updateSlackAgendaSettings(actor: AppActor, params: {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, allowedRoles: ["ADMIN"] });
   const installation = await activeSlackInstallation(params.workspaceId);
   invariant(installation, 404, "NOT_FOUND", "Slack is not connected for this workspace.");
+  const validation = await validateSlackPostTarget(installation.id, params.defaultAgendaChannelId);
+  if (!validation.ok) {
+    invariant(false, 400, validation.code, validation.message);
+  }
 
   const current = isRecord(installation.settings) ? installation.settings : {};
   const settings = {
     ...current,
-    defaultAgendaChannelId: params.defaultAgendaChannelId.trim() || null,
+    defaultAgendaChannelId: validation.channelId,
+    defaultAgendaChannelName: validation.channelName,
     agendaTimezone: params.agendaTimezone?.trim() || "UTC",
   };
 
@@ -510,6 +538,11 @@ export async function runMeetingAgendaPreparation(params: {
     await scheduleNextAgendaJob(params.workspaceId, settings);
     return { skipped: true, reason: "slack_agenda_channel_missing" };
   }
+  const channelValidation = await validateSlackPostTarget(installation.id, channelId);
+  if (!channelValidation.ok) {
+    await scheduleNextAgendaJob(params.workspaceId, settings);
+    return { skipped: true, reason: channelValidation.code };
+  }
 
   const targetDate = params.targetDateISO ? new Date(`${params.targetDateISO}T00:00:00.000Z`) : tomorrowBounds().start;
   const { start, end } = utcDayBounds(Number.isNaN(targetDate.valueOf()) ? tomorrowBounds().start : targetDate);
@@ -532,19 +565,7 @@ export async function runMeetingAgendaPreparation(params: {
       workflowJobId: params.workflowJobId,
     });
 
-    const externalUsers = await prisma.communicationExternalUser.findMany({
-      where: {
-        installationId: installation.id,
-        workspaceId: params.workspaceId,
-        email: { in: context.attendees.map((attendee) => attendee.email) },
-      },
-      select: { email: true, externalUserId: true },
-    });
-    const slackUsersByEmail = new Map(externalUsers.map((user) => [user.email?.toLowerCase(), user.externalUserId]));
-    const attendeeMentions = context.attendees.map((attendee) => {
-      const externalUserId = slackUsersByEmail.get(attendee.email.toLowerCase());
-      return externalUserId ? `<@${externalUserId}>` : attendee.name || attendee.email;
-    });
+    const attendeeMentions = await attendeeMentionsForContext(installation.id, params.workspaceId, context.attendees);
 
     const response = await sendSlackMessage(installation.id, { channel: channelId }, renderAgendaBlocks({
       meeting,
@@ -567,6 +588,162 @@ export async function runMeetingAgendaPreparation(params: {
 
   await scheduleNextAgendaJob(params.workspaceId, settings);
   return { posted, meetingIds: meetings.map((meeting) => meeting.id) };
+}
+
+function parseAgendaEditOutput(output: Record<string, unknown>, fallbackTitle: string): AgendaEditOutput {
+  const action = output.action === "update" ? "update" : "clarify";
+  const agendaRaw = isRecord(output.agenda) ? output.agenda : null;
+  const hasAgendaSections = Array.isArray(agendaRaw?.sections) && agendaRaw.sections.length > 0;
+  return {
+    action: action === "update" && hasAgendaSections ? "update" : "clarify",
+    changeSummary: typeof output.changeSummary === "string" ? output.changeSummary.trim() : null,
+    clarification: typeof output.clarification === "string" ? output.clarification.trim() : null,
+    agenda: agendaRaw && hasAgendaSections ? normalizeAgenda(agendaRaw, fallbackTitle, []) : null,
+  };
+}
+
+export async function runMeetingAgendaThreadEdit(params: {
+  workspaceId: string;
+  meetingId: string;
+  actorUserId: string;
+  installationId: string;
+  channelId: string;
+  threadTs: string;
+  messageTs: string;
+  messageText: string;
+  workflowJobId?: string;
+}) {
+  const actorUser = await prisma.user.findUnique({
+    where: { id: params.actorUserId },
+    select: { id: true, email: true, displayName: true, globalRole: true },
+  });
+  invariant(actorUser, 404, "NOT_FOUND", "Agenda editor user not found.");
+  const actor: AppActor = { kind: "user", user: actorUser };
+  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+
+  const meeting = await prisma.meeting.findFirst({
+    where: {
+      id: params.meetingId,
+      workspaceId: params.workspaceId,
+      agendaChannelId: params.channelId,
+      agendaMessageTs: params.threadTs,
+      archivedAt: null,
+    },
+    select: {
+      id: true,
+      title: true,
+      recordedAt: true,
+      scheduledEndAt: true,
+      agendaJson: true,
+      agendaChannelId: true,
+      agendaMessageTs: true,
+    },
+  });
+  invariant(meeting?.agendaJson && meeting.agendaChannelId && meeting.agendaMessageTs, 404, "NOT_FOUND", "Agenda thread not found.");
+  const currentAgenda = normalizeAgenda(isRecord(meeting.agendaJson) ? meeting.agendaJson : {}, meeting.title || "Meeting agenda", []);
+  invariant(currentAgenda.sections.length > 0, 400, "AGENDA_NOT_READY", "The agenda is not ready for editing yet.");
+
+  const installation = await activeSlackInstallation(params.workspaceId);
+  invariant(installation?.id === params.installationId, 404, "NOT_FOUND", "Slack installation not found.");
+  const settings = agendaSettings(installation.settings);
+  const threadMessages = await fetchSlackThreadMessages(params.installationId, {
+    channelId: params.channelId,
+    threadTs: params.threadTs,
+    limit: 20,
+  });
+
+  const extraction = await defaultModelGateway.extract({
+    workspaceId: params.workspaceId,
+    workflowJobId: params.workflowJobId,
+    instruction: [
+      "You edit an existing meeting agenda based only on an explicit Slack thread request.",
+      "If the request does not ask for a concrete agenda edit, set action to clarify and do not return an agenda.",
+      "Supported edits: add, remove, reword, reorder sections or items, clarify action items, adjust owners, or adjust durations.",
+      "Return the complete updated agenda JSON when action is update.",
+      "Keep existing source IDs and owners unless the user asks to change them.",
+    ].join("\n"),
+    input: JSON.stringify({
+      meeting: {
+        id: meeting.id,
+        title: meeting.title,
+        startsAt: meeting.recordedAt.toISOString(),
+        scheduledEndAt: meeting.scheduledEndAt?.toISOString() ?? null,
+      },
+      currentAgenda,
+      request: params.messageText,
+      threadMessages,
+    }),
+    schemaHint: `{
+      "action": "update | clarify",
+      "changeSummary": "short sentence describing what changed",
+      "clarification": "short request for a more specific agenda edit",
+      "agenda": {
+        "title": "string",
+        "intro": "string",
+        "sections": [
+          {
+            "title": "string",
+            "durationMinutes": "number",
+            "items": [
+              { "text": "string", "sourceType": "string", "sourceId": "string", "owner": "string" }
+            ]
+          }
+        ]
+      }
+    }`,
+  });
+
+  const edit = parseAgendaEditOutput(extraction.output, meeting.title || currentAgenda.title);
+  if (edit.action !== "update" || !edit.agenda) {
+    const clarification = edit.clarification || "I could not identify a concrete agenda edit. Please tell me what to add, remove, reword, or reorder.";
+    await sendSlackMessage(params.installationId, {
+      channel: params.channelId,
+      threadTs: params.threadTs,
+    }, [slackSection("Agenda edit", [clarification])]);
+    return { edited: false, reason: "clarification_requested" };
+  }
+
+  const context = await buildMeetingAgendaContext(params.workspaceId, meeting.id);
+  const attendeeMentions = await attendeeMentionsForContext(params.installationId, params.workspaceId, context.attendees);
+  const changeSummary = edit.changeSummary || "Updated the agenda.";
+
+  await updateSlackMessage(params.installationId, {
+    channel: params.channelId,
+    ts: params.threadTs,
+  }, renderAgendaBlocks({
+    meeting,
+    agenda: edit.agenda,
+    attendeeMentions,
+    timezone: settings.agendaTimezone || "UTC",
+  }));
+  await sendSlackMessage(params.installationId, {
+    channel: params.channelId,
+    threadTs: params.threadTs,
+  }, [slackSection("Agenda updated", [changeSummary])]);
+
+  await prisma.$transaction([
+    prisma.meeting.update({
+      where: { id: meeting.id },
+      data: { agendaJson: toInputJson(edit.agenda) },
+    }),
+    prisma.auditLog.create({
+      data: {
+        workspaceId: params.workspaceId,
+        actorUserId: params.actorUserId,
+        action: "meeting.agenda.edited",
+        entityType: "Meeting",
+        entityId: meeting.id,
+        meta: {
+          channelId: params.channelId,
+          threadTs: params.threadTs,
+          messageTs: params.messageTs,
+          changeSummary,
+        },
+      },
+    }),
+  ]);
+
+  return { edited: true, changeSummary };
 }
 
 export async function runMeetingInsightsExtraction(params: {
