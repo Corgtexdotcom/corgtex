@@ -69,11 +69,9 @@ export default async function FinancePage({
   const ledgerAccounts = ledgerAccountsResult.items;
   const targetOptions = deliberationTargets.options.map((option) => ({
     ...option,
-    label: option.value.startsWith("circle:")
-      ? t("targetCircle", { name: option.label.replace(/^Circle: /, "") })
-      : option.value.startsWith("member:")
-        ? t("targetPerson", { name: option.label.replace(/^Person: /, "") })
-        : option.label,
+    label: option.kind === "circle"
+      ? t("targetCircle", { name: option.name })
+      : t("targetPerson", { name: option.name }),
   }));
 
   const entriesMap = new Map(
@@ -94,7 +92,6 @@ export default async function FinancePage({
   );
   const isBlocked = (spendId: string) => unresolvedObjectionCount(spendId) > 0;
   const isPaid = (spend: { spentAt?: Date | null }) => Boolean(spend.spentAt);
-
   const totalOpen = spends.filter((spend) => spend.status === "OPEN").reduce((sum, spend) => sum + spend.amountCents, 0);
   const totalApproved = spends
     .filter((spend) => spend.status === "RESOLVED" && spend.resolutionOutcome === "APPROVED")
@@ -416,7 +413,6 @@ export default async function FinancePage({
                                     hiddenFields={{ workspaceId, parentId: spend.id }}
                                     title={t("discussionTitle")}
                                     targetOptions={targetOptions}
-                                    defaultTargetValue={deliberationTargets.defaultValue}
                                     entryTypes={[
                                       { value: "REACTION", label: t("typeReaction"), variant: "secondary" },
                                       { value: "OBJECTION", label: t("typeObjection"), variant: "danger" },

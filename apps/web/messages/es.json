@@ -1431,14 +1431,16 @@
     "entryPosted": "Entrada publicada correctamente.",
     "entryPostFailed": "No se pudo publicar la entrada.",
     "entryPlaceholder": "Escribe tu entrada en Markdown...",
-    "targetAriaLabel": "Destino de deliberación",
-    "noTarget": "Sin destino",
     "posting": "Publicando...",
     "postEntry": "Publicar entrada",
     "entryReaction": "Reacción",
     "entryObjection": "Objeción",
     "resolved": "Resuelto",
     "resolvePlaceholder": "¿Qué cambió o por qué está resuelto?",
-    "resolve": "Resolver"
+    "resolve": "Resolver",
+    "mentionAriaLabel": "Sugerencias de destino de mención",
+    "noMatchingTargets": "No hay destinos coincidentes.",
+    "targetKindCircle": "Círculo",
+    "targetKindPerson": "Persona"
   }
 }

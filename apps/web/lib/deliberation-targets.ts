@@ -1,10 +1,8 @@
 import type { AppActor } from "@corgtex/shared";
 import { prisma } from "@corgtex/shared";
+import type { DeliberationMentionTarget } from "./deliberation-mentions";
 
-export type DeliberationTargetOption = {
-  value: string;
-  label: string;
-};
+export type DeliberationTargetOption = DeliberationMentionTarget;
 
 export async function getDeliberationTargets(params: {
   actor: AppActor;
@@ -37,11 +35,21 @@ export async function getDeliberationTargets(params: {
   ]);
 
   const options = [
-    ...circles.map((circle) => ({ value: `circle:${circle.id}`, label: `Circle: ${circle.name}` })),
-    ...members.map((member) => ({
-      value: `member:${member.id}`,
-      label: `Person: ${member.user.displayName || member.user.email}`,
+    ...circles.map((circle) => ({
+      value: `circle:${circle.id}`,
+      label: `Circle: ${circle.name}`,
+      kind: "circle" as const,
+      name: circle.name,
     })),
+    ...members.map((member) => {
+      const name = member.user.displayName || member.user.email;
+      return {
+        value: `member:${member.id}`,
+        label: `Person: ${name}`,
+        kind: "member" as const,
+        name,
+      };
+    }),
   ];
 
   const parentCircle = params.parentCircleId && circles.some((circle) => circle.id === params.parentCircleId)
