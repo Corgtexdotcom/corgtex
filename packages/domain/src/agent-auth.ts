@@ -49,6 +49,10 @@ export const SCOPE_REGISTRY = {
   "tensions:read":       { label: "Read tensions",              group: "operations", default: true,  description: "List and view tensions raised in the workspace." },
   "tensions:write":      { label: "Create & edit tensions",     group: "operations", default: true,  description: "Create, update, upvote, and resolve tensions." },
 
+  // ---- goals ----
+  "goals:read":          { label: "Read goals",                  group: "operations", default: true,  description: "List, get, and view workspace goals and key results." },
+  "goals:write":         { label: "Create & edit goals",         group: "operations", default: true,  description: "Create, update, and archive workspace goals and key results." },
+
   // ---- members ----
   "members:read":        { label: "Read members",               group: "people",     default: true,  description: "List active members and their roles." },
   "members:write":       { label: "Manage members",             group: "people",     default: false, description: "Create, update, and deactivate members. Sensitive — opt-in." },
