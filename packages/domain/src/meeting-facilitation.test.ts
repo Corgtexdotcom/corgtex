@@ -65,7 +65,7 @@ describe("meeting facilitation", () => {
       workspaceId: "workspace-1",
       title: "Weekly Tactical",
       seriesId: "series-1",
-      participantIds: ["member-1"],
+      participantIds: ["user-1"],
       participantEmails: ["jan@example.com"],
       recordedAt: new Date("2026-04-30T17:00:00.000Z"),
       archivedAt: null,
@@ -133,6 +133,15 @@ describe("meeting facilitation", () => {
         status: { in: ["OPEN", "IN_PROGRESS"] },
         isPrivate: false,
         publishedAt: { not: null },
+      }),
+    }));
+    expect(prismaMock.member.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        OR: expect.arrayContaining([
+          { id: { in: ["user-1"] } },
+          { userId: { in: ["user-1"] } },
+          { user: { email: { in: ["jan@example.com"] } } },
+        ]),
       }),
     }));
   });

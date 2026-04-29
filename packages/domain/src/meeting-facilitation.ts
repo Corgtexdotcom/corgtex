@@ -278,6 +278,7 @@ export async function buildMeetingAgendaContext(workspaceId: string, meetingId: 
   const participantEmails = meeting.participantEmails.map((email) => email.toLowerCase());
   const memberOr = [
     meeting.participantIds.length > 0 ? { id: { in: meeting.participantIds } } : null,
+    meeting.participantIds.length > 0 ? { userId: { in: meeting.participantIds } } : null,
     participantEmails.length > 0 ? { user: { email: { in: participantEmails } } } : null,
   ].filter(Boolean) as Prisma.MemberWhereInput[];
   const members = await prisma.member.findMany({
