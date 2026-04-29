@@ -1,8 +1,9 @@
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import type { NextRequest } from "next/server";
-import { clearSession, resolveAgentActorFromBearer, resolveControlPlaneAgentFromBearer, resolveSessionActor } from "@corgtex/domain";
-import { isDatabaseUnavailableError, sessionCookieName } from "@corgtex/shared";
+import { clearSession, isGlobalOperator, resolveAgentActorFromBearer, resolveControlPlaneAgentFromBearer, resolveSessionActor } from "@corgtex/domain";
+import { env, isDatabaseUnavailableError, sessionCookieName } from "@corgtex/shared";
+import type { AppActor } from "@corgtex/shared";
 import { AppError } from "@corgtex/domain";
 
 const SESSION_UNAVAILABLE_REDIRECT = "/login?error=session-unavailable";
@@ -14,6 +15,12 @@ function sessionUnavailableError() {
 function rethrowIfSessionUnavailable(error: unknown) {
   if (isDatabaseUnavailableError(error)) {
     throw sessionUnavailableError();
+  }
+}
+
+function assertAllowedInControlPlaneMode(actor: AppActor) {
+  if (env.CONTROL_PLANE_MODE && !isGlobalOperator(actor)) {
+    throw new AppError(403, "CONTROL_PLANE_ONLY", "This deployment is restricted to platform operators.");
   }
 }
 
@@ -30,6 +37,7 @@ export async function resolveRequestActor(request: NextRequest) {
     }
 
     if (agentActor) {
+      assertAllowedInControlPlaneMode(agentActor);
       return agentActor;
     }
   }
@@ -51,6 +59,7 @@ export async function resolveRequestActor(request: NextRequest) {
     throw new AppError(401, "UNAUTHENTICATED", "Session expired.");
   }
 
+  assertAllowedInControlPlaneMode(actor);
   return actor;
 }
 
@@ -86,6 +95,10 @@ export async function requirePageActor() {
 
   if (!actor) {
     redirect("/login");
+  }
+
+  if (env.CONTROL_PLANE_MODE && !isGlobalOperator(actor)) {
+    redirect("/login?error=control-plane-only");
   }
 
   return actor;
