@@ -2,7 +2,7 @@ import { notFound } from "next/navigation";
 
 import { prisma } from "@corgtex/shared";
 
-import type { NavGroup, WorkspaceNavFeatureFlag } from "@/lib/nav-config";
+import type { NavGroup, WorkspaceNavCapability, WorkspaceNavFeatureFlag } from "@/lib/nav-config";
 
 export type WorkspaceFeatureFlag =
   | WorkspaceNavFeatureFlag
@@ -67,14 +67,27 @@ export async function requireWorkspaceFeature(workspaceId: string, flag: Workspa
   }
 }
 
-export function filterNavGroupsByFeatureFlags(
+export type WorkspaceNavCapabilityMap = Partial<Record<WorkspaceNavCapability, boolean>>;
+
+export function filterNavGroupsByWorkspaceAccess(
   navGroups: NavGroup[],
   flags: WorkspaceFeatureFlagMap,
+  capabilities: WorkspaceNavCapabilityMap = {},
 ): NavGroup[] {
   return navGroups
     .map((group) => ({
       ...group,
-      items: group.items.filter((item) => !item.featureFlag || flags[item.featureFlag]),
+      items: group.items.filter((item) => (
+        (!item.featureFlag || flags[item.featureFlag])
+        && (!item.requiredCapability || Boolean(capabilities[item.requiredCapability]))
+      )),
     }))
     .filter((group) => group.items.length > 0);
+}
+
+export function filterNavGroupsByFeatureFlags(
+  navGroups: NavGroup[],
+  flags: WorkspaceFeatureFlagMap,
+): NavGroup[] {
+  return filterNavGroupsByWorkspaceAccess(navGroups, flags);
 }
