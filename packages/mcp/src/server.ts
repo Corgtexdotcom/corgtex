@@ -341,7 +341,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         listProposals(actor, workspaceId, { take: 50 }),
         listTensions(actor, workspaceId, { take: 50 }),
         listMeetings(workspaceId),
-        listSpends(workspaceId, { take: 50 }),
+        listSpends(actor, workspaceId, { take: 50 }),
       ]);
 
       const recentActions = actions.items
@@ -1886,7 +1886,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
     async ({ take, skip }: { take?: number; skip?: number }) => {
       requireScope(sessionCtx, "finance:read");
-      const result = await listSpends(workspaceId, { take, skip });
+      const result = await listSpends(actor, workspaceId, { take, skip });
       const simplified = result.items.map((s) => ({
         id: s.id,
         amountCents: s.amountCents,

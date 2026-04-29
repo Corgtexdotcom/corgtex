@@ -62,7 +62,7 @@ export default async function FinancePage({
   const activeDiscussionId = typeof resolvedSearch.discuss === "string" ? resolvedSearch.discuss : null;
 
   const [spendsResult, ledgerAccountsResult, currentWorkspace, deliberationTargets] = await Promise.all([
-    listSpends(workspaceId, { take: 200 }),
+    listSpends(actor, workspaceId, { take: 200 }),
     listLedgerAccounts(workspaceId, { take: 50 }),
     prisma.workspace.findUnique({ where: { id: workspaceId }, select: { slug: true } }),
     getDeliberationTargets({ actor, workspaceId }),

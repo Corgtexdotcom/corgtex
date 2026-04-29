@@ -2,13 +2,17 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { normalizeCurrencyCode, normalizeReconciliationStatusInput } from "./finance";
 
 const { prismaMock, txMock } = vi.hoisted(() => {
-  const spendRequest = {
+  const txSpendRequest = {
     create: vi.fn(),
     findUnique: vi.fn(),
     update: vi.fn(),
   };
+  const prismaSpendRequest = {
+    count: vi.fn(),
+    findMany: vi.fn(),
+  };
   const tx = {
-    spendRequest,
+    spendRequest: txSpendRequest,
     auditLog: { create: vi.fn() },
     deliberationEntry: { count: vi.fn() },
     spendComment: {
@@ -18,6 +22,7 @@ const { prismaMock, txMock } = vi.hoisted(() => {
   };
   const prisma = {
     member: { findFirst: vi.fn() },
+    spendRequest: prismaSpendRequest,
     $transaction: vi.fn((cb: (client: typeof tx) => Promise<unknown>) => cb(tx)),
   };
 
@@ -119,6 +124,69 @@ describe("createSpend", () => {
     });
 
     expect(prisma.$transaction).toHaveBeenCalled();
+  });
+});
+
+describe("listSpends", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    prismaMock.spendRequest.findMany.mockResolvedValue([]);
+    prismaMock.spendRequest.count.mockResolvedValue(0);
+  });
+
+  it("limits regular members to public spends plus their own draft spends", async () => {
+    const { listSpends } = await import("./finance");
+
+    await listSpends(
+      { kind: "user", user: { id: "usr-1", globalRole: "USER" } } as any,
+      "ws-1",
+      { take: 25 },
+    );
+
+    expect(prismaMock.spendRequest.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        workspaceId: "ws-1",
+        archivedAt: null,
+        OR: [
+          { status: { not: "DRAFT" } },
+          { status: "DRAFT", requesterUserId: "usr-1" },
+        ],
+      },
+      take: 25,
+      skip: 0,
+    }));
+    expect(prismaMock.spendRequest.count).toHaveBeenCalledWith({
+      where: {
+        workspaceId: "ws-1",
+        archivedAt: null,
+        OR: [
+          { status: { not: "DRAFT" } },
+          { status: "DRAFT", requesterUserId: "usr-1" },
+        ],
+      },
+    });
+  });
+
+  it("lets workspace admins see all spend drafts", async () => {
+    const { listSpends } = await import("./finance");
+    const { requireWorkspaceMembership } = await import("./auth");
+
+    vi.mocked(requireWorkspaceMembership).mockResolvedValueOnce({
+      id: "mem-admin",
+      workspaceId: "ws-1",
+      userId: "usr-admin",
+      role: "ADMIN",
+      isActive: true,
+    } as any);
+
+    await listSpends(
+      { kind: "user", user: { id: "usr-admin", globalRole: "USER" } } as any,
+      "ws-1",
+    );
+
+    expect(prismaMock.spendRequest.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { workspaceId: "ws-1", archivedAt: null },
+    }));
   });
 });
 

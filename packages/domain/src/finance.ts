@@ -182,12 +182,31 @@ async function countOpenSpendObjections(
   return deliberationObjections + legacyCommentObjections.length - representedLegacyCommentCount;
 }
 
-export async function listSpends(workspaceId: string, opts?: { take?: number; skip?: number; archiveFilter?: ArchiveFilter }) {
+function spendRequestVisibilityFilter(actor: AppActor, membership: Awaited<ReturnType<typeof requireWorkspaceMembership>>): Prisma.SpendRequestWhereInput {
+  if (actor.kind === "agent" || membership?.role === "ADMIN") return {};
+  if (actor.kind === "user") {
+    return {
+      OR: [
+        { status: { not: "DRAFT" } },
+        { status: "DRAFT", requesterUserId: actor.user.id },
+      ],
+    };
+  }
+  return { status: { not: "DRAFT" } };
+}
+
+export async function listSpends(actor: AppActor, workspaceId: string, opts?: { take?: number; skip?: number; archiveFilter?: ArchiveFilter }) {
   const take = opts?.take ?? 20;
   const skip = opts?.skip ?? 0;
+  const membership = await requireWorkspaceMembership({ actor, workspaceId });
+  const where: Prisma.SpendRequestWhereInput = {
+    workspaceId,
+    ...spendRequestVisibilityFilter(actor, membership),
+    ...archiveFilterWhere(opts?.archiveFilter),
+  };
   const [items, total] = await Promise.all([
     prisma.spendRequest.findMany({
-      where: { workspaceId, ...archiveFilterWhere(opts?.archiveFilter) },
+      where,
       include: {
         requester: {
           select: {
@@ -225,7 +244,7 @@ export async function listSpends(workspaceId: string, opts?: { take?: number; sk
       take,
       skip,
     }),
-    prisma.spendRequest.count({ where: { workspaceId, ...archiveFilterWhere(opts?.archiveFilter) } }),
+    prisma.spendRequest.count({ where }),
   ]);
   return { items, total, take, skip };
 }
