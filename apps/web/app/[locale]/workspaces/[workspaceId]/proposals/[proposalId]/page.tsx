@@ -31,11 +31,9 @@ export default async function ProposalDetailPage({
   const deliberationTargets = await getDeliberationTargets({ actor, workspaceId, parentCircleId: proposal.circleId });
   const targetOptions = deliberationTargets.options.map((option) => ({
     ...option,
-    label: option.value.startsWith("circle:")
-      ? t("targetCircle", { name: option.label.replace(/^Circle: /, "") })
-      : option.value.startsWith("member:")
-        ? t("targetPerson", { name: option.label.replace(/^Person: /, "") })
-        : option.label,
+    label: option.kind === "circle"
+      ? t("targetCircle", { name: option.name })
+      : t("targetPerson", { name: option.name }),
   }));
 
   const htmlContent = renderMarkdown(proposal.bodyMd);
@@ -116,7 +114,6 @@ export default async function ProposalDetailPage({
               hiddenFields={{ workspaceId, proposalId }}
               title={t("sectionDeliberation")}
               targetOptions={targetOptions}
-              defaultTargetValue={deliberationTargets.defaultValue}
               entryTypes={[
                 { value: "REACTION", label: t("entryReaction"), variant: "secondary" },
                 { value: "OBJECTION", label: t("entryObjection"), variant: "danger" },

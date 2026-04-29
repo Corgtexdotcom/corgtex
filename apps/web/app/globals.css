@@ -1912,7 +1912,58 @@ a.wiki-list-item:hover {
   .delib-inline-tags { @apply flex items-center gap-2; }
   .delib-inline-tag { @apply text-[0.75rem] font-semibold px-2 py-1 rounded-full border border-line bg-transparent text-muted; }
   .delib-inline-tag-active { @apply bg-accent text-accent-fg border-accent; }
-  .delib-target-select { @apply text-[0.8rem] px-2 py-1 rounded border border-line bg-bg-alt text-text; }
+  .delib-mention-field { position: relative; }
+  .delib-mention-listbox {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    right: 0;
+    z-index: 30;
+    max-height: 240px;
+    overflow-y: auto;
+    padding: 4px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--surface-strong);
+    box-shadow: var(--shadow-lg);
+  }
+  .delib-mention-option {
+    display: flex;
+    width: 100%;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text);
+    padding: 8px 10px;
+    text-align: left;
+    font-size: 0.85rem;
+  }
+  .delib-mention-option:hover,
+  .delib-mention-option-active {
+    background: var(--bg-alt);
+  }
+  .delib-mention-option-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-weight: 600;
+  }
+  .delib-mention-option-kind {
+    flex: 0 0 auto;
+    color: var(--muted);
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .delib-mention-empty {
+    padding: 10px;
+    color: var(--muted);
+    font-size: 0.85rem;
+  }
   .fin-discussion-cell { @apply bg-bg-alt border-t-0; }
   .fin-discussion-panel { @apply border border-line rounded p-4 my-2 bg-surface; }
 }

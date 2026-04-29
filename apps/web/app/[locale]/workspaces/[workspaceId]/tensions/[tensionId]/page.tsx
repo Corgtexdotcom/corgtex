@@ -21,11 +21,9 @@ export default async function TensionDetailPage({
   const deliberationTargets = await getDeliberationTargets({ actor, workspaceId, parentCircleId: tension.circleId });
   const targetOptions = deliberationTargets.options.map((option) => ({
     ...option,
-    label: option.value.startsWith("circle:")
-      ? t("targetCircle", { name: option.label.replace(/^Circle: /, "") })
-      : option.value.startsWith("member:")
-        ? t("targetPerson", { name: option.label.replace(/^Person: /, "") })
-        : option.label,
+    label: option.kind === "circle"
+      ? t("targetCircle", { name: option.name })
+      : t("targetPerson", { name: option.name }),
   }));
   const mappedEntries = entries.map((e: any) => ({
     ...e,
@@ -93,7 +91,6 @@ export default async function TensionDetailPage({
             postAction={postTensionDeliberationAction}
             hiddenFields={{ workspaceId, parentId: tensionId }}
             targetOptions={targetOptions}
-            defaultTargetValue={deliberationTargets.defaultValue}
             entryTypes={[
               { value: "REACTION", label: t("entryReaction"), variant: "secondary" },
               { value: "OBJECTION", label: t("entryObjection"), variant: "danger" },

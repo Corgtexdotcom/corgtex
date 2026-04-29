@@ -1,28 +1,114 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useId, useMemo, useRef, useState, useTransition } from "react";
 import { useTranslations } from "next-intl";
+import {
+  applyMentionSelection,
+  filterMentionTargets,
+  getActiveMentionRange,
+  type ActiveMentionRange,
+  type DeliberationMentionTarget,
+} from "@/lib/deliberation-mentions";
 import { FormMessage } from "./FormMessage";
+
+function isSameMentionRange(a: ActiveMentionRange | null, b: ActiveMentionRange | null) {
+  return a?.start === b?.start && a?.end === b?.end && a?.query === b?.query;
+}
 
 type DeliberationComposerProps = {
   postAction: (formData: FormData) => Promise<void>;
   hiddenFields: Record<string, string>;
   entryTypes: Array<{ value: string; label: string; variant: string }>;
-  targetOptions?: Array<{ value: string; label: string }>;
-  defaultTargetValue?: string;
+  targetOptions?: DeliberationMentionTarget[];
   title?: string;
 };
 
-export function DeliberationComposer({ postAction, hiddenFields, entryTypes, targetOptions = [], defaultTargetValue = "", title }: DeliberationComposerProps) {
+export function DeliberationComposer({ postAction, hiddenFields, entryTypes, targetOptions = [], title }: DeliberationComposerProps) {
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const listboxId = useId();
   const [selectedType, setSelectedType] = useState(entryTypes[0]?.value || "REACTION");
-  const [selectedTarget, setSelectedTarget] = useState(defaultTargetValue);
+  const [selectedTarget, setSelectedTarget] = useState("");
+  const [bodyMd, setBodyMd] = useState("");
+  const [activeMention, setActiveMention] = useState<ActiveMentionRange | null>(null);
+  const [activeTargetIndex, setActiveTargetIndex] = useState(0);
   const [isPending, startTransition] = useTransition();
   const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
   const t = useTranslations("deliberation");
+  const filteredTargets = useMemo(() => (
+    activeMention ? filterMentionTargets(targetOptions, activeMention.query) : []
+  ), [activeMention, targetOptions]);
+  const isMentionOpen = !!activeMention && targetOptions.length > 0;
+  const activeOptionIndex = filteredTargets.length > 0
+    ? Math.min(activeTargetIndex, filteredTargets.length - 1)
+    : -1;
+
+  const syncMentionForCursor = (value: string, cursorIndex: number) => {
+    const nextMention = getActiveMentionRange(value, cursorIndex);
+    setActiveTargetIndex((currentIndex) => (
+      isSameMentionRange(activeMention, nextMention) ? currentIndex : 0
+    ));
+    setActiveMention(nextMention);
+  };
+
+  const selectMentionTarget = (target: DeliberationMentionTarget) => {
+    if (!activeMention) return;
+
+    const next = applyMentionSelection(bodyMd, activeMention, target);
+    setBodyMd(next.value);
+    setSelectedTarget(target.value);
+    setActiveMention(null);
+    setActiveTargetIndex(0);
+
+    window.requestAnimationFrame(() => {
+      textareaRef.current?.focus();
+      textareaRef.current?.setSelectionRange(next.cursorIndex, next.cursorIndex);
+    });
+  };
+
+  const handleBodyChange = (event: React.ChangeEvent<HTMLTextAreaElement>) => {
+    const nextValue = event.currentTarget.value;
+    setBodyMd(nextValue);
+    syncMentionForCursor(nextValue, event.currentTarget.selectionStart);
+  };
+
+  const handleTextareaSelect = (event: React.SyntheticEvent<HTMLTextAreaElement>) => {
+    syncMentionForCursor(bodyMd, event.currentTarget.selectionStart);
+  };
+
+  const handleTextareaKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (!isMentionOpen) return;
+
+    if (event.key === "Escape") {
+      event.preventDefault();
+      setActiveMention(null);
+      setActiveTargetIndex(0);
+      return;
+    }
+
+    if (filteredTargets.length === 0) return;
+
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      setActiveTargetIndex((current) => (current + 1) % filteredTargets.length);
+      return;
+    }
+
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      setActiveTargetIndex((current) => (current - 1 + filteredTargets.length) % filteredTargets.length);
+      return;
+    }
+
+    if (event.key === "Enter" || event.key === "Tab") {
+      event.preventDefault();
+      selectMentionTarget(filteredTargets[activeOptionIndex]);
+    }
+  };
 
   const handleSubmit = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const formData = new FormData(e.currentTarget);
+    formData.set("bodyMd", bodyMd);
     formData.set("entryType", selectedType);
     formData.delete("targetCircleId");
     formData.delete("targetMemberId");
@@ -38,7 +124,10 @@ export function DeliberationComposer({ postAction, hiddenFields, entryTypes, tar
         setMessage({ type: "success", text: t("entryPosted") });
         const form = e.target as HTMLFormElement;
         form.reset();
-        // Clear message after a short delay or just leave it
+        setBodyMd("");
+        setSelectedTarget("");
+        setActiveMention(null);
+        setActiveTargetIndex(0);
         setTimeout(() => setMessage(null), 3000);
       } catch (err: any) {
         setMessage({ type: "error", text: err.message || t("entryPostFailed") });
@@ -61,14 +150,52 @@ export function DeliberationComposer({ postAction, hiddenFields, entryTypes, tar
           <input key={k} type="hidden" name={k} value={v} />
         ))}
 
-        <textarea
-          name="bodyMd"
-          required
-          placeholder={t("entryPlaceholder")}
-          rows={4}
-          disabled={isPending}
-          style={{ width: "100%", padding: "12px", borderRadius: "8px", border: "1px solid var(--line)" }}
-        />
+        <div className="delib-mention-field">
+          <textarea
+            ref={textareaRef}
+            name="bodyMd"
+            required
+            value={bodyMd}
+            placeholder={t("entryPlaceholder")}
+            rows={4}
+            disabled={isPending}
+            aria-autocomplete={targetOptions.length > 0 ? "list" : undefined}
+            aria-controls={isMentionOpen ? listboxId : undefined}
+            aria-expanded={targetOptions.length > 0 ? isMentionOpen : undefined}
+            aria-activedescendant={activeOptionIndex >= 0 ? `${listboxId}-${activeOptionIndex}` : undefined}
+            onChange={handleBodyChange}
+            onSelect={handleTextareaSelect}
+            onClick={handleTextareaSelect}
+            onKeyDown={handleTextareaKeyDown}
+            style={{ width: "100%", padding: "12px", borderRadius: "8px", border: "1px solid var(--line)" }}
+          />
+          {isMentionOpen && (
+            <div id={listboxId} role="listbox" aria-label={t("mentionAriaLabel")} className="delib-mention-listbox">
+              {filteredTargets.length > 0 ? (
+                filteredTargets.map((target, index) => (
+                  <button
+                    key={target.value}
+                    id={`${listboxId}-${index}`}
+                    type="button"
+                    role="option"
+                    aria-selected={index === activeOptionIndex}
+                    className={`delib-mention-option ${index === activeOptionIndex ? "delib-mention-option-active" : ""}`}
+                    onMouseEnter={() => setActiveTargetIndex(index)}
+                    onMouseDown={(event) => {
+                      event.preventDefault();
+                      selectMentionTarget(target);
+                    }}
+                  >
+                    <span className="delib-mention-option-name">{target.name}</span>
+                    <span className="delib-mention-option-kind">{target.kind === "circle" ? t("targetKindCircle") : t("targetKindPerson")}</span>
+                  </button>
+                ))
+              ) : (
+                <div className="delib-mention-empty">{t("noMatchingTargets")}</div>
+              )}
+            </div>
+          )}
+        </div>
 
         <div className="delib-composer-toolbar">
           <div className="delib-inline-tags">
@@ -83,20 +210,6 @@ export function DeliberationComposer({ postAction, hiddenFields, entryTypes, tar
               </button>
             ))}
           </div>
-          {targetOptions.length > 0 && (
-            <select
-              aria-label={t("targetAriaLabel")}
-              value={selectedTarget}
-              onChange={(event) => setSelectedTarget(event.target.value)}
-              disabled={isPending}
-              className="delib-target-select"
-            >
-              <option value="">{t("noTarget")}</option>
-              {targetOptions.map((option) => (
-                <option key={option.value} value={option.value}>{option.label}</option>
-              ))}
-            </select>
-          )}
           <button type="submit" disabled={isPending} className="small">
             {isPending ? t("posting") : t("postEntry")}
           </button>

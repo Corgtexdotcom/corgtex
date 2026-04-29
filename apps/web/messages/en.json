@@ -1434,14 +1434,16 @@
     "entryPosted": "Entry posted successfully.",
     "entryPostFailed": "Failed to post entry.",
     "entryPlaceholder": "Write your entry in markdown...",
-    "targetAriaLabel": "Deliberation target",
-    "noTarget": "No target",
     "posting": "Posting...",
     "postEntry": "Post Entry",
     "entryReaction": "Reaction",
     "entryObjection": "Objection",
     "resolved": "Resolved",
     "resolvePlaceholder": "What changed, or why is this resolved?",
-    "resolve": "Resolve"
+    "resolve": "Resolve",
+    "mentionAriaLabel": "Mention target suggestions",
+    "noMatchingTargets": "No matching targets.",
+    "targetKindCircle": "Circle",
+    "targetKindPerson": "Person"
   }
 }
