@@ -1,20 +1,30 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { prismaMock, txMock, runAgentWorkflowJobMock, runSlackAgentMock, processSlackInboundEventMock, purgeExpiredCommunicationMessagesMock, syncSlackPublicArchiveForWorkspaceMock } = vi.hoisted(() => ({
+const { prismaMock, txMock, runAgentWorkflowJobMock, runSlackAgentMock, processSlackInboundEventMock, purgeExpiredCommunicationMessagesMock, syncSlackPublicArchiveForWorkspaceMock, isAgentEnabledMock } = vi.hoisted(() => ({
   prismaMock: {
     $transaction: vi.fn(),
     workflowJob: {
       update: vi.fn(),
     },
+    workspace: {
+      findMany: vi.fn(),
+    },
+    communicationInstallation: {
+      findMany: vi.fn(),
+    },
   },
   txMock: {
     $queryRaw: vi.fn(),
+    workflowJob: {
+      upsert: vi.fn(),
+    },
   },
   runAgentWorkflowJobMock: vi.fn(),
   runSlackAgentMock: vi.fn(),
   processSlackInboundEventMock: vi.fn(),
   purgeExpiredCommunicationMessagesMock: vi.fn(),
   syncSlackPublicArchiveForWorkspaceMock: vi.fn(),
+  isAgentEnabledMock: vi.fn(),
 }));
 
 vi.mock("@corgtex/shared", () => ({
@@ -44,20 +54,30 @@ vi.mock("@corgtex/domain", () => ({
   processSlackInboundEvent: processSlackInboundEventMock,
   purgeExpiredCommunicationMessages: purgeExpiredCommunicationMessagesMock,
   syncSlackPublicArchiveForWorkspace: syncSlackPublicArchiveForWorkspaceMock,
+  isAgentEnabled: isAgentEnabledMock,
 }));
 
-import { runPendingJobs } from "./outbox";
+import { runPendingJobs, scheduleDailyJobs } from "./outbox";
+
+afterEach(() => {
+  vi.useRealTimers();
+  delete process.env.WORKER_DAILY_JOB_START_HOUR_UTC;
+});
 
 describe("runPendingJobs", () => {
   beforeEach(() => {
     prismaMock.$transaction.mockReset().mockImplementation(async (callback: (tx: typeof txMock) => Promise<unknown>) => callback(txMock));
     prismaMock.workflowJob.update.mockReset().mockResolvedValue({ id: "job-1" });
+    prismaMock.workspace.findMany.mockReset().mockResolvedValue([]);
+    prismaMock.communicationInstallation.findMany.mockReset().mockResolvedValue([]);
     txMock.$queryRaw.mockReset().mockResolvedValue([]);
+    txMock.workflowJob.upsert.mockReset().mockResolvedValue({ id: "job-1" });
     runAgentWorkflowJobMock.mockReset();
     runSlackAgentMock.mockReset();
     processSlackInboundEventMock.mockReset();
     purgeExpiredCommunicationMessagesMock.mockReset();
     syncSlackPublicArchiveForWorkspaceMock.mockReset();
+    isAgentEnabledMock.mockReset().mockResolvedValue(false);
   });
 
   it("requeues agent jobs when execution is skipped by the concurrency gate", async () => {
@@ -180,5 +200,63 @@ describe("runPendingJobs", () => {
         status: "COMPLETED",
       }),
     });
+  });
+});
+
+describe("scheduleDailyJobs", () => {
+  beforeEach(() => {
+    prismaMock.$transaction.mockReset().mockImplementation(async (callback: (tx: typeof txMock) => Promise<unknown>) => callback(txMock));
+    prismaMock.workspace.findMany.mockReset().mockResolvedValue([
+      { id: "ws-1" },
+      { id: "ws-2" },
+    ]);
+    prismaMock.communicationInstallation.findMany.mockReset().mockResolvedValue([
+      { workspaceId: "ws-1" },
+    ]);
+    txMock.workflowJob.upsert.mockReset().mockResolvedValue({ id: "job-1" });
+    isAgentEnabledMock.mockReset().mockImplementation(async (workspaceId: string) => workspaceId === "ws-1");
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-04-29T20:15:00Z"));
+  });
+
+  it("schedules retention, digest, and Slack archive jobs once the daily window has opened", async () => {
+    await expect(scheduleDailyJobs()).resolves.toBe(4);
+
+    expect(txMock.workflowJob.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({
+        workspaceId: "ws-1",
+        type: "communication.raw-retention",
+        dedupeKey: "ws-1:communication-retention:2026-04-29",
+      }),
+    }));
+    expect(txMock.workflowJob.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({
+        workspaceId: "ws-2",
+        type: "communication.raw-retention",
+        dedupeKey: "ws-2:communication-retention:2026-04-29",
+      }),
+    }));
+    expect(txMock.workflowJob.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({
+        workspaceId: "ws-1",
+        type: "brain.daily-digest",
+        dedupeKey: "ws-1:daily-digest:2026-04-29",
+      }),
+    }));
+    expect(txMock.workflowJob.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({
+        workspaceId: "ws-1",
+        type: "communication.slack.public-archive",
+        dedupeKey: "ws-1:slack-public-archive:2026-04-29",
+      }),
+    }));
+  });
+
+  it("does not schedule daily jobs before the configured UTC start hour", async () => {
+    vi.setSystemTime(new Date("2026-04-29T10:59:00Z"));
+
+    await expect(scheduleDailyJobs()).resolves.toBe(0);
+
+    expect(txMock.workflowJob.upsert).not.toHaveBeenCalled();
   });
 });

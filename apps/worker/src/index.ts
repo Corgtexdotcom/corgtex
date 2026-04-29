@@ -31,8 +31,12 @@ let tickCount = 0;
 let totalDispatched = 0;
 let totalProcessed = 0;
 let totalFinalized = 0;
+let totalScheduledDaily = 0;
+let totalScheduledPeriodic = 0;
 let lastTickMs = 0;
 let lastError: string | null = null;
+let lastSuccessfulTickAt: string | null = null;
+let lastWorkAt: string | null = null;
 let pollTimer: ReturnType<typeof setTimeout> | null = null;
 let currentPollIntervalMs = POLL_INTERVAL_MS;
 
@@ -73,15 +77,21 @@ async function tick() {
     totalDispatched += dispatched;
     totalProcessed += processed;
     totalFinalized += finalized;
+    totalScheduledDaily += scheduled;
+    totalScheduledPeriodic += scheduledPeriodic;
     lastTickMs = Date.now() - tickStart;
     lastError = null;
+    lastSuccessfulTickAt = new Date().toISOString();
 
-    if (finalized > 0 || dispatched > 0 || processed > 0 || scheduledPeriodic > 0) {
+    if (finalized > 0 || dispatched > 0 || processed > 0 || scheduled > 0 || scheduledPeriodic > 0) {
+      lastWorkAt = lastSuccessfulTickAt;
       log("info", {
         event: "tick",
         finalized,
+        autoApproved,
         dispatched,
         processed,
+        scheduled,
         scheduledPeriodic,
         durationMs: lastTickMs,
       });
@@ -120,7 +130,11 @@ function startHealthServer() {
         totalDispatched,
         totalProcessed,
         totalFinalized,
+        totalScheduledDaily,
+        totalScheduledPeriodic,
         lastTickMs,
+        lastSuccessfulTickAt,
+        lastWorkAt,
         lastError,
         uptime: process.uptime(),
         memoryMB: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
@@ -148,6 +162,12 @@ function startHealthServer() {
         `# HELP worker_processed_total Total jobs processed`,
         `# TYPE worker_processed_total counter`,
         `worker_processed_total{worker="${workerId}"} ${totalProcessed}`,
+        `# HELP worker_scheduled_daily_total Total daily jobs scheduled`,
+        `# TYPE worker_scheduled_daily_total counter`,
+        `worker_scheduled_daily_total{worker="${workerId}"} ${totalScheduledDaily}`,
+        `# HELP worker_scheduled_periodic_total Total periodic jobs scheduled`,
+        `# TYPE worker_scheduled_periodic_total counter`,
+        `worker_scheduled_periodic_total{worker="${workerId}"} ${totalScheduledPeriodic}`,
         `# HELP worker_last_tick_ms Duration of last tick in ms`,
         `# TYPE worker_last_tick_ms gauge`,
         `worker_last_tick_ms{worker="${workerId}"} ${lastTickMs}`,
@@ -202,6 +222,8 @@ async function shutdown(signal: string) {
     totalDispatched,
     totalProcessed,
     totalFinalized,
+    totalScheduledDaily,
+    totalScheduledPeriodic,
   });
 
   await prisma.$disconnect();

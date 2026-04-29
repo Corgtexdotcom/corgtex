@@ -548,6 +548,38 @@ describe("Platform Admin Tools", () => {
     });
   });
 
+  it("probeExternalInstanceHealth accepts release gitSha when imageTag is not reported", async () => {
+    (prisma.instanceRegistry.findUniqueOrThrow as any).mockResolvedValueOnce({
+      id: "inst_1",
+      url: "http://fake-instance.com",
+      releaseImageTag: "sha-expected",
+    });
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: vi.fn().mockResolvedValue({
+        database: "up",
+        schema: "ready",
+        runtime: {
+          redis: "configured",
+          storage: "configured",
+        },
+        release: { imageTag: null, gitSha: "sha-expected" },
+      }),
+    });
+
+    await admin.probeExternalInstanceHealth(dummyActor, "inst_1");
+
+    expect(prisma.instanceRegistry.update).toHaveBeenCalledWith({
+      where: { id: "inst_1" },
+      data: expect.objectContaining({
+        lastHealthStatus: "ok",
+        lastHealthError: null,
+        provisioningStatus: "active",
+        lastReleaseCheck: expect.any(Date),
+      }),
+    });
+  });
+
   it("probeExternalInstanceHealth marks missing runtime dependencies as degraded", async () => {
     global.fetch = vi.fn().mockResolvedValue({
       ok: true,

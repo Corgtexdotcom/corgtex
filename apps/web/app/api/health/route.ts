@@ -23,7 +23,7 @@ function releaseFingerprint() {
   return {
     version: process.env.CORGTEX_RELEASE_VERSION || process.env.npm_package_version || "development",
     imageTag: process.env.CORGTEX_RELEASE_IMAGE_TAG || null,
-    gitSha: process.env.RAILWAY_GIT_COMMIT_SHA || process.env.GITHUB_SHA || null,
+    gitSha: process.env.CORGTEX_RELEASE_GIT_SHA || process.env.RAILWAY_GIT_COMMIT_SHA || process.env.GITHUB_SHA || null,
   };
 }
 

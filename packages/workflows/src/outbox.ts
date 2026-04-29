@@ -16,6 +16,7 @@ const RETRY_BASE_DELAY_MS = 5_000;
 const RETRY_MAX_DELAY_MS = 5 * 60 * 1_000;
 const LOCK_TIMEOUT_MS = 5 * 60 * 1_000;
 const TRIAGE_COALESCE_WINDOW_MS = 5 * 60 * 1_000;
+const DEFAULT_DAILY_JOB_START_HOUR_UTC = 11;
 const TRIAGE_EVENT_TYPES = new Set([
   "proposal.submitted",
   "spend.submitted",
@@ -514,10 +515,14 @@ export async function schedulePeriodicJobs() {
 
 export async function scheduleDailyJobs() {
   const now = new Date();
-  const currentHourUTC = now.getUTCHours();
-  
-  if (currentHourUTC !== 11) {
-    return 0; // Only run at 11:00 UTC
+  const dailyJobStartHourRaw = Number(process.env.WORKER_DAILY_JOB_START_HOUR_UTC ?? DEFAULT_DAILY_JOB_START_HOUR_UTC);
+  const dailyJobStartHourUTC = Math.min(
+    23,
+    Math.max(0, Number.isFinite(dailyJobStartHourRaw) ? dailyJobStartHourRaw : DEFAULT_DAILY_JOB_START_HOUR_UTC),
+  );
+
+  if (now.getUTCHours() < dailyJobStartHourUTC) {
+    return 0;
   }
 
   const todayISO = now.toISOString().split("T")[0];
@@ -545,6 +550,17 @@ export async function scheduleDailyJobs() {
 
   await prisma.$transaction(async (tx) => {
     const eventId = `cron-${now.getTime()}`;
+    for (const workspace of workspaces) {
+      await enqueueJob(tx, {
+        workspaceId: workspace.id,
+        eventId,
+        type: "communication.raw-retention",
+        payload: { dateISO: now.toISOString() },
+        dedupeKey: `${workspace.id}:communication-retention:${todayISO}`,
+      });
+      scheduledCount++;
+    }
+
     for (const workspace of enabledWorkspaces) {
       await enqueueJob(tx, {
         workspaceId: workspace.id,
@@ -552,13 +568,6 @@ export async function scheduleDailyJobs() {
         type: "brain.daily-digest",
         payload: { dateISO: now.toISOString() },
         dedupeKey: `${workspace.id}:daily-digest:${todayISO}`,
-      });
-      await enqueueJob(tx, {
-        workspaceId: workspace.id,
-        eventId,
-        type: "communication.raw-retention",
-        payload: { dateISO: now.toISOString() },
-        dedupeKey: `${workspace.id}:communication-retention:${todayISO}`,
       });
       scheduledCount++;
     }
