@@ -12,6 +12,8 @@ import Link from "next/link";
 import { GoalProgress } from "./goals/GoalProgress";
 import { RecognitionCard } from "./goals/RecognitionCard";
 import { getTranslations, getFormatter } from "next-intl/server";
+import { getDashboardAttentionCounts } from "@/lib/dashboard-attention";
+import { getWorkspaceCapabilities } from "@/lib/workspace-capabilities";
 
 export const dynamic = "force-dynamic";
 
@@ -41,6 +43,7 @@ export default async function WorkspaceDashboard({
   const actor = await requirePageActor();
   const t = await getTranslations("dashboard");
   const format = await getFormatter();
+  const capabilities = await getWorkspaceCapabilities(actor, workspaceId);
 
   const [
     { items: tensions },
@@ -85,7 +88,9 @@ export default async function WorkspaceDashboard({
     }),
     listActions(actor, workspaceId, { take: 10 }),
     prisma.tension.count({ where: { workspaceId, status: "OPEN", OR: [{ isPrivate: false }, { authorUserId: actor.kind === 'user' ? actor.user.id : '' }] } }),
-    prisma.agentRun.count({ where: { workspaceId, status: "WAITING_APPROVAL" } }),
+    capabilities.canReviewAgentRuns
+      ? prisma.agentRun.count({ where: { workspaceId, status: "WAITING_APPROVAL" } })
+      : Promise.resolve(0),
     listAuditLogs(actor, workspaceId, { take: 10 }),
     listArticles(actor, { workspaceId, take: 50 }),
     listMeetings(workspaceId),
@@ -134,7 +139,15 @@ export default async function WorkspaceDashboard({
   const unreadNotifications = notifications.filter(n => !n.readAt);
   const openActions = openActionsResult.items.filter(a => a.status === "OPEN" || a.status === "IN_PROGRESS");
   
-  const totalAttentionItems = pendingFlows.length + pendingAgentApprovals + unreadNotifications.length + advisoryRequests.length;
+  const attentionCounts = getDashboardAttentionCounts({
+    pendingFlowsCount: pendingFlows.length,
+    pendingAgentApprovalsCount: pendingAgentApprovals,
+    unreadNotificationsCount: unreadNotifications.length,
+    advisoryRequestsCount: advisoryRequests.length,
+    canReviewAgentRuns: capabilities.canReviewAgentRuns,
+  });
+  const totalAttentionItems = attentionCounts.totalAttentionItems;
+  const visiblePendingAgentApprovals = attentionCounts.pendingAgentApprovalsCount;
 
   const ageText = (date: Date) => format.relativeTime(date);
 
@@ -223,10 +236,10 @@ export default async function WorkspaceDashboard({
               </div>
             )}
             
-            {pendingAgentApprovals > 0 && (
+            {visiblePendingAgentApprovals > 0 && (
               <div className="nr-attention-block">
                 <strong>{t("agentRuns")}</strong>
-                <span style={{ fontSize: "0.8rem" }}>{t("runsWaitingReview", { count: pendingAgentApprovals })}</span>
+                <span style={{ fontSize: "0.8rem" }}>{t("runsWaitingReview", { count: visiblePendingAgentApprovals })}</span>
                 <Link href={`/workspaces/${workspaceId}/operator`} style={{ display: "block", fontSize: "0.8rem", marginTop: 4, textDecoration: "underline" }}>{t("review")}</Link>
               </div>
             )}

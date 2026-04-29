@@ -1,13 +1,12 @@
 import { env } from "@corgtex/shared";
-import { listAgentRuns, listRuntimeEvents, listRuntimeJobs, listMembers, listFailedJobs, getFailingAgents } from "@corgtex/domain";
+import { listAgentRuns, listRuntimeEvents, listRuntimeJobs, listFailedJobs, getFailingAgents } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
+import { getWorkspaceCapabilities } from "@/lib/workspace-capabilities";
+import { notFound } from "next/navigation";
 import {
   triggerAgentRunAction,
   replayEventAction,
   replayWorkflowJobAction,
-  decideApprovalAction,
-  createObjectionAction,
-  resolveObjectionAction,
   resolveAgentRunAction,
   discardFailedJobAction,
 } from "../actions";
@@ -87,17 +86,19 @@ export default async function OperatorPage({
   const { workspaceId } = await params;
   const actor = await requirePageActor();
   const t = await getTranslations("operator");
-  const [agentRuns, events, jobs, members, failedJobs, failingAgents] = await Promise.all([
+  const capabilities = await getWorkspaceCapabilities(actor, workspaceId);
+  if (!capabilities.canUseOperatorConsole) {
+    notFound();
+  }
+
+  const [agentRuns, events, jobs, failedJobs, failingAgents] = await Promise.all([
     listAgentRuns(actor, workspaceId, { take: 15 }),
     listRuntimeEvents(actor, workspaceId, { take: 15 }),
     listRuntimeJobs(actor, workspaceId, { take: 15 }),
-    listMembers(workspaceId),
     listFailedJobs(actor, workspaceId, { take: 50 }),
     getFailingAgents(workspaceId),
   ]);
-  const currentUserId = actor.kind === "user" ? actor.user.id : "";
-  const currentMembership = members.find((m) => m.userId === currentUserId);
-  const canOperate = currentMembership?.role === "ADMIN" || currentMembership?.role === "FACILITATOR";
+  const canOperate = capabilities.canUseOperatorConsole;
 
   return (
     <>

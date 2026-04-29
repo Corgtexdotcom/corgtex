@@ -3,6 +3,7 @@ export type NavItem = {
   labelKey: string;
   icon: string;
   featureFlag?: WorkspaceNavFeatureFlag;
+  requiredCapability?: WorkspaceNavCapability;
 };
 
 export type NavGroup = {
@@ -16,6 +17,11 @@ export type WorkspaceNavFeatureFlag =
   | "CYCLES"
   | "AGENT_GOVERNANCE"
   | "OS_METRICS";
+
+export type WorkspaceNavCapability =
+  | "canManageAgentGovernance"
+  | "canReviewAgentRuns"
+  | "canUseOperatorConsole";
 
 export const WORKSPACE_NAV_GROUPS: NavGroup[] = [
   {
@@ -53,7 +59,13 @@ export const WORKSPACE_NAV_GROUPS: NavGroup[] = [
   {
     labelKey: "aiGovernance",
     items: [
-      { href: "/agents", labelKey: "agentGovernance", icon: "⬡", featureFlag: "AGENT_GOVERNANCE" },
+      {
+        href: "/agents",
+        labelKey: "agentGovernance",
+        icon: "⬡",
+        featureFlag: "AGENT_GOVERNANCE",
+        requiredCapability: "canManageAgentGovernance",
+      },
     ],
   },
   {
