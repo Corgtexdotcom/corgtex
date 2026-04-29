@@ -7,6 +7,9 @@ const listGoalsMock = vi.fn();
 const getGoalMock = vi.fn();
 const updateGoalMock = vi.fn();
 const deleteGoalMock = vi.fn();
+const listWorkspaceToolLinksMock = vi.fn();
+const upsertWorkspaceToolLinkMock = vi.fn();
+const archiveWorkspaceToolLinkMock = vi.fn();
 
 vi.mock("@corgtex/domain", () => ({
   listProposals: vi.fn(),
@@ -32,6 +35,9 @@ vi.mock("@corgtex/domain", () => ({
   listCommunicationInstallations: vi.fn(),
   listExternalDataSources: vi.fn(),
   enqueueExternalDataSourceSync: vi.fn(),
+  listWorkspaceToolLinks: listWorkspaceToolLinksMock,
+  upsertWorkspaceToolLink: upsertWorkspaceToolLinkMock,
+  archiveWorkspaceToolLink: archiveWorkspaceToolLinkMock,
   listRuntimeJobs: vi.fn(),
   listFailedJobs: vi.fn(),
   replayWorkflowJob: vi.fn(),
@@ -75,6 +81,13 @@ describe("createCorgtexMcpServer", () => {
     getGoalMock.mockReset().mockResolvedValue({ id: "goal-1", cadence: "QUARTERLY" });
     updateGoalMock.mockReset().mockResolvedValue({ id: "goal-1", status: "ACTIVE", cadence: "QUARTERLY" });
     deleteGoalMock.mockReset().mockResolvedValue(undefined);
+    listWorkspaceToolLinksMock.mockReset().mockResolvedValue([]);
+    upsertWorkspaceToolLinkMock.mockReset().mockResolvedValue({
+      id: "tool-1",
+      title: "Miro board",
+      hasCredential: true,
+    });
+    archiveWorkspaceToolLinkMock.mockReset().mockResolvedValue({ id: "tool-1" });
   });
 
   it("returns the opened spend identifier from create_spend", async () => {
@@ -144,6 +157,11 @@ describe("createCorgtexMcpServer", () => {
       openWorldHint: false,
     });
     expect((server as any)._registeredTools.archive_goal.annotations).toMatchObject({
+      readOnlyHint: false,
+      destructiveHint: true,
+      openWorldHint: false,
+    });
+    expect((server as any)._registeredTools.archive_tool_link.annotations).toMatchObject({
       readOnlyHint: false,
       destructiveHint: true,
       openWorldHint: false,
@@ -231,5 +249,48 @@ describe("createCorgtexMcpServer", () => {
       archived: true,
       webUrl: "https://app.test/workspaces/ws-1/audit?tab=archive",
     });
+  });
+
+  it("upserts a shared tool link without returning credential material", async () => {
+    const { createCorgtexMcpServer } = await import("./server");
+    const { requireScope } = await import("./auth");
+
+    const server = createCorgtexMcpServer({
+      actor: { kind: "agent", authProvider: "bootstrap" } as any,
+      workspaceId: "ws-1",
+      authKind: "agent",
+    });
+
+    const upsertTool = (server as any)._registeredTools.upsert_tool_link;
+    const response = await upsertTool.handler({
+      title: "Miro board",
+      url: "https://miro.com/app/board/example",
+      category: "WHITEBOARD",
+      credentialLabel: "Board password",
+      credentialSecret: "replace with access code",
+    });
+
+    expect(upsertWorkspaceToolLinkMock).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "agent" }),
+      expect.objectContaining({
+        workspaceId: "ws-1",
+        title: "Miro board",
+        url: "https://miro.com/app/board/example",
+        category: "WHITEBOARD",
+        credentialLabel: "Board password",
+        credentialSecret: "replace with access code",
+      }),
+    );
+    expect(vi.mocked(requireScope)).toHaveBeenCalledWith(
+      expect.objectContaining({ workspaceId: "ws-1" }),
+      "tools:write",
+    );
+    expect(JSON.parse(response.content[0].text)).toEqual({
+      id: "tool-1",
+      title: "Miro board",
+      hasCredential: true,
+      webUrl: "https://app.test/workspaces/ws-1/tools",
+    });
+    expect(response.content[0].text).not.toContain("replace with access code");
   });
 });

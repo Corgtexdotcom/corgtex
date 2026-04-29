@@ -75,6 +75,9 @@ import {
   listCommunicationInstallations,
   listExternalDataSources,
   enqueueExternalDataSourceSync,
+  archiveWorkspaceToolLink,
+  listWorkspaceToolLinks,
+  upsertWorkspaceToolLink,
   listRuntimeJobs,
   listFailedJobs,
   replayWorkflowJob,
@@ -114,6 +117,7 @@ const DESTRUCTIVE_TOOL_NAMES = new Set([
   "delete_action",
   "delete_tension",
   "archive_goal",
+  "archive_tool_link",
   "deactivate_member",
   "delete_meeting",
   "delete_article",
@@ -495,6 +499,90 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       requireScope(sessionCtx, "data-sources:write");
       const job = await enqueueExternalDataSourceSync(actor, { workspaceId, sourceId });
       return jsonResult({ id: job.id, status: job.status, webUrl: webUrl(workspaceId, `/settings?tab=data-sources`) });
+    },
+  );
+
+  tool(
+    "list_tool_links",
+    "List shared workspace tool links and access notes. Does not return decrypted credentials.",
+    {},
+    async () => {
+      requireScope(sessionCtx, "tools:read");
+      const links = await listWorkspaceToolLinks(actor, { workspaceId });
+      return jsonResult({ items: links, webUrl: webUrl(workspaceId, `/tools`) });
+    },
+  );
+
+  tool(
+    "upsert_tool_link",
+    "Create or update a shared workspace tool link. Pass toolLinkId to update an existing link. Credential values are encrypted and never returned.",
+    {
+      toolLinkId: z.string().optional(),
+      title: z.string(),
+      url: z.string(),
+      category: z.string().optional(),
+      descriptionMd: z.string().nullable().optional(),
+      accessNotesMd: z.string().nullable().optional(),
+      previewTitle: z.string().nullable().optional(),
+      previewDescription: z.string().nullable().optional(),
+      previewImageUrl: z.string().nullable().optional(),
+      previewFaviconUrl: z.string().nullable().optional(),
+      credentialLabel: z.string().nullable().optional(),
+      credentialSecret: z.string().nullable().optional(),
+      circleIds: z.array(z.string()).optional(),
+    },
+    async (params: {
+      toolLinkId?: string;
+      title: string;
+      url: string;
+      category?: string;
+      descriptionMd?: string | null;
+      accessNotesMd?: string | null;
+      previewTitle?: string | null;
+      previewDescription?: string | null;
+      previewImageUrl?: string | null;
+      previewFaviconUrl?: string | null;
+      credentialLabel?: string | null;
+      credentialSecret?: string | null;
+      circleIds?: string[];
+    }) => {
+      requireScope(sessionCtx, "tools:write");
+      const link = await upsertWorkspaceToolLink(actor, {
+        workspaceId,
+        toolLinkId: params.toolLinkId,
+        title: params.title,
+        url: params.url,
+        category: params.category,
+        descriptionMd: params.descriptionMd,
+        accessNotesMd: params.accessNotesMd,
+        previewTitle: params.previewTitle,
+        previewDescription: params.previewDescription,
+        previewImageUrl: params.previewImageUrl,
+        previewFaviconUrl: params.previewFaviconUrl,
+        credentialLabel: params.credentialLabel,
+        credentialSecret: params.credentialSecret,
+        circleIds: params.circleIds,
+      });
+      return jsonResult({
+        id: link.id,
+        title: link.title,
+        hasCredential: link.hasCredential,
+        webUrl: webUrl(workspaceId, `/tools`),
+      });
+    },
+  );
+
+  tool(
+    "archive_tool_link",
+    "Archive a shared workspace tool link so it stops appearing in active tools.",
+    {
+      toolLinkId: z.string(),
+      reason: z.string().nullable().optional(),
+    },
+    async ({ toolLinkId, reason }: { toolLinkId: string; reason?: string | null }) => {
+      requireScope(sessionCtx, "tools:write");
+      await archiveWorkspaceToolLink(actor, { workspaceId, toolLinkId, reason });
+      return jsonResult({ id: toolLinkId, archived: true, webUrl: webUrl(workspaceId, `/audit?tab=archive`) });
     },
   );
 

@@ -56,6 +56,8 @@ export const SCOPE_REGISTRY = {
   // ---- members ----
   "members:read":        { label: "Read members",               group: "people",     default: true,  description: "List active members and their roles." },
   "members:write":       { label: "Manage members",             group: "people",     default: false, description: "Create, update, and deactivate members. Sensitive — opt-in." },
+  "tools:read":          { label: "Read shared tools",           group: "people",     default: true,  description: "List shared workspace tool links and non-secret access notes." },
+  "tools:write":         { label: "Manage shared tools",         group: "people",     default: false, description: "Create, update, and archive shared workspace tool links. Sensitive — opt-in." },
 
   // ---- meetings ----
   "meetings:read":       { label: "Read meetings",              group: "knowledge",  default: true,  description: "List meetings and their summaries." },
