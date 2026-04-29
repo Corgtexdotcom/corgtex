@@ -48,6 +48,7 @@ export default async function TensionDetailPage({
   };
 
   const priorityText = tension.priority > 0 ? t("priorityN", { priority: tension.priority }) : t("noPriority");
+  const raisedByName = tension.raisedByMember?.user.displayName || tension.raisedByMember?.user.email || null;
 
   return (
     <>
@@ -66,6 +67,7 @@ export default async function TensionDetailPage({
             {statusLabel(tension.status)}
           </span>
           <span>{t("detailAuthorMeta", { author: tension.author.displayName || tension.author.email || t("authorUnknown") })}</span>
+          {raisedByName && <span>{t("detailRaisedByMeta", { name: raisedByName })}</span>}
           <span>{t("detailPriorityMeta", { priority: priorityText })}</span>
           <span>{t("detailCreatedMeta", { date: new Date(tension.createdAt).toLocaleDateString() })}</span>
         </div>

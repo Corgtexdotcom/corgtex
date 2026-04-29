@@ -16,6 +16,7 @@ export const createTensionTool: ModelTool = {
         bodyMd: { type: "string", description: "Detailed description in Markdown format" },
         circleId: { type: "string", description: "Optional UUID of the circle this belongs to" },
         assigneeMemberId: { type: "string", description: "Optional UUID of a member assigned to resolve this" },
+        raisedByMemberId: { type: "string", description: "Optional UUID of the member who raised this tension" },
       },
       required: ["title"],
     },
@@ -36,6 +37,7 @@ export const updateTensionTool: ModelTool = {
         title: { type: "string" },
         bodyMd: { type: "string" },
         assigneeMemberId: { type: "string", description: "Set or clear the assigned member UUID" },
+        raisedByMemberId: { type: "string", description: "Set or clear the member who raised this tension" },
       },
       required: ["tensionId"],
     },
@@ -120,6 +122,7 @@ export async function createTensionAction(actor: AppActor, ctx: any, args: any) 
     bodyMd: args.bodyMd,
     circleId: args.circleId,
     assigneeMemberId: args.assigneeMemberId,
+    raisedByMemberId: args.raisedByMemberId,
   });
   
   await appendAuditMeta("Tension", result.id, "tension.created", {
@@ -138,6 +141,7 @@ export async function updateTensionAction(actor: AppActor, ctx: any, args: any) 
     title: args.title,
     bodyMd: args.bodyMd,
     assigneeMemberId: args.assigneeMemberId,
+    raisedByMemberId: args.raisedByMemberId,
     resolvedVia: args.resolvedVia,
   });
 

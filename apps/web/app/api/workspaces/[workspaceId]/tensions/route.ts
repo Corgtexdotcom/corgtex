@@ -8,6 +8,7 @@ import { handleRouteError, validateBody } from "@/lib/http";
 const createTensionSchema = z.object({
   title: z.string().trim().min(1),
   bodyMd: z.string().optional().nullable(),
+  raisedByMemberId: z.string().optional().nullable(),
 });
 
 export async function GET(request: NextRequest, { params }: { params: Promise<{ workspaceId: string }> }) {
@@ -32,6 +33,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       workspaceId,
       title: body.title,
       bodyMd: body.bodyMd ?? null,
+      raisedByMemberId: body.raisedByMemberId ?? null,
     });
     return NextResponse.json({ tension }, { status: 201 });
   } catch (error) {

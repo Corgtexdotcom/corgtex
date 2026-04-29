@@ -2,7 +2,7 @@
 
 import { enforceDemoGuard } from "@/lib/demo-guard";
 import { requirePageActor } from "@/lib/auth";
-import { asString, asOptional, asOptionalInt, refresh } from "../action-utils";
+import { asString, asOptional, refresh } from "../action-utils";
 import {
   createTension,
   deleteTension,
@@ -25,6 +25,7 @@ export async function createTensionAction(formData: FormData) {
     title: asString(formData, "title"),
     bodyMd: asOptional(formData, "bodyMd"),
     proposalId: asOptional(formData, "proposalId"),
+    raisedByMemberId: asOptional(formData, "raisedByMemberId"),
     isPrivate: formData.get("isPrivate") === "on",
   });
   refresh(workspaceId);
@@ -42,6 +43,7 @@ export async function updateTensionAction(formData: FormData) {
     title: asOptional(formData, "title") ?? undefined,
     status: asOptional(formData, "status") as "DRAFT" | "OPEN" | "RESOLVED" | null ?? undefined,
     resolvedVia: asOptional(formData, "resolvedVia") ?? undefined,
+    raisedByMemberId: formData.has("raisedByMemberId") ? asOptional(formData, "raisedByMemberId") : undefined,
   });
   refresh(workspaceId);
 }

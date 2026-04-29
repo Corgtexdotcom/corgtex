@@ -12,6 +12,7 @@ const updateTensionSchema = z.object({
   resolvedVia: z.string().optional().nullable(),
   circleId: z.string().optional().nullable(),
   assigneeMemberId: z.string().optional().nullable(),
+  raisedByMemberId: z.string().optional().nullable(),
   priority: z.number().int().optional(),
 });
 
@@ -29,6 +30,7 @@ export async function PATCH(request: NextRequest, { params }: Params) {
       resolvedVia: body.resolvedVia !== undefined ? body.resolvedVia : undefined,
       circleId: body.circleId !== undefined ? body.circleId : undefined,
       assigneeMemberId: body.assigneeMemberId !== undefined ? body.assigneeMemberId : undefined,
+      raisedByMemberId: body.raisedByMemberId !== undefined ? body.raisedByMemberId : undefined,
       priority: body.priority,
     });
     return NextResponse.json({ tension });

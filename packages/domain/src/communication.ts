@@ -1012,6 +1012,7 @@ export async function createWorkItemFromCommunicationSource(actor: AppActor, par
   sourceMessageId?: string | null;
   externalUserId?: string | null;
   assigneeMemberId?: string | null;
+  raisedByMemberId?: string | null;
   dueAt?: Date | string | null;
   open?: boolean;
 }) {
@@ -1041,7 +1042,7 @@ export async function createWorkItemFromCommunicationSource(actor: AppActor, par
       workspaceId: params.workspaceId,
       title,
       bodyMd,
-      assigneeMemberId: params.assigneeMemberId ?? null,
+      raisedByMemberId: params.raisedByMemberId ?? null,
       isPrivate: true,
     });
     if (params.open) {

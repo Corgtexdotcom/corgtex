@@ -206,8 +206,8 @@ export async function applyInsight(
   let appliedEntityType: string | null = null;
   let appliedEntityId: string | null = null;
 
-  // Attempt fuzzy match for assignee if hint exists
-  let assigneeMemberId: string | null = null;
+  // Attempt fuzzy match for a member reference if a hint exists.
+  let hintedMemberId: string | null = null;
   if (insight.assigneeHint) {
     const mems = await prisma.member.findMany({
       where: { workspaceId: params.workspaceId },
@@ -218,7 +218,7 @@ export async function applyInsight(
       m.user.displayName?.toLowerCase().includes(lowHint) || 
       m.user.email.toLowerCase().includes(lowHint)
     );
-    if (match) assigneeMemberId = match.id;
+    if (match) hintedMemberId = match.id;
   }
 
   const meetingContext = `\n\n*Created from meeting:* [${insight.meeting.title || 'Untitled'}](/workspaces/${params.workspaceId}/meetings/${insight.meetingId})`;
@@ -230,7 +230,7 @@ export async function applyInsight(
       workspaceId: params.workspaceId,
       title: insight.title,
       bodyMd: fullBody,
-      assigneeMemberId,
+      assigneeMemberId: hintedMemberId,
     });
     appliedEntityType = "Action";
     appliedEntityId = action.id;
@@ -239,7 +239,7 @@ export async function applyInsight(
       workspaceId: params.workspaceId,
       title: insight.title,
       bodyMd: fullBody,
-      assigneeMemberId,
+      raisedByMemberId: hintedMemberId,
       meetingId: insight.meetingId,
     });
     appliedEntityType = "Tension";

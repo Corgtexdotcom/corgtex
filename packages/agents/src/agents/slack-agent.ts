@@ -690,7 +690,8 @@ export async function runSlackAgent(params: SlackAgentJobPayload & {
             kind,
             title: parsed.title,
             open,
-            assigneeMemberId: assignee.memberId,
+            assigneeMemberId: kind === "ACTION" ? assignee.memberId : null,
+            raisedByMemberId: kind === "TENSION" ? assignee.memberId : null,
             dueDateISO: parsed.dueDateISO,
           }, () => createWorkItemFromCommunicationSource(actor, {
             workspaceId: params.workspaceId,
@@ -701,7 +702,8 @@ export async function runSlackAgent(params: SlackAgentJobPayload & {
             bodyMd: parsed.bodyMd,
             sourceMessageId: params.sourceMessageId ?? null,
             externalUserId: params.externalUserId,
-            assigneeMemberId: assignee.memberId,
+            assigneeMemberId: kind === "ACTION" ? assignee.memberId : null,
+            raisedByMemberId: kind === "TENSION" ? assignee.memberId : null,
             dueAt,
             open,
           }));
