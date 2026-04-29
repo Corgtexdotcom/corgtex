@@ -179,6 +179,39 @@ describe("Goals Domain", () => {
       expect(prisma.goal.update).not.toHaveBeenCalled();
     });
 
+    it("updates status and progress for an active goal", async () => {
+      vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce({
+        id: "goal-1",
+        workspaceId: "ws-1",
+        archivedAt: null,
+        parentGoalId: null,
+        ownerMemberId: "member-1",
+        status: "ACTIVE",
+      } as any);
+      vi.mocked(prisma.goal.update).mockResolvedValueOnce({
+        id: "goal-1",
+        workspaceId: "ws-1",
+        status: "ON_TRACK",
+        progressPercent: 65,
+      } as any);
+
+      await expect(updateGoal(actor, {
+        workspaceId: "ws-1",
+        goalId: "goal-1",
+        status: "ON_TRACK",
+        progressPercent: 65,
+      })).resolves.toMatchObject({
+        id: "goal-1",
+        status: "ON_TRACK",
+        progressPercent: 65,
+      });
+
+      expect(prisma.goal.update).toHaveBeenCalledWith(expect.objectContaining({
+        where: { id: "goal-1" },
+        data: { status: "ON_TRACK", progressPercent: 65 },
+      }));
+    });
+
     it("returns an active goal to draft for the owner", async () => {
       vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce({
         id: "goal-1",

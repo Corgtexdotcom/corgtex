@@ -34,7 +34,12 @@ import {
   returnTensionToDraft,
   deleteTension,
   upvoteTension,
+  listGoals,
+  getGoal,
+  createGoal,
+  updateGoal,
   returnGoalToDraft,
+  deleteGoal,
   listMembers,
   createMember,
   updateMember,
@@ -115,6 +120,7 @@ const DESTRUCTIVE_TOOL_NAMES = new Set([
   "archive_proposal",
   "delete_action",
   "delete_tension",
+  "archive_goal",
   "deactivate_member",
   "delete_meeting",
   "delete_article",
@@ -146,6 +152,9 @@ function annotationsForTool(name: string) {
 const PROPOSAL_STATUS = ["DRAFT", "OPEN", "RESOLVED"] as const;
 const ACTION_STATUS = ["DRAFT", "OPEN", "IN_PROGRESS", "COMPLETED"] as const;
 const TENSION_STATUS = ["DRAFT", "OPEN", "RESOLVED"] as const;
+const GOAL_CADENCE = ["WEEKLY", "MONTHLY", "QUARTERLY", "ANNUAL", "FIVE_YEAR", "TEN_YEAR"] as const;
+const GOAL_STATUS = ["DRAFT", "ACTIVE", "ON_TRACK", "AT_RISK", "BEHIND", "COMPLETED", "ABANDONED"] as const;
+const GOAL_LEVEL = ["COMPANY", "CIRCLE", "PERSONAL"] as const;
 const MEMBER_ROLE = ["CONTRIBUTOR", "FACILITATOR", "FINANCE_STEWARD", "ADMIN"] as const;
 const CYCLE_STATUS = ["PLANNED", "OPEN_UPDATES", "OPEN_ALLOCATIONS", "REVIEW", "FINALIZED"] as const;
 const BRAIN_ARTICLE_TYPE = [
@@ -1029,19 +1038,210 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
   // ===========================================================================
 
   tool(
+    "list_goals",
+    "List goals in the workspace, optionally filtered by cadence, level, or status.",
+    {
+      take: z.number().optional(),
+      skip: z.number().optional(),
+      cadence: z.enum(GOAL_CADENCE).optional(),
+      level: z.enum(GOAL_LEVEL).optional(),
+      status: z.enum(GOAL_STATUS).optional(),
+    },
+    async (params: {
+      take?: number;
+      skip?: number;
+      cadence?: typeof GOAL_CADENCE[number];
+      level?: typeof GOAL_LEVEL[number];
+      status?: typeof GOAL_STATUS[number];
+    }) => {
+      requireScope(sessionCtx, "goals:read");
+      const goals = await listGoals(actor, {
+        workspaceId,
+        take: params.take,
+        skip: params.skip,
+        cadence: params.cadence,
+        level: params.level,
+        status: params.status,
+      });
+      const simplified = goals.map((goal) => ({
+        id: goal.id,
+        title: goal.title,
+        cadence: goal.cadence,
+        level: goal.level,
+        status: goal.status,
+        progressPercent: goal.progressPercent,
+        circle: goal.circle?.name ?? null,
+        owner: goal.ownerMember?.user?.displayName ?? goal.ownerMember?.user?.email ?? null,
+        keyResults: goal.keyResults.map((keyResult) => ({
+          id: keyResult.id,
+          title: keyResult.title,
+          targetValue: keyResult.targetValue,
+          currentValue: keyResult.currentValue,
+          unit: keyResult.unit,
+          progressPercent: keyResult.progressPercent,
+        })),
+        webUrl: webUrl(workspaceId, `/goals?view=tree&cadence=${goal.cadence}`),
+      }));
+      return jsonResult({ items: simplified, total: simplified.length });
+    },
+  );
+
+  tool(
+    "get_goal",
+    "Get the full record for a single goal, including key results and updates.",
+    {
+      goalId: z.string(),
+    },
+    async ({ goalId }: { goalId: string }) => {
+      requireScope(sessionCtx, "goals:read");
+      const goal = await getGoal(actor, { workspaceId, goalId });
+      return jsonResult({
+        ...goal,
+        webUrl: webUrl(workspaceId, `/goals?view=tree&cadence=${goal.cadence}`),
+      });
+    },
+  );
+
+  tool(
+    "create_goal",
+    "Create a new workspace goal in the Goals tab with optional key results. Goals default to DRAFT unless a status is provided.",
+    {
+      title: z.string(),
+      descriptionMd: z.string().optional(),
+      cadence: z.enum(GOAL_CADENCE).optional(),
+      level: z.enum(GOAL_LEVEL).optional(),
+      status: z.enum(GOAL_STATUS).optional(),
+      targetDate: z.string().optional().describe("ISO 8601 date string"),
+      startDate: z.string().optional().describe("ISO 8601 date string"),
+      parentGoalId: z.string().optional(),
+      circleId: z.string().optional(),
+      ownerMemberId: z.string().optional(),
+      keyResults: z.array(z.object({
+        title: z.string(),
+        targetValue: z.number().nullable().optional(),
+        currentValue: z.number().nullable().optional(),
+        unit: z.string().nullable().optional(),
+      })).optional(),
+    },
+    async (params: {
+      title: string;
+      descriptionMd?: string;
+      cadence?: typeof GOAL_CADENCE[number];
+      level?: typeof GOAL_LEVEL[number];
+      status?: typeof GOAL_STATUS[number];
+      targetDate?: string;
+      startDate?: string;
+      parentGoalId?: string;
+      circleId?: string;
+      ownerMemberId?: string;
+      keyResults?: Array<{ title: string; targetValue?: number | null; currentValue?: number | null; unit?: string | null }>;
+    }) => {
+      requireScope(sessionCtx, "goals:write");
+      const goal = await createGoal(actor, {
+        workspaceId,
+        title: params.title,
+        descriptionMd: params.descriptionMd,
+        cadence: params.cadence,
+        level: params.level,
+        status: params.status,
+        targetDate: params.targetDate ? new Date(params.targetDate) : undefined,
+        startDate: params.startDate ? new Date(params.startDate) : undefined,
+        parentGoalId: params.parentGoalId,
+        circleId: params.circleId,
+        ownerMemberId: params.ownerMemberId,
+        keyResults: params.keyResults,
+      });
+      return jsonResult({
+        id: goal.id,
+        title: goal.title,
+        status: goal.status,
+        webUrl: webUrl(workspaceId, `/goals?view=tree&cadence=${goal.cadence}`),
+      });
+    },
+  );
+
+  tool(
+    "update_goal",
+    "Update a workspace goal's status, progress, dates, ownership, or content fields. Pass only the fields you want to change.",
+    {
+      goalId: z.string(),
+      title: z.string().optional(),
+      descriptionMd: z.string().optional(),
+      cadence: z.enum(GOAL_CADENCE).optional(),
+      level: z.enum(GOAL_LEVEL).optional(),
+      status: z.enum(GOAL_STATUS).optional(),
+      progressPercent: z.number().optional(),
+      targetDate: z.string().nullable().optional().describe("ISO 8601 date string or null"),
+      startDate: z.string().nullable().optional().describe("ISO 8601 date string or null"),
+      parentGoalId: z.string().nullable().optional(),
+      circleId: z.string().nullable().optional(),
+      ownerMemberId: z.string().nullable().optional(),
+    },
+    async (params: {
+      goalId: string;
+      title?: string;
+      descriptionMd?: string;
+      cadence?: typeof GOAL_CADENCE[number];
+      level?: typeof GOAL_LEVEL[number];
+      status?: typeof GOAL_STATUS[number];
+      progressPercent?: number;
+      targetDate?: string | null;
+      startDate?: string | null;
+      parentGoalId?: string | null;
+      circleId?: string | null;
+      ownerMemberId?: string | null;
+    }) => {
+      requireScope(sessionCtx, "goals:write");
+      const updated = await updateGoal(actor, {
+        workspaceId,
+        goalId: params.goalId,
+        title: params.title,
+        descriptionMd: params.descriptionMd,
+        cadence: params.cadence,
+        level: params.level,
+        status: params.status,
+        progressPercent: params.progressPercent,
+        targetDate: params.targetDate === undefined ? undefined : params.targetDate ? new Date(params.targetDate) : null,
+        startDate: params.startDate === undefined ? undefined : params.startDate ? new Date(params.startDate) : null,
+        parentGoalId: params.parentGoalId,
+        circleId: params.circleId,
+        ownerMemberId: params.ownerMemberId,
+      });
+      return jsonResult({
+        id: updated.id,
+        status: updated.status,
+        webUrl: webUrl(workspaceId, `/goals?view=tree&cadence=${updated.cadence}`),
+      });
+    },
+  );
+
+  tool(
     "return_goal_to_draft",
     "Return an active goal to DRAFT so authorized draft managers can edit it. Completed, abandoned, or archived goals cannot be returned.",
     {
       goalId: z.string(),
     },
     async ({ goalId }: { goalId: string }) => {
-      requireScope(sessionCtx, "cycles:write");
+      requireScope(sessionCtx, "goals:write");
       const updated = await returnGoalToDraft(actor, { workspaceId, goalId });
       return jsonResult({
         id: updated.id,
         status: updated.status,
         webUrl: webUrl(workspaceId, `/goals?view=tree&cadence=${updated.cadence}`),
       });
+    },
+  );
+
+  tool(
+    "archive_goal",
+    "Archive a goal so it stops appearing in active views. The record remains recoverable from the archive.",
+    {
+      goalId: z.string(),
+    },
+    async ({ goalId }: { goalId: string }) => {
+      requireScope(sessionCtx, "goals:write");
+      await deleteGoal(actor, { workspaceId, goalId });
+      return jsonResult({ id: goalId, archived: true, webUrl: webUrl(workspaceId, `/audit?tab=archive`) });
     },
   );
 
