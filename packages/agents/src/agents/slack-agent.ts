@@ -6,6 +6,7 @@ import {
   deliverSlackAgentResponse,
   fetchSlackThreadMessages,
   listMembers,
+  type SlackAgentDelivery,
   type SlackAgentJobPayload,
 } from "@corgtex/domain";
 import { prisma } from "@corgtex/shared";
@@ -53,6 +54,13 @@ const INTENTS = new Set<SlackAgentIntent>([
 const UNSUPPORTED_OPERATION_RE =
   /\b(delete|remove|archive|deactivate|invite|change role|grant|revoke|permission|submit spend|create spend|approve spend|pay|payment|reimburse|expense|notify everyone|broadcast|message everyone)\b/i;
 
+const READ_ONLY_CONVERSATION_RE =
+  /\b(who|what|where|when|why|how|how many|list|show|find|search|lookup|look up|account|member|members|user|users|email|role|roles|circle|circles|action|actions|tension|tensions|proposal|proposals|policy|policies|knowledge|brain|status|current|latest|summarize|summary)\b/i;
+
+const MEMBER_LIST_RE = /\b(list|show|who|members?|users?|team|people)\b/i;
+const ACCOUNT_LOOKUP_RE = /\b(my account|find my account|account now|who am i|me in corgtex|my corgtex)\b/i;
+const MAX_SLACK_TEXT_LENGTH = 2900;
+
 function clampConfidence(value: unknown) {
   const numeric = typeof value === "number" ? value : Number(value);
   if (!Number.isFinite(numeric)) return 0;
@@ -84,7 +92,15 @@ function normalizeExtraction(output: Record<string, unknown>, fallbackPrompt: st
 }
 
 function isUnsupportedOperation(prompt: string, extraction: SlackAgentExtraction) {
-  return extraction.intent === "unsupported" || UNSUPPORTED_OPERATION_RE.test(prompt);
+  if (UNSUPPORTED_OPERATION_RE.test(prompt)) return true;
+  return extraction.intent === "unsupported" && !READ_ONLY_CONVERSATION_RE.test(prompt);
+}
+
+function shouldUseConversationMode(prompt: string, extraction: SlackAgentExtraction) {
+  if (UNSUPPORTED_OPERATION_RE.test(prompt)) return false;
+  if (extraction.intent === "answer_question") return true;
+  if (extraction.intent !== "unsupported" && extraction.confidence >= 0.55) return false;
+  return READ_ONLY_CONVERSATION_RE.test(prompt);
 }
 
 function normalizeCapabilitiesPrompt(prompt: string) {
@@ -137,7 +153,7 @@ function renderSlackResponse(params: {
   done: string[];
   couldNot: string[];
   next?: string | null;
-}) {
+}): SlackAgentDelivery {
   const done = params.done.length > 0 ? params.done : ["No changes made."];
   const couldNot = params.couldNot.length > 0 ? params.couldNot : ["Nothing."];
   const next = params.next?.trim() || "No follow-up needed.";
@@ -153,16 +169,44 @@ function renderSlackResponse(params: {
   };
 }
 
+function truncateSlackText(text: string) {
+  const trimmed = text.trim();
+  if (trimmed.length <= MAX_SLACK_TEXT_LENGTH) return trimmed;
+  return `${trimmed.slice(0, MAX_SLACK_TEXT_LENGTH - 20).trimEnd()}\n\n...`;
+}
+
+function renderConversationResponse(text: string): SlackAgentDelivery {
+  const safeText = truncateSlackText(text || "I do not have enough information to answer that yet.");
+  return {
+    text: safeText,
+    blocks: [
+      { type: "section", text: { type: "mrkdwn", text: safeText } },
+    ],
+  };
+}
+
+function renderUnsupportedResponse(): SlackAgentDelivery {
+  return renderConversationResponse(
+    "I cannot do that from Slack. I can answer workspace questions, summarize context, and create bounded Corgtex actions, tensions, proposals, notes, and briefs. I do not run deletes, role or permission changes, invites, payments, or broad notifications from Slack.",
+  );
+}
+
 function slackLink(url: string, label: string) {
   return `<${url}|${label.replace(/[<>|]/g, "")}>`;
 }
 
-async function loadActor(userId: string): Promise<HumanActor | null> {
+async function loadActor(workspaceId: string, userId: string): Promise<HumanActor | null> {
   const user = await prisma.user.findUnique({
     where: { id: userId },
     select: { id: true, email: true, displayName: true, globalRole: true },
   });
-  return user ? { kind: "user", user } : null;
+  if (!user) return null;
+
+  const member = await prisma.member.findUnique({
+    where: { workspaceId_userId: { workspaceId, userId } },
+    select: { id: true, isActive: true },
+  });
+  return member?.isActive ? { kind: "user", user } : null;
 }
 
 function matchMemberId(params: {
@@ -201,7 +245,134 @@ function matchMemberId(params: {
   return { memberId: null, error: `Assignee "${hint}" did not match a Corgtex member.` };
 }
 
-async function deliverSafely(payload: SlackAgentJobPayload, response: ReturnType<typeof renderSlackResponse>) {
+function formatMemberName(member: Awaited<ReturnType<typeof listMembers>>[number], opts?: { includeEmail?: boolean }) {
+  const displayName = member.user.displayName || member.user.email;
+  const role = "role" in member && typeof member.role === "string" ? member.role.toLowerCase().replace(/_/g, " ") : null;
+  const email = opts?.includeEmail ? `, ${member.user.email}` : "";
+  return role ? `${displayName}${email} (${role})` : `${displayName}${email}`;
+}
+
+function answerAccountLookup(params: {
+  actor: HumanActor;
+  members: Awaited<ReturnType<typeof listMembers>>;
+  externalUsers: Array<{
+    externalUserId: string;
+    userId: string | null;
+    memberId: string | null;
+    email: string | null;
+    displayName: string | null;
+  }>;
+  externalUserId: string;
+}) {
+  const member = params.members.find((entry) => entry.userId === params.actor.user.id);
+  const slackUser = params.externalUsers.find((entry) => entry.externalUserId === params.externalUserId);
+  const name = params.actor.user.displayName || slackUser?.displayName || params.actor.user.email;
+  const role = member && "role" in member && typeof member.role === "string"
+    ? member.role.toLowerCase().replace(/_/g, " ")
+    : "member";
+  const linkedBy = slackUser?.email ? ` Slack is linked to ${slackUser.email}.` : "";
+  return `I found your Corgtex account: ${name} (${params.actor.user.email}). You are an active ${role} in this workspace.${linkedBy}`;
+}
+
+function answerMemberList(members: Awaited<ReturnType<typeof listMembers>>, prompt: string) {
+  if (members.length === 0) return "I do not see any active members in this workspace.";
+  const includeEmail = /\b(email|emails|address|account)\b/i.test(prompt);
+  const lines = members
+    .slice(0, 40)
+    .map((member) => `- ${formatMemberName(member, { includeEmail })}`);
+  const suffix = members.length > 40 ? `\n- ...and ${members.length - 40} more.` : "";
+  return `I found ${members.length} active member${members.length === 1 ? "" : "s"} in this workspace:\n${lines.join("\n")}${suffix}`;
+}
+
+async function answerSlackConversation(params: {
+  actor: HumanActor;
+  prompt: string;
+  workspaceId: string;
+  workflowJobId?: string;
+  agentRunId: string;
+  model: string;
+  members: Awaited<ReturnType<typeof listMembers>>;
+  externalUsers: Array<{
+    externalUserId: string;
+    userId: string | null;
+    memberId: string | null;
+    email: string | null;
+    displayName: string | null;
+  }>;
+  externalUserId: string;
+  openActions: unknown;
+  openTensions: unknown;
+  openProposals: unknown;
+  sourceMessage: unknown;
+  threadMessages: unknown;
+}) {
+  if (ACCOUNT_LOOKUP_RE.test(params.prompt)) {
+    return answerAccountLookup({
+      actor: params.actor,
+      members: params.members,
+      externalUsers: params.externalUsers,
+      externalUserId: params.externalUserId,
+    });
+  }
+
+  if (MEMBER_LIST_RE.test(params.prompt) && /\b(member|members|user|users|team|people)\b/i.test(params.prompt)) {
+    return answerMemberList(params.members, params.prompt);
+  }
+
+  const knowledge = await answerKnowledgeQuestion({
+    workspaceId: params.workspaceId,
+    question: params.prompt,
+    workflowJobId: params.workflowJobId,
+    agentRunId: params.agentRunId,
+  }).catch(() => null);
+
+  const chat = await defaultModelGateway.chat({
+    model: params.model,
+    workspaceId: params.workspaceId,
+    workflowJobId: params.workflowJobId,
+    agentRunId: params.agentRunId,
+    taskType: "AGENT",
+    messages: [
+      {
+        role: "system",
+        content: [
+          "You are Corgtex in Slack. Answer as a helpful conversation agent for the authenticated workspace member.",
+          "Use only the supplied workspace context, Slack context, and knowledge answer. Do not invent private facts.",
+          "Do not reveal secrets, tokens, raw credentials, bootstrap bundle content, private ops notes, or unrelated client data.",
+          "Do not modify Corgtex data in this conversational answer path. If the user asks for a write, tell them what bounded Slack actions are supported.",
+          "Be concise, direct, and natural. Do not use a Done/Could not/Next status template.",
+        ].join(" "),
+      },
+      {
+        role: "user",
+        content: JSON.stringify({
+          prompt: params.prompt,
+          requester: {
+            id: params.actor.user.id,
+            displayName: params.actor.user.displayName,
+            email: params.actor.user.email,
+          },
+          members: params.members.slice(0, 50).map((member) => ({
+            memberId: member.id,
+            userId: member.userId,
+            displayName: member.user.displayName,
+            role: "role" in member ? member.role : undefined,
+          })),
+          openActions: params.openActions,
+          openTensions: params.openTensions,
+          openProposals: params.openProposals,
+          selectedMessage: params.sourceMessage,
+          threadMessages: params.threadMessages,
+          knowledgeAnswer: knowledge?.answer ?? null,
+        }),
+      },
+    ],
+  });
+
+  return chat.content.trim() || knowledge?.answer || "I do not have enough information to answer that yet.";
+}
+
+async function deliverSafely(payload: SlackAgentJobPayload, response: SlackAgentDelivery) {
   try {
     await deliverSlackAgentResponse(payload, response);
     return { delivered: true };
@@ -238,8 +409,22 @@ export async function runSlackAgent(params: SlackAgentJobPayload & {
       source: params.source,
       sourceMessageId: params.sourceMessageId ?? null,
     }, async () => {
+      const actor = await loadActor(params.workspaceId, params.actorUserId);
+      if (!actor) {
+        return {
+          actor: null,
+          members: [],
+          externalUsers: [],
+          userTimezone: "UTC",
+          openActions: [],
+          openTensions: [],
+          openProposals: [],
+          sourceMessage: null,
+          threadMessages: [],
+        };
+      }
+
       const [
-        actor,
         members,
         externalUser,
         externalUsers,
@@ -249,7 +434,6 @@ export async function runSlackAgent(params: SlackAgentJobPayload & {
         sourceMessage,
         threadMessages,
       ] = await Promise.all([
-        loadActor(params.actorUserId),
         listMembers(params.workspaceId),
         prisma.communicationExternalUser.findUnique({
           where: { installationId_externalUserId: { installationId: params.installationId, externalUserId: params.externalUserId } },
@@ -303,11 +487,9 @@ export async function runSlackAgent(params: SlackAgentJobPayload & {
     execute: async (context, helpers, runId, model) => {
       const actor = context.actor as HumanActor | null;
       if (!actor) {
-        const response = renderSlackResponse({
-          done: [],
-          couldNot: ["I could not match the Slack user to a Corgtex account."],
-          next: "Open Corgtex settings and confirm your Slack email matches your Corgtex account.",
-        });
+        const response = renderConversationResponse(
+          "I could not match your Slack user to an active Corgtex account in this workspace. Open Corgtex settings and confirm your Slack email matches your Corgtex account.",
+        );
         const delivery = await helpers.tool("slack.reply", { reason: "missing_actor" }, () => deliverSafely(params, response));
         return { resultJson: { status: "NO_ACTOR", delivery } };
       }
@@ -343,6 +525,8 @@ export async function runSlackAgent(params: SlackAgentJobPayload & {
           "Return JSON only with intent, confidence, title, bodyMd, assigneeHint, dueDateISO, publish, needsAdviceRouting, answer, couldNot, and next.",
           "Allowed intents: brief, create_action, create_tension, create_proposal, capture_note, capabilities, answer_question, summarize_thread, unsupported.",
           "Use unsupported for destructive, admin, financial, permission, invite, role, delete, archive, payment, or broad-notification requests.",
+          "Use answer_question for read-only requests to list, find, search, or explain workspace members, accounts, roles, actions, proposals, tensions, current state, or workspace knowledge.",
+          "Do not treat read-only member/account lookup as unsupported.",
           "For action due dates, resolve relative dates using the provided userTimezone and current time; otherwise use UTC.",
         ].join(" "),
         schemaHint: "{ intent: string, confidence: number, title: string, bodyMd: string, assigneeHint: string|null, dueDateISO: string|null, publish: boolean, needsAdviceRouting: boolean, answer: string|null, couldNot: string[], next: string|null }",
@@ -372,7 +556,67 @@ export async function runSlackAgent(params: SlackAgentJobPayload & {
       const created: Array<{ entityType: string; entityId: string; webUrl: string; opened: boolean }> = [];
 
       if (isUnsupportedOperation(params.prompt, parsed)) {
-        couldNot.push("That request is outside Slack-agent v1 because it is destructive, administrative, financial, permission-related, or broadly notifying people.");
+        const response = renderUnsupportedResponse();
+        const delivery = await helpers.tool("slack.reply", {
+          reason: "unsupported",
+          source: params.source,
+          channelId: params.channelId ?? null,
+          responseUrl: Boolean(params.responseUrlEnc),
+        }, () => deliverSafely(params, response));
+
+        return {
+          resultJson: {
+            intent: parsed.intent,
+            confidence: parsed.confidence,
+            created,
+            done,
+            couldNot: ["Unsupported Slack operation."],
+            next,
+            delivery,
+          },
+        };
+      } else if (shouldUseConversationMode(params.prompt, parsed)) {
+        const answer = await helpers.tool("slack.conversation.answer", { prompt: params.prompt }, () => answerSlackConversation({
+          actor,
+          prompt: params.prompt,
+          workspaceId: params.workspaceId,
+          workflowJobId: params.workflowJobId,
+          agentRunId: runId,
+          model,
+          members: context.members as Awaited<ReturnType<typeof listMembers>>,
+          externalUsers: context.externalUsers as Array<{
+            externalUserId: string;
+            userId: string | null;
+            memberId: string | null;
+            email: string | null;
+            displayName: string | null;
+          }>,
+          externalUserId: params.externalUserId,
+          openActions: context.openActions,
+          openTensions: context.openTensions,
+          openProposals: context.openProposals,
+          sourceMessage: context.sourceMessage,
+          threadMessages: context.threadMessages,
+        }));
+        const response = renderConversationResponse(answer);
+        const delivery = await helpers.tool("slack.reply", {
+          reason: "conversation_answer",
+          source: params.source,
+          channelId: params.channelId ?? null,
+          responseUrl: Boolean(params.responseUrlEnc),
+        }, () => deliverSafely(params, response));
+
+        return {
+          resultJson: {
+            intent: "answer_question",
+            confidence: Math.max(parsed.confidence, 0.8),
+            created,
+            done: [answer],
+            couldNot,
+            next,
+            delivery,
+          },
+        };
       } else if (parsed.confidence < 0.55) {
         couldNot.push("I was not confident enough to change Corgtex from that Slack message.");
         next = next ?? "Reply with the item type, owner, and expected outcome.";
