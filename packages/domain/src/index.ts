@@ -43,6 +43,7 @@ export * from "./impact-footprint";
 export * from "./privacy";
 export * from "./draft-permissions";
 export * from "./tool-links";
+export * from "./build-artifacts";
 
 export * from "./check-ins";
 export * from "./artifact-permissions";

@@ -216,6 +216,32 @@ enum BrainSourceType {
   CONVERSATION_INSIGHT
 }
 
+enum BuildArtifactStatus {
+  OPEN
+  MERGED
+  CLOSED
+}
+
+enum BuildArtifactClassification {
+  OPEN_CORE
+  INTERNAL
+  CLIENT_PRIVATE
+}
+
+enum BuildArtifactVisibility {
+  PRIVATE
+  PUBLIC_REVIEW
+  REVOKED
+}
+
+enum BuildArtifactAssetKind {
+  SCREENSHOT
+  VIDEO
+  DOCUMENT
+  LOG
+  OTHER
+}
+
 enum BrainDiscussionTargetType {
   ARTICLE
   SECTION
@@ -344,6 +370,7 @@ model Workspace {
   procurementSetupSessions      ProcurementSetupSession[]
   procurementBillingHandoffs    ProcurementBillingHandoff[]
   toolLinks                     WorkspaceToolLink[]
+  buildArtifacts                BuildArtifact[]
 }
 
 model WorkspaceFeatureFlag {
@@ -553,6 +580,7 @@ model User {
   controlPlaneAccess      ControlPlaneInstanceAccess[]
   supportOperations       SupportOperation[]           @relation("SupportOperationActor")
   createdToolLinks        WorkspaceToolLink[]          @relation("WorkspaceToolLinkCreator")
+  createdBuildArtifacts   BuildArtifact[]              @relation("BuildArtifactCreator")
 }
 
 model Session {
@@ -732,6 +760,65 @@ model WorkspaceToolLinkCircleTag {
 
   @@unique([toolLinkId, circleId])
   @@index([circleId])
+}
+
+model BuildArtifact {
+  id                String                      @id @default(uuid())
+  workspaceId       String
+  createdByUserId   String?
+  brainSourceId     String?                     @unique
+  repositoryOwner   String
+  repositoryName    String
+  pullRequestNumber Int?
+  pullRequestUrl    String?                     @db.Text
+  branchName        String?
+  commitSha         String?
+  mergeCommitSha    String?
+  title             String
+  summaryMd         String?                     @db.Text
+  status            BuildArtifactStatus         @default(OPEN)
+  classification    BuildArtifactClassification @default(INTERNAL)
+  visibility        BuildArtifactVisibility     @default(PRIVATE)
+  publicTokenHash   String?                     @unique
+  publicTokenEnc    String?                     @db.Text
+  publicEnabledAt   DateTime?
+  publicRevokedAt   DateTime?
+  mergedAt          DateTime?
+  closedAt          DateTime?
+  createdAt         DateTime                    @default(now())
+  updatedAt         DateTime                    @updatedAt
+
+  workspace   Workspace            @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  createdBy   User?                @relation("BuildArtifactCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  brainSource BrainSource?         @relation(fields: [brainSourceId], references: [id], onDelete: SetNull)
+  assets      BuildArtifactAsset[]
+
+  @@unique([workspaceId, repositoryOwner, repositoryName, pullRequestNumber])
+  @@index([workspaceId, status, createdAt])
+  @@index([workspaceId, visibility])
+  @@index([repositoryOwner, repositoryName, pullRequestNumber])
+  @@index([createdByUserId])
+}
+
+model BuildArtifactAsset {
+  id         String                 @id @default(uuid())
+  artifactId String
+  kind       BuildArtifactAssetKind @default(SCREENSHOT)
+  label      String
+  captionMd  String?                @db.Text
+  storageKey String                 @unique
+  mimeType   String
+  sizeBytes  Int
+  width      Int?
+  height     Int?
+  sha256     String?
+  sortOrder  Int                    @default(0)
+  createdAt  DateTime               @default(now())
+
+  artifact BuildArtifact @relation(fields: [artifactId], references: [id], onDelete: Cascade)
+
+  @@index([artifactId, sortOrder])
+  @@index([kind])
 }
 
 model Role {
@@ -1676,8 +1763,9 @@ model BrainSource {
   archiveReason    String?
   createdAt        DateTime        @default(now())
 
-  workspace    Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  authorMember Member?   @relation(fields: [authorMemberId], references: [id], onDelete: SetNull)
+  workspace     Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  authorMember  Member?        @relation(fields: [authorMemberId], references: [id], onDelete: SetNull)
+  buildArtifact BuildArtifact?
 
   @@index([workspaceId, sourceType])
   @@index([workspaceId, absorbedAt])

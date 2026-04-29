@@ -22,13 +22,13 @@ export class S3StorageProvider implements StorageProvider {
   private bucket: string;
 
   constructor() {
-    this.bucket = process.env.R2_BUCKET_NAME || process.env.S3_BUCKET_NAME || process.env.AWS_S3_BUCKET_NAME || "corgtex-local";
+    this.bucket = process.env.R2_BUCKET_NAME || process.env.S3_BUCKET_NAME || process.env.AWS_S3_BUCKET_NAME || process.env.RAILWAY_BUCKET_NAME || process.env.BUCKET || "corgtex-local";
 
     const accountId = process.env.R2_ACCOUNT_ID;
-    const accessKeyId = process.env.R2_ACCESS_KEY_ID || process.env.S3_ACCESS_KEY_ID || process.env.S3_ACCESS_KEY;
-    const secretAccessKey = process.env.R2_SECRET_ACCESS_KEY || process.env.S3_SECRET_ACCESS_KEY || process.env.S3_SECRET_KEY;
-    const endpoint = process.env.S3_ENDPOINT || (accountId ? `https://${accountId}.r2.cloudflarestorage.com` : undefined);
-    const region = process.env.S3_REGION || "auto";
+    const accessKeyId = process.env.R2_ACCESS_KEY_ID || process.env.S3_ACCESS_KEY_ID || process.env.S3_ACCESS_KEY || process.env.RAILWAY_BUCKET_ACCESS_KEY_ID || process.env.ACCESS_KEY_ID;
+    const secretAccessKey = process.env.R2_SECRET_ACCESS_KEY || process.env.S3_SECRET_ACCESS_KEY || process.env.S3_SECRET_KEY || process.env.RAILWAY_BUCKET_SECRET_ACCESS_KEY || process.env.SECRET_ACCESS_KEY;
+    const endpoint = process.env.S3_ENDPOINT || process.env.RAILWAY_BUCKET_ENDPOINT || process.env.ENDPOINT || (accountId ? `https://${accountId}.r2.cloudflarestorage.com` : undefined);
+    const region = process.env.S3_REGION || process.env.RAILWAY_BUCKET_REGION || process.env.REGION || "auto";
 
     if (!endpoint && process.env.NODE_ENV === "production") {
       console.warn("StorageProvider: Missing S3/R2 endpoint. Uploads will fail.");
