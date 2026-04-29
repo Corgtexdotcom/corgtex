@@ -11,6 +11,7 @@ vi.mock("@corgtex/shared", () => ({
 beforeEach(() => {
   delete process.env.CORGTEX_RELEASE_VERSION;
   delete process.env.CORGTEX_RELEASE_IMAGE_TAG;
+  delete process.env.CORGTEX_RELEASE_GIT_SHA;
   delete process.env.GITHUB_SHA;
   delete process.env.RAILWAY_GIT_COMMIT_SHA;
   delete process.env.npm_package_version;
@@ -124,7 +125,7 @@ describe("GET /api/health", () => {
     const { GET } = await import("./route");
     process.env.CORGTEX_RELEASE_VERSION = "0.1.0";
     process.env.CORGTEX_RELEASE_IMAGE_TAG = "sha-abc";
-    process.env.RAILWAY_GIT_COMMIT_SHA = "abc";
+    process.env.CORGTEX_RELEASE_GIT_SHA = "abc";
     process.env.REDIS_URL = "redis://redis:6379";
     process.env.S3_BUCKET_NAME = "customer-bucket";
     queryRaw

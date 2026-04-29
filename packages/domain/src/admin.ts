@@ -38,7 +38,7 @@ type InstanceHealthPayload = {
   status?: string;
   database?: string;
   schema?: string;
-  release?: { imageTag?: string | null };
+  release?: { imageTag?: string | null; gitSha?: string | null };
   runtime?: { redis?: string; storage?: string };
 };
 
@@ -489,8 +489,9 @@ export async function probeExternalInstanceHealth(actor: AppActor, id: string) {
       if (health?.runtime?.storage && health.runtime.storage !== "configured") {
         runtimeErrors.push(`Storage ${health.runtime.storage}`);
       }
-      if (instance.releaseImageTag && health?.release?.imageTag && health.release.imageTag !== instance.releaseImageTag) {
-        runtimeErrors.push(`Release drift: expected ${instance.releaseImageTag}, got ${health.release.imageTag}`);
+      const actualRelease = health?.release?.imageTag || health?.release?.gitSha || null;
+      if (instance.releaseImageTag && actualRelease && actualRelease !== instance.releaseImageTag) {
+        runtimeErrors.push(`Release drift: expected ${instance.releaseImageTag}, got ${actualRelease}`);
       }
       if (runtimeErrors.length > 0) {
         status = "degraded";
