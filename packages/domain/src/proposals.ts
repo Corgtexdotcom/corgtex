@@ -1,11 +1,13 @@
 import type { AppActor } from "@corgtex/shared";
 import { prisma, logger } from "@corgtex/shared";
+import { Prisma } from "@prisma/client";
 import { appendEvents } from "./events";
 import { actorUserIdForWorkspace, requireWorkspaceMembership } from "./auth";
 import { getApprovalPolicy, ensureApprovalFlow } from "./approvals";
 import { invariant } from "./errors";
 import { privacyFilter } from "./privacy";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
+import { requireDraftManager } from "./draft-permissions";
 
 export async function listProposals(actor: AppActor, workspaceId: string, opts?: { take?: number; skip?: number; circleId?: string | null; archiveFilter?: ArchiveFilter }) {
   const take = opts?.take ?? 20;
@@ -145,7 +147,7 @@ export async function updateProposal(actor: AppActor, params: {
   bodyMd?: string;
   circleId?: string | null;
 }) {
-  await requireWorkspaceMembership({
+  const membership = await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
   });
@@ -157,6 +159,7 @@ export async function updateProposal(actor: AppActor, params: {
 
     invariant(proposal && proposal.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Proposal not found.");
     invariant(proposal.status === "DRAFT", 400, "INVALID_STATE", "Only draft proposals can be edited.");
+    await requireDraftManager({ actor, workspaceId: params.workspaceId, record: proposal, resolvedMembership: membership });
 
     const data: Record<string, unknown> = {};
     if (params.title !== undefined) {
@@ -210,7 +213,7 @@ export async function archiveProposal(actor: AppActor, params: {
 }
 
 export async function submitProposal(actor: AppActor, params: { workspaceId: string; proposalId: string; autoApproveHours?: number }) {
-  await requireWorkspaceMembership({
+  const membership = await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
   });
@@ -224,6 +227,7 @@ export async function submitProposal(actor: AppActor, params: { workspaceId: str
 
     invariant(proposal && proposal.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Proposal not found.");
     invariant(proposal.status === "DRAFT", 400, "INVALID_STATE", "Only draft proposals can be opened.");
+    await requireDraftManager({ actor, workspaceId: params.workspaceId, record: proposal, resolvedMembership: membership });
 
     const flow = await ensureApprovalFlow(tx, {
       workspaceId: params.workspaceId,
@@ -289,11 +293,111 @@ export async function submitProposal(actor: AppActor, params: { workspaceId: str
   });
 }
 
+export async function returnProposalToDraft(actor: AppActor, params: {
+  workspaceId: string;
+  proposalId: string;
+}) {
+  const membership = await requireWorkspaceMembership({
+    actor,
+    workspaceId: params.workspaceId,
+  });
+
+  return prisma.$transaction(async (tx) => {
+    const proposal = await tx.proposal.findUnique({
+      where: { id: params.proposalId },
+    });
+
+    invariant(proposal && proposal.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Proposal not found.");
+    invariant(proposal.status === "OPEN", 400, "INVALID_STATE", "Only open proposals can be returned to draft.");
+    await requireDraftManager({ actor, workspaceId: params.workspaceId, record: proposal, resolvedMembership: membership });
+
+    const flow = await tx.approvalFlow.findUnique({
+      where: {
+        subjectType_subjectId: {
+          subjectType: "PROPOSAL",
+          subjectId: proposal.id,
+        },
+      },
+    });
+
+    if (flow) {
+      await tx.approvalDecision.deleteMany({ where: { flowId: flow.id } });
+      await tx.objection.deleteMany({ where: { flowId: flow.id } });
+      await tx.approvalFlow.update({
+        where: { id: flow.id },
+        data: {
+          status: "DRAFT",
+          openedAt: null,
+          closesAt: null,
+          closedAt: null,
+          resultJson: Prisma.JsonNull,
+        },
+      });
+    }
+
+    const now = new Date();
+    await tx.deliberationEntry.updateMany({
+      where: {
+        workspaceId: params.workspaceId,
+        parentType: "PROPOSAL",
+        parentId: proposal.id,
+        resolvedAt: null,
+      },
+      data: {
+        resolvedAt: now,
+        resolvedNote: "Cleared when proposal returned to draft.",
+      },
+    });
+    await tx.proposalReaction.updateMany({
+      where: {
+        proposalId: proposal.id,
+        resolvedAt: null,
+      },
+      data: {
+        resolvedAt: now,
+        resolvedNote: "Cleared when proposal returned to draft.",
+      },
+    });
+
+    const updated = await tx.proposal.update({
+      where: { id: proposal.id },
+      data: {
+        status: "DRAFT",
+        isPrivate: true,
+        publishedAt: null,
+        autoApproveAt: null,
+      },
+    });
+
+    await tx.auditLog.create({
+      data: {
+        workspaceId: params.workspaceId,
+        actorUserId: actor.kind === "user" ? actor.user.id : null,
+        action: "proposal.returned_to_draft",
+        entityType: "Proposal",
+        entityId: proposal.id,
+      },
+    });
+
+    await appendEvents(tx, [
+      {
+        workspaceId: params.workspaceId,
+        type: "proposal.returned_to_draft",
+        aggregateType: "Proposal",
+        aggregateId: proposal.id,
+        payload: { proposalId: proposal.id },
+      },
+    ]);
+
+    return updated;
+  });
+}
+
 export async function publishProposal(actor: AppActor, params: {
   workspaceId: string;
   proposalId: string;
 }) {
-  await requireWorkspaceMembership({
+  const membership = await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
   });
@@ -305,7 +409,7 @@ export async function publishProposal(actor: AppActor, params: {
 
     invariant(proposal && proposal.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Proposal not found.");
     invariant(proposal.isPrivate, 400, "INVALID_STATE", "Proposal is already public.");
-    invariant(actor.kind === "user" && proposal.authorUserId === actor.user.id, 403, "FORBIDDEN", "Only the author can publish this proposal.");
+    await requireDraftManager({ actor, workspaceId: params.workspaceId, record: proposal, resolvedMembership: membership });
 
     const updated = await tx.proposal.update({
       where: { id: params.proposalId },

@@ -6,6 +6,7 @@ import { appendEvents } from "./events";
 import { requireWorkspaceMembership } from "./auth";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { invariant } from "./errors";
+import { requireDraftManager } from "./draft-permissions";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -49,6 +50,8 @@ export async function createArticle(actor: AppActor, params: {
   const slug = params.slug?.trim() || slugify(title);
   invariant(slug.length > 0, 400, "INVALID_INPUT", "Article slug is required.");
 
+  const isPrivate = params.isPrivate ?? ((params.authority ?? "DRAFT") === "DRAFT");
+
   return prisma.$transaction(async (tx) => {
     const article = await tx.brainArticle.create({
       data: {
@@ -59,11 +62,11 @@ export async function createArticle(actor: AppActor, params: {
         authority: params.authority ?? "DRAFT",
         bodyMd: params.bodyMd,
         frontmatterJson: params.frontmatterJson ?? Prisma.JsonNull,
-        ownerMemberId: (params.isPrivate && membership) ? membership.id : (params.ownerMemberId ?? null),
+        ownerMemberId: (isPrivate && membership) ? membership.id : (params.ownerMemberId ?? null),
         staleAfterDays: params.staleAfterDays ?? 90,
         sourceIds: params.sourceIds ?? [],
-        isPrivate: params.isPrivate ?? false,
-        publishedAt: params.isPrivate ? null : new Date(),
+        isPrivate,
+        publishedAt: isPrivate ? null : new Date(),
         lastVerifiedAt: new Date(),
       },
     });
@@ -107,7 +110,7 @@ export async function updateArticle(actor: AppActor, params: {
   changeSummary?: string;
   agentRunId?: string | null;
 }) {
-  await requireWorkspaceMembership({
+  const membership = await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
   });
@@ -123,6 +126,19 @@ export async function updateArticle(actor: AppActor, params: {
     });
 
     invariant(article, 404, "NOT_FOUND", "Article not found.");
+
+    const editsDraftContent = params.title !== undefined
+      || params.type !== undefined
+      || params.authority !== undefined
+      || params.bodyMd !== undefined
+      || params.frontmatterJson !== undefined
+      || params.ownerMemberId !== undefined
+      || params.staleAfterDays !== undefined
+      || params.sourceIds !== undefined;
+    if (editsDraftContent) {
+      invariant(article.authority === "DRAFT", 400, "INVALID_STATE", "Only draft Brain articles can be edited.");
+      await requireDraftManager({ actor, workspaceId: params.workspaceId, record: article, resolvedMembership: membership });
+    }
 
     // Create version snapshot of previous body before updating
     if (params.bodyMd !== undefined && params.bodyMd !== article.bodyMd) {
@@ -191,7 +207,7 @@ export async function getArticle(actor: AppActor, params: {
   workspaceId: string;
   slug: string;
 }) {
-  await requireWorkspaceMembership({
+  const membership = await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
   });
@@ -245,7 +261,10 @@ export async function getArticle(actor: AppActor, params: {
   invariant(article, 404, "NOT_FOUND", "Article not found.");
 
   if (article.isPrivate) {
-    invariant(actor.kind === "user" && article.ownerMember?.userId === actor.user.id, 404, "NOT_FOUND", "Article not found.");
+    const canReadPrivateDraft = actor.kind === "agent"
+      || membership?.role === "ADMIN"
+      || (actor.kind === "user" && article.ownerMember?.userId === actor.user.id);
+    invariant(canReadPrivateDraft, 404, "NOT_FOUND", "Article not found.");
   }
 
   return article;
@@ -268,9 +287,11 @@ export async function listArticles(actor: AppActor, params: {
   const take = params.take ?? 50;
   const skip = params.skip ?? 0;
 
-  const privacyFilter = actor.kind === "user" && membership
-    ? [{ isPrivate: false }, { isPrivate: true, ownerMemberId: membership.id }]
-    : [{ isPrivate: false }];
+  const privacyFilter = actor.kind === "agent" || membership?.role === "ADMIN"
+    ? [{ isPrivate: false }, { isPrivate: true, authority: "DRAFT" as const }]
+    : actor.kind === "user" && membership
+      ? [{ isPrivate: false }, { isPrivate: true, ownerMemberId: membership.id }]
+      : [{ isPrivate: false }];
 
   const baseWhere = {
     workspaceId: params.workspaceId,
@@ -807,7 +828,7 @@ export async function publishArticle(actor: AppActor, params: {
   workspaceId: string;
   slug: string;
 }) {
-  await requireWorkspaceMembership({
+  const membership = await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
   });
@@ -825,7 +846,8 @@ export async function publishArticle(actor: AppActor, params: {
 
     invariant(article, 404, "NOT_FOUND", "Article not found.");
     invariant(article.isPrivate, 400, "INVALID_STATE", "Article is already public.");
-    invariant(actor.kind === "user" && article.ownerMember?.userId === actor.user.id, 403, "FORBIDDEN", "Only the author can publish this article.");
+    invariant(article.authority === "DRAFT", 400, "INVALID_STATE", "Only draft Brain articles can be opened.");
+    await requireDraftManager({ actor, workspaceId: params.workspaceId, record: article, resolvedMembership: membership });
 
     const updated = await tx.brainArticle.update({
       where: { id: article.id },
@@ -861,6 +883,64 @@ export async function publishArticle(actor: AppActor, params: {
           workspaceId: params.workspaceId,
           articleId: updated.id,
         },
+      },
+    ]);
+
+    return updated;
+  });
+}
+
+export async function returnArticleToDraft(actor: AppActor, params: {
+  workspaceId: string;
+  slug: string;
+}) {
+  const membership = await requireWorkspaceMembership({
+    actor,
+    workspaceId: params.workspaceId,
+  });
+
+  return prisma.$transaction(async (tx) => {
+    const article = await tx.brainArticle.findUnique({
+      where: {
+        workspaceId_slug: {
+          workspaceId: params.workspaceId,
+          slug: params.slug,
+        },
+      },
+      include: { ownerMember: true },
+    });
+
+    invariant(article && !article.archivedAt, 404, "NOT_FOUND", "Article not found.");
+    invariant(!article.isPrivate, 400, "INVALID_STATE", "Only public Brain articles can be returned to draft.");
+    await requireDraftManager({ actor, workspaceId: params.workspaceId, record: article, resolvedMembership: membership });
+
+    const updated = await tx.brainArticle.update({
+      where: { id: article.id },
+      data: {
+        authority: "DRAFT",
+        isPrivate: true,
+        publishedAt: null,
+      },
+    });
+
+    await tx.auditLog.create({
+      data: {
+        workspaceId: params.workspaceId,
+        actorUserId: actor.kind === "user" ? actor.user.id : null,
+        action: "brain-article.returned_to_draft",
+        entityType: "BrainArticle",
+        entityId: updated.id,
+        meta: { slug: updated.slug },
+      },
+    });
+
+    await appendEvents(tx, [
+      {
+        workspaceId: params.workspaceId,
+        type: "brain-article.returned_to_draft",
+        aggregateType: "BrainArticle",
+        aggregateId: updated.id,
+        payload: { articleId: updated.id },
       },
     ]);
 

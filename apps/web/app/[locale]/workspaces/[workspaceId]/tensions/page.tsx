@@ -1,4 +1,4 @@
-import { listMembers, listTensions, listProposals } from "@corgtex/domain";
+import { listMembers, listTensions, listProposals, requireWorkspaceMembership } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import {
   createTensionAction,
@@ -6,6 +6,7 @@ import {
   upvoteTensionAction,
   deleteTensionAction,
   publishTensionAction,
+  returnTensionToDraftAction,
 } from "../actions";
 import { getTranslations } from "next-intl/server";
 
@@ -21,6 +22,7 @@ export default async function TensionsPage({
   const { workspaceId } = await params;
   const actor = await requirePageActor();
   const t = await getTranslations("tensions");
+  const membership = await requireWorkspaceMembership({ actor, workspaceId });
   const [{ items: tensions }, { items: proposals }, members] = await Promise.all([
     listTensions(actor, workspaceId, { take: 50 }),
     listProposals(actor, workspaceId, { take: 50 }),
@@ -63,6 +65,9 @@ export default async function TensionsPage({
     label: statusLabel(status),
   }));
   const memberName = (member: { user: { displayName: string | null; email: string } }) => member.user.displayName || member.user.email;
+  const canManageTension = (tension: { authorUserId: string }) => actor.kind === "agent"
+    || membership?.role === "ADMIN"
+    || (actor.kind === "user" && tension.authorUserId === actor.user.id);
 
   return (
     <>
@@ -98,6 +103,7 @@ export default async function TensionsPage({
           {displayTensions.map((tension) => {
             const authorName = tension.author.displayName || tension.author.email || t("authorUnknown");
             const raisedByName = tension.raisedByMember ? memberName(tension.raisedByMember) : null;
+            const canManage = canManageTension(tension);
 
             return (
               <div className="nr-item" key={tension.id}>
@@ -120,11 +126,18 @@ export default async function TensionsPage({
                 </div>
 
                 <div className="actions-inline" style={{ marginTop: 12 }}>
-                  {tension.status === "DRAFT" && (
+                  {canManage && tension.status === "DRAFT" && (
                     <form action={publishTensionAction}>
                       <input type="hidden" name="workspaceId" value={workspaceId} />
                       <input type="hidden" name="tensionId" value={tension.id} />
-                      <button type="submit" className="primary small">{t("btnPublish")}</button>
+                      <button type="submit" className="primary small">{t("btnOpen")}</button>
+                    </form>
+                  )}
+                  {canManage && tension.status === "OPEN" && (
+                    <form action={returnTensionToDraftAction}>
+                      <input type="hidden" name="workspaceId" value={workspaceId} />
+                      <input type="hidden" name="tensionId" value={tension.id} />
+                      <button type="submit" className="secondary small">{t("btnReturnToDraft")}</button>
                     </form>
                   )}
                   {!tension.isPrivate && tension.status === "OPEN" && (
@@ -139,6 +152,7 @@ export default async function TensionsPage({
                       </form>
                     </details>
                   )}
+                  {canManage && tension.status === "DRAFT" && (
                   <details>
                     <summary className="secondary small nr-hide-marker" style={{ cursor: "pointer" }}>{t("btnEditRaisedBy")}</summary>
                     <form action={updateTensionAction} className="actions-inline" style={{ marginTop: 8 }}>
@@ -153,6 +167,7 @@ export default async function TensionsPage({
                       <button type="submit" className="secondary small">{t("btnSaveRaisedBy")}</button>
                     </form>
                   </details>
+                  )}
                   {!tension.isPrivate && (
                     <form action={upvoteTensionAction}>
                       <input type="hidden" name="workspaceId" value={workspaceId} />
@@ -166,6 +181,28 @@ export default async function TensionsPage({
                     <button type="submit" className="danger small">{t("btnDelete")}</button>
                   </form>
                 </div>
+                {canManage && tension.status === "DRAFT" && (
+                  <details style={{ marginTop: 12 }}>
+                    <summary className="secondary small nr-hide-marker" style={{ cursor: "pointer", display: "inline-block" }}>{t("btnEdit")}</summary>
+                    <form action={updateTensionAction} className="stack nr-form-section" style={{ marginTop: 12 }}>
+                      <input type="hidden" name="workspaceId" value={workspaceId} />
+                      <input type="hidden" name="tensionId" value={tension.id} />
+                      <label>
+                        {t("formTitle")}
+                        <input name="title" defaultValue={tension.title} required />
+                      </label>
+                      <label>
+                        {t("formDescription")}
+                        <textarea name="bodyMd" defaultValue={tension.bodyMd ?? ""} />
+                      </label>
+                      <label>
+                        {t("formPriority")}
+                        <input name="priority" type="number" min={0} defaultValue={tension.priority} />
+                      </label>
+                      <button type="submit" className="secondary small">{t("btnSaveDraft")}</button>
+                    </form>
+                  </details>
+                )}
               </div>
             );
           })}

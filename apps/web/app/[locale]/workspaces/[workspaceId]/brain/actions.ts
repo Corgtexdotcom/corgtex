@@ -13,6 +13,7 @@ import {
   addDiscussionComment,
   resolveDiscussionThread,
   publishArticle,
+  returnArticleToDraft,
 } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 
@@ -57,6 +58,19 @@ export async function publishArticleAction(formData: FormData) {
   const actor = await requirePageActor();
   const workspaceId = asString(formData, "workspaceId");
   await publishArticle(actor, {
+    workspaceId,
+    slug: asString(formData, "slug"),
+  });
+  refresh(workspaceId, asString(formData, "slug"));
+}
+
+export async function returnArticleToDraftAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  await returnArticleToDraft(actor, {
     workspaceId,
     slug: asString(formData, "slug"),
   });

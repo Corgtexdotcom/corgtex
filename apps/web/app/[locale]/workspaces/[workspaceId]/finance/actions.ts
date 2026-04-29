@@ -10,7 +10,9 @@ import {
   deleteSpend,
   linkSpendLedgerAccount,
   markSpendPaid,
+  returnSpendToDraft,
   submitSpend,
+  updateSpend,
   updateLedgerAccount,
   updateSpendReconciliation,
   uploadSpendStatement,
@@ -54,6 +56,40 @@ export async function submitSpendAction(formData: FormData) {
   const actor = await requirePageActor();
   const workspaceId = asString(formData, "workspaceId");
   await submitSpend(actor, {
+    workspaceId,
+    spendId: asString(formData, "spendId"),
+  });
+  refresh(workspaceId);
+}
+
+export async function updateSpendAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  const rawAmount = asOptional(formData, "amount");
+  const parsedAmount = rawAmount ? Number.parseFloat(rawAmount) : null;
+  await updateSpend(actor, {
+    workspaceId,
+    spendId: asString(formData, "spendId"),
+    amountCents: parsedAmount !== null && !Number.isNaN(parsedAmount) ? Math.round(parsedAmount * 100) : undefined,
+    currency: formData.has("currency") ? asString(formData, "currency") : undefined,
+    category: formData.has("category") ? asString(formData, "category") : undefined,
+    description: formData.has("description") ? asString(formData, "description") : undefined,
+    vendor: formData.has("vendor") ? asOptional(formData, "vendor") : undefined,
+    ledgerAccountId: formData.has("ledgerAccountId") ? asOptional(formData, "ledgerAccountId") : undefined,
+  });
+  refresh(workspaceId);
+}
+
+export async function returnSpendToDraftAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  await returnSpendToDraft(actor, {
     workspaceId,
     spendId: asString(formData, "spendId"),
   });

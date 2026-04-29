@@ -22,15 +22,19 @@ import {
   archiveProposal,
   submitProposal,
   publishProposal,
+  returnProposalToDraft,
   listActions,
   createAction,
   updateAction,
+  returnActionToDraft,
   deleteAction,
   listTensions,
   createTension,
   updateTension,
+  returnTensionToDraft,
   deleteTension,
   upvoteTension,
+  returnGoalToDraft,
   listMembers,
   createMember,
   updateMember,
@@ -46,6 +50,7 @@ import {
   listArticles,
   deleteArticle,
   publishArticle,
+  returnArticleToDraft,
   createDiscussionThread,
   addDiscussionComment,
   resolveDiscussionThread,
@@ -63,6 +68,8 @@ import {
   deleteLedgerAccount,
   deleteSpend,
   submitSpend,
+  updateSpend,
+  returnSpendToDraft,
   listSpends,
   listLedgerAccounts,
   listArchivedWorkspaceArtifacts,
@@ -679,7 +686,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
 
   tool(
     "submit_proposal",
-    "Open a DRAFT proposal with the circle. Starts an approval flow per the workspace's approval policy.",
+    "Open a DRAFT proposal to the workspace. Starts an approval flow per the workspace's approval policy.",
     {
       proposalId: z.string(),
     },
@@ -714,13 +721,30 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
 
   tool(
     "publish_proposal",
-    "Publish a private draft proposal so other members can see it. Author-only — agents cannot publish on a user's behalf.",
+    "Legacy visibility-only helper for private draft proposals. Prefer submit_proposal when the user asks to Open a proposal.",
     {
       proposalId: z.string(),
     },
     async ({ proposalId }: { proposalId: string }) => {
       requireScope(sessionCtx, "proposals:write");
       const updated = await publishProposal(actor, { workspaceId, proposalId });
+      return jsonResult({
+        id: updated.id,
+        status: updated.status,
+        webUrl: webUrl(workspaceId, `/proposals/${updated.id}`),
+      });
+    },
+  );
+
+  tool(
+    "return_proposal_to_draft",
+    "Return an OPEN proposal to DRAFT so authorized draft managers can edit it. Clears active approval decisions, objections, and stale flow state so reopening starts fresh.",
+    {
+      proposalId: z.string(),
+    },
+    async ({ proposalId }: { proposalId: string }) => {
+      requireScope(sessionCtx, "proposals:write");
+      const updated = await returnProposalToDraft(actor, { workspaceId, proposalId });
       return jsonResult({
         id: updated.id,
         status: updated.status,
@@ -758,7 +782,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
 
   tool(
     "create_action",
-    "Create a new action item.",
+    "Create a new private DRAFT action item.",
     {
       title: z.string(),
       bodyMd: z.string().optional(),
@@ -776,7 +800,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
 
   tool(
     "update_action",
-    "Update an action's title, body, status, circle, assignee, or due date. Pass only the fields you want to change.",
+    "Update an action. Content fields are editable only while the action is DRAFT; status/progress workflow fields may be changed through the normal workflow.",
     {
       actionId: z.string(),
       title: z.string().optional(),
@@ -832,6 +856,23 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
   );
 
   tool(
+    "return_action_to_draft",
+    "Return an OPEN or IN_PROGRESS action to DRAFT so authorized draft managers can edit it. Completed or archived actions cannot be returned.",
+    {
+      actionId: z.string(),
+    },
+    async ({ actionId }: { actionId: string }) => {
+      requireScope(sessionCtx, "actions:write");
+      const updated = await returnActionToDraft(actor, { workspaceId, actionId });
+      return jsonResult({
+        id: updated.id,
+        status: updated.status,
+        webUrl: webUrl(workspaceId, `/actions/${updated.id}`),
+      });
+    },
+  );
+
+  tool(
     "delete_action",
     "Archive an action so it stops appearing in active views. The record remains recoverable from the archive.",
     {
@@ -873,7 +914,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
 
   tool(
     "create_tension",
-    "File a new tension (issue/concern).",
+    "Create a new private DRAFT tension (issue/concern).",
     {
       title: z.string(),
       bodyMd: z.string().optional(),
@@ -892,7 +933,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
 
   tool(
     "update_tension",
-    "Update a tension's title, body, status, circle, assignee, or priority. Pass only the fields you want to change.",
+    "Update a tension. Content fields are editable only while the tension is DRAFT; resolution workflow fields may be changed through the normal workflow.",
     {
       tensionId: z.string(),
       title: z.string().optional(),
@@ -937,6 +978,23 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
   );
 
   tool(
+    "return_tension_to_draft",
+    "Return an OPEN tension to DRAFT so authorized draft managers can edit it. Resolved or archived tensions cannot be returned.",
+    {
+      tensionId: z.string(),
+    },
+    async ({ tensionId }: { tensionId: string }) => {
+      requireScope(sessionCtx, "tensions:write");
+      const updated = await returnTensionToDraft(actor, { workspaceId, tensionId });
+      return jsonResult({
+        id: updated.id,
+        status: updated.status,
+        webUrl: webUrl(workspaceId, `/tensions/${updated.id}`),
+      });
+    },
+  );
+
+  tool(
     "upvote_tension",
     "Upvote a tension to signal support. User-only — agents cannot upvote on a user's behalf.",
     {
@@ -963,6 +1021,27 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       requireScope(sessionCtx, "tensions:write");
       const result = await deleteTension(actor, { workspaceId, tensionId });
       return jsonResult({ id: result.id, archived: true, webUrl: webUrl(workspaceId, `/audit?tab=archive`) });
+    },
+  );
+
+  // ===========================================================================
+  // GOALS
+  // ===========================================================================
+
+  tool(
+    "return_goal_to_draft",
+    "Return an active goal to DRAFT so authorized draft managers can edit it. Completed, abandoned, or archived goals cannot be returned.",
+    {
+      goalId: z.string(),
+    },
+    async ({ goalId }: { goalId: string }) => {
+      requireScope(sessionCtx, "cycles:write");
+      const updated = await returnGoalToDraft(actor, { workspaceId, goalId });
+      return jsonResult({
+        id: updated.id,
+        status: updated.status,
+        webUrl: webUrl(workspaceId, `/goals?view=tree&cadence=${updated.cadence}`),
+      });
     },
   );
 
@@ -1252,7 +1331,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
 
   tool(
     "update_article",
-    "Update a Brain article. Pass `changeSummary` to label the version snapshot. The previous body is preserved as a version row.",
+    "Update a DRAFT Brain article. Pass `changeSummary` to label the version snapshot. The previous body is preserved as a version row.",
     {
       slug: z.string(),
       title: z.string().optional(),
@@ -1302,7 +1381,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
 
   tool(
     "publish_article",
-    "Publish a private draft article so other members can see it. Author-only — agents cannot publish on a user's behalf.",
+    "Open a private draft article so other workspace members can see it.",
     {
       slug: z.string(),
     },
@@ -1312,6 +1391,24 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       return jsonResult({
         id: updated.id,
         slug: updated.slug,
+        webUrl: webUrl(workspaceId, `/brain/${updated.slug}`),
+      });
+    },
+  );
+
+  tool(
+    "return_article_to_draft",
+    "Return a public Brain article to DRAFT so authorized draft managers can edit it. Archived articles cannot be returned.",
+    {
+      slug: z.string(),
+    },
+    async ({ slug }: { slug: string }) => {
+      requireScope(sessionCtx, "brain:write");
+      const updated = await returnArticleToDraft(actor, { workspaceId, slug });
+      return jsonResult({
+        id: updated.id,
+        slug: updated.slug,
+        authority: updated.authority,
         webUrl: webUrl(workspaceId, `/brain/${updated.slug}`),
       });
     },
@@ -1702,8 +1799,65 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
   );
 
   tool(
+    "update_spend",
+    "Update a DRAFT spend request. Pass only the fields you want to change.",
+    {
+      spendId: z.string(),
+      amountCents: z.number().optional(),
+      currency: z.string().optional(),
+      category: z.string().optional(),
+      description: z.string().optional(),
+      vendor: z.string().nullable().optional(),
+      ledgerAccountId: z.string().nullable().optional(),
+    },
+    async (params: {
+      spendId: string;
+      amountCents?: number;
+      currency?: string;
+      category?: string;
+      description?: string;
+      vendor?: string | null;
+      ledgerAccountId?: string | null;
+    }) => {
+      requireScope(sessionCtx, "finance:write");
+      const updated = await updateSpend(actor, {
+        workspaceId,
+        spendId: params.spendId,
+        amountCents: params.amountCents,
+        currency: params.currency,
+        category: params.category,
+        description: params.description,
+        vendor: params.vendor,
+        ledgerAccountId: params.ledgerAccountId,
+      });
+      return jsonResult({
+        id: updated.id,
+        status: updated.status,
+        webUrl: webUrl(workspaceId, `/finance/spend/${updated.id}`),
+      });
+    },
+  );
+
+  tool(
+    "return_spend_to_draft",
+    "Return an OPEN spend request to DRAFT so authorized draft managers can edit it. Paid, reconciled, resolved, or archived spend requests cannot be returned.",
+    {
+      spendId: z.string(),
+    },
+    async ({ spendId }: { spendId: string }) => {
+      requireScope(sessionCtx, "finance:write");
+      const updated = await returnSpendToDraft(actor, { workspaceId, spendId });
+      return jsonResult({
+        id: updated.id,
+        status: updated.status,
+        webUrl: webUrl(workspaceId, `/finance/spend/${updated.id}`),
+      });
+    },
+  );
+
+  tool(
     "archive_spend",
-    "Archive a spend request so it stops appearing in active finance views. Submitted or paid spend remains recoverable and auditable.",
+    "Archive a spend request so it stops appearing in active finance views. Open or paid spend remains recoverable and auditable.",
     {
       spendId: z.string(),
     },

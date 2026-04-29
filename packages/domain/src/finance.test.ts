@@ -54,7 +54,13 @@ vi.mock("@corgtex/shared", () => ({
 }));
 
 vi.mock("./auth", () => ({
-  requireWorkspaceMembership: vi.fn().mockResolvedValue({ id: "mem-1" }),
+  requireWorkspaceMembership: vi.fn().mockResolvedValue({
+    id: "mem-1",
+    workspaceId: "ws-1",
+    userId: "usr-1",
+    role: "MEMBER",
+    isActive: true,
+  }),
   actorUserIdForWorkspace: vi.fn().mockResolvedValue("usr-sys"),
 }));
 
@@ -307,5 +313,90 @@ describe("submitSpend event payload", () => {
         }),
       ]),
     );
+  });
+
+  it("returns an open spend request to draft", async () => {
+    const { returnSpendToDraft } = await import("./finance");
+
+    txMock.spendRequest.findUnique.mockResolvedValue({
+      id: "sp-1",
+      workspaceId: "ws-1",
+      requesterUserId: "usr-1",
+      status: "OPEN",
+      description: "Annual SaaS license renewal",
+      amountCents: 5000,
+      currency: "USD",
+      category: "software",
+      vendor: null,
+      receiptUrl: null,
+      spentAt: null,
+      ledgerAccountId: null,
+      reconciliationStatus: "PENDING",
+      archivedAt: null,
+      proposalLinks: [],
+      comments: [],
+    });
+    txMock.spendRequest.update.mockResolvedValue({
+      id: "sp-1",
+      status: "DRAFT",
+      resolutionOutcome: null,
+    });
+
+    await expect(returnSpendToDraft(
+      { kind: "user", user: { id: "usr-1" } } as any,
+      { workspaceId: "ws-1", spendId: "sp-1" },
+    )).resolves.toMatchObject({
+      id: "sp-1",
+      status: "DRAFT",
+    });
+
+    expect(txMock.spendRequest.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "sp-1" },
+      data: {
+        status: "DRAFT",
+        resolutionOutcome: null,
+      },
+    }));
+  });
+
+  it("blocks non-managers from editing another requester's draft spend", async () => {
+    const { updateSpend } = await import("./finance");
+    const { requireWorkspaceMembership } = await import("./auth");
+
+    vi.mocked(requireWorkspaceMembership).mockResolvedValueOnce({
+      id: "mem-2",
+      workspaceId: "ws-1",
+      userId: "usr-2",
+      role: "MEMBER",
+      isActive: true,
+    } as any);
+    txMock.spendRequest.findUnique.mockResolvedValue({
+      id: "sp-1",
+      workspaceId: "ws-1",
+      requesterUserId: "usr-1",
+      status: "DRAFT",
+      description: "Annual SaaS license renewal",
+      amountCents: 5000,
+      currency: "USD",
+      category: "software",
+      vendor: null,
+      receiptUrl: null,
+      spentAt: null,
+      ledgerAccountId: null,
+      reconciliationStatus: "PENDING",
+      archivedAt: null,
+      proposalLinks: [],
+      comments: [],
+    });
+
+    await expect(updateSpend(
+      { kind: "user", user: { id: "usr-2" } } as any,
+      { workspaceId: "ws-1", spendId: "sp-1", description: "Changed" },
+    )).rejects.toMatchObject({
+      status: 403,
+      code: "FORBIDDEN",
+    });
+
+    expect(txMock.spendRequest.update).not.toHaveBeenCalled();
   });
 });

@@ -1,12 +1,13 @@
 import { notFound } from "next/navigation";
 import Link from "next/link";
-import { getProposal, listDeliberationEntries } from "@corgtex/domain";
+import { getProposal, listDeliberationEntries, requireWorkspaceMembership } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { renderMarkdown } from "@/lib/markdown";
+import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { DeliberationThread } from "@/lib/components/DeliberationThread";
 import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
 import { getDeliberationTargets } from "@/lib/deliberation-targets";
-import { postDeliberationEntryAction, resolveDeliberationEntryAction, submitProposalAction } from "../actions";
+import { postDeliberationEntryAction, resolveDeliberationEntryAction, returnProposalToDraftAction, submitProposalAction, updateProposalAction } from "../actions";
 import { getTranslations } from "next-intl/server";
 
 export const dynamic = "force-dynamic";
@@ -22,6 +23,7 @@ export default async function ProposalDetailPage({
 
   const proposal = await getProposal(actor, { workspaceId, proposalId });
   if (!proposal) notFound();
+  const membership = await requireWorkspaceMembership({ actor, workspaceId });
 
   const deliberationEntries = await listDeliberationEntries(actor, {
     workspaceId,
@@ -29,14 +31,7 @@ export default async function ProposalDetailPage({
     parentId: proposalId,
   });
   const deliberationTargets = await getDeliberationTargets({ actor, workspaceId, parentCircleId: proposal.circleId });
-  const targetOptions = deliberationTargets.options.map((option) => ({
-    ...option,
-    label: option.value.startsWith("circle:")
-      ? t("targetCircle", { name: option.label.replace(/^Circle: /, "") })
-      : option.value.startsWith("member:")
-        ? t("targetPerson", { name: option.label.replace(/^Person: /, "") })
-        : option.label,
-  }));
+  const targetOptions = deliberationTargets.options;
 
   const htmlContent = renderMarkdown(proposal.bodyMd);
 
@@ -56,6 +51,7 @@ export default async function ProposalDetailPage({
   })();
 
   const isAuthor = proposal.authorUserId === (actor.kind === "user" ? actor.user.id : "");
+  const canManage = actor.kind === "agent" || membership?.role === "ADMIN" || isAuthor;
 
   return (
     <>
@@ -116,7 +112,6 @@ export default async function ProposalDetailPage({
               hiddenFields={{ workspaceId, proposalId }}
               title={t("sectionDeliberation")}
               targetOptions={targetOptions}
-              defaultTargetValue={deliberationTargets.defaultValue}
               entryTypes={[
                 { value: "REACTION", label: t("entryReaction"), variant: "secondary" },
                 { value: "OBJECTION", label: t("entryObjection"), variant: "danger" },
@@ -127,14 +122,45 @@ export default async function ProposalDetailPage({
 
         {/* Sidebar */}
         <aside style={{ borderLeft: "1px solid var(--line)", paddingLeft: "32px", paddingRight: "16px" }}>
-          {isAuthor && proposal.status === "DRAFT" && (
+          {canManage && proposal.status === "DRAFT" && (
             <div className="stack mb-8">
               <form action={submitProposalAction} style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
                 <input type="hidden" name="workspaceId" value={workspaceId} />
                 <input type="hidden" name="proposalId" value={proposal.id} />
-                <button className="w-full">{t("btnSubmitProposal")}</button>
+                <button className="w-full">{t("btnOpen")}</button>
               </form>
             </div>
+          )}
+          {canManage && proposal.status === "OPEN" && (
+            <div className="stack mb-8">
+              <form action={returnProposalToDraftAction} style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+                <input type="hidden" name="workspaceId" value={workspaceId} />
+                <input type="hidden" name="proposalId" value={proposal.id} />
+                <button className="secondary w-full">{t("btnReturnToDraft")}</button>
+              </form>
+            </div>
+          )}
+          {canManage && proposal.status === "DRAFT" && (
+            <details className="stack mb-8">
+              <summary className="secondary small nr-hide-marker" style={{ cursor: "pointer" }}>{t("btnEdit")}</summary>
+              <form action={updateProposalAction} className="stack nr-form-section" style={{ marginTop: 12 }}>
+                <input type="hidden" name="workspaceId" value={workspaceId} />
+                <input type="hidden" name="proposalId" value={proposal.id} />
+                <label>
+                  {t("formTitle")}
+                  <input name="title" defaultValue={proposal.title} required />
+                </label>
+                <label>
+                  {t("formSummary")}
+                  <input name="summary" defaultValue={proposal.summary ?? ""} />
+                </label>
+                <label>
+                  {t("formBody")}
+                  <MarkdownEditor name="bodyMd" defaultValue={proposal.bodyMd} required placeholder={t("formBodyPlaceholder")} />
+                </label>
+                <button type="submit" className="secondary small">{t("btnSaveDraft")}</button>
+              </form>
+            </details>
           )}
           
           <h3 style={{ fontSize: "0.85rem", textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--text)", marginBottom: "16px" }}>{t("aboutTitle")}</h3>

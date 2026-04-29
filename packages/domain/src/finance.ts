@@ -6,6 +6,7 @@ import { appendEvents } from "./events";
 import { getApprovalPolicy } from "./approvals";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { invariant } from "./errors";
+import { requireDraftManager } from "./draft-permissions";
 
 const LEGACY_SPEND_COMMENT_ENTRY_ID_PREFIX = "legacy-spend-comment-";
 
@@ -378,7 +379,7 @@ export async function createSpend(actor: AppActor, params: {
 }
 
 export async function submitSpend(actor: AppActor, params: { workspaceId: string; spendId: string }) {
-  await requireWorkspaceMembership({
+  const membership = await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
   });
@@ -388,6 +389,7 @@ export async function submitSpend(actor: AppActor, params: { workspaceId: string
   return prisma.$transaction(async (tx) => {
     const spend = await findSpendForWorkspace(tx, params.workspaceId, params.spendId);
     invariant(spend.status === "DRAFT", 400, "INVALID_STATE", "Only draft spend requests can be submitted.");
+    await requireDraftManager({ actor, workspaceId: params.workspaceId, record: spend, resolvedMembership: membership });
 
     if (policy.requireProposalLink) {
       if (spend.proposalLinks.length === 0) {
@@ -1049,11 +1051,12 @@ export async function updateSpend(actor: AppActor, params: {
   vendor?: string | null;
   ledgerAccountId?: string | null;
 }) {
-  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
 
   return prisma.$transaction(async (tx) => {
     const spend = await findSpendForWorkspace(tx, params.workspaceId, params.spendId);
     invariant(spend.status === "DRAFT", 400, "INVALID_STATE", "Only draft spend requests can be updated.");
+    await requireDraftManager({ actor, workspaceId: params.workspaceId, record: spend, resolvedMembership: membership });
 
     const data: Record<string, unknown> = {};
     if (params.amountCents !== undefined) {
@@ -1100,6 +1103,51 @@ export async function updateSpend(actor: AppActor, params: {
         meta: { fields: Object.keys(data) },
       },
     });
+
+    return updated;
+  });
+}
+
+export async function returnSpendToDraft(actor: AppActor, params: {
+  workspaceId: string;
+  spendId: string;
+}) {
+  const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+
+  return prisma.$transaction(async (tx) => {
+    const spend = await findSpendForWorkspace(tx, params.workspaceId, params.spendId);
+    invariant(spend.status === "OPEN", 400, "INVALID_STATE", "Only open spend requests can be returned to draft.");
+    invariant(!spend.spentAt, 400, "INVALID_STATE", "Paid spend requests cannot be returned to draft.");
+    invariant(spend.reconciliationStatus === "PENDING", 400, "INVALID_STATE", "Reconciled spend requests cannot be returned to draft.");
+    await requireDraftManager({ actor, workspaceId: params.workspaceId, record: spend, resolvedMembership: membership });
+
+    const updated = await tx.spendRequest.update({
+      where: { id: params.spendId },
+      data: {
+        status: "DRAFT",
+        resolutionOutcome: null,
+      },
+    });
+
+    await tx.auditLog.create({
+      data: {
+        workspaceId: params.workspaceId,
+        actorUserId: actor.kind === "user" ? actor.user.id : null,
+        action: "spend.returned_to_draft",
+        entityType: "SpendRequest",
+        entityId: spend.id,
+      },
+    });
+
+    await appendEvents(tx, [
+      {
+        workspaceId: params.workspaceId,
+        type: "spend.returned_to_draft",
+        aggregateType: "SpendRequest",
+        aggregateId: spend.id,
+        payload: { spendId: spend.id },
+      },
+    ]);
 
     return updated;
   });

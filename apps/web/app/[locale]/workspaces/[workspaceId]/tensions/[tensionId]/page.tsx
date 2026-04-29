@@ -1,9 +1,9 @@
-import { getTension, listDeliberationEntries } from "@corgtex/domain";
+import { getTension, listDeliberationEntries, requireWorkspaceMembership } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { DeliberationThread } from "@/lib/components/DeliberationThread";
 import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
 import { getDeliberationTargets } from "@/lib/deliberation-targets";
-import { postTensionDeliberationAction, resolveTensionDeliberationAction } from "../actions";
+import { postTensionDeliberationAction, publishTensionAction, returnTensionToDraftAction, resolveTensionDeliberationAction, updateTensionAction } from "../actions";
 import { getTranslations } from "next-intl/server";
 
 export const dynamic = "force-dynamic";
@@ -17,16 +17,10 @@ export default async function TensionDetailPage({
   const actor = await requirePageActor();
   const t = await getTranslations("tensions");
   const tension = await getTension(actor, { workspaceId, tensionId });
+  const membership = await requireWorkspaceMembership({ actor, workspaceId });
   const entries = await listDeliberationEntries(actor, { workspaceId, parentType: "TENSION", parentId: tensionId });
   const deliberationTargets = await getDeliberationTargets({ actor, workspaceId, parentCircleId: tension.circleId });
-  const targetOptions = deliberationTargets.options.map((option) => ({
-    ...option,
-    label: option.value.startsWith("circle:")
-      ? t("targetCircle", { name: option.label.replace(/^Circle: /, "") })
-      : option.value.startsWith("member:")
-        ? t("targetPerson", { name: option.label.replace(/^Person: /, "") })
-        : option.label,
-  }));
+  const targetOptions = deliberationTargets.options;
   const mappedEntries = entries.map((e: any) => ({
     ...e,
     authorName: e.author?.displayName || e.author?.email || t("authorUnknown"),
@@ -49,6 +43,7 @@ export default async function TensionDetailPage({
 
   const priorityText = tension.priority > 0 ? t("priorityN", { priority: tension.priority }) : t("noPriority");
   const raisedByName = tension.raisedByMember?.user.displayName || tension.raisedByMember?.user.email || null;
+  const canManage = actor.kind === "agent" || membership?.role === "ADMIN" || (actor.kind === "user" && tension.authorUserId === actor.user.id);
 
   return (
     <>
@@ -73,6 +68,49 @@ export default async function TensionDetailPage({
         </div>
       </header>
 
+      {canManage && (
+        <section className="ws-section" style={{ marginBottom: 24 }}>
+          <div className="actions-inline">
+            {tension.status === "DRAFT" && (
+              <form action={publishTensionAction}>
+                <input type="hidden" name="workspaceId" value={workspaceId} />
+                <input type="hidden" name="tensionId" value={tension.id} />
+                <button type="submit" className="primary small">{t("btnOpen")}</button>
+              </form>
+            )}
+            {tension.status === "OPEN" && (
+              <form action={returnTensionToDraftAction}>
+                <input type="hidden" name="workspaceId" value={workspaceId} />
+                <input type="hidden" name="tensionId" value={tension.id} />
+                <button type="submit" className="secondary small">{t("btnReturnToDraft")}</button>
+              </form>
+            )}
+          </div>
+          {tension.status === "DRAFT" && (
+            <details style={{ marginTop: 12 }}>
+              <summary className="secondary small nr-hide-marker" style={{ cursor: "pointer", display: "inline-block" }}>{t("btnEdit")}</summary>
+              <form action={updateTensionAction} className="stack nr-form-section" style={{ marginTop: 12 }}>
+                <input type="hidden" name="workspaceId" value={workspaceId} />
+                <input type="hidden" name="tensionId" value={tension.id} />
+                <label>
+                  {t("formTitle")}
+                  <input name="title" defaultValue={tension.title} required />
+                </label>
+                <label>
+                  {t("formDescription")}
+                  <textarea name="bodyMd" defaultValue={tension.bodyMd ?? ""} />
+                </label>
+                <label>
+                  {t("formPriority")}
+                  <input name="priority" type="number" min={0} defaultValue={tension.priority} />
+                </label>
+                <button type="submit" className="secondary small">{t("btnSaveDraft")}</button>
+              </form>
+            </details>
+          )}
+        </section>
+      )}
+
       <section className="ws-section" style={{ marginBottom: 48 }}>
         <h2 className="nr-section-header">{t("sectionDescription")}</h2>
         <div className="nr-item">
@@ -93,7 +131,6 @@ export default async function TensionDetailPage({
             postAction={postTensionDeliberationAction}
             hiddenFields={{ workspaceId, parentId: tensionId }}
             targetOptions={targetOptions}
-            defaultTargetValue={deliberationTargets.defaultValue}
             entryTypes={[
               { value: "REACTION", label: t("entryReaction"), variant: "secondary" },
               { value: "OBJECTION", label: t("entryObjection"), variant: "danger" },
