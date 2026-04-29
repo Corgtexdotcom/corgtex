@@ -1,12 +1,21 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
+const { createActionMock, createProposalMock, createTensionMock } = vi.hoisted(() => ({
+  createActionMock: vi.fn(),
+  createProposalMock: vi.fn(),
+  createTensionMock: vi.fn(),
+}));
+
 vi.mock("@corgtex/shared", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@corgtex/shared")>();
   return {
     ...actual,
     prisma: {
       $transaction: vi.fn(),
-      member: { findUnique: vi.fn().mockResolvedValue({ id: "member-123", isActive: true }) },
+      member: {
+        findMany: vi.fn(),
+        findUnique: vi.fn().mockResolvedValue({ id: "member-123", workspaceId: "ws-1", userId: "user-123", role: "ADMIN", isActive: true }),
+      },
       meeting: { update: vi.fn() },
       meetingInsight: {
         createMany: vi.fn(),
@@ -18,6 +27,18 @@ vi.mock("@corgtex/shared", async (importOriginal) => {
     },
   };
 });
+
+vi.mock("./actions", () => ({
+  createAction: createActionMock,
+}));
+
+vi.mock("./proposals", () => ({
+  createProposal: createProposalMock,
+}));
+
+vi.mock("./tensions", () => ({
+  createTension: createTensionMock,
+}));
 
 import { prisma } from "@corgtex/shared";
 import { 
@@ -39,6 +60,18 @@ describe("meeting-intelligence", () => {
     
     // Default mocks
     (prisma.$transaction as ReturnType<typeof vi.fn>).mockImplementation((cb) => cb(prisma));
+    (prisma.member.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([
+      {
+        id: "member-raised",
+        user: {
+          displayName: "Milan",
+          email: "milan@example.com",
+        },
+      },
+    ]);
+    createActionMock.mockResolvedValue({ id: "action-1" });
+    createProposalMock.mockResolvedValue({ id: "proposal-1" });
+    createTensionMock.mockResolvedValue({ id: "tension-1" });
   });
 
   describe("extractMeetingInsights", () => {
@@ -99,6 +132,42 @@ describe("meeting-intelligence", () => {
   describe("applyInsight", () => {
     it("is defined and callable", async () => {
       expect(applyInsight).toBeDefined();
+    });
+
+    it("uses assignee hints as raised-by members for tension insights", async () => {
+      (prisma.meetingInsight.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue({
+        id: "insight-123",
+        workspaceId: "ws-1",
+        meetingId: "meeting-1",
+        type: "TENSION",
+        status: "CONFIRMED",
+        title: "Onboarding ownership is unclear",
+        bodyMd: "The handoff owner was unclear.",
+        assigneeHint: "Milan",
+        meeting: {
+          id: "meeting-1",
+          title: "Weekly sync",
+        },
+      });
+      (prisma.meetingInsight.update as ReturnType<typeof vi.fn>).mockResolvedValue({
+        id: "insight-123",
+        status: "APPLIED",
+      });
+
+      await applyInsight(mockActor, {
+        workspaceId: "ws-1",
+        insightId: "insight-123",
+      });
+
+      expect(createTensionMock).toHaveBeenCalledWith(mockActor, expect.objectContaining({
+        workspaceId: "ws-1",
+        title: "Onboarding ownership is unclear",
+        raisedByMemberId: "member-raised",
+        meetingId: "meeting-1",
+      }));
+      expect(createTensionMock).toHaveBeenCalledWith(mockActor, expect.not.objectContaining({
+        assigneeMemberId: "member-raised",
+      }));
     });
   });
 

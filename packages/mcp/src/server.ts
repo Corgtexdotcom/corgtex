@@ -864,6 +864,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         status: t.status,
         author: t.author?.displayName ?? t.author?.email ?? "Unknown",
         assignee: t.assigneeMember?.user?.displayName ?? t.assigneeMember?.user?.email ?? null,
+        raisedBy: t.raisedByMember?.user?.displayName ?? t.raisedByMember?.user?.email ?? null,
         createdAt: t.createdAt,
       }));
       return jsonResult({ items: simplified, total: result.total });
@@ -876,10 +877,11 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     {
       title: z.string(),
       bodyMd: z.string().optional(),
+      raisedByMemberId: z.string().optional(),
     },
-    async ({ title, bodyMd }: { title: string; bodyMd?: string }) => {
+    async ({ title, bodyMd, raisedByMemberId }: { title: string; bodyMd?: string; raisedByMemberId?: string }) => {
       requireScope(sessionCtx, "tensions:write");
-      const tension = await createTension(actor, { workspaceId, title, bodyMd });
+      const tension = await createTension(actor, { workspaceId, title, bodyMd, raisedByMemberId });
       return jsonResult({
         id: tension.id,
         status: tension.status,
@@ -898,6 +900,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       status: z.enum(TENSION_STATUS).optional(),
       circleId: z.string().optional(),
       assigneeMemberId: z.string().optional(),
+      raisedByMemberId: z.string().optional(),
       priority: z.number().optional(),
       resolvedVia: z.string().optional().describe("Required when setting status to RESOLVED"),
     },
@@ -908,6 +911,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       status?: typeof TENSION_STATUS[number];
       circleId?: string;
       assigneeMemberId?: string;
+      raisedByMemberId?: string;
       priority?: number;
       resolvedVia?: string;
     }) => {
@@ -920,6 +924,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         status: params.status,
         circleId: params.circleId,
         assigneeMemberId: params.assigneeMemberId,
+        raisedByMemberId: params.raisedByMemberId,
         priority: params.priority,
         resolvedVia: params.resolvedVia,
       });

@@ -165,7 +165,12 @@ export async function handleTensionKnowledgeSync(jobId: string, payload: { tensi
   if (!payload.tensionId) return;
   const tension = await prisma.tension.findUnique({
     where: { id: payload.tensionId },
-    include: { author: { select: { displayName: true } }, assigneeMember: { include: { user: { select: { displayName: true } } } }, circle: { select: { name: true } } },
+    include: {
+      author: { select: { displayName: true } },
+      assigneeMember: { include: { user: { select: { displayName: true } } } },
+      raisedByMember: { include: { user: { select: { displayName: true } } } },
+      circle: { select: { name: true } },
+    },
   });
   if (!tension || tension.workspaceId !== workspaceId) return;
 
@@ -173,6 +178,7 @@ export async function handleTensionKnowledgeSync(jobId: string, payload: { tensi
     `# Tension: ${tension.title}`,
     `**Status:** ${tension.status} | **Priority:** ${tension.priority}`,
     `**Author:** ${tension.author.displayName || "Unknown"}`,
+    `**Raised by:** ${tension.raisedByMember?.user.displayName || "Unknown"}`,
     `**Circle:** ${tension.circle?.name || "None"} | **Assigned to:** ${tension.assigneeMember?.user.displayName || "Unassigned"}`,
     `**Created:** ${tension.createdAt.toISOString()}`,
     tension.bodyMd ? `\n${tension.bodyMd}` : "",
@@ -305,5 +311,4 @@ export async function handleCalendarSync(jobId: string, payload: { connectionId?
     throw error;
   }
 }
-
 

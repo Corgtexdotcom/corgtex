@@ -20,6 +20,7 @@ export async function GET(request: NextRequest) {
       status: t.status,
       priority: t.priority,
       author: t.author?.displayName ?? t.author?.email ?? "Unknown",
+      raisedBy: t.raisedByMember?.user?.displayName ?? t.raisedByMember?.user?.email ?? null,
       createdAt: t.createdAt,
     }));
 
@@ -43,6 +44,7 @@ export async function POST(request: NextRequest) {
       workspaceId,
       title: body.title,
       bodyMd: body.bodyMd,
+      raisedByMemberId: body.raisedByMemberId ?? null,
     });
 
     const origin = env.APP_URL.replace(/\/$/, "");

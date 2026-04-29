@@ -123,6 +123,7 @@ export async function GET() {
             {
               title: { type: "string" },
               bodyMd: { type: "string" },
+              raisedByMemberId: { type: "string", nullable: true },
             },
             ["title"],
           ),

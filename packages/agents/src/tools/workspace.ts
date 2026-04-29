@@ -91,7 +91,11 @@ export async function queryTensions(workspaceId: string, status?: TensionStatus,
     where,
     take: 20,
     orderBy: { createdAt: "desc" },
-    include: { author: { select: { displayName: true } }, assigneeMember: { include: { user: { select: { displayName: true } } } } },
+    include: {
+      author: { select: { displayName: true } },
+      assigneeMember: { include: { user: { select: { displayName: true } } } },
+      raisedByMember: { include: { user: { select: { displayName: true } } } },
+    },
   });
 
   return tensions.map(t => ({
@@ -101,6 +105,7 @@ export async function queryTensions(workspaceId: string, status?: TensionStatus,
     priority: t.priority,
     author: t.author.displayName,
     assignee: t.assigneeMember?.user.displayName || null,
+    raisedBy: t.raisedByMember?.user.displayName || null,
     createdAt: t.createdAt,
     bodySnippet: t.bodyMd?.substring(0, 200) + (t.bodyMd && t.bodyMd.length > 200 ? "..." : ""),
   }));

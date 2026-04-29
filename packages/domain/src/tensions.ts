@@ -1,11 +1,27 @@
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
+import type { Prisma } from "@prisma/client";
 import { appendEvents } from "./events";
 import { actorUserIdForWorkspace, requireWorkspaceMembership } from "./auth";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { invariant } from "./errors";
 
 import { privacyFilter } from "./privacy";
+
+async function resolveRaisedByMemberId(tx: Prisma.TransactionClient, workspaceId: string, raisedByMemberId?: string | null) {
+  if (!raisedByMemberId) return null;
+
+  const member = await tx.member.findFirst({
+    where: {
+      id: raisedByMemberId,
+      workspaceId,
+      isActive: true,
+    },
+    select: { id: true },
+  });
+  invariant(member, 400, "INVALID_INPUT", "Raised-by member must be an active member of this workspace.");
+  return member.id;
+}
 
 export async function listTensions(actor: AppActor, workspaceId: string, opts?: { take?: number; skip?: number; archiveFilter?: ArchiveFilter }) {
   const take = opts?.take ?? 20;
@@ -33,6 +49,16 @@ export async function listTensions(actor: AppActor, workspaceId: string, opts?: 
             },
           },
         },
+        raisedByMember: {
+          include: {
+            user: {
+              select: {
+                displayName: true,
+                email: true,
+              },
+            },
+          },
+        },
         upvotes: true,
         proposal: { select: { id: true, title: true } },
       },
@@ -51,6 +77,7 @@ export async function createTension(actor: AppActor, params: {
   bodyMd?: string | null;
   circleId?: string | null;
   assigneeMemberId?: string | null;
+  raisedByMemberId?: string | null;
   proposalId?: string | null;
   isPrivate?: boolean;
   meetingId?: string | null;
@@ -65,6 +92,7 @@ export async function createTension(actor: AppActor, params: {
   const authorUserId = await actorUserIdForWorkspace(actor, params.workspaceId);
 
   return prisma.$transaction(async (tx) => {
+    const raisedByMemberId = await resolveRaisedByMemberId(tx, params.workspaceId, params.raisedByMemberId);
     const tension = await tx.tension.create({
       data: {
         workspaceId: params.workspaceId,
@@ -73,6 +101,7 @@ export async function createTension(actor: AppActor, params: {
         bodyMd: params.bodyMd?.trim() || null,
         circleId: params.circleId || null,
         assigneeMemberId: params.assigneeMemberId || null,
+        raisedByMemberId,
         proposalId: params.proposalId || null,
         status: "DRAFT",
         isPrivate: params.isPrivate ?? true,
@@ -118,6 +147,7 @@ export async function updateTension(actor: AppActor, params: {
   resolvedVia?: string | null;
   circleId?: string | null;
   assigneeMemberId?: string | null;
+  raisedByMemberId?: string | null;
   priority?: number;
   isPrivate?: boolean;
 }) {
@@ -157,6 +187,9 @@ export async function updateTension(actor: AppActor, params: {
     }
     if (params.circleId !== undefined) data.circleId = params.circleId || null;
     if (params.assigneeMemberId !== undefined) data.assigneeMemberId = params.assigneeMemberId || null;
+    if (params.raisedByMemberId !== undefined) {
+      data.raisedByMemberId = await resolveRaisedByMemberId(tx, params.workspaceId, params.raisedByMemberId);
+    }
     if (params.priority !== undefined) data.priority = params.priority;
     if (params.isPrivate !== undefined) data.isPrivate = params.isPrivate;
 
@@ -303,6 +336,7 @@ export async function getTension(actor: AppActor, params: { workspaceId: string;
     include: {
       author: { select: { id: true, displayName: true, email: true } },
       circle: { select: { id: true, name: true } },
+      raisedByMember: { include: { user: { select: { displayName: true, email: true } } } },
       proposal: { select: { id: true, title: true, status: true } },
       upvotes: true,
     },

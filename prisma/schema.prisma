@@ -596,6 +596,7 @@ model Member {
   inviteRequestsDecided       MemberInviteRequest[]    @relation("MemberInviteRequestDecider")
   assignedActions             Action[]                 @relation("ActionAssignee")
   assignedTensions            Tension[]                @relation("TensionAssignee")
+  raisedTensions              Tension[]                @relation("TensionRaisedBy")
   approvalDecisions           ApprovalDecision[]
   ownedBrainArticles          BrainArticle[]
   authoredBrainSources        BrainSource[]
@@ -758,6 +759,7 @@ model Tension {
   circleId         String?
   authorUserId     String
   assigneeMemberId String?
+  raisedByMemberId String?
   title            String
   bodyMd           String?
   status           TensionStatus @default(DRAFT)
@@ -780,11 +782,13 @@ model Tension {
   circle         Circle?         @relation(fields: [circleId], references: [id], onDelete: SetNull)
   author         User            @relation("TensionAuthor", fields: [authorUserId], references: [id], onDelete: Restrict)
   assigneeMember Member?         @relation("TensionAssignee", fields: [assigneeMemberId], references: [id], onDelete: SetNull)
+  raisedByMember Member?         @relation("TensionRaisedBy", fields: [raisedByMemberId], references: [id], onDelete: SetNull)
   meeting        Meeting?        @relation(fields: [meetingId], references: [id], onDelete: SetNull)
   upvotes        TensionUpvote[]
 
   @@index([workspaceId, status])
   @@index([workspaceId, archivedAt])
+  @@index([raisedByMemberId])
 }
 
 model Proposal {
