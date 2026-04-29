@@ -265,11 +265,6 @@ export default async function SettingsPage({
                             defaultValue={typeof slackSettings.defaultAgendaChannelId === "string" ? slackSettings.defaultAgendaChannelId : ""}
                           />
                         </label>
-                        {typeof slackSettings.defaultAgendaChannelName === "string" && slackSettings.defaultAgendaChannelName ? (
-                          <p className="nr-item-meta" style={{ fontSize: "0.82rem", margin: 0 }}>
-                            Current agenda channel: #{slackSettings.defaultAgendaChannelName}
-                          </p>
-                        ) : null}
                         <label style={{ fontSize: "0.85rem" }}>
                           Agenda timezone
                           <input
