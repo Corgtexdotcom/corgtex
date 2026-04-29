@@ -289,6 +289,7 @@ model Workspace {
   ledgerEntries                 LedgerEntry[]
   spendRequests                 SpendRequest[]
   meetings                      Meeting[]
+  meetingSeries                 MeetingSeries[]
   documents                     Document[]
   policyCorpus                  PolicyCorpus[]
   constitutions                 Constitution[]
@@ -1101,30 +1102,71 @@ model SpendComment {
   @@index([spendId, createdAt])
 }
 
+enum MeetingStatus {
+  SCHEDULED
+  COMPLETED
+}
+
+model MeetingSeries {
+  id                     String    @id @default(uuid())
+  workspaceId            String
+  title                  String
+  description            String?   @db.Text
+  source                 String    @default("internal")
+  externalId             String?   @unique
+  recurrenceRule         String?
+  startsAt               DateTime
+  defaultDurationMinutes Int       @default(60)
+  participantIds         String[]  @default([])
+  participantEmails      String[]  @default([])
+  archivedAt             DateTime?
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  meetings  Meeting[]
+
+  @@index([workspaceId, archivedAt])
+}
+
 model Meeting {
-  id               String    @id @default(uuid())
-  workspaceId      String
-  title            String?
-  source           String
-  externalId       String?   @unique
-  recordedAt       DateTime
-  transcript       String?   @db.Text
-  summaryMd        String?   @db.Text
-  participantIds   String[]
-  decisionsJson    Json?
-  aiProcessedAt    DateTime?
-  archivedAt       DateTime?
-  archivedByUserId String?
-  archiveReason    String?
-  createdAt        DateTime  @default(now())
-  updatedAt        DateTime  @updatedAt
+  id                 String        @id @default(uuid())
+  workspaceId        String
+  seriesId           String?
+  status             MeetingStatus @default(COMPLETED)
+  title              String?
+  source             String
+  externalId         String?       @unique
+  calendarExternalId String?
+  recordedAt         DateTime
+  scheduledEndAt     DateTime?
+  transcript         String?       @db.Text
+  summaryMd          String?       @db.Text
+  participantIds     String[]
+  participantEmails  String[]      @default([])
+  decisionsJson      Json?
+  agendaJson         Json?
+  agendaChannelId    String?
+  agendaMessageTs    String?
+  agendaPostedAt     DateTime?
+  summaryPostedAt    DateTime?
+  aiProcessedAt      DateTime?
+  archivedAt         DateTime?
+  archivedByUserId   String?
+  archiveReason      String?
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
 
   workspace Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  series    MeetingSeries?   @relation(fields: [seriesId], references: [id], onDelete: SetNull)
   proposals Proposal[]
   tensions  Tension[]
   insights  MeetingInsight[]
 
   @@index([workspaceId, recordedAt])
+  @@index([workspaceId, status, recordedAt])
+  @@index([workspaceId, calendarExternalId])
+  @@index([seriesId, recordedAt])
   @@index([workspaceId, archivedAt])
 }
 

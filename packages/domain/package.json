@@ -5,7 +5,8 @@
   "type": "module",
   "dependencies": {
     "@corgtex/shared": "0.1.0",
-    "@corgtex/storage": "0.1.0"
+    "@corgtex/storage": "0.1.0",
+    "ical.js": "^2.2.1"
   },
   "exports": {
     ".": "./src/index.ts"

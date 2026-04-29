@@ -93,7 +93,7 @@ export default async function WorkspaceDashboard({
       : Promise.resolve(0),
     listAuditLogs(actor, workspaceId, { take: 10 }),
     listArticles(actor, { workspaceId, take: 50 }),
-    listMeetings(workspaceId),
+    listMeetings(workspaceId, { status: "COMPLETED" }),
     prisma.knowledgeChunk.count({ where: { workspaceId } }),
     prisma.workspace.findUnique({ where: { id: workspaceId }, select: { slug: true, name: true } }),
     Promise.all([

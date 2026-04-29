@@ -9,6 +9,7 @@ const TRIAGE_EVENT_TYPES = new Set([
   "proposal.submitted",
   "spend.submitted",
   "meeting.created",
+  "meeting.transcript-uploaded",
   "action.created",
   "tension.created",
   "advice-process.initiated",
@@ -24,6 +25,7 @@ const KNOWLEDGE_PULSE_EVENT_TYPES = new Set([
   "spend.submitted",
   "spend.paid",
   "meeting.created",
+  "meeting.transcript-uploaded",
   "approval.finalized",
   "advice-process.advice-recorded",
 ]);
@@ -151,8 +153,9 @@ export function deriveJobsForEvent(event: {
     }
   }
 
-  if (event.type === "meeting.created") {
-    const payload = event.payload as { meetingId?: string };
+  if (event.type === "meeting.created" || event.type === "meeting.transcript-uploaded") {
+    const payload = event.payload as { meetingId?: string; status?: string; hasTranscript?: boolean };
+    const shouldRunMeetingAgents = payload.status !== "SCHEDULED" && payload.hasTranscript !== false;
     if (payload.meetingId && event.workspaceId) {
       jobs.push({
         workspaceId: event.workspaceId,
@@ -163,6 +166,8 @@ export function deriveJobsForEvent(event: {
         },
         dedupeKey: `${event.id}:meeting-knowledge-sync`,
       });
+    }
+    if (payload.meetingId && event.workspaceId && shouldRunMeetingAgents) {
       jobs.push({
         workspaceId: event.workspaceId,
         eventId: event.id,
@@ -175,12 +180,32 @@ export function deriveJobsForEvent(event: {
       jobs.push({
         workspaceId: event.workspaceId,
         eventId: event.id,
-        type: "agent.action-extraction",
+        type: "meeting.insights.extract",
         payload: {
           meetingId: payload.meetingId,
         },
         dependsOnDedupeKey: `${event.id}:meeting-summary`,
+        dedupeKey: `${event.id}:meeting-insights-extract`,
+      });
+      jobs.push({
+        workspaceId: event.workspaceId,
+        eventId: event.id,
+        type: "agent.action-extraction",
+        payload: {
+          meetingId: payload.meetingId,
+        },
+        dependsOnDedupeKey: `${event.id}:meeting-insights-extract`,
         dedupeKey: `${event.id}:action-extraction`,
+      });
+      jobs.push({
+        workspaceId: event.workspaceId,
+        eventId: event.id,
+        type: "meeting.summary.post",
+        payload: {
+          meetingId: payload.meetingId,
+        },
+        dependsOnDedupeKey: `${event.id}:action-extraction`,
+        dedupeKey: `${event.id}:meeting-summary-post`,
       });
     }
   }
@@ -344,4 +369,3 @@ export function deriveJobsForEvent(event: {
 
   return jobs;
 }
-

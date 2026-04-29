@@ -24,6 +24,7 @@ import {
   deleteWebhookEndpointAction,
   rotateWebhookSecretAction,
   disconnectCommunicationInstallationAction,
+  updateSlackAgendaSettingsAction,
 } from "../actions";
 import { CorgtexConnectorManager } from "./CorgtexConnectorManager";
 import { MembersTable } from "./MembersTable";
@@ -67,6 +68,9 @@ export default async function SettingsPage({
     listCommunicationInstallations(actor, workspaceId).catch(() => []),
   ]);
   const slackInstallation = communicationInstallations.find((installation) => installation.provider === "SLACK" && installation.status === "ACTIVE");
+  const slackSettings = slackInstallation?.settings && typeof slackInstallation.settings === "object" && !Array.isArray(slackInstallation.settings)
+    ? slackInstallation.settings as Record<string, unknown>
+    : {};
 
   // Lazy-load members only for the members tab to avoid N+1 and failure propagation
   let members: Awaited<ReturnType<typeof listMembersEnriched>> = [];
@@ -251,6 +255,26 @@ export default async function SettingsPage({
                       <p className="nr-item-meta" style={{ fontSize: "0.82rem", margin: 0 }}>
                         Granted scopes: {slackInstallation.scopes.length > 0 ? slackInstallation.scopes.join(", ") : "none recorded"}
                       </p>
+                      <form action={updateSlackAgendaSettingsAction} className="stack" style={{ gap: 8, paddingTop: 8 }}>
+                        <input type="hidden" name="workspaceId" value={workspaceId} />
+                        <label style={{ fontSize: "0.85rem" }}>
+                          Default agenda channel ID
+                          <input
+                            name="defaultAgendaChannelId"
+                            placeholder="C0123456789"
+                            defaultValue={typeof slackSettings.defaultAgendaChannelId === "string" ? slackSettings.defaultAgendaChannelId : ""}
+                          />
+                        </label>
+                        <label style={{ fontSize: "0.85rem" }}>
+                          Agenda timezone
+                          <input
+                            name="agendaTimezone"
+                            placeholder="UTC"
+                            defaultValue={typeof slackSettings.agendaTimezone === "string" ? slackSettings.agendaTimezone : "UTC"}
+                          />
+                        </label>
+                        <button type="submit" className="secondary small">Save agenda posting</button>
+                      </form>
                       <form action={disconnectCommunicationInstallationAction}>
                         <input type="hidden" name="workspaceId" value={workspaceId} />
                         <input type="hidden" name="installationId" value={slackInstallation.id} />
