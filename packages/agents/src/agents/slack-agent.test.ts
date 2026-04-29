@@ -38,6 +38,9 @@ const {
     user: {
       findUnique: vi.fn(),
     },
+    member: {
+      findUnique: vi.fn(),
+    },
     communicationExternalUser: {
       findUnique: vi.fn(),
       findMany: vi.fn(),
@@ -142,6 +145,10 @@ describe("runSlackAgent", () => {
       displayName: "User",
       globalRole: "USER",
     });
+    prismaMock.member.findUnique.mockResolvedValue({
+      id: "actor-member-1",
+      isActive: true,
+    });
     prismaMock.communicationExternalUser.findUnique.mockResolvedValue({
       rawProfile: { tz: "America/Los_Angeles" },
     });
@@ -171,6 +178,9 @@ describe("runSlackAgent", () => {
     answerKnowledgeQuestionMock.mockResolvedValue({
       answer: "The workspace handbook says to use advice routing for proposal risks.",
       citations: [],
+    });
+    chatMock.mockResolvedValue({
+      content: "The workspace handbook says to use advice routing for proposal risks.",
     });
   });
 
@@ -319,7 +329,7 @@ describe("runSlackAgent", () => {
     await runSlackAgent({ ...basePayload(), prompt: "delete all old actions" });
 
     expect(createWorkItemMock).not.toHaveBeenCalled();
-    expect(deliverSlackAgentResponseMock.mock.calls[0][1].text).toContain("outside Slack-agent v1");
+    expect(deliverSlackAgentResponseMock.mock.calls[0][1].text).toContain("I cannot do that from Slack");
   });
 
   it("answers workspace questions from indexed knowledge", async () => {
@@ -339,7 +349,105 @@ describe("runSlackAgent", () => {
       workspaceId: "workspace-1",
       question: "What does advice routing do?",
     }));
+    expect(chatMock).toHaveBeenCalledWith(expect.objectContaining({
+      workspaceId: "workspace-1",
+      taskType: "AGENT",
+    }));
     expect(createWorkItemMock).not.toHaveBeenCalled();
     expect(deliverSlackAgentResponseMock.mock.calls[0][1].text).toContain("workspace handbook");
+    expect(deliverSlackAgentResponseMock.mock.calls[0][1].text).not.toContain("Done:");
+  });
+
+  it("answers read-only member list requests conversationally", async () => {
+    extractMock.mockResolvedValueOnce({
+      output: {
+        intent: "unsupported",
+        confidence: 0.2,
+        title: "List members",
+        bodyMd: "list all the members",
+      },
+    });
+    listMembersMock.mockResolvedValueOnce([
+      {
+        id: "member-1",
+        userId: "user-1",
+        role: "ADMIN",
+        user: {
+          email: "user@example.test",
+          displayName: "User",
+        },
+      },
+      {
+        id: "member-2",
+        userId: "user-2",
+        role: "CONTRIBUTOR",
+        user: {
+          email: "milan@example.test",
+          displayName: "Milan",
+        },
+      },
+    ]);
+
+    const { runSlackAgent } = await import("./slack-agent");
+    await runSlackAgent({ ...basePayload(), prompt: "list all the members" });
+
+    expect(createWorkItemMock).not.toHaveBeenCalled();
+    expect(answerKnowledgeQuestionMock).not.toHaveBeenCalled();
+    expect(chatMock).not.toHaveBeenCalled();
+    expect(deliverSlackAgentResponseMock.mock.calls[0][1].text).toContain("I found 2 active members");
+    expect(deliverSlackAgentResponseMock.mock.calls[0][1].text).toContain("Milan");
+    expect(deliverSlackAgentResponseMock.mock.calls[0][1].text).not.toContain("Done:");
+  });
+
+  it("answers account lookup requests for the linked Slack user", async () => {
+    extractMock.mockResolvedValueOnce({
+      output: {
+        intent: "unsupported",
+        confidence: 0.1,
+        title: "Find account",
+        bodyMd: "can you find my account now",
+      },
+    });
+    prismaMock.communicationExternalUser.findMany.mockResolvedValueOnce([
+      {
+        externalUserId: "U1",
+        userId: "user-1",
+        memberId: "member-1",
+        email: "user@example.test",
+        displayName: "User",
+      },
+    ]);
+    listMembersMock.mockResolvedValueOnce([
+      {
+        id: "member-1",
+        userId: "user-1",
+        role: "ADMIN",
+        user: {
+          email: "user@example.test",
+          displayName: "User",
+        },
+      },
+    ]);
+
+    const { runSlackAgent } = await import("./slack-agent");
+    await runSlackAgent({ ...basePayload(), prompt: "can you find my account now" });
+
+    expect(createWorkItemMock).not.toHaveBeenCalled();
+    expect(deliverSlackAgentResponseMock.mock.calls[0][1].text).toContain("I found your Corgtex account");
+    expect(deliverSlackAgentResponseMock.mock.calls[0][1].text).toContain("user@example.test");
+    expect(deliverSlackAgentResponseMock.mock.calls[0][1].text).not.toContain("Done:");
+  });
+
+  it("does not expose workspace data when the Slack user is not an active member", async () => {
+    prismaMock.member.findUnique.mockResolvedValueOnce(null);
+
+    const { runSlackAgent } = await import("./slack-agent");
+    await runSlackAgent({ ...basePayload(), prompt: "list all the members" });
+
+    expect(extractMock).not.toHaveBeenCalled();
+    expect(listMembersMock).not.toHaveBeenCalled();
+    expect(createWorkItemMock).not.toHaveBeenCalled();
+    expect(deliverSlackAgentResponseMock.mock.calls[0][1].text).toContain("could not match your Slack user");
+    expect(deliverSlackAgentResponseMock.mock.calls[0][1].text).not.toContain("Milan");
   });
 });
