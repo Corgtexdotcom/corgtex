@@ -9,7 +9,7 @@ export type HumanActor = {
 
 export type AgentActor = {
   kind: "agent";
-  authProvider: "bootstrap" | "credential";
+  authProvider: "bootstrap" | "credential" | "control-plane";
   label: string;
   credentialId?: string;
   workspaceIds?: string[];

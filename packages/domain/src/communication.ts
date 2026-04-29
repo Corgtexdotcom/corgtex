@@ -51,8 +51,11 @@ const SLACK_REQUIRED_SCOPES = [
   "reactions:read",
 ] as const;
 
-const SLACK_BROAD_INGESTION_SCOPES = ["channels:history"] as const;
+const SLACK_BROAD_INGESTION_SCOPES = ["channels:history", "channels:join"] as const;
 const SLACK_RAW_RETENTION_DAYS = 30;
+const SLACK_PUBLIC_ARCHIVE_RETENTION_DAYS = 3650;
+const SLACK_PUBLIC_ARCHIVE_LOOKBACK_DAYS = 120;
+const SLACK_PUBLIC_ARCHIVE_PAGE_LIMIT = 200;
 const INACTIVE_SLACK_INSTALLATION_ERROR = "Slack installation is not active.";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -98,8 +101,38 @@ function slackTimestampToDate(ts: string | null) {
   return new Date(seconds * 1000 + (Number.isFinite(millis) ? millis : 0));
 }
 
-function rawRetentionDate() {
-  return new Date(Date.now() + SLACK_RAW_RETENTION_DAYS * 24 * 60 * 60 * 1000);
+function slackArchiveSettings(grantedScopes: string[]) {
+  const broadPublicIngestion = grantedScopes.includes("channels:history");
+  return {
+    broadPublicIngestion,
+    autoJoinPublicChannels: broadPublicIngestion && grantedScopes.includes("channels:join"),
+    rawRetentionDays: broadPublicIngestion ? SLACK_PUBLIC_ARCHIVE_RETENTION_DAYS : SLACK_RAW_RETENTION_DAYS,
+    label: broadPublicIngestion ? "Public Channel Archive" : "Enhanced Org Briefing",
+  };
+}
+
+function rawRetentionDays(settings?: Prisma.JsonValue | null) {
+  if (isRecord(settings) && typeof settings.rawRetentionDays === "number" && Number.isFinite(settings.rawRetentionDays)) {
+    return Math.max(1, Math.floor(settings.rawRetentionDays));
+  }
+  return SLACK_RAW_RETENTION_DAYS;
+}
+
+function rawRetentionDate(days = SLACK_RAW_RETENTION_DAYS) {
+  return new Date(Date.now() + days * 24 * 60 * 60 * 1000);
+}
+
+function unixSecondsAgo(days: number) {
+  if (days <= 0) return undefined;
+  return String(Math.floor((Date.now() - days * 24 * 60 * 60 * 1000) / 1000));
+}
+
+function shouldSkipSlackArchiveMessage(message: Record<string, unknown>) {
+  const subtype = asString(message.subtype);
+  return Boolean(message.hidden)
+    || subtype === "message_deleted"
+    || subtype === "bot_message"
+    || Boolean(message.bot_id);
 }
 
 function compactJsonObject<T extends Record<string, unknown>>(value: T) {
@@ -269,11 +302,7 @@ export async function saveSlackInstallation(actor: AppActor, params: {
       installedAt: new Date(),
       disconnectedAt: null,
       lastError: null,
-      settings: {
-        broadPublicIngestion: grantedScopes.includes("channels:history"),
-        rawRetentionDays: SLACK_RAW_RETENTION_DAYS,
-        label: "Enhanced Org Briefing",
-      },
+      settings: slackArchiveSettings(grantedScopes),
     },
     create: {
       workspaceId: params.workspaceId,
@@ -287,11 +316,7 @@ export async function saveSlackInstallation(actor: AppActor, params: {
       scopes: grantedScopes,
       optionalScopes,
       installedByUserId: actor.kind === "user" ? actor.user.id : null,
-      settings: {
-        broadPublicIngestion: grantedScopes.includes("channels:history"),
-        rawRetentionDays: SLACK_RAW_RETENTION_DAYS,
-        label: "Enhanced Org Briefing",
-      },
+      settings: slackArchiveSettings(grantedScopes),
     },
   });
 }
@@ -460,7 +485,7 @@ async function ensureSlackChannel(installation: { id: string; workspaceId: strin
   });
 }
 
-async function ingestSlackMessage(installation: { id: string; workspaceId: string; provider: CommunicationProvider }, event: Record<string, unknown>) {
+async function ingestSlackMessage(installation: { id: string; workspaceId: string; provider: CommunicationProvider; settings?: Prisma.JsonValue | null }, event: Record<string, unknown>) {
   const externalChannelId = asString(event.channel);
   const ts = asString(event.ts) || asString(event.event_ts);
   if (!externalChannelId || !ts) return { skipped: true, reason: "missing_channel_or_ts" };
@@ -479,6 +504,7 @@ async function ingestSlackMessage(installation: { id: string; workspaceId: strin
   }
 
   const text = asString(event.text);
+  const expiresRawAt = rawRetentionDate(rawRetentionDays(installation.settings));
   return prisma.communicationMessage.upsert({
     where: {
       installationId_externalChannelId_externalMessageId: {
@@ -493,7 +519,7 @@ async function ingestSlackMessage(installation: { id: string; workspaceId: strin
       text: text || null,
       raw: toInputJson(event),
       messageTs: slackTimestampToDate(ts),
-      expiresRawAt: rawRetentionDate(),
+      expiresRawAt,
       isBot,
       isHidden: hidden,
       isDeleted: deleted,
@@ -509,7 +535,7 @@ async function ingestSlackMessage(installation: { id: string; workspaceId: strin
       text: text || null,
       raw: toInputJson(event),
       messageTs: slackTimestampToDate(ts),
-      expiresRawAt: rawRetentionDate(),
+      expiresRawAt,
       isBot,
       isHidden: hidden,
       isDeleted: deleted,
@@ -521,6 +547,7 @@ async function persistSlackSourceMessage(installation: {
   id: string;
   workspaceId: string;
   provider: CommunicationProvider;
+  settings?: Prisma.JsonValue | null;
 }, params: {
   channelId: string;
   messageTs: string;
@@ -535,6 +562,7 @@ async function persistSlackSourceMessage(installation: {
     channel: params.channelId,
   });
 
+  const expiresRawAt = rawRetentionDate(rawRetentionDays(installation.settings));
   return prisma.communicationMessage.upsert({
     where: {
       installationId_externalChannelId_externalMessageId: {
@@ -549,7 +577,7 @@ async function persistSlackSourceMessage(installation: {
       text: params.text || null,
       raw: toInputJson(params.raw ?? {}),
       messageTs: slackTimestampToDate(params.messageTs),
-      expiresRawAt: rawRetentionDate(),
+      expiresRawAt,
       isBot: false,
       isHidden: false,
       isDeleted: false,
@@ -565,13 +593,277 @@ async function persistSlackSourceMessage(installation: {
       text: params.text || null,
       raw: toInputJson(params.raw ?? {}),
       messageTs: slackTimestampToDate(params.messageTs),
-      expiresRawAt: rawRetentionDate(),
+      expiresRawAt,
       isBot: false,
       isHidden: false,
       isDeleted: false,
     },
     select: { id: true },
   });
+}
+
+type SlackArchiveInstallation = {
+  id: string;
+  workspaceId: string;
+  provider: CommunicationProvider;
+  botTokenEnc: string | null;
+  scopes: string[];
+  settings?: Prisma.JsonValue | null;
+};
+
+export type SlackPublicArchiveSyncSummary = {
+  workspaceId: string;
+  installationId: string;
+  channelsSeen: number;
+  channelsJoined: number;
+  channelsArchived: number;
+  channelsSkippedNotMember: number;
+  channelsWithReadErrors: number;
+  messagesScanned: number;
+  messagesUpserted: number;
+  cappedChannels: number;
+  lookbackDays: number;
+  retentionDays: number;
+};
+
+async function upsertSlackArchiveMessage(params: {
+  installation: SlackArchiveInstallation;
+  channelId: string;
+  message: Record<string, unknown>;
+  expiresRawAt: Date;
+}) {
+  const ts = asString(params.message.ts);
+  if (!ts || shouldSkipSlackArchiveMessage(params.message)) {
+    return false;
+  }
+
+  await prisma.communicationMessage.upsert({
+    where: {
+      installationId_externalChannelId_externalMessageId: {
+        installationId: params.installation.id,
+        externalChannelId: params.channelId,
+        externalMessageId: ts,
+      },
+    },
+    update: {
+      externalUserId: asString(params.message.user) || null,
+      threadExternalId: asString(params.message.thread_ts) || null,
+      text: asString(params.message.text) || null,
+      raw: toInputJson(params.message),
+      messageTs: slackTimestampToDate(ts),
+      expiresRawAt: params.expiresRawAt,
+      isBot: false,
+      isHidden: false,
+      isDeleted: false,
+    },
+    create: {
+      installationId: params.installation.id,
+      workspaceId: params.installation.workspaceId,
+      provider: "SLACK",
+      externalMessageId: ts,
+      externalChannelId: params.channelId,
+      externalUserId: asString(params.message.user) || null,
+      threadExternalId: asString(params.message.thread_ts) || null,
+      text: asString(params.message.text) || null,
+      raw: toInputJson(params.message),
+      messageTs: slackTimestampToDate(ts),
+      expiresRawAt: params.expiresRawAt,
+      isBot: false,
+      isHidden: false,
+      isDeleted: false,
+    },
+  });
+
+  return true;
+}
+
+async function syncSlackArchiveChannelHistory(params: {
+  client: WebClient;
+  installation: SlackArchiveInstallation;
+  channelId: string;
+  oldest?: string;
+  expiresRawAt: Date;
+  maxMessagesPerChannel: number;
+}) {
+  let cursor: string | undefined;
+  let scanned = 0;
+  let upserted = 0;
+
+  do {
+    const response = await params.client.conversations.history({
+      channel: params.channelId,
+      cursor,
+      limit: SLACK_PUBLIC_ARCHIVE_PAGE_LIMIT,
+      ...(params.oldest ? { oldest: params.oldest } : {}),
+    });
+    const messages = Array.isArray(response.messages)
+      ? response.messages.filter((message): message is Record<string, unknown> => isRecord(message))
+      : [];
+
+    for (const message of messages) {
+      if (params.maxMessagesPerChannel > 0 && scanned >= params.maxMessagesPerChannel) {
+        return { scanned, upserted, capped: true };
+      }
+      scanned += 1;
+      const persisted = await upsertSlackArchiveMessage({
+        installation: params.installation,
+        channelId: params.channelId,
+        message,
+        expiresRawAt: params.expiresRawAt,
+      });
+      if (persisted) upserted += 1;
+    }
+    cursor = response.response_metadata?.next_cursor || undefined;
+  } while (cursor);
+
+  return { scanned, upserted, capped: false };
+}
+
+export async function syncSlackPublicArchiveForWorkspace(workspaceId: string, options: {
+  lookbackDays?: number;
+  retentionDays?: number;
+  maxMessagesPerChannel?: number;
+} = {}): Promise<SlackPublicArchiveSyncSummary> {
+  const installation = await prisma.communicationInstallation.findFirst({
+    where: {
+      workspaceId,
+      provider: "SLACK",
+      status: "ACTIVE",
+    },
+    orderBy: { installedAt: "desc" },
+  });
+  invariant(installation, 404, "SLACK_NOT_CONNECTED", "Active Slack installation was not found.");
+  invariant(installation.scopes.includes("channels:history"), 400, "SLACK_SCOPE_MISSING", "Slack installation is missing channels:history.");
+
+  const lookbackDays = Math.max(0, Math.floor(options.lookbackDays ?? SLACK_PUBLIC_ARCHIVE_LOOKBACK_DAYS));
+  const retentionDays = Math.max(1, Math.floor(options.retentionDays ?? rawRetentionDays(installation.settings)));
+  const maxMessagesPerChannel = Math.max(0, Math.floor(options.maxMessagesPerChannel ?? 0));
+  const autoJoinPublicChannels = installation.scopes.includes("channels:join");
+  const client = slackClient(encryptedBotToken(installation));
+  const oldest = unixSecondsAgo(lookbackDays);
+  const expiresRawAt = rawRetentionDate(retentionDays);
+  const archiveInstallation: SlackArchiveInstallation = installation;
+
+  const summary: SlackPublicArchiveSyncSummary = {
+    workspaceId,
+    installationId: installation.id,
+    channelsSeen: 0,
+    channelsJoined: 0,
+    channelsArchived: 0,
+    channelsSkippedNotMember: 0,
+    channelsWithReadErrors: 0,
+    messagesScanned: 0,
+    messagesUpserted: 0,
+    cappedChannels: 0,
+    lookbackDays,
+    retentionDays,
+  };
+
+  let cursor: string | undefined;
+  do {
+    const response = await client.conversations.list({
+      types: "public_channel",
+      exclude_archived: false,
+      limit: SLACK_PUBLIC_ARCHIVE_PAGE_LIMIT,
+      cursor,
+    });
+    const channels = Array.isArray(response.channels)
+      ? response.channels.filter((channel): channel is Record<string, unknown> => isRecord(channel))
+      : [];
+
+    for (const channel of channels) {
+      const channelId = asString(channel.id);
+      if (!channelId) continue;
+      summary.channelsSeen += 1;
+
+      const isArchived = Boolean(channel.is_archived);
+      await prisma.communicationChannel.upsert({
+        where: { installationId_externalChannelId: { installationId: installation.id, externalChannelId: channelId } },
+        update: {
+          name: asString(channel.name) || null,
+          kind: "PUBLIC",
+          isArchived,
+          isIngestEnabled: !isArchived,
+          lastSeenAt: new Date(),
+        },
+        create: {
+          installationId: installation.id,
+          workspaceId: installation.workspaceId,
+          provider: "SLACK",
+          externalChannelId: channelId,
+          name: asString(channel.name) || null,
+          kind: "PUBLIC",
+          isArchived,
+          isIngestEnabled: !isArchived,
+          lastSeenAt: new Date(),
+        },
+      });
+
+      if (isArchived) {
+        summary.channelsArchived += 1;
+        continue;
+      }
+
+      let canRead = Boolean(channel.is_member);
+      if (!canRead && autoJoinPublicChannels) {
+        try {
+          const join = await client.conversations.join({ channel: channelId });
+          if (join.ok) {
+            canRead = true;
+            summary.channelsJoined += 1;
+          }
+        } catch (error) {
+          const slackError = isRecord(error) && isRecord(error.data) ? asString(error.data.error) : "";
+          if (slackError === "method_not_supported_for_channel_type" || slackError === "is_archived") {
+            summary.channelsSkippedNotMember += 1;
+            continue;
+          }
+          throw error;
+        }
+      }
+
+      if (!canRead) {
+        summary.channelsSkippedNotMember += 1;
+        continue;
+      }
+
+      try {
+        const result = await syncSlackArchiveChannelHistory({
+          client,
+          installation: archiveInstallation,
+          channelId,
+          oldest,
+          expiresRawAt,
+          maxMessagesPerChannel,
+        });
+        summary.messagesScanned += result.scanned;
+        summary.messagesUpserted += result.upserted;
+        if (result.capped) summary.cappedChannels += 1;
+      } catch {
+        summary.channelsWithReadErrors += 1;
+      }
+    }
+    cursor = response.response_metadata?.next_cursor || undefined;
+  } while (cursor);
+
+  const settings = isRecord(installation.settings) ? installation.settings : {};
+  await prisma.communicationInstallation.update({
+    where: { id: installation.id },
+    data: {
+      settings: {
+        ...settings,
+        broadPublicIngestion: true,
+        autoJoinPublicChannels,
+        rawRetentionDays: retentionDays,
+        lastPublicArchiveSyncAt: new Date().toISOString(),
+      },
+      lastError: summary.channelsWithReadErrors > 0
+        ? `Public archive sync had ${summary.channelsWithReadErrors} channel read errors.`
+        : null,
+    },
+  });
+
+  return summary;
 }
 
 function slackAgentDedupeKey(payload: SlackAgentJobPayload) {
@@ -963,6 +1255,7 @@ export async function handleSlackInteraction(payload: Record<string, unknown>) {
     const bodyMd = asString(values.body?.value?.value);
     const metadataChannel = asString(metadata.channel);
     const metadataMessageTs = asString(metadata.messageTs);
+    const expiresRawAt = rawRetentionDate(rawRetentionDays(installation.settings));
     const sourceMessage = metadataChannel && metadataMessageTs
       ? await prisma.communicationMessage.upsert({
         where: {
@@ -976,7 +1269,7 @@ export async function handleSlackInteraction(payload: Record<string, unknown>) {
           externalUserId: asString(metadata.externalUserId) || externalUserId || null,
           text: asString(metadata.messageText) || null,
           messageTs: slackTimestampToDate(metadataMessageTs),
-          expiresRawAt: rawRetentionDate(),
+          expiresRawAt,
         },
         create: {
           installationId: installation.id,
@@ -987,7 +1280,7 @@ export async function handleSlackInteraction(payload: Record<string, unknown>) {
           externalUserId: asString(metadata.externalUserId) || externalUserId || null,
           text: asString(metadata.messageText) || null,
           messageTs: slackTimestampToDate(metadataMessageTs),
-          expiresRawAt: rawRetentionDate(),
+          expiresRawAt,
           raw: toInputJson({ explicitCapture: true }),
         },
         select: { id: true },

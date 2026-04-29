@@ -14,6 +14,19 @@ enum GlobalRole {
   OPERATOR
 }
 
+enum ControlPlaneInstanceRole {
+  SUPPORT_VIEWER
+  SUPPORT_ADMIN
+  CUSTOMER_IT_ADMIN
+}
+
+enum SupportOperationStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
 enum MemberRole {
   CONTRIBUTOR
   FACILITATOR
@@ -499,29 +512,29 @@ model CommunicationEntityLink {
 }
 
 model User {
-  id                      String                      @id @default(uuid())
-  email                   String                      @unique
+  id                      String                       @id @default(uuid())
+  email                   String                       @unique
   displayName             String?
-  bio                     String?                     @db.Text
-  avatarUrl               String?                     @db.Text
+  bio                     String?                      @db.Text
+  avatarUrl               String?                      @db.Text
   passwordHash            String
-  globalRole              GlobalRole                  @default(USER)
-  createdAt               DateTime                    @default(now())
-  updatedAt               DateTime                    @updatedAt
+  globalRole              GlobalRole                   @default(USER)
+  createdAt               DateTime                     @default(now())
+  updatedAt               DateTime                     @updatedAt
   sessions                Session[]
   memberships             Member[]
-  authoredActions         Action[]                    @relation("ActionAuthor")
-  authoredTensions        Tension[]                   @relation("TensionAuthor")
-  authoredProposals       Proposal[]                  @relation("ProposalAuthor")
-  spendRequests           SpendRequest[]              @relation("SpendRequester")
-  spendComments           SpendComment[]              @relation("SpendCommentAuthor")
+  authoredActions         Action[]                     @relation("ActionAuthor")
+  authoredTensions        Tension[]                    @relation("TensionAuthor")
+  authoredProposals       Proposal[]                   @relation("ProposalAuthor")
+  spendRequests           SpendRequest[]               @relation("SpendRequester")
+  spendComments           SpendComment[]               @relation("SpendCommentAuthor")
   cycleUpdates            CycleUpdate[]
-  allocationsFrom         Allocation[]                @relation("AllocFrom")
-  allocationsTo           Allocation[]                @relation("AllocTo")
+  allocationsFrom         Allocation[]                 @relation("AllocFrom")
+  allocationsTo           Allocation[]                 @relation("AllocTo")
   reactions               ProposalReaction[]
   objections              Objection[]
   tensionUpvotes          TensionUpvote[]
-  agentCreds              AgentCredential[]           @relation("AgentCredentialCreator")
+  agentCreds              AgentCredential[]            @relation("AgentCredentialCreator")
   notifications           Notification[]
   conversations           ConversationSession[]
   oauthConnections        OAuthConnection[]
@@ -530,11 +543,13 @@ model User {
   resetTokens             PasswordResetToken[]
   ssoIdentities           UserSsoIdentity[]
   meetingInsights         MeetingInsight[]
-  createdAgentIdentities  AgentIdentity[]             @relation("AgentIdentityCreator")
+  createdAgentIdentities  AgentIdentity[]              @relation("AgentIdentityCreator")
   deliberationEntries     DeliberationEntry[]
   notificationPrefs       NotificationPreference[]
   crmConversationMessages CrmConversationMessage[]
-  reviewedQualifications  CrmQualification[]          @relation("QualificationReviewer")
+  reviewedQualifications  CrmQualification[]           @relation("QualificationReviewer")
+  controlPlaneAccess      ControlPlaneInstanceAccess[]
+  supportOperations       SupportOperation[]           @relation("SupportOperationActor")
 }
 
 model Session {
@@ -2504,45 +2519,58 @@ model CrmProspectWorkspace {
 }
 
 model InstanceRegistry {
-  id                         String                @id @default(uuid())
-  label                      String
-  url                        String                @unique
-  environment                String                @default("production")
-  notes                      String?
-  customerSlug               String?               @unique
-  region                     String?
-  dataResidency              String?
-  customDomain               String?
-  supportOwnerEmail          String?
-  provisioningStatus         String                @default("draft")
-  bootstrapStatus            String                @default("not_started")
-  releaseVersion             String?
-  releaseImageTag            String?
-  railwayProjectId           String?
-  railwayEnvironmentId       String?
-  railwayWebServiceId        String?
-  railwayWorkerServiceId     String?
-  railwayPostgresServiceId   String?
-  railwayRedisServiceId      String?
-  storageBucketName          String?
-  bootstrapBundleUri         String?
-  bootstrapBundleChecksum    String?
+  id                           String    @id @default(uuid())
+  label                        String
+  url                          String    @unique
+  environment                  String    @default("production")
+  notes                        String?
+  customerSlug                 String?   @unique
+  region                       String?
+  dataResidency                String?
+  customDomain                 String?
+  supportOwnerEmail            String?
+  provisioningStatus           String    @default("draft")
+  bootstrapStatus              String    @default("not_started")
+  releaseVersion               String?
+  releaseImageTag              String?
+  railwayProjectId             String?
+  railwayEnvironmentId         String?
+  railwayWebServiceId          String?
+  railwayWorkerServiceId       String?
+  railwayPostgresServiceId     String?
+  railwayRedisServiceId        String?
+  storageBucketName            String?
+  bootstrapBundleUri           String?
+  bootstrapBundleChecksum      String?
   bootstrapBundleSchemaVersion String?
-  lastProvisioningError      String?
-  lastHealthCheck            DateTime?
-  lastHealthStatus           String?
-  lastHealthError            String?
-  lastWorkerHealthCheck      DateTime?
-  lastWorkerHealthStatus     String?
-  lastReleaseCheck           DateTime?
-  createdAt                  DateTime              @default(now())
-  updatedAt                  DateTime              @updatedAt
+  lastProvisioningError        String?
+  lastHealthCheck              DateTime?
+  lastHealthStatus             String?
+  lastHealthError              String?
+  lastWorkerHealthCheck        DateTime?
+  lastWorkerHealthStatus       String?
+  lastReleaseCheck             DateTime?
+  supportBaseUrl               String?
+  supportMcpUrl                String?
+  supportCredentialEnc         String?
+  supportCredentialLabel       String?
+  supportConnectorStatus       String    @default("not_configured")
+  supportAccessMode            String    @default("broad")
+  supportLastConnectedAt       DateTime?
+  supportLastSyncAt            DateTime?
+  supportLastSyncError         String?
+  supportNotes                 String?
+  createdAt                    DateTime  @default(now())
+  updatedAt                    DateTime  @updatedAt
 
-  events HostedInstanceEvent[]
+  events             HostedInstanceEvent[]
+  controlPlaneAccess ControlPlaneInstanceAccess[]
+  supportOperations  SupportOperation[]
 
   @@index([provisioningStatus])
   @@index([bootstrapStatus])
   @@index([region])
+  @@index([supportConnectorStatus])
 }
 
 model HostedInstanceEvent {
@@ -2556,6 +2584,50 @@ model HostedInstanceEvent {
   instance InstanceRegistry? @relation(fields: [instanceId], references: [id], onDelete: SetNull)
 
   @@index([instanceId, createdAt])
+  @@index([action, createdAt])
+}
+
+model ControlPlaneInstanceAccess {
+  id         String                   @id @default(uuid())
+  instanceId String
+  userId     String
+  role       ControlPlaneInstanceRole @default(SUPPORT_VIEWER)
+  isActive   Boolean                  @default(true)
+  createdAt  DateTime                 @default(now())
+  updatedAt  DateTime                 @updatedAt
+
+  instance InstanceRegistry @relation(fields: [instanceId], references: [id], onDelete: Cascade)
+  user     User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([instanceId, userId])
+  @@index([userId, isActive])
+  @@index([instanceId, isActive])
+}
+
+model SupportOperation {
+  id             String                 @id @default(uuid())
+  instanceId     String?
+  workspaceId    String?
+  actorUserId    String?
+  actorLabel     String                 @default("Corgtex Support")
+  action         String
+  reason         String
+  status         SupportOperationStatus @default(PENDING)
+  inputSummary   Json?
+  resultSummary  Json?
+  error          String?
+  idempotencyKey String?                @unique
+  startedAt      DateTime?
+  completedAt    DateTime?
+  createdAt      DateTime               @default(now())
+  updatedAt      DateTime               @updatedAt
+
+  instance InstanceRegistry? @relation(fields: [instanceId], references: [id], onDelete: SetNull)
+  actor    User?             @relation("SupportOperationActor", fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@index([instanceId, createdAt])
+  @@index([workspaceId, createdAt])
+  @@index([status, createdAt])
   @@index([action, createdAt])
 }
 

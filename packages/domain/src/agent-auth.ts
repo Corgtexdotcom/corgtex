@@ -31,6 +31,7 @@ const CREDENTIAL_PREFIX = "agentc-";
 export const SCOPE_REGISTRY = {
   // ---- core read/chat ----
   "workspace:read":      { label: "Read workspace info",        group: "core",       default: true,  description: "Workspace name, description, and aggregate counts." },
+  "support:write":       { label: "Write support audit",        group: "core",       default: false, description: "Record Corgtex Support audit entries in a customer workspace. Sensitive — support-only." },
   "archive:read":        { label: "Read archived records",      group: "core",       default: false, description: "List archived workspace artifacts for recovery and audit." },
   "archive:write":       { label: "Restore and purge archives", group: "core",       default: false, description: "Restore archived records or purge eligible archived records. Sensitive — opt-in." },
   "brain:read":          { label: "Search the Brain",           group: "core",       default: true,  description: "Semantic search over policies, meeting notes, proposals, and other indexed content." },
@@ -55,6 +56,7 @@ export const SCOPE_REGISTRY = {
   // ---- meetings ----
   "meetings:read":       { label: "Read meetings",              group: "knowledge",  default: true,  description: "List meetings and their summaries." },
   "meetings:write":      { label: "Upload & edit meetings",     group: "knowledge",  default: true,  description: "Create meetings (upload minutes / transcripts) and delete them." },
+  "documents:write":     { label: "Upload documents",           group: "knowledge",  default: false, description: "Upload support-provided documents or data drops into workspace documents. Sensitive — opt-in." },
 
   // ---- brain (writes) ----
   "brain:write":         { label: "Write to the Brain",         group: "knowledge",  default: true,  description: "Create and edit knowledge articles, post discussion comments, resolve threads." },
@@ -72,6 +74,14 @@ export const SCOPE_REGISTRY = {
   // ---- finance ----
   "finance:read":        { label: "Read finance",               group: "finance",    default: true,  description: "List spend requests and ledger accounts." },
   "finance:write":       { label: "Submit spend requests",      group: "finance",    default: false, description: "Create and submit spend requests on behalf of users. Sensitive — opt-in." },
+
+  // ---- support / operations ----
+  "integrations:read":   { label: "Read integrations",          group: "support",    default: false, description: "Inspect installed communication and OAuth integrations for support diagnostics." },
+  "data-sources:read":   { label: "Read data feeds",            group: "support",    default: false, description: "Inspect external data sources and sync health." },
+  "data-sources:write":  { label: "Sync data feeds",            group: "support",    default: false, description: "Trigger external data source sync jobs. Sensitive — opt-in." },
+  "agents:read":         { label: "Read agent runs",            group: "support",    default: false, description: "Inspect agent runs, steps, and failures for support diagnostics." },
+  "runtime:read":        { label: "Read runtime jobs",          group: "support",    default: false, description: "Inspect workflow jobs and runtime failures." },
+  "runtime:write":       { label: "Repair runtime jobs",        group: "support",    default: false, description: "Retry or discard failed workflow jobs. Sensitive — opt-in." },
 } as const satisfies Record<string, { label: string; group: string; default: boolean; description: string }>;
 
 export type AgentScope = keyof typeof SCOPE_REGISTRY;

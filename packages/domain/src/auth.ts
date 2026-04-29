@@ -169,7 +169,9 @@ export async function requireWorkspaceMembership(params: {
       throw new AppError(403, "FORBIDDEN", "Agent is not allowed for this workspace.");
     }
     if (params.allowedRoles && params.allowedRoles.length > 0) {
-      throw new AppError(403, "FORBIDDEN", "Agent cannot perform this human-gated action.");
+      if (!params.actor.scopes?.includes("support:write")) {
+        throw new AppError(403, "FORBIDDEN", "Agent cannot perform this human-gated action.");
+      }
     }
     return null;
   }

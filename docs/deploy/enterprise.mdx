@@ -23,6 +23,12 @@ The control plane records the target release and checks it against `/api/health`
 
 The operator UI and internal automation both use the same global-operator domain layer. Internal API routes under `/api/admin/hosted-instances` can list and provision managed customers, and per-instance routes can trigger health probes, bootstrap, suspension, and release upgrades. These APIs are for the Corgtex Ops deployment only and must not be exposed as customer-facing product APIs.
 
+### Support operations
+
+The Ops deployment also exposes a dedicated `/control-plane` surface for pilot customer support. Corgtex operators can register an encrypted support connector credential for each customer instance, inspect live customer state through that connector, and run support operations such as member invites, integration diagnostics, data-feed syncs, document uploads, agent-run inspection, and failed-job repair.
+
+Support operations are intentionally first-class records. The control plane stores the operator, customer instance, action, reason, redacted input summary, status, and result summary. Mutating support actions also write `support.*` audit entries into the customer instance. Direct infrastructure or database work remains a break-glass path and should be recorded as a break-glass support note rather than treated as the normal support workflow.
+
 ### Private bootstrap bundles
 
 Customer bootstrap data is delivered through a private signed bundle reference. The customer runtime accepts a one-time internal bootstrap request, verifies that the bearer token hashes to the runtime-configured `CORGTEX_INSTANCE_BOOTSTRAP_TOKEN_HASH`, verifies the request signature and bundle SHA-256 checksum, applies the generic stable-client seed logic, and records only status metadata in the database.

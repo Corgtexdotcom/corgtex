@@ -93,6 +93,8 @@ These variables are only needed by the internal Corgtex Ops control plane or by 
 |---|---|
 | `RAILWAY_API_TOKEN` | Railway API token used by the internal control plane to provision customer projects and services. Store only as a deployment secret. |
 | `RAILWAY_GRAPHQL_ENDPOINT` | Optional override for Railway's GraphQL endpoint. Leave unset unless Railway support directs otherwise. |
+| `CONTROL_PLANE_MODE` | Set to `true` for the internal Ops deployment. Operators landing on `/` are sent to `/control-plane`. |
+| `CONTROL_PLANE_AGENT_API_KEY` | Bearer secret for control-plane CLI/MCP automation. Requests use `Authorization: Bearer cp-<value>`. Store only as a deployment secret. |
 | `CORGTEX_INSTANCE_BOOTSTRAP_TOKEN_HASH` | SHA-256 hash of the one-time bearer token accepted by a customer runtime's internal bootstrap endpoint. Prefer this over storing the raw token. |
 | `CORGTEX_INSTANCE_BOOTSTRAP_TOKEN` | Legacy raw-token fallback for bootstrap endpoints. Use only while rotating to `CORGTEX_INSTANCE_BOOTSTRAP_TOKEN_HASH`. |
 | `CORGTEX_RELEASE_VERSION` | Release version reported by `/api/health` for fleet drift checks. |
@@ -108,6 +110,11 @@ The internal control plane exposes operator-only routes for automation:
 | `POST /api/admin/hosted-instances/:instanceId/bootstrap` | Trigger one-time private bundle bootstrap on the customer runtime. |
 | `POST /api/admin/hosted-instances/:instanceId/upgrade` | Update pinned release images and redeploy web and worker services. |
 | `POST /api/admin/hosted-instances/:instanceId/suspend` | Mark a customer instance suspended in the control plane. |
+| `GET /api/control-plane/customers` | List customer instances for operator dashboards or automation. |
+| `POST /api/control-plane/customers/:instanceId/support-connector` | Store or rotate an encrypted support connector credential for a customer instance. |
+| `POST /api/control-plane/customers/:instanceId/snapshot` | Pull a live support snapshot through the customer support connector. |
+| `POST /api/control-plane/customers/:instanceId/operations` | Run an audited support operation through the support connector. |
+| `POST /api/control-plane/mcp` | MCP-style control-plane automation endpoint for agents and CLI support workflows. |
 
 ## Example `.env` File
 
