@@ -26,6 +26,7 @@ import {
   rejectMemberInviteRequest,
   resendMemberAccessLink,
   disconnectCommunicationInstallation,
+  updateSlackAgendaSettings,
 } from "@corgtex/domain";
 import { sendEmail } from "@corgtex/shared";
 
@@ -294,6 +295,20 @@ export async function disconnectCommunicationInstallationAction(formData: FormDa
   const actor = await requirePageActor();
   const workspaceId = asString(formData, "workspaceId");
   await disconnectCommunicationInstallation(actor, asString(formData, "installationId"));
+  refresh(workspaceId);
+}
+
+export async function updateSlackAgendaSettingsAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  await updateSlackAgendaSettings(actor, {
+    workspaceId,
+    defaultAgendaChannelId: asString(formData, "defaultAgendaChannelId"),
+    agendaTimezone: asOptional(formData, "agendaTimezone") || "UTC",
+  });
   refresh(workspaceId);
 }
 

@@ -52,11 +52,32 @@ describe("deriveJobsForEvent", () => {
       },
     });
 
-    expect(jobs).toHaveLength(5);
+    expect(jobs).toHaveLength(7);
     expect(jobs.map((job) => job.type)).toEqual([
       "knowledge.sync.meeting",
       "agent.meeting-summary",
+      "meeting.insights.extract",
       "agent.action-extraction",
+      "meeting.summary.post",
+      "agent.inbox-triage",
+      "knowledge.sync.event",
+    ]);
+  });
+
+  it("does not run meeting agents for scheduled meetings without transcripts", () => {
+    const jobs = deriveJobsForEvent({
+      id: "event-scheduled",
+      type: "meeting.created",
+      workspaceId: "workspace-1",
+      payload: {
+        meetingId: "meeting-1",
+        status: "SCHEDULED",
+        hasTranscript: false,
+      },
+    });
+
+    expect(jobs.map((job) => job.type)).toEqual([
+      "knowledge.sync.meeting",
       "agent.inbox-triage",
       "knowledge.sync.event",
     ]);

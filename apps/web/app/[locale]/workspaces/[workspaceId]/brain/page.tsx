@@ -31,7 +31,7 @@ export default async function BrainPage({
     question.trim()
       ? answerKnowledgeQuestion({ workspaceId, question, limit: 4 })
       : Promise.resolve(null),
-    listMeetings(workspaceId),
+    listMeetings(workspaceId, { status: "COMPLETED" }),
     listDocuments(workspaceId),
   ]);
 

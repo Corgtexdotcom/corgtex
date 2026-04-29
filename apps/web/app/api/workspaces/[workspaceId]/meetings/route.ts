@@ -28,6 +28,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       transcript?: unknown;
       summaryMd?: unknown;
       participantIds?: unknown;
+      participantEmails?: unknown;
     };
 
     const meeting = await createMeeting(actor, {
@@ -39,6 +40,9 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       summaryMd: typeof body.summaryMd === "string" ? body.summaryMd : null,
       participantIds: Array.isArray(body.participantIds)
         ? body.participantIds.map((value) => String(value))
+        : [],
+      participantEmails: Array.isArray(body.participantEmails)
+        ? body.participantEmails.map((value) => String(value))
         : [],
     });
 

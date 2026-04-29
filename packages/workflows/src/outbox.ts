@@ -8,7 +8,17 @@ import { runAgentWorkflowJob } from "./handlers";
 import { syncBrainArticleKnowledge } from "@corgtex/knowledge";
 
 import { runDailyDigest, runSlackAgent } from "@corgtex/agents";
-import { createWebhookDeliveries, deliverWebhook, processSlackInboundEvent, purgeExpiredCommunicationMessages, syncSlackPublicArchiveForWorkspace, type SlackAgentJobPayload } from "@corgtex/domain";
+import {
+  createWebhookDeliveries,
+  deliverWebhook,
+  postMeetingSummaryToAgendaThread,
+  processSlackInboundEvent,
+  purgeExpiredCommunicationMessages,
+  runMeetingAgendaPreparation,
+  runMeetingInsightsExtraction,
+  syncSlackPublicArchiveForWorkspace,
+  type SlackAgentJobPayload,
+} from "@corgtex/domain";
 
 const DEFAULT_BATCH_SIZE = 25;
 const MAX_ATTEMPTS = 5;
@@ -21,6 +31,7 @@ const TRIAGE_EVENT_TYPES = new Set([
   "proposal.submitted",
   "spend.submitted",
   "meeting.created",
+  "meeting.transcript-uploaded",
   "action.created",
   "tension.created",
   "advice-process.initiated",
@@ -36,6 +47,7 @@ const KNOWLEDGE_PULSE_EVENT_TYPES = new Set([
   "spend.submitted",
   "spend.paid",
   "meeting.created",
+  "meeting.transcript-uploaded",
   "approval.finalized",
   "advice-process.advice-recorded",
 ]);
@@ -339,6 +351,32 @@ async function handleJob(job: ClaimedJob) {
 
   if (job.type === "calendar.sync") {
     await handleCalendarSync(job.id, payload as { connectionId?: string }, job.workspaceId);
+    return;
+  }
+
+  if (job.type === "meeting.agenda.prepare") {
+    const targetDateISO = (payload as { targetDateISO?: string }).targetDateISO;
+    await runMeetingAgendaPreparation({
+      workspaceId: job.workspaceId,
+      workflowJobId: job.id,
+      targetDateISO,
+    });
+    return;
+  }
+
+  if (job.type === "meeting.insights.extract") {
+    const meetingId = (payload as { meetingId?: string }).meetingId;
+    if (meetingId) {
+      await runMeetingInsightsExtraction({ workspaceId: job.workspaceId, meetingId });
+    }
+    return;
+  }
+
+  if (job.type === "meeting.summary.post") {
+    const meetingId = (payload as { meetingId?: string }).meetingId;
+    if (meetingId) {
+      await postMeetingSummaryToAgendaThread({ workspaceId: job.workspaceId, meetingId });
+    }
     return;
   }
 

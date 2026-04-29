@@ -42,10 +42,16 @@ describe("webhook delivery integration with outbox", () => {
     });
 
     const summaryJob = jobs.find((j) => j.type === "agent.meeting-summary");
+    const insightJob = jobs.find((j) => j.type === "meeting.insights.extract");
     const extractionJob = jobs.find((j) => j.type === "agent.action-extraction");
+    const postJob = jobs.find((j) => j.type === "meeting.summary.post");
 
     expect(summaryJob).toBeDefined();
+    expect(insightJob).toBeDefined();
     expect(extractionJob).toBeDefined();
-    expect(extractionJob?.dependsOnDedupeKey).toBe(summaryJob?.dedupeKey);
+    expect(postJob).toBeDefined();
+    expect(insightJob?.dependsOnDedupeKey).toBe(summaryJob?.dedupeKey);
+    expect(extractionJob?.dependsOnDedupeKey).toBe(insightJob?.dedupeKey);
+    expect(postJob?.dependsOnDedupeKey).toBe(extractionJob?.dedupeKey);
   });
 });
