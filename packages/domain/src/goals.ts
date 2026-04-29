@@ -5,7 +5,104 @@ import { requireWorkspaceMembership } from "./auth";
 import { recordAudit } from "./audit-trail";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { invariant } from "./errors";
-import type { GoalLevel, GoalCadence, GoalStatus } from "@prisma/client";
+import type { GoalLevel, GoalCadence, GoalStatus, Prisma } from "@prisma/client";
+
+type GoalKeyResultInput = {
+  title: string;
+  targetValue?: number | null;
+  currentValue?: number | null;
+  unit?: string | null;
+  sortOrder?: number | null;
+};
+
+function clampProgressPercent(value: number, fieldName = "Progress") {
+  invariant(Number.isFinite(value), 400, "INVALID_INPUT", `${fieldName} must be a number.`);
+  const rounded = Math.round(value);
+  invariant(rounded >= 0 && rounded <= 100, 400, "INVALID_INPUT", `${fieldName} must be between 0 and 100.`);
+  return rounded;
+}
+
+function keyResultProgress(keyResult: GoalKeyResultInput) {
+  if (keyResult.targetValue && keyResult.targetValue > 0) {
+    return Math.min(100, Math.max(0, Math.round(((keyResult.currentValue || 0) / keyResult.targetValue) * 100)));
+  }
+  return 0;
+}
+
+async function assertGoalInWorkspace(tx: Prisma.TransactionClient, workspaceId: string, goalId: string) {
+  const goal = await tx.goal.findUnique({
+    where: { id: goalId },
+    select: { id: true, workspaceId: true, archivedAt: true },
+  });
+  invariant(goal && goal.workspaceId === workspaceId && !goal.archivedAt, 404, "NOT_FOUND", "Goal not found.");
+  return goal;
+}
+
+async function validateGoalReferences(
+  tx: Prisma.TransactionClient,
+  params: {
+    workspaceId: string;
+    currentGoalId?: string;
+    parentGoalId?: string | null;
+    circleId?: string | null;
+    ownerMemberId?: string | null;
+  },
+) {
+  if (params.parentGoalId) {
+    invariant(params.parentGoalId !== params.currentGoalId, 400, "INVALID_INPUT", "Goal cannot be its own parent.");
+    const parentGoal = await tx.goal.findUnique({
+      where: { id: params.parentGoalId },
+      select: { workspaceId: true, archivedAt: true },
+    });
+    invariant(
+      parentGoal && parentGoal.workspaceId === params.workspaceId && !parentGoal.archivedAt,
+      400,
+      "INVALID_INPUT",
+      "Parent goal must be an active goal in the same workspace.",
+    );
+  }
+
+  if (params.circleId) {
+    const circle = await tx.circle.findUnique({
+      where: { id: params.circleId },
+      select: { workspaceId: true, archivedAt: true },
+    });
+    invariant(
+      circle && circle.workspaceId === params.workspaceId && !circle.archivedAt,
+      400,
+      "INVALID_INPUT",
+      "Goal circle must be an active circle in the same workspace.",
+    );
+  }
+
+  if (params.ownerMemberId) {
+    const owner = await tx.member.findUnique({
+      where: { id: params.ownerMemberId },
+      select: { workspaceId: true, isActive: true },
+    });
+    invariant(
+      owner && owner.workspaceId === params.workspaceId && owner.isActive,
+      400,
+      "INVALID_INPUT",
+      "Goal owner must be an active member in the same workspace.",
+    );
+  }
+}
+
+function normalizeKeyResults(keyResults: GoalKeyResultInput[] | undefined) {
+  return (keyResults ?? []).map((keyResult, index) => {
+    const title = keyResult.title.trim();
+    invariant(title.length > 0, 400, "INVALID_INPUT", "Key Result title is required.");
+    return {
+      title,
+      targetValue: keyResult.targetValue ?? null,
+      currentValue: keyResult.currentValue ?? 0,
+      unit: keyResult.unit || null,
+      progressPercent: keyResultProgress(keyResult),
+      sortOrder: keyResult.sortOrder ?? index,
+    };
+  });
+}
 
 export async function createGoal(
   actor: AppActor,
@@ -21,6 +118,7 @@ export async function createGoal(
     parentGoalId?: string | null;
     circleId?: string | null;
     ownerMemberId?: string | null;
+    keyResults?: GoalKeyResultInput[];
     _membership?: MembershipSummary | null;
   }
 ) {
@@ -34,14 +132,21 @@ export async function createGoal(
   invariant(title.length > 0, 400, "INVALID_INPUT", "Goal title is required.");
 
   return prisma.$transaction(async (tx) => {
+    await validateGoalReferences(tx, params);
+    const keyResults = normalizeKeyResults(params.keyResults);
+    const progressPercent = keyResults.length > 0
+      ? Math.round(keyResults.reduce((total, keyResult) => total + keyResult.progressPercent, 0) / keyResults.length)
+      : 0;
+
     const goal = await tx.goal.create({
       data: {
         workspaceId: params.workspaceId,
         title,
         descriptionMd: params.descriptionMd || null,
-        level: params.level,
-        cadence: params.cadence,
-        status: params.status,
+        level: params.level ?? "COMPANY",
+        cadence: params.cadence ?? "QUARTERLY",
+        status: params.status ?? "ACTIVE",
+        progressPercent,
         targetDate: params.targetDate || null,
         startDate: params.startDate || null,
         parentGoalId: params.parentGoalId || null,
@@ -49,6 +154,15 @@ export async function createGoal(
         ownerMemberId: params.ownerMemberId || null,
       },
     });
+
+    if (keyResults.length > 0) {
+      await tx.keyResult.createMany({
+        data: keyResults.map((keyResult) => ({
+          goalId: goal.id,
+          ...keyResult,
+        })),
+      });
+    }
 
     await recordAudit(tx, actor, {
       workspaceId: params.workspaceId,
@@ -85,6 +199,7 @@ export async function updateGoal(
     level?: GoalLevel;
     cadence?: GoalCadence;
     status?: GoalStatus;
+    progressPercent?: number;
     targetDate?: Date | null;
     startDate?: Date | null;
     parentGoalId?: string | null;
@@ -100,11 +215,14 @@ export async function updateGoal(
   });
 
   return prisma.$transaction(async (tx) => {
-    const goal = await tx.goal.findUnique({
-      where: { id: params.goalId },
+    await assertGoalInWorkspace(tx, params.workspaceId, params.goalId);
+    await validateGoalReferences(tx, {
+      workspaceId: params.workspaceId,
+      currentGoalId: params.goalId,
+      parentGoalId: params.parentGoalId,
+      circleId: params.circleId,
+      ownerMemberId: params.ownerMemberId,
     });
-
-    invariant(goal && goal.workspaceId === params.workspaceId && !goal.archivedAt, 404, "NOT_FOUND", "Goal not found.");
 
     const data: Record<string, unknown> = {};
     if (params.title !== undefined) {
@@ -116,6 +234,7 @@ export async function updateGoal(
     if (params.level !== undefined) data.level = params.level;
     if (params.cadence !== undefined) data.cadence = params.cadence;
     if (params.status !== undefined) data.status = params.status;
+    if (params.progressPercent !== undefined) data.progressPercent = clampProgressPercent(params.progressPercent);
     if (params.targetDate !== undefined) data.targetDate = params.targetDate || null;
     if (params.startDate !== undefined) data.startDate = params.startDate || null;
     if (params.parentGoalId !== undefined) data.parentGoalId = params.parentGoalId || null;
@@ -231,6 +350,8 @@ export async function listGoals(
     ownerMemberId?: string | null;
     status?: GoalStatus;
     parentGoalId?: string | null;
+    take?: number;
+    skip?: number;
     archiveFilter?: ArchiveFilter;
     _membership?: MembershipSummary | null;
   }
@@ -251,6 +372,8 @@ export async function listGoals(
 
   return prisma.goal.findMany({
     where: query,
+    take: params.take,
+    skip: params.skip,
     orderBy: [{ sortOrder: "asc" }, { createdAt: "desc" }],
     include: {
       ownerMember: {
@@ -285,10 +408,13 @@ export async function addKeyResult(
   const title = params.title.trim();
   invariant(title.length > 0, 400, "INVALID_INPUT", "Key Result title is required.");
 
-  let progressPercent = 0;
-  if (params.targetValue && params.targetValue > 0) {
-    progressPercent = Math.min(100, Math.max(0, Math.round(((params.currentValue || 0) / params.targetValue) * 100)));
-  }
+  const goal = await prisma.goal.findUnique({
+    where: { id: params.goalId },
+    select: { id: true, workspaceId: true, archivedAt: true, ownerMemberId: true, status: true },
+  });
+  invariant(goal && goal.workspaceId === params.workspaceId && !goal.archivedAt, 404, "NOT_FOUND", "Goal not found.");
+
+  const progressPercent = keyResultProgress(params);
 
   const kr = await prisma.keyResult.create({
     data: {
@@ -328,7 +454,7 @@ export async function updateKeyResult(
     where: { id: params.krId },
     include: { goal: true },
   });
-  invariant(kr && kr.goal.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Key Result not found.");
+  invariant(kr && kr.goal.workspaceId === params.workspaceId && !kr.goal.archivedAt, 404, "NOT_FOUND", "Key Result not found.");
 
   const data: any = {};
   if (params.title !== undefined) {
@@ -343,11 +469,11 @@ export async function updateKeyResult(
   const newTarget = params.targetValue !== undefined ? params.targetValue : kr.targetValue;
   const newCurrent = params.currentValue !== undefined ? params.currentValue : kr.currentValue;
 
-  let progressPercent = 0;
-  if (newTarget && newTarget > 0) {
-    progressPercent = Math.min(100, Math.max(0, Math.round(((newCurrent || 0) / newTarget) * 100)));
-  }
-  data.progressPercent = progressPercent;
+  data.progressPercent = keyResultProgress({
+    title: data.title ?? kr.title,
+    targetValue: newTarget,
+    currentValue: newCurrent,
+  });
 
   const updated = await prisma.keyResult.update({
     where: { id: params.krId },
@@ -377,7 +503,7 @@ export async function deleteKeyResult(
     where: { id: params.krId },
     include: { goal: true },
   });
-  invariant(kr && kr.goal.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Key Result not found.");
+  invariant(kr && kr.goal.workspaceId === params.workspaceId && !kr.goal.archivedAt, 404, "NOT_FOUND", "Key Result not found.");
 
   await prisma.keyResult.delete({ where: { id: params.krId } });
   await recomputeGoalProgress(kr.goalId);
@@ -404,22 +530,40 @@ export async function postGoalUpdate(
   const goal = await prisma.goal.findUnique({
     where: { id: params.goalId },
   });
-  invariant(goal && goal.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Goal not found.");
+  invariant(goal && goal.workspaceId === params.workspaceId && !goal.archivedAt, 404, "NOT_FOUND", "Goal not found.");
+  const bodyMd = params.bodyMd.trim();
+  invariant(bodyMd.length > 0, 400, "INVALID_INPUT", "Goal update body is required.");
+  const newProgress = params.newProgress !== undefined && params.newProgress !== null
+    ? clampProgressPercent(params.newProgress, "Goal progress")
+    : null;
+
+  if (params.authorMemberId) {
+    const author = await prisma.member.findUnique({
+      where: { id: params.authorMemberId },
+      select: { workspaceId: true, isActive: true },
+    });
+    invariant(
+      author && author.workspaceId === params.workspaceId && author.isActive,
+      400,
+      "INVALID_INPUT",
+      "Goal update author must be an active member in the same workspace.",
+    );
+  }
 
   return prisma.$transaction(async (tx) => {
     const update = await tx.goalUpdate.create({
       data: {
         goalId: params.goalId,
-        bodyMd: params.bodyMd,
-        authorMemberId: params.authorMemberId || membership!.id,
+        bodyMd,
+        authorMemberId: params.authorMemberId ?? membership?.id ?? null,
         statusChange: params.statusChange,
-        newProgress: params.newProgress,
+        newProgress,
       },
     });
 
     const updateData: any = {};
     if (params.statusChange) updateData.status = params.statusChange;
-    if (params.newProgress !== undefined && params.newProgress !== null) updateData.progressPercent = params.newProgress;
+    if (newProgress !== null) updateData.progressPercent = newProgress;
     
     if (Object.keys(updateData).length > 0) {
       await tx.goal.update({
@@ -456,7 +600,7 @@ export async function createGoalLink(
   const goal = await prisma.goal.findUnique({
     where: { id: params.goalId },
   });
-  invariant(goal && goal.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Goal not found.");
+  invariant(goal && goal.workspaceId === params.workspaceId && !goal.archivedAt, 404, "NOT_FOUND", "Goal not found.");
 
   return prisma.$transaction(async (tx) => {
     const link = await tx.goalLink.upsert({
@@ -567,7 +711,7 @@ export async function recomputeGoalProgress(goalId: string) {
 export async function getGoalTree(actor: AppActor, workspaceId: string, opts?: { cadence?: GoalCadence }) {
   await requireWorkspaceMembership({ actor, workspaceId });
   
-  const query: any = { workspaceId };
+  const query: any = { workspaceId, archivedAt: null };
   if (opts?.cadence) query.cadence = opts.cadence;
   
   const allGoals = await prisma.goal.findMany({
@@ -602,7 +746,7 @@ export async function getMyGoalSlice(actor: AppActor, memberId: string, workspac
   await requireWorkspaceMembership({ actor, workspaceId });
 
   const myGoals = await prisma.goal.findMany({
-    where: { workspaceId, ownerMemberId: memberId },
+    where: { workspaceId, ownerMemberId: memberId, archivedAt: null },
     include: {
       circle: true,
       parentGoal: {

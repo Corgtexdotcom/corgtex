@@ -1,8 +1,8 @@
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import type { ModelTool } from "@corgtex/models";
-import { createTension, updateTension, createAction, updateAction, createProposal } from "@corgtex/domain";
-import type { TensionStatus, ActionStatus, Prisma } from "@prisma/client";
+import { createTension, updateTension, createAction, updateAction, createProposal, createGoal } from "@corgtex/domain";
+import type { TensionStatus, ActionStatus, GoalCadence, GoalLevel, GoalStatus, Prisma } from "@prisma/client";
 
 export const createTensionTool: ModelTool = {
   type: "function",
@@ -96,6 +96,44 @@ export const createProposalTool: ModelTool = {
         circleId: { type: "string" },
       },
       required: ["title", "summary", "bodyMd"],
+    },
+  },
+};
+
+export const createGoalTool: ModelTool = {
+  type: "function",
+  function: {
+    name: "create_goal",
+    description: "Create a new workspace goal in the Goals tab. Use this when users ask to add goals, OKRs, objectives, or 10-year/5-year/annual/quarterly/monthly/weekly goals.",
+    parameters: {
+      type: "object",
+      properties: {
+        title: { type: "string", description: "Clear goal title" },
+        descriptionMd: { type: "string", description: "Optional goal description in Markdown" },
+        cadence: { type: "string", description: "TEN_YEAR, FIVE_YEAR, ANNUAL, QUARTERLY, MONTHLY, or WEEKLY. Defaults to QUARTERLY." },
+        level: { type: "string", description: "COMPANY, CIRCLE, or PERSONAL. Defaults to COMPANY." },
+        status: { type: "string", description: "DRAFT, ACTIVE, ON_TRACK, AT_RISK, BEHIND, COMPLETED, or ABANDONED. Defaults to ACTIVE." },
+        targetDate: { type: "string", description: "Optional ISO 8601 date string" },
+        startDate: { type: "string", description: "Optional ISO 8601 date string" },
+        parentGoalId: { type: "string", description: "Optional parent goal UUID" },
+        circleId: { type: "string", description: "Optional circle UUID" },
+        ownerMemberId: { type: "string", description: "Optional owner member UUID" },
+        keyResults: {
+          type: "array",
+          description: "Optional measurable key results for the goal",
+          items: {
+            type: "object",
+            properties: {
+              title: { type: "string" },
+              targetValue: { type: "number" },
+              currentValue: { type: "number" },
+              unit: { type: "string" },
+            },
+            required: ["title"],
+          },
+        },
+      },
+      required: ["title"],
     },
   },
 };
@@ -204,4 +242,28 @@ export async function createProposalAction(actor: AppActor, ctx: any, args: any)
   });
 
   return { success: true, proposalId: result.id };
+}
+
+export async function createGoalAction(actor: AppActor, ctx: any, args: any) {
+  const result = await createGoal(actor, {
+    workspaceId: ctx.workspaceId,
+    title: args.title,
+    descriptionMd: args.descriptionMd,
+    cadence: args.cadence as GoalCadence | undefined,
+    level: args.level as GoalLevel | undefined,
+    status: args.status as GoalStatus | undefined,
+    targetDate: args.targetDate ? new Date(args.targetDate) : undefined,
+    startDate: args.startDate ? new Date(args.startDate) : undefined,
+    parentGoalId: args.parentGoalId,
+    circleId: args.circleId,
+    ownerMemberId: args.ownerMemberId,
+    keyResults: Array.isArray(args.keyResults) ? args.keyResults : undefined,
+  });
+
+  await appendAuditMeta("Goal", result.id, "goal.created", {
+    conversationSessionId: ctx.sessionId,
+    toolCallInput: args,
+  });
+
+  return { success: true, goalId: result.id };
 }

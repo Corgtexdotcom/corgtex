@@ -5,9 +5,9 @@ import { loadRelevantMemories, storeAgentMemory } from "@corgtex/domain";
 import { env } from "@corgtex/shared";
 import type { ChatMessage } from "@corgtex/models";
 import { checkCalendarAvailabilityTool, scheduleMeetingTool, checkCalendarAvailability, scheduleMeeting } from "./tools/calendar";
-import { getWorkspaceOverviewTool, queryTensionsTool, queryActionsTool, queryProposalsTool, queryOrgStructureTool, getWorkspaceOverview, queryTensions, queryActions, queryProposals, queryOrgStructure } from "./tools/workspace";
+import { getWorkspaceOverviewTool, queryTensionsTool, queryActionsTool, queryProposalsTool, queryGoalsTool, queryOrgStructureTool, getWorkspaceOverview, queryTensions, queryActions, queryProposals, queryGoals, queryOrgStructure } from "./tools/workspace";
 import { searchBrainTool, searchBrain } from "./tools/knowledge";
-import { createTensionTool, updateTensionTool, createActionTool, updateActionTool, createProposalTool, createTensionAction, updateTensionAction, createActionItemAction, updateActionItemAction, createProposalAction } from "./tools/mutations";
+import { createTensionTool, updateTensionTool, createActionTool, updateActionTool, createProposalTool, createGoalTool, createTensionAction, updateTensionAction, createActionItemAction, updateActionItemAction, createProposalAction, createGoalAction } from "./tools/mutations";
 import { saveToBrainTool, saveToBrainAction } from "./tools/brain-save";
 import {
   listMembersTool,
@@ -33,12 +33,12 @@ const SYSTEM_PROMPTS: Record<string, string> = {
 - Brainstorm ideas and provide organizational guidance
 - Summarize meeting notes and extract action items
 - Find time and schedule meetings among team members
-- Create and update tensions, actions, and proposals directly
+- Create and update tensions, actions, proposals, and goals directly
 
 You have full read AND write access to the workspace through your tools:
 READ TOOLS:
 - 'get_workspace_overview' — high-level summary of org state
-- 'query_tensions', 'query_actions', 'query_proposals' — exact, filtered lists
+- 'query_tensions', 'query_actions', 'query_proposals', 'query_goals' — exact, filtered lists
 - 'query_org_structure' — circles, roles, and members
 - 'search_brain' — semantic search across all indexed knowledge
 
@@ -46,13 +46,14 @@ WRITE TOOLS:
 - 'create_tension', 'create_action' — create new items
 - 'update_tension', 'update_action' — update status, assignments, content
 - 'create_proposal' — draft and create a new governance proposal
+- 'create_goal' — create a goal in the Goals tab with cadence and optional key results
 
 When asked about current state, ALWAYS use a query tool instead of guessing.
 When asked to create or update something, execute the write tool immediately — do not ask for confirmation. Report what you did clearly after executing.
 Every write action is fully audited and traceable.
 
 Be concise, direct, and action-oriented. When relevant, cite workspace knowledge.
-If the user wants to create something (proposal, tension, action), help them draft it and suggest they use the appropriate workspace tool to submit it.
+If the user wants to create something (proposal, tension, action, or goal), use the appropriate workspace tool directly. If they say "add it to the goals tab" or "put it in goals", create goals rather than tensions, actions, or proposals.
 If the user asks to upload or ingest a file (e.g. meeting minutes, feedback), instruct them to use the attachment icon (+) in the chat input. When a user message contains '[Attached file: ...]', acknowledge that it has been queued for Brain absorption and answer based on the provided text if available.
 If the user explicitly asks you to save, upload, store, or remember content (e.g., "save this transcript", "upload this to the brain", "remember this for later"), invoke 'save_to_brain' immediately with the relevant content. You do NOT need to save regular conversation — that happens automatically in the nightly batch. Only use this tool when the user explicitly requests immediate storage.
 MEMBER MANAGEMENT TOOLS (permission-aware — mirrors your access level):
@@ -93,12 +94,14 @@ const TOOLS = [
   queryTensionsTool,
   queryActionsTool,
   queryProposalsTool,
+  queryGoalsTool,
   queryOrgStructureTool,
   createTensionTool,
   updateTensionTool,
   createActionTool,
   updateActionTool,
   createProposalTool,
+  createGoalTool,
   saveToBrainTool,
   listMembersTool,
   getMemberProfileTool,
@@ -115,12 +118,14 @@ const TOOL_HANDLERS: Record<string, (actor: AppActor, ctx: ConversationContext, 
   query_tensions: async (actor, ctx, args) => queryTensions(ctx.workspaceId, args.status, args.assigneeId),
   query_actions: async (actor, ctx, args) => queryActions(ctx.workspaceId, args.status, args.assigneeId),
   query_proposals: async (actor, ctx, args) => queryProposals(ctx.workspaceId, args.status),
+  query_goals: async (actor, ctx, args) => queryGoals(ctx.workspaceId, args.cadence, args.level, args.status),
   query_org_structure: async (actor, ctx) => queryOrgStructure(ctx.workspaceId),
   create_tension: createTensionAction,
   update_tension: updateTensionAction,
   create_action: createActionItemAction,
   update_action: updateActionItemAction,
   create_proposal: createProposalAction,
+  create_goal: createGoalAction,
   save_to_brain: async (actor, ctx, args) => saveToBrainAction(actor, ctx, args),
   list_members: async (actor, ctx) => listMembersAction(actor, ctx),
   get_member_profile: async (actor, ctx, args) => getMemberProfileAction(actor, ctx, args),

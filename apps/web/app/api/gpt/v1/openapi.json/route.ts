@@ -107,6 +107,54 @@ export async function GET() {
           responses: okResponse,
         },
       },
+      "/goals": {
+        get: {
+          operationId: "listGoals",
+          summary: "List goals",
+          security: [{ oauth2: ["read"] }],
+          parameters: [
+            ...paginationParameters,
+            { name: "cadence", in: "query", schema: { type: "string", enum: ["TEN_YEAR", "FIVE_YEAR", "ANNUAL", "QUARTERLY", "MONTHLY", "WEEKLY"] } },
+            { name: "level", in: "query", schema: { type: "string", enum: ["COMPANY", "CIRCLE", "PERSONAL"] } },
+            { name: "status", in: "query", schema: { type: "string", enum: ["DRAFT", "ACTIVE", "ON_TRACK", "AT_RISK", "BEHIND", "COMPLETED", "ABANDONED"] } },
+          ],
+          responses: okResponse,
+        },
+        post: {
+          operationId: "createGoal",
+          summary: "Create a goal in the Goals tab",
+          security: [{ oauth2: ["write"] }],
+          requestBody: jsonBodySchema(
+            {
+              title: { type: "string" },
+              descriptionMd: { type: "string" },
+              cadence: { type: "string", enum: ["TEN_YEAR", "FIVE_YEAR", "ANNUAL", "QUARTERLY", "MONTHLY", "WEEKLY"] },
+              level: { type: "string", enum: ["COMPANY", "CIRCLE", "PERSONAL"] },
+              status: { type: "string", enum: ["DRAFT", "ACTIVE", "ON_TRACK", "AT_RISK", "BEHIND", "COMPLETED", "ABANDONED"] },
+              startDate: { type: "string", format: "date-time" },
+              targetDate: { type: "string", format: "date-time" },
+              parentGoalId: { type: "string", nullable: true },
+              circleId: { type: "string", nullable: true },
+              ownerMemberId: { type: "string", nullable: true },
+              keyResults: {
+                type: "array",
+                items: {
+                  type: "object",
+                  properties: {
+                    title: { type: "string" },
+                    targetValue: { type: "number" },
+                    currentValue: { type: "number" },
+                    unit: { type: "string" },
+                  },
+                  required: ["title"],
+                },
+              },
+            },
+            ["title"],
+          ),
+          responses: okResponse,
+        },
+      },
       "/actions": {
         get: {
           operationId: "listActions",
