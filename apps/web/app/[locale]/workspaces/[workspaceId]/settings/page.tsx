@@ -246,7 +246,7 @@ export default async function SettingsPage({
                         {slackInstallation.externalTeamName || slackInstallation.externalWorkspaceId} · {slackInstallation._count.channels} channels · {slackInstallation._count.messages} captured messages
                       </p>
                       <p className="nr-item-meta" style={{ fontSize: "0.82rem", margin: 0 }}>
-                        Public-channel messages are used for aggregate briefings and work capture. Raw Slack message text is deleted after 30 days; source metadata, generated summaries, and Corgtex links are preserved.
+                        Public-channel messages are archived for aggregate briefings, work capture, and long-term context. Private channels and DMs are not ingested.
                       </p>
                       <p className="nr-item-meta" style={{ fontSize: "0.82rem", margin: 0 }}>
                         Granted scopes: {slackInstallation.scopes.length > 0 ? slackInstallation.scopes.join(", ") : "none recorded"}

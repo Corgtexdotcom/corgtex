@@ -1,10 +1,28 @@
 import { createHmac } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { prismaMock, txMock, createActionMock } = vi.hoisted(() => {
+const { prismaMock, txMock, createActionMock, slackWebClientMock } = vi.hoisted(() => {
   const tx = {
     communicationInstallation: { update: vi.fn() },
     workflowJob: { upsert: vi.fn() },
+  };
+  const webClient = {
+    conversations: {
+      list: vi.fn(),
+      join: vi.fn(),
+      history: vi.fn(),
+      replies: vi.fn(),
+    },
+    oauth: {
+      v2: { access: vi.fn() },
+    },
+    chat: {
+      postMessage: vi.fn(),
+      postEphemeral: vi.fn(),
+    },
+    views: {
+      publish: vi.fn(),
+    },
   };
   return {
     txMock: tx,
@@ -16,8 +34,10 @@ const { prismaMock, txMock, createActionMock } = vi.hoisted(() => {
         update: vi.fn(),
       },
       communicationInstallation: {
+        findFirst: vi.fn(),
         findUnique: vi.fn(),
         update: vi.fn(),
+        upsert: vi.fn(),
       },
       communicationChannel: {
         upsert: vi.fn(),
@@ -41,6 +61,7 @@ const { prismaMock, txMock, createActionMock } = vi.hoisted(() => {
       },
     },
     createActionMock: vi.fn(),
+    slackWebClientMock: webClient,
   };
 });
 
@@ -81,6 +102,12 @@ vi.mock("./auth", () => ({
   requireWorkspaceMembership: vi.fn(),
 }));
 
+vi.mock("@slack/web-api", () => ({
+  WebClient: vi.fn(function WebClient() {
+    return slackWebClientMock;
+  }),
+}));
+
 function signedHeaders(body: string, timestamp = Math.floor(Date.now() / 1000)) {
   const signature = `v0=${createHmac("sha256", "slack-secret").update(`v0:${timestamp}:${body}`).digest("hex")}`;
   return new Headers({
@@ -96,6 +123,13 @@ describe("communication Slack integration", () => {
     createActionMock.mockResolvedValue({ id: "action-1" });
     prismaMock.communicationEntityLink.create.mockResolvedValue({});
     prismaMock.communicationMessage.updateMany.mockResolvedValue({ count: 2 });
+    prismaMock.communicationInstallation.findFirst.mockReset();
+    prismaMock.communicationChannel.upsert.mockReset();
+    prismaMock.communicationMessage.upsert.mockReset();
+    prismaMock.communicationInstallation.update.mockReset();
+    slackWebClientMock.conversations.list.mockReset();
+    slackWebClientMock.conversations.join.mockReset();
+    slackWebClientMock.conversations.history.mockReset();
   });
 
   it("verifies Slack request signatures", async () => {
@@ -111,6 +145,99 @@ describe("communication Slack integration", () => {
     const staleTimestamp = Math.floor(Date.now() / 1000) - 600;
 
     expect(() => verifySlackRequest(body, signedHeaders(body, staleTimestamp))).toThrow("timestamp");
+  });
+
+  it("requests public channel history and join scopes for archive installs", async () => {
+    const { slackOAuthScopes } = await import("./communication");
+
+    expect(slackOAuthScopes().split(",")).toEqual(expect.arrayContaining([
+      "channels:history",
+      "channels:join",
+    ]));
+  });
+
+  it("stores archive settings with long retention when public history is granted", async () => {
+    const { saveSlackInstallation } = await import("./communication");
+    prismaMock.communicationInstallation.upsert.mockResolvedValueOnce({ id: "install-1" });
+
+    await saveSlackInstallation({ kind: "system" } as any, {
+      workspaceId: "workspace-1",
+      oauthResponse: {
+        ok: true,
+        team: { id: "T1", name: "Team" },
+        access_token: "xoxb-token",
+        scope: "commands,channels:history,channels:join",
+      } as any,
+    });
+
+    expect(prismaMock.communicationInstallation.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      update: expect.objectContaining({
+        settings: expect.objectContaining({
+          broadPublicIngestion: true,
+          autoJoinPublicChannels: true,
+          rawRetentionDays: 3650,
+          label: "Public Channel Archive",
+        }),
+      }),
+      create: expect.objectContaining({
+        settings: expect.objectContaining({
+          broadPublicIngestion: true,
+          autoJoinPublicChannels: true,
+          rawRetentionDays: 3650,
+          label: "Public Channel Archive",
+        }),
+      }),
+    }));
+  });
+
+  it("syncs accessible public Slack channel history without storing bot messages", async () => {
+    const { syncSlackPublicArchiveForWorkspace } = await import("./communication");
+    prismaMock.communicationInstallation.findFirst.mockResolvedValueOnce({
+      id: "install-1",
+      workspaceId: "workspace-1",
+      provider: "SLACK",
+      status: "ACTIVE",
+      botTokenEnc: "enc:xoxb-token",
+      scopes: ["channels:history", "channels:join"],
+      settings: { rawRetentionDays: 3650 },
+      installedAt: new Date(),
+    });
+    slackWebClientMock.conversations.list.mockResolvedValueOnce({
+      channels: [{ id: "C1", name: "general", is_archived: false, is_member: false }],
+      response_metadata: {},
+    });
+    slackWebClientMock.conversations.join.mockResolvedValueOnce({ ok: true });
+    slackWebClientMock.conversations.history.mockResolvedValueOnce({
+      messages: [
+        { ts: "1714320000.000100", user: "U1", text: "Public update" },
+        { ts: "1714320001.000100", bot_id: "B1", subtype: "bot_message", text: "ignored" },
+      ],
+      response_metadata: {},
+    });
+    prismaMock.communicationChannel.upsert.mockResolvedValue({ id: "channel-1" });
+    prismaMock.communicationMessage.upsert.mockResolvedValue({ id: "message-1" });
+    prismaMock.communicationInstallation.update.mockResolvedValue({ id: "install-1" });
+
+    const summary = await syncSlackPublicArchiveForWorkspace("workspace-1");
+
+    expect(summary).toMatchObject({
+      channelsSeen: 1,
+      channelsJoined: 1,
+      messagesScanned: 2,
+      messagesUpserted: 1,
+      retentionDays: 3650,
+    });
+    expect(prismaMock.communicationMessage.upsert).toHaveBeenCalledTimes(1);
+    expect(prismaMock.communicationInstallation.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        settings: expect.objectContaining({
+          broadPublicIngestion: true,
+          autoJoinPublicChannels: true,
+          rawRetentionDays: 3650,
+        }),
+        lastError: null,
+      }),
+    }));
   });
 
   it("deduplicates Slack events and enqueues new events", async () => {

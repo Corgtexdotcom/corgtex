@@ -35,6 +35,7 @@ import {
   createMember,
   updateMember,
   deactivateMember,
+  createDocument,
   listMeetings,
   getMeeting,
   createMeeting,
@@ -65,6 +66,14 @@ import {
   listSpends,
   listLedgerAccounts,
   listArchivedWorkspaceArtifacts,
+  listAgentRuns,
+  listCommunicationInstallations,
+  listExternalDataSources,
+  enqueueExternalDataSourceSync,
+  listRuntimeJobs,
+  listFailedJobs,
+  replayWorkflowJob,
+  discardFailedJob,
   purgeWorkspaceArtifact,
   restoreWorkspaceArtifact,
 } from "@corgtex/domain";
@@ -108,6 +117,8 @@ const DESTRUCTIVE_TOOL_NAMES = new Set([
   "archive_ledger_account",
   "archive_artifact",
   "purge_artifact",
+  "retry_failed_job",
+  "discard_failed_job",
 ]);
 
 function annotationsForTool(name: string) {
@@ -375,6 +386,196 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
           pendingSpends: pendingSpends.length,
         },
       });
+    },
+  );
+
+  // ===========================================================================
+  // SUPPORT / CONTROL PLANE
+  // ===========================================================================
+
+  tool(
+    "record_support_audit",
+    "Record a Corgtex Support audit event in this customer workspace. Support connector credentials only.",
+    {
+      action: z.string(),
+      reason: z.string(),
+      operationId: z.string(),
+      phase: z.enum(["started", "completed", "failed"]).optional(),
+      result: z.unknown().optional(),
+      error: z.string().nullable().optional(),
+    },
+    async (params: {
+      action: string;
+      reason: string;
+      operationId: string;
+      phase?: "started" | "completed" | "failed";
+      result?: unknown;
+      error?: string | null;
+    }) => {
+      requireScope(sessionCtx, "support:write");
+      const audit = await prisma.auditLog.create({
+        data: {
+          workspaceId,
+          actorUserId: actor.kind === "user" ? actor.user.id : null,
+          action: params.action,
+          entityType: "SupportOperation",
+          entityId: params.operationId,
+          meta: {
+            reason: params.reason,
+            phase: params.phase ?? "completed",
+            result: params.result ?? null,
+            error: params.error ?? null,
+          },
+        },
+      });
+      return jsonResult({ id: audit.id, operationId: params.operationId });
+    },
+  );
+
+  tool(
+    "list_integrations",
+    "List installed workspace integrations for support diagnostics.",
+    {},
+    async () => {
+      requireScope(sessionCtx, "integrations:read");
+      const [communicationInstallations, oauthConnections] = await Promise.all([
+        listCommunicationInstallations(actor, workspaceId),
+        prisma.oAuthConnection.findMany({
+          where: {
+            user: {
+              memberships: {
+                some: { workspaceId, isActive: true },
+              },
+            },
+          },
+          select: {
+            id: true,
+            provider: true,
+            providerAccountId: true,
+            scopes: true,
+            expiresAt: true,
+            createdAt: true,
+            updatedAt: true,
+            user: { select: { email: true, displayName: true } },
+          },
+          orderBy: { updatedAt: "desc" },
+        }),
+      ]);
+      return jsonResult({ communicationInstallations, oauthConnections });
+    },
+  );
+
+  tool(
+    "list_data_sources",
+    "List external data feeds and their last sync state.",
+    {},
+    async () => {
+      requireScope(sessionCtx, "data-sources:read");
+      const sources = await listExternalDataSources(actor, workspaceId, { archiveFilter: "active" });
+      return jsonResult({ items: sources });
+    },
+  );
+
+  tool(
+    "sync_data_source",
+    "Queue a manual sync for an external data feed.",
+    {
+      sourceId: z.string(),
+    },
+    async ({ sourceId }: { sourceId: string }) => {
+      requireScope(sessionCtx, "data-sources:write");
+      const job = await enqueueExternalDataSourceSync(actor, { workspaceId, sourceId });
+      return jsonResult({ id: job.id, status: job.status, webUrl: webUrl(workspaceId, `/settings?tab=data-sources`) });
+    },
+  );
+
+  tool(
+    "list_agent_runs",
+    "List recent agent runs, steps, tool calls, and model usage for support diagnostics.",
+    {
+      take: z.number().optional(),
+    },
+    async ({ take }: { take?: number }) => {
+      requireScope(sessionCtx, "agents:read");
+      const runs = await listAgentRuns(actor, workspaceId, { take: take ?? 20 });
+      return jsonResult({ items: runs });
+    },
+  );
+
+  tool(
+    "list_runtime_jobs",
+    "List recent workflow jobs for support diagnostics.",
+    {
+      take: z.number().optional(),
+    },
+    async ({ take }: { take?: number }) => {
+      requireScope(sessionCtx, "runtime:read");
+      const jobs = await listRuntimeJobs(actor, workspaceId, { take: take ?? 50 });
+      return jsonResult({ items: jobs });
+    },
+  );
+
+  tool(
+    "list_failed_jobs",
+    "List failed workflow jobs for support diagnostics.",
+    {
+      take: z.number().optional(),
+      skip: z.number().optional(),
+    },
+    async ({ take, skip }: { take?: number; skip?: number }) => {
+      requireScope(sessionCtx, "runtime:read");
+      const jobs = await listFailedJobs(actor, workspaceId, { take: take ?? 50, skip: skip ?? 0 });
+      return jsonResult({ items: jobs });
+    },
+  );
+
+  tool(
+    "retry_failed_job",
+    "Replay a failed workflow job for support repair.",
+    {
+      workflowJobId: z.string(),
+    },
+    async ({ workflowJobId }: { workflowJobId: string }) => {
+      requireScope(sessionCtx, "runtime:write");
+      const job = await replayWorkflowJob(actor, { workspaceId, workflowJobId });
+      return jsonResult({ id: job.id, status: job.status, webUrl: webUrl(workspaceId, `/operator`) });
+    },
+  );
+
+  tool(
+    "discard_failed_job",
+    "Mark a failed workflow job as cancelled for support repair.",
+    {
+      workflowJobId: z.string(),
+    },
+    async ({ workflowJobId }: { workflowJobId: string }) => {
+      requireScope(sessionCtx, "runtime:write");
+      const result = await discardFailedJob(actor, { workspaceId, workflowJobId });
+      return jsonResult({ count: result.count, webUrl: webUrl(workspaceId, `/operator`) });
+    },
+  );
+
+  tool(
+    "upload_document_text",
+    "Upload support-provided text data into workspace documents. Use this for batch customer data drops that do not need binary storage.",
+    {
+      title: z.string(),
+      source: z.string().optional(),
+      textContent: z.string(),
+      metadata: z.record(z.string(), z.unknown()).optional(),
+    },
+    async (params: { title: string; source?: string; textContent: string; metadata?: Record<string, unknown> }) => {
+      requireScope(sessionCtx, "documents:write");
+      const document = await createDocument(actor, {
+        workspaceId,
+        title: params.title,
+        source: params.source ?? "corgtex-support",
+        storageKey: `support-upload/${Date.now()}-${params.title.trim().toLowerCase().replace(/[^a-z0-9._-]+/g, "-")}`,
+        mimeType: "text/plain",
+        textContent: params.textContent,
+        metadata: params.metadata ?? { uploadedBy: "corgtex-support" },
+      });
+      return jsonResult({ id: document.id, title: document.title, webUrl: webUrl(workspaceId, `/settings?tab=data-sources`) });
     },
   );
 

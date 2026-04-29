@@ -15,6 +15,7 @@ export * from "./circles";
 export * from "./constitutions";
 export * from "./conversations";
 export * from "./communication";
+export * from "./control-plane";
 export * from "./cycles";
 export * from "./documents";
 export * from "./errors";

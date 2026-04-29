@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { prismaMock, txMock, runAgentWorkflowJobMock, runSlackAgentMock, processSlackInboundEventMock, purgeExpiredCommunicationMessagesMock } = vi.hoisted(() => ({
+const { prismaMock, txMock, runAgentWorkflowJobMock, runSlackAgentMock, processSlackInboundEventMock, purgeExpiredCommunicationMessagesMock, syncSlackPublicArchiveForWorkspaceMock } = vi.hoisted(() => ({
   prismaMock: {
     $transaction: vi.fn(),
     workflowJob: {
@@ -14,6 +14,7 @@ const { prismaMock, txMock, runAgentWorkflowJobMock, runSlackAgentMock, processS
   runSlackAgentMock: vi.fn(),
   processSlackInboundEventMock: vi.fn(),
   purgeExpiredCommunicationMessagesMock: vi.fn(),
+  syncSlackPublicArchiveForWorkspaceMock: vi.fn(),
 }));
 
 vi.mock("@corgtex/shared", () => ({
@@ -42,6 +43,7 @@ vi.mock("@corgtex/domain", () => ({
   fetchCalendarEvents: vi.fn(),
   processSlackInboundEvent: processSlackInboundEventMock,
   purgeExpiredCommunicationMessages: purgeExpiredCommunicationMessagesMock,
+  syncSlackPublicArchiveForWorkspace: syncSlackPublicArchiveForWorkspaceMock,
 }));
 
 import { runPendingJobs } from "./outbox";
@@ -55,6 +57,7 @@ describe("runPendingJobs", () => {
     runSlackAgentMock.mockReset();
     processSlackInboundEventMock.mockReset();
     purgeExpiredCommunicationMessagesMock.mockReset();
+    syncSlackPublicArchiveForWorkspaceMock.mockReset();
   });
 
   it("requeues agent jobs when execution is skipped by the concurrency gate", async () => {
@@ -106,6 +109,33 @@ describe("runPendingJobs", () => {
     await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
 
     expect(processSlackInboundEventMock).toHaveBeenCalledWith("inbound-1");
+    expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({
+      where: { id: "job-1" },
+      data: expect.objectContaining({
+        status: "COMPLETED",
+      }),
+    });
+  });
+
+  it("dispatches Slack public archive jobs", async () => {
+    txMock.$queryRaw.mockResolvedValue([
+      {
+        id: "job-1",
+        workspaceId: "ws-1",
+        type: "communication.slack.public-archive",
+        payload: {},
+        attempts: 1,
+      },
+    ]);
+    syncSlackPublicArchiveForWorkspaceMock.mockResolvedValue({
+      workspaceId: "ws-1",
+      channelsSeen: 1,
+      messagesUpserted: 1,
+    });
+
+    await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
+
+    expect(syncSlackPublicArchiveForWorkspaceMock).toHaveBeenCalledWith("ws-1");
     expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({
       where: { id: "job-1" },
       data: expect.objectContaining({

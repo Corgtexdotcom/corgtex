@@ -1,7 +1,7 @@
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import type { NextRequest } from "next/server";
-import { clearSession, resolveAgentActorFromBearer, resolveSessionActor } from "@corgtex/domain";
+import { clearSession, resolveAgentActorFromBearer, resolveControlPlaneAgentFromBearer, resolveSessionActor } from "@corgtex/domain";
 import { isDatabaseUnavailableError, sessionCookieName } from "@corgtex/shared";
 import { AppError } from "@corgtex/domain";
 
@@ -52,6 +52,19 @@ export async function resolveRequestActor(request: NextRequest) {
   }
 
   return actor;
+}
+
+export async function resolveControlPlaneRequestActor(request: NextRequest) {
+  const authorization = request.headers.get("authorization");
+  if (authorization?.startsWith("Bearer ")) {
+    const bearer = authorization.slice("Bearer ".length).trim();
+    const agentActor = await resolveControlPlaneAgentFromBearer(bearer);
+    if (agentActor) {
+      return agentActor;
+    }
+  }
+
+  return resolveRequestActor(request);
 }
 
 export async function requirePageActor() {

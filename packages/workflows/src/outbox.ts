@@ -8,7 +8,7 @@ import { runAgentWorkflowJob } from "./handlers";
 import { syncBrainArticleKnowledge } from "@corgtex/knowledge";
 
 import { runDailyDigest, runSlackAgent } from "@corgtex/agents";
-import { createWebhookDeliveries, deliverWebhook, processSlackInboundEvent, purgeExpiredCommunicationMessages, type SlackAgentJobPayload } from "@corgtex/domain";
+import { createWebhookDeliveries, deliverWebhook, processSlackInboundEvent, purgeExpiredCommunicationMessages, syncSlackPublicArchiveForWorkspace, type SlackAgentJobPayload } from "@corgtex/domain";
 
 const DEFAULT_BATCH_SIZE = 25;
 const MAX_ATTEMPTS = 5;
@@ -375,6 +375,11 @@ async function handleJob(job: ClaimedJob) {
     return;
   }
 
+  if (job.type === "communication.slack.public-archive") {
+    await syncSlackPublicArchiveForWorkspace(job.workspaceId);
+    return;
+  }
+
   if (job.type === "agent.inbox-triage") {
     const result = await runAgentWorkflowJob(job);
     if (result && typeof result === "object" && "skipped" in result && result.reason === "concurrency_limit") {
@@ -519,6 +524,15 @@ export async function scheduleDailyJobs() {
   let scheduledCount = 0;
 
   const workspaces = await prisma.workspace.findMany({ select: { id: true } });
+  const slackArchiveWorkspaces = await prisma.communicationInstallation.findMany({
+    where: {
+      provider: "SLACK",
+      status: "ACTIVE",
+      scopes: { has: "channels:history" },
+    },
+    distinct: ["workspaceId"],
+    select: { workspaceId: true },
+  });
   const { isAgentEnabled } = await import("@corgtex/domain");
   const enabledWorkspaces: typeof workspaces = [];
 
@@ -530,8 +544,8 @@ export async function scheduleDailyJobs() {
   }
 
   await prisma.$transaction(async (tx) => {
+    const eventId = `cron-${now.getTime()}`;
     for (const workspace of enabledWorkspaces) {
-      const eventId = `cron-${now.getTime()}`;
       await enqueueJob(tx, {
         workspaceId: workspace.id,
         eventId,
@@ -545,6 +559,17 @@ export async function scheduleDailyJobs() {
         type: "communication.raw-retention",
         payload: { dateISO: now.toISOString() },
         dedupeKey: `${workspace.id}:communication-retention:${todayISO}`,
+      });
+      scheduledCount++;
+    }
+
+    for (const installation of slackArchiveWorkspaces) {
+      await enqueueJob(tx, {
+        workspaceId: installation.workspaceId,
+        eventId,
+        type: "communication.slack.public-archive",
+        payload: { dateISO: now.toISOString() },
+        dedupeKey: `${installation.workspaceId}:slack-public-archive:${todayISO}`,
       });
       scheduledCount++;
     }

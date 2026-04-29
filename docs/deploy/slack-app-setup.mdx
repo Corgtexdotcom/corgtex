@@ -29,3 +29,7 @@ The Slack Client ID in production must match the Slack app where the redirect UR
 Start the install from Corgtex workspace settings with **Connect Slack**. Do not start from Slack App Management directly, because Corgtex generates a short-lived workspace-bound OAuth state cookie before sending the browser to Slack.
 
 After installation, verify the workspace settings page shows Slack as connected, then test `/corgtex Jan should follow up tomorrow`, `/corgtex brief`, an app mention such as `@Corgtex turn this into a tension`, and a message shortcut capture in Slack. Direct messages are not part of the v1 Slack surface, so do not add DM scopes or DM event subscriptions for this setup.
+
+For hosted workspaces that use Slack as long-term context, include `channels:history` and `channels:join` in the bot scopes. Corgtex uses those scopes to join public channels, archive accessible public-channel messages, and preserve context beyond short Slack workspace retention windows. Private channels and DMs remain out of scope.
+
+The worker schedules `communication.slack.public-archive` daily for active Slack installations with `channels:history`. For first-time customer onboarding or a recovery import, run `node /app/scripts/sync-slack-public-archive.mjs` inside the customer runtime with `WORKSPACE_SLUG` or `WORKSPACE_ID` set. The command reports counts only and must not print Slack message content, channel names, or token values.
