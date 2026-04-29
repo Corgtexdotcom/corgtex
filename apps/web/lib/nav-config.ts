@@ -30,6 +30,7 @@ export const WORKSPACE_NAV_GROUPS: NavGroup[] = [
       { href: "", labelKey: "home", icon: "◉" },
       { href: "/goals", labelKey: "goals", icon: "⌾", featureFlag: "GOALS" },
       { href: "/brain", labelKey: "brain", icon: "◈" },
+      { href: "/tools", labelKey: "tools", icon: "⌘" },
       { href: "/members", labelKey: "members", icon: "⌂" },
     ],
   },
