@@ -15,6 +15,7 @@ vi.mock("@corgtex/shared", async (importOriginal) => {
       crmQualification: {
         create: vi.fn(),
         findUnique: vi.fn(),
+        findFirst: vi.fn(),
         findMany: vi.fn(),
         count: vi.fn(),
         update: vi.fn(),
@@ -37,7 +38,11 @@ vi.mock("@corgtex/shared", async (importOriginal) => {
       },
       crmContact: {
         findFirst: vi.fn(),
+        update: vi.fn(),
         updateMany: vi.fn(),
+      },
+      crmActivity: {
+        create: vi.fn(),
       },
       workspace: {
         create: vi.fn(),
@@ -48,7 +53,13 @@ vi.mock("@corgtex/shared", async (importOriginal) => {
             create: vi.fn().mockResolvedValue({ id: "qual-1", workspaceId: "ws-1", status: "PENDING_REVIEW" }),
             update: vi.fn().mockResolvedValue({ id: "qual-1", status: "APPROVED" }),
           },
+          demoLead: {
+            update: vi.fn().mockResolvedValue({ id: "lead-1" }),
+          },
           crmContact: { updateMany: vi.fn() },
+          crmActivity: {
+            create: vi.fn().mockResolvedValue({ id: "activity-1" }),
+          },
           crmConversationMessage: {
             create: vi.fn().mockResolvedValue({ id: "msg-1", conversationId: "conv-1" }),
           },
@@ -340,6 +351,100 @@ describe("CRM domain", () => {
           crmWorkspaceId: "ws-1",
         })
       ).rejects.toThrow();
+    });
+  });
+
+  describe("applyExtractionResult", () => {
+    it("updates only null fields", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { applyExtractionResult } = await import("./crm-extraction");
+
+      vi.mocked(prisma.crmQualification.findFirst).mockResolvedValue({
+        id: "qual-1",
+        workspaceId: "ws-1",
+        companyName: null,
+        website: "https://existing.com",
+        aiExperience: null,
+        helpNeeded: null,
+      } as any);
+
+      await applyExtractionResult("ws-1", "qual-1", {
+        companyName: "Extracted Corp",
+        website: "https://new.com",
+        aiExperience: "Beginner",
+      });
+
+      expect(prisma.crmQualification.update).toHaveBeenCalledWith({
+        where: { id: "qual-1" },
+        data: {
+          companyName: "Extracted Corp",
+          aiExperience: "Beginner",
+        },
+      });
+    });
+  });
+
+  describe("applyEnrichmentResult", () => {
+    it("adds high-confidence enrichment as tags and records an activity", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { applyEnrichmentResult } = await import("./crm-enrichment");
+
+      vi.mocked(prisma.crmContact.findFirst).mockResolvedValue({
+        id: "contact-1",
+        workspaceId: "ws-1",
+        tags: ["existing"],
+      } as any);
+
+      await applyEnrichmentResult("ws-1", "contact-1", {
+        industry: "Healthcare",
+        headquarters: "New York",
+        description: "Care delivery platform",
+        confidence: 0.91,
+      });
+
+      expect(prisma.crmContact.findFirst).toHaveBeenCalledWith({
+        where: {
+          id: "contact-1",
+          workspaceId: "ws-1",
+        },
+      });
+      expect(prisma.crmContact.update).toHaveBeenCalledWith({
+        where: { id: "contact-1" },
+        data: { tags: ["existing", "Healthcare", "New York"] },
+      });
+      expect(prisma.crmActivity.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            workspaceId: "ws-1",
+            contactId: "contact-1",
+            title: "Applied Enrichment Data",
+          }),
+        }),
+      );
+    });
+  });
+
+  describe("recordDripFollowUp", () => {
+    it("scopes the lead lookup to the workspace before recording the follow-up", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { recordDripFollowUp } = await import("./crm-drip");
+
+      vi.mocked(prisma.demoLead.findFirst).mockResolvedValue({
+        id: "lead-1",
+        workspaceId: "ws-1",
+        followUpCount: 1,
+        convertedContactId: "contact-1",
+      } as any);
+
+      await recordDripFollowUp("ws-1", "lead-1", "Checking in.");
+
+      expect(prisma.demoLead.findFirst).toHaveBeenCalledWith({
+        where: {
+          id: "lead-1",
+          workspaceId: "ws-1",
+        },
+      });
+      expect(prisma.$transaction).toHaveBeenCalled();
     });
   });
 });

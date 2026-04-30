@@ -1,4 +1,4 @@
-import { runInboxTriageAgent, runDailyCheckInAgent, runMeetingSummaryAgent, runActionExtractionAgent, runProposalDraftingAgent, runConstitutionUpdateTriggerAgent, runFinanceReconciliationPrepAgent, runConstitutionSynthesisAgent, runAdviceRoutingAgent, runProcessLintingAgent, runSpendSubmissionAgent } from "@corgtex/agents";
+import { runInboxTriageAgent, runDailyCheckInAgent, runMeetingSummaryAgent, runActionExtractionAgent, runProposalDraftingAgent, runConstitutionUpdateTriggerAgent, runFinanceReconciliationPrepAgent, runConstitutionSynthesisAgent, runAdviceRoutingAgent, runProcessLintingAgent, runSpendSubmissionAgent, runCrmDripFollowupAgent, runCrmEmailExtractionAgent, runCrmLeadEnrichmentAgent } from "@corgtex/agents";
 import { executeAgentRun } from "@corgtex/agents";
 import { runBrainMaintenance, absorbSource } from "@corgtex/agents";
 
@@ -177,6 +177,46 @@ export async function runAgentWorkflowJob(job: {
     });
   }
 
+  if (job.type === "agent.crm-drip-followup") {
+    const demoLeadId = asString(payload.demoLeadId);
+    if (!demoLeadId) return null;
+    return runCrmDripFollowupAgent({
+      workspaceId: job.workspaceId!,
+      triggerRef: job.id,
+      payload: {
+        demoLeadId,
+        followUpNumber: Number(payload.followUpNumber ?? 1),
+      },
+    });
+  }
+
+  if (job.type === "agent.crm-email-extraction") {
+    const qualificationId = asString(payload.qualificationId);
+    if (!qualificationId) return null;
+    return runCrmEmailExtractionAgent({
+      workspaceId: job.workspaceId!,
+      triggerRef: job.id,
+      payload: {
+        eventId: asString(payload.eventId),
+        aggregateId: asString(payload.aggregateId),
+        qualificationId,
+      },
+    });
+  }
+
+  if (job.type === "agent.crm-lead-enrichment") {
+    const email = asString(payload.email);
+    if (!email) return null;
+    return runCrmLeadEnrichmentAgent({
+      workspaceId: job.workspaceId!,
+      triggerRef: job.id,
+      payload: {
+        eventId: asString(payload.eventId),
+        aggregateId: asString(payload.aggregateId),
+        email,
+      },
+    });
+  }
+
   return null;
 }
-

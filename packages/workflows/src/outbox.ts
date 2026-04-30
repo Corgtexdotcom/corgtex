@@ -76,7 +76,7 @@ class RetryableWorkflowJobError extends Error {}
 
 export async function enqueueJob(tx: Prisma.TransactionClient, params: {
   workspaceId?: string | null;
-  eventId: string;
+  eventId?: string | null;
   type: string;
   payload: Prisma.InputJsonObject;
   dedupeKey: string;
@@ -87,7 +87,7 @@ export async function enqueueJob(tx: Prisma.TransactionClient, params: {
     update: {},
     create: {
       workspaceId: params.workspaceId ?? null,
-      eventId: params.eventId,
+      eventId: params.eventId ?? null,
       type: params.type,
       payload: params.payload,
       dedupeKey: params.dedupeKey,
@@ -555,6 +555,63 @@ export async function runPendingJobs(workerId: string, batchSize = DEFAULT_BATCH
   }
 
   return jobs.length;
+}
+
+export async function scheduleDripCampaigns() {
+  if (process.env.CRM_DRIP_ENABLED !== "true") {
+    return 0;
+  }
+
+  const now = new Date();
+  const currentHourUTC = now.getUTCHours();
+
+  if (currentHourUTC !== 10) {
+    return 0; // Only run at 10:00 UTC
+  }
+
+  const todayISO = now.toISOString().split("T")[0];
+  let scheduledCount = 0;
+
+  const dripIntervalDays = Number(process.env.CRM_DRIP_INTERVAL_DAYS || "3");
+  const maxFollowUps = Number(process.env.CRM_DRIP_MAX_FOLLOWUPS || "3");
+
+  const targetDate = new Date(now);
+  targetDate.setDate(targetDate.getDate() - dripIntervalDays);
+
+  const pendingLeads = await prisma.demoLead.findMany({
+    where: {
+      convertedAt: null,
+      followUpCount: { lt: maxFollowUps },
+      OR: [
+        {
+          lastFollowUpAt: { lte: targetDate },
+        },
+        {
+          lastFollowUpAt: null,
+          createdAt: { lte: targetDate },
+        }
+      ]
+    },
+    select: { id: true, workspaceId: true, followUpCount: true },
+  });
+
+  await prisma.$transaction(async (tx) => {
+    for (const lead of pendingLeads) {
+      await enqueueJob(tx, {
+        workspaceId: lead.workspaceId,
+        eventId: null,
+        type: "agent.crm-drip-followup",
+        payload: {
+          demoLeadId: lead.id,
+          followUpNumber: lead.followUpCount + 1,
+        },
+        dedupeKey: `${lead.workspaceId}:drip:${lead.id}:${todayISO}`,
+      });
+      scheduledCount++;
+    }
+  });
+
+  return scheduledCount;
 }
 
 export async function schedulePeriodicJobs() {

@@ -367,5 +367,40 @@ export function deriveJobsForEvent(event: {
     });
   }
 
+  if (event.type === "crm.qualification.submitted" && event.workspaceId) {
+    const channel = readPayloadString(event.payload, "channel");
+    const qualificationId = readPayloadString(event.payload, "qualificationId");
+    if (channel === "email_reply" && qualificationId) {
+      jobs.push({
+        workspaceId: event.workspaceId,
+        eventId: event.id,
+        type: "agent.crm-email-extraction",
+        payload: {
+          eventId: event.id,
+          aggregateId: event.aggregateId,
+          qualificationId,
+        },
+        dedupeKey: `${event.id}:crm-email-extraction`,
+      });
+    }
+  }
+
+  if (event.type === "crm.qualification.approved" && event.workspaceId) {
+    const email = readPayloadString(event.payload, "email");
+    if (email) {
+      jobs.push({
+        workspaceId: event.workspaceId,
+        eventId: event.id,
+        type: "agent.crm-lead-enrichment",
+        payload: {
+          eventId: event.id,
+          aggregateId: event.aggregateId,
+          email,
+        },
+        dedupeKey: `${event.id}:crm-enrichment`,
+      });
+    }
+  }
+
   return jobs;
 }
