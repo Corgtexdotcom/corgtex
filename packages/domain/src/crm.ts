@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { appendEvents } from "./events";
@@ -55,6 +56,7 @@ export async function captureDemoLead(params: {
         workspaceId: workspace.id,
         email,
         source,
+        qualifyToken: randomUUID(),
       },
     });
 

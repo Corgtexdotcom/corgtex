@@ -1,4 +1,4 @@
-import { runInboxTriageAgent, runDailyCheckInAgent, runMeetingSummaryAgent, runActionExtractionAgent, runProposalDraftingAgent, runConstitutionUpdateTriggerAgent, runFinanceReconciliationPrepAgent, runConstitutionSynthesisAgent, runAdviceRoutingAgent, runProcessLintingAgent, runSpendSubmissionAgent } from "@corgtex/agents";
+import { runInboxTriageAgent, runDailyCheckInAgent, runMeetingSummaryAgent, runActionExtractionAgent, runProposalDraftingAgent, runConstitutionUpdateTriggerAgent, runFinanceReconciliationPrepAgent, runConstitutionSynthesisAgent, runAdviceRoutingAgent, runProcessLintingAgent, runSpendSubmissionAgent, runCrmDripFollowupAgent, runCrmEmailExtractionAgent, runCrmLeadEnrichmentAgent } from "@corgtex/agents";
 import { executeAgentRun } from "@corgtex/agents";
 import { runBrainMaintenance, absorbSource } from "@corgtex/agents";
 
@@ -174,6 +174,43 @@ export async function runAgentWorkflowJob(job: {
       description: asString(payload.description) || "Agent-generated spend request.",
       vendor: asString(payload.vendor) || null,
       requesterEmail: asString(payload.requesterEmail) || null,
+    });
+  }
+
+  if (job.type === "agent.crm-drip-followup") {
+    const demoLeadId = asString(payload.demoLeadId);
+    if (!demoLeadId) return null;
+    return runCrmDripFollowupAgent({
+      workspaceId: job.workspaceId!,
+      triggerRef: job.id,
+      payload: {
+        demoLeadId,
+        followUpNumber: Number(payload.followUpNumber ?? 1),
+      },
+    });
+  }
+
+  if (job.type === "agent.crm-email-extraction") {
+    return runCrmEmailExtractionAgent({
+      workspaceId: job.workspaceId!,
+      triggerRef: job.id,
+      payload: {
+        eventId: asString(payload.eventId),
+        aggregateId: asString(payload.aggregateId),
+        qualificationId: asString(payload.qualificationId),
+      },
+    });
+  }
+
+  if (job.type === "agent.crm-lead-enrichment") {
+    return runCrmLeadEnrichmentAgent({
+      workspaceId: job.workspaceId!,
+      triggerRef: job.id,
+      payload: {
+        eventId: asString(payload.eventId),
+        aggregateId: asString(payload.aggregateId),
+        email: asString(payload.email),
+      },
     });
   }
 

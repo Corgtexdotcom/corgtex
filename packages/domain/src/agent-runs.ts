@@ -18,7 +18,10 @@ export type AgentKey =
   | "process-linting"
   | "daily-check-in"
   | "spend-submission"
-  | "slack-agent";
+  | "slack-agent"
+  | "crm-email-extraction"
+  | "crm-drip-followup"
+  | "crm-lead-enrichment";
 
 function jobTypeForAgent(agentKey: AgentKey) {
   switch (agentKey) {
@@ -50,6 +53,12 @@ function jobTypeForAgent(agentKey: AgentKey) {
       return "agent.spend-submission";
     case "slack-agent":
       return "communication.slack.agent";
+    case "crm-email-extraction":
+      return "agent.crm-email-extraction";
+    case "crm-drip-followup":
+      return "agent.crm-drip-followup";
+    case "crm-lead-enrichment":
+      return "agent.crm-lead-enrichment";
   }
 }
 

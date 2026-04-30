@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import { prisma, logger } from "@corgtex/shared";
 import { finalizeExpiredApprovalFlows, autoApproveProposals } from "@corgtex/domain";
-import { dispatchPendingEvents, runPendingJobs, scheduleDailyJobs, schedulePeriodicJobs } from "@corgtex/workflows";
+import { dispatchPendingEvents, runPendingJobs, scheduleDailyJobs, schedulePeriodicJobs, scheduleDripCampaigns } from "@corgtex/workflows";
 import * as Sentry from "@sentry/node";
 
 if (process.env.SENTRY_DSN) {
@@ -72,6 +72,7 @@ async function tick() {
     const processed = await runPendingJobs(workerId, JOB_BATCH_SIZE);
     const scheduled = await scheduleDailyJobs();
     const scheduledPeriodic = await schedulePeriodicJobs();
+    const scheduledDrip = await scheduleDripCampaigns();
 
     tickCount++;
     totalDispatched += dispatched;
@@ -79,11 +80,12 @@ async function tick() {
     totalFinalized += finalized;
     totalScheduledDaily += scheduled;
     totalScheduledPeriodic += scheduledPeriodic;
+    // not tracking scheduledDrip in prometheus metrics for now to avoid boilerplate
     lastTickMs = Date.now() - tickStart;
     lastError = null;
     lastSuccessfulTickAt = new Date().toISOString();
 
-    if (finalized > 0 || dispatched > 0 || processed > 0 || scheduled > 0 || scheduledPeriodic > 0) {
+    if (finalized > 0 || dispatched > 0 || processed > 0 || scheduled > 0 || scheduledPeriodic > 0 || scheduledDrip > 0) {
       lastWorkAt = lastSuccessfulTickAt;
       log("info", {
         event: "tick",
