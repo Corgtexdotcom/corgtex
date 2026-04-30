@@ -56,8 +56,8 @@ export function DemoGateForm() {
   }
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "8px" }}>
-      <form onSubmit={handleSubmit} className="demo-gate-form" style={{ display: "flex", gap: "8px", alignItems: "center", justifyContent: "center", flexWrap: "wrap" }}>
+    <div className="demo-gate-shell">
+      <form onSubmit={handleSubmit} className="demo-gate-form">
         <input
           type="email"
           placeholder={t("emailPlaceholder")}

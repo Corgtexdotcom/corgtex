@@ -37,6 +37,10 @@ export function Navbar() {
     return () => window.removeEventListener("scroll", handleScroll);
   }, []);
 
+  useEffect(() => {
+    setMobileOpen(false);
+  }, [pathname]);
+
   return (
     <>
       <nav
@@ -86,6 +90,8 @@ export function Navbar() {
             className="navbar-toggle"
             onClick={() => setMobileOpen(!mobileOpen)}
             aria-label={t("toggle")}
+            aria-controls="site-mobile-menu"
+            aria-expanded={mobileOpen}
           >
             <span
               style={
@@ -106,7 +112,7 @@ export function Navbar() {
         </div>
       </nav>
 
-      <div className={`mobile-menu ${mobileOpen ? "open" : ""}`}>
+      <div id="site-mobile-menu" className={`mobile-menu ${mobileOpen ? "open" : ""}`}>
         {NAV_LINKS.map((link) => (
           <a
             key={link.href}
@@ -127,6 +133,7 @@ export function Navbar() {
           className="btn btn-secondary"
           target="_blank"
           rel="noopener noreferrer"
+          onClick={() => setMobileOpen(false)}
         >
           {t("demo")}
         </a>
@@ -135,6 +142,7 @@ export function Navbar() {
           className="btn btn-primary"
           target="_blank"
           rel="noopener noreferrer"
+          onClick={() => setMobileOpen(false)}
         >
           {t("briefing")}
         </a>

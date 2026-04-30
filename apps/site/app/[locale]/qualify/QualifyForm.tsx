@@ -20,18 +20,18 @@ function QualifyFormInner() {
 
   if (!token) {
     return (
-      <div className="container max-w-2xl mx-auto py-20 text-center px-4">
-        <h1 className="text-3xl font-bold mb-4">{t("invalidTitle")}</h1>
-        <p className="text-[var(--text-secondary)]">{t("invalidBody")}</p>
+      <div className="container qualify-state">
+        <h1>{t("invalidTitle")}</h1>
+        <p>{t("invalidBody")}</p>
       </div>
     );
   }
 
   if (success) {
     return (
-      <div className="container max-w-2xl mx-auto py-20 text-center px-4">
-        <h1 className="text-3xl font-bold mb-4">{t("successTitle")}</h1>
-        <p className="text-[var(--text-secondary)]">{t("successBody")}</p>
+      <div className="container qualify-state">
+        <h1>{t("successTitle")}</h1>
+        <p>{t("successBody")}</p>
       </div>
     );
   }
@@ -71,47 +71,47 @@ function QualifyFormInner() {
   };
 
   return (
-    <div className="container max-w-2xl mx-auto py-12 md:py-20 px-4">
-      <div className="mb-8 text-center">
-        <h1 className="text-3xl font-bold mb-4">{t("title")}</h1>
-        <p className="text-[var(--text-secondary)]">{t("description")}</p>
+    <div className="container qualify-shell">
+      <div className="qualify-header">
+        <h1>{t("title")}</h1>
+        <p>{t("description")}</p>
       </div>
 
-      <form onSubmit={handleSubmit} className="flex flex-col gap-6">
+      <form onSubmit={handleSubmit} className="qualify-form">
         {error && (
-          <div className="p-4 bg-[var(--accent-red)] bg-opacity-10 text-[var(--accent-red)] rounded-md text-sm">
+          <div className="form-alert">
             {error}
           </div>
         )}
 
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-          <div className="flex flex-col gap-2">
-            <label className="font-medium text-sm text-[var(--text-primary)]">{t("companyName")}</label>
-            <input type="text" required value={companyName} onChange={(e) => setCompanyName(e.target.value)} className="form-input w-full" disabled={loading} placeholder="Acme Corp" />
+        <div className="qualify-grid">
+          <div className="form-field">
+            <label className="form-label">{t("companyName")}</label>
+            <input type="text" required value={companyName} onChange={(e) => setCompanyName(e.target.value)} className="form-input" disabled={loading} placeholder="Acme Corp" />
           </div>
-          <div className="flex flex-col gap-2">
-            <label className="font-medium text-sm text-[var(--text-primary)]">{t("website")}</label>
-            <input type="text" required value={website} onChange={(e) => setWebsite(e.target.value)} className="form-input w-full" disabled={loading} placeholder="acme.com" />
+          <div className="form-field">
+            <label className="form-label">{t("website")}</label>
+            <input type="text" required value={website} onChange={(e) => setWebsite(e.target.value)} className="form-input" disabled={loading} placeholder="acme.com" />
           </div>
         </div>
 
-        <div className="flex flex-col gap-2">
-          <label className="font-medium text-sm text-[var(--text-primary)]">{t("roleTitle")}</label>
-          <input type="text" value={roleTitle} onChange={(e) => setRoleTitle(e.target.value)} className="form-input w-full" disabled={loading} placeholder={t("rolePlaceholder")} />
+        <div className="form-field">
+          <label className="form-label">{t("roleTitle")}</label>
+          <input type="text" value={roleTitle} onChange={(e) => setRoleTitle(e.target.value)} className="form-input" disabled={loading} placeholder={t("rolePlaceholder")} />
         </div>
 
-        <div className="flex flex-col gap-2">
-          <label className="font-medium text-sm text-[var(--text-primary)]">{t("aiExperience")}</label>
-          <textarea required value={aiExperience} onChange={(e) => setAiExperience(e.target.value)} className="form-input w-full min-h-[100px] resize-y" disabled={loading} placeholder={t("aiPlaceholder")} />
+        <div className="form-field">
+          <label className="form-label">{t("aiExperience")}</label>
+          <textarea required value={aiExperience} onChange={(e) => setAiExperience(e.target.value)} className="form-input form-textarea" disabled={loading} placeholder={t("aiPlaceholder")} />
         </div>
 
-        <div className="flex flex-col gap-2">
-          <label className="font-medium text-sm text-[var(--text-primary)]">{t("helpNeeded")}</label>
-          <textarea required value={helpNeeded} onChange={(e) => setHelpNeeded(e.target.value)} className="form-input w-full min-h-[100px] resize-y" disabled={loading} placeholder={t("helpPlaceholder")} />
+        <div className="form-field">
+          <label className="form-label">{t("helpNeeded")}</label>
+          <textarea required value={helpNeeded} onChange={(e) => setHelpNeeded(e.target.value)} className="form-input form-textarea" disabled={loading} placeholder={t("helpPlaceholder")} />
         </div>
 
-        <div className="mt-4">
-          <button type="submit" className="btn btn-primary w-full py-3" disabled={loading}>
+        <div>
+          <button type="submit" className="btn btn-primary full-width" disabled={loading}>
             {loading ? t("submitting") : t("submit")}
           </button>
         </div>
@@ -124,7 +124,7 @@ export function QualifyForm() {
   const t = useTranslations("qualify");
 
   return (
-    <Suspense fallback={<div className="container max-w-2xl mx-auto py-20 text-center">{t("loading")}</div>}>
+    <Suspense fallback={<div className="container qualify-state">{t("loading")}</div>}>
       <QualifyFormInner />
     </Suspense>
   );
