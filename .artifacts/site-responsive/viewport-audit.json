@@ -1,6 +1,10 @@
 {
   "baseURL": "http://localhost:3020",
   "failures": [],
+  "tabletGrid": {
+    "gridTemplateColumns": "351.766px 351.781px",
+    "columns": 2
+  },
   "summaries": [
     {
       "route": "/",
