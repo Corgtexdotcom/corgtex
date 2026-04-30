@@ -84,6 +84,7 @@ import {
   enqueueExternalDataSourceSync,
   archiveWorkspaceToolLink,
   listWorkspaceToolLinks,
+  revealWorkspaceToolLinkCredential,
   upsertWorkspaceToolLink,
   listRuntimeJobs,
   listFailedJobs,
@@ -92,6 +93,7 @@ import {
   purgeWorkspaceArtifact,
   restoreWorkspaceArtifact,
 } from "@corgtex/domain";
+import type { AgentScope } from "@corgtex/domain";
 import { searchIndexedKnowledge } from "@corgtex/knowledge";
 import { processConversationTurn } from "@corgtex/agents";
 import { prisma, env } from "@corgtex/shared";
@@ -138,9 +140,112 @@ const DESTRUCTIVE_TOOL_NAMES = new Set([
   "discard_failed_job",
 ]);
 
+const SENSITIVE_TOOL_NAMES = new Set([
+  "reveal_tool_link_credential",
+]);
+
+type ToolCapability = {
+  scopes: AgentScope[];
+  destructive?: boolean;
+  sensitive?: boolean;
+};
+
+const TOOL_CAPABILITIES = {
+  chat: { scopes: ["conversations:write"] },
+  search_knowledge: { scopes: ["brain:read"] },
+  search: { scopes: ["brain:read"] },
+  fetch: { scopes: ["brain:read"] },
+  get_workspace_info: { scopes: ["workspace:read"] },
+  daily_overview: { scopes: ["workspace:read", "actions:read", "proposals:read", "tensions:read", "meetings:read", "finance:read"] },
+  record_support_audit: { scopes: ["support:write"], sensitive: true },
+  list_integrations: { scopes: ["integrations:read"] },
+  list_data_sources: { scopes: ["data-sources:read"] },
+  sync_data_source: { scopes: ["data-sources:write"], sensitive: true },
+  list_tool_links: { scopes: ["tools:read"] },
+  upsert_tool_link: { scopes: ["tools:write"], sensitive: true },
+  reveal_tool_link_credential: { scopes: ["tools:credentials:read"], sensitive: true },
+  archive_tool_link: { scopes: ["tools:write"], destructive: true },
+  list_agent_runs: { scopes: ["agents:read"] },
+  list_runtime_jobs: { scopes: ["runtime:read"] },
+  list_failed_jobs: { scopes: ["runtime:read"] },
+  retry_failed_job: { scopes: ["runtime:write"], destructive: true, sensitive: true },
+  discard_failed_job: { scopes: ["runtime:write"], destructive: true, sensitive: true },
+  upload_document_text: { scopes: ["documents:write"], sensitive: true },
+  list_proposals: { scopes: ["proposals:read"] },
+  get_proposal: { scopes: ["proposals:read"] },
+  create_proposal: { scopes: ["proposals:write"] },
+  update_proposal: { scopes: ["proposals:write"] },
+  submit_proposal: { scopes: ["proposals:write"] },
+  archive_proposal: { scopes: ["proposals:write"], destructive: true },
+  publish_proposal: { scopes: ["proposals:write"] },
+  return_proposal_to_draft: { scopes: ["proposals:write"] },
+  list_actions: { scopes: ["actions:read"] },
+  create_action: { scopes: ["actions:write"] },
+  update_action: { scopes: ["actions:write"] },
+  complete_action: { scopes: ["actions:write"] },
+  return_action_to_draft: { scopes: ["actions:write"] },
+  delete_action: { scopes: ["actions:write"], destructive: true },
+  list_tensions: { scopes: ["tensions:read"] },
+  create_tension: { scopes: ["tensions:write"] },
+  update_tension: { scopes: ["tensions:write"] },
+  return_tension_to_draft: { scopes: ["tensions:write"] },
+  upvote_tension: { scopes: ["tensions:write"] },
+  delete_tension: { scopes: ["tensions:write"], destructive: true },
+  list_goals: { scopes: ["goals:read"] },
+  get_goal: { scopes: ["goals:read"] },
+  create_goal: { scopes: ["goals:write"] },
+  update_goal: { scopes: ["goals:write"] },
+  return_goal_to_draft: { scopes: ["goals:write"] },
+  archive_goal: { scopes: ["goals:write"], destructive: true },
+  list_members: { scopes: ["members:read"] },
+  create_member: { scopes: ["members:write"], sensitive: true },
+  update_member: { scopes: ["members:write"], sensitive: true },
+  deactivate_member: { scopes: ["members:write"], destructive: true, sensitive: true },
+  list_meetings: { scopes: ["meetings:read"] },
+  get_meeting: { scopes: ["meetings:read"] },
+  upload_meeting: { scopes: ["meetings:write"], sensitive: true },
+  delete_meeting: { scopes: ["meetings:write"], destructive: true },
+  list_articles: { scopes: ["brain:read"] },
+  get_article: { scopes: ["brain:read"] },
+  create_article: { scopes: ["brain:write"] },
+  update_article: { scopes: ["brain:write"] },
+  delete_article: { scopes: ["brain:write"], destructive: true },
+  publish_article: { scopes: ["brain:write"] },
+  return_article_to_draft: { scopes: ["brain:write"] },
+  create_discussion_thread: { scopes: ["brain:write"] },
+  add_discussion_comment: { scopes: ["brain:write"] },
+  resolve_discussion: { scopes: ["brain:write"] },
+  list_cycles: { scopes: ["cycles:read"] },
+  get_cycle: { scopes: ["cycles:read"] },
+  list_cycle_updates: { scopes: ["cycles:read"] },
+  list_allocations: { scopes: ["cycles:read"] },
+  create_cycle: { scopes: ["cycles:write"] },
+  update_cycle: { scopes: ["cycles:write"] },
+  list_circles: { scopes: ["circles:read"] },
+  get_constitution: { scopes: ["governance:read"] },
+  list_policies: { scopes: ["governance:read"] },
+  list_approval_policies: { scopes: ["governance:read"] },
+  list_spends: { scopes: ["finance:read"] },
+  create_spend: { scopes: ["finance:write"], sensitive: true },
+  create_spend_draft: { scopes: ["finance:write"], sensitive: true },
+  submit_spend: { scopes: ["finance:write"] },
+  update_spend: { scopes: ["finance:write"], sensitive: true },
+  return_spend_to_draft: { scopes: ["finance:write"] },
+  archive_spend: { scopes: ["finance:write"], destructive: true },
+  list_ledger_accounts: { scopes: ["finance:read"] },
+  archive_ledger_account: { scopes: ["finance:write"], destructive: true },
+  archive_artifact: { scopes: ["archive:write"], destructive: true },
+  list_archived_artifacts: { scopes: ["archive:read"] },
+  restore_artifact: { scopes: ["archive:write"] },
+  purge_artifact: { scopes: ["archive:write"], destructive: true },
+  list_ledger_transactions: { scopes: ["finance:read"] },
+} satisfies Record<string, ToolCapability>;
+
 function annotationsForTool(name: string) {
   const readOnlyHint = /^(search|fetch|list_|get_|daily_overview$)/.test(name);
-  const destructiveHint = DESTRUCTIVE_TOOL_NAMES.has(name);
+  const capability = TOOL_CAPABILITIES[name as keyof typeof TOOL_CAPABILITIES];
+  const destructiveHint = DESTRUCTIVE_TOOL_NAMES.has(name) || Boolean(capability?.destructive);
+  const sensitiveHint = SENSITIVE_TOOL_NAMES.has(name) || Boolean(capability?.sensitive);
   return {
     title: name
       .split("_")
@@ -148,6 +253,7 @@ function annotationsForTool(name: string) {
       .join(" "),
     readOnlyHint,
     destructiveHint,
+    sensitiveHint,
     idempotentHint: readOnlyHint,
     openWorldHint: false,
   };
@@ -182,8 +288,25 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
   });
 
   const { actor, workspaceId } = sessionCtx;
-  const tool = (name: string, description: string, inputSchema: Record<string, unknown>, handler: unknown) =>
-    server.tool(name, description, inputSchema, annotationsForTool(name), handler);
+  const sessionActorId = actor.kind === "user"
+    ? actor.user.id
+    : actor.credentialId ?? actor.agentIdentityId ?? actor.label ?? actor.authProvider;
+  const hasToolCapability = (name: string): name is keyof typeof TOOL_CAPABILITIES =>
+    Object.prototype.hasOwnProperty.call(TOOL_CAPABILITIES, name);
+  const requireToolCapability = (name: keyof typeof TOOL_CAPABILITIES) => {
+    for (const scope of TOOL_CAPABILITIES[name].scopes) {
+      requireScope(sessionCtx, scope);
+    }
+  };
+  const tool = (name: string, description: string, inputSchema: Record<string, unknown>, handler: unknown) => {
+    const guardedHandler = typeof handler === "function" && hasToolCapability(name)
+      ? async (...args: unknown[]) => {
+        requireToolCapability(name);
+        return handler(...args);
+      }
+      : handler;
+    return server.tool(name, description, inputSchema, annotationsForTool(name), guardedHandler);
+  };
 
   // ===========================================================================
   // CONVERSATION + SEARCH
@@ -200,10 +323,11 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       requireScope(sessionCtx, "conversations:write");
       const result = await processConversationTurn({
         workspaceId,
-        sessionId: `mcp-${workspaceId}`,
-        userId: "",
+        sessionId: `mcp-${workspaceId}-${sessionActorId}`,
+        userId: actor.kind === "user" ? actor.user.id : "",
         agentKey: "assistant",
         userMessage: message,
+        actor,
       });
       return jsonResult({ assistantMessage: result.assistantMessage });
     },
@@ -514,7 +638,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     "List shared workspace tool links and access notes. Does not return decrypted credentials.",
     {},
     async () => {
-      requireScope(sessionCtx, "tools:read");
+      requireToolCapability("list_tool_links");
       const links = await listWorkspaceToolLinks(actor, { workspaceId });
       return jsonResult({ items: links, webUrl: webUrl(workspaceId, `/tools`) });
     },
@@ -553,7 +677,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       credentialSecret?: string | null;
       circleIds?: string[];
     }) => {
-      requireScope(sessionCtx, "tools:write");
+      requireToolCapability("upsert_tool_link");
       const link = await upsertWorkspaceToolLink(actor, {
         workspaceId,
         toolLinkId: params.toolLinkId,
@@ -580,6 +704,23 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
   );
 
   tool(
+    "reveal_tool_link_credential",
+    "Reveal the saved credential for a shared workspace tool link. This is sensitive, audited, and follows the same workspace role rules as the Tools tab.",
+    {
+      toolLinkId: z.string(),
+    },
+    async ({ toolLinkId }: { toolLinkId: string }) => {
+      requireToolCapability("reveal_tool_link_credential");
+      const credential = await revealWorkspaceToolLinkCredential(actor, { workspaceId, toolLinkId });
+      return jsonResult({
+        toolLinkId,
+        credentialLabel: credential.credentialLabel,
+        credentialSecret: credential.credentialSecret,
+      });
+    },
+  );
+
+  tool(
     "archive_tool_link",
     "Archive a shared workspace tool link so it stops appearing in active tools.",
     {
@@ -587,7 +728,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       reason: z.string().nullable().optional(),
     },
     async ({ toolLinkId, reason }: { toolLinkId: string; reason?: string | null }) => {
-      requireScope(sessionCtx, "tools:write");
+      requireToolCapability("archive_tool_link");
       await archiveWorkspaceToolLink(actor, { workspaceId, toolLinkId, reason });
       return jsonResult({ id: toolLinkId, archived: true, webUrl: webUrl(workspaceId, `/audit?tab=archive`) });
     },

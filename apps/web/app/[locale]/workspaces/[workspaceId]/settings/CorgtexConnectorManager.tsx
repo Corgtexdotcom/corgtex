@@ -44,7 +44,7 @@ const SETUP_CARDS: SetupCard[] = [
     steps: [
       "In ChatGPT, open Settings -> Apps -> Advanced settings and turn on Developer mode if asked.",
       "Click Create app, name it Corgtex, paste the Corgtex connector URL as the MCP server URL, choose OAuth or dynamic client registration if ChatGPT asks, then click Create.",
-      "Start a new chat, open the + menu, choose Apps or Developer Mode, select Corgtex, and complete the browser sign-in.",
+      "Start a new chat, open the + menu, choose Apps or Developer Mode, select Corgtex, and complete the browser sign-in. The agent receives your current Corgtex role in the selected workspace.",
     ],
     note:
       "For Business, Enterprise, or Edu workspaces, an admin may need to create or publish the app from Workspace settings -> Apps -> Create or Drafts before members can use it.",
@@ -58,7 +58,7 @@ const SETUP_CARDS: SetupCard[] = [
     steps: [
       "In Claude, open Customize -> Connectors.",
       "Click +, choose Add custom connector, and paste the Corgtex connector URL as the remote MCP server URL.",
-      "Click Add, then Connect, and finish the browser sign-in.",
+      "Click Add, then Connect, and finish the browser sign-in. Corgtex authorizes the connector with your current workspace role.",
     ],
     note:
       "For Team or Enterprise, owners add it from Organization settings -> Connectors -> Add -> Custom -> Web. Members then connect it from Customize -> Connectors.",
@@ -72,7 +72,7 @@ const SETUP_CARDS: SetupCard[] = [
     steps: [
       "Click Add to Cursor.",
       "Approve the install prompt in Cursor.",
-      "When Cursor asks to authenticate, complete the browser sign-in.",
+      "When Cursor asks to authenticate, complete the browser sign-in. Corgtex scopes Tools and workspace actions to your role.",
     ],
   },
   {
@@ -84,7 +84,7 @@ const SETUP_CARDS: SetupCard[] = [
     steps: [
       "Paste the copied command into Terminal.",
       "Open Claude Code and type /mcp.",
-      "Select corgtex, choose authenticate or connect, and finish the browser sign-in.",
+      "Select corgtex, choose authenticate or connect, and finish the browser sign-in. Sensitive actions such as revealing saved tool credentials are audited.",
     ],
     note: "User scope makes Corgtex available across projects. Use local scope only if you want it for one project.",
   },
@@ -97,7 +97,7 @@ const SETUP_CARDS: SetupCard[] = [
     steps: [
       "Choose remote MCP, Streamable HTTP, or HTTP MCP server in your client.",
       "Paste the Corgtex connector URL.",
-      "Use browser OAuth when the client asks for authentication.",
+      "Use browser OAuth when the client asks for authentication. The connector acts with your selected workspace role.",
     ],
   },
 ];
@@ -343,7 +343,8 @@ export function CorgtexConnectorManager({ connectorUrl, workspaceName }: Props) 
           <div style={{ flex: 1, minWidth: 0 }}>
             <strong className="nr-item-title">Corgtex connector</strong>
             <div className="nr-item-meta" style={{ fontSize: "0.85rem", marginTop: 4 }}>
-              One connector for ChatGPT, Claude, Cursor, Claude Code, and other MCP clients.
+              One connector for ChatGPT, Claude, Cursor, Claude Code, and other MCP clients. It can use workspace
+              Tools and saved tool credentials as your current Corgtex role allows; sensitive actions are audited.
               {workspaceName ? ` This workspace appears during sign-in as ${workspaceName}.` : ""}
             </div>
           </div>

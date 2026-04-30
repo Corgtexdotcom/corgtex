@@ -21,6 +21,16 @@ import {
   assignRoleAction,
   unassignRoleAction
 } from "./tools/members";
+import {
+  archiveToolLinkAction,
+  archiveToolLinkTool,
+  listToolLinksAction,
+  listToolLinksTool,
+  revealToolLinkCredentialAction,
+  revealToolLinkCredentialTool,
+  upsertToolLinkAction,
+  upsertToolLinkTool,
+} from "./tools/tool-links";
 import type { AppActor } from "@corgtex/shared";
 
 const MAX_HISTORY_TURNS = 20;
@@ -41,16 +51,19 @@ READ TOOLS:
 - 'query_tensions', 'query_actions', 'query_proposals', 'query_goals' — exact, filtered lists
 - 'query_org_structure' — circles, roles, and members
 - 'search_brain' — semantic search across all indexed knowledge
+- 'list_tool_links' — shared workspace tools, access notes, and credential presence
 
 WRITE TOOLS:
 - 'create_tension', 'create_action' — create new items
 - 'update_tension', 'update_action' — update status, assignments, content
 - 'create_proposal' — draft and create a new governance proposal
 - 'create_goal' — create a goal in the Goals tab with cadence and optional key results
+- 'upsert_tool_link', 'archive_tool_link', 'reveal_tool_link_credential' — manage and use the shared Tools directory
 
 When asked about current state, ALWAYS use a query tool instead of guessing.
 When asked to create or update something, execute the write tool immediately — do not ask for confirmation. Report what you did clearly after executing.
 Every write action is fully audited and traceable.
+Tool credential reveals are sensitive and audited. Use them only when the user asks to access or reveal a saved tool credential.
 
 Be concise, direct, and action-oriented. When relevant, cite workspace knowledge.
 If the user wants to create something (proposal, tension, action, or goal), use the appropriate workspace tool directly. If they say "add it to the goals tab" or "put it in goals", create goals rather than tensions, actions, or proposals.
@@ -108,6 +121,10 @@ const TOOLS = [
   updateMemberTool,
   assignRoleTool,
   unassignRoleTool,
+  listToolLinksTool,
+  upsertToolLinkTool,
+  archiveToolLinkTool,
+  revealToolLinkCredentialTool,
 ];
 
 const TOOL_HANDLERS: Record<string, (actor: AppActor, ctx: ConversationContext, args: any) => Promise<unknown>> = {
@@ -132,8 +149,19 @@ const TOOL_HANDLERS: Record<string, (actor: AppActor, ctx: ConversationContext, 
   update_member: async (actor, ctx, args) => updateMemberAction(actor, ctx, args),
   assign_role: async (actor, ctx, args) => assignRoleAction(actor, ctx, args),
   unassign_role: async (actor, ctx, args) => unassignRoleAction(actor, ctx, args),
+  list_tool_links: async (actor, ctx) => listToolLinksAction(actor, ctx),
+  upsert_tool_link: async (actor, ctx, args) => upsertToolLinkAction(actor, ctx, args),
+  archive_tool_link: async (actor, ctx, args) => archiveToolLinkAction(actor, ctx, args),
+  reveal_tool_link_credential: async (actor, ctx, args) => revealToolLinkCredentialAction(actor, ctx, args),
 };
 
+function requireConversationToolActor(ctx: ConversationContext): AppActor {
+  if (!ctx.actor) {
+    throw new Error("Authenticated actor is required for Corgtex tool execution.");
+  }
+
+  return ctx.actor;
+}
 
 export async function processConversationTurn(ctx: ConversationContext): Promise<{
   assistantMessage: string;
@@ -256,13 +284,7 @@ export async function processConversationTurn(ctx: ConversationContext): Promise
   // Execute tools if the LLM requests it
   if (response.tool_calls && response.tool_calls.length > 0) {
     messages.push({ role: "assistant", content: response.content || "", tool_calls: response.tool_calls });
-    
-    const actor: AppActor = ctx.actor ?? {
-      kind: "agent",
-      authProvider: "bootstrap",
-      label: "chat-agent",
-      workspaceIds: [ctx.workspaceId],
-    };
+    const actor = requireConversationToolActor(ctx);
 
     for (const call of response.tool_calls) {
       const handler = TOOL_HANDLERS[call.function.name];
@@ -412,13 +434,7 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
 
   if (firstResult.tool_calls && firstResult.tool_calls.length > 0) {
     messages.push({ role: "assistant", content: firstResult.content || "", tool_calls: firstResult.tool_calls });
-    
-    const actor: AppActor = ctx.actor ?? {
-      kind: "agent",
-      authProvider: "bootstrap",
-      label: "chat-agent",
-      workspaceIds: [ctx.workspaceId],
-    };
+    const actor = requireConversationToolActor(ctx);
 
     for (const call of firstResult.tool_calls) {
       const handler = TOOL_HANDLERS[call.function.name];

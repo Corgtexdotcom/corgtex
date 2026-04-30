@@ -64,6 +64,20 @@ describe("authenticateMcpRequest", () => {
     }, "actions:write")).toThrow("MCP credential is missing the required scope");
   });
 
+  it("allows sensitive tool credentials only when the OAuth session has the delegated scope", async () => {
+    const { requireScope } = await import("./auth");
+    const ctx = {
+      actor: { kind: "user" as const, user: { id: "user-1", email: "user@example.com", displayName: "User" } },
+      authKind: "oauth" as const,
+      workspaceId: "ws-1",
+      scopes: ["tools:read", "tools:credentials:read"],
+      instanceSlug: "client-a",
+    };
+
+    expect(() => requireScope(ctx, "tools:credentials:read")).not.toThrow();
+    expect(() => requireScope({ ...ctx, scopes: ["tools:read"] }, "tools:credentials:read")).toThrow("MCP credential is missing the required scope");
+  });
+
   it("keeps bootstrap agent credentials unrestricted", async () => {
     const { requireScope } = await import("./auth");
 

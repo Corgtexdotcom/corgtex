@@ -2,14 +2,14 @@ import { createHash } from "node:crypto";
 import { prisma, randomOpaqueToken, sha256, env } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { AppError, invariant } from "./errors";
-import { ALL_SCOPES, type AgentScope } from "./agent-auth";
+import { ALL_SCOPES, DELEGATED_DEFAULT_SCOPES, type AgentScope } from "./agent-auth";
 
 const MCP_CLIENT_PREFIX = "mcp_client_";
 const MCP_CODE_PREFIX = "mcp_code_";
 const MCP_ACCESS_TOKEN_PREFIX = "mcp_at_";
 const MCP_REFRESH_TOKEN_PREFIX = "mcp_rt_";
 
-export const MCP_CONNECTOR_DEFAULT_SCOPES: AgentScope[] = [
+export const MCP_CONNECTOR_LEGACY_DEFAULT_SCOPES: AgentScope[] = [
   "workspace:read",
   "brain:read",
   "governance:read",
@@ -24,8 +24,10 @@ export const MCP_CONNECTOR_DEFAULT_SCOPES: AgentScope[] = [
   "conversations:write",
 ];
 
+export const MCP_CONNECTOR_DEFAULT_SCOPES: AgentScope[] = DELEGATED_DEFAULT_SCOPES;
+
 export const MCP_CONNECTOR_READ_ONLY_SCOPES: AgentScope[] = MCP_CONNECTOR_DEFAULT_SCOPES.filter(
-  (scope) => scope !== "conversations:write",
+  (scope) => !scope.endsWith(":write"),
 );
 
 type InstanceStatus = "active" | "disabled";
@@ -165,10 +167,20 @@ function validateMcpScopes(scopes: string[] | undefined): AgentScope[] {
   return effective as AgentScope[];
 }
 
-function requestedScopes(scopes: string[] | undefined, allowedScopes: string[]) {
+export function resolveMcpClientAllowedScopes(scopes: string[]): AgentScope[] {
   const normalized = normalizeScopes(scopes);
-  const effective = normalized.length > 0 ? normalized : allowedScopes;
-  const forbidden = effective.filter((scope) => !allowedScopes.includes(scope));
+  const legacyDefault = new Set(MCP_CONNECTOR_LEGACY_DEFAULT_SCOPES);
+  const matchesLegacyDefault = normalized.length === legacyDefault.size &&
+    normalized.every((scope) => legacyDefault.has(scope as AgentScope));
+
+  return matchesLegacyDefault ? MCP_CONNECTOR_DEFAULT_SCOPES : (normalized as AgentScope[]);
+}
+
+function requestedScopes(scopes: string[] | undefined, allowedScopes: string[]) {
+  const effectiveAllowedScopes = resolveMcpClientAllowedScopes(allowedScopes);
+  const normalized = normalizeScopes(scopes);
+  const effective = normalized.length > 0 ? normalized : effectiveAllowedScopes;
+  const forbidden = effective.filter((scope) => !effectiveAllowedScopes.includes(scope as AgentScope));
   invariant(
     forbidden.length === 0,
     400,
