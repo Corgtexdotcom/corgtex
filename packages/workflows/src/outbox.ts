@@ -76,7 +76,7 @@ class RetryableWorkflowJobError extends Error {}
 
 export async function enqueueJob(tx: Prisma.TransactionClient, params: {
   workspaceId?: string | null;
-  eventId: string;
+  eventId?: string | null;
   type: string;
   payload: Prisma.InputJsonObject;
   dedupeKey: string;
@@ -87,7 +87,7 @@ export async function enqueueJob(tx: Prisma.TransactionClient, params: {
     update: {},
     create: {
       workspaceId: params.workspaceId ?? null,
-      eventId: params.eventId,
+      eventId: params.eventId ?? null,
       type: params.type,
       payload: params.payload,
       dedupeKey: params.dedupeKey,
@@ -597,10 +597,9 @@ export async function scheduleDripCampaigns() {
 
   await prisma.$transaction(async (tx) => {
     for (const lead of pendingLeads) {
-      const eventId = `drip-${lead.id}-${now.getTime()}`;
       await enqueueJob(tx, {
         workspaceId: lead.workspaceId,
-        eventId,
+        eventId: null,
         type: "agent.crm-drip-followup",
         payload: {
           demoLeadId: lead.id,

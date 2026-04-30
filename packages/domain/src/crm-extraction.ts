@@ -9,10 +9,13 @@ export async function applyExtractionResult(
     website?: string | null;
     aiExperience?: string | null;
     helpNeeded?: string | null;
-  }
+  },
 ) {
-  const qualification = await prisma.crmQualification.findUnique({
-    where: { id: qualificationId },
+  const qualification = await prisma.crmQualification.findFirst({
+    where: {
+      id: qualificationId,
+      workspaceId,
+    },
   });
 
   invariant(qualification && qualification.workspaceId === workspaceId, 404, "NOT_FOUND", "Qualification not found.");
@@ -26,7 +29,7 @@ export async function applyExtractionResult(
 
   if (Object.keys(updateData).length > 0) {
     await prisma.crmQualification.update({
-      where: { id: qualificationId },
+      where: { id: qualification.id },
       data: updateData,
     });
   }

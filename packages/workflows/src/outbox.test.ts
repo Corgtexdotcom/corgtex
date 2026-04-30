@@ -118,6 +118,79 @@ describe("deriveJobsForEvent", () => {
     expect(jobs[1]?.type).toBe("knowledge.sync.event");
   });
 
+  it("creates CRM email extraction jobs for inbound reply qualifications", () => {
+    const jobs = deriveJobsForEvent({
+      id: "event-crm-email",
+      type: "crm.qualification.submitted",
+      workspaceId: "workspace-1",
+      aggregateType: "CrmQualification",
+      aggregateId: "qualification-1",
+      payload: {
+        qualificationId: "qualification-1",
+        email: "lead@example.com",
+        channel: "email_reply",
+      },
+    });
+
+    expect(jobs).toEqual([
+      {
+        workspaceId: "workspace-1",
+        eventId: "event-crm-email",
+        type: "agent.crm-email-extraction",
+        payload: {
+          eventId: "event-crm-email",
+          aggregateId: "qualification-1",
+          qualificationId: "qualification-1",
+        },
+        dedupeKey: "event-crm-email:crm-email-extraction",
+      },
+    ]);
+  });
+
+  it("does not create CRM email extraction jobs for form qualifications", () => {
+    const jobs = deriveJobsForEvent({
+      id: "event-crm-form",
+      type: "crm.qualification.submitted",
+      workspaceId: "workspace-1",
+      aggregateType: "CrmQualification",
+      aggregateId: "qualification-1",
+      payload: {
+        qualificationId: "qualification-1",
+        email: "lead@example.com",
+      },
+    });
+
+    expect(jobs).toEqual([]);
+  });
+
+  it("creates CRM enrichment jobs for approved qualifications", () => {
+    const jobs = deriveJobsForEvent({
+      id: "event-crm-approved",
+      type: "crm.qualification.approved",
+      workspaceId: "workspace-1",
+      aggregateType: "CrmQualification",
+      aggregateId: "qualification-1",
+      payload: {
+        qualificationId: "qualification-1",
+        email: "lead@example.com",
+      },
+    });
+
+    expect(jobs).toEqual([
+      {
+        workspaceId: "workspace-1",
+        eventId: "event-crm-approved",
+        type: "agent.crm-lead-enrichment",
+        payload: {
+          eventId: "event-crm-approved",
+          aggregateId: "qualification-1",
+          email: "lead@example.com",
+        },
+        dedupeKey: "event-crm-approved:crm-enrichment",
+      },
+    ]);
+  });
+
   it("caps retry backoff at five minutes", () => {
     expect(calculateRetryDelayMs(1)).toBe(5_000);
     expect(calculateRetryDelayMs(2)).toBe(10_000);

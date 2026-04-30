@@ -1,8 +1,20 @@
 import type { AgentTriggerType } from "@prisma/client";
 import { defaultModelGateway } from "@corgtex/models";
 import { executeAgentRun } from "../runtime";
-import { prisma } from "@corgtex/shared";
+import { prisma, sendEmail } from "@corgtex/shared";
 import { recordDripFollowUp } from "@corgtex/domain";
+
+function emailBodyToHtml(body: string) {
+  return body
+    .split("\n")
+    .map((line) =>
+      line
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+    )
+    .join("<br />");
+}
 
 export async function runCrmDripFollowupAgent(params: {
   workspaceId: string;
@@ -23,8 +35,11 @@ export async function runCrmDripFollowupAgent(params: {
     plan: ["load-lead-context", "generate-email", "send-and-record"],
     buildContext: async (helpers) => {
       return helpers.step("load-lead-context", {}, async () => {
-        const lead = await prisma.demoLead.findUnique({
-          where: { id: params.payload.demoLeadId },
+        const lead = await prisma.demoLead.findFirst({
+          where: {
+            id: params.payload.demoLeadId,
+            workspaceId: params.workspaceId,
+          },
           include: { crmQualifications: true, workspace: true },
         });
 
@@ -52,21 +67,25 @@ export async function runCrmDripFollowupAgent(params: {
           taskType: "AGENT",
           messages: [
             { role: "system", content: `You are a founder reaching out to a demo lead who hasn't responded. Write a short, warm, personalized email (3-5 sentences). This is follow-up #${params.payload.followUpNumber}. Make it conversational and low pressure. Output ONLY the email body.` },
-            { role: "user", content: `Lead context: ${leadContext}` }
+            { role: "user", content: `Lead context: ${leadContext}` },
           ],
         });
-        
+
         return response.content;
       });
 
       await helpers.step("send-and-record", {}, async () => {
-        // In a real implementation, we would send the email via Resend here.
-        // e.g. await sendEmail({ to: lead.email, text: emailContent })
-        
+        const lead = context.lead as { email: string };
+        await sendEmail({
+          to: lead.email,
+          subject: "A quick follow-up from Corgtex",
+          html: emailBodyToHtml(emailContent),
+        });
+
         await recordDripFollowUp(
           params.workspaceId,
           params.payload.demoLeadId,
-          emailContent
+          emailContent,
         );
       });
 

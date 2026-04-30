@@ -16,17 +16,17 @@ export async function executeWebSearch(params: {
 
   // Simulated implementation of a generic search
   // In production, this would call Tavily, Exa, or similar
-  const url = provider === "tavily" 
-    ? "https://api.tavily.com/search" 
+  const url = provider === "tavily"
+    ? "https://api.tavily.com/search"
     : "https://api.exa.ai/search";
-    
+
   try {
     const res = await fetch(url, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         "Authorization": `Bearer ${apiKey}`,
-        ...(provider === "tavily" ? {} : { "x-api-key": apiKey })
+        ...(provider === "tavily" ? {} : { "x-api-key": apiKey }),
       },
       body: JSON.stringify({ query: params.query, num_results: 3 }),
     });
@@ -36,9 +36,9 @@ export async function executeWebSearch(params: {
     }
 
     const data = await res.json() as any;
-    
+
     // Normalize results from different providers
-    const results = provider === "tavily" 
+    const results = provider === "tavily"
       ? data.results.map((r: any) => ({ url: r.url, snippet: r.content }))
       : data.results.map((r: any) => ({ url: r.url, snippet: r.text }));
 

@@ -9,10 +9,13 @@ export async function applyEnrichmentResult(
     industry?: string | null;
     headquarters?: string | null;
     confidence: number;
-  }
+  },
 ) {
-  const contact = await prisma.crmContact.findUnique({
-    where: { id: contactId },
+  const contact = await prisma.crmContact.findFirst({
+    where: {
+      id: contactId,
+      workspaceId,
+    },
   });
 
   invariant(contact && contact.workspaceId === workspaceId, 404, "NOT_FOUND", "Contact not found.");
@@ -24,12 +27,12 @@ export async function applyEnrichmentResult(
     if (enrichedData.headquarters) tags.add(enrichedData.headquarters);
 
     await prisma.crmContact.update({
-      where: { id: contactId },
+      where: { id: contact.id },
       data: {
         tags: Array.from(tags),
       },
     });
-    
+
     await prisma.crmActivity.create({
       data: {
         workspaceId,

@@ -191,29 +191,32 @@ export async function runAgentWorkflowJob(job: {
   }
 
   if (job.type === "agent.crm-email-extraction") {
+    const qualificationId = asString(payload.qualificationId);
+    if (!qualificationId) return null;
     return runCrmEmailExtractionAgent({
       workspaceId: job.workspaceId!,
       triggerRef: job.id,
       payload: {
         eventId: asString(payload.eventId),
         aggregateId: asString(payload.aggregateId),
-        qualificationId: asString(payload.qualificationId),
+        qualificationId,
       },
     });
   }
 
   if (job.type === "agent.crm-lead-enrichment") {
+    const email = asString(payload.email);
+    if (!email) return null;
     return runCrmLeadEnrichmentAgent({
       workspaceId: job.workspaceId!,
       triggerRef: job.id,
       payload: {
         eventId: asString(payload.eventId),
         aggregateId: asString(payload.aggregateId),
-        email: asString(payload.email),
+        email,
       },
     });
   }
 
   return null;
 }
-

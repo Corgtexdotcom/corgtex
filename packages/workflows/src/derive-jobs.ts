@@ -367,10 +367,10 @@ export function deriveJobsForEvent(event: {
     });
   }
 
-  // CRM
-  if (event.type === "crm.activity.recorded") {
-    const payload = event.payload as any;
-    if (payload.channel === "email_reply" && event.workspaceId && payload.qualificationId) {
+  if (event.type === "crm.qualification.submitted" && event.workspaceId) {
+    const channel = readPayloadString(event.payload, "channel");
+    const qualificationId = readPayloadString(event.payload, "qualificationId");
+    if (channel === "email_reply" && qualificationId) {
       jobs.push({
         workspaceId: event.workspaceId,
         eventId: event.id,
@@ -378,16 +378,16 @@ export function deriveJobsForEvent(event: {
         payload: {
           eventId: event.id,
           aggregateId: event.aggregateId,
-          qualificationId: payload.qualificationId,
+          qualificationId,
         },
         dedupeKey: `${event.id}:crm-email-extraction`,
       });
     }
   }
 
-  if (event.type === "crm.qualification.approved") {
-    const payload = event.payload as any;
-    if (event.workspaceId && payload.email) {
+  if (event.type === "crm.qualification.approved" && event.workspaceId) {
+    const email = readPayloadString(event.payload, "email");
+    if (email) {
       jobs.push({
         workspaceId: event.workspaceId,
         eventId: event.id,
@@ -395,7 +395,7 @@ export function deriveJobsForEvent(event: {
         payload: {
           eventId: event.id,
           aggregateId: event.aggregateId,
-          email: payload.email,
+          email,
         },
         dedupeKey: `${event.id}:crm-enrichment`,
       });
@@ -404,4 +404,3 @@ export function deriveJobsForEvent(event: {
 
   return jobs;
 }
-

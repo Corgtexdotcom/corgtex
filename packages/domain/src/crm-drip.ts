@@ -4,10 +4,13 @@ import { invariant } from "./errors";
 export async function recordDripFollowUp(
   workspaceId: string,
   demoLeadId: string,
-  emailContent: string
+  emailContent: string,
 ) {
-  const lead = await prisma.demoLead.findUnique({
-    where: { id: demoLeadId },
+  const lead = await prisma.demoLead.findFirst({
+    where: {
+      id: demoLeadId,
+      workspaceId,
+    },
   });
 
   invariant(lead && lead.workspaceId === workspaceId, 404, "NOT_FOUND", "DemoLead not found.");

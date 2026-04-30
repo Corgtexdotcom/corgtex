@@ -24,8 +24,11 @@ export async function runCrmEmailExtractionAgent(params: {
     plan: ["load-context", "extract-fields", "update-qualification"],
     buildContext: async (helpers) => {
       return helpers.step("load-context", {}, async () => {
-        const qualification = await prisma.crmQualification.findUnique({
-          where: { id: params.payload.qualificationId },
+        const qualification = await prisma.crmQualification.findFirst({
+          where: {
+            id: params.payload.qualificationId,
+            workspaceId: params.workspaceId,
+          },
         });
 
         if (!qualification || !qualification.rawEmailReply) {
@@ -56,7 +59,7 @@ export async function runCrmEmailExtractionAgent(params: {
         await applyExtractionResult(
           params.workspaceId,
           params.payload.qualificationId,
-          extracted.output
+          extracted.output,
         );
       });
 

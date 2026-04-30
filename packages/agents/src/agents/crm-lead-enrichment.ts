@@ -52,8 +52,8 @@ export async function runCrmLeadEnrichmentAgent(params: {
 
       // Extract & Score
       const extracted = await helpers.tool("model.extract", {}, async () => {
-        const searchContext = searchResult.degraded 
-          ? "Search degraded. Rely on parametric knowledge." 
+        const searchContext = searchResult.degraded
+          ? "Search degraded. Rely on parametric knowledge."
           : JSON.stringify(searchResult.results);
 
         return defaultModelGateway.extract({
@@ -81,7 +81,7 @@ export async function runCrmLeadEnrichmentAgent(params: {
         await applyEnrichmentResult(
           params.workspaceId,
           contact.id,
-          enrichedData
+          enrichedData,
         );
       });
 
