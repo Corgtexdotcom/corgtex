@@ -1,13 +1,32 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-const { uploadMeetingTranscript, resolveRequestActor, handleRouteError } = vi.hoisted(() => ({
+const { uploadMeetingTranscript, intakeMeetingTranscript, extractTextFromFileBuffer, resolveRequestActor, handleRouteError } = vi.hoisted(() => ({
   uploadMeetingTranscript: vi.fn(),
+  intakeMeetingTranscript: vi.fn(),
+  extractTextFromFileBuffer: vi.fn(),
   resolveRequestActor: vi.fn(),
   handleRouteError: vi.fn(),
 }));
 
+class MockAppError extends Error {
+  status: number;
+  code: string;
+
+  constructor(status: number, code: string, message: string) {
+    super(message);
+    this.status = status;
+    this.code = code;
+  }
+}
+
 vi.mock("@corgtex/domain", () => ({
+  AppError: MockAppError,
+  intakeMeetingTranscript,
   uploadMeetingTranscript,
+}));
+
+vi.mock("@corgtex/knowledge", () => ({
+  extractTextFromFileBuffer,
 }));
 
 vi.mock("@/lib/auth", () => ({
@@ -57,5 +76,46 @@ describe("POST /api/workspaces/[workspaceId]/meetings/transcript", () => {
       }),
     );
     expect(handleRouteError).not.toHaveBeenCalled();
+  });
+
+  it("accepts multipart transcript files", async () => {
+    resolveRequestActor.mockResolvedValue({ kind: "user", user: { id: "user-1" } });
+    extractTextFromFileBuffer.mockResolvedValue({
+      textContent: "Jan: We agreed Milan will own onboarding.",
+      supported: true,
+      truncated: false,
+    });
+    intakeMeetingTranscript.mockResolvedValue({
+      status: "meeting_created",
+      meeting: { id: "meeting-1", title: "Weekly Tactical" },
+      message: "Transcript saved as meeting.",
+      inferred: {},
+    });
+
+    const { POST } = await import("./route");
+    const formData = new FormData();
+    formData.set("file", new File(["ignored"], "weekly.txt", { type: "text/plain" }));
+    formData.set("recordedAt", "2026-04-30T17:10:00.000Z");
+    formData.set("title", "Weekly Tactical");
+
+    const response = await POST(
+      new Request("http://localhost/api/workspaces/ws-1/meetings/transcript", {
+        method: "POST",
+        body: formData,
+      }) as never,
+      { params: Promise.resolve({ workspaceId: "ws-1" }) },
+    );
+
+    expect(response.status).toBe(201);
+    expect(intakeMeetingTranscript).toHaveBeenCalledWith(
+      { kind: "user", user: { id: "user-1" } },
+      expect.objectContaining({
+        workspaceId: "ws-1",
+        transcript: "Jan: We agreed Milan will own onboarding.",
+        fileName: "weekly.txt",
+        title: "Weekly Tactical",
+      }),
+    );
+    expect(uploadMeetingTranscript).not.toHaveBeenCalled();
   });
 });

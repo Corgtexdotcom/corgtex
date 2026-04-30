@@ -21,6 +21,64 @@ async function extractPdfText(fileBuffer: Buffer) {
   }
 }
 
+export async function extractTextFromFileBuffer(params: {
+  fileBuffer: Buffer;
+  fileName: string;
+  mimeType: string;
+  maxExtractBytes?: number;
+  maxTextLength?: number;
+}) {
+  const fileName = params.fileName.trim().replace(/[^A-Za-z0-9._-]+/g, "-") || "upload.bin";
+  const lowerName = fileName.toLowerCase();
+  const size = params.fileBuffer.byteLength;
+  const maxExtractBytes = params.maxExtractBytes ?? 25 * 1024 * 1024;
+  const maxTextLength = params.maxTextLength ?? 100000;
+  let textContent: string | null = null;
+  let supported = false;
+  let truncated = false;
+
+  if (size <= maxExtractBytes) {
+    try {
+      if (
+        params.mimeType.startsWith("text/")
+        || lowerName.endsWith(".txt")
+        || lowerName.endsWith(".md")
+        || lowerName.endsWith(".csv")
+        || lowerName.endsWith(".json")
+      ) {
+        supported = true;
+        textContent = params.fileBuffer.toString("utf-8").trim();
+      } else if (params.mimeType === "application/pdf" || lowerName.endsWith(".pdf")) {
+        supported = true;
+        textContent = await extractPdfText(params.fileBuffer);
+      } else if (
+        params.mimeType === "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        || lowerName.endsWith(".docx")
+      ) {
+        supported = true;
+        const result = await mammoth.extractRawText({ buffer: params.fileBuffer });
+        textContent = result.value.trim();
+      }
+    } catch (error) {
+      console.warn("Failed to extract text from file", { fileName, error });
+      textContent = null;
+    }
+  }
+
+  if (textContent && textContent.length > maxTextLength) {
+    textContent = `${textContent.slice(0, maxTextLength)}\n...[truncated]`;
+    truncated = true;
+  }
+
+  return {
+    textContent,
+    supported,
+    truncated,
+    size,
+    fileName,
+  };
+}
+
 export async function ingestFile(actor: AppActor, params: {
   workspaceId: string;
   fileBuffer: Buffer;
@@ -53,34 +111,11 @@ export async function ingestFile(actor: AppActor, params: {
   await defaultStorage.put(storageKey, params.fileBuffer, { contentType: params.mimeType });
 
   // 2. Extract Text
-  let textContent: string | null = null;
-  const lowerName = fileName.toLowerCase();
-  const maxExtractBytes = 25 * 1024 * 1024; // 25MB max for extraction, not storage
-  
-  if (size <= maxExtractBytes) {
-    try {
-      if (params.mimeType.startsWith("text/") || 
-          lowerName.endsWith(".txt") || 
-          lowerName.endsWith(".md") || 
-          lowerName.endsWith(".csv") || 
-          lowerName.endsWith(".json")) {
-        textContent = params.fileBuffer.toString("utf-8").trim();
-      } else if (params.mimeType === "application/pdf" || lowerName.endsWith(".pdf")) {
-        textContent = await extractPdfText(params.fileBuffer);
-      } else if (params.mimeType === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" || lowerName.endsWith(".docx")) {
-        const result = await mammoth.extractRawText({ buffer: params.fileBuffer });
-        textContent = result.value.trim();
-      }
-    } catch (error) {
-      console.warn("Failed to extract text from file", { fileName, error });
-      // Keep going, we will just store the file without text content
-    }
-  }
-
-  // Limit extracted text to ~100KB for the Brain to chew on
-  if (textContent && textContent.length > 100000) {
-    textContent = textContent.slice(0, 100000) + "\n...[truncated]";
-  }
+  const { textContent } = await extractTextFromFileBuffer({
+    fileBuffer: params.fileBuffer,
+    fileName,
+    mimeType: params.mimeType,
+  });
 
   try {
     return await prisma.$transaction(async (tx) => {

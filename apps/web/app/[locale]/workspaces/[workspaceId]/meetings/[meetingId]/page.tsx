@@ -8,6 +8,7 @@ import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
 import { getDeliberationTargets } from "@/lib/deliberation-targets";
 import { listDeliberationEntries } from "@corgtex/domain";
 import { postMeetingDeliberationAction, resolveMeetingDeliberationAction } from "../actions";
+import MeetingIntelligence from "./MeetingIntelligence";
 
 export const dynamic = "force-dynamic";
 
@@ -114,6 +115,13 @@ export default async function MeetingDetailPage({
           />
         </section>
       )}
+
+      <MeetingIntelligence
+        workspaceId={workspaceId}
+        meetingId={meetingId}
+        insights={meeting.insights}
+        hasTranscript={Boolean(meeting.transcript)}
+      />
 
       {meeting.tensions.length > 0 && (
         <section className="ws-section" style={{ marginBottom: 48 }}>

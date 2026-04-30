@@ -1,9 +1,8 @@
 import type { AgentTriggerType } from "@prisma/client";
-import { prisma, env } from "@corgtex/shared";
-import { defaultModelGateway } from "@corgtex/models";
-import { searchIndexedKnowledge } from "@corgtex/knowledge";
-import { createConstitutionVersion } from "@corgtex/domain";
-import { executeAgentRun, normalizeActionDrafts, normalizeProposalDraft, asString } from "../runtime";
+import { prisma } from "@corgtex/shared";
+import { autoApplyMeetingInsights } from "@corgtex/domain";
+import type { AppActor } from "@corgtex/shared";
+import { executeAgentRun } from "../runtime";
 
 export async function runActionExtractionAgent(params: {
   workspaceId: string;
@@ -16,11 +15,11 @@ export async function runActionExtractionAgent(params: {
     workspaceId: params.workspaceId,
     triggerType: params.triggerType ?? "EVENT",
     triggerRef: params.triggerRef,
-    goal: "Extract proposed action items, structural proposals, and tensions from meeting content and pause for approval before creating records.",
+    goal: "Auto-apply high-confidence actions, tensions, proposals, decisions, and resolutions extracted from meeting content.",
     payload: {
       meetingId: params.meetingId,
     },
-    plan: ["load-context", "extract-actions", "approval-checkpoint"],
+    plan: ["load-context", "load-insights", "auto-apply-high-confidence"],
     buildContext: (helpers) => helpers.tool("meeting.load", { meetingId: params.meetingId }, async () => prisma.meeting.findUnique({
       where: { id: params.meetingId },
       select: {
@@ -29,17 +28,21 @@ export async function runActionExtractionAgent(params: {
         title: true,
         transcript: true,
         summaryMd: true,
+        insights: {
+          where: { status: { in: ["SUGGESTED", "CONFIRMED"] } },
+        },
       },
     }).then((meeting) => ({
       meeting,
     }))),
-    execute: async (context, helpers, runId, model) => {
+    execute: async (context, helpers, _runId, _model) => {
       const meeting = context.meeting as {
         id: string;
         workspaceId: string;
         title: string | null;
         transcript: string | null;
         summaryMd: string | null;
+        insights?: unknown[];
       } | null;
 
       if (!meeting || meeting.workspaceId !== params.workspaceId) {
@@ -51,40 +54,25 @@ export async function runActionExtractionAgent(params: {
         };
       }
 
-      const extracted = await helpers.tool("model.extract", { meetingId: meeting.id }, async () => defaultModelGateway.extract({ model,
-        workspaceId: params.workspaceId,
-        agentRunId: runId,
-        instruction: "Extract concrete follow-up actions, systemic tensions, and structural proposals (e.g. role changes or new accountabilities) discussed in this meeting.",
-        schemaHint: "{ actions: [{ title: string, rationale: string }], tensions: [{ title: string, description: string }], proposals: [{ title: string, type: string, description: string }] }",
-        input: JSON.stringify({
-          title: meeting.title,
-          summary: meeting.summaryMd,
-          transcript: meeting.transcript,
-        }),
-      }));
+      const actor: AppActor = {
+        kind: "agent",
+        authProvider: "bootstrap",
+        label: "action-extraction",
+        workspaceIds: [params.workspaceId],
+        scopes: ["meetings:write", "actions:write", "tensions:write", "proposals:write"],
+      };
 
-      const proposedActions = normalizeActionDrafts(extracted.output?.actions || []);
-      const proposedTensions = Array.isArray(extracted.output?.tensions) ? extracted.output.tensions : [];
-      const structuralProposals = Array.isArray(extracted.output?.proposals) ? extracted.output.proposals : [];
+      const result = await helpers.tool("meeting-insights.auto-apply", { meetingId: meeting.id }, () => autoApplyMeetingInsights(actor, {
+        workspaceId: params.workspaceId,
+        meetingId: meeting.id,
+      }));
 
       return {
         resultJson: {
           meetingId: meeting.id,
-          proposedActions,
-          proposedTensions,
-          structuralProposals,
-        },
-        approvalCheckpoint: {
-          summary: "Review extracted actions, tensions, and structural proposals before creating records.",
-          detail: {
-            meetingId: meeting.id,
-            proposedActions,
-            proposedTensions,
-            structuralProposals,
-          },
+          ...result,
         },
       };
     },
   });
 }
-

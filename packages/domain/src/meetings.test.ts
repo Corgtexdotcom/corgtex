@@ -16,6 +16,9 @@ const { prismaMock } = vi.hoisted(() => {
       create: vi.fn(),
       upsert: vi.fn(),
     },
+    meetingInsight: {
+      deleteMany: vi.fn(),
+    },
     workspaceArchiveRecord: {
       create: vi.fn(),
     },
@@ -53,6 +56,7 @@ describe("meetings domain", () => {
     prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof prismaMock) => Promise<unknown>) => callback(prismaMock));
     prismaMock.auditLog.create.mockResolvedValue({});
     prismaMock.event.createMany.mockResolvedValue({ count: 1 });
+    prismaMock.meetingInsight.deleteMany.mockResolvedValue({ count: 0 });
   });
 
   it("listMeetings returns meetings newest first", async () => {
@@ -258,8 +262,16 @@ describe("meetings domain", () => {
       data: expect.objectContaining({
         status: "COMPLETED",
         transcript: "Transcript text",
+        aiProcessedAt: null,
       }),
     }));
+    expect(prismaMock.meetingInsight.deleteMany).toHaveBeenCalledWith({
+      where: {
+        meetingId: "scheduled-1",
+        workspaceId: "workspace-1",
+        status: "SUGGESTED",
+      },
+    });
   });
 
   it("deleteMeeting archives an existing meeting", async () => {

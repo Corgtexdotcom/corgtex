@@ -1,9 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-const { createActionMock, createProposalMock, createTensionMock } = vi.hoisted(() => ({
+const { createActionMock, updateActionMock, createProposalMock, submitProposalMock, createTensionMock, updateTensionMock } = vi.hoisted(() => ({
   createActionMock: vi.fn(),
+  updateActionMock: vi.fn(),
   createProposalMock: vi.fn(),
+  submitProposalMock: vi.fn(),
   createTensionMock: vi.fn(),
+  updateTensionMock: vi.fn(),
 }));
 
 vi.mock("@corgtex/shared", async (importOriginal) => {
@@ -17,8 +20,20 @@ vi.mock("@corgtex/shared", async (importOriginal) => {
         findUnique: vi.fn().mockResolvedValue({ id: "member-123", workspaceId: "ws-1", userId: "user-123", role: "ADMIN", isActive: true }),
       },
       meeting: { update: vi.fn() },
+      proposal: {
+        findFirst: vi.fn(),
+        update: vi.fn(),
+      },
+      policyCorpus: {
+        upsert: vi.fn(),
+      },
+      auditLog: {
+        create: vi.fn(),
+      },
       meetingInsight: {
         createMany: vi.fn(),
+        deleteMany: vi.fn(),
+        findMany: vi.fn(),
         findUnique: vi.fn(),
         findUniqueOrThrow: vi.fn(),
         update: vi.fn(),
@@ -30,14 +45,21 @@ vi.mock("@corgtex/shared", async (importOriginal) => {
 
 vi.mock("./actions", () => ({
   createAction: createActionMock,
+  updateAction: updateActionMock,
 }));
 
 vi.mock("./proposals", () => ({
   createProposal: createProposalMock,
+  submitProposal: submitProposalMock,
 }));
 
 vi.mock("./tensions", () => ({
   createTension: createTensionMock,
+  updateTension: updateTensionMock,
+}));
+
+vi.mock("./events", () => ({
+  appendEvents: vi.fn(),
 }));
 
 import { prisma } from "@corgtex/shared";
@@ -70,8 +92,11 @@ describe("meeting-intelligence", () => {
       },
     ]);
     createActionMock.mockResolvedValue({ id: "action-1" });
+    updateActionMock.mockResolvedValue({ id: "action-1" });
     createProposalMock.mockResolvedValue({ id: "proposal-1" });
+    submitProposalMock.mockResolvedValue({ proposalId: "proposal-1" });
     createTensionMock.mockResolvedValue({ id: "tension-1" });
+    updateTensionMock.mockResolvedValue({ id: "tension-1" });
   });
 
   describe("extractMeetingInsights", () => {
@@ -164,10 +189,72 @@ describe("meeting-intelligence", () => {
         title: "Onboarding ownership is unclear",
         raisedByMemberId: "member-raised",
         meetingId: "meeting-1",
+        isPrivate: false,
+      }));
+      expect(updateTensionMock).toHaveBeenCalledWith(mockActor, expect.objectContaining({
+        workspaceId: "ws-1",
+        tensionId: "tension-1",
+        status: "OPEN",
       }));
       expect(createTensionMock).toHaveBeenCalledWith(mockActor, expect.not.objectContaining({
         assigneeMemberId: "member-raised",
       }));
+    });
+
+    it("applies adopted proposal resolutions through the proposal approval event path", async () => {
+      const { appendEvents } = await import("./events");
+      (prisma.meetingInsight.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue({
+        id: "insight-proposal",
+        workspaceId: "ws-1",
+        meetingId: "meeting-1",
+        type: "PROPOSAL",
+        operation: "RESOLVE",
+        targetEntityType: "Proposal",
+        targetEntityId: "proposal-1",
+        resolutionOutcome: "ADOPTED",
+        status: "SUGGESTED",
+        title: "Adopt pricing policy",
+        bodyMd: "The group agreed to adopt the pricing policy.",
+        meeting: {
+          id: "meeting-1",
+          title: "Weekly sync",
+        },
+      });
+      (prisma.proposal.findFirst as ReturnType<typeof vi.fn>).mockResolvedValue({
+        id: "proposal-1",
+        workspaceId: "ws-1",
+        title: "Adopt pricing policy",
+        bodyMd: "Pricing policy body",
+        circleId: null,
+        publishedAt: null,
+      });
+      (prisma.proposal.update as ReturnType<typeof vi.fn>).mockResolvedValue({
+        id: "proposal-1",
+        workspaceId: "ws-1",
+        title: "Adopt pricing policy",
+        bodyMd: "Pricing policy body",
+        circleId: null,
+        decidedAt: new Date("2026-04-29T12:00:00.000Z"),
+      });
+
+      await applyInsight(mockActor, {
+        workspaceId: "ws-1",
+        insightId: "insight-proposal",
+      });
+
+      expect(prisma.policyCorpus.upsert).toHaveBeenCalledWith(expect.objectContaining({
+        where: { proposalId: "proposal-1" },
+      }));
+      expect(appendEvents).toHaveBeenCalledWith(expect.anything(), [
+        expect.objectContaining({
+          type: "proposal.approved",
+          payload: expect.objectContaining({
+            proposalId: "proposal-1",
+            subjectId: "proposal-1",
+            outcome: "ADOPTED",
+          }),
+        }),
+      ]);
     });
   });
 

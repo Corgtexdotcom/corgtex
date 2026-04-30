@@ -1,5 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+const { autoApplyMeetingInsightsMock } = vi.hoisted(() => ({
+  autoApplyMeetingInsightsMock: vi.fn(),
+}));
+
 const prismaMock = {
   agentRun: {
     findFirst: vi.fn(),
@@ -91,6 +95,7 @@ vi.mock("@corgtex/domain", async (importOriginal) => {
     getAgentModelOverride: vi.fn().mockResolvedValue(undefined),
     resolveAgentIdentityLimits: vi.fn().mockResolvedValue(null),
     resolveAgentBehaviorContext: vi.fn().mockResolvedValue(null),
+    autoApplyMeetingInsights: autoApplyMeetingInsightsMock,
   };
 });
 
@@ -149,6 +154,7 @@ describe("agent runtime", () => {
     prismaMock.modelUsageBudget.findUnique.mockReset().mockResolvedValue(null);
     prismaMock.member.findMany.mockReset().mockResolvedValue([]);
     prismaMock.agentIdentity.findUnique.mockReset().mockResolvedValue(null);
+    autoApplyMeetingInsightsMock.mockReset().mockResolvedValue({ applied: 1, failed: 0, skipped: 0, threshold: 0.8 });
 
     // Mock $transaction to execute the callback
     prismaMock.$transaction.mockReset().mockImplementation(async (fn: any) => fn(prismaMock));
@@ -177,7 +183,7 @@ describe("agent runtime", () => {
     expect(prismaMock.agentRun.create).not.toHaveBeenCalled();
   });
 
-  it("waits for approval after extracting proposed actions", async () => {
+  it("auto-applies high-confidence meeting insights", async () => {
     prismaMock.meeting.findUnique.mockResolvedValue({
       id: "meeting-1",
       workspaceId: "ws-1",
@@ -208,16 +214,23 @@ describe("agent runtime", () => {
     expect(prismaMock.agentRun.create).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
         agentKey: "action-extraction",
-        goal: expect.stringContaining("Extract proposed action items"),
+        goal: expect.stringContaining("Auto-apply high-confidence"),
       }),
     }));
     expect(prismaMock.agentToolCall.createMany).toHaveBeenCalled();
     expect(prismaMock.agentRun.update).toHaveBeenLastCalledWith(expect.objectContaining({
       data: expect.objectContaining({
-        status: "WAITING_APPROVAL",
-        approvalRequired: true,
+        status: "COMPLETED",
+        approvalRequired: false,
       }),
     }));
+    expect(autoApplyMeetingInsightsMock).toHaveBeenCalledWith(expect.objectContaining({
+      kind: "agent",
+      label: "action-extraction",
+    }), {
+      workspaceId: "ws-1",
+      meetingId: "meeting-1",
+    });
   });
 
   it("does not count waiting-approval runs against execution concurrency", async () => {
