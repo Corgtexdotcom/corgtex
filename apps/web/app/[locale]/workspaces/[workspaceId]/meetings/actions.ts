@@ -129,6 +129,9 @@ export async function archiveMeetingAction(formData: FormData) {
 }
 
 export async function extractInsightsAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
   const actor = await requirePageActor();
   const workspaceId = formData.get("workspaceId") as string;
   const meetingId = formData.get("meetingId") as string;
@@ -138,6 +141,9 @@ export async function extractInsightsAction(formData: FormData) {
 }
 
 export async function confirmInsightAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
   const actor = await requirePageActor();
   const workspaceId = formData.get("workspaceId") as string;
   const insightId = formData.get("insightId") as string;
@@ -147,6 +153,9 @@ export async function confirmInsightAction(formData: FormData) {
 }
 
 export async function dismissInsightAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
   const actor = await requirePageActor();
   const workspaceId = formData.get("workspaceId") as string;
   const insightId = formData.get("insightId") as string;
@@ -156,6 +165,9 @@ export async function dismissInsightAction(formData: FormData) {
 }
 
 export async function applyInsightAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
   const actor = await requirePageActor();
   const workspaceId = formData.get("workspaceId") as string;
   const insightId = formData.get("insightId") as string;
@@ -165,6 +177,9 @@ export async function applyInsightAction(formData: FormData) {
 }
 
 export async function applyAllHighConfidenceInsightsAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
   const actor = await requirePageActor();
   const workspaceId = formData.get("workspaceId") as string;
   const meetingId = formData.get("meetingId") as string;
@@ -175,6 +190,9 @@ export async function applyAllHighConfidenceInsightsAction(formData: FormData) {
 }
 
 export async function confirmAllInsightsAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
   const actor = await requirePageActor();
   const workspaceId = formData.get("workspaceId") as string;
   const meetingId = formData.get("meetingId") as string;
