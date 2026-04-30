@@ -16,9 +16,21 @@ beforeEach(() => {
   delete process.env.RAILWAY_GIT_COMMIT_SHA;
   delete process.env.npm_package_version;
   delete process.env.REDIS_URL;
+  delete process.env.R2_ACCOUNT_ID;
   delete process.env.S3_BUCKET_NAME;
   delete process.env.AWS_S3_BUCKET_NAME;
   delete process.env.R2_BUCKET_NAME;
+  delete process.env.R2_ACCESS_KEY_ID;
+  delete process.env.R2_SECRET_ACCESS_KEY;
+  delete process.env.S3_ACCESS_KEY_ID;
+  delete process.env.S3_SECRET_ACCESS_KEY;
+  delete process.env.S3_ENDPOINT;
+  delete process.env.S3_REGION;
+  delete process.env.RAILWAY_BUCKET_NAME;
+  delete process.env.RAILWAY_BUCKET_ACCESS_KEY_ID;
+  delete process.env.RAILWAY_BUCKET_SECRET_ACCESS_KEY;
+  delete process.env.RAILWAY_BUCKET_ENDPOINT;
+  delete process.env.RAILWAY_BUCKET_REGION;
 });
 
 afterEach(() => {
@@ -128,6 +140,9 @@ describe("GET /api/health", () => {
     process.env.CORGTEX_RELEASE_GIT_SHA = "abc";
     process.env.REDIS_URL = "redis://redis:6379";
     process.env.S3_BUCKET_NAME = "customer-bucket";
+    process.env.S3_ACCESS_KEY_ID = "access";
+    process.env.S3_SECRET_ACCESS_KEY = "secret";
+    process.env.S3_ENDPOINT = "https://storage.example";
     queryRaw
       .mockResolvedValueOnce([{ ok: 1 }])
       .mockResolvedValueOnce([{ ready: true }])
@@ -146,6 +161,27 @@ describe("GET /api/health", () => {
       runtime: {
         redis: "configured",
         storage: "configured",
+      },
+    });
+  });
+
+  it("does not report storage as configured for a bucket-only placeholder", async () => {
+    const { GET } = await import("./route");
+    process.env.REDIS_URL = "redis://redis:6379";
+    process.env.R2_BUCKET_NAME = "corgtex";
+    queryRaw
+      .mockResolvedValueOnce([{ ok: 1 }])
+      .mockResolvedValueOnce([{ ready: true }])
+      .mockResolvedValueOnce([{ ready: true }])
+      .mockResolvedValueOnce([{ count: 0 }]);
+
+    const response = await GET();
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      runtime: {
+        redis: "configured",
+        storage: "missing",
       },
     });
   });
