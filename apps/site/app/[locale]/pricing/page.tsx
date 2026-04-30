@@ -166,8 +166,8 @@ export default async function PricingPage({ params }: LocaleParams) {
           </ScrollReveal>
 
           <ScrollReveal delay={200}>
-            <div style={{ marginTop: "48px", textAlign: "center" }}>
-              <a href="https://calendar.app.google/jJd5yeSuDStVZm896" className="btn btn-primary" style={{ padding: "16px 40px", fontSize: "1.05rem" }} target="_blank" rel="noopener noreferrer">
+            <div className="pricing-cta">
+              <a href="https://calendar.app.google/jJd5yeSuDStVZm896" className="btn btn-primary" target="_blank" rel="noopener noreferrer">
                 {t.scoping}
               </a>
               <p style={{ marginTop: "16px", fontSize: "0.9rem", color: "var(--text-tertiary)" }}>{t.scopingNote}</p>

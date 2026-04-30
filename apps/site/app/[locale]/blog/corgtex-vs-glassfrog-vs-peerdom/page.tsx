@@ -103,18 +103,18 @@ export default async function ComparisonPage({ params }: LocaleParams) {
       <StructuredData data={structuredData} />
       <article>
         <section className="section" style={{ paddingBottom: "48px" }}>
-          <div className="container" style={{ maxWidth: "800px" }}>
+          <div className="container article-shell">
             <ScrollReveal>
               <Link href={hrefFor(locale, "/blog")} style={{ color: "var(--text-secondary)", textDecoration: "none", fontSize: "0.9rem", display: "inline-flex", alignItems: "center", marginBottom: "24px" }}>
                 <span style={{ marginRight: "8px" }}>←</span> {t.back}
               </Link>
             </ScrollReveal>
             <ScrollReveal delay={100}><span className="section-label">{t.label}</span></ScrollReveal>
-            <ScrollReveal delay={200}><h1 style={{ marginTop: "24px", fontSize: "3rem", lineHeight: "1.2" }}>{t.title}</h1></ScrollReveal>
+            <ScrollReveal delay={200}><h1 className="article-title">{t.title}</h1></ScrollReveal>
             <ScrollReveal delay={300}>
-              <p style={{ fontSize: "1.3rem", lineHeight: "1.6", marginTop: "32px", fontWeight: 500, padding: "24px", background: "var(--gray-50)", borderLeft: "4px solid var(--text)", borderRadius: "0 8px 8px 0" }}>{t.answer}</p>
+              <p className="article-answer">{t.answer}</p>
             </ScrollReveal>
-            <div style={{ display: "flex", alignItems: "center", marginTop: "32px", gap: "16px" }}>
+            <div className="article-meta">
               <Image src="/images/puncar-pfp.jpg" alt="Jan Brezina" width={48} height={48} style={{ borderRadius: "50%" }} />
               <div>
                 <div style={{ fontWeight: 600 }}>Jan &ldquo;Puncar&rdquo; Brezina</div>
@@ -125,16 +125,16 @@ export default async function ComparisonPage({ params }: LocaleParams) {
         </section>
         <div className="rule-strong" style={{ maxWidth: "800px", margin: "0 auto" }} />
         <section className="section article-content">
-          <div className="container" style={{ maxWidth: "800px", fontSize: "1.15rem", lineHeight: "1.8" }}>
+          <div className="container article-content-inner">
             {t.sections.map(([title, paragraphs]) => (
               <ScrollReveal key={title}>
-                <h2 style={{ fontSize: "2rem", marginTop: "48px", marginBottom: "24px", fontFamily: "var(--font-serif)" }}>{title}</h2>
+                <h2 className="article-section-title">{title}</h2>
                 {paragraphs.map((paragraph) => <p key={paragraph} style={{ marginBottom: "24px", color: "var(--text-secondary)" }}>{paragraph}</p>)}
               </ScrollReveal>
             ))}
             <ScrollReveal>
-              <h2 style={{ fontSize: "2rem", marginTop: "48px", marginBottom: "24px", fontFamily: "var(--font-serif)" }}>{t.tableTitle}</h2>
-              <div style={{ overflowX: "auto", marginBottom: "48px" }}>
+              <h2 className="article-section-title">{t.tableTitle}</h2>
+              <div className="table-scroll">
                 <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "1rem" }}>
                   <thead>
                     <tr style={{ borderBottom: "2px solid var(--text)" }}>
@@ -152,10 +152,10 @@ export default async function ComparisonPage({ params }: LocaleParams) {
               </div>
             </ScrollReveal>
             <ScrollReveal>
-              <div style={{ marginTop: "64px", padding: "32px", background: "var(--gray-50)", border: "1px solid var(--border)", borderRadius: "8px" }}>
-                <h3 style={{ fontSize: "1.4rem", marginBottom: "16px" }}>{t.ctaTitle}</h3>
-                <p style={{ marginBottom: "24px", color: "var(--text-secondary)", fontSize: "1rem" }}>{t.ctaBody}</p>
-                <div style={{ display: "flex", gap: "16px" }}>
+              <div className="article-cta">
+                <h3>{t.ctaTitle}</h3>
+                <p>{t.ctaBody}</p>
+                <div className="action-row">
                   <a href={demoUrlForLocale(locale)} className="btn btn-primary" target="_blank" rel="noopener noreferrer">{t.demo}</a>
                   <a href="https://calendar.app.google/jJd5yeSuDStVZm896" className="btn btn-secondary" target="_blank" rel="noopener noreferrer">{t.briefing}</a>
                 </div>
