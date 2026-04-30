@@ -4,6 +4,7 @@ import { DemoGateForm } from "../../components/DemoGateForm";
 import { ScrollReveal } from "../../components/ScrollReveal";
 import { localeFromParams, hrefFor, type LocaleParams } from "../../lib/locale";
 import { buildMetadata } from "../../lib/metadata";
+import { getSiteConfig } from "../../lib/site";
 
 const homeCopy = {
   en: {
@@ -174,6 +175,7 @@ export async function generateMetadata({ params }: LocaleParams): Promise<Metada
 export default async function HomePage({ params }: LocaleParams) {
   const locale = await localeFromParams(params);
   const copy = homeCopy[locale];
+  const { bookDemoUrl } = getSiteConfig();
 
   return (
     <>
@@ -189,7 +191,7 @@ export default async function HomePage({ params }: LocaleParams) {
             <ScrollReveal delay={300}>
               <div className="btn-group">
                 <DemoGateForm />
-                <a href="https://calendar.app.google/jJd5yeSuDStVZm896" className="btn btn-primary" target="_blank" rel="noopener noreferrer">
+                <a href={bookDemoUrl} className="btn btn-primary" target="_blank" rel="noopener noreferrer">
                   {copy.briefing}
                 </a>
               </div>
@@ -411,7 +413,7 @@ export default async function HomePage({ params }: LocaleParams) {
             <p>{copy.finalBody}</p>
             <div className="btn-group">
               <DemoGateForm />
-              <a href="https://calendar.app.google/jJd5yeSuDStVZm896" className="btn btn-primary" target="_blank" rel="noopener noreferrer">
+              <a href={bookDemoUrl} className="btn btn-primary" target="_blank" rel="noopener noreferrer">
                 {copy.briefing}
               </a>
             </div>

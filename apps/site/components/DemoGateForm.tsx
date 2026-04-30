@@ -2,7 +2,19 @@
 
 import { useState, useEffect } from "react";
 import { useLocale, useTranslations } from "next-intl";
+import { trackEvent } from "../lib/analytics-client";
 import { demoUrlForLocale } from "../lib/site";
+
+const trackedGateViews = new Set<string>();
+
+function trackGateView(eventName: string) {
+  const path = window.location.pathname;
+  const key = `${eventName}:${path}`;
+  if (trackedGateViews.has(key)) return;
+
+  trackedGateViews.add(key);
+  trackEvent(eventName, { path });
+}
 
 export function DemoGateForm() {
   const [email, setEmail] = useState("");
@@ -17,6 +29,9 @@ export function DemoGateForm() {
     if (typeof window !== "undefined") {
       if (localStorage.getItem("corgtex_demo_lead")) {
         setShowGate(false);
+        trackGateView("demo_gate_known_lead");
+      } else {
+        trackGateView("demo_gate_viewed");
       }
     }
   }, []);
@@ -36,6 +51,7 @@ export function DemoGateForm() {
 
       if (res.ok) {
         localStorage.setItem("corgtex_demo_lead", email);
+        trackEvent("demo_gate_submitted", { path: window.location.pathname });
         window.location.href = demoUrlForLocale(locale);
       } else {
         setError(t("error"));

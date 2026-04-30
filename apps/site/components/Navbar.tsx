@@ -4,7 +4,7 @@ import { useState, useEffect } from "react";
 import { usePathname } from "next/navigation";
 import { useLocale, useTranslations } from "next-intl";
 import { localizedPath } from "../i18n/routing";
-import { demoUrlForLocale, getSiteConfig } from "../lib/site";
+import { demoGatePathForLocale, getSiteConfig } from "../lib/site";
 
 const NAV_LINKS: { href: string; labelKey: string }[] = [
   { href: "/about", labelKey: "about" },
@@ -24,9 +24,9 @@ export function Navbar() {
   const locale = useLocale();
   const pathname = usePathname();
   const t = useTranslations("nav");
-  const { appUrl } = getSiteConfig();
+  const { appUrl, bookDemoUrl } = getSiteConfig();
 
-  const demoUrl = demoUrlForLocale(locale);
+  const demoUrl = demoGatePathForLocale(locale);
   const loginUrl = `${appUrl}/login`;
   const localePath = (path: string) => localizedPath(path, locale);
   const switchLocaleHref = localizedPath(unprefixedPath(pathname), locale === "es" ? "en" : "es");
@@ -68,13 +68,11 @@ export function Navbar() {
             <a
               href={demoUrl}
               className="btn btn-secondary"
-              target="_blank"
-              rel="noopener noreferrer"
             >
               {t("demo")}
             </a>
             <a
-              href="https://calendar.app.google/jJd5yeSuDStVZm896"
+              href={bookDemoUrl}
               className="btn btn-primary"
               target="_blank"
               rel="noopener noreferrer"
@@ -131,14 +129,12 @@ export function Navbar() {
         <a
           href={demoUrl}
           className="btn btn-secondary"
-          target="_blank"
-          rel="noopener noreferrer"
           onClick={() => setMobileOpen(false)}
         >
           {t("demo")}
         </a>
         <a
-          href="https://calendar.app.google/jJd5yeSuDStVZm896"
+          href={bookDemoUrl}
           className="btn btn-primary"
           target="_blank"
           rel="noopener noreferrer"

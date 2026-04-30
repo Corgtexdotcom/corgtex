@@ -3,7 +3,7 @@ import Image from "next/image";
 import { ScrollReveal } from "../../../components/ScrollReveal";
 import { localeFromParams, type LocaleParams } from "../../../lib/locale";
 import { buildMetadata } from "../../../lib/metadata";
-import { demoUrlForLocale } from "../../../lib/site";
+import { demoGatePathForLocale, getSiteConfig } from "../../../lib/site";
 
 const copy = {
   en: {
@@ -78,6 +78,7 @@ export async function generateMetadata({ params }: LocaleParams): Promise<Metada
 export default async function AboutPage({ params }: LocaleParams) {
   const locale = await localeFromParams(params);
   const t = copy[locale];
+  const { bookDemoUrl } = getSiteConfig();
 
   return (
     <>
@@ -160,8 +161,8 @@ export default async function AboutPage({ params }: LocaleParams) {
           <h2>{t.ctaTitle}</h2>
           <p>{t.ctaBody}</p>
           <div className="btn-group">
-            <a href={demoUrlForLocale(locale)} className="btn btn-primary" target="_blank" rel="noopener noreferrer">{t.demo}</a>
-            <a href="https://calendar.app.google/jJd5yeSuDStVZm896" className="btn btn-secondary" target="_blank" rel="noopener noreferrer">{t.briefing}</a>
+            <a href={demoGatePathForLocale(locale)} className="btn btn-primary">{t.demo}</a>
+            <a href={bookDemoUrl} className="btn btn-secondary" target="_blank" rel="noopener noreferrer">{t.briefing}</a>
           </div>
         </ScrollReveal></div>
       </section>

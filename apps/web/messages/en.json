@@ -1566,7 +1566,11 @@
       "askTitle": "Ask Anything",
       "askDescription": "The AI assistant knows everything in the Brain. Ask it about any topic, draft proposals, or get context for decisions.",
       "exploreTitle": "Your Turn to Explore",
-      "exploreDescription": "Tour complete! You now have full access to explore Johnson & Johnson's governance through Corgtex. The workspace is read-only, but feel free to click around."
+      "exploreDescription": "Tour complete! You now have full access to explore Johnson & Johnson's governance through Corgtex. The workspace is read-only, but feel free to click around.",
+      "briefingCtaTitle": "Want to see this with your organization?",
+      "briefingCtaDescription": "We can walk through how Corgtex would map your AI workforce, governance, knowledge, and costs. You can schedule a briefing now or keep exploring the demo.",
+      "briefingCtaPrimary": "Schedule a Briefing",
+      "briefingCtaSecondary": "Keep Exploring"
     }
   },
   "shared": {

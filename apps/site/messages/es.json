@@ -37,9 +37,9 @@
     "bottom": "La plataforma de fuerza laboral de IA gobernada."
   },
   "demoGate": {
-    "emailPlaceholder": "Ingresa tu correo",
-    "button": "Acceder a la demo",
-    "loading": "...",
+    "emailPlaceholder": "Correo de trabajo",
+    "button": "Abrir demo en vivo",
+    "loading": "Abriendo...",
     "error": "No se pudo acceder a la demo. Inténtalo de nuevo."
   },
   "shared": {
