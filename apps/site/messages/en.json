@@ -37,9 +37,9 @@
     "bottom": "The governed AI workforce platform."
   },
   "demoGate": {
-    "emailPlaceholder": "Enter your email",
-    "button": "Access the Demo",
-    "loading": "...",
+    "emailPlaceholder": "Work email",
+    "button": "Open Live Demo",
+    "loading": "Opening...",
     "error": "Failed to access demo. Please try again."
   },
   "shared": {

@@ -3,7 +3,7 @@ import { ScrollReveal } from "../../../components/ScrollReveal";
 import { StructuredData } from "../../../components/StructuredData";
 import { localeFromParams, type LocaleParams } from "../../../lib/locale";
 import { buildMetadata } from "../../../lib/metadata";
-import { demoUrlForLocale } from "../../../lib/site";
+import { demoGatePathForLocale } from "../../../lib/site";
 
 const updatesEn = [
   { version: "v0.10", name: "Intelligence Layer", date: "Apr 14-15, 2026", prs: "#97-#99", features: ["Integrated O2 organizational methodology alongside Holacracy and Sociocracy.", "Upgraded finance agent UX with seamless inline approval workflows.", "Added native subtitles and improved audio playback for landing page videos."] },
@@ -130,7 +130,7 @@ export default async function UpdatesPage({ params }: LocaleParams) {
             <h2>{t.ctaTitle}</h2>
             <p>{t.ctaBody}</p>
             <div className="btn-group">
-              <a href={demoUrlForLocale(locale)} className="btn btn-primary" target="_blank" rel="noopener noreferrer">{t.demo}</a>
+              <a href={demoGatePathForLocale(locale)} className="btn btn-primary">{t.demo}</a>
             </div>
           </ScrollReveal>
         </div>

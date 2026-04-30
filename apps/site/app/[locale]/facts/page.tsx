@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { localeFromParams, type LocaleParams } from "../../../lib/locale";
 import { buildMetadata } from "../../../lib/metadata";
-import { absoluteSiteUrl, demoUrlForLocale } from "../../../lib/site";
+import { absoluteSiteUrl, demoGatePathForLocale } from "../../../lib/site";
 
 const copy = {
   en: {
@@ -75,7 +75,7 @@ export default async function FactsPage({ params }: LocaleParams) {
     [t.links.pricing, absoluteSiteUrl(`${sitePrefix}/pricing`)],
     [t.links.about, absoluteSiteUrl(`${sitePrefix}/about`)],
     [t.links.faq, absoluteSiteUrl(`${sitePrefix}/faq`)],
-    [t.links.demo, demoUrlForLocale(locale)],
+    [t.links.demo, absoluteSiteUrl(demoGatePathForLocale(locale))],
   ];
 
   return (

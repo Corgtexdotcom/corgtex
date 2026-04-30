@@ -1,11 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { driver } from "driver.js";
 import "driver.js/dist/driver.css";
 import "../../../demo-tour-theme.css";
+import { Dialog } from "@/lib/components/Dialog";
 
 interface TourStep {
   path: string;
@@ -19,6 +20,7 @@ interface TourStep {
 }
 
 const TOUR_KEY = (id: string) => `corgtex_tour_completed_${id}`;
+const BOOK_DEMO_URL = process.env.NEXT_PUBLIC_BOOK_DEMO_URL || "https://calendar.app.google/jJd5yeSuDStVZm896";
 
 function markTourCompleted(workspaceId: string) {
   localStorage.setItem(TOUR_KEY(workspaceId), "true");
@@ -34,6 +36,7 @@ export function DemoTour({ workspaceId }: { workspaceId: string }) {
   const t = useTranslations("demo.tour");
   const driverRef = useRef<ReturnType<typeof driver> | null>(null);
   const targetStepIndexRef = useRef<number | null>(null);
+  const [showBriefingCta, setShowBriefingCta] = useState(false);
 
   const tourSteps: TourStep[] = useMemo(() => [
     {
@@ -111,6 +114,7 @@ export function DemoTour({ workspaceId }: { workspaceId: string }) {
             if (!nextStep) {
               markTourCompleted(workspaceId);
               driverObj.destroy();
+              setShowBriefingCta(true);
               return;
             }
 
@@ -152,6 +156,8 @@ export function DemoTour({ workspaceId }: { workspaceId: string }) {
   }, [router, tourSteps, workspaceId]);
 
   const restartTour = useCallback(() => {
+    setShowBriefingCta(false);
+
     const homePath = `/workspaces/${workspaceId}`;
     if (window.location.pathname !== homePath) {
       targetStepIndexRef.current = 0;
@@ -202,7 +208,26 @@ export function DemoTour({ workspaceId }: { workspaceId: string }) {
     }
   }, [pathname, initDriver]);
 
+  const keepExploring = useCallback(() => {
+    setShowBriefingCta(false);
+  }, []);
 
+  const scheduleBriefing = useCallback(() => {
+    window.open(BOOK_DEMO_URL, "_blank", "noopener,noreferrer");
+    setShowBriefingCta(false);
+  }, []);
 
-  return null;
+  return (
+    <Dialog open={showBriefingCta} onClose={keepExploring} title={t("briefingCtaTitle")}>
+      <p className="demo-tour-briefing-copy">{t("briefingCtaDescription")}</p>
+      <div className="demo-tour-briefing-actions">
+        <button type="button" onClick={scheduleBriefing}>
+          {t("briefingCtaPrimary")}
+        </button>
+        <button type="button" className="secondary" onClick={keepExploring}>
+          {t("briefingCtaSecondary")}
+        </button>
+      </div>
+    </Dialog>
+  );
 }

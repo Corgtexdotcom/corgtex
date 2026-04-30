@@ -175,6 +175,62 @@ p { color: var(--text-secondary); line-height: 1.75; font-size: 1.05rem; }
   flex: 0 1 auto;
 }
 
+.demo-access-section {
+  min-height: calc(100vh - var(--nav-height) - 240px);
+  display: flex;
+  align-items: center;
+}
+
+.demo-access-shell {
+  max-width: 760px;
+  text-align: center;
+}
+
+.demo-access-shell h1 {
+  margin: 24px auto 20px;
+  max-width: 680px;
+}
+
+.demo-access-shell p {
+  color: var(--text-secondary);
+  font-size: 1.08rem;
+  line-height: 1.7;
+  margin: 0 auto;
+  max-width: 620px;
+}
+
+.demo-access-form {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  margin: 32px auto 0;
+  max-width: 560px;
+}
+
+.demo-access-note {
+  color: var(--text-tertiary) !important;
+  font-size: 0.9rem !important;
+}
+
+.demo-access-secondary {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: center;
+  margin-top: 32px;
+  color: var(--text-secondary);
+  font-size: 0.95rem;
+}
+
+.demo-access-secondary a {
+  color: var(--text);
+  font-weight: 700;
+  text-decoration: underline;
+  text-underline-offset: 4px;
+}
+
 /* ── Masthead / Navbar ── */
 .navbar {
   position: sticky; top: 0; z-index: 1000;

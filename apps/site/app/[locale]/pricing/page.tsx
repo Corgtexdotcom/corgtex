@@ -3,6 +3,7 @@ import { ScrollReveal } from "../../../components/ScrollReveal";
 import { StructuredData } from "../../../components/StructuredData";
 import { localeFromParams, type LocaleParams } from "../../../lib/locale";
 import { buildMetadata } from "../../../lib/metadata";
+import { getSiteConfig } from "../../../lib/site";
 
 const copy = {
   en: {
@@ -91,6 +92,7 @@ export async function generateMetadata({ params }: LocaleParams): Promise<Metada
 export default async function PricingPage({ params }: LocaleParams) {
   const locale = await localeFromParams(params);
   const t = copy[locale];
+  const { bookDemoUrl } = getSiteConfig();
   const structuredData = {
     "@context": "https://schema.org",
     "@type": "WebPage",
@@ -167,7 +169,7 @@ export default async function PricingPage({ params }: LocaleParams) {
 
           <ScrollReveal delay={200}>
             <div className="pricing-cta">
-              <a href="https://calendar.app.google/jJd5yeSuDStVZm896" className="btn btn-primary" target="_blank" rel="noopener noreferrer">
+              <a href={bookDemoUrl} className="btn btn-primary" target="_blank" rel="noopener noreferrer">
                 {t.scoping}
               </a>
               <p style={{ marginTop: "16px", fontSize: "0.9rem", color: "var(--text-tertiary)" }}>{t.scopingNote}</p>

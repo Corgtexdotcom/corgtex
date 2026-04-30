@@ -5,7 +5,7 @@ import { ScrollReveal } from "../../../../components/ScrollReveal";
 import { StructuredData } from "../../../../components/StructuredData";
 import { localeFromParams, hrefFor, type LocaleParams } from "../../../../lib/locale";
 import { buildMetadata } from "../../../../lib/metadata";
-import { demoUrlForLocale } from "../../../../lib/site";
+import { demoGatePathForLocale, getSiteConfig } from "../../../../lib/site";
 
 const path = "/blog/corgtex-vs-glassfrog-vs-peerdom";
 
@@ -87,6 +87,7 @@ export async function generateMetadata({ params }: LocaleParams): Promise<Metada
 export default async function ComparisonPage({ params }: LocaleParams) {
   const locale = await localeFromParams(params);
   const t = copy[locale];
+  const { bookDemoUrl } = getSiteConfig();
   const structuredData = {
     "@context": "https://schema.org",
     "@type": "Article",
@@ -156,8 +157,8 @@ export default async function ComparisonPage({ params }: LocaleParams) {
                 <h3>{t.ctaTitle}</h3>
                 <p>{t.ctaBody}</p>
                 <div className="action-row">
-                  <a href={demoUrlForLocale(locale)} className="btn btn-primary" target="_blank" rel="noopener noreferrer">{t.demo}</a>
-                  <a href="https://calendar.app.google/jJd5yeSuDStVZm896" className="btn btn-secondary" target="_blank" rel="noopener noreferrer">{t.briefing}</a>
+                  <a href={demoGatePathForLocale(locale)} className="btn btn-primary">{t.demo}</a>
+                  <a href={bookDemoUrl} className="btn btn-secondary" target="_blank" rel="noopener noreferrer">{t.briefing}</a>
                 </div>
               </div>
             </ScrollReveal>

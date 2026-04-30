@@ -9,7 +9,7 @@
 - [Pricing](https://corgtex.com/pricing): Custom enterprise pricing, not per-seat
 - [About](https://corgtex.com/about): Founder background and company philosophy
 - [FAQ](https://corgtex.com/faq): Common questions about AI workforce governance
-- [Demo](https://app.corgtex.com/demo): Interactive demo with real governance data
+- [Demo](https://corgtex.com/demo): Interactive demo with real governance data
 
 ## Core Capabilities
 - Workforce Graph: every AI agent, what it does, what data it touches, who owns it

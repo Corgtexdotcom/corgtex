@@ -21,7 +21,7 @@ export function getSiteConfig(): SiteConfig {
       (process.env.NODE_ENV === "production" ? "https://app.corgtex.com" : "http://localhost:3000"),
   );
   const demoUrl = trimTrailingSlash(process.env.NEXT_PUBLIC_DEMO_URL?.trim() || `${appUrl}/demo`);
-  const bookDemoUrl = process.env.NEXT_PUBLIC_BOOK_DEMO_URL?.trim() || "https://calendly.com/corgtex/demo";
+  const bookDemoUrl = process.env.NEXT_PUBLIC_BOOK_DEMO_URL?.trim() || "https://calendar.app.google/jJd5yeSuDStVZm896";
 
   return {
     siteUrl,
@@ -39,4 +39,8 @@ export function absoluteSiteUrl(path = "/") {
 export function demoUrlForLocale(locale?: SiteLocale | string | null) {
   const { appUrl } = getSiteConfig();
   return `${appUrl}${normalizeSiteLocale(locale) === "es" ? "/es/demo" : "/demo"}`;
+}
+
+export function demoGatePathForLocale(locale?: SiteLocale | string | null) {
+  return normalizeSiteLocale(locale) === "es" ? "/es/demo" : "/demo";
 }

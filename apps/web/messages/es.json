@@ -1563,7 +1563,11 @@
       "askTitle": "Pregunta cualquier cosa",
       "askDescription": "El asistente de IA conoce todo lo que hay en Brain. Pregunta sobre cualquier tema, redacta propuestas u obtén contexto para decisiones.",
       "exploreTitle": "Tu turno de explorar",
-      "exploreDescription": "Recorrido completo. Ahora tienes acceso para explorar la gobernanza de Johnson & Johnson en Corgtex. El espacio es de solo lectura, pero puedes navegar libremente."
+      "exploreDescription": "Recorrido completo. Ahora tienes acceso para explorar la gobernanza de Johnson & Johnson en Corgtex. El espacio es de solo lectura, pero puedes navegar libremente.",
+      "briefingCtaTitle": "¿Quieres verlo con tu organización?",
+      "briefingCtaDescription": "Podemos revisar cómo Corgtex mapearía tu fuerza laboral de IA, gobernanza, conocimiento y costos. Puedes agendar una sesión ahora o seguir explorando la demo.",
+      "briefingCtaPrimary": "Agendar una sesión",
+      "briefingCtaSecondary": "Seguir explorando"
     }
   },
   "shared": {

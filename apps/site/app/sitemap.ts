@@ -7,6 +7,7 @@ const routes: { path: string; changeFrequency: MetadataRoute.Sitemap[number]["ch
   { path: "/about", changeFrequency: "monthly", priority: 0.8 },
   { path: "/faq", changeFrequency: "monthly", priority: 0.9 },
   { path: "/how-we-work", changeFrequency: "monthly", priority: 0.9 },
+  { path: "/demo", changeFrequency: "monthly", priority: 0.9 },
   { path: "/facts", changeFrequency: "monthly", priority: 0.7 },
   { path: "/blog", changeFrequency: "weekly", priority: 0.9 },
   { path: "/blog/what-is-organizational-operating-system", changeFrequency: "monthly", priority: 0.8 },

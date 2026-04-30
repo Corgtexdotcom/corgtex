@@ -158,3 +158,17 @@
 .demo-tour-restart-btn:hover {
   background: var(--accent-soft);
 }
+
+.demo-tour-briefing-copy {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.demo-tour-briefing-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-start;
+}

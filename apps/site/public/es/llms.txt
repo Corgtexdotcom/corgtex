@@ -9,7 +9,7 @@
 - [Precios](https://corgtex.com/es/pricing): Precios enterprise personalizados, no por usuario
 - [Acerca de](https://corgtex.com/es/about): Fundador, historia y filosofía de la empresa
 - [FAQ](https://corgtex.com/es/faq): Preguntas comunes sobre gobernanza de fuerza laboral de IA
-- [Demo](https://app.corgtex.com/es/demo): Demo interactiva con datos reales de gobernanza
+- [Demo](https://corgtex.com/es/demo): Demo interactiva con datos reales de gobernanza
 
 ## Capacidades centrales
 - Workforce Graph: cada agente de IA, qué hace, qué datos toca y quién lo posee
