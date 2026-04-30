@@ -33,9 +33,9 @@ jobs:
       DATABASE_URL: postgresql://postgres:postgres@localhost:5432/corgtex_test?schema=public
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -79,9 +79,9 @@ jobs:
       SHADOW_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres?schema=public
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -102,9 +102,9 @@ jobs:
       - db-sync
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -122,10 +122,11 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
+          package-manager-cache: false
       - run: node scripts/check-public-docs.mjs
       - run: node scripts/check-private-boundary.mjs
       - run: npm i -g mint
@@ -139,12 +140,13 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
+          package-manager-cache: false
       - name: Check PR body plan exists
         run: node scripts/check-plan.mjs --mode=present
         env:
@@ -159,12 +161,13 @@ jobs:
     if: github.event_name == 'pull_request'
     needs: plan-present
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
+          package-manager-cache: false
       - name: Fetch base ref
         run: git fetch origin ${{ github.base_ref }} --depth=1
       - name: Verify changed files are within plan scope
@@ -188,12 +191,13 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
+          package-manager-cache: false
       - name: Fetch base ref
         run: git fetch origin ${{ github.base_ref }} --depth=1
       - name: Verify diff size within caps
@@ -209,7 +213,7 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
       - name: Install gitleaks
@@ -230,12 +234,13 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
+          package-manager-cache: false
       - name: Fetch base ref
         run: git fetch origin ${{ github.base_ref }} --depth=1
       - name: Scan for client data leaks
@@ -248,8 +253,6 @@ jobs:
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
     needs: build
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
       - name: Skip if secrets not configured
         id: check-secrets
@@ -275,9 +278,9 @@ jobs:
           echo "Deployment health check timed out after 5 minutes"
           exit 1
       
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         if: steps.check-secrets.outputs.skip != 'true'
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         if: steps.check-secrets.outputs.skip != 'true'
         with:
           node-version: 22
