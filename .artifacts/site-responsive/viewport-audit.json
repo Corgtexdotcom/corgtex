@@ -1,0 +1,486 @@
+{
+  "baseURL": "http://localhost:3020",
+  "failures": [],
+  "summaries": [
+    {
+      "route": "/",
+      "viewport": "desktop",
+      "width": 1440,
+      "overflow": 0
+    },
+    {
+      "route": "/es",
+      "viewport": "desktop",
+      "width": 1440,
+      "overflow": 0
+    },
+    {
+      "route": "/pricing",
+      "viewport": "desktop",
+      "width": 1440,
+      "overflow": 0
+    },
+    {
+      "route": "/about",
+      "viewport": "desktop",
+      "width": 1440,
+      "overflow": 0
+    },
+    {
+      "route": "/how-we-work",
+      "viewport": "desktop",
+      "width": 1440,
+      "overflow": 0
+    },
+    {
+      "route": "/blog",
+      "viewport": "desktop",
+      "width": 1440,
+      "overflow": 0
+    },
+    {
+      "route": "/blog/ai-used-to-be-your-intern",
+      "viewport": "desktop",
+      "width": 1440,
+      "overflow": 0
+    },
+    {
+      "route": "/blog/corgtex-vs-glassfrog-vs-peerdom",
+      "viewport": "desktop",
+      "width": 1440,
+      "overflow": 0
+    },
+    {
+      "route": "/updates",
+      "viewport": "desktop",
+      "width": 1440,
+      "overflow": 0
+    },
+    {
+      "route": "/qualify?token=test",
+      "viewport": "desktop",
+      "width": 1440,
+      "overflow": 0
+    },
+    {
+      "route": "/",
+      "viewport": "laptop",
+      "width": 1024,
+      "overflow": 0
+    },
+    {
+      "route": "/es",
+      "viewport": "laptop",
+      "width": 1024,
+      "overflow": 0
+    },
+    {
+      "route": "/pricing",
+      "viewport": "laptop",
+      "width": 1024,
+      "overflow": 0
+    },
+    {
+      "route": "/about",
+      "viewport": "laptop",
+      "width": 1024,
+      "overflow": 0
+    },
+    {
+      "route": "/how-we-work",
+      "viewport": "laptop",
+      "width": 1024,
+      "overflow": 0
+    },
+    {
+      "route": "/blog",
+      "viewport": "laptop",
+      "width": 1024,
+      "overflow": 0
+    },
+    {
+      "route": "/blog/ai-used-to-be-your-intern",
+      "viewport": "laptop",
+      "width": 1024,
+      "overflow": 0
+    },
+    {
+      "route": "/blog/corgtex-vs-glassfrog-vs-peerdom",
+      "viewport": "laptop",
+      "width": 1024,
+      "overflow": 0
+    },
+    {
+      "route": "/updates",
+      "viewport": "laptop",
+      "width": 1024,
+      "overflow": 0
+    },
+    {
+      "route": "/qualify?token=test",
+      "viewport": "laptop",
+      "width": 1024,
+      "overflow": 0
+    },
+    {
+      "route": "/",
+      "viewport": "compact",
+      "width": 900,
+      "overflow": 0
+    },
+    {
+      "route": "/es",
+      "viewport": "compact",
+      "width": 900,
+      "overflow": 0
+    },
+    {
+      "route": "/pricing",
+      "viewport": "compact",
+      "width": 900,
+      "overflow": 0
+    },
+    {
+      "route": "/about",
+      "viewport": "compact",
+      "width": 900,
+      "overflow": 0
+    },
+    {
+      "route": "/how-we-work",
+      "viewport": "compact",
+      "width": 900,
+      "overflow": 0
+    },
+    {
+      "route": "/blog",
+      "viewport": "compact",
+      "width": 900,
+      "overflow": 0
+    },
+    {
+      "route": "/blog/ai-used-to-be-your-intern",
+      "viewport": "compact",
+      "width": 900,
+      "overflow": 0
+    },
+    {
+      "route": "/blog/corgtex-vs-glassfrog-vs-peerdom",
+      "viewport": "compact",
+      "width": 900,
+      "overflow": 0
+    },
+    {
+      "route": "/updates",
+      "viewport": "compact",
+      "width": 900,
+      "overflow": 0
+    },
+    {
+      "route": "/qualify?token=test",
+      "viewport": "compact",
+      "width": 900,
+      "overflow": 0
+    },
+    {
+      "route": "/",
+      "viewport": "ipad-landscape-ish",
+      "width": 834,
+      "overflow": 0
+    },
+    {
+      "route": "/es",
+      "viewport": "ipad-landscape-ish",
+      "width": 834,
+      "overflow": 0
+    },
+    {
+      "route": "/pricing",
+      "viewport": "ipad-landscape-ish",
+      "width": 834,
+      "overflow": 0
+    },
+    {
+      "route": "/about",
+      "viewport": "ipad-landscape-ish",
+      "width": 834,
+      "overflow": 0
+    },
+    {
+      "route": "/how-we-work",
+      "viewport": "ipad-landscape-ish",
+      "width": 834,
+      "overflow": 0
+    },
+    {
+      "route": "/blog",
+      "viewport": "ipad-landscape-ish",
+      "width": 834,
+      "overflow": 0
+    },
+    {
+      "route": "/blog/ai-used-to-be-your-intern",
+      "viewport": "ipad-landscape-ish",
+      "width": 834,
+      "overflow": 0
+    },
+    {
+      "route": "/blog/corgtex-vs-glassfrog-vs-peerdom",
+      "viewport": "ipad-landscape-ish",
+      "width": 834,
+      "overflow": 0
+    },
+    {
+      "route": "/updates",
+      "viewport": "ipad-landscape-ish",
+      "width": 834,
+      "overflow": 0
+    },
+    {
+      "route": "/qualify?token=test",
+      "viewport": "ipad-landscape-ish",
+      "width": 834,
+      "overflow": 0
+    },
+    {
+      "route": "/",
+      "viewport": "ipad-portrait",
+      "width": 768,
+      "overflow": 0
+    },
+    {
+      "route": "/es",
+      "viewport": "ipad-portrait",
+      "width": 768,
+      "overflow": 0
+    },
+    {
+      "route": "/pricing",
+      "viewport": "ipad-portrait",
+      "width": 768,
+      "overflow": 0
+    },
+    {
+      "route": "/about",
+      "viewport": "ipad-portrait",
+      "width": 768,
+      "overflow": 0
+    },
+    {
+      "route": "/how-we-work",
+      "viewport": "ipad-portrait",
+      "width": 768,
+      "overflow": 0
+    },
+    {
+      "route": "/blog",
+      "viewport": "ipad-portrait",
+      "width": 768,
+      "overflow": 0
+    },
+    {
+      "route": "/blog/ai-used-to-be-your-intern",
+      "viewport": "ipad-portrait",
+      "width": 768,
+      "overflow": 0
+    },
+    {
+      "route": "/blog/corgtex-vs-glassfrog-vs-peerdom",
+      "viewport": "ipad-portrait",
+      "width": 768,
+      "overflow": 0
+    },
+    {
+      "route": "/updates",
+      "viewport": "ipad-portrait",
+      "width": 768,
+      "overflow": 0
+    },
+    {
+      "route": "/qualify?token=test",
+      "viewport": "ipad-portrait",
+      "width": 768,
+      "overflow": 0
+    },
+    {
+      "route": "/",
+      "viewport": "phone-large",
+      "width": 430,
+      "overflow": 0
+    },
+    {
+      "route": "/es",
+      "viewport": "phone-large",
+      "width": 430,
+      "overflow": 0
+    },
+    {
+      "route": "/pricing",
+      "viewport": "phone-large",
+      "width": 430,
+      "overflow": 0
+    },
+    {
+      "route": "/about",
+      "viewport": "phone-large",
+      "width": 430,
+      "overflow": 0
+    },
+    {
+      "route": "/how-we-work",
+      "viewport": "phone-large",
+      "width": 430,
+      "overflow": 0
+    },
+    {
+      "route": "/blog",
+      "viewport": "phone-large",
+      "width": 430,
+      "overflow": 0
+    },
+    {
+      "route": "/blog/ai-used-to-be-your-intern",
+      "viewport": "phone-large",
+      "width": 430,
+      "overflow": 0
+    },
+    {
+      "route": "/blog/corgtex-vs-glassfrog-vs-peerdom",
+      "viewport": "phone-large",
+      "width": 430,
+      "overflow": 0
+    },
+    {
+      "route": "/updates",
+      "viewport": "phone-large",
+      "width": 430,
+      "overflow": 0
+    },
+    {
+      "route": "/qualify?token=test",
+      "viewport": "phone-large",
+      "width": 430,
+      "overflow": 0
+    },
+    {
+      "route": "/",
+      "viewport": "phone",
+      "width": 390,
+      "overflow": 0
+    },
+    {
+      "route": "/es",
+      "viewport": "phone",
+      "width": 390,
+      "overflow": 0
+    },
+    {
+      "route": "/pricing",
+      "viewport": "phone",
+      "width": 390,
+      "overflow": 0
+    },
+    {
+      "route": "/about",
+      "viewport": "phone",
+      "width": 390,
+      "overflow": 0
+    },
+    {
+      "route": "/how-we-work",
+      "viewport": "phone",
+      "width": 390,
+      "overflow": 0
+    },
+    {
+      "route": "/blog",
+      "viewport": "phone",
+      "width": 390,
+      "overflow": 0
+    },
+    {
+      "route": "/blog/ai-used-to-be-your-intern",
+      "viewport": "phone",
+      "width": 390,
+      "overflow": 0
+    },
+    {
+      "route": "/blog/corgtex-vs-glassfrog-vs-peerdom",
+      "viewport": "phone",
+      "width": 390,
+      "overflow": 0
+    },
+    {
+      "route": "/updates",
+      "viewport": "phone",
+      "width": 390,
+      "overflow": 0
+    },
+    {
+      "route": "/qualify?token=test",
+      "viewport": "phone",
+      "width": 390,
+      "overflow": 0
+    },
+    {
+      "route": "/",
+      "viewport": "wcag-min",
+      "width": 320,
+      "overflow": 0
+    },
+    {
+      "route": "/es",
+      "viewport": "wcag-min",
+      "width": 320,
+      "overflow": 0
+    },
+    {
+      "route": "/pricing",
+      "viewport": "wcag-min",
+      "width": 320,
+      "overflow": 0
+    },
+    {
+      "route": "/about",
+      "viewport": "wcag-min",
+      "width": 320,
+      "overflow": 0
+    },
+    {
+      "route": "/how-we-work",
+      "viewport": "wcag-min",
+      "width": 320,
+      "overflow": 0
+    },
+    {
+      "route": "/blog",
+      "viewport": "wcag-min",
+      "width": 320,
+      "overflow": 0
+    },
+    {
+      "route": "/blog/ai-used-to-be-your-intern",
+      "viewport": "wcag-min",
+      "width": 320,
+      "overflow": 0
+    },
+    {
+      "route": "/blog/corgtex-vs-glassfrog-vs-peerdom",
+      "viewport": "wcag-min",
+      "width": 320,
+      "overflow": 0
+    },
+    {
+      "route": "/updates",
+      "viewport": "wcag-min",
+      "width": 320,
+      "overflow": 0
+    },
+    {
+      "route": "/qualify?token=test",
+      "viewport": "wcag-min",
+      "width": 320,
+      "overflow": 0
+    }
+  ]
+}
