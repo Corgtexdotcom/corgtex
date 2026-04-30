@@ -3,6 +3,7 @@ import { requireGptAuth } from "@/lib/gpt-auth";
 import { createGoal, listGoals } from "@corgtex/domain";
 import { env } from "@corgtex/shared";
 import { handleRouteError } from "@/lib/http";
+import { disabledWorkspaceFeatureResponse } from "@/lib/workspace-feature-route";
 import type { GoalCadence, GoalLevel, GoalStatus } from "@prisma/client";
 
 function optionalDate(value: unknown) {
@@ -13,6 +14,8 @@ export async function GET(request: NextRequest) {
   try {
     const sessionCtx = await requireGptAuth(request, "read");
     const { workspaceId, actor } = sessionCtx;
+    const disabled = await disabledWorkspaceFeatureResponse(workspaceId, "GOALS");
+    if (disabled) return disabled;
 
     const take = parseInt(request.nextUrl.searchParams.get("take") || "20", 10);
     const skip = parseInt(request.nextUrl.searchParams.get("skip") || "0", 10);
@@ -62,6 +65,9 @@ export async function POST(request: NextRequest) {
   try {
     const sessionCtx = await requireGptAuth(request, "write");
     const { workspaceId, actor } = sessionCtx;
+    const disabled = await disabledWorkspaceFeatureResponse(workspaceId, "GOALS");
+    if (disabled) return disabled;
+
     const body = await request.json();
 
     if (!body.title) {

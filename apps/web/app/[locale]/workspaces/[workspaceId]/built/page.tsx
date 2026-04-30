@@ -1,5 +1,6 @@
 import { listBuildArtifacts, requireWorkspaceMembership } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
+import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
 import { getTranslations } from "next-intl/server";
 import { BuiltArtifactsClient } from "./BuiltArtifactsClient";
 
@@ -13,6 +14,7 @@ export default async function BuiltPage({
   const { workspaceId } = await params;
   const actor = await requirePageActor();
   await requireWorkspaceMembership({ actor, workspaceId });
+  await requireWorkspaceFeature(workspaceId, "BUILD_ARTIFACTS");
   const t = await getTranslations("built");
   const artifacts = await listBuildArtifacts(actor, { workspaceId });
 

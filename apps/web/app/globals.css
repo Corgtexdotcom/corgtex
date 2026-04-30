@@ -2007,10 +2007,12 @@ a.wiki-list-item:hover {
   cursor: pointer;
 }
 
-.avatar-upload img {
+.avatar-upload-image {
+  display: block;
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  background-position: center;
+  background-size: cover;
 }
 
 .avatar-upload:hover .avatar-overlay {

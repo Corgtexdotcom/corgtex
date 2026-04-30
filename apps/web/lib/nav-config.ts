@@ -13,6 +13,8 @@ export type NavGroup = {
 
 export type WorkspaceNavFeatureFlag =
   | "GOALS"
+  | "TOOL_LINKS"
+  | "BUILD_ARTIFACTS"
   | "RELATIONSHIPS"
   | "CYCLES"
   | "AGENT_GOVERNANCE"
@@ -30,8 +32,8 @@ export const WORKSPACE_NAV_GROUPS: NavGroup[] = [
       { href: "", labelKey: "home", icon: "◉" },
       { href: "/goals", labelKey: "goals", icon: "⌾", featureFlag: "GOALS" },
       { href: "/brain", labelKey: "brain", icon: "◈" },
-      { href: "/tools", labelKey: "tools", icon: "⌘" },
-      { href: "/built", labelKey: "built", icon: "▣" },
+      { href: "/tools", labelKey: "tools", icon: "⌘", featureFlag: "TOOL_LINKS" },
+      { href: "/built", labelKey: "built", icon: "▣", featureFlag: "BUILD_ARTIFACTS" },
       { href: "/members", labelKey: "members", icon: "⌂" },
     ],
   },

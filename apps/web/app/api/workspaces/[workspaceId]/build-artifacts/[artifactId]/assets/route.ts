@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { AppError, addBuildArtifactAsset } from "@corgtex/domain";
 import { withWorkspaceRoute } from "@/lib/route-handler";
+import { disabledWorkspaceFeatureResponse } from "@/lib/workspace-feature-route";
 
 export const dynamic = "force-dynamic";
 
@@ -22,6 +23,9 @@ function asOptionalNumber(value: FormDataEntryValue | null) {
 }
 
 export const POST = withWorkspaceRoute(async (request, { actor, workspaceId, params }) => {
+  const disabled = await disabledWorkspaceFeatureResponse(workspaceId, "BUILD_ARTIFACTS");
+  if (disabled) return disabled;
+
   const contentType = request.headers.get("content-type") ?? "";
   if (!contentType.includes("multipart/form-data")) {
     throw new AppError(400, "INVALID_INPUT", "Must be multipart/form-data.");

@@ -1,5 +1,6 @@
 import { listCircles, listWorkspaceToolLinks, requireWorkspaceMembership } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
+import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
 import { getTranslations } from "next-intl/server";
 import { ToolsDirectoryClient } from "./ToolsDirectoryClient";
 
@@ -16,6 +17,7 @@ export default async function ToolsPage({
   const { view } = await searchParams;
   const actor = await requirePageActor();
   await requireWorkspaceMembership({ actor, workspaceId });
+  await requireWorkspaceFeature(workspaceId, "TOOL_LINKS");
   const t = await getTranslations("tools");
 
   const [toolLinks, circles] = await Promise.all([

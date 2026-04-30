@@ -147,9 +147,14 @@ export function UserSettingsPanel({
             title={t("btnUploadAvatar")}
           >
             {profile.user.avatarUrl ? (
-              <img src={profile.user.avatarUrl} alt="Avatar" />
+              <span
+                aria-label="Avatar"
+                role="img"
+                className="avatar-upload-image"
+                style={{ backgroundImage: `url(${JSON.stringify(profile.user.avatarUrl)})` }}
+              />
             ) : (
-              <span style={{ fontSize: '2rem', fontWeight: 600, color: 'var(--accent)' }}>
+              <span style={{ fontSize: "2rem", fontWeight: 600, color: "var(--accent)" }}>
                 {profile.user.displayName?.charAt(0)?.toUpperCase() || profile.user.email.charAt(0).toUpperCase()}
               </span>
             )}
