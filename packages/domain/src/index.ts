@@ -54,6 +54,8 @@ export * from "./objection-validation";
 export * from "./conversation-brain";
 export * from "./sso";
 export * from "./cost-budget";
+export * from "./procurement-trials";
+export * from "./trial-entitlements";
 export * from "./meeting-intelligence";
 export * from "./meeting-transcript-intake";
 export * from "./admin";

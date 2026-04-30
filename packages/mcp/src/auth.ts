@@ -1,6 +1,6 @@
 import type { AppActor } from "@corgtex/shared";
 import { env } from "@corgtex/shared";
-import { resolveAgentActorFromBearer, describeScope, resolveMcpOAuthAccessToken } from "@corgtex/domain";
+import { resolveAgentActorFromBearer, describeScope, resolveMcpOAuthAccessToken, requireTrialMcpAccess } from "@corgtex/domain";
 import { AppError } from "@corgtex/domain";
 
 /**
@@ -55,6 +55,9 @@ export async function authenticateMcpRequest(
     if (!workspaceId) {
       throw new AppError(403, "FORBIDDEN", "Agent credential is not scoped to any workspace.");
     }
+    if (agentActor.authProvider !== "bootstrap") {
+      await requireTrialMcpAccess(workspaceId);
+    }
 
     return {
       actor: agentActor,
@@ -66,6 +69,7 @@ export async function authenticateMcpRequest(
 
   const oauthSession = await resolveMcpOAuthAccessToken(token, options.resourceUrl);
   if (oauthSession) {
+    await requireTrialMcpAccess(oauthSession.workspaceId);
     return {
       actor: oauthSession.actor,
       workspaceId: oauthSession.workspaceId,

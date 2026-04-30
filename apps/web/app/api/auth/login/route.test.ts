@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { randomUUID } from "node:crypto";
 
 const {
   listActorWorkspaces,
@@ -115,13 +116,14 @@ describe("POST /api/auth/login", () => {
     isDatabaseUnavailableError.mockReturnValue(false);
 
     const { POST } = await import("./route");
+    const clientAddress = `203.0.113.9-${randomUUID()}`;
     const makeRequest = () =>
       POST(
         new Request("http://localhost/api/auth/login", {
           method: "POST",
           headers: {
             "content-type": "application/json",
-            "x-forwarded-for": "203.0.113.9",
+            "x-forwarded-for": clientAddress,
           },
           body: JSON.stringify({
             email: "admin@example.com",

@@ -189,4 +189,12 @@ export const RATE_LIMITS = {
   PROCUREMENT_SETUP_PER_COMPANY: { windowMs: 86_400_000, limit: 5, failClosed: true },
   /** Initial self-serve setup member invitation writes per setup session per hour */
   PROCUREMENT_SETUP_INVITES_PER_SESSION: { windowMs: 3_600_000, limit: 20, failClosed: true },
+  /** Instant procurement trial requests per IP per hour */
+  PROCUREMENT_TRIAL_PER_IP: { windowMs: 3_600_000, limit: 5, failClosed: true },
+  /** Instant procurement trial requests per admin email per day */
+  PROCUREMENT_TRIAL_PER_EMAIL: { windowMs: 86_400_000, limit: 2, failClosed: true },
+  /** Instant procurement trial requests per company per day */
+  PROCUREMENT_TRIAL_PER_COMPANY: { windowMs: 86_400_000, limit: 3, failClosed: true },
+  /** Instant procurement trial requests per email domain per day */
+  PROCUREMENT_TRIAL_PER_DOMAIN: { windowMs: 86_400_000, limit: 3, failClosed: true },
 } as const;

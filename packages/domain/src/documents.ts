@@ -5,6 +5,7 @@ import { appendEvents } from "./events";
 import { requireWorkspaceMembership } from "./auth";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { invariant } from "./errors";
+import { assertTrialStorageCapacity } from "./trial-entitlements";
 
 export async function listDocuments(workspaceId: string, opts?: { archiveFilter?: ArchiveFilter }) {
   return prisma.document.findMany({
@@ -34,6 +35,11 @@ export async function createDocument(actor: AppActor, params: {
   invariant(title.length > 0, 400, "INVALID_INPUT", "Document title is required.");
   invariant(source.length > 0, 400, "INVALID_INPUT", "Document source is required.");
   invariant(storageKey.length > 0, 400, "INVALID_INPUT", "storageKey is required.");
+  const metadata = params.metadata;
+  const size = metadata && typeof metadata === "object" && !Array.isArray(metadata)
+    ? (metadata as Record<string, unknown>).size
+    : null;
+  await assertTrialStorageCapacity(params.workspaceId, typeof size === "number" ? size : 0);
 
   return prisma.$transaction(async (tx) => {
     const document = await tx.document.create({
