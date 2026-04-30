@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@corgtex/shared";
+import { resolveStorageRuntimeConfig } from "@corgtex/storage";
 
 function handleRouteError(error: unknown) {
   console.error("Healthcheck failed.", error);
@@ -30,11 +31,7 @@ function releaseFingerprint() {
 function runtimeFingerprint() {
   return {
     redis: process.env.REDIS_URL ? "configured" : "missing",
-    storage: (
-      process.env.S3_BUCKET_NAME
-      || process.env.AWS_S3_BUCKET_NAME
-      || process.env.R2_BUCKET_NAME
-    ) ? "configured" : "missing",
+    storage: resolveStorageRuntimeConfig().configured ? "configured" : "missing",
   };
 }
 
