@@ -8,6 +8,8 @@ import {
   confirmInsightAction, 
   dismissInsightAction, 
   confirmAllInsightsAction,
+  applyInsightAction,
+  applyAllHighConfidenceInsightsAction,
 } from "../actions";
 
 export default function MeetingIntelligence({ 
@@ -73,6 +75,15 @@ export default function MeetingIntelligence({
     setLoadingExtract(false);
   };
 
+  const applyAllHighConfidence = async () => {
+    setLoadingExtract(true);
+    const f = new FormData();
+    f.append("workspaceId", workspaceId);
+    f.append("meetingId", meetingId);
+    await applyAllHighConfidenceInsightsAction(f);
+    setLoadingExtract(false);
+  };
+
   const grouped = suggested.reduce((acc, curr) => {
     acc[curr.type] = acc[curr.type] || [];
     acc[curr.type].push(curr);
@@ -89,6 +100,9 @@ export default function MeetingIntelligence({
         </h2>
         <button className="btn" onClick={confirmAll} disabled={loadingExtract}>
           {loadingExtract ? "..." : t("confirmAll")}
+        </button>
+        <button className="btn btn-primary" onClick={applyAllHighConfidence} disabled={loadingExtract}>
+          {loadingExtract ? "..." : "Apply high confidence"}
         </button>
       </div>
 
@@ -121,6 +135,7 @@ export default function MeetingIntelligence({
                     )}
                   </div>
                   <div style={{ display: "flex", gap: 8 }}>
+                    <button className="btn btn-primary" onClick={actionItem(applyInsightAction, insight.id)}>Apply</button>
                     <button className="btn" onClick={actionItem(confirmInsightAction, insight.id)}>{t("confirmInsight")}</button>
                     <button className="btn" onClick={actionItem(dismissInsightAction, insight.id)}>{t("dismissInsight")}</button>
                   </div>

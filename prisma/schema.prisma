@@ -2399,13 +2399,19 @@ enum MeetingInsightStatus {
   DISMISSED
 }
 
+enum MeetingInsightOperation {
+  CREATE
+  RESOLVE
+}
+
 model MeetingInsight {
   id          String @id @default(uuid())
   workspaceId String
   meetingId   String
 
-  type   MeetingInsightType
-  status MeetingInsightStatus @default(SUGGESTED)
+  type      MeetingInsightType
+  operation MeetingInsightOperation @default(CREATE)
+  status    MeetingInsightStatus    @default(SUGGESTED)
 
   title        String
   bodyMd       String
@@ -2415,6 +2421,11 @@ model MeetingInsight {
 
   appliedEntityType String?
   appliedEntityId   String?
+  targetEntityType  String?
+  targetEntityId    String?
+  resolutionOutcome ProposalResolutionOutcome?
+  autoAppliedAt     DateTime?
+  autoApplyError    String?
 
   reviewedByUserId String?
   reviewedAt       DateTime?

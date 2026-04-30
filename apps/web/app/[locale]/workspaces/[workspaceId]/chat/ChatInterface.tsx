@@ -150,7 +150,51 @@ export function ChatInterface({
   }
 
   async function sendMessage() {
-    if (!input.trim() || loading) return;
+    if ((!input.trim() && !attachedFile) || loading) return;
+
+    setLoading(true);
+    setError(null);
+
+    let userMessage = input.trim();
+
+    if (attachedFile) {
+      try {
+        const formData = new FormData();
+        formData.append("file", attachedFile);
+        formData.append("title", attachedFile.name);
+        formData.append("source", "chat-upload");
+        if (userMessage) formData.append("message", userMessage);
+        const uploadRes = await fetch(`/api/workspaces/${workspaceId}/chat/attachments`, {
+          method: "POST",
+          body: formData,
+        });
+        const uploadData = await uploadRes.json().catch(() => ({})) as {
+          status?: string;
+          message?: string;
+          webUrl?: string | null;
+        };
+        if (!uploadRes.ok) {
+          throw new Error(uploadData.message || t("errorFailedToSend"));
+        }
+        if (uploadData.status === "needs_clarification") {
+          setError(uploadData.message || "Please add the missing meeting details and send again.");
+          setLoading(false);
+          inputRef.current?.focus();
+          return;
+        }
+        const attachmentMessage = uploadData.webUrl
+          ? `${uploadData.message}\n${uploadData.webUrl}`
+          : uploadData.message;
+        userMessage = [attachmentMessage, userMessage].filter(Boolean).join("\n\n");
+        removeAttachment();
+      } catch (err) {
+        if (!userMessage) {
+          setError(err instanceof Error ? err.message : t("errorFailedToSend"));
+          setLoading(false);
+          return;
+        }
+      }
+    }
 
     let currentSessionId = sessionId;
     if (!currentSessionId) {
@@ -183,33 +227,7 @@ export function ChatInterface({
       }
     }
 
-    let userMessage = input.trim();
-
-    if (attachedFile) {
-      try {
-        const formData = new FormData();
-        formData.append("file", attachedFile);
-        formData.append("title", attachedFile.name);
-        formData.append("source", "chat-upload");
-        const uploadRes = await fetch(`/api/workspaces/${workspaceId}/documents`, {
-          method: "POST",
-          body: formData,
-        });
-        if (uploadRes.ok) {
-          userMessage = t("attachedFileMessage", {
-            fileName: attachedFile.name,
-            message: userMessage,
-          });
-        }
-      } catch {
-        // Continue sending the message even if the attachment upload fails.
-      }
-      removeAttachment();
-    }
-
     setInput("");
-    setLoading(true);
-    setError(null);
 
     const optimisticTurn: Turn = {
       id: `pending-${Date.now()}`,
@@ -540,7 +558,7 @@ export function ChatInterface({
             />
             <button
               onClick={() => void sendMessage()}
-              disabled={loading || !input.trim()}
+              disabled={loading || (!input.trim() && !attachedFile)}
               className="chat-send-btn"
               type="button"
             >

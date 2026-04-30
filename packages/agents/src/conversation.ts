@@ -5,6 +5,7 @@ import { loadRelevantMemories, storeAgentMemory } from "@corgtex/domain";
 import { env } from "@corgtex/shared";
 import type { ChatMessage } from "@corgtex/models";
 import { checkCalendarAvailabilityTool, scheduleMeetingTool, checkCalendarAvailability, scheduleMeeting } from "./tools/calendar";
+import { createCorgtexScheduledMeetingTool, uploadMeetingTranscriptTool, createCorgtexScheduledMeeting, uploadMeetingTranscriptFromTool } from "./tools/meetings";
 import { getWorkspaceOverviewTool, queryTensionsTool, queryActionsTool, queryProposalsTool, queryGoalsTool, queryOrgStructureTool, getWorkspaceOverview, queryTensions, queryActions, queryProposals, queryGoals, queryOrgStructure } from "./tools/workspace";
 import { searchBrainTool, searchBrain } from "./tools/knowledge";
 import { createTensionTool, updateTensionTool, createActionTool, updateActionTool, createProposalTool, createGoalTool, createTensionAction, updateTensionAction, createActionItemAction, updateActionItemAction, createProposalAction, createGoalAction } from "./tools/mutations";
@@ -67,7 +68,9 @@ Tool credential reveals are sensitive and audited. Use them only when the user a
 
 Be concise, direct, and action-oriented. When relevant, cite workspace knowledge.
 If the user wants to create something (proposal, tension, action, or goal), use the appropriate workspace tool directly. If they say "add it to the goals tab" or "put it in goals", create goals rather than tensions, actions, or proposals.
-If the user asks to upload or ingest a file (e.g. meeting minutes, feedback), instruct them to use the attachment icon (+) in the chat input. When a user message contains '[Attached file: ...]', acknowledge that it has been queued for Brain absorption and answer based on the provided text if available.
+If the user asks to upload or ingest meeting minutes or a transcript, use 'upload_meeting_transcript' when transcript text is present. If the transcript is attached in chat, the application will process the attachment before this message reaches you; report the result and ask only for missing meeting date/time if needed.
+If the user asks to create a meeting in Corgtex Upcoming Meetings, use 'create_corgtex_scheduled_meeting'. Use 'schedule_meeting' only when the user wants an external calendar invite.
+For generic non-meeting files, instruct them to use the attachment icon (+) in the chat input.
 If the user explicitly asks you to save, upload, store, or remember content (e.g., "save this transcript", "upload this to the brain", "remember this for later"), invoke 'save_to_brain' immediately with the relevant content. You do NOT need to save regular conversation — that happens automatically in the nightly batch. Only use this tool when the user explicitly requests immediate storage.
 MEMBER MANAGEMENT TOOLS (permission-aware — mirrors your access level):
 - 'list_members' — full member list with emails, roles, and assignments
@@ -76,7 +79,7 @@ MEMBER MANAGEMENT TOOLS (permission-aware — mirrors your access level):
 - 'assign_role' — assign a member to a governance role in a circle (FACILITATOR/ADMIN)
 - 'unassign_role' — remove a member from a governance role (FACILITATOR/ADMIN)
 
-If the user wants to schedule a meeting or find availability, ALWAYS invoke the 'check_calendar_availability' tool first using full ISO 8601 UTC dates (e.g., 2026-04-10T09:00:00Z) based on their local time/date request. If availability allows, automatically invoke 'schedule_meeting' to book it natively!`,
+If the user wants a calendar invite or availability check, invoke 'check_calendar_availability' first using full ISO 8601 UTC dates (e.g., 2026-04-10T09:00:00Z). If availability allows, invoke 'schedule_meeting'. If they only want it listed in Corgtex Upcoming Meetings, use 'create_corgtex_scheduled_meeting' instead.`,
 
   "proposal-drafting": `You are a proposal drafting assistant for a self-managing organization. Help the user:
 - Clarify their governance need or operational change
@@ -102,6 +105,8 @@ type ConversationContext = {
 const TOOLS = [
   checkCalendarAvailabilityTool,
   scheduleMeetingTool,
+  createCorgtexScheduledMeetingTool,
+  uploadMeetingTranscriptTool,
   searchBrainTool,
   getWorkspaceOverviewTool,
   queryTensionsTool,
@@ -130,6 +135,8 @@ const TOOLS = [
 const TOOL_HANDLERS: Record<string, (actor: AppActor, ctx: ConversationContext, args: any) => Promise<unknown>> = {
   check_calendar_availability: async (actor, ctx, args) => checkCalendarAvailability(ctx.userId, ctx.workspaceId, args.emails, args.timeMin, args.timeMax),
   schedule_meeting: async (actor, ctx, args) => scheduleMeeting(ctx.userId, ctx.workspaceId, args.title, args.description, args.startTime, args.endTime, args.attendeeEmails),
+  create_corgtex_scheduled_meeting: async (actor, ctx, args) => createCorgtexScheduledMeeting(actor, ctx.workspaceId, args),
+  upload_meeting_transcript: async (actor, ctx, args) => uploadMeetingTranscriptFromTool(actor, ctx.workspaceId, args),
   search_brain: async (actor, ctx, args) => searchBrain(ctx.workspaceId, args.query, args.limit),
   get_workspace_overview: async (actor, ctx) => getWorkspaceOverview(ctx.workspaceId),
   query_tensions: async (actor, ctx, args) => queryTensions(ctx.workspaceId, args.status, args.assigneeId),

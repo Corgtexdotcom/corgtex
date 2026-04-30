@@ -48,6 +48,7 @@ import {
   listMeetings,
   getMeeting,
   createMeeting,
+  intakeMeetingTranscript,
   deleteMeeting,
   createArticle,
   updateArticle,
@@ -1629,20 +1630,43 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       participantIds?: string[];
     }) => {
       requireScope(sessionCtx, "meetings:write");
-      const meeting = await createMeeting(actor, {
+      if (!params.transcript?.trim()) {
+        const meeting = await createMeeting(actor, {
+          workspaceId,
+          title: params.title ?? null,
+          source: params.source,
+          recordedAt: new Date(params.recordedAt),
+          transcript: null,
+          summaryMd: params.summaryMd ?? null,
+          participantIds: params.participantIds ?? [],
+        });
+        return jsonResult({
+          id: meeting.id,
+          title: meeting.title,
+          status: "meeting_created",
+          recordedAt: meeting.recordedAt,
+          webUrl: webUrl(workspaceId, `/meetings/${meeting.id}`),
+        });
+      }
+
+      const result = await intakeMeetingTranscript(actor, {
         workspaceId,
         title: params.title ?? null,
         source: params.source,
         recordedAt: new Date(params.recordedAt),
-        transcript: params.transcript ?? null,
+        transcript: params.transcript,
         summaryMd: params.summaryMd ?? null,
         participantIds: params.participantIds ?? [],
       });
+      if (result.status === "needs_clarification") {
+        return jsonResult(result);
+      }
       return jsonResult({
-        id: meeting.id,
-        title: meeting.title,
-        recordedAt: meeting.recordedAt,
-        webUrl: webUrl(workspaceId, `/meetings/${meeting.id}`),
+        id: result.meeting.id,
+        title: result.meeting.title,
+        status: result.status,
+        recordedAt: result.meeting.recordedAt,
+        webUrl: webUrl(workspaceId, `/meetings/${result.meeting.id}`),
       });
     },
   );

@@ -280,6 +280,15 @@ async function updateMeetingWithTranscriptTx(
       summaryMd: params.summaryMd?.trim() || undefined,
       participantIds: params.participantIds ? normalizeIds(params.participantIds) : undefined,
       participantEmails: params.participantEmails ? normalizeEmails(params.participantEmails) : undefined,
+      aiProcessedAt: null,
+    },
+  });
+
+  await tx.meetingInsight.deleteMany({
+    where: {
+      meetingId: meeting.id,
+      workspaceId: params.workspaceId,
+      status: "SUGGESTED",
     },
   });
 

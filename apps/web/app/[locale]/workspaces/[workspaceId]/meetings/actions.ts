@@ -18,6 +18,7 @@ import {
   postDeliberationEntry,
   resolveDeliberationEntry,
 } from "@corgtex/domain";
+import { extractTextFromFileBuffer } from "@corgtex/knowledge";
 
 export async function createMeetingAction(formData: FormData) {
   const _demoGuardWsId = formData.get("workspaceId") as string;
@@ -85,13 +86,23 @@ export async function uploadMeetingTranscriptAction(formData: FormData) {
 
   const actor = await requirePageActor();
   const workspaceId = asString(formData, "workspaceId");
+  const file = formData.get("file");
+  let transcript = asOptional(formData, "transcript") ?? "";
+  if (file instanceof File && file.size > 0) {
+    const extracted = await extractTextFromFileBuffer({
+      fileBuffer: Buffer.from(await file.arrayBuffer()),
+      fileName: file.name,
+      mimeType: file.type || "application/octet-stream",
+    });
+    transcript = extracted.textContent ?? transcript;
+  }
   const result = await uploadMeetingTranscript(actor, {
     workspaceId,
     meetingId: asOptional(formData, "meetingId"),
     title: asOptional(formData, "title"),
     source: asOptional(formData, "source") || "transcript-upload",
     recordedAt: new Date(asString(formData, "recordedAt")),
-    transcript: asString(formData, "transcript"),
+    transcript,
     summaryMd: asOptional(formData, "summaryMd"),
     participantIds: asOptional(formData, "participantIds")?.split(",").map((value) => value.trim()).filter(Boolean) ?? [],
     participantEmails: asOptional(formData, "participantEmails")?.split(",").map((value) => value.trim()).filter(Boolean) ?? [],
@@ -150,6 +161,16 @@ export async function applyInsightAction(formData: FormData) {
   const insightId = formData.get("insightId") as string;
   
   await applyInsight(actor, { workspaceId, insightId });
+  refresh(workspaceId);
+}
+
+export async function applyAllHighConfidenceInsightsAction(formData: FormData) {
+  const actor = await requirePageActor();
+  const workspaceId = formData.get("workspaceId") as string;
+  const meetingId = formData.get("meetingId") as string;
+  const { autoApplyMeetingInsights } = await import("@corgtex/domain");
+
+  await autoApplyMeetingInsights(actor, { workspaceId, meetingId });
   refresh(workspaceId);
 }
 

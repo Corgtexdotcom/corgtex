@@ -94,7 +94,7 @@ type Env = {
   readonly SLACK_APP_ID: string | undefined;
 };
 
-const TEST_DATABASE_URL = "postgresql://postgres:postgres@localhost:5432/corgtex_test";
+const TEST_DATABASE_URL = "postgresql://postgres:postgres@localhost:5433/corgtex_test?schema=public";
 
 export const env: Env = {
   get NODE_ENV() {
