@@ -36,6 +36,50 @@ function installSharedMock(prismaMock: Record<string, any>) {
 }
 
 describe("MCP connector registry", () => {
+  it("uses delegated defaults for new OAuth connector clients", async () => {
+    const prismaMock = {
+      mcpOAuthClient: {
+        create: vi.fn().mockResolvedValue({
+          clientId: "mcp_client_test",
+          name: "Corgtex",
+          redirectUris: ["https://client.example/callback"],
+          scopes: ["workspace:read", "tools:read", "tools:write", "tools:credentials:read", "members:write", "runtime:write"],
+          tokenEndpointAuthMethod: "none",
+        }),
+      },
+    };
+    installSharedMock(prismaMock);
+
+    const { MCP_CONNECTOR_DEFAULT_SCOPES, registerMcpOAuthClient } = await import("./mcp-connector");
+    const result = await registerMcpOAuthClient({
+      name: "Corgtex",
+      redirectUris: ["https://client.example/callback"],
+    });
+
+    expect(MCP_CONNECTOR_DEFAULT_SCOPES).toContain("tools:write");
+    expect(MCP_CONNECTOR_DEFAULT_SCOPES).toContain("tools:credentials:read");
+    expect(MCP_CONNECTOR_DEFAULT_SCOPES).toContain("runtime:write");
+    expect(MCP_CONNECTOR_DEFAULT_SCOPES).not.toContain("support:write");
+    expect(prismaMock.mcpOAuthClient.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        scopes: expect.arrayContaining(["tools:read", "tools:write", "tools:credentials:read"]),
+      }),
+    });
+    expect(result.scope).toContain("tools:credentials:read");
+  });
+
+  it("expands legacy default client scopes without expanding intentionally narrow clients", async () => {
+    const {
+      MCP_CONNECTOR_LEGACY_DEFAULT_SCOPES,
+      resolveMcpClientAllowedScopes,
+    } = await import("./mcp-connector");
+
+    expect(resolveMcpClientAllowedScopes(MCP_CONNECTOR_LEGACY_DEFAULT_SCOPES)).toEqual(
+      expect.arrayContaining(["tools:write", "tools:credentials:read", "runtime:write"]),
+    );
+    expect(resolveMcpClientAllowedScopes(["workspace:read", "brain:read"])).toEqual(["workspace:read", "brain:read"]);
+  });
+
   it("defaults the current deployment to a registered active instance from WORKSPACE_SLUG", async () => {
     restoreEnv();
     Object.assign(process.env, {

@@ -6,6 +6,7 @@ import {
   isAllowedOAuthRedirectUri,
   isKnownScope,
   listActorWorkspaces,
+  resolveMcpClientAllowedScopes,
   resolveMcpConnectorInstanceForWorkspace,
   SCOPE_REGISTRY,
 } from "@corgtex/domain";
@@ -84,7 +85,8 @@ export default async function OAuthAuthorizePage(props: Props) {
     }
 
     const displayScopes = scopeString.split(" ").filter(Boolean);
-    const effectiveScopes: string[] = displayScopes.length > 0 ? displayScopes : mcpClient.scopes;
+    const allowedScopes = resolveMcpClientAllowedScopes(mcpClient.scopes);
+    const effectiveScopes: string[] = displayScopes.length > 0 ? displayScopes : allowedScopes;
     const deniedRedirectUrl = new URL(redirectUri);
     deniedRedirectUrl.searchParams.set("error", "access_denied");
     if (state) deniedRedirectUrl.searchParams.set("state", state);
@@ -110,7 +112,7 @@ export default async function OAuthAuthorizePage(props: Props) {
                 Allow {mcpClient.name}
               </h2>
               <p className="mt-1 text-sm text-[var(--text-muted)]">
-                This connects your AI client to one Corgtex workspace. Data remains scoped to the workspace you select.
+                This connects your AI client to one Corgtex workspace. It uses your current Corgtex role, including Tools access, and every sensitive action is audited.
               </p>
             </div>
 

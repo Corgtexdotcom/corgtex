@@ -14,6 +14,24 @@ afterEach(() => {
   vi.resetModules();
 });
 
+describe("scope defaults", () => {
+  it("keeps service-account defaults narrower than same-user delegated defaults", async () => {
+    const { DEFAULT_SCOPES, DELEGATED_DEFAULT_SCOPES, SCOPE_REGISTRY } = await import("./agent-auth");
+
+    expect(DEFAULT_SCOPES).toContain("tools:read");
+    expect(DEFAULT_SCOPES).not.toContain("tools:write");
+    expect(DEFAULT_SCOPES).not.toContain("tools:credentials:read");
+
+    expect(DELEGATED_DEFAULT_SCOPES).toContain("tools:read");
+    expect(DELEGATED_DEFAULT_SCOPES).toContain("tools:write");
+    expect(DELEGATED_DEFAULT_SCOPES).toContain("tools:credentials:read");
+    expect(DELEGATED_DEFAULT_SCOPES).toContain("members:write");
+    expect(DELEGATED_DEFAULT_SCOPES).toContain("runtime:write");
+    expect(DELEGATED_DEFAULT_SCOPES).not.toContain("support:write");
+    expect(SCOPE_REGISTRY["tools:credentials:read"].description).toContain("audited");
+  });
+});
+
 describe("resolveAgentActorFromBearer", () => {
   it("resolves the bootstrap agent with scoped workspaces", async () => {
     restoreEnv();

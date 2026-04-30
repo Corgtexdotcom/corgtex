@@ -30,71 +30,74 @@ const CREDENTIAL_PREFIX = "agentc-";
  */
 export const SCOPE_REGISTRY = {
   // ---- core read/chat ----
-  "workspace:read":      { label: "Read workspace info",        group: "core",       default: true,  description: "Workspace name, description, and aggregate counts." },
-  "support:write":       { label: "Write support audit",        group: "core",       default: false, description: "Record Corgtex Support audit entries in a customer workspace. Sensitive — support-only." },
-  "archive:read":        { label: "Read archived records",      group: "core",       default: false, description: "List archived workspace artifacts for recovery and audit." },
-  "archive:write":       { label: "Restore and purge archives", group: "core",       default: false, description: "Restore archived records or purge eligible archived records. Sensitive — opt-in." },
-  "brain:read":          { label: "Search the Brain",           group: "core",       default: true,  description: "Semantic search over policies, meeting notes, proposals, and other indexed content." },
-  "conversations:write": { label: "Chat with Corgtex",          group: "core",       default: true,  description: "Send messages to the Corgtex assistant (server-side LLM call)." },
+  "workspace:read":      { label: "Read workspace info",        group: "core",       default: true,  delegatedDefault: true,  description: "Workspace name, description, and aggregate counts." },
+  "support:write":       { label: "Write support audit",        group: "core",       default: false, delegatedDefault: false, description: "Record Corgtex Support audit entries in a customer workspace. Sensitive — support-only." },
+  "archive:read":        { label: "Read archived records",      group: "core",       default: false, delegatedDefault: true,  description: "List archived workspace artifacts for recovery and audit." },
+  "archive:write":       { label: "Restore and purge archives", group: "core",       default: false, delegatedDefault: true,  description: "Restore archived records or purge eligible archived records. Sensitive — same-role delegation." },
+  "brain:read":          { label: "Search the Brain",           group: "core",       default: true,  delegatedDefault: true,  description: "Semantic search over policies, meeting notes, proposals, and other indexed content." },
+  "conversations:write": { label: "Chat with Corgtex",          group: "core",       default: true,  delegatedDefault: true,  description: "Send messages to the Corgtex assistant (server-side LLM call)." },
 
   // ---- proposals ----
-  "proposals:read":      { label: "Read proposals",             group: "governance", default: true,  description: "List, get, and view governance proposals." },
-  "proposals:write":     { label: "Create & edit proposals",    group: "governance", default: true,  description: "Create, update, submit, archive, and publish proposals." },
+  "proposals:read":      { label: "Read proposals",             group: "governance", default: true,  delegatedDefault: true,  description: "List, get, and view governance proposals." },
+  "proposals:write":     { label: "Create & edit proposals",    group: "governance", default: true,  delegatedDefault: true,  description: "Create, update, submit, archive, and publish proposals." },
 
   // ---- actions ----
-  "actions:read":        { label: "Read actions",               group: "operations", default: true,  description: "List and view action items." },
-  "actions:write":       { label: "Create & edit actions",      group: "operations", default: true,  description: "Create, update, complete, and delete action items." },
+  "actions:read":        { label: "Read actions",               group: "operations", default: true,  delegatedDefault: true,  description: "List and view action items." },
+  "actions:write":       { label: "Create & edit actions",      group: "operations", default: true,  delegatedDefault: true,  description: "Create, update, complete, and delete action items." },
 
   // ---- tensions ----
-  "tensions:read":       { label: "Read tensions",              group: "operations", default: true,  description: "List and view tensions raised in the workspace." },
-  "tensions:write":      { label: "Create & edit tensions",     group: "operations", default: true,  description: "Create, update, upvote, and resolve tensions." },
+  "tensions:read":       { label: "Read tensions",              group: "operations", default: true,  delegatedDefault: true,  description: "List and view tensions raised in the workspace." },
+  "tensions:write":      { label: "Create & edit tensions",     group: "operations", default: true,  delegatedDefault: true,  description: "Create, update, upvote, and resolve tensions." },
 
   // ---- goals ----
-  "goals:read":          { label: "Read goals",                  group: "operations", default: true,  description: "List, get, and view workspace goals and key results." },
-  "goals:write":         { label: "Create & edit goals",         group: "operations", default: true,  description: "Create, update, and archive workspace goals and key results." },
+  "goals:read":          { label: "Read goals",                  group: "operations", default: true,  delegatedDefault: true,  description: "List, get, and view workspace goals and key results." },
+  "goals:write":         { label: "Create & edit goals",         group: "operations", default: true,  delegatedDefault: true,  description: "Create, update, and archive workspace goals and key results." },
 
   // ---- members ----
-  "members:read":        { label: "Read members",               group: "people",     default: true,  description: "List active members and their roles." },
-  "members:write":       { label: "Manage members",             group: "people",     default: false, description: "Create, update, and deactivate members. Sensitive — opt-in." },
-  "tools:read":          { label: "Read shared tools",           group: "people",     default: true,  description: "List shared workspace tool links and non-secret access notes." },
-  "tools:write":         { label: "Manage shared tools",         group: "people",     default: false, description: "Create, update, and archive shared workspace tool links. Sensitive — opt-in." },
+  "members:read":        { label: "Read members",               group: "people",     default: true,  delegatedDefault: true,  description: "List active members and their roles." },
+  "members:write":       { label: "Manage members",             group: "people",     default: false, delegatedDefault: true,  description: "Create, update, and deactivate members. Sensitive — same-role delegation." },
+  "tools:read":          { label: "Read shared tools",           group: "people",     default: true,  delegatedDefault: true,  description: "List shared workspace tool links and non-secret access notes." },
+  "tools:write":         { label: "Manage shared tools",         group: "people",     default: false, delegatedDefault: true,  description: "Create, update, and archive shared workspace tool links. Sensitive — same-role delegation." },
+  "tools:credentials:read": { label: "Reveal shared tool credentials", group: "people", default: false, delegatedDefault: true, description: "Reveal encrypted credentials saved on shared tool links. Sensitive — same-role delegation and audited." },
 
   // ---- meetings ----
-  "meetings:read":       { label: "Read meetings",              group: "knowledge",  default: true,  description: "List meetings and their summaries." },
-  "meetings:write":      { label: "Upload & edit meetings",     group: "knowledge",  default: true,  description: "Create meetings (upload minutes / transcripts) and delete them." },
-  "documents:write":     { label: "Upload documents",           group: "knowledge",  default: false, description: "Upload support-provided documents or data drops into workspace documents. Sensitive — opt-in." },
+  "meetings:read":       { label: "Read meetings",              group: "knowledge",  default: true,  delegatedDefault: true,  description: "List meetings and their summaries." },
+  "meetings:write":      { label: "Upload & edit meetings",     group: "knowledge",  default: true,  delegatedDefault: true,  description: "Create meetings (upload minutes / transcripts) and delete them." },
+  "documents:write":     { label: "Upload documents",           group: "knowledge",  default: false, delegatedDefault: true,  description: "Upload documents or data drops into workspace documents. Sensitive — same-role delegation." },
 
   // ---- brain (writes) ----
-  "brain:write":         { label: "Write to the Brain",         group: "knowledge",  default: true,  description: "Create and edit knowledge articles, post discussion comments, resolve threads." },
+  "brain:write":         { label: "Write to the Brain",         group: "knowledge",  default: true,  delegatedDefault: true,  description: "Create and edit knowledge articles, post discussion comments, resolve threads." },
 
   // ---- cycles / sprints ----
-  "cycles:read":         { label: "Read cycles",                group: "operations", default: true,  description: "List cycles, allocations, and cycle updates." },
-  "cycles:write":        { label: "Create & edit cycles",       group: "operations", default: true,  description: "Create and update cycles, allocations, and cycle updates." },
+  "cycles:read":         { label: "Read cycles",                group: "operations", default: true,  delegatedDefault: true,  description: "List cycles, allocations, and cycle updates." },
+  "cycles:write":        { label: "Create & edit cycles",       group: "operations", default: true,  delegatedDefault: true,  description: "Create and update cycles, allocations, and cycle updates." },
 
   // ---- circles / org structure ----
-  "circles:read":        { label: "Read circles",               group: "people",     default: true,  description: "List circles and their members for org-structure context." },
+  "circles:read":        { label: "Read circles",               group: "people",     default: true,  delegatedDefault: true,  description: "List circles and their members for org-structure context." },
 
   // ---- governance reference ----
-  "governance:read":     { label: "Read governance",            group: "governance", default: true,  description: "Read the constitution, active policies, and governance scoring." },
+  "governance:read":     { label: "Read governance",            group: "governance", default: true,  delegatedDefault: true,  description: "Read the constitution, active policies, and governance scoring." },
 
   // ---- finance ----
-  "finance:read":        { label: "Read finance",               group: "finance",    default: true,  description: "List spend requests and ledger accounts." },
-  "finance:write":       { label: "Submit spend requests",      group: "finance",    default: false, description: "Create and submit spend requests on behalf of users. Sensitive — opt-in." },
+  "finance:read":        { label: "Read finance",               group: "finance",    default: true,  delegatedDefault: true,  description: "List spend requests and ledger accounts." },
+  "finance:write":       { label: "Submit spend requests",      group: "finance",    default: false, delegatedDefault: true,  description: "Create and submit spend requests on behalf of users. Sensitive — same-role delegation." },
 
   // ---- support / operations ----
-  "integrations:read":   { label: "Read integrations",          group: "support",    default: false, description: "Inspect installed communication and OAuth integrations for support diagnostics." },
-  "data-sources:read":   { label: "Read data feeds",            group: "support",    default: false, description: "Inspect external data sources and sync health." },
-  "data-sources:write":  { label: "Sync data feeds",            group: "support",    default: false, description: "Trigger external data source sync jobs. Sensitive — opt-in." },
-  "agents:read":         { label: "Read agent runs",            group: "support",    default: false, description: "Inspect agent runs, steps, and failures for support diagnostics." },
-  "runtime:read":        { label: "Read runtime jobs",          group: "support",    default: false, description: "Inspect workflow jobs and runtime failures." },
-  "runtime:write":       { label: "Repair runtime jobs",        group: "support",    default: false, description: "Retry or discard failed workflow jobs. Sensitive — opt-in." },
-} as const satisfies Record<string, { label: string; group: string; default: boolean; description: string }>;
+  "integrations:read":   { label: "Read integrations",          group: "support",    default: false, delegatedDefault: true,  description: "Inspect installed communication and OAuth integrations. Admin-only where domain rules require it." },
+  "data-sources:read":   { label: "Read data feeds",            group: "support",    default: false, delegatedDefault: true,  description: "Inspect external data sources and sync health. Admin-only where domain rules require it." },
+  "data-sources:write":  { label: "Sync data feeds",            group: "support",    default: false, delegatedDefault: true,  description: "Trigger external data source sync jobs. Sensitive — same-role delegation." },
+  "agents:read":         { label: "Read agent runs",            group: "support",    default: false, delegatedDefault: true,  description: "Inspect agent runs, steps, and failures. Same-role delegation." },
+  "runtime:read":        { label: "Read runtime jobs",          group: "support",    default: false, delegatedDefault: true,  description: "Inspect workflow jobs and runtime failures. Same-role delegation." },
+  "runtime:write":       { label: "Repair runtime jobs",        group: "support",    default: false, delegatedDefault: true,  description: "Retry or discard failed workflow jobs. Sensitive — same-role delegation." },
+} as const satisfies Record<string, { label: string; group: string; default: boolean; delegatedDefault: boolean; description: string }>;
 
 export type AgentScope = keyof typeof SCOPE_REGISTRY;
 
 export const ALL_SCOPES = Object.keys(SCOPE_REGISTRY) as AgentScope[];
 
 export const DEFAULT_SCOPES = ALL_SCOPES.filter((scope) => SCOPE_REGISTRY[scope].default);
+
+export const DELEGATED_DEFAULT_SCOPES = ALL_SCOPES.filter((scope) => SCOPE_REGISTRY[scope].delegatedDefault);
 
 /**
  * Backwards-compatible alias for the previous flat string list.

@@ -10,6 +10,7 @@ const deleteGoalMock = vi.fn();
 const listWorkspaceToolLinksMock = vi.fn();
 const upsertWorkspaceToolLinkMock = vi.fn();
 const archiveWorkspaceToolLinkMock = vi.fn();
+const revealWorkspaceToolLinkCredentialMock = vi.fn();
 
 vi.mock("@corgtex/domain", () => ({
   listProposals: vi.fn(),
@@ -38,6 +39,7 @@ vi.mock("@corgtex/domain", () => ({
   listWorkspaceToolLinks: listWorkspaceToolLinksMock,
   upsertWorkspaceToolLink: upsertWorkspaceToolLinkMock,
   archiveWorkspaceToolLink: archiveWorkspaceToolLinkMock,
+  revealWorkspaceToolLinkCredential: revealWorkspaceToolLinkCredentialMock,
   listRuntimeJobs: vi.fn(),
   listFailedJobs: vi.fn(),
   replayWorkflowJob: vi.fn(),
@@ -88,6 +90,10 @@ describe("createCorgtexMcpServer", () => {
       hasCredential: true,
     });
     archiveWorkspaceToolLinkMock.mockReset().mockResolvedValue({ id: "tool-1" });
+    revealWorkspaceToolLinkCredentialMock.mockReset().mockResolvedValue({
+      credentialLabel: "Board password",
+      credentialSecret: "board-pass",
+    });
   });
 
   it("returns the opened spend identifier from create_spend", async () => {
@@ -164,6 +170,12 @@ describe("createCorgtexMcpServer", () => {
     expect((server as any)._registeredTools.archive_tool_link.annotations).toMatchObject({
       readOnlyHint: false,
       destructiveHint: true,
+      openWorldHint: false,
+    });
+    expect((server as any)._registeredTools.reveal_tool_link_credential.annotations).toMatchObject({
+      readOnlyHint: false,
+      destructiveHint: false,
+      sensitiveHint: true,
       openWorldHint: false,
     });
   });
@@ -292,5 +304,69 @@ describe("createCorgtexMcpServer", () => {
       webUrl: "https://app.test/workspaces/ws-1/tools",
     });
     expect(response.content[0].text).not.toContain("replace with access code");
+  });
+
+  it("reveals tool link credentials through a separate sensitive scoped tool", async () => {
+    const { createCorgtexMcpServer } = await import("./server");
+    const { requireScope } = await import("./auth");
+
+    const actor = {
+      kind: "user",
+      user: { id: "user-1", email: "user@example.com", displayName: "User" },
+    } as any;
+    const server = createCorgtexMcpServer({
+      actor,
+      workspaceId: "ws-1",
+      authKind: "oauth",
+      scopes: ["tools:credentials:read"],
+    });
+
+    const revealTool = (server as any)._registeredTools.reveal_tool_link_credential;
+    const response = await revealTool.handler({ toolLinkId: "tool-1" });
+
+    expect(revealWorkspaceToolLinkCredentialMock).toHaveBeenCalledWith(
+      actor,
+      { workspaceId: "ws-1", toolLinkId: "tool-1" },
+    );
+    expect(vi.mocked(requireScope)).toHaveBeenCalledWith(
+      expect.objectContaining({ workspaceId: "ws-1" }),
+      "tools:credentials:read",
+    );
+    expect(JSON.parse(response.content[0].text)).toEqual({
+      toolLinkId: "tool-1",
+      credentialLabel: "Board password",
+      credentialSecret: "board-pass",
+    });
+  });
+
+  it("passes the real actor into MCP chat instead of falling back to a bootstrap agent", async () => {
+    const { createCorgtexMcpServer } = await import("./server");
+    const { processConversationTurn } = await import("@corgtex/agents");
+
+    const actor = {
+      kind: "user",
+      user: { id: "user-1", email: "user@example.com", displayName: "User" },
+    } as any;
+    vi.mocked(processConversationTurn).mockResolvedValueOnce({
+      assistantMessage: "done",
+      contextUsed: {},
+    } as any);
+
+    const server = createCorgtexMcpServer({
+      actor,
+      workspaceId: "ws-1",
+      authKind: "oauth",
+      scopes: ["conversations:write"],
+    });
+
+    await (server as any)._registeredTools.chat.handler({ message: "show tools" });
+
+    expect(processConversationTurn).toHaveBeenCalledWith(expect.objectContaining({
+      workspaceId: "ws-1",
+      sessionId: "mcp-ws-1-user-1",
+      userId: "user-1",
+      userMessage: "show tools",
+      actor,
+    }));
   });
 });

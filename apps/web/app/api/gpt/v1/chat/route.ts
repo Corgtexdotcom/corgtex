@@ -21,6 +21,7 @@ export async function POST(request: NextRequest) {
       userId,
       agentKey: "assistant",
       userMessage: body.message,
+      actor,
     });
 
     return NextResponse.json({ assistantMessage: result.assistantMessage });
