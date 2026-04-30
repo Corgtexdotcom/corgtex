@@ -30,9 +30,11 @@ export default withSentryConfig(analyzer(withNextIntl(nextConfig)), {
   project: process.env.SENTRY_PROJECT,
   silent: !process.env.CI,
   widenClientFileUpload: true,
-  reactComponentAnnotation: {
-    enabled: true,
-  },
   tunnelRoute: "/monitoring",
-  automaticVercelMonitors: true,
+  webpack: {
+    automaticVercelMonitors: true,
+    reactComponentAnnotation: {
+      enabled: true,
+    },
+  },
 });
