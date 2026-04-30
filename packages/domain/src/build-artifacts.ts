@@ -104,6 +104,18 @@ type ArtifactUpdateInput = Partial<Omit<ArtifactInput, "workspaceId" | "artifact
   artifactId: string;
 };
 
+type GitHubPullRequestInput = {
+  repositoryOwner: string;
+  repositoryName: string;
+  pullRequestNumber: number;
+  pullRequestUrl?: string | null;
+  branchName?: string | null;
+  commitSha?: string | null;
+  title: string;
+  bodyMd?: string | null;
+  isDraft?: boolean;
+};
+
 function normalizeString(value: string | null | undefined, maxLength?: number) {
   const trimmed = value?.trim();
   if (!trimmed) return null;
@@ -120,6 +132,17 @@ function normalizeRepoPart(value: string, label: string) {
   const normalized = normalizeRequired(value, label, 120).toLowerCase();
   invariant(/^[a-z0-9_.-]+$/.test(normalized), 400, "INVALID_INPUT", `${label} contains unsupported characters.`);
   return normalized;
+}
+
+function normalizeRepositoryFullName(value: unknown) {
+  if (typeof value !== "string") return null;
+  const [owner, name, ...rest] = value.trim().split("/");
+  if (!owner || !name || rest.length > 0) return null;
+  try {
+    return `${normalizeRepoPart(owner, "Repository owner")}/${normalizeRepoPart(name, "Repository name")}`;
+  } catch {
+    return null;
+  }
 }
 
 function normalizePrNumber(value: number | null | undefined) {
@@ -239,6 +262,13 @@ function enforcePublicReviewRules(params: {
   }
 }
 
+function repositoryConfigMatches(config: Prisma.JsonValue | null, repositoryFullName: string) {
+  if (!config || typeof config !== "object" || Array.isArray(config)) return false;
+  const repositories = (config as Record<string, unknown>).githubRepositories;
+  if (!Array.isArray(repositories)) return false;
+  return repositories.some((repository) => normalizeRepositoryFullName(repository) === repositoryFullName);
+}
+
 function artifactContent(artifact: BuildArtifactRecord) {
   const repo = `${artifact.repositoryOwner}/${artifact.repositoryName}`;
   const pr = artifact.pullRequestNumber ? `#${artifact.pullRequestNumber}` : "unlinked PR";
@@ -328,6 +358,16 @@ async function getArtifactOrThrow(tx: Prisma.TransactionClient, workspaceId: str
   return artifact;
 }
 
+function githubPullRequestSummary(params: GitHubPullRequestInput) {
+  const lines = [
+    params.isDraft ? "GitHub review state: draft PR" : "GitHub review state: ready for review",
+    params.branchName ? `Source branch: ${params.branchName}` : null,
+    params.commitSha ? `Head commit: ${params.commitSha}` : null,
+    params.bodyMd ? `PR description:\n${params.bodyMd.trim()}` : "PR description: none provided.",
+  ];
+  return lines.filter(Boolean).join("\n\n");
+}
+
 export async function listBuildArtifacts(actor: AppActor, params: {
   workspaceId: string;
   status?: BuildArtifactStatus;
@@ -343,6 +383,29 @@ export async function listBuildArtifacts(actor: AppActor, params: {
   });
 
   return artifacts.map((artifact) => serializeArtifact(actor, membership, artifact));
+}
+
+export async function listBuildArtifactWorkspaceIdsForGithubRepository(params: {
+  repositoryOwner: string;
+  repositoryName: string;
+}) {
+  const repositoryOwner = normalizeRepoPart(params.repositoryOwner, "Repository owner");
+  const repositoryName = normalizeRepoPart(params.repositoryName, "Repository name");
+  const repositoryFullName = `${repositoryOwner}/${repositoryName}`;
+  const records = await prisma.workspaceFeatureFlag.findMany({
+    where: {
+      flag: "BUILD_ARTIFACTS",
+      enabled: true,
+    },
+    select: {
+      workspaceId: true,
+      config: true,
+    },
+  });
+
+  return records
+    .filter((record) => repositoryConfigMatches(record.config, repositoryFullName))
+    .map((record) => record.workspaceId);
 }
 
 export async function getBuildArtifact(actor: AppActor, params: {
@@ -489,6 +552,87 @@ export async function updateBuildArtifact(actor: AppActor, params: ArtifactUpdat
     classification: params.classification ?? current.classification,
     visibility: params.visibility ?? current.visibility,
     noPrivateDataConfirmed: params.noPrivateDataConfirmed,
+  });
+}
+
+export async function upsertBuildArtifactsFromGitHubPullRequest(params: GitHubPullRequestInput) {
+  const repositoryOwner = normalizeRepoPart(params.repositoryOwner, "Repository owner");
+  const repositoryName = normalizeRepoPart(params.repositoryName, "Repository name");
+  const pullRequestNumber = normalizePrNumber(params.pullRequestNumber);
+  invariant(pullRequestNumber, 400, "INVALID_INPUT", "PR number is required.");
+  const workspaceIds = await listBuildArtifactWorkspaceIdsForGithubRepository({
+    repositoryOwner,
+    repositoryName,
+  });
+  const summaryMd = githubPullRequestSummary(params);
+  const now = new Date();
+
+  return prisma.$transaction(async (tx) => {
+    const updated = [];
+
+    for (const workspaceId of workspaceIds) {
+      const existing = await tx.buildArtifact.findFirst({
+        where: {
+          workspaceId,
+          repositoryOwner,
+          repositoryName,
+          pullRequestNumber,
+        },
+        select: buildArtifactSelect,
+      });
+      const data = {
+        repositoryOwner,
+        repositoryName,
+        pullRequestNumber,
+        pullRequestUrl: normalizeUrl(params.pullRequestUrl),
+        branchName: normalizeString(params.branchName, 160),
+        commitSha: normalizeString(params.commitSha, 80),
+        mergeCommitSha: null,
+        title: normalizeRequired(params.title, "Artifact title", 200),
+        summaryMd: normalizeString(summaryMd),
+        status: "OPEN" as const,
+        classification: existing?.classification ?? "INTERNAL",
+        visibility: existing?.visibility ?? "PRIVATE",
+        closedAt: null,
+        mergedAt: null,
+      } satisfies Prisma.BuildArtifactUncheckedUpdateInput;
+
+      const artifact = existing
+        ? await tx.buildArtifact.update({
+          where: { id: existing.id },
+          data,
+          select: buildArtifactSelect,
+        })
+        : await tx.buildArtifact.create({
+          data: {
+            workspaceId,
+            createdByUserId: null,
+            ...data,
+          },
+          select: buildArtifactSelect,
+        });
+
+      await syncBrainSource(tx, artifact.id);
+      const refreshed = await getArtifactOrThrow(tx, workspaceId, artifact.id);
+      await tx.auditLog.create({
+        data: {
+          workspaceId,
+          actorUserId: null,
+          action: existing ? "build_artifact.github_updated" : "build_artifact.github_created",
+          entityType: "BuildArtifact",
+          entityId: artifact.id,
+          meta: {
+            repository: `${repositoryOwner}/${repositoryName}`,
+            pullRequestNumber,
+            isDraft: params.isDraft === true,
+            syncedAt: now.toISOString(),
+          },
+        },
+      });
+      updated.push(refreshed.id);
+    }
+
+    return { updatedCount: updated.length, artifactIds: updated };
   });
 }
 

@@ -11,6 +11,60 @@ import {
 } from "@corgtex/domain";
 import type { BrainArticleType } from "@prisma/client";
 
+type BuildArtifactDigestItem = {
+  repositoryOwner: string;
+  repositoryName: string;
+  pullRequestNumber: number | null;
+  pullRequestUrl: string | null;
+  branchName: string | null;
+  title: string;
+  summaryMd: string | null;
+  status: "OPEN" | "MERGED" | "CLOSED";
+  mergedAt: Date | null;
+  closedAt: Date | null;
+  updatedAt: Date;
+  assets: {
+    kind: string;
+    label: string;
+    captionMd: string | null;
+  }[];
+};
+
+function formatBuildArtifactDate(value: Date | null) {
+  return value ? value.toISOString().split("T")[0] : "unknown date";
+}
+
+function formatBuildArtifactDigestItem(item: BuildArtifactDigestItem) {
+  const repo = `${item.repositoryOwner}/${item.repositoryName}`;
+  const pr = item.pullRequestNumber ? `#${item.pullRequestNumber}` : "unlinked PR";
+  const proof = item.assets.length > 0
+    ? item.assets.map((asset) => `${asset.label} (${asset.kind})${asset.captionMd ? `: ${asset.captionMd}` : ""}`).join("; ")
+    : "No visual proof attached yet.";
+
+  return [
+    `- ${item.title} (${repo} ${pr})`,
+    item.pullRequestUrl ? `  PR: ${item.pullRequestUrl}` : null,
+    item.branchName ? `  Branch: ${item.branchName}` : null,
+    `  Last activity: ${formatBuildArtifactDate(item.updatedAt)}`,
+    item.mergedAt ? `  Merged: ${formatBuildArtifactDate(item.mergedAt)}` : null,
+    item.closedAt && item.status === "CLOSED" ? `  Closed: ${formatBuildArtifactDate(item.closedAt)}` : null,
+    item.summaryMd ? `  Plan / description: ${item.summaryMd.slice(0, 800)}` : null,
+    `  Visual proof: ${proof}`,
+  ].filter(Boolean).join("\n");
+}
+
+function formatBuildArtifactDigestInput(items: BuildArtifactDigestItem[]) {
+  const active = items.filter((item) => item.status === "OPEN");
+  const merged = items.filter((item) => item.status === "MERGED");
+  const closed = items.filter((item) => item.status === "CLOSED");
+  const sections = [
+    active.length > 0 ? `Active PR work:\n${active.map(formatBuildArtifactDigestItem).join("\n\n")}` : null,
+    merged.length > 0 ? `Merged PRs / shipped outcomes:\n${merged.map(formatBuildArtifactDigestItem).join("\n\n")}` : null,
+    closed.length > 0 ? `Closed without merge:\n${closed.map(formatBuildArtifactDigestItem).join("\n\n")}` : null,
+  ];
+  return sections.filter(Boolean).join("\n\n");
+}
+
 export async function runDailyDigest(params: {
   workspaceId: string;
   workflowJobId?: string;
@@ -53,9 +107,43 @@ export async function runDailyDigest(params: {
     }
   });
   const slackMessages = await listSlackMessagesForDigest(params.workspaceId, since);
+  const buildArtifacts = await prisma.buildArtifact.findMany({
+    where: {
+      workspaceId: params.workspaceId,
+      OR: [
+        { updatedAt: { gte: since } },
+        { mergedAt: { gte: since } },
+        { closedAt: { gte: since } },
+      ],
+    },
+    orderBy: { updatedAt: "desc" },
+    take: 40,
+    select: {
+      repositoryOwner: true,
+      repositoryName: true,
+      pullRequestNumber: true,
+      pullRequestUrl: true,
+      branchName: true,
+      title: true,
+      summaryMd: true,
+      status: true,
+      mergedAt: true,
+      closedAt: true,
+      updatedAt: true,
+      assets: {
+        select: {
+          kind: true,
+          label: true,
+          captionMd: true,
+        },
+        orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
+        take: 5,
+      },
+    },
+  });
 
-  if (sessions.length === 0 && slackMessages.length === 0) {
-    return { success: true, message: "No conversations or Slack messages to digest." };
+  if (sessions.length === 0 && slackMessages.length === 0 && buildArtifacts.length === 0) {
+    return { success: true, message: "No conversations, Slack messages, or PR activity to digest." };
   }
 
   // 3. Extract member insights and update PERSON profiles
@@ -173,7 +261,8 @@ Rules:
   const allTranscripts = [
     conversationTranscripts ? `Corgtex conversations:\n${conversationTranscripts}` : "",
     slackTranscript ? `Slack public-channel messages:\n${slackTranscript}` : "",
-  ].filter(Boolean).join("\n\n---\n\n").slice(0, 12000);
+    buildArtifacts.length > 0 ? `Built / PR activity for accomplishments and shipped work:\n${formatBuildArtifactDigestInput(buildArtifacts)}` : "",
+  ].filter(Boolean).join("\n\n---\n\n").slice(0, 16000);
 
   const digestResult = await defaultModelGateway.chat({
     model,
@@ -188,6 +277,7 @@ Rules:
 Format it as a markdown article containing these sections:
 - ✧ Key Decisions Made
 - ✓ Action Items Identified
+- Built / Shipped Work
 - ▫ Conversation Highlights
 - ● Team Pulse (aggregate sentiment)
 - △ Emerging Tensions (recurring themes)`

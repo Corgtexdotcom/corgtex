@@ -45,34 +45,6 @@ type BuildArtifact = {
   assets: BuildArtifactAsset[];
 };
 
-type FormState = {
-  repositoryOwner: string;
-  repositoryName: string;
-  pullRequestNumber: string;
-  pullRequestUrl: string;
-  branchName: string;
-  commitSha: string;
-  title: string;
-  summaryMd: string;
-  classification: BuildArtifact["classification"];
-  visibility: BuildArtifact["visibility"];
-  noPrivateDataConfirmed: boolean;
-};
-
-const EMPTY_FORM: FormState = {
-  repositoryOwner: "",
-  repositoryName: "",
-  pullRequestNumber: "",
-  pullRequestUrl: "",
-  branchName: "",
-  commitSha: "",
-  title: "",
-  summaryMd: "",
-  classification: "OPEN_CORE",
-  visibility: "PUBLIC_REVIEW",
-  noPrivateDataConfirmed: false,
-};
-
 function displayDate(value: string | null) {
   if (!value) return "";
   return new Date(value).toLocaleDateString(undefined, {
@@ -80,6 +52,10 @@ function displayDate(value: string | null) {
     day: "numeric",
     year: "numeric",
   });
+}
+
+function dateValue(value: string | null) {
+  return value ? new Date(value).getTime() : 0;
 }
 
 function formatBytes(value: number) {
@@ -99,6 +75,17 @@ function markdownLinks(artifact: BuildArtifact) {
     .join("\n");
 }
 
+function firstImage(artifact: BuildArtifact) {
+  return artifact.assets.find((asset) => asset.mimeType.startsWith("image/")) ?? null;
+}
+
+function initialSelectedId(artifacts: BuildArtifact[]) {
+  return artifacts.find((artifact) => artifact.status === "OPEN")?.id
+    ?? artifacts.find((artifact) => artifact.status === "MERGED")?.id
+    ?? artifacts[0]?.id
+    ?? null;
+}
+
 export function BuiltArtifactsClient({
   workspaceId,
   initialArtifacts,
@@ -109,62 +96,34 @@ export function BuiltArtifactsClient({
   const router = useRouter();
   const t = useTranslations("built");
   const [artifacts, setArtifacts] = useState(initialArtifacts);
-  const [form, setForm] = useState<FormState>(EMPTY_FORM);
-  const [isFormOpen, setIsFormOpen] = useState(initialArtifacts.length === 0);
-  const [selectedId, setSelectedId] = useState(initialArtifacts[0]?.id ?? null);
+  const [selectedId, setSelectedId] = useState(initialSelectedId(initialArtifacts));
   const [error, setError] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [uploadingId, setUploadingId] = useState<string | null>(null);
 
-  const selected = useMemo(
-    () => artifacts.find((artifact) => artifact.id === selectedId) ?? artifacts[0] ?? null,
-    [artifacts, selectedId],
-  );
+  const groupedArtifacts = useMemo(() => {
+    const inProgress = artifacts
+      .filter((artifact) => artifact.status === "OPEN")
+      .sort((a, b) => dateValue(b.updatedAt) - dateValue(a.updatedAt));
+    const merged = artifacts
+      .filter((artifact) => artifact.status === "MERGED")
+      .sort((a, b) => dateValue(b.mergedAt ?? b.updatedAt) - dateValue(a.mergedAt ?? a.updatedAt));
+    const closed = artifacts
+      .filter((artifact) => artifact.status === "CLOSED")
+      .sort((a, b) => dateValue(b.closedAt ?? b.updatedAt) - dateValue(a.closedAt ?? a.updatedAt));
 
-  function setField<K extends keyof FormState>(key: K, value: FormState[K]) {
-    setForm((current) => ({ ...current, [key]: value }));
-  }
-
-  async function submitArtifact(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setError(null);
-
-    const payload = {
-      repositoryOwner: form.repositoryOwner,
-      repositoryName: form.repositoryName,
-      pullRequestNumber: form.pullRequestNumber.trim() ? Number.parseInt(form.pullRequestNumber, 10) : null,
-      pullRequestUrl: form.pullRequestUrl || null,
-      branchName: form.branchName || null,
-      commitSha: form.commitSha || null,
-      title: form.title,
-      summaryMd: form.summaryMd || null,
-      classification: form.classification,
-      visibility: form.visibility,
-      noPrivateDataConfirmed: form.noPrivateDataConfirmed,
+    return {
+      inProgress,
+      merged,
+      closed,
+      ordered: [...inProgress, ...merged, ...closed],
     };
+  }, [artifacts]);
 
-    const res = await fetch(`/api/workspaces/${workspaceId}/build-artifacts`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    const data = await res.json().catch(() => null);
-    if (!res.ok) {
-      setError(data?.error?.message ?? t("errorGeneric"));
-      return;
-    }
-
-    setArtifacts((current) => {
-      const exists = current.some((artifact) => artifact.id === data.id);
-      return exists
-        ? current.map((artifact) => (artifact.id === data.id ? data : artifact))
-        : [data, ...current];
-    });
-    setSelectedId(data.id);
-    setIsFormOpen(false);
-    setForm(EMPTY_FORM);
-    router.refresh();
-  }
+  const selected = useMemo(
+    () => artifacts.find((artifact) => artifact.id === selectedId) ?? groupedArtifacts.ordered[0] ?? null,
+    [artifacts, groupedArtifacts.ordered, selectedId],
+  );
 
   async function uploadAsset(event: React.FormEvent<HTMLFormElement>, artifact: BuildArtifact) {
     event.preventDefault();
@@ -230,149 +189,243 @@ export function BuiltArtifactsClient({
     return t("classificationInternal");
   }
 
-  function renderPreview(artifact: BuildArtifact) {
-    const firstVisual = artifact.assets.find((asset) => asset.mimeType.startsWith("image/"));
+  function artifactDateLabel(artifact: BuildArtifact) {
+    if (artifact.status === "MERGED") return t("mergedOn", { date: displayDate(artifact.mergedAt ?? artifact.updatedAt) });
+    if (artifact.status === "CLOSED") return t("closedOn", { date: displayDate(artifact.closedAt ?? artifact.updatedAt) });
+    return t("updated", { date: displayDate(artifact.updatedAt) });
+  }
+
+  function renderThumbnail(artifact: BuildArtifact, height = 72) {
+    const image = firstImage(artifact);
+    if (image) {
+      return (
+        <div
+          role="img"
+          aria-label={image.label}
+          style={{
+            height,
+            backgroundImage: `url("${assetUrl(workspaceId, artifact, image).replace(/"/g, "%22")}")`,
+            backgroundPosition: "center",
+            backgroundSize: "cover",
+            backgroundColor: "var(--bg-alt)",
+          }}
+        />
+      );
+    }
+
     return (
       <div
         style={{
-          border: "1px solid var(--line)",
-          borderRadius: 8,
-          overflow: "hidden",
-          background: "var(--surface-strong)",
-          minHeight: 168,
+          height,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          background: "var(--bg-alt)",
+          fontSize: "1.45rem",
+          fontWeight: 700,
         }}
       >
-        {firstVisual ? (
-          <div
-            role="img"
-            aria-label={firstVisual.label}
-            style={{
-              height: 124,
-              backgroundImage: `url("${assetUrl(workspaceId, artifact, firstVisual).replace(/"/g, "%22")}")`,
-              backgroundPosition: "center",
-              backgroundSize: "cover",
-              backgroundColor: "var(--bg-alt)",
-            }}
-          />
-        ) : (
-          <div
-            style={{
-              height: 124,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              background: "var(--bg-alt)",
-              fontSize: "2rem",
-              fontWeight: 700,
-            }}
-          >
-            {artifact.repositoryName.slice(0, 1).toUpperCase()}
-          </div>
-        )}
-        <div style={{ padding: 12 }}>
-          <strong style={{ display: "block", fontSize: "0.95rem" }}>{artifact.title}</strong>
-          <div className="nr-item-meta" style={{ marginTop: 4 }}>
+        {artifact.repositoryName.slice(0, 1).toUpperCase()}
+      </div>
+    );
+  }
+
+  function renderArtifactCard(artifact: BuildArtifact) {
+    const isSelected = selected?.id === artifact.id;
+    return (
+      <button
+        type="button"
+        key={artifact.id}
+        onClick={() => setSelectedId(artifact.id)}
+        style={{
+          display: "grid",
+          gridTemplateColumns: "96px minmax(0, 1fr)",
+          gap: 12,
+          textAlign: "left",
+          border: isSelected ? "2px solid var(--accent)" : "1px solid var(--line)",
+          borderRadius: 8,
+          padding: 10,
+          background: "var(--surface-strong)",
+          color: "var(--text)",
+          cursor: "pointer",
+          width: "100%",
+        }}
+      >
+        <div style={{ borderRadius: 6, overflow: "hidden", border: "1px solid var(--line)" }}>
+          {renderThumbnail(artifact)}
+        </div>
+        <div style={{ minWidth: 0 }}>
+          <strong style={{ display: "block", fontSize: "0.95rem", wordBreak: "break-word" }}>{artifact.title}</strong>
+          <div className="nr-item-meta" style={{ marginTop: 4, wordBreak: "break-word" }}>
             {artifact.repositoryOwner}/{artifact.repositoryName}
             {artifact.pullRequestNumber ? ` #${artifact.pullRequestNumber}` : ""}
           </div>
+          <div className="actions-inline" style={{ gap: 6, marginTop: 10 }}>
+            <span className="tag">{statusLabel(artifact.status)}</span>
+            <span className="tag info">{artifact.assets.length} {t("assets")}</span>
+          </div>
+          <div className="nr-item-meta" style={{ marginTop: 8 }}>{artifactDateLabel(artifact)}</div>
         </div>
-      </div>
+      </button>
+    );
+  }
+
+  function renderArtifactSection(title: string, description: string, emptyText: string, items: BuildArtifact[]) {
+    return (
+      <section className="stack" style={{ gap: 12 }}>
+        <div>
+          <h2 style={{ margin: 0, fontSize: "1.25rem" }}>{title}</h2>
+          <div className="nr-item-meta" style={{ marginTop: 4 }}>{description}</div>
+        </div>
+        {items.length > 0 ? (
+          <div style={{ display: "grid", gap: 10 }}>
+            {items.map((artifact) => renderArtifactCard(artifact))}
+          </div>
+        ) : (
+          <div className="nr-empty" style={{ padding: 18 }}>
+            <p style={{ margin: 0 }}>{emptyText}</p>
+          </div>
+        )}
+      </section>
+    );
+  }
+
+  function renderDetail(artifact: BuildArtifact) {
+    return (
+      <article className="stack" style={{ gap: 18 }}>
+        <div
+          style={{
+            border: "1px solid var(--line)",
+            borderRadius: 8,
+            overflow: "hidden",
+            background: "var(--surface-strong)",
+          }}
+        >
+          {renderThumbnail(artifact, 168)}
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "flex-start", flexWrap: "wrap" }}>
+          <div>
+            <h2 style={{ margin: 0, fontSize: "1.35rem" }}>{artifact.title}</h2>
+            <div className="nr-item-meta" style={{ marginTop: 6 }}>
+              {classificationLabel(artifact.classification)} · {visibilityLabel(artifact.visibility)} · {artifactDateLabel(artifact)}
+            </div>
+          </div>
+          <div className="actions-inline">
+            {artifact.pullRequestUrl && (
+              <a className="link-button small" href={artifact.pullRequestUrl} target="_blank" rel="noreferrer">
+                {t("btnOpenPr")}
+              </a>
+            )}
+            {artifact.assets.some((asset) => asset.publicUrl) && (
+              <button type="button" className="secondary small" onClick={() => copyPublicLinks(artifact)}>
+                {copiedId === artifact.id ? t("btnCopied") : t("btnCopyPrLinks")}
+              </button>
+            )}
+            {artifact.canManage && artifact.visibility === "PUBLIC_REVIEW" && (
+              <button type="button" className="danger small" onClick={() => revokePublic(artifact)}>
+                {t("btnRevokePublic")}
+              </button>
+            )}
+          </div>
+        </div>
+
+        {artifact.summaryMd && (
+          <div style={{ margin: 0, whiteSpace: "pre-wrap", lineHeight: 1.55 }}>{artifact.summaryMd}</div>
+        )}
+
+        <div className="nr-table-wrap">
+          <table className="nr-table">
+            <thead>
+              <tr>
+                <th>{t("asset")}</th>
+                <th>{t("caption")}</th>
+                <th>{t("publicLink")}</th>
+                <th>{t("size")}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {artifact.assets.map((asset) => (
+                <tr key={asset.id}>
+                  <td style={{ minWidth: 180 }}>
+                    <a href={assetUrl(workspaceId, artifact, asset)} target="_blank" rel="noreferrer">
+                      {asset.label}
+                    </a>
+                    <div className="nr-item-meta">{asset.kind} · {asset.mimeType}</div>
+                  </td>
+                  <td style={{ minWidth: 220, whiteSpace: "pre-wrap" }}>{asset.captionMd || <span className="muted">-</span>}</td>
+                  <td style={{ minWidth: 220 }}>
+                    {asset.publicUrl ? (
+                      <a href={asset.publicUrl} target="_blank" rel="noreferrer">{t("publicProofLink")}</a>
+                    ) : (
+                      <span className="muted">{t("privateOnly")}</span>
+                    )}
+                  </td>
+                  <td>{formatBytes(asset.sizeBytes)}</td>
+                </tr>
+              ))}
+              {artifact.assets.length === 0 && (
+                <tr>
+                  <td colSpan={4} className="muted">{t("noAssets")}</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+
+        {artifact.canManage && (
+          <form
+            onSubmit={(event) => uploadAsset(event, artifact)}
+            className="nr-form-section stack"
+            style={{ border: "1px solid var(--line)", borderRadius: 8, padding: 16 }}
+          >
+            <h3 style={{ margin: 0, fontSize: "1rem" }}>{t("uploadProof")}</h3>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12 }}>
+              <label>
+                {t("file")}
+                <input name="file" type="file" required />
+              </label>
+              <label>
+                {t("assetKind")}
+                <select name="kind" defaultValue="SCREENSHOT">
+                  <option value="SCREENSHOT">{t("kindScreenshot")}</option>
+                  <option value="VIDEO">{t("kindVideo")}</option>
+                  <option value="DOCUMENT">{t("kindDocument")}</option>
+                  <option value="LOG">{t("kindLog")}</option>
+                  <option value="OTHER">{t("kindOther")}</option>
+                </select>
+              </label>
+              <label>
+                {t("assetLabel")}
+                <input name="label" placeholder={t("assetLabelPlaceholder")} />
+              </label>
+            </div>
+            <label>
+              {t("caption")}
+              <textarea name="captionMd" rows={3} placeholder={t("captionPlaceholder")} />
+            </label>
+            <div className="actions-inline">
+              <button type="submit" disabled={uploadingId === artifact.id}>
+                {uploadingId === artifact.id ? t("btnUploading") : t("btnUpload")}
+              </button>
+            </div>
+          </form>
+        )}
+      </article>
     );
   }
 
   return (
     <section className="ws-section stack" style={{ gap: 24 }}>
       <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
-        <div className="actions-inline">
-          <button
-            type="button"
-            className={isFormOpen ? "secondary small" : "small"}
-            onClick={() => setIsFormOpen((value) => !value)}
-          >
-            {isFormOpen ? t("btnCancel") : t("btnAddArtifact")}
-          </button>
+        <div className="actions-inline" style={{ gap: 8 }}>
+          <span className="tag">{t("inProgressCount", { count: groupedArtifacts.inProgress.length })}</span>
+          <span className="tag info">{t("mergedCount", { count: groupedArtifacts.merged.length })}</span>
+          {groupedArtifacts.closed.length > 0 && <span className="tag">{t("closedCount", { count: groupedArtifacts.closed.length })}</span>}
         </div>
         <div className="nr-item-meta">{t("artifactCount", { count: artifacts.length })}</div>
       </div>
 
       {error && <div className="form-message form-message-error">{error}</div>}
-
-      {isFormOpen && (
-        <form
-          onSubmit={submitArtifact}
-          className="nr-form-section stack"
-          style={{ border: "1px solid var(--line)", borderRadius: 8, padding: 20 }}
-        >
-          <h2 style={{ margin: 0, fontSize: "1.1rem" }}>{t("newArtifact")}</h2>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 14 }}>
-            <label>
-              {t("repositoryOwner")}
-              <input required value={form.repositoryOwner} onChange={(event) => setField("repositoryOwner", event.target.value)} placeholder="puncar-dev" />
-            </label>
-            <label>
-              {t("repositoryName")}
-              <input required value={form.repositoryName} onChange={(event) => setField("repositoryName", event.target.value)} placeholder="CORGTEX" />
-            </label>
-            <label>
-              {t("pullRequestNumber")}
-              <input inputMode="numeric" value={form.pullRequestNumber} onChange={(event) => setField("pullRequestNumber", event.target.value)} placeholder="123" />
-            </label>
-            <label>
-              {t("pullRequestUrl")}
-              <input value={form.pullRequestUrl} onChange={(event) => setField("pullRequestUrl", event.target.value)} placeholder="https://github.com/org/repo/pull/123" />
-            </label>
-          </div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 14 }}>
-            <label>
-              {t("title")}
-              <input required value={form.title} onChange={(event) => setField("title", event.target.value)} />
-            </label>
-            <label>
-              {t("branchName")}
-              <input value={form.branchName} onChange={(event) => setField("branchName", event.target.value)} />
-            </label>
-            <label>
-              {t("commitSha")}
-              <input value={form.commitSha} onChange={(event) => setField("commitSha", event.target.value)} />
-            </label>
-          </div>
-          <label>
-            {t("summary")}
-            <textarea rows={4} value={form.summaryMd} onChange={(event) => setField("summaryMd", event.target.value)} />
-          </label>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 14 }}>
-            <label>
-              {t("classification")}
-              <select value={form.classification} onChange={(event) => setField("classification", event.target.value as BuildArtifact["classification"])}>
-                <option value="OPEN_CORE">{t("classificationOpenCore")}</option>
-                <option value="INTERNAL">{t("classificationInternal")}</option>
-                <option value="CLIENT_PRIVATE">{t("classificationClientPrivate")}</option>
-              </select>
-            </label>
-            <label>
-              {t("visibility")}
-              <select value={form.visibility} onChange={(event) => setField("visibility", event.target.value as BuildArtifact["visibility"])}>
-                <option value="PUBLIC_REVIEW">{t("visibilityPublicReview")}</option>
-                <option value="PRIVATE">{t("visibilityPrivate")}</option>
-              </select>
-            </label>
-          </div>
-          {form.visibility === "PUBLIC_REVIEW" && (
-            <label style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
-              <input
-                type="checkbox"
-                checked={form.noPrivateDataConfirmed}
-                onChange={(event) => setField("noPrivateDataConfirmed", event.target.checked)}
-                style={{ width: "auto", marginTop: 4 }}
-              />
-              <span>{t("noPrivateDataConfirm")}</span>
-            </label>
-          )}
-          <div className="actions-inline">
-            <button type="submit">{t("btnSaveArtifact")}</button>
-          </div>
-        </form>
-      )}
 
       {artifacts.length === 0 ? (
         <div className="nr-empty">
@@ -380,149 +433,29 @@ export function BuiltArtifactsClient({
           <p>{t("emptyDescription")}</p>
         </div>
       ) : (
-        <div style={{ display: "grid", gap: 24 }}>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(min(100%, 240px), 1fr))", gap: 12, alignContent: "start" }}>
-            {artifacts.map((artifact) => (
-              <button
-                type="button"
-                key={artifact.id}
-                onClick={() => setSelectedId(artifact.id)}
-                style={{
-                  textAlign: "left",
-                  border: selected?.id === artifact.id ? "2px solid var(--accent)" : "1px solid var(--line)",
-                  borderRadius: 8,
-                  padding: 12,
-                  background: "var(--surface-strong)",
-                  color: "var(--text)",
-                  cursor: "pointer",
-                }}
-              >
-                <strong>{artifact.title}</strong>
-                <div className="nr-item-meta" style={{ marginTop: 4 }}>
-                  {artifact.repositoryOwner}/{artifact.repositoryName}
-                  {artifact.pullRequestNumber ? ` #${artifact.pullRequestNumber}` : ""}
-                </div>
-                <div className="actions-inline" style={{ gap: 6, marginTop: 10 }}>
-                  <span className="tag">{statusLabel(artifact.status)}</span>
-                  <span className="tag info">{visibilityLabel(artifact.visibility)}</span>
-                  <span className="tag">{artifact.assets.length} {t("assets")}</span>
-                </div>
-              </button>
-            ))}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 360px), 1fr))", gap: 24, alignItems: "start" }}>
+          <div className="stack" style={{ gap: 28 }}>
+            {renderArtifactSection(
+              t("inProgressTitle"),
+              t("inProgressDescription"),
+              t("emptyInProgress"),
+              groupedArtifacts.inProgress,
+            )}
+            {renderArtifactSection(
+              t("mergedTitle"),
+              t("mergedDescription"),
+              t("emptyMerged"),
+              groupedArtifacts.merged,
+            )}
+            {groupedArtifacts.closed.length > 0 && renderArtifactSection(
+              t("closedTitle"),
+              t("closedDescription"),
+              t("emptyClosed"),
+              groupedArtifacts.closed,
+            )}
           </div>
 
-          {selected && (
-            <article className="stack" style={{ gap: 18 }}>
-              {renderPreview(selected)}
-              <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "flex-start", flexWrap: "wrap" }}>
-                <div>
-                  <h2 style={{ margin: 0, fontSize: "1.35rem" }}>{selected.title}</h2>
-                  <div className="nr-item-meta" style={{ marginTop: 6 }}>
-                    {classificationLabel(selected.classification)} · {visibilityLabel(selected.visibility)} · {t("updated", { date: displayDate(selected.updatedAt) })}
-                  </div>
-                </div>
-                <div className="actions-inline">
-                  {selected.pullRequestUrl && (
-                    <a className="link-button small" href={selected.pullRequestUrl} target="_blank" rel="noreferrer">
-                      {t("btnOpenPr")}
-                    </a>
-                  )}
-                  {selected.assets.some((asset) => asset.publicUrl) && (
-                    <button type="button" className="secondary small" onClick={() => copyPublicLinks(selected)}>
-                      {copiedId === selected.id ? t("btnCopied") : t("btnCopyPrLinks")}
-                    </button>
-                  )}
-                  {selected.canManage && selected.visibility === "PUBLIC_REVIEW" && (
-                    <button type="button" className="danger small" onClick={() => revokePublic(selected)}>
-                      {t("btnRevokePublic")}
-                    </button>
-                  )}
-                </div>
-              </div>
-
-              {selected.summaryMd && (
-                <p style={{ margin: 0, whiteSpace: "pre-wrap", lineHeight: 1.55 }}>{selected.summaryMd}</p>
-              )}
-
-              <div className="nr-table-wrap">
-                <table className="nr-table">
-                  <thead>
-                    <tr>
-                      <th>{t("asset")}</th>
-                      <th>{t("caption")}</th>
-                      <th>{t("publicLink")}</th>
-                      <th>{t("size")}</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {selected.assets.map((asset) => (
-                      <tr key={asset.id}>
-                        <td style={{ minWidth: 180 }}>
-                          <a href={assetUrl(workspaceId, selected, asset)} target="_blank" rel="noreferrer">
-                            {asset.label}
-                          </a>
-                          <div className="nr-item-meta">{asset.kind} · {asset.mimeType}</div>
-                        </td>
-                        <td style={{ minWidth: 220, whiteSpace: "pre-wrap" }}>{asset.captionMd || <span className="muted">-</span>}</td>
-                        <td style={{ minWidth: 220 }}>
-                          {asset.publicUrl ? (
-                            <a href={asset.publicUrl} target="_blank" rel="noreferrer">{t("publicProofLink")}</a>
-                          ) : (
-                            <span className="muted">{t("privateOnly")}</span>
-                          )}
-                        </td>
-                        <td>{formatBytes(asset.sizeBytes)}</td>
-                      </tr>
-                    ))}
-                    {selected.assets.length === 0 && (
-                      <tr>
-                        <td colSpan={4} className="muted">{t("noAssets")}</td>
-                      </tr>
-                    )}
-                  </tbody>
-                </table>
-              </div>
-
-              {selected.canManage && (
-                <form
-                  onSubmit={(event) => uploadAsset(event, selected)}
-                  className="nr-form-section stack"
-                  style={{ border: "1px solid var(--line)", borderRadius: 8, padding: 16 }}
-                >
-                  <h3 style={{ margin: 0, fontSize: "1rem" }}>{t("uploadProof")}</h3>
-                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12 }}>
-                    <label>
-                      {t("file")}
-                      <input name="file" type="file" required />
-                    </label>
-                    <label>
-                      {t("assetKind")}
-                      <select name="kind" defaultValue="SCREENSHOT">
-                        <option value="SCREENSHOT">{t("kindScreenshot")}</option>
-                        <option value="VIDEO">{t("kindVideo")}</option>
-                        <option value="DOCUMENT">{t("kindDocument")}</option>
-                        <option value="LOG">{t("kindLog")}</option>
-                        <option value="OTHER">{t("kindOther")}</option>
-                      </select>
-                    </label>
-                    <label>
-                      {t("assetLabel")}
-                      <input name="label" placeholder={t("assetLabelPlaceholder")} />
-                    </label>
-                  </div>
-                  <label>
-                    {t("caption")}
-                    <textarea name="captionMd" rows={3} placeholder={t("captionPlaceholder")} />
-                  </label>
-                  <div className="actions-inline">
-                    <button type="submit" disabled={uploadingId === selected.id}>
-                      {uploadingId === selected.id ? t("btnUploading") : t("btnUpload")}
-                    </button>
-                  </div>
-                </form>
-              )}
-            </article>
-          )}
+          {selected && renderDetail(selected)}
         </div>
       )}
     </section>
