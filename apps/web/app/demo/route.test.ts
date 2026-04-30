@@ -60,6 +60,14 @@ afterEach(async () => {
 });
 
 describe("GET /demo", () => {
+  it("formats localized demo workspace paths", async () => {
+    const { demoWorkspacePath } = await import("@/lib/demo-session");
+
+    expect(demoWorkspacePath("workspace-1")).toBe("/workspaces/workspace-1");
+    expect(demoWorkspacePath("workspace-1", "en")).toBe("/workspaces/workspace-1");
+    expect(demoWorkspacePath("workspace-1", "es")).toBe("/es/workspaces/workspace-1");
+  });
+
   it("creates a demo session cookie and redirects into the demo workspace", async () => {
     loginUserWithPassword.mockResolvedValue({
       token: "demo-token",
@@ -115,6 +123,33 @@ describe("GET /demo", () => {
 
     expect(response.status).toBe(307);
     expect(response.headers.get("location")).toBe("https://demo.corgtex.app/workspaces/workspace-1");
+  });
+
+  it("creates a Spanish demo session cookie and redirects into the Spanish demo workspace", async () => {
+    loginUserWithPassword.mockResolvedValue({
+      token: "demo-token",
+      expiresAt: new Date("2026-04-13T00:00:00.000Z"),
+      user: {
+        id: "user-1",
+        email: "demo@jnj-demo.corgtex.app",
+      },
+    });
+    listActorWorkspaces.mockResolvedValue([{ id: "workspace-1", slug: "jnj-demo" }]);
+    isDatabaseUnavailableError.mockReturnValue(false);
+
+    const { GET } = await import("../[locale]/demo/route");
+    const response = await GET(
+      new Request("http://localhost/es/demo", {
+        headers: {
+          "x-forwarded-for": "203.0.113.8",
+        },
+      }) as never,
+      { params: Promise.resolve({ locale: "es" }) },
+    );
+
+    expect(response.status).toBe(307);
+    expect(response.headers.get("location")).toBe("http://localhost/es/workspaces/workspace-1");
+    expect(response.headers.get("set-cookie")).toContain("corgtex_session=demo-token");
   });
 
   it("falls back to the host header when the request URL uses an internal origin", async () => {

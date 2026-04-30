@@ -1,13 +1,16 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { getSiteConfig } from "../lib/site";
+import { useLocale, useTranslations } from "next-intl";
+import { demoUrlForLocale } from "../lib/site";
 
 export function DemoGateForm() {
   const [email, setEmail] = useState("");
   const [loading, setLoading] = useState(false);
   const [showGate, setShowGate] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const locale = useLocale();
+  const t = useTranslations("demoGate");
 
   // If they already submitted their email in the past, just show a plain link
   useEffect(() => {
@@ -33,23 +36,21 @@ export function DemoGateForm() {
 
       if (res.ok) {
         localStorage.setItem("corgtex_demo_lead", email);
-        const { demoUrl } = getSiteConfig();
-        window.location.href = demoUrl;
+        window.location.href = demoUrlForLocale(locale);
       } else {
-        setError("Failed to access demo. Please try again.");
+        setError(t("error"));
         setLoading(false);
       }
     } catch {
-      setError("Failed to access demo. Please try again.");
+      setError(t("error"));
       setLoading(false);
     }
   };
 
   if (!showGate) {
-    const { demoUrl } = getSiteConfig();
     return (
-      <a href={demoUrl} className="btn btn-secondary" target="_blank" rel="noopener noreferrer">
-        Access the Demo
+      <a href={demoUrlForLocale(locale)} className="btn btn-secondary" target="_blank" rel="noopener noreferrer">
+        {t("button")}
       </a>
     );
   }
@@ -59,7 +60,7 @@ export function DemoGateForm() {
       <form onSubmit={handleSubmit} className="demo-gate-form" style={{ display: "flex", gap: "8px", alignItems: "center", justifyContent: "center", flexWrap: "wrap" }}>
         <input
           type="email"
-          placeholder="Enter your email"
+          placeholder={t("emailPlaceholder")}
           value={email}
           onChange={(e) => {
             setEmail(e.target.value);
@@ -70,7 +71,7 @@ export function DemoGateForm() {
           className="form-input"
         />
         <button type="submit" className="btn btn-secondary" disabled={loading}>
-          {loading ? "..." : "Access the Demo"}
+          {loading ? t("loading") : t("button")}
         </button>
       </form>
       {error && (

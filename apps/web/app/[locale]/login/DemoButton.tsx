@@ -1,10 +1,12 @@
 "use client";
 
 import { useState } from "react";
+import { useLocale } from "next-intl";
 import { useTranslations } from "next-intl";
 
 export function DemoButton() {
   const [isLoading, setIsLoading] = useState(false);
+  const locale = useLocale();
   const t = useTranslations("demo");
 
   const handleDemoLogin = async () => {
@@ -18,7 +20,9 @@ export function DemoButton() {
       
       if (data.success && data.workspaceId) {
         // Force a hard navigation to clear any cached states
-        window.location.href = `/workspaces/${data.workspaceId}`;
+        window.location.href = locale === "es"
+          ? `/es/workspaces/${data.workspaceId}`
+          : `/workspaces/${data.workspaceId}`;
       } else {
         alert(t("unavailable"));
         setIsLoading(false);

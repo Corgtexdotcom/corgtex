@@ -1,0 +1,75 @@
+{
+  "metadata": {
+    "title": "Corgtex - Run Your AI Workforce Like an Accountable Team",
+    "description": "Corgtex gives you total visibility into your AI workforce - what every agent is doing, governed by your rules, with costs you can see. Live in weeks, yours to own.",
+    "ogDescription": "See what every agent is doing. Govern it with your rules. Know what it costs.",
+    "ogAlt": "Corgtex - Run Your AI Workforce Like an Accountable Team"
+  },
+  "nav": {
+    "about": "About",
+    "pricing": "Pricing",
+    "howWeWork": "How We Work",
+    "blog": "Blog",
+    "faq": "FAQ",
+    "login": "Log In",
+    "demo": "Access the Demo",
+    "briefing": "Schedule a Briefing",
+    "toggle": "Toggle menu",
+    "language": "Language"
+  },
+  "footer": {
+    "tagline": "Your governed AI workforce. See every agent, enforce your rules, know what it costs.",
+    "product": "Product",
+    "liveDemo": "Live Demo",
+    "pricing": "Pricing",
+    "faq": "FAQ",
+    "howWeWork": "How We Work",
+    "facts": "Facts",
+    "company": "Company",
+    "about": "About",
+    "blog": "Blog",
+    "updates": "Updates",
+    "contact": "Contact",
+    "legal": "Legal",
+    "privacy": "Privacy",
+    "terms": "Terms",
+    "rights": "All rights reserved.",
+    "bottom": "The governed AI workforce platform."
+  },
+  "demoGate": {
+    "emailPlaceholder": "Enter your email",
+    "button": "Access the Demo",
+    "loading": "...",
+    "error": "Failed to access demo. Please try again."
+  },
+  "shared": {
+    "scheduleBriefing": "Schedule a Briefing",
+    "accessDemo": "Access the Demo",
+    "tryLiveDemo": "Try the Live Demo",
+    "readArticle": "Read article",
+    "backToResources": "Back to Resources",
+    "getBook": "Get the Book",
+    "exploreTheory": "Explore the Theory"
+  },
+  "qualify": {
+    "invalidTitle": "Invalid Link",
+    "invalidBody": "The qualification link appears to be missing or invalid. Please check the email you received.",
+    "successTitle": "Thank You!",
+    "successBody": "We've received your information. Our team will review your request and get back to you within 24 hours.",
+    "title": "Set up your Corgtex trial",
+    "description": "Tell us a bit about your company to help us tailor your workspace.",
+    "companyName": "Company Name *",
+    "website": "Website *",
+    "roleTitle": "Your Role / Title",
+    "aiExperience": "How has your experience with AI been so far? *",
+    "helpNeeded": "What help would you appreciate the most? *",
+    "rolePlaceholder": "e.g. CTO, Operations Manager",
+    "aiPlaceholder": "Tell us what you've tried...",
+    "helpPlaceholder": "e.g. Automating customer support, organizing internal knowledge...",
+    "submit": "Submit Request",
+    "submitting": "Submitting...",
+    "loading": "Loading...",
+    "genericError": "Something went wrong. Please try again.",
+    "networkError": "Failed to submit form. Please check your connection and try again."
+  }
+}

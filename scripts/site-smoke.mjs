@@ -2,7 +2,8 @@ const [, , siteUrlArg, appUrlArg] = process.argv;
 
 const siteUrl = siteUrlArg || "http://localhost:3008";
 const appUrl = appUrlArg || "http://localhost:3000";
-const expectedDemoUrl = process.env.DEMO_APP_URL || "https://app.corgtex.com";
+const normalizedSiteUrl = siteUrl.replace(/\/$/, "");
+const normalizedAppUrl = appUrl.replace(/\/$/, "");
 
 function expect(condition, message) {
   if (!condition) {
@@ -22,39 +23,81 @@ async function fetchText(url, init) {
   return { response, text };
 }
 
-async function main() {
-  const homepage = await fetchText(siteUrl);
-  expect(homepage.response.ok, `Site homepage failed: ${homepage.response.status}`);
-  expect(homepage.text.includes("Corgtex"), "Homepage is missing the Corgtex brand name");
-  expect(
-    homepage.text.includes(expectedDemoUrl) ||
-      homepage.text.includes("Read the Demo Edition") ||
-      homepage.text.includes("Try the Demo"),
-    "Homepage is missing the demo CTA",
-  );
+async function expectRouteOk(path, expectedText) {
+  const result = await fetchText(`${normalizedSiteUrl}${path}`);
+  expect(result.response.ok, `${path} failed: ${result.response.status}`);
+  expect(result.text.includes(expectedText), `${path} is missing expected text: ${expectedText}`);
+  return result;
+}
 
-  const platformPage = await fetchText(`${siteUrl.replace(/\/$/, "")}/platform`);
-  expect(platformPage.response.ok, `/platform failed: ${platformPage.response.status}`);
-  expect(platformPage.text.includes("Business Impact"), "/platform is missing the Business Impact phrase");
-
-  const demoEntry = await fetch(`${appUrl.replace(/\/$/, "")}/demo`, {
+async function expectDemoRedirect(path, expectedWorkspaceSegment) {
+  const response = await fetch(`${normalizedAppUrl}${path}`, {
     redirect: "manual",
     headers: {
       accept: "text/html",
     },
   });
-  expect(demoEntry.status >= 300 && demoEntry.status < 400, `/demo did not redirect: ${demoEntry.status}`);
 
-  const location = demoEntry.headers.get("location");
-  expect(location && location.includes("/workspaces/"), `/demo redirected to an unexpected location: ${location}`);
+  expect(response.status >= 300 && response.status < 400, `${path} did not redirect: ${response.status}`);
 
-  const setCookie = demoEntry.headers.getSetCookie?.() ?? [];
-  expect(setCookie.length > 0, "/demo did not set a session cookie");
+  const location = response.headers.get("location");
+  expect(
+    location && location.includes(expectedWorkspaceSegment),
+    `${path} redirected to an unexpected location: ${location}`,
+  );
 
-  const workspaceUrl = new URL(location, `${appUrl.replace(/\/$/, "")}/demo`).toString();
+  const setCookie = response.headers.getSetCookie?.() ?? [];
+  expect(setCookie.length > 0, `${path} did not set a session cookie`);
+
+  return { location, setCookie };
+}
+
+async function main() {
+  await expectRouteOk("/", "Corgtex");
+  await expectRouteOk("/es", "Dirige tu fuerza laboral");
+  await expectRouteOk("/about", "Jan Brezina");
+  await expectRouteOk("/es/about", "Jan Brezina");
+  await expectRouteOk("/blog", "Organizational Intelligence");
+  await expectRouteOk("/es/blog", "Inteligencia organizacional");
+
+  const englishAlias = await fetch(`${normalizedSiteUrl}/en/about`, {
+    redirect: "manual",
+  });
+  expect(
+    englishAlias.status >= 300 && englishAlias.status < 400,
+    `/en/about did not redirect back to the canonical English path: ${englishAlias.status}`,
+  );
+  expect(
+    englishAlias.headers.get("location")?.endsWith("/about"),
+    `/en/about redirected to an unexpected location: ${englishAlias.headers.get("location")}`,
+  );
+
+  const sitemap = await fetchText(`${normalizedSiteUrl}/sitemap.xml`);
+  expect(sitemap.response.ok, `Sitemap failed: ${sitemap.response.status}`);
+  expect(sitemap.text.includes("/es/about"), "Sitemap is missing Spanish routes");
+  expect(sitemap.text.includes('hreflang="es"'), "Sitemap is missing Spanish hreflang alternates");
+  expect(sitemap.text.includes('hreflang="x-default"'), "Sitemap is missing x-default hreflang alternates");
+
+  const llms = await fetchText(`${normalizedSiteUrl}/llms.txt`);
+  expect(llms.response.ok, `/llms.txt failed: ${llms.response.status}`);
+  expect(llms.text.includes("Interactive demo"), "/llms.txt is missing English content");
+
+  const spanishLlms = await fetchText(`${normalizedSiteUrl}/es/llms.txt`);
+  expect(spanishLlms.response.ok, `/es/llms.txt failed: ${spanishLlms.response.status}`);
+  expect(spanishLlms.text.includes("Demo interactiva"), "/es/llms.txt is missing Spanish content");
+
+  const englishDemo = await expectDemoRedirect("/demo", "/workspaces/");
+  expect(
+    !new URL(englishDemo.location, `${normalizedAppUrl}/demo`).pathname.includes("/es/workspaces/"),
+    "/demo redirected into the Spanish workspace path",
+  );
+
+  const spanishDemo = await expectDemoRedirect("/es/demo", "/es/workspaces/");
+
+  const workspaceUrl = new URL(englishDemo.location, `${normalizedAppUrl}/demo`).toString();
   const workspace = await fetchText(workspaceUrl, {
     headers: {
-      cookie: cookieHeader(setCookie),
+      cookie: cookieHeader(englishDemo.setCookie),
     },
   });
 
@@ -62,6 +105,20 @@ async function main() {
   expect(
     workspace.text.includes("This demo is read-only") || workspace.text.includes("read-only demo environment"),
     "Demo workspace does not appear to be read-only",
+  );
+
+  const spanishWorkspaceUrl = new URL(spanishDemo.location, `${normalizedAppUrl}/es/demo`).toString();
+  const spanishWorkspace = await fetchText(spanishWorkspaceUrl, {
+    headers: {
+      cookie: cookieHeader(spanishDemo.setCookie),
+    },
+  });
+
+  expect(spanishWorkspace.response.ok, `Spanish demo workspace did not load: ${spanishWorkspace.response.status}`);
+  expect(
+    spanishWorkspace.text.includes("Esta demostración es de solo lectura") ||
+      spanishWorkspace.text.includes("entorno de demostración de solo lectura"),
+    "Spanish demo workspace does not appear to be localized",
   );
 
   console.log("Site smoke test passed.");

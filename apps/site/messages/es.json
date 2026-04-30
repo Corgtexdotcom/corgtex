@@ -1,0 +1,75 @@
+{
+  "metadata": {
+    "title": "Corgtex - Dirige tu fuerza laboral de IA como un equipo responsable",
+    "description": "Corgtex te da visibilidad total sobre tu fuerza laboral de IA: qué hace cada agente, bajo tus reglas y con costos claros. En vivo en semanas, bajo tu control.",
+    "ogDescription": "Ve qué hace cada agente. Gobierna con tus reglas. Conoce el costo.",
+    "ogAlt": "Corgtex - Dirige tu fuerza laboral de IA como un equipo responsable"
+  },
+  "nav": {
+    "about": "Acerca de",
+    "pricing": "Precios",
+    "howWeWork": "Cómo trabajamos",
+    "blog": "Blog",
+    "faq": "FAQ",
+    "login": "Iniciar sesión",
+    "demo": "Acceder a la demo",
+    "briefing": "Agendar una sesión",
+    "toggle": "Abrir menú",
+    "language": "Idioma"
+  },
+  "footer": {
+    "tagline": "Tu fuerza laboral de IA gobernada. Ve cada agente, aplica tus reglas y conoce el costo.",
+    "product": "Producto",
+    "liveDemo": "Demo en vivo",
+    "pricing": "Precios",
+    "faq": "FAQ",
+    "howWeWork": "Cómo trabajamos",
+    "facts": "Datos",
+    "company": "Empresa",
+    "about": "Acerca de",
+    "blog": "Blog",
+    "updates": "Actualizaciones",
+    "contact": "Contacto",
+    "legal": "Legal",
+    "privacy": "Privacidad",
+    "terms": "Términos",
+    "rights": "Todos los derechos reservados.",
+    "bottom": "La plataforma de fuerza laboral de IA gobernada."
+  },
+  "demoGate": {
+    "emailPlaceholder": "Ingresa tu correo",
+    "button": "Acceder a la demo",
+    "loading": "...",
+    "error": "No se pudo acceder a la demo. Inténtalo de nuevo."
+  },
+  "shared": {
+    "scheduleBriefing": "Agendar una sesión",
+    "accessDemo": "Acceder a la demo",
+    "tryLiveDemo": "Probar la demo en vivo",
+    "readArticle": "Leer artículo",
+    "backToResources": "Volver a recursos",
+    "getBook": "Comprar el libro",
+    "exploreTheory": "Explorar la teoría"
+  },
+  "qualify": {
+    "invalidTitle": "Enlace no válido",
+    "invalidBody": "El enlace de calificación parece faltar o no ser válido. Revisa el correo que recibiste.",
+    "successTitle": "Gracias",
+    "successBody": "Recibimos tu información. Nuestro equipo revisará tu solicitud y te responderá en un plazo de 24 horas.",
+    "title": "Configura tu prueba de Corgtex",
+    "description": "Cuéntanos un poco sobre tu empresa para ayudarnos a adaptar tu espacio de trabajo.",
+    "companyName": "Nombre de la empresa *",
+    "website": "Sitio web *",
+    "roleTitle": "Tu rol / cargo",
+    "aiExperience": "¿Cómo ha sido tu experiencia con IA hasta ahora? *",
+    "helpNeeded": "¿Qué ayuda valorarías más? *",
+    "rolePlaceholder": "p. ej., CTO, gerente de operaciones",
+    "aiPlaceholder": "Cuéntanos qué has probado...",
+    "helpPlaceholder": "p. ej., automatizar soporte al cliente, organizar conocimiento interno...",
+    "submit": "Enviar solicitud",
+    "submitting": "Enviando...",
+    "loading": "Cargando...",
+    "genericError": "Algo salió mal. Inténtalo de nuevo.",
+    "networkError": "No se pudo enviar el formulario. Revisa tu conexión e inténtalo de nuevo."
+  }
+}

@@ -1984,6 +1984,39 @@ a.wiki-list-item:hover {
   }
 }
 
+@media (max-width: 720px) {
+  .ws-layout {
+    grid-template-columns: minmax(0, 1fr);
+    height: auto;
+    min-height: 100vh;
+    overflow: visible;
+  }
+
+  .ws-sidebar {
+    position: static;
+    height: auto;
+    max-height: 48vh;
+    flex-direction: row;
+    flex-wrap: wrap;
+    padding: 12px;
+    gap: 8px;
+  }
+
+  .ws-nav {
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+
+  .ws-main {
+    overflow: visible;
+    padding: 0;
+  }
+
+  .ws-main-content {
+    padding: 24px 16px 48px;
+  }
+}
+
 /* ── User Profile & Settings ── */
 
 .user-profile-card {

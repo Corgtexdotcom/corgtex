@@ -1,3 +1,5 @@
+import { normalizeSiteLocale, type SiteLocale } from "../i18n/routing";
+
 export type SiteConfig = {
   appUrl: string;
   bookDemoUrl: string;
@@ -9,14 +11,16 @@ function trimTrailingSlash(value: string) {
   return value.endsWith("/") ? value.slice(0, -1) : value;
 }
 
-function publicUrl(name: string, fallback: string) {
-  return trimTrailingSlash(process.env[name]?.trim() || fallback);
-}
-
 export function getSiteConfig(): SiteConfig {
-  const siteUrl = publicUrl("NEXT_PUBLIC_SITE_URL", process.env.NODE_ENV === "production" ? "https://corgtex.com" : "http://localhost:3008");
-  const appUrl = publicUrl("NEXT_PUBLIC_APP_URL", process.env.NODE_ENV === "production" ? "https://app.corgtex.com" : "http://localhost:3000");
-  const demoUrl = publicUrl("NEXT_PUBLIC_DEMO_URL", `${appUrl}/demo`);
+  const siteUrl = trimTrailingSlash(
+    process.env.NEXT_PUBLIC_SITE_URL?.trim() ||
+      (process.env.NODE_ENV === "production" ? "https://corgtex.com" : "http://localhost:3008"),
+  );
+  const appUrl = trimTrailingSlash(
+    process.env.NEXT_PUBLIC_APP_URL?.trim() ||
+      (process.env.NODE_ENV === "production" ? "https://app.corgtex.com" : "http://localhost:3000"),
+  );
+  const demoUrl = trimTrailingSlash(process.env.NEXT_PUBLIC_DEMO_URL?.trim() || `${appUrl}/demo`);
   const bookDemoUrl = process.env.NEXT_PUBLIC_BOOK_DEMO_URL?.trim() || "https://calendly.com/corgtex/demo";
 
   return {
@@ -30,4 +34,9 @@ export function getSiteConfig(): SiteConfig {
 export function absoluteSiteUrl(path = "/") {
   const { siteUrl } = getSiteConfig();
   return new URL(path, `${siteUrl}/`).toString();
+}
+
+export function demoUrlForLocale(locale?: SiteLocale | string | null) {
+  const { appUrl } = getSiteConfig();
+  return `${appUrl}${normalizeSiteLocale(locale) === "es" ? "/es/demo" : "/demo"}`;
 }
