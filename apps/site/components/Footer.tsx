@@ -1,52 +1,59 @@
-const DEMO_URL = "https://app.corgtex.com/demo";
+"use client";
+
+import { useLocale, useTranslations } from "next-intl";
+import { localizedPath } from "../i18n/routing";
+import { demoUrlForLocale } from "../lib/site";
 
 export function Footer() {
   const year = new Date().getFullYear();
+  const locale = useLocale();
+  const t = useTranslations("footer");
+  const localePath = (path: string) => localizedPath(path, locale);
 
   return (
     <footer className="footer">
       <div className="container">
         <div className="footer-grid">
           <div className="footer-brand">
-            <a href="/" className="navbar-logo">Corgtex</a>
+            <a href={localePath("/")} className="navbar-logo">Corgtex</a>
             <p>
-              Your governed AI workforce. See every agent, enforce your rules, know what it costs.
+              {t("tagline")}
             </p>
           </div>
 
           <div className="footer-col">
-            <h4>Product</h4>
+            <h4>{t("product")}</h4>
             <ul>
-              <li><a href={DEMO_URL} target="_blank" rel="noopener noreferrer">Live Demo</a></li>
-              <li><a href="/pricing">Pricing</a></li>
-              <li><a href="/faq">FAQ</a></li>
-              <li><a href="/how-we-work">How We Work</a></li>
-              <li><a href="/facts">Facts</a></li>
+              <li><a href={demoUrlForLocale(locale)} target="_blank" rel="noopener noreferrer">{t("liveDemo")}</a></li>
+              <li><a href={localePath("/pricing")}>{t("pricing")}</a></li>
+              <li><a href={localePath("/faq")}>{t("faq")}</a></li>
+              <li><a href={localePath("/how-we-work")}>{t("howWeWork")}</a></li>
+              <li><a href={localePath("/facts")}>{t("facts")}</a></li>
             </ul>
           </div>
 
           <div className="footer-col">
-            <h4>Company</h4>
+            <h4>{t("company")}</h4>
             <ul>
-              <li><a href="/about">About</a></li>
-              <li><a href="/blog">Blog</a></li>
-              <li><a href="/updates">Updates</a></li>
-              <li><a href="mailto:hello@corgtex.com">Contact</a></li>
+              <li><a href={localePath("/about")}>{t("about")}</a></li>
+              <li><a href={localePath("/blog")}>{t("blog")}</a></li>
+              <li><a href={localePath("/updates")}>{t("updates")}</a></li>
+              <li><a href="mailto:hello@corgtex.com">{t("contact")}</a></li>
             </ul>
           </div>
 
           <div className="footer-col">
-            <h4>Legal</h4>
+            <h4>{t("legal")}</h4>
             <ul>
-              <li><a href="/privacy">Privacy</a></li>
-              <li><a href="/terms">Terms</a></li>
+              <li><a href={localePath("/privacy")}>{t("privacy")}</a></li>
+              <li><a href={localePath("/terms")}>{t("terms")}</a></li>
             </ul>
           </div>
         </div>
 
         <div className="footer-bottom">
-          <span>&copy; {year} Corgtex. All rights reserved.</span>
-          <span>The governed AI workforce platform.</span>
+          <span>&copy; {year} Corgtex. {t("rights")}</span>
+          <span>{t("bottom")}</span>
         </div>
       </div>
     </footer>

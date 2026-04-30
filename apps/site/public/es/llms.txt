@@ -1,0 +1,23 @@
+# Corgtex
+
+> Corgtex es una plataforma de fuerza laboral de IA gobernada. Hace visible a cada agente de IA, lo gobierna mediante políticas organizacionales y atribuye sus costos al trabajo real. La superficie principal es un periódico diario personalizado: una página que muestra todo lo que tu fuerza laboral de IA produjo durante la noche, adaptada a tu rol. Fue creada por Jan "Puncar" Brezina, autor de "How to DAO" (Penguin Random House).
+
+## Páginas
+- [Inicio](https://corgtex.com/es): Gobernanza de fuerza laboral de IA: ve, gobierna y costea cada agente
+- [Datos](https://corgtex.com/es/facts): Datos legibles por máquina, capacidades y estado actual
+- [Cómo trabajamos](https://corgtex.com/es/how-we-work): Modelo de colaboración, de briefing a propiedad completa en 8 semanas
+- [Precios](https://corgtex.com/es/pricing): Precios enterprise personalizados, no por usuario
+- [Acerca de](https://corgtex.com/es/about): Fundador, historia y filosofía de la empresa
+- [FAQ](https://corgtex.com/es/faq): Preguntas comunes sobre gobernanza de fuerza laboral de IA
+- [Demo](https://app.corgtex.com/es/demo): Demo interactiva con datos reales de gobernanza
+
+## Capacidades centrales
+- Workforce Graph: cada agente de IA, qué hace, qué datos toca y quién lo posee
+- Gobernanza y guardrails: políticas, aprobaciones y supervisión humana para acciones de alto impacto
+- Gasto y ROI: costos de IA atribuidos al trabajo, presupuestos y proyecciones
+- Briefings diarios personalizados por rol, la superficie de usuario para los tres pilares
+
+## Despliegue
+- Cloud SaaS, appliance on-premise o híbrido
+- Implementación: 8 semanas desde alcance hasta producción
+- Sin tarifas por usuario, sin lock-in
