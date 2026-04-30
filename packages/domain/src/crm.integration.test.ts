@@ -1,13 +1,13 @@
 import { describe, expect, it, beforeAll, afterAll } from "vitest";
 import { prisma } from "@corgtex/shared";
-import { 
-  captureDemoLead, 
-  submitQualification, 
-  approveQualification, 
+import {
+  captureDemoLead,
+  submitQualification,
+  approveQualification,
   rejectQualification,
   receiveEmailReply,
   syncEmailReplyToConversation,
-  provisionProspectWorkspace
+  provisionProspectWorkspace,
 } from "./crm";
 
 describe("CRM Integration Lifecycle", () => {
@@ -49,7 +49,7 @@ describe("CRM Integration Lifecycle", () => {
       source: "demo_gate_integration",
       workspaceSlug: workspace.slug,
     };
-    
+
     const { demoLead, contact } = await captureDemoLead(captureParams);
     expect(demoLead.email).toBe(captureParams.email);
     expect(demoLead.qualifyToken).toBeTruthy();
@@ -89,10 +89,10 @@ describe("CRM Integration Lifecycle", () => {
     });
 
     expect(provisionResult.id).toBeDefined();
-    
+
     const prospectWorkspace = await prisma.crmProspectWorkspace.findUnique({
       where: { id: provisionResult.id },
-      include: { targetWorkspace: true }
+      include: { targetWorkspace: true },
     });
     expect(prospectWorkspace?.targetWorkspace).toBeDefined();
   });

@@ -564,7 +564,7 @@ export async function scheduleDripCampaigns() {
 
   const now = new Date();
   const currentHourUTC = now.getUTCHours();
-  
+
   if (currentHourUTC !== 10) {
     return 0; // Only run at 10:00 UTC
   }
@@ -574,7 +574,7 @@ export async function scheduleDripCampaigns() {
 
   const dripIntervalDays = Number(process.env.CRM_DRIP_INTERVAL_DAYS || "3");
   const maxFollowUps = Number(process.env.CRM_DRIP_MAX_FOLLOWUPS || "3");
-  
+
   const targetDate = new Date(now);
   targetDate.setDate(targetDate.getDate() - dripIntervalDays);
 
