@@ -36,6 +36,8 @@ CREATE INDEX "ProcurementTrial_status_trialExpiresAt_idx" ON "ProcurementTrial"(
 CREATE INDEX "ProcurementTrial_adminEmail_status_idx" ON "ProcurementTrial"("adminEmail", "status");
 CREATE INDEX "ProcurementTrial_emailDomain_status_idx" ON "ProcurementTrial"("emailDomain", "status");
 CREATE INDEX "ProcurementTrial_riskStatus_createdAt_idx" ON "ProcurementTrial"("riskStatus", "createdAt");
+CREATE UNIQUE INDEX "ProcurementTrial_active_adminEmail_key" ON "ProcurementTrial"("adminEmail") WHERE "status" = 'ACTIVE';
+CREATE UNIQUE INDEX "ProcurementTrial_active_emailDomain_key" ON "ProcurementTrial"("emailDomain") WHERE "status" = 'ACTIVE';
 
 ALTER TABLE "ProcurementTrial"
 ADD CONSTRAINT "ProcurementTrial_workspaceId_fkey"

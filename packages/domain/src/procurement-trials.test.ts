@@ -18,8 +18,10 @@ const {
     procurementTrial: {
       count: vi.fn(),
       create: vi.fn(),
+      findMany: vi.fn(),
       findUnique: vi.fn(),
       update: vi.fn(),
+      updateMany: vi.fn(),
     },
     workspace: {
       findUnique: vi.fn(),
@@ -48,6 +50,7 @@ const {
     agentCredential: {
       create: vi.fn(),
       update: vi.fn(),
+      updateMany: vi.fn(),
     },
     agentIdentity: {
       create: vi.fn(),
@@ -114,6 +117,7 @@ describe("procurement trials", () => {
     prismaMock.procurementIdempotencyKey.create.mockResolvedValue({});
     prismaMock.procurementIdempotencyKey.update.mockResolvedValue({});
     prismaMock.procurementTrial.count.mockResolvedValue(0);
+    prismaMock.procurementTrial.findMany.mockResolvedValue([]);
     prismaMock.procurementTrial.create.mockImplementation(async ({ data }: any) => ({
       id: data.status === "ACTIVE" ? "trial-1" : "trial-review",
       claimEmailStatus: null,
@@ -121,6 +125,7 @@ describe("procurement trials", () => {
     }));
     prismaMock.procurementTrial.findUnique.mockResolvedValue(null);
     prismaMock.procurementTrial.update.mockResolvedValue({ id: "trial-1", status: "SUSPENDED" });
+    prismaMock.procurementTrial.updateMany.mockResolvedValue({ count: 0 });
     prismaMock.workspace.findUnique.mockResolvedValue(null);
     prismaMock.workspace.create.mockResolvedValue({ id: "ws-1", name: "Acme", slug: "acme" });
     prismaMock.approvalPolicy.createMany.mockResolvedValue({ count: 2 });
@@ -133,6 +138,7 @@ describe("procurement trials", () => {
     prismaMock.passwordResetToken.create.mockResolvedValue({});
     prismaMock.agentCredential.create.mockResolvedValue({ id: "cred-1" });
     prismaMock.agentCredential.update.mockResolvedValue({});
+    prismaMock.agentCredential.updateMany.mockResolvedValue({ count: 0 });
     prismaMock.agentIdentity.create.mockResolvedValue({});
     prismaMock.modelUsageBudget.upsert.mockResolvedValue({});
     prismaMock.document.findMany.mockResolvedValue([]);
@@ -229,7 +235,18 @@ describe("procurement trials", () => {
       workspaceId: "ws-1",
     });
     prismaMock.procurementTrial.findUnique.mockResolvedValueOnce({
+      id: "trial-1",
+      workspaceId: "ws-1",
+      agentCredentialId: "cred-1",
       status: "ACTIVE",
+      riskStatus: "LOW",
+      riskReasons: [],
+      trialExpiresAt: new Date(Date.now() + 60_000),
+      claimEmailStatus: null,
+      modelMonthlyBudgetCents: 500,
+      storageLimitMb: 100,
+      memberLimit: 5,
+      mcpDailyCallLimit: 100,
       connectorTokenEnc: "enc:agentc-credential-secret",
     });
     const { createProcurementTrial } = await import("./procurement-trials");
@@ -250,6 +267,99 @@ describe("procurement trials", () => {
       connector: { token: "agentc-credential-secret" },
     });
     expect(decryptSecretMock).toHaveBeenCalledWith("enc:agentc-credential-secret");
+  });
+
+  it("does not reveal a connector token when replaying an expired active trial", async () => {
+    prismaMock.procurementIdempotencyKey.findUnique.mockResolvedValueOnce({
+      requestHash: "hash:{\"acceptedTermsVersion\":\"2026-04\",\"adminEmail\":\"admin@acme.test\",\"adminName\":null,\"billingContactEmail\":null,\"companyName\":\"Acme\",\"emailDomain\":\"acme.test\",\"sourceAgent\":null}",
+      responseJson: { trialId: "trial-1", status: "ACTIVE" },
+      workspaceId: "ws-1",
+    });
+    prismaMock.procurementTrial.findUnique.mockResolvedValueOnce({
+      id: "trial-1",
+      workspaceId: "ws-1",
+      agentCredentialId: "cred-1",
+      status: "ACTIVE",
+      riskStatus: "LOW",
+      riskReasons: [],
+      trialExpiresAt: new Date(Date.now() - 60_000),
+      claimEmailStatus: null,
+      modelMonthlyBudgetCents: 500,
+      storageLimitMb: 100,
+      memberLimit: 5,
+      mcpDailyCallLimit: 100,
+      connectorTokenEnc: "enc:agentc-credential-secret",
+    });
+    const { createProcurementTrial } = await import("./procurement-trials");
+
+    const result = await createProcurementTrial({
+      idempotencyKey: "idem-1",
+      origin: "https://app.test",
+      input: {
+        companyName: "Acme",
+        adminEmail: "admin@acme.test",
+        acceptedTermsVersion: "2026-04",
+      },
+    });
+
+    expect(result.statusCode).toBe(201);
+    expect(result.body).toMatchObject({
+      trialId: "trial-1",
+      status: "EXPIRED",
+    });
+    expect((result.body as Record<string, unknown>).connector).toBeUndefined();
+    expect(decryptSecretMock).not.toHaveBeenCalled();
+    expect(prismaMock.procurementTrial.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "trial-1", status: "ACTIVE" },
+      data: { status: "EXPIRED" },
+    }));
+    expect(prismaMock.agentCredential.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "cred-1" },
+      data: { isActive: false },
+    }));
+  });
+
+  it("review-gates when the active trial uniqueness guard wins a concurrent create race", async () => {
+    const uniqueError = Object.assign(
+      new Error("Unique constraint failed on ProcurementTrial_active_emailDomain_key"),
+      {
+        code: "P2002",
+        meta: { target: ["emailDomain"] },
+      },
+    );
+    prismaMock.procurementTrial.create.mockImplementation(async ({ data }: any) => {
+      if (data.status === "ACTIVE") {
+        throw uniqueError;
+      }
+      return {
+        id: "trial-review",
+        claimEmailStatus: null,
+        ...data,
+      };
+    });
+    const { createProcurementTrial } = await import("./procurement-trials");
+
+    const result = await createProcurementTrial({
+      idempotencyKey: "idem-race",
+      origin: "https://app.test",
+      input: {
+        companyName: "Acme",
+        adminEmail: "admin@acme.test",
+        acceptedTermsVersion: "2026-04",
+      },
+    });
+
+    expect(result.statusCode).toBe(202);
+    expect(result.body).toMatchObject({
+      trialId: "trial-review",
+      status: "REVIEW_REQUIRED",
+      riskStatus: "REVIEW_REQUIRED",
+      riskReasons: ["ACTIVE_TRIAL_FOR_DOMAIN"],
+    });
+    expect((result.body as Record<string, unknown>).connector).toBeUndefined();
+    const idempotencyCreate = prismaMock.procurementIdempotencyKey.create.mock.calls.at(-1)?.[0];
+    expect(idempotencyCreate.data.workspaceId).toBeUndefined();
+    expect(idempotencyCreate.data.responseJson).not.toHaveProperty("connector");
   });
 
   it("blocks MCP access for expired trials and revokes the connector", async () => {

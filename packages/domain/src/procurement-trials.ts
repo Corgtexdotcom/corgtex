@@ -7,7 +7,6 @@ import {
   randomOpaqueToken,
   sha256,
 } from "@corgtex/shared";
-import type { AppActor } from "@corgtex/shared";
 import { AppError, invariant } from "./errors";
 import { appendEvents } from "./events";
 import { getMcpPublicUrl } from "./mcp-connector";
@@ -101,6 +100,8 @@ type RiskAssessment = {
   riskReasons: string[];
 };
 
+type TrialUniquenessReason = "ACTIVE_TRIAL_FOR_EMAIL" | "ACTIVE_TRIAL_FOR_DOMAIN";
+
 function normalizeEmail(email: string) {
   return email.trim().toLowerCase();
 }
@@ -148,15 +149,6 @@ function idempotencyKeyHash(scope: string, idempotencyKey: string) {
 
 function requestHash(value: unknown) {
   return sha256(stableStringify(value));
-}
-
-function procurementTrialActor(): AppActor {
-  return {
-    kind: "agent",
-    authProvider: "bootstrap",
-    label: "Public procurement trial setup",
-    scopes: ["members:write"],
-  };
 }
 
 function sourceAgentJson(sourceAgent?: Record<string, unknown> | null): Prisma.InputJsonValue | undefined {
@@ -286,6 +278,92 @@ async function createTrialAdmin(tx: Tx, params: {
 
   const token = await issueSetupToken(tx, user.id);
   return { user, member, token };
+}
+
+function uniqueErrorTarget(error: unknown) {
+  if (!error || typeof error !== "object") return "";
+  const candidate = error as { code?: unknown; message?: unknown; meta?: { target?: unknown } };
+  if (candidate.code !== "P2002") return "";
+  const target = Array.isArray(candidate.meta?.target)
+    ? candidate.meta.target.join(",")
+    : String(candidate.meta?.target ?? "");
+  return `${target} ${typeof candidate.message === "string" ? candidate.message : ""}`;
+}
+
+function activeTrialUniquenessReason(error: unknown): TrialUniquenessReason | null {
+  const target = uniqueErrorTarget(error);
+  if (target.includes("ProcurementTrial_active_adminEmail_key")) {
+    return "ACTIVE_TRIAL_FOR_EMAIL";
+  }
+  if (target.includes("ProcurementTrial_active_emailDomain_key")) {
+    return "ACTIVE_TRIAL_FOR_DOMAIN";
+  }
+  if (target.includes("adminEmail")) {
+    return "ACTIVE_TRIAL_FOR_EMAIL";
+  }
+  if (target.includes("emailDomain")) {
+    return "ACTIVE_TRIAL_FOR_DOMAIN";
+  }
+  return null;
+}
+
+function idempotencyKeyUniquenessConflict(error: unknown) {
+  const target = uniqueErrorTarget(error);
+  return target.includes("ProcurementIdempotencyKey_keyHash_key") || target.includes("keyHash");
+}
+
+async function expireStaleTrialsForIdentity(input: NormalizedTrialInput) {
+  const staleTrials = await prisma.procurementTrial.findMany({
+    where: {
+      status: TRIAL_STATUS_ACTIVE,
+      trialExpiresAt: { lte: new Date() },
+      OR: [
+        { adminEmail: input.adminEmail },
+        { emailDomain: input.emailDomain },
+      ],
+    },
+    select: {
+      id: true,
+      agentCredentialId: true,
+    },
+  });
+  if (staleTrials.length === 0) return;
+
+  const staleIds = staleTrials.map((trial) => trial.id);
+  const credentialIds = staleTrials
+    .map((trial) => trial.agentCredentialId)
+    .filter((id): id is string => Boolean(id));
+  await prisma.$transaction([
+    prisma.procurementTrial.updateMany({
+      where: { id: { in: staleIds } },
+      data: { status: TRIAL_STATUS_EXPIRED },
+    }),
+    ...(credentialIds.length > 0
+      ? [
+          prisma.agentCredential.updateMany({
+            where: { id: { in: credentialIds } },
+            data: { isActive: false },
+          }),
+        ]
+      : []),
+  ]);
+}
+
+async function expireTrialConnector(trial: { id: string; agentCredentialId: string | null }) {
+  await prisma.$transaction([
+    prisma.procurementTrial.updateMany({
+      where: { id: trial.id, status: TRIAL_STATUS_ACTIVE },
+      data: { status: TRIAL_STATUS_EXPIRED },
+    }),
+    ...(trial.agentCredentialId
+      ? [
+          prisma.agentCredential.updateMany({
+            where: { id: trial.agentCredentialId },
+            data: { isActive: false },
+          }),
+        ]
+      : []),
+  ]);
 }
 
 async function assessTrialRisk(input: NormalizedTrialInput): Promise<RiskAssessment> {
@@ -435,77 +513,112 @@ async function existingTrialResponse(params: {
   const trial = await prisma.procurementTrial.findUnique({
     where: { workspaceId: params.workspaceId },
     select: {
+      id: true,
+      workspaceId: true,
+      agentCredentialId: true,
       connectorTokenEnc: true,
       status: true,
+      riskStatus: true,
+      riskReasons: true,
+      trialExpiresAt: true,
+      claimEmailStatus: true,
+      modelMonthlyBudgetCents: true,
+      storageLimitMb: true,
+      memberLimit: true,
+      mcpDailyCallLimit: true,
     },
   });
-  const connectorToken = trial?.connectorTokenEnc && trial.status === TRIAL_STATUS_ACTIVE
+  if (!trial) {
+    return publicIdempotencyResponse({
+      origin: params.origin,
+      responseJson: params.responseJson,
+    });
+  }
+
+  const expired = trial.status === TRIAL_STATUS_ACTIVE && trial.trialExpiresAt.getTime() <= Date.now();
+  if (expired) {
+    await expireTrialConnector(trial);
+  }
+  const status = expired ? TRIAL_STATUS_EXPIRED : trial.status;
+  const connectorToken = trial.connectorTokenEnc && status === TRIAL_STATUS_ACTIVE
     ? decryptSecret(trial.connectorTokenEnc)
     : null;
-  return publicIdempotencyResponse({
+
+  return publicTrialResponse({
     origin: params.origin,
-    responseJson: params.responseJson,
+    trial: {
+      id: trial.id,
+      status,
+      riskStatus: trial.riskStatus,
+      riskReasons: trial.riskReasons,
+      trialExpiresAt: trial.trialExpiresAt,
+      workspaceId: trial.workspaceId,
+      claimEmailStatus: trial.claimEmailStatus,
+      modelMonthlyBudgetCents: trial.modelMonthlyBudgetCents,
+      storageLimitMb: trial.storageLimitMb,
+      memberLimit: trial.memberLimit,
+      mcpDailyCallLimit: trial.mcpDailyCallLimit,
+    },
     connectorToken,
   });
 }
 
-export async function createProcurementTrial(params: {
-  input: ProcurementTrialInput;
-  idempotencyKey: string;
+async function replayExistingIdempotencyResponse(params: {
+  idemKeyHash: string;
+  idemRequestHash: string;
   origin?: string;
 }) {
-  const normalized = normalizeInput(params.input);
-  const idempotencyKey = params.idempotencyKey.trim();
-  invariant(idempotencyKey.length > 0, 400, "IDEMPOTENCY_KEY_REQUIRED", "Idempotency-Key header is required.");
-
-  const idemKeyHash = idempotencyKeyHash(TRIAL_IDEMPOTENCY_SCOPE, idempotencyKey);
-  const idemRequestHash = requestHash(normalized);
   const existingIdempotency = await prisma.procurementIdempotencyKey.findUnique({
-    where: { keyHash: idemKeyHash },
+    where: { keyHash: params.idemKeyHash },
     select: {
       requestHash: true,
       responseJson: true,
       workspaceId: true,
     },
   });
-  if (existingIdempotency) {
-    if (existingIdempotency.requestHash !== idemRequestHash) {
-      throw new AppError(409, "IDEMPOTENCY_KEY_REUSED", "The same Idempotency-Key was used with a different request body.");
-    }
-    return {
-      statusCode: existingIdempotency.workspaceId ? 201 : 202,
-      body: await existingTrialResponse({
-        origin: params.origin,
-        responseJson: existingIdempotency.responseJson,
-        workspaceId: existingIdempotency.workspaceId,
-      }),
-    };
+  if (!existingIdempotency) return null;
+  if (existingIdempotency.requestHash !== params.idemRequestHash) {
+    throw new AppError(409, "IDEMPOTENCY_KEY_REUSED", "The same Idempotency-Key was used with a different request body.");
   }
+  return {
+    statusCode: existingIdempotency.workspaceId ? 201 : 202,
+    body: await existingTrialResponse({
+      origin: params.origin,
+      responseJson: existingIdempotency.responseJson,
+      workspaceId: existingIdempotency.workspaceId,
+    }),
+  };
+}
 
-  const risk = await assessTrialRisk(normalized);
-  const expiresAt = new Date(Date.now() + PROCUREMENT_TRIAL_TTL_DAYS * 24 * 60 * 60 * 1000);
-
-  if (risk.riskStatus === "REVIEW_REQUIRED") {
-    const claimEmailStatus: MemberSetupEmailStatus = {
-      email: normalized.adminEmail,
-      sent: false,
-      error: "Trial request requires review before account claim.",
-    };
+async function createReviewGatedTrial(params: {
+  normalized: NormalizedTrialInput;
+  risk: RiskAssessment;
+  expiresAt: Date;
+  origin?: string;
+  idemKeyHash: string;
+  idemRequestHash: string;
+}) {
+  const claimEmailStatus: MemberSetupEmailStatus = {
+    email: params.normalized.adminEmail,
+    sent: false,
+    error: "Trial request requires review before account claim.",
+  };
+  try {
     const created = await prisma.$transaction(async (tx) => {
       const trial = await tx.procurementTrial.create({
         data: {
           status: TRIAL_STATUS_REVIEW_REQUIRED,
-          companyName: normalized.companyName,
-          adminEmail: normalized.adminEmail,
-          adminName: normalized.adminName,
-          emailDomain: normalized.emailDomain,
-          billingContactEmail: normalized.billingContactEmail,
-          acceptedTermsVersion: normalized.acceptedTermsVersion,
-          sourceAgent: sourceAgentJson(normalized.sourceAgent),
-          riskStatus: risk.riskStatus,
-          riskReasons: risk.riskReasons,
+          companyName: params.normalized.companyName,
+          adminEmail: params.normalized.adminEmail,
+          adminName: params.normalized.adminName,
+          emailDomain: params.normalized.emailDomain,
+          billingContactEmail: params.normalized.billingContactEmail,
+          acceptedTermsVersion: params.normalized.acceptedTermsVersion,
+          sourceAgent: sourceAgentJson(params.normalized.sourceAgent),
+          riskStatus: "REVIEW_REQUIRED",
+          riskReasons: params.risk.riskReasons,
           claimEmailStatus: claimEmailStatus as unknown as Prisma.InputJsonValue,
-          trialExpiresAt: expiresAt,
+          trialExpiresAt: params.expiresAt,
           ...trialLimits(),
         },
       });
@@ -516,8 +629,8 @@ export async function createProcurementTrial(params: {
       await tx.procurementIdempotencyKey.create({
         data: {
           scope: TRIAL_IDEMPOTENCY_SCOPE,
-          keyHash: idemKeyHash,
-          requestHash: idemRequestHash,
+          keyHash: params.idemKeyHash,
+          requestHash: params.idemRequestHash,
           responseJson: response as Prisma.InputJsonObject,
         },
       });
@@ -528,16 +641,34 @@ export async function createProcurementTrial(params: {
       statusCode: 202,
       body: created.response,
     };
+  } catch (error) {
+    if (idempotencyKeyUniquenessConflict(error)) {
+      const replayed = await replayExistingIdempotencyResponse({
+        idemKeyHash: params.idemKeyHash,
+        idemRequestHash: params.idemRequestHash,
+        origin: params.origin,
+      });
+      if (replayed) return replayed;
+    }
+    throw error;
   }
+}
 
-  const actor = procurementTrialActor();
+async function createActiveTrial(params: {
+  normalized: NormalizedTrialInput;
+  risk: RiskAssessment;
+  expiresAt: Date;
+  origin?: string;
+  idemKeyHash: string;
+  idemRequestHash: string;
+}) {
   const created = await prisma.$transaction(async (tx) => {
-    const slug = await findAvailableSlug(tx, normalized.companyName);
+    const slug = await findAvailableSlug(tx, params.normalized.companyName);
     const workspace = await tx.workspace.create({
       data: {
-        name: normalized.companyName,
+        name: params.normalized.companyName,
         slug,
-        description: `Corgtex trial workspace for ${normalized.companyName}.`,
+        description: `Corgtex trial workspace for ${params.normalized.companyName}.`,
       },
       select: {
         id: true,
@@ -570,8 +701,8 @@ export async function createProcurementTrial(params: {
 
     const admin = await createTrialAdmin(tx, {
       workspaceId: workspace.id,
-      email: normalized.adminEmail,
-      displayName: normalized.adminName,
+      email: params.normalized.adminEmail,
+      displayName: params.normalized.adminName,
     });
 
     const credentialSecret = randomOpaqueToken();
@@ -623,22 +754,22 @@ export async function createProcurementTrial(params: {
         workspaceId: workspace.id,
         agentCredentialId: credential.id,
         status: TRIAL_STATUS_ACTIVE,
-        companyName: normalized.companyName,
-        adminEmail: normalized.adminEmail,
-        adminName: normalized.adminName,
-        emailDomain: normalized.emailDomain,
-        billingContactEmail: normalized.billingContactEmail,
-        acceptedTermsVersion: normalized.acceptedTermsVersion,
-        sourceAgent: sourceAgentJson(normalized.sourceAgent),
-        riskStatus: risk.riskStatus,
-        riskReasons: risk.riskReasons,
+        companyName: params.normalized.companyName,
+        adminEmail: params.normalized.adminEmail,
+        adminName: params.normalized.adminName,
+        emailDomain: params.normalized.emailDomain,
+        billingContactEmail: params.normalized.billingContactEmail,
+        acceptedTermsVersion: params.normalized.acceptedTermsVersion,
+        sourceAgent: sourceAgentJson(params.normalized.sourceAgent),
+        riskStatus: params.risk.riskStatus,
+        riskReasons: params.risk.riskReasons,
         connectorTokenEnc: encryptSecret(connectorToken),
         connectorTokenRevealedAt: new Date(),
         modelMonthlyBudgetCents: PROCUREMENT_TRIAL_LIMITS.modelMonthlyBudgetCents,
         storageLimitMb: PROCUREMENT_TRIAL_LIMITS.storageLimitMb,
         memberLimit: PROCUREMENT_TRIAL_LIMITS.memberLimit,
         mcpDailyCallLimit: PROCUREMENT_TRIAL_LIMITS.mcpDailyCallLimit,
-        trialExpiresAt: expiresAt,
+        trialExpiresAt: params.expiresAt,
       },
     });
 
@@ -650,10 +781,10 @@ export async function createProcurementTrial(params: {
         entityType: "ProcurementTrial",
         entityId: trial.id,
         meta: {
-          adminEmail: normalized.adminEmail,
-          emailDomain: normalized.emailDomain,
-          riskStatus: risk.riskStatus,
-          riskReasons: risk.riskReasons,
+          adminEmail: params.normalized.adminEmail,
+          emailDomain: params.normalized.emailDomain,
+          riskStatus: params.risk.riskStatus,
+          riskReasons: params.risk.riskReasons,
         },
       },
     });
@@ -677,8 +808,8 @@ export async function createProcurementTrial(params: {
     await tx.procurementIdempotencyKey.create({
       data: {
         scope: TRIAL_IDEMPOTENCY_SCOPE,
-        keyHash: idemKeyHash,
-        requestHash: idemRequestHash,
+        keyHash: params.idemKeyHash,
+        requestHash: params.idemRequestHash,
         workspaceId: workspace.id,
         responseJson: response as Prisma.InputJsonObject,
       },
@@ -696,7 +827,7 @@ export async function createProcurementTrial(params: {
     email: created.admin.user.email,
     displayName: created.admin.user.displayName,
     token: created.admin.token,
-    workspaceName: normalized.companyName,
+    workspaceName: params.normalized.companyName,
   });
   const responseWithEmailStatus = {
     ...created.response,
@@ -708,7 +839,7 @@ export async function createProcurementTrial(params: {
       data: { claimEmailStatus: claimEmailStatus as unknown as Prisma.InputJsonValue },
     }),
     prisma.procurementIdempotencyKey.update({
-      where: { keyHash: idemKeyHash },
+      where: { keyHash: params.idemKeyHash },
       data: { responseJson: responseWithEmailStatus as Prisma.InputJsonObject },
     }),
   ]);
@@ -724,6 +855,83 @@ export async function createProcurementTrial(params: {
       },
     },
   };
+}
+
+export async function createProcurementTrial(params: {
+  input: ProcurementTrialInput;
+  idempotencyKey: string;
+  origin?: string;
+}) {
+  const normalized = normalizeInput(params.input);
+  const idempotencyKey = params.idempotencyKey.trim();
+  invariant(idempotencyKey.length > 0, 400, "IDEMPOTENCY_KEY_REQUIRED", "Idempotency-Key header is required.");
+
+  const idemKeyHash = idempotencyKeyHash(TRIAL_IDEMPOTENCY_SCOPE, idempotencyKey);
+  const idemRequestHash = requestHash(normalized);
+  const existingIdempotency = await replayExistingIdempotencyResponse({
+    idemKeyHash,
+    idemRequestHash,
+    origin: params.origin,
+  });
+  if (existingIdempotency) {
+    return existingIdempotency;
+  }
+
+  await expireStaleTrialsForIdentity(normalized);
+  const risk = await assessTrialRisk(normalized);
+  const expiresAt = new Date(Date.now() + PROCUREMENT_TRIAL_TTL_DAYS * 24 * 60 * 60 * 1000);
+
+  if (risk.riskStatus === "REVIEW_REQUIRED") {
+    return createReviewGatedTrial({
+      normalized,
+      risk,
+      expiresAt,
+      origin: params.origin,
+      idemKeyHash,
+      idemRequestHash,
+    });
+  }
+
+  try {
+    return await createActiveTrial({
+      normalized,
+      risk,
+      expiresAt,
+      origin: params.origin,
+      idemKeyHash,
+      idemRequestHash,
+    });
+  } catch (error) {
+    const uniquenessReason = activeTrialUniquenessReason(error);
+    if (uniquenessReason) {
+      const replayed = await replayExistingIdempotencyResponse({
+        idemKeyHash,
+        idemRequestHash,
+        origin: params.origin,
+      });
+      if (replayed) return replayed;
+      return createReviewGatedTrial({
+        normalized,
+        risk: {
+          riskStatus: "REVIEW_REQUIRED",
+          riskReasons: Array.from(new Set([...risk.riskReasons, uniquenessReason])),
+        },
+        expiresAt,
+        origin: params.origin,
+        idemKeyHash,
+        idemRequestHash,
+      });
+    }
+    if (idempotencyKeyUniquenessConflict(error)) {
+      const replayed = await replayExistingIdempotencyResponse({
+        idemKeyHash,
+        idemRequestHash,
+        origin: params.origin,
+      });
+      if (replayed) return replayed;
+    }
+    throw error;
+  }
 }
 
 export async function getProcurementTrialStatus(trialId: string, origin?: string) {
