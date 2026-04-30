@@ -22,6 +22,9 @@ const { prismaMock, defaultStorageMock, encryptSecretMock, decryptSecretMock, sh
       create: vi.fn(),
       findFirst: vi.fn(),
     },
+    workspaceFeatureFlag: {
+      findMany: vi.fn(),
+    },
     brainSource: {
       create: vi.fn(),
       update: vi.fn(),
@@ -140,6 +143,7 @@ describe("build artifacts", () => {
     recordAudit.mockResolvedValue(undefined);
     prismaMock.brainSource.create.mockResolvedValue({ id: "brain-1" });
     prismaMock.buildArtifact.update.mockResolvedValue(artifactFixture({ brainSourceId: "brain-1" }));
+    prismaMock.workspaceFeatureFlag.findMany.mockResolvedValue([]);
     defaultStorageMock.put.mockResolvedValue({ key: "stored", size: 12 });
     defaultStorageMock.getSignedUrl.mockResolvedValue("https://signed.example/proof");
   });
@@ -345,6 +349,105 @@ describe("build artifacts", () => {
       data: expect.objectContaining({
         action: "build_artifact.github_merged",
         meta: expect.objectContaining({ publicAccessRevoked: true }),
+      }),
+    }));
+  });
+
+  it("resolves GitHub repository allowlists from build artifact feature config", async () => {
+    prismaMock.workspaceFeatureFlag.findMany.mockResolvedValue([
+      {
+        workspaceId: "workspace-1",
+        config: { githubRepositories: ["puncar-dev/CORGTEX", "other/repo"] },
+      },
+      {
+        workspaceId: "workspace-2",
+        config: { githubRepositories: ["Puncar-Dev/corgtex"] },
+      },
+      {
+        workspaceId: "workspace-3",
+        config: { githubRepositories: ["bad-format", 42] },
+      },
+    ]);
+
+    const { listBuildArtifactWorkspaceIdsForGithubRepository } = await import("./build-artifacts");
+    await expect(listBuildArtifactWorkspaceIdsForGithubRepository({
+      repositoryOwner: "Puncar-Dev",
+      repositoryName: "CORGTEX",
+    })).resolves.toEqual(["workspace-1", "workspace-2"]);
+
+    expect(prismaMock.workspaceFeatureFlag.findMany).toHaveBeenCalledWith({
+      where: {
+        flag: "BUILD_ARTIFACTS",
+        enabled: true,
+      },
+      select: {
+        workspaceId: true,
+        config: true,
+      },
+    });
+  });
+
+  it("creates open build artifacts from mapped GitHub pull requests", async () => {
+    prismaMock.workspaceFeatureFlag.findMany.mockResolvedValue([
+      {
+        workspaceId: "workspace-1",
+        config: { githubRepositories: ["puncar-dev/corgtex"] },
+      },
+    ]);
+    prismaMock.buildArtifact.findFirst
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(artifactFixture({
+        brainSourceId: "brain-1",
+        classification: "INTERNAL",
+        visibility: "PRIVATE",
+        summaryMd: "GitHub review state: draft PR",
+      }));
+    prismaMock.buildArtifact.create.mockResolvedValue(artifactFixture({
+      createdByUserId: null,
+      classification: "INTERNAL",
+      visibility: "PRIVATE",
+      summaryMd: "GitHub review state: draft PR",
+    }));
+    prismaMock.buildArtifact.findUnique.mockResolvedValue(artifactFixture({
+      createdByUserId: null,
+      classification: "INTERNAL",
+      visibility: "PRIVATE",
+      summaryMd: "GitHub review state: draft PR",
+    }));
+
+    const { upsertBuildArtifactsFromGitHubPullRequest } = await import("./build-artifacts");
+    const result = await upsertBuildArtifactsFromGitHubPullRequest({
+      repositoryOwner: "Puncar-Dev",
+      repositoryName: "CORGTEX",
+      pullRequestNumber: 42,
+      pullRequestUrl: "https://github.com/puncar-dev/corgtex/pull/42",
+      branchName: "feat/outcome-board",
+      commitSha: "abc123",
+      title: "Built outcome board",
+      bodyMd: "Plan and acceptance criteria.",
+      isDraft: true,
+    });
+
+    expect(result).toEqual({ updatedCount: 1, artifactIds: ["artifact-1"] });
+    expect(prismaMock.buildArtifact.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        workspaceId: "workspace-1",
+        createdByUserId: null,
+        repositoryOwner: "puncar-dev",
+        repositoryName: "corgtex",
+        pullRequestNumber: 42,
+        branchName: "feat/outcome-board",
+        commitSha: "abc123",
+        status: "OPEN",
+        classification: "INTERNAL",
+        visibility: "PRIVATE",
+        summaryMd: expect.stringContaining("PR description:\nPlan and acceptance criteria."),
+      }),
+    }));
+    expect(prismaMock.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        action: "build_artifact.github_created",
+        meta: expect.objectContaining({ isDraft: true }),
       }),
     }));
   });
