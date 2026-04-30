@@ -57,6 +57,39 @@ export async function checkBudget(workspaceId: string): Promise<{
   usedUsd: number;
   capUsd: number;
 }> {
+  const trialDelegate = (prisma as typeof prisma & { procurementTrial?: typeof prisma.procurementTrial }).procurementTrial;
+  const trial = trialDelegate
+    ? await trialDelegate.findUnique({
+        where: { workspaceId },
+        select: {
+          id: true,
+          status: true,
+          agentCredentialId: true,
+          trialExpiresAt: true,
+        },
+      })
+    : null;
+  if (trial) {
+    if (trial.status !== "ACTIVE" && trial.status !== "CONVERTED") {
+      return { allowed: false, usedPct: 100, usedUsd: 0, capUsd: 0 };
+    }
+    if (trial.status === "ACTIVE" && trial.trialExpiresAt.getTime() <= Date.now()) {
+      await prisma.$transaction(async (tx) => {
+        await tx.procurementTrial.update({
+          where: { id: trial.id },
+          data: { status: "EXPIRED" },
+        });
+        if (trial.agentCredentialId) {
+          await tx.agentCredential.update({
+            where: { id: trial.agentCredentialId },
+            data: { isActive: false },
+          });
+        }
+      });
+      return { allowed: false, usedPct: 100, usedUsd: 0, capUsd: 0 };
+    }
+  }
+
   const budget = await prisma.modelUsageBudget.findUnique({
     where: { workspaceId }
   });

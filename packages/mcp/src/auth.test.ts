@@ -2,6 +2,7 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 
 const resolveAgentActorFromBearerMock = vi.fn();
 const resolveMcpOAuthAccessTokenMock = vi.fn();
+const requireTrialMcpAccessMock = vi.fn();
 
 vi.mock("@corgtex/domain", () => {
   class AppError extends Error {
@@ -15,6 +16,7 @@ vi.mock("@corgtex/domain", () => {
     describeScope: (scope: string) => `Description for ${scope}`,
     resolveAgentActorFromBearer: resolveAgentActorFromBearerMock,
     resolveMcpOAuthAccessToken: resolveMcpOAuthAccessTokenMock,
+    requireTrialMcpAccess: requireTrialMcpAccessMock,
   };
 });
 
@@ -26,6 +28,7 @@ describe("authenticateMcpRequest", () => {
   beforeEach(() => {
     resolveAgentActorFromBearerMock.mockReset();
     resolveMcpOAuthAccessTokenMock.mockReset();
+    requireTrialMcpAccessMock.mockReset().mockResolvedValue(null);
   });
 
   it("resolves MCP OAuth bearer tokens with workspace, scopes, and instance binding", async () => {
@@ -44,6 +47,7 @@ describe("authenticateMcpRequest", () => {
     });
 
     expect(resolveMcpOAuthAccessTokenMock).toHaveBeenCalledWith("mcp_at_token", "https://mcp.corgtex.com/mcp");
+    expect(requireTrialMcpAccessMock).toHaveBeenCalledWith("ws-1");
     expect(ctx).toMatchObject({
       authKind: "oauth",
       workspaceId: "ws-1",

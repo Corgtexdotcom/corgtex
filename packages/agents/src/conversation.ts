@@ -1,7 +1,7 @@
 import { prisma } from "@corgtex/shared";
 import { searchIndexedKnowledge } from "@corgtex/knowledge";
 import { defaultModelGateway } from "@corgtex/models";
-import { loadRelevantMemories, storeAgentMemory } from "@corgtex/domain";
+import { AppError, checkBudget, loadRelevantMemories, storeAgentMemory } from "@corgtex/domain";
 import { env } from "@corgtex/shared";
 import type { ChatMessage } from "@corgtex/models";
 import { checkCalendarAvailabilityTool, scheduleMeetingTool, checkCalendarAvailability, scheduleMeeting } from "./tools/calendar";
@@ -36,6 +36,13 @@ import type { AppActor } from "@corgtex/shared";
 
 const MAX_HISTORY_TURNS = 20;
 const KNOWLEDGE_SEARCH_LIMIT = 4;
+
+async function assertWorkspaceModelBudget(workspaceId: string) {
+  const budget = await checkBudget(workspaceId);
+  if (!budget.allowed) {
+    throw new AppError(429, "BUDGET_EXCEEDED", "Workspace model usage budget has been reached.");
+  }
+}
 
 const SYSTEM_PROMPTS: Record<string, string> = {
   assistant: `You are Corgtex, an AI governance assistant for a self-managing organization. You help team members:
@@ -177,6 +184,8 @@ export async function processConversationTurn(ctx: ConversationContext): Promise
     memories?: unknown[];
   };
 }> {
+  await assertWorkspaceModelBudget(ctx.workspaceId);
+
   const priorTurnsDesc = await prisma.conversationTurn.findMany({
     where: { conversationId: ctx.sessionId },
     orderBy: { sequenceNumber: "desc" },
@@ -308,6 +317,7 @@ export async function processConversationTurn(ctx: ConversationContext): Promise
       }
     }
 
+    await assertWorkspaceModelBudget(ctx.workspaceId);
     const followup = await defaultModelGateway.chat({
       workspaceId: ctx.workspaceId,
       model: env.MODEL_CHAT_CONVERSATION,
@@ -353,6 +363,8 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
     memories?: unknown[];
   };
 }> {
+  await assertWorkspaceModelBudget(ctx.workspaceId);
+
   const priorTurnsDesc = await prisma.conversationTurn.findMany({
     where: { conversationId: ctx.sessionId },
     orderBy: { sequenceNumber: "desc" },
@@ -458,6 +470,7 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
       }
     }
 
+    await assertWorkspaceModelBudget(ctx.workspaceId);
     const followupIterator = defaultModelGateway.chatStream({
       workspaceId: ctx.workspaceId,
       model: env.MODEL_CHAT_CONVERSATION,

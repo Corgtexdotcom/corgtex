@@ -1,14 +1,21 @@
 import type { MemberInviteRequestStatus, MemberRole } from "@prisma/client";
 import type { AppActor } from "@corgtex/shared";
-import { prisma, hashPassword, randomOpaqueToken, sha256 } from "@corgtex/shared";
+import { env, prisma, hashPassword, randomOpaqueToken, sendEmail, sha256 } from "@corgtex/shared";
 import { AppError, invariant } from "./errors";
 import { appendEvents } from "./events";
 import { isGlobalOperator, requireWorkspaceMembership } from "./auth";
+import { assertTrialMemberCapacity } from "./trial-entitlements";
 
 export type MemberInvitePolicy = "ADMINS_ONLY" | "MEMBERS_CAN_INVITE" | "MEMBERS_CAN_REQUEST";
 
 const MEMBER_INVITE_SETTINGS_FLAG = "MEMBER_INVITES";
 const SETUP_TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+export type MemberSetupEmailStatus = {
+  email: string;
+  sent: boolean;
+  error?: string;
+};
 
 function normalizeEmail(email: string) {
   return email.trim().toLowerCase();
@@ -16,6 +23,56 @@ function normalizeEmail(email: string) {
 
 function normalizeDisplayName(displayName?: string | null) {
   return displayName?.trim() || null;
+}
+
+function escapeHtml(value: string) {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll("\"", "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+export async function sendMemberSetupEmail(params: {
+  email: string;
+  displayName?: string | null;
+  token: string;
+  workspaceName?: string | null;
+}): Promise<MemberSetupEmailStatus> {
+  const email = normalizeEmail(params.email);
+  if (!env.RESEND_API_KEY) {
+    return { email, sent: false, error: "RESEND_API_KEY is not configured on the server." };
+  }
+
+  const appUrl = env.APP_URL.replace(/\/$/, "");
+  const setupUrl = `${appUrl}/setup-account/${encodeURIComponent(params.token)}`;
+  const displayName = escapeHtml(params.displayName || "there");
+  const workspaceName = escapeHtml(params.workspaceName || "a Corgtex workspace");
+
+  try {
+    await sendEmail({
+      to: email,
+      subject: "You've been invited to Corgtex",
+      html: `
+        <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto; padding: 40px 20px;">
+          <h2>Join Corgtex</h2>
+          <p>Hi ${displayName},</p>
+          <p>You have been invited to join ${workspaceName} on Corgtex.</p>
+          <div style="margin: 32px 0;">
+            <a href="${setupUrl}" style="background-color: #111; color: #fff; padding: 12px 24px; border-radius: 6px; text-decoration: none; display: inline-block;">Set up your account</a>
+          </div>
+        </div>
+      `,
+    });
+    return { email, sent: true };
+  } catch (error) {
+    return {
+      email,
+      sent: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
 }
 
 function parseInvitePolicy(config: unknown): MemberInvitePolicy {
@@ -212,6 +269,7 @@ export async function createMember(actor: AppActor, params: {
 
   const email = normalizeEmail(params.email);
   invariant(email.length > 0, 400, "INVALID_INPUT", "Email is required.");
+  await assertTrialMemberCapacity(params.workspaceId);
 
   return prisma.$transaction(async (tx) => {
     const randomPassword = randomOpaqueToken();
