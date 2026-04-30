@@ -120,6 +120,10 @@ function evaluateContrast(fgStr, bgStr, context, isDark) {
 const violations = [];
 const hardcodedWarnings = [];
 
+function matchCssDeclaration(ruleBody, propertyPattern) {
+  return ruleBody.match(new RegExp(`(?:^|;)\\s*(?:${propertyPattern})\\s*:\\s*([^;!]+)`));
+}
+
 // Phase 2: Audit globals.css rules
 const cssRuleRegex = /([^{]+)\s*{([^}]*)}/g;
 let match;
@@ -129,8 +133,8 @@ while ((match = cssRuleRegex.exec(cssContent)) !== null) {
   
   if (selector.startsWith('@') || selector === ':root' || selector === '.dark') continue;
 
-  const bgMatch = ruleBody.match(/(?:background|background-color)\s*:\s*([^;!]+)/);
-  const fgMatch = ruleBody.match(/color\s*:\s*([^;!]+)/);
+  const bgMatch = matchCssDeclaration(ruleBody, 'background|background-color');
+  const fgMatch = matchCssDeclaration(ruleBody, 'color');
   
   // Custom Tailwind @apply parsing (bg-xxx text-xxx)
   const applyMatch = ruleBody.match(/@apply\s+([^;]+)/);
@@ -242,8 +246,8 @@ function scanDir(dir) {
             let inlMatch;
             while ((inlMatch = inlineRegex.exec(content)) !== null) {
                 const styleBody = inlMatch[1];
-                const bgM = styleBody.match(/(?:background|backgroundColor)\s*:\s*["']([^"']+)["']/);
-                const fgM = styleBody.match(/color\s*:\s*["']([^"']+)["']/);
+                const bgM = styleBody.match(/(?:^|,)\s*(?:background|backgroundColor)\s*:\s*["']([^"']+)["']/);
+                const fgM = styleBody.match(/(?:^|,)\s*color\s*:\s*["']([^"']+)["']/);
                 
                 if (bgM && fgM) {
                     const bgVal = bgM[1];
