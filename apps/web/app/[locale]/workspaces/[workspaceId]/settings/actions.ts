@@ -496,7 +496,7 @@ export async function updateNotificationPrefAction(
 
 export async function updateMemberNewspaperCadenceAction(
   workspaceId: string,
-  cadence: "WORKSPACE_DEFAULT" | "DAILY" | "WEEKLY"
+  cadence: "WORKSPACE_DEFAULT" | "DAILY" | "WEEKLY" | "OFF"
 ) {
   const actor = await requirePageActor();
   const { updateMemberNewspaperCadencePreference } = await import("@corgtex/domain");

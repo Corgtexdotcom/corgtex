@@ -37,6 +37,18 @@ enum MemberRole {
 enum NewspaperCadence {
   DAILY
   WEEKLY
+  OFF
+}
+
+enum NewspaperDeliveryStatus {
+  SENT
+  FAILED
+  SKIPPED
+}
+
+enum NewspaperDeliveryKind {
+  MEMBER_NEWSPAPER
+  DEMO_WELCOME
 }
 
 enum MemberInviteRequestStatus {
@@ -379,6 +391,8 @@ model Workspace {
   procurementTrials             ProcurementTrial[]
   toolLinks                     WorkspaceToolLink[]
   buildArtifacts                BuildArtifact[]
+  newspaperDeliveries           NewspaperDelivery[]
+  newspaperTrackedLinks         NewspaperTrackedLink[]
 }
 
 model WorkspaceFeatureFlag {
@@ -683,6 +697,7 @@ model Member {
   recognitionsReceived        Recognition[]            @relation("RecognitionRecipient")
   recognitionsGiven           Recognition[]            @relation("RecognitionAuthor")
   targetedDeliberationEntries DeliberationEntry[]      @relation("DeliberationTargetMember")
+  newspaperDeliveries         NewspaperDelivery[]
 
   @@unique([workspaceId, userId])
   @@index([workspaceId, role])
@@ -1507,9 +1522,65 @@ model WorkflowJob {
   dependsOn  WorkflowJob?  @relation("JobDependency", fields: [dependsOnJobId], references: [id], onDelete: SetNull)
   dependents WorkflowJob[] @relation("JobDependency")
   modelUsage ModelUsage[]
+  newspaperDeliveries   NewspaperDelivery[]
+  newspaperTrackedLinks NewspaperTrackedLink[]
 
   @@index([status, runAfter, createdAt])
   @@index([dependsOnJobId])
+}
+
+model NewspaperDelivery {
+  id                String                  @id @default(uuid())
+  workspaceId       String
+  workflowJobId     String?
+  memberId          String?
+  demoLeadId        String?
+  kind              NewspaperDeliveryKind
+  cadence           NewspaperCadence?
+  runKey            String
+  recipientEmail    String
+  subject           String
+  status            NewspaperDeliveryStatus
+  providerMessageId String?
+  sentAt            DateTime?
+  skippedAt         DateTime?
+  failedAt          DateTime?
+  error             String?                 @db.Text
+  createdAt         DateTime                @default(now())
+
+  workspace   Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workflowJob WorkflowJob? @relation(fields: [workflowJobId], references: [id], onDelete: SetNull)
+  member      Member?      @relation(fields: [memberId], references: [id], onDelete: SetNull)
+  demoLead    DemoLead?    @relation(fields: [demoLeadId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId, createdAt])
+  @@index([workspaceId, runKey])
+  @@index([workflowJobId])
+  @@index([memberId])
+  @@index([demoLeadId])
+}
+
+model NewspaperTrackedLink {
+  id             String    @id @default(uuid())
+  workspaceId    String
+  workflowJobId  String?
+  runKey         String
+  targetUrl      String    @db.Text
+  targetUrlHash  String
+  tokenHash      String    @unique
+  clickCount     Int       @default(0)
+  firstClickedAt DateTime?
+  lastClickedAt  DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  workspace   Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workflowJob WorkflowJob? @relation(fields: [workflowJobId], references: [id], onDelete: SetNull)
+
+  @@unique([runKey, targetUrlHash])
+  @@index([workspaceId, runKey])
+  @@index([workspaceId, createdAt])
+  @@index([workflowJobId])
 }
 
 model KnowledgeChunk {
@@ -2099,6 +2170,7 @@ model DemoLead {
   crmQualifications     CrmQualification[]
   crmConversations      CrmConversation[]
   crmProspectWorkspaces CrmProspectWorkspace[]
+  newspaperDeliveries   NewspaperDelivery[]
 
   @@unique([workspaceId, email])
   @@index([workspaceId, createdAt])

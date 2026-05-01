@@ -5,6 +5,7 @@ const {
   chatMock,
   extractMock,
   sendEmailMock,
+  loggerMock,
   txMock,
   batchIngestDailyConversationsMock,
   createArticleMock,
@@ -12,12 +13,17 @@ const {
   updateArticleMock,
   rebuildBacklinksMock,
   getWorkspaceNewspaperCadenceMock,
+  instrumentNewspaperHtmlLinksMock,
+  recordNewspaperDeliveryMock,
 } = vi.hoisted(() => ({
   txMock: {
     demoLead: {
       update: vi.fn(),
     },
     crmActivity: {
+      create: vi.fn(),
+    },
+    newspaperDelivery: {
       create: vi.fn(),
     },
   },
@@ -45,15 +51,23 @@ const {
   chatMock: vi.fn(),
   extractMock: vi.fn(),
   sendEmailMock: vi.fn(),
+  loggerMock: {
+    info: vi.fn(),
+    error: vi.fn(),
+  },
   batchIngestDailyConversationsMock: vi.fn(),
   createArticleMock: vi.fn(),
   listSlackMessagesForDigestMock: vi.fn(),
   updateArticleMock: vi.fn(),
   rebuildBacklinksMock: vi.fn(),
   getWorkspaceNewspaperCadenceMock: vi.fn(),
+  instrumentNewspaperHtmlLinksMock: vi.fn(),
+  recordNewspaperDeliveryMock: vi.fn(),
 }));
 
 vi.mock("@corgtex/shared", () => ({
+  env: { APP_URL: "https://app.example.com" },
+  logger: loggerMock,
   prisma: prismaMock,
   sendEmail: sendEmailMock,
 }));
@@ -74,13 +88,35 @@ vi.mock("@corgtex/domain", () => ({
   },
   getAgentModelOverride: vi.fn().mockResolvedValue(undefined),
   getWorkspaceNewspaperCadence: getWorkspaceNewspaperCadenceMock,
-  normalizeNewspaperCadence: (value: unknown) => value === "WEEKLY" ? "WEEKLY" : "DAILY",
+  normalizeNewspaperCadence: (value: unknown) => {
+    if (value === "WEEKLY" || value === "OFF") return value;
+    return "DAILY";
+  },
+  instrumentNewspaperHtmlLinks: instrumentNewspaperHtmlLinksMock,
+  recordNewspaperDelivery: recordNewspaperDeliveryMock,
   batchIngestDailyConversations: batchIngestDailyConversationsMock,
   createArticle: createArticleMock,
   listSlackMessagesForDigest: listSlackMessagesForDigestMock,
   updateArticle: updateArticleMock,
   rebuildBacklinks: rebuildBacklinksMock,
 }));
+
+function mockRecentBuildArtifact() {
+  return {
+    repositoryOwner: "puncar-dev",
+    repositoryName: "corgtex",
+    pullRequestNumber: 52,
+    pullRequestUrl: "https://github.com/puncar-dev/corgtex/pull/52",
+    branchName: "feat/newspaper",
+    title: "Newspaper delivery observability",
+    summaryMd: "Delivery records and reporting.",
+    status: "MERGED",
+    mergedAt: new Date("2026-04-30T12:00:00.000Z"),
+    closedAt: new Date("2026-04-30T12:00:00.000Z"),
+    updatedAt: new Date("2026-04-30T12:00:00.000Z"),
+    assets: [],
+  };
+}
 
 describe("runDailyDigest", () => {
   beforeEach(() => {
@@ -109,9 +145,12 @@ describe("runDailyDigest", () => {
     createArticleMock.mockResolvedValue({ id: "article-1" });
     updateArticleMock.mockResolvedValue({ id: "article-1" });
     rebuildBacklinksMock.mockResolvedValue(undefined);
-    sendEmailMock.mockResolvedValue(undefined);
+    sendEmailMock.mockResolvedValue({ status: "SENT", providerMessageId: "email-1" });
+    instrumentNewspaperHtmlLinksMock.mockImplementation(async ({ html }: { html: string }) => html);
+    recordNewspaperDeliveryMock.mockResolvedValue({ id: "delivery-1" });
     txMock.demoLead.update.mockResolvedValue({ id: "lead-1" });
     txMock.crmActivity.create.mockResolvedValue({ id: "activity-1" });
+    txMock.newspaperDelivery.create.mockResolvedValue({ id: "delivery-1" });
     getWorkspaceNewspaperCadenceMock.mockResolvedValue("DAILY");
   });
 
@@ -176,6 +215,14 @@ describe("runDailyDigest", () => {
       to: "member@example.com",
       subject: "Daily Newspaper - 2026-04-30 - Your Personal Briefing",
     }));
+    expect(recordNewspaperDeliveryMock).toHaveBeenCalledWith(expect.objectContaining({
+      workspaceId: "workspace-1",
+      memberId: "member-1",
+      kind: "MEMBER_NEWSPAPER",
+      cadence: "DAILY",
+      status: "SENT",
+      providerMessageId: "email-1",
+    }));
   });
 
   it("skips digest generation when no active members match the requested cadence", async () => {
@@ -207,6 +254,112 @@ describe("runDailyDigest", () => {
     expect(batchIngestDailyConversationsMock).not.toHaveBeenCalled();
     expect(chatMock).not.toHaveBeenCalled();
     expect(sendEmailMock).not.toHaveBeenCalled();
+  });
+
+  it("does not generate a newspaper when the requested cadence is off", async () => {
+    const { runDailyDigest } = await import("./daily-digest");
+    const result = await runDailyDigest({
+      workspaceId: "workspace-1",
+      dateISO: "2026-04-30T12:00:00.000Z",
+      cadence: "OFF",
+    });
+
+    expect(result).toEqual(expect.objectContaining({
+      success: true,
+      cadence: "OFF",
+      sentEmails: 0,
+    }));
+    expect(batchIngestDailyConversationsMock).not.toHaveBeenCalled();
+    expect(chatMock).not.toHaveBeenCalled();
+    expect(sendEmailMock).not.toHaveBeenCalled();
+    expect(loggerMock.info).toHaveBeenCalledWith("newspaper_delivery_skipped", expect.objectContaining({
+      reason: "cadence_off",
+    }));
+  });
+
+  it("excludes members whose effective cadence is off", async () => {
+    prismaMock.buildArtifact.findMany.mockResolvedValue([mockRecentBuildArtifact()]);
+    prismaMock.member.findMany.mockResolvedValue([
+      {
+        id: "member-off",
+        newspaperCadence: "OFF",
+        user: {
+          id: "user-off",
+          email: "off@example.com",
+          displayName: "Off Member",
+        },
+      },
+      {
+        id: "member-daily",
+        newspaperCadence: "DAILY",
+        user: {
+          id: "user-daily",
+          email: "daily@example.com",
+          displayName: "Daily Member",
+        },
+      },
+    ]);
+
+    const { runDailyDigest } = await import("./daily-digest");
+    await runDailyDigest({
+      workspaceId: "workspace-1",
+      dateISO: "2026-04-30T12:00:00.000Z",
+      cadence: "DAILY",
+    });
+
+    expect(sendEmailMock).toHaveBeenCalledTimes(1);
+    expect(sendEmailMock).toHaveBeenCalledWith(expect.objectContaining({
+      to: "daily@example.com",
+    }));
+    expect(recordNewspaperDeliveryMock).toHaveBeenCalledWith(expect.objectContaining({
+      memberId: "member-daily",
+      status: "SENT",
+    }));
+  });
+
+  it("records skipped deliveries when email is not configured", async () => {
+    prismaMock.buildArtifact.findMany.mockResolvedValue([mockRecentBuildArtifact()]);
+    sendEmailMock.mockResolvedValue({ status: "SKIPPED", reason: "RESEND_API_KEY is not configured." });
+
+    const { runDailyDigest } = await import("./daily-digest");
+    const result = await runDailyDigest({
+      workspaceId: "workspace-1",
+      dateISO: "2026-04-30T12:00:00.000Z",
+      cadence: "DAILY",
+    });
+
+    expect(result).toEqual(expect.objectContaining({
+      sentEmails: 0,
+      skippedEmails: 1,
+    }));
+    expect(recordNewspaperDeliveryMock).toHaveBeenCalledWith(expect.objectContaining({
+      status: "SKIPPED",
+      error: "RESEND_API_KEY is not configured.",
+    }));
+  });
+
+  it("records failed deliveries when sending fails", async () => {
+    prismaMock.buildArtifact.findMany.mockResolvedValue([mockRecentBuildArtifact()]);
+    sendEmailMock.mockRejectedValue(new Error("provider unavailable"));
+
+    const { runDailyDigest } = await import("./daily-digest");
+    const result = await runDailyDigest({
+      workspaceId: "workspace-1",
+      dateISO: "2026-04-30T12:00:00.000Z",
+      cadence: "DAILY",
+    });
+
+    expect(result).toEqual(expect.objectContaining({
+      sentEmails: 0,
+      failedEmails: 1,
+    }));
+    expect(recordNewspaperDeliveryMock).toHaveBeenCalledWith(expect.objectContaining({
+      status: "FAILED",
+      error: "provider unavailable",
+    }));
+    expect(loggerMock.error).toHaveBeenCalledWith("newspaper_delivery_failed", expect.objectContaining({
+      error: "provider unavailable",
+    }));
   });
 
   it("uses a seven-day lookback for weekly newspapers", async () => {
@@ -276,6 +429,15 @@ describe("runDailyDigest", () => {
         contactId: "contact-1",
         type: "EMAIL",
         title: "Sent welcome newspaper",
+      }),
+    });
+    expect(txMock.newspaperDelivery.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        workspaceId: "workspace-1",
+        demoLeadId: "lead-1",
+        kind: "DEMO_WELCOME",
+        status: "SENT",
+        providerMessageId: "email-1",
       }),
     });
   });

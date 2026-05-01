@@ -1,7 +1,14 @@
-import { prisma, sendEmail } from "@corgtex/shared";
+import { env, logger, prisma, sendEmail } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { defaultModelGateway, resolveModel } from "@corgtex/models";
-import { AGENT_REGISTRY, getAgentModelOverride, getWorkspaceNewspaperCadence, normalizeNewspaperCadence } from "@corgtex/domain";
+import {
+  AGENT_REGISTRY,
+  getAgentModelOverride,
+  getWorkspaceNewspaperCadence,
+  instrumentNewspaperHtmlLinks,
+  normalizeNewspaperCadence,
+  recordNewspaperDelivery,
+} from "@corgtex/domain";
 import { 
   batchIngestDailyConversations, 
   createArticle, 
@@ -11,7 +18,9 @@ import {
 } from "@corgtex/domain";
 import type { BrainArticleType, NewspaperCadence } from "@prisma/client";
 
-const LOOKBACK_DAYS_BY_CADENCE: Record<NewspaperCadence, number> = {
+type DeliveryCadence = Exclude<NewspaperCadence, "OFF">;
+
+const LOOKBACK_DAYS_BY_CADENCE: Record<DeliveryCadence, number> = {
   DAILY: 1,
   WEEKLY: 7,
 };
@@ -26,6 +35,21 @@ function escapeHtml(value: string) {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
+}
+
+function workspaceUrl(workspaceId: string) {
+  return `${env.APP_URL.replace(/\/$/, "")}/workspaces/${workspaceId}`;
+}
+
+function appendNewspaperFooter(html: string, workspaceId: string) {
+  const footer = `<div style="margin-top:24px;padding-top:16px;border-top:1px solid #d9d1bd;font-family:Arial,sans-serif;font-size:13px;line-height:1.5;color:#5b5448;"><a href="${workspaceUrl(workspaceId)}" style="color:#6750a4;text-decoration:underline;">Open Corgtex</a> to review the source work and decisions behind this newspaper.</div>`;
+  return html.includes("</body>")
+    ? html.replace("</body>", `${footer}</body>`)
+    : `${html}${footer}`;
+}
+
+function isDeliveryCadence(cadence: NewspaperCadence): cadence is DeliveryCadence {
+  return cadence === "DAILY" || cadence === "WEEKLY";
 }
 
 export function buildDemoWelcomeNewspaperHtml(params?: { workspaceName?: string | null }) {
@@ -77,6 +101,7 @@ export function buildDemoWelcomeNewspaperHtml(params?: { workspaceName?: string 
                 </table>
                 <h2 style="font-size:22px;line-height:1.2;margin:0 0 12px;">Already built</h2>
                 <p style="font-size:16px;line-height:1.6;margin:0;">Corgtex already brings together the Organization Brain, governance workflows, member and role visibility, meeting intelligence, action tracking, finance controls, CRM follow-up, Slack-aware briefings, and AI agents that can help teams turn scattered activity into operating clarity.</p>
+                <p style="font-size:15px;line-height:1.6;margin:20px 0 0;"><a href="${env.APP_URL.replace(/\/$/, "")}" style="color:#2d2a24;text-decoration:underline;">Open Corgtex</a> when you are ready to see the operating picture behind the newspaper.</p>
               </td>
             </tr>
           </table>
@@ -156,6 +181,25 @@ export async function runDailyDigest(params: {
   };
 
   const cadence = normalizeNewspaperCadence(params.cadence);
+  if (!isDeliveryCadence(cadence)) {
+    logger.info("newspaper_delivery_skipped", {
+      workspaceId: params.workspaceId,
+      cadence,
+      reason: "cadence_off",
+    });
+    return {
+      success: true,
+      message: "Newspaper cadence is off.",
+      cadence,
+      processedSessions: 0,
+      processedSlackMessages: 0,
+      updatedProfiles: 0,
+      sentEmails: 0,
+      failedEmails: 0,
+      skippedEmails: 0,
+    };
+  }
+
   const workspaceCadence = await getWorkspaceNewspaperCadence(params.workspaceId);
   const activeMembers = await prisma.member.findMany({
     where: { workspaceId: params.workspaceId, isActive: true },
@@ -166,6 +210,11 @@ export async function runDailyDigest(params: {
   ));
 
   if (recipientMembers.length === 0) {
+    logger.info("newspaper_delivery_skipped", {
+      workspaceId: params.workspaceId,
+      cadence,
+      reason: "no_matching_recipients",
+    });
     return {
       success: true,
       message: `No active members configured for the ${cadence.toLowerCase()} newspaper.`,
@@ -173,6 +222,9 @@ export async function runDailyDigest(params: {
       processedSessions: 0,
       processedSlackMessages: 0,
       updatedProfiles: 0,
+      sentEmails: 0,
+      failedEmails: 0,
+      skippedEmails: 0,
     };
   }
 
@@ -242,7 +294,23 @@ export async function runDailyDigest(params: {
   });
 
   if (sessions.length === 0 && slackMessages.length === 0 && buildArtifacts.length === 0) {
-    return { success: true, message: "No conversations, Slack messages, or PR activity to digest." };
+    logger.info("newspaper_delivery_skipped", {
+      workspaceId: params.workspaceId,
+      workflowJobId: params.workflowJobId ?? null,
+      cadence,
+      reason: "no_digest_inputs",
+    });
+    return {
+      success: true,
+      message: "No conversations, Slack messages, or PR activity to digest.",
+      cadence,
+      processedSessions: 0,
+      processedSlackMessages: 0,
+      updatedProfiles: 0,
+      sentEmails: 0,
+      failedEmails: 0,
+      skippedEmails: 0,
+    };
   }
 
   // 3. Extract member insights and update PERSON profiles
@@ -390,6 +458,7 @@ Format it as a markdown article containing these sections:
 
   const digestTitle = `${cadenceLabel(cadence)} Newspaper - ${params.dateISO.split("T")[0]}`;
   const digestSlug = `${cadence.toLowerCase()}-newspaper-${params.dateISO.split("T")[0]}`;
+  const runKey = params.workflowJobId ?? `${params.workspaceId}:${cadence.toLowerCase()}-newspaper:${params.dateISO.split("T")[0]}`;
 
   await createArticle(agentActor, {
     workspaceId: params.workspaceId,
@@ -404,6 +473,10 @@ Format it as a markdown article containing these sections:
   await rebuildBacklinks(agentActor, { workspaceId: params.workspaceId });
 
   // 6. Send personalized digest emails
+  let sentEmails = 0;
+  let failedEmails = 0;
+  let skippedEmails = 0;
+
   for (const member of recipientMembers) {
     const personArticle = await prisma.brainArticle.findUnique({
       where: {
@@ -437,12 +510,83 @@ Output clean HTML suitable for email (use inline styles).`
       ]
     });
 
-    await sendEmail({
-      to: member.user.email,
-      subject: `${digestTitle} - Your Personal Briefing`,
-      html: personalizedDigest.content,
+    const subject = `${digestTitle} - Your Personal Briefing`;
+    const html = await instrumentNewspaperHtmlLinks({
+      workspaceId: params.workspaceId,
+      workflowJobId: params.workflowJobId ?? null,
+      runKey,
+      html: appendNewspaperFooter(personalizedDigest.content, params.workspaceId),
     });
+
+    try {
+      const emailResult = await sendEmail({
+        to: member.user.email,
+        subject,
+        html,
+      });
+      if (emailResult.status === "SENT") {
+        sentEmails++;
+        await recordNewspaperDelivery({
+          workspaceId: params.workspaceId,
+          workflowJobId: params.workflowJobId ?? null,
+          memberId: member.id,
+          kind: "MEMBER_NEWSPAPER",
+          cadence,
+          runKey,
+          recipientEmail: member.user.email,
+          subject,
+          status: "SENT",
+          providerMessageId: emailResult.providerMessageId,
+        });
+      } else {
+        skippedEmails++;
+        await recordNewspaperDelivery({
+          workspaceId: params.workspaceId,
+          workflowJobId: params.workflowJobId ?? null,
+          memberId: member.id,
+          kind: "MEMBER_NEWSPAPER",
+          cadence,
+          runKey,
+          recipientEmail: member.user.email,
+          subject,
+          status: "SKIPPED",
+          error: emailResult.reason,
+        });
+      }
+    } catch (error) {
+      failedEmails++;
+      const message = error instanceof Error ? error.message : "Unknown email error";
+      await recordNewspaperDelivery({
+        workspaceId: params.workspaceId,
+        workflowJobId: params.workflowJobId ?? null,
+        memberId: member.id,
+        kind: "MEMBER_NEWSPAPER",
+        cadence,
+        runKey,
+        recipientEmail: member.user.email,
+        subject,
+        status: "FAILED",
+        error: message,
+      });
+      logger.error("newspaper_delivery_failed", {
+        workspaceId: params.workspaceId,
+        workflowJobId: params.workflowJobId ?? null,
+        cadence,
+        memberId: member.id,
+        error: message,
+      });
+    }
   }
+
+  logger.info("newspaper_delivery_completed", {
+    workspaceId: params.workspaceId,
+    workflowJobId: params.workflowJobId ?? null,
+    cadence,
+    recipients: recipientMembers.length,
+    sentEmails,
+    failedEmails,
+    skippedEmails,
+  });
 
   return {
     success: true,
@@ -450,13 +594,17 @@ Output clean HTML suitable for email (use inline styles).`
     cadence,
     processedSessions: sessions.length,
     processedSlackMessages: slackMessages.length,
-    updatedProfiles: memberUpdates.length
+    updatedProfiles: memberUpdates.length,
+    sentEmails,
+    failedEmails,
+    skippedEmails,
   };
 }
 
 export async function sendDemoWelcomeNewspaper(params: {
   workspaceId: string;
   demoLeadId: string;
+  workflowJobId?: string;
 }) {
   const lead = await prisma.demoLead.findFirst({
     where: {
@@ -476,11 +624,52 @@ export async function sendDemoWelcomeNewspaper(params: {
     return { success: true, skipped: true, message: "Welcome newspaper already sent." };
   }
 
-  await sendEmail({
-    to: lead.email,
-    subject: "Welcome to Corgtex - your first newspaper",
+  const subject = "Welcome to Corgtex - your first newspaper";
+  const runKey = params.workflowJobId ?? `demo-welcome:${lead.id}`;
+  const html = await instrumentNewspaperHtmlLinks({
+    workspaceId: params.workspaceId,
+    workflowJobId: params.workflowJobId ?? null,
+    runKey,
     html: buildDemoWelcomeNewspaperHtml({ workspaceName: lead.workspace.name }),
   });
+  let deliveryStatus: "SENT" | "SKIPPED" = "SENT";
+  let providerMessageId: string | null = null;
+  let deliveryError: string | null = null;
+
+  try {
+    const emailResult = await sendEmail({
+      to: lead.email,
+      subject,
+      html,
+    });
+    if (emailResult.status === "SENT") {
+      providerMessageId = emailResult.providerMessageId;
+    } else {
+      deliveryStatus = "SKIPPED";
+      deliveryError = emailResult.reason;
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown email error";
+    await recordNewspaperDelivery({
+      workspaceId: params.workspaceId,
+      workflowJobId: params.workflowJobId ?? null,
+      demoLeadId: lead.id,
+      kind: "DEMO_WELCOME",
+      runKey,
+      recipientEmail: lead.email,
+      subject,
+      status: "FAILED",
+      error: message,
+    });
+    logger.error("newspaper_delivery_failed", {
+      workspaceId: params.workspaceId,
+      workflowJobId: params.workflowJobId ?? null,
+      kind: "DEMO_WELCOME",
+      demoLeadId: lead.id,
+      error: message,
+    });
+    throw error;
+  }
 
   await prisma.$transaction(async (tx) => {
     await tx.demoLead.update({
@@ -501,6 +690,32 @@ export async function sendDemoWelcomeNewspaper(params: {
         ].join("\n"),
       },
     });
+
+    const now = new Date();
+    await tx.newspaperDelivery.create({
+      data: {
+        workspaceId: params.workspaceId,
+        workflowJobId: params.workflowJobId ?? null,
+        demoLeadId: lead.id,
+        kind: "DEMO_WELCOME",
+        runKey,
+        recipientEmail: lead.email,
+        subject,
+        status: deliveryStatus,
+        providerMessageId,
+        error: deliveryError,
+        sentAt: deliveryStatus === "SENT" ? now : null,
+        skippedAt: deliveryStatus === "SKIPPED" ? now : null,
+      },
+    });
+  });
+
+  logger.info("newspaper_delivery_completed", {
+    workspaceId: params.workspaceId,
+    workflowJobId: params.workflowJobId ?? null,
+    kind: "DEMO_WELCOME",
+    demoLeadId: lead.id,
+    status: deliveryStatus,
   });
 
   return { success: true, skipped: false };

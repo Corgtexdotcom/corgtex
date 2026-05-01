@@ -1,4 +1,13 @@
-import { listAuditLogs, getModelUsageSummary, listAgentRuns, getAgentRunTrace, getStorageUsageSummary, listArchivedWorkspaceArtifacts } from "@corgtex/domain";
+import {
+  listAuditLogs,
+  getModelUsageSummary,
+  listAgentRuns,
+  getAgentRunTrace,
+  getStorageUsageSummary,
+  listArchivedWorkspaceArtifacts,
+  listNewspaperDeliveryDetails,
+  listNewspaperDeliverySummaries,
+} from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { getTranslations } from "next-intl/server";
 import { purgeArchivedArtifactAction, restoreArchivedArtifactAction } from "./actions";
@@ -27,9 +36,9 @@ function actionLabel(action: string): string {
 }
 
 function statusColor(status: string): string {
-  if (status === "COMPLETED" || status === "DELIVERED") return "var(--accent)";
+  if (status === "COMPLETED" || status === "DELIVERED" || status === "SENT") return "var(--accent)";
   if (status === "FAILED") return "#842029";
-  if (status === "RUNNING" || status === "PENDING") return "var(--warning)";
+  if (status === "RUNNING" || status === "PENDING" || status === "SKIPPED") return "var(--warning)";
   if (status === "WAITING_APPROVAL") return "#b45309";
   return "inherit";
 }
@@ -75,6 +84,12 @@ export default async function AuditPage({
     entityType: search.archiveEntityType,
     take: 100,
   });
+  const [newspaperSummaries, newspaperDetails] = tab === "newspapers"
+    ? await Promise.all([
+      listNewspaperDeliverySummaries(actor, workspaceId, { take: 20 }),
+      listNewspaperDeliveryDetails(actor, workspaceId, { take: 100 }),
+    ])
+    : [[], []];
   const archiveActorQuery = search.archiveActor?.trim().toLowerCase() ?? "";
   const archiveReasonQuery = search.archiveReason?.trim().toLowerCase() ?? "";
   const archiveDateFrom = search.archiveDateFrom ? new Date(search.archiveDateFrom) : null;
@@ -118,6 +133,12 @@ export default async function AuditPage({
           className={`nr-tab ${tab === "archive" ? "nr-tab-active" : ""}`}
         >
           {t("tabArchive")}
+        </a>
+        <a
+          href={`/workspaces/${workspaceId}/audit?tab=newspapers`}
+          className={`nr-tab ${tab === "newspapers" ? "nr-tab-active" : ""}`}
+        >
+          {t("tabNewspapers")}
         </a>
       </div>
 
@@ -172,6 +193,84 @@ export default async function AuditPage({
               </div>
             ))}
           </div>
+        </section>
+      )}
+
+      {tab === "newspapers" && (
+        <section>
+          <h2 className="nr-section-header">{t("sectionNewspapers")}</h2>
+          <p className="nr-item-meta" style={{ fontSize: "0.85rem", marginBottom: 16 }}>
+            {t("newspapersDesc")}
+          </p>
+
+          {newspaperSummaries.length === 0 && (
+            <p className="nr-item-meta">{t("noNewspaperDeliveries")}</p>
+          )}
+
+          {newspaperSummaries.map((summary) => (
+            <div className="nr-item" key={summary.runKey} style={{ padding: "16px 0" }}>
+              <div className="row" style={{ alignItems: "flex-start", gap: 16 }}>
+                <div style={{ flex: 1 }}>
+                  <strong className="nr-item-title">{summary.subject}</strong>
+                  <div className="nr-item-meta" style={{ marginTop: 4 }}>
+                    {summary.kind === "DEMO_WELCOME" ? t("newspaperKindDemo") : t("newspaperKindMember")}
+                    {summary.cadence ? ` · ${summary.cadence}` : ""}
+                    {" · "}{formatDateTime(summary.createdAt)}
+                  </div>
+                  <div className="nr-item-meta" style={{ marginTop: 8 }}>
+                    {t("newspaperSummaryCounts", {
+                      sent: summary.sentCount,
+                      failed: summary.failedCount,
+                      skipped: summary.skippedCount,
+                      recipients: summary.recipientCount,
+                    })}
+                  </div>
+                  <div className="nr-item-meta" style={{ marginTop: 4 }}>
+                    {t("newspaperClickCounts", {
+                      clicks: summary.totalClickCount,
+                      clickedLinks: summary.clickedLinkCount,
+                      links: summary.trackedLinkCount,
+                    })}
+                  </div>
+                </div>
+                <div className="nr-item-meta" style={{ textAlign: "right", minWidth: 180 }}>
+                  <div>{t("newspaperFirstSent", { date: formatDateTime(summary.firstSentAt) })}</div>
+                  <div>{t("newspaperLastSent", { date: formatDateTime(summary.lastSentAt) })}</div>
+                </div>
+              </div>
+            </div>
+          ))}
+
+          {newspaperDetails.length > 0 && (
+            <div style={{ marginTop: 32 }}>
+              <h3 className="nr-section-header" style={{ fontSize: "1.15rem" }}>{t("sectionNewspaperRecipients")}</h3>
+              <div style={{ overflowX: "auto" }}>
+                <table className="notif-pref-table">
+                  <thead>
+                    <tr>
+                      <th>{t("newspaperRecipient")}</th>
+                      <th>{t("newspaperSubject")}</th>
+                      <th>{t("newspaperStatus")}</th>
+                      <th>{t("newspaperSentAt")}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {newspaperDetails.map((delivery) => (
+                      <tr key={delivery.id}>
+                        <td>{delivery.member?.user.displayName ?? delivery.recipientEmail}</td>
+                        <td>{delivery.subject}</td>
+                        <td style={{ color: statusColor(delivery.status), fontWeight: 600 }}>
+                          {delivery.status}
+                          {delivery.error ? <div className="nr-item-meta">{delivery.error}</div> : null}
+                        </td>
+                        <td>{formatDateTime(delivery.sentAt ?? delivery.skippedAt ?? delivery.failedAt ?? delivery.createdAt)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
         </section>
       )}
 

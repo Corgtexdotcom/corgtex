@@ -89,6 +89,28 @@ describe("agent-config", () => {
       await expect(getWorkspaceNewspaperCadence("ws-1")).resolves.toBe("WEEKLY");
     });
 
+    it("reads off as a configured workspace newspaper cadence", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { getWorkspaceNewspaperCadence } = await import("./agent-config");
+
+      vi.mocked(prisma.workspaceAgentConfig.findUnique).mockResolvedValue({
+        configJson: { newspaperCadence: "OFF" },
+      } as any);
+
+      await expect(getWorkspaceNewspaperCadence("ws-1")).resolves.toBe("OFF");
+    });
+
+    it("falls back to daily for invalid configured workspace newspaper cadence", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { getWorkspaceNewspaperCadence } = await import("./agent-config");
+
+      vi.mocked(prisma.workspaceAgentConfig.findUnique).mockResolvedValue({
+        configJson: { newspaperCadence: "MONTHLY" },
+      } as any);
+
+      await expect(getWorkspaceNewspaperCadence("ws-1")).resolves.toBe("DAILY");
+    });
+
     it("merges admin newspaper cadence into the daily digest config", async () => {
       const { prisma } = await import("@corgtex/shared");
       const { updateWorkspaceNewspaperCadence } = await import("./agent-config");
@@ -110,6 +132,30 @@ describe("agent-config", () => {
         }),
         update: {
           configJson: { existing: true, newspaperCadence: "WEEKLY" },
+        },
+      }));
+    });
+
+    it("allows admins to set the workspace newspaper cadence to off", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { updateWorkspaceNewspaperCadence } = await import("./agent-config");
+
+      vi.mocked(prisma.workspaceAgentConfig.findUnique).mockResolvedValue({
+        configJson: { existing: true },
+      } as any);
+      vi.mocked(prisma.workspaceAgentConfig.upsert).mockResolvedValue({} as any);
+
+      await updateWorkspaceNewspaperCadence(
+        { kind: "user", user: { id: "u-1" } } as any,
+        { workspaceId: "ws-1", cadence: "OFF" },
+      );
+
+      expect(prisma.workspaceAgentConfig.upsert).toHaveBeenCalledWith(expect.objectContaining({
+        create: expect.objectContaining({
+          configJson: { existing: true, newspaperCadence: "OFF" },
+        }),
+        update: {
+          configJson: { existing: true, newspaperCadence: "OFF" },
         },
       }));
     });

@@ -22,7 +22,7 @@ export type AgentConfigSummary = {
 };
 
 export const DEFAULT_NEWSPAPER_CADENCE: NewspaperCadence = "DAILY";
-const NEWSPAPER_CADENCES = new Set<NewspaperCadence>(["DAILY", "WEEKLY"]);
+const NEWSPAPER_CADENCES = new Set<NewspaperCadence>(["DAILY", "WEEKLY", "OFF"]);
 const DEFAULT_SLACK_AGENT_CONFIG = {
   publicIngestionEnabled: true,
   rawMessageRetentionDays: 3650,

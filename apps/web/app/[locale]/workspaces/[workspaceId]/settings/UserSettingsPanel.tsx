@@ -5,6 +5,8 @@ import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { updateProfileAction, updateNotificationPrefAction, updateMemberNewspaperCadenceAction } from "./actions";
 
+type MemberNewspaperCadenceChoice = "WORKSPACE_DEFAULT" | "DAILY" | "WEEKLY" | "OFF";
+
 export function UserSettingsPanel({
   workspaceId,
   profile,
@@ -20,8 +22,8 @@ export function UserSettingsPanel({
   const t = useTranslations("settings");
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [newspaperCadence, setNewspaperCadence] = useState<"WORKSPACE_DEFAULT" | "DAILY" | "WEEKLY">(
-    profile.member?.newspaperCadence === "DAILY" || profile.member?.newspaperCadence === "WEEKLY"
+  const [newspaperCadence, setNewspaperCadence] = useState<MemberNewspaperCadenceChoice>(
+    profile.member?.newspaperCadence === "DAILY" || profile.member?.newspaperCadence === "WEEKLY" || profile.member?.newspaperCadence === "OFF"
       ? profile.member.newspaperCadence
       : "WORKSPACE_DEFAULT"
   );
@@ -126,7 +128,7 @@ export function UserSettingsPanel({
     }
   };
 
-  const handleNewspaperCadenceChange = async (cadence: "WORKSPACE_DEFAULT" | "DAILY" | "WEEKLY") => {
+  const handleNewspaperCadenceChange = async (cadence: MemberNewspaperCadenceChoice) => {
     setNewspaperCadence(cadence);
     try {
       await updateMemberNewspaperCadenceAction(workspaceId, cadence);
@@ -292,11 +294,12 @@ export function UserSettingsPanel({
             className="nr-input"
             style={{ maxWidth: 280 }}
             value={newspaperCadence}
-            onChange={(e) => handleNewspaperCadenceChange(e.target.value as "WORKSPACE_DEFAULT" | "DAILY" | "WEEKLY")}
+            onChange={(e) => handleNewspaperCadenceChange(e.target.value as MemberNewspaperCadenceChoice)}
           >
             <option value="WORKSPACE_DEFAULT">{t("newspaperCadenceWorkspaceDefault")}</option>
             <option value="DAILY">{t("newspaperCadenceDaily")}</option>
             <option value="WEEKLY">{t("newspaperCadenceWeekly")}</option>
+            <option value="OFF">{t("newspaperCadenceOff")}</option>
           </select>
           <p className="text-muted mt-2 text-[0.85rem]">{t("newspaperCadenceMemberHelp")}</p>
         </div>

@@ -19,7 +19,7 @@ export async function updateAgentModelAction(workspaceId: string, agentKey: stri
 
 export async function updateAgentNewspaperCadenceAction(
   workspaceId: string,
-  cadence: "DAILY" | "WEEKLY",
+  cadence: "DAILY" | "WEEKLY" | "OFF",
 ) {
   await enforceDemoGuard(workspaceId);
 

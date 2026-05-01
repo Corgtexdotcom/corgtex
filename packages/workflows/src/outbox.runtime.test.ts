@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const {
   prismaMock,
   txMock,
+  loggerMock,
   runAgentWorkflowJobMock,
   runDailyDigestMock,
   runSlackAgentMock,
@@ -40,6 +41,10 @@ const {
       upsert: vi.fn(),
     },
   },
+  loggerMock: {
+    info: vi.fn(),
+    error: vi.fn(),
+  },
   runAgentWorkflowJobMock: vi.fn(),
   runDailyDigestMock: vi.fn(),
   runSlackAgentMock: vi.fn(),
@@ -55,6 +60,7 @@ const {
 }));
 
 vi.mock("@corgtex/shared", () => ({
+  logger: loggerMock,
   prisma: prismaMock,
   toInputJson: (value: unknown) => value,
 }));
@@ -194,6 +200,7 @@ describe("runPendingJobs", () => {
     expect(sendDemoWelcomeNewspaperMock).toHaveBeenCalledWith({
       workspaceId: "ws-1",
       demoLeadId: "lead-1",
+      workflowJobId: "job-1",
     });
     expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({
       where: { id: "job-1" },
@@ -482,6 +489,27 @@ describe("scheduleDailyJobs", () => {
         type: "brain.daily-digest",
         dedupeKey: "ws-1:daily-digest:2026-05-04",
       }),
+    }));
+  });
+
+  it("does not schedule newspapers when all effective cadences are off", async () => {
+    getWorkspaceNewspaperCadenceMock.mockResolvedValue("OFF");
+    prismaMock.member.findMany.mockResolvedValue([
+      { newspaperCadence: null },
+      { newspaperCadence: "OFF" },
+    ]);
+
+    await expect(scheduleDailyJobs()).resolves.toBe(3);
+
+    expect(txMock.workflowJob.upsert).not.toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({
+        type: "brain.daily-digest",
+      }),
+    }));
+    expect(loggerMock.info).toHaveBeenCalledWith("newspaper_schedule_skipped", expect.objectContaining({
+      workspaceId: "ws-1",
+      cadence: "DAILY",
+      reason: "no_daily_recipients",
     }));
   });
 });
