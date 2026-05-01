@@ -43,6 +43,9 @@ docs/slack-app-manifest.yml
 .agents/plans/
 .artifacts/
 
+# local/raw media source files
+apps/site/public/videos/*.mov
+
 # prisma
 /prisma/dev.db
 /prisma/dev.db-journal
