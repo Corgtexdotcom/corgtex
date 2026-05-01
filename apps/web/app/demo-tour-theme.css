@@ -1,7 +1,7 @@
 /* ── Demo Tour Theme (Driver.js) ── */
 
-.driver-popover {
-  background: rgba(255, 255, 255, 0.95);
+.driver-popover.driver-popover {
+  background: var(--surface-strong);
   backdrop-filter: blur(8px);
   border: 1px solid var(--line);
   border-radius: var(--radius-lg);
@@ -9,7 +9,7 @@
   padding: 24px;
   font-family: inherit;
   color: var(--text);
-  max-width: 400px;
+  max-width: min(400px, calc(100vw - 32px));
 }
 
 .driver-popover-title {
@@ -17,6 +17,7 @@
   font-size: 1.25rem;
   color: var(--accent);
   margin-bottom: 12px;
+  padding-right: 76px;
   font-weight: 600;
   display: flex;
   flex-direction: column;
@@ -50,6 +51,7 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 16px;
   margin-top: 0;
 }
 
@@ -59,13 +61,18 @@
   color: var(--muted);
 }
 
-.driver-popover-navigation-btns {
+.driver-popover-footer .driver-popover-navigation-btns {
   display: flex;
   gap: 8px;
+  flex-wrap: wrap;
 }
 
-.driver-popover-next-btn, 
-.driver-popover-prev-btn {
+.driver-popover-footer .driver-popover-navigation-btns button + button {
+  margin-left: 0;
+}
+
+.driver-popover-footer .driver-popover-next-btn,
+.driver-popover-footer .driver-popover-prev-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -77,53 +84,104 @@
   cursor: pointer;
   transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
   text-shadow: none;
+  white-space: nowrap;
 }
 
-.driver-popover-next-btn {
+.driver-popover-footer .driver-popover-next-btn {
   background: var(--accent);
-  color: white;
+  color: var(--accent-fg);
   border: 1px solid transparent;
 }
 
-.driver-popover-next-btn:hover {
-  background: #1e293b;
+.driver-popover-footer .driver-popover-next-btn:hover {
+  background: var(--text);
   transform: translateY(-1px);
 }
 
-.driver-popover-prev-btn,
-.driver-popover-close-btn {
-  background: transparent;
+.driver-popover-footer .driver-popover-prev-btn {
+  background: var(--surface-strong);
   color: var(--muted);
-  border: none;
+  border: 1px solid var(--line);
 }
 
-.driver-popover-prev-btn:hover,
-.driver-popover-close-btn:hover {
+.driver-popover-footer .driver-popover-prev-btn:hover {
+  background: var(--accent-soft);
   color: var(--text);
 }
 
-/* Style the close/skip button */
-.driver-popover-close-btn {
-  position: absolute;
-  top: 12px;
-  right: 12px;
-  background: transparent;
-  border: none;
-  font-size: 0;
-  font-weight: 500;
-  cursor: pointer;
-  padding: 4px 8px;
-  border-radius: 4px;
+.driver-popover-footer .driver-popover-btn-disabled,
+.driver-popover-footer .driver-popover-btn-disabled:hover {
+  opacity: 0.45;
+  transform: none;
 }
 
-.driver-popover-close-btn::before {
+/* Style the close/skip button */
+.driver-popover .driver-popover-close-btn {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 64px;
+  height: 32px;
+  background: var(--accent-soft);
+  border: 1px solid var(--line);
+  font-size: 0;
+  line-height: 1;
+  color: var(--muted);
+  font-weight: 600;
+  cursor: pointer;
+  padding: 0 12px;
+  border-radius: var(--radius-full);
+  text-align: center;
+  text-shadow: none;
+  z-index: 2;
+}
+
+.driver-popover .driver-popover-close-btn::before {
   content: "Skip";
   font-size: 0.8rem;
+  line-height: 1;
+}
+
+.driver-popover .driver-popover-close-btn:hover {
+  background: var(--surface-sunken);
+  color: var(--text);
 }
 
 /* Driver.js uses text in some builds and an SVG in others. */
-.driver-popover-close-btn svg {
-  display: none;
+.driver-popover .driver-popover-close-btn > *,
+.driver-popover .driver-popover-close-btn svg {
+  display: none !important;
+}
+
+.driver-popover .driver-popover-arrow {
+  border-color: var(--surface-strong);
+}
+
+.driver-popover .driver-popover-arrow-side-left {
+  border-right-color: transparent;
+  border-bottom-color: transparent;
+  border-top-color: transparent;
+}
+
+.driver-popover .driver-popover-arrow-side-right {
+  border-left-color: transparent;
+  border-bottom-color: transparent;
+  border-top-color: transparent;
+}
+
+.driver-popover .driver-popover-arrow-side-top {
+  border-right-color: transparent;
+  border-bottom-color: transparent;
+  border-left-color: transparent;
+}
+
+.driver-popover .driver-popover-arrow-side-bottom {
+  border-left-color: transparent;
+  border-top-color: transparent;
+  border-right-color: transparent;
 }
 
 /* Watermark banner style */
@@ -131,9 +189,10 @@
   margin-bottom: 16px;
   padding: 12px 16px;
   border-radius: 12px;
-  border: 1px solid rgba(148, 163, 184, 0.35);
-  background: rgba(241, 245, 249, 0.9);
+  border: 1px solid var(--line);
+  background: var(--surface);
   color: var(--text);
+  box-shadow: var(--shadow-sm);
   font-size: 0.9rem;
   font-weight: 500;
   display: flex;
@@ -143,16 +202,22 @@
   gap: 12px;
 }
 
+.demo-tour-banner > div {
+  flex: 1 1 280px;
+  min-width: 0;
+}
+
 .demo-tour-restart-btn {
-  background: white;
+  background: var(--surface-strong);
   border: 1px solid var(--line);
   border-radius: 6px;
   padding: 4px 10px;
   font-size: 0.8rem;
   font-weight: 600;
-  color: var(--accent);
+  color: var(--text);
   cursor: pointer;
-  transition: background 0.2s;
+  transition: background 0.2s, border-color 0.2s, color 0.2s;
+  white-space: nowrap;
 }
 
 .demo-tour-restart-btn:hover {
