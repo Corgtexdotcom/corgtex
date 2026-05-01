@@ -9,24 +9,23 @@
   padding: 24px;
   font-family: inherit;
   color: var(--text);
-  max-width: min(400px, calc(100vw - 32px));
+  max-width: min(440px, calc(100vw - 32px));
 }
 
 .driver-popover-title {
   font-family: var(--font-playfair, inherit);
-  font-size: 1.25rem;
+  font-size: 1.2rem;
+  line-height: 1.25;
   color: var(--accent);
   margin-bottom: 12px;
-  padding-right: 76px;
   font-weight: 600;
-  display: flex;
-  flex-direction: column;
+  display: block;
 }
 
 /* Add the Guided Tour badge before the title */
 .driver-popover-title::before {
   content: "Guided Tour";
-  display: inline-block;
+  display: block;
   font-family: "Inter", "IBM Plex Sans", system-ui, sans-serif;
   font-size: 0.7rem;
   font-weight: 700;
@@ -36,8 +35,8 @@
   background: var(--warning-soft);
   padding: 4px 8px;
   border-radius: var(--radius-full);
-  margin-bottom: 8px;
-  width: max-content;
+  margin: 0 88px 10px 0;
+  width: fit-content;
 }
 
 .driver-popover-description {
@@ -118,8 +117,8 @@
 /* Style the close/skip button */
 .driver-popover .driver-popover-close-btn {
   position: absolute;
-  top: 16px;
-  right: 16px;
+  top: 22px;
+  right: 22px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -129,7 +128,7 @@
   border: 1px solid var(--line);
   font-size: 0;
   line-height: 1;
-  color: var(--muted);
+  color: var(--text);
   font-weight: 600;
   cursor: pointer;
   padding: 0 12px;
