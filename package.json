@@ -45,6 +45,7 @@
     "seed:e2e": "node scripts/seed-e2e.mjs",
     "seed:pilot-tester": "node scripts/seed-pilot-tester.mjs",
     "seed:demo": "node scripts/seed-corgtex.mjs && node scripts/seed-jnj-demo.mjs",
+    "seed:demo-video": "npm run seed:demo && npx tsx scripts/seed-demo-video.ts",
     "seed:brain": "node scripts/seed-brain.mjs",
     "seed:client-stable": "node scripts/seed-client-stable.mjs",
     "seed:jnj-demo": "node scripts/seed-jnj-demo.mjs",
