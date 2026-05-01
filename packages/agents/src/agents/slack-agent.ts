@@ -3,6 +3,10 @@ import { defaultModelGateway } from "@corgtex/models";
 import { answerKnowledgeQuestion, searchIndexedKnowledge } from "@corgtex/knowledge";
 import {
   createWorkItemFromCommunicationSource,
+  deleteAction,
+  deleteProposal,
+  deleteSource,
+  deleteTension,
   deliverSlackAgentResponse,
   fetchSlackThreadMessages,
   listMembers,
@@ -23,6 +27,7 @@ type SlackAgentIntent =
   | "capabilities"
   | "answer_question"
   | "summarize_thread"
+  | "undo_created_item"
   | "unsupported";
 
 type SlackAgentExtraction = {
@@ -48,6 +53,7 @@ const INTENTS = new Set<SlackAgentIntent>([
   "capabilities",
   "answer_question",
   "summarize_thread",
+  "undo_created_item",
   "unsupported",
 ]);
 
@@ -60,6 +66,10 @@ const READ_ONLY_CONVERSATION_RE =
 const MEMBER_LIST_RE = /\b(list|show|who|members?|users?|team|people)\b/i;
 const ACCOUNT_LOOKUP_RE = /\b(my account|find my account|account now|who am i|me in corgtex|my corgtex)\b/i;
 const MAX_SLACK_TEXT_LENGTH = 2900;
+const SLACK_UNDO_LOOKBACK_MS = 24 * 60 * 60 * 1000;
+const SLACK_UNDO_ENTITY_TYPES = ["Action", "Tension", "Proposal", "BrainSource"] as const;
+const SLACK_UNDO_CREATE_ACTIONS = ["create_action", "create_tension", "create_proposal", "create_brain_note"];
+type SlackUndoEntityType = typeof SLACK_UNDO_ENTITY_TYPES[number];
 
 function clampConfidence(value: unknown) {
   const numeric = typeof value === "number" ? value : Number(value);
@@ -103,6 +113,34 @@ function shouldUseConversationMode(prompt: string, extraction: SlackAgentExtract
   return READ_ONLY_CONVERSATION_RE.test(prompt);
 }
 
+function undoEntityHint(prompt: string): SlackUndoEntityType | null {
+  if (/\b(actions?|task|tasks|todo|todos)\b/i.test(prompt)) return "Action";
+  if (/\b(tensions?|issue|issues|problem|problems)\b/i.test(prompt)) return "Tension";
+  if (/\b(proposals?|proposal)\b/i.test(prompt)) return "Proposal";
+  if (/\b(notes?|brain|source|sources)\b/i.test(prompt)) return "BrainSource";
+  return null;
+}
+
+function isSlackUndoRequest(prompt: string) {
+  const normalized = normalizeCapabilitiesPrompt(prompt);
+  if (/\b(undo|revert)\b/.test(normalized)) return true;
+  return /\b(delete|remove|archive|cancel)\b/.test(normalized)
+    && /\b(that|last|latest|previous|recent|just|created)\b/.test(normalized);
+}
+
+function undoEntityLabel(entityType: SlackUndoEntityType) {
+  if (entityType === "BrainSource") return "Brain note";
+  return entityType;
+}
+
+function undoEntityUrl(workspaceId: string, entityType: SlackUndoEntityType, entityId: string) {
+  const base = `/workspaces/${workspaceId}`;
+  if (entityType === "Action") return `${base}/actions`;
+  if (entityType === "Tension") return `${base}/tensions/${entityId}`;
+  if (entityType === "Proposal") return `${base}/proposals/${entityId}`;
+  return `${base}/brain`;
+}
+
 function normalizeCapabilitiesPrompt(prompt: string) {
   return prompt
     .replace(/<@[A-Z0-9]+(?:\|[^>]+)?>/gi, " ")
@@ -131,9 +169,9 @@ function renderCapabilitiesResponse() {
       "When confidence is high, I can create and open/publish supported Corgtex items; when it is lower, I create drafts or ask a clarifying question.",
     ],
     couldNot: [
-      "I do not run deletes, role changes, invites, permission changes, spend/payment actions, or broad notifications from Slack.",
+      "I only undo items I just created from Slack. I do not run broad deletes, role changes, invites, permission changes, spend/payment actions, or broad notifications from Slack.",
     ],
-    next: "Try `/corgtex Jan should follow up with Milan tomorrow` or `@Corgtex turn this thread into a proposal`.",
+    next: "Try `/corgtex Jan should follow up with Milan tomorrow`, `@Corgtex turn this thread into a proposal`, or `@Corgtex undo that proposal`.",
   };
 }
 
@@ -187,12 +225,165 @@ function renderConversationResponse(text: string): SlackAgentDelivery {
 
 function renderUnsupportedResponse(): SlackAgentDelivery {
   return renderConversationResponse(
-    "I cannot do that from Slack. I can answer workspace questions, summarize context, and create bounded Corgtex actions, tensions, proposals, notes, and briefs. I do not run deletes, role or permission changes, invites, payments, or broad notifications from Slack.",
+    "I cannot do that from Slack. I can answer workspace questions, summarize context, create bounded Corgtex actions, tensions, proposals, notes, and briefs, and undo items I just created from Slack. I do not run broad deletes, role or permission changes, invites, payments, or broad notifications from Slack.",
   );
 }
 
 function slackLink(url: string, label: string) {
   return `<${url}|${label.replace(/[<>|]/g, "")}>`;
+}
+
+async function loadUndoEntitySummary(workspaceId: string, entityType: SlackUndoEntityType, entityId: string) {
+  const select = { id: true, title: true, archivedAt: true };
+  if (entityType === "Action") {
+    const record = await prisma.action.findFirst({ where: { id: entityId, workspaceId }, select });
+    return record ? { title: record.title, archivedAt: record.archivedAt } : null;
+  }
+  if (entityType === "Tension") {
+    const record = await prisma.tension.findFirst({ where: { id: entityId, workspaceId }, select });
+    return record ? { title: record.title, archivedAt: record.archivedAt } : null;
+  }
+  if (entityType === "Proposal") {
+    const record = await prisma.proposal.findFirst({ where: { id: entityId, workspaceId }, select });
+    return record ? { title: record.title, archivedAt: record.archivedAt } : null;
+  }
+  const source = await prisma.brainSource.findFirst({
+    where: { id: entityId, workspaceId },
+    select: { id: true, title: true, archivedAt: true },
+  });
+  return source ? { title: source.title, archivedAt: source.archivedAt } : null;
+}
+
+async function findSlackUndoCandidate(params: SlackAgentJobPayload) {
+  const hint = undoEntityHint(params.prompt);
+  const entityTypes = hint ? [hint] : [...SLACK_UNDO_ENTITY_TYPES];
+  const createdAfter = new Date(Date.now() - SLACK_UNDO_LOOKBACK_MS);
+  const baseWhere = {
+    installationId: params.installationId,
+    workspaceId: params.workspaceId,
+    provider: "SLACK" as const,
+    externalUserId: params.externalUserId,
+    action: { in: SLACK_UNDO_CREATE_ACTIONS },
+    entityType: { in: entityTypes },
+    createdAt: { gte: createdAfter },
+  };
+
+  const scopedQueries = [
+    params.channelId && params.threadTs
+      ? {
+        ...baseWhere,
+        message: {
+          externalChannelId: params.channelId,
+          OR: [
+            { externalMessageId: params.threadTs },
+            { threadExternalId: params.threadTs },
+          ],
+        },
+      }
+      : null,
+    params.channelId
+      ? {
+        ...baseWhere,
+        message: { externalChannelId: params.channelId },
+      }
+      : null,
+    baseWhere,
+  ].filter((query): query is typeof baseWhere => Boolean(query));
+
+  for (const where of scopedQueries) {
+    const links = await prisma.communicationEntityLink.findMany({
+      where,
+      orderBy: { createdAt: "desc" },
+      take: 8,
+      select: {
+        id: true,
+        action: true,
+        entityType: true,
+        entityId: true,
+        createdAt: true,
+      },
+    });
+
+    for (const link of links) {
+      if (!SLACK_UNDO_ENTITY_TYPES.includes(link.entityType as SlackUndoEntityType)) continue;
+      const entityType = link.entityType as SlackUndoEntityType;
+      const entity = await loadUndoEntitySummary(params.workspaceId, entityType, link.entityId);
+      if (entity && !entity.archivedAt) return { ...link, entityType, title: entity.title };
+    }
+  }
+
+  return null;
+}
+
+async function archiveSlackUndoCandidate(actor: HumanActor, params: SlackAgentJobPayload, candidate: {
+  action: string;
+  entityType: SlackUndoEntityType;
+  entityId: string;
+  title: string | null;
+}) {
+  if (candidate.entityType === "Action") {
+    await deleteAction(actor, { workspaceId: params.workspaceId, actionId: candidate.entityId });
+  } else if (candidate.entityType === "Tension") {
+    await deleteTension(actor, { workspaceId: params.workspaceId, tensionId: candidate.entityId });
+  } else if (candidate.entityType === "Proposal") {
+    await deleteProposal(actor, { workspaceId: params.workspaceId, proposalId: candidate.entityId });
+  } else {
+    await deleteSource(actor, { workspaceId: params.workspaceId, sourceId: candidate.entityId });
+  }
+
+  await prisma.communicationEntityLink.create({
+    data: {
+      installationId: params.installationId,
+      workspaceId: params.workspaceId,
+      provider: "SLACK",
+      messageId: params.sourceMessageId ?? null,
+      externalUserId: params.externalUserId,
+      entityType: candidate.entityType,
+      entityId: candidate.entityId,
+      action: `undo_${candidate.action}`,
+    },
+  });
+}
+
+async function undoLastSlackCreatedItem(actor: HumanActor, params: SlackAgentJobPayload) {
+  const candidate = await findSlackUndoCandidate(params);
+  if (!candidate) {
+    return {
+      done: [],
+      couldNot: ["I could not find an active Slack-created item from you in the last 24 hours to undo."],
+      next: "Reply with the item link or create a fresh correction request.",
+      target: null,
+    };
+  }
+
+  const label = undoEntityLabel(candidate.entityType);
+  const title = candidate.title || candidate.entityId;
+  try {
+    await archiveSlackUndoCandidate(actor, params, candidate);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : "The archive request failed.";
+    return {
+      done: [],
+      couldNot: [`I found ${label} ${title}, but could not archive it from Slack: ${reason}`],
+      next: "Open the item in Corgtex to review permissions or archive it manually.",
+      target: {
+        entityType: candidate.entityType,
+        entityId: candidate.entityId,
+        title: candidate.title,
+      },
+    };
+  }
+
+  return {
+    done: [`Archived ${label} ${slackLink(undoEntityUrl(params.workspaceId, candidate.entityType, candidate.entityId), title)}.`],
+    couldNot: [],
+    next: "No follow-up needed.",
+    target: {
+      entityType: candidate.entityType,
+      entityId: candidate.entityId,
+      title: candidate.title,
+    },
+  };
 }
 
 async function loadActor(workspaceId: string, userId: string): Promise<HumanActor | null> {
@@ -601,6 +792,34 @@ export async function runSlackAgent(params: SlackAgentJobPayload & {
             confidence: 1,
             created: [],
             ...parts,
+            delivery,
+          },
+        };
+      }
+
+      if (isSlackUndoRequest(params.prompt)) {
+        const undo = await helpers.tool("corgtex.undo", {
+          source: params.source,
+          channelId: params.channelId ?? null,
+          threadTs: params.threadTs ?? null,
+        }, () => undoLastSlackCreatedItem(actor, params));
+        const response = renderSlackResponse(undo);
+        const delivery = await helpers.tool("slack.reply", {
+          reason: "undo_created_item",
+          source: params.source,
+          channelId: params.channelId ?? null,
+          responseUrl: Boolean(params.responseUrlEnc),
+        }, () => deliverSafely(params, response));
+
+        return {
+          resultJson: {
+            intent: "undo_created_item",
+            confidence: undo.target ? 1 : 0,
+            created: [],
+            done: undo.done,
+            couldNot: undo.couldNot,
+            next: undo.next,
+            target: undo.target,
             delivery,
           },
         };
