@@ -9,6 +9,7 @@ const {
   extractMock,
   chatMock,
   answerKnowledgeQuestionMock,
+  searchIndexedKnowledgeMock,
 } = vi.hoisted(() => ({
   prismaMock: {
     agentRun: {
@@ -47,6 +48,10 @@ const {
     },
     communicationMessage: {
       findUnique: vi.fn(),
+      findMany: vi.fn(),
+    },
+    communicationContextSummary: {
+      findMany: vi.fn(),
     },
     action: {
       findMany: vi.fn(),
@@ -66,6 +71,7 @@ const {
   extractMock: vi.fn(),
   chatMock: vi.fn(),
   answerKnowledgeQuestionMock: vi.fn(),
+  searchIndexedKnowledgeMock: vi.fn(),
 }));
 
 vi.mock("@corgtex/shared", () => ({
@@ -104,7 +110,7 @@ vi.mock("@corgtex/models", () => ({
 }));
 
 vi.mock("@corgtex/knowledge", () => ({
-  searchIndexedKnowledge: vi.fn().mockResolvedValue([]),
+  searchIndexedKnowledge: searchIndexedKnowledgeMock,
   answerKnowledgeQuestion: answerKnowledgeQuestionMock,
 }));
 
@@ -154,6 +160,8 @@ describe("runSlackAgent", () => {
     });
     prismaMock.communicationExternalUser.findMany.mockResolvedValue([]);
     prismaMock.communicationMessage.findUnique.mockResolvedValue(null);
+    prismaMock.communicationMessage.findMany.mockResolvedValue([]);
+    prismaMock.communicationContextSummary.findMany.mockResolvedValue([]);
     prismaMock.action.findMany.mockResolvedValue([]);
     prismaMock.tension.findMany.mockResolvedValue([]);
     prismaMock.proposal.findMany.mockResolvedValue([]);
@@ -179,6 +187,7 @@ describe("runSlackAgent", () => {
       answer: "The workspace handbook says to use advice routing for proposal risks.",
       citations: [],
     });
+    searchIndexedKnowledgeMock.mockResolvedValue([]);
     chatMock.mockResolvedValue({
       content: "The workspace handbook says to use advice routing for proposal risks.",
     });
@@ -356,6 +365,86 @@ describe("runSlackAgent", () => {
     expect(createWorkItemMock).not.toHaveBeenCalled();
     expect(deliverSlackAgentResponseMock.mock.calls[0][1].text).toContain("workspace handbook");
     expect(deliverSlackAgentResponseMock.mock.calls[0][1].text).not.toContain("Done:");
+  });
+
+  it("answers using stored Slack thread, channel, summaries, and Brain chunks", async () => {
+    extractMock.mockResolvedValueOnce({
+      output: {
+        intent: "answer_question",
+        confidence: 0.84,
+        title: "Budget cap",
+        bodyMd: "What budget cap was agreed in this thread?",
+      },
+    });
+    prismaMock.communicationMessage.findMany
+      .mockResolvedValueOnce([
+        {
+          id: "thread-message-1",
+          text: "We agreed the pilot budget cap is $20k.",
+          externalUserId: "U2",
+          externalMessageId: "1714320000.000100",
+          threadExternalId: "1714320000.000100",
+          messageTs: new Date("2024-04-28T16:00:00.000Z"),
+        },
+      ])
+      .mockResolvedValueOnce([
+        {
+          id: "channel-message-1",
+          text: "Finance also asked for weekly spend updates.",
+          externalUserId: "U3",
+          externalMessageId: "1714319900.000100",
+          threadExternalId: null,
+          messageTs: new Date("2024-04-28T15:58:20.000Z"),
+        },
+      ]);
+    prismaMock.communicationContextSummary.findMany.mockResolvedValueOnce([
+      {
+        title: "Slack #general thread 2024-04-28",
+        summaryMd: "The thread settled on a $20k pilot budget cap and weekly spend updates.",
+        threadExternalId: "1714320000.000100",
+        summaryDate: new Date("2024-04-28T00:00:00.000Z"),
+        messageCount: 3,
+      },
+    ]);
+    searchIndexedKnowledgeMock.mockResolvedValueOnce([
+      {
+        sourceTitle: "Slack #general",
+        content: "Slack message confirms the pilot budget cap is $20k.",
+        metadata: { permalink: "https://slack.test/archives/C1/p1714320000000100" },
+      },
+    ]);
+    chatMock.mockResolvedValueOnce({ content: "The agreed pilot budget cap is $20k." });
+
+    const { runSlackAgent } = await import("./slack-agent");
+    await runSlackAgent({
+      ...basePayload(),
+      source: "app_mention",
+      prompt: "What budget cap was agreed in this thread?",
+      threadTs: "1714320000.000100",
+      messageTs: "1714320100.000100",
+    });
+
+    expect(searchIndexedKnowledgeMock).toHaveBeenCalledWith(expect.objectContaining({
+      workspaceId: "workspace-1",
+      sourceTypes: ["SLACK"],
+      query: "What budget cap was agreed in this thread?",
+    }));
+    const conversationCall = chatMock.mock.calls.find((call) => call[0]?.taskType === "AGENT");
+    expect(conversationCall).toBeDefined();
+    const promptPayload = JSON.parse(conversationCall?.[0].messages[1].content);
+    expect(promptPayload.threadMessages).toEqual(expect.arrayContaining([
+      expect.objectContaining({ text: "We agreed the pilot budget cap is $20k." }),
+    ]));
+    expect(promptPayload.channelMessages).toEqual(expect.arrayContaining([
+      expect.objectContaining({ text: "Finance also asked for weekly spend updates." }),
+    ]));
+    expect(promptPayload.slackContextSummaries).toEqual(expect.arrayContaining([
+      expect.objectContaining({ summaryMd: expect.stringContaining("$20k") }),
+    ]));
+    expect(promptPayload.slackKnowledge).toEqual(expect.arrayContaining([
+      expect.objectContaining({ content: expect.stringContaining("$20k") }),
+    ]));
+    expect(deliverSlackAgentResponseMock.mock.calls[0][1].text).toContain("$20k");
   });
 
   it("answers read-only member list requests conversationally", async () => {

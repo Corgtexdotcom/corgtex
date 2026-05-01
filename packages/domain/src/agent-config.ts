@@ -23,6 +23,14 @@ export type AgentConfigSummary = {
 
 export const DEFAULT_NEWSPAPER_CADENCE: NewspaperCadence = "DAILY";
 const NEWSPAPER_CADENCES = new Set<NewspaperCadence>(["DAILY", "WEEKLY"]);
+const DEFAULT_SLACK_AGENT_CONFIG = {
+  publicIngestionEnabled: true,
+  rawMessageRetentionDays: 3650,
+  proactiveEnabled: true,
+  proactiveConfidenceThreshold: 0.9,
+  unansweredFollowupDelayMinutes: 240,
+  mutedChannelIds: [],
+};
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -40,8 +48,29 @@ function normalizeAgentConfigJson(agentKey: string, configJson: unknown): Prisma
   if (agentKey === "daily-digest" && "newspaperCadence" in config) {
     config.newspaperCadence = normalizeNewspaperCadence(config.newspaperCadence);
   }
+  if (agentKey === "slack-agent") {
+    const mutedChannelIds = Array.isArray(config.mutedChannelIds)
+      ? config.mutedChannelIds.map((entry) => typeof entry === "string" ? entry.trim() : "").filter(Boolean)
+      : DEFAULT_SLACK_AGENT_CONFIG.mutedChannelIds;
+    return toInputJson({
+      ...DEFAULT_SLACK_AGENT_CONFIG,
+      ...config,
+      proactiveConfidenceThreshold: typeof config.proactiveConfidenceThreshold === "number"
+        ? Math.max(0, Math.min(1, config.proactiveConfidenceThreshold))
+        : DEFAULT_SLACK_AGENT_CONFIG.proactiveConfidenceThreshold,
+      unansweredFollowupDelayMinutes: typeof config.unansweredFollowupDelayMinutes === "number"
+        ? Math.max(15, Math.floor(config.unansweredFollowupDelayMinutes))
+        : DEFAULT_SLACK_AGENT_CONFIG.unansweredFollowupDelayMinutes,
+      mutedChannelIds,
+    }) as Prisma.InputJsonObject;
+  }
 
   return toInputJson(config) as Prisma.InputJsonObject;
+}
+
+function defaultConfigJson(agentKey: string) {
+  if (agentKey === "slack-agent") return DEFAULT_SLACK_AGENT_CONFIG;
+  return {};
 }
 
 export async function listAgentConfigs(actor: AppActor, workspaceId: string): Promise<AgentConfigSummary[]> {
@@ -70,7 +99,7 @@ export async function listAgentConfigs(actor: AppActor, workspaceId: string): Pr
       enabled: override ? override.enabled : true,
       modelOverride: override?.modelOverride ?? null,
       governancePolicy: override?.governancePolicy ?? null,
-      configJson: override?.configJson ?? {},
+      configJson: override?.configJson ?? defaultConfigJson(key),
     });
   }
 

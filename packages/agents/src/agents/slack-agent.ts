@@ -1,6 +1,6 @@
 import type { AgentTriggerType } from "@prisma/client";
 import { defaultModelGateway } from "@corgtex/models";
-import { answerKnowledgeQuestion } from "@corgtex/knowledge";
+import { answerKnowledgeQuestion, searchIndexedKnowledge } from "@corgtex/knowledge";
 import {
   createWorkItemFromCommunicationSource,
   deliverSlackAgentResponse,
@@ -305,6 +305,8 @@ async function answerSlackConversation(params: {
   openProposals: unknown;
   sourceMessage: unknown;
   threadMessages: unknown;
+  channelMessages: unknown;
+  contextSummaries: unknown;
 }) {
   if (ACCOUNT_LOOKUP_RE.test(params.prompt)) {
     return answerAccountLookup({
@@ -325,6 +327,14 @@ async function answerSlackConversation(params: {
     workflowJobId: params.workflowJobId,
     agentRunId: params.agentRunId,
   }).catch(() => null);
+  const slackKnowledge = await searchIndexedKnowledge({
+    workspaceId: params.workspaceId,
+    query: params.prompt,
+    sourceTypes: ["SLACK"],
+    limit: 5,
+    workflowJobId: params.workflowJobId,
+    agentRunId: params.agentRunId,
+  }).catch(() => []);
 
   const chat = await defaultModelGateway.chat({
     model: params.model,
@@ -363,6 +373,9 @@ async function answerSlackConversation(params: {
           openProposals: params.openProposals,
           selectedMessage: params.sourceMessage,
           threadMessages: params.threadMessages,
+          channelMessages: params.channelMessages,
+          slackContextSummaries: params.contextSummaries,
+          slackKnowledge,
           knowledgeAnswer: knowledge?.answer ?? null,
         }),
       },
@@ -421,8 +434,15 @@ export async function runSlackAgent(params: SlackAgentJobPayload & {
           openProposals: [],
           sourceMessage: null,
           threadMessages: [],
+          channelMessages: [],
+          contextSummaries: [],
         };
       }
+
+      const currentMessageDateRaw = params.messageTs ? new Date(Number(params.messageTs.split(".")[0]) * 1000) : null;
+      const currentMessageDate = currentMessageDateRaw && Number.isFinite(currentMessageDateRaw.getTime())
+        ? currentMessageDateRaw
+        : null;
 
       const [
         members,
@@ -432,7 +452,10 @@ export async function runSlackAgent(params: SlackAgentJobPayload & {
         openTensions,
         openProposals,
         sourceMessage,
-        threadMessages,
+        fetchedThreadMessages,
+        storedThreadMessages,
+        channelMessagesDesc,
+        contextSummaries,
       ] = await Promise.all([
         listMembers(params.workspaceId),
         prisma.communicationExternalUser.findUnique({
@@ -470,7 +493,73 @@ export async function runSlackAgent(params: SlackAgentJobPayload & {
         params.channelId && params.threadTs
           ? fetchSlackThreadMessages(params.installationId, { channelId: params.channelId, threadTs: params.threadTs })
           : Promise.resolve([]),
+        params.channelId && params.threadTs
+          ? prisma.communicationMessage.findMany({
+            where: {
+              installationId: params.installationId,
+              workspaceId: params.workspaceId,
+              provider: "SLACK",
+              externalChannelId: params.channelId,
+              text: { not: null },
+              textRedactedAt: null,
+              isBot: false,
+              isHidden: false,
+              isDeleted: false,
+              OR: [{ externalMessageId: params.threadTs }, { threadExternalId: params.threadTs }],
+            },
+            orderBy: { messageTs: "asc" },
+            take: 80,
+            select: { id: true, text: true, externalUserId: true, externalMessageId: true, threadExternalId: true, messageTs: true },
+          })
+          : Promise.resolve([]),
+        params.channelId
+          ? prisma.communicationMessage.findMany({
+            where: {
+              installationId: params.installationId,
+              workspaceId: params.workspaceId,
+              provider: "SLACK",
+              externalChannelId: params.channelId,
+              text: { not: null },
+              textRedactedAt: null,
+              isBot: false,
+              isHidden: false,
+              isDeleted: false,
+              ...(currentMessageDate ? { messageTs: { lte: currentMessageDate } } : {}),
+            },
+            orderBy: { messageTs: "desc" },
+            take: 40,
+            select: { id: true, text: true, externalUserId: true, externalMessageId: true, threadExternalId: true, messageTs: true },
+          })
+          : Promise.resolve([]),
+        params.channelId
+          ? prisma.communicationContextSummary.findMany({
+            where: {
+              installationId: params.installationId,
+              workspaceId: params.workspaceId,
+              provider: "SLACK",
+              externalChannelId: params.channelId,
+              ...(params.threadTs ? { OR: [{ threadExternalId: params.threadTs }, { threadExternalId: null }] } : {}),
+            },
+            orderBy: { summaryDate: "desc" },
+            take: 6,
+            select: { title: true, summaryMd: true, threadExternalId: true, summaryDate: true, messageCount: true },
+          })
+          : Promise.resolve([]),
       ]);
+      const threadMessages = storedThreadMessages.length > 0
+        ? storedThreadMessages.map((message) => ({
+          user: message.externalUserId,
+          text: message.text,
+          ts: message.externalMessageId,
+          threadTs: message.threadExternalId,
+        }))
+        : fetchedThreadMessages;
+      const channelMessages = channelMessagesDesc.reverse().map((message) => ({
+        user: message.externalUserId,
+        text: message.text,
+        ts: message.externalMessageId,
+        threadTs: message.threadExternalId,
+      }));
 
       return {
         actor,
@@ -482,6 +571,8 @@ export async function runSlackAgent(params: SlackAgentJobPayload & {
         openProposals,
         sourceMessage,
         threadMessages,
+        channelMessages,
+        contextSummaries,
       };
     }),
     execute: async (context, helpers, runId, model) => {
@@ -537,6 +628,8 @@ export async function runSlackAgent(params: SlackAgentJobPayload & {
           prompt: params.prompt,
           selectedMessage: context.sourceMessage ?? null,
           threadMessages: context.threadMessages ?? [],
+          channelMessages: context.channelMessages ?? [],
+          slackContextSummaries: context.contextSummaries ?? [],
           members: (context.members as Awaited<ReturnType<typeof listMembers>>).map((member) => ({
             memberId: member.id,
             userId: member.userId,
@@ -597,6 +690,8 @@ export async function runSlackAgent(params: SlackAgentJobPayload & {
           openProposals: context.openProposals,
           sourceMessage: context.sourceMessage,
           threadMessages: context.threadMessages,
+          channelMessages: context.channelMessages,
+          contextSummaries: context.contextSummaries,
         }));
         const response = renderConversationResponse(answer);
         const delivery = await helpers.tool("slack.reply", {

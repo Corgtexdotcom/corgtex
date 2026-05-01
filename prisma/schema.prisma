@@ -174,6 +174,7 @@ enum KnowledgeSourceType {
   CIRCLE
   ROLE
   EXTERNAL_DATABASE
+  SLACK
 }
 
 enum BrainArticleType {
@@ -365,6 +366,7 @@ model Workspace {
   communicationExternalUsers    CommunicationExternalUser[]
   communicationChannels         CommunicationChannel[]
   communicationMessages         CommunicationMessage[]
+  communicationContextSummaries CommunicationContextSummary[]
   communicationInboundEvents    CommunicationInboundEvent[]
   communicationEntityLinks      CommunicationEntityLink[]
   archiveRecords                WorkspaceArchiveRecord[]
@@ -419,6 +421,7 @@ model CommunicationInstallation {
   externalUsers CommunicationExternalUser[]
   channels      CommunicationChannel[]
   messages      CommunicationMessage[]
+  contextSummaries CommunicationContextSummary[]
   inboundEvents CommunicationInboundEvent[]
   entityLinks   CommunicationEntityLink[]
 
@@ -501,6 +504,36 @@ model CommunicationMessage {
   @@unique([installationId, externalChannelId, externalMessageId], map: "CommunicationMessage_installation_channel_message_key")
   @@index([workspaceId, provider, receivedAt])
   @@index([workspaceId, expiresRawAt])
+  @@index([installationId, externalChannelId, threadExternalId, messageTs])
+  @@index([workspaceId, provider, externalChannelId, messageTs])
+}
+
+model CommunicationContextSummary {
+  id                    String                @id @default(uuid())
+  installationId        String
+  workspaceId           String
+  provider              CommunicationProvider
+  externalChannelId     String
+  threadExternalId      String?
+  summaryDate           DateTime
+  summaryKey            String
+  title                 String?
+  summaryMd             String                @db.Text
+  messageCount          Int                   @default(0)
+  firstMessageTs        DateTime?
+  lastMessageTs         DateTime?
+  lastMessageExternalId String?
+  sourceMessageIds      String[]              @default([])
+  metadata              Json?
+  createdAt             DateTime              @default(now())
+  updatedAt             DateTime              @updatedAt
+
+  installation CommunicationInstallation @relation(fields: [installationId], references: [id], onDelete: Cascade)
+  workspace    Workspace                 @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([installationId, summaryKey])
+  @@index([workspaceId, provider, summaryDate])
+  @@index([workspaceId, provider, externalChannelId, threadExternalId])
 }
 
 model CommunicationInboundEvent {
