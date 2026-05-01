@@ -7,6 +7,8 @@ const {
   runAgentWorkflowJobMock,
   runDailyDigestMock,
   runSlackAgentMock,
+  runSlackContextSummaryMock,
+  runSlackProactiveScanMock,
   sendDemoWelcomeNewspaperMock,
   processSlackInboundEventMock,
   purgeExpiredCommunicationMessagesMock,
@@ -26,6 +28,9 @@ const {
     member: {
       findMany: vi.fn(),
     },
+    externalDataSource: {
+      findMany: vi.fn(),
+    },
     communicationInstallation: {
       findMany: vi.fn(),
     },
@@ -43,6 +48,8 @@ const {
   runAgentWorkflowJobMock: vi.fn(),
   runDailyDigestMock: vi.fn(),
   runSlackAgentMock: vi.fn(),
+  runSlackContextSummaryMock: vi.fn(),
+  runSlackProactiveScanMock: vi.fn(),
   sendDemoWelcomeNewspaperMock: vi.fn(),
   processSlackInboundEventMock: vi.fn(),
   purgeExpiredCommunicationMessagesMock: vi.fn(),
@@ -66,6 +73,8 @@ vi.mock("@corgtex/agents", () => ({
   runDailyDigest: runDailyDigestMock,
   runAgentWorkflowJob: runAgentWorkflowJobMock,
   runSlackAgent: runSlackAgentMock,
+  runSlackContextSummary: runSlackContextSummaryMock,
+  runSlackProactiveScan: runSlackProactiveScanMock,
   sendDemoWelcomeNewspaper: sendDemoWelcomeNewspaperMock,
 }));
 
@@ -87,7 +96,7 @@ vi.mock("@corgtex/domain", () => ({
   getWorkspaceNewspaperCadence: getWorkspaceNewspaperCadenceMock,
 }));
 
-import { runPendingJobs, scheduleDailyJobs } from "./outbox";
+import { runPendingJobs, scheduleDailyJobs, schedulePeriodicJobs } from "./outbox";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -100,12 +109,15 @@ describe("runPendingJobs", () => {
     prismaMock.workflowJob.update.mockReset().mockResolvedValue({ id: "job-1" });
     prismaMock.workspace.findMany.mockReset().mockResolvedValue([]);
     prismaMock.member.findMany.mockReset().mockResolvedValue([]);
+    prismaMock.externalDataSource.findMany.mockReset().mockResolvedValue([]);
     prismaMock.communicationInstallation.findMany.mockReset().mockResolvedValue([]);
     txMock.$queryRaw.mockReset().mockResolvedValue([]);
     txMock.workflowJob.upsert.mockReset().mockResolvedValue({ id: "job-1" });
     runAgentWorkflowJobMock.mockReset();
     runDailyDigestMock.mockReset().mockResolvedValue({ success: true });
     runSlackAgentMock.mockReset();
+    runSlackContextSummaryMock.mockReset().mockResolvedValue({ summarized: true });
+    runSlackProactiveScanMock.mockReset().mockResolvedValue({ agendaJobs: 0, nudges: 0, drafts: 0 });
     sendDemoWelcomeNewspaperMock.mockReset().mockResolvedValue({ success: true });
     processSlackInboundEventMock.mockReset();
     purgeExpiredCommunicationMessagesMock.mockReset();
@@ -302,6 +314,94 @@ describe("runPendingJobs", () => {
         status: "COMPLETED",
       }),
     });
+  });
+
+  it("dispatches Slack context summary jobs", async () => {
+    txMock.$queryRaw.mockResolvedValue([
+      {
+        id: "job-1",
+        workspaceId: "ws-1",
+        type: "communication.slack.context-summary",
+        payload: {
+          installationId: "install-1",
+          channelId: "C1",
+          threadTs: "1710000000.000100",
+          dayISO: "2026-04-29",
+        },
+        attempts: 1,
+      },
+    ]);
+
+    await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
+
+    expect(runSlackContextSummaryMock).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      workflowJobId: "job-1",
+      installationId: "install-1",
+      channelId: "C1",
+      threadTs: "1710000000.000100",
+      dayISO: "2026-04-29",
+    });
+    expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({
+      where: { id: "job-1" },
+      data: expect.objectContaining({
+        status: "COMPLETED",
+      }),
+    });
+  });
+
+  it("dispatches Slack proactive scan jobs", async () => {
+    txMock.$queryRaw.mockResolvedValue([
+      {
+        id: "job-1",
+        workspaceId: "ws-1",
+        type: "communication.slack.proactive-scan",
+        payload: {
+          installationId: "install-1",
+        },
+        attempts: 1,
+      },
+    ]);
+
+    await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
+
+    expect(runSlackProactiveScanMock).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      workflowJobId: "job-1",
+      installationId: "install-1",
+    });
+    expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({
+      where: { id: "job-1" },
+      data: expect.objectContaining({
+        status: "COMPLETED",
+      }),
+    });
+  });
+});
+
+describe("schedulePeriodicJobs", () => {
+  beforeEach(() => {
+    prismaMock.$transaction.mockReset().mockImplementation(async (callback: (tx: typeof txMock) => Promise<unknown>) => callback(txMock));
+    txMock.workflowJob.upsert.mockReset().mockResolvedValue({ id: "job-1" });
+    prismaMock.externalDataSource.findMany.mockReset().mockResolvedValue([]);
+    prismaMock.communicationInstallation.findMany.mockReset().mockResolvedValue([
+      { id: "install-1", workspaceId: "ws-1" },
+    ]);
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-04-29T20:15:00Z"));
+  });
+
+  it("schedules hourly proactive scans for public Slack installations", async () => {
+    await expect(schedulePeriodicJobs()).resolves.toBe(1);
+
+    expect(txMock.workflowJob.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({
+        workspaceId: "ws-1",
+        type: "communication.slack.proactive-scan",
+        payload: { installationId: "install-1" },
+        dedupeKey: "install-1:slack-proactive-scan:493748",
+      }),
+    }));
   });
 });
 

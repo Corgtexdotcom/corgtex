@@ -66,6 +66,7 @@ const SLACK_RAW_RETENTION_DAYS = 30;
 const SLACK_PUBLIC_ARCHIVE_RETENTION_DAYS = 3650;
 const SLACK_PUBLIC_ARCHIVE_LOOKBACK_DAYS = 120;
 const SLACK_PUBLIC_ARCHIVE_PAGE_LIMIT = 200;
+const SLACK_CONTEXT_SUMMARY_DEBOUNCE_MS = 5 * 60 * 1000;
 const INACTIVE_SLACK_INSTALLATION_ERROR = "Slack installation is not active.";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -111,12 +112,25 @@ function slackTimestampToDate(ts: string | null) {
   return new Date(seconds * 1000 + (Number.isFinite(millis) ? millis : 0));
 }
 
+function dateKey(date: Date) {
+  return date.toISOString().split("T")[0];
+}
+
+function slackContextSummaryKey(channelId: string, threadTs: string | null | undefined, dayISO: string) {
+  return `channel:${channelId}:thread:${threadTs || "channel"}:day:${dayISO}`;
+}
+
 function slackArchiveSettings(grantedScopes: string[]) {
   const broadPublicIngestion = grantedScopes.includes("channels:history");
   return {
     broadPublicIngestion,
     autoJoinPublicChannels: broadPublicIngestion && grantedScopes.includes("channels:join"),
     rawRetentionDays: broadPublicIngestion ? SLACK_PUBLIC_ARCHIVE_RETENTION_DAYS : SLACK_RAW_RETENTION_DAYS,
+    publicIngestionEnabled: true,
+    proactiveEnabled: true,
+    proactiveConfidenceThreshold: 0.9,
+    unansweredFollowupDelayMinutes: 240,
+    mutedChannelIds: [],
     label: broadPublicIngestion ? "Public Channel Archive" : "Enhanced Org Briefing",
   };
 }
@@ -481,7 +495,19 @@ async function ensureSlackChannel(installation: { id: string; workspaceId: strin
   const externalChannelId = asString(event.channel);
   if (!externalChannelId) return null;
   const channelType = asString(event.channel_type);
-  const kind = channelType === "channel" ? "PUBLIC" : channelType === "group" ? "PRIVATE" : channelType === "im" ? "DIRECT" : "UNKNOWN";
+  const kind = channelType === "channel"
+    ? "PUBLIC"
+    : channelType === "group"
+      ? "PRIVATE"
+      : channelType === "im"
+        ? "DIRECT"
+        : externalChannelId.startsWith("C")
+          ? "PUBLIC"
+          : externalChannelId.startsWith("G")
+            ? "PRIVATE"
+            : externalChannelId.startsWith("D")
+              ? "DIRECT"
+              : "UNKNOWN";
 
   return prisma.communicationChannel.upsert({
     where: { installationId_externalChannelId: { installationId: installation.id, externalChannelId } },
@@ -501,27 +527,151 @@ async function ensureSlackChannel(installation: { id: string; workspaceId: strin
   });
 }
 
-async function ingestSlackMessage(installation: { id: string; workspaceId: string; provider: CommunicationProvider; settings?: Prisma.JsonValue | null }, event: Record<string, unknown>) {
-  const externalChannelId = asString(event.channel);
-  const ts = asString(event.ts) || asString(event.event_ts);
-  if (!externalChannelId || !ts) return { skipped: true, reason: "missing_channel_or_ts" };
-
+function normalizeSlackMessageEvent(event: Record<string, unknown>) {
   const subtype = asString(event.subtype);
-  const hidden = Boolean(event.hidden);
-  const isBot = Boolean(event.bot_id) || subtype === "bot_message";
-  const deleted = subtype === "message_deleted";
-  if (hidden || deleted || isBot) {
-    return { skipped: true, reason: "excluded_message_type" };
+  const changedMessage = subtype === "message_changed" && isRecord(event.message) ? event.message : null;
+  const previousMessage = isRecord(event.previous_message) ? event.previous_message : null;
+  const source = changedMessage ?? event;
+  const deletedTs = subtype === "message_deleted" ? asString(event.deleted_ts) || asString(previousMessage?.ts) : "";
+  const externalChannelId = asString(event.channel) || asString(source.channel) || asString(previousMessage?.channel);
+  const ts = deletedTs || asString(source.ts) || asString(event.ts) || asString(event.event_ts);
+  const threadTs = asString(source.thread_ts) || asString(previousMessage?.thread_ts) || null;
+  const sourceSubtype = asString(source.subtype) || subtype;
+  const isDeleted = subtype === "message_deleted";
+
+  return {
+    source,
+    subtype,
+    externalChannelId,
+    ts,
+    externalUserId: asString(source.user) || asString(previousMessage?.user) || null,
+    threadTs,
+    text: isDeleted ? "" : asString(source.text),
+    hidden: Boolean(event.hidden) || Boolean(source.hidden),
+    isBot: Boolean(source.bot_id) || sourceSubtype === "bot_message",
+    isDeleted,
+  };
+}
+
+async function deleteSlackMessageKnowledge(messageId: string) {
+  await prisma.knowledgeChunk.deleteMany({
+    where: {
+      sourceType: "SLACK",
+      sourceId: messageId,
+    },
+  });
+}
+
+async function enqueueSlackMessageContextJobs(params: {
+  installation: { id: string; workspaceId: string };
+  message: { id: string; externalChannelId: string; externalMessageId: string; threadExternalId: string | null; messageTs: Date | null; updatedAt?: Date };
+  syncKnowledge?: boolean;
+}) {
+  const dayISO = dateKey(params.message.messageTs ?? slackTimestampToDate(params.message.externalMessageId) ?? new Date());
+  const threadTs = params.message.threadExternalId || params.message.externalMessageId;
+  const runAfter = new Date(Date.now() + SLACK_CONTEXT_SUMMARY_DEBOUNCE_MS);
+
+  if (params.syncKnowledge ?? true) {
+    const knowledgeDedupeKey = `${params.message.id}:knowledge-sync-slack-message${params.message.updatedAt ? `:${params.message.updatedAt.getTime()}` : ""}`;
+    await prisma.workflowJob.upsert({
+      where: { dedupeKey: knowledgeDedupeKey },
+      update: {},
+      create: {
+        workspaceId: params.installation.workspaceId,
+        type: "knowledge.sync.slack-message",
+        payload: toInputJson({ messageId: params.message.id }) as Prisma.InputJsonObject,
+        dedupeKey: knowledgeDedupeKey,
+      },
+    });
   }
 
-  const channel = await ensureSlackChannel(installation, event);
+  for (const summaryThreadTs of [threadTs, null]) {
+    const summaryKey = slackContextSummaryKey(params.message.externalChannelId, summaryThreadTs, dayISO);
+    await prisma.workflowJob.upsert({
+      where: { dedupeKey: `${params.installation.id}:slack-context-summary:${summaryKey}` },
+      update: {
+        payload: toInputJson({
+          installationId: params.installation.id,
+          channelId: params.message.externalChannelId,
+          threadTs: summaryThreadTs,
+          dayISO,
+        }) as Prisma.InputJsonObject,
+        runAfter,
+        status: "PENDING",
+        completedAt: null,
+        error: null,
+      },
+      create: {
+        workspaceId: params.installation.workspaceId,
+        type: "communication.slack.context-summary",
+        payload: toInputJson({
+          installationId: params.installation.id,
+          channelId: params.message.externalChannelId,
+          threadTs: summaryThreadTs,
+          dayISO,
+        }) as Prisma.InputJsonObject,
+        runAfter,
+        dedupeKey: `${params.installation.id}:slack-context-summary:${summaryKey}`,
+      },
+    });
+  }
+}
+
+async function ingestSlackMessage(installation: { id: string; workspaceId: string; provider: CommunicationProvider; settings?: Prisma.JsonValue | null }, event: Record<string, unknown>) {
+  const normalized = normalizeSlackMessageEvent(event);
+  const externalChannelId = normalized.externalChannelId;
+  const ts = normalized.ts;
+  if (!externalChannelId || !ts) return { skipped: true, reason: "missing_channel_or_ts" };
+
+  const channel = await ensureSlackChannel(installation, {
+    ...event,
+    channel: externalChannelId,
+  });
   if (!channel || channel.kind !== "PUBLIC" || !channel.isIngestEnabled) {
     return { skipped: true, reason: "channel_not_ingested" };
   }
 
-  const text = asString(event.text);
+  if (normalized.isDeleted) {
+    const existing = await prisma.communicationMessage.findUnique({
+      where: {
+        installationId_externalChannelId_externalMessageId: {
+          installationId: installation.id,
+          externalChannelId,
+          externalMessageId: ts,
+        },
+      },
+      select: { id: true, externalChannelId: true, externalMessageId: true, threadExternalId: true, messageTs: true },
+    });
+
+    await prisma.communicationMessage.updateMany({
+      where: {
+        installationId: installation.id,
+        externalChannelId,
+        externalMessageId: ts,
+      },
+      data: {
+        text: null,
+        raw: toInputJson(event),
+        textRedactedAt: new Date(),
+        isDeleted: true,
+        isHidden: true,
+      },
+    });
+
+    if (existing) {
+      await deleteSlackMessageKnowledge(existing.id);
+      await enqueueSlackMessageContextJobs({ installation, message: existing, syncKnowledge: false });
+    }
+    return { skipped: true, reason: "message_deleted" };
+  }
+
+  if (normalized.hidden || normalized.isBot) {
+    return { skipped: true, reason: "excluded_message_type" };
+  }
+
+  const text = normalized.text;
   const expiresRawAt = rawRetentionDate(rawRetentionDays(installation.settings));
-  return prisma.communicationMessage.upsert({
+  const message = await prisma.communicationMessage.upsert({
     where: {
       installationId_externalChannelId_externalMessageId: {
         installationId: installation.id,
@@ -530,15 +680,16 @@ async function ingestSlackMessage(installation: { id: string; workspaceId: strin
       },
     },
     update: {
-      externalUserId: asString(event.user) || null,
-      threadExternalId: asString(event.thread_ts) || null,
+      externalUserId: normalized.externalUserId,
+      threadExternalId: normalized.threadTs,
       text: text || null,
-      raw: toInputJson(event),
+      raw: toInputJson(normalized.source),
       messageTs: slackTimestampToDate(ts),
       expiresRawAt,
-      isBot,
-      isHidden: hidden,
-      isDeleted: deleted,
+      isBot: normalized.isBot,
+      isHidden: normalized.hidden,
+      isDeleted: false,
+      textRedactedAt: null,
     },
     create: {
       installationId: installation.id,
@@ -546,17 +697,23 @@ async function ingestSlackMessage(installation: { id: string; workspaceId: strin
       provider: "SLACK",
       externalMessageId: ts,
       externalChannelId,
-      externalUserId: asString(event.user) || null,
-      threadExternalId: asString(event.thread_ts) || null,
+      externalUserId: normalized.externalUserId,
+      threadExternalId: normalized.threadTs,
       text: text || null,
-      raw: toInputJson(event),
+      raw: toInputJson(normalized.source),
       messageTs: slackTimestampToDate(ts),
       expiresRawAt,
-      isBot,
-      isHidden: hidden,
-      isDeleted: deleted,
+      isBot: normalized.isBot,
+      isHidden: normalized.hidden,
+      isDeleted: false,
     },
   });
+
+  if (text) {
+    await enqueueSlackMessageContextJobs({ installation, message });
+  }
+
+  return message;
 }
 
 async function persistSlackSourceMessage(installation: {
@@ -579,7 +736,7 @@ async function persistSlackSourceMessage(installation: {
   });
 
   const expiresRawAt = rawRetentionDate(rawRetentionDays(installation.settings));
-  return prisma.communicationMessage.upsert({
+  const message = await prisma.communicationMessage.upsert({
     where: {
       installationId_externalChannelId_externalMessageId: {
         installationId: installation.id,
@@ -597,6 +754,7 @@ async function persistSlackSourceMessage(installation: {
       isBot: false,
       isHidden: false,
       isDeleted: false,
+      textRedactedAt: null,
     },
     create: {
       installationId: installation.id,
@@ -614,8 +772,14 @@ async function persistSlackSourceMessage(installation: {
       isHidden: false,
       isDeleted: false,
     },
-    select: { id: true },
+    select: { id: true, externalChannelId: true, externalMessageId: true, threadExternalId: true, messageTs: true, updatedAt: true },
   });
+
+  if (params.text?.trim()) {
+    await enqueueSlackMessageContextJobs({ installation, message });
+  }
+
+  return { id: message.id };
 }
 
 type SlackArchiveInstallation = {
@@ -653,7 +817,7 @@ async function upsertSlackArchiveMessage(params: {
     return false;
   }
 
-  await prisma.communicationMessage.upsert({
+  const message = await prisma.communicationMessage.upsert({
     where: {
       installationId_externalChannelId_externalMessageId: {
         installationId: params.installation.id,
@@ -671,6 +835,7 @@ async function upsertSlackArchiveMessage(params: {
       isBot: false,
       isHidden: false,
       isDeleted: false,
+      textRedactedAt: null,
     },
     create: {
       installationId: params.installation.id,
@@ -689,6 +854,13 @@ async function upsertSlackArchiveMessage(params: {
       isDeleted: false,
     },
   });
+
+  if (asString(params.message.text)) {
+    await enqueueSlackMessageContextJobs({
+      installation: params.installation,
+      message,
+    });
+  }
 
   return true;
 }
@@ -1631,18 +1803,32 @@ export async function publishSlackHome(installationId: string, externalUserId: s
 
 export async function purgeExpiredCommunicationMessages(workspaceId?: string) {
   const now = new Date();
-  return prisma.communicationMessage.updateMany({
-    where: {
+  const where = {
       ...(workspaceId ? { workspaceId } : {}),
       expiresRawAt: { lte: now },
       textRedactedAt: null,
-    },
+  };
+  const expired = await prisma.communicationMessage.findMany({
+    where,
+    select: { id: true },
+  });
+  const result = await prisma.communicationMessage.updateMany({
+    where,
     data: {
       text: null,
       raw: Prisma.DbNull,
       textRedactedAt: now,
     },
   });
+  if (expired.length > 0) {
+    await prisma.knowledgeChunk.deleteMany({
+      where: {
+        sourceType: "SLACK",
+        sourceId: { in: expired.map((message) => message.id) },
+      },
+    });
+  }
+  return result;
 }
 
 export async function listSlackMessagesForDigest(workspaceId: string, since: Date) {

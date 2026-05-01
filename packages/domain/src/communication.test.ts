@@ -49,8 +49,13 @@ const { prismaMock, txMock, createActionMock, slackWebClientMock } = vi.hoisted(
         upsert: vi.fn(),
       },
       communicationMessage: {
+        findUnique: vi.fn(),
+        findMany: vi.fn(),
         upsert: vi.fn(),
         updateMany: vi.fn(),
+      },
+      knowledgeChunk: {
+        deleteMany: vi.fn(),
       },
       meeting: {
         findFirst: vi.fn(),
@@ -121,6 +126,18 @@ function signedHeaders(body: string, timestamp = Math.floor(Date.now() / 1000)) 
   });
 }
 
+function slackMessageRow(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "message-1",
+    externalChannelId: "C1",
+    externalMessageId: "1714320000.000100",
+    threadExternalId: null,
+    messageTs: new Date("2024-04-28T16:00:00.000Z"),
+    updatedAt: new Date("2024-04-28T16:00:01.000Z"),
+    ...overrides,
+  };
+}
+
 describe("communication Slack integration", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -128,6 +145,9 @@ describe("communication Slack integration", () => {
     createActionMock.mockResolvedValue({ id: "action-1" });
     prismaMock.communicationEntityLink.create.mockResolvedValue({});
     prismaMock.communicationMessage.updateMany.mockResolvedValue({ count: 2 });
+    prismaMock.communicationMessage.findUnique.mockReset().mockResolvedValue(null);
+    prismaMock.communicationMessage.findMany.mockReset().mockResolvedValue([]);
+    prismaMock.knowledgeChunk.deleteMany.mockReset().mockResolvedValue({ count: 0 });
     prismaMock.communicationInstallation.findFirst.mockReset();
     prismaMock.communicationChannel.upsert.mockReset();
     prismaMock.communicationMessage.upsert.mockReset();
@@ -223,7 +243,7 @@ describe("communication Slack integration", () => {
       response_metadata: {},
     });
     prismaMock.communicationChannel.upsert.mockResolvedValue({ id: "channel-1" });
-    prismaMock.communicationMessage.upsert.mockResolvedValue({ id: "message-1" });
+    prismaMock.communicationMessage.upsert.mockResolvedValue(slackMessageRow());
     prismaMock.communicationInstallation.update.mockResolvedValue({ id: "install-1" });
 
     const summary = await syncSlackPublicArchiveForWorkspace("workspace-1");
@@ -338,6 +358,121 @@ describe("communication Slack integration", () => {
     expect(prismaMock.communicationMessage.upsert).not.toHaveBeenCalled();
   });
 
+  it("stores public Slack message events and queues Brain indexing plus summaries", async () => {
+    const { processSlackInboundEvent } = await import("./communication");
+    prismaMock.communicationInboundEvent.findUnique.mockResolvedValueOnce({
+      id: "inbound-message",
+      provider: "SLACK",
+      payload: {
+        event: {
+          type: "message",
+          channel: "C1",
+          channel_type: "channel",
+          user: "U1",
+          ts: "1714320000.000100",
+          text: "Public launch detail is ready.",
+        },
+      },
+      installation: {
+        id: "install-1",
+        workspaceId: "workspace-1",
+        provider: "SLACK",
+        status: "ACTIVE",
+        settings: { rawRetentionDays: 3650 },
+      },
+    });
+    prismaMock.communicationChannel.upsert.mockResolvedValueOnce({ id: "channel-1", kind: "PUBLIC", isIngestEnabled: true });
+    prismaMock.communicationMessage.upsert.mockResolvedValueOnce(slackMessageRow());
+
+    await processSlackInboundEvent("inbound-message");
+
+    expect(prismaMock.communicationMessage.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      update: expect.objectContaining({
+        text: "Public launch detail is ready.",
+        textRedactedAt: null,
+        isDeleted: false,
+      }),
+    }));
+    expect(prismaMock.workflowJob.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({
+        type: "knowledge.sync.slack-message",
+        payload: { messageId: "message-1" },
+      }),
+    }));
+    expect(prismaMock.workflowJob.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({
+        type: "communication.slack.context-summary",
+        payload: expect.objectContaining({
+          installationId: "install-1",
+          channelId: "C1",
+        }),
+      }),
+    }));
+  });
+
+  it("redacts deleted Slack messages and removes indexed Brain chunks", async () => {
+    const { processSlackInboundEvent } = await import("./communication");
+    prismaMock.communicationInboundEvent.findUnique.mockResolvedValueOnce({
+      id: "inbound-delete",
+      provider: "SLACK",
+      payload: {
+        event: {
+          type: "message",
+          subtype: "message_deleted",
+          channel: "C1",
+          channel_type: "channel",
+          deleted_ts: "1714320000.000100",
+          previous_message: {
+            type: "message",
+            channel: "C1",
+            user: "U1",
+            ts: "1714320000.000100",
+            text: "Please remove this",
+          },
+        },
+      },
+      installation: {
+        id: "install-1",
+        workspaceId: "workspace-1",
+        provider: "SLACK",
+        status: "ACTIVE",
+        settings: { rawRetentionDays: 3650 },
+      },
+    });
+    prismaMock.communicationChannel.upsert.mockResolvedValueOnce({ id: "channel-1", kind: "PUBLIC", isIngestEnabled: true });
+    prismaMock.communicationMessage.findUnique.mockResolvedValueOnce(slackMessageRow());
+
+    await processSlackInboundEvent("inbound-delete");
+
+    expect(prismaMock.communicationMessage.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        installationId: "install-1",
+        externalChannelId: "C1",
+        externalMessageId: "1714320000.000100",
+      }),
+      data: expect.objectContaining({
+        text: null,
+        isDeleted: true,
+        isHidden: true,
+        textRedactedAt: expect.any(Date),
+      }),
+    }));
+    expect(prismaMock.knowledgeChunk.deleteMany).toHaveBeenCalledWith({
+      where: {
+        sourceType: "SLACK",
+        sourceId: "message-1",
+      },
+    });
+    expect(prismaMock.workflowJob.upsert).not.toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({ type: "knowledge.sync.slack-message" }),
+    }));
+    expect(prismaMock.workflowJob.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({
+        type: "communication.slack.context-summary",
+      }),
+    }));
+  });
+
   it("creates private action drafts from Slack slash commands", async () => {
     const { handleSlackCommand } = await import("./communication");
     prismaMock.communicationInstallation.findUnique.mockResolvedValueOnce({
@@ -442,7 +577,7 @@ describe("communication Slack integration", () => {
       globalRole: "USER",
     });
     prismaMock.communicationChannel.upsert.mockResolvedValueOnce({ id: "channel-1", kind: "PUBLIC", isIngestEnabled: true });
-    prismaMock.communicationMessage.upsert.mockResolvedValueOnce({ id: "message-1" });
+    prismaMock.communicationMessage.upsert.mockResolvedValueOnce(slackMessageRow({ externalMessageId: "1710000000.000100" }));
     prismaMock.workflowJob.upsert.mockResolvedValueOnce({ id: "job-1" });
 
     await processSlackInboundEvent("inbound-1");
@@ -493,7 +628,7 @@ describe("communication Slack integration", () => {
       globalRole: "USER",
     });
     prismaMock.communicationChannel.upsert.mockResolvedValueOnce({ id: "channel-1", kind: "PUBLIC", isIngestEnabled: true });
-    prismaMock.communicationMessage.upsert.mockResolvedValueOnce({ id: "message-1" });
+    prismaMock.communicationMessage.upsert.mockResolvedValueOnce(slackMessageRow({ externalMessageId: "1710000001.000100", threadExternalId: "1710000000.000100" }));
     prismaMock.meeting.findFirst.mockResolvedValueOnce({ id: "meeting-1" });
     prismaMock.workflowJob.upsert.mockResolvedValueOnce({ id: "job-1" });
 
@@ -577,7 +712,7 @@ describe("communication Slack integration", () => {
       globalRole: "USER",
     });
     prismaMock.communicationChannel.upsert.mockResolvedValueOnce({ id: "channel-1", kind: "PUBLIC", isIngestEnabled: true });
-    prismaMock.communicationMessage.upsert.mockResolvedValueOnce({ id: "message-1" });
+    prismaMock.communicationMessage.upsert.mockResolvedValueOnce(slackMessageRow({ externalMessageId: "1710000000.000100" }));
     prismaMock.workflowJob.upsert.mockResolvedValueOnce({ id: "job-1" });
 
     const response = await handleSlackInteraction({
@@ -609,9 +744,20 @@ describe("communication Slack integration", () => {
 
   it("purges expired raw message content while preserving rows", async () => {
     const { purgeExpiredCommunicationMessages } = await import("./communication");
+    prismaMock.communicationMessage.findMany.mockResolvedValueOnce([
+      { id: "message-1" },
+      { id: "message-2" },
+    ]);
 
     await purgeExpiredCommunicationMessages("workspace-1");
 
+    expect(prismaMock.communicationMessage.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        workspaceId: "workspace-1",
+        textRedactedAt: null,
+      }),
+      select: { id: true },
+    }));
     expect(prismaMock.communicationMessage.updateMany).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({
         workspaceId: "workspace-1",
@@ -622,5 +768,11 @@ describe("communication Slack integration", () => {
         textRedactedAt: expect.any(Date),
       }),
     }));
+    expect(prismaMock.knowledgeChunk.deleteMany).toHaveBeenCalledWith({
+      where: {
+        sourceType: "SLACK",
+        sourceId: { in: ["message-1", "message-2"] },
+      },
+    });
   });
 });
