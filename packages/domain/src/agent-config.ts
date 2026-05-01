@@ -22,7 +22,7 @@ export type AgentConfigSummary = {
 };
 
 export const DEFAULT_NEWSPAPER_CADENCE: NewspaperCadence = "DAILY";
-const NEWSPAPER_CADENCES = new Set<NewspaperCadence>(["DAILY", "WEEKLY"]);
+const NEWSPAPER_CADENCES = new Set<NewspaperCadence>(["DAILY", "WEEKLY", "OFF"]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);

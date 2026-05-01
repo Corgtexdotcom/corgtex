@@ -23,7 +23,7 @@ export function AgentSettingsClient({ workspaceId, agents }: { workspaceId: stri
 
  const handleNewspaperCadenceChange = (cadence: string) => {
  startTransition(() => {
- updateAgentNewspaperCadenceAction(workspaceId, cadence ==="WEEKLY" ?"WEEKLY" :"DAILY");
+ updateAgentNewspaperCadenceAction(workspaceId, cadence ==="WEEKLY" ?"WEEKLY" : cadence ==="OFF" ?"OFF" :"DAILY");
  });
  };
 
@@ -116,12 +116,13 @@ export function AgentSettingsClient({ workspaceId, agents }: { workspaceId: stri
  </label>
  <select
  disabled={isPending}
- value={agent.configJson?.newspaperCadence ==="WEEKLY" ?"WEEKLY" :"DAILY"}
+ value={agent.configJson?.newspaperCadence ==="WEEKLY" ?"WEEKLY" : agent.configJson?.newspaperCadence ==="OFF" ?"OFF" :"DAILY"}
  onChange={(e) => handleNewspaperCadenceChange(e.target.value)}
  className="text-sm border border-line rounded-md bg-surface-strong text-text py-1.5 px-3 disabled:opacity-50"
  >
  <option value="DAILY">{t("newspaperCadenceDaily")}</option>
  <option value="WEEKLY">{t("newspaperCadenceWeekly")}</option>
+ <option value="OFF">{t("newspaperCadenceOff")}</option>
  </select>
  <p className="text-xs text-muted max-w-56 text-left lg:text-right">
  {t("newspaperCadenceAdminHelp")}

@@ -122,6 +122,30 @@ describe("User Profile Domain", () => {
       });
     });
 
+    it("stores an off newspaper cadence override", async () => {
+      vi.mocked(prisma.member.update).mockResolvedValue({
+        id: "m1",
+        newspaperCadence: "OFF",
+      } as any);
+
+      await expect(updateMemberNewspaperCadencePreference(mockActor as any, {
+        workspaceId: "w1",
+        cadence: "OFF",
+      })).resolves.toEqual({
+        id: "m1",
+        newspaperCadence: "OFF",
+      });
+
+      expect(prisma.member.update).toHaveBeenCalledWith({
+        where: { id: "m1" },
+        data: { newspaperCadence: "OFF" },
+        select: {
+          id: true,
+          newspaperCadence: true,
+        },
+      });
+    });
+
     it("clears the override when the member chooses the workspace default", async () => {
       vi.mocked(prisma.member.update).mockResolvedValue({
         id: "m1",

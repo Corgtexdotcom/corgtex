@@ -225,7 +225,7 @@ export async function updateMemberNewspaperCadencePreference(
   invariant(actor.kind === "user", 403, "FORBIDDEN", "Only user accounts have newspaper preferences.");
 
   if (params.cadence !== null) {
-    const validCadences = ["DAILY", "WEEKLY"];
+    const validCadences = ["DAILY", "WEEKLY", "OFF"];
     invariant(validCadences.includes(params.cadence), 400, "INVALID_INPUT", "Invalid newspaper cadence.");
   }
 

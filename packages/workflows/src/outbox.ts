@@ -1,5 +1,5 @@
 import type { EventStatus, NewspaperCadence, Prisma, WorkflowJobStatus } from "@prisma/client";
-import { prisma } from "@corgtex/shared";
+import { logger, prisma } from "@corgtex/shared";
 import { deriveJobsForEvent } from "./derive-jobs";
 import { deriveNotificationsForEvent } from "./derive-notifications";
 import { handleKnowledgeSync, handleMeetingKnowledgeSync, handleDocumentKnowledgeSync, handleEventKnowledgeSync, handleTensionKnowledgeSync, handleActionKnowledgeSync, handleCircleKnowledgeSync, handleRoleKnowledgeSync, handleCalendarSync } from "./handlers";
@@ -114,7 +114,10 @@ function nextRetryTime(attempt: number) {
 }
 
 function readNewspaperCadence(value: unknown): NewspaperCadence {
-  return value === "WEEKLY" ? "WEEKLY" : "DAILY";
+  if (value === "WEEKLY" || value === "OFF") {
+    return value;
+  }
+  return "DAILY";
 }
 
 async function claimPendingEvents(workerId: string, batchSize: number) {
@@ -485,6 +488,7 @@ async function handleJob(job: ClaimedJob) {
       await sendDemoWelcomeNewspaper({
         workspaceId: job.workspaceId,
         demoLeadId,
+        workflowJobId: job.id,
       });
     }
     return;
@@ -699,6 +703,10 @@ export async function scheduleDailyJobs() {
   for (const workspace of workspaces) {
     const enabled = await isAgentEnabled(workspace.id, "daily-digest");
     if (!enabled) {
+      logger.info("newspaper_schedule_skipped", {
+        workspaceId: workspace.id,
+        reason: "agent_disabled",
+      });
       continue;
     }
 
@@ -723,6 +731,12 @@ export async function scheduleDailyJobs() {
         cadence: "DAILY",
         dedupeKey: `${workspace.id}:daily-digest:${todayISO}`,
       });
+    } else {
+      logger.info("newspaper_schedule_skipped", {
+        workspaceId: workspace.id,
+        cadence: "DAILY",
+        reason: "no_daily_recipients",
+      });
     }
 
     if (isWeeklyWindow && hasWeeklyRecipients) {
@@ -730,6 +744,12 @@ export async function scheduleDailyJobs() {
         workspaceId: workspace.id,
         cadence: "WEEKLY",
         dedupeKey: `${workspace.id}:weekly-digest:${todayISO}`,
+      });
+    } else if (isWeeklyWindow) {
+      logger.info("newspaper_schedule_skipped", {
+        workspaceId: workspace.id,
+        cadence: "WEEKLY",
+        reason: "no_weekly_recipients",
       });
     }
   }
@@ -753,6 +773,11 @@ export async function scheduleDailyJobs() {
         eventId,
         type: "brain.daily-digest",
         payload: { dateISO: now.toISOString(), cadence: schedule.cadence },
+        dedupeKey: schedule.dedupeKey,
+      });
+      logger.info("newspaper_schedule_created", {
+        workspaceId: schedule.workspaceId,
+        cadence: schedule.cadence,
         dedupeKey: schedule.dedupeKey,
       });
       scheduledCount++;
