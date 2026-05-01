@@ -397,6 +397,7 @@ describe("schedulePeriodicJobs", () => {
     expect(txMock.workflowJob.upsert).toHaveBeenCalledWith(expect.objectContaining({
       create: expect.objectContaining({
         workspaceId: "ws-1",
+        eventId: null,
         type: "communication.slack.proactive-scan",
         payload: { installationId: "install-1" },
         dedupeKey: "install-1:slack-proactive-scan:493748",
@@ -433,6 +434,7 @@ describe("scheduleDailyJobs", () => {
     expect(txMock.workflowJob.upsert).toHaveBeenCalledWith(expect.objectContaining({
       create: expect.objectContaining({
         workspaceId: "ws-1",
+        eventId: null,
         type: "communication.raw-retention",
         dedupeKey: "ws-1:communication-retention:2026-04-29",
       }),
@@ -440,6 +442,7 @@ describe("scheduleDailyJobs", () => {
     expect(txMock.workflowJob.upsert).toHaveBeenCalledWith(expect.objectContaining({
       create: expect.objectContaining({
         workspaceId: "ws-2",
+        eventId: null,
         type: "communication.raw-retention",
         dedupeKey: "ws-2:communication-retention:2026-04-29",
       }),
@@ -447,6 +450,7 @@ describe("scheduleDailyJobs", () => {
     expect(txMock.workflowJob.upsert).toHaveBeenCalledWith(expect.objectContaining({
       create: expect.objectContaining({
         workspaceId: "ws-1",
+        eventId: null,
         type: "brain.daily-digest",
         payload: { dateISO: "2026-04-29T20:15:00.000Z", cadence: "DAILY" },
         dedupeKey: "ws-1:daily-digest:2026-04-29",
@@ -455,6 +459,7 @@ describe("scheduleDailyJobs", () => {
     expect(txMock.workflowJob.upsert).toHaveBeenCalledWith(expect.objectContaining({
       create: expect.objectContaining({
         workspaceId: "ws-1",
+        eventId: null,
         type: "communication.slack.public-archive",
         dedupeKey: "ws-1:slack-public-archive:2026-04-29",
       }),
