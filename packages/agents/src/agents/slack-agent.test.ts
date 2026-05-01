@@ -3,6 +3,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const {
   prismaMock,
   createWorkItemMock,
+  deleteActionMock,
+  deleteProposalMock,
+  deleteSourceMock,
+  deleteTensionMock,
   deliverSlackAgentResponseMock,
   fetchSlackThreadMessagesMock,
   listMembersMock,
@@ -53,18 +57,32 @@ const {
     communicationContextSummary: {
       findMany: vi.fn(),
     },
+    communicationEntityLink: {
+      findMany: vi.fn(),
+      create: vi.fn(),
+    },
     action: {
       findMany: vi.fn(),
+      findFirst: vi.fn(),
     },
     tension: {
       findMany: vi.fn(),
+      findFirst: vi.fn(),
     },
     proposal: {
       findMany: vi.fn(),
+      findFirst: vi.fn(),
+    },
+    brainSource: {
+      findFirst: vi.fn(),
     },
     $transaction: vi.fn(),
   },
   createWorkItemMock: vi.fn(),
+  deleteActionMock: vi.fn(),
+  deleteProposalMock: vi.fn(),
+  deleteSourceMock: vi.fn(),
+  deleteTensionMock: vi.fn(),
   deliverSlackAgentResponseMock: vi.fn(),
   fetchSlackThreadMessagesMock: vi.fn(),
   listMembersMock: vi.fn(),
@@ -96,6 +114,10 @@ vi.mock("@corgtex/domain", () => ({
   resolveAgentBehaviorContext: vi.fn().mockResolvedValue(null),
   createConstitutionVersion: vi.fn(),
   createWorkItemFromCommunicationSource: createWorkItemMock,
+  deleteAction: deleteActionMock,
+  deleteProposal: deleteProposalMock,
+  deleteSource: deleteSourceMock,
+  deleteTension: deleteTensionMock,
   deliverSlackAgentResponse: deliverSlackAgentResponseMock,
   fetchSlackThreadMessages: fetchSlackThreadMessagesMock,
   listMembers: listMembersMock,
@@ -162,9 +184,15 @@ describe("runSlackAgent", () => {
     prismaMock.communicationMessage.findUnique.mockResolvedValue(null);
     prismaMock.communicationMessage.findMany.mockResolvedValue([]);
     prismaMock.communicationContextSummary.findMany.mockResolvedValue([]);
+    prismaMock.communicationEntityLink.findMany.mockResolvedValue([]);
+    prismaMock.communicationEntityLink.create.mockResolvedValue({ id: "undo-link-1" });
     prismaMock.action.findMany.mockResolvedValue([]);
+    prismaMock.action.findFirst.mockResolvedValue(null);
     prismaMock.tension.findMany.mockResolvedValue([]);
+    prismaMock.tension.findFirst.mockResolvedValue(null);
     prismaMock.proposal.findMany.mockResolvedValue([]);
+    prismaMock.proposal.findFirst.mockResolvedValue(null);
+    prismaMock.brainSource.findFirst.mockResolvedValue(null);
     listMembersMock.mockResolvedValue([
       {
         id: "member-1",
@@ -183,6 +211,10 @@ describe("runSlackAgent", () => {
       webUrl: "https://app.example.test/workspaces/workspace-1/actions",
       opened: true,
     });
+    deleteActionMock.mockResolvedValue({ id: "action-1" });
+    deleteProposalMock.mockResolvedValue({ id: "proposal-1" });
+    deleteSourceMock.mockResolvedValue({ id: "source-1" });
+    deleteTensionMock.mockResolvedValue({ id: "tension-1" });
     answerKnowledgeQuestionMock.mockResolvedValue({
       answer: "The workspace handbook says to use advice routing for proposal risks.",
       citations: [],
@@ -338,7 +370,84 @@ describe("runSlackAgent", () => {
     await runSlackAgent({ ...basePayload(), prompt: "delete all old actions" });
 
     expect(createWorkItemMock).not.toHaveBeenCalled();
+    expect(deleteActionMock).not.toHaveBeenCalled();
+    expect(deleteProposalMock).not.toHaveBeenCalled();
     expect(deliverSlackAgentResponseMock.mock.calls[0][1].text).toContain("I cannot do that from Slack");
+  });
+
+  it("archives the most recent Slack-created proposal from the same thread", async () => {
+    prismaMock.communicationEntityLink.findMany.mockResolvedValueOnce([
+      {
+        id: "link-1",
+        action: "create_proposal",
+        entityType: "Proposal",
+        entityId: "proposal-1",
+        createdAt: new Date("2026-04-28T16:00:00.000Z"),
+      },
+    ]);
+    prismaMock.proposal.findFirst.mockResolvedValueOnce({
+      id: "proposal-1",
+      title: "Clarify onboarding ownership",
+      archivedAt: null,
+    });
+
+    const { runSlackAgent } = await import("./slack-agent");
+    await runSlackAgent({
+      ...basePayload(),
+      source: "app_mention",
+      prompt: "can you delete that proposal you just created",
+      sourceMessageId: "delete-message-1",
+      channelId: "C1",
+      threadTs: "1714320000.000100",
+      messageTs: "1714320100.000100",
+    });
+
+    expect(extractMock).not.toHaveBeenCalled();
+    expect(createWorkItemMock).not.toHaveBeenCalled();
+    expect(prismaMock.communicationEntityLink.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        installationId: "install-1",
+        externalUserId: "U1",
+        entityType: { in: ["Proposal"] },
+        message: expect.objectContaining({
+          externalChannelId: "C1",
+          OR: [
+            { externalMessageId: "1714320000.000100" },
+            { threadExternalId: "1714320000.000100" },
+          ],
+        }),
+      }),
+      orderBy: { createdAt: "desc" },
+    }));
+    expect(deleteProposalMock).toHaveBeenCalledWith(expect.objectContaining({ kind: "user" }), {
+      workspaceId: "workspace-1",
+      proposalId: "proposal-1",
+    });
+    expect(prismaMock.communicationEntityLink.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        installationId: "install-1",
+        workspaceId: "workspace-1",
+        provider: "SLACK",
+        messageId: "delete-message-1",
+        externalUserId: "U1",
+        entityType: "Proposal",
+        entityId: "proposal-1",
+        action: "undo_create_proposal",
+      }),
+    });
+    expect(deliverSlackAgentResponseMock.mock.calls[0][1].text).toContain("Archived Proposal");
+    expect(deliverSlackAgentResponseMock.mock.calls[0][1].text).toContain("Clarify onboarding ownership");
+  });
+
+  it("does not archive arbitrary records when no Slack-created undo target exists", async () => {
+    const { runSlackAgent } = await import("./slack-agent");
+    await runSlackAgent({ ...basePayload(), prompt: "undo that last action" });
+
+    expect(extractMock).not.toHaveBeenCalled();
+    expect(deleteActionMock).not.toHaveBeenCalled();
+    expect(deleteProposalMock).not.toHaveBeenCalled();
+    expect(prismaMock.communicationEntityLink.create).not.toHaveBeenCalled();
+    expect(deliverSlackAgentResponseMock.mock.calls[0][1].text).toContain("could not find an active Slack-created item");
   });
 
   it("answers workspace questions from indexed knowledge", async () => {
