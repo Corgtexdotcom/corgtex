@@ -1,4 +1,4 @@
-import type { EventStatus, Prisma, WorkflowJobStatus } from "@prisma/client";
+import type { EventStatus, NewspaperCadence, Prisma, WorkflowJobStatus } from "@prisma/client";
 import { prisma } from "@corgtex/shared";
 import { deriveJobsForEvent } from "./derive-jobs";
 import { deriveNotificationsForEvent } from "./derive-notifications";
@@ -7,7 +7,7 @@ import { handleGovernanceScoring } from "./handlers";
 import { runAgentWorkflowJob } from "./handlers";
 import { syncBrainArticleKnowledge } from "@corgtex/knowledge";
 
-import { runDailyDigest, runSlackAgent } from "@corgtex/agents";
+import { runDailyDigest, runSlackAgent, sendDemoWelcomeNewspaper } from "@corgtex/agents";
 import {
   createWebhookDeliveries,
   deliverWebhook,
@@ -111,6 +111,10 @@ export function calculateRetryDelayMs(attempt: number) {
 
 function nextRetryTime(attempt: number) {
   return new Date(Date.now() + calculateRetryDelayMs(attempt));
+}
+
+function readNewspaperCadence(value: unknown): NewspaperCadence {
+  return value === "WEEKLY" ? "WEEKLY" : "DAILY";
 }
 
 async function claimPendingEvents(workerId: string, batchSize: number) {
@@ -465,7 +469,23 @@ async function handleJob(job: ClaimedJob) {
   if (job.type === "brain.daily-digest") {
     const dateISO = (payload as { dateISO?: string }).dateISO;
     if (dateISO && job.workspaceId) {
-      await runDailyDigest({ workspaceId: job.workspaceId, workflowJobId: job.id, dateISO });
+      await runDailyDigest({
+        workspaceId: job.workspaceId,
+        workflowJobId: job.id,
+        dateISO,
+        cadence: readNewspaperCadence(payload.cadence),
+      });
+    }
+    return;
+  }
+
+  if (job.type === "email.demo-welcome-newspaper") {
+    const demoLeadId = (payload as { demoLeadId?: string }).demoLeadId;
+    if (demoLeadId && job.workspaceId) {
+      await sendDemoWelcomeNewspaper({
+        workspaceId: job.workspaceId,
+        demoLeadId,
+      });
     }
     return;
   }
@@ -668,13 +688,49 @@ export async function scheduleDailyJobs() {
     distinct: ["workspaceId"],
     select: { workspaceId: true },
   });
-  const { isAgentEnabled } = await import("@corgtex/domain");
-  const enabledWorkspaces: typeof workspaces = [];
+  const { getWorkspaceNewspaperCadence, isAgentEnabled } = await import("@corgtex/domain");
+  const newspaperSchedules: Array<{
+    workspaceId: string;
+    cadence: NewspaperCadence;
+    dedupeKey: string;
+  }> = [];
+  const isWeeklyWindow = now.getUTCDay() === 1;
 
   for (const workspace of workspaces) {
     const enabled = await isAgentEnabled(workspace.id, "daily-digest");
-    if (enabled) {
-      enabledWorkspaces.push(workspace);
+    if (!enabled) {
+      continue;
+    }
+
+    const [workspaceCadence, activeMembers] = await Promise.all([
+      getWorkspaceNewspaperCadence(workspace.id),
+      prisma.member.findMany({
+        where: { workspaceId: workspace.id, isActive: true },
+        select: { newspaperCadence: true },
+      }),
+    ]);
+
+    const hasDailyRecipients = activeMembers.some((member) => (
+      (member.newspaperCadence ?? workspaceCadence) === "DAILY"
+    ));
+    const hasWeeklyRecipients = activeMembers.some((member) => (
+      (member.newspaperCadence ?? workspaceCadence) === "WEEKLY"
+    ));
+
+    if (hasDailyRecipients) {
+      newspaperSchedules.push({
+        workspaceId: workspace.id,
+        cadence: "DAILY",
+        dedupeKey: `${workspace.id}:daily-digest:${todayISO}`,
+      });
+    }
+
+    if (isWeeklyWindow && hasWeeklyRecipients) {
+      newspaperSchedules.push({
+        workspaceId: workspace.id,
+        cadence: "WEEKLY",
+        dedupeKey: `${workspace.id}:weekly-digest:${todayISO}`,
+      });
     }
   }
 
@@ -691,13 +747,13 @@ export async function scheduleDailyJobs() {
       scheduledCount++;
     }
 
-    for (const workspace of enabledWorkspaces) {
+    for (const schedule of newspaperSchedules) {
       await enqueueJob(tx, {
-        workspaceId: workspace.id,
+        workspaceId: schedule.workspaceId,
         eventId,
         type: "brain.daily-digest",
-        payload: { dateISO: now.toISOString() },
-        dedupeKey: `${workspace.id}:daily-digest:${todayISO}`,
+        payload: { dateISO: now.toISOString(), cadence: schedule.cadence },
+        dedupeKey: schedule.dedupeKey,
       });
       scheduledCount++;
     }

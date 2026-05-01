@@ -3,7 +3,7 @@
 import { useState, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
-import { updateProfileAction, updateNotificationPrefAction } from "./actions";
+import { updateProfileAction, updateNotificationPrefAction, updateMemberNewspaperCadenceAction } from "./actions";
 
 export function UserSettingsPanel({
   workspaceId,
@@ -20,6 +20,11 @@ export function UserSettingsPanel({
   const t = useTranslations("settings");
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [newspaperCadence, setNewspaperCadence] = useState<"WORKSPACE_DEFAULT" | "DAILY" | "WEEKLY">(
+    profile.member?.newspaperCadence === "DAILY" || profile.member?.newspaperCadence === "WEEKLY"
+      ? profile.member.newspaperCadence
+      : "WORKSPACE_DEFAULT"
+  );
 
   // Profile Form
   const [displayName, setDisplayName] = useState(profile.user.displayName || "");
@@ -116,6 +121,15 @@ export function UserSettingsPanel({
   const handlePrefChange = async (notifType: string, channel: string) => {
     try {
       await updateNotificationPrefAction(workspaceId, { notifType, channel });
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const handleNewspaperCadenceChange = async (cadence: "WORKSPACE_DEFAULT" | "DAILY" | "WEEKLY") => {
+    setNewspaperCadence(cadence);
+    try {
+      await updateMemberNewspaperCadenceAction(workspaceId, cadence);
     } catch (err) {
       console.error(err);
     }
@@ -270,6 +284,22 @@ export function UserSettingsPanel({
       {/* 3. Notifications */}
       <div className="nr-form-section">
         <h2>{t("sectionNotifications")}</h2>
+        <div className="nested-item" style={{ marginBottom: 16 }}>
+          <label style={{ display: "block", marginBottom: 8, fontWeight: 600 }}>
+            {t("labelNewspaperCadence")}
+          </label>
+          <select
+            className="nr-input"
+            style={{ maxWidth: 280 }}
+            value={newspaperCadence}
+            onChange={(e) => handleNewspaperCadenceChange(e.target.value as "WORKSPACE_DEFAULT" | "DAILY" | "WEEKLY")}
+          >
+            <option value="WORKSPACE_DEFAULT">{t("newspaperCadenceWorkspaceDefault")}</option>
+            <option value="DAILY">{t("newspaperCadenceDaily")}</option>
+            <option value="WEEKLY">{t("newspaperCadenceWeekly")}</option>
+          </select>
+          <p className="text-muted mt-2 text-[0.85rem]">{t("newspaperCadenceMemberHelp")}</p>
+        </div>
         <div className="nested-item" style={{ padding: 0, overflow: 'hidden' }}>
           <table className="notif-pref-table">
             <tbody>

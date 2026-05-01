@@ -189,6 +189,14 @@ export default async function SettingsPage({
         >
           {t("tabKnowledgeSources")}
         </a>
+        {featureFlags.AGENT_GOVERNANCE && (
+          <a
+            href={`/workspaces/${workspaceId}/settings?tab=agents`}
+            className={`nr-tab ${tab === "agents" ? "nr-tab-active" : ""}`}
+          >
+            {t("tabAgents")}
+          </a>
+        )}
         <a
           href={`/workspaces/${workspaceId}/settings?tab=user`}
           className={`nr-tab ${tab === "user" ? "nr-tab-active" : ""}`}
@@ -446,6 +454,10 @@ export default async function SettingsPage({
 
       {tab === "data-sources" && (
         <DataSourcesManager workspaceId={workspaceId} dataSources={dataSources} documents={documents} />
+      )}
+
+      {tab === "agents" && (
+        <AgentSettingsClient workspaceId={workspaceId} agents={agents} />
       )}
     </>
   );

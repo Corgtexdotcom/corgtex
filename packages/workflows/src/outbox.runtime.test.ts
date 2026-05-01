@@ -1,12 +1,28 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { prismaMock, txMock, runAgentWorkflowJobMock, runSlackAgentMock, processSlackInboundEventMock, purgeExpiredCommunicationMessagesMock, syncSlackPublicArchiveForWorkspaceMock, runMeetingAgendaThreadEditMock, isAgentEnabledMock } = vi.hoisted(() => ({
+const {
+  prismaMock,
+  txMock,
+  runAgentWorkflowJobMock,
+  runDailyDigestMock,
+  runSlackAgentMock,
+  sendDemoWelcomeNewspaperMock,
+  processSlackInboundEventMock,
+  purgeExpiredCommunicationMessagesMock,
+  syncSlackPublicArchiveForWorkspaceMock,
+  runMeetingAgendaThreadEditMock,
+  isAgentEnabledMock,
+  getWorkspaceNewspaperCadenceMock,
+} = vi.hoisted(() => ({
   prismaMock: {
     $transaction: vi.fn(),
     workflowJob: {
       update: vi.fn(),
     },
     workspace: {
+      findMany: vi.fn(),
+    },
+    member: {
       findMany: vi.fn(),
     },
     communicationInstallation: {
@@ -20,12 +36,15 @@ const { prismaMock, txMock, runAgentWorkflowJobMock, runSlackAgentMock, processS
     },
   },
   runAgentWorkflowJobMock: vi.fn(),
+  runDailyDigestMock: vi.fn(),
   runSlackAgentMock: vi.fn(),
+  sendDemoWelcomeNewspaperMock: vi.fn(),
   processSlackInboundEventMock: vi.fn(),
   purgeExpiredCommunicationMessagesMock: vi.fn(),
   syncSlackPublicArchiveForWorkspaceMock: vi.fn(),
   runMeetingAgendaThreadEditMock: vi.fn(),
   isAgentEnabledMock: vi.fn(),
+  getWorkspaceNewspaperCadenceMock: vi.fn(),
 }));
 
 vi.mock("@corgtex/shared", () => ({
@@ -38,8 +57,10 @@ vi.mock("./handlers/agent-dispatch", () => ({
 }));
 
 vi.mock("@corgtex/agents", () => ({
+  runDailyDigest: runDailyDigestMock,
   runAgentWorkflowJob: runAgentWorkflowJobMock,
   runSlackAgent: runSlackAgentMock,
+  sendDemoWelcomeNewspaper: sendDemoWelcomeNewspaperMock,
 }));
 
 vi.mock("@corgtex/knowledge", () => ({
@@ -57,6 +78,7 @@ vi.mock("@corgtex/domain", () => ({
   syncSlackPublicArchiveForWorkspace: syncSlackPublicArchiveForWorkspaceMock,
   runMeetingAgendaThreadEdit: runMeetingAgendaThreadEditMock,
   isAgentEnabled: isAgentEnabledMock,
+  getWorkspaceNewspaperCadence: getWorkspaceNewspaperCadenceMock,
 }));
 
 import { runPendingJobs, scheduleDailyJobs } from "./outbox";
@@ -71,16 +93,20 @@ describe("runPendingJobs", () => {
     prismaMock.$transaction.mockReset().mockImplementation(async (callback: (tx: typeof txMock) => Promise<unknown>) => callback(txMock));
     prismaMock.workflowJob.update.mockReset().mockResolvedValue({ id: "job-1" });
     prismaMock.workspace.findMany.mockReset().mockResolvedValue([]);
+    prismaMock.member.findMany.mockReset().mockResolvedValue([]);
     prismaMock.communicationInstallation.findMany.mockReset().mockResolvedValue([]);
     txMock.$queryRaw.mockReset().mockResolvedValue([]);
     txMock.workflowJob.upsert.mockReset().mockResolvedValue({ id: "job-1" });
     runAgentWorkflowJobMock.mockReset();
+    runDailyDigestMock.mockReset().mockResolvedValue({ success: true });
     runSlackAgentMock.mockReset();
+    sendDemoWelcomeNewspaperMock.mockReset().mockResolvedValue({ success: true });
     processSlackInboundEventMock.mockReset();
     purgeExpiredCommunicationMessagesMock.mockReset();
     syncSlackPublicArchiveForWorkspaceMock.mockReset();
     runMeetingAgendaThreadEditMock.mockReset();
     isAgentEnabledMock.mockReset().mockResolvedValue(false);
+    getWorkspaceNewspaperCadenceMock.mockReset().mockResolvedValue("DAILY");
   });
 
   it("requeues agent jobs when execution is skipped by the concurrency gate", async () => {
@@ -132,6 +158,31 @@ describe("runPendingJobs", () => {
     await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
 
     expect(processSlackInboundEventMock).toHaveBeenCalledWith("inbound-1");
+    expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({
+      where: { id: "job-1" },
+      data: expect.objectContaining({
+        status: "COMPLETED",
+      }),
+    });
+  });
+
+  it("dispatches demo welcome newspaper jobs", async () => {
+    txMock.$queryRaw.mockResolvedValue([
+      {
+        id: "job-1",
+        workspaceId: "ws-1",
+        type: "email.demo-welcome-newspaper",
+        payload: { demoLeadId: "lead-1" },
+        attempts: 1,
+      },
+    ]);
+
+    await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
+
+    expect(sendDemoWelcomeNewspaperMock).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      demoLeadId: "lead-1",
+    });
     expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({
       where: { id: "job-1" },
       data: expect.objectContaining({
@@ -254,11 +305,17 @@ describe("scheduleDailyJobs", () => {
       { id: "ws-1" },
       { id: "ws-2" },
     ]);
+    prismaMock.member.findMany.mockReset().mockImplementation(async ({ where }: { where: { workspaceId: string } }) => (
+      where.workspaceId === "ws-1"
+        ? [{ newspaperCadence: null }]
+        : []
+    ));
     prismaMock.communicationInstallation.findMany.mockReset().mockResolvedValue([
       { workspaceId: "ws-1" },
     ]);
     txMock.workflowJob.upsert.mockReset().mockResolvedValue({ id: "job-1" });
     isAgentEnabledMock.mockReset().mockImplementation(async (workspaceId: string) => workspaceId === "ws-1");
+    getWorkspaceNewspaperCadenceMock.mockReset().mockResolvedValue("DAILY");
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-04-29T20:15:00Z"));
   });
@@ -284,6 +341,7 @@ describe("scheduleDailyJobs", () => {
       create: expect.objectContaining({
         workspaceId: "ws-1",
         type: "brain.daily-digest",
+        payload: { dateISO: "2026-04-29T20:15:00.000Z", cadence: "DAILY" },
         dedupeKey: "ws-1:daily-digest:2026-04-29",
       }),
     }));
@@ -302,5 +360,28 @@ describe("scheduleDailyJobs", () => {
     await expect(scheduleDailyJobs()).resolves.toBe(0);
 
     expect(txMock.workflowJob.upsert).not.toHaveBeenCalled();
+  });
+
+  it("schedules weekly newspaper jobs on Monday UTC for weekly recipients", async () => {
+    vi.setSystemTime(new Date("2026-05-04T20:15:00Z"));
+    getWorkspaceNewspaperCadenceMock.mockResolvedValue("WEEKLY");
+
+    await expect(scheduleDailyJobs()).resolves.toBe(4);
+
+    expect(txMock.workflowJob.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({
+        workspaceId: "ws-1",
+        type: "brain.daily-digest",
+        payload: { dateISO: "2026-05-04T20:15:00.000Z", cadence: "WEEKLY" },
+        dedupeKey: "ws-1:weekly-digest:2026-05-04",
+      }),
+    }));
+    expect(txMock.workflowJob.upsert).not.toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({
+        workspaceId: "ws-1",
+        type: "brain.daily-digest",
+        dedupeKey: "ws-1:daily-digest:2026-05-04",
+      }),
+    }));
   });
 });

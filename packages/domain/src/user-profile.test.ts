@@ -1,6 +1,8 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { getUserProfile, updateUserProfile } from "./user-profile";
+import { getUserProfile, updateMemberNewspaperCadencePreference, updateUserProfile } from "./user-profile";
 import { prisma } from "@corgtex/shared";
+
+const requireWorkspaceMembershipMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@corgtex/shared", async () => {
   const actual = await vi.importActual("@corgtex/shared");
@@ -13,10 +15,15 @@ vi.mock("@corgtex/shared", async () => {
       },
       member: {
         findUnique: vi.fn(),
+        update: vi.fn(),
       },
     },
   };
 });
+
+vi.mock("./auth", () => ({
+  requireWorkspaceMembership: requireWorkspaceMembershipMock,
+}));
 
 describe("User Profile Domain", () => {
   const mockActor = {
@@ -26,6 +33,13 @@ describe("User Profile Domain", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    requireWorkspaceMembershipMock.mockResolvedValue({
+      id: "m1",
+      workspaceId: "w1",
+      userId: "u1",
+      role: "CONTRIBUTOR",
+      isActive: true,
+    });
   });
 
   describe("getUserProfile", () => {
@@ -76,6 +90,52 @@ describe("User Profile Domain", () => {
         },
       });
       expect(result.displayName).toBe("New Name");
+    });
+  });
+
+  describe("updateMemberNewspaperCadencePreference", () => {
+    it("stores a member newspaper cadence override", async () => {
+      vi.mocked(prisma.member.update).mockResolvedValue({
+        id: "m1",
+        newspaperCadence: "WEEKLY",
+      } as any);
+
+      await expect(updateMemberNewspaperCadencePreference(mockActor as any, {
+        workspaceId: "w1",
+        cadence: "WEEKLY",
+      })).resolves.toEqual({
+        id: "m1",
+        newspaperCadence: "WEEKLY",
+      });
+
+      expect(requireWorkspaceMembershipMock).toHaveBeenCalledWith({
+        actor: mockActor,
+        workspaceId: "w1",
+      });
+      expect(prisma.member.update).toHaveBeenCalledWith({
+        where: { id: "m1" },
+        data: { newspaperCadence: "WEEKLY" },
+        select: {
+          id: true,
+          newspaperCadence: true,
+        },
+      });
+    });
+
+    it("clears the override when the member chooses the workspace default", async () => {
+      vi.mocked(prisma.member.update).mockResolvedValue({
+        id: "m1",
+        newspaperCadence: null,
+      } as any);
+
+      await updateMemberNewspaperCadencePreference(mockActor as any, {
+        workspaceId: "w1",
+        cadence: null,
+      });
+
+      expect(prisma.member.update).toHaveBeenCalledWith(expect.objectContaining({
+        data: { newspaperCadence: null },
+      }));
     });
   });
 });

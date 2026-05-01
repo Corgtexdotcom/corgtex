@@ -53,10 +53,23 @@ vi.mock("@corgtex/shared", async (importOriginal) => {
             create: vi.fn().mockResolvedValue({ id: "qual-1", workspaceId: "ws-1", status: "PENDING_REVIEW" }),
             update: vi.fn().mockResolvedValue({ id: "qual-1", status: "APPROVED" }),
           },
+          workspace: {
+            upsert: vi.fn().mockResolvedValue({ id: "ws-1", slug: "corgtex", name: "Corgtex" }),
+            create: vi.fn().mockResolvedValue({ id: "ws-new", name: "Demo Workspace" }),
+          },
           demoLead: {
+            upsert: vi.fn().mockResolvedValue({
+              id: "lead-1",
+              workspaceId: "ws-1",
+              email: "demo@example.com",
+              welcomeEmailSentAt: null,
+            }),
             update: vi.fn().mockResolvedValue({ id: "lead-1" }),
           },
-          crmContact: { updateMany: vi.fn() },
+          crmContact: {
+            upsert: vi.fn().mockResolvedValue({ id: "contact-1" }),
+            updateMany: vi.fn(),
+          },
           crmActivity: {
             create: vi.fn().mockResolvedValue({ id: "activity-1" }),
           },
@@ -65,9 +78,6 @@ vi.mock("@corgtex/shared", async (importOriginal) => {
           },
           crmConversation: {
             update: vi.fn(),
-          },
-          workspace: {
-            create: vi.fn().mockResolvedValue({ id: "ws-new", name: "Demo Workspace" }),
           },
           crmProspectWorkspace: {
             create: vi.fn().mockResolvedValue({ id: "pw-1", crmWorkspaceId: "ws-1", targetWorkspaceId: "ws-new" }),
@@ -93,6 +103,57 @@ const dummyActor = { kind: "user", user: { id: "u-1", email: "admin@corgtex.loca
 describe("CRM domain", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  describe("captureDemoLead", () => {
+    it("emits a welcome newspaper event for leads that have not received one", async () => {
+      const { appendEvents } = await import("./events");
+      const { captureDemoLead } = await import("./crm");
+
+      await captureDemoLead({ email: "Demo@Example.com" });
+
+      expect(appendEvents).toHaveBeenCalledWith(expect.anything(), [
+        expect.objectContaining({
+          workspaceId: "ws-1",
+          type: "demo-lead.captured",
+          aggregateType: "DemoLead",
+          aggregateId: "lead-1",
+          payload: {
+            demoLeadId: "lead-1",
+            email: "demo@example.com",
+            source: "demo_gate",
+          },
+        }),
+      ]);
+    });
+
+    it("does not emit the welcome event after the welcome newspaper was sent", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { appendEvents } = await import("./events");
+      const { captureDemoLead } = await import("./crm");
+
+      vi.mocked(prisma.$transaction).mockImplementationOnce((async (fn: any) =>
+        fn({
+          workspace: {
+            upsert: vi.fn().mockResolvedValue({ id: "ws-1", slug: "corgtex", name: "Corgtex" }),
+          },
+          demoLead: {
+            upsert: vi.fn().mockResolvedValue({
+              id: "lead-1",
+              workspaceId: "ws-1",
+              email: "demo@example.com",
+              welcomeEmailSentAt: new Date("2026-04-30T12:00:00.000Z"),
+            }),
+          },
+          crmContact: {
+            upsert: vi.fn().mockResolvedValue({ id: "contact-1" }),
+          },
+        })) as any);
+
+      await captureDemoLead({ email: "demo@example.com" });
+
+      expect(appendEvents).not.toHaveBeenCalled();
+    });
   });
 
   // --- submitQualification ---

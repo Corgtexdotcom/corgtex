@@ -1,6 +1,8 @@
 import { prisma, hashPassword, verifyPassword } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { AppError, invariant } from "./errors";
+import { requireWorkspaceMembership } from "./auth";
+import type { NewspaperCadence } from "@prisma/client";
 
 // ------------------------------------------------------------------
 // Profile Management
@@ -211,4 +213,34 @@ export async function updateNotificationPreference(actor: AppActor, params: { no
   });
 
   return pref;
+}
+
+export async function updateMemberNewspaperCadencePreference(
+  actor: AppActor,
+  params: {
+    workspaceId: string;
+    cadence: NewspaperCadence | null;
+  },
+) {
+  invariant(actor.kind === "user", 403, "FORBIDDEN", "Only user accounts have newspaper preferences.");
+
+  if (params.cadence !== null) {
+    const validCadences = ["DAILY", "WEEKLY"];
+    invariant(validCadences.includes(params.cadence), 400, "INVALID_INPUT", "Invalid newspaper cadence.");
+  }
+
+  const membership = await requireWorkspaceMembership({
+    actor,
+    workspaceId: params.workspaceId,
+  });
+  invariant(membership, 403, "NOT_A_MEMBER", "You are not an active member of this workspace.");
+
+  return prisma.member.update({
+    where: { id: membership.id },
+    data: { newspaperCadence: params.cadence },
+    select: {
+      id: true,
+      newspaperCadence: true,
+    },
+  });
 }
