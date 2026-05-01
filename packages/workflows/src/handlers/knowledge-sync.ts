@@ -276,6 +276,69 @@ export async function handleRoleKnowledgeSync(jobId: string, payload: { roleId?:
   });
 }
 
+export async function handleSlackMessageKnowledgeSync(jobId: string, payload: { messageId?: string }, workspaceId: string) {
+  if (!payload.messageId) return;
+  const message = await prisma.communicationMessage.findUnique({
+    where: { id: payload.messageId },
+    include: {
+      installation: { select: { id: true, externalTeamName: true } },
+    },
+  });
+  if (!message || message.workspaceId !== workspaceId || message.provider !== "SLACK") return;
+
+  if (!message.text || message.textRedactedAt || message.isBot || message.isHidden || message.isDeleted) {
+    await prisma.knowledgeChunk.deleteMany({
+      where: {
+        workspaceId,
+        sourceType: "SLACK",
+        sourceId: message.id,
+      },
+    });
+    return;
+  }
+
+  const channel = await prisma.communicationChannel.findUnique({
+    where: {
+      installationId_externalChannelId: {
+        installationId: message.installationId,
+        externalChannelId: message.externalChannelId,
+      },
+    },
+    select: { name: true, kind: true },
+  });
+  if (channel?.kind !== "PUBLIC") return;
+
+  const channelLabel = channel.name ? `#${channel.name}` : message.externalChannelId;
+  const content = [
+    `Slack message in ${channelLabel}`,
+    message.messageTs ? `Posted at ${message.messageTs.toISOString()}` : null,
+    message.externalUserId ? `Author: ${message.externalUserId}` : null,
+    message.threadExternalId ? `Thread: ${message.threadExternalId}` : null,
+    "",
+    message.text,
+  ].filter((entry) => entry !== null).join("\n");
+
+  await syncKnowledgeForSource({
+    workspaceId,
+    sourceType: "SLACK",
+    sourceId: message.id,
+    sourceTitle: `Slack ${channelLabel}`,
+    content,
+    metadata: {
+      installationId: message.installationId,
+      externalTeamName: message.installation.externalTeamName,
+      externalChannelId: message.externalChannelId,
+      externalMessageId: message.externalMessageId,
+      externalUserId: message.externalUserId,
+      threadExternalId: message.threadExternalId,
+      messageTs: message.messageTs?.toISOString() ?? null,
+      permalink: message.permalink,
+      workflowJobId: jobId,
+    },
+    workflowJobId: jobId,
+  });
+}
+
 
 export async function handleCalendarSync(jobId: string, payload: { connectionId?: string }, workspaceId: string) {
   if (!payload.connectionId) return;
@@ -311,4 +374,3 @@ export async function handleCalendarSync(jobId: string, payload: { connectionId?
     throw error;
   }
 }
-

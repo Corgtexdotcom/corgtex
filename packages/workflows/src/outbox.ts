@@ -2,12 +2,12 @@ import type { EventStatus, NewspaperCadence, Prisma, WorkflowJobStatus } from "@
 import { prisma } from "@corgtex/shared";
 import { deriveJobsForEvent } from "./derive-jobs";
 import { deriveNotificationsForEvent } from "./derive-notifications";
-import { handleKnowledgeSync, handleMeetingKnowledgeSync, handleDocumentKnowledgeSync, handleEventKnowledgeSync, handleTensionKnowledgeSync, handleActionKnowledgeSync, handleCircleKnowledgeSync, handleRoleKnowledgeSync, handleCalendarSync } from "./handlers";
+import { handleKnowledgeSync, handleMeetingKnowledgeSync, handleDocumentKnowledgeSync, handleEventKnowledgeSync, handleTensionKnowledgeSync, handleActionKnowledgeSync, handleCircleKnowledgeSync, handleRoleKnowledgeSync, handleSlackMessageKnowledgeSync, handleCalendarSync } from "./handlers";
 import { handleGovernanceScoring } from "./handlers";
 import { runAgentWorkflowJob } from "./handlers";
 import { syncBrainArticleKnowledge } from "@corgtex/knowledge";
 
-import { runDailyDigest, runSlackAgent, sendDemoWelcomeNewspaper } from "@corgtex/agents";
+import { runDailyDigest, runSlackAgent, runSlackContextSummary, runSlackProactiveScan, sendDemoWelcomeNewspaper } from "@corgtex/agents";
 import {
   createWebhookDeliveries,
   deliverWebhook,
@@ -349,6 +349,11 @@ async function handleJob(job: ClaimedJob) {
     return;
   }
 
+  if (job.type === "knowledge.sync.slack-message") {
+    await handleSlackMessageKnowledgeSync(job.id, payload as { messageId?: string }, job.workspaceId);
+    return;
+  }
+
   if (job.type === "governance.score") {
     await handleGovernanceScoring(job.workspaceId);
     return;
@@ -455,6 +460,38 @@ async function handleJob(job: ClaimedJob) {
 
   if (job.type === "communication.slack.public-archive") {
     await syncSlackPublicArchiveForWorkspace(job.workspaceId);
+    return;
+  }
+
+  if (job.type === "communication.slack.context-summary") {
+    const summaryPayload = payload as {
+      installationId?: string;
+      channelId?: string;
+      threadTs?: string | null;
+      dayISO?: string;
+    };
+    if (summaryPayload.installationId && summaryPayload.channelId && summaryPayload.dayISO) {
+      await runSlackContextSummary({
+        workspaceId: job.workspaceId,
+        workflowJobId: job.id,
+        installationId: summaryPayload.installationId,
+        channelId: summaryPayload.channelId,
+        threadTs: summaryPayload.threadTs ?? null,
+        dayISO: summaryPayload.dayISO,
+      });
+    }
+    return;
+  }
+
+  if (job.type === "communication.slack.proactive-scan") {
+    const proactivePayload = payload as { installationId?: string };
+    if (proactivePayload.installationId) {
+      await runSlackProactiveScan({
+        workspaceId: job.workspaceId,
+        workflowJobId: job.id,
+        installationId: proactivePayload.installationId,
+      });
+    }
     return;
   }
 
@@ -637,10 +674,20 @@ export async function scheduleDripCampaigns() {
 export async function schedulePeriodicJobs() {
   const now = new Date();
   
-  const sources = await prisma.externalDataSource.findMany({
-    where: { isActive: true },
-    select: { id: true, workspaceId: true, pullCadenceMinutes: true, lastSyncAt: true }
-  });
+  const [sources, slackInstallations] = await Promise.all([
+    prisma.externalDataSource.findMany({
+      where: { isActive: true },
+      select: { id: true, workspaceId: true, pullCadenceMinutes: true, lastSyncAt: true }
+    }),
+    prisma.communicationInstallation.findMany({
+      where: {
+        provider: "SLACK",
+        status: "ACTIVE",
+        scopes: { has: "channels:history" },
+      },
+      select: { id: true, workspaceId: true },
+    }),
+  ]);
 
   let scheduledCount = 0;
 
@@ -657,6 +704,18 @@ export async function schedulePeriodicJobs() {
         });
         scheduledCount++;
       }
+    }
+
+    const hourlyBucket = Math.floor(now.getTime() / (60 * 60 * 1000));
+    for (const installation of slackInstallations) {
+      await enqueueJob(tx, {
+        workspaceId: installation.workspaceId,
+        eventId: `schedule-${now.getTime()}`,
+        type: "communication.slack.proactive-scan",
+        payload: { installationId: installation.id },
+        dedupeKey: `${installation.id}:slack-proactive-scan:${hourlyBucket}`,
+      });
+      scheduledCount++;
     }
   });
 
