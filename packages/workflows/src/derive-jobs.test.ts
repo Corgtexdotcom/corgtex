@@ -27,4 +27,23 @@ describe("deriveJobsForEvent", () => {
     expect(jobs).toHaveLength(1);
     expect(jobs[0].type).toBe("knowledge.sync.brain-article");
   });
+
+  it("derives an idempotent welcome newspaper job for demo lead captures", () => {
+    const jobs = deriveJobsForEvent({
+      id: "event-demo-1",
+      type: "demo-lead.captured",
+      workspaceId: "ws-1",
+      payload: { demoLeadId: "lead-1", email: "lead@example.com" },
+    });
+
+    expect(jobs).toEqual([
+      {
+        workspaceId: "ws-1",
+        eventId: "event-demo-1",
+        type: "email.demo-welcome-newspaper",
+        payload: { demoLeadId: "lead-1" },
+        dedupeKey: "ws-1:demo-welcome-newspaper:lead-1",
+      },
+    ]);
+  });
 });

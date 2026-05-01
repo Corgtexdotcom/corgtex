@@ -79,6 +79,22 @@ export async function captureDemoLead(params: {
       },
     });
 
+    if (!demoLead.welcomeEmailSentAt) {
+      await appendEvents(tx, [
+        {
+          workspaceId: workspace.id,
+          type: "demo-lead.captured",
+          aggregateType: "DemoLead",
+          aggregateId: demoLead.id,
+          payload: {
+            demoLeadId: demoLead.id,
+            email,
+            source,
+          },
+        },
+      ]);
+    }
+
     return { workspace, demoLead, contact };
   });
 }

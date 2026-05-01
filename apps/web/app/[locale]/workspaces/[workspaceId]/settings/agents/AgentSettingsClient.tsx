@@ -1,7 +1,7 @@
 "use client";
 
 import { useTransition } from"react";
-import { toggleAgentAction, updateAgentModelAction } from"./actions";
+import { toggleAgentAction, updateAgentModelAction, updateAgentNewspaperCadenceAction } from"./actions";
 import type { AgentConfigSummary } from"@corgtex/domain";
 import { useTranslations } from "next-intl";
 
@@ -18,6 +18,12 @@ export function AgentSettingsClient({ workspaceId, agents }: { workspaceId: stri
  const handleModelChange = (agentKey: string, modelOverride: string) => {
  startTransition(() => {
  updateAgentModelAction(workspaceId, agentKey, modelOverride ==="default" ? null : modelOverride);
+ });
+ };
+
+ const handleNewspaperCadenceChange = (cadence: string) => {
+ startTransition(() => {
+ updateAgentNewspaperCadenceAction(workspaceId, cadence ==="WEEKLY" ?"WEEKLY" :"DAILY");
  });
  };
 
@@ -102,6 +108,26 @@ export function AgentSettingsClient({ workspaceId, agents }: { workspaceId: stri
  <option value="google/gemini-2.5-flash">{t("optQuality")} (Gemini 2.5 Flash)</option>
  </select>
  </div>
+
+ {agent.agentKey ==="daily-digest" && (
+ <div className="flex flex-col items-start lg:items-end gap-2">
+ <label className="text-sm font-medium text-text">
+ {t("lblNewspaperCadence")}
+ </label>
+ <select
+ disabled={isPending}
+ value={agent.configJson?.newspaperCadence ==="WEEKLY" ?"WEEKLY" :"DAILY"}
+ onChange={(e) => handleNewspaperCadenceChange(e.target.value)}
+ className="text-sm border border-line rounded-md bg-surface-strong text-text py-1.5 px-3 disabled:opacity-50"
+ >
+ <option value="DAILY">{t("newspaperCadenceDaily")}</option>
+ <option value="WEEKLY">{t("newspaperCadenceWeekly")}</option>
+ </select>
+ <p className="text-xs text-muted max-w-56 text-left lg:text-right">
+ {t("newspaperCadenceAdminHelp")}
+ </p>
+ </div>
+ )}
  </div>
 
  </div>

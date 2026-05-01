@@ -493,3 +493,17 @@ export async function updateNotificationPrefAction(
   refresh(workspaceId);
   return { success: true };
 }
+
+export async function updateMemberNewspaperCadenceAction(
+  workspaceId: string,
+  cadence: "WORKSPACE_DEFAULT" | "DAILY" | "WEEKLY"
+) {
+  const actor = await requirePageActor();
+  const { updateMemberNewspaperCadencePreference } = await import("@corgtex/domain");
+  await updateMemberNewspaperCadencePreference(actor, {
+    workspaceId,
+    cadence: cadence === "WORKSPACE_DEFAULT" ? null : cadence,
+  });
+  refresh(workspaceId);
+  return { success: true };
+}

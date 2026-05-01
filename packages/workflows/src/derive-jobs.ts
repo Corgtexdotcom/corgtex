@@ -402,5 +402,20 @@ export function deriveJobsForEvent(event: {
     }
   }
 
+  if (event.type === "demo-lead.captured" && event.workspaceId) {
+    const demoLeadId = readPayloadString(event.payload, "demoLeadId");
+    if (demoLeadId) {
+      jobs.push({
+        workspaceId: event.workspaceId,
+        eventId: event.id,
+        type: "email.demo-welcome-newspaper",
+        payload: {
+          demoLeadId,
+        },
+        dedupeKey: `${event.workspaceId}:demo-welcome-newspaper:${demoLeadId}`,
+      });
+    }
+  }
+
   return jobs;
 }

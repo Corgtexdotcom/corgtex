@@ -1,8 +1,9 @@
-import { prisma } from "@corgtex/shared";
+import { prisma, toInputJson } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
 import { AGENT_REGISTRY, type RegisteredAgentKey } from "./agent-registry";
 import { AppError } from "./errors";
+import type { NewspaperCadence, Prisma } from "@prisma/client";
 
 export type AgentConfigSummary = {
   agentKey: RegisteredAgentKey;
@@ -19,6 +20,29 @@ export type AgentConfigSummary = {
   governancePolicy: string | null;
   configJson: any;
 };
+
+export const DEFAULT_NEWSPAPER_CADENCE: NewspaperCadence = "DAILY";
+const NEWSPAPER_CADENCES = new Set<NewspaperCadence>(["DAILY", "WEEKLY"]);
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+export function normalizeNewspaperCadence(value: unknown, fallback: NewspaperCadence = DEFAULT_NEWSPAPER_CADENCE): NewspaperCadence {
+  return typeof value === "string" && NEWSPAPER_CADENCES.has(value as NewspaperCadence)
+    ? value as NewspaperCadence
+    : fallback;
+}
+
+function normalizeAgentConfigJson(agentKey: string, configJson: unknown): Prisma.InputJsonObject {
+  const config = isRecord(configJson) ? { ...configJson } : {};
+
+  if (agentKey === "daily-digest" && "newspaperCadence" in config) {
+    config.newspaperCadence = normalizeNewspaperCadence(config.newspaperCadence);
+  }
+
+  return toInputJson(config) as Prisma.InputJsonObject;
+}
 
 export async function listAgentConfigs(actor: AppActor, workspaceId: string): Promise<AgentConfigSummary[]> {
   await requireWorkspaceMembership({ actor, workspaceId, allowedRoles: ["ADMIN"] });
@@ -75,6 +99,10 @@ export async function updateAgentConfig(
     throw new AppError(400, "INVALID_INPUT", `Agent ${params.agentKey} cannot be disabled.`);
   }
 
+  const configJson = params.configJson === undefined
+    ? undefined
+    : normalizeAgentConfigJson(params.agentKey, params.configJson);
+
   return prisma.workspaceAgentConfig.upsert({
     where: {
       workspaceId_agentKey: {
@@ -88,13 +116,69 @@ export async function updateAgentConfig(
       enabled: params.enabled ?? true,
       modelOverride: params.modelOverride ?? null,
       governancePolicy: params.governancePolicy ?? null,
-      configJson: params.configJson ?? {},
+      configJson: configJson ?? {},
     },
     update: {
       ...(params.enabled !== undefined && { enabled: params.enabled }),
       ...(params.modelOverride !== undefined && { modelOverride: params.modelOverride }),
       ...(params.governancePolicy !== undefined && { governancePolicy: params.governancePolicy }),
-      ...(params.configJson !== undefined && { configJson: params.configJson }),
+      ...(configJson !== undefined && { configJson }),
+    },
+  });
+}
+
+export async function getWorkspaceNewspaperCadence(workspaceId: string): Promise<NewspaperCadence> {
+  const config = await prisma.workspaceAgentConfig.findUnique({
+    where: {
+      workspaceId_agentKey: { workspaceId, agentKey: "daily-digest" },
+    },
+    select: { configJson: true },
+  });
+
+  return normalizeNewspaperCadence(isRecord(config?.configJson) ? config.configJson.newspaperCadence : undefined);
+}
+
+export async function updateWorkspaceNewspaperCadence(
+  actor: AppActor,
+  params: {
+    workspaceId: string;
+    cadence: NewspaperCadence;
+  },
+) {
+  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, allowedRoles: ["ADMIN"] });
+
+  const cadence = normalizeNewspaperCadence(params.cadence);
+  const existing = await prisma.workspaceAgentConfig.findUnique({
+    where: {
+      workspaceId_agentKey: { workspaceId: params.workspaceId, agentKey: "daily-digest" },
+    },
+    select: { configJson: true },
+  });
+  const currentConfig = isRecord(existing?.configJson)
+    ? existing.configJson as Prisma.InputJsonObject
+    : {};
+  const configJson = toInputJson({
+    ...currentConfig,
+    newspaperCadence: cadence,
+  }) as Prisma.InputJsonObject;
+
+  return prisma.workspaceAgentConfig.upsert({
+    where: {
+      workspaceId_agentKey: {
+        workspaceId: params.workspaceId,
+        agentKey: "daily-digest",
+      },
+    },
+    create: {
+      workspaceId: params.workspaceId,
+      agentKey: "daily-digest",
+      enabled: true,
+      modelOverride: null,
+      governancePolicy: null,
+      configJson,
+    },
+    update: {
+      configJson,
     },
   });
 }

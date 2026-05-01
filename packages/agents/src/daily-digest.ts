@@ -1,7 +1,7 @@
 import { prisma, sendEmail } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { defaultModelGateway, resolveModel } from "@corgtex/models";
-import { AGENT_REGISTRY, getAgentModelOverride } from "@corgtex/domain";
+import { AGENT_REGISTRY, getAgentModelOverride, getWorkspaceNewspaperCadence, normalizeNewspaperCadence } from "@corgtex/domain";
 import { 
   batchIngestDailyConversations, 
   createArticle, 
@@ -9,7 +9,83 @@ import {
   updateArticle, 
   rebuildBacklinks 
 } from "@corgtex/domain";
-import type { BrainArticleType } from "@prisma/client";
+import type { BrainArticleType, NewspaperCadence } from "@prisma/client";
+
+const LOOKBACK_DAYS_BY_CADENCE: Record<NewspaperCadence, number> = {
+  DAILY: 1,
+  WEEKLY: 7,
+};
+
+function cadenceLabel(cadence: NewspaperCadence) {
+  return cadence === "WEEKLY" ? "Weekly" : "Daily";
+}
+
+function escapeHtml(value: string) {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+export function buildDemoWelcomeNewspaperHtml(params?: { workspaceName?: string | null }) {
+  const workspaceName = escapeHtml(params?.workspaceName?.trim() || "Corgtex");
+
+  return `<!doctype html>
+<html>
+  <body style="margin:0;background:#f4f1ea;color:#1f1d1a;font-family:Georgia,'Times New Roman',serif;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f4f1ea;padding:24px 12px;">
+      <tr>
+        <td align="center">
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:680px;background:#fffaf0;border:1px solid #2d2a24;">
+            <tr>
+              <td style="padding:24px 28px 12px;border-bottom:3px double #2d2a24;text-align:center;">
+                <div style="font-size:12px;letter-spacing:1.6px;text-transform:uppercase;">The ${workspaceName} Edition</div>
+                <h1 style="font-size:34px;line-height:1.05;margin:8px 0 6px;font-weight:700;">Welcome to Corgtex</h1>
+                <div style="font-size:13px;text-transform:uppercase;letter-spacing:1px;">A working newspaper for how your organization runs</div>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:24px 28px;">
+                <h2 style="font-size:22px;line-height:1.2;margin:0 0 12px;">What Corgtex helps your team do</h2>
+                <p style="font-size:16px;line-height:1.6;margin:0 0 18px;">Corgtex gives an organization one shared place to see what is happening, what has been decided, what needs attention, and where work is moving. Instead of asking people to leave their daily tools, Corgtex turns the important signals into a clear briefing that can arrive directly in email.</p>
+                <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-top:1px solid #2d2a24;border-bottom:1px solid #2d2a24;margin:20px 0;">
+                  <tr>
+                    <td style="padding:16px 0;">
+                      <h3 style="font-size:16px;line-height:1.3;margin:0 0 8px;text-transform:uppercase;letter-spacing:0.8px;">Shared company memory</h3>
+                      <p style="font-size:15px;line-height:1.55;margin:0;">Important context from conversations, documents, decisions, and operating history becomes easier to find and easier to trust.</p>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style="padding:16px 0;border-top:1px solid #c9c0aa;">
+                      <h3 style="font-size:16px;line-height:1.3;margin:0 0 8px;text-transform:uppercase;letter-spacing:0.8px;">Decision visibility</h3>
+                      <p style="font-size:15px;line-height:1.55;margin:0;">Proposals, approvals, objections, and advice records stay visible so teams know why a choice was made and what changed afterward.</p>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style="padding:16px 0;border-top:1px solid #c9c0aa;">
+                      <h3 style="font-size:16px;line-height:1.3;margin:0 0 8px;text-transform:uppercase;letter-spacing:0.8px;">Follow-through on work</h3>
+                      <p style="font-size:15px;line-height:1.55;margin:0;">Actions, tensions, meetings, goals, and shipped work can be summarized into a practical newspaper that tells each member what matters next.</p>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style="padding:16px 0;border-top:1px solid #c9c0aa;">
+                      <h3 style="font-size:16px;line-height:1.3;margin:0 0 8px;text-transform:uppercase;letter-spacing:0.8px;">Business visibility</h3>
+                      <p style="font-size:15px;line-height:1.55;margin:0;">Finance, budget, spend requests, and operating activity can live beside the work itself, helping leaders see cost, value, and progress in one operating picture.</p>
+                    </td>
+                  </tr>
+                </table>
+                <h2 style="font-size:22px;line-height:1.2;margin:0 0 12px;">Already built</h2>
+                <p style="font-size:16px;line-height:1.6;margin:0;">Corgtex already brings together the Organization Brain, governance workflows, member and role visibility, meeting intelligence, action tracking, finance controls, CRM follow-up, Slack-aware briefings, and AI agents that can help teams turn scattered activity into operating clarity.</p>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>`;
+}
 
 type BuildArtifactDigestItem = {
   repositoryOwner: string;
@@ -70,6 +146,7 @@ export async function runDailyDigest(params: {
   workflowJobId?: string;
   agentRunId?: string;
   dateISO: string;
+  cadence?: NewspaperCadence;
   model?: string;
 }) {
   const agentActor: AppActor = {
@@ -78,7 +155,29 @@ export async function runDailyDigest(params: {
     label: "daily-digest-agent",
   };
 
-  const since = new Date(new Date(params.dateISO).getTime() - 24 * 60 * 60 * 1000);
+  const cadence = normalizeNewspaperCadence(params.cadence);
+  const workspaceCadence = await getWorkspaceNewspaperCadence(params.workspaceId);
+  const activeMembers = await prisma.member.findMany({
+    where: { workspaceId: params.workspaceId, isActive: true },
+    include: { user: { select: { email: true, displayName: true, id: true } } },
+  });
+  const recipientMembers = activeMembers.filter((member) => (
+    (member.newspaperCadence ?? workspaceCadence) === cadence
+  ));
+
+  if (recipientMembers.length === 0) {
+    return {
+      success: true,
+      message: `No active members configured for the ${cadence.toLowerCase()} newspaper.`,
+      cadence,
+      processedSessions: 0,
+      processedSlackMessages: 0,
+      updatedProfiles: 0,
+    };
+  }
+
+  const lookbackDays = LOOKBACK_DAYS_BY_CADENCE[cadence];
+  const since = new Date(new Date(params.dateISO).getTime() - lookbackDays * 24 * 60 * 60 * 1000);
   const model = params.model ?? resolveModel(
     AGENT_REGISTRY["daily-digest"].defaultModelTier,
     await getAgentModelOverride(params.workspaceId, "daily-digest"),
@@ -273,14 +372,14 @@ Rules:
     messages: [
       {
         role: "system",
-        content: `You are generating a Daily Digest / Newspaper for the workspace based on yesterday's conversations.
+        content: `You are generating a ${cadenceLabel(cadence)} Newspaper for the workspace based on the last ${lookbackDays} day(s) of conversations.
 Format it as a markdown article containing these sections:
-- ✧ Key Decisions Made
-- ✓ Action Items Identified
+- Key Decisions Made
+- Action Items Identified
 - Built / Shipped Work
-- ▫ Conversation Highlights
-- ● Team Pulse (aggregate sentiment)
-- △ Emerging Tensions (recurring themes)`
+- Conversation Highlights
+- Team Pulse (aggregate sentiment)
+- Emerging Tensions (recurring themes)`
       },
       {
         role: "user",
@@ -289,8 +388,8 @@ Format it as a markdown article containing these sections:
     ]
   });
 
-  const digestTitle = `Daily Digest - ${params.dateISO.split("T")[0]}`;
-  const digestSlug = `digest-${params.dateISO.split("T")[0]}`;
+  const digestTitle = `${cadenceLabel(cadence)} Newspaper - ${params.dateISO.split("T")[0]}`;
+  const digestSlug = `${cadence.toLowerCase()}-newspaper-${params.dateISO.split("T")[0]}`;
 
   await createArticle(agentActor, {
     workspaceId: params.workspaceId,
@@ -305,12 +404,7 @@ Format it as a markdown article containing these sections:
   await rebuildBacklinks(agentActor, { workspaceId: params.workspaceId });
 
   // 6. Send personalized digest emails
-  const activeMembers = await prisma.member.findMany({
-    where: { workspaceId: params.workspaceId, isActive: true },
-    include: { user: { select: { email: true, displayName: true, id: true } } },
-  });
-
-  for (const member of activeMembers) {
+  for (const member of recipientMembers) {
     const personArticle = await prisma.brainArticle.findUnique({
       where: {
         workspaceId_slug: {
@@ -345,7 +439,7 @@ Output clean HTML suitable for email (use inline styles).`
 
     await sendEmail({
       to: member.user.email,
-      subject: `✉ ${digestTitle} — Your Personal Briefing`,
+      subject: `${digestTitle} - Your Personal Briefing`,
       html: personalizedDigest.content,
     });
   }
@@ -353,8 +447,61 @@ Output clean HTML suitable for email (use inline styles).`
   return {
     success: true,
     digestSlug,
+    cadence,
     processedSessions: sessions.length,
     processedSlackMessages: slackMessages.length,
     updatedProfiles: memberUpdates.length
   };
+}
+
+export async function sendDemoWelcomeNewspaper(params: {
+  workspaceId: string;
+  demoLeadId: string;
+}) {
+  const lead = await prisma.demoLead.findFirst({
+    where: {
+      id: params.demoLeadId,
+      workspaceId: params.workspaceId,
+    },
+    include: {
+      workspace: { select: { name: true } },
+    },
+  });
+
+  if (!lead) {
+    return { success: true, skipped: true, message: "Demo lead not found." };
+  }
+
+  if (lead.welcomeEmailSentAt) {
+    return { success: true, skipped: true, message: "Welcome newspaper already sent." };
+  }
+
+  await sendEmail({
+    to: lead.email,
+    subject: "Welcome to Corgtex - your first newspaper",
+    html: buildDemoWelcomeNewspaperHtml({ workspaceName: lead.workspace.name }),
+  });
+
+  await prisma.$transaction(async (tx) => {
+    await tx.demoLead.update({
+      where: { id: lead.id },
+      data: { welcomeEmailSentAt: new Date() },
+    });
+
+    await tx.crmActivity.create({
+      data: {
+        workspaceId: params.workspaceId,
+        contactId: lead.convertedContactId,
+        type: "EMAIL",
+        title: "Sent welcome newspaper",
+        bodyMd: [
+          "Sent the Corgtex welcome newspaper.",
+          "",
+          "The email described how Corgtex helps organizations keep shared memory, decision visibility, work follow-through, and business visibility in one operating picture.",
+        ].join("\n"),
+      },
+    });
+  });
+
+  return { success: true, skipped: false };
 }

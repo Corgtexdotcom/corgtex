@@ -67,4 +67,51 @@ describe("agent-config", () => {
       });
     });
   });
+
+  describe("newspaper cadence", () => {
+    it("defaults workspace newspaper cadence to daily when unset", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { getWorkspaceNewspaperCadence } = await import("./agent-config");
+
+      vi.mocked(prisma.workspaceAgentConfig.findUnique).mockResolvedValue(null);
+
+      await expect(getWorkspaceNewspaperCadence("ws-1")).resolves.toBe("DAILY");
+    });
+
+    it("reads configured workspace newspaper cadence", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { getWorkspaceNewspaperCadence } = await import("./agent-config");
+
+      vi.mocked(prisma.workspaceAgentConfig.findUnique).mockResolvedValue({
+        configJson: { newspaperCadence: "WEEKLY" },
+      } as any);
+
+      await expect(getWorkspaceNewspaperCadence("ws-1")).resolves.toBe("WEEKLY");
+    });
+
+    it("merges admin newspaper cadence into the daily digest config", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { updateWorkspaceNewspaperCadence } = await import("./agent-config");
+
+      vi.mocked(prisma.workspaceAgentConfig.findUnique).mockResolvedValue({
+        configJson: { existing: true },
+      } as any);
+      vi.mocked(prisma.workspaceAgentConfig.upsert).mockResolvedValue({} as any);
+
+      await updateWorkspaceNewspaperCadence(
+        { kind: "user", user: { id: "u-1" } } as any,
+        { workspaceId: "ws-1", cadence: "WEEKLY" },
+      );
+
+      expect(prisma.workspaceAgentConfig.upsert).toHaveBeenCalledWith(expect.objectContaining({
+        where: { workspaceId_agentKey: { workspaceId: "ws-1", agentKey: "daily-digest" } },
+        create: expect.objectContaining({
+          configJson: { existing: true, newspaperCadence: "WEEKLY" },
+        }),
+        update: {
+          configJson: { existing: true, newspaperCadence: "WEEKLY" },
+        },
+      }));
+    });
+  });
 });

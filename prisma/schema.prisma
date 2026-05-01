@@ -34,6 +34,11 @@ enum MemberRole {
   ADMIN
 }
 
+enum NewspaperCadence {
+  DAILY
+  WEEKLY
+}
+
 enum MemberInviteRequestStatus {
   PENDING
   APPROVED
@@ -613,12 +618,13 @@ model PasswordResetToken {
 }
 
 model Member {
-  id          String     @id @default(uuid())
-  workspaceId String
-  userId      String
-  role        MemberRole @default(CONTRIBUTOR)
-  isActive    Boolean    @default(true)
-  joinedAt    DateTime   @default(now())
+  id               String            @id @default(uuid())
+  workspaceId      String
+  userId           String
+  role             MemberRole        @default(CONTRIBUTOR)
+  isActive         Boolean           @default(true)
+  joinedAt         DateTime          @default(now())
+  newspaperCadence NewspaperCadence?
 
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
