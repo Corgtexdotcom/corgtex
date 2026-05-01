@@ -701,7 +701,6 @@ export async function schedulePeriodicJobs() {
         const dedupeKey = `sync-${source.id}-${Math.floor(now.getTime() / (source.pullCadenceMinutes * 60000))}`;
         await enqueueJob(tx, {
           workspaceId: source.workspaceId,
-          eventId: `schedule-${now.getTime()}`,
           type: "data-source.sync",
           payload: { sourceId: source.id },
           dedupeKey,
@@ -714,7 +713,6 @@ export async function schedulePeriodicJobs() {
     for (const installation of slackInstallations) {
       await enqueueJob(tx, {
         workspaceId: installation.workspaceId,
-        eventId: `schedule-${now.getTime()}`,
         type: "communication.slack.proactive-scan",
         payload: { installationId: installation.id },
         dedupeKey: `${installation.id}:slack-proactive-scan:${hourlyBucket}`,
@@ -814,11 +812,9 @@ export async function scheduleDailyJobs() {
   }
 
   await prisma.$transaction(async (tx) => {
-    const eventId = `cron-${now.getTime()}`;
     for (const workspace of workspaces) {
       await enqueueJob(tx, {
         workspaceId: workspace.id,
-        eventId,
         type: "communication.raw-retention",
         payload: { dateISO: now.toISOString() },
         dedupeKey: `${workspace.id}:communication-retention:${todayISO}`,
@@ -829,7 +825,6 @@ export async function scheduleDailyJobs() {
     for (const schedule of newspaperSchedules) {
       await enqueueJob(tx, {
         workspaceId: schedule.workspaceId,
-        eventId,
         type: "brain.daily-digest",
         payload: { dateISO: now.toISOString(), cadence: schedule.cadence },
         dedupeKey: schedule.dedupeKey,
@@ -845,7 +840,6 @@ export async function scheduleDailyJobs() {
     for (const installation of slackArchiveWorkspaces) {
       await enqueueJob(tx, {
         workspaceId: installation.workspaceId,
-        eventId,
         type: "communication.slack.public-archive",
         payload: { dateISO: now.toISOString() },
         dedupeKey: `${installation.workspaceId}:slack-public-archive:${todayISO}`,
