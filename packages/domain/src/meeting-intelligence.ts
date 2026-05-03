@@ -63,8 +63,12 @@ Extract all:
 For each item, provide:
 - operation: CREATE for new records/decisions/follow-ups, RESOLVE for existing records resolved in this meeting
 - type: one of DECISION, TENSION, ACTION_ITEM, PROPOSAL, FOLLOW_UP
-- title: concise one-line summary
-- body: detailed description in markdown
+- title: a concise numbered summary, e.g. "#001 > Owner Name Topic/Category - short description"
+- body: use this structured markdown format:
+  **CONTEXT:** [Background or situation that prompted this item]
+  **REQUEST:** [What was asked, raised, or proposed]
+  **ANSWER:** [What was decided, agreed upon, or the next step]
+  **RESULT:** [PROCESSED / OPEN / PENDING — the current status]
 - assigneeHint: who is responsible (display name from transcript), or null
 - confidence: 0.0-1.0 how confident you are
 - sourceQuote: the relevant transcript excerpt (max 200 chars)
@@ -72,6 +76,7 @@ For each item, provide:
 - resolutionOutcome only for resolved proposals: ADOPTED, NOT_ADOPTED, or WITHDRAWN
 
 Be conservative — only extract items you're confident about.
+Number items sequentially (#001, #002, ...) across all types.
 `;
 
   const schemaHint = `
