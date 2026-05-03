@@ -19,7 +19,7 @@ vi.mock("@corgtex/shared", async (importOriginal) => {
         findMany: vi.fn(),
         findUnique: vi.fn().mockResolvedValue({ id: "member-123", workspaceId: "ws-1", userId: "user-123", role: "ADMIN", isActive: true }),
       },
-      meeting: { 
+      meeting: {
         update: vi.fn(),
         findUnique: vi.fn(),
         findUniqueOrThrow: vi.fn(),
