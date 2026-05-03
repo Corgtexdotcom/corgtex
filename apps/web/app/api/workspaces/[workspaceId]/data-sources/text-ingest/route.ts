@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
-import { ingestSource, requireWorkspaceMembership } from "@corgtex/domain";
+import { ingestSource, intakeMeetingTranscript, requireWorkspaceMembership } from "@corgtex/domain";
 import type { BrainSourceType } from "@prisma/client";
 
 export async function POST(request: NextRequest, { params }: { params: Promise<{ workspaceId: string }> }) {
@@ -11,10 +11,29 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     const membership = await requireWorkspaceMembership({ actor, workspaceId });
     
     const body = await request.json();
-    const { title, sourceType, channel, content } = body;
+    const { title, sourceType, channel, content, recordedAt } = body;
     
     if (!content || typeof content !== "string") {
       return NextResponse.json({ error: { message: "Content is required" } }, { status: 400 });
+    }
+
+    // Route MEETING sources through the meeting transcript intake pipeline
+    // which creates a proper Meeting record and triggers the full meeting
+    // intelligence pipeline (summary → insights → auto-apply → Slack post).
+    if (String(sourceType || "ARTICLE") === "MEETING") {
+      const result = await intakeMeetingTranscript(actor, {
+        workspaceId,
+        transcript: content,
+        title: title ? String(title) : null,
+        source: channel ? String(channel) : "text-paste",
+        recordedAt: recordedAt ? String(recordedAt) : null,
+      });
+
+      if (result.status === "needs_clarification") {
+        return NextResponse.json(result, { status: 409 });
+      }
+
+      return NextResponse.json(result, { status: 201 });
     }
     
     const source = await ingestSource(actor, {

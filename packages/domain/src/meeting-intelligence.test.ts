@@ -19,9 +19,20 @@ vi.mock("@corgtex/shared", async (importOriginal) => {
         findMany: vi.fn(),
         findUnique: vi.fn().mockResolvedValue({ id: "member-123", workspaceId: "ws-1", userId: "user-123", role: "ADMIN", isActive: true }),
       },
-      meeting: { update: vi.fn() },
+      meeting: {
+        update: vi.fn(),
+        findUnique: vi.fn(),
+        findUniqueOrThrow: vi.fn(),
+      },
+      action: {
+        findMany: vi.fn().mockResolvedValue([]),
+      },
+      tension: {
+        findMany: vi.fn().mockResolvedValue([]),
+      },
       proposal: {
         findFirst: vi.fn(),
+        findMany: vi.fn().mockResolvedValue([]),
         update: vi.fn(),
       },
       policyCorpus: {
@@ -31,6 +42,7 @@ vi.mock("@corgtex/shared", async (importOriginal) => {
         create: vi.fn(),
       },
       meetingInsight: {
+        create: vi.fn(),
         createMany: vi.fn(),
         deleteMany: vi.fn(),
         findMany: vi.fn(),
@@ -42,6 +54,12 @@ vi.mock("@corgtex/shared", async (importOriginal) => {
     },
   };
 });
+
+vi.mock("@corgtex/models", () => ({
+  defaultModelGateway: {
+    extract: vi.fn(),
+  },
+}));
 
 vi.mock("./actions", () => ({
   createAction: createActionMock,
@@ -100,9 +118,48 @@ describe("meeting-intelligence", () => {
   });
 
   describe("extractMeetingInsights", () => {
-    it("should extract insights and update meeting", async () => {
-      // For now just testing the module exports exist and are callable
-      expect(extractMeetingInsights).toBeDefined();
+    it("should call model gateway to extract structured insights and create records", async () => {
+      const { defaultModelGateway } = await import("@corgtex/models");
+      (defaultModelGateway.extract as ReturnType<typeof vi.fn>).mockResolvedValue({
+        output: {
+          insights: [
+            {
+              type: "ACTION_ITEM",
+              operation: "CREATE",
+              title: "#001 > Alice Next Steps - follow up on email",
+              body: "**CONTEXT:** Received customer feedback\n**REQUEST:** Need to follow up\n**ANSWER:** Alice will follow up\n**RESULT:** OPEN",
+              assigneeHint: "Alice",
+              confidence: 0.9,
+              sourceQuote: "I will follow up tomorrow",
+            }
+          ]
+        }
+      });
+
+      // Mock dependencies
+      (prisma.meeting.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue({
+        id: "meeting-1",
+        workspaceId: "ws-1",
+        transcript: "Alice: I will follow up tomorrow.",
+      });
+      (prisma.meetingInsight.create as ReturnType<typeof vi.fn>).mockResolvedValue({ id: "insight-1" });
+
+      await extractMeetingInsights(mockActor, {
+        workspaceId: "ws-1",
+        meetingId: "meeting-1"
+      });
+
+      expect(defaultModelGateway.extract).toHaveBeenCalledWith(expect.objectContaining({
+        workspaceId: "ws-1",
+        instruction: expect.stringContaining("Number items sequentially"),
+      }));
+      expect(prisma.meetingInsight.create).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({
+          type: "ACTION_ITEM",
+          title: "#001 > Alice Next Steps - follow up on email",
+          bodyMd: expect.stringContaining("**CONTEXT:**"),
+        })
+      }));
     });
   });
 
