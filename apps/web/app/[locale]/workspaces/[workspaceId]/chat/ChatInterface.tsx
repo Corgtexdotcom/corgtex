@@ -31,6 +31,9 @@ function renderAssistantMarkdown(markdown: string) {
   return marked.parse(escaped) as string;
 }
 
+const MAX_MESSAGE_LENGTH = 100_000;
+const WARNING_LENGTH = 80_000;
+
 export function ChatInterface({
   workspaceId,
   conversations: initialConversations,
@@ -156,6 +159,12 @@ export function ChatInterface({
     setError(null);
 
     let userMessage = input.trim();
+
+    if (userMessage.length > MAX_MESSAGE_LENGTH) {
+      setError(`This message is too long (${userMessage.length.toLocaleString()} characters). Please use the + button to upload it as a file instead.`);
+      setLoading(false);
+      return;
+    }
 
     if (attachedFile) {
       try {
@@ -546,16 +555,24 @@ export function ChatInterface({
             >
               {t("btnAttach")}
             </button>
-            <textarea
-              ref={inputRef}
-              value={input}
-              onChange={(event) => setInput(event.target.value)}
-              onKeyDown={handleKeyDown}
-              placeholder={t("placeholderTypeMessage")}
-              rows={1}
-              disabled={loading}
-              className="chat-input"
-            />
+            <div style={{ flex: 1, display: "flex", flexDirection: "column" }}>
+              <textarea
+                ref={inputRef}
+                value={input}
+                onChange={(event) => setInput(event.target.value)}
+                onKeyDown={handleKeyDown}
+                placeholder={t("placeholderTypeMessage")}
+                rows={1}
+                disabled={loading}
+                className="chat-input"
+                style={{ width: "100%" }}
+              />
+              {input.length > WARNING_LENGTH && (
+                <div style={{ fontSize: "0.75rem", color: input.length > MAX_MESSAGE_LENGTH ? "var(--destructive)" : "var(--muted)", alignSelf: "flex-end", marginTop: "4px" }}>
+                  {input.length.toLocaleString()} / {MAX_MESSAGE_LENGTH.toLocaleString()}
+                </div>
+              )}
+            </div>
             <button
               onClick={() => void sendMessage()}
               disabled={loading || (!input.trim() && !attachedFile)}

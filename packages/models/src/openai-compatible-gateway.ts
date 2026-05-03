@@ -41,6 +41,7 @@ type EmbeddingApiResponse = {
 };
 
 const REQUEST_TIMEOUT_MS = 45_000;
+const STREAM_TIMEOUT_MS = 120_000;
 const MAX_REQUEST_RETRIES = 2;
 const OPENROUTER_TITLE = "Corgtex";
 
@@ -353,7 +354,7 @@ async function* completeChatStream(
         method: "POST",
         headers: requestHeaders(),
         body: payload,
-        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        signal: AbortSignal.timeout(STREAM_TIMEOUT_MS),
       });
 
       if (!response.ok) {
