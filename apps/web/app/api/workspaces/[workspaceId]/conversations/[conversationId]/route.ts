@@ -5,6 +5,8 @@ import { defaultModelGateway } from "@corgtex/models";
 import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
 
+const MAX_MESSAGE_LENGTH = 100_000;
+
 export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ workspaceId: string; conversationId: string }> },
@@ -30,6 +32,13 @@ export async function POST(
     const userMessage = String(body.message ?? "").trim();
     if (!userMessage) {
       return NextResponse.json({ error: "Message is required." }, { status: 400 });
+    }
+
+    if (userMessage.length > MAX_MESSAGE_LENGTH) {
+      return NextResponse.json(
+        { error: `Message is too long (${userMessage.length.toLocaleString()} characters). Maximum is ${MAX_MESSAGE_LENGTH.toLocaleString()} characters. For long transcripts, use the attachment (+) button to upload as a file.` },
+        { status: 413 }
+      );
     }
 
     const conversation = await getConversation(actor, workspaceId, conversationId);

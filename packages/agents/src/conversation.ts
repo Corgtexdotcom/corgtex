@@ -186,10 +186,12 @@ export async function processConversationTurn(ctx: ConversationContext): Promise
 }> {
   await assertWorkspaceModelBudget(ctx.workspaceId);
 
+  const effectiveHistoryTurns = ctx.userMessage.length > 10_000 ? 5 : MAX_HISTORY_TURNS;
+
   const priorTurnsDesc = await prisma.conversationTurn.findMany({
     where: { conversationId: ctx.sessionId },
     orderBy: { sequenceNumber: "desc" },
-    take: MAX_HISTORY_TURNS,
+    take: effectiveHistoryTurns,
     select: {
       sequenceNumber: true,
       userMessage: true,
@@ -201,12 +203,13 @@ export async function processConversationTurn(ctx: ConversationContext): Promise
 
   // Search knowledge if the message looks like a question or references workspace concepts
   let knowledgeResults: unknown[] = [];
+  const effectiveKnowledgeLimit = ctx.userMessage.length > 10_000 ? 2 : KNOWLEDGE_SEARCH_LIMIT;
   if (ctx.userMessage.length > 10) {
     try {
       const results = await searchIndexedKnowledge({
         workspaceId: ctx.workspaceId,
         query: ctx.userMessage,
-        limit: KNOWLEDGE_SEARCH_LIMIT,
+        limit: effectiveKnowledgeLimit,
       });
       knowledgeResults = Array.isArray(results) ? results : [];
     } catch {
@@ -365,10 +368,12 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
 }> {
   await assertWorkspaceModelBudget(ctx.workspaceId);
 
+  const effectiveHistoryTurns = ctx.userMessage.length > 10_000 ? 5 : MAX_HISTORY_TURNS;
+
   const priorTurnsDesc = await prisma.conversationTurn.findMany({
     where: { conversationId: ctx.sessionId },
     orderBy: { sequenceNumber: "desc" },
-    take: MAX_HISTORY_TURNS,
+    take: effectiveHistoryTurns,
     select: {
       sequenceNumber: true,
       userMessage: true,
@@ -379,12 +384,13 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
   const turnCount = priorTurns.at(-1)?.sequenceNumber ?? 0;
 
   let knowledgeResults: unknown[] = [];
+  const effectiveKnowledgeLimit = ctx.userMessage.length > 10_000 ? 2 : KNOWLEDGE_SEARCH_LIMIT;
   if (ctx.userMessage.length > 10) {
     try {
       const results = await searchIndexedKnowledge({
         workspaceId: ctx.workspaceId,
         query: ctx.userMessage,
-        limit: KNOWLEDGE_SEARCH_LIMIT,
+        limit: effectiveKnowledgeLimit,
       });
       knowledgeResults = Array.isArray(results) ? results : [];
     } catch {
