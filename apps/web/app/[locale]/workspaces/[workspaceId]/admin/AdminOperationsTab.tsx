@@ -41,9 +41,9 @@ export function AdminOperationsTab({ data, workspaceId }: Props) {
     <div className="admin-operations stack" style={{ gap: 32 }}>
       
       <section className="stack" style={{ gap: 16 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <div className="admin-section-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <h2 className="title-lg">{t("externalInstances")}</h2>
-          <div style={{ display: "flex", gap: 8 }}>
+          <div className="admin-header-actions" style={{ display: "flex", gap: 8 }}>
             <button className="btn" onClick={() => setShowProvision(!showProvision)}>
               Provision hosted customer
             </button>
@@ -57,7 +57,7 @@ export function AdminOperationsTab({ data, workspaceId }: Props) {
           <div className="card" style={{ padding: 24 }}>
             <form action={adminProvisionHostedCustomerAction} className="stack" style={{ gap: 16 }}>
               <input type="hidden" name="workspaceId" value={workspaceId} />
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 16 }}>
+              <div className="admin-form-grid admin-form-grid-3" style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 16 }}>
                 <div className="form-group">
                   <label>Customer label</label>
                   <input type="text" name="label" className="input" required placeholder="Acme Production" />
@@ -158,7 +158,7 @@ export function AdminOperationsTab({ data, workspaceId }: Props) {
           <div className="card" style={{ padding: 24 }}>
             <form action={adminRegisterInstanceAction} className="stack" style={{ gap: 16 }}>
               <input type="hidden" name="workspaceId" value={workspaceId} />
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+              <div className="admin-form-grid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
                 <div className="form-group">
                   <label>{t("instanceLabel")}</label>
                   <input type="text" name="label" className="input" required placeholder="e.g. Acme Corp Prod" />
@@ -199,7 +199,7 @@ export function AdminOperationsTab({ data, workspaceId }: Props) {
           </div>
         )}
 
-        <div className="card">
+        <div className="card admin-table-card admin-instance-table">
           <table className="table" style={{ width: "100%", textAlign: "left", borderCollapse: "collapse" }}>
             <thead>
               <tr style={{ borderBottom: "1px solid var(--border-color)" }}>
@@ -225,16 +225,16 @@ export function AdminOperationsTab({ data, workspaceId }: Props) {
                 </tr>
               ) : data.instances.map(inst => (
                 <tr key={inst.id} style={{ borderBottom: "1px solid var(--border-color)" }}>
-                  <td style={{ padding: 12 }}>{inst.label}</td>
-                  <td style={{ padding: 12 }}>
+                  <td data-label={t("instanceLabel")} style={{ padding: 12 }}>{inst.label}</td>
+                  <td data-label={t("instanceUrl")} style={{ padding: 12 }}>
                     <a href={inst.url} target="_blank" rel="noreferrer" style={{ color: "var(--accent-11)" }}>
                       {inst.url}
                     </a>
                   </td>
-                  <td style={{ padding: 12 }}>{inst.environment || "—"}</td>
-                  <td style={{ padding: 12 }}>{inst.region || "—"}</td>
-                  <td style={{ padding: 12 }}>{inst.releaseImageTag || inst.releaseVersion || "—"}</td>
-                  <td style={{ padding: 12, minWidth: 220 }}>
+                  <td data-label={t("instanceEnvironment")} style={{ padding: 12 }}>{inst.environment || "—"}</td>
+                  <td data-label="Region" style={{ padding: 12 }}>{inst.region || "—"}</td>
+                  <td data-label="Release" style={{ padding: 12 }}>{inst.releaseImageTag || inst.releaseVersion || "—"}</td>
+                  <td data-label="Readiness" style={{ padding: 12, minWidth: 220 }}>
                     <details>
                       <summary style={{ color: readinessColor(inst.readiness?.status), fontWeight: 600 }}>
                         {readinessLabel(inst.readiness?.status)}
@@ -254,12 +254,12 @@ export function AdminOperationsTab({ data, workspaceId }: Props) {
                       </div>
                     </details>
                   </td>
-                  <td style={{ padding: 12 }}>{inst.provisioningStatus || "draft"}</td>
-                  <td style={{ padding: 12 }}>{inst.bootstrapStatus || "not_started"}</td>
-                  <td style={{ padding: 12 }}>
+                  <td data-label="Provisioning" style={{ padding: 12 }}>{inst.provisioningStatus || "draft"}</td>
+                  <td data-label="Bootstrap" style={{ padding: 12 }}>{inst.bootstrapStatus || "not_started"}</td>
+                  <td data-label={t("instanceLastChecked")} style={{ padding: 12 }}>
                     {inst.lastHealthCheck ? new Date(inst.lastHealthCheck).toLocaleString() : "Never"}
                   </td>
-                  <td style={{ padding: 12 }}>
+                  <td data-label={t("colStatus")} style={{ padding: 12 }}>
                     {inst.lastHealthStatus === "ok" ? (
                       <span style={{ color: "var(--green-11)", fontWeight: 500 }}>{t("instanceHealthOk")}</span>
                     ) : inst.lastHealthStatus === "degraded" ? (
@@ -270,8 +270,8 @@ export function AdminOperationsTab({ data, workspaceId }: Props) {
                       <span className="muted">{t("instanceHealthUnknown")}</span>
                     )}
                   </td>
-                  <td style={{ padding: 12 }}>
-                    <div style={{ display: "flex", gap: 8 }}>
+                  <td data-label={t("colActions")} style={{ padding: 12 }}>
+                    <div className="admin-table-actions" style={{ display: "flex", gap: 8 }}>
                       <form action={adminProbeInstanceHealthAction}>
                         <input type="hidden" name="workspaceId" value={workspaceId} />
                         <input type="hidden" name="instanceId" value={inst.id} />
@@ -332,7 +332,7 @@ export function AdminOperationsTab({ data, workspaceId }: Props) {
             <div className="muted">{t("noFailedJobsGlobal")}</div>
           </div>
         ) : (
-          <div className="card">
+          <div className="card admin-table-card">
             <table className="table" style={{ width: "100%", textAlign: "left", borderCollapse: "collapse" }}>
               <thead>
                 <tr style={{ borderBottom: "1px solid var(--border-color)" }}>
@@ -345,11 +345,11 @@ export function AdminOperationsTab({ data, workspaceId }: Props) {
               <tbody>
                 {data.failedJobs.map(job => (
                   <tr key={job.id} style={{ borderBottom: "1px solid var(--border-color)" }}>
-                    <td style={{ padding: 12 }}>{job.workspace.name}</td>
-                    <td style={{ padding: 12 }}>{job.type}</td>
-                    <td style={{ padding: 12 }} className="muted text-sm">{job.error?.substring(0, 100)}</td>
-                    <td style={{ padding: 12 }}>
-                      <div style={{ display: "flex", gap: 8 }}>
+                    <td data-label={t("colWorkspace")} style={{ padding: 12 }}>{job.workspace.name}</td>
+                    <td data-label="Type" style={{ padding: 12 }}>{job.type}</td>
+                    <td data-label="Error" style={{ padding: 12 }} className="muted text-sm">{job.error?.substring(0, 100)}</td>
+                    <td data-label={t("colActions")} style={{ padding: 12 }}>
+                      <div className="admin-table-actions" style={{ display: "flex", gap: 8 }}>
                         <form action={adminRetryFailedJobAction}>
                           <input type="hidden" name="workspaceId" value={workspaceId} />
                           <input type="hidden" name="targetWorkspaceId" value={job.workspaceId} />
@@ -380,7 +380,7 @@ export function AdminOperationsTab({ data, workspaceId }: Props) {
             <div className="muted">{t("noCommunicationErrors")}</div>
           </div>
         ) : (
-          <div className="card">
+          <div className="card admin-table-card">
             <table className="table" style={{ width: "100%", textAlign: "left", borderCollapse: "collapse" }}>
               <thead>
                 <tr style={{ borderBottom: "1px solid var(--border-color)" }}>
@@ -393,12 +393,12 @@ export function AdminOperationsTab({ data, workspaceId }: Props) {
               <tbody>
                 {data.commErrors.map(err => (
                   <tr key={err.id} style={{ borderBottom: "1px solid var(--border-color)" }}>
-                    <td style={{ padding: 12 }}>{err.workspace.name}</td>
-                    <td style={{ padding: 12 }}>{err.provider}</td>
-                    <td style={{ padding: 12 }}>
+                    <td data-label={t("colWorkspace")} style={{ padding: 12 }}>{err.workspace.name}</td>
+                    <td data-label="Provider" style={{ padding: 12 }}>{err.provider}</td>
+                    <td data-label={t("colStatus")} style={{ padding: 12 }}>
                       <span style={{ color: "var(--red-11)", fontWeight: 500 }}>{err.status}</span>
                     </td>
-                    <td style={{ padding: 12 }} className="muted text-sm">{err.lastError?.substring(0, 100) || "—"}</td>
+                    <td data-label="Error" style={{ padding: 12 }} className="muted text-sm">{err.lastError?.substring(0, 100) || "—"}</td>
                   </tr>
                 ))}
               </tbody>
