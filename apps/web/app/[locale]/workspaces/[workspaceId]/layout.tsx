@@ -12,6 +12,7 @@ import { LanguageSwitcher } from "./LanguageSwitcher";
 import { ThemeToggle } from "../../../ThemeToggle";
 import { buildWorkspaceCapabilities } from "@/lib/workspace-capabilities";
 import { filterNavGroupsByWorkspaceAccess, getWorkspaceFeatureFlags } from "@/lib/workspace-feature-flags";
+import { MobileWorkspaceShell } from "./MobileWorkspaceShell";
 
 export const dynamic = "force-dynamic";
 
@@ -50,16 +51,35 @@ export default async function WorkspaceLayout({
   const visibleNavGroups = filterNavGroupsByWorkspaceAccess(navGroups, featureFlags, capabilities);
   const tNav = await getTranslations("nav");
   const tCommon = await getTranslations("common");
+  const currentBranding = current ? workspaceBranding(current) : { primaryName: "Corgtex", secondaryLabel: "Workspace" };
+  const conversationSummaries = conversations.map((c: any) => ({
+    id: c.id,
+    topic: c.topic,
+    agentKey: c.agentKey,
+    status: c.status,
+    updatedAt: c.updatedAt.toISOString(),
+    lastMessage: c.turns?.[0]?.assistantMessage?.slice(0, 100) ?? null,
+  }));
 
   return (
     <div className="ws-layout">
       <CommandPalette workspaceId={workspaceId} workspaces={workspaces} navGroups={visibleNavGroups} />
+      <MobileWorkspaceShell
+        workspaceId={workspaceId}
+        workspaceName={currentBranding.primaryName}
+        workspaceLabel={currentBranding.secondaryLabel}
+        navGroups={visibleNavGroups}
+        unreadCount={unreadCount}
+        conversations={conversationSummaries}
+        showLanguageSwitcher={!!featureFlags.MULTILINGUAL}
+        showPlatformAdmin={isGlobalOperator(actor)}
+      />
       <aside className="ws-sidebar">
         <div className="ws-sidebar-header">
-          <a href="/" className="ws-logo">{current ? workspaceBranding(current).primaryName : "Corgtex"}</a>
+          <a href="/" className="ws-logo">{currentBranding.primaryName}</a>
           {current && (
             <div className="ws-workspace-name" style={{ marginTop: "2px", fontWeight: 500, opacity: 0.8, fontSize: "0.8rem", letterSpacing: "0.02em" }}>
-              {workspaceBranding(current).secondaryLabel}
+              {currentBranding.secondaryLabel}
             </div>
           )}
         </div>
@@ -124,14 +144,7 @@ export default async function WorkspaceLayout({
       <aside className="ws-agent-sidebar">
         <ChatInterface
           workspaceId={workspaceId}
-          conversations={conversations.map((c: any) => ({
-            id: c.id,
-            topic: c.topic,
-            agentKey: c.agentKey,
-            status: c.status,
-            updatedAt: c.updatedAt.toISOString(),
-            lastMessage: c.turns?.[0]?.assistantMessage?.slice(0, 100) ?? null,
-          }))}
+          conversations={conversationSummaries}
           activeSessionId={null}
           compact={true}
         />

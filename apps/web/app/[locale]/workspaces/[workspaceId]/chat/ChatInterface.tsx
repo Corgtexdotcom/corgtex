@@ -39,11 +39,13 @@ export function ChatInterface({
   conversations: initialConversations,
   activeSessionId,
   compact = false,
+  mobileMode = false,
 }: {
   workspaceId: string;
   conversations: ConversationSummary[];
   activeSessionId: string | null;
   compact?: boolean;
+  mobileMode?: boolean;
 }) {
   const t = useTranslations("chat");
   const [conversations, setConversations] = useState(initialConversations);
@@ -54,7 +56,8 @@ export function ChatInterface({
   const [error, setError] = useState<string | null>(null);
   const [isFullScreen, setIsFullScreen] = useState(false);
   const [attachedFile, setAttachedFile] = useState<File | null>(null);
-  const [showNewChat, setShowNewChat] = useState(false);
+  const [showNewChat, setShowNewChat] = useState(mobileMode);
+  const [showMobileHistory, setShowMobileHistory] = useState(false);
   const [editingTopic, setEditingTopic] = useState(false);
   const [editTopicValue, setEditTopicValue] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -113,11 +116,14 @@ export function ChatInterface({
     if (!compact) {
       window.history.pushState({}, "", `/workspaces/${workspaceId}/chat`);
     }
-    setTimeout(() => inputRef.current?.focus(), 50);
+    if (!mobileMode) {
+      setTimeout(() => inputRef.current?.focus(), 50);
+    }
   }
 
   function openConversation(id: string) {
     setShowNewChat(false);
+    setShowMobileHistory(false);
     setEditingTopic(false);
     if (!compact) {
       window.history.pushState({}, "", `/workspaces/${workspaceId}/chat?session=${id}`);
@@ -333,19 +339,50 @@ export function ChatInterface({
       setTurns((prev) => prev.filter((turn) => turn.id !== optimisticTurn.id));
     } finally {
       setLoading(false);
-      inputRef.current?.focus();
+      if (!mobileMode && !window.matchMedia("(pointer: coarse)").matches) {
+        inputRef.current?.focus();
+      }
     }
   }
 
   function handleKeyDown(event: React.KeyboardEvent) {
-    if (event.key === "Enter" && !event.shiftKey) {
+    const coarsePointer = typeof window !== "undefined" && window.matchMedia("(pointer: coarse)").matches;
+    if (event.key === "Enter" && !event.shiftKey && !coarsePointer) {
       event.preventDefault();
       void sendMessage();
     }
   }
 
+  function renderConversationList() {
+    return (
+      <div className="chat-session-list">
+        {conversations.map((conversation) => (
+          <button
+            key={conversation.id}
+            type="button"
+            onClick={() => openConversation(conversation.id)}
+            className={`chat-session-item ${conversation.id === sessionId ? "active" : ""}`}
+          >
+            <div className="chat-session-topic">{conversation.topic || t("newConversation")}</div>
+            <div className="chat-session-meta">
+              <div className="chat-session-preview">{conversation.lastMessage || t("emptyPreview")}</div>
+              <div className="chat-session-time">
+                {formatConversationDate(conversation.updatedAt)}
+              </div>
+            </div>
+          </button>
+        ))}
+        {conversations.length === 0 && (
+          <div style={{ padding: "32px 16px", textAlign: "center", color: "var(--muted)", fontSize: "0.85rem" }}>
+            {t("noConversations")}
+          </div>
+        )}
+      </div>
+    );
+  }
+
   return (
-    <div className={isFullScreen ? "chat-fullscreen" : "chat-layout"}>
+    <div className={`${isFullScreen ? "chat-fullscreen" : "chat-layout"} ${mobileMode ? "chat-mobile-mode" : ""}`}>
       {isFullScreen && (
         <div className="chat-header">
           <button
@@ -369,7 +406,7 @@ export function ChatInterface({
       )}
 
       <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
-        {(!isFullScreen && (!compact || (!sessionId && !showNewChat))) && (
+        {(!isFullScreen && (!compact || (!sessionId && !showNewChat && !mobileMode))) && (
           <div className="chat-sidebar" style={compact ? { width: "100%", borderRight: "none" } : undefined}>
             <div className="chat-sidebar-header">
               <h2>{t("conversationsTitle")}</h2>
@@ -382,38 +419,16 @@ export function ChatInterface({
                 {t("btnAttach")}
               </button>
             </div>
-            <div className="chat-session-list">
-              {conversations.map((conversation) => (
-                <button
-                  key={conversation.id}
-                  type="button"
-                  onClick={() => openConversation(conversation.id)}
-                  className={`chat-session-item ${conversation.id === sessionId ? "active" : ""}`}
-                >
-                  <div className="chat-session-topic">{conversation.topic || t("newConversation")}</div>
-                  <div className="chat-session-meta">
-                    <div className="chat-session-preview">{conversation.lastMessage || t("emptyPreview")}</div>
-                    <div className="chat-session-time">
-                      {formatConversationDate(conversation.updatedAt)}
-                    </div>
-                  </div>
-                </button>
-              ))}
-              {conversations.length === 0 && (
-                <div style={{ padding: "32px 16px", textAlign: "center", color: "var(--muted)", fontSize: "0.85rem" }}>
-                  {t("noConversations")}
-                </div>
-              )}
-            </div>
+            {renderConversationList()}
           </div>
         )}
 
-        {(!compact || sessionId || isFullScreen || showNewChat) && (
+        {(!compact || sessionId || isFullScreen || showNewChat || mobileMode) && (
         <div className="chat-main" style={compact ? { width: "100%" } : undefined}>
           {!isFullScreen && (
             <div className="chat-header">
               <div style={{ display: "flex", alignItems: "center", gap: "8px", flex: 1, minWidth: 0 }}>
-                {compact && (
+                {compact && !mobileMode && (
                   <button
                     onClick={() => { setSessionId(null); setShowNewChat(false); setEditingTopic(false); }}
                     style={{ background: "none", border: "none", cursor: "pointer", color: "var(--muted)", padding: "0 4px" }}
@@ -421,6 +436,15 @@ export function ChatInterface({
                     type="button"
                   >
                     {t("btnBackToConversations")}
+                  </button>
+                )}
+                {mobileMode && (
+                  <button
+                    className="chat-mobile-history-btn"
+                    type="button"
+                    onClick={() => setShowMobileHistory(true)}
+                  >
+                    {t("btnHistory")}
                   </button>
                 )}
                 {editingTopic ? (
@@ -451,6 +475,11 @@ export function ChatInterface({
                   </div>
                 )}
               </div>
+              {mobileMode && (
+                <button className="chat-new-btn" type="button" onClick={openNewConversation}>
+                  {t("btnNew")}
+                </button>
+              )}
               <button
                 className="chat-fullscreen-toggle"
                 onClick={() => setIsFullScreen(true)}
@@ -459,6 +488,21 @@ export function ChatInterface({
               >
                 {t("btnExpandChat")}
               </button>
+            </div>
+          )}
+
+          {mobileMode && showMobileHistory && (
+            <div className="chat-mobile-history" role="dialog" aria-modal="true" aria-label={t("conversationsTitle")}>
+              <div className="chat-mobile-history-header">
+                <h2>{t("conversationsTitle")}</h2>
+                <button type="button" className="chat-new-btn" onClick={openNewConversation}>
+                  {t("btnNew")}
+                </button>
+                <button type="button" className="mobile-icon-button" onClick={() => setShowMobileHistory(false)}>
+                  {t("btnClose")}
+                </button>
+              </div>
+              {renderConversationList()}
             </div>
           )}
 
