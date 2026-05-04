@@ -159,6 +159,7 @@ export async function intakeMeetingTranscript(actor: AppActor, params: {
   source?: string | null;
   recordedAt?: Date | string | null;
   summaryMd?: string | null;
+  ingestionGuidanceMd?: string | null;
   participantIds?: string[] | null;
   participantEmails?: string[] | null;
 }): Promise<MeetingTranscriptIntakeResult> {
@@ -197,6 +198,7 @@ export async function intakeMeetingTranscript(actor: AppActor, params: {
     recordedAt: inferred.recordedAt,
     transcript,
     summaryMd: params.summaryMd,
+    ingestionGuidanceMd: params.ingestionGuidanceMd,
     participantIds: params.participantIds ?? [],
     participantEmails: inferred.participantEmails,
   });

@@ -141,6 +141,7 @@ describe("meeting-intelligence", () => {
         id: "meeting-1",
         workspaceId: "ws-1",
         transcript: "Alice: I will follow up tomorrow.",
+        ingestionGuidanceMd: "Prioritize follow-up actions.",
       });
       (prisma.meetingInsight.create as ReturnType<typeof vi.fn>).mockResolvedValue({ id: "insight-1" });
 
@@ -152,6 +153,7 @@ describe("meeting-intelligence", () => {
       expect(defaultModelGateway.extract).toHaveBeenCalledWith(expect.objectContaining({
         workspaceId: "ws-1",
         instruction: expect.stringContaining("Number items sequentially"),
+        input: expect.stringContaining("Prioritize follow-up actions."),
       }));
       expect(prisma.meetingInsight.create).toHaveBeenCalledWith(expect.objectContaining({
         data: expect.objectContaining({

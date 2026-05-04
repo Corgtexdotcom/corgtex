@@ -100,6 +100,7 @@ describe("meetings domain", () => {
       source: " zoom ",
       recordedAt,
       participantIds: [" user-1 ", ""],
+      ingestionGuidanceMd: " Highlight revenue follow-ups. ",
     })).resolves.toMatchObject({ id: "meeting-1" });
 
     expect(prismaMock.meeting.create).toHaveBeenCalledWith({
@@ -109,6 +110,7 @@ describe("meetings domain", () => {
         source: "zoom",
         recordedAt,
         participantIds: ["user-1"],
+        ingestionGuidanceMd: "Highlight revenue follow-ups.",
       }),
     });
   });
@@ -252,6 +254,7 @@ describe("meetings domain", () => {
       recordedAt,
       transcript: "Transcript text",
       participantEmails: ["jan@example.com"],
+      ingestionGuidanceMd: " Track onboarding decisions. ",
     })).resolves.toMatchObject({
       status: "matched",
       meeting: { id: "scheduled-1" },
@@ -262,6 +265,7 @@ describe("meetings domain", () => {
       data: expect.objectContaining({
         status: "COMPLETED",
         transcript: "Transcript text",
+        ingestionGuidanceMd: "Track onboarding decisions.",
         aiProcessedAt: null,
       }),
     }));

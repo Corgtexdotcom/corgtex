@@ -1319,32 +1319,33 @@ model MeetingSeries {
 }
 
 model Meeting {
-  id                 String        @id @default(uuid())
-  workspaceId        String
-  seriesId           String?
-  status             MeetingStatus @default(COMPLETED)
-  title              String?
-  source             String
-  externalId         String?       @unique
-  calendarExternalId String?
-  recordedAt         DateTime
-  scheduledEndAt     DateTime?
-  transcript         String?       @db.Text
-  summaryMd          String?       @db.Text
-  participantIds     String[]
-  participantEmails  String[]      @default([])
-  decisionsJson      Json?
-  agendaJson         Json?
-  agendaChannelId    String?
-  agendaMessageTs    String?
-  agendaPostedAt     DateTime?
-  summaryPostedAt    DateTime?
-  aiProcessedAt      DateTime?
-  archivedAt         DateTime?
-  archivedByUserId   String?
-  archiveReason      String?
-  createdAt          DateTime      @default(now())
-  updatedAt          DateTime      @updatedAt
+  id                  String        @id @default(uuid())
+  workspaceId         String
+  seriesId            String?
+  status              MeetingStatus @default(COMPLETED)
+  title               String?
+  source              String
+  externalId          String?       @unique
+  calendarExternalId  String?
+  recordedAt          DateTime
+  scheduledEndAt      DateTime?
+  transcript          String?       @db.Text
+  summaryMd           String?       @db.Text
+  ingestionGuidanceMd String?       @db.Text
+  participantIds      String[]
+  participantEmails   String[]      @default([])
+  decisionsJson       Json?
+  agendaJson          Json?
+  agendaChannelId     String?
+  agendaMessageTs     String?
+  agendaPostedAt      DateTime?
+  summaryPostedAt     DateTime?
+  aiProcessedAt       DateTime?
+  archivedAt          DateTime?
+  archivedByUserId    String?
+  archiveReason       String?
+  createdAt           DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
 
   workspace Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   series    MeetingSeries?   @relation(fields: [seriesId], references: [id], onDelete: SetNull)
@@ -1855,25 +1856,26 @@ model BrainArticleVersion {
 }
 
 model BrainSource {
-  id               String          @id @default(uuid())
-  workspaceId      String
-  sourceType       BrainSourceType
-  tier             Int
-  externalId       String?
-  authorMemberId   String?
-  channel          String?
-  title            String?
-  content          String          @db.Text
-  metadata         Json?
-  fileStorageKey   String?
-  fileName         String?
-  fileMimeType     String?
-  fileSizeBytes    Int?
-  absorbedAt       DateTime?
-  archivedAt       DateTime?
-  archivedByUserId String?
-  archiveReason    String?
-  createdAt        DateTime        @default(now())
+  id                  String          @id @default(uuid())
+  workspaceId         String
+  sourceType          BrainSourceType
+  tier                Int
+  externalId          String?
+  authorMemberId      String?
+  channel             String?
+  title               String?
+  content             String          @db.Text
+  ingestionGuidanceMd String?         @db.Text
+  metadata            Json?
+  fileStorageKey      String?
+  fileName            String?
+  fileMimeType        String?
+  fileSizeBytes       Int?
+  absorbedAt          DateTime?
+  archivedAt          DateTime?
+  archivedByUserId    String?
+  archiveReason       String?
+  createdAt           DateTime        @default(now())
 
   workspace     Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   authorMember  Member?        @relation(fields: [authorMemberId], references: [id], onDelete: SetNull)

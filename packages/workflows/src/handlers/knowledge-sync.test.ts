@@ -11,6 +11,9 @@ const { prismaMock, syncKnowledgeForSourceMock } = vi.hoisted(() => ({
     knowledgeChunk: {
       deleteMany: vi.fn(),
     },
+    meeting: {
+      findUnique: vi.fn(),
+    },
   },
   syncKnowledgeForSourceMock: vi.fn(),
 }));
@@ -112,5 +115,35 @@ describe("handleSlackMessageKnowledgeSync", () => {
     await handleSlackMessageKnowledgeSync("job-1", { messageId: "message-1" }, "workspace-1");
 
     expect(syncKnowledgeForSourceMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("handleMeetingKnowledgeSync", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    syncKnowledgeForSourceMock.mockResolvedValue(undefined);
+    prismaMock.meeting.findUnique.mockResolvedValue({
+      id: "meeting-1",
+      workspaceId: "workspace-1",
+      title: "Weekly Tactical",
+      source: "transcript-upload",
+      transcript: "Jan: Milan owns onboarding.",
+      summaryMd: "Milan owns onboarding.",
+      ingestionGuidanceMd: "Highlight onboarding ownership.",
+      recordedAt: new Date("2026-04-30T17:10:00.000Z"),
+    });
+  });
+
+  it("keeps guidance out of meeting content and records only metadata", async () => {
+    const { handleMeetingKnowledgeSync } = await import("./knowledge-sync");
+
+    await handleMeetingKnowledgeSync("job-1", { meetingId: "meeting-1" }, "workspace-1");
+
+    expect(syncKnowledgeForSourceMock).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.not.stringContaining("Highlight onboarding ownership."),
+      metadata: expect.objectContaining({
+        hasIngestionGuidance: true,
+      }),
+    }));
   });
 });

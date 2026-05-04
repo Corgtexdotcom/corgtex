@@ -266,6 +266,7 @@ async function updateMeetingWithTranscriptTx(
     recordedAt?: Date | null;
     transcript: string;
     summaryMd?: string | null;
+    ingestionGuidanceMd?: string | null;
     participantIds?: string[] | null;
     participantEmails?: string[] | null;
   }
@@ -278,6 +279,7 @@ async function updateMeetingWithTranscriptTx(
       recordedAt: params.recordedAt && !Number.isNaN(params.recordedAt.valueOf()) ? params.recordedAt : undefined,
       transcript: params.transcript.trim(),
       summaryMd: params.summaryMd?.trim() || undefined,
+      ingestionGuidanceMd: params.ingestionGuidanceMd === undefined ? undefined : params.ingestionGuidanceMd?.trim() || null,
       participantIds: params.participantIds ? normalizeIds(params.participantIds) : undefined,
       participantEmails: params.participantEmails ? normalizeEmails(params.participantEmails) : undefined,
       aiProcessedAt: null,
@@ -302,6 +304,7 @@ async function updateMeetingWithTranscriptTx(
       meta: {
         title: meeting.title,
         recordedAt: meeting.recordedAt.toISOString(),
+        hasIngestionGuidance: Boolean(meeting.ingestionGuidanceMd),
       },
     },
   });
@@ -318,6 +321,7 @@ async function updateMeetingWithTranscriptTx(
         source: meeting.source,
         status: meeting.status,
         hasTranscript: Boolean(meeting.transcript),
+        hasIngestionGuidance: Boolean(meeting.ingestionGuidanceMd),
       },
     },
   ]);
@@ -577,6 +581,7 @@ export async function uploadMeetingTranscript(actor: AppActor, params: {
   recordedAt: Date;
   transcript: string;
   summaryMd?: string | null;
+  ingestionGuidanceMd?: string | null;
   participantIds?: string[] | null;
   participantEmails?: string[] | null;
 }) {
@@ -623,6 +628,7 @@ export async function uploadMeetingTranscript(actor: AppActor, params: {
     recordedAt: params.recordedAt,
     transcript: params.transcript,
     summaryMd: params.summaryMd,
+    ingestionGuidanceMd: params.ingestionGuidanceMd,
     participantIds: params.participantIds ?? [],
     participantEmails: params.participantEmails ?? [],
   });
@@ -638,6 +644,7 @@ export async function createMeeting(actor: AppActor, params: {
   scheduledEndAt?: Date | null;
   transcript?: string | null;
   summaryMd?: string | null;
+  ingestionGuidanceMd?: string | null;
   participantIds?: string[];
   participantEmails?: string[];
 }) {
@@ -661,6 +668,7 @@ export async function createMeeting(actor: AppActor, params: {
         scheduledEndAt: params.scheduledEndAt ?? null,
         transcript: params.transcript?.trim() || null,
         summaryMd: params.summaryMd?.trim() || null,
+        ingestionGuidanceMd: params.ingestionGuidanceMd?.trim() || null,
         participantIds: normalizeIds(params.participantIds),
         participantEmails: normalizeEmails(params.participantEmails),
       },
@@ -676,6 +684,7 @@ export async function createMeeting(actor: AppActor, params: {
         meta: {
           source: meeting.source,
           recordedAt: meeting.recordedAt.toISOString(),
+          hasIngestionGuidance: Boolean(meeting.ingestionGuidanceMd),
         },
       },
     });
@@ -692,6 +701,7 @@ export async function createMeeting(actor: AppActor, params: {
           source: meeting.source,
           status: meeting.status,
           hasTranscript: Boolean(meeting.transcript),
+          hasIngestionGuidance: Boolean(meeting.ingestionGuidanceMd),
         },
       },
     ]);

@@ -52,6 +52,7 @@ export async function handleMeetingKnowledgeSync(jobId: string, payload: { meeti
       source: true,
       transcript: true,
       summaryMd: true,
+      ingestionGuidanceMd: true,
       recordedAt: true,
     },
   });
@@ -69,6 +70,7 @@ export async function handleMeetingKnowledgeSync(jobId: string, payload: { meeti
     metadata: {
       source: meeting.source,
       recordedAt: meeting.recordedAt.toISOString(),
+      hasIngestionGuidance: Boolean(meeting.ingestionGuidanceMd),
       workflowJobId: jobId,
     },
     workflowJobId: jobId,

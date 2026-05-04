@@ -13,6 +13,9 @@ const { prismaMock } = vi.hoisted(() => ({
       create: vi.fn(),
       findFirst: vi.fn(),
     },
+    brainSource: {
+      create: vi.fn(),
+    },
     auditLog: {
       create: vi.fn(),
     },
@@ -165,5 +168,53 @@ describe("Brain article draft lifecycle", () => {
         publishedAt: null,
       },
     });
+  });
+});
+
+describe("brain source ingestion", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof prismaMock) => Promise<unknown>) => callback(prismaMock));
+    requireWorkspaceMembership.mockResolvedValue({
+      id: "mem-1",
+      workspaceId: "ws-1",
+      userId: "user-1",
+      role: "MEMBER",
+      isActive: true,
+    });
+    appendEvents.mockResolvedValue(undefined);
+    prismaMock.auditLog.create.mockResolvedValue({});
+    prismaMock.event.createMany.mockResolvedValue({ count: 1 });
+    prismaMock.brainSource.create.mockResolvedValue({
+      id: "source-1",
+      sourceType: "DOC",
+      tier: 1,
+      ingestionGuidanceMd: "Highlight launch constraints.",
+    });
+  });
+
+  it("persists trimmed ingestion guidance on brain sources", async () => {
+    const { ingestSource } = await import("./brain");
+
+    await ingestSource(ownerActor, {
+      workspaceId: "ws-1",
+      sourceType: "DOC",
+      tier: 1,
+      content: "Policy text",
+      ingestionGuidanceMd: " Highlight launch constraints. ",
+    });
+
+    expect(prismaMock.brainSource.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        workspaceId: "ws-1",
+        content: "Policy text",
+        ingestionGuidanceMd: "Highlight launch constraints.",
+      }),
+    });
+    expect(prismaMock.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        meta: expect.objectContaining({ hasIngestionGuidance: true }),
+      }),
+    }));
   });
 });

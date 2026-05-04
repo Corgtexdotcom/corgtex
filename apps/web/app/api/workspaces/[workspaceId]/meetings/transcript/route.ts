@@ -53,6 +53,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         source: formString(formData, "source") ?? "transcript-upload",
         recordedAt: formString(formData, "recordedAt"),
         summaryMd: formString(formData, "summaryMd"),
+        ingestionGuidanceMd: formString(formData, "ingestionGuidanceMd"),
         participantIds: formList(formData, "participantIds"),
         participantEmails: formList(formData, "participantEmails"),
       });
@@ -67,6 +68,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       recordedAt?: unknown;
       transcript?: unknown;
       summaryMd?: unknown;
+      ingestionGuidanceMd?: unknown;
       participantIds?: unknown;
       participantEmails?: unknown;
     };
@@ -79,6 +81,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       recordedAt: new Date(String(body.recordedAt ?? "")),
       transcript: String(body.transcript ?? ""),
       summaryMd: typeof body.summaryMd === "string" ? body.summaryMd : null,
+      ingestionGuidanceMd: typeof body.ingestionGuidanceMd === "string" ? body.ingestionGuidanceMd : null,
       participantIds: Array.isArray(body.participantIds) ? body.participantIds.map((value) => String(value)) : [],
       participantEmails: Array.isArray(body.participantEmails) ? body.participantEmails.map((value) => String(value)) : [],
     });

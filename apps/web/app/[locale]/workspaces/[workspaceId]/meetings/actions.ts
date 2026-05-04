@@ -33,6 +33,7 @@ export async function createMeetingAction(formData: FormData) {
     recordedAt: new Date(asString(formData, "recordedAt")),
     transcript: asOptional(formData, "transcript"),
     summaryMd: asOptional(formData, "summaryMd"),
+    ingestionGuidanceMd: asOptional(formData, "ingestionGuidanceMd"),
     participantIds: asString(formData, "participantIds")
       .split(",")
       .map((value) => value.trim())
@@ -104,6 +105,7 @@ export async function uploadMeetingTranscriptAction(formData: FormData) {
     recordedAt: new Date(asString(formData, "recordedAt")),
     transcript,
     summaryMd: asOptional(formData, "summaryMd"),
+    ingestionGuidanceMd: asOptional(formData, "ingestionGuidanceMd"),
     participantIds: asOptional(formData, "participantIds")?.split(",").map((value) => value.trim()).filter(Boolean) ?? [],
     participantEmails: asOptional(formData, "participantEmails")?.split(",").map((value) => value.trim()).filter(Boolean) ?? [],
   });

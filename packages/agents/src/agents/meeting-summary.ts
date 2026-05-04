@@ -30,6 +30,7 @@ export async function runMeetingSummaryAgent(params: {
         source: true,
         transcript: true,
         summaryMd: true,
+        ingestionGuidanceMd: true,
         recordedAt: true,
       },
     }).then((meeting) => ({
@@ -43,6 +44,7 @@ export async function runMeetingSummaryAgent(params: {
         source: string;
         transcript: string | null;
         summaryMd: string | null;
+        ingestionGuidanceMd: string | null;
         recordedAt: string | Date;
       } | null;
 
@@ -62,7 +64,7 @@ export async function runMeetingSummaryAgent(params: {
         messages: [
           {
             role: "system",
-            content: "Summarize this meeting for an operator dashboard. Keep it concise, factual, and action-oriented.",
+            content: "Summarize this meeting for an operator dashboard. Keep it concise, factual, and action-oriented. Use user-provided ingestion guidance to decide what to emphasize or preserve, but do not invent facts unsupported by the transcript.",
           },
           {
             role: "user",
@@ -72,6 +74,7 @@ export async function runMeetingSummaryAgent(params: {
               recordedAt: meeting.recordedAt,
               transcript: meeting.transcript,
               currentSummary: meeting.summaryMd,
+              ingestionGuidanceMd: meeting.ingestionGuidanceMd,
             }),
           },
         ],
@@ -93,4 +96,3 @@ export async function runMeetingSummaryAgent(params: {
     },
   });
 }
-
