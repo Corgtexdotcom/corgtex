@@ -33,6 +33,7 @@ CREATE TABLE "MeetingRecording" (
     "meetingId" TEXT NOT NULL,
     "provider" "MeetingRecorderProvider" NOT NULL,
     "externalBotId" TEXT,
+    "activeDedupeKey" TEXT,
     "meetingUrl" TEXT NOT NULL,
     "scheduledAt" TIMESTAMP(3),
     "joinAt" TIMESTAMP(3),
@@ -85,6 +86,9 @@ CREATE INDEX "MeetingRecording_workspaceId_provider_externalBotId_idx" ON "Meeti
 
 -- CreateIndex
 CREATE UNIQUE INDEX "MeetingRecording_provider_externalBotId_key" ON "MeetingRecording"("provider", "externalBotId");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "MeetingRecording_activeDedupeKey_key" ON "MeetingRecording"("activeDedupeKey");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "MeetingRecorderProviderEvent_dedupeKey_key" ON "MeetingRecorderProviderEvent"("dedupeKey");

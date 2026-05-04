@@ -262,4 +262,30 @@ describe("meeting recorder domain", () => {
       code: "RECORDER_MONTHLY_CAP_EXCEEDED",
     });
   });
+
+  it("reuses an active recording when concurrent scheduling hits the database dedupe key", async () => {
+    const { scheduleMeetingRecording } = await import("./meeting-recorders");
+    prismaMock.meetingRecording.findFirst
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({
+        id: "recording-active",
+        workspaceId: "workspace-1",
+        meetingId: "meeting-1",
+        provider: "RECALL_AI",
+        externalBotId: "recall-bot-1",
+        status: "SCHEDULED",
+      });
+    prismaMock.meetingRecording.create.mockRejectedValue({ code: "P2002" });
+
+    await expect(scheduleMeetingRecording(operatorActor, {
+      workspaceId: "workspace-1",
+      meetingId: "meeting-1",
+      mode: "auto",
+    })).resolves.toMatchObject({
+      id: "recording-active",
+      status: "SCHEDULED",
+    });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
 });

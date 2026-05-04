@@ -1406,6 +1406,7 @@ model MeetingRecording {
   meetingId             String
   provider              MeetingRecorderProvider
   externalBotId         String?
+  activeDedupeKey       String?                 @unique
   meetingUrl            String                  @db.Text
   scheduledAt           DateTime?
   joinAt                DateTime?

@@ -478,6 +478,14 @@ function isRetryableVendorError(error: unknown) {
   return error instanceof ProviderRequestError && RETRYABLE_VENDOR_STATUSES.has(error.status);
 }
 
+function isUniqueConstraintError(error: unknown) {
+  return isRecord(error) && error.code === "P2002";
+}
+
+function activeRecordingDedupeKey(params: { workspaceId: string; meetingId: string; provider: MeetingRecorderProvider }) {
+  return `meeting-recording:${params.workspaceId}:${params.meetingId}:${params.provider}`;
+}
+
 export function normalizeProviderTranscript(payload: unknown) {
   const entries = Array.isArray(payload)
     ? payload
@@ -724,16 +732,37 @@ async function createRecordingAttempt(params: {
   joinAt: Date;
   provider: MeetingRecorderProvider;
 }) {
-  return prisma.meetingRecording.create({
-    data: {
-      workspaceId: params.workspaceId,
-      meetingId: params.meetingId,
-      provider: params.provider,
-      meetingUrl: normalizeMeetingUrl(params.meetingUrl),
-      joinAt: params.joinAt,
-      status: "PENDING",
-    },
-  });
+  const activeDedupeKey = activeRecordingDedupeKey(params);
+  try {
+    const recording = await prisma.meetingRecording.create({
+      data: {
+        workspaceId: params.workspaceId,
+        meetingId: params.meetingId,
+        provider: params.provider,
+        activeDedupeKey,
+        meetingUrl: normalizeMeetingUrl(params.meetingUrl),
+        joinAt: params.joinAt,
+        status: "PENDING",
+      },
+    });
+    return { recording, reused: false };
+  } catch (error) {
+    if (!isUniqueConstraintError(error)) {
+      throw error;
+    }
+    const existing = await prisma.meetingRecording.findFirst({
+      where: {
+        workspaceId: params.workspaceId,
+        meetingId: params.meetingId,
+        provider: params.provider,
+        activeDedupeKey,
+        status: { in: ACTIVE_RECORDING_STATUSES },
+      },
+      orderBy: { createdAt: "desc" },
+    });
+    invariant(existing, 409, "RECORDER_ALREADY_SCHEDULING", "A recorder is already being scheduled for this meeting.");
+    return { recording: existing, reused: true };
+  }
 }
 
 export async function scheduleMeetingRecording(actor: AppActor, params: {
@@ -828,7 +857,11 @@ async function attemptProviderSchedule(params: {
   entryMessage?: string | null;
   provider: MeetingRecorderProvider;
 }) {
-  const recording = await createRecordingAttempt(params);
+  const attempt = await createRecordingAttempt(params);
+  const recording = attempt.recording;
+  if (attempt.reused) {
+    return { status: recording.status, recording, retryable: false };
+  }
   try {
     const scheduled = await providerSchedule(params.provider, {
       meetingUrl: params.meetingUrl,
@@ -857,6 +890,7 @@ async function attemptProviderSchedule(params: {
       where: { id: recording.id },
       data: {
         status: "FAILED",
+        activeDedupeKey: null,
         failureCode: error instanceof ProviderRequestError ? `HTTP_${error.status}` : "SCHEDULE_FAILED",
         failureMessage: error instanceof Error ? error.message : "Unknown recorder scheduling error.",
       },
@@ -889,6 +923,7 @@ export async function cancelMeetingRecording(actor: AppActor, params: { workspac
     where: { id: recording.id },
     data: {
       status: "CANCELLED",
+      activeDedupeKey: null,
       endedAt: new Date(),
     },
   });
@@ -914,6 +949,7 @@ async function cancelAutoRecordingsForMeeting(workspaceId: string, meetingId: st
       where: { id: recording.id },
       data: {
         status: "CANCELLED",
+        activeDedupeKey: null,
         endedAt: new Date(),
       },
     });
@@ -1109,6 +1145,7 @@ async function applyWebhookState(recording: MeetingRecording, event: ProviderWeb
   const data: Prisma.MeetingRecordingUpdateInput = {};
   if (event.externalBotId && !recording.externalBotId) data.externalBotId = event.externalBotId;
   if (event.status) data.status = event.status;
+  if (event.status && !ACTIVE_RECORDING_STATUSES.includes(event.status)) data.activeDedupeKey = null;
   if (event.startedAt) data.startedAt = event.startedAt;
   if (event.endedAt) data.endedAt = event.endedAt;
   if (event.durationSeconds !== null) data.durationSeconds = Math.max(0, Math.round(event.durationSeconds));
@@ -1155,6 +1192,7 @@ async function ingestProviderTranscript(provider: MeetingRecorderProvider, recor
     where: { id: recording.id },
     data: {
       status: "COMPLETED",
+      activeDedupeKey: null,
       transcriptProcessedAt: new Date(),
       providerMetadata: redactProviderArtifactUrls(artifact.metadata),
     },
@@ -1302,6 +1340,7 @@ export async function reconcileMeetingRecorders(workspaceId: string) {
       where: { id: recording.id },
       data: {
         status: "FAILED",
+        activeDedupeKey: null,
         failureCode: "STALE_RECORDER",
         failureMessage: "Recorder did not complete before the reconciliation timeout.",
         endedAt: new Date(),
