@@ -49,6 +49,12 @@ const desktopRoutes = routeCatalog.filter(([name, suffix]) => {
 });
 
 const mobileRoutes = desktopRoutes.filter(([name]) => name !== "operator");
+const mobileShellViewports = [
+  ["iphone-se", { width: 320, height: 568 }],
+  ["iphone-modern", { width: 390, height: 844 }],
+  ["pixel", { width: 412, height: 915 }],
+  ["small-tablet", { width: 700, height: 1024 }],
+];
 
 function routeUrl(locale, workspacePath, suffix) {
   return `${baseUrl}${locale}${workspacePath}${suffix}`;
@@ -78,7 +84,20 @@ async function captureScreenshot(page, fileName) {
 async function captureRoute(page, locale, workspacePath, name, suffix, viewport, prefix, findings, routeResults) {
   await page.setViewportSize(viewport);
   const target = routeUrl(locale, workspacePath, suffix);
-  const response = await page.goto(target, { waitUntil: "domcontentloaded" });
+  let response;
+  try {
+    response = await page.goto(target, { waitUntil: "domcontentloaded" });
+  } catch (error) {
+    findings.push({
+      name: `${prefix}${name}`,
+      route: target,
+      status: "navigation-failed",
+      error: error instanceof Error ? error.message : String(error),
+    });
+    routeResults.push({ name: `${prefix}${name}`, route: `${workspacePath}${suffix}`, status: 0 });
+    await captureScreenshot(page, `${prefix}${name}-navigation-failed.png`);
+    return;
+  }
   await waitForPageSettled(page);
   const status = response?.status() ?? 0;
   routeResults.push({ name: `${prefix}${name}`, route: `${workspacePath}${suffix}`, status });
@@ -88,6 +107,120 @@ async function captureRoute(page, locale, workspacePath, name, suffix, viewport,
     return;
   }
   await captureScreenshot(page, `${prefix}${name}.png`);
+}
+
+async function expectVisible(page, selector, label, findings) {
+  const locator = page.locator(selector).first();
+  await locator.waitFor({ state: "visible", timeout: 5000 }).catch(() => null);
+  if (!(await locator.isVisible().catch(() => false))) {
+    findings.push({ name: label, route: page.url(), status: "missing-visible-selector", selector });
+    await captureScreenshot(page, `${label}-missing.png`);
+    return false;
+  }
+  return true;
+}
+
+async function expectTextVisible(page, selector, text, label, findings) {
+  const locator = page.locator(selector, { hasText: text }).first();
+  await locator.waitFor({ state: "visible", timeout: 5000 }).catch(() => null);
+  if (!(await locator.isVisible().catch(() => false))) {
+    findings.push({ name: label, route: page.url(), status: "missing-visible-text", selector, text });
+    await captureScreenshot(page, `${label}-missing.png`);
+    return false;
+  }
+  return true;
+}
+
+async function verifyNoHorizontalOverflow(page, label, findings) {
+  const overflow = await page.evaluate(() => {
+    const root = document.documentElement;
+    return {
+      scrollWidth: root.scrollWidth,
+      clientWidth: root.clientWidth,
+      bodyScrollWidth: document.body.scrollWidth,
+      bodyClientWidth: document.body.clientWidth,
+    };
+  });
+
+  if (overflow.scrollWidth > overflow.clientWidth + 2 || overflow.bodyScrollWidth > overflow.bodyClientWidth + 2) {
+    findings.push({ name: label, route: page.url(), status: "horizontal-overflow", overflow });
+    await captureScreenshot(page, `${label}-overflow.png`);
+  }
+}
+
+async function verifyMobileShell(page, locale, workspacePath, findings, routeResults) {
+  let fakeConversationCounter = 0;
+  await page.route("**/api/workspaces/*/conversations", async (route) => {
+    if (route.request().method() !== "POST") {
+      await route.fallback();
+      return;
+    }
+
+    fakeConversationCounter += 1;
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ session: { id: `mobile-smoke-${fakeConversationCounter}` } }),
+    });
+  });
+  await page.route("**/api/workspaces/*/conversations/*", async (route) => {
+    if (route.request().method() !== "POST") {
+      await route.fallback();
+      return;
+    }
+
+    await route.fulfill({
+      status: 200,
+      contentType: "text/event-stream; charset=utf-8",
+      body: "data: {\"text\":\"Smoke response\"}\n\ndata: [DONE]\n\n",
+    });
+  });
+
+  for (const [viewportName, viewport] of mobileShellViewports) {
+    await page.setViewportSize(viewport);
+    const target = routeUrl(locale, workspacePath, "");
+    const response = await page.goto(target, { waitUntil: "domcontentloaded" });
+    await waitForPageSettled(page);
+    const status = response?.status() ?? 0;
+    routeResults.push({ name: `mobile-shell-${viewportName}`, route: workspacePath, status });
+    if (status >= 400) {
+      findings.push({ name: `mobile-shell-${viewportName}`, route: target, status });
+      await captureScreenshot(page, `mobile-shell-${viewportName}-failed.png`);
+      continue;
+    }
+
+    await expectVisible(page, ".mobile-topbar", `mobile-shell-${viewportName}-topbar`, findings);
+    await expectVisible(page, ".mobile-bottom-nav", `mobile-shell-${viewportName}-bottom-nav`, findings);
+    await verifyNoHorizontalOverflow(page, `mobile-shell-${viewportName}`, findings);
+    await captureScreenshot(page, `mobile-shell-${viewportName}-workspace.png`);
+
+    await page.locator(".mobile-bottom-nav button").nth(0).click();
+    await expectVisible(page, ".mobile-ai-workbench", `mobile-shell-${viewportName}-ai`, findings);
+    await expectVisible(page, ".chat-input", `mobile-shell-${viewportName}-ai-input`, findings);
+    const smokePrompt = `Mobile smoke ${viewportName}`;
+    await page.locator(".mobile-ai-workbench .chat-input").first().fill(smokePrompt);
+    await page.locator(".mobile-ai-workbench .chat-send-btn").first().click();
+    await expectTextVisible(page, ".mobile-ai-workbench .chat-message.user", smokePrompt, `mobile-shell-${viewportName}-ai-user-message`, findings);
+    await expectTextVisible(page, ".mobile-ai-workbench .chat-message.assistant", "Smoke response", `mobile-shell-${viewportName}-ai-response`, findings);
+    const storedMode = await page.evaluate(() => window.localStorage.getItem("corgtex.mobileMode"));
+    if (storedMode !== "ai") {
+      findings.push({ name: `mobile-shell-${viewportName}-mode-store`, route: page.url(), status: storedMode });
+    }
+    await captureScreenshot(page, `mobile-shell-${viewportName}-ai.png`);
+
+    await page.locator(".mobile-bottom-nav button").nth(1).click();
+    await expectVisible(page, ".mobile-more-sheet", `mobile-shell-${viewportName}-more`, findings);
+    await captureScreenshot(page, `mobile-shell-${viewportName}-more.png`);
+    await page.locator(".mobile-more-sheet .mobile-icon-button").first().click();
+
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await waitForPageSettled(page);
+    await expectVisible(page, ".mobile-ai-workbench", `mobile-shell-${viewportName}-ai-persisted`, findings);
+
+    await page.locator(".mobile-mode-switch button", { hasText: /Workspace|Espacio/ }).first().click();
+    await expectVisible(page, ".ws-main", `mobile-shell-${viewportName}-workspace-return`, findings);
+    await captureScreenshot(page, `mobile-shell-${viewportName}-workspace-return.png`);
+  }
 }
 
 async function verifyDisabledRoute(page, locale, workspacePath, suffix, findings, routeResults) {
@@ -188,6 +321,8 @@ async function main() {
       routeResults,
     );
   }
+
+  await verifyMobileShell(page, locale, workspacePath, findings, routeResults);
 
   await writeFile(
     path.join(outDir, "qa-results.json"),

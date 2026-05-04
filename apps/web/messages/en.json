@@ -401,7 +401,10 @@
     "btnAttach": "+",
     "btnBack": "← Back",
     "btnBackToConversations": "←",
+    "btnClose": "Close",
     "btnExpandChat": "⛶",
+    "btnHistory": "History",
+    "btnNew": "New",
     "btnRemoveAttachment": "✕",
     "btnSend": "Send",
     "conversationsTitle": "Conversations",
@@ -521,6 +524,18 @@
     "search": "Search",
     "synthesizing": "Synthesizing...",
     "topPriorities": "Top priorities"
+  },
+  "mobile": {
+    "aiMode": "AI",
+    "aiWorkbenchLabel": "AI workspace",
+    "bottomNavLabel": "Mobile workspace navigation",
+    "close": "Close",
+    "modeSwitchLabel": "Mobile mode",
+    "more": "More",
+    "openAi": "Open AI mode",
+    "shellLabel": "Mobile workspace shell",
+    "userSettings": "User settings",
+    "workspaceMode": "Workspace"
   },
   "cycles": {
     "btnCreateAllocation": "Create allocation",
