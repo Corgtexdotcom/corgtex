@@ -151,6 +151,33 @@ describe("POST /api/workspaces/[workspaceId]/data-sources/text-ingest", () => {
     expect(intakeMeetingTranscript).not.toHaveBeenCalled();
   });
 
+  it("does not persist the synthetic global operator as a brain source author", async () => {
+    const actor = { kind: "user" as const, user: { id: "operator-1" } };
+    resolveRequestActor.mockResolvedValue(actor);
+    requireWorkspaceMembership.mockResolvedValue({ id: "global-operator" });
+    ingestSource.mockResolvedValue({ id: "source-1", sourceType: "DOC" });
+
+    const { POST } = await import("./route");
+    const response = await POST(
+      postTextIngest({
+        title: "Policy",
+        sourceType: "DOC",
+        content: "Policy text",
+      }),
+      { params: Promise.resolve({ workspaceId: "ws-1" }) },
+    );
+
+    expect(response.status).toBe(201);
+    expect(ingestSource).toHaveBeenCalledWith(
+      actor,
+      expect.objectContaining({
+        workspaceId: "ws-1",
+        authorMemberId: null,
+      }),
+    );
+    expect(handleRouteError).not.toHaveBeenCalled();
+  });
+
   it("rejects missing content", async () => {
     resolveRequestActor.mockResolvedValue({ kind: "user", user: { id: "user-1" } });
     requireWorkspaceMembership.mockResolvedValue({ id: "member-1" });
