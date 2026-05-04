@@ -14,6 +14,7 @@ import {
   postMeetingSummaryToAgendaThread,
   processSlackInboundEvent,
   purgeExpiredCommunicationMessages,
+  reconcileMeetingRecorders,
   runMeetingAgendaPreparation,
   runMeetingAgendaThreadEdit,
   runMeetingInsightsExtraction,
@@ -27,6 +28,7 @@ const RETRY_BASE_DELAY_MS = 5_000;
 const RETRY_MAX_DELAY_MS = 5 * 60 * 1_000;
 const LOCK_TIMEOUT_MS = 5 * 60 * 1_000;
 const TRIAGE_COALESCE_WINDOW_MS = 5 * 60 * 1_000;
+const MEETING_RECORDER_RECONCILE_INTERVAL_MS = 10 * 60 * 1_000;
 const DEFAULT_DAILY_JOB_START_HOUR_UTC = 11;
 const TRIAGE_EVENT_TYPES = new Set([
   "proposal.submitted",
@@ -364,6 +366,25 @@ async function handleJob(job: ClaimedJob) {
 
   if (job.type === "calendar.sync") {
     await handleCalendarSync(job.id, payload as { connectionId?: string }, job.workspaceId);
+    return;
+  }
+
+  if (job.type === "meeting-recorders.reconcile") {
+    await reconcileMeetingRecorders(job.workspaceId);
+    const runAfter = new Date(Date.now() + MEETING_RECORDER_RECONCILE_INTERVAL_MS);
+    await prisma.workflowJob.upsert({
+      where: {
+        dedupeKey: `meeting-recorders:reconcile:${job.workspaceId}:${Math.floor(runAfter.getTime() / MEETING_RECORDER_RECONCILE_INTERVAL_MS)}`,
+      },
+      update: {},
+      create: {
+        workspaceId: job.workspaceId,
+        type: "meeting-recorders.reconcile",
+        payload: {},
+        runAfter,
+        dedupeKey: `meeting-recorders:reconcile:${job.workspaceId}:${Math.floor(runAfter.getTime() / MEETING_RECORDER_RECONCILE_INTERVAL_MS)}`,
+      },
+    });
     return;
   }
 

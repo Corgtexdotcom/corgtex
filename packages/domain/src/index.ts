@@ -59,6 +59,7 @@ export * from "./procurement-trials";
 export * from "./trial-entitlements";
 export * from "./meeting-intelligence";
 export * from "./meeting-transcript-intake";
+export * from "./meeting-recorders";
 export * from "./admin";
 export * from "./railway-client";
 export * from "./member-briefing";

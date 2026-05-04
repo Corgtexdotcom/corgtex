@@ -93,6 +93,12 @@ type Env = {
   readonly SLACK_CLIENT_SECRET: string | undefined;
   readonly SLACK_SIGNING_SECRET: string | undefined;
   readonly SLACK_APP_ID: string | undefined;
+  readonly RECALL_API_KEY: string | undefined;
+  readonly RECALL_REGION: string;
+  readonly RECALL_WEBHOOK_SECRET: string | undefined;
+  readonly MEETING_BAAS_API_KEY: string | undefined;
+  readonly MEETING_BAAS_WEBHOOK_SECRET: string | undefined;
+  readonly MEETING_RECORDER_PUBLIC_BASE_URL: string;
 };
 
 const TEST_DATABASE_URL = "postgresql://postgres:postgres@localhost:5433/corgtex_test?schema=public";
@@ -223,6 +229,24 @@ export const env: Env = {
   },
   get SLACK_APP_ID() {
     return optional("SLACK_APP_ID");
+  },
+  get RECALL_API_KEY() {
+    return optional("RECALL_API_KEY");
+  },
+  get RECALL_REGION() {
+    return optional("RECALL_REGION") ?? "us-east-1";
+  },
+  get RECALL_WEBHOOK_SECRET() {
+    return optional("RECALL_WEBHOOK_SECRET");
+  },
+  get MEETING_BAAS_API_KEY() {
+    return optional("MEETING_BAAS_API_KEY");
+  },
+  get MEETING_BAAS_WEBHOOK_SECRET() {
+    return optional("MEETING_BAAS_WEBHOOK_SECRET");
+  },
+  get MEETING_RECORDER_PUBLIC_BASE_URL() {
+    return optional("MEETING_RECORDER_PUBLIC_BASE_URL") ?? env.APP_URL;
   },
 };
 

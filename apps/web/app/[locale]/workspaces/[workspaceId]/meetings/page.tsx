@@ -1,13 +1,16 @@
-import { listMeetings } from "@corgtex/domain";
+import { getMeetingRecorderConfig, listMeetingRecordings, listMeetings } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import {
   archiveMeetingAction,
+  cancelMeetingRecordingAction,
   createMeetingSeriesAction,
   importMeetingInviteAction,
+  scheduleMeetingRecordingAction,
   uploadMeetingTranscriptAction,
 } from "../actions";
 import { getTranslations } from "next-intl/server";
 import Link from "next/link";
+import { getWorkspaceFeatureFlags } from "@/lib/workspace-feature-flags";
 
 export const dynamic = "force-dynamic";
 
@@ -21,11 +24,18 @@ export default async function MeetingsPage({
   params: Promise<{ workspaceId: string }>;
 }) {
   const { workspaceId } = await params;
-  await requirePageActor();
-  const [completedMeetings, upcomingMeetings] = await Promise.all([
+  const actor = await requirePageActor();
+  const [completedMeetings, upcomingMeetings, featureFlags, recorderConfig] = await Promise.all([
     listMeetings(workspaceId, { status: "COMPLETED" }),
     listMeetings(workspaceId, { status: "SCHEDULED" }),
+    getWorkspaceFeatureFlags(workspaceId),
+    getMeetingRecorderConfig(actor, workspaceId).catch(() => null),
   ]);
+  const recorderEnabled = Boolean(featureFlags.MEETING_RECORDERS && recorderConfig?.featureEnabled && recorderConfig.config.enabled);
+  const recordings = recorderEnabled
+    ? await listMeetingRecordings(workspaceId, upcomingMeetings.map((meeting) => meeting.id))
+    : [];
+  const latestRecordingByMeeting = new Map(recordings.map((recording) => [recording.meetingId, recording]));
   const t = await getTranslations("meetings");
 
   return (
@@ -92,6 +102,38 @@ export default async function MeetingsPage({
           <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
             {upcomingMeetings.map((meeting) => (
               <div className="nr-item" key={meeting.id}>
+                {(() => {
+                  const recording = latestRecordingByMeeting.get(meeting.id);
+                  return recorderEnabled ? (
+                    <div className="row" style={{ alignItems: "flex-start", gap: 12, marginBottom: 8 }}>
+                      <div>
+                        <span className="tag">{recording ? `Recorder ${recording.status}` : meeting.meetingUrl ? "Recorder ready" : "No meeting link"}</span>
+                        {recording?.failureMessage ? (
+                          <div className="nr-item-meta" style={{ fontSize: "0.82rem", marginTop: 4 }}>
+                            {recording.provider}: {recording.failureMessage}
+                          </div>
+                        ) : recording ? (
+                          <div className="nr-item-meta" style={{ fontSize: "0.82rem", marginTop: 4 }}>
+                            {recording.provider}
+                          </div>
+                        ) : null}
+                      </div>
+                      {recording && ["PENDING", "SCHEDULED", "JOINING", "RECORDING"].includes(recording.status) ? (
+                        <form action={cancelMeetingRecordingAction}>
+                          <input type="hidden" name="workspaceId" value={workspaceId} />
+                          <input type="hidden" name="meetingId" value={meeting.id} />
+                          <button type="submit" className="secondary small">Cancel recorder</button>
+                        </form>
+                      ) : meeting.meetingUrl ? (
+                        <form action={scheduleMeetingRecordingAction}>
+                          <input type="hidden" name="workspaceId" value={workspaceId} />
+                          <input type="hidden" name="meetingId" value={meeting.id} />
+                          <button type="submit" className="secondary small">Record with Corgtex</button>
+                        </form>
+                      ) : null}
+                    </div>
+                  ) : null;
+                })()}
                 <Link href={`/workspaces/${workspaceId}/meetings/${meeting.id}`} style={{ textDecoration: "none", color: "inherit" }}>
                   <div className="nr-item-title">{meeting.title ?? t("untitledMeeting")}</div>
                   <div className="nr-item-meta">

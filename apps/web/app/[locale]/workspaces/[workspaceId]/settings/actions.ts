@@ -27,6 +27,7 @@ import {
   resendMemberAccessLink,
   disconnectCommunicationInstallation,
   updateSlackAgendaSettings,
+  updateMeetingRecorderConfig,
 } from "@corgtex/domain";
 import { sendEmail } from "@corgtex/shared";
 
@@ -308,6 +309,26 @@ export async function updateSlackAgendaSettingsAction(formData: FormData) {
     workspaceId,
     defaultAgendaChannelId: asString(formData, "defaultAgendaChannelId"),
     agendaTimezone: asOptional(formData, "agendaTimezone") || "UTC",
+  });
+  refresh(workspaceId);
+}
+
+export async function updateMeetingRecorderConfigAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  const fallbackProvider = asOptional(formData, "fallbackProvider");
+  await updateMeetingRecorderConfig(actor, {
+    workspaceId,
+    enabled: formData.get("enabled") === "true",
+    autoRecordEnabled: formData.get("autoRecordEnabled") === "true",
+    defaultProvider: asString(formData, "defaultProvider") as "RECALL_AI" | "MEETING_BAAS",
+    fallbackProvider: fallbackProvider ? fallbackProvider as "RECALL_AI" | "MEETING_BAAS" : null,
+    botName: asString(formData, "botName"),
+    entryMessage: asOptional(formData, "entryMessage"),
+    monthlyMinuteCap: asOptionalInt(formData, "monthlyMinuteCap") ?? 6000,
   });
   refresh(workspaceId);
 }

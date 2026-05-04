@@ -7,7 +7,8 @@ import type { NavGroup, WorkspaceNavCapability, WorkspaceNavFeatureFlag } from "
 export type WorkspaceFeatureFlag =
   | WorkspaceNavFeatureFlag
   | "SETTINGS_GENERAL"
-  | "MULTILINGUAL";
+  | "MULTILINGUAL"
+  | "MEETING_RECORDERS";
 
 export type WorkspaceFeatureFlagMap = Record<WorkspaceFeatureFlag, boolean>;
 
@@ -21,6 +22,7 @@ export const DEFAULT_WORKSPACE_FEATURE_FLAGS: WorkspaceFeatureFlagMap = {
   OS_METRICS: true,
   SETTINGS_GENERAL: true,
   MULTILINGUAL: false,
+  MEETING_RECORDERS: false,
 };
 
 const WORKSPACE_FEATURE_FLAG_VALUES: WorkspaceFeatureFlag[] = [
@@ -33,6 +35,7 @@ const WORKSPACE_FEATURE_FLAG_VALUES: WorkspaceFeatureFlag[] = [
   "OS_METRICS",
   "SETTINGS_GENERAL",
   "MULTILINGUAL",
+  "MEETING_RECORDERS",
 ];
 
 function isKnownWorkspaceFeatureFlag(flag: string): flag is WorkspaceFeatureFlag {
