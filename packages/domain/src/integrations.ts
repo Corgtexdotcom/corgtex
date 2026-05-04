@@ -4,6 +4,7 @@ import type { OAuthConnection, OAuthProvider, Prisma } from "@prisma/client";
 import { requireWorkspaceMembership } from "./auth";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { invariant } from "./errors";
+import { extractSupportedMeetingUrlFromText } from "./meeting-recorders";
 
 const dataSourceSelect = {
   id: true,
@@ -313,12 +314,19 @@ export async function refreshOAuthTokenIfNeeded(connectionId: string): Promise<O
 
 export interface CalendarEvent {
   id: string;
+  provider: OAuthProvider;
   title: string;
   description: string | null;
   startTime: Date;
   endTime: Date;
   attendees: string[];
+  organizerEmail: string | null;
+  meetingUrl: string | null;
   htmlLink: string | null;
+  status: string | null;
+  visibility: string | null;
+  transparency: string | null;
+  responseStatus: string | null;
 }
 
 export async function fetchCalendarEvents(connectionId: string, timeMin: Date, timeMax: Date): Promise<CalendarEvent[]> {
@@ -330,6 +338,7 @@ export async function fetchCalendarEvents(connectionId: string, timeMin: Date, t
       timeMax: timeMax.toISOString(),
       singleEvents: "true",
       orderBy: "startTime",
+      showDeleted: "true",
     });
 
     const res = await fetch(`https://www.googleapis.com/calendar/v3/calendars/primary/events?${query}`, {
@@ -339,15 +348,31 @@ export async function fetchCalendarEvents(connectionId: string, timeMin: Date, t
     if (!res.ok) throw new Error(`Google Calendar API error: ${await res.text()}`);
     const data = await res.json();
 
-    return (data.items || []).map((item: any) => ({
-      id: item.id,
-      title: item.summary || "Untitled Event",
-      description: item.description || null,
-      startTime: new Date(item.start.dateTime || item.start.date),
-      endTime: new Date(item.end.dateTime || item.end.date),
-      attendees: (item.attendees || []).map((a: any) => a.email),
-      htmlLink: item.htmlLink || null,
-    }));
+    return (data.items || []).map((item: any) => {
+      const conferenceUrl = Array.isArray(item.conferenceData?.entryPoints)
+        ? item.conferenceData.entryPoints.map((entry: any) => entry?.uri).find((uri: unknown) => typeof uri === "string")
+        : null;
+      const meetingUrl = extractSupportedMeetingUrlFromText(item.hangoutLink)
+        ?? extractSupportedMeetingUrlFromText(conferenceUrl)
+        ?? extractSupportedMeetingUrlFromText(item.location)
+        ?? extractSupportedMeetingUrlFromText(item.description);
+      return {
+        id: item.id,
+        provider: connection.provider,
+        title: item.summary || "Untitled Event",
+        description: item.description || null,
+        startTime: new Date(item.start.dateTime || item.start.date),
+        endTime: new Date(item.end.dateTime || item.end.date),
+        attendees: (item.attendees || []).map((a: any) => a.email).filter(Boolean),
+        organizerEmail: item.organizer?.email || item.creator?.email || null,
+        meetingUrl,
+        htmlLink: item.htmlLink || null,
+        status: item.status || null,
+        visibility: item.visibility || null,
+        transparency: item.transparency || null,
+        responseStatus: (item.attendees || []).find((a: any) => a.self)?.responseStatus || null,
+      };
+    });
   }
 
   if (connection.provider === "MICROSOFT") {
@@ -366,15 +391,28 @@ export async function fetchCalendarEvents(connectionId: string, timeMin: Date, t
     if (!res.ok) throw new Error(`Microsoft Graph API error: ${await res.text()}`);
     const data = await res.json();
 
-    return (data.value || []).map((item: any) => ({
-      id: item.id,
-      title: item.subject || "Untitled Event",
-      description: item.bodyPreview || null,
-      startTime: parseMicrosoftDateTime(item.start),
-      endTime: parseMicrosoftDateTime(item.end),
-      attendees: (item.attendees || []).map((a: any) => a.emailAddress?.address).filter(Boolean),
-      htmlLink: item.webLink || null,
-    }));
+    return (data.value || []).map((item: any) => {
+      const meetingUrl = extractSupportedMeetingUrlFromText(item.onlineMeeting?.joinUrl)
+        ?? extractSupportedMeetingUrlFromText(item.location?.displayName)
+        ?? extractSupportedMeetingUrlFromText(item.bodyPreview)
+        ?? extractSupportedMeetingUrlFromText(item.body?.content);
+      return {
+        id: item.id,
+        provider: connection.provider,
+        title: item.subject || "Untitled Event",
+        description: item.bodyPreview || null,
+        startTime: parseMicrosoftDateTime(item.start),
+        endTime: parseMicrosoftDateTime(item.end),
+        attendees: (item.attendees || []).map((a: any) => a.emailAddress?.address).filter(Boolean),
+        organizerEmail: item.organizer?.emailAddress?.address || null,
+        meetingUrl,
+        htmlLink: item.webLink || null,
+        status: item.isCancelled ? "cancelled" : null,
+        visibility: item.sensitivity || null,
+        transparency: item.showAs || null,
+        responseStatus: item.responseStatus?.response || null,
+      };
+    });
   }
 
   return [];

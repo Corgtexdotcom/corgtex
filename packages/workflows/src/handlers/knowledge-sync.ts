@@ -1,6 +1,6 @@
 import { prisma } from "@corgtex/shared";
 import { syncKnowledgeForSource, syncBrainArticleKnowledge } from "@corgtex/knowledge";
-import { fetchCalendarEvents } from "@corgtex/domain";
+import { fetchCalendarEvents, syncCalendarEventRecorder } from "@corgtex/domain";
 
 export async function handleKnowledgeSync(jobId: string, payload: { proposalId?: string }, workspaceId: string) {
   if (!payload.proposalId) {
@@ -369,6 +369,11 @@ export async function handleCalendarSync(jobId: string, payload: { connectionId?
           workflowJobId: jobId,
         },
         workflowJobId: jobId,
+      });
+      await syncCalendarEventRecorder({
+        workspaceId,
+        connectionId: connection.id,
+        event,
       });
     }
   } catch (error) {

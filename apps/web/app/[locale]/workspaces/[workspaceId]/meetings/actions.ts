@@ -17,6 +17,8 @@ import {
   confirmAllInsights,
   postDeliberationEntry,
   resolveDeliberationEntry,
+  scheduleMeetingRecording,
+  cancelMeetingRecording,
 } from "@corgtex/domain";
 import { extractTextFromFileBuffer } from "@corgtex/knowledge";
 
@@ -124,6 +126,33 @@ export async function archiveMeetingAction(formData: FormData) {
   const actor = await requirePageActor();
   const workspaceId = asString(formData, "workspaceId");
   await deleteMeeting(actor, {
+    workspaceId,
+    meetingId: asString(formData, "meetingId"),
+  });
+  refresh(workspaceId);
+}
+
+export async function scheduleMeetingRecordingAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  await scheduleMeetingRecording(actor, {
+    workspaceId,
+    meetingId: asString(formData, "meetingId"),
+    mode: "manual",
+  });
+  refresh(workspaceId);
+}
+
+export async function cancelMeetingRecordingAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  await cancelMeetingRecording(actor, {
     workspaceId,
     meetingId: asString(formData, "meetingId"),
   });

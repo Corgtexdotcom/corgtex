@@ -13,7 +13,8 @@ import {
   requireWorkspaceMembership,
   getUserProfile,
   listUserSessions,
-  getUserNotificationPreferences
+  getUserNotificationPreferences,
+  getMeetingRecorderConfig,
 } from "@corgtex/domain";
 import { env, prisma } from "@corgtex/shared";
 import { requirePageActor } from "@/lib/auth";
@@ -24,6 +25,7 @@ import {
   deleteWebhookEndpointAction,
   rotateWebhookSecretAction,
   disconnectCommunicationInstallationAction,
+  updateMeetingRecorderConfigAction,
   updateSlackAgendaSettingsAction,
 } from "../actions";
 import { CorgtexConnectorManager } from "./CorgtexConnectorManager";
@@ -60,12 +62,13 @@ export default async function SettingsPage({
   }
 
   // Load core user constraints that apply to both tabs
-  const [webhookEndpoints, inboundWebhooks, userConnections, ssoConfigs, communicationInstallations] = await Promise.all([
+  const [webhookEndpoints, inboundWebhooks, userConnections, ssoConfigs, communicationInstallations, meetingRecorderConfig] = await Promise.all([
     listWebhookEndpoints(actor, workspaceId).catch(() => []),
     listInboundWebhooks(actor, workspaceId, { take: 20 }).catch(() => []),
     actor.kind === "user" ? prisma.oAuthConnection.findMany({ where: { userId: actor.user.id } }).catch(() => []) : Promise.resolve([]),
     getSsoConfigByWorkspace(actor, workspaceId).catch(() => []),
     listCommunicationInstallations(actor, workspaceId).catch(() => []),
+    featureFlags.MEETING_RECORDERS ? getMeetingRecorderConfig(actor, workspaceId).catch(() => null) : Promise.resolve(null),
   ]);
   const slackInstallation = communicationInstallations.find((installation) => installation.provider === "SLACK" && installation.status === "ACTIVE");
   const slackSettings = slackInstallation?.settings && typeof slackInstallation.settings === "object" && !Array.isArray(slackInstallation.settings)
@@ -243,6 +246,69 @@ export default async function SettingsPage({
                     )}
                   </div>
                 </div>
+                {featureFlags.MEETING_RECORDERS && meetingRecorderConfig ? (
+                  <div className="nr-item" style={{ padding: "12px 0" }}>
+                    <div className="row">
+                      <strong className="nr-item-title">Corgtex meeting recorder</strong>
+                      <span className="tag" style={{ background: meetingRecorderConfig.config.enabled ? "var(--accent-soft)" : "transparent" }}>
+                        {meetingRecorderConfig.config.enabled ? "Enabled" : "Disabled"}
+                      </span>
+                    </div>
+                    <p className="nr-item-meta" style={{ fontSize: "0.82rem", marginTop: 8 }}>
+                      Uses Corgtex-managed Recall.ai and Meeting BaaS accounts. Calendar connections stay in Corgtex; vendor keys are never shown to customers.
+                    </p>
+                    <form action={updateMeetingRecorderConfigAction} className="stack" style={{ gap: 8, paddingTop: 8 }}>
+                      <input type="hidden" name="workspaceId" value={workspaceId} />
+                      <label style={{ fontSize: "0.85rem" }}>
+                        Recorder
+                        <select name="enabled" defaultValue={meetingRecorderConfig.config.enabled ? "true" : "false"}>
+                          <option value="true">Enabled</option>
+                          <option value="false">Disabled</option>
+                        </select>
+                      </label>
+                      <label style={{ fontSize: "0.85rem" }}>
+                        Automatic calendar recording
+                        <select name="autoRecordEnabled" defaultValue={meetingRecorderConfig.config.autoRecordEnabled ? "true" : "false"}>
+                          <option value="true">Enabled</option>
+                          <option value="false">Disabled</option>
+                        </select>
+                      </label>
+                      <div className="actions-inline">
+                        <label style={{ flex: 1, fontSize: "0.85rem" }}>
+                          Default provider
+                          <select name="defaultProvider" defaultValue={meetingRecorderConfig.config.defaultProvider}>
+                            <option value="RECALL_AI">Recall.ai</option>
+                            <option value="MEETING_BAAS">Meeting BaaS</option>
+                          </select>
+                        </label>
+                        <label style={{ flex: 1, fontSize: "0.85rem" }}>
+                          Fallback provider
+                          <select name="fallbackProvider" defaultValue={meetingRecorderConfig.config.fallbackProvider ?? ""}>
+                            <option value="">None</option>
+                            <option value="RECALL_AI">Recall.ai</option>
+                            <option value="MEETING_BAAS">Meeting BaaS</option>
+                          </select>
+                        </label>
+                      </div>
+                      <label style={{ fontSize: "0.85rem" }}>
+                        Bot name
+                        <input name="botName" defaultValue={meetingRecorderConfig.config.botName} />
+                      </label>
+                      <label style={{ fontSize: "0.85rem" }}>
+                        Entry message
+                        <textarea name="entryMessage" defaultValue={meetingRecorderConfig.config.entryMessage ?? ""} rows={3} />
+                      </label>
+                      <label style={{ fontSize: "0.85rem" }}>
+                        Monthly minute cap
+                        <input name="monthlyMinuteCap" type="number" min="0" defaultValue={meetingRecorderConfig.config.monthlyMinuteCap} />
+                      </label>
+                      <p className="nr-item-meta" style={{ fontSize: "0.82rem", margin: 0 }}>
+                        Used this month: {meetingRecorderConfig.usage.usedMinutes} minutes.
+                      </p>
+                      <button type="submit" className="secondary small">Save recorder settings</button>
+                    </form>
+                  </div>
+                ) : null}
                 <div className="nr-item" style={{ padding: "12px 0" }}>
                   <div className="row">
                     <strong className="nr-item-title">Slack workspace</strong>

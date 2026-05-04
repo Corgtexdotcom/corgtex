@@ -314,12 +314,12 @@ enum SensitivityLabel {
 }
 
 model Workspace {
-  id                            String                      @id @default(uuid())
-  slug                          String                      @unique
+  id                            String                          @id @default(uuid())
+  slug                          String                          @unique
   name                          String
   description                   String?
-  createdAt                     DateTime                    @default(now())
-  updatedAt                     DateTime                    @updatedAt
+  createdAt                     DateTime                        @default(now())
+  updatedAt                     DateTime                        @updatedAt
   members                       Member[]
   memberInviteRequests          MemberInviteRequest[]
   circles                       Circle[]
@@ -369,6 +369,9 @@ model Workspace {
   modelUsageBudget              ModelUsageBudget?
   externalDataSources           ExternalDataSource[]
   featureFlags                  WorkspaceFeatureFlag[]
+  meetingRecorderConfig         WorkspaceMeetingRecorderConfig?
+  meetingRecordings             MeetingRecording[]
+  meetingRecorderProviderEvents MeetingRecorderProviderEvent[]
   meetingInsights               MeetingInsight[]
   goals                         Goal[]
   recognitions                  Recognition[]
@@ -384,8 +387,8 @@ model Workspace {
   archiveRecords                WorkspaceArchiveRecord[]
   crmQualifications             CrmQualification[]
   crmConversations              CrmConversation[]
-  crmProspectWorkspacesAsCrm    CrmProspectWorkspace[]      @relation("CrmWorkspace")
-  crmProspectWorkspacesAsTarget CrmProspectWorkspace[]      @relation("TargetWorkspace")
+  crmProspectWorkspacesAsCrm    CrmProspectWorkspace[]          @relation("CrmWorkspace")
+  crmProspectWorkspacesAsTarget CrmProspectWorkspace[]          @relation("TargetWorkspace")
   procurementSetupSessions      ProcurementSetupSession[]
   procurementBillingHandoffs    ProcurementBillingHandoff[]
   procurementTrials             ProcurementTrial[]
@@ -431,13 +434,13 @@ model CommunicationInstallation {
   createdAt           DateTime                        @default(now())
   updatedAt           DateTime                        @updatedAt
 
-  workspace     Workspace                   @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  externalUsers CommunicationExternalUser[]
-  channels      CommunicationChannel[]
-  messages      CommunicationMessage[]
+  workspace        Workspace                     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  externalUsers    CommunicationExternalUser[]
+  channels         CommunicationChannel[]
+  messages         CommunicationMessage[]
   contextSummaries CommunicationContextSummary[]
-  inboundEvents CommunicationInboundEvent[]
-  entityLinks   CommunicationEntityLink[]
+  inboundEvents    CommunicationInboundEvent[]
+  entityLinks      CommunicationEntityLink[]
 
   @@unique([provider, externalWorkspaceId])
   @@index([workspaceId, provider, status])
@@ -1296,6 +1299,22 @@ enum MeetingStatus {
   COMPLETED
 }
 
+enum MeetingRecorderProvider {
+  RECALL_AI
+  MEETING_BAAS
+}
+
+enum MeetingRecordingStatus {
+  PENDING
+  SCHEDULED
+  JOINING
+  RECORDING
+  COMPLETED
+  FAILED
+  CANCELLED
+  SKIPPED
+}
+
 model MeetingSeries {
   id                     String    @id @default(uuid())
   workspaceId            String
@@ -1327,6 +1346,8 @@ model Meeting {
   source              String
   externalId          String?       @unique
   calendarExternalId  String?
+  meetingUrl          String?       @db.Text
+  meetingUrlHash      String?
   recordedAt          DateTime
   scheduledEndAt      DateTime?
   transcript          String?       @db.Text
@@ -1347,17 +1368,92 @@ model Meeting {
   createdAt           DateTime      @default(now())
   updatedAt           DateTime      @updatedAt
 
-  workspace Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  series    MeetingSeries?   @relation(fields: [seriesId], references: [id], onDelete: SetNull)
-  proposals Proposal[]
-  tensions  Tension[]
-  insights  MeetingInsight[]
+  workspace  Workspace          @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  series     MeetingSeries?     @relation(fields: [seriesId], references: [id], onDelete: SetNull)
+  proposals  Proposal[]
+  tensions   Tension[]
+  insights   MeetingInsight[]
+  recordings MeetingRecording[]
 
   @@index([workspaceId, recordedAt])
   @@index([workspaceId, status, recordedAt])
   @@index([workspaceId, calendarExternalId])
+  @@index([workspaceId, meetingUrlHash])
   @@index([seriesId, recordedAt])
   @@index([workspaceId, archivedAt])
+}
+
+model WorkspaceMeetingRecorderConfig {
+  id                String                   @id @default(uuid())
+  workspaceId       String                   @unique
+  enabled           Boolean                  @default(false)
+  defaultProvider   MeetingRecorderProvider  @default(RECALL_AI)
+  fallbackProvider  MeetingRecorderProvider?
+  botName           String                   @default("Corgtex Recorder")
+  entryMessage      String?                  @db.Text
+  autoRecordEnabled Boolean                  @default(true)
+  monthlyMinuteCap  Int                      @default(6000)
+  providerSettings  Json?
+  createdAt         DateTime                 @default(now())
+  updatedAt         DateTime                 @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+}
+
+model MeetingRecording {
+  id                    String                  @id @default(uuid())
+  workspaceId           String
+  meetingId             String
+  provider              MeetingRecorderProvider
+  externalBotId         String?
+  activeDedupeKey       String?                 @unique
+  meetingUrl            String                  @db.Text
+  scheduledAt           DateTime?
+  joinAt                DateTime?
+  startedAt             DateTime?
+  endedAt               DateTime?
+  status                MeetingRecordingStatus  @default(PENDING)
+  failureCode           String?
+  failureMessage        String?                 @db.Text
+  transcriptProcessedAt DateTime?
+  durationSeconds       Int?
+  providerMetadata      Json?
+  createdAt             DateTime                @default(now())
+  updatedAt             DateTime                @updatedAt
+
+  workspace Workspace                      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  meeting   Meeting                        @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  events    MeetingRecorderProviderEvent[]
+
+  @@unique([provider, externalBotId])
+  @@index([workspaceId, meetingId])
+  @@index([workspaceId, status, joinAt])
+  @@index([workspaceId, provider, externalBotId])
+}
+
+model MeetingRecorderProviderEvent {
+  id              String                  @id @default(uuid())
+  workspaceId     String?
+  recordingId     String?
+  provider        MeetingRecorderProvider
+  externalEventId String?
+  externalBotId   String?
+  eventType       String
+  dedupeKey       String                  @unique
+  payload         Json
+  receivedAt      DateTime                @default(now())
+  processedAt     DateTime?
+  redactedAt      DateTime?
+  error           String?                 @db.Text
+  createdAt       DateTime                @default(now())
+  updatedAt       DateTime                @updatedAt
+
+  workspace Workspace?        @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
+  recording MeetingRecording? @relation(fields: [recordingId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId, provider, eventType])
+  @@index([recordingId])
+  @@index([provider, externalBotId])
 }
 
 model Document {
@@ -1518,11 +1614,11 @@ model WorkflowJob {
   createdAt      DateTime          @default(now())
   updatedAt      DateTime          @updatedAt
 
-  workspace  Workspace?    @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
-  event      Event?        @relation(fields: [eventId], references: [id], onDelete: SetNull)
-  dependsOn  WorkflowJob?  @relation("JobDependency", fields: [dependsOnJobId], references: [id], onDelete: SetNull)
-  dependents WorkflowJob[] @relation("JobDependency")
-  modelUsage ModelUsage[]
+  workspace             Workspace?             @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
+  event                 Event?                 @relation(fields: [eventId], references: [id], onDelete: SetNull)
+  dependsOn             WorkflowJob?           @relation("JobDependency", fields: [dependsOnJobId], references: [id], onDelete: SetNull)
+  dependents            WorkflowJob[]          @relation("JobDependency")
+  modelUsage            ModelUsage[]
   newspaperDeliveries   NewspaperDelivery[]
   newspaperTrackedLinks NewspaperTrackedLink[]
 
@@ -1638,9 +1734,9 @@ model AgentCredential {
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
 
-  workspace       Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  createdBy       User?           @relation("AgentCredentialCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
-  agentIdentities AgentIdentity[]
+  workspace        Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  createdBy        User?             @relation("AgentCredentialCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  agentIdentities  AgentIdentity[]
   procurementTrial ProcurementTrial?
 }
 
@@ -3007,32 +3103,32 @@ model ProcurementBillingHandoff {
 }
 
 model ProcurementTrial {
-  id                         String    @id @default(uuid())
-  workspaceId                String?   @unique
-  agentCredentialId          String?   @unique
-  status                     String    @default("REVIEW_REQUIRED")
-  companyName                String
-  adminEmail                 String
-  adminName                  String?
-  emailDomain                String
-  billingContactEmail        String?
-  acceptedTermsVersion       String
-  sourceAgent                Json?
-  riskStatus                 String    @default("REVIEW_REQUIRED")
-  riskReasons                String[]  @default([])
-  connectorTokenEnc          String?
-  connectorTokenRevealedAt   DateTime?
-  claimEmailStatus           Json?
-  modelMonthlyBudgetCents    Int       @default(500)
-  storageLimitMb             Int       @default(100)
-  memberLimit                Int       @default(5)
-  mcpDailyCallLimit          Int       @default(100)
-  trialExpiresAt             DateTime
-  suspendedAt                DateTime?
-  suspensionReason           String?
-  convertedAt                DateTime?
-  createdAt                  DateTime  @default(now())
-  updatedAt                  DateTime  @updatedAt
+  id                       String    @id @default(uuid())
+  workspaceId              String?   @unique
+  agentCredentialId        String?   @unique
+  status                   String    @default("REVIEW_REQUIRED")
+  companyName              String
+  adminEmail               String
+  adminName                String?
+  emailDomain              String
+  billingContactEmail      String?
+  acceptedTermsVersion     String
+  sourceAgent              Json?
+  riskStatus               String    @default("REVIEW_REQUIRED")
+  riskReasons              String[]  @default([])
+  connectorTokenEnc        String?
+  connectorTokenRevealedAt DateTime?
+  claimEmailStatus         Json?
+  modelMonthlyBudgetCents  Int       @default(500)
+  storageLimitMb           Int       @default(100)
+  memberLimit              Int       @default(5)
+  mcpDailyCallLimit        Int       @default(100)
+  trialExpiresAt           DateTime
+  suspendedAt              DateTime?
+  suspensionReason         String?
+  convertedAt              DateTime?
+  createdAt                DateTime  @default(now())
+  updatedAt                DateTime  @updatedAt
 
   workspace       Workspace?       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   agentCredential AgentCredential? @relation(fields: [agentCredentialId], references: [id], onDelete: SetNull)
