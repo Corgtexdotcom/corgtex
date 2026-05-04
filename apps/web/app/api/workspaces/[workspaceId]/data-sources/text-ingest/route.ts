@@ -37,6 +37,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       return NextResponse.json(result, { status: 201 });
     }
     
+    const authorMemberId = membership?.id === "global-operator" ? null : membership?.id ?? null;
     const source = await ingestSource(actor, {
       workspaceId,
       sourceType: String(sourceType || "ARTICLE") as BrainSourceType,
@@ -44,7 +45,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       content,
       title: title ? String(title) : undefined,
       channel: channel ? String(channel) : undefined,
-      authorMemberId: membership?.id ?? null,
+      authorMemberId,
       ingestionGuidanceMd: typeof ingestionGuidanceMd === "string" ? ingestionGuidanceMd : null,
     });
 
