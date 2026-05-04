@@ -34,6 +34,7 @@
     "test:db:down": "docker compose -f docker-compose.test.yml down -v",
     "test:smoke:site": "node scripts/site-smoke.mjs",
     "smoke:railway": "node scripts/check-migration-health.mjs && node scripts/railway-smoke.mjs",
+    "smoke:ingestion-guidance": "node scripts/ingestion-guidance-smoke.mjs",
     "test:e2e:agents": "npx dotenv-cli -- node scripts/e2e-agent-tests.mjs",
     "prisma:generate": "prisma generate",
     "prisma:push": "prisma db push",
