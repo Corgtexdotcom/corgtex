@@ -41,6 +41,10 @@ const routeCatalog = [
   ["operator", "/operator"],
 ];
 
+if (process.env.CLIENT_READINESS_INCLUDE_ADMIN === "true") {
+  routeCatalog.push(["admin", "/admin"]);
+}
+
 const desktopRoutes = routeCatalog.filter(([name, suffix]) => {
   if (routeNameFilter.size > 0 && !routeNameFilter.has(name)) return false;
   if (excludedRoutePaths.has(suffix)) return false;
@@ -48,7 +52,7 @@ const desktopRoutes = routeCatalog.filter(([name, suffix]) => {
   return true;
 });
 
-const mobileRoutes = desktopRoutes.filter(([name]) => name !== "operator");
+const mobileRoutes = desktopRoutes;
 const mobileShellViewports = [
   ["iphone-se", { width: 320, height: 568 }],
   ["iphone-modern", { width: 390, height: 844 }],

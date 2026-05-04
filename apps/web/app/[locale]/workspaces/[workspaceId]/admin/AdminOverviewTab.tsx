@@ -23,29 +23,30 @@ export function AdminOverviewTab({ data, workspaceId }: Props) {
 
   return (
     <div className="admin-overview stack" style={{ gap: 32 }}>
-      <div 
+      <div
+        className="admin-stat-grid"
         style={{ 
           display: "grid", 
           gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", 
           gap: 24 
         }}
       >
-        <div className="card" style={{ padding: 24 }}>
+        <div className="card admin-stat-card" style={{ padding: 24 }}>
           <h3 className="title-sm" style={{ color: "var(--gray-11)", marginBottom: 8 }}>{t("statTotalWorkspaces")}</h3>
           <div className="title-xl" style={{ fontSize: 32, fontWeight: 600 }}>{data.workspacesCount}</div>
         </div>
 
-        <div className="card" style={{ padding: 24 }}>
+        <div className="card admin-stat-card" style={{ padding: 24 }}>
           <h3 className="title-sm" style={{ color: "var(--gray-11)", marginBottom: 8 }}>{t("statTotalUsers")}</h3>
           <div className="title-xl" style={{ fontSize: 32, fontWeight: 600 }}>{data.usersCount}</div>
         </div>
 
-        <div className="card" style={{ padding: 24 }}>
+        <div className="card admin-stat-card" style={{ padding: 24 }}>
           <h3 className="title-sm" style={{ color: "var(--gray-11)", marginBottom: 8 }}>{t("statActiveMembers")}</h3>
           <div className="title-xl" style={{ fontSize: 32, fontWeight: 600 }}>{data.activeMembersCount}</div>
         </div>
 
-        <div className="card" style={{ padding: 24 }}>
+        <div className="card admin-stat-card" style={{ padding: 24 }}>
           <h3 className="title-sm" style={{ color: "var(--gray-11)", marginBottom: 8 }}>{t("statWorkerStatus")}</h3>
           <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12 }}>
             <div 

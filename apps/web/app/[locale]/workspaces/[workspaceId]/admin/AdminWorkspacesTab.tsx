@@ -19,7 +19,7 @@ export function AdminWorkspacesTab({ workspaces, workspaceId }: Props) {
 
   return (
     <div className="admin-workspaces stack" style={{ gap: 24 }}>
-      <div style={{ display: "flex", justifyContent: "flex-end" }}>
+      <div className="admin-section-header" style={{ display: "flex", justifyContent: "flex-end" }}>
         <button className="btn" onClick={() => setShowCreate(!showCreate)}>
           {t("createWorkspace")}
         </button>
@@ -46,7 +46,7 @@ export function AdminWorkspacesTab({ workspaces, workspaceId }: Props) {
         </div>
       )}
 
-      <div className="card">
+      <div className="card admin-table-card">
         <table className="table" style={{ width: "100%", textAlign: "left", borderCollapse: "collapse" }}>
           <thead>
             <tr style={{ borderBottom: "1px solid var(--border-color)" }}>
@@ -61,24 +61,24 @@ export function AdminWorkspacesTab({ workspaces, workspaceId }: Props) {
           <tbody>
             {workspaces.map((ws) => (
               <tr key={ws.id} style={{ borderBottom: "1px solid var(--border-color)" }}>
-                <td style={{ padding: 12 }}>
+                <td data-label={t("colWorkspace")} style={{ padding: 12 }}>
                   <div style={{ fontWeight: 500 }}>{ws.name}</div>
                   <div className="muted text-sm">{t("colCreated")}: {new Date(ws.createdAt).toLocaleDateString()}</div>
                 </td>
-                <td style={{ padding: 12 }}><code>{ws.slug}</code></td>
-                <td style={{ padding: 12 }}>
+                <td data-label={t("colSlug")} style={{ padding: 12 }}><code>{ws.slug}</code></td>
+                <td data-label={t("colMembers")} style={{ padding: 12 }}>
                   {ws.activeMemberCount} / {ws.memberCount}
                 </td>
-                <td style={{ padding: 12 }}>{ws.adminCount}</td>
-                <td style={{ padding: 12 }}>
+                <td data-label={t("colAdmins")} style={{ padding: 12 }}>{ws.adminCount}</td>
+                <td data-label={t("colFailedJobs")} style={{ padding: 12 }}>
                   {ws.failedJobsCount > 0 ? (
                     <span style={{ color: "var(--red-11)", fontWeight: 500 }}>{ws.failedJobsCount}</span>
                   ) : (
                     <span className="muted">0</span>
                   )}
                 </td>
-                <td style={{ padding: 12 }}>
-                  <div style={{ display: "flex", gap: 8 }}>
+                <td data-label={t("colActions")} style={{ padding: 12 }}>
+                  <div className="admin-table-actions" style={{ display: "flex", gap: 8 }}>
                     <Link href={`/workspaces/${ws.id}/overview`} className="btn-secondary btn-sm" target="_blank">
                       {t("btnOpenWorkspace")}
                     </Link>

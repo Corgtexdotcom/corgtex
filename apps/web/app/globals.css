@@ -2586,6 +2586,191 @@ a.wiki-list-item:hover {
     border-top: 1px solid var(--line-subtle) !important;
   }
 
+  .admin-dashboard {
+    gap: 14px;
+  }
+
+  .admin-mobile-tabs {
+    position: sticky;
+    top: calc(var(--mobile-topbar-height) + env(safe-area-inset-top, 0px));
+    z-index: 30;
+    display: flex;
+    flex-wrap: nowrap;
+    gap: 8px !important;
+    margin: -4px -14px 14px !important;
+    padding: 8px 14px 10px;
+    overflow-x: auto;
+    background: color-mix(in srgb, var(--bg) 92%, transparent);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    border-bottom: 1px solid var(--line-subtle);
+    scrollbar-width: none;
+  }
+
+  .admin-mobile-tabs::-webkit-scrollbar {
+    display: none;
+  }
+
+  .admin-mobile-tabs button {
+    flex: 0 0 auto;
+    min-height: 44px;
+    white-space: nowrap;
+  }
+
+  .admin-stat-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 10px !important;
+  }
+
+  .admin-stat-card {
+    padding: 14px !important;
+    border-radius: 10px;
+  }
+
+  .admin-stat-card h3 {
+    font-size: 0.74rem;
+    line-height: 1.2;
+  }
+
+  .admin-stat-card .title-xl {
+    font-size: 1.55rem !important;
+  }
+
+  .admin-section-header,
+  .admin-header-actions {
+    width: 100%;
+    align-items: stretch !important;
+    flex-direction: column;
+  }
+
+  .admin-header-actions button,
+  .admin-section-header > button {
+    width: 100%;
+  }
+
+  .admin-form-grid,
+  .admin-form-grid-3 {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+
+  .admin-search-card {
+    padding: 14px !important;
+  }
+
+  .admin-search-card input {
+    max-width: none !important;
+  }
+
+  .admin-table-card {
+    padding: 0;
+    border: 0;
+    background: transparent;
+    box-shadow: none;
+  }
+
+  .admin-table-card .table tr {
+    overflow: hidden;
+  }
+
+  .admin-table-card .table td[data-label] {
+    display: grid;
+    grid-template-columns: minmax(96px, 34%) minmax(0, 1fr);
+    gap: 12px;
+    align-items: start;
+    word-break: break-word;
+  }
+
+  .admin-table-card .table td[data-label]::before {
+    content: attr(data-label);
+    color: var(--muted);
+    font-size: 0.72rem;
+    font-weight: 800;
+    letter-spacing: 0.04em;
+    line-height: 1.35;
+    text-transform: uppercase;
+  }
+
+  .admin-table-actions {
+    display: grid !important;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px !important;
+    width: 100%;
+  }
+
+  .admin-table-actions a,
+  .admin-table-actions button,
+  .admin-table-actions form {
+    width: 100%;
+  }
+
+  .admin-table-actions form {
+    display: grid;
+  }
+
+  .admin-instance-table details summary {
+    min-height: 36px;
+    display: flex;
+    align-items: center;
+  }
+
+  .operator-page {
+    display: grid;
+    gap: 18px;
+  }
+
+  .operator-page .ws-page-header .row {
+    align-items: flex-start;
+  }
+
+  .operator-page .ws-page-header .tag {
+    min-height: 32px;
+    display: inline-flex;
+    align-items: center;
+  }
+
+  .operator-agent-form {
+    margin-left: -2px;
+    margin-right: -2px;
+  }
+
+  .operator-form-grid {
+    display: grid !important;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
+  }
+
+  .operator-run-list > .item,
+  .operator-runtime-grid .item {
+    padding: 14px;
+  }
+
+  .operator-card-body {
+    min-width: 0;
+  }
+
+  .operator-meta-row {
+    display: flex !important;
+    width: auto;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+
+  .operator-nested-list {
+    gap: 8px;
+  }
+
+  .operator-card-actions {
+    width: 100%;
+    display: grid !important;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+  }
+
+  .operator-card-actions form,
+  .operator-card-actions button {
+    width: 100%;
+  }
+
   .dialog {
     width: 100vw;
     max-width: none;

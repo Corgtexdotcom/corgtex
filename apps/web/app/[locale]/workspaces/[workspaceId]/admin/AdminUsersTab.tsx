@@ -19,7 +19,7 @@ export function AdminUsersTab({ users, workspaceId }: Props) {
 
   return (
     <div className="admin-users stack" style={{ gap: 24 }}>
-      <div className="card" style={{ padding: 24, display: "flex", gap: 16, alignItems: "center" }}>
+      <div className="card admin-search-card" style={{ padding: 24, display: "flex", gap: 16, alignItems: "center" }}>
         <input 
           type="text" 
           placeholder={t("placeholderSearchUsers")}
@@ -30,7 +30,7 @@ export function AdminUsersTab({ users, workspaceId }: Props) {
         />
       </div>
 
-      <div className="card">
+      <div className="card admin-table-card">
         <table className="table" style={{ width: "100%", textAlign: "left", borderCollapse: "collapse" }}>
           <thead>
             <tr style={{ borderBottom: "1px solid var(--border-color)" }}>
@@ -43,7 +43,7 @@ export function AdminUsersTab({ users, workspaceId }: Props) {
           <tbody>
             {filteredUsers.map((u) => (
               <tr key={u.id} style={{ borderBottom: "1px solid var(--border-color)" }}>
-                <td style={{ padding: 12 }}>
+                <td data-label={t("colUser")} style={{ padding: 12 }}>
                   <div style={{ fontWeight: 500 }}>{u.displayName || "Unknown"}</div>
                   <div className="muted text-sm">
                     {u.sessions.length > 0 ? (
@@ -53,8 +53,8 @@ export function AdminUsersTab({ users, workspaceId }: Props) {
                     )}
                   </div>
                 </td>
-                <td style={{ padding: 12 }}>{u.email}</td>
-                <td style={{ padding: 12 }}>
+                <td data-label={t("colEmail")} style={{ padding: 12 }}>{u.email}</td>
+                <td data-label={t("colMemberships")} style={{ padding: 12 }}>
                   <div className="stack" style={{ gap: 4 }}>
                     <div style={{ fontWeight: 500 }}>{t("membershipsCount", { count: u.memberships.length })}</div>
                     <div className="muted text-sm">
@@ -62,7 +62,7 @@ export function AdminUsersTab({ users, workspaceId }: Props) {
                     </div>
                   </div>
                 </td>
-                <td style={{ padding: 12 }}>
+                <td data-label={t("colRole")} style={{ padding: 12 }}>
                   {u.globalRole === "OPERATOR" ? (
                     <span style={{ color: "var(--accent-11)", fontWeight: 600 }}>OPERATOR</span>
                   ) : (

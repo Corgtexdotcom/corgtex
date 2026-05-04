@@ -24,8 +24,8 @@ export function AdminDashboardClient({
   const [tab, setTab] = useState<"overview" | "workspaces" | "users" | "operations">("overview");
 
   return (
-    <div className="stack">
-      <div className="nr-tabs" style={{ marginBottom: 24, gap: 8 }}>
+    <div className="admin-dashboard stack">
+      <div className="nr-tabs admin-mobile-tabs" style={{ marginBottom: 24, gap: 8 }}>
         <button className={tab === "overview" ? "active" : ""} onClick={() => setTab("overview")}>{t("tabOverview")}</button>
         <button className={tab === "workspaces" ? "active" : ""} onClick={() => setTab("workspaces")}>{t("workspacesTab")}</button>
         <button className={tab === "users" ? "active" : ""} onClick={() => setTab("users")}>{t("usersTab")}</button>
@@ -39,4 +39,3 @@ export function AdminDashboardClient({
     </div>
   );
 }
-

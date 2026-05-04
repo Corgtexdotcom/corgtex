@@ -101,7 +101,7 @@ export default async function OperatorPage({
   const canOperate = capabilities.canUseOperatorConsole;
 
   return (
-    <>
+    <div className="operator-page">
       {failingAgents.length > 0 && (
         <div className="panel danger" style={{ marginBottom: 24 }}>
           <strong>{t("failingAgents", { agents: failingAgents.join(", ") })}</strong>
@@ -122,9 +122,9 @@ export default async function OperatorPage({
       <section className="ws-section">
         <h2>{t("sectionAgentRuns")}</h2>
         {canOperate && (
-          <form action={triggerAgentRunAction} className="stack panel" style={{ marginBottom: 16 }}>
+          <form action={triggerAgentRunAction} className="stack panel operator-agent-form" style={{ marginBottom: 16 }}>
             <input type="hidden" name="workspaceId" value={workspaceId} />
-            <div className="actions-inline">
+            <div className="actions-inline operator-form-grid">
               <label style={{ flex: 1 }}>
                 {t("formAgent")}
                 <select name="agentKey" defaultValue="proposal-drafting">
@@ -141,7 +141,7 @@ export default async function OperatorPage({
                 <input name="meetingId" placeholder={t("placeholderOptional")} />
               </label>
             </div>
-            <div className="actions-inline">
+            <div className="actions-inline operator-form-grid">
               <label style={{ flex: 1 }}>
                 {t("formProposalId")}
                 <input name="proposalId" placeholder={t("placeholderOptional")} />
@@ -158,14 +158,14 @@ export default async function OperatorPage({
             <button type="submit" disabled={env.AGENT_KILL_SWITCH}>{t("btnQueueAgent")}</button>
           </form>
         )}
-        <div className="list">
+        <div className="list operator-run-list">
           {agentRuns.map((run) => {
             const totalUsage = summarizeUsage(run);
 
             return (
               <div className="item" key={run.id}>
                 <div className="row" style={{ alignItems: "flex-start" }}>
-                  <div className="stack" style={{ gap: 6 }}>
+                  <div className="stack operator-card-body" style={{ gap: 6 }}>
                     <div className="actions-inline">
                       <span className="tag">{run.agentKey}</span>
                       <span className={`status-chip ${run.status === "WAITING_APPROVAL" ? "warning" : ""}`}>{run.status}</span>
@@ -175,7 +175,7 @@ export default async function OperatorPage({
                     <div className="muted">{t("startedAtMeta", { date: formatDateTime(run.startedAt ?? run.createdAt, t("notSet")) })}</div>
                   </div>
                   {run.status === "WAITING_APPROVAL" && canOperate && (
-                    <form action={resolveAgentRunAction} className="actions-inline">
+                    <form action={resolveAgentRunAction} className="actions-inline operator-card-actions">
                       <input type="hidden" name="workspaceId" value={workspaceId} />
                       <input type="hidden" name="agentRunId" value={run.id} />
                       <button type="submit" name="status" value="COMPLETED" className="small secondary">{t("btnMarkResolved")}</button>
@@ -184,7 +184,7 @@ export default async function OperatorPage({
                 </div>
                 {run.modelUsageSummary.length > 0 && (
                   <div className="stack" style={{ gap: 8, marginTop: 12 }}>
-                    <div className="actions-inline">
+                    <div className="actions-inline operator-meta-row">
                       {usageModels(run).map((model) => (
                         <span className="tag" key={`${run.id}:${model}`}>{model}</span>
                       ))}
@@ -192,7 +192,7 @@ export default async function OperatorPage({
                     <div className="muted">
                       {t("usageSummary", { inTokens: totalUsage.inputTokens, outTokens: totalUsage.outputTokens, latency: totalUsage.latencyMs, cost: formatUsd(totalUsage.estimatedCostUsd) })}
                     </div>
-                    <div className="list">
+                    <div className="list operator-nested-list">
                       {run.modelUsageSummary.map((usage) => (
                         <div className="nested-item" key={usageKey(usage)}>
                           <div className="row">
@@ -214,7 +214,7 @@ export default async function OperatorPage({
                   </div>
                 )}
                 {run.steps.length > 0 && (
-                  <div className="list" style={{ marginTop: 12 }}>
+                  <div className="list operator-nested-list" style={{ marginTop: 12 }}>
                     {run.steps.slice(-4).map((step) => (
                       <div className="nested-item" key={step.id}>
                         <div className="row">
@@ -232,7 +232,7 @@ export default async function OperatorPage({
         </div>
       </section>
 
-      <div className="ws-columns">
+      <div className="ws-columns operator-runtime-grid">
         <section className="ws-section">
           <h2>{t("sectionEvents")}</h2>
           <div className="list">
@@ -251,7 +251,7 @@ export default async function OperatorPage({
                 </div>
                 {event.error && <p className="muted" style={{ margin: "8px 0 0", color: "#b45309" }}>{event.error}</p>}
                 {canOperate && (
-                  <form action={replayEventAction} style={{ marginTop: 8 }}>
+                  <form action={replayEventAction} className="operator-card-actions" style={{ marginTop: 8 }}>
                     <input type="hidden" name="workspaceId" value={workspaceId} />
                     <input type="hidden" name="eventId" value={event.id} />
                     <button type="submit" className="secondary small">{t("btnReplay")}</button>
@@ -279,7 +279,7 @@ export default async function OperatorPage({
                 </div>
                 {job.error && <p className="muted" style={{ margin: "8px 0 0", color: "#b45309" }}>{job.error}</p>}
                 {canOperate && (
-                  <form action={replayWorkflowJobAction} style={{ marginTop: 8 }}>
+                  <form action={replayWorkflowJobAction} className="operator-card-actions" style={{ marginTop: 8 }}>
                     <input type="hidden" name="workspaceId" value={workspaceId} />
                     <input type="hidden" name="workflowJobId" value={job.id} />
                     <button type="submit" className="secondary small">{t("btnReplay")}</button>
@@ -309,7 +309,7 @@ export default async function OperatorPage({
                 </div>
                 {job.error && <p className="muted" style={{ margin: "8px 0 0", color: "#b45309" }}>{job.error}</p>}
                 {canOperate && (
-                  <div className="row" style={{ marginTop: 8, gap: 8, justifyContent: "flex-start" }}>
+                  <div className="row operator-card-actions" style={{ marginTop: 8, gap: 8, justifyContent: "flex-start" }}>
                     <form action={replayWorkflowJobAction}>
                       <input type="hidden" name="workspaceId" value={workspaceId} />
                       <input type="hidden" name="workflowJobId" value={job.id} />
@@ -327,6 +327,6 @@ export default async function OperatorPage({
           </div>
         </section>
       </div>
-    </>
+    </div>
   );
 }

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePathname } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { ChatInterface } from "./chat/ChatInterface";
@@ -59,7 +59,9 @@ export function MobileWorkspaceShell({
   const tMobile = useTranslations("mobile");
   const tCommon = useTranslations("common");
   const [mode, setModeState] = useState<MobileMode>("workspace");
+  const [hasLoadedStoredMode, setHasLoadedStoredMode] = useState(false);
   const [isMoreOpen, setIsMoreOpen] = useState(false);
+  const lastViewedKeyRef = useRef<string | null>(null);
 
   const primaryItems = useMemo(() => {
     const items = navGroups.flatMap((group) => group.items);
@@ -70,8 +72,43 @@ export function MobileWorkspaceShell({
     return picked.length > 0 ? picked : items.filter((item) => PRIMARY_HREFS.has(item.href)).slice(0, 3);
   }, [navGroups]);
 
-  function setMode(nextMode: MobileMode) {
-    setModeState(nextMode);
+  const trackMobileMode = useCallback((eventName: "mode_viewed" | "mode_changed", nextMode: MobileMode, options: {
+    previousMode?: MobileMode;
+    source?: string;
+  } = {}) => {
+    const payload = JSON.stringify({
+      eventName,
+      mode: nextMode,
+      previousMode: options.previousMode,
+      source: options.source,
+      route: window.location.pathname,
+      viewportWidth: window.innerWidth,
+      coarsePointer: window.matchMedia?.("(pointer: coarse)").matches ?? false,
+    });
+    const url = `/api/workspaces/${workspaceId}/mobile-analytics`;
+
+    if (navigator.sendBeacon) {
+      const body = new Blob([payload], { type: "application/json" });
+      if (navigator.sendBeacon(url, body)) {
+        return;
+      }
+    }
+
+    void fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: payload,
+      keepalive: true,
+    }).catch(() => null);
+  }, [workspaceId]);
+
+  function setMode(nextMode: MobileMode, source = "unknown") {
+    setModeState((previousMode) => {
+      if (previousMode !== nextMode) {
+        trackMobileMode("mode_changed", nextMode, { previousMode, source });
+      }
+      return nextMode;
+    });
     try {
       window.localStorage.setItem(MODE_STORAGE_KEY, nextMode);
     } catch {
@@ -87,12 +124,22 @@ export function MobileWorkspaceShell({
       }
     } catch {
       // Keep the default workspace mode when storage is unavailable.
+    } finally {
+      setHasLoadedStoredMode(true);
     }
   }, []);
 
   useEffect(() => {
     document.documentElement.dataset.mobileMode = mode;
   }, [mode]);
+
+  useEffect(() => {
+    if (!hasLoadedStoredMode) return;
+    const viewedKey = `${pathname}:${mode}`;
+    if (lastViewedKeyRef.current === viewedKey) return;
+    lastViewedKeyRef.current = viewedKey;
+    trackMobileMode("mode_viewed", mode, { source: "route_view" });
+  }, [hasLoadedStoredMode, mode, pathname, trackMobileMode]);
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
@@ -117,7 +164,7 @@ export function MobileWorkspaceShell({
           <a
             href={navHref(workspaceId, "")}
             className="mobile-brand"
-            onClick={() => setMode("workspace")}
+            onClick={() => setMode("workspace", "brand")}
           >
             <span className="mobile-brand-name">{workspaceName}</span>
             <span className="mobile-brand-label">{workspaceLabel}</span>
@@ -128,7 +175,7 @@ export function MobileWorkspaceShell({
               type="button"
               className={mode === "workspace" ? "active" : ""}
               aria-pressed={mode === "workspace"}
-              onClick={() => setMode("workspace")}
+              onClick={() => setMode("workspace", "topbar_switch")}
             >
               {tMobile("workspaceMode")}
             </button>
@@ -136,7 +183,7 @@ export function MobileWorkspaceShell({
               type="button"
               className={mode === "ai" ? "active" : ""}
               aria-pressed={mode === "ai"}
-              onClick={() => setMode("ai")}
+              onClick={() => setMode("ai", "topbar_switch")}
             >
               {tMobile("aiMode")}
             </button>
@@ -149,7 +196,7 @@ export function MobileWorkspaceShell({
               key={item.href}
               href={navHref(workspaceId, item.href)}
               className={mode === "workspace" && isActivePath(pathname, workspaceId, item.href) ? "active" : ""}
-              onClick={() => setMode("workspace")}
+              onClick={() => setMode("workspace", "bottom_nav")}
             >
               <span className="mobile-bottom-icon">{item.icon}</span>
               <span>{tNav(item.labelKey as any)}</span>
@@ -161,7 +208,7 @@ export function MobileWorkspaceShell({
           <button
             type="button"
             className={mode === "ai" ? "active" : ""}
-            onClick={() => setMode("ai")}
+            onClick={() => setMode("ai", "bottom_nav")}
           >
             <span className="mobile-bottom-icon">◇</span>
             <span>{tMobile("aiMode")}</span>
@@ -215,7 +262,7 @@ export function MobileWorkspaceShell({
                 type="button"
                 className="mobile-sheet-action"
                 onClick={() => {
-                  setMode("ai");
+                  setMode("ai", "more_sheet");
                   setIsMoreOpen(false);
                 }}
               >
@@ -245,7 +292,7 @@ export function MobileWorkspaceShell({
                       href={navHref(workspaceId, item.href)}
                       className="mobile-more-link"
                       onClick={() => {
-                        setMode("workspace");
+                        setMode("workspace", "more_sheet_link");
                         setIsMoreOpen(false);
                       }}
                     >
@@ -266,7 +313,7 @@ export function MobileWorkspaceShell({
                     href={navHref(workspaceId, "/admin")}
                     className="mobile-more-link"
                     onClick={() => {
-                      setMode("workspace");
+                      setMode("workspace", "more_sheet_admin_link");
                       setIsMoreOpen(false);
                     }}
                   >
@@ -285,7 +332,7 @@ export function MobileWorkspaceShell({
                 href={navHref(workspaceId, "/settings?tab=user")}
                 className="mobile-more-link"
                 onClick={() => {
-                  setMode("workspace");
+                  setMode("workspace", "more_sheet_user_settings");
                   setIsMoreOpen(false);
                 }}
               >

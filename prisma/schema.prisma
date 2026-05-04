@@ -339,6 +339,7 @@ model Workspace {
   constitutions                 Constitution[]
   governanceScores              GovernanceScore[]
   auditLogs                     AuditLog[]
+  productAnalyticsEvents        ProductAnalyticsEvent[]
   events                        Event[]
   workflowJobs                  WorkflowJob[]
   knowledge                     KnowledgeChunk[]
@@ -637,6 +638,7 @@ model User {
   supportOperations       SupportOperation[]           @relation("SupportOperationActor")
   createdToolLinks        WorkspaceToolLink[]          @relation("WorkspaceToolLinkCreator")
   createdBuildArtifacts   BuildArtifact[]              @relation("BuildArtifactCreator")
+  productAnalyticsEvents  ProductAnalyticsEvent[]
 }
 
 model Session {
@@ -1545,6 +1547,29 @@ model AuditLog {
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 
   @@index([workspaceId, createdAt])
+}
+
+model ProductAnalyticsEvent {
+  id            String   @id @default(uuid())
+  workspaceId   String
+  actorUserId   String?
+  eventName     String   @db.VarChar(64)
+  surface       String   @db.VarChar(64)
+  mode          String?  @db.VarChar(24)
+  previousMode  String?  @db.VarChar(24)
+  source        String?  @db.VarChar(64)
+  route         String?  @db.Text
+  viewportWidth Int?
+  coarsePointer Boolean?
+  meta          Json?
+  createdAt     DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  actorUser User?     @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId, eventName, createdAt])
+  @@index([workspaceId, mode, createdAt])
+  @@index([actorUserId, createdAt])
 }
 
 model WorkspaceArchiveRecord {
