@@ -13,6 +13,7 @@ export function TextPasteUploader({ workspaceId }: { workspaceId: string }) {
   const [sourceType, setSourceType] = useState("ARTICLE");
   const [channel, setChannel] = useState("");
   const [content, setContent] = useState("");
+  const [ingestionGuidanceMd, setIngestionGuidanceMd] = useState("");
   const [recordedAt, setRecordedAt] = useState("");
   const [error, setError] = useState("");
   const [clarification, setClarification] = useState("");
@@ -47,6 +48,7 @@ export function TextPasteUploader({ workspaceId }: { workspaceId: string }) {
           sourceType,
           channel,
           content,
+          ingestionGuidanceMd,
           recordedAt: isMeeting && recordedAt ? recordedAt : undefined,
         }),
       });
@@ -56,6 +58,7 @@ export function TextPasteUploader({ workspaceId }: { workspaceId: string }) {
         setTitle("");
         setChannel("");
         setContent("");
+        setIngestionGuidanceMd("");
         setRecordedAt("");
 
         if (data.meeting?.id) {
@@ -113,6 +116,11 @@ export function TextPasteUploader({ workspaceId }: { workspaceId: string }) {
       <label>
         {t("labelContent")}
         <textarea required value={content} onChange={e => setContent(e.target.value)} rows={6} placeholder={isMeeting ? t("placeholderMeetingTranscript") : t("placeholderContent")} />
+      </label>
+
+      <label>
+        {t("labelIngestionGuidance")}
+        <textarea value={ingestionGuidanceMd} onChange={e => setIngestionGuidanceMd(e.target.value)} rows={3} placeholder={t("placeholderIngestionGuidance")} />
       </label>
       
       <div style={{ marginTop: 8 }}>

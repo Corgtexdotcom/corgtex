@@ -11,7 +11,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     const membership = await requireWorkspaceMembership({ actor, workspaceId });
     
     const body = await request.json();
-    const { title, sourceType, channel, content, recordedAt } = body;
+    const { title, sourceType, channel, content, recordedAt, ingestionGuidanceMd } = body;
     
     if (!content || typeof content !== "string") {
       return NextResponse.json({ error: { message: "Content is required" } }, { status: 400 });
@@ -27,6 +27,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         title: title ? String(title) : null,
         source: channel ? String(channel) : "text-paste",
         recordedAt: recordedAt ? String(recordedAt) : null,
+        ingestionGuidanceMd: typeof ingestionGuidanceMd === "string" ? ingestionGuidanceMd : null,
       });
 
       if (result.status === "needs_clarification") {
@@ -44,6 +45,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       title: title ? String(title) : undefined,
       channel: channel ? String(channel) : undefined,
       authorMemberId: membership?.id ?? null,
+      ingestionGuidanceMd: typeof ingestionGuidanceMd === "string" ? ingestionGuidanceMd : null,
     });
 
     return NextResponse.json(source, { status: 201 });

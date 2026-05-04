@@ -79,6 +79,7 @@ export async function absorbSource(params: {
 Source type: ${source.sourceType} (tier ${source.tier})
 Source title: ${source.title ?? "untitled"}
 Source channel: ${source.channel ?? "unknown"}
+${source.ingestionGuidanceMd ? `User ingestion guidance:\n${source.ingestionGuidanceMd}` : "User ingestion guidance: none"}
 
 Existing articles in the wiki:
 ${articleIndex.map((a) => `- "${a.title}" (${a.type}, ${a.authority}) [slug: ${a.slug}]${a.aliases.length > 0 ? ` aliases: ${a.aliases.join(", ")}` : ""}`).join("\n")}
@@ -94,7 +95,10 @@ Determine:
   createNew: { title: string, slug: string } | null,
   summary: string
 }`,
-    input: source.content.slice(0, 4000),
+    input: JSON.stringify({
+      sourceContent: source.content.slice(0, 4000),
+      ingestionGuidanceMd: source.ingestionGuidanceMd,
+    }),
   });
 
   const result = analysis.output as {
@@ -140,6 +144,7 @@ Rules:
           content: JSON.stringify({
             currentArticle: existing.bodyMd.slice(0, 3000),
             newSource: source.content.slice(0, 3000),
+            ingestionGuidanceMd: source.ingestionGuidanceMd,
             sourceType: source.sourceType,
             sourceTier: source.tier,
           }),
@@ -187,6 +192,7 @@ Rules:
             content: JSON.stringify({
               title: createNew.title,
               sourceContent: source.content.slice(0, 4000),
+              ingestionGuidanceMd: source.ingestionGuidanceMd,
               sourceType: source.sourceType,
             }),
           },

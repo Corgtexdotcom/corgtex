@@ -60,6 +60,8 @@ Extract all:
 - FOLLOW_UPS: Items that need to be discussed in the next meeting
 - RESOLUTIONS: existing actions, tensions, or proposals that the meeting clearly completed, resolved, adopted, rejected, or withdrew
 
+Use any user-provided ingestion guidance to prioritize what matters and what follow-up work the operator wanted highlighted. Do not invent facts from guidance alone. If an item mainly comes from guidance rather than transcript evidence, say that clearly in the body and leave sourceQuote null.
+
 For each item, provide:
 - operation: CREATE for new records/decisions/follow-ups, RESOLVE for existing records resolved in this meeting
 - type: one of DECISION, TENSION, ACTION_ITEM, PROPOSAL, FOLLOW_UP
@@ -112,6 +114,7 @@ Number items sequentially (#001, #002, ...) across all types.
     instruction,
     input: JSON.stringify({
       transcript: meeting.transcript,
+      ingestionGuidanceMd: meeting.ingestionGuidanceMd,
       existingRecords: {
         actions: openActions,
         tensions: openTensions,

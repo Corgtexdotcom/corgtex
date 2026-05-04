@@ -59,6 +59,7 @@ describe("POST /api/workspaces/[workspaceId]/data-sources/text-ingest", () => {
         sourceType: "MEETING",
         content: "Jan: Milan owns onboarding.",
         recordedAt: "2026-04-30T17:10:00.000Z",
+        ingestionGuidanceMd: "Highlight onboarding owner.",
       }),
       { params: Promise.resolve({ workspaceId: "ws-1" }) },
     );
@@ -72,6 +73,7 @@ describe("POST /api/workspaces/[workspaceId]/data-sources/text-ingest", () => {
       title: "Weekly Tactical",
       source: "text-paste",
       recordedAt: "2026-04-30T17:10:00.000Z",
+      ingestionGuidanceMd: "Highlight onboarding owner.",
     });
     expect(ingestSource).not.toHaveBeenCalled();
     expect(handleRouteError).not.toHaveBeenCalled();
@@ -109,6 +111,7 @@ describe("POST /api/workspaces/[workspaceId]/data-sources/text-ingest", () => {
         title: null,
         source: "text-paste",
         recordedAt: null,
+        ingestionGuidanceMd: null,
       }),
     );
     expect(ingestSource).not.toHaveBeenCalled();
@@ -127,6 +130,7 @@ describe("POST /api/workspaces/[workspaceId]/data-sources/text-ingest", () => {
         sourceType: "DOC",
         channel: "handbook",
         content: "Policy text",
+        ingestionGuidanceMd: "Preserve rollout notes.",
       }),
       { params: Promise.resolve({ workspaceId: "ws-1" }) },
     );
@@ -142,6 +146,7 @@ describe("POST /api/workspaces/[workspaceId]/data-sources/text-ingest", () => {
       title: "Policy",
       channel: "handbook",
       authorMemberId: "member-1",
+      ingestionGuidanceMd: "Preserve rollout notes.",
     });
     expect(intakeMeetingTranscript).not.toHaveBeenCalled();
   });

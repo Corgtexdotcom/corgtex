@@ -405,6 +405,7 @@ export async function ingestSource(actor: AppActor, params: {
   externalId?: string | null;
   channel?: string | null;
   authorMemberId?: string | null;
+  ingestionGuidanceMd?: string | null;
   metadata?: Prisma.InputJsonValue;
 }) {
   await requireWorkspaceMembership({
@@ -426,6 +427,7 @@ export async function ingestSource(actor: AppActor, params: {
         externalId: params.externalId || null,
         channel: params.channel?.trim() || null,
         authorMemberId: params.authorMemberId || null,
+        ingestionGuidanceMd: params.ingestionGuidanceMd?.trim() || null,
         ...(params.metadata === undefined ? {} : { metadata: params.metadata }),
       },
     });
@@ -437,7 +439,7 @@ export async function ingestSource(actor: AppActor, params: {
         action: "brain-source.created",
         entityType: "BrainSource",
         entityId: source.id,
-        meta: { sourceType: source.sourceType, tier: source.tier },
+        meta: { sourceType: source.sourceType, tier: source.tier, hasIngestionGuidance: Boolean(source.ingestionGuidanceMd) },
       },
     });
 

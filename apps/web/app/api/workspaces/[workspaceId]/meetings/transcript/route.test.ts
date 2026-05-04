@@ -59,6 +59,7 @@ describe("POST /api/workspaces/[workspaceId]/meetings/transcript", () => {
           title: "Weekly Tactical",
           recordedAt: "2026-04-30T17:10:00.000Z",
           transcript: "Transcript text",
+          ingestionGuidanceMd: "Highlight decisions.",
           participantEmails: ["jan@example.com"],
         }),
       }) as never,
@@ -72,6 +73,7 @@ describe("POST /api/workspaces/[workspaceId]/meetings/transcript", () => {
         workspaceId: "ws-1",
         title: "Weekly Tactical",
         transcript: "Transcript text",
+        ingestionGuidanceMd: "Highlight decisions.",
         participantEmails: ["jan@example.com"],
       }),
     );
@@ -97,6 +99,7 @@ describe("POST /api/workspaces/[workspaceId]/meetings/transcript", () => {
     formData.set("file", new File(["ignored"], "weekly.txt", { type: "text/plain" }));
     formData.set("recordedAt", "2026-04-30T17:10:00.000Z");
     formData.set("title", "Weekly Tactical");
+    formData.set("ingestionGuidanceMd", "Track onboarding follow-ups.");
 
     const response = await POST(
       new Request("http://localhost/api/workspaces/ws-1/meetings/transcript", {
@@ -114,6 +117,7 @@ describe("POST /api/workspaces/[workspaceId]/meetings/transcript", () => {
         transcript: "Jan: We agreed Milan will own onboarding.",
         fileName: "weekly.txt",
         title: "Weekly Tactical",
+        ingestionGuidanceMd: "Track onboarding follow-ups.",
       }),
     );
     expect(uploadMeetingTranscript).not.toHaveBeenCalled();

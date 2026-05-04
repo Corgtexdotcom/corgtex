@@ -109,7 +109,7 @@ export default async function MeetingsPage({
                     <input type="hidden" name="title" value={meeting.title ?? ""} />
                     <input type="hidden" name="recordedAt" value={dateTimeLocalValue(meeting.recordedAt)} />
                     <label>
-                      Upload transcript file
+                      {t("formTranscriptFile")}
                       <input name="file" type="file" accept=".txt,.md,.csv,.json,.pdf,.docx" />
                     </label>
                     <label>
@@ -117,8 +117,9 @@ export default async function MeetingsPage({
                       <textarea name="transcript" />
                     </label>
                     <label>
-                      {t("formSummary")}
-                      <textarea name="summaryMd" />
+                      {t("formIngestionGuidance")}
+                      <textarea name="ingestionGuidanceMd" />
+                      <span className="nr-item-meta" style={{ display: "block", marginTop: 4 }}>{t("helpIngestionGuidance")}</span>
                     </label>
                     <button type="submit">{t("btnUploadTranscript")}</button>
                   </form>
@@ -225,11 +226,12 @@ export default async function MeetingsPage({
                 <input name="participantEmails" placeholder={t("formParticipantEmailsPlaceholder")} />
               </label>
               <label>
-                {t("formSummary")}
-                <textarea name="summaryMd" />
+                {t("formIngestionGuidance")}
+                <textarea name="ingestionGuidanceMd" />
+                <span className="nr-item-meta" style={{ display: "block", marginTop: 4 }}>{t("helpIngestionGuidance")}</span>
               </label>
               <label>
-                Upload transcript file
+                {t("formTranscriptFile")}
                 <input name="file" type="file" accept=".txt,.md,.csv,.json,.pdf,.docx" />
               </label>
               <label>

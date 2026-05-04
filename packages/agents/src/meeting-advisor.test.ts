@@ -98,6 +98,7 @@ describe("runMeetingSummaryAgent", () => {
       source: "manual",
       transcript: "We discussed project updates.",
       summaryMd: null,
+      ingestionGuidanceMd: "Emphasize launch risks.",
       recordedAt: new Date(),
     });
     prismaMock.meeting.update.mockReset().mockResolvedValue({ id: "meeting-1" });
@@ -122,6 +123,15 @@ describe("runMeetingSummaryAgent", () => {
         agentKey: "meeting-summary",
         workspaceId: "ws-1",
       }),
+    }));
+    const { defaultModelGateway } = await import("@corgtex/models");
+    expect(defaultModelGateway.chat).toHaveBeenCalledWith(expect.objectContaining({
+      messages: expect.arrayContaining([
+        expect.objectContaining({
+          role: "user",
+          content: expect.stringContaining("Emphasize launch risks."),
+        }),
+      ]),
     }));
     expect(result).toEqual(expect.objectContaining({ status: "COMPLETED" }));
   });
