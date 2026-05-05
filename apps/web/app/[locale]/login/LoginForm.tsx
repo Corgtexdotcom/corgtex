@@ -20,6 +20,7 @@ function SubmitButton({ label, loadingLabel }: { label: string, loadingLabel: st
 export function LoginForm() {
   const [state, formAction] = useActionState(loginAction, initialLoginActionState);
   const locale = useLocale();
+  const forgotPasswordHref = locale === "es" ? "/es/forgot-password" : "/forgot-password";
   const t = useTranslations("auth");
   const common = useTranslations("common");
 
@@ -55,7 +56,7 @@ export function LoginForm() {
         />
       </label>
       <div style={{ textAlign: "right", marginTop: -4 }}>
-        <Link href="/forgot-password" className="muted" style={{ fontSize: 13 }}>
+        <Link href={forgotPasswordHref} prefetch={false} className="muted" style={{ fontSize: 13 }}>
           {t("forgotPassword")}
         </Link>
       </div>
