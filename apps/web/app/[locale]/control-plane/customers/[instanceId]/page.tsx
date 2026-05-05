@@ -1,7 +1,14 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getFormatter } from "next-intl/server";
-import { getControlPlaneContextHealth, getControlPlaneCustomer, getControlPlaneIntegrationStatus, requireControlPlaneAccess } from "@corgtex/domain";
+import {
+  getControlPlaneAiGovernanceStatus,
+  getControlPlaneContextHealth,
+  getControlPlaneCustomer,
+  getControlPlaneIntegrationStatus,
+  getControlPlaneReleaseStatus,
+  requireControlPlaneAccess,
+} from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import {
   configureMeetingRecorderIntegrationAction,
@@ -9,6 +16,7 @@ import {
   recordBreakGlassAction,
   refreshSupportSnapshotAction,
   runContextOperationAction,
+  runReleaseOperationAction,
   runSupportOperationAction,
 } from "../../actions";
 
@@ -136,10 +144,12 @@ export default async function ControlPlaneCustomerPage({
   } catch {
     notFound();
   }
-  const [customer, integrations, context, format] = await Promise.all([
+  const [customer, integrations, context, aiGovernance, releases, format] = await Promise.all([
     getControlPlaneCustomer(actor, instanceId),
     getControlPlaneIntegrationStatus(actor, instanceId),
     getControlPlaneContextHealth(actor, instanceId),
+    getControlPlaneAiGovernanceStatus(actor, instanceId),
+    getControlPlaneReleaseStatus(actor, instanceId),
     getFormatter(),
   ]);
   const contextBrainSources = Array.isArray(context.sources) ? [] : context.sources.brain;
@@ -149,6 +159,8 @@ export default async function ControlPlaneCustomerPage({
   const readinessStatus = checks.every((check) => check.status === "ready") ? "ready" : "attention";
   const failedOperations = customer.supportOperations.filter((operation) => operation.status === "FAILED").length;
   const mutatingOperations = customer.supportOperations.filter((operation) => operation.action !== "members.list" && operation.action !== "integrations.list").length;
+  const aiSummary = aiGovernance.summary;
+  const releasePrep = releases.recentPreparations[0];
   const mcpUrl = customer.supportMcpUrl || `${customer.url.replace(/\/$/, "")}/api/mcp`;
 
   return (
@@ -354,14 +366,84 @@ export default async function ControlPlaneCustomerPage({
         <section id="ai-governance" className="panel stack" style={{ padding: 20 }}>
           <h2 style={{ margin: 0 }}>AI Governance</h2>
           <p className="muted" style={{ margin: 0 }}>
-            Agent runs, model spend, tool permissions, approval waits, risky action history, and failed jobs belong here.
+            Agent runs, model spend, approval waits, risky tool activity, and failed jobs are governed from the managed workspace when available.
           </p>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 }}>
-            <MiniMetric label="Agent visibility" value={customer.managedWorkspace || customer.hasSupportCredential ? "connected" : "pending"} detail={customer.managedWorkspace ? `${customer.managedWorkspace._count.agentRuns} local agent runs recorded.` : "Support operations can inspect agent runs and failed jobs."} />
-            <MiniMetric label="Workflow jobs" value={customer.managedWorkspace ? String(customer.managedWorkspace._count.workflowJobs) : "remote"} detail={customer.managedWorkspace ? "Local managed workspace count" : "Requires support snapshot"} />
+            <MiniMetric label="Agent visibility" value={aiGovernance.accessMode === "managed_workspace" ? "connected" : "remote"} detail={aiGovernance.accessMode === "managed_workspace" ? `${customer.managedWorkspace?._count.agentRuns ?? 0} local agent runs recorded.` : "Use support operations to inspect remote agent runs."} />
+            <MiniMetric label="Pending approvals" value={aiSummary ? String(aiSummary.pendingApprovals) : "remote"} detail={aiSummary ? "Human approval waits" : "Requires support connector"} />
+            <MiniMetric label="Failed jobs" value={aiSummary && aiSummary.failedJobs > 0 ? "attention" : aiSummary ? "ready" : "remote"} detail={aiSummary ? `${aiSummary.failedJobs} failed workflow jobs` : "Inspect through support operations"} />
+            <MiniMetric label="Model spend" value={aiSummary ? `$${aiSummary.modelUsage.estimatedCostUsd ?? "0"}` : "remote"} detail={aiSummary ? `${aiSummary.modelUsage.inputTokens + aiSummary.modelUsage.outputTokens} total tokens` : "Requires support snapshot"} />
+            <MiniMetric label="Risky tool calls" value={aiSummary && aiSummary.riskyToolCalls.length > 0 ? "attention" : aiSummary ? "ready" : "remote"} detail={aiSummary ? `${aiSummary.riskyToolCalls.length} recent calls flagged` : "Support connector path"} />
             <MiniMetric label="Failed operations" value={failedOperations > 0 ? "attention" : "ready"} detail={`${failedOperations} failed support operations`} />
-            <MiniMetric label="Human approvals" value="planned" detail="Approval waits are scheduled for the governance slice." />
           </div>
+          {aiSummary ? (
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: 16 }}>
+              <section className="item" style={{ padding: 0, overflow: "hidden" }}>
+                <div style={{ padding: 16, borderBottom: "1px solid var(--border-color)" }}>
+                  <strong>Recent agent runs</strong>
+                </div>
+                <div className="list">
+                  {aiSummary.recentRuns.map((run) => (
+                    <div className="item" key={run.id}>
+                      <div className="row">
+                        <div>
+                          <strong>{run.agentKey}</strong>
+                          <div className="muted">{run.goal}</div>
+                        </div>
+                        <span style={{ color: tone(run.status), fontWeight: 700 }}>{run.status}</span>
+                      </div>
+                      <div className="muted">
+                        {run.triggerType} · {format.dateTime(run.createdAt, { dateStyle: "medium", timeStyle: "short" })}
+                        {run.approvalRequired ? " · approval required" : ""}
+                      </div>
+                    </div>
+                  ))}
+                  {aiSummary.recentRuns.length === 0 && (
+                    <p className="muted" style={{ padding: 16 }}>No agent runs are recorded for this workspace.</p>
+                  )}
+                </div>
+              </section>
+
+              <section className="item" style={{ padding: 0, overflow: "hidden" }}>
+                <div style={{ padding: 16, borderBottom: "1px solid var(--border-color)" }}>
+                  <strong>Risk and failures</strong>
+                </div>
+                <div className="list">
+                  {aiSummary.riskyToolCalls.map((call) => (
+                    <div className="item" key={call.id}>
+                      <div className="row">
+                        <div>
+                          <strong>{call.name}</strong>
+                          <div className="muted">{call.agentRun.agentKey}</div>
+                        </div>
+                        <span style={{ color: tone(call.status), fontWeight: 700 }}>{call.status}</span>
+                      </div>
+                      <div className="muted">{call.error || format.dateTime(call.createdAt, { dateStyle: "medium", timeStyle: "short" })}</div>
+                    </div>
+                  ))}
+                  {aiSummary.recentFailedJobs.map((job) => (
+                    <div className="item" key={job.id}>
+                      <div className="row">
+                        <strong>{job.type}</strong>
+                        <span style={{ color: tone("FAILED"), fontWeight: 700 }}>FAILED</span>
+                      </div>
+                      <div className="muted">{job.error || `${job.attempts} attempts`}</div>
+                    </div>
+                  ))}
+                  {aiSummary.riskyToolCalls.length === 0 && aiSummary.recentFailedJobs.length === 0 && (
+                    <p className="muted" style={{ padding: 16 }}>No risky tool calls or failed workflow jobs were found recently.</p>
+                  )}
+                </div>
+              </section>
+            </div>
+          ) : (
+            <div className="item">
+              <strong>Remote AI governance</strong>
+              <p className="muted" style={{ margin: "4px 0 0" }}>
+                This customer has no managed workspace link. Use support operations to inspect agent runs and runtime jobs from the customer instance.
+              </p>
+            </div>
+          )}
         </section>
 
         <section id="integrations" className="panel stack" style={{ padding: 20 }}>
@@ -458,11 +540,59 @@ export default async function ControlPlaneCustomerPage({
         <section id="releases" className="panel stack" style={{ padding: 20 }}>
           <h2 style={{ margin: 0 }}>Release Operations</h2>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 }}>
-            <MiniMetric label="Current release" value={customer.releaseImageTag || customer.releaseVersion || "unknown"} detail={customer.releaseVersion || undefined} />
-            <MiniMetric label="Provisioning" value={customer.provisioningStatus || "draft"} detail={customer.lastProvisioningError || undefined} />
-            <MiniMetric label="Bootstrap" value={customer.bootstrapStatus || "not_started"} detail={customer.bootstrapBundleUri ? "Bootstrap bundle registered" : "No bootstrap bundle"} />
-            <MiniMetric label="Rollback readiness" value="planned" detail="Reasoned upgrade and rollback audit trails land in the release slice." />
+            <MiniMetric label="Current release" value={releases.current.releaseImageTag || releases.current.releaseVersion || "unknown"} detail={releases.current.releaseVersion || undefined} />
+            <MiniMetric label="Provisioning" value={releases.provisioning.status || "draft"} detail={releases.provisioning.lastProvisioningError || undefined} />
+            <MiniMetric label="Health" value={releases.health.lastHealthStatus || "unknown"} detail={releases.health.lastHealthError || "No runtime error recorded."} />
+            <MiniMetric label="Drift" value={releases.current.releaseDrift ? "attention" : "ready"} detail={releases.current.releaseDrift || "No release drift recorded."} />
+            <MiniMetric label="Rollback readiness" value={releases.rollbackReady ? "ready" : "attention"} detail={releases.rollbackReady ? "Current release and healthy runtime recorded." : "Needs known release and healthy runtime."} />
+            <MiniMetric label="Last preparation" value={releasePrep ? "recorded" : "none"} detail={releasePrep ? format.dateTime(releasePrep.createdAt, { dateStyle: "medium", timeStyle: "short" }) : "No upgrade preparation audit yet."} />
           </div>
+          <form action={runReleaseOperationAction} className="item stack">
+            <input type="hidden" name="instanceId" value={customer.id} />
+            <input type="hidden" name="operation" value="prepare_upgrade" />
+            <div className="row">
+              <div>
+                <strong>Prepare release upgrade</strong>
+                <p className="muted" style={{ margin: "4px 0 0" }}>
+                  Records operator intent, target release, readiness checks, drift, and rollback evidence. This does not deploy.
+                </p>
+              </div>
+              <span className="tag">{releases.accessMode === "managed_workspace" ? "Managed workspace linked" : "Central instance record"}</span>
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 }}>
+              <label>
+                Target image tag
+                <input name="targetReleaseImageTag" required placeholder={releases.current.releaseImageTag || "ghcr.io/corgtex/app:sha"} />
+              </label>
+              <label>
+                Target version
+                <input name="targetReleaseVersion" placeholder={releases.current.releaseVersion || "0.1.0"} />
+              </label>
+              <label>
+                Mutation reason
+                <input name="reason" required placeholder="Prepare staged upgrade after production smoke passes" />
+              </label>
+            </div>
+            <button type="submit">Record upgrade preparation</button>
+          </form>
+          {releases.recentPreparations.length > 0 && (
+            <section className="item" style={{ padding: 0, overflow: "hidden" }}>
+              <div style={{ padding: 16, borderBottom: "1px solid var(--border-color)" }}>
+                <strong>Recent release preparation audit</strong>
+              </div>
+              <div className="list">
+                {releases.recentPreparations.map((event) => (
+                  <div className="item" key={event.id}>
+                    <div className="row">
+                      <strong>{event.action}</strong>
+                      <span className="muted">{format.dateTime(event.createdAt, { dateStyle: "medium", timeStyle: "short" })}</span>
+                    </div>
+                    <JsonPreview value={event.meta} />
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
         </section>
 
         <section id="support" className="stack" style={{ gap: 20 }}>

@@ -7,6 +7,7 @@ import {
   fetchCustomerSupportSnapshot,
   recordBreakGlassSupportNote,
   runControlPlaneContextOperation,
+  runControlPlaneReleaseOperation,
   runCustomerSupportOperation,
 } from "@corgtex/domain";
 import type { SupportAction } from "@corgtex/domain";
@@ -113,6 +114,19 @@ export async function runContextOperationAction(formData: FormData) {
     instanceId,
     operation: asString(formData, "operation"),
     sourceId: optionalString(formData, "sourceId"),
+    reason: asString(formData, "reason"),
+  });
+  revalidatePath(`/control-plane/customers/${instanceId}`);
+}
+
+export async function runReleaseOperationAction(formData: FormData) {
+  const actor = await requirePageActor();
+  const instanceId = asString(formData, "instanceId");
+  await runControlPlaneReleaseOperation(actor, {
+    instanceId,
+    operation: asString(formData, "operation"),
+    targetReleaseImageTag: asString(formData, "targetReleaseImageTag"),
+    targetReleaseVersion: optionalString(formData, "targetReleaseVersion"),
     reason: asString(formData, "reason"),
   });
   revalidatePath(`/control-plane/customers/${instanceId}`);
