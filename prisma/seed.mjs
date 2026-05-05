@@ -16,12 +16,46 @@ function hashPassword(password) {
   return `scrypt$${salt}$${scryptSync(password, salt, 64).toString("hex")}`;
 }
 
+async function upsertOperatorUser(params) {
+  const existingUser = await prisma.user.findUnique({
+    where: { email: params.email },
+    select: { id: true },
+  });
+  const shouldSetPassword = params.resetPasswords || !existingUser;
+  if (shouldSetPassword && !params.password) {
+    throw new Error(`Missing required environment variable: ${params.passwordEnvName}`);
+  }
+
+  if (existingUser) {
+    return prisma.user.update({
+      where: { email: params.email },
+      data: {
+        displayName: params.displayName,
+        globalRole: "OPERATOR",
+        ...(params.resetPasswords ? { passwordHash: hashPassword(params.password) } : {}),
+      },
+    });
+  }
+
+  return prisma.user.create({
+    data: {
+      email: params.email,
+      displayName: params.displayName,
+      passwordHash: hashPassword(params.password),
+      globalRole: "OPERATOR",
+    },
+  });
+}
+
 async function main() {
   const adminEmail = required("ADMIN_EMAIL").toLowerCase();
   const adminPassword = process.env.ADMIN_PASSWORD?.trim();
   const resetPasswords = process.env.SEED_RESET_PASSWORDS?.trim().toLowerCase() === "true";
   const workspaceName = process.env.WORKSPACE_NAME?.trim() || "Corgtex";
   const workspaceSlug = process.env.WORKSPACE_SLUG?.trim() || "corgtex";
+  const controlPlaneTesterEmail = process.env.CONTROL_PLANE_TESTER_EMAIL?.trim().toLowerCase();
+  const controlPlaneTesterPassword = process.env.CONTROL_PLANE_TESTER_PASSWORD?.trim();
+  const controlPlaneTesterDisplayName = process.env.CONTROL_PLANE_TESTER_DISPLAY_NAME?.trim() || "Control Plane Test Operator";
 
   const workspace = await prisma.workspace.upsert({
     where: { slug: workspaceSlug },
@@ -78,6 +112,20 @@ async function main() {
       isActive: true,
     },
   });
+
+  if (controlPlaneTesterEmail) {
+    if (controlPlaneTesterEmail === adminEmail) {
+      throw new Error("CONTROL_PLANE_TESTER_EMAIL must be different from ADMIN_EMAIL so production testing remains auditable.");
+    }
+
+    await upsertOperatorUser({
+      email: controlPlaneTesterEmail,
+      password: controlPlaneTesterPassword,
+      passwordEnvName: "CONTROL_PLANE_TESTER_PASSWORD",
+      displayName: controlPlaneTesterDisplayName,
+      resetPasswords,
+    });
+  }
 
   const systemEmail = `system+${workspace.slug}@corgtex.local`;
   const existingSystemUser = await prisma.user.findUnique({
@@ -232,9 +280,9 @@ This is the authoritative document defining the operating principles of our orga
   });
 
   console.log(
-    `Seeded workspace '${workspace.slug}' with admin '${adminEmail}' (passwords ${
-      resetPasswords ? "reset" : "preserved"
-    }).`,
+    `Seeded workspace '${workspace.slug}' with admin '${adminEmail}'${
+      controlPlaneTesterEmail ? ` and control-plane tester '${controlPlaneTesterEmail}'` : ""
+    } (passwords ${resetPasswords ? "reset" : "preserved"}).`,
   );
 }
 
