@@ -1,7 +1,7 @@
 "use server";
 
-import { redirect } from "next/navigation";
-import { AppError, listActorWorkspaces, loginUserWithPassword } from "@corgtex/domain";
+import { AppError, isGlobalOperator, listActorWorkspaces, loginUserWithPassword } from "@corgtex/domain";
+import { env } from "@corgtex/shared";
 import { setSessionCookie } from "@/lib/auth";
 import type { LoginActionState } from "./state";
 
@@ -9,6 +9,7 @@ function loginErrorState(email: string, error: string): LoginActionState {
   return {
     email,
     error,
+    redirectTo: null,
   };
 }
 
@@ -40,6 +41,15 @@ export async function loginAction(
     user: result.user,
   };
 
+  if (env.CONTROL_PLANE_MODE && isGlobalOperator(actor)) {
+    await setSessionCookie(result.token, result.expiresAt);
+    return {
+      email,
+      error: null,
+      redirectTo: "/control-plane",
+    };
+  }
+
   let workspaces;
   try {
     workspaces = await listActorWorkspaces(actor);
@@ -49,5 +59,9 @@ export async function loginAction(
   }
 
   await setSessionCookie(result.token, result.expiresAt);
-  redirect(workspaces[0] ? `/workspaces/${workspaces[0].id}` : "/workspaces/create");
+  return {
+    email,
+    error: null,
+    redirectTo: workspaces[0] ? `/workspaces/${workspaces[0].id}` : "/workspaces/create",
+  };
 }
