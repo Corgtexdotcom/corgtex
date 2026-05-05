@@ -19,7 +19,7 @@ const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS ?? "5000");
 const MAX_POLL_INTERVAL_MS = Number(process.env.WORKER_MAX_POLL_INTERVAL_MS ?? "30000");
 const EVENT_BATCH_SIZE = Number(process.env.WORKER_EVENT_BATCH_SIZE ?? "25");
 const JOB_BATCH_SIZE = Number(process.env.WORKER_JOB_BATCH_SIZE ?? "25");
-const HEALTH_PORT = Number(process.env.WORKER_HEALTH_PORT ?? "9090");
+const HEALTH_PORT = Number(process.env.WORKER_HEALTH_PORT ?? process.env.PORT ?? "9090");
 const SHUTDOWN_TIMEOUT_MS = Number(process.env.WORKER_SHUTDOWN_TIMEOUT_MS ?? "15000");
 
 // --- State ---
