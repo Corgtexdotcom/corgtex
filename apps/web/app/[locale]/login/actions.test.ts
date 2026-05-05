@@ -1,8 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-const envMock = {
-  CONTROL_PLANE_MODE: false,
-};
 const loginUserWithPassword = vi.fn();
 const listActorWorkspaces = vi.fn();
 const setSessionCookie = vi.fn();
@@ -27,23 +24,19 @@ vi.mock("@corgtex/domain", () => ({
   loginUserWithPassword,
 }));
 
-vi.mock("@corgtex/shared", () => ({
-  env: envMock,
-}));
-
 vi.mock("@/lib/auth", () => ({
   setSessionCookie,
 }));
 
-function buildFormData(email: string, password: string) {
+function buildFormData(email: string, password: string, locale = "en") {
   const formData = new FormData();
   formData.set("email", email);
   formData.set("password", password);
+  formData.set("locale", locale);
   return formData;
 }
 
 afterEach(() => {
-  envMock.CONTROL_PLANE_MODE = false;
   vi.clearAllMocks();
 });
 
@@ -115,11 +108,41 @@ describe("loginAction", () => {
     expect(setSessionCookie).toHaveBeenCalledWith("session-token", expiresAt);
   });
 
-  it("sets the session cookie and returns the control plane redirect for operators in control plane mode", async () => {
+  it("localizes the workspace redirect for Spanish login", async () => {
     const { loginAction } = await import("./actions");
     const { initialLoginActionState } = await import("./state");
     const expiresAt = new Date("2026-04-03T00:00:00.000Z");
-    envMock.CONTROL_PLANE_MODE = true;
+    loginUserWithPassword.mockResolvedValue({
+      token: "session-token",
+      expiresAt,
+      user: {
+        id: "user-1",
+        email: "admin@example.com",
+        displayName: "Admin",
+        globalRole: null,
+      },
+    });
+    listActorWorkspaces.mockResolvedValue([
+      {
+        id: "workspace-1",
+      },
+    ]);
+
+    await expect(
+      loginAction(initialLoginActionState, buildFormData("admin@example.com", "password123", "es")),
+    ).resolves.toEqual({
+      email: "admin@example.com",
+      error: null,
+      redirectTo: "/es/workspaces/workspace-1",
+    });
+
+    expect(setSessionCookie).toHaveBeenCalledWith("session-token", expiresAt);
+  });
+
+  it("sets the session cookie and returns the localized control plane redirect for operators", async () => {
+    const { loginAction } = await import("./actions");
+    const { initialLoginActionState } = await import("./state");
+    const expiresAt = new Date("2026-04-03T00:00:00.000Z");
     loginUserWithPassword.mockResolvedValue({
       token: "operator-session-token",
       expiresAt,
@@ -132,11 +155,11 @@ describe("loginAction", () => {
     });
 
     await expect(
-      loginAction(initialLoginActionState, buildFormData("operator@example.com", "password123")),
+      loginAction(initialLoginActionState, buildFormData("operator@example.com", "password123", "es")),
     ).resolves.toEqual({
       email: "operator@example.com",
       error: null,
-      redirectTo: "/control-plane",
+      redirectTo: "/es/control-plane",
     });
 
     expect(listActorWorkspaces).not.toHaveBeenCalled();

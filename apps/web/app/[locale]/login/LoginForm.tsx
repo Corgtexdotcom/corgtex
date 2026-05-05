@@ -5,7 +5,7 @@ import { useFormStatus } from "react-dom";
 import Link from "next/link";
 import { loginAction } from "./actions";
 import { initialLoginActionState } from "./state";
-import { useTranslations } from "next-intl";
+import { useLocale, useTranslations } from "next-intl";
 
 function SubmitButton({ label, loadingLabel }: { label: string, loadingLabel: string }) {
   const { pending } = useFormStatus();
@@ -19,6 +19,7 @@ function SubmitButton({ label, loadingLabel }: { label: string, loadingLabel: st
 
 export function LoginForm() {
   const [state, formAction] = useActionState(loginAction, initialLoginActionState);
+  const locale = useLocale();
   const t = useTranslations("auth");
   const common = useTranslations("common");
 
@@ -30,6 +31,7 @@ export function LoginForm() {
 
   return (
     <form action={formAction} className="stack" style={{ marginTop: 20 }}>
+      <input type="hidden" name="locale" value={locale} />
       <label>
         {t("emailLabel")}
         <input
