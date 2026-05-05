@@ -36,20 +36,20 @@ const CUSTOMER_SECTION_IDS = [
 ] as const;
 
 const SUPPORT_ACTIONS = [
-  ["members.list", "membersList", "{}"],
-  ["members.invite", "membersInvite", "{\n  \"email\": \"person@example.com\",\n  \"displayName\": \"Person Name\",\n  \"role\": \"CONTRIBUTOR\"\n}"],
-  ["members.deactivate", "membersDeactivate", "{\n  \"memberId\": \"member-id\"\n}"],
-  ["integrations.list", "integrationsList", "{}"],
-  ["data_feeds.list", "dataFeedsList", "{}"],
-  ["data_feeds.sync", "dataFeedsSync", "{\n  \"sourceId\": \"source-id\"\n}"],
-  ["tool_links.list", "toolLinksList", "{}"],
-  ["tool_links.upsert", "toolLinksUpsert", "{\n  \"title\": \"Miro board\",\n  \"url\": \"https://miro.com/app/board/example\",\n  \"category\": \"WHITEBOARD\",\n  \"accessNotesMd\": \"Use the shared board password.\",\n  \"credentialLabel\": \"Board password\",\n  \"credentialSecret\": \"replace with access code\"\n}"],
-  ["tool_links.archive", "toolLinksArchive", "{\n  \"toolLinkId\": \"tool-link-id\",\n  \"reason\": \"No longer used\"\n}"],
-  ["agents.list_runs", "agentsListRuns", "{\n  \"take\": 10\n}"],
-  ["runtime.list_failed_jobs", "runtimeListFailedJobs", "{\n  \"take\": 20\n}"],
-  ["runtime.retry_failed_job", "runtimeRetryFailedJob", "{\n  \"workflowJobId\": \"job-id\"\n}"],
-  ["runtime.discard_failed_job", "runtimeDiscardFailedJob", "{\n  \"workflowJobId\": \"job-id\"\n}"],
-  ["documents.upload_text", "documentsUploadText", "{\n  \"title\": \"Support upload\",\n  \"textContent\": \"Paste customer data here\"\n}"],
+  ["members.list", "membersList", "membersList"],
+  ["members.invite", "membersInvite", "membersInvite"],
+  ["members.deactivate", "membersDeactivate", "membersDeactivate"],
+  ["integrations.list", "integrationsList", "integrationsList"],
+  ["data_feeds.list", "dataFeedsList", "dataFeedsList"],
+  ["data_feeds.sync", "dataFeedsSync", "dataFeedsSync"],
+  ["tool_links.list", "toolLinksList", "toolLinksList"],
+  ["tool_links.upsert", "toolLinksUpsert", "toolLinksUpsert"],
+  ["tool_links.archive", "toolLinksArchive", "toolLinksArchive"],
+  ["agents.list_runs", "agentsListRuns", "agentsListRuns"],
+  ["runtime.list_failed_jobs", "runtimeListFailedJobs", "runtimeListFailedJobs"],
+  ["runtime.retry_failed_job", "runtimeRetryFailedJob", "runtimeRetryFailedJob"],
+  ["runtime.discard_failed_job", "runtimeDiscardFailedJob", "runtimeDiscardFailedJob"],
+  ["documents.upload_text", "documentsUploadText", "documentsUploadText"],
 ] as const;
 
 type ControlPlaneT = Awaited<ReturnType<typeof getTranslations>>;
@@ -702,10 +702,12 @@ export default async function ControlPlaneCustomerPage({
                 <details>
                   <summary className="muted">{t("customerDetail.support.commonArgumentTemplates")}</summary>
                   <div className="stack" style={{ marginTop: 12 }}>
-                    {SUPPORT_ACTIONS.slice(1).map(([value, labelKey, template]) => (
+                    {SUPPORT_ACTIONS.map(([value, labelKey, hintKey]) => (
                       <div key={value}>
                         <strong>{t(`customerDetail.support.actions.${labelKey}` as any)}</strong>
-                        <JsonPreview value={JSON.parse(template)} />
+                        <p className="muted" style={{ margin: "4px 0 0" }}>
+                          {t(`customerDetail.support.argumentHints.${hintKey}` as any)}
+                        </p>
                       </div>
                     ))}
                   </div>
