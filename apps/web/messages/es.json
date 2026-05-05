@@ -1240,6 +1240,12 @@
       "customerReason": "{customer} - {reason}",
       "empty": "Aún no hay operaciones de soporte registradas."
     },
+    "customerNotFound": {
+      "eyebrow": "Control plane del cliente",
+      "title": "Instancia de cliente no encontrada",
+      "description": "Este registro de cliente ya no está registrado en Control Plane. Vuelve a la flota y abre el registro actual del cliente.",
+      "backToFleet": "Volver a la flota"
+    },
     "customerDetail": {
       "backToFleet": "Volver a la flota",
       "eyebrow": "Control plane del cliente",
