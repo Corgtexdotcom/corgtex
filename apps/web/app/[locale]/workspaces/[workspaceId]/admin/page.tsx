@@ -5,8 +5,7 @@ import {
   isGlobalOperator, 
   listAllWorkspacesEnriched, 
   listAllUsers, 
-  getOperatorOverview, 
-  listExternalInstances 
+  getOperatorOverview,
 } from "@corgtex/domain";
 import { AdminDashboardClient } from "./AdminDashboardClient";
 import { getTranslations } from "next-intl/server";
@@ -26,21 +25,10 @@ export default async function GlobalAdminPage({ params }: { params: Promise<{ wo
     notFound();
   }
 
-  const [workspaces, users, overview, instances, failedJobs, commErrors] = await Promise.all([
+  const [workspaces, users, overview] = await Promise.all([
     listAllWorkspacesEnriched(actor),
     listAllUsers(actor),
     getOperatorOverview(actor),
-    listExternalInstances(actor),
-    prisma.workflowJob.findMany({ 
-      where: { status: "FAILED" }, 
-      include: { workspace: true }, 
-      take: 50, 
-      orderBy: { createdAt: "desc" } 
-    }),
-    prisma.communicationInstallation.findMany({ 
-      where: { status: "ERROR" }, 
-      include: { workspace: true } 
-    })
   ]);
 
   return (
@@ -54,7 +42,6 @@ export default async function GlobalAdminPage({ params }: { params: Promise<{ wo
         workspaces={workspaces} 
         users={users} 
         overview={overview}
-        operations={{ instances, failedJobs, commErrors }}
         workspaceId={workspaceId} 
       />
     </div>

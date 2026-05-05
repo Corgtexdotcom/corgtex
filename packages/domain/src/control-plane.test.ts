@@ -118,6 +118,50 @@ describe("control plane domain", () => {
     expect(result.supportCredentialEnc).toBeUndefined();
   });
 
+  it("lists customers with managed workspace summaries and redacted credentials", async () => {
+    const { listControlPlaneCustomers } = await import("./control-plane");
+    prismaMock.instanceRegistry.findMany.mockResolvedValueOnce([
+      {
+        id: "inst-1",
+        label: "Acme",
+        url: "https://acme.test",
+        supportCredentialEnc: "encrypted-token",
+        supportOperations: [],
+        managedWorkspace: {
+          id: "ws-1",
+          slug: "acme",
+          name: "Acme",
+          _count: {
+            externalDataSources: 2,
+            brainArticles: 12,
+            agentRuns: 5,
+            workflowJobs: 7,
+            communicationInstallations: 1,
+            meetingRecordings: 3,
+          },
+        },
+        _count: { supportOperations: 0, events: 0 },
+      },
+    ] as any);
+
+    const result = await listControlPlaneCustomers(operatorActor);
+
+    expect(prismaMock.instanceRegistry.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      include: expect.objectContaining({
+        managedWorkspace: expect.any(Object),
+      }),
+    }));
+    expect(result[0]).toMatchObject({
+      id: "inst-1",
+      hasSupportCredential: true,
+      managedWorkspace: {
+        slug: "acme",
+        _count: { brainArticles: 12 },
+      },
+    });
+    expect(result[0].supportCredentialEnc).toBeUndefined();
+  });
+
   it("records and completes an audited remote support operation", async () => {
     const { runCustomerSupportOperation } = await import("./control-plane");
     prismaMock.supportOperation.create.mockResolvedValueOnce({

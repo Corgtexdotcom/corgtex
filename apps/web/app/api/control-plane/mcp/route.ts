@@ -2,7 +2,11 @@ import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import {
   fetchCustomerSupportSnapshot,
+  getControlPlaneAiGovernanceStatus,
+  getControlPlaneContextHealth,
   getControlPlaneCustomer,
+  getControlPlaneIntegrationStatus,
+  getControlPlaneReleaseStatus,
   listControlPlaneCustomers,
   requireControlPlaneAccess,
   runCustomerSupportOperation,
@@ -27,6 +31,26 @@ const tools = [
   {
     name: "refresh_customer_snapshot",
     description: "Fetch a live support snapshot from the customer instance through the support connector.",
+    inputSchema: { type: "object", properties: { instanceId: { type: "string" } }, required: ["instanceId"] },
+  },
+  {
+    name: "list_customer_integrations",
+    description: "Get customer integration entitlement and readiness status.",
+    inputSchema: { type: "object", properties: { instanceId: { type: "string" } }, required: ["instanceId"] },
+  },
+  {
+    name: "get_context_health",
+    description: "Get governed context and brain health for a customer instance.",
+    inputSchema: { type: "object", properties: { instanceId: { type: "string" } }, required: ["instanceId"] },
+  },
+  {
+    name: "get_ai_governance_status",
+    description: "Get agent, model usage, approval, and failed-job governance status.",
+    inputSchema: { type: "object", properties: { instanceId: { type: "string" } }, required: ["instanceId"] },
+  },
+  {
+    name: "get_release_status",
+    description: "Get release, provisioning, health, and rollback-readiness status.",
     inputSchema: { type: "object", properties: { instanceId: { type: "string" } }, required: ["instanceId"] },
   },
   {
@@ -107,6 +131,18 @@ export async function POST(request: NextRequest) {
     }
     if (name === "refresh_customer_snapshot") {
       return rpcResult(id, textContent(await fetchCustomerSupportSnapshot(actor, String(args.instanceId ?? ""))));
+    }
+    if (name === "list_customer_integrations") {
+      return rpcResult(id, textContent(await getControlPlaneIntegrationStatus(actor, String(args.instanceId ?? ""))));
+    }
+    if (name === "get_context_health") {
+      return rpcResult(id, textContent(await getControlPlaneContextHealth(actor, String(args.instanceId ?? ""))));
+    }
+    if (name === "get_ai_governance_status") {
+      return rpcResult(id, textContent(await getControlPlaneAiGovernanceStatus(actor, String(args.instanceId ?? ""))));
+    }
+    if (name === "get_release_status") {
+      return rpcResult(id, textContent(await getControlPlaneReleaseStatus(actor, String(args.instanceId ?? ""))));
     }
     if (name === "run_customer_support_operation") {
       const operation = await runCustomerSupportOperation(actor, {

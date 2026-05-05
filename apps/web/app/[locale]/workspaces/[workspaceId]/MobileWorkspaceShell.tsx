@@ -310,7 +310,7 @@ export function MobileWorkspaceShell({
                 <div className="mobile-more-group">
                   <div className="mobile-more-group-label">{tNav("globalAdmin")}</div>
                   <a
-                    href={navHref(workspaceId, "/admin")}
+                    href="/control-plane"
                     className="mobile-more-link"
                     onClick={() => {
                       setMode("workspace", "more_sheet_admin_link");

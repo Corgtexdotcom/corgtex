@@ -3,6 +3,7 @@ import { decryptSecret, encryptSecret, env, prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { AppError, invariant } from "./errors";
 import { isGlobalOperator } from "./auth";
+import { getMeetingRecorderMonthlyUsage, MEETING_RECORDERS_FEATURE_FLAG } from "./meeting-recorders";
 
 const SUPPORT_ACTOR_LABEL = "Corgtex Support";
 
@@ -39,6 +40,28 @@ const SUPPORT_ACTION_TO_MCP_TOOL = {
 export type SupportAction = keyof typeof SUPPORT_ACTION_TO_MCP_TOOL;
 
 type JsonRecord = Record<string, unknown>;
+
+const managedWorkspaceSelect = {
+  id: true,
+  slug: true,
+  name: true,
+  _count: {
+    select: {
+      externalDataSources: true,
+      brainArticles: true,
+      brainSources: true,
+      agentRuns: true,
+      workflowJobs: true,
+      communicationInstallations: true,
+      meetingRecordings: true,
+    },
+  },
+} satisfies Prisma.WorkspaceSelect;
+
+function decimalToString(value: unknown) {
+  if (!value) return null;
+  return typeof value === "object" && "toString" in value ? String(value.toString()) : String(value);
+}
 
 function actorUserId(actor: AppActor) {
   return actor.kind === "user" ? actor.user.id : null;
@@ -223,6 +246,9 @@ export async function listControlPlaneCustomers(actor: AppActor) {
         orderBy: { createdAt: "desc" },
         take: 3,
       },
+      managedWorkspace: {
+        select: managedWorkspaceSelect,
+      },
       _count: {
         select: { supportOperations: true, events: true },
       },
@@ -255,6 +281,9 @@ export async function getControlPlaneCustomer(actor: AppActor, instanceId: strin
         include: { user: { select: { id: true, email: true, displayName: true } } },
         orderBy: { createdAt: "desc" },
       },
+      managedWorkspace: {
+        select: managedWorkspaceSelect,
+      },
     },
   });
   invariant(instance, 404, "NOT_FOUND", "Customer instance not found.");
@@ -263,6 +292,315 @@ export async function getControlPlaneCustomer(actor: AppActor, instanceId: strin
     ...instance,
     hasSupportCredential: Boolean(instance.supportCredentialEnc),
     supportCredentialEnc: undefined,
+  };
+}
+
+async function getControlPlaneInstanceWithWorkspace(actor: AppActor, instanceId: string) {
+  await requireControlPlaneAccess(actor, { instanceId });
+  const instance = await prisma.instanceRegistry.findUnique({
+    where: { id: instanceId },
+    include: {
+      managedWorkspace: {
+        select: managedWorkspaceSelect,
+      },
+    },
+  });
+  invariant(instance, 404, "NOT_FOUND", "Customer instance not found.");
+  return {
+    ...instance,
+    hasSupportCredential: Boolean(instance.supportCredentialEnc),
+    supportCredentialEnc: undefined,
+  };
+}
+
+export async function getControlPlaneContextHealth(actor: AppActor, instanceId: string) {
+  const instance = await getControlPlaneInstanceWithWorkspace(actor, instanceId);
+  if (!instance.managedWorkspaceId) {
+    return {
+      instanceId,
+      accessMode: "support_connector" as const,
+      hasManagedWorkspace: false,
+      supportConnectorStatus: instance.supportConnectorStatus,
+      supportLastSyncAt: instance.supportLastSyncAt,
+      supportLastSyncError: instance.supportLastSyncError,
+      summary: null,
+      sources: [],
+    };
+  }
+
+  const staleBefore = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+  const [
+    brainSources,
+    brainSourceCount,
+    dataSources,
+    dataSourceCount,
+    chunkCount,
+    failedSyncJobs,
+    failedExternalSourceCount,
+    staleExternalSourceCount,
+  ] = await Promise.all([
+    prisma.brainSource.findMany({
+      where: { workspaceId: instance.managedWorkspaceId, archivedAt: null },
+      orderBy: { createdAt: "desc" },
+      take: 8,
+      select: {
+        id: true,
+        sourceType: true,
+        title: true,
+        absorbedAt: true,
+        createdAt: true,
+      },
+    }),
+    prisma.brainSource.count({ where: { workspaceId: instance.managedWorkspaceId, archivedAt: null } }),
+    prisma.externalDataSource.findMany({
+      where: { workspaceId: instance.managedWorkspaceId, archivedAt: null },
+      orderBy: { updatedAt: "desc" },
+      take: 8,
+      select: {
+        id: true,
+        label: true,
+        driverType: true,
+        isActive: true,
+        lastSyncAt: true,
+        lastSyncError: true,
+      },
+    }),
+    prisma.externalDataSource.count({ where: { workspaceId: instance.managedWorkspaceId, archivedAt: null } }),
+    prisma.knowledgeChunk.count({ where: { workspaceId: instance.managedWorkspaceId } }),
+    prisma.workflowJob.count({
+      where: {
+        workspaceId: instance.managedWorkspaceId,
+        status: "FAILED",
+        type: { contains: "sync" },
+      },
+    }),
+    prisma.externalDataSource.count({
+      where: {
+        workspaceId: instance.managedWorkspaceId,
+        archivedAt: null,
+        lastSyncError: { not: null },
+      },
+    }),
+    prisma.externalDataSource.count({
+      where: {
+        workspaceId: instance.managedWorkspaceId,
+        archivedAt: null,
+        isActive: true,
+        OR: [
+          { lastSyncAt: null },
+          { lastSyncAt: { lt: staleBefore } },
+        ],
+      },
+    }),
+  ]);
+
+  return {
+    instanceId,
+    accessMode: "managed_workspace" as const,
+    hasManagedWorkspace: true,
+    managedWorkspace: instance.managedWorkspace,
+    summary: {
+      brainSources: brainSourceCount,
+      externalSources: dataSourceCount,
+      knowledgeChunks: chunkCount,
+      failedSyncJobs,
+      failedExternalSources: failedExternalSourceCount,
+      staleExternalSources: staleExternalSourceCount,
+    },
+    sources: {
+      brain: brainSources,
+      external: dataSources,
+    },
+  };
+}
+
+export async function getControlPlaneIntegrationStatus(actor: AppActor, instanceId: string) {
+  const instance = await getControlPlaneInstanceWithWorkspace(actor, instanceId);
+  if (!instance.managedWorkspaceId) {
+    return {
+      instanceId,
+      accessMode: "support_connector" as const,
+      hasManagedWorkspace: false,
+      supportConnectorStatus: instance.supportConnectorStatus,
+      supportLastSyncAt: instance.supportLastSyncAt,
+      integrations: [],
+    };
+  }
+
+  const [featureFlag, recorderConfig, recorderUsage, recorderFailures, communicationInstallations, dataSources] = await Promise.all([
+    prisma.workspaceFeatureFlag.findUnique({
+      where: {
+        workspaceId_flag: {
+          workspaceId: instance.managedWorkspaceId,
+          flag: MEETING_RECORDERS_FEATURE_FLAG,
+        },
+      },
+    }),
+    prisma.workspaceMeetingRecorderConfig.findUnique({ where: { workspaceId: instance.managedWorkspaceId } }),
+    getMeetingRecorderMonthlyUsage(instance.managedWorkspaceId),
+    prisma.meetingRecording.count({
+      where: {
+        workspaceId: instance.managedWorkspaceId,
+        status: "FAILED",
+      },
+    }),
+    prisma.communicationInstallation.findMany({
+      where: { workspaceId: instance.managedWorkspaceId },
+      orderBy: { updatedAt: "desc" },
+      select: {
+        id: true,
+        provider: true,
+        status: true,
+        externalTeamName: true,
+        scopes: true,
+        optionalScopes: true,
+        lastEventAt: true,
+        lastError: true,
+        updatedAt: true,
+      },
+    }),
+    prisma.externalDataSource.findMany({
+      where: { workspaceId: instance.managedWorkspaceId, archivedAt: null },
+      orderBy: { updatedAt: "desc" },
+      select: {
+        id: true,
+        label: true,
+        driverType: true,
+        isActive: true,
+        lastSyncAt: true,
+        lastSyncError: true,
+      },
+    }),
+  ]);
+
+  return {
+    instanceId,
+    accessMode: "managed_workspace" as const,
+    hasManagedWorkspace: true,
+    managedWorkspace: instance.managedWorkspace,
+    integrations: [
+      {
+        key: "meeting_recorders",
+        label: "Meeting recorders",
+        entitlementEnabled: Boolean(featureFlag?.enabled),
+        configured: Boolean(recorderConfig),
+        status: recorderConfig?.enabled ? "enabled" : "disabled",
+        provider: recorderConfig?.defaultProvider ?? null,
+        fallbackProvider: recorderConfig?.fallbackProvider ?? null,
+        autoRecordEnabled: recorderConfig?.autoRecordEnabled ?? null,
+        monthlyMinuteCap: recorderConfig?.monthlyMinuteCap ?? null,
+        usage: recorderUsage,
+        failures: recorderFailures,
+      },
+      ...communicationInstallations.map((installation) => ({
+        key: `communication_${installation.id}`,
+        label: installation.provider,
+        entitlementEnabled: true,
+        configured: true,
+        status: installation.status,
+        team: installation.externalTeamName,
+        scopes: installation.scopes,
+        optionalScopes: installation.optionalScopes,
+        lastEventAt: installation.lastEventAt,
+        lastError: installation.lastError,
+      })),
+      ...dataSources.map((source) => ({
+        key: `data_source_${source.id}`,
+        label: source.label,
+        entitlementEnabled: true,
+        configured: source.isActive,
+        status: source.lastSyncError ? "degraded" : source.isActive ? "active" : "disabled",
+        driverType: source.driverType,
+        lastSyncAt: source.lastSyncAt,
+        lastError: source.lastSyncError,
+      })),
+    ],
+  };
+}
+
+export async function getControlPlaneAiGovernanceStatus(actor: AppActor, instanceId: string) {
+  const instance = await getControlPlaneInstanceWithWorkspace(actor, instanceId);
+  if (!instance.managedWorkspaceId) {
+    return {
+      instanceId,
+      accessMode: "support_connector" as const,
+      hasManagedWorkspace: false,
+      supportConnectorStatus: instance.supportConnectorStatus,
+      supportLastSyncAt: instance.supportLastSyncAt,
+      summary: null,
+    };
+  }
+
+  const [agentRuns, pendingApprovals, failedJobs, modelUsage] = await Promise.all([
+    prisma.agentRun.groupBy({
+      by: ["status"],
+      where: { workspaceId: instance.managedWorkspaceId },
+      _count: { _all: true },
+    }),
+    prisma.agentRun.count({
+      where: { workspaceId: instance.managedWorkspaceId, approvalRequired: true, status: "WAITING_APPROVAL" },
+    }),
+    prisma.workflowJob.count({
+      where: { workspaceId: instance.managedWorkspaceId, status: "FAILED" },
+    }),
+    prisma.modelUsage.aggregate({
+      where: { workspaceId: instance.managedWorkspaceId },
+      _sum: {
+        inputTokens: true,
+        outputTokens: true,
+        estimatedCostUsd: true,
+      },
+    }),
+  ]);
+
+  return {
+    instanceId,
+    accessMode: "managed_workspace" as const,
+    hasManagedWorkspace: true,
+    managedWorkspace: instance.managedWorkspace,
+    summary: {
+      agentRuns: Object.fromEntries(agentRuns.map((run) => [run.status, run._count._all])),
+      pendingApprovals,
+      failedJobs,
+      modelUsage: {
+        inputTokens: modelUsage._sum.inputTokens ?? 0,
+        outputTokens: modelUsage._sum.outputTokens ?? 0,
+        estimatedCostUsd: decimalToString(modelUsage._sum.estimatedCostUsd),
+      },
+    },
+  };
+}
+
+export async function getControlPlaneReleaseStatus(actor: AppActor, instanceId: string) {
+  const instance = await getControlPlaneInstanceWithWorkspace(actor, instanceId);
+  const releaseDrift = instance.lastHealthError?.includes("Release drift:") ? instance.lastHealthError : null;
+  return {
+    instanceId,
+    accessMode: instance.managedWorkspaceId ? "managed_workspace" as const : "support_connector" as const,
+    managedWorkspace: instance.managedWorkspace,
+    current: {
+      releaseVersion: instance.releaseVersion,
+      releaseImageTag: instance.releaseImageTag,
+      lastReleaseCheck: instance.lastReleaseCheck,
+      releaseDrift,
+    },
+    provisioning: {
+      status: instance.provisioningStatus,
+      bootstrapStatus: instance.bootstrapStatus,
+      lastProvisioningError: instance.lastProvisioningError,
+      railwayProjectId: instance.railwayProjectId,
+      railwayEnvironmentId: instance.railwayEnvironmentId,
+      railwayWebServiceId: instance.railwayWebServiceId,
+      railwayWorkerServiceId: instance.railwayWorkerServiceId,
+    },
+    health: {
+      lastHealthStatus: instance.lastHealthStatus,
+      lastHealthCheck: instance.lastHealthCheck,
+      lastHealthError: instance.lastHealthError,
+      lastWorkerHealthStatus: instance.lastWorkerHealthStatus,
+      lastWorkerHealthCheck: instance.lastWorkerHealthCheck,
+    },
+    rollbackReady: Boolean(instance.releaseImageTag && instance.lastHealthStatus === "ok"),
   };
 }
 

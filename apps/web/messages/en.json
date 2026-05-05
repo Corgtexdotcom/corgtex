@@ -83,7 +83,7 @@
     "pageTitle": "Platform Admin",
     "pendingJobs": "{count} pending",
     "placeholderSearchUsers": "Search users by email or name...",
-    "platformAdmin": "Platform Admin",
+    "platformAdmin": "Control Plane",
     "platformAdminDesc": "Global cross-workspace administration and monitoring.",
     "registerInstance": "Register Instance",
     "roleAdmin": "Admin",
