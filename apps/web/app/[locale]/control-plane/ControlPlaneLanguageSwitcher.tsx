@@ -2,7 +2,7 @@
 
 import { usePathname } from "@/i18n/routing";
 import { useLocale, useTranslations } from "next-intl";
-import { localizedControlPlanePath, type ControlPlaneLocale } from "./locale-path";
+import { controlPlaneLocaleCookie, localizedControlPlanePath, type ControlPlaneLocale } from "./locale-path";
 
 export function ControlPlaneLanguageSwitcher() {
   const locale = useLocale();
@@ -21,6 +21,7 @@ export function ControlPlaneLanguageSwitcher() {
             return;
           }
 
+          document.cookie = controlPlaneLocaleCookie(nextLocale);
           window.location.assign(localizedControlPlanePath(pathname, nextLocale));
         }}
         style={{
