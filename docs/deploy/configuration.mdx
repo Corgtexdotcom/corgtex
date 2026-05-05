@@ -25,6 +25,9 @@ When you launch a fresh Corgtex instance, the database must be seeded with an in
 | `WORKSPACE_SLUG` | The URL-friendly identifier for the workspace (e.g., "acme-corp"). |
 | `ADMIN_EMAIL` | The email address for the initial bootstrap admin user. |
 | `ADMIN_PASSWORD` | The password for the initial bootstrap admin user. |
+| `CONTROL_PLANE_TESTER_EMAIL` | Optional separate global operator email for auditable Control Plane production testing. Must differ from `ADMIN_EMAIL`. |
+| `CONTROL_PLANE_TESTER_PASSWORD` | Password for the optional Control Plane tester account. Required when `CONTROL_PLANE_TESTER_EMAIL` creates the account, or when `SEED_RESET_PASSWORDS=true`. |
+| `CONTROL_PLANE_TESTER_DISPLAY_NAME` | Optional display name for the Control Plane tester account. Defaults to "Control Plane Test Operator". |
 
 ## Model Provider Settings
 
@@ -132,6 +135,8 @@ WORKSPACE_NAME="Acme Demo"
 WORKSPACE_SLUG="acme-demo"
 ADMIN_EMAIL="admin@acme.com"
 ADMIN_PASSWORD="<replace-with-bootstrap-admin-password>"
+CONTROL_PLANE_TESTER_EMAIL="control-plane-qa@acme.com"
+CONTROL_PLANE_TESTER_PASSWORD="<replace-with-separate-control-plane-test-password>"
 
 # LLM Config (Optional)
 MODEL_PROVIDER="openrouter"
