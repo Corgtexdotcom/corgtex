@@ -11,6 +11,7 @@ const DEFAULT_RECORDER_ENTRY_MESSAGE = "Corgtex is joining to record, transcribe
 const DEFAULT_RECORDER_MONTHLY_MINUTE_CAP = 6_000;
 const MEETING_RECORDER_PROVIDERS = new Set(["RECALL_AI", "MEETING_BAAS"]);
 const CONTROL_PLANE_CONTEXT_OPERATIONS = new Set(["sync_all", "sync_source", "disable_source"]);
+const CONTROL_PLANE_RELEASE_OPERATIONS = new Set(["prepare_upgrade"]);
 
 const MUTATING_SUPPORT_ACTIONS = new Set([
   "members.invite",
@@ -120,6 +121,11 @@ function normalizeMeetingRecorderProvider(value: string | null | undefined, labe
 function normalizeContextOperation(value: string) {
   invariant(CONTROL_PLANE_CONTEXT_OPERATIONS.has(value), 400, "INVALID_INPUT", "Unsupported context operation.");
   return value as "sync_all" | "sync_source" | "disable_source";
+}
+
+function normalizeReleaseOperation(value: string) {
+  invariant(CONTROL_PLANE_RELEASE_OPERATIONS.has(value), 400, "INVALID_INPUT", "Unsupported release operation.");
+  return value as "prepare_upgrade";
 }
 
 function normalizeSupportMcpUrl(instance: { url: string; supportMcpUrl?: string | null }) {
@@ -854,7 +860,7 @@ export async function getControlPlaneAiGovernanceStatus(actor: AppActor, instanc
     };
   }
 
-  const [agentRuns, pendingApprovals, failedJobs, modelUsage] = await Promise.all([
+  const [agentRuns, pendingApprovals, failedJobs, modelUsage, recentRuns, recentFailedJobs, recentToolCalls] = await Promise.all([
     prisma.agentRun.groupBy({
       by: ["status"],
       where: { workspaceId: instance.managedWorkspaceId },
@@ -874,7 +880,59 @@ export async function getControlPlaneAiGovernanceStatus(actor: AppActor, instanc
         estimatedCostUsd: true,
       },
     }),
+    prisma.agentRun.findMany({
+      where: { workspaceId: instance.managedWorkspaceId },
+      orderBy: { createdAt: "desc" },
+      take: 8,
+      select: {
+        id: true,
+        agentKey: true,
+        triggerType: true,
+        status: true,
+        goal: true,
+        approvalRequired: true,
+        createdAt: true,
+        startedAt: true,
+        completedAt: true,
+        failedAt: true,
+      },
+    }),
+    prisma.workflowJob.findMany({
+      where: { workspaceId: instance.managedWorkspaceId, status: "FAILED" },
+      orderBy: { updatedAt: "desc" },
+      take: 8,
+      select: {
+        id: true,
+        type: true,
+        attempts: true,
+        error: true,
+        createdAt: true,
+        updatedAt: true,
+      },
+    }),
+    prisma.agentToolCall.findMany({
+      where: { agentRun: { workspaceId: instance.managedWorkspaceId } },
+      orderBy: { createdAt: "desc" },
+      take: 25,
+      select: {
+        id: true,
+        name: true,
+        status: true,
+        error: true,
+        createdAt: true,
+        agentRun: {
+          select: {
+            id: true,
+            agentKey: true,
+            status: true,
+          },
+        },
+      },
+    }),
   ]);
+  const riskyToolCalls = recentToolCalls
+    .filter((call) => call.status === "FAILED" || /archive|create|delete|deactivate|deploy|discard|invite|remove|retry|rollback|send|sync|update|upsert|write/i.test(call.name))
+    .slice(0, 8);
 
   return {
     instanceId,
@@ -890,6 +948,9 @@ export async function getControlPlaneAiGovernanceStatus(actor: AppActor, instanc
         outputTokens: modelUsage._sum.outputTokens ?? 0,
         estimatedCostUsd: decimalToString(modelUsage._sum.estimatedCostUsd),
       },
+      recentRuns,
+      recentFailedJobs,
+      riskyToolCalls,
     },
   };
 }
@@ -897,6 +958,21 @@ export async function getControlPlaneAiGovernanceStatus(actor: AppActor, instanc
 export async function getControlPlaneReleaseStatus(actor: AppActor, instanceId: string) {
   const instance = await getControlPlaneInstanceWithWorkspace(actor, instanceId);
   const releaseDrift = instance.lastHealthError?.includes("Release drift:") ? instance.lastHealthError : null;
+  const recentPreparations = await prisma.hostedInstanceEvent.findMany({
+    where: {
+      instanceId,
+      action: "control_plane.release.upgrade_prepared",
+    },
+    orderBy: { createdAt: "desc" },
+    take: 5,
+    select: {
+      id: true,
+      actorUserId: true,
+      action: true,
+      meta: true,
+      createdAt: true,
+    },
+  });
   return {
     instanceId,
     accessMode: instance.managedWorkspaceId ? "managed_workspace" as const : "support_connector" as const,
@@ -924,7 +1000,59 @@ export async function getControlPlaneReleaseStatus(actor: AppActor, instanceId: 
       lastWorkerHealthCheck: instance.lastWorkerHealthCheck,
     },
     rollbackReady: Boolean(instance.releaseImageTag && instance.lastHealthStatus === "ok"),
+    recentPreparations,
   };
+}
+
+export async function runControlPlaneReleaseOperation(actor: AppActor, params: {
+  instanceId: string;
+  operation: string;
+  targetReleaseImageTag?: string | null;
+  targetReleaseVersion?: string | null;
+  reason?: string | null;
+}) {
+  const operation = normalizeReleaseOperation(params.operation);
+  const reason = requireMutationReason(params.reason);
+  const instance = await getControlPlaneInstanceWithWorkspace(actor, params.instanceId);
+
+  if (operation === "prepare_upgrade") {
+    const targetReleaseImageTag = params.targetReleaseImageTag?.trim();
+    invariant(targetReleaseImageTag, 400, "INVALID_INPUT", "Target release image tag is required.");
+    const targetReleaseVersion = params.targetReleaseVersion?.trim() || null;
+    const releaseDrift = instance.lastHealthError?.includes("Release drift:") ? instance.lastHealthError : null;
+    const checks = {
+      hasCustomerSlug: Boolean(instance.customerSlug),
+      hasRailwayProject: Boolean(instance.railwayProjectId),
+      hasRailwayEnvironment: Boolean(instance.railwayEnvironmentId),
+      hasRailwayServices: Boolean(instance.railwayWebServiceId && instance.railwayWorkerServiceId),
+      healthOk: instance.lastHealthStatus === "ok",
+      rollbackReady: Boolean(instance.releaseImageTag && instance.lastHealthStatus === "ok"),
+      targetDiffers: targetReleaseImageTag !== instance.releaseImageTag || targetReleaseVersion !== (instance.releaseVersion ?? null),
+    };
+
+    await recordHostedEvent(actor, params.instanceId, "control_plane.release.upgrade_prepared", {
+      reason,
+      operation,
+      currentReleaseImageTag: instance.releaseImageTag,
+      currentReleaseVersion: instance.releaseVersion,
+      targetReleaseImageTag,
+      targetReleaseVersion,
+      releaseDrift,
+      checks,
+    });
+
+    return {
+      operation,
+      target: {
+        releaseImageTag: targetReleaseImageTag,
+        releaseVersion: targetReleaseVersion,
+      },
+      checks,
+      release: await getControlPlaneReleaseStatus(actor, params.instanceId),
+    };
+  }
+
+  throw new AppError(400, "INVALID_INPUT", "Unsupported release operation.");
 }
 
 export async function configureSupportConnector(actor: AppActor, params: {

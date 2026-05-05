@@ -11,6 +11,7 @@ const { prismaMock, encryptSecretMock, decryptSecretMock } = vi.hoisted(() => ({
     },
     hostedInstanceEvent: {
       create: vi.fn(),
+      findMany: vi.fn(),
     },
     instanceRegistry: {
       findMany: vi.fn(),
@@ -40,6 +41,17 @@ const { prismaMock, encryptSecretMock, decryptSecretMock } = vi.hoisted(() => ({
       count: vi.fn(),
       findMany: vi.fn(),
       upsert: vi.fn(),
+    },
+    agentRun: {
+      count: vi.fn(),
+      findMany: vi.fn(),
+      groupBy: vi.fn(),
+    },
+    agentToolCall: {
+      findMany: vi.fn(),
+    },
+    modelUsage: {
+      aggregate: vi.fn(),
     },
     supportOperation: {
       create: vi.fn(),
@@ -530,6 +542,126 @@ describe("control plane domain", () => {
     })).rejects.toMatchObject({
       status: 404,
       code: "NOT_FOUND",
+    });
+  });
+
+  it("prepares a release upgrade and records readiness evidence without deployment", async () => {
+    const { runControlPlaneReleaseOperation } = await import("./control-plane");
+    prismaMock.instanceRegistry.findUnique.mockResolvedValue({
+      id: "inst-1",
+      label: "Acme",
+      customerSlug: "acme",
+      managedWorkspaceId: null,
+      managedWorkspace: null,
+      supportCredentialEnc: null,
+      releaseImageTag: "ghcr.io/corgtex/app:old",
+      releaseVersion: "0.1.0",
+      lastReleaseCheck: new Date("2026-01-01T00:00:00.000Z"),
+      lastHealthStatus: "ok",
+      lastHealthCheck: new Date("2026-01-01T00:00:00.000Z"),
+      lastHealthError: null,
+      lastWorkerHealthStatus: "ok",
+      lastWorkerHealthCheck: new Date("2026-01-01T00:00:00.000Z"),
+      provisioningStatus: "active",
+      bootstrapStatus: "completed",
+      lastProvisioningError: null,
+      railwayProjectId: "project-1",
+      railwayEnvironmentId: "env-1",
+      railwayWebServiceId: "web-1",
+      railwayWorkerServiceId: "worker-1",
+    });
+    prismaMock.hostedInstanceEvent.findMany.mockResolvedValueOnce([
+      {
+        id: "event-1",
+        actorUserId: "operator-1",
+        action: "control_plane.release.upgrade_prepared",
+        meta: {},
+        createdAt: new Date("2026-01-01T00:00:00.000Z"),
+      },
+    ]);
+
+    const result = await runControlPlaneReleaseOperation(operatorActor, {
+      instanceId: "inst-1",
+      operation: "prepare_upgrade",
+      targetReleaseImageTag: "ghcr.io/corgtex/app:new",
+      targetReleaseVersion: "0.2.0",
+      reason: "Prepare staged release after smoke checks.",
+    });
+
+    expect(prismaMock.hostedInstanceEvent.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        instanceId: "inst-1",
+        action: "control_plane.release.upgrade_prepared",
+        meta: expect.objectContaining({
+          reason: "Prepare staged release after smoke checks.",
+          currentReleaseImageTag: "ghcr.io/corgtex/app:old",
+          targetReleaseImageTag: "ghcr.io/corgtex/app:new",
+          targetReleaseVersion: "0.2.0",
+          checks: expect.objectContaining({
+            hasRailwayServices: true,
+            rollbackReady: true,
+            targetDiffers: true,
+          }),
+        }),
+      }),
+    }));
+    expect(prismaMock.instanceRegistry.update).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      operation: "prepare_upgrade",
+      target: {
+        releaseImageTag: "ghcr.io/corgtex/app:new",
+        releaseVersion: "0.2.0",
+      },
+      checks: {
+        rollbackReady: true,
+        targetDiffers: true,
+      },
+      release: {
+        rollbackReady: true,
+      },
+    });
+  });
+
+  it("requires reason, target image tag, and supported operation for release operations", async () => {
+    const { runControlPlaneReleaseOperation } = await import("./control-plane");
+    await expect(runControlPlaneReleaseOperation(operatorActor, {
+      instanceId: "inst-1",
+      operation: "prepare_upgrade",
+      targetReleaseImageTag: "ghcr.io/corgtex/app:new",
+      reason: "",
+    })).rejects.toMatchObject({
+      status: 400,
+      code: "CONTROL_PLANE_REASON_REQUIRED",
+    });
+
+    prismaMock.instanceRegistry.findUnique.mockResolvedValueOnce({
+      id: "inst-1",
+      label: "Acme",
+      managedWorkspaceId: null,
+      managedWorkspace: null,
+      supportCredentialEnc: null,
+      releaseImageTag: "ghcr.io/corgtex/app:old",
+      releaseVersion: "0.1.0",
+      lastHealthStatus: "ok",
+    });
+    await expect(runControlPlaneReleaseOperation(operatorActor, {
+      instanceId: "inst-1",
+      operation: "prepare_upgrade",
+      targetReleaseImageTag: "",
+      reason: "Prepare release.",
+    })).rejects.toMatchObject({
+      status: 400,
+      code: "INVALID_INPUT",
+    });
+
+    await expect(runControlPlaneReleaseOperation(operatorActor, {
+      instanceId: "inst-1",
+      operation: "upgrade_now",
+      targetReleaseImageTag: "ghcr.io/corgtex/app:new",
+      reason: "Prepare release.",
+    })).rejects.toMatchObject({
+      status: 400,
+      code: "INVALID_INPUT",
     });
   });
 
