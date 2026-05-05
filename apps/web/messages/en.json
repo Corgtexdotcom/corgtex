@@ -1240,6 +1240,12 @@
       "customerReason": "{customer} - {reason}",
       "empty": "No support operations recorded yet."
     },
+    "customerNotFound": {
+      "eyebrow": "Customer control plane",
+      "title": "Customer instance not found",
+      "description": "This customer record is no longer registered in the Control Plane. Return to the fleet and open the current customer record.",
+      "backToFleet": "Back to fleet"
+    },
     "customerDetail": {
       "backToFleet": "Back to fleet",
       "eyebrow": "Customer control plane",

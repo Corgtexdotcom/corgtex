@@ -1,6 +1,7 @@
 import { notFound } from "next/navigation";
 import { getFormatter, getTranslations } from "next-intl/server";
 import {
+  AppError,
   getControlPlaneAiGovernanceStatus,
   getControlPlaneContextHealth,
   getControlPlaneCustomer,
@@ -189,7 +190,12 @@ export default async function ControlPlaneCustomerPage({
     getControlPlaneReleaseStatus(actor, instanceId),
     getFormatter(),
     getTranslations("controlPlane"),
-  ]);
+  ]).catch((error: unknown) => {
+    if (error instanceof AppError && error.status === 404) {
+      notFound();
+    }
+    throw error;
+  });
   const contextBrainSources = Array.isArray(context.sources) ? [] : context.sources.brain;
   const contextExternalSources = Array.isArray(context.sources) ? [] : context.sources.external;
   const meetingRecorder = integrations.integrations.find((integration) => integration.key === "meeting_recorders") as MeetingRecorderIntegration | undefined;
@@ -223,7 +229,7 @@ export default async function ControlPlaneCustomerPage({
             <p className="muted" style={{ margin: "4px 0 0" }}>{customer.url}</p>
           </div>
           <div className="actions-inline">
-            <a className="button secondary small" href={customer.url} target="_blank" rel="noreferrer">{t("customerDetail.openCustomer")}</a>
+            <a className="link-button small" href={customer.url} target="_blank" rel="noreferrer">{t("customerDetail.openCustomer")}</a>
             {customer.hasSupportCredential && (
               <form action={refreshSupportSnapshotAction}>
                 <input type="hidden" name="instanceId" value={customer.id} />
@@ -282,7 +288,7 @@ export default async function ControlPlaneCustomerPage({
                   </p>
                 </div>
                 {context.managedWorkspace && (
-                  <Link className="button secondary small" href={`/workspaces/${context.managedWorkspace.id}/brain`}>
+                  <Link className="link-button small" href={`/workspaces/${context.managedWorkspace.id}/brain`}>
                     {t("customerDetail.context.openBrain")}
                   </Link>
                 )}
