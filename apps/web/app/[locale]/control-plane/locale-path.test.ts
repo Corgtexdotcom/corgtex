@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { localizedControlPlanePath } from "./locale-path";
+import { controlPlaneLocaleCookie, localizedControlPlanePath } from "./locale-path";
 
 describe("localizedControlPlanePath", () => {
-  it("uses an explicit English prefix so the locale cookie is updated", () => {
-    expect(localizedControlPlanePath("/control-plane", "en")).toBe("/en/control-plane");
+  it("uses the unprefixed default-locale path for English", () => {
+    expect(localizedControlPlanePath("/control-plane", "en")).toBe("/control-plane");
     expect(localizedControlPlanePath("/control-plane/customers/customer-1", "en")).toBe(
-      "/en/control-plane/customers/customer-1",
+      "/control-plane/customers/customer-1",
     );
   });
 
@@ -17,9 +17,16 @@ describe("localizedControlPlanePath", () => {
   });
 
   it("normalizes paths that already include a locale prefix", () => {
-    expect(localizedControlPlanePath("/es/control-plane", "en")).toBe("/en/control-plane");
+    expect(localizedControlPlanePath("/es/control-plane", "en")).toBe("/control-plane");
     expect(localizedControlPlanePath("/en/control-plane/customers/customer-1", "es")).toBe(
       "/es/control-plane/customers/customer-1",
     );
+  });
+});
+
+describe("controlPlaneLocaleCookie", () => {
+  it("persists the next-intl locale cookie for client-side switches", () => {
+    expect(controlPlaneLocaleCookie("en")).toBe("NEXT_LOCALE=en; path=/; max-age=31536000; SameSite=Lax");
+    expect(controlPlaneLocaleCookie("es")).toBe("NEXT_LOCALE=es; path=/; max-age=31536000; SameSite=Lax");
   });
 });
