@@ -1,12 +1,12 @@
 "use client";
 
-import { usePathname, useRouter } from "@/i18n/routing";
+import { usePathname } from "@/i18n/routing";
 import { useLocale, useTranslations } from "next-intl";
+import { localizedControlPlanePath, type ControlPlaneLocale } from "./locale-path";
 
 export function ControlPlaneLanguageSwitcher() {
   const locale = useLocale();
   const pathname = usePathname();
-  const router = useRouter();
   const t = useTranslations("common");
 
   return (
@@ -14,7 +14,15 @@ export function ControlPlaneLanguageSwitcher() {
       {t("language")}
       <select
         value={locale}
-        onChange={(event) => router.replace(pathname, { locale: event.target.value as "en" | "es" })}
+        onChange={(event) => {
+          const nextLocale = event.target.value as ControlPlaneLocale;
+
+          if (nextLocale === locale) {
+            return;
+          }
+
+          window.location.assign(localizedControlPlanePath(pathname, nextLocale));
+        }}
         style={{
           width: "100%",
           padding: "6px 8px",
