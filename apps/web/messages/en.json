@@ -1107,6 +1107,364 @@
     "tools": "Tools",
     "workspace": "Workspace"
   },
+  "controlPlane": {
+    "title": "Control Plane",
+    "eyebrow": "Enterprise AI governance",
+    "description": "Proprietary operations surface for hosted customer instances, governed context, enterprise integrations, AI-agent lifecycle controls, release rollout, support operations, audit, and Codex/MCP access.",
+    "sections": {
+      "fleet": {
+        "label": "Fleet",
+        "detail": "Hosted instance health, rollout state, and customer readiness."
+      },
+      "customers": {
+        "label": "Customers",
+        "detail": "Searchable enterprise customer records and support ownership."
+      },
+      "context": {
+        "label": "Context & Brain",
+        "detail": "Source freshness, provenance, sync status, and ingestion risk."
+      },
+      "ai-governance": {
+        "label": "AI Governance",
+        "detail": "Agent runs, model spend, approvals, budgets, and risky actions."
+      },
+      "integrations": {
+        "label": "Integrations",
+        "detail": "Enterprise entitlements, vendor readiness, caps, and failures."
+      },
+      "releases": {
+        "label": "Releases",
+        "detail": "Version drift, staged upgrades, bootstrap, and rollback readiness."
+      },
+      "support": {
+        "label": "Support",
+        "detail": "Reasoned support operations and break-glass records.",
+        "recentOperations": "{count} recent support operations visible"
+      },
+      "audit": {
+        "label": "Audit",
+        "detail": "Central evidence trail for control-plane and customer-side operations."
+      },
+      "mcp": {
+        "label": "MCP/CLI",
+        "detail": "Least-privilege automation interface for Codex and operator tooling."
+      },
+      "detailPageNote": "Customer detail pages expose the first operating view for this domain."
+    },
+    "status": {
+      "active": "active",
+      "attention": "attention",
+      "available": "available",
+      "completed": "completed",
+      "configured": "configured",
+      "connected": "connected",
+      "degraded": "degraded",
+      "disabled": "disabled",
+      "down": "down",
+      "draft": "draft",
+      "enabled": "Enabled",
+      "failed": "failed",
+      "inspectable": "inspectable",
+      "linked": "linked",
+      "never": "Never",
+      "none": "none",
+      "notSet": "Not set",
+      "not_configured": "not configured",
+      "off": "Off",
+      "ok": "healthy",
+      "on": "On",
+      "pending": "pending",
+      "provisioning": "provisioning",
+      "ready": "ready",
+      "recorded": "recorded",
+      "remote": "remote",
+      "remoteOnly": "Remote only",
+      "running": "running",
+      "suspended": "suspended",
+      "unknown": "unknown"
+    },
+    "readiness": {
+      "regionMissing": "Region missing",
+      "residencyMissing": "Residency missing",
+      "releaseUnknown": "Release unknown",
+      "noHealthProbe": "No health probe",
+      "runtimeStatus": "Runtime {status}",
+      "supportConnectorMissing": "Support connector not configured",
+      "supportConnectorDegraded": "Support connector degraded"
+    },
+    "fleetCards": {
+      "customers": {
+        "label": "Customers",
+        "detail": "Registered enterprise instances"
+      },
+      "active": {
+        "label": "Active",
+        "detail": "Instances reporting active provisioning"
+      },
+      "managed": {
+        "label": "Managed locally",
+        "detail": "Linked to an in-deployment workspace"
+      },
+      "supportReady": {
+        "label": "Support ready",
+        "detail": "Encrypted support connector available"
+      },
+      "needsAttention": {
+        "label": "Needs attention",
+        "detail": "Readiness gaps or failed operations"
+      }
+    },
+    "customers": {
+      "title": "Customers",
+      "description": "Search by customer, slug, region, release, owner, or URL.",
+      "searchPlaceholder": "Search customers",
+      "searchButton": "Search",
+      "columns": {
+        "customer": "Customer",
+        "readiness": "Readiness",
+        "workspace": "Workspace",
+        "region": "Region",
+        "release": "Release",
+        "runtime": "Runtime",
+        "support": "Support",
+        "lastCheck": "Last check",
+        "actions": "Actions"
+      },
+      "noOwner": "No owner",
+      "open": "Open",
+      "empty": "No customer instances match this search."
+    },
+    "operationHistory": {
+      "title": "Operation history",
+      "description": "Recent reasoned support operations across the fleet.",
+      "customerReason": "{customer} - {reason}",
+      "empty": "No support operations recorded yet."
+    },
+    "customerDetail": {
+      "backToFleet": "Back to fleet",
+      "eyebrow": "Customer control plane",
+      "openCustomer": "Open customer",
+      "refreshSnapshot": "Refresh support snapshot",
+      "forms": {
+        "reason": "Reason",
+        "mutationReason": "Mutation reason"
+      },
+      "metrics": {
+        "readiness": "Readiness",
+        "openGaps": "{count} open gaps",
+        "runtime": "Runtime",
+        "release": "Release",
+        "checkedAt": "Checked {date}",
+        "noReleaseCheck": "No release check",
+        "support": "Support",
+        "residency": "Residency",
+        "noResidencyPolicy": "No residency policy",
+        "managedWorkspace": "Managed workspace",
+        "useSupportConnector": "Use support connector for live customer reads"
+      },
+      "readiness": {
+        "customerRecord": "Customer record",
+        "customerRecordMissing": "Customer slug or URL is missing.",
+        "managedWorkspace": "Managed workspace",
+        "managedWorkspaceMissing": "No in-deployment workspace link is recorded.",
+        "deploymentResidency": "Deployment residency",
+        "deploymentResidencyMissing": "Region and residency are not fully set.",
+        "runtimeHealth": "Runtime health",
+        "runtimeHealthMissing": "No runtime health has been recorded.",
+        "supportConnector": "Support connector",
+        "supportConnectorMissing": "Encrypted support credential is not configured.",
+        "releaseEvidence": "Release evidence",
+        "releaseEvidenceMissing": "Current release is unknown."
+      },
+      "healthReadiness": {
+        "title": "Health and readiness"
+      },
+      "context": {
+        "description": "Source freshness, ingestion failures, and repair operations are visible here when this customer has a managed workspace link. Remote customers continue through the support connector.",
+        "contextAccess": "Context access",
+        "managedDataAvailable": "Managed workspace data is available locally.",
+        "useSupportForReads": "Use support operations for live customer reads.",
+        "configureSupportFirst": "Configure support connector first.",
+        "brainSources": "Brain sources",
+        "knowledgeChunks": "{count} knowledge chunks",
+        "requiresSupportSnapshot": "Requires support snapshot",
+        "externalSources": "External sources",
+        "externalSourceDetail": "{stale} stale, {failed} failed",
+        "failedSyncJobs": "Failed sync jobs",
+        "failedSyncJobsDetail": "{count} failed sync jobs",
+        "inspectThroughSupport": "Inspect through support connector",
+        "lastContextPull": "Last context pull",
+        "noSupportSnapshot": "No support snapshot yet",
+        "ingestionRisk": "Ingestion risk",
+        "noSupportConnectorError": "No support connector error recorded.",
+        "operationsTitle": "Context operations",
+        "operationsDescription": "Queue source syncs or disable a noisy source. Every operation writes the hosted-instance audit trail.",
+        "openBrain": "Open brain",
+        "operationLabel": "Operation",
+        "syncAllSources": "Sync all active sources",
+        "syncSelectedSource": "Sync selected source",
+        "disableSelectedSource": "Disable selected source",
+        "sourceLabel": "Source",
+        "allActiveSources": "All active sources",
+        "reasonPlaceholder": "Customer requested source repair",
+        "runOperation": "Run context operation",
+        "externalContextSources": "External context sources",
+        "sourceCadence": "{driver} - every {minutes} min",
+        "lastSync": "Last sync: {date}",
+        "latestLogError": "Latest log: {error}",
+        "latestLogRows": "Latest log: {rows} rows, {chunks} chunks",
+        "noExternalSources": "No external context sources are registered for this workspace.",
+        "recentBrainSources": "Recent brain sources",
+        "absorbedAt": "Absorbed {date}",
+        "createdAt": "Created {date}",
+        "noBrainSources": "No recent brain sources are registered for this workspace.",
+        "recentFailedSyncJobs": "Recent failed sync jobs",
+        "attempts": "{count} attempts",
+        "noErrorRecorded": "No error recorded.",
+        "remoteOperationsTitle": "Remote context operations",
+        "remoteOperationsDescription": "This customer has no managed workspace link. Use the support connector operation panel to inspect or sync remote data feeds."
+      },
+      "aiGovernance": {
+        "description": "Agent runs, model spend, approval waits, risky tool activity, and failed jobs are governed from the managed workspace when available.",
+        "agentVisibility": "Agent visibility",
+        "localRuns": "{count} local agent runs recorded.",
+        "remoteRuns": "Use support operations to inspect remote agent runs.",
+        "pendingApprovals": "Pending approvals",
+        "humanApprovalWaits": "Human approval waits",
+        "failedJobs": "Failed jobs",
+        "failedJobsDetail": "{count} failed workflow jobs",
+        "modelSpend": "Model spend",
+        "totalTokens": "{count} total tokens",
+        "riskyToolCalls": "Risky tool calls",
+        "recentCallsFlagged": "{count} recent calls flagged",
+        "supportConnectorPath": "Support connector path",
+        "failedOperations": "Failed operations",
+        "failedSupportOperations": "{count} failed support operations",
+        "recentAgentRuns": "Recent agent runs",
+        "approvalRequired": "approval required",
+        "noAgentRuns": "No agent runs are recorded for this workspace.",
+        "riskAndFailures": "Risk and failures",
+        "noRiskOrFailures": "No risky tool calls or failed workflow jobs were found recently.",
+        "remoteTitle": "Remote AI governance",
+        "remoteDescription": "This customer has no managed workspace link. Use support operations to inspect agent runs and runtime jobs from the customer instance."
+      },
+      "integrations": {
+        "title": "Enterprise Integrations",
+        "description": "Integrations are treated as entitlements with vendor readiness, caps, usage, failures, and audit. Meeting recorders are the first V1 entitlement.",
+        "meetingRecorderEntitlement": "Meeting recorder entitlement",
+        "noProviderSelected": "No provider selected",
+        "recorderStatus": "Recorder status",
+        "autoRecordingOn": "Auto-recording on",
+        "autoRecordingOff": "Auto-recording off",
+        "recorderUsage": "Recorder usage",
+        "minutes": "{count} min",
+        "monthlyCap": "{count} minute monthly cap",
+        "recorderFailures": "Recorder failures",
+        "failedRecordings": "{count} failed recordings",
+        "calendarAndSlack": "Calendar and Slack",
+        "localCommunicationInstalls": "{count} local communication installs.",
+        "supportCanReadState": "Support connector can read customer-side integration state.",
+        "supportConnector": "Support connector",
+        "lastSnapshot": "Last snapshot {date}",
+        "noSnapshot": "No support snapshot yet",
+        "meetingRecorderManagement": "Meeting recorder management",
+        "meetingRecorderManagementDescription": "Provider, caps, auto-recording, usage, and failures are managed here for this customer.",
+        "vendorReady": "Vendor ready",
+        "needsReadiness": "Needs readiness",
+        "entitlement": "Entitlement",
+        "recorderState": "Recorder state",
+        "autoRecording": "Auto-recording",
+        "primaryProvider": "Primary provider",
+        "fallbackProvider": "Fallback provider",
+        "monthlyMinuteCap": "Monthly minute cap",
+        "botName": "Bot name",
+        "reasonPlaceholder": "Enterprise recorder entitlement update",
+        "entryMessage": "Entry message",
+        "saveRecorderEntitlement": "Save recorder entitlement",
+        "linkManagedWorkspace": "Link a managed workspace to edit recorder entitlements from Control Plane. Remote instances can still be inspected through support operations."
+      },
+      "releases": {
+        "title": "Release Operations",
+        "currentRelease": "Current release",
+        "provisioning": "Provisioning",
+        "health": "Health",
+        "noRuntimeError": "No runtime error recorded.",
+        "drift": "Drift",
+        "noDrift": "No release drift recorded.",
+        "rollbackReadiness": "Rollback readiness",
+        "rollbackReady": "Current release and healthy runtime recorded.",
+        "rollbackNeedsEvidence": "Needs known release and healthy runtime.",
+        "lastPreparation": "Last preparation",
+        "noPreparation": "No upgrade preparation audit yet.",
+        "prepareUpgrade": "Prepare release upgrade",
+        "prepareUpgradeDescription": "Records operator intent, target release, readiness checks, drift, and rollback evidence. This does not deploy.",
+        "managedWorkspaceLinked": "Managed workspace linked",
+        "centralInstanceRecord": "Central instance record",
+        "targetImageTag": "Target image tag",
+        "targetImageTagPlaceholder": "Enter target image tag",
+        "targetVersion": "Target version",
+        "targetVersionPlaceholder": "Optional version label",
+        "reasonPlaceholder": "Prepare staged upgrade after production smoke passes",
+        "recordUpgradePreparation": "Record upgrade preparation",
+        "recentPreparationAudit": "Recent release preparation audit"
+      },
+      "support": {
+        "connectorTitle": "Support Connector",
+        "connectorDescription": "Store an encrypted support credential for this customer. The token is never shown again.",
+        "baseUrl": "Base URL",
+        "mcpUrl": "MCP URL",
+        "credentialLabel": "Credential label",
+        "supportCredential": "Support credential",
+        "credentialConfiguredPlaceholder": "Configured; enter a new token to rotate",
+        "credentialNewPlaceholder": "Paste support token",
+        "notes": "Notes",
+        "saveConnector": "Save connector",
+        "runOperationTitle": "Run Support Operation",
+        "runOperationDescription": "Mutating actions require a reason and write central and customer-side support audit records.",
+        "action": "Action",
+        "actions": {
+          "membersList": "List members",
+          "membersInvite": "Invite member",
+          "membersDeactivate": "Deactivate member",
+          "integrationsList": "Inspect integrations",
+          "dataFeedsList": "Inspect data feeds",
+          "dataFeedsSync": "Sync data feed",
+          "toolLinksList": "Inspect tool links",
+          "toolLinksUpsert": "Upsert tool link",
+          "toolLinksArchive": "Archive tool link",
+          "agentsListRuns": "Inspect agent runs",
+          "runtimeListFailedJobs": "List failed jobs",
+          "runtimeRetryFailedJob": "Retry failed job",
+          "runtimeDiscardFailedJob": "Discard failed job",
+          "documentsUploadText": "Upload text document"
+        },
+        "reasonPlaceholder": "Pilot support request, failed sync repair, onboarding help...",
+        "remoteWorkspaceId": "Remote workspace ID",
+        "remoteWorkspacePlaceholder": "Optional; stored with the operation audit",
+        "argumentsJson": "Arguments JSON",
+        "commonArgumentTemplates": "Common argument templates",
+        "runOperation": "Run operation",
+        "breakGlassTitle": "Break-glass Notes",
+        "breakGlassReasonPlaceholder": "Why direct infrastructure or database access was needed",
+        "breakGlassNotesPlaceholder": "What was inspected or changed. Do not paste secrets.",
+        "recordBreakGlassNote": "Record break-glass note"
+      },
+      "audit": {
+        "supportOperations": "Support Operations",
+        "mutatingOperations": "{count} mutating or repair operations recorded for this customer.",
+        "hostedInstanceEvents": "Hosted Instance Events",
+        "noHostedInstanceEvents": "No hosted instance events recorded yet."
+      },
+      "mcp": {
+        "title": "MCP/CLI Access",
+        "description": "Codex and operator tooling use the Control Plane API and MCP endpoint. Outputs must remain redacted and mutations must stay reasoned.",
+        "customerMcpUrl": "Customer MCP URL",
+        "supportOperations": "Support operations",
+        "supportOperationsDetail": "{failed} failed operations",
+        "centralEndpoint": "Central endpoint"
+      }
+    }
+  },
   "operator": {
     "agentActionExtraction": "Action extraction",
     "agentConstitutionUpdate": "Constitution update trigger",
