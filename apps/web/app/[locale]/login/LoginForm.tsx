@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState } from "react";
+import { useActionState, useEffect } from "react";
 import { useFormStatus } from "react-dom";
 import Link from "next/link";
 import { loginAction } from "./actions";
@@ -21,6 +21,12 @@ export function LoginForm() {
   const [state, formAction] = useActionState(loginAction, initialLoginActionState);
   const t = useTranslations("auth");
   const common = useTranslations("common");
+
+  useEffect(() => {
+    if (state.redirectTo) {
+      window.location.assign(state.redirectTo);
+    }
+  }, [state.redirectTo]);
 
   return (
     <form action={formAction} className="stack" style={{ marginTop: 20 }}>

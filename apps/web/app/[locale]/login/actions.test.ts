@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-const redirect = vi.fn((location: string) => {
-  throw new Error(`redirect:${location}`);
-});
+const envMock = {
+  CONTROL_PLANE_MODE: false,
+};
 const loginUserWithPassword = vi.fn();
 const listActorWorkspaces = vi.fn();
 const setSessionCookie = vi.fn();
@@ -18,14 +18,17 @@ class MockAppError extends Error {
   }
 }
 
-vi.mock("next/navigation", () => ({
-  redirect,
-}));
-
 vi.mock("@corgtex/domain", () => ({
   AppError: MockAppError,
+  isGlobalOperator: (actor: { kind: string, user: { globalRole?: string | null } }) => (
+    actor.kind === "user" && actor.user.globalRole === "OPERATOR"
+  ),
   listActorWorkspaces,
   loginUserWithPassword,
+}));
+
+vi.mock("@corgtex/shared", () => ({
+  env: envMock,
 }));
 
 vi.mock("@/lib/auth", () => ({
@@ -40,6 +43,7 @@ function buildFormData(email: string, password: string) {
 }
 
 afterEach(() => {
+  envMock.CONTROL_PLANE_MODE = false;
   vi.clearAllMocks();
 });
 
@@ -56,6 +60,7 @@ describe("loginAction", () => {
     ).resolves.toEqual({
       email: "user@example.com",
       error: "Invalid email or password.",
+      redirectTo: null,
     });
 
     expect(listActorWorkspaces).not.toHaveBeenCalled();
@@ -73,12 +78,13 @@ describe("loginAction", () => {
     ).resolves.toEqual({
       email: "ops@example.com",
       error: "Login is temporarily unavailable. Try again.",
+      redirectTo: null,
     });
 
     expect(consoleError).toHaveBeenCalledWith("Login action failed.", expect.any(Error));
   });
 
-  it("sets the session cookie and redirects after a successful login", async () => {
+  it("sets the session cookie and returns the first workspace redirect after a successful login", async () => {
     const { loginAction } = await import("./actions");
     const { initialLoginActionState } = await import("./state");
     const expiresAt = new Date("2026-04-03T00:00:00.000Z");
@@ -89,6 +95,7 @@ describe("loginAction", () => {
         id: "user-1",
         email: "admin@example.com",
         displayName: "Admin",
+        globalRole: null,
       },
     });
     listActorWorkspaces.mockResolvedValue([
@@ -99,9 +106,40 @@ describe("loginAction", () => {
 
     await expect(
       loginAction(initialLoginActionState, buildFormData("admin@example.com", "password123")),
-    ).rejects.toThrow("redirect:/workspaces/workspace-1");
+    ).resolves.toEqual({
+      email: "admin@example.com",
+      error: null,
+      redirectTo: "/workspaces/workspace-1",
+    });
 
     expect(setSessionCookie).toHaveBeenCalledWith("session-token", expiresAt);
-    expect(redirect).toHaveBeenCalledWith("/workspaces/workspace-1");
+  });
+
+  it("sets the session cookie and returns the control plane redirect for operators in control plane mode", async () => {
+    const { loginAction } = await import("./actions");
+    const { initialLoginActionState } = await import("./state");
+    const expiresAt = new Date("2026-04-03T00:00:00.000Z");
+    envMock.CONTROL_PLANE_MODE = true;
+    loginUserWithPassword.mockResolvedValue({
+      token: "operator-session-token",
+      expiresAt,
+      user: {
+        id: "operator-1",
+        email: "operator@example.com",
+        displayName: "Operator",
+        globalRole: "OPERATOR",
+      },
+    });
+
+    await expect(
+      loginAction(initialLoginActionState, buildFormData("operator@example.com", "password123")),
+    ).resolves.toEqual({
+      email: "operator@example.com",
+      error: null,
+      redirectTo: "/control-plane",
+    });
+
+    expect(listActorWorkspaces).not.toHaveBeenCalled();
+    expect(setSessionCookie).toHaveBeenCalledWith("operator-session-token", expiresAt);
   });
 });
