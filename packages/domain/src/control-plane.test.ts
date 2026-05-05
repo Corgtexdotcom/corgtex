@@ -65,6 +65,7 @@ const { prismaMock, encryptSecretMock, decryptSecretMock } = vi.hoisted(() => ({
 vi.mock("@corgtex/shared", () => ({
   env: {
     CONTROL_PLANE_AGENT_API_KEY: "agent-secret",
+    CONTROL_PLANE_AGENT_SCOPES: undefined,
   },
   prisma: prismaMock,
   encryptSecret: encryptSecretMock,
@@ -127,6 +128,25 @@ describe("control plane domain", () => {
     });
 
     await expect(requireControlPlaneAccess(userActor, { instanceId: "inst-1" })).resolves.toEqual({ role: "SUPPORT_VIEWER" });
+  });
+
+  it("defaults control-plane agent bearer access to read-only scopes", async () => {
+    const { resolveControlPlaneAgentFromBearer, runControlPlaneContextOperation } = await import("./control-plane");
+    const actor = await resolveControlPlaneAgentFromBearer("cp-agent-secret");
+
+    expect(actor).toMatchObject({
+      kind: "agent",
+      authProvider: "control-plane",
+      scopes: ["control-plane:read"],
+    });
+    await expect(runControlPlaneContextOperation(actor!, {
+      instanceId: "inst-1",
+      operation: "sync_all",
+      reason: "Repair context.",
+    })).rejects.toMatchObject({
+      status: 403,
+      code: "CONTROL_PLANE_SCOPE_REQUIRED",
+    });
   });
 
   it("encrypts support credentials and does not return ciphertext", async () => {
@@ -663,6 +683,71 @@ describe("control plane domain", () => {
       status: 400,
       code: "INVALID_INPUT",
     });
+  });
+
+  it("probes customer health with scoped release access and records audit evidence", async () => {
+    const { probeControlPlaneCustomerHealth } = await import("./control-plane");
+    const scopedAgent: AppActor = {
+      kind: "agent",
+      authProvider: "control-plane",
+      label: "control-plane-agent",
+      scopes: ["control-plane:read", "control-plane:releases:write"],
+    };
+    prismaMock.instanceRegistry.findUnique.mockResolvedValue({
+      id: "inst-1",
+      label: "Acme",
+      url: "https://customer.test",
+      managedWorkspaceId: null,
+      managedWorkspace: null,
+      supportCredentialEnc: null,
+      releaseImageTag: "sha-new",
+      releaseVersion: "0.2.0",
+      lastHealthStatus: null,
+      lastHealthError: null,
+      lastHealthCheck: null,
+      lastWorkerHealthStatus: null,
+      lastWorkerHealthCheck: null,
+      lastReleaseCheck: null,
+      provisioningStatus: "provisioning",
+      bootstrapStatus: "completed",
+      lastProvisioningError: null,
+    });
+    prismaMock.instanceRegistry.update.mockResolvedValueOnce({ id: "inst-1" });
+    prismaMock.hostedInstanceEvent.findMany.mockResolvedValueOnce([]);
+    global.fetch = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        database: "up",
+        schema: "ready",
+        runtime: { redis: "configured", storage: "configured" },
+        release: { gitSha: "sha-new" },
+      }),
+    })) as any;
+
+    const result = await probeControlPlaneCustomerHealth(scopedAgent, {
+      instanceId: "inst-1",
+      reason: "Post-deploy health check.",
+    });
+
+    expect(prismaMock.instanceRegistry.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "inst-1" },
+      data: expect.objectContaining({
+        lastHealthStatus: "ok",
+        lastHealthError: null,
+        provisioningStatus: "active",
+      }),
+    }));
+    expect(prismaMock.hostedInstanceEvent.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        action: "control_plane.release.health_probed",
+        meta: expect.objectContaining({
+          reason: "Post-deploy health check.",
+          status: "ok",
+        }),
+      }),
+    }));
+    expect(result.status).toBe("ok");
   });
 
   it("records and completes an audited remote support operation", async () => {

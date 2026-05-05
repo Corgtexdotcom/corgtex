@@ -1,6 +1,6 @@
 import type { MeetingRecorderProvider, Prisma } from "@prisma/client";
 import { decryptSecret, encryptSecret, env, prisma } from "@corgtex/shared";
-import type { AppActor } from "@corgtex/shared";
+import type { AgentActor, AppActor } from "@corgtex/shared";
 import { AppError, invariant } from "./errors";
 import { isGlobalOperator } from "./auth";
 import { getMeetingRecorderMonthlyUsage, MEETING_RECORDERS_FEATURE_FLAG } from "./meeting-recorders";
@@ -12,6 +12,7 @@ const DEFAULT_RECORDER_MONTHLY_MINUTE_CAP = 6_000;
 const MEETING_RECORDER_PROVIDERS = new Set(["RECALL_AI", "MEETING_BAAS"]);
 const CONTROL_PLANE_CONTEXT_OPERATIONS = new Set(["sync_all", "sync_source", "disable_source"]);
 const CONTROL_PLANE_RELEASE_OPERATIONS = new Set(["prepare_upgrade"]);
+const CONTROL_PLANE_READ_SCOPE = "control-plane:read";
 
 const MUTATING_SUPPORT_ACTIONS = new Set([
   "members.invite",
@@ -73,8 +74,25 @@ function actorUserId(actor: AppActor) {
   return actor.kind === "user" ? actor.user.id : null;
 }
 
-function isControlPlaneAgent(actor: AppActor) {
+function isControlPlaneAgent(actor: AppActor): actor is AgentActor & { authProvider: "control-plane" } {
   return actor.kind === "agent" && actor.authProvider === "control-plane";
+}
+
+function parseControlPlaneScopes(value: string | undefined) {
+  return (value ?? CONTROL_PLANE_READ_SCOPE)
+    .split(/[,\s]+/)
+    .map((scope) => scope.trim())
+    .filter(Boolean);
+}
+
+function hasControlPlaneScope(actor: AppActor, scope: string) {
+  if (!isControlPlaneAgent(actor)) return true;
+  const scopes = new Set(actor.scopes?.length ? actor.scopes : [CONTROL_PLANE_READ_SCOPE]);
+  return scopes.has("control-plane:*") || scopes.has(scope);
+}
+
+export function requireControlPlaneScope(actor: AppActor, scope: string) {
+  invariant(hasControlPlaneScope(actor, scope), 403, "CONTROL_PLANE_SCOPE_REQUIRED", `Control Plane scope required: ${scope}.`);
 }
 
 function redactValue(key: string, value: unknown): unknown {
@@ -242,7 +260,12 @@ async function recordRemoteSupportAudit(params: {
 }
 
 export async function requireControlPlaneAccess(actor: AppActor, params: { instanceId?: string } = {}) {
-  if (isGlobalOperator(actor) || isControlPlaneAgent(actor)) {
+  if (isGlobalOperator(actor)) {
+    return { role: "OPERATOR" as const };
+  }
+
+  if (isControlPlaneAgent(actor)) {
+    requireControlPlaneScope(actor, CONTROL_PLANE_READ_SCOPE);
     return { role: "OPERATOR" as const };
   }
 
@@ -501,6 +524,7 @@ export async function runControlPlaneContextOperation(actor: AppActor, params: {
   sourceId?: string | null;
   reason?: string | null;
 }) {
+  requireControlPlaneScope(actor, "control-plane:context:write");
   const reason = requireMutationReason(params.reason);
   const operation = normalizeContextOperation(params.operation);
   const instance = await getControlPlaneInstanceWithWorkspace(actor, params.instanceId);
@@ -753,6 +777,7 @@ export async function configureControlPlaneMeetingRecorderIntegration(actor: App
   entryMessage?: string | null;
   reason?: string | null;
 }) {
+  requireControlPlaneScope(actor, "control-plane:integrations:write");
   const reason = requireMutationReason(params.reason);
   const instance = await getControlPlaneInstanceWithWorkspace(actor, params.instanceId);
   const managedWorkspaceId = instance.managedWorkspaceId;
@@ -1011,6 +1036,7 @@ export async function runControlPlaneReleaseOperation(actor: AppActor, params: {
   targetReleaseVersion?: string | null;
   reason?: string | null;
 }) {
+  requireControlPlaneScope(actor, "control-plane:releases:write");
   const operation = normalizeReleaseOperation(params.operation);
   const reason = requireMutationReason(params.reason);
   const instance = await getControlPlaneInstanceWithWorkspace(actor, params.instanceId);
@@ -1055,6 +1081,80 @@ export async function runControlPlaneReleaseOperation(actor: AppActor, params: {
   throw new AppError(400, "INVALID_INPUT", "Unsupported release operation.");
 }
 
+type InstanceHealthPayload = {
+  database?: string;
+  schema?: string;
+  runtime?: {
+    redis?: string;
+    storage?: string;
+  };
+  release?: {
+    imageTag?: string | null;
+    gitSha?: string | null;
+  };
+};
+
+export async function probeControlPlaneCustomerHealth(actor: AppActor, params: {
+  instanceId: string;
+  reason?: string | null;
+}) {
+  requireControlPlaneScope(actor, "control-plane:releases:write");
+  const reason = requireMutationReason(params.reason);
+  const instance = await getControlPlaneInstanceWithWorkspace(actor, params.instanceId);
+  let status = "unknown";
+  let error: string | null = null;
+  let health: InstanceHealthPayload | null = null;
+
+  try {
+    const response = await fetch(`${instance.url.replace(/\/$/, "")}/api/health`, { method: "GET" });
+    health = await response.json().catch(() => null) as InstanceHealthPayload | null;
+    if (response.ok) {
+      status = "ok";
+      const runtimeErrors = [];
+      if (health?.database && health.database !== "up") runtimeErrors.push(`Database ${health.database}`);
+      if (health?.schema && health.schema !== "ready") runtimeErrors.push(`Schema ${health.schema}`);
+      if (health?.runtime?.redis && health.runtime.redis !== "configured") runtimeErrors.push(`Redis ${health.runtime.redis}`);
+      if (health?.runtime?.storage && health.runtime.storage !== "configured") runtimeErrors.push(`Storage ${health.runtime.storage}`);
+      const actualRelease = health?.release?.imageTag || health?.release?.gitSha || null;
+      if (instance.releaseImageTag && actualRelease && actualRelease !== instance.releaseImageTag) {
+        runtimeErrors.push(`Release drift: expected ${instance.releaseImageTag}, got ${actualRelease}`);
+      }
+      if (runtimeErrors.length > 0) {
+        status = "degraded";
+        error = runtimeErrors.join("; ");
+      }
+    } else {
+      status = "degraded";
+      error = `Status ${response.status}`;
+    }
+  } catch (probeError) {
+    status = "down";
+    error = probeError instanceof Error ? probeError.message : "Health probe failed.";
+  }
+
+  await prisma.instanceRegistry.update({
+    where: { id: params.instanceId },
+    data: {
+      lastHealthCheck: new Date(),
+      lastHealthStatus: status,
+      lastHealthError: error,
+      lastReleaseCheck: new Date(),
+      provisioningStatus: status === "ok" ? "active" : "degraded",
+    },
+  });
+  await recordHostedEvent(actor, params.instanceId, "control_plane.release.health_probed", {
+    reason,
+    status,
+    error,
+    release: health?.release ?? null,
+  });
+  return {
+    status,
+    error,
+    release: await getControlPlaneReleaseStatus(actor, params.instanceId),
+  };
+}
+
 export async function configureSupportConnector(actor: AppActor, params: {
   instanceId: string;
   supportBaseUrl?: string | null;
@@ -1063,6 +1163,7 @@ export async function configureSupportConnector(actor: AppActor, params: {
   supportCredentialLabel?: string | null;
   supportNotes?: string | null;
 }) {
+  requireControlPlaneScope(actor, "control-plane:support:write");
   await requireControlPlaneAccess(actor, { instanceId: params.instanceId });
   const existing = await prisma.instanceRegistry.findUnique({
     where: { id: params.instanceId },
@@ -1101,6 +1202,7 @@ export async function configureSupportConnector(actor: AppActor, params: {
 }
 
 export async function fetchCustomerSupportSnapshot(actor: AppActor, instanceId: string) {
+  requireControlPlaneScope(actor, "control-plane:support:write");
   await requireControlPlaneAccess(actor, { instanceId });
   const connector = await loadSupportConnector(instanceId);
 
@@ -1140,6 +1242,7 @@ export async function runCustomerSupportOperation(actor: AppActor, params: {
   remoteWorkspaceId?: string | null;
   idempotencyKey?: string | null;
 }) {
+  requireControlPlaneScope(actor, "control-plane:support:write");
   await requireControlPlaneAccess(actor, { instanceId: params.instanceId });
   const toolName = SUPPORT_ACTION_TO_MCP_TOOL[params.action];
   invariant(toolName, 400, "INVALID_INPUT", "Unsupported support action.");
@@ -1238,6 +1341,7 @@ export async function recordBreakGlassSupportNote(actor: AppActor, params: {
   reason: string;
   notes: string;
 }) {
+  requireControlPlaneScope(actor, "control-plane:support:write");
   await requireControlPlaneAccess(actor, { instanceId: params.instanceId });
   const reason = normalizeReason(params.reason, "support.break_glass_note");
   const notes = params.notes.trim();
@@ -1272,5 +1376,6 @@ export async function resolveControlPlaneAgentFromBearer(token: string): Promise
     authProvider: "control-plane",
     label: "control-plane-agent",
     workspaceIds: [],
+    scopes: parseControlPlaneScopes(env.CONTROL_PLANE_AGENT_SCOPES),
   };
 }
