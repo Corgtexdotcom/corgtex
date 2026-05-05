@@ -1,13 +1,14 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getFormatter } from "next-intl/server";
-import { getControlPlaneCustomer, getControlPlaneIntegrationStatus, requireControlPlaneAccess } from "@corgtex/domain";
+import { getControlPlaneContextHealth, getControlPlaneCustomer, getControlPlaneIntegrationStatus, requireControlPlaneAccess } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import {
   configureMeetingRecorderIntegrationAction,
   configureSupportConnectorAction,
   recordBreakGlassAction,
   refreshSupportSnapshotAction,
+  runContextOperationAction,
   runSupportOperationAction,
 } from "../../actions";
 
@@ -135,11 +136,14 @@ export default async function ControlPlaneCustomerPage({
   } catch {
     notFound();
   }
-  const [customer, integrations, format] = await Promise.all([
+  const [customer, integrations, context, format] = await Promise.all([
     getControlPlaneCustomer(actor, instanceId),
     getControlPlaneIntegrationStatus(actor, instanceId),
+    getControlPlaneContextHealth(actor, instanceId),
     getFormatter(),
   ]);
+  const contextBrainSources = Array.isArray(context.sources) ? [] : context.sources.brain;
+  const contextExternalSources = Array.isArray(context.sources) ? [] : context.sources.external;
   const meetingRecorder = integrations.integrations.find((integration) => integration.key === "meeting_recorders") as MeetingRecorderIntegration | undefined;
   const checks = readinessChecks(customer);
   const readinessStatus = checks.every((check) => check.status === "ready") ? "ready" : "attention";
@@ -207,16 +211,144 @@ export default async function ControlPlaneCustomerPage({
         <section id="context" className="panel stack" style={{ padding: 20 }}>
           <h2 style={{ margin: 0 }}>Context & Brain</h2>
           <p className="muted" style={{ margin: 0 }}>
-            This customer view is prepared for source freshness, provenance, permissions coverage, retention, and ingestion errors.
-            Live source and ingestion reads come from the managed workspace link when present, otherwise through the support connector.
+            Source freshness, ingestion failures, and repair operations are visible here when this customer has a managed workspace link.
+            Remote customers continue through the support connector.
           </p>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 }}>
-            <MiniMetric label="Context access" value={customer.managedWorkspace || customer.hasSupportCredential ? "connected" : "pending"} detail={customer.managedWorkspace ? "Managed workspace data is available locally." : customer.hasSupportCredential ? "Snapshot can inspect data sources." : "Configure support connector first."} />
-            <MiniMetric label="Brain articles" value={customer.managedWorkspace ? String(customer.managedWorkspace._count.brainArticles) : "remote"} detail={customer.managedWorkspace ? "Local managed workspace count" : "Requires support snapshot"} />
-            <MiniMetric label="Data sources" value={customer.managedWorkspace ? String(customer.managedWorkspace._count.externalDataSources) : "remote"} detail={customer.managedWorkspace ? "Local managed workspace count" : "Requires support snapshot"} />
+            <MiniMetric label="Context access" value={context.accessMode === "managed_workspace" || customer.hasSupportCredential ? "connected" : "pending"} detail={context.accessMode === "managed_workspace" ? "Managed workspace data is available locally." : customer.hasSupportCredential ? "Use support operations for live customer reads." : "Configure support connector first."} />
+            <MiniMetric label="Brain sources" value={context.summary ? String(context.summary.brainSources) : "remote"} detail={context.summary ? `${context.summary.knowledgeChunks} knowledge chunks` : "Requires support snapshot"} />
+            <MiniMetric label="External sources" value={context.summary ? String(context.summary.externalSources) : "remote"} detail={context.summary ? `${context.summary.staleExternalSources} stale, ${context.summary.failedExternalSources} failed` : "Requires support snapshot"} />
+            <MiniMetric label="Failed sync jobs" value={context.summary && context.summary.failedSyncJobs > 0 ? "attention" : context.summary ? "ready" : "remote"} detail={context.summary ? `${context.summary.failedSyncJobs} failed sync jobs` : "Inspect through support connector"} />
             <MiniMetric label="Last context pull" value={customer.supportLastSyncAt ? "recorded" : "unknown"} detail={customer.supportLastSyncAt ? format.dateTime(customer.supportLastSyncAt, { dateStyle: "medium", timeStyle: "short" }) : "No support snapshot yet"} />
-            <MiniMetric label="Ingestion risk" value={customer.supportLastSyncError ? "degraded" : "unknown"} detail={customer.supportLastSyncError || "Detailed ingestion health lands in the context governance slice."} />
+            <MiniMetric label="Ingestion risk" value={context.summary && (context.summary.failedExternalSources > 0 || context.summary.failedSyncJobs > 0) ? "degraded" : context.summary ? "ready" : customer.supportLastSyncError ? "degraded" : "unknown"} detail={customer.supportLastSyncError || "No support connector error recorded."} />
           </div>
+          {context.accessMode === "managed_workspace" ? (
+            <div className="stack" style={{ gap: 16 }}>
+              <div className="row">
+                <div>
+                  <strong>Context operations</strong>
+                  <p className="muted" style={{ margin: "4px 0 0" }}>
+                    Queue source syncs or disable a noisy source. Every operation writes the hosted-instance audit trail.
+                  </p>
+                </div>
+                {context.managedWorkspace && (
+                  <Link className="button secondary small" href={`/workspaces/${context.managedWorkspace.id}/brain`}>
+                    Open brain
+                  </Link>
+                )}
+              </div>
+              <form action={runContextOperationAction} className="item stack">
+                <input type="hidden" name="instanceId" value={customer.id} />
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 }}>
+                  <label>
+                    Operation
+                    <select name="operation" defaultValue="sync_all">
+                      <option value="sync_all">Sync all active sources</option>
+                      <option value="sync_source">Sync selected source</option>
+                      <option value="disable_source">Disable selected source</option>
+                    </select>
+                  </label>
+                  <label>
+                    Source
+                    <select name="sourceId" defaultValue="">
+                      <option value="">All active sources</option>
+                      {contextExternalSources.map((source) => (
+                        <option key={source.id} value={source.id}>{source.label}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    Reason
+                    <input name="reason" required placeholder="Customer requested source repair" />
+                  </label>
+                </div>
+                <button type="submit" disabled={contextExternalSources.length === 0}>Run context operation</button>
+              </form>
+
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 16 }}>
+                <section className="item" style={{ padding: 0, overflow: "hidden" }}>
+                  <div style={{ padding: 16, borderBottom: "1px solid var(--border-color)" }}>
+                    <strong>External context sources</strong>
+                  </div>
+                  <div className="list">
+                    {contextExternalSources.map((source) => (
+                      <div className="item" key={source.id}>
+                        <div className="row">
+                          <div>
+                            <strong>{source.label}</strong>
+                            <div className="muted">{source.driverType} · every {source.pullCadenceMinutes} min</div>
+                          </div>
+                          <span style={{ color: tone(source.lastSyncError ? "degraded" : source.isActive ? "active" : "disabled"), fontWeight: 700 }}>
+                            {source.lastSyncError ? "degraded" : source.isActive ? "active" : "disabled"}
+                          </span>
+                        </div>
+                        <div className="muted">
+                          Last sync: {source.lastSyncAt ? format.dateTime(source.lastSyncAt, { dateStyle: "medium", timeStyle: "short" }) : "never"}
+                          {source.lastSyncError ? ` · ${source.lastSyncError}` : ""}
+                        </div>
+                        {source.syncLogs.length > 0 && (
+                          <div className="muted" style={{ fontSize: 12 }}>
+                            Latest log: {source.syncLogs[0]?.error || `${source.syncLogs[0]?.rowsProcessed ?? 0} rows, ${source.syncLogs[0]?.chunksCreated ?? 0} chunks`}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                    {contextExternalSources.length === 0 && (
+                      <p className="muted" style={{ padding: 16 }}>No external context sources are registered for this workspace.</p>
+                    )}
+                  </div>
+                </section>
+
+                <section className="item" style={{ padding: 0, overflow: "hidden" }}>
+                  <div style={{ padding: 16, borderBottom: "1px solid var(--border-color)" }}>
+                    <strong>Recent brain sources</strong>
+                  </div>
+                  <div className="list">
+                    {contextBrainSources.map((source) => (
+                      <div className="item" key={source.id}>
+                        <div className="row">
+                          <strong>{source.title || source.sourceType}</strong>
+                          <span className="muted">{source.sourceType}</span>
+                        </div>
+                        <div className="muted">
+                          {source.absorbedAt ? `Absorbed ${format.dateTime(source.absorbedAt, { dateStyle: "medium", timeStyle: "short" })}` : `Created ${format.dateTime(source.createdAt, { dateStyle: "medium", timeStyle: "short" })}`}
+                        </div>
+                      </div>
+                    ))}
+                    {contextBrainSources.length === 0 && (
+                      <p className="muted" style={{ padding: 16 }}>No recent brain sources are registered for this workspace.</p>
+                    )}
+                  </div>
+                </section>
+              </div>
+
+              {context.summary?.recentFailedSyncJobs.length ? (
+                <section className="item" style={{ padding: 0, overflow: "hidden" }}>
+                  <div style={{ padding: 16, borderBottom: "1px solid var(--border-color)" }}>
+                    <strong>Recent failed sync jobs</strong>
+                  </div>
+                  <div className="list">
+                    {context.summary.recentFailedSyncJobs.map((job) => (
+                      <div className="item" key={job.id}>
+                        <div className="row">
+                          <strong>{job.type}</strong>
+                          <span className="muted">{job.attempts} attempts</span>
+                        </div>
+                        <div className="muted">{job.error || "No error recorded."}</div>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+              ) : null}
+            </div>
+          ) : (
+            <div className="item">
+              <strong>Remote context operations</strong>
+              <p className="muted" style={{ margin: "4px 0 0" }}>
+                This customer has no managed workspace link. Use the support connector operation panel to inspect or sync remote data feeds.
+              </p>
+            </div>
+          )}
         </section>
 
         <section id="ai-governance" className="panel stack" style={{ padding: 20 }}>

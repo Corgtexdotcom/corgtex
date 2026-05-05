@@ -23,7 +23,22 @@ const { prismaMock, encryptSecretMock, decryptSecretMock } = vi.hoisted(() => ({
     workspaceMeetingRecorderConfig: {
       upsert: vi.fn(),
     },
+    brainSource: {
+      count: vi.fn(),
+      findMany: vi.fn(),
+    },
+    externalDataSource: {
+      count: vi.fn(),
+      findFirst: vi.fn(),
+      findMany: vi.fn(),
+      update: vi.fn(),
+    },
+    knowledgeChunk: {
+      count: vi.fn(),
+    },
     workflowJob: {
+      count: vi.fn(),
+      findMany: vi.fn(),
       upsert: vi.fn(),
     },
     supportOperation: {
@@ -286,6 +301,235 @@ describe("control plane domain", () => {
     })).rejects.toMatchObject({
       status: 400,
       code: "MANAGED_WORKSPACE_REQUIRED",
+    });
+  });
+
+  it("queues sync for all active managed workspace context sources and audits the reason", async () => {
+    const { runControlPlaneContextOperation } = await import("./control-plane");
+    prismaMock.instanceRegistry.findUnique.mockResolvedValueOnce({
+      id: "inst-1",
+      label: "Acme",
+      managedWorkspaceId: "ws-1",
+      supportCredentialEnc: null,
+      managedWorkspace: {
+        id: "ws-1",
+        slug: "acme",
+        name: "Acme",
+        _count: {},
+      },
+    });
+    prismaMock.externalDataSource.findMany.mockResolvedValueOnce([
+      { id: "source-1", label: "Warehouse" },
+      { id: "source-2", label: "CRM" },
+    ]);
+    prismaMock.workflowJob.upsert.mockResolvedValue({ id: "job-1" });
+
+    const result = await runControlPlaneContextOperation(operatorActor, {
+      instanceId: "inst-1",
+      operation: "sync_all",
+      reason: "Customer requested a full context refresh.",
+    });
+
+    expect(prismaMock.externalDataSource.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        workspaceId: "ws-1",
+        archivedAt: null,
+        isActive: true,
+      },
+    }));
+    expect(prismaMock.workflowJob.upsert).toHaveBeenCalledTimes(2);
+    expect(prismaMock.workflowJob.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({
+        workspaceId: "ws-1",
+        type: "data-source.sync",
+        payload: expect.objectContaining({
+          sourceId: "source-1",
+          requestedBy: "control_plane",
+        }),
+      }),
+    }));
+    expect(prismaMock.hostedInstanceEvent.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        instanceId: "inst-1",
+        action: "control_plane.context.sync_requested",
+        meta: expect.objectContaining({
+          reason: "Customer requested a full context refresh.",
+          queuedJobs: 2,
+          sourceIds: ["source-1", "source-2"],
+        }),
+      }),
+    }));
+    expect(result).toMatchObject({
+      operation: "sync_all",
+      queuedJobs: 2,
+      sourceIds: ["source-1", "source-2"],
+    });
+  });
+
+  it("queues sync for one managed workspace context source", async () => {
+    const { runControlPlaneContextOperation } = await import("./control-plane");
+    prismaMock.instanceRegistry.findUnique.mockResolvedValueOnce({
+      id: "inst-1",
+      label: "Acme",
+      managedWorkspaceId: "ws-1",
+      supportCredentialEnc: null,
+      managedWorkspace: {
+        id: "ws-1",
+        slug: "acme",
+        name: "Acme",
+        _count: {},
+      },
+    });
+    prismaMock.externalDataSource.findFirst.mockResolvedValueOnce({
+      id: "source-1",
+      label: "Warehouse",
+      isActive: true,
+    });
+    prismaMock.workflowJob.upsert.mockResolvedValueOnce({ id: "job-1" });
+
+    const result = await runControlPlaneContextOperation(operatorActor, {
+      instanceId: "inst-1",
+      operation: "sync_source",
+      sourceId: "source-1",
+      reason: "Repair failed warehouse ingestion.",
+    });
+
+    expect(prismaMock.externalDataSource.findFirst).toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        id: "source-1",
+        workspaceId: "ws-1",
+        archivedAt: null,
+      },
+    }));
+    expect(prismaMock.workflowJob.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({
+        type: "data-source.sync",
+        payload: expect.objectContaining({ sourceId: "source-1" }),
+      }),
+    }));
+    expect(prismaMock.hostedInstanceEvent.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        action: "control_plane.context.sync_requested",
+        meta: expect.objectContaining({
+          reason: "Repair failed warehouse ingestion.",
+          sourceId: "source-1",
+          sourceLabel: "Warehouse",
+          workflowJobId: "job-1",
+        }),
+      }),
+    }));
+    expect(result).toMatchObject({
+      operation: "sync_source",
+      queuedJobs: 1,
+      sourceIds: ["source-1"],
+    });
+  });
+
+  it("disables a managed workspace context source and audits the operation", async () => {
+    const { runControlPlaneContextOperation } = await import("./control-plane");
+    prismaMock.instanceRegistry.findUnique.mockResolvedValueOnce({
+      id: "inst-1",
+      label: "Acme",
+      managedWorkspaceId: "ws-1",
+      supportCredentialEnc: null,
+      managedWorkspace: {
+        id: "ws-1",
+        slug: "acme",
+        name: "Acme",
+        _count: {},
+      },
+    });
+    prismaMock.externalDataSource.findFirst.mockResolvedValueOnce({
+      id: "source-1",
+      label: "Warehouse",
+      isActive: true,
+    });
+    prismaMock.externalDataSource.update.mockResolvedValueOnce({
+      id: "source-1",
+      label: "Warehouse",
+      isActive: false,
+    });
+
+    const result = await runControlPlaneContextOperation(operatorActor, {
+      instanceId: "inst-1",
+      operation: "disable_source",
+      sourceId: "source-1",
+      reason: "Source is creating invalid context.",
+    });
+
+    expect(prismaMock.externalDataSource.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "source-1" },
+      data: { isActive: false },
+    }));
+    expect(prismaMock.hostedInstanceEvent.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        action: "control_plane.context.source_disabled",
+        meta: expect.objectContaining({
+          reason: "Source is creating invalid context.",
+          sourceId: "source-1",
+          isActive: false,
+        }),
+      }),
+    }));
+    expect(result).toMatchObject({
+      operation: "disable_source",
+      disabled: true,
+      sourceIds: ["source-1"],
+    });
+  });
+
+  it("requires reason and managed workspace before running context operations", async () => {
+    const { runControlPlaneContextOperation } = await import("./control-plane");
+    await expect(runControlPlaneContextOperation(operatorActor, {
+      instanceId: "inst-1",
+      operation: "sync_all",
+      reason: "",
+    })).rejects.toMatchObject({
+      status: 400,
+      code: "CONTROL_PLANE_REASON_REQUIRED",
+    });
+
+    prismaMock.instanceRegistry.findUnique.mockResolvedValueOnce({
+      id: "inst-1",
+      label: "Acme",
+      managedWorkspaceId: null,
+      supportCredentialEnc: null,
+      managedWorkspace: null,
+    });
+    await expect(runControlPlaneContextOperation(operatorActor, {
+      instanceId: "inst-1",
+      operation: "sync_all",
+      reason: "Customer asked for context repair.",
+    })).rejects.toMatchObject({
+      status: 400,
+      code: "MANAGED_WORKSPACE_REQUIRED",
+    });
+  });
+
+  it("rejects context operations for sources outside the managed workspace", async () => {
+    const { runControlPlaneContextOperation } = await import("./control-plane");
+    prismaMock.instanceRegistry.findUnique.mockResolvedValueOnce({
+      id: "inst-1",
+      label: "Acme",
+      managedWorkspaceId: "ws-1",
+      supportCredentialEnc: null,
+      managedWorkspace: {
+        id: "ws-1",
+        slug: "acme",
+        name: "Acme",
+        _count: {},
+      },
+    });
+    prismaMock.externalDataSource.findFirst.mockResolvedValueOnce(null);
+
+    await expect(runControlPlaneContextOperation(operatorActor, {
+      instanceId: "inst-1",
+      operation: "sync_source",
+      sourceId: "source-2",
+      reason: "Repair source.",
+    })).rejects.toMatchObject({
+      status: 404,
+      code: "NOT_FOUND",
     });
   });
 

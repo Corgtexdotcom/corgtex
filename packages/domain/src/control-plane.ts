@@ -10,6 +10,7 @@ const DEFAULT_RECORDER_BOT_NAME = "Corgtex Recorder";
 const DEFAULT_RECORDER_ENTRY_MESSAGE = "Corgtex is joining to record, transcribe, and summarize this meeting for the workspace.";
 const DEFAULT_RECORDER_MONTHLY_MINUTE_CAP = 6_000;
 const MEETING_RECORDER_PROVIDERS = new Set(["RECALL_AI", "MEETING_BAAS"]);
+const CONTROL_PLANE_CONTEXT_OPERATIONS = new Set(["sync_all", "sync_source", "disable_source"]);
 
 const MUTATING_SUPPORT_ACTIONS = new Set([
   "members.invite",
@@ -114,6 +115,11 @@ function normalizeMeetingRecorderProvider(value: string | null | undefined, labe
   const normalized = value?.trim();
   invariant(normalized && MEETING_RECORDER_PROVIDERS.has(normalized), 400, "INVALID_INPUT", `Invalid ${label}.`);
   return normalized as MeetingRecorderProvider;
+}
+
+function normalizeContextOperation(value: string) {
+  invariant(CONTROL_PLANE_CONTEXT_OPERATIONS.has(value), 400, "INVALID_INPUT", "Unsupported context operation.");
+  return value as "sync_all" | "sync_source" | "disable_source";
 }
 
 function normalizeSupportMcpUrl(instance: { url: string; supportMcpUrl?: string | null }) {
@@ -352,6 +358,7 @@ export async function getControlPlaneContextHealth(actor: AppActor, instanceId: 
     dataSourceCount,
     chunkCount,
     failedSyncJobs,
+    recentFailedSyncJobs,
     failedExternalSourceCount,
     staleExternalSourceCount,
   ] = await Promise.all([
@@ -377,8 +384,22 @@ export async function getControlPlaneContextHealth(actor: AppActor, instanceId: 
         label: true,
         driverType: true,
         isActive: true,
+        pullCadenceMinutes: true,
         lastSyncAt: true,
         lastSyncError: true,
+        updatedAt: true,
+        syncLogs: {
+          orderBy: { startedAt: "desc" },
+          take: 3,
+          select: {
+            id: true,
+            rowsProcessed: true,
+            chunksCreated: true,
+            error: true,
+            startedAt: true,
+            completedAt: true,
+          },
+        },
       },
     }),
     prisma.externalDataSource.count({ where: { workspaceId: instance.managedWorkspaceId, archivedAt: null } }),
@@ -388,6 +409,22 @@ export async function getControlPlaneContextHealth(actor: AppActor, instanceId: 
         workspaceId: instance.managedWorkspaceId,
         status: "FAILED",
         type: { contains: "sync" },
+      },
+    }),
+    prisma.workflowJob.findMany({
+      where: {
+        workspaceId: instance.managedWorkspaceId,
+        status: "FAILED",
+        type: { contains: "sync" },
+      },
+      orderBy: { updatedAt: "desc" },
+      take: 5,
+      select: {
+        id: true,
+        type: true,
+        error: true,
+        attempts: true,
+        updatedAt: true,
       },
     }),
     prisma.externalDataSource.count({
@@ -420,6 +457,7 @@ export async function getControlPlaneContextHealth(actor: AppActor, instanceId: 
       externalSources: dataSourceCount,
       knowledgeChunks: chunkCount,
       failedSyncJobs,
+      recentFailedSyncJobs,
       failedExternalSources: failedExternalSourceCount,
       staleExternalSources: staleExternalSourceCount,
     },
@@ -428,6 +466,166 @@ export async function getControlPlaneContextHealth(actor: AppActor, instanceId: 
       external: dataSources,
     },
   };
+}
+
+async function enqueueContextSourceSync(tx: Prisma.TransactionClient, params: {
+  workspaceId: string;
+  sourceId: string;
+  dedupeSuffix: string;
+}) {
+  return tx.workflowJob.upsert({
+    where: { dedupeKey: `control-plane-sync-${params.sourceId}-${params.dedupeSuffix}` },
+    update: {},
+    create: {
+      workspaceId: params.workspaceId,
+      eventId: null,
+      type: "data-source.sync",
+      payload: {
+        sourceId: params.sourceId,
+        requestedBy: "control_plane",
+      },
+      dedupeKey: `control-plane-sync-${params.sourceId}-${params.dedupeSuffix}`,
+    },
+  });
+}
+
+export async function runControlPlaneContextOperation(actor: AppActor, params: {
+  instanceId: string;
+  operation: string;
+  sourceId?: string | null;
+  reason?: string | null;
+}) {
+  const reason = requireMutationReason(params.reason);
+  const operation = normalizeContextOperation(params.operation);
+  const instance = await getControlPlaneInstanceWithWorkspace(actor, params.instanceId);
+  const managedWorkspaceId = instance.managedWorkspaceId;
+  invariant(managedWorkspaceId, 400, "MANAGED_WORKSPACE_REQUIRED", "Context operations require a managed workspace link.");
+
+  return prisma.$transaction(async (tx) => {
+    if (operation === "sync_all") {
+      const sources = await tx.externalDataSource.findMany({
+        where: {
+          workspaceId: managedWorkspaceId,
+          archivedAt: null,
+          isActive: true,
+        },
+        orderBy: { updatedAt: "desc" },
+        select: {
+          id: true,
+          label: true,
+        },
+      });
+      const dedupeSuffix = String(Date.now());
+      for (const source of sources) {
+        await enqueueContextSourceSync(tx, {
+          workspaceId: managedWorkspaceId,
+          sourceId: source.id,
+          dedupeSuffix,
+        });
+      }
+      await tx.hostedInstanceEvent.create({
+        data: {
+          instanceId: params.instanceId,
+          actorUserId: actorUserId(actor),
+          action: "control_plane.context.sync_requested",
+          meta: redactObject({
+            reason,
+            managedWorkspaceId,
+            operation,
+            queuedJobs: sources.length,
+            sourceIds: sources.map((source) => source.id),
+          }) as Prisma.InputJsonObject,
+        },
+      });
+      return {
+        instanceId: params.instanceId,
+        managedWorkspaceId,
+        operation,
+        queuedJobs: sources.length,
+        sourceIds: sources.map((source) => source.id),
+      };
+    }
+
+    const sourceId = params.sourceId?.trim();
+    invariant(sourceId, 400, "INVALID_INPUT", "A source ID is required for this context operation.");
+    const source = await tx.externalDataSource.findFirst({
+      where: {
+        id: sourceId,
+        workspaceId: managedWorkspaceId,
+        archivedAt: null,
+      },
+      select: {
+        id: true,
+        label: true,
+        isActive: true,
+      },
+    });
+    invariant(source, 404, "NOT_FOUND", "Context source not found for this customer.");
+
+    if (operation === "sync_source") {
+      invariant(source.isActive, 400, "CONTEXT_SOURCE_DISABLED", "Disabled context sources cannot be synced.");
+      const job = await enqueueContextSourceSync(tx, {
+        workspaceId: managedWorkspaceId,
+        sourceId: source.id,
+        dedupeSuffix: String(Date.now()),
+      });
+      await tx.hostedInstanceEvent.create({
+        data: {
+          instanceId: params.instanceId,
+          actorUserId: actorUserId(actor),
+          action: "control_plane.context.sync_requested",
+          meta: redactObject({
+            reason,
+            managedWorkspaceId,
+            operation,
+            sourceId: source.id,
+            sourceLabel: source.label,
+            queuedJobs: 1,
+            workflowJobId: job.id,
+          }) as Prisma.InputJsonObject,
+        },
+      });
+      return {
+        instanceId: params.instanceId,
+        managedWorkspaceId,
+        operation,
+        queuedJobs: 1,
+        sourceIds: [source.id],
+      };
+    }
+
+    const updated = await tx.externalDataSource.update({
+      where: { id: source.id },
+      data: { isActive: false },
+      select: {
+        id: true,
+        label: true,
+        isActive: true,
+      },
+    });
+    await tx.hostedInstanceEvent.create({
+      data: {
+        instanceId: params.instanceId,
+        actorUserId: actorUserId(actor),
+        action: "control_plane.context.source_disabled",
+        meta: redactObject({
+          reason,
+          managedWorkspaceId,
+          operation,
+          sourceId: updated.id,
+          sourceLabel: updated.label,
+          isActive: updated.isActive,
+        }) as Prisma.InputJsonObject,
+      },
+    });
+    return {
+      instanceId: params.instanceId,
+      managedWorkspaceId,
+      operation,
+      sourceIds: [updated.id],
+      disabled: true,
+    };
+  });
 }
 
 export async function getControlPlaneIntegrationStatus(actor: AppActor, instanceId: string) {
