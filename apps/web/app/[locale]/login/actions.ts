@@ -1,9 +1,12 @@
 "use server";
 
 import { AppError, isGlobalOperator, listActorWorkspaces, loginUserWithPassword } from "@corgtex/domain";
-import { env } from "@corgtex/shared";
 import { setSessionCookie } from "@/lib/auth";
 import type { LoginActionState } from "./state";
+
+function localizedRedirect(path: string, locale: string) {
+  return locale === "es" ? `/es${path}` : path;
+}
 
 function loginErrorState(email: string, error: string): LoginActionState {
   return {
@@ -28,6 +31,7 @@ export async function loginAction(
 ): Promise<LoginActionState> {
   const email = String(formData.get("email") ?? "").trim().toLowerCase();
   const password = String(formData.get("password") ?? "");
+  const locale = String(formData.get("locale") ?? "").trim().toLowerCase() === "es" ? "es" : "en";
 
   let result;
   try {
@@ -41,12 +45,12 @@ export async function loginAction(
     user: result.user,
   };
 
-  if (env.CONTROL_PLANE_MODE && isGlobalOperator(actor)) {
+  if (isGlobalOperator(actor)) {
     await setSessionCookie(result.token, result.expiresAt);
     return {
       email,
       error: null,
-      redirectTo: "/control-plane",
+      redirectTo: localizedRedirect("/control-plane", locale),
     };
   }
 
@@ -62,6 +66,6 @@ export async function loginAction(
   return {
     email,
     error: null,
-    redirectTo: workspaces[0] ? `/workspaces/${workspaces[0].id}` : "/workspaces/create",
+    redirectTo: localizedRedirect(workspaces[0] ? `/workspaces/${workspaces[0].id}` : "/workspaces/create", locale),
   };
 }
