@@ -1,9 +1,10 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getFormatter } from "next-intl/server";
-import { getControlPlaneCustomer, requireControlPlaneAccess } from "@corgtex/domain";
+import { getControlPlaneCustomer, getControlPlaneIntegrationStatus, requireControlPlaneAccess } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import {
+  configureMeetingRecorderIntegrationAction,
   configureSupportConnectorAction,
   recordBreakGlassAction,
   refreshSupportSnapshotAction,
@@ -41,6 +42,21 @@ const SUPPORT_ACTIONS = [
 ] as const;
 
 type ControlPlaneCustomer = Awaited<ReturnType<typeof getControlPlaneCustomer>>;
+type MeetingRecorderIntegration = {
+  key: string;
+  entitlementEnabled: boolean;
+  configured: boolean;
+  status: string | null;
+  provider: string | null;
+  fallbackProvider: string | null;
+  autoRecordEnabled: boolean | null;
+  botName: string | null;
+  entryMessage: string | null;
+  monthlyMinuteCap: number | null;
+  usage?: { usedMinutes: number };
+  failures: number;
+  vendorReadiness?: boolean;
+};
 
 function tone(status?: string | null) {
   if (status === "ready" || status === "COMPLETED" || status === "ok" || status === "connected" || status === "active") return "var(--green-11)";
@@ -103,6 +119,10 @@ function MiniMetric({ label, value, detail }: { label: string; value: string; de
   );
 }
 
+function boolSelectDefault(value: boolean | null | undefined) {
+  return value ? "true" : "false";
+}
+
 export default async function ControlPlaneCustomerPage({
   params,
 }: {
@@ -115,10 +135,12 @@ export default async function ControlPlaneCustomerPage({
   } catch {
     notFound();
   }
-  const [customer, format] = await Promise.all([
+  const [customer, integrations, format] = await Promise.all([
     getControlPlaneCustomer(actor, instanceId),
+    getControlPlaneIntegrationStatus(actor, instanceId),
     getFormatter(),
   ]);
+  const meetingRecorder = integrations.integrations.find((integration) => integration.key === "meeting_recorders") as MeetingRecorderIntegration | undefined;
   const checks = readinessChecks(customer);
   const readinessStatus = checks.every((check) => check.status === "ready") ? "ready" : "attention";
   const failedOperations = customer.supportOperations.filter((operation) => operation.status === "FAILED").length;
@@ -216,10 +238,89 @@ export default async function ControlPlaneCustomerPage({
             Integrations are treated as entitlements with vendor readiness, caps, usage, failures, and audit. Meeting recorders are the first V1 entitlement.
           </p>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 }}>
-            <MiniMetric label="Meeting recorder entitlement" value="planned" detail="Provider, monthly minute cap, auto-recording, usage, and failures move here." />
+            <MiniMetric label="Meeting recorder entitlement" value={meetingRecorder?.entitlementEnabled ? "active" : "disabled"} detail={meetingRecorder?.provider || "No provider selected"} />
+            <MiniMetric label="Recorder status" value={meetingRecorder?.status || "unknown"} detail={meetingRecorder?.autoRecordEnabled ? "Auto-recording on" : "Auto-recording off"} />
+            <MiniMetric label="Recorder usage" value={`${meetingRecorder?.usage?.usedMinutes ?? 0} min`} detail={`${meetingRecorder?.monthlyMinuteCap ?? 0} minute monthly cap`} />
+            <MiniMetric label="Recorder failures" value={(meetingRecorder?.failures ?? 0) > 0 ? "attention" : "ready"} detail={`${meetingRecorder?.failures ?? 0} failed recordings`} />
             <MiniMetric label="Calendar and Slack" value={customer.managedWorkspace || customer.hasSupportCredential ? "inspectable" : "pending"} detail={customer.managedWorkspace ? `${customer.managedWorkspace._count.communicationInstallations} local communication installs.` : "Support connector can read customer-side integration state."} />
             <MiniMetric label="MCP connectors" value="planned" detail="Connector readiness joins the integration catalog slice." />
           </div>
+          {customer.managedWorkspace && meetingRecorder ? (
+            <form action={configureMeetingRecorderIntegrationAction} className="panel stack" style={{ padding: 16, marginTop: 4 }}>
+              <input type="hidden" name="instanceId" value={customer.id} />
+              <div className="row">
+                <div>
+                  <strong>Meeting recorder management</strong>
+                  <p className="muted" style={{ margin: "4px 0 0" }}>
+                    Provider, caps, auto-recording, usage, and failures are managed here for this customer.
+                  </p>
+                </div>
+                <span className="tag">{meetingRecorder.vendorReadiness ? "Vendor ready" : "Needs readiness"}</span>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 }}>
+                <label>
+                  Entitlement
+                  <select name="entitlementEnabled" defaultValue={boolSelectDefault(meetingRecorder.entitlementEnabled)}>
+                    <option value="true">Enabled</option>
+                    <option value="false">Disabled</option>
+                  </select>
+                </label>
+                <label>
+                  Recorder state
+                  <select name="enabled" defaultValue={meetingRecorder.status === "enabled" ? "true" : "false"}>
+                    <option value="true">Enabled</option>
+                    <option value="false">Disabled</option>
+                  </select>
+                </label>
+                <label>
+                  Auto-recording
+                  <select name="autoRecordEnabled" defaultValue={boolSelectDefault(meetingRecorder.autoRecordEnabled)}>
+                    <option value="true">On</option>
+                    <option value="false">Off</option>
+                  </select>
+                </label>
+                <label>
+                  Primary provider
+                  <select name="defaultProvider" defaultValue={meetingRecorder.provider || "RECALL_AI"}>
+                    <option value="RECALL_AI">Recall.ai</option>
+                    <option value="MEETING_BAAS">Meeting BaaS</option>
+                  </select>
+                </label>
+                <label>
+                  Fallback provider
+                  <select name="fallbackProvider" defaultValue={meetingRecorder.fallbackProvider || ""}>
+                    <option value="">None</option>
+                    <option value="RECALL_AI">Recall.ai</option>
+                    <option value="MEETING_BAAS">Meeting BaaS</option>
+                  </select>
+                </label>
+                <label>
+                  Monthly minute cap
+                  <input name="monthlyMinuteCap" type="number" min="0" defaultValue={meetingRecorder.monthlyMinuteCap ?? 6000} />
+                </label>
+                <label>
+                  Bot name
+                  <input name="botName" defaultValue={meetingRecorder.botName || "Corgtex Recorder"} />
+                </label>
+                <label>
+                  Mutation reason
+                  <input name="reason" required placeholder="Enterprise recorder entitlement update" />
+                </label>
+              </div>
+              <label>
+                Entry message
+                <textarea name="entryMessage" defaultValue={meetingRecorder.entryMessage || ""} rows={3} />
+              </label>
+              <button type="submit">Save recorder entitlement</button>
+            </form>
+          ) : (
+            <div className="item">
+              <strong>Meeting recorder management</strong>
+              <p className="muted" style={{ margin: "4px 0 0" }}>
+                Link a managed workspace to edit recorder entitlements from Control Plane. Remote instances can still be inspected through support operations.
+              </p>
+            </div>
+          )}
         </section>
 
         <section id="releases" className="panel stack" style={{ padding: 20 }}>

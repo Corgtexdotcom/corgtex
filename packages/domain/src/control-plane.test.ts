@@ -3,6 +3,9 @@ import type { AppActor } from "@corgtex/shared";
 
 const { prismaMock, encryptSecretMock, decryptSecretMock } = vi.hoisted(() => ({
   prismaMock: {
+    $transaction: vi.fn(async (operations: unknown[] | ((tx: unknown) => unknown)) => (
+      typeof operations === "function" ? operations(prismaMock) : Promise.all(operations)
+    )),
     controlPlaneInstanceAccess: {
       findUnique: vi.fn(),
     },
@@ -13,6 +16,15 @@ const { prismaMock, encryptSecretMock, decryptSecretMock } = vi.hoisted(() => ({
       findMany: vi.fn(),
       findUnique: vi.fn(),
       update: vi.fn(),
+    },
+    workspaceFeatureFlag: {
+      upsert: vi.fn(),
+    },
+    workspaceMeetingRecorderConfig: {
+      upsert: vi.fn(),
+    },
+    workflowJob: {
+      upsert: vi.fn(),
     },
     supportOperation: {
       create: vi.fn(),
@@ -55,6 +67,9 @@ const userActor: AppActor = {
 describe("control plane domain", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    prismaMock.$transaction.mockImplementation(async (operations: unknown[] | ((tx: unknown) => unknown)) => (
+      typeof operations === "function" ? operations(prismaMock) : Promise.all(operations)
+    ));
     global.fetch = vi.fn(async () => ({
       ok: true,
       status: 200,
@@ -160,6 +175,118 @@ describe("control plane domain", () => {
       },
     });
     expect(result[0].supportCredentialEnc).toBeUndefined();
+  });
+
+  it("configures meeting recorder entitlements for managed workspaces and audits the reason", async () => {
+    const { configureControlPlaneMeetingRecorderIntegration } = await import("./control-plane");
+    prismaMock.instanceRegistry.findUnique.mockResolvedValueOnce({
+      id: "inst-1",
+      label: "Acme",
+      managedWorkspaceId: "ws-1",
+      supportCredentialEnc: null,
+      managedWorkspace: {
+        id: "ws-1",
+        slug: "acme",
+        name: "Acme",
+        _count: {},
+      },
+    });
+    prismaMock.workspaceFeatureFlag.upsert.mockResolvedValueOnce({
+      workspaceId: "ws-1",
+      flag: "MEETING_RECORDERS",
+      enabled: true,
+    });
+    prismaMock.workspaceMeetingRecorderConfig.upsert.mockResolvedValueOnce({
+      workspaceId: "ws-1",
+      enabled: true,
+      defaultProvider: "RECALL_AI",
+      fallbackProvider: "MEETING_BAAS",
+      autoRecordEnabled: true,
+      monthlyMinuteCap: 1200,
+    });
+    prismaMock.workflowJob.upsert.mockResolvedValueOnce({ id: "job-1" });
+
+    const result = await configureControlPlaneMeetingRecorderIntegration(operatorActor, {
+      instanceId: "inst-1",
+      entitlementEnabled: true,
+      enabled: true,
+      defaultProvider: "RECALL_AI",
+      fallbackProvider: "MEETING_BAAS",
+      autoRecordEnabled: true,
+      monthlyMinuteCap: 1200,
+      reason: "Customer signed recorder addendum.",
+    });
+
+    expect(prismaMock.workspaceFeatureFlag.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        workspaceId_flag: {
+          workspaceId: "ws-1",
+          flag: "MEETING_RECORDERS",
+        },
+      },
+      update: { enabled: true },
+    }));
+    expect(prismaMock.workspaceMeetingRecorderConfig.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: { workspaceId: "ws-1" },
+      update: expect.objectContaining({
+        enabled: true,
+        defaultProvider: "RECALL_AI",
+        monthlyMinuteCap: 1200,
+      }),
+    }));
+    expect(prismaMock.workflowJob.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: { dedupeKey: "meeting-recorders:reconcile:ws-1:control-plane" },
+    }));
+    expect(prismaMock.hostedInstanceEvent.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        instanceId: "inst-1",
+        action: "control_plane.integration.meeting_recorders_configured",
+        meta: expect.objectContaining({
+          reason: "Customer signed recorder addendum.",
+          monthlyMinuteCap: 1200,
+        }),
+      }),
+    }));
+    expect(result).toMatchObject({
+      instanceId: "inst-1",
+      entitlementEnabled: true,
+    });
+  });
+
+  it("requires a reason and managed workspace before configuring meeting recorders", async () => {
+    const { configureControlPlaneMeetingRecorderIntegration } = await import("./control-plane");
+    await expect(configureControlPlaneMeetingRecorderIntegration(operatorActor, {
+      instanceId: "inst-1",
+      entitlementEnabled: true,
+      enabled: true,
+      defaultProvider: "RECALL_AI",
+      autoRecordEnabled: true,
+      monthlyMinuteCap: 1200,
+      reason: "",
+    })).rejects.toMatchObject({
+      status: 400,
+      code: "CONTROL_PLANE_REASON_REQUIRED",
+    });
+
+    prismaMock.instanceRegistry.findUnique.mockResolvedValueOnce({
+      id: "inst-1",
+      label: "Acme",
+      managedWorkspaceId: null,
+      supportCredentialEnc: null,
+      managedWorkspace: null,
+    });
+    await expect(configureControlPlaneMeetingRecorderIntegration(operatorActor, {
+      instanceId: "inst-1",
+      entitlementEnabled: true,
+      enabled: true,
+      defaultProvider: "RECALL_AI",
+      autoRecordEnabled: true,
+      monthlyMinuteCap: 1200,
+      reason: "Customer signed recorder addendum.",
+    })).rejects.toMatchObject({
+      status: 400,
+      code: "MANAGED_WORKSPACE_REQUIRED",
+    });
   });
 
   it("records and completes an audited remote support operation", async () => {
