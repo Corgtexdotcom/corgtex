@@ -1,4 +1,4 @@
-import type { Prisma } from "@prisma/client";
+import type { MeetingRecorderProvider, Prisma } from "@prisma/client";
 import { decryptSecret, encryptSecret, env, prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { AppError, invariant } from "./errors";
@@ -6,6 +6,10 @@ import { isGlobalOperator } from "./auth";
 import { getMeetingRecorderMonthlyUsage, MEETING_RECORDERS_FEATURE_FLAG } from "./meeting-recorders";
 
 const SUPPORT_ACTOR_LABEL = "Corgtex Support";
+const DEFAULT_RECORDER_BOT_NAME = "Corgtex Recorder";
+const DEFAULT_RECORDER_ENTRY_MESSAGE = "Corgtex is joining to record, transcribe, and summarize this meeting for the workspace.";
+const DEFAULT_RECORDER_MONTHLY_MINUTE_CAP = 6_000;
+const MEETING_RECORDER_PROVIDERS = new Set(["RECALL_AI", "MEETING_BAAS"]);
 
 const MUTATING_SUPPORT_ACTIONS = new Set([
   "members.invite",
@@ -98,6 +102,18 @@ function normalizeReason(reason: string | null | undefined, action: string) {
   if (trimmed) return trimmed;
   invariant(!MUTATING_SUPPORT_ACTIONS.has(action), 400, "SUPPORT_REASON_REQUIRED", "A support reason is required for mutating support actions.");
   return "Read-only support inspection.";
+}
+
+function requireMutationReason(reason: string | null | undefined) {
+  const trimmed = reason?.trim();
+  invariant(trimmed, 400, "CONTROL_PLANE_REASON_REQUIRED", "A reason is required for Control Plane mutations.");
+  return trimmed;
+}
+
+function normalizeMeetingRecorderProvider(value: string | null | undefined, label: string) {
+  const normalized = value?.trim();
+  invariant(normalized && MEETING_RECORDER_PROVIDERS.has(normalized), 400, "INVALID_INPUT", `Invalid ${label}.`);
+  return normalized as MeetingRecorderProvider;
 }
 
 function normalizeSupportMcpUrl(instance: { url: string; supportMcpUrl?: string | null }) {
@@ -488,9 +504,12 @@ export async function getControlPlaneIntegrationStatus(actor: AppActor, instance
         provider: recorderConfig?.defaultProvider ?? null,
         fallbackProvider: recorderConfig?.fallbackProvider ?? null,
         autoRecordEnabled: recorderConfig?.autoRecordEnabled ?? null,
+        botName: recorderConfig?.botName ?? null,
+        entryMessage: recorderConfig?.entryMessage ?? null,
         monthlyMinuteCap: recorderConfig?.monthlyMinuteCap ?? null,
         usage: recorderUsage,
         failures: recorderFailures,
+        vendorReadiness: Boolean(featureFlag?.enabled && recorderConfig?.defaultProvider && recorderConfig.monthlyMinuteCap >= 0),
       },
       ...communicationInstallations.map((installation) => ({
         key: `communication_${installation.id}`,
@@ -515,6 +534,112 @@ export async function getControlPlaneIntegrationStatus(actor: AppActor, instance
         lastError: source.lastSyncError,
       })),
     ],
+  };
+}
+
+export async function configureControlPlaneMeetingRecorderIntegration(actor: AppActor, params: {
+  instanceId: string;
+  entitlementEnabled: boolean;
+  enabled: boolean;
+  defaultProvider: string;
+  fallbackProvider?: string | null;
+  autoRecordEnabled: boolean;
+  monthlyMinuteCap: number;
+  botName?: string | null;
+  entryMessage?: string | null;
+  reason?: string | null;
+}) {
+  const reason = requireMutationReason(params.reason);
+  const instance = await getControlPlaneInstanceWithWorkspace(actor, params.instanceId);
+  const managedWorkspaceId = instance.managedWorkspaceId;
+  invariant(managedWorkspaceId, 400, "MANAGED_WORKSPACE_REQUIRED", "Meeting recorder configuration requires a managed workspace link.");
+
+  const defaultProvider = normalizeMeetingRecorderProvider(params.defaultProvider, "meeting recorder provider");
+  const fallbackProvider = params.fallbackProvider?.trim()
+    ? normalizeMeetingRecorderProvider(params.fallbackProvider, "fallback meeting recorder provider")
+    : null;
+  const monthlyMinuteCap = Math.max(0, Math.round(Number.isFinite(params.monthlyMinuteCap) ? params.monthlyMinuteCap : DEFAULT_RECORDER_MONTHLY_MINUTE_CAP));
+  const enabled = params.entitlementEnabled ? params.enabled : false;
+  const botName = params.botName?.trim() || DEFAULT_RECORDER_BOT_NAME;
+  const entryMessage = params.entryMessage?.trim() || DEFAULT_RECORDER_ENTRY_MESSAGE;
+
+  const { featureFlag, config } = await prisma.$transaction(async (tx) => {
+    const featureFlag = await tx.workspaceFeatureFlag.upsert({
+      where: {
+        workspaceId_flag: {
+          workspaceId: managedWorkspaceId,
+          flag: MEETING_RECORDERS_FEATURE_FLAG,
+        },
+      },
+      update: { enabled: params.entitlementEnabled },
+      create: {
+        workspaceId: managedWorkspaceId,
+        flag: MEETING_RECORDERS_FEATURE_FLAG,
+        enabled: params.entitlementEnabled,
+      },
+    });
+    const config = await tx.workspaceMeetingRecorderConfig.upsert({
+      where: { workspaceId: managedWorkspaceId },
+      update: {
+        enabled,
+        defaultProvider,
+        fallbackProvider,
+        autoRecordEnabled: params.autoRecordEnabled,
+        monthlyMinuteCap,
+        botName,
+        entryMessage,
+      },
+      create: {
+        workspaceId: managedWorkspaceId,
+        enabled,
+        defaultProvider,
+        fallbackProvider,
+        autoRecordEnabled: params.autoRecordEnabled,
+        monthlyMinuteCap,
+        botName,
+        entryMessage,
+      },
+    });
+
+    if (featureFlag.enabled && config.enabled) {
+      await tx.workflowJob.upsert({
+        where: { dedupeKey: `meeting-recorders:reconcile:${managedWorkspaceId}:control-plane` },
+        update: {},
+        create: {
+          workspaceId: managedWorkspaceId,
+          type: "meeting-recorders.reconcile",
+          payload: {},
+          dedupeKey: `meeting-recorders:reconcile:${managedWorkspaceId}:control-plane`,
+        },
+      });
+    }
+
+    await tx.hostedInstanceEvent.create({
+      data: {
+        instanceId: params.instanceId,
+        actorUserId: actorUserId(actor),
+        action: "control_plane.integration.meeting_recorders_configured",
+        meta: redactObject({
+          reason,
+          managedWorkspaceId,
+          entitlementEnabled: featureFlag.enabled,
+          enabled: config.enabled,
+          defaultProvider: config.defaultProvider,
+          fallbackProvider: config.fallbackProvider,
+          autoRecordEnabled: config.autoRecordEnabled,
+          monthlyMinuteCap: config.monthlyMinuteCap,
+        }) as Prisma.InputJsonObject,
+      },
+    });
+
+    return { featureFlag, config };
+  });
+
+  return {
+    instanceId: params.instanceId,
+    managedWorkspaceId,
+    entitlementEnabled: featureFlag.enabled,
+    config,
   };
 }
 
