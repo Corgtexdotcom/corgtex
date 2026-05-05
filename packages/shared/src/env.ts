@@ -60,6 +60,7 @@ type Env = {
   readonly MCP_DEFAULT_INSTANCE_SLUG: string | undefined;
   readonly CONTROL_PLANE_MODE: boolean;
   readonly CONTROL_PLANE_AGENT_API_KEY: string | undefined;
+  readonly CONTROL_PLANE_AGENT_SCOPES: string | undefined;
   readonly WORKSPACE_SLUG: string | undefined;
   readonly SESSION_COOKIE_SECRET: string;
   readonly SESSION_LAST_SEEN_WRITE_INTERVAL_MS: number;
@@ -127,6 +128,9 @@ export const env: Env = {
   },
   get CONTROL_PLANE_AGENT_API_KEY() {
     return optional("CONTROL_PLANE_AGENT_API_KEY");
+  },
+  get CONTROL_PLANE_AGENT_SCOPES() {
+    return optional("CONTROL_PLANE_AGENT_SCOPES");
   },
   get WORKSPACE_SLUG() {
     return optional("WORKSPACE_SLUG");

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import {
+  configureControlPlaneMeetingRecorderIntegration,
   fetchCustomerSupportSnapshot,
   getControlPlaneAiGovernanceStatus,
   getControlPlaneContextHealth,
@@ -8,7 +9,11 @@ import {
   getControlPlaneIntegrationStatus,
   getControlPlaneReleaseStatus,
   listControlPlaneCustomers,
+  probeControlPlaneCustomerHealth,
   requireControlPlaneAccess,
+  requireControlPlaneScope,
+  runControlPlaneContextOperation,
+  runControlPlaneReleaseOperation,
   runCustomerSupportOperation,
 } from "@corgtex/domain";
 import type { SupportAction } from "@corgtex/domain";
@@ -54,6 +59,55 @@ const tools = [
     inputSchema: { type: "object", properties: { instanceId: { type: "string" } }, required: ["instanceId"] },
   },
   {
+    name: "configure_customer_integration",
+    description: "Configure an audited customer integration entitlement. V1 supports meeting_recorders.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        instanceId: { type: "string" },
+        integrationKey: { type: "string" },
+        reason: { type: "string" },
+        entitlementEnabled: { type: "boolean" },
+        enabled: { type: "boolean" },
+        autoRecordEnabled: { type: "boolean" },
+        defaultProvider: { type: "string" },
+        fallbackProvider: { type: "string" },
+        monthlyMinuteCap: { type: "number" },
+        botName: { type: "string" },
+        entryMessage: { type: "string" },
+      },
+      required: ["instanceId", "integrationKey", "reason"],
+    },
+  },
+  {
+    name: "run_context_sync",
+    description: "Queue an audited context sync for all active sources or one source.",
+    inputSchema: {
+      type: "object",
+      properties: { instanceId: { type: "string" }, sourceId: { type: "string" }, reason: { type: "string" } },
+      required: ["instanceId", "reason"],
+    },
+  },
+  {
+    name: "probe_customer_health",
+    description: "Probe customer runtime health and record central release/health evidence.",
+    inputSchema: { type: "object", properties: { instanceId: { type: "string" }, reason: { type: "string" } }, required: ["instanceId", "reason"] },
+  },
+  {
+    name: "prepare_release_upgrade",
+    description: "Record audited target release readiness evidence without deploying.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        instanceId: { type: "string" },
+        targetReleaseImageTag: { type: "string" },
+        targetReleaseVersion: { type: "string" },
+        reason: { type: "string" },
+      },
+      required: ["instanceId", "targetReleaseImageTag", "reason"],
+    },
+  },
+  {
     name: "run_customer_support_operation",
     description: "Run an audited support action against a customer instance.",
     inputSchema: {
@@ -68,6 +122,21 @@ const tools = [
     },
   },
 ];
+
+const toolScopes: Record<string, string> = {
+  list_customers: "control-plane:read",
+  get_customer_status: "control-plane:read",
+  list_customer_integrations: "control-plane:read",
+  get_context_health: "control-plane:read",
+  get_ai_governance_status: "control-plane:read",
+  get_release_status: "control-plane:read",
+  refresh_customer_snapshot: "control-plane:support:write",
+  configure_customer_integration: "control-plane:integrations:write",
+  run_context_sync: "control-plane:context:write",
+  probe_customer_health: "control-plane:releases:write",
+  prepare_release_upgrade: "control-plane:releases:write",
+  run_customer_support_operation: "control-plane:support:write",
+};
 
 function rpcResult(id: unknown, result: unknown) {
   return NextResponse.json({ jsonrpc: "2.0", id: id ?? null, result });
@@ -86,6 +155,28 @@ function textContent(value: unknown) {
       },
     ],
   };
+}
+
+function objectArgs(args: unknown) {
+  return args && typeof args === "object" && !Array.isArray(args) ? args as Record<string, unknown> : {};
+}
+
+function argString(args: Record<string, unknown>, key: string) {
+  const value = args[key];
+  return typeof value === "string" ? value : "";
+}
+
+function argOptionalString(args: Record<string, unknown>, key: string) {
+  const value = argString(args, key).trim();
+  return value.length > 0 ? value : null;
+}
+
+function argBoolean(args: Record<string, unknown>, key: string, fallback: boolean) {
+  return typeof args[key] === "boolean" ? args[key] as boolean : fallback;
+}
+
+function argNumber(args: Record<string, unknown>, key: string, fallback: number) {
+  return typeof args[key] === "number" && Number.isFinite(args[key]) ? args[key] as number : fallback;
 }
 
 export async function GET() {
@@ -120,8 +211,11 @@ export async function POST(request: NextRequest) {
       return rpcError(id, -32601, "Unsupported MCP method.");
     }
 
-    const name = body.params?.name;
-    const args = body.params?.arguments ?? {};
+    const name = String(body.params?.name ?? "");
+    const args = objectArgs(body.params?.arguments);
+    if (toolScopes[name]) {
+      requireControlPlaneScope(actor, toolScopes[name]);
+    }
 
     if (name === "list_customers") {
       return rpcResult(id, textContent(await listControlPlaneCustomers(actor)));
@@ -144,14 +238,53 @@ export async function POST(request: NextRequest) {
     if (name === "get_release_status") {
       return rpcResult(id, textContent(await getControlPlaneReleaseStatus(actor, String(args.instanceId ?? ""))));
     }
+    if (name === "configure_customer_integration") {
+      if (argString(args, "integrationKey") !== "meeting_recorders") {
+        return rpcError(id, -32602, "Unsupported integration key.");
+      }
+      return rpcResult(id, textContent(await configureControlPlaneMeetingRecorderIntegration(actor, {
+        instanceId: argString(args, "instanceId"),
+        entitlementEnabled: argBoolean(args, "entitlementEnabled", true),
+        enabled: argBoolean(args, "enabled", true),
+        autoRecordEnabled: argBoolean(args, "autoRecordEnabled", false),
+        defaultProvider: argString(args, "defaultProvider") || "RECALL_AI",
+        fallbackProvider: argOptionalString(args, "fallbackProvider"),
+        monthlyMinuteCap: argNumber(args, "monthlyMinuteCap", 6_000),
+        botName: argOptionalString(args, "botName"),
+        entryMessage: argOptionalString(args, "entryMessage"),
+        reason: argString(args, "reason"),
+      })));
+    }
+    if (name === "run_context_sync") {
+      const sourceId = argOptionalString(args, "sourceId");
+      return rpcResult(id, textContent(await runControlPlaneContextOperation(actor, {
+        instanceId: argString(args, "instanceId"),
+        operation: sourceId ? "sync_source" : "sync_all",
+        sourceId,
+        reason: argString(args, "reason"),
+      })));
+    }
+    if (name === "probe_customer_health") {
+      return rpcResult(id, textContent(await probeControlPlaneCustomerHealth(actor, {
+        instanceId: argString(args, "instanceId"),
+        reason: argString(args, "reason"),
+      })));
+    }
+    if (name === "prepare_release_upgrade") {
+      return rpcResult(id, textContent(await runControlPlaneReleaseOperation(actor, {
+        instanceId: argString(args, "instanceId"),
+        operation: "prepare_upgrade",
+        targetReleaseImageTag: argString(args, "targetReleaseImageTag"),
+        targetReleaseVersion: argOptionalString(args, "targetReleaseVersion"),
+        reason: argString(args, "reason"),
+      })));
+    }
     if (name === "run_customer_support_operation") {
       const operation = await runCustomerSupportOperation(actor, {
-        instanceId: String(args.instanceId ?? ""),
-        action: String(args.action ?? "") as SupportAction,
+        instanceId: argString(args, "instanceId"),
+        action: argString(args, "action") as SupportAction,
         reason: typeof args.reason === "string" ? args.reason : null,
-        arguments: args.arguments && typeof args.arguments === "object" && !Array.isArray(args.arguments)
-          ? args.arguments as Record<string, unknown>
-          : {},
+        arguments: objectArgs(args.arguments),
       });
       return rpcResult(id, textContent(operation));
     }
