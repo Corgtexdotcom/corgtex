@@ -1,150 +1,229 @@
 "use client";
 
+import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { useTranslations } from "next-intl";
 import { type MeetingInsight } from "@prisma/client";
-import { 
-  extractInsightsAction, 
-  confirmInsightAction, 
-  dismissInsightAction, 
-  confirmAllInsightsAction,
+import { renderMarkdown } from "@/lib/markdown";
+import {
   applyInsightAction,
-  applyAllHighConfidenceInsightsAction,
+  dismissInsightAction,
+  regenerateMeetingIntelligenceAction,
 } from "../actions";
 
-export default function MeetingIntelligence({ 
-  workspaceId, 
-  meetingId, 
+type InsightBucket = {
+  title: string;
+  description: string;
+  items: MeetingInsight[];
+};
+
+function confidenceValue(insight: MeetingInsight) {
+  return typeof insight.confidence === "number" ? insight.confidence : 0;
+}
+
+export default function MeetingIntelligence({
+  workspaceId,
+  meetingId,
   insights,
-  hasTranscript
-}: { 
+  hasTranscript,
+}: {
   workspaceId: string;
   meetingId: string;
   insights: MeetingInsight[];
   hasTranscript: boolean;
 }) {
-  const [loadingExtract, setLoadingExtract] = useState(false);
-  const [loadingInsights, setLoadingInsights] = useState<Record<string, boolean>>({});
+  const router = useRouter();
   const t = useTranslations("meetings");
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [regenerating, setRegenerating] = useState(false);
+  const [guidance, setGuidance] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
-  const suggested = insights.filter(i => i.status === "SUGGESTED");
+  if (!hasTranscript) return null;
 
-  if (insights.length === 0) {
-    if (!hasTranscript) return null;
+  const reviewable = insights.filter((insight) => insight.status === "SUGGESTED" || insight.status === "CONFIRMED");
+  const applied = insights.filter((insight) => insight.status === "APPLIED");
+  const needsReview = reviewable.filter((insight) => confidenceValue(insight) >= 0.5);
+  const lowConfidence = reviewable.filter((insight) => confidenceValue(insight) < 0.5);
+  const insightTypeLabels: Record<string, string> = {
+    DECISION: t("insightType.decision"),
+    TENSION: t("insightType.tension"),
+    ACTION_ITEM: t("insightType.action_item"),
+    PROPOSAL: t("insightType.proposal"),
+    FOLLOW_UP: t("insightType.follow_up"),
+  };
 
-    return (
-      <section className="ws-section" style={{ marginBottom: 48, background: "var(--bg-alt)", padding: 24, borderRadius: 8 }}>
-        <h2 className="nr-section-header" style={{ borderTop: "none", marginTop: 0 }}>{t("aiIntelligenceTitle")}</h2>
-        <p className="muted">{t("noInsightsDescription")}</p>
-        <button 
-          className="btn btn-primary" 
-          onClick={async () => {
-            setLoadingExtract(true);
-            const formData = new FormData();
-            formData.append("workspaceId", workspaceId);
-            formData.append("meetingId", meetingId);
-            await extractInsightsAction(formData);
-            setLoadingExtract(false);
-          }}
-          disabled={loadingExtract}
-          style={{ marginTop: 16 }}
-        >
-          {loadingExtract ? t("extracting") : t("runAiExtraction")}
-        </button>
-      </section>
-    );
+  const buckets: InsightBucket[] = [
+    {
+      title: t("insightsApplied"),
+      description: t("insightsAppliedDescription"),
+      items: applied,
+    },
+    {
+      title: t("insightsNeedsReview"),
+      description: t("insightsNeedsReviewDescription"),
+      items: needsReview,
+    },
+    {
+      title: t("insightsLowConfidence"),
+      description: t("insightsLowConfidenceDescription"),
+      items: lowConfidence,
+    },
+  ].filter((bucket) => bucket.items.length > 0);
+
+  async function runInsightAction(actionFunc: (formData: FormData) => Promise<void>, insightId: string) {
+    setBusyId(insightId);
+    setError(null);
+    setNotice(null);
+    try {
+      const formData = new FormData();
+      formData.append("workspaceId", workspaceId);
+      formData.append("insightId", insightId);
+      await actionFunc(formData);
+      router.refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t("errorInsightAction"));
+    } finally {
+      setBusyId(null);
+    }
   }
 
-  if (suggested.length === 0) return null; // No active suggestions to review
+  async function regenerate() {
+    const trimmedGuidance = guidance.trim();
+    if (!trimmedGuidance) {
+      setError(t("errorRegenerationGuidanceRequired"));
+      return;
+    }
 
-  const actionItem = (actionFunc: any, insightId: string) => async () => {
-    setLoadingInsights(prev => ({ ...prev, [insightId]: true }));
-    const f = new FormData();
-    f.append("workspaceId", workspaceId);
-    f.append("insightId", insightId);
-    await actionFunc(f);
-    setLoadingInsights(prev => ({ ...prev, [insightId]: false }));
-  };
+    setRegenerating(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const formData = new FormData();
+      formData.append("workspaceId", workspaceId);
+      formData.append("meetingId", meetingId);
+      formData.append("guidanceMd", trimmedGuidance);
+      await regenerateMeetingIntelligenceAction(formData);
+      setGuidance("");
+      setNotice(t("regenerationQueued"));
+      router.refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t("errorRegenerationFailed"));
+    } finally {
+      setRegenerating(false);
+    }
+  }
 
-  const confirmAll = async () => {
-    setLoadingExtract(true);
-    const f = new FormData();
-    f.append("workspaceId", workspaceId);
-    f.append("meetingId", meetingId);
-    await confirmAllInsightsAction(f);
-    setLoadingExtract(false);
-  };
-
-  const applyAllHighConfidence = async () => {
-    setLoadingExtract(true);
-    const f = new FormData();
-    f.append("workspaceId", workspaceId);
-    f.append("meetingId", meetingId);
-    await applyAllHighConfidenceInsightsAction(f);
-    setLoadingExtract(false);
-  };
-
-  const grouped = suggested.reduce((acc, curr) => {
-    acc[curr.type] = acc[curr.type] || [];
-    acc[curr.type].push(curr);
-    return acc;
-  }, {} as Record<string, MeetingInsight[]>);
-
-  const getTypeLabel = (type: string) => t(`insightType.${type.toLowerCase()}`);
-  
   return (
-    <section className="ws-section" style={{ marginBottom: 48 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-        <h2 className="nr-section-header" style={{ borderTop: "none", margin: 0 }}>
-          {t("suggestedItems", { count: suggested.length })}
-        </h2>
-        <button className="btn" onClick={confirmAll} disabled={loadingExtract}>
-          {loadingExtract ? "..." : t("confirmAll")}
-        </button>
-        <button className="btn btn-primary" onClick={applyAllHighConfidence} disabled={loadingExtract}>
-          {loadingExtract ? "..." : "Apply high confidence"}
-        </button>
+    <section className="ws-section meeting-intelligence" style={{ marginBottom: 48 }}>
+      <div className="meeting-intelligence-header">
+        <div>
+          <h2 className="nr-section-header" style={{ borderTop: "none", margin: 0 }}>
+            {t("aiIntelligenceTitle")}
+          </h2>
+          <p className="nr-item-meta" style={{ marginTop: 6 }}>
+            {insights.length === 0 ? t("aiIntelligenceProcessing") : t("aiIntelligenceReviewHint")}
+          </p>
+        </div>
       </div>
 
-      {Object.entries(grouped).map(([type, items]) => (
-        <div key={type} style={{ marginBottom: 24 }}>
-          <h3 style={{ textTransform: "capitalize", fontSize: "1.1rem", marginBottom: 12 }}>{getTypeLabel(type)}</h3>
-          <div className="list">
-            {items.map(insight => (
-              <div className="item" key={insight.id} style={{ opacity: loadingInsights[insight.id] ? 0.6 : 1 }}>
-                <div className="row" style={{ alignItems: "flex-start" }}>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
-                      <strong style={{ fontSize: "1rem" }}>{insight.title}</strong>
-                      {(insight.confidence ?? 0) >= 0.8 && <span className="tag success">{t("highConfidence")}</span>}
-                      {(insight.confidence ?? 0) < 0.5 && <span className="tag warning">{t("lowConfidence")}</span>}
-                    </div>
-                    <div className="muted">{insight.bodyMd}</div>
-                    {insight.assigneeHint && (
-                      <div className="muted" style={{ fontSize: "0.82rem", marginTop: 4 }}>
-                        {t("assigneeHint")} <strong>{insight.assigneeHint}</strong>
-                      </div>
-                    )}
-                    {insight.sourceQuote && (
-                      <details style={{ marginTop: 8 }}>
-                        <summary style={{ cursor: "pointer", fontSize: "0.82rem", color: "var(--accent)" }}>{t("sourceQuote")}</summary>
-                        <blockquote style={{ fontSize: "0.82rem", margin: "4px 0 0 0", paddingLeft: 8, borderLeft: "2px solid var(--line)" }}>
-                          {insight.sourceQuote}
-                        </blockquote>
-                      </details>
-                    )}
-                  </div>
-                  <div style={{ display: "flex", gap: 8 }}>
-                    <button className="btn btn-primary" onClick={actionItem(applyInsightAction, insight.id)}>Apply</button>
-                    <button className="btn" onClick={actionItem(confirmInsightAction, insight.id)}>{t("confirmInsight")}</button>
-                    <button className="btn" onClick={actionItem(dismissInsightAction, insight.id)}>{t("dismissInsight")}</button>
-                  </div>
-                </div>
+      {error && <div className="meeting-intelligence-alert danger">{error}</div>}
+      {notice && <div className="meeting-intelligence-alert success">{notice}</div>}
+
+      {buckets.length > 0 ? (
+        <div className="meeting-insight-buckets">
+          {buckets.map((bucket) => (
+            <div className="meeting-insight-bucket" key={bucket.title}>
+              <div className="meeting-insight-bucket-title">
+                <h3>{bucket.title}</h3>
+                <span className="tag">{bucket.items.length}</span>
               </div>
-            ))}
-          </div>
+              <p className="nr-item-meta">{bucket.description}</p>
+              <div className="meeting-insight-list">
+                {bucket.items.map((insight) => {
+                  const confidence = confidenceValue(insight);
+                  const isReviewable = insight.status === "SUGGESTED" || insight.status === "CONFIRMED";
+                  const loading = busyId === insight.id;
+
+                  return (
+                    <article className="meeting-insight-item" key={insight.id} aria-busy={loading}>
+                      <div className="meeting-insight-main">
+                        <div className="meeting-insight-title-row">
+                          <span className="tag info">{insightTypeLabels[insight.type] ?? insight.type}</span>
+                          {confidence >= 0.8 && <span className="tag success">{t("highConfidence")}</span>}
+                          {confidence < 0.5 && <span className="tag warning">{t("lowConfidence")}</span>}
+                          <span className="nr-item-meta">{t("confidencePercent", { percent: Math.round(confidence * 100) })}</span>
+                        </div>
+                        <h4>{insight.title}</h4>
+                        {insight.bodyMd && (
+                          <div
+                            className="markdown-body meeting-insight-body"
+                            dangerouslySetInnerHTML={{ __html: renderMarkdown(insight.bodyMd) }}
+                          />
+                        )}
+                        {insight.assigneeHint && (
+                          <div className="nr-item-meta">
+                            {t("assigneeHint")} <strong>{insight.assigneeHint}</strong>
+                          </div>
+                        )}
+                        {insight.sourceQuote && (
+                          <details className="meeting-insight-source">
+                            <summary>{t("sourceQuote")}</summary>
+                            <blockquote>{insight.sourceQuote}</blockquote>
+                          </details>
+                        )}
+                      </div>
+                      {isReviewable && (
+                        <div className="meeting-insight-actions">
+                          <button
+                            className="btn btn-primary"
+                            type="button"
+                            disabled={loading}
+                            onClick={() => runInsightAction(applyInsightAction, insight.id)}
+                          >
+                            {loading ? t("working") : t("approveInsight")}
+                          </button>
+                          <button
+                            className="btn"
+                            type="button"
+                            disabled={loading}
+                            onClick={() => runInsightAction(dismissInsightAction, insight.id)}
+                          >
+                            {t("declineInsight")}
+                          </button>
+                        </div>
+                      )}
+                    </article>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
         </div>
-      ))}
+      ) : (
+        <div className="meeting-intelligence-empty">
+          <p>{t("noInsightsAutomaticDescription")}</p>
+        </div>
+      )}
+
+      <div className="meeting-regenerate">
+        <label>
+          {t("regenerateWithGuidance")}
+          <textarea
+            value={guidance}
+            onChange={(event) => setGuidance(event.target.value)}
+            placeholder={t("regenerateGuidancePlaceholder")}
+            rows={3}
+          />
+        </label>
+        <div className="meeting-regenerate-actions">
+          <button className="btn btn-primary" type="button" disabled={regenerating} onClick={regenerate}>
+            {regenerating ? t("regenerating") : t("btnRegenerate")}
+          </button>
+          <span className="nr-item-meta">{t("regenerateGuidanceHelp")}</span>
+        </div>
+      </div>
     </section>
   );
 }

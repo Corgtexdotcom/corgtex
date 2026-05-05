@@ -16,6 +16,7 @@ const TRANSCRIPT_MATCH_MARGIN = 0.1;
 type MeetingCandidate = {
   meetingId: string;
   title: string | null;
+  status: MeetingStatus;
   recordedAt: Date;
   scheduledEndAt: Date | null;
   score: number;
@@ -50,6 +51,45 @@ function normalizeIds(values?: string[] | null) {
 
 function normalizeTitle(value?: string | null) {
   return (value ?? "").trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function normalizeTranscriptForCompare(value?: string | null) {
+  return (value ?? "").trim().replace(/\s+/g, " ");
+}
+
+function mergeTranscript(existing: string | null | undefined, incoming: string) {
+  const current = existing?.trim() ?? "";
+  const next = incoming.trim();
+  if (!current) return next;
+  if (!next) return current;
+
+  const normalizedCurrent = normalizeTranscriptForCompare(current);
+  const normalizedNext = normalizeTranscriptForCompare(next);
+  if (normalizedCurrent === normalizedNext || normalizedCurrent.includes(normalizedNext)) {
+    return current;
+  }
+  if (normalizedNext.includes(normalizedCurrent)) {
+    return next;
+  }
+
+  return `${current}\n\n---\nAdditional transcript upload:\n${next}`;
+}
+
+function mergeMarkdownNote(existing?: string | null, incoming?: string | null) {
+  const current = existing?.trim() ?? "";
+  const next = incoming?.trim() ?? "";
+  if (!next) return current || null;
+  if (!current) return next;
+  if (current.includes(next)) return current;
+  return `${current}\n\nAdditional guidance:\n${next}`;
+}
+
+function chooseMergedTitle(existing?: string | null, incoming?: string | null) {
+  const current = existing?.trim() ?? "";
+  const next = incoming?.trim() ?? "";
+  if (!next) return current || null;
+  if (!current || normalizeTitle(current) === "untitled meeting") return next;
+  return current;
 }
 
 function escapeIcsText(value: string) {
@@ -212,7 +252,7 @@ async function findTranscriptMeetingCandidatesInternal(params: {
   const candidates = await prisma.meeting.findMany({
     where: {
       workspaceId: params.workspaceId,
-      status: "SCHEDULED",
+      status: { in: ["SCHEDULED", "COMPLETED"] },
       archivedAt: null,
       recordedAt: { gte: start, lte: end },
     },
@@ -248,6 +288,7 @@ async function findTranscriptMeetingCandidatesInternal(params: {
     return {
       meetingId: meeting.id,
       title: meeting.title,
+      status: meeting.status,
       recordedAt: meeting.recordedAt,
       scheduledEndAt: meeting.scheduledEndAt,
       score,
@@ -271,17 +312,43 @@ async function updateMeetingWithTranscriptTx(
     participantEmails?: string[] | null;
   }
 ) {
+  const existing = await tx.meeting.findFirst({
+    where: { id: params.meetingId, workspaceId: params.workspaceId, archivedAt: null },
+    select: {
+      id: true,
+      title: true,
+      transcript: true,
+      summaryMd: true,
+      ingestionGuidanceMd: true,
+      participantIds: true,
+      participantEmails: true,
+    },
+  });
+  invariant(existing, 404, "NOT_FOUND", "Meeting not found.");
+
+  const transcript = mergeTranscript(existing.transcript, params.transcript);
+  const ingestionGuidanceMd = mergeMarkdownNote(existing.ingestionGuidanceMd, params.ingestionGuidanceMd);
+  const participantIds = normalizeIds([
+    ...existing.participantIds,
+    ...(params.participantIds ?? []),
+  ]);
+  const participantEmails = normalizeEmails([
+    ...existing.participantEmails,
+    ...(params.participantEmails ?? []),
+  ]);
+  const title = chooseMergedTitle(existing.title, params.title);
+
   const meeting = await tx.meeting.update({
     where: { id: params.meetingId },
     data: {
       status: "COMPLETED",
-      title: params.title?.trim() || undefined,
+      title,
       recordedAt: params.recordedAt && !Number.isNaN(params.recordedAt.valueOf()) ? params.recordedAt : undefined,
-      transcript: params.transcript.trim(),
-      summaryMd: params.summaryMd?.trim() || undefined,
-      ingestionGuidanceMd: params.ingestionGuidanceMd === undefined ? undefined : params.ingestionGuidanceMd?.trim() || null,
-      participantIds: params.participantIds ? normalizeIds(params.participantIds) : undefined,
-      participantEmails: params.participantEmails ? normalizeEmails(params.participantEmails) : undefined,
+      transcript,
+      summaryMd: params.summaryMd?.trim() || existing.summaryMd || undefined,
+      ingestionGuidanceMd,
+      participantIds,
+      participantEmails,
       aiProcessedAt: null,
     },
   });
@@ -634,6 +701,84 @@ export async function uploadMeetingTranscript(actor: AppActor, params: {
   });
 
   return { status: "created" as const, meeting, candidates: [] };
+}
+
+export async function requestMeetingIntelligenceRegeneration(actor: AppActor, params: {
+  workspaceId: string;
+  meetingId: string;
+  guidanceMd: string;
+}) {
+  await requireWorkspaceMembership({
+    actor,
+    workspaceId: params.workspaceId,
+  });
+
+  const guidanceMd = params.guidanceMd.trim();
+  invariant(guidanceMd.length > 0, 400, "INVALID_INPUT", "Tell the AI what is missing or should change before regenerating meeting intelligence.");
+
+  return prisma.$transaction(async (tx) => {
+    const existing = await tx.meeting.findFirst({
+      where: { id: params.meetingId, workspaceId: params.workspaceId, archivedAt: null },
+      select: {
+        id: true,
+        title: true,
+        source: true,
+        status: true,
+        transcript: true,
+        ingestionGuidanceMd: true,
+      },
+    });
+    invariant(existing, 404, "NOT_FOUND", "Meeting not found.");
+    invariant(existing.transcript, 400, "INVALID_STATE", "Meeting has no transcript to regenerate.");
+
+    const meeting = await tx.meeting.update({
+      where: { id: existing.id },
+      data: {
+        ingestionGuidanceMd: mergeMarkdownNote(existing.ingestionGuidanceMd, guidanceMd),
+        aiProcessedAt: null,
+      },
+    });
+
+    await tx.meetingInsight.deleteMany({
+      where: {
+        meetingId: meeting.id,
+        workspaceId: params.workspaceId,
+        status: "SUGGESTED",
+      },
+    });
+
+    await tx.auditLog.create({
+      data: {
+        workspaceId: params.workspaceId,
+        actorUserId: actor.kind === "user" ? actor.user.id : null,
+        action: "meeting.intelligence-regeneration-requested",
+        entityType: "Meeting",
+        entityId: meeting.id,
+        meta: {
+          hasGuidance: true,
+        },
+      },
+    });
+
+    await appendEvents(tx, [
+      {
+        workspaceId: params.workspaceId,
+        type: "meeting.transcript-uploaded",
+        aggregateType: "Meeting",
+        aggregateId: meeting.id,
+        payload: {
+          meetingId: meeting.id,
+          title: meeting.title,
+          source: meeting.source,
+          status: meeting.status,
+          hasTranscript: Boolean(meeting.transcript),
+          hasIngestionGuidance: Boolean(meeting.ingestionGuidanceMd),
+        },
+      },
+    ]);
+
+    return meeting;
+  });
 }
 
 export async function createMeeting(actor: AppActor, params: {

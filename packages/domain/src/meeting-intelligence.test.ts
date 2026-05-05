@@ -86,6 +86,7 @@ import {
   confirmInsight, 
   dismissInsight, 
   applyInsight,
+  autoApplyMeetingInsights,
   confirmAllInsights
 } from "./meeting-intelligence";
 
@@ -332,6 +333,63 @@ describe("meeting-intelligence", () => {
           reviewedAt: expect.any(Date),
         },
       });
+    });
+  });
+
+  describe("autoApplyMeetingInsights", () => {
+    it("only loads high-confidence suggested or confirmed insights for auto-apply", async () => {
+      (prisma.meetingInsight.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([
+        {
+          id: "insight-action",
+          operation: "CREATE",
+          targetEntityType: null,
+          targetEntityId: null,
+        },
+      ]);
+      (prisma.meetingInsight.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue({
+        id: "insight-action",
+        workspaceId: "ws-1",
+        meetingId: "meeting-1",
+        type: "ACTION_ITEM",
+        operation: "CREATE",
+        status: "SUGGESTED",
+        title: "Follow up with customer",
+        bodyMd: "Milan will follow up.",
+        assigneeHint: "Milan",
+        meeting: {
+          id: "meeting-1",
+          title: "Weekly sync",
+        },
+      });
+
+      await expect(autoApplyMeetingInsights(mockActor, {
+        workspaceId: "ws-1",
+        meetingId: "meeting-1",
+      })).resolves.toMatchObject({
+        applied: 1,
+        failed: 0,
+        threshold: 0.8,
+      });
+
+      expect(prisma.meetingInsight.findMany).toHaveBeenCalledWith(expect.objectContaining({
+        where: expect.objectContaining({
+          workspaceId: "ws-1",
+          meetingId: "meeting-1",
+          status: { in: ["SUGGESTED", "CONFIRMED"] },
+          confidence: { gte: 0.8 },
+        }),
+      }));
+      expect(createActionMock).toHaveBeenCalledWith(mockActor, expect.objectContaining({
+        title: "Follow up with customer",
+        assigneeMemberId: "member-raised",
+      }));
+      expect(prisma.meetingInsight.update).toHaveBeenCalledWith(expect.objectContaining({
+        where: { id: "insight-action" },
+        data: expect.objectContaining({
+          status: "APPLIED",
+          autoAppliedAt: expect.any(Date),
+        }),
+      }));
     });
   });
 });

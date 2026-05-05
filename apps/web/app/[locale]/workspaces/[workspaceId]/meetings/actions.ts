@@ -10,7 +10,8 @@ import {
   enqueueMeetingAgendaPreparation,
   extractMeetingInsights,
   importMeetingInvite,
-  uploadMeetingTranscript,
+  intakeMeetingTranscript,
+  requestMeetingIntelligenceRegeneration,
   confirmInsight,
   dismissInsight,
   applyInsight,
@@ -99,12 +100,12 @@ export async function uploadMeetingTranscriptAction(formData: FormData) {
     });
     transcript = extracted.textContent ?? transcript;
   }
-  const result = await uploadMeetingTranscript(actor, {
+  const result = await intakeMeetingTranscript(actor, {
     workspaceId,
     meetingId: asOptional(formData, "meetingId"),
     title: asOptional(formData, "title"),
     source: asOptional(formData, "source") || "transcript-upload",
-    recordedAt: new Date(asString(formData, "recordedAt")),
+    recordedAt: asOptional(formData, "recordedAt"),
     transcript,
     summaryMd: asOptional(formData, "summaryMd"),
     ingestionGuidanceMd: asOptional(formData, "ingestionGuidanceMd"),
@@ -112,8 +113,8 @@ export async function uploadMeetingTranscriptAction(formData: FormData) {
     participantEmails: asOptional(formData, "participantEmails")?.split(",").map((value) => value.trim()).filter(Boolean) ?? [],
   });
 
-  if (result.status === "needs_selection") {
-    throw new Error("Multiple scheduled meetings match this transcript. Choose the scheduled meeting and upload again.");
+  if (result.status === "needs_clarification") {
+    throw new Error(result.message);
   }
 
   refresh(workspaceId);
@@ -168,6 +169,20 @@ export async function extractInsightsAction(formData: FormData) {
   const meetingId = formData.get("meetingId") as string;
   
   await extractMeetingInsights(actor, { workspaceId, meetingId });
+  refresh(workspaceId);
+}
+
+export async function regenerateMeetingIntelligenceAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  await requestMeetingIntelligenceRegeneration(actor, {
+    workspaceId,
+    meetingId: asString(formData, "meetingId"),
+    guidanceMd: asString(formData, "guidanceMd"),
+  });
   refresh(workspaceId);
 }
 

@@ -11,6 +11,7 @@ import {
 import { getTranslations } from "next-intl/server";
 import Link from "next/link";
 import { getWorkspaceFeatureFlags } from "@/lib/workspace-feature-flags";
+import { markdownToPlainText } from "@/lib/markdown";
 
 export const dynamic = "force-dynamic";
 
@@ -61,7 +62,7 @@ export default async function MeetingsPage({
                 <div className="nr-meta" style={{ marginBottom: "8px" }}>{completedMeetings[0].source}</div>
                 <h2 className="nr-lead-headline" style={{ fontSize: "1.8rem" }}>{completedMeetings[0].title ?? t("untitledMeeting")}</h2>
                 <div className="nr-item-meta" style={{ marginBottom: "12px" }}>{new Date(completedMeetings[0].recordedAt).toLocaleString()}</div>
-                {completedMeetings[0].summaryMd && <p className="nr-excerpt">{completedMeetings[0].summaryMd}</p>}
+                {completedMeetings[0].summaryMd && <p className="nr-excerpt">{markdownToPlainText(completedMeetings[0].summaryMd, 520)}</p>}
               </Link>
               <form action={archiveMeetingAction} style={{ marginTop: 12 }}>
                 <input type="hidden" name="workspaceId" value={workspaceId} />
@@ -80,7 +81,7 @@ export default async function MeetingsPage({
                   </div>
                   {meeting.summaryMd && (
                     <div className="nr-excerpt" style={{ fontSize: "0.85rem", marginTop: "6px" }}>
-                      {meeting.summaryMd}
+                      {markdownToPlainText(meeting.summaryMd, 320)}
                     </div>
                   )}
                 </Link>
