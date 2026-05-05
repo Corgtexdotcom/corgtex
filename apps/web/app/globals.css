@@ -2790,9 +2790,108 @@ a.wiki-list-item:hover {
     border-radius: 14px;
   }
 
-  .cmd-input {
+.cmd-input {
     font-size: 1rem;
     padding: 16px;
+  }
+}
+
+/* ── Control Plane ── */
+
+.control-plane-shell {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  gap: 28px;
+  width: 100%;
+  max-width: 1500px;
+  margin: 0 auto;
+  padding: 32px;
+}
+
+.control-plane-rail {
+  position: sticky;
+  top: 24px;
+  align-self: start;
+  gap: 8px;
+}
+
+.control-plane-content {
+  min-width: 0;
+  gap: 28px;
+}
+
+.control-plane-support-grid {
+  display: grid;
+  grid-template-columns: minmax(320px, 0.9fr) minmax(0, 1.4fr);
+  gap: 24px;
+  align-items: start;
+}
+
+.control-plane-shell .panel,
+.control-plane-shell .item {
+  min-width: 0;
+}
+
+.control-plane-shell .table {
+  min-width: 980px;
+}
+
+@media (max-width: 760px) {
+  .control-plane-shell {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 16px;
+    max-width: none;
+    padding: 16px;
+  }
+
+  .control-plane-rail {
+    position: static;
+    display: flex;
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: var(--bg-card);
+  }
+
+  .control-plane-rail > strong,
+  .control-plane-rail > .muted {
+    flex-basis: 100%;
+  }
+
+  .control-plane-rail .ws-nav-link {
+    width: auto;
+    min-height: 36px;
+    padding: 8px 10px;
+    font-size: 0.85rem;
+  }
+
+  .control-plane-content {
+    gap: 18px;
+  }
+
+  .control-plane-shell .page-header,
+  .control-plane-shell .row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .control-plane-shell form {
+    width: 100%;
+  }
+
+  .control-plane-shell input,
+  .control-plane-shell select,
+  .control-plane-shell textarea,
+  .control-plane-shell button {
+    max-width: 100%;
+  }
+
+  .control-plane-support-grid {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 16px;
   }
 }
 

@@ -397,6 +397,7 @@ model Workspace {
   buildArtifacts                BuildArtifact[]
   newspaperDeliveries           NewspaperDelivery[]
   newspaperTrackedLinks         NewspaperTrackedLink[]
+  managedInstanceRegistry       InstanceRegistry?
 }
 
 model WorkspaceFeatureFlag {
@@ -2990,12 +2991,14 @@ model InstanceRegistry {
   supportLastSyncAt            DateTime?
   supportLastSyncError         String?
   supportNotes                 String?
+  managedWorkspaceId           String?   @unique
   createdAt                    DateTime  @default(now())
   updatedAt                    DateTime  @updatedAt
 
   events             HostedInstanceEvent[]
   controlPlaneAccess ControlPlaneInstanceAccess[]
   supportOperations  SupportOperation[]
+  managedWorkspace   Workspace?                    @relation(fields: [managedWorkspaceId], references: [id], onDelete: SetNull)
 
   @@index([provisioningStatus])
   @@index([bootstrapStatus])

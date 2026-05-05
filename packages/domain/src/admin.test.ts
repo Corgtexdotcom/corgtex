@@ -16,6 +16,7 @@ vi.mock("@corgtex/shared", () => ({
   prisma: {
     workspace: {
       findMany: vi.fn().mockResolvedValue([]),
+      findUnique: vi.fn().mockResolvedValue(null),
       count: vi.fn().mockResolvedValue(0),
     },
     user: {
@@ -409,6 +410,9 @@ describe("Platform Admin Tools", () => {
   // ── registerExternalInstance ──────────────────────────────────────
 
   it("registerExternalInstance creates a new registry entry", async () => {
+    (prisma.workspace.findUnique as any).mockResolvedValueOnce({
+      id: "ws_acme",
+    });
     (prisma.instanceRegistry.create as any).mockResolvedValue({
       id: "inst_new",
       customerSlug: "acme",
@@ -436,6 +440,7 @@ describe("Platform Admin Tools", () => {
         environment: "staging",
         notes: "Test note",
         customerSlug: "acme",
+        managedWorkspaceId: "ws_acme",
         region: "eu-west4",
         releaseImageTag: "sha-1",
         storageBucketName: "customer-bucket",
@@ -607,6 +612,9 @@ describe("Platform Admin Tools", () => {
   });
 
   it("provisionHostedCustomerInstance records Railway resources without storing secrets", async () => {
+    (prisma.workspace.findUnique as any).mockResolvedValueOnce({
+      id: "ws_acme_prod",
+    });
     (prisma.instanceRegistry.update as any).mockResolvedValue({
       id: "inst_1",
       customerSlug: "acme-prod",
@@ -654,6 +662,7 @@ describe("Platform Admin Tools", () => {
       create: expect.objectContaining({
         provisioningStatus: "provisioning",
         bootstrapStatus: "pending",
+        managedWorkspaceId: "ws_acme_prod",
         storageBucketName: "customer-bucket",
         bootstrapBundleUri: "https://private.example/bundle.json",
         bootstrapBundleChecksum: "a".repeat(64),

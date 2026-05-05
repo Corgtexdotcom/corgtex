@@ -84,6 +84,16 @@ function assertDataResidency(region: string, dataResidency: string) {
   }
 }
 
+async function findManagedWorkspaceId(customerSlug: string | null | undefined) {
+  const slug = normalizeOptional(customerSlug);
+  if (!slug) return null;
+  const workspace = await prisma.workspace.findUnique({
+    where: { slug },
+    select: { id: true },
+  });
+  return workspace?.id ?? null;
+}
+
 function actorUserId(actor: AppActor) {
   return actor.kind === "user" ? actor.user.id : null;
 }
@@ -427,13 +437,15 @@ export async function registerExternalInstance(actor: AppActor, params: {
   bootstrapBundleSchemaVersion?: string;
 }) {
   requireGlobalOperator(actor);
+  const normalizedCustomerSlug = params.customerSlug ? normalizeSlug(params.customerSlug) : null;
+  const managedWorkspaceId = await findManagedWorkspaceId(normalizedCustomerSlug);
   const instance = await prisma.instanceRegistry.create({
     data: {
       label: params.label,
       url: params.url,
       environment: params.environment || "production",
       notes: params.notes,
-      customerSlug: params.customerSlug ? normalizeSlug(params.customerSlug) : null,
+      customerSlug: normalizedCustomerSlug,
       region: normalizeOptional(params.region),
       dataResidency: normalizeOptional(params.dataResidency),
       customDomain: normalizeOptional(params.customDomain),
@@ -444,6 +456,7 @@ export async function registerExternalInstance(actor: AppActor, params: {
       bootstrapBundleUri: normalizeOptional(params.bootstrapBundleUri),
       bootstrapBundleChecksum: normalizeOptional(params.bootstrapBundleChecksum),
       bootstrapBundleSchemaVersion: normalizeOptional(params.bootstrapBundleSchemaVersion),
+      managedWorkspaceId,
     }
   });
   await recordHostedInstanceEvent(actor, instance.id, "hosted_instance.registered", {
@@ -451,6 +464,7 @@ export async function registerExternalInstance(actor: AppActor, params: {
     region: instance.region,
     releaseImageTag: instance.releaseImageTag,
     hasBootstrapBundle: Boolean(instance.bootstrapBundleUri),
+    managedWorkspaceId,
   });
   return instance;
 }
@@ -583,6 +597,7 @@ export async function provisionHostedCustomerInstance(actor: AppActor, params: {
 }, railwayClient: RailwayClient = createRailwayClientFromEnv()) {
   requireGlobalOperator(actor);
   const customerSlug = normalizeSlug(params.customerSlug);
+  const managedWorkspaceId = await findManagedWorkspaceId(customerSlug);
   assertDataResidency(params.region, params.dataResidency);
   const url = params.customDomain?.trim()
     ? `https://${params.customDomain.trim().replace(/^https?:\/\//, "").replace(/\/$/, "")}`
@@ -608,6 +623,7 @@ export async function provisionHostedCustomerInstance(actor: AppActor, params: {
       provisioningStatus: "provisioning",
       bootstrapStatus: params.bootstrapBundleUri ? "pending" : "not_started",
       lastProvisioningError: null,
+      managedWorkspaceId,
     },
     create: {
       label: params.label,
@@ -626,6 +642,7 @@ export async function provisionHostedCustomerInstance(actor: AppActor, params: {
       bootstrapBundleSchemaVersion: normalizeOptional(params.bootstrapBundleSchemaVersion),
       provisioningStatus: "provisioning",
       bootstrapStatus: params.bootstrapBundleUri ? "pending" : "not_started",
+      managedWorkspaceId,
     },
   });
 
@@ -636,6 +653,7 @@ export async function provisionHostedCustomerInstance(actor: AppActor, params: {
     releaseImageTag: params.releaseImageTag,
     storageBucketConfigured: Boolean(params.storageBucketName),
     hasBootstrapBundle: Boolean(params.bootstrapBundleUri),
+    managedWorkspaceId,
   });
 
   try {
