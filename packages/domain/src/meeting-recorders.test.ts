@@ -72,6 +72,10 @@ vi.mock("@corgtex/shared", () => {
   };
 });
 
+vi.spyOn(console, "info").mockImplementation(() => undefined);
+vi.spyOn(console, "warn").mockImplementation(() => undefined);
+vi.spyOn(console, "error").mockImplementation(() => undefined);
+
 const operatorActor: AppActor = {
   kind: "user",
   user: {
@@ -235,7 +239,49 @@ describe("meeting recorder domain", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(prismaMock.meetingRecording.update).toHaveBeenNthCalledWith(1, expect.objectContaining({
       where: { id: "recording-recall" },
-      data: expect.objectContaining({ status: "FAILED", failureCode: "HTTP_507" }),
+      data: expect.objectContaining({ status: "FAILED", failureCode: "vendor_capacity_exceeded" }),
+    }));
+  });
+
+  it("does not fall back from Recall to Meeting BaaS on non-retryable scheduling failures", async () => {
+    const { scheduleMeetingRecording } = await import("./meeting-recorders");
+    prismaMock.meetingRecording.create.mockResolvedValue({
+      id: "recording-recall",
+      workspaceId: "workspace-1",
+      meetingId: "meeting-1",
+      provider: "RECALL_AI",
+      meetingUrl: "https://meet.google.com/abc-defg-hij",
+      status: "PENDING",
+    });
+    prismaMock.meetingRecording.update.mockResolvedValue({
+      id: "recording-recall",
+      workspaceId: "workspace-1",
+      meetingId: "meeting-1",
+      provider: "RECALL_AI",
+      status: "FAILED",
+      failureCode: "vendor_http_error",
+    });
+    fetchMock.mockResolvedValue({ ok: false, status: 400, text: async () => "bad request" });
+
+    await expect(scheduleMeetingRecording(operatorActor, {
+      workspaceId: "workspace-1",
+      meetingId: "meeting-1",
+      mode: "auto",
+    })).resolves.toMatchObject({
+      id: "recording-recall",
+      status: "FAILED",
+      failureCode: "vendor_http_error",
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(prismaMock.meetingRecording.create).toHaveBeenCalledTimes(1);
+    expect(prismaMock.meetingRecording.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "recording-recall" },
+      data: expect.objectContaining({
+        status: "FAILED",
+        activeDedupeKey: null,
+        failureCode: "vendor_http_error",
+      }),
     }));
   });
 
@@ -287,5 +333,39 @@ describe("meeting recorder domain", () => {
     });
 
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("marks stale active recordings failed during reconciliation", async () => {
+    const { reconcileMeetingRecorders } = await import("./meeting-recorders");
+    prismaMock.meetingRecording.findMany.mockResolvedValue([{
+      id: "recording-stale",
+      workspaceId: "workspace-1",
+      meetingId: "meeting-1",
+      provider: "RECALL_AI",
+      status: "SCHEDULED",
+      createdAt: new Date("2026-05-04T00:00:00.000Z"),
+    }]);
+    prismaMock.meetingRecording.update.mockResolvedValue({ id: "recording-stale", status: "FAILED" });
+    prismaMock.meetingRecorderProviderEvent.updateMany.mockResolvedValue({ count: 2 });
+
+    await expect(reconcileMeetingRecorders("workspace-1")).resolves.toEqual({ staleFailed: 1 });
+
+    expect(prismaMock.meetingRecording.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "recording-stale" },
+      data: expect.objectContaining({
+        status: "FAILED",
+        activeDedupeKey: null,
+        failureCode: "STALE_RECORDER",
+      }),
+    }));
+    expect(prismaMock.meetingRecorderProviderEvent.updateMany).toHaveBeenCalledWith({
+      where: {
+        workspaceId: "workspace-1",
+        redactedAt: null,
+      },
+      data: {
+        redactedAt: expect.any(Date),
+      },
+    });
   });
 });

@@ -15,6 +15,7 @@ const AUTO_SCHEDULE_MIN_LEAD_MS = 10 * 60 * 1000;
 const STALE_RECORDING_TIMEOUT_MS = 6 * 60 * 60 * 1000;
 const ACTIVE_RECORDING_STATUSES: MeetingRecordingStatus[] = ["PENDING", "SCHEDULED", "JOINING", "RECORDING"];
 const RETRYABLE_VENDOR_STATUSES = new Set([408, 409, 425, 429, 500, 502, 503, 504, 507]);
+const RECORDER_LOG_COMPONENT = "meeting-recorder";
 
 export type MeetingRecorderScheduleInput = {
   meetingUrl: string;
@@ -72,6 +73,24 @@ class ProviderRequestError extends Error {
     super(`${provider} returned ${status}: ${responseBody.slice(0, 240)}`);
     this.status = status;
     this.responseBody = responseBody;
+  }
+}
+
+type RecorderLogLevel = "info" | "warn" | "error";
+
+function recorderLog(level: RecorderLogLevel, event: string, fields: Record<string, unknown> = {}) {
+  const payload = {
+    component: RECORDER_LOG_COMPONENT,
+    event,
+    ...fields,
+  };
+  const message = JSON.stringify(payload);
+  if (level === "error") {
+    console.error(message);
+  } else if (level === "warn") {
+    console.warn(message);
+  } else {
+    console.info(message);
   }
 }
 
@@ -478,6 +497,23 @@ function isRetryableVendorError(error: unknown) {
   return error instanceof ProviderRequestError && RETRYABLE_VENDOR_STATUSES.has(error.status);
 }
 
+function providerFailureCode(error: unknown) {
+  if (error instanceof ProviderRequestError) {
+    if (error.status === 408 || error.status === 425) return "vendor_retry_later";
+    if (error.status === 409) return "vendor_conflict";
+    if (error.status === 429) return "vendor_rate_limited";
+    if (error.status === 507) return "vendor_capacity_exceeded";
+    if ([500, 502, 503, 504].includes(error.status)) return "vendor_server_error";
+    return "vendor_http_error";
+  }
+  if (error instanceof AppError) {
+    if (error.code === "RECORDER_VENDOR_NOT_CONFIGURED") return "configuration_error";
+    if (error.code === "RECORDER_VENDOR_BAD_RESPONSE") return "vendor_bad_response";
+    return error.code.toLowerCase();
+  }
+  return "schedule_failed";
+}
+
 function isUniqueConstraintError(error: unknown) {
   return isRecord(error) && error.code === "P2002";
 }
@@ -805,6 +841,13 @@ export async function scheduleMeetingRecording(actor: AppActor, params: {
     orderBy: { createdAt: "desc" },
   });
   if (existing) {
+    recorderLog("info", "schedule_reused", {
+      workspaceId: params.workspaceId,
+      meetingId: params.meetingId,
+      recordingId: existing.id,
+      provider: existing.provider,
+      status: existing.status,
+    });
     return existing;
   }
 
@@ -845,6 +888,15 @@ export async function scheduleMeetingRecording(actor: AppActor, params: {
     meetingId: params.meetingId,
     provider: fallbackProvider,
   });
+  recorderLog("warn", "schedule_fallback", {
+    workspaceId: params.workspaceId,
+    meetingId: params.meetingId,
+    fromProvider: provider,
+    toProvider: fallbackProvider,
+    failedRecordingId: first.recording.id,
+    fallbackRecordingId: fallback.recording.id,
+    fallbackStatus: fallback.recording.status,
+  });
   return fallback.recording;
 }
 
@@ -860,8 +912,21 @@ async function attemptProviderSchedule(params: {
   const attempt = await createRecordingAttempt(params);
   const recording = attempt.recording;
   if (attempt.reused) {
+    recorderLog("info", "schedule_dedupe_reused", {
+      workspaceId: params.workspaceId,
+      meetingId: params.meetingId,
+      recordingId: recording.id,
+      provider: params.provider,
+      status: recording.status,
+    });
     return { status: recording.status, recording, retryable: false };
   }
+  recorderLog("info", "schedule_attempt", {
+    workspaceId: params.workspaceId,
+    meetingId: params.meetingId,
+    recordingId: recording.id,
+    provider: params.provider,
+  });
   try {
     const scheduled = await providerSchedule(params.provider, {
       meetingUrl: params.meetingUrl,
@@ -883,17 +948,33 @@ async function attemptProviderSchedule(params: {
         providerMetadata: scheduled.providerMetadata,
       },
     });
+    recorderLog("info", "schedule_succeeded", {
+      workspaceId: params.workspaceId,
+      meetingId: params.meetingId,
+      recordingId: updated.id,
+      provider: updated.provider,
+      externalBotId: updated.externalBotId,
+    });
     return { status: updated.status, recording: updated, retryable: false };
   } catch (error) {
     const retryable = isRetryableVendorError(error);
+    const failureCode = providerFailureCode(error);
     const failed = await prisma.meetingRecording.update({
       where: { id: recording.id },
       data: {
         status: "FAILED",
         activeDedupeKey: null,
-        failureCode: error instanceof ProviderRequestError ? `HTTP_${error.status}` : "SCHEDULE_FAILED",
+        failureCode,
         failureMessage: error instanceof Error ? error.message : "Unknown recorder scheduling error.",
       },
+    });
+    recorderLog(retryable ? "warn" : "error", "schedule_failed", {
+      workspaceId: params.workspaceId,
+      meetingId: params.meetingId,
+      recordingId: failed.id,
+      provider: params.provider,
+      failureCode,
+      retryable,
     });
     return { status: failed.status, recording: failed, retryable };
   }
@@ -916,10 +997,21 @@ export async function cancelMeetingRecording(actor: AppActor, params: { workspac
   invariant(recording, 404, "NOT_FOUND", "No active recorder is scheduled for this meeting.");
 
   if (recording.externalBotId) {
-    await providerCancel(recording.provider, recording.externalBotId);
+    try {
+      await providerCancel(recording.provider, recording.externalBotId);
+    } catch (error) {
+      recorderLog("error", "cancel_failed", {
+        workspaceId: params.workspaceId,
+        meetingId: params.meetingId,
+        recordingId: recording.id,
+        provider: recording.provider,
+        failureCode: providerFailureCode(error),
+      });
+      throw error;
+    }
   }
 
-  return prisma.meetingRecording.update({
+  const cancelled = await prisma.meetingRecording.update({
     where: { id: recording.id },
     data: {
       status: "CANCELLED",
@@ -927,6 +1019,13 @@ export async function cancelMeetingRecording(actor: AppActor, params: { workspac
       endedAt: new Date(),
     },
   });
+  recorderLog("info", "cancel_succeeded", {
+    workspaceId: params.workspaceId,
+    meetingId: params.meetingId,
+    recordingId: cancelled.id,
+    provider: cancelled.provider,
+  });
+  return cancelled;
 }
 
 async function cancelAutoRecordingsForMeeting(workspaceId: string, meetingId: string) {
@@ -942,7 +1041,13 @@ async function cancelAutoRecordingsForMeeting(workspaceId: string, meetingId: st
       try {
         await providerCancel(recording.provider, recording.externalBotId);
       } catch (error) {
-        console.warn("Failed to cancel recorder bot during calendar sync.", error);
+        recorderLog("warn", "calendar_cancel_failed", {
+          workspaceId,
+          meetingId,
+          recordingId: recording.id,
+          provider: recording.provider,
+          failureCode: providerFailureCode(error),
+        });
       }
     }
     await prisma.meetingRecording.update({
@@ -1061,17 +1166,33 @@ export async function processMeetingRecorderWebhook(provider: MeetingRecorderPro
   const verified = provider === "RECALL_AI"
     ? verifyRecallWebhookSignature({ headers: params.headers, payload: params.rawBody })
     : verifyMeetingBaasWebhookSignature({ headers: params.headers, payload: params.rawBody });
+  if (!verified) {
+    recorderLog("warn", "webhook_signature_invalid", { provider });
+  }
   invariant(verified, 401, "INVALID_SIGNATURE", "Meeting recorder webhook signature is invalid.");
 
   const payload = JSON.parse(params.rawBody) as unknown;
   const event = provider === "RECALL_AI" ? normalizeRecallWebhook(payload) : normalizeMeetingBaasWebhook(payload);
   const dedupeKey = `${provider}:${event.eventId ?? createHash("sha256").update(params.rawBody).digest("hex")}`;
+  recorderLog("info", "webhook_received", {
+    provider,
+    eventType: event.eventType,
+    externalBotId: event.externalBotId,
+    workspaceId: event.workspaceId,
+    meetingId: event.meetingId,
+    recordingId: event.recordingId,
+  });
 
   const existingEvent = await prisma.meetingRecorderProviderEvent.findUnique({
     where: { dedupeKey },
     select: { id: true, processedAt: true },
   });
   if (existingEvent?.processedAt) {
+    recorderLog("info", "webhook_duplicate", {
+      provider,
+      eventType: event.eventType,
+      externalBotId: event.externalBotId,
+    });
     return { processed: false, duplicate: true };
   }
 
@@ -1100,6 +1221,14 @@ export async function processMeetingRecorderWebhook(provider: MeetingRecorderPro
         error: "No matching MeetingRecording found.",
       },
     });
+    recorderLog("warn", "webhook_unmatched", {
+      provider,
+      eventType: event.eventType,
+      externalBotId: event.externalBotId,
+      workspaceId: event.workspaceId,
+      meetingId: event.meetingId,
+      recordingId: event.recordingId,
+    });
     return { processed: false, duplicate: false };
   }
 
@@ -1116,6 +1245,14 @@ export async function processMeetingRecorderWebhook(provider: MeetingRecorderPro
   await prisma.meetingRecorderProviderEvent.update({
     where: { id: providerEvent.id },
     data: { processedAt: new Date(), recordingId: recording.id, workspaceId: recording.workspaceId },
+  });
+  recorderLog("info", "webhook_processed", {
+    provider,
+    eventType: event.eventType,
+    workspaceId: recording.workspaceId,
+    meetingId: recording.meetingId,
+    recordingId: recording.id,
+    status: recording.status,
   });
   return { processed: true, duplicate: false, recordingId: recording.id };
 }
@@ -1196,6 +1333,12 @@ async function ingestProviderTranscript(provider: MeetingRecorderProvider, recor
       transcriptProcessedAt: new Date(),
       providerMetadata: redactProviderArtifactUrls(artifact.metadata),
     },
+  });
+  recorderLog("info", "transcript_ingested", {
+    workspaceId: recording.workspaceId,
+    meetingId: recording.meetingId,
+    recordingId: recording.id,
+    provider,
   });
 }
 
@@ -1323,6 +1466,12 @@ export async function syncCalendarEventRecorder(params: {
     meetingId: meeting.id,
     mode: "auto",
   });
+  recorderLog("info", "calendar_event_scheduled", {
+    workspaceId: params.workspaceId,
+    meetingId: meeting.id,
+    recordingId: recording.id,
+    provider: recording.provider,
+  });
   return { action: "scheduled" as const, meeting, recording };
 }
 
@@ -1345,6 +1494,14 @@ export async function reconcileMeetingRecorders(workspaceId: string) {
         failureMessage: "Recorder did not complete before the reconciliation timeout.",
         endedAt: new Date(),
       },
+    });
+    recorderLog("warn", "reconcile_stale_failed", {
+      workspaceId,
+      meetingId: recording.meetingId,
+      recordingId: recording.id,
+      provider: recording.provider,
+      previousStatus: recording.status,
+      failureCode: "stale_recorder",
     });
   }
   await prisma.meetingRecorderProviderEvent.updateMany({
