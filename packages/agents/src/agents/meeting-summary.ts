@@ -64,7 +64,13 @@ export async function runMeetingSummaryAgent(params: {
         messages: [
           {
             role: "system",
-            content: "Summarize this meeting for an operator dashboard. Keep it concise, factual, and action-oriented. Use user-provided ingestion guidance to decide what to emphasize or preserve, but do not invent facts unsupported by the transcript.",
+            content: [
+              "Summarize this meeting for an operator dashboard.",
+              "Return clean Markdown only, with no preamble or closing disclaimer.",
+              "Use concise sections in this order when evidence exists: Overview, Decisions, Action Items, Tensions / Open Questions, Proposals, Next Steps.",
+              "Use bullets for scannability. Include owners and dates only when the transcript supports them.",
+              "Use user-provided ingestion guidance to decide what to emphasize or preserve, but do not invent facts unsupported by the transcript.",
+            ].join(" "),
           },
           {
             role: "user",

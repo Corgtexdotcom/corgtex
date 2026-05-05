@@ -236,6 +236,15 @@ describe("meetings domain", () => {
         participantEmails: ["jan@example.com"],
       },
     ]);
+    prismaMock.meeting.findFirst.mockResolvedValue({
+      id: "scheduled-1",
+      title: "Weekly Tactical",
+      transcript: null,
+      summaryMd: null,
+      ingestionGuidanceMd: null,
+      participantIds: [],
+      participantEmails: ["jan@example.com"],
+    });
     prismaMock.meeting.update.mockResolvedValue({
       id: "scheduled-1",
       workspaceId: "workspace-1",
@@ -276,6 +285,109 @@ describe("meetings domain", () => {
         status: "SUGGESTED",
       },
     });
+  });
+
+  it("uploadMeetingTranscript updates a matching completed meeting and merges guidance", async () => {
+    const recordedAt = new Date("2026-04-30T17:10:00.000Z");
+    prismaMock.meeting.findMany.mockResolvedValue([
+      {
+        id: "completed-1",
+        workspaceId: "workspace-1",
+        title: "Weekly Tactical",
+        source: "chat-transcript-upload",
+        status: "COMPLETED",
+        recordedAt: new Date("2026-04-30T17:00:00.000Z"),
+        scheduledEndAt: null,
+        participantEmails: ["jan@example.com"],
+      },
+    ]);
+    prismaMock.meeting.findFirst.mockResolvedValue({
+      id: "completed-1",
+      title: "Weekly Tactical",
+      transcript: "Jan: Existing transcript.",
+      summaryMd: "Existing summary",
+      ingestionGuidanceMd: "Preserve decisions.",
+      participantIds: ["member-1"],
+      participantEmails: ["jan@example.com"],
+    });
+    prismaMock.meeting.update.mockResolvedValue({
+      id: "completed-1",
+      workspaceId: "workspace-1",
+      title: "Weekly Tactical",
+      source: "chat-transcript-upload",
+      status: "COMPLETED",
+      recordedAt,
+      transcript: "merged",
+    });
+
+    const { uploadMeetingTranscript } = await import("./meetings");
+    await expect(uploadMeetingTranscript(actor, {
+      workspaceId: "workspace-1",
+      title: "Weekly Tactical",
+      source: "chat-transcript-upload",
+      recordedAt,
+      transcript: "Andy: Added a new personal note.",
+      participantEmails: ["andy@example.com"],
+      ingestionGuidanceMd: "Extract Andy's personal note.",
+    })).resolves.toMatchObject({
+      status: "matched",
+      meeting: { id: "completed-1" },
+    });
+
+    expect(prismaMock.meeting.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "completed-1" },
+      data: expect.objectContaining({
+        transcript: "Jan: Existing transcript.\n\n---\nAdditional transcript upload:\nAndy: Added a new personal note.",
+        summaryMd: "Existing summary",
+        ingestionGuidanceMd: "Preserve decisions.\n\nAdditional guidance:\nExtract Andy's personal note.",
+        participantIds: ["member-1"],
+        participantEmails: ["jan@example.com", "andy@example.com"],
+        aiProcessedAt: null,
+      }),
+    }));
+    expect(prismaMock.event.createMany).toHaveBeenCalled();
+  });
+
+  it("requestMeetingIntelligenceRegeneration appends guidance and requeues transcript processing", async () => {
+    prismaMock.meeting.findFirst.mockResolvedValue({
+      id: "meeting-1",
+      title: "Weekly Tactical",
+      source: "transcript-upload",
+      status: "COMPLETED",
+      transcript: "Jan: Milan owns onboarding.",
+      ingestionGuidanceMd: "Extract action owners.",
+    });
+    prismaMock.meeting.update.mockResolvedValue({
+      id: "meeting-1",
+      title: "Weekly Tactical",
+      source: "transcript-upload",
+      status: "COMPLETED",
+      transcript: "Jan: Milan owns onboarding.",
+      ingestionGuidanceMd: "Extract action owners.\n\nAdditional guidance:\nSeparate proposals from action items.",
+    });
+
+    const { requestMeetingIntelligenceRegeneration } = await import("./meetings");
+    await expect(requestMeetingIntelligenceRegeneration(actor, {
+      workspaceId: "workspace-1",
+      meetingId: "meeting-1",
+      guidanceMd: " Separate proposals from action items. ",
+    })).resolves.toMatchObject({ id: "meeting-1" });
+
+    expect(prismaMock.meeting.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "meeting-1" },
+      data: {
+        ingestionGuidanceMd: "Extract action owners.\n\nAdditional guidance:\nSeparate proposals from action items.",
+        aiProcessedAt: null,
+      },
+    }));
+    expect(prismaMock.meetingInsight.deleteMany).toHaveBeenCalledWith({
+      where: {
+        meetingId: "meeting-1",
+        workspaceId: "workspace-1",
+        status: "SUGGESTED",
+      },
+    });
+    expect(prismaMock.event.createMany).toHaveBeenCalled();
   });
 
   it("deleteMeeting archives an existing meeting", async () => {

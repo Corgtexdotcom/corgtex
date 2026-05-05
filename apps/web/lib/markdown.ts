@@ -28,3 +28,14 @@ export function renderMarkdown(md: string): string {
     },
   });
 }
+
+export function markdownToPlainText(md: string, maxLength = 360): string {
+  const html = marked.parse(md, { async: false }) as string;
+  const text = sanitizeHtml(html, {
+    allowedTags: [],
+    allowedAttributes: {},
+  }).replace(/\s+/g, " ").trim();
+
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, Math.max(0, maxLength - 1)).trim()}...`;
+}

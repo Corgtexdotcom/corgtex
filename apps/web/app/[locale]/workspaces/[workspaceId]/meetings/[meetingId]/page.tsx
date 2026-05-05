@@ -109,8 +109,7 @@ export default async function MeetingDetailPage({
         <section className="ws-section" style={{ marginBottom: 48 }}>
           <h2 className="nr-section-header">{t("userGuidance")}</h2>
           <div
-            className="nr-excerpt"
-            style={{ fontSize: "1rem", lineHeight: 1.6 }}
+            className="markdown-body"
             dangerouslySetInnerHTML={{ __html: renderMarkdown(meeting.ingestionGuidanceMd) }}
           />
         </section>
@@ -120,8 +119,7 @@ export default async function MeetingDetailPage({
         <section className="ws-section" style={{ marginBottom: 48 }}>
           <h2 className="nr-section-header">{t("summary")}</h2>
           <div 
-            className="nr-excerpt" 
-            style={{ fontSize: "1rem", lineHeight: 1.6 }}
+            className="markdown-body"
             dangerouslySetInnerHTML={{ __html: renderMarkdown(meeting.summaryMd) }}
           />
         </section>

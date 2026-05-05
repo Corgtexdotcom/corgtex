@@ -44,10 +44,12 @@ afterEach(() => {
 describe("POST /api/workspaces/[workspaceId]/meetings/transcript", () => {
   it("returns matching candidates as a conflict when transcript auto-match is ambiguous", async () => {
     resolveRequestActor.mockResolvedValue({ kind: "user", user: { id: "user-1" } });
-    uploadMeetingTranscript.mockResolvedValue({
-      status: "needs_selection",
-      meeting: null,
+    intakeMeetingTranscript.mockResolvedValue({
+      status: "needs_clarification",
+      requiredFields: ["meetingId"],
       candidates: [{ meetingId: "meeting-1", score: 0.72 }],
+      inferred: {},
+      message: "I found multiple scheduled meetings that could match this transcript. Choose one and upload again.",
     });
 
     const { POST } = await import("./route");
@@ -67,7 +69,7 @@ describe("POST /api/workspaces/[workspaceId]/meetings/transcript", () => {
     );
 
     expect(response.status).toBe(409);
-    expect(uploadMeetingTranscript).toHaveBeenCalledWith(
+    expect(intakeMeetingTranscript).toHaveBeenCalledWith(
       { kind: "user", user: { id: "user-1" } },
       expect.objectContaining({
         workspaceId: "ws-1",
@@ -77,6 +79,7 @@ describe("POST /api/workspaces/[workspaceId]/meetings/transcript", () => {
         participantEmails: ["jan@example.com"],
       }),
     );
+    expect(uploadMeetingTranscript).not.toHaveBeenCalled();
     expect(handleRouteError).not.toHaveBeenCalled();
   });
 

@@ -4,7 +4,7 @@ import { env, prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
 import { AppError, invariant } from "./errors";
-import { uploadMeetingTranscript } from "./meetings";
+import { intakeMeetingTranscript } from "./meeting-transcript-intake";
 
 export const MEETING_RECORDERS_FEATURE_FLAG = "MEETING_RECORDERS";
 
@@ -1317,7 +1317,7 @@ async function ingestProviderTranscript(provider: MeetingRecorderProvider, recor
   invariant(transcript.trim().length > 0, 422, "RECORDER_TRANSCRIPT_EMPTY", "Provider transcript was empty.");
 
   const actor = systemRecorderActor(recording.workspaceId);
-  await uploadMeetingTranscript(actor, {
+  await intakeMeetingTranscript(actor, {
     workspaceId: recording.workspaceId,
     meetingId: recording.meetingId,
     source: `recorder:${provider.toLowerCase()}`,

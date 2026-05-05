@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { AppError, intakeMeetingTranscript, uploadMeetingTranscript } from "@corgtex/domain";
+import { AppError, intakeMeetingTranscript } from "@corgtex/domain";
 import { extractTextFromFileBuffer } from "@corgtex/knowledge";
 import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
@@ -73,12 +73,12 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       participantEmails?: unknown;
     };
 
-    const result = await uploadMeetingTranscript(actor, {
+    const result = await intakeMeetingTranscript(actor, {
       workspaceId,
       meetingId: typeof body.meetingId === "string" ? body.meetingId : null,
       title: typeof body.title === "string" ? body.title : null,
       source: typeof body.source === "string" ? body.source : "transcript-upload",
-      recordedAt: new Date(String(body.recordedAt ?? "")),
+      recordedAt: typeof body.recordedAt === "string" ? body.recordedAt : null,
       transcript: String(body.transcript ?? ""),
       summaryMd: typeof body.summaryMd === "string" ? body.summaryMd : null,
       ingestionGuidanceMd: typeof body.ingestionGuidanceMd === "string" ? body.ingestionGuidanceMd : null,
@@ -86,7 +86,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       participantEmails: Array.isArray(body.participantEmails) ? body.participantEmails.map((value) => String(value)) : [],
     });
 
-    return NextResponse.json(result, { status: result.status === "needs_selection" ? 409 : 201 });
+    return NextResponse.json(result, { status: result.status === "needs_clarification" ? 409 : 201 });
   } catch (error) {
     return handleRouteError(error);
   }
