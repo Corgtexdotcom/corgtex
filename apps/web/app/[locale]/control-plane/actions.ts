@@ -43,6 +43,11 @@ function parseJsonObject(value: string) {
   return parsed as Record<string, unknown>;
 }
 
+function revalidateControlPlaneCustomer(instanceId: string) {
+  revalidatePath(`/control-plane/customers/${instanceId}`);
+  revalidatePath(`/es/control-plane/customers/${instanceId}`);
+}
+
 export async function configureSupportConnectorAction(formData: FormData) {
   const actor = await requirePageActor();
   const instanceId = asString(formData, "instanceId");
@@ -54,7 +59,7 @@ export async function configureSupportConnectorAction(formData: FormData) {
     supportCredentialLabel: optionalString(formData, "supportCredentialLabel"),
     supportNotes: optionalString(formData, "supportNotes"),
   });
-  revalidatePath(`/control-plane/customers/${instanceId}`);
+  revalidateControlPlaneCustomer(instanceId);
 }
 
 export async function runSupportOperationAction(formData: FormData) {
@@ -68,7 +73,7 @@ export async function runSupportOperationAction(formData: FormData) {
     arguments: parseJsonObject(asString(formData, "argumentsJson")),
     remoteWorkspaceId: optionalString(formData, "remoteWorkspaceId"),
   });
-  revalidatePath(`/control-plane/customers/${instanceId}`);
+  revalidateControlPlaneCustomer(instanceId);
 }
 
 export async function recordBreakGlassAction(formData: FormData) {
@@ -79,14 +84,14 @@ export async function recordBreakGlassAction(formData: FormData) {
     reason: asString(formData, "reason"),
     notes: asString(formData, "notes"),
   });
-  revalidatePath(`/control-plane/customers/${instanceId}`);
+  revalidateControlPlaneCustomer(instanceId);
 }
 
 export async function refreshSupportSnapshotAction(formData: FormData) {
   const actor = await requirePageActor();
   const instanceId = asString(formData, "instanceId");
   await fetchCustomerSupportSnapshot(actor, instanceId);
-  revalidatePath(`/control-plane/customers/${instanceId}`);
+  revalidateControlPlaneCustomer(instanceId);
 }
 
 export async function configureMeetingRecorderIntegrationAction(formData: FormData) {
@@ -104,7 +109,7 @@ export async function configureMeetingRecorderIntegrationAction(formData: FormDa
     entryMessage: optionalString(formData, "entryMessage"),
     reason: asString(formData, "reason"),
   });
-  revalidatePath(`/control-plane/customers/${instanceId}`);
+  revalidateControlPlaneCustomer(instanceId);
 }
 
 export async function runContextOperationAction(formData: FormData) {
@@ -116,7 +121,7 @@ export async function runContextOperationAction(formData: FormData) {
     sourceId: optionalString(formData, "sourceId"),
     reason: asString(formData, "reason"),
   });
-  revalidatePath(`/control-plane/customers/${instanceId}`);
+  revalidateControlPlaneCustomer(instanceId);
 }
 
 export async function runReleaseOperationAction(formData: FormData) {
@@ -129,5 +134,5 @@ export async function runReleaseOperationAction(formData: FormData) {
     targetReleaseVersion: optionalString(formData, "targetReleaseVersion"),
     reason: asString(formData, "reason"),
   });
-  revalidatePath(`/control-plane/customers/${instanceId}`);
+  revalidateControlPlaneCustomer(instanceId);
 }

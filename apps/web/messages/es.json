@@ -1107,6 +1107,364 @@
     "tools": "Herramientas",
     "workspace": "Espacio de trabajo"
   },
+  "controlPlane": {
+    "title": "Control Plane",
+    "eyebrow": "Gobernanza de IA empresarial",
+    "description": "Superficie operativa privada para instancias hospedadas de clientes, contexto gobernado, integraciones empresariales, controles del ciclo de vida de agentes de IA, despliegue de releases, soporte, auditoría y acceso Codex/MCP.",
+    "sections": {
+      "fleet": {
+        "label": "Flota",
+        "detail": "Salud de instancias hospedadas, estado de rollout y preparación del cliente."
+      },
+      "customers": {
+        "label": "Clientes",
+        "detail": "Registros empresariales buscables y propiedad de soporte."
+      },
+      "context": {
+        "label": "Contexto y Brain",
+        "detail": "Frescura de fuentes, procedencia, estado de sincronización y riesgo de ingesta."
+      },
+      "ai-governance": {
+        "label": "Gobernanza de IA",
+        "detail": "Ejecuciones de agentes, gasto de modelos, aprobaciones, presupuestos y acciones riesgosas."
+      },
+      "integrations": {
+        "label": "Integraciones",
+        "detail": "Entitlements empresariales, preparación de proveedores, límites y fallas."
+      },
+      "releases": {
+        "label": "Releases",
+        "detail": "Diferencia de versiones, upgrades preparados, bootstrap y preparación de rollback."
+      },
+      "support": {
+        "label": "Soporte",
+        "detail": "Operaciones de soporte con razón y registros break-glass.",
+        "recentOperations": "{count} operaciones recientes de soporte visibles"
+      },
+      "audit": {
+        "label": "Auditoría",
+        "detail": "Evidencia central de operaciones del control plane y del cliente."
+      },
+      "mcp": {
+        "label": "MCP/CLI",
+        "detail": "Interfaz de automatización con privilegio mínimo para Codex y herramientas de operadores."
+      },
+      "detailPageNote": "Las páginas de detalle del cliente exponen la primera vista operativa para este dominio."
+    },
+    "status": {
+      "active": "activo",
+      "attention": "requiere atención",
+      "available": "disponible",
+      "completed": "completado",
+      "configured": "configurado",
+      "connected": "conectado",
+      "degraded": "degradado",
+      "disabled": "deshabilitado",
+      "down": "caído",
+      "draft": "borrador",
+      "enabled": "Habilitado",
+      "failed": "fallido",
+      "inspectable": "inspeccionable",
+      "linked": "vinculado",
+      "never": "Nunca",
+      "none": "ninguno",
+      "notSet": "Sin configurar",
+      "not_configured": "sin configurar",
+      "off": "Apagado",
+      "ok": "saludable",
+      "on": "Encendido",
+      "pending": "pendiente",
+      "provisioning": "provisionando",
+      "ready": "listo",
+      "recorded": "registrado",
+      "remote": "remoto",
+      "remoteOnly": "Solo remoto",
+      "running": "en curso",
+      "suspended": "suspendido",
+      "unknown": "desconocido"
+    },
+    "readiness": {
+      "regionMissing": "Falta región",
+      "residencyMissing": "Falta residencia",
+      "releaseUnknown": "Release desconocido",
+      "noHealthProbe": "Sin prueba de salud",
+      "runtimeStatus": "Runtime {status}",
+      "supportConnectorMissing": "Conector de soporte sin configurar",
+      "supportConnectorDegraded": "Conector de soporte degradado"
+    },
+    "fleetCards": {
+      "customers": {
+        "label": "Clientes",
+        "detail": "Instancias empresariales registradas"
+      },
+      "active": {
+        "label": "Activas",
+        "detail": "Instancias reportando provisioning activo"
+      },
+      "managed": {
+        "label": "Gestionadas localmente",
+        "detail": "Vinculadas a un workspace en este despliegue"
+      },
+      "supportReady": {
+        "label": "Soporte listo",
+        "detail": "Conector de soporte cifrado disponible"
+      },
+      "needsAttention": {
+        "label": "Requieren atención",
+        "detail": "Brechas de preparación u operaciones fallidas"
+      }
+    },
+    "customers": {
+      "title": "Clientes",
+      "description": "Busca por cliente, slug, región, release, responsable o URL.",
+      "searchPlaceholder": "Buscar clientes",
+      "searchButton": "Buscar",
+      "columns": {
+        "customer": "Cliente",
+        "readiness": "Preparación",
+        "workspace": "Workspace",
+        "region": "Región",
+        "release": "Release",
+        "runtime": "Runtime",
+        "support": "Soporte",
+        "lastCheck": "Última revisión",
+        "actions": "Acciones"
+      },
+      "noOwner": "Sin responsable",
+      "open": "Abrir",
+      "empty": "Ninguna instancia de cliente coincide con esta búsqueda."
+    },
+    "operationHistory": {
+      "title": "Historial de operaciones",
+      "description": "Operaciones recientes de soporte con razón en toda la flota.",
+      "customerReason": "{customer} - {reason}",
+      "empty": "Aún no hay operaciones de soporte registradas."
+    },
+    "customerDetail": {
+      "backToFleet": "Volver a la flota",
+      "eyebrow": "Control plane del cliente",
+      "openCustomer": "Abrir cliente",
+      "refreshSnapshot": "Actualizar snapshot de soporte",
+      "forms": {
+        "reason": "Razón",
+        "mutationReason": "Razón de la mutación"
+      },
+      "metrics": {
+        "readiness": "Preparación",
+        "openGaps": "{count} brechas abiertas",
+        "runtime": "Runtime",
+        "release": "Release",
+        "checkedAt": "Revisado {date}",
+        "noReleaseCheck": "Sin revisión de release",
+        "support": "Soporte",
+        "residency": "Residencia",
+        "noResidencyPolicy": "Sin política de residencia",
+        "managedWorkspace": "Workspace gestionado",
+        "useSupportConnector": "Usa el conector de soporte para lecturas en vivo del cliente"
+      },
+      "readiness": {
+        "customerRecord": "Registro del cliente",
+        "customerRecordMissing": "Falta slug o URL del cliente.",
+        "managedWorkspace": "Workspace gestionado",
+        "managedWorkspaceMissing": "No hay vínculo registrado con un workspace de este despliegue.",
+        "deploymentResidency": "Residencia del despliegue",
+        "deploymentResidencyMissing": "Región y residencia no están completamente configuradas.",
+        "runtimeHealth": "Salud del runtime",
+        "runtimeHealthMissing": "No se ha registrado salud del runtime.",
+        "supportConnector": "Conector de soporte",
+        "supportConnectorMissing": "La credencial cifrada de soporte no está configurada.",
+        "releaseEvidence": "Evidencia de release",
+        "releaseEvidenceMissing": "El release actual es desconocido."
+      },
+      "healthReadiness": {
+        "title": "Salud y preparación"
+      },
+      "context": {
+        "description": "La frescura de fuentes, fallas de ingesta y operaciones de reparación son visibles aquí cuando el cliente tiene un workspace gestionado vinculado. Los clientes remotos siguen usando el conector de soporte.",
+        "contextAccess": "Acceso al contexto",
+        "managedDataAvailable": "Los datos del workspace gestionado están disponibles localmente.",
+        "useSupportForReads": "Usa operaciones de soporte para lecturas en vivo del cliente.",
+        "configureSupportFirst": "Configura primero el conector de soporte.",
+        "brainSources": "Fuentes del Brain",
+        "knowledgeChunks": "{count} fragmentos de conocimiento",
+        "requiresSupportSnapshot": "Requiere snapshot de soporte",
+        "externalSources": "Fuentes externas",
+        "externalSourceDetail": "{stale} obsoletas, {failed} fallidas",
+        "failedSyncJobs": "Trabajos de sync fallidos",
+        "failedSyncJobsDetail": "{count} trabajos de sync fallidos",
+        "inspectThroughSupport": "Inspecciona mediante el conector de soporte",
+        "lastContextPull": "Última lectura de contexto",
+        "noSupportSnapshot": "Aún no hay snapshot de soporte",
+        "ingestionRisk": "Riesgo de ingesta",
+        "noSupportConnectorError": "No hay error registrado del conector de soporte.",
+        "operationsTitle": "Operaciones de contexto",
+        "operationsDescription": "Encola syncs de fuentes o deshabilita una fuente ruidosa. Cada operación escribe el registro de auditoría de la instancia hospedada.",
+        "openBrain": "Abrir Brain",
+        "operationLabel": "Operación",
+        "syncAllSources": "Sincronizar todas las fuentes activas",
+        "syncSelectedSource": "Sincronizar fuente seleccionada",
+        "disableSelectedSource": "Deshabilitar fuente seleccionada",
+        "sourceLabel": "Fuente",
+        "allActiveSources": "Todas las fuentes activas",
+        "reasonPlaceholder": "El cliente pidió reparar la fuente",
+        "runOperation": "Ejecutar operación de contexto",
+        "externalContextSources": "Fuentes externas de contexto",
+        "sourceCadence": "{driver} - cada {minutes} min",
+        "lastSync": "Último sync: {date}",
+        "latestLogError": "Último log: {error}",
+        "latestLogRows": "Último log: {rows} filas, {chunks} fragmentos",
+        "noExternalSources": "No hay fuentes externas de contexto registradas para este workspace.",
+        "recentBrainSources": "Fuentes recientes del Brain",
+        "absorbedAt": "Absorbido {date}",
+        "createdAt": "Creado {date}",
+        "noBrainSources": "No hay fuentes recientes del Brain registradas para este workspace.",
+        "recentFailedSyncJobs": "Trabajos de sync fallidos recientes",
+        "attempts": "{count} intentos",
+        "noErrorRecorded": "Sin error registrado.",
+        "remoteOperationsTitle": "Operaciones de contexto remoto",
+        "remoteOperationsDescription": "Este cliente no tiene un workspace gestionado vinculado. Usa el panel de operaciones del conector de soporte para inspeccionar o sincronizar data feeds remotos."
+      },
+      "aiGovernance": {
+        "description": "Las ejecuciones de agentes, gasto de modelos, esperas de aprobación, actividad riesgosa de herramientas y trabajos fallidos se gobiernan desde el workspace gestionado cuando está disponible.",
+        "agentVisibility": "Visibilidad de agentes",
+        "localRuns": "{count} ejecuciones locales de agentes registradas.",
+        "remoteRuns": "Usa operaciones de soporte para inspeccionar ejecuciones remotas de agentes.",
+        "pendingApprovals": "Aprobaciones pendientes",
+        "humanApprovalWaits": "Esperas de aprobación humana",
+        "failedJobs": "Trabajos fallidos",
+        "failedJobsDetail": "{count} trabajos de workflow fallidos",
+        "modelSpend": "Gasto de modelos",
+        "totalTokens": "{count} tokens totales",
+        "riskyToolCalls": "Llamadas riesgosas a herramientas",
+        "recentCallsFlagged": "{count} llamadas recientes marcadas",
+        "supportConnectorPath": "Ruta por conector de soporte",
+        "failedOperations": "Operaciones fallidas",
+        "failedSupportOperations": "{count} operaciones de soporte fallidas",
+        "recentAgentRuns": "Ejecuciones recientes de agentes",
+        "approvalRequired": "aprobación requerida",
+        "noAgentRuns": "No hay ejecuciones de agentes registradas para este workspace.",
+        "riskAndFailures": "Riesgo y fallas",
+        "noRiskOrFailures": "No se encontraron llamadas riesgosas a herramientas ni trabajos de workflow fallidos recientemente.",
+        "remoteTitle": "Gobernanza de IA remota",
+        "remoteDescription": "Este cliente no tiene un workspace gestionado vinculado. Usa operaciones de soporte para inspeccionar ejecuciones de agentes y trabajos de runtime en la instancia del cliente."
+      },
+      "integrations": {
+        "title": "Integraciones empresariales",
+        "description": "Las integraciones se tratan como entitlements con preparación de proveedor, límites, uso, fallas y auditoría. Los grabadores de reuniones son el primer entitlement V1.",
+        "meetingRecorderEntitlement": "Entitlement de grabador de reuniones",
+        "noProviderSelected": "Sin proveedor seleccionado",
+        "recorderStatus": "Estado del grabador",
+        "autoRecordingOn": "Auto-grabación encendida",
+        "autoRecordingOff": "Auto-grabación apagada",
+        "recorderUsage": "Uso del grabador",
+        "minutes": "{count} min",
+        "monthlyCap": "límite mensual de {count} minutos",
+        "recorderFailures": "Fallas del grabador",
+        "failedRecordings": "{count} grabaciones fallidas",
+        "calendarAndSlack": "Calendario y Slack",
+        "localCommunicationInstalls": "{count} instalaciones locales de comunicación.",
+        "supportCanReadState": "El conector de soporte puede leer el estado de integraciones del cliente.",
+        "supportConnector": "Conector de soporte",
+        "lastSnapshot": "Último snapshot {date}",
+        "noSnapshot": "Aún no hay snapshot de soporte",
+        "meetingRecorderManagement": "Gestión del grabador de reuniones",
+        "meetingRecorderManagementDescription": "Proveedor, límites, auto-grabación, uso y fallas se gestionan aquí para este cliente.",
+        "vendorReady": "Proveedor listo",
+        "needsReadiness": "Requiere preparación",
+        "entitlement": "Entitlement",
+        "recorderState": "Estado del grabador",
+        "autoRecording": "Auto-grabación",
+        "primaryProvider": "Proveedor principal",
+        "fallbackProvider": "Proveedor fallback",
+        "monthlyMinuteCap": "Límite mensual de minutos",
+        "botName": "Nombre del bot",
+        "reasonPlaceholder": "Actualización de entitlement del grabador enterprise",
+        "entryMessage": "Mensaje de entrada",
+        "saveRecorderEntitlement": "Guardar entitlement del grabador",
+        "linkManagedWorkspace": "Vincula un workspace gestionado para editar entitlements del grabador desde Control Plane. Las instancias remotas aún se pueden inspeccionar mediante operaciones de soporte."
+      },
+      "releases": {
+        "title": "Operaciones de release",
+        "currentRelease": "Release actual",
+        "provisioning": "Provisioning",
+        "health": "Salud",
+        "noRuntimeError": "No hay error de runtime registrado.",
+        "drift": "Diferencia",
+        "noDrift": "No hay diferencia de release registrada.",
+        "rollbackReadiness": "Preparación de rollback",
+        "rollbackReady": "Release actual y runtime saludable registrados.",
+        "rollbackNeedsEvidence": "Necesita release conocido y runtime saludable.",
+        "lastPreparation": "Última preparación",
+        "noPreparation": "Aún no hay auditoría de preparación de upgrade.",
+        "prepareUpgrade": "Preparar upgrade de release",
+        "prepareUpgradeDescription": "Registra intención del operador, release destino, checks de preparación, drift y evidencia de rollback. Esto no despliega.",
+        "managedWorkspaceLinked": "Workspace gestionado vinculado",
+        "centralInstanceRecord": "Registro central de instancia",
+        "targetImageTag": "Tag de imagen destino",
+        "targetImageTagPlaceholder": "Ingresa el tag de imagen destino",
+        "targetVersion": "Versión destino",
+        "targetVersionPlaceholder": "Etiqueta de versión opcional",
+        "reasonPlaceholder": "Preparar upgrade por etapas después del smoke de producción",
+        "recordUpgradePreparation": "Registrar preparación de upgrade",
+        "recentPreparationAudit": "Auditoría reciente de preparación de release"
+      },
+      "support": {
+        "connectorTitle": "Conector de soporte",
+        "connectorDescription": "Guarda una credencial cifrada de soporte para este cliente. El token nunca se vuelve a mostrar.",
+        "baseUrl": "URL base",
+        "mcpUrl": "URL MCP",
+        "credentialLabel": "Etiqueta de credencial",
+        "supportCredential": "Credencial de soporte",
+        "credentialConfiguredPlaceholder": "Configurada; ingresa un nuevo token para rotar",
+        "credentialNewPlaceholder": "Pega el token de soporte",
+        "notes": "Notas",
+        "saveConnector": "Guardar conector",
+        "runOperationTitle": "Ejecutar operación de soporte",
+        "runOperationDescription": "Las acciones mutantes requieren una razón y escriben registros de auditoría centrales y del lado del cliente.",
+        "action": "Acción",
+        "actions": {
+          "membersList": "Listar miembros",
+          "membersInvite": "Invitar miembro",
+          "membersDeactivate": "Desactivar miembro",
+          "integrationsList": "Inspeccionar integraciones",
+          "dataFeedsList": "Inspeccionar data feeds",
+          "dataFeedsSync": "Sincronizar data feed",
+          "toolLinksList": "Inspeccionar enlaces de herramientas",
+          "toolLinksUpsert": "Crear o actualizar enlace de herramienta",
+          "toolLinksArchive": "Archivar enlace de herramienta",
+          "agentsListRuns": "Inspeccionar ejecuciones de agentes",
+          "runtimeListFailedJobs": "Listar trabajos fallidos",
+          "runtimeRetryFailedJob": "Reintentar trabajo fallido",
+          "runtimeDiscardFailedJob": "Descartar trabajo fallido",
+          "documentsUploadText": "Subir documento de texto"
+        },
+        "reasonPlaceholder": "Solicitud de soporte del piloto, reparación de sync fallido, ayuda de onboarding...",
+        "remoteWorkspaceId": "ID de workspace remoto",
+        "remoteWorkspacePlaceholder": "Opcional; se guarda en la auditoría de la operación",
+        "argumentsJson": "Argumentos JSON",
+        "commonArgumentTemplates": "Plantillas comunes de argumentos",
+        "runOperation": "Ejecutar operación",
+        "breakGlassTitle": "Notas break-glass",
+        "breakGlassReasonPlaceholder": "Por qué se necesitó acceso directo a infraestructura o base de datos",
+        "breakGlassNotesPlaceholder": "Qué se inspeccionó o cambió. No pegues secretos.",
+        "recordBreakGlassNote": "Registrar nota break-glass"
+      },
+      "audit": {
+        "supportOperations": "Operaciones de soporte",
+        "mutatingOperations": "{count} operaciones mutantes o de reparación registradas para este cliente.",
+        "hostedInstanceEvents": "Eventos de instancia hospedada",
+        "noHostedInstanceEvents": "Aún no hay eventos de instancia hospedada registrados."
+      },
+      "mcp": {
+        "title": "Acceso MCP/CLI",
+        "description": "Codex y las herramientas de operadores usan la API de Control Plane y el endpoint MCP. Las salidas deben permanecer redactadas y las mutaciones deben conservar una razón.",
+        "customerMcpUrl": "URL MCP del cliente",
+        "supportOperations": "Operaciones de soporte",
+        "supportOperationsDetail": "{failed} operaciones fallidas",
+        "centralEndpoint": "Endpoint central"
+      }
+    }
+  },
   "operator": {
     "agentActionExtraction": "Extracción de acciones",
     "agentConstitutionUpdate": "Disparador de actualización constitucional",
