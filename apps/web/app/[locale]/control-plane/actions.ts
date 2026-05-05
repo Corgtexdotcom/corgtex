@@ -6,6 +6,7 @@ import {
   configureSupportConnector,
   fetchCustomerSupportSnapshot,
   recordBreakGlassSupportNote,
+  runControlPlaneContextOperation,
   runCustomerSupportOperation,
 } from "@corgtex/domain";
 import type { SupportAction } from "@corgtex/domain";
@@ -100,6 +101,18 @@ export async function configureMeetingRecorderIntegrationAction(formData: FormDa
     monthlyMinuteCap: asOptionalNumber(formData, "monthlyMinuteCap") ?? 6_000,
     botName: optionalString(formData, "botName"),
     entryMessage: optionalString(formData, "entryMessage"),
+    reason: asString(formData, "reason"),
+  });
+  revalidatePath(`/control-plane/customers/${instanceId}`);
+}
+
+export async function runContextOperationAction(formData: FormData) {
+  const actor = await requirePageActor();
+  const instanceId = asString(formData, "instanceId");
+  await runControlPlaneContextOperation(actor, {
+    instanceId,
+    operation: asString(formData, "operation"),
+    sourceId: optionalString(formData, "sourceId"),
     reason: asString(formData, "reason"),
   });
   revalidatePath(`/control-plane/customers/${instanceId}`);
