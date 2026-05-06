@@ -179,7 +179,7 @@ export default async function GovernancePage({
               {currentConstitution.diffSummary && (
                 <div style={{ marginTop: 12, padding: 12, background: "var(--accent-soft)", borderRadius: 8, fontSize: "0.85rem" }}>
                   <strong>{t("changesInVersion", { version: currentConstitution.version })}</strong>
-                  <div style={{ marginTop: 4 }}>{currentConstitution.diffSummary}</div>
+                  <MarkdownRenderer markdown={currentConstitution.diffSummary} variant="compact" className="mt-1" />
                 </div>
               )}
             </>
