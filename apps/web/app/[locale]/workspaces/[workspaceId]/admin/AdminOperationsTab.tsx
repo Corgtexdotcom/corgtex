@@ -4,13 +4,13 @@ import { useTranslations } from "next-intl";
 import { useState } from "react";
 import { SubmitButton } from "@/lib/components/SubmitButton";
 import { 
-  adminRegisterInstanceAction, 
-  adminProvisionHostedCustomerAction,
-  adminRemoveInstanceAction, 
-  adminProbeInstanceHealthAction,
-  adminSuspendHostedInstanceAction,
+  adminRegisterCustomerDeploymentAction,
+  adminProvisionCustomerDeploymentAction,
+  adminRemoveCustomerDeploymentAction,
+  adminProbeCustomerDeploymentHealthAction,
+  adminSuspendCustomerDeploymentAction,
   adminTriggerBootstrapAction,
-  adminUpgradeHostedInstanceAction,
+  adminUpgradeCustomerDeploymentAction,
   adminDiscardFailedJobAction,
   adminRetryFailedJobAction
 } from "./actions";
@@ -18,7 +18,7 @@ import {
 interface Props {
   workspaceId: string;
   data: {
-    instances: any[];
+    deployments: any[];
     failedJobs: any[];
     commErrors: any[];
   };
@@ -42,20 +42,20 @@ export function AdminOperationsTab({ data, workspaceId }: Props) {
       
       <section className="stack" style={{ gap: 16 }}>
         <div className="admin-section-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <h2 className="title-lg">{t("externalInstances")}</h2>
+          <h2 className="title-lg">{t("customerDeployments")}</h2>
           <div className="admin-header-actions" style={{ display: "flex", gap: 8 }}>
             <button className="btn" onClick={() => setShowProvision(!showProvision)}>
-              Provision hosted customer
+              Provision customer deployment
             </button>
             <button className="btn" onClick={() => setShowRegister(!showRegister)}>
-              {t("registerInstance")}
+              {t("registerDeployment")}
             </button>
           </div>
         </div>
 
         {showProvision && (
           <div className="card" style={{ padding: 24 }}>
-            <form action={adminProvisionHostedCustomerAction} className="stack" style={{ gap: 16 }}>
+            <form action={adminProvisionCustomerDeploymentAction} className="stack" style={{ gap: 16 }}>
               <input type="hidden" name="workspaceId" value={workspaceId} />
               <div className="admin-form-grid admin-form-grid-3" style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 16 }}>
                 <div className="form-group">
@@ -148,7 +148,7 @@ export function AdminOperationsTab({ data, workspaceId }: Props) {
                 </div>
               </div>
               <div style={{ display: "flex", justifyContent: "flex-end" }}>
-                <SubmitButton>Provision hosted customer</SubmitButton>
+                <SubmitButton>Provision customer deployment</SubmitButton>
               </div>
             </form>
           </div>
@@ -156,19 +156,19 @@ export function AdminOperationsTab({ data, workspaceId }: Props) {
 
         {showRegister && (
           <div className="card" style={{ padding: 24 }}>
-            <form action={adminRegisterInstanceAction} className="stack" style={{ gap: 16 }}>
+            <form action={adminRegisterCustomerDeploymentAction} className="stack" style={{ gap: 16 }}>
               <input type="hidden" name="workspaceId" value={workspaceId} />
               <div className="admin-form-grid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
                 <div className="form-group">
-                  <label>{t("instanceLabel")}</label>
+                  <label>{t("deploymentLabel")}</label>
                   <input type="text" name="label" className="input" required placeholder="e.g. Acme Corp Prod" />
                 </div>
                 <div className="form-group">
-                  <label>{t("instanceUrl")}</label>
+                  <label>{t("deploymentUrl")}</label>
                   <input type="url" name="url" className="input" required placeholder="https://acme.corgtex.com" />
                 </div>
                 <div className="form-group">
-                  <label>{t("instanceEnvironment")}</label>
+                  <label>{t("deploymentEnvironment")}</label>
                   <input type="text" name="environment" className="input" placeholder="production" />
                 </div>
                 <div className="form-group">
@@ -193,7 +193,7 @@ export function AdminOperationsTab({ data, workspaceId }: Props) {
                 </div>
               </div>
               <div style={{ display: "flex", justifyContent: "flex-end" }}>
-                <SubmitButton>{t("registerInstance")}</SubmitButton>
+                <SubmitButton>{t("registerDeployment")}</SubmitButton>
               </div>
             </form>
           </div>
@@ -203,44 +203,44 @@ export function AdminOperationsTab({ data, workspaceId }: Props) {
           <table className="table" style={{ width: "100%", textAlign: "left", borderCollapse: "collapse" }}>
             <thead>
               <tr style={{ borderBottom: "1px solid var(--border-color)" }}>
-                <th style={{ padding: 12 }}>{t("instanceLabel")}</th>
-                <th style={{ padding: 12 }}>{t("instanceUrl")}</th>
-                <th style={{ padding: 12 }}>{t("instanceEnvironment")}</th>
+                <th style={{ padding: 12 }}>{t("deploymentLabel")}</th>
+                <th style={{ padding: 12 }}>{t("deploymentUrl")}</th>
+                <th style={{ padding: 12 }}>{t("deploymentEnvironment")}</th>
                   <th style={{ padding: 12 }}>Region</th>
                   <th style={{ padding: 12 }}>Release</th>
                   <th style={{ padding: 12 }}>Readiness</th>
                   <th style={{ padding: 12 }}>Provisioning</th>
                   <th style={{ padding: 12 }}>Bootstrap</th>
-                  <th style={{ padding: 12 }}>{t("instanceLastChecked")}</th>
+                  <th style={{ padding: 12 }}>{t("deploymentLastChecked")}</th>
                   <th style={{ padding: 12 }}>{t("colStatus")}</th>
                   <th style={{ padding: 12 }}>{t("colActions")}</th>
               </tr>
             </thead>
             <tbody>
-              {data.instances.length === 0 ? (
+              {data.deployments.length === 0 ? (
                 <tr>
                   <td colSpan={11} style={{ padding: 24, textAlign: "center" }} className="muted">
-                    No instances registered.
+                    No customer deployments registered.
                   </td>
                 </tr>
-              ) : data.instances.map(inst => (
-                <tr key={inst.id} style={{ borderBottom: "1px solid var(--border-color)" }}>
-                  <td data-label={t("instanceLabel")} style={{ padding: 12 }}>{inst.label}</td>
-                  <td data-label={t("instanceUrl")} style={{ padding: 12 }}>
-                    <a href={inst.url} target="_blank" rel="noreferrer" style={{ color: "var(--accent-11)" }}>
-                      {inst.url}
+              ) : data.deployments.map(deployment => (
+                <tr key={deployment.id} style={{ borderBottom: "1px solid var(--border-color)" }}>
+                  <td data-label={t("deploymentLabel")} style={{ padding: 12 }}>{deployment.label}</td>
+                  <td data-label={t("deploymentUrl")} style={{ padding: 12 }}>
+                    <a href={deployment.url} target="_blank" rel="noreferrer" style={{ color: "var(--accent-11)" }}>
+                      {deployment.url}
                     </a>
                   </td>
-                  <td data-label={t("instanceEnvironment")} style={{ padding: 12 }}>{inst.environment || "—"}</td>
-                  <td data-label="Region" style={{ padding: 12 }}>{inst.region || "—"}</td>
-                  <td data-label="Release" style={{ padding: 12 }}>{inst.releaseImageTag || inst.releaseVersion || "—"}</td>
+                  <td data-label={t("deploymentEnvironment")} style={{ padding: 12 }}>{deployment.environment || "—"}</td>
+                  <td data-label="Region" style={{ padding: 12 }}>{deployment.region || "—"}</td>
+                  <td data-label="Release" style={{ padding: 12 }}>{deployment.releaseImageTag || deployment.releaseVersion || "—"}</td>
                   <td data-label="Readiness" style={{ padding: 12, minWidth: 220 }}>
                     <details>
-                      <summary style={{ color: readinessColor(inst.readiness?.status), fontWeight: 600 }}>
-                        {readinessLabel(inst.readiness?.status)}
+                      <summary style={{ color: readinessColor(deployment.readiness?.status), fontWeight: 600 }}>
+                        {readinessLabel(deployment.readiness?.status)}
                       </summary>
                       <div style={{ display: "grid", gap: 4, marginTop: 8 }}>
-                        {(inst.readiness?.checks ?? []).map((check: any) => (
+                        {(deployment.readiness?.checks ?? []).map((check: any) => (
                           <div key={check.key} className="text-sm">
                             <span style={{
                               color: check.status === "ok" ? "var(--green-11)" : check.status === "warning" ? "var(--orange-11)" : "var(--red-11)",
@@ -254,53 +254,53 @@ export function AdminOperationsTab({ data, workspaceId }: Props) {
                       </div>
                     </details>
                   </td>
-                  <td data-label="Provisioning" style={{ padding: 12 }}>{inst.provisioningStatus || "draft"}</td>
-                  <td data-label="Bootstrap" style={{ padding: 12 }}>{inst.bootstrapStatus || "not_started"}</td>
-                  <td data-label={t("instanceLastChecked")} style={{ padding: 12 }}>
-                    {inst.lastHealthCheck ? new Date(inst.lastHealthCheck).toLocaleString() : "Never"}
+                  <td data-label="Provisioning" style={{ padding: 12 }}>{deployment.provisioningStatus || "draft"}</td>
+                  <td data-label="Bootstrap" style={{ padding: 12 }}>{deployment.bootstrapStatus || "not_started"}</td>
+                  <td data-label={t("deploymentLastChecked")} style={{ padding: 12 }}>
+                    {deployment.lastHealthCheck ? new Date(deployment.lastHealthCheck).toLocaleString() : "Never"}
                   </td>
                   <td data-label={t("colStatus")} style={{ padding: 12 }}>
-                    {inst.lastHealthStatus === "ok" ? (
-                      <span style={{ color: "var(--green-11)", fontWeight: 500 }}>{t("instanceHealthOk")}</span>
-                    ) : inst.lastHealthStatus === "degraded" ? (
-                      <span style={{ color: "var(--orange-11)", fontWeight: 500 }}>{t("instanceHealthDegraded")}</span>
-                    ) : inst.lastHealthStatus === "down" ? (
-                      <span style={{ color: "var(--red-11)", fontWeight: 500 }}>{t("instanceHealthDown")}</span>
+                    {deployment.lastHealthStatus === "ok" ? (
+                      <span style={{ color: "var(--green-11)", fontWeight: 500 }}>{t("deploymentHealthOk")}</span>
+                    ) : deployment.lastHealthStatus === "degraded" ? (
+                      <span style={{ color: "var(--orange-11)", fontWeight: 500 }}>{t("deploymentHealthDegraded")}</span>
+                    ) : deployment.lastHealthStatus === "down" ? (
+                      <span style={{ color: "var(--red-11)", fontWeight: 500 }}>{t("deploymentHealthDown")}</span>
                     ) : (
-                      <span className="muted">{t("instanceHealthUnknown")}</span>
+                      <span className="muted">{t("deploymentHealthUnknown")}</span>
                     )}
                   </td>
                   <td data-label={t("colActions")} style={{ padding: 12 }}>
                     <div className="admin-table-actions" style={{ display: "flex", gap: 8 }}>
-                      <form action={adminProbeInstanceHealthAction}>
+                      <form action={adminProbeCustomerDeploymentHealthAction}>
                         <input type="hidden" name="workspaceId" value={workspaceId} />
-                        <input type="hidden" name="instanceId" value={inst.id} />
+                        <input type="hidden" name="deploymentId" value={deployment.id} />
                         <SubmitButton variant="secondary" className="btn-sm">{t("btnCheckNow")}</SubmitButton>
                       </form>
-                      <form action={adminRemoveInstanceAction}>
+                      <form action={adminRemoveCustomerDeploymentAction}>
                         <input type="hidden" name="workspaceId" value={workspaceId} />
-                        <input type="hidden" name="instanceId" value={inst.id} />
-                        <SubmitButton variant="secondary" className="btn-sm">{t("btnRemoveInstance")}</SubmitButton>
+                        <input type="hidden" name="deploymentId" value={deployment.id} />
+                        <SubmitButton variant="secondary" className="btn-sm">{t("btnRemoveDeployment")}</SubmitButton>
                       </form>
-                      <form action={adminSuspendHostedInstanceAction}>
+                      <form action={adminSuspendCustomerDeploymentAction}>
                         <input type="hidden" name="workspaceId" value={workspaceId} />
-                        <input type="hidden" name="instanceId" value={inst.id} />
+                        <input type="hidden" name="deploymentId" value={deployment.id} />
                         <SubmitButton variant="secondary" className="btn-sm">Suspend</SubmitButton>
                       </form>
                     </div>
-                    {inst.bootstrapBundleUri && (
+                    {deployment.bootstrapBundleUri && (
                       <form action={adminTriggerBootstrapAction} style={{ display: "grid", gap: 6, marginTop: 8 }}>
                         <input type="hidden" name="workspaceId" value={workspaceId} />
-                        <input type="hidden" name="instanceId" value={inst.id} />
+                        <input type="hidden" name="deploymentId" value={deployment.id} />
                         <input type="password" name="bootstrapToken" className="input" placeholder="Bootstrap token" required />
                         <input type="datetime-local" name="expiresAt" className="input" required />
                         <SubmitButton variant="secondary" className="btn-sm">Trigger bootstrap</SubmitButton>
                       </form>
                     )}
-                    {inst.railwayWebServiceId && inst.railwayWorkerServiceId && (
-                      <form action={adminUpgradeHostedInstanceAction} style={{ display: "grid", gap: 6, marginTop: 8 }}>
+                    {deployment.railwayWebServiceId && deployment.railwayWorkerServiceId && (
+                      <form action={adminUpgradeCustomerDeploymentAction} style={{ display: "grid", gap: 6, marginTop: 8 }}>
                         <input type="hidden" name="workspaceId" value={workspaceId} />
-                        <input type="hidden" name="instanceId" value={inst.id} />
+                        <input type="hidden" name="deploymentId" value={deployment.id} />
                         <input type="text" name="releaseVersion" className="input" placeholder="Release version" />
                         <input type="text" name="releaseImageTag" className="input" placeholder="sha-..." required />
                         <input type="text" name="webImage" className="input" placeholder="Web image" />

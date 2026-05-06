@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
-  listControlPlaneCustomers: vi.fn(),
+  listControlPlaneDeployments: vi.fn(),
   requireControlPlaneAccess: vi.fn(),
   requireControlPlaneScope: vi.fn((actor: { kind?: string; scopes?: string[] }, scope: string) => {
     if (actor.kind !== "agent") return;
@@ -16,9 +16,9 @@ const mocks = vi.hoisted(() => ({
 vi.mock("@corgtex/domain", () => ({
   configureControlPlaneMeetingRecorderIntegration: vi.fn(), enqueueControlPlaneFleetSnapshots: vi.fn(), fetchCustomerSupportSnapshot: vi.fn(),
   getControlPlaneAiGovernanceStatus: vi.fn(), getControlPlaneContextHealth: vi.fn(),
-  getControlPlaneCustomer: vi.fn(), getControlPlaneIntegrationStatus: vi.fn(), getControlPlaneReleaseStatus: vi.fn(),
-  listControlPlaneCustomers: mocks.listControlPlaneCustomers,
-  probeControlPlaneCustomerHealth: vi.fn(),
+  getControlPlaneDeployment: vi.fn(), getControlPlaneIntegrationStatus: vi.fn(), getControlPlaneReleaseStatus: vi.fn(),
+  listControlPlaneDeployments: mocks.listControlPlaneDeployments,
+  probeControlPlaneDeploymentHealth: vi.fn(),
   requireControlPlaneAccess: mocks.requireControlPlaneAccess,
   requireControlPlaneScope: mocks.requireControlPlaneScope,
   refreshControlPlaneFleetSnapshots: vi.fn(),
@@ -36,17 +36,17 @@ describe("/api/control-plane/mcp", () => {
     vi.clearAllMocks();
     mocks.resolveControlPlaneRequestActor.mockResolvedValue({ kind: "agent", authProvider: "control-plane", label: "control-plane-agent", scopes: ["control-plane:read"] });
     mocks.requireControlPlaneAccess.mockResolvedValue({ role: "OPERATOR" });
-    mocks.listControlPlaneCustomers.mockResolvedValue([]);
+    mocks.listControlPlaneDeployments.mockResolvedValue([]);
   });
   it("lists the governed control-plane tool surface", async () => {
     const { POST } = await import("./route");
     const response = await POST(request({ jsonrpc: "2.0", id: 1, method: "tools/list" }) as never);
     const body = await response.json();
-    expect(body.result.tools.map((tool: { name: string }) => tool.name)).toEqual(["list_customers", "get_customer_status", "refresh_customer_snapshot", "list_customer_integrations", "get_context_health", "get_ai_governance_status", "get_release_status", "configure_customer_integration", "run_context_sync", "probe_customer_health", "refresh_fleet_snapshots", "enqueue_fleet_snapshot_jobs", "prepare_release_upgrade", "run_customer_support_operation"]);
+    expect(body.result.tools.map((tool: { name: string }) => tool.name)).toEqual(["list_customers", "get_customer_deployment_status", "refresh_customer_deployment_snapshot", "list_customer_integrations", "get_context_health", "get_ai_governance_status", "get_release_status", "configure_customer_integration", "run_context_sync", "probe_customer_deployment_health", "refresh_fleet_snapshots", "enqueue_fleet_snapshot_jobs", "prepare_release_upgrade", "run_customer_support_operation"]);
   });
   it("denies mutating tools when the control-plane agent only has read scope", async () => {
     const { POST } = await import("./route");
-    const response = await POST(request({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "run_context_sync", arguments: { instanceId: "inst-1", reason: "repair" } } }) as never);
+    const response = await POST(request({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "run_context_sync", arguments: { deploymentId: "inst-1", reason: "repair" } } }) as never);
     expect(response.status).toBe(403);
     await expect(response.json()).resolves.toEqual({ error: { code: "CONTROL_PLANE_SCOPE_REQUIRED", message: "Control Plane scope required: control-plane:context:write." } });
   });

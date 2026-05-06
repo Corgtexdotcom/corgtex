@@ -32,7 +32,7 @@ const {
       findUnique: vi.fn(),
       update: vi.fn(),
     },
-    instanceRegistry: {
+    customerDeployment: {
       upsert: vi.fn(),
     },
     approvalPolicy: {
@@ -139,7 +139,7 @@ describe("procurement trials", () => {
     prismaMock.customerAccount.upsert.mockResolvedValue({ id: "cust-1", slug: "acme", primaryDeploymentId: null });
     prismaMock.customerAccount.findUnique.mockResolvedValue({ id: "cust-1", primaryDeploymentId: null });
     prismaMock.customerAccount.update.mockResolvedValue({ id: "cust-1", primaryDeploymentId: "inst-1" });
-    prismaMock.instanceRegistry.upsert.mockResolvedValue({ id: "inst-1", customerSlug: "acme" });
+    prismaMock.customerDeployment.upsert.mockResolvedValue({ id: "inst-1", customerSlug: "acme" });
     prismaMock.approvalPolicy.createMany.mockResolvedValue({ count: 2 });
     prismaMock.user.upsert.mockResolvedValue({ id: "user-admin", email: "admin@acme.test", displayName: "Admin" });
     prismaMock.member.upsert.mockResolvedValue({ id: "member-admin", role: "ADMIN" });
@@ -198,7 +198,7 @@ describe("procurement trials", () => {
         managementAuthority: "CORGTEX",
       }),
     }));
-    expect(prismaMock.instanceRegistry.upsert).toHaveBeenCalledWith(expect.objectContaining({
+    expect(prismaMock.customerDeployment.upsert).toHaveBeenCalledWith(expect.objectContaining({
       where: { customerSlug: "acme" },
       create: expect.objectContaining({
         customerAccountId: "cust-1",

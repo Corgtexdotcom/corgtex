@@ -6,11 +6,11 @@ import {
   fetchCustomerSupportSnapshot,
   getControlPlaneAiGovernanceStatus,
   getControlPlaneContextHealth,
-  getControlPlaneCustomer,
+  getControlPlaneDeployment,
   getControlPlaneIntegrationStatus,
   getControlPlaneReleaseStatus,
-  listControlPlaneCustomers,
-  probeControlPlaneCustomerHealth,
+  listControlPlaneDeployments,
+  probeControlPlaneDeploymentHealth,
   requireControlPlaneAccess,
   requireControlPlaneScope,
   refreshControlPlaneFleetSnapshots,
@@ -27,38 +27,38 @@ export const dynamic = "force-dynamic";
 const tools = [
   {
     name: "list_customers",
-    description: "List customer instances registered in the Corgtex control plane.",
+    description: "List customer deployments registered in the Corgtex control plane.",
     inputSchema: { type: "object", properties: {} },
   },
   {
-    name: "get_customer_status",
-    description: "Get one customer instance, recent support operations, and hosted-instance events.",
-    inputSchema: { type: "object", properties: { instanceId: { type: "string" } }, required: ["instanceId"] },
+    name: "get_customer_deployment_status",
+    description: "Get one customer deployment, recent support operations, and customer-deployment events.",
+    inputSchema: { type: "object", properties: { deploymentId: { type: "string" } }, required: ["deploymentId"] },
   },
   {
-    name: "refresh_customer_snapshot",
-    description: "Fetch a live support snapshot from the customer instance through the support connector.",
-    inputSchema: { type: "object", properties: { instanceId: { type: "string" } }, required: ["instanceId"] },
+    name: "refresh_customer_deployment_snapshot",
+    description: "Fetch a live support snapshot from the customer deployment through the support connector.",
+    inputSchema: { type: "object", properties: { deploymentId: { type: "string" } }, required: ["deploymentId"] },
   },
   {
     name: "list_customer_integrations",
     description: "Get customer integration entitlement and readiness status.",
-    inputSchema: { type: "object", properties: { instanceId: { type: "string" } }, required: ["instanceId"] },
+    inputSchema: { type: "object", properties: { deploymentId: { type: "string" } }, required: ["deploymentId"] },
   },
   {
     name: "get_context_health",
-    description: "Get governed context and brain health for a customer instance.",
-    inputSchema: { type: "object", properties: { instanceId: { type: "string" } }, required: ["instanceId"] },
+    description: "Get governed context and brain health for a customer deployment.",
+    inputSchema: { type: "object", properties: { deploymentId: { type: "string" } }, required: ["deploymentId"] },
   },
   {
     name: "get_ai_governance_status",
     description: "Get agent, model usage, approval, and failed-job governance status.",
-    inputSchema: { type: "object", properties: { instanceId: { type: "string" } }, required: ["instanceId"] },
+    inputSchema: { type: "object", properties: { deploymentId: { type: "string" } }, required: ["deploymentId"] },
   },
   {
     name: "get_release_status",
     description: "Get release, provisioning, health, and rollback-readiness status.",
-    inputSchema: { type: "object", properties: { instanceId: { type: "string" } }, required: ["instanceId"] },
+    inputSchema: { type: "object", properties: { deploymentId: { type: "string" } }, required: ["deploymentId"] },
   },
   {
     name: "configure_customer_integration",
@@ -66,7 +66,7 @@ const tools = [
     inputSchema: {
       type: "object",
       properties: {
-        instanceId: { type: "string" },
+        deploymentId: { type: "string" },
         integrationKey: { type: "string" },
         reason: { type: "string" },
         entitlementEnabled: { type: "boolean" },
@@ -78,7 +78,7 @@ const tools = [
         botName: { type: "string" },
         entryMessage: { type: "string" },
       },
-      required: ["instanceId", "integrationKey", "reason"],
+      required: ["deploymentId", "integrationKey", "reason"],
     },
   },
   {
@@ -86,14 +86,14 @@ const tools = [
     description: "Queue an audited context sync for all active sources or one source.",
     inputSchema: {
       type: "object",
-      properties: { instanceId: { type: "string" }, sourceId: { type: "string" }, reason: { type: "string" } },
-      required: ["instanceId", "reason"],
+      properties: { deploymentId: { type: "string" }, sourceId: { type: "string" }, reason: { type: "string" } },
+      required: ["deploymentId", "reason"],
     },
   },
   {
-    name: "probe_customer_health",
+    name: "probe_customer_deployment_health",
     description: "Probe customer runtime health and record central release/health evidence.",
-    inputSchema: { type: "object", properties: { instanceId: { type: "string" }, reason: { type: "string" } }, required: ["instanceId", "reason"] },
+    inputSchema: { type: "object", properties: { deploymentId: { type: "string" }, reason: { type: "string" } }, required: ["deploymentId", "reason"] },
   },
   {
     name: "refresh_fleet_snapshots",
@@ -101,11 +101,11 @@ const tools = [
     inputSchema: {
       type: "object",
       properties: {
-        instanceId: { type: "string" },
+        deploymentId: { type: "string" },
         snapshotKinds: { type: "array", items: { type: "string" } },
         reason: { type: "string" },
       },
-      required: ["instanceId", "reason"],
+      required: ["deploymentId", "reason"],
     },
   },
   {
@@ -114,7 +114,7 @@ const tools = [
     inputSchema: {
       type: "object",
       properties: {
-        instanceId: { type: "string" },
+        deploymentId: { type: "string" },
         snapshotKinds: { type: "array", items: { type: "string" } },
         limit: { type: "number" },
         reason: { type: "string" },
@@ -128,41 +128,41 @@ const tools = [
     inputSchema: {
       type: "object",
       properties: {
-        instanceId: { type: "string" },
+        deploymentId: { type: "string" },
         targetReleaseImageTag: { type: "string" },
         targetReleaseVersion: { type: "string" },
         reason: { type: "string" },
       },
-      required: ["instanceId", "targetReleaseImageTag", "reason"],
+      required: ["deploymentId", "targetReleaseImageTag", "reason"],
     },
   },
   {
     name: "run_customer_support_operation",
-    description: "Run an audited support action against a customer instance.",
+    description: "Run an audited support action against a customer deployment.",
     inputSchema: {
       type: "object",
       properties: {
-        instanceId: { type: "string" },
+        deploymentId: { type: "string" },
         action: { type: "string" },
         reason: { type: "string" },
         arguments: { type: "object" },
       },
-      required: ["instanceId", "action"],
+      required: ["deploymentId", "action"],
     },
   },
 ];
 
 const toolScopes: Record<string, string> = {
   list_customers: "control-plane:read",
-  get_customer_status: "control-plane:read",
+  get_customer_deployment_status: "control-plane:read",
   list_customer_integrations: "control-plane:read",
   get_context_health: "control-plane:read",
   get_ai_governance_status: "control-plane:read",
   get_release_status: "control-plane:read",
-  refresh_customer_snapshot: "control-plane:support:write",
+  refresh_customer_deployment_snapshot: "control-plane:support:write",
   configure_customer_integration: "control-plane:integrations:write",
   run_context_sync: "control-plane:context:write",
-  probe_customer_health: "control-plane:releases:write",
+  probe_customer_deployment_health: "control-plane:releases:write",
   refresh_fleet_snapshots: "control-plane:fleet:write",
   enqueue_fleet_snapshot_jobs: "control-plane:fleet:write",
   prepare_release_upgrade: "control-plane:releases:write",
@@ -254,32 +254,32 @@ export async function POST(request: NextRequest) {
     }
 
     if (name === "list_customers") {
-      return rpcResult(id, textContent(await listControlPlaneCustomers(actor)));
+      return rpcResult(id, textContent(await listControlPlaneDeployments(actor)));
     }
-    if (name === "get_customer_status") {
-      return rpcResult(id, textContent(await getControlPlaneCustomer(actor, String(args.instanceId ?? ""))));
+    if (name === "get_customer_deployment_status") {
+      return rpcResult(id, textContent(await getControlPlaneDeployment(actor, String(args.deploymentId ?? ""))));
     }
-    if (name === "refresh_customer_snapshot") {
-      return rpcResult(id, textContent(await fetchCustomerSupportSnapshot(actor, String(args.instanceId ?? ""))));
+    if (name === "refresh_customer_deployment_snapshot") {
+      return rpcResult(id, textContent(await fetchCustomerSupportSnapshot(actor, String(args.deploymentId ?? ""))));
     }
     if (name === "list_customer_integrations") {
-      return rpcResult(id, textContent(await getControlPlaneIntegrationStatus(actor, String(args.instanceId ?? ""))));
+      return rpcResult(id, textContent(await getControlPlaneIntegrationStatus(actor, String(args.deploymentId ?? ""))));
     }
     if (name === "get_context_health") {
-      return rpcResult(id, textContent(await getControlPlaneContextHealth(actor, String(args.instanceId ?? ""))));
+      return rpcResult(id, textContent(await getControlPlaneContextHealth(actor, String(args.deploymentId ?? ""))));
     }
     if (name === "get_ai_governance_status") {
-      return rpcResult(id, textContent(await getControlPlaneAiGovernanceStatus(actor, String(args.instanceId ?? ""))));
+      return rpcResult(id, textContent(await getControlPlaneAiGovernanceStatus(actor, String(args.deploymentId ?? ""))));
     }
     if (name === "get_release_status") {
-      return rpcResult(id, textContent(await getControlPlaneReleaseStatus(actor, String(args.instanceId ?? ""))));
+      return rpcResult(id, textContent(await getControlPlaneReleaseStatus(actor, String(args.deploymentId ?? ""))));
     }
     if (name === "configure_customer_integration") {
       if (argString(args, "integrationKey") !== "meeting_recorders") {
         return rpcError(id, -32602, "Unsupported integration key.");
       }
       return rpcResult(id, textContent(await configureControlPlaneMeetingRecorderIntegration(actor, {
-        instanceId: argString(args, "instanceId"),
+        deploymentId: argString(args, "deploymentId"),
         entitlementEnabled: argBoolean(args, "entitlementEnabled", true),
         enabled: argBoolean(args, "enabled", true),
         autoRecordEnabled: argBoolean(args, "autoRecordEnabled", false),
@@ -294,28 +294,28 @@ export async function POST(request: NextRequest) {
     if (name === "run_context_sync") {
       const sourceId = argOptionalString(args, "sourceId");
       return rpcResult(id, textContent(await runControlPlaneContextOperation(actor, {
-        instanceId: argString(args, "instanceId"),
+        deploymentId: argString(args, "deploymentId"),
         operation: sourceId ? "sync_source" : "sync_all",
         sourceId,
         reason: argString(args, "reason"),
       })));
     }
-    if (name === "probe_customer_health") {
-      return rpcResult(id, textContent(await probeControlPlaneCustomerHealth(actor, {
-        instanceId: argString(args, "instanceId"),
+    if (name === "probe_customer_deployment_health") {
+      return rpcResult(id, textContent(await probeControlPlaneDeploymentHealth(actor, {
+        deploymentId: argString(args, "deploymentId"),
         reason: argString(args, "reason"),
       })));
     }
     if (name === "refresh_fleet_snapshots") {
       return rpcResult(id, textContent(await refreshControlPlaneFleetSnapshots(actor, {
-        instanceId: argString(args, "instanceId"),
+        deploymentId: argString(args, "deploymentId"),
         snapshotKinds: argStringArray(args, "snapshotKinds"),
         reason: argString(args, "reason"),
       })));
     }
     if (name === "enqueue_fleet_snapshot_jobs") {
       return rpcResult(id, textContent(await enqueueControlPlaneFleetSnapshots(actor, {
-        instanceId: argOptionalString(args, "instanceId"),
+        deploymentId: argOptionalString(args, "deploymentId"),
         snapshotKinds: argStringArray(args, "snapshotKinds"),
         limit: argNumber(args, "limit", 100),
         reason: argString(args, "reason"),
@@ -323,7 +323,7 @@ export async function POST(request: NextRequest) {
     }
     if (name === "prepare_release_upgrade") {
       return rpcResult(id, textContent(await runControlPlaneReleaseOperation(actor, {
-        instanceId: argString(args, "instanceId"),
+        deploymentId: argString(args, "deploymentId"),
         operation: "prepare_upgrade",
         targetReleaseImageTag: argString(args, "targetReleaseImageTag"),
         targetReleaseVersion: argOptionalString(args, "targetReleaseVersion"),
@@ -332,7 +332,7 @@ export async function POST(request: NextRequest) {
     }
     if (name === "run_customer_support_operation") {
       const operation = await runCustomerSupportOperation(actor, {
-        instanceId: argString(args, "instanceId"),
+        deploymentId: argString(args, "deploymentId"),
         action: argString(args, "action") as SupportAction,
         reason: typeof args.reason === "string" ? args.reason : null,
         arguments: objectArgs(args.arguments),

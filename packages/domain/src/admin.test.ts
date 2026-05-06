@@ -67,11 +67,11 @@ vi.mock("@corgtex/shared", () => ({
     communicationInstallation: {
       findMany: vi.fn().mockResolvedValue([]),
     },
-    instanceRegistry: {
+    customerDeployment: {
       findMany: vi.fn().mockResolvedValue([]),
       findUniqueOrThrow: vi.fn().mockResolvedValue({
         id: "inst_1",
-        url: "http://fake-instance.com",
+        url: "http://fake-deployment.com",
         customerSlug: "acme-prod",
         bootstrapBundleUri: "https://private.example/bundle.json",
         bootstrapBundleChecksum: "a".repeat(64),
@@ -87,7 +87,7 @@ vi.mock("@corgtex/shared", () => ({
       delete: vi.fn().mockResolvedValue({}),
       update: vi.fn().mockResolvedValue({}),
     },
-    hostedInstanceEvent: {
+    customerDeploymentEvent: {
       findMany: vi.fn().mockResolvedValue([]),
       create: vi.fn().mockResolvedValue({ id: "event_1" }),
     },
@@ -402,39 +402,39 @@ describe("Platform Admin Tools", () => {
     );
   });
 
-  // ── listExternalInstances ────────────────────────────────────────
+  // ── listCustomerDeployments ────────────────────────────────────────
 
-  it("listExternalInstances queries instance registry", async () => {
-    (prisma.instanceRegistry.findMany as any).mockResolvedValue([
+  it("listCustomerDeployments queries customer deployments", async () => {
+    (prisma.customerDeployment.findMany as any).mockResolvedValue([
       { id: "inst_1", label: "Acme" },
     ]);
 
-    const result = await admin.listExternalInstances(dummyActor);
+    const result = await admin.listCustomerDeployments(dummyActor);
 
     expect(requireGlobalOperator).toHaveBeenCalledWith(dummyActor);
-    expect(prisma.instanceRegistry.findMany).toHaveBeenCalled();
+    expect(prisma.customerDeployment.findMany).toHaveBeenCalled();
     expect(result).toHaveLength(1);
   });
 
-  it("listHostedInstanceEvents returns recent audit events", async () => {
-    (prisma.hostedInstanceEvent.findMany as any).mockResolvedValue([
-      { id: "event_1", action: "hosted_instance.provisioned" },
+  it("listCustomerDeploymentEvents returns recent audit events", async () => {
+    (prisma.customerDeploymentEvent.findMany as any).mockResolvedValue([
+      { id: "event_1", action: "customer_deployment.provisioned" },
     ]);
 
-    const result = await admin.listHostedInstanceEvents(dummyActor, "inst_1");
+    const result = await admin.listCustomerDeploymentEvents(dummyActor, "inst_1");
 
     expect(requireGlobalOperator).toHaveBeenCalledWith(dummyActor);
-    expect(prisma.hostedInstanceEvent.findMany).toHaveBeenCalledWith({
-      where: { instanceId: "inst_1" },
+    expect(prisma.customerDeploymentEvent.findMany).toHaveBeenCalledWith({
+      where: { deploymentId: "inst_1" },
       orderBy: { createdAt: "desc" },
       take: 50,
     });
     expect(result).toHaveLength(1);
   });
 
-  // ── registerExternalInstance ──────────────────────────────────────
+  // ── registerCustomerDeploymentRecord ────────────────────────────────
 
-  it("registerExternalInstance creates a new registry entry", async () => {
+  it("registerCustomerDeploymentRecord creates a new customer deployment record", async () => {
     (prisma.workspace.findUnique as any).mockResolvedValueOnce({
       id: "ws_acme",
     });
@@ -448,7 +448,7 @@ describe("Platform Admin Tools", () => {
       id: "cust_acme",
       primaryDeploymentId: null,
     });
-    (prisma.instanceRegistry.upsert as any).mockResolvedValueOnce({
+    (prisma.customerDeployment.upsert as any).mockResolvedValueOnce({
       id: "inst_new",
       customerSlug: "acme",
       region: "eu-west4",
@@ -456,7 +456,7 @@ describe("Platform Admin Tools", () => {
       bootstrapBundleUri: null,
     });
 
-    await admin.registerExternalInstance(dummyActor, {
+    await admin.registerCustomerDeploymentRecord(dummyActor, {
       label: "Acme",
       url: "https://acme.corgtex.com",
       environment: "staging",
@@ -477,7 +477,7 @@ describe("Platform Admin Tools", () => {
         managementAuthority: "CORGTEX",
       }),
     }));
-    expect(prisma.instanceRegistry.upsert).toHaveBeenCalledWith({
+    expect(prisma.customerDeployment.upsert).toHaveBeenCalledWith({
       where: { customerSlug: "acme" },
       update: expect.objectContaining({
         label: "Acme",
@@ -500,28 +500,28 @@ describe("Platform Admin Tools", () => {
         deploymentStatus: "ACTIVE",
       }),
     });
-    expect(prisma.hostedInstanceEvent.create).toHaveBeenCalledWith({
+    expect(prisma.customerDeploymentEvent.create).toHaveBeenCalledWith({
       data: expect.objectContaining({
-        instanceId: "inst_new",
-        action: "hosted_instance.registered",
+        deploymentId: "inst_new",
+        action: "customer_deployment.registered",
       }),
     });
   });
 
-  // ── removeExternalInstance ───────────────────────────────────────
+  // ── removeCustomerDeployment ───────────────────────────────────────
 
-  it("removeExternalInstance deletes the registry entry", async () => {
-    await admin.removeExternalInstance(dummyActor, "inst_1");
+  it("removeCustomerDeployment deletes the customer deployment record", async () => {
+    await admin.removeCustomerDeployment(dummyActor, "inst_1");
 
     expect(requireGlobalOperator).toHaveBeenCalledWith(dummyActor);
-    expect(prisma.instanceRegistry.delete).toHaveBeenCalledWith({
+    expect(prisma.customerDeployment.delete).toHaveBeenCalledWith({
       where: { id: "inst_1" },
     });
   });
 
-  // ── probeExternalInstanceHealth ──────────────────────────────────
+  // ── probeCustomerDeploymentHealth ──────────────────────────────────
 
-  it("probeExternalInstanceHealth marks instance as ok on success", async () => {
+  it("probeCustomerDeploymentHealth marks deployment as ok on success", async () => {
     global.fetch = vi.fn().mockResolvedValue({
       ok: true,
       json: vi.fn().mockResolvedValue({
@@ -529,10 +529,10 @@ describe("Platform Admin Tools", () => {
       }),
     });
 
-    await admin.probeExternalInstanceHealth(dummyActor, "inst_1");
+    await admin.probeCustomerDeploymentHealth(dummyActor, "inst_1");
 
     expect(requireGlobalOperator).toHaveBeenCalledWith(dummyActor);
-    expect(prisma.instanceRegistry.update).toHaveBeenCalledWith({
+    expect(prisma.customerDeployment.update).toHaveBeenCalledWith({
       where: { id: "inst_1" },
       data: expect.objectContaining({
         lastHealthStatus: "ok",
@@ -542,7 +542,7 @@ describe("Platform Admin Tools", () => {
     });
   });
 
-  it("probeExternalInstanceHealth marks instance as degraded on non-ok response", async () => {
+  it("probeCustomerDeploymentHealth marks deployment as degraded on non-ok response", async () => {
     global.fetch = vi
       .fn()
       .mockResolvedValue({
@@ -551,9 +551,9 @@ describe("Platform Admin Tools", () => {
         json: vi.fn().mockResolvedValue({}),
       });
 
-    await admin.probeExternalInstanceHealth(dummyActor, "inst_1");
+    await admin.probeCustomerDeploymentHealth(dummyActor, "inst_1");
 
-    expect(prisma.instanceRegistry.update).toHaveBeenCalledWith({
+    expect(prisma.customerDeployment.update).toHaveBeenCalledWith({
       where: { id: "inst_1" },
       data: expect.objectContaining({
         lastHealthStatus: "degraded",
@@ -563,15 +563,15 @@ describe("Platform Admin Tools", () => {
     });
   });
 
-  it("probeExternalInstanceHealth marks instance as down on fetch error", async () => {
+  it("probeCustomerDeploymentHealth marks deployment as down on fetch error", async () => {
     global.fetch = vi
       .fn()
       .mockRejectedValue(new Error("Network Error"));
 
-    await admin.probeExternalInstanceHealth(dummyActor, "inst_1");
+    await admin.probeCustomerDeploymentHealth(dummyActor, "inst_1");
 
     expect(requireGlobalOperator).toHaveBeenCalledWith(dummyActor);
-    expect(prisma.instanceRegistry.update).toHaveBeenCalledWith({
+    expect(prisma.customerDeployment.update).toHaveBeenCalledWith({
       where: { id: "inst_1" },
       data: expect.objectContaining({
         lastHealthStatus: "down",
@@ -581,10 +581,10 @@ describe("Platform Admin Tools", () => {
     });
   });
 
-  it("probeExternalInstanceHealth marks release drift as degraded", async () => {
-    (prisma.instanceRegistry.findUniqueOrThrow as any).mockResolvedValueOnce({
+  it("probeCustomerDeploymentHealth marks release drift as degraded", async () => {
+    (prisma.customerDeployment.findUniqueOrThrow as any).mockResolvedValueOnce({
       id: "inst_1",
-      url: "http://fake-instance.com",
+      url: "http://fake-deployment.com",
       releaseImageTag: "sha-expected",
     });
     global.fetch = vi.fn().mockResolvedValue({
@@ -594,9 +594,9 @@ describe("Platform Admin Tools", () => {
       }),
     });
 
-    await admin.probeExternalInstanceHealth(dummyActor, "inst_1");
+    await admin.probeCustomerDeploymentHealth(dummyActor, "inst_1");
 
-    expect(prisma.instanceRegistry.update).toHaveBeenCalledWith({
+    expect(prisma.customerDeployment.update).toHaveBeenCalledWith({
       where: { id: "inst_1" },
       data: expect.objectContaining({
         lastHealthStatus: "degraded",
@@ -607,10 +607,10 @@ describe("Platform Admin Tools", () => {
     });
   });
 
-  it("probeExternalInstanceHealth accepts release gitSha when imageTag is not reported", async () => {
-    (prisma.instanceRegistry.findUniqueOrThrow as any).mockResolvedValueOnce({
+  it("probeCustomerDeploymentHealth accepts release gitSha when imageTag is not reported", async () => {
+    (prisma.customerDeployment.findUniqueOrThrow as any).mockResolvedValueOnce({
       id: "inst_1",
-      url: "http://fake-instance.com",
+      url: "http://fake-deployment.com",
       releaseImageTag: "sha-expected",
     });
     global.fetch = vi.fn().mockResolvedValue({
@@ -626,9 +626,9 @@ describe("Platform Admin Tools", () => {
       }),
     });
 
-    await admin.probeExternalInstanceHealth(dummyActor, "inst_1");
+    await admin.probeCustomerDeploymentHealth(dummyActor, "inst_1");
 
-    expect(prisma.instanceRegistry.update).toHaveBeenCalledWith({
+    expect(prisma.customerDeployment.update).toHaveBeenCalledWith({
       where: { id: "inst_1" },
       data: expect.objectContaining({
         lastHealthStatus: "ok",
@@ -639,7 +639,7 @@ describe("Platform Admin Tools", () => {
     });
   });
 
-  it("probeExternalInstanceHealth marks missing runtime dependencies as degraded", async () => {
+  it("probeCustomerDeploymentHealth marks missing runtime dependencies as degraded", async () => {
     global.fetch = vi.fn().mockResolvedValue({
       ok: true,
       json: vi.fn().mockResolvedValue({
@@ -653,9 +653,9 @@ describe("Platform Admin Tools", () => {
       }),
     });
 
-    await admin.probeExternalInstanceHealth(dummyActor, "inst_1");
+    await admin.probeCustomerDeploymentHealth(dummyActor, "inst_1");
 
-    expect(prisma.instanceRegistry.update).toHaveBeenCalledWith({
+    expect(prisma.customerDeployment.update).toHaveBeenCalledWith({
       where: { id: "inst_1" },
       data: expect.objectContaining({
         lastHealthStatus: "degraded",
@@ -665,11 +665,11 @@ describe("Platform Admin Tools", () => {
     });
   });
 
-  it("provisionHostedCustomerInstance records Railway resources without storing secrets", async () => {
+  it("provisionCustomerDeployment records Railway resources without storing secrets", async () => {
     (prisma.workspace.findUnique as any).mockResolvedValueOnce({
       id: "ws_acme_prod",
     });
-    (prisma.instanceRegistry.update as any).mockResolvedValue({
+    (prisma.customerDeployment.update as any).mockResolvedValue({
       id: "inst_1",
       customerSlug: "acme-prod",
       provisioningStatus: "awaiting_dns",
@@ -691,7 +691,7 @@ describe("Platform Admin Tools", () => {
         .mockResolvedValueOnce({ customDomainCreate: { domain: "acme.corgtex.com" } }),
     } as any;
 
-    await admin.provisionHostedCustomerInstance(dummyActor, {
+    await admin.provisionCustomerDeployment(dummyActor, {
       label: "Acme Production",
       customerSlug: "acme-prod",
       region: "eu-west4",
@@ -711,7 +711,7 @@ describe("Platform Admin Tools", () => {
     }, railwayClient);
 
     expect(requireGlobalOperator).toHaveBeenCalledWith(dummyActor);
-    expect(prisma.instanceRegistry.upsert).toHaveBeenCalledWith(expect.objectContaining({
+    expect(prisma.customerDeployment.upsert).toHaveBeenCalledWith(expect.objectContaining({
       where: { customerSlug: "acme-prod" },
       create: expect.objectContaining({
         provisioningStatus: "provisioning",
@@ -722,7 +722,7 @@ describe("Platform Admin Tools", () => {
         bootstrapBundleChecksum: "a".repeat(64),
       }),
     }));
-    expect(prisma.instanceRegistry.update).toHaveBeenCalledWith({
+    expect(prisma.customerDeployment.update).toHaveBeenCalledWith({
       where: { id: "inst_1" },
       data: expect.objectContaining({
         railwayProjectId: "project-1",
@@ -733,14 +733,14 @@ describe("Platform Admin Tools", () => {
         provisioningStatus: "awaiting_dns",
       }),
     });
-    expect(prisma.instanceRegistry.upsert).toHaveBeenCalledWith(expect.not.objectContaining({
+    expect(prisma.customerDeployment.upsert).toHaveBeenCalledWith(expect.not.objectContaining({
       create: expect.objectContaining({ railwayApiToken: expect.anything() }),
     }));
     expect(railwayClient.graphql).toHaveBeenCalledTimes(8);
   });
 
-  it("provisionHostedCustomerInstance rejects EU data residency outside EU regions", async () => {
-    await expect(admin.provisionHostedCustomerInstance(dummyActor, {
+  it("provisionCustomerDeployment rejects EU data residency outside EU regions", async () => {
+    await expect(admin.provisionCustomerDeployment(dummyActor, {
       label: "Acme Production",
       customerSlug: "acme-prod",
       region: "us-west1",
@@ -751,11 +751,11 @@ describe("Platform Admin Tools", () => {
     }, { graphql: vi.fn() } as any)).rejects.toMatchObject({
       code: "DATA_RESIDENCY_REGION_MISMATCH",
     });
-    expect(prisma.instanceRegistry.upsert).not.toHaveBeenCalled();
+    expect(prisma.customerDeployment.upsert).not.toHaveBeenCalled();
   });
 
-  it("buildHostedCustomerRuntimeVariables returns non-secret customer runtime metadata", () => {
-    expect(admin.buildHostedCustomerRuntimeVariables({
+  it("buildCustomerDeploymentRuntimeVariables returns non-secret customer runtime metadata", () => {
+    expect(admin.buildCustomerDeploymentRuntimeVariables({
       customerSlug: "acme-prod",
       url: "https://acme.corgtex.com",
       releaseImageTag: "sha-1",
@@ -773,8 +773,8 @@ describe("Platform Admin Tools", () => {
     });
   });
 
-  it("buildHostedInstanceReadiness returns ready only when Ops has complete hosted customer metadata", () => {
-    const result = admin.buildHostedInstanceReadiness({
+  it("buildCustomerDeploymentReadiness returns ready only when Ops has complete customer deployment metadata", () => {
+    const result = admin.buildCustomerDeploymentReadiness({
       url: "https://acme.corgtex.com",
       customDomain: "acme.corgtex.com",
       region: "us-west2",
@@ -800,8 +800,8 @@ describe("Platform Admin Tools", () => {
     expect(result.checks.every((check) => check.status === "ok")).toBe(true);
   });
 
-  it("buildHostedInstanceReadiness flags incomplete hosted customer metadata", () => {
-    const result = admin.buildHostedInstanceReadiness({
+  it("buildCustomerDeploymentReadiness flags incomplete customer deployment metadata", () => {
+    const result = admin.buildCustomerDeploymentReadiness({
       url: "https://acme.corgtex.com",
       provisioningStatus: "draft",
       bootstrapStatus: "not_started",
@@ -815,8 +815,8 @@ describe("Platform Admin Tools", () => {
     ]));
   });
 
-  it("upgradeHostedInstanceRelease updates Railway service images and records the target release", async () => {
-    (prisma.instanceRegistry.findUniqueOrThrow as any).mockResolvedValueOnce({
+  it("upgradeCustomerDeploymentRelease updates Railway service images and records the target release", async () => {
+    (prisma.customerDeployment.findUniqueOrThrow as any).mockResolvedValueOnce({
       id: "inst_1",
       customerSlug: "acme-prod",
       railwayProjectId: "project-1",
@@ -824,7 +824,7 @@ describe("Platform Admin Tools", () => {
       railwayWebServiceId: "web-1",
       railwayWorkerServiceId: "worker-1",
     });
-    (prisma.instanceRegistry.update as any).mockResolvedValue({
+    (prisma.customerDeployment.update as any).mockResolvedValue({
       id: "inst_1",
       provisioningStatus: "active",
       releaseImageTag: "sha-2",
@@ -836,8 +836,8 @@ describe("Platform Admin Tools", () => {
         .mockResolvedValueOnce({ web: "deploy-web", worker: "deploy-worker" }),
     } as any;
 
-    await admin.upgradeHostedInstanceRelease(dummyActor, {
-      instanceId: "inst_1",
+    await admin.upgradeCustomerDeploymentRelease(dummyActor, {
+      deploymentId: "inst_1",
       releaseVersion: "0.2.0",
       releaseImageTag: "sha-2",
       webImage: "ghcr.io/corgtex/web:sha-2",
@@ -845,7 +845,7 @@ describe("Platform Admin Tools", () => {
     }, railwayClient);
 
     expect(requireGlobalOperator).toHaveBeenCalledWith(dummyActor);
-    expect(prisma.instanceRegistry.update).toHaveBeenCalledWith({
+    expect(prisma.customerDeployment.update).toHaveBeenCalledWith({
       where: { id: "inst_1" },
       data: expect.objectContaining({
         provisioningStatus: "provisioning",
@@ -853,7 +853,7 @@ describe("Platform Admin Tools", () => {
         releaseImageTag: "sha-2",
       }),
     });
-    expect(prisma.instanceRegistry.update).toHaveBeenCalledWith({
+    expect(prisma.customerDeployment.update).toHaveBeenCalledWith({
       where: { id: "inst_1" },
       data: expect.objectContaining({
         provisioningStatus: "active",
@@ -863,16 +863,16 @@ describe("Platform Admin Tools", () => {
       }),
     });
     expect(railwayClient.graphql).toHaveBeenCalledTimes(3);
-    expect(prisma.hostedInstanceEvent.create).toHaveBeenCalledWith({
+    expect(prisma.customerDeploymentEvent.create).toHaveBeenCalledWith({
       data: expect.objectContaining({
-        instanceId: "inst_1",
-        action: "hosted_instance.upgrade_succeeded",
+        deploymentId: "inst_1",
+        action: "customer_deployment.upgrade_succeeded",
       }),
     });
   });
 
-  it("upgradeHostedInstanceRelease requires Railway service IDs before deployment", async () => {
-    (prisma.instanceRegistry.findUniqueOrThrow as any).mockResolvedValueOnce({
+  it("upgradeCustomerDeploymentRelease requires Railway service IDs before deployment", async () => {
+    (prisma.customerDeployment.findUniqueOrThrow as any).mockResolvedValueOnce({
       id: "inst_1",
       customerSlug: "acme-prod",
       railwayProjectId: null,
@@ -881,19 +881,19 @@ describe("Platform Admin Tools", () => {
       railwayWorkerServiceId: "worker-1",
     });
 
-    await expect(admin.upgradeHostedInstanceRelease(dummyActor, {
-      instanceId: "inst_1",
+    await expect(admin.upgradeCustomerDeploymentRelease(dummyActor, {
+      deploymentId: "inst_1",
       releaseImageTag: "sha-2",
       webImage: "ghcr.io/corgtex/web:sha-2",
       workerImage: "ghcr.io/corgtex/worker:sha-2",
     }, { graphql: vi.fn() } as any)).rejects.toMatchObject({
       code: "INVALID_INPUT",
-      message: "Instance is missing a Railway project ID.",
+      message: "Customer deployment is missing a Railway project ID.",
     });
   });
 
-  it("triggerHostedInstanceBootstrap signs a one-time token without storing the raw token", async () => {
-    (prisma.instanceRegistry.findUniqueOrThrow as any).mockResolvedValueOnce({
+  it("triggerCustomerDeploymentBootstrap signs a one-time token without storing the raw token", async () => {
+    (prisma.customerDeployment.findUniqueOrThrow as any).mockResolvedValueOnce({
       id: "inst_1",
       url: "https://acme.corgtex.com",
       customerSlug: "acme-prod",
@@ -901,15 +901,15 @@ describe("Platform Admin Tools", () => {
       bootstrapBundleChecksum: "a".repeat(64),
       bootstrapBundleSchemaVersion: "stable-client-v1",
     });
-    (prisma.instanceRegistry.update as any).mockResolvedValue({
+    (prisma.customerDeployment.update as any).mockResolvedValue({
       id: "inst_1",
       bootstrapStatus: "bootstrapping",
     });
     global.fetch = vi.fn().mockResolvedValue({ ok: true, status: 200 });
 
     const expiresAt = new Date("2026-05-01T10:00:00.000Z");
-    await admin.triggerHostedInstanceBootstrap(dummyActor, {
-      instanceId: "inst_1",
+    await admin.triggerCustomerDeploymentBootstrap(dummyActor, {
+      deploymentId: "inst_1",
       token: "one-time-bootstrap-token",
       expiresAt,
     });
@@ -933,29 +933,29 @@ describe("Platform Admin Tools", () => {
       signature: createHmac("sha256", "one-time-bootstrap-token").update(expectedPayload).digest("hex"),
     });
     expect(JSON.stringify(body)).not.toContain("one-time-bootstrap-token");
-    expect(prisma.hostedInstanceEvent.create).toHaveBeenCalledWith({
+    expect(prisma.customerDeploymentEvent.create).toHaveBeenCalledWith({
       data: expect.not.objectContaining({
         meta: expect.objectContaining({ token: expect.anything() }),
       }),
     });
   });
 
-  it("suspendHostedInstance marks an instance suspended and audits the action", async () => {
-    (prisma.instanceRegistry.update as any).mockResolvedValue({
+  it("suspendCustomerDeployment marks a deployment suspended and audits the action", async () => {
+    (prisma.customerDeployment.update as any).mockResolvedValue({
       id: "inst_1",
       provisioningStatus: "suspended",
     });
 
-    await admin.suspendHostedInstance(dummyActor, "inst_1");
+    await admin.suspendCustomerDeployment(dummyActor, "inst_1");
 
-    expect(prisma.instanceRegistry.update).toHaveBeenCalledWith({
+    expect(prisma.customerDeployment.update).toHaveBeenCalledWith({
       where: { id: "inst_1" },
       data: { provisioningStatus: "suspended", deploymentStatus: "SUSPENDED" },
     });
-    expect(prisma.hostedInstanceEvent.create).toHaveBeenCalledWith({
+    expect(prisma.customerDeploymentEvent.create).toHaveBeenCalledWith({
       data: expect.objectContaining({
-        instanceId: "inst_1",
-        action: "hosted_instance.suspended",
+        deploymentId: "inst_1",
+        action: "customer_deployment.suspended",
       }),
     });
   });

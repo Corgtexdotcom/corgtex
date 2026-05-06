@@ -8,17 +8,17 @@ function usage() {
     "Usage:",
     "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs tools",
     "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs list-customers",
-    "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs get-customer <instanceId>",
-    "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs integrations <instanceId>",
-    "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs context <instanceId>",
-    "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs ai-governance <instanceId>",
-    "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs release <instanceId>",
-    "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs snapshot <instanceId>",
-    "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs sync-context <instanceId> <reason> [sourceId]",
-    "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs configure-recorder <instanceId> <reason> '<json-config>'",
-    "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs prepare-release <instanceId> <targetImageTag> <reason> [targetVersion]",
-    "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs probe-health <instanceId> <reason>",
-    "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs run-support <instanceId> <action> <reason> '<json-args>'",
+    "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs get-deployment <deploymentId>",
+    "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs integrations <deploymentId>",
+    "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs context <deploymentId>",
+    "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs ai-governance <deploymentId>",
+    "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs release <deploymentId>",
+    "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs snapshot <deploymentId>",
+    "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs sync-context <deploymentId> <reason> [sourceId]",
+    "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs configure-recorder <deploymentId> <reason> '<json-config>'",
+    "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs prepare-release <deploymentId> <targetImageTag> <reason> [targetVersion]",
+    "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs probe-health <deploymentId> <reason>",
+    "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs run-support <deploymentId> <action> <reason> '<json-args>'",
     "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs call <toolName> '<json-args>'",
   ].join("\n"));
   process.exit(1);
@@ -89,46 +89,46 @@ try {
     print(await requestMcp("tools/list"));
   } else if (command === "list-customers") {
     print(await callTool("list_customers"));
-  } else if (command === "get-customer") {
-    print(await callTool("get_customer_status", { instanceId: requireValue(args[0], "instanceId") }));
+  } else if (command === "get-deployment") {
+    print(await callTool("get_customer_deployment_status", { deploymentId: requireValue(args[0], "deploymentId") }));
   } else if (command === "integrations") {
-    print(await callTool("list_customer_integrations", { instanceId: requireValue(args[0], "instanceId") }));
+    print(await callTool("list_customer_integrations", { deploymentId: requireValue(args[0], "deploymentId") }));
   } else if (command === "context") {
-    print(await callTool("get_context_health", { instanceId: requireValue(args[0], "instanceId") }));
+    print(await callTool("get_context_health", { deploymentId: requireValue(args[0], "deploymentId") }));
   } else if (command === "ai-governance") {
-    print(await callTool("get_ai_governance_status", { instanceId: requireValue(args[0], "instanceId") }));
+    print(await callTool("get_ai_governance_status", { deploymentId: requireValue(args[0], "deploymentId") }));
   } else if (command === "release") {
-    print(await callTool("get_release_status", { instanceId: requireValue(args[0], "instanceId") }));
+    print(await callTool("get_release_status", { deploymentId: requireValue(args[0], "deploymentId") }));
   } else if (command === "snapshot") {
-    print(await callTool("refresh_customer_snapshot", { instanceId: requireValue(args[0], "instanceId") }));
+    print(await callTool("refresh_customer_deployment_snapshot", { deploymentId: requireValue(args[0], "deploymentId") }));
   } else if (command === "sync-context") {
     print(await callTool("run_context_sync", {
-      instanceId: requireValue(args[0], "instanceId"),
+      deploymentId: requireValue(args[0], "deploymentId"),
       reason: requireValue(args[1], "reason"),
       sourceId: args[2] || undefined,
     }));
   } else if (command === "configure-recorder") {
     print(await callTool("configure_customer_integration", {
-      instanceId: requireValue(args[0], "instanceId"),
+      deploymentId: requireValue(args[0], "deploymentId"),
       reason: requireValue(args[1], "reason"),
       integrationKey: "meeting_recorders",
       ...parseJsonArg(args[2]),
     }));
   } else if (command === "prepare-release") {
     print(await callTool("prepare_release_upgrade", {
-      instanceId: requireValue(args[0], "instanceId"),
+      deploymentId: requireValue(args[0], "deploymentId"),
       targetReleaseImageTag: requireValue(args[1], "targetImageTag"),
       reason: requireValue(args[2], "reason"),
       targetReleaseVersion: args[3] || undefined,
     }));
   } else if (command === "probe-health") {
-    print(await callTool("probe_customer_health", {
-      instanceId: requireValue(args[0], "instanceId"),
+    print(await callTool("probe_customer_deployment_health", {
+      deploymentId: requireValue(args[0], "deploymentId"),
       reason: requireValue(args[1], "reason"),
     }));
   } else if (command === "run-support") {
     print(await callTool("run_customer_support_operation", {
-      instanceId: requireValue(args[0], "instanceId"),
+      deploymentId: requireValue(args[0], "deploymentId"),
       action: requireValue(args[1], "action"),
       reason: requireValue(args[2], "reason"),
       arguments: parseJsonArg(args[3]),

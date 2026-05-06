@@ -300,7 +300,7 @@ async function handleJob(job: ClaimedJob) {
 
   if (job.type === CONTROL_PLANE_FLEET_SNAPSHOT_JOB_TYPE) {
     await runControlPlaneFleetSnapshotJob({
-      instanceId: typeof payload.instanceId === "string" ? payload.instanceId : null,
+      deploymentId: typeof payload.deploymentId === "string" ? payload.deploymentId : null,
       snapshotKinds: Array.isArray(payload.snapshotKinds) ? payload.snapshotKinds.filter((kind): kind is string => typeof kind === "string") : null,
       reason: typeof payload.reason === "string" ? payload.reason : null,
       limit: typeof payload.limit === "number" ? payload.limit : null,
@@ -727,7 +727,7 @@ export async function schedulePeriodicJobs() {
       },
       select: { id: true, workspaceId: true },
     }),
-    prisma.instanceRegistry.findMany({
+    prisma.customerDeployment.findMany({
       where: {
         customerAccountId: { not: null },
         deploymentStatus: { notIn: ["RETIRED", "SUSPENDED"] },
@@ -774,7 +774,7 @@ export async function schedulePeriodicJobs() {
         eventId: null,
         type: CONTROL_PLANE_FLEET_SNAPSHOT_JOB_TYPE,
         payload: {
-          instanceId: deployment.id,
+          deploymentId: deployment.id,
           snapshotKinds: ["HEALTH", "RELEASE", "CONNECTOR", "CONTEXT", "INTEGRATION", "SUPPORT_READY"],
           reason: "Scheduled Control Plane fleet sweep.",
         },

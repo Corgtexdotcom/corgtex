@@ -6,10 +6,10 @@ const { prismaMock, encryptSecretMock, decryptSecretMock } = vi.hoisted(() => ({
     $transaction: vi.fn(async (operations: unknown[] | ((tx: unknown) => unknown)) => (
       typeof operations === "function" ? operations(prismaMock) : Promise.all(operations)
     )),
-    controlPlaneInstanceAccess: {
+    customerDeploymentAccess: {
       findUnique: vi.fn(),
     },
-    hostedInstanceEvent: {
+    customerDeploymentEvent: {
       create: vi.fn(),
       findMany: vi.fn(),
     },
@@ -25,7 +25,7 @@ const { prismaMock, encryptSecretMock, decryptSecretMock } = vi.hoisted(() => ({
     fleetHealthSnapshot: {
       create: vi.fn(),
     },
-    instanceRegistry: {
+    customerDeployment: {
       findMany: vi.fn(),
       findUnique: vi.fn(),
       update: vi.fn(),
@@ -120,28 +120,28 @@ describe("control plane domain", () => {
       }),
     })) as any;
     prismaMock.customerAccount.findMany.mockResolvedValue([]);
-    prismaMock.instanceRegistry.findMany.mockResolvedValue([]);
+    prismaMock.customerDeployment.findMany.mockResolvedValue([]);
   });
 
-  it("allows global operators and rejects normal users without instance access", async () => {
+  it("allows global operators and rejects normal users without deployment access", async () => {
     const { requireControlPlaneAccess } = await import("./control-plane");
 
     await expect(requireControlPlaneAccess(operatorActor)).resolves.toEqual({ role: "OPERATOR" });
-    prismaMock.controlPlaneInstanceAccess.findUnique.mockResolvedValueOnce(null);
-    await expect(requireControlPlaneAccess(userActor, { instanceId: "inst-1" })).rejects.toMatchObject({
+    prismaMock.customerDeploymentAccess.findUnique.mockResolvedValueOnce(null);
+    await expect(requireControlPlaneAccess(userActor, { deploymentId: "inst-1" })).rejects.toMatchObject({
       status: 403,
       code: "FORBIDDEN",
     });
   });
 
-  it("allows future instance-scoped access primitives", async () => {
+  it("allows future deployment-scoped access primitives", async () => {
     const { requireControlPlaneAccess } = await import("./control-plane");
-    prismaMock.controlPlaneInstanceAccess.findUnique.mockResolvedValueOnce({
+    prismaMock.customerDeploymentAccess.findUnique.mockResolvedValueOnce({
       role: "SUPPORT_VIEWER",
       isActive: true,
     });
 
-    await expect(requireControlPlaneAccess(userActor, { instanceId: "inst-1" })).resolves.toEqual({ role: "SUPPORT_VIEWER" });
+    await expect(requireControlPlaneAccess(userActor, { deploymentId: "inst-1" })).resolves.toEqual({ role: "SUPPORT_VIEWER" });
   });
 
   it("defaults control-plane agent bearer access to read-only scopes", async () => {
@@ -154,7 +154,7 @@ describe("control plane domain", () => {
       scopes: ["control-plane:read"],
     });
     await expect(runControlPlaneContextOperation(actor!, {
-      instanceId: "inst-1",
+      deploymentId: "inst-1",
       operation: "sync_all",
       reason: "Repair context.",
     })).rejects.toMatchObject({
@@ -165,10 +165,10 @@ describe("control plane domain", () => {
 
   it("encrypts support credentials and does not return ciphertext", async () => {
     const { configureSupportConnector } = await import("./control-plane");
-    prismaMock.instanceRegistry.findUnique.mockResolvedValueOnce({
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce({
       supportCredentialEnc: null,
     });
-    prismaMock.instanceRegistry.update.mockResolvedValueOnce({
+    prismaMock.customerDeployment.update.mockResolvedValueOnce({
       id: "inst-1",
       supportCredentialEnc: "encrypted:support-token",
       supportMcpUrl: "https://customer.test/api/mcp",
@@ -177,7 +177,7 @@ describe("control plane domain", () => {
     });
 
     const result = await configureSupportConnector(operatorActor, {
-      instanceId: "inst-1",
+      deploymentId: "inst-1",
       supportBaseUrl: "https://customer.test",
       supportMcpUrl: "https://customer.test/api/mcp",
       supportCredential: "support-token",
@@ -185,7 +185,7 @@ describe("control plane domain", () => {
     });
 
     expect(encryptSecretMock).toHaveBeenCalledWith("support-token");
-    expect(prismaMock.instanceRegistry.update).toHaveBeenCalledWith(expect.objectContaining({
+    expect(prismaMock.customerDeployment.update).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
         supportCredentialEnc: "encrypted:support-token",
         supportConnectorStatus: "configured",
@@ -195,7 +195,7 @@ describe("control plane domain", () => {
   });
 
   it("lists customers with managed workspace summaries and redacted credentials", async () => {
-    const { listControlPlaneCustomers } = await import("./control-plane");
+    const { listControlPlaneDeployments } = await import("./control-plane");
     prismaMock.customerAccount.findMany.mockResolvedValueOnce([
       {
         id: "cust-1",
@@ -234,9 +234,9 @@ describe("control plane domain", () => {
         },
       },
     ] as any);
-    prismaMock.instanceRegistry.findMany.mockResolvedValueOnce([]);
+    prismaMock.customerDeployment.findMany.mockResolvedValueOnce([]);
 
-    const result = await listControlPlaneCustomers(operatorActor);
+    const result = await listControlPlaneDeployments(operatorActor);
 
     expect(prismaMock.customerAccount.findMany).toHaveBeenCalledWith(expect.objectContaining({
       include: expect.objectContaining({
@@ -256,7 +256,7 @@ describe("control plane domain", () => {
   });
 
   it("lists customer accounts that still need a deployment", async () => {
-    const { listControlPlaneCustomers } = await import("./control-plane");
+    const { listControlPlaneDeployments } = await import("./control-plane");
     prismaMock.customerAccount.findMany.mockResolvedValueOnce([
       {
         id: "cust-2",
@@ -274,9 +274,9 @@ describe("control plane domain", () => {
         primaryDeployment: null,
       },
     ] as any);
-    prismaMock.instanceRegistry.findMany.mockResolvedValueOnce([]);
+    prismaMock.customerDeployment.findMany.mockResolvedValueOnce([]);
 
-    const result = await listControlPlaneCustomers(operatorActor);
+    const result = await listControlPlaneDeployments(operatorActor);
 
     expect(result[0]).toMatchObject({
       id: "cust-2",
@@ -290,7 +290,7 @@ describe("control plane domain", () => {
 
   it("configures meeting recorder entitlements for managed workspaces and audits the reason", async () => {
     const { configureControlPlaneMeetingRecorderIntegration } = await import("./control-plane");
-    prismaMock.instanceRegistry.findUnique.mockResolvedValueOnce({
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce({
       id: "inst-1",
       label: "Acme",
       customerAccountId: "cust-1",
@@ -327,7 +327,7 @@ describe("control plane domain", () => {
     prismaMock.workflowJob.upsert.mockResolvedValueOnce({ id: "job-1" });
 
     const result = await configureControlPlaneMeetingRecorderIntegration(operatorActor, {
-      instanceId: "inst-1",
+      deploymentId: "inst-1",
       entitlementEnabled: true,
       enabled: true,
       defaultProvider: "RECALL_AI",
@@ -371,9 +371,9 @@ describe("control plane domain", () => {
     expect(prismaMock.workflowJob.upsert).toHaveBeenCalledWith(expect.objectContaining({
       where: { dedupeKey: "meeting-recorders:reconcile:ws-1:control-plane" },
     }));
-    expect(prismaMock.hostedInstanceEvent.create).toHaveBeenCalledWith(expect.objectContaining({
+    expect(prismaMock.customerDeploymentEvent.create).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
-        instanceId: "inst-1",
+        deploymentId: "inst-1",
         action: "control_plane.integration.meeting_recorders_configured",
         meta: expect.objectContaining({
           reason: "Customer signed recorder addendum.",
@@ -382,7 +382,7 @@ describe("control plane domain", () => {
       }),
     }));
     expect(result).toMatchObject({
-      instanceId: "inst-1",
+      deploymentId: "inst-1",
       entitlementEnabled: true,
       entitlement: {
         id: "entitlement-1",
@@ -394,7 +394,7 @@ describe("control plane domain", () => {
   it("requires a reason and managed workspace before configuring meeting recorders", async () => {
     const { configureControlPlaneMeetingRecorderIntegration } = await import("./control-plane");
     await expect(configureControlPlaneMeetingRecorderIntegration(operatorActor, {
-      instanceId: "inst-1",
+      deploymentId: "inst-1",
       entitlementEnabled: true,
       enabled: true,
       defaultProvider: "RECALL_AI",
@@ -406,7 +406,7 @@ describe("control plane domain", () => {
       code: "CONTROL_PLANE_REASON_REQUIRED",
     });
 
-    prismaMock.instanceRegistry.findUnique.mockResolvedValueOnce({
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce({
       id: "inst-1",
       label: "Acme",
       managedWorkspaceId: null,
@@ -414,7 +414,7 @@ describe("control plane domain", () => {
       managedWorkspace: null,
     });
     await expect(configureControlPlaneMeetingRecorderIntegration(operatorActor, {
-      instanceId: "inst-1",
+      deploymentId: "inst-1",
       entitlementEnabled: true,
       enabled: true,
       defaultProvider: "RECALL_AI",
@@ -429,7 +429,7 @@ describe("control plane domain", () => {
 
   it("queues sync for all active managed workspace context sources and audits the reason", async () => {
     const { runControlPlaneContextOperation } = await import("./control-plane");
-    prismaMock.instanceRegistry.findUnique.mockResolvedValueOnce({
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce({
       id: "inst-1",
       label: "Acme",
       managedWorkspaceId: "ws-1",
@@ -448,7 +448,7 @@ describe("control plane domain", () => {
     prismaMock.workflowJob.upsert.mockResolvedValue({ id: "job-1" });
 
     const result = await runControlPlaneContextOperation(operatorActor, {
-      instanceId: "inst-1",
+      deploymentId: "inst-1",
       operation: "sync_all",
       reason: "Customer requested a full context refresh.",
     });
@@ -471,9 +471,9 @@ describe("control plane domain", () => {
         }),
       }),
     }));
-    expect(prismaMock.hostedInstanceEvent.create).toHaveBeenCalledWith(expect.objectContaining({
+    expect(prismaMock.customerDeploymentEvent.create).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
-        instanceId: "inst-1",
+        deploymentId: "inst-1",
         action: "control_plane.context.sync_requested",
         meta: expect.objectContaining({
           reason: "Customer requested a full context refresh.",
@@ -491,7 +491,7 @@ describe("control plane domain", () => {
 
   it("queues sync for one managed workspace context source", async () => {
     const { runControlPlaneContextOperation } = await import("./control-plane");
-    prismaMock.instanceRegistry.findUnique.mockResolvedValueOnce({
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce({
       id: "inst-1",
       label: "Acme",
       managedWorkspaceId: "ws-1",
@@ -511,7 +511,7 @@ describe("control plane domain", () => {
     prismaMock.workflowJob.upsert.mockResolvedValueOnce({ id: "job-1" });
 
     const result = await runControlPlaneContextOperation(operatorActor, {
-      instanceId: "inst-1",
+      deploymentId: "inst-1",
       operation: "sync_source",
       sourceId: "source-1",
       reason: "Repair failed warehouse ingestion.",
@@ -530,7 +530,7 @@ describe("control plane domain", () => {
         payload: expect.objectContaining({ sourceId: "source-1" }),
       }),
     }));
-    expect(prismaMock.hostedInstanceEvent.create).toHaveBeenCalledWith(expect.objectContaining({
+    expect(prismaMock.customerDeploymentEvent.create).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
         action: "control_plane.context.sync_requested",
         meta: expect.objectContaining({
@@ -550,7 +550,7 @@ describe("control plane domain", () => {
 
   it("disables a managed workspace context source and audits the operation", async () => {
     const { runControlPlaneContextOperation } = await import("./control-plane");
-    prismaMock.instanceRegistry.findUnique.mockResolvedValueOnce({
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce({
       id: "inst-1",
       label: "Acme",
       managedWorkspaceId: "ws-1",
@@ -574,7 +574,7 @@ describe("control plane domain", () => {
     });
 
     const result = await runControlPlaneContextOperation(operatorActor, {
-      instanceId: "inst-1",
+      deploymentId: "inst-1",
       operation: "disable_source",
       sourceId: "source-1",
       reason: "Source is creating invalid context.",
@@ -584,7 +584,7 @@ describe("control plane domain", () => {
       where: { id: "source-1" },
       data: { isActive: false },
     }));
-    expect(prismaMock.hostedInstanceEvent.create).toHaveBeenCalledWith(expect.objectContaining({
+    expect(prismaMock.customerDeploymentEvent.create).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
         action: "control_plane.context.source_disabled",
         meta: expect.objectContaining({
@@ -604,7 +604,7 @@ describe("control plane domain", () => {
   it("requires reason and managed workspace before running context operations", async () => {
     const { runControlPlaneContextOperation } = await import("./control-plane");
     await expect(runControlPlaneContextOperation(operatorActor, {
-      instanceId: "inst-1",
+      deploymentId: "inst-1",
       operation: "sync_all",
       reason: "",
     })).rejects.toMatchObject({
@@ -612,7 +612,7 @@ describe("control plane domain", () => {
       code: "CONTROL_PLANE_REASON_REQUIRED",
     });
 
-    prismaMock.instanceRegistry.findUnique.mockResolvedValueOnce({
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce({
       id: "inst-1",
       label: "Acme",
       managedWorkspaceId: null,
@@ -620,7 +620,7 @@ describe("control plane domain", () => {
       managedWorkspace: null,
     });
     await expect(runControlPlaneContextOperation(operatorActor, {
-      instanceId: "inst-1",
+      deploymentId: "inst-1",
       operation: "sync_all",
       reason: "Customer asked for context repair.",
     })).rejects.toMatchObject({
@@ -631,7 +631,7 @@ describe("control plane domain", () => {
 
   it("rejects context operations for sources outside the managed workspace", async () => {
     const { runControlPlaneContextOperation } = await import("./control-plane");
-    prismaMock.instanceRegistry.findUnique.mockResolvedValueOnce({
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce({
       id: "inst-1",
       label: "Acme",
       managedWorkspaceId: "ws-1",
@@ -646,7 +646,7 @@ describe("control plane domain", () => {
     prismaMock.externalDataSource.findFirst.mockResolvedValueOnce(null);
 
     await expect(runControlPlaneContextOperation(operatorActor, {
-      instanceId: "inst-1",
+      deploymentId: "inst-1",
       operation: "sync_source",
       sourceId: "source-2",
       reason: "Repair source.",
@@ -658,7 +658,7 @@ describe("control plane domain", () => {
 
   it("prepares a release upgrade and records readiness evidence without deployment", async () => {
     const { runControlPlaneReleaseOperation } = await import("./control-plane");
-    prismaMock.instanceRegistry.findUnique.mockResolvedValue({
+    prismaMock.customerDeployment.findUnique.mockResolvedValue({
       id: "inst-1",
       label: "Acme",
       customerAccountId: "cust-1",
@@ -682,7 +682,7 @@ describe("control plane domain", () => {
       railwayWebServiceId: "web-1",
       railwayWorkerServiceId: "worker-1",
     });
-    prismaMock.hostedInstanceEvent.findMany.mockResolvedValueOnce([
+    prismaMock.customerDeploymentEvent.findMany.mockResolvedValueOnce([
       {
         id: "event-1",
         actorUserId: "operator-1",
@@ -693,16 +693,16 @@ describe("control plane domain", () => {
     ]);
 
     const result = await runControlPlaneReleaseOperation(operatorActor, {
-      instanceId: "inst-1",
+      deploymentId: "inst-1",
       operation: "prepare_upgrade",
       targetReleaseImageTag: "ghcr.io/corgtex/app:new",
       targetReleaseVersion: "0.2.0",
       reason: "Prepare staged release after smoke checks.",
     });
 
-    expect(prismaMock.hostedInstanceEvent.create).toHaveBeenCalledWith(expect.objectContaining({
+    expect(prismaMock.customerDeploymentEvent.create).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
-        instanceId: "inst-1",
+        deploymentId: "inst-1",
         action: "control_plane.release.upgrade_prepared",
         meta: expect.objectContaining({
           reason: "Prepare staged release after smoke checks.",
@@ -729,7 +729,7 @@ describe("control plane domain", () => {
         targetReleaseVersion: "0.2.0",
       }),
     }));
-    expect(prismaMock.instanceRegistry.update).not.toHaveBeenCalled();
+    expect(prismaMock.customerDeployment.update).not.toHaveBeenCalled();
     expect(result).toMatchObject({
       operation: "prepare_upgrade",
       target: {
@@ -749,7 +749,7 @@ describe("control plane domain", () => {
   it("requires reason, target image tag, and supported operation for release operations", async () => {
     const { runControlPlaneReleaseOperation } = await import("./control-plane");
     await expect(runControlPlaneReleaseOperation(operatorActor, {
-      instanceId: "inst-1",
+      deploymentId: "inst-1",
       operation: "prepare_upgrade",
       targetReleaseImageTag: "ghcr.io/corgtex/app:new",
       reason: "",
@@ -758,7 +758,7 @@ describe("control plane domain", () => {
       code: "CONTROL_PLANE_REASON_REQUIRED",
     });
 
-    prismaMock.instanceRegistry.findUnique.mockResolvedValueOnce({
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce({
       id: "inst-1",
       label: "Acme",
       managedWorkspaceId: null,
@@ -769,7 +769,7 @@ describe("control plane domain", () => {
       lastHealthStatus: "ok",
     });
     await expect(runControlPlaneReleaseOperation(operatorActor, {
-      instanceId: "inst-1",
+      deploymentId: "inst-1",
       operation: "prepare_upgrade",
       targetReleaseImageTag: "",
       reason: "Prepare release.",
@@ -779,7 +779,7 @@ describe("control plane domain", () => {
     });
 
     await expect(runControlPlaneReleaseOperation(operatorActor, {
-      instanceId: "inst-1",
+      deploymentId: "inst-1",
       operation: "upgrade_now",
       targetReleaseImageTag: "ghcr.io/corgtex/app:new",
       reason: "Prepare release.",
@@ -790,14 +790,14 @@ describe("control plane domain", () => {
   });
 
   it("probes customer health with scoped release access and records audit evidence", async () => {
-    const { probeControlPlaneCustomerHealth } = await import("./control-plane");
+    const { probeControlPlaneDeploymentHealth } = await import("./control-plane");
     const scopedAgent: AppActor = {
       kind: "agent",
       authProvider: "control-plane",
       label: "control-plane-agent",
       scopes: ["control-plane:read", "control-plane:releases:write"],
     };
-    prismaMock.instanceRegistry.findUnique.mockResolvedValue({
+    prismaMock.customerDeployment.findUnique.mockResolvedValue({
       id: "inst-1",
       label: "Acme",
       customerAccountId: "cust-1",
@@ -817,8 +817,8 @@ describe("control plane domain", () => {
       bootstrapStatus: "completed",
       lastProvisioningError: null,
     });
-    prismaMock.instanceRegistry.update.mockResolvedValueOnce({ id: "inst-1" });
-    prismaMock.hostedInstanceEvent.findMany.mockResolvedValueOnce([]);
+    prismaMock.customerDeployment.update.mockResolvedValueOnce({ id: "inst-1" });
+    prismaMock.customerDeploymentEvent.findMany.mockResolvedValueOnce([]);
     global.fetch = vi.fn(async () => ({
       ok: true,
       status: 200,
@@ -830,12 +830,12 @@ describe("control plane domain", () => {
       }),
     })) as any;
 
-    const result = await probeControlPlaneCustomerHealth(scopedAgent, {
-      instanceId: "inst-1",
+    const result = await probeControlPlaneDeploymentHealth(scopedAgent, {
+      deploymentId: "inst-1",
       reason: "Post-deploy health check.",
     });
 
-    expect(prismaMock.instanceRegistry.update).toHaveBeenCalledWith(expect.objectContaining({
+    expect(prismaMock.customerDeployment.update).toHaveBeenCalledWith(expect.objectContaining({
       where: { id: "inst-1" },
       data: expect.objectContaining({
         lastHealthStatus: "ok",
@@ -852,7 +852,7 @@ describe("control plane domain", () => {
         status: "ok",
       }),
     }));
-    expect(prismaMock.hostedInstanceEvent.create).toHaveBeenCalledWith(expect.objectContaining({
+    expect(prismaMock.customerDeploymentEvent.create).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
         action: "control_plane.release.health_probed",
         meta: expect.objectContaining({
@@ -870,7 +870,7 @@ describe("control plane domain", () => {
       id: "op-1",
       action: "members.invite",
     });
-    prismaMock.instanceRegistry.findUnique.mockResolvedValue({
+    prismaMock.customerDeployment.findUnique.mockResolvedValue({
       id: "inst-1",
       label: "Acme",
       url: "https://customer.test",
@@ -884,7 +884,7 @@ describe("control plane domain", () => {
     });
 
     const result = await runCustomerSupportOperation(operatorActor, {
-      instanceId: "inst-1",
+      deploymentId: "inst-1",
       action: "members.invite",
       reason: "Pilot onboarding request",
       arguments: {
@@ -913,7 +913,7 @@ describe("control plane domain", () => {
 
   it("refreshes cached connector snapshots without remote calls when connector setup is missing", async () => {
     const { refreshControlPlaneFleetSnapshots } = await import("./control-plane");
-    prismaMock.instanceRegistry.findUnique.mockResolvedValueOnce({
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce({
       id: "inst-1",
       label: "Acme",
       customerAccountId: "cust-1",
@@ -929,7 +929,7 @@ describe("control plane domain", () => {
     });
 
     const result = await refreshControlPlaneFleetSnapshots(operatorActor, {
-      instanceId: "inst-1",
+      deploymentId: "inst-1",
       snapshotKinds: ["CONNECTOR", "SUPPORT_READY"],
       reason: "Operator requested cached readiness refresh.",
     });
@@ -962,7 +962,7 @@ describe("control plane domain", () => {
 
   it("queues bounded fleet snapshot jobs against central deployment rows", async () => {
     const { CONTROL_PLANE_FLEET_SNAPSHOT_JOB_TYPE, enqueueControlPlaneFleetSnapshots } = await import("./control-plane");
-    prismaMock.instanceRegistry.findMany.mockResolvedValueOnce([
+    prismaMock.customerDeployment.findMany.mockResolvedValueOnce([
       { id: "inst-1" },
       { id: "inst-2" },
     ]);
@@ -974,7 +974,7 @@ describe("control plane domain", () => {
       limit: 2,
     });
 
-    expect(prismaMock.instanceRegistry.findMany).toHaveBeenCalledWith(expect.objectContaining({
+    expect(prismaMock.customerDeployment.findMany).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({
         customerAccountId: { not: null },
         deploymentStatus: { notIn: ["RETIRED", "SUSPENDED"] },

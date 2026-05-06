@@ -8,7 +8,7 @@ const { prismaMock } = vi.hoisted(() => ({
       findFirst: vi.fn(),
       update: vi.fn(),
     },
-    instanceRegistry: {
+    customerDeployment: {
       upsert: vi.fn(),
     },
     workspace: {
@@ -49,7 +49,7 @@ describe("customer lifecycle", () => {
       id: "cust-1",
       primaryDeploymentId: "inst-1",
     });
-    prismaMock.instanceRegistry.upsert.mockResolvedValue({
+    prismaMock.customerDeployment.upsert.mockResolvedValue({
       id: "inst-1",
       customerSlug: "acme",
       deploymentStatus: "ACTIVE",
@@ -106,7 +106,7 @@ describe("customer lifecycle", () => {
     });
 
     expect(result.deployment.id).toBe("inst-1");
-    expect(prismaMock.instanceRegistry.upsert).toHaveBeenCalledWith({
+    expect(prismaMock.customerDeployment.upsert).toHaveBeenCalledWith({
       where: { customerSlug: "acme" },
       update: expect.objectContaining({
         customerAccountId: "cust-1",
@@ -136,7 +136,7 @@ describe("customer lifecycle", () => {
       where: { slug: "acme" },
       select: { id: true, slug: true, name: true, description: true },
     });
-    expect(prismaMock.instanceRegistry.upsert).toHaveBeenCalledWith(expect.objectContaining({
+    expect(prismaMock.customerDeployment.upsert).toHaveBeenCalledWith(expect.objectContaining({
       create: expect.objectContaining({
         url: "https://app.test/workspaces/ws-1",
         deploymentKind: "SHARED_WORKSPACE",

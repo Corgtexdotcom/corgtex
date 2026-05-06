@@ -90,7 +90,7 @@ const controlPlaneDeploymentInclude = {
   _count: {
     select: { supportOperations: true, events: true },
   },
-} satisfies Prisma.InstanceRegistryInclude;
+} satisfies Prisma.CustomerDeploymentInclude;
 
 function decimalToString(value: unknown) {
   if (!value) return null;
@@ -292,11 +292,11 @@ const controlPlaneWorkerActor: AppActor = {
   scopes: ["control-plane:*"],
 };
 
-function normalizeSupportMcpUrl(instance: { url: string; supportMcpUrl?: string | null }) {
-  if (instance.supportMcpUrl?.trim()) {
-    return instance.supportMcpUrl.trim();
+function normalizeSupportMcpUrl(deployment: { url: string; supportMcpUrl?: string | null }) {
+  if (deployment.supportMcpUrl?.trim()) {
+    return deployment.supportMcpUrl.trim();
   }
-  return `${instance.url.replace(/\/$/, "")}/api/mcp`;
+  return `${deployment.url.replace(/\/$/, "")}/api/mcp`;
 }
 
 function summarizeMcpResponse(value: unknown) {
@@ -347,9 +347,9 @@ async function callMcpTool(params: {
   return body?.result ?? body;
 }
 
-async function loadSupportConnector(instanceId: string) {
-  const instance = await prisma.instanceRegistry.findUnique({
-    where: { id: instanceId },
+async function loadSupportConnector(deploymentId: string) {
+  const deployment = await prisma.customerDeployment.findUnique({
+    where: { id: deploymentId },
     select: {
       id: true,
       label: true,
@@ -363,19 +363,19 @@ async function loadSupportConnector(instanceId: string) {
       supportConnectorStatus: true,
     },
   });
-  invariant(instance, 404, "NOT_FOUND", "Customer instance not found.");
-  invariant(instance.supportCredentialEnc, 400, "SUPPORT_CONNECTOR_MISSING", "Support connector credentials are not configured for this instance.");
+  invariant(deployment, 404, "NOT_FOUND", "Customer deployment not found.");
+  invariant(deployment.supportCredentialEnc, 400, "SUPPORT_CONNECTOR_MISSING", "Support connector credentials are not configured for this deployment.");
   return {
-    instance,
-    mcpUrl: normalizeSupportMcpUrl(instance),
-    bearerToken: decryptSecret(instance.supportCredentialEnc),
+    deployment,
+    mcpUrl: normalizeSupportMcpUrl(deployment),
+    bearerToken: decryptSecret(deployment.supportCredentialEnc),
   };
 }
 
-async function recordHostedEvent(actor: AppActor, instanceId: string, action: string, meta: JsonRecord = {}) {
-  await prisma.hostedInstanceEvent.create({
+async function recordCustomerDeploymentEvent(actor: AppActor, deploymentId: string, action: string, meta: JsonRecord = {}) {
+  await prisma.customerDeploymentEvent.create({
     data: {
-      instanceId,
+      deploymentId,
       actorUserId: actorUserId(actor),
       action,
       meta: redactObject(meta) as Prisma.InputJsonObject,
@@ -408,7 +408,7 @@ async function recordRemoteSupportAudit(params: {
   });
 }
 
-export async function requireControlPlaneAccess(actor: AppActor, params: { instanceId?: string } = {}) {
+export async function requireControlPlaneAccess(actor: AppActor, params: { deploymentId?: string } = {}) {
   if (isGlobalOperator(actor)) {
     return { role: "OPERATOR" as const };
   }
@@ -418,11 +418,11 @@ export async function requireControlPlaneAccess(actor: AppActor, params: { insta
     return { role: "OPERATOR" as const };
   }
 
-  if (actor.kind === "user" && params.instanceId) {
-    const access = await prisma.controlPlaneInstanceAccess.findUnique({
+  if (actor.kind === "user" && params.deploymentId) {
+    const access = await prisma.customerDeploymentAccess.findUnique({
       where: {
-        instanceId_userId: {
-          instanceId: params.instanceId,
+        deploymentId_userId: {
+          deploymentId: params.deploymentId,
           userId: actor.user.id,
         },
       },
@@ -436,7 +436,7 @@ export async function requireControlPlaneAccess(actor: AppActor, params: { insta
   throw new AppError(403, "FORBIDDEN", "Control plane access is required.");
 }
 
-export async function listControlPlaneCustomers(actor: AppActor) {
+export async function listControlPlaneDeployments(actor: AppActor) {
   await requireControlPlaneAccess(actor);
 
   const accounts = await prisma.customerAccount.findMany({
@@ -532,27 +532,27 @@ export async function listControlPlaneCustomers(actor: AppActor) {
     };
   });
 
-  const orphanedDeployments = await prisma.instanceRegistry.findMany({
+  const orphanedDeployments = await prisma.customerDeployment.findMany({
     where: { customerAccountId: null },
     orderBy: { createdAt: "desc" },
     include: controlPlaneDeploymentInclude,
   });
 
-  const orphanedRows = orphanedDeployments.map((instance) => ({
-    ...instance,
+  const orphanedDeploymentRows = orphanedDeployments.map((deployment) => ({
+    ...deployment,
     hasDeployment: true,
-    hasSupportCredential: Boolean(instance.supportCredentialEnc),
+    hasSupportCredential: Boolean(deployment.supportCredentialEnc),
     supportCredentialEnc: undefined,
   }));
 
-  return [...accountRows, ...orphanedRows];
+  return [...accountRows, ...orphanedDeploymentRows];
 }
 
-export async function getControlPlaneCustomer(actor: AppActor, instanceId: string) {
-  await requireControlPlaneAccess(actor, { instanceId });
+export async function getControlPlaneDeployment(actor: AppActor, deploymentId: string) {
+  await requireControlPlaneAccess(actor, { deploymentId });
 
-  const instance = await prisma.instanceRegistry.findUnique({
-    where: { id: instanceId },
+  const deployment = await prisma.customerDeployment.findUnique({
+    where: { id: deploymentId },
     include: {
       events: {
         orderBy: { createdAt: "desc" },
@@ -562,7 +562,7 @@ export async function getControlPlaneCustomer(actor: AppActor, instanceId: strin
         orderBy: { createdAt: "desc" },
         take: 30,
       },
-      controlPlaneAccess: {
+      accessGrants: {
         where: { isActive: true },
         include: { user: { select: { id: true, email: true, displayName: true } } },
         orderBy: { createdAt: "desc" },
@@ -577,44 +577,44 @@ export async function getControlPlaneCustomer(actor: AppActor, instanceId: strin
       },
     },
   });
-  invariant(instance, 404, "NOT_FOUND", "Customer instance not found.");
+  invariant(deployment, 404, "NOT_FOUND", "Customer deployment not found.");
 
   return {
-    ...instance,
-    hasSupportCredential: Boolean(instance.supportCredentialEnc),
+    ...deployment,
+    hasSupportCredential: Boolean(deployment.supportCredentialEnc),
     supportCredentialEnc: undefined,
   };
 }
 
-async function getControlPlaneInstanceWithWorkspace(actor: AppActor, instanceId: string) {
-  await requireControlPlaneAccess(actor, { instanceId });
-  const instance = await prisma.instanceRegistry.findUnique({
-    where: { id: instanceId },
+async function getControlPlaneDeploymentWithWorkspace(actor: AppActor, deploymentId: string) {
+  await requireControlPlaneAccess(actor, { deploymentId });
+  const deployment = await prisma.customerDeployment.findUnique({
+    where: { id: deploymentId },
     include: {
       managedWorkspace: {
         select: managedWorkspaceSelect,
       },
     },
   });
-  invariant(instance, 404, "NOT_FOUND", "Customer instance not found.");
+  invariant(deployment, 404, "NOT_FOUND", "Customer deployment not found.");
   return {
-    ...instance,
-    hasSupportCredential: Boolean(instance.supportCredentialEnc),
+    ...deployment,
+    hasSupportCredential: Boolean(deployment.supportCredentialEnc),
     supportCredentialEnc: undefined,
   };
 }
 
-export async function getControlPlaneContextHealth(actor: AppActor, instanceId: string) {
-  const instance = await getControlPlaneInstanceWithWorkspace(actor, instanceId);
-  const adapter = createControlPlaneAdapter(instance);
-  if (!adapter.canReadCentralWorkspace || !instance.managedWorkspaceId) {
+export async function getControlPlaneContextHealth(actor: AppActor, deploymentId: string) {
+  const deployment = await getControlPlaneDeploymentWithWorkspace(actor, deploymentId);
+  const adapter = createControlPlaneAdapter(deployment);
+  if (!adapter.canReadCentralWorkspace || !deployment.managedWorkspaceId) {
     return {
-      instanceId,
+      deploymentId,
       accessMode: adapter.kind,
       hasManagedWorkspace: false,
-      supportConnectorStatus: instance.supportConnectorStatus,
-      supportLastSyncAt: instance.supportLastSyncAt,
-      supportLastSyncError: instance.supportLastSyncError,
+      supportConnectorStatus: deployment.supportConnectorStatus,
+      supportLastSyncAt: deployment.supportLastSyncAt,
+      supportLastSyncError: deployment.supportLastSyncError,
       requiresConnectorSetup: adapter.requiresConnectorSetup,
       summary: null,
       sources: [],
@@ -634,7 +634,7 @@ export async function getControlPlaneContextHealth(actor: AppActor, instanceId: 
     staleExternalSourceCount,
   ] = await Promise.all([
     prisma.brainSource.findMany({
-      where: { workspaceId: instance.managedWorkspaceId, archivedAt: null },
+      where: { workspaceId: deployment.managedWorkspaceId, archivedAt: null },
       orderBy: { createdAt: "desc" },
       take: 8,
       select: {
@@ -645,9 +645,9 @@ export async function getControlPlaneContextHealth(actor: AppActor, instanceId: 
         createdAt: true,
       },
     }),
-    prisma.brainSource.count({ where: { workspaceId: instance.managedWorkspaceId, archivedAt: null } }),
+    prisma.brainSource.count({ where: { workspaceId: deployment.managedWorkspaceId, archivedAt: null } }),
     prisma.externalDataSource.findMany({
-      where: { workspaceId: instance.managedWorkspaceId, archivedAt: null },
+      where: { workspaceId: deployment.managedWorkspaceId, archivedAt: null },
       orderBy: { updatedAt: "desc" },
       take: 8,
       select: {
@@ -673,18 +673,18 @@ export async function getControlPlaneContextHealth(actor: AppActor, instanceId: 
         },
       },
     }),
-    prisma.externalDataSource.count({ where: { workspaceId: instance.managedWorkspaceId, archivedAt: null } }),
-    prisma.knowledgeChunk.count({ where: { workspaceId: instance.managedWorkspaceId } }),
+    prisma.externalDataSource.count({ where: { workspaceId: deployment.managedWorkspaceId, archivedAt: null } }),
+    prisma.knowledgeChunk.count({ where: { workspaceId: deployment.managedWorkspaceId } }),
     prisma.workflowJob.count({
       where: {
-        workspaceId: instance.managedWorkspaceId,
+        workspaceId: deployment.managedWorkspaceId,
         status: "FAILED",
         type: { contains: "sync" },
       },
     }),
     prisma.workflowJob.findMany({
       where: {
-        workspaceId: instance.managedWorkspaceId,
+        workspaceId: deployment.managedWorkspaceId,
         status: "FAILED",
         type: { contains: "sync" },
       },
@@ -700,14 +700,14 @@ export async function getControlPlaneContextHealth(actor: AppActor, instanceId: 
     }),
     prisma.externalDataSource.count({
       where: {
-        workspaceId: instance.managedWorkspaceId,
+        workspaceId: deployment.managedWorkspaceId,
         archivedAt: null,
         lastSyncError: { not: null },
       },
     }),
     prisma.externalDataSource.count({
       where: {
-        workspaceId: instance.managedWorkspaceId,
+        workspaceId: deployment.managedWorkspaceId,
         archivedAt: null,
         isActive: true,
         OR: [
@@ -719,10 +719,10 @@ export async function getControlPlaneContextHealth(actor: AppActor, instanceId: 
   ]);
 
   return {
-    instanceId,
+    deploymentId,
     accessMode: "managed_workspace" as const,
     hasManagedWorkspace: true,
-    managedWorkspace: instance.managedWorkspace,
+    managedWorkspace: deployment.managedWorkspace,
     summary: {
       brainSources: brainSourceCount,
       externalSources: dataSourceCount,
@@ -761,7 +761,7 @@ async function enqueueContextSourceSync(tx: Prisma.TransactionClient, params: {
 }
 
 export async function runControlPlaneContextOperation(actor: AppActor, params: {
-  instanceId: string;
+  deploymentId: string;
   operation: string;
   sourceId?: string | null;
   reason?: string | null;
@@ -769,8 +769,8 @@ export async function runControlPlaneContextOperation(actor: AppActor, params: {
   requireControlPlaneScope(actor, "control-plane:context:write");
   const reason = requireMutationReason(params.reason);
   const operation = normalizeContextOperation(params.operation);
-  const instance = await getControlPlaneInstanceWithWorkspace(actor, params.instanceId);
-  const managedWorkspaceId = instance.managedWorkspaceId;
+  const deployment = await getControlPlaneDeploymentWithWorkspace(actor, params.deploymentId);
+  const managedWorkspaceId = deployment.managedWorkspaceId;
   invariant(managedWorkspaceId, 400, "MANAGED_WORKSPACE_REQUIRED", "Context operations require a managed workspace link.");
 
   return prisma.$transaction(async (tx) => {
@@ -795,9 +795,9 @@ export async function runControlPlaneContextOperation(actor: AppActor, params: {
           dedupeSuffix,
         });
       }
-      await tx.hostedInstanceEvent.create({
+      await tx.customerDeploymentEvent.create({
         data: {
-          instanceId: params.instanceId,
+          deploymentId: params.deploymentId,
           actorUserId: actorUserId(actor),
           action: "control_plane.context.sync_requested",
           meta: redactObject({
@@ -810,7 +810,7 @@ export async function runControlPlaneContextOperation(actor: AppActor, params: {
         },
       });
       return {
-        instanceId: params.instanceId,
+        deploymentId: params.deploymentId,
         managedWorkspaceId,
         operation,
         queuedJobs: sources.length,
@@ -841,9 +841,9 @@ export async function runControlPlaneContextOperation(actor: AppActor, params: {
         sourceId: source.id,
         dedupeSuffix: String(Date.now()),
       });
-      await tx.hostedInstanceEvent.create({
+      await tx.customerDeploymentEvent.create({
         data: {
-          instanceId: params.instanceId,
+          deploymentId: params.deploymentId,
           actorUserId: actorUserId(actor),
           action: "control_plane.context.sync_requested",
           meta: redactObject({
@@ -858,7 +858,7 @@ export async function runControlPlaneContextOperation(actor: AppActor, params: {
         },
       });
       return {
-        instanceId: params.instanceId,
+        deploymentId: params.deploymentId,
         managedWorkspaceId,
         operation,
         queuedJobs: 1,
@@ -875,9 +875,9 @@ export async function runControlPlaneContextOperation(actor: AppActor, params: {
         isActive: true,
       },
     });
-    await tx.hostedInstanceEvent.create({
+    await tx.customerDeploymentEvent.create({
       data: {
-        instanceId: params.instanceId,
+        deploymentId: params.deploymentId,
         actorUserId: actorUserId(actor),
         action: "control_plane.context.source_disabled",
         meta: redactObject({
@@ -891,7 +891,7 @@ export async function runControlPlaneContextOperation(actor: AppActor, params: {
       },
     });
     return {
-      instanceId: params.instanceId,
+      deploymentId: params.deploymentId,
       managedWorkspaceId,
       operation,
       sourceIds: [updated.id],
@@ -900,16 +900,16 @@ export async function runControlPlaneContextOperation(actor: AppActor, params: {
   });
 }
 
-export async function getControlPlaneIntegrationStatus(actor: AppActor, instanceId: string) {
-  const instance = await getControlPlaneInstanceWithWorkspace(actor, instanceId);
-  const adapter = createControlPlaneAdapter(instance);
-  if (!adapter.canReadCentralWorkspace || !instance.managedWorkspaceId) {
+export async function getControlPlaneIntegrationStatus(actor: AppActor, deploymentId: string) {
+  const deployment = await getControlPlaneDeploymentWithWorkspace(actor, deploymentId);
+  const adapter = createControlPlaneAdapter(deployment);
+  if (!adapter.canReadCentralWorkspace || !deployment.managedWorkspaceId) {
     return {
-      instanceId,
+      deploymentId,
       accessMode: adapter.kind,
       hasManagedWorkspace: false,
-      supportConnectorStatus: instance.supportConnectorStatus,
-      supportLastSyncAt: instance.supportLastSyncAt,
+      supportConnectorStatus: deployment.supportConnectorStatus,
+      supportLastSyncAt: deployment.supportLastSyncAt,
       requiresConnectorSetup: adapter.requiresConnectorSetup,
       integrations: [],
     };
@@ -919,21 +919,21 @@ export async function getControlPlaneIntegrationStatus(actor: AppActor, instance
     prisma.workspaceFeatureFlag.findUnique({
       where: {
         workspaceId_flag: {
-          workspaceId: instance.managedWorkspaceId,
+          workspaceId: deployment.managedWorkspaceId,
           flag: MEETING_RECORDERS_FEATURE_FLAG,
         },
       },
     }),
-    prisma.workspaceMeetingRecorderConfig.findUnique({ where: { workspaceId: instance.managedWorkspaceId } }),
-    getMeetingRecorderMonthlyUsage(instance.managedWorkspaceId),
+    prisma.workspaceMeetingRecorderConfig.findUnique({ where: { workspaceId: deployment.managedWorkspaceId } }),
+    getMeetingRecorderMonthlyUsage(deployment.managedWorkspaceId),
     prisma.meetingRecording.count({
       where: {
-        workspaceId: instance.managedWorkspaceId,
+        workspaceId: deployment.managedWorkspaceId,
         status: "FAILED",
       },
     }),
     prisma.communicationInstallation.findMany({
-      where: { workspaceId: instance.managedWorkspaceId },
+      where: { workspaceId: deployment.managedWorkspaceId },
       orderBy: { updatedAt: "desc" },
       select: {
         id: true,
@@ -948,7 +948,7 @@ export async function getControlPlaneIntegrationStatus(actor: AppActor, instance
       },
     }),
     prisma.externalDataSource.findMany({
-      where: { workspaceId: instance.managedWorkspaceId, archivedAt: null },
+      where: { workspaceId: deployment.managedWorkspaceId, archivedAt: null },
       orderBy: { updatedAt: "desc" },
       select: {
         id: true,
@@ -962,10 +962,10 @@ export async function getControlPlaneIntegrationStatus(actor: AppActor, instance
   ]);
 
   return {
-    instanceId,
+    deploymentId,
     accessMode: "managed_workspace" as const,
     hasManagedWorkspace: true,
-    managedWorkspace: instance.managedWorkspace,
+    managedWorkspace: deployment.managedWorkspace,
     integrations: [
       {
         key: "meeting_recorders",
@@ -1010,7 +1010,7 @@ export async function getControlPlaneIntegrationStatus(actor: AppActor, instance
 }
 
 export async function configureControlPlaneMeetingRecorderIntegration(actor: AppActor, params: {
-  instanceId: string;
+  deploymentId: string;
   entitlementEnabled: boolean;
   enabled: boolean;
   defaultProvider: string;
@@ -1023,8 +1023,8 @@ export async function configureControlPlaneMeetingRecorderIntegration(actor: App
 }) {
   requireControlPlaneScope(actor, "control-plane:integrations:write");
   const reason = requireMutationReason(params.reason);
-  const instance = await getControlPlaneInstanceWithWorkspace(actor, params.instanceId);
-  const managedWorkspaceId = instance.managedWorkspaceId;
+  const deployment = await getControlPlaneDeploymentWithWorkspace(actor, params.deploymentId);
+  const managedWorkspaceId = deployment.managedWorkspaceId;
   invariant(managedWorkspaceId, 400, "MANAGED_WORKSPACE_REQUIRED", "Meeting recorder configuration requires a managed workspace link.");
 
   const defaultProvider = normalizeMeetingRecorderProvider(params.defaultProvider, "meeting recorder provider");
@@ -1073,17 +1073,17 @@ export async function configureControlPlaneMeetingRecorderIntegration(actor: App
         entryMessage,
       },
     });
-    const entitlement = instance.customerAccountId
+    const entitlement = deployment.customerAccountId
       ? await tx.customerEntitlement.upsert({
         where: {
           customerAccountId_scopeKey_entitlementKey: {
-            customerAccountId: instance.customerAccountId,
-            scopeKey: `deployment:${params.instanceId}`,
+            customerAccountId: deployment.customerAccountId,
+            scopeKey: `deployment:${params.deploymentId}`,
             entitlementKey: MEETING_RECORDERS_FEATURE_FLAG,
           },
         },
         update: {
-          deploymentId: params.instanceId,
+          deploymentId: params.deploymentId,
           enabled: params.entitlementEnabled,
           status: params.entitlementEnabled ? "ENABLED" : "DISABLED",
           intent: {
@@ -1100,9 +1100,9 @@ export async function configureControlPlaneMeetingRecorderIntegration(actor: App
           configuredByUserId: actorUserId(actor),
         },
         create: {
-          customerAccountId: instance.customerAccountId,
-          deploymentId: params.instanceId,
-          scopeKey: `deployment:${params.instanceId}`,
+          customerAccountId: deployment.customerAccountId,
+          deploymentId: params.deploymentId,
+          scopeKey: `deployment:${params.deploymentId}`,
           entitlementKey: MEETING_RECORDERS_FEATURE_FLAG,
           enabled: params.entitlementEnabled,
           status: params.entitlementEnabled ? "ENABLED" : "DISABLED",
@@ -1135,9 +1135,9 @@ export async function configureControlPlaneMeetingRecorderIntegration(actor: App
       });
     }
 
-    await tx.hostedInstanceEvent.create({
+    await tx.customerDeploymentEvent.create({
       data: {
-        instanceId: params.instanceId,
+        deploymentId: params.deploymentId,
         actorUserId: actorUserId(actor),
         action: "control_plane.integration.meeting_recorders_configured",
         meta: redactObject({
@@ -1157,7 +1157,7 @@ export async function configureControlPlaneMeetingRecorderIntegration(actor: App
   });
 
   return {
-    instanceId: params.instanceId,
+    deploymentId: params.deploymentId,
     managedWorkspaceId,
     entitlementEnabled: featureFlag.enabled,
     entitlement,
@@ -1165,16 +1165,16 @@ export async function configureControlPlaneMeetingRecorderIntegration(actor: App
   };
 }
 
-export async function getControlPlaneAiGovernanceStatus(actor: AppActor, instanceId: string) {
-  const instance = await getControlPlaneInstanceWithWorkspace(actor, instanceId);
-  const adapter = createControlPlaneAdapter(instance);
-  if (!adapter.canReadCentralWorkspace || !instance.managedWorkspaceId) {
+export async function getControlPlaneAiGovernanceStatus(actor: AppActor, deploymentId: string) {
+  const deployment = await getControlPlaneDeploymentWithWorkspace(actor, deploymentId);
+  const adapter = createControlPlaneAdapter(deployment);
+  if (!adapter.canReadCentralWorkspace || !deployment.managedWorkspaceId) {
     return {
-      instanceId,
+      deploymentId,
       accessMode: adapter.kind,
       hasManagedWorkspace: false,
-      supportConnectorStatus: instance.supportConnectorStatus,
-      supportLastSyncAt: instance.supportLastSyncAt,
+      supportConnectorStatus: deployment.supportConnectorStatus,
+      supportLastSyncAt: deployment.supportLastSyncAt,
       requiresConnectorSetup: adapter.requiresConnectorSetup,
       summary: null,
     };
@@ -1183,17 +1183,17 @@ export async function getControlPlaneAiGovernanceStatus(actor: AppActor, instanc
   const [agentRuns, pendingApprovals, failedJobs, modelUsage, recentRuns, recentFailedJobs, recentToolCalls] = await Promise.all([
     prisma.agentRun.groupBy({
       by: ["status"],
-      where: { workspaceId: instance.managedWorkspaceId },
+      where: { workspaceId: deployment.managedWorkspaceId },
       _count: { _all: true },
     }),
     prisma.agentRun.count({
-      where: { workspaceId: instance.managedWorkspaceId, approvalRequired: true, status: "WAITING_APPROVAL" },
+      where: { workspaceId: deployment.managedWorkspaceId, approvalRequired: true, status: "WAITING_APPROVAL" },
     }),
     prisma.workflowJob.count({
-      where: { workspaceId: instance.managedWorkspaceId, status: "FAILED" },
+      where: { workspaceId: deployment.managedWorkspaceId, status: "FAILED" },
     }),
     prisma.modelUsage.aggregate({
-      where: { workspaceId: instance.managedWorkspaceId },
+      where: { workspaceId: deployment.managedWorkspaceId },
       _sum: {
         inputTokens: true,
         outputTokens: true,
@@ -1201,7 +1201,7 @@ export async function getControlPlaneAiGovernanceStatus(actor: AppActor, instanc
       },
     }),
     prisma.agentRun.findMany({
-      where: { workspaceId: instance.managedWorkspaceId },
+      where: { workspaceId: deployment.managedWorkspaceId },
       orderBy: { createdAt: "desc" },
       take: 8,
       select: {
@@ -1218,7 +1218,7 @@ export async function getControlPlaneAiGovernanceStatus(actor: AppActor, instanc
       },
     }),
     prisma.workflowJob.findMany({
-      where: { workspaceId: instance.managedWorkspaceId, status: "FAILED" },
+      where: { workspaceId: deployment.managedWorkspaceId, status: "FAILED" },
       orderBy: { updatedAt: "desc" },
       take: 8,
       select: {
@@ -1231,7 +1231,7 @@ export async function getControlPlaneAiGovernanceStatus(actor: AppActor, instanc
       },
     }),
     prisma.agentToolCall.findMany({
-      where: { agentRun: { workspaceId: instance.managedWorkspaceId } },
+      where: { agentRun: { workspaceId: deployment.managedWorkspaceId } },
       orderBy: { createdAt: "desc" },
       take: 25,
       select: {
@@ -1255,10 +1255,10 @@ export async function getControlPlaneAiGovernanceStatus(actor: AppActor, instanc
     .slice(0, 8);
 
   return {
-    instanceId,
+    deploymentId,
     accessMode: "managed_workspace" as const,
     hasManagedWorkspace: true,
-    managedWorkspace: instance.managedWorkspace,
+    managedWorkspace: deployment.managedWorkspace,
     summary: {
       agentRuns: Object.fromEntries(agentRuns.map((run) => [run.status, run._count._all])),
       pendingApprovals,
@@ -1275,13 +1275,13 @@ export async function getControlPlaneAiGovernanceStatus(actor: AppActor, instanc
   };
 }
 
-export async function getControlPlaneReleaseStatus(actor: AppActor, instanceId: string) {
-  const instance = await getControlPlaneInstanceWithWorkspace(actor, instanceId);
-  const adapter = createControlPlaneAdapter(instance);
-  const releaseDrift = instance.lastHealthError?.includes("Release drift:") ? instance.lastHealthError : null;
-  const recentPreparations = await prisma.hostedInstanceEvent.findMany({
+export async function getControlPlaneReleaseStatus(actor: AppActor, deploymentId: string) {
+  const deployment = await getControlPlaneDeploymentWithWorkspace(actor, deploymentId);
+  const adapter = createControlPlaneAdapter(deployment);
+  const releaseDrift = deployment.lastHealthError?.includes("Release drift:") ? deployment.lastHealthError : null;
+  const recentPreparations = await prisma.customerDeploymentEvent.findMany({
     where: {
-      instanceId,
+      deploymentId,
       action: "control_plane.release.upgrade_prepared",
     },
     orderBy: { createdAt: "desc" },
@@ -1295,39 +1295,39 @@ export async function getControlPlaneReleaseStatus(actor: AppActor, instanceId: 
     },
   });
   return {
-    instanceId,
+    deploymentId,
     accessMode: adapter.kind,
     requiresConnectorSetup: adapter.requiresConnectorSetup,
-    managedWorkspace: instance.managedWorkspace,
+    managedWorkspace: deployment.managedWorkspace,
     current: {
-      releaseVersion: instance.releaseVersion,
-      releaseImageTag: instance.releaseImageTag,
-      lastReleaseCheck: instance.lastReleaseCheck,
+      releaseVersion: deployment.releaseVersion,
+      releaseImageTag: deployment.releaseImageTag,
+      lastReleaseCheck: deployment.lastReleaseCheck,
       releaseDrift,
     },
     provisioning: {
-      status: instance.provisioningStatus,
-      bootstrapStatus: instance.bootstrapStatus,
-      lastProvisioningError: instance.lastProvisioningError,
-      railwayProjectId: instance.railwayProjectId,
-      railwayEnvironmentId: instance.railwayEnvironmentId,
-      railwayWebServiceId: instance.railwayWebServiceId,
-      railwayWorkerServiceId: instance.railwayWorkerServiceId,
+      status: deployment.provisioningStatus,
+      bootstrapStatus: deployment.bootstrapStatus,
+      lastProvisioningError: deployment.lastProvisioningError,
+      railwayProjectId: deployment.railwayProjectId,
+      railwayEnvironmentId: deployment.railwayEnvironmentId,
+      railwayWebServiceId: deployment.railwayWebServiceId,
+      railwayWorkerServiceId: deployment.railwayWorkerServiceId,
     },
     health: {
-      lastHealthStatus: instance.lastHealthStatus,
-      lastHealthCheck: instance.lastHealthCheck,
-      lastHealthError: instance.lastHealthError,
-      lastWorkerHealthStatus: instance.lastWorkerHealthStatus,
-      lastWorkerHealthCheck: instance.lastWorkerHealthCheck,
+      lastHealthStatus: deployment.lastHealthStatus,
+      lastHealthCheck: deployment.lastHealthCheck,
+      lastHealthError: deployment.lastHealthError,
+      lastWorkerHealthStatus: deployment.lastWorkerHealthStatus,
+      lastWorkerHealthCheck: deployment.lastWorkerHealthCheck,
     },
-    rollbackReady: Boolean(instance.releaseImageTag && instance.lastHealthStatus === "ok"),
+    rollbackReady: Boolean(deployment.releaseImageTag && deployment.lastHealthStatus === "ok"),
     recentPreparations,
   };
 }
 
 export async function runControlPlaneReleaseOperation(actor: AppActor, params: {
-  instanceId: string;
+  deploymentId: string;
   operation: string;
   targetReleaseImageTag?: string | null;
   targetReleaseVersion?: string | null;
@@ -1336,28 +1336,28 @@ export async function runControlPlaneReleaseOperation(actor: AppActor, params: {
   requireControlPlaneScope(actor, "control-plane:releases:write");
   const operation = normalizeReleaseOperation(params.operation);
   const reason = requireMutationReason(params.reason);
-  const instance = await getControlPlaneInstanceWithWorkspace(actor, params.instanceId);
+  const deployment = await getControlPlaneDeploymentWithWorkspace(actor, params.deploymentId);
 
   if (operation === "prepare_upgrade") {
     const targetReleaseImageTag = params.targetReleaseImageTag?.trim();
     invariant(targetReleaseImageTag, 400, "INVALID_INPUT", "Target release image tag is required.");
     const targetReleaseVersion = params.targetReleaseVersion?.trim() || null;
-    const releaseDrift = instance.lastHealthError?.includes("Release drift:") ? instance.lastHealthError : null;
+    const releaseDrift = deployment.lastHealthError?.includes("Release drift:") ? deployment.lastHealthError : null;
     const checks = {
-      hasCustomerSlug: Boolean(instance.customerSlug),
-      hasRailwayProject: Boolean(instance.railwayProjectId),
-      hasRailwayEnvironment: Boolean(instance.railwayEnvironmentId),
-      hasRailwayServices: Boolean(instance.railwayWebServiceId && instance.railwayWorkerServiceId),
-      healthOk: instance.lastHealthStatus === "ok",
-      rollbackReady: Boolean(instance.releaseImageTag && instance.lastHealthStatus === "ok"),
-      targetDiffers: targetReleaseImageTag !== instance.releaseImageTag || targetReleaseVersion !== (instance.releaseVersion ?? null),
+      hasCustomerSlug: Boolean(deployment.customerSlug),
+      hasRailwayProject: Boolean(deployment.railwayProjectId),
+      hasRailwayEnvironment: Boolean(deployment.railwayEnvironmentId),
+      hasRailwayServices: Boolean(deployment.railwayWebServiceId && deployment.railwayWorkerServiceId),
+      healthOk: deployment.lastHealthStatus === "ok",
+      rollbackReady: Boolean(deployment.releaseImageTag && deployment.lastHealthStatus === "ok"),
+      targetDiffers: targetReleaseImageTag !== deployment.releaseImageTag || targetReleaseVersion !== (deployment.releaseVersion ?? null),
     };
 
     const evidence = {
       reason,
       operation,
-      currentReleaseImageTag: instance.releaseImageTag,
-      currentReleaseVersion: instance.releaseVersion,
+      currentReleaseImageTag: deployment.releaseImageTag,
+      currentReleaseVersion: deployment.releaseVersion,
       targetReleaseImageTag,
       targetReleaseVersion,
       releaseDrift,
@@ -1365,11 +1365,11 @@ export async function runControlPlaneReleaseOperation(actor: AppActor, params: {
     };
 
     await prisma.$transaction(async (tx) => {
-      if (instance.customerAccountId) {
+      if (deployment.customerAccountId) {
         await tx.customerReleaseTarget.upsert({
           where: {
             deploymentId_targetReleaseImageTag: {
-              deploymentId: params.instanceId,
+              deploymentId: params.deploymentId,
               targetReleaseImageTag,
             },
           },
@@ -1381,8 +1381,8 @@ export async function runControlPlaneReleaseOperation(actor: AppActor, params: {
             preparedAt: new Date(),
           },
           create: {
-            customerAccountId: instance.customerAccountId,
-            deploymentId: params.instanceId,
+            customerAccountId: deployment.customerAccountId,
+            deploymentId: params.deploymentId,
             targetReleaseImageTag,
             targetReleaseVersion,
             status: "PREPARED",
@@ -1391,9 +1391,9 @@ export async function runControlPlaneReleaseOperation(actor: AppActor, params: {
           },
         });
       }
-      await tx.hostedInstanceEvent.create({
+      await tx.customerDeploymentEvent.create({
         data: {
-          instanceId: params.instanceId,
+          deploymentId: params.deploymentId,
           actorUserId: actorUserId(actor),
           action: "control_plane.release.upgrade_prepared",
           meta: redactObject(evidence) as Prisma.InputJsonObject,
@@ -1408,14 +1408,14 @@ export async function runControlPlaneReleaseOperation(actor: AppActor, params: {
         releaseVersion: targetReleaseVersion,
       },
       checks,
-      release: await getControlPlaneReleaseStatus(actor, params.instanceId),
+      release: await getControlPlaneReleaseStatus(actor, params.deploymentId),
     };
   }
 
   throw new AppError(400, "INVALID_INPUT", "Unsupported release operation.");
 }
 
-type InstanceHealthPayload = {
+type CustomerDeploymentHealthPayload = {
   database?: string;
   schema?: string;
   runtime?: {
@@ -1428,18 +1428,18 @@ type InstanceHealthPayload = {
   };
 };
 
-async function probeControlPlaneCustomerHealthCore(actor: AppActor, params: {
-  instanceId: string;
+async function probeControlPlaneDeploymentHealthCore(actor: AppActor, params: {
+  deploymentId: string;
   reason: string;
 }) {
-  const instance = await getControlPlaneInstanceWithWorkspace(actor, params.instanceId);
+  const deployment = await getControlPlaneDeploymentWithWorkspace(actor, params.deploymentId);
   let status = "unknown";
   let error: string | null = null;
-  let health: InstanceHealthPayload | null = null;
+  let health: CustomerDeploymentHealthPayload | null = null;
 
   try {
-    const response = await fetch(`${instance.url.replace(/\/$/, "")}/api/health`, { method: "GET" });
-    health = await response.json().catch(() => null) as InstanceHealthPayload | null;
+    const response = await fetch(`${deployment.url.replace(/\/$/, "")}/api/health`, { method: "GET" });
+    health = await response.json().catch(() => null) as CustomerDeploymentHealthPayload | null;
     if (response.ok) {
       status = "ok";
       const runtimeErrors = [];
@@ -1448,8 +1448,8 @@ async function probeControlPlaneCustomerHealthCore(actor: AppActor, params: {
       if (health?.runtime?.redis && health.runtime.redis !== "configured") runtimeErrors.push(`Redis ${health.runtime.redis}`);
       if (health?.runtime?.storage && health.runtime.storage !== "configured") runtimeErrors.push(`Storage ${health.runtime.storage}`);
       const actualRelease = health?.release?.imageTag || health?.release?.gitSha || null;
-      if (instance.releaseImageTag && actualRelease && actualRelease !== instance.releaseImageTag) {
-        runtimeErrors.push(`Release drift: expected ${instance.releaseImageTag}, got ${actualRelease}`);
+      if (deployment.releaseImageTag && actualRelease && actualRelease !== deployment.releaseImageTag) {
+        runtimeErrors.push(`Release drift: expected ${deployment.releaseImageTag}, got ${actualRelease}`);
       }
       if (runtimeErrors.length > 0) {
         status = "degraded";
@@ -1464,8 +1464,8 @@ async function probeControlPlaneCustomerHealthCore(actor: AppActor, params: {
     error = probeError instanceof Error ? probeError.message : "Health probe failed.";
   }
 
-  await prisma.instanceRegistry.update({
-    where: { id: params.instanceId },
+  await prisma.customerDeployment.update({
+    where: { id: params.deploymentId },
     data: {
       lastHealthCheck: new Date(),
       lastHealthStatus: status,
@@ -1477,8 +1477,8 @@ async function probeControlPlaneCustomerHealthCore(actor: AppActor, params: {
   });
   await Promise.all([
     recordFleetHealthSnapshot({
-      customerAccountId: instance.customerAccountId,
-      deploymentId: params.instanceId,
+      customerAccountId: deployment.customerAccountId,
+      deploymentId: params.deploymentId,
       snapshotKind: "HEALTH",
       status,
       summary: {
@@ -1488,19 +1488,19 @@ async function probeControlPlaneCustomerHealthCore(actor: AppActor, params: {
       error,
     }),
     recordFleetHealthSnapshot({
-      customerAccountId: instance.customerAccountId,
-      deploymentId: params.instanceId,
+      customerAccountId: deployment.customerAccountId,
+      deploymentId: params.deploymentId,
       snapshotKind: "RELEASE",
       status: error?.includes("Release drift:") ? "degraded" : status === "ok" ? "ok" : "unknown",
       summary: {
-        expectedReleaseImageTag: instance.releaseImageTag,
-        expectedReleaseVersion: instance.releaseVersion,
+        expectedReleaseImageTag: deployment.releaseImageTag,
+        expectedReleaseVersion: deployment.releaseVersion,
         observedRelease: health?.release ?? null,
       },
       error: error?.includes("Release drift:") ? error : null,
     }),
   ]);
-  await recordHostedEvent(actor, params.instanceId, "control_plane.release.health_probed", {
+  await recordCustomerDeploymentEvent(actor, params.deploymentId, "control_plane.release.health_probed", {
     reason: params.reason,
     status,
     error,
@@ -1509,24 +1509,24 @@ async function probeControlPlaneCustomerHealthCore(actor: AppActor, params: {
   return {
     status,
     error,
-    release: await getControlPlaneReleaseStatus(actor, params.instanceId),
+    release: await getControlPlaneReleaseStatus(actor, params.deploymentId),
   };
 }
 
-export async function probeControlPlaneCustomerHealth(actor: AppActor, params: {
-  instanceId: string;
+export async function probeControlPlaneDeploymentHealth(actor: AppActor, params: {
+  deploymentId: string;
   reason?: string | null;
 }) {
   requireControlPlaneScope(actor, "control-plane:releases:write");
   const reason = requireMutationReason(params.reason);
-  return probeControlPlaneCustomerHealthCore(actor, {
-    instanceId: params.instanceId,
+  return probeControlPlaneDeploymentHealthCore(actor, {
+    deploymentId: params.deploymentId,
     reason,
   });
 }
 
 export async function configureSupportConnector(actor: AppActor, params: {
-  instanceId: string;
+  deploymentId: string;
   supportBaseUrl?: string | null;
   supportMcpUrl?: string | null;
   supportCredential?: string | null;
@@ -1534,17 +1534,17 @@ export async function configureSupportConnector(actor: AppActor, params: {
   supportNotes?: string | null;
 }) {
   requireControlPlaneScope(actor, "control-plane:support:write");
-  await requireControlPlaneAccess(actor, { instanceId: params.instanceId });
-  const existing = await prisma.instanceRegistry.findUnique({
-    where: { id: params.instanceId },
+  await requireControlPlaneAccess(actor, { deploymentId: params.deploymentId });
+  const existing = await prisma.customerDeployment.findUnique({
+    where: { id: params.deploymentId },
     select: { supportCredentialEnc: true },
   });
-  invariant(existing, 404, "NOT_FOUND", "Customer instance not found.");
+  invariant(existing, 404, "NOT_FOUND", "Customer deployment not found.");
   const credential = params.supportCredential?.trim();
   invariant(Boolean(credential) || Boolean(existing.supportCredentialEnc), 400, "INVALID_INPUT", "Support credential is required.");
 
-  const instance = await prisma.instanceRegistry.update({
-    where: { id: params.instanceId },
+  const deployment = await prisma.customerDeployment.update({
+    where: { id: params.deploymentId },
     data: {
       supportBaseUrl: params.supportBaseUrl?.trim() || null,
       supportMcpUrl: params.supportMcpUrl?.trim() || null,
@@ -1558,21 +1558,21 @@ export async function configureSupportConnector(actor: AppActor, params: {
     },
   });
 
-  await recordHostedEvent(actor, params.instanceId, "support_connector.configured", {
-    supportBaseUrl: instance.supportBaseUrl,
-    supportMcpUrl: instance.supportMcpUrl,
-    supportCredentialLabel: instance.supportCredentialLabel,
+  await recordCustomerDeploymentEvent(actor, params.deploymentId, "support_connector.configured", {
+    supportBaseUrl: deployment.supportBaseUrl,
+    supportMcpUrl: deployment.supportMcpUrl,
+    supportCredentialLabel: deployment.supportCredentialLabel,
   });
 
   return {
-    ...instance,
+    ...deployment,
     hasSupportCredential: true,
     supportCredentialEnc: undefined,
   };
 }
 
-async function fetchCustomerSupportSnapshotCore(instanceId: string) {
-  const connector = await loadSupportConnector(instanceId);
+async function fetchCustomerSupportSnapshotCore(deploymentId: string) {
+  const connector = await loadSupportConnector(deploymentId);
 
   const calls = await Promise.allSettled([
     callMcpTool({ ...connector, toolName: "get_workspace_info", arguments: {} }),
@@ -1590,8 +1590,8 @@ async function fetchCustomerSupportSnapshotCore(instanceId: string) {
   ));
 
   const hasError = calls.some((result) => result.status === "rejected");
-  await prisma.instanceRegistry.update({
-    where: { id: instanceId },
+  await prisma.customerDeployment.update({
+    where: { id: deploymentId },
     data: {
       supportConnectorStatus: hasError ? "degraded" : "connected",
       supportLastSyncAt: new Date(),
@@ -1602,8 +1602,8 @@ async function fetchCustomerSupportSnapshotCore(instanceId: string) {
   const snapshot = { workspace, members, integrations, dataSources, agentRuns, failedJobs };
   await Promise.all([
     recordFleetHealthSnapshot({
-      customerAccountId: connector.instance.customerAccountId,
-      deploymentId: instanceId,
+      customerAccountId: connector.deployment.customerAccountId,
+      deploymentId: deploymentId,
       snapshotKind: "CONNECTOR",
       status: hasError ? "degraded" : "ok",
       summary: {
@@ -1613,8 +1613,8 @@ async function fetchCustomerSupportSnapshotCore(instanceId: string) {
       error: hasError ? "One or more support snapshot calls failed." : null,
     }),
     recordFleetHealthSnapshot({
-      customerAccountId: connector.instance.customerAccountId,
-      deploymentId: instanceId,
+      customerAccountId: connector.deployment.customerAccountId,
+      deploymentId: deploymentId,
       snapshotKind: "SUPPORT_READY",
       status: hasError ? "degraded" : "ok",
       summary: snapshot,
@@ -1625,29 +1625,29 @@ async function fetchCustomerSupportSnapshotCore(instanceId: string) {
   return snapshot;
 }
 
-export async function fetchCustomerSupportSnapshot(actor: AppActor, instanceId: string) {
+export async function fetchCustomerSupportSnapshot(actor: AppActor, deploymentId: string) {
   requireControlPlaneScope(actor, "control-plane:support:write");
-  await requireControlPlaneAccess(actor, { instanceId });
-  return fetchCustomerSupportSnapshotCore(instanceId);
+  await requireControlPlaneAccess(actor, { deploymentId });
+  return fetchCustomerSupportSnapshotCore(deploymentId);
 }
 
 export async function refreshControlPlaneFleetSnapshots(actor: AppActor, params: {
-  instanceId: string;
+  deploymentId: string;
   snapshotKinds?: string[] | null;
   reason?: string | null;
 }) {
   requireControlPlaneScope(actor, "control-plane:fleet:write");
   const reason = requireMutationReason(params.reason);
   const kinds = normalizeSnapshotKinds(params.snapshotKinds);
-  const instance = await getControlPlaneInstanceWithWorkspace(actor, params.instanceId);
-  const adapter = createControlPlaneAdapter(instance);
+  const deployment = await getControlPlaneDeploymentWithWorkspace(actor, params.deploymentId);
+  const adapter = createControlPlaneAdapter(deployment);
   const results: Array<{ snapshotKind: FleetSnapshotKind; status: string; error: string | null }> = [];
 
   for (const snapshotKind of kinds) {
     try {
       if (snapshotKind === "HEALTH") {
-        const result = await probeControlPlaneCustomerHealthCore(actor, {
-          instanceId: params.instanceId,
+        const result = await probeControlPlaneDeploymentHealthCore(actor, {
+          deploymentId: params.deploymentId,
           reason,
         });
         results.push({ snapshotKind, status: result.status, error: result.error });
@@ -1655,11 +1655,11 @@ export async function refreshControlPlaneFleetSnapshots(actor: AppActor, params:
       }
 
       if (snapshotKind === "RELEASE") {
-        const release = await getControlPlaneReleaseStatus(actor, params.instanceId);
+        const release = await getControlPlaneReleaseStatus(actor, params.deploymentId);
         const status = releaseSnapshotStatus(release);
         await recordFleetHealthSnapshot({
-          customerAccountId: instance.customerAccountId,
-          deploymentId: params.instanceId,
+          customerAccountId: deployment.customerAccountId,
+          deploymentId: params.deploymentId,
           snapshotKind,
           status,
           summary: release,
@@ -1670,30 +1670,30 @@ export async function refreshControlPlaneFleetSnapshots(actor: AppActor, params:
       }
 
       if (snapshotKind === "CONNECTOR") {
-        const status = connectorSnapshotStatus(instance.supportConnectorStatus);
+        const status = connectorSnapshotStatus(deployment.supportConnectorStatus);
         await recordFleetHealthSnapshot({
-          customerAccountId: instance.customerAccountId,
-          deploymentId: params.instanceId,
+          customerAccountId: deployment.customerAccountId,
+          deploymentId: params.deploymentId,
           snapshotKind,
           status,
           summary: {
             adapterKind: adapter.kind,
-            supportConnectorStatus: instance.supportConnectorStatus,
-            supportLastConnectedAt: instance.supportLastConnectedAt,
-            supportLastSyncAt: instance.supportLastSyncAt,
+            supportConnectorStatus: deployment.supportConnectorStatus,
+            supportLastConnectedAt: deployment.supportLastConnectedAt,
+            supportLastSyncAt: deployment.supportLastSyncAt,
             requiresConnectorSetup: adapter.requiresConnectorSetup,
           },
-          error: instance.supportLastSyncError,
+          error: deployment.supportLastSyncError,
         });
-        results.push({ snapshotKind, status, error: instance.supportLastSyncError });
+        results.push({ snapshotKind, status, error: deployment.supportLastSyncError });
         continue;
       }
 
       if (snapshotKind === "SUPPORT_READY") {
         if (adapter.requiresConnectorSetup) {
           await recordFleetHealthSnapshot({
-            customerAccountId: instance.customerAccountId,
-            deploymentId: params.instanceId,
+            customerAccountId: deployment.customerAccountId,
+            deploymentId: params.deploymentId,
             snapshotKind,
             status: "not_configured",
             summary: {
@@ -1705,7 +1705,7 @@ export async function refreshControlPlaneFleetSnapshots(actor: AppActor, params:
           results.push({ snapshotKind, status: "not_configured", error: "Support connector is not configured." });
           continue;
         }
-        const snapshot = await fetchCustomerSupportSnapshotCore(params.instanceId);
+        const snapshot = await fetchCustomerSupportSnapshotCore(params.deploymentId);
         const status = supportSnapshotStatus(snapshot);
         results.push({
           snapshotKind,
@@ -1716,12 +1716,12 @@ export async function refreshControlPlaneFleetSnapshots(actor: AppActor, params:
       }
 
       if (snapshotKind === "CONTEXT") {
-        const context = await getControlPlaneContextHealth(actor, params.instanceId);
+        const context = await getControlPlaneContextHealth(actor, params.deploymentId);
         const status = contextSnapshotStatus(context);
         const error = ("supportLastSyncError" in context ? context.supportLastSyncError : null) ?? null;
         await recordFleetHealthSnapshot({
-          customerAccountId: instance.customerAccountId,
-          deploymentId: params.instanceId,
+          customerAccountId: deployment.customerAccountId,
+          deploymentId: params.deploymentId,
           snapshotKind,
           status,
           summary: context,
@@ -1732,11 +1732,11 @@ export async function refreshControlPlaneFleetSnapshots(actor: AppActor, params:
       }
 
       if (snapshotKind === "INTEGRATION") {
-        const integrations = await getControlPlaneIntegrationStatus(actor, params.instanceId);
+        const integrations = await getControlPlaneIntegrationStatus(actor, params.deploymentId);
         const status = integrationSnapshotStatus(integrations);
         await recordFleetHealthSnapshot({
-          customerAccountId: instance.customerAccountId,
-          deploymentId: params.instanceId,
+          customerAccountId: deployment.customerAccountId,
+          deploymentId: params.deploymentId,
           snapshotKind,
           status,
           summary: integrations,
@@ -1747,8 +1747,8 @@ export async function refreshControlPlaneFleetSnapshots(actor: AppActor, params:
     } catch (error) {
       const message = error instanceof Error ? error.message : "Fleet snapshot refresh failed.";
       await recordFleetHealthSnapshot({
-        customerAccountId: instance.customerAccountId,
-        deploymentId: params.instanceId,
+        customerAccountId: deployment.customerAccountId,
+        deploymentId: params.deploymentId,
         snapshotKind,
         status: "failed",
         summary: {
@@ -1761,21 +1761,21 @@ export async function refreshControlPlaneFleetSnapshots(actor: AppActor, params:
     }
   }
 
-  await recordHostedEvent(actor, params.instanceId, "control_plane.fleet_snapshots_refreshed", {
+  await recordCustomerDeploymentEvent(actor, params.deploymentId, "control_plane.fleet_snapshots_refreshed", {
     reason,
     snapshotKinds: kinds,
     results,
   });
 
   return {
-    instanceId: params.instanceId,
+    deploymentId: params.deploymentId,
     adapterKind: adapter.kind,
     results,
   };
 }
 
 export async function enqueueControlPlaneFleetSnapshots(actor: AppActor, params: {
-  instanceId?: string | null;
+  deploymentId?: string | null;
   snapshotKinds?: string[] | null;
   reason?: string | null;
   limit?: number | null;
@@ -1784,9 +1784,9 @@ export async function enqueueControlPlaneFleetSnapshots(actor: AppActor, params:
   const reason = requireMutationReason(params.reason);
   const snapshotKinds = normalizeSnapshotKinds(params.snapshotKinds);
   const limit = Math.min(Math.max(Math.floor(params.limit ?? 100), 1), 500);
-  const deployments = params.instanceId?.trim()
-    ? [await getControlPlaneInstanceWithWorkspace(actor, params.instanceId.trim())]
-    : await prisma.instanceRegistry.findMany({
+  const deployments = params.deploymentId?.trim()
+    ? [await getControlPlaneDeploymentWithWorkspace(actor, params.deploymentId.trim())]
+    : await prisma.customerDeployment.findMany({
       where: {
         customerAccountId: { not: null },
         deploymentStatus: { notIn: ["RETIRED", "SUSPENDED"] },
@@ -1816,7 +1816,7 @@ export async function enqueueControlPlaneFleetSnapshots(actor: AppActor, params:
           eventId: null,
           type: CONTROL_PLANE_FLEET_SNAPSHOT_JOB_TYPE,
           payload: {
-            instanceId: deployment.id,
+            deploymentId: deployment.id,
             snapshotKinds,
             reason,
             requestedBy: actorUserId(actor) ?? (isControlPlaneAgent(actor) ? actor.label : "control-plane"),
@@ -1846,7 +1846,7 @@ async function runWithConcurrency<T>(items: T[], concurrency: number, callback: 
 }
 
 export async function runControlPlaneFleetSnapshotJob(params: {
-  instanceId?: string | null;
+  deploymentId?: string | null;
   snapshotKinds?: string[] | null;
   reason?: string | null;
   limit?: number | null;
@@ -1854,9 +1854,9 @@ export async function runControlPlaneFleetSnapshotJob(params: {
 }) {
   const reason = params.reason?.trim() || "Scheduled Control Plane fleet snapshot.";
   const snapshotKinds = normalizeSnapshotKinds(params.snapshotKinds);
-  if (params.instanceId?.trim()) {
+  if (params.deploymentId?.trim()) {
     return refreshControlPlaneFleetSnapshots(controlPlaneWorkerActor, {
-      instanceId: params.instanceId.trim(),
+      deploymentId: params.deploymentId.trim(),
       snapshotKinds,
       reason,
     });
@@ -1864,7 +1864,7 @@ export async function runControlPlaneFleetSnapshotJob(params: {
 
   const limit = Math.min(Math.max(Math.floor(params.limit ?? readPositiveInteger(process.env.CONTROL_PLANE_FLEET_SWEEP_BATCH_SIZE, 50, 500)), 1), 500);
   const concurrency = Math.min(Math.max(Math.floor(params.concurrency ?? readPositiveInteger(process.env.CONTROL_PLANE_FLEET_SWEEP_CONCURRENCY, 5, 20)), 1), 20);
-  const deployments = await prisma.instanceRegistry.findMany({
+  const deployments = await prisma.customerDeployment.findMany({
     where: {
       customerAccountId: { not: null },
       deploymentStatus: { notIn: ["RETIRED", "SUSPENDED"] },
@@ -1879,7 +1879,7 @@ export async function runControlPlaneFleetSnapshotJob(params: {
   const results: Array<unknown> = [];
   await runWithConcurrency(deployments, concurrency, async (deployment) => {
     results.push(await refreshControlPlaneFleetSnapshots(controlPlaneWorkerActor, {
-      instanceId: deployment.id,
+      deploymentId: deployment.id,
       snapshotKinds,
       reason,
     }));
@@ -1893,7 +1893,7 @@ export async function runControlPlaneFleetSnapshotJob(params: {
 }
 
 export async function runCustomerSupportOperation(actor: AppActor, params: {
-  instanceId: string;
+  deploymentId: string;
   action: SupportAction;
   reason?: string | null;
   arguments?: JsonRecord;
@@ -1901,7 +1901,7 @@ export async function runCustomerSupportOperation(actor: AppActor, params: {
   idempotencyKey?: string | null;
 }) {
   requireControlPlaneScope(actor, "control-plane:support:write");
-  await requireControlPlaneAccess(actor, { instanceId: params.instanceId });
+  await requireControlPlaneAccess(actor, { deploymentId: params.deploymentId });
   const toolName = SUPPORT_ACTION_TO_MCP_TOOL[params.action];
   invariant(toolName, 400, "INVALID_INPUT", "Unsupported support action.");
   const reason = normalizeReason(params.reason, params.action);
@@ -1910,7 +1910,7 @@ export async function runCustomerSupportOperation(actor: AppActor, params: {
 
   const operation = await prisma.supportOperation.create({
     data: {
-      instanceId: params.instanceId,
+      deploymentId: params.deploymentId,
       workspaceId: params.remoteWorkspaceId?.trim() || null,
       actorUserId: actorUserId(actor),
       actorLabel: SUPPORT_ACTOR_LABEL,
@@ -1923,7 +1923,7 @@ export async function runCustomerSupportOperation(actor: AppActor, params: {
     },
   });
 
-  const connector = await loadSupportConnector(params.instanceId);
+  const connector = await loadSupportConnector(params.deploymentId);
 
   try {
     if (MUTATING_SUPPORT_ACTIONS.has(params.action)) {
@@ -1995,19 +1995,19 @@ export async function runCustomerSupportOperation(actor: AppActor, params: {
 }
 
 export async function recordBreakGlassSupportNote(actor: AppActor, params: {
-  instanceId: string;
+  deploymentId: string;
   reason: string;
   notes: string;
 }) {
   requireControlPlaneScope(actor, "control-plane:support:write");
-  await requireControlPlaneAccess(actor, { instanceId: params.instanceId });
+  await requireControlPlaneAccess(actor, { deploymentId: params.deploymentId });
   const reason = normalizeReason(params.reason, "support.break_glass_note");
   const notes = params.notes.trim();
   invariant(notes.length > 0, 400, "INVALID_INPUT", "Break-glass notes are required.");
 
   return prisma.supportOperation.create({
     data: {
-      instanceId: params.instanceId,
+      deploymentId: params.deploymentId,
       actorUserId: actorUserId(actor),
       actorLabel: SUPPORT_ACTOR_LABEL,
       action: "support.break_glass_note",

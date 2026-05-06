@@ -1,17 +1,17 @@
 ---
 title: "Enterprise Deployments"
-description: "Scale Corgtex with hosted managed instances and private bootstrap bundles."
+description: "Scale Corgtex with customer deployments and private bootstrap bundles."
 ---
 
 While the standard Docker Compose method is perfect for evaluation and small setups, larger enterprises deploying Corgtex often need total data isolation, region-specific hosting, specific seeded configurations, and auditable operator support.
 
-For hosted customers, Corgtex uses a **managed instance** model. Each real customer receives a dedicated runtime stack with its own web service, worker service, Postgres database, Redis service, object storage, custom domain, and region. Shared multi-tenant deployments are reserved for demos and trials.
+For hosted customers, Corgtex uses a **customer deployment** model. Each real customer receives a dedicated runtime stack with its own web service, worker service, Postgres database, Redis service, object storage, custom domain, and region. Shared multi-tenant deployments are reserved for demos and trials.
 
-## Hosted Managed Instances
+## Hosted Customer Deployments
 
 The public Apache-licensed Corgtex repository remains the complete core product. Customer data, customer-specific seed content, private deployment metadata, and operational credentials never live in this public repository.
 
-Corgtex operators manage hosted instances through a dedicated internal control-plane instance. The control plane stores operational metadata such as customer slug, region, release image tag, Railway resource IDs, custom domain, health status, and bootstrap status. It does not store raw seed bundle content or provider API tokens.
+Corgtex operators manage customer deployments through a dedicated internal control-plane deployment. The control plane stores operational metadata such as customer slug, region, release image tag, Railway resource IDs, custom domain, health status, and bootstrap status. It does not store raw seed bundle content or provider API tokens.
 
 ### Release images
 
@@ -21,17 +21,17 @@ The control plane records the target release and checks it against `/api/health`
 
 ### Control-plane APIs
 
-The operator UI and internal automation both use the same global-operator domain layer. Internal API routes under `/api/admin/hosted-instances` can list and provision managed customers, and per-instance routes can trigger health probes, bootstrap, suspension, and release upgrades. These APIs are for the Corgtex Ops deployment only and must not be exposed as customer-facing product APIs.
+The operator UI and internal automation both use the same global-operator domain layer. Internal API routes under `/api/admin/customer-deployments` can list and provision managed customers, and per-deployment routes can trigger health probes, bootstrap, suspension, and release upgrades. These APIs are for the Corgtex Ops deployment only and must not be exposed as customer-facing product APIs.
 
 ### Support operations
 
-The Ops deployment also exposes a dedicated `/control-plane` surface for pilot customer support. Corgtex operators can register an encrypted support connector credential for each customer instance, inspect live customer state through that connector, and run support operations such as member invites, integration diagnostics, data-feed syncs, document uploads, agent-run inspection, and failed-job repair.
+The Ops deployment also exposes a dedicated `/control-plane` surface for pilot customer support. Corgtex operators can register an encrypted support connector credential for each customer deployment, inspect live customer state through that connector, and run support operations such as member invites, integration diagnostics, data-feed syncs, document uploads, agent-run inspection, and failed-job repair.
 
-Support operations are intentionally first-class records. The control plane stores the operator, customer instance, action, reason, redacted input summary, status, and result summary. Mutating support actions also write `support.*` audit entries into the customer instance. Direct infrastructure or database work remains a break-glass path and should be recorded as a break-glass support note rather than treated as the normal support workflow.
+Support operations are intentionally first-class records. The control plane stores the operator, customer deployment, action, reason, redacted input summary, status, and result summary. Mutating support actions also write `support.*` audit entries into the customer deployment. Direct infrastructure or database work remains a break-glass path and should be recorded as a break-glass support note rather than treated as the normal support workflow.
 
 ### Private bootstrap bundles
 
-Customer bootstrap data is delivered through a private signed bundle reference. The customer runtime accepts a one-time internal bootstrap request, verifies that the bearer token hashes to the runtime-configured `CORGTEX_INSTANCE_BOOTSTRAP_TOKEN_HASH`, verifies the request signature and bundle SHA-256 checksum, applies the generic stable-client seed logic, and records only status metadata in the database.
+Customer bootstrap data is delivered through a private signed bundle reference. The customer runtime accepts a one-time internal bootstrap request, verifies that the bearer token hashes to the runtime-configured `CORGTEX_CUSTOMER_DEPLOYMENT_BOOTSTRAP_TOKEN_HASH`, verifies the request signature and bundle SHA-256 checksum, applies the generic stable-client seed logic, and records only status metadata in the database.
 
 The bundle contains configuration and seed content required for that customer. The control plane stores only the bundle URI, checksum, schema version, and status. Runtime secrets remain in the deployment platform or private bundle delivery system, and the bootstrap bearer token is stored only as a hash plus consumed-at metadata in the customer runtime.
 

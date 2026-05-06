@@ -286,9 +286,9 @@ export async function registerCustomerDeployment(params: {
     bootstrapStatus: params.bootstrapStatus
       ? params.bootstrapStatus.trim().toLowerCase()
       : deploymentStatus === "BOOTSTRAPPING" ? "pending" : "not_started",
-  } satisfies Prisma.InstanceRegistryUncheckedCreateInput;
+  } satisfies Prisma.CustomerDeploymentUncheckedCreateInput;
 
-  const deployment = await db.instanceRegistry.upsert({
+  const deployment = await db.customerDeployment.upsert({
     where: { customerSlug: legacyCustomerSlug },
     update: deploymentData,
     create: deploymentData,
