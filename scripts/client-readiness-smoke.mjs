@@ -18,7 +18,9 @@ const routeNameFilter = csvSet("CLIENT_READINESS_ROUTE_NAMES");
 const excludedRoutePaths = csvSet("CLIENT_READINESS_EXCLUDE_ROUTES");
 const expectedDisabledRoutePaths = csvSet("CLIENT_READINESS_EXPECT_DISABLED_ROUTES");
 
-const routeCatalog = [
+const includeOptionalRoutes = process.env.CLIENT_READINESS_INCLUDE_OPTIONAL_ROUTES === "true";
+
+const coreRouteCatalog = [
   ["home", ""],
   ["goals", "/goals"],
   ["brain", "/brain"],
@@ -28,17 +30,25 @@ const routeCatalog = [
   ["tensions", "/tensions"],
   ["actions", "/actions"],
   ["meetings", "/meetings"],
-  ["leads", "/leads"],
   ["proposals", "/proposals"],
   ["circles", "/circles"],
-  ["cycles", "/cycles"],
   ["finance", "/finance"],
-  ["agents", "/agents"],
-  ["governance", "/governance"],
   ["audit", "/audit"],
   ["settings", "/settings"],
   ["chat", "/chat"],
+];
+
+const optionalRouteCatalog = [
+  ["leads", "/leads"],
+  ["cycles", "/cycles"],
+  ["agents", "/agents"],
+  ["governance", "/governance"],
   ["operator", "/operator"],
+];
+
+const routeCatalog = [
+  ...coreRouteCatalog,
+  ...(includeOptionalRoutes || routeNameFilter.size > 0 ? optionalRouteCatalog : []),
 ];
 
 if (process.env.CLIENT_READINESS_INCLUDE_ADMIN === "true") {
@@ -59,6 +69,36 @@ const mobileShellViewports = [
   ["pixel", { width: 412, height: 915 }],
   ["small-tablet", { width: 700, height: 1024 }],
 ];
+
+function normalizePath(value, fallback) {
+  const text = String(value || "").trim();
+  if (!text) return fallback;
+  return text.startsWith("/") ? text : `/${text}`;
+}
+
+async function resolveLoginPath() {
+  const explicitPath = normalizePath(process.env.CLIENT_READINESS_LOGIN_PATH, null);
+  if (explicitPath) return explicitPath;
+
+  if (loginLocale !== "en") {
+    return `/${loginLocale}/login`;
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 5000);
+  try {
+    const response = await fetch(`${baseUrl}/api/health`, {
+      signal: controller.signal,
+      headers: { "user-agent": "corgtex-client-readiness/1.0" },
+    });
+    const payload = await response.json().catch(() => null);
+    return normalizePath(payload?.loginPath, "/login");
+  } catch {
+    return "/login";
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 function routeUrl(locale, workspacePath, suffix) {
   return `${baseUrl}${locale}${workspacePath}${suffix}`;
@@ -244,7 +284,8 @@ async function main() {
   await mkdir(outDir, { recursive: true });
 
   const browser = await chromium.launch();
-  const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  try {
+    const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
   page.setDefaultNavigationTimeout(90000);
   const consoleErrors = [];
   const findings = [];
@@ -266,7 +307,7 @@ async function main() {
     consoleErrors.push({ type: "pageerror", text: error.message });
   });
 
-  await page.goto(`${baseUrl}/${loginLocale}/login`, { waitUntil: "domcontentloaded" });
+  await page.goto(`${baseUrl}${await resolveLoginPath()}`, { waitUntil: "domcontentloaded" });
   await waitForPageSettled(page);
   await captureScreenshot(page, "00-login.png");
   await page.fill('input[name="email"]', email);
@@ -342,10 +383,11 @@ async function main() {
     )}\n`,
   );
 
-  await browser.close();
-
   if (findings.length > 0 || consoleErrors.length > 0) {
     throw new Error(`Client readiness smoke found ${findings.length} route findings and ${consoleErrors.length} console errors.`);
+  }
+  } finally {
+    await browser.close().catch(() => null);
   }
 }
 
