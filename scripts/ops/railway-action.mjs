@@ -57,7 +57,7 @@ async function executeRailwayAction(plan) {
 async function latestDeployment(entry) {
   const result = await railwayGraphql(
     `query LatestDeployment($serviceId: String!, $environmentId: String!) {
-      deployments(input: { serviceId: $serviceId, environmentId: $environmentId, first: 1 }) {
+      deployments(first: 1, input: { serviceId: $serviceId, environmentId: $environmentId }) {
         edges {
           node {
             id
