@@ -141,6 +141,44 @@ const MEETINGS = [
   }
 ];
 
+const MEETING_INSIGHTS = [
+  {
+    meetingTitle: "Innovation & AI Working Group Kickoff",
+    idSuffix: "applied-ai-coe-decision",
+    type: "DECISION",
+    status: "APPLIED",
+    confidence: 0.93,
+    title: "#001 > R&D AI Center of Excellence - standardize tooling",
+    bodyMd: "**CONTEXT:** R&D teams are experimenting with generative AI in separate tools.\n\n**REQUEST:** Establish a shared operating model for target optimization and AI governance.\n\n**ANSWER:** The working group agreed to establish an internal Center of Excellence.\n\n**RESULT:** PROCESSED",
+    assigneeHint: "John C. Reed",
+    sourceQuote: "Generative AI will change target optimization. We are establishing an internal COE to standardize tooling.",
+    appliedEntityType: "Decision",
+    autoAppliedAt: nDaysAgo(0),
+  },
+  {
+    meetingTitle: "Innovation & AI Working Group Kickoff",
+    idSuffix: "needs-review-ai-governance",
+    type: "ACTION_ITEM",
+    status: "SUGGESTED",
+    confidence: 0.72,
+    title: "#002 > John C. Reed AI Governance - draft working-group charter",
+    bodyMd: "**CONTEXT:** The AI Center of Excellence needs a clear charter before teams adopt shared tools.\n\n**REQUEST:** Turn the kickoff discussion into an accountable next step.\n\n**ANSWER:** Draft the working-group charter and circulate it before the next R&D review.\n\n**RESULT:** OPEN",
+    assigneeHint: "John C. Reed",
+    sourceQuote: "We are establishing an internal COE to standardize tooling.",
+  },
+  {
+    meetingTitle: "Innovation & AI Working Group Kickoff",
+    idSuffix: "low-confidence-digital-twin",
+    type: "PROPOSAL",
+    status: "SUGGESTED",
+    confidence: 0.38,
+    title: "#003 > Digital Twin Pilot - evaluate MedTech transferability",
+    bodyMd: "**CONTEXT:** Digital twin pilots were mentioned as a possible learning area for AI-enabled operations.\n\n**REQUEST:** Consider whether the drug-discovery AI governance model should also cover MedTech digital twin pilots.\n\n**ANSWER:** The transcript hints at this connection, but does not clearly assign an owner or decision.\n\n**RESULT:** PENDING",
+    assigneeHint: "Timothy Schmid",
+    sourceQuote: "Discussed AI governance, drug discovery ML platforms, and digital twin pilots.",
+  },
+];
+
 const TENSIONS = [
   { title: "STELARA biosimilar erosion risk", status: "OPEN", assignee: null,
     body: "With STELARA facing biosimilar competition soon, we need a definitive strategy to transition patients and secure revenue lines via TREMFYA and other immunology assets." },
@@ -401,10 +439,11 @@ async function main() {
   console.log(`✅ ${ARTICLES.length} Brain Articles created`);
 
   // 6. Create Meetings
+  const meetingMappings = {};
   for (const m of MEETINGS) {
-    await prisma.meeting.upsert({
+    const meeting = await prisma.meeting.upsert({
       where: { externalId: `${wsId}-meet-${slugify(m.title)}` },
-      update: { transcript: m.transcript, summaryMd: m.summary },
+      update: { transcript: m.transcript, summaryMd: m.summary, aiProcessedAt: nDaysAgo(0) },
       create: {
         workspaceId: wsId,
         title: m.title,
@@ -412,14 +451,61 @@ async function main() {
         externalId: `${wsId}-meet-${slugify(m.title)}`,
         recordedAt: new Date(m.recordedAt),
         transcript: m.transcript,
-        summaryMd: m.summary
+        summaryMd: m.summary,
+        aiProcessedAt: nDaysAgo(0)
       }
     });
+    meetingMappings[m.title] = meeting;
   }
   console.log(`✅ ${MEETINGS.length} Meetings created`);
 
-  // 7. Create Tensions
   const adminUserId = memberMappings["jduato"].userId;
+  for (const insight of MEETING_INSIGHTS) {
+    const meeting = meetingMappings[insight.meetingTitle];
+    if (!meeting) continue;
+    const insightId = `${meeting.id}-${insight.idSuffix}`;
+    await prisma.meetingInsight.upsert({
+      where: { id: insightId },
+      update: {
+        type: insight.type,
+        operation: "CREATE",
+        status: insight.status,
+        title: insight.title,
+        bodyMd: insight.bodyMd,
+        assigneeHint: insight.assigneeHint,
+        confidence: insight.confidence,
+        sourceQuote: insight.sourceQuote,
+        appliedEntityType: insight.appliedEntityType ?? null,
+        appliedEntityId: null,
+        autoAppliedAt: insight.autoAppliedAt ?? null,
+        autoApplyError: null,
+        reviewedByUserId: adminUserId,
+        reviewedAt: nDaysAgo(0),
+      },
+      create: {
+        id: insightId,
+        workspaceId: wsId,
+        meetingId: meeting.id,
+        type: insight.type,
+        operation: "CREATE",
+        status: insight.status,
+        title: insight.title,
+        bodyMd: insight.bodyMd,
+        assigneeHint: insight.assigneeHint,
+        confidence: insight.confidence,
+        sourceQuote: insight.sourceQuote,
+        appliedEntityType: insight.appliedEntityType ?? null,
+        appliedEntityId: null,
+        autoAppliedAt: insight.autoAppliedAt ?? null,
+        autoApplyError: null,
+        reviewedByUserId: adminUserId,
+        reviewedAt: nDaysAgo(0),
+      }
+    });
+  }
+  console.log(`✅ ${MEETING_INSIGHTS.length} Meeting insights created`);
+
+  // 7. Create Tensions
   for (const t of TENSIONS) {
     const assignee = t.assignee && memberMappings[t.assignee] ? memberMappings[t.assignee].memberId : null;
     const exists = await prisma.tension.findFirst({ where: { workspaceId: wsId, title: t.title } });

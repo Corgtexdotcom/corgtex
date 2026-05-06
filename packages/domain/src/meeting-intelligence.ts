@@ -208,7 +208,7 @@ export async function confirmInsight(
 
 export async function updateInsight(
   actor: AppActor,
-  params: { workspaceId: string; insightId: string; title?: string | null; bodyMd?: string | null }
+  params: { workspaceId: string; insightId: string; title?: string | null; bodyMd?: string | null; assigneeHint?: string | null }
 ) {
   await requireWorkspaceMembership({
     actor,
@@ -220,12 +220,21 @@ export async function updateInsight(
   });
 
   invariant(insight, 404, "NOT_FOUND", "Insight not found.");
+  invariant(insight.status === "SUGGESTED" || insight.status === "CONFIRMED", 400, "INVALID_STATE", "Only reviewable insights can be edited.");
+
+  const title = params.title?.trim();
+  const bodyMd = params.bodyMd?.trim();
+  const assigneeHint = params.assigneeHint?.trim();
+  invariant(title === undefined || title.length > 0, 400, "INVALID_INPUT", "Insight title is required.");
   
   return prisma.meetingInsight.update({
     where: { id: params.insightId },
     data: {
-      ...(params.title ? { title: params.title } : {}),
-      ...(params.bodyMd ? { bodyMd: params.bodyMd } : {})
+      ...(title !== undefined ? { title } : {}),
+      ...(bodyMd !== undefined ? { bodyMd } : {}),
+      ...(params.assigneeHint !== undefined ? { assigneeHint: assigneeHint || null } : {}),
+      reviewedByUserId: actor.kind === "user" ? actor.user.id : null,
+      reviewedAt: new Date(),
     },
   });
 }
