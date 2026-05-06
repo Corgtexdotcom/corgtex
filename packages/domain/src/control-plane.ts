@@ -1,9 +1,10 @@
-import type { MeetingRecorderProvider, Prisma } from "@prisma/client";
+import type { FleetSnapshotKind, MeetingRecorderProvider, Prisma } from "@prisma/client";
 import { decryptSecret, encryptSecret, env, prisma } from "@corgtex/shared";
 import type { AgentActor, AppActor } from "@corgtex/shared";
 import { AppError, invariant } from "./errors";
 import { isGlobalOperator } from "./auth";
 import { getMeetingRecorderMonthlyUsage, MEETING_RECORDERS_FEATURE_FLAG } from "./meeting-recorders";
+import { createControlPlaneAdapter } from "./control-plane-adapters";
 
 const SUPPORT_ACTOR_LABEL = "Corgtex Support";
 const DEFAULT_RECORDER_BOT_NAME = "Corgtex Recorder";
@@ -13,6 +14,15 @@ const MEETING_RECORDER_PROVIDERS = new Set(["RECALL_AI", "MEETING_BAAS"]);
 const CONTROL_PLANE_CONTEXT_OPERATIONS = new Set(["sync_all", "sync_source", "disable_source"]);
 const CONTROL_PLANE_RELEASE_OPERATIONS = new Set(["prepare_upgrade"]);
 const CONTROL_PLANE_READ_SCOPE = "control-plane:read";
+export const CONTROL_PLANE_FLEET_SNAPSHOT_JOB_TYPE = "control-plane.fleet-snapshot";
+const CONTROL_PLANE_SNAPSHOT_KINDS = new Set<FleetSnapshotKind>([
+  "HEALTH",
+  "RELEASE",
+  "CONNECTOR",
+  "CONTEXT",
+  "INTEGRATION",
+  "SUPPORT_READY",
+]);
 
 const MUTATING_SUPPORT_ACTIONS = new Set([
   "members.invite",
@@ -189,6 +199,99 @@ function normalizeReleaseOperation(value: string) {
   return value as "prepare_upgrade";
 }
 
+function normalizeSnapshotKinds(values?: readonly string[] | null) {
+  const requested = values?.length ? values : Array.from(CONTROL_PLANE_SNAPSHOT_KINDS);
+  return Array.from(new Set(requested.map((value) => value.trim().toUpperCase()))).map((value) => {
+    invariant(CONTROL_PLANE_SNAPSHOT_KINDS.has(value as FleetSnapshotKind), 400, "INVALID_INPUT", `Unsupported fleet snapshot kind: ${value}.`);
+    return value as FleetSnapshotKind;
+  });
+}
+
+function readPositiveInteger(value: string | undefined, fallback: number, max: number) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.min(Math.floor(parsed), max);
+}
+
+function deploymentHealthStatus(status: string) {
+  if (status === "ok") return "ACTIVE" as const;
+  if (status === "degraded" || status === "down") return "DEGRADED" as const;
+  return undefined;
+}
+
+function contextSnapshotStatus(value: { summary?: { failedSyncJobs?: number; failedExternalSources?: number; staleExternalSources?: number } | null; supportConnectorStatus?: string | null }) {
+  if (value.summary) {
+    return (value.summary.failedSyncJobs || value.summary.failedExternalSources || value.summary.staleExternalSources) ? "degraded" : "ok";
+  }
+  return value.supportConnectorStatus ?? "not_configured";
+}
+
+function integrationSnapshotStatus(value: { integrations?: Array<{ status?: string | null; configured?: boolean | null }> }) {
+  const integrations = value.integrations ?? [];
+  if (integrations.length === 0) return "not_configured";
+  if (integrations.some((integration) => integration.status === "ERROR" || integration.status === "degraded" || integration.status === "failed")) {
+    return "degraded";
+  }
+  if (integrations.some((integration) => integration.configured)) return "ok";
+  return "not_configured";
+}
+
+function releaseSnapshotStatus(value: {
+  health?: { lastHealthStatus?: string | null; lastHealthError?: string | null };
+  rollbackReady?: boolean;
+}) {
+  if (value.health?.lastHealthStatus === "ok" && value.rollbackReady) return "ok";
+  if (value.health?.lastHealthStatus === "degraded" || value.health?.lastHealthStatus === "down" || value.health?.lastHealthError) return "degraded";
+  return "unknown";
+}
+
+function connectorSnapshotStatus(status: string | null | undefined) {
+  if (!status || status === "not_configured") return "not_configured";
+  if (status === "connected" || status === "configured") return "ok";
+  return status;
+}
+
+function supportSnapshotStatus(snapshot: JsonRecord) {
+  return Object.values(snapshot).some((value) => (
+    value && typeof value === "object" && "error" in value
+  )) ? "degraded" : "ok";
+}
+
+async function recordFleetHealthSnapshot(params: {
+  customerAccountId: string | null | undefined;
+  deploymentId?: string | null;
+  snapshotKind: FleetSnapshotKind;
+  status: string;
+  summary?: unknown;
+  error?: string | null;
+}) {
+  if (!params.customerAccountId) {
+    return null;
+  }
+
+  return prisma.fleetHealthSnapshot.create({
+    data: {
+      customerAccountId: params.customerAccountId,
+      deploymentId: params.deploymentId ?? null,
+      snapshotKind: params.snapshotKind,
+      status: params.status,
+      summary: params.summary && typeof params.summary === "object"
+        ? redactObject(params.summary as JsonRecord) as Prisma.InputJsonObject
+        : params.summary === undefined ? undefined : { value: params.summary } as Prisma.InputJsonObject,
+      error: params.error ?? null,
+      observedAt: new Date(),
+    },
+  });
+}
+
+const controlPlaneWorkerActor: AppActor = {
+  kind: "agent",
+  authProvider: "control-plane",
+  label: "control-plane-worker",
+  workspaceIds: [],
+  scopes: ["control-plane:*"],
+};
+
 function normalizeSupportMcpUrl(instance: { url: string; supportMcpUrl?: string | null }) {
   if (instance.supportMcpUrl?.trim()) {
     return instance.supportMcpUrl.trim();
@@ -252,6 +355,9 @@ async function loadSupportConnector(instanceId: string) {
       label: true,
       url: true,
       customerSlug: true,
+      customerAccountId: true,
+      deploymentKind: true,
+      deploymentStatus: true,
       supportMcpUrl: true,
       supportCredentialEnc: true,
       supportConnectorStatus: true,
@@ -500,14 +606,16 @@ async function getControlPlaneInstanceWithWorkspace(actor: AppActor, instanceId:
 
 export async function getControlPlaneContextHealth(actor: AppActor, instanceId: string) {
   const instance = await getControlPlaneInstanceWithWorkspace(actor, instanceId);
-  if (!instance.managedWorkspaceId) {
+  const adapter = createControlPlaneAdapter(instance);
+  if (!adapter.canReadCentralWorkspace || !instance.managedWorkspaceId) {
     return {
       instanceId,
-      accessMode: "support_connector" as const,
+      accessMode: adapter.kind,
       hasManagedWorkspace: false,
       supportConnectorStatus: instance.supportConnectorStatus,
       supportLastSyncAt: instance.supportLastSyncAt,
       supportLastSyncError: instance.supportLastSyncError,
+      requiresConnectorSetup: adapter.requiresConnectorSetup,
       summary: null,
       sources: [],
     };
@@ -794,13 +902,15 @@ export async function runControlPlaneContextOperation(actor: AppActor, params: {
 
 export async function getControlPlaneIntegrationStatus(actor: AppActor, instanceId: string) {
   const instance = await getControlPlaneInstanceWithWorkspace(actor, instanceId);
-  if (!instance.managedWorkspaceId) {
+  const adapter = createControlPlaneAdapter(instance);
+  if (!adapter.canReadCentralWorkspace || !instance.managedWorkspaceId) {
     return {
       instanceId,
-      accessMode: "support_connector" as const,
+      accessMode: adapter.kind,
       hasManagedWorkspace: false,
       supportConnectorStatus: instance.supportConnectorStatus,
       supportLastSyncAt: instance.supportLastSyncAt,
+      requiresConnectorSetup: adapter.requiresConnectorSetup,
       integrations: [],
     };
   }
@@ -926,7 +1036,7 @@ export async function configureControlPlaneMeetingRecorderIntegration(actor: App
   const botName = params.botName?.trim() || DEFAULT_RECORDER_BOT_NAME;
   const entryMessage = params.entryMessage?.trim() || DEFAULT_RECORDER_ENTRY_MESSAGE;
 
-  const { featureFlag, config } = await prisma.$transaction(async (tx) => {
+  const { featureFlag, config, entitlement } = await prisma.$transaction(async (tx) => {
     const featureFlag = await tx.workspaceFeatureFlag.upsert({
       where: {
         workspaceId_flag: {
@@ -963,6 +1073,54 @@ export async function configureControlPlaneMeetingRecorderIntegration(actor: App
         entryMessage,
       },
     });
+    const entitlement = instance.customerAccountId
+      ? await tx.customerEntitlement.upsert({
+        where: {
+          customerAccountId_scopeKey_entitlementKey: {
+            customerAccountId: instance.customerAccountId,
+            scopeKey: `deployment:${params.instanceId}`,
+            entitlementKey: MEETING_RECORDERS_FEATURE_FLAG,
+          },
+        },
+        update: {
+          deploymentId: params.instanceId,
+          enabled: params.entitlementEnabled,
+          status: params.entitlementEnabled ? "ENABLED" : "DISABLED",
+          intent: {
+            enabled: params.entitlementEnabled,
+            productEnforcement: "workspace_feature_flag",
+          },
+          evidence: {
+            reason,
+            managedWorkspaceId,
+            configEnabled: config.enabled,
+            defaultProvider: config.defaultProvider,
+            monthlyMinuteCap: config.monthlyMinuteCap,
+          },
+          configuredByUserId: actorUserId(actor),
+        },
+        create: {
+          customerAccountId: instance.customerAccountId,
+          deploymentId: params.instanceId,
+          scopeKey: `deployment:${params.instanceId}`,
+          entitlementKey: MEETING_RECORDERS_FEATURE_FLAG,
+          enabled: params.entitlementEnabled,
+          status: params.entitlementEnabled ? "ENABLED" : "DISABLED",
+          intent: {
+            enabled: params.entitlementEnabled,
+            productEnforcement: "workspace_feature_flag",
+          },
+          evidence: {
+            reason,
+            managedWorkspaceId,
+            configEnabled: config.enabled,
+            defaultProvider: config.defaultProvider,
+            monthlyMinuteCap: config.monthlyMinuteCap,
+          },
+          configuredByUserId: actorUserId(actor),
+        },
+      })
+      : null;
 
     if (featureFlag.enabled && config.enabled) {
       await tx.workflowJob.upsert({
@@ -995,26 +1153,29 @@ export async function configureControlPlaneMeetingRecorderIntegration(actor: App
       },
     });
 
-    return { featureFlag, config };
+    return { featureFlag, config, entitlement };
   });
 
   return {
     instanceId: params.instanceId,
     managedWorkspaceId,
     entitlementEnabled: featureFlag.enabled,
+    entitlement,
     config,
   };
 }
 
 export async function getControlPlaneAiGovernanceStatus(actor: AppActor, instanceId: string) {
   const instance = await getControlPlaneInstanceWithWorkspace(actor, instanceId);
-  if (!instance.managedWorkspaceId) {
+  const adapter = createControlPlaneAdapter(instance);
+  if (!adapter.canReadCentralWorkspace || !instance.managedWorkspaceId) {
     return {
       instanceId,
-      accessMode: "support_connector" as const,
+      accessMode: adapter.kind,
       hasManagedWorkspace: false,
       supportConnectorStatus: instance.supportConnectorStatus,
       supportLastSyncAt: instance.supportLastSyncAt,
+      requiresConnectorSetup: adapter.requiresConnectorSetup,
       summary: null,
     };
   }
@@ -1116,6 +1277,7 @@ export async function getControlPlaneAiGovernanceStatus(actor: AppActor, instanc
 
 export async function getControlPlaneReleaseStatus(actor: AppActor, instanceId: string) {
   const instance = await getControlPlaneInstanceWithWorkspace(actor, instanceId);
+  const adapter = createControlPlaneAdapter(instance);
   const releaseDrift = instance.lastHealthError?.includes("Release drift:") ? instance.lastHealthError : null;
   const recentPreparations = await prisma.hostedInstanceEvent.findMany({
     where: {
@@ -1134,7 +1296,8 @@ export async function getControlPlaneReleaseStatus(actor: AppActor, instanceId: 
   });
   return {
     instanceId,
-    accessMode: instance.managedWorkspaceId ? "managed_workspace" as const : "support_connector" as const,
+    accessMode: adapter.kind,
+    requiresConnectorSetup: adapter.requiresConnectorSetup,
     managedWorkspace: instance.managedWorkspace,
     current: {
       releaseVersion: instance.releaseVersion,
@@ -1190,7 +1353,7 @@ export async function runControlPlaneReleaseOperation(actor: AppActor, params: {
       targetDiffers: targetReleaseImageTag !== instance.releaseImageTag || targetReleaseVersion !== (instance.releaseVersion ?? null),
     };
 
-    await recordHostedEvent(actor, params.instanceId, "control_plane.release.upgrade_prepared", {
+    const evidence = {
       reason,
       operation,
       currentReleaseImageTag: instance.releaseImageTag,
@@ -1199,6 +1362,43 @@ export async function runControlPlaneReleaseOperation(actor: AppActor, params: {
       targetReleaseVersion,
       releaseDrift,
       checks,
+    };
+
+    await prisma.$transaction(async (tx) => {
+      if (instance.customerAccountId) {
+        await tx.customerReleaseTarget.upsert({
+          where: {
+            deploymentId_targetReleaseImageTag: {
+              deploymentId: params.instanceId,
+              targetReleaseImageTag,
+            },
+          },
+          update: {
+            targetReleaseVersion,
+            status: "PREPARED",
+            evidence: redactObject(evidence) as Prisma.InputJsonObject,
+            preparedByUserId: actorUserId(actor),
+            preparedAt: new Date(),
+          },
+          create: {
+            customerAccountId: instance.customerAccountId,
+            deploymentId: params.instanceId,
+            targetReleaseImageTag,
+            targetReleaseVersion,
+            status: "PREPARED",
+            evidence: redactObject(evidence) as Prisma.InputJsonObject,
+            preparedByUserId: actorUserId(actor),
+          },
+        });
+      }
+      await tx.hostedInstanceEvent.create({
+        data: {
+          instanceId: params.instanceId,
+          actorUserId: actorUserId(actor),
+          action: "control_plane.release.upgrade_prepared",
+          meta: redactObject(evidence) as Prisma.InputJsonObject,
+        },
+      });
     });
 
     return {
@@ -1228,12 +1428,10 @@ type InstanceHealthPayload = {
   };
 };
 
-export async function probeControlPlaneCustomerHealth(actor: AppActor, params: {
+async function probeControlPlaneCustomerHealthCore(actor: AppActor, params: {
   instanceId: string;
-  reason?: string | null;
+  reason: string;
 }) {
-  requireControlPlaneScope(actor, "control-plane:releases:write");
-  const reason = requireMutationReason(params.reason);
   const instance = await getControlPlaneInstanceWithWorkspace(actor, params.instanceId);
   let status = "unknown";
   let error: string | null = null;
@@ -1274,10 +1472,36 @@ export async function probeControlPlaneCustomerHealth(actor: AppActor, params: {
       lastHealthError: error,
       lastReleaseCheck: new Date(),
       provisioningStatus: status === "ok" ? "active" : "degraded",
+      ...(deploymentHealthStatus(status) ? { deploymentStatus: deploymentHealthStatus(status) } : {}),
     },
   });
+  await Promise.all([
+    recordFleetHealthSnapshot({
+      customerAccountId: instance.customerAccountId,
+      deploymentId: params.instanceId,
+      snapshotKind: "HEALTH",
+      status,
+      summary: {
+        reason: params.reason,
+        health,
+      },
+      error,
+    }),
+    recordFleetHealthSnapshot({
+      customerAccountId: instance.customerAccountId,
+      deploymentId: params.instanceId,
+      snapshotKind: "RELEASE",
+      status: error?.includes("Release drift:") ? "degraded" : status === "ok" ? "ok" : "unknown",
+      summary: {
+        expectedReleaseImageTag: instance.releaseImageTag,
+        expectedReleaseVersion: instance.releaseVersion,
+        observedRelease: health?.release ?? null,
+      },
+      error: error?.includes("Release drift:") ? error : null,
+    }),
+  ]);
   await recordHostedEvent(actor, params.instanceId, "control_plane.release.health_probed", {
-    reason,
+    reason: params.reason,
     status,
     error,
     release: health?.release ?? null,
@@ -1287,6 +1511,18 @@ export async function probeControlPlaneCustomerHealth(actor: AppActor, params: {
     error,
     release: await getControlPlaneReleaseStatus(actor, params.instanceId),
   };
+}
+
+export async function probeControlPlaneCustomerHealth(actor: AppActor, params: {
+  instanceId: string;
+  reason?: string | null;
+}) {
+  requireControlPlaneScope(actor, "control-plane:releases:write");
+  const reason = requireMutationReason(params.reason);
+  return probeControlPlaneCustomerHealthCore(actor, {
+    instanceId: params.instanceId,
+    reason,
+  });
 }
 
 export async function configureSupportConnector(actor: AppActor, params: {
@@ -1335,9 +1571,7 @@ export async function configureSupportConnector(actor: AppActor, params: {
   };
 }
 
-export async function fetchCustomerSupportSnapshot(actor: AppActor, instanceId: string) {
-  requireControlPlaneScope(actor, "control-plane:support:write");
-  await requireControlPlaneAccess(actor, { instanceId });
+async function fetchCustomerSupportSnapshotCore(instanceId: string) {
   const connector = await loadSupportConnector(instanceId);
 
   const calls = await Promise.allSettled([
@@ -1365,7 +1599,297 @@ export async function fetchCustomerSupportSnapshot(actor: AppActor, instanceId: 
     },
   });
 
-  return { workspace, members, integrations, dataSources, agentRuns, failedJobs };
+  const snapshot = { workspace, members, integrations, dataSources, agentRuns, failedJobs };
+  await Promise.all([
+    recordFleetHealthSnapshot({
+      customerAccountId: connector.instance.customerAccountId,
+      deploymentId: instanceId,
+      snapshotKind: "CONNECTOR",
+      status: hasError ? "degraded" : "ok",
+      summary: {
+        supportConnectorStatus: hasError ? "degraded" : "connected",
+        supportMcpUrl: connector.mcpUrl,
+      },
+      error: hasError ? "One or more support snapshot calls failed." : null,
+    }),
+    recordFleetHealthSnapshot({
+      customerAccountId: connector.instance.customerAccountId,
+      deploymentId: instanceId,
+      snapshotKind: "SUPPORT_READY",
+      status: hasError ? "degraded" : "ok",
+      summary: snapshot,
+      error: hasError ? "One or more support snapshot calls failed." : null,
+    }),
+  ]);
+
+  return snapshot;
+}
+
+export async function fetchCustomerSupportSnapshot(actor: AppActor, instanceId: string) {
+  requireControlPlaneScope(actor, "control-plane:support:write");
+  await requireControlPlaneAccess(actor, { instanceId });
+  return fetchCustomerSupportSnapshotCore(instanceId);
+}
+
+export async function refreshControlPlaneFleetSnapshots(actor: AppActor, params: {
+  instanceId: string;
+  snapshotKinds?: string[] | null;
+  reason?: string | null;
+}) {
+  requireControlPlaneScope(actor, "control-plane:fleet:write");
+  const reason = requireMutationReason(params.reason);
+  const kinds = normalizeSnapshotKinds(params.snapshotKinds);
+  const instance = await getControlPlaneInstanceWithWorkspace(actor, params.instanceId);
+  const adapter = createControlPlaneAdapter(instance);
+  const results: Array<{ snapshotKind: FleetSnapshotKind; status: string; error: string | null }> = [];
+
+  for (const snapshotKind of kinds) {
+    try {
+      if (snapshotKind === "HEALTH") {
+        const result = await probeControlPlaneCustomerHealthCore(actor, {
+          instanceId: params.instanceId,
+          reason,
+        });
+        results.push({ snapshotKind, status: result.status, error: result.error });
+        continue;
+      }
+
+      if (snapshotKind === "RELEASE") {
+        const release = await getControlPlaneReleaseStatus(actor, params.instanceId);
+        const status = releaseSnapshotStatus(release);
+        await recordFleetHealthSnapshot({
+          customerAccountId: instance.customerAccountId,
+          deploymentId: params.instanceId,
+          snapshotKind,
+          status,
+          summary: release,
+          error: release.health.lastHealthError,
+        });
+        results.push({ snapshotKind, status, error: release.health.lastHealthError });
+        continue;
+      }
+
+      if (snapshotKind === "CONNECTOR") {
+        const status = connectorSnapshotStatus(instance.supportConnectorStatus);
+        await recordFleetHealthSnapshot({
+          customerAccountId: instance.customerAccountId,
+          deploymentId: params.instanceId,
+          snapshotKind,
+          status,
+          summary: {
+            adapterKind: adapter.kind,
+            supportConnectorStatus: instance.supportConnectorStatus,
+            supportLastConnectedAt: instance.supportLastConnectedAt,
+            supportLastSyncAt: instance.supportLastSyncAt,
+            requiresConnectorSetup: adapter.requiresConnectorSetup,
+          },
+          error: instance.supportLastSyncError,
+        });
+        results.push({ snapshotKind, status, error: instance.supportLastSyncError });
+        continue;
+      }
+
+      if (snapshotKind === "SUPPORT_READY") {
+        if (adapter.requiresConnectorSetup) {
+          await recordFleetHealthSnapshot({
+            customerAccountId: instance.customerAccountId,
+            deploymentId: params.instanceId,
+            snapshotKind,
+            status: "not_configured",
+            summary: {
+              adapterKind: adapter.kind,
+              requiresConnectorSetup: true,
+            },
+            error: "Support connector is not configured.",
+          });
+          results.push({ snapshotKind, status: "not_configured", error: "Support connector is not configured." });
+          continue;
+        }
+        const snapshot = await fetchCustomerSupportSnapshotCore(params.instanceId);
+        const status = supportSnapshotStatus(snapshot);
+        results.push({
+          snapshotKind,
+          status,
+          error: status === "degraded" ? "One or more support snapshot calls failed." : null,
+        });
+        continue;
+      }
+
+      if (snapshotKind === "CONTEXT") {
+        const context = await getControlPlaneContextHealth(actor, params.instanceId);
+        const status = contextSnapshotStatus(context);
+        const error = ("supportLastSyncError" in context ? context.supportLastSyncError : null) ?? null;
+        await recordFleetHealthSnapshot({
+          customerAccountId: instance.customerAccountId,
+          deploymentId: params.instanceId,
+          snapshotKind,
+          status,
+          summary: context,
+          error,
+        });
+        results.push({ snapshotKind, status, error });
+        continue;
+      }
+
+      if (snapshotKind === "INTEGRATION") {
+        const integrations = await getControlPlaneIntegrationStatus(actor, params.instanceId);
+        const status = integrationSnapshotStatus(integrations);
+        await recordFleetHealthSnapshot({
+          customerAccountId: instance.customerAccountId,
+          deploymentId: params.instanceId,
+          snapshotKind,
+          status,
+          summary: integrations,
+          error: null,
+        });
+        results.push({ snapshotKind, status, error: null });
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Fleet snapshot refresh failed.";
+      await recordFleetHealthSnapshot({
+        customerAccountId: instance.customerAccountId,
+        deploymentId: params.instanceId,
+        snapshotKind,
+        status: "failed",
+        summary: {
+          adapterKind: adapter.kind,
+          reason,
+        },
+        error: message,
+      });
+      results.push({ snapshotKind, status: "failed", error: message });
+    }
+  }
+
+  await recordHostedEvent(actor, params.instanceId, "control_plane.fleet_snapshots_refreshed", {
+    reason,
+    snapshotKinds: kinds,
+    results,
+  });
+
+  return {
+    instanceId: params.instanceId,
+    adapterKind: adapter.kind,
+    results,
+  };
+}
+
+export async function enqueueControlPlaneFleetSnapshots(actor: AppActor, params: {
+  instanceId?: string | null;
+  snapshotKinds?: string[] | null;
+  reason?: string | null;
+  limit?: number | null;
+}) {
+  requireControlPlaneScope(actor, "control-plane:fleet:write");
+  const reason = requireMutationReason(params.reason);
+  const snapshotKinds = normalizeSnapshotKinds(params.snapshotKinds);
+  const limit = Math.min(Math.max(Math.floor(params.limit ?? 100), 1), 500);
+  const deployments = params.instanceId?.trim()
+    ? [await getControlPlaneInstanceWithWorkspace(actor, params.instanceId.trim())]
+    : await prisma.instanceRegistry.findMany({
+      where: {
+        customerAccountId: { not: null },
+        deploymentStatus: { notIn: ["RETIRED", "SUSPENDED"] },
+      },
+      orderBy: [
+        { lastHealthCheck: "asc" },
+        { createdAt: "asc" },
+      ],
+      take: limit,
+      include: {
+        managedWorkspace: {
+          select: managedWorkspaceSelect,
+        },
+      },
+    });
+
+  const bucket = Math.floor(Date.now() / (15 * 60 * 1000));
+  await prisma.$transaction(async (tx) => {
+    for (const deployment of deployments) {
+      await tx.workflowJob.upsert({
+        where: {
+          dedupeKey: `control-plane:fleet-snapshot:${deployment.id}:${snapshotKinds.join(",")}:${bucket}`,
+        },
+        update: {},
+        create: {
+          workspaceId: null,
+          eventId: null,
+          type: CONTROL_PLANE_FLEET_SNAPSHOT_JOB_TYPE,
+          payload: {
+            instanceId: deployment.id,
+            snapshotKinds,
+            reason,
+            requestedBy: actorUserId(actor) ?? (isControlPlaneAgent(actor) ? actor.label : "control-plane"),
+          },
+          dedupeKey: `control-plane:fleet-snapshot:${deployment.id}:${snapshotKinds.join(",")}:${bucket}`,
+        },
+      });
+    }
+  });
+
+  return {
+    queuedJobs: deployments.length,
+    snapshotKinds,
+    deploymentIds: deployments.map((deployment) => deployment.id),
+  };
+}
+
+async function runWithConcurrency<T>(items: T[], concurrency: number, callback: (item: T) => Promise<unknown>) {
+  let nextIndex = 0;
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (nextIndex < items.length) {
+      const item = items[nextIndex++];
+      await callback(item);
+    }
+  });
+  await Promise.all(workers);
+}
+
+export async function runControlPlaneFleetSnapshotJob(params: {
+  instanceId?: string | null;
+  snapshotKinds?: string[] | null;
+  reason?: string | null;
+  limit?: number | null;
+  concurrency?: number | null;
+}) {
+  const reason = params.reason?.trim() || "Scheduled Control Plane fleet snapshot.";
+  const snapshotKinds = normalizeSnapshotKinds(params.snapshotKinds);
+  if (params.instanceId?.trim()) {
+    return refreshControlPlaneFleetSnapshots(controlPlaneWorkerActor, {
+      instanceId: params.instanceId.trim(),
+      snapshotKinds,
+      reason,
+    });
+  }
+
+  const limit = Math.min(Math.max(Math.floor(params.limit ?? readPositiveInteger(process.env.CONTROL_PLANE_FLEET_SWEEP_BATCH_SIZE, 50, 500)), 1), 500);
+  const concurrency = Math.min(Math.max(Math.floor(params.concurrency ?? readPositiveInteger(process.env.CONTROL_PLANE_FLEET_SWEEP_CONCURRENCY, 5, 20)), 1), 20);
+  const deployments = await prisma.instanceRegistry.findMany({
+    where: {
+      customerAccountId: { not: null },
+      deploymentStatus: { notIn: ["RETIRED", "SUSPENDED"] },
+    },
+    orderBy: [
+      { lastHealthCheck: "asc" },
+      { createdAt: "asc" },
+    ],
+    take: limit,
+    select: { id: true },
+  });
+  const results: Array<unknown> = [];
+  await runWithConcurrency(deployments, concurrency, async (deployment) => {
+    results.push(await refreshControlPlaneFleetSnapshots(controlPlaneWorkerActor, {
+      instanceId: deployment.id,
+      snapshotKinds,
+      reason,
+    }));
+  });
+
+  return {
+    queuedDeployments: deployments.length,
+    snapshotKinds,
+    results,
+  };
 }
 
 export async function runCustomerSupportOperation(actor: AppActor, params: {

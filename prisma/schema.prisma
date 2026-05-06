@@ -359,6 +359,24 @@ enum FleetSnapshotKind {
   SUPPORT_READY
 }
 
+enum CustomerEntitlementStatus {
+  DRAFT
+  ENABLED
+  DISABLED
+  DEGRADED
+  SUSPENDED
+}
+
+enum CustomerReleaseTargetStatus {
+  PREPARED
+  PROBING
+  APPLYING
+  APPLIED
+  FAILED
+  ROLLBACK_READY
+  ROLLED_BACK
+}
+
 model Workspace {
   id                            String                          @id @default(uuid())
   slug                          String                          @unique
@@ -3007,9 +3025,11 @@ model CustomerAccount {
   createdAt           DateTime                    @default(now())
   updatedAt           DateTime                    @updatedAt
 
-  deployments       InstanceRegistry[]    @relation("CustomerAccountDeployments")
-  primaryDeployment InstanceRegistry?     @relation("CustomerAccountPrimaryDeployment", fields: [primaryDeploymentId], references: [id], onDelete: SetNull)
+  deployments       InstanceRegistry[]      @relation("CustomerAccountDeployments")
+  primaryDeployment InstanceRegistry?       @relation("CustomerAccountPrimaryDeployment", fields: [primaryDeploymentId], references: [id], onDelete: SetNull)
   fleetSnapshots    FleetHealthSnapshot[]
+  entitlements      CustomerEntitlement[]
+  releaseTargets    CustomerReleaseTarget[]
 
   @@index([status])
   @@index([managementAuthority])
@@ -3074,6 +3094,8 @@ model InstanceRegistry {
   customerAccount    CustomerAccount?             @relation("CustomerAccountDeployments", fields: [customerAccountId], references: [id], onDelete: SetNull)
   primaryForAccount  CustomerAccount?             @relation("CustomerAccountPrimaryDeployment")
   fleetSnapshots     FleetHealthSnapshot[]
+  entitlements       CustomerEntitlement[]
+  releaseTargets     CustomerReleaseTarget[]
 
   @@index([customerAccountId])
   @@index([deploymentKind])
@@ -3103,6 +3125,51 @@ model FleetHealthSnapshot {
   @@index([deploymentId, snapshotKind, createdAt])
   @@index([snapshotKind, createdAt])
   @@index([status, createdAt])
+}
+
+model CustomerEntitlement {
+  id                 String                    @id @default(uuid())
+  customerAccountId  String
+  deploymentId       String?
+  scopeKey           String
+  entitlementKey     String
+  enabled            Boolean                   @default(false)
+  status             CustomerEntitlementStatus @default(DRAFT)
+  intent             Json?
+  evidence           Json?
+  source             String                    @default("control_plane")
+  configuredByUserId String?
+  createdAt          DateTime                  @default(now())
+  updatedAt          DateTime                  @updatedAt
+
+  customerAccount CustomerAccount   @relation(fields: [customerAccountId], references: [id], onDelete: Cascade)
+  deployment      InstanceRegistry? @relation(fields: [deploymentId], references: [id], onDelete: SetNull)
+
+  @@unique([customerAccountId, scopeKey, entitlementKey], map: "CustomerEntitlement_account_scope_entitlement_key")
+  @@index([customerAccountId, status])
+  @@index([deploymentId, entitlementKey])
+}
+
+model CustomerReleaseTarget {
+  id                    String                      @id @default(uuid())
+  customerAccountId     String
+  deploymentId          String
+  targetReleaseImageTag String
+  targetReleaseVersion  String?
+  status                CustomerReleaseTargetStatus @default(PREPARED)
+  evidence              Json?
+  preparedByUserId      String?
+  preparedAt            DateTime                    @default(now())
+  appliedAt             DateTime?
+  createdAt             DateTime                    @default(now())
+  updatedAt             DateTime                    @updatedAt
+
+  customerAccount CustomerAccount  @relation(fields: [customerAccountId], references: [id], onDelete: Cascade)
+  deployment      InstanceRegistry @relation(fields: [deploymentId], references: [id], onDelete: Cascade)
+
+  @@unique([deploymentId, targetReleaseImageTag])
+  @@index([customerAccountId, status])
+  @@index([deploymentId, status, createdAt])
 }
 
 model HostedInstanceEvent {

@@ -16,6 +16,7 @@ export * from "./constitutions";
 export * from "./conversations";
 export * from "./communication";
 export * from "./control-plane";
+export * from "./control-plane-adapters";
 export * from "./customer-lifecycle";
 export * from "./cycles";
 export * from "./documents";
