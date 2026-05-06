@@ -15,6 +15,12 @@ import {
   type RailwayClient,
   type RailwayRuntimeServiceSource,
 } from "./railway-client";
+import {
+  customerSlugFromText,
+  deploymentStatusFromProvisioningStatus,
+  linkManagedWorkspaceDeployment,
+  registerCustomerDeployment,
+} from "./customer-lifecycle";
 
 const HOSTED_PROVISIONING_STATUSES = new Set([
   "draft",
@@ -393,10 +399,18 @@ export async function adminCreateWorkspace(actor: AppActor, params: {
   description: string | null;
 }) {
   requireGlobalOperator(actor);
-  return createWorkspace(actor, {
+  const workspace = await createWorkspace(actor, {
     name: params.name,
     slug: params.slug,
   });
+  await linkManagedWorkspaceDeployment({
+    workspaceId: workspace.id,
+    accountStatus: "ACTIVE",
+    deploymentKind: "SHARED_WORKSPACE",
+    deploymentStatus: "ACTIVE",
+    primary: true,
+  });
+  return workspace;
 }
 
 export async function listExternalInstances(actor: AppActor) {
@@ -437,27 +451,33 @@ export async function registerExternalInstance(actor: AppActor, params: {
   bootstrapBundleSchemaVersion?: string;
 }) {
   requireGlobalOperator(actor);
-  const normalizedCustomerSlug = params.customerSlug ? normalizeSlug(params.customerSlug) : null;
+  const normalizedCustomerSlug = params.customerSlug
+    ? normalizeSlug(params.customerSlug)
+    : customerSlugFromText(params.label || params.url);
   const managedWorkspaceId = await findManagedWorkspaceId(normalizedCustomerSlug);
-  const instance = await prisma.instanceRegistry.create({
-    data: {
-      label: params.label,
-      url: params.url,
-      environment: params.environment || "production",
-      notes: params.notes,
-      customerSlug: normalizedCustomerSlug,
-      region: normalizeOptional(params.region),
-      dataResidency: normalizeOptional(params.dataResidency),
-      customDomain: normalizeOptional(params.customDomain),
-      supportOwnerEmail: normalizeOptional(params.supportOwnerEmail),
-      releaseVersion: normalizeOptional(params.releaseVersion),
-      releaseImageTag: normalizeOptional(params.releaseImageTag),
-      storageBucketName: normalizeOptional(params.storageBucketName),
-      bootstrapBundleUri: normalizeOptional(params.bootstrapBundleUri),
-      bootstrapBundleChecksum: normalizeOptional(params.bootstrapBundleChecksum),
-      bootstrapBundleSchemaVersion: normalizeOptional(params.bootstrapBundleSchemaVersion),
-      managedWorkspaceId,
-    }
+  const { deployment: instance } = await registerCustomerDeployment({
+    accountSlug: normalizedCustomerSlug,
+    accountDisplayName: params.label,
+    accountStatus: managedWorkspaceId ? "ACTIVE" : "ONBOARDING",
+    managementAuthority: "CORGTEX",
+    label: params.label,
+    url: params.url,
+    environment: params.environment || "production",
+    notes: params.notes,
+    customerSlug: normalizedCustomerSlug,
+    deploymentKind: managedWorkspaceId ? "SHARED_WORKSPACE" : "REMOTE_MANAGED",
+    deploymentStatus: managedWorkspaceId ? "ACTIVE" : "DRAFT",
+    region: params.region,
+    dataResidency: params.dataResidency,
+    customDomain: params.customDomain,
+    supportOwnerEmail: params.supportOwnerEmail,
+    releaseVersion: params.releaseVersion,
+    releaseImageTag: params.releaseImageTag,
+    storageBucketName: params.storageBucketName,
+    bootstrapBundleUri: params.bootstrapBundleUri,
+    bootstrapBundleChecksum: params.bootstrapBundleChecksum,
+    bootstrapBundleSchemaVersion: params.bootstrapBundleSchemaVersion,
+    managedWorkspaceId,
   });
   await recordHostedInstanceEvent(actor, instance.id, "hosted_instance.registered", {
     customerSlug: instance.customerSlug,
@@ -528,6 +548,7 @@ export async function probeExternalInstanceHealth(actor: AppActor, id: string) {
       lastHealthError: error,
       lastReleaseCheck: health?.release ? new Date() : null,
       provisioningStatus: status === "ok" ? "active" : "degraded",
+      deploymentStatus: status === "ok" ? "ACTIVE" : "DEGRADED",
     }
   });
   await recordHostedInstanceEvent(actor, id, "hosted_instance.health_probed", { status, error });
@@ -543,14 +564,22 @@ export async function updateHostedInstanceStatus(actor: AppActor, params: {
   const data: {
     provisioningStatus?: string;
     bootstrapStatus?: string;
+    deploymentStatus?: "DRAFT" | "PROVISIONING" | "BOOTSTRAPPING" | "ACTIVE" | "DEGRADED" | "SUSPENDED" | "RETIRED";
     lastProvisioningError?: string | null;
   } = {};
 
   if (params.provisioningStatus) {
     data.provisioningStatus = requireStatus(params.provisioningStatus, HOSTED_PROVISIONING_STATUSES, "provisioning");
+    data.deploymentStatus = deploymentStatusFromProvisioningStatus(data.provisioningStatus);
   }
   if (params.bootstrapStatus) {
     data.bootstrapStatus = requireStatus(params.bootstrapStatus, HOSTED_BOOTSTRAP_STATUSES, "bootstrap");
+    if (!data.deploymentStatus && data.bootstrapStatus === "bootstrapping") {
+      data.deploymentStatus = "BOOTSTRAPPING";
+    }
+    if (!data.deploymentStatus && data.bootstrapStatus === "failed") {
+      data.deploymentStatus = "DEGRADED";
+    }
   }
   if (params.lastProvisioningError !== undefined) {
     data.lastProvisioningError = params.lastProvisioningError;
@@ -570,6 +599,7 @@ export async function suspendHostedInstance(actor: AppActor, instanceId: string)
     where: { id: instanceId },
     data: {
       provisioningStatus: "suspended",
+      deploymentStatus: "SUSPENDED",
     },
   });
   await recordHostedInstanceEvent(actor, instanceId, "hosted_instance.suspended");
@@ -603,47 +633,31 @@ export async function provisionHostedCustomerInstance(actor: AppActor, params: {
     ? `https://${params.customDomain.trim().replace(/^https?:\/\//, "").replace(/\/$/, "")}`
     : `https://${customerSlug}.corgtex.com`;
 
-  const instance = await prisma.instanceRegistry.upsert({
-    where: { customerSlug },
-    update: {
-      label: params.label,
-      url,
-      environment: "production",
-      customerSlug,
-      region: params.region,
-      dataResidency: params.dataResidency,
-      customDomain: normalizeOptional(params.customDomain),
-      supportOwnerEmail: normalizeOptional(params.supportOwnerEmail),
-      releaseVersion: normalizeOptional(params.releaseVersion),
-      releaseImageTag: params.releaseImageTag,
-      storageBucketName: normalizeOptional(params.storageBucketName),
-      bootstrapBundleUri: normalizeOptional(params.bootstrapBundleUri),
-      bootstrapBundleChecksum: normalizeOptional(params.bootstrapBundleChecksum),
-      bootstrapBundleSchemaVersion: normalizeOptional(params.bootstrapBundleSchemaVersion),
-      provisioningStatus: "provisioning",
-      bootstrapStatus: params.bootstrapBundleUri ? "pending" : "not_started",
-      lastProvisioningError: null,
-      managedWorkspaceId,
-    },
-    create: {
-      label: params.label,
-      url,
-      environment: "production",
-      customerSlug,
-      region: params.region,
-      dataResidency: params.dataResidency,
-      customDomain: normalizeOptional(params.customDomain),
-      supportOwnerEmail: normalizeOptional(params.supportOwnerEmail),
-      releaseVersion: normalizeOptional(params.releaseVersion),
-      releaseImageTag: params.releaseImageTag,
-      storageBucketName: normalizeOptional(params.storageBucketName),
-      bootstrapBundleUri: normalizeOptional(params.bootstrapBundleUri),
-      bootstrapBundleChecksum: normalizeOptional(params.bootstrapBundleChecksum),
-      bootstrapBundleSchemaVersion: normalizeOptional(params.bootstrapBundleSchemaVersion),
-      provisioningStatus: "provisioning",
-      bootstrapStatus: params.bootstrapBundleUri ? "pending" : "not_started",
-      managedWorkspaceId,
-    },
+  const { deployment: instance } = await registerCustomerDeployment({
+    accountSlug: customerSlug,
+    accountDisplayName: params.label,
+    accountStatus: "ONBOARDING",
+    managementAuthority: "CORGTEX",
+    label: params.label,
+    url,
+    environment: "production",
+    customerSlug,
+    deploymentKind: "HOSTED_DEDICATED",
+    deploymentStatus: "PROVISIONING",
+    region: params.region,
+    dataResidency: params.dataResidency,
+    customDomain: params.customDomain,
+    supportOwnerEmail: params.supportOwnerEmail,
+    releaseVersion: params.releaseVersion,
+    releaseImageTag: params.releaseImageTag,
+    storageBucketName: params.storageBucketName,
+    bootstrapBundleUri: params.bootstrapBundleUri,
+    bootstrapBundleChecksum: params.bootstrapBundleChecksum,
+    bootstrapBundleSchemaVersion: params.bootstrapBundleSchemaVersion,
+    provisioningStatus: "provisioning",
+    bootstrapStatus: params.bootstrapBundleUri ? "pending" : "not_started",
+    managedWorkspaceId,
+    primary: true,
   });
 
   await recordHostedInstanceEvent(actor, instance.id, "hosted_instance.provisioning_started", {
@@ -686,6 +700,7 @@ export async function provisionHostedCustomerInstance(actor: AppActor, params: {
         railwayRedisServiceId: result.redisServiceId,
         customDomain: result.webDomain ?? normalizeOptional(params.customDomain),
         provisioningStatus: result.webDomain ? "awaiting_dns" : "bootstrapping",
+        deploymentStatus: "BOOTSTRAPPING",
         lastProvisioningError: null,
       },
     });
@@ -703,6 +718,7 @@ export async function provisionHostedCustomerInstance(actor: AppActor, params: {
       where: { id: instance.id },
       data: {
         provisioningStatus: "degraded",
+        deploymentStatus: "DEGRADED",
         lastProvisioningError: message,
       },
     });

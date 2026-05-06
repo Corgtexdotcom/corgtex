@@ -229,9 +229,13 @@ export default async function ControlPlanePage({
                             : t("status.never")}
                       </td>
                       <td style={{ padding: 14 }}>
-                        <Link className="link-button small" href={`/control-plane/customers/${customer.id}`}>
-                          {t("customers.open")}
-                        </Link>
+                        {customer.hasDeployment ? (
+                          <Link className="link-button small" href={`/control-plane/customers/${customer.id}`}>
+                            {t("customers.open")}
+                          </Link>
+                        ) : (
+                          <span className="muted">{t("customers.needsDeployment")}</span>
+                        )}
                       </td>
                     </tr>
                   );

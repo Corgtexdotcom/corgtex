@@ -65,6 +65,23 @@ const managedWorkspaceSelect = {
   },
 } satisfies Prisma.WorkspaceSelect;
 
+const controlPlaneDeploymentInclude = {
+  supportOperations: {
+    orderBy: { createdAt: "desc" },
+    take: 3,
+  },
+  managedWorkspace: {
+    select: managedWorkspaceSelect,
+  },
+  fleetSnapshots: {
+    orderBy: { createdAt: "desc" },
+    take: 6,
+  },
+  _count: {
+    select: { supportOperations: true, events: true },
+  },
+} satisfies Prisma.InstanceRegistryInclude;
+
 function decimalToString(value: unknown) {
   if (!value) return null;
   return typeof value === "object" && "toString" in value ? String(value.toString()) : String(value);
@@ -72,6 +89,32 @@ function decimalToString(value: unknown) {
 
 function actorUserId(actor: AppActor) {
   return actor.kind === "user" ? actor.user.id : null;
+}
+
+function customerAccountSummary(account: {
+  id: string;
+  slug: string;
+  displayName: string;
+  status: string;
+  managementAuthority: string;
+  supportOwnerEmail: string | null;
+  notes: string | null;
+  primaryDeploymentId: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}) {
+  return {
+    id: account.id,
+    slug: account.slug,
+    displayName: account.displayName,
+    status: account.status,
+    managementAuthority: account.managementAuthority,
+    supportOwnerEmail: account.supportOwnerEmail,
+    notes: account.notes,
+    primaryDeploymentId: account.primaryDeploymentId,
+    createdAt: account.createdAt,
+    updatedAt: account.updatedAt,
+  };
 }
 
 function isControlPlaneAgent(actor: AppActor): actor is AgentActor & { authProvider: "control-plane" } {
@@ -290,27 +333,113 @@ export async function requireControlPlaneAccess(actor: AppActor, params: { insta
 export async function listControlPlaneCustomers(actor: AppActor) {
   await requireControlPlaneAccess(actor);
 
-  const instances = await prisma.instanceRegistry.findMany({
+  const accounts = await prisma.customerAccount.findMany({
     orderBy: { createdAt: "desc" },
     include: {
-      supportOperations: {
+      primaryDeployment: {
+        include: controlPlaneDeploymentInclude,
+      },
+      deployments: {
         orderBy: { createdAt: "desc" },
-        take: 3,
+        take: 5,
+        include: controlPlaneDeploymentInclude,
       },
-      managedWorkspace: {
-        select: managedWorkspaceSelect,
-      },
-      _count: {
-        select: { supportOperations: true, events: true },
+      fleetSnapshots: {
+        orderBy: { createdAt: "desc" },
+        take: 6,
       },
     },
   });
+  const accountRows = accounts.map((account) => {
+    const accountSummary = customerAccountSummary(account);
+    const deployment = account.primaryDeployment
+      ?? account.deployments.find((candidate) => candidate.deploymentStatus === "ACTIVE")
+      ?? account.deployments[0]
+      ?? null;
+    if (!deployment) {
+      return {
+        id: account.id,
+        label: account.displayName,
+        url: "",
+        environment: "production",
+        notes: account.notes,
+        customerSlug: account.slug,
+        customerAccountId: account.id,
+        customerAccount: accountSummary,
+        hasDeployment: false,
+        deploymentKind: null,
+        deploymentStatus: "DRAFT" as const,
+        remoteWorkspaceSlug: null,
+        remoteWorkspaceId: null,
+        region: null,
+        dataResidency: null,
+        customDomain: null,
+        supportOwnerEmail: account.supportOwnerEmail,
+        provisioningStatus: "draft",
+        bootstrapStatus: "not_started",
+        releaseVersion: null,
+        releaseImageTag: null,
+        railwayProjectId: null,
+        railwayEnvironmentId: null,
+        railwayWebServiceId: null,
+        railwayWorkerServiceId: null,
+        railwayPostgresServiceId: null,
+        railwayRedisServiceId: null,
+        storageBucketName: null,
+        bootstrapBundleUri: null,
+        bootstrapBundleChecksum: null,
+        bootstrapBundleSchemaVersion: null,
+        lastProvisioningError: null,
+        lastHealthCheck: null,
+        lastHealthStatus: null,
+        lastHealthError: null,
+        lastWorkerHealthCheck: null,
+        lastWorkerHealthStatus: null,
+        lastReleaseCheck: null,
+        supportBaseUrl: null,
+        supportMcpUrl: null,
+        supportCredentialLabel: null,
+        supportConnectorStatus: "not_configured",
+        supportAccessMode: "broad",
+        supportLastConnectedAt: null,
+        supportLastSyncAt: null,
+        supportLastSyncError: null,
+        supportNotes: null,
+        managedWorkspaceId: null,
+        managedWorkspace: null,
+        supportOperations: [],
+        fleetSnapshots: account.fleetSnapshots,
+        hasSupportCredential: false,
+        supportCredentialEnc: undefined,
+        createdAt: account.createdAt,
+        updatedAt: account.updatedAt,
+        _count: { supportOperations: 0, events: 0 },
+      };
+    }
+    return {
+      ...deployment,
+      customerAccount: accountSummary,
+      customerAccountId: account.id,
+      hasDeployment: true,
+      hasSupportCredential: Boolean(deployment.supportCredentialEnc),
+      supportCredentialEnc: undefined,
+    };
+  });
 
-  return instances.map((instance) => ({
+  const orphanedDeployments = await prisma.instanceRegistry.findMany({
+    where: { customerAccountId: null },
+    orderBy: { createdAt: "desc" },
+    include: controlPlaneDeploymentInclude,
+  });
+
+  const orphanedRows = orphanedDeployments.map((instance) => ({
     ...instance,
+    hasDeployment: true,
     hasSupportCredential: Boolean(instance.supportCredentialEnc),
     supportCredentialEnc: undefined,
   }));
+
+  return [...accountRows, ...orphanedRows];
 }
 
 export async function getControlPlaneCustomer(actor: AppActor, instanceId: string) {
@@ -331,6 +460,11 @@ export async function getControlPlaneCustomer(actor: AppActor, instanceId: strin
         where: { isActive: true },
         include: { user: { select: { id: true, email: true, displayName: true } } },
         orderBy: { createdAt: "desc" },
+      },
+      customerAccount: true,
+      fleetSnapshots: {
+        orderBy: { createdAt: "desc" },
+        take: 12,
       },
       managedWorkspace: {
         select: managedWorkspaceSelect,

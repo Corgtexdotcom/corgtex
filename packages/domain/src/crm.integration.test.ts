@@ -95,6 +95,12 @@ describe("CRM Integration Lifecycle", () => {
       include: { targetWorkspace: true },
     });
     expect(prospectWorkspace?.targetWorkspace).toBeDefined();
+    const customerAccount = await prisma.customerAccount.findUnique({
+      where: { slug: prospectWorkspace!.targetWorkspace.slug },
+      include: { primaryDeployment: true },
+    });
+    expect(customerAccount?.status).toBe("PROSPECT");
+    expect(customerAccount?.primaryDeployment?.managedWorkspaceId).toBe(prospectWorkspace?.targetWorkspaceId);
   });
 
   it("handles the reject flow correctly", async () => {

@@ -47,6 +47,14 @@ vi.mock("@corgtex/shared", async (importOriginal) => {
       workspace: {
         create: vi.fn(),
       },
+      customerAccount: {
+        upsert: vi.fn(),
+        findUnique: vi.fn(),
+        update: vi.fn(),
+      },
+      instanceRegistry: {
+        upsert: vi.fn(),
+      },
       $transaction: vi.fn((fn: any) =>
         fn({
           crmQualification: {
@@ -55,7 +63,15 @@ vi.mock("@corgtex/shared", async (importOriginal) => {
           },
           workspace: {
             upsert: vi.fn().mockResolvedValue({ id: "ws-1", slug: "corgtex", name: "Corgtex" }),
-            create: vi.fn().mockResolvedValue({ id: "ws-new", name: "Demo Workspace" }),
+            create: vi.fn().mockResolvedValue({ id: "ws-new", name: "Demo Workspace", slug: "demo-123" }),
+          },
+          customerAccount: {
+            upsert: vi.fn().mockResolvedValue({ id: "cust-1", slug: "demo-123", primaryDeploymentId: null }),
+            findUnique: vi.fn().mockResolvedValue({ id: "cust-1", primaryDeploymentId: null }),
+            update: vi.fn().mockResolvedValue({ id: "cust-1", primaryDeploymentId: "inst-1" }),
+          },
+          instanceRegistry: {
+            upsert: vi.fn().mockResolvedValue({ id: "inst-1", customerSlug: "demo-123" }),
           },
           demoLead: {
             upsert: vi.fn().mockResolvedValue({
