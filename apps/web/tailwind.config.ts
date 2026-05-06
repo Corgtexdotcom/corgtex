@@ -47,6 +47,7 @@ const config: Config = {
       },
       fontFamily: {
         playfair: ['var(--font-playfair)', 'serif'],
+        document: ['var(--font-document)', 'Georgia', 'serif'],
         inter: ['var(--font-inter)', 'sans-serif'],
         montserrat: ['var(--font-montserrat)', 'sans-serif'],
       }

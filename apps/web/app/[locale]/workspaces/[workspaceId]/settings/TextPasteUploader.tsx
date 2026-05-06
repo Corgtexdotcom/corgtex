@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
+import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 
 const SOURCE_TYPES = ["MEETING","TICKET","PR","RFC","INCIDENT","SLACK","CUSTOMER_FEEDBACK","COMPETITOR","RESEARCH","ARTICLE","DOC","RUNBOOK","EMAIL","FILE_UPLOAD"];
 
@@ -120,7 +121,13 @@ export function TextPasteUploader({ workspaceId }: { workspaceId: string }) {
 
       <label>
         {t("labelIngestionGuidance")}
-        <textarea value={ingestionGuidanceMd} onChange={e => setIngestionGuidanceMd(e.target.value)} rows={3} placeholder={t("placeholderIngestionGuidance")} />
+        <MarkdownEditor
+          name="ingestionGuidanceMd"
+          value={ingestionGuidanceMd}
+          onValueChange={setIngestionGuidanceMd}
+          rows={3}
+          placeholder={t("placeholderIngestionGuidance")}
+        />
       </label>
       
       <div style={{ marginTop: 8 }}>

@@ -13,6 +13,8 @@ import { requirePageActor } from "@/lib/auth";
 import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
 import { GoalProgress } from "./GoalProgress";
 import { RecognitionCard } from "./RecognitionCard";
+import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
+import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
 import {
   addKeyResultFormAction,
   archiveGoalFormAction,
@@ -114,7 +116,7 @@ export default async function GoalsPage({
               </label>
               <label>
                 {t("formDescription")}
-                <textarea name="descriptionMd" />
+                <MarkdownEditor name="descriptionMd" rows={4} />
               </label>
               <div className="actions-inline">
                 <label style={{ flex: 1 }}>
@@ -366,7 +368,9 @@ function GoalNodeInner({
                 {goal.circle?.name ? `[${goal.circle.name}] ` : ""}{goal.title}
               </h3>
             </div>
-            {goal.descriptionMd && <div className="text-sm text-muted mt-1 whitespace-pre-wrap">{goal.descriptionMd}</div>}
+            {goal.descriptionMd && (
+              <MarkdownRenderer markdown={goal.descriptionMd} variant="compact" className="text-sm text-muted mt-1" />
+            )}
             {goal.ownerMember && (
               <div className="text-sm text-muted flex items-center gap-1.5 mb-2 mt-2">
                 {goal.ownerMember.user?.avatarUrl ? (
@@ -458,7 +462,7 @@ function GoalNodeInner({
               </label>
               <label>
                 {t("formDescription")}
-                <textarea name="descriptionMd" defaultValue={goal.descriptionMd ?? ""} />
+                <MarkdownEditor name="descriptionMd" defaultValue={goal.descriptionMd ?? ""} rows={4} />
               </label>
               <div className="actions-inline">
                 <label style={{ flex: 1 }}>

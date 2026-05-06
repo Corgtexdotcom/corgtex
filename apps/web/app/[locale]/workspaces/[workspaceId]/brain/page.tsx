@@ -3,6 +3,8 @@ import { answerKnowledgeQuestion, searchIndexedKnowledge } from "@corgtex/knowle
 import { requirePageActor } from "@/lib/auth";
 import { createArticleAction, publishArticleAction, returnArticleToDraftAction } from "./actions";
 import { getTranslations } from "next-intl/server";
+import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
+import { MarkdownExcerpt } from "@/lib/components/MarkdownRenderer";
 
 export const dynamic = "force-dynamic";
 
@@ -152,7 +154,7 @@ export default async function BrainPage({
                       </a>
                       {a.authority === "AUTHORITATIVE" && <span style={{ fontSize: "0.6rem", padding: "1px 4px", background: "var(--accent)", color: "var(--accent-fg)", borderRadius: "2px", marginLeft: "6px", verticalAlign: "middle" }}>{t("core")}</span>}
                       {a.authority === "DRAFT" && <span style={{ fontSize: "0.6rem", padding: "1px 4px", background: "var(--warning-soft)", color: "var(--warning)", borderRadius: "2px", marginLeft: "6px", verticalAlign: "middle" }}>{t("draft")}</span>}
-                      <div style={{ fontSize: "0.8rem", color: "var(--muted)", marginTop: "2px" }}>{a.bodyMd.replace(/[#*]/g, '').slice(0, 80)}...</div>
+                      <MarkdownExcerpt markdown={a.bodyMd} maxLength={100} as="div" className="nr-item-meta" />
                       {canManage && (
                         <div className="actions-inline" style={{ marginTop: 6 }}>
                           {a.isPrivate && a.authority === "DRAFT" && (
@@ -240,7 +242,7 @@ export default async function BrainPage({
                   <option value="AUTHORITATIVE">{t("authorityAuthoritative")}</option>
                 </select>
               </div>
-              <textarea name="bodyMd" required placeholder={t("bodyMd")} rows={4} style={{ padding: "8px", fontSize: "0.85rem", border: "1px solid var(--line)", borderRadius: "4px", fontFamily: "monospace" }} />
+              <MarkdownEditor name="bodyMd" required placeholder={t("bodyMd")} rows={5} />
               <label style={{ display: "flex", alignItems: "center", gap: "8px", fontWeight: "normal", cursor: "pointer", fontSize: "0.85rem" }}>
                 <input type="checkbox" name="isPrivate" defaultChecked />
                 <span>{t("privateDraftOnlyMe")}</span>

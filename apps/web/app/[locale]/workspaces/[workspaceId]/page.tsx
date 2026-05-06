@@ -14,6 +14,7 @@ import { RecognitionCard } from "./goals/RecognitionCard";
 import { getTranslations, getFormatter } from "next-intl/server";
 import { getDashboardAttentionCounts } from "@/lib/dashboard-attention";
 import { getWorkspaceCapabilities } from "@/lib/workspace-capabilities";
+import { MarkdownExcerpt } from "@/lib/components/MarkdownRenderer";
 
 export const dynamic = "force-dynamic";
 
@@ -269,7 +270,7 @@ export default async function WorkspaceDashboard({
                       </div>
                       {n.bodyMd && (
                         <div style={{ fontSize: "0.75rem", color: "var(--muted)", marginTop: 2, lineHeight: 1.3 }}>
-                          {n.bodyMd.replace(/\*\*/g, "").slice(0, 100)}
+                          <MarkdownExcerpt markdown={n.bodyMd} maxLength={100} />
                         </div>
                       )}
                     </div>
@@ -305,7 +306,7 @@ export default async function WorkspaceDashboard({
               <div className="nr-meta">{featuredArticle.type} · {t("updated")} <span suppressHydrationWarning>{ageText(featuredArticle.updatedAt)}</span></div>
               <Link href={`/workspaces/${workspaceId}/brain/${featuredArticle.slug}`} style={{ textDecoration: "none" }}>
                 <h3 className="nr-lead-headline">{featuredArticle.title}</h3>
-                <p className="nr-excerpt">{featuredArticle.bodyMd.replace(/[#*`_]/g, '').slice(0, 200)}...</p>
+                <MarkdownExcerpt markdown={featuredArticle.bodyMd} maxLength={220} as="p" className="nr-excerpt" />
                 <span className="nr-link">{t("readFullArticle")}</span>
               </Link>
             </div>
@@ -316,7 +317,7 @@ export default async function WorkspaceDashboard({
                 <div className="nr-meta" style={{ marginBottom: "4px" }}>{a.type}</div>
                 <Link href={`/workspaces/${workspaceId}/brain/${a.slug}`} style={{ textDecoration: "none" }}>
                   <h4 className="nr-secondary-headline" style={{ fontSize: "1.2rem", marginBottom: "6px" }}>{a.title}</h4>
-                  <p className="nr-excerpt" style={{ fontSize: "0.9rem", margin: 0 }}>{a.bodyMd.replace(/[#*]/g, '').slice(0, 120)}...</p>
+                  <MarkdownExcerpt markdown={a.bodyMd} maxLength={140} as="p" className="nr-excerpt" />
                 </Link>
               </div>
             ))}
@@ -331,7 +332,7 @@ export default async function WorkspaceDashboard({
              <div key={meeting.id} className="nr-item">
                <div className="nr-item-title">{meeting.title || `${meeting.source} ${t("meeting")}`}</div>
                <div className="nr-item-meta" suppressHydrationWarning>{format.dateTime(new Date(meeting.recordedAt), { month: "short", day: "numeric", year: "numeric" })}</div>
-               {meeting.summaryMd && <div style={{ fontSize: "0.85rem", marginTop: "6px", lineHeight: 1.4, color: "var(--text-muted)" }}>{meeting.summaryMd.slice(0, 100)}...</div>}
+               {meeting.summaryMd && <MarkdownExcerpt markdown={meeting.summaryMd} maxLength={120} as="div" className="nr-item-meta" />}
              </div>
            ))}
            <div style={{ marginTop: "16px" }}>
