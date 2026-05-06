@@ -12,6 +12,35 @@ import MeetingIntelligence from "./MeetingIntelligence";
 
 export const dynamic = "force-dynamic";
 
+function getMeetingProcessingStatus(meeting: NonNullable<Awaited<ReturnType<typeof getMeeting>>>) {
+  if (!meeting.transcript) return null;
+
+  const reviewCount = meeting.insights.filter((insight) => insight.status === "SUGGESTED" || insight.status === "CONFIRMED").length;
+  if (meeting.aiProcessedAt) {
+    return {
+      className: "complete",
+      labelKey: "processingStatusComplete",
+      descriptionKey: reviewCount > 0 ? "processingStatusCompleteWithReview" : "processingStatusCompleteDescription",
+      reviewCount,
+    } as const;
+  }
+
+  if (meeting.summaryMd || meeting.insights.length > 0) {
+    return {
+      className: "processing",
+      labelKey: "processingStatusProcessing",
+      descriptionKey: "processingStatusProcessingDescription",
+      reviewCount,
+    } as const;
+  }
+
+  return {
+    className: "queued",
+    labelKey: "processingStatusQueued",
+    descriptionKey: "processingStatusQueuedDescription",
+    reviewCount,
+  } as const;
+}
 
 export default async function MeetingDetailPage({
   params,
@@ -57,6 +86,7 @@ export default async function MeetingDetailPage({
   const participants = meeting.participantIds?.length > 0 
     ? await getMeetingParticipants(workspaceId, meeting.participantIds)
     : [];
+  const processingStatus = getMeetingProcessingStatus(meeting);
 
   return (
     <>
@@ -75,6 +105,18 @@ export default async function MeetingDetailPage({
           <span>{format.dateTime(meeting.recordedAt, { dateStyle: "medium", timeStyle: "short" })}</span>
         </div>
       </header>
+
+      {processingStatus && (
+        <section className={`meeting-processing-status ${processingStatus.className}`} style={{ marginBottom: 32 }}>
+          <div>
+            <span className="meeting-processing-status-label">
+              <span className="meeting-processing-status-dot" aria-hidden="true" />
+              {t(processingStatus.labelKey)}
+            </span>
+            <p>{t(processingStatus.descriptionKey, { count: processingStatus.reviewCount })}</p>
+          </div>
+        </section>
+      )}
       
       {participants.length > 0 && (
         <section className="ws-section" style={{ marginBottom: 48 }}>
