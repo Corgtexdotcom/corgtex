@@ -3,6 +3,7 @@
 import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
+import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
 
 type BuildArtifactAsset = {
@@ -404,7 +405,7 @@ export function BuiltArtifactsClient({
             </div>
             <label>
               {t("caption")}
-              <textarea name="captionMd" rows={3} placeholder={t("captionPlaceholder")} />
+              <MarkdownEditor name="captionMd" rows={3} placeholder={t("captionPlaceholder")} />
             </label>
             <div className="actions-inline">
               <button type="submit" disabled={uploadingId === artifact.id}>

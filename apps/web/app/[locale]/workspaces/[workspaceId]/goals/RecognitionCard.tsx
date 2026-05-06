@@ -1,5 +1,6 @@
 import React from"react";
 import { useTranslations } from "next-intl";
+import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
 
 export function RecognitionCard({ recognition }: { recognition: any }) {
  const t = useTranslations("goals");
@@ -14,9 +15,7 @@ export function RecognitionCard({ recognition }: { recognition: any }) {
  <span className="font-medium text-text ml-1">{recipient}</span>
  </div>
  <h4 className="text-lg font-semibold text-text mb-2">{recognition.title}</h4>
- <div className="text-text leading-relaxed mb-4 whitespace-pre-wrap">
- {recognition.storyMd}
- </div>
+ <MarkdownRenderer markdown={recognition.storyMd} variant="compact" className="text-text mb-4" />
  {recognition.valueTags && recognition.valueTags.length > 0 && (
  <div className="flex flex-wrap gap-2 mt-4 pt-4 border-t border-line-subtle">
  {recognition.valueTags.map((tag: string, idx: number) => (
