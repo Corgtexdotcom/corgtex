@@ -13,11 +13,36 @@ vi.mock("./auth", () => ({
 }));
 
 vi.mock("@corgtex/shared", () => ({
+  env: {
+    APP_URL: "https://app.test",
+  },
   prisma: {
     workspace: {
       findMany: vi.fn().mockResolvedValue([]),
       findUnique: vi.fn().mockResolvedValue(null),
+      findFirst: vi.fn().mockResolvedValue({
+        id: "ws_new",
+        slug: "new-ws",
+        name: "New WS",
+        description: null,
+      }),
       count: vi.fn().mockResolvedValue(0),
+    },
+    customerAccount: {
+      upsert: vi.fn().mockResolvedValue({
+        id: "cust_1",
+        slug: "acme",
+        displayName: "Acme",
+        primaryDeploymentId: null,
+      }),
+      findUnique: vi.fn().mockResolvedValue({
+        id: "cust_1",
+        primaryDeploymentId: null,
+      }),
+      update: vi.fn().mockResolvedValue({
+        id: "cust_1",
+        primaryDeploymentId: "inst_1",
+      }),
     },
     user: {
       findMany: vi.fn().mockResolvedValue([]),
@@ -413,7 +438,17 @@ describe("Platform Admin Tools", () => {
     (prisma.workspace.findUnique as any).mockResolvedValueOnce({
       id: "ws_acme",
     });
-    (prisma.instanceRegistry.create as any).mockResolvedValue({
+    (prisma.customerAccount.upsert as any).mockResolvedValueOnce({
+      id: "cust_acme",
+      slug: "acme",
+      displayName: "Acme",
+      primaryDeploymentId: null,
+    });
+    (prisma.customerAccount.findUnique as any).mockResolvedValueOnce({
+      id: "cust_acme",
+      primaryDeploymentId: null,
+    });
+    (prisma.instanceRegistry.upsert as any).mockResolvedValueOnce({
       id: "inst_new",
       customerSlug: "acme",
       region: "eu-west4",
@@ -433,17 +468,36 @@ describe("Platform Admin Tools", () => {
     });
 
     expect(requireGlobalOperator).toHaveBeenCalledWith(dummyActor);
-    expect(prisma.instanceRegistry.create).toHaveBeenCalledWith({
-      data: expect.objectContaining({
+    expect(prisma.customerAccount.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: { slug: "acme" },
+      create: expect.objectContaining({
+        slug: "acme",
+        displayName: "Acme",
+        status: "ACTIVE",
+        managementAuthority: "CORGTEX",
+      }),
+    }));
+    expect(prisma.instanceRegistry.upsert).toHaveBeenCalledWith({
+      where: { customerSlug: "acme" },
+      update: expect.objectContaining({
         label: "Acme",
         url: "https://acme.corgtex.com",
         environment: "staging",
         notes: "Test note",
         customerSlug: "acme",
+        customerAccountId: "cust_acme",
+        deploymentKind: "SHARED_WORKSPACE",
+        deploymentStatus: "ACTIVE",
         managedWorkspaceId: "ws_acme",
         region: "eu-west4",
         releaseImageTag: "sha-1",
         storageBucketName: "customer-bucket",
+      }),
+      create: expect.objectContaining({
+        customerSlug: "acme",
+        customerAccountId: "cust_acme",
+        deploymentKind: "SHARED_WORKSPACE",
+        deploymentStatus: "ACTIVE",
       }),
     });
     expect(prisma.hostedInstanceEvent.create).toHaveBeenCalledWith({
@@ -896,7 +950,7 @@ describe("Platform Admin Tools", () => {
 
     expect(prisma.instanceRegistry.update).toHaveBeenCalledWith({
       where: { id: "inst_1" },
-      data: { provisioningStatus: "suspended" },
+      data: { provisioningStatus: "suspended", deploymentStatus: "SUSPENDED" },
     });
     expect(prisma.hostedInstanceEvent.create).toHaveBeenCalledWith({
       data: expect.objectContaining({

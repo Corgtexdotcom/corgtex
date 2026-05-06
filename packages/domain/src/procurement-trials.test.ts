@@ -27,6 +27,14 @@ const {
       findUnique: vi.fn(),
       create: vi.fn(),
     },
+    customerAccount: {
+      upsert: vi.fn(),
+      findUnique: vi.fn(),
+      update: vi.fn(),
+    },
+    instanceRegistry: {
+      upsert: vi.fn(),
+    },
     approvalPolicy: {
       createMany: vi.fn(),
     },
@@ -128,6 +136,10 @@ describe("procurement trials", () => {
     prismaMock.procurementTrial.updateMany.mockResolvedValue({ count: 0 });
     prismaMock.workspace.findUnique.mockResolvedValue(null);
     prismaMock.workspace.create.mockResolvedValue({ id: "ws-1", name: "Acme", slug: "acme" });
+    prismaMock.customerAccount.upsert.mockResolvedValue({ id: "cust-1", slug: "acme", primaryDeploymentId: null });
+    prismaMock.customerAccount.findUnique.mockResolvedValue({ id: "cust-1", primaryDeploymentId: null });
+    prismaMock.customerAccount.update.mockResolvedValue({ id: "cust-1", primaryDeploymentId: "inst-1" });
+    prismaMock.instanceRegistry.upsert.mockResolvedValue({ id: "inst-1", customerSlug: "acme" });
     prismaMock.approvalPolicy.createMany.mockResolvedValue({ count: 2 });
     prismaMock.user.upsert.mockResolvedValue({ id: "user-admin", email: "admin@acme.test", displayName: "Admin" });
     prismaMock.member.upsert.mockResolvedValue({ id: "member-admin", role: "ADMIN" });
@@ -176,6 +188,24 @@ describe("procurement trials", () => {
     }));
     expect(prismaMock.modelUsageBudget.upsert).toHaveBeenCalledWith(expect.objectContaining({
       create: expect.objectContaining({ monthlyCostCapUsd: 5 }),
+    }));
+    expect(prismaMock.customerAccount.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: { slug: "acme" },
+      create: expect.objectContaining({
+        slug: "acme",
+        displayName: "Acme",
+        status: "TRIAL",
+        managementAuthority: "CORGTEX",
+      }),
+    }));
+    expect(prismaMock.instanceRegistry.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: { customerSlug: "acme" },
+      create: expect.objectContaining({
+        customerAccountId: "cust-1",
+        deploymentKind: "SHARED_WORKSPACE",
+        deploymentStatus: "ACTIVE",
+        managedWorkspaceId: "ws-1",
+      }),
     }));
     const idempotencyCreate = prismaMock.procurementIdempotencyKey.create.mock.calls[0][0];
     expect(JSON.stringify(idempotencyCreate.data.responseJson)).not.toContain("agentc-credential-secret");

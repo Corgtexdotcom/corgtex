@@ -1255,6 +1255,7 @@
       },
       "noOwner": "Sin responsable",
       "open": "Abrir",
+      "needsDeployment": "Necesita despliegue",
       "empty": "Ninguna instancia de cliente coincide con esta búsqueda."
     },
     "operationHistory": {

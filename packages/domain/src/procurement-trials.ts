@@ -2,6 +2,7 @@ import type { MemberRole, Prisma } from "@prisma/client";
 import {
   decryptSecret,
   encryptSecret,
+  env,
   hashPassword,
   prisma,
   randomOpaqueToken,
@@ -18,6 +19,7 @@ import {
   TRIAL_STATUS_EXPIRED,
   TRIAL_STATUS_CONVERTED,
 } from "./trial-entitlements";
+import { registerCustomerDeployment } from "./customer-lifecycle";
 
 export const PROCUREMENT_TRIAL_TTL_DAYS = 14;
 export const PROCUREMENT_TRIAL_LIMITS = {
@@ -676,6 +678,22 @@ async function createActiveTrial(params: {
         slug: true,
       },
     });
+
+    await registerCustomerDeployment({
+      accountSlug: workspace.slug,
+      accountDisplayName: workspace.name,
+      accountStatus: "TRIAL",
+      managementAuthority: "CORGTEX",
+      label: workspace.name,
+      url: workspaceUrl(params.origin ?? env.APP_URL, workspace.id),
+      environment: "production",
+      notes: `Procurement trial workspace for ${params.normalized.companyName}.`,
+      deploymentKind: "SHARED_WORKSPACE",
+      deploymentStatus: "ACTIVE",
+      customerSlug: workspace.slug,
+      managedWorkspaceId: workspace.id,
+      primary: true,
+    }, tx);
 
     await tx.approvalPolicy.createMany({
       data: [

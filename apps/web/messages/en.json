@@ -1255,6 +1255,7 @@
       },
       "noOwner": "No owner",
       "open": "Open",
+      "needsDeployment": "Needs deployment",
       "empty": "No customer instances match this search."
     },
     "operationHistory": {

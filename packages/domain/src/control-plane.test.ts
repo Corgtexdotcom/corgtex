@@ -13,6 +13,9 @@ const { prismaMock, encryptSecretMock, decryptSecretMock } = vi.hoisted(() => ({
       create: vi.fn(),
       findMany: vi.fn(),
     },
+    customerAccount: {
+      findMany: vi.fn(),
+    },
     instanceRegistry: {
       findMany: vi.fn(),
       findUnique: vi.fn(),
@@ -107,6 +110,8 @@ describe("control plane domain", () => {
         },
       }),
     })) as any;
+    prismaMock.customerAccount.findMany.mockResolvedValue([]);
+    prismaMock.instanceRegistry.findMany.mockResolvedValue([]);
   });
 
   it("allows global operators and rejects normal users without instance access", async () => {
@@ -182,39 +187,56 @@ describe("control plane domain", () => {
 
   it("lists customers with managed workspace summaries and redacted credentials", async () => {
     const { listControlPlaneCustomers } = await import("./control-plane");
-    prismaMock.instanceRegistry.findMany.mockResolvedValueOnce([
+    prismaMock.customerAccount.findMany.mockResolvedValueOnce([
       {
-        id: "inst-1",
-        label: "Acme",
-        url: "https://acme.test",
-        supportCredentialEnc: "encrypted-token",
-        supportOperations: [],
-        managedWorkspace: {
-          id: "ws-1",
-          slug: "acme",
-          name: "Acme",
-          _count: {
-            externalDataSources: 2,
-            brainArticles: 12,
-            agentRuns: 5,
-            workflowJobs: 7,
-            communicationInstallations: 1,
-            meetingRecordings: 3,
+        id: "cust-1",
+        slug: "acme",
+        displayName: "Acme",
+        status: "ACTIVE",
+        managementAuthority: "CORGTEX",
+        supportOwnerEmail: null,
+        notes: null,
+        primaryDeploymentId: "inst-1",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        fleetSnapshots: [],
+        deployments: [],
+        primaryDeployment: {
+          id: "inst-1",
+          label: "Acme",
+          url: "https://acme.test",
+          supportCredentialEnc: "encrypted-token",
+          supportOperations: [],
+          fleetSnapshots: [],
+          managedWorkspace: {
+            id: "ws-1",
+            slug: "acme",
+            name: "Acme",
+            _count: {
+              externalDataSources: 2,
+              brainArticles: 12,
+              agentRuns: 5,
+              workflowJobs: 7,
+              communicationInstallations: 1,
+              meetingRecordings: 3,
+            },
           },
+          _count: { supportOperations: 0, events: 0 },
         },
-        _count: { supportOperations: 0, events: 0 },
       },
     ] as any);
+    prismaMock.instanceRegistry.findMany.mockResolvedValueOnce([]);
 
     const result = await listControlPlaneCustomers(operatorActor);
 
-    expect(prismaMock.instanceRegistry.findMany).toHaveBeenCalledWith(expect.objectContaining({
+    expect(prismaMock.customerAccount.findMany).toHaveBeenCalledWith(expect.objectContaining({
       include: expect.objectContaining({
-        managedWorkspace: expect.any(Object),
+        primaryDeployment: expect.any(Object),
       }),
     }));
     expect(result[0]).toMatchObject({
       id: "inst-1",
+      customerAccountId: "cust-1",
       hasSupportCredential: true,
       managedWorkspace: {
         slug: "acme",
@@ -222,6 +244,39 @@ describe("control plane domain", () => {
       },
     });
     expect(result[0].supportCredentialEnc).toBeUndefined();
+  });
+
+  it("lists customer accounts that still need a deployment", async () => {
+    const { listControlPlaneCustomers } = await import("./control-plane");
+    prismaMock.customerAccount.findMany.mockResolvedValueOnce([
+      {
+        id: "cust-2",
+        slug: "future-co",
+        displayName: "Future Co",
+        status: "ONBOARDING",
+        managementAuthority: "CORGTEX",
+        supportOwnerEmail: "ops@corgtex.com",
+        notes: null,
+        primaryDeploymentId: null,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        fleetSnapshots: [],
+        deployments: [],
+        primaryDeployment: null,
+      },
+    ] as any);
+    prismaMock.instanceRegistry.findMany.mockResolvedValueOnce([]);
+
+    const result = await listControlPlaneCustomers(operatorActor);
+
+    expect(result[0]).toMatchObject({
+      id: "cust-2",
+      customerSlug: "future-co",
+      customerAccountId: "cust-2",
+      hasDeployment: false,
+      deploymentStatus: "DRAFT",
+      supportConnectorStatus: "not_configured",
+    });
   });
 
   it("configures meeting recorder entitlements for managed workspaces and audits the reason", async () => {

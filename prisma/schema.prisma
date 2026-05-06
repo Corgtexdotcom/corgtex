@@ -313,6 +313,52 @@ enum SensitivityLabel {
   PII
 }
 
+enum CustomerAccountStatus {
+  PROSPECT
+  TRIAL
+  ONBOARDING
+  ACTIVE
+  SUSPENDED
+  CHURNED
+  INTERNAL
+  DEMO
+}
+
+enum CustomerManagementAuthority {
+  CORGTEX
+  CUSTOMER_CONTROL_PLANE
+  SELF_MANAGED
+}
+
+enum CustomerDeploymentKind {
+  SHARED_WORKSPACE
+  HOSTED_DEDICATED
+  REMOTE_MANAGED
+  SELF_HOSTED
+  CUSTOMER_CONTROL_PLANE
+  INTERNAL
+  DEMO
+}
+
+enum CustomerDeploymentStatus {
+  DRAFT
+  PROVISIONING
+  BOOTSTRAPPING
+  ACTIVE
+  DEGRADED
+  SUSPENDED
+  RETIRED
+}
+
+enum FleetSnapshotKind {
+  HEALTH
+  RELEASE
+  CONNECTOR
+  CONTEXT
+  INTEGRATION
+  SUPPORT_READY
+}
+
 model Workspace {
   id                            String                          @id @default(uuid())
   slug                          String                          @unique
@@ -2949,19 +2995,45 @@ model CrmProspectWorkspace {
   @@index([targetWorkspaceId])
 }
 
+model CustomerAccount {
+  id                  String                      @id @default(uuid())
+  slug                String                      @unique
+  displayName         String
+  status              CustomerAccountStatus       @default(PROSPECT)
+  managementAuthority CustomerManagementAuthority @default(CORGTEX)
+  supportOwnerEmail   String?
+  notes               String?
+  primaryDeploymentId String?                     @unique
+  createdAt           DateTime                    @default(now())
+  updatedAt           DateTime                    @updatedAt
+
+  deployments       InstanceRegistry[]    @relation("CustomerAccountDeployments")
+  primaryDeployment InstanceRegistry?     @relation("CustomerAccountPrimaryDeployment", fields: [primaryDeploymentId], references: [id], onDelete: SetNull)
+  fleetSnapshots    FleetHealthSnapshot[]
+
+  @@index([status])
+  @@index([managementAuthority])
+  @@index([supportOwnerEmail])
+}
+
 model InstanceRegistry {
-  id                           String    @id @default(uuid())
+  id                           String                   @id @default(uuid())
   label                        String
-  url                          String    @unique
-  environment                  String    @default("production")
+  url                          String                   @unique
+  environment                  String                   @default("production")
   notes                        String?
-  customerSlug                 String?   @unique
+  customerSlug                 String?                  @unique
+  customerAccountId            String?
+  deploymentKind               CustomerDeploymentKind   @default(REMOTE_MANAGED)
+  deploymentStatus             CustomerDeploymentStatus @default(DRAFT)
+  remoteWorkspaceSlug          String?
+  remoteWorkspaceId            String?
   region                       String?
   dataResidency                String?
   customDomain                 String?
   supportOwnerEmail            String?
-  provisioningStatus           String    @default("draft")
-  bootstrapStatus              String    @default("not_started")
+  provisioningStatus           String                   @default("draft")
+  bootstrapStatus              String                   @default("not_started")
   releaseVersion               String?
   releaseImageTag              String?
   railwayProjectId             String?
@@ -2985,25 +3057,52 @@ model InstanceRegistry {
   supportMcpUrl                String?
   supportCredentialEnc         String?
   supportCredentialLabel       String?
-  supportConnectorStatus       String    @default("not_configured")
-  supportAccessMode            String    @default("broad")
+  supportConnectorStatus       String                   @default("not_configured")
+  supportAccessMode            String                   @default("broad")
   supportLastConnectedAt       DateTime?
   supportLastSyncAt            DateTime?
   supportLastSyncError         String?
   supportNotes                 String?
-  managedWorkspaceId           String?   @unique
-  createdAt                    DateTime  @default(now())
-  updatedAt                    DateTime  @updatedAt
+  managedWorkspaceId           String?                  @unique
+  createdAt                    DateTime                 @default(now())
+  updatedAt                    DateTime                 @updatedAt
 
   events             HostedInstanceEvent[]
   controlPlaneAccess ControlPlaneInstanceAccess[]
   supportOperations  SupportOperation[]
-  managedWorkspace   Workspace?                    @relation(fields: [managedWorkspaceId], references: [id], onDelete: SetNull)
+  managedWorkspace   Workspace?                   @relation(fields: [managedWorkspaceId], references: [id], onDelete: SetNull)
+  customerAccount    CustomerAccount?             @relation("CustomerAccountDeployments", fields: [customerAccountId], references: [id], onDelete: SetNull)
+  primaryForAccount  CustomerAccount?             @relation("CustomerAccountPrimaryDeployment")
+  fleetSnapshots     FleetHealthSnapshot[]
 
+  @@index([customerAccountId])
+  @@index([deploymentKind])
+  @@index([deploymentStatus])
   @@index([provisioningStatus])
   @@index([bootstrapStatus])
   @@index([region])
+  @@index([lastHealthStatus])
   @@index([supportConnectorStatus])
+}
+
+model FleetHealthSnapshot {
+  id                String            @id @default(uuid())
+  customerAccountId String
+  deploymentId      String?
+  snapshotKind      FleetSnapshotKind
+  status            String
+  summary           Json?
+  error             String?
+  observedAt        DateTime          @default(now())
+  createdAt         DateTime          @default(now())
+
+  customerAccount CustomerAccount   @relation(fields: [customerAccountId], references: [id], onDelete: Cascade)
+  deployment      InstanceRegistry? @relation(fields: [deploymentId], references: [id], onDelete: SetNull)
+
+  @@index([customerAccountId, snapshotKind, createdAt], map: "FleetHealthSnapshot_customerAccountId_snapshotKind_createdAt_id")
+  @@index([deploymentId, snapshotKind, createdAt])
+  @@index([snapshotKind, createdAt])
+  @@index([status, createdAt])
 }
 
 model HostedInstanceEvent {

@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
-import { prisma } from "@corgtex/shared";
+import { env, prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { appendEvents } from "./events";
 import { requireWorkspaceMembership } from "./auth";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { invariant } from "./errors";
 import { CrmDealStage, CrmActivityType } from "@prisma/client";
+import { registerCustomerDeployment } from "./customer-lifecycle";
 
 const DEFAULT_DEMO_WORKSPACE = {
   slug: "corgtex",
@@ -840,6 +841,22 @@ export async function provisionProspectWorkspace(actor: AppActor, params: {
         slug: newWorkspaceSlug,
       },
     });
+
+    await registerCustomerDeployment({
+      accountSlug: targetWorkspace.slug,
+      accountDisplayName: targetWorkspace.name,
+      accountStatus: "PROSPECT",
+      managementAuthority: "CORGTEX",
+      label: targetWorkspace.name,
+      url: `${env.APP_URL.replace(/\/$/, "")}/workspaces/${targetWorkspace.id}`,
+      environment: "production",
+      notes: `CRM prospect workspace for ${lead.email}.`,
+      deploymentKind: "SHARED_WORKSPACE",
+      deploymentStatus: "ACTIVE",
+      customerSlug: targetWorkspace.slug,
+      managedWorkspaceId: targetWorkspace.id,
+      primary: true,
+    }, tx);
 
     const prospectWorkspace = await tx.crmProspectWorkspace.create({
       data: {
