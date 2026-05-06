@@ -14,13 +14,14 @@ const mocks = vi.hoisted(() => ({
   resolveControlPlaneRequestActor: vi.fn(),
 }));
 vi.mock("@corgtex/domain", () => ({
-  configureControlPlaneMeetingRecorderIntegration: vi.fn(), fetchCustomerSupportSnapshot: vi.fn(),
+  configureControlPlaneMeetingRecorderIntegration: vi.fn(), enqueueControlPlaneFleetSnapshots: vi.fn(), fetchCustomerSupportSnapshot: vi.fn(),
   getControlPlaneAiGovernanceStatus: vi.fn(), getControlPlaneContextHealth: vi.fn(),
   getControlPlaneCustomer: vi.fn(), getControlPlaneIntegrationStatus: vi.fn(), getControlPlaneReleaseStatus: vi.fn(),
   listControlPlaneCustomers: mocks.listControlPlaneCustomers,
   probeControlPlaneCustomerHealth: vi.fn(),
   requireControlPlaneAccess: mocks.requireControlPlaneAccess,
   requireControlPlaneScope: mocks.requireControlPlaneScope,
+  refreshControlPlaneFleetSnapshots: vi.fn(),
   runControlPlaneContextOperation: vi.fn(), runControlPlaneReleaseOperation: vi.fn(), runCustomerSupportOperation: vi.fn(),
 }));
 vi.mock("@/lib/auth", () => ({ resolveControlPlaneRequestActor: mocks.resolveControlPlaneRequestActor }));
@@ -41,7 +42,7 @@ describe("/api/control-plane/mcp", () => {
     const { POST } = await import("./route");
     const response = await POST(request({ jsonrpc: "2.0", id: 1, method: "tools/list" }) as never);
     const body = await response.json();
-    expect(body.result.tools.map((tool: { name: string }) => tool.name)).toEqual(["list_customers", "get_customer_status", "refresh_customer_snapshot", "list_customer_integrations", "get_context_health", "get_ai_governance_status", "get_release_status", "configure_customer_integration", "run_context_sync", "probe_customer_health", "prepare_release_upgrade", "run_customer_support_operation"]);
+    expect(body.result.tools.map((tool: { name: string }) => tool.name)).toEqual(["list_customers", "get_customer_status", "refresh_customer_snapshot", "list_customer_integrations", "get_context_health", "get_ai_governance_status", "get_release_status", "configure_customer_integration", "run_context_sync", "probe_customer_health", "refresh_fleet_snapshots", "enqueue_fleet_snapshot_jobs", "prepare_release_upgrade", "run_customer_support_operation"]);
   });
   it("denies mutating tools when the control-plane agent only has read scope", async () => {
     const { POST } = await import("./route");

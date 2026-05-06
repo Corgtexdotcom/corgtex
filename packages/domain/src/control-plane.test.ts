@@ -16,6 +16,15 @@ const { prismaMock, encryptSecretMock, decryptSecretMock } = vi.hoisted(() => ({
     customerAccount: {
       findMany: vi.fn(),
     },
+    customerEntitlement: {
+      upsert: vi.fn(),
+    },
+    customerReleaseTarget: {
+      upsert: vi.fn(),
+    },
+    fleetHealthSnapshot: {
+      create: vi.fn(),
+    },
     instanceRegistry: {
       findMany: vi.fn(),
       findUnique: vi.fn(),
@@ -284,6 +293,7 @@ describe("control plane domain", () => {
     prismaMock.instanceRegistry.findUnique.mockResolvedValueOnce({
       id: "inst-1",
       label: "Acme",
+      customerAccountId: "cust-1",
       managedWorkspaceId: "ws-1",
       supportCredentialEnc: null,
       managedWorkspace: {
@@ -305,6 +315,14 @@ describe("control plane domain", () => {
       fallbackProvider: "MEETING_BAAS",
       autoRecordEnabled: true,
       monthlyMinuteCap: 1200,
+    });
+    prismaMock.customerEntitlement.upsert.mockResolvedValueOnce({
+      id: "entitlement-1",
+      customerAccountId: "cust-1",
+      deploymentId: "inst-1",
+      entitlementKey: "MEETING_RECORDERS",
+      enabled: true,
+      status: "ENABLED",
     });
     prismaMock.workflowJob.upsert.mockResolvedValueOnce({ id: "job-1" });
 
@@ -336,6 +354,20 @@ describe("control plane domain", () => {
         monthlyMinuteCap: 1200,
       }),
     }));
+    expect(prismaMock.customerEntitlement.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        customerAccountId_scopeKey_entitlementKey: {
+          customerAccountId: "cust-1",
+          scopeKey: "deployment:inst-1",
+          entitlementKey: "MEETING_RECORDERS",
+        },
+      },
+      update: expect.objectContaining({
+        deploymentId: "inst-1",
+        enabled: true,
+        status: "ENABLED",
+      }),
+    }));
     expect(prismaMock.workflowJob.upsert).toHaveBeenCalledWith(expect.objectContaining({
       where: { dedupeKey: "meeting-recorders:reconcile:ws-1:control-plane" },
     }));
@@ -352,6 +384,10 @@ describe("control plane domain", () => {
     expect(result).toMatchObject({
       instanceId: "inst-1",
       entitlementEnabled: true,
+      entitlement: {
+        id: "entitlement-1",
+        status: "ENABLED",
+      },
     });
   });
 
@@ -625,6 +661,7 @@ describe("control plane domain", () => {
     prismaMock.instanceRegistry.findUnique.mockResolvedValue({
       id: "inst-1",
       label: "Acme",
+      customerAccountId: "cust-1",
       customerSlug: "acme",
       managedWorkspaceId: null,
       managedWorkspace: null,
@@ -678,6 +715,18 @@ describe("control plane domain", () => {
             targetDiffers: true,
           }),
         }),
+      }),
+    }));
+    expect(prismaMock.customerReleaseTarget.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        deploymentId_targetReleaseImageTag: {
+          deploymentId: "inst-1",
+          targetReleaseImageTag: "ghcr.io/corgtex/app:new",
+        },
+      },
+      update: expect.objectContaining({
+        status: "PREPARED",
+        targetReleaseVersion: "0.2.0",
       }),
     }));
     expect(prismaMock.instanceRegistry.update).not.toHaveBeenCalled();
@@ -751,6 +800,7 @@ describe("control plane domain", () => {
     prismaMock.instanceRegistry.findUnique.mockResolvedValue({
       id: "inst-1",
       label: "Acme",
+      customerAccountId: "cust-1",
       url: "https://customer.test",
       managedWorkspaceId: null,
       managedWorkspace: null,
@@ -791,6 +841,15 @@ describe("control plane domain", () => {
         lastHealthStatus: "ok",
         lastHealthError: null,
         provisioningStatus: "active",
+        deploymentStatus: "ACTIVE",
+      }),
+    }));
+    expect(prismaMock.fleetHealthSnapshot.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        customerAccountId: "cust-1",
+        deploymentId: "inst-1",
+        snapshotKind: "HEALTH",
+        status: "ok",
       }),
     }));
     expect(prismaMock.hostedInstanceEvent.create).toHaveBeenCalledWith(expect.objectContaining({
@@ -850,5 +909,92 @@ describe("control plane domain", () => {
       data: expect.objectContaining({ status: "COMPLETED" }),
     }));
     expect(result).toMatchObject({ id: "op-1", status: "COMPLETED" });
+  });
+
+  it("refreshes cached connector snapshots without remote calls when connector setup is missing", async () => {
+    const { refreshControlPlaneFleetSnapshots } = await import("./control-plane");
+    prismaMock.instanceRegistry.findUnique.mockResolvedValueOnce({
+      id: "inst-1",
+      label: "Acme",
+      customerAccountId: "cust-1",
+      deploymentKind: "REMOTE_MANAGED",
+      managedWorkspaceId: null,
+      managedWorkspace: null,
+      supportCredentialEnc: null,
+      supportMcpUrl: null,
+      supportConnectorStatus: "not_configured",
+      supportLastConnectedAt: null,
+      supportLastSyncAt: null,
+      supportLastSyncError: null,
+    });
+
+    const result = await refreshControlPlaneFleetSnapshots(operatorActor, {
+      instanceId: "inst-1",
+      snapshotKinds: ["CONNECTOR", "SUPPORT_READY"],
+      reason: "Operator requested cached readiness refresh.",
+    });
+
+    expect(prismaMock.fleetHealthSnapshot.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        customerAccountId: "cust-1",
+        deploymentId: "inst-1",
+        snapshotKind: "CONNECTOR",
+        status: "not_configured",
+      }),
+    }));
+    expect(prismaMock.fleetHealthSnapshot.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        customerAccountId: "cust-1",
+        deploymentId: "inst-1",
+        snapshotKind: "SUPPORT_READY",
+        status: "not_configured",
+      }),
+    }));
+    expect(fetch).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      adapterKind: "unconfigured",
+      results: [
+        { snapshotKind: "CONNECTOR", status: "not_configured" },
+        { snapshotKind: "SUPPORT_READY", status: "not_configured" },
+      ],
+    });
+  });
+
+  it("queues bounded fleet snapshot jobs against central deployment rows", async () => {
+    const { CONTROL_PLANE_FLEET_SNAPSHOT_JOB_TYPE, enqueueControlPlaneFleetSnapshots } = await import("./control-plane");
+    prismaMock.instanceRegistry.findMany.mockResolvedValueOnce([
+      { id: "inst-1" },
+      { id: "inst-2" },
+    ]);
+    prismaMock.workflowJob.upsert.mockResolvedValue({ id: "job-1" });
+
+    const result = await enqueueControlPlaneFleetSnapshots(operatorActor, {
+      snapshotKinds: ["HEALTH", "RELEASE"],
+      reason: "Queue hourly customer fleet sweep.",
+      limit: 2,
+    });
+
+    expect(prismaMock.instanceRegistry.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        customerAccountId: { not: null },
+        deploymentStatus: { notIn: ["RETIRED", "SUSPENDED"] },
+      }),
+      take: 2,
+    }));
+    expect(prismaMock.workflowJob.upsert).toHaveBeenCalledTimes(2);
+    expect(prismaMock.workflowJob.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({
+        workspaceId: null,
+        type: CONTROL_PLANE_FLEET_SNAPSHOT_JOB_TYPE,
+        payload: expect.objectContaining({
+          snapshotKinds: ["HEALTH", "RELEASE"],
+          reason: "Queue hourly customer fleet sweep.",
+        }),
+      }),
+    }));
+    expect(result).toMatchObject({
+      queuedJobs: 2,
+      deploymentIds: ["inst-1", "inst-2"],
+    });
   });
 });

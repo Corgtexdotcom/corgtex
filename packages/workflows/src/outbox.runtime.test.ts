@@ -14,6 +14,7 @@ const {
   purgeExpiredCommunicationMessagesMock,
   syncSlackPublicArchiveForWorkspaceMock,
   runMeetingAgendaThreadEditMock,
+  runControlPlaneFleetSnapshotJobMock,
   isAgentEnabledMock,
   getWorkspaceNewspaperCadenceMock,
 } = vi.hoisted(() => ({
@@ -32,6 +33,9 @@ const {
       findMany: vi.fn(),
     },
     communicationInstallation: {
+      findMany: vi.fn(),
+    },
+    instanceRegistry: {
       findMany: vi.fn(),
     },
   },
@@ -55,6 +59,7 @@ const {
   purgeExpiredCommunicationMessagesMock: vi.fn(),
   syncSlackPublicArchiveForWorkspaceMock: vi.fn(),
   runMeetingAgendaThreadEditMock: vi.fn(),
+  runControlPlaneFleetSnapshotJobMock: vi.fn(),
   isAgentEnabledMock: vi.fn(),
   getWorkspaceNewspaperCadenceMock: vi.fn(),
 }));
@@ -92,6 +97,8 @@ vi.mock("@corgtex/domain", () => ({
   purgeExpiredCommunicationMessages: purgeExpiredCommunicationMessagesMock,
   syncSlackPublicArchiveForWorkspace: syncSlackPublicArchiveForWorkspaceMock,
   runMeetingAgendaThreadEdit: runMeetingAgendaThreadEditMock,
+  CONTROL_PLANE_FLEET_SNAPSHOT_JOB_TYPE: "control-plane.fleet-snapshot",
+  runControlPlaneFleetSnapshotJob: runControlPlaneFleetSnapshotJobMock,
   isAgentEnabled: isAgentEnabledMock,
   getWorkspaceNewspaperCadence: getWorkspaceNewspaperCadenceMock,
 }));
@@ -111,6 +118,7 @@ describe("runPendingJobs", () => {
     prismaMock.member.findMany.mockReset().mockResolvedValue([]);
     prismaMock.externalDataSource.findMany.mockReset().mockResolvedValue([]);
     prismaMock.communicationInstallation.findMany.mockReset().mockResolvedValue([]);
+    prismaMock.instanceRegistry.findMany.mockReset().mockResolvedValue([]);
     txMock.$queryRaw.mockReset().mockResolvedValue([]);
     txMock.workflowJob.upsert.mockReset().mockResolvedValue({ id: "job-1" });
     runAgentWorkflowJobMock.mockReset();
@@ -123,6 +131,7 @@ describe("runPendingJobs", () => {
     purgeExpiredCommunicationMessagesMock.mockReset();
     syncSlackPublicArchiveForWorkspaceMock.mockReset();
     runMeetingAgendaThreadEditMock.mockReset();
+    runControlPlaneFleetSnapshotJobMock.mockReset().mockResolvedValue({ refreshed: true });
     isAgentEnabledMock.mockReset().mockResolvedValue(false);
     getWorkspaceNewspaperCadenceMock.mockReset().mockResolvedValue("DAILY");
   });
@@ -176,6 +185,38 @@ describe("runPendingJobs", () => {
     await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
 
     expect(processSlackInboundEventMock).toHaveBeenCalledWith("inbound-1");
+    expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({
+      where: { id: "job-1" },
+      data: expect.objectContaining({
+        status: "COMPLETED",
+      }),
+    });
+  });
+
+  it("dispatches control-plane fleet snapshot jobs without a workspace id", async () => {
+    txMock.$queryRaw.mockResolvedValue([
+      {
+        id: "job-1",
+        workspaceId: null,
+        type: "control-plane.fleet-snapshot",
+        payload: {
+          instanceId: "inst-1",
+          snapshotKinds: ["HEALTH", "RELEASE"],
+          reason: "Scheduled sweep.",
+        },
+        attempts: 1,
+      },
+    ]);
+
+    await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
+
+    expect(runControlPlaneFleetSnapshotJobMock).toHaveBeenCalledWith({
+      instanceId: "inst-1",
+      snapshotKinds: ["HEALTH", "RELEASE"],
+      reason: "Scheduled sweep.",
+      limit: null,
+      concurrency: null,
+    });
     expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({
       where: { id: "job-1" },
       data: expect.objectContaining({
@@ -387,6 +428,7 @@ describe("schedulePeriodicJobs", () => {
     prismaMock.communicationInstallation.findMany.mockReset().mockResolvedValue([
       { id: "install-1", workspaceId: "ws-1" },
     ]);
+    prismaMock.instanceRegistry.findMany.mockReset().mockResolvedValue([]);
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-04-29T20:15:00Z"));
   });
@@ -401,6 +443,37 @@ describe("schedulePeriodicJobs", () => {
         type: "communication.slack.proactive-scan",
         payload: { installationId: "install-1" },
         dedupeKey: "install-1:slack-proactive-scan:493748",
+      }),
+    }));
+  });
+
+  it("schedules bounded control-plane fleet snapshot jobs", async () => {
+    prismaMock.communicationInstallation.findMany.mockResolvedValue([]);
+    prismaMock.instanceRegistry.findMany.mockResolvedValue([
+      { id: "inst-1" },
+      { id: "inst-2" },
+    ]);
+
+    await expect(schedulePeriodicJobs()).resolves.toBe(2);
+
+    expect(prismaMock.instanceRegistry.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        customerAccountId: { not: null },
+        deploymentStatus: { notIn: ["RETIRED", "SUSPENDED"] },
+      },
+      take: 50,
+      select: { id: true },
+    }));
+    expect(txMock.workflowJob.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({
+        workspaceId: null,
+        eventId: null,
+        type: "control-plane.fleet-snapshot",
+        payload: expect.objectContaining({
+          instanceId: "inst-1",
+          reason: "Scheduled Control Plane fleet sweep.",
+        }),
+        dedupeKey: "inst-1:control-plane-fleet-snapshot:493748",
       }),
     }));
   });
