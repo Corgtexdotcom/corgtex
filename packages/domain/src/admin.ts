@@ -19,10 +19,10 @@ import {
   customerSlugFromText,
   deploymentStatusFromProvisioningStatus,
   linkManagedWorkspaceDeployment,
-  registerCustomerDeployment,
+  registerCustomerDeployment as upsertCustomerDeployment,
 } from "./customer-lifecycle";
 
-const HOSTED_PROVISIONING_STATUSES = new Set([
+const CUSTOMER_DEPLOYMENT_PROVISIONING_STATUSES = new Set([
   "draft",
   "provisioning",
   "awaiting_dns",
@@ -32,7 +32,7 @@ const HOSTED_PROVISIONING_STATUSES = new Set([
   "suspended",
 ]);
 
-const HOSTED_BOOTSTRAP_STATUSES = new Set([
+const CUSTOMER_DEPLOYMENT_BOOTSTRAP_STATUSES = new Set([
   "not_started",
   "pending",
   "bootstrapping",
@@ -40,7 +40,7 @@ const HOSTED_BOOTSTRAP_STATUSES = new Set([
   "failed",
 ]);
 
-type InstanceHealthPayload = {
+type CustomerDeploymentHealthPayload = {
   status?: string;
   database?: string;
   schema?: string;
@@ -48,16 +48,16 @@ type InstanceHealthPayload = {
   runtime?: { redis?: string; storage?: string };
 };
 
-export type HostedInstanceReadinessCheck = {
+export type CustomerDeploymentReadinessCheck = {
   key: string;
   label: string;
   status: "ok" | "warning" | "missing";
   detail: string;
 };
 
-export type HostedInstanceReadiness = {
+export type CustomerDeploymentReadiness = {
   status: "ready" | "attention";
-  checks: HostedInstanceReadinessCheck[];
+  checks: CustomerDeploymentReadinessCheck[];
 };
 
 function normalizeSlug(value: string) {
@@ -130,7 +130,7 @@ function bootstrapSignaturePayload(params: {
   });
 }
 
-export function buildHostedCustomerRuntimeVariables(params: {
+export function buildCustomerDeploymentRuntimeVariables(params: {
   customerSlug: string;
   url: string;
   releaseImageTag: string;
@@ -147,15 +147,15 @@ export function buildHostedCustomerRuntimeVariables(params: {
   };
 }
 
-async function recordHostedInstanceEvent(
+async function recordCustomerDeploymentEvent(
   actor: AppActor,
-  instanceId: string | null,
+  deploymentId: string | null,
   action: string,
   meta: Record<string, unknown> = {},
 ) {
-  await prisma.hostedInstanceEvent.create({
+  await prisma.customerDeploymentEvent.create({
     data: {
-      instanceId,
+      deploymentId,
       actorUserId: actorUserId(actor),
       action,
       meta: meta as Prisma.InputJsonObject,
@@ -413,27 +413,27 @@ export async function adminCreateWorkspace(actor: AppActor, params: {
   return workspace;
 }
 
-export async function listExternalInstances(actor: AppActor) {
+export async function listCustomerDeployments(actor: AppActor) {
   requireGlobalOperator(actor);
-  const instances = await prisma.instanceRegistry.findMany({
+  const deployments = await prisma.customerDeployment.findMany({
     orderBy: { createdAt: "desc" }
   });
-  return instances.map((instance) => ({
-    ...instance,
-    readiness: buildHostedInstanceReadiness(instance),
+  return deployments.map((deployment) => ({
+    ...deployment,
+    readiness: buildCustomerDeploymentReadiness(deployment),
   }));
 }
 
-export async function listHostedInstanceEvents(actor: AppActor, instanceId: string) {
+export async function listCustomerDeploymentEvents(actor: AppActor, deploymentId: string) {
   requireGlobalOperator(actor);
-  return prisma.hostedInstanceEvent.findMany({
-    where: { instanceId },
+  return prisma.customerDeploymentEvent.findMany({
+    where: { deploymentId },
     orderBy: { createdAt: "desc" },
     take: 50,
   });
 }
 
-export async function registerExternalInstance(actor: AppActor, params: {
+export async function registerCustomerDeploymentRecord(actor: AppActor, params: {
   label: string;
   url: string;
   environment?: string;
@@ -455,7 +455,7 @@ export async function registerExternalInstance(actor: AppActor, params: {
     ? normalizeSlug(params.customerSlug)
     : customerSlugFromText(params.label || params.url);
   const managedWorkspaceId = await findManagedWorkspaceId(normalizedCustomerSlug);
-  const { deployment: instance } = await registerCustomerDeployment({
+  const { deployment } = await upsertCustomerDeployment({
     accountSlug: normalizedCustomerSlug,
     accountDisplayName: params.label,
     accountStatus: managedWorkspaceId ? "ACTIVE" : "ONBOARDING",
@@ -479,35 +479,35 @@ export async function registerExternalInstance(actor: AppActor, params: {
     bootstrapBundleSchemaVersion: params.bootstrapBundleSchemaVersion,
     managedWorkspaceId,
   });
-  await recordHostedInstanceEvent(actor, instance.id, "hosted_instance.registered", {
-    customerSlug: instance.customerSlug,
-    region: instance.region,
-    releaseImageTag: instance.releaseImageTag,
-    hasBootstrapBundle: Boolean(instance.bootstrapBundleUri),
+  await recordCustomerDeploymentEvent(actor, deployment.id, "customer_deployment.registered", {
+    customerSlug: deployment.customerSlug,
+    region: deployment.region,
+    releaseImageTag: deployment.releaseImageTag,
+    hasBootstrapBundle: Boolean(deployment.bootstrapBundleUri),
     managedWorkspaceId,
   });
-  return instance;
+  return deployment;
 }
 
-export async function removeExternalInstance(actor: AppActor, id: string) {
+export async function removeCustomerDeployment(actor: AppActor, id: string) {
   requireGlobalOperator(actor);
-  await recordHostedInstanceEvent(actor, id, "hosted_instance.removed");
-  await prisma.instanceRegistry.delete({
+  await recordCustomerDeploymentEvent(actor, id, "customer_deployment.removed");
+  await prisma.customerDeployment.delete({
     where: { id }
   });
 }
 
-export async function probeExternalInstanceHealth(actor: AppActor, id: string) {
+export async function probeCustomerDeploymentHealth(actor: AppActor, id: string) {
   requireGlobalOperator(actor);
-  const instance = await prisma.instanceRegistry.findUniqueOrThrow({ where: { id } });
+  const deployment = await prisma.customerDeployment.findUniqueOrThrow({ where: { id } });
   
   let status = "unknown";
   let error = null;
-  let health: InstanceHealthPayload | null = null;
+  let health: CustomerDeploymentHealthPayload | null = null;
 
   try {
-    const res = await fetch(`${instance.url}/api/health`, { method: "GET" });
-    health = await res.json().catch(() => null) as InstanceHealthPayload | null;
+    const res = await fetch(`${deployment.url}/api/health`, { method: "GET" });
+    health = await res.json().catch(() => null) as CustomerDeploymentHealthPayload | null;
     if (res.ok) {
       status = "ok";
       const runtimeErrors = [];
@@ -524,8 +524,8 @@ export async function probeExternalInstanceHealth(actor: AppActor, id: string) {
         runtimeErrors.push(`Storage ${health.runtime.storage}`);
       }
       const actualRelease = health?.release?.imageTag || health?.release?.gitSha || null;
-      if (instance.releaseImageTag && actualRelease && actualRelease !== instance.releaseImageTag) {
-        runtimeErrors.push(`Release drift: expected ${instance.releaseImageTag}, got ${actualRelease}`);
+      if (deployment.releaseImageTag && actualRelease && actualRelease !== deployment.releaseImageTag) {
+        runtimeErrors.push(`Release drift: expected ${deployment.releaseImageTag}, got ${actualRelease}`);
       }
       if (runtimeErrors.length > 0) {
         status = "degraded";
@@ -540,7 +540,7 @@ export async function probeExternalInstanceHealth(actor: AppActor, id: string) {
     error = e.message;
   }
 
-  await prisma.instanceRegistry.update({
+  await prisma.customerDeployment.update({
     where: { id },
     data: {
       lastHealthCheck: new Date(),
@@ -551,11 +551,11 @@ export async function probeExternalInstanceHealth(actor: AppActor, id: string) {
       deploymentStatus: status === "ok" ? "ACTIVE" : "DEGRADED",
     }
   });
-  await recordHostedInstanceEvent(actor, id, "hosted_instance.health_probed", { status, error });
+  await recordCustomerDeploymentEvent(actor, id, "customer_deployment.health_probed", { status, error });
 }
 
-export async function updateHostedInstanceStatus(actor: AppActor, params: {
-  instanceId: string;
+export async function updateCustomerDeploymentStatus(actor: AppActor, params: {
+  deploymentId: string;
   provisioningStatus?: string;
   bootstrapStatus?: string;
   lastProvisioningError?: string | null;
@@ -569,11 +569,11 @@ export async function updateHostedInstanceStatus(actor: AppActor, params: {
   } = {};
 
   if (params.provisioningStatus) {
-    data.provisioningStatus = requireStatus(params.provisioningStatus, HOSTED_PROVISIONING_STATUSES, "provisioning");
+    data.provisioningStatus = requireStatus(params.provisioningStatus, CUSTOMER_DEPLOYMENT_PROVISIONING_STATUSES, "provisioning");
     data.deploymentStatus = deploymentStatusFromProvisioningStatus(data.provisioningStatus);
   }
   if (params.bootstrapStatus) {
-    data.bootstrapStatus = requireStatus(params.bootstrapStatus, HOSTED_BOOTSTRAP_STATUSES, "bootstrap");
+    data.bootstrapStatus = requireStatus(params.bootstrapStatus, CUSTOMER_DEPLOYMENT_BOOTSTRAP_STATUSES, "bootstrap");
     if (!data.deploymentStatus && data.bootstrapStatus === "bootstrapping") {
       data.deploymentStatus = "BOOTSTRAPPING";
     }
@@ -585,28 +585,28 @@ export async function updateHostedInstanceStatus(actor: AppActor, params: {
     data.lastProvisioningError = params.lastProvisioningError;
   }
 
-  const instance = await prisma.instanceRegistry.update({
-    where: { id: params.instanceId },
+  const deployment = await prisma.customerDeployment.update({
+    where: { id: params.deploymentId },
     data,
   });
-  await recordHostedInstanceEvent(actor, params.instanceId, "hosted_instance.status_updated", data);
-  return instance;
+  await recordCustomerDeploymentEvent(actor, params.deploymentId, "customer_deployment.status_updated", data);
+  return deployment;
 }
 
-export async function suspendHostedInstance(actor: AppActor, instanceId: string) {
+export async function suspendCustomerDeployment(actor: AppActor, deploymentId: string) {
   requireGlobalOperator(actor);
-  const instance = await prisma.instanceRegistry.update({
-    where: { id: instanceId },
+  const deployment = await prisma.customerDeployment.update({
+    where: { id: deploymentId },
     data: {
       provisioningStatus: "suspended",
       deploymentStatus: "SUSPENDED",
     },
   });
-  await recordHostedInstanceEvent(actor, instanceId, "hosted_instance.suspended");
-  return instance;
+  await recordCustomerDeploymentEvent(actor, deploymentId, "customer_deployment.suspended");
+  return deployment;
 }
 
-export async function provisionHostedCustomerInstance(actor: AppActor, params: {
+export async function provisionCustomerDeployment(actor: AppActor, params: {
   label: string;
   customerSlug: string;
   region: string;
@@ -633,7 +633,7 @@ export async function provisionHostedCustomerInstance(actor: AppActor, params: {
     ? `https://${params.customDomain.trim().replace(/^https?:\/\//, "").replace(/\/$/, "")}`
     : `https://${customerSlug}.corgtex.com`;
 
-  const { deployment: instance } = await registerCustomerDeployment({
+  const { deployment } = await upsertCustomerDeployment({
     accountSlug: customerSlug,
     accountDisplayName: params.label,
     accountStatus: "ONBOARDING",
@@ -660,7 +660,7 @@ export async function provisionHostedCustomerInstance(actor: AppActor, params: {
     primary: true,
   });
 
-  await recordHostedInstanceEvent(actor, instance.id, "hosted_instance.provisioning_started", {
+  await recordCustomerDeploymentEvent(actor, deployment.id, "customer_deployment.provisioning_started", {
     customerSlug,
     region: params.region,
     dataResidency: params.dataResidency,
@@ -680,7 +680,7 @@ export async function provisionHostedCustomerInstance(actor: AppActor, params: {
       webSource: params.webSource,
       workerSource: params.workerSource,
       customDomain: params.customDomain,
-      variables: buildHostedCustomerRuntimeVariables({
+      variables: buildCustomerDeploymentRuntimeVariables({
         customerSlug,
         url,
         releaseImageTag: params.releaseImageTag,
@@ -689,8 +689,8 @@ export async function provisionHostedCustomerInstance(actor: AppActor, params: {
       }),
     });
 
-    const updated = await prisma.instanceRegistry.update({
-      where: { id: instance.id },
+    const updated = await prisma.customerDeployment.update({
+      where: { id: deployment.id },
       data: {
         railwayProjectId: result.projectId,
         railwayEnvironmentId: result.environmentId,
@@ -704,7 +704,7 @@ export async function provisionHostedCustomerInstance(actor: AppActor, params: {
         lastProvisioningError: null,
       },
     });
-    await recordHostedInstanceEvent(actor, instance.id, "hosted_instance.provisioned", {
+    await recordCustomerDeploymentEvent(actor, deployment.id, "customer_deployment.provisioned", {
       railwayProjectId: result.projectId,
       railwayEnvironmentId: result.environmentId,
       railwayWebServiceId: result.webServiceId,
@@ -714,15 +714,15 @@ export async function provisionHostedCustomerInstance(actor: AppActor, params: {
     return updated;
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown Railway provisioning error.";
-    await prisma.instanceRegistry.update({
-      where: { id: instance.id },
+    await prisma.customerDeployment.update({
+      where: { id: deployment.id },
       data: {
         provisioningStatus: "degraded",
         deploymentStatus: "DEGRADED",
         lastProvisioningError: message,
       },
     });
-    await recordHostedInstanceEvent(actor, instance.id, "hosted_instance.provisioning_failed", {
+    await recordCustomerDeploymentEvent(actor, deployment.id, "customer_deployment.provisioning_failed", {
       error: message,
     });
     throw error;
@@ -736,7 +736,7 @@ function readinessCheck(
   detail: string,
   missingDetail: string,
   statusWhenFalse: "warning" | "missing" = "missing",
-): HostedInstanceReadinessCheck {
+): CustomerDeploymentReadinessCheck {
   return {
     key,
     label,
@@ -745,7 +745,7 @@ function readinessCheck(
   };
 }
 
-export function buildHostedInstanceReadiness(instance: {
+export function buildCustomerDeploymentReadiness(deployment: {
   url?: string | null;
   customDomain?: string | null;
   region?: string | null;
@@ -768,19 +768,19 @@ export function buildHostedInstanceReadiness(instance: {
   lastReleaseCheck?: Date | string | null;
 }) {
   const railwayServicesPresent = Boolean(
-    instance.railwayProjectId
-    && instance.railwayEnvironmentId
-    && instance.railwayWebServiceId
-    && instance.railwayWorkerServiceId
-    && instance.railwayPostgresServiceId
-    && instance.railwayRedisServiceId,
+    deployment.railwayProjectId
+    && deployment.railwayEnvironmentId
+    && deployment.railwayWebServiceId
+    && deployment.railwayWorkerServiceId
+    && deployment.railwayPostgresServiceId
+    && deployment.railwayRedisServiceId,
   );
-  const healthOk = instance.lastHealthStatus === "ok";
-  const releasePinned = Boolean(instance.releaseImageTag || instance.releaseVersion);
-  const releaseVerified = releasePinned && Boolean(instance.lastReleaseCheck) && !instance.lastHealthError?.includes("Release drift:");
-  const runtimeVerified = healthOk && !instance.lastHealthError;
+  const healthOk = deployment.lastHealthStatus === "ok";
+  const releasePinned = Boolean(deployment.releaseImageTag || deployment.releaseVersion);
+  const releaseVerified = releasePinned && Boolean(deployment.lastReleaseCheck) && !deployment.lastHealthError?.includes("Release drift:");
+  const runtimeVerified = healthOk && !deployment.lastHealthError;
 
-  const checks: HostedInstanceReadinessCheck[] = [
+  const checks: CustomerDeploymentReadinessCheck[] = [
     readinessCheck(
       "railway_project",
       "Railway services",
@@ -791,23 +791,23 @@ export function buildHostedInstanceReadiness(instance: {
     readinessCheck(
       "region",
       "Region and residency",
-      Boolean(instance.region && instance.dataResidency),
-      `${instance.region} / ${instance.dataResidency}`,
+      Boolean(deployment.region && deployment.dataResidency),
+      `${deployment.region} / ${deployment.dataResidency}`,
       "Record the customer region and data residency.",
     ),
     readinessCheck(
       "domain",
       "Production domain",
-      Boolean(instance.url && instance.customDomain),
-      instance.customDomain || instance.url || "Domain recorded.",
+      Boolean(deployment.url && deployment.customDomain),
+      deployment.customDomain || deployment.url || "Domain recorded.",
       "Record the customer custom domain and production URL.",
       "warning",
     ),
     readinessCheck(
       "storage",
       "Railway Bucket storage",
-      Boolean(instance.storageBucketName),
-      instance.storageBucketName || "Storage bucket recorded.",
+      Boolean(deployment.storageBucketName),
+      deployment.storageBucketName || "Storage bucket recorded.",
       "Record the Railway Bucket name for this customer.",
     ),
     readinessCheck(
@@ -815,47 +815,47 @@ export function buildHostedInstanceReadiness(instance: {
       "Runtime health",
       runtimeVerified,
       "Web health, database, schema, Redis, storage, and release are healthy.",
-      instance.lastHealthError || "Run a health probe after all runtime variables are configured.",
+      deployment.lastHealthError || "Run a health probe after all runtime variables are configured.",
     ),
     readinessCheck(
       "release",
       "Pinned release",
       releaseVerified,
-      instance.releaseImageTag || instance.releaseVersion || "Release verified.",
+      deployment.releaseImageTag || deployment.releaseVersion || "Release verified.",
       releasePinned ? "Run a health probe to verify the pinned release." : "Record a release tag or version before onboarding.",
     ),
     readinessCheck(
       "bootstrap",
       "Bootstrap status",
-      instance.bootstrapStatus === "applied",
+      deployment.bootstrapStatus === "applied",
       "Bootstrap has been applied.",
       "Mark bootstrap applied only after the production seed has completed.",
     ),
     readinessCheck(
       "support_owner",
       "Support owner",
-      Boolean(instance.supportOwnerEmail),
-      instance.supportOwnerEmail || "Support owner recorded.",
+      Boolean(deployment.supportOwnerEmail),
+      deployment.supportOwnerEmail || "Support owner recorded.",
       "Record the Corgtex support owner for this customer.",
       "warning",
     ),
     readinessCheck(
       "provisioning",
       "Ops status",
-      instance.provisioningStatus === "active",
+      deployment.provisioningStatus === "active",
       "Ops marks this customer active.",
-      `Current status is ${instance.provisioningStatus || "unknown"}.`,
+      `Current status is ${deployment.provisioningStatus || "unknown"}.`,
     ),
   ];
 
   return {
     status: checks.every((check) => check.status === "ok") ? "ready" : "attention",
     checks,
-  } satisfies HostedInstanceReadiness;
+  } satisfies CustomerDeploymentReadiness;
 }
 
-export async function upgradeHostedInstanceRelease(actor: AppActor, params: {
-  instanceId: string;
+export async function upgradeCustomerDeploymentRelease(actor: AppActor, params: {
+  deploymentId: string;
   releaseVersion?: string | null;
   releaseImageTag: string;
   webImage?: string | null;
@@ -865,17 +865,17 @@ export async function upgradeHostedInstanceRelease(actor: AppActor, params: {
   variables?: Record<string, string>;
 }, railwayClient: RailwayClient = createRailwayClientFromEnv()) {
   requireGlobalOperator(actor);
-  const instance = await prisma.instanceRegistry.findUniqueOrThrow({ where: { id: params.instanceId } });
+  const deployment = await prisma.customerDeployment.findUniqueOrThrow({ where: { id: params.deploymentId } });
 
-  invariant(instance.customerSlug, 400, "INVALID_INPUT", "Instance is missing a customer slug.");
-  invariant(instance.railwayProjectId, 400, "INVALID_INPUT", "Instance is missing a Railway project ID.");
-  invariant(instance.railwayEnvironmentId, 400, "INVALID_INPUT", "Instance is missing a Railway environment ID.");
-  invariant(instance.railwayWebServiceId, 400, "INVALID_INPUT", "Instance is missing a Railway web service ID.");
-  invariant(instance.railwayWorkerServiceId, 400, "INVALID_INPUT", "Instance is missing a Railway worker service ID.");
+  invariant(deployment.customerSlug, 400, "INVALID_INPUT", "Customer deployment is missing a customer slug.");
+  invariant(deployment.railwayProjectId, 400, "INVALID_INPUT", "Customer deployment is missing a Railway project ID.");
+  invariant(deployment.railwayEnvironmentId, 400, "INVALID_INPUT", "Customer deployment is missing a Railway environment ID.");
+  invariant(deployment.railwayWebServiceId, 400, "INVALID_INPUT", "Customer deployment is missing a Railway web service ID.");
+  invariant(deployment.railwayWorkerServiceId, 400, "INVALID_INPUT", "Customer deployment is missing a Railway worker service ID.");
 
   const releaseVersion = normalizeOptional(params.releaseVersion);
-  await prisma.instanceRegistry.update({
-    where: { id: instance.id },
+  await prisma.customerDeployment.update({
+    where: { id: deployment.id },
     data: {
       provisioningStatus: "provisioning",
       releaseVersion,
@@ -883,18 +883,18 @@ export async function upgradeHostedInstanceRelease(actor: AppActor, params: {
       lastProvisioningError: null,
     },
   });
-  await recordHostedInstanceEvent(actor, instance.id, "hosted_instance.upgrade_started", {
-    customerSlug: instance.customerSlug,
+  await recordCustomerDeploymentEvent(actor, deployment.id, "customer_deployment.upgrade_started", {
+    customerSlug: deployment.customerSlug,
     releaseVersion,
     releaseImageTag: params.releaseImageTag,
   });
 
   try {
     const result = await upgradeRailwayCustomerRelease(railwayClient, {
-      projectId: instance.railwayProjectId,
-      environmentId: instance.railwayEnvironmentId,
-      webServiceId: instance.railwayWebServiceId,
-      workerServiceId: instance.railwayWorkerServiceId,
+      projectId: deployment.railwayProjectId,
+      environmentId: deployment.railwayEnvironmentId,
+      webServiceId: deployment.railwayWebServiceId,
+      workerServiceId: deployment.railwayWorkerServiceId,
       webImage: params.webImage,
       workerImage: params.workerImage,
       webSource: params.webSource,
@@ -906,8 +906,8 @@ export async function upgradeHostedInstanceRelease(actor: AppActor, params: {
       },
     });
 
-    const updated = await prisma.instanceRegistry.update({
-      where: { id: instance.id },
+    const updated = await prisma.customerDeployment.update({
+      where: { id: deployment.id },
       data: {
         provisioningStatus: "active",
         releaseVersion,
@@ -916,7 +916,7 @@ export async function upgradeHostedInstanceRelease(actor: AppActor, params: {
         lastProvisioningError: null,
       },
     });
-    await recordHostedInstanceEvent(actor, instance.id, "hosted_instance.upgrade_succeeded", {
+    await recordCustomerDeploymentEvent(actor, deployment.id, "customer_deployment.upgrade_succeeded", {
       releaseVersion,
       releaseImageTag: params.releaseImageTag,
       webDeploymentId: result.webDeploymentId,
@@ -925,14 +925,14 @@ export async function upgradeHostedInstanceRelease(actor: AppActor, params: {
     return updated;
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown Railway upgrade error.";
-    await prisma.instanceRegistry.update({
-      where: { id: instance.id },
+    await prisma.customerDeployment.update({
+      where: { id: deployment.id },
       data: {
         provisioningStatus: "degraded",
         lastProvisioningError: message,
       },
     });
-    await recordHostedInstanceEvent(actor, instance.id, "hosted_instance.upgrade_failed", {
+    await recordCustomerDeploymentEvent(actor, deployment.id, "customer_deployment.upgrade_failed", {
       releaseVersion,
       releaseImageTag: params.releaseImageTag,
       error: message,
@@ -941,42 +941,42 @@ export async function upgradeHostedInstanceRelease(actor: AppActor, params: {
   }
 }
 
-export async function triggerHostedInstanceBootstrap(actor: AppActor, params: {
-  instanceId: string;
+export async function triggerCustomerDeploymentBootstrap(actor: AppActor, params: {
+  deploymentId: string;
   token: string;
   expiresAt: Date;
 }) {
   requireGlobalOperator(actor);
-  const instance = await prisma.instanceRegistry.findUniqueOrThrow({ where: { id: params.instanceId } });
-  invariant(instance.customerSlug, 400, "INVALID_INPUT", "Instance is missing a customer slug.");
-  invariant(instance.bootstrapBundleUri, 400, "INVALID_INPUT", "Instance is missing a bootstrap bundle URI.");
-  invariant(instance.bootstrapBundleChecksum, 400, "INVALID_INPUT", "Instance is missing a bootstrap bundle checksum.");
-  invariant(instance.bootstrapBundleSchemaVersion, 400, "INVALID_INPUT", "Instance is missing a bootstrap bundle schema version.");
+  const deployment = await prisma.customerDeployment.findUniqueOrThrow({ where: { id: params.deploymentId } });
+  invariant(deployment.customerSlug, 400, "INVALID_INPUT", "Customer deployment is missing a customer slug.");
+  invariant(deployment.bootstrapBundleUri, 400, "INVALID_INPUT", "Customer deployment is missing a bootstrap bundle URI.");
+  invariant(deployment.bootstrapBundleChecksum, 400, "INVALID_INPUT", "Customer deployment is missing a bootstrap bundle checksum.");
+  invariant(deployment.bootstrapBundleSchemaVersion, 400, "INVALID_INPUT", "Customer deployment is missing a bootstrap bundle schema version.");
   const token = params.token.trim();
   invariant(token, 400, "INVALID_INPUT", "Bootstrap token is required.");
 
   const expiresAt = params.expiresAt.toISOString();
   const tokenHash = sha256Hex(token);
   const signaturePayload = bootstrapSignaturePayload({
-    customerSlug: instance.customerSlug,
-    bundleUri: instance.bootstrapBundleUri,
-    checksum: instance.bootstrapBundleChecksum,
-    schemaVersion: instance.bootstrapBundleSchemaVersion,
+    customerSlug: deployment.customerSlug,
+    bundleUri: deployment.bootstrapBundleUri,
+    checksum: deployment.bootstrapBundleChecksum,
+    schemaVersion: deployment.bootstrapBundleSchemaVersion,
     expiresAt,
     tokenHash,
   });
 
-  const response = await fetch(`${instance.url.replace(/\/$/, "")}/api/internal/instance-bootstrap`, {
+  const response = await fetch(`${deployment.url.replace(/\/$/, "")}/api/internal/customer-deployment-bootstrap`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${token}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      customerSlug: instance.customerSlug,
-      bundleUri: instance.bootstrapBundleUri,
-      checksum: instance.bootstrapBundleChecksum,
-      schemaVersion: instance.bootstrapBundleSchemaVersion,
+      customerSlug: deployment.customerSlug,
+      bundleUri: deployment.bootstrapBundleUri,
+      checksum: deployment.bootstrapBundleChecksum,
+      schemaVersion: deployment.bootstrapBundleSchemaVersion,
       expiresAt,
       tokenHash,
       signature: hmacSha256Hex(token, signaturePayload),
@@ -984,15 +984,15 @@ export async function triggerHostedInstanceBootstrap(actor: AppActor, params: {
   });
 
   const bootstrapStatus = response.ok ? "bootstrapping" : "failed";
-  const updated = await prisma.instanceRegistry.update({
-    where: { id: instance.id },
+  const updated = await prisma.customerDeployment.update({
+    where: { id: deployment.id },
     data: {
       bootstrapStatus,
       provisioningStatus: response.ok ? "bootstrapping" : "degraded",
       lastProvisioningError: response.ok ? null : `Bootstrap endpoint returned ${response.status}.`,
     },
   });
-  await recordHostedInstanceEvent(actor, instance.id, "hosted_instance.bootstrap_triggered", {
+  await recordCustomerDeploymentEvent(actor, deployment.id, "customer_deployment.bootstrap_triggered", {
     status: response.status,
     ok: response.ok,
     expiresAt,

@@ -14,7 +14,7 @@ enum GlobalRole {
   OPERATOR
 }
 
-enum ControlPlaneInstanceRole {
+enum CustomerDeploymentAccessRole {
   SUPPORT_VIEWER
   SUPPORT_ADMIN
   CUSTOMER_IT_ADMIN
@@ -461,7 +461,7 @@ model Workspace {
   buildArtifacts                BuildArtifact[]
   newspaperDeliveries           NewspaperDelivery[]
   newspaperTrackedLinks         NewspaperTrackedLink[]
-  managedInstanceRegistry       InstanceRegistry?
+  managedCustomerDeployment     CustomerDeployment?
 }
 
 model WorkspaceFeatureFlag {
@@ -663,47 +663,47 @@ model CommunicationEntityLink {
 }
 
 model User {
-  id                      String                       @id @default(uuid())
-  email                   String                       @unique
-  displayName             String?
-  bio                     String?                      @db.Text
-  avatarUrl               String?                      @db.Text
-  passwordHash            String
-  globalRole              GlobalRole                   @default(USER)
-  createdAt               DateTime                     @default(now())
-  updatedAt               DateTime                     @updatedAt
-  sessions                Session[]
-  memberships             Member[]
-  authoredActions         Action[]                     @relation("ActionAuthor")
-  authoredTensions        Tension[]                    @relation("TensionAuthor")
-  authoredProposals       Proposal[]                   @relation("ProposalAuthor")
-  spendRequests           SpendRequest[]               @relation("SpendRequester")
-  spendComments           SpendComment[]               @relation("SpendCommentAuthor")
-  cycleUpdates            CycleUpdate[]
-  allocationsFrom         Allocation[]                 @relation("AllocFrom")
-  allocationsTo           Allocation[]                 @relation("AllocTo")
-  reactions               ProposalReaction[]
-  objections              Objection[]
-  tensionUpvotes          TensionUpvote[]
-  agentCreds              AgentCredential[]            @relation("AgentCredentialCreator")
-  notifications           Notification[]
-  conversations           ConversationSession[]
-  oauthConnections        OAuthConnection[]
-  mcpOAuthCodes           McpOAuthAuthorizationCode[]
-  mcpOAuthTokens          McpOAuthAccessToken[]
-  resetTokens             PasswordResetToken[]
-  ssoIdentities           UserSsoIdentity[]
-  meetingInsights         MeetingInsight[]
-  createdAgentIdentities  AgentIdentity[]              @relation("AgentIdentityCreator")
-  deliberationEntries     DeliberationEntry[]
-  notificationPrefs       NotificationPreference[]
-  crmConversationMessages CrmConversationMessage[]
-  reviewedQualifications  CrmQualification[]           @relation("QualificationReviewer")
-  controlPlaneAccess      ControlPlaneInstanceAccess[]
-  supportOperations       SupportOperation[]           @relation("SupportOperationActor")
-  createdToolLinks        WorkspaceToolLink[]          @relation("WorkspaceToolLinkCreator")
-  createdBuildArtifacts   BuildArtifact[]              @relation("BuildArtifactCreator")
-  productAnalyticsEvents  ProductAnalyticsEvent[]
+  id                       String                      @id @default(uuid())
+  email                    String                      @unique
+  displayName              String?
+  bio                      String?                     @db.Text
+  avatarUrl                String?                     @db.Text
+  passwordHash             String
+  globalRole               GlobalRole                  @default(USER)
+  createdAt                DateTime                    @default(now())
+  updatedAt                DateTime                    @updatedAt
+  sessions                 Session[]
+  memberships              Member[]
+  authoredActions          Action[]                    @relation("ActionAuthor")
+  authoredTensions         Tension[]                   @relation("TensionAuthor")
+  authoredProposals        Proposal[]                  @relation("ProposalAuthor")
+  spendRequests            SpendRequest[]              @relation("SpendRequester")
+  spendComments            SpendComment[]              @relation("SpendCommentAuthor")
+  cycleUpdates             CycleUpdate[]
+  allocationsFrom          Allocation[]                @relation("AllocFrom")
+  allocationsTo            Allocation[]                @relation("AllocTo")
+  reactions                ProposalReaction[]
+  objections               Objection[]
+  tensionUpvotes           TensionUpvote[]
+  agentCreds               AgentCredential[]           @relation("AgentCredentialCreator")
+  notifications            Notification[]
+  conversations            ConversationSession[]
+  oauthConnections         OAuthConnection[]
+  mcpOAuthCodes            McpOAuthAuthorizationCode[]
+  mcpOAuthTokens           McpOAuthAccessToken[]
+  resetTokens              PasswordResetToken[]
+  ssoIdentities            UserSsoIdentity[]
+  meetingInsights          MeetingInsight[]
+  createdAgentIdentities   AgentIdentity[]             @relation("AgentIdentityCreator")
+  deliberationEntries      DeliberationEntry[]
+  notificationPrefs        NotificationPreference[]
+  crmConversationMessages  CrmConversationMessage[]
+  reviewedQualifications   CrmQualification[]          @relation("QualificationReviewer")
+  customerDeploymentAccess CustomerDeploymentAccess[]
+  supportOperations        SupportOperation[]          @relation("SupportOperationActor")
+  createdToolLinks         WorkspaceToolLink[]         @relation("WorkspaceToolLinkCreator")
+  createdBuildArtifacts    BuildArtifact[]             @relation("BuildArtifactCreator")
+  productAnalyticsEvents   ProductAnalyticsEvent[]
 }
 
 model Session {
@@ -3025,8 +3025,8 @@ model CustomerAccount {
   createdAt           DateTime                    @default(now())
   updatedAt           DateTime                    @updatedAt
 
-  deployments       InstanceRegistry[]      @relation("CustomerAccountDeployments")
-  primaryDeployment InstanceRegistry?       @relation("CustomerAccountPrimaryDeployment", fields: [primaryDeploymentId], references: [id], onDelete: SetNull)
+  deployments       CustomerDeployment[]    @relation("CustomerAccountDeployments")
+  primaryDeployment CustomerDeployment?     @relation("CustomerAccountPrimaryDeployment", fields: [primaryDeploymentId], references: [id], onDelete: SetNull)
   fleetSnapshots    FleetHealthSnapshot[]
   entitlements      CustomerEntitlement[]
   releaseTargets    CustomerReleaseTarget[]
@@ -3036,7 +3036,7 @@ model CustomerAccount {
   @@index([supportOwnerEmail])
 }
 
-model InstanceRegistry {
+model CustomerDeployment {
   id                           String                   @id @default(uuid())
   label                        String
   url                          String                   @unique
@@ -3087,15 +3087,15 @@ model InstanceRegistry {
   createdAt                    DateTime                 @default(now())
   updatedAt                    DateTime                 @updatedAt
 
-  events             HostedInstanceEvent[]
-  controlPlaneAccess ControlPlaneInstanceAccess[]
-  supportOperations  SupportOperation[]
-  managedWorkspace   Workspace?                   @relation(fields: [managedWorkspaceId], references: [id], onDelete: SetNull)
-  customerAccount    CustomerAccount?             @relation("CustomerAccountDeployments", fields: [customerAccountId], references: [id], onDelete: SetNull)
-  primaryForAccount  CustomerAccount?             @relation("CustomerAccountPrimaryDeployment")
-  fleetSnapshots     FleetHealthSnapshot[]
-  entitlements       CustomerEntitlement[]
-  releaseTargets     CustomerReleaseTarget[]
+  events            CustomerDeploymentEvent[]
+  accessGrants      CustomerDeploymentAccess[]
+  supportOperations SupportOperation[]
+  managedWorkspace  Workspace?                 @relation(fields: [managedWorkspaceId], references: [id], onDelete: SetNull)
+  customerAccount   CustomerAccount?           @relation("CustomerAccountDeployments", fields: [customerAccountId], references: [id], onDelete: SetNull)
+  primaryForAccount CustomerAccount?           @relation("CustomerAccountPrimaryDeployment")
+  fleetSnapshots    FleetHealthSnapshot[]
+  entitlements      CustomerEntitlement[]
+  releaseTargets    CustomerReleaseTarget[]
 
   @@index([customerAccountId])
   @@index([deploymentKind])
@@ -3118,8 +3118,8 @@ model FleetHealthSnapshot {
   observedAt        DateTime          @default(now())
   createdAt         DateTime          @default(now())
 
-  customerAccount CustomerAccount   @relation(fields: [customerAccountId], references: [id], onDelete: Cascade)
-  deployment      InstanceRegistry? @relation(fields: [deploymentId], references: [id], onDelete: SetNull)
+  customerAccount CustomerAccount     @relation(fields: [customerAccountId], references: [id], onDelete: Cascade)
+  deployment      CustomerDeployment? @relation(fields: [deploymentId], references: [id], onDelete: SetNull)
 
   @@index([customerAccountId, snapshotKind, createdAt], map: "FleetHealthSnapshot_customerAccountId_snapshotKind_createdAt_id")
   @@index([deploymentId, snapshotKind, createdAt])
@@ -3142,8 +3142,8 @@ model CustomerEntitlement {
   createdAt          DateTime                  @default(now())
   updatedAt          DateTime                  @updatedAt
 
-  customerAccount CustomerAccount   @relation(fields: [customerAccountId], references: [id], onDelete: Cascade)
-  deployment      InstanceRegistry? @relation(fields: [deploymentId], references: [id], onDelete: SetNull)
+  customerAccount CustomerAccount     @relation(fields: [customerAccountId], references: [id], onDelete: Cascade)
+  deployment      CustomerDeployment? @relation(fields: [deploymentId], references: [id], onDelete: SetNull)
 
   @@unique([customerAccountId, scopeKey, entitlementKey], map: "CustomerEntitlement_account_scope_entitlement_key")
   @@index([customerAccountId, status])
@@ -3164,48 +3164,48 @@ model CustomerReleaseTarget {
   createdAt             DateTime                    @default(now())
   updatedAt             DateTime                    @updatedAt
 
-  customerAccount CustomerAccount  @relation(fields: [customerAccountId], references: [id], onDelete: Cascade)
-  deployment      InstanceRegistry @relation(fields: [deploymentId], references: [id], onDelete: Cascade)
+  customerAccount CustomerAccount    @relation(fields: [customerAccountId], references: [id], onDelete: Cascade)
+  deployment      CustomerDeployment @relation(fields: [deploymentId], references: [id], onDelete: Cascade)
 
   @@unique([deploymentId, targetReleaseImageTag])
   @@index([customerAccountId, status])
   @@index([deploymentId, status, createdAt])
 }
 
-model HostedInstanceEvent {
-  id          String   @id @default(uuid())
-  instanceId  String?
-  actorUserId String?
-  action      String
-  meta        Json?
-  createdAt   DateTime @default(now())
+model CustomerDeploymentEvent {
+  id           String   @id @default(uuid())
+  deploymentId String?
+  actorUserId  String?
+  action       String
+  meta         Json?
+  createdAt    DateTime @default(now())
 
-  instance InstanceRegistry? @relation(fields: [instanceId], references: [id], onDelete: SetNull)
+  deployment CustomerDeployment? @relation(fields: [deploymentId], references: [id], onDelete: SetNull)
 
-  @@index([instanceId, createdAt])
+  @@index([deploymentId, createdAt])
   @@index([action, createdAt])
 }
 
-model ControlPlaneInstanceAccess {
-  id         String                   @id @default(uuid())
-  instanceId String
-  userId     String
-  role       ControlPlaneInstanceRole @default(SUPPORT_VIEWER)
-  isActive   Boolean                  @default(true)
-  createdAt  DateTime                 @default(now())
-  updatedAt  DateTime                 @updatedAt
+model CustomerDeploymentAccess {
+  id           String                       @id @default(uuid())
+  deploymentId String
+  userId       String
+  role         CustomerDeploymentAccessRole @default(SUPPORT_VIEWER)
+  isActive     Boolean                      @default(true)
+  createdAt    DateTime                     @default(now())
+  updatedAt    DateTime                     @updatedAt
 
-  instance InstanceRegistry @relation(fields: [instanceId], references: [id], onDelete: Cascade)
-  user     User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  deployment CustomerDeployment @relation(fields: [deploymentId], references: [id], onDelete: Cascade)
+  user       User               @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  @@unique([instanceId, userId])
+  @@unique([deploymentId, userId])
   @@index([userId, isActive])
-  @@index([instanceId, isActive])
+  @@index([deploymentId, isActive])
 }
 
 model SupportOperation {
   id             String                 @id @default(uuid())
-  instanceId     String?
+  deploymentId   String?
   workspaceId    String?
   actorUserId    String?
   actorLabel     String                 @default("Corgtex Support")
@@ -3221,16 +3221,16 @@ model SupportOperation {
   createdAt      DateTime               @default(now())
   updatedAt      DateTime               @updatedAt
 
-  instance InstanceRegistry? @relation(fields: [instanceId], references: [id], onDelete: SetNull)
-  actor    User?             @relation("SupportOperationActor", fields: [actorUserId], references: [id], onDelete: SetNull)
+  deployment CustomerDeployment? @relation(fields: [deploymentId], references: [id], onDelete: SetNull)
+  actor      User?               @relation("SupportOperationActor", fields: [actorUserId], references: [id], onDelete: SetNull)
 
-  @@index([instanceId, createdAt])
+  @@index([deploymentId, createdAt])
   @@index([workspaceId, createdAt])
   @@index([status, createdAt])
   @@index([action, createdAt])
 }
 
-model InstanceBootstrapRun {
+model CustomerDeploymentBootstrapRun {
   id                       String    @id @default(uuid())
   customerSlug             String
   bundleUri                String

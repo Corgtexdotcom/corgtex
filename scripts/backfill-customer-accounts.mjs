@@ -56,30 +56,30 @@ function deploymentStatusFromProvisioningStatus(status) {
   }
 }
 
-function accountStatusFromDeployment(instance) {
-  if (instance.environment === "internal") return "INTERNAL";
-  if (instance.environment === "demo") return "DEMO";
-  if (instance.provisioningStatus === "active") return "ACTIVE";
-  if (instance.provisioningStatus === "suspended") return "SUSPENDED";
+function accountStatusFromDeployment(deployment) {
+  if (deployment.environment === "internal") return "INTERNAL";
+  if (deployment.environment === "demo") return "DEMO";
+  if (deployment.provisioningStatus === "active") return "ACTIVE";
+  if (deployment.provisioningStatus === "suspended") return "SUSPENDED";
   return "ONBOARDING";
 }
 
-function deploymentKind(instance) {
-  if (instance.environment === "internal") return "INTERNAL";
-  if (instance.environment === "demo") return "DEMO";
-  if (instance.railwayProjectId) return "HOSTED_DEDICATED";
-  if (instance.managedWorkspaceId) return "SHARED_WORKSPACE";
+function deploymentKind(deployment) {
+  if (deployment.environment === "internal") return "INTERNAL";
+  if (deployment.environment === "demo") return "DEMO";
+  if (deployment.railwayProjectId) return "HOSTED_DEDICATED";
+  if (deployment.managedWorkspaceId) return "SHARED_WORKSPACE";
   return "REMOTE_MANAGED";
 }
 
-async function ensureInstanceAccount(tx, instance, dryRun) {
-  const slug = instance.customerSlug
-    ? normalizeSlug(instance.customerSlug)
-    : normalizeSlug(instance.label || instance.url, `instance-${instance.id.slice(0, 8)}`);
-  const displayName = instance.label || slug;
-  const status = accountStatusFromDeployment(instance);
-  const kind = deploymentKind(instance);
-  const deploymentStatus = deploymentStatusFromProvisioningStatus(instance.provisioningStatus);
+async function ensureDeploymentAccount(tx, deployment, dryRun) {
+  const slug = deployment.customerSlug
+    ? normalizeSlug(deployment.customerSlug)
+    : normalizeSlug(deployment.label || deployment.url, `deployment-${deployment.id.slice(0, 8)}`);
+  const displayName = deployment.label || slug;
+  const status = accountStatusFromDeployment(deployment);
+  const kind = deploymentKind(deployment);
+  const deploymentStatus = deploymentStatusFromProvisioningStatus(deployment.provisioningStatus);
   if (dryRun) {
     return { slug, displayName, status, kind, deploymentStatus };
   }
@@ -89,21 +89,21 @@ async function ensureInstanceAccount(tx, instance, dryRun) {
     update: {
       displayName,
       status,
-      supportOwnerEmail: instance.supportOwnerEmail,
+      supportOwnerEmail: deployment.supportOwnerEmail,
     },
     create: {
       slug,
       displayName,
       status,
       managementAuthority: "CORGTEX",
-      supportOwnerEmail: instance.supportOwnerEmail,
+      supportOwnerEmail: deployment.supportOwnerEmail,
     },
   });
 
-  await tx.instanceRegistry.update({
-    where: { id: instance.id },
+  await tx.customerDeployment.update({
+    where: { id: deployment.id },
     data: {
-      customerSlug: instance.customerSlug || slug,
+      customerSlug: deployment.customerSlug || slug,
       customerAccountId: account.id,
       deploymentKind: kind,
       deploymentStatus,
@@ -113,7 +113,7 @@ async function ensureInstanceAccount(tx, instance, dryRun) {
   if (!account.primaryDeploymentId) {
     await tx.customerAccount.update({
       where: { id: account.id },
-      data: { primaryDeploymentId: instance.id },
+      data: { primaryDeploymentId: deployment.id },
     });
   }
   return { slug, displayName, status, kind, deploymentStatus };
@@ -146,7 +146,7 @@ async function ensureWorkspaceAccount(tx, workspace, dryRun) {
       managementAuthority: "CORGTEX",
     },
   });
-  const deployment = await tx.instanceRegistry.upsert({
+  const deployment = await tx.customerDeployment.upsert({
     where: { customerSlug: workspace.slug },
     update: {
       label: workspace.name,
@@ -191,9 +191,9 @@ async function main() {
   const dryRun = hasFlag(args, "--dry-run");
 
   const result = await prisma.$transaction(async (tx) => {
-    const instanceRows = workspaceIds.length || workspaceSlugs.length
+    const deploymentRows = workspaceIds.length || workspaceSlugs.length
       ? []
-      : await tx.instanceRegistry.findMany({ orderBy: { createdAt: "asc" } });
+      : await tx.customerDeployment.findMany({ orderBy: { createdAt: "asc" } });
     const workspaceRows = workspaceIds.length || workspaceSlugs.length
       ? await tx.workspace.findMany({
           where: {
@@ -206,15 +206,15 @@ async function main() {
         })
       : [];
 
-    const instances = [];
-    for (const instance of instanceRows) {
-      instances.push(await ensureInstanceAccount(tx, instance, dryRun));
+    const deployments = [];
+    for (const deployment of deploymentRows) {
+      deployments.push(await ensureDeploymentAccount(tx, deployment, dryRun));
     }
     const workspaces = [];
     for (const workspace of workspaceRows) {
       workspaces.push(await ensureWorkspaceAccount(tx, workspace, dryRun));
     }
-    return { dryRun, instances, workspaces };
+    return { dryRun, deployments, workspaces };
   });
 
   console.log(JSON.stringify(result, null, 2));

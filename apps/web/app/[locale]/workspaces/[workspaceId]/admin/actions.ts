@@ -13,13 +13,13 @@ import {
   adminBulkInvite,
   adminResendAccessLink,
   adminCreateWorkspace,
-  registerExternalInstance,
-  provisionHostedCustomerInstance,
-  removeExternalInstance,
-  probeExternalInstanceHealth,
-  suspendHostedInstance,
-  triggerHostedInstanceBootstrap,
-  upgradeHostedInstanceRelease,
+  registerCustomerDeploymentRecord,
+  provisionCustomerDeployment,
+  removeCustomerDeployment,
+  probeCustomerDeploymentHealth,
+  suspendCustomerDeployment,
+  triggerCustomerDeploymentBootstrap,
+  upgradeCustomerDeploymentRelease,
   getWorkspaceAdminDetail,
   type RailwayRuntimeServiceSource
 } from "@corgtex/domain";
@@ -250,11 +250,11 @@ export async function adminRetryFailedJobAction(formData: FormData) {
   refresh(workspaceId);
 }
 
-export async function adminRegisterInstanceAction(formData: FormData) {
+export async function adminRegisterCustomerDeploymentAction(formData: FormData) {
   const workspaceId = asString(formData, "workspaceId");
   const actor = await verifyGlobalAdmin(workspaceId);
   
-  await registerExternalInstance(actor, {
+  await registerCustomerDeploymentRecord(actor, {
     url: asString(formData, "url"),
     label: asString(formData, "label"),
     environment: formData.get("environment") as string | undefined,
@@ -275,14 +275,14 @@ export async function adminRegisterInstanceAction(formData: FormData) {
   refresh(workspaceId);
 }
 
-export async function adminProvisionHostedCustomerAction(formData: FormData) {
+export async function adminProvisionCustomerDeploymentAction(formData: FormData) {
   const workspaceId = asString(formData, "workspaceId");
   const actor = await verifyGlobalAdmin(workspaceId);
   const webImage = optionalString(formData, "webImage");
   const workerImage = optionalString(formData, "workerImage");
   const releaseImageTag = asString(formData, "releaseImageTag");
 
-  await provisionHostedCustomerInstance(actor, {
+  await provisionCustomerDeployment(actor, {
     label: asString(formData, "label"),
     customerSlug: asString(formData, "customerSlug"),
     region: asString(formData, "region"),
@@ -304,42 +304,42 @@ export async function adminProvisionHostedCustomerAction(formData: FormData) {
   refresh(workspaceId);
 }
 
-export async function adminRemoveInstanceAction(formData: FormData) {
+export async function adminRemoveCustomerDeploymentAction(formData: FormData) {
   const workspaceId = asString(formData, "workspaceId");
   const actor = await verifyGlobalAdmin(workspaceId);
   
-  await removeExternalInstance(actor, asString(formData, "instanceId"));
+  await removeCustomerDeployment(actor, asString(formData, "deploymentId"));
 
   refresh(workspaceId);
 }
 
-export async function adminProbeInstanceHealthAction(formData: FormData) {
+export async function adminProbeCustomerDeploymentHealthAction(formData: FormData) {
   const workspaceId = asString(formData, "workspaceId");
   const actor = await verifyGlobalAdmin(workspaceId);
   
-  await probeExternalInstanceHealth(actor, asString(formData, "instanceId"));
+  await probeCustomerDeploymentHealth(actor, asString(formData, "deploymentId"));
 
   refresh(workspaceId);
 }
 
-export async function adminSuspendHostedInstanceAction(formData: FormData) {
+export async function adminSuspendCustomerDeploymentAction(formData: FormData) {
   const workspaceId = asString(formData, "workspaceId");
   const actor = await verifyGlobalAdmin(workspaceId);
 
-  await suspendHostedInstance(actor, asString(formData, "instanceId"));
+  await suspendCustomerDeployment(actor, asString(formData, "deploymentId"));
 
   refresh(workspaceId);
 }
 
-export async function adminUpgradeHostedInstanceAction(formData: FormData) {
+export async function adminUpgradeCustomerDeploymentAction(formData: FormData) {
   const workspaceId = asString(formData, "workspaceId");
   const actor = await verifyGlobalAdmin(workspaceId);
   const webImage = optionalString(formData, "webImage");
   const workerImage = optionalString(formData, "workerImage");
   const releaseImageTag = asString(formData, "releaseImageTag");
 
-  await upgradeHostedInstanceRelease(actor, {
-    instanceId: asString(formData, "instanceId"),
+  await upgradeCustomerDeploymentRelease(actor, {
+    deploymentId: asString(formData, "deploymentId"),
     releaseVersion: formData.get("releaseVersion") as string | null,
     releaseImageTag,
     webImage,
@@ -355,8 +355,8 @@ export async function adminTriggerBootstrapAction(formData: FormData) {
   const workspaceId = asString(formData, "workspaceId");
   const actor = await verifyGlobalAdmin(workspaceId);
 
-  await triggerHostedInstanceBootstrap(actor, {
-    instanceId: asString(formData, "instanceId"),
+  await triggerCustomerDeploymentBootstrap(actor, {
+    deploymentId: asString(formData, "deploymentId"),
     token: asString(formData, "bootstrapToken"),
     expiresAt: new Date(asString(formData, "expiresAt")),
   });

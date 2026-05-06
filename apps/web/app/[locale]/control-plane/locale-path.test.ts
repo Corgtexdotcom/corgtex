@@ -4,22 +4,22 @@ import { controlPlaneLocaleCookie, localizedControlPlanePath } from "./locale-pa
 describe("localizedControlPlanePath", () => {
   it("uses the unprefixed default-locale path for English", () => {
     expect(localizedControlPlanePath("/control-plane", "en")).toBe("/control-plane");
-    expect(localizedControlPlanePath("/control-plane/customers/customer-1", "en")).toBe(
-      "/control-plane/customers/customer-1",
+    expect(localizedControlPlanePath("/control-plane/deployments/customer-1", "en")).toBe(
+      "/control-plane/deployments/customer-1",
     );
   });
 
   it("adds the Spanish prefix while preserving nested control plane paths", () => {
     expect(localizedControlPlanePath("/control-plane", "es")).toBe("/es/control-plane");
-    expect(localizedControlPlanePath("/control-plane/customers/customer-1", "es")).toBe(
-      "/es/control-plane/customers/customer-1",
+    expect(localizedControlPlanePath("/control-plane/deployments/customer-1", "es")).toBe(
+      "/es/control-plane/deployments/customer-1",
     );
   });
 
   it("normalizes paths that already include a locale prefix", () => {
     expect(localizedControlPlanePath("/es/control-plane", "en")).toBe("/control-plane");
-    expect(localizedControlPlanePath("/en/control-plane/customers/customer-1", "es")).toBe(
-      "/es/control-plane/customers/customer-1",
+    expect(localizedControlPlanePath("/en/control-plane/deployments/customer-1", "es")).toBe(
+      "/es/control-plane/deployments/customer-1",
     );
   });
 });

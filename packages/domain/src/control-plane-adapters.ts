@@ -16,7 +16,7 @@ export type ControlPlaneAdapterInput = {
 
 export type ControlPlaneAdapter = {
   kind: ControlPlaneAdapterKind;
-  instanceId: string;
+  deploymentId: string;
   canReadCentralWorkspace: boolean;
   canUseSupportConnector: boolean;
   canFederateControlPlane: boolean;
@@ -30,7 +30,7 @@ export class ManagedWorkspaceAdapter implements ControlPlaneAdapter {
   readonly canFederateControlPlane = false;
   readonly requiresConnectorSetup = false;
 
-  constructor(readonly instanceId: string) {}
+  constructor(readonly deploymentId: string) {}
 }
 
 export class RemoteMcpAdapter implements ControlPlaneAdapter {
@@ -40,7 +40,7 @@ export class RemoteMcpAdapter implements ControlPlaneAdapter {
   readonly canFederateControlPlane = false;
 
   constructor(
-    readonly instanceId: string,
+    readonly deploymentId: string,
     readonly requiresConnectorSetup: boolean,
   ) {}
 }
@@ -52,7 +52,7 @@ export class FederatedControlPlaneAdapter implements ControlPlaneAdapter {
   readonly canFederateControlPlane = true;
 
   constructor(
-    readonly instanceId: string,
+    readonly deploymentId: string,
     readonly requiresConnectorSetup: boolean,
   ) {}
 }
@@ -64,7 +64,7 @@ export class UnconfiguredControlPlaneAdapter implements ControlPlaneAdapter {
   readonly canFederateControlPlane = false;
   readonly requiresConnectorSetup = true;
 
-  constructor(readonly instanceId: string) {}
+  constructor(readonly deploymentId: string) {}
 }
 
 function hasConnectorSignal(input: ControlPlaneAdapterInput) {
@@ -92,4 +92,3 @@ export function createControlPlaneAdapter(input: ControlPlaneAdapterInput): Cont
 
   return new UnconfiguredControlPlaneAdapter(input.id);
 }
-

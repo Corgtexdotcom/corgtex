@@ -25,7 +25,7 @@ export async function GET(request: NextRequest) {
         trialDays: PROCUREMENT_TRIAL_TTL_DAYS,
         limits: PROCUREMENT_TRIAL_LIMITS,
       },
-      hostedInstances: {
+      customerDeployments: {
         publicProvisioning: false,
         note: "Dedicated hosted customer infrastructure is provisioned through the internal Corgtex control plane after review.",
       },

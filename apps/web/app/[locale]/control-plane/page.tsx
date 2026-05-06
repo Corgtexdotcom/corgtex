@@ -1,13 +1,13 @@
 import { notFound } from "next/navigation";
 import { getFormatter, getTranslations } from "next-intl/server";
-import { listControlPlaneCustomers, requireControlPlaneAccess } from "@corgtex/domain";
+import { listControlPlaneDeployments, requireControlPlaneAccess } from "@corgtex/domain";
 import { Link } from "@/i18n/routing";
 import { requirePageActor } from "@/lib/auth";
 import { ControlPlaneLanguageSwitcher } from "./ControlPlaneLanguageSwitcher";
 
 export const dynamic = "force-dynamic";
 
-type ControlPlaneCustomer = Awaited<ReturnType<typeof listControlPlaneCustomers>>[number];
+type ControlPlaneCustomer = Awaited<ReturnType<typeof listControlPlaneDeployments>>[number];
 
 const CONTROL_PLANE_SECTION_IDS = [
   "fleet",
@@ -55,7 +55,7 @@ function statusLabel(t: ControlPlaneT, status?: string | null) {
   return normalized && key !== "unknown" ? t(`status.${key}` as any) : (status ? status.replace(/_/g, " ") : t("status.unknown"));
 }
 
-function instanceReadiness(customer: ControlPlaneCustomer, t: ControlPlaneT) {
+function deploymentReadiness(customer: ControlPlaneCustomer, t: ControlPlaneT) {
   const issues = [
     !customer.region ? t("readiness.regionMissing") : null,
     !customer.dataResidency ? t("readiness.residencyMissing") : null,
@@ -101,13 +101,13 @@ export default async function ControlPlanePage({
   }
 
   const query = ((await searchParams)?.q ?? "").trim().toLowerCase();
-  const customers = await listControlPlaneCustomers(actor);
+  const customers = await listControlPlaneDeployments(actor);
   const filteredCustomers = customers.filter((customer) => matchesQuery(customer, query));
   const format = await getFormatter();
   const t = await getTranslations("controlPlane");
   const totals = customers.reduce((summary, customer) => ({
     active: summary.active + (customer.provisioningStatus === "active" ? 1 : 0),
-    attention: summary.attention + (instanceReadiness(customer, t).status === "attention" ? 1 : 0),
+    attention: summary.attention + (deploymentReadiness(customer, t).status === "attention" ? 1 : 0),
     supportReady: summary.supportReady + (customer.hasSupportCredential ? 1 : 0),
     managed: summary.managed + (customer.managedWorkspace ? 1 : 0),
     failedOperations: summary.failedOperations + customer.supportOperations.filter((op) => op.status === "FAILED").length,
@@ -186,7 +186,7 @@ export default async function ControlPlanePage({
               </thead>
               <tbody>
                 {filteredCustomers.map((customer) => {
-                  const readiness = instanceReadiness(customer, t);
+                  const readiness = deploymentReadiness(customer, t);
                   return (
                     <tr key={customer.id} style={{ borderBottom: "1px solid var(--border-color)" }}>
                       <td style={{ padding: 14 }}>
@@ -230,7 +230,7 @@ export default async function ControlPlanePage({
                       </td>
                       <td style={{ padding: 14 }}>
                         {customer.hasDeployment ? (
-                          <Link className="link-button small" href={`/control-plane/customers/${customer.id}`}>
+                          <Link className="link-button small" href={`/control-plane/deployments/${customer.id}`}>
                             {t("customers.open")}
                           </Link>
                         ) : (

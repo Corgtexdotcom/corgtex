@@ -14,7 +14,7 @@ interface Props {
       pendingJobs: number;
       failedJobs: number;
     };
-    externalInstances: any[];
+    customerDeployments: any[];
   };
 }
 

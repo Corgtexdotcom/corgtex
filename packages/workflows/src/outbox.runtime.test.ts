@@ -35,7 +35,7 @@ const {
     communicationInstallation: {
       findMany: vi.fn(),
     },
-    instanceRegistry: {
+    customerDeployment: {
       findMany: vi.fn(),
     },
   },
@@ -118,7 +118,7 @@ describe("runPendingJobs", () => {
     prismaMock.member.findMany.mockReset().mockResolvedValue([]);
     prismaMock.externalDataSource.findMany.mockReset().mockResolvedValue([]);
     prismaMock.communicationInstallation.findMany.mockReset().mockResolvedValue([]);
-    prismaMock.instanceRegistry.findMany.mockReset().mockResolvedValue([]);
+    prismaMock.customerDeployment.findMany.mockReset().mockResolvedValue([]);
     txMock.$queryRaw.mockReset().mockResolvedValue([]);
     txMock.workflowJob.upsert.mockReset().mockResolvedValue({ id: "job-1" });
     runAgentWorkflowJobMock.mockReset();
@@ -200,7 +200,7 @@ describe("runPendingJobs", () => {
         workspaceId: null,
         type: "control-plane.fleet-snapshot",
         payload: {
-          instanceId: "inst-1",
+          deploymentId: "inst-1",
           snapshotKinds: ["HEALTH", "RELEASE"],
           reason: "Scheduled sweep.",
         },
@@ -211,7 +211,7 @@ describe("runPendingJobs", () => {
     await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
 
     expect(runControlPlaneFleetSnapshotJobMock).toHaveBeenCalledWith({
-      instanceId: "inst-1",
+      deploymentId: "inst-1",
       snapshotKinds: ["HEALTH", "RELEASE"],
       reason: "Scheduled sweep.",
       limit: null,
@@ -428,7 +428,7 @@ describe("schedulePeriodicJobs", () => {
     prismaMock.communicationInstallation.findMany.mockReset().mockResolvedValue([
       { id: "install-1", workspaceId: "ws-1" },
     ]);
-    prismaMock.instanceRegistry.findMany.mockReset().mockResolvedValue([]);
+    prismaMock.customerDeployment.findMany.mockReset().mockResolvedValue([]);
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-04-29T20:15:00Z"));
   });
@@ -449,14 +449,14 @@ describe("schedulePeriodicJobs", () => {
 
   it("schedules bounded control-plane fleet snapshot jobs", async () => {
     prismaMock.communicationInstallation.findMany.mockResolvedValue([]);
-    prismaMock.instanceRegistry.findMany.mockResolvedValue([
+    prismaMock.customerDeployment.findMany.mockResolvedValue([
       { id: "inst-1" },
       { id: "inst-2" },
     ]);
 
     await expect(schedulePeriodicJobs()).resolves.toBe(2);
 
-    expect(prismaMock.instanceRegistry.findMany).toHaveBeenCalledWith(expect.objectContaining({
+    expect(prismaMock.customerDeployment.findMany).toHaveBeenCalledWith(expect.objectContaining({
       where: {
         customerAccountId: { not: null },
         deploymentStatus: { notIn: ["RETIRED", "SUSPENDED"] },
@@ -470,7 +470,7 @@ describe("schedulePeriodicJobs", () => {
         eventId: null,
         type: "control-plane.fleet-snapshot",
         payload: expect.objectContaining({
-          instanceId: "inst-1",
+          deploymentId: "inst-1",
           reason: "Scheduled Control Plane fleet sweep.",
         }),
         dedupeKey: "inst-1:control-plane-fleet-snapshot:493748",

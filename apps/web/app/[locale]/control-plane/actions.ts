@@ -43,62 +43,62 @@ function parseJsonObject(value: string) {
   return parsed as Record<string, unknown>;
 }
 
-function revalidateControlPlaneCustomer(instanceId: string) {
-  revalidatePath(`/control-plane/customers/${instanceId}`);
-  revalidatePath(`/es/control-plane/customers/${instanceId}`);
+function revalidateControlPlaneDeployment(deploymentId: string) {
+  revalidatePath(`/control-plane/deployments/${deploymentId}`);
+  revalidatePath(`/es/control-plane/deployments/${deploymentId}`);
 }
 
 export async function configureSupportConnectorAction(formData: FormData) {
   const actor = await requirePageActor();
-  const instanceId = asString(formData, "instanceId");
+  const deploymentId = asString(formData, "deploymentId");
   await configureSupportConnector(actor, {
-    instanceId,
+    deploymentId,
     supportBaseUrl: optionalString(formData, "supportBaseUrl"),
     supportMcpUrl: optionalString(formData, "supportMcpUrl"),
     supportCredential: asString(formData, "supportCredential"),
     supportCredentialLabel: optionalString(formData, "supportCredentialLabel"),
     supportNotes: optionalString(formData, "supportNotes"),
   });
-  revalidateControlPlaneCustomer(instanceId);
+  revalidateControlPlaneDeployment(deploymentId);
 }
 
 export async function runSupportOperationAction(formData: FormData) {
   const actor = await requirePageActor();
-  const instanceId = asString(formData, "instanceId");
+  const deploymentId = asString(formData, "deploymentId");
   const action = asString(formData, "action") as SupportAction;
   await runCustomerSupportOperation(actor, {
-    instanceId,
+    deploymentId,
     action,
     reason: optionalString(formData, "reason"),
     arguments: parseJsonObject(asString(formData, "argumentsJson")),
     remoteWorkspaceId: optionalString(formData, "remoteWorkspaceId"),
   });
-  revalidateControlPlaneCustomer(instanceId);
+  revalidateControlPlaneDeployment(deploymentId);
 }
 
 export async function recordBreakGlassAction(formData: FormData) {
   const actor = await requirePageActor();
-  const instanceId = asString(formData, "instanceId");
+  const deploymentId = asString(formData, "deploymentId");
   await recordBreakGlassSupportNote(actor, {
-    instanceId,
+    deploymentId,
     reason: asString(formData, "reason"),
     notes: asString(formData, "notes"),
   });
-  revalidateControlPlaneCustomer(instanceId);
+  revalidateControlPlaneDeployment(deploymentId);
 }
 
 export async function refreshSupportSnapshotAction(formData: FormData) {
   const actor = await requirePageActor();
-  const instanceId = asString(formData, "instanceId");
-  await fetchCustomerSupportSnapshot(actor, instanceId);
-  revalidateControlPlaneCustomer(instanceId);
+  const deploymentId = asString(formData, "deploymentId");
+  await fetchCustomerSupportSnapshot(actor, deploymentId);
+  revalidateControlPlaneDeployment(deploymentId);
 }
 
 export async function configureMeetingRecorderIntegrationAction(formData: FormData) {
   const actor = await requirePageActor();
-  const instanceId = asString(formData, "instanceId");
+  const deploymentId = asString(formData, "deploymentId");
   await configureControlPlaneMeetingRecorderIntegration(actor, {
-    instanceId,
+    deploymentId,
     entitlementEnabled: asBoolean(formData, "entitlementEnabled"),
     enabled: asBoolean(formData, "enabled"),
     autoRecordEnabled: asBoolean(formData, "autoRecordEnabled"),
@@ -109,30 +109,30 @@ export async function configureMeetingRecorderIntegrationAction(formData: FormDa
     entryMessage: optionalString(formData, "entryMessage"),
     reason: asString(formData, "reason"),
   });
-  revalidateControlPlaneCustomer(instanceId);
+  revalidateControlPlaneDeployment(deploymentId);
 }
 
 export async function runContextOperationAction(formData: FormData) {
   const actor = await requirePageActor();
-  const instanceId = asString(formData, "instanceId");
+  const deploymentId = asString(formData, "deploymentId");
   await runControlPlaneContextOperation(actor, {
-    instanceId,
+    deploymentId,
     operation: asString(formData, "operation"),
     sourceId: optionalString(formData, "sourceId"),
     reason: asString(formData, "reason"),
   });
-  revalidateControlPlaneCustomer(instanceId);
+  revalidateControlPlaneDeployment(deploymentId);
 }
 
 export async function runReleaseOperationAction(formData: FormData) {
   const actor = await requirePageActor();
-  const instanceId = asString(formData, "instanceId");
+  const deploymentId = asString(formData, "deploymentId");
   await runControlPlaneReleaseOperation(actor, {
-    instanceId,
+    deploymentId,
     operation: asString(formData, "operation"),
     targetReleaseImageTag: asString(formData, "targetReleaseImageTag"),
     targetReleaseVersion: optionalString(formData, "targetReleaseVersion"),
     reason: asString(formData, "reason"),
   });
-  revalidateControlPlaneCustomer(instanceId);
+  revalidateControlPlaneDeployment(deploymentId);
 }

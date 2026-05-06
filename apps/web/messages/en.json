@@ -43,7 +43,7 @@
     "btnCheckNow": "Check Now",
     "btnManage": "Manage",
     "btnRemove": "Remove",
-    "btnRemoveInstance": "Remove",
+    "btnRemoveDeployment": "Remove",
     "btnTriggerPasswordReset": "Trigger Password Reset Email",
     "colActions": "Actions",
     "colCreated": "Created",
@@ -59,17 +59,17 @@
     "createWorkspaceBtn": "Create",
     "createWorkspaceTitle": "Create Workspace",
     "crossWorkspaceFailedJobs": "Failed Jobs",
-    "externalInstances": "External Instances",
+    "customerDeployments": "Customer Deployments",
     "failedJobs": "{count} failed",
     "formNotes": "Notes",
-    "instanceEnvironment": "Environment",
-    "instanceHealthDegraded": "Degraded",
-    "instanceHealthDown": "Down",
-    "instanceHealthOk": "Healthy",
-    "instanceHealthUnknown": "Unknown",
-    "instanceLabel": "Label",
-    "instanceLastChecked": "Last Checked",
-    "instanceUrl": "URL",
+    "deploymentEnvironment": "Environment",
+    "deploymentHealthDegraded": "Degraded",
+    "deploymentHealthDown": "Down",
+    "deploymentHealthOk": "Healthy",
+    "deploymentHealthUnknown": "Unknown",
+    "deploymentLabel": "Label",
+    "deploymentLastChecked": "Last Checked",
+    "deploymentUrl": "URL",
     "labelRole": "Role",
     "labelTargetWorkspace": "Target Workspace",
     "lastJobAt": "Last job: {date}",
@@ -85,7 +85,7 @@
     "placeholderSearchUsers": "Search users by email or name...",
     "platformAdmin": "Control Plane",
     "platformAdminDesc": "Global cross-workspace administration and monitoring.",
-    "registerInstance": "Register Instance",
+    "registerDeployment": "Register Deployment",
     "roleAdmin": "Admin",
     "roleContributor": "Contributor",
     "roleFacilitator": "Facilitator",
@@ -1151,11 +1151,11 @@
   "controlPlane": {
     "title": "Control Plane",
     "eyebrow": "Enterprise AI governance",
-    "description": "Proprietary operations surface for hosted customer instances, governed context, enterprise integrations, AI-agent lifecycle controls, release rollout, support operations, audit, and Codex/MCP access.",
+    "description": "Proprietary operations surface for customer deployments, governed context, enterprise integrations, AI-agent lifecycle controls, release rollout, support operations, audit, and Codex/MCP access.",
     "sections": {
       "fleet": {
         "label": "Fleet",
-        "detail": "Hosted instance health, rollout state, and customer readiness."
+        "detail": "Customer deployment health, rollout state, and customer readiness."
       },
       "customers": {
         "label": "Customers",
@@ -1236,11 +1236,11 @@
     "fleetCards": {
       "customers": {
         "label": "Customers",
-        "detail": "Registered enterprise instances"
+        "detail": "Registered enterprise deployments"
       },
       "active": {
         "label": "Active",
-        "detail": "Instances reporting active provisioning"
+        "detail": "Deployments reporting active provisioning"
       },
       "managed": {
         "label": "Managed locally",
@@ -1274,7 +1274,7 @@
       "noOwner": "No owner",
       "open": "Open",
       "needsDeployment": "Needs deployment",
-      "empty": "No customer instances match this search."
+      "empty": "No customer deployments match this search."
     },
     "operationHistory": {
       "title": "Operation history",
@@ -1284,7 +1284,7 @@
     },
     "customerNotFound": {
       "eyebrow": "Customer control plane",
-      "title": "Customer instance not found",
+      "title": "Customer deployment not found",
       "description": "This customer record is no longer registered in the Control Plane. Return to the fleet and open the current customer record.",
       "backToFleet": "Back to fleet"
     },
@@ -1346,7 +1346,7 @@
         "ingestionRisk": "Ingestion risk",
         "noSupportConnectorError": "No support connector error recorded.",
         "operationsTitle": "Context operations",
-        "operationsDescription": "Queue source syncs or disable a noisy source. Every operation writes the hosted-instance audit trail.",
+        "operationsDescription": "Queue source syncs or disable a noisy source. Every operation writes the customer-deployment audit trail.",
         "openBrain": "Open brain",
         "operationLabel": "Operation",
         "syncAllSources": "Sync all active sources",
@@ -1394,7 +1394,7 @@
         "riskAndFailures": "Risk and failures",
         "noRiskOrFailures": "No risky tool calls or failed workflow jobs were found recently.",
         "remoteTitle": "Remote AI governance",
-        "remoteDescription": "This customer has no managed workspace link. Use support operations to inspect agent runs and runtime jobs from the customer instance."
+        "remoteDescription": "This customer has no managed workspace link. Use support operations to inspect agent runs and runtime jobs from the customer deployment."
       },
       "integrations": {
         "title": "Enterprise Integrations",
@@ -1429,7 +1429,7 @@
         "reasonPlaceholder": "Enterprise recorder entitlement update",
         "entryMessage": "Entry message",
         "saveRecorderEntitlement": "Save recorder entitlement",
-        "linkManagedWorkspace": "Link a managed workspace to edit recorder entitlements from Control Plane. Remote instances can still be inspected through support operations."
+        "linkManagedWorkspace": "Link a managed workspace to edit recorder entitlements from Control Plane. Remote deployments can still be inspected through support operations."
       },
       "releases": {
         "title": "Release Operations",
@@ -1447,7 +1447,7 @@
         "prepareUpgrade": "Prepare release upgrade",
         "prepareUpgradeDescription": "Records operator intent, target release, readiness checks, drift, and rollback evidence. This does not deploy.",
         "managedWorkspaceLinked": "Managed workspace linked",
-        "centralInstanceRecord": "Central instance record",
+        "centralDeploymentRecord": "Central deployment record",
         "targetImageTag": "Target image tag",
         "targetImageTagPlaceholder": "Enter target image tag",
         "targetVersion": "Target version",
@@ -1516,8 +1516,8 @@
       "audit": {
         "supportOperations": "Support Operations",
         "mutatingOperations": "{count} mutating or repair operations recorded for this customer.",
-        "hostedInstanceEvents": "Hosted Instance Events",
-        "noHostedInstanceEvents": "No hosted instance events recorded yet."
+        "customerDeploymentEvents": "Customer Deployment Events",
+        "noCustomerDeploymentEvents": "No customer deployment events recorded yet."
       },
       "mcp": {
         "title": "MCP/CLI Access",
