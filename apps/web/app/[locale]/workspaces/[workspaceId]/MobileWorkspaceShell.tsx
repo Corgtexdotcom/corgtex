@@ -29,6 +29,7 @@ type MobileWorkspaceShellProps = {
   conversations: ConversationSummary[];
   showLanguageSwitcher: boolean;
   showPlatformAdmin: boolean;
+  controlPlaneHref: string;
 };
 
 const MODE_STORAGE_KEY = "corgtex.mobileMode";
@@ -53,6 +54,7 @@ export function MobileWorkspaceShell({
   conversations,
   showLanguageSwitcher,
   showPlatformAdmin,
+  controlPlaneHref,
 }: MobileWorkspaceShellProps) {
   const pathname = usePathname();
   const tNav = useTranslations("nav");
@@ -310,7 +312,7 @@ export function MobileWorkspaceShell({
                 <div className="mobile-more-group">
                   <div className="mobile-more-group-label">{tNav("globalAdmin")}</div>
                   <a
-                    href="/control-plane"
+                    href={controlPlaneHref}
                     className="mobile-more-link"
                     onClick={() => {
                       setMode("workspace", "more_sheet_admin_link");

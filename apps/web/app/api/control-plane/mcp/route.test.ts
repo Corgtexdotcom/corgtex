@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   listControlPlaneDeployments: vi.fn(),
   requireControlPlaneAccess: vi.fn(),
@@ -33,11 +33,34 @@ function request(body: unknown) {
 }
 describe("/api/control-plane/mcp", () => {
   beforeEach(() => {
+    vi.resetModules();
+    vi.stubEnv("CONTROL_PLANE_MODE", "true");
     vi.clearAllMocks();
     mocks.resolveControlPlaneRequestActor.mockResolvedValue({ kind: "agent", authProvider: "control-plane", label: "control-plane-agent", scopes: ["control-plane:read"] });
     mocks.requireControlPlaneAccess.mockResolvedValue({ role: "OPERATOR" });
     mocks.listControlPlaneDeployments.mockResolvedValue([]);
   });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("does not expose MCP tools outside the dedicated control-plane deployment", async () => {
+    vi.stubEnv("CONTROL_PLANE_MODE", "false");
+    const { POST } = await import("./route");
+
+    const response = await POST(request({ jsonrpc: "2.0", id: 1, method: "tools/list" }) as never);
+
+    expect(response.status).toBe(404);
+    expect(mocks.resolveControlPlaneRequestActor).not.toHaveBeenCalled();
+    await expect(response.json()).resolves.toEqual({
+      error: {
+        code: "CONTROL_PLANE_NOT_AVAILABLE",
+        message: "Use the dedicated Ops control plane for control-plane operations.",
+      },
+    });
+  });
+
   it("lists the governed control-plane tool surface", async () => {
     const { POST } = await import("./route");
     const response = await POST(request({ jsonrpc: "2.0", id: 1, method: "tools/list" }) as never);

@@ -9,7 +9,7 @@
  *
  * Usage:
  *   npm run seed:demo-video
- *   # or after running seed:demo:
+ *   # or after running seed:jnj-demo:
  *   npx tsx scripts/seed-demo-video.ts
  */
 import { PrismaClient } from "@prisma/client";

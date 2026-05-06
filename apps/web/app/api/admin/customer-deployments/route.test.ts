@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
   isDatabaseUnavailableError,
@@ -34,15 +34,41 @@ vi.mock("@corgtex/domain", () => ({
 }));
 
 vi.mock("@corgtex/shared", () => ({
+  env: {
+    get CONTROL_PLANE_MODE() {
+      return process.env.CONTROL_PLANE_MODE === "true" || process.env.CONTROL_PLANE_MODE === "1";
+    },
+  },
   isDatabaseUnavailableError,
 }));
 
 describe("customer deployment admin API", () => {
   beforeEach(() => {
     vi.resetModules();
+    vi.stubEnv("CONTROL_PLANE_MODE", "true");
     vi.clearAllMocks();
     resolveRequestActor.mockResolvedValue({ kind: "user", user: { id: "operator_1" } });
     isDatabaseUnavailableError.mockReturnValue(false);
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("does not run legacy customer-deployment admin logic outside control-plane mode", async () => {
+    vi.stubEnv("CONTROL_PLANE_MODE", "false");
+
+    const { GET } = await import("./route");
+    const response = await GET(new Request("http://localhost/api/admin/customer-deployments") as never);
+
+    expect(response.status).toBe(404);
+    expect(resolveRequestActor).not.toHaveBeenCalled();
+    await expect(response.json()).resolves.toEqual({
+      error: {
+        code: "CONTROL_PLANE_NOT_AVAILABLE",
+        message: "Use the dedicated Ops control plane for control-plane operations.",
+      },
+    });
   });
 
   it("lists customer deployments through the global-operator domain path", async () => {

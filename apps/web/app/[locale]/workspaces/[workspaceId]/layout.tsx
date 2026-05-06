@@ -13,6 +13,7 @@ import { ThemeToggle } from "../../../ThemeToggle";
 import { buildWorkspaceCapabilities } from "@/lib/workspace-capabilities";
 import { filterNavGroupsByWorkspaceAccess, getWorkspaceFeatureFlags } from "@/lib/workspace-feature-flags";
 import { MobileWorkspaceShell } from "./MobileWorkspaceShell";
+import { getControlPlaneHref } from "@/lib/control-plane-url";
 
 export const dynamic = "force-dynamic";
 
@@ -20,7 +21,7 @@ type Workspace = Awaited<ReturnType<typeof listActorWorkspaces>>[number];
 
 import { WORKSPACE_NAV_GROUPS as navGroups } from "@/lib/nav-config";
 
-export async function generateMetadata({ params }: { params: Promise<{ workspaceId: string }> }): Promise<Metadata> {
+export async function generateMetadata({ params }: { params: Promise<{ locale: string; workspaceId: string }> }): Promise<Metadata> {
   const { workspaceId } = await params;
   const workspace = await prisma.workspace.findUnique({ where: { id: workspaceId }, select: { slug: true, name: true } });
   if (!workspace) return { title: "Corgtex" };
@@ -33,9 +34,9 @@ export default async function WorkspaceLayout({
   params,
 }: {
   children: React.ReactNode;
-  params: Promise<{ workspaceId: string }>;
+  params: Promise<{ locale: string; workspaceId: string }>;
 }) {
-  const { workspaceId } = await params;
+  const { locale, workspaceId } = await params;
   const actor = await requirePageActor();
   const userId = actor.kind === "user" ? actor.user.id : null;
   const [workspaces, unreadCount, conversationsResult, featureFlags, membership] = await Promise.all([
@@ -52,6 +53,7 @@ export default async function WorkspaceLayout({
   const tNav = await getTranslations("nav");
   const tCommon = await getTranslations("common");
   const currentBranding = current ? workspaceBranding(current) : { primaryName: "Corgtex", secondaryLabel: "Workspace" };
+  const controlPlaneHref = getControlPlaneHref("/control-plane", locale);
   const conversationSummaries = conversations.map((c: any) => ({
     id: c.id,
     topic: c.topic,
@@ -73,6 +75,7 @@ export default async function WorkspaceLayout({
         conversations={conversationSummaries}
         showLanguageSwitcher={!!featureFlags.MULTILINGUAL}
         showPlatformAdmin={isGlobalOperator(actor)}
+        controlPlaneHref={controlPlaneHref}
       />
       <aside className="ws-sidebar">
         <div className="ws-sidebar-header">
@@ -111,7 +114,7 @@ export default async function WorkspaceLayout({
               <div className="muted" style={{ fontSize: "0.75rem", textTransform: "uppercase", letterSpacing: "0.05em", padding: "0 12px", marginBottom: "4px", fontWeight: 600 }}>
                 {tNav("globalAdmin")}
               </div>
-              <a href="/control-plane" className="ws-nav-link">
+              <a href={controlPlaneHref} className="ws-nav-link">
                 <span className="ws-nav-icon">✧</span>
                 {tNav("platformAdmin")}
               </a>

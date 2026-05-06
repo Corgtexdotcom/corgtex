@@ -12,7 +12,7 @@ The variables defined here are strictly required to start the web and worker pro
 | Variable | Description |
 |---|---|
 | `DATABASE_URL` | The PostgreSQL connection string. Must include credentials and the database name. Example: `postgresql://postgres:pass@localhost:5432/corgtex` |
-| `APP_URL` | The fully qualified base URL where the application is hosted (e.g. `https://app.corgtex.com`). Used for OAuth redirects and webhook signing. |
+| `APP_URL` | The fully qualified base URL where this runtime is hosted (for example, `https://app.corgtex.com` for the dogfood product app, `https://ops.corgtex.com` for Ops, or a customer runtime domain). Used for OAuth redirects and webhook signing. |
 | `SESSION_COOKIE_SECRET` | A 32+ character random string used for signing secure cookies. Never expose this. |
 
 ## Initial Seeding Settings
@@ -90,13 +90,14 @@ On Railway, create or reuse a project bucket, read its S3-compatible credentials
 
 ## Hosted Control Plane Settings
 
-These variables are only needed by the internal Corgtex Ops control plane or by customer runtimes receiving one-time bootstrap requests.
+These variables are only needed by the dedicated Corgtex Ops control plane or by product/customer runtimes that need to link back to it. The canonical public Ops host is `https://ops.corgtex.com`; raw Railway service URLs are implementation URLs only.
 
 | Variable | Description |
 |---|---|
 | `RAILWAY_API_TOKEN` | Railway API token used by the internal control plane to provision customer projects and services. Store only as a deployment secret. |
 | `RAILWAY_GRAPHQL_ENDPOINT` | Optional override for Railway's GraphQL endpoint. Leave unset unless Railway support directs otherwise. |
-| `CONTROL_PLANE_MODE` | Set to `true` for the internal Ops deployment. Operators landing on `/` are sent to `/control-plane`. |
+| `CONTROL_PLANE_MODE` | Set to `true` only for the dedicated Ops deployment. Operators landing on `/` are sent to `/control-plane`, and control-plane UI/API routes are active only in this mode. |
+| `CONTROL_PLANE_URL` | Canonical Ops origin used by non-Ops deployments when linking or redirecting to the control plane. Production product and customer runtimes should set this to `https://ops.corgtex.com`. Local development can leave it unset to keep links relative. |
 | `CONTROL_PLANE_AGENT_API_KEY` | Bearer secret for control-plane CLI/MCP automation. Requests use `Authorization: Bearer cp-<value>`. Store only as a deployment secret. |
 | `CONTROL_PLANE_AGENT_SCOPES` | Optional comma- or space-separated scopes for control-plane CLI/MCP automation. Omit for read-only access; include only the mutation scopes needed by the operator workflow. |
 | `CORGTEX_CUSTOMER_DEPLOYMENT_BOOTSTRAP_TOKEN_HASH` | SHA-256 hash of the one-time bearer token accepted by a customer runtime's internal bootstrap endpoint. Prefer this over storing the raw token. |
@@ -104,7 +105,7 @@ These variables are only needed by the internal Corgtex Ops control plane or by 
 | `CORGTEX_RELEASE_VERSION` | Release version reported by `/api/health` for fleet drift checks. |
 | `CORGTEX_RELEASE_IMAGE_TAG` | Immutable image tag reported by `/api/health` and used by the control plane for customer deployments. |
 
-The internal control plane exposes operator-only routes for automation:
+The dedicated Ops control plane exposes operator-only routes for automation. These routes return unavailable outside `CONTROL_PLANE_MODE=true`, even if the code is deployed on `app.corgtex.com` or a customer runtime:
 
 | Route | Purpose |
 |---|---|
@@ -119,6 +120,8 @@ The internal control plane exposes operator-only routes for automation:
 | `POST /api/control-plane/deployments/:deploymentId/snapshot` | Pull a live support snapshot through the customer support connector. |
 | `POST /api/control-plane/deployments/:deploymentId/operations` | Run an audited support operation through the support connector. |
 | `POST /api/control-plane/mcp` | MCP-style control-plane automation endpoint for agents and CLI support workflows. |
+
+Old UI links under `/control-plane/customers/:deploymentId` are kept as compatibility redirects only. New operator links must use `/control-plane/deployments/:deploymentId`.
 
 ## Example `.env` File
 

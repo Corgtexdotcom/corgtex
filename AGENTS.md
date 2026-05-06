@@ -25,7 +25,7 @@ reviews code line-by-line. The full specification lives in
 - **Unit tests:** `npm test` or `npm run test:unit` | **Single test:** `npx vitest run packages/domain/src/runtime.test.ts`
 - **Integration tests:** `npm run test:integration` (starts `docker-compose.test.yml`, runs the Vitest `integration` project, tears it down) | **All tests:** `npm run test:all`
 - **E2E agent flow:** `npm run prisma:seed`, `npm run seed:e2e`, set `AGENT_API_KEY`, run `npm run dev`, then use the Agent API flow below.
-- **Prisma / seeds:** `npm run prisma:generate` (required before tests), `npm run prisma:migrate`, `npm run prisma:migrate:deploy`, `npm run prisma:seed`, `npm run seed:e2e`, `npm run seed:pilot-tester`, `npm run seed:demo`, `npm run seed:jnj-demo`
+- **Prisma / seeds:** `npm run prisma:generate` (required before tests), `npm run prisma:migrate`, `npm run prisma:migrate:deploy`, `npm run prisma:seed`, `npm run seed:e2e`, `npm run seed:pilot-tester`, `npm run seed:dogfood`, `npm run seed:jnj-demo`, `npm run seed:dogfood-demo`
 
 ### Architecture
 

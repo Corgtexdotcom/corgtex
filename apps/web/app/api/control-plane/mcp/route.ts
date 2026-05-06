@@ -21,6 +21,7 @@ import {
 import type { SupportAction } from "@corgtex/domain";
 import { resolveControlPlaneRequestActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
+import { requireControlPlaneDeploymentMode } from "@/lib/control-plane-guard";
 
 export const dynamic = "force-dynamic";
 
@@ -216,6 +217,11 @@ function argStringArray(args: Record<string, unknown>, key: string) {
 }
 
 export async function GET() {
+  const unavailableResponse = requireControlPlaneDeploymentMode();
+  if (unavailableResponse) {
+    return unavailableResponse;
+  }
+
   return NextResponse.json({
     name: "corgtex-control-plane-mcp",
     version: "1.0.0",
@@ -225,6 +231,11 @@ export async function GET() {
 }
 
 export async function POST(request: NextRequest) {
+  const unavailableResponse = requireControlPlaneDeploymentMode();
+  if (unavailableResponse) {
+    return unavailableResponse;
+  }
+
   try {
     const actor = await resolveControlPlaneRequestActor(request);
     await requireControlPlaneAccess(actor);

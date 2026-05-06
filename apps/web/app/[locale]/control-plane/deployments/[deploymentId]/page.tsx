@@ -11,6 +11,7 @@ import {
 } from "@corgtex/domain";
 import { Link } from "@/i18n/routing";
 import { requirePageActor } from "@/lib/auth";
+import { getControlPlaneHref } from "@/lib/control-plane-url";
 import {
   configureMeetingRecorderIntegrationAction,
   configureSupportConnectorAction,
@@ -173,9 +174,9 @@ function boolSelectDefault(value: boolean | null | undefined) {
 export default async function ControlPlaneCustomerPage({
   params,
 }: {
-  params: Promise<{ deploymentId: string }>;
+  params: Promise<{ locale: string; deploymentId: string }>;
 }) {
-  const { deploymentId } = await params;
+  const { locale, deploymentId } = await params;
   const actor = await requirePageActor();
   try {
     await requireControlPlaneAccess(actor, { deploymentId });
@@ -210,7 +211,7 @@ export default async function ControlPlaneCustomerPage({
   return (
     <main className="control-plane-shell">
       <aside className="control-plane-rail stack">
-        <Link href="/control-plane" className="muted">{t("customerDetail.backToFleet")}</Link>
+        <a href={getControlPlaneHref("/control-plane", locale)} className="muted">{t("customerDetail.backToFleet")}</a>
         <strong>{customer.label}</strong>
         {CUSTOMER_SECTION_IDS.map((id) => (
           <a key={id} className="ws-nav-link" href={`#${id}`}>
