@@ -14,7 +14,7 @@ const smokeSuites = {
     command: [process.execPath, ["scripts/railway-smoke.mjs", process.env.OPS_APP_URL || process.env.NEXT_PUBLIC_APP_URL || process.env.APP_URL || "", process.env.OPS_SMOKE_EMAIL || process.env.ADMIN_EMAIL || "", process.env.OPS_SMOKE_PASSWORD || process.env.ADMIN_PASSWORD || ""]],
   },
   client: {
-    command: [process.execPath, ["scripts/client-readiness-smoke.mjs", process.env.OPS_CLIENT_URL || process.env.CLIENT_READINESS_BASE_URL || process.env.NEXT_PUBLIC_APP_URL || process.env.APP_URL || "http://localhost:3000"]],
+    command: [process.execPath, ["scripts/ops/customer-readiness-sweep.mjs"]],
   },
 };
 
