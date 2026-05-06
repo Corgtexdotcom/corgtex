@@ -56,6 +56,99 @@ function eventPayloadFilter(key, value) {
   };
 }
 
+async function cleanupStaleMeetingSmokeArtifacts(prisma, workspaceId) {
+  const smokeTextFilters = [
+    { title: { contains: "ingestion-guidance-smoke" } },
+    { title: { contains: "ingestion guidance smoke" } },
+    { bodyMd: { contains: "ingestion-guidance-smoke" } },
+    { bodyMd: { contains: "ingestion guidance smoke" } },
+  ];
+  const staleMeetings = await prisma.meeting.findMany({
+    where: {
+      workspaceId,
+      source: "production-smoke",
+      OR: [
+        { title: { startsWith: "Temporary meeting ingestion" } },
+        { transcript: { contains: "ingestion-guidance-smoke" } },
+        { transcript: { contains: "ingestion guidance smoke" } },
+        { ingestionGuidanceMd: { contains: "ingestion-guidance-smoke" } },
+        { ingestionGuidanceMd: { contains: "ingestion guidance smoke" } },
+      ],
+    },
+    select: { id: true },
+  });
+  const meetingIds = staleMeetings.map((meeting) => meeting.id);
+
+  if (meetingIds.length > 0) {
+    const events = await prisma.event.findMany({
+      where: { aggregateId: { in: meetingIds } },
+      select: { id: true },
+    });
+    const eventIds = events.map((event) => event.id);
+    if (eventIds.length > 0) {
+      await prisma.workflowJob.deleteMany({ where: { eventId: { in: eventIds } } });
+      await prisma.event.deleteMany({ where: { id: { in: eventIds } } });
+    }
+
+    await prisma.meetingInsight.deleteMany({
+      where: {
+        workspaceId,
+        meetingId: { in: meetingIds },
+      },
+    });
+    await prisma.tension.deleteMany({
+      where: {
+        workspaceId,
+        OR: [
+          { meetingId: { in: meetingIds } },
+          ...smokeTextFilters,
+        ],
+      },
+    });
+
+    const proposals = await prisma.proposal.findMany({
+      where: {
+        workspaceId,
+        OR: [
+          { meetingId: { in: meetingIds } },
+          ...smokeTextFilters,
+          { summary: { contains: "ingestion-guidance-smoke" } },
+          { summary: { contains: "ingestion guidance smoke" } },
+        ],
+      },
+      select: { id: true },
+    });
+    const proposalIds = proposals.map((proposal) => proposal.id);
+    if (proposalIds.length > 0) {
+      await prisma.policyCorpus.deleteMany({ where: { proposalId: { in: proposalIds } } });
+      await prisma.proposal.deleteMany({
+        where: { workspaceId, id: { in: proposalIds } },
+      });
+    }
+
+    await prisma.action.deleteMany({
+      where: {
+        workspaceId,
+        OR: smokeTextFilters,
+      },
+    });
+    await prisma.meeting.deleteMany({
+      where: {
+        workspaceId,
+        id: { in: meetingIds },
+      },
+    });
+    await prisma.auditLog.deleteMany({
+      where: {
+        workspaceId,
+        entityId: { in: meetingIds },
+      },
+    });
+  }
+
+  return meetingIds.length;
+}
+
 async function cleanupSmokeArtifacts(prisma, params) {
   const ids = [params.sourceId, params.meetingId].filter(Boolean);
   if (ids.length === 0 && !params.tag) return;
@@ -220,6 +313,11 @@ async function main() {
       sourceId = null;
       pass("temporary non-meeting text ingestion record was removed");
 
+      const staleMeetingCount = await cleanupStaleMeetingSmokeArtifacts(prisma, workspaceId);
+      if (staleMeetingCount > 0) {
+        pass(`removed ${staleMeetingCount} stale meeting transcript smoke record(s)`);
+      }
+
       const recordedAt = new Date().toISOString();
       const meetingGuidance = `Highlight the meeting guidance for ${tag}.`;
       const transcriptText = [
@@ -338,6 +436,7 @@ async function main() {
         meetingTitle,
         tag,
       });
+      await cleanupStaleMeetingSmokeArtifacts(prisma, workspaceId);
     }
   } finally {
     await prisma.$disconnect();
