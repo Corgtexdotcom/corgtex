@@ -57,15 +57,47 @@ function eventPayloadFilter(key, value) {
 }
 
 async function cleanupSmokeArtifacts(prisma, params) {
-  const ids = [params.sourceId, params.meetingId].filter(Boolean);
+  const sourceIds = new Set([params.sourceId].filter(Boolean));
+  const meetingIds = new Set([params.meetingId].filter(Boolean));
+
+  if (params.cleanupStaleSmokeArtifacts) {
+    const [staleSources, staleMeetings] = await Promise.all([
+      prisma.brainSource.findMany({
+        where: {
+          workspaceId: params.workspaceId,
+          OR: [
+            { title: { startsWith: "Temporary source ingestion-guidance-smoke-" } },
+            { title: { startsWith: "Temporary source ingestion guidance smoke " } },
+          ],
+        },
+        select: { id: true },
+      }),
+      prisma.meeting.findMany({
+        where: {
+          workspaceId: params.workspaceId,
+          source: "production-smoke",
+          OR: [
+            { title: { startsWith: "Temporary meeting ingestion-guidance-smoke-" } },
+            { title: { startsWith: "Temporary meeting ingestion guidance smoke " } },
+          ],
+        },
+        select: { id: true },
+      }),
+    ]);
+
+    for (const source of staleSources) sourceIds.add(source.id);
+    for (const meeting of staleMeetings) meetingIds.add(meeting.id);
+  }
+
+  const ids = [...sourceIds, ...meetingIds];
   if (ids.length === 0 && !params.tag) return;
 
   if (ids.length > 0) {
     const eventWhere = {
       OR: [
         { aggregateId: { in: ids } },
-        params.sourceId ? eventPayloadFilter("sourceId", params.sourceId) : null,
-        params.meetingId ? eventPayloadFilter("meetingId", params.meetingId) : null,
+        ...[...sourceIds].map((sourceId) => eventPayloadFilter("sourceId", sourceId)),
+        ...[...meetingIds].map((meetingId) => eventPayloadFilter("meetingId", meetingId)),
       ].filter(Boolean),
     };
     const events = await prisma.event.findMany({
@@ -78,8 +110,8 @@ async function cleanupSmokeArtifacts(prisma, params) {
       where: {
         OR: [
           eventIds.length > 0 ? { eventId: { in: eventIds } } : null,
-          params.sourceId ? eventPayloadFilter("sourceId", params.sourceId) : null,
-          params.meetingId ? eventPayloadFilter("meetingId", params.meetingId) : null,
+          ...[...sourceIds].map((sourceId) => eventPayloadFilter("sourceId", sourceId)),
+          ...[...meetingIds].map((meetingId) => eventPayloadFilter("meetingId", meetingId)),
         ].filter(Boolean),
       },
     });
@@ -115,38 +147,38 @@ async function cleanupSmokeArtifacts(prisma, params) {
     });
   }
 
-  if (params.meetingId) {
+  if (meetingIds.size > 0) {
     await prisma.meetingInsight.deleteMany({
       where: {
         workspaceId: params.workspaceId,
-        meetingId: params.meetingId,
+        meetingId: { in: [...meetingIds] },
       },
     });
     await prisma.meeting.deleteMany({
       where: {
-        id: params.meetingId,
+        id: { in: [...meetingIds] },
         workspaceId: params.workspaceId,
-        title: params.meetingTitle,
       },
     });
   }
 
-  if (params.sourceId) {
+  if (sourceIds.size > 0) {
     await prisma.brainSource.deleteMany({
       where: {
-        id: params.sourceId,
+        id: { in: [...sourceIds] },
         workspaceId: params.workspaceId,
-        title: params.sourceTitle,
       },
     });
   }
 
-  await prisma.auditLog.deleteMany({
-    where: {
-      workspaceId: params.workspaceId,
-      entityId: { in: ids },
-    },
-  });
+  if (ids.length > 0) {
+    await prisma.auditLog.deleteMany({
+      where: {
+        workspaceId: params.workspaceId,
+        entityId: { in: ids },
+      },
+    });
+  }
 }
 
 async function main() {
@@ -183,6 +215,12 @@ async function main() {
       fail("/api/session did not return a workspace for ingestion guidance smoke");
     }
     pass("/api/session returned a workspace for ingestion guidance smoke");
+
+    await cleanupSmokeArtifacts(prisma, {
+      workspaceId,
+      cleanupStaleSmokeArtifacts: true,
+    });
+    pass("stale ingestion guidance smoke records were removed");
 
     const tag = `ingestion-guidance-smoke-${Date.now()}`;
     let sourceId = null;
