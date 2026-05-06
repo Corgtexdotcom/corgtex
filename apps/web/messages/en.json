@@ -2051,7 +2051,21 @@
     "markdownEditor": {
       "write": "Write",
       "preview": "Preview",
-      "emptyPreview": "Nothing to preview."
+      "emptyPreview": "Nothing to preview.",
+      "toolbar": "Formatting toolbar",
+      "bold": "Bold",
+      "italic": "Italic",
+      "headingOne": "Heading 1",
+      "headingTwo": "Heading 2",
+      "bulletedList": "Bulleted list",
+      "numberedList": "Numbered list",
+      "quote": "Quote",
+      "link": "Link",
+      "code": "Code",
+      "placeholderText": "text",
+      "listItem": "List item",
+      "heading": "Heading",
+      "linkText": "link text"
     },
     "dialog": {
       "close": "Close"

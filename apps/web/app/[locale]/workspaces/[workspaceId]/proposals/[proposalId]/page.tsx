@@ -2,8 +2,8 @@ import { notFound } from "next/navigation";
 import Link from "next/link";
 import { getProposal, listDeliberationEntries, requireWorkspaceMembership } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
-import { renderMarkdown } from "@/lib/markdown";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
+import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
 import { DeliberationThread } from "@/lib/components/DeliberationThread";
 import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
 import { getDeliberationTargets } from "@/lib/deliberation-targets";
@@ -37,8 +37,6 @@ export default async function ProposalDetailPage({
       ? t("targetCircle", { name: option.name })
       : t("targetPerson", { name: option.name }),
   }));
-
-  const htmlContent = renderMarkdown(proposal.bodyMd);
 
   const ageText = (date: Date) => {
     const days = Math.floor((Date.now() - new Date(date).getTime()) / (1000 * 60 * 60 * 24));
@@ -81,11 +79,7 @@ export default async function ProposalDetailPage({
       <div style={{ display: "grid", gridTemplateColumns: "3fr 1fr", gap: "64px" }}>
         {/* Main Article Body */}
         <article style={{ fontSize: "1.1rem", lineHeight: 1.8, color: "var(--text)" }}>
-          <div 
-            className="nr-markdown" 
-            dangerouslySetInnerHTML={{ __html: htmlContent }} 
-            style={{ marginBottom: "48px" }}
-          />
+          <MarkdownRenderer markdown={proposal.bodyMd} variant="document" className="nr-markdown" />
 
           <hr className="nr-divider" style={{ margin: "48px 0" }} />
 

@@ -3,6 +3,8 @@
 import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
+import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
+import { MarkdownExcerpt, MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
 
 type CircleOption = {
   id: string;
@@ -324,7 +326,7 @@ export function ToolsDirectoryClient({
           <div className="nr-item-meta" style={{ marginTop: 4 }}>{host}</div>
           {(link.previewDescription || link.descriptionMd) && (
             <p style={{ margin: "8px 0 0", color: "var(--muted)", fontSize: "0.82rem", lineHeight: 1.45 }}>
-              {(link.previewDescription || link.descriptionMd || "").slice(0, 130)}
+              {link.previewDescription || <MarkdownExcerpt markdown={link.descriptionMd} maxLength={130} />}
             </p>
           )}
         </div>
@@ -353,15 +355,13 @@ export function ToolsDirectoryClient({
                   <strong>{link.title}</strong>
                   <div className="nr-item-meta">{domainFor(link.url)}</div>
                   {link.descriptionMd && (
-                    <p style={{ whiteSpace: "pre-wrap", margin: "8px 0 0", lineHeight: 1.45 }}>
-                      {link.descriptionMd}
-                    </p>
+                    <MarkdownRenderer markdown={link.descriptionMd} variant="compact" className="mt-2" />
                   )}
                   <div style={{ marginTop: 8 }}>{renderTags(link)}</div>
                 </td>
                 <td style={{ verticalAlign: "top" }}>{categoryLabel(link.category)}</td>
-                <td style={{ minWidth: 220, whiteSpace: "pre-wrap", verticalAlign: "top" }}>
-                  {link.accessNotesMd || <span className="muted">-</span>}
+                <td style={{ minWidth: 220, verticalAlign: "top" }}>
+                  {link.accessNotesMd ? <MarkdownRenderer markdown={link.accessNotesMd} variant="compact" /> : <span className="muted">-</span>}
                 </td>
                 <td style={{ minWidth: 240, verticalAlign: "top" }}>{renderCredential(link)}</td>
                 <td style={{ minWidth: 150, verticalAlign: "top" }}>
@@ -418,9 +418,7 @@ export function ToolsDirectoryClient({
               {renderTags(link)}
             </div>
             {link.accessNotesMd && (
-              <p style={{ margin: 0, whiteSpace: "pre-wrap", color: "var(--muted)", fontSize: "0.85rem", lineHeight: 1.5 }}>
-                {link.accessNotesMd}
-              </p>
+              <MarkdownRenderer markdown={link.accessNotesMd} variant="compact" className="muted" />
             )}
             {renderCredential(link)}
             <div className="actions-inline">
@@ -491,11 +489,23 @@ export function ToolsDirectoryClient({
           </div>
           <label>
             {t("formDescription")}
-            <textarea value={form.descriptionMd} onChange={(event) => setField("descriptionMd", event.target.value)} placeholder={t("placeholderDescription")} />
+            <MarkdownEditor
+              name="descriptionMd"
+              value={form.descriptionMd}
+              onValueChange={(descriptionMd) => setField("descriptionMd", descriptionMd)}
+              placeholder={t("placeholderDescription")}
+              rows={4}
+            />
           </label>
           <label>
             {t("formAccessNotes")}
-            <textarea value={form.accessNotesMd} onChange={(event) => setField("accessNotesMd", event.target.value)} placeholder={t("placeholderAccessNotes")} />
+            <MarkdownEditor
+              name="accessNotesMd"
+              value={form.accessNotesMd}
+              onValueChange={(accessNotesMd) => setField("accessNotesMd", accessNotesMd)}
+              placeholder={t("placeholderAccessNotes")}
+              rows={4}
+            />
           </label>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 14 }}>
             <label>

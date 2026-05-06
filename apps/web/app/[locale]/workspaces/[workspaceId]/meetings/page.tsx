@@ -11,7 +11,8 @@ import {
 import { getTranslations } from "next-intl/server";
 import Link from "next/link";
 import { getWorkspaceFeatureFlags } from "@/lib/workspace-feature-flags";
-import { markdownToPlainText } from "@/lib/markdown";
+import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
+import { MarkdownExcerpt } from "@/lib/components/MarkdownRenderer";
 
 export const dynamic = "force-dynamic";
 
@@ -62,7 +63,7 @@ export default async function MeetingsPage({
                 <div className="nr-meta" style={{ marginBottom: "8px" }}>{completedMeetings[0].source}</div>
                 <h2 className="nr-lead-headline" style={{ fontSize: "1.8rem" }}>{completedMeetings[0].title ?? t("untitledMeeting")}</h2>
                 <div className="nr-item-meta" style={{ marginBottom: "12px" }}>{new Date(completedMeetings[0].recordedAt).toLocaleString()}</div>
-                {completedMeetings[0].summaryMd && <p className="nr-excerpt">{markdownToPlainText(completedMeetings[0].summaryMd, 520)}</p>}
+                {completedMeetings[0].summaryMd && <MarkdownExcerpt markdown={completedMeetings[0].summaryMd} maxLength={520} as="p" className="nr-excerpt" />}
               </Link>
               <form action={archiveMeetingAction} style={{ marginTop: 12 }}>
                 <input type="hidden" name="workspaceId" value={workspaceId} />
@@ -80,9 +81,7 @@ export default async function MeetingsPage({
                     {new Date(meeting.recordedAt).toLocaleString()} • {meeting.source}
                   </div>
                   {meeting.summaryMd && (
-                    <div className="nr-excerpt" style={{ fontSize: "0.85rem", marginTop: "6px" }}>
-                      {markdownToPlainText(meeting.summaryMd, 320)}
-                    </div>
+                    <MarkdownExcerpt markdown={meeting.summaryMd} maxLength={320} as="div" className="nr-excerpt" />
                   )}
                 </Link>
                 <form action={archiveMeetingAction} style={{ marginTop: 8 }}>
@@ -161,7 +160,7 @@ export default async function MeetingsPage({
                     </label>
                     <label>
                       {t("formIngestionGuidance")}
-                      <textarea name="ingestionGuidanceMd" />
+                      <MarkdownEditor name="ingestionGuidanceMd" rows={3} />
                       <span className="nr-item-meta" style={{ display: "block", marginTop: 4 }}>{t("helpIngestionGuidance")}</span>
                     </label>
                     <button type="submit">{t("btnUploadTranscript")}</button>
@@ -270,7 +269,7 @@ export default async function MeetingsPage({
               </label>
               <label>
                 {t("formIngestionGuidance")}
-                <textarea name="ingestionGuidanceMd" />
+                <MarkdownEditor name="ingestionGuidanceMd" rows={3} />
                 <span className="nr-item-meta" style={{ display: "block", marginTop: 4 }}>{t("helpIngestionGuidance")}</span>
               </label>
               <label>

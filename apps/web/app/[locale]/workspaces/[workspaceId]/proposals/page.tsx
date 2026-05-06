@@ -1,6 +1,7 @@
 import { listProposals, requireWorkspaceMembership } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
+import { MarkdownExcerpt } from "@/lib/components/MarkdownRenderer";
 import {
   createProposalAction,
   archiveProposalAction,
@@ -91,9 +92,7 @@ export default async function ProposalsPage({
                     {proposal.status === "RESOLVED" && proposal.resolutionOutcome ? `${proposal.status} · ${proposal.resolutionOutcome.replace("_", " ")}` : proposal.status}
                   </span>
                 </div>
-                <div className="nr-excerpt" style={{ marginTop: "8px" }}>
-                  {proposal.summary ?? proposal.bodyMd.replace(/\0/g, "").slice(0, 150) + "..."}
-                </div>
+                <MarkdownExcerpt markdown={proposal.summary ?? proposal.bodyMd} maxLength={180} as="div" className="nr-excerpt" />
                 <div className="nr-item-meta" style={{ marginTop: 8 }}>
                    {proposal.author.displayName || proposal.author.email} · {new Date(proposal.createdAt).toLocaleDateString()}
                 </div>

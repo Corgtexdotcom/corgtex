@@ -14,6 +14,7 @@ import {
 } from "../actions";
 import { prisma } from "@corgtex/shared";
 import { getTranslations } from "next-intl/server";
+import { MarkdownExcerpt, MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
 import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
 
 export const dynamic = "force-dynamic";
@@ -172,11 +173,8 @@ export default async function GovernancePage({
                 maxHeight: 400,
                 overflow: "auto",
                 background: "transparent",
-                whiteSpace: "pre-wrap",
-                fontSize: "0.88rem",
-                lineHeight: 1.6,
               }}>
-                {currentConstitution.bodyMd}
+                <MarkdownRenderer markdown={currentConstitution.bodyMd} variant="compact" />
               </div>
               {currentConstitution.diffSummary && (
                 <div style={{ marginTop: 12, padding: 12, background: "var(--accent-soft)", borderRadius: 8, fontSize: "0.85rem" }}>
@@ -204,9 +202,7 @@ export default async function GovernancePage({
                       </span>
                     </div>
                     {c.diffSummary && (
-                      <div className="nr-excerpt" style={{ marginTop: 4, fontSize: "0.82rem" }}>
-                        {c.diffSummary}
-                      </div>
+                      <MarkdownExcerpt markdown={c.diffSummary} maxLength={180} as="div" className="nr-excerpt" />
                     )}
                   </div>
                 ))}
@@ -241,11 +237,8 @@ export default async function GovernancePage({
                       background: "transparent",
                       border: "1px dashed var(--line)",
                       borderRadius: 8,
-                      whiteSpace: "pre-wrap",
-                      fontSize: "0.85rem",
-                      lineHeight: 1.5,
                     }}>
-                      {p.bodyMd}
+                      <MarkdownRenderer markdown={p.bodyMd} variant="compact" />
                     </div>
                   </details>
                 </div>

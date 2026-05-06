@@ -2,7 +2,7 @@ import { getMeeting, getMeetingParticipants } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { getFormatter, getTranslations } from "next-intl/server";
 import Link from "next/link";
-import { renderMarkdown } from "@/lib/markdown";
+import { MarkdownExcerpt, MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
 import { DeliberationThread } from "@/lib/components/DeliberationThread";
 import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
 import { getDeliberationTargets } from "@/lib/deliberation-targets";
@@ -150,20 +150,14 @@ export default async function MeetingDetailPage({
       {meeting.ingestionGuidanceMd && (
         <section className="ws-section" style={{ marginBottom: 48 }}>
           <h2 className="nr-section-header">{t("userGuidance")}</h2>
-          <div
-            className="markdown-body"
-            dangerouslySetInnerHTML={{ __html: renderMarkdown(meeting.ingestionGuidanceMd) }}
-          />
+          <MarkdownRenderer markdown={meeting.ingestionGuidanceMd} variant="document" />
         </section>
       )}
 
       {meeting.summaryMd && (
         <section className="ws-section" style={{ marginBottom: 48 }}>
           <h2 className="nr-section-header">{t("summary")}</h2>
-          <div 
-            className="markdown-body"
-            dangerouslySetInnerHTML={{ __html: renderMarkdown(meeting.summaryMd) }}
-          />
+          <MarkdownRenderer markdown={meeting.summaryMd} variant="document" />
         </section>
       )}
 
@@ -186,7 +180,7 @@ export default async function MeetingDetailPage({
                     {tension.status}
                   </span>
                 </div>
-                <div className="muted">{tension.bodyMd}</div>
+                {tension.bodyMd && <MarkdownRenderer markdown={tension.bodyMd} variant="compact" className="muted" />}
                 <div className="muted" style={{ fontSize: "0.82rem", marginTop: 8 }}>
                   {tension.author?.displayName || tension.author?.email}
                 </div>
@@ -208,7 +202,7 @@ export default async function MeetingDetailPage({
                     {proposal.status === "RESOLVED" && proposal.resolutionOutcome ? `${proposal.status} · ${proposal.resolutionOutcome.replace("_", " ")}` : proposal.status}
                   </span>
                 </div>
-                <div className="muted">{proposal.summary ?? proposal.bodyMd.slice(0, 150) + "..."}</div>
+                <MarkdownExcerpt markdown={proposal.summary ?? proposal.bodyMd} maxLength={180} as="div" className="muted" />
                 
                 <div className="muted" style={{ fontSize: "0.82rem", marginTop: 8 }}>
                    {proposal.author?.displayName || proposal.author?.email} · {format.dateTime(proposal.createdAt, { dateStyle: "medium" })}

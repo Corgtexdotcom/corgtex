@@ -2048,7 +2048,21 @@
     "markdownEditor": {
       "write": "Escribir",
       "preview": "Vista previa",
-      "emptyPreview": "No hay nada para previsualizar."
+      "emptyPreview": "No hay nada para previsualizar.",
+      "toolbar": "Barra de formato",
+      "bold": "Negrita",
+      "italic": "Cursiva",
+      "headingOne": "Encabezado 1",
+      "headingTwo": "Encabezado 2",
+      "bulletedList": "Lista con viñetas",
+      "numberedList": "Lista numerada",
+      "quote": "Cita",
+      "link": "Enlace",
+      "code": "Código",
+      "placeholderText": "texto",
+      "listItem": "Elemento de lista",
+      "heading": "Encabezado",
+      "linkText": "texto del enlace"
     },
     "dialog": {
       "close": "Cerrar"

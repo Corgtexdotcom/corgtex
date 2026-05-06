@@ -1,5 +1,7 @@
 import { getTension, listDeliberationEntries, requireWorkspaceMembership } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
+import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
+import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
 import { DeliberationThread } from "@/lib/components/DeliberationThread";
 import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
 import { getDeliberationTargets } from "@/lib/deliberation-targets";
@@ -103,7 +105,7 @@ export default async function TensionDetailPage({
                 </label>
                 <label>
                   {t("formDescription")}
-                  <textarea name="bodyMd" defaultValue={tension.bodyMd ?? ""} />
+                  <MarkdownEditor name="bodyMd" defaultValue={tension.bodyMd ?? ""} rows={6} />
                 </label>
                 <label>
                   {t("formPriority")}
@@ -120,7 +122,7 @@ export default async function TensionDetailPage({
         <h2 className="nr-section-header">{t("sectionDescription")}</h2>
         <div className="nr-item">
           {tension.bodyMd ? (
-            <div style={{ whiteSpace: "pre-wrap" }}>{tension.bodyMd}</div>
+            <MarkdownRenderer markdown={tension.bodyMd} variant="document" />
           ) : (
             <em className="muted">{t("noDescription")}</em>
           )}

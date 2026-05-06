@@ -3,6 +3,7 @@
 import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
+import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
 
 type BuildArtifactAsset = {
   id: string;
@@ -330,7 +331,7 @@ export function BuiltArtifactsClient({
         </div>
 
         {artifact.summaryMd && (
-          <div style={{ margin: 0, whiteSpace: "pre-wrap", lineHeight: 1.55 }}>{artifact.summaryMd}</div>
+          <MarkdownRenderer markdown={artifact.summaryMd} variant="compact" />
         )}
 
         <div className="nr-table-wrap">
@@ -352,7 +353,9 @@ export function BuiltArtifactsClient({
                     </a>
                     <div className="nr-item-meta">{asset.kind} · {asset.mimeType}</div>
                   </td>
-                  <td style={{ minWidth: 220, whiteSpace: "pre-wrap" }}>{asset.captionMd || <span className="muted">-</span>}</td>
+                  <td style={{ minWidth: 220 }}>
+                    {asset.captionMd ? <MarkdownRenderer markdown={asset.captionMd} variant="compact" /> : <span className="muted">-</span>}
+                  </td>
                   <td style={{ minWidth: 220 }}>
                     {asset.publicUrl ? (
                       <a href={asset.publicUrl} target="_blank" rel="noreferrer">{t("publicProofLink")}</a>

@@ -8,6 +8,8 @@ import {
   publishTensionAction,
   returnTensionToDraftAction,
 } from "../actions";
+import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
+import { MarkdownExcerpt } from "@/lib/components/MarkdownRenderer";
 import { getTranslations } from "next-intl/server";
 
 export const dynamic = "force-dynamic";
@@ -116,7 +118,7 @@ export default async function TensionsPage({
                   </strong>
                   <span className={`tag ${tension.status === "DRAFT" ? "info" : tension.status === "OPEN" ? "warning" : "success"}`}>{statusLabel(tension.status)}</span>
                 </div>
-                {tension.bodyMd && <div className="nr-excerpt">{tension.bodyMd}</div>}
+                {tension.bodyMd && <MarkdownExcerpt markdown={tension.bodyMd} maxLength={220} as="div" className="nr-excerpt" />}
 
                 <div className="nr-item-meta" style={{ marginTop: 8 }}>
                   {t("createdByMeta", { name: authorName })}
@@ -193,7 +195,7 @@ export default async function TensionsPage({
                       </label>
                       <label>
                         {t("formDescription")}
-                        <textarea name="bodyMd" defaultValue={tension.bodyMd ?? ""} />
+                        <MarkdownEditor name="bodyMd" defaultValue={tension.bodyMd ?? ""} rows={5} />
                       </label>
                       <label>
                         {t("formPriority")}
@@ -222,7 +224,7 @@ export default async function TensionsPage({
             </label>
             <label>
               {t("formDescription")}
-              <textarea name="bodyMd" />
+              <MarkdownEditor name="bodyMd" rows={5} />
             </label>
             <label>
               {t("formRaisedBy")}

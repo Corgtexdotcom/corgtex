@@ -2,6 +2,7 @@ import { getArticle } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { updateArticleAction } from "../../actions";
 import { getTranslations } from "next-intl/server";
+import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 
 export const dynamic = "force-dynamic";
 
@@ -50,7 +51,7 @@ export default async function BrainArticleEditPage({
         </div>
         <label>
           {t("bodyMd")}
-          <textarea name="bodyMd" rows={20} defaultValue={article.bodyMd} required />
+          <MarkdownEditor name="bodyMd" rows={20} defaultValue={article.bodyMd} required />
         </label>
         <label>
           {t("labelChangeSummary")}

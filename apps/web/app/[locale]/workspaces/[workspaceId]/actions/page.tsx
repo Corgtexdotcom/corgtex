@@ -14,6 +14,8 @@ import {
   groupActionsByStatus,
   normalizeActionStatusFilter,
 } from "./view-model";
+import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
+import { MarkdownExcerpt } from "@/lib/components/MarkdownRenderer";
 
 export const dynamic = "force-dynamic";
 
@@ -93,7 +95,7 @@ export default async function ActionsPage({
                   </strong>
                   <span className={`tag ${statusMeta.tagClass}`}>{t(statusMeta.labelKey)}</span>
                 </div>
-                {action.bodyMd && <div className="nr-excerpt">{action.bodyMd}</div>}
+                {action.bodyMd && <MarkdownExcerpt markdown={action.bodyMd} maxLength={220} as="div" className="nr-excerpt" />}
                 
                 <div className="nr-item-meta" style={{ marginTop: 8 }}>
                   {t("metaCreator", { name: authorName })}
@@ -152,7 +154,7 @@ export default async function ActionsPage({
                       </label>
                       <label>
                         {t("formNotes")}
-                        <textarea name="bodyMd" defaultValue={action.bodyMd ?? ""} />
+                        <MarkdownEditor name="bodyMd" defaultValue={action.bodyMd ?? ""} rows={5} />
                       </label>
                       <button type="submit" className="secondary small">{t("btnSaveDraft")}</button>
                     </form>
@@ -177,7 +179,7 @@ export default async function ActionsPage({
             </label>
             <label>
               {t("formNotes")}
-              <textarea name="bodyMd" />
+              <MarkdownEditor name="bodyMd" rows={5} />
             </label>
             <label>
               {t("formLinkToProposal")}
