@@ -10,6 +10,7 @@ import { syncBrainArticleKnowledge } from "@corgtex/knowledge";
 import { runDailyDigest, runSlackAgent, runSlackContextSummary, runSlackProactiveScan, sendDemoWelcomeNewspaper } from "@corgtex/agents";
 import {
   createWebhookDeliveries,
+  CONTROL_PLANE_FLEET_SNAPSHOT_JOB_TYPE,
   deliverWebhook,
   postMeetingSummaryToAgendaThread,
   processSlackInboundEvent,
@@ -18,6 +19,7 @@ import {
   runMeetingAgendaPreparation,
   runMeetingAgendaThreadEdit,
   runMeetingInsightsExtraction,
+  runControlPlaneFleetSnapshotJob,
   syncSlackPublicArchiveForWorkspace,
   type SlackAgentJobPayload,
 } from "@corgtex/domain";
@@ -294,11 +296,22 @@ async function failJob(job: ClaimedJob, error: unknown) {
 }
 
 async function handleJob(job: ClaimedJob) {
-  if (!job.workspaceId) {
+  const payload = job.payload as Record<string, unknown>;
+
+  if (job.type === CONTROL_PLANE_FLEET_SNAPSHOT_JOB_TYPE) {
+    await runControlPlaneFleetSnapshotJob({
+      instanceId: typeof payload.instanceId === "string" ? payload.instanceId : null,
+      snapshotKinds: Array.isArray(payload.snapshotKinds) ? payload.snapshotKinds.filter((kind): kind is string => typeof kind === "string") : null,
+      reason: typeof payload.reason === "string" ? payload.reason : null,
+      limit: typeof payload.limit === "number" ? payload.limit : null,
+      concurrency: typeof payload.concurrency === "number" ? payload.concurrency : null,
+    });
     return;
   }
 
-  const payload = job.payload as Record<string, unknown>;
+  if (!job.workspaceId) {
+    return;
+  }
 
   if (job.type === "knowledge.sync.proposal") {
     await handleKnowledgeSync(job.id, payload as { proposalId?: string }, job.workspaceId);
@@ -699,7 +712,9 @@ export async function scheduleDripCampaigns() {
 export async function schedulePeriodicJobs() {
   const now = new Date();
   
-  const [sources, slackInstallations] = await Promise.all([
+  const fleetSweepBatchSizeRaw = Number(process.env.CONTROL_PLANE_FLEET_SWEEP_BATCH_SIZE ?? 50);
+  const fleetSweepBatchSize = Math.min(Math.max(Number.isFinite(fleetSweepBatchSizeRaw) ? fleetSweepBatchSizeRaw : 50, 1), 500);
+  const [sources, slackInstallations, customerDeployments] = await Promise.all([
     prisma.externalDataSource.findMany({
       where: { isActive: true },
       select: { id: true, workspaceId: true, pullCadenceMinutes: true, lastSyncAt: true }
@@ -711,6 +726,18 @@ export async function schedulePeriodicJobs() {
         scopes: { has: "channels:history" },
       },
       select: { id: true, workspaceId: true },
+    }),
+    prisma.instanceRegistry.findMany({
+      where: {
+        customerAccountId: { not: null },
+        deploymentStatus: { notIn: ["RETIRED", "SUSPENDED"] },
+      },
+      orderBy: [
+        { lastHealthCheck: "asc" },
+        { createdAt: "asc" },
+      ],
+      take: fleetSweepBatchSize,
+      select: { id: true },
     }),
   ]);
 
@@ -737,6 +764,21 @@ export async function schedulePeriodicJobs() {
         type: "communication.slack.proactive-scan",
         payload: { installationId: installation.id },
         dedupeKey: `${installation.id}:slack-proactive-scan:${hourlyBucket}`,
+      });
+      scheduledCount++;
+    }
+
+    for (const deployment of customerDeployments) {
+      await enqueueJob(tx, {
+        workspaceId: null,
+        eventId: null,
+        type: CONTROL_PLANE_FLEET_SNAPSHOT_JOB_TYPE,
+        payload: {
+          instanceId: deployment.id,
+          snapshotKinds: ["HEALTH", "RELEASE", "CONNECTOR", "CONTEXT", "INTEGRATION", "SUPPORT_READY"],
+          reason: "Scheduled Control Plane fleet sweep.",
+        },
+        dedupeKey: `${deployment.id}:control-plane-fleet-snapshot:${hourlyBucket}`,
       });
       scheduledCount++;
     }

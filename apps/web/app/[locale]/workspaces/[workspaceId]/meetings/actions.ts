@@ -14,6 +14,7 @@ import {
   requestMeetingIntelligenceRegeneration,
   confirmInsight,
   dismissInsight,
+  updateInsight,
   applyInsight,
   confirmAllInsights,
   postDeliberationEntry,
@@ -207,6 +208,22 @@ export async function dismissInsightAction(formData: FormData) {
   const insightId = formData.get("insightId") as string;
   
   await dismissInsight(actor, { workspaceId, insightId });
+  refresh(workspaceId);
+}
+
+export async function updateInsightAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  await updateInsight(actor, {
+    workspaceId,
+    insightId: asString(formData, "insightId"),
+    title: asString(formData, "title"),
+    bodyMd: asString(formData, "bodyMd"),
+    assigneeHint: asOptional(formData, "assigneeHint"),
+  });
   refresh(workspaceId);
 }
 

@@ -85,6 +85,7 @@ import {
   extractMeetingInsights, 
   confirmInsight, 
   dismissInsight, 
+  updateInsight,
   applyInsight,
   autoApplyMeetingInsights,
   confirmAllInsights
@@ -187,6 +188,55 @@ describe("meeting-intelligence", () => {
           reviewedAt: expect.any(Date),
         },
       });
+    });
+  });
+
+  describe("updateInsight", () => {
+    it("updates editable insight fields and records reviewer metadata", async () => {
+      (prisma.meetingInsight.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue({
+        id: "insight-123",
+        workspaceId: "ws-1",
+        status: "SUGGESTED",
+      });
+      (prisma.meetingInsight.update as ReturnType<typeof vi.fn>).mockResolvedValue({
+        id: "insight-123",
+        title: "Updated title",
+      });
+
+      await updateInsight(mockActor, {
+        workspaceId: "ws-1",
+        insightId: "insight-123",
+        title: "  Updated title  ",
+        bodyMd: "  Updated body  ",
+        assigneeHint: "  Milan  ",
+      });
+
+      expect(prisma.meetingInsight.update).toHaveBeenCalledWith({
+        where: { id: "insight-123" },
+        data: {
+          title: "Updated title",
+          bodyMd: "Updated body",
+          assigneeHint: "Milan",
+          reviewedByUserId: "user-123",
+          reviewedAt: expect.any(Date),
+        },
+      });
+    });
+
+    it("rejects edits after an insight has been applied", async () => {
+      (prisma.meetingInsight.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue({
+        id: "insight-123",
+        workspaceId: "ws-1",
+        status: "APPLIED",
+      });
+
+      await expect(updateInsight(mockActor, {
+        workspaceId: "ws-1",
+        insightId: "insight-123",
+        title: "Updated title",
+      })).rejects.toThrow("Only reviewable insights can be edited.");
+
+      expect(prisma.meetingInsight.update).not.toHaveBeenCalled();
     });
   });
 

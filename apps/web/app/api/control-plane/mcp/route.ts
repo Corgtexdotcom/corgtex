@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import {
   configureControlPlaneMeetingRecorderIntegration,
+  enqueueControlPlaneFleetSnapshots,
   fetchCustomerSupportSnapshot,
   getControlPlaneAiGovernanceStatus,
   getControlPlaneContextHealth,
@@ -12,6 +13,7 @@ import {
   probeControlPlaneCustomerHealth,
   requireControlPlaneAccess,
   requireControlPlaneScope,
+  refreshControlPlaneFleetSnapshots,
   runControlPlaneContextOperation,
   runControlPlaneReleaseOperation,
   runCustomerSupportOperation,
@@ -94,6 +96,33 @@ const tools = [
     inputSchema: { type: "object", properties: { instanceId: { type: "string" }, reason: { type: "string" } }, required: ["instanceId", "reason"] },
   },
   {
+    name: "refresh_fleet_snapshots",
+    description: "Refresh cached fleet snapshots for one customer deployment without relying on list-page fanout.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        instanceId: { type: "string" },
+        snapshotKinds: { type: "array", items: { type: "string" } },
+        reason: { type: "string" },
+      },
+      required: ["instanceId", "reason"],
+    },
+  },
+  {
+    name: "enqueue_fleet_snapshot_jobs",
+    description: "Queue bounded background fleet snapshot jobs for one deployment or the next due batch.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        instanceId: { type: "string" },
+        snapshotKinds: { type: "array", items: { type: "string" } },
+        limit: { type: "number" },
+        reason: { type: "string" },
+      },
+      required: ["reason"],
+    },
+  },
+  {
     name: "prepare_release_upgrade",
     description: "Record audited target release readiness evidence without deploying.",
     inputSchema: {
@@ -134,6 +163,8 @@ const toolScopes: Record<string, string> = {
   configure_customer_integration: "control-plane:integrations:write",
   run_context_sync: "control-plane:context:write",
   probe_customer_health: "control-plane:releases:write",
+  refresh_fleet_snapshots: "control-plane:fleet:write",
+  enqueue_fleet_snapshot_jobs: "control-plane:fleet:write",
   prepare_release_upgrade: "control-plane:releases:write",
   run_customer_support_operation: "control-plane:support:write",
 };
@@ -177,6 +208,11 @@ function argBoolean(args: Record<string, unknown>, key: string, fallback: boolea
 
 function argNumber(args: Record<string, unknown>, key: string, fallback: number) {
   return typeof args[key] === "number" && Number.isFinite(args[key]) ? args[key] as number : fallback;
+}
+
+function argStringArray(args: Record<string, unknown>, key: string) {
+  const value = args[key];
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : null;
 }
 
 export async function GET() {
@@ -267,6 +303,21 @@ export async function POST(request: NextRequest) {
     if (name === "probe_customer_health") {
       return rpcResult(id, textContent(await probeControlPlaneCustomerHealth(actor, {
         instanceId: argString(args, "instanceId"),
+        reason: argString(args, "reason"),
+      })));
+    }
+    if (name === "refresh_fleet_snapshots") {
+      return rpcResult(id, textContent(await refreshControlPlaneFleetSnapshots(actor, {
+        instanceId: argString(args, "instanceId"),
+        snapshotKinds: argStringArray(args, "snapshotKinds"),
+        reason: argString(args, "reason"),
+      })));
+    }
+    if (name === "enqueue_fleet_snapshot_jobs") {
+      return rpcResult(id, textContent(await enqueueControlPlaneFleetSnapshots(actor, {
+        instanceId: argOptionalString(args, "instanceId"),
+        snapshotKinds: argStringArray(args, "snapshotKinds"),
+        limit: argNumber(args, "limit", 100),
         reason: argString(args, "reason"),
       })));
     }

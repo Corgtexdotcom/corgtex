@@ -1228,6 +1228,57 @@ button:disabled {
   font-style: italic;
 }
 
+.meeting-processing-status {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 14px 16px;
+  background: var(--bg-alt);
+}
+
+.meeting-processing-status p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 0.92rem;
+  line-height: 1.5;
+}
+
+.meeting-processing-status-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+  font-size: 0.82rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.meeting-processing-status-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  background: var(--muted);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--muted) 16%, transparent);
+}
+
+.meeting-processing-status.complete .meeting-processing-status-dot {
+  background: var(--success);
+  box-shadow: 0 0 0 3px var(--success-soft);
+}
+
+.meeting-processing-status.processing .meeting-processing-status-dot {
+  background: var(--warning);
+  box-shadow: 0 0 0 3px var(--warning-soft);
+}
+
+.meeting-processing-status.queued .meeting-processing-status-dot {
+  background: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
 .meeting-intelligence {
   background: var(--bg-alt);
   border: 1px solid var(--line);
@@ -1300,6 +1351,10 @@ button:disabled {
   padding: 16px;
 }
 
+.meeting-insight-item.editing {
+  grid-template-columns: 1fr;
+}
+
 .meeting-insight-item[aria-busy="true"] {
   opacity: 0.65;
 }
@@ -1323,9 +1378,52 @@ button:disabled {
   margin-bottom: 10px;
 }
 
+.meeting-insight-edit-form {
+  display: grid;
+  gap: 12px;
+  margin: 10px 0 12px;
+}
+
+.meeting-insight-edit-form label {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.meeting-insight-edit-form input,
+.meeting-insight-edit-form textarea {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  line-height: 1.45;
+  padding: 10px 12px;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.meeting-insight-edit-form textarea {
+  min-height: 120px;
+  resize: vertical;
+}
+
+.meeting-insight-edit-form input:focus,
+.meeting-insight-edit-form textarea:focus {
+  border-color: var(--accent);
+  outline: 2px solid color-mix(in srgb, var(--accent) 18%, transparent);
+  outline-offset: 1px;
+}
+
 .meeting-insight-actions {
   display: flex;
   align-items: flex-start;
+  flex-wrap: wrap;
   gap: 8px;
 }
 

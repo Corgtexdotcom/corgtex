@@ -9,12 +9,19 @@ import {
   applyInsightAction,
   dismissInsightAction,
   regenerateMeetingIntelligenceAction,
+  updateInsightAction,
 } from "../actions";
 
 type InsightBucket = {
   title: string;
   description: string;
   items: MeetingInsight[];
+};
+
+type InsightDraft = {
+  title: string;
+  bodyMd: string;
+  assigneeHint: string;
 };
 
 function confidenceValue(insight: MeetingInsight) {
@@ -37,6 +44,7 @@ export default function MeetingIntelligence({
   const [busyId, setBusyId] = useState<string | null>(null);
   const [regenerating, setRegenerating] = useState(false);
   const [guidance, setGuidance] = useState("");
+  const [editing, setEditing] = useState<Record<string, InsightDraft>>({});
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -81,6 +89,74 @@ export default function MeetingIntelligence({
       formData.append("workspaceId", workspaceId);
       formData.append("insightId", insightId);
       await actionFunc(formData);
+      router.refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t("errorInsightAction"));
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  function startEditing(insight: MeetingInsight) {
+    setEditing((current) => ({
+      ...current,
+      [insight.id]: {
+        title: insight.title,
+        bodyMd: insight.bodyMd,
+        assigneeHint: insight.assigneeHint ?? "",
+      },
+    }));
+  }
+
+  function cancelEditing(insightId: string) {
+    setEditing((current) => {
+      const next = { ...current };
+      delete next[insightId];
+      return next;
+    });
+  }
+
+  function updateDraft(insightId: string, patch: Partial<InsightDraft>) {
+    setEditing((current) => ({
+      ...current,
+      [insightId]: {
+        ...(current[insightId] ?? { title: "", bodyMd: "", assigneeHint: "" }),
+        ...patch,
+      },
+    }));
+  }
+
+  async function saveInsightEdits(insightId: string, applyAfterSave = false) {
+    const draft = editing[insightId];
+    if (!draft) return;
+    if (!draft.title.trim()) {
+      setError(t("errorInsightTitleRequired"));
+      return;
+    }
+
+    setBusyId(insightId);
+    setError(null);
+    setNotice(null);
+    try {
+      const updateFormData = new FormData();
+      updateFormData.append("workspaceId", workspaceId);
+      updateFormData.append("insightId", insightId);
+      updateFormData.append("title", draft.title.trim());
+      updateFormData.append("bodyMd", draft.bodyMd.trim());
+      updateFormData.append("assigneeHint", draft.assigneeHint.trim());
+      await updateInsightAction(updateFormData);
+
+      if (applyAfterSave) {
+        const applyFormData = new FormData();
+        applyFormData.append("workspaceId", workspaceId);
+        applyFormData.append("insightId", insightId);
+        await applyInsightAction(applyFormData);
+        setNotice(t("insightSavedAndApproved"));
+      } else {
+        setNotice(t("insightSaved"));
+      }
+
+      cancelEditing(insightId);
       router.refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : t("errorInsightAction"));
@@ -145,9 +221,11 @@ export default function MeetingIntelligence({
                   const confidence = confidenceValue(insight);
                   const isReviewable = insight.status === "SUGGESTED" || insight.status === "CONFIRMED";
                   const loading = busyId === insight.id;
+                  const draft = editing[insight.id];
+                  const isEditing = Boolean(draft);
 
                   return (
-                    <article className="meeting-insight-item" key={insight.id} aria-busy={loading}>
+                    <article className={`meeting-insight-item${isEditing ? " editing" : ""}`} key={insight.id} aria-busy={loading}>
                       <div className="meeting-insight-main">
                         <div className="meeting-insight-title-row">
                           <span className="tag info">{insightTypeLabels[insight.type] ?? insight.type}</span>
@@ -155,17 +233,47 @@ export default function MeetingIntelligence({
                           {confidence < 0.5 && <span className="tag warning">{t("lowConfidence")}</span>}
                           <span className="nr-item-meta">{t("confidencePercent", { percent: Math.round(confidence * 100) })}</span>
                         </div>
-                        <h4>{insight.title}</h4>
-                        {insight.bodyMd && (
-                          <div
-                            className="markdown-body meeting-insight-body"
-                            dangerouslySetInnerHTML={{ __html: renderMarkdown(insight.bodyMd) }}
-                          />
-                        )}
-                        {insight.assigneeHint && (
-                          <div className="nr-item-meta">
-                            {t("assigneeHint")} <strong>{insight.assigneeHint}</strong>
+                        {isEditing && draft ? (
+                          <div className="meeting-insight-edit-form">
+                            <label>
+                              {t("editInsightTitle")}
+                              <input
+                                value={draft.title}
+                                onChange={(event) => updateDraft(insight.id, { title: event.target.value })}
+                              />
+                            </label>
+                            <label>
+                              {t("editInsightBody")}
+                              <textarea
+                                value={draft.bodyMd}
+                                rows={5}
+                                onChange={(event) => updateDraft(insight.id, { bodyMd: event.target.value })}
+                              />
+                            </label>
+                            <label>
+                              {t("editInsightOwnerHint")}
+                              <input
+                                value={draft.assigneeHint}
+                                onChange={(event) => updateDraft(insight.id, { assigneeHint: event.target.value })}
+                                placeholder={t("editInsightOwnerHintPlaceholder")}
+                              />
+                            </label>
                           </div>
+                        ) : (
+                          <>
+                            <h4>{insight.title}</h4>
+                            {insight.bodyMd && (
+                              <div
+                                className="markdown-body meeting-insight-body"
+                                dangerouslySetInnerHTML={{ __html: renderMarkdown(insight.bodyMd) }}
+                              />
+                            )}
+                            {insight.assigneeHint && (
+                              <div className="nr-item-meta">
+                                {t("assigneeHint")} <strong>{insight.assigneeHint}</strong>
+                              </div>
+                            )}
+                          </>
                         )}
                         {insight.sourceQuote && (
                           <details className="meeting-insight-source">
@@ -176,22 +284,61 @@ export default function MeetingIntelligence({
                       </div>
                       {isReviewable && (
                         <div className="meeting-insight-actions">
-                          <button
-                            className="btn btn-primary"
-                            type="button"
-                            disabled={loading}
-                            onClick={() => runInsightAction(applyInsightAction, insight.id)}
-                          >
-                            {loading ? t("working") : t("approveInsight")}
-                          </button>
-                          <button
-                            className="btn"
-                            type="button"
-                            disabled={loading}
-                            onClick={() => runInsightAction(dismissInsightAction, insight.id)}
-                          >
-                            {t("declineInsight")}
-                          </button>
+                          {isEditing ? (
+                            <>
+                              <button
+                                className="btn btn-primary"
+                                type="button"
+                                disabled={loading}
+                                onClick={() => saveInsightEdits(insight.id, true)}
+                              >
+                                {loading ? t("working") : t("saveAndApproveInsight")}
+                              </button>
+                              <button
+                                className="btn"
+                                type="button"
+                                disabled={loading}
+                                onClick={() => saveInsightEdits(insight.id)}
+                              >
+                                {t("saveInsight")}
+                              </button>
+                              <button
+                                className="btn"
+                                type="button"
+                                disabled={loading}
+                                onClick={() => cancelEditing(insight.id)}
+                              >
+                                {t("cancelEditInsight")}
+                              </button>
+                            </>
+                          ) : (
+                            <>
+                              <button
+                                className="btn btn-primary"
+                                type="button"
+                                disabled={loading}
+                                onClick={() => runInsightAction(applyInsightAction, insight.id)}
+                              >
+                                {loading ? t("working") : t("approveInsight")}
+                              </button>
+                              <button
+                                className="btn"
+                                type="button"
+                                disabled={loading}
+                                onClick={() => startEditing(insight)}
+                              >
+                                {t("editInsight")}
+                              </button>
+                              <button
+                                className="btn"
+                                type="button"
+                                disabled={loading}
+                                onClick={() => runInsightAction(dismissInsightAction, insight.id)}
+                              >
+                                {t("declineInsight")}
+                              </button>
+                            </>
+                          )}
                         </div>
                       )}
                     </article>
