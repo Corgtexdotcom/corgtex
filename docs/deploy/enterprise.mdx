@@ -7,11 +7,17 @@ While the standard Docker Compose method is perfect for evaluation and small set
 
 For hosted customers, Corgtex uses a **customer deployment** model. Each real customer receives a dedicated runtime stack with its own web service, worker service, Postgres database, Redis service, object storage, custom domain, and region. Shared multi-tenant deployments are reserved for demos and trials.
 
+Corgtex uses three distinct runtime concepts in production:
+
+- `app.corgtex.com` is the Corgtex internal dogfood product app.
+- `ops.corgtex.com` is the dedicated Ops control plane for customer deployment management and support.
+- Customer domains, such as `customer.corgtex.com`, are customer runtimes.
+
 ## Hosted Customer Deployments
 
 The public Apache-licensed Corgtex repository remains the complete core product. Customer data, customer-specific seed content, private deployment metadata, and operational credentials never live in this public repository.
 
-Corgtex operators manage customer deployments through a dedicated internal control-plane deployment. The control plane stores operational metadata such as customer slug, region, release image tag, Railway resource IDs, custom domain, health status, and bootstrap status. It does not store raw seed bundle content or provider API tokens.
+Corgtex operators manage customer deployments through the dedicated Ops control-plane deployment at `ops.corgtex.com`. The control plane stores operational metadata such as customer slug, region, release image tag, Railway resource IDs, custom domain, health status, and bootstrap status. It does not store raw seed bundle content or provider API tokens.
 
 ### Release images
 
@@ -21,7 +27,7 @@ The control plane records the target release and checks it against `/api/health`
 
 ### Control-plane APIs
 
-The operator UI and internal automation both use the same global-operator domain layer. Internal API routes under `/api/admin/customer-deployments` can list and provision managed customers, and per-deployment routes can trigger health probes, bootstrap, suspension, and release upgrades. These APIs are for the Corgtex Ops deployment only and must not be exposed as customer-facing product APIs.
+The operator UI and internal automation both use the same global-operator domain layer. Internal API routes under `/api/admin/customer-deployments` can list and provision managed customers, and per-deployment routes can trigger health probes, bootstrap, suspension, and release upgrades. These APIs are active only on the Corgtex Ops deployment and are disabled on the dogfood product app and customer runtimes.
 
 ### Support operations
 

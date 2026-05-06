@@ -1,6 +1,7 @@
 "use server";
 
 import { AppError, isGlobalOperator, listActorWorkspaces, loginUserWithPassword } from "@corgtex/domain";
+import { env } from "@corgtex/shared";
 import { setSessionCookie } from "@/lib/auth";
 import type { LoginActionState } from "./state";
 
@@ -45,7 +46,7 @@ export async function loginAction(
     user: result.user,
   };
 
-  if (isGlobalOperator(actor)) {
+  if (env.CONTROL_PLANE_MODE && isGlobalOperator(actor)) {
     await setSessionCookie(result.token, result.expiresAt);
     return {
       email,

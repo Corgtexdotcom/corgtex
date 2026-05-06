@@ -13,15 +13,7 @@ import {
   adminBulkInvite,
   adminResendAccessLink,
   adminCreateWorkspace,
-  registerCustomerDeploymentRecord,
-  provisionCustomerDeployment,
-  removeCustomerDeployment,
-  probeCustomerDeploymentHealth,
-  suspendCustomerDeployment,
-  triggerCustomerDeploymentBootstrap,
-  upgradeCustomerDeploymentRelease,
   getWorkspaceAdminDetail,
-  type RailwayRuntimeServiceSource
 } from "@corgtex/domain";
 import { sendEmail, prisma } from "@corgtex/shared";
 import { notFound } from "next/navigation";
@@ -37,41 +29,6 @@ async function verifyGlobalAdmin(workspaceId: string) {
     notFound();
   }
   return actor;
-}
-
-function optionalString(formData: FormData, name: string) {
-  const value = formData.get(name);
-  if (typeof value !== "string") {
-    return null;
-  }
-  const trimmed = value.trim();
-  return trimmed ? trimmed : null;
-}
-
-function looksLikeGitSha(value: string) {
-  return /^[a-f0-9]{7,40}$/i.test(value.trim());
-}
-
-function serviceSourceFromForm(
-  formData: FormData,
-  prefix: "web" | "worker",
-  releaseImageTag: string,
-): RailwayRuntimeServiceSource | null {
-  const repo = optionalString(formData, `${prefix}Repo`);
-  if (!repo) {
-    return null;
-  }
-  const commitSha = optionalString(formData, `${prefix}CommitSha`)
-    ?? (looksLikeGitSha(releaseImageTag) ? releaseImageTag.trim() : null);
-
-  return {
-    repo,
-    branch: optionalString(formData, `${prefix}Branch`),
-    commitSha,
-    rootDirectory: optionalString(formData, `${prefix}RootDirectory`),
-    dockerfilePath: optionalString(formData, `${prefix}DockerfilePath`),
-    startCommand: optionalString(formData, `${prefix}StartCommand`),
-  };
 }
 
 export async function adminResetPasswordAction(formData: FormData) {
@@ -245,120 +202,6 @@ export async function adminRetryFailedJobAction(formData: FormData) {
   await replayWorkflowJob(actor, {
     workspaceId: asString(formData, "targetWorkspaceId"),
     workflowJobId: asString(formData, "jobId"),
-  });
-
-  refresh(workspaceId);
-}
-
-export async function adminRegisterCustomerDeploymentAction(formData: FormData) {
-  const workspaceId = asString(formData, "workspaceId");
-  const actor = await verifyGlobalAdmin(workspaceId);
-  
-  await registerCustomerDeploymentRecord(actor, {
-    url: asString(formData, "url"),
-    label: asString(formData, "label"),
-    environment: formData.get("environment") as string | undefined,
-    notes: formData.get("notes") as string | undefined,
-    customerSlug: formData.get("customerSlug") as string | undefined,
-    region: formData.get("region") as string | undefined,
-    dataResidency: formData.get("dataResidency") as string | undefined,
-    customDomain: formData.get("customDomain") as string | undefined,
-    supportOwnerEmail: formData.get("supportOwnerEmail") as string | undefined,
-    releaseVersion: formData.get("releaseVersion") as string | undefined,
-    releaseImageTag: formData.get("releaseImageTag") as string | undefined,
-    storageBucketName: formData.get("storageBucketName") as string | undefined,
-    bootstrapBundleUri: formData.get("bootstrapBundleUri") as string | undefined,
-    bootstrapBundleChecksum: formData.get("bootstrapBundleChecksum") as string | undefined,
-    bootstrapBundleSchemaVersion: formData.get("bootstrapBundleSchemaVersion") as string | undefined,
-  });
-
-  refresh(workspaceId);
-}
-
-export async function adminProvisionCustomerDeploymentAction(formData: FormData) {
-  const workspaceId = asString(formData, "workspaceId");
-  const actor = await verifyGlobalAdmin(workspaceId);
-  const webImage = optionalString(formData, "webImage");
-  const workerImage = optionalString(formData, "workerImage");
-  const releaseImageTag = asString(formData, "releaseImageTag");
-
-  await provisionCustomerDeployment(actor, {
-    label: asString(formData, "label"),
-    customerSlug: asString(formData, "customerSlug"),
-    region: asString(formData, "region"),
-    dataResidency: asString(formData, "dataResidency"),
-    customDomain: formData.get("customDomain") as string | null,
-    supportOwnerEmail: formData.get("supportOwnerEmail") as string | null,
-    releaseVersion: formData.get("releaseVersion") as string | null,
-    releaseImageTag,
-    webImage,
-    workerImage,
-    webSource: webImage ? null : serviceSourceFromForm(formData, "web", releaseImageTag),
-    workerSource: workerImage ? null : serviceSourceFromForm(formData, "worker", releaseImageTag),
-    storageBucketName: formData.get("storageBucketName") as string | null,
-    bootstrapBundleUri: formData.get("bootstrapBundleUri") as string | null,
-    bootstrapBundleChecksum: formData.get("bootstrapBundleChecksum") as string | null,
-    bootstrapBundleSchemaVersion: formData.get("bootstrapBundleSchemaVersion") as string | null,
-  });
-
-  refresh(workspaceId);
-}
-
-export async function adminRemoveCustomerDeploymentAction(formData: FormData) {
-  const workspaceId = asString(formData, "workspaceId");
-  const actor = await verifyGlobalAdmin(workspaceId);
-  
-  await removeCustomerDeployment(actor, asString(formData, "deploymentId"));
-
-  refresh(workspaceId);
-}
-
-export async function adminProbeCustomerDeploymentHealthAction(formData: FormData) {
-  const workspaceId = asString(formData, "workspaceId");
-  const actor = await verifyGlobalAdmin(workspaceId);
-  
-  await probeCustomerDeploymentHealth(actor, asString(formData, "deploymentId"));
-
-  refresh(workspaceId);
-}
-
-export async function adminSuspendCustomerDeploymentAction(formData: FormData) {
-  const workspaceId = asString(formData, "workspaceId");
-  const actor = await verifyGlobalAdmin(workspaceId);
-
-  await suspendCustomerDeployment(actor, asString(formData, "deploymentId"));
-
-  refresh(workspaceId);
-}
-
-export async function adminUpgradeCustomerDeploymentAction(formData: FormData) {
-  const workspaceId = asString(formData, "workspaceId");
-  const actor = await verifyGlobalAdmin(workspaceId);
-  const webImage = optionalString(formData, "webImage");
-  const workerImage = optionalString(formData, "workerImage");
-  const releaseImageTag = asString(formData, "releaseImageTag");
-
-  await upgradeCustomerDeploymentRelease(actor, {
-    deploymentId: asString(formData, "deploymentId"),
-    releaseVersion: formData.get("releaseVersion") as string | null,
-    releaseImageTag,
-    webImage,
-    workerImage,
-    webSource: webImage ? null : serviceSourceFromForm(formData, "web", releaseImageTag),
-    workerSource: workerImage ? null : serviceSourceFromForm(formData, "worker", releaseImageTag),
-  });
-
-  refresh(workspaceId);
-}
-
-export async function adminTriggerBootstrapAction(formData: FormData) {
-  const workspaceId = asString(formData, "workspaceId");
-  const actor = await verifyGlobalAdmin(workspaceId);
-
-  await triggerCustomerDeploymentBootstrap(actor, {
-    deploymentId: asString(formData, "deploymentId"),
-    token: asString(formData, "bootstrapToken"),
-    expiresAt: new Date(asString(formData, "expiresAt")),
   });
 
   refresh(workspaceId);

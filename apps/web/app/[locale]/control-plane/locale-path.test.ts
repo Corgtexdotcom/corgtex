@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { controlPlaneLocaleCookie, localizedControlPlanePath } from "./locale-path";
+import { controlPlaneLocaleCookie, localizedControlPlanePath, normalizeControlPlaneLocale } from "./locale-path";
 
 describe("localizedControlPlanePath", () => {
   it("uses the unprefixed default-locale path for English", () => {
@@ -28,5 +28,14 @@ describe("controlPlaneLocaleCookie", () => {
   it("persists the next-intl locale cookie for client-side switches", () => {
     expect(controlPlaneLocaleCookie("en")).toBe("NEXT_LOCALE=en; path=/; max-age=31536000; SameSite=Lax");
     expect(controlPlaneLocaleCookie("es")).toBe("NEXT_LOCALE=es; path=/; max-age=31536000; SameSite=Lax");
+  });
+});
+
+describe("normalizeControlPlaneLocale", () => {
+  it("falls back to English for unsupported or missing locales", () => {
+    expect(normalizeControlPlaneLocale("es")).toBe("es");
+    expect(normalizeControlPlaneLocale("en")).toBe("en");
+    expect(normalizeControlPlaneLocale("fr")).toBe("en");
+    expect(normalizeControlPlaneLocale(undefined)).toBe("en");
   });
 });

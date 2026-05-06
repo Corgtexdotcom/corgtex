@@ -3,6 +3,7 @@ import { z } from "zod";
 import { upgradeCustomerDeploymentRelease } from "@corgtex/domain";
 import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError, validateBody } from "@/lib/http";
+import { requireControlPlaneDeploymentMode } from "@/lib/control-plane-guard";
 
 export const dynamic = "force-dynamic";
 
@@ -36,6 +37,11 @@ export async function POST(
   request: NextRequest,
   props: { params: Promise<{ deploymentId: string }> },
 ) {
+  const unavailableResponse = requireControlPlaneDeploymentMode();
+  if (unavailableResponse) {
+    return unavailableResponse;
+  }
+
   try {
     const actor = await resolveRequestActor(request);
     const { deploymentId } = await props.params;
