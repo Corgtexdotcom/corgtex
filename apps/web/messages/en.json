@@ -2001,6 +2001,7 @@
     "raisedByMeta": "Raised by {name}",
     "sectionDescription": "Description",
     "sectionDiscussion": "Discussion",
+    "sectionResolution": "Resolution",
     "statusAll": "ALL",
     "statusDraft": "DRAFT",
     "statusResolved": "RESOLVED",

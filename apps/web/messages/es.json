@@ -1998,6 +1998,7 @@
     "raisedByMeta": "Planteada por {name}",
     "sectionDescription": "Descripción",
     "sectionDiscussion": "Discusión",
+    "sectionResolution": "Resolución",
     "statusAll": "ALL",
     "statusDraft": "BORRADOR",
     "statusResolved": "RESUELTAS",

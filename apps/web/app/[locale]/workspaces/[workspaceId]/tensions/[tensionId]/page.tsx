@@ -129,6 +129,15 @@ export default async function TensionDetailPage({
         </div>
       </section>
 
+      {tension.status === "RESOLVED" && tension.resolvedVia && (
+        <section className="ws-section" style={{ marginBottom: 48 }}>
+          <h2 className="nr-section-header">{t("sectionResolution")}</h2>
+          <div className="nr-item" style={{ whiteSpace: "pre-wrap" }}>
+            {tension.resolvedVia}
+          </div>
+        </section>
+      )}
+
       <section className="ws-section" style={{ marginBottom: 48 }}>
         <h2 className="nr-section-header">{t("sectionDiscussion")}</h2>
         <DeliberationThread entries={mappedEntries} canResolve={true} resolveAction={resolveTensionDeliberationAction} hiddenFields={{ workspaceId, parentId: tensionId }} />
