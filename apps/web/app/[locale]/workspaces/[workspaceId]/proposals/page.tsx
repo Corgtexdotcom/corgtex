@@ -2,8 +2,8 @@ import { listProposals, requireWorkspaceMembership } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownExcerpt } from "@/lib/components/MarkdownRenderer";
+import { CreateProposalForm } from "./CreateProposalForm";
 import {
-  createProposalAction,
   archiveProposalAction,
   submitProposalAction,
   returnProposalToDraftAction,
@@ -172,26 +172,7 @@ export default async function ProposalsPage({
             <summary className="nr-hide-marker" style={{ cursor: "pointer", fontWeight: 600, color: "var(--accent)" }}>
               <span className="nr-section-header" style={{ borderTop: "none", display: "inline-block", padding: 0, margin: 0 }}>{t("newProposalTitle")}</span>
             </summary>
-            <form action={createProposalAction} className="stack nr-form-section" style={{ marginTop: "16px" }}>
-              <input type="hidden" name="workspaceId" value={workspaceId} />
-              <label>
-                {t("formTitle")}
-                <input name="title" required />
-              </label>
-              <label>
-                {t("formSummary")}
-                <input name="summary" />
-              </label>
-              <label>
-                {t("formBody")}
-                <MarkdownEditor name="bodyMd" required placeholder={t("formBodyPlaceholder")} />
-              </label>
-              <label style={{ display: "flex", alignItems: "center", gap: "8px", fontWeight: "normal", cursor: "pointer" }}>
-                <input type="checkbox" name="isPrivate" defaultChecked />
-                <span>{t("formPrivateDraft")}</span>
-              </label>
-              <button type="submit">{t("btnCreateDraft")}</button>
-            </form>
+            <CreateProposalForm workspaceId={workspaceId} />
           </details>
         </section>
       )}

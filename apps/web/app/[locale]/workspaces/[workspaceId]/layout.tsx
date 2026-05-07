@@ -10,6 +10,7 @@ import { CommandMenuButton } from "./CommandMenuButton";
 import { getTranslations } from "next-intl/server";
 import { LanguageSwitcher } from "./LanguageSwitcher";
 import { ThemeToggle } from "../../../ThemeToggle";
+import { DesktopWorkspaceNav } from "./DesktopWorkspaceNav";
 import { buildWorkspaceCapabilities } from "@/lib/workspace-capabilities";
 import { filterNavGroupsByWorkspaceAccess, getWorkspaceFeatureFlags } from "@/lib/workspace-feature-flags";
 import { MobileWorkspaceShell } from "./MobileWorkspaceShell";
@@ -87,40 +88,13 @@ export default async function WorkspaceLayout({
           )}
         </div>
 
-        <nav className="ws-nav">
-          {visibleNavGroups.map((group) => (
-            <div key={group.labelKey} style={{ marginBottom: "16px" }}>
-              <div className="muted" style={{ fontSize: "0.75rem", textTransform: "uppercase", letterSpacing: "0.05em", padding: "0 12px", marginBottom: "4px", fontWeight: 600 }}>
-                {tNav(group.labelKey as any)}
-              </div>
-              {group.items.map((item) => (
-                <a
-                  key={item.href}
-                  href={`/workspaces/${workspaceId}${item.href}`}
-                  className="ws-nav-link"
-                >
-                  <span className="ws-nav-icon">{item.icon}</span>
-                  {tNav(item.labelKey as any)}
-                  {item.href === "" && unreadCount > 0 && (
-                    <span className="ws-notif-badge">{unreadCount}</span>
-                  )}
-                </a>
-              ))}
-            </div>
-          ))}
-
-          {isGlobalOperator(actor) && (
-            <div style={{ marginBottom: "16px" }}>
-              <div className="muted" style={{ fontSize: "0.75rem", textTransform: "uppercase", letterSpacing: "0.05em", padding: "0 12px", marginBottom: "4px", fontWeight: 600 }}>
-                {tNav("globalAdmin")}
-              </div>
-              <a href={controlPlaneHref} className="ws-nav-link">
-                <span className="ws-nav-icon">✧</span>
-                {tNav("platformAdmin")}
-              </a>
-            </div>
-          )}
-        </nav>
+        <DesktopWorkspaceNav
+          workspaceId={workspaceId}
+          navGroups={visibleNavGroups}
+          unreadCount={unreadCount}
+          showPlatformAdmin={isGlobalOperator(actor)}
+          controlPlaneHref={controlPlaneHref}
+        />
 
         <div className="ws-sidebar-footer">
           {featureFlags.MULTILINGUAL && <LanguageSwitcher />}
