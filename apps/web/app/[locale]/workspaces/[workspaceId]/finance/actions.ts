@@ -2,7 +2,8 @@
 
 import { enforceDemoGuard } from "@/lib/demo-guard";
 import { requirePageActor } from "@/lib/auth";
-import { asString, asOptional, asOptionalInt, refresh } from "../action-utils";
+import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
+import { asString, asOptional, refresh } from "../action-utils";
 import {
   createLedgerAccount,
   createSpend,
@@ -23,13 +24,16 @@ import {
   resolveDeliberationEntry,
 } from "@corgtex/domain";
 
+async function requireFinanceActionContext(formData: FormData) {
+  const workspaceId = asString(formData, "workspaceId");
+  await enforceDemoGuard(workspaceId);
+  const actor = await requirePageActor();
+  await requireWorkspaceFeature(workspaceId, "FINANCE");
+  return { actor, workspaceId };
+}
 
 export async function createSpendAction(formData: FormData) {
-  const _demoGuardWsId = formData.get("workspaceId") as string;
-  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
-
-  const actor = await requirePageActor();
-  const workspaceId = asString(formData, "workspaceId");
+  const { actor, workspaceId } = await requireFinanceActionContext(formData);
   
   // Convert dollars from form to cents for the domain
   const rawAmount = asString(formData, "amount");
@@ -50,11 +54,7 @@ export async function createSpendAction(formData: FormData) {
 }
 
 export async function submitSpendAction(formData: FormData) {
-  const _demoGuardWsId = formData.get("workspaceId") as string;
-  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
-
-  const actor = await requirePageActor();
-  const workspaceId = asString(formData, "workspaceId");
+  const { actor, workspaceId } = await requireFinanceActionContext(formData);
   await submitSpend(actor, {
     workspaceId,
     spendId: asString(formData, "spendId"),
@@ -63,11 +63,7 @@ export async function submitSpendAction(formData: FormData) {
 }
 
 export async function updateSpendAction(formData: FormData) {
-  const _demoGuardWsId = formData.get("workspaceId") as string;
-  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
-
-  const actor = await requirePageActor();
-  const workspaceId = asString(formData, "workspaceId");
+  const { actor, workspaceId } = await requireFinanceActionContext(formData);
   const rawAmount = asOptional(formData, "amount");
   const parsedAmount = rawAmount ? Number.parseFloat(rawAmount) : null;
   await updateSpend(actor, {
@@ -84,11 +80,7 @@ export async function updateSpendAction(formData: FormData) {
 }
 
 export async function returnSpendToDraftAction(formData: FormData) {
-  const _demoGuardWsId = formData.get("workspaceId") as string;
-  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
-
-  const actor = await requirePageActor();
-  const workspaceId = asString(formData, "workspaceId");
+  const { actor, workspaceId } = await requireFinanceActionContext(formData);
   await returnSpendToDraft(actor, {
     workspaceId,
     spendId: asString(formData, "spendId"),
@@ -97,11 +89,7 @@ export async function returnSpendToDraftAction(formData: FormData) {
 }
 
 export async function markSpendPaidAction(formData: FormData) {
-  const _demoGuardWsId = formData.get("workspaceId") as string;
-  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
-
-  const actor = await requirePageActor();
-  const workspaceId = asString(formData, "workspaceId");
+  const { actor, workspaceId } = await requireFinanceActionContext(formData);
   await markSpendPaid(actor, {
     workspaceId,
     spendId: asString(formData, "spendId"),
@@ -111,11 +99,7 @@ export async function markSpendPaidAction(formData: FormData) {
 }
 
 export async function createLedgerAccountAction(formData: FormData) {
-  const _demoGuardWsId = formData.get("workspaceId") as string;
-  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
-
-  const actor = await requirePageActor();
-  const workspaceId = asString(formData, "workspaceId");
+  const { actor, workspaceId } = await requireFinanceActionContext(formData);
   await createLedgerAccount(actor, {
     workspaceId,
     name: asString(formData, "name"),
@@ -127,11 +111,7 @@ export async function createLedgerAccountAction(formData: FormData) {
 }
 
 export async function updateLedgerAccountAction(formData: FormData) {
-  const _demoGuardWsId = formData.get("workspaceId") as string;
-  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
-
-  const actor = await requirePageActor();
-  const workspaceId = asString(formData, "workspaceId");
+  const { actor, workspaceId } = await requireFinanceActionContext(formData);
   await updateLedgerAccount(actor, {
     workspaceId,
     accountId: asString(formData, "accountId"),
@@ -143,11 +123,7 @@ export async function updateLedgerAccountAction(formData: FormData) {
 }
 
 export async function archiveSpendAction(formData: FormData) {
-  const _demoGuardWsId = formData.get("workspaceId") as string;
-  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
-
-  const actor = await requirePageActor();
-  const workspaceId = asString(formData, "workspaceId");
+  const { actor, workspaceId } = await requireFinanceActionContext(formData);
   await deleteSpend(actor, {
     workspaceId,
     spendId: asString(formData, "spendId"),
@@ -156,11 +132,7 @@ export async function archiveSpendAction(formData: FormData) {
 }
 
 export async function archiveLedgerAccountAction(formData: FormData) {
-  const _demoGuardWsId = formData.get("workspaceId") as string;
-  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
-
-  const actor = await requirePageActor();
-  const workspaceId = asString(formData, "workspaceId");
+  const { actor, workspaceId } = await requireFinanceActionContext(formData);
   await deleteLedgerAccount(actor, {
     workspaceId,
     accountId: asString(formData, "accountId"),
@@ -169,11 +141,7 @@ export async function archiveLedgerAccountAction(formData: FormData) {
 }
 
 export async function linkSpendLedgerAccountAction(formData: FormData) {
-  const _demoGuardWsId = formData.get("workspaceId") as string;
-  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
-
-  const actor = await requirePageActor();
-  const workspaceId = asString(formData, "workspaceId");
+  const { actor, workspaceId } = await requireFinanceActionContext(formData);
   await linkSpendLedgerAccount(actor, {
     workspaceId,
     spendId: asString(formData, "spendId"),
@@ -183,11 +151,7 @@ export async function linkSpendLedgerAccountAction(formData: FormData) {
 }
 
 export async function uploadSpendStatementAction(formData: FormData) {
-  const _demoGuardWsId = formData.get("workspaceId") as string;
-  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
-
-  const actor = await requirePageActor();
-  const workspaceId = asString(formData, "workspaceId");
+  const { actor, workspaceId } = await requireFinanceActionContext(formData);
   await uploadSpendStatement(actor, {
     workspaceId,
     spendId: asString(formData, "spendId"),
@@ -199,11 +163,7 @@ export async function uploadSpendStatementAction(formData: FormData) {
 }
 
 export async function updateSpendReconciliationAction(formData: FormData) {
-  const _demoGuardWsId = formData.get("workspaceId") as string;
-  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
-
-  const actor = await requirePageActor();
-  const workspaceId = asString(formData, "workspaceId");
+  const { actor, workspaceId } = await requireFinanceActionContext(formData);
   await updateSpendReconciliation(actor, {
     workspaceId,
     spendId: asString(formData, "spendId"),
@@ -214,11 +174,7 @@ export async function updateSpendReconciliationAction(formData: FormData) {
 }
 
 export async function addSpendCommentAction(formData: FormData) {
-  const _demoGuardWsId = formData.get("workspaceId") as string;
-  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
-
-  const actor = await requirePageActor();
-  const workspaceId = asString(formData, "workspaceId");
+  const { actor, workspaceId } = await requireFinanceActionContext(formData);
   await addSpendComment(actor, {
     workspaceId,
     spendId: asString(formData, "spendId"),
@@ -229,11 +185,7 @@ export async function addSpendCommentAction(formData: FormData) {
 }
 
 export async function resolveSpendObjectionAction(formData: FormData) {
-  const _demoGuardWsId = formData.get("workspaceId") as string;
-  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
-
-  const actor = await requirePageActor();
-  const workspaceId = asString(formData, "workspaceId");
+  const { actor, workspaceId } = await requireFinanceActionContext(formData);
   await resolveSpendObjection(actor, {
     workspaceId,
     spendId: asString(formData, "spendId"),
@@ -243,11 +195,7 @@ export async function resolveSpendObjectionAction(formData: FormData) {
 }
 
 export async function escalateSpendToProposalAction(formData: FormData) {
-  const _demoGuardWsId = formData.get("workspaceId") as string;
-  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
-
-  const actor = await requirePageActor();
-  const workspaceId = asString(formData, "workspaceId");
+  const { actor, workspaceId } = await requireFinanceActionContext(formData);
   await escalateSpendToProposal(actor, {
     workspaceId,
     spendId: asString(formData, "spendId"),
@@ -256,11 +204,7 @@ export async function escalateSpendToProposalAction(formData: FormData) {
 }
 
 export async function postSpendDeliberationAction(formData: FormData) {
-  const _demoGuardWsId = formData.get("workspaceId") as string;
-  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
-
-  const actor = await requirePageActor();
-  const workspaceId = asString(formData, "workspaceId");
+  const { actor, workspaceId } = await requireFinanceActionContext(formData);
   
   await postDeliberationEntry(actor, {
     workspaceId,
@@ -275,11 +219,7 @@ export async function postSpendDeliberationAction(formData: FormData) {
 }
 
 export async function resolveSpendDeliberationAction(formData: FormData) {
-  const _demoGuardWsId = formData.get("workspaceId") as string;
-  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
-
-  const actor = await requirePageActor();
-  const workspaceId = asString(formData, "workspaceId");
+  const { actor, workspaceId } = await requireFinanceActionContext(formData);
   
   await resolveDeliberationEntry(actor, {
     workspaceId,

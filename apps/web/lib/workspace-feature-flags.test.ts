@@ -41,6 +41,14 @@ describe("filterNavGroupsByWorkspaceAccess", () => {
     expect(labels).not.toContain("built");
   });
 
+  it("shows finance navigation by default for existing customers", () => {
+    expect(visibleLabels({ canManageAgentGovernance: true })).toContain("finance");
+  });
+
+  it("hides finance navigation when the feature flag is disabled", () => {
+    expect(visibleLabels({ canManageAgentGovernance: true }, { FINANCE: false })).not.toContain("finance");
+  });
+
   it("shows client-sensitive new surfaces only when explicitly enabled", () => {
     const labels = visibleLabels(
       { canManageAgentGovernance: true },

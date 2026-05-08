@@ -40,7 +40,6 @@ export function DesktopWorkspaceNav({
 }) {
   const pathname = usePathname() ?? "";
   const tNav = useTranslations("nav");
-  const currentPathname = pathname ?? "";
 
   return (
     <nav className="ws-nav">
@@ -50,7 +49,7 @@ export function DesktopWorkspaceNav({
             {tNav(group.labelKey as any)}
           </div>
           {group.items.map((item) => {
-            const isActive = isActiveWorkspacePath(currentPathname, workspaceId, item.href);
+            const isActive = isActiveWorkspacePath(pathname, workspaceId, item.href);
 
             return (
               <a
