@@ -34,6 +34,11 @@ describe("filterNavGroupsByWorkspaceAccess", () => {
     expect(visibleLabels({ canManageAgentGovernance: true }, { AGENT_GOVERNANCE: false })).not.toContain("agentGovernance");
   });
 
+  it("keeps finance visible by default and hides it when disabled", () => {
+    expect(visibleLabels({ canManageAgentGovernance: true })).toContain("finance");
+    expect(visibleLabels({ canManageAgentGovernance: true }, { FINANCE: false })).not.toContain("finance");
+  });
+
   it("hides client-sensitive new surfaces by default", () => {
     const labels = visibleLabels({ canManageAgentGovernance: true });
 
