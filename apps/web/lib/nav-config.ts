@@ -14,6 +14,7 @@ export type NavGroup = {
 export type WorkspaceNavFeatureFlag =
   | "GOALS"
   | "TOOL_LINKS"
+  | "FINANCE"
   | "BUILD_ARTIFACTS"
   | "RELATIONSHIPS"
   | "CYCLES"
@@ -57,7 +58,7 @@ export const WORKSPACE_NAV_GROUPS: NavGroup[] = [
   {
     labelKey: "finance",
     items: [
-      { href: "/finance", labelKey: "finance", icon: "¤" },
+      { href: "/finance", labelKey: "finance", icon: "¤", featureFlag: "FINANCE" },
     ],
   },
   {

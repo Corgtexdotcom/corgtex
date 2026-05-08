@@ -15,6 +15,7 @@ export type WorkspaceFeatureFlagMap = Record<WorkspaceFeatureFlag, boolean>;
 export const DEFAULT_WORKSPACE_FEATURE_FLAGS: WorkspaceFeatureFlagMap = {
   GOALS: true,
   TOOL_LINKS: false,
+  FINANCE: true,
   BUILD_ARTIFACTS: false,
   RELATIONSHIPS: true,
   CYCLES: true,
@@ -28,6 +29,7 @@ export const DEFAULT_WORKSPACE_FEATURE_FLAGS: WorkspaceFeatureFlagMap = {
 const WORKSPACE_FEATURE_FLAG_VALUES: WorkspaceFeatureFlag[] = [
   "GOALS",
   "TOOL_LINKS",
+  "FINANCE",
   "BUILD_ARTIFACTS",
   "RELATIONSHIPS",
   "CYCLES",
