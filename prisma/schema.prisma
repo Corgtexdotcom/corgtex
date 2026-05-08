@@ -260,6 +260,62 @@ enum BuildArtifactAssetKind {
   OTHER
 }
 
+enum CatalogItemType {
+  APP
+  AGENT
+  TOOL
+  AUTOMATION
+  CONNECTOR
+  DATA_SOURCE
+}
+
+enum CatalogSourceType {
+  TOOL_LINK
+  AGENT_CONFIG
+  AGENT_IDENTITY
+  BUILD_ARTIFACT
+  COMMUNICATION_INSTALLATION
+  OAUTH_CONNECTION
+  MCP_CONNECTOR
+  MEETING_RECORDER
+  DATA_SOURCE
+  MANUAL
+}
+
+enum CatalogItemStatus {
+  DRAFT
+  PUBLISHED
+  REQUEST_ONLY
+  DISABLED
+  ARCHIVED
+}
+
+enum CatalogAccessMode {
+  OPEN
+  REQUEST
+  ADMIN_ONLY
+  DISABLED
+}
+
+enum CatalogRequestType {
+  ACCESS
+  API_KEY
+  BUDGET_INCREASE
+  PUBLISH
+}
+
+enum CatalogRequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  CANCELLED
+}
+
+enum CatalogApprovalMode {
+  ADMIN
+  AGENT_ASSISTED
+}
+
 enum BrainDiscussionTargetType {
   ARTICLE
   SECTION
@@ -458,6 +514,10 @@ model Workspace {
   procurementBillingHandoffs    ProcurementBillingHandoff[]
   procurementTrials             ProcurementTrial[]
   toolLinks                     WorkspaceToolLink[]
+  catalogItems                  CatalogItem[]
+  catalogFavorites              CatalogFavorite[]
+  catalogRequests               CatalogRequest[]
+  catalogSettings               CatalogSettings?
   buildArtifacts                BuildArtifact[]
   newspaperDeliveries           NewspaperDelivery[]
   newspaperTrackedLinks         NewspaperTrackedLink[]
@@ -702,6 +762,11 @@ model User {
   customerDeploymentAccess CustomerDeploymentAccess[]
   supportOperations        SupportOperation[]          @relation("SupportOperationActor")
   createdToolLinks         WorkspaceToolLink[]         @relation("WorkspaceToolLinkCreator")
+  createdCatalogItems      CatalogItem[]               @relation("CatalogItemCreator")
+  ownedCatalogItems        CatalogItem[]               @relation("CatalogItemOwner")
+  catalogFavorites         CatalogFavorite[]
+  catalogRequestsMade      CatalogRequest[]            @relation("CatalogRequestRequester")
+  catalogRequestsDecided   CatalogRequest[]            @relation("CatalogRequestDecider")
   createdBuildArtifacts    BuildArtifact[]             @relation("BuildArtifactCreator")
   productAnalyticsEvents   ProductAnalyticsEvent[]
 }
@@ -885,6 +950,102 @@ model WorkspaceToolLinkCircleTag {
 
   @@unique([toolLinkId, circleId])
   @@index([circleId])
+}
+
+model CatalogItem {
+  id                   String            @id @default(uuid())
+  workspaceId          String
+  createdByUserId      String?
+  ownerUserId          String?
+  type                 CatalogItemType
+  sourceType           CatalogSourceType @default(MANUAL)
+  sourceId             String?
+  title                String
+  slug                 String
+  outcome              String?
+  descriptionMd        String?           @db.Text
+  accessNotesMd        String?           @db.Text
+  url                  String?           @db.Text
+  category             String            @default("OTHER")
+  status               CatalogItemStatus @default(PUBLISHED)
+  accessMode           CatalogAccessMode @default(OPEN)
+  requestedScopes      String[]          @default([])
+  monthlyBudgetCents   Int?
+  dailyCallLimit       Int?
+  featured             Boolean           @default(false)
+  archivedAt           DateTime?
+  archivedByUserId     String?
+  archiveReason        String?
+  createdAt            DateTime          @default(now())
+  updatedAt            DateTime          @updatedAt
+
+  workspace        Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  createdBy        User?             @relation("CatalogItemCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  owner            User?             @relation("CatalogItemOwner", fields: [ownerUserId], references: [id], onDelete: SetNull)
+  favorites        CatalogFavorite[]
+  requests         CatalogRequest[]
+  agentCredentials AgentCredential[]
+  modelUsage       ModelUsage[]
+
+  @@unique([workspaceId, slug])
+  @@unique([workspaceId, sourceType, sourceId])
+  @@index([workspaceId, type, status])
+  @@index([workspaceId, ownerUserId])
+  @@index([workspaceId, archivedAt])
+}
+
+model CatalogFavorite {
+  id            String   @id @default(uuid())
+  workspaceId   String
+  catalogItemId String
+  userId        String
+  createdAt     DateTime @default(now())
+
+  workspace   Workspace   @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  catalogItem CatalogItem @relation(fields: [catalogItemId], references: [id], onDelete: Cascade)
+  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([catalogItemId, userId])
+  @@index([workspaceId, userId])
+}
+
+model CatalogRequest {
+  id                      String               @id @default(uuid())
+  workspaceId             String
+  catalogItemId           String?
+  requesterUserId         String
+  decidedByUserId         String?
+  type                    CatalogRequestType
+  status                  CatalogRequestStatus @default(PENDING)
+  reasonMd                String               @db.Text
+  requestedScopes         String[]             @default([])
+  requestedBudgetCents    Int?
+  requestedDailyCallLimit Int?
+  title                   String?
+  payloadJson             Json?
+  decisionNoteMd          String?              @db.Text
+  decidedAt               DateTime?
+  createdAt               DateTime             @default(now())
+  updatedAt               DateTime             @updatedAt
+
+  workspace     Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  catalogItem   CatalogItem? @relation(fields: [catalogItemId], references: [id], onDelete: SetNull)
+  requester     User         @relation("CatalogRequestRequester", fields: [requesterUserId], references: [id], onDelete: Cascade)
+  decidedBy     User?        @relation("CatalogRequestDecider", fields: [decidedByUserId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId, status, createdAt])
+  @@index([workspaceId, requesterUserId])
+  @@index([catalogItemId, status])
+}
+
+model CatalogSettings {
+  id           String              @id @default(uuid())
+  workspaceId  String              @unique
+  approvalMode CatalogApprovalMode @default(ADMIN)
+  createdAt    DateTime            @default(now())
+  updatedAt    DateTime            @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 }
 
 model BuildArtifact {
@@ -1796,6 +1957,8 @@ model ModelUsage {
   workspaceId      String
   workflowJobId    String?
   agentRunId       String?
+  catalogItemId    String?
+  agentCredentialId String?
   provider         String
   model            String
   taskType         ModelTaskType
@@ -1808,17 +1971,25 @@ model ModelUsage {
   workspace   Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   workflowJob WorkflowJob? @relation(fields: [workflowJobId], references: [id], onDelete: SetNull)
   agentRun    AgentRun?    @relation(fields: [agentRunId], references: [id], onDelete: SetNull)
+  catalogItem CatalogItem? @relation(fields: [catalogItemId], references: [id], onDelete: SetNull)
+  agentCredential AgentCredential? @relation(fields: [agentCredentialId], references: [id], onDelete: SetNull)
 
   @@index([workspaceId, taskType, createdAt])
+  @@index([workspaceId, catalogItemId, createdAt])
+  @@index([workspaceId, agentCredentialId, createdAt])
 }
 
 model AgentCredential {
   id              String    @id @default(uuid())
   workspaceId     String
   createdByUserId String?
+  catalogItemId   String?
   label           String
   tokenHash       String    @unique
   scopes          String[]
+  reasonMd        String?   @db.Text
+  monthlyBudgetCents Int?
+  dailyCallLimit  Int?
   isActive        Boolean   @default(true)
   lastUsedAt      DateTime?
   createdAt       DateTime  @default(now())
@@ -1826,8 +1997,12 @@ model AgentCredential {
 
   workspace        Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   createdBy        User?             @relation("AgentCredentialCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  catalogItem      CatalogItem?      @relation(fields: [catalogItemId], references: [id], onDelete: SetNull)
   agentIdentities  AgentIdentity[]
+  modelUsage       ModelUsage[]
   procurementTrial ProcurementTrial?
+
+  @@index([workspaceId, catalogItemId])
 }
 
 model AgentRun {

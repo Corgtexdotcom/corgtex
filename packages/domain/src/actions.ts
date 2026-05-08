@@ -6,6 +6,7 @@ import { recordAudit } from "./audit-trail";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { invariant } from "./errors";
 import { requireDraftManager } from "./draft-permissions";
+import { resolveWorkspaceProposalLink } from "./proposal-links";
 
 import { privacyFilter } from "./privacy";
 
@@ -57,7 +58,7 @@ export async function createAction(actor: AppActor, params: {
   isPrivate?: boolean;
   _membership?: import("@corgtex/shared").MembershipSummary | null;
 }) {
-  await requireWorkspaceMembership({
+  const membership = await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
     resolvedMembership: params._membership,
@@ -68,6 +69,7 @@ export async function createAction(actor: AppActor, params: {
   const authorUserId = await actorUserIdForWorkspace(actor, params.workspaceId);
 
   return prisma.$transaction(async (tx) => {
+    const proposalId = await resolveWorkspaceProposalLink(tx, actor, membership, params.workspaceId, params.proposalId);
     const action = await tx.action.create({
       data: {
         workspaceId: params.workspaceId,
@@ -77,7 +79,7 @@ export async function createAction(actor: AppActor, params: {
         circleId: params.circleId || null,
         assigneeMemberId: params.assigneeMemberId || null,
         dueAt: params.dueAt ?? null,
-        proposalId: params.proposalId || null,
+        proposalId,
         status: "DRAFT",
         isPrivate: params.isPrivate ?? true,
         publishedAt: null,

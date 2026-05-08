@@ -14,6 +14,8 @@ import {
 import { DealStageSelect } from "./DealStageSelect";
 import { getTranslations } from "next-intl/server";
 import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
+import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
+import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
 
 export const dynamic = "force-dynamic";
 
@@ -318,9 +320,7 @@ export default async function LeadsPage({
                     <span className="tag">{activityTypeLabel(activity.type)}</span>
                     <span className="muted" style={{ fontSize: "0.8rem", marginLeft: "auto" }}>{ageText(activity.createdAt)}</span>
                   </div>
-                  <div style={{ fontSize: "0.85rem", color: "var(--text)", lineHeight: 1.5, marginBottom: "8px" }}>
-                    {activity.bodyMd}
-                  </div>
+                  <MarkdownRenderer markdown={activity.bodyMd} variant="compact" />
                   <div className="row" style={{ fontSize: "0.8rem" }}>
                     {activity.contact && (
                       <span className="muted">{t("activityContact")} <strong>{activity.contact.name || activity.contact.email}</strong></span>
@@ -382,7 +382,8 @@ export default async function LeadsPage({
                 </div>
                 {conv.messages && conv.messages[0] && (
                   <div style={{ marginTop: 12, background: "var(--bg-alt)", padding: 12, borderRadius: 8, fontSize: "0.85rem" }}>
-                    <strong>{conv.messages[0].senderType === "LEAD" ? "Lead" : "Staff"}</strong>: {conv.messages[0].bodyMd}
+                    <strong>{conv.messages[0].senderType === "LEAD" ? "Lead" : "Staff"}</strong>
+                    <MarkdownRenderer markdown={conv.messages[0].bodyMd} variant="compact" />
                   </div>
                 )}
                 
@@ -391,7 +392,7 @@ export default async function LeadsPage({
                   <form action={createConversationMessageAction} className="stack nr-form-section" style={{ marginTop: 12 }}>
                     <input type="hidden" name="workspaceId" value={workspaceId} />
                     <input type="hidden" name="conversationId" value={conv.id} />
-                    <textarea name="bodyMd" required placeholder="Type your reply here..." rows={3} style={{ width: "100%", padding: 8, border: "1px solid var(--line)", borderRadius: 8 }}></textarea>
+                    <MarkdownEditor name="bodyMd" required placeholder="Type your reply here..." rows={3} />
                     <button type="submit" className="small" style={{ width: "fit-content" }}>Send Reply</button>
                   </form>
                 </details>

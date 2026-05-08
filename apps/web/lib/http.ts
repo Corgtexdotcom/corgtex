@@ -28,6 +28,15 @@ export function handleRouteError(error: unknown) {
     return errorResponse(error.status, error.code, error.message);
   }
 
+  if (error instanceof Error) {
+    const routeError = error as Error & { status?: unknown; code?: unknown };
+    const status = routeError.status;
+    const code = routeError.code;
+    if (typeof status === "number" && typeof code === "string" && status >= 400 && status < 600) {
+      return errorResponse(status, code, error.message);
+    }
+  }
+
   if (isDatabaseUnavailableError(error)) {
     console.error("Route failed because the database is unavailable.", error);
     return serviceUnavailableResponse();

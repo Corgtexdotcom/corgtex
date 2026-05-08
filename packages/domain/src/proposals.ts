@@ -1,6 +1,7 @@
-import type { AppActor } from "@corgtex/shared";
-import { prisma, logger } from "@corgtex/shared";
-import { Prisma } from "@prisma/client";
+import type { AppActor, MembershipSummary } from "@corgtex/shared";
+import { prisma } from "@corgtex/shared";
+import { Prisma, type ProposalResolutionOutcome } from "@prisma/client";
+import { defaultModelGateway } from "@corgtex/models";
 import { appendEvents } from "./events";
 import { actorUserIdForWorkspace, requireWorkspaceMembership } from "./auth";
 import { getApprovalPolicy, ensureApprovalFlow } from "./approvals";
@@ -8,6 +9,179 @@ import { invariant } from "./errors";
 import { privacyFilter } from "./privacy";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { requireDraftManager } from "./draft-permissions";
+
+const PROPOSAL_RESOLUTION_OUTCOMES = new Set<ProposalResolutionOutcome>(["ADOPTED", "NOT_ADOPTED", "WITHDRAWN"]);
+const AI_SUMMARY_WORD_THRESHOLD = 120;
+
+type CreateProposalParams = {
+  workspaceId: string;
+  title: string;
+  summary?: string | null;
+  includeAiSummary?: boolean;
+  bodyMd: string;
+  circleId?: string | null;
+  isPrivate?: boolean;
+  meetingId?: string | null;
+  sourceTensionId?: string | null;
+  relatedActionIds?: string[] | null;
+};
+
+type CreateProposalFromTensionParams = Omit<CreateProposalParams, "title" | "bodyMd" | "sourceTensionId"> & {
+  sourceTensionId: string;
+  title?: string | null;
+  bodyMd?: string | null;
+};
+
+function normalizeIds(ids?: string[] | null) {
+  return Array.from(new Set((ids ?? []).map((id) => id.trim()).filter(Boolean)));
+}
+
+function markdownToProposalText(markdown: string) {
+  return markdown
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/`([^`]*)`/g, "$1")
+    .replace(/!\[([^\]]*)\]\([^)]+\)/g, "$1")
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+    .replace(/^#{1,6}\s+/gm, "")
+    .replace(/^>\s?/gm, "")
+    .replace(/^[\s>*+-]*\[[ xX]\]\s+/gm, "")
+    .replace(/^[\s>*+-]*(?:[-*+]|\d+\.)\s+/gm, "")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/[*_~>#|{}[\]()]/g, " ")
+    .replace(/&[a-z]+;/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function proposalWordCount(title: string, bodyMd: string) {
+  const text = markdownToProposalText(`${title}\n\n${bodyMd}`);
+  return text.match(/[\p{L}\p{N}]+(?:['-][\p{L}\p{N}]+)*/gu)?.length ?? 0;
+}
+
+function normalizeGeneratedSummary(value: unknown) {
+  if (typeof value !== "string") return null;
+  const summary = markdownToProposalText(value);
+  if (!summary) return null;
+  return summary.length > 500 ? `${summary.slice(0, 497).trim()}...` : summary;
+}
+
+async function generateProposalSummary(params: {
+  workspaceId: string;
+  title: string;
+  bodyMd: string;
+}) {
+  if (proposalWordCount(params.title, params.bodyMd) <= AI_SUMMARY_WORD_THRESHOLD) {
+    return null;
+  }
+
+  try {
+    const extraction = await defaultModelGateway.extract({
+      workspaceId: params.workspaceId,
+      instruction: [
+        "Write a concise plain-text summary for this governance proposal.",
+        "Use only the supplied title and body.",
+        "Return one or two short sentences and no markdown.",
+      ].join("\n"),
+      input: JSON.stringify({
+        title: params.title,
+        bodyMd: params.bodyMd,
+      }),
+      schemaHint: "{ summary: string }",
+    });
+
+    return normalizeGeneratedSummary(extraction.output.summary);
+  } catch {
+    return null;
+  }
+}
+
+function proposalDraftFromTension(tension: { title: string; bodyMd: string | null }, params: {
+  title?: string | null;
+  summary?: string | null;
+  bodyMd?: string | null;
+}) {
+  const title = params.title?.trim() || `Resolve tension: ${tension.title}`;
+  const summary = params.summary?.trim() || `Proposal drafted from tension: ${tension.title}`;
+  const sourceDescription = tension.bodyMd?.trim() || "_No description provided._";
+  const bodyMd = params.bodyMd?.trim() || [
+    "## Tension",
+    "",
+    sourceDescription,
+    "",
+    "## Proposal",
+    "",
+    "Describe the governance change that would reduce or resolve this tension.",
+    "",
+    "## Safe-to-try check",
+    "",
+    "- What risk does this introduce?",
+    "- How will we know it helped?",
+  ].join("\n");
+
+  return { title, summary, bodyMd };
+}
+
+async function loadVisibleSourceTension(
+  tx: Prisma.TransactionClient,
+  actor: AppActor,
+  membership: MembershipSummary | null,
+  workspaceId: string,
+  sourceTensionId?: string | null,
+) {
+  const normalizedTensionId = sourceTensionId?.trim();
+  if (!normalizedTensionId) return null;
+
+  const tension = await tx.tension.findFirst({
+    where: {
+      id: normalizedTensionId,
+      workspaceId,
+      archivedAt: null,
+      ...privacyFilter(actor, membership),
+    },
+    select: {
+      id: true,
+      title: true,
+      bodyMd: true,
+      circleId: true,
+      meetingId: true,
+      proposalId: true,
+      status: true,
+    },
+  });
+
+  invariant(tension, 404, "NOT_FOUND", "Source tension not found.");
+  invariant(!tension.proposalId, 400, "INVALID_STATE", "Source tension is already linked to a proposal.");
+  return tension;
+}
+
+async function validateRelatedActions(
+  tx: Prisma.TransactionClient,
+  actor: AppActor,
+  membership: MembershipSummary | null,
+  workspaceId: string,
+  relatedActionIds?: string[] | null,
+) {
+  const actionIds = normalizeIds(relatedActionIds);
+  if (actionIds.length === 0) return actionIds;
+
+  const actions = await tx.action.findMany({
+    where: {
+      id: { in: actionIds },
+      workspaceId,
+      archivedAt: null,
+      ...privacyFilter(actor, membership),
+    },
+    select: {
+      id: true,
+      proposalId: true,
+    },
+  });
+
+  invariant(actions.length === actionIds.length, 404, "NOT_FOUND", "Related action not found.");
+  invariant(!actions.some((action) => action.proposalId), 400, "INVALID_STATE", "Related action is already linked to a proposal.");
+
+  return actionIds;
+}
 
 export async function listProposals(actor: AppActor, workspaceId: string, opts?: { take?: number; skip?: number; circleId?: string | null; archiveFilter?: ArchiveFilter }) {
   const take = opts?.take ?? 20;
@@ -76,16 +250,8 @@ export async function getProposal(actor: AppActor, params: {
   return proposal;
 }
 
-export async function createProposal(actor: AppActor, params: {
-  workspaceId: string;
-  title: string;
-  summary?: string | null;
-  bodyMd: string;
-  circleId?: string | null;
-  isPrivate?: boolean;
-  meetingId?: string | null;
-}) {
-  await requireWorkspaceMembership({
+export async function createProposal(actor: AppActor, params: CreateProposalParams) {
+  const membership = await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
   });
@@ -95,21 +261,48 @@ export async function createProposal(actor: AppActor, params: {
   invariant(title.length > 0, 400, "INVALID_INPUT", "Proposal title is required.");
   invariant(bodyMd.length > 0, 400, "INVALID_INPUT", "Proposal body is required.");
   const authorUserId = await actorUserIdForWorkspace(actor, params.workspaceId);
+  const summary = params.includeAiSummary === true
+    ? await generateProposalSummary({ workspaceId: params.workspaceId, title, bodyMd })
+    : params.summary?.trim() || null;
 
   return prisma.$transaction(async (tx) => {
+    const sourceTension = await loadVisibleSourceTension(tx, actor, membership, params.workspaceId, params.sourceTensionId);
+    const relatedActionIds = await validateRelatedActions(tx, actor, membership, params.workspaceId, params.relatedActionIds);
     const proposal = await tx.proposal.create({
       data: {
         workspaceId: params.workspaceId,
         authorUserId,
         title,
-        summary: params.summary?.trim() || null,
+        summary,
         bodyMd,
-        circleId: params.circleId || null,
+        circleId: params.circleId || sourceTension?.circleId || null,
         isPrivate: params.isPrivate ?? true,
-        meetingId: params.meetingId || null,
+        meetingId: params.meetingId || sourceTension?.meetingId || null,
         publishedAt: null,
       },
     });
+
+    if (sourceTension) {
+      await tx.tension.update({
+        where: { id: sourceTension.id },
+        data: { proposalId: proposal.id },
+      });
+    }
+
+    if (relatedActionIds.length > 0) {
+      const linkedActions = await tx.action.updateMany({
+        where: {
+          id: { in: relatedActionIds },
+          workspaceId: params.workspaceId,
+          archivedAt: null,
+          proposalId: null,
+          ...privacyFilter(actor, membership),
+        },
+        data: { proposalId: proposal.id },
+      });
+
+      invariant(linkedActions.count === relatedActionIds.length, 409, "CONFLICT", "Related actions changed before they could be linked.");
+    }
 
     await tx.auditLog.create({
       data: {
@@ -118,7 +311,11 @@ export async function createProposal(actor: AppActor, params: {
         action: "proposal.created",
         entityType: "Proposal",
         entityId: proposal.id,
-        meta: { title: proposal.title },
+        meta: {
+          title: proposal.title,
+          sourceTensionId: sourceTension?.id ?? null,
+          relatedActionIds,
+        },
       },
     });
 
@@ -131,6 +328,90 @@ export async function createProposal(actor: AppActor, params: {
         payload: {
           proposalId: proposal.id,
           title: proposal.title,
+          sourceTensionId: sourceTension?.id ?? null,
+          relatedActionIds,
+        },
+      },
+    ]);
+
+    return proposal;
+  });
+}
+
+export async function createProposalFromTension(actor: AppActor, params: CreateProposalFromTensionParams) {
+  const membership = await requireWorkspaceMembership({
+    actor,
+    workspaceId: params.workspaceId,
+  });
+
+  const authorUserId = await actorUserIdForWorkspace(actor, params.workspaceId);
+
+  return prisma.$transaction(async (tx) => {
+    const sourceTension = await loadVisibleSourceTension(tx, actor, membership, params.workspaceId, params.sourceTensionId);
+    invariant(sourceTension, 404, "NOT_FOUND", "Source tension not found.");
+    const relatedActionIds = await validateRelatedActions(tx, actor, membership, params.workspaceId, params.relatedActionIds);
+    const draft = proposalDraftFromTension(sourceTension, params);
+
+    const proposal = await tx.proposal.create({
+      data: {
+        workspaceId: params.workspaceId,
+        authorUserId,
+        title: draft.title,
+        summary: draft.summary,
+        bodyMd: draft.bodyMd,
+        circleId: params.circleId || sourceTension.circleId || null,
+        isPrivate: params.isPrivate ?? true,
+        meetingId: params.meetingId || sourceTension.meetingId || null,
+        publishedAt: null,
+      },
+    });
+
+    await tx.tension.update({
+      where: { id: sourceTension.id },
+      data: { proposalId: proposal.id },
+    });
+
+    if (relatedActionIds.length > 0) {
+      const linkedActions = await tx.action.updateMany({
+        where: {
+          id: { in: relatedActionIds },
+          workspaceId: params.workspaceId,
+          archivedAt: null,
+          proposalId: null,
+          ...privacyFilter(actor, membership),
+        },
+        data: { proposalId: proposal.id },
+      });
+
+      invariant(linkedActions.count === relatedActionIds.length, 409, "CONFLICT", "Related actions changed before they could be linked.");
+    }
+
+    await tx.auditLog.create({
+      data: {
+        workspaceId: params.workspaceId,
+        actorUserId: actor.kind === "user" ? actor.user.id : null,
+        action: "proposal.created_from_tension",
+        entityType: "Proposal",
+        entityId: proposal.id,
+        meta: {
+          title: proposal.title,
+          sourceTensionId: sourceTension.id,
+          relatedActionIds,
+        },
+      },
+    });
+
+    await appendEvents(tx, [
+      {
+        workspaceId: params.workspaceId,
+        type: "proposal.created",
+        aggregateType: "Proposal",
+        aggregateId: proposal.id,
+        payload: {
+          proposalId: proposal.id,
+          title: proposal.title,
+          sourceTensionId: sourceTension.id,
+          relatedActionIds,
         },
       },
     ]);
@@ -144,6 +425,7 @@ export async function updateProposal(actor: AppActor, params: {
   proposalId: string;
   title?: string;
   summary?: string | null;
+  includeAiSummary?: boolean;
   bodyMd?: string;
   circleId?: string | null;
 }) {
@@ -172,7 +454,17 @@ export async function updateProposal(actor: AppActor, params: {
       invariant(bodyMd.length > 0, 400, "INVALID_INPUT", "Proposal body is required.");
       data.bodyMd = bodyMd;
     }
-    if (params.summary !== undefined) data.summary = params.summary?.trim() || null;
+    if (params.includeAiSummary === true) {
+      data.summary = await generateProposalSummary({
+        workspaceId: params.workspaceId,
+        title: String(data.title ?? proposal.title),
+        bodyMd: String(data.bodyMd ?? proposal.bodyMd),
+      });
+    } else if (params.includeAiSummary === false) {
+      data.summary = null;
+    } else if (params.summary !== undefined) {
+      data.summary = params.summary?.trim() || null;
+    }
     if (params.circleId !== undefined) data.circleId = params.circleId || null;
 
     const updated = await tx.proposal.update({
@@ -237,15 +529,13 @@ export async function submitProposal(actor: AppActor, params: { workspaceId: str
       createdByUserId: actor.kind === "user" ? actor.user.id : null,
     });
 
-    const autoApproveAt = params.autoApproveHours ? new Date(Date.now() + params.autoApproveHours * 60 * 60 * 1000) : null;
-
     await tx.proposal.update({
       where: { id: proposal.id },
       data: {
         status: "OPEN",
         isPrivate: false,
         publishedAt: proposal.publishedAt || new Date(),
-        autoApproveAt,
+        autoApproveAt: null,
       },
     });
 
@@ -441,78 +731,121 @@ export async function publishProposal(actor: AppActor, params: {
   });
 }
 
-export async function autoApproveProposals(): Promise<number> {
-  const now = new Date();
-  
-  const proposalsToApprove = await prisma.proposal.findMany({
-    where: {
-      status: "OPEN",
-      archivedAt: null,
-      autoApproveAt: { lt: now, not: null },
-    },
-    select: { id: true, workspaceId: true }
+export async function resolveProposal(actor: AppActor, params: {
+  workspaceId: string;
+  proposalId: string;
+  outcome: ProposalResolutionOutcome;
+  decisionMd: string;
+}) {
+  await requireWorkspaceMembership({
+    actor,
+    workspaceId: params.workspaceId,
   });
 
-  if (proposalsToApprove.length === 0) return 0;
+  invariant(PROPOSAL_RESOLUTION_OUTCOMES.has(params.outcome), 400, "INVALID_INPUT", "Resolution outcome is required.");
+  const decisionMd = params.decisionMd.trim();
+  invariant(decisionMd.length > 0, 400, "INVALID_INPUT", "Resolution note is required.");
 
-  let approvedCount = 0;
-  for (const p of proposalsToApprove) {
-    try {
-      const didApprove = await prisma.$transaction(async (tx) => {
-        const [openDeliberationObjections, openReactionObjections] = await Promise.all([
-          tx.deliberationEntry.count({
-            where: {
-              workspaceId: p.workspaceId,
-              parentType: "PROPOSAL",
-              parentId: p.id,
-              entryType: "OBJECTION",
-              resolvedAt: null,
-            },
-          }),
-          tx.proposalReaction.count({
-            where: {
-              proposalId: p.id,
-              reaction: "OBJECTION",
-              resolvedAt: null,
-            },
-          }),
-        ]);
-        if (openDeliberationObjections + openReactionObjections > 0) {
-          return false;
-        }
+  const now = new Date();
 
-        await tx.proposal.update({
-          where: { id: p.id },
-          data: { status: "RESOLVED", resolutionOutcome: "ADOPTED", decidedAt: now },
-        });
+  return prisma.$transaction(async (tx) => {
+    const proposal = await tx.proposal.findUnique({
+      where: { id: params.proposalId },
+    });
 
-        await tx.auditLog.create({
-          data: {
-            workspaceId: p.workspaceId,
-            action: "proposal.auto_approved",
-            entityType: "Proposal",
-            entityId: p.id,
-          },
-        });
+    invariant(proposal && proposal.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Proposal not found.");
+    invariant(proposal.status === "OPEN", 400, "INVALID_STATE", "Only open proposals can be resolved.");
 
-        await appendEvents(tx, [
-          {
-            workspaceId: p.workspaceId,
-            type: "proposal.auto_approved",
-            aggregateType: "Proposal",
-            aggregateId: p.id,
-            payload: { proposalId: p.id },
-          },
-        ]);
-        return true;
+    const flow = await tx.approvalFlow.findUnique({
+      where: {
+        subjectType_subjectId: {
+          subjectType: "PROPOSAL",
+          subjectId: proposal.id,
+        },
+      },
+    });
+
+    const updated = await tx.proposal.update({
+      where: { id: proposal.id },
+      data: {
+        status: "RESOLVED",
+        resolutionOutcome: params.outcome,
+        decisionMd,
+        decidedAt: now,
+        autoApproveAt: null,
+        isPrivate: false,
+        publishedAt: proposal.publishedAt || now,
+      },
+    });
+
+    if (flow) {
+      await tx.approvalFlow.update({
+        where: { id: flow.id },
+        data: {
+          status: params.outcome === "ADOPTED" ? "APPROVED" : params.outcome === "WITHDRAWN" ? "WITHDRAWN" : "REJECTED",
+          closedAt: now,
+          resultJson: {
+            manuallyResolved: true,
+            outcome: params.outcome,
+            decisionMd,
+          } as Prisma.InputJsonValue,
+        },
       });
-      if (didApprove) approvedCount++;
-    } catch (error) {
-      logger.error(`Failed to auto-approve proposal ${p.id}`, { error });
     }
-  }
-  return approvedCount;
+
+    if (params.outcome === "ADOPTED") {
+      await tx.policyCorpus.upsert({
+        where: { proposalId: updated.id },
+        update: {
+          title: updated.title,
+          bodyMd: updated.bodyMd,
+          acceptedAt: updated.decidedAt ?? now,
+          circleId: updated.circleId,
+        },
+        create: {
+          workspaceId: updated.workspaceId,
+          proposalId: updated.id,
+          title: updated.title,
+          bodyMd: updated.bodyMd,
+          acceptedAt: updated.decidedAt ?? now,
+          circleId: updated.circleId,
+        },
+      });
+    }
+
+    await tx.auditLog.create({
+      data: {
+        workspaceId: params.workspaceId,
+        actorUserId: actor.kind === "user" ? actor.user.id : null,
+        action: "proposal.resolved",
+        entityType: "Proposal",
+        entityId: proposal.id,
+        meta: {
+          outcome: params.outcome,
+          flowId: flow?.id ?? null,
+        },
+      },
+    });
+
+    await appendEvents(tx, [
+      {
+        workspaceId: params.workspaceId,
+        type: params.outcome === "ADOPTED" ? "proposal.approved" : "proposal.rejected",
+        aggregateType: "Proposal",
+        aggregateId: proposal.id,
+        payload: {
+          proposalId: proposal.id,
+          subjectId: proposal.id,
+          outcome: params.outcome,
+          flowId: flow?.id ?? null,
+        },
+      },
+    ]);
+
+    return updated;
+  });
 }
+
 export async function deleteProposal(actor: AppActor, params: { workspaceId: string; proposalId: string }) {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
   return archiveWorkspaceArtifact(actor, {

@@ -7,7 +7,7 @@ import type {
   ModelUsageInput,
   RerankRequest,
 } from "./contracts";
-import { recordModelUsage } from "./usage";
+import { assertCatalogModelBudget, recordModelUsage } from "./usage";
 
 function usageDetails(input: ModelUsageInput) {
   return {
@@ -17,6 +17,16 @@ function usageDetails(input: ModelUsageInput) {
     outputTokens: input.outputTokens ?? 0,
     latencyMs: input.latencyMs ?? 0,
     estimatedCostUsd: input.estimatedCostUsd ?? "0.000000",
+  };
+}
+
+function usageContext(request: {
+  catalogItemId?: string | null;
+  agentCredentialId?: string | null;
+}) {
+  return {
+    catalogItemId: request.catalogItemId ?? undefined,
+    agentCredentialId: request.agentCredentialId ?? undefined,
   };
 }
 
@@ -61,6 +71,10 @@ async function recordUsage(input: ModelUsageInput) {
 export const fakeModelGateway: ModelGateway = {
   async chat(request: ChatCompletionRequest) {
     const startedAt = Date.now();
+    await assertCatalogModelBudget({
+      workspaceId: request.workspaceId,
+      ...usageContext(request),
+    });
     const content = groundedResponse(request)
       ?? `FAKE_MODEL_RESPONSE\n\n${request.messages.map((message) => `${message.role}: ${message.content}`).join("\n\n")}`;
     const latencyMs = Date.now() - startedAt;
@@ -68,6 +82,7 @@ export const fakeModelGateway: ModelGateway = {
       workspaceId: request.workspaceId,
       workflowJobId: request.workflowJobId,
       agentRunId: request.agentRunId,
+      ...usageContext(request),
       provider: env.MODEL_PROVIDER,
       model: request.model ?? env.MODEL_CHAT_DEFAULT,
       taskType: request.taskType,
@@ -92,6 +107,10 @@ export const fakeModelGateway: ModelGateway = {
 
   async extract(request: ExtractionRequest) {
     const startedAt = Date.now();
+    await assertCatalogModelBudget({
+      workspaceId: request.workspaceId,
+      ...usageContext(request),
+    });
     let output: Record<string, unknown>;
     if (/actions/i.test(request.schemaHint) || /action/i.test(request.instruction)) {
       output = {
@@ -121,6 +140,7 @@ export const fakeModelGateway: ModelGateway = {
       workspaceId: request.workspaceId,
       workflowJobId: request.workflowJobId,
       agentRunId: request.agentRunId,
+      ...usageContext(request),
       provider: env.MODEL_PROVIDER,
       model: request.model ?? env.MODEL_CHAT_DEFAULT,
       taskType: "EXTRACTION",
@@ -139,6 +159,10 @@ export const fakeModelGateway: ModelGateway = {
 
   async embed(request: EmbeddingRequest) {
     const startedAt = Date.now();
+    await assertCatalogModelBudget({
+      workspaceId: request.workspaceId,
+      ...usageContext(request),
+    });
     const inputs = Array.isArray(request.input) ? request.input : [request.input];
     const embeddings = inputs.map((input) => fakeEmbeddingVector(input));
     const latencyMs = Date.now() - startedAt;
@@ -146,6 +170,7 @@ export const fakeModelGateway: ModelGateway = {
       workspaceId: request.workspaceId,
       workflowJobId: request.workflowJobId,
       agentRunId: request.agentRunId,
+      ...usageContext(request),
       provider: env.MODEL_PROVIDER,
       model: request.model ?? env.MODEL_EMBEDDING_DEFAULT,
       taskType: "EMBEDDING",
@@ -163,6 +188,10 @@ export const fakeModelGateway: ModelGateway = {
 
   async rerank(request: RerankRequest) {
     const startedAt = Date.now();
+    await assertCatalogModelBudget({
+      workspaceId: request.workspaceId,
+      ...usageContext(request),
+    });
     const queryEmbedding = fakeEmbeddingVector(request.query);
     const ranked = request.documents
       .map((document, index) => ({
@@ -177,6 +206,7 @@ export const fakeModelGateway: ModelGateway = {
       workspaceId: request.workspaceId,
       workflowJobId: request.workflowJobId,
       agentRunId: request.agentRunId,
+      ...usageContext(request),
       provider: env.MODEL_PROVIDER,
       model: request.model ?? env.MODEL_EMBEDDING_DEFAULT,
       taskType: "RERANK",

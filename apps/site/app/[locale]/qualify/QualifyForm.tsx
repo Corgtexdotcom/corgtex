@@ -6,7 +6,7 @@ import { useTranslations } from "next-intl";
 
 function QualifyFormInner() {
   const searchParams = useSearchParams();
-  const token = searchParams.get("token");
+  const token = searchParams?.get("token");
   const t = useTranslations("qualify");
 
   const [companyName, setCompanyName] = useState("");

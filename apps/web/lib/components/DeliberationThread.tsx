@@ -1,4 +1,4 @@
-import { renderMarkdown } from "@/lib/markdown";
+import { MarkdownRenderer } from "./MarkdownRenderer";
 import { useFormatter, useTranslations } from "next-intl";
 
 type DeliberationEntry = {
@@ -66,10 +66,7 @@ export function DeliberationThread({ entries, canResolve, resolveAction, hiddenF
             </div>
 
             {entry.bodyMd && (
-              <div
-                className="delib-body nr-markdown"
-                dangerouslySetInnerHTML={{ __html: renderMarkdown(entry.bodyMd) }}
-              />
+              <MarkdownRenderer markdown={entry.bodyMd} variant="document" className="delib-body" />
             )}
 
             {isResolved && entry.resolvedNote && (

@@ -75,6 +75,7 @@ Tool credential reveals are sensitive and audited. Use them only when the user a
 
 Be concise, direct, and action-oriented. When relevant, cite workspace knowledge.
 If the user wants to create something (proposal, tension, action, or goal), use the appropriate workspace tool directly. If they say "add it to the goals tab" or "put it in goals", create goals rather than tensions, actions, or proposals.
+If the user asks to turn, convert, or process an existing tension into a proposal, first use 'query_tensions' to identify the tension, then create the proposal with 'sourceTensionId' set. Treat action items as optional related implementation work; only pass 'relatedActionIds' when the user clearly names existing actions that belong with the proposal. Do not turn an action into a proposal unless the user explicitly asks for that exact action-to-proposal conversion.
 If the user asks to upload or ingest meeting minutes or a transcript, use 'upload_meeting_transcript' when transcript text is present. If the transcript is attached in chat, the application will process the attachment before this message reaches you; report the result and ask only for missing meeting date/time if needed.
 If the user asks to create a meeting in Corgtex Upcoming Meetings, use 'create_corgtex_scheduled_meeting'. Use 'schedule_meeting' only when the user wants an external calendar invite.
 For generic non-meeting files, instruct them to use the attachment icon (+) in the chat input.
@@ -175,6 +176,17 @@ function requireConversationToolActor(ctx: ConversationContext): AppActor {
   }
 
   return ctx.actor;
+}
+
+function catalogUsageContext(ctx: ConversationContext) {
+  if (ctx.actor?.kind === "agent" && ctx.actor.authProvider === "credential") {
+    return {
+      catalogItemId: ctx.actor.catalogItemId ?? undefined,
+      agentCredentialId: ctx.actor.credentialId,
+    };
+  }
+
+  return {};
 }
 
 export async function processConversationTurn(ctx: ConversationContext): Promise<{
@@ -292,6 +304,7 @@ export async function processConversationTurn(ctx: ConversationContext): Promise
 
   const response = await defaultModelGateway.chat({
     workspaceId: ctx.workspaceId,
+    ...catalogUsageContext(ctx),
     model: env.MODEL_CHAT_CONVERSATION,
     taskType: "AGENT",
     messages,
@@ -323,6 +336,7 @@ export async function processConversationTurn(ctx: ConversationContext): Promise
     await assertWorkspaceModelBudget(ctx.workspaceId);
     const followup = await defaultModelGateway.chat({
       workspaceId: ctx.workspaceId,
+      ...catalogUsageContext(ctx),
       model: env.MODEL_CHAT_CONVERSATION,
       taskType: "AGENT",
       messages,
@@ -440,6 +454,7 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
 
   const iterator = defaultModelGateway.chatStream({
     workspaceId: ctx.workspaceId,
+    ...catalogUsageContext(ctx),
     model: env.MODEL_CHAT_CONVERSATION,
     taskType: "AGENT",
     messages,
@@ -479,6 +494,7 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
     await assertWorkspaceModelBudget(ctx.workspaceId);
     const followupIterator = defaultModelGateway.chatStream({
       workspaceId: ctx.workspaceId,
+      ...catalogUsageContext(ctx),
       model: env.MODEL_CHAT_CONVERSATION,
       taskType: "AGENT",
       messages,

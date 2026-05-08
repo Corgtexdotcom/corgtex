@@ -169,6 +169,45 @@ describe("processConversationTurn", () => {
     expect(chatMock).not.toHaveBeenCalled();
   });
 
+  it("guides the assistant to create proposals from tensions instead of action conversions", async () => {
+    const actor = {
+      kind: "user" as const,
+      user: {
+        id: "user-1",
+        email: "user@example.com",
+        displayName: "User",
+      },
+    };
+    chatMock.mockResolvedValueOnce({ content: "I will use the tension as the source." });
+
+    const { processConversationTurn } = await import("./conversation");
+    await processConversationTurn({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      userMessage: "Turn the reimbursement tension into a proposal",
+      actor,
+    });
+
+    expect(chatMock).toHaveBeenCalledWith(expect.objectContaining({
+      messages: expect.arrayContaining([
+        expect.objectContaining({
+          role: "system",
+          content: expect.stringContaining("sourceTensionId"),
+        }),
+      ]),
+    }));
+    expect(chatMock).toHaveBeenCalledWith(expect.objectContaining({
+      messages: expect.arrayContaining([
+        expect.objectContaining({
+          role: "system",
+          content: expect.stringContaining("Do not turn an action into a proposal unless the user explicitly asks"),
+        }),
+      ]),
+    }));
+  });
+
   it("rechecks budget before a tool-followup model call", async () => {
     const actor = {
       kind: "user" as const,

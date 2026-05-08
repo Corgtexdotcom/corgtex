@@ -10,6 +10,7 @@ import {
   type DeliberationMentionTarget,
 } from "@/lib/deliberation-mentions";
 import { FormMessage } from "./FormMessage";
+import { MarkdownEditor } from "./MarkdownEditor";
 
 function isSameMentionRange(a: ActiveMentionRange | null, b: ActiveMentionRange | null) {
   return a?.start === b?.start && a?.end === b?.end && a?.query === b?.query;
@@ -65,10 +66,9 @@ export function DeliberationComposer({ postAction, hiddenFields, entryTypes, tar
     });
   };
 
-  const handleBodyChange = (event: React.ChangeEvent<HTMLTextAreaElement>) => {
-    const nextValue = event.currentTarget.value;
+  const handleBodyChange = (nextValue: string, event?: React.ChangeEvent<HTMLTextAreaElement>) => {
     setBodyMd(nextValue);
-    syncMentionForCursor(nextValue, event.currentTarget.selectionStart);
+    syncMentionForCursor(nextValue, event?.currentTarget.selectionStart ?? textareaRef.current?.selectionStart ?? nextValue.length);
   };
 
   const handleTextareaSelect = (event: React.SyntheticEvent<HTMLTextAreaElement>) => {
@@ -151,23 +151,21 @@ export function DeliberationComposer({ postAction, hiddenFields, entryTypes, tar
         ))}
 
         <div className="delib-mention-field">
-          <textarea
-            ref={textareaRef}
+          <MarkdownEditor
+            textareaRef={textareaRef}
             name="bodyMd"
             required
             value={bodyMd}
+            onValueChange={handleBodyChange}
             placeholder={t("entryPlaceholder")}
             rows={4}
             disabled={isPending}
-            aria-autocomplete={targetOptions.length > 0 ? "list" : undefined}
-            aria-controls={isMentionOpen ? listboxId : undefined}
-            aria-expanded={targetOptions.length > 0 ? isMentionOpen : undefined}
-            aria-activedescendant={activeOptionIndex >= 0 ? `${listboxId}-${activeOptionIndex}` : undefined}
-            onChange={handleBodyChange}
+            ariaAutocomplete={targetOptions.length > 0 ? "list" : undefined}
+            ariaControls={isMentionOpen ? listboxId : undefined}
+            ariaActivedescendant={activeOptionIndex >= 0 ? `${listboxId}-${activeOptionIndex}` : undefined}
             onSelect={handleTextareaSelect}
             onClick={handleTextareaSelect}
             onKeyDown={handleTextareaKeyDown}
-            style={{ width: "100%", padding: "12px", borderRadius: "8px", border: "1px solid var(--line)" }}
           />
           {isMentionOpen && (
             <div id={listboxId} role="listbox" aria-label={t("mentionAriaLabel")} className="delib-mention-listbox">

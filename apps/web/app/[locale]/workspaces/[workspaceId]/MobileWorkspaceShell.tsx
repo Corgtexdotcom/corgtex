@@ -29,6 +29,7 @@ type MobileWorkspaceShellProps = {
   conversations: ConversationSummary[];
   showLanguageSwitcher: boolean;
   showPlatformAdmin: boolean;
+  controlPlaneHref: string;
 };
 
 const MODE_STORAGE_KEY = "corgtex.mobileMode";
@@ -38,10 +39,11 @@ function navHref(workspaceId: string, href: string) {
   return `/workspaces/${workspaceId}${href}`;
 }
 
-function isActivePath(pathname: string, workspaceId: string, href: string) {
+function isActivePath(pathname: string | null, workspaceId: string, href: string) {
+  const currentPathname = pathname ?? "";
   const fullHref = navHref(workspaceId, href);
-  if (href === "") return pathname.endsWith(`/workspaces/${workspaceId}`);
-  return pathname.includes(fullHref);
+  if (href === "") return currentPathname.endsWith(`/workspaces/${workspaceId}`);
+  return currentPathname.includes(fullHref);
 }
 
 export function MobileWorkspaceShell({
@@ -53,8 +55,9 @@ export function MobileWorkspaceShell({
   conversations,
   showLanguageSwitcher,
   showPlatformAdmin,
+  controlPlaneHref,
 }: MobileWorkspaceShellProps) {
-  const pathname = usePathname();
+  const pathname = usePathname() ?? "";
   const tNav = useTranslations("nav");
   const tMobile = useTranslations("mobile");
   const tCommon = useTranslations("common");
@@ -310,7 +313,7 @@ export function MobileWorkspaceShell({
                 <div className="mobile-more-group">
                   <div className="mobile-more-group-label">{tNav("globalAdmin")}</div>
                   <a
-                    href="/control-plane"
+                    href={controlPlaneHref}
                     className="mobile-more-link"
                     onClick={() => {
                       setMode("workspace", "more_sheet_admin_link");

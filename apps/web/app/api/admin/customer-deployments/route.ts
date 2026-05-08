@@ -6,6 +6,7 @@ import {
 } from "@corgtex/domain";
 import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError, validateBody } from "@/lib/http";
+import { requireControlPlaneDeploymentMode } from "@/lib/control-plane-guard";
 
 export const dynamic = "force-dynamic";
 
@@ -46,6 +47,11 @@ const provisionCustomerDeploymentSchema = z.object({
 });
 
 export async function GET(request: NextRequest) {
+  const unavailableResponse = requireControlPlaneDeploymentMode();
+  if (unavailableResponse) {
+    return unavailableResponse;
+  }
+
   try {
     const actor = await resolveRequestActor(request);
     const deployments = await listCustomerDeployments(actor);
@@ -56,6 +62,11 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
+  const unavailableResponse = requireControlPlaneDeploymentMode();
+  if (unavailableResponse) {
+    return unavailableResponse;
+  }
+
   try {
     const actor = await resolveRequestActor(request);
     const body = await validateBody(request, provisionCustomerDeploymentSchema);

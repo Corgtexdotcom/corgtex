@@ -1,7 +1,7 @@
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import type { ModelTool } from "@corgtex/models";
-import { createTension, updateTension, createAction, updateAction, createProposal, createGoal } from "@corgtex/domain";
+import { createTension, updateTension, createAction, updateAction, createProposal, createProposalFromTension, createGoal } from "@corgtex/domain";
 import type { TensionStatus, ActionStatus, GoalCadence, GoalLevel, GoalStatus, Prisma } from "@prisma/client";
 
 export const createTensionTool: ModelTool = {
@@ -86,16 +86,22 @@ export const createProposalTool: ModelTool = {
   type: "function",
   function: {
     name: "create_proposal",
-    description: "Draft and create a new governance proposal.",
+    description: "Draft and create a new governance proposal. When the user asks to turn a tension into a proposal, pass sourceTensionId. Only pass relatedActionIds for existing implementation or follow-up actions that are clearly connected.",
     parameters: {
       type: "object",
       properties: {
-        title: { type: "string" },
+        title: { type: "string", description: "Required unless sourceTensionId is provided" },
         summary: { type: "string" },
-        bodyMd: { type: "string", description: "The full proposal text in Markdown" },
+        bodyMd: { type: "string", description: "The full proposal text in Markdown. Required unless sourceTensionId is provided." },
         circleId: { type: "string" },
+        sourceTensionId: { type: "string", description: "Optional UUID of the tension this proposal is drafted from" },
+        relatedActionIds: {
+          type: "array",
+          description: "Optional UUIDs of existing action items related to implementing or following up on this proposal",
+          items: { type: "string" },
+        },
       },
-      required: ["title", "summary", "bodyMd"],
+      required: [],
     },
   },
 };
@@ -228,13 +234,28 @@ export async function updateActionItemAction(actor: AppActor, ctx: any, args: an
 }
 
 export async function createProposalAction(actor: AppActor, ctx: any, args: any) {
-  const result = await createProposal(actor, {
-    workspaceId: ctx.workspaceId,
-    title: args.title,
-    summary: args.summary,
-    bodyMd: args.bodyMd,
-    circleId: args.circleId,
-  });
+  const relatedActionIds = Array.isArray(args.relatedActionIds) ? args.relatedActionIds : undefined;
+  const sourceTensionId = typeof args.sourceTensionId === "string" && args.sourceTensionId.trim().length > 0
+    ? args.sourceTensionId
+    : null;
+  const result = sourceTensionId
+    ? await createProposalFromTension(actor, {
+        workspaceId: ctx.workspaceId,
+        sourceTensionId,
+        title: typeof args.title === "string" ? args.title : null,
+        summary: typeof args.summary === "string" ? args.summary : null,
+        bodyMd: typeof args.bodyMd === "string" ? args.bodyMd : null,
+        circleId: typeof args.circleId === "string" ? args.circleId : null,
+        relatedActionIds,
+      })
+    : await createProposal(actor, {
+        workspaceId: ctx.workspaceId,
+        title: typeof args.title === "string" ? args.title : "",
+        summary: typeof args.summary === "string" ? args.summary : null,
+        bodyMd: typeof args.bodyMd === "string" ? args.bodyMd : "",
+        circleId: typeof args.circleId === "string" ? args.circleId : null,
+        relatedActionIds,
+      });
 
   await appendAuditMeta("Proposal", result.id, "proposal.created", {
     conversationSessionId: ctx.sessionId,

@@ -6,6 +6,7 @@ import { actorUserIdForWorkspace, requireWorkspaceMembership } from "./auth";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { invariant } from "./errors";
 import { requireDraftManager } from "./draft-permissions";
+import { resolveWorkspaceProposalLink } from "./proposal-links";
 
 import { privacyFilter } from "./privacy";
 
@@ -63,7 +64,11 @@ export async function listTensions(actor: AppActor, workspaceId: string, opts?: 
         upvotes: true,
         proposal: { select: { id: true, title: true } },
       },
-      orderBy: { createdAt: "desc" },
+      orderBy: [
+        { upvotes: { _count: "desc" } },
+        { createdAt: "desc" },
+        { id: "desc" },
+      ],
       take,
       skip,
     }),
@@ -83,7 +88,7 @@ export async function createTension(actor: AppActor, params: {
   isPrivate?: boolean;
   meetingId?: string | null;
 }) {
-  await requireWorkspaceMembership({
+  const membership = await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
   });
@@ -94,6 +99,7 @@ export async function createTension(actor: AppActor, params: {
 
   return prisma.$transaction(async (tx) => {
     const raisedByMemberId = await resolveRaisedByMemberId(tx, params.workspaceId, params.raisedByMemberId);
+    const proposalId = await resolveWorkspaceProposalLink(tx, actor, membership, params.workspaceId, params.proposalId);
     const tension = await tx.tension.create({
       data: {
         workspaceId: params.workspaceId,
@@ -103,7 +109,7 @@ export async function createTension(actor: AppActor, params: {
         circleId: params.circleId || null,
         assigneeMemberId: params.assigneeMemberId || null,
         raisedByMemberId,
-        proposalId: params.proposalId || null,
+        proposalId,
         status: "DRAFT",
         isPrivate: params.isPrivate ?? true,
         meetingId: params.meetingId || null,

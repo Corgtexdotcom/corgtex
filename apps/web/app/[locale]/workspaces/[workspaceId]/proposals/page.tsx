@@ -1,9 +1,12 @@
 import { listProposals, requireWorkspaceMembership } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
+import { MarkdownExcerpt } from "@/lib/components/MarkdownRenderer";
+import { CreateProposalForm } from "./CreateProposalForm";
+import { ProposalDraftFields } from "./ProposalDraftFields";
 import {
-  createProposalAction,
   archiveProposalAction,
+  resolveProposalAction,
   submitProposalAction,
   returnProposalToDraftAction,
   updateProposalAction,
@@ -36,6 +39,7 @@ export default async function ProposalsPage({
   const canManageProposal = (proposal: { authorUserId: string }) => actor.kind === "agent"
     || membership?.role === "ADMIN"
     || (actor.kind === "user" && proposal.authorUserId === actor.user.id);
+  const canResolveProposal = actor.kind === "agent" || Boolean(membership);
 
   const groupedProposals = {
     DRAFT: proposals.filter((p) => p.status === "DRAFT"),
@@ -91,9 +95,7 @@ export default async function ProposalsPage({
                     {proposal.status === "RESOLVED" && proposal.resolutionOutcome ? `${proposal.status} · ${proposal.resolutionOutcome.replace("_", " ")}` : proposal.status}
                   </span>
                 </div>
-                <div className="nr-excerpt" style={{ marginTop: "8px" }}>
-                  {proposal.summary ?? proposal.bodyMd.replace(/\0/g, "").slice(0, 150) + "..."}
-                </div>
+                <MarkdownExcerpt markdown={proposal.summary ?? proposal.bodyMd} maxLength={180} as="div" className="nr-excerpt" />
                 <div className="nr-item-meta" style={{ marginTop: 8 }}>
                    {proposal.author.displayName || proposal.author.email} · {new Date(proposal.createdAt).toLocaleDateString()}
                 </div>
@@ -140,24 +142,36 @@ export default async function ProposalsPage({
                 </div>
               )}
 
+              {!isDemo && canResolveProposal && proposal.status === "OPEN" && (
+                <details style={{ marginTop: 12 }}>
+                  <summary className="secondary small nr-hide-marker" style={{ cursor: "pointer", display: "inline-block" }}>{t("btnResolve")}</summary>
+                  <form action={resolveProposalAction} className="stack nr-form-section" style={{ marginTop: 12 }}>
+                    <input type="hidden" name="workspaceId" value={workspaceId} />
+                    <input type="hidden" name="proposalId" value={proposal.id} />
+                    <label>
+                      {t("formResolutionOutcome")}
+                      <select name="outcome" defaultValue="ADOPTED" required>
+                        <option value="ADOPTED">{t("outcomeAdopted")}</option>
+                        <option value="NOT_ADOPTED">{t("outcomeNotAdopted")}</option>
+                        <option value="WITHDRAWN">{t("outcomeWithdrawn")}</option>
+                      </select>
+                    </label>
+                    <label>
+                      {t("formDecisionNote")}
+                      <MarkdownEditor name="decisionMd" placeholder={t("placeholderDecisionMd")} required rows={3} />
+                    </label>
+                    <button type="submit" className="secondary small">{t("btnResolve")}</button>
+                  </form>
+                </details>
+              )}
+
               {!isDemo && canManage && proposal.status === "DRAFT" && (
                 <details style={{ marginTop: 12 }}>
                   <summary className="secondary small nr-hide-marker" style={{ cursor: "pointer", display: "inline-block" }}>{t("btnEdit")}</summary>
                   <form action={updateProposalAction} className="stack nr-form-section" style={{ marginTop: 12 }}>
                     <input type="hidden" name="workspaceId" value={workspaceId} />
                     <input type="hidden" name="proposalId" value={proposal.id} />
-                    <label>
-                      {t("formTitle")}
-                      <input name="title" defaultValue={proposal.title} required />
-                    </label>
-                    <label>
-                      {t("formSummary")}
-                      <input name="summary" defaultValue={proposal.summary ?? ""} />
-                    </label>
-                    <label>
-                      {t("formBody")}
-                      <MarkdownEditor name="bodyMd" defaultValue={proposal.bodyMd} required placeholder={t("formBodyPlaceholder")} />
-                    </label>
+                    <ProposalDraftFields defaultTitle={proposal.title} defaultBodyMd={proposal.bodyMd} />
                     <button type="submit" className="secondary small">{t("btnSaveDraft")}</button>
                   </form>
                 </details>
@@ -173,26 +187,7 @@ export default async function ProposalsPage({
             <summary className="nr-hide-marker" style={{ cursor: "pointer", fontWeight: 600, color: "var(--accent)" }}>
               <span className="nr-section-header" style={{ borderTop: "none", display: "inline-block", padding: 0, margin: 0 }}>{t("newProposalTitle")}</span>
             </summary>
-            <form action={createProposalAction} className="stack nr-form-section" style={{ marginTop: "16px" }}>
-              <input type="hidden" name="workspaceId" value={workspaceId} />
-              <label>
-                {t("formTitle")}
-                <input name="title" required />
-              </label>
-              <label>
-                {t("formSummary")}
-                <input name="summary" />
-              </label>
-              <label>
-                {t("formBody")}
-                <MarkdownEditor name="bodyMd" required placeholder={t("formBodyPlaceholder")} />
-              </label>
-              <label style={{ display: "flex", alignItems: "center", gap: "8px", fontWeight: "normal", cursor: "pointer" }}>
-                <input type="checkbox" name="isPrivate" defaultChecked />
-                <span>{t("formPrivateDraft")}</span>
-              </label>
-              <button type="submit">{t("btnCreateDraft")}</button>
-            </form>
+            <CreateProposalForm workspaceId={workspaceId} />
           </details>
         </section>
       )}

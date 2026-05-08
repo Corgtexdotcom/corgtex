@@ -117,6 +117,10 @@ function assertConsentWindowOpen(flow: ApprovalFlow) {
     return;
   }
 
+  if (flow.subjectType === "PROPOSAL") {
+    return;
+  }
+
   invariant(
     !flow.closesAt || flow.closesAt > new Date(),
     400,
@@ -467,7 +471,14 @@ export async function recordApprovalDecision(actor: AppActor, params: {
 
     let nextStatus: ApprovalFlowStatus = flow.status;
 
-    if (flow.mode !== "CONSENT") {
+    if (flow.subjectType === "PROPOSAL") {
+      await tx.approvalFlow.update({
+        where: { id: flow.id },
+        data: {
+          resultJson: outcome as Prisma.InputJsonValue,
+        },
+      });
+    } else if (flow.mode !== "CONSENT") {
       if (outcome.approved) {
         nextStatus = "APPROVED";
         await finalizeApprovalFlow(tx, {
@@ -752,6 +763,7 @@ export async function finalizeExpiredApprovalFlows(batchSize = EXPIRING_FLOW_BAT
       FROM "ApprovalFlow" AS flow
       WHERE flow.status = 'ACTIVE'
         AND flow.mode = 'CONSENT'
+        AND flow."subjectType" <> 'PROPOSAL'
         AND flow."closesAt" IS NOT NULL
         AND flow."closesAt" <= NOW()
       ORDER BY flow."closesAt" ASC
@@ -763,7 +775,7 @@ export async function finalizeExpiredApprovalFlows(batchSize = EXPIRING_FLOW_BAT
 
     for (const row of rows) {
       const flow = await loadFlow(tx, row.id);
-      if (!flow || flow.status !== "ACTIVE" || flow.mode !== "CONSENT") {
+      if (!flow || flow.status !== "ACTIVE" || flow.mode !== "CONSENT" || flow.subjectType === "PROPOSAL") {
         continue;
       }
 

@@ -179,6 +179,7 @@ export const credentialAgentAuthProvider: AgentAuthProvider = {
       select: {
         id: true,
         workspaceId: true,
+        catalogItemId: true,
         label: true,
         scopes: true,
         isActive: true,
@@ -207,6 +208,7 @@ export const credentialAgentAuthProvider: AgentAuthProvider = {
       kind: "agent",
       authProvider: "credential",
       credentialId: credential.id,
+      catalogItemId: credential.catalogItemId,
       label: credential.label,
       workspaceIds: [credential.workspaceId],
       scopes: credential.scopes,
@@ -244,6 +246,10 @@ export async function listAgentCredentials(actor: AppActor, workspaceId: string)
       id: true,
       label: true,
       scopes: true,
+      catalogItemId: true,
+      reasonMd: true,
+      monthlyBudgetCents: true,
+      dailyCallLimit: true,
       isActive: true,
       lastUsedAt: true,
       createdAt: true,
@@ -257,6 +263,10 @@ export async function issueAgentCredential(actor: AppActor, params: {
   workspaceId: string;
   label: string;
   scopes?: string[];
+  catalogItemId?: string | null;
+  reasonMd?: string | null;
+  monthlyBudgetCents?: number | null;
+  dailyCallLimit?: number | null;
 }) {
   await requireWorkspaceMembership({
     actor,
@@ -266,15 +276,33 @@ export async function issueAgentCredential(actor: AppActor, params: {
 
   const label = params.label.trim();
   invariant(label.length > 0, 400, "INVALID_INPUT", "Credential label is required.");
+  invariant(params.monthlyBudgetCents == null || params.monthlyBudgetCents >= 0, 400, "INVALID_INPUT", "Monthly budget must be zero or greater.");
+  invariant(params.dailyCallLimit == null || params.dailyCallLimit >= 0, 400, "INVALID_INPUT", "Daily call limit must be zero or greater.");
+
+  if (params.catalogItemId) {
+    const catalogItem = await prisma.catalogItem.findFirst({
+      where: {
+        id: params.catalogItemId,
+        workspaceId: params.workspaceId,
+        archivedAt: null,
+      },
+      select: { id: true },
+    });
+    invariant(catalogItem, 404, "NOT_FOUND", "Catalog item not found.");
+  }
 
   const secret = randomOpaqueToken();
   const credential = await prisma.agentCredential.create({
     data: {
       workspaceId: params.workspaceId,
       createdByUserId: actor.kind === "user" ? actor.user.id : null,
+      catalogItemId: params.catalogItemId ?? null,
       label,
       tokenHash: sha256(secret),
       scopes: validateScopes(params.scopes),
+      reasonMd: params.reasonMd?.trim() || null,
+      monthlyBudgetCents: params.monthlyBudgetCents ?? null,
+      dailyCallLimit: params.dailyCallLimit ?? null,
       isActive: true,
     },
     select: {

@@ -55,6 +55,7 @@ type Env = {
   readonly NODE_ENV: NodeEnv;
   readonly DATABASE_URL: string;
   readonly APP_URL: string;
+  readonly CONTROL_PLANE_URL: string | undefined;
   readonly MCP_PUBLIC_URL: string | undefined;
   readonly MCP_INSTANCE_REGISTRY: string | undefined;
   readonly MCP_DEFAULT_INSTANCE_SLUG: string | undefined;
@@ -113,6 +114,9 @@ export const env: Env = {
   },
   get APP_URL() {
     return optional("APP_URL") ?? "http://localhost:3000";
+  },
+  get CONTROL_PLANE_URL() {
+    return optional("CONTROL_PLANE_URL");
   },
   get MCP_PUBLIC_URL() {
     return optional("MCP_PUBLIC_URL");

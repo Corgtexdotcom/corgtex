@@ -7,7 +7,7 @@ import type {
   ModelUsageInput,
   RerankRequest,
 } from "./contracts";
-import { recordModelUsage } from "./usage";
+import { assertCatalogModelBudget, recordModelUsage } from "./usage";
 
 type UsageDetails = {
   provider: string;
@@ -80,6 +80,16 @@ function usageDetails(input: ModelUsageInput): UsageDetails {
     outputTokens: input.outputTokens ?? 0,
     latencyMs: input.latencyMs ?? 0,
     estimatedCostUsd: input.estimatedCostUsd ?? "0.000000",
+  };
+}
+
+function usageContext(request: {
+  catalogItemId?: string | null;
+  agentCredentialId?: string | null;
+}) {
+  return {
+    catalogItemId: request.catalogItemId ?? undefined,
+    agentCredentialId: request.agentCredentialId ?? undefined,
   };
 }
 
@@ -297,6 +307,10 @@ async function completeChat(
 ) {
   const startedAt = Date.now();
   const model = modelOverride ?? request.model ?? env.MODEL_CHAT_DEFAULT;
+  await assertCatalogModelBudget({
+    workspaceId: request.workspaceId,
+    ...usageContext(request),
+  });
   const response = await postJson<ChatCompletionApiResponse>("/chat/completions", {
     model,
     temperature: 0.2,
@@ -314,6 +328,7 @@ async function completeChat(
     workspaceId: request.workspaceId,
     workflowJobId: request.workflowJobId,
     agentRunId: request.agentRunId,
+    ...usageContext(request),
     provider: env.MODEL_PROVIDER,
     model,
     taskType,
@@ -334,6 +349,10 @@ async function* completeChatStream(
 ): AsyncGenerator<string, import("./contracts").ChatCompletionResponse> {
   const startedAt = Date.now();
   const model = modelOverride ?? request.model ?? env.MODEL_CHAT_DEFAULT;
+  await assertCatalogModelBudget({
+    workspaceId: request.workspaceId,
+    ...usageContext(request),
+  });
   const payload = JSON.stringify(withProviderOptions({
     model,
     temperature: 0.2,
@@ -440,6 +459,7 @@ async function* completeChatStream(
     workspaceId: request.workspaceId,
     workflowJobId: request.workflowJobId,
     agentRunId: request.agentRunId,
+    ...usageContext(request),
     provider: env.MODEL_PROVIDER,
     model,
     taskType,
@@ -457,6 +477,7 @@ async function repairExtractionObject(request: ExtractionRequest, raw: string) {
     workspaceId: request.workspaceId,
     workflowJobId: request.workflowJobId,
     agentRunId: request.agentRunId,
+    ...usageContext(request),
     taskType: "EXTRACTION",
     model: request.model,
     messages: [
@@ -487,6 +508,10 @@ async function embedTexts(request: EmbeddingRequest) {
   const startedAt = Date.now();
   const inputs = Array.isArray(request.input) ? request.input : [request.input];
   const model = request.model ?? env.MODEL_EMBEDDING_DEFAULT;
+  await assertCatalogModelBudget({
+    workspaceId: request.workspaceId,
+    ...usageContext(request),
+  });
   const response = await postJson<EmbeddingApiResponse>("/embeddings", {
     model,
     input: inputs,
@@ -517,6 +542,7 @@ export const openAICompatibleModelGateway: ModelGateway = {
       workspaceId: request.workspaceId,
       workflowJobId: request.workflowJobId,
       agentRunId: request.agentRunId,
+      ...usageContext(request),
       taskType: "EXTRACTION",
       model: request.model,
       messages: [
@@ -566,6 +592,7 @@ export const openAICompatibleModelGateway: ModelGateway = {
       workspaceId: request.workspaceId,
       workflowJobId: request.workflowJobId,
       agentRunId: request.agentRunId,
+      ...usageContext(request),
       provider: env.MODEL_PROVIDER,
       model: embedded.model,
       taskType: "EMBEDDING",
@@ -586,6 +613,7 @@ export const openAICompatibleModelGateway: ModelGateway = {
       workspaceId: request.workspaceId,
       workflowJobId: request.workflowJobId,
       agentRunId: request.agentRunId,
+      ...usageContext(request),
       model: request.model ?? env.MODEL_EMBEDDING_DEFAULT,
       input: [request.query, ...request.documents],
     });
@@ -602,6 +630,7 @@ export const openAICompatibleModelGateway: ModelGateway = {
       workspaceId: request.workspaceId,
       workflowJobId: request.workflowJobId,
       agentRunId: request.agentRunId,
+      ...usageContext(request),
       provider: env.MODEL_PROVIDER,
       model: embedded.model,
       taskType: "RERANK",

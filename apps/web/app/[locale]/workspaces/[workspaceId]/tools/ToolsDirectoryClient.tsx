@@ -3,10 +3,18 @@
 import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
+import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
+import { MarkdownExcerpt, MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
 
 type CircleOption = {
   id: string;
   name: string;
+};
+
+type PersonSummary = {
+  id: string;
+  email: string;
+  displayName: string | null;
 };
 
 type ToolLink = {
@@ -25,9 +33,54 @@ type ToolLink = {
   createdAt: string;
   updatedAt: string;
   archivedAt: string | null;
-  createdBy: { id: string; email: string; displayName: string | null } | null;
+  createdBy: PersonSummary | null;
   circles: CircleOption[];
   canManage: boolean;
+};
+
+type CatalogItemType = "APP" | "AGENT" | "TOOL" | "AUTOMATION" | "CONNECTOR" | "DATA_SOURCE";
+type CatalogAccessMode = "OPEN" | "REQUEST" | "ADMIN_ONLY" | "DISABLED";
+type CatalogRequestType = "ACCESS" | "API_KEY" | "BUDGET_INCREASE" | "PUBLISH";
+type CatalogRequestStatus = "PENDING" | "APPROVED" | "REJECTED" | "CANCELLED";
+
+type CatalogItem = {
+  id: string;
+  type: CatalogItemType;
+  sourceType: string;
+  title: string;
+  outcome: string | null;
+  descriptionMd: string | null;
+  accessNotesMd: string | null;
+  url: string | null;
+  category: string;
+  status: "DRAFT" | "PUBLISHED" | "REQUEST_ONLY" | "DISABLED" | "ARCHIVED";
+  accessMode: CatalogAccessMode;
+  requestedScopes: string[];
+  monthlyBudgetCents: number | null;
+  dailyCallLimit: number | null;
+  featured: boolean;
+  createdAt: string;
+  updatedAt: string;
+  createdBy: PersonSummary | null;
+  owner: PersonSummary | null;
+  isFavorite: boolean;
+  isUploaded: boolean;
+  pendingRequestCount: number;
+};
+
+type CatalogRequest = {
+  id: string;
+  catalogItemId: string | null;
+  type: CatalogRequestType;
+  status: CatalogRequestStatus;
+  reasonMd: string;
+  requestedScopes: string[];
+  requestedBudgetCents: number | null;
+  requestedDailyCallLimit: number | null;
+  title: string | null;
+  createdAt: string;
+  catalogItem: { id: string; title: string; type: CatalogItemType } | null;
+  requester: PersonSummary;
 };
 
 type FormState = {
@@ -44,6 +97,25 @@ type FormState = {
   circleIds: string[];
 };
 
+type RequestDraft = {
+  item: CatalogItem | null;
+  type: CatalogRequestType;
+  reasonMd: string;
+  requestedBudgetCents: string;
+  requestedDailyCallLimit: string;
+};
+
+type PublishDraft = {
+  title: string;
+  url: string;
+  outcome: string;
+  descriptionMd: string;
+  requestedScopes: string;
+  requestedBudgetCents: string;
+  requestedDailyCallLimit: string;
+  proofUrl: string;
+};
+
 const EMPTY_FORM: FormState = {
   title: "",
   url: "",
@@ -58,6 +130,25 @@ const EMPTY_FORM: FormState = {
   circleIds: [],
 };
 
+const EMPTY_REQUEST: RequestDraft = {
+  item: null,
+  type: "ACCESS",
+  reasonMd: "",
+  requestedBudgetCents: "",
+  requestedDailyCallLimit: "",
+};
+
+const EMPTY_PUBLISH: PublishDraft = {
+  title: "",
+  url: "",
+  outcome: "",
+  descriptionMd: "",
+  requestedScopes: "",
+  requestedBudgetCents: "",
+  requestedDailyCallLimit: "",
+  proofUrl: "",
+};
+
 const CATEGORIES = [
   ["WHITEBOARD", "categoryWhiteboard"],
   ["FILES", "categoryFiles"],
@@ -66,9 +157,20 @@ const CATEGORIES = [
   ["OTHER", "categoryOther"],
 ] as const;
 
+const TYPE_LABELS: Record<CatalogItemType, string> = {
+  APP: "Apps",
+  AGENT: "Agents",
+  TOOL: "Tools",
+  AUTOMATION: "Automations",
+  CONNECTOR: "Connectors",
+  DATA_SOURCE: "Data",
+};
+
+const TYPE_ORDER: CatalogItemType[] = ["APP", "AGENT", "TOOL", "AUTOMATION", "CONNECTOR", "DATA_SOURCE"];
+
 function domainFor(url: string) {
   try {
-    return new URL(url).hostname.replace(/^www\./, "");
+    return new URL(url, "https://corgtex.local").hostname.replace(/^www\./, "") || url;
   } catch {
     return url;
   }
@@ -80,6 +182,15 @@ function displayDate(value: string) {
     day: "numeric",
     year: "numeric",
   });
+}
+
+function formatCents(cents: number | null) {
+  if (cents == null) return "No cap";
+  return `$${(cents / 100).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+function personName(person: PersonSummary | null) {
+  return person?.displayName ?? person?.email ?? "Workspace";
 }
 
 function linkToForm(link: ToolLink): FormState {
@@ -101,20 +212,34 @@ function linkToForm(link: ToolLink): FormState {
 export function ToolsDirectoryClient({
   workspaceId,
   initialLinks,
+  initialCatalogItems,
+  initialRequests,
+  canManageCatalog,
   circles,
   initialView,
 }: {
   workspaceId: string;
   initialLinks: ToolLink[];
+  initialCatalogItems: CatalogItem[];
+  initialRequests: CatalogRequest[];
+  canManageCatalog: boolean;
   circles: CircleOption[];
   initialView: "list" | "grid";
 }) {
   const router = useRouter();
   const t = useTranslations("tools");
   const [links, setLinks] = useState(initialLinks);
+  const [items, setItems] = useState(initialCatalogItems);
+  const [requests, setRequests] = useState(initialRequests);
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [isFormOpen, setIsFormOpen] = useState(false);
+  const [activeType, setActiveType] = useState<CatalogItemType | "ALL">("ALL");
+  const [query, setQuery] = useState("");
+  const [requestDraft, setRequestDraft] = useState<RequestDraft>(EMPTY_REQUEST);
+  const [publishDraft, setPublishDraft] = useState<PublishDraft>(EMPTY_PUBLISH);
+  const [isPublishOpen, setIsPublishOpen] = useState(false);
+  const [issuedToken, setIssuedToken] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [revealed, setRevealed] = useState<Record<string, string | null>>({});
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -124,8 +249,49 @@ export function ToolsDirectoryClient({
     return [...links].sort((a, b) => a.title.localeCompare(b.title));
   }, [links]);
 
+  const visibleItems = useMemo(() => {
+    const normalizedQuery = query.trim().toLowerCase();
+    return items
+      .filter((item) => activeType === "ALL" || item.type === activeType)
+      .filter((item) => {
+        if (!normalizedQuery) return true;
+        return [
+          item.title,
+          item.outcome,
+          item.descriptionMd,
+          item.category,
+          item.type,
+        ].some((value) => value?.toLowerCase().includes(normalizedQuery));
+      })
+      .sort((a, b) => Number(b.featured) - Number(a.featured) || a.title.localeCompare(b.title));
+  }, [activeType, items, query]);
+
+  const recommendedItems = useMemo(() => (
+    [...items]
+      .filter((item) => item.status === "PUBLISHED" && (item.featured || item.isFavorite || item.type === "CONNECTOR"))
+      .sort((a, b) => Number(b.isFavorite) - Number(a.isFavorite) || Number(b.featured) - Number(a.featured) || a.title.localeCompare(b.title))
+      .slice(0, 6)
+  ), [items]);
+
+  const favoriteItems = items.filter((item) => item.isFavorite);
+  const uploadedItems = items.filter((item) => item.isUploaded);
+  const pendingRequests = requests.filter((request) => request.status === "PENDING");
+  const summary = useMemo(() => {
+    const activeConnectors = items.filter((item) => item.type === "CONNECTOR" && item.status !== "DISABLED").length;
+    const budgetCents = items.reduce((sum, item) => sum + (item.monthlyBudgetCents ?? 0), 0);
+    return {
+      total: items.length,
+      activeConnectors,
+      budgetCents,
+    };
+  }, [items]);
+
   function setField<K extends keyof FormState>(key: K, value: FormState[K]) {
     setForm((current) => ({ ...current, [key]: value }));
+  }
+
+  function setPublishField<K extends keyof PublishDraft>(key: K, value: PublishDraft[K]) {
+    setPublishDraft((current) => ({ ...current, [key]: value }));
   }
 
   function toggleCircle(circleId: string) {
@@ -144,11 +310,25 @@ export function ToolsDirectoryClient({
     setError(null);
   }
 
+  function resetPublishForm() {
+    setPublishDraft(EMPTY_PUBLISH);
+    setIsPublishOpen(false);
+    setError(null);
+  }
+
   function startEdit(link: ToolLink) {
     setForm(linkToForm(link));
     setEditingId(link.id);
     setIsFormOpen(true);
     setError(null);
+  }
+
+  async function refreshCatalog() {
+    const res = await fetch(`/api/workspaces/${workspaceId}/catalog`);
+    const data = await res.json().catch(() => null);
+    if (res.ok && Array.isArray(data?.items)) {
+      setItems(data.items);
+    }
   }
 
   async function submitForm(event: React.FormEvent) {
@@ -193,6 +373,7 @@ export function ToolsDirectoryClient({
         : [data, ...current]
     ));
     resetForm();
+    await refreshCatalog();
     router.refresh();
   }
 
@@ -207,6 +388,129 @@ export function ToolsDirectoryClient({
       return;
     }
     setLinks((current) => current.filter((item) => item.id !== link.id));
+    await refreshCatalog();
+    router.refresh();
+  }
+
+  async function toggleFavorite(item: CatalogItem) {
+    const res = await fetch(`/api/workspaces/${workspaceId}/catalog/${item.id}/favorite`, {
+      method: item.isFavorite ? "DELETE" : "POST",
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok) {
+      setError(data?.error?.message ?? "Could not update favorite.");
+      return;
+    }
+    setItems((current) => current.map((entry) => (
+      entry.id === item.id ? { ...entry, isFavorite: !item.isFavorite } : entry
+    )));
+  }
+
+  function openRequest(item: CatalogItem | null, type: CatalogRequestType) {
+    setIssuedToken(null);
+    setRequestDraft({
+      item,
+      type,
+      reasonMd: "",
+      requestedBudgetCents: item?.monthlyBudgetCents != null ? String(item.monthlyBudgetCents) : "",
+      requestedDailyCallLimit: item?.dailyCallLimit != null ? String(item.dailyCallLimit) : "",
+    });
+  }
+
+  async function submitRequest(event: React.FormEvent) {
+    event.preventDefault();
+    setError(null);
+    const budget = requestDraft.requestedBudgetCents.trim();
+    const daily = requestDraft.requestedDailyCallLimit.trim();
+    const payload: Record<string, unknown> = {
+      catalogItemId: requestDraft.item?.id ?? null,
+      type: requestDraft.type,
+      reasonMd: requestDraft.reasonMd,
+      requestedScopes: requestDraft.item?.requestedScopes ?? [],
+    };
+    if (budget) payload.requestedBudgetCents = Number(budget);
+    if (daily) payload.requestedDailyCallLimit = Number(daily);
+
+    const res = await fetch(`/api/workspaces/${workspaceId}/catalog/requests`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok) {
+      setError(data?.error?.message ?? "Could not create request.");
+      return;
+    }
+    setRequests((current) => [data, ...current]);
+    setItems((current) => current.map((item) => (
+      item.id === requestDraft.item?.id
+        ? { ...item, pendingRequestCount: item.pendingRequestCount + 1 }
+        : item
+    )));
+    setRequestDraft(EMPTY_REQUEST);
+    router.refresh();
+  }
+
+  async function submitPublishRequest(event: React.FormEvent) {
+    event.preventDefault();
+    setError(null);
+    const scopes = publishDraft.requestedScopes
+      .split(/[\s,]+/)
+      .map((scope) => scope.trim())
+      .filter(Boolean);
+    const budget = publishDraft.requestedBudgetCents.trim();
+    const daily = publishDraft.requestedDailyCallLimit.trim();
+    const payload: Record<string, unknown> = {
+      type: "PUBLISH",
+      title: publishDraft.title,
+      reasonMd: publishDraft.outcome || publishDraft.descriptionMd,
+      requestedScopes: scopes,
+      payloadJson: {
+        type: "APP",
+        title: publishDraft.title,
+        url: publishDraft.url,
+        outcome: publishDraft.outcome,
+        descriptionMd: publishDraft.descriptionMd,
+        category: "VIBE_CODED",
+        proofUrl: publishDraft.proofUrl,
+      },
+    };
+    if (budget) payload.requestedBudgetCents = Number(budget);
+    if (daily) payload.requestedDailyCallLimit = Number(daily);
+
+    const res = await fetch(`/api/workspaces/${workspaceId}/catalog/requests`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok) {
+      setError(data?.error?.message ?? "Could not submit app.");
+      return;
+    }
+    setRequests((current) => [data, ...current]);
+    resetPublishForm();
+    router.refresh();
+  }
+
+  async function decideRequest(request: CatalogRequest, action: "approve" | "reject") {
+    const res = await fetch(`/api/workspaces/${workspaceId}/catalog/requests/${request.id}/${action}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ decisionNoteMd: `${action === "approve" ? "Approved" : "Rejected"} from Tools admin queue.` }),
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok) {
+      setError(data?.error?.message ?? "Could not update request.");
+      return;
+    }
+    setRequests((current) => current.map((entry) => (
+      entry.id === request.id ? { ...entry, status: data.request.status } : entry
+    )));
+    if (data.token) {
+      setIssuedToken(data.token);
+    }
+    await refreshCatalog();
     router.refresh();
   }
 
@@ -228,6 +532,106 @@ export function ToolsDirectoryClient({
     await navigator.clipboard.writeText(secret);
     setCopiedId(linkId);
     window.setTimeout(() => setCopiedId(null), 1800);
+  }
+
+  async function copyToken() {
+    if (!issuedToken) return;
+    await navigator.clipboard.writeText(issuedToken);
+    setCopiedId("issued-token");
+    window.setTimeout(() => setCopiedId(null), 1800);
+  }
+
+  function renderCatalogCard(item: CatalogItem, compact = false) {
+    const disabled = item.status === "DISABLED" || item.accessMode === "DISABLED";
+    return (
+      <article
+        key={item.id}
+        style={{
+          border: "1px solid var(--line)",
+          borderRadius: 8,
+          padding: compact ? 12 : 16,
+          background: "var(--surface-strong)",
+          display: "grid",
+          gap: 12,
+          minHeight: compact ? 0 : 220,
+        }}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "flex-start" }}>
+          <div style={{ minWidth: 0 }}>
+            <div className="actions-inline" style={{ gap: 6, marginBottom: 8 }}>
+              <span className="tag">{TYPE_LABELS[item.type]}</span>
+              <span className={`tag ${item.accessMode === "OPEN" ? "success" : "info"}`}>
+                {item.accessMode === "OPEN" ? "Open" : item.accessMode === "ADMIN_ONLY" ? "Admin" : item.accessMode === "REQUEST" ? "Request" : "Disabled"}
+              </span>
+              {item.pendingRequestCount > 0 && <span className="tag info">{item.pendingRequestCount} pending</span>}
+            </div>
+            <h2 style={{ fontSize: compact ? "0.98rem" : "1.1rem", margin: 0, wordBreak: "break-word" }}>
+              {item.title}
+            </h2>
+          </div>
+          <button
+            type="button"
+            className="secondary small"
+            aria-label={item.isFavorite ? "Remove favorite" : "Add favorite"}
+            onClick={() => toggleFavorite(item)}
+            style={{ minWidth: 40 }}
+          >
+            {item.isFavorite ? "★" : "☆"}
+          </button>
+        </div>
+
+        <p style={{ margin: 0, color: "var(--muted)", lineHeight: 1.45, fontSize: "0.9rem" }}>
+          {item.outcome || item.descriptionMd || "Shared workspace capability."}
+        </p>
+
+        {item.descriptionMd && item.outcome !== item.descriptionMd && !compact && (
+          <MarkdownRenderer markdown={item.descriptionMd} variant="compact" className="muted" />
+        )}
+
+        <div className="nr-item-meta" style={{ margin: 0 }}>
+          Owner: {personName(item.owner ?? item.createdBy)} · Budget: {formatCents(item.monthlyBudgetCents)}
+          {item.dailyCallLimit != null ? ` · ${item.dailyCallLimit} calls/day` : ""}
+        </div>
+
+        <div className="actions-inline" style={{ marginTop: "auto" }}>
+          {item.url && !disabled && (
+            <a className="link-button small" href={item.url} target={item.url.startsWith("/") ? undefined : "_blank"} rel="noreferrer">
+              Open
+            </a>
+          )}
+          <a className="link-button secondary small" href={`/workspaces/${workspaceId}/tools/${item.id}`}>
+            Details
+          </a>
+          <button type="button" className="secondary small" onClick={() => openRequest(item, "ACCESS")}>
+            Request access
+          </button>
+          <button type="button" className="secondary small" onClick={() => openRequest(item, "API_KEY")}>
+            API key
+          </button>
+          <button type="button" className="secondary small" onClick={() => openRequest(item, "BUDGET_INCREASE")}>
+            Budget
+          </button>
+        </div>
+      </article>
+    );
+  }
+
+  function renderSection(title: string, sectionItems: CatalogItem[], empty: string, compact = false) {
+    return (
+      <section className="stack" style={{ gap: 12 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "baseline" }}>
+          <h2 className="nr-section-header" style={{ margin: 0 }}>{title}</h2>
+          <span className="nr-item-meta">{sectionItems.length}</span>
+        </div>
+        {sectionItems.length === 0 ? (
+          <p className="muted" style={{ margin: 0, fontSize: "0.9rem" }}>{empty}</p>
+        ) : (
+          <div style={{ display: "grid", gridTemplateColumns: compact ? "repeat(auto-fit, minmax(240px, 1fr))" : "repeat(auto-fit, minmax(280px, 1fr))", gap: 14 }}>
+            {sectionItems.map((item) => renderCatalogCard(item, compact))}
+          </div>
+        )}
+      </section>
+    );
   }
 
   function renderCredential(link: ToolLink) {
@@ -323,9 +727,9 @@ export function ToolsDirectoryClient({
           </strong>
           <div className="nr-item-meta" style={{ marginTop: 4 }}>{host}</div>
           {(link.previewDescription || link.descriptionMd) && (
-            <p style={{ margin: "8px 0 0", color: "var(--muted)", fontSize: "0.82rem", lineHeight: 1.45 }}>
-              {(link.previewDescription || link.descriptionMd || "").slice(0, 130)}
-            </p>
+            <div style={{ margin: "8px 0 0", color: "var(--muted)", fontSize: "0.82rem", lineHeight: 1.45 }}>
+              {link.previewDescription || <MarkdownExcerpt markdown={link.descriptionMd} maxLength={130} />}
+            </div>
           )}
         </div>
       </div>
@@ -353,15 +757,13 @@ export function ToolsDirectoryClient({
                   <strong>{link.title}</strong>
                   <div className="nr-item-meta">{domainFor(link.url)}</div>
                   {link.descriptionMd && (
-                    <p style={{ whiteSpace: "pre-wrap", margin: "8px 0 0", lineHeight: 1.45 }}>
-                      {link.descriptionMd}
-                    </p>
+                    <MarkdownRenderer markdown={link.descriptionMd} variant="compact" className="mt-2" />
                   )}
                   <div style={{ marginTop: 8 }}>{renderTags(link)}</div>
                 </td>
                 <td style={{ verticalAlign: "top" }}>{categoryLabel(link.category)}</td>
-                <td style={{ minWidth: 220, whiteSpace: "pre-wrap", verticalAlign: "top" }}>
-                  {link.accessNotesMd || <span className="muted">-</span>}
+                <td style={{ minWidth: 220, verticalAlign: "top" }}>
+                  {link.accessNotesMd ? <MarkdownRenderer markdown={link.accessNotesMd} variant="compact" /> : <span className="muted">-</span>}
                 </td>
                 <td style={{ minWidth: 240, verticalAlign: "top" }}>{renderCredential(link)}</td>
                 <td style={{ minWidth: 150, verticalAlign: "top" }}>
@@ -418,9 +820,7 @@ export function ToolsDirectoryClient({
               {renderTags(link)}
             </div>
             {link.accessNotesMd && (
-              <p style={{ margin: 0, whiteSpace: "pre-wrap", color: "var(--muted)", fontSize: "0.85rem", lineHeight: 1.5 }}>
-                {link.accessNotesMd}
-              </p>
+              <MarkdownRenderer markdown={link.accessNotesMd} variant="compact" className="muted" />
             )}
             {renderCredential(link)}
             <div className="actions-inline">
@@ -445,24 +845,154 @@ export function ToolsDirectoryClient({
   }
 
   return (
-    <section className="ws-section stack" style={{ gap: 24 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
-        <button
-          type="button"
-          className={isFormOpen ? "secondary small" : "small"}
-          onClick={() => {
-            if (isFormOpen) {
-              resetForm();
-            } else {
-              setIsFormOpen(true);
-            }
-          }}
-        >
-          {isFormOpen ? t("btnCancel") : t("btnAddTool")}
-        </button>
+    <section className="ws-section stack" style={{ gap: 28 }}>
+      <div className="stack" style={{ gap: 16 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto", gap: 12, alignItems: "center" }}>
+          <input
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="Find an app, agent, connector, tool, or data source"
+            aria-label="Search tools catalog"
+          />
+          <div className="actions-inline" style={{ justifyContent: "flex-end" }}>
+            <button type="button" className="small" onClick={() => setIsPublishOpen((open) => !open)}>
+              {isPublishOpen ? t("btnCancel") : "Submit app"}
+            </button>
+            <button type="button" className="secondary small" onClick={() => setIsFormOpen((open) => !open)}>
+              {isFormOpen ? t("btnCancel") : "Publish shared link"}
+            </button>
+          </div>
+        </div>
+
+        <div className="ws-stat-row" style={{ marginTop: 0 }}>
+          <div className="ws-stat-card">
+            <span>Catalog items</span>
+            <strong>{summary.total}</strong>
+          </div>
+          <div className="ws-stat-card">
+            <span>Connectors</span>
+            <strong>{summary.activeConnectors}</strong>
+          </div>
+          <div className="ws-stat-card">
+            <span>AI budget caps</span>
+            <strong>{formatCents(summary.budgetCents)}</strong>
+          </div>
+          <div className="ws-stat-card">
+            <span>Pending</span>
+            <strong>{pendingRequests.length}</strong>
+          </div>
+        </div>
+
+        <div className="nr-filter-bar">
+          <button type="button" className={`nr-filter-item ${activeType === "ALL" ? "nr-filter-active" : ""}`} onClick={() => setActiveType("ALL")}>
+            All ({items.length})
+          </button>
+          {TYPE_ORDER.map((type) => (
+            <button
+              type="button"
+              key={type}
+              className={`nr-filter-item ${activeType === type ? "nr-filter-active" : ""}`}
+              onClick={() => setActiveType(type)}
+            >
+              {TYPE_LABELS[type]} ({items.filter((item) => item.type === type).length})
+            </button>
+          ))}
+        </div>
       </div>
 
       {error && <div className="form-message form-message-error">{error}</div>}
+
+      {issuedToken && (
+        <div className="form-message form-message-success">
+          <strong>API key issued.</strong>
+          <div className="actions-inline" style={{ marginTop: 8 }}>
+            <input readOnly value={issuedToken} aria-label="Issued API key" style={{ minWidth: 320, fontFamily: "monospace" }} />
+            <button type="button" className="secondary small" onClick={copyToken}>
+              {copiedId === "issued-token" ? t("btnCopied") : t("btnCopy")}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {isPublishOpen && (
+        <form
+          onSubmit={submitPublishRequest}
+          className="nr-form-section stack"
+          style={{ border: "1px solid var(--line)", borderRadius: 8, padding: 20, marginBottom: 8 }}
+        >
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "flex-start" }}>
+            <div>
+              <h2 style={{ margin: 0, fontSize: "1.1rem" }}>Submit vibe-coded app</h2>
+              <p className="nr-item-meta" style={{ margin: "4px 0 0" }}>Employee-made apps go to workspace admins before they appear in Tools.</p>
+            </div>
+            <button type="button" className="secondary small" onClick={resetPublishForm}>{t("btnCancel")}</button>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 14 }}>
+            <label>
+              App name
+              <input required value={publishDraft.title} onChange={(event) => setPublishField("title", event.target.value)} />
+            </label>
+            <label>
+              App URL
+              <input required value={publishDraft.url} onChange={(event) => setPublishField("url", event.target.value)} placeholder="https://example.com/app" />
+            </label>
+            <label>
+              Proof link
+              <input value={publishDraft.proofUrl} onChange={(event) => setPublishField("proofUrl", event.target.value)} placeholder="Build, demo, or artifact link" />
+            </label>
+          </div>
+          <label>
+            Outcome
+            <input
+              required
+              value={publishDraft.outcome}
+              onChange={(event) => setPublishField("outcome", event.target.value)}
+              placeholder="What business outcome does this app produce?"
+            />
+          </label>
+          <label>
+            Description
+            <MarkdownEditor
+              name="publishDescription"
+              value={publishDraft.descriptionMd}
+              onValueChange={(descriptionMd) => setPublishField("descriptionMd", descriptionMd)}
+              placeholder="What it does, who should use it, and what data it needs."
+              rows={4}
+            />
+          </label>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 14 }}>
+            <label>
+              Requested scopes
+              <input
+                value={publishDraft.requestedScopes}
+                onChange={(event) => setPublishField("requestedScopes", event.target.value)}
+                placeholder="tools:read runtime:write"
+              />
+            </label>
+            <label>
+              Initial monthly budget cents
+              <input
+                type="number"
+                min="0"
+                value={publishDraft.requestedBudgetCents}
+                onChange={(event) => setPublishField("requestedBudgetCents", event.target.value)}
+              />
+            </label>
+            <label>
+              Daily call limit
+              <input
+                type="number"
+                min="0"
+                value={publishDraft.requestedDailyCallLimit}
+                onChange={(event) => setPublishField("requestedDailyCallLimit", event.target.value)}
+              />
+            </label>
+          </div>
+          <div className="actions-inline">
+            <button type="submit" className="small">Submit to admins</button>
+          </div>
+        </form>
+      )}
 
       {isFormOpen && (
         <form
@@ -470,7 +1000,7 @@ export function ToolsDirectoryClient({
           className="nr-form-section stack"
           style={{ border: "1px solid var(--line)", borderRadius: 8, padding: 20, marginBottom: 8 }}
         >
-          <h2 style={{ margin: 0, fontSize: "1.1rem" }}>{isEditing ? t("editTitle") : t("newTitle")}</h2>
+          <h2 style={{ margin: 0, fontSize: "1.1rem" }}>{isEditing ? t("editTitle") : "Publish shared link"}</h2>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 14 }}>
             <label>
               {t("formTitle")}
@@ -491,11 +1021,23 @@ export function ToolsDirectoryClient({
           </div>
           <label>
             {t("formDescription")}
-            <textarea value={form.descriptionMd} onChange={(event) => setField("descriptionMd", event.target.value)} placeholder={t("placeholderDescription")} />
+            <MarkdownEditor
+              name="descriptionMd"
+              value={form.descriptionMd}
+              onValueChange={(descriptionMd) => setField("descriptionMd", descriptionMd)}
+              placeholder={t("placeholderDescription")}
+              rows={4}
+            />
           </label>
           <label>
             {t("formAccessNotes")}
-            <textarea value={form.accessNotesMd} onChange={(event) => setField("accessNotesMd", event.target.value)} placeholder={t("placeholderAccessNotes")} />
+            <MarkdownEditor
+              name="accessNotesMd"
+              value={form.accessNotesMd}
+              onValueChange={(accessNotesMd) => setField("accessNotesMd", accessNotesMd)}
+              placeholder={t("placeholderAccessNotes")}
+              rows={4}
+            />
           </label>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 14 }}>
             <label>
@@ -544,18 +1086,144 @@ export function ToolsDirectoryClient({
             )}
           </fieldset>
           <div className="actions-inline">
-            <button type="submit" className="small">{isEditing ? t("btnUpdateTool") : t("btnSaveTool")}</button>
+            <button type="submit" className="small">{isEditing ? t("btnUpdateTool") : "Publish link"}</button>
             <button type="button" className="secondary small" onClick={resetForm}>{t("btnCancel")}</button>
           </div>
         </form>
       )}
 
-      {groupedLinks.length === 0 ? (
-        <div className="nr-item" style={{ textAlign: "center", padding: "48px 24px" }}>
-          <h2 style={{ margin: "0 0 8px", fontSize: "1.1rem" }}>{t("emptyTitle")}</h2>
-          <p className="muted" style={{ margin: 0 }}>{t("emptyDescription")}</p>
+      {requestDraft.item && (
+        <form
+          onSubmit={submitRequest}
+          className="nr-form-section stack"
+          style={{ border: "1px solid var(--line)", borderRadius: 8, padding: 18 }}
+        >
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+            <div>
+              <h2 style={{ margin: 0, fontSize: "1.05rem" }}>
+                {requestDraft.type === "ACCESS" ? "Request access" : requestDraft.type === "API_KEY" ? "Request API key" : "Request budget"}: {requestDraft.item.title}
+              </h2>
+              <p className="nr-item-meta" style={{ margin: "4px 0 0" }}>Requests route to workspace admins.</p>
+            </div>
+            <button type="button" className="secondary small" onClick={() => setRequestDraft(EMPTY_REQUEST)}>
+              {t("btnCancel")}
+            </button>
+          </div>
+          <label>
+            Reason
+            <MarkdownEditor
+              name="reasonMd"
+              value={requestDraft.reasonMd}
+              onValueChange={(reasonMd) => setRequestDraft((current) => ({ ...current, reasonMd }))}
+              placeholder="What outcome are you trying to produce?"
+              rows={3}
+            />
+          </label>
+          {requestDraft.type !== "ACCESS" && (
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12 }}>
+              <label>
+                Monthly budget cents
+                <input
+                  type="number"
+                  min="0"
+                  value={requestDraft.requestedBudgetCents}
+                  onChange={(event) => setRequestDraft((current) => ({ ...current, requestedBudgetCents: event.target.value }))}
+                />
+              </label>
+              <label>
+                Daily call limit
+                <input
+                  type="number"
+                  min="0"
+                  value={requestDraft.requestedDailyCallLimit}
+                  onChange={(event) => setRequestDraft((current) => ({ ...current, requestedDailyCallLimit: event.target.value }))}
+                />
+              </label>
+            </div>
+          )}
+          <div className="actions-inline">
+            <button type="submit" className="small">Submit request</button>
+          </div>
+        </form>
+      )}
+
+      {canManageCatalog && pendingRequests.length > 0 && (
+        <section className="stack" style={{ gap: 12 }}>
+          <h2 className="nr-section-header" style={{ margin: 0 }}>Admin queue</h2>
+          <div className="nr-table-wrap">
+            <table className="nr-table">
+              <thead>
+                <tr>
+                  <th>Request</th>
+                  <th>Reason</th>
+                  <th>Requester</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {pendingRequests.map((request) => (
+                  <tr key={request.id}>
+                    <td>
+                      <strong>{request.catalogItem?.title ?? request.title ?? "Catalog publish request"}</strong>
+                      <div className="nr-item-meta">{request.type} · {displayDate(request.createdAt)}</div>
+                    </td>
+                    <td style={{ minWidth: 260 }}>
+                      <MarkdownRenderer markdown={request.reasonMd} variant="compact" />
+                      {(request.requestedBudgetCents != null || request.requestedDailyCallLimit != null) && (
+                        <div className="nr-item-meta" style={{ marginTop: 6 }}>
+                          {formatCents(request.requestedBudgetCents)} · {request.requestedDailyCallLimit ?? "No"} calls/day
+                        </div>
+                      )}
+                    </td>
+                    <td>{personName(request.requester)}</td>
+                    <td>
+                      <div className="actions-inline">
+                        <button type="button" className="secondary small" onClick={() => decideRequest(request, "approve")}>Approve</button>
+                        <button type="button" className="danger small" onClick={() => decideRequest(request, "reject")}>Reject</button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
+
+      {renderSection("Recommended", recommendedItems, "No recommendations yet.", true)}
+      {renderSection("My favorites", favoriteItems, "Favorite apps, agents, connectors, or tools to keep them here.", true)}
+      {renderSection("My uploads", uploadedItems, "Your published links and vibe-coded apps will appear here.", true)}
+
+      <section className="stack" style={{ gap: 16 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "baseline" }}>
+          <h2 className="nr-section-header" style={{ margin: 0 }}>{activeType === "ALL" ? "Catalog" : TYPE_LABELS[activeType]}</h2>
+          <span className="nr-item-meta">{visibleItems.length} items</span>
         </div>
-      ) : initialView === "grid" ? renderGridView() : renderListView()}
+        {visibleItems.length === 0 ? (
+          <div className="nr-item" style={{ textAlign: "center", padding: "48px 24px" }}>
+            <h2 style={{ margin: "0 0 8px", fontSize: "1.1rem" }}>No catalog items found.</h2>
+            <p className="muted" style={{ margin: 0 }}>Try another search or publish a shared link.</p>
+          </div>
+        ) : (
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: 16 }}>
+            {visibleItems.map((item) => renderCatalogCard(item))}
+          </div>
+        )}
+      </section>
+
+      <details>
+        <summary className="nr-section-header" style={{ cursor: "pointer", margin: 0 }}>
+          Shared link management
+        </summary>
+        <div style={{ marginTop: 16 }}>
+          {groupedLinks.length === 0 ? (
+            <div className="nr-item" style={{ textAlign: "center", padding: "32px 24px" }}>
+              <h2 style={{ margin: "0 0 8px", fontSize: "1.1rem" }}>{t("emptyTitle")}</h2>
+              <p className="muted" style={{ margin: 0 }}>{t("emptyDescription")}</p>
+            </div>
+          ) : initialView === "grid" ? renderGridView() : renderListView()}
+        </div>
+      </details>
     </section>
   );
 }

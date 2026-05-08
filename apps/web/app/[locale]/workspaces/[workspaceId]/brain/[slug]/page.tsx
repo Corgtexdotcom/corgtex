@@ -3,7 +3,8 @@ import { getArticle, listArticles, requireWorkspaceMembership, updateArticle } f
 import { requirePageActor } from "@/lib/auth";
 import { notFound } from "next/navigation";
 import Link from "next/link";
-import { renderMarkdown } from "@/lib/markdown";
+import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
+import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
 import { revalidatePath } from "next/cache";
 import { prisma } from "@corgtex/shared";
 import { getTranslations } from "next-intl/server";
@@ -47,8 +48,6 @@ export default async function BrainArticlePage({
     if (days === 1) return t("yesterday");
     return t("daysAgo", { count: days });
   };
-
-  const htmlContent = renderMarkdown(article.bodyMd);
 
   async function updateArticleAction(formData: FormData) {
     "use server";
@@ -109,11 +108,7 @@ export default async function BrainArticlePage({
       <div style={{ display: "grid", gridTemplateColumns: "3fr 1fr", gap: "64px" }}>
         {/* Main Article Body */}
         <article style={{ fontSize: "1.1rem", lineHeight: 1.8, color: "var(--text)" }}>
-          <div 
-            className="nr-markdown" 
-            dangerouslySetInnerHTML={{ __html: htmlContent }} 
-            style={{ marginBottom: "48px" }}
-          />
+          <MarkdownRenderer markdown={article.bodyMd} variant="document" className="nr-markdown" />
 
           <hr className="nr-divider" style={{ margin: "48px 0" }} />
           
@@ -133,7 +128,7 @@ export default async function BrainArticlePage({
                 <option value="AUTHORITATIVE">{t("authorityAuthoritative")}</option>
               </select>
             </div>
-            <textarea name="bodyMd" defaultValue={article.bodyMd} rows={10} style={{ width: "100%", padding: "12px", fontSize: "0.9rem", border: "1px solid var(--line)", borderRadius: "4px", fontFamily: "monospace", lineHeight: 1.4 }} />
+            <MarkdownEditor name="bodyMd" defaultValue={article.bodyMd} rows={10} />
             <button type="submit" style={{ padding: "8px 16px", background: "var(--text-strong)", color: "var(--bg)", border: "none", borderRadius: "4px", cursor: "pointer", fontWeight: 600, alignSelf: "flex-start" }}>{t("updateArticle")}</button>
           </form>
           </>

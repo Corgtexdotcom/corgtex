@@ -78,7 +78,7 @@ const ARTICLES = [
 ];
 
 async function main() {
-  console.log("🚀 Starting Corgtex Internal Workspace Seed...");
+  console.log("🚀 Starting Corgtex dogfood workspace seed...");
 
   // 1. Get or create workspace (Base seed handles this usually, but let's be safe)
   let workspace = await prisma.workspace.findUnique({ where: { slug: WORKSPACE_SLUG } });
@@ -279,7 +279,7 @@ async function main() {
   }
   console.log(`Created ${accounts.length} ledger accounts.`);
 
-  console.log("✅ Corgtex internal workspace seed complete.");
+  console.log("✅ Corgtex dogfood workspace seed complete.");
 }
 
 main()

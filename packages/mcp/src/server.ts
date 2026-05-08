@@ -19,6 +19,7 @@ import {
   archiveWorkspaceArtifact,
   createProposal,
   updateProposal,
+  resolveProposal,
   archiveProposal,
   submitProposal,
   publishProposal,
@@ -176,6 +177,7 @@ const TOOL_CAPABILITIES = {
   get_proposal: { scopes: ["proposals:read"] },
   create_proposal: { scopes: ["proposals:write"] },
   update_proposal: { scopes: ["proposals:write"] },
+  resolve_proposal: { scopes: ["proposals:write"] },
   submit_proposal: { scopes: ["proposals:write"] },
   archive_proposal: { scopes: ["proposals:write"], destructive: true },
   publish_proposal: { scopes: ["proposals:write"] },
@@ -937,6 +939,26 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         flowId: result.flowId,
         status: "OPEN",
         webUrl: webUrl(workspaceId, `/proposals/${result.proposalId}`),
+      });
+    },
+  );
+
+  tool(
+    "resolve_proposal",
+    "Manually resolve an OPEN proposal with an explicit outcome and required resolution note.",
+    {
+      proposalId: z.string(),
+      outcome: z.enum(["ADOPTED", "NOT_ADOPTED", "WITHDRAWN"]),
+      decisionMd: z.string().min(1).describe("Required note describing how or why the proposal was resolved."),
+    },
+    async ({ proposalId, outcome, decisionMd }: { proposalId: string; outcome: "ADOPTED" | "NOT_ADOPTED" | "WITHDRAWN"; decisionMd: string }) => {
+      requireScope(sessionCtx, "proposals:write");
+      const updated = await resolveProposal(actor, { workspaceId, proposalId, outcome, decisionMd });
+      return jsonResult({
+        id: updated.id,
+        status: updated.status,
+        resolutionOutcome: updated.resolutionOutcome,
+        webUrl: webUrl(workspaceId, `/proposals/${updated.id}`),
       });
     },
   );

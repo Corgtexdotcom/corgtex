@@ -4,7 +4,8 @@ import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { useTranslations } from "next-intl";
 import { type MeetingInsight } from "@prisma/client";
-import { renderMarkdown } from "@/lib/markdown";
+import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
+import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
 import {
   applyInsightAction,
   dismissInsightAction,
@@ -244,10 +245,11 @@ export default function MeetingIntelligence({
                             </label>
                             <label>
                               {t("editInsightBody")}
-                              <textarea
+                              <MarkdownEditor
+                                name="bodyMd"
                                 value={draft.bodyMd}
                                 rows={5}
-                                onChange={(event) => updateDraft(insight.id, { bodyMd: event.target.value })}
+                                onValueChange={(bodyMd) => updateDraft(insight.id, { bodyMd })}
                               />
                             </label>
                             <label>
@@ -263,10 +265,7 @@ export default function MeetingIntelligence({
                           <>
                             <h4>{insight.title}</h4>
                             {insight.bodyMd && (
-                              <div
-                                className="markdown-body meeting-insight-body"
-                                dangerouslySetInnerHTML={{ __html: renderMarkdown(insight.bodyMd) }}
-                              />
+                              <MarkdownRenderer markdown={insight.bodyMd} variant="compact" className="meeting-insight-body" />
                             )}
                             {insight.assigneeHint && (
                               <div className="nr-item-meta">

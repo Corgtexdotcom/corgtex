@@ -8,7 +8,7 @@ export function PageViewTracker() {
   const pathname = usePathname();
 
   useEffect(() => {
-    trackEvent("website_pageview", { path: pathname });
+    trackEvent("website_pageview", { path: pathname ?? undefined });
   }, [pathname]);
 
   return null;
