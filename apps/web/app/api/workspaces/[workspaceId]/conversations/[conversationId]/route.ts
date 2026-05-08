@@ -7,6 +7,17 @@ import { handleRouteError } from "@/lib/http";
 
 const MAX_MESSAGE_LENGTH = 100_000;
 
+function catalogUsageContext(actor: Awaited<ReturnType<typeof resolveRequestActor>>) {
+  if (actor.kind === "agent" && actor.authProvider === "credential") {
+    return {
+      catalogItemId: actor.catalogItemId ?? undefined,
+      agentCredentialId: actor.credentialId,
+    };
+  }
+
+  return {};
+}
+
 export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ workspaceId: string; conversationId: string }> },
@@ -88,6 +99,7 @@ export async function POST(
               try {
                 const titleResponse = await defaultModelGateway.chat({
                   workspaceId,
+                  ...catalogUsageContext(actor),
                   taskType: "CLASSIFICATION",
                   messages: [
                     {

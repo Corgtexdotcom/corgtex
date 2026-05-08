@@ -7,6 +7,7 @@ import {
   deleteTensionAction,
   publishTensionAction,
   returnTensionToDraftAction,
+  createProposalFromTensionAction,
 } from "../actions";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownExcerpt } from "@/lib/components/MarkdownRenderer";
@@ -106,6 +107,7 @@ export default async function TensionsPage({
             const authorName = tension.author.displayName || tension.author.email || t("authorUnknown");
             const raisedByName = tension.raisedByMember ? memberName(tension.raisedByMember) : null;
             const canManage = canManageTension(tension);
+            const canDraftProposal = !tension.proposal && (canManage || !tension.isPrivate);
 
             return (
               <div className="nr-item" key={tension.id}>
@@ -124,7 +126,12 @@ export default async function TensionsPage({
                   {t("createdByMeta", { name: authorName })}
                   {raisedByName ? ` · ${t("raisedByMeta", { name: raisedByName })}` : ""}
                   {` · ${ageText(tension.createdAt)} · ${t("upvotes", { count: tension.upvotes.length })} · ${t("priorityN", { priority: tension.priority })}`}
-                  {tension.proposal && t("linkedProposalMeta", { title: tension.proposal.title })}
+                  {tension.proposal && (
+                    <>
+                      {" · "}
+                      <a href={`/workspaces/${workspaceId}/proposals/${tension.proposal.id}`}>{t("linkedProposalMeta", { title: tension.proposal.title })}</a>
+                    </>
+                  )}
                 </div>
 
                 <div className="actions-inline" style={{ marginTop: 12 }}>
@@ -142,6 +149,13 @@ export default async function TensionsPage({
                       <button type="submit" className="secondary small">{t("btnReturnToDraft")}</button>
                     </form>
                   )}
+                  {canDraftProposal && (
+                    <form action={createProposalFromTensionAction}>
+                      <input type="hidden" name="workspaceId" value={workspaceId} />
+                      <input type="hidden" name="sourceTensionId" value={tension.id} />
+                      <button type="submit" className="secondary small">{t("btnDraftProposal")}</button>
+                    </form>
+                  )}
                   {!tension.isPrivate && tension.status === "OPEN" && (
                     <details>
                       <summary className="secondary small nr-hide-marker" style={{ cursor: "pointer" }}>{t("btnResolve")}</summary>
@@ -155,20 +169,20 @@ export default async function TensionsPage({
                     </details>
                   )}
                   {canManage && tension.status === "DRAFT" && (
-                  <details>
-                    <summary className="secondary small nr-hide-marker" style={{ cursor: "pointer" }}>{t("btnEditRaisedBy")}</summary>
-                    <form action={updateTensionAction} className="actions-inline" style={{ marginTop: 8 }}>
-                      <input type="hidden" name="workspaceId" value={workspaceId} />
-                      <input type="hidden" name="tensionId" value={tension.id} />
-                      <select name="raisedByMemberId" defaultValue={tension.raisedByMemberId || ""} aria-label={t("formRaisedBy")}>
-                        <option value="">{t("formRaisedByNone")}</option>
-                        {members.map((member) => (
-                          <option value={member.id} key={member.id}>{memberName(member)}</option>
-                        ))}
-                      </select>
-                      <button type="submit" className="secondary small">{t("btnSaveRaisedBy")}</button>
-                    </form>
-                  </details>
+                    <details>
+                      <summary className="secondary small nr-hide-marker" style={{ cursor: "pointer" }}>{t("btnEditRaisedBy")}</summary>
+                      <form action={updateTensionAction} className="actions-inline" style={{ marginTop: 8 }}>
+                        <input type="hidden" name="workspaceId" value={workspaceId} />
+                        <input type="hidden" name="tensionId" value={tension.id} />
+                        <select name="raisedByMemberId" defaultValue={tension.raisedByMemberId || ""} aria-label={t("formRaisedBy")}>
+                          <option value="">{t("formRaisedByNone")}</option>
+                          {members.map((member) => (
+                            <option value={member.id} key={member.id}>{memberName(member)}</option>
+                          ))}
+                        </select>
+                        <button type="submit" className="secondary small">{t("btnSaveRaisedBy")}</button>
+                      </form>
+                    </details>
                   )}
                   {!tension.isPrivate && (
                     <form action={upvoteTensionAction}>
@@ -235,15 +249,18 @@ export default async function TensionsPage({
                 ))}
               </select>
             </label>
-            <label>
-              {t("formLinkToProposal")}
-              <select name="proposalId" defaultValue="">
-                <option value="">{t("formNone")}</option>
-                {activeProposals.map((p) => (
-                  <option value={p.id} key={p.id}>{p.title}</option>
-                ))}
-              </select>
-            </label>
+            <details>
+              <summary className="secondary small nr-hide-marker" style={{ cursor: "pointer", display: "inline-block" }}>{t("formOptionalMetadata")}</summary>
+              <label style={{ marginTop: 12 }}>
+                {t("formLinkToProposal")}
+                <select name="proposalId" defaultValue="">
+                  <option value="">{t("formNone")}</option>
+                  {activeProposals.map((p) => (
+                    <option value={p.id} key={p.id}>{p.title}</option>
+                  ))}
+                </select>
+              </label>
+            </details>
             <label style={{ display: "flex", alignItems: "center", gap: "8px", fontWeight: "normal", cursor: "pointer" }}>
               <input type="checkbox" name="isPrivate" defaultChecked />
               <span>{t("formPrivateInbox")}</span>

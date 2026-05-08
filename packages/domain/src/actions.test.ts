@@ -5,8 +5,12 @@ const { prismaMock } = vi.hoisted(() => ({
   prismaMock: {
     $transaction: vi.fn(),
     action: {
+      create: vi.fn(),
       findUnique: vi.fn(),
       update: vi.fn(),
+    },
+    proposal: {
+      findFirst: vi.fn(),
     },
   },
 }));
@@ -177,5 +181,33 @@ describe("action domain lifecycle", () => {
     });
 
     expect(prismaMock.action.update).not.toHaveBeenCalled();
+  });
+
+  it("rejects hidden, missing, archived, or cross-workspace linked proposals before creating an action", async () => {
+    prismaMock.proposal.findFirst.mockResolvedValueOnce(null);
+
+    const { createAction } = await import("./actions");
+    await expect(createAction(actor, {
+      workspaceId: "workspace-1",
+      title: "Follow up",
+      proposalId: "proposal-missing",
+    })).rejects.toMatchObject({
+      status: 404,
+      code: "NOT_FOUND",
+    });
+
+    expect(prismaMock.proposal.findFirst).toHaveBeenCalledWith({
+      where: {
+        id: "proposal-missing",
+        workspaceId: "workspace-1",
+        archivedAt: null,
+        OR: [
+          { isPrivate: false },
+          { isPrivate: true, status: "DRAFT", authorUserId: "user-1" },
+        ],
+      },
+      select: { id: true },
+    });
+    expect(prismaMock.action.create).not.toHaveBeenCalled();
   });
 });

@@ -4,6 +4,8 @@ export type ModelUsageInput = {
   workspaceId: string;
   workflowJobId?: string;
   agentRunId?: string;
+  catalogItemId?: string;
+  agentCredentialId?: string;
   provider: string;
   model: string;
   taskType: ModelTaskType;
@@ -48,6 +50,8 @@ export type ChatCompletionRequest = {
   tool_choice?: "auto" | "none" | { type: "function", function: { name: string } };
   workflowJobId?: string;
   agentRunId?: string;
+  catalogItemId?: string;
+  agentCredentialId?: string;
 };
 
 export type ChatCompletionResponse = {
@@ -64,6 +68,8 @@ export type ExtractionRequest = {
   schemaHint: string;
   workflowJobId?: string;
   agentRunId?: string;
+  catalogItemId?: string;
+  agentCredentialId?: string;
 };
 
 export type ExtractionResponse = {
@@ -78,6 +84,8 @@ export type EmbeddingRequest = {
   input: string | string[];
   workflowJobId?: string;
   agentRunId?: string;
+  catalogItemId?: string;
+  agentCredentialId?: string;
 };
 
 export type EmbeddingResponse = {
@@ -93,6 +101,8 @@ export type RerankRequest = {
   topK?: number;
   workflowJobId?: string;
   agentRunId?: string;
+  catalogItemId?: string;
+  agentCredentialId?: string;
 };
 
 export type RerankResult = {

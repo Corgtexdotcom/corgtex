@@ -1,4 +1,4 @@
-import { listCircles, listWorkspaceToolLinks, requireWorkspaceMembership } from "@corgtex/domain";
+import { listCatalogItems, listCatalogRequests, listCircles, listWorkspaceToolLinks, requireWorkspaceMembership } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
 import { getTranslations } from "next-intl/server";
@@ -20,9 +20,11 @@ export default async function ToolsPage({
   await requireWorkspaceFeature(workspaceId, "TOOL_LINKS");
   const t = await getTranslations("tools");
 
-  const [toolLinks, circles] = await Promise.all([
+  const [toolLinks, circles, catalog, catalogRequests] = await Promise.all([
     listWorkspaceToolLinks(actor, { workspaceId }),
     listCircles(workspaceId),
+    listCatalogItems(actor, workspaceId),
+    listCatalogRequests(actor, { workspaceId, status: "PENDING" }),
   ]);
 
   return (
@@ -32,7 +34,7 @@ export default async function ToolsPage({
           <div>
             <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2.5rem" }}>{t("pageTitle")}</h1>
             <div className="nr-masthead-meta">
-              <span>{t("pageDescription")}</span>
+              <span>Find, favorite, request, publish, and govern the apps, agents, connectors, automations, data, and shared tools that power this workspace.</span>
             </div>
           </div>
           <div className="actions-inline">
@@ -57,6 +59,18 @@ export default async function ToolsPage({
       <ToolsDirectoryClient
         workspaceId={workspaceId}
         initialView={view === "grid" ? "grid" : "list"}
+        initialCatalogItems={catalog.items.map((item) => ({
+          ...item,
+          createdAt: item.createdAt.toISOString(),
+          updatedAt: item.updatedAt.toISOString(),
+        }))}
+        initialRequests={catalogRequests.map((request) => ({
+          ...request,
+          createdAt: request.createdAt.toISOString(),
+          decidedAt: request.decidedAt?.toISOString() ?? null,
+          updatedAt: request.updatedAt.toISOString(),
+        }))}
+        canManageCatalog={catalog.canManage}
         initialLinks={toolLinks.map((link) => ({
           ...link,
           createdAt: link.createdAt.toISOString(),

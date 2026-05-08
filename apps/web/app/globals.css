@@ -583,6 +583,87 @@ button:disabled {
   padding: 40px 32px 80px;
 }
 
+.workspace-add-menu {
+  position: fixed;
+  top: 20px;
+  right: 374px;
+  z-index: 950;
+}
+
+.workspace-add-button {
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--text-strong);
+  color: var(--bg);
+  box-shadow: var(--shadow-md);
+  font-size: 1.6rem;
+  line-height: 1;
+}
+
+.workspace-add-button:hover {
+  background: var(--accent);
+  color: var(--accent-fg);
+  box-shadow: var(--shadow-lg);
+}
+
+.workspace-add-dropdown {
+  position: absolute;
+  top: calc(100% + 10px);
+  right: 0;
+  width: min(320px, calc(100vw - 32px));
+  max-height: min(70vh, 520px);
+  overflow-y: auto;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-strong);
+  box-shadow: var(--shadow-lg);
+}
+
+.workspace-add-dropdown-title {
+  padding: 8px 10px 6px;
+  color: var(--muted);
+  font-size: 0.74rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.workspace-add-item {
+  width: 100%;
+  display: grid;
+  gap: 2px;
+  justify-items: start;
+  padding: 10px;
+  border-radius: 6px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  box-shadow: none;
+}
+
+.workspace-add-item:hover {
+  transform: none;
+  background: var(--accent-soft);
+  color: var(--text);
+  box-shadow: none;
+}
+
+.workspace-add-item-label {
+  font-size: 0.92rem;
+  font-weight: 700;
+}
+
+.workspace-add-item-description {
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.3;
+}
+
 .ws-agent-sidebar {
   border-left: 1px solid var(--line);
   background: var(--surface-strong);
@@ -1198,6 +1279,7 @@ button:disabled {
 }
 
 .markdown-body-compact {
+  font-family: var(--font-inter), system-ui, sans-serif;
   font-size: 0.9rem;
   line-height: 1.55;
   color: var(--text);
@@ -2148,6 +2230,10 @@ a.wiki-list-item:hover {
     padding-left: 24px;
     padding-right: 24px;
   }
+
+  .workspace-add-menu {
+    right: 24px;
+  }
 }
 
 @media (max-width: 720px) {
@@ -2383,6 +2469,11 @@ a.wiki-list-item:hover {
 
   .ws-main-content {
     padding: 24px 16px 48px;
+  }
+
+  .workspace-add-menu {
+    top: calc(var(--mobile-topbar-height) + 12px);
+    right: 16px;
   }
 }
 

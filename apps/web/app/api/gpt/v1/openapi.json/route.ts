@@ -98,11 +98,17 @@ export async function GET() {
           security: [{ oauth2: ["write"] }],
           requestBody: jsonBodySchema(
             {
-              title: { type: "string" },
-              bodyMd: { type: "string" },
+              title: { type: "string", description: "Required unless sourceTensionId is provided." },
+              bodyMd: { type: "string", description: "Required unless sourceTensionId is provided. If sourceTensionId is provided, this overrides the generated draft body." },
               summary: { type: "string" },
+              sourceTensionId: { type: "string", nullable: true, description: "Optional tension ID to draft this proposal from and link as its source." },
+              relatedActionIds: {
+                type: "array",
+                description: "Optional existing action IDs to link as implementation or follow-up work.",
+                items: { type: "string" },
+              },
             },
-            ["title", "bodyMd"],
+            [],
           ),
           responses: okResponse,
         },

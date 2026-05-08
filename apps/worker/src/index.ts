@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import { prisma, logger } from "@corgtex/shared";
-import { finalizeExpiredApprovalFlows, autoApproveProposals } from "@corgtex/domain";
+import { finalizeExpiredApprovalFlows } from "@corgtex/domain";
 import { dispatchPendingEvents, runPendingJobs, scheduleDailyJobs, schedulePeriodicJobs, scheduleDripCampaigns } from "@corgtex/workflows";
 import * as Sentry from "@sentry/node";
 
@@ -67,7 +67,6 @@ async function tick() {
   const tickStart = Date.now();
   try {
     const finalized = await finalizeExpiredApprovalFlows();
-    const autoApproved = await autoApproveProposals();
     const dispatched = await dispatchPendingEvents(workerId, EVENT_BATCH_SIZE);
     const processed = await runPendingJobs(workerId, JOB_BATCH_SIZE);
     const scheduled = await scheduleDailyJobs();
@@ -90,7 +89,6 @@ async function tick() {
       log("info", {
         event: "tick",
         finalized,
-        autoApproved,
         dispatched,
         processed,
         scheduled,

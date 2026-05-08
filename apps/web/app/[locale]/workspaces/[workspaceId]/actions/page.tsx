@@ -181,15 +181,18 @@ export default async function ActionsPage({
               {t("formNotes")}
               <MarkdownEditor name="bodyMd" rows={5} />
             </label>
-            <label>
-              {t("formLinkToProposal")}
-              <select name="proposalId" defaultValue="">
-                <option value="">{t("formNone")}</option>
-                {activeProposals.map((p) => (
-                  <option value={p.id} key={p.id}>{p.title}</option>
-                ))}
-              </select>
-            </label>
+            <details>
+              <summary className="secondary small nr-hide-marker" style={{ cursor: "pointer", display: "inline-block" }}>{t("formOptionalMetadata")}</summary>
+              <label style={{ marginTop: 12 }}>
+                {t("formLinkToProposal")}
+                <select name="proposalId" defaultValue="">
+                  <option value="">{t("formNone")}</option>
+                  {activeProposals.map((p) => (
+                    <option value={p.id} key={p.id}>{p.title}</option>
+                  ))}
+                </select>
+              </label>
+            </details>
             <button type="submit">{t("btnCreateAction")}</button>
           </form>
         </details>

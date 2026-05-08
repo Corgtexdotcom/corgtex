@@ -38,7 +38,7 @@ export function DesktopWorkspaceNav({
   showPlatformAdmin: boolean;
   controlPlaneHref: string;
 }) {
-  const pathname = usePathname();
+  const pathname = usePathname() ?? "";
   const tNav = useTranslations("nav");
 
   return (

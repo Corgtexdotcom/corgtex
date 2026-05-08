@@ -5,6 +5,7 @@ import { requirePageActor } from "@/lib/auth";
 import { asString, asOptional, refresh } from "../action-utils";
 import {
   createTension,
+  createProposalFromTension,
   deleteTension,
   updateTension,
   upvoteTension,
@@ -14,6 +15,9 @@ import {
   resolveDeliberationEntry
 } from "@corgtex/domain";
 
+function asStringArray(formData: FormData, key: string) {
+  return formData.getAll(key).map((value) => String(value).trim()).filter(Boolean);
+}
 
 export async function createTensionAction(formData: FormData) {
   const _demoGuardWsId = formData.get("workspaceId") as string;
@@ -28,6 +32,21 @@ export async function createTensionAction(formData: FormData) {
     proposalId: asOptional(formData, "proposalId"),
     raisedByMemberId: asOptional(formData, "raisedByMemberId"),
     isPrivate: formData.get("isPrivate") === "on",
+  });
+  refresh(workspaceId);
+}
+
+export async function createProposalFromTensionAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  await createProposalFromTension(actor, {
+    workspaceId,
+    sourceTensionId: asString(formData, "sourceTensionId"),
+    relatedActionIds: asStringArray(formData, "relatedActionIds"),
+    isPrivate: true,
   });
   refresh(workspaceId);
 }

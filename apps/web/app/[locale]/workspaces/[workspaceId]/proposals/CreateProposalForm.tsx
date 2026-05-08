@@ -4,8 +4,8 @@ import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useFormStatus } from "react-dom";
 import { useTranslations } from "next-intl";
-import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { createProposalAction } from "../actions";
+import { ProposalDraftFields } from "./ProposalDraftFields";
 
 function CreateProposalButton({ label }: { label: string }) {
   const { pending } = useFormStatus();
@@ -33,18 +33,7 @@ export function CreateProposalForm({ workspaceId }: { workspaceId: string }) {
   return (
     <form ref={formRef} action={handleCreateProposal} className="stack nr-form-section" style={{ marginTop: "16px" }}>
       <input type="hidden" name="workspaceId" value={workspaceId} />
-      <label>
-        {t("formTitle")}
-        <input name="title" required />
-      </label>
-      <label>
-        {t("formSummary")}
-        <input name="summary" />
-      </label>
-      <label>
-        {t("formBody")}
-        <MarkdownEditor key={editorKey} name="bodyMd" required placeholder={t("formBodyPlaceholder")} />
-      </label>
+      <ProposalDraftFields key={editorKey} />
       <label style={{ display: "flex", alignItems: "center", gap: "8px", fontWeight: "normal", cursor: "pointer" }}>
         <input type="checkbox" name="isPrivate" defaultChecked />
         <span>{t("formPrivateDraft")}</span>

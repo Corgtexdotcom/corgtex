@@ -22,7 +22,7 @@ export function Navbar() {
   const [mobileOpen, setMobileOpen] = useState(false);
   const [scrolled, setScrolled] = useState(false);
   const locale = useLocale();
-  const pathname = usePathname();
+  const pathname = usePathname() ?? "/";
   const t = useTranslations("nav");
   const { appUrl, bookDemoUrl } = getSiteConfig();
 

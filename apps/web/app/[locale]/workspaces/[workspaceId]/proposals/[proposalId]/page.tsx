@@ -7,7 +7,8 @@ import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
 import { DeliberationThread } from "@/lib/components/DeliberationThread";
 import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
 import { getDeliberationTargets } from "@/lib/deliberation-targets";
-import { postDeliberationEntryAction, resolveDeliberationEntryAction, returnProposalToDraftAction, submitProposalAction, updateProposalAction } from "../actions";
+import { postDeliberationEntryAction, resolveDeliberationEntryAction, resolveProposalAction, returnProposalToDraftAction, submitProposalAction, updateProposalAction } from "../actions";
+import { ProposalDraftFields } from "../ProposalDraftFields";
 import { getTranslations } from "next-intl/server";
 
 export const dynamic = "force-dynamic";
@@ -55,6 +56,7 @@ export default async function ProposalDetailPage({
 
   const isAuthor = proposal.authorUserId === (actor.kind === "user" ? actor.user.id : "");
   const canManage = actor.kind === "agent" || membership?.role === "ADMIN" || isAuthor;
+  const canResolve = actor.kind === "agent" || Boolean(membership);
 
   return (
     <>
@@ -79,6 +81,21 @@ export default async function ProposalDetailPage({
       <div style={{ display: "grid", gridTemplateColumns: "3fr 1fr", gap: "64px" }}>
         {/* Main Article Body */}
         <article style={{ fontSize: "1.1rem", lineHeight: 1.8, color: "var(--text)" }}>
+          {proposal.summary && (
+            <section
+              aria-label={t("summaryTitle")}
+              style={{
+                borderLeft: "3px solid var(--accent)",
+                marginBottom: "32px",
+                paddingLeft: "20px",
+              }}
+            >
+              <h2 style={{ fontSize: "0.85rem", textTransform: "uppercase", letterSpacing: "0.05em", margin: "0 0 8px", color: "var(--muted)" }}>
+                {t("summaryTitle")}
+              </h2>
+              <p style={{ margin: 0, fontSize: "1rem", lineHeight: 1.6, color: "var(--text)" }}>{proposal.summary}</p>
+            </section>
+          )}
           <MarkdownRenderer markdown={proposal.bodyMd} variant="document" className="nr-markdown" />
 
           <hr className="nr-divider" style={{ margin: "48px 0" }} />
@@ -145,30 +162,54 @@ export default async function ProposalDetailPage({
               <form action={updateProposalAction} className="stack nr-form-section" style={{ marginTop: 12 }}>
                 <input type="hidden" name="workspaceId" value={workspaceId} />
                 <input type="hidden" name="proposalId" value={proposal.id} />
-                <label>
-                  {t("formTitle")}
-                  <input name="title" defaultValue={proposal.title} required />
-                </label>
-                <label>
-                  {t("formSummary")}
-                  <input name="summary" defaultValue={proposal.summary ?? ""} />
-                </label>
-                <label>
-                  {t("formBody")}
-                  <MarkdownEditor name="bodyMd" defaultValue={proposal.bodyMd} required placeholder={t("formBodyPlaceholder")} />
-                </label>
+                <ProposalDraftFields defaultTitle={proposal.title} defaultBodyMd={proposal.bodyMd} />
                 <button type="submit" className="secondary small">{t("btnSaveDraft")}</button>
               </form>
             </details>
+          )}
+
+          {canResolve && proposal.status === "OPEN" && (
+            <div className="stack mb-8">
+              <h3 style={{ fontSize: "0.85rem", textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--text)", marginBottom: "16px" }}>{t("resolveProposalTitle")}</h3>
+              <form action={resolveProposalAction} className="stack nr-form-section">
+                <input type="hidden" name="workspaceId" value={workspaceId} />
+                <input type="hidden" name="proposalId" value={proposal.id} />
+                <label>
+                  {t("formResolutionOutcome")}
+                  <select name="outcome" defaultValue="ADOPTED" required>
+                    <option value="ADOPTED">{t("outcomeAdopted")}</option>
+                    <option value="NOT_ADOPTED">{t("outcomeNotAdopted")}</option>
+                    <option value="WITHDRAWN">{t("outcomeWithdrawn")}</option>
+                  </select>
+                </label>
+                <label>
+                  {t("formDecisionNote")}
+                  <MarkdownEditor name="decisionMd" placeholder={t("placeholderDecisionMd")} required rows={4} />
+                </label>
+                <button type="submit" className="secondary small">{t("btnResolve")}</button>
+              </form>
+            </div>
           )}
           
           <h3 style={{ fontSize: "0.85rem", textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--text)", marginBottom: "16px" }}>{t("aboutTitle")}</h3>
           <div className="nr-meta mb-4">
             <strong>{t("aboutCreated")}</strong> {new Date(proposal.createdAt).toLocaleDateString()}
           </div>
-          {proposal.summary && (
+          {(proposal.tensions.length > 0 || proposal.actions.length > 0) && (
             <div className="nr-meta mb-4">
-              <strong>{t("aboutSummary")}</strong> {proposal.summary}
+              <strong>{t("aboutRelated")}</strong>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
+                {proposal.tensions.map((tension) => (
+                  <Link key={tension.id} href={`/workspaces/${workspaceId}/tensions/${tension.id}`} className="tag info" style={{ textDecoration: "none" }}>
+                    {t("tensionTag", { title: tension.title })}
+                  </Link>
+                ))}
+                {proposal.actions.map((action) => (
+                  <span key={action.id} className="tag info">
+                    {t("actionTag", { title: action.title })}
+                  </span>
+                ))}
+              </div>
             </div>
           )}
         </aside>

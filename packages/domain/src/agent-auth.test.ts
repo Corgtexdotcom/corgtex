@@ -84,6 +84,7 @@ describe("credentialAgentAuthProvider", () => {
     vi.mocked(prisma.agentCredential.findUnique).mockResolvedValue({
       id: "cred-1",
       workspaceId: "ws-1",
+      catalogItemId: "catalog-1",
       label: "My Agent",
       scopes: ["read"],
       isActive: true,
@@ -99,6 +100,7 @@ describe("credentialAgentAuthProvider", () => {
       kind: "agent",
       authProvider: "credential",
       credentialId: "cred-1",
+      catalogItemId: "catalog-1",
       label: "My Agent",
       workspaceIds: ["ws-1"],
       scopes: ["read"],

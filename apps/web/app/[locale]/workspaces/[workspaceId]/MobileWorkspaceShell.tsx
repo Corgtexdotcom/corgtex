@@ -39,10 +39,11 @@ function navHref(workspaceId: string, href: string) {
   return `/workspaces/${workspaceId}${href}`;
 }
 
-function isActivePath(pathname: string, workspaceId: string, href: string) {
+function isActivePath(pathname: string | null, workspaceId: string, href: string) {
+  const currentPathname = pathname ?? "";
   const fullHref = navHref(workspaceId, href);
-  if (href === "") return pathname.endsWith(`/workspaces/${workspaceId}`);
-  return pathname.includes(fullHref);
+  if (href === "") return currentPathname.endsWith(`/workspaces/${workspaceId}`);
+  return currentPathname.includes(fullHref);
 }
 
 export function MobileWorkspaceShell({
@@ -56,7 +57,7 @@ export function MobileWorkspaceShell({
   showPlatformAdmin,
   controlPlaneHref,
 }: MobileWorkspaceShellProps) {
-  const pathname = usePathname();
+  const pathname = usePathname() ?? "";
   const tNav = useTranslations("nav");
   const tMobile = useTranslations("mobile");
   const tCommon = useTranslations("common");

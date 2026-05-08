@@ -5,7 +5,7 @@ import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
 import { DeliberationThread } from "@/lib/components/DeliberationThread";
 import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
 import { getDeliberationTargets } from "@/lib/deliberation-targets";
-import { postTensionDeliberationAction, publishTensionAction, returnTensionToDraftAction, resolveTensionDeliberationAction, updateTensionAction } from "../actions";
+import { createProposalFromTensionAction, postTensionDeliberationAction, publishTensionAction, returnTensionToDraftAction, resolveTensionDeliberationAction, updateTensionAction } from "../../actions";
 import { getTranslations } from "next-intl/server";
 
 export const dynamic = "force-dynamic";
@@ -51,6 +51,7 @@ export default async function TensionDetailPage({
   const priorityText = tension.priority > 0 ? t("priorityN", { priority: tension.priority }) : t("noPriority");
   const raisedByName = tension.raisedByMember?.user.displayName || tension.raisedByMember?.user.email || null;
   const canManage = actor.kind === "agent" || membership?.role === "ADMIN" || (actor.kind === "user" && tension.authorUserId === actor.user.id);
+  const canDraftProposal = !tension.proposal && (canManage || !tension.isPrivate);
 
   return (
     <>
@@ -72,28 +73,40 @@ export default async function TensionDetailPage({
           {raisedByName && <span>{t("detailRaisedByMeta", { name: raisedByName })}</span>}
           <span>{t("detailPriorityMeta", { priority: priorityText })}</span>
           <span>{t("detailCreatedMeta", { date: new Date(tension.createdAt).toLocaleDateString() })}</span>
+          {tension.proposal && (
+            <span>
+              <a href={`/workspaces/${workspaceId}/proposals/${tension.proposal.id}`}>{t("linkedProposalMeta", { title: tension.proposal.title })}</a>
+            </span>
+          )}
         </div>
       </header>
 
-      {canManage && (
+      {(canManage || canDraftProposal) && (
         <section className="ws-section" style={{ marginBottom: 24 }}>
           <div className="actions-inline">
-            {tension.status === "DRAFT" && (
+            {canManage && tension.status === "DRAFT" && (
               <form action={publishTensionAction}>
                 <input type="hidden" name="workspaceId" value={workspaceId} />
                 <input type="hidden" name="tensionId" value={tension.id} />
                 <button type="submit" className="primary small">{t("btnOpen")}</button>
               </form>
             )}
-            {tension.status === "OPEN" && (
+            {canManage && tension.status === "OPEN" && (
               <form action={returnTensionToDraftAction}>
                 <input type="hidden" name="workspaceId" value={workspaceId} />
                 <input type="hidden" name="tensionId" value={tension.id} />
                 <button type="submit" className="secondary small">{t("btnReturnToDraft")}</button>
               </form>
             )}
+            {canDraftProposal && (
+              <form action={createProposalFromTensionAction}>
+                <input type="hidden" name="workspaceId" value={workspaceId} />
+                <input type="hidden" name="sourceTensionId" value={tension.id} />
+                <button type="submit" className="secondary small">{t("btnDraftProposal")}</button>
+              </form>
+            )}
           </div>
-          {tension.status === "DRAFT" && (
+          {canManage && tension.status === "DRAFT" && (
             <details style={{ marginTop: 12 }}>
               <summary className="secondary small nr-hide-marker" style={{ cursor: "pointer", display: "inline-block" }}>{t("btnEdit")}</summary>
               <form action={updateTensionAction} className="stack nr-form-section" style={{ marginTop: 12 }}>
@@ -132,8 +145,8 @@ export default async function TensionDetailPage({
       {tension.status === "RESOLVED" && tension.resolvedVia && (
         <section className="ws-section" style={{ marginBottom: 48 }}>
           <h2 className="nr-section-header">{t("sectionResolution")}</h2>
-          <div className="nr-item" style={{ whiteSpace: "pre-wrap" }}>
-            {tension.resolvedVia}
+          <div className="nr-item">
+            <MarkdownRenderer markdown={tension.resolvedVia} variant="document" />
           </div>
         </section>
       )}

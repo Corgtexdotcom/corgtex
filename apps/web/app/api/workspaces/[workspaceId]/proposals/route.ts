@@ -1,14 +1,23 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
-import { createProposal, listProposals, requireWorkspaceMembership } from "@corgtex/domain";
+import { createProposal, createProposalFromTension, listProposals, requireWorkspaceMembership } from "@corgtex/domain";
 import type { ArchiveFilter } from "@corgtex/domain";
 import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError, validateBody } from "@/lib/http";
 
 const createProposalSchema = z.object({
-  title: z.string().trim().min(1),
+  title: z.string().trim().min(1).optional(),
   summary: z.string().optional().nullable(),
-  bodyMd: z.string(),
+  bodyMd: z.string().optional(),
+  sourceTensionId: z.string().trim().min(1).optional().nullable(),
+  relatedActionIds: z.array(z.string().trim().min(1)).optional().nullable(),
+}).superRefine((body, ctx) => {
+  if (!body.sourceTensionId && !body.title) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["title"], message: "Title is required." });
+  }
+  if (!body.sourceTensionId && !body.bodyMd) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["bodyMd"], message: "Proposal body is required." });
+  }
 });
 
 export async function GET(request: NextRequest, { params }: { params: Promise<{ workspaceId: string }> }) {
@@ -29,12 +38,22 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     const actor = await resolveRequestActor(request);
     const { workspaceId } = await params;
     const body = await validateBody(request, createProposalSchema);
-    const proposal = await createProposal(actor, {
-      workspaceId,
-      title: body.title,
-      summary: body.summary ?? null,
-      bodyMd: body.bodyMd,
-    });
+    const proposal = body.sourceTensionId
+      ? await createProposalFromTension(actor, {
+          workspaceId,
+          sourceTensionId: body.sourceTensionId,
+          title: body.title ?? null,
+          summary: body.summary ?? null,
+          bodyMd: body.bodyMd ?? null,
+          relatedActionIds: body.relatedActionIds ?? null,
+        })
+      : await createProposal(actor, {
+          workspaceId,
+          title: body.title!,
+          summary: body.summary ?? null,
+          bodyMd: body.bodyMd!,
+          relatedActionIds: body.relatedActionIds ?? null,
+        });
     return NextResponse.json({ proposal }, { status: 201 });
   } catch (error) {
     return handleRouteError(error);

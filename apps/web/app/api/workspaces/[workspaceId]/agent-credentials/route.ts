@@ -24,11 +24,22 @@ export async function POST(
   try {
     const actor = await resolveRequestActor(request);
     const { workspaceId } = await params;
-    const body = (await request.json()) as { label?: unknown; scopes?: unknown };
+    const body = (await request.json()) as {
+      label?: unknown;
+      scopes?: unknown;
+      catalogItemId?: unknown;
+      reasonMd?: unknown;
+      monthlyBudgetCents?: unknown;
+      dailyCallLimit?: unknown;
+    };
     const result = await issueAgentCredential(actor, {
       workspaceId,
       label: String(body.label ?? ""),
       scopes: Array.isArray(body.scopes) ? body.scopes.map((value) => String(value)) : [],
+      catalogItemId: typeof body.catalogItemId === "string" ? body.catalogItemId : null,
+      reasonMd: typeof body.reasonMd === "string" ? body.reasonMd : null,
+      monthlyBudgetCents: typeof body.monthlyBudgetCents === "number" ? body.monthlyBudgetCents : null,
+      dailyCallLimit: typeof body.dailyCallLimit === "number" ? body.dailyCallLimit : null,
     });
     return NextResponse.json(result, { status: 201 });
   } catch (error) {

@@ -14,6 +14,9 @@ const { prismaMock } = vi.hoisted(() => {
     member: {
       findFirst: vi.fn(),
     },
+    proposal: {
+      findFirst: vi.fn(),
+    },
     auditLog: {
       create: vi.fn(),
     },
@@ -118,6 +121,34 @@ describe("tensions domain", () => {
     expect(prismaMock.tension.create).not.toHaveBeenCalled();
   });
 
+  it("rejects hidden, missing, archived, or cross-workspace linked proposals before creating a tension", async () => {
+    prismaMock.proposal.findFirst.mockResolvedValueOnce(null);
+    const { createTension } = await import("./tensions");
+
+    await expect(createTension(actor, {
+      workspaceId: "ws-1",
+      title: "Test tension",
+      proposalId: "proposal-missing",
+    })).rejects.toMatchObject({
+      status: 404,
+      code: "NOT_FOUND",
+    });
+
+    expect(prismaMock.proposal.findFirst).toHaveBeenCalledWith({
+      where: {
+        id: "proposal-missing",
+        workspaceId: "ws-1",
+        archivedAt: null,
+        OR: [
+          { isPrivate: false },
+          { isPrivate: true, status: "DRAFT", authorUserId: "u-1" },
+        ],
+      },
+      select: { id: true },
+    });
+    expect(prismaMock.tension.create).not.toHaveBeenCalled();
+  });
+
   it("updates a tension raised-by member", async () => {
     const { updateTension } = await import("./tensions");
 
@@ -178,6 +209,11 @@ describe("tensions domain", () => {
           },
         },
       }),
+      orderBy: [
+        { upvotes: { _count: "desc" } },
+        { createdAt: "desc" },
+        { id: "desc" },
+      ],
     }));
   });
 

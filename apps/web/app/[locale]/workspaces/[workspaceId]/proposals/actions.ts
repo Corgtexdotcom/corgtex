@@ -7,8 +7,10 @@ import { revalidatePath } from "next/cache";
 import {
   archiveProposal,
   createProposal,
+  createProposalFromTension,
   postReaction,
   resolveReaction,
+  resolveProposal,
   returnProposalToDraft,
   submitProposal,
   updateProposal,
@@ -21,6 +23,9 @@ import {
   resolveDeliberationEntry
 } from "@corgtex/domain";
 
+function asStringArray(formData: FormData, key: string) {
+  return formData.getAll(key).map((value) => String(value).trim()).filter(Boolean);
+}
 
 export async function createProposalAction(formData: FormData) {
   const _demoGuardWsId = formData.get("workspaceId") as string;
@@ -31,9 +36,29 @@ export async function createProposalAction(formData: FormData) {
   await createProposal(actor, {
     workspaceId,
     title: asString(formData, "title"),
-    summary: asOptional(formData, "summary"),
     bodyMd: asString(formData, "bodyMd"),
+    includeAiSummary: formData.get("includeAiSummary") === "on",
     isPrivate: formData.get("isPrivate") === "on",
+    sourceTensionId: asOptional(formData, "sourceTensionId"),
+    relatedActionIds: asStringArray(formData, "relatedActionIds"),
+  });
+  refresh(workspaceId);
+}
+
+export async function createProposalFromTensionAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  await createProposalFromTension(actor, {
+    workspaceId,
+    sourceTensionId: asString(formData, "sourceTensionId"),
+    title: asOptional(formData, "title"),
+    summary: asOptional(formData, "summary"),
+    bodyMd: asOptional(formData, "bodyMd"),
+    relatedActionIds: asStringArray(formData, "relatedActionIds"),
+    isPrivate: formData.has("isPrivate") ? formData.get("isPrivate") === "on" : true,
   });
   refresh(workspaceId);
 }
@@ -49,7 +74,7 @@ export async function updateProposalAction(formData: FormData) {
     proposalId: asString(formData, "proposalId"),
     title: asOptional(formData, "title") ?? undefined,
     bodyMd: asOptional(formData, "bodyMd") ?? undefined,
-    summary: formData.has("summary") ? asOptional(formData, "summary") : undefined,
+    includeAiSummary: formData.get("includeAiSummary") === "on",
   });
   refresh(workspaceId);
 }
@@ -90,6 +115,21 @@ export async function archiveProposalAction(formData: FormData) {
   await archiveProposal(actor, {
     workspaceId,
     proposalId: asString(formData, "proposalId"),
+  });
+  refresh(workspaceId);
+}
+
+export async function resolveProposalAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  await resolveProposal(actor, {
+    workspaceId,
+    proposalId: asString(formData, "proposalId"),
+    outcome: asString(formData, "outcome") as "ADOPTED" | "NOT_ADOPTED" | "WITHDRAWN",
+    decisionMd: asString(formData, "decisionMd"),
   });
   refresh(workspaceId);
 }

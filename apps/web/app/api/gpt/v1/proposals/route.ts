@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireGptAuth } from "@/lib/gpt-auth";
-import { listProposals, createProposal } from "@corgtex/domain";
+import { listProposals, createProposal, createProposalFromTension } from "@corgtex/domain";
 import { env } from "@corgtex/shared";
 import { handleRouteError } from "@/lib/http";
 
@@ -35,16 +35,26 @@ export async function POST(request: NextRequest) {
     const { workspaceId, actor } = sessionCtx;
     const body = await request.json();
 
-    if (!body.title || !body.bodyMd) {
-      return NextResponse.json({ error: "Missing required fields (title, bodyMd)" }, { status: 400 });
+    if (!body.sourceTensionId && (!body.title || !body.bodyMd)) {
+      return NextResponse.json({ error: "Missing required fields (title, bodyMd) unless sourceTensionId is provided" }, { status: 400 });
     }
 
-    const proposal = await createProposal(actor, {
-      workspaceId,
-      title: body.title,
-      bodyMd: body.bodyMd,
-      summary: body.summary,
-    });
+    const proposal = body.sourceTensionId
+      ? await createProposalFromTension(actor, {
+          workspaceId,
+          sourceTensionId: String(body.sourceTensionId),
+          title: typeof body.title === "string" ? body.title : null,
+          bodyMd: typeof body.bodyMd === "string" ? body.bodyMd : null,
+          summary: typeof body.summary === "string" ? body.summary : null,
+          relatedActionIds: Array.isArray(body.relatedActionIds) ? body.relatedActionIds.map(String) : null,
+        })
+      : await createProposal(actor, {
+          workspaceId,
+          title: body.title,
+          bodyMd: body.bodyMd,
+          summary: body.summary,
+          relatedActionIds: Array.isArray(body.relatedActionIds) ? body.relatedActionIds.map(String) : null,
+        });
 
     const origin = env.APP_URL.replace(/\/$/, "");
 

@@ -1,4 +1,4 @@
-import { isGlobalOperator, listActorWorkspaces, countUnreadNotifications, listConversations, requireWorkspaceMembership } from "@corgtex/domain";
+import { isGlobalOperator, listActorWorkspaces, countUnreadNotifications, listConversations, requireWorkspaceMembership, getMemberInvitePolicy } from "@corgtex/domain";
 import { workspaceBranding, prisma } from "@corgtex/shared";
 import type { Metadata } from "next";
 import { logoutAction, requirePageActor } from "@/lib/auth";
@@ -15,6 +15,7 @@ import { buildWorkspaceCapabilities } from "@/lib/workspace-capabilities";
 import { filterNavGroupsByWorkspaceAccess, getWorkspaceFeatureFlags } from "@/lib/workspace-feature-flags";
 import { MobileWorkspaceShell } from "./MobileWorkspaceShell";
 import { getControlPlaneHref } from "@/lib/control-plane-url";
+import { WorkspaceAddMenu } from "./WorkspaceAddMenu";
 
 export const dynamic = "force-dynamic";
 
@@ -40,12 +41,13 @@ export default async function WorkspaceLayout({
   const { locale, workspaceId } = await params;
   const actor = await requirePageActor();
   const userId = actor.kind === "user" ? actor.user.id : null;
-  const [workspaces, unreadCount, conversationsResult, featureFlags, membership] = await Promise.all([
+  const [workspaces, unreadCount, conversationsResult, featureFlags, membership, invitePolicy] = await Promise.all([
     listActorWorkspaces(actor),
     userId ? countUnreadNotifications(userId, workspaceId) : Promise.resolve(0),
     listConversations(actor, workspaceId, { take: 30 }).catch(() => ({ items: [], total: 0, take: 30, skip: 0 })),
     getWorkspaceFeatureFlags(workspaceId),
     requireWorkspaceMembership({ actor, workspaceId }),
+    getMemberInvitePolicy(workspaceId).catch(() => null),
   ]);
   const current = workspaces.find((w: Workspace) => w.id === workspaceId);
   const conversations = conversationsResult.items;
@@ -112,6 +114,13 @@ export default async function WorkspaceLayout({
       </aside>
 
       <main className="ws-main">
+        <WorkspaceAddMenu
+          workspaceId={workspaceId}
+          featureFlags={featureFlags}
+          role={membership?.role ?? null}
+          invitePolicy={invitePolicy}
+          isDemo={current?.slug === "jnj-demo"}
+        />
         <div className="ws-main-content">
           {current?.slug === "jnj-demo" && <DemoBanner />}
           {children}
