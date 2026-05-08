@@ -6,6 +6,7 @@ import { requirePageActor } from "@/lib/auth";
 import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
 import { DeliberationThread } from "@/lib/components/DeliberationThread";
 import { getDeliberationTargets } from "@/lib/deliberation-targets";
+import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
 import { getTranslations } from "next-intl/server";
 import {
   archiveLedgerAccountAction,
@@ -54,6 +55,7 @@ export default async function FinancePage({
 }) {
   const { workspaceId } = await params;
   const actor = await requirePageActor();
+  await requireWorkspaceFeature(workspaceId, "FINANCE");
   const t = await getTranslations("finance");
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
   const resolvedSearch = searchParams ? await searchParams : {};
