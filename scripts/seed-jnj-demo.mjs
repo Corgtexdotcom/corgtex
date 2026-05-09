@@ -1084,12 +1084,16 @@ async function main() {
   }
   
   // 11. Governance Scores
-  for (const s of SCORES) {
-    const scoreId = `${wsId}-governance-score-${s.periodEnd.toISOString().slice(0, 10)}`;
-    const exists = await prisma.governanceScore.findFirst({
-      where: { workspaceId: wsId, periodEnd: s.periodEnd },
-      orderBy: { createdAt: "asc" },
-    });
+  const governanceScoreIds = SCORES.map((_, index) => `${wsId}-governance-score-${index + 1}`);
+  await prisma.governanceScore.deleteMany({
+    where: {
+      workspaceId: wsId,
+      overallScore: { in: SCORES.map((score) => score.score) },
+      id: { notIn: governanceScoreIds },
+    },
+  });
+  for (const [index, s] of SCORES.entries()) {
+    const scoreId = governanceScoreIds[index];
     const data = {
       workspaceId: wsId,
       periodStart: new Date(s.periodEnd.getTime() - 90 * 24 * 60 * 60 * 1000),
@@ -1097,15 +1101,11 @@ async function main() {
       overallScore: s.score,
       ...s.parts
     };
-    if (exists) {
-      await prisma.governanceScore.update({ where: { id: exists.id }, data });
-    } else {
-      await prisma.governanceScore.upsert({
-        where: { id: scoreId },
-        update: data,
-        create: { id: scoreId, ...data },
-      });
-    }
+    await prisma.governanceScore.upsert({
+      where: { id: scoreId },
+      update: data,
+      create: { id: scoreId, ...data },
+    });
   }
   
   // 12. Ledger Accounts & Spends

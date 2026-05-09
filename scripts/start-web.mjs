@@ -30,7 +30,15 @@ function configuredSeedScripts() {
     seedScripts.push("scripts/seed-jnj-demo.mjs");
   }
 
-  return [...new Set(seedScripts)];
+  const uniqueScripts = new Map();
+  for (const script of seedScripts) {
+    const resolved = path.resolve(rootDir, script);
+    if (!uniqueScripts.has(resolved)) {
+      uniqueScripts.set(resolved, script);
+    }
+  }
+
+  return [...uniqueScripts.values()];
 }
 
 console.log("[start-web] === Production Startup Sequence ===");
