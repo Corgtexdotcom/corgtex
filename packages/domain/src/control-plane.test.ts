@@ -616,6 +616,27 @@ describe("control plane domain", () => {
     }));
   });
 
+  it("rejects member creation for deployment viewers without write access", async () => {
+    const { createControlPlaneCustomerMember } = await import("./control-plane");
+    prismaMock.customerDeploymentAccess.findUnique.mockResolvedValueOnce({
+      role: "SUPPORT_VIEWER",
+      isActive: true,
+    });
+
+    await expect(createControlPlaneCustomerMember(userActor, {
+      deploymentId: "inst-1",
+      email: "new@acme.test",
+      displayName: "New Member",
+      role: "CONTRIBUTOR",
+      reason: "Customer approved onboarding.",
+    })).rejects.toMatchObject({
+      status: 403,
+      code: "CONTROL_PLANE_WRITE_ACCESS_REQUIRED",
+    });
+
+    expect(memberMocks.createMember).not.toHaveBeenCalled();
+  });
+
   it("lists and toggles managed workspace feature flags with audit evidence", async () => {
     const { listControlPlaneFeatureFlags, setControlPlaneFeatureFlag } = await import("./control-plane");
     const deployment = {
@@ -1281,6 +1302,24 @@ describe("control plane domain", () => {
     })).rejects.toMatchObject({
       status: 400,
       code: "INVALID_INPUT",
+    });
+
+    expect(prismaMock.customerDeployment.findMany).not.toHaveBeenCalled();
+    expect(prismaMock.workflowJob.upsert).not.toHaveBeenCalled();
+  });
+
+  it("rejects fleet-wide bulk deploys for deployment-scoped user access", async () => {
+    vi.stubEnv("CONTROL_PLANE_LATEST_WEB_IMAGE", "ghcr.io/corgtex/web:new");
+    vi.stubEnv("CONTROL_PLANE_LATEST_WORKER_IMAGE", "ghcr.io/corgtex/worker:new");
+    vi.stubEnv("CONTROL_PLANE_LATEST_RELEASE_IMAGE_TAG", "release-new");
+    const { enqueueControlPlaneDeployLatestRollout } = await import("./control-plane");
+
+    await expect(enqueueControlPlaneDeployLatestRollout(userActor, {
+      allEligible: true,
+      reason: "Deploy latest to every eligible customer.",
+    })).rejects.toMatchObject({
+      status: 403,
+      code: "CONTROL_PLANE_WRITE_ACCESS_REQUIRED",
     });
 
     expect(prismaMock.customerDeployment.findMany).not.toHaveBeenCalled();

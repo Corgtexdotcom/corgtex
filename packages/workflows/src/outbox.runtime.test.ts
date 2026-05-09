@@ -240,6 +240,12 @@ describe("runPendingJobs", () => {
           deploymentId: "inst-1",
           reason: "Queued rollout.",
           force: true,
+          target: {
+            releaseImageTag: "release-new",
+            releaseVersion: "0.2.0",
+            webImage: "ghcr.io/corgtex/web:new",
+            workerImage: "ghcr.io/corgtex/worker:new",
+          },
         },
         attempts: 1,
       },
@@ -251,6 +257,12 @@ describe("runPendingJobs", () => {
       deploymentId: "inst-1",
       reason: "Queued rollout.",
       force: true,
+      target: {
+        releaseImageTag: "release-new",
+        releaseVersion: "0.2.0",
+        webImage: "ghcr.io/corgtex/web:new",
+        workerImage: "ghcr.io/corgtex/worker:new",
+      },
     });
     expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({
       where: { id: "job-1" },

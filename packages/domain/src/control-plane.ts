@@ -1,4 +1,4 @@
-import type { FleetSnapshotKind, MeetingRecorderProvider, MemberRole, Prisma } from "@prisma/client";
+import type { CustomerDeploymentAccessRole, FleetSnapshotKind, MeetingRecorderProvider, MemberRole, Prisma } from "@prisma/client";
 import { decryptSecret, encryptSecret, env, prisma } from "@corgtex/shared";
 import type { AgentActor, AppActor } from "@corgtex/shared";
 import { AppError, invariant } from "./errors";
@@ -16,6 +16,7 @@ const MEETING_RECORDER_PROVIDERS = new Set(["RECALL_AI", "MEETING_BAAS"]);
 const CONTROL_PLANE_CONTEXT_OPERATIONS = new Set(["sync_all", "sync_source", "disable_source"]);
 const CONTROL_PLANE_RELEASE_OPERATIONS = new Set(["prepare_upgrade"]);
 const CONTROL_PLANE_READ_SCOPE = "control-plane:read";
+const CONTROL_PLANE_DEPLOYMENT_WRITE_ROLES = new Set<CustomerDeploymentAccessRole>(["SUPPORT_ADMIN", "CUSTOMER_IT_ADMIN"]);
 export const CONTROL_PLANE_FLEET_SNAPSHOT_JOB_TYPE = "control-plane.fleet-snapshot";
 export const CONTROL_PLANE_RELEASE_DEPLOY_JOB_TYPE = "control-plane.release.deploy-latest";
 const CONTROL_PLANE_SNAPSHOT_KINDS = new Set<FleetSnapshotKind>([
@@ -496,6 +497,43 @@ export async function requireControlPlaneAccess(actor: AppActor, params: { deplo
   throw new AppError(403, "FORBIDDEN", "Control plane access is required.");
 }
 
+async function requireControlPlaneDeploymentWriteAccess(actor: AppActor, deploymentId: string) {
+  if (isGlobalOperator(actor)) {
+    return { role: "OPERATOR" as const };
+  }
+
+  if (isControlPlaneAgent(actor)) {
+    requireControlPlaneScope(actor, CONTROL_PLANE_READ_SCOPE);
+    return { role: "OPERATOR" as const };
+  }
+
+  if (actor.kind === "user") {
+    const access = await prisma.customerDeploymentAccess.findUnique({
+      where: {
+        deploymentId_userId: {
+          deploymentId,
+          userId: actor.user.id,
+        },
+      },
+      select: { role: true, isActive: true },
+    });
+    if (access?.isActive && CONTROL_PLANE_DEPLOYMENT_WRITE_ROLES.has(access.role)) {
+      return { role: access.role };
+    }
+  }
+
+  throw new AppError(403, "CONTROL_PLANE_WRITE_ACCESS_REQUIRED", "Control plane write access is required for this deployment.");
+}
+
+function requireControlPlaneFleetReleaseWriteAccess(actor: AppActor) {
+  if (isGlobalOperator(actor)) return;
+  if (isControlPlaneAgent(actor)) {
+    requireControlPlaneScope(actor, "control-plane:releases:write");
+    return;
+  }
+  throw new AppError(403, "CONTROL_PLANE_WRITE_ACCESS_REQUIRED", "Global control plane release access is required for fleet-wide rollouts.");
+}
+
 export async function listControlPlaneDeployments(actor: AppActor) {
   await requireControlPlaneAccess(actor);
 
@@ -864,6 +902,7 @@ export async function createControlPlaneCustomerMember(actor: AppActor, params: 
   requireControlPlaneScope(actor, "control-plane:access:write");
   const reason = requireMutationReason(params.reason);
   const role = requireKnownMemberRole(params.role);
+  await requireControlPlaneDeploymentWriteAccess(actor, params.deploymentId);
   const deployment = await getControlPlaneDeploymentWithWorkspace(actor, params.deploymentId);
   const adapter = createControlPlaneAdapter(deployment);
 
@@ -933,6 +972,7 @@ export async function resendControlPlaneCustomerMemberAccessLink(actor: AppActor
 }) {
   requireControlPlaneScope(actor, "control-plane:access:write");
   const reason = requireMutationReason(params.reason);
+  await requireControlPlaneDeploymentWriteAccess(actor, params.deploymentId);
   const deployment = await getControlPlaneDeploymentWithWorkspace(actor, params.deploymentId);
   const adapter = createControlPlaneAdapter(deployment);
 
@@ -993,6 +1033,7 @@ export async function updateControlPlaneCustomerMemberStatus(actor: AppActor, pa
 }) {
   requireControlPlaneScope(actor, "control-plane:access:write");
   const reason = requireMutationReason(params.reason);
+  await requireControlPlaneDeploymentWriteAccess(actor, params.deploymentId);
   const deployment = await getControlPlaneDeploymentWithWorkspace(actor, params.deploymentId);
   const adapter = createControlPlaneAdapter(deployment);
 
@@ -1157,6 +1198,7 @@ export async function setControlPlaneFeatureFlag(actor: AppActor, params: {
   requireControlPlaneScope(actor, "control-plane:features:write");
   const reason = requireMutationReason(params.reason);
   const flag = requireKnownWorkspaceFeatureFlag(params.flag);
+  await requireControlPlaneDeploymentWriteAccess(actor, params.deploymentId);
   const deployment = await getControlPlaneDeploymentWithWorkspace(actor, params.deploymentId);
   const adapter = createControlPlaneAdapter(deployment);
 
@@ -2142,11 +2184,13 @@ export async function deployLatestControlPlaneRelease(actor: AppActor, params: {
   deploymentId: string;
   reason?: string | null;
   force?: boolean | null;
+  target?: ControlPlaneReleaseTarget | null;
 }, railwayClient: RailwayClient = createRailwayClientFromEnv()) {
   requireControlPlaneScope(actor, "control-plane:releases:write");
   const reason = requireMutationReason(params.reason);
+  await requireControlPlaneDeploymentWriteAccess(actor, params.deploymentId);
   const deployment = await getControlPlaneDeploymentWithWorkspace(actor, params.deploymentId);
-  const target = getControlPlaneLatestReleaseTarget();
+  const target = params.target ?? getControlPlaneLatestReleaseTarget();
   const preflight = releasePreflightForDeployment(deployment, target);
   if (!preflight.eligible && !params.force) {
     throw new AppError(400, "RELEASE_PREFLIGHT_FAILED", preflight.blockers.join(" "));
@@ -2329,6 +2373,9 @@ export async function enqueueControlPlaneDeployLatestRollout(actor: AppActor, pa
   const requestedIds = Array.from(new Set((params.deploymentIds ?? []).map((id) => id.trim()).filter(Boolean)));
   const allEligible = params.allEligible === true;
   invariant(requestedIds.length > 0 || allEligible, 400, "INVALID_INPUT", "Select at least one customer deployment or set allEligible=true.");
+  if (allEligible) {
+    requireControlPlaneFleetReleaseWriteAccess(actor);
+  }
   const limit = Math.min(Math.max(Math.floor(params.limit ?? 100), 1), 100);
   const deployments = requestedIds.length
     ? await prisma.customerDeployment.findMany({
@@ -2353,7 +2400,7 @@ export async function enqueueControlPlaneDeployLatestRollout(actor: AppActor, pa
   await prisma.$transaction(async (tx) => {
     for (const deployment of deployments) {
       if (requestedIds.length) {
-        await requireControlPlaneAccess(actor, { deploymentId: deployment.id });
+        await requireControlPlaneDeploymentWriteAccess(actor, deployment.id);
       }
       const preflight = releasePreflightForDeployment(deployment, target);
       const bypassPreflight = Boolean(requestedIds.length && params.includeUnhealthy && canBypassDeployLatestPreflight(preflight));
@@ -2455,11 +2502,13 @@ export async function runControlPlaneReleaseDeployJob(params: {
   deploymentId: string;
   reason?: string | null;
   force?: boolean | null;
+  target?: ControlPlaneReleaseTarget | null;
 }) {
   return deployLatestControlPlaneRelease(controlPlaneWorkerActor, {
     deploymentId: params.deploymentId,
     reason: params.reason || "Queued Ops Control Plane deploy latest job.",
     force: params.force,
+    target: params.target,
   });
 }
 

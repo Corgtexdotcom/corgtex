@@ -33,6 +33,14 @@ function asBoolean(formData: FormData, key: string) {
   return asString(formData, key) === "true";
 }
 
+function asRequiredBoolean(formData: FormData, key: string) {
+  const value = asString(formData, key);
+  if (value !== "true" && value !== "false") {
+    throw new Error(`${key} must be true or false.`);
+  }
+  return value === "true";
+}
+
 function asOptionalNumber(formData: FormData, key: string) {
   const value = asString(formData, key);
   if (!value) return undefined;
@@ -182,7 +190,7 @@ export async function updateControlPlaneMemberStatusAction(formData: FormData) {
   await updateControlPlaneCustomerMemberStatus(actor, {
     deploymentId,
     memberId: asString(formData, "memberId"),
-    isActive: asString(formData, "isActive") === "true",
+    isActive: asRequiredBoolean(formData, "isActive"),
     reason: asString(formData, "reason"),
   });
   revalidateControlPlaneDeployment(deploymentId);
@@ -194,7 +202,7 @@ export async function setControlPlaneFeatureFlagAction(formData: FormData) {
   await setControlPlaneFeatureFlag(actor, {
     deploymentId,
     flag: asString(formData, "flag"),
-    enabled: asString(formData, "enabled") === "true",
+    enabled: asRequiredBoolean(formData, "enabled"),
     reason: asString(formData, "reason"),
   });
   revalidateControlPlaneDeployment(deploymentId);
@@ -206,7 +214,7 @@ export async function deployLatestControlPlaneReleaseAction(formData: FormData) 
   await deployLatestControlPlaneRelease(actor, {
     deploymentId,
     reason: asString(formData, "reason"),
-    force: asBooleanFromCheckbox(formData, "force"),
+    force: false,
   });
   revalidateControlPlaneDeployment(deploymentId);
 }
