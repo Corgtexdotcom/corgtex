@@ -2163,8 +2163,6 @@ export async function deployLatestControlPlaneRelease(actor: AppActor, params: {
       where: { id: params.deploymentId },
       data: {
         provisioningStatus: "provisioning",
-        releaseVersion: target.releaseVersion,
-        releaseImageTag: target.releaseImageTag,
         lastProvisioningError: null,
       },
     });
@@ -2329,6 +2327,8 @@ export async function enqueueControlPlaneDeployLatestRollout(actor: AppActor, pa
   invariant(target, 400, "LATEST_RELEASE_NOT_CONFIGURED", "Latest release target is not configured.");
 
   const requestedIds = Array.from(new Set((params.deploymentIds ?? []).map((id) => id.trim()).filter(Boolean)));
+  const allEligible = params.allEligible === true;
+  invariant(requestedIds.length > 0 || allEligible, 400, "INVALID_INPUT", "Select at least one customer deployment or set allEligible=true.");
   const limit = Math.min(Math.max(Math.floor(params.limit ?? 100), 1), 100);
   const deployments = requestedIds.length
     ? await prisma.customerDeployment.findMany({
@@ -2362,7 +2362,7 @@ export async function enqueueControlPlaneDeployLatestRollout(actor: AppActor, pa
         results.push({
           deploymentId: deployment.id,
           label: deployment.label,
-          status: params.allEligible ? "skipped" : "preflight_failed",
+          status: allEligible ? "skipped" : "preflight_failed",
           blockers: preflight.blockers,
         });
         await tx.customerDeploymentEvent.create({
@@ -2948,7 +2948,7 @@ export async function runCustomerSupportOperation(actor: AppActor, params: {
   remoteWorkspaceId?: string | null;
   idempotencyKey?: string | null;
 }) {
-  requireControlPlaneScope(actor, "control-plane:support:write");
+  requireControlPlaneScope(actor, MUTATING_SUPPORT_ACTIONS.has(params.action) ? "control-plane:support:write" : CONTROL_PLANE_READ_SCOPE);
   await requireControlPlaneAccess(actor, { deploymentId: params.deploymentId });
   const toolName = SUPPORT_ACTION_TO_MCP_TOOL[params.action];
   invariant(toolName, 400, "INVALID_INPUT", "Unsupported support action.");

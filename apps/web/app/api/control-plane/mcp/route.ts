@@ -438,10 +438,13 @@ export async function POST(request: NextRequest) {
       })));
     }
     if (name === "update_customer_member_status") {
+      if (typeof args.isActive !== "boolean") {
+        return rpcError(id, -32602, "isActive must be a boolean.");
+      }
       return rpcResult(id, textContent(await updateControlPlaneCustomerMemberStatus(actor, {
         deploymentId: argString(args, "deploymentId"),
         memberId: argString(args, "memberId"),
-        isActive: argBoolean(args, "isActive", false),
+        isActive: args.isActive,
         reason: argString(args, "reason"),
       })));
     }
@@ -449,10 +452,13 @@ export async function POST(request: NextRequest) {
       return rpcResult(id, textContent(await listControlPlaneFeatureFlags(actor, argString(args, "deploymentId"))));
     }
     if (name === "set_customer_feature_flag") {
+      if (typeof args.enabled !== "boolean") {
+        return rpcError(id, -32602, "enabled must be a boolean.");
+      }
       return rpcResult(id, textContent(await setControlPlaneFeatureFlag(actor, {
         deploymentId: argString(args, "deploymentId"),
         flag: argString(args, "flag"),
-        enabled: argBoolean(args, "enabled", false),
+        enabled: args.enabled,
         reason: argString(args, "reason"),
       })));
     }
@@ -522,7 +528,7 @@ export async function POST(request: NextRequest) {
     if (name === "deploy_latest_release_bulk") {
       return rpcResult(id, textContent(await enqueueControlPlaneDeployLatestRollout(actor, {
         deploymentIds: argStringArray(args, "deploymentIds"),
-        allEligible: argBoolean(args, "allEligible", true),
+        allEligible: argBoolean(args, "allEligible", false),
         includeUnhealthy: argBoolean(args, "includeUnhealthy", false),
         limit: argNumber(args, "limit", 100),
         reason: argString(args, "reason"),

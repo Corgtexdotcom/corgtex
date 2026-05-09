@@ -485,6 +485,62 @@ describe("control plane domain", () => {
     });
   });
 
+  it("lists remote customer members with a read-scoped control-plane agent", async () => {
+    const { listControlPlaneCustomerMembers } = await import("./control-plane");
+    const readAgent: AppActor = {
+      kind: "agent",
+      authProvider: "control-plane",
+      label: "control-plane-agent",
+      scopes: ["control-plane:read"],
+    };
+    const deployment = {
+      id: "inst-1",
+      label: "Acme",
+      deploymentKind: "REMOTE_MANAGED",
+      managedWorkspaceId: null,
+      managedWorkspace: null,
+      remoteWorkspaceId: "remote-ws-1",
+      supportMcpUrl: "https://customer.test/api/mcp",
+      supportCredentialEnc: "encrypted-token",
+    };
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce(deployment);
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce(deployment);
+    prismaMock.supportOperation.create.mockResolvedValueOnce({ id: "op-members", action: "members.list" });
+    prismaMock.supportOperation.update.mockResolvedValueOnce({
+      id: "op-members",
+      status: "COMPLETED",
+      resultSummary: {
+        members: [
+          {
+            id: "member-r",
+            role: "ADMIN",
+            isActive: true,
+            user: { id: "user-r", email: "admin@remote.test", displayName: "Remote Admin" },
+          },
+        ],
+      },
+    });
+
+    const result = await listControlPlaneCustomerMembers(readAgent, "inst-1");
+
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(prismaMock.supportOperation.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ action: "members.list" }),
+    }));
+    expect(result).toMatchObject({
+      source: "support_connector",
+      operationId: "op-members",
+      members: [
+        {
+          id: "member-r",
+          email: "admin@remote.test",
+          role: "ADMIN",
+          isActive: true,
+        },
+      ],
+    });
+  });
+
   it("creates and resends managed member setup links without returning raw tokens", async () => {
     const { createControlPlaneCustomerMember, resendControlPlaneCustomerMemberAccessLink } = await import("./control-plane");
     const deployment = {
@@ -628,6 +684,60 @@ describe("control plane domain", () => {
       source: "managed_workspace",
       flag: "FINANCE",
       enabled: true,
+    });
+  });
+
+  it("lists remote feature flags with a read-scoped control-plane agent", async () => {
+    const { listControlPlaneFeatureFlags } = await import("./control-plane");
+    const readAgent: AppActor = {
+      kind: "agent",
+      authProvider: "control-plane",
+      label: "control-plane-agent",
+      scopes: ["control-plane:read"],
+    };
+    const deployment = {
+      id: "inst-1",
+      label: "Acme",
+      deploymentKind: "REMOTE_MANAGED",
+      managedWorkspaceId: null,
+      managedWorkspace: null,
+      remoteWorkspaceId: "remote-ws-1",
+      supportMcpUrl: "https://customer.test/api/mcp",
+      supportCredentialEnc: "encrypted-token",
+    };
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce(deployment);
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce(deployment);
+    prismaMock.supportOperation.create.mockResolvedValueOnce({ id: "op-flags", action: "feature_flags.list" });
+    prismaMock.supportOperation.update.mockResolvedValueOnce({
+      id: "op-flags",
+      status: "COMPLETED",
+      resultSummary: {
+        flags: [
+          {
+            flag: "FINANCE",
+            enabled: true,
+            source: "remote_override",
+          },
+        ],
+      },
+    });
+
+    const result = await listControlPlaneFeatureFlags(readAgent, "inst-1");
+
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(prismaMock.supportOperation.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ action: "feature_flags.list" }),
+    }));
+    expect(result).toMatchObject({
+      source: "support_connector",
+      operationId: "op-flags",
+      flags: [
+        {
+          flag: "FINANCE",
+          enabled: true,
+          source: "remote_override",
+        },
+      ],
     });
   });
 
@@ -1005,21 +1115,23 @@ describe("control plane domain", () => {
     }, railwayClient);
 
     expect(railwayClient.graphql).toHaveBeenCalledTimes(3);
-    expect(prismaMock.customerDeployment.update).toHaveBeenCalledWith(expect.objectContaining({
+    const deploymentUpdates = prismaMock.customerDeployment.update.mock.calls.map(([call]) => call as { where: unknown; data: Record<string, unknown> });
+    expect(deploymentUpdates[0]).toMatchObject({
       where: { id: "inst-1" },
-      data: expect.objectContaining({
+      data: {
         provisioningStatus: "provisioning",
-        releaseImageTag: "release-new",
-        releaseVersion: "0.2.0",
-      }),
-    }));
-    expect(prismaMock.customerDeployment.update).toHaveBeenCalledWith(expect.objectContaining({
+        lastProvisioningError: null,
+      },
+    });
+    expect(deploymentUpdates[0].data).not.toHaveProperty("releaseImageTag");
+    expect(deploymentUpdates[0].data).not.toHaveProperty("releaseVersion");
+    expect(deploymentUpdates[1]).toMatchObject({
       where: { id: "inst-1" },
-      data: expect.objectContaining({
+      data: {
         provisioningStatus: "active",
         releaseImageTag: "release-new",
-      }),
-    }));
+      },
+    });
     expect(prismaMock.customerReleaseTarget.upsert).toHaveBeenCalledWith(expect.objectContaining({
       update: expect.objectContaining({ status: "APPLYING" }),
     }));
@@ -1037,6 +1149,56 @@ describe("control plane domain", () => {
       status: "deployed",
       target: { releaseImageTag: "release-new" },
     });
+  });
+
+  it("does not mark a release current when deploy latest fails", async () => {
+    vi.stubEnv("CONTROL_PLANE_LATEST_WEB_IMAGE", "ghcr.io/corgtex/web:new");
+    vi.stubEnv("CONTROL_PLANE_LATEST_WORKER_IMAGE", "ghcr.io/corgtex/worker:new");
+    vi.stubEnv("CONTROL_PLANE_LATEST_RELEASE_IMAGE_TAG", "release-new");
+    vi.stubEnv("CONTROL_PLANE_LATEST_RELEASE_VERSION", "0.2.0");
+    const { deployLatestControlPlaneRelease } = await import("./control-plane");
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce({
+      id: "inst-1",
+      label: "Acme",
+      customerAccountId: "cust-1",
+      customerSlug: "acme",
+      deploymentKind: "HOSTED",
+      deploymentStatus: "ACTIVE",
+      managedWorkspaceId: null,
+      managedWorkspace: null,
+      supportCredentialEnc: null,
+      provisioningStatus: "active",
+      releaseImageTag: "release-old",
+      releaseVersion: "0.1.0",
+      lastHealthStatus: "ok",
+      lastHealthCheck: new Date("2026-01-01T00:00:00.000Z"),
+      lastHealthError: null,
+      railwayProjectId: "project-1",
+      railwayEnvironmentId: "env-1",
+      railwayWebServiceId: "web-1",
+      railwayWorkerServiceId: "worker-1",
+    });
+    const railwayClient = {
+      graphql: vi.fn().mockRejectedValueOnce(new Error("Railway deployment failed.")),
+    };
+
+    await expect(deployLatestControlPlaneRelease(operatorActor, {
+      deploymentId: "inst-1",
+      reason: "Deploy latest after production smoke passed.",
+    }, railwayClient)).rejects.toThrow("Railway deployment failed.");
+
+    const deploymentUpdates = prismaMock.customerDeployment.update.mock.calls.map(([call]) => call as { where: unknown; data: Record<string, unknown> });
+    expect(deploymentUpdates[0].data).not.toHaveProperty("releaseImageTag");
+    expect(deploymentUpdates[0].data).not.toHaveProperty("releaseVersion");
+    expect(deploymentUpdates[1]).toMatchObject({
+      where: { id: "inst-1" },
+      data: {
+        provisioningStatus: "degraded",
+        lastProvisioningError: "Railway deployment failed.",
+      },
+    });
+    expect(deploymentUpdates[1].data).not.toHaveProperty("releaseImageTag");
+    expect(deploymentUpdates[1].data).not.toHaveProperty("releaseVersion");
   });
 
   it("queues bulk deploy-latest jobs and skips clients that fail preflight", async () => {
@@ -1104,6 +1266,25 @@ describe("control plane domain", () => {
         { deploymentId: "inst-2", status: "skipped" },
       ],
     });
+  });
+
+  it("rejects empty selected bulk deploy requests unless all eligible clients are explicit", async () => {
+    vi.stubEnv("CONTROL_PLANE_LATEST_WEB_IMAGE", "ghcr.io/corgtex/web:new");
+    vi.stubEnv("CONTROL_PLANE_LATEST_WORKER_IMAGE", "ghcr.io/corgtex/worker:new");
+    vi.stubEnv("CONTROL_PLANE_LATEST_RELEASE_IMAGE_TAG", "release-new");
+    const { enqueueControlPlaneDeployLatestRollout } = await import("./control-plane");
+
+    await expect(enqueueControlPlaneDeployLatestRollout(operatorActor, {
+      deploymentIds: [],
+      allEligible: false,
+      reason: "Deploy latest to selected customers.",
+    })).rejects.toMatchObject({
+      status: 400,
+      code: "INVALID_INPUT",
+    });
+
+    expect(prismaMock.customerDeployment.findMany).not.toHaveBeenCalled();
+    expect(prismaMock.workflowJob.upsert).not.toHaveBeenCalled();
   });
 
   it("only bypasses health blockers for explicitly selected bulk deploys", async () => {

@@ -103,4 +103,62 @@ describe("/api/control-plane/mcp", () => {
     expect(response.status).toBe(403);
     await expect(response.json()).resolves.toEqual({ error: { code: "CONTROL_PLANE_SCOPE_REQUIRED", message: "Control Plane scope required: control-plane:context:write." } });
   });
+
+  it("rejects member status updates without an explicit boolean isActive value", async () => {
+    mocks.resolveControlPlaneRequestActor.mockResolvedValueOnce({
+      kind: "agent",
+      authProvider: "control-plane",
+      label: "control-plane-agent",
+      scopes: ["control-plane:read", "control-plane:access:write"],
+    });
+    const domain = await import("@corgtex/domain");
+    const { POST } = await import("./route");
+
+    const response = await POST(request({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "tools/call",
+      params: {
+        name: "update_customer_member_status",
+        arguments: { deploymentId: "inst-1", memberId: "member-1", reason: "Suspend stale access." },
+      },
+    }) as never);
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      jsonrpc: "2.0",
+      id: 3,
+      error: { code: -32602, message: "isActive must be a boolean." },
+    });
+    expect(vi.mocked(domain.updateControlPlaneCustomerMemberStatus)).not.toHaveBeenCalled();
+  });
+
+  it("rejects feature flag mutations without an explicit boolean enabled value", async () => {
+    mocks.resolveControlPlaneRequestActor.mockResolvedValueOnce({
+      kind: "agent",
+      authProvider: "control-plane",
+      label: "control-plane-agent",
+      scopes: ["control-plane:read", "control-plane:features:write"],
+    });
+    const domain = await import("@corgtex/domain");
+    const { POST } = await import("./route");
+
+    const response = await POST(request({
+      jsonrpc: "2.0",
+      id: 4,
+      method: "tools/call",
+      params: {
+        name: "set_customer_feature_flag",
+        arguments: { deploymentId: "inst-1", flag: "FINANCE", reason: "Enable finance." },
+      },
+    }) as never);
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      jsonrpc: "2.0",
+      id: 4,
+      error: { code: -32602, message: "enabled must be a boolean." },
+    });
+    expect(vi.mocked(domain.setControlPlaneFeatureFlag)).not.toHaveBeenCalled();
+  });
 });
