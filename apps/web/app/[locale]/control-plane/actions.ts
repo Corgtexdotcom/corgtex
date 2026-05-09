@@ -163,11 +163,15 @@ export async function runReleaseOperationAction(formData: FormData) {
 export async function createControlPlaneMemberAction(formData: FormData) {
   const actor = await requirePageActor();
   const deploymentId = asString(formData, "deploymentId");
+  const role = asString(formData, "role");
+  if (!role) {
+    throw new Error("role is required.");
+  }
   await createControlPlaneCustomerMember(actor, {
     deploymentId,
     email: asString(formData, "email"),
     displayName: optionalString(formData, "displayName"),
-    role: asString(formData, "role") || "CONTRIBUTOR",
+    role,
     reason: asString(formData, "reason"),
   });
   revalidateControlPlaneDeployment(deploymentId);

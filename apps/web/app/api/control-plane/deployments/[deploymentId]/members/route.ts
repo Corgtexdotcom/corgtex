@@ -11,7 +11,7 @@ export const dynamic = "force-dynamic";
 const createMemberSchema = z.object({
   email: z.string().trim().email(),
   displayName: z.string().trim().min(1).nullable().optional(),
-  role: z.enum(["CONTRIBUTOR", "FACILITATOR", "FINANCE_STEWARD", "ADMIN"]).default("CONTRIBUTOR"),
+  role: z.enum(["CONTRIBUTOR", "FACILITATOR", "FINANCE_STEWARD", "ADMIN"]),
   reason: z.string().trim().min(1),
 }).strict();
 

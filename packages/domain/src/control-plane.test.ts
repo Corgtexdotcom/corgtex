@@ -53,6 +53,7 @@ const { prismaMock, encryptSecretMock, decryptSecretMock, memberMocks } = vi.hoi
     workflowJob: {
       count: vi.fn(),
       create: vi.fn(),
+      createMany: vi.fn(),
       findUnique: vi.fn(),
       findMany: vi.fn(),
       upsert: vi.fn(),
@@ -139,6 +140,7 @@ describe("control plane domain", () => {
         },
       }),
     })) as any;
+    prismaMock.workflowJob.createMany.mockResolvedValue({ count: 1 });
     prismaMock.customerAccount.findMany.mockResolvedValue([]);
     prismaMock.customerDeployment.findMany.mockResolvedValue([]);
     prismaMock.workspaceFeatureFlag.findMany.mockResolvedValue([]);
@@ -1249,6 +1251,60 @@ describe("control plane domain", () => {
     });
   });
 
+  it("clears the runtime release version variable when latest release has no version", async () => {
+    vi.stubEnv("CONTROL_PLANE_LATEST_WEB_IMAGE", "ghcr.io/corgtex/web:new");
+    vi.stubEnv("CONTROL_PLANE_LATEST_WORKER_IMAGE", "ghcr.io/corgtex/worker:new");
+    vi.stubEnv("CONTROL_PLANE_LATEST_RELEASE_IMAGE_TAG", "release-new");
+    vi.stubEnv("CONTROL_PLANE_LATEST_RELEASE_VERSION", "");
+    const { deployLatestControlPlaneRelease } = await import("./control-plane");
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce({
+      id: "inst-1",
+      label: "Acme",
+      customerAccountId: "cust-1",
+      customerSlug: "acme",
+      deploymentKind: "HOSTED",
+      deploymentStatus: "ACTIVE",
+      managedWorkspaceId: null,
+      managedWorkspace: null,
+      supportCredentialEnc: null,
+      provisioningStatus: "active",
+      releaseImageTag: "release-old",
+      releaseVersion: "0.1.0",
+      lastHealthStatus: "ok",
+      lastHealthCheck: new Date("2026-01-01T00:00:00.000Z"),
+      lastHealthError: null,
+      railwayProjectId: "project-1",
+      railwayEnvironmentId: "env-1",
+      railwayWebServiceId: "web-1",
+      railwayWorkerServiceId: "worker-1",
+    });
+    const railwayClient = {
+      graphql: vi.fn()
+        .mockResolvedValueOnce({})
+        .mockResolvedValueOnce({})
+        .mockResolvedValueOnce({ web: "web-deploy-1", worker: "worker-deploy-1" }),
+    };
+
+    await deployLatestControlPlaneRelease(operatorActor, {
+      deploymentId: "inst-1",
+      reason: "Deploy image-only latest release.",
+    }, railwayClient);
+
+    expect(railwayClient.graphql).toHaveBeenCalledTimes(3);
+    expect(railwayClient.graphql.mock.calls[1]?.[1]).toMatchObject({
+      variables: {
+        CORGTEX_RELEASE_IMAGE_TAG: "release-new",
+        CORGTEX_RELEASE_VERSION: "",
+      },
+    });
+    expect(prismaMock.customerDeployment.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        releaseImageTag: "release-new",
+        releaseVersion: null,
+      }),
+    }));
+  });
+
   it("does not mark a release current when deploy latest fails", async () => {
     vi.stubEnv("CONTROL_PLANE_LATEST_WEB_IMAGE", "ghcr.io/corgtex/web:new");
     vi.stubEnv("CONTROL_PLANE_LATEST_WORKER_IMAGE", "ghcr.io/corgtex/worker:new");
@@ -1386,8 +1442,8 @@ describe("control plane domain", () => {
       limit: 2,
     });
 
-    expect(prismaMock.workflowJob.create).toHaveBeenCalledTimes(1);
-    expect(prismaMock.workflowJob.create).toHaveBeenCalledWith(expect.objectContaining({
+    expect(prismaMock.workflowJob.createMany).toHaveBeenCalledTimes(1);
+    expect(prismaMock.workflowJob.createMany).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
         workspaceId: null,
         type: CONTROL_PLANE_RELEASE_DEPLOY_JOB_TYPE,
@@ -1396,6 +1452,7 @@ describe("control plane domain", () => {
           reason: "Deploy latest to healthy customers.",
         }),
       }),
+      skipDuplicates: true,
     }));
     expect(result).toMatchObject({
       requested: 2,
@@ -1423,7 +1480,7 @@ describe("control plane domain", () => {
     });
 
     expect(prismaMock.customerDeployment.findMany).not.toHaveBeenCalled();
-    expect(prismaMock.workflowJob.create).not.toHaveBeenCalled();
+    expect(prismaMock.workflowJob.createMany).not.toHaveBeenCalled();
   });
 
   it("rejects explicit bulk deploy selections that exceed the rollout limit", async () => {
@@ -1442,7 +1499,7 @@ describe("control plane domain", () => {
     });
 
     expect(prismaMock.customerDeployment.findMany).not.toHaveBeenCalled();
-    expect(prismaMock.workflowJob.create).not.toHaveBeenCalled();
+    expect(prismaMock.workflowJob.createMany).not.toHaveBeenCalled();
   });
 
   it("rejects explicit bulk deploy selections with unknown deployment IDs", async () => {
@@ -1478,7 +1535,7 @@ describe("control plane domain", () => {
       message: expect.stringContaining("inst-missing"),
     });
 
-    expect(prismaMock.workflowJob.create).not.toHaveBeenCalled();
+    expect(prismaMock.workflowJob.createMany).not.toHaveBeenCalled();
     expect(prismaMock.customerDeploymentEvent.create).not.toHaveBeenCalled();
   });
 
@@ -1497,7 +1554,7 @@ describe("control plane domain", () => {
     });
 
     expect(prismaMock.customerDeployment.findMany).not.toHaveBeenCalled();
-    expect(prismaMock.workflowJob.create).not.toHaveBeenCalled();
+    expect(prismaMock.workflowJob.createMany).not.toHaveBeenCalled();
   });
 
   it("rejects deployment viewer access for privileged customer mutations", async () => {
@@ -1582,8 +1639,8 @@ describe("control plane domain", () => {
       reason: "Explicitly selected recovery rollout.",
     });
 
-    expect(prismaMock.workflowJob.create).toHaveBeenCalledTimes(1);
-    expect(prismaMock.workflowJob.create).toHaveBeenCalledWith(expect.objectContaining({
+    expect(prismaMock.workflowJob.createMany).toHaveBeenCalledTimes(1);
+    expect(prismaMock.workflowJob.createMany).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
         payload: expect.objectContaining({
           deploymentId: "inst-1",
@@ -1625,6 +1682,7 @@ describe("control plane domain", () => {
         railwayWorkerServiceId: "worker-1",
       },
     ]);
+    prismaMock.workflowJob.createMany.mockResolvedValueOnce({ count: 0 });
     prismaMock.workflowJob.findUnique.mockResolvedValueOnce({ id: "job-existing", status: "PENDING" });
 
     const result = await enqueueControlPlaneDeployLatestRollout(operatorActor, {
@@ -1632,12 +1690,17 @@ describe("control plane domain", () => {
       reason: "Retry latest rollout.",
     });
 
+    expect(prismaMock.workflowJob.createMany).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        dedupeKey: expect.stringContaining(":release-new:0.2.0:"),
+      }),
+      skipDuplicates: true,
+    }));
     expect(prismaMock.workflowJob.findUnique).toHaveBeenCalledWith(expect.objectContaining({
       where: {
         dedupeKey: expect.stringContaining(":release-new:0.2.0:"),
       },
     }));
-    expect(prismaMock.workflowJob.create).not.toHaveBeenCalled();
     expect(result).toMatchObject({
       requested: 1,
       queuedJobs: 0,

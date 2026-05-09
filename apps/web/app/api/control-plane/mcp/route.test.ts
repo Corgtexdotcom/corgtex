@@ -194,4 +194,37 @@ describe("/api/control-plane/mcp", () => {
     });
     expect(vi.mocked(domain.setControlPlaneFeatureFlag)).not.toHaveBeenCalled();
   });
+
+  it("rejects integration configuration without explicit boolean toggles", async () => {
+    mocks.resolveControlPlaneRequestActor.mockResolvedValueOnce({
+      kind: "agent",
+      authProvider: "control-plane",
+      label: "control-plane-agent",
+      scopes: ["control-plane:read", "control-plane:integrations:write"],
+    });
+    const domain = await import("@corgtex/domain");
+    const { POST } = await import("./route");
+
+    const response = await POST(request({
+      jsonrpc: "2.0",
+      id: 6,
+      method: "tools/call",
+      params: {
+        name: "configure_customer_integration",
+        arguments: {
+          deploymentId: "inst-1",
+          integrationKey: "meeting_recorders",
+          reason: "Enable recorder entitlement.",
+        },
+      },
+    }) as never);
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      jsonrpc: "2.0",
+      id: 6,
+      error: { code: -32602, message: "entitlementEnabled must be a boolean." },
+    });
+    expect(vi.mocked(domain.configureControlPlaneMeetingRecorderIntegration)).not.toHaveBeenCalled();
+  });
 });

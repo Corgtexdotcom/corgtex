@@ -160,7 +160,7 @@ const tools = [
         botName: { type: "string" },
         entryMessage: { type: "string" },
       },
-      required: ["deploymentId", "integrationKey", "reason"],
+      required: ["deploymentId", "integrationKey", "reason", "entitlementEnabled", "enabled", "autoRecordEnabled"],
     },
   },
   {
@@ -470,11 +470,20 @@ export async function POST(request: NextRequest) {
       if (argString(args, "integrationKey") !== "meeting_recorders") {
         return rpcError(id, -32602, "Unsupported integration key.");
       }
+      if (typeof args.entitlementEnabled !== "boolean") {
+        return rpcError(id, -32602, "entitlementEnabled must be a boolean.");
+      }
+      if (typeof args.enabled !== "boolean") {
+        return rpcError(id, -32602, "enabled must be a boolean.");
+      }
+      if (typeof args.autoRecordEnabled !== "boolean") {
+        return rpcError(id, -32602, "autoRecordEnabled must be a boolean.");
+      }
       return rpcResult(id, textContent(await configureControlPlaneMeetingRecorderIntegration(actor, {
         deploymentId: argString(args, "deploymentId"),
-        entitlementEnabled: argBoolean(args, "entitlementEnabled", true),
-        enabled: argBoolean(args, "enabled", true),
-        autoRecordEnabled: argBoolean(args, "autoRecordEnabled", false),
+        entitlementEnabled: args.entitlementEnabled,
+        enabled: args.enabled,
+        autoRecordEnabled: args.autoRecordEnabled,
         defaultProvider: argString(args, "defaultProvider") || "RECALL_AI",
         fallbackProvider: argOptionalString(args, "fallbackProvider"),
         monthlyMinuteCap: argNumber(args, "monthlyMinuteCap", 6_000),

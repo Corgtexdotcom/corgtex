@@ -2262,7 +2262,7 @@ export async function deployLatestControlPlaneRelease(actor: AppActor, params: {
       workerImage: target.workerImage,
       variables: {
         CORGTEX_RELEASE_IMAGE_TAG: target.releaseImageTag,
-        ...(target.releaseVersion ? { CORGTEX_RELEASE_VERSION: target.releaseVersion } : {}),
+        CORGTEX_RELEASE_VERSION: target.releaseVersion ?? "",
       },
     });
 
@@ -2435,30 +2435,7 @@ export async function enqueueControlPlaneDeployLatestRollout(actor: AppActor, pa
       }
 
       const dedupeKey = `control-plane:deploy-latest:${deployment.id}:${target.releaseImageTag}:${target.releaseVersion ?? "no-version"}:${bucket}`;
-      const existingJob = await tx.workflowJob.findUnique({
-        where: { dedupeKey },
-        select: { id: true, status: true },
-      });
-      if (existingJob) {
-        const blockers = [`A rollout job already exists in this dedupe window with status ${existingJob.status}.`];
-        await tx.customerDeploymentEvent.create({
-          data: {
-            deploymentId: deployment.id,
-            actorUserId: actorUserId(actor),
-            action: "control_plane.release.deploy_latest_skipped",
-            meta: redactObject({ reason, target, blockers, dedupeKey, existingJobId: existingJob.id }) as Prisma.InputJsonObject,
-          },
-        });
-        results.push({
-          deploymentId: deployment.id,
-          label: deployment.label,
-          status: "skipped",
-          blockers,
-        });
-        continue;
-      }
-
-      await tx.workflowJob.create({
+      const createResult = await tx.workflowJob.createMany({
         data: {
           workspaceId: null,
           eventId: null,
@@ -2472,7 +2449,30 @@ export async function enqueueControlPlaneDeployLatestRollout(actor: AppActor, pa
           },
           dedupeKey,
         },
+        skipDuplicates: true,
       });
+      if (createResult.count === 0) {
+        const existingJob = await tx.workflowJob.findUnique({
+          where: { dedupeKey },
+          select: { id: true, status: true },
+        });
+        const blockers = [`A rollout job already exists in this dedupe window${existingJob?.status ? ` with status ${existingJob.status}` : ""}.`];
+        await tx.customerDeploymentEvent.create({
+          data: {
+            deploymentId: deployment.id,
+            actorUserId: actorUserId(actor),
+            action: "control_plane.release.deploy_latest_skipped",
+            meta: redactObject({ reason, target, blockers, dedupeKey, existingJobId: existingJob?.id ?? null }) as Prisma.InputJsonObject,
+          },
+        });
+        results.push({
+          deploymentId: deployment.id,
+          label: deployment.label,
+          status: "skipped",
+          blockers,
+        });
+        continue;
+      }
       await tx.customerDeploymentEvent.create({
         data: {
           deploymentId: deployment.id,
