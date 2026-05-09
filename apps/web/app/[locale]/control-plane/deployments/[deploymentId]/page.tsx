@@ -389,9 +389,9 @@ export default async function ControlPlaneCustomerPage({
             </div>
             {"error" in featureFlags && <span style={{ color: "var(--orange-11)", fontWeight: 700 }}>{featureFlags.error}</span>}
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 12 }}>
+          <div className="control-plane-flag-grid">
             {featureFlags.flags.map((flag) => (
-              <form key={flag.flag} action={setControlPlaneFeatureFlagAction} className="item stack">
+              <form key={flag.flag} action={setControlPlaneFeatureFlagAction} className="control-plane-flag-card stack">
                 <input type="hidden" name="deploymentId" value={customer.id} />
                 <input type="hidden" name="flag" value={flag.flag} />
                 <input type="hidden" name="enabled" value={flag.enabled ? "false" : "true"} />
@@ -400,21 +400,25 @@ export default async function ControlPlaneCustomerPage({
                     <strong>{flag.label}</strong>
                     <div className="muted" style={{ fontSize: 12 }}>{flag.flag}</div>
                   </div>
-                  <span style={{ color: flag.enabled ? "var(--green-11)" : "var(--gray-11)", fontWeight: 700 }}>
-                    {flag.enabled ? "Enabled" : "Disabled"}
-                  </span>
+                  <button type="submit" className="control-plane-toggle-button" aria-pressed={flag.enabled}>
+                    <span className="control-plane-toggle" aria-hidden="true" data-state={flag.enabled ? "on" : "off"}>
+                      <span />
+                    </span>
+                    <span>{flag.enabled ? "Enabled" : "Disabled"}</span>
+                  </button>
                 </div>
                 <p className="muted" style={{ margin: 0 }}>{flag.description}</p>
-                <div className="muted" style={{ fontSize: 12 }}>
-                  Source: {flag.source}. Last changed: {flag.lastChangedAt ? format.dateTime(new Date(flag.lastChangedAt), { dateStyle: "medium", timeStyle: "short" }) : "not recorded"}.
+                <div className="control-plane-flag-meta">
+                  <span>Default: {flag.defaultEnabled ? "enabled" : "disabled"}</span>
+                  <span>Current: {flag.enabled ? "enabled" : "disabled"}</span>
+                  <span>Source: {flag.source}</span>
+                  <span>Last changed: {flag.lastChangedAt ? format.dateTime(new Date(flag.lastChangedAt), { dateStyle: "medium", timeStyle: "short" }) : "not recorded"}</span>
+                  <span>Changed by: {flag.lastChangedBy || "not recorded"}</span>
                 </div>
                 <label>
                   Reason
                   <input name="reason" required placeholder={flag.enabled ? "Disable for this customer." : "Enable for this customer."} />
                 </label>
-                <button type="submit" className="button secondary small" style={{ alignSelf: "flex-start" }}>
-                  {flag.enabled ? "Disable" : "Enable"}
-                </button>
               </form>
             ))}
             {featureFlags.flags.length === 0 && <div className="item muted">No feature flags returned for this customer.</div>}
