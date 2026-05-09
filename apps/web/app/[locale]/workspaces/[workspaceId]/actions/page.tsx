@@ -64,7 +64,7 @@ export default async function ActionsPage({
       </header>
 
       <section className="ws-section">
-        <div className="nr-filter-bar">
+        <div className="nr-filter-bar nr-filter-bar-wrap">
           {ACTION_STATUS_FILTERS.map((s) => (
             <a 
               key={s} 

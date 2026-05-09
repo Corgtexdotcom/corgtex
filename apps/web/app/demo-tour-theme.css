@@ -185,16 +185,17 @@
 
 /* Watermark banner style */
 .demo-tour-banner {
-  width: fit-content;
-  max-width: 100%;
-  margin-bottom: 20px;
-  padding: 7px 10px;
-  border-radius: var(--radius-full);
+  width: 100%;
+  max-width: 640px;
+  margin-bottom: 16px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
   border: 1px solid var(--line);
-  background: var(--warning-bg);
-  color: var(--warning);
-  font-size: 0.82rem;
-  font-weight: 600;
+  background: var(--surface-strong);
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-weight: 500;
+  line-height: 1.4;
   display: flex;
   justify-content: flex-start;
   align-items: center;
@@ -214,16 +215,24 @@
   padding: 2px 6px;
   font-size: 0.78rem;
   font-weight: 600;
-  color: var(--warning);
+  color: var(--accent);
   cursor: pointer;
   transition: background 0.2s, border-color 0.2s, color 0.2s;
   white-space: nowrap;
 }
 
 .demo-tour-restart-btn:hover {
-  background: var(--warning-soft);
+  background: var(--accent-soft);
   box-shadow: none;
   transform: none;
+}
+
+@media (max-width: 720px) {
+  .demo-tour-banner {
+    max-width: none;
+    font-size: 0.78rem;
+    align-items: flex-start;
+  }
 }
 
 .demo-tour-briefing-copy {
