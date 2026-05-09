@@ -1445,6 +1445,43 @@ describe("control plane domain", () => {
     expect(prismaMock.workflowJob.create).not.toHaveBeenCalled();
   });
 
+  it("rejects explicit bulk deploy selections with unknown deployment IDs", async () => {
+    vi.stubEnv("CONTROL_PLANE_LATEST_WEB_IMAGE", "ghcr.io/corgtex/web:new");
+    vi.stubEnv("CONTROL_PLANE_LATEST_WORKER_IMAGE", "ghcr.io/corgtex/worker:new");
+    vi.stubEnv("CONTROL_PLANE_LATEST_RELEASE_IMAGE_TAG", "release-new");
+    const { enqueueControlPlaneDeployLatestRollout } = await import("./control-plane");
+    prismaMock.customerDeployment.findMany.mockResolvedValueOnce([
+      {
+        id: "inst-1",
+        label: "Acme",
+        customerAccountId: "cust-1",
+        deploymentStatus: "ACTIVE",
+        provisioningStatus: "active",
+        releaseImageTag: "release-old",
+        releaseVersion: null,
+        lastHealthStatus: "ok",
+        lastHealthCheck: new Date("2026-01-01T00:00:00.000Z"),
+        lastHealthError: null,
+        railwayProjectId: "project-1",
+        railwayEnvironmentId: "env-1",
+        railwayWebServiceId: "web-1",
+        railwayWorkerServiceId: "worker-1",
+      },
+    ]);
+
+    await expect(enqueueControlPlaneDeployLatestRollout(operatorActor, {
+      deploymentIds: ["inst-1", "inst-missing"],
+      reason: "Deploy latest to selected customers.",
+    })).rejects.toMatchObject({
+      status: 400,
+      code: "INVALID_INPUT",
+      message: expect.stringContaining("inst-missing"),
+    });
+
+    expect(prismaMock.workflowJob.create).not.toHaveBeenCalled();
+    expect(prismaMock.customerDeploymentEvent.create).not.toHaveBeenCalled();
+  });
+
   it("rejects fleet-wide bulk deploys for deployment-scoped user access", async () => {
     vi.stubEnv("CONTROL_PLANE_LATEST_WEB_IMAGE", "ghcr.io/corgtex/web:new");
     vi.stubEnv("CONTROL_PLANE_LATEST_WORKER_IMAGE", "ghcr.io/corgtex/worker:new");

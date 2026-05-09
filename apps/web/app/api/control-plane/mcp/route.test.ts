@@ -133,6 +133,39 @@ describe("/api/control-plane/mcp", () => {
     expect(vi.mocked(domain.updateControlPlaneCustomerMemberStatus)).not.toHaveBeenCalled();
   });
 
+  it("rejects member creation without an explicit role value", async () => {
+    mocks.resolveControlPlaneRequestActor.mockResolvedValueOnce({
+      kind: "agent",
+      authProvider: "control-plane",
+      label: "control-plane-agent",
+      scopes: ["control-plane:read", "control-plane:access:write"],
+    });
+    const domain = await import("@corgtex/domain");
+    const { POST } = await import("./route");
+
+    const response = await POST(request({
+      jsonrpc: "2.0",
+      id: 5,
+      method: "tools/call",
+      params: {
+        name: "create_customer_member",
+        arguments: {
+          deploymentId: "inst-1",
+          email: "new@example.com",
+          reason: "Customer approved onboarding.",
+        },
+      },
+    }) as never);
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      jsonrpc: "2.0",
+      id: 5,
+      error: { code: -32602, message: "role must be a non-empty string." },
+    });
+    expect(vi.mocked(domain.createControlPlaneCustomerMember)).not.toHaveBeenCalled();
+  });
+
   it("rejects feature flag mutations without an explicit boolean enabled value", async () => {
     mocks.resolveControlPlaneRequestActor.mockResolvedValueOnce({
       kind: "agent",

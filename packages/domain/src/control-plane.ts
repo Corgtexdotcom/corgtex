@@ -2400,6 +2400,11 @@ export async function enqueueControlPlaneDeployLatestRollout(actor: AppActor, pa
       ],
       take: limit,
     });
+  if (requestedIds.length) {
+    const foundIds = new Set(deployments.map((deployment) => deployment.id));
+    const missingIds = requestedIds.filter((deploymentId) => !foundIds.has(deploymentId));
+    invariant(missingIds.length === 0, 400, "INVALID_INPUT", `Unknown customer deployment IDs: ${missingIds.join(", ")}.`);
+  }
 
   const bucket = Math.floor(Date.now() / (15 * 60 * 1000));
   const results: Array<{ deploymentId: string; label: string; status: "queued" | "skipped" | "preflight_failed"; blockers: string[] }> = [];

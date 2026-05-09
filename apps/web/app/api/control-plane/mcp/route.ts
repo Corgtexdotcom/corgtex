@@ -422,11 +422,15 @@ export async function POST(request: NextRequest) {
       return rpcResult(id, textContent(await listControlPlaneCustomerMembers(actor, argString(args, "deploymentId"))));
     }
     if (name === "create_customer_member") {
+      const role = argString(args, "role").trim();
+      if (!role) {
+        return rpcError(id, -32602, "role must be a non-empty string.");
+      }
       return rpcResult(id, textContent(await createControlPlaneCustomerMember(actor, {
         deploymentId: argString(args, "deploymentId"),
         email: argString(args, "email"),
         displayName: argOptionalString(args, "displayName"),
-        role: argString(args, "role") || "CONTRIBUTOR",
+        role,
         reason: argString(args, "reason"),
       })));
     }
