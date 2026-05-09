@@ -20,6 +20,33 @@ describe("newspaper email rendering", () => {
     expect(renderNewspaperDigestMarkdown({ title: "Daily Newspaper", digest })).not.toContain("## Action Items Identified");
   });
 
+  it("normalizes object-style sections with nested items", () => {
+    const digest = normalizeNewspaperDigestPayload({
+      sections: {
+        keyDecisions: { items: ["Approved launch."] },
+        actionItems: { items: [{ title: "Confirm owner", body: "Assign the pilot handoff." }] },
+      },
+    });
+
+    expect(digest.sections).toEqual([
+      { id: "keyDecisions", title: "Key Decisions Made", items: ["Approved launch."] },
+      { id: "actionItems", title: "Action Items Identified", items: ["Confirm owner: Assign the pilot handoff."] },
+    ]);
+  });
+
+  it("normalizes aliases inside object-style sections", () => {
+    const digest = normalizeNewspaperDigestPayload({
+      sections: {
+        decisions: ["Hold launch until QA signs off."],
+        nextActions: ["Book customer review."],
+      },
+    });
+
+    expect(digest.sections.map((section) => section.id)).toEqual(["keyDecisions", "actionItems"]);
+    expect(digest.sections[0]?.items).toEqual(["Hold launch until QA signs off."]);
+    expect(digest.sections[1]?.items).toEqual(["Book customer review."]);
+  });
+
   it("escapes model-provided text in email html", () => {
     const digest = normalizeNewspaperDigestPayload({
       keyDecisions: ["Use <script>alert('x')</script> safely."],

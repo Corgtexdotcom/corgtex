@@ -1,6 +1,6 @@
 import {
   computeNewspaperLayout,
-  listActions, listMembers, listNotifications, listTensions,
+  listMembers, listNotifications, listTensions,
   listAuditLogs, listArticles, listMeetings
 } from "@corgtex/domain";
 import { prisma, workspaceBranding } from "@corgtex/shared";
@@ -52,7 +52,6 @@ export default async function WorkspaceDashboard({
     members,
     notifications,
     pendingFlowsRaw,
-    openActionsResult,
     activeTensionsResult,
     pendingAgentApprovals,
     auditLogs,
@@ -88,7 +87,6 @@ export default async function WorkspaceDashboard({
       }));
       return enriched;
     }),
-    listActions(actor, workspaceId, { take: 10 }),
     prisma.tension.count({ where: { workspaceId, status: "OPEN", OR: [{ isPrivate: false }, { authorUserId: actor.kind === 'user' ? actor.user.id : '' }] } }),
     capabilities.canReviewAgentRuns
       ? prisma.agentRun.count({ where: { workspaceId, status: "WAITING_APPROVAL" } })
@@ -139,9 +137,21 @@ export default async function WorkspaceDashboard({
     .slice(0, 5);
   const pendingFlows = pendingFlowsRaw;
   const unreadNotifications = notifications.filter(n => !n.readAt);
-  const workspaceOpenActions = openActionsResult.items.filter(a => a.status === "OPEN" || a.status === "IN_PROGRESS");
   const memberOpenActions = currentMember
-    ? workspaceOpenActions.filter((action) => action.assigneeMemberId === currentMember.id)
+    ? await prisma.action.findMany({
+      where: {
+        workspaceId,
+        assigneeMemberId: currentMember.id,
+        status: { in: ["OPEN", "IN_PROGRESS"] },
+      },
+      select: {
+        id: true,
+        title: true,
+        bodyMd: true,
+      },
+      orderBy: { createdAt: "desc" },
+      take: 10,
+    })
     : [];
   const openTensionItems = tensions.filter((tension) => tension.status === "OPEN");
   

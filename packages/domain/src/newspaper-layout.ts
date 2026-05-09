@@ -87,10 +87,14 @@ function placementFor(section: NewspaperSectionInput, variant: NewspaperLayoutVa
 export function computeNewspaperLayout<SectionId extends string>(
   sections: Array<NewspaperSectionInput<SectionId>>
 ): NewspaperLayoutResult<SectionId> {
-  const visibleInputs = sections.filter((section) => {
-    const emptyPolicy = section.emptyPolicy ?? "omit";
-    return normalizeCount(section.itemCount) > 0 || emptyPolicy === "show";
-  });
+  const visibleInputs = sections
+    .map((section, index) => ({ section, index }))
+    .filter(({ section }) => {
+      const emptyPolicy = section.emptyPolicy ?? "omit";
+      return normalizeCount(section.itemCount) > 0 || emptyPolicy === "show";
+    })
+    .sort((a, b) => a.section.priority - b.section.priority || a.index - b.index)
+    .map(({ section }) => section);
 
   if (visibleInputs.length === 0) {
     return {
@@ -102,10 +106,10 @@ export function computeNewspaperLayout<SectionId extends string>(
 
   const meetingSection = visibleInputs.find((section) => isMeetingSection(section.id));
   const meetingHeavy = normalizeCount(meetingSection?.itemCount ?? 0) >= MEETING_HEAVY_THRESHOLD;
-  const variant: NewspaperLayoutVariant = meetingHeavy
-    ? "meeting-heavy"
-    : visibleInputs.length <= 2
-      ? "sparse"
+  const variant: NewspaperLayoutVariant = visibleInputs.length <= 2
+    ? "sparse"
+    : meetingHeavy
+      ? "meeting-heavy"
       : "balanced";
 
   const visibleSections = visibleInputs.map((section, index) => {

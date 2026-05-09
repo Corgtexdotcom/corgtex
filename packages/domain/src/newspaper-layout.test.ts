@@ -21,7 +21,7 @@ describe("computeNewspaperLayout", () => {
     expect(layout.visibleSections.map((section) => section.id)).toEqual(["featuredKnowledge"]);
   });
 
-  it("uses sparse layout for one or two visible sections without changing order", () => {
+  it("uses sparse layout for one or two visible sections in priority order", () => {
     const layout = computeNewspaperLayout([
       { id: "featuredKnowledge", priority: 1, itemCount: 2 },
       { id: "todos", priority: 2, itemCount: 1 },
@@ -32,6 +32,34 @@ describe("computeNewspaperLayout", () => {
     expect(layout.visibleSections.map((section) => section.id)).toEqual(["featuredKnowledge", "todos"]);
     expect(layout.sectionCaps.featuredKnowledge).toEqual(expect.objectContaining({
       itemCap: 2,
+      placement: "lead",
+    }));
+  });
+
+  it("sorts visible sections by priority with source order as a tiebreaker", () => {
+    const layout = computeNewspaperLayout([
+      { id: "todos", priority: 2, itemCount: 1 },
+      { id: "activity", priority: 3, itemCount: 1 },
+      { id: "featuredKnowledge", priority: 1, itemCount: 1 },
+      { id: "meetings", priority: 3, itemCount: 1 },
+    ]);
+
+    expect(layout.visibleSections.map((section) => section.id)).toEqual([
+      "featuredKnowledge",
+      "todos",
+      "activity",
+      "meetings",
+    ]);
+  });
+
+  it("keeps meeting-only dashboards sparse instead of creating empty rails", () => {
+    const layout = computeNewspaperLayout([
+      { id: "meetings", priority: 1, itemCount: 5 },
+    ]);
+
+    expect(layout.variant).toBe("sparse");
+    expect(layout.sectionCaps.meetings).toEqual(expect.objectContaining({
+      itemCap: 3,
       placement: "lead",
     }));
   });

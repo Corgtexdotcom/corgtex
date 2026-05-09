@@ -87,8 +87,18 @@ function normalizeItems(value: unknown): string[] {
   return [];
 }
 
+function normalizeSectionValue(value: unknown): string[] {
+  if (isRecord(value)) {
+    const nestedItems = normalizeItems(value.items ?? value.entries ?? value.bullets ?? value.points);
+    if (nestedItems.length > 0) return nestedItems;
+  }
+
+  return normalizeItems(value);
+}
+
 function sectionItemsFromRecord(record: Record<string, unknown>, id: NewspaperEmailSectionId, aliases: string[]) {
-  const directItems = [id, ...aliases].flatMap((key) => normalizeItems(record[key]));
+  const keys = [id, ...aliases];
+  const directItems = keys.flatMap((key) => normalizeSectionValue(record[key]));
 
   if (directItems.length > 0) return directItems;
 
@@ -101,12 +111,12 @@ function sectionItemsFromRecord(record: Record<string, unknown>, id: NewspaperEm
       return sectionId === id || title === SECTION_DEFINITIONS.find((definition) => definition.id === id)?.title.toLowerCase();
     });
     if (isRecord(matchingSection)) {
-      return normalizeItems(matchingSection.items ?? matchingSection.body ?? matchingSection.summary ?? matchingSection.text);
+      return normalizeSectionValue(matchingSection);
     }
   }
 
   if (isRecord(sections)) {
-    return normalizeItems(sections[id]);
+    return keys.flatMap((key) => normalizeSectionValue(sections[key]));
   }
 
   return [];
