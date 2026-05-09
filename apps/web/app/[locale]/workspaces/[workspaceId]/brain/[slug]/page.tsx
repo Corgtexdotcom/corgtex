@@ -26,7 +26,10 @@ function stripDuplicateTitleHeading(markdown: string | null | undefined, title: 
   if (headingText !== title.trim().toLowerCase()) return markdown;
 
   const nextLines = lines.slice(0, firstContentIndex).concat(lines.slice(firstContentIndex + 1));
-  return nextLines.join("\n").replace(/^\s+/, "");
+  while (nextLines[0]?.trim() === "") {
+    nextLines.shift();
+  }
+  return nextLines.join("\n");
 }
 
 export default async function BrainArticlePage({

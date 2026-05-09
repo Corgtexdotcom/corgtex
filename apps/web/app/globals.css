@@ -493,6 +493,18 @@ button:disabled {
   transition: grid-template-columns 0.2s ease;
 }
 
+.ws-layout.ws-layout-chat-collapsed {
+  grid-template-columns: 240px minmax(0, 1fr) 52px;
+}
+
+.ws-layout.ws-layout-chat-collapsed .ws-main-content {
+  max-width: 1280px;
+}
+
+.ws-layout.ws-layout-chat-collapsed .workspace-add-menu {
+  right: 76px;
+}
+
 @supports selector(:has(*)) {
   .ws-layout:has(.ws-agent-sidebar-collapsed) {
     grid-template-columns: 240px minmax(0, 1fr) 52px;

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { usePathname } from "next/navigation";
 import { ChatInterface } from "./chat/ChatInterface";
 import { WorkspaceUtilityIcon } from "./WorkspaceNavIcon";
@@ -34,6 +34,7 @@ export function WorkspaceChatRail({
   const pathname = usePathname() ?? "";
   const defaultCollapsed = useMemo(() => !isWorkspaceHome(pathname, workspaceId), [pathname, workspaceId]);
   const [isCollapsed, setIsCollapsed] = useState(defaultCollapsed);
+  const railRef = useRef<HTMLElement>(null);
 
   useEffect(() => {
     try {
@@ -52,6 +53,14 @@ export function WorkspaceChatRail({
     setIsCollapsed(defaultCollapsed);
   }, [defaultCollapsed]);
 
+  useEffect(() => {
+    const layout = railRef.current?.closest(".ws-layout");
+    layout?.classList.toggle("ws-layout-chat-collapsed", isCollapsed);
+    return () => {
+      layout?.classList.remove("ws-layout-chat-collapsed");
+    };
+  }, [isCollapsed]);
+
   function toggleCollapsed() {
     setIsCollapsed((current) => {
       const next = !current;
@@ -65,7 +74,7 @@ export function WorkspaceChatRail({
   }
 
   return (
-    <aside className={`ws-agent-sidebar ${isCollapsed ? "ws-agent-sidebar-collapsed" : ""}`}>
+    <aside ref={railRef} className={`ws-agent-sidebar ${isCollapsed ? "ws-agent-sidebar-collapsed" : ""}`}>
       <button
         type="button"
         className="ws-agent-toggle"
