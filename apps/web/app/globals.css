@@ -1547,7 +1547,8 @@ details[open] > .settings-disclosure-summary::before {
 
 .markdown-excerpt {
   color: inherit;
-  font-family: var(--font-document), Georgia, serif;
+  font-family: var(--font-inter), system-ui, sans-serif;
+  line-height: 1.55;
 }
 
 .meeting-processing-status {
@@ -2516,7 +2517,7 @@ a.wiki-list-item:hover {
   .nr-lead-headline { @apply font-sans text-2xl font-bold leading-tight m-0 mb-3; }
   .nr-secondary-headline { @apply font-sans font-semibold not-italic; }
   
-  .nr-excerpt { @apply text-[0.95rem] leading-[1.6] text-text mb-3; }
+  .nr-excerpt { @apply font-sans text-[0.95rem] leading-[1.55] text-text mb-3; }
   .nr-meta { @apply text-[0.78rem] text-muted normal-case tracking-normal; }
   .nr-link { @apply text-[0.85rem] font-semibold no-underline text-text hover:underline; }
   
@@ -2554,6 +2555,7 @@ a.wiki-list-item:hover {
 
   /* ── UI Spacing and Alignment (Newsroom) ── */
   .nr-filter-bar { @apply flex flex-nowrap gap-3 mb-6 overflow-x-auto pb-1; }
+  .nr-filter-bar-wrap { @apply flex-wrap overflow-visible; }
   .nr-filter-item { @apply text-muted no-underline font-semibold text-[0.85rem] tracking-normal px-3 py-[6px] rounded-full border border-line transition-all hover:text-text hover:border-text; }
   .nr-filter-active { @apply bg-accent !text-accent-fg border-accent; }
   
@@ -3209,12 +3211,24 @@ a.wiki-list-item:hover {
     scrollbar-width: none;
   }
 
+  .nr-filter-bar.nr-filter-bar-wrap {
+    margin-left: 0;
+    margin-right: 0;
+    padding: 0 0 8px;
+    overflow-x: visible;
+  }
+
   .nr-filter-item,
   .nr-tab {
     min-width: max-content;
     min-height: 44px;
     display: inline-flex;
     align-items: center;
+  }
+
+  .nr-filter-bar.nr-filter-bar-wrap .nr-filter-item {
+    min-width: 0;
+    flex: 0 1 auto;
   }
 
   .nr-table-wrap {
