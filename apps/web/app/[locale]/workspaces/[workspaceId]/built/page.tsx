@@ -23,7 +23,7 @@ export default async function BuiltPage({
       <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 32 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", flexWrap: "wrap", gap: 16 }}>
           <div>
-            <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2.5rem" }}>{t("pageTitle")}</h1>
+            <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2rem" }}>{t("pageTitle")}</h1>
             <div className="nr-masthead-meta">
               <span>{t("pageDescription")}</span>
             </div>

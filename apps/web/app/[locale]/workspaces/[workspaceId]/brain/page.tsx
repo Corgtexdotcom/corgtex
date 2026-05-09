@@ -63,7 +63,7 @@ export default async function BrainPage({
     <>
       <div className="nr-masthead" style={{ textAlign: "left", marginBottom: 48 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", borderBottom: "1px solid var(--text)", paddingBottom: 16 }}>
-          <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2.5rem" }}>{t("title")}</h1>
+          <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2rem" }}>{t("title")}</h1>
           <span style={{ fontSize: "0.85rem", color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.05em" }}>
             {t("stats", { articles: status.totalArticles, meetings: allMeetings.length })}
           </span>

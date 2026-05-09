@@ -67,6 +67,8 @@ Required environment variables for the core application (usually set in `.env` o
 | `ADMIN_PASSWORD` | Password for the initial bootstrap admin user |
 | `WORKSPACE_NAME` | Display name of the initial workspace |
 | `WORKSPACE_SLUG` | URL slug identifier for the workspace |
+| `SEED_SCRIPTS` | Optional comma-separated seed scripts to run after the base seed at web startup |
+| `CORGTEX_AUTO_SEED_JNJ_DEMO` | Set to `true` only on demo/trial runtimes that should refresh the public J&J demo workspace on each deploy |
 
 **Model Provider Settings (Optional but recommended):**
 - `MODEL_PROVIDER`: Set to `openrouter` or `openai`

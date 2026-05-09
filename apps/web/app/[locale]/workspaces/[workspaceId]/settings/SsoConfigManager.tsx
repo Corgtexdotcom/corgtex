@@ -30,7 +30,7 @@ export function SsoConfigManager({
 
       {/* Google SSO */}
       <details style={{ marginBottom: 16 }}>
-        <summary className="nr-section-header" style={{ borderTop: "none", display: "inline-block", padding: 0, margin: 0, cursor: "pointer", color: googleConfig?.isEnabled ? "var(--accent)" : "inherit" }}>
+        <summary className="nr-hide-marker settings-disclosure-summary" style={{ color: googleConfig?.isEnabled ? "var(--accent)" : "inherit" }}>
           {googleConfig?.isEnabled ? t("ssoGoogleActive") : t("ssoGoogleDisabled")}
         </summary>
         <form action={upsertSsoConfigAction} className="stack nr-form-section" style={{ marginTop: 8 }}>
@@ -61,7 +61,7 @@ export function SsoConfigManager({
 
       {/* Microsoft SSO */}
       <details>
-        <summary className="nr-section-header" style={{ borderTop: "none", display: "inline-block", padding: 0, margin: 0, cursor: "pointer", color: microsoftConfig?.isEnabled ? "var(--accent)" : "inherit" }}>
+        <summary className="nr-hide-marker settings-disclosure-summary" style={{ color: microsoftConfig?.isEnabled ? "var(--accent)" : "inherit" }}>
           {microsoftConfig?.isEnabled ? t("ssoMicrosoftActive") : t("ssoMicrosoftDisabled")}
         </summary>
         <form action={upsertSsoConfigAction} className="stack nr-form-section" style={{ marginTop: 8 }}>

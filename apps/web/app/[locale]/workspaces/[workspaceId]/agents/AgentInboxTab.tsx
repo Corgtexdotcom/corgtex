@@ -32,9 +32,9 @@ export function AgentInboxTab({
               const lastStep = run.steps?.[run.steps.length - 1];
               
               return (
-                <div key={run.id} className="nr-item" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                <div key={run.id} className="agent-question-card" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
                   <div className="row">
-                    <span className="nr-tag">{run.agentKey}</span>
+                    <span className="tag neutral">{run.agentKey}</span>
                     <span className="nr-item-meta" style={{ fontSize: "0.82rem" }}>
                       {new Date(run.startedAt ?? run.createdAt).toLocaleString()}
                     </span>
@@ -46,7 +46,7 @@ export function AgentInboxTab({
                   </div>
 
                   {lastStep && (
-                    <div style={{ background: "var(--bg-subtle)", padding: 12, borderRadius: 8, border: "1px dashed var(--line)" }}>
+                    <div style={{ background: "var(--surface-sunken)", padding: 12, borderRadius: 8, border: "1px dashed var(--line)" }}>
                       <strong style={{ display: "block", marginBottom: 4 }}>{t("agentAsking")}</strong>
                       <div className="nr-excerpt" style={{ color: "var(--text)" }}>
                         {lastStep.outputJson?.question || t("waitingInput")}

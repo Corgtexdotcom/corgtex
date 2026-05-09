@@ -16,7 +16,7 @@ export function EmptyState({ title, description, icon, action, className = "" }:
           {icon}
         </div>
       )}
-      <h3 style={{ fontSize: "1.1rem", marginBottom: "8px", fontFamily: "var(--font-playfair)" }}>
+      <h3 style={{ fontSize: "1.1rem", marginBottom: "8px" }}>
         {title}
       </h3>
       <p className="muted" style={{ maxWidth: "400px", margin: "0 auto 24px", lineHeight: 1.5 }}>

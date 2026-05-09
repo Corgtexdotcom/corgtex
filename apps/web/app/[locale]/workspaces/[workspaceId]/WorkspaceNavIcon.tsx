@@ -1,0 +1,96 @@
+"use client";
+
+import {
+  Brain,
+  Building2,
+  CalendarDays,
+  CheckSquare,
+  CircleDot,
+  ClipboardList,
+  Command,
+  FileText,
+  Gauge,
+  Hexagon,
+  Home,
+  Landmark,
+  LogOut,
+  Menu,
+  MessageSquare,
+  PackageCheck,
+  Plus,
+  RefreshCw,
+  Settings,
+  Shield,
+  Target,
+  TriangleAlert,
+  UserCog,
+  UserPlus,
+  Users,
+  Wrench,
+  type LucideIcon,
+} from "lucide-react";
+import type { WorkspaceNavIconName } from "@/lib/nav-config";
+
+const ICONS: Record<WorkspaceNavIconName, LucideIcon> = {
+  home: Home,
+  goals: Target,
+  brain: Brain,
+  tools: Wrench,
+  built: PackageCheck,
+  members: Users,
+  tensions: TriangleAlert,
+  actions: CheckSquare,
+  meetings: CalendarDays,
+  relationships: UserPlus,
+  proposals: FileText,
+  circles: CircleDot,
+  cycles: RefreshCw,
+  finance: Landmark,
+  agents: Hexagon,
+  governance: Gauge,
+  audit: ClipboardList,
+  settings: Settings,
+};
+
+export type WorkspaceUtilityIconName =
+  | "ai"
+  | "add"
+  | "command"
+  | "logout"
+  | "menu"
+  | "platformAdmin"
+  | "userSettings"
+  | "workspace";
+
+const UTILITY_ICONS: Record<WorkspaceUtilityIconName, LucideIcon> = {
+  ai: MessageSquare,
+  add: Plus,
+  command: Command,
+  logout: LogOut,
+  menu: Menu,
+  platformAdmin: Shield,
+  userSettings: UserCog,
+  workspace: Building2,
+};
+
+export function WorkspaceNavIcon({
+  name,
+  className = "ws-nav-icon",
+}: {
+  name: WorkspaceNavIconName;
+  className?: string;
+}) {
+  const Icon = ICONS[name];
+  return <Icon aria-hidden="true" className={className} strokeWidth={1.9} />;
+}
+
+export function WorkspaceUtilityIcon({
+  name,
+  className = "ws-nav-icon",
+}: {
+  name: WorkspaceUtilityIconName;
+  className?: string;
+}) {
+  const Icon = UTILITY_ICONS[name];
+  return <Icon aria-hidden="true" className={className} strokeWidth={1.9} />;
+}

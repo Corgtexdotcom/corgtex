@@ -9,10 +9,10 @@ export type ActionListItem = {
 
 export const ACTION_STATUS_META: Record<ActionStatusFilter, {
   labelKey: "statusDraft" | "statusOpen" | "statusInProgress" | "statusCompleted" | "statusAll";
-  tagClass: "info" | "warning" | "success" | "";
+  tagClass: "info" | "neutral" | "success" | "";
 }> = {
   DRAFT: { labelKey: "statusDraft", tagClass: "info" },
-  OPEN: { labelKey: "statusOpen", tagClass: "warning" },
+  OPEN: { labelKey: "statusOpen", tagClass: "neutral" },
   IN_PROGRESS: { labelKey: "statusInProgress", tagClass: "info" },
   COMPLETED: { labelKey: "statusCompleted", tagClass: "success" },
   ALL: { labelKey: "statusAll", tagClass: "" },

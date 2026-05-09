@@ -16,6 +16,31 @@ function run(command, args, options = {}) {
   });
 }
 
+function flagEnabled(name) {
+  const value = process.env[name]?.trim().toLowerCase();
+  return value === "1" || value === "true" || value === "yes" || value === "on";
+}
+
+function configuredSeedScripts() {
+  const seedScripts = process.env.SEED_SCRIPTS
+    ? process.env.SEED_SCRIPTS.split(",").map((script) => script.trim()).filter(Boolean)
+    : [];
+
+  if (flagEnabled("CORGTEX_AUTO_SEED_JNJ_DEMO")) {
+    seedScripts.push("scripts/seed-jnj-demo.mjs");
+  }
+
+  const uniqueScripts = new Map();
+  for (const script of seedScripts) {
+    const resolved = path.resolve(rootDir, script);
+    if (!uniqueScripts.has(resolved)) {
+      uniqueScripts.set(resolved, script);
+    }
+  }
+
+  return [...uniqueScripts.values()];
+}
+
 console.log("[start-web] === Production Startup Sequence ===");
 
 try {
@@ -28,9 +53,7 @@ try {
   console.log("[start-web] Step 2: Running Production Bootstrap Seed");
   run(process.execPath, [path.join(rootDir, "prisma", "seed.mjs")]);
 
-  const seedScripts = process.env.SEED_SCRIPTS
-    ? process.env.SEED_SCRIPTS.split(",").map((script) => script.trim()).filter(Boolean)
-    : [];
+  const seedScripts = configuredSeedScripts();
 
   for (const script of seedScripts) {
     const resolved = path.resolve(rootDir, script);

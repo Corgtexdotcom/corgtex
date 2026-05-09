@@ -2,7 +2,6 @@ import { isGlobalOperator, listActorWorkspaces, countUnreadNotifications, listCo
 import { workspaceBranding, prisma } from "@corgtex/shared";
 import type { Metadata } from "next";
 import { logoutAction, requirePageActor } from "@/lib/auth";
-import { ChatInterface } from "./chat/ChatInterface";
 import { DemoTour } from "./DemoTour";
 import { DemoBanner } from "./DemoBanner";
 import { CommandPalette } from "./CommandPalette";
@@ -16,6 +15,7 @@ import { filterNavGroupsByWorkspaceAccess, getWorkspaceFeatureFlags } from "@/li
 import { MobileWorkspaceShell } from "./MobileWorkspaceShell";
 import { getControlPlaneHref } from "@/lib/control-plane-url";
 import { WorkspaceAddMenu } from "./WorkspaceAddMenu";
+import { WorkspaceChatRail } from "./WorkspaceChatRail";
 
 export const dynamic = "force-dynamic";
 
@@ -127,14 +127,7 @@ export default async function WorkspaceLayout({
         </div>
       </main>
 
-      <aside className="ws-agent-sidebar">
-        <ChatInterface
-          workspaceId={workspaceId}
-          conversations={conversationSummaries}
-          activeSessionId={null}
-          compact={true}
-        />
-      </aside>
+      <WorkspaceChatRail workspaceId={workspaceId} conversations={conversationSummaries} />
       {current?.slug === "jnj-demo" && (
         <DemoTour workspaceId={workspaceId} />
       )}
