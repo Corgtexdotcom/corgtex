@@ -1,10 +1,12 @@
-import type { FleetSnapshotKind, MeetingRecorderProvider, Prisma } from "@prisma/client";
+import type { FleetSnapshotKind, MeetingRecorderProvider, MemberRole, Prisma } from "@prisma/client";
 import { decryptSecret, encryptSecret, env, prisma } from "@corgtex/shared";
 import type { AgentActor, AppActor } from "@corgtex/shared";
 import { AppError, invariant } from "./errors";
 import { isGlobalOperator } from "./auth";
+import { createMember, deactivateMember, listMembersEnriched, resendMemberAccessLink, sendMemberSetupEmail, updateMember } from "./members";
 import { getMeetingRecorderMonthlyUsage, MEETING_RECORDERS_FEATURE_FLAG } from "./meeting-recorders";
 import { createControlPlaneAdapter } from "./control-plane-adapters";
+import { createRailwayClientFromEnv, upgradeRailwayCustomerRelease, type RailwayClient } from "./railway-client";
 
 const SUPPORT_ACTOR_LABEL = "Corgtex Support";
 const DEFAULT_RECORDER_BOT_NAME = "Corgtex Recorder";
@@ -15,6 +17,7 @@ const CONTROL_PLANE_CONTEXT_OPERATIONS = new Set(["sync_all", "sync_source", "di
 const CONTROL_PLANE_RELEASE_OPERATIONS = new Set(["prepare_upgrade"]);
 const CONTROL_PLANE_READ_SCOPE = "control-plane:read";
 export const CONTROL_PLANE_FLEET_SNAPSHOT_JOB_TYPE = "control-plane.fleet-snapshot";
+export const CONTROL_PLANE_RELEASE_DEPLOY_JOB_TYPE = "control-plane.release.deploy-latest";
 const CONTROL_PLANE_SNAPSHOT_KINDS = new Set<FleetSnapshotKind>([
   "HEALTH",
   "RELEASE",
@@ -26,7 +29,10 @@ const CONTROL_PLANE_SNAPSHOT_KINDS = new Set<FleetSnapshotKind>([
 
 const MUTATING_SUPPORT_ACTIONS = new Set([
   "members.invite",
+  "members.update",
   "members.deactivate",
+  "members.resend_access_link",
+  "feature_flags.set",
   "data_feeds.sync",
   "tool_links.upsert",
   "tool_links.archive",
@@ -39,7 +45,11 @@ const MUTATING_SUPPORT_ACTIONS = new Set([
 const SUPPORT_ACTION_TO_MCP_TOOL = {
   "members.list": "list_members",
   "members.invite": "create_member",
+  "members.update": "update_member",
   "members.deactivate": "deactivate_member",
+  "members.resend_access_link": "resend_member_access_link",
+  "feature_flags.list": "list_feature_flags",
+  "feature_flags.set": "set_feature_flag",
   "integrations.list": "list_integrations",
   "data_feeds.list": "list_data_sources",
   "data_feeds.sync": "sync_data_source",
@@ -57,6 +67,51 @@ const SUPPORT_ACTION_TO_MCP_TOOL = {
 export type SupportAction = keyof typeof SUPPORT_ACTION_TO_MCP_TOOL;
 
 type JsonRecord = Record<string, unknown>;
+
+export const CONTROL_PLANE_WORKSPACE_FEATURE_FLAGS = [
+  { flag: "GOALS", label: "Goals", description: "Goal trees, recognition, and progress tracking.", defaultEnabled: true },
+  { flag: "TOOL_LINKS", label: "Tools catalog", description: "Shared tool links, catalog approvals, and credentials.", defaultEnabled: false },
+  { flag: "FINANCE", label: "Finance", description: "Spend requests, ledgers, and finance workflows.", defaultEnabled: true },
+  { flag: "BUILD_ARTIFACTS", label: "Build artifacts", description: "Workspace build artifact publishing and review.", defaultEnabled: false },
+  { flag: "RELATIONSHIPS", label: "Relationships", description: "CRM, leads, and relationship workspace views.", defaultEnabled: true },
+  { flag: "CYCLES", label: "Cycles", description: "Planning cycles, updates, and allocations.", defaultEnabled: true },
+  { flag: "AGENT_GOVERNANCE", label: "Agent governance", description: "Agent registry, access, spend, and observability controls.", defaultEnabled: true },
+  { flag: "OS_METRICS", label: "OS metrics", description: "Governance health and operating-system metrics.", defaultEnabled: true },
+  { flag: "SETTINGS_GENERAL", label: "General settings", description: "General workspace configuration screens.", defaultEnabled: true },
+  { flag: "MULTILINGUAL", label: "Multilingual", description: "Locale switcher and translated workspace UI.", defaultEnabled: false },
+  { flag: "MEETING_RECORDERS", label: "Meeting recorders", description: "Managed meeting recorder entitlement and recorder config.", defaultEnabled: false },
+] as const;
+
+export type ControlPlaneWorkspaceFeatureFlag = typeof CONTROL_PLANE_WORKSPACE_FEATURE_FLAGS[number]["flag"];
+
+const CONTROL_PLANE_WORKSPACE_FEATURE_FLAG_SET = new Set<string>(
+  CONTROL_PLANE_WORKSPACE_FEATURE_FLAGS.map((definition) => definition.flag),
+);
+
+const CONTROL_PLANE_MEMBER_ROLES = new Set(["CONTRIBUTOR", "FACILITATOR", "FINANCE_STEWARD", "ADMIN"]);
+
+export type ControlPlaneFleetSort =
+  | "customer"
+  | "health"
+  | "release"
+  | "support"
+  | "region"
+  | "owner"
+  | "updated";
+
+export type ControlPlaneReleasePreflightCheck = {
+  key: string;
+  label: string;
+  ok: boolean;
+  detail: string;
+};
+
+export type ControlPlaneReleaseTarget = {
+  releaseImageTag: string;
+  releaseVersion: string | null;
+  webImage: string;
+  workerImage: string;
+};
 
 const managedWorkspaceSelect = {
   id: true,
@@ -211,6 +266,11 @@ function readPositiveInteger(value: string | undefined, fallback: number, max: n
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
   return Math.min(Math.floor(parsed), max);
+}
+
+function boundedInteger(value: number | null | undefined, fallback: number, min: number, max: number) {
+  const parsed = typeof value === "number" && Number.isFinite(value) ? Math.floor(value) : fallback;
+  return Math.min(Math.max(parsed, min), max);
 }
 
 function deploymentHealthStatus(status: string) {
@@ -540,12 +600,132 @@ export async function listControlPlaneDeployments(actor: AppActor) {
 
   const orphanedDeploymentRows = orphanedDeployments.map((deployment) => ({
     ...deployment,
+    customerAccount: null,
     hasDeployment: true,
     hasSupportCredential: Boolean(deployment.supportCredentialEnc),
     supportCredentialEnc: undefined,
   }));
 
   return [...accountRows, ...orphanedDeploymentRows];
+}
+
+function normalizedStatus(value: unknown) {
+  return typeof value === "string" ? value.toLowerCase() : "";
+}
+
+function latestSnapshotForKind(deployment: { fleetSnapshots?: Array<{ snapshotKind: FleetSnapshotKind; status: string; observedAt: Date; error?: string | null }> }, kind: FleetSnapshotKind) {
+  return deployment.fleetSnapshots?.find((snapshot) => snapshot.snapshotKind === kind) ?? null;
+}
+
+function fleetRowMatchesQuery(row: Awaited<ReturnType<typeof listControlPlaneDeployments>>[number], query: string) {
+  if (!query) return true;
+  return [
+    row.label,
+    row.customerSlug,
+    row.url,
+    row.environment,
+    row.region,
+    row.dataResidency,
+    row.supportOwnerEmail,
+    row.releaseImageTag,
+    row.releaseVersion,
+    row.customerAccount?.displayName,
+    row.customerAccount?.slug,
+    row.managedWorkspace?.name,
+    row.managedWorkspace?.slug,
+  ].some((value) => value?.toLowerCase().includes(query));
+}
+
+function fleetSortValue(row: Awaited<ReturnType<typeof listControlPlaneDeployments>>[number], sort: ControlPlaneFleetSort) {
+  if (sort === "customer") return row.label?.toLowerCase() ?? "";
+  if (sort === "health") return normalizedStatus(row.lastHealthStatus || latestSnapshotForKind(row, "HEALTH")?.status || row.provisioningStatus);
+  if (sort === "release") return (row.releaseImageTag || row.releaseVersion || "").toLowerCase();
+  if (sort === "support") return normalizedStatus(row.supportConnectorStatus || latestSnapshotForKind(row, "SUPPORT_READY")?.status);
+  if (sort === "region") return (row.region || "").toLowerCase();
+  if (sort === "owner") return (row.supportOwnerEmail || "").toLowerCase();
+  return row.updatedAt?.getTime?.() ?? row.createdAt?.getTime?.() ?? 0;
+}
+
+function compareFleetRows(
+  a: Awaited<ReturnType<typeof listControlPlaneDeployments>>[number],
+  b: Awaited<ReturnType<typeof listControlPlaneDeployments>>[number],
+  sort: ControlPlaneFleetSort,
+  direction: "asc" | "desc",
+) {
+  const av = fleetSortValue(a, sort);
+  const bv = fleetSortValue(b, sort);
+  const result = typeof av === "number" && typeof bv === "number"
+    ? av - bv
+    : String(av).localeCompare(String(bv));
+  return direction === "asc" ? result : -result;
+}
+
+export async function listControlPlaneFleetPage(actor: AppActor, params: {
+  query?: string | null;
+  health?: string | null;
+  support?: string | null;
+  region?: string | null;
+  owner?: string | null;
+  sort?: string | null;
+  direction?: string | null;
+  page?: number | null;
+  pageSize?: number | null;
+} = {}) {
+  const rows = await listControlPlaneDeployments(actor);
+  const query = params.query?.trim().toLowerCase() ?? "";
+  const health = params.health?.trim().toLowerCase() ?? "";
+  const support = params.support?.trim().toLowerCase() ?? "";
+  const region = params.region?.trim().toLowerCase() ?? "";
+  const owner = params.owner?.trim().toLowerCase() ?? "";
+  const sort = (["customer", "health", "release", "support", "region", "owner", "updated"].includes(params.sort ?? "")
+    ? params.sort
+    : "updated") as ControlPlaneFleetSort;
+  const direction = params.direction === "asc" ? "asc" : "desc";
+  const pageSize = boundedInteger(params.pageSize, 25, 10, 100);
+  const page = boundedInteger(params.page, 1, 1, Number.MAX_SAFE_INTEGER);
+
+  const filtered = rows.filter((row) => {
+    const healthValue = normalizedStatus(row.lastHealthStatus || latestSnapshotForKind(row, "HEALTH")?.status || row.provisioningStatus);
+    const supportValue = normalizedStatus(row.supportConnectorStatus || latestSnapshotForKind(row, "SUPPORT_READY")?.status);
+    return fleetRowMatchesQuery(row, query)
+      && (!health || healthValue === health)
+      && (!support || supportValue === support)
+      && (!region || row.region?.toLowerCase() === region)
+      && (!owner || row.supportOwnerEmail?.toLowerCase() === owner);
+  }).sort((a, b) => compareFleetRows(a, b, sort, direction));
+
+  const pageCount = Math.max(Math.ceil(filtered.length / pageSize), 1);
+  const currentPage = Math.min(page, pageCount);
+  const start = (currentPage - 1) * pageSize;
+  const items = filtered.slice(start, start + pageSize);
+  const regions = Array.from(new Set(rows.map((row) => row.region).filter(Boolean) as string[])).sort();
+  const owners = Array.from(new Set(rows.map((row) => row.supportOwnerEmail).filter(Boolean) as string[])).sort();
+
+  return {
+    items,
+    total: filtered.length,
+    page: currentPage,
+    pageSize,
+    pageCount,
+    filters: {
+      query,
+      health,
+      support,
+      region,
+      owner,
+      sort,
+      direction,
+      regions,
+      owners,
+    },
+    summary: {
+      totalCustomers: rows.length,
+      active: rows.filter((row) => row.provisioningStatus === "active").length,
+      attention: rows.filter((row) => normalizedStatus(row.lastHealthStatus) && normalizedStatus(row.lastHealthStatus) !== "ok").length,
+      supportReady: rows.filter((row) => Boolean(row.hasSupportCredential) && row.supportConnectorStatus !== "degraded").length,
+      releaseDrift: rows.filter((row) => row.lastHealthError?.includes("Release drift:")).length,
+    },
+  };
 }
 
 export async function getControlPlaneDeployment(actor: AppActor, deploymentId: string) {
@@ -601,6 +781,442 @@ async function getControlPlaneDeploymentWithWorkspace(actor: AppActor, deploymen
     ...deployment,
     hasSupportCredential: Boolean(deployment.supportCredentialEnc),
     supportCredentialEnc: undefined,
+  };
+}
+
+function requireKnownMemberRole(role: string): MemberRole {
+  invariant(CONTROL_PLANE_MEMBER_ROLES.has(role), 400, "INVALID_INPUT", "Unsupported member role.");
+  return role as MemberRole;
+}
+
+function normalizeMemberRow(member: {
+  id: string;
+  role: string;
+  isActive: boolean;
+  joinedAt?: Date | string | null;
+  user?: { id?: string; email?: string | null; displayName?: string | null };
+  roleAssignments?: Array<{ role?: { name?: string; circle?: { id?: string; name?: string } } }>;
+}) {
+  return {
+    id: member.id,
+    userId: member.user?.id ?? null,
+    email: member.user?.email ?? null,
+    displayName: member.user?.displayName ?? null,
+    role: member.role,
+    isActive: member.isActive,
+    joinedAt: member.joinedAt ?? null,
+    roleAssignments: (member.roleAssignments ?? []).map((assignment) => ({
+      roleName: assignment.role?.name ?? null,
+      circleId: assignment.role?.circle?.id ?? null,
+      circleName: assignment.role?.circle?.name ?? null,
+    })),
+  };
+}
+
+function normalizeRemoteMembers(summary: unknown) {
+  const value = summary && typeof summary === "object" && "members" in summary
+    ? (summary as { members?: unknown }).members
+    : summary;
+  return Array.isArray(value)
+    ? value.map((member) => normalizeMemberRow(member as Parameters<typeof normalizeMemberRow>[0]))
+    : [];
+}
+
+export async function listControlPlaneCustomerMembers(actor: AppActor, deploymentId: string) {
+  const deployment = await getControlPlaneDeploymentWithWorkspace(actor, deploymentId);
+  const adapter = createControlPlaneAdapter(deployment);
+
+  if (deployment.managedWorkspaceId) {
+    const members = await listMembersEnriched(deployment.managedWorkspaceId, { includeInactive: true });
+    return {
+      deploymentId,
+      accessMode: adapter.kind,
+      source: "managed_workspace" as const,
+      members: members.map(normalizeMemberRow),
+    };
+  }
+
+  invariant(adapter.canUseSupportConnector && deployment.hasSupportCredential, 400, "SUPPORT_CONNECTOR_REQUIRED", "Support connector is required to inspect remote members.");
+  const operation = await runCustomerSupportOperation(actor, {
+    deploymentId,
+    action: "members.list",
+    reason: "Read customer members from Ops Control Plane.",
+    arguments: { includeInactive: true },
+    remoteWorkspaceId: deployment.remoteWorkspaceId,
+  });
+
+  return {
+    deploymentId,
+    accessMode: adapter.kind,
+    source: "support_connector" as const,
+    operationId: operation.id,
+    members: normalizeRemoteMembers(operation.resultSummary),
+  };
+}
+
+export async function createControlPlaneCustomerMember(actor: AppActor, params: {
+  deploymentId: string;
+  email: string;
+  displayName?: string | null;
+  role: string;
+  reason?: string | null;
+}) {
+  requireControlPlaneScope(actor, "control-plane:access:write");
+  const reason = requireMutationReason(params.reason);
+  const role = requireKnownMemberRole(params.role);
+  const deployment = await getControlPlaneDeploymentWithWorkspace(actor, params.deploymentId);
+  const adapter = createControlPlaneAdapter(deployment);
+
+  if (deployment.managedWorkspaceId) {
+    const result = await createMember(actor, {
+      workspaceId: deployment.managedWorkspaceId,
+      email: params.email,
+      displayName: params.displayName ?? null,
+      role,
+      skipAdminCheck: true,
+    });
+    const emailStatus = await sendMemberSetupEmail({
+      email: result.user.email,
+      displayName: result.user.displayName,
+      token: result.token,
+      workspaceName: deployment.managedWorkspace?.name ?? deployment.label,
+    });
+    await recordCustomerDeploymentEvent(actor, params.deploymentId, "control_plane.access.member_created", {
+      reason,
+      source: "managed_workspace",
+      memberId: result.member.id,
+      email: result.user.email,
+      role,
+      emailStatus,
+    });
+    return {
+      deploymentId: params.deploymentId,
+      accessMode: adapter.kind,
+      source: "managed_workspace" as const,
+      member: normalizeMemberRow({ ...result.member, user: result.user }),
+      emailStatus,
+    };
+  }
+
+  invariant(adapter.canUseSupportConnector && deployment.hasSupportCredential, 400, "SUPPORT_CONNECTOR_REQUIRED", "Support connector is required to create remote members.");
+  const operation = await runCustomerSupportOperation(actor, {
+    deploymentId: params.deploymentId,
+    action: "members.invite",
+    reason,
+    arguments: {
+      email: params.email,
+      displayName: params.displayName ?? null,
+      role,
+      sendSetupEmail: true,
+    },
+    remoteWorkspaceId: deployment.remoteWorkspaceId,
+  });
+  await recordCustomerDeploymentEvent(actor, params.deploymentId, "control_plane.access.member_created", {
+    reason,
+    source: "support_connector",
+    email: params.email,
+    role,
+    operationId: operation.id,
+  });
+  return {
+    deploymentId: params.deploymentId,
+    accessMode: adapter.kind,
+    source: "support_connector" as const,
+    operation,
+  };
+}
+
+export async function resendControlPlaneCustomerMemberAccessLink(actor: AppActor, params: {
+  deploymentId: string;
+  memberId: string;
+  reason?: string | null;
+}) {
+  requireControlPlaneScope(actor, "control-plane:access:write");
+  const reason = requireMutationReason(params.reason);
+  const deployment = await getControlPlaneDeploymentWithWorkspace(actor, params.deploymentId);
+  const adapter = createControlPlaneAdapter(deployment);
+
+  if (deployment.managedWorkspaceId) {
+    const result = await resendMemberAccessLink(actor, {
+      workspaceId: deployment.managedWorkspaceId,
+      memberId: params.memberId,
+    });
+    const emailStatus = await sendMemberSetupEmail({
+      email: result.user.email,
+      displayName: result.user.displayName,
+      token: result.token,
+      workspaceName: deployment.managedWorkspace?.name ?? deployment.label,
+    });
+    await recordCustomerDeploymentEvent(actor, params.deploymentId, "control_plane.access.link_resent", {
+      reason,
+      source: "managed_workspace",
+      memberId: params.memberId,
+      email: result.user.email,
+      emailStatus,
+    });
+    return {
+      deploymentId: params.deploymentId,
+      accessMode: adapter.kind,
+      source: "managed_workspace" as const,
+      memberId: params.memberId,
+      emailStatus,
+    };
+  }
+
+  invariant(adapter.canUseSupportConnector && deployment.hasSupportCredential, 400, "SUPPORT_CONNECTOR_REQUIRED", "Support connector is required to resend remote member access links.");
+  const operation = await runCustomerSupportOperation(actor, {
+    deploymentId: params.deploymentId,
+    action: "members.resend_access_link",
+    reason,
+    arguments: { memberId: params.memberId, sendSetupEmail: true },
+    remoteWorkspaceId: deployment.remoteWorkspaceId,
+  });
+  await recordCustomerDeploymentEvent(actor, params.deploymentId, "control_plane.access.link_resent", {
+    reason,
+    source: "support_connector",
+    memberId: params.memberId,
+    operationId: operation.id,
+  });
+  return {
+    deploymentId: params.deploymentId,
+    accessMode: adapter.kind,
+    source: "support_connector" as const,
+    operation,
+  };
+}
+
+export async function updateControlPlaneCustomerMemberStatus(actor: AppActor, params: {
+  deploymentId: string;
+  memberId: string;
+  isActive: boolean;
+  reason?: string | null;
+}) {
+  requireControlPlaneScope(actor, "control-plane:access:write");
+  const reason = requireMutationReason(params.reason);
+  const deployment = await getControlPlaneDeploymentWithWorkspace(actor, params.deploymentId);
+  const adapter = createControlPlaneAdapter(deployment);
+
+  if (deployment.managedWorkspaceId) {
+    const updated = params.isActive
+      ? await updateMember(actor, { workspaceId: deployment.managedWorkspaceId, memberId: params.memberId, isActive: true })
+      : await deactivateMember(actor, { workspaceId: deployment.managedWorkspaceId, memberId: params.memberId });
+    await recordCustomerDeploymentEvent(actor, params.deploymentId, params.isActive ? "control_plane.access.member_reactivated" : "control_plane.access.member_deactivated", {
+      reason,
+      source: "managed_workspace",
+      memberId: params.memberId,
+    });
+    return {
+      deploymentId: params.deploymentId,
+      accessMode: adapter.kind,
+      source: "managed_workspace" as const,
+      member: normalizeMemberRow(updated),
+    };
+  }
+
+  invariant(adapter.canUseSupportConnector && deployment.hasSupportCredential, 400, "SUPPORT_CONNECTOR_REQUIRED", "Support connector is required to update remote member access.");
+  const operation = await runCustomerSupportOperation(actor, {
+    deploymentId: params.deploymentId,
+    action: params.isActive ? "members.update" : "members.deactivate",
+    reason,
+    arguments: params.isActive ? { memberId: params.memberId, isActive: true } : { memberId: params.memberId },
+    remoteWorkspaceId: deployment.remoteWorkspaceId,
+  });
+  await recordCustomerDeploymentEvent(actor, params.deploymentId, params.isActive ? "control_plane.access.member_reactivated" : "control_plane.access.member_deactivated", {
+    reason,
+    source: "support_connector",
+    memberId: params.memberId,
+    operationId: operation.id,
+  });
+  return {
+    deploymentId: params.deploymentId,
+    accessMode: adapter.kind,
+    source: "support_connector" as const,
+    operation,
+  };
+}
+
+function requireKnownWorkspaceFeatureFlag(flag: string): ControlPlaneWorkspaceFeatureFlag {
+  invariant(CONTROL_PLANE_WORKSPACE_FEATURE_FLAG_SET.has(flag), 400, "INVALID_INPUT", "Unsupported workspace feature flag.");
+  return flag as ControlPlaneWorkspaceFeatureFlag;
+}
+
+function featureFlagDefinition(flag: string) {
+  return CONTROL_PLANE_WORKSPACE_FEATURE_FLAGS.find((definition) => definition.flag === flag);
+}
+
+function normalizeRemoteFeatureFlags(summary: unknown) {
+  const value = summary && typeof summary === "object" && "flags" in summary
+    ? (summary as { flags?: unknown }).flags
+    : summary;
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((entry): entry is JsonRecord => Boolean(entry && typeof entry === "object"))
+    .map((entry) => {
+      const flag = typeof entry.flag === "string" ? entry.flag : "";
+      const definition = featureFlagDefinition(flag);
+      return {
+        flag,
+        label: typeof entry.label === "string" ? entry.label : definition?.label ?? flag,
+        description: typeof entry.description === "string" ? entry.description : definition?.description ?? "",
+        enabled: Boolean(entry.enabled),
+        defaultEnabled: Boolean(entry.defaultEnabled ?? definition?.defaultEnabled),
+        source: typeof entry.source === "string" ? entry.source : "support_connector",
+        updatedAt: typeof entry.updatedAt === "string" ? entry.updatedAt : null,
+        lastChangedAt: typeof entry.lastChangedAt === "string" ? entry.lastChangedAt : null,
+        lastChangedBy: typeof entry.lastChangedBy === "string" ? entry.lastChangedBy : null,
+      };
+    });
+}
+
+export async function listControlPlaneFeatureFlags(actor: AppActor, deploymentId: string) {
+  const deployment = await getControlPlaneDeploymentWithWorkspace(actor, deploymentId);
+  const adapter = createControlPlaneAdapter(deployment);
+
+  if (deployment.managedWorkspaceId) {
+    const [records, events] = await Promise.all([
+      prisma.workspaceFeatureFlag.findMany({
+        where: {
+          workspaceId: deployment.managedWorkspaceId,
+          flag: { in: CONTROL_PLANE_WORKSPACE_FEATURE_FLAGS.map((definition) => definition.flag) },
+        },
+        select: {
+          flag: true,
+          enabled: true,
+          config: true,
+          updatedAt: true,
+        },
+      }),
+      prisma.customerDeploymentEvent.findMany({
+        where: {
+          deploymentId,
+          action: "control_plane.feature_flag.updated",
+        },
+        orderBy: { createdAt: "desc" },
+        take: 50,
+        select: {
+          actorUserId: true,
+          meta: true,
+          createdAt: true,
+        },
+      }),
+    ]);
+    const recordMap = new Map(records.map((record) => [record.flag, record]));
+    const eventMap = new Map<string, typeof events[number]>();
+    for (const event of events) {
+      const flag = event.meta && typeof event.meta === "object" && "flag" in event.meta
+        ? String((event.meta as JsonRecord).flag)
+        : "";
+      if (flag && !eventMap.has(flag)) {
+        eventMap.set(flag, event);
+      }
+    }
+
+    return {
+      deploymentId,
+      accessMode: adapter.kind,
+      source: "managed_workspace" as const,
+      flags: CONTROL_PLANE_WORKSPACE_FEATURE_FLAGS.map((definition) => {
+        const record = recordMap.get(definition.flag);
+        const event = eventMap.get(definition.flag);
+        return {
+          ...definition,
+          enabled: record?.enabled ?? definition.defaultEnabled,
+          source: record ? "workspace_override" : "default",
+          config: record?.config ?? null,
+          updatedAt: record?.updatedAt ?? null,
+          lastChangedAt: event?.createdAt ?? null,
+          lastChangedBy: event?.actorUserId ?? null,
+        };
+      }),
+    };
+  }
+
+  invariant(adapter.canUseSupportConnector && deployment.hasSupportCredential, 400, "SUPPORT_CONNECTOR_REQUIRED", "Support connector is required to inspect remote feature flags.");
+  const operation = await runCustomerSupportOperation(actor, {
+    deploymentId,
+    action: "feature_flags.list",
+    reason: "Read customer feature flags from Ops Control Plane.",
+    arguments: {},
+    remoteWorkspaceId: deployment.remoteWorkspaceId,
+  });
+  return {
+    deploymentId,
+    accessMode: adapter.kind,
+    source: "support_connector" as const,
+    operationId: operation.id,
+    flags: normalizeRemoteFeatureFlags(operation.resultSummary),
+  };
+}
+
+export async function setControlPlaneFeatureFlag(actor: AppActor, params: {
+  deploymentId: string;
+  flag: string;
+  enabled: boolean;
+  reason?: string | null;
+}) {
+  requireControlPlaneScope(actor, "control-plane:features:write");
+  const reason = requireMutationReason(params.reason);
+  const flag = requireKnownWorkspaceFeatureFlag(params.flag);
+  const deployment = await getControlPlaneDeploymentWithWorkspace(actor, params.deploymentId);
+  const adapter = createControlPlaneAdapter(deployment);
+
+  if (deployment.managedWorkspaceId) {
+    const record = await prisma.workspaceFeatureFlag.upsert({
+      where: {
+        workspaceId_flag: {
+          workspaceId: deployment.managedWorkspaceId,
+          flag,
+        },
+      },
+      update: {
+        enabled: params.enabled,
+      },
+      create: {
+        workspaceId: deployment.managedWorkspaceId,
+        flag,
+        enabled: params.enabled,
+      },
+    });
+    await recordCustomerDeploymentEvent(actor, params.deploymentId, "control_plane.feature_flag.updated", {
+      reason,
+      source: "managed_workspace",
+      flag,
+      enabled: params.enabled,
+    });
+    return {
+      deploymentId: params.deploymentId,
+      accessMode: adapter.kind,
+      source: "managed_workspace" as const,
+      flag: record.flag,
+      enabled: record.enabled,
+    };
+  }
+
+  invariant(adapter.canUseSupportConnector && deployment.hasSupportCredential, 400, "SUPPORT_CONNECTOR_REQUIRED", "Support connector is required to change remote feature flags.");
+  const operation = await runCustomerSupportOperation(actor, {
+    deploymentId: params.deploymentId,
+    action: "feature_flags.set",
+    reason,
+    arguments: {
+      flag,
+      enabled: params.enabled,
+    },
+    remoteWorkspaceId: deployment.remoteWorkspaceId,
+  });
+  await recordCustomerDeploymentEvent(actor, params.deploymentId, "control_plane.feature_flag.updated", {
+    reason,
+    source: "support_connector",
+    flag,
+    enabled: params.enabled,
+    operationId: operation.id,
+  });
+  return {
+    deploymentId: params.deploymentId,
+    accessMode: adapter.kind,
+    source: "support_connector" as const,
+    flag,
+    enabled: params.enabled,
+    operation,
   };
 }
 
@@ -1413,6 +2029,438 @@ export async function runControlPlaneReleaseOperation(actor: AppActor, params: {
   }
 
   throw new AppError(400, "INVALID_INPUT", "Unsupported release operation.");
+}
+
+export function getControlPlaneLatestReleaseTarget(): ControlPlaneReleaseTarget | null {
+  const sharedImage = process.env.CONTROL_PLANE_LATEST_IMAGE?.trim()
+    || process.env.CONTROL_PLANE_LATEST_RELEASE_IMAGE_TAG?.trim()
+    || "";
+  const webImage = process.env.CONTROL_PLANE_LATEST_WEB_IMAGE?.trim() || sharedImage;
+  const workerImage = process.env.CONTROL_PLANE_LATEST_WORKER_IMAGE?.trim() || sharedImage;
+  const releaseImageTag = process.env.CONTROL_PLANE_LATEST_RELEASE_IMAGE_TAG?.trim() || webImage;
+  const releaseVersion = process.env.CONTROL_PLANE_LATEST_RELEASE_VERSION?.trim() || null;
+  if (!webImage || !workerImage || !releaseImageTag) {
+    return null;
+  }
+  return {
+    releaseImageTag,
+    releaseVersion,
+    webImage,
+    workerImage,
+  };
+}
+
+function releasePreflightForDeployment(deployment: {
+  customerSlug?: string | null;
+  deploymentStatus?: string | null;
+  provisioningStatus?: string | null;
+  releaseImageTag?: string | null;
+  releaseVersion?: string | null;
+  lastHealthStatus?: string | null;
+  lastHealthCheck?: Date | string | null;
+  lastHealthError?: string | null;
+  railwayProjectId?: string | null;
+  railwayEnvironmentId?: string | null;
+  railwayWebServiceId?: string | null;
+  railwayWorkerServiceId?: string | null;
+}, target: ControlPlaneReleaseTarget | null) {
+  const checks: ControlPlaneReleasePreflightCheck[] = [
+    {
+      key: "target_configured",
+      label: "Latest release configured",
+      ok: Boolean(target),
+      detail: target?.releaseImageTag ?? "Set CONTROL_PLANE_LATEST_WEB_IMAGE and CONTROL_PLANE_LATEST_WORKER_IMAGE.",
+    },
+    {
+      key: "not_suspended",
+      label: "Client is not suspended",
+      ok: deployment.deploymentStatus !== "SUSPENDED" && deployment.provisioningStatus !== "suspended",
+      detail: deployment.provisioningStatus || deployment.deploymentStatus || "Unknown deployment status.",
+    },
+    {
+      key: "railway_target",
+      label: "Railway target is complete",
+      ok: Boolean(deployment.railwayProjectId && deployment.railwayEnvironmentId && deployment.railwayWebServiceId && deployment.railwayWorkerServiceId),
+      detail: deployment.railwayProjectId ? "Project, environment, web, and worker services are recorded." : "Railway project and service IDs are required.",
+    },
+    {
+      key: "health_known",
+      label: "Health was checked",
+      ok: Boolean(deployment.lastHealthStatus && deployment.lastHealthCheck),
+      detail: deployment.lastHealthCheck ? `Last health status: ${deployment.lastHealthStatus}.` : "Run a health probe first.",
+    },
+    {
+      key: "rollback_ready",
+      label: "Rollback evidence exists",
+      ok: Boolean(deployment.releaseImageTag && deployment.lastHealthStatus === "ok"),
+      detail: deployment.releaseImageTag && deployment.lastHealthStatus === "ok"
+        ? `Current release ${deployment.releaseImageTag} is healthy.`
+        : "Current release and healthy runtime must be recorded before deploying.",
+    },
+    {
+      key: "target_differs",
+      label: "Target differs from current",
+      ok: Boolean(target && (target.releaseImageTag !== deployment.releaseImageTag || target.releaseVersion !== (deployment.releaseVersion ?? null))),
+      detail: target ? `Target ${target.releaseImageTag}; current ${deployment.releaseImageTag ?? "unknown"}.` : "No target release configured.",
+    },
+    {
+      key: "no_release_drift",
+      label: "No release drift is open",
+      ok: !deployment.lastHealthError?.includes("Release drift:"),
+      detail: deployment.lastHealthError?.includes("Release drift:") ? deployment.lastHealthError : "No release drift recorded.",
+    },
+  ];
+  return {
+    eligible: checks.every((check) => check.ok),
+    blockers: checks.filter((check) => !check.ok).map((check) => check.detail),
+    checks,
+  };
+}
+
+const DEPLOY_LATEST_EXPLICIT_SELECTION_BYPASS_KEYS = new Set([
+  "health_known",
+  "rollback_ready",
+  "no_release_drift",
+]);
+
+function canBypassDeployLatestPreflight(preflight: { checks: ControlPlaneReleasePreflightCheck[] }) {
+  const blockers = preflight.checks.filter((check) => !check.ok);
+  return blockers.length > 0 && blockers.every((check) => DEPLOY_LATEST_EXPLICIT_SELECTION_BYPASS_KEYS.has(check.key));
+}
+
+export async function getControlPlaneDeployLatestPreflight(actor: AppActor, deploymentId: string) {
+  const deployment = await getControlPlaneDeploymentWithWorkspace(actor, deploymentId);
+  const target = getControlPlaneLatestReleaseTarget();
+  return {
+    deploymentId,
+    target,
+    ...releasePreflightForDeployment(deployment, target),
+  };
+}
+
+export async function deployLatestControlPlaneRelease(actor: AppActor, params: {
+  deploymentId: string;
+  reason?: string | null;
+  force?: boolean | null;
+}, railwayClient: RailwayClient = createRailwayClientFromEnv()) {
+  requireControlPlaneScope(actor, "control-plane:releases:write");
+  const reason = requireMutationReason(params.reason);
+  const deployment = await getControlPlaneDeploymentWithWorkspace(actor, params.deploymentId);
+  const target = getControlPlaneLatestReleaseTarget();
+  const preflight = releasePreflightForDeployment(deployment, target);
+  if (!preflight.eligible && !params.force) {
+    throw new AppError(400, "RELEASE_PREFLIGHT_FAILED", preflight.blockers.join(" "));
+  }
+  invariant(target, 400, "LATEST_RELEASE_NOT_CONFIGURED", "Latest release target is not configured.");
+  invariant(deployment.customerSlug, 400, "INVALID_INPUT", "Customer deployment is missing a customer slug.");
+  invariant(deployment.railwayProjectId, 400, "INVALID_INPUT", "Customer deployment is missing a Railway project ID.");
+  invariant(deployment.railwayEnvironmentId, 400, "INVALID_INPUT", "Customer deployment is missing a Railway environment ID.");
+  invariant(deployment.railwayWebServiceId, 400, "INVALID_INPUT", "Customer deployment is missing a Railway web service ID.");
+  invariant(deployment.railwayWorkerServiceId, 400, "INVALID_INPUT", "Customer deployment is missing a Railway worker service ID.");
+
+  await prisma.$transaction(async (tx) => {
+    await tx.customerDeployment.update({
+      where: { id: params.deploymentId },
+      data: {
+        provisioningStatus: "provisioning",
+        releaseVersion: target.releaseVersion,
+        releaseImageTag: target.releaseImageTag,
+        lastProvisioningError: null,
+      },
+    });
+    if (deployment.customerAccountId) {
+      await tx.customerReleaseTarget.upsert({
+        where: {
+          deploymentId_targetReleaseImageTag: {
+            deploymentId: params.deploymentId,
+            targetReleaseImageTag: target.releaseImageTag,
+          },
+        },
+        update: {
+          targetReleaseVersion: target.releaseVersion,
+          status: "APPLYING",
+          evidence: redactObject({ reason, target, preflight }) as Prisma.InputJsonObject,
+          preparedByUserId: actorUserId(actor),
+          preparedAt: new Date(),
+        },
+        create: {
+          customerAccountId: deployment.customerAccountId,
+          deploymentId: params.deploymentId,
+          targetReleaseImageTag: target.releaseImageTag,
+          targetReleaseVersion: target.releaseVersion,
+          status: "APPLYING",
+          evidence: redactObject({ reason, target, preflight }) as Prisma.InputJsonObject,
+          preparedByUserId: actorUserId(actor),
+        },
+      });
+    }
+    await tx.customerDeploymentEvent.create({
+      data: {
+        deploymentId: params.deploymentId,
+        actorUserId: actorUserId(actor),
+        action: "control_plane.release.deploy_latest_started",
+        meta: redactObject({ reason, target, preflight, force: Boolean(params.force) }) as Prisma.InputJsonObject,
+      },
+    });
+  });
+
+  try {
+    const result = await upgradeRailwayCustomerRelease(railwayClient, {
+      projectId: deployment.railwayProjectId,
+      environmentId: deployment.railwayEnvironmentId,
+      webServiceId: deployment.railwayWebServiceId,
+      workerServiceId: deployment.railwayWorkerServiceId,
+      webImage: target.webImage,
+      workerImage: target.workerImage,
+      variables: {
+        CORGTEX_RELEASE_IMAGE_TAG: target.releaseImageTag,
+        ...(target.releaseVersion ? { CORGTEX_RELEASE_VERSION: target.releaseVersion } : {}),
+      },
+    });
+
+    await prisma.$transaction(async (tx) => {
+      await tx.customerDeployment.update({
+        where: { id: params.deploymentId },
+        data: {
+          provisioningStatus: "active",
+          releaseVersion: target.releaseVersion,
+          releaseImageTag: target.releaseImageTag,
+          lastReleaseCheck: new Date(),
+          lastProvisioningError: null,
+        },
+      });
+      if (deployment.customerAccountId) {
+        await tx.customerReleaseTarget.upsert({
+          where: {
+            deploymentId_targetReleaseImageTag: {
+              deploymentId: params.deploymentId,
+              targetReleaseImageTag: target.releaseImageTag,
+            },
+          },
+          update: {
+            status: "APPLIED",
+            appliedAt: new Date(),
+            evidence: redactObject({ reason, target, result }) as Prisma.InputJsonObject,
+          },
+          create: {
+            customerAccountId: deployment.customerAccountId,
+            deploymentId: params.deploymentId,
+            targetReleaseImageTag: target.releaseImageTag,
+            targetReleaseVersion: target.releaseVersion,
+            status: "APPLIED",
+            appliedAt: new Date(),
+            evidence: redactObject({ reason, target, result }) as Prisma.InputJsonObject,
+            preparedByUserId: actorUserId(actor),
+          },
+        });
+      }
+      await tx.customerDeploymentEvent.create({
+        data: {
+          deploymentId: params.deploymentId,
+          actorUserId: actorUserId(actor),
+          action: "control_plane.release.deploy_latest_succeeded",
+          meta: redactObject({ reason, target, result }) as Prisma.InputJsonObject,
+        },
+      });
+    });
+
+    return {
+      deploymentId: params.deploymentId,
+      status: "deployed" as const,
+      target,
+      result,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown Railway upgrade error.";
+    await prisma.$transaction(async (tx) => {
+      await tx.customerDeployment.update({
+        where: { id: params.deploymentId },
+        data: {
+          provisioningStatus: "degraded",
+          lastProvisioningError: message,
+        },
+      });
+      if (deployment.customerAccountId) {
+        await tx.customerReleaseTarget.upsert({
+          where: {
+            deploymentId_targetReleaseImageTag: {
+              deploymentId: params.deploymentId,
+              targetReleaseImageTag: target.releaseImageTag,
+            },
+          },
+          update: {
+            status: "FAILED",
+            evidence: redactObject({ reason, target, error: message }) as Prisma.InputJsonObject,
+          },
+          create: {
+            customerAccountId: deployment.customerAccountId,
+            deploymentId: params.deploymentId,
+            targetReleaseImageTag: target.releaseImageTag,
+            targetReleaseVersion: target.releaseVersion,
+            status: "FAILED",
+            evidence: redactObject({ reason, target, error: message }) as Prisma.InputJsonObject,
+            preparedByUserId: actorUserId(actor),
+          },
+        });
+      }
+      await tx.customerDeploymentEvent.create({
+        data: {
+          deploymentId: params.deploymentId,
+          actorUserId: actorUserId(actor),
+          action: "control_plane.release.deploy_latest_failed",
+          meta: redactObject({ reason, target, error: message }) as Prisma.InputJsonObject,
+        },
+      });
+    });
+    throw error;
+  }
+}
+
+export async function enqueueControlPlaneDeployLatestRollout(actor: AppActor, params: {
+  deploymentIds?: string[] | null;
+  allEligible?: boolean | null;
+  includeUnhealthy?: boolean | null;
+  reason?: string | null;
+  limit?: number | null;
+}) {
+  requireControlPlaneScope(actor, "control-plane:releases:write");
+  const reason = requireMutationReason(params.reason);
+  const target = getControlPlaneLatestReleaseTarget();
+  invariant(target, 400, "LATEST_RELEASE_NOT_CONFIGURED", "Latest release target is not configured.");
+
+  const requestedIds = Array.from(new Set((params.deploymentIds ?? []).map((id) => id.trim()).filter(Boolean)));
+  const limit = Math.min(Math.max(Math.floor(params.limit ?? 100), 1), 100);
+  const deployments = requestedIds.length
+    ? await prisma.customerDeployment.findMany({
+      where: { id: { in: requestedIds } },
+      orderBy: { label: "asc" },
+      take: limit,
+    })
+    : await prisma.customerDeployment.findMany({
+      where: {
+        customerAccountId: { not: null },
+        deploymentStatus: { notIn: ["RETIRED", "SUSPENDED"] },
+      },
+      orderBy: [
+        { lastHealthStatus: "asc" },
+        { label: "asc" },
+      ],
+      take: limit,
+    });
+
+  const bucket = Math.floor(Date.now() / (15 * 60 * 1000));
+  const results: Array<{ deploymentId: string; label: string; status: "queued" | "skipped" | "preflight_failed"; blockers: string[] }> = [];
+  await prisma.$transaction(async (tx) => {
+    for (const deployment of deployments) {
+      if (requestedIds.length) {
+        await requireControlPlaneAccess(actor, { deploymentId: deployment.id });
+      }
+      const preflight = releasePreflightForDeployment(deployment, target);
+      const bypassPreflight = Boolean(requestedIds.length && params.includeUnhealthy && canBypassDeployLatestPreflight(preflight));
+      const allowQueue = preflight.eligible || bypassPreflight;
+      if (!allowQueue) {
+        results.push({
+          deploymentId: deployment.id,
+          label: deployment.label,
+          status: params.allEligible ? "skipped" : "preflight_failed",
+          blockers: preflight.blockers,
+        });
+        await tx.customerDeploymentEvent.create({
+          data: {
+            deploymentId: deployment.id,
+            actorUserId: actorUserId(actor),
+            action: "control_plane.release.deploy_latest_skipped",
+            meta: redactObject({ reason, target, blockers: preflight.blockers }) as Prisma.InputJsonObject,
+          },
+        });
+        continue;
+      }
+
+      await tx.workflowJob.upsert({
+        where: {
+          dedupeKey: `control-plane:deploy-latest:${deployment.id}:${target.releaseImageTag}:${bucket}`,
+        },
+        update: {},
+        create: {
+          workspaceId: null,
+          eventId: null,
+          type: CONTROL_PLANE_RELEASE_DEPLOY_JOB_TYPE,
+          payload: {
+            deploymentId: deployment.id,
+            target,
+            reason,
+            force: bypassPreflight,
+            requestedBy: actorUserId(actor) ?? (isControlPlaneAgent(actor) ? actor.label : "control-plane"),
+          },
+          dedupeKey: `control-plane:deploy-latest:${deployment.id}:${target.releaseImageTag}:${bucket}`,
+        },
+      });
+      await tx.customerDeploymentEvent.create({
+        data: {
+          deploymentId: deployment.id,
+          actorUserId: actorUserId(actor),
+          action: "control_plane.release.deploy_latest_queued",
+          meta: redactObject({ reason, target, preflight }) as Prisma.InputJsonObject,
+        },
+      });
+      results.push({
+        deploymentId: deployment.id,
+        label: deployment.label,
+        status: "queued",
+        blockers: [],
+      });
+    }
+  });
+
+  return {
+    target,
+    requested: deployments.length,
+    queuedJobs: results.filter((result) => result.status === "queued").length,
+    results,
+  };
+}
+
+export async function listControlPlaneReleaseRolloutJobs(actor: AppActor, params: {
+  deploymentId?: string | null;
+  take?: number | null;
+} = {}) {
+  if (params.deploymentId) {
+    await requireControlPlaneAccess(actor, { deploymentId: params.deploymentId });
+  } else {
+    await requireControlPlaneAccess(actor);
+  }
+
+  const take = boundedInteger(params.take, 50, 1, 100);
+  const jobs = await prisma.workflowJob.findMany({
+    where: {
+      type: CONTROL_PLANE_RELEASE_DEPLOY_JOB_TYPE,
+      ...(params.deploymentId ? { payload: { path: ["deploymentId"], equals: params.deploymentId } } : {}),
+    },
+    orderBy: { createdAt: "desc" },
+    take,
+  });
+
+  return jobs.map((job) => ({
+    id: job.id,
+    status: job.status,
+    attempts: job.attempts,
+    error: job.error,
+    payload: redactObject((job.payload && typeof job.payload === "object" ? job.payload : {}) as JsonRecord),
+    createdAt: job.createdAt,
+    completedAt: job.completedAt,
+  }));
+}
+
+export async function runControlPlaneReleaseDeployJob(params: {
+  deploymentId: string;
+  reason?: string | null;
+  force?: boolean | null;
+}) {
+  return deployLatestControlPlaneRelease(controlPlaneWorkerActor, {
+    deploymentId: params.deploymentId,
+    reason: params.reason || "Queued Ops Control Plane deploy latest job.",
+    force: params.force,
+  });
 }
 
 type CustomerDeploymentHealthPayload = {

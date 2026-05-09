@@ -11,6 +11,7 @@ import { runDailyDigest, runSlackAgent, runSlackContextSummary, runSlackProactiv
 import {
   createWebhookDeliveries,
   CONTROL_PLANE_FLEET_SNAPSHOT_JOB_TYPE,
+  CONTROL_PLANE_RELEASE_DEPLOY_JOB_TYPE,
   deliverWebhook,
   postMeetingSummaryToAgendaThread,
   processSlackInboundEvent,
@@ -20,6 +21,7 @@ import {
   runMeetingAgendaThreadEdit,
   runMeetingInsightsExtraction,
   runControlPlaneFleetSnapshotJob,
+  runControlPlaneReleaseDeployJob,
   syncSlackPublicArchiveForWorkspace,
   type SlackAgentJobPayload,
 } from "@corgtex/domain";
@@ -305,6 +307,18 @@ async function handleJob(job: ClaimedJob) {
       reason: typeof payload.reason === "string" ? payload.reason : null,
       limit: typeof payload.limit === "number" ? payload.limit : null,
       concurrency: typeof payload.concurrency === "number" ? payload.concurrency : null,
+    });
+    return;
+  }
+
+  if (job.type === CONTROL_PLANE_RELEASE_DEPLOY_JOB_TYPE) {
+    if (typeof payload.deploymentId !== "string") {
+      throw new Error("Control Plane deploy-latest job is missing deploymentId.");
+    }
+    await runControlPlaneReleaseDeployJob({
+      deploymentId: payload.deploymentId,
+      reason: typeof payload.reason === "string" ? payload.reason : null,
+      force: typeof payload.force === "boolean" ? payload.force : null,
     });
     return;
   }

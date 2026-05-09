@@ -31,6 +31,7 @@ const CREDENTIAL_PREFIX = "agentc-";
 export const SCOPE_REGISTRY = {
   // ---- core read/chat ----
   "workspace:read":      { label: "Read workspace info",        group: "core",       default: true,  delegatedDefault: true,  description: "Workspace name, description, and aggregate counts." },
+  "workspace:write":     { label: "Manage workspace settings",  group: "core",       default: false, delegatedDefault: true,  description: "Manage workspace-level settings such as feature flags. Sensitive — same-role delegation." },
   "support:write":       { label: "Write support audit",        group: "core",       default: false, delegatedDefault: false, description: "Record Corgtex Support audit entries in a customer workspace. Sensitive — support-only." },
   "archive:read":        { label: "Read archived records",      group: "core",       default: false, delegatedDefault: true,  description: "List archived workspace artifacts for recovery and audit." },
   "archive:write":       { label: "Restore and purge archives", group: "core",       default: false, delegatedDefault: true,  description: "Restore archived records or purge eligible archived records. Sensitive — same-role delegation." },

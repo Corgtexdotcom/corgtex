@@ -42,9 +42,13 @@ import {
   returnGoalToDraft,
   deleteGoal,
   listMembers,
+  listMembersEnriched,
   createMember,
   updateMember,
   deactivateMember,
+  resendMemberAccessLink,
+  sendMemberSetupEmail,
+  CONTROL_PLANE_WORKSPACE_FEATURE_FLAGS,
   createDocument,
   listMeetings,
   getMeeting,
@@ -204,6 +208,9 @@ const TOOL_CAPABILITIES = {
   create_member: { scopes: ["members:write"], sensitive: true },
   update_member: { scopes: ["members:write"], sensitive: true },
   deactivate_member: { scopes: ["members:write"], destructive: true, sensitive: true },
+  resend_member_access_link: { scopes: ["members:write"], sensitive: true },
+  list_feature_flags: { scopes: ["workspace:read"] },
+  set_feature_flag: { scopes: ["workspace:write"], sensitive: true },
   list_meetings: { scopes: ["meetings:read"] },
   get_meeting: { scopes: ["meetings:read"] },
   upload_meeting: { scopes: ["meetings:write"], sensitive: true },
@@ -1503,19 +1510,24 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
 
   tool(
     "list_members",
-    "List all active members of the workspace with their roles.",
-    {},
-    async () => {
+    "List members of the workspace with their roles. Pass includeInactive to include deactivated members.",
+    {
+      includeInactive: z.boolean().optional(),
+    },
+    async ({ includeInactive }: { includeInactive?: boolean }) => {
       requireScope(sessionCtx, "members:read");
-      const members = await listMembers(workspaceId);
+      const members = includeInactive
+        ? await listMembersEnriched(workspaceId, { includeInactive: true })
+        : await listMembers(workspaceId);
       const simplified = members.map((m) => ({
         id: m.id,
         displayName: m.user.displayName,
         email: m.user.email,
         role: m.role,
         isActive: m.isActive,
+        joinedAt: m.joinedAt,
       }));
-      return jsonResult(simplified);
+      return jsonResult({ members: simplified });
     },
   );
 
@@ -1535,11 +1547,17 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         role: params.role,
         displayName: params.displayName,
       });
+      const emailStatus = await sendMemberSetupEmail({
+        email: result.user.email,
+        displayName: result.user.displayName,
+        token: result.token,
+      });
       return jsonResult({
         id: result.member.id,
         userId: result.user.id,
         email: result.user.email,
         role: result.member.role,
+        emailStatus,
         webUrl: webUrl(workspaceId, `/settings?tab=members`),
       });
     },
@@ -1571,6 +1589,84 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         isActive: updated.isActive,
         email: updated.user.email,
         webUrl: webUrl(workspaceId, `/settings?tab=members`),
+      });
+    },
+  );
+
+  tool(
+    "resend_member_access_link",
+    "Issue and email a fresh setup/reset access link for a workspace member. Admin-only. Does not expose or set a raw password.",
+    {
+      memberId: z.string(),
+    },
+    async ({ memberId }: { memberId: string }) => {
+      requireScope(sessionCtx, "members:write");
+      const result = await resendMemberAccessLink(actor, { workspaceId, memberId });
+      const emailStatus = await sendMemberSetupEmail({
+        email: result.user.email,
+        displayName: result.user.displayName,
+        token: result.token,
+      });
+      return jsonResult({
+        id: result.member.id,
+        email: result.user.email,
+        emailStatus,
+        webUrl: webUrl(workspaceId, `/settings?tab=members`),
+      });
+    },
+  );
+
+  tool(
+    "list_feature_flags",
+    "List workspace feature flags with defaults and current values.",
+    {},
+    async () => {
+      requireScope(sessionCtx, "workspace:read");
+      const records = await prisma.workspaceFeatureFlag.findMany({
+        where: {
+          workspaceId,
+          flag: { in: CONTROL_PLANE_WORKSPACE_FEATURE_FLAGS.map((definition) => definition.flag) },
+        },
+        select: { flag: true, enabled: true, updatedAt: true },
+      });
+      const recordMap = new Map(records.map((record) => [record.flag, record]));
+      return jsonResult({
+        flags: CONTROL_PLANE_WORKSPACE_FEATURE_FLAGS.map((definition) => {
+          const record = recordMap.get(definition.flag);
+          return {
+            ...definition,
+            enabled: record?.enabled ?? definition.defaultEnabled,
+            source: record ? "workspace_override" : "default",
+            updatedAt: record?.updatedAt ?? null,
+          };
+        }),
+      });
+    },
+  );
+
+  tool(
+    "set_feature_flag",
+    "Enable or disable one known workspace feature flag. Admin-only.",
+    {
+      flag: z.enum(CONTROL_PLANE_WORKSPACE_FEATURE_FLAGS.map((definition) => definition.flag) as [string, ...string[]]),
+      enabled: z.boolean(),
+    },
+    async ({ flag, enabled }: { flag: string; enabled: boolean }) => {
+      requireScope(sessionCtx, "workspace:write");
+      const record = await prisma.workspaceFeatureFlag.upsert({
+        where: {
+          workspaceId_flag: {
+            workspaceId,
+            flag,
+          },
+        },
+        update: { enabled },
+        create: { workspaceId, flag, enabled },
+      });
+      return jsonResult({
+        flag: record.flag,
+        enabled: record.enabled,
+        webUrl: webUrl(workspaceId, `/settings`),
       });
     },
   );

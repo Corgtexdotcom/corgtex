@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppActor } from "@corgtex/shared";
 
-const { prismaMock, encryptSecretMock, decryptSecretMock } = vi.hoisted(() => ({
+const { prismaMock, encryptSecretMock, decryptSecretMock, memberMocks } = vi.hoisted(() => ({
   prismaMock: {
     $transaction: vi.fn(async (operations: unknown[] | ((tx: unknown) => unknown)) => (
       typeof operations === "function" ? operations(prismaMock) : Promise.all(operations)
@@ -31,6 +31,7 @@ const { prismaMock, encryptSecretMock, decryptSecretMock } = vi.hoisted(() => ({
       update: vi.fn(),
     },
     workspaceFeatureFlag: {
+      findMany: vi.fn(),
       upsert: vi.fn(),
     },
     workspaceMeetingRecorderConfig: {
@@ -72,6 +73,14 @@ const { prismaMock, encryptSecretMock, decryptSecretMock } = vi.hoisted(() => ({
   },
   encryptSecretMock: vi.fn((value: string) => `encrypted:${value}`),
   decryptSecretMock: vi.fn(() => "support-token"),
+  memberMocks: {
+    listMembersEnriched: vi.fn(),
+    createMember: vi.fn(),
+    resendMemberAccessLink: vi.fn(),
+    sendMemberSetupEmail: vi.fn(),
+    updateMember: vi.fn(),
+    deactivateMember: vi.fn(),
+  },
 }));
 
 vi.mock("@corgtex/shared", () => ({
@@ -82,6 +91,15 @@ vi.mock("@corgtex/shared", () => ({
   prisma: prismaMock,
   encryptSecret: encryptSecretMock,
   decryptSecret: decryptSecretMock,
+}));
+
+vi.mock("./members", () => ({
+  listMembersEnriched: memberMocks.listMembersEnriched,
+  createMember: memberMocks.createMember,
+  resendMemberAccessLink: memberMocks.resendMemberAccessLink,
+  sendMemberSetupEmail: memberMocks.sendMemberSetupEmail,
+  updateMember: memberMocks.updateMember,
+  deactivateMember: memberMocks.deactivateMember,
 }));
 
 const operatorActor: AppActor = {
@@ -121,6 +139,8 @@ describe("control plane domain", () => {
     })) as any;
     prismaMock.customerAccount.findMany.mockResolvedValue([]);
     prismaMock.customerDeployment.findMany.mockResolvedValue([]);
+    prismaMock.workspaceFeatureFlag.findMany.mockResolvedValue([]);
+    memberMocks.sendMemberSetupEmail.mockResolvedValue({ status: "sent" });
   });
 
   it("allows global operators and rejects normal users without deployment access", async () => {
@@ -424,6 +444,190 @@ describe("control plane domain", () => {
     })).rejects.toMatchObject({
       status: 400,
       code: "MANAGED_WORKSPACE_REQUIRED",
+    });
+  });
+
+  it("lists managed customer members including inactive accounts", async () => {
+    const { listControlPlaneCustomerMembers } = await import("./control-plane");
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce({
+      id: "inst-1",
+      label: "Acme",
+      deploymentKind: "HOSTED",
+      managedWorkspaceId: "ws-1",
+      supportCredentialEnc: null,
+      managedWorkspace: { id: "ws-1", slug: "acme", name: "Acme", _count: {} },
+    });
+    memberMocks.listMembersEnriched.mockResolvedValueOnce([
+      {
+        id: "member-1",
+        role: "ADMIN",
+        isActive: false,
+        joinedAt: new Date("2026-01-02T00:00:00.000Z"),
+        user: { id: "user-1", email: "admin@acme.test", displayName: "Admin" },
+        roleAssignments: [{ role: { name: "Lead", circle: { id: "circle-1", name: "Ops" } } }],
+      },
+    ]);
+
+    const result = await listControlPlaneCustomerMembers(operatorActor, "inst-1");
+
+    expect(memberMocks.listMembersEnriched).toHaveBeenCalledWith("ws-1", { includeInactive: true });
+    expect(result).toMatchObject({
+      source: "managed_workspace",
+      members: [
+        {
+          id: "member-1",
+          email: "admin@acme.test",
+          role: "ADMIN",
+          isActive: false,
+          roleAssignments: [{ roleName: "Lead", circleName: "Ops" }],
+        },
+      ],
+    });
+  });
+
+  it("creates and resends managed member setup links without returning raw tokens", async () => {
+    const { createControlPlaneCustomerMember, resendControlPlaneCustomerMemberAccessLink } = await import("./control-plane");
+    const deployment = {
+      id: "inst-1",
+      label: "Acme",
+      deploymentKind: "HOSTED",
+      managedWorkspaceId: "ws-1",
+      supportCredentialEnc: null,
+      managedWorkspace: { id: "ws-1", slug: "acme", name: "Acme", _count: {} },
+    };
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce(deployment);
+    memberMocks.createMember.mockResolvedValueOnce({
+      member: { id: "member-2", role: "CONTRIBUTOR", isActive: true, joinedAt: new Date("2026-01-02T00:00:00.000Z") },
+      user: { id: "user-2", email: "new@acme.test", displayName: "New Member" },
+      token: "setup-token-secret",
+    });
+
+    const created = await createControlPlaneCustomerMember(operatorActor, {
+      deploymentId: "inst-1",
+      email: "new@acme.test",
+      displayName: "New Member",
+      role: "CONTRIBUTOR",
+      reason: "Customer approved onboarding.",
+    });
+
+    expect(memberMocks.createMember).toHaveBeenCalledWith(operatorActor, expect.objectContaining({
+      workspaceId: "ws-1",
+      email: "new@acme.test",
+      skipAdminCheck: true,
+    }));
+    expect(memberMocks.sendMemberSetupEmail).toHaveBeenCalledWith(expect.objectContaining({
+      email: "new@acme.test",
+      token: "setup-token-secret",
+      workspaceName: "Acme",
+    }));
+    expect(JSON.stringify(created)).not.toContain("setup-token-secret");
+    expect(prismaMock.customerDeploymentEvent.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        action: "control_plane.access.member_created",
+        meta: expect.objectContaining({
+          reason: "Customer approved onboarding.",
+          email: "new@acme.test",
+        }),
+      }),
+    }));
+
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce(deployment);
+    memberMocks.resendMemberAccessLink.mockResolvedValueOnce({
+      member: { id: "member-2", role: "CONTRIBUTOR", isActive: true },
+      user: { id: "user-2", email: "new@acme.test", displayName: "New Member" },
+      token: "reset-token-secret",
+    });
+
+    const resent = await resendControlPlaneCustomerMemberAccessLink(operatorActor, {
+      deploymentId: "inst-1",
+      memberId: "member-2",
+      reason: "Customer requested a fresh setup link.",
+    });
+
+    expect(memberMocks.resendMemberAccessLink).toHaveBeenCalledWith(operatorActor, {
+      workspaceId: "ws-1",
+      memberId: "member-2",
+    });
+    expect(JSON.stringify(resent)).not.toContain("reset-token-secret");
+    expect(prismaMock.customerDeploymentEvent.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        action: "control_plane.access.link_resent",
+        meta: expect.objectContaining({
+          reason: "Customer requested a fresh setup link.",
+          memberId: "member-2",
+        }),
+      }),
+    }));
+  });
+
+  it("lists and toggles managed workspace feature flags with audit evidence", async () => {
+    const { listControlPlaneFeatureFlags, setControlPlaneFeatureFlag } = await import("./control-plane");
+    const deployment = {
+      id: "inst-1",
+      label: "Acme",
+      deploymentKind: "HOSTED",
+      managedWorkspaceId: "ws-1",
+      supportCredentialEnc: null,
+      managedWorkspace: { id: "ws-1", slug: "acme", name: "Acme", _count: {} },
+    };
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce(deployment);
+    prismaMock.workspaceFeatureFlag.findMany.mockResolvedValueOnce([
+      { flag: "FINANCE", enabled: false, config: null, updatedAt: new Date("2026-01-03T00:00:00.000Z") },
+    ]);
+    prismaMock.customerDeploymentEvent.findMany.mockResolvedValueOnce([
+      {
+        actorUserId: "operator-1",
+        meta: { flag: "FINANCE" },
+        createdAt: new Date("2026-01-04T00:00:00.000Z"),
+      },
+    ]);
+
+    const flags = await listControlPlaneFeatureFlags(operatorActor, "inst-1");
+    const finance = flags.flags.find((flag) => flag.flag === "FINANCE");
+
+    expect(finance).toMatchObject({
+      enabled: false,
+      source: "workspace_override",
+      lastChangedBy: "operator-1",
+    });
+
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce(deployment);
+    prismaMock.workspaceFeatureFlag.upsert.mockResolvedValueOnce({
+      workspaceId: "ws-1",
+      flag: "FINANCE",
+      enabled: true,
+    });
+
+    const result = await setControlPlaneFeatureFlag(operatorActor, {
+      deploymentId: "inst-1",
+      flag: "FINANCE",
+      enabled: true,
+      reason: "Customer enabled finance module.",
+    });
+
+    expect(prismaMock.workspaceFeatureFlag.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        workspaceId_flag: {
+          workspaceId: "ws-1",
+          flag: "FINANCE",
+        },
+      },
+      update: { enabled: true },
+    }));
+    expect(prismaMock.customerDeploymentEvent.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        action: "control_plane.feature_flag.updated",
+        meta: expect.objectContaining({
+          reason: "Customer enabled finance module.",
+          flag: "FINANCE",
+          enabled: true,
+        }),
+      }),
+    }));
+    expect(result).toMatchObject({
+      source: "managed_workspace",
+      flag: "FINANCE",
+      enabled: true,
     });
   });
 
@@ -743,6 +947,227 @@ describe("control plane domain", () => {
       release: {
         rollbackReady: true,
       },
+    });
+  });
+
+  it("preflights and deploys the configured latest release for one customer", async () => {
+    vi.stubEnv("CONTROL_PLANE_LATEST_WEB_IMAGE", "ghcr.io/corgtex/web:new");
+    vi.stubEnv("CONTROL_PLANE_LATEST_WORKER_IMAGE", "ghcr.io/corgtex/worker:new");
+    vi.stubEnv("CONTROL_PLANE_LATEST_RELEASE_IMAGE_TAG", "release-new");
+    vi.stubEnv("CONTROL_PLANE_LATEST_RELEASE_VERSION", "0.2.0");
+    const { deployLatestControlPlaneRelease, getControlPlaneDeployLatestPreflight } = await import("./control-plane");
+    const deployment = {
+      id: "inst-1",
+      label: "Acme",
+      customerAccountId: "cust-1",
+      customerSlug: "acme",
+      deploymentKind: "HOSTED",
+      deploymentStatus: "ACTIVE",
+      managedWorkspaceId: null,
+      managedWorkspace: null,
+      supportCredentialEnc: null,
+      provisioningStatus: "active",
+      releaseImageTag: "release-old",
+      releaseVersion: "0.1.0",
+      lastHealthStatus: "ok",
+      lastHealthCheck: new Date("2026-01-01T00:00:00.000Z"),
+      lastHealthError: null,
+      railwayProjectId: "project-1",
+      railwayEnvironmentId: "env-1",
+      railwayWebServiceId: "web-1",
+      railwayWorkerServiceId: "worker-1",
+    };
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce(deployment);
+
+    const preflight = await getControlPlaneDeployLatestPreflight(operatorActor, "inst-1");
+
+    expect(preflight).toMatchObject({
+      eligible: true,
+      target: {
+        releaseImageTag: "release-new",
+        releaseVersion: "0.2.0",
+        webImage: "ghcr.io/corgtex/web:new",
+        workerImage: "ghcr.io/corgtex/worker:new",
+      },
+    });
+
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce(deployment);
+    const railwayClient = {
+      graphql: vi.fn()
+        .mockResolvedValueOnce({})
+        .mockResolvedValueOnce({})
+        .mockResolvedValueOnce({ web: "web-deploy-1", worker: "worker-deploy-1" }),
+    };
+
+    const result = await deployLatestControlPlaneRelease(operatorActor, {
+      deploymentId: "inst-1",
+      reason: "Deploy latest after production smoke passed.",
+    }, railwayClient);
+
+    expect(railwayClient.graphql).toHaveBeenCalledTimes(3);
+    expect(prismaMock.customerDeployment.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "inst-1" },
+      data: expect.objectContaining({
+        provisioningStatus: "provisioning",
+        releaseImageTag: "release-new",
+        releaseVersion: "0.2.0",
+      }),
+    }));
+    expect(prismaMock.customerDeployment.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "inst-1" },
+      data: expect.objectContaining({
+        provisioningStatus: "active",
+        releaseImageTag: "release-new",
+      }),
+    }));
+    expect(prismaMock.customerReleaseTarget.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      update: expect.objectContaining({ status: "APPLYING" }),
+    }));
+    expect(prismaMock.customerReleaseTarget.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      update: expect.objectContaining({ status: "APPLIED" }),
+    }));
+    expect(prismaMock.customerDeploymentEvent.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ action: "control_plane.release.deploy_latest_started" }),
+    }));
+    expect(prismaMock.customerDeploymentEvent.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ action: "control_plane.release.deploy_latest_succeeded" }),
+    }));
+    expect(result).toMatchObject({
+      deploymentId: "inst-1",
+      status: "deployed",
+      target: { releaseImageTag: "release-new" },
+    });
+  });
+
+  it("queues bulk deploy-latest jobs and skips clients that fail preflight", async () => {
+    vi.stubEnv("CONTROL_PLANE_LATEST_WEB_IMAGE", "ghcr.io/corgtex/web:new");
+    vi.stubEnv("CONTROL_PLANE_LATEST_WORKER_IMAGE", "ghcr.io/corgtex/worker:new");
+    vi.stubEnv("CONTROL_PLANE_LATEST_RELEASE_IMAGE_TAG", "release-new");
+    const { CONTROL_PLANE_RELEASE_DEPLOY_JOB_TYPE, enqueueControlPlaneDeployLatestRollout } = await import("./control-plane");
+    prismaMock.customerDeployment.findMany.mockResolvedValueOnce([
+      {
+        id: "inst-1",
+        label: "Acme",
+        customerAccountId: "cust-1",
+        deploymentStatus: "ACTIVE",
+        provisioningStatus: "active",
+        releaseImageTag: "release-old",
+        releaseVersion: null,
+        lastHealthStatus: "ok",
+        lastHealthCheck: new Date("2026-01-01T00:00:00.000Z"),
+        lastHealthError: null,
+        railwayProjectId: "project-1",
+        railwayEnvironmentId: "env-1",
+        railwayWebServiceId: "web-1",
+        railwayWorkerServiceId: "worker-1",
+      },
+      {
+        id: "inst-2",
+        label: "Broken",
+        customerAccountId: "cust-2",
+        deploymentStatus: "ACTIVE",
+        provisioningStatus: "active",
+        releaseImageTag: "release-old",
+        releaseVersion: null,
+        lastHealthStatus: "down",
+        lastHealthCheck: new Date("2026-01-01T00:00:00.000Z"),
+        lastHealthError: "Runtime down.",
+        railwayProjectId: "project-2",
+        railwayEnvironmentId: "env-2",
+        railwayWebServiceId: "web-2",
+        railwayWorkerServiceId: "worker-2",
+      },
+    ]);
+
+    const result = await enqueueControlPlaneDeployLatestRollout(operatorActor, {
+      allEligible: true,
+      reason: "Deploy latest to healthy customers.",
+      limit: 2,
+    });
+
+    expect(prismaMock.workflowJob.upsert).toHaveBeenCalledTimes(1);
+    expect(prismaMock.workflowJob.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({
+        workspaceId: null,
+        type: CONTROL_PLANE_RELEASE_DEPLOY_JOB_TYPE,
+        payload: expect.objectContaining({
+          deploymentId: "inst-1",
+          reason: "Deploy latest to healthy customers.",
+        }),
+      }),
+    }));
+    expect(result).toMatchObject({
+      requested: 2,
+      queuedJobs: 1,
+      results: [
+        { deploymentId: "inst-1", status: "queued" },
+        { deploymentId: "inst-2", status: "skipped" },
+      ],
+    });
+  });
+
+  it("only bypasses health blockers for explicitly selected bulk deploys", async () => {
+    vi.stubEnv("CONTROL_PLANE_LATEST_WEB_IMAGE", "ghcr.io/corgtex/web:new");
+    vi.stubEnv("CONTROL_PLANE_LATEST_WORKER_IMAGE", "ghcr.io/corgtex/worker:new");
+    vi.stubEnv("CONTROL_PLANE_LATEST_RELEASE_IMAGE_TAG", "release-new");
+    const { enqueueControlPlaneDeployLatestRollout } = await import("./control-plane");
+    prismaMock.customerDeployment.findMany.mockResolvedValueOnce([
+      {
+        id: "inst-1",
+        label: "Unhealthy",
+        customerAccountId: "cust-1",
+        deploymentStatus: "ACTIVE",
+        provisioningStatus: "active",
+        releaseImageTag: "release-old",
+        releaseVersion: null,
+        lastHealthStatus: "down",
+        lastHealthCheck: new Date("2026-01-01T00:00:00.000Z"),
+        lastHealthError: "Runtime down.",
+        railwayProjectId: "project-1",
+        railwayEnvironmentId: "env-1",
+        railwayWebServiceId: "web-1",
+        railwayWorkerServiceId: "worker-1",
+      },
+      {
+        id: "inst-2",
+        label: "Missing Railway",
+        customerAccountId: "cust-2",
+        deploymentStatus: "ACTIVE",
+        provisioningStatus: "active",
+        releaseImageTag: "release-old",
+        releaseVersion: null,
+        lastHealthStatus: "ok",
+        lastHealthCheck: new Date("2026-01-01T00:00:00.000Z"),
+        lastHealthError: null,
+        railwayProjectId: null,
+        railwayEnvironmentId: "env-2",
+        railwayWebServiceId: "web-2",
+        railwayWorkerServiceId: "worker-2",
+      },
+    ]);
+
+    const result = await enqueueControlPlaneDeployLatestRollout(operatorActor, {
+      deploymentIds: ["inst-1", "inst-2"],
+      includeUnhealthy: true,
+      reason: "Explicitly selected recovery rollout.",
+    });
+
+    expect(prismaMock.workflowJob.upsert).toHaveBeenCalledTimes(1);
+    expect(prismaMock.workflowJob.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({
+        payload: expect.objectContaining({
+          deploymentId: "inst-1",
+          force: true,
+        }),
+      }),
+    }));
+    expect(result).toMatchObject({
+      requested: 2,
+      queuedJobs: 1,
+      results: [
+        { deploymentId: "inst-1", status: "queued" },
+        { deploymentId: "inst-2", status: "preflight_failed" },
+      ],
     });
   });
 

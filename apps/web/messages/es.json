@@ -1162,6 +1162,14 @@
         "label": "Clientes",
         "detail": "Registros empresariales buscables y propiedad de soporte."
       },
+      "access": {
+        "label": "Acceso",
+        "detail": "Miembros, enlaces de configuración y estado de acceso del cliente."
+      },
+      "feature-flags": {
+        "label": "Feature Flags",
+        "detail": "Overrides de features por cliente y evidencia de auditoría."
+      },
       "context": {
         "label": "Contexto y Brain",
         "detail": "Frescura de fuentes, procedencia, estado de sincronización y riesgo de ingesta."
@@ -1455,7 +1463,23 @@
         "targetVersionPlaceholder": "Etiqueta de versión opcional",
         "reasonPlaceholder": "Preparar upgrade por etapas después del smoke de producción",
         "recordUpgradePreparation": "Registrar preparación de upgrade",
-        "recentPreparationAudit": "Auditoría reciente de preparación de release"
+        "recentPreparationAudit": "Auditoría reciente de preparación de release",
+        "deployLatest": "Desplegar latest",
+        "deployLatestDescription": "Ejecuta un despliegue protegido usando los tags configurados de imagen web y worker latest. El preflight debe pasar antes de habilitar este botón.",
+        "latestReleaseTarget": "Release destino latest",
+        "releaseNotConfigured": "Sin configurar",
+        "webImage": "Imagen web",
+        "workerImage": "Imagen worker",
+        "preflightPassed": "Preflight aprobado",
+        "preflightBlocked": "Preflight bloqueado",
+        "preflightCheckPassed": "Aprobado",
+        "preflightCheckBlocked": "Bloqueado",
+        "deployLatestReasonPlaceholder": "El cliente aprobó el rollout latest",
+        "deployLatestToClient": "Desplegar latest a este cliente",
+        "resolvePreflightBlockers": "Resuelve los bloqueos anteriores antes de desplegar latest desde la UI.",
+        "recentRollouts": "Trabajos de rollout recientes",
+        "rolloutAttempts": "{count} intentos",
+        "noRecentRollouts": "Aún no hay trabajos deploy-latest registrados para este cliente."
       },
       "support": {
         "connectorTitle": "Conector de soporte",

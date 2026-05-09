@@ -2,21 +2,31 @@ import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import {
   configureControlPlaneMeetingRecorderIntegration,
+  createControlPlaneCustomerMember,
+  deployLatestControlPlaneRelease,
   enqueueControlPlaneFleetSnapshots,
+  enqueueControlPlaneDeployLatestRollout,
   fetchCustomerSupportSnapshot,
+  getControlPlaneDeployLatestPreflight,
   getControlPlaneAiGovernanceStatus,
   getControlPlaneContextHealth,
   getControlPlaneDeployment,
   getControlPlaneIntegrationStatus,
   getControlPlaneReleaseStatus,
+  listControlPlaneCustomerMembers,
   listControlPlaneDeployments,
+  listControlPlaneFeatureFlags,
+  listControlPlaneReleaseRolloutJobs,
   probeControlPlaneDeploymentHealth,
   requireControlPlaneAccess,
   requireControlPlaneScope,
   refreshControlPlaneFleetSnapshots,
+  resendControlPlaneCustomerMemberAccessLink,
   runControlPlaneContextOperation,
   runControlPlaneReleaseOperation,
   runCustomerSupportOperation,
+  setControlPlaneFeatureFlag,
+  updateControlPlaneCustomerMemberStatus,
 } from "@corgtex/domain";
 import type { SupportAction } from "@corgtex/domain";
 import { resolveControlPlaneRequestActor } from "@/lib/auth";
@@ -60,6 +70,77 @@ const tools = [
     name: "get_release_status",
     description: "Get release, provisioning, health, and rollback-readiness status.",
     inputSchema: { type: "object", properties: { deploymentId: { type: "string" } }, required: ["deploymentId"] },
+  },
+  {
+    name: "get_deploy_latest_preflight",
+    description: "Check whether one customer can deploy the configured latest release target.",
+    inputSchema: { type: "object", properties: { deploymentId: { type: "string" } }, required: ["deploymentId"] },
+  },
+  {
+    name: "list_customer_members",
+    description: "List all active and inactive members for a customer deployment.",
+    inputSchema: { type: "object", properties: { deploymentId: { type: "string" } }, required: ["deploymentId"] },
+  },
+  {
+    name: "create_customer_member",
+    description: "Create a customer member and email a setup link. Does not expose or set raw passwords.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        deploymentId: { type: "string" },
+        email: { type: "string" },
+        displayName: { type: "string" },
+        role: { type: "string" },
+        reason: { type: "string" },
+      },
+      required: ["deploymentId", "email", "role", "reason"],
+    },
+  },
+  {
+    name: "resend_customer_member_access_link",
+    description: "Email a fresh setup/reset access link for a customer member.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        deploymentId: { type: "string" },
+        memberId: { type: "string" },
+        reason: { type: "string" },
+      },
+      required: ["deploymentId", "memberId", "reason"],
+    },
+  },
+  {
+    name: "update_customer_member_status",
+    description: "Deactivate or reactivate a customer member.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        deploymentId: { type: "string" },
+        memberId: { type: "string" },
+        isActive: { type: "boolean" },
+        reason: { type: "string" },
+      },
+      required: ["deploymentId", "memberId", "isActive", "reason"],
+    },
+  },
+  {
+    name: "list_customer_feature_flags",
+    description: "List customer workspace feature flags, defaults, sources, and audit context.",
+    inputSchema: { type: "object", properties: { deploymentId: { type: "string" } }, required: ["deploymentId"] },
+  },
+  {
+    name: "set_customer_feature_flag",
+    description: "Enable or disable a customer workspace feature flag.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        deploymentId: { type: "string" },
+        flag: { type: "string" },
+        enabled: { type: "boolean" },
+        reason: { type: "string" },
+      },
+      required: ["deploymentId", "flag", "enabled", "reason"],
+    },
   },
   {
     name: "configure_customer_integration",
@@ -138,6 +219,45 @@ const tools = [
     },
   },
   {
+    name: "deploy_latest_release",
+    description: "Deploy the configured latest release to one customer after preflight checks.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        deploymentId: { type: "string" },
+        reason: { type: "string" },
+        force: { type: "boolean" },
+      },
+      required: ["deploymentId", "reason"],
+    },
+  },
+  {
+    name: "deploy_latest_release_bulk",
+    description: "Queue deploy-latest rollout jobs for selected or eligible customer deployments.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        deploymentIds: { type: "array", items: { type: "string" } },
+        allEligible: { type: "boolean" },
+        includeUnhealthy: { type: "boolean" },
+        reason: { type: "string" },
+        limit: { type: "number" },
+      },
+      required: ["reason"],
+    },
+  },
+  {
+    name: "get_rollout_status",
+    description: "List recent deploy-latest rollout jobs and statuses.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        deploymentId: { type: "string" },
+        take: { type: "number" },
+      },
+    },
+  },
+  {
     name: "run_customer_support_operation",
     description: "Run an audited support action against a customer deployment.",
     inputSchema: {
@@ -160,6 +280,13 @@ const toolScopes: Record<string, string> = {
   get_context_health: "control-plane:read",
   get_ai_governance_status: "control-plane:read",
   get_release_status: "control-plane:read",
+  get_deploy_latest_preflight: "control-plane:read",
+  list_customer_members: "control-plane:read",
+  create_customer_member: "control-plane:access:write",
+  resend_customer_member_access_link: "control-plane:access:write",
+  update_customer_member_status: "control-plane:access:write",
+  list_customer_feature_flags: "control-plane:read",
+  set_customer_feature_flag: "control-plane:features:write",
   refresh_customer_deployment_snapshot: "control-plane:support:write",
   configure_customer_integration: "control-plane:integrations:write",
   run_context_sync: "control-plane:context:write",
@@ -167,6 +294,9 @@ const toolScopes: Record<string, string> = {
   refresh_fleet_snapshots: "control-plane:fleet:write",
   enqueue_fleet_snapshot_jobs: "control-plane:fleet:write",
   prepare_release_upgrade: "control-plane:releases:write",
+  deploy_latest_release: "control-plane:releases:write",
+  deploy_latest_release_bulk: "control-plane:releases:write",
+  get_rollout_status: "control-plane:read",
   run_customer_support_operation: "control-plane:support:write",
 };
 
@@ -285,6 +415,47 @@ export async function POST(request: NextRequest) {
     if (name === "get_release_status") {
       return rpcResult(id, textContent(await getControlPlaneReleaseStatus(actor, String(args.deploymentId ?? ""))));
     }
+    if (name === "get_deploy_latest_preflight") {
+      return rpcResult(id, textContent(await getControlPlaneDeployLatestPreflight(actor, argString(args, "deploymentId"))));
+    }
+    if (name === "list_customer_members") {
+      return rpcResult(id, textContent(await listControlPlaneCustomerMembers(actor, argString(args, "deploymentId"))));
+    }
+    if (name === "create_customer_member") {
+      return rpcResult(id, textContent(await createControlPlaneCustomerMember(actor, {
+        deploymentId: argString(args, "deploymentId"),
+        email: argString(args, "email"),
+        displayName: argOptionalString(args, "displayName"),
+        role: argString(args, "role") || "CONTRIBUTOR",
+        reason: argString(args, "reason"),
+      })));
+    }
+    if (name === "resend_customer_member_access_link") {
+      return rpcResult(id, textContent(await resendControlPlaneCustomerMemberAccessLink(actor, {
+        deploymentId: argString(args, "deploymentId"),
+        memberId: argString(args, "memberId"),
+        reason: argString(args, "reason"),
+      })));
+    }
+    if (name === "update_customer_member_status") {
+      return rpcResult(id, textContent(await updateControlPlaneCustomerMemberStatus(actor, {
+        deploymentId: argString(args, "deploymentId"),
+        memberId: argString(args, "memberId"),
+        isActive: argBoolean(args, "isActive", false),
+        reason: argString(args, "reason"),
+      })));
+    }
+    if (name === "list_customer_feature_flags") {
+      return rpcResult(id, textContent(await listControlPlaneFeatureFlags(actor, argString(args, "deploymentId"))));
+    }
+    if (name === "set_customer_feature_flag") {
+      return rpcResult(id, textContent(await setControlPlaneFeatureFlag(actor, {
+        deploymentId: argString(args, "deploymentId"),
+        flag: argString(args, "flag"),
+        enabled: argBoolean(args, "enabled", false),
+        reason: argString(args, "reason"),
+      })));
+    }
     if (name === "configure_customer_integration") {
       if (argString(args, "integrationKey") !== "meeting_recorders") {
         return rpcError(id, -32602, "Unsupported integration key.");
@@ -339,6 +510,28 @@ export async function POST(request: NextRequest) {
         targetReleaseImageTag: argString(args, "targetReleaseImageTag"),
         targetReleaseVersion: argOptionalString(args, "targetReleaseVersion"),
         reason: argString(args, "reason"),
+      })));
+    }
+    if (name === "deploy_latest_release") {
+      return rpcResult(id, textContent(await deployLatestControlPlaneRelease(actor, {
+        deploymentId: argString(args, "deploymentId"),
+        reason: argString(args, "reason"),
+        force: argBoolean(args, "force", false),
+      })));
+    }
+    if (name === "deploy_latest_release_bulk") {
+      return rpcResult(id, textContent(await enqueueControlPlaneDeployLatestRollout(actor, {
+        deploymentIds: argStringArray(args, "deploymentIds"),
+        allEligible: argBoolean(args, "allEligible", true),
+        includeUnhealthy: argBoolean(args, "includeUnhealthy", false),
+        limit: argNumber(args, "limit", 100),
+        reason: argString(args, "reason"),
+      })));
+    }
+    if (name === "get_rollout_status") {
+      return rpcResult(id, textContent(await listControlPlaneReleaseRolloutJobs(actor, {
+        deploymentId: argOptionalString(args, "deploymentId"),
+        take: argNumber(args, "take", 50),
       })));
     }
     if (name === "run_customer_support_operation") {
