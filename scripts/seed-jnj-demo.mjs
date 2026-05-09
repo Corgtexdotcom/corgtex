@@ -1,5 +1,5 @@
 import { PrismaClient } from "@prisma/client";
-import { randomBytes, scryptSync } from "node:crypto";
+import { randomBytes, randomUUID, scryptSync } from "node:crypto";
 
 const prisma = new PrismaClient();
 
@@ -14,6 +14,10 @@ function hashPassword(password) {
 
 function slugify(text) {
   return text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 120);
+}
+
+function uuid() {
+  return randomUUID();
 }
 
 const nDaysAgo = (days) => {
@@ -298,6 +302,136 @@ const SPENDS = [
   { desc: "Patent Filing – Novel CAR-T Vector", cat: "Legal", vendor: "Fish & Richardson", amountCents: 6500000, status: "RESOLVED", resolutionOutcome: "APPROVED", paid: true }
 ];
 
+const SHOWCASE_GOALS = [
+  {
+    title: "Ship Agent Governance v2",
+    descriptionMd: "Complete the agent registry, observability traces, spend controls, and access management features.",
+    level: "COMPANY",
+    cadence: "QUARTERLY",
+    status: "ON_TRACK",
+    progressPercent: 72,
+    targetDate: new Date("2026-06-30"),
+  },
+  {
+    title: "Onboard 5 Enterprise Pilots",
+    descriptionMd: "Convert pipeline prospects into active pilot deployments with full governance setup.",
+    level: "COMPANY",
+    cadence: "QUARTERLY",
+    status: "ON_TRACK",
+    progressPercent: 40,
+    targetDate: new Date("2026-06-30"),
+  },
+  {
+    title: "Reduce Agent Cost per Workspace by 30%",
+    descriptionMd: "Optimize model routing, caching, and token budgets to cut per-workspace AI spend.",
+    level: "COMPANY",
+    cadence: "QUARTERLY",
+    status: "ON_TRACK",
+    progressPercent: 91,
+    targetDate: new Date("2026-05-15"),
+  },
+];
+
+const SHOWCASE_AGENTS = [
+  {
+    agentKey: "slack-agent",
+    displayName: "Slack Agent",
+    purposeMd: "Interprets natural-language Slack messages and converts them into Corgtex work items or answers workspace knowledge questions.",
+  },
+  {
+    agentKey: "daily-digest",
+    displayName: "Daily Digest Agent",
+    purposeMd: "Synthesizes organizational activity from conversations, Slack, pull requests, and meetings into personalized daily briefings.",
+  },
+  {
+    agentKey: "meeting-summary",
+    displayName: "Meeting Summary Agent",
+    purposeMd: "Processes meeting transcripts to extract decisions, action items, and tensions with reviewable evidence.",
+  },
+  {
+    agentKey: "advice-routing",
+    displayName: "Advice Routing Agent",
+    purposeMd: "Routes proposals to relevant advisors based on expertise, circle membership, and consent-process policy.",
+  },
+  {
+    agentKey: "crm-lead-enrichment",
+    displayName: "CRM Lead Enrichment Agent",
+    purposeMd: "Enriches inbound demo and pilot leads with public company context so the pipeline can be prioritized.",
+  },
+];
+
+const SHOWCASE_AGENT_RUNS = [
+  {
+    agentKey: "daily-digest",
+    goal: "Generate personalized daily digest for all workspace members",
+    status: "COMPLETED",
+    triggerType: "SCHEDULE",
+    durationMs: 12400,
+    hoursAgo: 14,
+  },
+  {
+    agentKey: "slack-agent",
+    goal: "Interpret Slack request and create action: follow up with APAC vendor",
+    status: "COMPLETED",
+    triggerType: "EVENT",
+    durationMs: 3200,
+    hoursAgo: 10,
+  },
+  {
+    agentKey: "meeting-summary",
+    goal: "Extract insights from Weekly Operations Sync transcript",
+    status: "COMPLETED",
+    triggerType: "EVENT",
+    durationMs: 8700,
+    hoursAgo: 8,
+  },
+  {
+    agentKey: "advice-routing",
+    goal: "Route proposal to domain experts: async consent for standard governance",
+    status: "COMPLETED",
+    triggerType: "EVENT",
+    durationMs: 4100,
+    hoursAgo: 6,
+  },
+  {
+    agentKey: "crm-lead-enrichment",
+    goal: "Enrich lead data for Meridian Group using public sources",
+    status: "COMPLETED",
+    triggerType: "SCHEDULE",
+    durationMs: 6500,
+    hoursAgo: 4,
+  },
+  {
+    agentKey: "slack-agent",
+    goal: "Answer workspace question: What is our current procurement policy?",
+    status: "COMPLETED",
+    triggerType: "EVENT",
+    durationMs: 2800,
+    hoursAgo: 2,
+  },
+  {
+    agentKey: "crm-lead-enrichment",
+    goal: "Enrich lead data for Horizon Capital Partners",
+    status: "WAITING_APPROVAL",
+    triggerType: "SCHEDULE",
+    durationMs: null,
+    hoursAgo: 1,
+  },
+];
+
+const SHOWCASE_AUDIT_EVENTS = [
+  { action: "proposal.published", entityType: "Proposal" },
+  { action: "action.created", entityType: "Action" },
+  { action: "tension.published", entityType: "Tension" },
+  { action: "meeting.agenda.posted", entityType: "Meeting" },
+  { action: "agent.run.completed", entityType: "AgentRun" },
+  { action: "brain.article.updated", entityType: "BrainArticle" },
+  { action: "action.status.changed", entityType: "Action" },
+  { action: "recognition.created", entityType: "Recognition" },
+  { action: "agent.run.waiting_approval", entityType: "AgentRun" },
+  { action: "goal.progress.updated", entityType: "Goal" },
+];
+
 const CONSTITUTION = `# Our Credo & Organizational Constitution
 
 ## Mission
@@ -343,6 +477,216 @@ We must work with our suppliers and distributors to ensure they share our commit
 ### 10. Courageous Investment
 New equipment must be purchased, new facilities provided, and new products launched. We must prepare for adverse times while investing boldly in the future.
 `;
+
+async function seedShowcaseData({ wsId, memberMappings }) {
+  const admin = memberMappings["jduato"] ?? memberMappings["demo"];
+  const activeMembers = Object.values(memberMappings);
+
+  for (const [index, goal] of SHOWCASE_GOALS.entries()) {
+    const existing = await prisma.goal.findFirst({
+      where: { workspaceId: wsId, title: goal.title },
+    });
+    const data = {
+      workspaceId: wsId,
+      title: goal.title,
+      descriptionMd: goal.descriptionMd,
+      level: goal.level,
+      cadence: goal.cadence,
+      status: goal.status,
+      progressPercent: goal.progressPercent,
+      targetDate: goal.targetDate,
+      ownerMemberId: admin.memberId,
+      sortOrder: index,
+      archivedAt: null,
+      archivedByUserId: null,
+      archiveReason: null,
+    };
+
+    if (existing) {
+      await prisma.goal.update({ where: { id: existing.id }, data });
+    } else {
+      await prisma.goal.create({
+        data: {
+          id: `${wsId}-goal-${slugify(goal.title)}`,
+          ...data,
+        },
+      });
+    }
+  }
+  console.log(`✅ ${SHOWCASE_GOALS.length} Goals refreshed`);
+
+  for (const agent of SHOWCASE_AGENTS) {
+    await prisma.agentIdentity.upsert({
+      where: { workspaceId_agentKey: { workspaceId: wsId, agentKey: agent.agentKey } },
+      update: {
+        displayName: agent.displayName,
+        purposeMd: agent.purposeMd,
+        memberType: "INTERNAL",
+        isActive: true,
+        archivedAt: null,
+        archivedByUserId: null,
+        archiveReason: null,
+      },
+      create: {
+        id: `${wsId}-agent-${slugify(agent.agentKey)}`,
+        workspaceId: wsId,
+        agentKey: agent.agentKey,
+        displayName: agent.displayName,
+        purposeMd: agent.purposeMd,
+        memberType: "INTERNAL",
+        isActive: true,
+        createdByUserId: admin.userId,
+      },
+    });
+  }
+  console.log(`✅ ${SHOWCASE_AGENTS.length} Agent identities refreshed`);
+
+  const now = new Date();
+  for (const [index, agentRun] of SHOWCASE_AGENT_RUNS.entries()) {
+    const runId = `${wsId}-showcase-run-${slugify(agentRun.agentKey)}-${index + 1}`;
+    const startedAt = new Date(now.getTime() - agentRun.hoursAgo * 60 * 60 * 1000);
+    const completedAt = agentRun.durationMs
+      ? new Date(startedAt.getTime() + agentRun.durationMs)
+      : null;
+
+    await prisma.agentStep.deleteMany({ where: { agentRunId: runId } });
+    await prisma.agentToolCall.deleteMany({ where: { agentRunId: runId } });
+    await prisma.modelUsage.deleteMany({ where: { agentRunId: runId } });
+
+    const run = await prisma.agentRun.upsert({
+      where: { id: runId },
+      update: {
+        agentKey: agentRun.agentKey,
+        goal: agentRun.goal,
+        status: agentRun.status,
+        triggerType: agentRun.triggerType,
+        triggerRef: `seed-jnj-showcase-${index + 1}`,
+        approvalRequired: agentRun.status === "WAITING_APPROVAL",
+        startedAt,
+        completedAt,
+        failedAt: null,
+        resultJson: agentRun.status === "COMPLETED"
+          ? { status: "success", itemsProcessed: index + 3 }
+          : null,
+      },
+      create: {
+        id: runId,
+        workspaceId: wsId,
+        agentKey: agentRun.agentKey,
+        goal: agentRun.goal,
+        status: agentRun.status,
+        triggerType: agentRun.triggerType,
+        triggerRef: `seed-jnj-showcase-${index + 1}`,
+        approvalRequired: agentRun.status === "WAITING_APPROVAL",
+        startedAt,
+        completedAt,
+        resultJson: agentRun.status === "COMPLETED"
+          ? { status: "success", itemsProcessed: index + 3 }
+          : null,
+      },
+    });
+
+    if (agentRun.status === "COMPLETED" && agentRun.durationMs) {
+      const stepNames = ["Load context", "Extract intent", "Execute action", "Deliver result"];
+      const stepDuration = Math.floor(agentRun.durationMs / stepNames.length);
+      for (const [stepIndex, name] of stepNames.entries()) {
+        await prisma.agentStep.create({
+          data: {
+            id: uuid(),
+            agentRunId: run.id,
+            name,
+            status: "COMPLETED",
+            startedAt: new Date(startedAt.getTime() + stepIndex * stepDuration),
+            completedAt: new Date(startedAt.getTime() + (stepIndex + 1) * stepDuration),
+            outputJson: { step: stepIndex + 1, result: "ok" },
+          },
+        });
+      }
+
+      const toolCallNames = [
+        "context.load_workspace",
+        "model.extract_intent",
+        agentRun.agentKey === "slack-agent" ? "slack.post_reply" : "corgtex.create_entity",
+      ];
+      for (const [toolIndex, name] of toolCallNames.entries()) {
+        await prisma.agentToolCall.create({
+          data: {
+            id: uuid(),
+            agentRunId: run.id,
+            name,
+            status: "COMPLETED",
+            inputJson: { source: "demo", step: toolIndex },
+            outputJson: { result: "ok", items: toolIndex + 1 },
+            startedAt: new Date(startedAt.getTime() + toolIndex * 1200),
+            completedAt: new Date(startedAt.getTime() + toolIndex * 1200 + 450 + toolIndex * 175),
+          },
+        });
+      }
+
+      await prisma.modelUsage.create({
+        data: {
+          id: uuid(),
+          workspaceId: wsId,
+          agentRunId: run.id,
+          provider: "openrouter",
+          model: "qwen/qwen3-32b",
+          taskType: "AGENT",
+          inputTokens: 800 + index * 325,
+          outputTokens: 220 + index * 140,
+          latencyMs: agentRun.durationMs,
+          estimatedCostUsd: Number((0.0025 + index * 0.0011).toFixed(6)),
+        },
+      });
+    }
+  }
+  console.log(`✅ ${SHOWCASE_AGENT_RUNS.length} Agent runs refreshed`);
+
+  if (activeMembers.length >= 2) {
+    const existing = await prisma.recognition.findFirst({
+      where: { workspaceId: wsId, title: "Exceptional Systems Thinking" },
+    });
+    const data = {
+      workspaceId: wsId,
+      authorMemberId: activeMembers.find((member) => member.memberId !== admin.memberId)?.memberId ?? admin.memberId,
+      recipientMemberId: admin.memberId,
+      title: "Exceptional Systems Thinking",
+      storyMd: "For building the agent governance system end-to-end. The observability traces and spend controls give leaders confidence in the AI workforce.",
+      valueTags: ["INNOVATION", "SPEED", "LEADERSHIP"],
+      visibility: "WORKSPACE",
+    };
+
+    if (existing) {
+      await prisma.recognition.update({ where: { id: existing.id }, data });
+    } else {
+      await prisma.recognition.create({ data: { id: uuid(), ...data } });
+    }
+  }
+
+  for (const [index, event] of SHOWCASE_AUDIT_EVENTS.entries()) {
+    await prisma.auditLog.upsert({
+      where: { id: `${wsId}-showcase-audit-${slugify(event.action)}` },
+      update: {
+        actorUserId: activeMembers[index % activeMembers.length]?.userId ?? admin.userId,
+        action: event.action,
+        entityType: event.entityType,
+        entityId: `${wsId}-showcase-entity-${index + 1}`,
+        meta: { source: "seed-jnj-demo", showcase: true },
+        createdAt: new Date(now.getTime() - index * 30 * 60 * 1000),
+      },
+      create: {
+        id: `${wsId}-showcase-audit-${slugify(event.action)}`,
+        workspaceId: wsId,
+        actorUserId: activeMembers[index % activeMembers.length]?.userId ?? admin.userId,
+        action: event.action,
+        entityType: event.entityType,
+        entityId: `${wsId}-showcase-entity-${index + 1}`,
+        meta: { source: "seed-jnj-demo", showcase: true },
+        createdAt: new Date(now.getTime() - index * 30 * 60 * 1000),
+      },
+    });
+  }
+  console.log(`✅ ${SHOWCASE_AUDIT_EVENTS.length} Audit events refreshed`);
+}
 
 async function main() {
   console.log("Starting J&J Demo Workspace Seed...");
@@ -509,9 +853,24 @@ async function main() {
   for (const t of TENSIONS) {
     const assignee = t.assignee && memberMappings[t.assignee] ? memberMappings[t.assignee].memberId : null;
     const exists = await prisma.tension.findFirst({ where: { workspaceId: wsId, title: t.title } });
-    if (!exists) {
+    const data = {
+      workspaceId: wsId,
+      authorUserId: adminUserId,
+      assigneeMemberId: assignee,
+      title: t.title,
+      bodyMd: t.body,
+      status: t.status,
+      isPrivate: false,
+      publishedAt: nDaysAgo(2),
+      archivedAt: null,
+      archivedByUserId: null,
+      archiveReason: null,
+    };
+    if (exists) {
+      await prisma.tension.update({ where: { id: exists.id }, data });
+    } else {
       await prisma.tension.create({
-        data: { workspaceId: wsId, authorUserId: adminUserId, assigneeMemberId: assignee, title: t.title, bodyMd: t.body, status: t.status, publishedAt: nDaysAgo(2) }
+        data,
       });
     }
   }
@@ -520,9 +879,23 @@ async function main() {
   for (const a of ACTIONS) {
     const assignee = a.assignee && memberMappings[a.assignee] ? memberMappings[a.assignee].memberId : null;
     const exists = await prisma.action.findFirst({ where: { workspaceId: wsId, title: a.title } });
-    if (!exists) {
+    const data = {
+      workspaceId: wsId,
+      authorUserId: adminUserId,
+      assigneeMemberId: assignee,
+      title: a.title,
+      status: a.status,
+      isPrivate: false,
+      publishedAt: nDaysAgo(1),
+      archivedAt: null,
+      archivedByUserId: null,
+      archiveReason: null,
+    };
+    if (exists) {
+      await prisma.action.update({ where: { id: exists.id }, data });
+    } else {
       await prisma.action.create({
-        data: { workspaceId: wsId, authorUserId: adminUserId, assigneeMemberId: assignee, title: a.title, status: a.status, publishedAt: nDaysAgo(1) }
+        data,
       });
     }
   }
@@ -533,22 +906,25 @@ async function main() {
     const authorId = memberMappings[p.author].userId;
     const circleId = circleMappings[p.circle];
     let proposal = await prisma.proposal.findFirst({ where: { workspaceId: wsId, title: p.title } });
+    const data = {
+      workspaceId: wsId,
+      authorUserId: authorId,
+      circleId: circleId,
+      title: p.title,
+      summary: p.summary,
+      bodyMd: p.body,
+      status: p.status,
+      resolutionOutcome: p.resolutionOutcome ?? null,
+      isPrivate: false,
+      publishedAt: p.publishedAt,
+      decidedAt: p.status === "RESOLVED" ? p.publishedAt : null,
+      archivedAt: p.archivedAt ?? null,
+      archivedByUserId: null,
+      archiveReason: null
+    };
     if (!proposal) {
       proposal = await prisma.proposal.create({
-        data: {
-          workspaceId: wsId,
-          authorUserId: authorId,
-          circleId: circleId,
-          title: p.title,
-          summary: p.summary,
-          bodyMd: p.body,
-          status: p.status,
-          resolutionOutcome: p.resolutionOutcome ?? null,
-          isPrivate: false,
-          publishedAt: p.publishedAt,
-          decidedAt: p.status === "RESOLVED" ? p.publishedAt : null,
-          archivedAt: p.archivedAt ?? null
-        }
+        data
       });
       // seed reactions sporadically
       const potentialReactors = Object.values(memberMappings).filter(x => x.userId !== authorId);
@@ -564,7 +940,7 @@ async function main() {
     } else {
       proposal = await prisma.proposal.update({
         where: { id: proposal.id },
-        data: { isPrivate: false }
+        data
       });
     }
     createdProposals[p.title] = proposal;
@@ -575,70 +951,81 @@ async function main() {
   const apProp1 = createdProposals[apTitle1];
   if (apProp1 && apProp1.status === "OPEN") {
     let ap = await prisma.adviceProcess.findUnique({ where: { proposalId: apProp1.id } });
+    const data = {
+      workspaceId: wsId,
+      proposalId: apProp1.id,
+      authorMemberId: memberMappings["vbroadhurst"].memberId,
+      status: "GATHERING",
+      advisorySuggestionsJson: {
+        advisors: [
+          { memberId: memberMappings["jwolk"].memberId, name: "Joseph J. Wolk", reason: "Financial impact of supplier mandates" },
+          { memberId: memberMappings["mullmann"].memberId, name: "Michael Ullmann", reason: "Contract and compliance review" }
+        ]
+      }
+    };
     if (!ap) {
       ap = await prisma.adviceProcess.create({
-        data: {
-          workspaceId: wsId,
-          proposalId: apProp1.id,
-          authorMemberId: memberMappings["vbroadhurst"].memberId,
-          status: "GATHERING",
-          advisorySuggestionsJson: {
-            advisors: [
-              { memberId: memberMappings["jwolk"].memberId, name: "Joseph J. Wolk", reason: "Financial impact of supplier mandates" },
-              { memberId: memberMappings["mullmann"].memberId, name: "Michael Ullmann", reason: "Contract and compliance review" }
-            ]
-          }
-        }
+        data
       });
-      await prisma.adviceRecord.createMany({
-        data: [
-          { processId: ap.id, memberId: memberMappings["jwolk"].memberId, type: "ENDORSE", bodyMd: "Supply chain costs will increase slightly in the short term, but long term risk mitigation is sound. Approved from a finance perspective." },
-          { processId: ap.id, memberId: memberMappings["jtaubert"].memberId, type: "ENDORSE", bodyMd: "Agreed. Needed for our IM facilities." },
-          { processId: ap.id, memberId: memberMappings["mullmann"].memberId, type: "CONCERN", bodyMd: "We need 6-month grace periods for critical sole-source suppliers before enforcement." }
-        ]
-      });
+    } else {
+      ap = await prisma.adviceProcess.update({ where: { id: ap.id }, data });
     }
+    await prisma.adviceRecord.deleteMany({ where: { processId: ap.id } });
+    await prisma.adviceRecord.createMany({
+      data: [
+        { processId: ap.id, memberId: memberMappings["jwolk"].memberId, type: "ENDORSE", bodyMd: "Supply chain costs will increase slightly in the short term, but long term risk mitigation is sound. Approved from a finance perspective." },
+        { processId: ap.id, memberId: memberMappings["jtaubert"].memberId, type: "ENDORSE", bodyMd: "Agreed. Needed for our IM facilities." },
+        { processId: ap.id, memberId: memberMappings["mullmann"].memberId, type: "CONCERN", bodyMd: "We need 6-month grace periods for critical sole-source suppliers before enforcement." }
+      ]
+    });
   }
 
   const apTitle2 = "Global Clinical Trial Data Sharing Framework";
   const apProp2 = createdProposals[apTitle2];
   if (apProp2 && apProp2.status === "OPEN") {
     let ap = await prisma.adviceProcess.findUnique({ where: { proposalId: apProp2.id } });
+    const data = {
+      workspaceId: wsId,
+      proposalId: apProp2.id,
+      authorMemberId: memberMappings["jreed"].memberId,
+      status: "GATHERING",
+      advisorySuggestionsJson: {
+        advisors: [
+          { memberId: memberMappings["mullmann"].memberId, name: "Michael Ullmann", reason: "Data privacy & IP risk" }
+        ]
+      }
+    };
     if (!ap) {
       ap = await prisma.adviceProcess.create({
-        data: {
-          workspaceId: wsId,
-          proposalId: apProp2.id,
-          authorMemberId: memberMappings["jreed"].memberId,
-          status: "GATHERING",
-          advisorySuggestionsJson: {
-            advisors: [
-              { memberId: memberMappings["mullmann"].memberId, name: "Michael Ullmann", reason: "Data privacy & IP risk" }
-            ]
-          }
-        }
+        data
       });
-      await prisma.adviceRecord.createMany({
-        data: [
-          { processId: ap.id, memberId: memberMappings["jtaubert"].memberId, type: "ENDORSE", bodyMd: "Fully support this framework." },
-          { processId: ap.id, memberId: memberMappings["mullmann"].memberId, type: "CONCERN", bodyMd: "Ensure IP clauses explicitly protect our pending patents." }
-        ]
-      });
+    } else {
+      ap = await prisma.adviceProcess.update({ where: { id: ap.id }, data });
     }
+    await prisma.adviceRecord.deleteMany({ where: { processId: ap.id } });
+    await prisma.adviceRecord.createMany({
+      data: [
+        { processId: ap.id, memberId: memberMappings["jtaubert"].memberId, type: "ENDORSE", bodyMd: "Fully support this framework." },
+        { processId: ap.id, memberId: memberMappings["mullmann"].memberId, type: "CONCERN", bodyMd: "Ensure IP clauses explicitly protect our pending patents." }
+      ]
+    });
   }
   
   // 11. Governance Scores
   for (const s of SCORES) {
     const exists = await prisma.governanceScore.findFirst({ where: { workspaceId: wsId, overallScore: s.score } });
-    if (!exists) {
+    const data = {
+      workspaceId: wsId,
+      periodStart: new Date(s.periodEnd.getTime() - 90 * 24 * 60 * 60 * 1000),
+      periodEnd: s.periodEnd,
+      overallScore: s.score,
+      ...s.parts
+    };
+    if (exists) {
+      await prisma.governanceScore.update({ where: { id: exists.id }, data });
+    } else {
       await prisma.governanceScore.create({
-        data: { 
-          workspaceId: wsId, 
-          periodStart: new Date(s.periodEnd.getTime() - 90 * 24 * 60 * 60 * 1000), 
-          periodEnd: s.periodEnd, 
-          overallScore: s.score, 
-          ...s.parts 
-        }
+        data
       });
     }
   }
@@ -656,20 +1043,26 @@ async function main() {
   
   for (const sp of SPENDS) {
     const exists = await prisma.spendRequest.findFirst({ where: { workspaceId: wsId, description: sp.desc } });
-    if (!exists) {
+    const data = {
+      workspaceId: wsId,
+      requesterUserId: adminUserId,
+      description: sp.desc,
+      category: sp.cat,
+      vendor: sp.vendor,
+      amountCents: sp.amountCents,
+      currency: "USD",
+      status: sp.status,
+      resolutionOutcome: sp.resolutionOutcome ?? null,
+      spentAt: sp.paid ? nDaysAgo(5) : null,
+      archivedAt: null,
+      archivedByUserId: null,
+      archiveReason: null
+    };
+    if (exists) {
+      await prisma.spendRequest.update({ where: { id: exists.id }, data });
+    } else {
       await prisma.spendRequest.create({
-        data: {
-          workspaceId: wsId,
-          requesterUserId: adminUserId,
-          description: sp.desc,
-          category: sp.cat,
-          vendor: sp.vendor,
-          amountCents: sp.amountCents,
-          currency: "USD",
-          status: sp.status,
-          resolutionOutcome: sp.resolutionOutcome ?? null,
-          spentAt: sp.paid ? nDaysAgo(5) : null
-        }
+        data
       });
     }
   }
@@ -685,20 +1078,45 @@ async function main() {
     const prop = createdProposals[pol.pTitle];
     if (prop && prop.status === "RESOLVED" && prop.resolutionOutcome === "ADOPTED") {
       const exists = await prisma.policyCorpus.findFirst({ where: { workspaceId: wsId, proposalId: prop.id } });
-      if (!exists) {
+      const data = {
+        workspaceId: wsId,
+        proposalId: prop.id,
+        title: pol.title,
+        bodyMd: prop.bodyMd,
+        circleId: pol.cId,
+        acceptedAt: prop.publishedAt
+      };
+      if (exists) {
+        await prisma.policyCorpus.update({ where: { id: exists.id }, data });
+      } else {
         await prisma.policyCorpus.create({
-          data: {
-            workspaceId: wsId,
-            proposalId: prop.id,
-            title: pol.title,
-            bodyMd: prop.bodyMd,
-            circleId: pol.cId,
-            acceptedAt: prop.publishedAt
-          }
+          data
         });
       }
     }
   }
+
+  // 14. Safe showcase data for current customer-visible feature surfaces.
+  await seedShowcaseData({ wsId, memberMappings });
+
+  const counts = {
+    articles: await prisma.brainArticle.count({ where: { workspaceId: wsId } }),
+    actions: await prisma.action.count({ where: { workspaceId: wsId } }),
+    tensions: await prisma.tension.count({ where: { workspaceId: wsId } }),
+    proposals: await prisma.proposal.count({ where: { workspaceId: wsId } }),
+    goals: await prisma.goal.count({ where: { workspaceId: wsId } }),
+    meetings: await prisma.meeting.count({ where: { workspaceId: wsId } }),
+    circles: await prisma.circle.count({ where: { workspaceId: wsId } }),
+    agentRuns: await prisma.agentRun.count({ where: { workspaceId: wsId } }),
+    agentIdentities: await prisma.agentIdentity.count({ where: { workspaceId: wsId } }),
+    recognitions: await prisma.recognition.count({ where: { workspaceId: wsId } }),
+    auditLogs: await prisma.auditLog.count({ where: { workspaceId: wsId } }),
+  };
+
+  console.log("Demo workspace refreshed:");
+  Object.entries(counts).forEach(([key, value]) => {
+    console.log(`  ${key.padEnd(18)} ${value}`);
+  });
 
   console.log("✅ Seed complete! You can log in with: demo@jnj-demo.corgtex.app / demo1234");
 }

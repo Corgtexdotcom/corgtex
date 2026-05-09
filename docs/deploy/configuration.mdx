@@ -28,6 +28,8 @@ When you launch a fresh Corgtex instance, the database must be seeded with an in
 | `CONTROL_PLANE_TESTER_EMAIL` | Optional separate global operator email for auditable Control Plane production testing. Must differ from `ADMIN_EMAIL`. |
 | `CONTROL_PLANE_TESTER_PASSWORD` | Password for the optional Control Plane tester account. Required when `CONTROL_PLANE_TESTER_EMAIL` creates the account, or when `SEED_RESET_PASSWORDS=true`. |
 | `CONTROL_PLANE_TESTER_DISPLAY_NAME` | Optional display name for the Control Plane tester account. Defaults to "Control Plane Test Operator". |
+| `SEED_SCRIPTS` | Optional comma-separated list of extra Node seed scripts to run after the base seed at web startup. Use only for public-safe or deployment-specific fixtures. |
+| `CORGTEX_AUTO_SEED_JNJ_DEMO` | Set to `true` only on shared demo/trial runtimes that should refresh the public J&J demo workspace on each deploy. This runs `scripts/seed-jnj-demo.mjs` after the base seed. |
 
 ## Model Provider Settings
 

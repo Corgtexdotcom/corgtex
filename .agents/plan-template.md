@@ -48,6 +48,12 @@ outside this list will fail `scope-check` in CI.
 - `path/to/file.ts`
 - `path/to/dir/**`
 
+## Demo exposure
+
+For customer-visible product changes, state how the safe public demo
+will show the feature. Update `scripts/seed-jnj-demo.mjs` when seeded
+state is needed, or explain why the feature cannot be shown safely.
+
 ## Acceptance criteria
 
 GitHub-style checklist. Each item must be independently verifiable by
