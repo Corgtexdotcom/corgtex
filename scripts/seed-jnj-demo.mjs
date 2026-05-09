@@ -820,10 +820,20 @@ async function main() {
       create: { workspaceId: wsId, slug, title: a.title, type: a.type, authority: a.authority, bodyMd: a.body, publishedAt: nDaysAgo(5) }
     });
     
-    await prisma.brainArticleVersion.findFirst({ where: { articleId: created.id, version: 1 } }) ||
-    await prisma.brainArticleVersion.create({
-      data: { articleId: created.id, version: 1, bodyMd: a.body, changeSummary: "Initial seed" }
+    const versionId = `${created.id}-version-1`;
+    const existingVersion = await prisma.brainArticleVersion.findFirst({
+      where: { articleId: created.id, version: 1 },
     });
+    const versionData = { articleId: created.id, version: 1, bodyMd: a.body, changeSummary: "Initial seed" };
+    if (existingVersion) {
+      await prisma.brainArticleVersion.update({ where: { id: existingVersion.id }, data: versionData });
+    } else {
+      await prisma.brainArticleVersion.upsert({
+        where: { id: versionId },
+        update: versionData,
+        create: { id: versionId, ...versionData },
+      });
+    }
   }
   console.log(`✅ ${ARTICLES.length} Brain Articles created`);
 
@@ -897,7 +907,11 @@ async function main() {
   // 7. Create Tensions
   for (const t of TENSIONS) {
     const assignee = t.assignee && memberMappings[t.assignee] ? memberMappings[t.assignee].memberId : null;
-    const exists = await prisma.tension.findFirst({ where: { workspaceId: wsId, title: t.title } });
+    const tensionId = `${wsId}-tension-${slugify(t.title)}`;
+    const exists = await prisma.tension.findFirst({
+      where: { workspaceId: wsId, title: t.title },
+      orderBy: { createdAt: "asc" },
+    });
     const data = {
       workspaceId: wsId,
       authorUserId: adminUserId,
@@ -914,8 +928,10 @@ async function main() {
     if (exists) {
       await prisma.tension.update({ where: { id: exists.id }, data });
     } else {
-      await prisma.tension.create({
-        data,
+      await prisma.tension.upsert({
+        where: { id: tensionId },
+        update: data,
+        create: { id: tensionId, ...data },
       });
     }
   }
@@ -923,7 +939,11 @@ async function main() {
   // 8. Create Actions
   for (const a of ACTIONS) {
     const assignee = a.assignee && memberMappings[a.assignee] ? memberMappings[a.assignee].memberId : null;
-    const exists = await prisma.action.findFirst({ where: { workspaceId: wsId, title: a.title } });
+    const actionId = `${wsId}-action-${slugify(a.title)}`;
+    const exists = await prisma.action.findFirst({
+      where: { workspaceId: wsId, title: a.title },
+      orderBy: { createdAt: "asc" },
+    });
     const data = {
       workspaceId: wsId,
       authorUserId: adminUserId,
@@ -939,18 +959,24 @@ async function main() {
     if (exists) {
       await prisma.action.update({ where: { id: exists.id }, data });
     } else {
-      await prisma.action.create({
-        data,
+      await prisma.action.upsert({
+        where: { id: actionId },
+        update: data,
+        create: { id: actionId, ...data },
       });
     }
   }
   
   // 9. proposals
   const createdProposals = {};
-  for (const p of PROPOSALS) {
+  for (const [index, p] of PROPOSALS.entries()) {
     const authorId = memberMappings[p.author].userId;
     const circleId = circleMappings[p.circle];
-    let proposal = await prisma.proposal.findFirst({ where: { workspaceId: wsId, title: p.title } });
+    const proposalId = `${wsId}-proposal-${slugify(p.title)}`;
+    let proposal = await prisma.proposal.findFirst({
+      where: { workspaceId: wsId, title: p.title },
+      orderBy: { createdAt: "asc" },
+    });
     const data = {
       workspaceId: wsId,
       authorUserId: authorId,
@@ -968,24 +994,37 @@ async function main() {
       archiveReason: null
     };
     if (!proposal) {
-      proposal = await prisma.proposal.create({
-        data
+      proposal = await prisma.proposal.upsert({
+        where: { id: proposalId },
+        update: data,
+        create: { id: proposalId, ...data },
       });
-      // seed reactions sporadically
-      const potentialReactors = Object.values(memberMappings).filter(x => x.userId !== authorId);
-      for (let i = 0; i < Math.floor(Math.random() * 3) + 1; i++) {
-        const reactor = potentialReactors[i];
-        if (reactor) {
-          const rType = Math.random() > 0.7 ? "CONCERN" : (Math.random() > 0.5 ? "QUESTION" : "SUPPORT");
-          await prisma.proposalReaction.create({
-            data: { proposalId: proposal.id, userId: reactor.userId, reaction: rType }
-          });
-        }
-      }
     } else {
       proposal = await prisma.proposal.update({
         where: { id: proposal.id },
         data
+      });
+    }
+    const potentialReactors = Object.values(memberMappings).filter((member) => member.userId !== authorId);
+    const reactionTypes = ["SUPPORT", "QUESTION", "SUPPORT"];
+    const reactionRows = potentialReactors.slice(0, Math.min(potentialReactors.length, (index % 3) + 1)).map((reactor, reactorIndex) => ({
+      id: `${proposal.id}-seed-reaction-${reactorIndex + 1}`,
+      proposalId: proposal.id,
+      userId: reactor.userId,
+      reaction: reactionTypes[(index + reactorIndex) % reactionTypes.length],
+    }));
+    await prisma.proposalReaction.deleteMany({
+      where: {
+        proposalId: proposal.id,
+        id: { notIn: reactionRows.map((reaction) => reaction.id) },
+      },
+    });
+    for (const reaction of reactionRows) {
+      const { id, ...reactionData } = reaction;
+      await prisma.proposalReaction.upsert({
+        where: { id },
+        update: reactionData,
+        create: reaction,
       });
     }
     createdProposals[p.title] = proposal;
@@ -1081,7 +1120,11 @@ async function main() {
   }
   
   for (const sp of SPENDS) {
-    const exists = await prisma.spendRequest.findFirst({ where: { workspaceId: wsId, description: sp.desc } });
+    const spendId = `${wsId}-spend-${slugify(sp.desc)}`;
+    const exists = await prisma.spendRequest.findFirst({
+      where: { workspaceId: wsId, description: sp.desc },
+      orderBy: { createdAt: "asc" },
+    });
     const data = {
       workspaceId: wsId,
       requesterUserId: adminUserId,
@@ -1100,8 +1143,10 @@ async function main() {
     if (exists) {
       await prisma.spendRequest.update({ where: { id: exists.id }, data });
     } else {
-      await prisma.spendRequest.create({
-        data
+      await prisma.spendRequest.upsert({
+        where: { id: spendId },
+        update: data,
+        create: { id: spendId, ...data },
       });
     }
   }
@@ -1116,7 +1161,6 @@ async function main() {
   for (const pol of policies) {
     const prop = createdProposals[pol.pTitle];
     if (prop && prop.status === "RESOLVED" && prop.resolutionOutcome === "ADOPTED") {
-      const exists = await prisma.policyCorpus.findFirst({ where: { workspaceId: wsId, proposalId: prop.id } });
       const data = {
         workspaceId: wsId,
         proposalId: prop.id,
@@ -1125,13 +1169,11 @@ async function main() {
         circleId: pol.cId,
         acceptedAt: prop.publishedAt
       };
-      if (exists) {
-        await prisma.policyCorpus.update({ where: { id: exists.id }, data });
-      } else {
-        await prisma.policyCorpus.create({
-          data
-        });
-      }
+      await prisma.policyCorpus.upsert({
+        where: { proposalId: prop.id },
+        update: data,
+        create: data,
+      });
     }
   }
 
