@@ -85,14 +85,14 @@ export function WorkspaceChatRail({
         <WorkspaceUtilityIcon name="ai" className="ws-agent-toggle-icon" />
         <span className="ws-agent-toggle-text">AI</span>
       </button>
-      {!isCollapsed && (
+      <div className="ws-agent-chat-shell" hidden={isCollapsed} aria-hidden={isCollapsed}>
         <ChatInterface
           workspaceId={workspaceId}
           conversations={conversations}
           activeSessionId={null}
           compact={true}
         />
-      )}
+      </div>
     </aside>
   );
 }

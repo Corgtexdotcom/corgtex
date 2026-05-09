@@ -737,6 +737,11 @@ button:disabled {
   overflow: hidden;
 }
 
+.ws-agent-chat-shell {
+  min-height: 0;
+  flex: 1;
+}
+
 .ws-agent-sidebar-collapsed {
   align-items: center;
   justify-content: flex-start;
@@ -2306,8 +2311,18 @@ a.wiki-list-item:hover {
 }
 
 .cmd-item-icon {
-  font-size: 1.2rem;
+  display: inline-flex;
+  width: 20px;
+  height: 20px;
+  align-items: center;
+  justify-content: center;
   opacity: 0.7;
+}
+
+.cmd-item-icon-svg {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
 }
 
 .cmd-item[data-active="true"] .cmd-item-icon,
@@ -2362,6 +2377,10 @@ a.wiki-list-item:hover {
     grid-template-columns: 240px minmax(0, 1fr);
   }
 
+  .ws-layout.ws-layout-chat-collapsed {
+    grid-template-columns: 240px minmax(0, 1fr);
+  }
+
   .ws-agent-sidebar {
     display: none;
   }
@@ -2373,6 +2392,10 @@ a.wiki-list-item:hover {
   }
 
   .workspace-add-menu {
+    right: 24px;
+  }
+
+  .ws-layout.ws-layout-chat-collapsed .workspace-add-menu {
     right: 24px;
   }
 }
@@ -2669,6 +2692,10 @@ a.wiki-list-item:hover {
 
   .workspace-add-menu {
     top: calc(var(--mobile-topbar-height) + 12px);
+    right: 16px;
+  }
+
+  .ws-layout.ws-layout-chat-collapsed .workspace-add-menu {
     right: 16px;
   }
 }

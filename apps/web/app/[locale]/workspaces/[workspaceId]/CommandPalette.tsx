@@ -4,20 +4,36 @@ import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 
-import type { NavGroup } from "@/lib/nav-config";
+import type { NavGroup, WorkspaceNavIconName } from "@/lib/nav-config";
+import {
+  WorkspaceNavIcon,
+  WorkspaceUtilityIcon,
+  type WorkspaceUtilityIconName,
+} from "./WorkspaceNavIcon";
 
 // We'll move actionItems inside the component so we can use translations.
 
 type Workspace = { id: string; name: string };
 
+type CommandIcon =
+  | { type: "nav"; name: WorkspaceNavIconName }
+  | { type: "utility"; name: WorkspaceUtilityIconName };
+
 type CommandItem = {
   id: string;
   label: string;
-  icon: string;
+  icon: CommandIcon;
   desc?: string;
   group: string;
   onSelect: () => void;
 };
+
+function CommandItemIcon({ icon }: { icon: CommandIcon }) {
+  if (icon.type === "nav") {
+    return <WorkspaceNavIcon name={icon.name} className="cmd-item-icon-svg" />;
+  }
+  return <WorkspaceUtilityIcon name={icon.name} className="cmd-item-icon-svg" />;
+}
 
 export function CommandPalette({
   workspaceId,
@@ -64,9 +80,9 @@ export function CommandPalette({
   if (!open) return null;
 
   const actionItems = [
-    { href: "/tensions?open=new", label: tCmd("createTension"), icon: "+", desc: tCmd("createTensionDesc") },
-    { href: "/proposals?open=new", label: tCmd("newProposal"), icon: "+", desc: tCmd("newProposalDesc") },
-    { href: "/actions?open=new", label: tCmd("newAction"), icon: "+", desc: tCmd("newActionDesc") },
+    { href: "/tensions?open=new", label: tCmd("createTension"), icon: { type: "utility", name: "add" } as const, desc: tCmd("createTensionDesc") },
+    { href: "/proposals?open=new", label: tCmd("newProposal"), icon: { type: "utility", name: "add" } as const, desc: tCmd("newProposalDesc") },
+    { href: "/actions?open=new", label: tCmd("newAction"), icon: { type: "utility", name: "add" } as const, desc: tCmd("newActionDesc") },
   ];
 
   // Build the unified list of commands
@@ -93,7 +109,7 @@ export function CommandPalette({
       ...group.items.map((item) => ({
         id: `nav-${item.labelKey}`,
         label: tNav(item.labelKey as any),
-        icon: item.icon,
+        icon: { type: "nav", name: item.icon } as const,
         group: tCmd("navigation"),
         onSelect: () => {
           router.push(`/workspaces/${workspaceId}${item.href}`);
@@ -110,7 +126,7 @@ export function CommandPalette({
       ...otherWorkspaces.map((w) => ({
         id: `ws-${w.id}`,
         label: w.name,
-        icon: "◫",
+        icon: { type: "utility", name: "workspace" } as const,
         group: tCmd("switchWorkspace"),
         onSelect: () => {
           router.push(`/workspaces/${w.id}`);
@@ -203,7 +219,7 @@ export function CommandPalette({
                       onMouseEnter={() => setSelectedIndex(currentIndex)}
                       onClick={cmd.onSelect}
                     >
-                      <span className="cmd-item-icon">{cmd.icon}</span>
+                      <span className="cmd-item-icon"><CommandItemIcon icon={cmd.icon} /></span>
                       <div className="cmd-item-content">
                         <span>{cmd.label}</span>
                         {cmd.desc && <span className="cmd-item-desc">{cmd.desc}</span>}

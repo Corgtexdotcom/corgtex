@@ -2,6 +2,7 @@
 
 import {
   Brain,
+  Building2,
   CalendarDays,
   CheckSquare,
   CircleDot,
@@ -16,6 +17,7 @@ import {
   Menu,
   MessageSquare,
   PackageCheck,
+  Plus,
   RefreshCw,
   Settings,
   Shield,
@@ -50,21 +52,25 @@ const ICONS: Record<WorkspaceNavIconName, LucideIcon> = {
   settings: Settings,
 };
 
-type UtilityIconName =
+export type WorkspaceUtilityIconName =
   | "ai"
+  | "add"
   | "command"
   | "logout"
   | "menu"
   | "platformAdmin"
-  | "userSettings";
+  | "userSettings"
+  | "workspace";
 
-const UTILITY_ICONS: Record<UtilityIconName, LucideIcon> = {
+const UTILITY_ICONS: Record<WorkspaceUtilityIconName, LucideIcon> = {
   ai: MessageSquare,
+  add: Plus,
   command: Command,
   logout: LogOut,
   menu: Menu,
   platformAdmin: Shield,
   userSettings: UserCog,
+  workspace: Building2,
 };
 
 export function WorkspaceNavIcon({
@@ -82,7 +88,7 @@ export function WorkspaceUtilityIcon({
   name,
   className = "ws-nav-icon",
 }: {
-  name: UtilityIconName;
+  name: WorkspaceUtilityIconName;
   className?: string;
 }) {
   const Icon = UTILITY_ICONS[name];
