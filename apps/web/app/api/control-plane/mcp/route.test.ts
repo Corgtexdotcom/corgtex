@@ -14,15 +14,20 @@ const mocks = vi.hoisted(() => ({
   resolveControlPlaneRequestActor: vi.fn(),
 }));
 vi.mock("@corgtex/domain", () => ({
-  configureControlPlaneMeetingRecorderIntegration: vi.fn(), enqueueControlPlaneFleetSnapshots: vi.fn(), fetchCustomerSupportSnapshot: vi.fn(),
+  configureControlPlaneMeetingRecorderIntegration: vi.fn(), createControlPlaneCustomerMember: vi.fn(), deployLatestControlPlaneRelease: vi.fn(),
+  enqueueControlPlaneDeployLatestRollout: vi.fn(), enqueueControlPlaneFleetSnapshots: vi.fn(), fetchCustomerSupportSnapshot: vi.fn(),
+  getControlPlaneDeployLatestPreflight: vi.fn(),
   getControlPlaneAiGovernanceStatus: vi.fn(), getControlPlaneContextHealth: vi.fn(),
   getControlPlaneDeployment: vi.fn(), getControlPlaneIntegrationStatus: vi.fn(), getControlPlaneReleaseStatus: vi.fn(),
+  listControlPlaneCustomerMembers: vi.fn(),
   listControlPlaneDeployments: mocks.listControlPlaneDeployments,
+  listControlPlaneFeatureFlags: vi.fn(), listControlPlaneReleaseRolloutJobs: vi.fn(),
   probeControlPlaneDeploymentHealth: vi.fn(),
   requireControlPlaneAccess: mocks.requireControlPlaneAccess,
   requireControlPlaneScope: mocks.requireControlPlaneScope,
   refreshControlPlaneFleetSnapshots: vi.fn(),
-  runControlPlaneContextOperation: vi.fn(), runControlPlaneReleaseOperation: vi.fn(), runCustomerSupportOperation: vi.fn(),
+  resendControlPlaneCustomerMemberAccessLink: vi.fn(), runControlPlaneContextOperation: vi.fn(), runControlPlaneReleaseOperation: vi.fn(), runCustomerSupportOperation: vi.fn(),
+  setControlPlaneFeatureFlag: vi.fn(), updateControlPlaneCustomerMemberStatus: vi.fn(),
 }));
 vi.mock("@/lib/auth", () => ({ resolveControlPlaneRequestActor: mocks.resolveControlPlaneRequestActor }));
 vi.mock("@/lib/http", () => ({
@@ -65,12 +70,161 @@ describe("/api/control-plane/mcp", () => {
     const { POST } = await import("./route");
     const response = await POST(request({ jsonrpc: "2.0", id: 1, method: "tools/list" }) as never);
     const body = await response.json();
-    expect(body.result.tools.map((tool: { name: string }) => tool.name)).toEqual(["list_customers", "get_customer_deployment_status", "refresh_customer_deployment_snapshot", "list_customer_integrations", "get_context_health", "get_ai_governance_status", "get_release_status", "configure_customer_integration", "run_context_sync", "probe_customer_deployment_health", "refresh_fleet_snapshots", "enqueue_fleet_snapshot_jobs", "prepare_release_upgrade", "run_customer_support_operation"]);
+    expect(body.result.tools.map((tool: { name: string }) => tool.name)).toEqual([
+      "list_customers",
+      "get_customer_deployment_status",
+      "refresh_customer_deployment_snapshot",
+      "list_customer_integrations",
+      "get_context_health",
+      "get_ai_governance_status",
+      "get_release_status",
+      "get_deploy_latest_preflight",
+      "list_customer_members",
+      "create_customer_member",
+      "resend_customer_member_access_link",
+      "update_customer_member_status",
+      "list_customer_feature_flags",
+      "set_customer_feature_flag",
+      "configure_customer_integration",
+      "run_context_sync",
+      "probe_customer_deployment_health",
+      "refresh_fleet_snapshots",
+      "enqueue_fleet_snapshot_jobs",
+      "prepare_release_upgrade",
+      "deploy_latest_release",
+      "deploy_latest_release_bulk",
+      "get_rollout_status",
+      "run_customer_support_operation",
+    ]);
   });
   it("denies mutating tools when the control-plane agent only has read scope", async () => {
     const { POST } = await import("./route");
     const response = await POST(request({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "run_context_sync", arguments: { deploymentId: "inst-1", reason: "repair" } } }) as never);
     expect(response.status).toBe(403);
     await expect(response.json()).resolves.toEqual({ error: { code: "CONTROL_PLANE_SCOPE_REQUIRED", message: "Control Plane scope required: control-plane:context:write." } });
+  });
+
+  it("rejects member status updates without an explicit boolean isActive value", async () => {
+    mocks.resolveControlPlaneRequestActor.mockResolvedValueOnce({
+      kind: "agent",
+      authProvider: "control-plane",
+      label: "control-plane-agent",
+      scopes: ["control-plane:read", "control-plane:access:write"],
+    });
+    const domain = await import("@corgtex/domain");
+    const { POST } = await import("./route");
+
+    const response = await POST(request({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "tools/call",
+      params: {
+        name: "update_customer_member_status",
+        arguments: { deploymentId: "inst-1", memberId: "member-1", reason: "Suspend stale access." },
+      },
+    }) as never);
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      jsonrpc: "2.0",
+      id: 3,
+      error: { code: -32602, message: "isActive must be a boolean." },
+    });
+    expect(vi.mocked(domain.updateControlPlaneCustomerMemberStatus)).not.toHaveBeenCalled();
+  });
+
+  it("rejects member creation without an explicit role value", async () => {
+    mocks.resolveControlPlaneRequestActor.mockResolvedValueOnce({
+      kind: "agent",
+      authProvider: "control-plane",
+      label: "control-plane-agent",
+      scopes: ["control-plane:read", "control-plane:access:write"],
+    });
+    const domain = await import("@corgtex/domain");
+    const { POST } = await import("./route");
+
+    const response = await POST(request({
+      jsonrpc: "2.0",
+      id: 5,
+      method: "tools/call",
+      params: {
+        name: "create_customer_member",
+        arguments: {
+          deploymentId: "inst-1",
+          email: "new@example.com",
+          reason: "Customer approved onboarding.",
+        },
+      },
+    }) as never);
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      jsonrpc: "2.0",
+      id: 5,
+      error: { code: -32602, message: "role must be a non-empty string." },
+    });
+    expect(vi.mocked(domain.createControlPlaneCustomerMember)).not.toHaveBeenCalled();
+  });
+
+  it("rejects feature flag mutations without an explicit boolean enabled value", async () => {
+    mocks.resolveControlPlaneRequestActor.mockResolvedValueOnce({
+      kind: "agent",
+      authProvider: "control-plane",
+      label: "control-plane-agent",
+      scopes: ["control-plane:read", "control-plane:features:write"],
+    });
+    const domain = await import("@corgtex/domain");
+    const { POST } = await import("./route");
+
+    const response = await POST(request({
+      jsonrpc: "2.0",
+      id: 4,
+      method: "tools/call",
+      params: {
+        name: "set_customer_feature_flag",
+        arguments: { deploymentId: "inst-1", flag: "FINANCE", reason: "Enable finance." },
+      },
+    }) as never);
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      jsonrpc: "2.0",
+      id: 4,
+      error: { code: -32602, message: "enabled must be a boolean." },
+    });
+    expect(vi.mocked(domain.setControlPlaneFeatureFlag)).not.toHaveBeenCalled();
+  });
+
+  it("rejects integration configuration without explicit boolean toggles", async () => {
+    mocks.resolveControlPlaneRequestActor.mockResolvedValueOnce({
+      kind: "agent",
+      authProvider: "control-plane",
+      label: "control-plane-agent",
+      scopes: ["control-plane:read", "control-plane:integrations:write"],
+    });
+    const domain = await import("@corgtex/domain");
+    const { POST } = await import("./route");
+
+    const response = await POST(request({
+      jsonrpc: "2.0",
+      id: 6,
+      method: "tools/call",
+      params: {
+        name: "configure_customer_integration",
+        arguments: {
+          deploymentId: "inst-1",
+          integrationKey: "meeting_recorders",
+          reason: "Enable recorder entitlement.",
+        },
+      },
+    }) as never);
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      jsonrpc: "2.0",
+      id: 6,
+      error: { code: -32602, message: "entitlementEnabled must be a boolean." },
+    });
+    expect(vi.mocked(domain.configureControlPlaneMeetingRecorderIntegration)).not.toHaveBeenCalled();
   });
 });

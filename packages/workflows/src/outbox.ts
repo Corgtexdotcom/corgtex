@@ -11,6 +11,7 @@ import { runDailyDigest, runSlackAgent, runSlackContextSummary, runSlackProactiv
 import {
   createWebhookDeliveries,
   CONTROL_PLANE_FLEET_SNAPSHOT_JOB_TYPE,
+  CONTROL_PLANE_RELEASE_DEPLOY_JOB_TYPE,
   deliverWebhook,
   postMeetingSummaryToAgendaThread,
   processSlackInboundEvent,
@@ -20,7 +21,9 @@ import {
   runMeetingAgendaThreadEdit,
   runMeetingInsightsExtraction,
   runControlPlaneFleetSnapshotJob,
+  runControlPlaneReleaseDeployJob,
   syncSlackPublicArchiveForWorkspace,
+  type ControlPlaneReleaseTarget,
   type SlackAgentJobPayload,
 } from "@corgtex/domain";
 
@@ -75,6 +78,20 @@ type ClaimedJob = {
   payload: unknown;
   attempts: number;
 };
+
+function releaseTargetFromPayload(value: unknown): ControlPlaneReleaseTarget | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const target = value as Record<string, unknown>;
+  if (typeof target.releaseImageTag !== "string" || typeof target.webImage !== "string" || typeof target.workerImage !== "string") {
+    return null;
+  }
+  return {
+    releaseImageTag: target.releaseImageTag,
+    releaseVersion: typeof target.releaseVersion === "string" ? target.releaseVersion : null,
+    webImage: target.webImage,
+    workerImage: target.workerImage,
+  };
+}
 
 class RetryableWorkflowJobError extends Error {}
 
@@ -305,6 +322,19 @@ async function handleJob(job: ClaimedJob) {
       reason: typeof payload.reason === "string" ? payload.reason : null,
       limit: typeof payload.limit === "number" ? payload.limit : null,
       concurrency: typeof payload.concurrency === "number" ? payload.concurrency : null,
+    });
+    return;
+  }
+
+  if (job.type === CONTROL_PLANE_RELEASE_DEPLOY_JOB_TYPE) {
+    if (typeof payload.deploymentId !== "string") {
+      throw new Error("Control Plane deploy-latest job is missing deploymentId.");
+    }
+    await runControlPlaneReleaseDeployJob({
+      deploymentId: payload.deploymentId,
+      reason: typeof payload.reason === "string" ? payload.reason : null,
+      force: typeof payload.force === "boolean" ? payload.force : null,
+      target: releaseTargetFromPayload(payload.target),
     });
     return;
   }

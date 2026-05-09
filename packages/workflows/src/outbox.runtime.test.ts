@@ -15,6 +15,7 @@ const {
   syncSlackPublicArchiveForWorkspaceMock,
   runMeetingAgendaThreadEditMock,
   runControlPlaneFleetSnapshotJobMock,
+  runControlPlaneReleaseDeployJobMock,
   isAgentEnabledMock,
   getWorkspaceNewspaperCadenceMock,
 } = vi.hoisted(() => ({
@@ -60,6 +61,7 @@ const {
   syncSlackPublicArchiveForWorkspaceMock: vi.fn(),
   runMeetingAgendaThreadEditMock: vi.fn(),
   runControlPlaneFleetSnapshotJobMock: vi.fn(),
+  runControlPlaneReleaseDeployJobMock: vi.fn(),
   isAgentEnabledMock: vi.fn(),
   getWorkspaceNewspaperCadenceMock: vi.fn(),
 }));
@@ -99,6 +101,8 @@ vi.mock("@corgtex/domain", () => ({
   runMeetingAgendaThreadEdit: runMeetingAgendaThreadEditMock,
   CONTROL_PLANE_FLEET_SNAPSHOT_JOB_TYPE: "control-plane.fleet-snapshot",
   runControlPlaneFleetSnapshotJob: runControlPlaneFleetSnapshotJobMock,
+  CONTROL_PLANE_RELEASE_DEPLOY_JOB_TYPE: "control-plane.release.deploy-latest",
+  runControlPlaneReleaseDeployJob: runControlPlaneReleaseDeployJobMock,
   isAgentEnabled: isAgentEnabledMock,
   getWorkspaceNewspaperCadence: getWorkspaceNewspaperCadenceMock,
 }));
@@ -132,6 +136,7 @@ describe("runPendingJobs", () => {
     syncSlackPublicArchiveForWorkspaceMock.mockReset();
     runMeetingAgendaThreadEditMock.mockReset();
     runControlPlaneFleetSnapshotJobMock.mockReset().mockResolvedValue({ refreshed: true });
+    runControlPlaneReleaseDeployJobMock.mockReset().mockResolvedValue({ status: "deployed" });
     isAgentEnabledMock.mockReset().mockResolvedValue(false);
     getWorkspaceNewspaperCadenceMock.mockReset().mockResolvedValue("DAILY");
   });
@@ -216,6 +221,48 @@ describe("runPendingJobs", () => {
       reason: "Scheduled sweep.",
       limit: null,
       concurrency: null,
+    });
+    expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({
+      where: { id: "job-1" },
+      data: expect.objectContaining({
+        status: "COMPLETED",
+      }),
+    });
+  });
+
+  it("dispatches control-plane deploy-latest jobs without a workspace id", async () => {
+    txMock.$queryRaw.mockResolvedValue([
+      {
+        id: "job-1",
+        workspaceId: null,
+        type: "control-plane.release.deploy-latest",
+        payload: {
+          deploymentId: "inst-1",
+          reason: "Queued rollout.",
+          force: true,
+          target: {
+            releaseImageTag: "release-new",
+            releaseVersion: "0.2.0",
+            webImage: "ghcr.io/corgtex/web:new",
+            workerImage: "ghcr.io/corgtex/worker:new",
+          },
+        },
+        attempts: 1,
+      },
+    ]);
+
+    await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
+
+    expect(runControlPlaneReleaseDeployJobMock).toHaveBeenCalledWith({
+      deploymentId: "inst-1",
+      reason: "Queued rollout.",
+      force: true,
+      target: {
+        releaseImageTag: "release-new",
+        releaseVersion: "0.2.0",
+        webImage: "ghcr.io/corgtex/web:new",
+        workerImage: "ghcr.io/corgtex/worker:new",
+      },
     });
     expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({
       where: { id: "job-1" },

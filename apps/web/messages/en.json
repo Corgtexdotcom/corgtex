@@ -1162,6 +1162,14 @@
         "label": "Customers",
         "detail": "Searchable enterprise customer records and support ownership."
       },
+      "access": {
+        "label": "Access",
+        "detail": "Members, setup links, and customer access state."
+      },
+      "feature-flags": {
+        "label": "Feature Flags",
+        "detail": "Per-client workspace feature overrides and audit evidence."
+      },
       "context": {
         "label": "Context & Brain",
         "detail": "Source freshness, provenance, sync status, and ingestion risk."
@@ -1455,7 +1463,23 @@
         "targetVersionPlaceholder": "Optional version label",
         "reasonPlaceholder": "Prepare staged upgrade after production smoke passes",
         "recordUpgradePreparation": "Record upgrade preparation",
-        "recentPreparationAudit": "Recent release preparation audit"
+        "recentPreparationAudit": "Recent release preparation audit",
+        "deployLatest": "Deploy latest",
+        "deployLatestDescription": "Runs a guarded deployment using the configured latest web and worker image tags. Preflight must pass before this button is enabled.",
+        "latestReleaseTarget": "Latest release target",
+        "releaseNotConfigured": "Not configured",
+        "webImage": "Web image",
+        "workerImage": "Worker image",
+        "preflightPassed": "Preflight passed",
+        "preflightBlocked": "Preflight blocked",
+        "preflightCheckPassed": "Pass",
+        "preflightCheckBlocked": "Blocked",
+        "deployLatestReasonPlaceholder": "Customer approved latest release rollout",
+        "deployLatestToClient": "Deploy latest to this client",
+        "resolvePreflightBlockers": "Resolve the blockers above before deploying latest from the UI.",
+        "recentRollouts": "Recent rollout jobs",
+        "rolloutAttempts": "{count} attempts",
+        "noRecentRollouts": "No deploy-latest rollout jobs recorded for this client yet."
       },
       "support": {
         "connectorTitle": "Support Connector",

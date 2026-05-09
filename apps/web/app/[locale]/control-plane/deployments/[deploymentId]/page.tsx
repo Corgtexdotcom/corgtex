@@ -2,11 +2,15 @@ import { notFound } from "next/navigation";
 import { getFormatter, getTranslations } from "next-intl/server";
 import {
   AppError,
+  getControlPlaneDeployLatestPreflight,
   getControlPlaneAiGovernanceStatus,
   getControlPlaneContextHealth,
   getControlPlaneDeployment,
   getControlPlaneIntegrationStatus,
   getControlPlaneReleaseStatus,
+  listControlPlaneCustomerMembers,
+  listControlPlaneFeatureFlags,
+  listControlPlaneReleaseRolloutJobs,
   requireControlPlaneAccess,
 } from "@corgtex/domain";
 import { Link } from "@/i18n/routing";
@@ -15,11 +19,16 @@ import { getControlPlaneHref } from "@/lib/control-plane-url";
 import {
   configureMeetingRecorderIntegrationAction,
   configureSupportConnectorAction,
+  createControlPlaneMemberAction,
+  deployLatestControlPlaneReleaseAction,
   recordBreakGlassAction,
   refreshSupportSnapshotAction,
+  resendControlPlaneAccessLinkAction,
   runContextOperationAction,
   runReleaseOperationAction,
   runSupportOperationAction,
+  setControlPlaneFeatureFlagAction,
+  updateControlPlaneMemberStatusAction,
 } from "../../actions";
 import { ControlPlaneLanguageSwitcher } from "../../ControlPlaneLanguageSwitcher";
 
@@ -27,6 +36,8 @@ export const dynamic = "force-dynamic";
 
 const CUSTOMER_SECTION_IDS = [
   "fleet",
+  "access",
+  "feature-flags",
   "context",
   "ai-governance",
   "integrations",
@@ -183,12 +194,16 @@ export default async function ControlPlaneCustomerPage({
   } catch {
     notFound();
   }
-  const [customer, integrations, context, aiGovernance, releases, format, t] = await Promise.all([
+  const [customer, integrations, context, aiGovernance, releases, members, featureFlags, deployPreflight, rollouts, format, t] = await Promise.all([
     getControlPlaneDeployment(actor, deploymentId),
     getControlPlaneIntegrationStatus(actor, deploymentId),
     getControlPlaneContextHealth(actor, deploymentId),
     getControlPlaneAiGovernanceStatus(actor, deploymentId),
     getControlPlaneReleaseStatus(actor, deploymentId),
+    listControlPlaneCustomerMembers(actor, deploymentId).catch((error: unknown) => ({ deploymentId, source: "unavailable" as const, members: [], error: error instanceof Error ? error.message : "Unable to load members." })),
+    listControlPlaneFeatureFlags(actor, deploymentId).catch((error: unknown) => ({ deploymentId, source: "unavailable" as const, flags: [], error: error instanceof Error ? error.message : "Unable to load feature flags." })),
+    getControlPlaneDeployLatestPreflight(actor, deploymentId),
+    listControlPlaneReleaseRolloutJobs(actor, { deploymentId, take: 8 }),
     getFormatter(),
     getTranslations("controlPlane"),
   ]).catch((error: unknown) => {
@@ -207,6 +222,7 @@ export default async function ControlPlaneCustomerPage({
   const aiSummary = aiGovernance.summary;
   const releasePrep = releases.recentPreparations[0];
   const mcpUrl = customer.supportMcpUrl || `${customer.url.replace(/\/$/, "")}/api/mcp`;
+  const latestReleaseTarget = deployPreflight.target;
 
   return (
     <main className="control-plane-shell">
@@ -264,6 +280,145 @@ export default async function ControlPlaneCustomerPage({
               ))}
             </div>
           </section>
+        </section>
+
+        <section id="access" className="panel stack" style={{ padding: 20 }}>
+          <div className="row">
+            <div>
+              <h2 style={{ margin: 0 }}>Access</h2>
+              <p className="muted" style={{ margin: "4px 0 0" }}>
+                Member operations use setup links only. Source: {"source" in members ? members.source.replace(/_/g, " ") : "unavailable"}.
+              </p>
+            </div>
+            {"error" in members && <span style={{ color: "var(--orange-11)", fontWeight: 700 }}>{members.error}</span>}
+          </div>
+
+          <form action={createControlPlaneMemberAction} className="item stack">
+            <input type="hidden" name="deploymentId" value={customer.id} />
+            <div className="row">
+              <strong>Add member</strong>
+              <span className="tag">Setup link emailed</span>
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12 }}>
+              <label>
+                Name
+                <input name="displayName" />
+              </label>
+              <label>
+                Email
+                <input name="email" type="email" required />
+              </label>
+              <label>
+                Role
+                <select name="role" defaultValue="CONTRIBUTOR">
+                  <option value="CONTRIBUTOR">Contributor</option>
+                  <option value="FACILITATOR">Facilitator</option>
+                  <option value="FINANCE_STEWARD">Finance steward</option>
+                  <option value="ADMIN">Admin</option>
+                </select>
+              </label>
+              <label>
+                Reason
+                <input name="reason" required placeholder="Access request or customer approval." />
+              </label>
+            </div>
+            <button type="submit" style={{ alignSelf: "flex-start" }}>Add member and send setup link</button>
+          </form>
+
+          <div style={{ overflowX: "auto" }}>
+            <table className="table" style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead>
+                <tr style={{ textAlign: "left", borderBottom: "1px solid var(--border-color)" }}>
+                  <th style={{ padding: 12 }}>Member</th>
+                  <th style={{ padding: 12 }}>Role</th>
+                  <th style={{ padding: 12 }}>Status</th>
+                  <th style={{ padding: 12 }}>Org roles</th>
+                  <th style={{ padding: 12 }}>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {members.members.map((member) => (
+                  <tr key={member.id} style={{ borderBottom: "1px solid var(--border-color)" }}>
+                    <td style={{ padding: 12 }}>
+                      <strong>{member.displayName || member.email || member.id}</strong>
+                      <div className="muted">{member.email || "No email returned"}</div>
+                    </td>
+                    <td style={{ padding: 12 }}>{member.role}</td>
+                    <td style={{ padding: 12 }}>
+                      <span style={{ color: member.isActive ? "var(--green-11)" : "var(--gray-11)", fontWeight: 700 }}>
+                        {member.isActive ? "Active" : "Inactive"}
+                      </span>
+                    </td>
+                    <td style={{ padding: 12 }}>
+                      {member.roleAssignments?.length ? member.roleAssignments.slice(0, 3).map((assignment) => assignment.roleName || assignment.circleName).filter(Boolean).join(", ") : <span className="muted">None</span>}
+                    </td>
+                    <td style={{ padding: 12, minWidth: 320 }}>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                        <form action={resendControlPlaneAccessLinkAction} style={{ display: "flex", gap: 6 }}>
+                          <input type="hidden" name="deploymentId" value={customer.id} />
+                          <input type="hidden" name="memberId" value={member.id} />
+                          <input type="hidden" name="reason" value="Ops requested fresh setup/reset link." />
+                          <button type="submit" className="button secondary small">Send access link</button>
+                        </form>
+                        <form action={updateControlPlaneMemberStatusAction} style={{ display: "flex", gap: 6 }}>
+                          <input type="hidden" name="deploymentId" value={customer.id} />
+                          <input type="hidden" name="memberId" value={member.id} />
+                          <input type="hidden" name="isActive" value={member.isActive ? "false" : "true"} />
+                          <input type="hidden" name="reason" value={member.isActive ? "Ops deactivated customer access." : "Ops reactivated customer access."} />
+                          <button type="submit" className="button secondary small">{member.isActive ? "Deactivate" : "Reactivate"}</button>
+                        </form>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+                {members.members.length === 0 && (
+                  <tr><td colSpan={5} className="muted" style={{ padding: 24, textAlign: "center" }}>No members returned for this customer.</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="feature-flags" className="panel stack" style={{ padding: 20 }}>
+          <div className="row">
+            <div>
+              <h2 style={{ margin: 0 }}>Feature flags</h2>
+              <p className="muted" style={{ margin: "4px 0 0" }}>
+                Toggle known workspace features with an audited reason. Source: {"source" in featureFlags ? featureFlags.source.replace(/_/g, " ") : "unavailable"}.
+              </p>
+            </div>
+            {"error" in featureFlags && <span style={{ color: "var(--orange-11)", fontWeight: 700 }}>{featureFlags.error}</span>}
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 12 }}>
+            {featureFlags.flags.map((flag) => (
+              <form key={flag.flag} action={setControlPlaneFeatureFlagAction} className="item stack">
+                <input type="hidden" name="deploymentId" value={customer.id} />
+                <input type="hidden" name="flag" value={flag.flag} />
+                <input type="hidden" name="enabled" value={flag.enabled ? "false" : "true"} />
+                <div className="row">
+                  <div>
+                    <strong>{flag.label}</strong>
+                    <div className="muted" style={{ fontSize: 12 }}>{flag.flag}</div>
+                  </div>
+                  <span style={{ color: flag.enabled ? "var(--green-11)" : "var(--gray-11)", fontWeight: 700 }}>
+                    {flag.enabled ? "Enabled" : "Disabled"}
+                  </span>
+                </div>
+                <p className="muted" style={{ margin: 0 }}>{flag.description}</p>
+                <div className="muted" style={{ fontSize: 12 }}>
+                  Source: {flag.source}. Last changed: {flag.lastChangedAt ? format.dateTime(new Date(flag.lastChangedAt), { dateStyle: "medium", timeStyle: "short" }) : "not recorded"}.
+                </div>
+                <label>
+                  Reason
+                  <input name="reason" required placeholder={flag.enabled ? "Disable for this customer." : "Enable for this customer."} />
+                </label>
+                <button type="submit" className="button secondary small" style={{ alignSelf: "flex-start" }}>
+                  {flag.enabled ? "Disable" : "Enable"}
+                </button>
+              </form>
+            ))}
+            {featureFlags.flags.length === 0 && <div className="item muted">No feature flags returned for this customer.</div>}
+          </div>
         </section>
 
         <section id="context" className="panel stack" style={{ padding: 20 }}>
@@ -596,6 +751,84 @@ export default async function ControlPlaneCustomerPage({
             <MiniMetric label={t("customerDetail.releases.rollbackReadiness")} value={statusLabel(t, releases.rollbackReady ? "ready" : "attention")} toneValue={releases.rollbackReady ? "ready" : "attention"} detail={releases.rollbackReady ? t("customerDetail.releases.rollbackReady") : t("customerDetail.releases.rollbackNeedsEvidence")} />
             <MiniMetric label={t("customerDetail.releases.lastPreparation")} value={statusLabel(t, releasePrep ? "recorded" : "none")} toneValue={releasePrep ? "recorded" : "none"} detail={releasePrep ? format.dateTime(releasePrep.createdAt, { dateStyle: "medium", timeStyle: "short" }) : t("customerDetail.releases.noPreparation")} />
           </div>
+          <section className="item stack">
+            <div className="row">
+              <div>
+                <strong>{t("customerDetail.releases.deployLatest")}</strong>
+                <p className="muted" style={{ margin: "4px 0 0" }}>
+                  {t("customerDetail.releases.deployLatestDescription")}
+                </p>
+              </div>
+              <span className="tag" style={{ color: tone(deployPreflight.eligible ? "ready" : "failed") }}>
+                {deployPreflight.eligible ? t("customerDetail.releases.preflightPassed") : t("customerDetail.releases.preflightBlocked")}
+              </span>
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 }}>
+              <MiniMetric
+                label={t("customerDetail.releases.latestReleaseTarget")}
+                value={latestReleaseTarget?.releaseImageTag || t("customerDetail.releases.releaseNotConfigured")}
+                toneValue={latestReleaseTarget ? "ready" : "failed"}
+                detail={latestReleaseTarget?.releaseVersion || undefined}
+              />
+              <MiniMetric
+                label={t("customerDetail.releases.webImage")}
+                value={latestReleaseTarget?.webImage || t("status.unknown")}
+                toneValue={latestReleaseTarget ? "ready" : "unknown"}
+              />
+              <MiniMetric
+                label={t("customerDetail.releases.workerImage")}
+                value={latestReleaseTarget?.workerImage || t("status.unknown")}
+                toneValue={latestReleaseTarget ? "ready" : "unknown"}
+              />
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 12 }}>
+              {deployPreflight.checks.map((check) => (
+                <div className="panel" key={check.key} style={{ padding: 14 }}>
+                  <div className="row">
+                    <strong>{check.label}</strong>
+                    <span style={{ color: tone(check.ok ? "ready" : "failed"), fontWeight: 700 }}>
+                      {check.ok ? t("customerDetail.releases.preflightCheckPassed") : t("customerDetail.releases.preflightCheckBlocked")}
+                    </span>
+                  </div>
+                  <p className="muted" style={{ margin: "6px 0 0", fontSize: 12 }}>{check.detail}</p>
+                </div>
+              ))}
+            </div>
+            <form action={deployLatestControlPlaneReleaseAction} className="stack">
+              <input type="hidden" name="deploymentId" value={customer.id} />
+              <label>
+                {t("customerDetail.forms.mutationReason")}
+                <input name="reason" required placeholder={t("customerDetail.releases.deployLatestReasonPlaceholder")} />
+              </label>
+              <button type="submit" disabled={!deployPreflight.eligible}>
+                {t("customerDetail.releases.deployLatestToClient")}
+              </button>
+              {!deployPreflight.eligible && (
+                <p className="muted" style={{ margin: 0 }}>{t("customerDetail.releases.resolvePreflightBlockers")}</p>
+              )}
+            </form>
+            {rollouts.length > 0 ? (
+              <div className="stack">
+                <strong>{t("customerDetail.releases.recentRollouts")}</strong>
+                {rollouts.map((rollout) => (
+                  <div className="item" key={rollout.id}>
+                    <div className="row">
+                      <span style={{ color: tone(rollout.status), fontWeight: 700 }}>{statusLabel(t, rollout.status)}</span>
+                      <span className="muted">{format.dateTime(rollout.createdAt, { dateStyle: "medium", timeStyle: "short" })}</span>
+                    </div>
+                    <div className="muted" style={{ fontSize: 12 }}>
+                      {t("customerDetail.releases.rolloutAttempts", { count: rollout.attempts })}
+                      {rollout.completedAt ? ` / ${format.dateTime(rollout.completedAt, { dateStyle: "medium", timeStyle: "short" })}` : ""}
+                    </div>
+                    {rollout.error && <div style={{ color: "var(--red-11)", fontSize: 12 }}>{rollout.error}</div>}
+                    <JsonPreview value={rollout.payload} />
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="muted" style={{ margin: 0 }}>{t("customerDetail.releases.noRecentRollouts")}</p>
+            )}
+          </section>
           <form action={runReleaseOperationAction} className="item stack">
             <input type="hidden" name="deploymentId" value={customer.id} />
             <input type="hidden" name="operation" value="prepare_upgrade" />

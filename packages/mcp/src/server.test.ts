@@ -13,6 +13,10 @@ const archiveWorkspaceToolLinkMock = vi.fn();
 const revealWorkspaceToolLinkCredentialMock = vi.fn();
 
 vi.mock("@corgtex/domain", () => ({
+  CONTROL_PLANE_WORKSPACE_FEATURE_FLAGS: [
+    { flag: "GOALS", label: "Goals", description: "Goals", defaultEnabled: true },
+    { flag: "FINANCE", label: "Finance", description: "Finance", defaultEnabled: false },
+  ],
   listProposals: vi.fn(),
   createProposal: vi.fn(),
   listActions: vi.fn(),
@@ -25,9 +29,12 @@ vi.mock("@corgtex/domain", () => ({
   updateGoal: updateGoalMock,
   deleteGoal: deleteGoalMock,
   listMembers: vi.fn(),
+  listMembersEnriched: vi.fn(),
   createMember: vi.fn(),
   updateMember: vi.fn(),
   deactivateMember: vi.fn(),
+  resendMemberAccessLink: vi.fn(),
+  sendMemberSetupEmail: vi.fn(),
   createDocument: vi.fn(),
   listMeetings: vi.fn(),
   getCurrentConstitution: vi.fn(),
@@ -59,7 +66,12 @@ vi.mock("@corgtex/agents", () => ({
 }));
 
 vi.mock("@corgtex/shared", () => ({
-  prisma: {},
+  prisma: {
+    workspaceFeatureFlag: {
+      findMany: vi.fn(),
+      upsert: vi.fn(),
+    },
+  },
   env: { APP_URL: "https://app.test" },
 }));
 

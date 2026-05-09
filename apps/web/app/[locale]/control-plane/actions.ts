@@ -4,11 +4,17 @@ import { revalidatePath } from "next/cache";
 import {
   configureControlPlaneMeetingRecorderIntegration,
   configureSupportConnector,
+  createControlPlaneCustomerMember,
+  deployLatestControlPlaneRelease,
+  enqueueControlPlaneDeployLatestRollout,
   fetchCustomerSupportSnapshot,
   recordBreakGlassSupportNote,
+  resendControlPlaneCustomerMemberAccessLink,
   runControlPlaneContextOperation,
   runControlPlaneReleaseOperation,
   runCustomerSupportOperation,
+  setControlPlaneFeatureFlag,
+  updateControlPlaneCustomerMemberStatus,
 } from "@corgtex/domain";
 import type { SupportAction } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
@@ -27,11 +33,28 @@ function asBoolean(formData: FormData, key: string) {
   return asString(formData, key) === "true";
 }
 
+function asRequiredBoolean(formData: FormData, key: string) {
+  const value = asString(formData, key);
+  if (value !== "true" && value !== "false") {
+    throw new Error(`${key} must be true or false.`);
+  }
+  return value === "true";
+}
+
 function asOptionalNumber(formData: FormData, key: string) {
   const value = asString(formData, key);
   if (!value) return undefined;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function asBooleanFromCheckbox(formData: FormData, key: string) {
+  const value = formData.get(key);
+  return value === "on" || value === "true";
+}
+
+function asStringArray(formData: FormData, key: string) {
+  return formData.getAll(key).filter((value): value is string => typeof value === "string" && value.trim().length > 0);
 }
 
 function parseJsonObject(value: string) {
@@ -135,4 +158,80 @@ export async function runReleaseOperationAction(formData: FormData) {
     reason: asString(formData, "reason"),
   });
   revalidateControlPlaneDeployment(deploymentId);
+}
+
+export async function createControlPlaneMemberAction(formData: FormData) {
+  const actor = await requirePageActor();
+  const deploymentId = asString(formData, "deploymentId");
+  const role = asString(formData, "role");
+  if (!role) {
+    throw new Error("role is required.");
+  }
+  await createControlPlaneCustomerMember(actor, {
+    deploymentId,
+    email: asString(formData, "email"),
+    displayName: optionalString(formData, "displayName"),
+    role,
+    reason: asString(formData, "reason"),
+  });
+  revalidateControlPlaneDeployment(deploymentId);
+}
+
+export async function resendControlPlaneAccessLinkAction(formData: FormData) {
+  const actor = await requirePageActor();
+  const deploymentId = asString(formData, "deploymentId");
+  await resendControlPlaneCustomerMemberAccessLink(actor, {
+    deploymentId,
+    memberId: asString(formData, "memberId"),
+    reason: asString(formData, "reason"),
+  });
+  revalidateControlPlaneDeployment(deploymentId);
+}
+
+export async function updateControlPlaneMemberStatusAction(formData: FormData) {
+  const actor = await requirePageActor();
+  const deploymentId = asString(formData, "deploymentId");
+  await updateControlPlaneCustomerMemberStatus(actor, {
+    deploymentId,
+    memberId: asString(formData, "memberId"),
+    isActive: asRequiredBoolean(formData, "isActive"),
+    reason: asString(formData, "reason"),
+  });
+  revalidateControlPlaneDeployment(deploymentId);
+}
+
+export async function setControlPlaneFeatureFlagAction(formData: FormData) {
+  const actor = await requirePageActor();
+  const deploymentId = asString(formData, "deploymentId");
+  await setControlPlaneFeatureFlag(actor, {
+    deploymentId,
+    flag: asString(formData, "flag"),
+    enabled: asRequiredBoolean(formData, "enabled"),
+    reason: asString(formData, "reason"),
+  });
+  revalidateControlPlaneDeployment(deploymentId);
+}
+
+export async function deployLatestControlPlaneReleaseAction(formData: FormData) {
+  const actor = await requirePageActor();
+  const deploymentId = asString(formData, "deploymentId");
+  await deployLatestControlPlaneRelease(actor, {
+    deploymentId,
+    reason: asString(formData, "reason"),
+    force: false,
+  });
+  revalidateControlPlaneDeployment(deploymentId);
+}
+
+export async function enqueueDeployLatestRolloutAction(formData: FormData) {
+  const actor = await requirePageActor();
+  await enqueueControlPlaneDeployLatestRollout(actor, {
+    deploymentIds: asStringArray(formData, "deploymentIds"),
+    allEligible: asBooleanFromCheckbox(formData, "allEligible"),
+    includeUnhealthy: asBooleanFromCheckbox(formData, "includeUnhealthy"),
+    reason: asString(formData, "reason"),
+    limit: asOptionalNumber(formData, "limit") ?? 100,
+  });
+  revalidatePath("/control-plane");
+  revalidatePath("/es/control-plane");
 }

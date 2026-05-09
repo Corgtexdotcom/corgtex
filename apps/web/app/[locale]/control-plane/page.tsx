@@ -1,27 +1,17 @@
 import { notFound } from "next/navigation";
-import { getFormatter, getTranslations } from "next-intl/server";
-import { listControlPlaneDeployments, requireControlPlaneAccess } from "@corgtex/domain";
+import { getFormatter } from "next-intl/server";
+import { listControlPlaneFleetPage, requireControlPlaneAccess } from "@corgtex/domain";
 import { Link } from "@/i18n/routing";
 import { requirePageActor } from "@/lib/auth";
+import { enqueueDeployLatestRolloutAction } from "./actions";
 import { ControlPlaneLanguageSwitcher } from "./ControlPlaneLanguageSwitcher";
 
 export const dynamic = "force-dynamic";
 
-type ControlPlaneCustomer = Awaited<ReturnType<typeof listControlPlaneDeployments>>[number];
+type FleetPage = Awaited<ReturnType<typeof listControlPlaneFleetPage>>;
+type FleetCustomer = FleetPage["items"][number];
 
-const CONTROL_PLANE_SECTION_IDS = [
-  "fleet",
-  "customers",
-  "context",
-  "ai-governance",
-  "integrations",
-  "releases",
-  "support",
-  "audit",
-  "mcp",
-] as const;
-
-type ControlPlaneT = Awaited<ReturnType<typeof getTranslations>>;
+const PAGE_SIZE = 25;
 
 function statusTone(status?: string | null) {
   if (status === "ok" || status === "active" || status === "connected") return "var(--green-11)";
@@ -30,68 +20,45 @@ function statusTone(status?: string | null) {
   return "var(--gray-11)";
 }
 
-function statusLabel(t: ControlPlaneT, status?: string | null) {
-  const normalized = status?.toLowerCase().replace(/[^a-z0-9]+/g, "_");
-  const key = normalized && [
-    "active",
-    "attention",
-    "connected",
-    "configured",
-    "degraded",
-    "disabled",
-    "down",
-    "failed",
-    "not_configured",
-    "ok",
-    "pending",
-    "provisioning",
-    "ready",
-    "suspended",
-    "unknown",
-  ].includes(normalized)
-    ? normalized
-    : "unknown";
-
-  return normalized && key !== "unknown" ? t(`status.${key}` as any) : (status ? status.replace(/_/g, " ") : t("status.unknown"));
+function label(value?: string | null) {
+  return value ? value.replace(/_/g, " ") : "unknown";
 }
 
-function deploymentReadiness(customer: ControlPlaneCustomer, t: ControlPlaneT) {
-  const issues = [
-    !customer.region ? t("readiness.regionMissing") : null,
-    !customer.dataResidency ? t("readiness.residencyMissing") : null,
-    !customer.releaseImageTag && !customer.releaseVersion ? t("readiness.releaseUnknown") : null,
-    !customer.lastHealthCheck ? t("readiness.noHealthProbe") : null,
-    customer.lastHealthStatus && customer.lastHealthStatus !== "ok" ? t("readiness.runtimeStatus", { status: statusLabel(t, customer.lastHealthStatus) }) : null,
-    !customer.hasSupportCredential ? t("readiness.supportConnectorMissing") : null,
-    customer.supportConnectorStatus === "degraded" ? t("readiness.supportConnectorDegraded") : null,
-  ].filter(Boolean) as string[];
-
-  return {
-    status: issues.length === 0 ? "ready" : "attention",
-    issues,
-  };
+function latestSnapshot(customer: FleetCustomer, kind: string) {
+  return customer.fleetSnapshots?.find((snapshot) => snapshot.snapshotKind === kind) ?? null;
 }
 
-function matchesQuery(customer: ControlPlaneCustomer, query: string) {
-  if (!query) return true;
-  return [
-    customer.label,
-    customer.customerSlug,
-    customer.url,
-    customer.region,
-    customer.dataResidency,
-    customer.supportOwnerEmail,
-    customer.releaseImageTag,
-    customer.releaseVersion,
-    customer.managedWorkspace?.name,
-    customer.managedWorkspace?.slug,
-  ].some((value) => value?.toLowerCase().includes(query));
+function releaseDrift(customer: FleetCustomer) {
+  return customer.lastHealthError?.includes("Release drift:")
+    ? customer.lastHealthError
+    : latestSnapshot(customer, "RELEASE")?.error ?? null;
+}
+
+function queryString(params: Record<string, string | number | null | undefined>) {
+  const search = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== null && String(value).length > 0) {
+      search.set(key, String(value));
+    }
+  }
+  return `?${search.toString()}`;
+}
+
+function ReadinessCell({ customer }: { customer: FleetCustomer }) {
+  const health = customer.lastHealthStatus || latestSnapshot(customer, "HEALTH")?.status || customer.provisioningStatus;
+  const drift = releaseDrift(customer);
+  return (
+    <td style={{ padding: 12, minWidth: 180 }}>
+      <div style={{ color: statusTone(health), fontWeight: 700, textTransform: "capitalize" }}>{label(health)}</div>
+      {drift ? <div className="muted" style={{ fontSize: 12 }}>{drift}</div> : <div className="muted" style={{ fontSize: 12 }}>Cached status</div>}
+    </td>
+  );
 }
 
 export default async function ControlPlanePage({
   searchParams,
 }: {
-  searchParams?: Promise<{ q?: string }>;
+  searchParams?: Promise<Record<string, string | undefined>>;
 }) {
   const actor = await requirePageActor();
   try {
@@ -100,190 +67,215 @@ export default async function ControlPlanePage({
     notFound();
   }
 
-  const query = ((await searchParams)?.q ?? "").trim().toLowerCase();
-  const customers = await listControlPlaneDeployments(actor);
-  const filteredCustomers = customers.filter((customer) => matchesQuery(customer, query));
+  const raw = await searchParams;
+  const fleet = await listControlPlaneFleetPage(actor, {
+    query: raw?.q,
+    health: raw?.health,
+    support: raw?.support,
+    region: raw?.region,
+    owner: raw?.owner,
+    sort: raw?.sort,
+    direction: raw?.direction,
+    page: Number(raw?.page ?? 1),
+    pageSize: PAGE_SIZE,
+  });
   const format = await getFormatter();
-  const t = await getTranslations("controlPlane");
-  const totals = customers.reduce((summary, customer) => ({
-    active: summary.active + (customer.provisioningStatus === "active" ? 1 : 0),
-    attention: summary.attention + (deploymentReadiness(customer, t).status === "attention" ? 1 : 0),
-    supportReady: summary.supportReady + (customer.hasSupportCredential ? 1 : 0),
-    managed: summary.managed + (customer.managedWorkspace ? 1 : 0),
-    failedOperations: summary.failedOperations + customer.supportOperations.filter((op) => op.status === "FAILED").length,
-  }), { active: 0, attention: 0, supportReady: 0, managed: 0, failedOperations: 0 });
-  const recentOperations = customers
-    .flatMap((customer) => customer.supportOperations.map((operation) => ({ customer, operation })))
-    .sort((a, b) => b.operation.createdAt.getTime() - a.operation.createdAt.getTime())
-    .slice(0, 8);
+  const paginationFilters = {
+    q: fleet.filters.query,
+    health: fleet.filters.health,
+    support: fleet.filters.support,
+    region: fleet.filters.region,
+    owner: fleet.filters.owner,
+    sort: fleet.filters.sort,
+    direction: fleet.filters.direction,
+  };
+  const previousHref = queryString({ ...paginationFilters, page: Math.max(fleet.page - 1, 1) });
+  const nextHref = queryString({ ...paginationFilters, page: Math.min(fleet.page + 1, fleet.pageCount) });
 
   return (
     <main className="control-plane-shell">
       <aside className="control-plane-rail stack">
-        <strong>{t("title")}</strong>
-        {CONTROL_PLANE_SECTION_IDS.map((id) => (
-          <a key={id} className="ws-nav-link" href={`#${id}`}>
-            <span className="ws-nav-icon">◇</span>
-            {t(`sections.${id}.label` as any)}
-          </a>
-        ))}
+        <strong>Ops Control Plane</strong>
+        <a className="ws-nav-link" href="#fleet"><span className="ws-nav-icon">◇</span>Fleet</a>
+        <a className="ws-nav-link" href="#rollout"><span className="ws-nav-icon">◇</span>Deploy latest</a>
+        <a className="ws-nav-link" href="#audit"><span className="ws-nav-icon">◇</span>Cached evidence</a>
         <ControlPlaneLanguageSwitcher />
       </aside>
 
       <div className="control-plane-content stack">
         <header className="page-header">
           <div>
-            <p className="muted" style={{ textTransform: "uppercase", fontSize: 12 }}>{t("eyebrow")}</p>
-            <h1 className="title-lg" style={{ margin: 0 }}>{t("title")}</h1>
-            <p className="muted" style={{ maxWidth: 720 }}>
-              {t("description")}
+            <p className="muted" style={{ textTransform: "uppercase", fontSize: 12 }}>Private operations</p>
+            <h1 className="title-lg" style={{ margin: 0 }}>Customer Fleet</h1>
+            <p className="muted" style={{ maxWidth: 760 }}>
+              Scalable control plane for 10-100 customer deployments. The list reads cached deployment and fleet snapshot records only; live probes run on demand from customer detail pages.
             </p>
           </div>
         </header>
 
-        <section id="fleet" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 16 }}>
+        <section style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12 }}>
           {[
-            [t("fleetCards.customers.label"), customers.length, t("fleetCards.customers.detail")],
-            [t("fleetCards.active.label"), totals.active, t("fleetCards.active.detail")],
-            [t("fleetCards.managed.label"), totals.managed, t("fleetCards.managed.detail")],
-            [t("fleetCards.supportReady.label"), totals.supportReady, t("fleetCards.supportReady.detail")],
-            [t("fleetCards.needsAttention.label"), totals.attention + totals.failedOperations, t("fleetCards.needsAttention.detail")],
-          ].map(([label, value, detail]) => (
-            <div className="panel" key={label} style={{ padding: 18 }}>
-              <div className="muted" style={{ fontSize: 12 }}>{label}</div>
+            ["Customers", fleet.summary.totalCustomers, "registered clients"],
+            ["Active", fleet.summary.active, "active deployments"],
+            ["Needs attention", fleet.summary.attention, "cached health issues"],
+            ["Support ready", fleet.summary.supportReady, "connector configured"],
+            ["Release drift", fleet.summary.releaseDrift, "cached drift signals"],
+          ].map(([title, value, detail]) => (
+            <div className="panel" key={title} style={{ padding: 16 }}>
+              <div className="muted" style={{ fontSize: 12 }}>{title}</div>
               <div style={{ fontSize: 28, fontWeight: 700 }}>{value}</div>
               <div className="muted" style={{ fontSize: 12 }}>{detail}</div>
             </div>
           ))}
         </section>
 
-        <section id="customers" className="panel stack" style={{ padding: 20, gap: 18 }}>
-          <div className="row">
+        <section id="fleet" className="panel stack" style={{ padding: 18, gap: 16 }}>
+          <div className="row" style={{ alignItems: "end" }}>
             <div>
-              <h2 style={{ margin: 0 }}>{t("customers.title")}</h2>
-              <p className="muted" style={{ margin: "4px 0 0" }}>{t("customers.description")}</p>
+              <h2 style={{ margin: 0 }}>Fleet</h2>
+              <p className="muted" style={{ margin: "4px 0 0" }}>Server-side filters, pagination, and cached evidence. No fan-out from this page.</p>
             </div>
-            <form method="get" style={{ display: "flex", gap: 8 }}>
-              <input name="q" defaultValue={query} placeholder={t("customers.searchPlaceholder")} style={{ minWidth: 260 }} />
-              <button type="submit" className="button secondary small">{t("customers.searchButton")}</button>
+            <form method="get" style={{ display: "flex", flexWrap: "wrap", gap: 8, justifyContent: "flex-end" }}>
+              <input name="q" defaultValue={fleet.filters.query} placeholder="Search customer, URL, owner, release" style={{ minWidth: 280 }} />
+              <select name="health" defaultValue={fleet.filters.health}>
+                <option value="">Any health</option>
+                <option value="ok">Healthy</option>
+                <option value="degraded">Degraded</option>
+                <option value="down">Down</option>
+                <option value="active">Active</option>
+              </select>
+              <select name="support" defaultValue={fleet.filters.support}>
+                <option value="">Any support</option>
+                <option value="connected">Connected</option>
+                <option value="configured">Configured</option>
+                <option value="not_configured">Not configured</option>
+                <option value="degraded">Degraded</option>
+              </select>
+              <select name="region" defaultValue={fleet.filters.region}>
+                <option value="">Any region</option>
+                {fleet.filters.regions.map((region) => <option key={region} value={region.toLowerCase()}>{region}</option>)}
+              </select>
+              <select name="owner" defaultValue={fleet.filters.owner}>
+                <option value="">Any owner</option>
+                {fleet.filters.owners.map((owner) => <option key={owner} value={owner.toLowerCase()}>{owner}</option>)}
+              </select>
+              <select name="sort" defaultValue={fleet.filters.sort}>
+                <option value="updated">Updated</option>
+                <option value="customer">Customer</option>
+                <option value="health">Health</option>
+                <option value="release">Release</option>
+                <option value="support">Support</option>
+                <option value="region">Region</option>
+                <option value="owner">Owner</option>
+              </select>
+              <button type="submit" className="button secondary small">Apply</button>
             </form>
           </div>
 
-          <div style={{ overflowX: "auto" }}>
-            <table className="table" style={{ width: "100%", borderCollapse: "collapse" }}>
-              <thead>
-                <tr style={{ textAlign: "left", borderBottom: "1px solid var(--border-color)" }}>
-                  <th style={{ padding: 14 }}>{t("customers.columns.customer")}</th>
-                  <th style={{ padding: 14 }}>{t("customers.columns.readiness")}</th>
-                  <th style={{ padding: 14 }}>{t("customers.columns.workspace")}</th>
-                  <th style={{ padding: 14 }}>{t("customers.columns.region")}</th>
-                  <th style={{ padding: 14 }}>{t("customers.columns.release")}</th>
-                  <th style={{ padding: 14 }}>{t("customers.columns.runtime")}</th>
-                  <th style={{ padding: 14 }}>{t("customers.columns.support")}</th>
-                  <th style={{ padding: 14 }}>{t("customers.columns.lastCheck")}</th>
-                  <th style={{ padding: 14 }}>{t("customers.columns.actions")}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {filteredCustomers.map((customer) => {
-                  const readiness = deploymentReadiness(customer, t);
-                  return (
-                    <tr key={customer.id} style={{ borderBottom: "1px solid var(--border-color)" }}>
-                      <td style={{ padding: 14 }}>
-                        <strong>{customer.label}</strong>
-                        <div className="muted">{customer.customerSlug || customer.url}</div>
-                      </td>
-                      <td style={{ padding: 14 }}>
-                        <span style={{ color: statusTone(readiness.status), fontWeight: 700 }}>{statusLabel(t, readiness.status)}</span>
-                        {readiness.issues.length > 0 && <div className="muted">{readiness.issues.slice(0, 2).join(", ")}</div>}
-                      </td>
-                      <td style={{ padding: 14 }}>
-                        {customer.managedWorkspace ? (
-                          <>
-                            <strong>{customer.managedWorkspace.name}</strong>
-                            <div className="muted">{customer.managedWorkspace.slug}</div>
-                          </>
-                        ) : (
-                          <span className="muted">{t("status.remoteOnly")}</span>
-                        )}
-                      </td>
-                      <td style={{ padding: 14 }}>{customer.region || t("status.notSet")}</td>
-                      <td style={{ padding: 14 }}>{customer.releaseImageTag || customer.releaseVersion || t("status.unknown")}</td>
-                      <td style={{ padding: 14 }}>
-                        <span style={{ color: statusTone(customer.lastHealthStatus), fontWeight: 600 }}>
-                          {statusLabel(t, customer.lastHealthStatus || customer.provisioningStatus || "unknown")}
-                        </span>
-                        {customer.lastHealthError && <div className="muted">{customer.lastHealthError}</div>}
-                      </td>
-                      <td style={{ padding: 14 }}>
-                        <span style={{ color: statusTone(customer.supportConnectorStatus), fontWeight: 600 }}>
-                          {statusLabel(t, customer.supportConnectorStatus)}
-                        </span>
-                        <div className="muted">{customer.supportOwnerEmail || t("customers.noOwner")}</div>
-                      </td>
-                      <td style={{ padding: 14 }}>
-                        {customer.supportLastSyncAt
-                          ? format.dateTime(customer.supportLastSyncAt, { dateStyle: "medium", timeStyle: "short" })
-                          : customer.lastHealthCheck
-                            ? format.dateTime(customer.lastHealthCheck, { dateStyle: "medium", timeStyle: "short" })
-                            : t("status.never")}
-                      </td>
-                      <td style={{ padding: 14 }}>
-                        {customer.hasDeployment ? (
-                          <Link className="link-button small" href={`/control-plane/deployments/${customer.id}`}>
-                            {t("customers.open")}
-                          </Link>
-                        ) : (
-                          <span className="muted">{t("customers.needsDeployment")}</span>
-                        )}
-                      </td>
-                    </tr>
-                  );
-                })}
-                {filteredCustomers.length === 0 && (
-                  <tr>
-                    <td colSpan={9} style={{ padding: 32, textAlign: "center" }} className="muted">
-                      {t("customers.empty")}
-                    </td>
+          <form action={enqueueDeployLatestRolloutAction} className="stack" id="rollout" style={{ gap: 14 }}>
+            <div style={{ overflowX: "auto" }}>
+              <table className="table" style={{ width: "100%", borderCollapse: "collapse" }}>
+                <thead>
+                  <tr style={{ textAlign: "left", borderBottom: "1px solid var(--border-color)" }}>
+                    <th style={{ padding: 12 }}><span className="muted">Select</span></th>
+                    <th style={{ padding: 12 }}>Customer</th>
+                    <th style={{ padding: 12 }}>Health</th>
+                    <th style={{ padding: 12 }}>Release</th>
+                    <th style={{ padding: 12 }}>Support</th>
+                    <th style={{ padding: 12 }}>Feature flags</th>
+                    <th style={{ padding: 12 }}>Owner</th>
+                    <th style={{ padding: 12 }}>Last checked</th>
+                    <th style={{ padding: 12 }}>Actions</th>
                   </tr>
-                )}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {fleet.items.map((customer) => {
+                    const supportStatus = customer.hasSupportCredential ? customer.supportConnectorStatus : "not_configured";
+                    const integrationSnapshot = latestSnapshot(customer, "INTEGRATION");
+                    return (
+                      <tr key={customer.id} style={{ borderBottom: "1px solid var(--border-color)" }}>
+                        <td style={{ padding: 12 }}>
+                          {customer.hasDeployment ? <input type="checkbox" name="deploymentIds" value={customer.id} aria-label={`Select ${customer.label}`} /> : null}
+                        </td>
+                        <td style={{ padding: 12, minWidth: 220 }}>
+                          <strong>{customer.label}</strong>
+                          <div className="muted">{customer.customerSlug || customer.customerAccount?.slug || customer.url}</div>
+                          <div className="muted" style={{ fontSize: 12 }}>{customer.region || "No region"} / {customer.dataResidency || "No residency"}</div>
+                        </td>
+                        <ReadinessCell customer={customer} />
+                        <td style={{ padding: 12, minWidth: 180 }}>
+                          <strong>{customer.releaseImageTag || customer.releaseVersion || "Unknown"}</strong>
+                          {releaseDrift(customer) ? <div style={{ color: "var(--red-11)", fontSize: 12 }}>Drift recorded</div> : <div className="muted" style={{ fontSize: 12 }}>No cached drift</div>}
+                        </td>
+                        <td style={{ padding: 12 }}>
+                          <span style={{ color: statusTone(supportStatus), fontWeight: 700, textTransform: "capitalize" }}>{label(supportStatus)}</span>
+                          <div className="muted" style={{ fontSize: 12 }}>{customer.managedWorkspace ? "Managed workspace" : "Remote connector"}</div>
+                        </td>
+                        <td style={{ padding: 12 }}>
+                          <span style={{ color: statusTone(integrationSnapshot?.status), fontWeight: 700, textTransform: "capitalize" }}>{label(integrationSnapshot?.status)}</span>
+                          <div className="muted" style={{ fontSize: 12 }}>Open client to edit</div>
+                        </td>
+                        <td style={{ padding: 12 }}>{customer.supportOwnerEmail || "Unassigned"}</td>
+                        <td style={{ padding: 12 }}>
+                          {customer.lastHealthCheck
+                            ? format.dateTime(customer.lastHealthCheck, { dateStyle: "medium", timeStyle: "short" })
+                            : latestSnapshot(customer, "HEALTH")?.observedAt
+                              ? format.dateTime(latestSnapshot(customer, "HEALTH")!.observedAt, { dateStyle: "medium", timeStyle: "short" })
+                              : "Never"}
+                        </td>
+                        <td style={{ padding: 12 }}>
+                          {customer.hasDeployment ? (
+                            <Link className="link-button small" href={`/control-plane/deployments/${customer.id}`}>Open</Link>
+                          ) : (
+                            <span className="muted">Needs deployment</span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  {fleet.items.length === 0 && (
+                    <tr><td colSpan={9} className="muted" style={{ padding: 28, textAlign: "center" }}>No customers match these filters.</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="row" style={{ alignItems: "end", gap: 12 }}>
+              <label style={{ flex: "1 1 320px" }}>
+                Rollout reason
+                <input name="reason" required defaultValue="Deploy configured latest release to selected eligible clients." />
+              </label>
+              <label style={{ display: "flex", alignItems: "center", gap: 8, margin: 0 }}>
+                <input type="checkbox" name="includeUnhealthy" />
+                Confirm selected clients with health blockers
+              </label>
+              <button type="submit" className="button">Queue selected deploy latest</button>
+            </div>
+          </form>
+
+          <div className="row">
+            <div className="muted">Page {fleet.page} of {fleet.pageCount}. Showing {fleet.items.length} of {fleet.total} matching customers.</div>
+            <div className="actions-inline">
+              <a className="link-button small" href={previousHref}>Previous</a>
+              <a className="link-button small" href={nextHref}>Next</a>
+            </div>
           </div>
         </section>
 
-        <section style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 16 }}>
-          {CONTROL_PLANE_SECTION_IDS.slice(2).map((id) => (
-            <div id={id} className="panel stack" key={id} style={{ padding: 18, gap: 8 }}>
-              <h2 style={{ margin: 0, fontSize: 18 }}>{t(`sections.${id}.label` as any)}</h2>
-              <p className="muted" style={{ margin: 0 }}>{t(`sections.${id}.detail` as any)}</p>
-              <div className="muted" style={{ fontSize: 12 }}>
-                {id === "support"
-                  ? t("sections.support.recentOperations", { count: recentOperations.length })
-                  : t("sections.detailPageNote")}
-              </div>
-            </div>
-          ))}
-        </section>
-
-        <section className="panel stack" style={{ padding: 20, gap: 14 }}>
-          <div>
-            <h2 style={{ margin: 0 }}>{t("operationHistory.title")}</h2>
-            <p className="muted" style={{ margin: "4px 0 0" }}>{t("operationHistory.description")}</p>
-          </div>
-          {recentOperations.map(({ customer, operation }) => (
-            <div className="item" key={operation.id}>
-              <div className="row">
-                <div>
-                  <strong>{operation.action}</strong>
-                  <div className="muted">{t("operationHistory.customerReason", { customer: customer.label, reason: operation.reason })}</div>
-                </div>
-                <span style={{ color: statusTone(operation.status), fontWeight: 700 }}>{statusLabel(t, operation.status)}</span>
-              </div>
-              <div className="muted">{format.dateTime(operation.createdAt, { dateStyle: "medium", timeStyle: "short" })}</div>
-            </div>
-          ))}
-          {recentOperations.length === 0 && <p className="muted">{t("operationHistory.empty")}</p>}
+        <section id="audit" className="panel stack" style={{ padding: 18 }}>
+          <h2 style={{ margin: 0 }}>Operational model</h2>
+          <p className="muted" style={{ margin: 0 }}>
+            Fleet rendering stays fast because it uses central deployment rows and cached fleet snapshots. Health probes, support snapshots, access changes, feature flag writes, and deploy actions run from client detail pages or queued jobs and write the audit timeline.
+          </p>
+          <form action={enqueueDeployLatestRolloutAction} className="item row" style={{ alignItems: "end" }}>
+            <input type="hidden" name="allEligible" value="true" />
+            <input type="hidden" name="limit" value="100" />
+            <label style={{ flex: 1 }}>
+              Queue all eligible clients
+              <input name="reason" required defaultValue="Deploy configured latest release to all eligible healthy clients." />
+            </label>
+            <button type="submit" className="button secondary">Queue all eligible deploy latest</button>
+          </form>
         </section>
       </div>
     </main>
