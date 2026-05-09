@@ -2196,7 +2196,8 @@ export async function deployLatestControlPlaneRelease(actor: AppActor, params: {
   const deployment = await getControlPlaneDeploymentWithWorkspace(actor, params.deploymentId);
   const target = params.target ?? getControlPlaneLatestReleaseTarget();
   const preflight = releasePreflightForDeployment(deployment, target);
-  if (!preflight.eligible && !params.force) {
+  const canForceDeploy = Boolean(params.force && canBypassDeployLatestPreflight(preflight));
+  if (!preflight.eligible && !canForceDeploy) {
     throw new AppError(400, "RELEASE_PREFLIGHT_FAILED", preflight.blockers.join(" "));
   }
   invariant(target, 400, "LATEST_RELEASE_NOT_CONFIGURED", "Latest release target is not configured.");
@@ -2382,11 +2383,11 @@ export async function enqueueControlPlaneDeployLatestRollout(actor: AppActor, pa
     requireControlPlaneFleetReleaseWriteAccess(actor);
   }
   const limit = Math.min(Math.max(Math.floor(params.limit ?? 100), 1), 100);
+  invariant(requestedIds.length <= limit, 400, "INVALID_INPUT", `Selected deployment count (${requestedIds.length}) exceeds rollout limit (${limit}).`);
   const deployments = requestedIds.length
     ? await prisma.customerDeployment.findMany({
       where: { id: { in: requestedIds } },
       orderBy: { label: "asc" },
-      take: limit,
     })
     : await prisma.customerDeployment.findMany({
       where: {
@@ -2428,12 +2429,32 @@ export async function enqueueControlPlaneDeployLatestRollout(actor: AppActor, pa
         continue;
       }
 
-      await tx.workflowJob.upsert({
-        where: {
-          dedupeKey: `control-plane:deploy-latest:${deployment.id}:${target.releaseImageTag}:${bucket}`,
-        },
-        update: {},
-        create: {
+      const dedupeKey = `control-plane:deploy-latest:${deployment.id}:${target.releaseImageTag}:${target.releaseVersion ?? "no-version"}:${bucket}`;
+      const existingJob = await tx.workflowJob.findUnique({
+        where: { dedupeKey },
+        select: { id: true, status: true },
+      });
+      if (existingJob) {
+        const blockers = [`A rollout job already exists in this dedupe window with status ${existingJob.status}.`];
+        await tx.customerDeploymentEvent.create({
+          data: {
+            deploymentId: deployment.id,
+            actorUserId: actorUserId(actor),
+            action: "control_plane.release.deploy_latest_skipped",
+            meta: redactObject({ reason, target, blockers, dedupeKey, existingJobId: existingJob.id }) as Prisma.InputJsonObject,
+          },
+        });
+        results.push({
+          deploymentId: deployment.id,
+          label: deployment.label,
+          status: "skipped",
+          blockers,
+        });
+        continue;
+      }
+
+      await tx.workflowJob.create({
+        data: {
           workspaceId: null,
           eventId: null,
           type: CONTROL_PLANE_RELEASE_DEPLOY_JOB_TYPE,
@@ -2444,7 +2465,7 @@ export async function enqueueControlPlaneDeployLatestRollout(actor: AppActor, pa
             force: bypassPreflight,
             requestedBy: actorUserId(actor) ?? (isControlPlaneAgent(actor) ? actor.label : "control-plane"),
           },
-          dedupeKey: `control-plane:deploy-latest:${deployment.id}:${target.releaseImageTag}:${bucket}`,
+          dedupeKey,
         },
       });
       await tx.customerDeploymentEvent.create({
