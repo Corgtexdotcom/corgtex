@@ -14,7 +14,8 @@ Per-role rules live in [`AGENTS.md`](../AGENTS.md).
 1. Read the PR body plan for this PR. If it is missing, request changes with the reason "no PR-body plan." Do not proceed.
 2. The PR body must state the risk tier and include the completed plan contract.
 3. Confirm the PR-body plan is public-safe and does not include private keys, API tokens, passwords, raw credentials, secret values, or customer-private facts.
-4. Read the full diff.
+4. Confirm the branch/PR is task-specific. If it appears to reuse an unrelated open or merged PR branch, compare the PR title/body, commit history, and diff against the stated plan before approving.
+5. Read the full diff.
 
 ## Hard rejection criteria (request changes, do not approve)
 
@@ -46,7 +47,8 @@ Reject on **any** of these:
 10. **CI red** — any required check failed: `Lint, Typecheck & Test`, `Database Sync`, `Build`, `Docs Validation`, `Plan Present`, `Scope Check`, `Secret Scan`, or `Diff Size`.
 11. **`halt-agents` label** present — do not approve regardless of other state.
 12. **Private docs/artifacts committed** — any private/client/partner notes, handoff docs, agent plans, generated QA output, screenshots, recordings, Slack manifests, or other non-public documentation-site files appear under `docs/`.
-13. **Objective Logic Flaws** — any objective, critical logic or security bug detected (e.g., race conditions, unhandled promise rejections, insecure direct object references, or missing database indexes that cause critical bottlenecks). Do NOT reject for subjective style or architecture.
+13. **Mixed branch/task scope** — the PR includes commits or changes from an unrelated task, reuses an unrelated open or merged PR branch, or stacks on another PR without the PR body explicitly saying it is stacked and why.
+14. **Objective Logic Flaws** — any objective, critical logic or security bug detected (e.g., race conditions, unhandled promise rejections, insecure direct object references, or missing database indexes that cause critical bottlenecks). Do NOT reject for subjective style or architecture.
 
 ## Reviewer identity
 
