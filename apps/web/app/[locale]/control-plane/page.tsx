@@ -1,6 +1,6 @@
 import { notFound } from "next/navigation";
 import { getFormatter } from "next-intl/server";
-import { listControlPlaneFleetPage, requireControlPlaneAccess } from "@corgtex/domain";
+import { listControlPlaneFleetPage, listControlPlaneReleaseRolloutJobs, requireControlPlaneAccess } from "@corgtex/domain";
 import { Link } from "@/i18n/routing";
 import { requirePageActor } from "@/lib/auth";
 import { enqueueDeployLatestRolloutAction } from "./actions";
@@ -10,6 +10,7 @@ export const dynamic = "force-dynamic";
 
 type FleetPage = Awaited<ReturnType<typeof listControlPlaneFleetPage>>;
 type FleetCustomer = FleetPage["items"][number];
+type ReleaseRollout = Awaited<ReturnType<typeof listControlPlaneReleaseRolloutJobs>>[number];
 
 const PAGE_SIZE = 25;
 
@@ -44,6 +45,22 @@ function queryString(params: Record<string, string | number | null | undefined>)
   return `?${search.toString()}`;
 }
 
+function payloadString(payload: ReleaseRollout["payload"], key: string) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+  const value = payload[key];
+  return typeof value === "string" && value.trim().length > 0 ? value : null;
+}
+
+function rolloutTarget(payload: ReleaseRollout["payload"]) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+  const target = payload.target;
+  if (!target || typeof target !== "object" || Array.isArray(target)) return null;
+  const targetRecord = target as Record<string, unknown>;
+  const releaseImageTag = typeof targetRecord.releaseImageTag === "string" ? targetRecord.releaseImageTag : null;
+  const releaseVersion = typeof targetRecord.releaseVersion === "string" ? targetRecord.releaseVersion : null;
+  return releaseVersion ? `${releaseImageTag ?? "unknown"} / ${releaseVersion}` : releaseImageTag;
+}
+
 function ReadinessCell({ customer }: { customer: FleetCustomer }) {
   const health = customer.lastHealthStatus || latestSnapshot(customer, "HEALTH")?.status || customer.provisioningStatus;
   const drift = releaseDrift(customer);
@@ -68,18 +85,22 @@ export default async function ControlPlanePage({
   }
 
   const raw = await searchParams;
-  const fleet = await listControlPlaneFleetPage(actor, {
-    query: raw?.q,
-    health: raw?.health,
-    support: raw?.support,
-    region: raw?.region,
-    owner: raw?.owner,
-    sort: raw?.sort,
-    direction: raw?.direction,
-    page: Number(raw?.page ?? 1),
-    pageSize: PAGE_SIZE,
-  });
+  const [fleet, recentRollouts] = await Promise.all([
+    listControlPlaneFleetPage(actor, {
+      query: raw?.q,
+      health: raw?.health,
+      support: raw?.support,
+      region: raw?.region,
+      owner: raw?.owner,
+      sort: raw?.sort,
+      direction: raw?.direction,
+      page: Number(raw?.page ?? 1),
+      pageSize: PAGE_SIZE,
+    }),
+    listControlPlaneReleaseRolloutJobs(actor, { take: 8 }),
+  ]);
   const format = await getFormatter();
+  const fleetLabelByDeploymentId = new Map(fleet.items.map((customer) => [customer.id, customer.label]));
   const paginationFilters = {
     q: fleet.filters.query,
     health: fleet.filters.health,
@@ -168,7 +189,26 @@ export default async function ControlPlanePage({
                 <option value="region">Region</option>
                 <option value="owner">Owner</option>
               </select>
+              <select name="direction" defaultValue={fleet.filters.direction}>
+                <option value="desc">Descending</option>
+                <option value="asc">Ascending</option>
+              </select>
               <button type="submit" className="button secondary small">Apply</button>
+            </form>
+          </div>
+
+          <div className="control-plane-deploy-strip">
+            <div>
+              <strong>Deploy latest</strong>
+              <p className="muted" style={{ margin: "4px 0 0" }}>
+                Queue selected clients from the table, or send the configured latest release to all healthy eligible clients. Preflight still skips unsafe targets.
+              </p>
+            </div>
+            <form action={enqueueDeployLatestRolloutAction} className="control-plane-inline-form">
+              <input type="hidden" name="allEligible" value="true" />
+              <input type="hidden" name="limit" value="100" />
+              <input name="reason" required defaultValue="Deploy configured latest release to all eligible healthy clients." />
+              <button type="submit" className="button secondary small">Queue all eligible</button>
             </form>
           </div>
 
@@ -253,11 +293,47 @@ export default async function ControlPlanePage({
             </div>
           </form>
 
+          <section className="control-plane-rollout-panel stack">
+            <div className="row">
+              <div>
+                <h3 style={{ margin: 0 }}>Recent rollout progress</h3>
+                <p className="muted" style={{ margin: "4px 0 0" }}>Queued jobs are per client, so failures and retries stay visible without polling every customer instance.</p>
+              </div>
+              <span className="tag neutral">{recentRollouts.length} recent</span>
+            </div>
+            <div className="control-plane-rollout-list">
+              {recentRollouts.map((rollout) => {
+                const deploymentId = payloadString(rollout.payload, "deploymentId");
+                const customerLabel = deploymentId ? fleetLabelByDeploymentId.get(deploymentId) ?? deploymentId : "Unknown client";
+                const target = rolloutTarget(rollout.payload);
+                return (
+                  <div className="item" key={rollout.id}>
+                    <div className="row">
+                      <div>
+                        <strong>{customerLabel}</strong>
+                        <div className="muted" style={{ fontSize: 12 }}>{target ? `Target ${target}` : "Target not recorded"}</div>
+                      </div>
+                      <span style={{ color: statusTone(rollout.status), fontWeight: 700, textTransform: "capitalize" }}>{label(rollout.status)}</span>
+                    </div>
+                    <div className="muted" style={{ fontSize: 12 }}>
+                      {format.dateTime(rollout.createdAt, { dateStyle: "medium", timeStyle: "short" })} / attempts {rollout.attempts}
+                      {rollout.completedAt ? ` / completed ${format.dateTime(rollout.completedAt, { dateStyle: "medium", timeStyle: "short" })}` : ""}
+                    </div>
+                    {rollout.error ? <div style={{ color: "var(--red-11)", fontSize: 12 }}>{rollout.error}</div> : null}
+                  </div>
+                );
+              })}
+              {recentRollouts.length === 0 && (
+                <div className="item muted">No deploy latest jobs have been queued yet.</div>
+              )}
+            </div>
+          </section>
+
           <div className="row">
             <div className="muted">Page {fleet.page} of {fleet.pageCount}. Showing {fleet.items.length} of {fleet.total} matching customers.</div>
             <div className="actions-inline">
-              <a className="link-button small" href={previousHref}>Previous</a>
-              <a className="link-button small" href={nextHref}>Next</a>
+              {fleet.page > 1 ? <a className="link-button small" href={previousHref}>Previous</a> : <span className="link-button small muted" aria-disabled="true">Previous</span>}
+              {fleet.page < fleet.pageCount ? <a className="link-button small" href={nextHref}>Next</a> : <span className="link-button small muted" aria-disabled="true">Next</span>}
             </div>
           </div>
         </section>
@@ -267,15 +343,6 @@ export default async function ControlPlanePage({
           <p className="muted" style={{ margin: 0 }}>
             Fleet rendering stays fast because it uses central deployment rows and cached fleet snapshots. Health probes, support snapshots, access changes, feature flag writes, and deploy actions run from client detail pages or queued jobs and write the audit timeline.
           </p>
-          <form action={enqueueDeployLatestRolloutAction} className="item row" style={{ alignItems: "end" }}>
-            <input type="hidden" name="allEligible" value="true" />
-            <input type="hidden" name="limit" value="100" />
-            <label style={{ flex: 1 }}>
-              Queue all eligible clients
-              <input name="reason" required defaultValue="Deploy configured latest release to all eligible healthy clients." />
-            </label>
-            <button type="submit" className="button secondary">Queue all eligible deploy latest</button>
-          </form>
         </section>
       </div>
     </main>
