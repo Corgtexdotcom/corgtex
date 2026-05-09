@@ -75,7 +75,7 @@ export default async function TensionsPage({
   return (
     <>
       <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 32 }}>
-        <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2.5rem" }}>{t("pageTitle")}</h1>
+        <h1>{t("pageTitle")}</h1>
         <div className="nr-masthead-meta">
           <span>{t("pageDescription")}</span>
         </div>
@@ -118,7 +118,7 @@ export default async function TensionsPage({
                       {tension.title}
                     </a>
                   </strong>
-                  <span className={`tag ${tension.status === "DRAFT" ? "info" : tension.status === "OPEN" ? "warning" : "success"}`}>{statusLabel(tension.status)}</span>
+                  <span className={`tag ${tension.status === "DRAFT" ? "info" : tension.status === "OPEN" ? "neutral" : "success"}`}>{statusLabel(tension.status)}</span>
                 </div>
                 {tension.bodyMd && <MarkdownExcerpt markdown={tension.bodyMd} maxLength={220} as="div" className="nr-excerpt" />}
 

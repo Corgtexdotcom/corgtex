@@ -21,8 +21,7 @@ export function StatRow({ stats, className = "", prefix = "nr" }: StatRowProps) 
         <span key={stat.key} style={{ display: "inline-flex", alignItems: "baseline", gap: 8 }}>
           <strong
             style={{
-              fontFamily: "var(--font-playfair)",
-              fontSize: "1.2rem",
+              fontSize: "1rem",
               fontWeight: 700,
             }}
           >
@@ -31,8 +30,6 @@ export function StatRow({ stats, className = "", prefix = "nr" }: StatRowProps) 
           <span
             style={{
               fontSize: "0.85rem",
-              textTransform: "uppercase",
-              letterSpacing: "0.05em",
               color: "var(--muted)",
             }}
           >

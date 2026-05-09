@@ -445,7 +445,7 @@ export default async function WorkspaceAddPage({
       <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 32 }}>
         <div style={{ display: "flex", justifyContent: "space-between", gap: 16, alignItems: "flex-end", flexWrap: "wrap" }}>
           <div>
-            <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2.5rem" }}>{title}</h1>
+            <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2rem" }}>{title}</h1>
             <div className="nr-masthead-meta">
               <span>{WORKSPACE_ADD_ACTION_DEFINITIONS[kind].description}</span>
             </div>

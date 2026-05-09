@@ -12,6 +12,22 @@ import { publishArticleAction, returnArticleToDraftAction } from "../actions";
 
 export const dynamic = "force-dynamic";
 
+function stripDuplicateTitleHeading(markdown: string | null | undefined, title: string) {
+  if (!markdown?.trim()) return markdown;
+
+  const lines = markdown.split(/\r?\n/);
+  const firstContentIndex = lines.findIndex((line) => line.trim().length > 0);
+  if (firstContentIndex < 0) return markdown;
+
+  const firstContent = lines[firstContentIndex].trim();
+  if (!firstContent.startsWith("# ")) return markdown;
+
+  const headingText = firstContent.replace(/^#+\s+/, "").trim().toLowerCase();
+  if (headingText !== title.trim().toLowerCase()) return markdown;
+
+  const nextLines = lines.slice(0, firstContentIndex).concat(lines.slice(firstContentIndex + 1));
+  return nextLines.join("\n").replace(/^\s+/, "");
+}
 
 export default async function BrainArticlePage({
   params,
@@ -48,6 +64,7 @@ export default async function BrainArticlePage({
     if (days === 1) return t("yesterday");
     return t("daysAgo", { count: days });
   };
+  const articleBodyMd = stripDuplicateTitleHeading(article.bodyMd, article.title);
 
   async function updateArticleAction(formData: FormData) {
     "use server";
@@ -98,7 +115,7 @@ export default async function BrainArticlePage({
           </div>
         )}
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", borderBottom: "1px solid var(--line)", paddingBottom: 16 }}>
-          <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2.5rem", maxWidth: "800px" }}>{article.title}</h1>
+          <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2rem", maxWidth: "800px" }}>{article.title}</h1>
           <span style={{ fontSize: "0.85rem", color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.05em" }}>
             {t("updated", { time: ageText(article.updatedAt) })}
           </span>
@@ -108,7 +125,7 @@ export default async function BrainArticlePage({
       <div style={{ display: "grid", gridTemplateColumns: "3fr 1fr", gap: "64px" }}>
         {/* Main Article Body */}
         <article style={{ fontSize: "1.1rem", lineHeight: 1.8, color: "var(--text)" }}>
-          <MarkdownRenderer markdown={article.bodyMd} variant="document" className="nr-markdown" />
+          <MarkdownRenderer markdown={articleBodyMd} variant="document" className="nr-markdown" />
 
           <hr className="nr-divider" style={{ margin: "48px 0" }} />
           

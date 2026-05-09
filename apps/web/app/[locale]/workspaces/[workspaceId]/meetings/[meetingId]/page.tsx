@@ -98,7 +98,7 @@ export default async function MeetingDetailPage({
 
       <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 32 }}>
         <div className="nr-meta" style={{ marginBottom: "8px" }}>{meeting.source}</div>
-        <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2.5rem" }}>
+        <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2rem" }}>
           {meeting.title || t("untitledMeeting")}
         </h1>
         <div className="nr-masthead-meta">

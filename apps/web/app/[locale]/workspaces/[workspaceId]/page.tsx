@@ -256,13 +256,12 @@ export default async function WorkspaceDashboard({
         <h1>{branding.primaryName}</h1>
         <div className="nr-masthead-meta">
           <span suppressHydrationWarning>{dateString}</span>
-          <form action={`/workspaces/${workspaceId}/brain`} method="GET" style={{ display: "flex", gap: "8px", alignItems: "center", marginLeft: "16px" }}>
-            <span style={{ fontSize: "0.75rem", color: "var(--muted)", textTransform: "none" }}>{t("searchLabel")}</span>
+          <form action={`/workspaces/${workspaceId}/brain`} method="GET" className="nr-masthead-search">
+            <span>{t("searchLabel")}</span>
             <input 
               name="q"
               type="text" 
               placeholder={t("searchPlaceholder")} 
-              style={{ padding: "4px 8px", fontSize: "0.85rem", border: "1px solid var(--line)", borderRadius: "4px" }}
             />
           </form>
         </div>

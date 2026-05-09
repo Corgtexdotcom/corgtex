@@ -31,7 +31,7 @@ export default async function MembersPage({
   return (
     <>
       <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 32 }}>
-        <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2.5rem" }}>{t("title")}</h1>
+        <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2rem" }}>{t("title")}</h1>
         <div className="nr-masthead-meta">
           <span>{t("description")}</span>
         </div>

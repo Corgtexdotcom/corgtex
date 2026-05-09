@@ -46,7 +46,7 @@ export default async function CatalogItemPage({
           <span className="tag">{item.status.replace("_", " ")}</span>
           {item.isFavorite && <span className="tag success">Favorite</span>}
         </div>
-        <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2.5rem" }}>{item.title}</h1>
+        <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2rem" }}>{item.title}</h1>
         <div className="nr-masthead-meta">
           <span>{item.outcome ?? "Shared workspace capability."}</span>
         </div>

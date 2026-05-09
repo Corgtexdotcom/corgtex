@@ -8,6 +8,7 @@ import { CommandMenuButton } from "./CommandMenuButton";
 import { LanguageSwitcher } from "./LanguageSwitcher";
 import { ThemeToggle } from "../../../ThemeToggle";
 import type { NavGroup } from "@/lib/nav-config";
+import { WorkspaceNavIcon, WorkspaceUtilityIcon } from "./WorkspaceNavIcon";
 
 type MobileMode = "workspace" | "ai";
 
@@ -201,7 +202,7 @@ export function MobileWorkspaceShell({
               className={mode === "workspace" && isActivePath(pathname, workspaceId, item.href) ? "active" : ""}
               onClick={() => setMode("workspace", "bottom_nav")}
             >
-              <span className="mobile-bottom-icon">{item.icon}</span>
+              <WorkspaceNavIcon name={item.icon} className="mobile-bottom-icon" />
               <span>{tNav(item.labelKey as any)}</span>
               {item.href === "" && unreadCount > 0 && (
                 <span className="mobile-bottom-badge">{unreadCount}</span>
@@ -213,7 +214,7 @@ export function MobileWorkspaceShell({
             className={mode === "ai" ? "active" : ""}
             onClick={() => setMode("ai", "bottom_nav")}
           >
-            <span className="mobile-bottom-icon">◇</span>
+            <WorkspaceUtilityIcon name="ai" className="mobile-bottom-icon" />
             <span>{tMobile("aiMode")}</span>
           </button>
           <button
@@ -222,7 +223,7 @@ export function MobileWorkspaceShell({
             aria-expanded={isMoreOpen}
             onClick={() => setIsMoreOpen(true)}
           >
-            <span className="mobile-bottom-icon">☰</span>
+            <WorkspaceUtilityIcon name="menu" className="mobile-bottom-icon" />
             <span>{tMobile("more")}</span>
           </button>
         </nav>
@@ -269,7 +270,7 @@ export function MobileWorkspaceShell({
                   setIsMoreOpen(false);
                 }}
               >
-                <span>◇</span>
+                <WorkspaceUtilityIcon name="ai" />
                 <span>{tMobile("openAi")}</span>
               </button>
               <button
@@ -280,7 +281,7 @@ export function MobileWorkspaceShell({
                   setIsMoreOpen(false);
                 }}
               >
-                <span>⌘</span>
+                <WorkspaceUtilityIcon name="command" />
                 <span>{tCommon("commandMenu")}</span>
               </button>
             </div>
@@ -299,7 +300,7 @@ export function MobileWorkspaceShell({
                         setIsMoreOpen(false);
                       }}
                     >
-                      <span className="ws-nav-icon">{item.icon}</span>
+                      <WorkspaceNavIcon name={item.icon} />
                       <span>{tNav(item.labelKey as any)}</span>
                       {item.href === "" && unreadCount > 0 && (
                         <span className="ws-notif-badge">{unreadCount}</span>
@@ -320,7 +321,7 @@ export function MobileWorkspaceShell({
                       setIsMoreOpen(false);
                     }}
                   >
-                    <span className="ws-nav-icon">✧</span>
+                    <WorkspaceUtilityIcon name="platformAdmin" />
                     <span>{tNav("platformAdmin")}</span>
                   </a>
                 </div>
@@ -339,11 +340,11 @@ export function MobileWorkspaceShell({
                   setIsMoreOpen(false);
                 }}
               >
-                <span className="ws-nav-icon">⎈</span>
+                <WorkspaceUtilityIcon name="userSettings" />
                 <span>{tMobile("userSettings")}</span>
               </a>
               <button type="button" className="mobile-more-link mobile-logout" onClick={() => void handleLogout()}>
-                <span className="ws-nav-icon">↥</span>
+                <WorkspaceUtilityIcon name="logout" />
                 <span>{tCommon("logout")}</span>
               </button>
             </div>

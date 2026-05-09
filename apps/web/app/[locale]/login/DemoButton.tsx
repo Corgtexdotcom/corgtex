@@ -42,12 +42,7 @@ export function DemoButton() {
         type="button" 
         onClick={handleDemoLogin}
         disabled={isLoading}
-        style={{ 
-          width: "100%", 
-          background: "linear-gradient(135deg, #0f172a 0%, #334155 100%)",
-          boxShadow: "0 4px 12px rgba(15, 23, 42, 0.2)",
-          fontWeight: 600
-        }}
+        className="login-demo-button secondary"
       >
         {isLoading ? t("preparing") : t("explore")}
       </button>
