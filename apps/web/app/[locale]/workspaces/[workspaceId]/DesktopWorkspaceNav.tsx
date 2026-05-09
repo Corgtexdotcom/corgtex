@@ -3,6 +3,7 @@
 import { usePathname } from "next/navigation";
 import { useTranslations } from "next-intl";
 import type { NavGroup } from "@/lib/nav-config";
+import { WorkspaceNavIcon, WorkspaceUtilityIcon } from "./WorkspaceNavIcon";
 
 function navHref(workspaceId: string, href: string) {
   return `/workspaces/${workspaceId}${href}`;
@@ -58,7 +59,7 @@ export function DesktopWorkspaceNav({
                 className={`ws-nav-link ${isActive ? "ws-nav-link-active" : ""}`}
                 aria-current={isActive ? "page" : undefined}
               >
-                <span className="ws-nav-icon">{item.icon}</span>
+                <WorkspaceNavIcon name={item.icon} />
                 {tNav(item.labelKey as any)}
                 {item.href === "" && unreadCount > 0 && (
                   <span className="ws-notif-badge">{unreadCount}</span>
@@ -75,7 +76,7 @@ export function DesktopWorkspaceNav({
             {tNav("globalAdmin")}
           </div>
           <a href={controlPlaneHref} className="ws-nav-link">
-            <span className="ws-nav-icon">✧</span>
+            <WorkspaceUtilityIcon name="platformAdmin" />
             {tNav("platformAdmin")}
           </a>
         </div>

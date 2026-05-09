@@ -147,7 +147,7 @@ export default async function FinancePage({
   return (
     <>
       <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 24 }}>
-        <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2.5rem" }}>{t("pageTitle")}</h1>
+        <h1>{t("pageTitle")}</h1>
         <div className="nr-masthead-meta">
           <span>{t("pageDescription")}</span>
         </div>
@@ -156,7 +156,7 @@ export default async function FinancePage({
       <div className="nr-stat-bar">
         <span className="nr-stat">{t("statTotal", { amount: fmt(totalAll) })}</span>
         <span className="nr-stat-sep">·</span>
-        <span className="nr-stat" style={{ color: "var(--warning)" }}>{t("statOpen", { amount: fmt(totalOpen) })}</span>
+        <span className="nr-stat">{t("statOpen", { amount: fmt(totalOpen) })}</span>
         <span className="nr-stat-sep">·</span>
         <span className="nr-stat">{t("statApproved", { amount: fmt(totalApproved) })}</span>
         <span className="nr-stat-sep">·</span>
@@ -289,7 +289,7 @@ export default async function FinancePage({
                           <td>{spend.category}</td>
                           <td className="fin-td-desc">{spend.description}</td>
                           <td>{spend.vendor || "—"}</td>
-                          <td style={{ textAlign: "right", fontWeight: 600, fontFamily: "'IBM Plex Mono', monospace" }}>
+                          <td style={{ textAlign: "right", fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>
                             {fmt(spend.amountCents, spend.currency)}
                           </td>
                           <td>
@@ -527,7 +527,7 @@ export default async function FinancePage({
                     <td><strong>{account.name}</strong></td>
                     <td>{account.type}</td>
                     <td>{account.currency}</td>
-                    <td style={{ textAlign: "right", fontWeight: 600, fontFamily: "'IBM Plex Mono', monospace" }}>
+                    <td style={{ textAlign: "right", fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>
                       {fmt(account.balanceCents, account.currency)}
                     </td>
                     {!isDemo && (

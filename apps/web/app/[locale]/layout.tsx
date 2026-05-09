@@ -1,5 +1,5 @@
 import type { Metadata, Viewport } from "next";
-import { Inter, Playfair_Display, Montserrat, Source_Serif_4 } from "next/font/google";
+import { Inter, Playfair_Display, Source_Serif_4 } from "next/font/google";
 import "../globals.css";
 import { NextIntlClientProvider } from 'next-intl';
 import { getMessages, getTranslations } from 'next-intl/server';
@@ -10,7 +10,6 @@ import { ToastProvider } from "@/lib/components/Toast";
 
 const inter = Inter({ subsets: ["latin"], variable: "--font-inter", display: "swap" });
 const playfair = Playfair_Display({ subsets: ["latin"], variable: "--font-playfair", display: "swap" });
-const montserrat = Montserrat({ weight: ["900"], subsets: ["latin"], variable: "--font-montserrat", display: "swap" });
 const sourceSerif = Source_Serif_4({ subsets: ["latin"], variable: "--font-document", display: "swap" });
 
 export const viewport: Viewport = {
@@ -42,7 +41,7 @@ export default async function RootLayout({
   const messages = await getMessages();
 
   return (
-    <html lang={locale} className={`${inter.variable} ${playfair.variable} ${montserrat.variable} ${sourceSerif.variable}`} suppressHydrationWarning>
+    <html lang={locale} className={`${inter.variable} ${playfair.variable} ${sourceSerif.variable}`} suppressHydrationWarning>
       <body
         className={`${inter.variable} ${playfair.variable} ${sourceSerif.variable} font-sans`}
         style={{ background: "var(--bg)" }}

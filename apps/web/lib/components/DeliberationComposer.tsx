@@ -137,7 +137,7 @@ export function DeliberationComposer({ postAction, hiddenFields, entryTypes, tar
 
   return (
     <div className="delib-composer">
-      {title && <h3 className="font-playfair font-semibold mb-4 text-[1.1rem]">{title}</h3>}
+      {title && <h3 className="font-semibold mb-4 text-[1.1rem]">{title}</h3>}
       
       {message && (
         <div className="mb-4">

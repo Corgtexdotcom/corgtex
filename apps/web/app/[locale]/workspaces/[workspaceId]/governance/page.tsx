@@ -56,7 +56,7 @@ export default async function GovernancePage({
     <>
       <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 32 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
-          <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2.5rem" }}>{t("pageTitle")}</h1>
+          <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2rem" }}>{t("pageTitle")}</h1>
           {!isDemo && (
             <div className="actions-inline">
               <form action={recalculateGovernanceScoreAction}>

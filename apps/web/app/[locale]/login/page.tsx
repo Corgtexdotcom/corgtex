@@ -40,7 +40,7 @@ export default async function LoginPage({
     <main className="login-shell">
       <section className="panel login-card">
         <span className="tag">Corgtex</span>
-        <h1 style={{ marginTop: 16 }}>{t("welcomeTitle")}</h1>
+        <h1>{t("welcomeTitle")}</h1>
         <p className="muted" style={{ marginBottom: "20px" }}>
           {t("welcomeSubtitle")}
         </p>

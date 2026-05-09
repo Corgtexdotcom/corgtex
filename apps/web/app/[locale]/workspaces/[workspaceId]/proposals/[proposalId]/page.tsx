@@ -71,7 +71,7 @@ export default async function ProposalDetailPage({
           </span>
         </p>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", borderBottom: "1px solid var(--line)", paddingBottom: 16 }}>
-          <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2.5rem", maxWidth: "800px" }}>{proposal.title}</h1>
+          <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2rem", maxWidth: "800px" }}>{proposal.title}</h1>
           <span style={{ fontSize: "0.85rem", color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.05em" }}>
             {t("updatedAt", { date: ageText(proposal.updatedAt) })}
           </span>

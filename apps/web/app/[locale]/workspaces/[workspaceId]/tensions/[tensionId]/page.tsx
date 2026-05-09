@@ -61,7 +61,7 @@ export default async function TensionDetailPage({
             {t("backToTensions")}
           </a>
         </div>
-        <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2.5rem" }}>
+        <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2rem" }}>
           {tension.isPrivate && <span title={t("privateInboxTooltip")} style={{ marginRight: 6 }}>◆</span>}
           {tension.title}
         </h1>
