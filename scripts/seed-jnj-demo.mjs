@@ -719,7 +719,10 @@ async function refreshAdviceRecords(processId, records) {
   await prisma.adviceRecord.deleteMany({
     where: {
       processId,
-      id: { notIn: rows.map((row) => row.id) },
+      id: {
+        startsWith: `${processId}-seed-advice-`,
+        notIn: rows.map((row) => row.id),
+      },
     },
   });
 
@@ -973,10 +976,6 @@ async function main() {
     const authorId = memberMappings[p.author].userId;
     const circleId = circleMappings[p.circle];
     const proposalId = `${wsId}-proposal-${slugify(p.title)}`;
-    let proposal = await prisma.proposal.findFirst({
-      where: { workspaceId: wsId, title: p.title },
-      orderBy: { createdAt: "asc" },
-    });
     const data = {
       workspaceId: wsId,
       authorUserId: authorId,
@@ -993,18 +992,22 @@ async function main() {
       archivedByUserId: null,
       archiveReason: null
     };
-    if (!proposal) {
-      proposal = await prisma.proposal.upsert({
-        where: { id: proposalId },
-        update: data,
-        create: { id: proposalId, ...data },
-      });
-    } else {
-      proposal = await prisma.proposal.update({
-        where: { id: proposal.id },
-        data
-      });
-    }
+    const proposal = await prisma.proposal.upsert({
+      where: { id: proposalId },
+      update: data,
+      create: { id: proposalId, ...data },
+    });
+    await prisma.proposal.deleteMany({
+      where: {
+        workspaceId: wsId,
+        id: { not: proposal.id },
+        authorUserId: authorId,
+        circleId,
+        title: p.title,
+        summary: p.summary,
+        bodyMd: p.body,
+      },
+    });
     const potentialReactors = Object.values(memberMappings).filter((member) => member.userId !== authorId);
     const reactionTypes = ["SUPPORT", "QUESTION", "SUPPORT"];
     const reactionRows = potentialReactors.slice(0, Math.min(potentialReactors.length, (index % 3) + 1)).map((reactor, reactorIndex) => ({
@@ -1016,7 +1019,10 @@ async function main() {
     await prisma.proposalReaction.deleteMany({
       where: {
         proposalId: proposal.id,
-        id: { notIn: reactionRows.map((reaction) => reaction.id) },
+        id: {
+          startsWith: `${proposal.id}-seed-reaction-`,
+          notIn: reactionRows.map((reaction) => reaction.id),
+        },
       },
     });
     for (const reaction of reactionRows) {
@@ -1088,8 +1094,10 @@ async function main() {
   await prisma.governanceScore.deleteMany({
     where: {
       workspaceId: wsId,
-      overallScore: { in: SCORES.map((score) => score.score) },
-      id: { notIn: governanceScoreIds },
+      id: {
+        startsWith: `${wsId}-governance-score-`,
+        notIn: governanceScoreIds,
+      },
     },
   });
   for (const [index, s] of SCORES.entries()) {
