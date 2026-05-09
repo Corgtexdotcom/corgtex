@@ -637,6 +637,43 @@ describe("control plane domain", () => {
     expect(memberMocks.createMember).not.toHaveBeenCalled();
   });
 
+  it("allows access-write agents to create remote members through the support connector", async () => {
+    const { createControlPlaneCustomerMember } = await import("./control-plane");
+    const accessAgent: AppActor = {
+      kind: "agent",
+      authProvider: "control-plane",
+      label: "control-plane-agent",
+      scopes: ["control-plane:read", "control-plane:access:write"],
+    };
+    const deployment = {
+      id: "inst-1",
+      label: "Acme",
+      deploymentKind: "REMOTE_MANAGED",
+      managedWorkspaceId: null,
+      managedWorkspace: null,
+      remoteWorkspaceId: "remote-ws-1",
+      supportMcpUrl: "https://customer.test/api/mcp",
+      supportCredentialEnc: "encrypted-token",
+    };
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce(deployment);
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce(deployment);
+    prismaMock.supportOperation.create.mockResolvedValueOnce({ id: "op-member-create", action: "members.invite" });
+    prismaMock.supportOperation.update.mockResolvedValueOnce({ id: "op-member-create", status: "COMPLETED" });
+
+    const result = await createControlPlaneCustomerMember(accessAgent, {
+      deploymentId: "inst-1",
+      email: "new@remote.test",
+      displayName: "New Member",
+      role: "CONTRIBUTOR",
+      reason: "Customer approved onboarding.",
+    });
+
+    expect(result).toMatchObject({
+      source: "support_connector",
+      operation: { id: "op-member-create", status: "COMPLETED" },
+    });
+  });
+
   it("lists and toggles managed workspace feature flags with audit evidence", async () => {
     const { listControlPlaneFeatureFlags, setControlPlaneFeatureFlag } = await import("./control-plane");
     const deployment = {
@@ -759,6 +796,44 @@ describe("control plane domain", () => {
           source: "remote_override",
         },
       ],
+    });
+  });
+
+  it("allows feature-write agents to set remote feature flags through the support connector", async () => {
+    const { setControlPlaneFeatureFlag } = await import("./control-plane");
+    const featureAgent: AppActor = {
+      kind: "agent",
+      authProvider: "control-plane",
+      label: "control-plane-agent",
+      scopes: ["control-plane:read", "control-plane:features:write"],
+    };
+    const deployment = {
+      id: "inst-1",
+      label: "Acme",
+      deploymentKind: "REMOTE_MANAGED",
+      managedWorkspaceId: null,
+      managedWorkspace: null,
+      remoteWorkspaceId: "remote-ws-1",
+      supportMcpUrl: "https://customer.test/api/mcp",
+      supportCredentialEnc: "encrypted-token",
+    };
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce(deployment);
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce(deployment);
+    prismaMock.supportOperation.create.mockResolvedValueOnce({ id: "op-flag-set", action: "feature_flags.set" });
+    prismaMock.supportOperation.update.mockResolvedValueOnce({ id: "op-flag-set", status: "COMPLETED" });
+
+    const result = await setControlPlaneFeatureFlag(featureAgent, {
+      deploymentId: "inst-1",
+      flag: "FINANCE",
+      enabled: true,
+      reason: "Enable finance for pilot.",
+    });
+
+    expect(result).toMatchObject({
+      source: "support_connector",
+      flag: "FINANCE",
+      enabled: true,
+      operation: { id: "op-flag-set", status: "COMPLETED" },
     });
   });
 
@@ -1324,6 +1399,42 @@ describe("control plane domain", () => {
 
     expect(prismaMock.customerDeployment.findMany).not.toHaveBeenCalled();
     expect(prismaMock.workflowJob.upsert).not.toHaveBeenCalled();
+  });
+
+  it("rejects deployment viewer access for privileged customer mutations", async () => {
+    const { deployLatestControlPlaneRelease, setControlPlaneFeatureFlag, updateControlPlaneCustomerMemberStatus } = await import("./control-plane");
+    prismaMock.customerDeploymentAccess.findUnique.mockResolvedValue({
+      role: "SUPPORT_VIEWER",
+      isActive: true,
+    });
+
+    await expect(updateControlPlaneCustomerMemberStatus(userActor, {
+      deploymentId: "inst-1",
+      memberId: "member-1",
+      isActive: false,
+      reason: "Suspend stale access.",
+    })).rejects.toMatchObject({
+      status: 403,
+      code: "CONTROL_PLANE_WRITE_ACCESS_REQUIRED",
+    });
+
+    await expect(setControlPlaneFeatureFlag(userActor, {
+      deploymentId: "inst-1",
+      flag: "FINANCE",
+      enabled: true,
+      reason: "Enable finance module.",
+    })).rejects.toMatchObject({
+      status: 403,
+      code: "CONTROL_PLANE_WRITE_ACCESS_REQUIRED",
+    });
+
+    await expect(deployLatestControlPlaneRelease(userActor, {
+      deploymentId: "inst-1",
+      reason: "Deploy latest.",
+    })).rejects.toMatchObject({
+      status: 403,
+      code: "CONTROL_PLANE_WRITE_ACCESS_REQUIRED",
+    });
   });
 
   it("only bypasses health blockers for explicitly selected bulk deploys", async () => {

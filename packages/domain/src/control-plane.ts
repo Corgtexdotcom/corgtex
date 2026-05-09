@@ -938,10 +938,11 @@ export async function createControlPlaneCustomerMember(actor: AppActor, params: 
   }
 
   invariant(adapter.canUseSupportConnector && deployment.hasSupportCredential, 400, "SUPPORT_CONNECTOR_REQUIRED", "Support connector is required to create remote members.");
-  const operation = await runCustomerSupportOperation(actor, {
-    deploymentId: params.deploymentId,
-    action: "members.invite",
-    reason,
+	  const operation = await runCustomerSupportOperation(actor, {
+	    deploymentId: params.deploymentId,
+	    action: "members.invite",
+	    scopeOverride: "control-plane:access:write",
+	    reason,
     arguments: {
       email: params.email,
       displayName: params.displayName ?? null,
@@ -1004,10 +1005,11 @@ export async function resendControlPlaneCustomerMemberAccessLink(actor: AppActor
   }
 
   invariant(adapter.canUseSupportConnector && deployment.hasSupportCredential, 400, "SUPPORT_CONNECTOR_REQUIRED", "Support connector is required to resend remote member access links.");
-  const operation = await runCustomerSupportOperation(actor, {
-    deploymentId: params.deploymentId,
-    action: "members.resend_access_link",
-    reason,
+	  const operation = await runCustomerSupportOperation(actor, {
+	    deploymentId: params.deploymentId,
+	    action: "members.resend_access_link",
+	    scopeOverride: "control-plane:access:write",
+	    reason,
     arguments: { memberId: params.memberId, sendSetupEmail: true },
     remoteWorkspaceId: deployment.remoteWorkspaceId,
   });
@@ -1055,10 +1057,11 @@ export async function updateControlPlaneCustomerMemberStatus(actor: AppActor, pa
   }
 
   invariant(adapter.canUseSupportConnector && deployment.hasSupportCredential, 400, "SUPPORT_CONNECTOR_REQUIRED", "Support connector is required to update remote member access.");
-  const operation = await runCustomerSupportOperation(actor, {
-    deploymentId: params.deploymentId,
-    action: params.isActive ? "members.update" : "members.deactivate",
-    reason,
+	  const operation = await runCustomerSupportOperation(actor, {
+	    deploymentId: params.deploymentId,
+	    action: params.isActive ? "members.update" : "members.deactivate",
+	    scopeOverride: "control-plane:access:write",
+	    reason,
     arguments: params.isActive ? { memberId: params.memberId, isActive: true } : { memberId: params.memberId },
     remoteWorkspaceId: deployment.remoteWorkspaceId,
   });
@@ -1235,10 +1238,11 @@ export async function setControlPlaneFeatureFlag(actor: AppActor, params: {
   }
 
   invariant(adapter.canUseSupportConnector && deployment.hasSupportCredential, 400, "SUPPORT_CONNECTOR_REQUIRED", "Support connector is required to change remote feature flags.");
-  const operation = await runCustomerSupportOperation(actor, {
-    deploymentId: params.deploymentId,
-    action: "feature_flags.set",
-    reason,
+	  const operation = await runCustomerSupportOperation(actor, {
+	    deploymentId: params.deploymentId,
+	    action: "feature_flags.set",
+	    scopeOverride: "control-plane:features:write",
+	    reason,
     arguments: {
       flag,
       enabled: params.enabled,
@@ -2185,7 +2189,7 @@ export async function deployLatestControlPlaneRelease(actor: AppActor, params: {
   reason?: string | null;
   force?: boolean | null;
   target?: ControlPlaneReleaseTarget | null;
-}, railwayClient: RailwayClient = createRailwayClientFromEnv()) {
+}, railwayClient?: RailwayClient) {
   requireControlPlaneScope(actor, "control-plane:releases:write");
   const reason = requireMutationReason(params.reason);
   await requireControlPlaneDeploymentWriteAccess(actor, params.deploymentId);
@@ -2201,6 +2205,7 @@ export async function deployLatestControlPlaneRelease(actor: AppActor, params: {
   invariant(deployment.railwayEnvironmentId, 400, "INVALID_INPUT", "Customer deployment is missing a Railway environment ID.");
   invariant(deployment.railwayWebServiceId, 400, "INVALID_INPUT", "Customer deployment is missing a Railway web service ID.");
   invariant(deployment.railwayWorkerServiceId, 400, "INVALID_INPUT", "Customer deployment is missing a Railway worker service ID.");
+  const activeRailwayClient = railwayClient ?? createRailwayClientFromEnv();
 
   await prisma.$transaction(async (tx) => {
     await tx.customerDeployment.update({
@@ -2247,7 +2252,7 @@ export async function deployLatestControlPlaneRelease(actor: AppActor, params: {
   });
 
   try {
-    const result = await upgradeRailwayCustomerRelease(railwayClient, {
+    const result = await upgradeRailwayCustomerRelease(activeRailwayClient, {
       projectId: deployment.railwayProjectId,
       environmentId: deployment.railwayEnvironmentId,
       webServiceId: deployment.railwayWebServiceId,
@@ -2992,12 +2997,13 @@ export async function runControlPlaneFleetSnapshotJob(params: {
 export async function runCustomerSupportOperation(actor: AppActor, params: {
   deploymentId: string;
   action: SupportAction;
+  scopeOverride?: string | null;
   reason?: string | null;
   arguments?: JsonRecord;
   remoteWorkspaceId?: string | null;
   idempotencyKey?: string | null;
 }) {
-  requireControlPlaneScope(actor, MUTATING_SUPPORT_ACTIONS.has(params.action) ? "control-plane:support:write" : CONTROL_PLANE_READ_SCOPE);
+  requireControlPlaneScope(actor, params.scopeOverride ?? (MUTATING_SUPPORT_ACTIONS.has(params.action) ? "control-plane:support:write" : CONTROL_PLANE_READ_SCOPE));
   await requireControlPlaneAccess(actor, { deploymentId: params.deploymentId });
   const toolName = SUPPORT_ACTION_TO_MCP_TOOL[params.action];
   invariant(toolName, 400, "INVALID_INPUT", "Unsupported support action.");
