@@ -22,6 +22,10 @@
 
 [Summarize what shipped in one or two sentences.]
 
+## Demo exposure
+
+[For customer-visible product changes, state how the safe public demo shows the feature. Update `scripts/seed-jnj-demo.mjs` when seeded state is needed, or explain why the feature cannot be shown safely.]
+
 ## Acceptance criteria
 
 - [ ] [...]
