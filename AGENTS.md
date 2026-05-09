@@ -27,6 +27,14 @@ reviews code line-by-line. The full specification lives in
 - **E2E agent flow:** `npm run prisma:seed`, `npm run seed:e2e`, set `AGENT_API_KEY`, run `npm run dev`, then use the Agent API flow below.
 - **Prisma / seeds:** `npm run prisma:generate` (required before tests), `npm run prisma:migrate`, `npm run prisma:migrate:deploy`, `npm run prisma:seed`, `npm run seed:e2e`, `npm run seed:pilot-tester`, `npm run seed:dogfood`, `npm run seed:jnj-demo`, `npm run seed:dogfood-demo`
 
+### Branch and PR isolation
+
+- Every new human-requested task that changes code, docs, tests, config, or plans must use a fresh task branch from the latest `origin/main`, unless the human explicitly names an existing branch/PR or says to continue the current one.
+- Before editing, inspect the current branch and any associated PR. If the branch already has an open or merged PR, or the PR title/body does not match the new task, do not reuse it.
+- If the current worktree has unrelated dirty files, do not stash, reset, or carry them into the new task. Create a separate worktree from `origin/main` and work there.
+- A PR must represent one task and one plan contract. Do not add a new feature, fix, or cleanup to an existing unrelated PR, even if the files overlap.
+- If a task genuinely needs to build on an unmerged PR, the PR body must explicitly say it is stacked on that PR and why. Otherwise, branch from `origin/main`.
+
 ### Architecture
 
 - **Framework:** Next.js 15 (App Router) + React 19 + TypeScript (strict) + Tailwind CSS 3
@@ -93,7 +101,7 @@ reviews code line-by-line. The full specification lives in
 Your job is to produce a PR-body plan contract and nothing else. Do not write
 implementation code.
 
-1. Create a new branch: `git checkout -b <type>/<short-slug>` (e.g. `feat/optimistic-finance`, `fix/login-crash`).
+1. Fetch the latest main branch and create a new task branch from it: `git fetch origin && git checkout -b <type>/<short-slug> origin/main` (e.g. `feat/optimistic-finance`, `fix/login-crash`). Do not reuse an existing branch/PR unless the human explicitly says this plan continues that exact branch/PR.
 2. Copy [.agents/plan-template.md](.agents/plan-template.md) into the draft PR body. For local checks before a PR exists, copy it to `.agents/plans/<branch>.md`; that directory is ignored and must not be committed.
 3. Fill every section, including **Risk tier** (`low`, `standard`, or `high`). The **Files to touch** section is a hard allowlist — the Executor cannot modify files outside it without first updating the PR body plan.
 4. Pick the smallest honest risk tier:
@@ -112,7 +120,7 @@ Stop there. Hand off to the Executor.
 Your job is to implement the plan. You do not plan, and you do not
 merge.
 
-1. **First action:** Verify your branch state (`git branch --show-current`) before working. Multiple agents run simultaneously in this repo. If you are on the wrong branch, checkout or create it (`git checkout -b <branch>`). Once on the correct branch, read the PR body plan. If the PR does not exist yet, read `.agents/plans/<branch>.md`.
+1. **First action:** Verify your branch state (`git branch --show-current`) and inspect the matching PR before working. Multiple agents run simultaneously in this repo. If the branch/PR does not exactly match the assigned plan, stop and switch to the correct branch or create a fresh branch from `origin/main`. If the current worktree has unrelated dirty files, create a separate worktree for this task instead of stashing, resetting, or mixing them into the PR. Once on the correct branch, read the PR body plan. If the PR does not exist yet, read `.agents/plans/<branch>.md`.
 2. **Stay in scope:** only modify files listed in the plan's "Files to touch" section. If you discover the plan is wrong or incomplete, update the PR body plan before writing code. `scripts/check-plan.mjs` enforces this in CI.
 3. **Run the test plan locally** before pushing. Run `npm run check` and whatever the plan's "Test plan" specifies. Wait for it to exit with code `0`. Fix any TypeScript or ESLint errors before proceeding.
 3a. **Domain test coverage:** If the plan adds or modifies files under `packages/domain/**`, you must create or update the corresponding `*.test.ts` file in the same package *before* opening the PR. The Reviewer will reject any PR that changes domain source without same-package test coverage (Criterion 7).
