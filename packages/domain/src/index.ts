@@ -51,6 +51,7 @@ export * from "./catalog";
 export * from "./tool-links";
 export * from "./build-artifacts";
 export * from "./newspaper-delivery";
+export * from "./newspaper-layout";
 
 export * from "./check-ins";
 export * from "./artifact-permissions";

@@ -17,6 +17,12 @@ import {
   rebuildBacklinks 
 } from "@corgtex/domain";
 import type { BrainArticleType, NewspaperCadence } from "@prisma/client";
+import {
+  normalizeNewspaperDigestPayload,
+  normalizeNewspaperPersonalizationPayload,
+  renderNewspaperDigestMarkdown,
+  renderNewspaperEmailHtml,
+} from "./newspaper-email";
 
 type DeliveryCadence = Exclude<NewspaperCadence, "OFF">;
 
@@ -39,13 +45,6 @@ function escapeHtml(value: string) {
 
 function workspaceUrl(workspaceId: string) {
   return `${env.APP_URL.replace(/\/$/, "")}/workspaces/${workspaceId}`;
-}
-
-function appendNewspaperFooter(html: string, workspaceId: string) {
-  const footer = `<div style="margin-top:24px;padding-top:16px;border-top:1px solid #d9d1bd;font-family:Arial,sans-serif;font-size:13px;line-height:1.5;color:#5b5448;"><a href="${workspaceUrl(workspaceId)}" style="color:#6750a4;text-decoration:underline;">Open Corgtex</a> to review the source work and decisions behind this newspaper.</div>`;
-  return html.includes("</body>")
-    ? html.replace("</body>", `${footer}</body>`)
-    : `${html}${footer}`;
 }
 
 function isDeliveryCadence(cadence: NewspaperCadence): cadence is DeliveryCadence {
@@ -227,6 +226,11 @@ export async function runDailyDigest(params: {
       skippedEmails: 0,
     };
   }
+  const workspace = await prisma.workspace.findUnique({
+    where: { id: params.workspaceId },
+    select: { name: true },
+  });
+  const workspaceName = workspace?.name?.trim() || "Corgtex";
 
   const lookbackDays = LOOKBACK_DAYS_BY_CADENCE[cadence];
   const since = new Date(new Date(params.dateISO).getTime() - lookbackDays * 24 * 60 * 60 * 1000);
@@ -431,34 +435,63 @@ Rules:
     buildArtifacts.length > 0 ? `Built / PR activity for accomplishments and shipped work:\n${formatBuildArtifactDigestInput(buildArtifacts)}` : "",
   ].filter(Boolean).join("\n\n---\n\n").slice(0, 16000);
 
-  const digestResult = await defaultModelGateway.chat({
+  const digestExtraction = await defaultModelGateway.extract({
     model,
     workspaceId: params.workspaceId,
     workflowJobId: params.workflowJobId,
     agentRunId: params.agentRunId,
-    taskType: "AGENT",
-    messages: [
-      {
-        role: "system",
-        content: `You are generating a ${cadenceLabel(cadence)} Newspaper for the workspace based on the last ${lookbackDays} day(s) of conversations.
-Format it as a markdown article containing these sections:
-- Key Decisions Made
-- Action Items Identified
-- Built / Shipped Work
-- Conversation Highlights
-- Team Pulse (aggregate sentiment)
-- Emerging Tensions (recurring themes)`
-      },
-      {
-        role: "user",
-        content: `Conversations:\n${allTranscripts}\n\nGenerate the digest.`
-      }
-    ]
+    instruction: `Generate a structured ${cadenceLabel(cadence)} Newspaper for the workspace based on the last ${lookbackDays} day(s) of conversations. Return concise, non-empty section arrays only when the source material supports them.`,
+    schemaHint: `{
+      intro: string | null,
+      keyDecisions: string[],
+      actionItems: string[],
+      builtWork: string[],
+      conversationHighlights: string[],
+      teamPulse: string[],
+      emergingTensions: string[]
+    }`,
+    input: allTranscripts,
   });
+  const digest = normalizeNewspaperDigestPayload(digestExtraction.output);
 
   const digestTitle = `${cadenceLabel(cadence)} Newspaper - ${params.dateISO.split("T")[0]}`;
   const digestSlug = `${cadence.toLowerCase()}-newspaper-${params.dateISO.split("T")[0]}`;
   const runKey = params.workflowJobId ?? `${params.workspaceId}:${cadence.toLowerCase()}-newspaper:${params.dateISO.split("T")[0]}`;
+
+  if (digest.sections.length === 0) {
+    const reason = "No digest sections generated.";
+    logger.info("newspaper_delivery_skipped", {
+      workspaceId: params.workspaceId,
+      workflowJobId: params.workflowJobId ?? null,
+      cadence,
+      reason: "empty_digest_sections",
+    });
+    for (const member of recipientMembers) {
+      await recordNewspaperDelivery({
+        workspaceId: params.workspaceId,
+        workflowJobId: params.workflowJobId ?? null,
+        memberId: member.id,
+        kind: "MEMBER_NEWSPAPER",
+        cadence,
+        runKey,
+        recipientEmail: member.user.email,
+        subject: `${digestTitle} - Your Personal Briefing`,
+        status: "SKIPPED",
+        error: reason,
+      });
+    }
+    return {
+      success: true,
+      digestSlug,
+      cadence,
+      processedSessions: sessions.length,
+      processedSlackMessages: slackMessages.length,
+      updatedProfiles: memberUpdates.length,
+      sentEmails: 0,
+      failedEmails: 0,
+      skippedEmails: recipientMembers.length,
+    };
+  }
 
   await createArticle(agentActor, {
     workspaceId: params.workspaceId,
@@ -466,7 +499,7 @@ Format it as a markdown article containing these sections:
     title: digestTitle,
     type: "DIGEST" as BrainArticleType,
     authority: "DRAFT",
-    bodyMd: digestResult.content,
+    bodyMd: renderNewspaperDigestMarkdown({ title: digestTitle, digest }),
   });
 
   // 5. Rebuild backlinks
@@ -488,34 +521,39 @@ Format it as a markdown article containing these sections:
       select: { bodyMd: true },
     });
 
-    const personalizedDigest = await defaultModelGateway.chat({
+    const personalizationExtraction = await defaultModelGateway.extract({
       model,
       workspaceId: params.workspaceId,
       workflowJobId: params.workflowJobId,
       agentRunId: params.agentRunId,
-      taskType: "AGENT",
-      messages: [
-        {
-          role: "system",
-          content: `Personalize this org-wide digest for a specific team member.
-Their profile: ${personArticle?.bodyMd || "No profile available."}
-Tailor the opening greeting, highlight items most relevant to them,
-and adjust the tone to match their communication preferences.
-Output clean HTML suitable for email (use inline styles).`
-        },
-        {
-          role: "user",
-          content: `Digest:\n${digestResult.content}\n\nPersonalize for: ${member.user.displayName || member.user.email}`
-        }
-      ]
+      instruction: `Personalize this structured newspaper for a specific member. Return short text fields only; do not return HTML.`,
+      schemaHint: `{
+        greeting: string | null,
+        intro: string | null,
+        memberNote: string | null,
+        emphasizedSectionIds: string[]
+      }`,
+      input: JSON.stringify({
+        recipient: member.user.displayName || member.user.email,
+        profile: personArticle?.bodyMd || "No profile available.",
+        digest,
+      }),
     });
+    const personalization = normalizeNewspaperPersonalizationPayload(personalizationExtraction.output);
 
     const subject = `${digestTitle} - Your Personal Briefing`;
     const html = await instrumentNewspaperHtmlLinks({
       workspaceId: params.workspaceId,
       workflowJobId: params.workflowJobId ?? null,
       runKey,
-      html: appendNewspaperFooter(personalizedDigest.content, params.workspaceId),
+      html: renderNewspaperEmailHtml({
+        title: digestTitle,
+        workspaceName,
+        recipientName: member.user.displayName || member.user.email,
+        workspaceUrl: workspaceUrl(params.workspaceId),
+        digest,
+        personalization,
+      }),
     });
 
     try {
