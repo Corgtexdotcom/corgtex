@@ -1,5 +1,6 @@
 import {
-  listActions, listMembers, listNotifications, listTensions,
+  computeNewspaperLayout,
+  listMembers, listNotifications, listTensions,
   listAuditLogs, listArticles, listMeetings
 } from "@corgtex/domain";
 import { prisma, workspaceBranding } from "@corgtex/shared";
@@ -51,7 +52,6 @@ export default async function WorkspaceDashboard({
     members,
     notifications,
     pendingFlowsRaw,
-    openActionsResult,
     activeTensionsResult,
     pendingAgentApprovals,
     auditLogs,
@@ -87,7 +87,6 @@ export default async function WorkspaceDashboard({
       }));
       return enriched;
     }),
-    listActions(actor, workspaceId, { take: 10 }),
     prisma.tension.count({ where: { workspaceId, status: "OPEN", OR: [{ isPrivate: false }, { authorUserId: actor.kind === 'user' ? actor.user.id : '' }] } }),
     capabilities.canReviewAgentRuns
       ? prisma.agentRun.count({ where: { workspaceId, status: "WAITING_APPROVAL" } })
@@ -138,7 +137,23 @@ export default async function WorkspaceDashboard({
     .slice(0, 5);
   const pendingFlows = pendingFlowsRaw;
   const unreadNotifications = notifications.filter(n => !n.readAt);
-  const openActions = openActionsResult.items.filter(a => a.status === "OPEN" || a.status === "IN_PROGRESS");
+  const memberOpenActions = currentMember
+    ? await prisma.action.findMany({
+      where: {
+        workspaceId,
+        assigneeMemberId: currentMember.id,
+        status: { in: ["OPEN", "IN_PROGRESS"] },
+      },
+      select: {
+        id: true,
+        title: true,
+        bodyMd: true,
+      },
+      orderBy: { createdAt: "desc" },
+      take: 10,
+    })
+    : [];
+  const openTensionItems = tensions.filter((tension) => tension.status === "OPEN");
   
   const attentionCounts = getDashboardAttentionCounts({
     pendingFlowsCount: pendingFlows.length,
@@ -179,6 +194,61 @@ export default async function WorkspaceDashboard({
   ]
     .sort((a, b) => b.publishedAt!.getTime() - a.publishedAt!.getTime())
     .slice(0, 10);
+
+  const dashboardLayout = computeNewspaperLayout([
+    {
+      id: "featuredKnowledge",
+      priority: 1,
+      itemCount: featuredArticle ? 1 + otherRecentArticles.length : 0,
+      estimatedTextLength: featuredArticle
+        ? featuredArticle.title.length + featuredArticle.bodyMd.length + otherRecentArticles.reduce((sum, article) => sum + article.title.length + article.bodyMd.length, 0)
+        : 0,
+    },
+    {
+      id: "meetings",
+      priority: 2,
+      itemCount: recentMeetings.length,
+      estimatedTextLength: recentMeetings.reduce((sum, meeting) => sum + (meeting.title?.length ?? 0) + (meeting.summaryMd?.length ?? 0), 0),
+    },
+    {
+      id: "todos",
+      priority: 3,
+      itemCount: memberOpenActions.length,
+      estimatedTextLength: memberOpenActions.reduce((sum, action) => sum + action.title.length + (action.bodyMd?.length ?? 0), 0),
+    },
+    {
+      id: "tensions",
+      priority: 4,
+      itemCount: openTensionItems.length,
+      estimatedTextLength: openTensionItems.reduce((sum, tension) => sum + tension.title.length + (tension.bodyMd?.length ?? 0), 0),
+    },
+    {
+      id: "activity",
+      priority: 5,
+      itemCount: auditLogs.length,
+      estimatedTextLength: auditLogs.reduce((sum, log) => sum + log.action.length + log.entityType.length, 0),
+    },
+  ]);
+  const dashboardSectionIds = new Set<string>(dashboardLayout.visibleSections.map((section) => section.id));
+  const hasDashboardSection = (id: string) => dashboardSectionIds.has(id);
+  const dashboardSectionLayout = (id: string) => dashboardLayout.sectionCaps[id] ?? {
+    itemCap: 4,
+    excerptMaxLength: 140,
+    placement: "standard" as const,
+  };
+  const dashboardPaperClassName = {
+    empty: "nr-paper nr-paper-empty",
+    sparse: "nr-paper nr-paper-sparse",
+    balanced: "nr-paper nr-paper-balanced",
+    "meeting-heavy": "nr-paper nr-paper-meeting-heavy",
+  }[dashboardLayout.variant];
+  const dashboardSectionClassName = (id: string) => {
+    const placement = dashboardSectionLayout(id).placement;
+    if (placement === "lead") return "nr-paper-section nr-paper-section-lead";
+    if (placement === "wide") return "nr-paper-section nr-paper-section-wide";
+    return "nr-paper-section nr-paper-section-standard";
+  };
+  const hasStrategicDirection = strategicGoals.length > 0 || !!recentRecognition;
 
   return (
     <>
@@ -296,23 +366,31 @@ export default async function WorkspaceDashboard({
         </div>
       )}
 
+      {currentMemberUrl && (
+        <div className="nr-profile-link-row">
+          <Link href={`/workspaces/${workspaceId}/members/${currentMemberUrl}`} className="nr-link">
+            {t("viewFullProfile")}
+          </Link>
+        </div>
+      )}
+
       {/* HERO SECTION */}
-      <section className="nr-hero">
+      {dashboardLayout.visibleSections.length > 0 && (
+      <section className={dashboardPaperClassName}>
         {/* LEFT COLUMN: FEATURED */}
-        <div>
+        {hasDashboardSection("featuredKnowledge") && featuredArticle && (
+        <div className={dashboardSectionClassName("featuredKnowledge")}>
           <h2 className="nr-section-header">{t("featuredKnowledge")}</h2>
-          {featuredArticle && (
             <div style={{ marginBottom: "24px" }}>
               <div className="nr-meta">{featuredArticle.type} · {t("updated")} <span suppressHydrationWarning>{ageText(featuredArticle.updatedAt)}</span></div>
               <Link href={`/workspaces/${workspaceId}/brain/${featuredArticle.slug}`} style={{ textDecoration: "none" }}>
                 <h3 className="nr-lead-headline">{featuredArticle.title}</h3>
-                <MarkdownExcerpt markdown={featuredArticle.bodyMd} maxLength={220} as="p" className="nr-excerpt" />
+                <MarkdownExcerpt markdown={featuredArticle.bodyMd} maxLength={dashboardSectionLayout("featuredKnowledge").excerptMaxLength} as="p" className="nr-excerpt" />
                 <span className="nr-link">{t("readFullArticle")}</span>
               </Link>
             </div>
-          )}
           <div style={{ borderTop: "1px solid var(--line)", paddingTop: "16px" }}>
-            {otherRecentArticles.map(a => (
+            {otherRecentArticles.slice(0, Math.max(0, dashboardSectionLayout("featuredKnowledge").itemCap - 1)).map(a => (
               <div key={a.id} className="nr-item" style={{ borderBottom: "1px solid var(--line)", paddingBottom: "16px", marginBottom: "16px" }}>
                 <div className="nr-meta" style={{ marginBottom: "4px" }}>{a.type}</div>
                 <Link href={`/workspaces/${workspaceId}/brain/${a.slug}`} style={{ textDecoration: "none" }}>
@@ -323,46 +401,45 @@ export default async function WorkspaceDashboard({
             ))}
           </div>
         </div>
+        )}
 
         {/* CENTER COLUMN: MEETINGS */}
-        <div>
+        {hasDashboardSection("meetings") && (
+        <div className={dashboardSectionClassName("meetings")}>
            <h2 className="nr-section-header">{t("yourMeetings")}</h2>
-           {recentMeetings.length === 0 ? <p className="nr-meta">{t("noRecentMeetings")}</p> : null}
-           {recentMeetings.map((meeting) => (
+           {recentMeetings.slice(0, dashboardSectionLayout("meetings").itemCap).map((meeting) => (
              <div key={meeting.id} className="nr-item">
                <div className="nr-item-title">{meeting.title || `${meeting.source} ${t("meeting")}`}</div>
                <div className="nr-item-meta" suppressHydrationWarning>{format.dateTime(new Date(meeting.recordedAt), { month: "short", day: "numeric", year: "numeric" })}</div>
-               {meeting.summaryMd && <MarkdownExcerpt markdown={meeting.summaryMd} maxLength={120} as="div" className="nr-item-meta" />}
+               {meeting.summaryMd && <MarkdownExcerpt markdown={meeting.summaryMd} maxLength={dashboardSectionLayout("meetings").excerptMaxLength} as="div" className="nr-item-meta" />}
              </div>
            ))}
            <div style={{ marginTop: "16px" }}>
              <Link href={`/workspaces/${workspaceId}/meetings`} className="nr-link">{t("viewAllTranscripts")}</Link>
            </div>
         </div>
+        )}
 
         {/* RIGHT COLUMN: TODOS & TENSIONS */}
-        <div>
-           <h2 className="nr-section-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-             {t("yourToDos")}
-             {currentMemberUrl && (
-               <Link href={`/workspaces/${workspaceId}/members/${currentMemberUrl}`} style={{ fontSize: "0.75rem", textTransform: "none", color: "var(--accent)" }}>
-                 {t("viewFullProfile")}
-               </Link>
-             )}
-           </h2>
-           {openActions.length === 0 ? <p className="nr-meta" style={{ marginBottom: "32px"}}>{t("zeroInbox")}</p> : null}
+        {hasDashboardSection("todos") && (
+        <div className={dashboardSectionClassName("todos")}>
+           <h2 className="nr-section-header">{t("yourToDos")}</h2>
            <div style={{ marginBottom: "32px"}}>
-             {openActions.slice(0, 6).map((action) => (
+             {memberOpenActions.slice(0, dashboardSectionLayout("todos").itemCap).map((action) => (
                <div key={action.id} className="nr-item" style={{ display: "flex", gap: "8px", alignItems: "baseline", borderBottom: "none", padding: "6px 0" }}>
                  <input type="checkbox" disabled style={{ margin: 0 }} />
                  <Link href={`/workspaces/${workspaceId}/actions`} style={{ fontSize: "0.85rem", lineHeight: 1.4, textDecoration: "none", color: "var(--text)" }}>{action.title}</Link>
                </div>
              ))}
            </div>
+        </div>
+        )}
 
+        {hasDashboardSection("tensions") && (
+        <div className={dashboardSectionClassName("tensions")}>
            <h2 className="nr-section-header">{t("activeTensions")}</h2>
            <div style={{ marginBottom: "16px" }}>
-             {tensions.filter((tension) => tension.status === "OPEN").slice(0, 4).map((tension) => (
+             {openTensionItems.slice(0, dashboardSectionLayout("tensions").itemCap).map((tension) => (
                <div key={tension.id} className="nr-item" style={{ padding: "8px 0" }}>
                  <Link href={`/workspaces/${workspaceId}/tensions`} style={{ display: "block", textDecoration: "none" }}>
                    <div style={{ fontSize: "0.85rem", fontWeight: 600, color: "var(--text)", marginBottom: "2px" }}>{tension.title}</div>
@@ -371,10 +448,14 @@ export default async function WorkspaceDashboard({
                </div>
              ))}
            </div>
-           
-           <h2 className="nr-section-header" style={{ marginTop: "32px"}}>{t("liveActivity")}</h2>
+        </div>
+        )}
+
+        {hasDashboardSection("activity") && (
+        <div className={dashboardSectionClassName("activity")}>
+           <h2 className="nr-section-header">{t("liveActivity")}</h2>
            <div className="nr-activity">
-             {auditLogs.slice(0, 5).map(log => (
+             {auditLogs.slice(0, dashboardSectionLayout("activity").itemCap).map(log => (
                <div key={log.id} style={{ fontSize: "0.85rem", padding: "8px 0", borderBottom: "1px solid var(--line)" }}>
                  <span style={{ color: "var(--muted)", marginRight: "6px" }} suppressHydrationWarning>{ageText(log.createdAt)}</span>
                  <span>{log.actorUserId ? t("someone") : t("system")} {log.action.replace(/\./g, " ")} {t("activityOn")} {log.entityType}</span>
@@ -382,17 +463,21 @@ export default async function WorkspaceDashboard({
              ))}
            </div>
         </div>
+        )}
       </section>
+      )}
 
-      <hr className="nr-divider" />
+      {dashboardLayout.visibleSections.length > 0 && hasStrategicDirection && <hr className="nr-divider" />}
 
+      {hasStrategicDirection && (
+      <>
       <h2 className="nr-section-header" style={{ borderTop: "none", fontSize: "1.2rem", marginBottom: "24px" }}>
         {t("strategicDirection")}
         <Link href={`/workspaces/${workspaceId}/goals`} className="nr-link" style={{ float: "right", fontSize: "0.85rem", marginTop: "4px" }}>{t("viewAll")}</Link>
       </h2>
       <div style={{ display: "flex", gap: "24px", flexWrap: "wrap", marginBottom: "32px" }}>
+        {strategicGoals.length > 0 && (
         <div style={{ flex: "2 1 400px" }}>
-          {strategicGoals.length === 0 ? <p className="nr-meta">{t("noActiveGoals")}</p> : null}
           {strategicGoals.map(goal => (
             <div key={goal.id} className="nr-item" style={{ border: "1px solid var(--line)", borderRadius: "8px", padding: "16px", marginBottom: "12px", backgroundColor: "var(--surface)" }}>
               <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "8px" }}>
@@ -411,6 +496,7 @@ export default async function WorkspaceDashboard({
             </div>
           ))}
         </div>
+        )}
         
         {recentRecognition && (
           <div style={{ flex: "1 1 300px" }}>
@@ -419,12 +505,15 @@ export default async function WorkspaceDashboard({
           </div>
         )}
       </div>
+      </>
+      )}
 
-      <hr className="nr-divider" />
+      {(hasStrategicDirection || dashboardLayout.visibleSections.length > 0) && recentlyPublished.length > 0 && <hr className="nr-divider" />}
 
+      {recentlyPublished.length > 0 && (
+      <>
       <h2 className="nr-section-header" style={{ borderTop: "none", fontSize: "1.2rem", marginBottom: "24px" }}>{t("recentlyPublished")}</h2>
       <div style={{ display: "flex", gap: "16px", overflowX: "auto", paddingBottom: "16px", marginBottom: "32px", WebkitOverflowScrolling: "touch" }}>
-        {recentlyPublished.length === 0 ? <p className="nr-meta">{t("noItemsPublished")}</p> : null}
         {recentlyPublished.map(item => (
           <Link key={item.kind + item.id} href={item.link} style={{ display: "block", flex: "0 0 280px", border: "1px solid var(--line)", borderRadius: "8px", padding: "16px", textDecoration: "none", color: "inherit", backgroundColor: "var(--surface)" }}>
             <div style={{ fontSize: "0.75rem", textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--muted)", marginBottom: "8px", fontWeight: "bold" }}>{item.kind}</div>
@@ -435,9 +524,13 @@ export default async function WorkspaceDashboard({
           </Link>
         ))}
       </div>
+      </>
+      )}
 
-      <hr className="nr-divider" />
+      {(recentlyPublished.length > 0 || hasStrategicDirection || dashboardLayout.visibleSections.length > 0) && sortedCategories.length > 0 && <hr className="nr-divider" />}
 
+      {sortedCategories.length > 0 && (
+      <>
       <h2 className="nr-section-header" style={{ borderTop: "none", fontSize: "1.2rem", marginBottom: "24px" }}>{t("wikiIndex")}</h2>
       <div className="nr-category-grid">
         {sortedCategories.map(([category, items]) => (
@@ -454,6 +547,8 @@ export default async function WorkspaceDashboard({
           </div>
         ))}
       </div>
+      </>
+      )}
 
       <div className="nr-footer">
         {t("footerStats", { articles: allArticles.length, meetings: meetings.length, chunks: chunksCount, members: members.length })}

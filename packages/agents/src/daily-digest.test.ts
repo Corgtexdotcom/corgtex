@@ -44,6 +44,9 @@ const {
     member: {
       findMany: vi.fn(),
     },
+    workspace: {
+      findUnique: vi.fn(),
+    },
     demoLead: {
       findFirst: vi.fn(),
     },
@@ -91,6 +94,28 @@ vi.mock("@corgtex/domain", () => ({
   normalizeNewspaperCadence: (value: unknown) => {
     if (value === "WEEKLY" || value === "OFF") return value;
     return "DAILY";
+  },
+  computeNewspaperLayout: (sections: Array<{ id: string; itemCount: number }>) => {
+    const visibleSections = sections
+      .filter((section) => section.itemCount > 0)
+      .map((section) => ({
+        ...section,
+        itemCap: Math.min(section.itemCount, 5),
+        excerptMaxLength: 180,
+        placement: "standard",
+      }));
+    return {
+      variant: visibleSections.length <= 2 ? "sparse" : "balanced",
+      visibleSections,
+      sectionCaps: Object.fromEntries(visibleSections.map((section) => [
+        section.id,
+        {
+          itemCap: section.itemCap,
+          excerptMaxLength: section.excerptMaxLength,
+          placement: section.placement,
+        },
+      ])),
+    };
   },
   instrumentNewspaperHtmlLinks: instrumentNewspaperHtmlLinksMock,
   recordNewspaperDelivery: recordNewspaperDeliveryMock,
@@ -140,8 +165,28 @@ describe("runDailyDigest", () => {
     prismaMock.demoLead.findFirst.mockResolvedValue(null);
     prismaMock.brainSource.create.mockResolvedValue({ id: "source-1" });
     prismaMock.brainArticle.findUnique.mockResolvedValue(null);
-    chatMock.mockResolvedValue({ content: "Digest body" });
-    extractMock.mockResolvedValue({ output: {} });
+    chatMock.mockResolvedValue({ content: "Merged profile body" });
+    extractMock.mockImplementation(async ({ instruction }: { instruction: string }) => {
+      if (instruction.startsWith("Generate a structured")) {
+        return {
+          output: {
+            intro: "Structured daily brief.",
+            builtWork: ["Shipped a useful update."],
+            conversationHighlights: ["Discussed operating priorities."],
+          },
+        };
+      }
+      if (instruction.startsWith("Personalize this structured")) {
+        return {
+          output: {
+            greeting: "Hello Member One,",
+            intro: "Here is what matters most today.",
+            emphasizedSectionIds: ["builtWork"],
+          },
+        };
+      }
+      return { output: {} };
+    });
     createArticleMock.mockResolvedValue({ id: "article-1" });
     updateArticleMock.mockResolvedValue({ id: "article-1" });
     rebuildBacklinksMock.mockResolvedValue(undefined);
@@ -152,6 +197,7 @@ describe("runDailyDigest", () => {
     txMock.crmActivity.create.mockResolvedValue({ id: "activity-1" });
     txMock.newspaperDelivery.create.mockResolvedValue({ id: "delivery-1" });
     getWorkspaceNewspaperCadenceMock.mockResolvedValue("DAILY");
+    prismaMock.workspace.findUnique.mockResolvedValue({ name: "Workspace One" });
   });
 
   it("includes recent active and merged build artifacts in the digest input", async () => {
@@ -198,7 +244,8 @@ describe("runDailyDigest", () => {
       dateISO: "2026-04-30T12:00:00.000Z",
     });
 
-    const digestInput = chatMock.mock.calls[0][0].messages[1].content;
+    const digestCall = extractMock.mock.calls.find(([request]) => request.instruction.startsWith("Generate a structured"));
+    const digestInput = digestCall?.[0].input;
     expect(digestInput).toContain("Built / PR activity for accomplishments and shipped work");
     expect(digestInput).toContain("Active PR work");
     expect(digestInput).toContain("Built outcome board");
@@ -208,12 +255,13 @@ describe("runDailyDigest", () => {
     expect(createArticleMock).toHaveBeenCalledWith(expect.objectContaining({ kind: "agent" }), expect.objectContaining({
       workspaceId: "workspace-1",
       type: "DIGEST",
-      bodyMd: "Digest body",
+      bodyMd: expect.stringContaining("## Built / Shipped Work"),
       title: "Daily Newspaper - 2026-04-30",
     }));
     expect(sendEmailMock).toHaveBeenCalledWith(expect.objectContaining({
       to: "member@example.com",
       subject: "Daily Newspaper - 2026-04-30 - Your Personal Briefing",
+      html: expect.stringContaining("The Workspace One Edition"),
     }));
     expect(recordNewspaperDeliveryMock).toHaveBeenCalledWith(expect.objectContaining({
       workspaceId: "workspace-1",
@@ -335,6 +383,35 @@ describe("runDailyDigest", () => {
     expect(recordNewspaperDeliveryMock).toHaveBeenCalledWith(expect.objectContaining({
       status: "SKIPPED",
       error: "RESEND_API_KEY is not configured.",
+    }));
+  });
+
+  it("records skipped deliveries instead of sending empty structured newspapers", async () => {
+    prismaMock.buildArtifact.findMany.mockResolvedValue([mockRecentBuildArtifact()]);
+    extractMock.mockImplementation(async ({ instruction }: { instruction: string }) => {
+      if (instruction.startsWith("Generate a structured")) {
+        return { output: {} };
+      }
+      return { output: {} };
+    });
+
+    const { runDailyDigest } = await import("./daily-digest");
+    const result = await runDailyDigest({
+      workspaceId: "workspace-1",
+      dateISO: "2026-04-30T12:00:00.000Z",
+      cadence: "DAILY",
+    });
+
+    expect(result).toEqual(expect.objectContaining({
+      sentEmails: 0,
+      skippedEmails: 1,
+    }));
+    expect(sendEmailMock).not.toHaveBeenCalled();
+    expect(createArticleMock).not.toHaveBeenCalled();
+    expect(recordNewspaperDeliveryMock).toHaveBeenCalledWith(expect.objectContaining({
+      memberId: "member-1",
+      status: "SKIPPED",
+      error: "No digest sections generated.",
     }));
   });
 
