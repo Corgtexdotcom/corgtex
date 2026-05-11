@@ -4,8 +4,6 @@ import type { Metadata } from "next";
 import { logoutAction, requirePageActor } from "@/lib/auth";
 import { DemoTour } from "./DemoTour";
 import { DemoBanner } from "./DemoBanner";
-import { CommandPalette } from "./CommandPalette";
-import { CommandMenuButton } from "./CommandMenuButton";
 import { getTranslations } from "next-intl/server";
 import { LanguageSwitcher } from "./LanguageSwitcher";
 import { ThemeToggle } from "../../../ThemeToggle";
@@ -68,7 +66,6 @@ export default async function WorkspaceLayout({
 
   return (
     <div className="ws-layout">
-      <CommandPalette workspaceId={workspaceId} workspaces={workspaces} navGroups={visibleNavGroups} />
       <MobileWorkspaceShell
         workspaceId={workspaceId}
         workspaceName={currentBranding.primaryName}
@@ -76,9 +73,6 @@ export default async function WorkspaceLayout({
         navGroups={visibleNavGroups}
         unreadCount={unreadCount}
         conversations={conversationSummaries}
-        showLanguageSwitcher={!!featureFlags.MULTILINGUAL}
-        showPlatformAdmin={isGlobalOperator(actor)}
-        controlPlaneHref={controlPlaneHref}
       />
       <aside className="ws-sidebar">
         <div className="ws-sidebar-header">
@@ -100,7 +94,6 @@ export default async function WorkspaceLayout({
 
         <div className="ws-sidebar-footer">
           {featureFlags.MULTILINGUAL && <LanguageSwitcher />}
-          <CommandMenuButton />
           <ThemeToggle />
           
           <a href={`/workspaces/${workspaceId}/settings?tab=user`} className="ws-nav-link ws-logout-btn" style={{ marginTop: "4px" }}>

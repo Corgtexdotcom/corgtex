@@ -2,28 +2,22 @@
 
 import {
   Brain,
-  Building2,
   CalendarDays,
   CheckSquare,
   CircleDot,
   ClipboardList,
-  Command,
   FileText,
   Gauge,
   Hexagon,
   Home,
   Landmark,
-  LogOut,
-  Menu,
   MessageSquare,
   PackageCheck,
-  Plus,
   RefreshCw,
   Settings,
   Shield,
   Target,
   TriangleAlert,
-  UserCog,
   UserPlus,
   Users,
   Wrench,
@@ -54,23 +48,11 @@ const ICONS: Record<WorkspaceNavIconName, LucideIcon> = {
 
 export type WorkspaceUtilityIconName =
   | "ai"
-  | "add"
-  | "command"
-  | "logout"
-  | "menu"
-  | "platformAdmin"
-  | "userSettings"
-  | "workspace";
+  | "platformAdmin";
 
 const UTILITY_ICONS: Record<WorkspaceUtilityIconName, LucideIcon> = {
   ai: MessageSquare,
-  add: Plus,
-  command: Command,
-  logout: LogOut,
-  menu: Menu,
   platformAdmin: Shield,
-  userSettings: UserCog,
-  workspace: Building2,
 };
 
 export function WorkspaceNavIcon({

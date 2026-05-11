@@ -4,11 +4,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePathname } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { ChatInterface } from "./chat/ChatInterface";
-import { CommandMenuButton } from "./CommandMenuButton";
-import { LanguageSwitcher } from "./LanguageSwitcher";
-import { ThemeToggle } from "../../../ThemeToggle";
 import type { NavGroup } from "@/lib/nav-config";
-import { WorkspaceNavIcon, WorkspaceUtilityIcon } from "./WorkspaceNavIcon";
+import { WorkspaceNavIcon } from "./WorkspaceNavIcon";
 
 type MobileMode = "workspace" | "ai";
 
@@ -28,13 +25,10 @@ type MobileWorkspaceShellProps = {
   navGroups: NavGroup[];
   unreadCount: number;
   conversations: ConversationSummary[];
-  showLanguageSwitcher: boolean;
-  showPlatformAdmin: boolean;
-  controlPlaneHref: string;
 };
 
 const MODE_STORAGE_KEY = "corgtex.mobileMode";
-const PRIMARY_HREFS = new Set(["", "/brain", "/actions"]);
+const PRIMARY_HREFS = ["", "/tensions", "/actions", "/proposals", "/tools"] as const;
 
 function navHref(workspaceId: string, href: string) {
   return `/workspaces/${workspaceId}${href}`;
@@ -54,26 +48,19 @@ export function MobileWorkspaceShell({
   navGroups,
   unreadCount,
   conversations,
-  showLanguageSwitcher,
-  showPlatformAdmin,
-  controlPlaneHref,
 }: MobileWorkspaceShellProps) {
   const pathname = usePathname() ?? "";
   const tNav = useTranslations("nav");
   const tMobile = useTranslations("mobile");
-  const tCommon = useTranslations("common");
   const [mode, setModeState] = useState<MobileMode>("workspace");
   const [hasLoadedStoredMode, setHasLoadedStoredMode] = useState(false);
-  const [isMoreOpen, setIsMoreOpen] = useState(false);
   const lastViewedKeyRef = useRef<string | null>(null);
 
   const primaryItems = useMemo(() => {
     const items = navGroups.flatMap((group) => group.items);
-    const picked = ["", "/brain", "/actions"]
+    return PRIMARY_HREFS
       .map((href) => items.find((item) => item.href === href))
       .filter((item): item is NonNullable<typeof item> => !!item);
-
-    return picked.length > 0 ? picked : items.filter((item) => PRIMARY_HREFS.has(item.href)).slice(0, 3);
   }, [navGroups]);
 
   const trackMobileMode = useCallback((eventName: "mode_viewed" | "mode_changed", nextMode: MobileMode, options: {
@@ -145,22 +132,6 @@ export function MobileWorkspaceShell({
     trackMobileMode("mode_viewed", mode, { source: "route_view" });
   }, [hasLoadedStoredMode, mode, pathname, trackMobileMode]);
 
-  useEffect(() => {
-    function onKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") {
-        setIsMoreOpen(false);
-      }
-    }
-
-    document.addEventListener("keydown", onKeyDown);
-    return () => document.removeEventListener("keydown", onKeyDown);
-  }, []);
-
-  async function handleLogout() {
-    await fetch("/api/auth/logout", { method: "POST" }).catch(() => null);
-    window.location.href = "/login";
-  }
-
   return (
     <>
       <div className="mobile-shell" aria-label={tMobile("shellLabel")}>
@@ -194,39 +165,24 @@ export function MobileWorkspaceShell({
           </div>
         </header>
 
-        <nav className="mobile-bottom-nav" aria-label={tMobile("bottomNavLabel")}>
-          {primaryItems.map((item) => (
-            <a
-              key={item.href}
-              href={navHref(workspaceId, item.href)}
-              className={mode === "workspace" && isActivePath(pathname, workspaceId, item.href) ? "active" : ""}
-              onClick={() => setMode("workspace", "bottom_nav")}
-            >
-              <WorkspaceNavIcon name={item.icon} className="mobile-bottom-icon" />
-              <span>{tNav(item.labelKey as any)}</span>
-              {item.href === "" && unreadCount > 0 && (
-                <span className="mobile-bottom-badge">{unreadCount}</span>
-              )}
-            </a>
-          ))}
-          <button
-            type="button"
-            className={mode === "ai" ? "active" : ""}
-            onClick={() => setMode("ai", "bottom_nav")}
-          >
-            <WorkspaceUtilityIcon name="ai" className="mobile-bottom-icon" />
-            <span>{tMobile("aiMode")}</span>
-          </button>
-          <button
-            type="button"
-            className={isMoreOpen ? "active" : ""}
-            aria-expanded={isMoreOpen}
-            onClick={() => setIsMoreOpen(true)}
-          >
-            <WorkspaceUtilityIcon name="menu" className="mobile-bottom-icon" />
-            <span>{tMobile("more")}</span>
-          </button>
-        </nav>
+        {mode === "workspace" && (
+          <nav className="mobile-bottom-nav" aria-label={tMobile("bottomNavLabel")}>
+            {primaryItems.map((item) => (
+              <a
+                key={item.href}
+                href={navHref(workspaceId, item.href)}
+                className={isActivePath(pathname, workspaceId, item.href) ? "active" : ""}
+                onClick={() => setMode("workspace", "bottom_nav")}
+              >
+                <WorkspaceNavIcon name={item.icon} className="mobile-bottom-icon" />
+                <span>{tNav(item.labelKey as any)}</span>
+                {item.href === "" && unreadCount > 0 && (
+                  <span className="mobile-bottom-badge">{unreadCount}</span>
+                )}
+              </a>
+            ))}
+          </nav>
+        )}
       </div>
 
       {mode === "ai" && (
@@ -239,117 +195,6 @@ export function MobileWorkspaceShell({
             mobileMode={true}
           />
         </section>
-      )}
-
-      {isMoreOpen && (
-        <div className="mobile-sheet-backdrop" role="presentation" onClick={() => setIsMoreOpen(false)}>
-          <section
-            className="mobile-more-sheet"
-            role="dialog"
-            aria-modal="true"
-            aria-label={tMobile("more")}
-            onClick={(event) => event.stopPropagation()}
-          >
-            <div className="mobile-sheet-handle" />
-            <div className="mobile-sheet-header">
-              <div>
-                <div className="mobile-sheet-title">{tMobile("more")}</div>
-                <div className="mobile-sheet-subtitle">{workspaceName}</div>
-              </div>
-              <button type="button" className="mobile-icon-button" onClick={() => setIsMoreOpen(false)}>
-                {tMobile("close")}
-              </button>
-            </div>
-
-            <div className="mobile-sheet-actions">
-              <button
-                type="button"
-                className="mobile-sheet-action"
-                onClick={() => {
-                  setMode("ai", "more_sheet");
-                  setIsMoreOpen(false);
-                }}
-              >
-                <WorkspaceUtilityIcon name="ai" />
-                <span>{tMobile("openAi")}</span>
-              </button>
-              <button
-                type="button"
-                className="mobile-sheet-action"
-                onClick={() => {
-                  window.dispatchEvent(new CustomEvent("corgtex:open-command-palette"));
-                  setIsMoreOpen(false);
-                }}
-              >
-                <WorkspaceUtilityIcon name="command" />
-                <span>{tCommon("commandMenu")}</span>
-              </button>
-            </div>
-
-            <div className="mobile-more-list">
-              {navGroups.map((group) => (
-                <div key={group.labelKey} className="mobile-more-group">
-                  <div className="mobile-more-group-label">{tNav(group.labelKey as any)}</div>
-                  {group.items.map((item) => (
-                    <a
-                      key={item.href}
-                      href={navHref(workspaceId, item.href)}
-                      className="mobile-more-link"
-                      onClick={() => {
-                        setMode("workspace", "more_sheet_link");
-                        setIsMoreOpen(false);
-                      }}
-                    >
-                      <WorkspaceNavIcon name={item.icon} />
-                      <span>{tNav(item.labelKey as any)}</span>
-                      {item.href === "" && unreadCount > 0 && (
-                        <span className="ws-notif-badge">{unreadCount}</span>
-                      )}
-                    </a>
-                  ))}
-                </div>
-              ))}
-
-              {showPlatformAdmin && (
-                <div className="mobile-more-group">
-                  <div className="mobile-more-group-label">{tNav("globalAdmin")}</div>
-                  <a
-                    href={controlPlaneHref}
-                    className="mobile-more-link"
-                    onClick={() => {
-                      setMode("workspace", "more_sheet_admin_link");
-                      setIsMoreOpen(false);
-                    }}
-                  >
-                    <WorkspaceUtilityIcon name="platformAdmin" />
-                    <span>{tNav("platformAdmin")}</span>
-                  </a>
-                </div>
-              )}
-            </div>
-
-            <div className="mobile-sheet-footer">
-              {showLanguageSwitcher && <LanguageSwitcher />}
-              <CommandMenuButton />
-              <ThemeToggle />
-              <a
-                href={navHref(workspaceId, "/settings?tab=user")}
-                className="mobile-more-link"
-                onClick={() => {
-                  setMode("workspace", "more_sheet_user_settings");
-                  setIsMoreOpen(false);
-                }}
-              >
-                <WorkspaceUtilityIcon name="userSettings" />
-                <span>{tMobile("userSettings")}</span>
-              </a>
-              <button type="button" className="mobile-more-link mobile-logout" onClick={() => void handleLogout()}>
-                <WorkspaceUtilityIcon name="logout" />
-                <span>{tCommon("logout")}</span>
-              </button>
-            </div>
-          </section>
-        </div>
       )}
     </>
   );

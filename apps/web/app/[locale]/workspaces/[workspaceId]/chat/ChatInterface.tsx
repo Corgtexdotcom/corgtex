@@ -405,7 +405,7 @@ export function ChatInterface({
         </div>
       )}
 
-      <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
+      <div className="chat-body">
         {(!isFullScreen && (!compact || (!sessionId && !showNewChat && !mobileMode))) && (
           <div className="chat-sidebar" style={compact ? { width: "100%", borderRight: "none" } : undefined}>
             <div className="chat-sidebar-header">
@@ -599,7 +599,7 @@ export function ChatInterface({
             >
               {t("btnAttach")}
             </button>
-            <div style={{ flex: 1, display: "flex", flexDirection: "column" }}>
+            <div className="chat-input-field">
               <textarea
                 ref={inputRef}
                 value={input}
