@@ -256,6 +256,39 @@ describe("meeting recorder domain", () => {
     }));
   });
 
+  it("clears stale recorder calendar refresh tokens when reconnect does not return one", async () => {
+    const { upsertRecorderCalendarSource } = await import("./meeting-recorders");
+    prismaMock.workspaceRecorderCalendarSource.upsert.mockResolvedValue({
+      id: "source-1",
+      workspaceId: "workspace-1",
+      provider: "MICROSOFT",
+      providerAccountId: "ms-user-2",
+      providerAccountEmail: "new-calendar@customer.test",
+      status: "ACTIVE",
+    });
+
+    await upsertRecorderCalendarSource({
+      workspaceId: "workspace-1",
+      providerAccountId: "ms-user-2",
+      providerAccountEmail: "new-calendar@customer.test",
+      accessToken: "new-access-token",
+      refreshToken: null,
+      expiresIn: 3600,
+      scopes: ["Calendars.Read"],
+    });
+
+    expect(prismaMock.workspaceRecorderCalendarSource.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      update: expect.objectContaining({
+        accessTokenEnc: "enc:new-access-token",
+        refreshTokenEnc: null,
+      }),
+      create: expect.objectContaining({
+        accessTokenEnc: "enc:new-access-token",
+        refreshTokenEnc: null,
+      }),
+    }));
+  });
+
   it("verifies Svix-style webhook signatures", async () => {
     const { verifySvixLikeSignature } = await import("./meeting-recorders");
     const payload = JSON.stringify({ event: "transcript.done" });

@@ -901,7 +901,7 @@ export async function upsertRecorderCalendarSource(params: {
       providerAccountEmail: params.providerAccountEmail ?? null,
       displayName: params.displayName ?? null,
       accessTokenEnc: encryptSecret(params.accessToken),
-      ...(params.refreshToken ? { refreshTokenEnc: encryptSecret(params.refreshToken) } : {}),
+      refreshTokenEnc: params.refreshToken ? encryptSecret(params.refreshToken) : null,
       expiresAt,
       scopes: params.scopes ?? [],
       status: "ACTIVE",
