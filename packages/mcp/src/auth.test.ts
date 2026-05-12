@@ -65,7 +65,19 @@ describe("authenticateMcpRequest", () => {
       workspaceId: "ws-1",
       scopes: ["brain:read"],
       instanceSlug: "client-a",
-    }, "actions:write")).toThrow("MCP credential is missing the required scope");
+    }, "actions:write")).toThrow("Missing required permission: actions:write");
+  });
+
+  it("OAuth scope errors point users at the hosted installer for self-service reconnect", async () => {
+    const { requireScope } = await import("./auth");
+
+    expect(() => requireScope({
+      actor: { kind: "user", user: { id: "user-1", email: "user@example.com", displayName: "User" } },
+      authKind: "oauth",
+      workspaceId: "ws-1",
+      scopes: ["brain:read"],
+      instanceSlug: "client-a",
+    }, "actions:write")).toThrow("https://app.test/install/claude");
   });
 
   it("allows sensitive tool credentials only when the OAuth session has the delegated scope", async () => {
@@ -79,7 +91,7 @@ describe("authenticateMcpRequest", () => {
     };
 
     expect(() => requireScope(ctx, "tools:credentials:read")).not.toThrow();
-    expect(() => requireScope({ ...ctx, scopes: ["tools:read"] }, "tools:credentials:read")).toThrow("MCP credential is missing the required scope");
+    expect(() => requireScope({ ...ctx, scopes: ["tools:read"] }, "tools:credentials:read")).toThrow("Missing required permission: tools:credentials:read");
   });
 
   it("keeps bootstrap agent credentials unrestricted", async () => {
