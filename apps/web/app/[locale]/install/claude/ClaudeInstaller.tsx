@@ -143,7 +143,7 @@ export function ClaudeInstaller({ connectorUrl }: Props) {
       </ol>
 
       <section className="rounded-[var(--radius-lg)] border border-[var(--line-subtle)] bg-[var(--surface-sunken)] p-5">
-        <h2 className="text-sm font-medium text-[var(--text-strong)]">Try it once you're connected</h2>
+        <h2 className="text-sm font-medium text-[var(--text-strong)]">Try it once you&apos;re connected</h2>
         <p className="mt-1 text-xs text-[var(--text-muted)]">
           Open Claude and try one of these. Claude will use Corgtex automatically.
         </p>

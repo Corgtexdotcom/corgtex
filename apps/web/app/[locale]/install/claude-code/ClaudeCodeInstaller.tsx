@@ -38,7 +38,7 @@ export function ClaudeCodeInstaller({ command, fallbackInstallHref }: Props) {
         </div>
         <h1 className="text-2xl font-bold text-[var(--text-strong)]">Connect Corgtex to Claude Code</h1>
         <p className="mt-2 text-sm text-[var(--text-muted)]">
-          Claude Code runs in your terminal. If you don't use a terminal, use the Claude web/desktop installer instead.
+          Claude Code runs in your terminal. If you don&apos;t use a terminal, use the Claude web/desktop installer instead.
         </p>
       </header>
 
