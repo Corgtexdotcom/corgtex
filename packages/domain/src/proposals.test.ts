@@ -818,7 +818,7 @@ describe("submitProposal event payload", () => {
     await expect(supportReopenResolvedProposals(actor, {
       workspaceId: "ws-1",
       proposalIds: ["p-1"],
-      reason: "Undo accidental system auto-resolution for Crina.",
+      reason: "Undo accidental system auto-resolution for the customer workspace.",
     })).resolves.toEqual({
       workspaceId: "ws-1",
       reopened: [
@@ -862,7 +862,7 @@ describe("submitProposal event payload", () => {
         action: "proposal.support_reopened_resolved",
         entityId: "p-1",
         meta: expect.objectContaining({
-          reason: "Undo accidental system auto-resolution for Crina.",
+          reason: "Undo accidental system auto-resolution for the customer workspace.",
           previousResolutionOutcome: "ADOPTED",
           approvalDecisionsDeleted: 2,
           objectionsDeleted: 1,
