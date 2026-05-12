@@ -313,6 +313,24 @@ async function failJob(job: ClaimedJob, error: unknown) {
   });
 }
 
+async function scheduleRecurringRecorderCalendarSync(workspaceId: string, sourceId: string) {
+  const runAfter = new Date(Date.now() + MEETING_RECORDER_RECONCILE_INTERVAL_MS);
+  const dedupeBucket = Math.floor(runAfter.getTime() / MEETING_RECORDER_RECONCILE_INTERVAL_MS);
+  await prisma.workflowJob.upsert({
+    where: {
+      dedupeKey: `meeting-recorders:calendar-sync:${sourceId}:${dedupeBucket}`,
+    },
+    update: {},
+    create: {
+      workspaceId,
+      type: "meeting-recorders.calendar.sync",
+      payload: { sourceId, reason: "recurring" },
+      runAfter,
+      dedupeKey: `meeting-recorders:calendar-sync:${sourceId}:${dedupeBucket}`,
+    },
+  });
+}
+
 async function handleJob(job: ClaimedJob) {
   const payload = job.payload as Record<string, unknown>;
 
@@ -435,28 +453,21 @@ async function handleJob(job: ClaimedJob) {
   if (job.type === "meeting-recorders.calendar.sync") {
     const sourceId = (payload as { sourceId?: string }).sourceId;
     if (sourceId) {
-      const result = await syncRecorderCalendarSource({
-        workspaceId: job.workspaceId,
-        sourceId,
-        workflowJobId: job.id,
-      });
+      let result: Awaited<ReturnType<typeof syncRecorderCalendarSource>>;
+      try {
+        result = await syncRecorderCalendarSource({
+          workspaceId: job.workspaceId,
+          sourceId,
+          workflowJobId: job.id,
+        });
+      } catch (error) {
+        await scheduleRecurringRecorderCalendarSync(job.workspaceId, sourceId);
+        throw error;
+      }
       if (result.action === "skipped" && result.reason === "source_unavailable") {
         return;
       }
-      const runAfter = new Date(Date.now() + MEETING_RECORDER_RECONCILE_INTERVAL_MS);
-      await prisma.workflowJob.upsert({
-        where: {
-          dedupeKey: `meeting-recorders:calendar-sync:${sourceId}:${Math.floor(runAfter.getTime() / MEETING_RECORDER_RECONCILE_INTERVAL_MS)}`,
-        },
-        update: {},
-        create: {
-          workspaceId: job.workspaceId,
-          type: "meeting-recorders.calendar.sync",
-          payload: { sourceId, reason: "recurring" },
-          runAfter,
-          dedupeKey: `meeting-recorders:calendar-sync:${sourceId}:${Math.floor(runAfter.getTime() / MEETING_RECORDER_RECONCILE_INTERVAL_MS)}`,
-        },
-      });
+      await scheduleRecurringRecorderCalendarSync(job.workspaceId, sourceId);
     }
     return;
   }

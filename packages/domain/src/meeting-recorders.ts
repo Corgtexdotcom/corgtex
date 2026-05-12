@@ -1928,6 +1928,8 @@ export async function processMeetingRecorderWebhook(provider: MeetingRecorderPro
 
   if (shouldFetchTranscript(provider, event)) {
     await ingestProviderTranscript(provider, recording, event);
+  } else {
+    await updateSmokeRunsForTerminalRecording(recording);
   }
 
   await prisma.meetingRecorderProviderEvent.update({
@@ -1980,6 +1982,26 @@ async function applyWebhookState(recording: MeetingRecording, event: ProviderWeb
   return prisma.meetingRecording.update({
     where: { id: recording.id },
     data,
+  });
+}
+
+async function updateSmokeRunsForTerminalRecording(recording: MeetingRecording) {
+  if (recording.status !== "FAILED" && recording.status !== "CANCELLED") {
+    return;
+  }
+
+  await prisma.meetingRecorderSmokeRun.updateMany({
+    where: {
+      recordingId: recording.id,
+      status: { in: ["PENDING", "SCHEDULED"] },
+    },
+    data: {
+      status: recording.status === "CANCELLED" ? "CANCELLED" : "FAILED",
+      failureMessage: recording.failureMessage ?? (recording.status === "CANCELLED"
+        ? "Recorder run was cancelled before transcript ingestion."
+        : "Recorder run failed before transcript ingestion."),
+      completedAt: new Date(),
+    },
   });
 }
 

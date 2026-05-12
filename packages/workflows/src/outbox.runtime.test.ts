@@ -265,6 +265,36 @@ describe("runPendingJobs", () => {
     });
   });
 
+  it("keeps recorder calendar sync recurrence alive after provider failures", async () => {
+    syncRecorderCalendarSourceMock.mockRejectedValueOnce(new Error("Microsoft Graph unavailable"));
+    txMock.$queryRaw.mockResolvedValue([
+      {
+        id: "job-1",
+        workspaceId: "ws-1",
+        type: "meeting-recorders.calendar.sync",
+        payload: { sourceId: "source-flaky" },
+        attempts: 5,
+      },
+    ]);
+
+    await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
+
+    expect(prismaMock.workflowJob.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({
+        workspaceId: "ws-1",
+        type: "meeting-recorders.calendar.sync",
+        payload: { sourceId: "source-flaky", reason: "recurring" },
+      }),
+    }));
+    expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({
+      where: { id: "job-1" },
+      data: expect.objectContaining({
+        status: "FAILED",
+        error: "Microsoft Graph unavailable",
+      }),
+    });
+  });
+
   it("dispatches control-plane fleet snapshot jobs without a workspace id", async () => {
     txMock.$queryRaw.mockResolvedValue([
       {

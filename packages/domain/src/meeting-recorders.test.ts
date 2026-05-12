@@ -308,6 +308,82 @@ describe("meeting recorder domain", () => {
     })).toBe(true);
   });
 
+  it("marks live smoke runs failed when recorder webhooks report terminal failures", async () => {
+    const { processMeetingRecorderWebhook } = await import("./meeting-recorders");
+    const payload = JSON.stringify({
+      id: "event-1",
+      event: "bot.failed",
+      data: {
+        bot: {
+          id: "bot-1",
+          metadata: {
+            workspaceId: "workspace-1",
+            meetingId: "meeting-1",
+            recordingId: "recording-1",
+          },
+        },
+        data: {
+          code: "failed",
+          sub_code: "no_join",
+          message: "Bot could not join.",
+        },
+      },
+    });
+    const msgId = "msg_1";
+    const timestamp = "1770000000";
+    const signature = createHmac("sha256", Buffer.from("recall-secret"))
+      .update(`${msgId}.${timestamp}.${payload}`)
+      .digest("base64");
+    prismaMock.meetingRecorderProviderEvent.findUnique.mockResolvedValue(null);
+    prismaMock.meetingRecorderProviderEvent.upsert.mockResolvedValue({ id: "provider-event-1" });
+    prismaMock.meetingRecorderProviderEvent.update.mockResolvedValue({ id: "provider-event-1" });
+    prismaMock.meetingRecording.findUnique.mockResolvedValue({
+      id: "recording-1",
+      workspaceId: "workspace-1",
+      meetingId: "meeting-1",
+      provider: "RECALL_AI",
+      externalBotId: "bot-1",
+      status: "SCHEDULED",
+      failureMessage: null,
+    });
+    prismaMock.meetingRecording.update.mockResolvedValue({
+      id: "recording-1",
+      workspaceId: "workspace-1",
+      meetingId: "meeting-1",
+      provider: "RECALL_AI",
+      externalBotId: "bot-1",
+      status: "FAILED",
+      failureCode: "no_join",
+      failureMessage: "Bot could not join.",
+    });
+    prismaMock.meetingRecorderSmokeRun.updateMany.mockResolvedValue({ count: 1 });
+
+    await expect(processMeetingRecorderWebhook("RECALL_AI", {
+      rawBody: payload,
+      headers: {
+        "svix-id": msgId,
+        "svix-timestamp": timestamp,
+        "svix-signature": `v1,${signature}`,
+      },
+    })).resolves.toMatchObject({
+      processed: true,
+      duplicate: false,
+      recordingId: "recording-1",
+    });
+
+    expect(prismaMock.meetingRecorderSmokeRun.updateMany).toHaveBeenCalledWith({
+      where: {
+        recordingId: "recording-1",
+        status: { in: ["PENDING", "SCHEDULED"] },
+      },
+      data: expect.objectContaining({
+        status: "FAILED",
+        failureMessage: "Bot could not join.",
+        completedAt: expect.any(Date),
+      }),
+    });
+  });
+
   it("normalizes structured transcript segments into Corgtex transcript text", async () => {
     const { normalizeProviderTranscript } = await import("./meeting-recorders");
 
