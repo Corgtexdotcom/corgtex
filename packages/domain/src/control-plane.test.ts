@@ -622,7 +622,7 @@ describe("control plane domain", () => {
     });
     expect(prismaMock.workspaceMeetingRecorderConfig.upsert).toHaveBeenCalledWith({
       where: { workspaceId: "ws-1" },
-      update: { autoRecordEnabled: true },
+      update: { enabled: true, autoRecordEnabled: true },
       create: {
         workspaceId: "ws-1",
         enabled: true,

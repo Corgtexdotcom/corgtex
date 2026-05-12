@@ -2005,7 +2005,7 @@ export async function runControlPlaneMeetingRecorderOperation(actor: AppActor, p
   const latestSmoke = await requireCompletedMeetingRecorderSmoke(managedWorkspaceId);
   const config = await prisma.workspaceMeetingRecorderConfig.upsert({
     where: { workspaceId: managedWorkspaceId },
-    update: { autoRecordEnabled: true },
+    update: { enabled: true, autoRecordEnabled: true },
     create: {
       workspaceId: managedWorkspaceId,
       enabled: true,

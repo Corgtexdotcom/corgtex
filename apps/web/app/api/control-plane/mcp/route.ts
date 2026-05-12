@@ -366,14 +366,30 @@ function argStringArray(args: Record<string, unknown>, key: string) {
 
 function parseTimezoneAwareJoinAt(value: string | null) {
   if (!value) return { ok: true as const, date: null };
-  if (!/[zZ]$|[+-]\d{2}:\d{2}$/.test(value)) {
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,9}))?)?([zZ]|[+-]\d{2}:\d{2})$/);
+  if (!match) {
     return { ok: false as const, message: "joinAt must include an explicit timezone offset or Z." };
   }
   const date = new Date(value);
-  if (Number.isNaN(date.valueOf())) {
+  if (Number.isNaN(date.valueOf()) || !timezoneAwareTimestampMatchesInput(date, match)) {
     return { ok: false as const, message: "joinAt must be a valid timestamp." };
   }
   return { ok: true as const, date };
+}
+
+function timezoneAwareTimestampMatchesInput(parsed: Date, match: RegExpMatchArray) {
+  const [, year, month, day, hour, minute, second = "0", fraction = "0", zone] = match;
+  const offsetMinutes = zone.toUpperCase() === "Z"
+    ? 0
+    : (Number(zone.slice(1, 3)) * 60 + Number(zone.slice(4, 6))) * (zone.startsWith("-") ? -1 : 1);
+  const local = new Date(parsed.getTime() + offsetMinutes * 60_000);
+  return local.getUTCFullYear() === Number(year)
+    && local.getUTCMonth() + 1 === Number(month)
+    && local.getUTCDate() === Number(day)
+    && local.getUTCHours() === Number(hour)
+    && local.getUTCMinutes() === Number(minute)
+    && local.getUTCSeconds() === Number(second)
+    && local.getUTCMilliseconds() === Number(fraction.slice(0, 3).padEnd(3, "0"));
 }
 
 export async function GET() {
