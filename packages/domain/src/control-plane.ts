@@ -4,7 +4,16 @@ import type { AgentActor, AppActor } from "@corgtex/shared";
 import { AppError, invariant } from "./errors";
 import { isGlobalOperator } from "./auth";
 import { createMember, deactivateMember, listMembersEnriched, resendMemberAccessLink, sendMemberSetupEmail, updateMember } from "./members";
-import { getMeetingRecorderMonthlyUsage, MEETING_RECORDERS_FEATURE_FLAG } from "./meeting-recorders";
+import {
+  enqueueRecorderCalendarSync,
+  getMeetingRecorderEnterpriseReadiness,
+  getMeetingRecorderMonthlyUsage,
+  getRecorderCalendarSource,
+  MEETING_RECORDERS_FEATURE_FLAG,
+  runMeetingRecorderSmoke,
+  scanRecorderCalendarSource,
+  upsertRecorderCalendarSource,
+} from "./meeting-recorders";
 import { createControlPlaneAdapter } from "./control-plane-adapters";
 import { createRailwayClientFromEnv, upgradeRailwayCustomerRelease, type RailwayClient } from "./railway-client";
 
@@ -1577,7 +1586,7 @@ export async function getControlPlaneIntegrationStatus(actor: AppActor, deployme
     };
   }
 
-  const [featureFlag, recorderConfig, recorderUsage, recorderFailures, communicationInstallations, dataSources] = await Promise.all([
+  const [featureFlag, recorderConfig, recorderUsage, recorderFailures, recorderReadiness, communicationInstallations, dataSources] = await Promise.all([
     prisma.workspaceFeatureFlag.findUnique({
       where: {
         workspaceId_flag: {
@@ -1594,6 +1603,7 @@ export async function getControlPlaneIntegrationStatus(actor: AppActor, deployme
         status: "FAILED",
       },
     }),
+    getMeetingRecorderEnterpriseReadiness(deployment.managedWorkspaceId),
     prisma.communicationInstallation.findMany({
       where: { workspaceId: deployment.managedWorkspaceId },
       orderBy: { updatedAt: "desc" },
@@ -1643,7 +1653,10 @@ export async function getControlPlaneIntegrationStatus(actor: AppActor, deployme
         monthlyMinuteCap: recorderConfig?.monthlyMinuteCap ?? null,
         usage: recorderUsage,
         failures: recorderFailures,
-        vendorReadiness: Boolean(featureFlag?.enabled && recorderConfig?.defaultProvider && recorderConfig.monthlyMinuteCap >= 0),
+        vendorReadiness: recorderReadiness.ready,
+        readiness: recorderReadiness,
+        calendarSource: recorderReadiness.calendarSource,
+        lastSmokeRun: recorderReadiness.lastSmokeRun,
       },
       ...communicationInstallations.map((installation) => ({
         key: `communication_${installation.id}`,
@@ -1697,6 +1710,9 @@ export async function configureControlPlaneMeetingRecorderIntegration(actor: App
   const enabled = params.entitlementEnabled ? params.enabled : false;
   const botName = params.botName?.trim() || DEFAULT_RECORDER_BOT_NAME;
   const entryMessage = params.entryMessage?.trim() || DEFAULT_RECORDER_ENTRY_MESSAGE;
+  const latestCompletedSmoke = enabled && params.autoRecordEnabled
+    ? await requireCompletedMeetingRecorderSmoke(managedWorkspaceId)
+    : null;
 
   const { featureFlag, config, entitlement } = await prisma.$transaction(async (tx) => {
     const featureFlag = await tx.workspaceFeatureFlag.upsert({
@@ -1811,6 +1827,7 @@ export async function configureControlPlaneMeetingRecorderIntegration(actor: App
           fallbackProvider: config.fallbackProvider,
           autoRecordEnabled: config.autoRecordEnabled,
           monthlyMinuteCap: config.monthlyMinuteCap,
+          smokeRunId: latestCompletedSmoke?.id,
         }) as Prisma.InputJsonObject,
       },
     });
@@ -1823,6 +1840,187 @@ export async function configureControlPlaneMeetingRecorderIntegration(actor: App
     managedWorkspaceId,
     entitlementEnabled: featureFlag.enabled,
     entitlement,
+    config,
+  };
+}
+
+async function requireCompletedMeetingRecorderSmoke(workspaceId: string) {
+  const latestSmoke = await prisma.meetingRecorderSmokeRun.findFirst({
+    where: {
+      workspaceId,
+      status: "COMPLETED",
+    },
+    orderBy: { createdAt: "desc" },
+  });
+  invariant(latestSmoke, 400, "RECORDER_SMOKE_REQUIRED", "A completed recorder smoke run is required before enabling auto-recording.");
+  return latestSmoke;
+}
+
+export async function saveControlPlaneRecorderCalendarSource(actor: AppActor, params: {
+  deploymentId: string;
+  providerAccountId: string;
+  providerAccountEmail?: string | null;
+  displayName?: string | null;
+  accessToken: string;
+  refreshToken?: string | null;
+  expiresIn?: number | null;
+  scopes?: string[];
+  reason?: string | null;
+}) {
+  requireControlPlaneScope(actor, "control-plane:integrations:write");
+  const reason = requireMutationReason(params.reason);
+  await requireControlPlaneDeploymentWriteAccess(actor, params.deploymentId);
+  const deployment = await getControlPlaneDeploymentWithWorkspace(actor, params.deploymentId);
+  const managedWorkspaceId = deployment.managedWorkspaceId;
+  invariant(managedWorkspaceId, 400, "MANAGED_WORKSPACE_REQUIRED", "Recorder calendar setup requires a managed workspace link.");
+
+  const source = await upsertRecorderCalendarSource({
+    workspaceId: managedWorkspaceId,
+    providerAccountId: params.providerAccountId,
+    providerAccountEmail: params.providerAccountEmail ?? null,
+    displayName: params.displayName ?? null,
+    accessToken: params.accessToken,
+    refreshToken: params.refreshToken ?? null,
+    expiresIn: params.expiresIn ?? null,
+    scopes: params.scopes ?? [],
+  });
+  const job = await enqueueRecorderCalendarSync({
+    workspaceId: managedWorkspaceId,
+    sourceId: source.id,
+    reason: "oauth_connected",
+  });
+  await recordCustomerDeploymentEvent(actor, params.deploymentId, "control_plane.integration.meeting_recorder_calendar_connected", {
+    reason,
+    managedWorkspaceId,
+    sourceId: source.id,
+    provider: source.provider,
+    providerAccountEmail: source.providerAccountEmail,
+    workflowJobId: job.id,
+  });
+  return {
+    deploymentId: params.deploymentId,
+    managedWorkspaceId,
+    source,
+    workflowJobId: job.id,
+  };
+}
+
+export async function runControlPlaneMeetingRecorderOperation(actor: AppActor, params: {
+  deploymentId: string;
+  operation: "enqueue_calendar_sync" | "dry_run_scan" | "live_smoke" | "enable_auto_recording_after_smoke";
+  meetingUrl?: string | null;
+  joinAt?: Date | null;
+  provider?: string | null;
+  reason?: string | null;
+}) {
+  requireControlPlaneScope(actor, "control-plane:integrations:write");
+  const reason = requireMutationReason(params.reason);
+  await requireControlPlaneDeploymentWriteAccess(actor, params.deploymentId);
+  const deployment = await getControlPlaneDeploymentWithWorkspace(actor, params.deploymentId);
+  const managedWorkspaceId = deployment.managedWorkspaceId;
+  invariant(managedWorkspaceId, 400, "MANAGED_WORKSPACE_REQUIRED", "Meeting recorder operations require a managed workspace link.");
+
+  const provider = params.provider?.trim()
+    ? normalizeMeetingRecorderProvider(params.provider, "meeting recorder smoke provider")
+    : "RECALL_AI";
+
+  if (params.operation === "enqueue_calendar_sync") {
+    const source = await getRecorderCalendarSource(managedWorkspaceId);
+    invariant(source, 400, "RECORDER_CALENDAR_SOURCE_REQUIRED", "Connect a Microsoft recorder calendar before syncing.");
+    const job = await enqueueRecorderCalendarSync({
+      workspaceId: managedWorkspaceId,
+      sourceId: source.id,
+      reason: "control_plane",
+    });
+    await recordCustomerDeploymentEvent(actor, params.deploymentId, "control_plane.integration.meeting_recorder_calendar_sync_requested", {
+      reason,
+      managedWorkspaceId,
+      sourceId: source.id,
+      workflowJobId: job.id,
+    });
+    return {
+      deploymentId: params.deploymentId,
+      managedWorkspaceId,
+      operation: params.operation,
+      sourceId: source.id,
+      workflowJobId: job.id,
+    };
+  }
+
+  if (params.operation === "dry_run_scan") {
+    const source = await getRecorderCalendarSource(managedWorkspaceId);
+    invariant(source, 400, "RECORDER_CALENDAR_SOURCE_REQUIRED", "Connect a Microsoft recorder calendar before scanning.");
+    const scan = await scanRecorderCalendarSource({
+      workspaceId: managedWorkspaceId,
+      sourceId: source.id,
+    });
+    await recordCustomerDeploymentEvent(actor, params.deploymentId, "control_plane.integration.meeting_recorder_calendar_dry_run", {
+      reason,
+      managedWorkspaceId,
+      sourceId: source.id,
+      upcomingEventCount: scan.upcomingEventCount,
+      schedulableEventCount: scan.schedulableEventCount,
+    });
+    return {
+      deploymentId: params.deploymentId,
+      managedWorkspaceId,
+      operation: params.operation,
+      scan,
+    };
+  }
+
+  if (params.operation === "live_smoke") {
+    const meetingUrl = params.meetingUrl?.trim();
+    invariant(meetingUrl, 400, "INVALID_INPUT", "A future meeting URL is required for live smoke.");
+    invariant(params.joinAt && !Number.isNaN(params.joinAt.valueOf()), 400, "INVALID_INPUT", "A future join time is required for live smoke.");
+    const smokeRun = await runMeetingRecorderSmoke({
+      workspaceId: managedWorkspaceId,
+      deploymentId: params.deploymentId,
+      meetingUrl,
+      joinAt: params.joinAt,
+      provider,
+      liveVendorCall: true,
+    });
+    await recordCustomerDeploymentEvent(actor, params.deploymentId, "control_plane.integration.meeting_recorder_live_smoke", {
+      reason,
+      managedWorkspaceId,
+      smokeRunId: smokeRun.id,
+      status: smokeRun.status,
+      provider: smokeRun.provider,
+      meetingId: smokeRun.meetingId,
+      recordingId: smokeRun.recordingId,
+    });
+    return {
+      deploymentId: params.deploymentId,
+      managedWorkspaceId,
+      operation: params.operation,
+      smokeRun,
+    };
+  }
+
+  if (params.operation !== "enable_auto_recording_after_smoke") {
+    throw new AppError(400, "INVALID_INPUT", "Unsupported meeting recorder operation.");
+  }
+
+  const latestSmoke = await requireCompletedMeetingRecorderSmoke(managedWorkspaceId);
+  const config = await prisma.workspaceMeetingRecorderConfig.upsert({
+    where: { workspaceId: managedWorkspaceId },
+    update: { enabled: true, autoRecordEnabled: true },
+    create: {
+      workspaceId: managedWorkspaceId,
+      enabled: true,
+      autoRecordEnabled: true,
+    },
+  });
+  await recordCustomerDeploymentEvent(actor, params.deploymentId, "control_plane.integration.meeting_recorder_auto_recording_enabled", {
+    reason,
+    managedWorkspaceId,
+    smokeRunId: latestSmoke.id,
+  });
+  return {
+    deploymentId: params.deploymentId,
+    managedWorkspaceId,
+    operation: params.operation,
     config,
   };
 }

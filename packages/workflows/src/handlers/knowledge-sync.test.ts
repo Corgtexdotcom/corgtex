@@ -29,6 +29,7 @@ vi.mock("@corgtex/knowledge", () => ({
 
 vi.mock("@corgtex/domain", () => ({
   fetchCalendarEvents: vi.fn(),
+  syncCalendarEventRecorder: vi.fn(),
 }));
 
 function slackMessage(overrides: Record<string, unknown> = {}) {

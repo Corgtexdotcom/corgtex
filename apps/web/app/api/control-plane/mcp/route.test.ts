@@ -26,7 +26,7 @@ vi.mock("@corgtex/domain", () => ({
   requireControlPlaneAccess: mocks.requireControlPlaneAccess,
   requireControlPlaneScope: mocks.requireControlPlaneScope,
   refreshControlPlaneFleetSnapshots: vi.fn(),
-  resendControlPlaneCustomerMemberAccessLink: vi.fn(), runControlPlaneContextOperation: vi.fn(), runControlPlaneReleaseOperation: vi.fn(), runCustomerSupportOperation: vi.fn(),
+  resendControlPlaneCustomerMemberAccessLink: vi.fn(), runControlPlaneContextOperation: vi.fn(), runControlPlaneMeetingRecorderOperation: vi.fn(), runControlPlaneReleaseOperation: vi.fn(), runCustomerSupportOperation: vi.fn(),
   setControlPlaneFeatureFlag: vi.fn(), updateControlPlaneCustomerMemberStatus: vi.fn(),
 }));
 vi.mock("@/lib/auth", () => ({ resolveControlPlaneRequestActor: mocks.resolveControlPlaneRequestActor }));
@@ -86,6 +86,7 @@ describe("/api/control-plane/mcp", () => {
       "list_customer_feature_flags",
       "set_customer_feature_flag",
       "configure_customer_integration",
+      "run_meeting_recorder_operation",
       "run_context_sync",
       "probe_customer_deployment_health",
       "refresh_fleet_snapshots",
@@ -226,5 +227,75 @@ describe("/api/control-plane/mcp", () => {
       error: { code: -32602, message: "entitlementEnabled must be a boolean." },
     });
     expect(vi.mocked(domain.configureControlPlaneMeetingRecorderIntegration)).not.toHaveBeenCalled();
+  });
+
+  it("rejects timezone-less meeting recorder smoke timestamps", async () => {
+    mocks.resolveControlPlaneRequestActor.mockResolvedValueOnce({
+      kind: "agent",
+      authProvider: "control-plane",
+      label: "control-plane-agent",
+      scopes: ["control-plane:read", "control-plane:integrations:write"],
+    });
+    const domain = await import("@corgtex/domain");
+    const { POST } = await import("./route");
+
+    const response = await POST(request({
+      jsonrpc: "2.0",
+      id: 7,
+      method: "tools/call",
+      params: {
+        name: "run_meeting_recorder_operation",
+        arguments: {
+          deploymentId: "inst-1",
+          operation: "live_smoke",
+          meetingUrl: "https://teams.microsoft.com/l/meetup-join/test",
+          joinAt: "2026-05-12T15:30",
+          reason: "Run live smoke.",
+        },
+      },
+    }) as never);
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      jsonrpc: "2.0",
+      id: 7,
+      error: { code: -32602, message: "joinAt must include an explicit timezone offset or Z." },
+    });
+    expect(vi.mocked(domain.runControlPlaneMeetingRecorderOperation)).not.toHaveBeenCalled();
+  });
+
+  it("rejects overflowed meeting recorder smoke timestamps", async () => {
+    mocks.resolveControlPlaneRequestActor.mockResolvedValueOnce({
+      kind: "agent",
+      authProvider: "control-plane",
+      label: "control-plane-agent",
+      scopes: ["control-plane:read", "control-plane:integrations:write"],
+    });
+    const domain = await import("@corgtex/domain");
+    const { POST } = await import("./route");
+
+    const response = await POST(request({
+      jsonrpc: "2.0",
+      id: 8,
+      method: "tools/call",
+      params: {
+        name: "run_meeting_recorder_operation",
+        arguments: {
+          deploymentId: "inst-1",
+          operation: "live_smoke",
+          meetingUrl: "https://teams.microsoft.com/l/meetup-join/test",
+          joinAt: "2026-02-31T10:00:00Z",
+          reason: "Run live smoke.",
+        },
+      },
+    }) as never);
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      jsonrpc: "2.0",
+      id: 8,
+      error: { code: -32602, message: "joinAt must be a valid timestamp." },
+    });
+    expect(vi.mocked(domain.runControlPlaneMeetingRecorderOperation)).not.toHaveBeenCalled();
   });
 });

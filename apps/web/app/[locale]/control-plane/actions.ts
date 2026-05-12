@@ -11,6 +11,7 @@ import {
   recordBreakGlassSupportNote,
   resendControlPlaneCustomerMemberAccessLink,
   runControlPlaneContextOperation,
+  runControlPlaneMeetingRecorderOperation,
   runControlPlaneReleaseOperation,
   runCustomerSupportOperation,
   setControlPlaneFeatureFlag,
@@ -46,6 +47,75 @@ function asOptionalNumber(formData: FormData, key: string) {
   if (!value) return undefined;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+const LOCAL_DATETIME_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/;
+const TIMEZONE_AWARE_DATETIME_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,9}))?)?([zZ]|[+-]\d{2}:\d{2})$/;
+
+function parseDateTimeLocalWithOffset(value: string, offsetMinutesRaw: string | null) {
+  const timezoneAwareMatch = value.match(TIMEZONE_AWARE_DATETIME_PATTERN);
+  if (timezoneAwareMatch) {
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.valueOf()) || !timezoneAwareTimestampMatchesInput(parsed, timezoneAwareMatch)) {
+      throw new Error("joinAt must be a valid datetime.");
+    }
+    return parsed;
+  }
+  const match = value.match(LOCAL_DATETIME_PATTERN);
+  const offsetMinutes = offsetMinutesRaw === null ? NaN : Number(offsetMinutesRaw);
+  if (!match) {
+    throw new Error("joinAt must be a valid datetime.");
+  }
+  if (!Number.isInteger(offsetMinutes)) {
+    throw new Error("joinAt timezone offset is required.");
+  }
+  const [, year, month, day, hour, minute, second = "0"] = match;
+  const parsed = new Date(Date.UTC(
+    Number(year),
+    Number(month) - 1,
+    Number(day),
+    Number(hour),
+    Number(minute),
+    Number(second),
+  ) + offsetMinutes * 60_000);
+  if (Number.isNaN(parsed.valueOf()) || !localTimestampMatchesInput(parsed, match, offsetMinutes)) {
+    throw new Error("joinAt must be a valid datetime.");
+  }
+  return parsed;
+}
+
+function timezoneAwareTimestampMatchesInput(parsed: Date, match: RegExpMatchArray) {
+  const [, year, month, day, hour, minute, second = "0", fraction = "0", zone] = match;
+  const offsetMinutes = zone.toUpperCase() === "Z"
+    ? 0
+    : (Number(zone.slice(1, 3)) * 60 + Number(zone.slice(4, 6))) * (zone.startsWith("-") ? -1 : 1);
+  const local = new Date(parsed.getTime() + offsetMinutes * 60_000);
+  return localDateTimeMatches(local, year, month, day, hour, minute, second, fraction);
+}
+
+function localTimestampMatchesInput(parsed: Date, match: RegExpMatchArray, offsetMinutes: number) {
+  const [, year, month, day, hour, minute, second = "0"] = match;
+  const local = new Date(parsed.getTime() - offsetMinutes * 60_000);
+  return localDateTimeMatches(local, year, month, day, hour, minute, second, "0");
+}
+
+function localDateTimeMatches(
+  date: Date,
+  year: string,
+  month: string,
+  day: string,
+  hour: string,
+  minute: string,
+  second: string,
+  fraction: string,
+) {
+  return date.getUTCFullYear() === Number(year)
+    && date.getUTCMonth() + 1 === Number(month)
+    && date.getUTCDate() === Number(day)
+    && date.getUTCHours() === Number(hour)
+    && date.getUTCMinutes() === Number(minute)
+    && date.getUTCSeconds() === Number(second)
+    && date.getUTCMilliseconds() === Number(fraction.slice(0, 3).padEnd(3, "0"));
 }
 
 function asBooleanFromCheckbox(formData: FormData, key: string) {
@@ -130,6 +200,22 @@ export async function configureMeetingRecorderIntegrationAction(formData: FormDa
     monthlyMinuteCap: asOptionalNumber(formData, "monthlyMinuteCap") ?? 6_000,
     botName: optionalString(formData, "botName"),
     entryMessage: optionalString(formData, "entryMessage"),
+    reason: asString(formData, "reason"),
+  });
+  revalidateControlPlaneDeployment(deploymentId);
+}
+
+export async function runMeetingRecorderOperationAction(formData: FormData) {
+  const actor = await requirePageActor();
+  const deploymentId = asString(formData, "deploymentId");
+  const joinAtRaw = optionalString(formData, "joinAt");
+  const joinAtTimezoneOffsetMinutes = optionalString(formData, "joinAtTimezoneOffsetMinutes");
+  await runControlPlaneMeetingRecorderOperation(actor, {
+    deploymentId,
+    operation: asString(formData, "operation") as "enqueue_calendar_sync" | "dry_run_scan" | "live_smoke" | "enable_auto_recording_after_smoke",
+    meetingUrl: optionalString(formData, "meetingUrl"),
+    joinAt: joinAtRaw ? parseDateTimeLocalWithOffset(joinAtRaw, joinAtTimezoneOffsetMinutes) : null,
+    provider: optionalString(formData, "provider"),
     reason: asString(formData, "reason"),
   });
   revalidateControlPlaneDeployment(deploymentId);

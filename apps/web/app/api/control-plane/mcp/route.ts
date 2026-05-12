@@ -23,6 +23,7 @@ import {
   refreshControlPlaneFleetSnapshots,
   resendControlPlaneCustomerMemberAccessLink,
   runControlPlaneContextOperation,
+  runControlPlaneMeetingRecorderOperation,
   runControlPlaneReleaseOperation,
   runCustomerSupportOperation,
   setControlPlaneFeatureFlag,
@@ -164,6 +165,22 @@ const tools = [
     },
   },
   {
+    name: "run_meeting_recorder_operation",
+    description: "Run an audited meeting recorder rollout operation: enqueue calendar sync, dry-run scan, live smoke, or enable auto-recording after a completed smoke.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        deploymentId: { type: "string" },
+        operation: { type: "string" },
+        reason: { type: "string" },
+        meetingUrl: { type: "string" },
+        joinAt: { type: "string" },
+        provider: { type: "string" },
+      },
+      required: ["deploymentId", "operation", "reason"],
+    },
+  },
+  {
     name: "run_context_sync",
     description: "Queue an audited context sync for all active sources or one source.",
     inputSchema: {
@@ -289,6 +306,7 @@ const toolScopes: Record<string, string> = {
   set_customer_feature_flag: "control-plane:features:write",
   refresh_customer_deployment_snapshot: "control-plane:support:write",
   configure_customer_integration: "control-plane:integrations:write",
+  run_meeting_recorder_operation: "control-plane:integrations:write",
   run_context_sync: "control-plane:context:write",
   probe_customer_deployment_health: "control-plane:releases:write",
   refresh_fleet_snapshots: "control-plane:fleet:write",
@@ -344,6 +362,34 @@ function argNumber(args: Record<string, unknown>, key: string, fallback: number)
 function argStringArray(args: Record<string, unknown>, key: string) {
   const value = args[key];
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : null;
+}
+
+function parseTimezoneAwareJoinAt(value: string | null) {
+  if (!value) return { ok: true as const, date: null };
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,9}))?)?([zZ]|[+-]\d{2}:\d{2})$/);
+  if (!match) {
+    return { ok: false as const, message: "joinAt must include an explicit timezone offset or Z." };
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.valueOf()) || !timezoneAwareTimestampMatchesInput(date, match)) {
+    return { ok: false as const, message: "joinAt must be a valid timestamp." };
+  }
+  return { ok: true as const, date };
+}
+
+function timezoneAwareTimestampMatchesInput(parsed: Date, match: RegExpMatchArray) {
+  const [, year, month, day, hour, minute, second = "0", fraction = "0", zone] = match;
+  const offsetMinutes = zone.toUpperCase() === "Z"
+    ? 0
+    : (Number(zone.slice(1, 3)) * 60 + Number(zone.slice(4, 6))) * (zone.startsWith("-") ? -1 : 1);
+  const local = new Date(parsed.getTime() + offsetMinutes * 60_000);
+  return local.getUTCFullYear() === Number(year)
+    && local.getUTCMonth() + 1 === Number(month)
+    && local.getUTCDate() === Number(day)
+    && local.getUTCHours() === Number(hour)
+    && local.getUTCMinutes() === Number(minute)
+    && local.getUTCSeconds() === Number(second)
+    && local.getUTCMilliseconds() === Number(fraction.slice(0, 3).padEnd(3, "0"));
 }
 
 export async function GET() {
@@ -489,6 +535,21 @@ export async function POST(request: NextRequest) {
         monthlyMinuteCap: argNumber(args, "monthlyMinuteCap", 6_000),
         botName: argOptionalString(args, "botName"),
         entryMessage: argOptionalString(args, "entryMessage"),
+        reason: argString(args, "reason"),
+      })));
+    }
+    if (name === "run_meeting_recorder_operation") {
+      const joinAt = argOptionalString(args, "joinAt");
+      const parsedJoinAt = parseTimezoneAwareJoinAt(joinAt);
+      if (!parsedJoinAt.ok) {
+        return rpcError(id, -32602, parsedJoinAt.message);
+      }
+      return rpcResult(id, textContent(await runControlPlaneMeetingRecorderOperation(actor, {
+        deploymentId: argString(args, "deploymentId"),
+        operation: argString(args, "operation") as "enqueue_calendar_sync" | "dry_run_scan" | "live_smoke" | "enable_auto_recording_after_smoke",
+        meetingUrl: argOptionalString(args, "meetingUrl"),
+        joinAt: parsedJoinAt.date,
+        provider: argOptionalString(args, "provider"),
         reason: argString(args, "reason"),
       })));
     }

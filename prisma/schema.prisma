@@ -491,8 +491,10 @@ model Workspace {
   externalDataSources           ExternalDataSource[]
   featureFlags                  WorkspaceFeatureFlag[]
   meetingRecorderConfig         WorkspaceMeetingRecorderConfig?
+  recorderCalendarSources       WorkspaceRecorderCalendarSource[]
   meetingRecordings             MeetingRecording[]
   meetingRecorderProviderEvents MeetingRecorderProviderEvent[]
+  meetingRecorderSmokeRuns      MeetingRecorderSmokeRun[]
   meetingInsights               MeetingInsight[]
   goals                         Goal[]
   recognitions                  Recognition[]
@@ -1543,6 +1545,21 @@ enum MeetingRecordingStatus {
   SKIPPED
 }
 
+enum RecorderCalendarSourceStatus {
+  ACTIVE
+  DISABLED
+  ERROR
+}
+
+enum MeetingRecorderSmokeRunStatus {
+  PENDING
+  DRY_RUN_READY
+  SCHEDULED
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
 model MeetingSeries {
   id                     String    @id @default(uuid())
   workspaceId            String
@@ -1602,6 +1619,7 @@ model Meeting {
   tensions   Tension[]
   insights   MeetingInsight[]
   recordings MeetingRecording[]
+  smokeRuns  MeetingRecorderSmokeRun[]
 
   @@index([workspaceId, recordedAt])
   @@index([workspaceId, status, recordedAt])
@@ -1628,6 +1646,36 @@ model WorkspaceMeetingRecorderConfig {
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 }
 
+model WorkspaceRecorderCalendarSource {
+  id                         String                       @id @default(uuid())
+  workspaceId                String
+  provider                   OAuthProvider                @default(MICROSOFT)
+  providerAccountId          String
+  providerAccountEmail       String?
+  displayName                String?
+  accessTokenEnc             String                       @db.Text
+  refreshTokenEnc            String?                      @db.Text
+  expiresAt                  DateTime?
+  scopes                     String[]                     @default([])
+  status                     RecorderCalendarSourceStatus @default(ACTIVE)
+  lastSyncStartedAt          DateTime?
+  lastSyncCompletedAt        DateTime?
+  lastSyncAt                 DateTime?
+  lastSyncJobId              String?
+  lastSyncError              String?                      @db.Text
+  lastDryRunAt               DateTime?
+  lastUpcomingEventCount     Int                          @default(0)
+  lastSchedulableEventCount  Int                          @default(0)
+  createdAt                  DateTime                     @default(now())
+  updatedAt                  DateTime                     @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, provider])
+  @@index([workspaceId, status])
+  @@index([provider, providerAccountId])
+}
+
 model MeetingRecording {
   id                    String                  @id @default(uuid())
   workspaceId           String
@@ -1652,6 +1700,7 @@ model MeetingRecording {
   workspace Workspace                      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   meeting   Meeting                        @relation(fields: [meetingId], references: [id], onDelete: Cascade)
   events    MeetingRecorderProviderEvent[]
+  smokeRuns MeetingRecorderSmokeRun[]
 
   @@unique([provider, externalBotId])
   @@index([workspaceId, meetingId])
@@ -1682,6 +1731,34 @@ model MeetingRecorderProviderEvent {
   @@index([workspaceId, provider, eventType])
   @@index([recordingId])
   @@index([provider, externalBotId])
+}
+
+model MeetingRecorderSmokeRun {
+  id             String                        @id @default(uuid())
+  workspaceId    String
+  deploymentId   String?
+  meetingId      String?
+  recordingId    String?
+  provider       MeetingRecorderProvider       @default(RECALL_AI)
+  status         MeetingRecorderSmokeRunStatus @default(PENDING)
+  meetingUrlHash String?
+  joinAt         DateTime?
+  liveVendorCall Boolean                       @default(false)
+  checks         Json?
+  failureMessage String?                       @db.Text
+  createdAt      DateTime                      @default(now())
+  updatedAt      DateTime                      @updatedAt
+  completedAt    DateTime?
+
+  workspace  Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  deployment CustomerDeployment? @relation(fields: [deploymentId], references: [id], onDelete: SetNull)
+  meeting    Meeting?            @relation(fields: [meetingId], references: [id], onDelete: SetNull)
+  recording  MeetingRecording?   @relation(fields: [recordingId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId, createdAt])
+  @@index([deploymentId, createdAt])
+  @@index([workspaceId, status])
+  @@index([recordingId])
 }
 
 model Document {
@@ -3265,6 +3342,7 @@ model CustomerDeployment {
   events            CustomerDeploymentEvent[]
   accessGrants      CustomerDeploymentAccess[]
   supportOperations SupportOperation[]
+  recorderSmokeRuns MeetingRecorderSmokeRun[]
   managedWorkspace  Workspace?                 @relation(fields: [managedWorkspaceId], references: [id], onDelete: SetNull)
   customerAccount   CustomerAccount?           @relation("CustomerAccountDeployments", fields: [customerAccountId], references: [id], onDelete: SetNull)
   primaryForAccount CustomerAccount?           @relation("CustomerAccountPrimaryDeployment")
