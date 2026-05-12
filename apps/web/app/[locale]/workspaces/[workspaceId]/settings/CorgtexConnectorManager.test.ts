@@ -6,7 +6,7 @@ import {
   buildCursorInstallLinks,
   buildCursorMcpConfig,
   encodeBase64Utf8,
-} from "./CorgtexConnectorManager";
+} from "@/lib/install-helpers";
 
 const CONNECTOR_URL = "https://mcp.corgtex.com/mcp";
 

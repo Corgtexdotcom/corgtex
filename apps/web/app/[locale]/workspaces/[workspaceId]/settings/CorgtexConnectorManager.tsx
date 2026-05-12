@@ -1,9 +1,27 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import {
+  buildClaudeCodeCommand,
+  buildCursorInstallLinks,
+  buildCursorMcpConfig,
+  encodeBase64Utf8,
+  CLAUDE_INSTALLER_PATH,
+  CLAUDE_CODE_INSTALLER_PATH,
+  type CursorMcpConfig,
+} from "@/lib/install-helpers";
 
 const CHATGPT_APPS_URL = "https://chatgpt.com/apps";
 const CLAUDE_CONNECTORS_URL = "https://claude.ai/settings/connectors";
+
+// Re-export so the existing test in CorgtexConnectorManager.test.ts keeps working.
+export {
+  buildClaudeCodeCommand,
+  buildCursorInstallLinks,
+  buildCursorMcpConfig,
+  encodeBase64Utf8,
+};
+export type { CursorMcpConfig };
 
 type Props = {
   connectorUrl: string;
@@ -27,11 +45,6 @@ type ActionStatus = {
   message: string;
   tone: "success" | "warning";
   manualValue?: string;
-};
-
-type CursorMcpConfig = {
-  type: "http";
-  url: string;
 };
 
 const SETUP_CARDS: SetupCard[] = [
@@ -101,47 +114,6 @@ const SETUP_CARDS: SetupCard[] = [
     ],
   },
 ];
-
-export function buildCursorMcpConfig(connectorUrl: string): CursorMcpConfig {
-  return {
-    type: "http",
-    url: connectorUrl,
-  };
-}
-
-export function encodeBase64Utf8(value: string): string {
-  const bytes = new TextEncoder().encode(value);
-  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-  let output = "";
-
-  for (let index = 0; index < bytes.length; index += 3) {
-    const first = bytes[index] ?? 0;
-    const second = bytes[index + 1] ?? 0;
-    const third = bytes[index + 2] ?? 0;
-    const chunk = (first << 16) | (second << 8) | third;
-
-    output += alphabet[(chunk >> 18) & 63];
-    output += alphabet[(chunk >> 12) & 63];
-    output += index + 1 < bytes.length ? alphabet[(chunk >> 6) & 63] : "=";
-    output += index + 2 < bytes.length ? alphabet[chunk & 63] : "=";
-  }
-
-  return output;
-}
-
-export function buildCursorInstallLinks(connectorUrl: string): { app: string; browser: string } {
-  const encodedConfig = encodeURIComponent(encodeBase64Utf8(JSON.stringify(buildCursorMcpConfig(connectorUrl))));
-  const name = encodeURIComponent("Corgtex");
-
-  return {
-    app: `cursor://anysphere.cursor-deeplink/mcp/install?name=${name}&config=${encodedConfig}`,
-    browser: `https://cursor.com/en/install-mcp?name=${name}&config=${encodedConfig}`,
-  };
-}
-
-export function buildClaudeCodeCommand(connectorUrl: string): string {
-  return `claude mcp add --transport http corgtex --scope user ${connectorUrl}`;
-}
 
 async function writeClipboard(value: string): Promise<boolean> {
   if (typeof navigator === "undefined" || !navigator.clipboard?.writeText) {
@@ -276,12 +248,12 @@ export function CorgtexConnectorManager({ connectorUrl, workspaceName }: Props) 
     if (card.id === "claude") {
       return (
         <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+          <a className="button" href={CLAUDE_INSTALLER_PATH} target="_blank" rel="noreferrer">
+            Open guided installer ↗
+          </a>
           <button className="button secondary" type="button" onClick={() => handleCopyAndOpen(card.id, connectorUrl, CLAUDE_CONNECTORS_URL, "Claude Connectors")}>
             {card.actionLabel}
           </button>
-          <a className="button secondary" href={CLAUDE_CONNECTORS_URL} target="_blank" rel="noreferrer">
-            Open only
-          </a>
         </div>
       );
     }
@@ -301,20 +273,25 @@ export function CorgtexConnectorManager({ connectorUrl, workspaceName }: Props) 
 
     if (card.id === "claude-code") {
       return (
-        <button
-          className="button secondary"
-          type="button"
-          onClick={() =>
-            handleCopy(
-              card.id,
-              claudeCodeCommand,
-              "Copied the Claude Code command.",
-              "Your browser blocked clipboard access. Select and copy the command below.",
-            )
-          }
-        >
-          {card.actionLabel}
-        </button>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+          <a className="button" href={CLAUDE_CODE_INSTALLER_PATH} target="_blank" rel="noreferrer">
+            Open guided installer ↗
+          </a>
+          <button
+            className="button secondary"
+            type="button"
+            onClick={() =>
+              handleCopy(
+                card.id,
+                claudeCodeCommand,
+                "Copied the Claude Code command.",
+                "Your browser blocked clipboard access. Select and copy the command below.",
+              )
+            }
+          >
+            {card.actionLabel}
+          </button>
+        </div>
       );
     }
 
@@ -338,14 +315,24 @@ export function CorgtexConnectorManager({ connectorUrl, workspaceName }: Props) 
 
   return (
     <div className="stack" style={{ gap: 16 }}>
-      <div className="panel" style={{ border: "1px solid var(--line)", borderRadius: 8, padding: 16 }}>
-        <div className="row" style={{ alignItems: "center", justifyContent: "space-between", gap: 16 }}>
+      <div
+        className="panel"
+        style={{
+          border: "1px solid var(--line)",
+          borderRadius: 8,
+          padding: 20,
+          background: "var(--surface-strong, var(--surface))",
+        }}
+      >
+        <div className="row" style={{ alignItems: "flex-start", justifyContent: "space-between", gap: 16 }}>
           <div style={{ flex: 1, minWidth: 0 }}>
-            <strong className="nr-item-title">Corgtex connector</strong>
-            <div className="nr-item-meta" style={{ fontSize: "0.85rem", marginTop: 4 }}>
-              One connector for ChatGPT, Claude, Cursor, Claude Code, and other MCP clients. It can use workspace
-              Tools and saved tool credentials as your current Corgtex role allows; sensitive actions are audited.
-              {workspaceName ? ` This workspace appears during sign-in as ${workspaceName}.` : ""}
+            <strong className="nr-item-title" style={{ fontSize: "1.05rem" }}>
+              Add Corgtex to Claude
+            </strong>
+            <div className="nr-item-meta" style={{ fontSize: "0.88rem", marginTop: 6 }}>
+              The fastest path for non-technical teammates. We open Claude with the connector URL on your clipboard;
+              the user pastes it once and signs in. Works with Claude.ai (web), the desktop app, and Claude Cowork.
+              {workspaceName ? ` During sign-in this workspace appears as ${workspaceName}.` : ""}
             </div>
           </div>
           <span className="tag" style={{ background: "var(--accent-soft)", fontWeight: "bold" }}>
@@ -354,6 +341,24 @@ export function CorgtexConnectorManager({ connectorUrl, workspaceName }: Props) 
         </div>
 
         <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 16 }}>
+          <a
+            className="button"
+            href={CLAUDE_INSTALLER_PATH}
+            target="_blank"
+            rel="noreferrer"
+            style={{ fontSize: "0.95rem", padding: "8px 16px" }}
+          >
+            Open guided installer ↗
+          </a>
+          <button
+            className="button secondary"
+            type="button"
+            onClick={() =>
+              handleCopyAndOpen("claude", connectorUrl, CLAUDE_CONNECTORS_URL, "Claude Connectors")
+            }
+          >
+            Copy URL and open Claude Connectors
+          </button>
           <button
             className="button secondary"
             type="button"
@@ -366,12 +371,73 @@ export function CorgtexConnectorManager({ connectorUrl, workspaceName }: Props) 
               )
             }
           >
-            Copy connector URL
+            Copy URL only
           </button>
         </div>
+
+        {status?.cardId === "claude" || status?.cardId === "other" ? (
+          <div
+            role="status"
+            className="nr-item-meta"
+            style={{
+              background: status.tone === "success" ? "var(--accent-soft)" : "rgba(255, 165, 0, 0.12)",
+              border: `1px solid ${status.tone === "success" ? "var(--line)" : "rgba(255, 165, 0, 0.35)"}`,
+              borderRadius: 6,
+              color: "var(--text)",
+              fontSize: "0.82rem",
+              marginTop: 12,
+              padding: "8px 10px",
+            }}
+          >
+            {status.message}
+          </div>
+        ) : null}
+
+        <details style={{ marginTop: 16 }}>
+          <summary style={{ cursor: "pointer", fontSize: "0.88rem", color: "var(--text)" }}>
+            Share a link with a teammate instead
+          </summary>
+          <div className="nr-item-meta" style={{ fontSize: "0.82rem", marginTop: 8 }}>
+            Send this URL to anyone with a Corgtex login. The page walks them through three clicks — no terminal, no install:
+            <code
+              style={{
+                display: "block",
+                border: "1px solid var(--line)",
+                borderRadius: 6,
+                fontFamily: "monospace",
+                fontSize: "0.82rem",
+                marginTop: 8,
+                overflowWrap: "anywhere",
+                padding: "8px 10px",
+              }}
+            >
+              {typeof window !== "undefined"
+                ? `${window.location.origin}${CLAUDE_INSTALLER_PATH}`
+                : CLAUDE_INSTALLER_PATH}
+            </code>
+            <button
+              className="button secondary small"
+              type="button"
+              style={{ marginTop: 8 }}
+              onClick={() => {
+                const url = typeof window !== "undefined"
+                  ? `${window.location.origin}${CLAUDE_INSTALLER_PATH}`
+                  : CLAUDE_INSTALLER_PATH;
+                handleCopy("other", url, "Copied the share link.", "Clipboard blocked. Select and copy the link above.");
+              }}
+            >
+              Copy share link
+            </button>
+          </div>
+        </details>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 16 }}>
+      <details>
+        <summary style={{ cursor: "pointer", fontSize: "0.95rem", fontWeight: 600, padding: "8px 0" }}>
+          Other AI tools (ChatGPT, Cursor, Claude Code, Other)
+        </summary>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 16, marginTop: 12 }}>
         {SETUP_CARDS.map((card) => (
           <section
             key={card.id}
@@ -472,6 +538,7 @@ export function CorgtexConnectorManager({ connectorUrl, workspaceName }: Props) 
           </section>
         ))}
       </div>
+      </details>
     </div>
   );
 }

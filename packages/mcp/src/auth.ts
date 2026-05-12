@@ -26,6 +26,16 @@ function settingsUrl(workspaceId: string): string {
 }
 
 /**
+ * Public installer URL — used in OAuth scope-error messages so the user
+ * (the principal of the token, in OAuth's case) can reconnect themselves
+ * and approve the new scope, instead of waiting on a workspace admin.
+ */
+function claudeInstallerUrl(): string {
+  const origin = env.APP_URL.replace(/\/$/, "");
+  return `${origin}/install/claude`;
+}
+
+/**
  * Extract a bearer token from an Authorization header value,
  * resolve it to an AppActor, and derive the workspace scope.
  *
@@ -89,14 +99,30 @@ export async function authenticateMcpRequest(
  */
 export function requireScope(ctx: McpSessionContext, scope: string): void {
   if (ctx.scopes && !ctx.scopes.includes(scope)) {
-    const label = ctx.actor.kind === "agent" ? ctx.actor.label ?? "this credential" : "this connector";
-    const url = settingsUrl(ctx.workspaceId);
     const purpose = describeScope(scope);
+
+    // OAuth (e.g. Claude / Claude Cowork): the principal is the end user —
+    // they can self-service by disconnecting + reconnecting. Point them at the
+    // hosted installer, which walks them through reconnecting in their AI tool.
+    if (ctx.authKind === "oauth") {
+      throw new AppError(
+        403,
+        "FORBIDDEN",
+        [
+          `Missing required permission: ${scope} (${purpose}).`,
+          `Disconnect Corgtex in your AI tool, then reconnect using the guided installer at ${claudeInstallerUrl()} —`,
+          `the new permission is requested automatically and you'll be asked to approve it during sign-in.`,
+        ].join(" "),
+      );
+    }
+
+    const label = ctx.actor.kind === "agent" ? ctx.actor.label ?? "this credential" : "this credential";
+    const url = settingsUrl(ctx.workspaceId);
     throw new AppError(
       403,
       "FORBIDDEN",
       [
-        `MCP credential is missing the required scope: ${scope} (${purpose})`,
+        `MCP credential is missing the required scope: ${scope} (${purpose}).`,
         `Credential: "${label}".`,
         `An admin can grant this permission from ${url}.`,
       ].join(" "),

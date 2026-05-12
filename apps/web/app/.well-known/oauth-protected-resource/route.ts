@@ -6,10 +6,12 @@ export async function GET(request: NextRequest) {
   const origin = getPublicOrigin(request);
   return NextResponse.json({
     resource: getMcpPublicUrl(origin),
+    resource_name: "Corgtex",
+    resource_documentation: `${origin}/install`,
+    resource_policy_uri: `${origin}/install`,
     authorization_servers: [origin],
     scopes_supported: ALL_SCOPES,
     bearer_methods_supported: ["header"],
-    resource_name: "Corgtex connector",
   }, {
     headers: {
       "Cache-Control": "public, max-age=300",

@@ -45,6 +45,80 @@ function scopeDescription(scope: string) {
   return isKnownScope(scope) ? SCOPE_REGISTRY[scope].description : "Custom permission requested by this connector.";
 }
 
+function scopeGroup(scope: string): string {
+  return isKnownScope(scope) ? SCOPE_REGISTRY[scope].group : "other";
+}
+
+const SCOPE_GROUP_ORDER = [
+  "core",
+  "governance",
+  "operations",
+  "knowledge",
+  "people",
+  "finance",
+  "support",
+  "other",
+] as const;
+
+const SCOPE_GROUP_LABEL: Record<string, string> = {
+  core: "Core access",
+  governance: "Governance",
+  operations: "Operations",
+  knowledge: "Knowledge & meetings",
+  people: "People & shared tools",
+  finance: "Finance",
+  support: "Integrations & runtime",
+  other: "Other permissions",
+};
+
+function groupScopes(scopes: string[]): { group: string; label: string; scopes: string[] }[] {
+  const byGroup = new Map<string, string[]>();
+  for (const scope of scopes) {
+    const group = scopeGroup(scope);
+    const existing = byGroup.get(group) ?? [];
+    existing.push(scope);
+    byGroup.set(group, existing);
+  }
+  const ordered: { group: string; label: string; scopes: string[] }[] = [];
+  for (const group of SCOPE_GROUP_ORDER) {
+    const entries = byGroup.get(group);
+    if (entries && entries.length > 0) {
+      ordered.push({ group, label: SCOPE_GROUP_LABEL[group] ?? group, scopes: entries });
+    }
+  }
+  for (const [group, entries] of byGroup) {
+    if (!SCOPE_GROUP_ORDER.includes(group as typeof SCOPE_GROUP_ORDER[number])) {
+      ordered.push({ group, label: SCOPE_GROUP_LABEL[group] ?? group, scopes: entries });
+    }
+  }
+  return ordered;
+}
+
+function ScopeGroupList({ scopes }: { scopes: string[] }) {
+  const groups = groupScopes(scopes);
+  return (
+    <div className="space-y-4">
+      {groups.map((group) => (
+        <details key={group.group} open={group.group === "core"}>
+          <summary className="cursor-pointer text-sm font-medium text-[var(--text-strong)]">
+            {group.label} <span className="text-[var(--text-muted)]">({group.scopes.length})</span>
+          </summary>
+          <ul className="mt-3 space-y-3 pl-1">
+            {group.scopes.map((scope) => (
+              <li key={scope} className="flex flex-col items-start gap-1 text-sm">
+                <span className="rounded border border-[var(--line-subtle)] bg-[var(--surface-sunken)] px-2 py-0.5 text-xs font-medium text-[var(--text-strong)]">
+                  {scopeLabel(scope)}
+                </span>
+                <span className="text-[var(--text-muted)]">{scopeDescription(scope)}</span>
+              </li>
+            ))}
+          </ul>
+        </details>
+      ))}
+    </div>
+  );
+}
+
 export default async function OAuthAuthorizePage(props: Props) {
   const searchParams = await props.searchParams;
   const actor = await requirePageActor();
@@ -114,6 +188,11 @@ export default async function OAuthAuthorizePage(props: Props) {
               <p className="mt-1 text-sm text-[var(--text-muted)]">
                 This connects your AI client to one Corgtex workspace. It uses your current Corgtex role, including Tools access, and every sensitive action is audited.
               </p>
+              {actor.kind === "user" ? (
+                <p className="mt-3 text-xs text-[var(--text-muted)]">
+                  Signed in as <span className="font-medium text-[var(--text-strong)]">{actor.user.displayName ?? actor.user.email}</span>
+                </p>
+              ) : null}
             </div>
 
             <form action="/api/oauth/authorize" method="POST">
@@ -132,22 +211,16 @@ export default async function OAuthAuthorizePage(props: Props) {
                     ))}
                   </select>
                 </label>
+                <p className="mt-2 text-xs text-[var(--text-muted)]">
+                  The connector will only see this workspace. To switch, disconnect and reconnect.
+                </p>
               </div>
 
               <div className="border-b border-[var(--line-subtle)] px-6 py-6">
                 <h3 className="mb-4 text-sm font-medium text-[var(--text-strong)]">
                   This connector can
                 </h3>
-                <ul className="space-y-3">
-                  {effectiveScopes.map((scope) => (
-                    <li key={scope} className="flex flex-col items-start gap-1 text-sm">
-                      <span className="rounded border border-[var(--line-subtle)] bg-[var(--surface-sunken)] px-2 py-0.5 text-xs font-medium text-[var(--text-strong)]">
-                        {scopeLabel(scope)}
-                      </span>
-                      <span className="text-[var(--text-muted)]">{scopeDescription(scope)}</span>
-                    </li>
-                  ))}
-                </ul>
+                <ScopeGroupList scopes={effectiveScopes} />
               </div>
 
               <div className="bg-[var(--surface-sunken)] px-6 py-6">
@@ -213,16 +286,7 @@ export default async function OAuthAuthorizePage(props: Props) {
             <h3 className="mb-4 text-sm font-medium text-[var(--text-strong)]">
               This connection can
             </h3>
-            <ul className="space-y-3">
-              {displayScopes.map((scope) => (
-                <li key={scope} className="flex flex-col items-start gap-1 text-sm">
-                  <span className="rounded border border-[var(--line-subtle)] bg-[var(--surface-sunken)] px-2 py-0.5 text-xs font-medium text-[var(--text-strong)]">
-                    {scopeLabel(scope)}
-                  </span>
-                  <span className="text-[var(--text-muted)]">{scopeDescription(scope)}</span>
-                </li>
-              ))}
-            </ul>
+            <ScopeGroupList scopes={displayScopes} />
           </div>
 
           <div className="bg-[var(--surface-sunken)] px-6 py-6">

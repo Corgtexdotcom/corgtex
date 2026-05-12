@@ -24,6 +24,9 @@ export async function GET(request: NextRequest) {
       },
       mcp: {
         connectorUrl: getMcpPublicUrl(origin),
+        humanInstallUrl: `${origin}/install`,
+        claudeInstallUrl: `${origin}/install/claude`,
+        claudeCodeInstallUrl: `${origin}/install/claude-code`,
       },
     });
   } catch (error) {
