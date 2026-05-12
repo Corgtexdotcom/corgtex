@@ -2086,6 +2086,56 @@ describe("control plane domain", () => {
     expect(result).toMatchObject({ id: "op-1", status: "COMPLETED" });
   });
 
+  it("runs the support proposal reopen repair through the audited connector", async () => {
+    const { runCustomerSupportOperation } = await import("./control-plane");
+    prismaMock.supportOperation.create.mockResolvedValueOnce({
+      id: "op-proposals",
+      action: "proposals.reopen_resolved",
+    });
+    prismaMock.customerDeployment.findUnique.mockResolvedValue({
+      id: "inst-1",
+      label: "Acme",
+      url: "https://customer.test",
+      supportMcpUrl: "https://customer.test/api/mcp",
+      supportCredentialEnc: "encrypted-token",
+      supportConnectorStatus: "connected",
+    });
+    prismaMock.supportOperation.update.mockResolvedValueOnce({
+      id: "op-proposals",
+      status: "COMPLETED",
+    });
+
+    await runCustomerSupportOperation(operatorActor, {
+      deploymentId: "inst-1",
+      action: "proposals.reopen_resolved",
+      reason: "Undo accidental system auto-resolution.",
+      arguments: {
+        proposalIds: ["proposal-1", "proposal-2"],
+      },
+    });
+
+    expect(fetch).toHaveBeenCalledTimes(3);
+    const toolCall = vi.mocked(fetch).mock.calls[1]?.[1] as RequestInit;
+    expect(JSON.parse(String(toolCall.body))).toEqual(expect.objectContaining({
+      params: expect.objectContaining({
+        name: "support_reopen_resolved_proposals",
+        arguments: {
+          proposalIds: ["proposal-1", "proposal-2"],
+          reason: "Undo accidental system auto-resolution.",
+        },
+      }),
+    }));
+    expect(prismaMock.supportOperation.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        action: "proposals.reopen_resolved",
+        inputSummary: expect.objectContaining({
+          proposalIds: ["proposal-1", "proposal-2"],
+          reason: "Undo accidental system auto-resolution.",
+        }),
+      }),
+    }));
+  });
+
   it("refreshes cached connector snapshots without remote calls when connector setup is missing", async () => {
     const { refreshControlPlaneFleetSnapshots } = await import("./control-plane");
     prismaMock.customerDeployment.findUnique.mockResolvedValueOnce({

@@ -3,7 +3,7 @@ import { prisma } from "@corgtex/shared";
 import { Prisma, type ProposalResolutionOutcome } from "@prisma/client";
 import { defaultModelGateway } from "@corgtex/models";
 import { appendEvents } from "./events";
-import { actorUserIdForWorkspace, requireWorkspaceMembership } from "./auth";
+import { actorUserIdForWorkspace, isGlobalOperator, requireWorkspaceMembership } from "./auth";
 import { getApprovalPolicy, ensureApprovalFlow } from "./approvals";
 import { invariant } from "./errors";
 import { privacyFilter } from "./privacy";
@@ -12,6 +12,7 @@ import { requireDraftManager } from "./draft-permissions";
 
 const PROPOSAL_RESOLUTION_OUTCOMES = new Set<ProposalResolutionOutcome>(["ADOPTED", "NOT_ADOPTED", "WITHDRAWN"]);
 const AI_SUMMARY_WORD_THRESHOLD = 120;
+const SUPPORT_REOPEN_PROPOSALS_LIMIT = 25;
 
 type CreateProposalParams = {
   workspaceId: string;
@@ -34,6 +35,12 @@ type CreateProposalFromTensionParams = Omit<CreateProposalParams, "title" | "bod
 
 function normalizeIds(ids?: string[] | null) {
   return Array.from(new Set((ids ?? []).map((id) => id.trim()).filter(Boolean)));
+}
+
+function requireSupportRepairActor(actor: AppActor) {
+  if (isGlobalOperator(actor)) return;
+  if (actor.kind === "agent" && (actor.authProvider === "bootstrap" || actor.scopes?.includes("support:write"))) return;
+  invariant(false, 403, "FORBIDDEN", "Support repair requires a support-scoped actor.");
 }
 
 function markdownToProposalText(markdown: string) {
@@ -680,6 +687,159 @@ export async function returnProposalToDraft(actor: AppActor, params: {
     ]);
 
     return updated;
+  });
+}
+
+export async function supportReopenResolvedProposals(actor: AppActor, params: {
+  workspaceId: string;
+  proposalIds: string[];
+  reason: string;
+}) {
+  requireSupportRepairActor(actor);
+  await requireWorkspaceMembership({
+    actor,
+    workspaceId: params.workspaceId,
+  });
+
+  const proposalIds = normalizeIds(params.proposalIds);
+  invariant(proposalIds.length > 0, 400, "INVALID_INPUT", "At least one proposal ID is required.");
+  invariant(proposalIds.length <= SUPPORT_REOPEN_PROPOSALS_LIMIT, 400, "INVALID_INPUT", `Cannot repair more than ${SUPPORT_REOPEN_PROPOSALS_LIMIT} proposals at once.`);
+  const reason = params.reason.trim();
+  invariant(reason.length > 0, 400, "INVALID_INPUT", "Support repair reason is required.");
+
+  const policy = await getApprovalPolicy(params.workspaceId, "PROPOSAL");
+  const now = new Date();
+
+  return prisma.$transaction(async (tx) => {
+    const proposals = await tx.proposal.findMany({
+      where: {
+        id: { in: proposalIds },
+        workspaceId: params.workspaceId,
+      },
+      select: {
+        id: true,
+        workspaceId: true,
+        title: true,
+        authorUserId: true,
+        status: true,
+        resolutionOutcome: true,
+        decisionMd: true,
+        decidedAt: true,
+        publishedAt: true,
+        archivedAt: true,
+      },
+    });
+    const proposalById = new Map(proposals.map((proposal) => [proposal.id, proposal]));
+    const missingIds = proposalIds.filter((proposalId) => !proposalById.has(proposalId));
+    invariant(missingIds.length === 0, 404, "NOT_FOUND", `Proposal not found: ${missingIds.join(", ")}.`);
+
+    const reopened = [];
+    const events = [];
+
+    for (const proposalId of proposalIds) {
+      const proposal = proposalById.get(proposalId);
+      invariant(proposal, 404, "NOT_FOUND", "Proposal not found.");
+      invariant(!proposal.archivedAt, 400, "INVALID_STATE", `Archived proposal cannot be reopened: ${proposal.id}.`);
+      invariant(proposal.status === "RESOLVED", 400, "INVALID_STATE", `Only resolved proposals can be reopened: ${proposal.id}.`);
+
+      const existingFlow = await tx.approvalFlow.findUnique({
+        where: {
+          subjectType_subjectId: {
+            subjectType: "PROPOSAL",
+            subjectId: proposal.id,
+          },
+        },
+      });
+      const flow = existingFlow ?? await ensureApprovalFlow(tx, {
+        workspaceId: params.workspaceId,
+        subjectType: "PROPOSAL",
+        subjectId: proposal.id,
+        policy,
+        createdByUserId: null,
+      });
+
+      const deletedDecisions = await tx.approvalDecision.deleteMany({ where: { flowId: flow.id } });
+      const deletedObjections = await tx.objection.deleteMany({ where: { flowId: flow.id } });
+
+      await tx.approvalFlow.update({
+        where: { id: flow.id },
+        data: {
+          status: "ACTIVE",
+          openedAt: flow.openedAt ?? now,
+          closesAt: null,
+          closedAt: null,
+          resultJson: Prisma.JsonNull,
+        },
+      });
+
+      const deletedPolicyCorpus = await tx.policyCorpus.deleteMany({
+        where: { proposalId: proposal.id },
+      });
+
+      const updated = await tx.proposal.update({
+        where: { id: proposal.id },
+        data: {
+          status: "OPEN",
+          resolutionOutcome: null,
+          decisionMd: null,
+          decidedAt: null,
+          autoApproveAt: null,
+          isPrivate: false,
+          publishedAt: proposal.publishedAt ?? now,
+        },
+      });
+
+      await tx.auditLog.create({
+        data: {
+          workspaceId: params.workspaceId,
+          actorUserId: actor.kind === "user" ? actor.user.id : null,
+          action: "proposal.support_reopened_resolved",
+          entityType: "Proposal",
+          entityId: proposal.id,
+          meta: {
+            reason,
+            previousStatus: proposal.status,
+            previousResolutionOutcome: proposal.resolutionOutcome,
+            previousDecidedAt: proposal.decidedAt,
+            flowId: flow.id,
+            approvalDecisionsDeleted: deletedDecisions.count,
+            objectionsDeleted: deletedObjections.count,
+            policyCorpusRowsDeleted: deletedPolicyCorpus.count,
+          },
+        },
+      });
+
+      events.push({
+        workspaceId: params.workspaceId,
+        type: "proposal.support_reopened_resolved",
+        aggregateType: "Proposal",
+        aggregateId: proposal.id,
+        payload: {
+          proposalId: proposal.id,
+          flowId: flow.id,
+          reason,
+          approvalDecisionsDeleted: deletedDecisions.count,
+          objectionsDeleted: deletedObjections.count,
+          policyCorpusRowsDeleted: deletedPolicyCorpus.count,
+        },
+      });
+
+      reopened.push({
+        id: updated.id,
+        status: updated.status,
+        flowId: flow.id,
+        approvalDecisionsDeleted: deletedDecisions.count,
+        objectionsDeleted: deletedObjections.count,
+        policyCorpusRowsDeleted: deletedPolicyCorpus.count,
+      });
+    }
+
+    await appendEvents(tx, events);
+
+    return {
+      workspaceId: params.workspaceId,
+      reopened,
+    };
   });
 }
 

@@ -47,6 +47,20 @@ const MUTATING_SUPPORT_ACTIONS = new Set([
   "tool_links.upsert",
   "tool_links.archive",
   "documents.upload_text",
+  "proposals.create",
+  "proposals.update",
+  "proposals.submit",
+  "proposals.resolve",
+  "proposals.return_to_draft",
+  "proposals.reopen_resolved",
+  "actions.create",
+  "actions.update",
+  "actions.complete",
+  "actions.return_to_draft",
+  "tensions.create",
+  "tensions.update",
+  "tensions.return_to_draft",
+  "meetings.upload",
   "runtime.retry_failed_job",
   "runtime.discard_failed_job",
   "support.break_glass_note",
@@ -72,6 +86,26 @@ const SUPPORT_ACTION_TO_MCP_TOOL = {
   "runtime.retry_failed_job": "retry_failed_job",
   "runtime.discard_failed_job": "discard_failed_job",
   "documents.upload_text": "upload_document_text",
+  "proposals.list": "list_proposals",
+  "proposals.get": "get_proposal",
+  "proposals.create": "create_proposal",
+  "proposals.update": "update_proposal",
+  "proposals.submit": "submit_proposal",
+  "proposals.resolve": "resolve_proposal",
+  "proposals.return_to_draft": "return_proposal_to_draft",
+  "proposals.reopen_resolved": "support_reopen_resolved_proposals",
+  "actions.list": "list_actions",
+  "actions.create": "create_action",
+  "actions.update": "update_action",
+  "actions.complete": "complete_action",
+  "actions.return_to_draft": "return_action_to_draft",
+  "tensions.list": "list_tensions",
+  "tensions.create": "create_tension",
+  "tensions.update": "update_tension",
+  "tensions.return_to_draft": "return_tension_to_draft",
+  "meetings.list": "list_meetings",
+  "meetings.get": "get_meeting",
+  "meetings.upload": "upload_meeting",
 } as const;
 
 export type SupportAction = keyof typeof SUPPORT_ACTION_TO_MCP_TOOL;
@@ -3232,7 +3266,10 @@ export async function runCustomerSupportOperation(actor: AppActor, params: {
   const toolName = SUPPORT_ACTION_TO_MCP_TOOL[params.action];
   invariant(toolName, 400, "INVALID_INPUT", "Unsupported support action.");
   const reason = normalizeReason(params.reason, params.action);
-  const args = params.arguments ?? {};
+  const providedArgs = params.arguments ?? {};
+  const args = params.action === "proposals.reopen_resolved" && typeof providedArgs.reason !== "string"
+    ? { ...providedArgs, reason }
+    : providedArgs;
   const inputSummary = redactObject(args);
 
   const operation = await prisma.supportOperation.create({

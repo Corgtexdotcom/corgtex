@@ -11,6 +11,7 @@ const listWorkspaceToolLinksMock = vi.fn();
 const upsertWorkspaceToolLinkMock = vi.fn();
 const archiveWorkspaceToolLinkMock = vi.fn();
 const revealWorkspaceToolLinkCredentialMock = vi.fn();
+const supportReopenResolvedProposalsMock = vi.fn();
 
 vi.mock("@corgtex/domain", () => ({
   CONTROL_PLANE_WORKSPACE_FEATURE_FLAGS: [
@@ -19,6 +20,7 @@ vi.mock("@corgtex/domain", () => ({
   ],
   listProposals: vi.fn(),
   createProposal: vi.fn(),
+  supportReopenResolvedProposals: supportReopenResolvedProposalsMock,
   listActions: vi.fn(),
   createAction: vi.fn(),
   listTensions: vi.fn(),
@@ -106,6 +108,10 @@ describe("createCorgtexMcpServer", () => {
       credentialLabel: "Board password",
       credentialSecret: "board-pass",
     });
+    supportReopenResolvedProposalsMock.mockReset().mockResolvedValue({
+      workspaceId: "ws-1",
+      reopened: [{ id: "proposal-1", status: "OPEN", flowId: "flow-1", policyCorpusRowsDeleted: 1 }],
+    });
   });
 
   it("returns the opened spend identifier from create_spend", async () => {
@@ -189,6 +195,45 @@ describe("createCorgtexMcpServer", () => {
       destructiveHint: false,
       sensitiveHint: true,
       openWorldHint: false,
+    });
+    expect((server as any)._registeredTools.support_reopen_resolved_proposals.annotations).toMatchObject({
+      readOnlyHint: false,
+      destructiveHint: true,
+      sensitiveHint: true,
+      openWorldHint: false,
+    });
+  });
+
+  it("runs the support proposal repair tool with support and proposal scopes", async () => {
+    const { createCorgtexMcpServer } = await import("./server");
+    const { requireScope } = await import("./auth");
+
+    const server = createCorgtexMcpServer({
+      actor: { kind: "agent", authProvider: "bootstrap" } as any,
+      workspaceId: "ws-1",
+      authKind: "agent",
+    });
+
+    const repairTool = (server as any)._registeredTools.support_reopen_resolved_proposals;
+    const response = await repairTool.handler({
+      proposalIds: ["proposal-1"],
+      reason: "Undo accidental system auto-resolution.",
+    });
+
+    expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "support:write");
+    expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "proposals:write");
+    expect(supportReopenResolvedProposalsMock).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "agent" }),
+      {
+        workspaceId: "ws-1",
+        proposalIds: ["proposal-1"],
+        reason: "Undo accidental system auto-resolution.",
+      },
+    );
+    expect(JSON.parse(response.content[0].text)).toEqual({
+      workspaceId: "ws-1",
+      reopened: [{ id: "proposal-1", status: "OPEN", flowId: "flow-1", policyCorpusRowsDeleted: 1 }],
+      webUrls: ["https://app.test/workspaces/ws-1/proposals/proposal-1"],
     });
   });
 
