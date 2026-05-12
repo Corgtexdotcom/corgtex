@@ -594,6 +594,24 @@ describe("meeting recorder domain", () => {
               sensitivity: "normal",
             },
           ],
+          "@odata.nextLink": "https://graph.microsoft.com/v1.0/me/events?$skiptoken=page-2",
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          value: [
+            {
+              id: "zoom-event-next-page",
+              subject: "Zoom sync",
+              start: { dateTime: "2026-05-05T19:00:00", timeZone: "UTC" },
+              end: { dateTime: "2026-05-05T20:00:00", timeZone: "UTC" },
+              onlineMeeting: { joinUrl: "https://example.zoom.us/j/456" },
+              showAs: "busy",
+              sensitivity: "normal",
+            },
+          ],
         }),
       })
       .mockResolvedValueOnce({ ok: true, status: 200, text: async () => JSON.stringify({ id: "recall-bot-1" }) });
@@ -606,7 +624,54 @@ describe("meeting recorder domain", () => {
     })).resolves.toMatchObject({ action: "synced", teamsEvents: 1, scheduled: 1 });
 
     expect(prismaMock.meeting.upsert).toHaveBeenCalledTimes(1);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock.mock.calls[1]?.[0]).toBe("https://graph.microsoft.com/v1.0/me/events?$skiptoken=page-2");
+  });
+
+  it("requires a completed smoke run and ignores failed sync jobs before the latest successful sync", async () => {
+    const { getMeetingRecorderEnterpriseReadiness } = await import("./meeting-recorders");
+    const lastSyncAt = new Date("2026-05-05T18:00:00.000Z");
+    prismaMock.workspaceRecorderCalendarSource.findUnique.mockResolvedValue({
+      id: "source-1",
+      workspaceId: "workspace-1",
+      provider: "MICROSOFT",
+      providerAccountId: "ms-user-1",
+      providerAccountEmail: "calendar@customer.test",
+      displayName: "Customer Recorder",
+      status: "ACTIVE",
+      lastSyncAt,
+      lastSyncStartedAt: new Date("2026-05-05T17:59:00.000Z"),
+      lastSyncCompletedAt: lastSyncAt,
+      lastSyncJobId: "job-success",
+      lastSyncError: null,
+      lastDryRunAt: null,
+      lastUpcomingEventCount: 1,
+      lastSchedulableEventCount: 1,
+      createdAt: new Date("2026-05-05T17:00:00.000Z"),
+      updatedAt: lastSyncAt,
+    });
+    prismaMock.workflowJob.count.mockResolvedValue(0);
+    prismaMock.meetingRecorderSmokeRun.findFirst.mockResolvedValue({
+      id: "smoke-1",
+      workspaceId: "workspace-1",
+      status: "DRY_RUN_READY",
+      provider: "RECALL_AI",
+      createdAt: new Date("2026-05-05T18:05:00.000Z"),
+    });
+
+    const readiness = await getMeetingRecorderEnterpriseReadiness("workspace-1");
+
+    expect(prismaMock.workflowJob.count).toHaveBeenCalledWith({
+      where: {
+        workspaceId: "workspace-1",
+        type: "meeting-recorders.calendar.sync",
+        status: "FAILED",
+        updatedAt: { gt: lastSyncAt },
+      },
+    });
+    expect(readiness.checks.find((check) => check.key === "worker_sync")?.ok).toBe(true);
+    expect(readiness.checks.find((check) => check.key === "last_smoke")?.ok).toBe(false);
+    expect(readiness.ready).toBe(false);
   });
 
   it("reuses an active recording when concurrent scheduling hits the database dedupe key", async () => {

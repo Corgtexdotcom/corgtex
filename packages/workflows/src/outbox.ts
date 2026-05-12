@@ -435,11 +435,14 @@ async function handleJob(job: ClaimedJob) {
   if (job.type === "meeting-recorders.calendar.sync") {
     const sourceId = (payload as { sourceId?: string }).sourceId;
     if (sourceId) {
-      await syncRecorderCalendarSource({
+      const result = await syncRecorderCalendarSource({
         workspaceId: job.workspaceId,
         sourceId,
         workflowJobId: job.id,
       });
+      if (result.action === "skipped" && result.reason === "source_unavailable") {
+        return;
+      }
       const runAfter = new Date(Date.now() + MEETING_RECORDER_RECONCILE_INTERVAL_MS);
       await prisma.workflowJob.upsert({
         where: {

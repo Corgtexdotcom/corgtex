@@ -837,17 +837,31 @@ async function fetchRecorderCalendarSourceEvents(sourceId: string, timeMin: Date
     $orderBy: "start/dateTime",
     $top: "100",
   });
-  const response = await fetch(`https://graph.microsoft.com/v1.0/me/events?${query}`, {
-    headers: {
-      Authorization: `Bearer ${source.accessToken}`,
-      Prefer: 'outlook.timezone="UTC"',
-    },
-  });
-  const data = await response.json().catch(() => ({})) as { value?: unknown; error?: { message?: unknown } };
-  if (!response.ok) {
-    throw new AppError(502, "MICROSOFT_GRAPH_FAILED", String(data.error?.message ?? "Microsoft Graph calendar request failed."));
+  const items: unknown[] = [];
+  const seenUrls = new Set<string>();
+  let url: string | null = `https://graph.microsoft.com/v1.0/me/events?${query}`;
+  while (url) {
+    if (seenUrls.has(url)) {
+      throw new AppError(502, "MICROSOFT_GRAPH_PAGINATION_LOOP", "Microsoft Graph calendar pagination returned a repeated page URL.");
+    }
+    seenUrls.add(url);
+    const response = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${source.accessToken}`,
+        Prefer: 'outlook.timezone="UTC"',
+      },
+    });
+    const data = await response.json().catch(() => ({})) as unknown;
+    const record = isRecord(data) ? data : {};
+    if (!response.ok) {
+      const error = firstRecord(record.error);
+      throw new AppError(502, "MICROSOFT_GRAPH_FAILED", String(error?.message ?? "Microsoft Graph calendar request failed."));
+    }
+    if (Array.isArray(record.value)) {
+      items.push(...record.value);
+    }
+    url = readString(record["@odata.nextLink"]) ?? null;
   }
-  const items: unknown[] = Array.isArray(data.value) ? data.value : [];
   return items
     .filter((item): item is Record<string, unknown> => isRecord(item))
     .map(microsoftGraphEventToRecorderEvent)
@@ -1228,22 +1242,25 @@ function providerRuntimeChecks(config: {
 }
 
 export async function getMeetingRecorderEnterpriseReadiness(workspaceId: string) {
-  const [featureEnabled, config, calendarSource, failedSyncJobs, lastSmokeRun] = await Promise.all([
+  const [featureEnabled, config, calendarSource, lastSmokeRun] = await Promise.all([
     isRecorderFeatureEnabled(workspaceId),
     getEffectiveRecorderConfig(workspaceId),
     getRecorderCalendarSource(workspaceId),
-    prisma.workflowJob.count({
-      where: {
-        workspaceId,
-        type: "meeting-recorders.calendar.sync",
-        status: "FAILED",
-      },
-    }),
     prisma.meetingRecorderSmokeRun.findFirst({
       where: { workspaceId },
       orderBy: { createdAt: "desc" },
     }),
   ]);
+  const failedSyncJobs = calendarSource
+    ? await prisma.workflowJob.count({
+      where: {
+        workspaceId,
+        type: "meeting-recorders.calendar.sync",
+        status: "FAILED",
+        ...(calendarSource.lastSyncAt ? { updatedAt: { gt: calendarSource.lastSyncAt } } : {}),
+      },
+    })
+    : 0;
   const checks: RecorderReadinessCheck[] = [
     {
       key: "entitlement",
@@ -1275,7 +1292,7 @@ export async function getMeetingRecorderEnterpriseReadiness(workspaceId: string)
     {
       key: "last_smoke",
       label: "Latest smoke run",
-      ok: lastSmokeRun?.status === "COMPLETED" || lastSmokeRun?.status === "SCHEDULED" || lastSmokeRun?.status === "DRY_RUN_READY",
+      ok: lastSmokeRun?.status === "COMPLETED",
       detail: lastSmokeRun ? `${lastSmokeRun.status} at ${lastSmokeRun.createdAt.toISOString()}.` : "No recorder smoke run recorded yet.",
     },
   ];

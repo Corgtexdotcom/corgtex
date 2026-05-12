@@ -237,6 +237,34 @@ describe("runPendingJobs", () => {
     });
   });
 
+  it("does not schedule recurring recorder calendar sync jobs for unavailable sources", async () => {
+    syncRecorderCalendarSourceMock.mockResolvedValueOnce({ action: "skipped", reason: "source_unavailable" });
+    txMock.$queryRaw.mockResolvedValue([
+      {
+        id: "job-1",
+        workspaceId: "ws-1",
+        type: "meeting-recorders.calendar.sync",
+        payload: { sourceId: "source-disabled" },
+        attempts: 1,
+      },
+    ]);
+
+    await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
+
+    expect(syncRecorderCalendarSourceMock).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      sourceId: "source-disabled",
+      workflowJobId: "job-1",
+    });
+    expect(prismaMock.workflowJob.upsert).not.toHaveBeenCalled();
+    expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({
+      where: { id: "job-1" },
+      data: expect.objectContaining({
+        status: "COMPLETED",
+      }),
+    });
+  });
+
   it("dispatches control-plane fleet snapshot jobs without a workspace id", async () => {
     txMock.$queryRaw.mockResolvedValue([
       {
