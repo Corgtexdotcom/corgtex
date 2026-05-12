@@ -37,6 +37,18 @@ function optionalString(value: unknown) {
   return typeof value === "string" ? value : null;
 }
 
+function parseTimezoneAwareJoinAt(value: string | null) {
+  if (!value) return null;
+  if (!/[zZ]$|[+-]\d{2}:\d{2}$/.test(value)) {
+    throw new AppError(400, "INVALID_INPUT", "joinAt must include an explicit timezone offset or Z.");
+  }
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.valueOf())) {
+    throw new AppError(400, "INVALID_INPUT", "joinAt must be a valid timestamp.");
+  }
+  return parsed;
+}
+
 async function parseJson(request: NextRequest) {
   try {
     return await request.json();
@@ -119,7 +131,7 @@ export async function POST(
       deploymentId,
       operation: requiredString(body.operation, "operation") as "enqueue_calendar_sync" | "dry_run_scan" | "live_smoke" | "enable_auto_recording_after_smoke",
       meetingUrl: optionalString(body.meetingUrl),
-      joinAt: joinAt ? new Date(joinAt) : null,
+      joinAt: parseTimezoneAwareJoinAt(joinAt),
       provider: optionalString(body.provider),
       reason: optionalString(body.reason),
     });

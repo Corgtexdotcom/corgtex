@@ -846,7 +846,7 @@ export default async function ControlPlaneCustomerPage({
                     <input name="joinAtTimezoneOffsetMinutes" type="hidden" value="0" />
                     <script
                       dangerouslySetInnerHTML={{
-                        __html: "(() => { const input = document.currentScript?.previousElementSibling; if (input instanceof HTMLInputElement) input.value = String(new Date().getTimezoneOffset()); })();",
+                        __html: "(() => { const script = document.currentScript; const form = script?.closest('form'); const joinAt = form?.querySelector('input[name=\"joinAt\"]'); const offset = form?.querySelector('input[name=\"joinAtTimezoneOffsetMinutes\"]'); if (!(joinAt instanceof HTMLInputElement) || !(offset instanceof HTMLInputElement)) return; const sync = () => { offset.value = joinAt.value ? String(new Date(joinAt.value).getTimezoneOffset()) : String(new Date().getTimezoneOffset()); }; joinAt.addEventListener('input', sync); joinAt.addEventListener('change', sync); sync(); })();",
                       }}
                     />
                     <label>

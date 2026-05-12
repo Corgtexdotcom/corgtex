@@ -364,6 +364,18 @@ function argStringArray(args: Record<string, unknown>, key: string) {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : null;
 }
 
+function parseTimezoneAwareJoinAt(value: string | null) {
+  if (!value) return { ok: true as const, date: null };
+  if (!/[zZ]$|[+-]\d{2}:\d{2}$/.test(value)) {
+    return { ok: false as const, message: "joinAt must include an explicit timezone offset or Z." };
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.valueOf())) {
+    return { ok: false as const, message: "joinAt must be a valid timestamp." };
+  }
+  return { ok: true as const, date };
+}
+
 export async function GET() {
   const unavailableResponse = requireControlPlaneDeploymentMode();
   if (unavailableResponse) {
@@ -512,11 +524,15 @@ export async function POST(request: NextRequest) {
     }
     if (name === "run_meeting_recorder_operation") {
       const joinAt = argOptionalString(args, "joinAt");
+      const parsedJoinAt = parseTimezoneAwareJoinAt(joinAt);
+      if (!parsedJoinAt.ok) {
+        return rpcError(id, -32602, parsedJoinAt.message);
+      }
       return rpcResult(id, textContent(await runControlPlaneMeetingRecorderOperation(actor, {
         deploymentId: argString(args, "deploymentId"),
         operation: argString(args, "operation") as "enqueue_calendar_sync" | "dry_run_scan" | "live_smoke" | "enable_auto_recording_after_smoke",
         meetingUrl: argOptionalString(args, "meetingUrl"),
-        joinAt: joinAt ? new Date(joinAt) : null,
+        joinAt: parsedJoinAt.date,
         provider: argOptionalString(args, "provider"),
         reason: argString(args, "reason"),
       })));
