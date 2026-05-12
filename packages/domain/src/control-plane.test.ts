@@ -574,7 +574,7 @@ describe("control plane domain", () => {
     });
 
     prismaMock.meetingRecorderSmokeRun.findFirst.mockResolvedValueOnce({ id: "smoke-1", status: "COMPLETED" });
-    prismaMock.workspaceMeetingRecorderConfig.update.mockResolvedValueOnce({ workspaceId: "ws-1", autoRecordEnabled: true });
+    prismaMock.workspaceMeetingRecorderConfig.upsert.mockResolvedValueOnce({ workspaceId: "ws-1", enabled: true, autoRecordEnabled: true });
 
     await expect(runControlPlaneMeetingRecorderOperation(operatorActor, {
       deploymentId: "inst-1",
@@ -582,7 +582,16 @@ describe("control plane domain", () => {
       reason: "Enable after smoke.",
     })).resolves.toMatchObject({
       operation: "enable_auto_recording_after_smoke",
-      config: { autoRecordEnabled: true },
+      config: { enabled: true, autoRecordEnabled: true },
+    });
+    expect(prismaMock.workspaceMeetingRecorderConfig.upsert).toHaveBeenCalledWith({
+      where: { workspaceId: "ws-1" },
+      update: { autoRecordEnabled: true },
+      create: {
+        workspaceId: "ws-1",
+        enabled: true,
+        autoRecordEnabled: true,
+      },
     });
   });
 
@@ -606,7 +615,7 @@ describe("control plane domain", () => {
       code: "INVALID_INPUT",
     });
 
-    expect(prismaMock.workspaceMeetingRecorderConfig.update).not.toHaveBeenCalled();
+    expect(prismaMock.workspaceMeetingRecorderConfig.upsert).not.toHaveBeenCalled();
   });
 
   it("lists managed customer members including inactive accounts", async () => {

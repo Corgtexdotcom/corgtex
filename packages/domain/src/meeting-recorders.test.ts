@@ -625,6 +625,7 @@ describe("meeting recorder domain", () => {
 
     expect(prismaMock.meeting.upsert).toHaveBeenCalledTimes(1);
     expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain("https://graph.microsoft.com/v1.0/me/calendarView?");
     expect(fetchMock.mock.calls[1]?.[0]).toBe("https://graph.microsoft.com/v1.0/me/events?$skiptoken=page-2");
   });
 
@@ -671,6 +672,45 @@ describe("meeting recorder domain", () => {
     });
     expect(readiness.checks.find((check) => check.key === "worker_sync")?.ok).toBe(true);
     expect(readiness.checks.find((check) => check.key === "last_smoke")?.ok).toBe(false);
+    expect(readiness.ready).toBe(false);
+  });
+
+  it("does not mark worker sync ready before a successful calendar sync completes", async () => {
+    const { getMeetingRecorderEnterpriseReadiness } = await import("./meeting-recorders");
+    prismaMock.workspaceRecorderCalendarSource.findUnique.mockResolvedValue({
+      id: "source-1",
+      workspaceId: "workspace-1",
+      provider: "MICROSOFT",
+      providerAccountId: "ms-user-1",
+      providerAccountEmail: "calendar@customer.test",
+      displayName: "Customer Recorder",
+      status: "ACTIVE",
+      lastSyncAt: null,
+      lastSyncStartedAt: null,
+      lastSyncCompletedAt: null,
+      lastSyncJobId: null,
+      lastSyncError: null,
+      lastDryRunAt: null,
+      lastUpcomingEventCount: 0,
+      lastSchedulableEventCount: 0,
+      createdAt: new Date("2026-05-05T17:00:00.000Z"),
+      updatedAt: new Date("2026-05-05T17:00:00.000Z"),
+    });
+    prismaMock.workflowJob.count.mockResolvedValue(0);
+    prismaMock.meetingRecorderSmokeRun.findFirst.mockResolvedValue({
+      id: "smoke-1",
+      workspaceId: "workspace-1",
+      status: "COMPLETED",
+      provider: "RECALL_AI",
+      createdAt: new Date("2026-05-05T18:05:00.000Z"),
+    });
+
+    const readiness = await getMeetingRecorderEnterpriseReadiness("workspace-1");
+
+    expect(readiness.checks.find((check) => check.key === "worker_sync")).toMatchObject({
+      ok: false,
+      detail: "No successful recorder calendar sync yet.",
+    });
     expect(readiness.ready).toBe(false);
   });
 

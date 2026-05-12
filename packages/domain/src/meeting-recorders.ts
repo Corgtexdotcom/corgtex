@@ -832,14 +832,14 @@ function microsoftGraphEventToRecorderEvent(item: Record<string, unknown>): Cale
 
 async function fetchRecorderCalendarSourceEvents(sourceId: string, timeMin: Date, timeMax: Date) {
   const source = await refreshRecorderCalendarSourceTokenIfNeeded(sourceId);
-  const query = new URLSearchParams({
-    $filter: `start/dateTime ge '${timeMin.toISOString()}' and end/dateTime le '${timeMax.toISOString()}'`,
-    $orderBy: "start/dateTime",
-    $top: "100",
-  });
+  const calendarViewUrl = new URL("https://graph.microsoft.com/v1.0/me/calendarView");
+  calendarViewUrl.searchParams.set("startDateTime", timeMin.toISOString());
+  calendarViewUrl.searchParams.set("endDateTime", timeMax.toISOString());
+  calendarViewUrl.searchParams.set("$orderby", "start/dateTime");
+  calendarViewUrl.searchParams.set("$top", "100");
   const items: unknown[] = [];
   const seenUrls = new Set<string>();
-  let url: string | null = `https://graph.microsoft.com/v1.0/me/events?${query}`;
+  let url: string | null = calendarViewUrl.toString();
   while (url) {
     if (seenUrls.has(url)) {
       throw new AppError(502, "MICROSOFT_GRAPH_PAGINATION_LOOP", "Microsoft Graph calendar pagination returned a repeated page URL.");
@@ -1286,8 +1286,11 @@ export async function getMeetingRecorderEnterpriseReadiness(workspaceId: string)
     {
       key: "worker_sync",
       label: "Recorder calendar sync",
-      ok: Boolean(calendarSource && !calendarSource.lastSyncError && failedSyncJobs === 0),
-      detail: calendarSource?.lastSyncError ?? (failedSyncJobs > 0 ? `${failedSyncJobs} failed recorder calendar sync job(s).` : "No failed recorder calendar sync jobs."),
+      ok: Boolean(calendarSource?.lastSyncAt && !calendarSource.lastSyncError && failedSyncJobs === 0),
+      detail: calendarSource?.lastSyncError
+        ?? (calendarSource?.lastSyncAt
+          ? (failedSyncJobs > 0 ? `${failedSyncJobs} failed recorder calendar sync job(s).` : "No failed recorder calendar sync jobs.")
+          : "No successful recorder calendar sync yet."),
     },
     {
       key: "last_smoke",

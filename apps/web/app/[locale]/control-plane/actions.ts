@@ -49,6 +49,26 @@ function asOptionalNumber(formData: FormData, key: string) {
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
+function parseDateTimeLocalWithOffset(value: string, offsetMinutesRaw: string | null) {
+  if (/[zZ]$|[+-]\d{2}:\d{2}$/.test(value)) {
+    return new Date(value);
+  }
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/);
+  const offsetMinutes = offsetMinutesRaw === null ? NaN : Number(offsetMinutesRaw);
+  if (!match || !Number.isFinite(offsetMinutes)) {
+    return new Date(value);
+  }
+  const [, year, month, day, hour, minute, second = "0"] = match;
+  return new Date(Date.UTC(
+    Number(year),
+    Number(month) - 1,
+    Number(day),
+    Number(hour),
+    Number(minute),
+    Number(second),
+  ) + offsetMinutes * 60_000);
+}
+
 function asBooleanFromCheckbox(formData: FormData, key: string) {
   const value = formData.get(key);
   return value === "on" || value === "true";
@@ -140,11 +160,12 @@ export async function runMeetingRecorderOperationAction(formData: FormData) {
   const actor = await requirePageActor();
   const deploymentId = asString(formData, "deploymentId");
   const joinAtRaw = optionalString(formData, "joinAt");
+  const joinAtTimezoneOffsetMinutes = optionalString(formData, "joinAtTimezoneOffsetMinutes");
   await runControlPlaneMeetingRecorderOperation(actor, {
     deploymentId,
     operation: asString(formData, "operation") as "enqueue_calendar_sync" | "dry_run_scan" | "live_smoke" | "enable_auto_recording_after_smoke",
     meetingUrl: optionalString(formData, "meetingUrl"),
-    joinAt: joinAtRaw ? new Date(joinAtRaw) : null,
+    joinAt: joinAtRaw ? parseDateTimeLocalWithOffset(joinAtRaw, joinAtTimezoneOffsetMinutes) : null,
     provider: optionalString(formData, "provider"),
     reason: asString(formData, "reason"),
   });

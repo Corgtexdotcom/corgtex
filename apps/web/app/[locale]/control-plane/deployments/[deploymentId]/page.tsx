@@ -843,6 +843,12 @@ export default async function ControlPlaneCustomerPage({
                       Join time
                       <input name="joinAt" type="datetime-local" />
                     </label>
+                    <input name="joinAtTimezoneOffsetMinutes" type="hidden" value="0" />
+                    <script
+                      dangerouslySetInnerHTML={{
+                        __html: "(() => { const input = document.currentScript?.previousElementSibling; if (input instanceof HTMLInputElement) input.value = String(new Date().getTimezoneOffset()); })();",
+                      }}
+                    />
                     <label>
                       Reason
                       <input name="reason" required placeholder="Enterprise live recorder smoke." />

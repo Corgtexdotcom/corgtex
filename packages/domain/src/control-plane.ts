@@ -1994,9 +1994,14 @@ export async function runControlPlaneMeetingRecorderOperation(actor: AppActor, p
     orderBy: { createdAt: "desc" },
   });
   invariant(latestSmoke, 400, "RECORDER_SMOKE_REQUIRED", "A completed recorder smoke run is required before enabling auto-recording.");
-  const config = await prisma.workspaceMeetingRecorderConfig.update({
+  const config = await prisma.workspaceMeetingRecorderConfig.upsert({
     where: { workspaceId: managedWorkspaceId },
-    data: { autoRecordEnabled: true },
+    update: { autoRecordEnabled: true },
+    create: {
+      workspaceId: managedWorkspaceId,
+      enabled: true,
+      autoRecordEnabled: true,
+    },
   });
   await recordCustomerDeploymentEvent(actor, params.deploymentId, "control_plane.integration.meeting_recorder_auto_recording_enabled", {
     reason,
