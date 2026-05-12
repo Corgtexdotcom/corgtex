@@ -20,6 +20,7 @@ vi.mock("@corgtex/shared", () => ({
       update: vi.fn(),
     },
     policyCorpus: {
+      deleteMany: vi.fn(),
       upsert: vi.fn(),
     },
     auditLog: {
@@ -51,6 +52,7 @@ vi.mock("@corgtex/shared", () => ({
 }));
 
 vi.mock("./auth", () => ({
+  isGlobalOperator: vi.fn((actor: any) => actor.kind === "user" && actor.user?.globalRole === "OPERATOR"),
   requireWorkspaceMembership: vi.fn().mockResolvedValue({
     id: "mem-1",
     workspaceId: "ws-1",
@@ -770,6 +772,108 @@ describe("submitProposal event payload", () => {
       expect.anything(),
       expect.arrayContaining([
         expect.objectContaining({ type: "proposal.returned_to_draft" }),
+      ]),
+    );
+  });
+
+  it("reopens resolved proposals through a support repair and removes adopted policy rows", async () => {
+    const { appendEvents } = await import("./events");
+    const { supportReopenResolvedProposals } = await import("./proposals");
+
+    vi.mocked((prisma.proposal as any).findMany).mockResolvedValueOnce([
+      {
+        id: "p-1",
+        workspaceId: "ws-1",
+        title: "Adopt async standup policy",
+        authorUserId: "u-1",
+        status: "RESOLVED",
+        resolutionOutcome: "ADOPTED",
+        decisionMd: "System auto-adopted this proposal.",
+        decidedAt: new Date("2026-05-01T10:00:00.000Z"),
+        publishedAt: new Date("2026-04-30T10:00:00.000Z"),
+        archivedAt: null,
+      },
+    ]);
+    vi.mocked((prisma as any).approvalFlow.findUnique).mockResolvedValueOnce({
+      id: "flow-1",
+      openedAt: new Date("2026-04-30T10:00:00.000Z"),
+    });
+    vi.mocked((prisma as any).approvalDecision.deleteMany).mockResolvedValueOnce({ count: 2 });
+    vi.mocked((prisma as any).objection.deleteMany).mockResolvedValueOnce({ count: 1 });
+    vi.mocked((prisma as any).approvalFlow.update).mockResolvedValueOnce({ id: "flow-1", status: "ACTIVE" });
+    vi.mocked((prisma as any).policyCorpus.deleteMany).mockResolvedValueOnce({ count: 1 });
+    vi.mocked((prisma.proposal as any).update).mockResolvedValueOnce({
+      id: "p-1",
+      status: "OPEN",
+    });
+
+    const actor = {
+      kind: "agent",
+      authProvider: "control-plane",
+      label: "Corgtex Support",
+      workspaceIds: ["ws-1"],
+      scopes: ["support:write", "proposals:write"],
+    } as any;
+
+    await expect(supportReopenResolvedProposals(actor, {
+      workspaceId: "ws-1",
+      proposalIds: ["p-1"],
+      reason: "Undo accidental system auto-resolution for the customer workspace.",
+    })).resolves.toEqual({
+      workspaceId: "ws-1",
+      reopened: [
+        {
+          id: "p-1",
+          status: "OPEN",
+          flowId: "flow-1",
+          approvalDecisionsDeleted: 2,
+          objectionsDeleted: 1,
+          policyCorpusRowsDeleted: 1,
+        },
+      ],
+    });
+
+    expect((prisma as any).approvalDecision.deleteMany).toHaveBeenCalledWith({ where: { flowId: "flow-1" } });
+    expect((prisma as any).objection.deleteMany).toHaveBeenCalledWith({ where: { flowId: "flow-1" } });
+    expect((prisma as any).approvalFlow.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "flow-1" },
+      data: expect.objectContaining({
+        status: "ACTIVE",
+        closesAt: null,
+        closedAt: null,
+      }),
+    }));
+    expect((prisma as any).policyCorpus.deleteMany).toHaveBeenCalledWith({
+      where: { proposalId: "p-1" },
+    });
+    expect((prisma.proposal as any).update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "p-1" },
+      data: expect.objectContaining({
+        status: "OPEN",
+        resolutionOutcome: null,
+        decisionMd: null,
+        decidedAt: null,
+        autoApproveAt: null,
+        isPrivate: false,
+      }),
+    }));
+    expect((prisma as any).auditLog.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        action: "proposal.support_reopened_resolved",
+        entityId: "p-1",
+        meta: expect.objectContaining({
+          reason: "Undo accidental system auto-resolution for the customer workspace.",
+          previousResolutionOutcome: "ADOPTED",
+          approvalDecisionsDeleted: 2,
+          objectionsDeleted: 1,
+          policyCorpusRowsDeleted: 1,
+        }),
+      }),
+    }));
+    expect(appendEvents).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.arrayContaining([
+        expect.objectContaining({ type: "proposal.support_reopened_resolved" }),
       ]),
     );
   });

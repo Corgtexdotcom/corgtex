@@ -24,6 +24,7 @@ import {
   submitProposal,
   publishProposal,
   returnProposalToDraft,
+  supportReopenResolvedProposals,
   listActions,
   createAction,
   updateAction,
@@ -186,6 +187,7 @@ const TOOL_CAPABILITIES = {
   archive_proposal: { scopes: ["proposals:write"], destructive: true },
   publish_proposal: { scopes: ["proposals:write"] },
   return_proposal_to_draft: { scopes: ["proposals:write"] },
+  support_reopen_resolved_proposals: { scopes: ["support:write", "proposals:write"], destructive: true, sensitive: true },
   list_actions: { scopes: ["actions:read"] },
   create_action: { scopes: ["actions:write"] },
   update_action: { scopes: ["actions:write"] },
@@ -272,6 +274,7 @@ function annotationsForTool(name: string) {
 const PROPOSAL_STATUS = ["DRAFT", "OPEN", "RESOLVED"] as const;
 const ACTION_STATUS = ["DRAFT", "OPEN", "IN_PROGRESS", "COMPLETED"] as const;
 const TENSION_STATUS = ["DRAFT", "OPEN", "RESOLVED"] as const;
+const ARCHIVE_FILTER = ["active", "archived", "all"] as const;
 const GOAL_CADENCE = ["WEEKLY", "MONTHLY", "QUARTERLY", "ANNUAL", "FIVE_YEAR", "TEN_YEAR"] as const;
 const GOAL_STATUS = ["DRAFT", "ACTIVE", "ON_TRACK", "AT_RISK", "BEHIND", "COMPLETED", "ABANDONED"] as const;
 const GOAL_LEVEL = ["COMPANY", "CIRCLE", "PERSONAL"] as const;
@@ -844,14 +847,18 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     {
       take: z.number().optional().describe("Number of proposals to return (default 20)"),
       skip: z.number().optional().describe("Number of proposals to skip for pagination"),
+      archiveFilter: z.enum(ARCHIVE_FILTER).optional().describe("active, archived, or all"),
     },
-    async ({ take, skip }: { take?: number; skip?: number }) => {
+    async ({ take, skip, archiveFilter }: { take?: number; skip?: number; archiveFilter?: typeof ARCHIVE_FILTER[number] }) => {
       requireScope(sessionCtx, "proposals:read");
-      const result = await listProposals(actor, workspaceId, { take, skip });
+      const result = await listProposals(actor, workspaceId, { take, skip, archiveFilter });
       const simplified = result.items.map((p) => ({
         id: p.id,
         title: p.title,
         status: p.status,
+        resolutionOutcome: p.resolutionOutcome,
+        decidedAt: p.decidedAt,
+        archivedAt: p.archivedAt,
         summary: p.summary,
         author: p.author?.displayName ?? p.author?.email ?? "Unknown",
         createdAt: p.createdAt,
@@ -1021,6 +1028,28 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
   );
 
+  tool(
+    "support_reopen_resolved_proposals",
+    "Support-only repair: reopen RESOLVED proposals, clear resolution fields, reactivate approval flows, remove adopted policy corpus rows, and record an audit note.",
+    {
+      proposalIds: z.array(z.string()).min(1).max(25),
+      reason: z.string(),
+    },
+    async ({ proposalIds, reason }: { proposalIds: string[]; reason: string }) => {
+      requireScope(sessionCtx, "support:write");
+      requireScope(sessionCtx, "proposals:write");
+      const result = await supportReopenResolvedProposals(actor, {
+        workspaceId,
+        proposalIds,
+        reason,
+      });
+      return jsonResult({
+        ...result,
+        webUrls: result.reopened.map((proposal) => webUrl(workspaceId, `/proposals/${proposal.id}`)),
+      });
+    },
+  );
+
   // ===========================================================================
   // ACTIONS
   // ===========================================================================
@@ -1031,10 +1060,11 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     {
       take: z.number().optional(),
       skip: z.number().optional(),
+      archiveFilter: z.enum(ARCHIVE_FILTER).optional(),
     },
-    async ({ take, skip }: { take?: number; skip?: number }) => {
+    async ({ take, skip, archiveFilter }: { take?: number; skip?: number; archiveFilter?: typeof ARCHIVE_FILTER[number] }) => {
       requireScope(sessionCtx, "actions:read");
-      const result = await listActions(actor, workspaceId, { take, skip });
+      const result = await listActions(actor, workspaceId, { take, skip, archiveFilter });
       const simplified = result.items.map((a) => ({
         id: a.id,
         title: a.title,
@@ -1042,6 +1072,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         author: a.author?.displayName ?? a.author?.email ?? "Unknown",
         assignee: a.assigneeMember?.user?.displayName ?? a.assigneeMember?.user?.email ?? null,
         dueAt: (a as Record<string, unknown>).dueAt ?? null,
+        archivedAt: a.archivedAt,
         createdAt: a.createdAt,
       }));
       return jsonResult({ items: simplified, total: result.total });
@@ -1163,10 +1194,11 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     {
       take: z.number().optional(),
       skip: z.number().optional(),
+      archiveFilter: z.enum(ARCHIVE_FILTER).optional(),
     },
-    async ({ take, skip }: { take?: number; skip?: number }) => {
+    async ({ take, skip, archiveFilter }: { take?: number; skip?: number; archiveFilter?: typeof ARCHIVE_FILTER[number] }) => {
       requireScope(sessionCtx, "tensions:read");
-      const result = await listTensions(actor, workspaceId, { take, skip });
+      const result = await listTensions(actor, workspaceId, { take, skip, archiveFilter });
       const simplified = result.items.map((t) => ({
         id: t.id,
         title: t.title,
@@ -1174,6 +1206,8 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         author: t.author?.displayName ?? t.author?.email ?? "Unknown",
         assignee: t.assigneeMember?.user?.displayName ?? t.assigneeMember?.user?.email ?? null,
         raisedBy: t.raisedByMember?.user?.displayName ?? t.raisedByMember?.user?.email ?? null,
+        resolvedVia: t.resolvedVia,
+        archivedAt: t.archivedAt,
         createdAt: t.createdAt,
       }));
       return jsonResult({ items: simplified, total: result.total });
@@ -1695,10 +1729,12 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
   tool(
     "list_meetings",
     "List meetings in the workspace with their summaries.",
-    {},
-    async () => {
+    {
+      archiveFilter: z.enum(ARCHIVE_FILTER).optional(),
+    },
+    async ({ archiveFilter }: { archiveFilter?: typeof ARCHIVE_FILTER[number] }) => {
       requireScope(sessionCtx, "meetings:read");
-      const meetings = await listMeetings(workspaceId);
+      const meetings = await listMeetings(workspaceId, { archiveFilter });
       const simplified = meetings.map((m) => ({
         id: m.id,
         title: m.title,
@@ -1706,6 +1742,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         recordedAt: m.recordedAt,
         hasSummary: Boolean(m.summaryMd),
         summaryPreview: m.summaryMd?.slice(0, 200) ?? null,
+        archivedAt: m.archivedAt,
       }));
       return jsonResult(simplified);
     },

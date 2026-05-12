@@ -63,7 +63,42 @@ const SUPPORT_ACTIONS = [
   ["runtime.retry_failed_job", "runtimeRetryFailedJob", "runtimeRetryFailedJob"],
   ["runtime.discard_failed_job", "runtimeDiscardFailedJob", "runtimeDiscardFailedJob"],
   ["documents.upload_text", "documentsUploadText", "documentsUploadText"],
+  ["proposals.list", "proposalsList", "proposalsList"],
+  ["proposals.get", "proposalsGet", "proposalsGet"],
+  ["proposals.create", "proposalsCreate", "proposalsCreate"],
+  ["proposals.update", "proposalsUpdate", "proposalsUpdate"],
+  ["proposals.submit", "proposalsSubmit", "proposalsSubmit"],
+  ["proposals.resolve", "proposalsResolve", "proposalsResolve"],
+  ["proposals.return_to_draft", "proposalsReturnToDraft", "proposalsReturnToDraft"],
+  ["proposals.reopen_resolved", "proposalsReopenResolved", "proposalsReopenResolved"],
+  ["actions.list", "actionsList", "actionsList"],
+  ["actions.create", "actionsCreate", "actionsCreate"],
+  ["actions.update", "actionsUpdate", "actionsUpdate"],
+  ["actions.complete", "actionsComplete", "actionsComplete"],
+  ["actions.return_to_draft", "actionsReturnToDraft", "actionsReturnToDraft"],
+  ["tensions.list", "tensionsList", "tensionsList"],
+  ["tensions.create", "tensionsCreate", "tensionsCreate"],
+  ["tensions.update", "tensionsUpdate", "tensionsUpdate"],
+  ["tensions.return_to_draft", "tensionsReturnToDraft", "tensionsReturnToDraft"],
+  ["meetings.list", "meetingsList", "meetingsList"],
+  ["meetings.get", "meetingsGet", "meetingsGet"],
+  ["meetings.upload", "meetingsUpload", "meetingsUpload"],
 ] as const;
+
+const READ_ONLY_SUPPORT_ACTIONS = new Set([
+  "members.list",
+  "integrations.list",
+  "data_feeds.list",
+  "tool_links.list",
+  "agents.list_runs",
+  "runtime.list_failed_jobs",
+  "proposals.list",
+  "proposals.get",
+  "actions.list",
+  "tensions.list",
+  "meetings.list",
+  "meetings.get",
+]);
 
 type ControlPlaneT = Awaited<ReturnType<typeof getTranslations>>;
 
@@ -246,7 +281,7 @@ export default async function ControlPlaneCustomerPage({
   const checks = readinessChecks(customer, t);
   const readinessStatus = checks.every((check) => check.status === "ready") ? "ready" : "attention";
   const failedOperations = customer.supportOperations.filter((operation) => operation.status === "FAILED").length;
-  const mutatingOperations = customer.supportOperations.filter((operation) => operation.action !== "members.list" && operation.action !== "integrations.list").length;
+  const mutatingOperations = customer.supportOperations.filter((operation) => !READ_ONLY_SUPPORT_ACTIONS.has(operation.action)).length;
   const aiSummary = aiGovernance.summary;
   const releasePrep = releases.recentPreparations[0];
   const mcpUrl = customer.supportMcpUrl || `${customer.url.replace(/\/$/, "")}/api/mcp`;
