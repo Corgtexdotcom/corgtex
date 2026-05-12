@@ -380,6 +380,7 @@ describe("control plane domain", () => {
       status: "ENABLED",
     });
     prismaMock.workflowJob.upsert.mockResolvedValueOnce({ id: "job-1" });
+    prismaMock.meetingRecorderSmokeRun.findFirst.mockResolvedValueOnce({ id: "smoke-1", status: "COMPLETED" });
 
     const result = await configureControlPlaneMeetingRecorderIntegration(operatorActor, {
       deploymentId: "inst-1",
@@ -433,6 +434,7 @@ describe("control plane domain", () => {
         meta: expect.objectContaining({
           reason: "Customer signed recorder addendum.",
           monthlyMinuteCap: 1200,
+          smokeRunId: "smoke-1",
         }),
       }),
     }));
@@ -444,6 +446,40 @@ describe("control plane domain", () => {
         status: "ENABLED",
       },
     });
+  });
+
+  it("requires completed smoke before active meeting recorder auto-recording can be configured", async () => {
+    const { configureControlPlaneMeetingRecorderIntegration } = await import("./control-plane");
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce({
+      id: "inst-1",
+      label: "Acme",
+      customerAccountId: "cust-1",
+      managedWorkspaceId: "ws-1",
+      supportCredentialEnc: null,
+      managedWorkspace: {
+        id: "ws-1",
+        slug: "acme",
+        name: "Acme",
+        _count: {},
+      },
+    });
+    prismaMock.meetingRecorderSmokeRun.findFirst.mockResolvedValueOnce(null);
+
+    await expect(configureControlPlaneMeetingRecorderIntegration(operatorActor, {
+      deploymentId: "inst-1",
+      entitlementEnabled: true,
+      enabled: true,
+      defaultProvider: "RECALL_AI",
+      fallbackProvider: "MEETING_BAAS",
+      autoRecordEnabled: true,
+      monthlyMinuteCap: 1200,
+      reason: "Enable recorder rollout.",
+    })).rejects.toMatchObject({
+      status: 400,
+      code: "RECORDER_SMOKE_REQUIRED",
+    });
+
+    expect(prismaMock.workspaceMeetingRecorderConfig.upsert).not.toHaveBeenCalled();
   });
 
   it("requires a reason and managed workspace before configuring meeting recorders", async () => {

@@ -687,8 +687,8 @@ describe("meeting recorder domain", () => {
             {
               id: "teams-event",
               subject: "Client sync",
-              start: { dateTime: "2026-05-05T17:00:00", timeZone: "UTC" },
-              end: { dateTime: "2026-05-05T18:00:00", timeZone: "UTC" },
+              start: { dateTime: "2026-05-05T10:00:00", timeZone: "Pacific Standard Time" },
+              end: { dateTime: "2026-05-05T11:00:00", timeZone: "Pacific Standard Time" },
               onlineMeeting: { joinUrl: "https://teams.microsoft.com/l/meetup-join/abc" },
               showAs: "busy",
               sensitivity: "normal",
@@ -733,6 +733,12 @@ describe("meeting recorder domain", () => {
     })).resolves.toMatchObject({ action: "synced", teamsEvents: 1, scheduled: 1 });
 
     expect(prismaMock.meeting.upsert).toHaveBeenCalledTimes(1);
+    expect(prismaMock.meeting.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({
+        recordedAt: new Date("2026-05-05T17:00:00.000Z"),
+        scheduledEndAt: new Date("2026-05-05T18:00:00.000Z"),
+      }),
+    }));
     expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(String(fetchMock.mock.calls[0]?.[0])).toContain("https://graph.microsoft.com/v1.0/me/calendarView?");
     expect(fetchMock.mock.calls[1]?.[0]).toBe("https://graph.microsoft.com/v1.0/me/events?$skiptoken=page-2");

@@ -1710,6 +1710,9 @@ export async function configureControlPlaneMeetingRecorderIntegration(actor: App
   const enabled = params.entitlementEnabled ? params.enabled : false;
   const botName = params.botName?.trim() || DEFAULT_RECORDER_BOT_NAME;
   const entryMessage = params.entryMessage?.trim() || DEFAULT_RECORDER_ENTRY_MESSAGE;
+  const latestCompletedSmoke = enabled && params.autoRecordEnabled
+    ? await requireCompletedMeetingRecorderSmoke(managedWorkspaceId)
+    : null;
 
   const { featureFlag, config, entitlement } = await prisma.$transaction(async (tx) => {
     const featureFlag = await tx.workspaceFeatureFlag.upsert({
@@ -1824,6 +1827,7 @@ export async function configureControlPlaneMeetingRecorderIntegration(actor: App
           fallbackProvider: config.fallbackProvider,
           autoRecordEnabled: config.autoRecordEnabled,
           monthlyMinuteCap: config.monthlyMinuteCap,
+          smokeRunId: latestCompletedSmoke?.id,
         }) as Prisma.InputJsonObject,
       },
     });
@@ -1838,6 +1842,18 @@ export async function configureControlPlaneMeetingRecorderIntegration(actor: App
     entitlement,
     config,
   };
+}
+
+async function requireCompletedMeetingRecorderSmoke(workspaceId: string) {
+  const latestSmoke = await prisma.meetingRecorderSmokeRun.findFirst({
+    where: {
+      workspaceId,
+      status: "COMPLETED",
+    },
+    orderBy: { createdAt: "desc" },
+  });
+  invariant(latestSmoke, 400, "RECORDER_SMOKE_REQUIRED", "A completed recorder smoke run is required before enabling auto-recording.");
+  return latestSmoke;
 }
 
 export async function saveControlPlaneRecorderCalendarSource(actor: AppActor, params: {
@@ -1986,14 +2002,7 @@ export async function runControlPlaneMeetingRecorderOperation(actor: AppActor, p
     throw new AppError(400, "INVALID_INPUT", "Unsupported meeting recorder operation.");
   }
 
-  const latestSmoke = await prisma.meetingRecorderSmokeRun.findFirst({
-    where: {
-      workspaceId: managedWorkspaceId,
-      status: "COMPLETED",
-    },
-    orderBy: { createdAt: "desc" },
-  });
-  invariant(latestSmoke, 400, "RECORDER_SMOKE_REQUIRED", "A completed recorder smoke run is required before enabling auto-recording.");
+  const latestSmoke = await requireCompletedMeetingRecorderSmoke(managedWorkspaceId);
   const config = await prisma.workspaceMeetingRecorderConfig.upsert({
     where: { workspaceId: managedWorkspaceId },
     update: { autoRecordEnabled: true },
