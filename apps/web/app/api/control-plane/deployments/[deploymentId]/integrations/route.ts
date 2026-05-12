@@ -1,6 +1,11 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
-import { AppError, configureControlPlaneMeetingRecorderIntegration, getControlPlaneIntegrationStatus } from "@corgtex/domain";
+import {
+  AppError,
+  configureControlPlaneMeetingRecorderIntegration,
+  getControlPlaneIntegrationStatus,
+  runControlPlaneMeetingRecorderOperation,
+} from "@corgtex/domain";
 import { resolveControlPlaneRequestActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
 import { requireControlPlaneDeploymentMode } from "@/lib/control-plane-guard";
@@ -88,6 +93,37 @@ export async function PATCH(
       reason: optionalString(body.reason),
     });
     return NextResponse.json({ integration: result });
+  } catch (error) {
+    return handleRouteError(error);
+  }
+}
+
+export async function POST(
+  request: NextRequest,
+  props: { params: Promise<{ deploymentId: string }> },
+) {
+  const unavailableResponse = requireControlPlaneDeploymentMode();
+  if (unavailableResponse) {
+    return unavailableResponse;
+  }
+
+  try {
+    const actor = await resolveControlPlaneRequestActor(request);
+    const { deploymentId } = await props.params;
+    const body = await parseJson(request);
+    if (body?.integrationKey !== "meeting_recorders") {
+      throw new AppError(400, "INVALID_INPUT", "Only meeting recorder integration operations are supported.");
+    }
+    const joinAt = optionalString(body.joinAt);
+    const result = await runControlPlaneMeetingRecorderOperation(actor, {
+      deploymentId,
+      operation: requiredString(body.operation, "operation") as "enqueue_calendar_sync" | "dry_run_scan" | "live_smoke" | "enable_auto_recording_after_smoke",
+      meetingUrl: optionalString(body.meetingUrl),
+      joinAt: joinAt ? new Date(joinAt) : null,
+      provider: optionalString(body.provider),
+      reason: optionalString(body.reason),
+    });
+    return NextResponse.json({ operation: result });
   } catch (error) {
     return handleRouteError(error);
   }

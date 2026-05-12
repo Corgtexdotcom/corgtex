@@ -86,6 +86,7 @@ describe("/api/control-plane/mcp", () => {
       "list_customer_feature_flags",
       "set_customer_feature_flag",
       "configure_customer_integration",
+      "run_meeting_recorder_operation",
       "run_context_sync",
       "probe_customer_deployment_health",
       "refresh_fleet_snapshots",

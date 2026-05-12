@@ -11,6 +11,7 @@ import {
   recordBreakGlassSupportNote,
   resendControlPlaneCustomerMemberAccessLink,
   runControlPlaneContextOperation,
+  runControlPlaneMeetingRecorderOperation,
   runControlPlaneReleaseOperation,
   runCustomerSupportOperation,
   setControlPlaneFeatureFlag,
@@ -130,6 +131,21 @@ export async function configureMeetingRecorderIntegrationAction(formData: FormDa
     monthlyMinuteCap: asOptionalNumber(formData, "monthlyMinuteCap") ?? 6_000,
     botName: optionalString(formData, "botName"),
     entryMessage: optionalString(formData, "entryMessage"),
+    reason: asString(formData, "reason"),
+  });
+  revalidateControlPlaneDeployment(deploymentId);
+}
+
+export async function runMeetingRecorderOperationAction(formData: FormData) {
+  const actor = await requirePageActor();
+  const deploymentId = asString(formData, "deploymentId");
+  const joinAtRaw = optionalString(formData, "joinAt");
+  await runControlPlaneMeetingRecorderOperation(actor, {
+    deploymentId,
+    operation: asString(formData, "operation") as "enqueue_calendar_sync" | "dry_run_scan" | "live_smoke" | "enable_auto_recording_after_smoke",
+    meetingUrl: optionalString(formData, "meetingUrl"),
+    joinAt: joinAtRaw ? new Date(joinAtRaw) : null,
+    provider: optionalString(formData, "provider"),
     reason: asString(formData, "reason"),
   });
   revalidateControlPlaneDeployment(deploymentId);

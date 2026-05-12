@@ -16,6 +16,7 @@ const {
   runMeetingAgendaThreadEditMock,
   runControlPlaneFleetSnapshotJobMock,
   runControlPlaneReleaseDeployJobMock,
+  syncRecorderCalendarSourceMock,
   isAgentEnabledMock,
   getWorkspaceNewspaperCadenceMock,
 } = vi.hoisted(() => ({
@@ -23,6 +24,7 @@ const {
     $transaction: vi.fn(),
     workflowJob: {
       update: vi.fn(),
+      upsert: vi.fn(),
     },
     workspace: {
       findMany: vi.fn(),
@@ -62,6 +64,7 @@ const {
   runMeetingAgendaThreadEditMock: vi.fn(),
   runControlPlaneFleetSnapshotJobMock: vi.fn(),
   runControlPlaneReleaseDeployJobMock: vi.fn(),
+  syncRecorderCalendarSourceMock: vi.fn(),
   isAgentEnabledMock: vi.fn(),
   getWorkspaceNewspaperCadenceMock: vi.fn(),
 }));
@@ -103,6 +106,7 @@ vi.mock("@corgtex/domain", () => ({
   runControlPlaneFleetSnapshotJob: runControlPlaneFleetSnapshotJobMock,
   CONTROL_PLANE_RELEASE_DEPLOY_JOB_TYPE: "control-plane.release.deploy-latest",
   runControlPlaneReleaseDeployJob: runControlPlaneReleaseDeployJobMock,
+  syncRecorderCalendarSource: syncRecorderCalendarSourceMock,
   isAgentEnabled: isAgentEnabledMock,
   getWorkspaceNewspaperCadence: getWorkspaceNewspaperCadenceMock,
 }));
@@ -118,6 +122,7 @@ describe("runPendingJobs", () => {
   beforeEach(() => {
     prismaMock.$transaction.mockReset().mockImplementation(async (callback: (tx: typeof txMock) => Promise<unknown>) => callback(txMock));
     prismaMock.workflowJob.update.mockReset().mockResolvedValue({ id: "job-1" });
+    prismaMock.workflowJob.upsert.mockReset().mockResolvedValue({ id: "job-next" });
     prismaMock.workspace.findMany.mockReset().mockResolvedValue([]);
     prismaMock.member.findMany.mockReset().mockResolvedValue([]);
     prismaMock.externalDataSource.findMany.mockReset().mockResolvedValue([]);
@@ -137,6 +142,7 @@ describe("runPendingJobs", () => {
     runMeetingAgendaThreadEditMock.mockReset();
     runControlPlaneFleetSnapshotJobMock.mockReset().mockResolvedValue({ refreshed: true });
     runControlPlaneReleaseDeployJobMock.mockReset().mockResolvedValue({ status: "deployed" });
+    syncRecorderCalendarSourceMock.mockReset().mockResolvedValue({ action: "synced" });
     isAgentEnabledMock.mockReset().mockResolvedValue(false);
     getWorkspaceNewspaperCadenceMock.mockReset().mockResolvedValue("DAILY");
   });
@@ -190,6 +196,39 @@ describe("runPendingJobs", () => {
     await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
 
     expect(processSlackInboundEventMock).toHaveBeenCalledWith("inbound-1");
+    expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({
+      where: { id: "job-1" },
+      data: expect.objectContaining({
+        status: "COMPLETED",
+      }),
+    });
+  });
+
+  it("dispatches recorder calendar sync jobs and schedules the recurring follow-up", async () => {
+    txMock.$queryRaw.mockResolvedValue([
+      {
+        id: "job-1",
+        workspaceId: "ws-1",
+        type: "meeting-recorders.calendar.sync",
+        payload: { sourceId: "source-1" },
+        attempts: 1,
+      },
+    ]);
+
+    await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
+
+    expect(syncRecorderCalendarSourceMock).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      sourceId: "source-1",
+      workflowJobId: "job-1",
+    });
+    expect(prismaMock.workflowJob.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({
+        workspaceId: "ws-1",
+        type: "meeting-recorders.calendar.sync",
+        payload: { sourceId: "source-1", reason: "recurring" },
+      }),
+    }));
     expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({
       where: { id: "job-1" },
       data: expect.objectContaining({

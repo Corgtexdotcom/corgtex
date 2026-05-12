@@ -17,6 +17,7 @@ import {
   processSlackInboundEvent,
   purgeExpiredCommunicationMessages,
   reconcileMeetingRecorders,
+  syncRecorderCalendarSource,
   runMeetingAgendaPreparation,
   runMeetingAgendaThreadEdit,
   runMeetingInsightsExtraction,
@@ -428,6 +429,32 @@ async function handleJob(job: ClaimedJob) {
         dedupeKey: `meeting-recorders:reconcile:${job.workspaceId}:${Math.floor(runAfter.getTime() / MEETING_RECORDER_RECONCILE_INTERVAL_MS)}`,
       },
     });
+    return;
+  }
+
+  if (job.type === "meeting-recorders.calendar.sync") {
+    const sourceId = (payload as { sourceId?: string }).sourceId;
+    if (sourceId) {
+      await syncRecorderCalendarSource({
+        workspaceId: job.workspaceId,
+        sourceId,
+        workflowJobId: job.id,
+      });
+      const runAfter = new Date(Date.now() + MEETING_RECORDER_RECONCILE_INTERVAL_MS);
+      await prisma.workflowJob.upsert({
+        where: {
+          dedupeKey: `meeting-recorders:calendar-sync:${sourceId}:${Math.floor(runAfter.getTime() / MEETING_RECORDER_RECONCILE_INTERVAL_MS)}`,
+        },
+        update: {},
+        create: {
+          workspaceId: job.workspaceId,
+          type: "meeting-recorders.calendar.sync",
+          payload: { sourceId, reason: "recurring" },
+          runAfter,
+          dedupeKey: `meeting-recorders:calendar-sync:${sourceId}:${Math.floor(runAfter.getTime() / MEETING_RECORDER_RECONCILE_INTERVAL_MS)}`,
+        },
+      });
+    }
     return;
   }
 

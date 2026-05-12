@@ -31,11 +31,36 @@ const { prismaMock, encryptSecretMock, decryptSecretMock, memberMocks } = vi.hoi
       update: vi.fn(),
     },
     workspaceFeatureFlag: {
+      findUnique: vi.fn(),
       findMany: vi.fn(),
       upsert: vi.fn(),
     },
     workspaceMeetingRecorderConfig: {
+      findUnique: vi.fn(),
       upsert: vi.fn(),
+      update: vi.fn(),
+    },
+    workspaceRecorderCalendarSource: {
+      findUnique: vi.fn(),
+      findFirst: vi.fn(),
+      upsert: vi.fn(),
+      update: vi.fn(),
+    },
+    meetingRecorderSmokeRun: {
+      create: vi.fn(),
+      findFirst: vi.fn(),
+      update: vi.fn(),
+    },
+    meetingRecording: {
+      aggregate: vi.fn(),
+      count: vi.fn(),
+      create: vi.fn(),
+      findFirst: vi.fn(),
+      update: vi.fn(),
+    },
+    meeting: {
+      create: vi.fn(),
+      findFirst: vi.fn(),
     },
     brainSource: {
       count: vi.fn(),
@@ -90,10 +115,16 @@ vi.mock("@corgtex/shared", () => ({
   env: {
     CONTROL_PLANE_AGENT_API_KEY: "agent-secret",
     CONTROL_PLANE_AGENT_SCOPES: undefined,
+    SESSION_COOKIE_SECRET: "test-session-secret",
+    MEETING_RECORDER_PUBLIC_BASE_URL: "https://customer-recorder.example",
+    RECALL_API_KEY: "recall-key",
+    RECALL_WEBHOOK_SECRET: "recall-secret",
+    RECALL_REGION: "us-east-1",
   },
   prisma: prismaMock,
   encryptSecret: encryptSecretMock,
   decryptSecret: decryptSecretMock,
+  randomOpaqueToken: vi.fn(() => "nonce-value"),
 }));
 
 vi.mock("./members", () => ({
@@ -449,6 +480,133 @@ describe("control plane domain", () => {
       status: 400,
       code: "MANAGED_WORKSPACE_REQUIRED",
     });
+  });
+
+  it("connects a workspace-scoped recorder calendar with encrypted tokens and queues sync", async () => {
+    const { saveControlPlaneRecorderCalendarSource } = await import("./control-plane");
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce({
+      id: "inst-1",
+      label: "Customer",
+      customerAccountId: "cust-1",
+      managedWorkspaceId: "ws-1",
+      supportCredentialEnc: null,
+      managedWorkspace: { id: "ws-1", slug: "customer", name: "Customer", _count: {} },
+    });
+    prismaMock.workspaceRecorderCalendarSource.upsert.mockResolvedValueOnce({
+      id: "source-1",
+      workspaceId: "ws-1",
+      provider: "MICROSOFT",
+      providerAccountId: "ms-user-1",
+      providerAccountEmail: "calendar@customer.test",
+      displayName: "Customer Recorder",
+      expiresAt: new Date("2026-05-05T18:00:00.000Z"),
+      scopes: ["Calendars.Read"],
+      status: "ACTIVE",
+      lastSyncStartedAt: null,
+      lastSyncCompletedAt: null,
+      lastSyncAt: null,
+      lastSyncJobId: null,
+      lastSyncError: null,
+      lastDryRunAt: null,
+      lastUpcomingEventCount: 0,
+      lastSchedulableEventCount: 0,
+      createdAt: new Date("2026-05-05T17:00:00.000Z"),
+      updatedAt: new Date("2026-05-05T17:00:00.000Z"),
+    });
+    prismaMock.workflowJob.upsert.mockResolvedValueOnce({ id: "job-1" });
+
+    const result = await saveControlPlaneRecorderCalendarSource(operatorActor, {
+      deploymentId: "inst-1",
+      providerAccountId: "ms-user-1",
+      providerAccountEmail: "calendar@customer.test",
+      accessToken: "access-token",
+      refreshToken: "refresh-token",
+      scopes: ["Calendars.Read"],
+      reason: "Customer authorized recorder calendar.",
+    });
+
+    expect(encryptSecretMock).toHaveBeenCalledWith("access-token");
+    expect(encryptSecretMock).toHaveBeenCalledWith("refresh-token");
+    expect(prismaMock.workspaceRecorderCalendarSource.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        workspaceId_provider: {
+          workspaceId: "ws-1",
+          provider: "MICROSOFT",
+        },
+      },
+    }));
+    expect(prismaMock.workflowJob.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({
+        workspaceId: "ws-1",
+        type: "meeting-recorders.calendar.sync",
+      }),
+    }));
+    expect(prismaMock.customerDeploymentEvent.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        action: "control_plane.integration.meeting_recorder_calendar_connected",
+        meta: expect.objectContaining({
+          providerAccountEmail: "calendar@customer.test",
+        }),
+      }),
+    }));
+    expect(result.source).toMatchObject({ id: "source-1", workspaceId: "ws-1" });
+  });
+
+  it("requires a completed smoke before enabling recorder auto-recording", async () => {
+    const { runControlPlaneMeetingRecorderOperation } = await import("./control-plane");
+    prismaMock.customerDeployment.findUnique.mockResolvedValue({
+      id: "inst-1",
+      label: "Customer",
+      customerAccountId: "cust-1",
+      managedWorkspaceId: "ws-1",
+      supportCredentialEnc: null,
+      managedWorkspace: { id: "ws-1", slug: "customer", name: "Customer", _count: {} },
+    });
+    prismaMock.meetingRecorderSmokeRun.findFirst.mockResolvedValueOnce(null);
+
+    await expect(runControlPlaneMeetingRecorderOperation(operatorActor, {
+      deploymentId: "inst-1",
+      operation: "enable_auto_recording_after_smoke",
+      reason: "Enable after smoke.",
+    })).rejects.toMatchObject({
+      status: 400,
+      code: "RECORDER_SMOKE_REQUIRED",
+    });
+
+    prismaMock.meetingRecorderSmokeRun.findFirst.mockResolvedValueOnce({ id: "smoke-1", status: "COMPLETED" });
+    prismaMock.workspaceMeetingRecorderConfig.update.mockResolvedValueOnce({ workspaceId: "ws-1", autoRecordEnabled: true });
+
+    await expect(runControlPlaneMeetingRecorderOperation(operatorActor, {
+      deploymentId: "inst-1",
+      operation: "enable_auto_recording_after_smoke",
+      reason: "Enable after smoke.",
+    })).resolves.toMatchObject({
+      operation: "enable_auto_recording_after_smoke",
+      config: { autoRecordEnabled: true },
+    });
+  });
+
+  it("rejects unsupported meeting recorder operations before mutating config", async () => {
+    const { runControlPlaneMeetingRecorderOperation } = await import("./control-plane");
+    prismaMock.customerDeployment.findUnique.mockResolvedValue({
+      id: "inst-1",
+      label: "Customer",
+      customerAccountId: "cust-1",
+      managedWorkspaceId: "ws-1",
+      supportCredentialEnc: null,
+      managedWorkspace: { id: "ws-1", slug: "customer", name: "Customer", _count: {} },
+    });
+
+    await expect(runControlPlaneMeetingRecorderOperation(operatorActor, {
+      deploymentId: "inst-1",
+      operation: "unsupported_operation" as "enable_auto_recording_after_smoke",
+      reason: "Invalid operation should not mutate.",
+    })).rejects.toMatchObject({
+      status: 400,
+      code: "INVALID_INPUT",
+    });
+
+    expect(prismaMock.workspaceMeetingRecorderConfig.update).not.toHaveBeenCalled();
   });
 
   it("lists managed customer members including inactive accounts", async () => {

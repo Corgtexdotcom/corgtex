@@ -25,6 +25,7 @@ import {
   refreshSupportSnapshotAction,
   resendControlPlaneAccessLinkAction,
   runContextOperationAction,
+  runMeetingRecorderOperationAction,
   runReleaseOperationAction,
   runSupportOperationAction,
   setControlPlaneFeatureFlagAction,
@@ -81,6 +82,29 @@ type MeetingRecorderIntegration = {
   usage?: { usedMinutes: number };
   failures: number;
   vendorReadiness?: boolean;
+  readiness?: {
+    ready: boolean;
+    checks: Array<{ key: string; label: string; ok: boolean; detail: string }>;
+  };
+  calendarSource?: {
+    id: string;
+    providerAccountEmail: string | null;
+    providerAccountId: string;
+    status: string;
+    lastSyncAt: Date | string | null;
+    lastSyncError: string | null;
+    lastDryRunAt: Date | string | null;
+    lastUpcomingEventCount: number;
+    lastSchedulableEventCount: number;
+  } | null;
+  lastSmokeRun?: {
+    id: string;
+    status: string;
+    provider: string;
+    createdAt: Date | string;
+    completedAt: Date | string | null;
+    failureMessage: string | null;
+  } | null;
 };
 
 function tone(status?: string | null) {
@@ -176,6 +200,10 @@ function MiniMetric({ label, value, detail, toneValue }: { label: string; value:
       {detail && <div className="muted" style={{ fontSize: 12 }}>{detail}</div>}
     </div>
   );
+}
+
+function asDate(value: Date | string | null | undefined) {
+  return value ? new Date(value) : null;
 }
 
 function boolSelectDefault(value: boolean | null | undefined) {
@@ -743,6 +771,94 @@ export default async function ControlPlaneCustomerPage({
               </p>
             </div>
           )}
+          {customer.managedWorkspace && meetingRecorder ? (
+            <div className="stack" style={{ gap: 12 }}>
+              <div className="item">
+                <div className="row">
+                  <div>
+                    <strong>Recorder readiness</strong>
+                    <p className="muted" style={{ margin: "4px 0 0" }}>
+                      Runtime checks for enterprise recorder activation.
+                    </p>
+                  </div>
+                  <span className="tag">{meetingRecorder.readiness?.ready ? "Ready" : "Needs setup"}</span>
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 8, marginTop: 12 }}>
+                  {(meetingRecorder.readiness?.checks ?? []).map((check) => (
+                    <div key={check.key} className="panel" style={{ padding: 12 }}>
+                      <strong style={{ color: tone(check.ok ? "ready" : "attention") }}>{check.label}</strong>
+                      <p className="muted" style={{ margin: "4px 0 0", fontSize: 12 }}>{check.detail}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="item">
+                <div className="row">
+                  <div>
+                    <strong>Master recorder calendar</strong>
+                    <p className="muted" style={{ margin: "4px 0 0" }}>
+                      {meetingRecorder.calendarSource
+                        ? `${meetingRecorder.calendarSource.providerAccountEmail ?? meetingRecorder.calendarSource.providerAccountId} / ${meetingRecorder.calendarSource.status}`
+                        : "Connect the Microsoft calendar whose future Teams meetings should be recorded."}
+                    </p>
+                  </div>
+                  <a className="link-button small" href={`/api/control-plane/deployments/${customer.id}/meeting-recorders/microsoft/connect`}>
+                    {meetingRecorder.calendarSource ? "Reconnect Microsoft" : "Connect Microsoft"}
+                  </a>
+                </div>
+                {meetingRecorder.calendarSource ? (
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: 8, marginTop: 12 }}>
+                    <MiniMetric label="Last sync" value={meetingRecorder.calendarSource.lastSyncAt ? format.dateTime(asDate(meetingRecorder.calendarSource.lastSyncAt)!, { dateStyle: "medium", timeStyle: "short" }) : "Never"} toneValue={meetingRecorder.calendarSource.lastSyncError ? "attention" : "ready"} detail={meetingRecorder.calendarSource.lastSyncError || undefined} />
+                    <MiniMetric label="Dry-run events" value={`${meetingRecorder.calendarSource.lastSchedulableEventCount}/${meetingRecorder.calendarSource.lastUpcomingEventCount}`} toneValue="ready" detail="schedulable Teams meetings" />
+                    <MiniMetric label="Last smoke" value={statusLabel(t, meetingRecorder.lastSmokeRun?.status || "unknown")} toneValue={meetingRecorder.lastSmokeRun?.status || "unknown"} detail={meetingRecorder.lastSmokeRun?.failureMessage || (meetingRecorder.lastSmokeRun ? format.dateTime(asDate(meetingRecorder.lastSmokeRun.createdAt)!, { dateStyle: "medium", timeStyle: "short" }) : "No smoke run yet")} />
+                  </div>
+                ) : null}
+              </div>
+
+              <div className="item stack" style={{ gap: 10 }}>
+                <strong>Recorder rollout actions</strong>
+                <div className="actions-inline" style={{ alignItems: "flex-end", flexWrap: "wrap" }}>
+                  <form action={runMeetingRecorderOperationAction}>
+                    <input type="hidden" name="deploymentId" value={customer.id} />
+                    <input type="hidden" name="operation" value="dry_run_scan" />
+                    <input type="hidden" name="reason" value="Control-plane recorder dry-run scan." />
+                    <button type="submit" className="button secondary small">Dry-run scan</button>
+                  </form>
+                  <form action={runMeetingRecorderOperationAction}>
+                    <input type="hidden" name="deploymentId" value={customer.id} />
+                    <input type="hidden" name="operation" value="enqueue_calendar_sync" />
+                    <input type="hidden" name="reason" value="Control-plane recorder calendar sync." />
+                    <button type="submit" className="button secondary small">Queue sync</button>
+                  </form>
+                  <form action={runMeetingRecorderOperationAction} className="actions-inline" style={{ alignItems: "flex-end", flexWrap: "wrap" }}>
+                    <input type="hidden" name="deploymentId" value={customer.id} />
+                    <input type="hidden" name="operation" value="live_smoke" />
+                    <input type="hidden" name="provider" value="RECALL_AI" />
+                    <label style={{ minWidth: 260 }}>
+                      Future Teams URL
+                      <input name="meetingUrl" placeholder="https://teams.microsoft.com/l/meetup-join/..." />
+                    </label>
+                    <label>
+                      Join time
+                      <input name="joinAt" type="datetime-local" />
+                    </label>
+                    <label>
+                      Reason
+                      <input name="reason" required placeholder="Enterprise live recorder smoke." />
+                    </label>
+                    <button type="submit" className="button secondary small">Run live smoke</button>
+                  </form>
+                  <form action={runMeetingRecorderOperationAction}>
+                    <input type="hidden" name="deploymentId" value={customer.id} />
+                    <input type="hidden" name="operation" value="enable_auto_recording_after_smoke" />
+                    <input type="hidden" name="reason" value="Enable auto-recording after completed live smoke." />
+                    <button type="submit" className="button secondary small">Enable after smoke</button>
+                  </form>
+                </div>
+              </div>
+            </div>
+          ) : null}
         </section>
 
         <section id="releases" className="panel stack" style={{ padding: 20 }}>

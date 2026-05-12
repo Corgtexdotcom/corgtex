@@ -4,6 +4,9 @@ import type { AppActor } from "@corgtex/shared";
 
 const { prismaMock, fetchMock } = vi.hoisted(() => {
   const prisma = {
+    customerDeployment: {
+      findUnique: vi.fn(),
+    },
     workspaceFeatureFlag: {
       findUnique: vi.fn(),
       upsert: vi.fn(),
@@ -12,10 +15,18 @@ const { prismaMock, fetchMock } = vi.hoisted(() => {
       findUnique: vi.fn(),
       upsert: vi.fn(),
     },
+    workspaceRecorderCalendarSource: {
+      findUnique: vi.fn(),
+      findFirst: vi.fn(),
+      upsert: vi.fn(),
+      update: vi.fn(),
+    },
     workflowJob: {
+      count: vi.fn(),
       upsert: vi.fn(),
     },
     meeting: {
+      create: vi.fn(),
       findFirst: vi.fn(),
       update: vi.fn(),
       upsert: vi.fn(),
@@ -31,6 +42,12 @@ const { prismaMock, fetchMock } = vi.hoisted(() => {
     meetingRecorderProviderEvent: {
       findUnique: vi.fn(),
       upsert: vi.fn(),
+      update: vi.fn(),
+      updateMany: vi.fn(),
+    },
+    meetingRecorderSmokeRun: {
+      create: vi.fn(),
+      findFirst: vi.fn(),
       update: vi.fn(),
       updateMany: vi.fn(),
     },
@@ -60,6 +77,7 @@ vi.mock("@corgtex/shared", () => {
     parseAllowedWorkspaceIds: vi.fn(() => new Set<string>()),
     env: {
       NODE_ENV: "test",
+      SESSION_COOKIE_SECRET: "test-session-secret",
       SESSION_LAST_SEEN_WRITE_INTERVAL_MS: 5 * 60 * 1000,
       RECALL_API_KEY: "recall-key",
       RECALL_REGION: "us-west-2",
@@ -69,6 +87,9 @@ vi.mock("@corgtex/shared", () => {
       MEETING_RECORDER_PUBLIC_BASE_URL: "https://app.example.com",
       APP_URL: "https://app.example.com",
     },
+    encryptSecret: vi.fn((value: string) => `enc:${value}`),
+    decryptSecret: vi.fn((value: string) => value.replace(/^enc:/, "")),
+    randomOpaqueToken: vi.fn(() => "nonce-value"),
   };
 });
 
@@ -102,6 +123,7 @@ describe("meeting recorder domain", () => {
     global.fetch = fetchMock as unknown as typeof fetch;
     prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof prismaMock) => Promise<unknown>) => callback(prismaMock));
     prismaMock.workspaceFeatureFlag.findUnique.mockResolvedValue({ enabled: true });
+    prismaMock.customerDeployment.findUnique.mockResolvedValue(null);
     prismaMock.workspaceMeetingRecorderConfig.findUnique.mockResolvedValue({
       workspaceId: "workspace-1",
       enabled: true,
@@ -122,6 +144,8 @@ describe("meeting recorder domain", () => {
     });
     prismaMock.meetingRecording.findFirst.mockResolvedValue(null);
     prismaMock.meetingRecording.aggregate.mockResolvedValue({ _sum: { durationSeconds: 0 } });
+    prismaMock.workflowJob.count.mockResolvedValue(0);
+    prismaMock.meetingRecorderSmokeRun.findFirst.mockResolvedValue(null);
     prismaMock.member.findUnique.mockResolvedValue({
       id: "member-1",
       workspaceId: "workspace-1",
@@ -163,6 +187,73 @@ describe("meeting recorder domain", () => {
         },
       },
     });
+  });
+
+  it("rejects tampered recorder calendar OAuth state", async () => {
+    const { createRecorderCalendarOAuthState, readRecorderCalendarOAuthState } = await import("./meeting-recorders");
+    const state = createRecorderCalendarOAuthState({ deploymentId: "deployment-1", actorUserId: "operator-1" });
+    const [payload] = state.split(".");
+
+    expect(readRecorderCalendarOAuthState(state)).toMatchObject({
+      deploymentId: "deployment-1",
+      actorUserId: "operator-1",
+      nonce: "nonce-value",
+    });
+    expect(readRecorderCalendarOAuthState(`${payload}.tampered`)).toBeNull();
+    expect(readRecorderCalendarOAuthState(`${state}.extra`)).toBeNull();
+  });
+
+  it("stores recorder calendar source tokens encrypted and scoped to one workspace provider", async () => {
+    const { upsertRecorderCalendarSource } = await import("./meeting-recorders");
+    prismaMock.workspaceRecorderCalendarSource.upsert.mockResolvedValue({
+      id: "source-1",
+      workspaceId: "workspace-1",
+      provider: "MICROSOFT",
+      providerAccountId: "ms-user-1",
+      providerAccountEmail: "calendar@customer.test",
+      displayName: "Customer Recorder",
+      expiresAt: new Date("2027-05-05T18:00:00.000Z"),
+      scopes: ["Calendars.Read"],
+      status: "ACTIVE",
+      lastSyncStartedAt: null,
+      lastSyncCompletedAt: null,
+      lastSyncAt: null,
+      lastSyncJobId: null,
+      lastSyncError: null,
+      lastDryRunAt: null,
+      lastUpcomingEventCount: 0,
+      lastSchedulableEventCount: 0,
+      createdAt: new Date("2026-05-05T17:00:00.000Z"),
+      updatedAt: new Date("2026-05-05T17:00:00.000Z"),
+    });
+
+    await upsertRecorderCalendarSource({
+      workspaceId: "workspace-1",
+      providerAccountId: "ms-user-1",
+      providerAccountEmail: "calendar@customer.test",
+      accessToken: "access-token",
+      refreshToken: "refresh-token",
+      expiresIn: 3600,
+      scopes: ["Calendars.Read"],
+    });
+
+    expect(prismaMock.workspaceRecorderCalendarSource.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        workspaceId_provider: {
+          workspaceId: "workspace-1",
+          provider: "MICROSOFT",
+        },
+      },
+      update: expect.objectContaining({
+        accessTokenEnc: "enc:access-token",
+        refreshTokenEnc: "enc:refresh-token",
+      }),
+      create: expect.objectContaining({
+        workspaceId: "workspace-1",
+        accessTokenEnc: "enc:access-token",
+        refreshTokenEnc: "enc:refresh-token",
+      }),
+    }));
   });
 
   it("verifies Svix-style webhook signatures", async () => {
@@ -243,6 +334,49 @@ describe("meeting recorder domain", () => {
     }));
   });
 
+  it("sends only IDs in Recall scheduling metadata", async () => {
+    const { scheduleMeetingRecording } = await import("./meeting-recorders");
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce({
+      id: "deployment-1",
+      customerAccountId: "customer-1",
+    });
+    prismaMock.meetingRecording.create.mockResolvedValue({
+      id: "recording-1",
+      workspaceId: "workspace-1",
+      meetingId: "meeting-1",
+      provider: "RECALL_AI",
+      meetingUrl: "https://teams.microsoft.com/l/meetup-join/abc",
+      status: "PENDING",
+    });
+    prismaMock.meetingRecording.update.mockResolvedValue({
+      id: "recording-1",
+      workspaceId: "workspace-1",
+      meetingId: "meeting-1",
+      provider: "RECALL_AI",
+      status: "SCHEDULED",
+      externalBotId: "recall-bot-1",
+    });
+    fetchMock.mockResolvedValue({ ok: true, status: 200, text: async () => JSON.stringify({ id: "recall-bot-1" }) });
+
+    await scheduleMeetingRecording(operatorActor, {
+      workspaceId: "workspace-1",
+      meetingId: "meeting-1",
+      provider: "RECALL_AI",
+      mode: "manual",
+    });
+
+    const body = JSON.parse(String(fetchMock.mock.calls[0][1]?.body));
+    expect(body.metadata).toEqual({
+      workspaceId: "workspace-1",
+      meetingId: "meeting-1",
+      recordingId: "recording-1",
+      deploymentId: "deployment-1",
+      customerId: "customer-1",
+    });
+    expect(JSON.stringify(body.metadata)).not.toContain("Weekly");
+    expect(JSON.stringify(body.metadata)).not.toContain("team@example.com");
+  });
+
   it("does not fall back from Recall to Meeting BaaS on non-retryable scheduling failures", async () => {
     const { scheduleMeetingRecording } = await import("./meeting-recorders");
     prismaMock.meetingRecording.create.mockResolvedValue({
@@ -307,6 +441,172 @@ describe("meeting recorder domain", () => {
       status: 402,
       code: "RECORDER_MONTHLY_CAP_EXCEEDED",
     });
+  });
+
+  it("treats private, free, declined, past, and too-soon calendar events as ineligible", async () => {
+    const { calendarEventIsEligible } = await import("./meeting-recorders");
+    const now = new Date("2026-05-05T16:00:00.000Z");
+    const base = {
+      id: "event-1",
+      provider: "MICROSOFT" as const,
+      title: "Client sync",
+      description: null,
+      startTime: new Date("2026-05-05T17:00:00.000Z"),
+      endTime: new Date("2026-05-05T18:00:00.000Z"),
+      attendees: [],
+      organizerEmail: "host@example.com",
+      meetingUrl: "https://teams.microsoft.com/l/meetup-join/abc",
+      htmlLink: null,
+      status: null,
+      visibility: null,
+      transparency: null,
+      responseStatus: null,
+    };
+
+    expect(calendarEventIsEligible(base, now)).toBe(true);
+    expect(calendarEventIsEligible({ ...base, visibility: "private" }, now)).toBe(false);
+    expect(calendarEventIsEligible({ ...base, transparency: "free" }, now)).toBe(false);
+    expect(calendarEventIsEligible({ ...base, responseStatus: "declined" }, now)).toBe(false);
+    expect(calendarEventIsEligible({ ...base, endTime: new Date("2026-05-05T15:00:00.000Z") }, now)).toBe(false);
+    expect(calendarEventIsEligible({ ...base, startTime: new Date("2026-05-05T16:05:00.000Z") }, now)).toBe(false);
+  });
+
+  it("records failed live smoke prechecks as completed failures", async () => {
+    const { runMeetingRecorderSmoke } = await import("./meeting-recorders");
+    prismaMock.meetingRecorderSmokeRun.create.mockResolvedValue({
+      id: "smoke-1",
+      workspaceId: "workspace-1",
+      status: "FAILED",
+      liveVendorCall: true,
+    });
+
+    await expect(runMeetingRecorderSmoke({
+      workspaceId: "workspace-1",
+      deploymentId: "deployment-1",
+      meetingUrl: "https://example.com/not-teams",
+      joinAt: new Date(Date.now() + 60 * 60 * 1000),
+      provider: "RECALL_AI",
+      liveVendorCall: true,
+    })).resolves.toMatchObject({ status: "FAILED" });
+
+    expect(prismaMock.meetingRecorderSmokeRun.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        deploymentId: "deployment-1",
+        status: "FAILED",
+        liveVendorCall: true,
+        completedAt: expect.any(Date),
+        failureMessage: expect.stringContaining("supported Microsoft Teams meeting URL"),
+      }),
+    }));
+    expect(prismaMock.meeting.create).not.toHaveBeenCalled();
+  });
+
+  it("syncs recorder calendar sources by scheduling only eligible Microsoft Teams meetings", async () => {
+    const { syncRecorderCalendarSource } = await import("./meeting-recorders");
+    prismaMock.workspaceRecorderCalendarSource.findFirst.mockResolvedValue({
+      id: "source-1",
+      workspaceId: "workspace-1",
+      provider: "MICROSOFT",
+      providerAccountId: "ms-user-1",
+      providerAccountEmail: "calendar@customer.test",
+      displayName: "Customer Recorder",
+      expiresAt: new Date("2027-05-05T18:00:00.000Z"),
+      scopes: ["Calendars.Read"],
+      status: "ACTIVE",
+      lastSyncStartedAt: null,
+      lastSyncCompletedAt: null,
+      lastSyncAt: null,
+      lastSyncJobId: null,
+      lastSyncError: null,
+      lastDryRunAt: null,
+      lastUpcomingEventCount: 0,
+      lastSchedulableEventCount: 0,
+      createdAt: new Date("2026-05-05T17:00:00.000Z"),
+      updatedAt: new Date("2026-05-05T17:00:00.000Z"),
+    });
+    prismaMock.workspaceRecorderCalendarSource.findUnique.mockResolvedValue({
+      id: "source-1",
+      workspaceId: "workspace-1",
+      provider: "MICROSOFT",
+      accessTokenEnc: "enc:access-token",
+      refreshTokenEnc: "enc:refresh-token",
+      expiresAt: new Date("2027-05-05T18:00:00.000Z"),
+      scopes: ["Calendars.Read"],
+      status: "ACTIVE",
+    });
+    prismaMock.workspaceRecorderCalendarSource.update.mockResolvedValue({});
+    prismaMock.meeting.findFirst
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({
+        id: "meeting-teams",
+        title: "Client sync",
+        recordedAt: new Date("2026-05-05T17:00:00.000Z"),
+        scheduledEndAt: new Date("2026-05-05T18:00:00.000Z"),
+        meetingUrl: "https://teams.microsoft.com/l/meetup-join/abc",
+        participantEmails: [],
+      });
+    prismaMock.meeting.upsert.mockResolvedValue({
+      id: "meeting-teams",
+      workspaceId: "workspace-1",
+      title: "Client sync",
+      recordedAt: new Date("2026-05-05T17:00:00.000Z"),
+      scheduledEndAt: new Date("2026-05-05T18:00:00.000Z"),
+      meetingUrl: "https://teams.microsoft.com/l/meetup-join/abc",
+    });
+    prismaMock.meetingRecording.create.mockResolvedValue({
+      id: "recording-teams",
+      workspaceId: "workspace-1",
+      meetingId: "meeting-teams",
+      provider: "RECALL_AI",
+      status: "PENDING",
+    });
+    prismaMock.meetingRecording.update.mockResolvedValue({
+      id: "recording-teams",
+      workspaceId: "workspace-1",
+      meetingId: "meeting-teams",
+      provider: "RECALL_AI",
+      status: "SCHEDULED",
+      externalBotId: "recall-bot-1",
+    });
+    fetchMock
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          value: [
+            {
+              id: "teams-event",
+              subject: "Client sync",
+              start: { dateTime: "2026-05-05T17:00:00", timeZone: "UTC" },
+              end: { dateTime: "2026-05-05T18:00:00", timeZone: "UTC" },
+              onlineMeeting: { joinUrl: "https://teams.microsoft.com/l/meetup-join/abc" },
+              showAs: "busy",
+              sensitivity: "normal",
+            },
+            {
+              id: "zoom-event",
+              subject: "Zoom sync",
+              start: { dateTime: "2026-05-05T17:00:00", timeZone: "UTC" },
+              end: { dateTime: "2026-05-05T18:00:00", timeZone: "UTC" },
+              onlineMeeting: { joinUrl: "https://example.zoom.us/j/123" },
+              showAs: "busy",
+              sensitivity: "normal",
+            },
+          ],
+        }),
+      })
+      .mockResolvedValueOnce({ ok: true, status: 200, text: async () => JSON.stringify({ id: "recall-bot-1" }) });
+
+    await expect(syncRecorderCalendarSource({
+      workspaceId: "workspace-1",
+      sourceId: "source-1",
+      workflowJobId: "job-1",
+      now: new Date("2026-05-05T16:00:00.000Z"),
+    })).resolves.toMatchObject({ action: "synced", teamsEvents: 1, scheduled: 1 });
+
+    expect(prismaMock.meeting.upsert).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("reuses an active recording when concurrent scheduling hits the database dedupe key", async () => {

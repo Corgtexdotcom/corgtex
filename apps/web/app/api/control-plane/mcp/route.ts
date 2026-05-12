@@ -23,6 +23,7 @@ import {
   refreshControlPlaneFleetSnapshots,
   resendControlPlaneCustomerMemberAccessLink,
   runControlPlaneContextOperation,
+  runControlPlaneMeetingRecorderOperation,
   runControlPlaneReleaseOperation,
   runCustomerSupportOperation,
   setControlPlaneFeatureFlag,
@@ -164,6 +165,22 @@ const tools = [
     },
   },
   {
+    name: "run_meeting_recorder_operation",
+    description: "Run an audited meeting recorder rollout operation: enqueue calendar sync, dry-run scan, live smoke, or enable auto-recording after a completed smoke.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        deploymentId: { type: "string" },
+        operation: { type: "string" },
+        reason: { type: "string" },
+        meetingUrl: { type: "string" },
+        joinAt: { type: "string" },
+        provider: { type: "string" },
+      },
+      required: ["deploymentId", "operation", "reason"],
+    },
+  },
+  {
     name: "run_context_sync",
     description: "Queue an audited context sync for all active sources or one source.",
     inputSchema: {
@@ -289,6 +306,7 @@ const toolScopes: Record<string, string> = {
   set_customer_feature_flag: "control-plane:features:write",
   refresh_customer_deployment_snapshot: "control-plane:support:write",
   configure_customer_integration: "control-plane:integrations:write",
+  run_meeting_recorder_operation: "control-plane:integrations:write",
   run_context_sync: "control-plane:context:write",
   probe_customer_deployment_health: "control-plane:releases:write",
   refresh_fleet_snapshots: "control-plane:fleet:write",
@@ -489,6 +507,17 @@ export async function POST(request: NextRequest) {
         monthlyMinuteCap: argNumber(args, "monthlyMinuteCap", 6_000),
         botName: argOptionalString(args, "botName"),
         entryMessage: argOptionalString(args, "entryMessage"),
+        reason: argString(args, "reason"),
+      })));
+    }
+    if (name === "run_meeting_recorder_operation") {
+      const joinAt = argOptionalString(args, "joinAt");
+      return rpcResult(id, textContent(await runControlPlaneMeetingRecorderOperation(actor, {
+        deploymentId: argString(args, "deploymentId"),
+        operation: argString(args, "operation") as "enqueue_calendar_sync" | "dry_run_scan" | "live_smoke" | "enable_auto_recording_after_smoke",
+        meetingUrl: argOptionalString(args, "meetingUrl"),
+        joinAt: joinAt ? new Date(joinAt) : null,
+        provider: argOptionalString(args, "provider"),
         reason: argString(args, "reason"),
       })));
     }
