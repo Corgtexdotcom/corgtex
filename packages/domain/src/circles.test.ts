@@ -1,10 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
-import { suggestMaturityUpgrade } from "./circles";
+import { listCircleTree, suggestMaturityUpgrade } from "./circles";
 import { prisma } from "@corgtex/shared";
 
 vi.mock("@corgtex/shared", () => ({
   prisma: {
     circle: {
+      findMany: vi.fn(),
       findUnique: vi.fn(),
     },
   },
@@ -66,5 +67,70 @@ describe("suggestMaturityUpgrade", () => {
     const result = await suggestMaturityUpgrade(workspaceId, circleId);
 
     expect(result.ready).toBe(false);
+  });
+});
+
+describe("listCircleTree", () => {
+  it("loads profile fields for visible role fillers", async () => {
+    vi.mocked(prisma.circle.findMany).mockResolvedValueOnce([
+      {
+        id: "circle-1",
+        workspaceId: "ws-1",
+        parentCircleId: null,
+        name: "Product",
+        roles: [
+          {
+            id: "role-1",
+            assignments: [
+              {
+                id: "assignment-1",
+                member: {
+                  id: "member-1",
+                  user: {
+                    id: "user-1",
+                    email: "member@example.com",
+                    displayName: "Member One",
+                    avatarUrl: "https://example.com/avatar.png",
+                    bio: "Design and delivery.",
+                  },
+                },
+              },
+            ],
+          },
+        ],
+      },
+    ] as any);
+
+    const result = await listCircleTree("ws-1");
+
+    expect(prisma.circle.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      include: expect.objectContaining({
+        roles: expect.objectContaining({
+          include: expect.objectContaining({
+            assignments: {
+              include: {
+                member: {
+                  include: {
+                    user: {
+                      select: {
+                        id: true,
+                        email: true,
+                        displayName: true,
+                        avatarUrl: true,
+                        bio: true,
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          }),
+        }),
+      }),
+    }));
+    expect(result[0]?.roles[0]?.assignments[0]?.member.user).toMatchObject({
+      avatarUrl: "https://example.com/avatar.png",
+      bio: "Design and delivery.",
+    });
   });
 });

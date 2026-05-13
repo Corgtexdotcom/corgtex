@@ -59,6 +59,9 @@ export default async function MembersPage({
                     height: 48, 
                     borderRadius: 24, 
                     background: isAgent ? "var(--surface-sunken)" : "var(--accent-soft)", 
+                    backgroundImage: member.user.avatarUrl ? `url(${JSON.stringify(member.user.avatarUrl)})` : undefined,
+                    backgroundPosition: "center",
+                    backgroundSize: "cover",
                     color: isAgent ? "var(--text-strong)" : "var(--accent)", 
                     border: isAgent ? "1px solid var(--line)" : "none",
                     display: "flex", 
@@ -67,13 +70,18 @@ export default async function MembersPage({
                     fontWeight: 600,
                     fontSize: "1.1rem"
                   }}>
-                    {isAgent ? "⬡" : initials}
+                    {!member.user.avatarUrl && (isAgent ? "⬡" : initials)}
                   </div>
                   <div>
                     <h3 style={{ margin: "0 0 4px", fontSize: "1rem" }}>{displayName}</h3>
                     <div className="muted" style={{ fontSize: "0.8rem", marginBottom: 4 }}>
                       {member.user.email}
                     </div>
+                    {member.user.bio && (
+                      <div className="muted" style={{ fontSize: "0.78rem", marginBottom: 6, lineHeight: 1.35 }}>
+                        {member.user.bio}
+                      </div>
+                    )}
                     <div style={{ fontSize: "0.75rem", background: "var(--bg-alt)", display: "inline-block", padding: "2px 8px", borderRadius: "12px" }}>
                       {member.role}
                     </div>
