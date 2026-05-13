@@ -217,7 +217,17 @@ export async function listCircleTree(workspaceId: string, opts?: { archiveFilter
           assignments: {
             include: {
               member: {
-                include: { user: { select: { displayName: true, email: true } } },
+                include: {
+                  user: {
+                    select: {
+                      id: true,
+                      email: true,
+                      displayName: true,
+                      avatarUrl: true,
+                      bio: true,
+                    },
+                  },
+                },
               },
             },
           },

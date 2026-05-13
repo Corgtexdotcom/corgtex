@@ -1,4 +1,4 @@
-import { listCircles, listCircleTree, listRoles, listRoleAssignments, listMembers } from "@corgtex/domain";
+import { listCircles, listCircleTree, listRoles, listRoleAssignments, listMembers, requireWorkspaceMembership } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import {
   createCircleAction,
@@ -24,7 +24,8 @@ export default async function CirclesPage({
   const { workspaceId } = await params;
   const { view } = await searchParams;
   const viewMode = view === "list" ? "list" : "graph";
-  await requirePageActor();
+  const actor = await requirePageActor();
+  await requireWorkspaceMembership({ actor, workspaceId });
   const t = await getTranslations("circles");
 
   let circles: Awaited<ReturnType<typeof listCircles>>;

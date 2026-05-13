@@ -101,6 +101,8 @@ describe("members domain", () => {
             id: true,
             email: true,
             displayName: true,
+            avatarUrl: true,
+            bio: true,
           },
         },
       },
@@ -543,7 +545,7 @@ describe("members domain", () => {
     prismaMock.member.findUnique.mockResolvedValue({
       id: "member-1",
       workspaceId: "workspace-1",
-      user: { id: "user-1" },
+      user: { id: "user-1", avatarUrl: "https://example.com/avatar.png", bio: "Operations lead." },
     });
     prismaMock.meeting.findMany.mockResolvedValue([{ id: "meeting-1" }]);
     prismaMock.auditLog.findMany.mockResolvedValue([{ id: "audit-1" }]);
@@ -558,5 +560,18 @@ describe("members domain", () => {
       proposals: [{ id: "proposal-1" }],
       authoredTensions: [{ id: "tension-1" }],
     });
+    expect(prismaMock.member.findUnique).toHaveBeenCalledWith(expect.objectContaining({
+      include: expect.objectContaining({
+        user: {
+          select: {
+            id: true,
+            email: true,
+            displayName: true,
+            avatarUrl: true,
+            bio: true,
+          },
+        },
+      }),
+    }));
   });
 });

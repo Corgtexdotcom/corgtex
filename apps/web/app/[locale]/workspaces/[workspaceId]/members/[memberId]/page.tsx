@@ -62,6 +62,9 @@ export default async function MemberProfilePage({ params }: PageProps) {
             height: 80, 
             borderRadius: 40, 
             background: "var(--accent-soft)", 
+            backgroundImage: member.user?.avatarUrl ? `url(${JSON.stringify(member.user.avatarUrl)})` : undefined,
+            backgroundPosition: "center",
+            backgroundSize: "cover",
             color: "var(--accent)", 
             display: "flex", 
             alignItems: "center", 
@@ -69,7 +72,7 @@ export default async function MemberProfilePage({ params }: PageProps) {
             fontSize: "2rem",
             fontWeight: 600
           }}>
-            {getInitials(member.user?.displayName, member.user?.email)}
+            {!member.user?.avatarUrl && getInitials(member.user?.displayName, member.user?.email)}
           </div>
           <div>
             <h1 style={{ border: "none", padding: 0, margin: "0 0 8px 0", fontSize: "2rem" }}>
@@ -81,6 +84,11 @@ export default async function MemberProfilePage({ params }: PageProps) {
                 {member.role}
               </span>
             </div>
+            {member.user?.bio && (
+              <p className="muted" style={{ margin: "10px 0 0", maxWidth: 640, lineHeight: 1.5 }}>
+                {member.user.bio}
+              </p>
+            )}
           </div>
         </div>
       </header>
