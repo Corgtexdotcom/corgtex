@@ -11,6 +11,7 @@ const { prismaMock } = vi.hoisted(() => {
       create: vi.fn(),
       upsert: vi.fn(),
       update: vi.fn(),
+      delete: vi.fn(),
     },
     meetingSeries: {
       create: vi.fn(),
@@ -125,6 +126,77 @@ describe("meetings domain", () => {
       status: 400,
       code: "INVALID_INPUT",
     });
+  });
+
+  it("createScheduledMeeting stores a scheduled meeting URL and hash", async () => {
+    const startsAt = new Date("2026-04-30T17:00:00.000Z");
+    const scheduledEndAt = new Date("2026-04-30T17:30:00.000Z");
+    prismaMock.meeting.create.mockResolvedValue({
+      id: "meeting-1",
+      title: "Manual Teams call",
+      source: "manual-recorder",
+      status: "SCHEDULED",
+      recordedAt: startsAt,
+      meetingUrl: "https://teams.microsoft.com/l/meetup-join/abc",
+    });
+
+    const { createScheduledMeeting } = await import("./meetings");
+    await expect(createScheduledMeeting(actor, {
+      workspaceId: "workspace-1",
+      title: " Manual Teams call ",
+      startsAt,
+      scheduledEndAt,
+      meetingUrl: "https://TEAMS.microsoft.com/l/meetup-join/abc#ignored",
+      participantEmails: [" Member@Example.com "],
+      source: "manual-recorder",
+    })).resolves.toMatchObject({ id: "meeting-1" });
+
+    expect(prismaMock.meeting.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        workspaceId: "workspace-1",
+        status: "SCHEDULED",
+        title: "Manual Teams call",
+        source: "manual-recorder",
+        recordedAt: startsAt,
+        scheduledEndAt,
+        meetingUrl: "https://teams.microsoft.com/l/meetup-join/abc",
+        meetingUrlHash: expect.any(String),
+        participantEmails: ["member@example.com"],
+      }),
+    });
+  });
+
+  it("discardManualScheduledMeeting removes an orphan manual recorder meeting", async () => {
+    prismaMock.meeting.findFirst.mockResolvedValue({
+      id: "meeting-1",
+      recordings: [],
+    });
+    prismaMock.meeting.delete.mockResolvedValue({ id: "meeting-1" });
+
+    const { discardManualScheduledMeeting } = await import("./meetings");
+    await expect(discardManualScheduledMeeting(actor, {
+      workspaceId: "workspace-1",
+      meetingId: "meeting-1",
+    })).resolves.toEqual({ id: "meeting-1", deleted: true });
+
+    expect(prismaMock.meeting.findFirst).toHaveBeenCalledWith({
+      where: {
+        id: "meeting-1",
+        workspaceId: "workspace-1",
+        status: "SCHEDULED",
+        source: "manual-recorder",
+        archivedAt: null,
+      },
+      select: {
+        id: true,
+        recordings: {
+          where: { status: { in: ["PENDING", "SCHEDULED", "JOINING", "RECORDING"] } },
+          select: { id: true },
+          take: 1,
+        },
+      },
+    });
+    expect(prismaMock.meeting.delete).toHaveBeenCalledWith({ where: { id: "meeting-1" } });
   });
 
   it("createMeetingSeries materializes recurring scheduled meetings", async () => {
