@@ -907,24 +907,28 @@ describe("meeting recorder domain", () => {
       participantIds: [],
       participantEmails: [],
     };
+    const recording = {
+      id: "recording-1",
+      workspaceId: "workspace-1",
+      meetingId: "meeting-1",
+      provider: "RECALL_AI",
+      externalBotId: "recall-bot-1",
+      status: "COMPLETED",
+      transcriptProcessedAt: null,
+      joinAt: new Date("2026-05-04T16:00:00.000Z"),
+      startedAt: new Date("2026-05-04T16:00:30.000Z"),
+      createdAt: new Date("2026-05-04T15:55:00.000Z"),
+      meeting: {
+        recordedAt: new Date("2026-05-04T16:00:00.000Z"),
+        scheduledEndAt: new Date("2026-05-04T17:00:00.000Z"),
+      },
+    };
     prismaMock.meetingRecording.findMany
-      .mockResolvedValueOnce([{
-        id: "recording-1",
-        workspaceId: "workspace-1",
-        meetingId: "meeting-1",
-        provider: "RECALL_AI",
-        externalBotId: "recall-bot-1",
-        status: "SCHEDULED",
-        transcriptProcessedAt: null,
-        joinAt: new Date("2026-05-04T16:00:00.000Z"),
-        startedAt: new Date("2026-05-04T16:00:30.000Z"),
-        createdAt: new Date("2026-05-04T15:55:00.000Z"),
-        meeting: {
-          recordedAt: new Date("2026-05-04T16:00:00.000Z"),
-          scheduledEndAt: new Date("2026-05-04T17:00:00.000Z"),
-        },
-      }])
+      .mockResolvedValueOnce([recording])
       .mockResolvedValueOnce([]);
+    prismaMock.meetingRecording.findUnique
+      .mockResolvedValueOnce(recording)
+      .mockResolvedValueOnce(recording);
     fetchMock.mockImplementation(async (url: string | URL) => {
       const value = String(url);
       if (value.endsWith("/api/v1/bot/recall-bot-1/")) {
@@ -968,5 +972,52 @@ describe("meeting recorder domain", () => {
         transcriptProcessedAt: expect.any(Date),
       }),
     });
+  });
+
+  it("skips Recall recovery intake when a delayed webhook already processed the transcript", async () => {
+    const { reconcileMeetingRecorders } = await import("./meeting-recorders");
+    const recording = {
+      id: "recording-1",
+      workspaceId: "workspace-1",
+      meetingId: "meeting-1",
+      provider: "RECALL_AI",
+      externalBotId: "recall-bot-1",
+      status: "COMPLETED",
+      transcriptProcessedAt: null,
+      joinAt: new Date("2026-05-04T16:00:00.000Z"),
+      startedAt: new Date("2026-05-04T16:00:30.000Z"),
+      createdAt: new Date("2026-05-04T15:55:00.000Z"),
+      meeting: {
+        recordedAt: new Date("2026-05-04T16:00:00.000Z"),
+        scheduledEndAt: new Date("2026-05-04T17:00:00.000Z"),
+      },
+    };
+    prismaMock.meetingRecording.findMany
+      .mockResolvedValueOnce([recording])
+      .mockResolvedValueOnce([]);
+    prismaMock.meetingRecording.findUnique
+      .mockResolvedValueOnce(recording)
+      .mockResolvedValueOnce({
+        ...recording,
+        transcriptProcessedAt: new Date("2026-05-04T17:05:00.000Z"),
+      });
+    fetchMock.mockImplementation(async (url: string | URL) => {
+      const value = String(url);
+      if (value.endsWith("/api/v1/bot/recall-bot-1/")) {
+        return new Response(JSON.stringify({ id: "recall-bot-1", status: "done" }), { status: 200 });
+      }
+      if (value.endsWith("/api/v1/bot/recall-bot-1/transcript/")) {
+        return new Response(JSON.stringify([
+          { speaker: "Dana", start: 0, text: "This transcript was already handled by the webhook." },
+        ]), { status: 200 });
+      }
+      return new Response("{}", { status: 200 });
+    });
+    prismaMock.meetingRecorderProviderEvent.updateMany.mockResolvedValue({ count: 0 });
+
+    await expect(reconcileMeetingRecorders("workspace-1")).resolves.toEqual({ staleFailed: 0, recoveredTranscripts: 0 });
+
+    expect(prismaMock.meeting.update).not.toHaveBeenCalled();
+    expect(prismaMock.meetingRecording.update).not.toHaveBeenCalled();
   });
 });

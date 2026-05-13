@@ -22,6 +22,7 @@ const STALE_RECORDING_TIMEOUT_MS = 6 * 60 * 60 * 1000;
 const RECALL_TRANSCRIPT_RECOVERY_GRACE_MS = 20 * 60 * 1000;
 const FALLBACK_MEETING_DURATION_MS = 90 * 60 * 1000;
 const ACTIVE_RECORDING_STATUSES: MeetingRecordingStatus[] = ["PENDING", "SCHEDULED", "JOINING", "RECORDING"];
+const RECOVERABLE_RECALL_RECORDING_STATUSES: MeetingRecordingStatus[] = [...ACTIVE_RECORDING_STATUSES, "COMPLETED"];
 const RETRYABLE_VENDOR_STATUSES = new Set([408, 409, 425, 429, 500, 502, 503, 504, 507]);
 const RECORDER_LOG_COMPONENT = "meeting-recorder";
 const RECORDER_CALENDAR_SYNC_LOOKAHEAD_MS = 30 * 24 * 60 * 60 * 1000;
@@ -2436,6 +2437,24 @@ function recallRecoveryReadyAt(recording: RecoverableRecallRecording) {
   return new Date(expectedEnd.getTime() + RECALL_TRANSCRIPT_RECOVERY_GRACE_MS);
 }
 
+async function findRecoverableRecallRecording(recordingId: string) {
+  const recording = await prisma.meetingRecording.findUnique({
+    where: { id: recordingId },
+    include: {
+      meeting: {
+        select: {
+          recordedAt: true,
+          scheduledEndAt: true,
+        },
+      },
+    },
+  });
+  if (!recording || recording.provider !== "RECALL_AI") {
+    return null;
+  }
+  return recording as RecoverableRecallRecording;
+}
+
 function recallBotTerminalStatus(bot: unknown) {
   const data = isRecord(bot) && isRecord(bot.data) ? bot.data : bot;
   if (!isRecord(data)) return null;
@@ -2476,7 +2495,7 @@ async function recoverRecallTranscripts(workspaceId: string) {
     where: {
       workspaceId,
       provider: "RECALL_AI",
-      status: { in: ACTIVE_RECORDING_STATUSES },
+      status: { in: RECOVERABLE_RECALL_RECORDING_STATUSES },
       transcriptProcessedAt: null,
       externalBotId: { not: null },
     },
@@ -2497,18 +2516,28 @@ async function recoverRecallTranscripts(workspaceId: string) {
     }
 
     try {
-      const bot = await fetchRecallBot(recording.externalBotId);
+      const current = await findRecoverableRecallRecording(recording.id);
+      if (!current || current.transcriptProcessedAt || !current.externalBotId) {
+        continue;
+      }
+
+      const bot = await fetchRecallBot(current.externalBotId);
       if (!recallBotIsDone(bot)) {
         continue;
       }
-      const artifact = await fetchRecallTranscriptArtifact({ externalBotId: recording.externalBotId });
-      await completeRecordingWithTranscriptArtifact("RECALL_AI", recording, artifact);
+      const artifact = await fetchRecallTranscriptArtifact({ externalBotId: current.externalBotId });
+      const latest = await findRecoverableRecallRecording(recording.id);
+      if (!latest || latest.transcriptProcessedAt || !latest.externalBotId) {
+        continue;
+      }
+
+      await completeRecordingWithTranscriptArtifact("RECALL_AI", latest, artifact);
       recovered += 1;
       recorderLog("info", "reconcile_recall_transcript_recovered", {
         workspaceId,
-        meetingId: recording.meetingId,
-        recordingId: recording.id,
-        provider: recording.provider,
+        meetingId: latest.meetingId,
+        recordingId: latest.id,
+        provider: latest.provider,
       });
     } catch (error) {
       if (transcriptRecoveryIsPending(error)) {
