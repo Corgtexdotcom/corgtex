@@ -15,6 +15,7 @@ type WorkspaceAddMenuProps = {
   featureFlags: WorkspaceFeatureFlagMap;
   role: MemberRole | null;
   invitePolicy: WorkspaceAddInvitePolicy | null;
+  meetingRecorderEnabled: boolean;
   isDemo: boolean;
 };
 
@@ -23,6 +24,7 @@ export function WorkspaceAddMenu({
   featureFlags,
   role,
   invitePolicy,
+  meetingRecorderEnabled,
   isDemo,
 }: WorkspaceAddMenuProps) {
   const pathname = usePathname() ?? "";
@@ -40,9 +42,10 @@ export function WorkspaceAddMenu({
       featureFlags,
       role,
       invitePolicy,
+      meetingRecorderEnabled,
       isDemo,
     })
-  ), [workspaceId, pathname, search, featureFlags, role, invitePolicy, isDemo]);
+  ), [workspaceId, pathname, search, featureFlags, role, invitePolicy, meetingRecorderEnabled, isDemo]);
 
   useEffect(() => {
     setIsOpen(false);

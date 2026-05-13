@@ -1,4 +1,4 @@
-import { isGlobalOperator, listActorWorkspaces, countUnreadNotifications, listConversations, requireWorkspaceMembership, getMemberInvitePolicy } from "@corgtex/domain";
+import { isGlobalOperator, listActorWorkspaces, countUnreadNotifications, listConversations, requireWorkspaceMembership, getMemberInvitePolicy, getMeetingRecorderConfig } from "@corgtex/domain";
 import { workspaceBranding, prisma } from "@corgtex/shared";
 import type { Metadata } from "next";
 import { logoutAction, requirePageActor } from "@/lib/auth";
@@ -55,6 +55,13 @@ export default async function WorkspaceLayout({
   const tCommon = await getTranslations("common");
   const currentBranding = current ? workspaceBranding(current) : { primaryName: "Corgtex", secondaryLabel: "Workspace" };
   const controlPlaneHref = getControlPlaneHref("/control-plane", locale);
+  const isDemo = current?.slug === "jnj-demo";
+  const meetingRecorderConfig = !isDemo && featureFlags.MEETING_RECORDERS
+    ? await getMeetingRecorderConfig(actor, workspaceId).catch(() => null)
+    : null;
+  const meetingRecorderEnabled = Boolean(
+    featureFlags.MEETING_RECORDERS && meetingRecorderConfig?.featureEnabled && meetingRecorderConfig.config.enabled,
+  );
   const conversationSummaries = conversations.map((c: any) => ({
     id: c.id,
     topic: c.topic,
@@ -112,16 +119,17 @@ export default async function WorkspaceLayout({
           featureFlags={featureFlags}
           role={membership?.role ?? null}
           invitePolicy={invitePolicy}
-          isDemo={current?.slug === "jnj-demo"}
+          meetingRecorderEnabled={meetingRecorderEnabled}
+          isDemo={isDemo}
         />
         <div className="ws-main-content">
-          {current?.slug === "jnj-demo" && <DemoBanner />}
+          {isDemo && <DemoBanner />}
           {children}
         </div>
       </main>
 
       <WorkspaceChatRail workspaceId={workspaceId} conversations={conversationSummaries} />
-      {current?.slug === "jnj-demo" && (
+      {isDemo && (
         <DemoTour workspaceId={workspaceId} />
       )}
     </div>

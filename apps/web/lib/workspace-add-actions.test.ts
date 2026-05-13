@@ -15,6 +15,7 @@ function context(overrides: Partial<WorkspaceAddActionContext> = {}): WorkspaceA
     featureFlags: DEFAULT_WORKSPACE_FEATURE_FLAGS,
     role: "ADMIN",
     invitePolicy: "MEMBERS_CAN_INVITE",
+    meetingRecorderEnabled: false,
     isDemo: false,
     ...overrides,
   };
@@ -32,6 +33,22 @@ describe("workspace add actions", () => {
 
   it("returns ordered meeting actions", () => {
     expect(kinds({ pathname: "/workspaces/ws-1/meetings" })).toEqual([
+      "meeting_schedule",
+      "meeting_invite",
+      "meeting_transcript",
+    ]);
+  });
+
+  it("adds manual recording last for recorder-enabled meeting managers", () => {
+    const recorderActions = [
+      "meeting_schedule",
+      "meeting_invite",
+      "meeting_transcript",
+      "meeting_manual_recording",
+    ];
+    expect(kinds({ pathname: "/workspaces/ws-1/meetings", meetingRecorderEnabled: true })).toEqual(recorderActions);
+    expect(kinds({ pathname: "/workspaces/ws-1/meetings", meetingRecorderEnabled: true, role: "FACILITATOR" })).toEqual(recorderActions);
+    expect(kinds({ pathname: "/workspaces/ws-1/meetings", meetingRecorderEnabled: true, role: "CONTRIBUTOR" })).toEqual([
       "meeting_schedule",
       "meeting_invite",
       "meeting_transcript",
