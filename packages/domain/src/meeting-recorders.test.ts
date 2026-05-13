@@ -64,6 +64,7 @@ const { prismaMock, fetchMock } = vi.hoisted(() => {
     event: {
       createMany: vi.fn(),
     },
+    $queryRaw: vi.fn(),
     $transaction: vi.fn(),
   };
   return {
@@ -123,6 +124,7 @@ describe("meeting recorder domain", () => {
     vi.clearAllMocks();
     global.fetch = fetchMock as unknown as typeof fetch;
     prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof prismaMock) => Promise<unknown>) => callback(prismaMock));
+    prismaMock.$queryRaw.mockResolvedValue([]);
     prismaMock.workspaceFeatureFlag.findUnique.mockResolvedValue({ enabled: true });
     prismaMock.customerDeployment.findUnique.mockResolvedValue(null);
     prismaMock.workspaceMeetingRecorderConfig.findUnique.mockResolvedValue({
@@ -930,7 +932,8 @@ describe("meeting recorder domain", () => {
       .mockResolvedValueOnce([]);
     prismaMock.meetingRecording.findUnique
       .mockResolvedValueOnce(recording)
-      .mockResolvedValueOnce(recording);
+      .mockResolvedValueOnce(recording)
+      .mockResolvedValueOnce({ transcriptProcessedAt: null });
     fetchMock.mockImplementation(async (url: string | URL) => {
       const value = String(url);
       if (value.endsWith("/api/v1/bot/recall-bot-1/")) {
@@ -1033,7 +1036,7 @@ describe("meeting recorder domain", () => {
     expect(prismaMock.meetingRecording.update).not.toHaveBeenCalled();
   });
 
-  it("skips Recall recovery intake when another worker already claimed transcript ingestion", async () => {
+  it("skips Recall recovery intake when the lock-protected row is already processed", async () => {
     const { reconcileMeetingRecorders } = await import("./meeting-recorders");
     const recording = {
       id: "recording-1",
@@ -1057,8 +1060,10 @@ describe("meeting recorder domain", () => {
       .mockResolvedValueOnce([]);
     prismaMock.meetingRecording.findUnique
       .mockResolvedValueOnce(recording)
-      .mockResolvedValueOnce(recording);
-    prismaMock.meetingRecording.updateMany.mockResolvedValueOnce({ count: 0 });
+      .mockResolvedValueOnce(recording)
+      .mockResolvedValueOnce({
+        transcriptProcessedAt: new Date("2026-05-04T17:05:00.000Z"),
+      });
     fetchMock.mockImplementation(async (url: string | URL) => {
       const value = String(url);
       if (value.endsWith("/api/v1/bot/recall-bot-1/")) {
@@ -1103,7 +1108,8 @@ describe("meeting recorder domain", () => {
       .mockResolvedValueOnce([]);
     prismaMock.meetingRecording.findUnique
       .mockResolvedValueOnce(recording)
-      .mockResolvedValueOnce(recording);
+      .mockResolvedValueOnce(recording)
+      .mockResolvedValueOnce({ transcriptProcessedAt: null });
     fetchMock.mockImplementation(async (url: string | URL) => {
       const value = String(url);
       if (value.endsWith("/api/v1/bot/recall-bot-1/")) {

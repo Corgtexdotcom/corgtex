@@ -23,7 +23,6 @@ const RECALL_TRANSCRIPT_RECOVERY_GRACE_MS = 20 * 60 * 1000;
 const FALLBACK_MEETING_DURATION_MS = 90 * 60 * 1000;
 const ACTIVE_RECORDING_STATUSES: MeetingRecordingStatus[] = ["PENDING", "SCHEDULED", "JOINING", "RECORDING"];
 const RECOVERABLE_RECALL_RECORDING_STATUSES: MeetingRecordingStatus[] = [...ACTIVE_RECORDING_STATUSES, "COMPLETED"];
-const TRANSCRIPT_INGESTION_CLAIM_PREFIX = "transcript-ingest:";
 const RETRYABLE_VENDOR_STATUSES = new Set([408, 409, 425, 429, 500, 502, 503, 504, 507]);
 const RECORDER_LOG_COMPONENT = "meeting-recorder";
 const RECORDER_CALENDAR_SYNC_LOOKAHEAD_MS = 30 * 24 * 60 * 60 * 1000;
@@ -2197,9 +2196,7 @@ async function applyWebhookState(recording: MeetingRecording, event: ProviderWeb
   const data: Prisma.MeetingRecordingUpdateInput = {};
   if (event.externalBotId && !recording.externalBotId) data.externalBotId = event.externalBotId;
   if (event.status) data.status = event.status;
-  if (event.status && !ACTIVE_RECORDING_STATUSES.includes(event.status) && !isTranscriptIngestionClaim(recording.activeDedupeKey)) {
-    data.activeDedupeKey = null;
-  }
+  if (event.status && !ACTIVE_RECORDING_STATUSES.includes(event.status)) data.activeDedupeKey = null;
   if (event.startedAt) data.startedAt = event.startedAt;
   if (event.endedAt) data.endedAt = event.endedAt;
   if (event.durationSeconds !== null) data.durationSeconds = Math.max(0, Math.round(event.durationSeconds));
@@ -2239,71 +2236,13 @@ function shouldFetchTranscript(provider: MeetingRecorderProvider, event: Provide
   return event.eventType === "bot.completed" || event.status === "COMPLETED";
 }
 
-function transcriptIngestionClaimKey(recordingId: string) {
-  return `${TRANSCRIPT_INGESTION_CLAIM_PREFIX}${recordingId}`;
-}
-
-function isTranscriptIngestionClaim(value?: string | null) {
-  return value?.startsWith(TRANSCRIPT_INGESTION_CLAIM_PREFIX) ?? false;
-}
-
-type TranscriptIngestionClaim = {
-  claimKey: string;
-  previousActiveDedupeKey: string | null;
-};
-
-async function claimRecordingTranscriptIngestion(recording: MeetingRecording): Promise<TranscriptIngestionClaim | null> {
-  if (recording.transcriptProcessedAt || isTranscriptIngestionClaim(recording.activeDedupeKey)) {
-    return null;
-  }
-  const previousActiveDedupeKey = recording.activeDedupeKey ?? null;
-  const claimKey = transcriptIngestionClaimKey(recording.id);
-  const claimed = await prisma.meetingRecording.updateMany({
-    where: {
-      id: recording.id,
-      transcriptProcessedAt: null,
-      activeDedupeKey: previousActiveDedupeKey,
-    },
-    data: {
-      activeDedupeKey: claimKey,
-    },
-  });
-  if (claimed.count !== 1) {
-    return null;
-  }
-  return { claimKey, previousActiveDedupeKey };
-}
-
-async function releaseRecordingTranscriptIngestionClaim(recordingId: string, claim: TranscriptIngestionClaim) {
-  const current = await prisma.meetingRecording.findUnique({
-    where: { id: recordingId },
-    select: {
-      activeDedupeKey: true,
-      status: true,
-      transcriptProcessedAt: true,
-    },
-  });
-  if (!current || current.transcriptProcessedAt || current.activeDedupeKey !== claim.claimKey) {
-    return;
-  }
-  await prisma.meetingRecording.updateMany({
-    where: {
-      id: recordingId,
-      activeDedupeKey: claim.claimKey,
-      transcriptProcessedAt: null,
-    },
-    data: {
-      activeDedupeKey: ACTIVE_RECORDING_STATUSES.includes(current.status) ? claim.previousActiveDedupeKey : null,
-    },
-  });
-}
-
 async function markRecordingTranscriptEmpty(
   provider: MeetingRecorderProvider,
   recording: MeetingRecording,
   artifact: { metadata: unknown },
+  tx: Prisma.TransactionClient,
 ) {
-  await prisma.meetingRecording.update({
+  await tx.meetingRecording.update({
     where: { id: recording.id },
     data: {
       status: "COMPLETED",
@@ -2314,7 +2253,7 @@ async function markRecordingTranscriptEmpty(
       providerMetadata: redactProviderArtifactUrls(artifact.metadata),
     },
   });
-  await prisma.meetingRecorderSmokeRun.updateMany({
+  await tx.meetingRecorderSmokeRun.updateMany({
     where: {
       recordingId: recording.id,
       status: { in: ["PENDING", "SCHEDULED"] },
@@ -2339,14 +2278,18 @@ async function completeRecordingWithTranscriptArtifact(
   artifact: { transcriptPayload: unknown; metadata: unknown },
 ) {
   const transcript = normalizeProviderTranscript(artifact.transcriptPayload);
-  const claim = await claimRecordingTranscriptIngestion(recording);
-  if (!claim) {
-    return false;
-  }
+  const completed = await prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${recording.id}, 0))`;
+    const current = await tx.meetingRecording.findUnique({
+      where: { id: recording.id },
+      select: { transcriptProcessedAt: true },
+    });
+    if (!current || current.transcriptProcessedAt) {
+      return false;
+    }
 
-  try {
     if (transcript.trim().length === 0) {
-      await markRecordingTranscriptEmpty(provider, recording, artifact);
+      await markRecordingTranscriptEmpty(provider, recording, artifact, tx);
       return false;
     }
 
@@ -2359,7 +2302,7 @@ async function completeRecordingWithTranscriptArtifact(
       transcript,
     });
 
-    await prisma.meetingRecording.update({
+    await tx.meetingRecording.update({
       where: { id: recording.id },
       data: {
         status: "COMPLETED",
@@ -2370,7 +2313,7 @@ async function completeRecordingWithTranscriptArtifact(
         providerMetadata: redactProviderArtifactUrls(artifact.metadata),
       },
     });
-    await prisma.meetingRecorderSmokeRun.updateMany({
+    await tx.meetingRecorderSmokeRun.updateMany({
       where: {
         recordingId: recording.id,
         status: { in: ["PENDING", "SCHEDULED"] },
@@ -2380,17 +2323,18 @@ async function completeRecordingWithTranscriptArtifact(
         completedAt: new Date(),
       },
     });
+    return true;
+  }, { timeout: 120_000 });
+
+  if (completed) {
     recorderLog("info", "transcript_ingested", {
       workspaceId: recording.workspaceId,
       meetingId: recording.meetingId,
       recordingId: recording.id,
       provider,
     });
-    return true;
-  } catch (error) {
-    await releaseRecordingTranscriptIngestionClaim(recording.id, claim);
-    throw error;
   }
+  return completed;
 }
 
 async function ingestProviderTranscript(provider: MeetingRecorderProvider, recording: MeetingRecording, event: ProviderWebhookEvent) {
