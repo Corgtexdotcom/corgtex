@@ -19,6 +19,8 @@ const DEFAULT_ENTRY_MESSAGE = "Corgtex Recorder is joining to transcribe this me
 const DEFAULT_MONTHLY_MINUTE_CAP = 6000;
 const AUTO_SCHEDULE_MIN_LEAD_MS = 10 * 60 * 1000;
 const STALE_RECORDING_TIMEOUT_MS = 6 * 60 * 60 * 1000;
+const RECALL_TRANSCRIPT_RECOVERY_GRACE_MS = 20 * 60 * 1000;
+const FALLBACK_MEETING_DURATION_MS = 90 * 60 * 1000;
 const ACTIVE_RECORDING_STATUSES: MeetingRecordingStatus[] = ["PENDING", "SCHEDULED", "JOINING", "RECORDING"];
 const RETRYABLE_VENDOR_STATUSES = new Set([408, 409, 425, 429, 500, 502, 503, 504, 507]);
 const RECORDER_LOG_COMPONENT = "meeting-recorder";
@@ -652,13 +654,19 @@ async function fetchRecallTranscriptArtifact(params: { transcriptId?: string | n
   }
 
   if (!downloadUrl && params.externalBotId) {
-    metadata = await fetchJson(`https://${env.RECALL_REGION}.recall.ai/api/v1/bot/${params.externalBotId}/`, {
+    const transcriptPayload = await fetchJson(`https://${env.RECALL_REGION}.recall.ai/api/v1/bot/${params.externalBotId}/transcript/`, {
       headers: {
         Authorization: recallAuthorization(apiKey),
         accept: "application/json",
       },
     });
-    downloadUrl = findFirstUrl(metadata, "download_url");
+    return {
+      transcriptPayload,
+      metadata: {
+        source: "bot_transcript_endpoint",
+        externalBotId: params.externalBotId,
+      },
+    };
   }
 
   invariant(downloadUrl, 404, "RECORDER_TRANSCRIPT_NOT_READY", "Recall transcript is not ready.");
@@ -669,6 +677,16 @@ async function fetchRecallTranscriptArtifact(params: { transcriptId?: string | n
     },
   });
   return { transcriptPayload, metadata };
+}
+
+async function fetchRecallBot(externalBotId: string) {
+  const apiKey = requireVendorSecret("RECALL_AI");
+  return fetchJson(`https://${env.RECALL_REGION}.recall.ai/api/v1/bot/${externalBotId}/`, {
+    headers: {
+      Authorization: recallAuthorization(apiKey),
+      accept: "application/json",
+    },
+  });
 }
 
 async function fetchMeetingBaasTranscriptArtifact(externalBotId: string, transcriptUrl?: string | null) {
@@ -691,25 +709,6 @@ async function fetchMeetingBaasTranscriptArtifact(externalBotId: string, transcr
     },
   });
   return { transcriptPayload, metadata };
-}
-
-function findFirstUrl(value: unknown, keyHint: string): string | null {
-  if (isRecord(value)) {
-    for (const [key, item] of Object.entries(value)) {
-      if (key === keyHint && typeof item === "string" && item.startsWith("http")) {
-        return item;
-      }
-      const nested = findFirstUrl(item, keyHint);
-      if (nested) return nested;
-    }
-  }
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      const nested = findFirstUrl(item, keyHint);
-      if (nested) return nested;
-    }
-  }
-  return null;
 }
 
 function providerSchedule(provider: MeetingRecorderProvider, input: MeetingRecorderScheduleInput) {
@@ -2230,17 +2229,11 @@ function shouldFetchTranscript(provider: MeetingRecorderProvider, event: Provide
   return event.eventType === "bot.completed" || event.status === "COMPLETED";
 }
 
-async function ingestProviderTranscript(provider: MeetingRecorderProvider, recording: MeetingRecording, event: ProviderWebhookEvent) {
-  if (recording.transcriptProcessedAt) {
-    return;
-  }
-  const artifact = provider === "RECALL_AI"
-    ? await fetchRecallTranscriptArtifact({
-      transcriptId: event.transcriptId,
-      transcriptUrl: event.transcriptUrl,
-      externalBotId: recording.externalBotId,
-    })
-    : await fetchMeetingBaasTranscriptArtifact(recording.externalBotId ?? event.externalBotId ?? "", event.transcriptUrl);
+async function completeRecordingWithTranscriptArtifact(
+  provider: MeetingRecorderProvider,
+  recording: MeetingRecording,
+  artifact: { transcriptPayload: unknown; metadata: unknown },
+) {
   const transcript = normalizeProviderTranscript(artifact.transcriptPayload);
   invariant(transcript.trim().length > 0, 422, "RECORDER_TRANSCRIPT_EMPTY", "Provider transcript was empty.");
 
@@ -2278,6 +2271,20 @@ async function ingestProviderTranscript(provider: MeetingRecorderProvider, recor
     recordingId: recording.id,
     provider,
   });
+}
+
+async function ingestProviderTranscript(provider: MeetingRecorderProvider, recording: MeetingRecording, event: ProviderWebhookEvent) {
+  if (recording.transcriptProcessedAt) {
+    return;
+  }
+  const artifact = provider === "RECALL_AI"
+    ? await fetchRecallTranscriptArtifact({
+      transcriptId: event.transcriptId,
+      transcriptUrl: event.transcriptUrl,
+      externalBotId: recording.externalBotId,
+    })
+    : await fetchMeetingBaasTranscriptArtifact(recording.externalBotId ?? event.externalBotId ?? "", event.transcriptUrl);
+  await completeRecordingWithTranscriptArtifact(provider, recording, artifact);
 }
 
 export function extractSupportedMeetingUrlFromText(value?: string | null) {
@@ -2414,7 +2421,121 @@ export async function syncCalendarEventRecorder(params: {
   return { action: "scheduled" as const, meeting, recording };
 }
 
+type RecoverableRecallRecording = MeetingRecording & {
+  meeting: {
+    recordedAt: Date;
+    scheduledEndAt: Date | null;
+  };
+};
+
+function recallRecoveryReadyAt(recording: RecoverableRecallRecording) {
+  const expectedEnd = recording.meeting.scheduledEndAt
+    ?? (recording.joinAt
+      ? new Date(recording.joinAt.getTime() + FALLBACK_MEETING_DURATION_MS)
+      : new Date(recording.meeting.recordedAt.getTime() + FALLBACK_MEETING_DURATION_MS));
+  return new Date(expectedEnd.getTime() + RECALL_TRANSCRIPT_RECOVERY_GRACE_MS);
+}
+
+function recallBotTerminalStatus(bot: unknown) {
+  const data = isRecord(bot) && isRecord(bot.data) ? bot.data : bot;
+  if (!isRecord(data)) return null;
+
+  const direct = readString(data.status) ?? readString(data.status_code);
+  if (direct) return direct.toLowerCase();
+
+  const changes = Array.isArray(data.status_changes) ? data.status_changes : [];
+  for (let index = changes.length - 1; index >= 0; index -= 1) {
+    const change = isRecord(changes[index]) ? changes[index] : {};
+    const nested = firstRecord(change.data, change.status);
+    const code = readString(change.code)
+      ?? readString(change.status)
+      ?? readString(nested?.code)
+      ?? readString(nested?.status);
+    if (code) return code.toLowerCase();
+  }
+  return null;
+}
+
+function recallBotIsDone(bot: unknown) {
+  return recallBotTerminalStatus(bot) === "done";
+}
+
+function transcriptRecoveryIsPending(error: unknown) {
+  if (error instanceof AppError) {
+    return error.code === "RECORDER_TRANSCRIPT_NOT_READY" || error.code === "RECORDER_TRANSCRIPT_EMPTY";
+  }
+  if (error instanceof ProviderRequestError) {
+    return error.status === 404 || error.status === 409 || error.status === 425;
+  }
+  return false;
+}
+
+async function recoverRecallTranscripts(workspaceId: string) {
+  const now = new Date();
+  const recordings = await prisma.meetingRecording.findMany({
+    where: {
+      workspaceId,
+      provider: "RECALL_AI",
+      status: { in: ACTIVE_RECORDING_STATUSES },
+      transcriptProcessedAt: null,
+      externalBotId: { not: null },
+    },
+    include: {
+      meeting: {
+        select: {
+          recordedAt: true,
+          scheduledEndAt: true,
+        },
+      },
+    },
+  }) as RecoverableRecallRecording[];
+
+  let recovered = 0;
+  for (const recording of recordings) {
+    if (!recording.externalBotId || recallRecoveryReadyAt(recording) > now) {
+      continue;
+    }
+
+    try {
+      const bot = await fetchRecallBot(recording.externalBotId);
+      if (!recallBotIsDone(bot)) {
+        continue;
+      }
+      const artifact = await fetchRecallTranscriptArtifact({ externalBotId: recording.externalBotId });
+      await completeRecordingWithTranscriptArtifact("RECALL_AI", recording, artifact);
+      recovered += 1;
+      recorderLog("info", "reconcile_recall_transcript_recovered", {
+        workspaceId,
+        meetingId: recording.meetingId,
+        recordingId: recording.id,
+        provider: recording.provider,
+      });
+    } catch (error) {
+      if (transcriptRecoveryIsPending(error)) {
+        recorderLog("info", "reconcile_recall_transcript_pending", {
+          workspaceId,
+          meetingId: recording.meetingId,
+          recordingId: recording.id,
+          provider: recording.provider,
+          failureCode: providerFailureCode(error),
+        });
+        continue;
+      }
+      recorderLog("warn", "reconcile_recall_transcript_failed", {
+        workspaceId,
+        meetingId: recording.meetingId,
+        recordingId: recording.id,
+        provider: recording.provider,
+        failureCode: providerFailureCode(error),
+      });
+    }
+  }
+
+  return recovered;
+}
+
 export async function reconcileMeetingRecorders(workspaceId: string) {
+  const recoveredTranscripts = await recoverRecallTranscripts(workspaceId);
   const staleBefore = new Date(Date.now() - STALE_RECORDING_TIMEOUT_MS);
   const stale = await prisma.meetingRecording.findMany({
     where: {
@@ -2452,5 +2573,5 @@ export async function reconcileMeetingRecorders(workspaceId: string) {
       redactedAt: new Date(),
     },
   });
-  return { staleFailed: stale.length };
+  return { staleFailed: stale.length, recoveredTranscripts };
 }
