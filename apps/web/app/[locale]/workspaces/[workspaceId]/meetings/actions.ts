@@ -14,6 +14,7 @@ import {
   importMeetingInvite,
   intakeMeetingTranscript,
   requestMeetingIntelligenceRegeneration,
+  requireWorkspaceMembership,
   confirmInsight,
   dismissInsight,
   updateInsight,
@@ -132,6 +133,11 @@ export async function scheduleManualMeetingRecordingAction(formData: FormData) {
 
   const actor = await requirePageActor();
   const workspaceId = asString(formData, "workspaceId");
+  await requireWorkspaceMembership({
+    actor,
+    workspaceId,
+    allowedRoles: ["ADMIN", "FACILITATOR"],
+  });
   const joinAt = parseDateTimeLocalWithOffset(
     asString(formData, "joinAt"),
     asOptional(formData, "joinAtTimezoneOffsetMinutes"),
