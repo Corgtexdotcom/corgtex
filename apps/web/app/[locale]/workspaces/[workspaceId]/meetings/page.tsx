@@ -5,6 +5,7 @@ import {
   cancelMeetingRecordingAction,
   createMeetingSeriesAction,
   importMeetingInviteAction,
+  scheduleManualMeetingRecordingAction,
   scheduleMeetingRecordingAction,
   uploadMeetingTranscriptAction,
 } from "../actions";
@@ -51,6 +52,48 @@ export default async function MeetingsPage({
       </header>
 
       {/* ── OUTPUT SECTIONS (primary content) ────────────────────── */}
+
+      {recorderEnabled && (
+        <section className="ws-section" style={{ marginBottom: 48 }}>
+          <details open>
+            <summary className="nr-hide-marker" style={{ cursor: "pointer", fontWeight: 600, color: "var(--accent)" }}>
+              <span className="nr-section-header" style={{ borderTop: "none", display: "inline-block", padding: 0, margin: 0 }}>{t("manualRecorderTitle")}</span>
+            </summary>
+            <form action={scheduleManualMeetingRecordingAction} className="stack panel" style={{ marginTop: 16 }}>
+              <input type="hidden" name="workspaceId" value={workspaceId} />
+              <label>
+                {t("formTitle")}
+                <input name="title" required />
+              </label>
+              <label>
+                {t("formMeetingUrl")}
+                <input name="meetingUrl" type="url" placeholder="https://teams.microsoft.com/l/meetup-join/..." required />
+              </label>
+              <div className="actions-inline">
+                <label style={{ flex: 1 }}>
+                  {t("formJoinAt")}
+                  <input name="joinAt" type="datetime-local" required />
+                </label>
+                <label style={{ flex: 1 }}>
+                  {t("formScheduledEndAt")}
+                  <input name="scheduledEndAt" type="datetime-local" />
+                </label>
+              </div>
+              <input name="joinAtTimezoneOffsetMinutes" type="hidden" value="" />
+              <script
+                dangerouslySetInnerHTML={{
+                  __html: "(() => { const script = document.currentScript; const form = script?.closest('form'); const joinAt = form?.querySelector('input[name=\"joinAt\"]'); const offset = form?.querySelector('input[name=\"joinAtTimezoneOffsetMinutes\"]'); if (!(joinAt instanceof HTMLInputElement) || !(offset instanceof HTMLInputElement)) return; const sync = () => { offset.value = joinAt.value ? String(new Date(joinAt.value).getTimezoneOffset()) : String(new Date().getTimezoneOffset()); }; joinAt.addEventListener('input', sync); joinAt.addEventListener('change', sync); sync(); })();",
+                }}
+              />
+              <label>
+                {t("formParticipantEmails")}
+                <input name="participantEmails" placeholder={t("formParticipantEmailsPlaceholder")} />
+              </label>
+              <button type="submit">{t("btnRecordMeeting")}</button>
+            </form>
+          </details>
+        </section>
+      )}
 
       <section className="ws-section" style={{ marginBottom: 48 }}>
         <h2 className="nr-section-header">{t("completedMeetings")}</h2>

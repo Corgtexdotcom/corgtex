@@ -127,6 +127,44 @@ describe("meetings domain", () => {
     });
   });
 
+  it("createScheduledMeeting stores a scheduled meeting URL and hash", async () => {
+    const startsAt = new Date("2026-04-30T17:00:00.000Z");
+    const scheduledEndAt = new Date("2026-04-30T17:30:00.000Z");
+    prismaMock.meeting.create.mockResolvedValue({
+      id: "meeting-1",
+      title: "Manual Teams call",
+      source: "manual-recorder",
+      status: "SCHEDULED",
+      recordedAt: startsAt,
+      meetingUrl: "https://teams.microsoft.com/l/meetup-join/abc",
+    });
+
+    const { createScheduledMeeting } = await import("./meetings");
+    await expect(createScheduledMeeting(actor, {
+      workspaceId: "workspace-1",
+      title: " Manual Teams call ",
+      startsAt,
+      scheduledEndAt,
+      meetingUrl: "https://TEAMS.microsoft.com/l/meetup-join/abc#ignored",
+      participantEmails: [" Member@Example.com "],
+      source: "manual-recorder",
+    })).resolves.toMatchObject({ id: "meeting-1" });
+
+    expect(prismaMock.meeting.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        workspaceId: "workspace-1",
+        status: "SCHEDULED",
+        title: "Manual Teams call",
+        source: "manual-recorder",
+        recordedAt: startsAt,
+        scheduledEndAt,
+        meetingUrl: "https://teams.microsoft.com/l/meetup-join/abc",
+        meetingUrlHash: expect.any(String),
+        participantEmails: ["member@example.com"],
+      }),
+    });
+  });
+
   it("createMeetingSeries materializes recurring scheduled meetings", async () => {
     const startsAt = new Date("2026-04-30T17:00:00.000Z");
     const scheduledEndAt = new Date("2026-04-30T18:00:00.000Z");

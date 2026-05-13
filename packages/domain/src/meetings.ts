@@ -104,6 +104,24 @@ function hashStableId(value: string) {
   return createHash("sha256").update(value).digest("hex").slice(0, 16);
 }
 
+function normalizeMeetingUrl(value: string) {
+  try {
+    const url = new URL(value.trim());
+    url.hash = "";
+    url.hostname = url.hostname.toLowerCase();
+    if (url.hostname.includes("zoom.us")) {
+      url.searchParams.sort();
+    }
+    return url.toString();
+  } catch {
+    return value.trim();
+  }
+}
+
+function meetingUrlHash(value: string) {
+  return createHash("sha256").update(normalizeMeetingUrl(value)).digest("hex");
+}
+
 function addDays(value: Date, days: number) {
   return new Date(value.getTime() + days * 24 * 60 * 60 * 1000);
 }
@@ -546,6 +564,82 @@ export async function createMeetingSeries(actor: AppActor, params: {
     });
 
     return { series, meetings };
+  });
+}
+
+export async function createScheduledMeeting(actor: AppActor, params: {
+  workspaceId: string;
+  title: string;
+  startsAt: Date;
+  scheduledEndAt?: Date | null;
+  meetingUrl?: string | null;
+  participantIds?: string[] | null;
+  participantEmails?: string[] | null;
+  source?: string | null;
+}) {
+  await requireWorkspaceMembership({
+    actor,
+    workspaceId: params.workspaceId,
+  });
+
+  const title = params.title.trim();
+  const source = params.source?.trim() || "manual";
+  const meetingUrl = params.meetingUrl?.trim() ? normalizeMeetingUrl(params.meetingUrl) : null;
+  invariant(title.length > 0, 400, "INVALID_INPUT", "Meeting title is required.");
+  invariant(!Number.isNaN(params.startsAt.valueOf()), 400, "INVALID_INPUT", "startsAt must be a valid date.");
+  invariant(!params.scheduledEndAt || !Number.isNaN(params.scheduledEndAt.valueOf()), 400, "INVALID_INPUT", "scheduledEndAt must be a valid date.");
+  invariant(!params.scheduledEndAt || params.scheduledEndAt > params.startsAt, 400, "INVALID_INPUT", "scheduledEndAt must be after startsAt.");
+
+  return prisma.$transaction(async (tx) => {
+    const meeting = await tx.meeting.create({
+      data: {
+        workspaceId: params.workspaceId,
+        status: "SCHEDULED",
+        title,
+        source,
+        recordedAt: params.startsAt,
+        scheduledEndAt: params.scheduledEndAt ?? null,
+        transcript: null,
+        summaryMd: null,
+        meetingUrl,
+        meetingUrlHash: meetingUrl ? meetingUrlHash(meetingUrl) : null,
+        participantIds: normalizeIds(params.participantIds),
+        participantEmails: normalizeEmails(params.participantEmails),
+      },
+    });
+
+    await tx.auditLog.create({
+      data: {
+        workspaceId: params.workspaceId,
+        actorUserId: actor.kind === "user" ? actor.user.id : null,
+        action: "meeting.scheduled",
+        entityType: "Meeting",
+        entityId: meeting.id,
+        meta: {
+          source: meeting.source,
+          recordedAt: meeting.recordedAt.toISOString(),
+          hasMeetingUrl: Boolean(meeting.meetingUrl),
+        },
+      },
+    });
+
+    await appendEvents(tx, [
+      {
+        workspaceId: params.workspaceId,
+        type: "meeting.scheduled",
+        aggregateType: "Meeting",
+        aggregateId: meeting.id,
+        payload: {
+          meetingId: meeting.id,
+          title: meeting.title,
+          source: meeting.source,
+          status: meeting.status,
+          hasMeetingUrl: Boolean(meeting.meetingUrl),
+        },
+      },
+    ]);
+
+    return meeting;
   });
 }
 

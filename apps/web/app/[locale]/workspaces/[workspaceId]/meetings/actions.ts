@@ -6,6 +6,7 @@ import { asString, asOptional, refresh } from "../action-utils";
 import {
   createMeeting,
   createMeetingSeries,
+  createScheduledMeeting,
   deleteMeeting,
   enqueueMeetingAgendaPreparation,
   extractMeetingInsights,
@@ -23,6 +24,29 @@ import {
   cancelMeetingRecording,
 } from "@corgtex/domain";
 import { extractTextFromFileBuffer } from "@corgtex/knowledge";
+
+const LOCAL_DATETIME_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/;
+
+function parseDateTimeLocalWithOffset(value: string, offsetMinutesRaw: string | null) {
+  const match = value.match(LOCAL_DATETIME_PATTERN);
+  const offsetMinutes = offsetMinutesRaw === null ? NaN : Number(offsetMinutesRaw);
+  if (!match || !Number.isInteger(offsetMinutes)) {
+    throw new Error("Meeting time must be a valid local datetime.");
+  }
+  const [, year, month, day, hour, minute, second = "0"] = match;
+  const parsed = new Date(Date.UTC(
+    Number(year),
+    Number(month) - 1,
+    Number(day),
+    Number(hour),
+    Number(minute),
+    Number(second),
+  ) + offsetMinutes * 60_000);
+  if (Number.isNaN(parsed.valueOf())) {
+    throw new Error("Meeting time must be a valid local datetime.");
+  }
+  return parsed;
+}
 
 export async function createMeetingAction(formData: FormData) {
   const _demoGuardWsId = formData.get("workspaceId") as string;
@@ -65,6 +89,37 @@ export async function createMeetingSeriesAction(formData: FormData) {
     participantEmails: asOptional(formData, "participantEmails")?.split(",").map((value) => value.trim()).filter(Boolean) ?? [],
   });
   await enqueueMeetingAgendaPreparation(actor, { workspaceId });
+  refresh(workspaceId);
+}
+
+export async function scheduleManualMeetingRecordingAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  const joinAt = parseDateTimeLocalWithOffset(
+    asString(formData, "joinAt"),
+    asOptional(formData, "joinAtTimezoneOffsetMinutes"),
+  );
+  const scheduledEndAtRaw = asOptional(formData, "scheduledEndAt");
+  const scheduledEndAt = scheduledEndAtRaw
+    ? parseDateTimeLocalWithOffset(scheduledEndAtRaw, asOptional(formData, "joinAtTimezoneOffsetMinutes"))
+    : null;
+  const meeting = await createScheduledMeeting(actor, {
+    workspaceId,
+    title: asString(formData, "title"),
+    startsAt: joinAt,
+    scheduledEndAt,
+    meetingUrl: asString(formData, "meetingUrl"),
+    participantEmails: asOptional(formData, "participantEmails")?.split(",").map((value) => value.trim()).filter(Boolean) ?? [],
+    source: "manual-recorder",
+  });
+  await scheduleMeetingRecording(actor, {
+    workspaceId,
+    meetingId: meeting.id,
+    mode: "manual",
+  });
   refresh(workspaceId);
 }
 
