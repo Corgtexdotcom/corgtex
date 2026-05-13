@@ -117,8 +117,8 @@ export default function CircleDetailPanel({
                       {role.purposeMd && <div className="nr-excerpt" style={{ fontSize: "0.8rem", marginTop: 4 }}>{role.purposeMd}</div>}
                       {(role.accountabilities?.length || 0) > 0 && (
                         <ul className="circle-detail-accountabilities">
-                          {(role.accountabilities ?? []).slice(0, 4).map((accountability) => (
-                            <li key={accountability}>{accountability}</li>
+                          {(role.accountabilities ?? []).slice(0, 4).map((accountability, accountabilityIndex) => (
+                            <li key={`${role.id}-accountability-${accountabilityIndex}`}>{accountability}</li>
                           ))}
                         </ul>
                       )}

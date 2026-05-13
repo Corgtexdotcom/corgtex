@@ -119,8 +119,8 @@ export default function ExpandedCircleNode({ data, selected }: { data: ExpandedC
               {role.purposeMd && <div className="role-card-purpose">{role.purposeMd}</div>}
               {accountabilities.length > 0 && (
                 <ul className="role-card-accountabilities">
-                  {accountabilities.slice(0, 2).map((accountability) => (
-                    <li key={accountability}>{accountability}</li>
+                  {accountabilities.slice(0, 2).map((accountability, accountabilityIndex) => (
+                    <li key={`${role.id}-accountability-${accountabilityIndex}`}>{accountability}</li>
                   ))}
                 </ul>
               )}
