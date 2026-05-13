@@ -15,6 +15,10 @@ export const WORKSPACE_ADD_ACTION_DEFINITIONS = {
     label: "Upload transcript",
     description: "Ingest a completed meeting transcript.",
   },
+  meeting_manual_recording: {
+    label: "Record meeting manually",
+    description: "Schedule a recorder for a meeting link.",
+  },
   action: {
     label: "Action",
     description: "Create a new action draft.",
@@ -127,6 +131,7 @@ export type WorkspaceAddActionContext = {
   featureFlags: WorkspaceFeatureFlagMap;
   role?: MemberRole | null;
   invitePolicy?: WorkspaceAddInvitePolicy | null;
+  meetingRecorderEnabled?: boolean;
   isDemo?: boolean;
 };
 
@@ -180,6 +185,10 @@ function canInviteMembers(context: WorkspaceAddActionContext) {
   return isAdmin(context.role) || context.invitePolicy === "MEMBERS_CAN_INVITE" || context.invitePolicy === "MEMBERS_CAN_REQUEST";
 }
 
+function canRecordMeetingsManually(context: WorkspaceAddActionContext) {
+  return Boolean(context.meetingRecorderEnabled && (context.role === "ADMIN" || context.role === "FACILITATOR"));
+}
+
 export function getWorkspaceAddActions(context: WorkspaceAddActionContext): WorkspaceAddAction[] {
   if (context.isDemo) return [];
 
@@ -189,7 +198,12 @@ export function getWorkspaceAddActions(context: WorkspaceAddActionContext): Work
 
   switch (segment) {
     case "meetings":
-      return [action("meeting_schedule"), action("meeting_invite"), action("meeting_transcript")];
+      return [
+        action("meeting_schedule"),
+        action("meeting_invite"),
+        action("meeting_transcript"),
+        ...(canRecordMeetingsManually(context) ? [action("meeting_manual_recording")] : []),
+      ];
     case "actions":
       return [action("action")];
     case "tensions":

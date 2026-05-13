@@ -4,6 +4,7 @@ import {
   createCatalogRequest,
   createExternalDataSource,
   createWorkspaceToolLink,
+  getMeetingRecorderConfig,
   getMemberInvitePolicy,
   ingestSource,
   intakeMeetingTranscript,
@@ -52,6 +53,7 @@ import {
   inviteMemberAction,
   provisionProspectWorkspaceAction,
   requestMemberInviteAction,
+  scheduleManualMeetingRecordingAction,
   uploadMeetingTranscriptAction,
 } from "../actions";
 import { createArticleAction } from "../brain/actions";
@@ -73,6 +75,27 @@ const GOAL_LEVELS: GoalLevel[] = ["COMPANY", "CIRCLE", "PERSONAL"];
 const GOAL_STATUSES: GoalStatus[] = ["ACTIVE", "ON_TRACK", "AT_RISK", "BEHIND", "COMPLETED", "DRAFT", "ABANDONED"];
 const ARTICLE_TYPES: BrainArticleType[] = ["PRODUCT", "ARCHITECTURE", "PROCESS", "RUNBOOK", "DECISION", "TEAM", "PERSON", "CUSTOMER", "INCIDENT", "PROJECT", "INTEGRATION", "PATTERN", "STRATEGY", "CULTURE", "GLOSSARY"];
 const SOURCE_TYPES: BrainSourceType[] = ["MEETING", "TICKET", "PR", "RFC", "INCIDENT", "SLACK", "CUSTOMER_FEEDBACK", "COMPETITOR", "RESEARCH", "ARTICLE", "DOC", "RUNBOOK", "EMAIL", "FILE_UPLOAD"];
+const LOCAL_DATETIME_OFFSET_SCRIPT = `
+(() => {
+  const script = document.currentScript;
+  const form = script?.closest("form");
+  const pairs = [
+    [form?.querySelector('input[name="joinAt"]'), form?.querySelector('input[name="joinAtTimezoneOffsetMinutes"]')],
+    [form?.querySelector('input[name="scheduledEndAt"]'), form?.querySelector('input[name="scheduledEndAtTimezoneOffsetMinutes"]')],
+  ];
+  const sync = (input, offset) => {
+    if (!(input instanceof HTMLInputElement) || !(offset instanceof HTMLInputElement)) return;
+    offset.value = input.value ? String(new Date(input.value).getTimezoneOffset()) : String(new Date().getTimezoneOffset());
+  };
+  for (const [input, offset] of pairs) {
+    if (!(input instanceof HTMLInputElement) || !(offset instanceof HTMLInputElement)) continue;
+    const update = () => sync(input, offset);
+    input.addEventListener("input", update);
+    input.addEventListener("change", update);
+    update();
+  }
+})();
+`;
 
 function splitList(value: string | null) {
   return (value ?? "")
@@ -128,6 +151,12 @@ export default async function WorkspaceAddPage({
   ]);
   const isDemo = currentWorkspace?.slug === "jnj-demo";
   if (isDemo) notFound();
+  const meetingRecorderConfig = featureFlags.MEETING_RECORDERS
+    ? await getMeetingRecorderConfig(actor, workspaceId).catch(() => null)
+    : null;
+  const meetingRecorderEnabled = Boolean(
+    featureFlags.MEETING_RECORDERS && meetingRecorderConfig?.featureEnabled && meetingRecorderConfig.config.enabled,
+  );
 
   const returnTo = sanitizeWorkspaceReturnTo(workspaceId, search.returnTo);
   const returnUrl = new URL(returnTo, "https://app.local");
@@ -138,6 +167,7 @@ export default async function WorkspaceAddPage({
     featureFlags,
     role: membership?.role ?? null,
     invitePolicy,
+    meetingRecorderEnabled,
     isDemo,
   });
   if (!allowedActions.some((action) => action.kind === kind)) notFound();
@@ -262,6 +292,12 @@ export default async function WorkspaceAddPage({
   async function uploadMeetingTranscriptAndReturn(formData: FormData) {
     "use server";
     await uploadMeetingTranscriptAction(formData);
+    redirect(returnTo);
+  }
+
+  async function recordMeetingManuallyAndReturn(formData: FormData) {
+    "use server";
+    await scheduleManualMeetingRecordingAction(formData);
     redirect(returnTo);
   }
 
@@ -500,6 +536,23 @@ export default async function WorkspaceAddPage({
             <label>Transcript file<input name="file" type="file" accept=".txt,.md,.csv,.json,.pdf,.docx" /></label>
             <label>Transcript<textarea name="transcript" rows={8} /></label>
             <div className="actions-inline"><button type="submit">Upload transcript</button>{cancelLink(returnTo)}</div>
+          </form>
+        )}
+
+        {kind === "meeting_manual_recording" && (
+          <form action={recordMeetingManuallyAndReturn} className="stack nr-form-section">
+            {hiddenWorkspace(workspaceId)}
+            <label>Title<input name="title" required /></label>
+            <label>Meeting URL<input name="meetingUrl" type="url" placeholder="https://teams.microsoft.com/l/meetup-join/..." required /></label>
+            <div className="actions-inline">
+              <label style={{ flex: 1 }}>Meeting time<input name="joinAt" type="datetime-local" required /></label>
+              <label style={{ flex: 1 }}>Ends at<input name="scheduledEndAt" type="datetime-local" /></label>
+            </div>
+            <input name="joinAtTimezoneOffsetMinutes" type="hidden" value="0" />
+            <input name="scheduledEndAtTimezoneOffsetMinutes" type="hidden" value="0" />
+            <script dangerouslySetInnerHTML={{ __html: LOCAL_DATETIME_OFFSET_SCRIPT }} />
+            <label>Participant emails<input name="participantEmails" placeholder="one@example.com, two@example.com" /></label>
+            <div className="actions-inline"><button type="submit">Record meeting</button>{cancelLink(returnTo)}</div>
           </form>
         )}
 
