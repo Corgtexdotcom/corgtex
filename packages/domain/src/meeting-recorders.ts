@@ -19,7 +19,10 @@ const DEFAULT_ENTRY_MESSAGE = "Corgtex Recorder is joining to transcribe this me
 const DEFAULT_MONTHLY_MINUTE_CAP = 6000;
 const AUTO_SCHEDULE_MIN_LEAD_MS = 10 * 60 * 1000;
 const STALE_RECORDING_TIMEOUT_MS = 6 * 60 * 60 * 1000;
+const RECALL_TRANSCRIPT_RECOVERY_GRACE_MS = 20 * 60 * 1000;
+const FALLBACK_MEETING_DURATION_MS = 90 * 60 * 1000;
 const ACTIVE_RECORDING_STATUSES: MeetingRecordingStatus[] = ["PENDING", "SCHEDULED", "JOINING", "RECORDING"];
+const RECOVERABLE_RECALL_RECORDING_STATUSES: MeetingRecordingStatus[] = [...ACTIVE_RECORDING_STATUSES, "COMPLETED"];
 const RETRYABLE_VENDOR_STATUSES = new Set([408, 409, 425, 429, 500, 502, 503, 504, 507]);
 const RECORDER_LOG_COMPONENT = "meeting-recorder";
 const RECORDER_CALENDAR_SYNC_LOOKAHEAD_MS = 30 * 24 * 60 * 60 * 1000;
@@ -652,13 +655,19 @@ async function fetchRecallTranscriptArtifact(params: { transcriptId?: string | n
   }
 
   if (!downloadUrl && params.externalBotId) {
-    metadata = await fetchJson(`https://${env.RECALL_REGION}.recall.ai/api/v1/bot/${params.externalBotId}/`, {
+    const transcriptPayload = await fetchJson(`https://${env.RECALL_REGION}.recall.ai/api/v1/bot/${params.externalBotId}/transcript/`, {
       headers: {
         Authorization: recallAuthorization(apiKey),
         accept: "application/json",
       },
     });
-    downloadUrl = findFirstUrl(metadata, "download_url");
+    return {
+      transcriptPayload,
+      metadata: {
+        source: "bot_transcript_endpoint",
+        externalBotId: params.externalBotId,
+      },
+    };
   }
 
   invariant(downloadUrl, 404, "RECORDER_TRANSCRIPT_NOT_READY", "Recall transcript is not ready.");
@@ -669,6 +678,16 @@ async function fetchRecallTranscriptArtifact(params: { transcriptId?: string | n
     },
   });
   return { transcriptPayload, metadata };
+}
+
+async function fetchRecallBot(externalBotId: string) {
+  const apiKey = requireVendorSecret("RECALL_AI");
+  return fetchJson(`https://${env.RECALL_REGION}.recall.ai/api/v1/bot/${externalBotId}/`, {
+    headers: {
+      Authorization: recallAuthorization(apiKey),
+      accept: "application/json",
+    },
+  });
 }
 
 async function fetchMeetingBaasTranscriptArtifact(externalBotId: string, transcriptUrl?: string | null) {
@@ -691,25 +710,6 @@ async function fetchMeetingBaasTranscriptArtifact(externalBotId: string, transcr
     },
   });
   return { transcriptPayload, metadata };
-}
-
-function findFirstUrl(value: unknown, keyHint: string): string | null {
-  if (isRecord(value)) {
-    for (const [key, item] of Object.entries(value)) {
-      if (key === keyHint && typeof item === "string" && item.startsWith("http")) {
-        return item;
-      }
-      const nested = findFirstUrl(item, keyHint);
-      if (nested) return nested;
-    }
-  }
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      const nested = findFirstUrl(item, keyHint);
-      if (nested) return nested;
-    }
-  }
-  return null;
 }
 
 function providerSchedule(provider: MeetingRecorderProvider, input: MeetingRecorderScheduleInput) {
@@ -771,6 +771,8 @@ async function recorderVendorMetadata(params: { workspaceId: string; meetingId: 
 }
 
 export function normalizeProviderTranscript(payload: unknown) {
+  const hasStructuredTranscript = Array.isArray(payload)
+    || (isRecord(payload) && (Array.isArray(payload.segments) || Array.isArray(payload.transcript) || Array.isArray(payload.words)));
   const entries = Array.isArray(payload)
     ? payload
     : isRecord(payload) && Array.isArray(payload.segments)
@@ -813,6 +815,10 @@ export function normalizeProviderTranscript(payload: unknown) {
 
   if (lines.length > 0) {
     return lines.join("\n");
+  }
+
+  if (hasStructuredTranscript) {
+    return "";
   }
 
   return JSON.stringify(payload, null, 2);
@@ -2230,6 +2236,107 @@ function shouldFetchTranscript(provider: MeetingRecorderProvider, event: Provide
   return event.eventType === "bot.completed" || event.status === "COMPLETED";
 }
 
+async function markRecordingTranscriptEmpty(
+  provider: MeetingRecorderProvider,
+  recording: MeetingRecording,
+  artifact: { metadata: unknown },
+  tx: Prisma.TransactionClient,
+) {
+  await tx.meetingRecording.update({
+    where: { id: recording.id },
+    data: {
+      status: "COMPLETED",
+      activeDedupeKey: null,
+      transcriptProcessedAt: new Date(),
+      failureCode: "RECORDER_TRANSCRIPT_EMPTY",
+      failureMessage: "Provider transcript was empty.",
+      providerMetadata: redactProviderArtifactUrls(artifact.metadata),
+    },
+  });
+  await tx.meetingRecorderSmokeRun.updateMany({
+    where: {
+      recordingId: recording.id,
+      status: { in: ["PENDING", "SCHEDULED"] },
+    },
+    data: {
+      status: "FAILED",
+      failureMessage: "Provider transcript was empty.",
+      completedAt: new Date(),
+    },
+  });
+  recorderLog("info", "transcript_empty", {
+    workspaceId: recording.workspaceId,
+    meetingId: recording.meetingId,
+    recordingId: recording.id,
+    provider,
+  });
+}
+
+async function completeRecordingWithTranscriptArtifact(
+  provider: MeetingRecorderProvider,
+  recording: MeetingRecording,
+  artifact: { transcriptPayload: unknown; metadata: unknown },
+) {
+  const transcript = normalizeProviderTranscript(artifact.transcriptPayload);
+  const completed = await prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${recording.id}, 0))`;
+    const current = await tx.meetingRecording.findUnique({
+      where: { id: recording.id },
+      select: { transcriptProcessedAt: true },
+    });
+    if (!current || current.transcriptProcessedAt) {
+      return false;
+    }
+
+    if (transcript.trim().length === 0) {
+      await markRecordingTranscriptEmpty(provider, recording, artifact, tx);
+      return false;
+    }
+
+    const actor = systemRecorderActor(recording.workspaceId);
+    await intakeMeetingTranscript(actor, {
+      workspaceId: recording.workspaceId,
+      meetingId: recording.meetingId,
+      source: `recorder:${provider.toLowerCase()}`,
+      recordedAt: recording.startedAt ?? recording.joinAt ?? recording.createdAt,
+      transcript,
+    });
+
+    await tx.meetingRecording.update({
+      where: { id: recording.id },
+      data: {
+        status: "COMPLETED",
+        activeDedupeKey: null,
+        transcriptProcessedAt: new Date(),
+        failureCode: null,
+        failureMessage: null,
+        providerMetadata: redactProviderArtifactUrls(artifact.metadata),
+      },
+    });
+    await tx.meetingRecorderSmokeRun.updateMany({
+      where: {
+        recordingId: recording.id,
+        status: { in: ["PENDING", "SCHEDULED"] },
+      },
+      data: {
+        status: "COMPLETED",
+        completedAt: new Date(),
+      },
+    });
+    return true;
+  }, { timeout: 120_000 });
+
+  if (completed) {
+    recorderLog("info", "transcript_ingested", {
+      workspaceId: recording.workspaceId,
+      meetingId: recording.meetingId,
+      recordingId: recording.id,
+      provider,
+    });
+  }
+  return completed;
+}
+
 async function ingestProviderTranscript(provider: MeetingRecorderProvider, recording: MeetingRecording, event: ProviderWebhookEvent) {
   if (recording.transcriptProcessedAt) {
     return;
@@ -2241,43 +2348,7 @@ async function ingestProviderTranscript(provider: MeetingRecorderProvider, recor
       externalBotId: recording.externalBotId,
     })
     : await fetchMeetingBaasTranscriptArtifact(recording.externalBotId ?? event.externalBotId ?? "", event.transcriptUrl);
-  const transcript = normalizeProviderTranscript(artifact.transcriptPayload);
-  invariant(transcript.trim().length > 0, 422, "RECORDER_TRANSCRIPT_EMPTY", "Provider transcript was empty.");
-
-  const actor = systemRecorderActor(recording.workspaceId);
-  await intakeMeetingTranscript(actor, {
-    workspaceId: recording.workspaceId,
-    meetingId: recording.meetingId,
-    source: `recorder:${provider.toLowerCase()}`,
-    recordedAt: recording.startedAt ?? recording.joinAt ?? recording.createdAt,
-    transcript,
-  });
-
-  await prisma.meetingRecording.update({
-    where: { id: recording.id },
-    data: {
-      status: "COMPLETED",
-      activeDedupeKey: null,
-      transcriptProcessedAt: new Date(),
-      providerMetadata: redactProviderArtifactUrls(artifact.metadata),
-    },
-  });
-  await prisma.meetingRecorderSmokeRun.updateMany({
-    where: {
-      recordingId: recording.id,
-      status: { in: ["PENDING", "SCHEDULED"] },
-    },
-    data: {
-      status: "COMPLETED",
-      completedAt: new Date(),
-    },
-  });
-  recorderLog("info", "transcript_ingested", {
-    workspaceId: recording.workspaceId,
-    meetingId: recording.meetingId,
-    recordingId: recording.id,
-    provider,
-  });
+  await completeRecordingWithTranscriptArtifact(provider, recording, artifact);
 }
 
 export function extractSupportedMeetingUrlFromText(value?: string | null) {
@@ -2414,7 +2485,154 @@ export async function syncCalendarEventRecorder(params: {
   return { action: "scheduled" as const, meeting, recording };
 }
 
+type RecoverableRecallRecording = MeetingRecording & {
+  meeting: {
+    recordedAt: Date;
+    scheduledEndAt: Date | null;
+  };
+};
+
+function recallRecoveryReadyAt(recording: RecoverableRecallRecording) {
+  const expectedEnd = recording.meeting.scheduledEndAt
+    ?? (recording.joinAt
+      ? new Date(recording.joinAt.getTime() + FALLBACK_MEETING_DURATION_MS)
+      : new Date(recording.meeting.recordedAt.getTime() + FALLBACK_MEETING_DURATION_MS));
+  return new Date(expectedEnd.getTime() + RECALL_TRANSCRIPT_RECOVERY_GRACE_MS);
+}
+
+async function findRecoverableRecallRecording(recordingId: string) {
+  const recording = await prisma.meetingRecording.findUnique({
+    where: { id: recordingId },
+    include: {
+      meeting: {
+        select: {
+          recordedAt: true,
+          scheduledEndAt: true,
+        },
+      },
+    },
+  });
+  if (!recording || recording.provider !== "RECALL_AI") {
+    return null;
+  }
+  return recording as RecoverableRecallRecording;
+}
+
+function recallBotTerminalStatus(bot: unknown) {
+  const data = isRecord(bot) && isRecord(bot.data) ? bot.data : bot;
+  if (!isRecord(data)) return null;
+
+  const direct = readString(data.status) ?? readString(data.status_code);
+  if (direct) return direct.toLowerCase();
+
+  const changes = Array.isArray(data.status_changes) ? data.status_changes : [];
+  for (let index = changes.length - 1; index >= 0; index -= 1) {
+    const change = isRecord(changes[index]) ? changes[index] : {};
+    const nested = firstRecord(change.data, change.status);
+    const code = readString(change.code)
+      ?? readString(change.status)
+      ?? readString(nested?.code)
+      ?? readString(nested?.status);
+    if (code) return code.toLowerCase();
+  }
+  return null;
+}
+
+function recallBotIsDone(bot: unknown) {
+  return recallBotTerminalStatus(bot) === "done";
+}
+
+function transcriptRecoveryIsPending(error: unknown) {
+  if (error instanceof AppError) {
+    return error.code === "RECORDER_TRANSCRIPT_NOT_READY";
+  }
+  if (error instanceof ProviderRequestError) {
+    return error.status === 404 || error.status === 409 || error.status === 425;
+  }
+  return false;
+}
+
+async function recoverRecallTranscripts(workspaceId: string) {
+  const now = new Date();
+  const recordings = await prisma.meetingRecording.findMany({
+    where: {
+      workspaceId,
+      provider: "RECALL_AI",
+      transcriptProcessedAt: null,
+      externalBotId: { not: null },
+      OR: [
+        { status: { in: RECOVERABLE_RECALL_RECORDING_STATUSES } },
+        { status: "FAILED", failureCode: "STALE_RECORDER" },
+      ],
+    },
+    include: {
+      meeting: {
+        select: {
+          recordedAt: true,
+          scheduledEndAt: true,
+        },
+      },
+    },
+  }) as RecoverableRecallRecording[];
+
+  let recovered = 0;
+  for (const recording of recordings) {
+    if (!recording.externalBotId || recallRecoveryReadyAt(recording) > now) {
+      continue;
+    }
+
+    try {
+      const current = await findRecoverableRecallRecording(recording.id);
+      if (!current || current.transcriptProcessedAt || !current.externalBotId) {
+        continue;
+      }
+
+      const bot = await fetchRecallBot(current.externalBotId);
+      if (!recallBotIsDone(bot)) {
+        continue;
+      }
+      const artifact = await fetchRecallTranscriptArtifact({ externalBotId: current.externalBotId });
+      const latest = await findRecoverableRecallRecording(recording.id);
+      if (!latest || latest.transcriptProcessedAt || !latest.externalBotId) {
+        continue;
+      }
+
+      const completed = await completeRecordingWithTranscriptArtifact("RECALL_AI", latest, artifact);
+      if (completed) {
+        recovered += 1;
+        recorderLog("info", "reconcile_recall_transcript_recovered", {
+          workspaceId,
+          meetingId: latest.meetingId,
+          recordingId: latest.id,
+          provider: latest.provider,
+        });
+      }
+    } catch (error) {
+      if (transcriptRecoveryIsPending(error)) {
+        recorderLog("info", "reconcile_recall_transcript_pending", {
+          workspaceId,
+          meetingId: recording.meetingId,
+          recordingId: recording.id,
+          provider: recording.provider,
+          failureCode: providerFailureCode(error),
+        });
+        continue;
+      }
+      recorderLog("warn", "reconcile_recall_transcript_failed", {
+        workspaceId,
+        meetingId: recording.meetingId,
+        recordingId: recording.id,
+        provider: recording.provider,
+        failureCode: providerFailureCode(error),
+      });
+    }
+  }
+
+  return recovered;
+}
+
 export async function reconcileMeetingRecorders(workspaceId: string) {
+  const recoveredTranscripts = await recoverRecallTranscripts(workspaceId);
   const staleBefore = new Date(Date.now() - STALE_RECORDING_TIMEOUT_MS);
   const stale = await prisma.meetingRecording.findMany({
     where: {
@@ -2452,5 +2670,5 @@ export async function reconcileMeetingRecorders(workspaceId: string) {
       redactedAt: new Date(),
     },
   });
-  return { staleFailed: stale.length };
+  return { staleFailed: stale.length, recoveredTranscripts };
 }
