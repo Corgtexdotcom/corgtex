@@ -698,8 +698,11 @@ button:disabled {
 .workspace-add-item {
   width: 100%;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 2px;
+  justify-content: stretch;
   justify-items: start;
+  align-items: start;
   padding: 10px;
   border-radius: 6px;
   border: 0;
@@ -717,14 +720,18 @@ button:disabled {
 }
 
 .workspace-add-item-label {
+  width: 100%;
   font-size: 0.92rem;
   font-weight: 700;
+  overflow-wrap: anywhere;
 }
 
 .workspace-add-item-description {
+  width: 100%;
   color: var(--muted);
   font-size: 0.8rem;
   line-height: 1.3;
+  overflow-wrap: anywhere;
 }
 
 .ws-agent-sidebar {
@@ -775,6 +782,11 @@ button:disabled {
   width: 36px;
   height: 36px;
   padding: 0;
+}
+
+.ws-agent-sidebar:not(.ws-agent-sidebar-collapsed) .ws-agent-chat-shell .chat-header,
+.ws-agent-sidebar:not(.ws-agent-sidebar-collapsed) .ws-agent-chat-shell .chat-sidebar-header {
+  padding-right: 108px;
 }
 
 .ws-agent-toggle-icon {
@@ -2806,6 +2818,17 @@ a.wiki-list-item:hover {
     min-height: 56px;
     padding: 10px 12px;
     background: var(--surface-strong);
+    gap: 8px;
+  }
+
+  .mobile-ai-workbench .chat-header > div {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+
+  .mobile-ai-workbench .chat-new-btn,
+  .mobile-ai-workbench .chat-fullscreen-toggle {
+    flex: 0 0 auto;
   }
 
   .mobile-ai-workbench .chat-messages {
