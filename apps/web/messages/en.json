@@ -491,19 +491,6 @@
     "closePanel": "Close panel",
     "roleCount": "{count, plural, one {# role} other {# roles}}"
   },
-  "commandPalette": {
-    "createTension": "Create Tension",
-    "createTensionDesc": "Log a new tension",
-    "navigation": "Navigation",
-    "newAction": "New Action",
-    "newActionDesc": "Track a new task",
-    "newProposal": "New Proposal",
-    "newProposalDesc": "Draft a new proposal",
-    "noResults": "No results found for \"{query}\"",
-    "placeholder": "Type a command or search...",
-    "quickActions": "Quick Actions",
-    "switchWorkspace": "Switch Workspace"
-  },
   "common": {
     "aiBriefing": "AI briefing",
     "aiBriefingEmpty": "Generate a concise briefing for this member.",
@@ -511,7 +498,6 @@
     "approve": "Approve",
     "briefingFailed": "Could not generate the briefing.",
     "cancel": "Cancel",
-    "commandMenu": "Command menu",
     "error": "An error occurred",
     "generate": "Generate",
     "generating": "Generating...",
@@ -530,12 +516,8 @@
     "aiMode": "AI",
     "aiWorkbenchLabel": "AI workspace",
     "bottomNavLabel": "Mobile workspace navigation",
-    "close": "Close",
     "modeSwitchLabel": "Mobile mode",
-    "more": "More",
-    "openAi": "Open AI mode",
     "shellLabel": "Mobile workspace shell",
-    "userSettings": "User settings",
     "workspaceMode": "Workspace"
   },
   "cycles": {
