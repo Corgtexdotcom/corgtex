@@ -7,3 +7,5 @@
 # The token is also annotated with gitleaks:allow in the source file but the
 # original commit (856070c) pre-dates that annotation.
 856070c6d34bf74bdb05131c6f4c6dae3785dca9:apps/web/app/.well-known/openai-apps-challenge/route.ts:generic-api-key:6
+# Same token rotated when MCP URL was reverted — second value also high entropy.
+2060d24c51362877dd8fbd943cf1f9cf4924ec7b:apps/web/app/.well-known/openai-apps-challenge/route.ts:generic-api-key:6
