@@ -1,0 +1,9 @@
+# Suppressed gitleaks findings that are intentionally not secrets.
+# Each line is a fingerprint: commit:file:rule:line
+# See: https://github.com/gitleaks/gitleaks?tab=readme-ov-file#gitleaksignore
+
+# OpenAI domain verification challenge token — public, non-secret token issued
+# by platform.openai.com for ChatGPT Apps directory domain ownership proof.
+# The token is also annotated with gitleaks:allow in the source file but the
+# original commit (856070c) pre-dates that annotation.
+856070c6d34bf74bdb05131c6f4c6dae3785dca9:apps/web/app/.well-known/openai-apps-challenge/route.ts:generic-api-key:6
