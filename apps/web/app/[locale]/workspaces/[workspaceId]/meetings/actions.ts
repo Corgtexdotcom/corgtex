@@ -8,6 +8,7 @@ import {
   createMeetingSeries,
   createScheduledMeeting,
   deleteMeeting,
+  discardManualScheduledMeeting,
   enqueueMeetingAgendaPreparation,
   extractMeetingInsights,
   importMeetingInvite,
@@ -29,18 +30,51 @@ const LOCAL_DATETIME_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{
 
 function parseDateTimeLocalWithOffset(value: string, offsetMinutesRaw: string | null) {
   const match = value.match(LOCAL_DATETIME_PATTERN);
-  const offsetMinutes = offsetMinutesRaw === null ? NaN : Number(offsetMinutesRaw);
+  const offsetMinutes = offsetMinutesRaw === null || offsetMinutesRaw.trim() === "" ? 0 : Number(offsetMinutesRaw);
   if (!match || !Number.isInteger(offsetMinutes)) {
     throw new Error("Meeting time must be a valid local datetime.");
   }
   const [, year, month, day, hour, minute, second = "0"] = match;
+  const parts = {
+    year: Number(year),
+    month: Number(month),
+    day: Number(day),
+    hour: Number(hour),
+    minute: Number(minute),
+    second: Number(second),
+  };
+  const local = new Date(Date.UTC(
+    parts.year,
+    parts.month - 1,
+    parts.day,
+    parts.hour,
+    parts.minute,
+    parts.second,
+  ));
+  const validLocalParts = parts.month >= 1
+    && parts.month <= 12
+    && parts.hour >= 0
+    && parts.hour <= 23
+    && parts.minute >= 0
+    && parts.minute <= 59
+    && parts.second >= 0
+    && parts.second <= 59
+    && local.getUTCFullYear() === parts.year
+    && local.getUTCMonth() === parts.month - 1
+    && local.getUTCDate() === parts.day
+    && local.getUTCHours() === parts.hour
+    && local.getUTCMinutes() === parts.minute
+    && local.getUTCSeconds() === parts.second;
+  if (!validLocalParts) {
+    throw new Error("Meeting time must be a valid local datetime.");
+  }
   const parsed = new Date(Date.UTC(
-    Number(year),
-    Number(month) - 1,
-    Number(day),
-    Number(hour),
-    Number(minute),
-    Number(second),
+    parts.year,
+    parts.month - 1,
+    parts.day,
+    parts.hour,
+    parts.minute,
+    parts.second,
   ) + offsetMinutes * 60_000);
   if (Number.isNaN(parsed.valueOf())) {
     throw new Error("Meeting time must be a valid local datetime.");
@@ -104,7 +138,7 @@ export async function scheduleManualMeetingRecordingAction(formData: FormData) {
   );
   const scheduledEndAtRaw = asOptional(formData, "scheduledEndAt");
   const scheduledEndAt = scheduledEndAtRaw
-    ? parseDateTimeLocalWithOffset(scheduledEndAtRaw, asOptional(formData, "joinAtTimezoneOffsetMinutes"))
+    ? parseDateTimeLocalWithOffset(scheduledEndAtRaw, asOptional(formData, "scheduledEndAtTimezoneOffsetMinutes"))
     : null;
   const meeting = await createScheduledMeeting(actor, {
     workspaceId,
@@ -115,11 +149,19 @@ export async function scheduleManualMeetingRecordingAction(formData: FormData) {
     participantEmails: asOptional(formData, "participantEmails")?.split(",").map((value) => value.trim()).filter(Boolean) ?? [],
     source: "manual-recorder",
   });
-  await scheduleMeetingRecording(actor, {
-    workspaceId,
-    meetingId: meeting.id,
-    mode: "manual",
-  });
+  try {
+    const recording = await scheduleMeetingRecording(actor, {
+      workspaceId,
+      meetingId: meeting.id,
+      mode: "manual",
+    });
+    if (recording.status === "FAILED") {
+      throw new Error(recording.failureMessage ?? "Recorder scheduling failed.");
+    }
+  } catch (error) {
+    await discardManualScheduledMeeting(actor, { workspaceId, meetingId: meeting.id }).catch(() => undefined);
+    throw error;
+  }
   refresh(workspaceId);
 }
 

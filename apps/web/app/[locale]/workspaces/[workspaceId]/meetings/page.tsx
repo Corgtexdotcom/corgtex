@@ -79,10 +79,11 @@ export default async function MeetingsPage({
                   <input name="scheduledEndAt" type="datetime-local" />
                 </label>
               </div>
-              <input name="joinAtTimezoneOffsetMinutes" type="hidden" value="" />
+              <input name="joinAtTimezoneOffsetMinutes" type="hidden" value="0" />
+              <input name="scheduledEndAtTimezoneOffsetMinutes" type="hidden" value="0" />
               <script
                 dangerouslySetInnerHTML={{
-                  __html: "(() => { const script = document.currentScript; const form = script?.closest('form'); const joinAt = form?.querySelector('input[name=\"joinAt\"]'); const offset = form?.querySelector('input[name=\"joinAtTimezoneOffsetMinutes\"]'); if (!(joinAt instanceof HTMLInputElement) || !(offset instanceof HTMLInputElement)) return; const sync = () => { offset.value = joinAt.value ? String(new Date(joinAt.value).getTimezoneOffset()) : String(new Date().getTimezoneOffset()); }; joinAt.addEventListener('input', sync); joinAt.addEventListener('change', sync); sync(); })();",
+                  __html: "(() => { const script = document.currentScript; const form = script?.closest('form'); const pairs = [[form?.querySelector('input[name=\"joinAt\"]'), form?.querySelector('input[name=\"joinAtTimezoneOffsetMinutes\"]')], [form?.querySelector('input[name=\"scheduledEndAt\"]'), form?.querySelector('input[name=\"scheduledEndAtTimezoneOffsetMinutes\"]')]]; const sync = (input, offset) => { if (!(input instanceof HTMLInputElement) || !(offset instanceof HTMLInputElement)) return; offset.value = input.value ? String(new Date(input.value).getTimezoneOffset()) : String(new Date().getTimezoneOffset()); }; for (const [input, offset] of pairs) { if (!(input instanceof HTMLInputElement) || !(offset instanceof HTMLInputElement)) continue; const update = () => sync(input, offset); input.addEventListener('input', update); input.addEventListener('change', update); update(); } })();",
                 }}
               />
               <label>

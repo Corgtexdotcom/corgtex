@@ -11,6 +11,7 @@ const { prismaMock } = vi.hoisted(() => {
       create: vi.fn(),
       upsert: vi.fn(),
       update: vi.fn(),
+      delete: vi.fn(),
     },
     meetingSeries: {
       create: vi.fn(),
@@ -163,6 +164,39 @@ describe("meetings domain", () => {
         participantEmails: ["member@example.com"],
       }),
     });
+  });
+
+  it("discardManualScheduledMeeting removes an orphan manual recorder meeting", async () => {
+    prismaMock.meeting.findFirst.mockResolvedValue({
+      id: "meeting-1",
+      recordings: [],
+    });
+    prismaMock.meeting.delete.mockResolvedValue({ id: "meeting-1" });
+
+    const { discardManualScheduledMeeting } = await import("./meetings");
+    await expect(discardManualScheduledMeeting(actor, {
+      workspaceId: "workspace-1",
+      meetingId: "meeting-1",
+    })).resolves.toEqual({ id: "meeting-1", deleted: true });
+
+    expect(prismaMock.meeting.findFirst).toHaveBeenCalledWith({
+      where: {
+        id: "meeting-1",
+        workspaceId: "workspace-1",
+        status: "SCHEDULED",
+        source: "manual-recorder",
+        archivedAt: null,
+      },
+      select: {
+        id: true,
+        recordings: {
+          where: { status: { in: ["PENDING", "SCHEDULED", "JOINING", "RECORDING"] } },
+          select: { id: true },
+          take: 1,
+        },
+      },
+    });
+    expect(prismaMock.meeting.delete).toHaveBeenCalledWith({ where: { id: "meeting-1" } });
   });
 
   it("createMeetingSeries materializes recurring scheduled meetings", async () => {

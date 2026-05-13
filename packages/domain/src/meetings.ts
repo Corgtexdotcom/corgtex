@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import ICAL from "ical.js";
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
-import type { Meeting, MeetingStatus, Prisma } from "@prisma/client";
+import type { Meeting, MeetingRecordingStatus, MeetingStatus, Prisma } from "@prisma/client";
 import { appendEvents } from "./events";
 import { requireWorkspaceMembership } from "./auth";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
@@ -12,6 +12,7 @@ const DEFAULT_OCCURRENCE_WINDOW_DAYS = 30;
 const TRANSCRIPT_MATCH_WINDOW_MS = 2 * 60 * 60 * 1000;
 const TRANSCRIPT_AUTO_MATCH_THRESHOLD = 0.65;
 const TRANSCRIPT_MATCH_MARGIN = 0.1;
+const ACTIVE_RECORDING_STATUSES_FOR_CLEANUP: MeetingRecordingStatus[] = ["PENDING", "SCHEDULED", "JOINING", "RECORDING"];
 
 type MeetingCandidate = {
   meetingId: string;
@@ -640,6 +641,70 @@ export async function createScheduledMeeting(actor: AppActor, params: {
     ]);
 
     return meeting;
+  });
+}
+
+export async function discardManualScheduledMeeting(actor: AppActor, params: {
+  workspaceId: string;
+  meetingId: string;
+}) {
+  await requireWorkspaceMembership({
+    actor,
+    workspaceId: params.workspaceId,
+    allowedRoles: ["ADMIN", "FACILITATOR"],
+  });
+
+  return prisma.$transaction(async (tx) => {
+    const meeting = await tx.meeting.findFirst({
+      where: {
+        id: params.meetingId,
+        workspaceId: params.workspaceId,
+        status: "SCHEDULED",
+        source: "manual-recorder",
+        archivedAt: null,
+      },
+      select: {
+        id: true,
+        recordings: {
+          where: { status: { in: ACTIVE_RECORDING_STATUSES_FOR_CLEANUP } },
+          select: { id: true },
+          take: 1,
+        },
+      },
+    });
+    if (!meeting) {
+      return { id: params.meetingId, deleted: false };
+    }
+    invariant(meeting.recordings.length === 0, 409, "RECORDER_ALREADY_SCHEDULING", "Manual meeting has an active recorder.");
+
+    await tx.meeting.delete({ where: { id: meeting.id } });
+    await tx.auditLog.create({
+      data: {
+        workspaceId: params.workspaceId,
+        actorUserId: actor.kind === "user" ? actor.user.id : null,
+        action: "meeting.manual_schedule_discarded",
+        entityType: "Meeting",
+        entityId: meeting.id,
+        meta: {
+          reason: "Recorder scheduling failed before the manual meeting could be finalized.",
+        },
+      },
+    });
+
+    await appendEvents(tx, [
+      {
+        workspaceId: params.workspaceId,
+        type: "meeting.manual_schedule_discarded",
+        aggregateType: "Meeting",
+        aggregateId: meeting.id,
+        payload: {
+          meetingId: meeting.id,
+          reason: "recorder_scheduling_failed",
+        },
+      },
+    ]);
+
+    return { id: meeting.id, deleted: true };
   });
 }
 
