@@ -119,6 +119,23 @@ describe("circle graph layout", () => {
     ).toBe(false);
   });
 
+  it("keeps searching when the dense-graph fallback position is occupied", () => {
+    const draggedNode: Node = {
+      ...makeNode("dragged"),
+      position: { x: 0, y: 0 },
+      data: { nodeWidth: 100, nodeHeight: 100 },
+    };
+    const blocker: Node = {
+      ...makeNode("blocker"),
+      position: { x: -2000, y: -2000 },
+      data: { nodeWidth: 4000, nodeHeight: 4000 },
+    };
+
+    const nextPosition = findNearestFreePosition("dragged", [draggedNode, blocker], defaultOptions);
+
+    expect(overlaps(nextPosition, getDimensions(draggedNode), blocker.position, getDimensions(blocker))).toBe(false);
+  });
+
   it("returns bounds that contain every positioned node", () => {
     const edges: Edge[] = [{ id: "a-b", source: "a", target: "b" }];
     const result = layoutCircleGraph(

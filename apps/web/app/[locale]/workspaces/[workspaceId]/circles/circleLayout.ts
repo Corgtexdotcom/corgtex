@@ -123,6 +123,10 @@ function snapPosition(position: GraphPoint): GraphPoint {
   };
 }
 
+function snapUp(value: number, gridSize: number) {
+  return Math.ceil(value / gridSize) * gridSize;
+}
+
 function rectanglesOverlap(
   aPosition: GraphPoint,
   aDimensions: NodeDimensions,
@@ -192,8 +196,24 @@ export function findNearestFreePosition(
     if (match) return match;
   }
 
-  const nodeDimensions = dimensionsById.get(nodeId) ?? { width: 0, height: 0 };
-  return snapPosition({ x: start.x, y: start.y + nodeDimensions.height + COLLISION_GAP });
+  const maxOccupiedBottom = nodes.reduce((maxBottom, item) => {
+    if (item.id === nodeId) return maxBottom;
+    const dimensions = dimensionsById.get(item.id);
+    if (!dimensions) return maxBottom;
+    return Math.max(maxBottom, item.position.y + dimensions.height);
+  }, start.y);
+  let fallback = {
+    x: start.x,
+    y: snapUp(maxOccupiedBottom + COLLISION_GAP, CIRCLE_SNAP_GRID[1]),
+  };
+
+  while (!isFreePosition(nodeId, fallback, nodes, dimensionsById)) {
+    fallback = {
+      x: fallback.x,
+      y: fallback.y + CIRCLE_SNAP_GRID[1],
+    };
+  }
+  return fallback;
 }
 
 function resolveCollisions(nodes: Node[], options: CircleLayoutOptions) {
