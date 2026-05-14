@@ -93,6 +93,11 @@ describe("ingestion guidance corrections", () => {
       "The website at corporate-rebels.com is live.",
       "The URL for docs is corporate-rebels.com.",
       "Open corporate-rebels.com/login.",
+      "Open corporate-rebels.com?utm=foo.",
+      "Open corporate-rebels.com#docs.",
+      "Open corporate-rebels.com:8443.",
+      "Open <corporate-rebels.com>.",
+      "Open [docs](corporate-rebels.com).",
     ].join("\n");
 
     expect(applyGuidanceTermCorrections(summary, guidance)).toBe([
@@ -106,6 +111,11 @@ describe("ingestion guidance corrections", () => {
       "The website at corporate-rebels.com is live.",
       "The URL for docs is corporate-rebels.com.",
       "Open corporate-rebels.com/login.",
+      "Open corporate-rebels.com?utm=foo.",
+      "Open corporate-rebels.com#docs.",
+      "Open corporate-rebels.com:8443.",
+      "Open <corporate-rebels.com>.",
+      "Open [docs](corporate-rebels.com).",
     ].join("\n"));
   });
 
