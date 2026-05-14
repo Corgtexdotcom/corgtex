@@ -11,6 +11,29 @@ import { appendEvents } from "./events";
 const AUTO_APPLY_CONFIDENCE_THRESHOLD = 0.8;
 const MAX_DIRECT_INSIGHT_TRANSCRIPT_CHARS = 35_000;
 const INSIGHT_TRANSCRIPT_EXCERPT_CHARS = 8_000;
+const MEETING_INSIGHT_TYPES = new Set<MeetingInsightType>([
+  "DECISION",
+  "TENSION",
+  "ACTION_ITEM",
+  "PROPOSAL",
+  "FOLLOW_UP",
+]);
+const MEETING_INSIGHT_TYPE_ALIASES: Record<string, MeetingInsightType> = {
+  ACTION: "ACTION_ITEM",
+  ACTIONS: "ACTION_ITEM",
+  ACTION_ITEMS: "ACTION_ITEM",
+  DECISIONS: "DECISION",
+  FOLLOWUP: "FOLLOW_UP",
+  FOLLOWUPS: "FOLLOW_UP",
+  FOLLOW_UPS: "FOLLOW_UP",
+  PROPOSALS: "PROPOSAL",
+  TENSIONS: "TENSION",
+};
+const RESOLUTION_OUTCOMES = new Set<ProposalResolutionOutcome>([
+  "ADOPTED",
+  "NOT_ADOPTED",
+  "WITHDRAWN",
+]);
 
 function excerptLongTranscript(transcript: string) {
   if (transcript.length <= MAX_DIRECT_INSIGHT_TRANSCRIPT_CHARS) {
@@ -29,6 +52,43 @@ function excerptLongTranscript(transcript: string) {
     `MIDDLE EXCERPT:\n${transcript.slice(middleStart, middleEnd)}`,
     `ENDING EXCERPT:\n${transcript.slice(-INSIGHT_TRANSCRIPT_EXCERPT_CHARS)}`,
   ].join("\n\n---\n\n");
+}
+
+function normalizeInsightType(value: unknown, targetEntityType: string | null): MeetingInsightType | null {
+  if (typeof value !== "string") return null;
+
+  const normalized = value.trim().toUpperCase().replace(/[\s-]+/g, "_");
+  if (MEETING_INSIGHT_TYPES.has(normalized as MeetingInsightType)) {
+    return normalized as MeetingInsightType;
+  }
+
+  const alias = MEETING_INSIGHT_TYPE_ALIASES[normalized];
+  if (alias) {
+    return alias;
+  }
+
+  if (normalized === "RESOLUTION" || normalized === "RESOLUTIONS") {
+    if (targetEntityType === "Action") return "ACTION_ITEM";
+    if (targetEntityType === "Tension") return "TENSION";
+    if (targetEntityType === "Proposal") return "PROPOSAL";
+  }
+
+  return null;
+}
+
+function normalizeResolutionOutcome(
+  value: unknown,
+  operation: "CREATE" | "RESOLVE",
+  targetEntityType: string | null,
+): ProposalResolutionOutcome | null {
+  if (operation !== "RESOLVE" || targetEntityType !== "Proposal" || typeof value !== "string") {
+    return null;
+  }
+
+  const normalized = value.trim().toUpperCase().replace(/[\s-]+/g, "_");
+  return RESOLUTION_OUTCOMES.has(normalized as ProposalResolutionOutcome)
+    ? normalized as ProposalResolutionOutcome
+    : null;
 }
 
 export async function extractMeetingInsights(
@@ -170,27 +230,28 @@ Number items sequentially (#001, #002, ...) across all types.
     });
     
     for (const item of insights) {
-      if (!item.type || !item.title || !item.body) continue;
       const targetEntityType = typeof item.targetEntityType === "string" ? item.targetEntityType : null;
       const targetEntityId = typeof item.targetEntityId === "string" ? item.targetEntityId : null;
       const targetKey = targetEntityType && targetEntityId ? `${targetEntityType}:${targetEntityId}` : null;
       const operation = item.operation === "RESOLVE" && targetKey && validTargets.has(targetKey) ? "RESOLVE" : "CREATE";
+      const type = normalizeInsightType(item.type, operation === "RESOLVE" ? targetEntityType : null);
+      if (!type || typeof item.title !== "string" || typeof item.body !== "string") continue;
       
       const created = await tx.meetingInsight.create({
         data: {
           meetingId: meeting.id,
           workspaceId: params.workspaceId,
-          type: item.type as MeetingInsightType,
+          type,
           operation,
           status: "SUGGESTED",
           title: item.title,
           bodyMd: item.body,
-          assigneeHint: item.assigneeHint || null,
+          assigneeHint: typeof item.assigneeHint === "string" ? item.assigneeHint : null,
           confidence: typeof item.confidence === "number" ? item.confidence : 0,
-          sourceQuote: item.sourceQuote || null,
+          sourceQuote: typeof item.sourceQuote === "string" ? item.sourceQuote.slice(0, 200) : null,
           targetEntityType: operation === "RESOLVE" ? targetEntityType : null,
           targetEntityId: operation === "RESOLVE" ? targetEntityId : null,
-          resolutionOutcome: item.resolutionOutcome || null,
+          resolutionOutcome: normalizeResolutionOutcome(item.resolutionOutcome, operation, targetEntityType),
         },
       });
       createdInsights.push(created);
