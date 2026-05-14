@@ -9,6 +9,27 @@ import { createProposal, submitProposal } from "./proposals";
 import { appendEvents } from "./events";
 
 const AUTO_APPLY_CONFIDENCE_THRESHOLD = 0.8;
+const MAX_DIRECT_INSIGHT_TRANSCRIPT_CHARS = 35_000;
+const INSIGHT_TRANSCRIPT_EXCERPT_CHARS = 8_000;
+
+function excerptLongTranscript(transcript: string) {
+  if (transcript.length <= MAX_DIRECT_INSIGHT_TRANSCRIPT_CHARS) {
+    return transcript;
+  }
+
+  const middleStart = Math.max(
+    INSIGHT_TRANSCRIPT_EXCERPT_CHARS,
+    Math.floor(transcript.length / 2) - Math.floor(INSIGHT_TRANSCRIPT_EXCERPT_CHARS / 2),
+  );
+  const middleEnd = Math.min(transcript.length - INSIGHT_TRANSCRIPT_EXCERPT_CHARS, middleStart + INSIGHT_TRANSCRIPT_EXCERPT_CHARS);
+
+  return [
+    `The full transcript is ${transcript.length} characters and was shortened for extraction to avoid model timeouts. Use summaryMd first, then these transcript excerpts as supporting evidence.`,
+    `BEGINNING EXCERPT:\n${transcript.slice(0, INSIGHT_TRANSCRIPT_EXCERPT_CHARS)}`,
+    `MIDDLE EXCERPT:\n${transcript.slice(middleStart, middleEnd)}`,
+    `ENDING EXCERPT:\n${transcript.slice(-INSIGHT_TRANSCRIPT_EXCERPT_CHARS)}`,
+  ].join("\n\n---\n\n");
+}
 
 export async function extractMeetingInsights(
   actor: AppActor,
@@ -61,6 +82,7 @@ Extract all:
 - RESOLUTIONS: existing actions, tensions, or proposals that the meeting clearly completed, resolved, adopted, rejected, or withdrew
 
 Use any user-provided ingestion guidance to prioritize what matters and what follow-up work the operator wanted highlighted. Do not invent facts from guidance alone. If an item mainly comes from guidance rather than transcript evidence, say that clearly in the body and leave sourceQuote null.
+If transcriptCondensedForExtraction is true, the full transcript was too large for direct structured extraction. Use summaryMd as the primary meeting digest and the transcript excerpts only as supporting evidence. Do not treat the transcript-shortening note itself as meeting content.
 
 For each item, provide:
 - operation: CREATE for new records/decisions/follow-ups, RESOLVE for existing records resolved in this meeting
@@ -73,7 +95,7 @@ For each item, provide:
   **RESULT:** [PROCESSED / OPEN / PENDING — the current status]
 - assigneeHint: who is responsible (display name from transcript), or null
 - confidence: 0.0-1.0 how confident you are
-- sourceQuote: the relevant transcript excerpt (max 200 chars)
+- sourceQuote: the relevant transcript or summary excerpt (max 200 chars)
 - targetEntityType and targetEntityId only for RESOLVE items, using the existing records supplied in the input
 - resolutionOutcome only for resolved proposals: ADOPTED, NOT_ADOPTED, or WITHDRAWN
 
@@ -113,7 +135,10 @@ Number items sequentially (#001, #002, ...) across all types.
     workspaceId: params.workspaceId,
     instruction,
     input: JSON.stringify({
-      transcript: meeting.transcript,
+      transcript: excerptLongTranscript(meeting.transcript),
+      transcriptLength: meeting.transcript.length,
+      transcriptCondensedForExtraction: meeting.transcript.length > MAX_DIRECT_INSIGHT_TRANSCRIPT_CHARS,
+      summaryMd: meeting.summaryMd,
       ingestionGuidanceMd: meeting.ingestionGuidanceMd,
       existingRecords: {
         actions: openActions,
