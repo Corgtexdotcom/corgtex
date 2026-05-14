@@ -2598,8 +2598,9 @@ a.wiki-list-item:hover {
   /* ── UI Spacing and Alignment (Newsroom) ── */
   .nr-filter-bar { @apply flex flex-nowrap gap-3 mb-6 overflow-x-auto pb-1; }
   .nr-filter-bar-wrap { @apply flex-wrap overflow-visible; }
-  .nr-filter-item { @apply text-muted no-underline font-semibold text-[0.85rem] tracking-normal px-3 py-[6px] rounded-full border border-line transition-all hover:text-text hover:border-text; }
+  .nr-filter-item { @apply bg-surface-strong text-muted no-underline font-semibold text-[0.85rem] tracking-normal px-3 py-[6px] rounded-full border border-line shadow-none transition-all hover:bg-bg-alt hover:text-text hover:border-text; }
   .nr-filter-active { @apply bg-accent !text-accent-fg border-accent; }
+  .nr-filter-active:hover { @apply bg-accent !text-accent-fg border-accent; }
   
   .nr-stat-bar { @apply flex flex-wrap items-baseline gap-x-4 gap-y-1 mb-6 pb-3 border-b border-line text-[0.85rem]; }
   .nr-stat-sep { @apply text-line; }
@@ -2611,7 +2612,7 @@ a.wiki-list-item:hover {
   .nr-table-wrap { @apply border border-line rounded bg-surface-strong overflow-x-auto; }
   .nr-table { @apply w-full border-collapse text-[0.85rem]; }
   .nr-table th, .nr-table td { @apply text-left px-3 py-2 border-b border-line; }
-  .nr-table th { @apply font-sans not-italic text-[0.78rem] font-semibold bg-bg-alt text-muted; }
+  .nr-table th { @apply font-sans not-italic text-[0.78rem] font-semibold bg-bg-alt text-text; }
   .nr-table tr:last-child td { @apply border-b-0; }
   
   /* Hide default arrow on details > summary for custom layout */

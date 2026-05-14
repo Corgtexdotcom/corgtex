@@ -17,6 +17,15 @@ import { AppError, invariant } from "./errors";
 
 const CREDENTIAL_PREFIX = "agentc-";
 const CATALOG_ADMIN_ROLES = new Set(["ADMIN"]);
+const CATALOG_FEATURE_DEFAULTS = {
+  AGENT_GOVERNANCE: true,
+  BUILD_ARTIFACTS: false,
+  MEETING_RECORDERS: false,
+  SETTINGS_GENERAL: true,
+} as const;
+
+type CatalogFeatureFlag = keyof typeof CATALOG_FEATURE_DEFAULTS;
+type CatalogFeatureFlags = Record<CatalogFeatureFlag, boolean>;
 
 type CatalogSourceInput = {
   type: CatalogItemType;
@@ -83,6 +92,26 @@ function canManageCatalog(membership: MembershipSummary | null | undefined) {
   return Boolean(membership && CATALOG_ADMIN_ROLES.has(membership.role));
 }
 
+async function getCatalogFeatureFlags(workspaceId: string): Promise<CatalogFeatureFlags> {
+  const records = await prisma.workspaceFeatureFlag.findMany({
+    where: {
+      workspaceId,
+      flag: { in: Object.keys(CATALOG_FEATURE_DEFAULTS) },
+    },
+    select: {
+      flag: true,
+      enabled: true,
+    },
+  });
+  const flags: CatalogFeatureFlags = { ...CATALOG_FEATURE_DEFAULTS };
+  for (const record of records) {
+    if (record.flag in flags) {
+      flags[record.flag as CatalogFeatureFlag] = record.enabled;
+    }
+  }
+  return flags;
+}
+
 function requireUser(actor: AppActor) {
   if (actor.kind !== "user") {
     throw new AppError(403, "FORBIDDEN", "Only signed-in workspace members can use this catalog action.");
@@ -90,9 +119,10 @@ function requireUser(actor: AppActor) {
   return actor.user;
 }
 
-function connectorSources(workspaceId: string): CatalogSourceInput[] {
-  return [
-    {
+function connectorSources(workspaceId: string, flags: CatalogFeatureFlags): CatalogSourceInput[] {
+  const sources: CatalogSourceInput[] = [];
+  if (process.env.SLACK_CLIENT_ID && process.env.SLACK_CLIENT_SECRET) {
+    sources.push({
       type: "CONNECTOR",
       sourceType: "COMMUNICATION_INSTALLATION",
       sourceId: "slack",
@@ -104,8 +134,10 @@ function connectorSources(workspaceId: string): CatalogSourceInput[] {
       accessMode: "ADMIN_ONLY",
       requestedScopes: ["integrations:read"],
       featured: true,
-    },
-    {
+    });
+  }
+  if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
+    sources.push({
       type: "CONNECTOR",
       sourceType: "OAUTH_CONNECTION",
       sourceId: "google",
@@ -117,8 +149,10 @@ function connectorSources(workspaceId: string): CatalogSourceInput[] {
       accessMode: "OPEN",
       requestedScopes: ["meetings:read", "documents:write"],
       featured: true,
-    },
-    {
+    });
+  }
+  if (process.env.MICROSOFT_CLIENT_ID && process.env.MICROSOFT_CLIENT_SECRET) {
+    sources.push({
       type: "CONNECTOR",
       sourceType: "OAUTH_CONNECTION",
       sourceId: "microsoft",
@@ -130,8 +164,10 @@ function connectorSources(workspaceId: string): CatalogSourceInput[] {
       accessMode: "OPEN",
       requestedScopes: ["meetings:read", "documents:write"],
       featured: true,
-    },
-    {
+    });
+  }
+  if (flags.SETTINGS_GENERAL) {
+    sources.push({
       type: "CONNECTOR",
       sourceType: "MCP_CONNECTOR",
       sourceId: "corgtex-mcp",
@@ -143,8 +179,10 @@ function connectorSources(workspaceId: string): CatalogSourceInput[] {
       accessMode: "OPEN",
       requestedScopes: ["workspace:read", "brain:read", "conversations:write"],
       featured: true,
-    },
-    {
+    });
+  }
+  if (flags.MEETING_RECORDERS && flags.SETTINGS_GENERAL) {
+    sources.push({
       type: "AUTOMATION",
       sourceType: "MEETING_RECORDER",
       sourceId: "meeting-recorder",
@@ -155,12 +193,62 @@ function connectorSources(workspaceId: string): CatalogSourceInput[] {
       category: "MEETINGS",
       accessMode: "ADMIN_ONLY",
       requestedScopes: ["meetings:read", "meetings:write"],
-    },
-  ];
+    });
+  }
+  return sources;
+}
+
+function isCatalogItemAvailable(item: Pick<CatalogItemRecord, "sourceType" | "sourceId">, flags: CatalogFeatureFlags) {
+  if (item.sourceType === "AGENT_CONFIG" || item.sourceType === "AGENT_IDENTITY") {
+    return flags.AGENT_GOVERNANCE;
+  }
+  if (item.sourceType === "BUILD_ARTIFACT") {
+    return flags.BUILD_ARTIFACTS;
+  }
+  if (item.sourceType === "MEETING_RECORDER") {
+    return flags.MEETING_RECORDERS && flags.SETTINGS_GENERAL;
+  }
+  if (item.sourceType === "DATA_SOURCE") {
+    return flags.SETTINGS_GENERAL;
+  }
+  if (item.sourceType === "MCP_CONNECTOR") {
+    return flags.SETTINGS_GENERAL;
+  }
+  if (item.sourceType === "COMMUNICATION_INSTALLATION" && item.sourceId === "slack") {
+    return Boolean(process.env.SLACK_CLIENT_ID && process.env.SLACK_CLIENT_SECRET);
+  }
+  if (item.sourceType === "OAUTH_CONNECTION" && item.sourceId === "google") {
+    return Boolean(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET);
+  }
+  if (item.sourceType === "OAUTH_CONNECTION" && item.sourceId === "microsoft") {
+    return Boolean(process.env.MICROSOFT_CLIENT_ID && process.env.MICROSOFT_CLIENT_SECRET);
+  }
+  return true;
+}
+
+async function requireAvailableCatalogItem(workspaceId: string, catalogItemId: string) {
+  await ensureDerivedCatalogItems(workspaceId);
+  const [item, featureFlags] = await Promise.all([
+    prisma.catalogItem.findFirst({
+      where: {
+        id: catalogItemId,
+        workspaceId,
+        archivedAt: null,
+      },
+      select: {
+        id: true,
+        sourceType: true,
+        sourceId: true,
+      },
+    }),
+    getCatalogFeatureFlags(workspaceId),
+  ]);
+  invariant(item && isCatalogItemAvailable(item, featureFlags), 404, "NOT_FOUND", "Catalog item not found.");
+  return item;
 }
 
 async function ensureDerivedCatalogItems(workspaceId: string) {
-  const [toolLinks, agentConfigs, buildArtifacts, dataSources] = await Promise.all([
+  const [toolLinks, agentConfigs, buildArtifacts, dataSources, featureFlags] = await Promise.all([
     prisma.workspaceToolLink.findMany({
       where: { workspaceId, archivedAt: null },
       select: {
@@ -203,6 +291,7 @@ async function ensureDerivedCatalogItems(workspaceId: string) {
         lastSyncError: true,
       },
     }),
+    getCatalogFeatureFlags(workspaceId),
   ]);
 
   const configMap = new Map(agentConfigs.map((config) => [config.agentKey, config]));
@@ -221,7 +310,7 @@ async function ensureDerivedCatalogItems(workspaceId: string) {
       createdByUserId: link.createdByUserId,
       ownerUserId: link.createdByUserId,
     })),
-    ...Object.entries(AGENT_REGISTRY).map(([agentKey, meta]) => {
+    ...(featureFlags.AGENT_GOVERNANCE ? Object.entries(AGENT_REGISTRY).map(([agentKey, meta]) => {
       const config = configMap.get(agentKey);
       return {
         type: "AGENT" as const,
@@ -237,8 +326,8 @@ async function ensureDerivedCatalogItems(workspaceId: string) {
         requestedScopes: ["agents:read"],
         featured: meta.costTier === "free" || meta.costTier === "low",
       };
-    }),
-    ...buildArtifacts.map((artifact) => ({
+    }) : []),
+    ...(featureFlags.BUILD_ARTIFACTS ? buildArtifacts.map((artifact) => ({
       type: "APP" as const,
       sourceType: "BUILD_ARTIFACT" as const,
       sourceId: artifact.id,
@@ -251,8 +340,8 @@ async function ensureDerivedCatalogItems(workspaceId: string) {
       accessMode: "REQUEST" as const,
       createdByUserId: artifact.createdByUserId,
       ownerUserId: artifact.createdByUserId,
-    })),
-    ...dataSources.map((source) => ({
+    })) : []),
+    ...(featureFlags.SETTINGS_GENERAL ? dataSources.map((source) => ({
       type: "DATA_SOURCE" as const,
       sourceType: "DATA_SOURCE" as const,
       sourceId: source.id,
@@ -264,8 +353,8 @@ async function ensureDerivedCatalogItems(workspaceId: string) {
       status: source.isActive ? "PUBLISHED" as const : "DISABLED" as const,
       accessMode: "ADMIN_ONLY" as const,
       requestedScopes: ["data-sources:read"],
-    })),
-    ...connectorSources(workspaceId),
+    })) : []),
+    ...connectorSources(workspaceId, featureFlags),
   ];
 
   await Promise.all(sources.map((source) => prisma.catalogItem.upsert({
@@ -308,6 +397,9 @@ async function ensureDerivedCatalogItems(workspaceId: string) {
       accessMode: source.accessMode ?? "OPEN",
       requestedScopes: validateCatalogScopes(source.requestedScopes),
       featured: source.featured ?? false,
+      archivedAt: null,
+      archivedByUserId: null,
+      archiveReason: null,
     },
   })));
 }
@@ -354,6 +446,7 @@ function serializeCatalogItem(params: {
 export async function listCatalogItems(actor: AppActor, workspaceId: string) {
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
   await ensureDerivedCatalogItems(workspaceId);
+  const featureFlags = await getCatalogFeatureFlags(workspaceId);
 
   const userId = actor.kind === "user" ? actor.user.id : null;
   const [items, favorites, pendingRequests, settings] = await Promise.all([
@@ -394,12 +487,14 @@ export async function listCatalogItems(actor: AppActor, workspaceId: string) {
     }
   }
 
-  const serialized = items.map((item) => serializeCatalogItem({
-    item,
-    userId,
-    favoriteIds,
-    pendingByItem,
-  }));
+  const serialized = items
+    .filter((item) => isCatalogItemAvailable(item, featureFlags))
+    .map((item) => serializeCatalogItem({
+      item,
+      userId,
+      favoriteIds,
+      pendingByItem,
+    }));
 
   return {
     items: serialized,
@@ -414,6 +509,7 @@ export async function getCatalogItem(actor: AppActor, params: {
 }) {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
   await ensureDerivedCatalogItems(params.workspaceId);
+  const featureFlags = await getCatalogFeatureFlags(params.workspaceId);
   const userId = actor.kind === "user" ? actor.user.id : null;
 
   const [item, favorite, requests, usageRows, credentialCount] = await Promise.all([
@@ -464,7 +560,7 @@ export async function getCatalogItem(actor: AppActor, params: {
     }),
   ]);
 
-  invariant(item, 404, "NOT_FOUND", "Catalog item not found.");
+  invariant(item && isCatalogItemAvailable(item, featureFlags), 404, "NOT_FOUND", "Catalog item not found.");
   const totalCostUsd = usageRows.reduce((sum, row) => sum + Number(row.estimatedCostUsd ?? 0), 0);
   const totalTokens = usageRows.reduce((sum, row) => sum + row.inputTokens + row.outputTokens, 0);
 
@@ -492,15 +588,7 @@ export async function setCatalogFavorite(actor: AppActor, params: {
 }) {
   const user = requireUser(actor);
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
-  const item = await prisma.catalogItem.findFirst({
-    where: {
-      id: params.catalogItemId,
-      workspaceId: params.workspaceId,
-      archivedAt: null,
-    },
-    select: { id: true },
-  });
-  invariant(item, 404, "NOT_FOUND", "Catalog item not found.");
+  await requireAvailableCatalogItem(params.workspaceId, params.catalogItemId);
 
   if (params.favorite) {
     await prisma.catalogFavorite.upsert({
@@ -543,15 +631,7 @@ export async function createCatalogRequest(actor: AppActor, params: {
 
   if (params.type !== "PUBLISH") {
     invariant(params.catalogItemId, 400, "INVALID_INPUT", "Catalog item is required for this request type.");
-    const item = await prisma.catalogItem.findFirst({
-      where: {
-        id: params.catalogItemId,
-        workspaceId: params.workspaceId,
-        archivedAt: null,
-      },
-      select: { id: true },
-    });
-    invariant(item, 404, "NOT_FOUND", "Catalog item not found.");
+    await requireAvailableCatalogItem(params.workspaceId, params.catalogItemId);
   }
 
   const request = await prisma.catalogRequest.create({
