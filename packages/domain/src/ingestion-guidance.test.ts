@@ -69,6 +69,25 @@ describe("ingestion guidance corrections", () => {
     );
   });
 
+  it("keeps dotted readable-name alternatives as prose replacements", () => {
+    const guidance = "Additional guidance: Its not Karina - use corporate-rebels.com or U.S. Steel";
+
+    expect(extractGuidanceTermCorrections(guidance)).toEqual([
+      { from: "Karina", to: "corporate-rebels.com", domainTo: "corporate-rebels.com", nameTo: "U.S. Steel" },
+    ]);
+    expect(applyGuidanceTermCorrections("Karina should configure info@karina.com.", guidance)).toBe(
+      "U.S. Steel should configure info@corporate-rebels.com.",
+    );
+  });
+
+  it("does not run domain-context rewrites for dotted readable-name replacements", () => {
+    const guidance = "Additional guidance: Its not Karina - use U.S. Steel";
+
+    expect(applyGuidanceTermCorrections("Karina should configure info@karina.com.", guidance)).toBe(
+      "U.S. Steel should configure info@karina.com.",
+    );
+  });
+
   it("corrects multi-label domains for non-domain source terms", () => {
     const guidance = "Additional guidance: Its not Karina - its Corporate-rebels.com or corporate rebels depends on the context";
     const summary = [

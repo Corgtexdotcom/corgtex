@@ -16,6 +16,22 @@ function cleanCorrectionReplacement(value: string) {
   return cleanCorrectionTerm(value.replace(/^\s*(?:it(?:'|’)?s|it\s+is|should\s+be|use)\s+/i, ""));
 }
 
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function isLikelyDomain(value: string) {
+  return /^[a-z0-9](?:[a-z0-9-]*\.)+[a-z]{2,}$/i.test(value);
+}
+
+function isLikelyEmailAddress(value: string) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/i.test(value);
+}
+
+function isReadableNameTarget(value: string) {
+  return !isLikelyDomain(value) && !isLikelyEmailAddress(value);
+}
+
 function parseCorrectionTargets(value: string) {
   const withoutQualifier = value.replace(/\s+(?:depends|depending)\b.*$/i, "");
   const targets = withoutQualifier
@@ -24,20 +40,12 @@ function parseCorrectionTargets(value: string) {
     .filter(Boolean);
   const to = targets[0] ?? "";
   const domainTo = targets.find(isLikelyDomain);
-  const nameTo = targets.find((target) => target !== domainTo && !target.includes("."));
+  const nameTo = targets.find((target) => target !== domainTo && isReadableNameTarget(target));
   return {
     to,
     domainTo,
     nameTo,
   };
-}
-
-function escapeRegExp(value: string) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function isLikelyDomain(value: string) {
-  return /^[a-z0-9](?:[a-z0-9-]*\.)+[a-z]{2,}$/i.test(value);
 }
 
 export function extractGuidanceTermCorrections(guidanceMd: string | null | undefined): GuidanceCorrection[] {
@@ -86,11 +94,10 @@ function replaceDomainContext(text: string, from: string, to: string) {
 }
 
 export function applyGuidanceTermCorrections(text: string, guidanceMd: string | null | undefined) {
-  return extractGuidanceTermCorrections(guidanceMd).reduce((current, correction) => (
-    replaceStandaloneTerm(
-      correction.domainTo ? replaceDomainContext(current, correction.from, correction.domainTo) : current,
-      correction.from,
-      correction.nameTo ?? correction.to,
-    )
-  ), text);
+  return extractGuidanceTermCorrections(guidanceMd).reduce((current, correction) => {
+    const domainCorrected = correction.domainTo && isLikelyDomain(correction.domainTo)
+      ? replaceDomainContext(current, correction.from, correction.domainTo)
+      : current;
+    return replaceStandaloneTerm(domainCorrected, correction.from, correction.nameTo ?? correction.to);
+  }, text);
 }
