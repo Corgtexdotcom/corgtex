@@ -19,6 +19,9 @@ const { prismaMock, randomOpaqueTokenMock, sha256Mock, toInputJsonMock } = vi.ho
     externalDataSource: {
       findMany: vi.fn(),
     },
+    workspaceFeatureFlag: {
+      findMany: vi.fn(),
+    },
     catalogItem: {
       create: vi.fn(),
       findFirst: vi.fn(),
@@ -168,6 +171,12 @@ describe("catalog domain", () => {
     });
     actorUserIdForWorkspace.mockResolvedValue("admin-1");
     recordAudit.mockResolvedValue(undefined);
+    vi.stubEnv("GOOGLE_CLIENT_ID", "");
+    vi.stubEnv("GOOGLE_CLIENT_SECRET", "");
+    vi.stubEnv("MICROSOFT_CLIENT_ID", "");
+    vi.stubEnv("MICROSOFT_CLIENT_SECRET", "");
+    vi.stubEnv("SLACK_CLIENT_ID", "");
+    vi.stubEnv("SLACK_CLIENT_SECRET", "");
     prismaMock.workspaceToolLink.findMany.mockResolvedValue([
       {
         id: "tool-1",
@@ -182,6 +191,7 @@ describe("catalog domain", () => {
     prismaMock.workspaceAgentConfig.findMany.mockResolvedValue([]);
     prismaMock.buildArtifact.findMany.mockResolvedValue([]);
     prismaMock.externalDataSource.findMany.mockResolvedValue([]);
+    prismaMock.workspaceFeatureFlag.findMany.mockResolvedValue([]);
     prismaMock.catalogItem.upsert.mockResolvedValue(catalogItemFixture());
     prismaMock.catalogItem.findMany.mockResolvedValue([catalogItemFixture()]);
     prismaMock.catalogFavorite.findMany.mockResolvedValue([{ catalogItemId: "catalog-1" }]);
@@ -259,12 +269,105 @@ describe("catalog domain", () => {
           sourceId: "tool-1",
         },
       },
+      update: expect.objectContaining({
+        archivedAt: null,
+        archivedByUserId: null,
+        archiveReason: null,
+      }),
     }));
     expect(prismaMock.catalogSettings.upsert).toHaveBeenCalledWith({
       where: { workspaceId: "workspace-1" },
       create: { workspaceId: "workspace-1", approvalMode: "ADMIN" },
       update: {},
     });
+  });
+
+  it("hides stale derived catalog items when backing features or connectors are unavailable", async () => {
+    const { listCatalogItems } = await import("./catalog");
+    prismaMock.workspaceFeatureFlag.findMany.mockResolvedValue([
+      { flag: "AGENT_GOVERNANCE", enabled: false },
+      { flag: "BUILD_ARTIFACTS", enabled: false },
+      { flag: "MEETING_RECORDERS", enabled: false },
+      { flag: "SETTINGS_GENERAL", enabled: false },
+    ]);
+    prismaMock.catalogItem.findMany.mockResolvedValue([
+      catalogItemFixture({ id: "tool-1", title: "Miro board", sourceType: "TOOL_LINK", sourceId: "tool-1" }),
+      catalogItemFixture({ id: "agent-1", title: "Planning agent", sourceType: "AGENT_CONFIG", sourceId: "planning-agent" }),
+      catalogItemFixture({ id: "build-1", title: "Internal app", sourceType: "BUILD_ARTIFACT", sourceId: "build-1" }),
+      catalogItemFixture({ id: "recorder-1", title: "Meeting recorder", sourceType: "MEETING_RECORDER", sourceId: "meeting-recorder" }),
+      catalogItemFixture({ id: "data-1", title: "Warehouse", sourceType: "DATA_SOURCE", sourceId: "data-1" }),
+      catalogItemFixture({ id: "mcp-1", title: "Corgtex MCP", sourceType: "MCP_CONNECTOR", sourceId: "corgtex-mcp" }),
+      catalogItemFixture({ id: "google-1", title: "Google", sourceType: "OAUTH_CONNECTION", sourceId: "google" }),
+    ]);
+
+    const result = await listCatalogItems(actor, "workspace-1");
+
+    expect(result.items.map((item) => item.title)).toEqual(["Miro board"]);
+  });
+
+  it("rejects actions against unavailable derived catalog items", async () => {
+    const { createCatalogRequest, setCatalogFavorite } = await import("./catalog");
+    prismaMock.workspaceFeatureFlag.findMany.mockResolvedValue([
+      { flag: "AGENT_GOVERNANCE", enabled: false },
+    ]);
+    prismaMock.catalogItem.findFirst.mockResolvedValue(catalogItemFixture({
+      id: "agent-1",
+      sourceType: "AGENT_CONFIG",
+      sourceId: "planning-agent",
+      title: "Planning agent",
+    }));
+
+    await expect(createCatalogRequest(actor, {
+      workspaceId: "workspace-1",
+      catalogItemId: "agent-1",
+      type: "API_KEY",
+      reasonMd: "Use stale agent.",
+    })).rejects.toMatchObject({
+      status: 404,
+      code: "NOT_FOUND",
+    });
+
+    await expect(setCatalogFavorite(actor, {
+      workspaceId: "workspace-1",
+      catalogItemId: "agent-1",
+      favorite: true,
+    })).rejects.toMatchObject({
+      status: 404,
+      code: "NOT_FOUND",
+    });
+    expect(prismaMock.catalogRequest.create).not.toHaveBeenCalled();
+    expect(prismaMock.catalogFavorite.upsert).not.toHaveBeenCalled();
+  });
+
+  it("derives configured connector cards but skips connector routes without env support", async () => {
+    const { listCatalogItems } = await import("./catalog");
+    vi.stubEnv("GOOGLE_CLIENT_ID", "google-client-id");
+    vi.stubEnv("GOOGLE_CLIENT_SECRET", "google-client-secret");
+    prismaMock.workspaceToolLink.findMany.mockResolvedValue([]);
+    prismaMock.catalogItem.findMany.mockResolvedValue([]);
+    prismaMock.catalogFavorite.findMany.mockResolvedValue([]);
+    prismaMock.catalogRequest.findMany.mockResolvedValue([]);
+
+    await listCatalogItems(actor, "workspace-1");
+
+    expect(prismaMock.catalogItem.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        workspaceId_sourceType_sourceId: {
+          workspaceId: "workspace-1",
+          sourceType: "OAUTH_CONNECTION",
+          sourceId: "google",
+        },
+      },
+    }));
+    expect(prismaMock.catalogItem.upsert).not.toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        workspaceId_sourceType_sourceId: {
+          workspaceId: "workspace-1",
+          sourceType: "OAUTH_CONNECTION",
+          sourceId: "microsoft",
+        },
+      },
+    }));
   });
 
   it("creates a catalog request with normalized scopes and budget limits", async () => {

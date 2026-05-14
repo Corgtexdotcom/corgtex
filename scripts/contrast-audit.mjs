@@ -119,6 +119,33 @@ function evaluateContrast(fgStr, bgStr, context, isDark) {
 
 const violations = [];
 const hardcodedWarnings = [];
+const APPLY_COLOR_MAP = {
+    'bg-accent': 'var(--accent)',
+    'bg-bg-alt': 'var(--bg-alt)',
+    'bg-surface-strong': 'var(--surface-strong)',
+    'text-accent': 'var(--accent)',
+    'text-accent-fg': 'var(--accent-fg)',
+    'text-muted': 'var(--muted)',
+    'text-text': 'var(--text)',
+};
+
+const REQUIRED_CONTRAST_PAIRS = [
+    { context: 'semantic button primary', fg: 'var(--accent-fg)', bg: 'var(--accent)' },
+    { context: 'semantic button secondary', fg: 'var(--accent)', bg: 'var(--surface-strong)' },
+    { context: 'semantic link button', fg: 'var(--accent)', bg: 'var(--surface-strong)' },
+    { context: 'semantic filter inactive', fg: 'var(--muted)', bg: 'var(--surface-strong)' },
+    { context: 'semantic filter inactive hover', fg: 'var(--text)', bg: 'var(--bg-alt)' },
+    { context: 'semantic filter active', fg: 'var(--accent-fg)', bg: 'var(--accent)' },
+];
+
+for (const pair of REQUIRED_CONTRAST_PAIRS) {
+    for (const isDark of [false, true]) {
+        const res = evaluateContrast(pair.fg, pair.bg, pair.context, isDark);
+        if (res && !res.passAA) {
+            violations.push(res);
+        }
+    }
+}
 
 function matchCssDeclaration(ruleBody, propertyPattern) {
   return ruleBody.match(new RegExp(`(?:^|;)\\s*(?:${propertyPattern})\\s*:\\s*([^;!]+)`));
@@ -147,11 +174,13 @@ while ((match = cssRuleRegex.exec(cssContent)) !== null) {
       for (const cls of classes) {
           const cleanCls = cls.replace('!', '');
           if (cleanCls.startsWith('bg-')) {
-             if (cleanCls === 'bg-text') bgStr = 'var(--text)';
+             if (APPLY_COLOR_MAP[cleanCls]) bgStr = APPLY_COLOR_MAP[cleanCls];
+             else if (cleanCls === 'bg-text') bgStr = 'var(--text)';
              else if (cleanCls.startsWith('bg-[')) bgStr = cleanCls.replace('bg-[', '').replace(']', '');
           }
           if (cleanCls.startsWith('text-')) {
-             if (cleanCls === 'text-white' || cleanCls === 'text-[white]') fgStr = 'white';
+             if (APPLY_COLOR_MAP[cleanCls]) fgStr = APPLY_COLOR_MAP[cleanCls];
+             else if (cleanCls === 'text-white' || cleanCls === 'text-[white]') fgStr = 'white';
              else if (cleanCls === 'text-black' || cleanCls === 'text-[black]') fgStr = 'black';
           }
       }
