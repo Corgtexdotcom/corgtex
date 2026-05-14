@@ -80,6 +80,55 @@ describe("ingestion guidance corrections", () => {
     );
   });
 
+  it("normalizes model-overused domain targets in prose while preserving real domain contexts", () => {
+    const guidance = "Additional guidance: Its not Karina - use corporate-rebels.com or corporate rebels";
+    const summary = [
+      "The company name for Corporate-rebels.com was discussed.",
+      "Puncar should configure info@corporate-rebels.com.",
+      "The old corporate-rebels.com domain is still pending.",
+      "Open https://corporate-rebels.com for reference.",
+      "Open corporate-rebels.com for reference.",
+      "URL: corporate-rebels.com.",
+      "The website is corporate-rebels.com.",
+      "The website at corporate-rebels.com is live.",
+      "The URL for docs is corporate-rebels.com.",
+      "Open corporate-rebels.com/login.",
+      "Open corporate-rebels.com?utm=foo.",
+      "Open corporate-rebels.com#docs.",
+      "Open corporate-rebels.com:8443.",
+      "Open <corporate-rebels.com>.",
+      "Open [docs](corporate-rebels.com).",
+      "Use `corporate-rebels.com` in examples.",
+      "Check corporate-rebels.com for updates.",
+      "The URL for our internal developer portal is corporate-rebels.com.",
+      "The company (Corporate-rebels.com) was discussed.",
+      "The reference Corporate-rebels.com was discussed.",
+    ].join("\n");
+
+    expect(applyGuidanceTermCorrections(summary, guidance)).toBe([
+      "The company name for corporate rebels was discussed.",
+      "Puncar should configure info@corporate-rebels.com.",
+      "The old corporate-rebels.com domain is still pending.",
+      "Open https://corporate-rebels.com for reference.",
+      "Open corporate-rebels.com for reference.",
+      "URL: corporate-rebels.com.",
+      "The website is corporate-rebels.com.",
+      "The website at corporate-rebels.com is live.",
+      "The URL for docs is corporate-rebels.com.",
+      "Open corporate-rebels.com/login.",
+      "Open corporate-rebels.com?utm=foo.",
+      "Open corporate-rebels.com#docs.",
+      "Open corporate-rebels.com:8443.",
+      "Open <corporate-rebels.com>.",
+      "Open [docs](corporate-rebels.com).",
+      "Use `corporate-rebels.com` in examples.",
+      "Check corporate-rebels.com for updates.",
+      "The URL for our internal developer portal is corporate-rebels.com.",
+      "The company (corporate rebels) was discussed.",
+      "The reference corporate rebels was discussed.",
+    ].join("\n"));
+  });
+
   it("does not run domain-context rewrites for dotted readable-name replacements", () => {
     const guidance = "Additional guidance: Its not Karina - use U.S. Steel";
 
