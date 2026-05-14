@@ -98,6 +98,9 @@ describe("ingestion guidance corrections", () => {
       "Open corporate-rebels.com:8443.",
       "Open <corporate-rebels.com>.",
       "Open [docs](corporate-rebels.com).",
+      "Use `corporate-rebels.com` in examples.",
+      "The company (Corporate-rebels.com) was discussed.",
+      "The reference Corporate-rebels.com was discussed.",
     ].join("\n");
 
     expect(applyGuidanceTermCorrections(summary, guidance)).toBe([
@@ -116,6 +119,9 @@ describe("ingestion guidance corrections", () => {
       "Open corporate-rebels.com:8443.",
       "Open <corporate-rebels.com>.",
       "Open [docs](corporate-rebels.com).",
+      "Use `corporate-rebels.com` in examples.",
+      "The company (corporate rebels) was discussed.",
+      "The reference corporate rebels was discussed.",
     ].join("\n"));
   });
 
