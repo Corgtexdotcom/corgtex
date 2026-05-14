@@ -354,7 +354,7 @@ function GoalNodeInner({
   const canManage = canManageAnyGoal || (Boolean(goal.ownerMemberId) && goal.ownerMemberId === membershipId);
   const canReturnToDraft = ["ACTIVE", "ON_TRACK", "AT_RISK", "BEHIND"].includes(goal.status);
   return (
-    <div className="border border-line rounded-lg bg-surface-strong shadow-sm overflow-hidden mb-3" style={{ marginLeft: `${level * 1.5}rem` }}>
+    <div className="border border-line rounded-lg bg-surface-strong shadow-sm mb-3" style={{ marginLeft: `${level * 1.5}rem` }}>
       <div className="p-4">
         <div className="flex items-start justify-between">
           <div className="flex-1 min-w-0 pr-4">
@@ -560,7 +560,7 @@ function GoalNodeInner({
       </div>
 
       {goal.childGoals && goal.childGoals.length > 0 && (
-        <div className="bg-surface-sunken p-3 pt-4 border-t border-line">
+        <div className="bg-surface-sunken p-3 pt-4 border-t border-line rounded-b-lg">
           {goal.childGoals.map((child: any) => (
             <GoalNode
               key={child.id}
