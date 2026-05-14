@@ -67,13 +67,14 @@ export function extractGuidanceTermCorrections(guidanceMd: string | null | undef
 }
 
 function shouldPreserveDomainReference(fullText: string, start: number, end: number) {
-  const before = fullText.slice(Math.max(0, start - 24), start).toLowerCase();
+  const before = fullText.slice(Math.max(0, start - 64), start).toLowerCase();
   const after = fullText.slice(end, Math.min(fullText.length, end + 24)).toLowerCase();
-  const explicitReferenceBefore = /\b(?:domain|url|website|web site|link)\s*(?::|-|=|is|was|should be)?\s*$/.test(before);
+  const explicitReferenceBefore = /\b(?:domain|url|website|web site|link)\b(?:\s+\w+){0,4}\s*(?::|-|=|is|was|should be|at)?\s*$/.test(before);
   const navigationReferenceBefore = /\b(?:open|visit|browse|go to|reference)\s*$/.test(before);
   const explicitReferenceAfter = /^\s*(?:domain|url|website|web site|link)\b/.test(after);
   const referencePhraseAfter = /^\s*(?:for reference|as reference)\b/.test(after);
-  return explicitReferenceBefore || navigationReferenceBefore || explicitReferenceAfter || referencePhraseAfter;
+  const pathAfter = /^\//.test(after);
+  return explicitReferenceBefore || navigationReferenceBefore || explicitReferenceAfter || referencePhraseAfter || pathAfter;
 }
 
 function replaceStandaloneDomainTerm(text: string, from: string, to: string, options?: { preserveDomainReferences?: boolean }) {
