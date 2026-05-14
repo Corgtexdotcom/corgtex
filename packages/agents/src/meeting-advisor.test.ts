@@ -128,6 +128,10 @@ describe("runMeetingSummaryAgent", () => {
     expect(defaultModelGateway.chat).toHaveBeenCalledWith(expect.objectContaining({
       messages: expect.arrayContaining([
         expect.objectContaining({
+          role: "system",
+          content: expect.stringContaining("trusted operator context for spelling, name, and terminology corrections"),
+        }),
+        expect.objectContaining({
           role: "user",
           content: expect.stringContaining("Emphasize launch risks."),
         }),

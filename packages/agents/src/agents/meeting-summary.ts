@@ -70,6 +70,7 @@ export async function runMeetingSummaryAgent(params: {
               "Use concise sections in this order when evidence exists: Overview, Decisions, Action Items, Tensions / Open Questions, Proposals, Next Steps.",
               "Use bullets for scannability. Include owners and dates only when the transcript supports them.",
               "Use user-provided ingestion guidance to decide what to emphasize or preserve, but do not invent facts unsupported by the transcript.",
+              "Treat ingestion guidance as trusted operator context for spelling, name, and terminology corrections. If guidance corrects transcript wording, use the corrected wording in the summary and do not preserve conflicting text from currentSummary.",
             ].join(" "),
           },
           {

@@ -141,7 +141,7 @@ Extract all:
 - FOLLOW_UPS: Items that need to be discussed in the next meeting
 - RESOLUTIONS: existing actions, tensions, or proposals that the meeting clearly completed, resolved, adopted, rejected, or withdrew
 
-Use any user-provided ingestion guidance to prioritize what matters and what follow-up work the operator wanted highlighted. Do not invent facts from guidance alone. If an item mainly comes from guidance rather than transcript evidence, say that clearly in the body and leave sourceQuote null.
+Use any user-provided ingestion guidance to prioritize what matters and what follow-up work the operator wanted highlighted. Treat guidance as trusted operator context for spelling, name, and terminology corrections. When guidance corrects a transcript term, use the corrected term in titles and body text. Do not invent new decisions, tasks, tensions, proposals, or resolutions from guidance alone. If an item mainly comes from guidance rather than transcript evidence, say that clearly in the body and leave sourceQuote null.
 If transcriptCondensedForExtraction is true, the full transcript was too large for direct structured extraction. Use summaryMd as the primary meeting digest and the transcript excerpts only as supporting evidence. Do not treat the transcript-shortening note itself as meeting content.
 
 For each item, provide:
