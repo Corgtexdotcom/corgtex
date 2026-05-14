@@ -12,6 +12,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Keep the PR and merge-queue gate comprehensive, but do not serialize
+  # independent checks. This preserves the existing required check names while
+  # letting test, migration, and build failures surface in parallel.
   check:
     name: Lint, Typecheck & Test
     runs-on: ubuntu-latest
@@ -59,7 +62,6 @@ jobs:
   db-sync:
     name: Database Sync
     runs-on: ubuntu-latest
-    needs: check
     services:
       postgres:
         image: pgvector/pgvector:pg16
@@ -97,9 +99,6 @@ jobs:
   build:
     name: Build
     runs-on: ubuntu-latest
-    needs:
-      - check
-      - db-sync
 
     steps:
       - uses: actions/checkout@v5
@@ -252,7 +251,10 @@ jobs:
     name: Production Smoke Test
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
-    needs: build
+    needs:
+      - check
+      - db-sync
+      - build
     steps:
       - name: Skip if secrets not configured
         id: check-secrets
