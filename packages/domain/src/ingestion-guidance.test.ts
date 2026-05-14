@@ -87,6 +87,9 @@ describe("ingestion guidance corrections", () => {
       "Puncar should configure info@corporate-rebels.com.",
       "The old corporate-rebels.com domain is still pending.",
       "Open https://corporate-rebels.com for reference.",
+      "Open corporate-rebels.com for reference.",
+      "URL: corporate-rebels.com.",
+      "The website is corporate-rebels.com.",
     ].join("\n");
 
     expect(applyGuidanceTermCorrections(summary, guidance)).toBe([
@@ -94,6 +97,9 @@ describe("ingestion guidance corrections", () => {
       "Puncar should configure info@corporate-rebels.com.",
       "The old corporate-rebels.com domain is still pending.",
       "Open https://corporate-rebels.com for reference.",
+      "Open corporate-rebels.com for reference.",
+      "URL: corporate-rebels.com.",
+      "The website is corporate-rebels.com.",
     ].join("\n"));
   });
 

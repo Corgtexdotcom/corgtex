@@ -69,7 +69,11 @@ export function extractGuidanceTermCorrections(guidanceMd: string | null | undef
 function shouldPreserveDomainReference(fullText: string, start: number, end: number) {
   const before = fullText.slice(Math.max(0, start - 24), start).toLowerCase();
   const after = fullText.slice(end, Math.min(fullText.length, end + 24)).toLowerCase();
-  return /\b(?:domain|url|website|web site)\s*$/.test(before) || /^\s*(?:domain|url|website|web site)\b/.test(after);
+  const explicitReferenceBefore = /\b(?:domain|url|website|web site|link)\s*(?::|-|=|is|was|should be)?\s*$/.test(before);
+  const navigationReferenceBefore = /\b(?:open|visit|browse|go to|reference)\s*$/.test(before);
+  const explicitReferenceAfter = /^\s*(?:domain|url|website|web site|link)\b/.test(after);
+  const referencePhraseAfter = /^\s*(?:for reference|as reference)\b/.test(after);
+  return explicitReferenceBefore || navigationReferenceBefore || explicitReferenceAfter || referencePhraseAfter;
 }
 
 function replaceStandaloneDomainTerm(text: string, from: string, to: string, options?: { preserveDomainReferences?: boolean }) {
