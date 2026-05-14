@@ -171,6 +171,6 @@ describe("runMeetingSummaryAgent", () => {
     const persistedSummary = prismaMock.meeting.update.mock.calls.at(-1)?.[0]?.data?.summaryMd;
     expect(persistedSummary).toContain("Corporate-rebels.com");
     expect(persistedSummary).not.toContain("company name for Karina");
-    expect(persistedSummary).toContain("info@karina.com");
+    expect(persistedSummary).toContain("info@corporate-rebels.com");
   });
 });

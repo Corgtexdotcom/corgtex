@@ -21,6 +21,10 @@ function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+function isLikelyDomain(value: string) {
+  return /^[a-z0-9](?:[a-z0-9-]*\.)+[a-z]{2,}$/i.test(value);
+}
+
 export function extractGuidanceTermCorrections(guidanceMd: string | null | undefined): GuidanceCorrection[] {
   if (!guidanceMd) return [];
 
@@ -40,14 +44,17 @@ export function extractGuidanceTermCorrections(guidanceMd: string | null | undef
 }
 
 function replaceStandaloneTerm(text: string, from: string, to: string) {
-  const pattern = new RegExp(`\\b${escapeRegExp(from)}\\b`, "gi");
-  return text.replace(pattern, (match, offset, fullText) => {
+  const pattern = new RegExp(`\\b${escapeRegExp(from)}((?:\\.[A-Za-z0-9-]+)+)?\\b`, "gi");
+  const replacementIsDomain = isLikelyDomain(to);
+  return text.replace(pattern, (match, domainSuffix: string | undefined, offset: number, fullText: string) => {
     const previous = offset > 0 ? fullText[offset - 1] : "";
     const next = fullText[offset + match.length] ?? "";
-    const afterNext = fullText[offset + match.length + 1] ?? "";
+    if (domainSuffix) {
+      if (!replacementIsDomain || previous === "/" || previous === "." || previous === "-") return match;
+      return previous === "@" ? to.toLowerCase() : to;
+    }
     if (previous === "@" || previous === "/" || previous === "." || previous === "-") return match;
     if (next === "@" || next === "/" || next === "-") return match;
-    if (next === "." && /[A-Za-z0-9]/.test(afterNext)) return match;
     return to;
   });
 }
