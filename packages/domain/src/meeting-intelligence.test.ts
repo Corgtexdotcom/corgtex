@@ -157,6 +157,9 @@ describe("meeting-intelligence", () => {
         instruction: expect.stringContaining("Number items sequentially"),
         input: expect.stringContaining("Prioritize follow-up actions."),
       }));
+      expect(defaultModelGateway.extract).toHaveBeenCalledWith(expect.objectContaining({
+        input: expect.stringContaining("Alice: I will follow up tomorrow."),
+      }));
       expect(prisma.meetingInsight.create).toHaveBeenCalledWith(expect.objectContaining({
         data: expect.objectContaining({
           type: "ACTION_ITEM",
