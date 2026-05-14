@@ -66,9 +66,22 @@ export function extractGuidanceTermCorrections(guidanceMd: string | null | undef
   return corrections;
 }
 
-function replaceStandaloneDomainTerm(text: string, from: string, to: string) {
-  const pattern = new RegExp(`(^|[^A-Za-z0-9.@-])(${escapeRegExp(from)})(?=$|[^A-Za-z0-9.-]|\\.(?![A-Za-z0-9-]))`, "gi");
-  return text.replace(pattern, (_match, prefix: string) => `${prefix}${to}`);
+function shouldPreserveDomainReference(fullText: string, start: number, end: number) {
+  const before = fullText.slice(Math.max(0, start - 24), start).toLowerCase();
+  const after = fullText.slice(end, Math.min(fullText.length, end + 24)).toLowerCase();
+  return /\b(?:domain|url|website|web site)\s*$/.test(before) || /^\s*(?:domain|url|website|web site)\b/.test(after);
+}
+
+function replaceStandaloneDomainTerm(text: string, from: string, to: string, options?: { preserveDomainReferences?: boolean }) {
+  const pattern = new RegExp(`(^|[^A-Za-z0-9.@/-])(${escapeRegExp(from)})(?=$|[^A-Za-z0-9.-]|\\.(?![A-Za-z0-9-]))`, "gi");
+  return text.replace(pattern, (match, prefix: string, domain: string, offset: number, fullText: string) => {
+    const start = offset + prefix.length;
+    const end = start + domain.length;
+    if (options?.preserveDomainReferences && shouldPreserveDomainReference(fullText, start, end)) {
+      return match;
+    }
+    return `${prefix}${to}`;
+  });
 }
 
 function replaceStandaloneTerm(text: string, from: string, to: string) {
@@ -95,9 +108,14 @@ function replaceDomainContext(text: string, from: string, to: string) {
 
 export function applyGuidanceTermCorrections(text: string, guidanceMd: string | null | undefined) {
   return extractGuidanceTermCorrections(guidanceMd).reduce((current, correction) => {
-    const domainCorrected = correction.domainTo && isLikelyDomain(correction.domainTo)
+    let domainCorrected = correction.domainTo && isLikelyDomain(correction.domainTo)
       ? replaceDomainContext(current, correction.from, correction.domainTo)
       : current;
+    if (correction.domainTo && correction.nameTo) {
+      domainCorrected = replaceStandaloneDomainTerm(domainCorrected, correction.domainTo, correction.nameTo, {
+        preserveDomainReferences: true,
+      });
+    }
     return replaceStandaloneTerm(domainCorrected, correction.from, correction.nameTo ?? correction.to);
   }, text);
 }

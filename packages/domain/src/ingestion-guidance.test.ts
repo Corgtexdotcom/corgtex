@@ -80,6 +80,23 @@ describe("ingestion guidance corrections", () => {
     );
   });
 
+  it("normalizes model-overused domain targets in prose while preserving real domain contexts", () => {
+    const guidance = "Additional guidance: Its not Karina - use corporate-rebels.com or corporate rebels";
+    const summary = [
+      "The company name for Corporate-rebels.com was discussed.",
+      "Puncar should configure info@corporate-rebels.com.",
+      "The old corporate-rebels.com domain is still pending.",
+      "Open https://corporate-rebels.com for reference.",
+    ].join("\n");
+
+    expect(applyGuidanceTermCorrections(summary, guidance)).toBe([
+      "The company name for corporate rebels was discussed.",
+      "Puncar should configure info@corporate-rebels.com.",
+      "The old corporate-rebels.com domain is still pending.",
+      "Open https://corporate-rebels.com for reference.",
+    ].join("\n"));
+  });
+
   it("does not run domain-context rewrites for dotted readable-name replacements", () => {
     const guidance = "Additional guidance: Its not Karina - use U.S. Steel";
 

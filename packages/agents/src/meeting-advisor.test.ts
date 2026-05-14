@@ -145,7 +145,7 @@ describe("runMeetingSummaryAgent", () => {
   it("applies explicit guidance term corrections before persisting the meeting summary", async () => {
     const { defaultModelGateway } = await import("@corgtex/models");
     vi.mocked(defaultModelGateway.chat).mockResolvedValueOnce({
-      content: "The company name for Karina was discussed.\nPuncar should configure info@karina.com.",
+      content: "The company name for Corporate-rebels.com was discussed.\nPuncar should configure info@karina.com.",
       usage: modelUsage,
     });
     prismaMock.meeting.findUnique.mockResolvedValue({
@@ -171,6 +171,7 @@ describe("runMeetingSummaryAgent", () => {
     const persistedSummary = prismaMock.meeting.update.mock.calls.at(-1)?.[0]?.data?.summaryMd;
     expect(persistedSummary).toContain("corporate rebels");
     expect(persistedSummary).toContain("info@corporate-rebels.com");
+    expect(persistedSummary).not.toContain("company name for Corporate-rebels.com");
     expect(persistedSummary).not.toContain("company name for Karina");
   });
 });
