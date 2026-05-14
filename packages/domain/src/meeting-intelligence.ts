@@ -235,7 +235,11 @@ Number items sequentially (#001, #002, ...) across all types.
       const targetKey = targetEntityType && targetEntityId ? `${targetEntityType}:${targetEntityId}` : null;
       const operation = item.operation === "RESOLVE" && targetKey && validTargets.has(targetKey) ? "RESOLVE" : "CREATE";
       const type = normalizeInsightType(item.type, operation === "RESOLVE" ? targetEntityType : null);
-      if (!type || typeof item.title !== "string" || typeof item.body !== "string") continue;
+      const title = typeof item.title === "string" ? item.title.trim() : "";
+      const bodyMd = typeof item.body === "string" ? item.body.trim() : "";
+      const resolutionOutcome = normalizeResolutionOutcome(item.resolutionOutcome, operation, targetEntityType);
+      if (!type || title.length === 0 || bodyMd.length === 0) continue;
+      if (operation === "RESOLVE" && targetEntityType === "Proposal" && !resolutionOutcome) continue;
       
       const created = await tx.meetingInsight.create({
         data: {
@@ -244,14 +248,14 @@ Number items sequentially (#001, #002, ...) across all types.
           type,
           operation,
           status: "SUGGESTED",
-          title: item.title,
-          bodyMd: item.body,
+          title,
+          bodyMd,
           assigneeHint: typeof item.assigneeHint === "string" ? item.assigneeHint : null,
           confidence: typeof item.confidence === "number" ? item.confidence : 0,
           sourceQuote: typeof item.sourceQuote === "string" ? item.sourceQuote.slice(0, 200) : null,
           targetEntityType: operation === "RESOLVE" ? targetEntityType : null,
           targetEntityId: operation === "RESOLVE" ? targetEntityId : null,
-          resolutionOutcome: normalizeResolutionOutcome(item.resolutionOutcome, operation, targetEntityType),
+          resolutionOutcome,
         },
       });
       createdInsights.push(created);

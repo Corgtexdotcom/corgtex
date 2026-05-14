@@ -237,6 +237,23 @@ describe("meeting-intelligence", () => {
               body: "No concrete target",
               confidence: 0.5,
             },
+            {
+              type: "PROPOSAL",
+              operation: "RESOLVE",
+              title: "#004 > Proposal ambiguous outcome",
+              body: "Malformed outcome should not default to adopted",
+              confidence: 0.8,
+              targetEntityType: "Proposal",
+              targetEntityId: "proposal-123",
+              resolutionOutcome: "maybe",
+            },
+            {
+              type: "ACTION_ITEM",
+              operation: "CREATE",
+              title: "   ",
+              body: "Empty title should be skipped",
+              confidence: 0.7,
+            },
           ],
         },
       });
