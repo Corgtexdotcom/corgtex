@@ -8,7 +8,8 @@ export type WorkspaceFeatureFlag =
   | WorkspaceNavFeatureFlag
   | "SETTINGS_GENERAL"
   | "MULTILINGUAL"
-  | "MEETING_RECORDERS";
+  | "MEETING_RECORDERS"
+  | "MEETING_CONTEXTUAL_INTELLIGENCE";
 
 export type WorkspaceFeatureFlagMap = Record<WorkspaceFeatureFlag, boolean>;
 
@@ -24,6 +25,7 @@ export const DEFAULT_WORKSPACE_FEATURE_FLAGS: WorkspaceFeatureFlagMap = {
   SETTINGS_GENERAL: true,
   MULTILINGUAL: false,
   MEETING_RECORDERS: false,
+  MEETING_CONTEXTUAL_INTELLIGENCE: false,
 };
 
 const WORKSPACE_FEATURE_FLAG_VALUES: WorkspaceFeatureFlag[] = [
@@ -38,6 +40,7 @@ const WORKSPACE_FEATURE_FLAG_VALUES: WorkspaceFeatureFlag[] = [
   "SETTINGS_GENERAL",
   "MULTILINGUAL",
   "MEETING_RECORDERS",
+  "MEETING_CONTEXTUAL_INTELLIGENCE",
 ];
 
 function isKnownWorkspaceFeatureFlag(flag: string): flag is WorkspaceFeatureFlag {

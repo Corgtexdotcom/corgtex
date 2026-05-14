@@ -1,7 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { autoApplyMeetingInsightsMock } = vi.hoisted(() => ({
+const { autoApplyMeetingInsightsMock, buildMeetingIntelligenceContextMock, syncKnowledgeForSourceMock } = vi.hoisted(() => ({
   autoApplyMeetingInsightsMock: vi.fn(),
+  buildMeetingIntelligenceContextMock: vi.fn(),
+  syncKnowledgeForSourceMock: vi.fn(),
 }));
 
 const prismaMock = {
@@ -96,6 +98,7 @@ vi.mock("@corgtex/domain", async (importOriginal) => {
     resolveAgentIdentityLimits: vi.fn().mockResolvedValue(null),
     resolveAgentBehaviorContext: vi.fn().mockResolvedValue(null),
     autoApplyMeetingInsights: autoApplyMeetingInsightsMock,
+    buildMeetingIntelligenceContext: buildMeetingIntelligenceContextMock,
   };
 });
 
@@ -106,6 +109,7 @@ vi.mock("@corgtex/models", () => ({
 
 vi.mock("@corgtex/knowledge", () => ({
   searchIndexedKnowledge: knowledgeMock.searchIndexedKnowledge,
+  syncKnowledgeForSource: syncKnowledgeForSourceMock,
 }));
 
 describe("agent runtime", () => {
@@ -147,6 +151,20 @@ describe("agent runtime", () => {
     prismaMock.proposal.findUnique.mockReset().mockResolvedValue(null);
     prismaMock.meeting.findUnique.mockReset().mockResolvedValue(null);
     prismaMock.meeting.update.mockReset().mockResolvedValue({});
+    buildMeetingIntelligenceContextMock.mockReset().mockImplementation(async ({ workspaceId, meetingId }: { workspaceId: string; meetingId: string }) => {
+      const meeting = await prismaMock.meeting.findUnique({ where: { id: meetingId, workspaceId } });
+      return {
+        contextualIntelligenceEnabled: false,
+        meeting,
+        previousMeetings: [],
+        actions: [],
+        tensions: [],
+        proposals: [],
+        deliberationEntries: [],
+        followUps: [],
+        knowledge: [],
+      };
+    });
     prismaMock.spendRequest.findMany.mockReset().mockResolvedValue([]);
     prismaMock.policyCorpus.findUnique.mockReset().mockResolvedValue(null);
     prismaMock.workspaceAgentConfig.findUnique.mockReset().mockResolvedValue(null);
@@ -155,6 +173,7 @@ describe("agent runtime", () => {
     prismaMock.member.findMany.mockReset().mockResolvedValue([]);
     prismaMock.agentIdentity.findUnique.mockReset().mockResolvedValue(null);
     autoApplyMeetingInsightsMock.mockReset().mockResolvedValue({ applied: 1, failed: 0, skipped: 0, threshold: 0.8 });
+    syncKnowledgeForSourceMock.mockReset().mockResolvedValue(1);
 
     // Mock $transaction to execute the callback
     prismaMock.$transaction.mockReset().mockImplementation(async (fn: any) => fn(prismaMock));

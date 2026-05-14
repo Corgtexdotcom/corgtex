@@ -2945,6 +2945,7 @@ enum MeetingInsightType {
   ACTION_ITEM
   PROPOSAL
   FOLLOW_UP
+  DELIBERATION_ENTRY
 }
 
 enum MeetingInsightStatus {
@@ -2978,7 +2979,9 @@ model MeetingInsight {
   appliedEntityId   String?
   targetEntityType  String?
   targetEntityId    String?
+  deliberationEntryType String?
   resolutionOutcome ProposalResolutionOutcome?
+  dedupeKey         String?
   autoAppliedAt     DateTime?
   autoApplyError    String?
 
@@ -2993,6 +2996,7 @@ model MeetingInsight {
   reviewedByUser User?     @relation(fields: [reviewedByUserId], references: [id], onDelete: SetNull)
 
   @@index([workspaceId, meetingId, status])
+  @@unique([meetingId, dedupeKey])
 }
 
 enum GoalCadence {

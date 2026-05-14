@@ -1,6 +1,7 @@
-import { getMeeting, getMeetingParticipants } from "@corgtex/domain";
+import { getMeeting, getMeetingParticipants, privacyFilter, requireWorkspaceMembership } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { getFormatter, getTranslations } from "next-intl/server";
+import { prisma } from "@corgtex/shared";
 import Link from "next/link";
 import { MarkdownExcerpt, MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
 import { DeliberationThread } from "@/lib/components/DeliberationThread";
@@ -12,10 +13,16 @@ import MeetingIntelligence from "./MeetingIntelligence";
 
 export const dynamic = "force-dynamic";
 
+type MeetingInsightSummary = {
+  status: string;
+  targetEntityType: string | null;
+  targetEntityId: string | null;
+};
+
 function getMeetingProcessingStatus(meeting: NonNullable<Awaited<ReturnType<typeof getMeeting>>>) {
   if (!meeting.transcript) return null;
 
-  const reviewCount = meeting.insights.filter((insight) => insight.status === "SUGGESTED" || insight.status === "CONFIRMED").length;
+  const reviewCount = meeting.insights.filter((insight: MeetingInsightSummary) => insight.status === "SUGGESTED" || insight.status === "CONFIRMED").length;
   if (meeting.aiProcessedAt) {
     return {
       className: "complete",
@@ -51,6 +58,7 @@ export default async function MeetingDetailPage({
   const actor = await requirePageActor();
   const t = await getTranslations("meetings");
   const format = await getFormatter();
+  const membership = await requireWorkspaceMembership({ actor, workspaceId });
 
   const meeting = await getMeeting(workspaceId, meetingId);
   const meetingEntries = await listDeliberationEntries(actor, { workspaceId, parentType: "MEETING", parentId: meetingId });
@@ -87,6 +95,30 @@ export default async function MeetingDetailPage({
     ? await getMeetingParticipants(workspaceId, meeting.participantIds)
     : [];
   const processingStatus = getMeetingProcessingStatus(meeting);
+  const insightTargetProposalIds = [...new Set((meeting.insights as MeetingInsightSummary[])
+    .filter((insight: MeetingInsightSummary) => insight.targetEntityType === "Proposal" && insight.targetEntityId)
+    .map((insight: MeetingInsightSummary) => insight.targetEntityId as string))];
+  const insightTargetTensionIds = [...new Set((meeting.insights as MeetingInsightSummary[])
+    .filter((insight: MeetingInsightSummary) => insight.targetEntityType === "Tension" && insight.targetEntityId)
+    .map((insight: MeetingInsightSummary) => insight.targetEntityId as string))];
+  const [insightTargetProposals, insightTargetTensions] = await Promise.all([
+    insightTargetProposalIds.length > 0
+      ? prisma.proposal.findMany({
+        where: { workspaceId, id: { in: insightTargetProposalIds }, archivedAt: null, ...privacyFilter(actor, membership) },
+        select: { id: true, title: true },
+      })
+      : Promise.resolve([]),
+    insightTargetTensionIds.length > 0
+      ? prisma.tension.findMany({
+        where: { workspaceId, id: { in: insightTargetTensionIds }, archivedAt: null, ...privacyFilter(actor, membership) },
+        select: { id: true, title: true },
+      })
+      : Promise.resolve([]),
+  ]);
+  const insightTargetLabels = Object.fromEntries([
+    ...insightTargetProposals.map((proposal: { id: string; title: string }) => [`Proposal:${proposal.id}`, t("insightTargetProposal", { title: proposal.title })]),
+    ...insightTargetTensions.map((tension: { id: string; title: string }) => [`Tension:${tension.id}`, t("insightTargetTension", { title: tension.title })]),
+  ]);
 
   return (
     <>
@@ -165,6 +197,7 @@ export default async function MeetingDetailPage({
         workspaceId={workspaceId}
         meetingId={meetingId}
         insights={meeting.insights}
+        insightTargetLabels={insightTargetLabels}
         hasTranscript={Boolean(meeting.transcript)}
       />
 
@@ -172,7 +205,7 @@ export default async function MeetingDetailPage({
         <section className="ws-section" style={{ marginBottom: 48 }}>
           <h2 className="nr-section-header">{t("tensionsRaised")}</h2>
           <div className="list">
-            {meeting.tensions.map(tension => (
+            {meeting.tensions.map((tension: any) => (
               <div className="item" key={tension.id}>
                 <div className="row">
                   <strong>{tension.title}</strong>
@@ -194,7 +227,7 @@ export default async function MeetingDetailPage({
         <section className="ws-section" style={{ marginBottom: 48 }}>
           <h2 className="nr-section-header">{t("proposalsCreated")}</h2>
           <div className="list">
-            {meeting.proposals.map(proposal => (
+            {meeting.proposals.map((proposal: any) => (
               <div className="item" key={proposal.id}>
                 <div className="row">
                   <strong>{proposal.title}</strong>

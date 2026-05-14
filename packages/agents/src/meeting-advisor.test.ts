@@ -1,5 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+const { buildMeetingIntelligenceContextMock, syncKnowledgeForSourceMock } = vi.hoisted(() => ({
+  buildMeetingIntelligenceContextMock: vi.fn(),
+  syncKnowledgeForSourceMock: vi.fn(),
+}));
+
 const prismaMock = {
   agentRun: {
     findFirst: vi.fn(),
@@ -54,12 +59,17 @@ vi.mock("@corgtex/domain", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@corgtex/domain")>();
   return {
     ...actual,
+    buildMeetingIntelligenceContext: buildMeetingIntelligenceContextMock,
     isAgentEnabled: vi.fn().mockResolvedValue(true),
     getAgentModelOverride: vi.fn().mockResolvedValue(undefined),
     resolveAgentIdentityLimits: vi.fn().mockResolvedValue(null),
     resolveAgentBehaviorContext: vi.fn().mockResolvedValue(null),
   };
 });
+
+vi.mock("@corgtex/knowledge", () => ({
+  syncKnowledgeForSource: syncKnowledgeForSourceMock,
+}));
 
 vi.mock("@corgtex/models", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@corgtex/models")>();
@@ -92,16 +102,27 @@ describe("runMeetingSummaryAgent", () => {
     prismaMock.agentToolCall.createMany.mockReset().mockResolvedValue({ count: 0 });
     prismaMock.event.create.mockReset().mockResolvedValue({ id: "event-1" });
     prismaMock.modelUsageBudget.findUnique.mockReset().mockResolvedValue(null);
+    syncKnowledgeForSourceMock.mockReset().mockResolvedValue(1);
 
-    prismaMock.meeting.findUnique.mockReset().mockResolvedValue({
-      id: "meeting-1",
-      workspaceId: "ws-1",
-      title: "Test Meeting",
-      source: "manual",
-      transcript: "We discussed project updates.",
-      summaryMd: null,
-      ingestionGuidanceMd: "Emphasize launch risks.",
-      recordedAt: new Date(),
+    buildMeetingIntelligenceContextMock.mockReset().mockResolvedValue({
+      contextualIntelligenceEnabled: true,
+      meeting: {
+        id: "meeting-1",
+        workspaceId: "ws-1",
+        title: "Test Meeting",
+        source: "manual",
+        transcript: "We discussed project updates.",
+        summaryMd: null,
+        ingestionGuidanceMd: "Emphasize launch risks.",
+        recordedAt: new Date("2026-04-29T12:00:00.000Z"),
+      },
+      previousMeetings: [{ id: "meeting-0", title: "Previous Meeting", summaryMd: "Previous summary" }],
+      actions: [],
+      tensions: [],
+      proposals: [],
+      deliberationEntries: [],
+      followUps: [],
+      knowledge: [],
     });
     prismaMock.meeting.update.mockReset().mockResolvedValue({ id: "meeting-1" });
 
@@ -139,6 +160,7 @@ describe("runMeetingSummaryAgent", () => {
         }),
       ]),
     }));
+    expect(syncKnowledgeForSourceMock).not.toHaveBeenCalled();
     expect(result).toEqual(expect.objectContaining({ status: "COMPLETED" }));
   });
 
@@ -148,15 +170,25 @@ describe("runMeetingSummaryAgent", () => {
       content: "The company name for Corporate-rebels.com was discussed.\nPuncar should configure info@karina.com.",
       usage: modelUsage,
     });
-    prismaMock.meeting.findUnique.mockResolvedValue({
-      id: "meeting-1",
-      workspaceId: "ws-1",
-      title: "Test Meeting",
-      source: "manual",
-      transcript: "We discussed the company name.",
-      summaryMd: "The company name for Karina was discussed.",
-      ingestionGuidanceMd: "Its not Karina - its Corporate-rebels.com or corporate rebels depends on the context",
-      recordedAt: new Date(),
+    buildMeetingIntelligenceContextMock.mockResolvedValueOnce({
+      contextualIntelligenceEnabled: false,
+      meeting: {
+        id: "meeting-1",
+        workspaceId: "ws-1",
+        title: "Test Meeting",
+        source: "manual",
+        transcript: "We discussed the company name.",
+        summaryMd: "The company name for Karina was discussed.",
+        ingestionGuidanceMd: "Its not Karina - its Corporate-rebels.com or corporate rebels depends on the context",
+        recordedAt: new Date("2026-04-29T12:00:00.000Z"),
+      },
+      previousMeetings: [],
+      actions: [],
+      tensions: [],
+      proposals: [],
+      deliberationEntries: [],
+      followUps: [],
+      knowledge: [],
     });
 
     const { runMeetingSummaryAgent } = await import(".");
@@ -174,4 +206,34 @@ describe("runMeetingSummaryAgent", () => {
     expect(persistedSummary).not.toContain("company name for Corporate-rebels.com");
     expect(persistedSummary).not.toContain("company name for Karina");
   });
+
+  it("skips cleanly when the meeting disappeared before summary generation", async () => {
+    const { AppError } = await import("@corgtex/domain");
+    const { defaultModelGateway } = await import("@corgtex/models");
+    vi.mocked(defaultModelGateway.chat).mockClear();
+    buildMeetingIntelligenceContextMock.mockRejectedValueOnce(new AppError(404, "NOT_FOUND", "Meeting not found."));
+
+    const { runMeetingSummaryAgent } = await import(".");
+
+    const result = await runMeetingSummaryAgent({
+      workspaceId: "ws-1",
+      triggerRef: "trigger-missing",
+      triggerType: "EVENT",
+      meetingId: "meeting-missing",
+    });
+
+    expect(defaultModelGateway.chat).not.toHaveBeenCalled();
+    expect(prismaMock.meeting.update).not.toHaveBeenCalled();
+    expect(result).toEqual(expect.objectContaining({ status: "COMPLETED" }));
+    expect(prismaMock.agentRun.update).toHaveBeenLastCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        status: "COMPLETED",
+        resultJson: expect.objectContaining({
+          skipped: true,
+          reason: "missing_meeting",
+        }),
+      }),
+    }));
+  });
+
 });

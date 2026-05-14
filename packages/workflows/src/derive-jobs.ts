@@ -19,6 +19,7 @@ const TRIAGE_EVENT_TYPES = new Set([
 
 const KNOWLEDGE_PULSE_EVENT_TYPES = new Set([
   "proposal.submitted",
+  "proposal.opened",
   "proposal.approved",
   "document.created",
   "spend.created",
@@ -112,6 +113,22 @@ export function deriveJobsForEvent(event: {
     }
   }
 
+  if (event.type === "proposal.opened") {
+    const payload = event.payload as { proposalId?: string; subjectId?: string };
+    const proposalId = payload.proposalId ?? payload.subjectId;
+    if (proposalId && event.workspaceId) {
+      jobs.push({
+        workspaceId: event.workspaceId,
+        eventId: event.id,
+        type: "knowledge.sync.proposal",
+        payload: {
+          proposalId,
+        },
+        dedupeKey: `${event.id}:knowledge-sync`,
+      });
+    }
+  }
+
   if (event.type === "advice-process.initiated") {
     const payload = event.payload as { proposalId?: string };
     if (payload.proposalId && event.workspaceId) {
@@ -156,7 +173,7 @@ export function deriveJobsForEvent(event: {
   if (event.type === "meeting.created" || event.type === "meeting.transcript-uploaded") {
     const payload = event.payload as { meetingId?: string; status?: string; hasTranscript?: boolean };
     const shouldRunMeetingAgents = payload.status !== "SCHEDULED" && payload.hasTranscript !== false;
-    if (payload.meetingId && event.workspaceId) {
+    if (payload.meetingId && event.workspaceId && !shouldRunMeetingAgents) {
       jobs.push({
         workspaceId: event.workspaceId,
         eventId: event.id,
@@ -206,6 +223,16 @@ export function deriveJobsForEvent(event: {
         },
         dependsOnDedupeKey: `${event.id}:action-extraction`,
         dedupeKey: `${event.id}:meeting-summary-post`,
+      });
+      jobs.push({
+        workspaceId: event.workspaceId,
+        eventId: event.id,
+        type: "knowledge.sync.meeting",
+        payload: {
+          meetingId: payload.meetingId,
+        },
+        dependsOnDedupeKey: `${event.id}:meeting-summary-post`,
+        dedupeKey: `${event.id}:meeting-knowledge-sync`,
       });
     }
   }

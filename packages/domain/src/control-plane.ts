@@ -124,6 +124,7 @@ export const CONTROL_PLANE_WORKSPACE_FEATURE_FLAGS = [
   { flag: "SETTINGS_GENERAL", label: "General settings", description: "General workspace configuration screens.", defaultEnabled: true },
   { flag: "MULTILINGUAL", label: "Multilingual", description: "Locale switcher and translated workspace UI.", defaultEnabled: false },
   { flag: "MEETING_RECORDERS", label: "Meeting recorders", description: "Managed meeting recorder entitlement and recorder config.", defaultEnabled: false },
+  { flag: "MEETING_CONTEXTUAL_INTELLIGENCE", label: "Context-aware meeting intelligence", description: "Use workspace context to summarize meetings and automatically update related governance records.", defaultEnabled: false },
 ] as const;
 
 export type ControlPlaneWorkspaceFeatureFlag = typeof CONTROL_PLANE_WORKSPACE_FEATURE_FLAGS[number]["flag"];
