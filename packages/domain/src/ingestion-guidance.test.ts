@@ -99,6 +99,8 @@ describe("ingestion guidance corrections", () => {
       "Open <corporate-rebels.com>.",
       "Open [docs](corporate-rebels.com).",
       "Use `corporate-rebels.com` in examples.",
+      "Check corporate-rebels.com for updates.",
+      "The URL for our internal developer portal is corporate-rebels.com.",
       "The company (Corporate-rebels.com) was discussed.",
       "The reference Corporate-rebels.com was discussed.",
     ].join("\n");
@@ -120,6 +122,8 @@ describe("ingestion guidance corrections", () => {
       "Open <corporate-rebels.com>.",
       "Open [docs](corporate-rebels.com).",
       "Use `corporate-rebels.com` in examples.",
+      "Check corporate-rebels.com for updates.",
+      "The URL for our internal developer portal is corporate-rebels.com.",
       "The company (corporate rebels) was discussed.",
       "The reference corporate rebels was discussed.",
     ].join("\n"));

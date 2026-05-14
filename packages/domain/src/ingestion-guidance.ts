@@ -70,8 +70,8 @@ function shouldPreserveDomainReference(fullText: string, start: number, end: num
   const before = fullText.slice(Math.max(0, start - 64), start).toLowerCase();
   const after = fullText.slice(end, Math.min(fullText.length, end + 24)).toLowerCase();
   const previous = fullText[start - 1] ?? "";
-  const explicitReferenceBefore = /\b(?:domain|url|website|web site|link)\b(?:\s+\w+){0,4}\s*(?::|-|=|is|was|should be|at)?\s*$/.test(before);
-  const navigationReferenceBefore = /\b(?:open|visit|browse|go to)\s*$/.test(before);
+  const explicitReferenceBefore = /\b(?:domain|url|website|web site|link)\b[\w\s-]*(?::|-|=|is|was|should be|at)?\s*$/.test(before);
+  const navigationReferenceBefore = /\b(?:open|visit|browse|go to|check|view|see|access)\s*$/.test(before);
   const explicitReferenceAfter = /^\s*(?:domain|url|website|web site|link)\b/.test(after);
   const referencePhraseAfter = /^\s*(?:for reference|as reference)\b/.test(after);
   const urlContinuationAfter = /^[/?#:]/.test(after);
