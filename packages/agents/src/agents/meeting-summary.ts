@@ -2,7 +2,7 @@ import type { AgentTriggerType } from "@prisma/client";
 import { prisma, env } from "@corgtex/shared";
 import { defaultModelGateway } from "@corgtex/models";
 import { searchIndexedKnowledge } from "@corgtex/knowledge";
-import { createConstitutionVersion } from "@corgtex/domain";
+import { applyGuidanceTermCorrections, createConstitutionVersion } from "@corgtex/domain";
 import { executeAgentRun, normalizeActionDrafts, normalizeProposalDraft, asString } from "../runtime";
 
 export async function runMeetingSummaryAgent(params: {
@@ -87,17 +87,18 @@ export async function runMeetingSummaryAgent(params: {
         ],
       }));
 
+      const summaryMd = applyGuidanceTermCorrections(summary.content, meeting.ingestionGuidanceMd);
       await helpers.step("persist-summary", { meetingId: meeting.id }, async () => prisma.meeting.update({
         where: { id: meeting.id },
         data: {
-          summaryMd: summary.content,
+          summaryMd,
         },
       }));
 
       return {
         resultJson: {
           meetingId: meeting.id,
-          summary: summary.content,
+          summary: summaryMd,
         },
       };
     },
