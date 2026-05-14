@@ -1,0 +1,197 @@
+name: Nightly Quality and Research
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Early morning UTC keeps the slow lane away from normal agent iteration.
+    - cron: "17 8 * * *"
+
+concurrency:
+  group: nightly-quality-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  full-quality:
+    name: Full Quality Gate
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: corgtex_nightly
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d corgtex_nightly"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/corgtex_nightly?schema=public
+      SHADOW_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres?schema=public
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - run: npx prisma generate
+
+      - run: npm run check
+
+      - run: npx prisma migrate diff --from-migrations prisma/migrations --to-schema-datamodel prisma/schema.prisma --shadow-database-url "$SHADOW_DATABASE_URL" --exit-code
+
+      - run: npx prisma migrate deploy
+
+      - run: npx vitest run --project unit --project integration
+
+      - run: env -u DATABASE_URL -u SHADOW_DATABASE_URL npm run build
+
+      - run: npm run build:site
+
+      - name: Audit production dependencies
+        continue-on-error: true
+        run: npm audit --omit=dev --audit-level=high
+
+  local-agent-e2e:
+    name: Local Agent E2E
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: corgtex_e2e
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d corgtex_e2e"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/corgtex_e2e?schema=public
+      APP_URL: http://localhost:3000
+      NEXT_PUBLIC_APP_URL: http://localhost:3000
+      NEXT_PUBLIC_SITE_URL: http://localhost:3008
+      ADMIN_EMAIL: nightly-admin@corgtex.local
+      ADMIN_PASSWORD: nightly-${{ github.run_id }}-${{ github.run_attempt }}
+      AGENT_E2E_EMAIL: nightly-admin@corgtex.local
+      AGENT_E2E_PASSWORD: nightly-${{ github.run_id }}-${{ github.run_attempt }}
+      AGENT_API_KEY: nightly-agent-${{ github.run_id }}-${{ github.run_attempt }}
+      MODEL_PROVIDER: fake
+      WORKER_POLL_INTERVAL_MS: 500
+      WORKER_MAX_POLL_INTERVAL_MS: 1500
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - run: npx prisma generate
+
+      - run: npx prisma migrate deploy
+
+      - run: npm run prisma:seed
+
+      - run: npm run seed:e2e
+
+      - run: env -u DATABASE_URL -u SHADOW_DATABASE_URL npm run build
+
+      - name: Start local web and worker
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm --workspace @corgtex/web run start:next > web.log 2>&1 &
+          echo $! > web.pid
+          npm --workspace @corgtex/worker run start > worker.log 2>&1 &
+          echo $! > worker.pid
+          for i in $(seq 1 60); do
+            if curl -fsS http://localhost:3000/api/health >/dev/null && curl -fsS http://localhost:9090/health >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Local web or worker did not become healthy."
+          tail -n 200 web.log || true
+          tail -n 200 worker.log || true
+          exit 1
+
+      - name: Run agent E2E flow
+        run: npm run test:e2e:agents -- http://localhost:3000
+
+      - name: Run local load smoke
+        run: npm run ops:load-smoke -- --base-url http://localhost:3000 --requests 80 --concurrency 8 --p95-ms 1500
+
+      - name: Print server logs on failure
+        if: failure()
+        run: |
+          tail -n 200 web.log || true
+          tail -n 200 worker.log || true
+
+  research:
+    name: Nightly Research Scout
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Generate research report
+        run: npm run ops:nightly-research -- --out-dir .artifacts/nightly-research
+
+      - name: Upload research artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-research
+          path: .artifacts/nightly-research
+
+      - name: Add summary
+        run: cat .artifacts/nightly-research/report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Update nightly research issue
+        if: vars.NIGHTLY_RESEARCH_CREATE_ISSUE == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require("node:fs");
+            const body = fs.readFileSync(".artifacts/nightly-research/report.md", "utf8").slice(0, 60000);
+            const title = "Nightly research and upgrade scout";
+            const { owner, repo } = context.repo;
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner,
+              repo,
+              state: "open",
+              per_page: 50,
+            });
+            const existing = issues.find((issue) => issue.title === title && !issue.pull_request);
+            if (existing) {
+              await github.rest.issues.createComment({ owner, repo, issue_number: existing.number, body });
+            } else {
+              await github.rest.issues.create({ owner, repo, title, body });
+            }
