@@ -1,14 +1,18 @@
-import type { MeetingInsightType, MeetingInsightStatus, MeetingInsight, Prisma, ProposalResolutionOutcome } from "@prisma/client";
+import { createHash } from "node:crypto";
+import type { MeetingInsightType, MeetingInsight, MeetingInsightOperation, Prisma, ProposalResolutionOutcome } from "@prisma/client";
 import { prisma, type AppActor } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
-import { invariant } from "./errors";
+import { AppError, invariant } from "./errors";
 import { defaultModelGateway } from "@corgtex/models";
 import { createAction, updateAction } from "./actions";
 import { createTension, updateTension } from "./tensions";
-import { createProposal, submitProposal } from "./proposals";
-import { appendEvents } from "./events";
+import { createProposal, createProposalFromTension, resolveProposal, submitProposal } from "./proposals";
+import { postDeliberationEntry } from "./deliberation";
+import { buildMeetingIntelligenceContext } from "./meeting-intelligence-context";
 
 const AUTO_APPLY_CONFIDENCE_THRESHOLD = 0.8;
+const AUTO_APPLY_DELIBERATION_THRESHOLD = 0.85;
+const AUTO_APPLY_PROPOSAL_RESOLUTION_THRESHOLD = 0.92;
 const MAX_DIRECT_INSIGHT_TRANSCRIPT_CHARS = 35_000;
 const INSIGHT_TRANSCRIPT_EXCERPT_CHARS = 8_000;
 const MEETING_INSIGHT_TYPES = new Set<MeetingInsightType>([
@@ -17,6 +21,7 @@ const MEETING_INSIGHT_TYPES = new Set<MeetingInsightType>([
   "ACTION_ITEM",
   "PROPOSAL",
   "FOLLOW_UP",
+  "DELIBERATION_ENTRY",
 ]);
 const MEETING_INSIGHT_TYPE_ALIASES: Record<string, MeetingInsightType> = {
   ACTION: "ACTION_ITEM",
@@ -27,6 +32,10 @@ const MEETING_INSIGHT_TYPE_ALIASES: Record<string, MeetingInsightType> = {
   FOLLOWUPS: "FOLLOW_UP",
   FOLLOW_UPS: "FOLLOW_UP",
   PROPOSALS: "PROPOSAL",
+  DELIBERATION: "DELIBERATION_ENTRY",
+  DELIBERATION_ENTRIES: "DELIBERATION_ENTRY",
+  DISCUSSION: "DELIBERATION_ENTRY",
+  DISCUSSION_NOTE: "DELIBERATION_ENTRY",
   TENSIONS: "TENSION",
 };
 const RESOLUTION_OUTCOMES = new Set<ProposalResolutionOutcome>([
@@ -34,6 +43,7 @@ const RESOLUTION_OUTCOMES = new Set<ProposalResolutionOutcome>([
   "NOT_ADOPTED",
   "WITHDRAWN",
 ]);
+const DELIBERATION_ENTRY_TYPES = new Set(["REACTION", "OBJECTION"]);
 
 function excerptLongTranscript(transcript: string) {
   if (transcript.length <= MAX_DIRECT_INSIGHT_TRANSCRIPT_CHARS) {
@@ -91,6 +101,61 @@ function normalizeResolutionOutcome(
     : null;
 }
 
+function normalizeDeliberationEntryType(value: unknown) {
+  if (typeof value !== "string") return "REACTION";
+  const normalized = value.trim().toUpperCase().replace(/[\s-]+/g, "_");
+  return DELIBERATION_ENTRY_TYPES.has(normalized) ? normalized : "REACTION";
+}
+
+function normalizeTargetEntityType(value: unknown) {
+  if (value === "Action" || value === "Tension" || value === "Proposal") {
+    return value;
+  }
+  return null;
+}
+
+function deterministicInsightDedupeKey(params: {
+  meetingId: string;
+  type: MeetingInsightType;
+  operation: "CREATE" | "RESOLVE";
+  title: string;
+  bodyMd: string;
+  targetEntityType: string | null;
+  targetEntityId: string | null;
+  deliberationEntryType: string | null;
+  resolutionOutcome: ProposalResolutionOutcome | null;
+}) {
+  const normalized = [
+    params.meetingId,
+    params.type,
+    params.operation,
+    params.targetEntityType ?? "",
+    params.targetEntityId ?? "",
+    params.deliberationEntryType ?? "",
+    params.resolutionOutcome ?? "",
+    params.title.toLowerCase().replace(/\s+/g, " ").trim(),
+    params.bodyMd.toLowerCase().replace(/\s+/g, " ").trim().slice(0, 600),
+  ].join("|");
+  return createHash("sha256").update(normalized).digest("hex").slice(0, 32);
+}
+
+function autoApplyThresholdForInsight(insight: Pick<MeetingInsight, "type" | "operation" | "targetEntityType">) {
+  if (insight.operation === "RESOLVE" && insight.targetEntityType === "Proposal") {
+    return AUTO_APPLY_PROPOSAL_RESOLUTION_THRESHOLD;
+  }
+  if (insight.type === "DELIBERATION_ENTRY") {
+    return AUTO_APPLY_DELIBERATION_THRESHOLD;
+  }
+  return AUTO_APPLY_CONFIDENCE_THRESHOLD;
+}
+
+function hasMeetingEvidenceForAutoApply(insight: Pick<MeetingInsight, "operation" | "targetEntityType" | "sourceQuote">) {
+  if (insight.operation === "RESOLVE" && insight.targetEntityType === "Proposal") {
+    return Boolean(insight.sourceQuote?.trim());
+  }
+  return true;
+}
+
 export async function extractMeetingInsights(
   actor: AppActor,
   params: { workspaceId: string; meetingId: string }
@@ -100,36 +165,33 @@ export async function extractMeetingInsights(
     workspaceId: params.workspaceId,
   });
 
-  const meeting = await prisma.meeting.findUnique({
-    where: {
-      id: params.meetingId,
+  let meetingContext;
+  try {
+    meetingContext = await buildMeetingIntelligenceContext({
       workspaceId: params.workspaceId,
-    },
-  });
+      meetingId: params.meetingId,
+      mode: "insights",
+    });
+  } catch (error) {
+    if (error instanceof AppError && error.status === 404 && error.code === "NOT_FOUND") {
+      const archivedMeeting = await prisma.meeting.findFirst({
+        where: {
+          id: params.meetingId,
+          workspaceId: params.workspaceId,
+          archivedAt: { not: null },
+        },
+        select: { id: true },
+      });
+      if (archivedMeeting) {
+        return [];
+      }
+    }
+    throw error;
+  }
+  const meeting = meetingContext.meeting;
 
   invariant(meeting, 404, "NOT_FOUND", "Meeting not found.");
   invariant(meeting.transcript, 400, "INVALID_STATE", "Meeting has no transcript to analyze.");
-
-  const [openActions, openTensions, openProposals] = await Promise.all([
-    prisma.action.findMany({
-      where: { workspaceId: params.workspaceId, archivedAt: null, status: { in: ["DRAFT", "OPEN", "IN_PROGRESS"] } },
-      select: { id: true, title: true, status: true },
-      orderBy: { createdAt: "desc" },
-      take: 50,
-    }),
-    prisma.tension.findMany({
-      where: { workspaceId: params.workspaceId, archivedAt: null, status: { in: ["DRAFT", "OPEN"] } },
-      select: { id: true, title: true, status: true },
-      orderBy: { createdAt: "desc" },
-      take: 50,
-    }),
-    prisma.proposal.findMany({
-      where: { workspaceId: params.workspaceId, archivedAt: null, status: { in: ["DRAFT", "OPEN"] } },
-      select: { id: true, title: true, status: true },
-      orderBy: { createdAt: "desc" },
-      take: 50,
-    }),
-  ]);
 
   const instruction = `
 You are analyzing a meeting transcript for a self-managed organization.
@@ -139,14 +201,16 @@ Extract all:
 - ACTION_ITEMS: Tasks assigned to specific people with next steps
 - PROPOSALS: New ideas or changes proposed for the organization
 - FOLLOW_UPS: Items that need to be discussed in the next meeting
+- DELIBERATION_ENTRIES: Notes about discussion on an existing proposal or tension
 - RESOLUTIONS: existing actions, tensions, or proposals that the meeting clearly completed, resolved, adopted, rejected, or withdrew
 
 Use any user-provided ingestion guidance to prioritize what matters and what follow-up work the operator wanted highlighted. Treat guidance as trusted operator context for spelling, name, and terminology corrections. When guidance corrects a transcript term, use the corrected term in titles and body text. Do not invent new decisions, tasks, tensions, proposals, or resolutions from guidance alone. If an item mainly comes from guidance rather than transcript evidence, say that clearly in the body and leave sourceQuote null.
 If transcriptCondensedForExtraction is true, the full transcript was too large for direct structured extraction. Use summaryMd as the primary meeting digest and the transcript excerpts only as supporting evidence. Do not treat the transcript-shortening note itself as meeting content.
+When contextual intelligence is enabled, use Corgtex context to connect the meeting to previous recurring meetings, active actions, active tensions, open proposals, recent deliberation, and relevant knowledge. Prefer updating or discussing existing records over creating duplicates.
 
 For each item, provide:
 - operation: CREATE for new records/decisions/follow-ups, RESOLVE for existing records resolved in this meeting
-- type: one of DECISION, TENSION, ACTION_ITEM, PROPOSAL, FOLLOW_UP
+- type: one of DECISION, TENSION, ACTION_ITEM, PROPOSAL, FOLLOW_UP, DELIBERATION_ENTRY
 - title: a concise numbered summary, e.g. "#001 > Owner Name Topic/Category - short description"
 - body: use this structured markdown format:
   **CONTEXT:** [Background or situation that prompted this item]
@@ -157,7 +221,10 @@ For each item, provide:
 - confidence: 0.0-1.0 how confident you are
 - sourceQuote: the relevant transcript or summary excerpt (max 200 chars)
 - targetEntityType and targetEntityId only for RESOLVE items, using the existing records supplied in the input
+- targetEntityType and targetEntityId are also required for DELIBERATION_ENTRY items and for PROPOSAL items that should be drafted from an existing Tension
+- deliberationEntryType only for DELIBERATION_ENTRY items: REACTION or OBJECTION
 - resolutionOutcome only for resolved proposals: ADOPTED, NOT_ADOPTED, or WITHDRAWN
+- dedupeKey: stable lowercase key based on type, target, and the discussed topic
 
 Be conservative — only extract items you're confident about.
 Number items sequentially (#001, #002, ...) across all types.
@@ -172,7 +239,7 @@ Number items sequentially (#001, #002, ...) across all types.
       "items": {
         "type": "object",
         "properties": {
-          "type": { "type": "string", "enum": ["DECISION", "TENSION", "ACTION_ITEM", "PROPOSAL", "FOLLOW_UP"] },
+          "type": { "type": "string", "enum": ["DECISION", "TENSION", "ACTION_ITEM", "PROPOSAL", "FOLLOW_UP", "DELIBERATION_ENTRY"] },
           "operation": { "type": "string", "enum": ["CREATE", "RESOLVE"] },
           "title": { "type": "string" },
           "body": { "type": "string" },
@@ -181,7 +248,9 @@ Number items sequentially (#001, #002, ...) across all types.
           "sourceQuote": { "type": "string" },
           "targetEntityType": { "type": "string", "enum": ["Action", "Tension", "Proposal"] },
           "targetEntityId": { "type": "string" },
-          "resolutionOutcome": { "type": "string", "enum": ["ADOPTED", "NOT_ADOPTED", "WITHDRAWN"] }
+          "deliberationEntryType": { "type": "string", "enum": ["REACTION", "OBJECTION"] },
+          "resolutionOutcome": { "type": "string", "enum": ["ADOPTED", "NOT_ADOPTED", "WITHDRAWN"] },
+          "dedupeKey": { "type": "string" }
         },
         "required": ["type", "title", "body", "confidence"]
       }
@@ -200,26 +269,43 @@ Number items sequentially (#001, #002, ...) across all types.
       transcriptCondensedForExtraction: meeting.transcript.length > MAX_DIRECT_INSIGHT_TRANSCRIPT_CHARS,
       summaryMd: meeting.summaryMd,
       ingestionGuidanceMd: meeting.ingestionGuidanceMd,
+      contextualIntelligenceEnabled: meetingContext.contextualIntelligenceEnabled,
       existingRecords: {
-        actions: openActions,
-        tensions: openTensions,
-        proposals: openProposals,
+        actions: meetingContext.actions,
+        tensions: meetingContext.tensions,
+        proposals: meetingContext.proposals,
+      },
+      corgtexContext: meetingContext.contextualIntelligenceEnabled ? {
+        previousMeetings: meetingContext.previousMeetings,
+        followUps: meetingContext.followUps,
+        recentDeliberation: meetingContext.deliberationEntries,
+        knowledge: meetingContext.knowledge,
+        attendees: meetingContext.attendees,
+      } : null,
+      automationPolicy: {
+        createRecordsAt: AUTO_APPLY_CONFIDENCE_THRESHOLD,
+        deliberationAt: AUTO_APPLY_DELIBERATION_THRESHOLD,
+        proposalResolutionAt: AUTO_APPLY_PROPOSAL_RESOLUTION_THRESHOLD,
       },
     }),
     schemaHint,
   });
 
-  const parsed = extraction.output as { insights?: any[] };
+  const parsed = extraction.output as { insights?: Array<Record<string, unknown>> };
   const insights = Array.isArray(parsed.insights) ? parsed.insights : [];
 
   const validTargets = new Map<string, string>([
-    ...openActions.map((item) => [`Action:${item.id}`, item.id] as const),
-    ...openTensions.map((item) => [`Tension:${item.id}`, item.id] as const),
-    ...openProposals.map((item) => [`Proposal:${item.id}`, item.id] as const),
+    ...meetingContext.actions.map((item: { id: string }) => [`Action:${item.id}`, item.id] as const),
+    ...meetingContext.tensions.map((item: { id: string }) => [`Tension:${item.id}`, item.id] as const),
+    ...meetingContext.proposals.map((item: { id: string }) => [`Proposal:${item.id}`, item.id] as const),
   ]);
+  const resolvableProposalIds = new Set(meetingContext.proposals
+    .filter((item: { id: string; status: string }) => item.status === "OPEN")
+    .map((item: { id: string }) => item.id));
 
-  return prisma.$transaction(async (tx) => {
+  return prisma.$transaction(async (tx: Prisma.TransactionClient) => {
     const createdInsights: MeetingInsight[] = [];
+    const seenDedupeKeys = new Set<string>();
 
     await tx.meetingInsight.deleteMany({
       where: {
@@ -230,35 +316,111 @@ Number items sequentially (#001, #002, ...) across all types.
     });
     
     for (const item of insights) {
-      const targetEntityType = typeof item.targetEntityType === "string" ? item.targetEntityType : null;
-      const targetEntityId = typeof item.targetEntityId === "string" ? item.targetEntityId : null;
+      const targetEntityType = normalizeTargetEntityType(item.targetEntityType);
+      const targetEntityId = typeof item.targetEntityId === "string" ? item.targetEntityId.trim() : null;
       const targetKey = targetEntityType && targetEntityId ? `${targetEntityType}:${targetEntityId}` : null;
-      const operation = item.operation === "RESOLVE" && targetKey && validTargets.has(targetKey) ? "RESOLVE" : "CREATE";
-      const type = normalizeInsightType(item.type, operation === "RESOLVE" ? targetEntityType : null);
+      const hasValidTarget = Boolean(targetKey && validTargets.has(targetKey));
+      if (targetKey && !hasValidTarget) continue;
+
+      const requestedOperation: MeetingInsightOperation = item.operation === "RESOLVE" ? "RESOLVE" : "CREATE";
+      if (requestedOperation === "RESOLVE" && !hasValidTarget) continue;
+      if (requestedOperation === "RESOLVE" && targetEntityType === "Proposal" && targetEntityId && !resolvableProposalIds.has(targetEntityId)) continue;
+
+      const type = normalizeInsightType(item.type, requestedOperation === "RESOLVE" ? targetEntityType : null);
       const title = typeof item.title === "string" ? item.title.trim() : "";
       const bodyMd = typeof item.body === "string" ? item.body.trim() : "";
-      const resolutionOutcome = normalizeResolutionOutcome(item.resolutionOutcome, operation, targetEntityType);
       if (!type || title.length === 0 || bodyMd.length === 0) continue;
+
+      const isDeliberationEntry = type === "DELIBERATION_ENTRY";
+      const operation: MeetingInsightOperation = isDeliberationEntry ? "CREATE" : requestedOperation;
+      const resolutionOutcome = normalizeResolutionOutcome(item.resolutionOutcome, operation, targetEntityType);
       if (operation === "RESOLVE" && targetEntityType === "Proposal" && !resolutionOutcome) continue;
-      
-      const created = await tx.meetingInsight.create({
-        data: {
-          meetingId: meeting.id,
-          workspaceId: params.workspaceId,
-          type,
-          operation,
-          status: "SUGGESTED",
-          title,
-          bodyMd,
-          assigneeHint: typeof item.assigneeHint === "string" ? item.assigneeHint : null,
-          confidence: typeof item.confidence === "number" ? item.confidence : 0,
-          sourceQuote: typeof item.sourceQuote === "string" ? item.sourceQuote.slice(0, 200) : null,
-          targetEntityType: operation === "RESOLVE" ? targetEntityType : null,
-          targetEntityId: operation === "RESOLVE" ? targetEntityId : null,
-          resolutionOutcome,
-        },
+
+      if (isDeliberationEntry && (!hasValidTarget || (targetEntityType !== "Proposal" && targetEntityType !== "Tension"))) {
+        continue;
+      }
+
+      const keepTarget = hasValidTarget && (
+        operation === "RESOLVE" ||
+        isDeliberationEntry ||
+        (type === "PROPOSAL" && targetEntityType === "Tension")
+      );
+      const deliberationEntryType = isDeliberationEntry ? normalizeDeliberationEntryType(item.deliberationEntryType) : null;
+      const modelDedupeKey = typeof item.dedupeKey === "string"
+        ? item.dedupeKey.trim().toLowerCase().replace(/\s+/g, "-").slice(0, 160)
+        : "";
+      const dedupeKey = modelDedupeKey || deterministicInsightDedupeKey({
+        meetingId: meeting.id,
+        type,
+        operation,
+        title,
+        bodyMd,
+        targetEntityType: keepTarget ? targetEntityType : null,
+        targetEntityId: keepTarget ? targetEntityId : null,
+        deliberationEntryType,
+        resolutionOutcome,
       });
-      createdInsights.push(created);
+      if (seenDedupeKeys.has(dedupeKey)) continue;
+      seenDedupeKeys.add(dedupeKey);
+
+      const insightData = {
+        meetingId: meeting.id,
+        workspaceId: params.workspaceId,
+        type,
+        operation,
+        status: "SUGGESTED" as const,
+        title,
+        bodyMd,
+        assigneeHint: typeof item.assigneeHint === "string" ? item.assigneeHint : null,
+        confidence: typeof item.confidence === "number" ? item.confidence : 0,
+        sourceQuote: typeof item.sourceQuote === "string" ? item.sourceQuote.slice(0, 200) : null,
+        targetEntityType: keepTarget ? targetEntityType : null,
+        targetEntityId: keepTarget ? targetEntityId : null,
+        deliberationEntryType,
+        resolutionOutcome,
+        dedupeKey,
+      };
+
+      const existingInsight = await tx.meetingInsight.findFirst({
+        where: {
+          workspaceId: params.workspaceId,
+          meetingId: meeting.id,
+          OR: [
+            { dedupeKey },
+            {
+              dedupeKey: null,
+              type,
+              operation,
+              title,
+              bodyMd,
+              targetEntityType: insightData.targetEntityType,
+              targetEntityId: insightData.targetEntityId,
+              deliberationEntryType,
+              resolutionOutcome,
+            },
+          ],
+        },
+        select: { id: true },
+      });
+      if (existingInsight) continue;
+
+      const createdCount = await tx.meetingInsight.createMany({
+        data: [insightData],
+        skipDuplicates: true,
+      });
+      if (createdCount.count === 0) continue;
+
+      const created = await tx.meetingInsight.findFirst({
+        where: {
+          workspaceId: params.workspaceId,
+          meetingId: meeting.id,
+          dedupeKey,
+        },
+        orderBy: { createdAt: "desc" },
+      });
+      if (created) {
+        createdInsights.push(created);
+      }
     }
 
     await tx.meeting.update({
@@ -377,7 +539,43 @@ export async function applyInsight(
   const meetingContext = `\n\n*Created from meeting:* [${insight.meeting.title || 'Untitled'}](/workspaces/${params.workspaceId}/meetings/${insight.meetingId})`;
   const fullBody = (insight.bodyMd || "") + meetingContext;
 
-  if (insight.operation === "RESOLVE") {
+  if (insight.type === "DELIBERATION_ENTRY") {
+    invariant(insight.targetEntityType === "Proposal" || insight.targetEntityType === "Tension", 400, "INVALID_STATE", "Deliberation insights must point to a proposal or tension.");
+    invariant(insight.targetEntityId, 400, "INVALID_STATE", "Deliberation insights must point to a target record.");
+
+    const parentType = insight.targetEntityType === "Proposal" ? "PROPOSAL" : "TENSION";
+    if (insight.targetEntityType === "Proposal") {
+      const proposal = await prisma.proposal.findFirst({
+        where: {
+          id: insight.targetEntityId,
+          workspaceId: params.workspaceId,
+          archivedAt: null,
+        },
+        select: { id: true },
+      });
+      invariant(proposal, 404, "NOT_FOUND", "Proposal not found.");
+    } else {
+      const tension = await prisma.tension.findFirst({
+        where: {
+          id: insight.targetEntityId,
+          workspaceId: params.workspaceId,
+          archivedAt: null,
+        },
+        select: { id: true },
+      });
+      invariant(tension, 404, "NOT_FOUND", "Tension not found.");
+    }
+
+    const entry = await postDeliberationEntry(actor, {
+      workspaceId: params.workspaceId,
+      parentType,
+      parentId: insight.targetEntityId,
+      entryType: normalizeDeliberationEntryType(insight.deliberationEntryType),
+      bodyMd: fullBody,
+    });
+    appliedEntityType = "DeliberationEntry";
+    appliedEntityId = entry.id;
+  } else if (insight.operation === "RESOLVE") {
     invariant(insight.targetEntityType && insight.targetEntityId, 400, "INVALID_STATE", "Resolved insight must point to a target record.");
 
     if (insight.targetEntityType === "Action") {
@@ -399,60 +597,11 @@ export async function applyInsight(
       appliedEntityId = insight.targetEntityId;
     } else if (insight.targetEntityType === "Proposal") {
       const outcome = (insight.resolutionOutcome || "ADOPTED") as ProposalResolutionOutcome;
-      await prisma.$transaction(async (tx) => {
-        const proposal = await tx.proposal.findFirst({
-          where: { id: insight.targetEntityId!, workspaceId: params.workspaceId, archivedAt: null },
-        });
-        invariant(proposal, 404, "NOT_FOUND", "Proposal not found.");
-        const updatedProposal = await tx.proposal.update({
-          where: { id: proposal.id },
-          data: {
-            status: "RESOLVED",
-            resolutionOutcome: outcome,
-            decisionMd: fullBody,
-            decidedAt: new Date(),
-            isPrivate: false,
-            publishedAt: proposal.publishedAt || new Date(),
-          },
-        });
-        if (outcome === "ADOPTED") {
-          await tx.policyCorpus.upsert({
-            where: { proposalId: updatedProposal.id },
-            update: {
-              title: updatedProposal.title,
-              bodyMd: updatedProposal.bodyMd,
-              acceptedAt: updatedProposal.decidedAt ?? new Date(),
-              circleId: updatedProposal.circleId,
-            },
-            create: {
-              workspaceId: updatedProposal.workspaceId,
-              proposalId: updatedProposal.id,
-              title: updatedProposal.title,
-              bodyMd: updatedProposal.bodyMd,
-              acceptedAt: updatedProposal.decidedAt ?? new Date(),
-              circleId: updatedProposal.circleId,
-            },
-          });
-        }
-        await tx.auditLog.create({
-          data: {
-            workspaceId: params.workspaceId,
-            actorUserId: actor.kind === "user" ? actor.user.id : null,
-            action: "proposal.resolved_from_meeting",
-            entityType: "Proposal",
-            entityId: proposal.id,
-            meta: { meetingId: insight.meetingId, outcome },
-          },
-        });
-        await appendEvents(tx, [
-          {
-            workspaceId: params.workspaceId,
-            type: outcome === "ADOPTED" ? "proposal.approved" : "proposal.rejected",
-            aggregateType: "Proposal",
-            aggregateId: proposal.id,
-            payload: { proposalId: proposal.id, subjectId: proposal.id, outcome },
-          },
-        ]);
+      await resolveProposal(actor, {
+        workspaceId: params.workspaceId,
+        proposalId: insight.targetEntityId,
+        outcome,
+        decisionMd: fullBody,
       });
       appliedEntityType = "Proposal";
       appliedEntityId = insight.targetEntityId;
@@ -481,7 +630,7 @@ export async function applyInsight(
         include: { user: true }
       });
       const lowHint = insight.assigneeHint.toLowerCase();
-      const match = mems.find(m =>
+      const match = mems.find((m: { id: string; user: { displayName?: string | null; email: string } }) =>
         m.user.displayName?.toLowerCase().includes(lowHint) ||
         m.user.email.toLowerCase().includes(lowHint)
       );
@@ -520,13 +669,22 @@ export async function applyInsight(
       appliedEntityType = "Tension";
       appliedEntityId = opened.id;
     } else if (insight.type === "PROPOSAL") {
-      const proposal = await createProposal(actor, {
-        workspaceId: params.workspaceId,
-        title: insight.title,
-        bodyMd: fullBody,
-        meetingId: insight.meetingId,
-        isPrivate: false,
-      });
+      const proposal = insight.targetEntityType === "Tension" && insight.targetEntityId
+        ? await createProposalFromTension(actor, {
+          workspaceId: params.workspaceId,
+          sourceTensionId: insight.targetEntityId,
+          title: insight.title,
+          bodyMd: fullBody,
+          meetingId: insight.meetingId,
+          isPrivate: false,
+        })
+        : await createProposal(actor, {
+          workspaceId: params.workspaceId,
+          title: insight.title,
+          bodyMd: fullBody,
+          meetingId: insight.meetingId,
+          isPrivate: false,
+        });
       await submitProposal(actor, {
         workspaceId: params.workspaceId,
         proposalId: proposal.id,
@@ -575,7 +733,20 @@ export async function autoApplyMeetingInsights(
   let skipped = 0;
 
   for (const insight of insights) {
+    const requiredThreshold = Math.max(confidenceThreshold, autoApplyThresholdForInsight(insight));
+    if ((insight.confidence ?? 0) < requiredThreshold) {
+      skipped++;
+      continue;
+    }
     if (insight.operation === "RESOLVE" && (!insight.targetEntityType || !insight.targetEntityId)) {
+      skipped++;
+      continue;
+    }
+    if (insight.type === "DELIBERATION_ENTRY" && (!insight.targetEntityType || !insight.targetEntityId)) {
+      skipped++;
+      continue;
+    }
+    if (!hasMeetingEvidenceForAutoApply(insight)) {
       skipped++;
       continue;
     }

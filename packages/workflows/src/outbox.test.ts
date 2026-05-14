@@ -54,14 +54,17 @@ describe("deriveJobsForEvent", () => {
 
     expect(jobs).toHaveLength(7);
     expect(jobs.map((job) => job.type)).toEqual([
-      "knowledge.sync.meeting",
       "agent.meeting-summary",
       "meeting.insights.extract",
       "agent.action-extraction",
       "meeting.summary.post",
+      "knowledge.sync.meeting",
       "agent.inbox-triage",
       "knowledge.sync.event",
     ]);
+    const postJob = jobs.find((job) => job.type === "meeting.summary.post");
+    const knowledgeJob = jobs.find((job) => job.type === "knowledge.sync.meeting");
+    expect(knowledgeJob?.dependsOnDedupeKey).toBe(postJob?.dedupeKey);
   });
 
   it("does not run meeting agents for scheduled meetings without transcripts", () => {
@@ -96,6 +99,26 @@ describe("deriveJobsForEvent", () => {
     expect(jobs).toHaveLength(2);
     expect(jobs[0]?.type).toBe("knowledge.sync.document");
     expect(jobs[1]?.type).toBe("knowledge.sync.event");
+  });
+
+  it("indexes proposals when they are opened", () => {
+    const jobs = deriveJobsForEvent({
+      id: "event-proposal-opened",
+      type: "proposal.opened",
+      workspaceId: "workspace-1",
+      payload: {
+        proposalId: "proposal-1",
+      },
+    });
+
+    expect(jobs.map((job) => job.type)).toEqual([
+      "knowledge.sync.proposal",
+      "knowledge.sync.event",
+    ]);
+    expect(jobs[0]).toMatchObject({
+      payload: { proposalId: "proposal-1" },
+      dedupeKey: "event-proposal-opened:knowledge-sync",
+    });
   });
 
   it("creates reconciliation prep jobs for paid spends", () => {

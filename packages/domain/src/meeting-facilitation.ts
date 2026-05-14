@@ -1,10 +1,11 @@
 import { defaultModelGateway } from "@corgtex/models";
 import { prisma, toInputJson, type AppActor } from "@corgtex/shared";
-import type { MeetingInsightType, Prisma } from "@prisma/client";
+import type { MeetingInsightType } from "@prisma/client";
 import { requireWorkspaceMembership } from "./auth";
 import { invariant } from "./errors";
 import { fetchSlackThreadMessages, sendSlackMessage, updateSlackMessage, validateSlackPostTarget } from "./communication";
 import { extractMeetingInsights } from "./meeting-intelligence";
+import { buildMeetingIntelligenceContext } from "./meeting-intelligence-context";
 
 type AgendaSection = {
   title: string;
@@ -82,10 +83,6 @@ function displayDate(date: Date, timeZone = "UTC") {
     minute: "2-digit",
     timeZone,
   }).format(date);
-}
-
-function userLabel(user?: { displayName?: string | null; email?: string | null } | null) {
-  return user?.displayName || user?.email || null;
 }
 
 function truncate(text: string, max = 2900) {
@@ -220,7 +217,7 @@ async function attendeeMentionsForContext(installationId: string, workspaceId: s
     },
     select: { email: true, externalUserId: true },
   });
-  const slackUsersByEmail = new Map(externalUsers.map((user) => [user.email?.toLowerCase(), user.externalUserId]));
+  const slackUsersByEmail = new Map(externalUsers.map((user: { email?: string | null; externalUserId: string }) => [user.email?.toLowerCase(), user.externalUserId]));
   return attendees.map((attendee) => {
     const externalUserId = slackUsersByEmail.get(attendee.email.toLowerCase());
     return externalUserId ? `<@${externalUserId}>` : attendee.name || attendee.email;
@@ -297,150 +294,11 @@ export async function updateSlackAgendaSettings(actor: AppActor, params: {
 }
 
 export async function buildMeetingAgendaContext(workspaceId: string, meetingId: string) {
-  const meeting = await prisma.meeting.findFirst({
-    where: { id: meetingId, workspaceId, archivedAt: null },
-    include: { series: true },
+  return buildMeetingIntelligenceContext({
+    workspaceId,
+    meetingId,
+    mode: "agenda",
   });
-  invariant(meeting, 404, "NOT_FOUND", "Meeting not found.");
-
-  const participantEmails = meeting.participantEmails.map((email) => email.toLowerCase());
-  const memberOr = [
-    meeting.participantIds.length > 0 ? { id: { in: meeting.participantIds } } : null,
-    meeting.participantIds.length > 0 ? { userId: { in: meeting.participantIds } } : null,
-    participantEmails.length > 0 ? { user: { email: { in: participantEmails } } } : null,
-  ].filter(Boolean) as Prisma.MemberWhereInput[];
-  const members = await prisma.member.findMany({
-    where: {
-      workspaceId,
-      isActive: true,
-      ...(memberOr.length > 0 ? { OR: memberOr } : { id: { in: [] } }),
-    },
-    include: {
-      user: { select: { displayName: true, email: true } },
-      roleAssignments: {
-        include: {
-          role: {
-            select: {
-              circleId: true,
-              circle: { select: { name: true } },
-            },
-          },
-        },
-      },
-    },
-  });
-
-  const memberIds = members.map((member) => member.id);
-  const circleIds = [...new Set(members.flatMap((member) => member.roleAssignments.map((assignment) => assignment.role.circleId)))];
-  const scopedOr = [
-    circleIds.length > 0 ? { circleId: { in: circleIds } } : null,
-    memberIds.length > 0 ? { assigneeMemberId: { in: memberIds } } : null,
-    memberIds.length > 0 ? { raisedByMemberId: { in: memberIds } } : null,
-  ].filter(Boolean) as Prisma.TensionWhereInput[];
-
-  const [tensions, actions, previousMeeting] = await Promise.all([
-    prisma.tension.findMany({
-      where: {
-        workspaceId,
-        status: "OPEN",
-        isPrivate: false,
-        publishedAt: { not: null },
-        archivedAt: null,
-        ...(scopedOr.length > 0 ? { OR: scopedOr } : {}),
-      },
-      include: {
-        upvotes: true,
-        circle: { select: { name: true } },
-        assigneeMember: { include: { user: { select: { displayName: true, email: true } } } },
-        raisedByMember: { include: { user: { select: { displayName: true, email: true } } } },
-      },
-      orderBy: [{ priority: "desc" }, { createdAt: "desc" }],
-      take: 8,
-    }),
-    prisma.action.findMany({
-      where: {
-        workspaceId,
-        status: { in: ["OPEN", "IN_PROGRESS"] },
-        isPrivate: false,
-        publishedAt: { not: null },
-        archivedAt: null,
-        ...(memberIds.length > 0 || circleIds.length > 0
-          ? {
-            OR: [
-              memberIds.length > 0 ? { assigneeMemberId: { in: memberIds } } : null,
-              circleIds.length > 0 ? { circleId: { in: circleIds } } : null,
-            ].filter(Boolean) as Prisma.ActionWhereInput[],
-          }
-          : {}),
-      },
-      include: {
-        circle: { select: { name: true } },
-        assigneeMember: { include: { user: { select: { displayName: true, email: true } } } },
-      },
-      orderBy: [{ dueAt: "asc" }, { createdAt: "desc" }],
-      take: 8,
-    }),
-    prisma.meeting.findFirst({
-      where: {
-        workspaceId,
-        id: { not: meeting.id },
-        status: "COMPLETED",
-        archivedAt: null,
-        recordedAt: { lt: meeting.recordedAt },
-        OR: [
-          meeting.seriesId ? { seriesId: meeting.seriesId } : null,
-          meeting.title ? { title: meeting.title } : null,
-        ].filter(Boolean) as Prisma.MeetingWhereInput[],
-      },
-      orderBy: { recordedAt: "desc" },
-      select: { id: true },
-    }),
-  ]);
-
-  const followUps = previousMeeting
-    ? await prisma.meetingInsight.findMany({
-      where: {
-        workspaceId,
-        meetingId: previousMeeting.id,
-        type: "FOLLOW_UP",
-        status: { not: "DISMISSED" },
-      },
-      orderBy: { createdAt: "asc" },
-      take: 8,
-    })
-    : [];
-
-  return {
-    meeting,
-    attendees: members.map((member) => ({
-      memberId: member.id,
-      name: userLabel(member.user),
-      email: member.user.email,
-      circles: member.roleAssignments.map((assignment) => assignment.role.circle?.name).filter(Boolean),
-    })),
-    tensions: tensions.map((tension) => ({
-      id: tension.id,
-      title: tension.title,
-      priority: tension.priority,
-      upvotes: tension.upvotes.length,
-      circle: tension.circle?.name ?? null,
-      owner: userLabel(tension.assigneeMember?.user) ?? userLabel(tension.raisedByMember?.user),
-    })),
-    actions: actions.map((action) => ({
-      id: action.id,
-      title: action.title,
-      status: action.status,
-      dueAt: action.dueAt?.toISOString() ?? null,
-      circle: action.circle?.name ?? null,
-      owner: userLabel(action.assigneeMember?.user),
-    })),
-    followUps: followUps.map((followUp) => ({
-      id: followUp.id,
-      title: followUp.title,
-      bodyMd: followUp.bodyMd,
-      owner: followUp.assigneeHint,
-    })),
-  };
 }
 
 export async function prepareAgendaForMeeting(params: {
@@ -587,7 +445,7 @@ export async function runMeetingAgendaPreparation(params: {
   }
 
   await scheduleNextAgendaJob(params.workspaceId, settings);
-  return { posted, meetingIds: meetings.map((meeting) => meeting.id) };
+  return { posted, meetingIds: meetings.map((meeting: { id: string }) => meeting.id) };
 }
 
 function parseAgendaEditOutput(output: Record<string, unknown>, fallbackTitle: string): AgendaEditOutput {

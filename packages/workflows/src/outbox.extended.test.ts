@@ -111,14 +111,17 @@ describe("deriveJobsForEvent edge cases", () => {
     const insightJob = jobs.find((j) => j.type === "meeting.insights.extract");
     const extractionJob = jobs.find((j) => j.type === "agent.action-extraction");
     const postJob = jobs.find((j) => j.type === "meeting.summary.post");
+    const knowledgeJob = jobs.find((j) => j.type === "knowledge.sync.meeting");
 
     expect(summaryJob).toBeDefined();
     expect(insightJob).toBeDefined();
     expect(extractionJob).toBeDefined();
     expect(postJob).toBeDefined();
+    expect(knowledgeJob).toBeDefined();
     expect(insightJob?.dependsOnDedupeKey).toBe(summaryJob?.dedupeKey);
     expect(extractionJob?.dependsOnDedupeKey).toBe(insightJob?.dedupeKey);
     expect(postJob?.dependsOnDedupeKey).toBe(extractionJob?.dedupeKey);
+    expect(knowledgeJob?.dependsOnDedupeKey).toBe(postJob?.dedupeKey);
   });
 
   it("creates replay triage jobs with their own dedupe key", () => {

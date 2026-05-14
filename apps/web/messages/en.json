@@ -930,6 +930,12 @@
     "lowConfidence": "Low Confidence",
     "confidencePercent": "{percent}% confidence",
     "assigneeHint": "Assignee hint:",
+    "insightTargetLabel": "Target:",
+    "insightTargetProposal": "Proposal: {title}",
+    "insightTargetTension": "Tension: {title}",
+    "insightTargetFallback": "{type} {id}",
+    "deliberationEntryType": "Deliberation:",
+    "resolutionOutcome": "Resolution:",
     "sourceQuote": "Source Quote",
     "confirmInsight": "Confirm",
     "dismissInsight": "Dismiss",
@@ -968,7 +974,8 @@
       "tension": "tensions",
       "action_item": "action items",
       "proposal": "proposals",
-      "follow_up": "follow-ups"
+      "follow_up": "follow-ups",
+      "deliberation_entry": "deliberation"
     }
   },
   "members": {

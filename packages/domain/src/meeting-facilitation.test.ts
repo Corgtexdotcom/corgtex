@@ -27,7 +27,9 @@ const {
     member: { findMany: vi.fn() },
     tension: { findMany: vi.fn() },
     action: { findMany: vi.fn() },
+    proposal: { findMany: vi.fn() },
     meetingInsight: { findMany: vi.fn() },
+    deliberationEntry: { findMany: vi.fn() },
   },
   defaultModelGatewayMock: {
     extract: vi.fn(),
@@ -66,6 +68,14 @@ vi.mock("./meeting-intelligence", () => ({
 describe("meeting facilitation", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    prismaMock.meeting.findFirst.mockReset();
+    prismaMock.meeting.findMany.mockReset().mockResolvedValue([]);
+    prismaMock.member.findMany.mockReset().mockResolvedValue([]);
+    prismaMock.tension.findMany.mockReset().mockResolvedValue([]);
+    prismaMock.action.findMany.mockReset().mockResolvedValue([]);
+    prismaMock.proposal.findMany.mockReset().mockResolvedValue([]);
+    prismaMock.meetingInsight.findMany.mockReset().mockResolvedValue([]);
+    prismaMock.deliberationEntry.findMany.mockReset().mockResolvedValue([]);
     prismaMock.$transaction.mockImplementation(async (operations: unknown[]) => Promise.all(operations));
     prismaMock.communicationInstallation.findFirst.mockResolvedValue({
       id: "slack-1",
@@ -156,9 +166,16 @@ describe("meeting facilitation", () => {
       archivedAt: null,
       series: null,
     };
-    prismaMock.meeting.findFirst
-      .mockResolvedValueOnce(meeting)
-      .mockResolvedValueOnce({ id: "previous-meeting" });
+    prismaMock.meeting.findFirst.mockResolvedValueOnce(meeting);
+    prismaMock.meeting.findMany.mockResolvedValueOnce([
+      {
+        id: "previous-meeting",
+        title: "Weekly Tactical",
+        recordedAt: new Date("2026-04-23T17:00:00.000Z"),
+        summaryMd: "Previous summary",
+        decisionsJson: { items: [] },
+      },
+    ]);
     prismaMock.member.findMany.mockResolvedValue([
       {
         id: "member-1",
@@ -208,7 +225,7 @@ describe("meeting facilitation", () => {
 
     expect(prismaMock.tension.findMany).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({
-        status: "OPEN",
+        status: { in: ["OPEN"] },
         isPrivate: false,
         publishedAt: { not: null },
       }),
@@ -375,18 +392,30 @@ describe("meeting facilitation", () => {
       displayName: "Jan",
       globalRole: "USER",
     });
-    prismaMock.meeting.findFirst.mockResolvedValueOnce({
-      id: "meeting-1",
-      title: "Weekly Tactical",
-      recordedAt: new Date("2026-04-30T17:00:00.000Z"),
-      scheduledEndAt: null,
-      agendaJson: {
+    prismaMock.meeting.findFirst
+      .mockResolvedValueOnce({
+        id: "meeting-1",
         title: "Weekly Tactical",
-        sections: [{ title: "Check-in", items: [{ text: "Round" }] }],
-      },
-      agendaChannelId: "C123",
-      agendaMessageTs: "1710000000.000100",
-    });
+        recordedAt: new Date("2026-04-30T17:00:00.000Z"),
+        scheduledEndAt: null,
+        agendaJson: {
+          title: "Weekly Tactical",
+          sections: [{ title: "Check-in", items: [{ text: "Round" }] }],
+        },
+        agendaChannelId: "C123",
+        agendaMessageTs: "1710000000.000100",
+      })
+      .mockResolvedValueOnce({
+        id: "meeting-1",
+        workspaceId: "workspace-1",
+        title: "Weekly Tactical",
+        seriesId: "series-1",
+        participantIds: ["user-1"],
+        participantEmails: ["jan@example.com"],
+        recordedAt: new Date("2026-04-30T17:00:00.000Z"),
+        archivedAt: null,
+        series: null,
+      });
     defaultModelGatewayMock.extract.mockResolvedValue({
       output: {
         action: "clarify",

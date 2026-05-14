@@ -33,11 +33,13 @@ export default function MeetingIntelligence({
   workspaceId,
   meetingId,
   insights,
+  insightTargetLabels,
   hasTranscript,
 }: {
   workspaceId: string;
   meetingId: string;
   insights: MeetingInsight[];
+  insightTargetLabels?: Record<string, string>;
   hasTranscript: boolean;
 }) {
   const router = useRouter();
@@ -61,6 +63,7 @@ export default function MeetingIntelligence({
     ACTION_ITEM: t("insightType.action_item"),
     PROPOSAL: t("insightType.proposal"),
     FOLLOW_UP: t("insightType.follow_up"),
+    DELIBERATION_ENTRY: t("insightType.deliberation_entry"),
   };
 
   const buckets: InsightBucket[] = [
@@ -224,6 +227,17 @@ export default function MeetingIntelligence({
                   const loading = busyId === insight.id;
                   const draft = editing[insight.id];
                   const isEditing = Boolean(draft);
+                  const targetType = insight.targetEntityType ?? "";
+                  const targetId = insight.targetEntityId ?? "";
+                  const targetKey = targetType && targetId
+                    ? `${targetType}:${targetId}`
+                    : null;
+                  const targetLabel = targetKey
+                    ? insightTargetLabels?.[targetKey] ?? t("insightTargetFallback", {
+                      type: targetType,
+                      id: targetId.slice(0, 8),
+                    })
+                    : null;
 
                   return (
                     <article className={`meeting-insight-item${isEditing ? " editing" : ""}`} key={insight.id} aria-busy={loading}>
@@ -270,6 +284,21 @@ export default function MeetingIntelligence({
                             {insight.assigneeHint && (
                               <div className="nr-item-meta">
                                 {t("assigneeHint")} <strong>{insight.assigneeHint}</strong>
+                              </div>
+                            )}
+                            {targetLabel && (
+                              <div className="nr-item-meta">
+                                {t("insightTargetLabel")} <strong>{targetLabel}</strong>
+                              </div>
+                            )}
+                            {insight.deliberationEntryType && (
+                              <div className="nr-item-meta">
+                                {t("deliberationEntryType")} <strong>{insight.deliberationEntryType.toLowerCase()}</strong>
+                              </div>
+                            )}
+                            {insight.operation === "RESOLVE" && insight.resolutionOutcome && (
+                              <div className="nr-item-meta">
+                                {t("resolutionOutcome")} <strong>{insight.resolutionOutcome.replace("_", " ").toLowerCase()}</strong>
                               </div>
                             )}
                           </>
