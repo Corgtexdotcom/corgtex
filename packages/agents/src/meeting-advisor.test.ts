@@ -38,6 +38,8 @@ const envMock = {
   WORKSPACE_AGENT_MAX_CONCURRENCY: 4,
 };
 
+const modelUsage = { provider: "fake", model: "fake", inputTokens: 1, outputTokens: 1, latencyMs: 1, estimatedCostUsd: "0.000000" };
+
 vi.mock("@corgtex/shared", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@corgtex/shared")>();
   return {
@@ -65,7 +67,7 @@ vi.mock("@corgtex/models", async (importOriginal) => {
     ...actual,
     resolveModel: vi.fn().mockReturnValue("gpt-4o-mini"),
     defaultModelGateway: {
-      chat: vi.fn().mockResolvedValue({ content: "Mock summary" }),
+      chat: vi.fn().mockResolvedValue({ content: "Mock summary", usage: modelUsage }),
       embed: vi.fn().mockResolvedValue({ embeddings: [[0.1, 0.2]] }),
       extract: vi.fn().mockResolvedValue({ output: {} }),
       rerank: vi.fn().mockResolvedValue({ results: [] }),
@@ -138,5 +140,37 @@ describe("runMeetingSummaryAgent", () => {
       ]),
     }));
     expect(result).toEqual(expect.objectContaining({ status: "COMPLETED" }));
+  });
+
+  it("applies explicit guidance term corrections before persisting the meeting summary", async () => {
+    const { defaultModelGateway } = await import("@corgtex/models");
+    vi.mocked(defaultModelGateway.chat).mockResolvedValueOnce({
+      content: "The company name for Karina was discussed.\nPuncar should configure info@karina.com.",
+      usage: modelUsage,
+    });
+    prismaMock.meeting.findUnique.mockResolvedValue({
+      id: "meeting-1",
+      workspaceId: "ws-1",
+      title: "Test Meeting",
+      source: "manual",
+      transcript: "We discussed the company name.",
+      summaryMd: "The company name for Karina was discussed.",
+      ingestionGuidanceMd: "Its not Karina - its Corporate-rebels.com or corporate rebels depends on the context",
+      recordedAt: new Date(),
+    });
+
+    const { runMeetingSummaryAgent } = await import(".");
+
+    await runMeetingSummaryAgent({
+      workspaceId: "ws-1",
+      triggerRef: "trigger-1",
+      triggerType: "EVENT",
+      meetingId: "meeting-1",
+    });
+
+    const persistedSummary = prismaMock.meeting.update.mock.calls.at(-1)?.[0]?.data?.summaryMd;
+    expect(persistedSummary).toContain("Corporate-rebels.com");
+    expect(persistedSummary).not.toContain("company name for Karina");
+    expect(persistedSummary).toContain("info@karina.com");
   });
 });
