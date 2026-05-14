@@ -206,6 +206,95 @@ describe("meeting-intelligence", () => {
       expect(call.input).toContain("ENDING EXCERPT");
       expect(call.input.length).toBeLessThan(longTranscript.length);
     });
+
+    it("normalizes model insight enum variants before saving", async () => {
+      const { defaultModelGateway } = await import("@corgtex/models");
+      (defaultModelGateway.extract as ReturnType<typeof vi.fn>).mockResolvedValue({
+        output: {
+          insights: [
+            {
+              type: "RESOLUTION",
+              operation: "RESOLVE",
+              title: "#001 > Proposal resolved",
+              body: "**CONTEXT:** Proposal discussed\n**REQUEST:** Decide outcome\n**ANSWER:** Adopted\n**RESULT:** PROCESSED",
+              confidence: 0.85,
+              targetEntityType: "Proposal",
+              targetEntityId: "proposal-123",
+              resolutionOutcome: "adopted",
+            },
+            {
+              type: "ACTION_ITEMS",
+              operation: "CREATE",
+              title: "#002 > Alice Follow-up",
+              body: "**CONTEXT:** Follow-up needed\n**REQUEST:** Email customer\n**ANSWER:** Alice owns it\n**RESULT:** OPEN",
+              confidence: 0.7,
+              sourceQuote: "x".repeat(240),
+            },
+            {
+              type: "RESOLUTION",
+              operation: "CREATE",
+              title: "#003 > Unsupported loose resolution",
+              body: "No concrete target",
+              confidence: 0.5,
+            },
+            {
+              type: "PROPOSAL",
+              operation: "RESOLVE",
+              title: "#004 > Proposal ambiguous outcome",
+              body: "Malformed outcome should not default to adopted",
+              confidence: 0.8,
+              targetEntityType: "Proposal",
+              targetEntityId: "proposal-123",
+              resolutionOutcome: "maybe",
+            },
+            {
+              type: "ACTION_ITEM",
+              operation: "CREATE",
+              title: "   ",
+              body: "Empty title should be skipped",
+              confidence: 0.7,
+            },
+          ],
+        },
+      });
+
+      (prisma.meeting.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue({
+        id: "meeting-1",
+        workspaceId: "ws-1",
+        transcript: "Meeting transcript.",
+      });
+      (prisma.proposal.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([
+        { id: "proposal-123", title: "Existing proposal", status: "OPEN" },
+      ]);
+      (prisma.meetingInsight.create as ReturnType<typeof vi.fn>).mockResolvedValue({ id: "insight-1" });
+
+      await extractMeetingInsights(mockActor, {
+        workspaceId: "ws-1",
+        meetingId: "meeting-1",
+      });
+
+      expect(prisma.meetingInsight.create).toHaveBeenCalledTimes(2);
+      expect(prisma.meetingInsight.create).toHaveBeenNthCalledWith(1, expect.objectContaining({
+        data: expect.objectContaining({
+          type: "PROPOSAL",
+          operation: "RESOLVE",
+          targetEntityType: "Proposal",
+          targetEntityId: "proposal-123",
+          resolutionOutcome: "ADOPTED",
+        }),
+      }));
+      expect(prisma.meetingInsight.create).toHaveBeenNthCalledWith(2, expect.objectContaining({
+        data: expect.objectContaining({
+          type: "ACTION_ITEM",
+          operation: "CREATE",
+          sourceQuote: "x".repeat(200),
+        }),
+      }));
+      expect(prisma.meeting.update).toHaveBeenCalledWith(expect.objectContaining({
+        where: { id: "meeting-1" },
+        data: expect.objectContaining({ aiProcessedAt: expect.any(Date) }),
+      }));
+    });
   });
 
   describe("confirmInsight", () => {
