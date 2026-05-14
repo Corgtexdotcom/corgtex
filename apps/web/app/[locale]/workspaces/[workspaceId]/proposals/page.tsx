@@ -11,6 +11,7 @@ import {
   returnProposalToDraftAction,
   updateProposalAction,
 } from "../actions";
+import { ActionMenu } from "@/lib/components/ui/ActionMenu";
 import { getTranslations } from "next-intl/server";
 import { prisma } from "@corgtex/shared";
 
@@ -26,6 +27,7 @@ export default async function ProposalsPage({
   const { workspaceId } = await params;
   const actor = await requirePageActor();
   const t = await getTranslations("proposals");
+  const tCommon = await getTranslations("common");
   const resolvedSearch = searchParams ? await searchParams : {};
   const statusFilter = typeof resolvedSearch.status === "string" ? resolvedSearch.status : "OPEN";
   const archiveFilter = statusFilter === "ARCHIVED" ? "archived" : "active";
@@ -116,65 +118,64 @@ export default async function ProposalsPage({
                 )}
               </a>
 
-              {!isDemo && canManage && (
-                <div className="actions-inline" style={{ marginTop: 12 }}>
-                  {proposal.status === "DRAFT" && (
-                    <form action={submitProposalAction}>
-                      <input type="hidden" name="workspaceId" value={workspaceId} />
-                      <input type="hidden" name="proposalId" value={proposal.id} />
-                      <button type="submit" className="primary small">{t("btnOpen")}</button>
-                    </form>
-                  )}
-                  {proposal.status === "OPEN" && (
-                    <form action={returnProposalToDraftAction}>
-                      <input type="hidden" name="workspaceId" value={workspaceId} />
-                      <input type="hidden" name="proposalId" value={proposal.id} />
-                      <button type="submit" className="secondary small">{t("btnReturnToDraft")}</button>
-                    </form>
-                  )}
-                  {(proposal.status === "DRAFT" || proposal.status === "RESOLVED") && (
-                    <form action={archiveProposalAction}>
-                      <input type="hidden" name="workspaceId" value={workspaceId} />
-                      <input type="hidden" name="proposalId" value={proposal.id} />
-                      <button type="submit" className="warning small">{t("btnArchive")}</button>
-                    </form>
-                  )}
+              {!isDemo && (canManage || (canResolveProposal && proposal.status === "OPEN")) && (
+                <div className="item-actions">
+                  <div className="item-actions-primary">
+                    {canManage && proposal.status === "DRAFT" && (
+                      <form action={submitProposalAction}>
+                        <input type="hidden" name="workspaceId" value={workspaceId} />
+                        <input type="hidden" name="proposalId" value={proposal.id} />
+                        <button type="submit" className="primary small">{t("btnOpen")}</button>
+                      </form>
+                    )}
+                  </div>
+                  <ActionMenu label={tCommon("moreActions")}>
+                    {canResolveProposal && proposal.status === "OPEN" && (
+                      <form action={resolveProposalAction} className="action-menu-form">
+                        <input type="hidden" name="workspaceId" value={workspaceId} />
+                        <input type="hidden" name="proposalId" value={proposal.id} />
+                        <span className="action-menu-label">{t("btnResolve")}</span>
+                        <select name="outcome" defaultValue="ADOPTED" required aria-label={t("formResolutionOutcome")}>
+                          <option value="ADOPTED">{t("outcomeAdopted")}</option>
+                          <option value="NOT_ADOPTED">{t("outcomeNotAdopted")}</option>
+                          <option value="WITHDRAWN">{t("outcomeWithdrawn")}</option>
+                        </select>
+                        <MarkdownEditor name="decisionMd" placeholder={t("placeholderDecisionMd")} required rows={2} />
+                        <button type="submit" className="secondary small">{t("btnResolve")}</button>
+                      </form>
+                    )}
+                    {canManage && proposal.status === "OPEN" && (
+                      <form action={returnProposalToDraftAction}>
+                        <input type="hidden" name="workspaceId" value={workspaceId} />
+                        <input type="hidden" name="proposalId" value={proposal.id} />
+                        <button type="submit">{t("btnReturnToDraft")}</button>
+                      </form>
+                    )}
+                    {canManage && proposal.status === "DRAFT" && (
+                      <details>
+                        <summary className="nr-hide-marker" style={{ cursor: "pointer", padding: "8px 10px", borderRadius: 8, fontSize: "0.88rem", fontWeight: 500 }}>
+                          {t("btnEdit")}
+                        </summary>
+                        <form action={updateProposalAction} className="action-menu-form">
+                          <input type="hidden" name="workspaceId" value={workspaceId} />
+                          <input type="hidden" name="proposalId" value={proposal.id} />
+                          <ProposalDraftFields defaultTitle={proposal.title} defaultBodyMd={proposal.bodyMd} />
+                          <button type="submit" className="secondary small">{t("btnSaveDraft")}</button>
+                        </form>
+                      </details>
+                    )}
+                    {canManage && (proposal.status === "DRAFT" || proposal.status === "RESOLVED") && (
+                      <>
+                        <div className="action-menu-divider" />
+                        <form action={archiveProposalAction}>
+                          <input type="hidden" name="workspaceId" value={workspaceId} />
+                          <input type="hidden" name="proposalId" value={proposal.id} />
+                          <button type="submit" className="danger">{t("btnArchive")}</button>
+                        </form>
+                      </>
+                    )}
+                  </ActionMenu>
                 </div>
-              )}
-
-              {!isDemo && canResolveProposal && proposal.status === "OPEN" && (
-                <details style={{ marginTop: 12 }}>
-                  <summary className="secondary small nr-hide-marker" style={{ cursor: "pointer", display: "inline-block" }}>{t("btnResolve")}</summary>
-                  <form action={resolveProposalAction} className="stack nr-form-section" style={{ marginTop: 12 }}>
-                    <input type="hidden" name="workspaceId" value={workspaceId} />
-                    <input type="hidden" name="proposalId" value={proposal.id} />
-                    <label>
-                      {t("formResolutionOutcome")}
-                      <select name="outcome" defaultValue="ADOPTED" required>
-                        <option value="ADOPTED">{t("outcomeAdopted")}</option>
-                        <option value="NOT_ADOPTED">{t("outcomeNotAdopted")}</option>
-                        <option value="WITHDRAWN">{t("outcomeWithdrawn")}</option>
-                      </select>
-                    </label>
-                    <label>
-                      {t("formDecisionNote")}
-                      <MarkdownEditor name="decisionMd" placeholder={t("placeholderDecisionMd")} required rows={3} />
-                    </label>
-                    <button type="submit" className="secondary small">{t("btnResolve")}</button>
-                  </form>
-                </details>
-              )}
-
-              {!isDemo && canManage && proposal.status === "DRAFT" && (
-                <details style={{ marginTop: 12 }}>
-                  <summary className="secondary small nr-hide-marker" style={{ cursor: "pointer", display: "inline-block" }}>{t("btnEdit")}</summary>
-                  <form action={updateProposalAction} className="stack nr-form-section" style={{ marginTop: 12 }}>
-                    <input type="hidden" name="workspaceId" value={workspaceId} />
-                    <input type="hidden" name="proposalId" value={proposal.id} />
-                    <ProposalDraftFields defaultTitle={proposal.title} defaultBodyMd={proposal.bodyMd} />
-                    <button type="submit" className="secondary small">{t("btnSaveDraft")}</button>
-                  </form>
-                </details>
               )}
             </div>
           );})}

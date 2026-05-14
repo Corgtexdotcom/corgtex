@@ -365,6 +365,166 @@ button.warning {
   align-items: center;
 }
 
+/* Item actions row: primary CTA + overflow menu, used on list items. */
+.item-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+
+.item-actions-primary {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.item-actions-primary > form,
+.item-actions-primary > a,
+.item-actions-primary > button {
+  flex: 0 0 auto;
+}
+
+/* Overflow / kebab menu used to collapse secondary actions. */
+.action-menu {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.action-menu > summary.action-menu-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-full);
+  background: var(--surface-strong);
+  color: var(--muted);
+  cursor: pointer;
+  box-shadow: var(--shadow-sm);
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+
+.action-menu > summary.action-menu-trigger:hover,
+.action-menu[open] > summary.action-menu-trigger {
+  color: var(--text);
+  border-color: var(--text);
+  background: var(--bg-alt);
+}
+
+.action-menu > summary.action-menu-trigger svg {
+  display: block;
+}
+
+.action-menu-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  z-index: 60;
+  min-width: 200px;
+  max-width: min(280px, calc(100vw - 24px));
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-strong);
+  box-shadow: var(--shadow-lg);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.action-menu[data-align="right"] .action-menu-panel {
+  right: 0;
+}
+.action-menu[data-align="left"] .action-menu-panel {
+  left: 0;
+}
+
+/* Children of the menu panel: forms with a single button render as full-width rows.
+   Inline forms with multiple inputs (e.g., resolve with note) lay out as a vertical stack. */
+.action-menu-panel > * {
+  width: 100%;
+}
+
+.action-menu-panel form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+}
+
+.action-menu-panel form > button,
+.action-menu-panel > button,
+.action-menu-panel > a {
+  width: 100%;
+  justify-content: flex-start;
+  text-align: left;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  font-size: 0.88rem;
+  font-weight: 500;
+  box-shadow: none;
+  min-height: 36px;
+  text-decoration: none;
+}
+
+.action-menu-panel form > button:hover,
+.action-menu-panel > button:hover,
+.action-menu-panel > a:hover {
+  background: var(--bg-alt);
+  transform: none;
+  box-shadow: none;
+}
+
+.action-menu-panel form > button.danger,
+.action-menu-panel > button.danger {
+  color: var(--danger);
+  background: transparent;
+  border: 0;
+}
+.action-menu-panel form > button.danger:hover,
+.action-menu-panel > button.danger:hover {
+  background: var(--danger-soft);
+}
+
+.action-menu-panel .action-menu-divider {
+  height: 1px;
+  background: var(--line);
+  margin: 4px 0;
+  width: 100%;
+}
+
+.action-menu-panel .action-menu-label {
+  padding: 6px 10px 4px;
+  font-size: 0.72rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 600;
+}
+
+/* Forms that expand inline inside the panel (e.g., resolve with input) */
+.action-menu-panel .action-menu-form {
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.action-menu-panel .action-menu-form input,
+.action-menu-panel .action-menu-form select,
+.action-menu-panel .action-menu-form textarea {
+  width: 100%;
+  font-size: 0.88rem;
+}
+
 .form-message {
   margin: 0;
   border-radius: var(--radius-md);
@@ -2969,11 +3129,95 @@ a.wiki-list-item:hover {
     flex: 1 1 auto;
   }
 
+  /* New item-actions row keeps overflow menu compact on mobile, primary CTA grows. */
+  .item-actions {
+    width: 100%;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: nowrap;
+    gap: 10px;
+  }
+
+  .item-actions-primary {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .item-actions-primary > form,
+  .item-actions-primary > a,
+  .item-actions-primary > button,
+  .item-actions-primary > form > button {
+    flex: 1 1 auto;
+    width: 100%;
+  }
+
+  .item-actions .action-menu {
+    flex: 0 0 auto;
+  }
+
+  /* Reset the wall-of-buttons behavior when actions-inline lives inside the overflow panel. */
+  .action-menu-panel .actions-inline {
+    width: 100%;
+    align-items: stretch;
+  }
+
+  .action-menu-panel .actions-inline > a,
+  .action-menu-panel .actions-inline > button,
+  .action-menu-panel .actions-inline > form,
+  .action-menu-panel .actions-inline > form > button {
+    flex: 1 1 auto;
+  }
+
+  /* Action menu panel: anchor to viewport edges and prefer full-width on small screens. */
+  .action-menu-panel {
+    min-width: 240px;
+    max-width: calc(100vw - 32px);
+  }
+
   .panel,
   .item,
   .ws-stat-card {
     border-radius: 10px;
     padding: 16px;
+  }
+
+  /* Tighter list items + masthead on mobile so content gets more room. */
+  .nr-item {
+    padding-bottom: 14px;
+    margin-bottom: 14px;
+  }
+
+  .nr-item-title {
+    font-size: 1rem;
+    line-height: 1.3;
+  }
+
+  .nr-item-meta {
+    font-size: 0.78rem;
+    line-height: 1.35;
+  }
+
+  .nr-excerpt {
+    font-size: 0.9rem;
+    line-height: 1.5;
+  }
+
+  .nr-masthead h1 {
+    font-size: 1.5rem !important;
+    line-height: 1.2;
+  }
+
+  .nr-masthead {
+    margin-bottom: 18px !important;
+  }
+
+  .ws-section {
+    margin-bottom: 18px;
+  }
+
+  /* Inline create form: when used as a primary CTA section, soften it. */
+  .ws-section > details > summary > .nr-section-header {
+    font-size: 0.95rem;
   }
 
   .nr-filter-bar,
@@ -2985,21 +3229,30 @@ a.wiki-list-item:hover {
     overflow-x: auto;
     -webkit-overflow-scrolling: touch;
     scrollbar-width: none;
+    scroll-snap-type: x proximity;
+    scroll-padding-left: 14px;
+    scroll-padding-right: 14px;
   }
+  .nr-filter-bar::-webkit-scrollbar,
+  .nr-tab-bar::-webkit-scrollbar { display: none; }
 
   .nr-filter-bar.nr-filter-bar-wrap {
     margin-left: 0;
     margin-right: 0;
     padding: 0 0 8px;
     overflow-x: visible;
+    scroll-snap-type: none;
   }
 
   .nr-filter-item,
   .nr-tab {
     min-width: max-content;
-    min-height: 44px;
+    min-height: 40px;
+    padding-top: 8px;
+    padding-bottom: 8px;
     display: inline-flex;
     align-items: center;
+    scroll-snap-align: start;
   }
 
   .nr-filter-bar.nr-filter-bar-wrap .nr-filter-item {

@@ -16,6 +16,7 @@ import {
 } from "./view-model";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownExcerpt } from "@/lib/components/MarkdownRenderer";
+import { ActionMenu } from "@/lib/components/ui/ActionMenu";
 
 export const dynamic = "force-dynamic";
 
@@ -29,6 +30,7 @@ export default async function ActionsPage({
   const { workspaceId } = await params;
   const actor = await requirePageActor();
   const t = await getTranslations("actions");
+  const tCommon = await getTranslations("common");
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
   const [{ items: actions }, { items: proposals }] = await Promise.all([
     listActions(actor, workspaceId, { take: 50 }),
@@ -105,42 +107,55 @@ export default async function ActionsPage({
                   {action.proposal?.title ? ` · ${t("metaLinkedToProposal", { title: action.proposal.title })}` : ""}
                 </div>
 
-                <div className="actions-inline" style={{ marginTop: 12 }}>
-                  {canManage && action.status === "DRAFT" && (
-                    <form action={publishActionAction}>
+                <div className="item-actions">
+                  <div className="item-actions-primary">
+                    {canManage && action.status === "DRAFT" && (
+                      <form action={publishActionAction}>
+                        <input type="hidden" name="workspaceId" value={workspaceId} />
+                        <input type="hidden" name="actionId" value={action.id} />
+                        <button type="submit" className="primary small">{t("btnOpen")}</button>
+                      </form>
+                    )}
+                    {action.status === "OPEN" && (
+                      <form action={updateActionAction}>
+                        <input type="hidden" name="workspaceId" value={workspaceId} />
+                        <input type="hidden" name="actionId" value={action.id} />
+                        <input type="hidden" name="status" value="IN_PROGRESS" />
+                        <button type="submit" className="primary small">{t("btnStart")}</button>
+                      </form>
+                    )}
+                    {action.status === "IN_PROGRESS" && (
+                      <form action={updateActionAction}>
+                        <input type="hidden" name="workspaceId" value={workspaceId} />
+                        <input type="hidden" name="actionId" value={action.id} />
+                        <input type="hidden" name="status" value="COMPLETED" />
+                        <button type="submit" className="primary small">{t("btnComplete")}</button>
+                      </form>
+                    )}
+                  </div>
+                  <ActionMenu label={tCommon("moreActions")}>
+                    {action.status === "OPEN" && (
+                      <form action={updateActionAction}>
+                        <input type="hidden" name="workspaceId" value={workspaceId} />
+                        <input type="hidden" name="actionId" value={action.id} />
+                        <input type="hidden" name="status" value="COMPLETED" />
+                        <button type="submit">{t("btnComplete")}</button>
+                      </form>
+                    )}
+                    {canManage && (action.status === "OPEN" || action.status === "IN_PROGRESS") && (
+                      <form action={returnActionToDraftAction}>
+                        <input type="hidden" name="workspaceId" value={workspaceId} />
+                        <input type="hidden" name="actionId" value={action.id} />
+                        <button type="submit">{t("btnReturnToDraft")}</button>
+                      </form>
+                    )}
+                    <div className="action-menu-divider" />
+                    <form action={deleteActionAction}>
                       <input type="hidden" name="workspaceId" value={workspaceId} />
                       <input type="hidden" name="actionId" value={action.id} />
-                      <button type="submit" className="primary small">{t("btnOpen")}</button>
+                      <button type="submit" className="danger">{t("btnDelete")}</button>
                     </form>
-                  )}
-                  {canManage && (action.status === "OPEN" || action.status === "IN_PROGRESS") && (
-                    <form action={returnActionToDraftAction}>
-                      <input type="hidden" name="workspaceId" value={workspaceId} />
-                      <input type="hidden" name="actionId" value={action.id} />
-                      <button type="submit" className="secondary small">{t("btnReturnToDraft")}</button>
-                    </form>
-                  )}
-                  {action.status === "OPEN" && (
-                    <form action={updateActionAction}>
-                      <input type="hidden" name="workspaceId" value={workspaceId} />
-                      <input type="hidden" name="actionId" value={action.id} />
-                      <input type="hidden" name="status" value="IN_PROGRESS" />
-                      <button type="submit" className="secondary small">{t("btnStart")}</button>
-                    </form>
-                  )}
-                  {(action.status === "OPEN" || action.status === "IN_PROGRESS") && (
-                    <form action={updateActionAction}>
-                      <input type="hidden" name="workspaceId" value={workspaceId} />
-                      <input type="hidden" name="actionId" value={action.id} />
-                      <input type="hidden" name="status" value="COMPLETED" />
-                      <button type="submit" className="secondary small">{t("btnComplete")}</button>
-                    </form>
-                  )}
-                  <form action={deleteActionAction}>
-                    <input type="hidden" name="workspaceId" value={workspaceId} />
-                    <input type="hidden" name="actionId" value={action.id} />
-                    <button type="submit" className="danger small">{t("btnDelete")}</button>
-                  </form>
+                  </ActionMenu>
                 </div>
                 {canManage && action.status === "DRAFT" && (
                   <details style={{ marginTop: 12 }}>

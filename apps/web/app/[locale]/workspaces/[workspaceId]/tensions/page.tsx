@@ -11,6 +11,7 @@ import {
 } from "../actions";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownExcerpt } from "@/lib/components/MarkdownRenderer";
+import { ActionMenu } from "@/lib/components/ui/ActionMenu";
 import { getTranslations } from "next-intl/server";
 
 export const dynamic = "force-dynamic";
@@ -25,6 +26,7 @@ export default async function TensionsPage({
   const { workspaceId } = await params;
   const actor = await requirePageActor();
   const t = await getTranslations("tensions");
+  const tCommon = await getTranslations("common");
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
   const [{ items: tensions }, { items: proposals }, members] = await Promise.all([
     listTensions(actor, workspaceId, { take: 50 }),
@@ -134,46 +136,52 @@ export default async function TensionsPage({
                   )}
                 </div>
 
-                <div className="actions-inline" style={{ marginTop: 12 }}>
-                  {canManage && tension.status === "DRAFT" && (
-                    <form action={publishTensionAction}>
-                      <input type="hidden" name="workspaceId" value={workspaceId} />
-                      <input type="hidden" name="tensionId" value={tension.id} />
-                      <button type="submit" className="primary small">{t("btnOpen")}</button>
-                    </form>
-                  )}
-                  {canManage && tension.status === "OPEN" && (
-                    <form action={returnTensionToDraftAction}>
-                      <input type="hidden" name="workspaceId" value={workspaceId} />
-                      <input type="hidden" name="tensionId" value={tension.id} />
-                      <button type="submit" className="secondary small">{t("btnReturnToDraft")}</button>
-                    </form>
-                  )}
-                  {canDraftProposal && (
-                    <form action={createProposalFromTensionAction}>
-                      <input type="hidden" name="workspaceId" value={workspaceId} />
-                      <input type="hidden" name="sourceTensionId" value={tension.id} />
-                      <button type="submit" className="secondary small">{t("btnDraftProposal")}</button>
-                    </form>
-                  )}
-                  {!tension.isPrivate && tension.status === "OPEN" && (
-                    <details>
-                      <summary className="secondary small nr-hide-marker" style={{ cursor: "pointer" }}>{t("btnResolve")}</summary>
-                      <form action={updateTensionAction} className="actions-inline" style={{ marginTop: 8 }}>
+                <div className="item-actions">
+                  <div className="item-actions-primary">
+                    {canManage && tension.status === "DRAFT" && (
+                      <form action={publishTensionAction}>
+                        <input type="hidden" name="workspaceId" value={workspaceId} />
+                        <input type="hidden" name="tensionId" value={tension.id} />
+                        <button type="submit" className="primary small">{t("btnOpen")}</button>
+                      </form>
+                    )}
+                    {!tension.isPrivate && (
+                      <form action={upvoteTensionAction}>
+                        <input type="hidden" name="workspaceId" value={workspaceId} />
+                        <input type="hidden" name="tensionId" value={tension.id} />
+                        <button type="submit" className="secondary small">{t("btnUpvote")}</button>
+                      </form>
+                    )}
+                  </div>
+                  <ActionMenu label={tCommon("moreActions")}>
+                    {canDraftProposal && (
+                      <form action={createProposalFromTensionAction}>
+                        <input type="hidden" name="workspaceId" value={workspaceId} />
+                        <input type="hidden" name="sourceTensionId" value={tension.id} />
+                        <button type="submit">{t("btnDraftProposal")}</button>
+                      </form>
+                    )}
+                    {canManage && tension.status === "OPEN" && (
+                      <form action={returnTensionToDraftAction}>
+                        <input type="hidden" name="workspaceId" value={workspaceId} />
+                        <input type="hidden" name="tensionId" value={tension.id} />
+                        <button type="submit">{t("btnReturnToDraft")}</button>
+                      </form>
+                    )}
+                    {!tension.isPrivate && tension.status === "OPEN" && (
+                      <form action={updateTensionAction} className="action-menu-form">
                         <input type="hidden" name="workspaceId" value={workspaceId} />
                         <input type="hidden" name="tensionId" value={tension.id} />
                         <input type="hidden" name="status" value="RESOLVED" />
                         <input name="resolvedVia" placeholder={t("placeholderResolvedVia")} required />
                         <button type="submit" className="secondary small">{t("btnResolve")}</button>
                       </form>
-                    </details>
-                  )}
-                  {canManage && tension.status === "DRAFT" && (
-                    <details>
-                      <summary className="secondary small nr-hide-marker" style={{ cursor: "pointer" }}>{t("btnEditRaisedBy")}</summary>
-                      <form action={updateTensionAction} className="actions-inline" style={{ marginTop: 8 }}>
+                    )}
+                    {canManage && tension.status === "DRAFT" && (
+                      <form action={updateTensionAction} className="action-menu-form">
                         <input type="hidden" name="workspaceId" value={workspaceId} />
                         <input type="hidden" name="tensionId" value={tension.id} />
+                        <span className="action-menu-label">{t("btnEditRaisedBy")}</span>
                         <select name="raisedByMemberId" defaultValue={tension.raisedByMemberId || ""} aria-label={t("formRaisedBy")}>
                           <option value="">{t("formRaisedByNone")}</option>
                           {members.map((member) => (
@@ -182,20 +190,14 @@ export default async function TensionsPage({
                         </select>
                         <button type="submit" className="secondary small">{t("btnSaveRaisedBy")}</button>
                       </form>
-                    </details>
-                  )}
-                  {!tension.isPrivate && (
-                    <form action={upvoteTensionAction}>
+                    )}
+                    {canManage && tension.status === "DRAFT" && <div className="action-menu-divider" />}
+                    <form action={deleteTensionAction}>
                       <input type="hidden" name="workspaceId" value={workspaceId} />
                       <input type="hidden" name="tensionId" value={tension.id} />
-                      <button type="submit" className="secondary small">{t("btnUpvote")}</button>
+                      <button type="submit" className="danger">{t("btnDelete")}</button>
                     </form>
-                  )}
-                  <form action={deleteTensionAction}>
-                    <input type="hidden" name="workspaceId" value={workspaceId} />
-                    <input type="hidden" name="tensionId" value={tension.id} />
-                    <button type="submit" className="danger small">{t("btnDelete")}</button>
-                  </form>
+                  </ActionMenu>
                 </div>
                 {canManage && tension.status === "DRAFT" && (
                   <details style={{ marginTop: 12 }}>
