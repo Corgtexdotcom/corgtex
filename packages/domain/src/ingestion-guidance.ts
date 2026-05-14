@@ -23,7 +23,7 @@ function parseCorrectionTargets(value: string) {
     .map(cleanCorrectionReplacement)
     .filter(Boolean);
   const to = targets[0] ?? "";
-  const domainTo = targets.find((target) => /\b[a-z0-9][a-z0-9-]*(?:\.[a-z0-9][a-z0-9-]*)+\b/i.test(target));
+  const domainTo = targets.find(isLikelyDomain);
   const nameTo = targets.find((target) => target !== domainTo && !target.includes("."));
   return {
     to,
@@ -58,8 +58,13 @@ export function extractGuidanceTermCorrections(guidanceMd: string | null | undef
   return corrections;
 }
 
+function replaceStandaloneDomainTerm(text: string, from: string, to: string) {
+  const pattern = new RegExp(`(^|[^A-Za-z0-9.@-])(${escapeRegExp(from)})(?=$|[^A-Za-z0-9.-]|\\.(?![A-Za-z0-9-]))`, "gi");
+  return text.replace(pattern, (_match, prefix: string) => `${prefix}${to}`);
+}
+
 function replaceStandaloneTerm(text: string, from: string, to: string) {
-  if (isLikelyDomain(from)) return text;
+  if (isLikelyDomain(from)) return replaceStandaloneDomainTerm(text, from, to);
   const pattern = new RegExp(`\\b${escapeRegExp(from)}\\b`, "gi");
   return text.replace(pattern, (match, offset, fullText) => {
     const previous = offset > 0 ? fullText[offset - 1] : "";
@@ -75,7 +80,7 @@ function replaceStandaloneTerm(text: string, from: string, to: string) {
 function replaceDomainContext(text: string, from: string, to: string) {
   const sourceDomainPattern = isLikelyDomain(from)
     ? escapeRegExp(from)
-    : `${escapeRegExp(from)}\\.[A-Za-z0-9-]+`;
+    : `${escapeRegExp(from)}(?:\\.[A-Za-z0-9-]+)+`;
   const pattern = new RegExp(`(^|[^A-Za-z0-9.-])(${sourceDomainPattern})(?=$|[^A-Za-z0-9.-]|\\.(?![A-Za-z0-9-]))`, "gi");
   return text.replace(pattern, (_match, prefix: string) => `${prefix}${to.toLowerCase()}`);
 }

@@ -46,6 +46,44 @@ describe("ingestion guidance corrections", () => {
     ].join("\n"));
   });
 
+  it("applies name-only corrections for standalone full-domain source terms", () => {
+    const guidance = "Additional guidance: Its not karina.com - use corporate rebels";
+    const summary = [
+      "The old karina.com label is still present.",
+      "Send mail to info@karina.com.",
+      "The vendor portal.karina.com should not be inferred from the correction.",
+    ].join("\n");
+
+    expect(applyGuidanceTermCorrections(summary, guidance)).toBe([
+      "The old corporate rebels label is still present.",
+      "Send mail to info@karina.com.",
+      "The vendor portal.karina.com should not be inferred from the correction.",
+    ].join("\n"));
+  });
+
+  it("does not treat email replacements as domain targets", () => {
+    const guidance = "Additional guidance: Its not Karina - use info@corporate-rebels.com";
+
+    expect(applyGuidanceTermCorrections("Configure info@karina.com for Karina.", guidance)).toBe(
+      "Configure info@karina.com for info@corporate-rebels.com.",
+    );
+  });
+
+  it("corrects multi-label domains for non-domain source terms", () => {
+    const guidance = "Additional guidance: Its not Karina - its Corporate-rebels.com or corporate rebels depends on the context";
+    const summary = [
+      "Send mail to info@karina.co.uk.",
+      "The old karina.co.uk domain is still pending.",
+      "The vendor portal.karina.co.uk should not be inferred from the correction.",
+    ].join("\n");
+
+    expect(applyGuidanceTermCorrections(summary, guidance)).toBe([
+      "Send mail to info@corporate-rebels.com.",
+      "The old corporate-rebels.com domain is still pending.",
+      "The vendor portal.karina.co.uk should not be inferred from the correction.",
+    ].join("\n"));
+  });
+
   it("preserves explicit replacement casing", () => {
     expect(applyGuidanceTermCorrections("Acme approved the migration.", "It is not Acme - use IBM")).toBe(
       "IBM approved the migration.",
