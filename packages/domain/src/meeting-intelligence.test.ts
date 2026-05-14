@@ -158,6 +158,9 @@ describe("meeting-intelligence", () => {
         input: expect.stringContaining("Prioritize follow-up actions."),
       }));
       expect(defaultModelGateway.extract).toHaveBeenCalledWith(expect.objectContaining({
+        instruction: expect.stringContaining("trusted operator context for spelling, name, and terminology corrections"),
+      }));
+      expect(defaultModelGateway.extract).toHaveBeenCalledWith(expect.objectContaining({
         input: expect.stringContaining("Alice: I will follow up tomorrow."),
       }));
       expect(prisma.meetingInsight.create).toHaveBeenCalledWith(expect.objectContaining({
