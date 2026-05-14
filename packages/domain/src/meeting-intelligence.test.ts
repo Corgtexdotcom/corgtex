@@ -157,6 +157,9 @@ describe("meeting-intelligence", () => {
         instruction: expect.stringContaining("Number items sequentially"),
         input: expect.stringContaining("Prioritize follow-up actions."),
       }));
+      expect(defaultModelGateway.extract).toHaveBeenCalledWith(expect.objectContaining({
+        input: expect.stringContaining("Alice: I will follow up tomorrow."),
+      }));
       expect(prisma.meetingInsight.create).toHaveBeenCalledWith(expect.objectContaining({
         data: expect.objectContaining({
           type: "ACTION_ITEM",
@@ -164,6 +167,44 @@ describe("meeting-intelligence", () => {
           bodyMd: expect.stringContaining("**CONTEXT:**"),
         })
       }));
+    });
+
+    it("uses the summary and excerpts for long transcripts to avoid extraction timeouts", async () => {
+      const { defaultModelGateway } = await import("@corgtex/models");
+      (defaultModelGateway.extract as ReturnType<typeof vi.fn>).mockResolvedValue({
+        output: {
+          insights: [],
+        },
+      });
+
+      const longTranscript = [
+        "Alice: Beginning action item.",
+        "Filler ".repeat(6000),
+        "Milan: Middle concern.",
+        "More filler ".repeat(6000),
+        "Jan: Ending decision.",
+      ].join("\n");
+
+      (prisma.meeting.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue({
+        id: "meeting-1",
+        workspaceId: "ws-1",
+        transcript: longTranscript,
+        summaryMd: "Summary: Alice owns the follow-up and Jan confirmed the decision.",
+        ingestionGuidanceMd: "Prioritize follow-up actions.",
+      });
+
+      await extractMeetingInsights(mockActor, {
+        workspaceId: "ws-1",
+        meetingId: "meeting-1",
+      });
+
+      const call = (defaultModelGateway.extract as ReturnType<typeof vi.fn>).mock.calls[0]?.[0];
+      expect(call.input).toContain("\"transcriptCondensedForExtraction\":true");
+      expect(call.input).toContain("Summary: Alice owns the follow-up");
+      expect(call.input).toContain("BEGINNING EXCERPT");
+      expect(call.input).toContain("MIDDLE EXCERPT");
+      expect(call.input).toContain("ENDING EXCERPT");
+      expect(call.input.length).toBeLessThan(longTranscript.length);
     });
   });
 
