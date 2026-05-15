@@ -146,7 +146,9 @@ export default async function TensionsPage({
                         <button type="submit" className="primary small">{t("btnOpen")}</button>
                       </form>
                     );
-                  } else if (!tension.isPrivate && tension.status === "OPEN") {
+                  } else if (!tension.isPrivate && tension.status !== "DRAFT") {
+                    // upvoteTension only checks membership, so OPEN and RESOLVED
+                    // public tensions both keep the upvote primary CTA.
                     primary = (
                       <form action={upvoteTensionAction}>
                         <input type="hidden" name="workspaceId" value={workspaceId} />

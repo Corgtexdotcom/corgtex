@@ -98,12 +98,20 @@ export function ActionMenu({ label, children, className = "" }: ActionMenuProps)
     document.addEventListener("mousedown", handleDocumentPointerDown);
     document.addEventListener("touchstart", handleDocumentPointerDown, { passive: true });
     document.addEventListener("keydown", handleKey);
+    // Watch the panel's own size so it stays inside the viewport when nested
+    // <details> entries expand or collapse without a scroll/resize event.
+    const panel = panelRef.current;
+    const resizeObserver = panel && typeof ResizeObserver !== "undefined"
+      ? new ResizeObserver(() => recompute())
+      : null;
+    if (panel && resizeObserver) resizeObserver.observe(panel);
     return () => {
       window.removeEventListener("scroll", handleScrollOrResize, true);
       window.removeEventListener("resize", handleScrollOrResize);
       document.removeEventListener("mousedown", handleDocumentPointerDown);
       document.removeEventListener("touchstart", handleDocumentPointerDown);
       document.removeEventListener("keydown", handleKey);
+      resizeObserver?.disconnect();
     };
   }, [open, recompute, close]);
 
