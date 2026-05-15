@@ -9,15 +9,41 @@ import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
 import { getDeliberationTargets } from "@/lib/deliberation-targets";
 import { listDeliberationEntries } from "@corgtex/domain";
 import { postMeetingDeliberationAction, resolveMeetingDeliberationAction } from "../actions";
-import MeetingIntelligence from "./MeetingIntelligence";
+import MeetingIntelligence, { MeetingRegenerationPanel, type InsightTargetMetadata } from "./MeetingIntelligence";
 
 export const dynamic = "force-dynamic";
 
+type MeetingTab = "summary" | "raised" | "evidence";
+
 type MeetingInsightSummary = {
   status: string;
+  type: string;
+  title: string;
+  confidence: number | null;
+  sourceQuote: string | null;
+  appliedEntityType: string | null;
+  appliedEntityId: string | null;
   targetEntityType: string | null;
   targetEntityId: string | null;
 };
+
+function normalizeMeetingTab(value: string | string[] | undefined): MeetingTab {
+  const candidate = Array.isArray(value) ? value[0] : value;
+  if (candidate === "raised" || candidate === "evidence") return candidate;
+  return "summary";
+}
+
+function meetingTabHref(baseHref: string, tab: MeetingTab) {
+  return tab === "summary" ? baseHref : `${baseHref}?tab=${tab}`;
+}
+
+function statusTagClass(status: string, resolutionOutcome?: string | null) {
+  if (status === "DRAFT") return "info";
+  if (status === "OPEN") return "warning";
+  if (resolutionOutcome === "ADOPTED") return "success";
+  if (status === "RESOLVED") return "info";
+  return "";
+}
 
 function getMeetingProcessingStatus(meeting: NonNullable<Awaited<ReturnType<typeof getMeeting>>>) {
   if (!meeting.transcript) return null;
@@ -51,10 +77,13 @@ function getMeetingProcessingStatus(meeting: NonNullable<Awaited<ReturnType<type
 
 export default async function MeetingDetailPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ workspaceId: string; meetingId: string }>;
+  searchParams?: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const { workspaceId, meetingId } = await params;
+  const resolvedSearch = searchParams ? await searchParams : {};
   const actor = await requirePageActor();
   const t = await getTranslations("meetings");
   const format = await getFormatter();
@@ -94,6 +123,8 @@ export default async function MeetingDetailPage({
   const participants = meeting.participantIds?.length > 0 
     ? await getMeetingParticipants(workspaceId, meeting.participantIds)
     : [];
+  const activeTab = normalizeMeetingTab(resolvedSearch.tab);
+  const meetingHref = `/workspaces/${workspaceId}/meetings/${meetingId}`;
   const processingStatus = getMeetingProcessingStatus(meeting);
   const insightTargetProposalIds = [...new Set((meeting.insights as MeetingInsightSummary[])
     .filter((insight: MeetingInsightSummary) => insight.targetEntityType === "Proposal" && insight.targetEntityId)
@@ -115,10 +146,55 @@ export default async function MeetingDetailPage({
       })
       : Promise.resolve([]),
   ]);
-  const insightTargetLabels = Object.fromEntries([
-    ...insightTargetProposals.map((proposal: { id: string; title: string }) => [`Proposal:${proposal.id}`, t("insightTargetProposal", { title: proposal.title })]),
-    ...insightTargetTensions.map((tension: { id: string; title: string }) => [`Tension:${tension.id}`, t("insightTargetTension", { title: tension.title })]),
+  const insightTargets: Record<string, InsightTargetMetadata> = Object.fromEntries([
+    ...insightTargetProposals.map((proposal: { id: string; title: string }) => [`Proposal:${proposal.id}`, {
+      label: t("insightTargetProposal", { title: proposal.title }),
+      href: `/workspaces/${workspaceId}/proposals/${proposal.id}`,
+    }]),
+    ...insightTargetTensions.map((tension: { id: string; title: string }) => [`Tension:${tension.id}`, {
+      label: t("insightTargetTension", { title: tension.title }),
+      href: `/workspaces/${workspaceId}/tensions/${tension.id}`,
+    }]),
   ]);
+  const raisedEvidenceByEntity = new Map<string, MeetingInsightSummary[]>();
+  for (const insight of meeting.insights as MeetingInsightSummary[]) {
+    if (insight.status !== "APPLIED" || !insight.appliedEntityType || !insight.appliedEntityId) continue;
+    if (insight.appliedEntityType !== "Proposal" && insight.appliedEntityType !== "Tension") continue;
+    const key = `${insight.appliedEntityType}:${insight.appliedEntityId}`;
+    raisedEvidenceByEntity.set(key, [...(raisedEvidenceByEntity.get(key) ?? []), insight]);
+  }
+  const raisedItemCount = meeting.tensions.length + meeting.proposals.length;
+  const tabs: Array<{ key: MeetingTab; label: string }> = [
+    { key: "summary", label: t("tabSummary") },
+    { key: "raised", label: t("tabRaised", { count: raisedItemCount }) },
+    { key: "evidence", label: t("tabEvidence") },
+  ];
+  const evidenceFor = (entityType: "Proposal" | "Tension", entityId: string) => (
+    raisedEvidenceByEntity.get(`${entityType}:${entityId}`) ?? []
+  );
+  const renderRaisedEvidence = (evidence: MeetingInsightSummary[]) => {
+    if (evidence.length === 0) return null;
+    const primaryEvidence = evidence[0];
+    const targetKey = primaryEvidence.targetEntityType && primaryEvidence.targetEntityId
+      ? `${primaryEvidence.targetEntityType}:${primaryEvidence.targetEntityId}`
+      : null;
+    const target = targetKey ? insightTargets[targetKey] : null;
+
+    return (
+      <div className="meeting-raised-evidence">
+        <div className="meeting-raised-evidence-meta">
+          <span>{t("raisedEvidenceTitle")}</span>
+          {typeof primaryEvidence.confidence === "number" && (
+            <span>{t("confidencePercent", { percent: Math.round(primaryEvidence.confidence * 100) })}</span>
+          )}
+          {target && <span>{t("raisedEvidenceTarget", { target: target.label })}</span>}
+        </div>
+        {primaryEvidence.sourceQuote && (
+          <blockquote>{primaryEvidence.sourceQuote}</blockquote>
+        )}
+      </div>
+    );
+  };
 
   return (
     <>
@@ -150,129 +226,185 @@ export default async function MeetingDetailPage({
         </section>
       )}
       
-      {participants.length > 0 && (
-        <section className="ws-section" style={{ marginBottom: 48 }}>
-          <h2 className="nr-section-header">{t("participants")}</h2>
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {participants.map((p: any) => (
-              <Link 
-                key={p.id} 
-                href={`/workspaces/${workspaceId}/members/${p.id}`}
-                className="flex items-center gap-3 p-3 rounded-xl border bg-card hover:border-primary/50 transition-colors shadow-sm"
-                style={{ textDecoration: "none", color: "inherit" }}
-              >
-                <div className="flex-shrink-0 flex items-center justify-center w-10 h-10 rounded-full bg-primary/10 text-primary font-bold">
-                  {(p.user?.displayName || p.user?.email || "?").slice(0, 2).toUpperCase()}
+      <nav className="nr-tab-bar meeting-detail-tabs" aria-label={t("meetingDetailTabsLabel")}>
+        {tabs.map((tab) => (
+          <Link
+            key={tab.key}
+            href={meetingTabHref(meetingHref, tab.key)}
+            className={`nr-tab ${activeTab === tab.key ? "nr-tab-active" : ""}`}
+            aria-current={activeTab === tab.key ? "page" : undefined}
+          >
+            {tab.label}
+          </Link>
+        ))}
+      </nav>
+
+      <div className="meeting-tab-panel">
+        {activeTab === "summary" && (
+          <>
+            {participants.length > 0 && (
+              <section className="ws-section" style={{ marginBottom: 32 }}>
+                <h2 className="nr-section-header">{t("participants")}</h2>
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                  {participants.map((p: any) => (
+                    <Link
+                      key={p.id}
+                      href={`/workspaces/${workspaceId}/members/${p.id}`}
+                      className="flex items-center gap-3 p-3 rounded-xl border bg-card hover:border-primary/50 transition-colors shadow-sm"
+                      style={{ textDecoration: "none", color: "inherit" }}
+                    >
+                      <div className="flex-shrink-0 flex items-center justify-center w-10 h-10 rounded-full bg-primary/10 text-primary font-bold">
+                        {(p.user?.displayName || p.user?.email || "?").slice(0, 2).toUpperCase()}
+                      </div>
+                      <div>
+                        <div className="font-semibold text-sm">
+                          {p.user?.displayName || p.user?.email}
+                        </div>
+                        <div className="text-xs text-muted-foreground line-clamp-1">
+                          {p.roleAssignments[0]?.role.name || t("participant")}
+                          {p.roleAssignments.length > 1 && t("moreRoles", { count: p.roleAssignments.length - 1 })}
+                        </div>
+                      </div>
+                    </Link>
+                  ))}
                 </div>
-                <div>
-                  <div className="font-semibold text-sm">
-                    {p.user?.displayName || p.user?.email}
+              </section>
+            )}
+
+            {meeting.ingestionGuidanceMd && (
+              <section className="ws-section" style={{ marginBottom: 32 }}>
+                <h2 className="nr-section-header">{t("userGuidance")}</h2>
+                <MarkdownRenderer markdown={meeting.ingestionGuidanceMd} variant="document" />
+              </section>
+            )}
+
+            <section className="ws-section" style={{ marginBottom: 32 }}>
+              <h2 className="nr-section-header">{t("summary")}</h2>
+              {meeting.summaryMd ? (
+                <MarkdownRenderer markdown={meeting.summaryMd} variant="document" />
+              ) : (
+                <p className="meeting-empty-state">{t("summaryEmpty")}</p>
+              )}
+            </section>
+
+            <MeetingRegenerationPanel
+              workspaceId={workspaceId}
+              meetingId={meetingId}
+              hasTranscript={Boolean(meeting.transcript)}
+            />
+          </>
+        )}
+
+        {activeTab === "raised" && (
+          <section className="ws-section meeting-raised-section" style={{ marginBottom: 48 }}>
+            <div className="meeting-raised-header">
+              <h2 className="nr-section-header">{t("raisedItemsTitle")}</h2>
+              <p className="nr-item-meta">{t("raisedItemsDescription")}</p>
+            </div>
+
+            {raisedItemCount === 0 ? (
+              <p className="meeting-empty-state">{t("raisedItemsEmpty")}</p>
+            ) : (
+              <div className="meeting-raised-groups">
+                {meeting.tensions.length > 0 && (
+                  <div>
+                    <h3 className="meeting-raised-group-title">{t("tensionsRaised")}</h3>
+                    <div className="meeting-raised-grid">
+                      {meeting.tensions.map((tension: any) => (
+                        <Link
+                          href={`/workspaces/${workspaceId}/tensions/${tension.id}`}
+                          className="meeting-raised-card"
+                          key={tension.id}
+                        >
+                          <div className="meeting-raised-card-head">
+                            <span className="tag info">{t("raisedTypeTension")}</span>
+                            <span className={`tag ${statusTagClass(tension.status)}`}>
+                              {tension.status}
+                            </span>
+                          </div>
+                          <h3>{tension.title}</h3>
+                          <MarkdownExcerpt markdown={tension.bodyMd} maxLength={240} as="div" className="nr-excerpt" />
+                          <div className="nr-item-meta">
+                            {tension.author?.displayName || tension.author?.email}
+                          </div>
+                          {renderRaisedEvidence(evidenceFor("Tension", tension.id))}
+                        </Link>
+                      ))}
+                    </div>
                   </div>
-                  <div className="text-xs text-muted-foreground line-clamp-1">
-                    {p.roleAssignments[0]?.role.name || t("participant")}
-                    {p.roleAssignments.length > 1 && t("moreRoles", { count: p.roleAssignments.length - 1 })}
-                  </div>
-                </div>
-              </Link>
-            ))}
-          </div>
-        </section>
-      )}
+                )}
 
-      {meeting.ingestionGuidanceMd && (
-        <section className="ws-section" style={{ marginBottom: 48 }}>
-          <h2 className="nr-section-header">{t("userGuidance")}</h2>
-          <MarkdownRenderer markdown={meeting.ingestionGuidanceMd} variant="document" />
-        </section>
-      )}
-
-      {meeting.summaryMd && (
-        <section className="ws-section" style={{ marginBottom: 48 }}>
-          <h2 className="nr-section-header">{t("summary")}</h2>
-          <MarkdownRenderer markdown={meeting.summaryMd} variant="document" />
-        </section>
-      )}
-
-      <MeetingIntelligence
-        workspaceId={workspaceId}
-        meetingId={meetingId}
-        insights={meeting.insights}
-        insightTargetLabels={insightTargetLabels}
-        hasTranscript={Boolean(meeting.transcript)}
-      />
-
-      {meeting.tensions.length > 0 && (
-        <section className="ws-section" style={{ marginBottom: 48 }}>
-          <h2 className="nr-section-header">{t("tensionsRaised")}</h2>
-          <div className="list">
-            {meeting.tensions.map((tension: any) => (
-              <div className="item" key={tension.id}>
-                <div className="row">
-                  <strong>{tension.title}</strong>
-                  <span className={`tag ${tension.status === "DRAFT" ? "info" : tension.status === "OPEN" ? "warning" : "success"}`}>
-                    {tension.status}
-                  </span>
-                </div>
-                {tension.bodyMd && <MarkdownRenderer markdown={tension.bodyMd} variant="compact" className="muted" />}
-                <div className="muted" style={{ fontSize: "0.82rem", marginTop: 8 }}>
-                  {tension.author?.displayName || tension.author?.email}
-                </div>
-              </div>
-            ))}
-          </div>
-        </section>
-      )}
-
-      {meeting.proposals.length > 0 && (
-        <section className="ws-section" style={{ marginBottom: 48 }}>
-          <h2 className="nr-section-header">{t("proposalsCreated")}</h2>
-          <div className="list">
-            {meeting.proposals.map((proposal: any) => (
-              <div className="item" key={proposal.id}>
-                <div className="row">
-                  <strong>{proposal.title}</strong>
-                  <span className={`tag ${proposal.status === "DRAFT" ? "info" : proposal.status === "OPEN" ? "warning" : proposal.resolutionOutcome === "ADOPTED" ? "success" : proposal.status === "RESOLVED" ? "info" : ""}`}>
-                    {proposal.status === "RESOLVED" && proposal.resolutionOutcome ? `${proposal.status} · ${proposal.resolutionOutcome.replace("_", " ")}` : proposal.status}
-                  </span>
-                </div>
-                <MarkdownExcerpt markdown={proposal.summary ?? proposal.bodyMd} maxLength={180} as="div" className="muted" />
-                
-                <div className="muted" style={{ fontSize: "0.82rem", marginTop: 8 }}>
-                   {proposal.author?.displayName || proposal.author?.email} · {format.dateTime(proposal.createdAt, { dateStyle: "medium" })}
-                </div>
-
-                {(proposal.tensions?.length > 0 || proposal.actions?.length > 0) && (
-                  <div style={{ marginTop: 8, fontSize: "0.82rem", display: "flex", gap: "8px", flexWrap: "wrap" }}>
-                    {proposal.tensions?.map((linkedTension: any) => (
-                      <span key={linkedTension.id} className="tag info" style={{ padding: "2px 6px", fontSize: "0.75rem" }}>
-                        {t("tensionTag", { title: linkedTension.title })}
-                      </span>
-                    ))}
-                    {proposal.actions?.map((a: any) => (
-                      <span key={a.id} className="tag info" style={{ padding: "2px 6px", fontSize: "0.75rem" }}>
-                        {t("actionTag", { title: a.title })}
-                      </span>
-                    ))}
+                {meeting.proposals.length > 0 && (
+                  <div>
+                    <h3 className="meeting-raised-group-title">{t("proposalsCreated")}</h3>
+                    <div className="meeting-raised-grid">
+                      {meeting.proposals.map((proposal: any) => (
+                        <Link
+                          href={`/workspaces/${workspaceId}/proposals/${proposal.id}`}
+                          className="meeting-raised-card"
+                          key={proposal.id}
+                        >
+                          <div className="meeting-raised-card-head">
+                            <span className="tag info">{t("raisedTypeProposal")}</span>
+                            <span className={`tag ${statusTagClass(proposal.status, proposal.resolutionOutcome)}`}>
+                              {proposal.status === "RESOLVED" && proposal.resolutionOutcome ? `${proposal.status} · ${proposal.resolutionOutcome.replace("_", " ")}` : proposal.status}
+                            </span>
+                          </div>
+                          <h3>{proposal.title}</h3>
+                          <MarkdownExcerpt markdown={proposal.summary ?? proposal.bodyMd} maxLength={240} as="div" className="nr-excerpt" />
+                          <div className="nr-item-meta">
+                            {proposal.author?.displayName || proposal.author?.email} · {format.dateTime(proposal.createdAt, { dateStyle: "medium" })}
+                          </div>
+                          {(proposal.tensions?.length > 0 || proposal.actions?.length > 0) && (
+                            <div className="meeting-raised-tags">
+                              {proposal.tensions?.map((linkedTension: any) => (
+                                <span key={linkedTension.id} className="tag info">
+                                  {t("tensionTag", { title: linkedTension.title })}
+                                </span>
+                              ))}
+                              {proposal.actions?.map((a: any) => (
+                                <span key={a.id} className="tag info">
+                                  {t("actionTag", { title: a.title })}
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                          {renderRaisedEvidence(evidenceFor("Proposal", proposal.id))}
+                        </Link>
+                      ))}
+                    </div>
                   </div>
                 )}
               </div>
-            ))}
-          </div>
-        </section>
-      )}
+            )}
+          </section>
+        )}
 
-      {meeting.transcript && (
-        <section className="ws-section" style={{ marginBottom: 48 }}>
-          <details>
-            <summary style={{ cursor: "pointer", fontWeight: 600, color: "var(--accent)" }}>
-              <span className="nr-section-header" style={{ borderTop: "none", display: "inline-block", padding: 0, margin: 0 }}>{t("btnViewTranscript")}</span>
-            </summary>
-            <div style={{ marginTop: "24px", whiteSpace: "pre-wrap", fontSize: "0.9rem", color: "var(--text)" }}>
-              {meeting.transcript}
-            </div>
-          </details>
-        </section>
-      )}
+        {activeTab === "evidence" && (
+          <section className="ws-section meeting-evidence-stack" style={{ marginBottom: 48 }}>
+            <MeetingIntelligence
+              workspaceId={workspaceId}
+              insights={meeting.insights}
+              insightTargets={insightTargets}
+              hasTranscript={Boolean(meeting.transcript)}
+            />
+
+            {meeting.transcript && (
+              <details className="meeting-evidence-drawer">
+                <summary className="meeting-evidence-summary">
+                  <div>
+                    <span className="nr-section-header" style={{ borderTop: "none", margin: 0, padding: 0 }}>{t("btnViewTranscript")}</span>
+                    <p className="nr-item-meta" style={{ marginTop: 6 }}>{t("transcriptEvidenceDescription")}</p>
+                  </div>
+                </summary>
+                <div className="meeting-transcript-block">
+                  {meeting.transcript}
+                </div>
+              </details>
+            )}
+          </section>
+        )}
+      </div>
 
       <section className="ws-section" style={{ marginBottom: 48 }}>
         <h2 className="nr-section-header">{t("discussion")}</h2>
