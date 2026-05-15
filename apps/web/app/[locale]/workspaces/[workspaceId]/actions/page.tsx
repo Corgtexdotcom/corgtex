@@ -135,15 +135,9 @@ export default async function ActionsPage({
                         <button type="submit" className="primary small">{t("btnComplete")}</button>
                       </form>
                     );
-                  } else if (action.status === "COMPLETED" && canManage) {
-                    primary = (
-                      <form action={returnActionToDraftAction}>
-                        <input type="hidden" name="workspaceId" value={workspaceId} />
-                        <input type="hidden" name="actionId" value={action.id} />
-                        <button type="submit" className="secondary small">{t("btnReturnToDraft")}</button>
-                      </form>
-                    );
                   }
+                  // COMPLETED has no domain-allowed forward action and no detail page, so the
+                  // row is kebab-only (matches pre-refactor behavior).
                   const moreItems: React.ReactNode[] = [];
                   if (action.status === "OPEN") {
                     moreItems.push(
@@ -186,16 +180,16 @@ export default async function ActionsPage({
                       </details>
                     );
                   }
-                  if (canManage) {
-                    if (moreItems.length > 0) moreItems.push(<div key="divider" className="action-menu-divider" />);
-                    moreItems.push(
-                      <form key="delete" action={deleteActionAction}>
-                        <input type="hidden" name="workspaceId" value={workspaceId} />
-                        <input type="hidden" name="actionId" value={action.id} />
-                        <button type="submit" className="danger">{t("btnDelete")}</button>
-                      </form>
-                    );
-                  }
+                  // `deleteAction` only requires workspace membership, so delete is offered
+                  // to all members (matches pre-refactor behavior).
+                  if (moreItems.length > 0) moreItems.push(<div key="divider" className="action-menu-divider" />);
+                  moreItems.push(
+                    <form key="delete" action={deleteActionAction}>
+                      <input type="hidden" name="workspaceId" value={workspaceId} />
+                      <input type="hidden" name="actionId" value={action.id} />
+                      <button type="submit" className="danger">{t("btnDelete")}</button>
+                    </form>
+                  );
                   return (
                     <ItemActions
                       moreLabel={tCommon("moreActions")}

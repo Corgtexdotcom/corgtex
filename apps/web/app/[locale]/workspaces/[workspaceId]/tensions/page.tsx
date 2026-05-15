@@ -231,16 +231,16 @@ export default async function TensionsPage({
                       </details>
                     );
                   }
-                  if (canManage) {
-                    if (moreItems.length > 0) moreItems.push(<div key="divider" className="action-menu-divider" />);
-                    moreItems.push(
-                      <form key="delete" action={deleteTensionAction}>
-                        <input type="hidden" name="workspaceId" value={workspaceId} />
-                        <input type="hidden" name="tensionId" value={tension.id} />
-                        <button type="submit" className="danger">{t("btnDelete")}</button>
-                      </form>
-                    );
-                  }
+                  // `deleteTension` only requires workspace membership, so delete is offered
+                  // to all members (matches pre-refactor behavior).
+                  if (moreItems.length > 0) moreItems.push(<div key="divider" className="action-menu-divider" />);
+                  moreItems.push(
+                    <form key="delete" action={deleteTensionAction}>
+                      <input type="hidden" name="workspaceId" value={workspaceId} />
+                      <input type="hidden" name="tensionId" value={tension.id} />
+                      <button type="submit" className="danger">{t("btnDelete")}</button>
+                    </form>
+                  );
                   return (
                     <ItemActions
                       moreLabel={tCommon("moreActions")}

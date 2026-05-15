@@ -107,12 +107,16 @@ export function ActionMenu({ label, children, className = "" }: ActionMenuProps)
     };
   }, [open, recompute, close]);
 
-  // Close on submit-button or link click so the menu doesn't linger after navigation/server action.
+  // Close on link click immediately, and on form submit AFTER native validation passes
+  // (the `submit` event only fires once required fields / patterns are satisfied).
   const handlePanelClick = (event: React.MouseEvent<HTMLDivElement>) => {
     const target = event.target as HTMLElement;
-    if (target.closest("button[type=submit], a[href]")) {
+    if (target.closest("a[href]")) {
       requestAnimationFrame(close);
     }
+  };
+  const handlePanelSubmit = () => {
+    requestAnimationFrame(close);
   };
 
   return (
@@ -150,6 +154,7 @@ export function ActionMenu({ label, children, className = "" }: ActionMenuProps)
             visibility: pos && pos.top >= 0 ? "visible" : "hidden",
           }}
           onClick={handlePanelClick}
+          onSubmit={handlePanelSubmit}
         >
           {children}
         </div>,
