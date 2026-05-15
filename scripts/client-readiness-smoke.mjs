@@ -122,7 +122,35 @@ async function captureScreenshot(page, fileName) {
     path: path.join(outDir, fileName),
     fullPage: true,
     caret: "initial",
-  });
+  }).catch(() => null);
+}
+
+function serializeError(error) {
+  return {
+    name: error?.name ?? "Error",
+    message: error instanceof Error ? error.message : String(error),
+    stack: error instanceof Error ? error.stack : null,
+  };
+}
+
+async function writeResults(status, routeResults, findings, consoleErrors, fatalError = null) {
+  await writeFile(
+    path.join(outDir, "qa-results.json"),
+    `${JSON.stringify(
+      {
+        used: "agent-e2e",
+        status,
+        baseUrl,
+        checkedAt: new Date().toISOString(),
+        routeResults,
+        findings,
+        consoleErrors,
+        fatalError,
+      },
+      null,
+      2,
+    )}\n`,
+  );
 }
 
 async function captureRoute(page, locale, workspacePath, name, suffix, viewport, prefix, findings, routeResults) {
@@ -234,11 +262,12 @@ async function verifyMobileShell(page, locale, workspacePath, findings, routeRes
     }
 
     await expectVisible(page, ".mobile-topbar", `mobile-shell-${viewportName}-topbar`, findings);
+    await expectVisible(page, ".mobile-mode-switch", `mobile-shell-${viewportName}-mode-switch`, findings);
     await expectVisible(page, ".mobile-bottom-nav", `mobile-shell-${viewportName}-bottom-nav`, findings);
     await verifyNoHorizontalOverflow(page, `mobile-shell-${viewportName}`, findings);
     await captureScreenshot(page, `mobile-shell-${viewportName}-workspace.png`);
 
-    await page.locator(".mobile-bottom-nav button").nth(0).click();
+    await page.locator(".mobile-mode-switch button", { hasText: /AI|IA/ }).first().click();
     await expectVisible(page, ".mobile-ai-workbench", `mobile-shell-${viewportName}-ai`, findings);
     await expectVisible(page, ".chat-input", `mobile-shell-${viewportName}-ai-input`, findings);
     const smokePrompt = `Mobile smoke ${viewportName}`;
@@ -252,17 +281,13 @@ async function verifyMobileShell(page, locale, workspacePath, findings, routeRes
     }
     await captureScreenshot(page, `mobile-shell-${viewportName}-ai.png`);
 
-    await page.locator(".mobile-bottom-nav button").nth(1).click();
-    await expectVisible(page, ".mobile-more-sheet", `mobile-shell-${viewportName}-more`, findings);
-    await captureScreenshot(page, `mobile-shell-${viewportName}-more.png`);
-    await page.locator(".mobile-more-sheet .mobile-icon-button").first().click();
-
     await page.reload({ waitUntil: "domcontentloaded" });
     await waitForPageSettled(page);
     await expectVisible(page, ".mobile-ai-workbench", `mobile-shell-${viewportName}-ai-persisted`, findings);
 
     await page.locator(".mobile-mode-switch button", { hasText: /Workspace|Espacio/ }).first().click();
     await expectVisible(page, ".ws-main", `mobile-shell-${viewportName}-workspace-return`, findings);
+    await expectVisible(page, ".mobile-bottom-nav", `mobile-shell-${viewportName}-bottom-nav-return`, findings);
     await captureScreenshot(page, `mobile-shell-${viewportName}-workspace-return.png`);
   }
 }
@@ -283,111 +308,110 @@ async function verifyDisabledRoute(page, locale, workspacePath, suffix, findings
 async function main() {
   await mkdir(outDir, { recursive: true });
 
-  const browser = await chromium.launch();
-  try {
-    const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
-  page.setDefaultNavigationTimeout(90000);
+  let browser;
   const consoleErrors = [];
   const findings = [];
   const routeResults = [];
-  let expectedNotFoundRoute = false;
+  try {
+    browser = await chromium.launch();
+    const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+    page.setDefaultNavigationTimeout(90000);
+    let expectedNotFoundRoute = false;
 
-  page.on("console", (message) => {
-    if (message.type() === "error") {
-      if (
-        expectedNotFoundRoute &&
-        message.text().includes("Failed to load resource: the server responded with a status of 404")
-      ) {
-        return;
+    page.on("console", (message) => {
+      if (message.type() === "error") {
+        if (
+          expectedNotFoundRoute &&
+          message.text().includes("Failed to load resource: the server responded with a status of 404")
+        ) {
+          return;
+        }
+        consoleErrors.push(cleanConsoleMessage(message));
       }
-      consoleErrors.push(cleanConsoleMessage(message));
+    });
+    page.on("pageerror", (error) => {
+      consoleErrors.push({ type: "pageerror", text: error.message });
+    });
+
+    await page.goto(`${baseUrl}${await resolveLoginPath()}`, { waitUntil: "domcontentloaded" });
+    await waitForPageSettled(page);
+    await captureScreenshot(page, "00-login.png");
+    await page.fill('input[name="email"]', email);
+    await page.fill('input[name="password"]', password);
+    await Promise.all([
+      page.waitForURL(/\/workspaces\//, { timeout: 15000 }),
+      page.click('button[type="submit"]'),
+    ]);
+    await waitForPageSettled(page);
+    await captureScreenshot(page, "01-after-login.png");
+
+    const match = new URL(page.url()).pathname.match(/^(\/[a-z]{2})?(\/workspaces\/[^/]+)/);
+    if (!match) {
+      throw new Error(`Login did not land in a workspace: ${page.url()}`);
     }
-  });
-  page.on("pageerror", (error) => {
-    consoleErrors.push({ type: "pageerror", text: error.message });
-  });
+    const [, locale = "", workspacePath] = match;
 
-  await page.goto(`${baseUrl}${await resolveLoginPath()}`, { waitUntil: "domcontentloaded" });
-  await waitForPageSettled(page);
-  await captureScreenshot(page, "00-login.png");
-  await page.fill('input[name="email"]', email);
-  await page.fill('input[name="password"]', password);
-  await Promise.all([
-    page.waitForURL(/\/workspaces\//, { timeout: 15000 }),
-    page.click('button[type="submit"]'),
-  ]);
-  await waitForPageSettled(page);
-  await captureScreenshot(page, "01-after-login.png");
-
-  const match = new URL(page.url()).pathname.match(/^(\/[a-z]{2})?(\/workspaces\/[^/]+)/);
-  if (!match) {
-    throw new Error(`Login did not land in a workspace: ${page.url()}`);
-  }
-  const [, locale = "", workspacePath] = match;
-
-  for (const [name, suffix] of desktopRoutes) {
-    await captureRoute(
-      page,
-      locale,
-      workspacePath,
-      name,
-      suffix,
-      { width: 1440, height: 900 },
-      "desktop-",
-      findings,
-      routeResults,
-    );
-  }
-
-  expectedNotFoundRoute = true;
-  await page.goto(routeUrl(locale, workspacePath, "/not-a-real-client-readiness-route"), { waitUntil: "domcontentloaded" });
-  await waitForPageSettled(page);
-  await captureScreenshot(page, "desktop-invalid-route.png");
-  expectedNotFoundRoute = false;
-
-  if (expectedDisabledRoutePaths.size > 0) {
-    expectedNotFoundRoute = true;
-    for (const suffix of expectedDisabledRoutePaths) {
-      await verifyDisabledRoute(page, locale, workspacePath, suffix, findings, routeResults);
-    }
-    expectedNotFoundRoute = false;
-  }
-
-  for (const [name, suffix] of mobileRoutes) {
-    await captureRoute(
-      page,
-      locale,
-      workspacePath,
-      name,
-      suffix,
-      { width: 390, height: 844 },
-      "mobile-",
-      findings,
-      routeResults,
-    );
-  }
-
-  await verifyMobileShell(page, locale, workspacePath, findings, routeResults);
-
-  await writeFile(
-    path.join(outDir, "qa-results.json"),
-    `${JSON.stringify(
-      {
-        used: "agent-e2e",
-        routeResults,
+    for (const [name, suffix] of desktopRoutes) {
+      await captureRoute(
+        page,
+        locale,
+        workspacePath,
+        name,
+        suffix,
+        { width: 1440, height: 900 },
+        "desktop-",
         findings,
-        consoleErrors,
-      },
-      null,
-      2,
-    )}\n`,
-  );
+        routeResults,
+      );
+    }
 
-  if (findings.length > 0 || consoleErrors.length > 0) {
-    throw new Error(`Client readiness smoke found ${findings.length} route findings and ${consoleErrors.length} console errors.`);
-  }
+    expectedNotFoundRoute = true;
+    await page.goto(routeUrl(locale, workspacePath, "/not-a-real-client-readiness-route"), { waitUntil: "domcontentloaded" });
+    await waitForPageSettled(page);
+    await captureScreenshot(page, "desktop-invalid-route.png");
+    expectedNotFoundRoute = false;
+
+    if (expectedDisabledRoutePaths.size > 0) {
+      expectedNotFoundRoute = true;
+      for (const suffix of expectedDisabledRoutePaths) {
+        await verifyDisabledRoute(page, locale, workspacePath, suffix, findings, routeResults);
+      }
+      expectedNotFoundRoute = false;
+    }
+
+    for (const [name, suffix] of mobileRoutes) {
+      await captureRoute(
+        page,
+        locale,
+        workspacePath,
+        name,
+        suffix,
+        { width: 390, height: 844 },
+        "mobile-",
+        findings,
+        routeResults,
+      );
+    }
+
+    await verifyMobileShell(page, locale, workspacePath, findings, routeResults);
+
+    await writeResults("completed", routeResults, findings, consoleErrors);
+
+    if (findings.length > 0 || consoleErrors.length > 0) {
+      throw new Error(`Client readiness smoke found ${findings.length} route findings and ${consoleErrors.length} console errors.`);
+    }
+  } catch (error) {
+    const fatalError = serializeError(error);
+    findings.push({
+      name: "fatal",
+      route: baseUrl,
+      status: "failed",
+      error: fatalError.message,
+    });
+    await writeResults("failed", routeResults, findings, consoleErrors, fatalError);
+    throw error;
   } finally {
-    await browser.close().catch(() => null);
+    await browser?.close().catch(() => null);
   }
 }
 

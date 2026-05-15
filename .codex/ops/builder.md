@@ -9,6 +9,15 @@ Identity:
 - Use the builder GitHub identity, expected at `~/.config/gh-codex-builder`.
 - Do not use the reviewer identity for writing code or opening PRs.
 
+Model routing:
+
+- Cheap discovery can run on `gpt-5.3-codex`.
+- Once a concrete implementation is required, run the fix on `gpt-5.5` with
+  high reasoning, then return to the builder identity to push, open/update the
+  PR, and enable auto-merge.
+- Reviewer work must stay under the reviewer identity; never approve your own
+  builder changes.
+
 Procedure:
 
 1. Read `AGENTS.md` and the incident issue.

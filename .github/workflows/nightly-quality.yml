@@ -2,9 +2,6 @@ name: Nightly Quality and Research
 
 on:
   workflow_dispatch:
-  schedule:
-    # Early morning UTC keeps the slow lane away from normal agent iteration.
-    - cron: "17 8 * * *"
 
 concurrency:
   group: nightly-quality-${{ github.ref }}

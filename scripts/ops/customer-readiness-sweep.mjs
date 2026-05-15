@@ -13,6 +13,7 @@ const dryRun = Boolean(args["dry-run"]);
 const healthOnly = Boolean(args["health-only"]);
 const createIssues = Boolean(args["create-issues"] || process.env.OPS_CREATE_GITHUB_ISSUES === "true");
 const outRoot = path.resolve(String(args["out-dir"] || process.env.CLIENT_READINESS_OUT_DIR || ".artifacts/client-readiness"));
+const smokeTimeoutMs = positiveInt(args["smoke-timeout-ms"] || process.env.CLIENT_READINESS_SMOKE_TIMEOUT_MS, 180_000);
 
 function optionalText(value) {
   if (value === null || value === undefined) return null;
@@ -26,6 +27,10 @@ function slugSafe(value) {
     .replace(/[^a-z0-9-]+/g, "-")
     .replace(/^-|-$/g, "")
     .slice(0, 60) || "customer";
+}
+
+function envSafeSlug(value) {
+  return slugSafe(value).toUpperCase().replace(/[^A-Z0-9]+/g, "_");
 }
 
 function customerSlug(customer) {
@@ -50,10 +55,24 @@ function parseJsonEnv(name, fallback) {
   }
 }
 
+function positiveInt(value, fallback) {
+  if (value === null || value === undefined || value === "") return fallback;
+  const parsed = Number.parseInt(String(value), 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error(`Expected positive integer for timeout, got ${value}.`);
+  }
+  return parsed;
+}
+
 function selectedSlugSet() {
   const raw = optionalText(args.customers) || optionalText(process.env.CLIENT_READINESS_CUSTOMER_SLUGS);
   if (!raw) return null;
   return new Set(raw.split(",").map((value) => slugSafe(value)).filter(Boolean));
+}
+
+function isMonitorableCustomerStatus(status) {
+  if (!status) return true;
+  return status === "active" || status === "degraded";
 }
 
 function normalizeCustomer(customer) {
@@ -101,7 +120,7 @@ function eligibleCustomers() {
   return discoverCustomers().filter((customer) => {
     if (only && !only.has(customer.slug)) return false;
     if (includeInactive) return true;
-    return !customer.provisioningStatus || customer.provisioningStatus === "active";
+    return isMonitorableCustomerStatus(customer.provisioningStatus);
   });
 }
 
@@ -130,12 +149,43 @@ function smokeCommand(customer) {
   ];
 }
 
+function credentialEnv(customer) {
+  const configured = parseJsonEnv("CLIENT_READINESS_CREDENTIALS_JSON", {});
+  if (configured && (typeof configured !== "object" || Array.isArray(configured))) {
+    throw new Error("CLIENT_READINESS_CREDENTIALS_JSON must be an object keyed by customer slug.");
+  }
+
+  const key = envSafeSlug(customer.slug);
+  const mapped = configured?.[customer.slug] || configured?.[customer.id] || {};
+  const email = optionalText(process.env[`CLIENT_READINESS_${key}_EMAIL`])
+    || optionalText(mapped.email)
+    || optionalText(mapped.username);
+  const password = optionalText(process.env[`CLIENT_READINESS_${key}_PASSWORD`])
+    || optionalText(mapped.password);
+
+  return {
+    ...(email ? { AGENT_E2E_EMAIL: email } : {}),
+    ...(password ? { AGENT_E2E_PASSWORD: password } : {}),
+  };
+}
+
+function firstOutputLine(...values) {
+  for (const value of values) {
+    const line = String(value || "").split("\n").map((item) => item.trim()).find(Boolean);
+    if (line) return line.slice(0, 500);
+  }
+  return null;
+}
+
 function runSmoke(customer) {
   const [bin, suiteArgs] = smokeCommand(customer);
+  const startedAt = Date.now();
+  console.error(`[client-readiness] smoke start ${customer.slug}`);
   const result = spawnSync(bin, suiteArgs, {
     cwd: process.cwd(),
     env: {
       ...process.env,
+      ...credentialEnv(customer),
       CLIENT_READINESS_BASE_URL: customer.url,
       OPS_CLIENT_URL: customer.url,
       OPS_PRIMARY_CLIENT_URL: customer.url,
@@ -144,12 +194,25 @@ function runSmoke(customer) {
     },
     encoding: "utf8",
     maxBuffer: 10 * 1024 * 1024,
+    timeout: smokeTimeoutMs,
   });
+  const elapsedMs = Date.now() - startedAt;
+  const timedOut = result.error?.code === "ETIMEDOUT";
+  const exitCode = result.status ?? (timedOut ? 124 : 1);
+  console.error(`[client-readiness] smoke done ${customer.slug} ok=${result.status === 0} elapsedMs=${elapsedMs}`);
   return {
     ok: result.status === 0,
-    exitCode: result.status ?? 1,
+    exitCode,
     signal: result.signal,
+    timedOut,
+    elapsedMs,
     stderr: result.stderr,
+    stdout: result.stdout,
+    error: result.error ? {
+      name: result.error.name,
+      message: result.error.message,
+      code: result.error.code,
+    } : null,
   };
 }
 
@@ -165,8 +228,11 @@ function smokeIncident(customer, result) {
       `URL: ${customer.url}`,
       `Exit code: ${result.exitCode}`,
       result.signal ? `Signal: ${result.signal}` : null,
+      result.timedOut ? `Timed out after ${smokeTimeoutMs}ms` : null,
+      `Elapsed ms: ${result.elapsedMs}`,
       `Artifacts: ${path.join(outRoot, customer.slug)}`,
-      result.stderr ? `Error: ${result.stderr.split("\n").find(Boolean)?.slice(0, 500)}` : null,
+      result.error ? `Process error: ${result.error.message}` : null,
+      firstOutputLine(result.stderr, result.stdout) ? `Error: ${firstOutputLine(result.stderr, result.stdout)}` : null,
     ].filter(Boolean),
     recommendedAction: "run Codex Builder Loop",
   });
@@ -225,7 +291,13 @@ async function main() {
         httpStatus: health.httpStatus ?? null,
         elapsedMs: health.elapsedMs,
       },
-      smoke: smoke ? { ok: smoke.ok, exitCode: smoke.exitCode, signal: smoke.signal } : null,
+      smoke: smoke ? {
+        ok: smoke.ok,
+        exitCode: smoke.exitCode,
+        signal: smoke.signal,
+        elapsedMs: smoke.elapsedMs,
+        timedOut: smoke.timedOut,
+      } : null,
     });
   }
 
