@@ -4,7 +4,9 @@ Purpose: run the slow safety net outside the normal PR loop and create a
 proposal-first research surface for upgrades, model changes, and new ecosystem
 tools.
 
-Run cadence: nightly.
+Run cadence: local automation may request this manually when needed; GitHub
+Actions should stay `workflow_dispatch` only unless the human explicitly
+re-enables cloud scheduling.
 
 Workflow:
 

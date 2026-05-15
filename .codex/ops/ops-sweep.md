@@ -2,13 +2,20 @@
 
 Purpose: detect production, demo, worker, and client readiness failures cheaply before paid monitoring is required.
 
-Run cadence: hourly.
+Run cadence: local runner every 15 minutes for health, less often for browser
+smoke and agent loops.
 
-Railway continuous layer:
+Local continuous layer:
 
-- `deploy/railway.ops-monitor.toml` runs the lightweight health sweep every 15 minutes.
-- Configure the Railway cron service with `OPS_CREATE_GITHUB_ISSUES=true`, `OPS_GITHUB_REPOSITORY`, `OPS_GITHUB_TOKEN`, and the health target environment variables.
-- Configure Railway deployment and volume webhooks to `POST /api/webhooks/railway` with `RAILWAY_WEBHOOK_SECRET`; Slack fan-out is optional through `OPS_SLACK_WEBHOOK_URL`.
+- Local recurring automation is owned by the private folder
+  `/Users/janbrezina/Development /CORGTEX-AUTOMATIONS`.
+- The LaunchAgent calls that folder's runner, which sources
+  `/Users/janbrezina/.codex/corgtex-automation.env` and executes product-side
+  checks through `/Users/janbrezina/.codex/bin/corgtex-automation-run`.
+- Keep GitHub Actions `nightly-quality` manual-only unless the human explicitly
+  asks to re-enable cloud scheduling.
+- Store local logs, state, and screenshots in the private automation folder; do
+  not add them to the product repo.
 
 Procedure:
 
