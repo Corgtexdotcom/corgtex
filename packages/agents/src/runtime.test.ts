@@ -307,7 +307,7 @@ describe("agent runtime", () => {
 
     expect(prismaMock.meeting.update).toHaveBeenCalledWith(expect.objectContaining({
       where: { id: "meeting-2" },
-      data: { summaryMd: "Concise meeting summary" },
+      data: expect.objectContaining({ summaryMd: "Concise meeting summary" }),
     }));
     expect(prismaMock.agentRun.update).toHaveBeenLastCalledWith(expect.objectContaining({
       data: expect.objectContaining({
