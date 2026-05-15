@@ -21,13 +21,17 @@ import {
   requireControlPlaneAccess,
   requireControlPlaneScope,
   refreshControlPlaneFleetSnapshots,
+  revokeControlPlaneAgentCredential,
   resendControlPlaneCustomerMemberAccessLink,
   runControlPlaneContextOperation,
   runControlPlaneMeetingRecorderOperation,
   runControlPlaneReleaseOperation,
   runCustomerSupportOperation,
   setControlPlaneFeatureFlag,
+  updateControlPlaneAgentCredentialScopes,
+  updateControlPlaneAgentPolicy,
   updateControlPlaneCustomerMemberStatus,
+  updateControlPlaneModelBudget,
 } from "@corgtex/domain";
 import type { SupportAction } from "@corgtex/domain";
 import { resolveControlPlaneRequestActor } from "@/lib/auth";
@@ -66,6 +70,63 @@ const tools = [
     name: "get_ai_governance_status",
     description: "Get agent, model usage, approval, and failed-job governance status.",
     inputSchema: { type: "object", properties: { deploymentId: { type: "string" } }, required: ["deploymentId"] },
+  },
+  {
+    name: "update_customer_agent_credential_scopes",
+    description: "Update scopes for a customer agent credential through the audited Control Plane path.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        deploymentId: { type: "string" },
+        credentialId: { type: "string" },
+        scopes: { type: "array", items: { type: "string" } },
+        reason: { type: "string" },
+      },
+      required: ["deploymentId", "credentialId", "scopes", "reason"],
+    },
+  },
+  {
+    name: "revoke_customer_agent_credential",
+    description: "Revoke a customer agent credential through the audited Control Plane path.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        deploymentId: { type: "string" },
+        credentialId: { type: "string" },
+        reason: { type: "string" },
+      },
+      required: ["deploymentId", "credentialId", "reason"],
+    },
+  },
+  {
+    name: "update_customer_model_budget",
+    description: "Update the customer workspace model budget through the audited Control Plane path.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        deploymentId: { type: "string" },
+        monthlyCostCapUsd: { type: "number" },
+        alertThresholdPct: { type: "number" },
+        periodStartDay: { type: "number" },
+        reason: { type: "string" },
+      },
+      required: ["deploymentId", "monthlyCostCapUsd", "reason"],
+    },
+  },
+  {
+    name: "update_customer_agent_policy",
+    description: "Update an agent governance policy or model override through the audited Control Plane path.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        deploymentId: { type: "string" },
+        agentKey: { type: "string" },
+        governancePolicy: { type: "string" },
+        modelOverride: { type: "string" },
+        reason: { type: "string" },
+      },
+      required: ["deploymentId", "agentKey", "reason"],
+    },
   },
   {
     name: "get_release_status",
@@ -296,6 +357,10 @@ const toolScopes: Record<string, string> = {
   list_customer_integrations: "control-plane:read",
   get_context_health: "control-plane:read",
   get_ai_governance_status: "control-plane:read",
+  update_customer_agent_credential_scopes: "control-plane:ai-governance:write",
+  revoke_customer_agent_credential: "control-plane:ai-governance:write",
+  update_customer_model_budget: "control-plane:ai-governance:write",
+  update_customer_agent_policy: "control-plane:ai-governance:write",
   get_release_status: "control-plane:read",
   get_deploy_latest_preflight: "control-plane:read",
   list_customer_members: "control-plane:read",
@@ -362,6 +427,11 @@ function argNumber(args: Record<string, unknown>, key: string, fallback: number)
 function argStringArray(args: Record<string, unknown>, key: string) {
   const value = args[key];
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : null;
+}
+
+function requiredStringArray(args: Record<string, unknown>, key: string) {
+  const value = argStringArray(args, key);
+  return value ?? [];
 }
 
 function parseTimezoneAwareJoinAt(value: string | null) {
@@ -457,6 +527,45 @@ export async function POST(request: NextRequest) {
     }
     if (name === "get_ai_governance_status") {
       return rpcResult(id, textContent(await getControlPlaneAiGovernanceStatus(actor, String(args.deploymentId ?? ""))));
+    }
+    if (name === "update_customer_agent_credential_scopes") {
+      if (!Array.isArray(args.scopes) || !args.scopes.every((scope) => typeof scope === "string")) {
+        return rpcError(id, -32602, "scopes must be an array of strings.");
+      }
+      return rpcResult(id, textContent(await updateControlPlaneAgentCredentialScopes(actor, {
+        deploymentId: argString(args, "deploymentId"),
+        credentialId: argString(args, "credentialId"),
+        scopes: requiredStringArray(args, "scopes"),
+        reason: argString(args, "reason"),
+      })));
+    }
+    if (name === "revoke_customer_agent_credential") {
+      return rpcResult(id, textContent(await revokeControlPlaneAgentCredential(actor, {
+        deploymentId: argString(args, "deploymentId"),
+        credentialId: argString(args, "credentialId"),
+        reason: argString(args, "reason"),
+      })));
+    }
+    if (name === "update_customer_model_budget") {
+      if (typeof args.monthlyCostCapUsd !== "number" || !Number.isFinite(args.monthlyCostCapUsd)) {
+        return rpcError(id, -32602, "monthlyCostCapUsd must be a finite number.");
+      }
+      return rpcResult(id, textContent(await updateControlPlaneModelBudget(actor, {
+        deploymentId: argString(args, "deploymentId"),
+        monthlyCostCapUsd: args.monthlyCostCapUsd,
+        alertThresholdPct: typeof args.alertThresholdPct === "number" ? args.alertThresholdPct : null,
+        periodStartDay: typeof args.periodStartDay === "number" ? args.periodStartDay : null,
+        reason: argString(args, "reason"),
+      })));
+    }
+    if (name === "update_customer_agent_policy") {
+      return rpcResult(id, textContent(await updateControlPlaneAgentPolicy(actor, {
+        deploymentId: argString(args, "deploymentId"),
+        agentKey: argString(args, "agentKey"),
+        governancePolicy: argOptionalString(args, "governancePolicy"),
+        modelOverride: argOptionalString(args, "modelOverride"),
+        reason: argString(args, "reason"),
+      })));
     }
     if (name === "get_release_status") {
       return rpcResult(id, textContent(await getControlPlaneReleaseStatus(actor, String(args.deploymentId ?? ""))));

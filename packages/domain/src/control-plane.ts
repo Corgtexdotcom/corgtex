@@ -16,6 +16,8 @@ import {
 } from "./meeting-recorders";
 import { createControlPlaneAdapter } from "./control-plane-adapters";
 import { createRailwayClientFromEnv, upgradeRailwayCustomerRelease, type RailwayClient } from "./railway-client";
+import { AGENT_REGISTRY } from "./agent-registry";
+import { isKnownScope } from "./agent-auth";
 
 const SUPPORT_ACTOR_LABEL = "Corgtex Support";
 const DEFAULT_RECORDER_BOT_NAME = "Corgtex Recorder";
@@ -25,9 +27,12 @@ const MEETING_RECORDER_PROVIDERS = new Set(["RECALL_AI", "MEETING_BAAS"]);
 const CONTROL_PLANE_CONTEXT_OPERATIONS = new Set(["sync_all", "sync_source", "disable_source"]);
 const CONTROL_PLANE_RELEASE_OPERATIONS = new Set(["prepare_upgrade"]);
 const CONTROL_PLANE_READ_SCOPE = "control-plane:read";
+const CONTROL_PLANE_AI_GOVERNANCE_WRITE_SCOPE = "control-plane:ai-governance:write";
 const CONTROL_PLANE_DEPLOYMENT_WRITE_ROLES = new Set<CustomerDeploymentAccessRole>(["SUPPORT_ADMIN", "CUSTOMER_IT_ADMIN"]);
 export const CONTROL_PLANE_FLEET_SNAPSHOT_JOB_TYPE = "control-plane.fleet-snapshot";
 export const CONTROL_PLANE_RELEASE_DEPLOY_JOB_TYPE = "control-plane.release.deploy-latest";
+const AGENT_GOVERNANCE_FEATURE_FLAG = "AGENT_GOVERNANCE";
+const STALE_CREDENTIAL_DAYS = 90;
 const CONTROL_PLANE_SNAPSHOT_KINDS = new Set<FleetSnapshotKind>([
   "HEALTH",
   "RELEASE",
@@ -63,6 +68,10 @@ const MUTATING_SUPPORT_ACTIONS = new Set([
   "meetings.upload",
   "runtime.retry_failed_job",
   "runtime.discard_failed_job",
+  "agent_credentials.update_scopes",
+  "agent_credentials.revoke",
+  "model_budget.update",
+  "agent_config.update_policy",
   "support.break_glass_note",
 ]);
 
@@ -85,6 +94,13 @@ const SUPPORT_ACTION_TO_MCP_TOOL = {
   "runtime.list_failed_jobs": "list_failed_jobs",
   "runtime.retry_failed_job": "retry_failed_job",
   "runtime.discard_failed_job": "discard_failed_job",
+  "agent_credentials.list": "list_agent_credentials",
+  "agent_credentials.update_scopes": "update_agent_credential_scopes",
+  "agent_credentials.revoke": "revoke_agent_credential",
+  "model_budget.get": "get_model_budget",
+  "model_budget.update": "update_model_budget",
+  "agent_config.list": "list_agent_configs",
+  "agent_config.update_policy": "update_agent_policy",
   "documents.upload_text": "upload_document_text",
   "proposals.list": "list_proposals",
   "proposals.get": "get_proposal",
@@ -249,7 +265,11 @@ export function requireControlPlaneScope(actor: AppActor, scope: string) {
 }
 
 function redactValue(key: string, value: unknown): unknown {
-  if (/token|secret|password|credential|connection|string|authorization|bearer/i.test(key)) {
+  const normalizedKey = key.toLowerCase();
+  const isSecretLikeKey = /token|secret|password|authorization|bearer|connectionstring/.test(normalizedKey)
+    || normalizedKey === "supportcredential"
+    || (normalizedKey.includes("credential") && /(enc|hash|secret|token|password|value)$/.test(normalizedKey));
+  if (isSecretLikeKey) {
     return "[redacted]";
   }
   if (typeof value === "string" && value.length > 500) {
@@ -2060,10 +2080,132 @@ export async function runControlPlaneMeetingRecorderOperation(actor: AppActor, p
   };
 }
 
+const HIGH_RISK_AGENT_SCOPES = new Set([
+  "archive:write",
+  "finance:write",
+  "members:write",
+  "runtime:write",
+  "support:write",
+  "tools:credentials:read",
+  "workspace:write",
+]);
+
+const RISKY_TOOL_NAME_PATTERN = /archive|create|delete|deactivate|deploy|discard|invite|purge|remove|retry|revoke|rollback|send|sync|update|upsert|write/i;
+
+function daysSince(value: Date | string | null | undefined) {
+  if (!value) return null;
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.valueOf())) return null;
+  return Math.floor((Date.now() - date.getTime()) / 86_400_000);
+}
+
+function summarizeSupportOperationForGovernance(operation: {
+  id: string;
+  action: string;
+  reason: string;
+  status: string;
+  error: string | null;
+  startedAt: Date | null;
+  completedAt: Date | null;
+  createdAt: Date;
+}) {
+  return {
+    id: operation.id,
+    action: operation.action,
+    reason: operation.reason,
+    status: operation.status,
+    error: operation.error,
+    startedAt: operation.startedAt,
+    completedAt: operation.completedAt,
+    createdAt: operation.createdAt,
+  };
+}
+
+function normalizeAgentScopes(scopes: string[] | undefined) {
+  const normalized = [...new Set((scopes ?? []).map((scope) => scope.trim()).filter(Boolean))];
+  const unknown = normalized.filter((scope) => !isKnownScope(scope));
+  invariant(unknown.length === 0, 400, "INVALID_INPUT", `Unknown scope(s): ${unknown.join(", ")}.`);
+  return normalized;
+}
+
+function normalizeBudgetNumber(value: number, label: string) {
+  invariant(Number.isFinite(value), 400, "INVALID_INPUT", `${label} must be a finite number.`);
+  return value;
+}
+
+function normalizeBudgetInteger(value: number | null | undefined, label: string, fallback: number, min: number, max: number) {
+  if (value == null) return fallback;
+  invariant(Number.isInteger(value) && value >= min && value <= max, 400, "INVALID_INPUT", `${label} must be between ${min} and ${max}.`);
+  return value;
+}
+
+function controlPlaneRiskFinding(params: {
+  key: string;
+  severity: "high" | "medium" | "low";
+  title: string;
+  detail: string;
+  evidence?: string | null;
+}) {
+  return params;
+}
+
+function summarizeAgentScopeRisk(scopes: string[]) {
+  const highRisk = scopes.filter((scope) => HIGH_RISK_AGENT_SCOPES.has(scope));
+  const writeScopes = scopes.filter((scope) => scope.endsWith(":write"));
+  return {
+    highRisk,
+    writeScopes,
+    isOverbroad: highRisk.length > 0 || writeScopes.length >= 6,
+  };
+}
+
 export async function getControlPlaneAiGovernanceStatus(actor: AppActor, deploymentId: string) {
   const deployment = await getControlPlaneDeploymentWithWorkspace(actor, deploymentId);
   const adapter = createControlPlaneAdapter(deployment);
+  const recentGovernanceSupportOperations = await prisma.supportOperation.findMany({
+    where: {
+      deploymentId,
+      action: {
+        in: [
+          "agents.list_runs",
+          "runtime.list_failed_jobs",
+          "agent_credentials.list",
+          "agent_credentials.update_scopes",
+          "agent_credentials.revoke",
+          "model_budget.get",
+          "model_budget.update",
+          "agent_config.list",
+          "agent_config.update_policy",
+        ],
+      },
+    },
+    orderBy: { createdAt: "desc" },
+    take: 12,
+    select: {
+      id: true,
+      action: true,
+      reason: true,
+      status: true,
+      error: true,
+      startedAt: true,
+      completedAt: true,
+      createdAt: true,
+    },
+  });
+
   if (!adapter.canReadCentralWorkspace || !deployment.managedWorkspaceId) {
+    const riskFindings = [
+      !deployment.hasSupportCredential
+        ? controlPlaneRiskFinding({
+          key: "support-connector-missing",
+          severity: "high",
+          title: "Support connector is not configured",
+          detail: "Remote agent governance reads and repairs require an encrypted customer support connector.",
+          evidence: deployment.supportConnectorStatus,
+        })
+        : null,
+    ].filter((finding): finding is NonNullable<typeof finding> => Boolean(finding));
+
     return {
       deploymentId,
       accessMode: adapter.kind,
@@ -2071,24 +2213,79 @@ export async function getControlPlaneAiGovernanceStatus(actor: AppActor, deploym
       supportConnectorStatus: deployment.supportConnectorStatus,
       supportLastSyncAt: deployment.supportLastSyncAt,
       requiresConnectorSetup: adapter.requiresConnectorSetup,
+      managedWorkspace: null,
+      featureFlag: {
+        flag: AGENT_GOVERNANCE_FEATURE_FLAG,
+        enabled: null,
+        source: "remote_unavailable" as const,
+      },
       summary: null,
+      agents: {
+        identities: [],
+        configs: [],
+      },
+      access: {
+        credentials: [],
+      },
+      spend: {
+        budget: null,
+        recentModelUsage: [],
+      },
+      activity: {
+        recentRuns: [],
+        recentFailedJobs: [],
+        riskyToolCalls: [],
+      },
+      audit: {
+        recentSupportOperations: recentGovernanceSupportOperations.map(summarizeSupportOperationForGovernance),
+      },
+      riskFindings,
+      remoteSupport: {
+        available: Boolean(adapter.canUseSupportConnector && deployment.hasSupportCredential),
+        message: deployment.hasSupportCredential
+          ? "Use audited support operations for remote agent-governance inspection and repair."
+          : "Configure the support connector before remote agent-governance inspection.",
+        supportedActions: [
+          "agent_credentials.list",
+          "agent_credentials.update_scopes",
+          "agent_credentials.revoke",
+          "model_budget.get",
+          "model_budget.update",
+          "agent_config.list",
+          "agent_config.update_policy",
+        ],
+      },
     };
   }
 
-  const [agentRuns, pendingApprovals, failedJobs, modelUsage, recentRuns, recentFailedJobs, recentToolCalls] = await Promise.all([
+  const managedWorkspaceId = deployment.managedWorkspaceId;
+  const [featureFlag, agentRuns, pendingApprovals, failedJobs, modelUsage, recentRuns, recentFailedJobs, recentToolCalls, agentIdentities, agentConfigOverrides, credentials, budget, recentModelUsage] = await Promise.all([
+    prisma.workspaceFeatureFlag.findUnique({
+      where: {
+        workspaceId_flag: {
+          workspaceId: managedWorkspaceId,
+          flag: AGENT_GOVERNANCE_FEATURE_FLAG,
+        },
+      },
+      select: {
+        flag: true,
+        enabled: true,
+        updatedAt: true,
+      },
+    }),
     prisma.agentRun.groupBy({
       by: ["status"],
-      where: { workspaceId: deployment.managedWorkspaceId },
+      where: { workspaceId: managedWorkspaceId },
       _count: { _all: true },
     }),
     prisma.agentRun.count({
-      where: { workspaceId: deployment.managedWorkspaceId, approvalRequired: true, status: "WAITING_APPROVAL" },
+      where: { workspaceId: managedWorkspaceId, approvalRequired: true, status: "WAITING_APPROVAL" },
     }),
     prisma.workflowJob.count({
-      where: { workspaceId: deployment.managedWorkspaceId, status: "FAILED" },
+      where: { workspaceId: managedWorkspaceId, status: "FAILED" },
     }),
     prisma.modelUsage.aggregate({
-      where: { workspaceId: deployment.managedWorkspaceId },
+      where: { workspaceId: managedWorkspaceId },
       _sum: {
         inputTokens: true,
         outputTokens: true,
@@ -2096,7 +2293,7 @@ export async function getControlPlaneAiGovernanceStatus(actor: AppActor, deploym
       },
     }),
     prisma.agentRun.findMany({
-      where: { workspaceId: deployment.managedWorkspaceId },
+      where: { workspaceId: managedWorkspaceId },
       orderBy: { createdAt: "desc" },
       take: 8,
       select: {
@@ -2113,7 +2310,7 @@ export async function getControlPlaneAiGovernanceStatus(actor: AppActor, deploym
       },
     }),
     prisma.workflowJob.findMany({
-      where: { workspaceId: deployment.managedWorkspaceId, status: "FAILED" },
+      where: { workspaceId: managedWorkspaceId, status: "FAILED" },
       orderBy: { updatedAt: "desc" },
       take: 8,
       select: {
@@ -2126,7 +2323,7 @@ export async function getControlPlaneAiGovernanceStatus(actor: AppActor, deploym
       },
     }),
     prisma.agentToolCall.findMany({
-      where: { agentRun: { workspaceId: deployment.managedWorkspaceId } },
+      where: { agentRun: { workspaceId: managedWorkspaceId } },
       orderBy: { createdAt: "desc" },
       take: 25,
       select: {
@@ -2144,16 +2341,225 @@ export async function getControlPlaneAiGovernanceStatus(actor: AppActor, deploym
         },
       },
     }),
+    prisma.agentIdentity.findMany({
+      where: { workspaceId: managedWorkspaceId },
+      orderBy: { createdAt: "asc" },
+      select: {
+        id: true,
+        agentKey: true,
+        memberType: true,
+        displayName: true,
+        isActive: true,
+        linkedCredentialId: true,
+        maxSpendPerRunCents: true,
+        maxRunsPerDay: true,
+        maxRunsPerHour: true,
+        archivedAt: true,
+        createdAt: true,
+        updatedAt: true,
+        linkedCredential: {
+          select: {
+            id: true,
+            label: true,
+            scopes: true,
+            isActive: true,
+            lastUsedAt: true,
+          },
+        },
+        circleAssignments: {
+          select: {
+            circle: { select: { id: true, name: true } },
+            role: { select: { id: true, name: true } },
+          },
+        },
+      },
+    }),
+    prisma.workspaceAgentConfig.findMany({
+      where: { workspaceId: managedWorkspaceId, archivedAt: null },
+      orderBy: { agentKey: "asc" },
+      select: {
+        id: true,
+        agentKey: true,
+        enabled: true,
+        modelOverride: true,
+        governancePolicy: true,
+        updatedAt: true,
+      },
+    }),
+    prisma.agentCredential.findMany({
+      where: { workspaceId: managedWorkspaceId },
+      orderBy: { createdAt: "desc" },
+      select: {
+        id: true,
+        label: true,
+        scopes: true,
+        catalogItemId: true,
+        monthlyBudgetCents: true,
+        dailyCallLimit: true,
+        isActive: true,
+        lastUsedAt: true,
+        createdAt: true,
+        updatedAt: true,
+        catalogItem: {
+          select: {
+            id: true,
+            title: true,
+            slug: true,
+            type: true,
+            status: true,
+          },
+        },
+      },
+    }),
+    prisma.modelUsageBudget.findUnique({
+      where: { workspaceId: managedWorkspaceId },
+      select: {
+        id: true,
+        monthlyCostCapUsd: true,
+        alertThresholdPct: true,
+        periodStartDay: true,
+        alertSentAt: true,
+        updatedAt: true,
+      },
+    }),
+    prisma.modelUsage.findMany({
+      where: { workspaceId: managedWorkspaceId },
+      orderBy: { createdAt: "desc" },
+      take: 25,
+      select: {
+        id: true,
+        provider: true,
+        model: true,
+        taskType: true,
+        inputTokens: true,
+        outputTokens: true,
+        latencyMs: true,
+        estimatedCostUsd: true,
+        createdAt: true,
+        agentRun: { select: { id: true, agentKey: true, status: true } },
+        agentCredential: { select: { id: true, label: true, isActive: true } },
+        catalogItem: { select: { id: true, title: true } },
+      },
+    }),
   ]);
   const riskyToolCalls = recentToolCalls
-    .filter((call) => call.status === "FAILED" || /archive|create|delete|deactivate|deploy|discard|invite|remove|retry|rollback|send|sync|update|upsert|write/i.test(call.name))
+    .filter((call) => call.status === "FAILED" || RISKY_TOOL_NAME_PATTERN.test(call.name))
     .slice(0, 8);
+  const configByAgentKey = new Map(agentConfigOverrides.map((config) => [config.agentKey, config]));
+  const agentConfigs = Object.entries(AGENT_REGISTRY).map(([agentKey, meta]) => {
+    const override = configByAgentKey.get(agentKey);
+    return {
+      agentKey,
+      label: meta.label,
+      category: meta.category,
+      canDisable: meta.canDisable,
+      costTier: meta.costTier,
+      defaultModelTier: meta.defaultModelTier,
+      enabled: override?.enabled ?? true,
+      modelOverride: override?.modelOverride ?? null,
+      hasGovernancePolicy: Boolean(override?.governancePolicy?.trim()),
+      updatedAt: override?.updatedAt ?? null,
+    };
+  });
+  const credentialRows = credentials.map((credential) => {
+    const scopeRisk = summarizeAgentScopeRisk(credential.scopes);
+    return {
+      id: credential.id,
+      label: credential.label,
+      scopes: credential.scopes,
+      catalogItemId: credential.catalogItemId,
+      catalogItem: credential.catalogItem,
+      monthlyBudgetCents: credential.monthlyBudgetCents,
+      dailyCallLimit: credential.dailyCallLimit,
+      isActive: credential.isActive,
+      lastUsedAt: credential.lastUsedAt,
+      createdAt: credential.createdAt,
+      updatedAt: credential.updatedAt,
+      risk: {
+        ...scopeRisk,
+        staleDays: daysSince(credential.lastUsedAt ?? credential.createdAt),
+      },
+    };
+  });
+  const activeCredentialRows = credentialRows.filter((credential) => credential.isActive);
+  const riskFindings = [
+    featureFlag?.enabled === false
+      ? controlPlaneRiskFinding({
+        key: "agent-governance-disabled",
+        severity: "high",
+        title: "Agent governance feature is disabled",
+        detail: "The workspace feature flag is explicitly off for this customer.",
+        evidence: AGENT_GOVERNANCE_FEATURE_FLAG,
+      })
+      : null,
+    !budget
+      ? controlPlaneRiskFinding({
+        key: "model-budget-missing",
+        severity: "medium",
+        title: "No workspace model budget is set",
+        detail: "Agent model usage is currently not capped at the workspace level.",
+      })
+      : null,
+    pendingApprovals > 0
+      ? controlPlaneRiskFinding({
+        key: "pending-agent-approvals",
+        severity: "low",
+        title: "Agent approvals are waiting",
+        detail: `${pendingApprovals} agent run(s) are waiting for human approval.`,
+      })
+      : null,
+    failedJobs > 0
+      ? controlPlaneRiskFinding({
+        key: "failed-agent-jobs",
+        severity: "medium",
+        title: "Failed workflow jobs need review",
+        detail: `${failedJobs} failed workflow job(s) were found in this workspace.`,
+      })
+      : null,
+    riskyToolCalls.length > 0
+      ? controlPlaneRiskFinding({
+        key: "risky-tool-calls",
+        severity: "medium",
+        title: "Risky or failed tool calls were detected",
+        detail: `${riskyToolCalls.length} recent tool call(s) matched write/destructive/failure patterns.`,
+      })
+      : null,
+    ...activeCredentialRows
+      .filter((credential) => credential.risk.staleDays !== null && credential.risk.staleDays >= STALE_CREDENTIAL_DAYS)
+      .slice(0, 4)
+      .map((credential) => controlPlaneRiskFinding({
+        key: `stale-credential-${credential.id}`,
+        severity: "medium" as const,
+        title: "Stale active credential",
+        detail: `${credential.label} has not been used recently but remains active.`,
+        evidence: `${credential.risk.staleDays} days`,
+      })),
+    ...activeCredentialRows
+      .filter((credential) => credential.risk.isOverbroad)
+      .slice(0, 4)
+      .map((credential) => controlPlaneRiskFinding({
+        key: `overbroad-credential-${credential.id}`,
+        severity: credential.risk.highRisk.length > 0 ? "high" as const : "medium" as const,
+        title: "Credential has broad or sensitive scopes",
+        detail: `${credential.label} can access ${credential.risk.writeScopes.length} write scope(s).`,
+        evidence: credential.risk.highRisk.join(", ") || credential.risk.writeScopes.join(", "),
+      })),
+  ].filter((finding): finding is NonNullable<typeof finding> => Boolean(finding));
 
   return {
     deploymentId,
     accessMode: "managed_workspace" as const,
     hasManagedWorkspace: true,
     managedWorkspace: deployment.managedWorkspace,
+    supportConnectorStatus: deployment.supportConnectorStatus,
+    supportLastSyncAt: deployment.supportLastSyncAt,
+    requiresConnectorSetup: adapter.requiresConnectorSetup,
+    featureFlag: {
+      flag: AGENT_GOVERNANCE_FEATURE_FLAG,
+      enabled: featureFlag?.enabled ?? true,
+      source: featureFlag ? "workspace_override" as const : "default" as const,
+      updatedAt: featureFlag?.updatedAt ?? null,
+    },
     summary: {
       agentRuns: Object.fromEntries(agentRuns.map((run) => [run.status, run._count._all])),
       pendingApprovals,
@@ -2166,6 +2572,334 @@ export async function getControlPlaneAiGovernanceStatus(actor: AppActor, deploym
       recentRuns,
       recentFailedJobs,
       riskyToolCalls,
+    },
+    agents: {
+      identities: agentIdentities,
+      configs: agentConfigs,
+    },
+    access: {
+      credentials: credentialRows,
+    },
+    spend: {
+      budget: budget
+        ? {
+          id: budget.id,
+          monthlyCostCapUsd: decimalToString(budget.monthlyCostCapUsd),
+          alertThresholdPct: budget.alertThresholdPct,
+          periodStartDay: budget.periodStartDay,
+          alertSentAt: budget.alertSentAt,
+          updatedAt: budget.updatedAt,
+        }
+        : null,
+      recentModelUsage: recentModelUsage.map((usage) => ({
+        ...usage,
+        estimatedCostUsd: decimalToString(usage.estimatedCostUsd),
+      })),
+    },
+    activity: {
+      recentRuns,
+      recentFailedJobs,
+      riskyToolCalls,
+    },
+    audit: {
+      recentSupportOperations: recentGovernanceSupportOperations.map(summarizeSupportOperationForGovernance),
+    },
+    riskFindings,
+    remoteSupport: {
+      available: Boolean(deployment.hasSupportCredential),
+      message: deployment.hasSupportCredential
+        ? "Support connector is available for remote fallback operations."
+        : "Support connector is not configured for remote fallback operations.",
+      supportedActions: [
+        "agent_credentials.list",
+        "agent_credentials.update_scopes",
+        "agent_credentials.revoke",
+        "model_budget.get",
+        "model_budget.update",
+        "agent_config.list",
+        "agent_config.update_policy",
+      ],
+    },
+  };
+}
+
+async function resolveControlPlaneAgentGovernanceWorkspace(actor: AppActor, deploymentId: string) {
+  requireControlPlaneScope(actor, CONTROL_PLANE_AI_GOVERNANCE_WRITE_SCOPE);
+  await requireControlPlaneDeploymentWriteAccess(actor, deploymentId);
+  const deployment = await getControlPlaneDeploymentWithWorkspace(actor, deploymentId);
+  const adapter = createControlPlaneAdapter(deployment);
+  return { deployment, adapter };
+}
+
+export async function updateControlPlaneAgentCredentialScopes(actor: AppActor, params: {
+  deploymentId: string;
+  credentialId: string;
+  scopes: string[];
+  reason?: string | null;
+}) {
+  const reason = requireMutationReason(params.reason);
+  const scopes = normalizeAgentScopes(params.scopes);
+  const { deployment, adapter } = await resolveControlPlaneAgentGovernanceWorkspace(actor, params.deploymentId);
+
+  if (!deployment.managedWorkspaceId) {
+    invariant(adapter.canUseSupportConnector && deployment.hasSupportCredential, 400, "SUPPORT_CONNECTOR_REQUIRED", "Support connector is required to update remote agent credentials.");
+    const operation = await runCustomerSupportOperation(actor, {
+      deploymentId: params.deploymentId,
+      action: "agent_credentials.update_scopes",
+      scopeOverride: CONTROL_PLANE_AI_GOVERNANCE_WRITE_SCOPE,
+      reason,
+      arguments: { credentialId: params.credentialId, scopes },
+      remoteWorkspaceId: deployment.remoteWorkspaceId,
+    });
+    await recordCustomerDeploymentEvent(actor, params.deploymentId, "control_plane.ai_governance.credential_scopes_updated", {
+      reason,
+      source: "support_connector",
+      credentialId: params.credentialId,
+      scopes,
+      operationId: operation.id,
+    });
+    return { deploymentId: params.deploymentId, source: "support_connector" as const, operation };
+  }
+
+  const credential = await prisma.agentCredential.findUnique({
+    where: { id: params.credentialId },
+    select: { id: true, workspaceId: true, isActive: true },
+  });
+  invariant(credential && credential.workspaceId === deployment.managedWorkspaceId, 404, "NOT_FOUND", "Agent credential not found.");
+  invariant(credential.isActive, 400, "INVALID_STATE", "Cannot update scopes on a revoked credential.");
+  const updated = await prisma.agentCredential.update({
+    where: { id: credential.id },
+    data: { scopes },
+    select: {
+      id: true,
+      label: true,
+      scopes: true,
+      isActive: true,
+      lastUsedAt: true,
+      createdAt: true,
+      updatedAt: true,
+    },
+  });
+  await recordCustomerDeploymentEvent(actor, params.deploymentId, "control_plane.ai_governance.credential_scopes_updated", {
+    reason,
+    source: "managed_workspace",
+    managedWorkspaceId: deployment.managedWorkspaceId,
+    credentialId: updated.id,
+    scopes: updated.scopes,
+  });
+  return { deploymentId: params.deploymentId, source: "managed_workspace" as const, credential: updated };
+}
+
+export async function revokeControlPlaneAgentCredential(actor: AppActor, params: {
+  deploymentId: string;
+  credentialId: string;
+  reason?: string | null;
+}) {
+  const reason = requireMutationReason(params.reason);
+  const { deployment, adapter } = await resolveControlPlaneAgentGovernanceWorkspace(actor, params.deploymentId);
+
+  if (!deployment.managedWorkspaceId) {
+    invariant(adapter.canUseSupportConnector && deployment.hasSupportCredential, 400, "SUPPORT_CONNECTOR_REQUIRED", "Support connector is required to revoke remote agent credentials.");
+    const operation = await runCustomerSupportOperation(actor, {
+      deploymentId: params.deploymentId,
+      action: "agent_credentials.revoke",
+      scopeOverride: CONTROL_PLANE_AI_GOVERNANCE_WRITE_SCOPE,
+      reason,
+      arguments: { credentialId: params.credentialId },
+      remoteWorkspaceId: deployment.remoteWorkspaceId,
+    });
+    await recordCustomerDeploymentEvent(actor, params.deploymentId, "control_plane.ai_governance.credential_revoked", {
+      reason,
+      source: "support_connector",
+      credentialId: params.credentialId,
+      operationId: operation.id,
+    });
+    return { deploymentId: params.deploymentId, source: "support_connector" as const, operation };
+  }
+
+  const credential = await prisma.agentCredential.findUnique({
+    where: { id: params.credentialId },
+    select: { id: true, workspaceId: true, isActive: true },
+  });
+  invariant(credential && credential.workspaceId === deployment.managedWorkspaceId, 404, "NOT_FOUND", "Agent credential not found.");
+  invariant(credential.isActive, 400, "INVALID_STATE", "Agent credential is already revoked.");
+  const updated = await prisma.agentCredential.update({
+    where: { id: credential.id },
+    data: { isActive: false },
+    select: {
+      id: true,
+      label: true,
+      scopes: true,
+      isActive: true,
+      lastUsedAt: true,
+      createdAt: true,
+      updatedAt: true,
+    },
+  });
+  await recordCustomerDeploymentEvent(actor, params.deploymentId, "control_plane.ai_governance.credential_revoked", {
+    reason,
+    source: "managed_workspace",
+    managedWorkspaceId: deployment.managedWorkspaceId,
+    credentialId: updated.id,
+  });
+  return { deploymentId: params.deploymentId, source: "managed_workspace" as const, credential: updated };
+}
+
+export async function updateControlPlaneModelBudget(actor: AppActor, params: {
+  deploymentId: string;
+  monthlyCostCapUsd: number;
+  alertThresholdPct?: number | null;
+  periodStartDay?: number | null;
+  reason?: string | null;
+}) {
+  const reason = requireMutationReason(params.reason);
+  const monthlyCostCapUsd = normalizeBudgetNumber(params.monthlyCostCapUsd, "monthlyCostCapUsd");
+  const alertThresholdPct = normalizeBudgetInteger(params.alertThresholdPct, "alertThresholdPct", 80, 1, 100);
+  const periodStartDay = normalizeBudgetInteger(params.periodStartDay, "periodStartDay", 1, 1, 31);
+  const { deployment, adapter } = await resolveControlPlaneAgentGovernanceWorkspace(actor, params.deploymentId);
+
+  if (!deployment.managedWorkspaceId) {
+    invariant(adapter.canUseSupportConnector && deployment.hasSupportCredential, 400, "SUPPORT_CONNECTOR_REQUIRED", "Support connector is required to update remote model budgets.");
+    const operation = await runCustomerSupportOperation(actor, {
+      deploymentId: params.deploymentId,
+      action: "model_budget.update",
+      scopeOverride: CONTROL_PLANE_AI_GOVERNANCE_WRITE_SCOPE,
+      reason,
+      arguments: { monthlyCostCapUsd, alertThresholdPct, periodStartDay },
+      remoteWorkspaceId: deployment.remoteWorkspaceId,
+    });
+    await recordCustomerDeploymentEvent(actor, params.deploymentId, "control_plane.ai_governance.model_budget_updated", {
+      reason,
+      source: "support_connector",
+      monthlyCostCapUsd,
+      alertThresholdPct,
+      periodStartDay,
+      operationId: operation.id,
+    });
+    return { deploymentId: params.deploymentId, source: "support_connector" as const, operation };
+  }
+
+  const budget = await prisma.modelUsageBudget.upsert({
+    where: { workspaceId: deployment.managedWorkspaceId },
+    create: {
+      workspaceId: deployment.managedWorkspaceId,
+      monthlyCostCapUsd,
+      alertThresholdPct,
+      periodStartDay,
+    },
+    update: {
+      monthlyCostCapUsd,
+      alertThresholdPct,
+      periodStartDay,
+    },
+    select: {
+      id: true,
+      monthlyCostCapUsd: true,
+      alertThresholdPct: true,
+      periodStartDay: true,
+      updatedAt: true,
+    },
+  });
+  await recordCustomerDeploymentEvent(actor, params.deploymentId, "control_plane.ai_governance.model_budget_updated", {
+    reason,
+    source: "managed_workspace",
+    managedWorkspaceId: deployment.managedWorkspaceId,
+    monthlyCostCapUsd: decimalToString(budget.monthlyCostCapUsd),
+    alertThresholdPct: budget.alertThresholdPct,
+    periodStartDay: budget.periodStartDay,
+  });
+  return {
+    deploymentId: params.deploymentId,
+    source: "managed_workspace" as const,
+    budget: {
+      ...budget,
+      monthlyCostCapUsd: decimalToString(budget.monthlyCostCapUsd),
+    },
+  };
+}
+
+export async function updateControlPlaneAgentPolicy(actor: AppActor, params: {
+  deploymentId: string;
+  agentKey: string;
+  governancePolicy?: string | null;
+  modelOverride?: string | null;
+  reason?: string | null;
+}) {
+  const reason = requireMutationReason(params.reason);
+  const agentKey = params.agentKey.trim();
+  invariant(Boolean(AGENT_REGISTRY[agentKey as keyof typeof AGENT_REGISTRY]), 400, "INVALID_INPUT", "Unknown agent.");
+  invariant(params.governancePolicy !== undefined || params.modelOverride !== undefined, 400, "INVALID_INPUT", "No agent policy changes were provided.");
+  const governancePolicy = params.governancePolicy === undefined ? undefined : params.governancePolicy?.trim() || null;
+  const modelOverride = params.modelOverride === undefined ? undefined : params.modelOverride?.trim() || null;
+  const { deployment, adapter } = await resolveControlPlaneAgentGovernanceWorkspace(actor, params.deploymentId);
+
+  if (!deployment.managedWorkspaceId) {
+    invariant(adapter.canUseSupportConnector && deployment.hasSupportCredential, 400, "SUPPORT_CONNECTOR_REQUIRED", "Support connector is required to update remote agent policies.");
+    const operation = await runCustomerSupportOperation(actor, {
+      deploymentId: params.deploymentId,
+      action: "agent_config.update_policy",
+      scopeOverride: CONTROL_PLANE_AI_GOVERNANCE_WRITE_SCOPE,
+      reason,
+      arguments: { agentKey, governancePolicy, modelOverride },
+      remoteWorkspaceId: deployment.remoteWorkspaceId,
+    });
+    await recordCustomerDeploymentEvent(actor, params.deploymentId, "control_plane.ai_governance.agent_policy_updated", {
+      reason,
+      source: "support_connector",
+      agentKey,
+      hasGovernancePolicy: Boolean(governancePolicy),
+      modelOverride,
+      operationId: operation.id,
+    });
+    return { deploymentId: params.deploymentId, source: "support_connector" as const, operation };
+  }
+
+  const config = await prisma.workspaceAgentConfig.upsert({
+    where: {
+      workspaceId_agentKey: {
+        workspaceId: deployment.managedWorkspaceId,
+        agentKey,
+      },
+    },
+    create: {
+      workspaceId: deployment.managedWorkspaceId,
+      agentKey,
+      enabled: true,
+      modelOverride: modelOverride ?? null,
+      governancePolicy: governancePolicy ?? null,
+      configJson: {},
+    },
+    update: {
+      ...(governancePolicy !== undefined && { governancePolicy }),
+      ...(modelOverride !== undefined && { modelOverride }),
+    },
+    select: {
+      id: true,
+      agentKey: true,
+      enabled: true,
+      modelOverride: true,
+      governancePolicy: true,
+      updatedAt: true,
+    },
+  });
+  await recordCustomerDeploymentEvent(actor, params.deploymentId, "control_plane.ai_governance.agent_policy_updated", {
+    reason,
+    source: "managed_workspace",
+    managedWorkspaceId: deployment.managedWorkspaceId,
+    agentKey,
+    hasGovernancePolicy: Boolean(config.governancePolicy?.trim()),
+    modelOverride: config.modelOverride,
+  });
+  return {
+    deploymentId: params.deploymentId,
+    source: "managed_workspace" as const,
+    config: {
+      id: config.id,
+      agentKey: config.agentKey,
+      enabled: config.enabled,
+      modelOverride: config.modelOverride,
+      hasGovernancePolicy: Boolean(config.governancePolicy?.trim()),
+      updatedAt: config.updatedAt,
     },
   };
 }

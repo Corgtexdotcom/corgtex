@@ -86,6 +86,13 @@ import {
   listLedgerAccounts,
   listArchivedWorkspaceArtifacts,
   listAgentRuns,
+  listAgentCredentials,
+  updateAgentCredentialScopes,
+  revokeAgentCredential,
+  listAgentConfigs,
+  updateAgentConfig,
+  getModelUsageBudget,
+  updateModelUsageBudget,
   listCommunicationInstallations,
   listExternalDataSources,
   enqueueExternalDataSourceSync,
@@ -128,6 +135,32 @@ function structuredJsonResult(value: Record<string, unknown>) {
   };
 }
 
+function agentCredentialSummary(credential: {
+  id: string;
+  label: string;
+  scopes: string[];
+  catalogItemId?: string | null;
+  monthlyBudgetCents?: number | null;
+  dailyCallLimit?: number | null;
+  isActive: boolean;
+  lastUsedAt?: Date | string | null;
+  createdAt?: Date | string | null;
+  updatedAt?: Date | string | null;
+}) {
+  return {
+    id: credential.id,
+    label: credential.label,
+    scopes: credential.scopes,
+    catalogItemId: credential.catalogItemId ?? null,
+    monthlyBudgetCents: credential.monthlyBudgetCents ?? null,
+    dailyCallLimit: credential.dailyCallLimit ?? null,
+    isActive: credential.isActive,
+    lastUsedAt: credential.lastUsedAt ?? null,
+    createdAt: credential.createdAt ?? null,
+    updatedAt: credential.updatedAt ?? null,
+  };
+}
+
 const DESTRUCTIVE_TOOL_NAMES = new Set([
   "archive_proposal",
   "delete_action",
@@ -145,6 +178,7 @@ const DESTRUCTIVE_TOOL_NAMES = new Set([
   "purge_artifact",
   "retry_failed_job",
   "discard_failed_job",
+  "revoke_agent_credential",
 ]);
 
 const SENSITIVE_TOOL_NAMES = new Set([
@@ -173,6 +207,13 @@ const TOOL_CAPABILITIES = {
   reveal_tool_link_credential: { scopes: ["tools:credentials:read"], sensitive: true },
   archive_tool_link: { scopes: ["tools:write"], destructive: true },
   list_agent_runs: { scopes: ["agents:read"] },
+  list_agent_credentials: { scopes: ["agents:read"] },
+  update_agent_credential_scopes: { scopes: ["support:write"], sensitive: true },
+  revoke_agent_credential: { scopes: ["support:write"], destructive: true, sensitive: true },
+  list_agent_configs: { scopes: ["agents:read"] },
+  update_agent_policy: { scopes: ["support:write"], sensitive: true },
+  get_model_budget: { scopes: ["agents:read"] },
+  update_model_budget: { scopes: ["support:write"], sensitive: true },
   list_runtime_jobs: { scopes: ["runtime:read"] },
   list_failed_jobs: { scopes: ["runtime:read"] },
   retry_failed_job: { scopes: ["runtime:write"], destructive: true, sensitive: true },
@@ -757,6 +798,122 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       requireScope(sessionCtx, "agents:read");
       const runs = await listAgentRuns(actor, workspaceId, { take: take ?? 20 });
       return jsonResult({ items: runs });
+    },
+  );
+
+  tool(
+    "list_agent_credentials",
+    "List agent credentials for support diagnostics. Does not return bearer tokens or token hashes.",
+    {},
+    async () => {
+      requireScope(sessionCtx, "agents:read");
+      const credentials = await listAgentCredentials(actor, workspaceId);
+      return jsonResult({
+        items: credentials.map(agentCredentialSummary),
+      });
+    },
+  );
+
+  tool(
+    "update_agent_credential_scopes",
+    "Update scopes on an existing agent credential. Does not rotate or reveal the bearer token.",
+    {
+      credentialId: z.string(),
+      scopes: z.array(z.string()),
+    },
+    async ({ credentialId, scopes }: { credentialId: string; scopes: string[] }) => {
+      requireScope(sessionCtx, "support:write");
+      const credential = await updateAgentCredentialScopes(actor, { workspaceId, credentialId, scopes });
+      return jsonResult({ credential: agentCredentialSummary(credential) });
+    },
+  );
+
+  tool(
+    "revoke_agent_credential",
+    "Revoke an active agent credential. Does not reveal token material.",
+    {
+      credentialId: z.string(),
+    },
+    async ({ credentialId }: { credentialId: string }) => {
+      requireScope(sessionCtx, "support:write");
+      const credential = await revokeAgentCredential(actor, { workspaceId, credentialId });
+      return jsonResult({ credential: agentCredentialSummary(credential) });
+    },
+  );
+
+  tool(
+    "list_agent_configs",
+    "List agent configuration states for support diagnostics. Governance policy bodies are redacted.",
+    {},
+    async () => {
+      requireScope(sessionCtx, "agents:read");
+      const configs = await listAgentConfigs(actor, workspaceId);
+      return jsonResult({
+        items: configs.map((config) => ({
+          agentKey: config.agentKey,
+          label: config.label,
+          category: config.category,
+          enabled: config.enabled,
+          modelOverride: config.modelOverride,
+          hasGovernancePolicy: Boolean(config.governancePolicy?.trim()),
+          costTier: config.costTier,
+        })),
+      });
+    },
+  );
+
+  tool(
+    "update_agent_policy",
+    "Update an agent governance policy or model override for support repair. Returns only redacted policy state.",
+    {
+      agentKey: z.string(),
+      governancePolicy: z.string().nullable().optional(),
+      modelOverride: z.string().nullable().optional(),
+    },
+    async (params: { agentKey: string; governancePolicy?: string | null; modelOverride?: string | null }) => {
+      requireScope(sessionCtx, "support:write");
+      const config = await updateAgentConfig(actor, {
+        workspaceId,
+        agentKey: params.agentKey,
+        governancePolicy: params.governancePolicy,
+        modelOverride: params.modelOverride,
+      });
+      return jsonResult({
+        config: {
+          id: config.id,
+          agentKey: config.agentKey,
+          enabled: config.enabled,
+          modelOverride: config.modelOverride,
+          hasGovernancePolicy: Boolean(config.governancePolicy?.trim()),
+          updatedAt: config.updatedAt,
+        },
+      });
+    },
+  );
+
+  tool(
+    "get_model_budget",
+    "Get the workspace model budget for support diagnostics.",
+    {},
+    async () => {
+      requireScope(sessionCtx, "agents:read");
+      const budget = await getModelUsageBudget(actor, workspaceId);
+      return jsonResult({ budget });
+    },
+  );
+
+  tool(
+    "update_model_budget",
+    "Update the workspace model budget for support repair.",
+    {
+      monthlyCostCapUsd: z.number(),
+      alertThresholdPct: z.number().optional(),
+      periodStartDay: z.number().optional(),
+    },
+    async (params: { monthlyCostCapUsd: number; alertThresholdPct?: number; periodStartDay?: number }) => {
+      requireScope(sessionCtx, "support:write");
+      const budget = await updateModelUsageBudget(actor, { workspaceId, ...params });
+      return jsonResult({ budget });
     },
   );
 

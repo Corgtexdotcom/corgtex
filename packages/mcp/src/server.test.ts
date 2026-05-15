@@ -12,6 +12,13 @@ const upsertWorkspaceToolLinkMock = vi.fn();
 const archiveWorkspaceToolLinkMock = vi.fn();
 const revealWorkspaceToolLinkCredentialMock = vi.fn();
 const supportReopenResolvedProposalsMock = vi.fn();
+const listAgentCredentialsMock = vi.fn();
+const updateAgentCredentialScopesMock = vi.fn();
+const revokeAgentCredentialMock = vi.fn();
+const listAgentConfigsMock = vi.fn();
+const updateAgentConfigMock = vi.fn();
+const getModelUsageBudgetMock = vi.fn();
+const updateModelUsageBudgetMock = vi.fn();
 
 vi.mock("@corgtex/domain", () => ({
   CONTROL_PLANE_WORKSPACE_FEATURE_FLAGS: [
@@ -42,6 +49,13 @@ vi.mock("@corgtex/domain", () => ({
   getCurrentConstitution: vi.fn(),
   listPolicyCorpus: vi.fn(),
   listAgentRuns: vi.fn(),
+  listAgentCredentials: listAgentCredentialsMock,
+  updateAgentCredentialScopes: updateAgentCredentialScopesMock,
+  revokeAgentCredential: revokeAgentCredentialMock,
+  listAgentConfigs: listAgentConfigsMock,
+  updateAgentConfig: updateAgentConfigMock,
+  getModelUsageBudget: getModelUsageBudgetMock,
+  updateModelUsageBudget: updateModelUsageBudgetMock,
   listCommunicationInstallations: vi.fn(),
   listExternalDataSources: vi.fn(),
   enqueueExternalDataSourceSync: vi.fn(),
@@ -112,6 +126,20 @@ describe("createCorgtexMcpServer", () => {
       workspaceId: "ws-1",
       reopened: [{ id: "proposal-1", status: "OPEN", flowId: "flow-1", policyCorpusRowsDeleted: 1 }],
     });
+    listAgentCredentialsMock.mockReset().mockResolvedValue([]);
+    updateAgentCredentialScopesMock.mockReset().mockResolvedValue({ id: "cred-1", label: "Production MCP", scopes: ["workspace:read"], isActive: true });
+    revokeAgentCredentialMock.mockReset().mockResolvedValue({ id: "cred-1", label: "Production MCP", scopes: ["workspace:read"], isActive: false });
+    listAgentConfigsMock.mockReset().mockResolvedValue([]);
+    updateAgentConfigMock.mockReset().mockResolvedValue({
+      id: "config-1",
+      agentKey: "meeting-summary",
+      enabled: true,
+      modelOverride: null,
+      governancePolicy: null,
+      updatedAt: new Date("2026-05-01T00:00:00.000Z"),
+    });
+    getModelUsageBudgetMock.mockReset().mockResolvedValue(null);
+    updateModelUsageBudgetMock.mockReset().mockResolvedValue({ id: "budget-1", monthlyCostCapUsd: "250.00" });
   });
 
   it("returns the opened spend identifier from create_spend", async () => {
@@ -202,6 +230,162 @@ describe("createCorgtexMcpServer", () => {
       sensitiveHint: true,
       openWorldHint: false,
     });
+    expect((server as any)._registeredTools.list_agent_credentials.annotations).toMatchObject({
+      readOnlyHint: true,
+      destructiveHint: false,
+      openWorldHint: false,
+    });
+    expect((server as any)._registeredTools.update_agent_policy.annotations).toMatchObject({
+      readOnlyHint: false,
+      destructiveHint: false,
+      sensitiveHint: true,
+      openWorldHint: false,
+    });
+    expect((server as any)._registeredTools.revoke_agent_credential.annotations).toMatchObject({
+      readOnlyHint: false,
+      destructiveHint: true,
+      sensitiveHint: true,
+      openWorldHint: false,
+    });
+  });
+
+  it("lists agent credentials without returning token hashes or private reason text", async () => {
+    const { createCorgtexMcpServer } = await import("./server");
+    const { requireScope } = await import("./auth");
+    listAgentCredentialsMock.mockResolvedValueOnce([
+      {
+        id: "cred-1",
+        label: "Production MCP",
+        scopes: ["workspace:read", "agents:read"],
+        catalogItemId: "catalog-1",
+        reasonMd: "Private customer setup note.",
+        tokenHash: "sha256-secret",
+        monthlyBudgetCents: null,
+        dailyCallLimit: null,
+        isActive: true,
+        lastUsedAt: null,
+        createdAt: new Date("2026-05-01T00:00:00.000Z"),
+        updatedAt: new Date("2026-05-01T00:00:00.000Z"),
+      },
+    ]);
+
+    const server = createCorgtexMcpServer({
+      actor: { kind: "agent", authProvider: "bootstrap" } as any,
+      workspaceId: "ws-1",
+      authKind: "agent",
+    });
+
+    const response = await (server as any)._registeredTools.list_agent_credentials.handler({});
+    const body = JSON.parse(response.content[0].text);
+
+    expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "agents:read");
+    expect(body.items[0]).toEqual(expect.objectContaining({
+      id: "cred-1",
+      label: "Production MCP",
+      scopes: ["workspace:read", "agents:read"],
+      isActive: true,
+    }));
+    expect(body.items[0]).not.toHaveProperty("reasonMd");
+    expect(body.items[0]).not.toHaveProperty("tokenHash");
+    expect(response.content[0].text).not.toContain("Private customer setup note");
+    expect(response.content[0].text).not.toContain("sha256-secret");
+  });
+
+  it("redacts agent governance policy bodies from support config reads and writes", async () => {
+    const { createCorgtexMcpServer } = await import("./server");
+    const { requireScope } = await import("./auth");
+    listAgentConfigsMock.mockResolvedValueOnce([
+      {
+        agentKey: "meeting-summary",
+        label: "Meeting Summary",
+        category: "knowledge",
+        enabled: true,
+        modelOverride: "openai/gpt-test",
+        governancePolicy: "Do not expose raw customer policy.",
+        costTier: "medium",
+      },
+    ]);
+    updateAgentConfigMock.mockResolvedValueOnce({
+      id: "config-1",
+      agentKey: "meeting-summary",
+      enabled: true,
+      modelOverride: "openai/gpt-test",
+      governancePolicy: "Do not expose updated policy.",
+      updatedAt: new Date("2026-05-01T00:00:00.000Z"),
+    });
+
+    const server = createCorgtexMcpServer({
+      actor: { kind: "agent", authProvider: "bootstrap" } as any,
+      workspaceId: "ws-1",
+      authKind: "agent",
+    });
+
+    const listResponse = await (server as any)._registeredTools.list_agent_configs.handler({});
+    const updateResponse = await (server as any)._registeredTools.update_agent_policy.handler({
+      agentKey: "meeting-summary",
+      governancePolicy: "Replacement policy body.",
+      modelOverride: "openai/gpt-test",
+    });
+
+    expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "agents:read");
+    expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "support:write");
+    expect(JSON.parse(listResponse.content[0].text).items[0]).toEqual(expect.objectContaining({
+      agentKey: "meeting-summary",
+      modelOverride: "openai/gpt-test",
+      hasGovernancePolicy: true,
+    }));
+    expect(JSON.parse(updateResponse.content[0].text).config).toEqual(expect.objectContaining({
+      agentKey: "meeting-summary",
+      modelOverride: "openai/gpt-test",
+      hasGovernancePolicy: true,
+    }));
+    expect(listResponse.content[0].text).not.toContain("Do not expose raw customer policy");
+    expect(updateResponse.content[0].text).not.toContain("Do not expose updated policy");
+  });
+
+  it("updates and revokes agent credentials through support-scoped tools without returning token material", async () => {
+    const { createCorgtexMcpServer } = await import("./server");
+    const { requireScope } = await import("./auth");
+    updateAgentCredentialScopesMock.mockResolvedValueOnce({
+      id: "cred-1",
+      label: "Production MCP",
+      scopes: ["workspace:read"],
+      isActive: true,
+      tokenHash: "sha256-secret",
+    });
+    revokeAgentCredentialMock.mockResolvedValueOnce({
+      id: "cred-1",
+      label: "Production MCP",
+      scopes: ["workspace:read"],
+      isActive: false,
+      tokenHash: "sha256-secret",
+    });
+
+    const server = createCorgtexMcpServer({
+      actor: { kind: "agent", authProvider: "bootstrap" } as any,
+      workspaceId: "ws-1",
+      authKind: "agent",
+    });
+
+    const updateResponse = await (server as any)._registeredTools.update_agent_credential_scopes.handler({
+      credentialId: "cred-1",
+      scopes: ["workspace:read"],
+    });
+    const revokeResponse = await (server as any)._registeredTools.revoke_agent_credential.handler({
+      credentialId: "cred-1",
+    });
+
+    expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "support:write");
+    expect(updateAgentCredentialScopesMock).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "agent" }),
+      { workspaceId: "ws-1", credentialId: "cred-1", scopes: ["workspace:read"] },
+    );
+    expect(revokeAgentCredentialMock).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "agent" }),
+      { workspaceId: "ws-1", credentialId: "cred-1" },
+    );
+    expect(updateResponse.content[0].text).not.toContain("sha256-secret");
+    expect(revokeResponse.content[0].text).not.toContain("sha256-secret");
   });
 
   it("runs the support proposal repair tool with support and proposal scopes", async () => {
