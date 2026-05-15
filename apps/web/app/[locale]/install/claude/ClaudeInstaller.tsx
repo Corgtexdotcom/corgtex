@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 
-const CLAUDE_CONNECTORS_URL = "https://claude.ai/settings/connectors";
+import { CLAUDE_CONNECTORS_URL } from "@/lib/install-helpers";
 
 const STARTER_PROMPTS = [
   "What proposals are open in my Corgtex workspace?",
@@ -114,7 +114,7 @@ export function ClaudeInstaller({ connectorUrl }: Props) {
           body={
             <>
               <p className="text-sm text-[var(--text-muted)]">
-                In Claude, this is at <span className="font-medium">Settings → Connectors</span>.
+                In Claude, this is at <span className="font-medium">Customize → Connectors</span>.
               </p>
               <button
                 type="button"

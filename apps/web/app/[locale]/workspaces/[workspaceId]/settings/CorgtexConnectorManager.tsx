@@ -6,13 +6,13 @@ import {
   buildCursorInstallLinks,
   buildCursorMcpConfig,
   encodeBase64Utf8,
+  CLAUDE_CONNECTORS_URL,
   CLAUDE_INSTALLER_PATH,
   CLAUDE_CODE_INSTALLER_PATH,
   type CursorMcpConfig,
 } from "@/lib/install-helpers";
 
 const CHATGPT_APPS_URL = "https://chatgpt.com/apps";
-const CLAUDE_CONNECTORS_URL = "https://claude.ai/settings/connectors";
 
 // Re-export so the existing test in CorgtexConnectorManager.test.ts keeps working.
 export {

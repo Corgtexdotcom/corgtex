@@ -5,6 +5,7 @@ import {
   buildClaudeCodeCommand,
   buildCursorInstallLinks,
   buildCursorMcpConfig,
+  CLAUDE_CONNECTORS_URL,
   encodeBase64Utf8,
 } from "@/lib/install-helpers";
 
@@ -53,5 +54,9 @@ describe("CorgtexConnectorManager setup helpers", () => {
     expect(buildClaudeCodeCommand(CONNECTOR_URL)).toBe(
       "claude mcp add --transport http corgtex --scope user https://mcp.corgtex.com/mcp",
     );
+  });
+
+  it("opens Claude's current connector settings address", () => {
+    expect(CLAUDE_CONNECTORS_URL).toBe("https://claude.ai/customize/connectors");
   });
 });
