@@ -9,6 +9,7 @@ import { createTension, updateTension } from "./tensions";
 import { createProposal, createProposalFromTension, resolveProposal, submitProposal } from "./proposals";
 import { postDeliberationEntry } from "./deliberation";
 import { buildMeetingIntelligenceContext } from "./meeting-intelligence-context";
+import { prependMeetingBlockContext, resolveMeetingBlockReference } from "./meeting-blocks";
 
 const AUTO_APPLY_CONFIDENCE_THRESHOLD = 0.8;
 const AUTO_APPLY_DELIBERATION_THRESHOLD = 0.85;
@@ -207,6 +208,7 @@ Extract all:
 Use any user-provided ingestion guidance to prioritize what matters and what follow-up work the operator wanted highlighted. Treat guidance as trusted operator context for spelling, name, and terminology corrections. When guidance corrects a transcript term, use the corrected term in titles and body text. Do not invent new decisions, tasks, tensions, proposals, or resolutions from guidance alone. If an item mainly comes from guidance rather than transcript evidence, say that clearly in the body and leave sourceQuote null.
 If transcriptCondensedForExtraction is true, the full transcript was too large for direct structured extraction. Use summaryMd as the primary meeting digest and the transcript excerpts only as supporting evidence. Do not treat the transcript-shortening note itself as meeting content.
 When contextual intelligence is enabled, use Corgtex context to connect the meeting to previous recurring meetings, active actions, active tensions, open proposals, recent deliberation, and relevant knowledge. Prefer updating or discussing existing records over creating duplicates.
+Use meetingBlocks as the conversation map. Assign each extracted item to the most relevant block using blockSequence, blockTitle, and blockKind. If a proposal discussion leads to a decision or resolution, keep that connection in the body and target fields when supported by existingRecords.
 
 For each item, provide:
 - operation: CREATE for new records/decisions/follow-ups, RESOLVE for existing records resolved in this meeting
@@ -220,10 +222,11 @@ For each item, provide:
 - assigneeHint: who is responsible (display name from transcript), or null
 - confidence: 0.0-1.0 how confident you are
 - sourceQuote: the relevant transcript or summary excerpt (max 200 chars)
-- targetEntityType and targetEntityId only for RESOLVE items, using the existing records supplied in the input
+- targetEntityType and targetEntityId only for RESOLVE items, DECISION items tied to an existing Proposal or Tension, using the existing records supplied in the input
 - targetEntityType and targetEntityId are also required for DELIBERATION_ENTRY items and for PROPOSAL items that should be drafted from an existing Tension
 - deliberationEntryType only for DELIBERATION_ENTRY items: REACTION or OBJECTION
 - resolutionOutcome only for resolved proposals: ADOPTED, NOT_ADOPTED, or WITHDRAWN
+- blockSequence, blockTitle, and blockKind for the meeting block that produced this item
 - dedupeKey: stable lowercase key based on type, target, and the discussed topic
 
 Be conservative — only extract items you're confident about.
@@ -250,6 +253,9 @@ Number items sequentially (#001, #002, ...) across all types.
           "targetEntityId": { "type": "string" },
           "deliberationEntryType": { "type": "string", "enum": ["REACTION", "OBJECTION"] },
           "resolutionOutcome": { "type": "string", "enum": ["ADOPTED", "NOT_ADOPTED", "WITHDRAWN"] },
+          "blockSequence": { "type": "number" },
+          "blockTitle": { "type": "string" },
+          "blockKind": { "type": "string" },
           "dedupeKey": { "type": "string" }
         },
         "required": ["type", "title", "body", "confidence"]
@@ -268,6 +274,7 @@ Number items sequentially (#001, #002, ...) across all types.
       transcriptLength: meeting.transcript.length,
       transcriptCondensedForExtraction: meeting.transcript.length > MAX_DIRECT_INSIGHT_TRANSCRIPT_CHARS,
       summaryMd: meeting.summaryMd,
+      meetingBlocks: meeting.blocksJson,
       ingestionGuidanceMd: meeting.ingestionGuidanceMd,
       contextualIntelligenceEnabled: meetingContext.contextualIntelligenceEnabled,
       existingRecords: {
@@ -328,7 +335,12 @@ Number items sequentially (#001, #002, ...) across all types.
 
       const type = normalizeInsightType(item.type, requestedOperation === "RESOLVE" ? targetEntityType : null);
       const title = typeof item.title === "string" ? item.title.trim() : "";
-      const bodyMd = typeof item.body === "string" ? item.body.trim() : "";
+      const block = resolveMeetingBlockReference(meeting.blocksJson, {
+        sequence: typeof item.blockSequence === "number" ? item.blockSequence : null,
+        title: typeof item.blockTitle === "string" ? item.blockTitle : null,
+        kind: typeof item.blockKind === "string" ? item.blockKind : null,
+      });
+      const bodyMd = prependMeetingBlockContext(typeof item.body === "string" ? item.body.trim() : "", block);
       if (!type || title.length === 0 || bodyMd.length === 0) continue;
 
       const isDeliberationEntry = type === "DELIBERATION_ENTRY";
@@ -343,6 +355,7 @@ Number items sequentially (#001, #002, ...) across all types.
       const keepTarget = hasValidTarget && (
         operation === "RESOLVE" ||
         isDeliberationEntry ||
+        (type === "DECISION" && (targetEntityType === "Proposal" || targetEntityType === "Tension")) ||
         (type === "PROPOSAL" && targetEntityType === "Tension")
       );
       const deliberationEntryType = isDeliberationEntry ? normalizeDeliberationEntryType(item.deliberationEntryType) : null;

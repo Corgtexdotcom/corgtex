@@ -24,6 +24,7 @@ type ContextMeetingRecord = {
   source: string;
   transcript: string | null;
   summaryMd: string | null;
+  blocksJson: unknown;
   ingestionGuidanceMd: string | null;
   recordedAt: Date;
   scheduledEndAt: Date | null;
@@ -138,6 +139,7 @@ export type MeetingIntelligenceContext = {
     source: string;
     transcript: string | null;
     summaryMd: string | null;
+    blocksJson: unknown;
     ingestionGuidanceMd: string | null;
     recordedAt: Date;
     scheduledEndAt: Date | null;
@@ -461,6 +463,7 @@ function buildKnowledgeQuery(params: {
     title: string | null;
     transcript: string | null;
     summaryMd: string | null;
+    blocksJson?: unknown;
     ingestionGuidanceMd: string | null;
   };
   previousMeetings: Array<{ title: string | null; summaryMd: string | null }>;
@@ -472,6 +475,7 @@ function buildKnowledgeQuery(params: {
     params.meeting.title,
     params.meeting.ingestionGuidanceMd,
     params.meeting.summaryMd,
+    params.meeting.blocksJson ? JSON.stringify(params.meeting.blocksJson).slice(0, 2000) : null,
     params.meeting.transcript?.slice(0, 2000),
     ...params.previousMeetings.flatMap((meeting) => [meeting.title, meeting.summaryMd]),
     ...params.tensions.map((tension) => tension.title),
@@ -488,6 +492,7 @@ function contextMeeting(meeting: ContextMeetingRecord) {
     source: meeting.source,
     transcript: meeting.transcript,
     summaryMd: meeting.summaryMd,
+    blocksJson: meeting.blocksJson,
     ingestionGuidanceMd: meeting.ingestionGuidanceMd,
     recordedAt: meeting.recordedAt,
     scheduledEndAt: meeting.scheduledEndAt,

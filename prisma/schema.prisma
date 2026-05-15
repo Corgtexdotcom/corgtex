@@ -1597,6 +1597,7 @@ model Meeting {
   scheduledEndAt      DateTime?
   transcript          String?       @db.Text
   summaryMd           String?       @db.Text
+  blocksJson          Json?
   ingestionGuidanceMd String?       @db.Text
   participantIds      String[]
   participantEmails   String[]      @default([])

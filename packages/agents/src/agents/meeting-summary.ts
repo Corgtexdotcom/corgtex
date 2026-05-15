@@ -1,7 +1,7 @@
 import type { AgentTriggerType } from "@prisma/client";
-import { prisma } from "@corgtex/shared";
+import { prisma, toInputJson } from "@corgtex/shared";
 import { defaultModelGateway } from "@corgtex/models";
-import { AppError, applyGuidanceTermCorrections, buildMeetingIntelligenceContext } from "@corgtex/domain";
+import { AppError, applyGuidanceTermCorrections, buildMeetingIntelligenceContext, normalizeMeetingBlocks } from "@corgtex/domain";
 import { executeAgentRun } from "../runtime";
 
 function isMissingMeetingError(error: unknown) {
@@ -49,6 +49,7 @@ export async function runMeetingSummaryAgent(params: {
         source: string;
         transcript: string | null;
         summaryMd: string | null;
+        blocksJson: unknown;
         ingestionGuidanceMd: string | null;
         recordedAt: string | Date;
       } | null | undefined;
@@ -62,6 +63,49 @@ export async function runMeetingSummaryAgent(params: {
         };
       }
 
+      const blockExtraction = await helpers.tool("model.extract.meeting-blocks", { meetingId: meeting.id }, async () => defaultModelGateway.extract({
+        model,
+        workspaceId: params.workspaceId,
+        agentRunId: runId,
+        instruction: [
+          "Identify the meeting's actual discussion blocks from transcript evidence.",
+          "Do not force a fixed template. Use natural blocks from the conversation, including custom/ad-hoc topics.",
+          "A block can be a check-in, update, tension, proposal discussion, decision, planning segment, or custom topic.",
+          "Tie proposal discussions and decisions to supplied existing proposal, tension, or action records only when the transcript and context support it.",
+          "Personal check-ins can be blocks, but they are not governance records unless explicit work follows.",
+          "Return ordered blocks only. Do not invent transcript content.",
+        ].join(" "),
+        input: JSON.stringify({
+          title: meeting.title,
+          source: meeting.source,
+          recordedAt: meeting.recordedAt,
+          transcript: meeting.transcript,
+          currentSummary: meeting.summaryMd,
+          ingestionGuidanceMd: meeting.ingestionGuidanceMd,
+          existingRecords: meetingContext?.contextualIntelligenceEnabled ? {
+            actions: meetingContext.actions,
+            tensions: meetingContext.tensions,
+            proposals: meetingContext.proposals,
+          } : null,
+        }),
+        schemaHint: `{
+          "version": 1,
+          "blocks": [
+            {
+              "sequence": "number",
+              "title": "string",
+              "kind": "check_in | update | tension | proposal_discussion | decision | planning | custom",
+              "summaryMd": "string",
+              "sourceQuote": "string",
+              "relatedRecords": [
+                { "entityType": "Action | Tension | Proposal", "entityId": "string", "title": "string" }
+              ]
+            }
+          ]
+        }`,
+      }));
+      const meetingBlocks = normalizeMeetingBlocks(blockExtraction.output);
+
       const summary = await helpers.tool("model.chat", { meetingId: meeting.id }, async () => defaultModelGateway.chat({ model,
         workspaceId: params.workspaceId,
         agentRunId: runId,
@@ -72,7 +116,10 @@ export async function runMeetingSummaryAgent(params: {
             content: [
               "Summarize this meeting for an operator dashboard.",
               "Return clean Markdown only, with no preamble or closing disclaimer.",
-              "Use concise sections in this order when evidence exists: Overview, Decisions, Action Items, Tensions / Open Questions, Proposals, Next Steps.",
+              "Write a slightly longer narrative summary organized around the supplied dynamic meeting blocks.",
+              "Use the block titles as the main story spine. Preserve the meeting flow instead of forcing a fixed agenda template.",
+              "For each block, explain what happened, what context mattered, and how it connects to decisions, proposals, tensions, actions, or follow-ups when evidence supports it.",
+              "Explicitly tie decisions to the proposal, tension, or topic they belong to. If no clear decision was made, say what remained open.",
               "Use bullets for scannability. Include owners and dates only when the transcript supports them.",
               "Use user-provided ingestion guidance to decide what to emphasize or preserve, but do not invent facts unsupported by the transcript.",
               "Treat ingestion guidance as trusted operator context for spelling, name, and terminology corrections. If guidance corrects transcript wording, use the corrected wording in the summary and do not preserve conflicting text from currentSummary.",
@@ -87,6 +134,7 @@ export async function runMeetingSummaryAgent(params: {
               recordedAt: meeting.recordedAt,
               transcript: meeting.transcript,
               currentSummary: meeting.summaryMd,
+              meetingBlocks,
               ingestionGuidanceMd: meeting.ingestionGuidanceMd,
               corgtexContext: meetingContext?.contextualIntelligenceEnabled ? {
                 previousMeetings: meetingContext.previousMeetings,
@@ -107,12 +155,14 @@ export async function runMeetingSummaryAgent(params: {
         where: { id: meeting.id },
         data: {
           summaryMd,
+          blocksJson: toInputJson(meetingBlocks),
         },
       }));
       return {
         resultJson: {
           meetingId: meeting.id,
           summary: summaryMd,
+          blocks: meetingBlocks.blocks.length,
         },
       };
     },

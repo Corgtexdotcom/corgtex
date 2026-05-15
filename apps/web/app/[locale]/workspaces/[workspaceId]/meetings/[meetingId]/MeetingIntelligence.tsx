@@ -13,6 +13,7 @@ import {
   regenerateMeetingIntelligenceAction,
   updateInsightAction,
 } from "../actions";
+import { parseMeetingBlockContext } from "./meetingInsightBlocks";
 
 type InsightBucket = {
   title: string;
@@ -297,12 +298,14 @@ export default function MeetingIntelligence({
                         }),
                       }
                       : null;
+                    const blockContext = parseMeetingBlockContext(insight.bodyMd);
 
                     return (
                       <article className={`meeting-insight-item${isEditing ? " editing" : ""}`} key={insight.id} aria-busy={loading}>
                         <div className="meeting-insight-main">
                           <div className="meeting-insight-title-row">
                             <span className="tag info">{insightTypeLabels[insight.type] ?? insight.type}</span>
+                            {blockContext.blockTitle && <span className="tag">{blockContext.blockTitle}</span>}
                             {confidence >= 0.8 && <span className="tag success">{t("highConfidence")}</span>}
                             {confidence < 0.5 && <span className="tag warning">{t("lowConfidence")}</span>}
                             <span className="nr-item-meta">{t("confidencePercent", { percent: Math.round(confidence * 100) })}</span>
@@ -352,6 +355,11 @@ export default function MeetingIntelligence({
                                   )}
                                 </div>
                               )}
+                              {blockContext.blockKind && (
+                                <div className="nr-item-meta">
+                                  {blockContext.blockKind}
+                                </div>
+                              )}
                               {insight.deliberationEntryType && (
                                 <div className="nr-item-meta">
                                   {t("deliberationEntryType")} <strong>{insight.deliberationEntryType.toLowerCase()}</strong>
@@ -362,10 +370,10 @@ export default function MeetingIntelligence({
                                   {t("resolutionOutcome")} <strong>{insight.resolutionOutcome.replace("_", " ").toLowerCase()}</strong>
                                 </div>
                               )}
-                              {insight.bodyMd && (
+                              {blockContext.bodyMd && (
                                 <details className="meeting-insight-details">
                                   <summary>{t("insightDetails")}</summary>
-                                  <MarkdownRenderer markdown={insight.bodyMd} variant="compact" className="meeting-insight-body" />
+                                  <MarkdownRenderer markdown={blockContext.bodyMd} variant="compact" className="meeting-insight-body" />
                                 </details>
                               )}
                             </>
