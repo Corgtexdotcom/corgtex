@@ -14,6 +14,7 @@ const homeCopy = {
     },
     heroTitle: "Run your AI workforce like an accountable team.",
     heroSubtitle: "See what every agent is doing. Govern it with your rules. Know what it costs. Live in weeks, yours to own.",
+    aiReadinessCta: "Run AI Readiness X-Ray",
     briefing: "Schedule a Briefing",
     dailyLabel: "The Daily Surface",
     dailyTitle: "Every morning, one page. Everything your AI workforce produced overnight.",
@@ -91,6 +92,7 @@ const homeCopy = {
     },
     heroTitle: "Dirige tu fuerza laboral de IA como un equipo responsable.",
     heroSubtitle: "Ve qué hace cada agente. Gobierna con tus reglas. Conoce el costo. En vivo en semanas, bajo tu control.",
+    aiReadinessCta: "X-Ray de preparación IA",
     briefing: "Agendar una sesión",
     dailyLabel: "La superficie diaria",
     dailyTitle: "Cada mañana, una sola página. Todo lo que tu fuerza laboral de IA produjo durante la noche.",
@@ -191,6 +193,9 @@ export default async function HomePage({ params }: LocaleParams) {
             <ScrollReveal delay={300}>
               <div className="btn-group">
                 <DemoGateForm />
+                <a href={hrefFor(locale, "/ai-readiness")} className="btn btn-secondary">
+                  {copy.aiReadinessCta}
+                </a>
                 <a href={bookDemoUrl} className="btn btn-primary" target="_blank" rel="noopener noreferrer">
                   {copy.briefing}
                 </a>

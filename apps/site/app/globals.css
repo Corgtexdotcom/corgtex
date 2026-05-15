@@ -416,6 +416,123 @@ p { color: var(--text-secondary); line-height: 1.75; font-size: 1.05rem; }
 .demo-terminal-body .cmd { color: #dcdcdc; }
 .demo-terminal-body .output { color: #808080; }
 
+/* ── AI Readiness Page ── */
+.ai-readiness-hero {
+  border-bottom: 3px double var(--line-strong);
+}
+.ai-readiness-hero-grid {
+  display: grid;
+  grid-template-columns: minmax(0,1.05fr) minmax(280px,0.95fr);
+  gap: clamp(32px,5vw,72px);
+  align-items: start;
+}
+.ai-readiness-hero-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+.ai-readiness-hero-copy h1 {
+  margin: 0;
+  font-size: clamp(2.75rem,5.4vw,4.4rem);
+  line-height: 1.08;
+}
+.ai-readiness-hero-copy > p {
+  max-width: 640px;
+}
+.ai-readiness-visual {
+  border: 1px solid var(--line);
+  background: var(--bg-warm);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+}
+.ai-readiness-visual img {
+  width: 100%;
+  height: auto;
+  mix-blend-mode: multiply;
+}
+.ai-prompt-shell {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 20px;
+}
+.ai-prompt-panel {
+  width: 100%;
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+  box-shadow: var(--shadow-md);
+}
+.ai-prompt-panel-header {
+  display: flex;
+  gap: 24px;
+  align-items: flex-start;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--line);
+  padding: 24px;
+}
+.ai-prompt-panel-header .section-label {
+  margin-bottom: 12px;
+}
+.ai-prompt-panel-header p {
+  max-width: 720px;
+  font-size: 0.95rem;
+}
+.ai-prompt-panel-header .btn {
+  flex: 0 0 auto;
+}
+.ai-prompt-code {
+  max-height: min(58vh,620px);
+  overflow: auto;
+  padding: 24px;
+  background: var(--bg-ink);
+  color: #e8e4dc;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.ai-readiness-consultation {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  color: var(--text-secondary);
+  font-size: 0.95rem;
+}
+.ai-readiness-consultation a {
+  color: var(--text);
+  font-weight: 700;
+  text-decoration: underline;
+  text-underline-offset: 4px;
+}
+.ai-readiness-output-grid {
+  display: grid;
+  grid-template-columns: minmax(0,0.9fr) minmax(280px,1.1fr);
+  gap: clamp(32px,5vw,72px);
+  align-items: start;
+}
+.ai-readiness-output-list {
+  list-style: none;
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 1px;
+  background: var(--line);
+  border: 1px solid var(--line);
+}
+.ai-readiness-output-list li {
+  background: var(--surface);
+  color: var(--text-secondary);
+  font-size: 1rem;
+  padding: 18px 20px;
+}
+.ai-readiness-output-list li::before {
+  content: "—";
+  color: var(--accent-red);
+  font-weight: 700;
+  margin-right: 12px;
+}
+
 /* ── CTA Banner ── */
 .cta-banner { text-align: center; position: relative; }
 .cta-banner h2 { margin-bottom: 16px; }
@@ -691,6 +808,10 @@ p { color: var(--text-secondary); line-height: 1.75; font-size: 1.05rem; }
   .headline-grid .divider { height: 1px; width: 100%; }
   .editorial-feature { grid-template-columns: 1fr; gap: 40px; }
   .editorial-feature.reversed { direction: ltr; }
+  .ai-readiness-hero-grid,
+  .ai-readiness-output-grid {
+    grid-template-columns: 1fr;
+  }
   .founder-section { grid-template-columns: 1fr; gap: 32px; }
   .founder-photo { max-width: 280px; }
   .founder-banner { grid-template-columns: 1fr; gap: 40px; }
@@ -728,6 +849,27 @@ p { color: var(--text-secondary); line-height: 1.75; font-size: 1.05rem; }
   .demo-panel-visual {
     min-height: 280px;
     padding: 32px;
+  }
+  .ai-readiness-hero-copy {
+    align-items: stretch;
+    text-align: center;
+  }
+  .ai-readiness-hero-copy > p {
+    margin-left: auto;
+    margin-right: auto;
+  }
+  .ai-prompt-shell {
+    align-items: stretch;
+  }
+  .ai-prompt-panel-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .ai-prompt-panel-header .btn {
+    width: 100%;
+  }
+  .ai-readiness-consultation {
+    justify-content: center;
   }
   .cards-grid, .phases-grid { grid-template-columns: 1fr; }
   .footer-grid { grid-template-columns: 1fr; gap: 24px; }

@@ -7,6 +7,7 @@ import { localizedPath } from "../i18n/routing";
 import { demoGatePathForLocale, getSiteConfig } from "../lib/site";
 
 const NAV_LINKS: { href: string; labelKey: string }[] = [
+  { href: "/ai-readiness", labelKey: "aiReadiness" },
   { href: "/about", labelKey: "about" },
   { href: "/pricing", labelKey: "pricing" },
   { href: "/how-we-work", labelKey: "howWeWork" },
