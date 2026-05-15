@@ -4,6 +4,7 @@ import { pathAlternates } from "../i18n/routing";
 
 const routes: { path: string; changeFrequency: MetadataRoute.Sitemap[number]["changeFrequency"]; priority: number }[] = [
   { path: "/", changeFrequency: "weekly", priority: 1.0 },
+  { path: "/ai-readiness", changeFrequency: "monthly", priority: 0.95 },
   { path: "/about", changeFrequency: "monthly", priority: 0.8 },
   { path: "/faq", changeFrequency: "monthly", priority: 0.9 },
   { path: "/how-we-work", changeFrequency: "monthly", priority: 0.9 },

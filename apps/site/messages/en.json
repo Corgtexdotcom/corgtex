@@ -6,6 +6,7 @@
     "ogAlt": "Corgtex - Run Your AI Workforce Like an Accountable Team"
   },
   "nav": {
+    "aiReadiness": "AI Readiness",
     "about": "About",
     "pricing": "Pricing",
     "howWeWork": "How We Work",
@@ -20,6 +21,7 @@
   "footer": {
     "tagline": "Your governed AI workforce. See every agent, enforce your rules, know what it costs.",
     "product": "Product",
+    "aiReadiness": "AI Readiness",
     "liveDemo": "Live Demo",
     "pricing": "Pricing",
     "faq": "FAQ",
