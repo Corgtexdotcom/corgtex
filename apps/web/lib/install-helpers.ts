@@ -62,3 +62,8 @@ export const CLAUDE_CONNECTORS_URL = "https://claude.ai/customize/connectors";
 export const CLAUDE_INSTALLER_PATH = "/install/claude";
 export const CLAUDE_CODE_INSTALLER_PATH = "/install/claude-code";
 export const INSTALL_INDEX_PATH = "/install";
+
+export function buildClaudeInstallerShareUrl(origin?: string | null): string {
+  const trimmedOrigin = origin?.trim().replace(/\/$/, "");
+  return trimmedOrigin ? `${trimmedOrigin}${CLAUDE_INSTALLER_PATH}` : CLAUDE_INSTALLER_PATH;
+}

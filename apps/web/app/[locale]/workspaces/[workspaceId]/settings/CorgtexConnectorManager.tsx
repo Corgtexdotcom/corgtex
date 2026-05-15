@@ -1,7 +1,8 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
+  buildClaudeInstallerShareUrl,
   buildClaudeCodeCommand,
   buildCursorInstallLinks,
   buildCursorMcpConfig,
@@ -17,6 +18,7 @@ const CHATGPT_APPS_URL = "https://chatgpt.com/apps";
 // Re-export so the existing test in CorgtexConnectorManager.test.ts keeps working.
 export {
   buildClaudeCodeCommand,
+  buildClaudeInstallerShareUrl,
   buildCursorInstallLinks,
   buildCursorMcpConfig,
   encodeBase64Utf8,
@@ -142,8 +144,13 @@ function openCurrentWindow(url: string): boolean {
 
 export function CorgtexConnectorManager({ connectorUrl, workspaceName }: Props) {
   const [status, setStatus] = useState<ActionStatus | null>(null);
+  const [claudeInstallerShareUrl, setClaudeInstallerShareUrl] = useState(() => buildClaudeInstallerShareUrl());
   const cursorLinks = useMemo(() => buildCursorInstallLinks(connectorUrl), [connectorUrl]);
   const claudeCodeCommand = useMemo(() => buildClaudeCodeCommand(connectorUrl), [connectorUrl]);
+
+  useEffect(() => {
+    setClaudeInstallerShareUrl(buildClaudeInstallerShareUrl(window.location.origin));
+  }, []);
 
   const setCopyResult = (cardId: SetupCardId, copied: boolean, copiedMessage: string, fallbackMessage: string, value: string) => {
     setStatus({
@@ -411,19 +418,19 @@ export function CorgtexConnectorManager({ connectorUrl, workspaceName }: Props) 
                 padding: "8px 10px",
               }}
             >
-              {typeof window !== "undefined"
-                ? `${window.location.origin}${CLAUDE_INSTALLER_PATH}`
-                : CLAUDE_INSTALLER_PATH}
+              {claudeInstallerShareUrl}
             </code>
             <button
               className="button secondary small"
               type="button"
               style={{ marginTop: 8 }}
               onClick={() => {
-                const url = typeof window !== "undefined"
-                  ? `${window.location.origin}${CLAUDE_INSTALLER_PATH}`
-                  : CLAUDE_INSTALLER_PATH;
-                handleCopy("other", url, "Copied the share link.", "Clipboard blocked. Select and copy the link above.");
+                handleCopy(
+                  "other",
+                  claudeInstallerShareUrl,
+                  "Copied the share link.",
+                  "Clipboard blocked. Select and copy the link above.",
+                );
               }}
             >
               Copy share link

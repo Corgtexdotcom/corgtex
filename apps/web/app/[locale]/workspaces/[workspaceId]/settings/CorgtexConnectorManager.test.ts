@@ -3,9 +3,11 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildClaudeCodeCommand,
+  buildClaudeInstallerShareUrl,
   buildCursorInstallLinks,
   buildCursorMcpConfig,
   CLAUDE_CONNECTORS_URL,
+  CLAUDE_INSTALLER_PATH,
   encodeBase64Utf8,
 } from "@/lib/install-helpers";
 
@@ -58,5 +60,10 @@ describe("CorgtexConnectorManager setup helpers", () => {
 
   it("opens Claude's current connector settings address", () => {
     expect(CLAUDE_CONNECTORS_URL).toBe("https://claude.ai/customize/connectors");
+  });
+
+  it("builds a hydration-safe Claude installer share URL", () => {
+    expect(buildClaudeInstallerShareUrl()).toBe(CLAUDE_INSTALLER_PATH);
+    expect(buildClaudeInstallerShareUrl("https://app.corgtex.com/")).toBe("https://app.corgtex.com/install/claude");
   });
 });
