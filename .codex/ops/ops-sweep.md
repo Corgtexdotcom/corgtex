@@ -8,7 +8,7 @@ smoke and agent loops.
 Local continuous layer:
 
 - Local recurring automation is owned by the private folder
-  `/Users/janbrezina/Development /CORGTEX-AUTOMATIONS`.
+  `/Users/janbrezina/Development/CORGTEX-AUTOMATIONS`.
 - The LaunchAgent calls that folder's runner, which sources
   `/Users/janbrezina/.codex/corgtex-automation.env` and executes product-side
   checks through `/Users/janbrezina/.codex/bin/corgtex-automation-run`.
