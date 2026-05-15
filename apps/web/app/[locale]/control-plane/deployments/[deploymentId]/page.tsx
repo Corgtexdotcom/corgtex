@@ -59,6 +59,13 @@ const SUPPORT_ACTIONS = [
   ["tool_links.upsert", "toolLinksUpsert", "toolLinksUpsert"],
   ["tool_links.archive", "toolLinksArchive", "toolLinksArchive"],
   ["agents.list_runs", "agentsListRuns", "agentsListRuns"],
+  ["agent_credentials.list", "agentCredentialsList", "agentCredentialsList"],
+  ["agent_credentials.update_scopes", "agentCredentialsUpdateScopes", "agentCredentialsUpdateScopes"],
+  ["agent_credentials.revoke", "agentCredentialsRevoke", "agentCredentialsRevoke"],
+  ["model_budget.get", "modelBudgetGet", "modelBudgetGet"],
+  ["model_budget.update", "modelBudgetUpdate", "modelBudgetUpdate"],
+  ["agent_config.list", "agentConfigList", "agentConfigList"],
+  ["agent_config.update_policy", "agentConfigUpdatePolicy", "agentConfigUpdatePolicy"],
   ["runtime.list_failed_jobs", "runtimeListFailedJobs", "runtimeListFailedJobs"],
   ["runtime.retry_failed_job", "runtimeRetryFailedJob", "runtimeRetryFailedJob"],
   ["runtime.discard_failed_job", "runtimeDiscardFailedJob", "runtimeDiscardFailedJob"],
@@ -91,6 +98,9 @@ const READ_ONLY_SUPPORT_ACTIONS = new Set([
   "data_feeds.list",
   "tool_links.list",
   "agents.list_runs",
+  "agent_credentials.list",
+  "model_budget.get",
+  "agent_config.list",
   "runtime.list_failed_jobs",
   "proposals.list",
   "proposals.get",
@@ -635,16 +645,24 @@ export default async function ControlPlaneCustomerPage({
         </section>
 
         <section id="ai-governance" className="panel stack" style={{ padding: 20 }}>
-          <h2 style={{ margin: 0 }}>{t("sections.ai-governance.label")}</h2>
-          <p className="muted" style={{ margin: 0 }}>
-            {t("customerDetail.aiGovernance.description")}
-          </p>
+          <div className="row">
+            <div>
+              <h2 style={{ margin: 0 }}>{t("sections.ai-governance.label")}</h2>
+              <p className="muted" style={{ margin: "4px 0 0" }}>
+                {t("customerDetail.aiGovernance.description")}
+              </p>
+            </div>
+            <a className="link-button small" href={getControlPlaneHref(`/control-plane/deployments/${customer.id}/agent-governance`, locale)}>
+              Open governance panel
+            </a>
+          </div>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 }}>
             <MiniMetric label={t("customerDetail.aiGovernance.agentVisibility")} value={statusLabel(t, aiGovernance.accessMode === "managed_workspace" ? "connected" : "remote")} toneValue={aiGovernance.accessMode === "managed_workspace" ? "connected" : "remote"} detail={aiGovernance.accessMode === "managed_workspace" ? t("customerDetail.aiGovernance.localRuns", { count: customer.managedWorkspace?._count.agentRuns ?? 0 }) : t("customerDetail.aiGovernance.remoteRuns")} />
             <MiniMetric label={t("customerDetail.aiGovernance.pendingApprovals")} value={aiSummary ? String(aiSummary.pendingApprovals) : statusLabel(t, "remote")} toneValue={aiSummary ? "ready" : "remote"} detail={aiSummary ? t("customerDetail.aiGovernance.humanApprovalWaits") : t("customerDetail.context.requiresSupportSnapshot")} />
             <MiniMetric label={t("customerDetail.aiGovernance.failedJobs")} value={statusLabel(t, aiSummary && aiSummary.failedJobs > 0 ? "attention" : aiSummary ? "ready" : "remote")} toneValue={aiSummary && aiSummary.failedJobs > 0 ? "attention" : aiSummary ? "ready" : "remote"} detail={aiSummary ? t("customerDetail.aiGovernance.failedJobsDetail", { count: aiSummary.failedJobs }) : t("customerDetail.context.inspectThroughSupport")} />
             <MiniMetric label={t("customerDetail.aiGovernance.modelSpend")} value={aiSummary ? `$${aiSummary.modelUsage.estimatedCostUsd ?? "0"}` : statusLabel(t, "remote")} toneValue={aiSummary ? "ready" : "remote"} detail={aiSummary ? t("customerDetail.aiGovernance.totalTokens", { count: aiSummary.modelUsage.inputTokens + aiSummary.modelUsage.outputTokens }) : t("customerDetail.context.requiresSupportSnapshot")} />
             <MiniMetric label={t("customerDetail.aiGovernance.riskyToolCalls")} value={statusLabel(t, aiSummary && aiSummary.riskyToolCalls.length > 0 ? "attention" : aiSummary ? "ready" : "remote")} toneValue={aiSummary && aiSummary.riskyToolCalls.length > 0 ? "attention" : aiSummary ? "ready" : "remote"} detail={aiSummary ? t("customerDetail.aiGovernance.recentCallsFlagged", { count: aiSummary.riskyToolCalls.length }) : t("customerDetail.aiGovernance.supportConnectorPath")} />
+            <MiniMetric label="Governance findings" value={String(aiGovernance.riskFindings.length)} toneValue={aiGovernance.riskFindings.some((risk) => risk.severity === "high") ? "attention" : "ready"} detail="Open the panel for remediation controls" />
             <MiniMetric label={t("customerDetail.aiGovernance.failedOperations")} value={statusLabel(t, failedOperations > 0 ? "attention" : "ready")} toneValue={failedOperations > 0 ? "attention" : "ready"} detail={t("customerDetail.aiGovernance.failedSupportOperations", { count: failedOperations })} />
           </div>
           {aiSummary ? (

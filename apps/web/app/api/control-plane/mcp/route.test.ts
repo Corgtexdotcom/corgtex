@@ -26,8 +26,9 @@ vi.mock("@corgtex/domain", () => ({
   requireControlPlaneAccess: mocks.requireControlPlaneAccess,
   requireControlPlaneScope: mocks.requireControlPlaneScope,
   refreshControlPlaneFleetSnapshots: vi.fn(),
+  revokeControlPlaneAgentCredential: vi.fn(),
   resendControlPlaneCustomerMemberAccessLink: vi.fn(), runControlPlaneContextOperation: vi.fn(), runControlPlaneMeetingRecorderOperation: vi.fn(), runControlPlaneReleaseOperation: vi.fn(), runCustomerSupportOperation: vi.fn(),
-  setControlPlaneFeatureFlag: vi.fn(), updateControlPlaneCustomerMemberStatus: vi.fn(),
+  setControlPlaneFeatureFlag: vi.fn(), updateControlPlaneAgentCredentialScopes: vi.fn(), updateControlPlaneAgentPolicy: vi.fn(), updateControlPlaneCustomerMemberStatus: vi.fn(), updateControlPlaneModelBudget: vi.fn(),
 }));
 vi.mock("@/lib/auth", () => ({ resolveControlPlaneRequestActor: mocks.resolveControlPlaneRequestActor }));
 vi.mock("@/lib/http", () => ({
@@ -77,6 +78,10 @@ describe("/api/control-plane/mcp", () => {
       "list_customer_integrations",
       "get_context_health",
       "get_ai_governance_status",
+      "update_customer_agent_credential_scopes",
+      "revoke_customer_agent_credential",
+      "update_customer_model_budget",
+      "update_customer_agent_policy",
       "get_release_status",
       "get_deploy_latest_preflight",
       "list_customer_members",
@@ -103,6 +108,113 @@ describe("/api/control-plane/mcp", () => {
     const response = await POST(request({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "run_context_sync", arguments: { deploymentId: "inst-1", reason: "repair" } } }) as never);
     expect(response.status).toBe(403);
     await expect(response.json()).resolves.toEqual({ error: { code: "CONTROL_PLANE_SCOPE_REQUIRED", message: "Control Plane scope required: control-plane:context:write." } });
+  });
+
+  it("denies AI governance writes when the control-plane agent lacks the governance write scope", async () => {
+    const { POST } = await import("./route");
+    const response = await POST(request({
+      jsonrpc: "2.0",
+      id: 9,
+      method: "tools/call",
+      params: {
+        name: "update_customer_model_budget",
+        arguments: {
+          deploymentId: "inst-1",
+          monthlyCostCapUsd: 250,
+          reason: "Customer approved model cap.",
+        },
+      },
+    }) as never);
+
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toEqual({
+      error: {
+        code: "CONTROL_PLANE_SCOPE_REQUIRED",
+        message: "Control Plane scope required: control-plane:ai-governance:write.",
+      },
+    });
+  });
+
+  it("rejects AI governance credential updates unless scopes is an array of strings", async () => {
+    mocks.resolveControlPlaneRequestActor.mockResolvedValueOnce({
+      kind: "agent",
+      authProvider: "control-plane",
+      label: "control-plane-agent",
+      scopes: ["control-plane:read", "control-plane:ai-governance:write"],
+    });
+    const domain = await import("@corgtex/domain");
+    const { POST } = await import("./route");
+
+    const response = await POST(request({
+      jsonrpc: "2.0",
+      id: 10,
+      method: "tools/call",
+      params: {
+        name: "update_customer_agent_credential_scopes",
+        arguments: {
+          deploymentId: "inst-1",
+          credentialId: "cred-1",
+          scopes: "workspace:read",
+          reason: "Reduce scope.",
+        },
+      },
+    }) as never);
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      jsonrpc: "2.0",
+      id: 10,
+      error: { code: -32602, message: "scopes must be an array of strings." },
+    });
+    expect(vi.mocked(domain.updateControlPlaneAgentCredentialScopes)).not.toHaveBeenCalled();
+  });
+
+  it("calls the AI governance model budget mutation with the write-scoped actor", async () => {
+    mocks.resolveControlPlaneRequestActor.mockResolvedValueOnce({
+      kind: "agent",
+      authProvider: "control-plane",
+      label: "control-plane-agent",
+      scopes: ["control-plane:read", "control-plane:ai-governance:write"],
+    });
+    const domain = await import("@corgtex/domain");
+    vi.mocked(domain.updateControlPlaneModelBudget).mockResolvedValueOnce({
+      deploymentId: "inst-1",
+      source: "managed_workspace",
+      budget: { id: "budget-1", monthlyCostCapUsd: "250.00" },
+    } as never);
+    const { POST } = await import("./route");
+
+    const response = await POST(request({
+      jsonrpc: "2.0",
+      id: 11,
+      method: "tools/call",
+      params: {
+        name: "update_customer_model_budget",
+        arguments: {
+          deploymentId: "inst-1",
+          monthlyCostCapUsd: 250,
+          alertThresholdPct: 75,
+          reason: "Customer approved model cap.",
+        },
+      },
+    }) as never);
+
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(JSON.parse(body.result.content[0].text)).toMatchObject({
+      deploymentId: "inst-1",
+      source: "managed_workspace",
+    });
+    expect(vi.mocked(domain.updateControlPlaneModelBudget)).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "agent" }),
+      {
+        deploymentId: "inst-1",
+        monthlyCostCapUsd: 250,
+        alertThresholdPct: 75,
+        periodStartDay: null,
+        reason: "Customer approved model cap.",
+      },
+    );
   });
 
   it("rejects member status updates without an explicit boolean isActive value", async () => {

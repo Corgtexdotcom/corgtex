@@ -9,13 +9,17 @@ import {
   enqueueControlPlaneDeployLatestRollout,
   fetchCustomerSupportSnapshot,
   recordBreakGlassSupportNote,
+  revokeControlPlaneAgentCredential,
   resendControlPlaneCustomerMemberAccessLink,
   runControlPlaneContextOperation,
   runControlPlaneMeetingRecorderOperation,
   runControlPlaneReleaseOperation,
   runCustomerSupportOperation,
   setControlPlaneFeatureFlag,
+  updateControlPlaneAgentCredentialScopes,
+  updateControlPlaneAgentPolicy,
   updateControlPlaneCustomerMemberStatus,
+  updateControlPlaneModelBudget,
 } from "@corgtex/domain";
 import type { SupportAction } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
@@ -139,6 +143,8 @@ function parseJsonObject(value: string) {
 function revalidateControlPlaneDeployment(deploymentId: string) {
   revalidatePath(`/control-plane/deployments/${deploymentId}`);
   revalidatePath(`/es/control-plane/deployments/${deploymentId}`);
+  revalidatePath(`/control-plane/deployments/${deploymentId}/agent-governance`);
+  revalidatePath(`/es/control-plane/deployments/${deploymentId}/agent-governance`);
 }
 
 export async function configureSupportConnectorAction(formData: FormData) {
@@ -293,6 +299,59 @@ export async function setControlPlaneFeatureFlagAction(formData: FormData) {
     deploymentId,
     flag: asString(formData, "flag"),
     enabled: asRequiredBoolean(formData, "enabled"),
+    reason: asString(formData, "reason"),
+  });
+  revalidateControlPlaneDeployment(deploymentId);
+}
+
+export async function updateControlPlaneAgentCredentialScopesAction(formData: FormData) {
+  const actor = await requirePageActor();
+  const deploymentId = asString(formData, "deploymentId");
+  await updateControlPlaneAgentCredentialScopes(actor, {
+    deploymentId,
+    credentialId: asString(formData, "credentialId"),
+    scopes: asStringArray(formData, "scopes"),
+    reason: asString(formData, "reason"),
+  });
+  revalidateControlPlaneDeployment(deploymentId);
+}
+
+export async function revokeControlPlaneAgentCredentialAction(formData: FormData) {
+  const actor = await requirePageActor();
+  const deploymentId = asString(formData, "deploymentId");
+  await revokeControlPlaneAgentCredential(actor, {
+    deploymentId,
+    credentialId: asString(formData, "credentialId"),
+    reason: asString(formData, "reason"),
+  });
+  revalidateControlPlaneDeployment(deploymentId);
+}
+
+export async function updateControlPlaneModelBudgetAction(formData: FormData) {
+  const actor = await requirePageActor();
+  const deploymentId = asString(formData, "deploymentId");
+  const monthlyCostCapUsd = asOptionalNumber(formData, "monthlyCostCapUsd");
+  if (monthlyCostCapUsd === undefined) {
+    throw new Error("monthlyCostCapUsd is required.");
+  }
+  await updateControlPlaneModelBudget(actor, {
+    deploymentId,
+    monthlyCostCapUsd,
+    alertThresholdPct: asOptionalNumber(formData, "alertThresholdPct"),
+    periodStartDay: asOptionalNumber(formData, "periodStartDay"),
+    reason: asString(formData, "reason"),
+  });
+  revalidateControlPlaneDeployment(deploymentId);
+}
+
+export async function updateControlPlaneAgentPolicyAction(formData: FormData) {
+  const actor = await requirePageActor();
+  const deploymentId = asString(formData, "deploymentId");
+  await updateControlPlaneAgentPolicy(actor, {
+    deploymentId,
+    agentKey: asString(formData, "agentKey"),
+    governancePolicy: optionalString(formData, "governancePolicy"),
+    modelOverride: optionalString(formData, "modelOverride"),
     reason: asString(formData, "reason"),
   });
   revalidateControlPlaneDeployment(deploymentId);

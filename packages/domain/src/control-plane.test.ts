@@ -91,11 +91,29 @@ const { prismaMock, encryptSecretMock, decryptSecretMock, memberMocks } = vi.hoi
     agentToolCall: {
       findMany: vi.fn(),
     },
+    agentIdentity: {
+      findMany: vi.fn(),
+    },
+    workspaceAgentConfig: {
+      findMany: vi.fn(),
+      upsert: vi.fn(),
+    },
+    agentCredential: {
+      findMany: vi.fn(),
+      findUnique: vi.fn(),
+      update: vi.fn(),
+    },
     modelUsage: {
       aggregate: vi.fn(),
+      findMany: vi.fn(),
+    },
+    modelUsageBudget: {
+      findUnique: vi.fn(),
+      upsert: vi.fn(),
     },
     supportOperation: {
       create: vi.fn(),
+      findMany: vi.fn(),
       update: vi.fn(),
     },
   },
@@ -172,6 +190,19 @@ describe("control plane domain", () => {
       }),
     })) as any;
     prismaMock.workflowJob.createMany.mockResolvedValue({ count: 1 });
+    prismaMock.workflowJob.count.mockResolvedValue(0);
+    prismaMock.workflowJob.findMany.mockResolvedValue([]);
+    prismaMock.agentRun.count.mockResolvedValue(0);
+    prismaMock.agentRun.findMany.mockResolvedValue([]);
+    prismaMock.agentRun.groupBy.mockResolvedValue([]);
+    prismaMock.agentToolCall.findMany.mockResolvedValue([]);
+    prismaMock.agentIdentity.findMany.mockResolvedValue([]);
+    prismaMock.workspaceAgentConfig.findMany.mockResolvedValue([]);
+    prismaMock.agentCredential.findMany.mockResolvedValue([]);
+    prismaMock.modelUsage.aggregate.mockResolvedValue({ _sum: { inputTokens: 0, outputTokens: 0, estimatedCostUsd: null } });
+    prismaMock.modelUsage.findMany.mockResolvedValue([]);
+    prismaMock.modelUsageBudget.findUnique.mockResolvedValue(null);
+    prismaMock.supportOperation.findMany.mockResolvedValue([]);
     prismaMock.customerAccount.findMany.mockResolvedValue([]);
     prismaMock.customerDeployment.findMany.mockResolvedValue([]);
     prismaMock.workspaceFeatureFlag.findMany.mockResolvedValue([]);
@@ -1042,6 +1073,383 @@ describe("control plane domain", () => {
       enabled: true,
       operation: { id: "op-flag-set", status: "COMPLETED" },
     });
+  });
+
+  it("keeps audit identifiers while redacting credential material", async () => {
+    const { redactObject } = await import("./control-plane");
+
+    expect(redactObject({
+      credentialId: "cred-1",
+      credentialLabel: "Production Claude",
+      hasCredential: true,
+      supportCredential: "raw-support-token",
+      tokenHash: "sha256-secret",
+      bearerToken: "bearer-secret",
+      connectionString: "postgresql://secret",
+    })).toEqual({
+      credentialId: "cred-1",
+      credentialLabel: "Production Claude",
+      hasCredential: true,
+      supportCredential: "[redacted]",
+      tokenHash: "[redacted]",
+      bearerToken: "[redacted]",
+      connectionString: "[redacted]",
+    });
+  });
+
+  it("returns expanded managed AI governance status with deterministic risks and redacted policies", async () => {
+    const { getControlPlaneAiGovernanceStatus } = await import("./control-plane");
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce({
+      id: "inst-1",
+      label: "Acme",
+      customerAccountId: "cust-1",
+      managedWorkspaceId: "ws-1",
+      managedWorkspace: { id: "ws-1", slug: "acme", name: "Acme", _count: {} },
+      supportCredentialEnc: null,
+      supportConnectorStatus: "not_configured",
+      supportLastSyncAt: null,
+      remoteWorkspaceId: null,
+    });
+    prismaMock.supportOperation.findMany.mockResolvedValueOnce([
+      {
+        id: "op-1",
+        action: "agent_credentials.update_scopes",
+        reason: "Reduce access.",
+        status: "COMPLETED",
+        error: null,
+        startedAt: new Date("2026-05-01T10:00:00.000Z"),
+        completedAt: new Date("2026-05-01T10:00:05.000Z"),
+        createdAt: new Date("2026-05-01T10:00:00.000Z"),
+      },
+    ]);
+    prismaMock.workspaceFeatureFlag.findUnique.mockResolvedValueOnce({
+      flag: "AGENT_GOVERNANCE",
+      enabled: false,
+      updatedAt: new Date("2026-05-01T00:00:00.000Z"),
+    });
+    prismaMock.agentRun.groupBy.mockResolvedValueOnce([
+      { status: "COMPLETED", _count: { _all: 2 } },
+      { status: "WAITING_APPROVAL", _count: { _all: 1 } },
+    ]);
+    prismaMock.agentRun.count.mockResolvedValueOnce(1);
+    prismaMock.workflowJob.count.mockResolvedValueOnce(1);
+    prismaMock.modelUsage.aggregate.mockResolvedValueOnce({
+      _sum: {
+        inputTokens: 100,
+        outputTokens: 50,
+        estimatedCostUsd: { toString: () => "0.250000" },
+      },
+    });
+    prismaMock.agentRun.findMany.mockResolvedValueOnce([
+      {
+        id: "run-1",
+        agentKey: "meeting-summary",
+        triggerType: "MANUAL",
+        status: "WAITING_APPROVAL",
+        goal: "Summarize meeting",
+        approvalRequired: true,
+        createdAt: new Date("2026-05-01T09:00:00.000Z"),
+        startedAt: null,
+        completedAt: null,
+        failedAt: null,
+      },
+    ]);
+    prismaMock.workflowJob.findMany.mockResolvedValueOnce([
+      {
+        id: "job-1",
+        type: "agent.run",
+        attempts: 3,
+        error: "Tool call failed.",
+        createdAt: new Date("2026-05-01T08:00:00.000Z"),
+        updatedAt: new Date("2026-05-01T08:05:00.000Z"),
+      },
+    ]);
+    prismaMock.agentToolCall.findMany.mockResolvedValueOnce([
+      {
+        id: "call-1",
+        name: "update_member",
+        status: "COMPLETED",
+        error: null,
+        createdAt: new Date("2026-05-01T08:02:00.000Z"),
+        agentRun: { id: "run-1", agentKey: "meeting-summary", status: "COMPLETED" },
+      },
+    ]);
+    prismaMock.agentIdentity.findMany.mockResolvedValueOnce([
+      {
+        id: "identity-1",
+        agentKey: "meeting-summary",
+        memberType: "SYSTEM",
+        displayName: "Meeting Summary",
+        isActive: true,
+        linkedCredentialId: "cred-1",
+        maxSpendPerRunCents: null,
+        maxRunsPerDay: null,
+        maxRunsPerHour: null,
+        archivedAt: null,
+        createdAt: new Date("2026-01-01T00:00:00.000Z"),
+        updatedAt: new Date("2026-01-01T00:00:00.000Z"),
+        linkedCredential: {
+          id: "cred-1",
+          label: "Production MCP",
+          scopes: ["workspace:read", "members:write"],
+          isActive: true,
+          lastUsedAt: null,
+        },
+        circleAssignments: [],
+      },
+    ]);
+    prismaMock.workspaceAgentConfig.findMany.mockResolvedValueOnce([
+      {
+        id: "config-1",
+        agentKey: "meeting-summary",
+        enabled: true,
+        modelOverride: "openai/gpt-test",
+        governancePolicy: "Do not leak this policy body.",
+        updatedAt: new Date("2026-05-01T00:00:00.000Z"),
+      },
+    ]);
+    prismaMock.agentCredential.findMany.mockResolvedValueOnce([
+      {
+        id: "cred-1",
+        label: "Production MCP",
+        scopes: ["workspace:read", "members:write", "finance:write", "runtime:write", "support:write"],
+        catalogItemId: "catalog-1",
+        catalogItem: { id: "catalog-1", title: "Claude Desktop", slug: "claude", type: "MCP", status: "APPROVED" },
+        monthlyBudgetCents: null,
+        dailyCallLimit: null,
+        isActive: true,
+        lastUsedAt: new Date("2025-01-01T00:00:00.000Z"),
+        createdAt: new Date("2025-01-01T00:00:00.000Z"),
+        updatedAt: new Date("2026-05-01T00:00:00.000Z"),
+      },
+    ]);
+    prismaMock.modelUsageBudget.findUnique.mockResolvedValueOnce(null);
+    prismaMock.modelUsage.findMany.mockResolvedValueOnce([
+      {
+        id: "usage-1",
+        provider: "openai",
+        model: "gpt-test",
+        taskType: "AGENT_RUN",
+        inputTokens: 100,
+        outputTokens: 50,
+        latencyMs: 1200,
+        estimatedCostUsd: { toString: () => "0.250000" },
+        createdAt: new Date("2026-05-01T09:01:00.000Z"),
+        agentRun: { id: "run-1", agentKey: "meeting-summary", status: "COMPLETED" },
+        agentCredential: { id: "cred-1", label: "Production MCP", isActive: true },
+        catalogItem: { id: "catalog-1", title: "Claude Desktop" },
+      },
+    ]);
+
+    const status = await getControlPlaneAiGovernanceStatus(operatorActor, "inst-1");
+
+    expect(status.featureFlag).toMatchObject({ flag: "AGENT_GOVERNANCE", enabled: false });
+    expect(status.summary?.agentRuns).toEqual({ COMPLETED: 2, WAITING_APPROVAL: 1 });
+    expect(status.summary?.modelUsage).toMatchObject({ inputTokens: 100, outputTokens: 50, estimatedCostUsd: "0.250000" });
+    expect(status.access.credentials[0]).toMatchObject({
+      id: "cred-1",
+      risk: {
+        highRisk: expect.arrayContaining(["members:write", "finance:write", "runtime:write", "support:write"]),
+        isOverbroad: true,
+      },
+    });
+    expect(status.agents.configs.find((config) => config.agentKey === "meeting-summary")).toMatchObject({
+      modelOverride: "openai/gpt-test",
+      hasGovernancePolicy: true,
+    });
+    expect(status.riskFindings.map((finding) => finding.key)).toEqual(expect.arrayContaining([
+      "agent-governance-disabled",
+      "model-budget-missing",
+      "pending-agent-approvals",
+      "failed-agent-jobs",
+      "risky-tool-calls",
+      "stale-credential-cred-1",
+      "overbroad-credential-cred-1",
+    ]));
+    expect(JSON.stringify(status)).not.toContain("Do not leak this policy body");
+    expect(JSON.stringify(status)).not.toContain("tokenHash");
+  });
+
+  it("requires governance write scope and explicit reasons for agent governance mutations", async () => {
+    const { updateControlPlaneAgentCredentialScopes } = await import("./control-plane");
+    const readAgent: AppActor = {
+      kind: "agent",
+      authProvider: "control-plane",
+      label: "control-plane-agent",
+      scopes: ["control-plane:read"],
+    };
+
+    await expect(updateControlPlaneAgentCredentialScopes(readAgent, {
+      deploymentId: "inst-1",
+      credentialId: "cred-1",
+      scopes: ["workspace:read"],
+      reason: "Reduce credential scope.",
+    })).rejects.toMatchObject({
+      status: 403,
+      code: "CONTROL_PLANE_SCOPE_REQUIRED",
+    });
+
+    await expect(updateControlPlaneAgentCredentialScopes(operatorActor, {
+      deploymentId: "inst-1",
+      credentialId: "cred-1",
+      scopes: ["workspace:read"],
+      reason: "",
+    })).rejects.toMatchObject({
+      status: 400,
+      code: "CONTROL_PLANE_REASON_REQUIRED",
+    });
+  });
+
+  it("updates managed agent credential scopes and audits the credential id without token material", async () => {
+    const { updateControlPlaneAgentCredentialScopes } = await import("./control-plane");
+    const writeAgent: AppActor = {
+      kind: "agent",
+      authProvider: "control-plane",
+      label: "control-plane-agent",
+      scopes: ["control-plane:read", "control-plane:ai-governance:write"],
+    };
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce({
+      id: "inst-1",
+      label: "Acme",
+      managedWorkspaceId: "ws-1",
+      managedWorkspace: { id: "ws-1", slug: "acme", name: "Acme", _count: {} },
+      supportCredentialEnc: null,
+    });
+    prismaMock.agentCredential.findUnique.mockResolvedValueOnce({
+      id: "cred-1",
+      workspaceId: "ws-1",
+      isActive: true,
+    });
+    prismaMock.agentCredential.update.mockResolvedValueOnce({
+      id: "cred-1",
+      label: "Production MCP",
+      scopes: ["workspace:read", "agents:read"],
+      isActive: true,
+      lastUsedAt: null,
+      createdAt: new Date("2026-01-01T00:00:00.000Z"),
+      updatedAt: new Date("2026-05-01T00:00:00.000Z"),
+    });
+
+    const result = await updateControlPlaneAgentCredentialScopes(writeAgent, {
+      deploymentId: "inst-1",
+      credentialId: "cred-1",
+      scopes: ["workspace:read", "agents:read"],
+      reason: "Reduce to diagnostic access.",
+    });
+
+    expect(prismaMock.agentCredential.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "cred-1" },
+      data: { scopes: ["workspace:read", "agents:read"] },
+    }));
+    expect(prismaMock.customerDeploymentEvent.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        action: "control_plane.ai_governance.credential_scopes_updated",
+        meta: expect.objectContaining({
+          reason: "Reduce to diagnostic access.",
+          credentialId: "cred-1",
+          scopes: ["workspace:read", "agents:read"],
+        }),
+      }),
+    }));
+    expect(result).toMatchObject({
+      source: "managed_workspace",
+      credential: {
+        id: "cred-1",
+        scopes: ["workspace:read", "agents:read"],
+      },
+    });
+    expect(JSON.stringify(result)).not.toContain("token");
+  });
+
+  it("routes remote model budget updates through the audited support connector", async () => {
+    const { updateControlPlaneModelBudget } = await import("./control-plane");
+    const writeAgent: AppActor = {
+      kind: "agent",
+      authProvider: "control-plane",
+      label: "control-plane-agent",
+      scopes: ["control-plane:read", "control-plane:ai-governance:write"],
+    };
+    prismaMock.customerDeployment.findUnique.mockResolvedValue({
+      id: "inst-1",
+      label: "Remote Acme",
+      url: "https://customer.test",
+      managedWorkspaceId: null,
+      managedWorkspace: null,
+      remoteWorkspaceId: "remote-ws-1",
+      supportMcpUrl: "https://customer.test/api/mcp",
+      supportCredentialEnc: "encrypted-token",
+      supportConnectorStatus: "connected",
+    });
+    prismaMock.supportOperation.create.mockResolvedValueOnce({ id: "op-budget", action: "model_budget.update" });
+    prismaMock.supportOperation.update.mockResolvedValueOnce({
+      id: "op-budget",
+      status: "COMPLETED",
+      resultSummary: { budget: { id: "budget-1", monthlyCostCapUsd: "250.00" } },
+    });
+
+    const result = await updateControlPlaneModelBudget(writeAgent, {
+      deploymentId: "inst-1",
+      monthlyCostCapUsd: 250,
+      alertThresholdPct: 75,
+      reason: "Customer approved model cap.",
+    });
+
+    expect(fetch).toHaveBeenCalledTimes(3);
+    const toolCall = vi.mocked(fetch).mock.calls[1]?.[1] as RequestInit;
+    expect(JSON.parse(String(toolCall.body))).toEqual(expect.objectContaining({
+      params: expect.objectContaining({
+        name: "update_model_budget",
+        arguments: {
+          monthlyCostCapUsd: 250,
+          alertThresholdPct: 75,
+          periodStartDay: 1,
+        },
+      }),
+    }));
+    expect(prismaMock.supportOperation.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        action: "model_budget.update",
+        inputSummary: {
+          monthlyCostCapUsd: 250,
+          alertThresholdPct: 75,
+          periodStartDay: 1,
+        },
+      }),
+    }));
+    expect(result).toMatchObject({
+      source: "support_connector",
+      operation: { id: "op-budget", status: "COMPLETED" },
+    });
+  });
+
+  it("does not fall back to manual repair for unsupported remote governance mutations", async () => {
+    const { updateControlPlaneModelBudget } = await import("./control-plane");
+    const writeAgent: AppActor = {
+      kind: "agent",
+      authProvider: "control-plane",
+      label: "control-plane-agent",
+      scopes: ["control-plane:read", "control-plane:ai-governance:write"],
+    };
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce({
+      id: "inst-1",
+      label: "Remote Acme",
+      managedWorkspaceId: null,
+      managedWorkspace: null,
+      remoteWorkspaceId: "remote-ws-1",
+      supportMcpUrl: null,
+      supportCredentialEnc: null,
+      supportConnectorStatus: "not_configured",
+    });
+
+    await expect(updateControlPlaneModelBudget(writeAgent, {
+      deploymentId: "inst-1",
+      monthlyCostCapUsd: 250,
+      reason: "Customer approved model cap.",
+    })).rejects.toMatchObject({
+      status: 400,
+      code: "SUPPORT_CONNECTOR_REQUIRED",
+    });
+    expect(fetch).not.toHaveBeenCalled();
   });
 
   it("queues sync for all active managed workspace context sources and audits the reason", async () => {
