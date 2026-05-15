@@ -50,6 +50,8 @@ export function buildClaudeCodeCommand(connectorUrl: string): string {
   return `claude mcp add --transport http corgtex --scope user ${connectorUrl}`;
 }
 
+export const CLAUDE_CONNECTORS_URL = "https://claude.ai/customize/connectors";
+
 /**
  * Path to the hosted Claude installer landing page. Use this from anywhere
  * we want to send a non-technical user to the "Add to Claude" flow.
