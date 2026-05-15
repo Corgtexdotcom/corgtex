@@ -15,7 +15,7 @@ import { GoalProgress } from "./GoalProgress";
 import { RecognitionCard } from "./RecognitionCard";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
-import { ActionMenu } from "@/lib/components/ui/ActionMenu";
+import { ItemActions } from "@/lib/components/ui/ItemActions";
 import {
   addKeyResultFormAction,
   archiveGoalFormAction,
@@ -421,9 +421,10 @@ function GoalNodeInner({
 
         {canManage && (
         <div className="mt-4 pt-3 border-t border-line-subtle space-y-3">
-          <div className="item-actions">
-            <div className="item-actions-primary">
-              {goal.status === "DRAFT" ? (
+          <ItemActions
+            moreLabel={tCommon("moreActions")}
+            primary={
+              goal.status === "DRAFT" ? (
                 <form action={updateGoalFormAction}>
                   <input type="hidden" name="workspaceId" value={workspaceId} />
                   <input type="hidden" name="goalId" value={goal.id} />
@@ -442,119 +443,121 @@ function GoalNodeInner({
                   <input name="progressPercent" type="number" min={0} max={100} defaultValue={goal.progressPercent} style={{ width: 80 }} aria-label={t("formProgress")} />
                   <button type="submit" className="secondary small">{t("btnSaveGoal")}</button>
                 </form>
-              )}
-            </div>
-            <ActionMenu label={tCommon("moreActions")}>
-              {canReturnToDraft && (
-                <form action={returnGoalToDraftFormAction}>
+              )
+            }
+            more={
+              <>
+                {canReturnToDraft && (
+                  <form action={returnGoalToDraftFormAction}>
+                    <input type="hidden" name="workspaceId" value={workspaceId} />
+                    <input type="hidden" name="goalId" value={goal.id} />
+                    <button type="submit">{t("btnReturnToDraft")}</button>
+                  </form>
+                )}
+                {goal.status === "DRAFT" && (
+                  <details>
+                    <summary className="nr-hide-marker" style={{ cursor: "pointer", padding: "8px 10px", borderRadius: 8, fontSize: "0.88rem", fontWeight: 500 }}>
+                      {t("btnEdit")}
+                    </summary>
+                    <form action={updateGoalFormAction} className="action-menu-form">
+                      <input type="hidden" name="workspaceId" value={workspaceId} />
+                      <input type="hidden" name="goalId" value={goal.id} />
+                      <label>
+                        {t("formTitle")}
+                        <input name="title" defaultValue={goal.title} required />
+                      </label>
+                      <label>
+                        {t("formDescription")}
+                        <MarkdownEditor name="descriptionMd" defaultValue={goal.descriptionMd ?? ""} rows={4} />
+                      </label>
+                      <div className="actions-inline">
+                        <label style={{ flex: 1 }}>
+                          {t("formCadence")}
+                          <select name="cadence" defaultValue={goal.cadence}>
+                            {CADENCES.map((item) => (
+                              <option key={item.id} value={item.id}>{item.label}</option>
+                            ))}
+                          </select>
+                        </label>
+                        <label style={{ flex: 1 }}>
+                          {t("formLevel")}
+                          <select name="level" defaultValue={goal.level}>
+                            {LEVELS.map((item) => (
+                              <option key={item} value={item}>{item}</option>
+                            ))}
+                          </select>
+                        </label>
+                      </div>
+                      <div className="actions-inline">
+                        <label style={{ flex: 1 }}>
+                          {t("formStartDate")}
+                          <input name="startDate" type="date" defaultValue={goal.startDate ? new Date(goal.startDate).toISOString().slice(0, 10) : ""} />
+                        </label>
+                        <label style={{ flex: 1 }}>
+                          {t("formTargetDate")}
+                          <input name="targetDate" type="date" defaultValue={goal.targetDate ? new Date(goal.targetDate).toISOString().slice(0, 10) : ""} />
+                        </label>
+                      </div>
+                      <div className="actions-inline">
+                        <label style={{ flex: 1 }}>
+                          {t("formParentGoal")}
+                          <select name="parentGoalId" defaultValue={goal.parentGoalId ?? ""}>
+                            <option value="">{t("formNone")}</option>
+                            {allGoals.filter((item) => item.id !== goal.id).map((item) => (
+                              <option key={item.id} value={item.id}>{item.title}</option>
+                            ))}
+                          </select>
+                        </label>
+                        <label style={{ flex: 1 }}>
+                          {t("formCircle")}
+                          <select name="circleId" defaultValue={goal.circleId ?? ""}>
+                            <option value="">{t("formNone")}</option>
+                            {circles.map((circle) => (
+                              <option key={circle.id} value={circle.id}>{circle.name}</option>
+                            ))}
+                          </select>
+                        </label>
+                        <label style={{ flex: 1 }}>
+                          {t("formOwner")}
+                          <select name="ownerMemberId" defaultValue={goal.ownerMemberId ?? ""}>
+                            <option value="">{t("formNone")}</option>
+                            {members.map((member) => (
+                              <option key={member.id} value={member.id}>{member.user.displayName ?? member.user.email}</option>
+                            ))}
+                          </select>
+                        </label>
+                      </div>
+                      <button type="submit" className="secondary small">{t("btnSaveDraft")}</button>
+                    </form>
+                  </details>
+                )}
+                {goal.status === "DRAFT" && (
+                  <details>
+                    <summary className="nr-hide-marker" style={{ cursor: "pointer", padding: "8px 10px", borderRadius: 8, fontSize: "0.88rem", fontWeight: 500 }}>
+                      {t("addKeyResultTitle")}
+                    </summary>
+                    <form action={addKeyResultFormAction} className="action-menu-form">
+                      <input type="hidden" name="workspaceId" value={workspaceId} />
+                      <input type="hidden" name="goalId" value={goal.id} />
+                      <input name="title" placeholder={t("formKeyResultTitle")} required />
+                      <div className="actions-inline">
+                        <input name="currentValue" type="number" step="any" placeholder={t("formKeyResultCurrent")} style={{ flex: 1 }} />
+                        <input name="targetValue" type="number" step="any" placeholder={t("formKeyResultTarget")} style={{ flex: 1 }} />
+                        <input name="unit" placeholder={t("formKeyResultUnit")} style={{ flex: 1 }} />
+                      </div>
+                      <button type="submit" className="secondary small">{t("btnAddKeyResult")}</button>
+                    </form>
+                  </details>
+                )}
+                <div className="action-menu-divider" />
+                <form action={archiveGoalFormAction}>
                   <input type="hidden" name="workspaceId" value={workspaceId} />
                   <input type="hidden" name="goalId" value={goal.id} />
-                  <button type="submit">{t("btnReturnToDraft")}</button>
+                  <button type="submit" className="danger">{t("btnArchiveGoal")}</button>
                 </form>
-              )}
-              {goal.status === "DRAFT" && (
-                <details>
-                  <summary className="nr-hide-marker" style={{ cursor: "pointer", padding: "8px 10px", borderRadius: 8, fontSize: "0.88rem", fontWeight: 500 }}>
-                    {t("btnEdit")}
-                  </summary>
-                  <form action={updateGoalFormAction} className="action-menu-form">
-                    <input type="hidden" name="workspaceId" value={workspaceId} />
-                    <input type="hidden" name="goalId" value={goal.id} />
-                    <label>
-                      {t("formTitle")}
-                      <input name="title" defaultValue={goal.title} required />
-                    </label>
-                    <label>
-                      {t("formDescription")}
-                      <MarkdownEditor name="descriptionMd" defaultValue={goal.descriptionMd ?? ""} rows={4} />
-                    </label>
-                    <div className="actions-inline">
-                      <label style={{ flex: 1 }}>
-                        {t("formCadence")}
-                        <select name="cadence" defaultValue={goal.cadence}>
-                          {CADENCES.map((item) => (
-                            <option key={item.id} value={item.id}>{item.label}</option>
-                          ))}
-                        </select>
-                      </label>
-                      <label style={{ flex: 1 }}>
-                        {t("formLevel")}
-                        <select name="level" defaultValue={goal.level}>
-                          {LEVELS.map((item) => (
-                            <option key={item} value={item}>{item}</option>
-                          ))}
-                        </select>
-                      </label>
-                    </div>
-                    <div className="actions-inline">
-                      <label style={{ flex: 1 }}>
-                        {t("formStartDate")}
-                        <input name="startDate" type="date" defaultValue={goal.startDate ? new Date(goal.startDate).toISOString().slice(0, 10) : ""} />
-                      </label>
-                      <label style={{ flex: 1 }}>
-                        {t("formTargetDate")}
-                        <input name="targetDate" type="date" defaultValue={goal.targetDate ? new Date(goal.targetDate).toISOString().slice(0, 10) : ""} />
-                      </label>
-                    </div>
-                    <div className="actions-inline">
-                      <label style={{ flex: 1 }}>
-                        {t("formParentGoal")}
-                        <select name="parentGoalId" defaultValue={goal.parentGoalId ?? ""}>
-                          <option value="">{t("formNone")}</option>
-                          {allGoals.filter((item) => item.id !== goal.id).map((item) => (
-                            <option key={item.id} value={item.id}>{item.title}</option>
-                          ))}
-                        </select>
-                      </label>
-                      <label style={{ flex: 1 }}>
-                        {t("formCircle")}
-                        <select name="circleId" defaultValue={goal.circleId ?? ""}>
-                          <option value="">{t("formNone")}</option>
-                          {circles.map((circle) => (
-                            <option key={circle.id} value={circle.id}>{circle.name}</option>
-                          ))}
-                        </select>
-                      </label>
-                      <label style={{ flex: 1 }}>
-                        {t("formOwner")}
-                        <select name="ownerMemberId" defaultValue={goal.ownerMemberId ?? ""}>
-                          <option value="">{t("formNone")}</option>
-                          {members.map((member) => (
-                            <option key={member.id} value={member.id}>{member.user.displayName ?? member.user.email}</option>
-                          ))}
-                        </select>
-                      </label>
-                    </div>
-                    <button type="submit" className="secondary small">{t("btnSaveDraft")}</button>
-                  </form>
-                </details>
-              )}
-              {goal.status === "DRAFT" && (
-                <details>
-                  <summary className="nr-hide-marker" style={{ cursor: "pointer", padding: "8px 10px", borderRadius: 8, fontSize: "0.88rem", fontWeight: 500 }}>
-                    {t("addKeyResultTitle")}
-                  </summary>
-                  <form action={addKeyResultFormAction} className="action-menu-form">
-                    <input type="hidden" name="workspaceId" value={workspaceId} />
-                    <input type="hidden" name="goalId" value={goal.id} />
-                    <input name="title" placeholder={t("formKeyResultTitle")} required />
-                    <div className="actions-inline">
-                      <input name="currentValue" type="number" step="any" placeholder={t("formKeyResultCurrent")} style={{ flex: 1 }} />
-                      <input name="targetValue" type="number" step="any" placeholder={t("formKeyResultTarget")} style={{ flex: 1 }} />
-                      <input name="unit" placeholder={t("formKeyResultUnit")} style={{ flex: 1 }} />
-                    </div>
-                    <button type="submit" className="secondary small">{t("btnAddKeyResult")}</button>
-                  </form>
-                </details>
-              )}
-              <div className="action-menu-divider" />
-              <form action={archiveGoalFormAction}>
-                <input type="hidden" name="workspaceId" value={workspaceId} />
-                <input type="hidden" name="goalId" value={goal.id} />
-                <button type="submit" className="danger">{t("btnArchiveGoal")}</button>
-              </form>
-            </ActionMenu>
-          </div>
+              </>
+            }
+          />
         </div>
         )}
       </div>

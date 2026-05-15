@@ -11,7 +11,7 @@ import {
 } from "../actions";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownExcerpt } from "@/lib/components/MarkdownRenderer";
-import { ActionMenu } from "@/lib/components/ui/ActionMenu";
+import { ItemActions } from "@/lib/components/ui/ItemActions";
 import { getTranslations } from "next-intl/server";
 
 export const dynamic = "force-dynamic";
@@ -136,49 +136,66 @@ export default async function TensionsPage({
                   )}
                 </div>
 
-                <div className="item-actions">
-                  <div className="item-actions-primary">
-                    {canManage && tension.status === "DRAFT" && (
+                {(() => {
+                  let primary: React.ReactNode;
+                  if (canManage && tension.status === "DRAFT") {
+                    primary = (
                       <form action={publishTensionAction}>
                         <input type="hidden" name="workspaceId" value={workspaceId} />
                         <input type="hidden" name="tensionId" value={tension.id} />
                         <button type="submit" className="primary small">{t("btnOpen")}</button>
                       </form>
-                    )}
-                    {!tension.isPrivate && (
+                    );
+                  } else if (!tension.isPrivate && tension.status !== "DRAFT") {
+                    // upvoteTension only checks membership, so OPEN and RESOLVED
+                    // public tensions both keep the upvote primary CTA.
+                    primary = (
                       <form action={upvoteTensionAction}>
                         <input type="hidden" name="workspaceId" value={workspaceId} />
                         <input type="hidden" name="tensionId" value={tension.id} />
-                        <button type="submit" className="secondary small">{t("btnUpvote")}</button>
+                        <button type="submit" className="primary small">{t("btnUpvote")}</button>
                       </form>
-                    )}
-                  </div>
-                  <ActionMenu label={tCommon("moreActions")}>
-                    {canDraftProposal && (
-                      <form action={createProposalFromTensionAction}>
+                    );
+                  } else {
+                    primary = (
+                      <a className="link-button small" href={`/workspaces/${workspaceId}/tensions/${tension.id}`}>
+                        {tCommon("btnView")}
+                      </a>
+                    );
+                  }
+                  const moreItems: React.ReactNode[] = [];
+                  if (canDraftProposal) {
+                    moreItems.push(
+                      <form key="draft-proposal" action={createProposalFromTensionAction}>
                         <input type="hidden" name="workspaceId" value={workspaceId} />
                         <input type="hidden" name="sourceTensionId" value={tension.id} />
                         <button type="submit">{t("btnDraftProposal")}</button>
                       </form>
-                    )}
-                    {canManage && tension.status === "OPEN" && (
-                      <form action={returnTensionToDraftAction}>
+                    );
+                  }
+                  if (canManage && tension.status === "OPEN") {
+                    moreItems.push(
+                      <form key="return-to-draft" action={returnTensionToDraftAction}>
                         <input type="hidden" name="workspaceId" value={workspaceId} />
                         <input type="hidden" name="tensionId" value={tension.id} />
                         <button type="submit">{t("btnReturnToDraft")}</button>
                       </form>
-                    )}
-                    {!tension.isPrivate && tension.status === "OPEN" && (
-                      <form action={updateTensionAction} className="action-menu-form">
+                    );
+                  }
+                  if (!tension.isPrivate && tension.status === "OPEN") {
+                    moreItems.push(
+                      <form key="resolve" action={updateTensionAction} className="action-menu-form">
                         <input type="hidden" name="workspaceId" value={workspaceId} />
                         <input type="hidden" name="tensionId" value={tension.id} />
                         <input type="hidden" name="status" value="RESOLVED" />
                         <input name="resolvedVia" placeholder={t("placeholderResolvedVia")} required />
                         <button type="submit" className="secondary small">{t("btnResolve")}</button>
                       </form>
-                    )}
-                    {canManage && tension.status === "DRAFT" && (
-                      <form action={updateTensionAction} className="action-menu-form">
+                    );
+                  }
+                  if (canManage && tension.status === "DRAFT") {
+                    moreItems.push(
+                      <form key="edit-raised-by" action={updateTensionAction} className="action-menu-form">
                         <input type="hidden" name="workspaceId" value={workspaceId} />
                         <input type="hidden" name="tensionId" value={tension.id} />
                         <span className="action-menu-label">{t("btnEditRaisedBy")}</span>
@@ -190,37 +207,50 @@ export default async function TensionsPage({
                         </select>
                         <button type="submit" className="secondary small">{t("btnSaveRaisedBy")}</button>
                       </form>
-                    )}
-                    {canManage && tension.status === "DRAFT" && <div className="action-menu-divider" />}
-                    <form action={deleteTensionAction}>
+                    );
+                    moreItems.push(
+                      <details key="edit">
+                        <summary className="nr-hide-marker" style={{ cursor: "pointer", padding: "8px 10px", borderRadius: 8, fontSize: "0.88rem", fontWeight: 500 }}>
+                          {t("btnEdit")}
+                        </summary>
+                        <form action={updateTensionAction} className="action-menu-form">
+                          <input type="hidden" name="workspaceId" value={workspaceId} />
+                          <input type="hidden" name="tensionId" value={tension.id} />
+                          <label>
+                            {t("formTitle")}
+                            <input name="title" defaultValue={tension.title} required />
+                          </label>
+                          <label>
+                            {t("formDescription")}
+                            <MarkdownEditor name="bodyMd" defaultValue={tension.bodyMd ?? ""} rows={5} />
+                          </label>
+                          <label>
+                            {t("formPriority")}
+                            <input name="priority" type="number" min={0} defaultValue={tension.priority} />
+                          </label>
+                          <button type="submit" className="secondary small">{t("btnSaveDraft")}</button>
+                        </form>
+                      </details>
+                    );
+                  }
+                  // `deleteTension` only requires workspace membership, so delete is offered
+                  // to all members (matches pre-refactor behavior).
+                  if (moreItems.length > 0) moreItems.push(<div key="divider" className="action-menu-divider" />);
+                  moreItems.push(
+                    <form key="delete" action={deleteTensionAction}>
                       <input type="hidden" name="workspaceId" value={workspaceId} />
                       <input type="hidden" name="tensionId" value={tension.id} />
                       <button type="submit" className="danger">{t("btnDelete")}</button>
                     </form>
-                  </ActionMenu>
-                </div>
-                {canManage && tension.status === "DRAFT" && (
-                  <details style={{ marginTop: 12 }}>
-                    <summary className="secondary small nr-hide-marker" style={{ cursor: "pointer", display: "inline-block" }}>{t("btnEdit")}</summary>
-                    <form action={updateTensionAction} className="stack nr-form-section" style={{ marginTop: 12 }}>
-                      <input type="hidden" name="workspaceId" value={workspaceId} />
-                      <input type="hidden" name="tensionId" value={tension.id} />
-                      <label>
-                        {t("formTitle")}
-                        <input name="title" defaultValue={tension.title} required />
-                      </label>
-                      <label>
-                        {t("formDescription")}
-                        <MarkdownEditor name="bodyMd" defaultValue={tension.bodyMd ?? ""} rows={5} />
-                      </label>
-                      <label>
-                        {t("formPriority")}
-                        <input name="priority" type="number" min={0} defaultValue={tension.priority} />
-                      </label>
-                      <button type="submit" className="secondary small">{t("btnSaveDraft")}</button>
-                    </form>
-                  </details>
-                )}
+                  );
+                  return (
+                    <ItemActions
+                      moreLabel={tCommon("moreActions")}
+                      primary={primary}
+                      more={moreItems.length > 0 ? moreItems : null}
+                    />
+                  );
+                })()}
               </div>
             );
           })}

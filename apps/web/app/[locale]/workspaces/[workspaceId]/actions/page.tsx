@@ -16,7 +16,7 @@ import {
 } from "./view-model";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownExcerpt } from "@/lib/components/MarkdownRenderer";
-import { ActionMenu } from "@/lib/components/ui/ActionMenu";
+import { ItemActions } from "@/lib/components/ui/ItemActions";
 
 export const dynamic = "force-dynamic";
 
@@ -107,74 +107,97 @@ export default async function ActionsPage({
                   {action.proposal?.title ? ` · ${t("metaLinkedToProposal", { title: action.proposal.title })}` : ""}
                 </div>
 
-                <div className="item-actions">
-                  <div className="item-actions-primary">
-                    {canManage && action.status === "DRAFT" && (
+                {(() => {
+                  let primary: React.ReactNode = null;
+                  if (canManage && action.status === "DRAFT") {
+                    primary = (
                       <form action={publishActionAction}>
                         <input type="hidden" name="workspaceId" value={workspaceId} />
                         <input type="hidden" name="actionId" value={action.id} />
                         <button type="submit" className="primary small">{t("btnOpen")}</button>
                       </form>
-                    )}
-                    {action.status === "OPEN" && (
+                    );
+                  } else if (action.status === "OPEN") {
+                    primary = (
                       <form action={updateActionAction}>
                         <input type="hidden" name="workspaceId" value={workspaceId} />
                         <input type="hidden" name="actionId" value={action.id} />
                         <input type="hidden" name="status" value="IN_PROGRESS" />
                         <button type="submit" className="primary small">{t("btnStart")}</button>
                       </form>
-                    )}
-                    {action.status === "IN_PROGRESS" && (
+                    );
+                  } else if (action.status === "IN_PROGRESS") {
+                    primary = (
                       <form action={updateActionAction}>
                         <input type="hidden" name="workspaceId" value={workspaceId} />
                         <input type="hidden" name="actionId" value={action.id} />
                         <input type="hidden" name="status" value="COMPLETED" />
                         <button type="submit" className="primary small">{t("btnComplete")}</button>
                       </form>
-                    )}
-                  </div>
-                  <ActionMenu label={tCommon("moreActions")}>
-                    {action.status === "OPEN" && (
-                      <form action={updateActionAction}>
+                    );
+                  }
+                  // COMPLETED has no domain-allowed forward action and no detail page, so the
+                  // row is kebab-only (matches pre-refactor behavior).
+                  const moreItems: React.ReactNode[] = [];
+                  if (action.status === "OPEN") {
+                    moreItems.push(
+                      <form key="complete" action={updateActionAction}>
                         <input type="hidden" name="workspaceId" value={workspaceId} />
                         <input type="hidden" name="actionId" value={action.id} />
                         <input type="hidden" name="status" value="COMPLETED" />
                         <button type="submit">{t("btnComplete")}</button>
                       </form>
-                    )}
-                    {canManage && (action.status === "OPEN" || action.status === "IN_PROGRESS") && (
-                      <form action={returnActionToDraftAction}>
+                    );
+                  }
+                  if (canManage && (action.status === "OPEN" || action.status === "IN_PROGRESS")) {
+                    moreItems.push(
+                      <form key="return-to-draft" action={returnActionToDraftAction}>
                         <input type="hidden" name="workspaceId" value={workspaceId} />
                         <input type="hidden" name="actionId" value={action.id} />
                         <button type="submit">{t("btnReturnToDraft")}</button>
                       </form>
-                    )}
-                    <div className="action-menu-divider" />
-                    <form action={deleteActionAction}>
+                    );
+                  }
+                  if (canManage && action.status === "DRAFT") {
+                    moreItems.push(
+                      <details key="edit">
+                        <summary className="nr-hide-marker" style={{ cursor: "pointer", padding: "8px 10px", borderRadius: 8, fontSize: "0.88rem", fontWeight: 500 }}>
+                          {t("btnEdit")}
+                        </summary>
+                        <form action={updateActionAction} className="action-menu-form">
+                          <input type="hidden" name="workspaceId" value={workspaceId} />
+                          <input type="hidden" name="actionId" value={action.id} />
+                          <label>
+                            {t("formTitle")}
+                            <input name="title" defaultValue={action.title} required />
+                          </label>
+                          <label>
+                            {t("formNotes")}
+                            <MarkdownEditor name="bodyMd" defaultValue={action.bodyMd ?? ""} rows={5} />
+                          </label>
+                          <button type="submit" className="secondary small">{t("btnSaveDraft")}</button>
+                        </form>
+                      </details>
+                    );
+                  }
+                  // `deleteAction` only requires workspace membership, so delete is offered
+                  // to all members (matches pre-refactor behavior).
+                  if (moreItems.length > 0) moreItems.push(<div key="divider" className="action-menu-divider" />);
+                  moreItems.push(
+                    <form key="delete" action={deleteActionAction}>
                       <input type="hidden" name="workspaceId" value={workspaceId} />
                       <input type="hidden" name="actionId" value={action.id} />
                       <button type="submit" className="danger">{t("btnDelete")}</button>
                     </form>
-                  </ActionMenu>
-                </div>
-                {canManage && action.status === "DRAFT" && (
-                  <details style={{ marginTop: 12 }}>
-                    <summary className="secondary small nr-hide-marker" style={{ cursor: "pointer", display: "inline-block" }}>{t("btnEdit")}</summary>
-                    <form action={updateActionAction} className="stack nr-form-section" style={{ marginTop: 12 }}>
-                      <input type="hidden" name="workspaceId" value={workspaceId} />
-                      <input type="hidden" name="actionId" value={action.id} />
-                      <label>
-                        {t("formTitle")}
-                        <input name="title" defaultValue={action.title} required />
-                      </label>
-                      <label>
-                        {t("formNotes")}
-                        <MarkdownEditor name="bodyMd" defaultValue={action.bodyMd ?? ""} rows={5} />
-                      </label>
-                      <button type="submit" className="secondary small">{t("btnSaveDraft")}</button>
-                    </form>
-                  </details>
-                )}
+                  );
+                  return (
+                    <ItemActions
+                      moreLabel={tCommon("moreActions")}
+                      primary={primary}
+                      more={moreItems.length > 0 ? moreItems : null}
+                    />
+                  );
+                })()}
               </div>
             );
           })}

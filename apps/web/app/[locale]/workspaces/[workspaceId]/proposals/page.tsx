@@ -11,7 +11,7 @@ import {
   returnProposalToDraftAction,
   updateProposalAction,
 } from "../actions";
-import { ActionMenu } from "@/lib/components/ui/ActionMenu";
+import { ItemActions } from "@/lib/components/ui/ItemActions";
 import { getTranslations } from "next-intl/server";
 import { prisma } from "@corgtex/shared";
 
@@ -85,6 +85,57 @@ export default async function ProposalsPage({
           )}
           {displayProposals.map((proposal) => {
             const canManage = canManageProposal(proposal);
+            const moreItems: React.ReactNode[] = [];
+            if (canResolveProposal && proposal.status === "OPEN") {
+              moreItems.push(
+                <form key="resolve" action={resolveProposalAction} className="action-menu-form">
+                  <input type="hidden" name="workspaceId" value={workspaceId} />
+                  <input type="hidden" name="proposalId" value={proposal.id} />
+                  <span className="action-menu-label">{t("btnResolve")}</span>
+                  <select name="outcome" defaultValue="ADOPTED" required aria-label={t("formResolutionOutcome")}>
+                    <option value="ADOPTED">{t("outcomeAdopted")}</option>
+                    <option value="NOT_ADOPTED">{t("outcomeNotAdopted")}</option>
+                    <option value="WITHDRAWN">{t("outcomeWithdrawn")}</option>
+                  </select>
+                  <MarkdownEditor name="decisionMd" placeholder={t("placeholderDecisionMd")} required rows={2} />
+                  <button type="submit" className="secondary small">{t("btnResolve")}</button>
+                </form>
+              );
+            }
+            if (canManage && proposal.status === "OPEN") {
+              moreItems.push(
+                <form key="return-to-draft" action={returnProposalToDraftAction}>
+                  <input type="hidden" name="workspaceId" value={workspaceId} />
+                  <input type="hidden" name="proposalId" value={proposal.id} />
+                  <button type="submit">{t("btnReturnToDraft")}</button>
+                </form>
+              );
+            }
+            if (canManage && proposal.status === "DRAFT") {
+              moreItems.push(
+                <details key="edit">
+                  <summary className="nr-hide-marker" style={{ cursor: "pointer", padding: "8px 10px", borderRadius: 8, fontSize: "0.88rem", fontWeight: 500 }}>
+                    {t("btnEdit")}
+                  </summary>
+                  <form action={updateProposalAction} className="action-menu-form">
+                    <input type="hidden" name="workspaceId" value={workspaceId} />
+                    <input type="hidden" name="proposalId" value={proposal.id} />
+                    <ProposalDraftFields defaultTitle={proposal.title} defaultBodyMd={proposal.bodyMd} />
+                    <button type="submit" className="secondary small">{t("btnSaveDraft")}</button>
+                  </form>
+                </details>
+              );
+            }
+            if (canManage && (proposal.status === "DRAFT" || proposal.status === "RESOLVED")) {
+              moreItems.push(<div key="divider" className="action-menu-divider" />);
+              moreItems.push(
+                <form key="archive" action={archiveProposalAction}>
+                  <input type="hidden" name="workspaceId" value={workspaceId} />
+                  <input type="hidden" name="proposalId" value={proposal.id} />
+                  <button type="submit" className="danger">{t("btnArchive")}</button>
+                </form>
+              );
+            }
             return (
             <div className="nr-item hover:bg-bg-alt transition-colors duration-200" key={proposal.id} style={{ position: "relative", padding: "16px", borderRadius: "8px", borderBottom: "1px dashed var(--line)" }}>
               <a href={`/workspaces/${workspaceId}/proposals/${proposal.id}`} style={{ display: "block", textDecoration: "none", color: "inherit" }}>
@@ -118,64 +169,24 @@ export default async function ProposalsPage({
                 )}
               </a>
 
-              {!isDemo && (canManage || (canResolveProposal && proposal.status === "OPEN")) && (
-                <div className="item-actions">
-                  <div className="item-actions-primary">
-                    {canManage && proposal.status === "DRAFT" && (
+              {!isDemo && (
+                <ItemActions
+                  moreLabel={tCommon("moreActions")}
+                  primary={
+                    canManage && proposal.status === "DRAFT" ? (
                       <form action={submitProposalAction}>
                         <input type="hidden" name="workspaceId" value={workspaceId} />
                         <input type="hidden" name="proposalId" value={proposal.id} />
                         <button type="submit" className="primary small">{t("btnOpen")}</button>
                       </form>
-                    )}
-                  </div>
-                  <ActionMenu label={tCommon("moreActions")}>
-                    {canResolveProposal && proposal.status === "OPEN" && (
-                      <form action={resolveProposalAction} className="action-menu-form">
-                        <input type="hidden" name="workspaceId" value={workspaceId} />
-                        <input type="hidden" name="proposalId" value={proposal.id} />
-                        <span className="action-menu-label">{t("btnResolve")}</span>
-                        <select name="outcome" defaultValue="ADOPTED" required aria-label={t("formResolutionOutcome")}>
-                          <option value="ADOPTED">{t("outcomeAdopted")}</option>
-                          <option value="NOT_ADOPTED">{t("outcomeNotAdopted")}</option>
-                          <option value="WITHDRAWN">{t("outcomeWithdrawn")}</option>
-                        </select>
-                        <MarkdownEditor name="decisionMd" placeholder={t("placeholderDecisionMd")} required rows={2} />
-                        <button type="submit" className="secondary small">{t("btnResolve")}</button>
-                      </form>
-                    )}
-                    {canManage && proposal.status === "OPEN" && (
-                      <form action={returnProposalToDraftAction}>
-                        <input type="hidden" name="workspaceId" value={workspaceId} />
-                        <input type="hidden" name="proposalId" value={proposal.id} />
-                        <button type="submit">{t("btnReturnToDraft")}</button>
-                      </form>
-                    )}
-                    {canManage && proposal.status === "DRAFT" && (
-                      <details>
-                        <summary className="nr-hide-marker" style={{ cursor: "pointer", padding: "8px 10px", borderRadius: 8, fontSize: "0.88rem", fontWeight: 500 }}>
-                          {t("btnEdit")}
-                        </summary>
-                        <form action={updateProposalAction} className="action-menu-form">
-                          <input type="hidden" name="workspaceId" value={workspaceId} />
-                          <input type="hidden" name="proposalId" value={proposal.id} />
-                          <ProposalDraftFields defaultTitle={proposal.title} defaultBodyMd={proposal.bodyMd} />
-                          <button type="submit" className="secondary small">{t("btnSaveDraft")}</button>
-                        </form>
-                      </details>
-                    )}
-                    {canManage && (proposal.status === "DRAFT" || proposal.status === "RESOLVED") && (
-                      <>
-                        <div className="action-menu-divider" />
-                        <form action={archiveProposalAction}>
-                          <input type="hidden" name="workspaceId" value={workspaceId} />
-                          <input type="hidden" name="proposalId" value={proposal.id} />
-                          <button type="submit" className="danger">{t("btnArchive")}</button>
-                        </form>
-                      </>
-                    )}
-                  </ActionMenu>
-                </div>
+                    ) : (
+                      <a className="link-button small" href={`/workspaces/${workspaceId}/proposals/${proposal.id}`}>
+                        {tCommon("btnView")}
+                      </a>
+                    )
+                  }
+                  more={moreItems.length > 0 ? moreItems : null}
+                />
               )}
             </div>
           );})}

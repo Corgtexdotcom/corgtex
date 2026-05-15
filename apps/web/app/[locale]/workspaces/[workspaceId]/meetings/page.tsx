@@ -13,6 +13,7 @@ import Link from "next/link";
 import { getWorkspaceFeatureFlags } from "@/lib/workspace-feature-flags";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownExcerpt } from "@/lib/components/MarkdownRenderer";
+import { ItemActions } from "@/lib/components/ui/ItemActions";
 
 export const dynamic = "force-dynamic";
 
@@ -39,6 +40,7 @@ export default async function MeetingsPage({
     : [];
   const latestRecordingByMeeting = new Map(recordings.map((recording) => [recording.meetingId, recording]));
   const t = await getTranslations("meetings");
+  const tCommon = await getTranslations("common");
 
   return (
     <>
@@ -65,11 +67,21 @@ export default async function MeetingsPage({
                 <div className="nr-item-meta" style={{ marginBottom: "12px" }}>{new Date(completedMeetings[0].recordedAt).toLocaleString()}</div>
                 {completedMeetings[0].summaryMd && <MarkdownExcerpt markdown={completedMeetings[0].summaryMd} maxLength={520} as="p" className="nr-excerpt" />}
               </Link>
-              <form action={archiveMeetingAction} style={{ marginTop: 12 }}>
-                <input type="hidden" name="workspaceId" value={workspaceId} />
-                <input type="hidden" name="meetingId" value={completedMeetings[0].id} />
-                <button type="submit" className="danger small">{t("btnArchiveMeeting")}</button>
-              </form>
+              <ItemActions
+                moreLabel={tCommon("moreActions")}
+                primary={
+                  <Link className="link-button small" href={`/workspaces/${workspaceId}/meetings/${completedMeetings[0].id}`}>
+                    {tCommon("btnView")}
+                  </Link>
+                }
+                more={
+                  <form action={archiveMeetingAction}>
+                    <input type="hidden" name="workspaceId" value={workspaceId} />
+                    <input type="hidden" name="meetingId" value={completedMeetings[0].id} />
+                    <button type="submit" className="danger">{t("btnArchiveMeeting")}</button>
+                  </form>
+                }
+              />
             </div>
 
             {/* Other meetings list */}
@@ -84,11 +96,21 @@ export default async function MeetingsPage({
                     <MarkdownExcerpt markdown={meeting.summaryMd} maxLength={320} as="div" className="nr-excerpt" />
                   )}
                 </Link>
-                <form action={archiveMeetingAction} style={{ marginTop: 8 }}>
-                  <input type="hidden" name="workspaceId" value={workspaceId} />
-                  <input type="hidden" name="meetingId" value={meeting.id} />
-                  <button type="submit" className="danger small">{t("btnArchive")}</button>
-                </form>
+                <ItemActions
+                  moreLabel={tCommon("moreActions")}
+                  primary={
+                    <Link className="link-button small" href={`/workspaces/${workspaceId}/meetings/${meeting.id}`}>
+                      {tCommon("btnView")}
+                    </Link>
+                  }
+                  more={
+                    <form action={archiveMeetingAction}>
+                      <input type="hidden" name="workspaceId" value={workspaceId} />
+                      <input type="hidden" name="meetingId" value={meeting.id} />
+                      <button type="submit" className="danger">{t("btnArchive")}</button>
+                    </form>
+                  }
+                />
               </div>
             ))}
           </div>
@@ -141,31 +163,41 @@ export default async function MeetingsPage({
                     {meeting.agendaPostedAt ? ` • ${t("agendaPosted")}` : ""}
                   </div>
                 </Link>
-                <details style={{ marginTop: 12 }}>
-                  <summary className="nr-hide-marker" style={{ cursor: "pointer", color: "var(--accent)", fontWeight: 600 }}>
-                    {t("uploadTranscriptForMeeting")}
-                  </summary>
-                  <form action={uploadMeetingTranscriptAction} className="stack" style={{ marginTop: 12 }}>
-                    <input type="hidden" name="workspaceId" value={workspaceId} />
-                    <input type="hidden" name="meetingId" value={meeting.id} />
-                    <input type="hidden" name="title" value={meeting.title ?? ""} />
-                    <input type="hidden" name="recordedAt" value={dateTimeLocalValue(meeting.recordedAt)} />
-                    <label>
-                      {t("formTranscriptFile")}
-                      <input name="file" type="file" accept=".txt,.md,.csv,.json,.pdf,.docx" />
-                    </label>
-                    <label>
-                      {t("formTranscript")}
-                      <textarea name="transcript" />
-                    </label>
-                    <label>
-                      {t("formIngestionGuidance")}
-                      <MarkdownEditor name="ingestionGuidanceMd" rows={3} />
-                      <span className="nr-item-meta" style={{ display: "block", marginTop: 4 }}>{t("helpIngestionGuidance")}</span>
-                    </label>
-                    <button type="submit">{t("btnUploadTranscript")}</button>
-                  </form>
-                </details>
+                <ItemActions
+                  moreLabel={tCommon("moreActions")}
+                  primary={
+                    <Link className="link-button small" href={`/workspaces/${workspaceId}/meetings/${meeting.id}`}>
+                      {tCommon("btnView")}
+                    </Link>
+                  }
+                  more={
+                    <details>
+                      <summary className="nr-hide-marker" style={{ cursor: "pointer", padding: "8px 10px", borderRadius: 8, fontSize: "0.88rem", fontWeight: 500 }}>
+                        {t("uploadTranscriptForMeeting")}
+                      </summary>
+                      <form action={uploadMeetingTranscriptAction} className="action-menu-form">
+                        <input type="hidden" name="workspaceId" value={workspaceId} />
+                        <input type="hidden" name="meetingId" value={meeting.id} />
+                        <input type="hidden" name="title" value={meeting.title ?? ""} />
+                        <input type="hidden" name="recordedAt" value={dateTimeLocalValue(meeting.recordedAt)} />
+                        <label>
+                          {t("formTranscriptFile")}
+                          <input name="file" type="file" accept=".txt,.md,.csv,.json,.pdf,.docx" />
+                        </label>
+                        <label>
+                          {t("formTranscript")}
+                          <textarea name="transcript" />
+                        </label>
+                        <label>
+                          {t("formIngestionGuidance")}
+                          <MarkdownEditor name="ingestionGuidanceMd" rows={3} />
+                          <span className="nr-item-meta" style={{ display: "block", marginTop: 4 }}>{t("helpIngestionGuidance")}</span>
+                        </label>
+                        <button type="submit">{t("btnUploadTranscript")}</button>
+                      </form>
+                    </details>
+                  }
+                />
               </div>
             ))}
           </div>

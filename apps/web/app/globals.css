@@ -388,13 +388,15 @@ button.warning {
   flex: 0 0 auto;
 }
 
-/* Overflow / kebab menu used to collapse secondary actions. */
+/* Overflow / kebab menu used to collapse secondary actions.
+   The panel is portaled to <body> and positioned with `position: fixed`
+   from JS so no ancestor `overflow`, `transform`, or `z-index` stacking
+   context can clip it. The trigger lives inline next to the primary CTA. */
 .action-menu {
-  position: relative;
   flex: 0 0 auto;
 }
 
-.action-menu > summary.action-menu-trigger {
+.action-menu-trigger {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -410,23 +412,25 @@ button.warning {
   transition: color 0.15s, border-color 0.15s, background 0.15s;
 }
 
-.action-menu > summary.action-menu-trigger:hover,
-.action-menu[open] > summary.action-menu-trigger {
+.action-menu-trigger:hover,
+.action-menu-trigger[aria-expanded="true"] {
   color: var(--text);
   border-color: var(--text);
   background: var(--bg-alt);
 }
 
-.action-menu > summary.action-menu-trigger svg {
+.action-menu-trigger svg {
   display: block;
 }
 
 .action-menu-panel {
-  position: absolute;
-  top: calc(100% + 6px);
+  /* `position: fixed`, `top`, and `left` are set inline from JS so the
+     panel can flip and clamp inside the viewport on every open/scroll/resize. */
   z-index: 60;
-  min-width: 200px;
-  max-width: min(280px, calc(100vw - 24px));
+  min-width: 220px;
+  max-width: min(320px, calc(100vw - 24px));
+  max-height: calc(100vh - 24px);
+  overflow-y: auto;
   padding: 6px;
   border: 1px solid var(--line);
   border-radius: 12px;
@@ -435,13 +439,6 @@ button.warning {
   display: flex;
   flex-direction: column;
   gap: 2px;
-}
-
-.action-menu[data-align="right"] .action-menu-panel {
-  right: 0;
-}
-.action-menu[data-align="left"] .action-menu-panel {
-  left: 0;
 }
 
 /* Children of the menu panel: forms with a single button render as full-width rows.
