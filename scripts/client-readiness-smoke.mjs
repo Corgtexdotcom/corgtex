@@ -1,5 +1,6 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { chromium } from "playwright";
 
 const [, , baseUrlArg, outDirArg] = process.argv;
@@ -135,7 +136,7 @@ async function captureScreenshot(page, fileName) {
   }).catch(() => null);
 }
 
-function isWorkspaceUrl(value) {
+export function isWorkspaceUrl(value) {
   try {
     return /\/workspaces\//.test(new URL(value).pathname);
   } catch {
@@ -143,7 +144,7 @@ function isWorkspaceUrl(value) {
   }
 }
 
-async function visibleLoginErrorMessage(page) {
+export async function visibleLoginErrorMessage(page) {
   const locators = page.locator('[role="alert"], .form-message-error');
   const count = await locators.count().catch(() => 0);
 
@@ -158,7 +159,7 @@ async function visibleLoginErrorMessage(page) {
   return null;
 }
 
-async function waitForLoginResult(page) {
+export async function waitForLoginResult(page) {
   const deadline = Date.now() + loginTimeoutMs;
 
   while (Date.now() < deadline) {
@@ -468,7 +469,9 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exitCode = 1;
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  });
+}
