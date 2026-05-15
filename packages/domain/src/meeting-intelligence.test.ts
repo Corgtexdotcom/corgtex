@@ -139,6 +139,7 @@ describe("meeting-intelligence", () => {
         source: "manual",
         transcript: "Alice: I will follow up tomorrow.",
         summaryMd: null,
+        blocksJson: null,
         ingestionGuidanceMd: "Prioritize follow-up actions.",
         recordedAt: new Date("2026-04-29T12:00:00.000Z"),
         scheduledEndAt: null,
@@ -229,6 +230,81 @@ describe("meeting-intelligence", () => {
       }));
     });
 
+    it("passes meeting blocks to extraction and persists block labels on suggested insights", async () => {
+      const { defaultModelGateway } = await import("@corgtex/models");
+      (defaultModelGateway.extract as ReturnType<typeof vi.fn>).mockResolvedValue({
+        output: {
+          insights: [
+            {
+              type: "DECISION",
+              operation: "CREATE",
+              title: "#001 > Template proposal - connect decisions",
+              body: "**CONTEXT:** The proposal discussion covered decision formatting.\n**REQUEST:** Tie decisions to proposals.\n**ANSWER:** Decisions should reference the proposal context.\n**RESULT:** PROCESSED",
+              confidence: 0.92,
+              targetEntityType: "Proposal",
+              targetEntityId: "proposal-1",
+              blockSequence: 2,
+              blockTitle: "Meeting template proposal",
+              blockKind: "proposal_discussion",
+            },
+          ],
+        },
+      });
+
+      buildMeetingIntelligenceContextMock.mockResolvedValueOnce({
+        contextualIntelligenceEnabled: true,
+        meeting: {
+          id: "meeting-1",
+          workspaceId: "ws-1",
+          title: "Weekly sync",
+          source: "manual",
+          transcript: "We discussed the template proposal and decision.",
+          summaryMd: "The proposal discussion led to a decision.",
+          blocksJson: {
+            version: 1,
+            blocks: [
+              { sequence: 1, title: "Opening check-in", kind: "check_in", summaryMd: "Short check-in." },
+              { sequence: 2, title: "Meeting template proposal", kind: "proposal_discussion", summaryMd: "Decision formatting was discussed." },
+            ],
+          },
+          ingestionGuidanceMd: null,
+          recordedAt: new Date("2026-04-29T12:00:00.000Z"),
+          scheduledEndAt: null,
+          seriesId: null,
+          seriesTitle: null,
+          participantIds: [],
+          participantEmails: [],
+        },
+        attendees: [],
+        previousMeetings: [],
+        tensions: [],
+        actions: [],
+        proposals: [{ id: "proposal-1", title: "Meeting template refinement", status: "OPEN" }],
+        followUps: [],
+        deliberationEntries: [],
+        knowledgeSearchQuery: "",
+        knowledge: [],
+      });
+
+      await extractMeetingInsights(mockActor, {
+        workspaceId: "ws-1",
+        meetingId: "meeting-1",
+      });
+
+      expect(defaultModelGateway.extract).toHaveBeenCalledWith(expect.objectContaining({
+        instruction: expect.stringContaining("Use meetingBlocks as the conversation map"),
+        input: expect.stringContaining("Meeting template proposal"),
+      }));
+      expect(prisma.meetingInsight.createMany).toHaveBeenCalledWith(expect.objectContaining({
+        data: [expect.objectContaining({
+          type: "DECISION",
+          bodyMd: expect.stringContaining("**MEETING BLOCK:** Meeting template proposal"),
+          targetEntityType: "Proposal",
+          targetEntityId: "proposal-1",
+        })],
+      }));
+    });
+
     it("uses the summary and excerpts for long transcripts to avoid extraction timeouts", async () => {
       const { defaultModelGateway } = await import("@corgtex/models");
       (defaultModelGateway.extract as ReturnType<typeof vi.fn>).mockResolvedValue({
@@ -254,6 +330,7 @@ describe("meeting-intelligence", () => {
           source: "manual",
           transcript: longTranscript,
           summaryMd: "Summary: Alice owns the follow-up and Jan confirmed the decision.",
+          blocksJson: null,
           ingestionGuidanceMd: "Prioritize follow-up actions.",
           recordedAt: new Date("2026-04-29T12:00:00.000Z"),
           scheduledEndAt: null,
@@ -378,6 +455,7 @@ describe("meeting-intelligence", () => {
           source: "manual",
           transcript: "Meeting transcript.",
           summaryMd: null,
+          blocksJson: null,
           ingestionGuidanceMd: null,
           recordedAt: new Date("2026-04-29T12:00:00.000Z"),
           scheduledEndAt: null,
@@ -807,6 +885,7 @@ describe("meeting-intelligence", () => {
           source: "manual",
           transcript: "Meeting transcript.",
           summaryMd: null,
+          blocksJson: null,
           ingestionGuidanceMd: null,
           recordedAt: new Date("2026-04-29T12:00:00.000Z"),
           scheduledEndAt: null,

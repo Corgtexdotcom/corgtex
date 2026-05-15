@@ -113,6 +113,7 @@ describe("runMeetingSummaryAgent", () => {
         source: "manual",
         transcript: "We discussed project updates.",
         summaryMd: null,
+        blocksJson: null,
         ingestionGuidanceMd: "Emphasize launch risks.",
         recordedAt: new Date("2026-04-29T12:00:00.000Z"),
       },
@@ -164,6 +165,100 @@ describe("runMeetingSummaryAgent", () => {
     expect(result).toEqual(expect.objectContaining({ status: "COMPLETED" }));
   });
 
+  it("detects dynamic meeting blocks and uses them as the summary spine", async () => {
+    const { defaultModelGateway } = await import("@corgtex/models");
+    vi.mocked(defaultModelGateway.extract).mockResolvedValueOnce({
+      output: {
+        blocks: [
+          {
+            sequence: 1,
+            title: "Opening check-in",
+            kind: "check_in",
+            summaryMd: "The meeting opened with a short personal check-in.",
+          },
+          {
+            sequence: 2,
+            title: "Meeting template proposal",
+            kind: "proposal_discussion",
+            summaryMd: "The group discussed connecting decisions to proposals in meeting summaries.",
+            relatedRecords: [{ entityType: "Proposal", entityId: "proposal-1", title: "Meeting template refinement" }],
+          },
+          {
+            sequence: 3,
+            title: "Org structure visibility",
+            kind: "custom",
+            summaryMd: "The group discussed making circles and roles easier to inspect.",
+          },
+        ],
+      },
+      raw: "{}",
+      usage: modelUsage,
+    });
+    vi.mocked(defaultModelGateway.chat).mockResolvedValueOnce({
+      content: "## Opening check-in\nA quick check-in happened.\n\n## Meeting template proposal\nThe decision was tied to the proposal.",
+      usage: modelUsage,
+    });
+    buildMeetingIntelligenceContextMock.mockResolvedValueOnce({
+      contextualIntelligenceEnabled: true,
+      meeting: {
+        id: "meeting-1",
+        workspaceId: "ws-1",
+        title: "Template refinement",
+        source: "recorder",
+        transcript: "We checked in. Then we discussed the proposal and decision. Later we discussed org structure.",
+        summaryMd: null,
+        blocksJson: null,
+        ingestionGuidanceMd: null,
+        recordedAt: new Date("2026-04-29T12:00:00.000Z"),
+      },
+      previousMeetings: [],
+      actions: [],
+      tensions: [],
+      proposals: [{ id: "proposal-1", title: "Meeting template refinement", status: "OPEN" }],
+      deliberationEntries: [],
+      followUps: [],
+      knowledge: [],
+    });
+
+    const { runMeetingSummaryAgent } = await import(".");
+    await runMeetingSummaryAgent({
+      workspaceId: "ws-1",
+      triggerRef: "trigger-blocks",
+      triggerType: "EVENT",
+      meetingId: "meeting-1",
+    });
+
+    expect(defaultModelGateway.extract).toHaveBeenCalledWith(expect.objectContaining({
+      instruction: expect.stringContaining("Do not force a fixed template"),
+      input: expect.stringContaining("Meeting template refinement"),
+    }));
+    expect(defaultModelGateway.chat).toHaveBeenCalledWith(expect.objectContaining({
+      messages: expect.arrayContaining([
+        expect.objectContaining({
+          role: "system",
+          content: expect.stringContaining("dynamic meeting blocks"),
+        }),
+        expect.objectContaining({
+          role: "user",
+          content: expect.stringContaining("Meeting template proposal"),
+        }),
+      ]),
+    }));
+    expect(prismaMock.meeting.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        summaryMd: expect.stringContaining("Opening check-in"),
+        blocksJson: expect.objectContaining({
+          version: 1,
+          blocks: expect.arrayContaining([
+            expect.objectContaining({ title: "Opening check-in", kind: "check_in" }),
+            expect.objectContaining({ title: "Meeting template proposal", kind: "proposal_discussion" }),
+            expect.objectContaining({ title: "Org structure visibility", kind: "custom" }),
+          ]),
+        }),
+      }),
+    }));
+  });
+
   it("applies explicit guidance term corrections before persisting the meeting summary", async () => {
     const { defaultModelGateway } = await import("@corgtex/models");
     vi.mocked(defaultModelGateway.chat).mockResolvedValueOnce({
@@ -179,6 +274,7 @@ describe("runMeetingSummaryAgent", () => {
         source: "manual",
         transcript: "We discussed the company name.",
         summaryMd: "The company name for Karina was discussed.",
+        blocksJson: null,
         ingestionGuidanceMd: "Its not Karina - its Corporate-rebels.com or corporate rebels depends on the context",
         recordedAt: new Date("2026-04-29T12:00:00.000Z"),
       },
