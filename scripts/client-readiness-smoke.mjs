@@ -9,6 +9,7 @@ const outDir = path.resolve(outDirArg || process.env.CLIENT_READINESS_OUT_DIR ||
 const email = process.env.AGENT_E2E_EMAIL || "system+corgtex@corgtex.local";
 const password = process.env.AGENT_E2E_PASSWORD || "corgtex-test-agent-pw";
 const loginLocale = process.env.CLIENT_READINESS_LOCALE || "en";
+const loginTimeoutMs = positiveInt(process.env.CLIENT_READINESS_LOGIN_TIMEOUT_MS, 60_000);
 
 function csvSet(name) {
   return new Set((process.env[name] || "").split(",").map((value) => value.trim()).filter(Boolean));
@@ -70,6 +71,15 @@ const mobileShellViewports = [
   ["small-tablet", { width: 700, height: 1024 }],
 ];
 
+function positiveInt(value, fallback) {
+  if (value === null || value === undefined || value === "") return fallback;
+  const parsed = Number.parseInt(String(value), 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error(`Expected positive integer for timeout, got ${value}.`);
+  }
+  return parsed;
+}
+
 function normalizePath(value, fallback) {
   const text = String(value || "").trim();
   if (!text) return fallback;
@@ -123,6 +133,51 @@ async function captureScreenshot(page, fileName) {
     fullPage: true,
     caret: "initial",
   }).catch(() => null);
+}
+
+function isWorkspaceUrl(value) {
+  try {
+    return /\/workspaces\//.test(new URL(value).pathname);
+  } catch {
+    return false;
+  }
+}
+
+async function visibleLoginErrorMessage(page) {
+  const locators = page.locator('[role="alert"], .form-message-error');
+  const count = await locators.count().catch(() => 0);
+
+  for (let index = 0; index < count; index += 1) {
+    const locator = locators.nth(index);
+    if (!(await locator.isVisible().catch(() => false))) continue;
+
+    const message = (await locator.textContent().catch(() => null))?.trim();
+    if (message) return message;
+  }
+
+  return null;
+}
+
+async function waitForLoginResult(page) {
+  const deadline = Date.now() + loginTimeoutMs;
+
+  while (Date.now() < deadline) {
+    if (isWorkspaceUrl(page.url())) {
+      await page.waitForLoadState("domcontentloaded", { timeout: 5000 }).catch(() => null);
+      return;
+    }
+
+    const message = await visibleLoginErrorMessage(page);
+    if (message) {
+      await captureScreenshot(page, "login-failed.png");
+      throw new Error(`Login failed: ${message}`);
+    }
+
+    await page.waitForTimeout(Math.min(250, Math.max(1, deadline - Date.now())));
+  }
+
+  await captureScreenshot(page, "login-failed.png");
+  throw new Error(`Login did not reach a workspace within ${loginTimeoutMs}ms. Current URL: ${page.url()}`);
 }
 
 function serializeError(error) {
@@ -338,10 +393,8 @@ async function main() {
     await captureScreenshot(page, "00-login.png");
     await page.fill('input[name="email"]', email);
     await page.fill('input[name="password"]', password);
-    await Promise.all([
-      page.waitForURL(/\/workspaces\//, { timeout: 15000 }),
-      page.click('button[type="submit"]'),
-    ]);
+    await page.click('button[type="submit"]');
+    await waitForLoginResult(page);
     await waitForPageSettled(page);
     await captureScreenshot(page, "01-after-login.png");
 
