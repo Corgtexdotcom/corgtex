@@ -60,6 +60,8 @@
     "ops:github-incident": "node scripts/ops/github-incident.mjs",
     "ops:railway-action": "node scripts/ops/railway-action.mjs",
     "ops:smoke": "node scripts/ops/smoke-orchestrator.mjs",
+    "ops:load-smoke": "node scripts/nightly-load-smoke.mjs",
+    "ops:nightly-research": "node scripts/nightly-research-report.mjs",
     "control-plane": "node scripts/control-plane.mjs",
     "slack:sync-public-archive": "node scripts/sync-slack-public-archive.mjs",
     "check:public-docs": "node scripts/check-public-docs.mjs",
