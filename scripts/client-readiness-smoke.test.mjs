@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   isWorkspaceUrl,
+  submitLoginForm,
   visibleLoginErrorMessage,
   waitForLoginResult,
 } from "./client-readiness-smoke.mjs";
@@ -23,6 +24,7 @@ function page({ url = "http://localhost/login", errors = [] } = {}) {
     screenshot: vi.fn(async () => null),
     waitForLoadState: vi.fn(async () => null),
     waitForTimeout: vi.fn(async () => null),
+    click: vi.fn(async () => null),
   };
 }
 
@@ -54,6 +56,16 @@ describe("client readiness smoke login handling", () => {
     expect(fakePage.screenshot).toHaveBeenCalledWith(expect.objectContaining({
       path: expect.stringContaining("login-failed.png"),
     }));
+  });
+
+  it("enforces login failure handling while the submit click is still pending", async () => {
+    const fakePage = page({
+      errors: [{ visible: true, text: "Invalid email or password." }],
+    });
+    fakePage.click = vi.fn(() => new Promise(() => {}));
+
+    await expect(submitLoginForm(fakePage)).rejects.toThrow("Login failed: Invalid email or password.");
+    expect(fakePage.click).toHaveBeenCalledWith('button[type="submit"]', { noWaitAfter: true });
   });
 
   it("returns after workspace navigation", async () => {

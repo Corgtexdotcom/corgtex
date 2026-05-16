@@ -181,6 +181,11 @@ export async function waitForLoginResult(page) {
   throw new Error(`Login did not reach a workspace within ${loginTimeoutMs}ms. Current URL: ${page.url()}`);
 }
 
+export async function submitLoginForm(page) {
+  const submitClick = page.click('button[type="submit"]', { noWaitAfter: true });
+  await Promise.all([submitClick, waitForLoginResult(page)]);
+}
+
 function serializeError(error) {
   return {
     name: error?.name ?? "Error",
@@ -394,8 +399,7 @@ async function main() {
     await captureScreenshot(page, "00-login.png");
     await page.fill('input[name="email"]', email);
     await page.fill('input[name="password"]', password);
-    await page.click('button[type="submit"]');
-    await waitForLoginResult(page);
+    await submitLoginForm(page);
     await waitForPageSettled(page);
     await captureScreenshot(page, "01-after-login.png");
 
