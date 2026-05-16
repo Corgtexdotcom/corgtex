@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef } from "react";
+import { useEffect, useState, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { updateProfileAction, updateNotificationPrefAction, updateMemberNewspaperCadenceAction } from "./actions";
@@ -20,6 +20,7 @@ export function UserSettingsPanel({
 }) {
   const router = useRouter();
   const t = useTranslations("settings");
+  const [isHydrated, setIsHydrated] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [newspaperCadence, setNewspaperCadence] = useState<MemberNewspaperCadenceChoice>(
@@ -38,6 +39,10 @@ export function UserSettingsPanel({
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [passwordError, setPasswordError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setIsHydrated(true);
+  }, []);
 
   const handleProfileSave = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -147,6 +152,15 @@ export function UserSettingsPanel({
     { type: "advice-process.initiated", label: t("notifType_advice-process_initiated") },
     { type: "advice-process.advice-recorded", label: t("notifType_advice-process_advice-recorded") },
   ];
+
+  if (!isHydrated) {
+    return (
+      <div className="stack" style={{ gap: 40 }} aria-hidden="true">
+        <div className="nr-form-section" style={{ minHeight: 260 }} />
+        <div className="nr-form-section" style={{ minHeight: 180 }} />
+      </div>
+    );
+  }
 
   return (
     <div className="stack" style={{ gap: 40 }}>
