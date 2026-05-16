@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { FileUploader } from "./FileUploader";
 import { TextPasteUploader } from "./TextPasteUploader";
@@ -22,6 +22,7 @@ type DataSource = {
 
 export function DataSourcesManager({ workspaceId, dataSources, documents }: { workspaceId: string; dataSources: DataSource[]; documents: any[] }) {
   const router = useRouter();
+  const [isHydrated, setIsHydrated] = useState(false);
   const [isAdding, setIsAdding] = useState(false);
   const [label, setLabel] = useState("");
   const [connectionString, setConnectionString] = useState("");
@@ -32,6 +33,10 @@ export function DataSourcesManager({ workspaceId, dataSources, documents }: { wo
   const [cursorColumn, setCursorColumn] = useState("updated_at");
   const [pullCadenceMinutes, setPullCadenceMinutes] = useState(60);
   const t = useTranslations("settings");
+
+  useEffect(() => {
+    setIsHydrated(true);
+  }, []);
 
   async function handleTestConnection(e: React.FormEvent) {
     e.preventDefault();
@@ -106,6 +111,14 @@ export function DataSourcesManager({ workspaceId, dataSources, documents }: { wo
       await fetch(`/api/workspaces/${workspaceId}/data-sources/${sourceId}`, { method: "DELETE" });
       router.refresh();
     }
+  }
+
+  if (!isHydrated) {
+    return (
+      <section className="stack" style={{ gap: 40 }} aria-hidden="true">
+        <div className="nr-form-section" style={{ minHeight: 220, padding: 24, border: "1px solid var(--line)", borderRadius: 8 }} />
+      </section>
+    );
   }
 
   return (
