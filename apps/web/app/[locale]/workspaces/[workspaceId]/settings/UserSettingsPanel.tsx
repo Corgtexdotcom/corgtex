@@ -1,11 +1,34 @@
 "use client";
 
-import { useEffect, useState, useRef } from "react";
+import { useState, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { updateProfileAction, updateNotificationPrefAction, updateMemberNewspaperCadenceAction } from "./actions";
 
 type MemberNewspaperCadenceChoice = "WORKSPACE_DEFAULT" | "DAILY" | "WEEKLY" | "OFF";
+
+const DATE_FORMATTER = new Intl.DateTimeFormat("en-US", {
+  dateStyle: "medium",
+  timeZone: "UTC",
+});
+
+const DATE_TIME_FORMATTER = new Intl.DateTimeFormat("en-US", {
+  dateStyle: "medium",
+  timeStyle: "short",
+  timeZone: "UTC",
+});
+
+function formatStableDate(value: Date | string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "-";
+  return DATE_FORMATTER.format(date);
+}
+
+function formatStableDateTime(value: Date | string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "-";
+  return DATE_TIME_FORMATTER.format(date);
+}
 
 export function UserSettingsPanel({
   workspaceId,
@@ -20,7 +43,6 @@ export function UserSettingsPanel({
 }) {
   const router = useRouter();
   const t = useTranslations("settings");
-  const [isHydrated, setIsHydrated] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [newspaperCadence, setNewspaperCadence] = useState<MemberNewspaperCadenceChoice>(
@@ -39,10 +61,6 @@ export function UserSettingsPanel({
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [passwordError, setPasswordError] = useState<string | null>(null);
-
-  useEffect(() => {
-    setIsHydrated(true);
-  }, []);
 
   const handleProfileSave = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -153,15 +171,6 @@ export function UserSettingsPanel({
     { type: "advice-process.advice-recorded", label: t("notifType_advice-process_advice-recorded") },
   ];
 
-  if (!isHydrated) {
-    return (
-      <div className="stack" style={{ gap: 40 }} aria-hidden="true">
-        <div className="nr-form-section" style={{ minHeight: 260 }} />
-        <div className="nr-form-section" style={{ minHeight: 180 }} />
-      </div>
-    );
-  }
-
   return (
     <div className="stack" style={{ gap: 40 }}>
       {/* 1. Profile Card */}
@@ -231,7 +240,7 @@ export function UserSettingsPanel({
               <div style={{ flex: 1 }}>
                 <label>{t("labelMemberSince")}</label>
                 <div style={{ padding: "10px 0", color: "var(--muted)" }}>
-                  {profile.member ? new Date(profile.member.createdAt).toLocaleDateString() : "-"}
+                  {profile.member ? formatStableDate(profile.member.createdAt) : "-"}
                 </div>
               </div>
             </div>
@@ -421,7 +430,7 @@ export function UserSettingsPanel({
                     </div>
                     <div className="text-muted" style={{ fontSize: '0.8rem', display: 'flex', gap: 16 }}>
                       <span>IP: {s.ipAddress || "Unknown"}</span>
-                      <span>Last active: {new Date(s.lastSeenAt).toLocaleString()}</span>
+                      <span>Last active: {formatStableDateTime(s.lastSeenAt)}</span>
                     </div>
                   </div>
                   {!s.isCurrent && (

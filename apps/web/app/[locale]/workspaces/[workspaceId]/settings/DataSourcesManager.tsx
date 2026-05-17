@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { FileUploader } from "./FileUploader";
 import { TextPasteUploader } from "./TextPasteUploader";
@@ -20,9 +20,21 @@ type DataSource = {
   createdAt: string;
 };
 
+const DATE_TIME_FORMATTER = new Intl.DateTimeFormat("en-US", {
+  dateStyle: "medium",
+  timeStyle: "short",
+  timeZone: "UTC",
+});
+
+function formatStableDateTime(value: string | null, fallback: string): string {
+  if (!value) return fallback;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return fallback;
+  return DATE_TIME_FORMATTER.format(date);
+}
+
 export function DataSourcesManager({ workspaceId, dataSources, documents }: { workspaceId: string; dataSources: DataSource[]; documents: any[] }) {
   const router = useRouter();
-  const [isHydrated, setIsHydrated] = useState(false);
   const [isAdding, setIsAdding] = useState(false);
   const [label, setLabel] = useState("");
   const [connectionString, setConnectionString] = useState("");
@@ -33,10 +45,6 @@ export function DataSourcesManager({ workspaceId, dataSources, documents }: { wo
   const [cursorColumn, setCursorColumn] = useState("updated_at");
   const [pullCadenceMinutes, setPullCadenceMinutes] = useState(60);
   const t = useTranslations("settings");
-
-  useEffect(() => {
-    setIsHydrated(true);
-  }, []);
 
   async function handleTestConnection(e: React.FormEvent) {
     e.preventDefault();
@@ -111,14 +119,6 @@ export function DataSourcesManager({ workspaceId, dataSources, documents }: { wo
       await fetch(`/api/workspaces/${workspaceId}/data-sources/${sourceId}`, { method: "DELETE" });
       router.refresh();
     }
-  }
-
-  if (!isHydrated) {
-    return (
-      <section className="stack" style={{ gap: 40 }} aria-hidden="true">
-        <div className="nr-form-section" style={{ minHeight: 220, padding: 24, border: "1px solid var(--line)", borderRadius: 8 }} />
-      </section>
-    );
   }
 
   return (
@@ -214,7 +214,7 @@ export function DataSourcesManager({ workspaceId, dataSources, documents }: { wo
                 {t("metaTables", { tables: source.selectedTables.join(", ") || t("valNone"), cursor: source.cursorColumn })}
               </div>
               <div className="nr-item-meta" style={{ fontSize: "0.85rem", marginTop: 4 }}>
-                {t("metaLastSync", { date: source.lastSyncAt ? new Date(source.lastSyncAt).toLocaleString() : t("valNever") })}
+                {t("metaLastSync", { date: formatStableDateTime(source.lastSyncAt, t("valNever")) })}
               </div>
               {source.lastSyncError && (
                 <div style={{ color: "var(--danger)", fontSize: "0.85rem", marginTop: 4 }}>

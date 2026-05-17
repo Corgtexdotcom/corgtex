@@ -143,14 +143,12 @@ function openCurrentWindow(url: string): boolean {
 }
 
 export function CorgtexConnectorManager({ connectorUrl, workspaceName }: Props) {
-  const [isHydrated, setIsHydrated] = useState(false);
   const [status, setStatus] = useState<ActionStatus | null>(null);
   const [claudeInstallerShareUrl, setClaudeInstallerShareUrl] = useState(() => buildClaudeInstallerShareUrl());
   const cursorLinks = useMemo(() => buildCursorInstallLinks(connectorUrl), [connectorUrl]);
   const claudeCodeCommand = useMemo(() => buildClaudeCodeCommand(connectorUrl), [connectorUrl]);
 
   useEffect(() => {
-    setIsHydrated(true);
     setClaudeInstallerShareUrl(buildClaudeInstallerShareUrl(window.location.origin));
   }, []);
 
@@ -321,23 +319,6 @@ export function CorgtexConnectorManager({ connectorUrl, workspaceName }: Props) 
       </button>
     );
   };
-
-  if (!isHydrated) {
-    return (
-      <div className="stack" style={{ gap: 16 }} aria-hidden="true">
-        <div
-          className="panel"
-          style={{
-            border: "1px solid var(--line)",
-            borderRadius: 8,
-            minHeight: 210,
-            padding: 20,
-            background: "var(--surface-strong, var(--surface))",
-          }}
-        />
-      </div>
-    );
-  }
 
   return (
     <div className="stack" style={{ gap: 16 }}>
