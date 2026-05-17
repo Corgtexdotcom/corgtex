@@ -144,7 +144,7 @@ function openCurrentWindow(url: string): boolean {
 
 export function CorgtexConnectorManager({ connectorUrl, workspaceName }: Props) {
   const [status, setStatus] = useState<ActionStatus | null>(null);
-  const [claudeInstallerShareUrl, setClaudeInstallerShareUrl] = useState(() => buildClaudeInstallerShareUrl());
+  const [claudeInstallerShareUrl, setClaudeInstallerShareUrl] = useState<string | null>(null);
   const cursorLinks = useMemo(() => buildCursorInstallLinks(connectorUrl), [connectorUrl]);
   const claudeCodeCommand = useMemo(() => buildClaudeCodeCommand(connectorUrl), [connectorUrl]);
 
@@ -418,13 +418,15 @@ export function CorgtexConnectorManager({ connectorUrl, workspaceName }: Props) 
                 padding: "8px 10px",
               }}
             >
-              {claudeInstallerShareUrl}
+              {claudeInstallerShareUrl ?? "Preparing share link..."}
             </code>
             <button
               className="button secondary small"
               type="button"
+              disabled={!claudeInstallerShareUrl}
               style={{ marginTop: 8 }}
               onClick={() => {
+                if (!claudeInstallerShareUrl) return;
                 handleCopy(
                   "other",
                   claudeInstallerShareUrl,
