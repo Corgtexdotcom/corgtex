@@ -1,19 +1,18 @@
 "use client";
 
-import { useTranslations } from "next-intl";
+import { useLocale, useTranslations } from "next-intl";
 
-const DATE_FORMATTER = new Intl.DateTimeFormat("en-US", {
-  dateStyle: "medium",
-  timeZone: "UTC",
-});
-
-function formatStableDate(value: Date | string): string {
+function formatStableDate(value: Date | string, locale: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "";
-  return DATE_FORMATTER.format(date);
+  return new Intl.DateTimeFormat(locale, {
+    dateStyle: "medium",
+    timeZone: "UTC",
+  }).format(date);
 }
 
 export function RecentUploads({ documents }: { documents: any[] }) {
+  const locale = useLocale();
   const t = useTranslations("settings");
 
   return (
@@ -30,7 +29,7 @@ export function RecentUploads({ documents }: { documents: any[] }) {
               </div>
               <div className="nr-item-meta" style={{ marginTop: 4, fontSize: "0.85rem" }} suppressHydrationWarning>
                  <span className="tag">{doc.source}</span>
-                 <span style={{ marginLeft: 8 }}>{formatStableDate(doc.createdAt)}</span>
+                 <span style={{ marginLeft: 8 }}>{formatStableDate(doc.createdAt, locale)}</span>
               </div>
             </div>
           ))}

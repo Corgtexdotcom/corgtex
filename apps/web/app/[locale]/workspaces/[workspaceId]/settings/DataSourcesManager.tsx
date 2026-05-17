@@ -1,11 +1,11 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { FileUploader } from "./FileUploader";
 import { TextPasteUploader } from "./TextPasteUploader";
 import { RecentUploads } from "./RecentUploads";
-import { useTranslations } from "next-intl";
+import { useLocale, useTranslations } from "next-intl";
 
 type DataSource = {
   id: string;
@@ -20,21 +20,20 @@ type DataSource = {
   createdAt: string;
 };
 
-const DATE_TIME_FORMATTER = new Intl.DateTimeFormat("en-US", {
-  dateStyle: "medium",
-  timeStyle: "short",
-  timeZone: "UTC",
-});
-
-function formatStableDateTime(value: string | null, fallback: string): string {
+function formatLocalDateTime(value: string | null, fallback: string, locale: string): string {
   if (!value) return fallback;
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return fallback;
-  return DATE_TIME_FORMATTER.format(date);
+  return new Intl.DateTimeFormat(locale, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(date);
 }
 
 export function DataSourcesManager({ workspaceId, dataSources, documents }: { workspaceId: string; dataSources: DataSource[]; documents: any[] }) {
   const router = useRouter();
+  const locale = useLocale();
+  const [isHydrated, setIsHydrated] = useState(false);
   const [isAdding, setIsAdding] = useState(false);
   const [label, setLabel] = useState("");
   const [connectionString, setConnectionString] = useState("");
@@ -45,6 +44,10 @@ export function DataSourcesManager({ workspaceId, dataSources, documents }: { wo
   const [cursorColumn, setCursorColumn] = useState("updated_at");
   const [pullCadenceMinutes, setPullCadenceMinutes] = useState(60);
   const t = useTranslations("settings");
+
+  useEffect(() => {
+    setIsHydrated(true);
+  }, []);
 
   async function handleTestConnection(e: React.FormEvent) {
     e.preventDefault();
@@ -195,34 +198,41 @@ export function DataSourcesManager({ workspaceId, dataSources, documents }: { wo
             <p className="nr-item-meta">{t("noExternalSources")}</p>
           )}
           
-          {dataSources.map(source => (
-            <div className="nr-item" key={source.id} style={{ padding: "16px", marginBottom: 16 }}>
-              <div style={{ display: "flex", justifyContent: "space-between" }}>
-                <div>
-                  <strong className="nr-item-title" style={{ fontSize: "1.1rem" }}>{source.label}</strong>
-                  <span className="tag" style={{ marginLeft: 8 }}>{source.driverType}</span>
+          {dataSources.map(source => {
+            let lastSyncDate = t("valNever");
+            if (source.lastSyncAt) {
+              lastSyncDate = isHydrated ? formatLocalDateTime(source.lastSyncAt, t("valNever"), locale) : "";
+            }
+
+            return (
+              <div className="nr-item" key={source.id} style={{ padding: "16px", marginBottom: 16 }}>
+                <div style={{ display: "flex", justifyContent: "space-between" }}>
+                  <div>
+                    <strong className="nr-item-title" style={{ fontSize: "1.1rem" }}>{source.label}</strong>
+                    <span className="tag" style={{ marginLeft: 8 }}>{source.driverType}</span>
+                  </div>
+                  <div className="actions-inline">
+                    <button onClick={() => handleSync(source.id)} className="secondary small">{t("btnSyncNow")}</button>
+                    <button onClick={() => handleArchive(source.id)} className="danger small">{t("btnDelete")}</button>
+                  </div>
                 </div>
-                <div className="actions-inline">
-                  <button onClick={() => handleSync(source.id)} className="secondary small">{t("btnSyncNow")}</button>
-                  <button onClick={() => handleArchive(source.id)} className="danger small">{t("btnDelete")}</button>
+                <div className="nr-item-meta" style={{ fontSize: "0.85rem", marginTop: 8 }}>
+                  {t("metaCadence", { minutes: source.pullCadenceMinutes, status: source.isActive ? t("statusActive") : t("statusInactive") })}
                 </div>
-              </div>
-              <div className="nr-item-meta" style={{ fontSize: "0.85rem", marginTop: 8 }}>
-                {t("metaCadence", { minutes: source.pullCadenceMinutes, status: source.isActive ? t("statusActive") : t("statusInactive") })}
-              </div>
-              <div className="nr-item-meta" style={{ fontSize: "0.85rem", marginTop: 4 }}>
-                {t("metaTables", { tables: source.selectedTables.join(", ") || t("valNone"), cursor: source.cursorColumn })}
-              </div>
-              <div className="nr-item-meta" style={{ fontSize: "0.85rem", marginTop: 4 }}>
-                {t("metaLastSync", { date: formatStableDateTime(source.lastSyncAt, t("valNever")) })}
-              </div>
-              {source.lastSyncError && (
-                <div style={{ color: "var(--danger)", fontSize: "0.85rem", marginTop: 4 }}>
-                  {t("metaError", { error: source.lastSyncError })}
+                <div className="nr-item-meta" style={{ fontSize: "0.85rem", marginTop: 4 }}>
+                  {t("metaTables", { tables: source.selectedTables.join(", ") || t("valNone"), cursor: source.cursorColumn })}
                 </div>
-              )}
-            </div>
-          ))}
+                <div className="nr-item-meta" style={{ fontSize: "0.85rem", marginTop: 4 }}>
+                  {t("metaLastSync", { date: lastSyncDate })}
+                </div>
+                {source.lastSyncError && (
+                  <div style={{ color: "var(--danger)", fontSize: "0.85rem", marginTop: 4 }}>
+                    {t("metaError", { error: source.lastSyncError })}
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
         
         <RecentUploads documents={documents} />
