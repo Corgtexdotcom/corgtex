@@ -132,9 +132,14 @@ export async function inferMeetingTranscriptMetadata(params: {
   recordedAt?: Date | string | null;
   participantEmails?: string[] | null;
 }) {
-  const modelMetadata = await inferMetadataWithModel(params);
+  const explicitTitle = cleanTitle(params.title);
+  const explicitRecordedAt = asValidDate(params.recordedAt);
+  const needsModelMetadata = !explicitTitle || !explicitRecordedAt;
+  const modelMetadata = needsModelMetadata
+    ? await inferMetadataWithModel(params)
+    : { title: null, recordedAt: null, participantEmails: [] };
   const combinedText = `${params.userMessage ?? ""}\n${params.fileName ?? ""}\n${params.transcript.slice(0, 4000)}`;
-  const recordedAt = asValidDate(params.recordedAt) ?? modelMetadata.recordedAt ?? parseDateFromText(combinedText);
+  const recordedAt = explicitRecordedAt ?? modelMetadata.recordedAt ?? parseDateFromText(combinedText);
   const participantEmails = [
     ...(params.participantEmails ?? []),
     ...modelMetadata.participantEmails,
@@ -142,7 +147,7 @@ export async function inferMeetingTranscriptMetadata(params: {
   ].map((email) => email.trim().toLowerCase()).filter(Boolean);
 
   return {
-    title: cleanTitle(params.title) ?? cleanTitle(modelMetadata.title) ?? titleFromFileName(params.fileName),
+    title: explicitTitle ?? cleanTitle(modelMetadata.title) ?? titleFromFileName(params.fileName),
     recordedAt,
     participantEmails: [...new Set(participantEmails)],
     source: params.source?.trim() || "chat-transcript-upload",
