@@ -7,12 +7,11 @@ import { updateProfileAction, updateNotificationPrefAction, updateMemberNewspape
 
 type MemberNewspaperCadenceChoice = "WORKSPACE_DEFAULT" | "DAILY" | "WEEKLY" | "OFF";
 
-function formatStableDate(value: Date | string, locale: string): string {
+function formatLocalDate(value: Date | string, locale: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "-";
   return new Intl.DateTimeFormat(locale, {
     dateStyle: "medium",
-    timeZone: "UTC",
   }).format(date);
 }
 
@@ -171,6 +170,10 @@ export function UserSettingsPanel({
     { type: "advice-process.initiated", label: t("notifType_advice-process_initiated") },
     { type: "advice-process.advice-recorded", label: t("notifType_advice-process_advice-recorded") },
   ];
+  let memberSince = "-";
+  if (profile.member) {
+    memberSince = isHydrated ? formatLocalDate(profile.member.createdAt, locale) : "";
+  }
 
   return (
     <div className="stack" style={{ gap: 40 }}>
@@ -241,7 +244,7 @@ export function UserSettingsPanel({
               <div style={{ flex: 1 }}>
                 <label>{t("labelMemberSince")}</label>
                 <div style={{ padding: "10px 0", color: "var(--muted)" }}>
-                  {profile.member ? formatStableDate(profile.member.createdAt, locale) : "-"}
+                  {memberSince}
                 </div>
               </div>
             </div>
