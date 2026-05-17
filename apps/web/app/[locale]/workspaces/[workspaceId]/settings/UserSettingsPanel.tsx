@@ -2,10 +2,27 @@
 
 import { useEffect, useState, useRef } from "react";
 import { useRouter } from "next/navigation";
-import { useTranslations } from "next-intl";
+import { useLocale, useTranslations } from "next-intl";
 import { updateProfileAction, updateNotificationPrefAction, updateMemberNewspaperCadenceAction } from "./actions";
 
 type MemberNewspaperCadenceChoice = "WORKSPACE_DEFAULT" | "DAILY" | "WEEKLY" | "OFF";
+
+function formatLocalDate(value: Date | string, locale: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "-";
+  return new Intl.DateTimeFormat(locale, {
+    dateStyle: "medium",
+  }).format(date);
+}
+
+function formatLocalDateTime(value: Date | string, locale: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "-";
+  return new Intl.DateTimeFormat(locale, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(date);
+}
 
 export function UserSettingsPanel({
   workspaceId,
@@ -19,6 +36,7 @@ export function UserSettingsPanel({
   preferences: any[];
 }) {
   const router = useRouter();
+  const locale = useLocale();
   const t = useTranslations("settings");
   const [isHydrated, setIsHydrated] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
@@ -152,14 +170,9 @@ export function UserSettingsPanel({
     { type: "advice-process.initiated", label: t("notifType_advice-process_initiated") },
     { type: "advice-process.advice-recorded", label: t("notifType_advice-process_advice-recorded") },
   ];
-
-  if (!isHydrated) {
-    return (
-      <div className="stack" style={{ gap: 40 }} aria-hidden="true">
-        <div className="nr-form-section" style={{ minHeight: 260 }} />
-        <div className="nr-form-section" style={{ minHeight: 180 }} />
-      </div>
-    );
+  let memberSince = "-";
+  if (profile.member) {
+    memberSince = isHydrated ? formatLocalDate(profile.member.createdAt, locale) : "";
   }
 
   return (
@@ -231,7 +244,7 @@ export function UserSettingsPanel({
               <div style={{ flex: 1 }}>
                 <label>{t("labelMemberSince")}</label>
                 <div style={{ padding: "10px 0", color: "var(--muted)" }}>
-                  {profile.member ? new Date(profile.member.createdAt).toLocaleDateString() : "-"}
+                  {memberSince}
                 </div>
               </div>
             </div>
@@ -421,7 +434,7 @@ export function UserSettingsPanel({
                     </div>
                     <div className="text-muted" style={{ fontSize: '0.8rem', display: 'flex', gap: 16 }}>
                       <span>IP: {s.ipAddress || "Unknown"}</span>
-                      <span>Last active: {new Date(s.lastSeenAt).toLocaleString()}</span>
+                      <span>Last active: {isHydrated ? formatLocalDateTime(s.lastSeenAt, locale) : ""}</span>
                     </div>
                   </div>
                   {!s.isCurrent && (

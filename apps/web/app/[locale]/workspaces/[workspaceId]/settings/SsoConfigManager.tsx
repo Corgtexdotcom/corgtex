@@ -2,7 +2,6 @@
 
 import { upsertSsoConfigAction } from "./actions";
 import { useTranslations } from "next-intl";
-import { useEffect, useState } from "react";
 
 type SsoConfig = {
   provider: string;
@@ -18,22 +17,9 @@ export function SsoConfigManager({
   workspaceId: string;
   configs: SsoConfig[];
 }) {
-  const [isHydrated, setIsHydrated] = useState(false);
   const googleConfig = configs.find(c => c.provider === "GOOGLE");
   const microsoftConfig = configs.find(c => c.provider === "MICROSOFT");
   const t = useTranslations("settings");
-
-  useEffect(() => {
-    setIsHydrated(true);
-  }, []);
-
-  if (!isHydrated) {
-    return (
-      <section aria-hidden="true">
-        <div className="nr-form-section" style={{ minHeight: 160, border: "1px solid var(--line)", borderRadius: 8 }} />
-      </section>
-    );
-  }
 
   return (
     <section>
