@@ -491,11 +491,11 @@ describe("runDailyDigest", () => {
       demoLeadId: "lead-1",
     })).resolves.toEqual({ success: true, skipped: false });
 
-    expect(sendEmailMock).toHaveBeenCalledWith(expect.objectContaining({
-      to: "lead@example.com",
-      subject: "Welcome to Corgtex - your first newspaper",
-      html: expect.stringContaining("Already built"),
-    }));
+	    expect(sendEmailMock).toHaveBeenCalledWith(expect.objectContaining({
+	      to: "lead@example.com",
+	      subject: "Welcome to Corgtex - your first newspaper",
+	      html: expect.stringContaining("Ownership and control"),
+	    }));
     expect(txMock.demoLead.update).toHaveBeenCalledWith({
       where: { id: "lead-1" },
       data: { welcomeEmailSentAt: expect.any(Date) },
@@ -504,10 +504,11 @@ describe("runDailyDigest", () => {
       data: expect.objectContaining({
         workspaceId: "workspace-1",
         contactId: "contact-1",
-        type: "EMAIL",
-        title: "Sent welcome newspaper",
-      }),
-    });
+	        type: "EMAIL",
+	        title: "Sent welcome newspaper",
+	        bodyMd: expect.stringContaining("ownership and control"),
+	      }),
+	    });
     expect(txMock.newspaperDelivery.create).toHaveBeenCalledWith({
       data: expect.objectContaining({
         workspaceId: "workspace-1",

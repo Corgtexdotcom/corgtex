@@ -27,13 +27,13 @@ Primary questions:
 - What company context do AI tools need but currently lack?
 - Which workflows are strong candidates for AI assistance or agentic automation?
 - Which workflows should remain human-led, manual, or read-only for now?
-- What data, governance, integration, privacy, or trust gaps limit AI value?
+- What data, governance, integration, privacy, employee-trust, or control gaps limit AI value?
 - What should we do in the next 30 days to improve AI usefulness safely?
 
 About Corgtex, for later recommendations:
-Corgtex is a self-management operating system and organizational intelligence layer for AI-enabled companies. It is not meant to replace every specialist tool. It helps preserve and use company operating context: roles, circles or teams, tensions, proposals, decisions, actions, meetings, documents, communication summaries, tool ownership, AI usage, and technology-spend visibility.
+Corgtex is a self-management operating system and organizational intelligence layer for AI-enabled companies. It is not meant to replace every specialist tool. It helps preserve and use company operating context: roles, circles or teams, tensions, proposals, decisions, actions, meetings, documents, communication summaries, tool ownership, AI usage, technology-spend visibility, and human review boundaries.
 
-Corgtex may help when the main AI readiness gap is missing organizational context, scattered decision memory, unclear ownership, poor meeting-to-action flow, unmanaged tool/AI sprawl, or the need to give Claude, Codex, ChatGPT, Cursor, and other AI workbenches a trusted company context layer. Do not force Corgtex into the answer. If Corgtex is not the right first step, say so.
+Corgtex may help when the main AI readiness gap is missing organizational context, scattered decision memory, unclear ownership, weak employee trust, poor meeting-to-action flow, unmanaged tool/AI sprawl, or the need to give Claude, Codex, ChatGPT, Cursor, and other AI workbenches a trusted company context layer. It is especially relevant for employee-owned, self-managed, and mission-driven organizations that need AI adoption to preserve accountability and human control. Do not force Corgtex into the answer. If Corgtex is not the right first step, say so.
 
 Safety rules:
 - Analyze only the information we explicitly provide or approve in this chat/workspace.
@@ -181,7 +181,7 @@ const pageCopy = {
     },
     label: "AI Readiness",
     title: "Run an AI readiness X-Ray inside your own AI coworker.",
-    body: "Use the prompt in the AI tool that is already most connected to your company resources and work. It maps how AI is used today, where context is missing, and what to improve next.",
+    body: "Use the prompt in the AI tool that is already most connected to your company resources and work. It maps how AI is used today, where context is missing, and where governance, trust, or human control need to improve next.",
     openLabel: "Open The Prompt",
     closeLabel: "Hide The Prompt",
     copyLabel: "Copy Prompt",
@@ -213,13 +213,13 @@ const pageCopy = {
       "System integration and context gaps",
       "Workforce readiness and training needs",
       "High-value AI workflow opportunities",
-      "Privacy, governance, and read-only boundaries",
+      "Privacy, governance, employee trust, and read-only boundaries",
       "Where Corgtex may help, only if it clearly fits",
       "A feasible 30-day plan using existing staff",
     ],
     fitLabel: "Where Corgtex Fits",
     fitTitle: "Corgtex comes after the diagnosis.",
-    fitBody: "If the X-Ray shows that AI is weak because context is scattered across meetings, decisions, tools, and documents, Corgtex can become the organizational memory and governance layer. If the first step is simpler, the prompt tells the analyst to say that clearly.",
+    fitBody: "If the X-Ray shows that AI is weak because context is scattered across meetings, decisions, tools, and documents, Corgtex can become the organizational memory and governance layer. This is especially useful for employee-owned or self-managed teams when employee trust, ownership, and human review need to stay visible. If the first step is simpler, the prompt tells the analyst to say that clearly.",
   },
   es: {
     metadata: {
@@ -228,7 +228,7 @@ const pageCopy = {
     },
     label: "Preparación para IA",
     title: "Ejecuta un X-Ray de preparación para IA dentro de tu propio compañero de IA.",
-    body: "Usa el prompt en la herramienta de IA que ya esté más conectada a los recursos y trabajo de tu empresa. Mapea cómo se usa la IA hoy, dónde falta contexto y qué conviene mejorar después.",
+    body: "Usa el prompt en la herramienta de IA que ya esté más conectada a los recursos y trabajo de tu empresa. Mapea cómo se usa la IA hoy, dónde falta contexto y dónde conviene mejorar gobernanza, confianza o control humano.",
     openLabel: "Abrir el prompt",
     closeLabel: "Ocultar el prompt",
     copyLabel: "Copiar prompt",
@@ -260,13 +260,13 @@ const pageCopy = {
       "Brechas de integración y contexto",
       "Preparación del equipo y necesidades de formación",
       "Oportunidades de workflow con IA de alto valor",
-      "Privacidad, gobernanza y límites de solo lectura",
+      "Privacidad, gobernanza, confianza del equipo y límites de solo lectura",
       "Dónde Corgtex puede ayudar, solo si encaja claramente",
       "Un plan viable de 30 días con el equipo existente",
     ],
     fitLabel: "Dónde encaja Corgtex",
     fitTitle: "Corgtex viene después del diagnóstico.",
-    fitBody: "Si el X-Ray muestra que la IA es débil porque el contexto está disperso entre reuniones, decisiones, herramientas y documentos, Corgtex puede convertirse en la capa de memoria organizativa y gobernanza. Si el primer paso debe ser más simple, el prompt indica al analista que lo diga con claridad.",
+    fitBody: "Si el X-Ray muestra que la IA es débil porque el contexto está disperso entre reuniones, decisiones, herramientas y documentos, Corgtex puede convertirse en la capa de memoria organizativa y gobernanza. Esto es especialmente útil para equipos propiedad de sus empleados o autogestionados cuando confianza del equipo, propiedad y revisión humana deben permanecer visibles. Si el primer paso debe ser más simple, el prompt indica al analista que lo diga con claridad.",
   },
 } as const;
 
