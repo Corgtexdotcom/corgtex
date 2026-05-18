@@ -71,7 +71,7 @@ export function buildDemoWelcomeNewspaperHtml(params?: { workspaceName?: string 
             <tr>
               <td style="padding:24px 28px;">
                 <h2 style="font-size:22px;line-height:1.2;margin:0 0 12px;">What Corgtex helps your team do</h2>
-                <p style="font-size:16px;line-height:1.6;margin:0 0 18px;">Corgtex gives an organization one shared place to see what is happening, what has been decided, what needs attention, and where work is moving. Instead of asking people to leave their daily tools, Corgtex turns the important signals into a clear briefing that can arrive directly in email.</p>
+                <p style="font-size:16px;line-height:1.6;margin:0 0 18px;">Corgtex gives an organization one shared place to see what is happening, what has been decided, what needs attention, and where work is moving. It helps teams adopt AI without losing ownership of their context, decisions, handoffs, and human review. Instead of asking people to leave their daily tools, Corgtex turns the important signals into a clear briefing that can arrive directly in email.</p>
                 <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-top:1px solid #2d2a24;border-bottom:1px solid #2d2a24;margin:20px 0;">
                   <tr>
                     <td style="padding:16px 0;">
@@ -97,9 +97,15 @@ export function buildDemoWelcomeNewspaperHtml(params?: { workspaceName?: string 
                       <p style="font-size:15px;line-height:1.55;margin:0;">Finance, budget, spend requests, and operating activity can live beside the work itself, helping leaders see cost, value, and progress in one operating picture.</p>
                     </td>
                   </tr>
+                  <tr>
+                    <td style="padding:16px 0;border-top:1px solid #c9c0aa;">
+                      <h3 style="font-size:16px;line-height:1.3;margin:0 0 8px;text-transform:uppercase;letter-spacing:0.8px;">Ownership and control</h3>
+                      <p style="font-size:15px;line-height:1.55;margin:0;">Especially for employee-owned, self-managed, or mission-driven teams, AI should strengthen trust and accountability rather than hide how work gets done.</p>
+                    </td>
+                  </tr>
                 </table>
                 <h2 style="font-size:22px;line-height:1.2;margin:0 0 12px;">Already built</h2>
-                <p style="font-size:16px;line-height:1.6;margin:0;">Corgtex already brings together the Organization Brain, governance workflows, member and role visibility, meeting intelligence, action tracking, finance controls, CRM follow-up, Slack-aware briefings, and AI agents that can help teams turn scattered activity into operating clarity.</p>
+                <p style="font-size:16px;line-height:1.6;margin:0;">Corgtex already brings together the Organization Brain, governance workflows, member and role visibility, meeting intelligence, action tracking, finance controls, CRM follow-up, Slack-aware briefings, and AI agents that can help teams turn scattered activity into operating clarity while keeping people in control.</p>
                 <p style="font-size:15px;line-height:1.6;margin:20px 0 0;"><a href="${env.APP_URL.replace(/\/$/, "")}" style="color:#2d2a24;text-decoration:underline;">Open Corgtex</a> when you are ready to see the operating picture behind the newspaper.</p>
               </td>
             </tr>
@@ -724,7 +730,7 @@ export async function sendDemoWelcomeNewspaper(params: {
         bodyMd: [
           "Sent the Corgtex welcome newspaper.",
           "",
-          "The email described how Corgtex helps organizations keep shared memory, decision visibility, work follow-through, and business visibility in one operating picture.",
+          "The email described how Corgtex helps organizations keep shared memory, decision visibility, work follow-through, business visibility, and ownership and control in one operating picture.",
         ].join("\n"),
       },
     });

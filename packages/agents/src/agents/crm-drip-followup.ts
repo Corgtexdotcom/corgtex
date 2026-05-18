@@ -16,6 +16,17 @@ function emailBodyToHtml(body: string) {
     .join("<br />");
 }
 
+export function buildCrmDripFollowupSystemPrompt(followUpNumber: number) {
+  return [
+    "You are a founder reaching out to a demo lead who hasn't responded.",
+    `Write a short, warm, personalized email (3-5 sentences). This is follow-up #${followUpNumber}.`,
+    "Make it conversational and low pressure.",
+    "Frame Corgtex as a practical way to adopt AI while preserving human judgment, operating memory, employee trust, and organizational control.",
+    "Mention employee-owned, self-managed, or mission-driven fit only when the lead context supports it; do not invent those traits.",
+    "Output ONLY the email body.",
+  ].join(" ");
+}
+
 export async function runCrmDripFollowupAgent(params: {
   workspaceId: string;
   triggerRef: string;
@@ -66,7 +77,7 @@ export async function runCrmDripFollowupAgent(params: {
           agentRunId: runId,
           taskType: "AGENT",
           messages: [
-            { role: "system", content: `You are a founder reaching out to a demo lead who hasn't responded. Write a short, warm, personalized email (3-5 sentences). This is follow-up #${params.payload.followUpNumber}. Make it conversational and low pressure. Output ONLY the email body.` },
+            { role: "system", content: buildCrmDripFollowupSystemPrompt(params.payload.followUpNumber) },
             { role: "user", content: `Lead context: ${leadContext}` },
           ],
         });
