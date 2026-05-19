@@ -1059,14 +1059,14 @@ describe("meeting-intelligence", () => {
       expect(prisma.meetingInsight.findUnique).not.toHaveBeenCalled();
     });
 
-    it("bypasses auto-apply for configured Slack-reviewed Crina action items", async () => {
+    it("bypasses auto-apply for configured Slack-reviewed customer action items", async () => {
       (prisma.meeting.findFirst as ReturnType<typeof vi.fn>).mockResolvedValue({
-        series: { externalId: "ops:crina-weekly-progress-review" },
+        series: { externalId: "ops:weekly-progress-review" },
       });
       (prisma.workspaceFeatureFlag.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue({
         enabled: true,
         config: {
-          meetingSeriesExternalId: "ops:crina-weekly-progress-review",
+          meetingSeriesExternalId: "ops:weekly-progress-review",
           channelId: "C999",
         },
       });

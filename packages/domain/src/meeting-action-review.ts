@@ -4,7 +4,7 @@ import { requireWorkspaceMembership } from "./auth";
 import { invariant } from "./errors";
 
 export const SLACK_MEETING_ACTION_REVIEW_FLAG = "SLACK_MEETING_ACTION_REVIEW";
-export const CRINA_WEEKLY_PROGRESS_REVIEW_SERIES_EXTERNAL_ID = "ops:crina-weekly-progress-review";
+export const DEFAULT_WEEKLY_PROGRESS_REVIEW_SERIES_EXTERNAL_ID = "ops:weekly-progress-review";
 export const SLACK_MEETING_ACTION_REVIEW_EDIT_CALLBACK_ID = "corgtex_meeting_review_edit_modal";
 
 const DEFAULT_REVIEW_EXPIRY_HOURS = 48;
@@ -114,7 +114,7 @@ function parseSlackMeetingActionReviewConfig(raw: unknown): SlackMeetingActionRe
   if (!isRecord(raw)) return null;
 
   const meetingSeriesExternalId = stringValue(raw, ["meetingSeriesExternalId", "seriesExternalId", "meetingSeriesId"])
-    ?? CRINA_WEEKLY_PROGRESS_REVIEW_SERIES_EXTERNAL_ID;
+    ?? DEFAULT_WEEKLY_PROGRESS_REVIEW_SERIES_EXTERNAL_ID;
   const channelId = stringValue(raw, ["channelId", "approvedChannelId", "slackChannelId"]);
   if (!channelId) return null;
 
