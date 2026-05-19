@@ -99,7 +99,7 @@ export default async function CirclesPage({
       </header>
 
       {viewMode === "graph" ? (
-        <section className="ws-section" style={{ padding: "0 24px" }}>
+        <section className="ws-section circle-graph-section">
           {(!treeData || treeData.length === 0) ? (
             <div className="nr-item" style={{ textAlign: "center", padding: "48px 24px" }}>
               <h3 style={{ margin: "0 0 8px" }}>{t("whatIsCircleTitle")}</h3>

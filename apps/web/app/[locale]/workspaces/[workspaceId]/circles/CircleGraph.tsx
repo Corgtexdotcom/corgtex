@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, useCallback, type CSSProperties } from "react";
+import { useEffect, useRef, useState, useCallback, type CSSProperties, type MouseEvent } from "react";
 import {
   ReactFlow,
   Controls,
@@ -38,13 +38,16 @@ const DEFAULT_EXTENT: [[number, number], [number, number]] = [[-2000, -2000], [6
 
 export default function CircleGraph({ treeData }: { treeData: CircleGraphCircle[]; isDemo: boolean }) {
   const t = useTranslations("circles");
-  const shellRef = useRef<HTMLDivElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
   const dragStartPositionsRef = useRef<Record<string, GraphPoint>>({});
+  const skipNextNodeClickRef = useRef(false);
+  const nodesRef = useRef<Node[]>([]);
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
   const [selectedCircleId, setSelectedCircleId] = useState<string | null>(null);
   const [expandedCircleIds, setExpandedCircleIds] = useState<Set<string>>(new Set());
   const [manualPositions, setManualPositions] = useState<Record<string, GraphPoint>>({});
+  const [layoutAnchorCircleId, setLayoutAnchorCircleId] = useState<string | null>(null);
   const [containerWidth, setContainerWidth] = useState(() => typeof window !== "undefined" ? window.innerWidth : 1200);
   const [graphBounds, setGraphBounds] = useState<GraphBounds>(DEFAULT_GRAPH_BOUNDS);
   const [nodeExtent, setNodeExtent] = useState<[[number, number], [number, number]]>(DEFAULT_EXTENT);
@@ -58,6 +61,10 @@ export default function CircleGraph({ treeData }: { treeData: CircleGraphCircle[
   const isCompactGraph = isCompactViewport || containerWidth < 760;
 
   useEffect(() => {
+    nodesRef.current = nodes;
+  }, [nodes]);
+
+  useEffect(() => {
     const updateViewportMode = () => setIsCompactViewport(window.innerWidth < 760);
     updateViewportMode();
     window.addEventListener("resize", updateViewportMode);
@@ -65,11 +72,11 @@ export default function CircleGraph({ treeData }: { treeData: CircleGraphCircle[
   }, []);
 
   useEffect(() => {
-    if (!shellRef.current) return;
+    if (!panelRef.current) return;
     const observer = new ResizeObserver(([entry]) => {
       setContainerWidth(entry.contentRect.width);
     });
-    observer.observe(shellRef.current);
+    observer.observe(panelRef.current);
     return () => observer.disconnect();
   }, []);
 
@@ -98,22 +105,49 @@ export default function CircleGraph({ treeData }: { treeData: CircleGraphCircle[
     return result;
   }, []);
 
+  const anchorNodeAtCurrentPosition = useCallback((id: string) => {
+    const currentNode = nodesRef.current.find((node) => node.id === id);
+    if (!currentNode) return;
+    setManualPositions((prev) => {
+      if (prev[id]) return prev;
+      return { ...prev, [id]: currentNode.position };
+    });
+    setLayoutAnchorCircleId(id);
+  }, []);
+
   const handleCollapse = useCallback((id: string) => {
+    anchorNodeAtCurrentPosition(id);
     setExpandedCircleIds(prev => {
       const next = new Set(prev);
       next.delete(id);
       return next;
     });
-  }, []);
+    setSelectedCircleId(id);
+  }, [anchorNodeAtCurrentPosition]);
 
   const expandCircle = useCallback((id: string) => {
+    anchorNodeAtCurrentPosition(id);
     setExpandedCircleIds(prev => {
       const next = new Set(prev);
       next.add(id);
       return next;
     });
     setSelectedCircleId(id);
-  }, []);
+  }, [anchorNodeAtCurrentPosition]);
+
+  const toggleCircle = useCallback((id: string) => {
+    anchorNodeAtCurrentPosition(id);
+    setExpandedCircleIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+    setSelectedCircleId(id);
+  }, [anchorNodeAtCurrentPosition]);
 
   useEffect(() => {
     const flatData = flattenTree(treeData);
@@ -141,6 +175,7 @@ export default function CircleGraph({ treeData }: { treeData: CircleGraphCircle[
           roles: item.roles || [],
           onCollapse: handleCollapse,
           onExpand: expandCircle,
+          onToggle: toggleCircle,
         },
       };
     });
@@ -165,6 +200,7 @@ export default function CircleGraph({ treeData }: { treeData: CircleGraphCircle[
           isCompactViewport: isCompactGraph,
           isFullscreen,
           manualPositions,
+          anchorNodeId: layoutAnchorCircleId,
         },
       );
       const layoutedNodes = layout.nodes.map((node) => {
@@ -201,30 +237,30 @@ export default function CircleGraph({ treeData }: { treeData: CircleGraphCircle[
     isCompactGraph,
     isFullscreen,
     manualPositions,
+    layoutAnchorCircleId,
     layoutRevision,
+    toggleCircle,
   ]);
 
-  const onNodeDoubleClick = useCallback((_: any, node: Node) => {
-    setExpandedCircleIds(prev => {
-      const next = new Set(prev);
-      if (next.has(node.id)) {
-        next.delete(node.id);
-      } else {
-        next.add(node.id);
-      }
-      return next;
-    });
+  const isInteractiveTarget = useCallback((target: EventTarget | null) => {
+    if (!(target instanceof Element)) return false;
+    return Boolean(target.closest("a,button,input,select,textarea,label,[contenteditable='true'],[data-no-node-toggle='true']"));
   }, []);
 
-  const onNodeClick = useCallback((_: any, node: Node) => {
+  const onNodeClick = useCallback((event: MouseEvent, node: Node) => {
+    if (skipNextNodeClickRef.current) {
+      skipNextNodeClickRef.current = false;
+      return;
+    }
+    if (isInteractiveTarget(event.target)) return;
     setNodes((nds: Node[]) => 
       nds.map((n: Node) => ({
         ...n,
         selected: n.id === node.id
       }))
     );
-    setSelectedCircleId(node.data.circleId as string);
-  }, [setNodes]);
+    toggleCircle(node.id);
+  }, [isInteractiveTarget, setNodes, toggleCircle]);
 
   const handleNodeDragStart = useCallback((_: any, node: Node) => {
     dragStartPositionsRef.current[node.id] = node.position;
@@ -236,6 +272,10 @@ export default function CircleGraph({ treeData }: { treeData: CircleGraphCircle[
     if (!startPosition || Math.hypot(node.position.x - startPosition.x, node.position.y - startPosition.y) < CIRCLE_SNAP_GRID[0]) {
       return;
     }
+    skipNextNodeClickRef.current = true;
+    window.setTimeout(() => {
+      skipNextNodeClickRef.current = false;
+    }, 0);
 
     const candidateNodes = nodes.map((item) => item.id === node.id ? node : item);
     const nextPosition = findNearestFreePosition(node.id, candidateNodes, {
@@ -243,12 +283,15 @@ export default function CircleGraph({ treeData }: { treeData: CircleGraphCircle[
       isCompactViewport: isCompactGraph,
       isFullscreen,
       manualPositions,
+      anchorNodeId: node.id,
     });
     setManualPositions((prev) => ({ ...prev, [node.id]: nextPosition }));
+    setLayoutAnchorCircleId(node.id);
   }, [containerWidth, isCompactGraph, isFullscreen, manualPositions, nodes]);
 
   const handleResetLayout = useCallback(() => {
     setManualPositions({});
+    setLayoutAnchorCircleId(null);
     setLayoutRevision((value) => value + 1);
     window.requestAnimationFrame(() => {
       if (!flowInstance) return;
@@ -263,6 +306,7 @@ export default function CircleGraph({ treeData }: { treeData: CircleGraphCircle[
   const handleCollapseAll = useCallback(() => {
     setExpandedCircleIds(new Set());
     setManualPositions({});
+    setLayoutAnchorCircleId(null);
     setSelectedCircleId(null);
     setLayoutRevision((value) => value + 1);
   }, []);
@@ -290,8 +334,8 @@ export default function CircleGraph({ treeData }: { treeData: CircleGraphCircle[
 
   return (
     <div
-      ref={shellRef}
-      className={`circle-graph-shell ${isFullscreen ? "circle-graph-shell-fullscreen" : ""}`}
+      ref={panelRef}
+      className={`circle-graph-panel ${isFullscreen ? "circle-graph-panel-fullscreen" : ""}`}
       style={{ "--circle-graph-width": `${Math.ceil(graphBounds.width)}px` } as CSSProperties}
     >
       <div className="circle-graph-toolbar">
@@ -312,31 +356,32 @@ export default function CircleGraph({ treeData }: { treeData: CircleGraphCircle[
           <span>{isFullscreen ? t("graphExitFullscreen") : t("graphFullscreen")}</span>
         </button>
       </div>
-      <ReactFlow
-        nodes={nodes}
-        edges={edges}
-        onNodesChange={onNodesChange}
-        onEdgesChange={onEdgesChange}
-        onNodeClick={onNodeClick}
-        onNodeDoubleClick={onNodeDoubleClick}
-        onNodeDragStart={handleNodeDragStart}
-        onNodeDragStop={handleNodeDragStop}
-        onInit={setFlowInstance}
-        nodeTypes={nodeTypes}
-        fitView={!isCompactGraph}
-        defaultViewport={isCompactGraph ? { x: 24, y: 86, zoom: 0.95 } : undefined}
-        fitViewOptions={{ padding: 0.18 }}
-        nodeExtent={nodeExtent}
-        translateExtent={translateExtent}
-        snapToGrid
-        snapGrid={CIRCLE_SNAP_GRID}
-        minZoom={0.2}
-        maxZoom={2}
-        attributionPosition="bottom-right"
-      >
-        <Controls />
-        <Background gap={28} size={1} color="var(--circle-grid)" />
-      </ReactFlow>
+      <div className={`circle-graph-shell ${isFullscreen ? "circle-graph-shell-fullscreen" : ""}`}>
+        <ReactFlow
+          nodes={nodes}
+          edges={edges}
+          onNodesChange={onNodesChange}
+          onEdgesChange={onEdgesChange}
+          onNodeClick={onNodeClick}
+          onNodeDragStart={handleNodeDragStart}
+          onNodeDragStop={handleNodeDragStop}
+          onInit={setFlowInstance}
+          nodeTypes={nodeTypes}
+          fitView={!isCompactGraph}
+          defaultViewport={isCompactGraph ? { x: 24, y: 86, zoom: 0.95 } : undefined}
+          fitViewOptions={{ padding: 0.18 }}
+          nodeExtent={nodeExtent}
+          translateExtent={translateExtent}
+          snapToGrid
+          snapGrid={CIRCLE_SNAP_GRID}
+          minZoom={0.2}
+          maxZoom={2}
+          attributionPosition="bottom-right"
+        >
+          <Controls />
+          <Background gap={28} size={1} color="var(--circle-grid)" />
+        </ReactFlow>
+      </div>
     </div>
   );
 }

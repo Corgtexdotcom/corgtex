@@ -26,6 +26,33 @@ function makeNode(id: string, type: "circleNode" | "expandedCircleNode" = "circl
   };
 }
 
+function makeRichExpandedNode(id: string): Node {
+  const roles = Array.from({ length: 4 }, (_, roleIndex) => ({
+    id: `${id}-role-${roleIndex}`,
+    purposeMd: `Owns a substantial operating area with enough descriptive text to wrap across multiple lines in the expanded card ${roleIndex}.`,
+    accountabilities: Array.from(
+      { length: 4 },
+      (_, accountabilityIndex) => `Accountability ${accountabilityIndex + 1} for role ${roleIndex + 1} with enough content to require layout room.`,
+    ),
+    assignments: Array.from({ length: 5 }, (_, assignmentIndex) => ({
+      id: `${id}-role-${roleIndex}-assignment-${assignmentIndex}`,
+    })),
+  }));
+
+  return {
+    id,
+    type: "expandedCircleNode",
+    position: { x: 0, y: 0 },
+    data: {
+      roleCount: roles.length,
+      roles,
+      members: Array.from({ length: 18 }, (_, index) => ({ memberId: `${id}-member-${index}` })),
+      memberCount: 18,
+      purposeMd: "Coordinates a broader circle with several people and a purpose that should remain visible when expanded.",
+    },
+  };
+}
+
 function getDimensions(node: Node): NodeDimensions {
   const data = node.data as { nodeWidth?: number; nodeHeight?: number };
   return {
@@ -81,6 +108,22 @@ describe("circle graph layout", () => {
     expectNoOverlap(result.nodes);
   });
 
+  it("sizes expanded circles from visible role, member, and accountability content", () => {
+    const result = layoutCircleGraph(
+      [makeNode("small", "expandedCircleNode", 1), makeRichExpandedNode("rich")],
+      [],
+      defaultOptions,
+    );
+
+    const small = result.nodes.find((node) => node.id === "small");
+    const rich = result.nodes.find((node) => node.id === "rich");
+    expect(small).toBeDefined();
+    expect(rich).toBeDefined();
+    expect(getDimensions(rich!).height).toBeGreaterThan(620);
+    expect(getDimensions(rich!).height).toBeGreaterThan(getDimensions(small!).height + 600);
+    expectNoOverlap(result.nodes);
+  });
+
   it("uses expanded row heights when collapsed and expanded circles are mixed", () => {
     const result = layoutCircleGraph(
       [
@@ -117,6 +160,38 @@ describe("circle graph layout", () => {
     expect(
       overlaps(nextPosition, getDimensions(draggedNode), first.position, getDimensions(first)),
     ).toBe(false);
+  });
+
+  it("keeps an anchored expanded node in place and pushes neighbors away", () => {
+    const anchorPosition = { x: 48, y: 48 };
+    const result = layoutCircleGraph(
+      [makeNode("neighbor"), makeRichExpandedNode("target")],
+      [],
+      { ...defaultOptions, manualPositions: { target: anchorPosition }, anchorNodeId: "target" },
+    );
+
+    const target = result.nodes.find((node) => node.id === "target");
+    expect(target?.position).toEqual(anchorPosition);
+    expectNoOverlap(result.nodes);
+  });
+
+  it("preserves manual side-by-side placement for multiple expanded circles", () => {
+    const result = layoutCircleGraph(
+      [makeRichExpandedNode("left"), makeRichExpandedNode("right"), makeNode("collapsed")],
+      [],
+      {
+        ...defaultOptions,
+        viewportWidth: 1600,
+        manualPositions: {
+          left: { x: 48, y: 48 },
+          right: { x: 640, y: 48 },
+        },
+      },
+    );
+
+    expect(result.nodes.find((node) => node.id === "left")?.position).toEqual({ x: 48, y: 48 });
+    expect(result.nodes.find((node) => node.id === "right")?.position).toEqual({ x: 640, y: 48 });
+    expectNoOverlap(result.nodes);
   });
 
   it("keeps searching when the dense-graph fallback position is occupied", () => {
