@@ -571,6 +571,16 @@ describe("members domain", () => {
             bio: true,
           },
         },
+        roleAssignments: expect.objectContaining({
+          where: {
+            role: {
+              archivedAt: null,
+              circle: {
+                archivedAt: null,
+              },
+            },
+          },
+        }),
       }),
     }));
   });

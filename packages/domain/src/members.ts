@@ -155,6 +155,14 @@ export async function listMembersEnriched(workspaceId: string, opts?: { includeI
         },
       },
       roleAssignments: {
+        where: {
+          role: {
+            archivedAt: null,
+            circle: {
+              archivedAt: null,
+            },
+          },
+        },
         include: {
           role: {
             include: {
@@ -718,6 +726,14 @@ export async function getMemberProfile(actor: AppActor, workspaceId: string, mem
         },
       },
       roleAssignments: {
+        where: {
+          role: {
+            archivedAt: null,
+            circle: {
+              archivedAt: null,
+            },
+          },
+        },
         include: {
           role: {
             include: {
