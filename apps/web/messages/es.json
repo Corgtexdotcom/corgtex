@@ -408,6 +408,8 @@
     "btnNew": "Nuevo",
     "btnRemoveAttachment": "✕",
     "btnSend": "Enviar",
+    "connectClaudeDescription": "Usa el contexto de Corgtex en Claude, Claude Cowork o Claude Code.",
+    "connectClaudeLabel": "Conectar Claude",
     "conversationsTitle": "Conversaciones",
     "emptyStateDesc": "Pregunta sobre tu espacio de trabajo, redacta propuestas o explora conocimiento.",
     "emptyStateTitle": "Inicia una conversación",

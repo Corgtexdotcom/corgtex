@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { ChatInterface } from "./chat/ChatInterface";
 import type { NavGroup } from "@/lib/nav-config";
+import { WorkspaceClaudeConnectorCta } from "./WorkspaceClaudeConnectorCta";
 import { WorkspaceNavIcon } from "./WorkspaceNavIcon";
 
 type MobileMode = "workspace" | "ai";
@@ -187,6 +188,7 @@ export function MobileWorkspaceShell({
 
       {mode === "ai" && (
         <section className="mobile-ai-workbench" aria-label={tMobile("aiWorkbenchLabel")}>
+          <WorkspaceClaudeConnectorCta />
           <ChatInterface
             workspaceId={workspaceId}
             conversations={conversations}
