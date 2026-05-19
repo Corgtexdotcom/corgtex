@@ -786,8 +786,9 @@ describe("createCorgtexMcpServer", () => {
       providerKey: "notion",
       toolName: "notion-create-page",
       arguments: { title: "Decision log" },
+      operation: undefined,
       confidence: 0.95,
-      explicitUserIntent: true,
+      explicitUserIntent: false,
     });
     expect(JSON.parse(response.content[0].text)).toEqual(expect.objectContaining({
       skipped: false,

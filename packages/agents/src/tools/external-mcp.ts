@@ -83,7 +83,9 @@ export const executeExternalToolTool: ModelTool = {
         providerKey: { type: "string", enum: ["notion"] },
         toolName: { type: "string" },
         argumentsJson: { type: "string", description: "JSON object string containing the external MCP tool arguments" },
+        operation: { type: "string", enum: ["read", "write"], description: "Set explicitly when known; unknown tools default to write." },
         confidence: { type: "number", description: "Model confidence from 0 to 1 when available" },
+        explicitUserIntent: { type: "boolean", description: "Only true when the user explicitly asked for this external execution." },
       },
       required: ["providerKey", "toolName"],
     },
@@ -149,7 +151,8 @@ export async function executeExternalToolAction(actor: AppActor, ctx: ToolContex
     providerKey: args.providerKey,
     toolName: args.toolName,
     arguments: parseArgumentsJson(args.argumentsJson ?? args.arguments),
+    operation: args.operation === "read" || args.operation === "write" ? args.operation : undefined,
     confidence: typeof args.confidence === "number" ? args.confidence : undefined,
-    explicitUserIntent: true,
+    explicitUserIntent: args.explicitUserIntent === true,
   });
 }

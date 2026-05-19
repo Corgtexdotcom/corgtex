@@ -625,13 +625,17 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       providerKey: z.enum(["notion"]).describe("Connected external provider key"),
       toolName: z.string().describe("External MCP tool name to execute"),
       arguments: z.record(z.string(), z.unknown()).optional().describe("External MCP tool arguments"),
+      operation: z.enum(["read", "write"]).optional().describe("External operation class. Unknown tools default to write."),
       confidence: z.number().optional().describe("Model confidence from 0 to 1 when available"),
+      explicitUserIntent: z.boolean().optional().describe("True only when the user explicitly asked for this external execution."),
     },
-    async ({ providerKey, toolName, arguments: args, confidence }: {
+    async ({ providerKey, toolName, arguments: args, operation, confidence, explicitUserIntent }: {
       providerKey: "notion";
       toolName: string;
       arguments?: Record<string, unknown>;
+      operation?: "read" | "write";
       confidence?: number;
+      explicitUserIntent?: boolean;
     }) => {
       requireToolCapability("execute_external_tool");
       const result = await executeExternalMcpTool(actor, {
@@ -639,8 +643,9 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         providerKey,
         toolName,
         arguments: args ?? {},
+        operation,
         confidence,
-        explicitUserIntent: true,
+        explicitUserIntent: explicitUserIntent === true,
       });
       return structuredJsonResult(result as Record<string, unknown>);
     },

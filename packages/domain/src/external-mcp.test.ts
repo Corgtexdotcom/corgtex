@@ -125,6 +125,22 @@ describe("external MCP gateway", () => {
     }));
   });
 
+  it("preserves the stored refresh token when connection updates omit it", async () => {
+    externalMcpConnectionMock.upsert.mockResolvedValueOnce({ id: "connection-1" });
+    const { upsertExternalMcpConnection } = await import("./external-mcp");
+
+    await upsertExternalMcpConnection(actor, {
+      workspaceId: "ws-1",
+      providerKey: "notion",
+      accessToken: "rotated-access-token",
+      scopes: ["search"],
+    });
+
+    const upsertArgs = externalMcpConnectionMock.upsert.mock.calls.at(-1)?.[0];
+    expect(upsertArgs.update).not.toHaveProperty("refreshTokenEnc");
+    expect(upsertArgs.create).toHaveProperty("refreshTokenEnc", null);
+  });
+
   it("searches live Notion context with provenance and audits without storing raw tokens", async () => {
     externalMcpConnectionMock.findMany.mockResolvedValueOnce([activeNotionConnection()]);
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
@@ -264,5 +280,77 @@ describe("external MCP gateway", () => {
     });
     expect(externalMcpConnectionMock.findFirst).not.toHaveBeenCalled();
     expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("does not treat missing explicit user intent as explicit", async () => {
+    vi.stubGlobal("fetch", vi.fn());
+    const { executeExternalMcpTool } = await import("./external-mcp");
+    const result = await executeExternalMcpTool(actor, {
+      workspaceId: "ws-1",
+      providerKey: "notion",
+      toolName: "notion-create-page",
+      arguments: { title: "Decision log" },
+      confidence: 0.7,
+    });
+
+    expect(result).toEqual({
+      skipped: true,
+      policy: expect.objectContaining({
+        policyClass: "draft_or_clarify",
+        autoRunAllowed: false,
+      }),
+    });
+    expect(externalMcpConnectionMock.findFirst).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("classifies unknown external tools as writes without substring matching", async () => {
+    vi.stubGlobal("fetch", vi.fn());
+    const { executeExternalMcpTool } = await import("./external-mcp");
+    const result = await executeExternalMcpTool(actor, {
+      workspaceId: "ws-1",
+      providerKey: "notion",
+      toolName: "notion-targeted-update",
+      arguments: { title: "Decision log" },
+      confidence: 0.7,
+    });
+
+    expect(result).toEqual({
+      skipped: true,
+      policy: expect.objectContaining({
+        policyClass: "draft_or_clarify",
+        autoRunAllowed: false,
+      }),
+    });
+    expect(externalMcpConnectionMock.findFirst).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("auto-runs exact provider read tools at low confidence", async () => {
+    externalMcpConnectionMock.findFirst.mockResolvedValueOnce(activeNotionConnection());
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      result: {
+        structuredContent: { results: [] },
+      },
+    }), { status: 200 })));
+
+    const { executeExternalMcpTool } = await import("./external-mcp");
+    const result = await executeExternalMcpTool(actor, {
+      workspaceId: "ws-1",
+      providerKey: "notion",
+      toolName: "notion-search",
+      arguments: { query: "decision log" },
+      confidence: 0.2,
+    });
+
+    expect(result).toEqual(expect.objectContaining({
+      skipped: false,
+      toolName: "notion-search",
+      policy: expect.objectContaining({
+        policyClass: "read",
+        autoRunAllowed: true,
+      }),
+    }));
+    expect(fetch).toHaveBeenCalled();
   });
 });

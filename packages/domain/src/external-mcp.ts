@@ -7,6 +7,7 @@ import { requireWorkspaceMembership } from "./auth";
 import { AppError, invariant } from "./errors";
 
 export type ExternalMcpProviderKey = "notion";
+export type ExternalMcpOperation = "read" | "write";
 
 type ExternalMcpProvider = {
   providerKey: ExternalMcpProviderKey;
@@ -76,6 +77,16 @@ function providerForKey(providerKey: string) {
   const provider = EXTERNAL_MCP_PROVIDERS[providerKey as ExternalMcpProviderKey];
   invariant(provider, 404, "NOT_FOUND", `Unknown external MCP provider: ${providerKey}`);
   return provider;
+}
+
+function classifyExternalMcpOperation(
+  provider: ExternalMcpProvider,
+  toolName: string,
+  operation?: ExternalMcpOperation | null,
+): ExternalMcpOperation {
+  if (operation === "read" || operation === "write") return operation;
+  if (toolName === provider.searchToolName || toolName === provider.fetchToolName) return "read";
+  return "write";
 }
 
 function connectionStatus(connection: ExternalMcpConnectionRecord | null): ExternalMcpConnectionSummary["status"] {
@@ -346,6 +357,9 @@ export async function upsertExternalMcpConnection(actor: AppActor, params: {
   invariant(actor.kind === "user", 403, "FORBIDDEN", "Only users can connect external MCP providers.");
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
   const provider = providerForKey(params.providerKey);
+  const refreshTokenUpdate = params.refreshToken !== undefined
+    ? { refreshTokenEnc: params.refreshToken ? encryptSecret(params.refreshToken) : null }
+    : {};
   return prisma.externalMcpConnection.upsert({
     where: {
       workspaceId_userId_providerKey: {
@@ -358,7 +372,7 @@ export async function upsertExternalMcpConnection(actor: AppActor, params: {
       displayName: provider.displayName,
       serverUrl: provider.serverUrl,
       accessTokenEnc: encryptSecret(params.accessToken),
-      refreshTokenEnc: params.refreshToken ? encryptSecret(params.refreshToken) : null,
+      ...refreshTokenUpdate,
       scopes: params.scopes ?? [],
       capabilities: params.capabilities ? params.capabilities as Prisma.InputJsonObject : Prisma.DbNull,
       status: "ACTIVE",
@@ -472,22 +486,25 @@ export async function executeExternalMcpTool(actor: AppActor, params: {
   providerKey: ExternalMcpProviderKey;
   toolName: string;
   arguments: Record<string, unknown>;
+  operation?: ExternalMcpOperation | null;
   confidence?: number | null;
   explicitUserIntent?: boolean;
 }) {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  const provider = providerForKey(params.providerKey);
+  const operation = classifyExternalMcpOperation(provider, params.toolName, params.operation);
   const policy = evaluateDelegatedActionPolicy({
     toolName: params.toolName,
-    operation: params.toolName.includes("search") || params.toolName.includes("fetch") || params.toolName.includes("get") ? "read" : "write",
+    operation,
     confidence: params.confidence,
-    explicitUserIntent: params.explicitUserIntent ?? true,
+    explicitUserIntent: params.explicitUserIntent === true,
   });
 
   if (!policy.autoRunAllowed) {
     return { skipped: true, policy };
   }
 
-  const { provider, connection } = await requireActiveConnection(actor, params);
+  const { connection } = await requireActiveConnection(actor, params);
   try {
     const remote = await callExternalMcpTool(connection, params.toolName, params.arguments);
     const payload = extractMcpPayload(remote);
