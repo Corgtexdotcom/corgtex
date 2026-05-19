@@ -198,6 +198,20 @@ export async function assignAgentToCircle(
   });
   invariant(circle, 404, "NOT_FOUND", "Circle not found.");
 
+  const roleId = params.roleId?.trim() || null;
+  if (roleId) {
+    const role = await prisma.role.findFirst({
+      where: {
+        id: roleId,
+        circleId: params.circleId,
+        circle: { workspaceId: params.workspaceId },
+        archivedAt: null,
+      },
+      select: { id: true },
+    });
+    invariant(role, 404, "NOT_FOUND", "Role not found.");
+  }
+
   return prisma.circleAgentAssignment.upsert({
     where: {
       circleId_agentIdentityId: {
@@ -208,10 +222,10 @@ export async function assignAgentToCircle(
     create: {
       circleId: params.circleId,
       agentIdentityId: params.agentIdentityId,
-      roleId: params.roleId ?? null,
+      roleId,
     },
     update: {
-      roleId: params.roleId ?? null,
+      roleId,
     },
   });
 }

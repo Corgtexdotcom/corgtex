@@ -43,6 +43,10 @@ export const WORKSPACE_ADD_ACTION_DEFINITIONS = {
     label: "Role",
     description: "Create a role in a circle.",
   },
+  role_assignment: {
+    label: "Member assignment",
+    description: "Assign a member to a role in this circle.",
+  },
   cycle: {
     label: "Cycle",
     description: "Create a contribution cycle.",
@@ -181,6 +185,15 @@ function isAdmin(role: MemberRole | null | undefined) {
   return role === "ADMIN";
 }
 
+function isStructureManager(role: MemberRole | null | undefined) {
+  return role === "ADMIN" || role === "FACILITATOR";
+}
+
+function pathSegments(subpath: string | null) {
+  if (subpath === null) return null;
+  return subpath.split("?")[0]?.split("#")[0]?.split("/").filter(Boolean) ?? [];
+}
+
 function canInviteMembers(context: WorkspaceAddActionContext) {
   return isAdmin(context.role) || context.invitePolicy === "MEMBERS_CAN_INVITE" || context.invitePolicy === "MEMBERS_CAN_REQUEST";
 }
@@ -194,6 +207,7 @@ export function getWorkspaceAddActions(context: WorkspaceAddActionContext): Work
 
   const subpath = workspaceSubpath(context.pathname, context.workspaceId);
   const segment = primarySegment(subpath);
+  const segments = pathSegments(subpath);
   if (segment === null || segment === "add") return [];
 
   switch (segment) {
@@ -213,7 +227,10 @@ export function getWorkspaceAddActions(context: WorkspaceAddActionContext): Work
     case "goals":
       return context.featureFlags.GOALS ? [action("goal")] : [];
     case "circles":
-      return [action("circle"), action("role")];
+      if (!isStructureManager(context.role)) return [];
+      return (segments?.length ?? 0) > 1
+        ? [action("circle"), action("role"), action("role_assignment")]
+        : [action("circle"), action("role")];
     case "cycles":
       return context.featureFlags.CYCLES ? [action("cycle"), action("allocation")] : [];
     case "finance":

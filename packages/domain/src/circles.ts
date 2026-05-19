@@ -1,10 +1,60 @@
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
+import type { Prisma } from "@prisma/client";
 import { appendEvents } from "./events";
 import { requireWorkspaceMembership } from "./auth";
 import { recordAudit } from "./audit-trail";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { invariant } from "./errors";
+
+async function validateParentCircle(tx: Prisma.TransactionClient, params: {
+  workspaceId: string;
+  circleId?: string;
+  parentCircleId?: string | null;
+}) {
+  const parentCircleId = params.parentCircleId?.trim() || null;
+  if (!parentCircleId) return null;
+
+  invariant(parentCircleId !== params.circleId, 400, "INVALID_INPUT", "A circle cannot be its own parent.");
+
+  const parent = await tx.circle.findUnique({
+    where: { id: parentCircleId },
+    select: {
+      id: true,
+      workspaceId: true,
+      parentCircleId: true,
+      archivedAt: true,
+    },
+  });
+
+  invariant(parent && parent.workspaceId === params.workspaceId && !parent.archivedAt, 404, "NOT_FOUND", "Parent circle not found.");
+
+  if (!params.circleId) return parentCircleId;
+
+  const visited = new Set<string>([parent.id]);
+  let nextParentId = parent.parentCircleId;
+
+  while (nextParentId) {
+    invariant(nextParentId !== params.circleId, 400, "INVALID_INPUT", "A circle cannot be moved under one of its descendants.");
+    if (visited.has(nextParentId)) break;
+    visited.add(nextParentId);
+
+    const ancestor = await tx.circle.findUnique({
+      where: { id: nextParentId },
+      select: {
+        id: true,
+        workspaceId: true,
+        parentCircleId: true,
+        archivedAt: true,
+      },
+    });
+
+    if (!ancestor || ancestor.workspaceId !== params.workspaceId || ancestor.archivedAt) break;
+    nextParentId = ancestor.parentCircleId;
+  }
+
+  return parentCircleId;
+}
 
 export async function listCircles(workspaceId: string, opts?: { archiveFilter?: ArchiveFilter }) {
   return prisma.circle.findMany({
@@ -39,13 +89,18 @@ export async function createCircle(actor: AppActor, params: {
   invariant(name.length > 0, 400, "INVALID_INPUT", "Circle name is required.");
 
   return prisma.$transaction(async (tx) => {
+    const parentCircleId = await validateParentCircle(tx, {
+      workspaceId: params.workspaceId,
+      parentCircleId: params.parentCircleId,
+    });
+
     const circle = await tx.circle.create({
       data: {
         workspaceId: params.workspaceId,
         name,
         purposeMd: params.purposeMd?.trim() || null,
         domainMd: params.domainMd?.trim() || null,
-        parentCircleId: params.parentCircleId || null,
+        parentCircleId,
         maturityStage: params.maturityStage || "GETTING_STARTED",
       },
     });
@@ -107,7 +162,13 @@ export async function updateCircle(actor: AppActor, params: {
     }
     if (params.purposeMd !== undefined) data.purposeMd = params.purposeMd?.trim() || null;
     if (params.domainMd !== undefined) data.domainMd = params.domainMd?.trim() || null;
-    if (params.parentCircleId !== undefined) data.parentCircleId = params.parentCircleId || null;
+    if (params.parentCircleId !== undefined) {
+      data.parentCircleId = await validateParentCircle(tx, {
+        workspaceId: params.workspaceId,
+        circleId: circle.id,
+        parentCircleId: params.parentCircleId,
+      });
+    }
     if (params.maturityStage !== undefined) data.maturityStage = params.maturityStage;
 
     const updated = await tx.circle.update({

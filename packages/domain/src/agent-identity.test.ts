@@ -31,6 +31,9 @@ vi.mock("@corgtex/shared", () => ({
     circle: {
       findFirst: vi.fn(),
     },
+    role: {
+      findFirst: vi.fn(),
+    },
     member: {
       findUnique: vi.fn(),
     },
@@ -150,6 +153,58 @@ describe("agent-identity", () => {
     });
 
     expect(result.circleId).toBe("c-1");
+  });
+
+  it("assigns an agent to a role in the same circle", async () => {
+    vi.mocked(prisma.agentIdentity.findFirst).mockResolvedValue({ id: "ai-1", workspaceId: wsId } as any);
+    vi.mocked(prisma.circle.findFirst).mockResolvedValue({ id: "c-1", workspaceId: wsId } as any);
+    vi.mocked(prisma.role.findFirst).mockResolvedValue({ id: "r-1" } as any);
+    vi.mocked(prisma.circleAgentAssignment.upsert).mockResolvedValue({
+      id: "ca-1",
+      circleId: "c-1",
+      agentIdentityId: "ai-1",
+      roleId: "r-1",
+    } as any);
+
+    const result = await assignAgentToCircle(adminActor, {
+      workspaceId: wsId,
+      agentIdentityId: "ai-1",
+      circleId: "c-1",
+      roleId: " r-1 ",
+    });
+
+    expect(prisma.role.findFirst).toHaveBeenCalledWith({
+      where: {
+        id: "r-1",
+        circleId: "c-1",
+        circle: { workspaceId: wsId },
+        archivedAt: null,
+      },
+      select: { id: true },
+    });
+    expect(prisma.circleAgentAssignment.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({ roleId: "r-1" }),
+      update: { roleId: "r-1" },
+    }));
+    expect(result.roleId).toBe("r-1");
+  });
+
+  it("rejects assigning an agent to a role outside the circle", async () => {
+    vi.mocked(prisma.agentIdentity.findFirst).mockResolvedValue({ id: "ai-1", workspaceId: wsId } as any);
+    vi.mocked(prisma.circle.findFirst).mockResolvedValue({ id: "c-1", workspaceId: wsId } as any);
+    vi.mocked(prisma.role.findFirst).mockResolvedValue(null);
+
+    await expect(assignAgentToCircle(adminActor, {
+      workspaceId: wsId,
+      agentIdentityId: "ai-1",
+      circleId: "c-1",
+      roleId: "other-circle-role",
+    })).rejects.toMatchObject({
+      status: 404,
+      code: "NOT_FOUND",
+    });
+
+    expect(prisma.circleAgentAssignment.upsert).not.toHaveBeenCalled();
   });
 
   it("removes an agent from a circle", async () => {
