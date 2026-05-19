@@ -61,6 +61,16 @@ describe("workspace add actions", () => {
     expect(kinds({ pathname: "/workspaces/ws-1/proposals" })).toEqual(["proposal"]);
   });
 
+  it("uses circle detail context for structure actions", () => {
+    expect(kinds({ pathname: "/workspaces/ws-1/circles" })).toEqual(["circle", "role"]);
+    expect(kinds({ pathname: "/workspaces/ws-1/circles/circle-1" })).toEqual([
+      "circle",
+      "role",
+      "role_assignment",
+    ]);
+    expect(kinds({ pathname: "/workspaces/ws-1/circles/circle-1", role: "CONTRIBUTOR" })).toEqual([]);
+  });
+
   it("respects feature flags and demo read-only state", () => {
     expect(kinds({
       pathname: "/workspaces/ws-1/goals",

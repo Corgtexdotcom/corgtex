@@ -16,6 +16,7 @@ import {
   listMembers,
   listProposals,
   listQualifications,
+  listRoles,
   requireWorkspaceMembership,
 } from "@corgtex/domain";
 import { ingestFile } from "@corgtex/knowledge";
@@ -31,9 +32,11 @@ import {
   isWorkspaceAddActionKind,
   sanitizeWorkspaceReturnTo,
   WORKSPACE_ADD_ACTION_DEFINITIONS,
+  workspaceSubpath,
   type WorkspaceAddActionKind,
 } from "@/lib/workspace-add-actions";
 import {
+  assignRoleAction,
   bulkInviteAction,
   createActionAction,
   createAllocationAction,
@@ -129,6 +132,18 @@ function cancelLink(returnTo: string) {
   return <a className="link-button secondary" href={returnTo}>Cancel</a>;
 }
 
+function circleIdFromReturnTo(returnTo: string, workspaceId: string) {
+  const parsed = new URL(returnTo, "https://app.local");
+  const subpath = workspaceSubpath(parsed.pathname, workspaceId);
+  const segments = subpath?.split("?")[0]?.split("#")[0]?.split("/").filter(Boolean) ?? [];
+  if (segments[0] !== "circles" || !segments[1]) return null;
+  try {
+    return decodeURIComponent(segments[1]);
+  } catch {
+    return segments[1];
+  }
+}
+
 export default async function WorkspaceAddPage({
   params,
   searchParams,
@@ -159,6 +174,7 @@ export default async function WorkspaceAddPage({
   );
 
   const returnTo = sanitizeWorkspaceReturnTo(workspaceId, search.returnTo);
+  const contextCircleId = circleIdFromReturnTo(returnTo, workspaceId);
   const returnUrl = new URL(returnTo, "https://app.local");
   const allowedActions = getWorkspaceAddActions({
     workspaceId,
@@ -173,8 +189,9 @@ export default async function WorkspaceAddPage({
   if (!allowedActions.some((action) => action.kind === kind)) notFound();
 
   const needsProposals = kind === "action" || kind === "tension";
-  const needsMembers = kind === "tension" || kind === "goal" || kind === "allocation";
+  const needsMembers = kind === "tension" || kind === "goal" || kind === "allocation" || kind === "role_assignment";
   const needsCircles = kind === "goal" || kind === "circle" || kind === "role" || kind === "tool_link";
+  const needsRoles = kind === "role_assignment";
   const needsGoals = kind === "goal";
   const needsLedgerAccounts = kind === "spend";
   const needsContacts = kind === "deal";
@@ -190,6 +207,7 @@ export default async function WorkspaceAddPage({
     contactsResult,
     cyclesResult,
     approvedQualificationsResult,
+    roles,
   ] = await Promise.all([
     needsProposals ? listProposals(actor, workspaceId, { take: 100 }) : Promise.resolve({ items: [] }),
     needsMembers ? listMembers(workspaceId) : Promise.resolve([]),
@@ -199,6 +217,7 @@ export default async function WorkspaceAddPage({
     needsContacts ? listContacts(actor, workspaceId, { take: 100 }) : Promise.resolve({ items: [] }),
     needsCycles ? listCycles(workspaceId, { take: 100 }) : Promise.resolve({ items: [] }),
     needsApprovedProspects ? listQualifications(actor, workspaceId, { status: "APPROVED" }) : Promise.resolve({ items: [] }),
+    needsRoles ? listRoles(workspaceId) : Promise.resolve([]),
   ]);
 
   const proposals = proposalsResult.items;
@@ -208,6 +227,9 @@ export default async function WorkspaceAddPage({
   const cycles = cyclesResult.items;
   const allocatableCycles = cycles.filter((cycle) => cycle.status === "OPEN_ALLOCATIONS");
   const approvedQualifications = approvedQualificationsResult.items;
+  const roleAssignmentRoles = contextCircleId
+    ? roles.filter((role) => role.circle?.id === contextCircleId)
+    : roles;
   const currentUserId = actor.kind === "user" ? actor.user.id : "";
   const title = `Add ${WORKSPACE_ADD_ACTION_DEFINITIONS[kind].label}`;
 
@@ -244,6 +266,12 @@ export default async function WorkspaceAddPage({
   async function createRoleAndReturn(formData: FormData) {
     "use server";
     await createRoleAction(formData);
+    redirect(returnTo);
+  }
+
+  async function assignRoleAndReturn(formData: FormData) {
+    "use server";
+    await assignRoleAction(formData);
     redirect(returnTo);
   }
 
@@ -651,7 +679,7 @@ export default async function WorkspaceAddPage({
           <form action={createCircleAndReturn} className="stack nr-form-section">
             {hiddenWorkspace(workspaceId)}
             <label>Name<input name="name" required /></label>
-            <label>Parent circle<select name="parentCircleId"><option value="">None</option>{circles.map((circle) => <option key={circle.id} value={circle.id}>{circle.name}</option>)}</select></label>
+            <label>Parent circle<select name="parentCircleId" defaultValue={contextCircleId ?? ""}><option value="">None</option>{circles.map((circle) => <option key={circle.id} value={circle.id}>{circle.name}</option>)}</select></label>
             <label>Purpose<textarea name="purposeMd" /></label>
             <label>Domain<textarea name="domainMd" /></label>
             <div className="actions-inline"><button type="submit">Create circle</button>{cancelLink(returnTo)}</div>
@@ -661,11 +689,41 @@ export default async function WorkspaceAddPage({
         {kind === "role" && (
           <form action={createRoleAndReturn} className="stack nr-form-section">
             {hiddenWorkspace(workspaceId)}
-            <label>Circle<select name="circleId" required defaultValue={circles[0]?.id ?? ""}>{circles.map((circle) => <option key={circle.id} value={circle.id}>{circle.name}</option>)}</select></label>
+            <label>Circle<select name="circleId" required defaultValue={contextCircleId ?? circles[0]?.id ?? ""}>{circles.map((circle) => <option key={circle.id} value={circle.id}>{circle.name}</option>)}</select></label>
             <label>Name<input name="name" required /></label>
             <label>Purpose<textarea name="purposeMd" /></label>
             <label>Accountabilities<textarea name="accountabilities" placeholder="One accountability per line" /></label>
             <div className="actions-inline"><button type="submit" disabled={circles.length === 0}>Create role</button>{cancelLink(returnTo)}</div>
+          </form>
+        )}
+
+        {kind === "role_assignment" && (
+          <form action={assignRoleAndReturn} className="stack nr-form-section">
+            {hiddenWorkspace(workspaceId)}
+            <label>
+              Role
+              <select name="roleId" required defaultValue={roleAssignmentRoles[0]?.id ?? ""}>
+                {roleAssignmentRoles.map((role) => (
+                  <option key={role.id} value={role.id}>
+                    {role.name}{role.circle?.name ? ` (${role.circle.name})` : ""}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Member
+              <select name="memberId" required defaultValue={members[0]?.id ?? ""}>
+                {members.map((member) => (
+                  <option key={member.id} value={member.id}>{member.user.displayName ?? member.user.email}</option>
+                ))}
+              </select>
+            </label>
+            {roleAssignmentRoles.length === 0 && <p className="form-message form-message-error">Create a role in this circle before adding members.</p>}
+            {members.length === 0 && <p className="form-message form-message-error">Invite a member before assigning roles.</p>}
+            <div className="actions-inline">
+              <button type="submit" disabled={roleAssignmentRoles.length === 0 || members.length === 0}>Add member</button>
+              {cancelLink(returnTo)}
+            </div>
           </form>
         )}
 

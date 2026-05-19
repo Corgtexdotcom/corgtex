@@ -4,12 +4,14 @@ import { enforceDemoGuard } from "@/lib/demo-guard";
 import { requirePageActor } from "@/lib/auth";
 import { asString, asOptional, asOptionalInt, refresh } from "../action-utils";
 import {
+  assignAgentToCircle,
   createCircle,
   deleteCircle,
   updateCircle,
   assignRole,
   createRole,
   deleteRole,
+  removeAgentFromCircle,
   unassignRole,
   updateRole
 } from "@corgtex/domain";
@@ -43,6 +45,7 @@ export async function updateCircleAction(formData: FormData) {
     name: asOptional(formData, "name") ?? undefined,
     purposeMd: formData.has("purposeMd") ? asOptional(formData, "purposeMd") : undefined,
     domainMd: formData.has("domainMd") ? asOptional(formData, "domainMd") : undefined,
+    parentCircleId: formData.has("parentCircleId") ? asOptional(formData, "parentCircleId") : undefined,
   });
   refresh(workspaceId);
 }
@@ -135,6 +138,35 @@ export async function unassignRoleAction(formData: FormData) {
     workspaceId,
     roleId: asString(formData, "roleId"),
     memberId: asString(formData, "memberId"),
+  });
+  refresh(workspaceId);
+}
+
+export async function assignAgentToCircleAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  await assignAgentToCircle(actor, {
+    workspaceId,
+    circleId: asString(formData, "circleId"),
+    agentIdentityId: asString(formData, "agentIdentityId"),
+    roleId: asOptional(formData, "roleId"),
+  });
+  refresh(workspaceId);
+}
+
+export async function removeAgentFromCircleAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  await removeAgentFromCircle(actor, {
+    workspaceId,
+    circleId: asString(formData, "circleId"),
+    agentIdentityId: asString(formData, "agentIdentityId"),
   });
   refresh(workspaceId);
 }
