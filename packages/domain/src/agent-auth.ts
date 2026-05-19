@@ -31,10 +31,10 @@ const CREDENTIAL_PREFIX = "agentc-";
 export const SCOPE_REGISTRY = {
   // ---- core read/chat ----
   "workspace:read":      { label: "Read workspace info",        group: "core",       default: true,  delegatedDefault: true,  description: "Workspace name, description, and aggregate counts." },
-  "workspace:write":     { label: "Manage workspace settings",  group: "core",       default: false, delegatedDefault: false, description: "Manage workspace-level settings such as feature flags. Sensitive — explicit opt-in only." },
+  "workspace:write":     { label: "Manage workspace settings",  group: "core",       default: false, delegatedDefault: true,  description: "Manage workspace-level settings such as feature flags, subject to the user's domain permissions." },
   "support:write":       { label: "Write support audit",        group: "core",       default: false, delegatedDefault: false, description: "Record Corgtex Support audit entries in a customer workspace. Sensitive — support-only." },
   "archive:read":        { label: "Read archived records",      group: "core",       default: false, delegatedDefault: true,  description: "List archived workspace artifacts for recovery and audit." },
-  "archive:write":       { label: "Restore and purge archives", group: "core",       default: false, delegatedDefault: true,  description: "Restore archived records or purge eligible archived records. Sensitive — same-role delegation." },
+  "archive:write":       { label: "Restore and purge archives", group: "core",       default: false, delegatedDefault: true,  description: "Restore archived records or purge eligible archived records through same-role delegation." },
   "brain:read":          { label: "Search the Brain",           group: "core",       default: true,  delegatedDefault: true,  description: "Semantic search over policies, meeting notes, proposals, and other indexed content." },
   "conversations:write": { label: "Chat with Corgtex",          group: "core",       default: true,  delegatedDefault: true,  description: "Send messages to the Corgtex assistant (server-side LLM call)." },
 
@@ -56,15 +56,17 @@ export const SCOPE_REGISTRY = {
 
   // ---- members ----
   "members:read":        { label: "Read members",               group: "people",     default: true,  delegatedDefault: true,  description: "List active members and their roles." },
-  "members:write":       { label: "Manage members",             group: "people",     default: false, delegatedDefault: true,  description: "Create, update, and deactivate members. Sensitive — same-role delegation." },
+  "members:write":       { label: "Manage members",             group: "people",     default: false, delegatedDefault: true,  description: "Create, update, and deactivate members through same-role delegation." },
   "tools:read":          { label: "Read shared tools",           group: "people",     default: true,  delegatedDefault: true,  description: "List shared workspace tool links and non-secret access notes." },
-  "tools:write":         { label: "Manage shared tools",         group: "people",     default: false, delegatedDefault: true,  description: "Create, update, and archive shared workspace tool links. Sensitive — same-role delegation." },
+  "tools:write":         { label: "Manage shared tools",         group: "people",     default: false, delegatedDefault: true,  description: "Create, update, and archive shared workspace tool links through same-role delegation." },
   "tools:credentials:read": { label: "Reveal shared tool credentials", group: "people", default: false, delegatedDefault: true, description: "Reveal encrypted credentials saved on shared tool links. Sensitive — same-role delegation and audited." },
+  "external-tools:read": { label: "Read connected tools",         group: "integrations", default: true, delegatedDefault: true, description: "List and search same-user delegated external MCP tools such as Notion." },
+  "external-tools:write": { label: "Use connected tools",         group: "integrations", default: true, delegatedDefault: true, description: "Execute same-user delegated external MCP tools such as Notion tools." },
 
   // ---- meetings ----
   "meetings:read":       { label: "Read meetings",              group: "knowledge",  default: true,  delegatedDefault: true,  description: "List meetings and their summaries." },
   "meetings:write":      { label: "Upload & edit meetings",     group: "knowledge",  default: true,  delegatedDefault: true,  description: "Create meetings (upload minutes / transcripts) and delete them." },
-  "documents:write":     { label: "Upload documents",           group: "knowledge",  default: false, delegatedDefault: true,  description: "Upload documents or data drops into workspace documents. Sensitive — same-role delegation." },
+  "documents:write":     { label: "Upload documents",           group: "knowledge",  default: false, delegatedDefault: true,  description: "Upload documents or data drops into workspace documents through same-role delegation." },
 
   // ---- brain (writes) ----
   "brain:write":         { label: "Write to the Brain",         group: "knowledge",  default: true,  delegatedDefault: true,  description: "Create and edit knowledge articles, post discussion comments, resolve threads." },
@@ -81,15 +83,15 @@ export const SCOPE_REGISTRY = {
 
   // ---- finance ----
   "finance:read":        { label: "Read finance",               group: "finance",    default: true,  delegatedDefault: true,  description: "List spend requests and ledger accounts." },
-  "finance:write":       { label: "Submit spend requests",      group: "finance",    default: false, delegatedDefault: true,  description: "Create and submit spend requests on behalf of users. Sensitive — same-role delegation." },
+  "finance:write":       { label: "Submit spend requests",      group: "finance",    default: false, delegatedDefault: true,  description: "Create and submit spend requests on behalf of users through same-role delegation." },
 
   // ---- support / operations ----
   "integrations:read":   { label: "Read integrations",          group: "support",    default: false, delegatedDefault: true,  description: "Inspect installed communication and OAuth integrations. Admin-only where domain rules require it." },
   "data-sources:read":   { label: "Read data feeds",            group: "support",    default: false, delegatedDefault: true,  description: "Inspect external data sources and sync health. Admin-only where domain rules require it." },
-  "data-sources:write":  { label: "Sync data feeds",            group: "support",    default: false, delegatedDefault: true,  description: "Trigger external data source sync jobs. Sensitive — same-role delegation." },
+  "data-sources:write":  { label: "Sync data feeds",            group: "support",    default: false, delegatedDefault: true,  description: "Trigger external data source sync jobs through same-role delegation." },
   "agents:read":         { label: "Read agent runs",            group: "support",    default: false, delegatedDefault: true,  description: "Inspect agent runs, steps, and failures. Same-role delegation." },
   "runtime:read":        { label: "Read runtime jobs",          group: "support",    default: false, delegatedDefault: true,  description: "Inspect workflow jobs and runtime failures. Same-role delegation." },
-  "runtime:write":       { label: "Repair runtime jobs",        group: "support",    default: false, delegatedDefault: true,  description: "Retry or discard failed workflow jobs. Sensitive — same-role delegation." },
+  "runtime:write":       { label: "Repair runtime jobs",        group: "support",    default: false, delegatedDefault: true,  description: "Retry or discard failed workflow jobs through same-role delegation." },
 } as const satisfies Record<string, { label: string; group: string; default: boolean; delegatedDefault: boolean; description: string }>;
 
 export type AgentScope = keyof typeof SCOPE_REGISTRY;

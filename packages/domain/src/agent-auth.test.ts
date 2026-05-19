@@ -25,11 +25,13 @@ describe("scope defaults", () => {
     expect(DELEGATED_DEFAULT_SCOPES).toContain("tools:read");
     expect(DELEGATED_DEFAULT_SCOPES).toContain("tools:write");
     expect(DELEGATED_DEFAULT_SCOPES).toContain("tools:credentials:read");
+    expect(DELEGATED_DEFAULT_SCOPES).toContain("external-tools:read");
+    expect(DELEGATED_DEFAULT_SCOPES).toContain("external-tools:write");
     expect(DELEGATED_DEFAULT_SCOPES).toContain("members:write");
     expect(DELEGATED_DEFAULT_SCOPES).toContain("runtime:write");
-    expect(DELEGATED_DEFAULT_SCOPES).not.toContain("workspace:write");
+    expect(DELEGATED_DEFAULT_SCOPES).toContain("workspace:write");
     expect(DELEGATED_DEFAULT_SCOPES).not.toContain("support:write");
-    expect(SCOPE_REGISTRY["workspace:write"].delegatedDefault).toBe(false);
+    expect(SCOPE_REGISTRY["workspace:write"].delegatedDefault).toBe(true);
     expect(SCOPE_REGISTRY["tools:credentials:read"].description).toContain("audited");
   });
 });

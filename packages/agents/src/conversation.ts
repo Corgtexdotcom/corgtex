@@ -32,6 +32,16 @@ import {
   upsertToolLinkAction,
   upsertToolLinkTool,
 } from "./tools/tool-links";
+import {
+  executeExternalToolAction,
+  executeExternalToolTool,
+  fetchConnectedContextAction,
+  fetchConnectedContextTool,
+  listConnectedToolsAction,
+  listConnectedToolsTool,
+  searchConnectedContextAction,
+  searchConnectedContextTool,
+} from "./tools/external-mcp";
 import type { AppActor } from "@corgtex/shared";
 
 const MAX_HISTORY_TURNS = 20;
@@ -60,6 +70,8 @@ READ TOOLS:
 - 'query_org_structure' — circles, roles, and members
 - 'search_brain' — semantic search across all indexed knowledge
 - 'list_tool_links' — shared workspace tools, access notes, and credential presence
+- 'list_connected_tools' — same-user external MCP tools connected to this workspace
+- 'search_connected_context', 'fetch_connected_context' — live search/fetch from Corgtex and connected tools such as Notion, with provenance
 
 WRITE TOOLS:
 - 'create_tension', 'create_action' — create new items
@@ -67,11 +79,14 @@ WRITE TOOLS:
 - 'create_proposal' — draft and create a new governance proposal
 - 'create_goal' — create a goal in the Goals tab with cadence and optional key results
 - 'upsert_tool_link', 'archive_tool_link', 'reveal_tool_link_credential' — manage and use the shared Tools directory
+- 'execute_external_tool' — run a same-user delegated external MCP tool such as Notion when the user explicitly asks or confidence is high
 
 When asked about current state, ALWAYS use a query tool instead of guessing.
 When asked to create or update something, execute the write tool immediately — do not ask for confirmation. Report what you did clearly after executing.
 Every write action is fully audited and traceable.
 Tool credential reveals are sensitive and audited. Use them only when the user asks to access or reveal a saved tool credential.
+Use live retrieval from connected tools first. Do not save Notion or other external content into Corgtex Brain unless the user explicitly asks you to save, upload, store, or remember it.
+When answering from connected tools, say whether the context came from Corgtex or the external provider.
 
 Be concise, direct, and action-oriented. When relevant, cite workspace knowledge.
 If the user wants to create something (proposal, tension, action, or goal), use the appropriate workspace tool directly. If they say "add it to the goals tab" or "put it in goals", create goals rather than tensions, actions, or proposals.
@@ -138,6 +153,10 @@ const TOOLS = [
   upsertToolLinkTool,
   archiveToolLinkTool,
   revealToolLinkCredentialTool,
+  listConnectedToolsTool,
+  searchConnectedContextTool,
+  fetchConnectedContextTool,
+  executeExternalToolTool,
 ];
 
 const TOOL_HANDLERS: Record<string, (actor: AppActor, ctx: ConversationContext, args: any) => Promise<unknown>> = {
@@ -168,6 +187,10 @@ const TOOL_HANDLERS: Record<string, (actor: AppActor, ctx: ConversationContext, 
   upsert_tool_link: async (actor, ctx, args) => upsertToolLinkAction(actor, ctx, args),
   archive_tool_link: async (actor, ctx, args) => archiveToolLinkAction(actor, ctx, args),
   reveal_tool_link_credential: async (actor, ctx, args) => revealToolLinkCredentialAction(actor, ctx, args),
+  list_connected_tools: async (actor, ctx) => listConnectedToolsAction(actor, ctx),
+  search_connected_context: async (actor, ctx, args) => searchConnectedContextAction(actor, ctx, args),
+  fetch_connected_context: async (actor, ctx, args) => fetchConnectedContextAction(actor, ctx, args),
+  execute_external_tool: async (actor, ctx, args) => executeExternalToolAction(actor, ctx, args),
 };
 
 function requireConversationToolActor(ctx: ConversationContext): AppActor {

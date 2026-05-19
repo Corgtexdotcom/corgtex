@@ -19,6 +19,12 @@ const listAgentConfigsMock = vi.fn();
 const updateAgentConfigMock = vi.fn();
 const getModelUsageBudgetMock = vi.fn();
 const updateModelUsageBudgetMock = vi.fn();
+const executeExternalMcpToolMock = vi.fn();
+const fetchConnectedExternalMcpContextMock = vi.fn();
+const listExternalMcpConnectionsMock = vi.fn();
+const searchConnectedExternalMcpContextMock = vi.fn();
+const recordAuditMock = vi.fn();
+const searchIndexedKnowledgeMock = vi.fn();
 
 vi.mock("@corgtex/domain", () => ({
   CONTROL_PLANE_WORKSPACE_FEATURE_FLAGS: [
@@ -28,10 +34,33 @@ vi.mock("@corgtex/domain", () => ({
   listProposals: vi.fn(),
   createProposal: vi.fn(),
   supportReopenResolvedProposals: supportReopenResolvedProposalsMock,
+  evaluateDelegatedActionPolicy: vi.fn((input: { toolName?: string | null; operation?: "read" | "write" | null; confidence?: number | null; explicitUserIntent?: boolean }) => {
+    if ([
+      "reveal_tool_link_credential",
+      "record_support_audit",
+      "support_reopen_resolved_proposals",
+      "update_agent_credential_scopes",
+      "revoke_agent_credential",
+      "update_agent_policy",
+      "update_model_budget",
+    ].includes(input.toolName ?? "")) {
+      return { policyClass: "sensitive", autoRunAllowed: false, requiresSensitiveHandling: true, reason: "test sensitive" };
+    }
+    if (input.operation === "read") {
+      return { policyClass: "read", autoRunAllowed: true, requiresSensitiveHandling: false, reason: "test read" };
+    }
+    if (input.explicitUserIntent || input.confidence == null || input.confidence >= 0.8) {
+      return { policyClass: "normal_write", autoRunAllowed: true, requiresSensitiveHandling: false, reason: "test normal write" };
+    }
+    return { policyClass: "draft_or_clarify", autoRunAllowed: false, requiresSensitiveHandling: false, reason: "test draft" };
+  }),
+  executeExternalMcpTool: executeExternalMcpToolMock,
+  fetchConnectedExternalMcpContext: fetchConnectedExternalMcpContextMock,
   listActions: vi.fn(),
   createAction: vi.fn(),
   listTensions: vi.fn(),
   createTension: vi.fn(),
+  listExternalMcpConnections: listExternalMcpConnectionsMock,
   listGoals: listGoalsMock,
   getGoal: getGoalMock,
   createGoal: createGoalMock,
@@ -63,6 +92,8 @@ vi.mock("@corgtex/domain", () => ({
   upsertWorkspaceToolLink: upsertWorkspaceToolLinkMock,
   archiveWorkspaceToolLink: archiveWorkspaceToolLinkMock,
   revealWorkspaceToolLinkCredential: revealWorkspaceToolLinkCredentialMock,
+  recordAudit: recordAuditMock,
+  searchConnectedExternalMcpContext: searchConnectedExternalMcpContextMock,
   listRuntimeJobs: vi.fn(),
   listFailedJobs: vi.fn(),
   replayWorkflowJob: vi.fn(),
@@ -74,7 +105,7 @@ vi.mock("@corgtex/domain", () => ({
 }));
 
 vi.mock("@corgtex/knowledge", () => ({
-  searchIndexedKnowledge: vi.fn(),
+  searchIndexedKnowledge: searchIndexedKnowledgeMock,
 }));
 
 vi.mock("@corgtex/agents", () => ({
@@ -83,6 +114,7 @@ vi.mock("@corgtex/agents", () => ({
 
 vi.mock("@corgtex/shared", () => ({
   prisma: {
+    $transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => callback({})),
     workspaceFeatureFlag: {
       findMany: vi.fn(),
       upsert: vi.fn(),
@@ -140,6 +172,12 @@ describe("createCorgtexMcpServer", () => {
     });
     getModelUsageBudgetMock.mockReset().mockResolvedValue(null);
     updateModelUsageBudgetMock.mockReset().mockResolvedValue({ id: "budget-1", monthlyCostCapUsd: "250.00" });
+    executeExternalMcpToolMock.mockReset().mockResolvedValue({ skipped: false, result: { ok: true } });
+    fetchConnectedExternalMcpContextMock.mockReset().mockResolvedValue({ providerKey: "notion", externalId: "page-1", content: { title: "Launch" } });
+    listExternalMcpConnectionsMock.mockReset().mockResolvedValue([]);
+    recordAuditMock.mockReset().mockResolvedValue({ id: "audit-1" });
+    searchConnectedExternalMcpContextMock.mockReset().mockResolvedValue({ results: [], errors: [] });
+    searchIndexedKnowledgeMock.mockReset().mockResolvedValue([]);
   });
 
   it("returns the opened spend identifier from create_spend", async () => {
@@ -205,17 +243,17 @@ describe("createCorgtexMcpServer", () => {
     });
     expect((server as any)._registeredTools.delete_action.annotations).toMatchObject({
       readOnlyHint: false,
-      destructiveHint: true,
+      destructiveHint: false,
       openWorldHint: false,
     });
     expect((server as any)._registeredTools.archive_goal.annotations).toMatchObject({
       readOnlyHint: false,
-      destructiveHint: true,
+      destructiveHint: false,
       openWorldHint: false,
     });
     expect((server as any)._registeredTools.archive_tool_link.annotations).toMatchObject({
       readOnlyHint: false,
-      destructiveHint: true,
+      destructiveHint: false,
       openWorldHint: false,
     });
     expect((server as any)._registeredTools.reveal_tool_link_credential.annotations).toMatchObject({
@@ -226,7 +264,7 @@ describe("createCorgtexMcpServer", () => {
     });
     expect((server as any)._registeredTools.support_reopen_resolved_proposals.annotations).toMatchObject({
       readOnlyHint: false,
-      destructiveHint: true,
+      destructiveHint: false,
       sensitiveHint: true,
       openWorldHint: false,
     });
@@ -609,5 +647,156 @@ describe("createCorgtexMcpServer", () => {
       userMessage: "show tools",
       actor,
     }));
+  });
+
+  it("lists same-user connected external tools with external tool scope", async () => {
+    const { createCorgtexMcpServer } = await import("./server");
+    const { requireScope } = await import("./auth");
+    listExternalMcpConnectionsMock.mockResolvedValueOnce([
+      {
+        providerKey: "notion",
+        displayName: "Notion",
+        status: "connected",
+        connectionId: "connection-1",
+        connectionOwnerUserId: "user-1",
+        scopes: ["search"],
+        capabilities: { searchToolName: "notion-search" },
+      },
+    ]);
+
+    const actor = {
+      kind: "user",
+      user: { id: "user-1", email: "user@example.com", displayName: "User" },
+    } as any;
+    const server = createCorgtexMcpServer({
+      actor,
+      workspaceId: "ws-1",
+      authKind: "oauth",
+      scopes: ["external-tools:read"],
+    });
+
+    const response = await (server as any)._registeredTools.list_connected_tools.handler({});
+
+    expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "external-tools:read");
+    expect(listExternalMcpConnectionsMock).toHaveBeenCalledWith(actor, "ws-1");
+    expect(JSON.parse(response.content[0].text).items[0]).toEqual(expect.objectContaining({
+      providerKey: "notion",
+      status: "connected",
+    }));
+    expect((server as any)._registeredTools.list_connected_tools.annotations).toMatchObject({
+      readOnlyHint: true,
+      openWorldHint: true,
+    });
+  });
+
+  it("searches connected Corgtex and external context with provenance", async () => {
+    const { createCorgtexMcpServer } = await import("./server");
+    const { requireScope } = await import("./auth");
+    searchIndexedKnowledgeMock.mockResolvedValueOnce([
+      {
+        chunkId: "chunk-1",
+        title: "Corgtex rollout",
+        sourceType: "BrainArticle",
+        sourceId: "article-1",
+        chunkIndex: 0,
+        score: 0.91,
+        snippet: "Corgtex source",
+      },
+    ]);
+    searchConnectedExternalMcpContextMock.mockResolvedValueOnce({
+      results: [
+        {
+          id: "notion:page-1",
+          source: "external_mcp",
+          providerKey: "notion",
+          providerDisplayName: "Notion",
+          externalId: "page-1",
+          title: "Notion rollout",
+          text: "Notion source",
+        },
+      ],
+      errors: [],
+    });
+
+    const actor = {
+      kind: "user",
+      user: { id: "user-1", email: "user@example.com", displayName: "User" },
+    } as any;
+    const server = createCorgtexMcpServer({
+      actor,
+      workspaceId: "ws-1",
+      authKind: "oauth",
+      scopes: ["external-tools:read", "brain:read"],
+    });
+
+    const response = await (server as any)._registeredTools.search_connected_context.handler({
+      query: "rollout",
+      limit: 5,
+    });
+    const body = JSON.parse(response.content[0].text);
+
+    expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "external-tools:read");
+    expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "brain:read");
+    expect(body.results).toEqual([
+      expect.objectContaining({
+        id: "corgtex:chunk-1",
+        source: "corgtex",
+        providerDisplayName: "Corgtex Brain",
+      }),
+      expect.objectContaining({
+        id: "notion:page-1",
+        source: "external_mcp",
+        providerDisplayName: "Notion",
+      }),
+    ]);
+    expect(body.externalErrors).toEqual([]);
+  });
+
+  it("executes external tools through delegated policy and scope enforcement", async () => {
+    const { createCorgtexMcpServer } = await import("./server");
+    const { requireScope } = await import("./auth");
+    executeExternalMcpToolMock.mockResolvedValueOnce({
+      skipped: false,
+      providerKey: "notion",
+      toolName: "notion-create-page",
+      result: { id: "page-1" },
+    });
+
+    const actor = {
+      kind: "user",
+      user: { id: "user-1", email: "user@example.com", displayName: "User" },
+    } as any;
+    const server = createCorgtexMcpServer({
+      actor,
+      workspaceId: "ws-1",
+      authKind: "oauth",
+      scopes: ["external-tools:write"],
+    });
+
+    const response = await (server as any)._registeredTools.execute_external_tool.handler({
+      providerKey: "notion",
+      toolName: "notion-create-page",
+      arguments: { title: "Decision log" },
+      confidence: 0.95,
+    });
+
+    expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "external-tools:write");
+    expect(executeExternalMcpToolMock).toHaveBeenCalledWith(actor, {
+      workspaceId: "ws-1",
+      providerKey: "notion",
+      toolName: "notion-create-page",
+      arguments: { title: "Decision log" },
+      confidence: 0.95,
+      explicitUserIntent: true,
+    });
+    expect(JSON.parse(response.content[0].text)).toEqual(expect.objectContaining({
+      skipped: false,
+      providerKey: "notion",
+      toolName: "notion-create-page",
+    }));
+    expect((server as any)._registeredTools.execute_external_tool.annotations).toMatchObject({
+      readOnlyHint: false,
+      openWorldHint: true,
+    });
   });
 });
