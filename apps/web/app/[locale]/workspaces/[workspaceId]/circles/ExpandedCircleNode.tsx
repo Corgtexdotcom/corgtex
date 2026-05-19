@@ -1,5 +1,6 @@
 import { Handle, Position } from "@xyflow/react";
 import { Minimize2 } from "lucide-react";
+import type { KeyboardEvent } from "react";
 import PersonNode from "./PersonNode";
 import type { PersonData } from "./PersonNode";
 import { useTranslations } from "next-intl";
@@ -19,12 +20,22 @@ export type ExpandedCircleNodeData = {
   members: CircleMemberPreview[];
   roles: CircleGraphRole[];
   onCollapse: (circleId: string) => void;
+  onToggle?: (circleId: string) => void;
   nodeWidth?: number;
   nodeHeight?: number;
 };
 
 export default function ExpandedCircleNode({ data, selected }: { data: ExpandedCircleNodeData; selected?: boolean }) {
   const t = useTranslations("circles");
+
+  const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.target !== event.currentTarget) return;
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    event.stopPropagation();
+    data.onToggle?.(data.circleId);
+  };
+
   const getBadgeClass = (stage: string) => {
     switch (stage) {
       case "BUILDING_MUSCLE": return "badge-building-muscle";
@@ -45,6 +56,11 @@ export default function ExpandedCircleNode({ data, selected }: { data: ExpandedC
     <div
       className={`circle-node expanded ${selected ? "selected" : ""}`}
       style={{ width: data.nodeWidth, height: data.nodeHeight }}
+      role="button"
+      tabIndex={0}
+      aria-expanded={true}
+      aria-label={`${data.name} ${t("btnCollapse")}`}
+      onKeyDown={handleKeyDown}
     >
       <Handle type="target" position={Position.Top} style={{ visibility: "hidden" }} />
       
@@ -63,7 +79,7 @@ export default function ExpandedCircleNode({ data, selected }: { data: ExpandedC
         </div>
         {data.purposeMd && <div className="circle-node-purpose">{data.purposeMd}</div>}
         <div className="expanded-circle-roster">
-          {data.members.slice(0, 8).map((member) => (
+          {data.members.map((member) => (
             <PersonNode
               key={member.memberId}
               compact
@@ -79,9 +95,6 @@ export default function ExpandedCircleNode({ data, selected }: { data: ExpandedC
               }}
             />
           ))}
-          {data.memberCount > 8 && (
-            <span className="person-overflow">+{data.memberCount - 8}</span>
-          )}
         </div>
         <div className="circle-node-metrics expanded-metrics">
           <span><strong>{data.memberCount}</strong>{t("membersShort")}</span>
@@ -119,7 +132,7 @@ export default function ExpandedCircleNode({ data, selected }: { data: ExpandedC
               {role.purposeMd && <div className="role-card-purpose">{role.purposeMd}</div>}
               {accountabilities.length > 0 && (
                 <ul className="role-card-accountabilities">
-                  {accountabilities.slice(0, 2).map((accountability, accountabilityIndex) => (
+                  {accountabilities.map((accountability, accountabilityIndex) => (
                     <li key={`${role.id}-accountability-${accountabilityIndex}`}>{accountability}</li>
                   ))}
                 </ul>

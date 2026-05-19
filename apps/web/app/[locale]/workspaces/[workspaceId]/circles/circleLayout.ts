@@ -25,6 +25,7 @@ export type CircleLayoutOptions = {
   isCompactViewport: boolean;
   isFullscreen: boolean;
   manualPositions?: Record<string, GraphPoint>;
+  anchorNodeId?: string | null;
 };
 
 export type CircleLayoutResult = {
@@ -39,13 +40,29 @@ export const CIRCLE_SNAP_GRID: [number, number] = [16, 16];
 
 const COLLAPSED_NODE_WIDTH = 284;
 const COLLAPSED_NODE_HEIGHT = 320;
-const EXPANDED_NODE_WIDTH = 460;
+const EXPANDED_NODE_WIDTH = 520;
 const MIN_COMPACT_EXPANDED_WIDTH = 320;
 const MAX_COMPACT_EXPANDED_WIDTH = 420;
 const COLLISION_GAP = 24;
 
+type LayoutRole = {
+  purposeMd?: string | null;
+  accountabilities?: unknown[];
+  assignments?: unknown[];
+};
+
+type CircleLayoutNodeData = {
+  roleCount?: number;
+  roles?: LayoutRole[];
+  members?: unknown[];
+  memberCount?: number;
+  purposeMd?: string | null;
+  nodeWidth?: number;
+  nodeHeight?: number;
+};
+
 function getRoleCount(node: Node) {
-  const data = node.data as { roleCount?: number; roles?: unknown[] } | undefined;
+  const data = node.data as CircleLayoutNodeData | undefined;
   if (typeof data?.roleCount === "number") return data.roleCount;
   return data?.roles?.length ?? 0;
 }
@@ -57,6 +74,64 @@ function isExpandedNode(node: Node) {
 function getSafeViewportWidth(options: Pick<CircleLayoutOptions, "viewportWidth" | "isCompactViewport">) {
   if (Number.isFinite(options.viewportWidth) && options.viewportWidth > 0) return options.viewportWidth;
   return options.isCompactViewport ? 390 : 1100;
+}
+
+function estimateTextLines(value: unknown, charsPerLine: number) {
+  if (typeof value !== "string") return 0;
+  const text = value.trim();
+  if (!text) return 0;
+  return text.split("\n").reduce((total, line) => total + Math.max(1, Math.ceil(line.length / charsPerLine)), 0);
+}
+
+function countRosterRows(memberCount: number, contentWidth: number) {
+  if (memberCount <= 0) return 0;
+  const itemWidth = 42;
+  const perRow = Math.max(1, Math.floor((contentWidth + 8) / itemWidth));
+  return Math.ceil(memberCount / perRow);
+}
+
+function countPeopleRows(assignmentCount: number, contentWidth: number, isCompactViewport: boolean) {
+  if (assignmentCount <= 0) return 1;
+  const chipWidth = isCompactViewport ? 160 : 188;
+  const perRow = Math.max(1, Math.floor((contentWidth + 8) / chipWidth));
+  return Math.ceil(assignmentCount / perRow);
+}
+
+function estimateAccountabilityHeight(accountabilities: unknown[] | undefined, charsPerLine: number) {
+  if (!accountabilities?.length) return 0;
+  const lineCount = accountabilities.reduce<number>((total, item) => (
+    total + Math.max(1, estimateTextLines(item, charsPerLine))
+  ), 0);
+  return 10 + lineCount * 18 + Math.max(0, accountabilities.length - 1) * 5;
+}
+
+function getExpandedCircleHeight(data: CircleLayoutNodeData | undefined, width: number, isCompactViewport: boolean) {
+  const headerContentWidth = width - 32;
+  const roleContentWidth = width - 52;
+  const textCharsPerLine = isCompactViewport ? 42 : 64;
+  const roles = data?.roles ?? [];
+  const memberCount = data?.members?.length ?? data?.memberCount ?? 0;
+  const rosterRows = countRosterRows(memberCount, headerContentWidth);
+
+  const purposeLines = estimateTextLines(data?.purposeMd, textCharsPerLine);
+  const purposeHeight = purposeLines > 0 ? Math.max(34, purposeLines * 18) + 12 : 0;
+  const rosterHeight = rosterRows > 0 ? rosterRows * 34 + Math.max(0, rosterRows - 1) * 8 + 24 : 24;
+  const headerHeight = 32 + 30 + purposeHeight + rosterHeight + 45 + 42;
+
+  if (roles.length === 0) return headerHeight + 28 + 22;
+
+  const roleHeights = roles.map((role) => {
+    const purposeRoleLines = estimateTextLines(role.purposeMd, textCharsPerLine);
+    const purposeRoleHeight = purposeRoleLines > 0 ? purposeRoleLines * 18 : 0;
+    const accountabilityHeight = estimateAccountabilityHeight(role.accountabilities, textCharsPerLine);
+    const peopleRows = countPeopleRows(role.assignments?.length ?? 0, roleContentWidth, isCompactViewport);
+    const peopleHeight = peopleRows * 34 + Math.max(0, peopleRows - 1) * 8;
+    const sectionCount = 2 + (purposeRoleHeight > 0 ? 1 : 0) + (accountabilityHeight > 0 ? 1 : 0);
+    const gaps = Math.max(0, sectionCount - 1) * 9;
+    return Math.max(84, 24 + 22 + purposeRoleHeight + accountabilityHeight + peopleHeight + gaps);
+  });
+
+  return headerHeight + 28 + roleHeights.reduce((total, height) => total + height, 0) + Math.max(0, roleHeights.length - 1) * 10;
 }
 
 export function getCircleNodeDimensions({
@@ -86,23 +161,30 @@ export function getCircleNodeDimensions({
 
   return {
     width: isCompactViewport ? compactExpandedWidth : EXPANDED_NODE_WIDTH,
-    height: Math.min(isCompactViewport ? 560 : 620, 260 + roleCount * 132),
+    height: 260 + roleCount * 132,
   };
 }
 
 function getDimensionsForNode(node: Node, options: CircleLayoutOptions): NodeDimensions {
-  const data = node.data as { nodeWidth?: number; nodeHeight?: number } | undefined;
+  const data = node.data as CircleLayoutNodeData | undefined;
   if (typeof data?.nodeWidth === "number" && typeof data?.nodeHeight === "number") {
     return { width: data.nodeWidth, height: data.nodeHeight };
   }
 
-  return getCircleNodeDimensions({
+  const dimensions = getCircleNodeDimensions({
     isExpanded: isExpandedNode(node),
     roleCount: getRoleCount(node),
     viewportWidth: options.viewportWidth,
     isCompactViewport: options.isCompactViewport,
     isFullscreen: options.isFullscreen,
   });
+
+  if (!isExpandedNode(node)) return dimensions;
+
+  return {
+    width: dimensions.width,
+    height: getExpandedCircleHeight(data, dimensions.width, options.isCompactViewport),
+  };
 }
 
 function withMeasuredData(node: Node, dimensions: NodeDimensions): Node {
@@ -216,16 +298,26 @@ export function findNearestFreePosition(
   return fallback;
 }
 
+function orderNodesForCollisionResolution(nodes: Node[], anchorNodeId: string | null | undefined) {
+  if (!anchorNodeId) return nodes;
+  const anchor = nodes.find((node) => node.id === anchorNodeId);
+  if (!anchor) return nodes;
+  return [anchor, ...nodes.filter((node) => node.id !== anchorNodeId)];
+}
+
 function resolveCollisions(nodes: Node[], options: CircleLayoutOptions) {
   const resolved: Node[] = [];
+  const resolvedById = new Map<string, Node>();
 
-  for (const node of nodes) {
+  for (const node of orderNodesForCollisionResolution(nodes, options.anchorNodeId)) {
     const candidate = { ...node };
     const position = findNearestFreePosition(candidate.id, [candidate, ...resolved], options);
-    resolved.push({ ...candidate, position });
+    const nextNode = { ...candidate, position };
+    resolved.push(nextNode);
+    resolvedById.set(nextNode.id, nextNode);
   }
 
-  return resolved;
+  return nodes.map((node) => resolvedById.get(node.id) ?? node);
 }
 
 function layoutFlatNodes(nodes: Node[], options: CircleLayoutOptions) {

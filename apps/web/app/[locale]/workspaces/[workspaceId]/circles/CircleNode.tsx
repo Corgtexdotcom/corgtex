@@ -3,6 +3,7 @@
 import { Handle, Position } from "@xyflow/react";
 import { Maximize2 } from "lucide-react";
 import { useTranslations } from "next-intl";
+import type { KeyboardEvent } from "react";
 import PersonNode from "./PersonNode";
 import type { CircleMemberPreview } from "./circleGraphHelpers";
 
@@ -18,6 +19,7 @@ export type CircleNodeData = {
   accountabilityCount: number;
   members: CircleMemberPreview[];
   onExpand?: (circleId: string) => void;
+  onToggle?: (circleId: string) => void;
   nodeWidth?: number;
   nodeHeight?: number;
 };
@@ -33,6 +35,14 @@ const avatarPositions = [
 
 export default function CircleNode({ data, selected }: { data: CircleNodeData; selected?: boolean }) {
   const t = useTranslations("circles");
+
+  const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.target !== event.currentTarget) return;
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    event.stopPropagation();
+    data.onToggle?.(data.circleId);
+  };
 
   const getBadgeClass = (stage: string) => {
     switch (stage) {
@@ -51,7 +61,15 @@ export default function CircleNode({ data, selected }: { data: CircleNodeData; s
   };
 
   return (
-    <div className={`circle-node ${selected ? "selected" : ""}`} style={{ width: data.nodeWidth, height: data.nodeHeight }}>
+    <div
+      className={`circle-node ${selected ? "selected" : ""}`}
+      style={{ width: data.nodeWidth, height: data.nodeHeight }}
+      role="button"
+      tabIndex={0}
+      aria-expanded={false}
+      aria-label={`${data.name} ${t("expand")}`}
+      onKeyDown={handleKeyDown}
+    >
       <Handle type="target" position={Position.Top} style={{ visibility: "hidden" }} />
       <div className="circle-node-topline">
         <div className="circle-node-title">{data.name}</div>
