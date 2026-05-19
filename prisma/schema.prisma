@@ -730,6 +730,8 @@ model User {
   displayName              String?
   bio                      String?                     @db.Text
   avatarUrl                String?                     @db.Text
+  linkedinUrl              String?                     @db.Text
+  websiteUrl               String?                     @db.Text
   passwordHash             String
   globalRole               GlobalRole                  @default(USER)
   createdAt                DateTime                    @default(now())

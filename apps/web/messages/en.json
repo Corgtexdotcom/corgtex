@@ -1009,6 +1009,7 @@
     "editProfile": "Edit profile",
     "inCircles": "In {count} circles",
     "inactive": "Inactive",
+    "linkedin": "LinkedIn",
     "noActiveTensions": "No active tensions.",
     "noBio": "No bio has been added yet.",
     "noBioOwn": "Add a short bio so teammates understand your focus and how to work with you.",
@@ -1026,7 +1027,8 @@
     "rolesAndCircles": "Roles & Circles",
     "title": "Members",
     "unknownUser": "Unknown User",
-    "untitled": "Untitled"
+    "untitled": "Untitled",
+    "website": "Website"
   },
   "roles": {
     "accountabilities": "Accountabilities",
@@ -2043,6 +2045,8 @@
   "sectionSecurity": "Security & Sessions",
   "labelDisplayName": "Display Name",
   "labelBio": "Bio (About me)",
+  "labelLinkedinUrl": "LinkedIn URL",
+  "labelWebsiteUrl": "Website URL",
   "labelAvatar": "Avatar",
   "labelEmail": "Email",
   "labelMemberSince": "Member Since",

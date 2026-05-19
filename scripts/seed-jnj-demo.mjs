@@ -23,6 +23,9 @@ const nDaysAgo = (days) => {
 };
 
 // Data Definition
+const DEMO_LINKEDIN_URL = "https://www.linkedin.com/company/johnson-&-johnson/";
+const DEMO_WEBSITE_URL = "https://www.jnj.com/";
+
 const TEAM_MEMBERS = [
   { email: "demo@jnj-demo.corgtex.app", name: "Demo User", role: "ADMIN", password: "demo1234", title: "Observer", bio: "Demo workspace observer used to review member, role, circle, proposal, tension, and meeting navigation." },
   { email: "jduato@jnj.demo.corgtex.app", name: "Joaquin Duato", role: "ADMIN", title: "Chairman & CEO", bio: "Enterprise leader focused on portfolio strategy, operating cadence, and cross-segment governance." },
@@ -759,8 +762,21 @@ async function main() {
   for (const tm of TEAM_MEMBERS) {
     const user = await prisma.user.upsert({
       where: { email: tm.email },
-      update: { displayName: tm.name, bio: tm.bio, passwordHash: hashPassword(tm.password || "jnj12345") },
-      create: { email: tm.email, displayName: tm.name, bio: tm.bio, passwordHash: hashPassword(tm.password || "jnj12345") }
+      update: {
+        displayName: tm.name,
+        bio: tm.bio,
+        linkedinUrl: tm.linkedinUrl || DEMO_LINKEDIN_URL,
+        websiteUrl: tm.websiteUrl || DEMO_WEBSITE_URL,
+        passwordHash: hashPassword(tm.password || "jnj12345"),
+      },
+      create: {
+        email: tm.email,
+        displayName: tm.name,
+        bio: tm.bio,
+        linkedinUrl: tm.linkedinUrl || DEMO_LINKEDIN_URL,
+        websiteUrl: tm.websiteUrl || DEMO_WEBSITE_URL,
+        passwordHash: hashPassword(tm.password || "jnj12345"),
+      }
     });
     
     const member = await prisma.member.upsert({

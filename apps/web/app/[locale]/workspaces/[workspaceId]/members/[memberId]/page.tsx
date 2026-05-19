@@ -54,6 +54,9 @@ export default async function MemberProfilePage({ params }: PageProps) {
     if (!acc.find((item) => item.id === tension.id)) acc.push(tension);
     return acc;
   }, []);
+  const profileLinks: { label: string; href: string }[] = [];
+  if (member.user?.linkedinUrl) profileLinks.push({ label: t("linkedin"), href: member.user.linkedinUrl });
+  if (member.user?.websiteUrl) profileLinks.push({ label: t("website"), href: member.user.websiteUrl });
   const circleHref = (circleId: string) => `/workspaces/${workspaceId}/circles?view=list&circleId=${circleId}#circle-${circleId}`;
 
   return (
@@ -103,6 +106,22 @@ export default async function MemberProfilePage({ params }: PageProps) {
               <p className="muted" style={{ margin: 0, lineHeight: 1.5 }}>
                 {member.user?.bio || (isCurrentUser ? t("noBioOwn") : t("noBio"))}
               </p>
+              {profileLinks.length > 0 && (
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 12 }}>
+                  {profileLinks.map((link) => (
+                    <a
+                      key={link.href}
+                      href={link.href}
+                      target="_blank"
+                      rel="noreferrer noopener"
+                      className="tag info"
+                      style={{ textDecoration: "none" }}
+                    >
+                      {link.label}
+                    </a>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
         </div>

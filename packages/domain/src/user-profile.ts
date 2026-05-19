@@ -20,6 +20,8 @@ export async function getUserProfile(actor: AppActor, workspaceId: string) {
         displayName: true,
         bio: true,
         avatarUrl: true,
+        linkedinUrl: true,
+        websiteUrl: true,
         createdAt: true,
         ssoIdentities: { select: { provider: true } },
       },
@@ -68,6 +70,8 @@ export async function updateUserProfile(actor: AppActor, params: {
   displayName?: string | null;
   bio?: string | null;
   avatarUrl?: string | null;
+  linkedinUrl?: string | null;
+  websiteUrl?: string | null;
 }) {
   invariant(actor.kind === "user", 403, "FORBIDDEN", "Only user accounts have profiles.");
 
@@ -75,6 +79,8 @@ export async function updateUserProfile(actor: AppActor, params: {
   if (params.displayName !== undefined) data.displayName = params.displayName?.trim() || null;
   if (params.bio !== undefined) data.bio = params.bio?.trim() || null;
   if (params.avatarUrl !== undefined) data.avatarUrl = params.avatarUrl;
+  if (params.linkedinUrl !== undefined) data.linkedinUrl = normalizeProfileUrl(params.linkedinUrl, "LinkedIn URL");
+  if (params.websiteUrl !== undefined) data.websiteUrl = normalizeProfileUrl(params.websiteUrl, "Website URL");
 
   if (Object.keys(data).length === 0) return actor.user;
 
@@ -87,10 +93,30 @@ export async function updateUserProfile(actor: AppActor, params: {
       displayName: true,
       bio: true,
       avatarUrl: true,
+      linkedinUrl: true,
+      websiteUrl: true,
     },
   });
 
   return updated;
+}
+
+function normalizeProfileUrl(value: string | null | undefined, label: string) {
+  const trimmed = value?.trim();
+  if (!trimmed) return null;
+
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    throw new AppError(400, "INVALID_PROFILE_URL", `${label} must be a valid https:// URL.`);
+  }
+
+  if (parsed.protocol !== "https:") {
+    throw new AppError(400, "INVALID_PROFILE_URL", `${label} must start with https://.`);
+  }
+
+  return trimmed;
 }
 
 // ------------------------------------------------------------------

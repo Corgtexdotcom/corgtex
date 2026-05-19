@@ -7,6 +7,8 @@ import { handleRouteError, validateBody } from "@/lib/http";
 const updateProfileSchema = z.object({
   displayName: z.string().trim().min(1).optional(),
   bio: z.string().trim().optional(),
+  linkedinUrl: z.string().optional().nullable(),
+  websiteUrl: z.string().optional().nullable(),
 });
 
 export async function GET(request: NextRequest) {

@@ -129,6 +129,8 @@ export async function listMembers(workspaceId: string) {
           displayName: true,
           avatarUrl: true,
           bio: true,
+          linkedinUrl: true,
+          websiteUrl: true,
         },
       },
     },
@@ -152,6 +154,8 @@ export async function listMembersEnriched(workspaceId: string, opts?: { includeI
           displayName: true,
           avatarUrl: true,
           bio: true,
+          linkedinUrl: true,
+          websiteUrl: true,
         },
       },
       roleAssignments: {
@@ -723,6 +727,8 @@ export async function getMemberProfile(actor: AppActor, workspaceId: string, mem
           displayName: true,
           avatarUrl: true,
           bio: true,
+          linkedinUrl: true,
+          websiteUrl: true,
         },
       },
       roleAssignments: {
