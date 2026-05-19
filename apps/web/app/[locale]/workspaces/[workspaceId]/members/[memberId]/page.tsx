@@ -1,4 +1,4 @@
-import { AppError, getMemberProfile, requireWorkspaceMembership } from "@corgtex/domain";
+import { AppError, getMemberProfile } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { notFound } from "next/navigation";
 import Link from "next/link";
@@ -29,23 +29,32 @@ export default async function MemberProfilePage({ params }: PageProps) {
     notFound();
   }
 
+  let data;
   try {
-    await requireWorkspaceMembership({ actor, workspaceId });
+    data = await getMemberProfile(actor, workspaceId, memberId);
   } catch (error) {
-    if (error instanceof AppError && error.status === 403) {
+    if (error instanceof AppError && (error.status === 403 || error.status === 404)) {
       notFound();
     }
     throw error;
   }
 
-  let data;
-  try {
-    data = await getMemberProfile(workspaceId, memberId);
-  } catch (error) {
-    notFound();
-  }
-
   const { member, meetings, proposals, authoredTensions, recentActivity } = data;
+  const isCurrentUser = member.user?.id === actor.user.id;
+  const assignedCircles = Array.from(
+    member.roleAssignments.reduce((circleMap, assignment) => {
+      const circle = assignment.role.circle;
+      if (circle) {
+        circleMap.set(circle.id, circle);
+      }
+      return circleMap;
+    }, new Map<string, NonNullable<(typeof member.roleAssignments)[number]["role"]["circle"]>>()).values(),
+  );
+  const activeTensions = [...authoredTensions, ...member.assignedTensions].reduce((acc: typeof authoredTensions, tension) => {
+    if (!acc.find((item) => item.id === tension.id)) acc.push(tension);
+    return acc;
+  }, []);
+  const circleHref = (circleId: string) => `/workspaces/${workspaceId}/circles?view=list&circleId=${circleId}#circle-${circleId}`;
 
   return (
     <>
@@ -74,7 +83,7 @@ export default async function MemberProfilePage({ params }: PageProps) {
           }}>
             {!member.user?.avatarUrl && getInitials(member.user?.displayName, member.user?.email)}
           </div>
-          <div>
+          <div style={{ flex: 1 }}>
             <h1 style={{ border: "none", padding: 0, margin: "0 0 8px 0", fontSize: "2rem" }}>
               {member.user?.displayName || t("unknownUser")}
             </h1>
@@ -83,12 +92,18 @@ export default async function MemberProfilePage({ params }: PageProps) {
               <span className="badge-getting-started" style={{ padding: "2px 8px", borderRadius: 12, fontSize: "0.75rem", background: "var(--surface)", border: "1px solid var(--line)" }}>
                 {member.role}
               </span>
+              {isCurrentUser && (
+                <Link href={`/workspaces/${workspaceId}/settings?tab=user`} style={{ color: "var(--accent)", textDecoration: "none" }}>
+                  {t("editProfile")}
+                </Link>
+              )}
             </div>
-            {member.user?.bio && (
-              <p className="muted" style={{ margin: "10px 0 0", maxWidth: 640, lineHeight: 1.5 }}>
-                {member.user.bio}
+            <div style={{ marginTop: 14, maxWidth: 720 }}>
+              <div className="nr-item-meta" style={{ marginBottom: 4 }}>{t("profileIntro")}</div>
+              <p className="muted" style={{ margin: 0, lineHeight: 1.5 }}>
+                {member.user?.bio || (isCurrentUser ? t("noBioOwn") : t("noBio"))}
               </p>
-            )}
+            </div>
           </div>
         </div>
       </header>
@@ -104,11 +119,13 @@ export default async function MemberProfilePage({ params }: PageProps) {
                 {member.roleAssignments.map((ra) => (
                   <div key={ra.id} className="nr-item">
                     <div className="nr-item-meta" style={{ marginBottom: 4 }}>
-                      <Link href={`/workspaces/${workspaceId}/circles`} style={{ color: "var(--accent)", textDecoration: "none" }}>
+                      <Link href={ra.role.circle?.id ? circleHref(ra.role.circle.id) : `/workspaces/${workspaceId}/circles?view=list`} style={{ color: "var(--accent)", textDecoration: "none" }}>
                         {ra.role.circle?.name || t("noCircle")} Circle
                       </Link>
                     </div>
-                    <strong className="nr-item-title">{ra.role.name}</strong>
+                    <Link href={`/workspaces/${workspaceId}/roles/${ra.role.id}`} className="nr-item-title" style={{ color: "inherit", textDecoration: "none", fontWeight: 700 }}>
+                      {ra.role.name}
+                    </Link>
                     {ra.role.purposeMd && (
                       <div className="nr-excerpt" style={{ marginTop: 8 }}>
                         {ra.role.purposeMd}
@@ -143,18 +160,20 @@ export default async function MemberProfilePage({ params }: PageProps) {
 
           <section className="ws-section">
             <h2 className="nr-section-header">{t("activeTensions")}</h2>
-            {authoredTensions.length === 0 && member.assignedTensions.length === 0 ? (
+            {activeTensions.length === 0 ? (
               <p className="muted italic">{t("noActiveTensions")}</p>
             ) : (
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                {[...authoredTensions, ...member.assignedTensions].reduce((acc: any[], curr) => {
-                  if (!acc.find(item => item.id === curr.id)) acc.push(curr);
-                  return acc;
-                }, []).map((t: any) => (
-                  <div key={t.id} className="nr-item row" style={{ display: "flex", justifyContent: "space-between" }}>
-                    <span>{t.title || t("untitled")}</span>
-                    <span className="muted" style={{ fontSize: "0.8rem", textTransform: "uppercase" }}>{t.status}</span>
-                  </div>
+                {activeTensions.map((tension) => (
+                  <Link
+                    key={tension.id}
+                    href={`/workspaces/${workspaceId}/tensions/${tension.id}`}
+                    className="nr-item row"
+                    style={{ textDecoration: "none", color: "inherit", display: "flex", justifyContent: "space-between" }}
+                  >
+                    <span>{tension.title || t("untitled")}</span>
+                    <span className="muted" style={{ fontSize: "0.8rem", textTransform: "uppercase" }}>{tension.status}</span>
+                  </Link>
                 ))}
               </div>
             )}
@@ -162,6 +181,26 @@ export default async function MemberProfilePage({ params }: PageProps) {
         </div>
 
         <div style={{ flex: 1, minWidth: 300 }}>
+          <section className="ws-section" style={{ marginBottom: 32 }}>
+            <h2 className="nr-section-header">{t("circles")}</h2>
+            {assignedCircles.length === 0 ? (
+              <p className="muted italic">{t("noCircles")}</p>
+            ) : (
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                {assignedCircles.map((circle) => (
+                  <Link
+                    key={circle.id}
+                    href={circleHref(circle.id)}
+                    className="tag info"
+                    style={{ textDecoration: "none" }}
+                  >
+                    {circle.name}
+                  </Link>
+                ))}
+              </div>
+            )}
+          </section>
+
           <section className="ws-section" style={{ marginBottom: 32 }}>
             <h2 className="nr-section-header">{t("recentMeetings")}</h2>
             {meetings.length === 0 ? (

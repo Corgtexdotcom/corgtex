@@ -553,7 +553,7 @@ describe("members domain", () => {
     prismaMock.tension.findMany.mockResolvedValue([{ id: "tension-1" }]);
 
     const { getMemberProfile } = await import("./members");
-    await expect(getMemberProfile("workspace-1", "member-1")).resolves.toMatchObject({
+    await expect(getMemberProfile(actor, "workspace-1", "member-1")).resolves.toMatchObject({
       member: { id: "member-1" },
       meetings: [{ id: "meeting-1" }],
       recentActivity: [{ id: "audit-1" }],
@@ -571,6 +571,81 @@ describe("members domain", () => {
             bio: true,
           },
         },
+        roleAssignments: expect.objectContaining({
+          where: {
+            role: {
+              archivedAt: null,
+              circle: {
+                archivedAt: null,
+              },
+            },
+          },
+        }),
+      }),
+    }));
+  });
+
+  it("getMemberProfile filters recent governance records to what the viewer can open", async () => {
+    const viewerActor: AppActor = {
+      kind: "user",
+      user: {
+        id: "viewer-user",
+        email: "viewer@example.com",
+        displayName: "Viewer",
+        globalRole: "USER",
+      },
+    };
+    prismaMock.member.findUnique
+      .mockResolvedValueOnce({
+        id: "viewer-member",
+        workspaceId: "workspace-1",
+        userId: "viewer-user",
+        role: "CONTRIBUTOR",
+        isActive: true,
+      })
+      .mockResolvedValueOnce({
+        id: "member-1",
+        workspaceId: "workspace-1",
+        user: { id: "profile-user", email: "profile@example.com" },
+      });
+    prismaMock.meeting.findMany.mockResolvedValue([]);
+    prismaMock.auditLog.findMany.mockResolvedValue([]);
+    prismaMock.proposal.findMany.mockResolvedValue([]);
+    prismaMock.tension.findMany.mockResolvedValue([]);
+
+    const { getMemberProfile } = await import("./members");
+    await getMemberProfile(viewerActor, "workspace-1", "member-1");
+
+    const visibleWhere = {
+      archivedAt: null,
+      OR: [
+        { isPrivate: false },
+        { isPrivate: true, status: "DRAFT", authorUserId: "viewer-user" },
+      ],
+    };
+    expect(prismaMock.member.findUnique).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      include: expect.objectContaining({
+        assignedTensions: expect.objectContaining({
+          where: expect.objectContaining({
+            status: "OPEN",
+            ...visibleWhere,
+          }),
+        }),
+      }),
+    }));
+    expect(prismaMock.proposal.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        workspaceId: "workspace-1",
+        authorUserId: "profile-user",
+        ...visibleWhere,
+      }),
+    }));
+    expect(prismaMock.tension.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        workspaceId: "workspace-1",
+        authorUserId: "profile-user",
+        status: "OPEN",
+        ...visibleWhere,
       }),
     }));
   });

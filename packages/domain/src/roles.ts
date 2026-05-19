@@ -26,6 +26,59 @@ export async function listRoles(workspaceId: string, opts?: { archiveFilter?: Ar
   });
 }
 
+export async function getRole(actor: AppActor, params: {
+  workspaceId: string;
+  roleId: string;
+}) {
+  await requireWorkspaceMembership({
+    actor,
+    workspaceId: params.workspaceId,
+  });
+
+  const role = await prisma.role.findFirst({
+    where: {
+      id: params.roleId,
+      archivedAt: null,
+      circle: {
+        workspaceId: params.workspaceId,
+        archivedAt: null,
+      },
+    },
+    include: {
+      circle: {
+        select: {
+          id: true,
+          name: true,
+          purposeMd: true,
+          domainMd: true,
+          maturityStage: true,
+        },
+      },
+      assignments: {
+        include: {
+          member: {
+            include: {
+              user: {
+                select: {
+                  id: true,
+                  email: true,
+                  displayName: true,
+                  avatarUrl: true,
+                  bio: true,
+                },
+              },
+            },
+          },
+        },
+        orderBy: { assignedAt: "desc" },
+      },
+    },
+  });
+
+  invariant(role, 404, "NOT_FOUND", "Role not found.");
+  return role;
+}
+
 export async function createRole(actor: AppActor, params: {
   workspaceId: string;
   circleId: string;
