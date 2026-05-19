@@ -9,6 +9,7 @@ import { createTension, updateTension } from "./tensions";
 import { createProposal, createProposalFromTension, resolveProposal, submitProposal } from "./proposals";
 import { postDeliberationEntry } from "./deliberation";
 import { buildMeetingIntelligenceContext } from "./meeting-intelligence-context";
+import { shouldBypassAutoApplyForSlackMeetingActionReview } from "./meeting-action-review";
 import { prependMeetingBlockContext, resolveMeetingBlockReference } from "./meeting-blocks";
 
 const AUTO_APPLY_CONFIDENCE_THRESHOLD = 0.8;
@@ -113,6 +114,15 @@ function normalizeTargetEntityType(value: unknown) {
     return value;
   }
   return null;
+}
+
+function normalizeDueAt(value: unknown) {
+  if (value instanceof Date) {
+    return Number.isFinite(value.getTime()) ? value : null;
+  }
+  if (typeof value !== "string" || !value.trim()) return null;
+  const parsed = new Date(value.trim());
+  return Number.isFinite(parsed.getTime()) ? parsed : null;
 }
 
 function deterministicInsightDedupeKey(params: {
@@ -220,6 +230,7 @@ For each item, provide:
   **ANSWER:** [What was decided, agreed upon, or the next step]
   **RESULT:** [PROCESSED / OPEN / PENDING — the current status]
 - assigneeHint: who is responsible (display name from transcript), or null
+- dueAt: ISO 8601 due date/time for ACTION_ITEM or FOLLOW_UP only when the meeting explicitly states one, otherwise null
 - confidence: 0.0-1.0 how confident you are
 - sourceQuote: the relevant transcript or summary excerpt (max 200 chars)
 - targetEntityType and targetEntityId only for RESOLVE items, DECISION items tied to an existing Proposal or Tension, using the existing records supplied in the input
@@ -247,6 +258,7 @@ Number items sequentially (#001, #002, ...) across all types.
           "title": { "type": "string" },
           "body": { "type": "string" },
           "assigneeHint": { "type": "string" },
+          "dueAt": { "type": "string" },
           "confidence": { "type": "number" },
           "sourceQuote": { "type": "string" },
           "targetEntityType": { "type": "string", "enum": ["Action", "Tension", "Proposal"] },
@@ -385,6 +397,7 @@ Number items sequentially (#001, #002, ...) across all types.
         title,
         bodyMd,
         assigneeHint: typeof item.assigneeHint === "string" ? item.assigneeHint : null,
+        dueAt: type === "ACTION_ITEM" || type === "FOLLOW_UP" ? normalizeDueAt(item.dueAt ?? item.dueDate) : null,
         confidence: typeof item.confidence === "number" ? item.confidence : 0,
         sourceQuote: typeof item.sourceQuote === "string" ? item.sourceQuote.slice(0, 200) : null,
         targetEntityType: keepTarget ? targetEntityType : null,
@@ -473,7 +486,7 @@ export async function confirmInsight(
 
 export async function updateInsight(
   actor: AppActor,
-  params: { workspaceId: string; insightId: string; title?: string | null; bodyMd?: string | null; assigneeHint?: string | null }
+  params: { workspaceId: string; insightId: string; title?: string | null; bodyMd?: string | null; assigneeHint?: string | null; dueAt?: Date | string | null }
 ) {
   await requireWorkspaceMembership({
     actor,
@@ -490,6 +503,7 @@ export async function updateInsight(
   const title = params.title?.trim();
   const bodyMd = params.bodyMd?.trim();
   const assigneeHint = params.assigneeHint?.trim();
+  const dueAt = params.dueAt === undefined ? undefined : normalizeDueAt(params.dueAt);
   invariant(title === undefined || title.length > 0, 400, "INVALID_INPUT", "Insight title is required.");
   
   return prisma.meetingInsight.update({
@@ -498,6 +512,7 @@ export async function updateInsight(
       ...(title !== undefined ? { title } : {}),
       ...(bodyMd !== undefined ? { bodyMd } : {}),
       ...(params.assigneeHint !== undefined ? { assigneeHint: assigneeHint || null } : {}),
+      ...(dueAt !== undefined ? { dueAt } : {}),
       reviewedByUserId: actor.kind === "user" ? actor.user.id : null,
       reviewedAt: new Date(),
     },
@@ -656,6 +671,7 @@ export async function applyInsight(
         title: insight.title,
         bodyMd: fullBody,
         assigneeMemberId: hintedMemberId,
+        dueAt: insight.dueAt ?? null,
         isPrivate: false,
       });
       const opened = await updateAction(actor, {
@@ -744,6 +760,10 @@ export async function autoApplyMeetingInsights(
   let applied = 0;
   let failed = 0;
   let skipped = 0;
+  const bypassSlackReviewedActionItems = await shouldBypassAutoApplyForSlackMeetingActionReview({
+    workspaceId: params.workspaceId,
+    meetingId: params.meetingId,
+  });
 
   for (const insight of insights) {
     const requiredThreshold = Math.max(confidenceThreshold, autoApplyThresholdForInsight(insight));
@@ -760,6 +780,10 @@ export async function autoApplyMeetingInsights(
       continue;
     }
     if (!hasMeetingEvidenceForAutoApply(insight)) {
+      skipped++;
+      continue;
+    }
+    if (bypassSlackReviewedActionItems && insight.type === "ACTION_ITEM" && insight.operation === "CREATE") {
       skipped++;
       continue;
     }

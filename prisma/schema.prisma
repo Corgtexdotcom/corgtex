@@ -507,6 +507,7 @@ model Workspace {
   communicationContextSummaries CommunicationContextSummary[]
   communicationInboundEvents    CommunicationInboundEvent[]
   communicationEntityLinks      CommunicationEntityLink[]
+  meetingFollowUpReviews        MeetingFollowUpReview[]
   archiveRecords                WorkspaceArchiveRecord[]
   crmQualifications             CrmQualification[]
   crmConversations              CrmConversation[]
@@ -569,6 +570,7 @@ model CommunicationInstallation {
   contextSummaries CommunicationContextSummary[]
   inboundEvents    CommunicationInboundEvent[]
   entityLinks      CommunicationEntityLink[]
+  meetingFollowUpReviews MeetingFollowUpReview[]
 
   @@unique([provider, externalWorkspaceId])
   @@index([workspaceId, provider, status])
@@ -1621,6 +1623,7 @@ model Meeting {
   proposals  Proposal[]
   tensions   Tension[]
   insights   MeetingInsight[]
+  followUpReview MeetingFollowUpReview?
   recordings MeetingRecording[]
   smokeRuns  MeetingRecorderSmokeRun[]
 
@@ -2963,6 +2966,36 @@ enum MeetingInsightOperation {
   RESOLVE
 }
 
+enum MeetingFollowUpReviewStatus {
+  OPEN
+  CLOSED
+  EXPIRED
+}
+
+model MeetingFollowUpReview {
+  id             String                      @id @default(uuid())
+  workspaceId    String
+  meetingId      String                      @unique
+  installationId String
+  provider       CommunicationProvider       @default(SLACK)
+  channelId      String
+  messageTs      String?
+  threadTs       String?
+  status         MeetingFollowUpReviewStatus @default(OPEN)
+  postedAt       DateTime?
+  expiresAt      DateTime
+  closedAt       DateTime?
+  createdAt      DateTime                    @default(now())
+  updatedAt      DateTime                    @updatedAt
+
+  workspace    Workspace                 @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  meeting      Meeting                   @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  installation CommunicationInstallation @relation(fields: [installationId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, status, expiresAt])
+  @@index([installationId, channelId, messageTs])
+}
+
 model MeetingInsight {
   id          String @id @default(uuid())
   workspaceId String
@@ -2975,6 +3008,7 @@ model MeetingInsight {
   title        String
   bodyMd       String
   assigneeHint String?
+  dueAt        DateTime?
   confidence   Float?
   sourceQuote  String?
 

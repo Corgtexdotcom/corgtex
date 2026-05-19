@@ -58,6 +58,9 @@ vi.mock("@corgtex/shared", async (importOriginal) => {
       auditLog: {
         create: vi.fn(),
       },
+      workspaceFeatureFlag: {
+        findUnique: vi.fn(),
+      },
       meetingInsight: {
         create: vi.fn(),
         createMany: vi.fn(),
@@ -176,7 +179,9 @@ describe("meeting-intelligence", () => {
     createTensionMock.mockResolvedValue({ id: "tension-1" });
     updateTensionMock.mockResolvedValue({ id: "tension-1" });
     postDeliberationEntryMock.mockResolvedValue({ id: "deliberation-1" });
+    (prisma.meeting.findFirst as ReturnType<typeof vi.fn>).mockReset().mockResolvedValue(null);
     (prisma.meetingInsight.createMany as ReturnType<typeof vi.fn>).mockResolvedValue({ count: 1 });
+    (prisma.workspaceFeatureFlag.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue(null);
   });
 
   describe("extractMeetingInsights", () => {
@@ -191,6 +196,7 @@ describe("meeting-intelligence", () => {
               title: "#001 > Alice Next Steps - follow up on email",
               body: "**CONTEXT:** Received customer feedback\n**REQUEST:** Need to follow up\n**ANSWER:** Alice will follow up\n**RESULT:** OPEN",
               assigneeHint: "Alice",
+              dueAt: "2026-04-30T17:00:00.000Z",
               confidence: 0.9,
               sourceQuote: "I will follow up tomorrow",
             }
@@ -226,6 +232,7 @@ describe("meeting-intelligence", () => {
           type: "ACTION_ITEM",
           title: "#001 > Alice Next Steps - follow up on email",
           bodyMd: expect.stringContaining("**CONTEXT:**"),
+          dueAt: new Date("2026-04-30T17:00:00.000Z"),
         })],
       }));
     });
@@ -1049,6 +1056,43 @@ describe("meeting-intelligence", () => {
         threshold: 0.8,
       });
 
+      expect(prisma.meetingInsight.findUnique).not.toHaveBeenCalled();
+    });
+
+    it("bypasses auto-apply for configured Slack-reviewed Crina action items", async () => {
+      (prisma.meeting.findFirst as ReturnType<typeof vi.fn>).mockResolvedValue({
+        series: { externalId: "ops:crina-weekly-progress-review" },
+      });
+      (prisma.workspaceFeatureFlag.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue({
+        enabled: true,
+        config: {
+          meetingSeriesExternalId: "ops:crina-weekly-progress-review",
+          channelId: "C999",
+        },
+      });
+      (prisma.meetingInsight.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([
+        {
+          id: "insight-action",
+          type: "ACTION_ITEM",
+          operation: "CREATE",
+          targetEntityType: null,
+          targetEntityId: null,
+          confidence: 0.95,
+          sourceQuote: "I will follow up.",
+        },
+      ]);
+
+      await expect(autoApplyMeetingInsights(mockActor, {
+        workspaceId: "ws-1",
+        meetingId: "meeting-1",
+      })).resolves.toMatchObject({
+        applied: 0,
+        failed: 0,
+        skipped: 1,
+        threshold: 0.8,
+      });
+
+      expect(createActionMock).not.toHaveBeenCalled();
       expect(prisma.meetingInsight.findUnique).not.toHaveBeenCalled();
     });
   });
