@@ -50,6 +50,8 @@ describe("User Profile Domain", () => {
         displayName: "Test",
         bio: "Bio",
         avatarUrl: null,
+        linkedinUrl: "https://www.linkedin.com/in/test",
+        websiteUrl: "https://example.com",
         createdAt: new Date(),
         ssoIdentities: [],
       } as any);
@@ -65,6 +67,8 @@ describe("User Profile Domain", () => {
 
       const profile = await getUserProfile(mockActor as any, "w1");
       expect(profile.user.email).toBe("test@example.com");
+      expect(profile.user.linkedinUrl).toBe("https://www.linkedin.com/in/test");
+      expect(profile.user.websiteUrl).toBe("https://example.com");
       expect(profile.member!.role).toBe("ADMIN");
     });
   });
@@ -75,6 +79,8 @@ describe("User Profile Domain", () => {
         id: "u1",
         displayName: "New Name",
         bio: "New Bio",
+        linkedinUrl: null,
+        websiteUrl: null,
       } as any);
 
       const result = await updateUserProfile(mockActor as any, { displayName: "New Name", bio: "New Bio" });
@@ -87,9 +93,62 @@ describe("User Profile Domain", () => {
           displayName: true,
           bio: true,
           avatarUrl: true,
+          linkedinUrl: true,
+          websiteUrl: true,
         },
       });
       expect(result.displayName).toBe("New Name");
+    });
+
+    it("saves valid profile links", async () => {
+      vi.mocked(prisma.user.update).mockResolvedValue({
+        id: "u1",
+        linkedinUrl: "https://www.linkedin.com/in/test",
+        websiteUrl: "https://example.com/about",
+      } as any);
+
+      await updateUserProfile(mockActor as any, {
+        linkedinUrl: " https://www.linkedin.com/in/test ",
+        websiteUrl: "https://example.com/about",
+      });
+
+      expect(prisma.user.update).toHaveBeenCalledWith(expect.objectContaining({
+        data: {
+          linkedinUrl: "https://www.linkedin.com/in/test",
+          websiteUrl: "https://example.com/about",
+        },
+      }));
+    });
+
+    it("clears blank profile links", async () => {
+      vi.mocked(prisma.user.update).mockResolvedValue({
+        id: "u1",
+        linkedinUrl: null,
+        websiteUrl: null,
+      } as any);
+
+      await updateUserProfile(mockActor as any, {
+        linkedinUrl: " ",
+        websiteUrl: "",
+      });
+
+      expect(prisma.user.update).toHaveBeenCalledWith(expect.objectContaining({
+        data: {
+          linkedinUrl: null,
+          websiteUrl: null,
+        },
+      }));
+    });
+
+    it("rejects non-https profile links", async () => {
+      await expect(updateUserProfile(mockActor as any, {
+        linkedinUrl: "http://www.linkedin.com/in/test",
+      })).rejects.toMatchObject({
+        status: 400,
+        code: "INVALID_PROFILE_URL",
+      });
+
+      expect(prisma.user.update).not.toHaveBeenCalled();
     });
   });
 

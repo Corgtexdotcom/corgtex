@@ -103,6 +103,8 @@ describe("members domain", () => {
             displayName: true,
             avatarUrl: true,
             bio: true,
+            linkedinUrl: true,
+            websiteUrl: true,
           },
         },
       },
@@ -569,6 +571,8 @@ describe("members domain", () => {
             displayName: true,
             avatarUrl: true,
             bio: true,
+            linkedinUrl: true,
+            websiteUrl: true,
           },
         },
         roleAssignments: expect.objectContaining({

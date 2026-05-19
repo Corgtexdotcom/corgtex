@@ -50,6 +50,8 @@ export function UserSettingsPanel({
   // Profile Form
   const [displayName, setDisplayName] = useState(profile.user.displayName || "");
   const [bio, setBio] = useState(profile.user.bio || "");
+  const [linkedinUrl, setLinkedinUrl] = useState(profile.user.linkedinUrl || "");
+  const [websiteUrl, setWebsiteUrl] = useState(profile.user.websiteUrl || "");
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Password Form
@@ -67,7 +69,7 @@ export function UserSettingsPanel({
     setIsSaving(true);
     setError(null);
     try {
-      await updateProfileAction(workspaceId, { displayName, bio });
+      await updateProfileAction(workspaceId, { displayName, bio, linkedinUrl, websiteUrl });
       router.refresh();
       // Optional: show toast
     } catch (err: any) {
@@ -234,6 +236,31 @@ export function UserSettingsPanel({
                 onChange={(e) => setBio(e.target.value)}
                 placeholder="Brief summary about yourself..."
               />
+            </div>
+
+            <div className="row" style={{ gap: 16, alignItems: "center" }}>
+              <div style={{ flex: 1 }}>
+                <label>{t("labelLinkedinUrl")}</label>
+                <input
+                  type="url"
+                  className="nr-input"
+                  value={linkedinUrl}
+                  onChange={(e) => setLinkedinUrl(e.target.value)}
+                  pattern="https://.*"
+                  placeholder="https://www.linkedin.com/in/..."
+                />
+              </div>
+              <div style={{ flex: 1 }}>
+                <label>{t("labelWebsiteUrl")}</label>
+                <input
+                  type="url"
+                  className="nr-input"
+                  value={websiteUrl}
+                  onChange={(e) => setWebsiteUrl(e.target.value)}
+                  pattern="https://.*"
+                  placeholder="https://example.com"
+                />
+              </div>
             </div>
 
             <div className="row" style={{ gap: 16, alignItems: 'center' }}>

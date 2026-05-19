@@ -41,53 +41,76 @@ export default async function MembersPage({
         <div style={{ display: "grid", gap: "16px", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))" }}>
           {members.map(member => {
             const displayName = member.user.displayName || member.user.email;
-            const initials = member.user.displayName 
-              ? member.user.displayName.split(" ").map((n: string) => n[0]).join("").substring(0, 2).toUpperCase() 
+            const initials = member.user.displayName
+              ? member.user.displayName.split(" ").map((n: string) => n[0]).join("").substring(0, 2).toUpperCase()
               : member.user.email.substring(0,2).toUpperCase();
             const isAgent = member.user.email.includes("agent") || displayName.toLowerCase().includes("agent") || member.user.email.includes("system+");
-            
+            const profileLinks: { label: string; href: string }[] = [];
+            if (member.user.linkedinUrl) profileLinks.push({ label: t("linkedin"), href: member.user.linkedinUrl });
+            if (member.user.websiteUrl) profileLinks.push({ label: t("website"), href: member.user.websiteUrl });
+
             return (
-              <Link 
-                href={`/workspaces/${workspaceId}/members/${member.id}`} 
+              <div
                 key={member.id}
                 className="nr-item"
                 style={{ textDecoration: "none", color: "inherit", transition: "transform 0.1s" }}
               >
-                <div style={{ display: "flex", gap: "16px", alignItems: "center" }}>
-                  <div style={{ 
-                    width: 48, 
-                    height: 48, 
-                    borderRadius: 24, 
-                    background: isAgent ? "var(--surface-sunken)" : "var(--accent-soft)", 
-                    backgroundImage: member.user.avatarUrl ? `url(${JSON.stringify(member.user.avatarUrl)})` : undefined,
-                    backgroundPosition: "center",
-                    backgroundSize: "cover",
-                    color: isAgent ? "var(--text-strong)" : "var(--accent)", 
-                    border: isAgent ? "1px solid var(--line)" : "none",
-                    display: "flex", 
-                    alignItems: "center", 
-                    justifyContent: "center",
-                    fontWeight: 600,
-                    fontSize: "1.1rem"
-                  }}>
-                    {!member.user.avatarUrl && (isAgent ? "⬡" : initials)}
-                  </div>
-                  <div>
-                    <h3 style={{ margin: "0 0 4px", fontSize: "1rem" }}>{displayName}</h3>
-                    <div className="muted" style={{ fontSize: "0.8rem", marginBottom: 4 }}>
-                      {member.user.email}
+                <Link
+                  href={`/workspaces/${workspaceId}/members/${member.id}`}
+                  style={{ color: "inherit", display: "block", textDecoration: "none" }}
+                >
+                  <div style={{ display: "flex", gap: "16px", alignItems: "center" }}>
+                    <div style={{
+                      width: 48,
+                      height: 48,
+                      borderRadius: 24,
+                      background: isAgent ? "var(--surface-sunken)" : "var(--accent-soft)",
+                      backgroundImage: member.user.avatarUrl ? `url(${JSON.stringify(member.user.avatarUrl)})` : undefined,
+                      backgroundPosition: "center",
+                      backgroundSize: "cover",
+                      color: isAgent ? "var(--text-strong)" : "var(--accent)",
+                      border: isAgent ? "1px solid var(--line)" : "none",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      fontWeight: 600,
+                      fontSize: "1.1rem"
+                    }}>
+                      {!member.user.avatarUrl && (isAgent ? "⬡" : initials)}
                     </div>
-                    {member.user.bio && (
-                      <div className="muted" style={{ fontSize: "0.78rem", marginBottom: 6, lineHeight: 1.35 }}>
-                        {member.user.bio}
+                    <div>
+                      <h3 style={{ margin: "0 0 4px", fontSize: "1rem" }}>{displayName}</h3>
+                      <div className="muted" style={{ fontSize: "0.8rem", marginBottom: 4 }}>
+                        {member.user.email}
                       </div>
-                    )}
-                    <div style={{ fontSize: "0.75rem", background: "var(--bg-alt)", display: "inline-block", padding: "2px 8px", borderRadius: "12px" }}>
-                      {member.role}
+                      {member.user.bio && (
+                        <div className="muted" style={{ fontSize: "0.78rem", marginBottom: 6, lineHeight: 1.35 }}>
+                          {member.user.bio}
+                        </div>
+                      )}
+                      <div style={{ fontSize: "0.75rem", background: "var(--bg-alt)", display: "inline-block", padding: "2px 8px", borderRadius: "12px" }}>
+                        {member.role}
+                      </div>
                     </div>
                   </div>
-                </div>
-              </Link>
+                </Link>
+                {profileLinks.length > 0 && (
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 12, paddingLeft: 64 }}>
+                    {profileLinks.map((link) => (
+                      <a
+                        key={link.href}
+                        href={link.href}
+                        target="_blank"
+                        rel="noreferrer noopener"
+                        className="tag info"
+                        style={{ textDecoration: "none" }}
+                      >
+                        {link.label}
+                      </a>
+                    ))}
+                  </div>
+                )}
+              </div>
             )
           })}
         </div>

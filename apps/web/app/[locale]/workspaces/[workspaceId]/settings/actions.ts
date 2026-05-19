@@ -495,7 +495,7 @@ export async function updateModelUsageBudgetAction(formData: FormData) {
 
 export async function updateProfileAction(
   workspaceId: string,
-  data: { displayName?: string; bio?: string }
+  data: { displayName?: string; bio?: string; linkedinUrl?: string; websiteUrl?: string }
 ) {
   const actor = await requirePageActor();
   const { updateUserProfile } = await import("@corgtex/domain");

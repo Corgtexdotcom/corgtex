@@ -1009,6 +1009,7 @@
     "editProfile": "Editar perfil",
     "inCircles": "En {count} círculos",
     "inactive": "Inactivo",
+    "linkedin": "LinkedIn",
     "noActiveTensions": "Sin tensiones activas.",
     "noBio": "Aún no se ha agregado una bio.",
     "noBioOwn": "Agrega una bio breve para que tus compañeros entiendan tu foco y cómo trabajar contigo.",
@@ -1026,7 +1027,8 @@
     "rolesAndCircles": "Roles y círculos",
     "title": "Miembros",
     "unknownUser": "Usuario desconocido",
-    "untitled": "Sin título"
+    "untitled": "Sin título",
+    "website": "Sitio web"
   },
   "roles": {
     "accountabilities": "Responsabilidades",
@@ -2042,7 +2044,10 @@
     "sectionSecurity": "Seguridad y Sesiones",
     "labelDisplayName": "Nombre para mostrar",
     "labelBio": "Biografía (Sobre mí)",
+    "labelLinkedinUrl": "URL de LinkedIn",
+    "labelWebsiteUrl": "URL del sitio web",
     "labelAvatar": "Avatar",
+    "labelEmail": "Correo electrónico",
     "labelMemberSince": "Miembro desde",
     "labelCurrentPassword": "Contraseña actual",
     "labelNewPassword": "Nueva contraseña",
