@@ -486,6 +486,7 @@ model Workspace {
   oauthApps                     OAuthApp[]
   mcpOAuthCodes                 McpOAuthAuthorizationCode[]
   mcpOAuthTokens                McpOAuthAccessToken[]
+  externalMcpConnections        ExternalMcpConnection[]
   ssoConfigs                    WorkspaceSsoConfig[]
   modelUsageBudget              ModelUsageBudget?
   externalDataSources           ExternalDataSource[]
@@ -757,6 +758,7 @@ model User {
   oauthConnections         OAuthConnection[]
   mcpOAuthCodes            McpOAuthAuthorizationCode[]
   mcpOAuthTokens           McpOAuthAccessToken[]
+  externalMcpConnections   ExternalMcpConnection[]
   resetTokens              PasswordResetToken[]
   ssoIdentities            UserSsoIdentity[]
   meetingInsights          MeetingInsight[]
@@ -2903,6 +2905,36 @@ model McpOAuthAccessToken {
   @@index([clientId])
   @@index([userId, workspaceId])
   @@index([workspaceId, instanceSlug])
+}
+
+enum ExternalMcpConnectionStatus {
+  ACTIVE
+  DISCONNECTED
+  ERROR
+}
+
+model ExternalMcpConnection {
+  id              String                      @id @default(uuid())
+  workspaceId     String
+  userId          String
+  providerKey     String
+  displayName     String
+  serverUrl       String
+  accessTokenEnc  String?                     @db.Text
+  refreshTokenEnc String?                     @db.Text
+  scopes          String[]                    @default([])
+  capabilities    Json?
+  status          ExternalMcpConnectionStatus @default(ACTIVE)
+  lastError       String?                     @db.Text
+  createdAt       DateTime                    @default(now())
+  updatedAt       DateTime                    @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, userId, providerKey])
+  @@index([workspaceId, providerKey, status])
+  @@index([userId, providerKey])
 }
 
 model ExternalDataSource {

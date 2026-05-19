@@ -8,6 +8,7 @@ import {
   deleteSource,
   deleteTension,
   deliverSlackAgentResponse,
+  evaluateDelegatedActionPolicy,
   fetchSlackThreadMessages,
   listMembers,
   type SlackAgentDelivery,
@@ -985,7 +986,13 @@ export async function runSlackAgent(params: SlackAgentJobPayload & {
         });
         if (assignee.error) couldNot.push(assignee.error);
 
-        const open = parsed.confidence >= 0.8;
+        const actionPolicy = evaluateDelegatedActionPolicy({
+          toolName: parsed.intent,
+          operation: "write",
+          confidence: parsed.confidence,
+          explicitUserIntent: false,
+        });
+        const open = actionPolicy.policyClass === "normal_write";
         const dueAt = parseDueDate(parsed.dueDateISO);
         const kind = parsed.intent === "create_action"
           ? "ACTION"

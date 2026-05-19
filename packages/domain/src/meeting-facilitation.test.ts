@@ -296,11 +296,11 @@ describe("meeting facilitation", () => {
     });
   });
 
-  it("posts configured Crina meeting reviews with summary context and action proposals", async () => {
+  it("posts configured customer meeting reviews with summary context and action proposals", async () => {
     prismaMock.workspaceFeatureFlag.findUnique.mockResolvedValue({
       enabled: true,
       config: {
-        meetingSeriesExternalId: "ops:crina-weekly-progress-review",
+        meetingSeriesExternalId: "ops:weekly-progress-review",
         channelId: "C999",
         maxProposals: 5,
         expiresAfterHours: 48,
@@ -311,12 +311,12 @@ describe("meeting facilitation", () => {
       .mockResolvedValueOnce({
         id: "meeting-1",
         workspaceId: "workspace-1",
-        title: "Crina weekly progress review",
-        summaryMd: "Full generated summary for the Crina meeting.",
+        title: "Customer weekly progress review",
+        summaryMd: "Full generated summary for the customer meeting.",
         summaryPostedAt: null,
         recordedAt: new Date("2026-05-20T16:00:00.000Z"),
         seriesId: "series-1",
-        series: { externalId: "ops:crina-weekly-progress-review" },
+        series: { externalId: "ops:weekly-progress-review" },
       })
       .mockResolvedValueOnce(null);
     prismaMock.meetingInsight.findMany.mockResolvedValue([
@@ -346,7 +346,7 @@ describe("meeting facilitation", () => {
       threadTs: undefined,
     }, expect.any(Array));
     const postedBlocks = JSON.stringify(sendSlackMessageMock.mock.calls[0]?.[2]);
-    expect(postedBlocks).toContain("Full generated summary for the Crina meeting.");
+    expect(postedBlocks).toContain("Full generated summary for the customer meeting.");
     expect(postedBlocks).toContain("Milan to confirm rollout channel");
     expect(prismaMock.meetingFollowUpReview.upsert).toHaveBeenCalledWith(expect.objectContaining({
       create: expect.objectContaining({

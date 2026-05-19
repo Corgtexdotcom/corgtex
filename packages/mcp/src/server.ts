@@ -106,6 +106,12 @@ import {
   discardFailedJob,
   purgeWorkspaceArtifact,
   restoreWorkspaceArtifact,
+  evaluateDelegatedActionPolicy,
+  executeExternalMcpTool,
+  fetchConnectedExternalMcpContext,
+  listExternalMcpConnections,
+  recordAudit,
+  searchConnectedExternalMcpContext,
 } from "@corgtex/domain";
 import type { AgentScope } from "@corgtex/domain";
 import { searchIndexedKnowledge } from "@corgtex/knowledge";
@@ -162,27 +168,8 @@ function agentCredentialSummary(credential: {
 }
 
 const DESTRUCTIVE_TOOL_NAMES = new Set([
-  "archive_proposal",
-  "delete_action",
-  "delete_tension",
-  "archive_goal",
-  "archive_tool_link",
-  "deactivate_member",
-  "delete_meeting",
-  "delete_article",
-  "delete_ledger_account",
-  "delete_spend",
-  "archive_spend",
-  "archive_ledger_account",
-  "archive_artifact",
   "purge_artifact",
-  "retry_failed_job",
-  "discard_failed_job",
   "revoke_agent_credential",
-]);
-
-const SENSITIVE_TOOL_NAMES = new Set([
-  "reveal_tool_link_credential",
 ]);
 
 type ToolCapability = {
@@ -196,16 +183,20 @@ const TOOL_CAPABILITIES = {
   search_knowledge: { scopes: ["brain:read"] },
   search: { scopes: ["brain:read"] },
   fetch: { scopes: ["brain:read"] },
+  list_connected_tools: { scopes: ["external-tools:read"] },
+  search_connected_context: { scopes: ["external-tools:read"] },
+  fetch_connected_context: { scopes: ["external-tools:read"] },
+  execute_external_tool: { scopes: ["external-tools:write"] },
   get_workspace_info: { scopes: ["workspace:read"] },
   daily_overview: { scopes: ["workspace:read", "actions:read", "proposals:read", "tensions:read", "meetings:read", "finance:read"] },
   record_support_audit: { scopes: ["support:write"], sensitive: true },
   list_integrations: { scopes: ["integrations:read"] },
   list_data_sources: { scopes: ["data-sources:read"] },
-  sync_data_source: { scopes: ["data-sources:write"], sensitive: true },
+  sync_data_source: { scopes: ["data-sources:write"] },
   list_tool_links: { scopes: ["tools:read"] },
-  upsert_tool_link: { scopes: ["tools:write"], sensitive: true },
+  upsert_tool_link: { scopes: ["tools:write"] },
   reveal_tool_link_credential: { scopes: ["tools:credentials:read"], sensitive: true },
-  archive_tool_link: { scopes: ["tools:write"], destructive: true },
+  archive_tool_link: { scopes: ["tools:write"] },
   list_agent_runs: { scopes: ["agents:read"] },
   list_agent_credentials: { scopes: ["agents:read"] },
   update_agent_credential_scopes: { scopes: ["support:write"], sensitive: true },
@@ -216,53 +207,53 @@ const TOOL_CAPABILITIES = {
   update_model_budget: { scopes: ["support:write"], sensitive: true },
   list_runtime_jobs: { scopes: ["runtime:read"] },
   list_failed_jobs: { scopes: ["runtime:read"] },
-  retry_failed_job: { scopes: ["runtime:write"], destructive: true, sensitive: true },
-  discard_failed_job: { scopes: ["runtime:write"], destructive: true, sensitive: true },
-  upload_document_text: { scopes: ["documents:write"], sensitive: true },
+  retry_failed_job: { scopes: ["runtime:write"] },
+  discard_failed_job: { scopes: ["runtime:write"] },
+  upload_document_text: { scopes: ["documents:write"] },
   list_proposals: { scopes: ["proposals:read"] },
   get_proposal: { scopes: ["proposals:read"] },
   create_proposal: { scopes: ["proposals:write"] },
   update_proposal: { scopes: ["proposals:write"] },
   resolve_proposal: { scopes: ["proposals:write"] },
   submit_proposal: { scopes: ["proposals:write"] },
-  archive_proposal: { scopes: ["proposals:write"], destructive: true },
+  archive_proposal: { scopes: ["proposals:write"] },
   publish_proposal: { scopes: ["proposals:write"] },
   return_proposal_to_draft: { scopes: ["proposals:write"] },
-  support_reopen_resolved_proposals: { scopes: ["support:write", "proposals:write"], destructive: true, sensitive: true },
+  support_reopen_resolved_proposals: { scopes: ["support:write", "proposals:write"], sensitive: true },
   list_actions: { scopes: ["actions:read"] },
   create_action: { scopes: ["actions:write"] },
   update_action: { scopes: ["actions:write"] },
   complete_action: { scopes: ["actions:write"] },
   return_action_to_draft: { scopes: ["actions:write"] },
-  delete_action: { scopes: ["actions:write"], destructive: true },
+  delete_action: { scopes: ["actions:write"] },
   list_tensions: { scopes: ["tensions:read"] },
   create_tension: { scopes: ["tensions:write"] },
   update_tension: { scopes: ["tensions:write"] },
   return_tension_to_draft: { scopes: ["tensions:write"] },
   upvote_tension: { scopes: ["tensions:write"] },
-  delete_tension: { scopes: ["tensions:write"], destructive: true },
+  delete_tension: { scopes: ["tensions:write"] },
   list_goals: { scopes: ["goals:read"] },
   get_goal: { scopes: ["goals:read"] },
   create_goal: { scopes: ["goals:write"] },
   update_goal: { scopes: ["goals:write"] },
   return_goal_to_draft: { scopes: ["goals:write"] },
-  archive_goal: { scopes: ["goals:write"], destructive: true },
+  archive_goal: { scopes: ["goals:write"] },
   list_members: { scopes: ["members:read"] },
-  create_member: { scopes: ["members:write"], sensitive: true },
-  update_member: { scopes: ["members:write"], sensitive: true },
-  deactivate_member: { scopes: ["members:write"], destructive: true, sensitive: true },
-  resend_member_access_link: { scopes: ["members:write"], sensitive: true },
+  create_member: { scopes: ["members:write"] },
+  update_member: { scopes: ["members:write"] },
+  deactivate_member: { scopes: ["members:write"] },
+  resend_member_access_link: { scopes: ["members:write"] },
   list_feature_flags: { scopes: ["workspace:read"] },
-  set_feature_flag: { scopes: ["workspace:write"], sensitive: true },
+  set_feature_flag: { scopes: ["workspace:write"] },
   list_meetings: { scopes: ["meetings:read"] },
   get_meeting: { scopes: ["meetings:read"] },
-  upload_meeting: { scopes: ["meetings:write"], sensitive: true },
-  delete_meeting: { scopes: ["meetings:write"], destructive: true },
+  upload_meeting: { scopes: ["meetings:write"] },
+  delete_meeting: { scopes: ["meetings:write"] },
   list_articles: { scopes: ["brain:read"] },
   get_article: { scopes: ["brain:read"] },
   create_article: { scopes: ["brain:write"] },
   update_article: { scopes: ["brain:write"] },
-  delete_article: { scopes: ["brain:write"], destructive: true },
+  delete_article: { scopes: ["brain:write"] },
   publish_article: { scopes: ["brain:write"] },
   return_article_to_draft: { scopes: ["brain:write"] },
   create_discussion_thread: { scopes: ["brain:write"] },
@@ -279,26 +270,49 @@ const TOOL_CAPABILITIES = {
   list_policies: { scopes: ["governance:read"] },
   list_approval_policies: { scopes: ["governance:read"] },
   list_spends: { scopes: ["finance:read"] },
-  create_spend: { scopes: ["finance:write"], sensitive: true },
-  create_spend_draft: { scopes: ["finance:write"], sensitive: true },
+  create_spend: { scopes: ["finance:write"] },
+  create_spend_draft: { scopes: ["finance:write"] },
   submit_spend: { scopes: ["finance:write"] },
-  update_spend: { scopes: ["finance:write"], sensitive: true },
+  update_spend: { scopes: ["finance:write"] },
   return_spend_to_draft: { scopes: ["finance:write"] },
-  archive_spend: { scopes: ["finance:write"], destructive: true },
+  archive_spend: { scopes: ["finance:write"] },
   list_ledger_accounts: { scopes: ["finance:read"] },
-  archive_ledger_account: { scopes: ["finance:write"], destructive: true },
-  archive_artifact: { scopes: ["archive:write"], destructive: true },
+  archive_ledger_account: { scopes: ["finance:write"] },
+  archive_artifact: { scopes: ["archive:write"] },
   list_archived_artifacts: { scopes: ["archive:read"] },
   restore_artifact: { scopes: ["archive:write"] },
   purge_artifact: { scopes: ["archive:write"], destructive: true },
   list_ledger_transactions: { scopes: ["finance:read"] },
 } satisfies Record<string, ToolCapability>;
 
+function summarizeForExecutionAudit(value: unknown): unknown {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "string") return { type: "string", length: value.length };
+  if (typeof value === "number" || typeof value === "boolean") return value;
+  if (Array.isArray(value)) return { type: "array", length: value.length };
+  if (typeof value === "object") {
+    return {
+      type: "object",
+      keys: Object.keys(value as Record<string, unknown>).sort(),
+    };
+  }
+  return { type: typeof value };
+}
+
 function annotationsForTool(name: string) {
   const readOnlyHint = /^(search|fetch|list_|get_|daily_overview$)/.test(name);
   const capability = TOOL_CAPABILITIES[name as keyof typeof TOOL_CAPABILITIES];
+  const policy = evaluateDelegatedActionPolicy({
+    toolName: name,
+    operation: readOnlyHint ? "read" : "write",
+    explicitUserIntent: true,
+  });
   const destructiveHint = DESTRUCTIVE_TOOL_NAMES.has(name) || Boolean(capability?.destructive);
-  const sensitiveHint = SENSITIVE_TOOL_NAMES.has(name) || Boolean(capability?.sensitive);
+  const sensitiveHint = Boolean(capability?.sensitive) || policy.requiresSensitiveHandling;
+  const openWorldHint = name === "list_connected_tools"
+    || name === "search_connected_context"
+    || name === "fetch_connected_context"
+    || name === "execute_external_tool";
   return {
     title: name
       .split("_")
@@ -308,7 +322,7 @@ function annotationsForTool(name: string) {
     destructiveHint,
     sensitiveHint,
     idempotentHint: readOnlyHint,
-    openWorldHint: false,
+    openWorldHint,
   };
 }
 
@@ -352,11 +366,53 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       requireScope(sessionCtx, scope);
     }
   };
+  const auditToolExecution = async (name: string, input: unknown, result: unknown, error?: unknown) => {
+    if (!hasToolCapability(name) || name === "record_support_audit") return;
+    const annotation = annotationsForTool(name);
+    if (annotation.readOnlyHint) return;
+
+    const policy = evaluateDelegatedActionPolicy({
+      toolName: name,
+      operation: "write",
+      explicitUserIntent: true,
+    });
+    if (policy.policyClass === "read") return;
+
+    try {
+      await prisma.$transaction(async (tx) => {
+        await recordAudit(tx, actor, {
+          workspaceId,
+          action: "mcp.tool_executed",
+          entityType: "McpTool",
+          entityId: name,
+          meta: {
+            provider: "corgtex",
+            toolName: name,
+            policyClass: policy.policyClass,
+            confidence: null,
+            inputSummary: summarizeForExecutionAudit(input),
+            resultSummary: error ? null : summarizeForExecutionAudit(result),
+            error: error instanceof Error ? error.message : error ? String(error) : null,
+          },
+        });
+      });
+    } catch {
+      // Execution audit is best-effort; domain permission checks and tool work
+      // must not fail because audit storage had a transient problem.
+    }
+  };
   const tool = (name: string, description: string, inputSchema: Record<string, unknown>, handler: unknown) => {
     const guardedHandler = typeof handler === "function" && hasToolCapability(name)
       ? async (...args: unknown[]) => {
         requireToolCapability(name);
-        return handler(...args);
+        try {
+          const result = await handler(...args);
+          await auditToolExecution(name, args[0], result);
+          return result;
+        } catch (error) {
+          await auditToolExecution(name, args[0], null, error);
+          throw error;
+        }
       }
       : handler;
     return server.tool(name, description, inputSchema, annotationsForTool(name), guardedHandler);
@@ -472,6 +528,126 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
           raw: chunk.metadata,
         },
       });
+    },
+  );
+
+  tool(
+    "list_connected_tools",
+    "List same-user delegated external MCP tools connected to this workspace, starting with Notion. Does not reveal OAuth tokens.",
+    {},
+    async () => {
+      requireToolCapability("list_connected_tools");
+      const tools = await listExternalMcpConnections(actor, workspaceId);
+      return structuredJsonResult({ items: tools });
+    },
+  );
+
+  tool(
+    "search_connected_context",
+    "Search live connected context across Corgtex Brain and same-user external MCP sources such as Notion. External results are not saved into Brain unless the user explicitly asks.",
+    {
+      query: z.string().describe("The search query"),
+      limit: z.number().optional().describe("Max combined results to return (default 5, max 20)"),
+      includeCorgtex: z.boolean().optional().describe("Whether to include Corgtex Brain results (default true)"),
+      providerKey: z.enum(["notion"]).optional().describe("Limit external search to one connected provider"),
+    },
+    async ({ query, limit, includeCorgtex, providerKey }: {
+      query: string;
+      limit?: number;
+      includeCorgtex?: boolean;
+      providerKey?: "notion";
+    }) => {
+      requireToolCapability("search_connected_context");
+      const safeLimit = Math.max(1, Math.min(limit ?? 5, 20));
+      const corgtexResults = [];
+
+      if (includeCorgtex !== false) {
+        requireScope(sessionCtx, "brain:read");
+        const results = await searchIndexedKnowledge({
+          workspaceId,
+          query,
+          limit: safeLimit,
+        });
+        corgtexResults.push(...results.map((result) => ({
+          id: `corgtex:${result.chunkId}`,
+          source: "corgtex",
+          providerKey: "corgtex",
+          providerDisplayName: "Corgtex Brain",
+          externalId: result.chunkId,
+          title: result.title ?? `${result.sourceType} ${result.sourceId}`,
+          text: result.snippet,
+          url: webUrl(workspaceId, `/brain?source=${encodeURIComponent(result.sourceId)}`),
+          metadata: {
+            sourceType: result.sourceType,
+            sourceId: result.sourceId,
+            chunkIndex: result.chunkIndex,
+            score: result.score,
+          },
+        })));
+      }
+
+      const external = await searchConnectedExternalMcpContext(actor, {
+        workspaceId,
+        query,
+        providerKey,
+        limit: safeLimit,
+      });
+
+      return structuredJsonResult({
+        results: [...corgtexResults, ...external.results].slice(0, safeLimit),
+        externalErrors: external.errors,
+      });
+    },
+  );
+
+  tool(
+    "fetch_connected_context",
+    "Fetch detail for one live external MCP result returned by search_connected_context. Does not ingest the result into Corgtex Brain.",
+    {
+      providerKey: z.enum(["notion"]).describe("Connected external provider key"),
+      externalId: z.string().describe("External result ID to fetch"),
+    },
+    async ({ providerKey, externalId }: { providerKey: "notion"; externalId: string }) => {
+      requireToolCapability("fetch_connected_context");
+      const result = await fetchConnectedExternalMcpContext(actor, {
+        workspaceId,
+        providerKey,
+        externalId,
+      });
+      return structuredJsonResult(result as Record<string, unknown>);
+    },
+  );
+
+  tool(
+    "execute_external_tool",
+    "Execute a same-user delegated external MCP tool, such as a Notion tool, under the authenticated user's connected account. Normal writes auto-run when explicit/high-confidence; sensitive Corgtex actions are not routed through this generic gateway.",
+    {
+      providerKey: z.enum(["notion"]).describe("Connected external provider key"),
+      toolName: z.string().describe("External MCP tool name to execute"),
+      arguments: z.record(z.string(), z.unknown()).optional().describe("External MCP tool arguments"),
+      operation: z.enum(["read", "write"]).optional().describe("External operation class. Unknown tools default to write."),
+      confidence: z.number().optional().describe("Model confidence from 0 to 1 when available"),
+      explicitUserIntent: z.boolean().optional().describe("True only when the user explicitly asked for this external execution."),
+    },
+    async ({ providerKey, toolName, arguments: args, operation, confidence, explicitUserIntent }: {
+      providerKey: "notion";
+      toolName: string;
+      arguments?: Record<string, unknown>;
+      operation?: "read" | "write";
+      confidence?: number;
+      explicitUserIntent?: boolean;
+    }) => {
+      requireToolCapability("execute_external_tool");
+      const result = await executeExternalMcpTool(actor, {
+        workspaceId,
+        providerKey,
+        toolName,
+        arguments: args ?? {},
+        operation,
+        confidence,
+        explicitUserIntent: explicitUserIntent === true,
+      });
+      return structuredJsonResult(result as Record<string, unknown>);
     },
   );
 

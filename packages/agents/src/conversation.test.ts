@@ -3,14 +3,22 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const {
   checkBudgetMock,
   chatMock,
+  executeExternalMcpToolMock,
+  fetchConnectedExternalMcpContextMock,
+  listExternalMcpConnectionsMock,
   listWorkspaceToolLinksMock,
   loadRelevantMemoriesMock,
+  searchConnectedExternalMcpContextMock,
   storeAgentMemoryMock,
 } = vi.hoisted(() => ({
   checkBudgetMock: vi.fn(),
   chatMock: vi.fn(),
+  executeExternalMcpToolMock: vi.fn(),
+  fetchConnectedExternalMcpContextMock: vi.fn(),
+  listExternalMcpConnectionsMock: vi.fn(),
   listWorkspaceToolLinksMock: vi.fn(),
   loadRelevantMemoriesMock: vi.fn(),
+  searchConnectedExternalMcpContextMock: vi.fn(),
   storeAgentMemoryMock: vi.fn(),
 }));
 
@@ -54,13 +62,17 @@ vi.mock("@corgtex/domain", () => ({
   createGoal: vi.fn(),
   createProposal: vi.fn(),
   createTension: vi.fn(),
+  executeExternalMcpTool: executeExternalMcpToolMock,
+  fetchConnectedExternalMcpContext: fetchConnectedExternalMcpContextMock,
   getMemberProfile: vi.fn(),
   ingestConversationOnDemand: vi.fn(),
+  listExternalMcpConnections: listExternalMcpConnectionsMock,
   listMembersEnriched: vi.fn(),
   listWorkspaceToolLinks: listWorkspaceToolLinksMock,
   loadRelevantMemories: loadRelevantMemoriesMock,
   refreshOAuthTokenIfNeeded: vi.fn(),
   revealWorkspaceToolLinkCredential: vi.fn(),
+  searchConnectedExternalMcpContext: searchConnectedExternalMcpContextMock,
   storeAgentMemory: storeAgentMemoryMock,
   unassignRole: vi.fn(),
   updateAction: vi.fn(),
@@ -76,6 +88,10 @@ describe("processConversationTurn", () => {
     checkBudgetMock.mockResolvedValue({ allowed: true, usedPct: 0, usedUsd: 0, capUsd: 5 });
     loadRelevantMemoriesMock.mockResolvedValue([]);
     storeAgentMemoryMock.mockResolvedValue(undefined);
+    executeExternalMcpToolMock.mockResolvedValue({ skipped: false, result: { ok: true } });
+    fetchConnectedExternalMcpContextMock.mockResolvedValue({ providerKey: "notion", externalId: "page-1", content: {} });
+    listExternalMcpConnectionsMock.mockResolvedValue([]);
+    searchConnectedExternalMcpContextMock.mockResolvedValue({ results: [], errors: [] });
     listWorkspaceToolLinksMock.mockResolvedValue([
       {
         id: "tool-1",
@@ -203,6 +219,51 @@ describe("processConversationTurn", () => {
         expect.objectContaining({
           role: "system",
           content: expect.stringContaining("Do not turn an action into a proposal unless the user explicitly asks"),
+        }),
+      ]),
+    }));
+  });
+
+  it("exposes connected external MCP tools to the assistant", async () => {
+    const actor = {
+      kind: "user" as const,
+      user: {
+        id: "user-1",
+        email: "user@example.com",
+        displayName: "User",
+      },
+    };
+    chatMock.mockResolvedValueOnce({ content: "I can search Notion live." });
+
+    const { processConversationTurn } = await import("./conversation");
+    await processConversationTurn({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      userMessage: "Find the customer rollout notes in Notion",
+      actor,
+    });
+
+    expect(chatMock).toHaveBeenCalledWith(expect.objectContaining({
+      tools: expect.arrayContaining([
+        expect.objectContaining({
+          function: expect.objectContaining({ name: "list_connected_tools" }),
+        }),
+        expect.objectContaining({
+          function: expect.objectContaining({ name: "search_connected_context" }),
+        }),
+        expect.objectContaining({
+          function: expect.objectContaining({ name: "fetch_connected_context" }),
+        }),
+        expect.objectContaining({
+          function: expect.objectContaining({ name: "execute_external_tool" }),
+        }),
+      ]),
+      messages: expect.arrayContaining([
+        expect.objectContaining({
+          role: "system",
+          content: expect.stringContaining("Use live retrieval from connected tools first"),
         }),
       ]),
     }));

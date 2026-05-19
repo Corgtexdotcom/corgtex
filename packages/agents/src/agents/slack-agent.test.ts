@@ -119,6 +119,12 @@ vi.mock("@corgtex/domain", () => ({
   deleteSource: deleteSourceMock,
   deleteTension: deleteTensionMock,
   deliverSlackAgentResponse: deliverSlackAgentResponseMock,
+  evaluateDelegatedActionPolicy: vi.fn((input: { confidence?: number | null; explicitUserIntent?: boolean }) => {
+    if (input.explicitUserIntent || input.confidence == null || input.confidence >= 0.8) {
+      return { policyClass: "normal_write", autoRunAllowed: true, requiresSensitiveHandling: false, reason: "test" };
+    }
+    return { policyClass: "draft_or_clarify", autoRunAllowed: false, requiresSensitiveHandling: false, reason: "test" };
+  }),
   fetchSlackThreadMessages: fetchSlackThreadMessagesMock,
   listMembers: listMembersMock,
 }));
