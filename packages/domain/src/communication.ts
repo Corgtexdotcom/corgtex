@@ -13,7 +13,16 @@ import type { AppActor, HumanActor } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
 import { createAction, publishAction } from "./actions";
 import { ingestSource } from "./brain";
-import { invariant } from "./errors";
+import { AppError, invariant } from "./errors";
+import {
+  buildSlackMeetingActionReviewEditView,
+  confirmSlackMeetingActionReviewProposal,
+  dismissSlackMeetingActionReviewProposal,
+  isSlackMeetingActionReviewAction,
+  parseSlackMeetingActionReviewActionValue,
+  SLACK_MEETING_ACTION_REVIEW_EDIT_CALLBACK_ID,
+  updateSlackMeetingActionReviewProposalFromModal,
+} from "./meeting-action-review";
 import { createProposal, submitProposal } from "./proposals";
 import { createTension, publishTension } from "./tensions";
 
@@ -1502,6 +1511,20 @@ export async function handleSlackInteraction(payload: Record<string, unknown>) {
   if (payload.type === "view_submission") {
     const view = isRecord(payload.view) ? payload.view : {};
     const values = isRecord(isRecord(view.state) ? view.state.values : null) ? (view.state as Record<string, any>).values : {};
+    const callbackId = asString(view.callback_id);
+    if (callbackId === SLACK_MEETING_ACTION_REVIEW_EDIT_CALLBACK_ID) {
+      const result = await updateSlackMeetingActionReviewProposalFromModal(actor, {
+        workspaceId: installation.workspaceId,
+        privateMetadata: asString(view.private_metadata),
+        values,
+      });
+      await updateSlackMessage(installation.id, {
+        channel: result.channelId,
+        ts: result.messageTs,
+      }, result.blocks, result.text);
+      return {};
+    }
+
     const metadata = JSON.parse(asString(view.private_metadata) || "{}") as Record<string, unknown>;
     const kind = asString(values.kind?.value?.selected_option?.value) as CommunicationWorkItemKind;
     const title = asString(values.title?.value?.value);
@@ -1556,6 +1579,49 @@ export async function handleSlackInteraction(payload: Record<string, unknown>) {
   if (payload.type === "block_actions") {
     const action = Array.isArray(payload.actions) && isRecord(payload.actions[0]) ? payload.actions[0] : null;
     const actionId = asString(action?.action_id);
+    if (isSlackMeetingActionReviewAction(actionId)) {
+      try {
+        const { reviewId, insightId } = parseSlackMeetingActionReviewActionValue(asString(action?.value));
+        invariant(reviewId && insightId, 400, "INVALID_INPUT", "Meeting follow-up review action metadata is missing.");
+
+        if (actionId === "corgtex_meeting_review_edit") {
+          const triggerId = asString(payload.trigger_id);
+          invariant(triggerId, 400, "INVALID_INPUT", "Slack trigger is missing for the edit modal.");
+          const view = await buildSlackMeetingActionReviewEditView(actor, {
+            workspaceId: installation.workspaceId,
+            reviewId,
+            insightId,
+          });
+          await openSlackModal(installation.id, triggerId, view);
+          return {};
+        }
+
+        const result = actionId === "corgtex_meeting_review_confirm"
+          ? await confirmSlackMeetingActionReviewProposal(actor, {
+            workspaceId: installation.workspaceId,
+            installationId: installation.id,
+            externalUserId,
+            reviewId,
+            insightId,
+          })
+          : await dismissSlackMeetingActionReviewProposal(actor, {
+            workspaceId: installation.workspaceId,
+            reviewId,
+            insightId,
+          });
+        await updateSlackMessage(installation.id, {
+          channel: result.channelId,
+          ts: result.messageTs,
+        }, result.blocks, result.text);
+        return { response_type: "ephemeral", text: result.responseText };
+      } catch (error) {
+        if (error instanceof AppError) {
+          return { response_type: "ephemeral", text: error.message };
+        }
+        throw error;
+      }
+    }
+
     const value = JSON.parse(asString(action?.value) || "{}") as { entityType?: string; entityId?: string };
     if (actionId === "corgtex_publish_action" && value.entityId) {
       await publishAction(actor, { workspaceId: installation.workspaceId, actionId: value.entityId });
@@ -1604,6 +1670,18 @@ export async function updateSlackMessage(installationId: string, target: {
     ts: target.ts,
     text,
     blocks: blocks as any,
+  });
+}
+
+async function openSlackModal(installationId: string, triggerId: string, view: unknown) {
+  const installation = await prisma.communicationInstallation.findUnique({
+    where: { id: installationId },
+  });
+  invariant(installation, 404, "NOT_FOUND", "Slack installation not found.");
+
+  return slackClient(encryptedBotToken(installation)).views.open({
+    trigger_id: triggerId,
+    view: view as any,
   });
 }
 

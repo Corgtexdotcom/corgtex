@@ -31,6 +31,7 @@ export * from "./finance";
 export * from "./governance-scoring";
 export * from "./meetings";
 export * from "./meeting-facilitation";
+export * from "./meeting-action-review";
 export * from "./members";
 export * from "./notifications";
 export * from "./proposals";

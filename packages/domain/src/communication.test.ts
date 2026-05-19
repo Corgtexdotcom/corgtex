@@ -1,7 +1,16 @@
 import { createHmac } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { prismaMock, txMock, createActionMock, slackWebClientMock } = vi.hoisted(() => {
+const {
+  prismaMock,
+  txMock,
+  createActionMock,
+  slackWebClientMock,
+  meetingReviewConfirmMock,
+  meetingReviewDismissMock,
+  meetingReviewEditViewMock,
+  meetingReviewModalUpdateMock,
+} = vi.hoisted(() => {
   const tx = {
     communicationInstallation: { update: vi.fn() },
     workflowJob: { upsert: vi.fn() },
@@ -24,6 +33,7 @@ const { prismaMock, txMock, createActionMock, slackWebClientMock } = vi.hoisted(
     },
     views: {
       publish: vi.fn(),
+      open: vi.fn(),
     },
   };
   return {
@@ -72,6 +82,10 @@ const { prismaMock, txMock, createActionMock, slackWebClientMock } = vi.hoisted(
     },
     createActionMock: vi.fn(),
     slackWebClientMock: webClient,
+    meetingReviewConfirmMock: vi.fn(),
+    meetingReviewDismissMock: vi.fn(),
+    meetingReviewEditViewMock: vi.fn(),
+    meetingReviewModalUpdateMock: vi.fn(),
   };
 });
 
@@ -112,6 +126,20 @@ vi.mock("./auth", () => ({
   requireWorkspaceMembership: vi.fn(),
 }));
 
+vi.mock("./meeting-action-review", () => ({
+  SLACK_MEETING_ACTION_REVIEW_EDIT_CALLBACK_ID: "corgtex_meeting_review_edit_modal",
+  isSlackMeetingActionReviewAction: (actionId: string) => [
+    "corgtex_meeting_review_confirm",
+    "corgtex_meeting_review_edit",
+    "corgtex_meeting_review_dismiss",
+  ].includes(actionId),
+  parseSlackMeetingActionReviewActionValue: (value: string) => JSON.parse(value || "{}"),
+  buildSlackMeetingActionReviewEditView: meetingReviewEditViewMock,
+  confirmSlackMeetingActionReviewProposal: meetingReviewConfirmMock,
+  dismissSlackMeetingActionReviewProposal: meetingReviewDismissMock,
+  updateSlackMeetingActionReviewProposalFromModal: meetingReviewModalUpdateMock,
+}));
+
 vi.mock("@slack/web-api", () => ({
   WebClient: vi.fn(function WebClient() {
     return slackWebClientMock;
@@ -149,7 +177,10 @@ describe("communication Slack integration", () => {
     prismaMock.communicationMessage.findMany.mockReset().mockResolvedValue([]);
     prismaMock.knowledgeChunk.deleteMany.mockReset().mockResolvedValue({ count: 0 });
     prismaMock.communicationInstallation.findFirst.mockReset();
+    prismaMock.communicationInstallation.findUnique.mockReset();
     prismaMock.communicationChannel.upsert.mockReset();
+    prismaMock.communicationExternalUser.findUnique.mockReset();
+    prismaMock.user.findUnique.mockReset();
     prismaMock.communicationMessage.upsert.mockReset();
     prismaMock.communicationInstallation.update.mockReset();
     slackWebClientMock.conversations.list.mockReset();
@@ -157,7 +188,30 @@ describe("communication Slack integration", () => {
     slackWebClientMock.conversations.history.mockReset();
     slackWebClientMock.conversations.info.mockReset();
     slackWebClientMock.chat.update.mockReset();
+    slackWebClientMock.views.open.mockReset();
     prismaMock.meeting.findFirst.mockReset();
+    meetingReviewConfirmMock.mockReset().mockResolvedValue({
+      channelId: "C1",
+      messageTs: "1714320000.000100",
+      blocks: [{ type: "section", text: { type: "mrkdwn", text: "updated" } }],
+      text: "Corgtex meeting follow-up review",
+      responseText: "Created action.",
+    });
+    meetingReviewDismissMock.mockReset().mockResolvedValue({
+      channelId: "C1",
+      messageTs: "1714320000.000100",
+      blocks: [{ type: "section", text: { type: "mrkdwn", text: "updated" } }],
+      text: "Corgtex meeting follow-up review",
+      responseText: "Dismissed.",
+    });
+    meetingReviewEditViewMock.mockReset().mockResolvedValue({ type: "modal", callback_id: "corgtex_meeting_review_edit_modal", blocks: [] });
+    meetingReviewModalUpdateMock.mockReset().mockResolvedValue({
+      channelId: "C1",
+      messageTs: "1714320000.000100",
+      blocks: [{ type: "section", text: { type: "mrkdwn", text: "updated" } }],
+      text: "Corgtex meeting follow-up review",
+      responseText: "Updated.",
+    });
   });
 
   it("verifies Slack request signatures", async () => {
@@ -740,6 +794,135 @@ describe("communication Slack integration", () => {
       }),
     }));
     expect(response.text).toContain("working");
+  });
+
+  it("routes signed meeting-review confirm block actions through Corgtex-side authorization", async () => {
+    const { handleSlackInteraction } = await import("./communication");
+    const installation = {
+      id: "install-1",
+      workspaceId: "workspace-1",
+      provider: "SLACK",
+      status: "ACTIVE",
+      botTokenEnc: "enc:bot-token",
+      externalWorkspaceId: "T1",
+    };
+    prismaMock.communicationInstallation.findUnique.mockResolvedValue(installation);
+    prismaMock.communicationExternalUser.findUnique.mockResolvedValue({ userId: "user-1" });
+    prismaMock.user.findUnique.mockResolvedValue({
+      id: "user-1",
+      email: "user@example.test",
+      displayName: "User",
+      globalRole: "USER",
+    });
+
+    const response = await handleSlackInteraction({
+      type: "block_actions",
+      team: { id: "T1" },
+      user: { id: "U1" },
+      actions: [{
+        action_id: "corgtex_meeting_review_confirm",
+        value: JSON.stringify({ reviewId: "review-1", insightId: "insight-1" }),
+      }],
+    });
+
+    expect(meetingReviewConfirmMock).toHaveBeenCalledWith(expect.objectContaining({
+      kind: "user",
+      user: expect.objectContaining({ id: "user-1" }),
+    }), {
+      workspaceId: "workspace-1",
+      installationId: "install-1",
+      externalUserId: "U1",
+      reviewId: "review-1",
+      insightId: "insight-1",
+    });
+    expect(slackWebClientMock.chat.update).toHaveBeenCalledWith(expect.objectContaining({
+      channel: "C1",
+      ts: "1714320000.000100",
+      text: "Corgtex meeting follow-up review",
+    }));
+    expect(response).toEqual({ response_type: "ephemeral", text: "Created action." });
+  });
+
+  it("opens the meeting-review edit modal from signed block actions", async () => {
+    const { handleSlackInteraction } = await import("./communication");
+    const installation = {
+      id: "install-1",
+      workspaceId: "workspace-1",
+      provider: "SLACK",
+      status: "ACTIVE",
+      botTokenEnc: "enc:bot-token",
+      externalWorkspaceId: "T1",
+    };
+    prismaMock.communicationInstallation.findUnique.mockResolvedValue(installation);
+    prismaMock.communicationExternalUser.findUnique.mockResolvedValue({ userId: "user-1" });
+    prismaMock.user.findUnique.mockResolvedValue({
+      id: "user-1",
+      email: "user@example.test",
+      displayName: "User",
+      globalRole: "USER",
+    });
+
+    await expect(handleSlackInteraction({
+      type: "block_actions",
+      team: { id: "T1" },
+      user: { id: "U1" },
+      trigger_id: "trigger-1",
+      actions: [{
+        action_id: "corgtex_meeting_review_edit",
+        value: JSON.stringify({ reviewId: "review-1", insightId: "insight-1" }),
+      }],
+    })).resolves.toEqual({});
+
+    expect(meetingReviewEditViewMock).toHaveBeenCalledWith(expect.any(Object), {
+      workspaceId: "workspace-1",
+      reviewId: "review-1",
+      insightId: "insight-1",
+    });
+    expect(slackWebClientMock.views.open).toHaveBeenCalledWith(expect.objectContaining({
+      trigger_id: "trigger-1",
+      view: expect.objectContaining({ type: "modal" }),
+    }));
+  });
+
+  it("updates the meeting-review Slack post after modal submissions", async () => {
+    const { handleSlackInteraction } = await import("./communication");
+    const installation = {
+      id: "install-1",
+      workspaceId: "workspace-1",
+      provider: "SLACK",
+      status: "ACTIVE",
+      botTokenEnc: "enc:bot-token",
+      externalWorkspaceId: "T1",
+    };
+    prismaMock.communicationInstallation.findUnique.mockResolvedValue(installation);
+    prismaMock.communicationExternalUser.findUnique.mockResolvedValue({ userId: "user-1" });
+    prismaMock.user.findUnique.mockResolvedValue({
+      id: "user-1",
+      email: "user@example.test",
+      displayName: "User",
+      globalRole: "USER",
+    });
+
+    await expect(handleSlackInteraction({
+      type: "view_submission",
+      team: { id: "T1" },
+      user: { id: "U1" },
+      view: {
+        callback_id: "corgtex_meeting_review_edit_modal",
+        private_metadata: JSON.stringify({ reviewId: "review-1", insightId: "insight-1" }),
+        state: { values: { title: { value: { value: "Edited title" } } } },
+      },
+    })).resolves.toEqual({});
+
+    expect(meetingReviewModalUpdateMock).toHaveBeenCalledWith(expect.any(Object), {
+      workspaceId: "workspace-1",
+      privateMetadata: JSON.stringify({ reviewId: "review-1", insightId: "insight-1" }),
+      values: { title: { value: { value: "Edited title" } } },
+    });
+    expect(slackWebClientMock.chat.update).toHaveBeenCalledWith(expect.objectContaining({
+      channel: "C1",
+      ts: "1714320000.000100",
+    }));
   });
 
   it("purges expired raw message content while preserving rows", async () => {

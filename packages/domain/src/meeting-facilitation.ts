@@ -4,6 +4,10 @@ import type { MeetingInsightType } from "@prisma/client";
 import { requireWorkspaceMembership } from "./auth";
 import { invariant } from "./errors";
 import { fetchSlackThreadMessages, sendSlackMessage, updateSlackMessage, validateSlackPostTarget } from "./communication";
+import {
+  markSlackMeetingActionReviewPosted,
+  prepareSlackMeetingActionReviewPost,
+} from "./meeting-action-review";
 import { extractMeetingInsights } from "./meeting-intelligence";
 import { buildMeetingIntelligenceContext } from "./meeting-intelligence-context";
 
@@ -634,6 +638,51 @@ export async function postMeetingSummaryToAgendaThread(params: {
   workspaceId: string;
   meetingId: string;
 }) {
+  const reviewPreparation = await prepareSlackMeetingActionReviewPost(params);
+  if (reviewPreparation?.configured) {
+    if (reviewPreparation.skipped) {
+      return { skipped: true, reason: reviewPreparation.reason };
+    }
+
+    const validation = await validateSlackPostTarget(reviewPreparation.installationId, reviewPreparation.channelId);
+    if (!validation.ok) {
+      return { skipped: true, reason: validation.code };
+    }
+
+    const response = await sendSlackMessage(reviewPreparation.installationId, {
+      channel: reviewPreparation.channelId,
+      threadTs: reviewPreparation.threadTs ?? undefined,
+    }, reviewPreparation.message.mainBlocks);
+    const messageTs = typeof response.ts === "string" ? response.ts : "";
+    invariant(messageTs, 502, "SLACK_POST_FAILED", "Slack did not return a message timestamp for the meeting follow-up review.");
+    const threadTs = reviewPreparation.threadTs ?? messageTs;
+
+    await markSlackMeetingActionReviewPosted({
+      workspaceId: reviewPreparation.workspaceId,
+      meetingId: reviewPreparation.meetingId,
+      reviewId: reviewPreparation.reviewId,
+      installationId: reviewPreparation.installationId,
+      channelId: reviewPreparation.channelId,
+      messageTs,
+      threadTs,
+      text: reviewPreparation.message.text,
+      raw: response,
+    });
+
+    for (const blocks of reviewPreparation.message.overflowBlocks) {
+      await sendSlackMessage(reviewPreparation.installationId, {
+        channel: reviewPreparation.channelId,
+        threadTs,
+      }, blocks);
+    }
+
+    await prisma.meeting.update({
+      where: { id: reviewPreparation.meetingId },
+      data: { summaryPostedAt: new Date() },
+    });
+    return { posted: true, mode: "slack_meeting_action_review" };
+  }
+
   const meeting = await prisma.meeting.findFirst({
     where: { id: params.meetingId, workspaceId: params.workspaceId },
     select: {

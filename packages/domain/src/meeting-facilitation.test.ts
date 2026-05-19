@@ -12,12 +12,20 @@ const {
   prismaMock: {
     $transaction: vi.fn(),
     auditLog: { create: vi.fn() },
+    workspaceFeatureFlag: { findUnique: vi.fn() },
     communicationExternalUser: { findMany: vi.fn() },
     communicationInstallation: {
       findFirst: vi.fn(),
       update: vi.fn(),
     },
+    communicationMessage: { upsert: vi.fn(), findUnique: vi.fn() },
+    communicationEntityLink: { create: vi.fn() },
     workflowJob: { upsert: vi.fn() },
+    meetingFollowUpReview: {
+      findUnique: vi.fn(),
+      upsert: vi.fn(),
+      update: vi.fn(),
+    },
     meeting: {
       findFirst: vi.fn(),
       findMany: vi.fn(),
@@ -44,6 +52,7 @@ const {
 vi.mock("@corgtex/shared", () => ({
   prisma: prismaMock,
   toInputJson: (value: unknown) => value,
+  env: { APP_URL: "https://app.example.test" },
 }));
 
 vi.mock("@corgtex/models", () => ({
@@ -70,12 +79,19 @@ describe("meeting facilitation", () => {
     vi.clearAllMocks();
     prismaMock.meeting.findFirst.mockReset();
     prismaMock.meeting.findMany.mockReset().mockResolvedValue([]);
+    prismaMock.workspaceFeatureFlag.findUnique.mockReset().mockResolvedValue(null);
     prismaMock.member.findMany.mockReset().mockResolvedValue([]);
     prismaMock.tension.findMany.mockReset().mockResolvedValue([]);
     prismaMock.action.findMany.mockReset().mockResolvedValue([]);
     prismaMock.proposal.findMany.mockReset().mockResolvedValue([]);
     prismaMock.meetingInsight.findMany.mockReset().mockResolvedValue([]);
     prismaMock.deliberationEntry.findMany.mockReset().mockResolvedValue([]);
+    prismaMock.meetingFollowUpReview.findUnique.mockReset().mockResolvedValue(null);
+    prismaMock.meetingFollowUpReview.upsert.mockReset().mockResolvedValue({ id: "review-1" });
+    prismaMock.meetingFollowUpReview.update.mockReset().mockResolvedValue({ id: "review-1" });
+    prismaMock.communicationMessage.upsert.mockReset().mockResolvedValue({ id: "message-1" });
+    prismaMock.communicationMessage.findUnique.mockReset().mockResolvedValue(null);
+    prismaMock.communicationEntityLink.create.mockReset().mockResolvedValue({ id: "link-1" });
     prismaMock.$transaction.mockImplementation(async (operations: unknown[]) => Promise.all(operations));
     prismaMock.communicationInstallation.findFirst.mockResolvedValue({
       id: "slack-1",
@@ -274,6 +290,77 @@ describe("meeting facilitation", () => {
       channel: "C123",
       threadTs: "1710000000.000100",
     }, expect.any(Array));
+    expect(prismaMock.meeting.update).toHaveBeenCalledWith({
+      where: { id: "meeting-1" },
+      data: { summaryPostedAt: expect.any(Date) },
+    });
+  });
+
+  it("posts configured Crina meeting reviews with summary context and action proposals", async () => {
+    prismaMock.workspaceFeatureFlag.findUnique.mockResolvedValue({
+      enabled: true,
+      config: {
+        meetingSeriesExternalId: "ops:crina-weekly-progress-review",
+        channelId: "C999",
+        maxProposals: 5,
+        expiresAfterHours: 48,
+        timezone: "America/Los_Angeles",
+      },
+    });
+    prismaMock.meeting.findFirst
+      .mockResolvedValueOnce({
+        id: "meeting-1",
+        workspaceId: "workspace-1",
+        title: "Crina weekly progress review",
+        summaryMd: "Full generated summary for the Crina meeting.",
+        summaryPostedAt: null,
+        recordedAt: new Date("2026-05-20T16:00:00.000Z"),
+        seriesId: "series-1",
+        series: { externalId: "ops:crina-weekly-progress-review" },
+      })
+      .mockResolvedValueOnce(null);
+    prismaMock.meetingInsight.findMany.mockResolvedValue([
+      {
+        id: "insight-1",
+        title: "Milan to confirm rollout channel",
+        bodyMd: "Milan will confirm the approved Slack channel before rollout.",
+        assigneeHint: "Milan",
+        dueAt: new Date("2026-05-22T12:00:00.000Z"),
+        confidence: 0.91,
+        sourceQuote: "Milan will confirm the channel.",
+        status: "SUGGESTED",
+        appliedEntityId: null,
+      },
+    ]);
+    sendSlackMessageMock.mockResolvedValue({ ok: true, ts: "1710000001.000100" });
+    prismaMock.meeting.update.mockResolvedValue({ id: "meeting-1" });
+
+    const { postMeetingSummaryToAgendaThread } = await import("./meeting-facilitation");
+    await expect(postMeetingSummaryToAgendaThread({
+      workspaceId: "workspace-1",
+      meetingId: "meeting-1",
+    })).resolves.toEqual({ posted: true, mode: "slack_meeting_action_review" });
+
+    expect(sendSlackMessageMock).toHaveBeenCalledWith("slack-1", {
+      channel: "C999",
+      threadTs: undefined,
+    }, expect.any(Array));
+    const postedBlocks = JSON.stringify(sendSlackMessageMock.mock.calls[0]?.[2]);
+    expect(postedBlocks).toContain("Full generated summary for the Crina meeting.");
+    expect(postedBlocks).toContain("Milan to confirm rollout channel");
+    expect(prismaMock.meetingFollowUpReview.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({
+        channelId: "C999",
+        status: "OPEN",
+      }),
+    }));
+    expect(prismaMock.communicationEntityLink.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        entityType: "Meeting",
+        entityId: "meeting-1",
+        action: "meeting_follow_up_review_posted",
+      }),
+    }));
     expect(prismaMock.meeting.update).toHaveBeenCalledWith({
       where: { id: "meeting-1" },
       data: { summaryPostedAt: expect.any(Date) },
