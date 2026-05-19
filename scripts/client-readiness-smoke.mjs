@@ -115,6 +115,17 @@ function routeUrl(locale, workspacePath, suffix) {
   return `${baseUrl}${locale}${workspacePath}${suffix}`;
 }
 
+export function labelConsoleEntry(entry, routeLabel) {
+  const label = String(routeLabel || "").trim();
+  return label ? { ...entry, routeLabel: label } : entry;
+}
+
+function setActiveRouteLabel(label) {
+  if (typeof globalThis.__corgtexClientReadinessSetRouteLabel === "function") {
+    globalThis.__corgtexClientReadinessSetRouteLabel(label);
+  }
+}
+
 function cleanConsoleMessage(message) {
   return {
     type: message.type(),
@@ -215,6 +226,7 @@ async function writeResults(status, routeResults, findings, consoleErrors, fatal
 }
 
 async function captureRoute(page, locale, workspacePath, name, suffix, viewport, prefix, findings, routeResults) {
+  setActiveRouteLabel(`${prefix}${name}`);
   await page.setViewportSize(viewport);
   const target = routeUrl(locale, workspacePath, suffix);
   let response;
@@ -310,6 +322,7 @@ async function verifyMobileShell(page, locale, workspacePath, findings, routeRes
   });
 
   for (const [viewportName, viewport] of mobileShellViewports) {
+    setActiveRouteLabel(`mobile-shell-${viewportName}`);
     await page.setViewportSize(viewport);
     const target = routeUrl(locale, workspacePath, "");
     const response = await page.goto(target, { waitUntil: "domcontentloaded" });
@@ -355,6 +368,7 @@ async function verifyMobileShell(page, locale, workspacePath, findings, routeRes
 
 async function verifyDisabledRoute(page, locale, workspacePath, suffix, findings, routeResults) {
   const routeName = suffix.replace(/^\//, "").replace(/[^a-z0-9_-]+/gi, "-") || "home";
+  setActiveRouteLabel(`disabled-${routeName}`);
   const target = routeUrl(locale, workspacePath, suffix);
   const response = await page.goto(target, { waitUntil: "domcontentloaded" });
   await waitForPageSettled(page);
@@ -370,6 +384,10 @@ async function main() {
   await mkdir(outDir, { recursive: true });
 
   let browser;
+  let activeRouteLabel = "startup";
+  globalThis.__corgtexClientReadinessSetRouteLabel = (label) => {
+    activeRouteLabel = String(label || "unknown");
+  };
   const consoleErrors = [];
   const findings = [];
   const routeResults = [];
@@ -387,13 +405,14 @@ async function main() {
         ) {
           return;
         }
-        consoleErrors.push(cleanConsoleMessage(message));
+        consoleErrors.push(labelConsoleEntry(cleanConsoleMessage(message), activeRouteLabel));
       }
     });
     page.on("pageerror", (error) => {
-      consoleErrors.push({ type: "pageerror", text: error.message });
+      consoleErrors.push(labelConsoleEntry({ type: "pageerror", text: error.message }, activeRouteLabel));
     });
 
+    setActiveRouteLabel("login");
     await page.goto(`${baseUrl}${await resolveLoginPath()}`, { waitUntil: "domcontentloaded" });
     await waitForPageSettled(page);
     await captureScreenshot(page, "00-login.png");
@@ -424,6 +443,7 @@ async function main() {
     }
 
     expectedNotFoundRoute = true;
+    setActiveRouteLabel("desktop-invalid-route");
     await page.goto(routeUrl(locale, workspacePath, "/not-a-real-client-readiness-route"), { waitUntil: "domcontentloaded" });
     await waitForPageSettled(page);
     await captureScreenshot(page, "desktop-invalid-route.png");
@@ -469,6 +489,7 @@ async function main() {
     await writeResults("failed", routeResults, findings, consoleErrors, fatalError);
     throw error;
   } finally {
+    delete globalThis.__corgtexClientReadinessSetRouteLabel;
     await browser?.close().catch(() => null);
   }
 }
