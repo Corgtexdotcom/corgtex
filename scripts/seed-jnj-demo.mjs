@@ -24,15 +24,15 @@ const nDaysAgo = (days) => {
 
 // Data Definition
 const TEAM_MEMBERS = [
-  { email: "demo@jnj-demo.corgtex.app", name: "Demo User", role: "ADMIN", password: "demo1234", title: "Observer" },
-  { email: "jduato@jnj.demo.corgtex.app", name: "Joaquin Duato", role: "ADMIN", title: "Chairman & CEO" },
-  { email: "jwolk@jnj.demo.corgtex.app", name: "Joseph J. Wolk", role: "FINANCE_STEWARD", title: "EVP, CFO" },
-  { email: "jtaubert@jnj.demo.corgtex.app", name: "Jennifer L. Taubert", role: "FACILITATOR", title: "Worldwide Chairman, Innovative Medicine" },
-  { email: "tschmid@jnj.demo.corgtex.app", name: "Timothy Schmid", role: "FACILITATOR", title: "Worldwide Chairman, MedTech" },
-  { email: "jreed@jnj.demo.corgtex.app", name: "John C. Reed", role: "CONTRIBUTOR", title: "EVP, R&D" },
-  { email: "vbroadhurst@jnj.demo.corgtex.app", name: "Vanessa Broadhurst", role: "CONTRIBUTOR", title: "EVP, Global Corporate Affairs" },
-  { email: "mullmann@jnj.demo.corgtex.app", name: "Michael Ullmann", role: "CONTRIBUTOR", title: "EVP, General Counsel" },
-  { email: "pfasolo@jnj.demo.corgtex.app", name: "Peter Fasolo", role: "CONTRIBUTOR", title: "EVP, CHRO" },
+  { email: "demo@jnj-demo.corgtex.app", name: "Demo User", role: "ADMIN", password: "demo1234", title: "Observer", bio: "Demo workspace observer used to review member, role, circle, proposal, tension, and meeting navigation." },
+  { email: "jduato@jnj.demo.corgtex.app", name: "Joaquin Duato", role: "ADMIN", title: "Chairman & CEO", bio: "Enterprise leader focused on portfolio strategy, operating cadence, and cross-segment governance." },
+  { email: "jwolk@jnj.demo.corgtex.app", name: "Joseph J. Wolk", role: "FINANCE_STEWARD", title: "EVP, CFO", bio: "Finance steward for capital allocation, audit readiness, and performance reporting." },
+  { email: "jtaubert@jnj.demo.corgtex.app", name: "Jennifer L. Taubert", role: "FACILITATOR", title: "Worldwide Chairman, Innovative Medicine", bio: "Facilitates Innovative Medicine priorities across oncology, immunology, and commercial strategy." },
+  { email: "tschmid@jnj.demo.corgtex.app", name: "Timothy Schmid", role: "FACILITATOR", title: "Worldwide Chairman, MedTech", bio: "Leads MedTech operating priorities, including Abiomed integration and international commercialization." },
+  { email: "jreed@jnj.demo.corgtex.app", name: "John C. Reed", role: "CONTRIBUTOR", title: "EVP, R&D", bio: "R&D contributor connecting pipeline strategy, clinical development, and portfolio prioritization." },
+  { email: "vbroadhurst@jnj.demo.corgtex.app", name: "Vanessa Broadhurst", role: "CONTRIBUTOR", title: "EVP, Global Corporate Affairs", bio: "Corporate affairs contributor focused on public trust, ESG reporting, and health equity work." },
+  { email: "mullmann@jnj.demo.corgtex.app", name: "Michael Ullmann", role: "CONTRIBUTOR", title: "EVP, General Counsel", bio: "Legal and compliance contributor for governance, risk, and enterprise policy decisions." },
+  { email: "pfasolo@jnj.demo.corgtex.app", name: "Peter Fasolo", role: "CONTRIBUTOR", title: "EVP, CHRO", bio: "People and culture contributor focused on talent, leadership systems, and workforce planning." },
 ];
 
 const CIRCLES = [
@@ -116,26 +116,32 @@ const ARTICLES = [
 
 const MEETINGS = [
   { title: "Q4 2024 Earnings Final Review", recordedAt: "2025-01-15T10:00:00Z",
+    participants: ["jduato", "jwolk", "jtaubert", "tschmid"],
     transcript: "J. Duato: Let's review the Q4 numbers. We closed the year strong at $88.8 billion in revenue. Innovative Medicine delivered almost $57 billion, and MedTech contributed $31.9 billion. J. Wolk: Yes, operational growth was solid. DARZALEX and TREMFYA were the main drivers in IM. In MedTech, electrophysiology is outperforming. We do see some margin pressure from supply chain, but overall EPS is in line. J. Taubert: Looking at STELARA, we need to prepare for biosimilar impacts next year. I propose we increase the localized commercial push for TREMFYA. T. Schmid: For MedTech, Abiomed integration is going smoothly, but we need to accelerate international rollout to justify the ROI. Let's allocate more budget to the EU team.",
     summary: "Reviewed Q4 2024 performance showing $88.8B total revenue. Innovative Medicine ($57B) driven by DARZALEX and TREMFYA. MedTech ($31.9B) led by electrophysiology and Abiomed. Discussed margin pressures, upcoming STELARA biosimilar competition, and accelerating Abiomed's international rollout."
   },
   { title: "Executive Committee Strategic Planning", recordedAt: "2024-11-20T14:00:00Z",
+    participants: ["jduato", "jreed", "jwolk", "pfasolo"],
     transcript: "J. Duato: Welcome everyone. Today we align on our 2025 capital allocation. Following the Kenvue separation, our focus must be strictly on high-growth pharma and MedTech. J. Reed: The pipeline is robust, but I need an additional $500M in the oncology R&D budget to accelerate the CARVYKTI scale-up and new indications. J. Wolk: The capital framework supports R&D first, but we are also targeting specific MedTech tuck-in acquisitions. P. Fasolo: Culturally, our Credo survey shows employees want more clarity on the future of our decentralized model. We must communicate that agility remains our priority.",
     summary: "Aligned on 2025 strategy post-Kenvue. Confirmed focus on high-growth Innovative Medicine and MedTech. Requested $500M R&D boost for CARVYKTI oncology scale-up. Reaffirmed commitment to the decentralized operating model and Our Credo."
   },
   { title: "ESG & Regulatory Compliance Update", recordedAt: "2024-10-10T09:00:00Z",
+    participants: ["mullmann", "vbroadhurst", "jwolk"],
     transcript: "M. Ullmann: As part of the RCSC oversight, we need to finalize our Health for Humanity reporting for the year. V. Broadhurst: We are on track for our science-based climate targets, specifically renewable electricity. However, we have a tension regarding supplier emissions (Scope 3). It's difficult to track. I propose we mandate ESG reporting from our top 50 global suppliers next year. J. Wolk: Agreed, but we must provide them with the monitoring tools or we risk supply chain disruption. Let's form an action group.",
     summary: "Reviewed Health for Humanity progress. On track for internal climate targets but facing challenges with Scope 3 supplier emissions tracking. Proposed to mandate ESG reporting for top 50 suppliers, with a plan to assist them via monitoring tools to prevent supply chain disruption."
   },
   { title: "Board of Directors Quarterly Review", recordedAt: "2024-12-18T10:00:00Z",
+    participants: ["pfasolo", "jwolk", "jduato"],
     transcript: "P. Fasolo: Presenting the talent retention numbers in key R&D hubs... retention remains strong. J. Wolk: Debt issuance strategy for early 2025 is structured to maintain our AAA rating.",
     summary: "Reviewed board governance, committee reports, and FY2025 financial outlook."
   },
   { title: "MedTech Product Strategy Deep Dive", recordedAt: "2024-09-15T09:00:00Z",
+    participants: ["tschmid", "jduato", "jwolk"],
     transcript: "T. Schmid: The Monarch platform is showing robust adoption curves, but Velys needs more localized training centers in EMEA.",
     summary: "Deep dive into robotic surgery roadmap, Abiomed international expansion, and Vision Care."
   },
   { title: "Innovation & AI Working Group Kickoff", recordedAt: "2025-01-28T14:00:00Z",
+    participants: ["jreed", "tschmid", "jduato"],
     transcript: "J. Reed: Generative AI will change target optimization. We are establishing an internal COE to standardize tooling.",
     summary: "Discussed AI governance, drug discovery ML platforms, and digital twin pilots."
   }
@@ -753,8 +759,8 @@ async function main() {
   for (const tm of TEAM_MEMBERS) {
     const user = await prisma.user.upsert({
       where: { email: tm.email },
-      update: { displayName: tm.name, passwordHash: hashPassword(tm.password || "jnj12345") },
-      create: { email: tm.email, displayName: tm.name, passwordHash: hashPassword(tm.password || "jnj12345") }
+      update: { displayName: tm.name, bio: tm.bio, passwordHash: hashPassword(tm.password || "jnj12345") },
+      create: { email: tm.email, displayName: tm.name, bio: tm.bio, passwordHash: hashPassword(tm.password || "jnj12345") }
     });
     
     const member = await prisma.member.upsert({
@@ -843,15 +849,19 @@ async function main() {
   // 6. Create Meetings
   const meetingMappings = {};
   for (const m of MEETINGS) {
+    const participantIds = (m.participants ?? [])
+      .map((key) => memberMappings[key]?.userId)
+      .filter(Boolean);
     const meeting = await prisma.meeting.upsert({
       where: { externalId: `${wsId}-meet-${slugify(m.title)}` },
-      update: { transcript: m.transcript, summaryMd: m.summary, aiProcessedAt: nDaysAgo(0) },
+      update: { transcript: m.transcript, summaryMd: m.summary, participantIds, aiProcessedAt: nDaysAgo(0) },
       create: {
         workspaceId: wsId,
         title: m.title,
         source: "seed-jnj",
         externalId: `${wsId}-meet-${slugify(m.title)}`,
         recordedAt: new Date(m.recordedAt),
+        participantIds,
         transcript: m.transcript,
         summaryMd: m.summary,
         aiProcessedAt: nDaysAgo(0)

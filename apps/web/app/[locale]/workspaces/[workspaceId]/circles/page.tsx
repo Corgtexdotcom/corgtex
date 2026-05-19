@@ -19,10 +19,10 @@ export default async function CirclesPage({
   searchParams,
 }: {
   params: Promise<{ workspaceId: string }>;
-  searchParams: Promise<{ view?: string }>;
+  searchParams: Promise<{ view?: string; circleId?: string }>;
 }) {
   const { workspaceId } = await params;
-  const { view } = await searchParams;
+  const { view, circleId } = await searchParams;
   const viewMode = view === "list" ? "list" : "graph";
   const actor = await requirePageActor();
   await requireWorkspaceMembership({ actor, workspaceId });
@@ -125,7 +125,15 @@ export default async function CirclesPage({
           {circles.map((circle) => {
             const circleRoles = roles.filter(r => r.circle?.id === circle.id);
             return (
-              <div key={circle.id} style={{ marginBottom: 48 }}>
+              <div
+                key={circle.id}
+                id={`circle-${circle.id}`}
+                style={{
+                  marginBottom: 48,
+                  scrollMarginTop: 96,
+                  ...(circleId === circle.id ? { outline: "2px solid var(--accent)", outlineOffset: 12, borderRadius: 8 } : {}),
+                }}
+              >
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
                   <h2 className="nr-section-header" style={{ flex: 1, borderTop: "2px solid var(--text)" }}>
                     {t("circleTitle", { name: circle.name })}

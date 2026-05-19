@@ -5,6 +5,7 @@ import { AppError, invariant } from "./errors";
 import { appendEvents } from "./events";
 import { isGlobalOperator, requireWorkspaceMembership } from "./auth";
 import { assertTrialMemberCapacity } from "./trial-entitlements";
+import { privacyFilter } from "./privacy";
 
 export type MemberInvitePolicy = "ADMINS_ONLY" | "MEMBERS_CAN_INVITE" | "MEMBERS_CAN_REQUEST";
 
@@ -697,7 +698,13 @@ export async function rejectMemberInviteRequest(actor: AppActor, params: {
   });
 }
 
-export async function getMemberProfile(workspaceId: string, memberId: string) {
+export async function getMemberProfile(actor: AppActor, workspaceId: string, memberId: string) {
+  const membership = await requireWorkspaceMembership({ actor, workspaceId });
+  const visibleWorkspaceRecordWhere = {
+    ...privacyFilter(actor, membership),
+    archivedAt: null,
+  };
+
   const member = await prisma.member.findUnique({
     where: { id: memberId },
     include: {
@@ -727,7 +734,7 @@ export async function getMemberProfile(workspaceId: string, memberId: string) {
         orderBy: { createdAt: "desc" },
       },
       assignedTensions: {
-        where: { status: "OPEN" },
+        where: { status: "OPEN", ...visibleWorkspaceRecordWhere },
         take: 5,
         orderBy: { createdAt: "desc" },
       },
@@ -760,6 +767,7 @@ export async function getMemberProfile(workspaceId: string, memberId: string) {
     where: {
       workspaceId,
       authorUserId: member.user.id,
+      ...visibleWorkspaceRecordWhere,
     },
     orderBy: { createdAt: "desc" },
     take: 5,
@@ -770,6 +778,7 @@ export async function getMemberProfile(workspaceId: string, memberId: string) {
       workspaceId,
       authorUserId: member.user.id,
       status: "OPEN",
+      ...visibleWorkspaceRecordWhere,
     },
     orderBy: { createdAt: "desc" },
     take: 5,

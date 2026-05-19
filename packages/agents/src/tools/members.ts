@@ -93,7 +93,7 @@ export async function listMembersAction(actor: AppActor, ctx: any) {
 }
 
 export async function getMemberProfileAction(actor: AppActor, ctx: any, args: any) {
-  const profile = await getMemberProfile(ctx.workspaceId, args.memberId);
+  const profile = await getMemberProfile(actor, ctx.workspaceId, args.memberId);
   return profile;
 }
 

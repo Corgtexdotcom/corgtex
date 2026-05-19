@@ -79,6 +79,76 @@ describe("roles domain", () => {
     }));
   });
 
+  it("getRole returns a workspace-scoped role with assigned member profiles", async () => {
+    prismaMock.role.findFirst.mockResolvedValue({
+      id: "role-1",
+      name: "Lead",
+      circle: { id: "circle-1", name: "Circle" },
+      assignments: [
+        {
+          id: "assignment-1",
+          member: {
+            id: "member-1",
+            user: {
+              id: "user-1",
+              email: "member@example.com",
+              displayName: "Member",
+              avatarUrl: "https://example.com/avatar.png",
+              bio: "Leads delivery.",
+            },
+          },
+        },
+      ],
+    });
+
+    const { getRole } = await import("./roles");
+    await expect(getRole(actor, {
+      workspaceId: "workspace-1",
+      roleId: "role-1",
+    })).resolves.toMatchObject({
+      id: "role-1",
+      assignments: [
+        {
+          member: {
+            user: {
+              avatarUrl: "https://example.com/avatar.png",
+              bio: "Leads delivery.",
+            },
+          },
+        },
+      ],
+    });
+    expect(prismaMock.role.findFirst).toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        id: "role-1",
+        archivedAt: null,
+        circle: {
+          workspaceId: "workspace-1",
+          archivedAt: null,
+        },
+      },
+      include: expect.objectContaining({
+        assignments: expect.objectContaining({
+          include: {
+            member: {
+              include: {
+                user: {
+                  select: {
+                    id: true,
+                    email: true,
+                    displayName: true,
+                    avatarUrl: true,
+                    bio: true,
+                  },
+                },
+              },
+            },
+          },
+        }),
+      }),
+    }));
+  });
+
   it("createRole creates a role with trimmed fields", async () => {
     prismaMock.circle.findUnique.mockResolvedValue({ id: "circle-1", workspaceId: "workspace-1", archivedAt: null });
     prismaMock.role.count.mockResolvedValue(2);
