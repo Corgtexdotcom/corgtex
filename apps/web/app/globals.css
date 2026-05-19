@@ -903,6 +903,90 @@ button:disabled {
 .ws-agent-chat-shell {
   min-height: 0;
   flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.ws-agent-chat-shell[hidden] {
+  display: none;
+}
+
+.ws-agent-chat-shell > .chat-layout {
+  min-height: 0;
+  height: auto;
+  flex: 1;
+}
+
+.ws-claude-cta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 12px 12px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--fg);
+  text-decoration: none;
+  box-shadow: var(--shadow-sm);
+}
+
+.ws-claude-cta:hover {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+  opacity: 1;
+}
+
+.ws-claude-cta-icon-wrap {
+  display: inline-flex;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+  color: var(--accent);
+}
+
+.ws-claude-cta-icon {
+  width: 17px;
+  height: 17px;
+}
+
+.ws-claude-cta-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ws-claude-cta-label {
+  color: var(--fg);
+  font-size: 0.86rem;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.ws-claude-cta-description {
+  color: var(--muted);
+  font-size: 0.76rem;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.ws-claude-cta-compact {
+  width: 36px;
+  height: 36px;
+  margin: 8px 0 0;
+  padding: 0;
+  justify-content: center;
+  color: var(--accent);
+}
+
+.ws-agent-sidebar:not(.ws-agent-sidebar-collapsed) .ws-agent-chat-shell > .ws-claude-cta {
+  margin-top: 54px;
 }
 
 .ws-agent-sidebar-collapsed {
@@ -3120,14 +3204,21 @@ a.wiki-list-item:hover {
     inset: calc(var(--mobile-topbar-height) + env(safe-area-inset-top, 0px)) 0 0 0;
     z-index: 7000;
     display: flex;
+    flex-direction: column;
     min-width: 0;
     background: var(--bg);
+  }
+
+  .mobile-ai-workbench > .ws-claude-cta {
+    flex: 0 0 auto;
+    margin: 10px 12px 0;
   }
 
   .mobile-ai-workbench .chat-layout,
   .mobile-ai-workbench .chat-mobile-mode {
     width: 100%;
-    height: 100%;
+    height: auto;
+    flex: 1;
     min-height: 0;
     min-width: 0;
     overflow: hidden;
