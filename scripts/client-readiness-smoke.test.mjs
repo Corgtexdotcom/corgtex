@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   isWorkspaceUrl,
+  labelConsoleEntry,
   submitLoginForm,
   visibleLoginErrorMessage,
   waitForLoginResult,
@@ -74,5 +75,17 @@ describe("client readiness smoke login handling", () => {
     await expect(waitForLoginResult(fakePage)).resolves.toBeUndefined();
     expect(fakePage.waitForLoadState).toHaveBeenCalledWith("domcontentloaded", { timeout: 5000 });
     expect(fakePage.screenshot).not.toHaveBeenCalled();
+  });
+
+  it("adds route labels to console and page error entries", () => {
+    expect(labelConsoleEntry({ type: "pageerror", text: "boom" }, "desktop-settings")).toEqual({
+      type: "pageerror",
+      text: "boom",
+      routeLabel: "desktop-settings",
+    });
+    expect(labelConsoleEntry({ type: "error", text: "boom" }, "")).toEqual({
+      type: "error",
+      text: "boom",
+    });
   });
 });
