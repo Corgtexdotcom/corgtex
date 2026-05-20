@@ -68,6 +68,8 @@ describe("ops-core health targets", () => {
       service: "web",
       severity: "P1",
       url: "https://app.example/api/health",
+      attempts: 2,
+      retryDelayMs: 750,
     });
   });
 
@@ -75,7 +77,7 @@ describe("ops-core health targets", () => {
     const [target] = buildHealthTargets({
       NEXT_PUBLIC_APP_URL: "https://app.example",
     }).filter((item) => item.name === "app");
-    const result = await checkHealthTarget(target, async () => response({
+    const result = await checkHealthTarget({ ...target, attempts: 1 }, async () => response({
       status: "degraded",
       database: "up",
       schema: "stale",
@@ -87,6 +89,57 @@ describe("ops-core health targets", () => {
       severity: "P1",
       status: "degraded",
     });
+  });
+
+  it("retries transient fetch failures before returning success", async () => {
+    const [target] = buildHealthTargets({
+      NEXT_PUBLIC_APP_URL: "https://app.example",
+    }).filter((item) => item.name === "app");
+    let calls = 0;
+
+    const result = await checkHealthTarget(
+      { ...target, attempts: 2, retryDelayMs: 1 },
+      async () => {
+        calls += 1;
+        if (calls === 1) throw new Error("fetch failed");
+        return response({
+          status: "ok",
+          database: "up",
+          schema: "ready",
+        });
+      },
+    );
+
+    expect(calls).toBe(2);
+    expect(result).toMatchObject({
+      ok: true,
+      status: "ok",
+      attempts: 2,
+    });
+    expect(result.incident).toBeUndefined();
+  });
+
+  it("returns an incident with attempt evidence after retry exhaustion", async () => {
+    const [target] = buildHealthTargets({
+      NEXT_PUBLIC_APP_URL: "https://app.example",
+    }).filter((item) => item.name === "app");
+
+    const result = await checkHealthTarget(
+      { ...target, attempts: 2, retryDelayMs: 1 },
+      async () => {
+        throw new Error("fetch failed");
+      },
+    );
+
+    expect(result).toMatchObject({
+      ok: false,
+      status: "unreachable",
+      attempts: 2,
+    });
+    expect(result.incident.evidence).toEqual(expect.arrayContaining([
+      "Attempts: 2",
+      "Attempt 1: unreachable",
+    ]));
   });
 });
 
