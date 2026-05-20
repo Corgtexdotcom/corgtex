@@ -8,6 +8,7 @@ const MCP_CLIENT_PREFIX = "mcp_client_";
 const MCP_CODE_PREFIX = "mcp_code_";
 const MCP_ACCESS_TOKEN_PREFIX = "mcp_at_";
 const MCP_REFRESH_TOKEN_PREFIX = "mcp_rt_";
+const CLAUDE_HOST = "claude.ai";
 
 export const MCP_CONNECTOR_LEGACY_DEFAULT_SCOPES: AgentScope[] = [
   "workspace:read",
@@ -50,6 +51,24 @@ type RegistryEntry = {
   status?: unknown;
 };
 
+type McpConnectionClientSnapshot = {
+  name: string;
+  redirectUris: string[];
+  isActive: boolean;
+};
+
+type McpConnectionTokenSnapshot = {
+  userId: string;
+  workspaceId: string;
+  instanceSlug: string;
+  refreshHash: string | null;
+  refreshExpiresAt: Date | null;
+  revokedAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+  client: McpConnectionClientSnapshot;
+};
+
 function cleanString(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
 }
@@ -58,6 +77,34 @@ function cleanStringArray(value: unknown): string[] {
   return Array.isArray(value)
     ? [...new Set(value.map(cleanString).filter((item): item is string => Boolean(item)))]
     : [];
+}
+
+function uriMatchesClaude(uri: string) {
+  try {
+    const hostname = new URL(uri).hostname.toLowerCase();
+    return hostname === CLAUDE_HOST || hostname.endsWith(`.${CLAUDE_HOST}`);
+  } catch {
+    return uri.toLowerCase().includes(CLAUDE_HOST);
+  }
+}
+
+function isClaudeMcpClient(client: McpConnectionClientSnapshot) {
+  return client.name.toLowerCase().includes("claude") ||
+    client.redirectUris.some((uri) => uriMatchesClaude(uri));
+}
+
+function isRefreshableActiveToken(token: McpConnectionTokenSnapshot, params: {
+  userId: string;
+  workspaceId: string;
+  now: Date;
+}) {
+  return token.userId === params.userId &&
+    token.workspaceId === params.workspaceId &&
+    token.client.isActive &&
+    !token.revokedAt &&
+    token.refreshHash !== null &&
+    (!token.refreshExpiresAt || token.refreshExpiresAt > params.now) &&
+    Boolean(getMcpConnectorInstance(token.instanceSlug));
 }
 
 function normalizeBaseUrl(value: string): string {
@@ -125,6 +172,57 @@ export function listMcpConnectorInstances(): McpConnectorInstance[] {
 
 export function getMcpConnectorInstance(slug: string) {
   return listMcpConnectorInstances().find((instance) => instance.slug === slug && instance.status === "active") ?? null;
+}
+
+export async function getClaudeMcpConnectionStatus(params: {
+  userId: string;
+  workspaceId: string;
+  now?: Date;
+}): Promise<{ connected: boolean; connectedAt: Date | null }> {
+  const now = params.now ?? new Date();
+  const tokens = await prisma.mcpOAuthAccessToken.findMany({
+    where: {
+      userId: params.userId,
+      workspaceId: params.workspaceId,
+      revokedAt: null,
+      refreshHash: { not: null },
+      OR: [
+        { refreshExpiresAt: null },
+        { refreshExpiresAt: { gt: now } },
+      ],
+    },
+    select: {
+      userId: true,
+      workspaceId: true,
+      instanceSlug: true,
+      refreshHash: true,
+      refreshExpiresAt: true,
+      revokedAt: true,
+      createdAt: true,
+      updatedAt: true,
+      client: {
+        select: {
+          name: true,
+          redirectUris: true,
+          isActive: true,
+        },
+      },
+    },
+    orderBy: { updatedAt: "desc" },
+  });
+
+  const connection = tokens.find((token) =>
+    isRefreshableActiveToken(token, {
+      userId: params.userId,
+      workspaceId: params.workspaceId,
+      now,
+    }) && isClaudeMcpClient(token.client)
+  );
+
+  return {
+    connected: Boolean(connection),
+    connectedAt: connection?.updatedAt ?? connection?.createdAt ?? null,
+  };
 }
 
 export async function resolveMcpConnectorInstanceForWorkspace(workspaceId: string) {

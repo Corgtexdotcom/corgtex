@@ -51,6 +51,7 @@ export function buildClaudeCodeCommand(connectorUrl: string): string {
 }
 
 export const CLAUDE_CONNECTORS_URL = "https://claude.ai/customize/connectors";
+export const CLAUDE_CHAT_URL = "https://claude.ai/new";
 
 /**
  * Path to the hosted Claude installer landing page. Use this from anywhere

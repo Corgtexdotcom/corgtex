@@ -6,6 +6,7 @@ import {
   buildClaudeInstallerShareUrl,
   buildCursorInstallLinks,
   buildCursorMcpConfig,
+  CLAUDE_CHAT_URL,
   CLAUDE_CONNECTORS_URL,
   CLAUDE_INSTALLER_PATH,
   encodeBase64Utf8,
@@ -60,6 +61,10 @@ describe("CorgtexConnectorManager setup helpers", () => {
 
   it("opens Claude's current connector settings address", () => {
     expect(CLAUDE_CONNECTORS_URL).toBe("https://claude.ai/customize/connectors");
+  });
+
+  it("opens a new Claude chat from connected rail state", () => {
+    expect(CLAUDE_CHAT_URL).toBe("https://claude.ai/new");
   });
 
   it("builds a hydration-safe Claude installer share URL", () => {
