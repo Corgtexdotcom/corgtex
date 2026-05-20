@@ -62,7 +62,6 @@ type McpConnectionTokenSnapshot = {
   workspaceId: string;
   instanceSlug: string;
   refreshHash: string | null;
-  expiresAt: Date;
   refreshExpiresAt: Date | null;
   revokedAt: Date | null;
   createdAt: Date;
@@ -104,7 +103,6 @@ function isRefreshableActiveToken(token: McpConnectionTokenSnapshot, params: {
     token.client.isActive &&
     !token.revokedAt &&
     token.refreshHash !== null &&
-    token.expiresAt > params.now &&
     (!token.refreshExpiresAt || token.refreshExpiresAt > params.now) &&
     Boolean(getMcpConnectorInstance(token.instanceSlug));
 }
@@ -188,7 +186,6 @@ export async function getClaudeMcpConnectionStatus(params: {
       workspaceId: params.workspaceId,
       revokedAt: null,
       refreshHash: { not: null },
-      expiresAt: { gt: now },
       OR: [
         { refreshExpiresAt: null },
         { refreshExpiresAt: { gt: now } },
@@ -199,7 +196,6 @@ export async function getClaudeMcpConnectionStatus(params: {
       workspaceId: true,
       instanceSlug: true,
       refreshHash: true,
-      expiresAt: true,
       refreshExpiresAt: true,
       revokedAt: true,
       createdAt: true,

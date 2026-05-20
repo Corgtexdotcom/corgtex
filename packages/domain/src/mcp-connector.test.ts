@@ -271,7 +271,6 @@ describe("Claude MCP connection status", () => {
         workspaceId: "ws-1",
         revokedAt: null,
         refreshHash: { not: null },
-        expiresAt: { gt: now },
         OR: [
           { refreshExpiresAt: null },
           { refreshExpiresAt: { gt: now } },
@@ -279,6 +278,26 @@ describe("Claude MCP connection status", () => {
       },
       select: expect.any(Object),
       orderBy: { updatedAt: "desc" },
+    });
+  });
+
+  it("keeps Claude connected when the access token expired but the refresh grant is valid", async () => {
+    const prismaMock = {
+      mcpOAuthAccessToken: {
+        findMany: vi.fn().mockResolvedValue([
+          token({
+            expiresAt: new Date("2026-05-20T15:30:00.000Z"),
+          }),
+        ]),
+      },
+    };
+    installSharedMock(prismaMock);
+
+    const { getClaudeMcpConnectionStatus } = await import("./mcp-connector");
+
+    await expect(getClaudeMcpConnectionStatus({ userId: "user-1", workspaceId: "ws-1", now })).resolves.toEqual({
+      connected: true,
+      connectedAt: new Date("2026-05-20T15:00:00.000Z"),
     });
   });
 
@@ -306,12 +325,11 @@ describe("Claude MCP connection status", () => {
     });
   });
 
-  it("ignores revoked, expired, or non-refreshable Claude tokens", async () => {
+  it("ignores revoked, refresh-expired, or non-refreshable Claude tokens", async () => {
     const prismaMock = {
       mcpOAuthAccessToken: {
         findMany: vi.fn().mockResolvedValue([
           token({ revokedAt: new Date("2026-05-20T15:30:00.000Z") }),
-          token({ expiresAt: new Date("2026-05-20T15:30:00.000Z") }),
           token({ refreshExpiresAt: new Date("2026-05-20T15:30:00.000Z") }),
           token({ refreshHash: null }),
         ]),

@@ -69,10 +69,12 @@ function ClaudeConnectorFooter({ workspaceId }: { workspaceId: string }) {
           }
           if (connected) return;
         } else if (!cancelled) {
+          setIsConnected(false);
           setIsLoaded(true);
         }
       } catch {
         if (!cancelled) {
+          setIsConnected(false);
           setIsLoaded(true);
         }
       }
@@ -128,12 +130,14 @@ export function ChatInterface({
   activeSessionId,
   compact = false,
   mobileMode = false,
+  claudeFooterEnabled = true,
 }: {
   workspaceId: string;
   conversations: ConversationSummary[];
   activeSessionId: string | null;
   compact?: boolean;
   mobileMode?: boolean;
+  claudeFooterEnabled?: boolean;
 }) {
   const t = useTranslations("chat");
   const [conversations, setConversations] = useState(initialConversations);
@@ -469,7 +473,7 @@ export function ChatInterface({
     );
   }
 
-  const showClaudeConnectorFooter = compact && !isFullScreen;
+  const showClaudeConnectorFooter = compact && !isFullScreen && claudeFooterEnabled;
 
   return (
     <div className={`${isFullScreen ? "chat-fullscreen" : "chat-layout"} ${mobileMode ? "chat-mobile-mode" : ""}`}>

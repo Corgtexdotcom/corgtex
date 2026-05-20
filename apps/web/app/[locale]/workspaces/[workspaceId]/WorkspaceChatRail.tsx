@@ -91,6 +91,7 @@ export function WorkspaceChatRail({
           conversations={conversations}
           activeSessionId={null}
           compact={true}
+          claudeFooterEnabled={!isCollapsed}
         />
       </div>
     </aside>
