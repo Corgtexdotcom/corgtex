@@ -184,6 +184,7 @@ export function buildHealthTargets(env = process.env) {
 export function normalizeHealthTarget(input) {
   const expectedStatuses = input.expectedStatuses ?? input.expectedStatus ?? [200];
   const statuses = Array.isArray(expectedStatuses) ? expectedStatuses : [expectedStatuses];
+  const attempts = input.attempts ?? input.retryAttempts;
   return {
     name: requireText(input.name, "target.name"),
     service: requireText(input.service ?? input.name, "target.service"),
@@ -191,6 +192,8 @@ export function normalizeHealthTarget(input) {
     url: requireUrl(input.url, "target.url"),
     severity: normalizeSeverity(input.severity, "P3"),
     timeoutMs: positiveInt(input.timeoutMs, 10_000),
+    attempts: positiveInt(attempts, 2),
+    retryDelayMs: positiveInt(input.retryDelayMs, 750),
     expectedStatuses: statuses.map((status) => positiveInt(status, 200)),
     expectJson: input.expectJson && typeof input.expectJson === "object" ? input.expectJson : null,
     method: optionalText(input.method) ?? "GET",
@@ -198,6 +201,29 @@ export function normalizeHealthTarget(input) {
 }
 
 export async function checkHealthTarget(target, fetchImpl = fetch) {
+  const attempts = positiveInt(target.attempts, 1);
+  const retryDelayMs = positiveInt(target.retryDelayMs, 0);
+  const failures = [];
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    const result = await checkHealthTargetOnce(target, fetchImpl);
+    if (result.ok) {
+      return {
+        ...result,
+        attempts: attempt,
+      };
+    }
+
+    failures.push(result);
+    if (attempt < attempts) {
+      await sleep(retryDelayMs);
+    }
+  }
+
+  return withRetryEvidence(failures.at(-1), failures);
+}
+
+async function checkHealthTargetOnce(target, fetchImpl) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), target.timeoutMs);
   const startedAt = Date.now();
@@ -282,6 +308,43 @@ export async function checkHealthTarget(target, fetchImpl = fetch) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+function withRetryEvidence(result, failures) {
+  if (!result) return result;
+  const attempts = failures.length;
+  if (attempts <= 1 || !result.incident) {
+    return {
+      ...result,
+      attempts,
+    };
+  }
+
+  return {
+    ...result,
+    attempts,
+    incident: {
+      ...result.incident,
+      evidence: [
+        ...result.incident.evidence,
+        `Attempts: ${attempts}`,
+        ...failures.slice(0, -1).map((failure, index) => retryFailureSummary(failure, index + 1)),
+      ],
+    },
+  };
+}
+
+function retryFailureSummary(failure, attempt) {
+  const parts = [`Attempt ${attempt}: ${failure.status}`];
+  if (failure.httpStatus) parts.push(`HTTP ${failure.httpStatus}`);
+  return parts.join("; ");
+}
+
+function sleep(ms) {
+  if (ms <= 0) return Promise.resolve();
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }
 
 export function parseRailwayAllowlist(env = process.env) {

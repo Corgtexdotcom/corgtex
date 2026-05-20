@@ -20,6 +20,7 @@ async function main() {
       target,
       elapsedMs: 0,
       httpStatus: null,
+      attempts: 0,
     }))
     : await Promise.all(targets.map((target) => checkHealthTarget(target)));
 
@@ -40,6 +41,7 @@ async function main() {
       status: result.status,
       elapsedMs: result.elapsedMs,
       httpStatus: result.httpStatus ?? null,
+      attempts: result.attempts ?? 1,
     })),
     incidents,
   };
