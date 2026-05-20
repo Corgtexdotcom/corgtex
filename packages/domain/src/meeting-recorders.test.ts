@@ -937,11 +937,45 @@ describe("meeting recorder domain", () => {
     fetchMock.mockImplementation(async (url: string | URL) => {
       const value = String(url);
       if (value.endsWith("/api/v1/bot/recall-bot-1/")) {
-        return new Response(JSON.stringify({ id: "recall-bot-1", status: "done" }), { status: 200 });
+        return new Response(JSON.stringify({
+          id: "recall-bot-1",
+          status: "done",
+          recordings: [
+            {
+              id: "recall-recording-old",
+              status: "done",
+              completed_at: "2026-05-04T16:30:00.000Z",
+              media_shortcuts: {
+                transcript: {
+                  data: {
+                    download_url: "https://signed.example.com/old-transcript.json?X-Amz-Algorithm=AWS4-HMAC-SHA256",
+                  },
+                },
+              },
+            },
+            {
+              id: "recall-recording-new",
+              status: "done",
+              completed_at: "2026-05-04T17:05:00.000Z",
+              media_shortcuts: {
+                transcript: {
+                  data: {
+                    download_url: "https://signed.example.com/transcript.json?X-Amz-Algorithm=AWS4-HMAC-SHA256",
+                  },
+                },
+              },
+            },
+          ],
+        }), { status: 200 });
       }
-      if (value.endsWith("/api/v1/bot/recall-bot-1/transcript/")) {
+      if (value.startsWith("https://signed.example.com/old-transcript.json")) {
         return new Response(JSON.stringify([
-          { speaker: "Dana", start: 0, text: "The recorder recovered this transcript." },
+          { speaker: "Dana", start: 0, text: "The recorder recovered the first transcript segment." },
+        ]), { status: 200 });
+      }
+      if (value.startsWith("https://signed.example.com/transcript.json")) {
+        return new Response(JSON.stringify([
+          { speaker: "Dana", start: 60, text: "The recorder recovered the second transcript segment." },
         ]), { status: 200 });
       }
       return new Response("{}", { status: 200 });
@@ -952,7 +986,7 @@ describe("meeting recorder domain", () => {
       .mockResolvedValueOnce(meeting);
     prismaMock.meeting.update.mockResolvedValue({
       ...meeting,
-      transcript: `${meeting.transcript}\n\n---\nAdditional transcript upload:\nDana [00:00:00]: The recorder recovered this transcript.`,
+      transcript: `${meeting.transcript}\n\n---\nAdditional transcript upload:\nDana [00:00:00]: The recorder recovered the first transcript segment.\nDana [00:01:00]: The recorder recovered the second transcript segment.`,
     });
     prismaMock.meetingInsight.deleteMany.mockResolvedValue({ count: 0 });
     prismaMock.auditLog.create.mockResolvedValue({ id: "audit-1" });
@@ -972,9 +1006,115 @@ describe("meeting recorder domain", () => {
       }),
     }));
     expect(fetchMock).toHaveBeenCalledWith(
+      "https://signed.example.com/old-transcript.json?X-Amz-Algorithm=AWS4-HMAC-SHA256",
+      expect.objectContaining({
+        headers: { accept: "application/json" },
+      }),
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://signed.example.com/transcript.json?X-Amz-Algorithm=AWS4-HMAC-SHA256",
+      expect.objectContaining({
+        headers: { accept: "application/json" },
+      }),
+    );
+    const meetingUpdateData = prismaMock.meeting.update.mock.calls[0]?.[0]?.data;
+    expect(meetingUpdateData?.transcript).toContain("The recorder recovered the first transcript segment.");
+    expect(meetingUpdateData?.transcript).toContain("The recorder recovered the second transcript segment.");
+    expect(prismaMock.meetingRecording.update).toHaveBeenCalledWith({
+      where: { id: "recording-1" },
+      data: expect.objectContaining({
+        status: "COMPLETED",
+        activeDedupeKey: null,
+        transcriptProcessedAt: expect.any(Date),
+        failureCode: null,
+        failureMessage: null,
+      }),
+    });
+  });
+
+  it("falls back to the legacy Recall transcript endpoint when bot metadata is unavailable", async () => {
+    const { reconcileMeetingRecorders } = await import("./meeting-recorders");
+    const meeting = {
+      id: "meeting-1",
+      workspaceId: "workspace-1",
+      title: "Weekly progress",
+      source: "internal",
+      status: "COMPLETED",
+      recordedAt: new Date("2026-05-04T16:00:00.000Z"),
+      scheduledEndAt: new Date("2026-05-04T17:00:00.000Z"),
+      transcript: "Speaker [00:00:00]: Existing",
+      summaryMd: null,
+      ingestionGuidanceMd: null,
+      participantIds: [],
+      participantEmails: [],
+    };
+    const recording = {
+      id: "recording-1",
+      workspaceId: "workspace-1",
+      meetingId: "meeting-1",
+      provider: "RECALL_AI",
+      externalBotId: "recall-bot-1",
+      status: "COMPLETED",
+      transcriptProcessedAt: null,
+      joinAt: new Date("2026-05-04T16:00:00.000Z"),
+      startedAt: new Date("2026-05-04T16:00:30.000Z"),
+      createdAt: new Date("2026-05-04T15:55:00.000Z"),
+      meeting: {
+        recordedAt: new Date("2026-05-04T16:00:00.000Z"),
+        scheduledEndAt: new Date("2026-05-04T17:00:00.000Z"),
+      },
+    };
+    prismaMock.meetingRecording.findMany
+      .mockResolvedValueOnce([recording])
+      .mockResolvedValueOnce([]);
+    prismaMock.meetingRecording.findUnique
+      .mockResolvedValueOnce(recording)
+      .mockResolvedValueOnce(recording)
+      .mockResolvedValueOnce({ transcriptProcessedAt: null });
+    let botFetches = 0;
+    fetchMock.mockImplementation(async (url: string | URL) => {
+      const value = String(url);
+      if (value.endsWith("/api/v1/bot/recall-bot-1/")) {
+        botFetches += 1;
+        if (botFetches === 1) {
+          return new Response(JSON.stringify({
+            id: "recall-bot-1",
+            status: "done",
+          }), { status: 200 });
+        }
+        return new Response("temporary bot metadata failure", { status: 503 });
+      }
+      if (value.endsWith("/api/v1/bot/recall-bot-1/transcript/")) {
+        return new Response(JSON.stringify([
+          { speaker: "Dana", start: 0, text: "The legacy endpoint still had the transcript." },
+        ]), { status: 200 });
+      }
+      return new Response("{}", { status: 200 });
+    });
+    prismaMock.meeting.findFirst
+      .mockResolvedValueOnce({ recordedAt: meeting.recordedAt, title: meeting.title, participantEmails: [] })
+      .mockResolvedValueOnce({ id: meeting.id })
+      .mockResolvedValueOnce(meeting);
+    prismaMock.meeting.update.mockResolvedValue({
+      ...meeting,
+      transcript: `${meeting.transcript}\n\n---\nAdditional transcript upload:\nDana [00:00:00]: The legacy endpoint still had the transcript.`,
+    });
+    prismaMock.meetingInsight.deleteMany.mockResolvedValue({ count: 0 });
+    prismaMock.auditLog.create.mockResolvedValue({ id: "audit-1" });
+    prismaMock.event.createMany.mockResolvedValue({ count: 1 });
+    prismaMock.meetingRecording.update.mockResolvedValue({ id: "recording-1", status: "COMPLETED" });
+    prismaMock.meetingRecorderSmokeRun.updateMany.mockResolvedValue({ count: 0 });
+    prismaMock.meetingRecorderProviderEvent.updateMany.mockResolvedValue({ count: 0 });
+
+    await expect(reconcileMeetingRecorders("workspace-1")).resolves.toEqual({ staleFailed: 0, recoveredTranscripts: 1 });
+
+    expect(fetchMock).toHaveBeenCalledWith(
       "https://us-west-2.recall.ai/api/v1/bot/recall-bot-1/transcript/",
       expect.objectContaining({
-        headers: expect.objectContaining({ Authorization: "Token recall-key" }),
+        headers: expect.objectContaining({
+          Authorization: "Token recall-key",
+          accept: "application/json",
+        }),
       }),
     );
     expect(prismaMock.meetingRecording.update).toHaveBeenCalledWith({
@@ -987,6 +1127,51 @@ describe("meeting recorder domain", () => {
         failureMessage: null,
       }),
     });
+  });
+
+  it("does not recover Recall transcripts when bot done status cannot be confirmed", async () => {
+    const { reconcileMeetingRecorders } = await import("./meeting-recorders");
+    const recording = {
+      id: "recording-1",
+      workspaceId: "workspace-1",
+      meetingId: "meeting-1",
+      provider: "RECALL_AI",
+      externalBotId: "recall-bot-1",
+      status: "COMPLETED",
+      transcriptProcessedAt: null,
+      joinAt: new Date("2026-05-04T16:00:00.000Z"),
+      startedAt: new Date("2026-05-04T16:00:30.000Z"),
+      createdAt: new Date("2026-05-04T15:55:00.000Z"),
+      meeting: {
+        recordedAt: new Date("2026-05-04T16:00:00.000Z"),
+        scheduledEndAt: new Date("2026-05-04T17:00:00.000Z"),
+      },
+    };
+    prismaMock.meetingRecording.findMany
+      .mockResolvedValueOnce([recording])
+      .mockResolvedValueOnce([]);
+    prismaMock.meetingRecording.findUnique.mockResolvedValueOnce(recording);
+    fetchMock.mockImplementation(async (url: string | URL) => {
+      const value = String(url);
+      if (value.endsWith("/api/v1/bot/recall-bot-1/")) {
+        return new Response("temporary bot status failure", { status: 503 });
+      }
+      if (value.endsWith("/api/v1/bot/recall-bot-1/transcript/")) {
+        return new Response(JSON.stringify([
+          { speaker: "Dana", start: 0, text: "This could still be partial." },
+        ]), { status: 200 });
+      }
+      return new Response("{}", { status: 200 });
+    });
+    prismaMock.meetingRecorderProviderEvent.updateMany.mockResolvedValue({ count: 0 });
+
+    await expect(reconcileMeetingRecorders("workspace-1")).resolves.toEqual({ staleFailed: 0, recoveredTranscripts: 0 });
+
+    expect(fetchMock.mock.calls.map(([url]) => String(url))).not.toContain(
+      "https://us-west-2.recall.ai/api/v1/bot/recall-bot-1/transcript/",
+    );
+    expect(prismaMock.meeting.update).not.toHaveBeenCalled();
+    expect(prismaMock.meetingRecording.update).not.toHaveBeenCalled();
   });
 
   it("skips Recall recovery intake when a delayed webhook already processed the transcript", async () => {
@@ -1019,9 +1204,22 @@ describe("meeting recorder domain", () => {
     fetchMock.mockImplementation(async (url: string | URL) => {
       const value = String(url);
       if (value.endsWith("/api/v1/bot/recall-bot-1/")) {
-        return new Response(JSON.stringify({ id: "recall-bot-1", status: "done" }), { status: 200 });
+        return new Response(JSON.stringify({
+          id: "recall-bot-1",
+          status: "done",
+          recordings: [{
+            id: "recall-recording-1",
+            media_shortcuts: {
+              transcript: {
+                data: {
+                  download_url: "https://signed.example.com/transcript.json?X-Amz-Algorithm=AWS4-HMAC-SHA256",
+                },
+              },
+            },
+          }],
+        }), { status: 200 });
       }
-      if (value.endsWith("/api/v1/bot/recall-bot-1/transcript/")) {
+      if (value.startsWith("https://signed.example.com/transcript.json")) {
         return new Response(JSON.stringify([
           { speaker: "Dana", start: 0, text: "This transcript was already handled by the webhook." },
         ]), { status: 200 });
@@ -1067,9 +1265,22 @@ describe("meeting recorder domain", () => {
     fetchMock.mockImplementation(async (url: string | URL) => {
       const value = String(url);
       if (value.endsWith("/api/v1/bot/recall-bot-1/")) {
-        return new Response(JSON.stringify({ id: "recall-bot-1", status: "done" }), { status: 200 });
+        return new Response(JSON.stringify({
+          id: "recall-bot-1",
+          status: "done",
+          recordings: [{
+            id: "recall-recording-1",
+            media_shortcuts: {
+              transcript: {
+                data: {
+                  download_url: "https://signed.example.com/transcript.json?X-Amz-Algorithm=AWS4-HMAC-SHA256",
+                },
+              },
+            },
+          }],
+        }), { status: 200 });
       }
-      if (value.endsWith("/api/v1/bot/recall-bot-1/transcript/")) {
+      if (value.startsWith("https://signed.example.com/transcript.json")) {
         return new Response(JSON.stringify([
           { speaker: "Dana", start: 0, text: "Only the claim holder should ingest this." },
         ]), { status: 200 });
@@ -1113,9 +1324,22 @@ describe("meeting recorder domain", () => {
     fetchMock.mockImplementation(async (url: string | URL) => {
       const value = String(url);
       if (value.endsWith("/api/v1/bot/recall-bot-1/")) {
-        return new Response(JSON.stringify({ id: "recall-bot-1", status: "done" }), { status: 200 });
+        return new Response(JSON.stringify({
+          id: "recall-bot-1",
+          status: "done",
+          recordings: [{
+            id: "recall-recording-1",
+            media_shortcuts: {
+              transcript: {
+                data: {
+                  download_url: "https://signed.example.com/transcript.json?X-Amz-Algorithm=AWS4-HMAC-SHA256",
+                },
+              },
+            },
+          }],
+        }), { status: 200 });
       }
-      if (value.endsWith("/api/v1/bot/recall-bot-1/transcript/")) {
+      if (value.startsWith("https://signed.example.com/transcript.json")) {
         return new Response(JSON.stringify([]), { status: 200 });
       }
       return new Response("{}", { status: 200 });
