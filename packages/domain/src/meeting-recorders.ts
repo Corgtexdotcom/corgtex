@@ -639,6 +639,89 @@ async function createRecallAsyncTranscript(recordingId: string) {
   });
 }
 
+function recallSignedDownloadUrl(url: string) {
+  try {
+    const parsed = new URL(url);
+    return parsed.searchParams.has("X-Amz-Algorithm") || parsed.searchParams.has("Signature");
+  } catch {
+    return false;
+  }
+}
+
+function recallRecordingTimestamp(recording: Record<string, unknown>) {
+  const dates = [
+    readDate(recording.completed_at),
+    readDate(recording.completedAt),
+    readDate(recording.ended_at),
+    readDate(recording.endedAt),
+    readDate(recording.started_at),
+    readDate(recording.startedAt),
+    readDate(recording.created_at),
+    readDate(recording.createdAt),
+  ].filter((date): date is Date => Boolean(date));
+  return dates.length > 0 ? Math.max(...dates.map((date) => date.getTime())) : null;
+}
+
+function recallRecordingCompletionRank(recording: Record<string, unknown>) {
+  const status = readString(recording.status)?.toLowerCase();
+  return status === "done" || status === "completed" || status === "complete" ? 1 : 0;
+}
+
+function recallBotTranscriptDownloadUrls(bot: unknown) {
+  const data = isRecord(bot) && isRecord(bot.data) ? bot.data : bot;
+  const recordings = isRecord(data) && Array.isArray(data.recordings) ? data.recordings : [];
+  const candidates: Array<{ downloadUrl: string; completionRank: number; timestamp: number; index: number }> = [];
+  for (const [index, item] of recordings.entries()) {
+    const recording = isRecord(item) ? item : {};
+    const mediaShortcuts = firstRecord(recording.media_shortcuts, recording.mediaShortcuts);
+    const transcript = firstRecord(mediaShortcuts?.transcript);
+    const transcriptData = firstRecord(transcript?.data);
+    const downloadUrl = readString(transcriptData?.download_url) ?? readString(transcriptData?.downloadUrl);
+    if (!downloadUrl) {
+      continue;
+    }
+    const completionRank = recallRecordingCompletionRank(recording);
+    const timestamp = recallRecordingTimestamp(recording) ?? Number.NEGATIVE_INFINITY;
+    candidates.push({ downloadUrl, completionRank, timestamp, index });
+  }
+  const bestCompletionRank = Math.max(...candidates.map((candidate) => candidate.completionRank), 0);
+  return candidates
+    .filter((candidate) => bestCompletionRank === 0 || candidate.completionRank === bestCompletionRank)
+    .sort((left, right) => {
+      if (left.timestamp !== right.timestamp) return left.timestamp - right.timestamp;
+      return left.index - right.index;
+    })
+    .map((candidate) => candidate.downloadUrl);
+}
+
+function combineRecallTranscriptPayloads(payloads: unknown[]) {
+  if (payloads.length <= 1) {
+    return payloads[0] ?? [];
+  }
+  if (payloads.every((payload) => typeof payload === "string")) {
+    return payloads.map((payload) => String(payload).trim()).filter(Boolean).join("\n\n");
+  }
+  return payloads.flatMap((payload) => {
+    if (Array.isArray(payload)) return payload;
+    if (isRecord(payload) && Array.isArray(payload.segments)) return payload.segments;
+    if (isRecord(payload) && Array.isArray(payload.transcript)) return payload.transcript;
+    if (isRecord(payload) && Array.isArray(payload.words)) return [{ words: payload.words }];
+    return [payload];
+  });
+}
+
+async function fetchRecallTranscriptDownload(downloadUrl: string, apiKey: string) {
+  const transcriptPayload = await fetchJson(downloadUrl, {
+    headers: recallSignedDownloadUrl(downloadUrl)
+      ? { accept: "application/json" }
+      : {
+          Authorization: recallAuthorization(apiKey),
+          accept: "application/json",
+        },
+  });
+  return transcriptPayload;
+}
+
 async function fetchRecallTranscriptArtifact(params: { transcriptId?: string | null; transcriptUrl?: string | null; externalBotId?: string | null }) {
   const apiKey = requireVendorSecret("RECALL_AI");
   let downloadUrl = params.transcriptUrl ?? null;
@@ -652,6 +735,22 @@ async function fetchRecallTranscriptArtifact(params: { transcriptId?: string | n
       },
     });
     downloadUrl = readString(isRecord(metadata) && isRecord(metadata.data) ? metadata.data.download_url : null);
+  }
+
+  if (!downloadUrl && params.externalBotId) {
+    try {
+      metadata = await fetchRecallBot(params.externalBotId);
+      const downloadUrls = recallBotTranscriptDownloadUrls(metadata);
+      if (downloadUrls.length > 0) {
+        const transcriptPayloads = await Promise.all(downloadUrls.map((url) => fetchRecallTranscriptDownload(url, apiKey)));
+        return { transcriptPayload: combineRecallTranscriptPayloads(transcriptPayloads), metadata };
+      }
+    } catch (error) {
+      recorderLog("warn", "recall_bot_metadata_fetch_failed", {
+        externalBotId: params.externalBotId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   if (!downloadUrl && params.externalBotId) {
@@ -671,12 +770,7 @@ async function fetchRecallTranscriptArtifact(params: { transcriptId?: string | n
   }
 
   invariant(downloadUrl, 404, "RECORDER_TRANSCRIPT_NOT_READY", "Recall transcript is not ready.");
-  const transcriptPayload = await fetchJson(downloadUrl, {
-    headers: {
-      Authorization: recallAuthorization(apiKey),
-      accept: "application/json",
-    },
-  });
+  const transcriptPayload = await fetchRecallTranscriptDownload(downloadUrl, apiKey);
   return { transcriptPayload, metadata };
 }
 
@@ -2587,8 +2681,19 @@ async function recoverRecallTranscripts(workspaceId: string) {
         continue;
       }
 
-      const bot = await fetchRecallBot(current.externalBotId);
-      if (!recallBotIsDone(bot)) {
+      try {
+        const bot = await fetchRecallBot(current.externalBotId);
+        if (!recallBotIsDone(bot)) {
+          continue;
+        }
+      } catch (error) {
+        recorderLog("warn", "recall_bot_status_fetch_failed", {
+          workspaceId,
+          meetingId: recording.meetingId,
+          recordingId: recording.id,
+          provider: recording.provider,
+          failureCode: providerFailureCode(error),
+        });
         continue;
       }
       const artifact = await fetchRecallTranscriptArtifact({ externalBotId: current.externalBotId });
