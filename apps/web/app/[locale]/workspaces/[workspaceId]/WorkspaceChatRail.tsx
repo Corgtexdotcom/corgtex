@@ -3,7 +3,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { usePathname } from "next/navigation";
 import { ChatInterface } from "./chat/ChatInterface";
-import { WorkspaceClaudeConnectorCta } from "./WorkspaceClaudeConnectorCta";
 import { WorkspaceUtilityIcon } from "./WorkspaceNavIcon";
 
 type ConversationSummary = {
@@ -86,9 +85,7 @@ export function WorkspaceChatRail({
         <WorkspaceUtilityIcon name="ai" className="ws-agent-toggle-icon" />
         <span className="ws-agent-toggle-text">AI</span>
       </button>
-      {isCollapsed ? <WorkspaceClaudeConnectorCta compact /> : null}
       <div className="ws-agent-chat-shell" hidden={isCollapsed} aria-hidden={isCollapsed}>
-        <WorkspaceClaudeConnectorCta />
         <ChatInterface
           workspaceId={workspaceId}
           conversations={conversations}

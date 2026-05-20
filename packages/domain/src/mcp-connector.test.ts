@@ -16,7 +16,7 @@ afterEach(() => {
   vi.resetModules();
 });
 
-function installSharedMock(prismaMock: Record<string, any>) {
+function installSharedMock(prismaMock: Record<string, any>, envOverrides: Record<string, string | undefined> = {}) {
   vi.doMock("@corgtex/shared", () => ({
     prisma: prismaMock,
     env: {
@@ -26,6 +26,7 @@ function installSharedMock(prismaMock: Record<string, any>) {
       MCP_PUBLIC_URL: undefined,
       WORKSPACE_SLUG: undefined,
       AGENT_API_KEY: undefined,
+      ...envOverrides,
     },
     hashPassword: vi.fn((value: string) => `hash:${value}`),
     parseAllowedWorkspaceIds: vi.fn(() => new Set<string>()),
@@ -69,6 +70,8 @@ describe("MCP connector registry", () => {
   });
 
   it("expands legacy default client scopes without expanding intentionally narrow clients", async () => {
+    installSharedMock({});
+
     const {
       MCP_CONNECTOR_LEGACY_DEFAULT_SCOPES,
       resolveMcpClientAllowedScopes,
@@ -81,8 +84,7 @@ describe("MCP connector registry", () => {
   });
 
   it("defaults the current deployment to a registered active instance from WORKSPACE_SLUG", async () => {
-    restoreEnv();
-    Object.assign(process.env, {
+    installSharedMock({}, {
       APP_URL: "https://client-a.example.com",
       WORKSPACE_SLUG: "client-a",
     });
@@ -100,8 +102,7 @@ describe("MCP connector registry", () => {
   });
 
   it("reads explicitly registered instances from MCP_INSTANCE_REGISTRY", async () => {
-    restoreEnv();
-    Object.assign(process.env, {
+    installSharedMock({}, {
       APP_URL: "https://app.corgtex.com",
       MCP_INSTANCE_REGISTRY: JSON.stringify([
         {
@@ -126,6 +127,8 @@ describe("MCP connector registry", () => {
   });
 
   it("treats /mcp and /api/mcp on the same origin as the same audience", async () => {
+    installSharedMock({});
+
     const { areEquivalentMcpResources } = await import("./mcp-connector");
 
     expect(areEquivalentMcpResources("https://mcp.corgtex.com/mcp", "https://mcp.corgtex.com/api/mcp")).toBe(true);
@@ -221,5 +224,125 @@ describe("MCP OAuth workspace membership revalidation", () => {
       code: "NOT_A_MEMBER",
     });
     expect(updateMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("Claude MCP connection status", () => {
+  const now = new Date("2026-05-20T16:00:00.000Z");
+
+  function token(overrides: Record<string, any> = {}) {
+    return {
+      userId: "user-1",
+      workspaceId: "ws-1",
+      instanceSlug: "corgtex",
+      refreshHash: "sha:mcp_rt_valid",
+      expiresAt: new Date("2026-05-20T17:00:00.000Z"),
+      refreshExpiresAt: new Date("2026-06-20T16:00:00.000Z"),
+      revokedAt: null,
+      createdAt: new Date("2026-05-19T16:00:00.000Z"),
+      updatedAt: new Date("2026-05-20T15:00:00.000Z"),
+      client: {
+        name: "Claude",
+        redirectUris: ["https://claude.ai/api/mcp/callback"],
+        isActive: true,
+      },
+      ...overrides,
+    };
+  }
+
+  it("detects an active refreshable Claude OAuth token for the current user and workspace", async () => {
+    const prismaMock = {
+      mcpOAuthAccessToken: {
+        findMany: vi.fn().mockResolvedValue([token()]),
+      },
+    };
+    installSharedMock(prismaMock);
+
+    const { getClaudeMcpConnectionStatus } = await import("./mcp-connector");
+    const result = await getClaudeMcpConnectionStatus({ userId: "user-1", workspaceId: "ws-1", now });
+
+    expect(result).toEqual({
+      connected: true,
+      connectedAt: new Date("2026-05-20T15:00:00.000Z"),
+    });
+    expect(prismaMock.mcpOAuthAccessToken.findMany).toHaveBeenCalledWith({
+      where: {
+        userId: "user-1",
+        workspaceId: "ws-1",
+        revokedAt: null,
+        refreshHash: { not: null },
+        expiresAt: { gt: now },
+        OR: [
+          { refreshExpiresAt: null },
+          { refreshExpiresAt: { gt: now } },
+        ],
+      },
+      select: expect.any(Object),
+      orderBy: { updatedAt: "desc" },
+    });
+  });
+
+  it("ignores active MCP tokens that do not belong to Claude", async () => {
+    const prismaMock = {
+      mcpOAuthAccessToken: {
+        findMany: vi.fn().mockResolvedValue([
+          token({
+            client: {
+              name: "ChatGPT",
+              redirectUris: ["https://chatgpt.com/aip/example/oauth/callback"],
+              isActive: true,
+            },
+          }),
+        ]),
+      },
+    };
+    installSharedMock(prismaMock);
+
+    const { getClaudeMcpConnectionStatus } = await import("./mcp-connector");
+
+    await expect(getClaudeMcpConnectionStatus({ userId: "user-1", workspaceId: "ws-1", now })).resolves.toEqual({
+      connected: false,
+      connectedAt: null,
+    });
+  });
+
+  it("ignores revoked, expired, or non-refreshable Claude tokens", async () => {
+    const prismaMock = {
+      mcpOAuthAccessToken: {
+        findMany: vi.fn().mockResolvedValue([
+          token({ revokedAt: new Date("2026-05-20T15:30:00.000Z") }),
+          token({ expiresAt: new Date("2026-05-20T15:30:00.000Z") }),
+          token({ refreshExpiresAt: new Date("2026-05-20T15:30:00.000Z") }),
+          token({ refreshHash: null }),
+        ]),
+      },
+    };
+    installSharedMock(prismaMock);
+
+    const { getClaudeMcpConnectionStatus } = await import("./mcp-connector");
+
+    await expect(getClaudeMcpConnectionStatus({ userId: "user-1", workspaceId: "ws-1", now })).resolves.toEqual({
+      connected: false,
+      connectedAt: null,
+    });
+  });
+
+  it("does not leak Claude connection state across users or workspaces", async () => {
+    const prismaMock = {
+      mcpOAuthAccessToken: {
+        findMany: vi.fn().mockResolvedValue([
+          token({ userId: "other-user" }),
+          token({ workspaceId: "other-workspace" }),
+        ]),
+      },
+    };
+    installSharedMock(prismaMock);
+
+    const { getClaudeMcpConnectionStatus } = await import("./mcp-connector");
+
+    await expect(getClaudeMcpConnectionStatus({ userId: "user-1", workspaceId: "ws-1", now })).resolves.toEqual({
+      connected: false,
+      connectedAt: null,
+    });
   });
 });
