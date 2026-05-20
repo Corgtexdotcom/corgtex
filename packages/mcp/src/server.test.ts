@@ -121,6 +121,7 @@ vi.mock("@corgtex/shared", () => ({
     },
   },
   env: { APP_URL: "https://app.test" },
+  toInputJson: (value: unknown) => value,
 }));
 
 vi.mock("./auth", () => ({
@@ -217,6 +218,52 @@ describe("createCorgtexMcpServer", () => {
       id: "spend-1",
       status: "OPEN",
       webUrl: "https://app.test/workspaces/ws-1/finance/spend/spend-1",
+    });
+  });
+
+  it("lists and sets feature flag config for customer support operations", async () => {
+    const { createCorgtexMcpServer } = await import("./server");
+    const { prisma } = await import("@corgtex/shared");
+    vi.mocked(prisma.workspaceFeatureFlag.findMany).mockResolvedValueOnce([
+      {
+        flag: "FINANCE",
+        enabled: true,
+        config: { channelId: "C123" },
+        updatedAt: new Date("2026-05-20T00:00:00.000Z"),
+      },
+    ] as never);
+    vi.mocked(prisma.workspaceFeatureFlag.upsert).mockResolvedValueOnce({
+      flag: "FINANCE",
+      enabled: true,
+      config: { channelId: "C456" },
+    } as never);
+
+    const server = createCorgtexMcpServer({
+      actor: { kind: "agent", authProvider: "bootstrap" } as any,
+      workspaceId: "ws-1",
+      authKind: "agent",
+    });
+
+    const listResponse = await (server as any)._registeredTools.list_feature_flags.handler({});
+    expect(JSON.parse(listResponse.content[0].text).flags.find((flag: { flag: string }) => flag.flag === "FINANCE")).toMatchObject({
+      enabled: true,
+      config: { channelId: "C123" },
+    });
+
+    const setResponse = await (server as any)._registeredTools.set_feature_flag.handler({
+      flag: "FINANCE",
+      enabled: true,
+      config: { channelId: "C456" },
+    });
+
+    expect(prisma.workspaceFeatureFlag.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      update: expect.objectContaining({ enabled: true, config: { channelId: "C456" } }),
+      create: expect.objectContaining({ enabled: true, config: { channelId: "C456" } }),
+    }));
+    expect(JSON.parse(setResponse.content[0].text)).toMatchObject({
+      flag: "FINANCE",
+      enabled: true,
+      config: { channelId: "C456" },
     });
   });
 

@@ -143,6 +143,7 @@ vi.mock("@corgtex/shared", () => ({
   encryptSecret: encryptSecretMock,
   decryptSecret: decryptSecretMock,
   randomOpaqueToken: vi.fn(() => "nonce-value"),
+  toInputJson: (value: unknown) => value,
 }));
 
 vi.mock("./members", () => ({
@@ -983,6 +984,51 @@ describe("control plane domain", () => {
     });
   });
 
+  it("sets managed workspace feature flag config when provided", async () => {
+    const { setControlPlaneFeatureFlag } = await import("./control-plane");
+    const deployment = {
+      id: "inst-1",
+      label: "Acme",
+      deploymentKind: "HOSTED",
+      managedWorkspaceId: "ws-1",
+      supportCredentialEnc: null,
+      managedWorkspace: { id: "ws-1", slug: "acme", name: "Acme", _count: {} },
+    };
+    const config = {
+      channelId: "C123",
+      meetingSeriesExternalId: "ops:weekly-progress-review",
+    };
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce(deployment);
+    prismaMock.workspaceFeatureFlag.upsert.mockResolvedValueOnce({
+      workspaceId: "ws-1",
+      flag: "SLACK_MEETING_ACTION_REVIEW",
+      enabled: true,
+      config,
+    });
+
+    await setControlPlaneFeatureFlag(operatorActor, {
+      deploymentId: "inst-1",
+      flag: "SLACK_MEETING_ACTION_REVIEW",
+      enabled: true,
+      config,
+      reason: "Enable customer Slack meeting action review.",
+    });
+
+    expect(prismaMock.workspaceFeatureFlag.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      update: expect.objectContaining({ enabled: true, config }),
+      create: expect.objectContaining({ enabled: true, config }),
+    }));
+    expect(prismaMock.customerDeploymentEvent.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        meta: expect.objectContaining({
+          flag: "SLACK_MEETING_ACTION_REVIEW",
+          enabled: true,
+          configProvided: true,
+        }),
+      }),
+    }));
+  });
+
   it("lists remote feature flags with a read-scoped control-plane agent", async () => {
     const { listControlPlaneFeatureFlags } = await import("./control-plane");
     const readAgent: AppActor = {
@@ -1012,6 +1058,7 @@ describe("control plane domain", () => {
           {
             flag: "FINANCE",
             enabled: true,
+            config: { channelId: "C123" },
             source: "remote_override",
           },
         ],
@@ -1031,6 +1078,7 @@ describe("control plane domain", () => {
         {
           flag: "FINANCE",
           enabled: true,
+          config: { channelId: "C123" },
           source: "remote_override",
         },
       ],
@@ -1064,9 +1112,19 @@ describe("control plane domain", () => {
       deploymentId: "inst-1",
       flag: "FINANCE",
       enabled: true,
+      config: { channelId: "C123" },
       reason: "Enable finance for pilot.",
     });
 
+    expect(prismaMock.supportOperation.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        inputSummary: expect.objectContaining({
+          flag: "FINANCE",
+          enabled: true,
+          config: { channelId: "C123" },
+        }),
+      }),
+    }));
     expect(result).toMatchObject({
       source: "support_connector",
       flag: "FINANCE",

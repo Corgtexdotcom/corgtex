@@ -116,7 +116,7 @@ import {
 import type { AgentScope } from "@corgtex/domain";
 import { searchIndexedKnowledge } from "@corgtex/knowledge";
 import { processConversationTurn } from "@corgtex/agents";
-import { prisma, env } from "@corgtex/shared";
+import { prisma, env, toInputJson } from "@corgtex/shared";
 import type { McpSessionContext } from "./auth";
 import { requireScope } from "./auth";
 
@@ -1994,7 +1994,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
           workspaceId,
           flag: { in: CONTROL_PLANE_WORKSPACE_FEATURE_FLAGS.map((definition) => definition.flag) },
         },
-        select: { flag: true, enabled: true, updatedAt: true },
+        select: { flag: true, enabled: true, config: true, updatedAt: true },
       });
       const recordMap = new Map(records.map((record) => [record.flag, record]));
       return jsonResult({
@@ -2003,6 +2003,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
           return {
             ...definition,
             enabled: record?.enabled ?? definition.defaultEnabled,
+            config: record?.config ?? null,
             source: record ? "workspace_override" : "default",
             updatedAt: record?.updatedAt ?? null,
           };
@@ -2013,13 +2014,17 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
 
   tool(
     "set_feature_flag",
-    "Enable or disable one known workspace feature flag. Admin-only.",
+    "Enable or disable one known workspace feature flag. Admin-only. Optionally set public-safe JSON config for flags that require rollout settings.",
     {
       flag: z.enum(CONTROL_PLANE_WORKSPACE_FEATURE_FLAGS.map((definition) => definition.flag) as [string, ...string[]]),
       enabled: z.boolean(),
+      config: z.unknown().optional(),
     },
-    async ({ flag, enabled }: { flag: string; enabled: boolean }) => {
+    async (input: { flag: string; enabled: boolean; config?: unknown }) => {
+      const { flag, enabled, config } = input;
       requireScope(sessionCtx, "workspace:write");
+      const hasConfig = Object.prototype.hasOwnProperty.call(input, "config");
+      const configData = hasConfig ? { config: config == null ? null : toInputJson(config) } : {};
       const record = await prisma.workspaceFeatureFlag.upsert({
         where: {
           workspaceId_flag: {
@@ -2027,12 +2032,13 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
             flag,
           },
         },
-        update: { enabled },
-        create: { workspaceId, flag, enabled },
+        update: { enabled, ...configData },
+        create: { workspaceId, flag, enabled, ...configData },
       });
       return jsonResult({
         flag: record.flag,
         enabled: record.enabled,
+        config: record.config ?? null,
         webUrl: webUrl(workspaceId, `/settings`),
       });
     },

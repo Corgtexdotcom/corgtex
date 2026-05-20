@@ -18,6 +18,7 @@ function usage() {
     "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs configure-recorder <deploymentId> <reason> '<json-config>'",
     "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs prepare-release <deploymentId> <targetImageTag> <reason> [targetVersion]",
     "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs probe-health <deploymentId> <reason>",
+    "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs set-feature <deploymentId> <flag> <enabled> <reason> [json-config]",
     "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs run-support <deploymentId> <action> <reason> '<json-args>'",
     "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs call <toolName> '<json-args>'",
   ].join("\n"));
@@ -38,6 +39,13 @@ function parseJsonArg(raw) {
     throw new Error("JSON args must be an object.");
   }
   return parsed;
+}
+
+function parseBooleanArg(raw, label) {
+  const value = requireValue(raw, label).toLowerCase();
+  if (value === "true") return true;
+  if (value === "false") return false;
+  throw new Error(`${label} must be true or false.`);
 }
 
 async function requestMcp(method, params = {}) {
@@ -125,6 +133,14 @@ try {
     print(await callTool("probe_customer_deployment_health", {
       deploymentId: requireValue(args[0], "deploymentId"),
       reason: requireValue(args[1], "reason"),
+    }));
+  } else if (command === "set-feature") {
+    print(await callTool("set_customer_feature_flag", {
+      deploymentId: requireValue(args[0], "deploymentId"),
+      flag: requireValue(args[1], "flag"),
+      enabled: parseBooleanArg(args[2], "enabled"),
+      reason: requireValue(args[3], "reason"),
+      ...(args[4] ? { config: parseJsonArg(args[4]) } : {}),
     }));
   } else if (command === "run-support") {
     print(await callTool("run_customer_support_operation", {

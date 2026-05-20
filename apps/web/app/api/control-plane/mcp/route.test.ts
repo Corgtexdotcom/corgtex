@@ -308,6 +308,53 @@ describe("/api/control-plane/mcp", () => {
     expect(vi.mocked(domain.setControlPlaneFeatureFlag)).not.toHaveBeenCalled();
   });
 
+  it("passes feature flag config through control-plane MCP mutations", async () => {
+    mocks.resolveControlPlaneRequestActor.mockResolvedValueOnce({
+      kind: "agent",
+      authProvider: "control-plane",
+      label: "control-plane-agent",
+      scopes: ["control-plane:read", "control-plane:features:write"],
+    });
+    const domain = await import("@corgtex/domain");
+    vi.mocked(domain.setControlPlaneFeatureFlag).mockResolvedValueOnce({
+      deploymentId: "inst-1",
+      flag: "SLACK_MEETING_ACTION_REVIEW",
+      enabled: true,
+    } as never);
+    const { POST } = await import("./route");
+
+    const response = await POST(request({
+      jsonrpc: "2.0",
+      id: 6,
+      method: "tools/call",
+      params: {
+        name: "set_customer_feature_flag",
+        arguments: {
+          deploymentId: "inst-1",
+          flag: "SLACK_MEETING_ACTION_REVIEW",
+          enabled: true,
+          config: {
+            channelId: "C123",
+            meetingSeriesExternalId: "ops:weekly-progress-review",
+          },
+          reason: "Enable customer Slack meeting action review.",
+        },
+      },
+    }) as never);
+
+    expect(response.status).toBe(200);
+    expect(vi.mocked(domain.setControlPlaneFeatureFlag)).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({
+      deploymentId: "inst-1",
+      flag: "SLACK_MEETING_ACTION_REVIEW",
+      enabled: true,
+      config: {
+        channelId: "C123",
+        meetingSeriesExternalId: "ops:weekly-progress-review",
+      },
+      reason: "Enable customer Slack meeting action review.",
+    }));
+  });
+
   it("rejects integration configuration without explicit boolean toggles", async () => {
     mocks.resolveControlPlaneRequestActor.mockResolvedValueOnce({
       kind: "agent",

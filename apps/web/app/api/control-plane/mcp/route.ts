@@ -199,6 +199,7 @@ const tools = [
         deploymentId: { type: "string" },
         flag: { type: "string" },
         enabled: { type: "boolean" },
+        config: { type: "object" },
         reason: { type: "string" },
       },
       required: ["deploymentId", "flag", "enabled", "reason"],
@@ -618,6 +619,7 @@ export async function POST(request: NextRequest) {
         deploymentId: argString(args, "deploymentId"),
         flag: argString(args, "flag"),
         enabled: args.enabled,
+        ...(Object.prototype.hasOwnProperty.call(args, "config") ? { config: args.config } : {}),
         reason: argString(args, "reason"),
       })));
     }
