@@ -90,11 +90,34 @@ async function railwayGraphql(query, variables) {
     },
     body: JSON.stringify({ query, variables }),
   });
-  const body = await response.json();
+  const responseText = await response.text();
+  const body = parseJsonResponse(responseText);
+  if (!body) {
+    throw new Error(formatRailwayHttpError(response, responseText));
+  }
   if (!response.ok || body.errors?.length) {
     throw new Error(body.errors?.map((error) => error.message).join("; ") || `Railway API failed: ${response.status}`);
   }
   return body.data;
+}
+
+function parseJsonResponse(responseText) {
+  try {
+    return JSON.parse(responseText);
+  } catch {
+    return null;
+  }
+}
+
+function formatRailwayHttpError(response, responseText) {
+  const statusText = response.statusText ? ` ${response.statusText}` : "";
+  return `Railway API returned non-JSON response: HTTP ${response.status}${statusText}; body: ${summarizeResponse(responseText)}`;
+}
+
+function summarizeResponse(responseText) {
+  const normalized = String(responseText || "").replace(/\s+/g, " ").trim();
+  if (!normalized) return "<empty>";
+  return normalized.slice(0, 240);
 }
 
 function publicPlan(plan) {
