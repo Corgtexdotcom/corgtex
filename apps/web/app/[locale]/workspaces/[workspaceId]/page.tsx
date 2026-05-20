@@ -8,6 +8,7 @@ import { requirePageActor } from "@/lib/auth";
 import {
   decideApprovalAction,
   markAllNotificationsReadAction,
+  updateActionAction,
 } from "./actions";
 import Link from "next/link";
 import { GoalProgress } from "./goals/GoalProgress";
@@ -426,7 +427,31 @@ export default async function WorkspaceDashboard({
            <div style={{ marginBottom: "32px"}}>
              {memberOpenActions.slice(0, dashboardSectionLayout("todos").itemCap).map((action) => (
                <div key={action.id} className="nr-item" style={{ display: "flex", gap: "8px", alignItems: "baseline", borderBottom: "none", padding: "6px 0" }}>
-                 <input type="checkbox" disabled style={{ margin: 0 }} />
+                 <form action={updateActionAction} style={{ display: "inline-flex", flex: "0 0 auto", margin: 0 }}>
+                   <input type="hidden" name="workspaceId" value={workspaceId} />
+                   <input type="hidden" name="actionId" value={action.id} />
+                   <input type="hidden" name="status" value="COMPLETED" />
+                   <button
+                     type="submit"
+                     role="checkbox"
+                     aria-checked={false}
+                     aria-label={t("markTodoComplete", { title: action.title })}
+                     title={t("markTodoComplete", { title: action.title })}
+                     style={{
+                       appearance: "none",
+                       background: "var(--surface)",
+                       border: "1px solid var(--line)",
+                       borderRadius: "2px",
+                       cursor: "pointer",
+                       flex: "0 0 13px",
+                       height: "13px",
+                       margin: "2px 0 0",
+                       minHeight: 0,
+                       padding: 0,
+                       width: "13px",
+                     }}
+                   />
+                 </form>
                  <Link href={`/workspaces/${workspaceId}/actions`} style={{ fontSize: "0.85rem", lineHeight: 1.4, textDecoration: "none", color: "var(--text)" }}>{action.title}</Link>
                </div>
              ))}
