@@ -1,5 +1,5 @@
 import type { CustomerDeploymentAccessRole, FleetSnapshotKind, MeetingRecorderProvider, MemberRole, Prisma } from "@prisma/client";
-import { decryptSecret, encryptSecret, env, prisma } from "@corgtex/shared";
+import { decryptSecret, encryptSecret, env, prisma, toInputJson } from "@corgtex/shared";
 import type { AgentActor, AppActor } from "@corgtex/shared";
 import { AppError, invariant } from "./errors";
 import { isGlobalOperator } from "./auth";
@@ -1169,6 +1169,7 @@ function normalizeRemoteFeatureFlags(summary: unknown) {
         description: typeof entry.description === "string" ? entry.description : definition?.description ?? "",
         enabled: Boolean(entry.enabled),
         defaultEnabled: Boolean(entry.defaultEnabled ?? definition?.defaultEnabled),
+        config: "config" in entry ? entry.config : null,
         source: typeof entry.source === "string" ? entry.source : "support_connector",
         updatedAt: typeof entry.updatedAt === "string" ? entry.updatedAt : null,
         lastChangedAt: typeof entry.lastChangedAt === "string" ? entry.lastChangedAt : null,
@@ -1261,6 +1262,7 @@ export async function setControlPlaneFeatureFlag(actor: AppActor, params: {
   deploymentId: string;
   flag: string;
   enabled: boolean;
+  config?: unknown;
   reason?: string | null;
 }) {
   requireControlPlaneScope(actor, "control-plane:features:write");
@@ -1269,6 +1271,8 @@ export async function setControlPlaneFeatureFlag(actor: AppActor, params: {
   await requireControlPlaneDeploymentWriteAccess(actor, params.deploymentId);
   const deployment = await getControlPlaneDeploymentWithWorkspace(actor, params.deploymentId);
   const adapter = createControlPlaneAdapter(deployment);
+  const hasConfig = Object.prototype.hasOwnProperty.call(params, "config");
+  const configData = hasConfig ? { config: params.config == null ? null : toInputJson(params.config) } : {};
 
   if (deployment.managedWorkspaceId) {
     const record = await prisma.workspaceFeatureFlag.upsert({
@@ -1280,11 +1284,13 @@ export async function setControlPlaneFeatureFlag(actor: AppActor, params: {
       },
       update: {
         enabled: params.enabled,
+        ...configData,
       },
       create: {
         workspaceId: deployment.managedWorkspaceId,
         flag,
         enabled: params.enabled,
+        ...configData,
       },
     });
     await recordCustomerDeploymentEvent(actor, params.deploymentId, "control_plane.feature_flag.updated", {
@@ -1292,6 +1298,7 @@ export async function setControlPlaneFeatureFlag(actor: AppActor, params: {
       source: "managed_workspace",
       flag,
       enabled: params.enabled,
+      configProvided: hasConfig,
     });
     return {
       deploymentId: params.deploymentId,
@@ -1311,6 +1318,7 @@ export async function setControlPlaneFeatureFlag(actor: AppActor, params: {
     arguments: {
       flag,
       enabled: params.enabled,
+      ...(hasConfig ? { config: params.config ?? null } : {}),
     },
     remoteWorkspaceId: deployment.remoteWorkspaceId,
   });
@@ -1319,6 +1327,7 @@ export async function setControlPlaneFeatureFlag(actor: AppActor, params: {
     source: "support_connector",
     flag,
     enabled: params.enabled,
+    configProvided: hasConfig,
     operationId: operation.id,
   });
   return {
