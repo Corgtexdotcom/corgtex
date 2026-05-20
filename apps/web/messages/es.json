@@ -612,6 +612,7 @@
     "footerStats": "{articles} artículos · {meetings} reuniones · {chunks} fragmentos de conocimiento · {members} miembros",
     "itemsNeedAttention": "{count, plural, =1 {# elemento necesita} other {# elementos necesitan}} atención",
     "liveActivity": "Actividad en vivo",
+    "markTodoComplete": "Marcar \"{title}\" como completada",
     "markRead": "Marcar como leído",
     "meeting": "Reunión",
     "more": "+ {count} más",

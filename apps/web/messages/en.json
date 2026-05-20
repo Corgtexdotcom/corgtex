@@ -612,6 +612,7 @@
     "footerStats": "{articles} articles · {meetings} meetings · {chunks} knowledge chunks · {members} members",
     "itemsNeedAttention": "{count, plural, =1 {# item needs} other {# items need}} attention",
     "liveActivity": "Live Activity",
+    "markTodoComplete": "Mark \"{title}\" complete",
     "markRead": "Mark read",
     "meeting": "Meeting",
     "more": "+ {count} more",
