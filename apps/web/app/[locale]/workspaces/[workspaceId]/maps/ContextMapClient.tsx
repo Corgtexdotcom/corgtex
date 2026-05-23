@@ -213,22 +213,25 @@ export default function ContextMapClient({ workspaceId, data }: { workspaceId: s
 
     let cancelled = false;
     setRegionContextStatus("loading");
-    buildSelectedRegionContextAction({
-      workspaceId,
-      mapViewId: data.mapView.id,
-      objectIds: selectedRegionIds,
-    }).then((context) => {
-      if (cancelled) return;
-      setRegionContext(context);
-      setRegionContextStatus("ready");
-    }).catch(() => {
-      if (cancelled) return;
-      setRegionContext(null);
-      setRegionContextStatus("error");
-    });
+    const timeoutId = window.setTimeout(() => {
+      buildSelectedRegionContextAction({
+        workspaceId,
+        mapViewId: data.mapView.id,
+        objectIds: selectedRegionIds,
+      }).then((context) => {
+        if (cancelled) return;
+        setRegionContext(context);
+        setRegionContextStatus("ready");
+      }).catch(() => {
+        if (cancelled) return;
+        setRegionContext(null);
+        setRegionContextStatus("error");
+      });
+    }, 250);
 
     return () => {
       cancelled = true;
+      window.clearTimeout(timeoutId);
     };
   }, [data.mapView.id, selectedRegionKey, selectedRegionIds, workspaceId]);
 
