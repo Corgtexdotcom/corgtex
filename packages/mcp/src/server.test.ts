@@ -25,6 +25,9 @@ const listExternalMcpConnectionsMock = vi.fn();
 const searchConnectedExternalMcpContextMock = vi.fn();
 const recordAuditMock = vi.fn();
 const searchIndexedKnowledgeMock = vi.fn();
+const buildSelectedRegionContextMock = vi.fn();
+const createContextGraphProposedDiffMock = vi.fn();
+const getContextMapDataMock = vi.fn();
 
 vi.mock("@corgtex/domain", () => ({
   CONTROL_PLANE_WORKSPACE_FEATURE_FLAGS: [
@@ -93,6 +96,9 @@ vi.mock("@corgtex/domain", () => ({
   archiveWorkspaceToolLink: archiveWorkspaceToolLinkMock,
   revealWorkspaceToolLinkCredential: revealWorkspaceToolLinkCredentialMock,
   recordAudit: recordAuditMock,
+  buildSelectedRegionContext: buildSelectedRegionContextMock,
+  createContextGraphProposedDiff: createContextGraphProposedDiffMock,
+  getContextMapData: getContextMapDataMock,
   searchConnectedExternalMcpContext: searchConnectedExternalMcpContextMock,
   listRuntimeJobs: vi.fn(),
   listFailedJobs: vi.fn(),

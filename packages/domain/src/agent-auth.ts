@@ -36,6 +36,9 @@ export const SCOPE_REGISTRY = {
   "archive:read":        { label: "Read archived records",      group: "core",       default: false, delegatedDefault: true,  description: "List archived workspace artifacts for recovery and audit." },
   "archive:write":       { label: "Restore and purge archives", group: "core",       default: false, delegatedDefault: true,  description: "Restore archived records or purge eligible archived records through same-role delegation." },
   "brain:read":          { label: "Search the Brain",           group: "core",       default: true,  delegatedDefault: true,  description: "Semantic search over policies, meeting notes, proposals, and other indexed content." },
+  "context-graph:read":  { label: "Read context graph",          group: "core",       default: true,  delegatedDefault: true,  description: "Read living context graph objects, relationships, evidence, and selected-region context." },
+  "context-graph:propose": { label: "Propose graph changes",     group: "core",       default: true,  delegatedDefault: true,  description: "Create proposed diffs against the context graph without directly mutating approved company truth." },
+  "context-graph:approve": { label: "Approve graph changes",     group: "core",       default: false, delegatedDefault: false, description: "Approve and apply context graph diffs. Sensitive — owner/admin gated." },
   "conversations:write": { label: "Chat with Corgtex",          group: "core",       default: true,  delegatedDefault: true,  description: "Send messages to the Corgtex assistant (server-side LLM call)." },
 
   // ---- proposals ----

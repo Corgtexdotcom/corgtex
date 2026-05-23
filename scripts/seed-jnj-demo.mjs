@@ -718,6 +718,273 @@ async function seedShowcaseData({ wsId, memberMappings }) {
   console.log(`✅ ${SHOWCASE_AUDIT_EVENTS.length} Audit events refreshed`);
 }
 
+async function seedContextMapData({ wsId, circleMappings, meetingMappings }) {
+  await prisma.workspaceFeatureFlag.upsert({
+    where: {
+      workspaceId_flag: {
+        workspaceId: wsId,
+        flag: "CONTEXT_MAPS",
+      },
+    },
+    update: { enabled: true },
+    create: {
+      workspaceId: wsId,
+      flag: "CONTEXT_MAPS",
+      enabled: true,
+    },
+  });
+
+  const aiMeeting = meetingMappings["Innovation & AI Working Group Kickoff"];
+  const rdCircleId = circleMappings["rd"];
+  const medtechCircleId = circleMappings["medtech"];
+  const boardCircleId = circleMappings["board"];
+
+  const objectSpecs = [
+    {
+      id: `${wsId}-ctx-process-ai-governance`,
+      objectType: "Process",
+      title: "AI governance intake process",
+      summary: "A safe demo process for moving AI ideas from working-group discussion into reviewed operating context.",
+      sourceEntityType: "DemoContext",
+      sourceEntityId: "ai-governance-process",
+      x: 0,
+      y: 80,
+    },
+    {
+      id: `${wsId}-ctx-step-working-group`,
+      objectType: "ProcessStep",
+      title: "Working group captures opportunity",
+      summary: "R&D and MedTech leaders capture AI opportunities during the kickoff meeting.",
+      sourceEntityType: "Meeting",
+      sourceEntityId: aiMeeting?.id ?? "innovation-ai-working-group",
+      x: 300,
+      y: 0,
+    },
+    {
+      id: `${wsId}-ctx-decision-coe`,
+      objectType: "Decision",
+      title: "Create R&D AI Center of Excellence",
+      summary: "The working group agreed to establish a shared AI Center of Excellence to standardize tooling.",
+      confidence: 0.93,
+      sourceEntityType: "MeetingInsight",
+      sourceEntityId: `${wsId}-insight-applied-ai-coe-decision`,
+      x: 620,
+      y: 0,
+    },
+    {
+      id: `${wsId}-ctx-task-charter`,
+      objectType: "Task",
+      title: "Draft AI governance working-group charter",
+      summary: "Open proposed follow-up to circulate a charter before the next R&D review.",
+      confidence: 0.72,
+      status: "proposed",
+      sourceEntityType: "MeetingInsight",
+      sourceEntityId: `${wsId}-insight-needs-review-ai-governance`,
+      x: 620,
+      y: 190,
+    },
+    {
+      id: `${wsId}-ctx-team-rd`,
+      objectType: "Team",
+      title: "Research & Development",
+      summary: "Cross-cutting R&D strategy and pipeline management.",
+      sourceEntityType: "Circle",
+      sourceEntityId: rdCircleId,
+      x: 300,
+      y: 210,
+    },
+    {
+      id: `${wsId}-ctx-team-medtech`,
+      objectType: "Team",
+      title: "MedTech",
+      summary: "Medical devices, surgical solutions, and vision.",
+      sourceEntityType: "Circle",
+      sourceEntityId: medtechCircleId,
+      x: 930,
+      y: 210,
+    },
+    {
+      id: `${wsId}-ctx-risk-digital-twin`,
+      objectType: "Risk",
+      title: "Digital twin transferability is unclear",
+      summary: "The transcript hints that MedTech digital twin pilots may need separate governance, but ownership is not yet clear.",
+      confidence: 0.38,
+      status: "proposed",
+      sourceEntityType: "MeetingInsight",
+      sourceEntityId: `${wsId}-insight-low-confidence-digital-twin`,
+      x: 930,
+      y: 20,
+    },
+    {
+      id: `${wsId}-ctx-meeting-ai-kickoff`,
+      objectType: "Meeting",
+      title: "Innovation & AI Working Group Kickoff",
+      summary: "Discussed AI governance, drug discovery ML platforms, and digital twin pilots.",
+      sourceEntityType: "Meeting",
+      sourceEntityId: aiMeeting?.id ?? "innovation-ai-working-group",
+      x: 0,
+      y: 300,
+    },
+    {
+      id: `${wsId}-ctx-team-executive`,
+      objectType: "Team",
+      title: "Executive Committee",
+      summary: "Company-wide governance and strategic oversight.",
+      sourceEntityType: "Circle",
+      sourceEntityId: boardCircleId,
+      x: 300,
+      y: 420,
+    },
+  ];
+
+  const objectIds = objectSpecs.map((object) => object.id);
+  await prisma.contextGraphObject.deleteMany({
+    where: {
+      workspaceId: wsId,
+      id: {
+        startsWith: `${wsId}-ctx-`,
+        notIn: objectIds,
+      },
+    },
+  });
+
+  for (const object of objectSpecs) {
+    await prisma.contextGraphObject.upsert({
+      where: { id: object.id },
+      update: {
+        objectType: object.objectType,
+        title: object.title,
+        summary: object.summary,
+        confidence: object.confidence ?? null,
+        status: object.status ?? "approved",
+        sourceEntityType: object.sourceEntityType,
+        sourceEntityId: object.sourceEntityId,
+        updatedAt: new Date(),
+      },
+      create: {
+        id: object.id,
+        workspaceId: wsId,
+        objectType: object.objectType,
+        title: object.title,
+        summary: object.summary,
+        confidence: object.confidence ?? null,
+        status: object.status ?? "approved",
+        createdByType: "integration",
+        sourceEntityType: object.sourceEntityType,
+        sourceEntityId: object.sourceEntityId,
+        lastVerifiedAt: object.status === "proposed" ? null : new Date(),
+      },
+    });
+  }
+
+  const mapView = await prisma.contextMapView.upsert({
+    where: { id: `${wsId}-ctx-map-process` },
+    update: {
+      name: "AI governance process map",
+      viewType: "process",
+      query: { demo: true, objectIds },
+    },
+    create: {
+      id: `${wsId}-ctx-map-process`,
+      workspaceId: wsId,
+      name: "AI governance process map",
+      viewType: "process",
+      query: { demo: true, objectIds },
+    },
+  });
+
+  for (const object of objectSpecs) {
+    await prisma.contextMapLayoutItem.upsert({
+      where: {
+        mapViewId_objectId: {
+          mapViewId: mapView.id,
+          objectId: object.id,
+        },
+      },
+      update: { x: object.x, y: object.y, width: 230, height: 110 },
+      create: {
+        mapViewId: mapView.id,
+        objectId: object.id,
+        x: object.x,
+        y: object.y,
+        width: 230,
+        height: 110,
+      },
+    });
+  }
+
+  const relationships = [
+    [`${wsId}-ctx-step-working-group`, `${wsId}-ctx-process-ai-governance`, "part_of", "approved"],
+    [`${wsId}-ctx-decision-coe`, `${wsId}-ctx-meeting-ai-kickoff`, "decided_in", "approved"],
+    [`${wsId}-ctx-task-charter`, `${wsId}-ctx-meeting-ai-kickoff`, "created_in", "proposed"],
+    [`${wsId}-ctx-task-charter`, `${wsId}-ctx-team-rd`, "assigned_to", "proposed"],
+    [`${wsId}-ctx-decision-coe`, `${wsId}-ctx-team-rd`, "owns", "approved"],
+    [`${wsId}-ctx-risk-digital-twin`, `${wsId}-ctx-team-medtech`, "needs_approval_from", "proposed"],
+    [`${wsId}-ctx-team-rd`, `${wsId}-ctx-team-executive`, "part_of", "approved"],
+    [`${wsId}-ctx-team-medtech`, `${wsId}-ctx-team-executive`, "part_of", "approved"],
+  ];
+
+  for (const [sourceObjectId, targetObjectId, relationshipType, status] of relationships) {
+    const dedupeKey = `${wsId}:${sourceObjectId}:${relationshipType}:${targetObjectId}:demo`;
+    await prisma.contextGraphRelationship.upsert({
+      where: { dedupeKey },
+      update: { sourceObjectId, targetObjectId, relationshipType, status },
+      create: {
+        workspaceId: wsId,
+        sourceObjectId,
+        targetObjectId,
+        relationshipType,
+        status,
+        createdByType: "integration",
+        dedupeKey,
+      },
+    });
+  }
+
+  const evidenceSpecs = [
+    {
+      objectId: `${wsId}-ctx-decision-coe`,
+      quote: "Generative AI will change target optimization. We are establishing an internal COE to standardize tooling.",
+      relevanceScore: 0.93,
+    },
+    {
+      objectId: `${wsId}-ctx-task-charter`,
+      quote: "We are establishing an internal COE to standardize tooling.",
+      relevanceScore: 0.72,
+    },
+    {
+      objectId: `${wsId}-ctx-risk-digital-twin`,
+      quote: "Discussed AI governance, drug discovery ML platforms, and digital twin pilots.",
+      relevanceScore: 0.38,
+    },
+  ];
+
+  for (const evidence of evidenceSpecs) {
+    const existing = await prisma.contextGraphEvidenceRef.findFirst({
+      where: {
+        workspaceId: wsId,
+        objectId: evidence.objectId,
+        sourceType: "MEETING",
+        sourceId: aiMeeting?.id ?? "innovation-ai-working-group",
+      },
+    });
+    const data = {
+      workspaceId: wsId,
+      objectId: evidence.objectId,
+      sourceType: "MEETING",
+      sourceId: aiMeeting?.id ?? "innovation-ai-working-group",
+      quote: evidence.quote,
+      relevanceScore: evidence.relevanceScore,
+      metadata: { demo: true },
+    };
+    if (existing) {
+      await prisma.contextGraphEvidenceRef.update({ where: { id: existing.id }, data });
+    } else {
+      await prisma.contextGraphEvidenceRef.create({ data });
+    }
+  }
+}
+
 async function refreshAdviceRecords(processId, records) {
   const rows = records.map((record, index) => ({
     id: `${processId}-seed-advice-${index + 1}`,
@@ -1213,6 +1480,7 @@ async function main() {
 
   // 14. Safe showcase data for current customer-visible feature surfaces.
   await seedShowcaseData({ wsId, memberMappings });
+  await seedContextMapData({ wsId, circleMappings, meetingMappings });
 
   const counts = {
     articles: await prisma.brainArticle.count({ where: { workspaceId: wsId } }),
@@ -1226,6 +1494,8 @@ async function main() {
     agentIdentities: await prisma.agentIdentity.count({ where: { workspaceId: wsId } }),
     recognitions: await prisma.recognition.count({ where: { workspaceId: wsId } }),
     auditLogs: await prisma.auditLog.count({ where: { workspaceId: wsId } }),
+    contextObjects: await prisma.contextGraphObject.count({ where: { workspaceId: wsId } }),
+    contextMaps: await prisma.contextMapView.count({ where: { workspaceId: wsId } }),
   };
 
   console.log("Demo workspace refreshed:");

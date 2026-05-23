@@ -112,6 +112,9 @@ import {
   listExternalMcpConnections,
   recordAudit,
   searchConnectedExternalMcpContext,
+  buildSelectedRegionContext,
+  createContextGraphProposedDiff,
+  getContextMapData,
 } from "@corgtex/domain";
 import type { AgentScope } from "@corgtex/domain";
 import { searchIndexedKnowledge } from "@corgtex/knowledge";
@@ -181,6 +184,11 @@ type ToolCapability = {
 const TOOL_CAPABILITIES = {
   chat: { scopes: ["conversations:write"] },
   search_knowledge: { scopes: ["brain:read"] },
+  query_context_graph: { scopes: ["context-graph:read"] },
+  get_context_neighbors: { scopes: ["context-graph:read"] },
+  get_context_evidence: { scopes: ["context-graph:read"] },
+  get_selected_region_context: { scopes: ["context-graph:read"] },
+  create_context_graph_proposed_diff: { scopes: ["context-graph:propose"] },
   search: { scopes: ["brain:read"] },
   fetch: { scopes: ["brain:read"] },
   list_connected_tools: { scopes: ["external-tools:read"] },
@@ -528,6 +536,134 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
           raw: chunk.metadata,
         },
       });
+    },
+  );
+
+  tool(
+    "query_context_graph",
+    "Query living company context graph objects and relationships. Use this for structured ownership, dependency, status, and provenance context before falling back to broad semantic search.",
+    {
+      objectType: z.string().optional().describe("Optional object type filter, e.g. Process, Decision, Task, Team"),
+      status: z.string().optional().describe("Optional status filter, e.g. approved, proposed, stale, disputed"),
+      take: z.number().optional().describe("Max objects to return (default 50, max 100)"),
+    },
+    async ({ objectType, status, take }: { objectType?: string; status?: string; take?: number }) => {
+      requireToolCapability("query_context_graph");
+      const limit = Math.min(Math.max(take ?? 50, 1), 100);
+      const objects = await prisma.contextGraphObject.findMany({
+        where: {
+          workspaceId,
+          ...(objectType ? { objectType } : {}),
+          ...(status ? { status } : { status: { not: "archived" } }),
+        },
+        orderBy: [{ objectType: "asc" }, { updatedAt: "desc" }],
+        take: limit,
+      });
+      const relationships = await prisma.contextGraphRelationship.findMany({
+        where: {
+          workspaceId,
+          sourceObjectId: { in: objects.map((object) => object.id) },
+          targetObjectId: { in: objects.map((object) => object.id) },
+          status: { not: "archived" },
+        },
+        take: limit * 2,
+      });
+      return structuredJsonResult({ objects, relationships, webUrl: webUrl(workspaceId, "/maps") });
+    },
+  );
+
+  tool(
+    "get_context_neighbors",
+    "Get graph neighbors around one context graph object. Returns the selected object, connected relationships, neighboring objects, and evidence refs.",
+    {
+      objectId: z.string().describe("ContextGraphObject id"),
+      depth: z.number().optional().describe("Traversal depth, default 1, max 2"),
+      includeStale: z.boolean().optional(),
+    },
+    async ({ objectId, depth, includeStale }: { objectId: string; depth?: number; includeStale?: boolean }) => {
+      requireToolCapability("get_context_neighbors");
+      const context = await buildSelectedRegionContext(actor, {
+        workspaceId,
+        objectIds: [objectId],
+        depth: depth ?? 1,
+        includeStale,
+      });
+      return structuredJsonResult({ ...context, webUrl: webUrl(workspaceId, "/maps") });
+    },
+  );
+
+  tool(
+    "get_context_evidence",
+    "Get evidence refs attached to a context graph object or relationship.",
+    {
+      objectId: z.string().optional(),
+      relationshipId: z.string().optional(),
+      take: z.number().optional().describe("Default 20"),
+    },
+    async ({ objectId, relationshipId, take }: { objectId?: string; relationshipId?: string; take?: number }) => {
+      requireToolCapability("get_context_evidence");
+      if (Boolean(objectId) === Boolean(relationshipId)) {
+        throw new Error("Provide exactly one of objectId or relationshipId.");
+      }
+      const evidenceRefs = await prisma.contextGraphEvidenceRef.findMany({
+        where: {
+          workspaceId,
+          ...(objectId ? { objectId } : { relationshipId }),
+        },
+        orderBy: { createdAt: "desc" },
+        take: Math.min(Math.max(take ?? 20, 1), 50),
+      });
+      return structuredJsonResult({ evidenceRefs });
+    },
+  );
+
+  tool(
+    "get_selected_region_context",
+    "Assemble a scoped agent context packet from selected map region object ids: graph neighbors, evidence, temporal scope, stale/disputed facts, and permissions.",
+    {
+      objectIds: z.array(z.string()).min(1).describe("Selected ContextGraphObject ids"),
+      mapViewId: z.string().optional(),
+      depth: z.number().optional().describe("Default 2, max 2"),
+      includeStale: z.boolean().optional(),
+      asOf: z.string().optional().describe("Optional ISO timestamp for temporal context"),
+    },
+    async ({ objectIds, mapViewId, depth, includeStale, asOf }: {
+      objectIds: string[];
+      mapViewId?: string;
+      depth?: number;
+      includeStale?: boolean;
+      asOf?: string;
+    }) => {
+      requireToolCapability("get_selected_region_context");
+      const context = await buildSelectedRegionContext(actor, {
+        workspaceId,
+        mapViewId,
+        objectIds,
+        depth: depth ?? 2,
+        includeStale,
+        asOf: asOf ?? null,
+      });
+      return structuredJsonResult({ ...context, webUrl: webUrl(workspaceId, "/maps") });
+    },
+  );
+
+  tool(
+    "create_context_graph_proposed_diff",
+    "Create a proposed diff against the living context graph. This does not mutate approved graph truth; it creates a reviewable proposal for a human or policy gate.",
+    {
+      reason: z.string().optional(),
+      diff: z.record(z.string(), z.any()).describe("Diff JSON with optional objects, relationships, and evidenceRefs arrays"),
+      evidence: z.record(z.string(), z.any()).optional(),
+    },
+    async ({ reason, diff, evidence }: { reason?: string; diff: Record<string, unknown>; evidence?: Record<string, unknown> }) => {
+      requireToolCapability("create_context_graph_proposed_diff");
+      const proposedDiff = await createContextGraphProposedDiff(actor, {
+        workspaceId,
+        reason,
+        diff,
+        evidence,
+      });
+      return jsonResult({ id: proposedDiff.id, status: proposedDiff.status, webUrl: webUrl(workspaceId, "/maps") });
     },
   );
 
@@ -2987,6 +3123,23 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
           uri: "corgtex://workspace/policies",
           mimeType: "application/json",
           text: JSON.stringify(simplified, null, 2),
+        }],
+      };
+    },
+  );
+
+  server.resource(
+    "context-map",
+    "corgtex://map/process/current",
+    { description: "Current living process context map for the workspace", mimeType: "application/json" },
+    async () => {
+      requireScope(sessionCtx, "context-graph:read");
+      const data = await getContextMapData(actor, { workspaceId });
+      return {
+        contents: [{
+          uri: "corgtex://map/process/current",
+          mimeType: "application/json",
+          text: JSON.stringify(data, null, 2),
         }],
       };
     },

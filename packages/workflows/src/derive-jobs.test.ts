@@ -10,10 +10,15 @@ describe("deriveJobsForEvent", () => {
       payload: { articleId: "art-1" },
     });
 
-    expect(jobs).toHaveLength(1);
+    expect(jobs).toHaveLength(2);
     expect(jobs[0].type).toBe("knowledge.sync.brain-article");
     expect(jobs[0].payload).toEqual({ articleId: "art-1" });
     expect(jobs[0].workspaceId).toBe("ws-1");
+    expect(jobs[1]).toMatchObject({
+      type: "context-graph.sync",
+      payload: { sourceType: "BRAIN_ARTICLE", sourceId: "art-1" },
+      dependsOnDedupeKey: "event-1:brain-article-knowledge-sync",
+    });
   });
 
   it("derives knowledge.sync.brain-article for brain-article.created event", () => {
@@ -24,8 +29,9 @@ describe("deriveJobsForEvent", () => {
       payload: { articleId: "art-1" },
     });
 
-    expect(jobs).toHaveLength(1);
+    expect(jobs).toHaveLength(2);
     expect(jobs[0].type).toBe("knowledge.sync.brain-article");
+    expect(jobs[1].type).toBe("context-graph.sync");
   });
 
   it("derives an idempotent welcome newspaper job for demo lead captures", () => {

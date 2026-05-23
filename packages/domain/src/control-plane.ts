@@ -134,6 +134,7 @@ export const CONTROL_PLANE_WORKSPACE_FEATURE_FLAGS = [
   { flag: "FINANCE", label: "Finance", description: "Spend requests, ledgers, and finance workflows.", defaultEnabled: true },
   { flag: "BUILD_ARTIFACTS", label: "Build artifacts", description: "Workspace build artifact publishing and review.", defaultEnabled: false },
   { flag: "RELATIONSHIPS", label: "Relationships", description: "CRM, leads, and relationship workspace views.", defaultEnabled: true },
+  { flag: "CONTEXT_MAPS", label: "Context maps", description: "Living company context graph maps, graph evidence, and region-scoped agent context.", defaultEnabled: false },
   { flag: "CYCLES", label: "Cycles", description: "Planning cycles, updates, and allocations.", defaultEnabled: true },
   { flag: "AGENT_GOVERNANCE", label: "Agent governance", description: "Agent registry, access, spend, and observability controls.", defaultEnabled: true },
   { flag: "OS_METRICS", label: "OS metrics", description: "Governance health and operating-system metrics.", defaultEnabled: true },
