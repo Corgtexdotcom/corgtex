@@ -14,9 +14,10 @@ describe("deriveJobsForEvent", () => {
       },
     });
 
-    expect(jobs).toHaveLength(5);
+    expect(jobs).toHaveLength(6);
     expect(jobs.map((job) => job.type)).toEqual([
       "knowledge.sync.proposal",
+      "context-graph.sync",
       "agent.constitution-update-trigger",
       "agent.constitution-synthesis",
       "governance.score",
@@ -52,19 +53,22 @@ describe("deriveJobsForEvent", () => {
       },
     });
 
-    expect(jobs).toHaveLength(7);
+    expect(jobs).toHaveLength(8);
     expect(jobs.map((job) => job.type)).toEqual([
       "agent.meeting-summary",
       "meeting.insights.extract",
       "agent.action-extraction",
       "meeting.summary.post",
       "knowledge.sync.meeting",
+      "context-graph.sync",
       "agent.inbox-triage",
       "knowledge.sync.event",
     ]);
     const postJob = jobs.find((job) => job.type === "meeting.summary.post");
     const knowledgeJob = jobs.find((job) => job.type === "knowledge.sync.meeting");
+    const contextGraphJob = jobs.find((job) => job.type === "context-graph.sync");
     expect(knowledgeJob?.dependsOnDedupeKey).toBe(postJob?.dedupeKey);
+    expect(contextGraphJob?.dependsOnDedupeKey).toBe("event-3:meeting-insights-extract");
   });
 
   it("does not run meeting agents for scheduled meetings without transcripts", () => {
@@ -81,6 +85,7 @@ describe("deriveJobsForEvent", () => {
 
     expect(jobs.map((job) => job.type)).toEqual([
       "knowledge.sync.meeting",
+      "context-graph.sync",
       "agent.inbox-triage",
       "knowledge.sync.event",
     ]);
@@ -96,9 +101,10 @@ describe("deriveJobsForEvent", () => {
       },
     });
 
-    expect(jobs).toHaveLength(2);
+    expect(jobs).toHaveLength(3);
     expect(jobs[0]?.type).toBe("knowledge.sync.document");
-    expect(jobs[1]?.type).toBe("knowledge.sync.event");
+    expect(jobs[1]?.type).toBe("context-graph.sync");
+    expect(jobs[2]?.type).toBe("knowledge.sync.event");
   });
 
   it("indexes proposals when they are opened", () => {
@@ -113,6 +119,7 @@ describe("deriveJobsForEvent", () => {
 
     expect(jobs.map((job) => job.type)).toEqual([
       "knowledge.sync.proposal",
+      "context-graph.sync",
       "knowledge.sync.event",
     ]);
     expect(jobs[0]).toMatchObject({

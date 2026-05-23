@@ -525,6 +525,11 @@ model Workspace {
   buildArtifacts                BuildArtifact[]
   newspaperDeliveries           NewspaperDelivery[]
   newspaperTrackedLinks         NewspaperTrackedLink[]
+  contextGraphObjects           ContextGraphObject[]
+  contextGraphRelationships     ContextGraphRelationship[]
+  contextGraphEvidenceRefs      ContextGraphEvidenceRef[]
+  contextMapViews               ContextMapView[]
+  contextGraphProposedDiffs     ContextGraphProposedDiff[]
   managedCustomerDeployment     CustomerDeployment?
 }
 
@@ -2035,6 +2040,154 @@ model KnowledgeChunk {
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 
   @@index([workspaceId, sourceType, sourceId])
+}
+
+model ContextGraphObject {
+  id                    String   @id @default(uuid())
+  workspaceId           String
+  objectType            String
+  title                 String
+  summary               String?  @db.Text
+  properties            Json     @default("{}")
+  confidence            Float?
+  status                String   @default("draft")
+  createdByType         String   @default("human")
+  createdByUserId       String?
+  createdByAgentRunId   String?
+  sourceEntityType      String?
+  sourceEntityId        String?
+  dedupeKey             String?  @unique
+  validFrom             DateTime?
+  validTo               DateTime?
+  recordedAt            DateTime @default(now())
+  lastVerifiedAt        DateTime?
+  supersededByObjectId  String?
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  workspace             Workspace                  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  outgoingRelationships ContextGraphRelationship[] @relation("ContextGraphRelationshipSource")
+  incomingRelationships ContextGraphRelationship[] @relation("ContextGraphRelationshipTarget")
+  evidenceRefs          ContextGraphEvidenceRef[]
+  layoutItems           ContextMapLayoutItem[]
+
+  @@index([workspaceId, objectType, status])
+  @@index([workspaceId, sourceEntityType, sourceEntityId])
+  @@index([workspaceId, validFrom, validTo])
+}
+
+model ContextGraphRelationship {
+  id                         String   @id @default(uuid())
+  workspaceId                String
+  sourceObjectId             String
+  targetObjectId             String
+  relationshipType           String
+  properties                 Json     @default("{}")
+  confidence                 Float?
+  status                     String   @default("draft")
+  createdByType              String   @default("human")
+  createdByUserId            String?
+  createdByAgentRunId        String?
+  sourceEntityType           String?
+  sourceEntityId             String?
+  dedupeKey                  String?  @unique
+  validFrom                  DateTime?
+  validTo                    DateTime?
+  recordedAt                 DateTime @default(now())
+  lastVerifiedAt             DateTime?
+  supersededByRelationshipId String?
+  createdAt                  DateTime @default(now())
+  updatedAt                  DateTime @updatedAt
+
+  workspace                  Workspace                 @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  sourceObject               ContextGraphObject        @relation("ContextGraphRelationshipSource", fields: [sourceObjectId], references: [id], onDelete: Cascade)
+  targetObject               ContextGraphObject        @relation("ContextGraphRelationshipTarget", fields: [targetObjectId], references: [id], onDelete: Cascade)
+  evidenceRefs               ContextGraphEvidenceRef[]
+
+  @@index([workspaceId, relationshipType, status])
+  @@index([workspaceId, sourceObjectId])
+  @@index([workspaceId, targetObjectId])
+  @@index([workspaceId, sourceEntityType, sourceEntityId])
+  @@index([workspaceId, validFrom, validTo])
+}
+
+model ContextGraphEvidenceRef {
+  id             String   @id @default(uuid())
+  workspaceId    String
+  objectId       String?
+  relationshipId String?
+  sourceType     String
+  sourceId       String
+  knowledgeChunkId String?
+  quote          String?  @db.Text
+  relevanceScore Float?
+  metadata       Json     @default("{}")
+  createdAt      DateTime @default(now())
+
+  workspace      Workspace                 @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  object         ContextGraphObject?       @relation(fields: [objectId], references: [id], onDelete: Cascade)
+  relationship   ContextGraphRelationship? @relation(fields: [relationshipId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, sourceType, sourceId])
+  @@index([workspaceId, objectId])
+  @@index([workspaceId, relationshipId])
+  @@index([workspaceId, knowledgeChunkId])
+}
+
+model ContextMapView {
+  id              String   @id @default(uuid())
+  workspaceId     String
+  name            String
+  viewType        String
+  query           Json     @default("{}")
+  layoutVersion   Int      @default(1)
+  createdByUserId String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  workspace       Workspace              @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  layoutItems     ContextMapLayoutItem[]
+
+  @@index([workspaceId, viewType])
+}
+
+model ContextMapLayoutItem {
+  id          String   @id @default(uuid())
+  mapViewId   String
+  objectId    String
+  x           Float
+  y           Float
+  width       Float?
+  height      Float?
+  visualState Json     @default("{}")
+  updatedAt   DateTime @updatedAt
+
+  mapView     ContextMapView    @relation(fields: [mapViewId], references: [id], onDelete: Cascade)
+  object      ContextGraphObject @relation(fields: [objectId], references: [id], onDelete: Cascade)
+
+  @@unique([mapViewId, objectId])
+}
+
+model ContextGraphProposedDiff {
+  id                    String   @id @default(uuid())
+  workspaceId           String
+  proposedByType        String
+  proposedByUserId      String?
+  proposedByAgentRunId  String?
+  diffJson              Json
+  reason                String?  @db.Text
+  evidenceJson          Json?
+  status                String   @default("pending")
+  reviewedByUserId      String?
+  reviewedAt            DateTime?
+  appliedAt             DateTime?
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  workspace             Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, status, createdAt])
+  @@index([workspaceId, proposedByType])
 }
 
 model ModelUsage {

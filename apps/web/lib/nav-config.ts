@@ -17,6 +17,7 @@ export type WorkspaceNavFeatureFlag =
   | "FINANCE"
   | "BUILD_ARTIFACTS"
   | "RELATIONSHIPS"
+  | "CONTEXT_MAPS"
   | "CYCLES"
   | "AGENT_GOVERNANCE"
   | "OS_METRICS";
@@ -37,6 +38,7 @@ export type WorkspaceNavIconName =
   | "actions"
   | "meetings"
   | "relationships"
+  | "contextMaps"
   | "proposals"
   | "circles"
   | "cycles"
@@ -65,6 +67,7 @@ export const WORKSPACE_NAV_GROUPS: NavGroup[] = [
       { href: "/actions", labelKey: "actions", icon: "actions" },
       { href: "/meetings", labelKey: "meetings", icon: "meetings" },
       { href: "/leads", labelKey: "relationships", icon: "relationships", featureFlag: "RELATIONSHIPS" },
+      { href: "/maps", labelKey: "contextMaps", icon: "contextMaps", featureFlag: "CONTEXT_MAPS" },
     ],
   },
   {

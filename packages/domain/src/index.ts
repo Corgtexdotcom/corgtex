@@ -61,6 +61,7 @@ export * from "./check-ins";
 export * from "./artifact-permissions";
 export * from "./objection-validation";
 export * from "./conversation-brain";
+export * from "./context-graph";
 export * from "./sso";
 export * from "./cost-budget";
 export * from "./procurement-trials";

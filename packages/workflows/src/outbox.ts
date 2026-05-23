@@ -2,7 +2,7 @@ import type { EventStatus, NewspaperCadence, Prisma, WorkflowJobStatus } from "@
 import { logger, prisma } from "@corgtex/shared";
 import { deriveJobsForEvent } from "./derive-jobs";
 import { deriveNotificationsForEvent } from "./derive-notifications";
-import { handleKnowledgeSync, handleMeetingKnowledgeSync, handleDocumentKnowledgeSync, handleEventKnowledgeSync, handleTensionKnowledgeSync, handleActionKnowledgeSync, handleCircleKnowledgeSync, handleRoleKnowledgeSync, handleSlackMessageKnowledgeSync, handleCalendarSync } from "./handlers";
+import { handleKnowledgeSync, handleMeetingKnowledgeSync, handleDocumentKnowledgeSync, handleEventKnowledgeSync, handleTensionKnowledgeSync, handleActionKnowledgeSync, handleCircleKnowledgeSync, handleRoleKnowledgeSync, handleSlackMessageKnowledgeSync, handleCalendarSync, handleContextGraphSync } from "./handlers";
 import { handleGovernanceScoring } from "./handlers";
 import { runAgentWorkflowJob } from "./handlers";
 import { syncBrainArticleKnowledge } from "@corgtex/knowledge";
@@ -418,6 +418,11 @@ async function handleJob(job: ClaimedJob) {
 
   if (job.type === "knowledge.sync.slack-message") {
     await handleSlackMessageKnowledgeSync(job.id, payload as { messageId?: string }, job.workspaceId);
+    return;
+  }
+
+  if (job.type === "context-graph.sync") {
+    await handleContextGraphSync(job.id, payload as { sourceType?: string; sourceId?: string }, job.workspaceId);
     return;
   }
 

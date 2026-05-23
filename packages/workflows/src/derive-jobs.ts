@@ -75,6 +75,22 @@ export function deriveJobsForEvent(event: {
     dependsOnDedupeKey?: string;
   }> = [];
 
+  const pushContextGraphSync = (
+    sourceType: string,
+    sourceId: string | undefined,
+    dependsOnDedupeKey?: string,
+  ) => {
+    if (!sourceId || !event.workspaceId) return;
+    jobs.push({
+      workspaceId: event.workspaceId,
+      eventId: event.id,
+      type: "context-graph.sync",
+      payload: { sourceType, sourceId },
+      dedupeKey: `${event.id}:context-graph-sync:${sourceType}:${sourceId}`,
+      dependsOnDedupeKey,
+    });
+  };
+
   if (event.type === "proposal.approved") {
     const payload = event.payload as { subjectId?: string };
     if (payload.subjectId && event.workspaceId) {
@@ -87,6 +103,7 @@ export function deriveJobsForEvent(event: {
         },
         dedupeKey: `${event.id}:knowledge-sync`,
       });
+      pushContextGraphSync("PROPOSAL", payload.subjectId, `${event.id}:knowledge-sync`);
       jobs.push({
         workspaceId: event.workspaceId,
         eventId: event.id,
@@ -126,6 +143,7 @@ export function deriveJobsForEvent(event: {
         },
         dedupeKey: `${event.id}:knowledge-sync`,
       });
+      pushContextGraphSync("PROPOSAL", proposalId, `${event.id}:knowledge-sync`);
     }
   }
 
@@ -183,6 +201,7 @@ export function deriveJobsForEvent(event: {
         },
         dedupeKey: `${event.id}:meeting-knowledge-sync`,
       });
+      pushContextGraphSync("MEETING", payload.meetingId, `${event.id}:meeting-knowledge-sync`);
     }
     if (payload.meetingId && event.workspaceId && shouldRunMeetingAgents) {
       jobs.push({
@@ -234,6 +253,7 @@ export function deriveJobsForEvent(event: {
         dependsOnDedupeKey: `${event.id}:meeting-summary-post`,
         dedupeKey: `${event.id}:meeting-knowledge-sync`,
       });
+      pushContextGraphSync("MEETING", payload.meetingId, `${event.id}:meeting-insights-extract`);
     }
   }
 
@@ -260,6 +280,7 @@ export function deriveJobsForEvent(event: {
         payload: { articleId: payload.articleId },
         dedupeKey: `${event.id}:brain-article-knowledge-sync`,
       });
+      pushContextGraphSync("BRAIN_ARTICLE", payload.articleId, `${event.id}:brain-article-knowledge-sync`);
     }
   }
 
@@ -275,6 +296,7 @@ export function deriveJobsForEvent(event: {
         },
         dedupeKey: `${event.id}:document-knowledge-sync`,
       });
+      pushContextGraphSync("DOCUMENT", payload.documentId, `${event.id}:document-knowledge-sync`);
     }
   }
 
@@ -303,6 +325,7 @@ export function deriveJobsForEvent(event: {
         payload: { tensionId: payload.tensionId },
         dedupeKey: `${event.id}:tension-knowledge-sync`,
       });
+      pushContextGraphSync("TENSION", payload.tensionId, `${event.id}:tension-knowledge-sync`);
     }
   }
 
@@ -316,6 +339,7 @@ export function deriveJobsForEvent(event: {
         payload: { actionId: payload.actionId },
         dedupeKey: `${event.id}:action-knowledge-sync`,
       });
+      pushContextGraphSync("ACTION", payload.actionId, `${event.id}:action-knowledge-sync`);
     }
   }
 
@@ -329,6 +353,7 @@ export function deriveJobsForEvent(event: {
         payload: { circleId: payload.circleId },
         dedupeKey: `${event.id}:circle-knowledge-sync`,
       });
+      pushContextGraphSync("CIRCLE", payload.circleId, `${event.id}:circle-knowledge-sync`);
     }
   }
 
@@ -342,6 +367,7 @@ export function deriveJobsForEvent(event: {
         payload: { roleId: payload.roleId },
         dedupeKey: `${event.id}:role-knowledge-sync`,
       });
+      pushContextGraphSync("ROLE", payload.roleId, `${event.id}:role-knowledge-sync`);
     }
   }
 
