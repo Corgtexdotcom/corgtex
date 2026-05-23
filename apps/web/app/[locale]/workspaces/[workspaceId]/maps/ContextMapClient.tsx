@@ -122,6 +122,10 @@ function confidenceLabel(value: number | null) {
   return `${Math.round(value * 100)}% confidence`;
 }
 
+function stableDateLabel(value: string) {
+  return new Date(value).toISOString().slice(0, 10);
+}
+
 function objectMeta(object: ContextGraphObject) {
   return [object.objectType, object.status, confidenceLabel(object.confidence)].join(" · ");
 }
@@ -311,7 +315,7 @@ export default function ContextMapClient({ workspaceId, data }: { workspaceId: s
                 {selectedObject.summary && <p style={{ margin: 0, color: "#334155", lineHeight: 1.45 }}>{selectedObject.summary.slice(0, 420)}</p>}
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
                   {selectedObject.sourceEntityType && <span className="tag neutral">{selectedObject.sourceEntityType}</span>}
-                  {selectedObject.lastVerifiedAt && <span className="tag neutral">verified {new Date(selectedObject.lastVerifiedAt).toLocaleDateString()}</span>}
+                  {selectedObject.lastVerifiedAt && <span className="tag neutral">verified {stableDateLabel(selectedObject.lastVerifiedAt)}</span>}
                 </div>
               </div>
             ) : (
@@ -383,7 +387,7 @@ export default function ContextMapClient({ workspaceId, data }: { workspaceId: s
               <div style={{ display: "grid", gap: 10 }}>
                 {data.proposedDiffs.map((diff) => (
                   <div key={diff.id} style={{ borderTop: "1px solid var(--border)", paddingTop: 10 }}>
-                    <div className="nr-item-meta">{diff.status} · {new Date(diff.createdAt).toLocaleDateString()}</div>
+                    <div className="nr-item-meta">{diff.status} · {stableDateLabel(diff.createdAt)}</div>
                     <p style={{ margin: "4px 0 8px", color: "#334155" }}>{diff.reason ?? "Proposed graph change"}</p>
                     <button className="secondary small" type="button" onClick={() => applyDiff(diff.id)} disabled={isPending}>
                       <Check size={14} aria-hidden="true" /> Approve and apply
