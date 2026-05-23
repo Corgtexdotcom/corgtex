@@ -331,7 +331,7 @@ export async function upsertContextGraphObject(actor: AppActor, params: ContextG
   workspaceId: string;
   agentRunId?: string | null;
 }) {
-  await requireGraphPropose(actor, params.workspaceId);
+  await requireGraphApprove(actor, params.workspaceId);
   return prisma.$transaction(async (tx) => {
     const object = await upsertObjectWithTx(tx, actor, params.workspaceId, params, params.agentRunId);
     await recordAudit(tx, actor, {
@@ -349,7 +349,7 @@ export async function upsertContextGraphRelationship(actor: AppActor, params: Co
   workspaceId: string;
   agentRunId?: string | null;
 }) {
-  await requireGraphPropose(actor, params.workspaceId);
+  await requireGraphApprove(actor, params.workspaceId);
   return prisma.$transaction(async (tx) => {
     const relationship = await upsertRelationshipWithTx(tx, actor, params.workspaceId, params, new Map(), params.agentRunId);
     await recordAudit(tx, actor, {
@@ -366,7 +366,7 @@ export async function upsertContextGraphRelationship(actor: AppActor, params: Co
 export async function attachContextGraphEvidence(actor: AppActor, params: ContextGraphEvidenceInput & {
   workspaceId: string;
 }) {
-  await requireGraphPropose(actor, params.workspaceId);
+  await requireGraphApprove(actor, params.workspaceId);
   return prisma.$transaction(async (tx) => attachEvidenceWithTx(tx, params.workspaceId, params, new Map(), new Map()));
 }
 

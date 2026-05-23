@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   applyContextGraphProposedDiff,
   buildSelectedRegionContext,
+  createContextGraphProposedDiff,
   upsertContextGraphObject,
 } from "./context-graph";
 import { prisma } from "@corgtex/shared";
@@ -90,6 +91,36 @@ describe("context graph domain", () => {
 
     expect(prisma.contextGraphObject.upsert).not.toHaveBeenCalled();
     expect(prisma.contextGraphObject.create).not.toHaveBeenCalled();
+  });
+
+  it("lets propose-scoped agent credentials create diffs but not mutate graph truth directly", async () => {
+    const proposeOnlyAgent = {
+      kind: "agent",
+      authProvider: "credential",
+      label: "research-agent",
+      workspaceIds: ["ws-1"],
+      scopes: ["context-graph:read", "context-graph:propose"],
+    } as any;
+
+    prismaMock.contextGraphProposedDiff.create.mockResolvedValue({
+      id: "diff-agent-1",
+      status: "pending",
+      reason: "Agent proposal",
+    });
+
+    await expect(createContextGraphProposedDiff(proposeOnlyAgent, {
+      workspaceId: "ws-1",
+      reason: "Agent proposal",
+      diff: {
+        objects: [{ ref: "question", objectType: "Question", title: "Who owns onboarding?" }],
+      },
+    })).resolves.toMatchObject({ id: "diff-agent-1", status: "pending" });
+
+    await expect(upsertContextGraphObject(proposeOnlyAgent, {
+      workspaceId: "ws-1",
+      objectType: "Question",
+      title: "Direct write should fail",
+    })).rejects.toMatchObject({ code: "FORBIDDEN" });
   });
 
   it("applies a proposed diff transactionally and records audit/event proof", async () => {
