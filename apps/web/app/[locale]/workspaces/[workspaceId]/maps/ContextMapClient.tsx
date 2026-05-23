@@ -138,6 +138,7 @@ export default function ContextMapClient({ workspaceId, data }: { workspaceId: s
   const [selectedObjectIds, setSelectedObjectIds] = useState<string[]>([]);
   const [selectedObjectId, setSelectedObjectId] = useState<string | null>(data.objects[0]?.id ?? null);
   const [regionContext, setRegionContext] = useState<RegionContext | null>(null);
+  const [regionContextStatus, setRegionContextStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const [message, setMessage] = useState<string | null>(null);
   const [isCompactLayout, setIsCompactLayout] = useState(false);
   const [isPending, startTransition] = useTransition();
@@ -195,20 +196,59 @@ export default function ContextMapClient({ workspaceId, data }: { workspaceId: s
   }, [initialNodes, initialEdges, setEdges, setNodes]);
 
   const selectedObject = selectedObjectId ? objectById.get(selectedObjectId) ?? null : null;
+  const selectedRegionIds = useMemo(() => (
+    selectedObjectIds.length > 0 ? selectedObjectIds : selectedObjectId ? [selectedObjectId] : []
+  ), [selectedObjectId, selectedObjectIds]);
+  const selectedRegionKey = selectedRegionIds.join("|");
   const selectedRelationships = selectedObject
     ? data.relationships.filter((relationship) => relationship.sourceObjectId === selectedObject.id || relationship.targetObjectId === selectedObject.id)
     : [];
+
+  useEffect(() => {
+    if (selectedRegionIds.length === 0) {
+      setRegionContext(null);
+      setRegionContextStatus("idle");
+      return;
+    }
+
+    let cancelled = false;
+    setRegionContextStatus("loading");
+    buildSelectedRegionContextAction({
+      workspaceId,
+      mapViewId: data.mapView.id,
+      objectIds: selectedRegionIds,
+    }).then((context) => {
+      if (cancelled) return;
+      setRegionContext(context);
+      setRegionContextStatus("ready");
+    }).catch(() => {
+      if (cancelled) return;
+      setRegionContext(null);
+      setRegionContextStatus("error");
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [data.mapView.id, selectedRegionKey, selectedRegionIds, workspaceId]);
 
   function loadRegionContext(ids: string[]) {
     if (ids.length === 0) return;
     startTransition(async () => {
       setMessage(null);
-      const context = await buildSelectedRegionContextAction({
-        workspaceId,
-        mapViewId: data.mapView.id,
-        objectIds: ids,
-      });
-      setRegionContext(context);
+      setRegionContextStatus("loading");
+      try {
+        const context = await buildSelectedRegionContextAction({
+          workspaceId,
+          mapViewId: data.mapView.id,
+          objectIds: ids,
+        });
+        setRegionContext(context);
+        setRegionContextStatus("ready");
+      } catch {
+        setRegionContext(null);
+        setRegionContextStatus("error");
+      }
     });
   }
 
@@ -248,10 +288,10 @@ export default function ContextMapClient({ workspaceId, data }: { workspaceId: s
               <button
                 className="secondary small"
                 type="button"
-                onClick={() => loadRegionContext(selectedObjectIds.length > 0 ? selectedObjectIds : selectedObjectId ? [selectedObjectId] : [])}
-                disabled={isPending}
+                onClick={() => loadRegionContext(selectedRegionIds)}
+                disabled={isPending || regionContextStatus === "loading"}
               >
-                <FileSearch size={14} aria-hidden="true" /> Context
+                <FileSearch size={14} aria-hidden="true" /> {regionContextStatus === "loading" ? "Loading" : "Context"}
               </button>
               <button className="secondary small" type="button" onClick={createProposal} disabled={isPending}>
                 <GitBranch size={14} aria-hidden="true" /> Propose
@@ -276,7 +316,6 @@ export default function ContextMapClient({ workspaceId, data }: { workspaceId: s
                 onNodeClick={(_, node) => {
                   setSelectedObjectId(node.id);
                   setSelectedObjectIds((current) => sameIds(current, [node.id]) ? current : [node.id]);
-                  setRegionContext(null);
                 }}
                 onSelectionChange={({ nodes: selectedNodes }) => {
                   const ids = selectedNodes.map((node) => node.id);
@@ -368,7 +407,11 @@ export default function ContextMapClient({ workspaceId, data }: { workspaceId: s
 
           <div>
             <h2 style={{ fontSize: 16, margin: "0 0 10px" }}>Region Context</h2>
-            {regionContext ? (
+            {regionContextStatus === "loading" ? (
+              <p className="muted" style={{ margin: 0 }} aria-live="polite">Loading selected-region context...</p>
+            ) : regionContextStatus === "error" ? (
+              <p className="form-message form-message-error" role="alert" style={{ margin: 0 }}>Could not build context for this selection. Try refreshing the context.</p>
+            ) : regionContext ? (
               <div style={{ display: "grid", gap: 8 }}>
                 <span className="tag neutral">{regionContext.objects.length} objects</span>
                 <span className="tag neutral">{regionContext.relationships.length} relationships</span>
