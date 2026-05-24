@@ -649,7 +649,7 @@ export default function ContextMapClient({ workspaceId, data, includeStale = fal
     const updateLayout = () => {
       const compact = window.innerWidth < 920;
       setIsCompactLayout(compact);
-      if (compact) setInspectorDock("bottom");
+      setInspectorDock(compact ? "bottom" : storedInspectorDock());
     };
     updateLayout();
     window.addEventListener("resize", updateLayout);
