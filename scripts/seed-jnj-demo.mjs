@@ -718,7 +718,7 @@ async function seedShowcaseData({ wsId, memberMappings }) {
   console.log(`✅ ${SHOWCASE_AUDIT_EVENTS.length} Audit events refreshed`);
 }
 
-async function seedContextMapData({ wsId, circleMappings, meetingMappings }) {
+async function seedContextMapData({ wsId, circleMappings, memberMappings, meetingMappings }) {
   await prisma.workspaceFeatureFlag.upsert({
     where: {
       workspaceId_flag: {
@@ -739,7 +739,7 @@ async function seedContextMapData({ wsId, circleMappings, meetingMappings }) {
   const medtechCircleId = circleMappings["medtech"];
   const boardCircleId = circleMappings["board"];
 
-  const objectSpecs = [
+  const processObjectSpecs = [
     {
       id: `${wsId}-ctx-process-ai-governance`,
       objectType: "Process",
@@ -906,6 +906,99 @@ async function seedContextMapData({ wsId, circleMappings, meetingMappings }) {
     },
   ];
 
+  const orgCircleId = (circleId) => `${wsId}-ctx-org-circle-${circleId}`;
+  const orgRoleId = (role) => `${wsId}-ctx-org-role-${role.circle}-${slugify(role.name)}`;
+  const orgPersonId = (memberKey) => `${wsId}-ctx-org-person-${memberKey}`;
+  const segmentCircleIds = CIRCLES.filter((circle) => circle.id !== "board").map((circle) => circle.id);
+  const roleCountByCircle = new Map();
+  const personLayoutByMemberKey = new Map();
+  const memberByKey = new Map(TEAM_MEMBERS.map((member) => [member.email.split("@")[0], member]));
+
+  function circlePosition(circleId) {
+    if (circleId === "board") return { x: 560, y: 0 };
+    return { x: segmentCircleIds.indexOf(circleId) * 340, y: 510 };
+  }
+
+  function rolePosition(circleId, index) {
+    if (circleId === "board") return { x: index * 280, y: 170 };
+    return { x: segmentCircleIds.indexOf(circleId) * 340, y: 680 + index * 132 };
+  }
+
+  const orgCircleSpecs = CIRCLES.map((circle) => ({
+    id: orgCircleId(circle.id),
+    objectType: "Team",
+    title: circle.name,
+    summary: circle.purpose,
+    properties: {
+      orgView: true,
+      orgKind: "Circle",
+      pathStage: circle.id === "board" ? "Enterprise circle" : "Operating circle",
+      sourceSystem: "workspace.circle",
+    },
+    sourceEntityType: "Circle",
+    sourceEntityId: circleMappings[circle.id],
+    ...circlePosition(circle.id),
+  }));
+
+  const orgRoleSpecs = ROLES.map((role) => {
+    const index = roleCountByCircle.get(role.circle) ?? 0;
+    roleCountByCircle.set(role.circle, index + 1);
+    const position = rolePosition(role.circle, index);
+    if (role.assignee && !personLayoutByMemberKey.has(role.assignee)) {
+      const personIndex = personLayoutByMemberKey.size;
+      personLayoutByMemberKey.set(role.assignee, {
+        x: (personIndex % 5) * 340,
+        y: 1400 + Math.floor(personIndex / 5) * 132,
+        roleTitles: [],
+      });
+    }
+    if (role.assignee) {
+      personLayoutByMemberKey.get(role.assignee)?.roleTitles.push(role.name);
+    }
+    return {
+      id: orgRoleId(role),
+      objectType: "Role",
+      title: role.name,
+      summary: role.purpose,
+      properties: {
+        orgView: true,
+        orgKind: "Role",
+        pathStage: "Accountability",
+        staffingState: role.assignee ? "assigned" : "open",
+        accountabilities: role.accountabilities,
+        ...(role.assignee ? {} : { nextAction: `Assign a member to own ${role.name}.` }),
+      },
+      sourceEntityType: "Role",
+      sourceEntityId: `${circleMappings[role.circle]}-role-${slugify(role.name)}`,
+      ...position,
+    };
+  });
+
+  const orgPersonSpecs = [...personLayoutByMemberKey.entries()].map(([memberKey, layout]) => {
+    const member = memberByKey.get(memberKey);
+    return {
+      id: orgPersonId(memberKey),
+      objectType: "Person",
+      title: member?.name ?? memberKey,
+      summary: member?.title ?? "Workspace member",
+      properties: {
+        orgView: true,
+        orgKind: "Person",
+        pathStage: "Member",
+        staffingState: "assigned",
+        assignedRoles: layout.roleTitles,
+      },
+      sourceEntityType: "Member",
+      sourceEntityId: memberMappings[memberKey]?.memberId ?? memberKey,
+      x: layout.x,
+      y: layout.y,
+    };
+  });
+
+  const orgObjectSpecs = [...orgCircleSpecs, ...orgRoleSpecs, ...orgPersonSpecs];
+  const processObjectIds = processObjectSpecs.map((object) => object.id);
+  const orgObjectIds = orgObjectSpecs.map((object) => object.id);
+  const objectSpecs = [...processObjectSpecs, ...orgObjectSpecs];
   const objectIds = objectSpecs.map((object) => object.id);
   await prisma.contextGraphObject.deleteMany({
     where: {
@@ -948,7 +1041,7 @@ async function seedContextMapData({ wsId, circleMappings, meetingMappings }) {
     });
   }
 
-  const mapView = await prisma.contextMapView.upsert({
+  const processMapView = await prisma.contextMapView.upsert({
     where: { id: `${wsId}-ctx-map-process` },
     update: {
       name: "AI governance critical path",
@@ -956,7 +1049,7 @@ async function seedContextMapData({ wsId, circleMappings, meetingMappings }) {
       query: {
         demo: true,
         mode: "criticalPath",
-        objectIds,
+        objectIds: processObjectIds,
         objectTypes: ["Process", "ProcessStep", "Decision", "Task", "Risk", "Team", "Tool", "Meeting"],
         relationshipTypes: ["part_of", "depends_on", "blocks", "owns", "assigned_to", "supports", "uses", "created_in", "decided_in", "needs_approval_from"],
       },
@@ -969,24 +1062,24 @@ async function seedContextMapData({ wsId, circleMappings, meetingMappings }) {
       query: {
         demo: true,
         mode: "criticalPath",
-        objectIds,
+        objectIds: processObjectIds,
         objectTypes: ["Process", "ProcessStep", "Decision", "Task", "Risk", "Team", "Tool", "Meeting"],
         relationshipTypes: ["part_of", "depends_on", "blocks", "owns", "assigned_to", "supports", "uses", "created_in", "decided_in", "needs_approval_from"],
       },
     },
   });
 
-  for (const object of objectSpecs) {
+  for (const object of processObjectSpecs) {
     await prisma.contextMapLayoutItem.upsert({
       where: {
         mapViewId_objectId: {
-          mapViewId: mapView.id,
+          mapViewId: processMapView.id,
           objectId: object.id,
         },
       },
       update: { x: object.x, y: object.y, width: 230, height: 110 },
       create: {
-        mapViewId: mapView.id,
+        mapViewId: processMapView.id,
         objectId: object.id,
         x: object.x,
         y: object.y,
@@ -996,7 +1089,55 @@ async function seedContextMapData({ wsId, circleMappings, meetingMappings }) {
     });
   }
 
-  const relationships = [
+  const orgMapView = await prisma.contextMapView.upsert({
+    where: { id: `${wsId}-ctx-map-org` },
+    update: {
+      name: "J&J organization map",
+      viewType: "org",
+      query: {
+        demo: true,
+        mode: "organization",
+        objectIds: orgObjectIds,
+        objectTypes: ["Team", "Role", "Person"],
+        relationshipTypes: ["part_of", "member_of", "reports_to", "owns"],
+      },
+    },
+    create: {
+      id: `${wsId}-ctx-map-org`,
+      workspaceId: wsId,
+      name: "J&J organization map",
+      viewType: "org",
+      query: {
+        demo: true,
+        mode: "organization",
+        objectIds: orgObjectIds,
+        objectTypes: ["Team", "Role", "Person"],
+        relationshipTypes: ["part_of", "member_of", "reports_to", "owns"],
+      },
+    },
+  });
+
+  for (const object of orgObjectSpecs) {
+    await prisma.contextMapLayoutItem.upsert({
+      where: {
+        mapViewId_objectId: {
+          mapViewId: orgMapView.id,
+          objectId: object.id,
+        },
+      },
+      update: { x: object.x, y: object.y, width: 230, height: 110 },
+      create: {
+        mapViewId: orgMapView.id,
+        objectId: object.id,
+        x: object.x,
+        y: object.y,
+        width: 230,
+        height: 110,
+      },
+    });
+  }
+
+  const processRelationships = [
     { sourceObjectId: `${wsId}-ctx-step-working-group`, targetObjectId: `${wsId}-ctx-process-ai-governance`, relationshipType: "part_of", status: "approved", confidence: 0.9 },
     { sourceObjectId: `${wsId}-ctx-step-review-request`, targetObjectId: `${wsId}-ctx-process-ai-governance`, relationshipType: "part_of", status: "approved", confidence: 0.86 },
     { sourceObjectId: `${wsId}-ctx-meeting-ai-kickoff`, targetObjectId: `${wsId}-ctx-step-working-group`, relationshipType: "supports", status: "approved", confidence: 0.88 },
@@ -1012,6 +1153,85 @@ async function seedContextMapData({ wsId, circleMappings, meetingMappings }) {
     { sourceObjectId: `${wsId}-ctx-team-rd`, targetObjectId: `${wsId}-ctx-team-executive`, relationshipType: "part_of", status: "approved", confidence: 0.95 },
     { sourceObjectId: `${wsId}-ctx-team-medtech`, targetObjectId: `${wsId}-ctx-team-executive`, relationshipType: "part_of", status: "approved", confidence: 0.95 },
   ];
+
+  const ceoRole = ROLES.find((role) => role.circle === "board" && role.name === "Chairman & CEO");
+  const leadRoleByCircle = new Map(
+    CIRCLES.map((circle) => {
+      const lead = ROLES.find((role) => role.circle === circle.id && (
+        role.name === "Worldwide Chairman"
+        || role.name === "EVP Research & Development"
+        || role.name === "Head of Internal Audit"
+        || role.name === "Head of Health Equity"
+        || role.name === "Chairman & CEO"
+      ));
+      return [circle.id, lead];
+    }),
+  );
+  const orgRelationships = [
+    ...CIRCLES
+      .filter((circle) => circle.id !== "board")
+      .map((circle) => ({
+        sourceObjectId: orgCircleId(circle.id),
+        targetObjectId: orgCircleId("board"),
+        relationshipType: "part_of",
+        status: "approved",
+        confidence: 0.94,
+        properties: { orgView: true, relationScope: "circle" },
+      })),
+    ...ROLES.flatMap((role) => {
+      const relationshipsForRole = [{
+        sourceObjectId: orgRoleId(role),
+        targetObjectId: orgCircleId(role.circle),
+        relationshipType: "part_of",
+        status: "approved",
+        confidence: 0.92,
+        properties: { orgView: true, relationScope: "role" },
+      }];
+      if (role.assignee) {
+        relationshipsForRole.push({
+          sourceObjectId: orgPersonId(role.assignee),
+          targetObjectId: orgRoleId(role),
+          relationshipType: "member_of",
+          status: "approved",
+          confidence: 0.9,
+          properties: { orgView: true, relationScope: "assignment" },
+        });
+      }
+      const leadRole = leadRoleByCircle.get(role.circle);
+      if (leadRole && leadRole !== role) {
+        relationshipsForRole.push({
+          sourceObjectId: orgRoleId(role),
+          targetObjectId: orgRoleId(leadRole),
+          relationshipType: "reports_to",
+          status: "approved",
+          confidence: 0.78,
+          properties: { orgView: true, relationScope: "reporting" },
+        });
+      } else if (role.circle !== "board" && ceoRole) {
+        relationshipsForRole.push({
+          sourceObjectId: orgRoleId(role),
+          targetObjectId: orgRoleId(ceoRole),
+          relationshipType: "reports_to",
+          status: "approved",
+          confidence: 0.72,
+          properties: { orgView: true, relationScope: "executive-reporting" },
+        });
+      }
+      if (role.name === "Worldwide Chairman" || role.name === "EVP Research & Development" || role.name === "Chairman & CEO") {
+        relationshipsForRole.push({
+          sourceObjectId: orgRoleId(role),
+          targetObjectId: orgCircleId(role.circle),
+          relationshipType: "owns",
+          status: "approved",
+          confidence: 0.84,
+          properties: { orgView: true, relationScope: "accountability" },
+        });
+      }
+      return relationshipsForRole;
+    }),
+  ];
+
+  const relationships = [...processRelationships, ...orgRelationships];
 
   await prisma.contextGraphRelationship.deleteMany({
     where: {
@@ -1035,14 +1255,14 @@ async function seedContextMapData({ wsId, circleMappings, meetingMappings }) {
         relationshipType: relationship.relationshipType,
         status: relationship.status,
         confidence: relationship.confidence,
-        properties: { criticalPath: true },
+        properties: relationship.properties ?? { criticalPath: true },
         createdByType: "integration",
         dedupeKey,
       },
     });
   }
 
-  const evidenceSpecs = [
+  const processEvidenceSpecs = [
     {
       objectId: `${wsId}-ctx-process-ai-governance`,
       quote: "The working group needs a repeatable path from source records to governed AI actions.",
@@ -1075,23 +1295,64 @@ async function seedContextMapData({ wsId, circleMappings, meetingMappings }) {
     },
   ];
 
+  const circleEvidenceSourceById = {
+    board: "2024 Financial Overview & Strategy",
+    "innovative-medicine": "Innovative Medicine Segment",
+    medtech: "MedTech Segment",
+    rd: "Pipeline & Clinical Trials Overview",
+    finance: "Capital Allocation Framework",
+    esg: "Health for Humanity Sustainability Goals",
+  };
+  const orgEvidenceSpecs = [
+    ...CIRCLES.map((circle) => ({
+      objectId: orgCircleId(circle.id),
+      sourceType: "BRAIN_ARTICLE",
+      sourceId: slugify(circleEvidenceSourceById[circle.id] ?? "2024 Financial Overview & Strategy"),
+      quote: `${circle.name}: ${circle.purpose}.`,
+      relevanceScore: 0.82,
+    })),
+    ...ROLES.map((role) => ({
+      objectId: orgRoleId(role),
+      sourceType: "ROLE_RECORD",
+      sourceId: `${circleMappings[role.circle]}-role-${slugify(role.name)}`,
+      quote: role.accountabilities.length
+        ? `${role.name} accountability: ${role.accountabilities[0]}.`
+        : `${role.name} exists in ${CIRCLES.find((circle) => circle.id === role.circle)?.name ?? role.circle}, but no accountability detail is recorded yet.`,
+      relevanceScore: role.accountabilities.length ? 0.78 : 0.52,
+    })),
+    ...[...personLayoutByMemberKey.entries()].map(([memberKey, layout]) => {
+      const member = memberByKey.get(memberKey);
+      return {
+        objectId: orgPersonId(memberKey),
+        sourceType: "MEMBER_RECORD",
+        sourceId: memberMappings[memberKey]?.memberId ?? memberKey,
+        quote: `${member?.name ?? memberKey} is assigned to ${layout.roleTitles.slice(0, 3).join(", ")}.`,
+        relevanceScore: 0.76,
+      };
+    }),
+  ];
+
+  const evidenceSpecs = [...processEvidenceSpecs, ...orgEvidenceSpecs];
+
   for (const evidence of evidenceSpecs) {
+    const sourceType = evidence.sourceType ?? "MEETING";
+    const sourceId = evidence.sourceId ?? aiMeeting?.id ?? "innovation-ai-working-group";
     const existing = await prisma.contextGraphEvidenceRef.findFirst({
       where: {
         workspaceId: wsId,
         objectId: evidence.objectId,
-        sourceType: "MEETING",
-        sourceId: aiMeeting?.id ?? "innovation-ai-working-group",
+        sourceType,
+        sourceId,
       },
     });
     const data = {
       workspaceId: wsId,
       objectId: evidence.objectId,
-      sourceType: "MEETING",
-      sourceId: aiMeeting?.id ?? "innovation-ai-working-group",
+      sourceType,
+      sourceId,
       quote: evidence.quote,
       relevanceScore: evidence.relevanceScore,
-      metadata: { demo: true },
+      metadata: { demo: true, viewType: sourceType === "MEETING" ? "process" : "org" },
     };
     if (existing) {
       await prisma.contextGraphEvidenceRef.update({ where: { id: existing.id }, data });
@@ -1596,7 +1857,7 @@ async function main() {
 
   // 14. Safe showcase data for current customer-visible feature surfaces.
   await seedShowcaseData({ wsId, memberMappings });
-  await seedContextMapData({ wsId, circleMappings, meetingMappings });
+  await seedContextMapData({ wsId, circleMappings, memberMappings, meetingMappings });
 
   const counts = {
     articles: await prisma.brainArticle.count({ where: { workspaceId: wsId } }),
