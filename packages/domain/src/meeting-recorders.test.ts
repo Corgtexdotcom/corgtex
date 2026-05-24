@@ -388,6 +388,74 @@ describe("meeting recorder domain", () => {
     });
   });
 
+  it("rejects recorder transcript ingestion when the recording points across workspaces", async () => {
+    const { processMeetingRecorderWebhook } = await import("./meeting-recorders");
+    const payload = JSON.stringify({
+      id: "event-transcript-1",
+      event: "transcript.done",
+      data: {
+        bot: {
+          id: "bot-1",
+          metadata: {
+            workspaceId: "workspace-1",
+            meetingId: "meeting-1",
+            recordingId: "recording-1",
+          },
+        },
+        transcript: {
+          id: "transcript-1",
+          data: {
+            download_url: "https://signed.example.com/transcript.json",
+          },
+        },
+      },
+    });
+    const msgId = "msg_1";
+    const timestamp = "1770000000";
+    const signature = createHmac("sha256", Buffer.from("recall-secret"))
+      .update(`${msgId}.${timestamp}.${payload}`)
+      .digest("base64");
+    const recording = {
+      id: "recording-1",
+      workspaceId: "workspace-1",
+      meetingId: "meeting-1",
+      provider: "RECALL_AI",
+      externalBotId: "bot-1",
+      status: "SCHEDULED",
+      transcriptProcessedAt: null,
+      joinAt: new Date("2026-05-04T16:00:00.000Z"),
+      startedAt: new Date("2026-05-04T16:00:30.000Z"),
+      createdAt: new Date("2026-05-04T15:55:00.000Z"),
+    };
+    prismaMock.meetingRecorderProviderEvent.findUnique.mockResolvedValue(null);
+    prismaMock.meetingRecorderProviderEvent.upsert.mockResolvedValue({ id: "provider-event-1" });
+    prismaMock.meetingRecording.findUnique
+      .mockResolvedValueOnce(recording)
+      .mockResolvedValueOnce({
+        ...recording,
+        meeting: { workspaceId: "workspace-2" },
+      });
+    prismaMock.meetingRecording.update.mockResolvedValue({ ...recording, status: "COMPLETED" });
+    fetchMock.mockResolvedValue(new Response(JSON.stringify([
+      { speaker: "Dana", start: 0, text: "This transcript should not cross workspaces." },
+    ]), { status: 200 }));
+
+    await expect(processMeetingRecorderWebhook("RECALL_AI", {
+      rawBody: payload,
+      headers: {
+        "svix-id": msgId,
+        "svix-timestamp": timestamp,
+        "svix-signature": `v1,${signature}`,
+      },
+    })).rejects.toMatchObject({
+      status: 409,
+      code: "RECORDER_WORKSPACE_MISMATCH",
+    });
+
+    expect(prismaMock.meeting.update).not.toHaveBeenCalled();
+    expect(prismaMock.meetingRecorderSmokeRun.updateMany).not.toHaveBeenCalled();
+  });
+
   it("normalizes structured transcript segments into Corgtex transcript text", async () => {
     const { normalizeProviderTranscript } = await import("./meeting-recorders");
 
@@ -933,7 +1001,11 @@ describe("meeting recorder domain", () => {
     prismaMock.meetingRecording.findUnique
       .mockResolvedValueOnce(recording)
       .mockResolvedValueOnce(recording)
-      .mockResolvedValueOnce({ transcriptProcessedAt: null });
+      .mockResolvedValueOnce({
+        ...recording,
+        meeting: { workspaceId: "workspace-1" },
+        transcriptProcessedAt: null,
+      });
     fetchMock.mockImplementation(async (url: string | URL) => {
       const value = String(url);
       if (value.endsWith("/api/v1/bot/recall-bot-1/")) {
@@ -1070,7 +1142,11 @@ describe("meeting recorder domain", () => {
     prismaMock.meetingRecording.findUnique
       .mockResolvedValueOnce(recording)
       .mockResolvedValueOnce(recording)
-      .mockResolvedValueOnce({ transcriptProcessedAt: null });
+      .mockResolvedValueOnce({
+        ...recording,
+        meeting: { workspaceId: "workspace-1" },
+        transcriptProcessedAt: null,
+      });
     let botFetches = 0;
     fetchMock.mockImplementation(async (url: string | URL) => {
       const value = String(url);
@@ -1199,6 +1275,7 @@ describe("meeting recorder domain", () => {
       .mockResolvedValueOnce(recording)
       .mockResolvedValueOnce({
         ...recording,
+        meeting: { workspaceId: "workspace-1" },
         transcriptProcessedAt: new Date("2026-05-04T17:05:00.000Z"),
       });
     fetchMock.mockImplementation(async (url: string | URL) => {
@@ -1260,6 +1337,8 @@ describe("meeting recorder domain", () => {
       .mockResolvedValueOnce(recording)
       .mockResolvedValueOnce(recording)
       .mockResolvedValueOnce({
+        ...recording,
+        meeting: { workspaceId: "workspace-1" },
         transcriptProcessedAt: new Date("2026-05-04T17:05:00.000Z"),
       });
     fetchMock.mockImplementation(async (url: string | URL) => {
@@ -1320,7 +1399,11 @@ describe("meeting recorder domain", () => {
     prismaMock.meetingRecording.findUnique
       .mockResolvedValueOnce(recording)
       .mockResolvedValueOnce(recording)
-      .mockResolvedValueOnce({ transcriptProcessedAt: null });
+      .mockResolvedValueOnce({
+        ...recording,
+        meeting: { workspaceId: "workspace-1" },
+        transcriptProcessedAt: null,
+      });
     fetchMock.mockImplementation(async (url: string | URL) => {
       const value = String(url);
       if (value.endsWith("/api/v1/bot/recall-bot-1/")) {

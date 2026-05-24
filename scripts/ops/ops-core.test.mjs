@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  buildControlPlaneIncidents,
   buildHealthTargets,
   checkHealthTarget,
+  fetchControlPlaneCustomers,
   incidentLabels,
   incidentTitle,
   normalizeIncident,
@@ -140,6 +142,83 @@ describe("ops-core health targets", () => {
       "Attempts: 2",
       "Attempt 1: unreachable",
     ]));
+  });
+});
+
+describe("ops-core control-plane incidents", () => {
+  it("fetches customers from the Control Plane MCP endpoint", async () => {
+    const customers = [{ id: "deployment-1", label: "Acme Production" }];
+    const result = await fetchControlPlaneCustomers({
+      CONTROL_PLANE_URL: "https://ops.example",
+      CONTROL_PLANE_AGENT_API_KEY: "test-token",
+    }, async (url, init) => {
+      expect(url).toBe("https://ops.example/api/control-plane/mcp");
+      expect(init.headers.authorization).toBe("Bearer cp-test-token");
+      return response({
+        result: {
+          content: [{ text: JSON.stringify(customers) }],
+        },
+      });
+    });
+
+    expect(result).toEqual(customers);
+  });
+
+  it("builds sanitized incidents from cached support and release snapshots", () => {
+    const incidents = buildControlPlaneIncidents([
+      {
+        id: "deployment-acme",
+        label: "Acme Production",
+        customerSlug: "acme",
+        hasSupportCredential: true,
+        releaseImageTag: "old-release",
+        lastHealthError: "Release drift: expected old-release, got new-release",
+        fleetSnapshots: [
+          {
+            snapshotKind: "SUPPORT_READY",
+            observedAt: "2026-05-24T00:00:00.000Z",
+            summary: {
+              agentRuns: {
+                items: [
+                  { agentKey: "inbox-triage", status: "FAILED", createdAt: "2026-05-24T00:00:00.000Z" },
+                  { agentKey: "inbox-triage", status: "FAILED", createdAt: "2026-05-23T23:00:00.000Z" },
+                  { agentKey: "inbox-triage", status: "FAILED", createdAt: "2026-05-23T22:00:00.000Z" },
+                ],
+              },
+              failedJobs: {
+                items: [
+                  { type: "communication.slack.proactive-scan", error: "An API error occurred: invalid_auth" },
+                ],
+              },
+            },
+          },
+          {
+            snapshotKind: "RELEASE",
+            observedAt: "2026-05-24T00:00:00.000Z",
+            error: "Release drift: expected old-release, got new-release",
+            summary: {
+              expectedReleaseImageTag: "old-release",
+              observedRelease: { gitSha: "new-release" },
+            },
+          },
+        ],
+      },
+      {
+        id: "deployment-internal",
+        label: "Corgtex Internal",
+        customerSlug: "corgtex-internal",
+        hasSupportCredential: false,
+        supportConnectorStatus: "not_configured",
+      },
+    ]);
+
+    expect(incidents.map((incident) => incident.status).sort()).toEqual([
+      "agentFailureStreak",
+      "missingSupportConnector",
+      "releaseMetadataDrift",
+      "slackInvalidAuth",
+    ].sort());
+    expect(incidents.find((incident) => incident.status === "slackInvalidAuth").evidence.join("\n")).not.toContain("secret");
   });
 });
 

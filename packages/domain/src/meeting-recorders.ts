@@ -2376,11 +2376,30 @@ async function completeRecordingWithTranscriptArtifact(
     await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${recording.id}, 0))`;
     const current = await tx.meetingRecording.findUnique({
       where: { id: recording.id },
-      select: { transcriptProcessedAt: true },
+      select: {
+        id: true,
+        workspaceId: true,
+        meetingId: true,
+        transcriptProcessedAt: true,
+        meeting: {
+          select: {
+            workspaceId: true,
+          },
+        },
+      },
     });
     if (!current || current.transcriptProcessedAt) {
       return false;
     }
+
+    invariant(
+      current.workspaceId === recording.workspaceId
+      && current.meetingId === recording.meetingId
+      && current.meeting?.workspaceId === recording.workspaceId,
+      409,
+      "RECORDER_WORKSPACE_MISMATCH",
+      "Recorder transcript target does not match the recording workspace.",
+    );
 
     if (transcript.trim().length === 0) {
       await markRecordingTranscriptEmpty(provider, recording, artifact, tx);

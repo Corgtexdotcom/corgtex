@@ -332,4 +332,55 @@ describe("runMeetingSummaryAgent", () => {
     }));
   });
 
+  it("skips without model calls when the meeting has no transcript", async () => {
+    const { defaultModelGateway } = await import("@corgtex/models");
+    vi.mocked(defaultModelGateway.extract).mockClear();
+    vi.mocked(defaultModelGateway.chat).mockClear();
+    buildMeetingIntelligenceContextMock.mockResolvedValueOnce({
+      contextualIntelligenceEnabled: true,
+      meeting: {
+        id: "meeting-empty",
+        workspaceId: "ws-1",
+        title: "Empty recorder meeting",
+        source: "recorder",
+        transcript: "   ",
+        summaryMd: null,
+        blocksJson: null,
+        ingestionGuidanceMd: null,
+        recordedAt: new Date("2026-04-29T12:00:00.000Z"),
+      },
+      previousMeetings: [],
+      actions: [],
+      tensions: [],
+      proposals: [],
+      deliberationEntries: [],
+      followUps: [],
+      knowledge: [],
+    });
+
+    const { runMeetingSummaryAgent } = await import(".");
+
+    const result = await runMeetingSummaryAgent({
+      workspaceId: "ws-1",
+      triggerRef: "trigger-empty",
+      triggerType: "EVENT",
+      meetingId: "meeting-empty",
+    });
+
+    expect(defaultModelGateway.extract).not.toHaveBeenCalled();
+    expect(defaultModelGateway.chat).not.toHaveBeenCalled();
+    expect(prismaMock.meeting.update).not.toHaveBeenCalled();
+    expect(result).toEqual(expect.objectContaining({ status: "COMPLETED" }));
+    expect(prismaMock.agentRun.update).toHaveBeenLastCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        status: "COMPLETED",
+        resultJson: expect.objectContaining({
+          skipped: true,
+          reason: "missing_transcript",
+          meetingId: "meeting-empty",
+        }),
+      }),
+    }));
+  });
+
 });

@@ -23,6 +23,7 @@ vi.mock("@corgtex/domain", () => ({
   listControlPlaneDeployments: mocks.listControlPlaneDeployments,
   listControlPlaneFeatureFlags: vi.fn(), listControlPlaneReleaseRolloutJobs: vi.fn(),
   probeControlPlaneDeploymentHealth: vi.fn(),
+  recordVerifiedControlPlaneRelease: vi.fn(),
   requireControlPlaneAccess: mocks.requireControlPlaneAccess,
   requireControlPlaneScope: mocks.requireControlPlaneScope,
   refreshControlPlaneFleetSnapshots: vi.fn(),
@@ -94,6 +95,7 @@ describe("/api/control-plane/mcp", () => {
       "run_meeting_recorder_operation",
       "run_context_sync",
       "probe_customer_deployment_health",
+      "record_verified_release",
       "refresh_fleet_snapshots",
       "enqueue_fleet_snapshot_jobs",
       "prepare_release_upgrade",
@@ -353,6 +355,45 @@ describe("/api/control-plane/mcp", () => {
       },
       reason: "Enable customer Slack meeting action review.",
     }));
+  });
+
+  it("calls verified release reconciliation with release write scope", async () => {
+    mocks.resolveControlPlaneRequestActor.mockResolvedValueOnce({
+      kind: "agent",
+      authProvider: "control-plane",
+      label: "control-plane-agent",
+      scopes: ["control-plane:read", "control-plane:releases:write"],
+    });
+    const domain = await import("@corgtex/domain");
+    vi.mocked(domain.recordVerifiedControlPlaneRelease).mockResolvedValueOnce({
+      deploymentId: "inst-1",
+      recorded: true,
+      releaseImageTag: "sha-new",
+    } as never);
+    const { POST } = await import("./route");
+
+    const response = await POST(request({
+      jsonrpc: "2.0",
+      id: 12,
+      method: "tools/call",
+      params: {
+        name: "record_verified_release",
+        arguments: {
+          deploymentId: "inst-1",
+          releaseImageTag: "sha-new",
+          releaseVersion: "main-2026-05-20",
+          reason: "Verified live health.",
+        },
+      },
+    }) as never);
+
+    expect(response.status).toBe(200);
+    expect(vi.mocked(domain.recordVerifiedControlPlaneRelease)).toHaveBeenCalledWith(expect.any(Object), {
+      deploymentId: "inst-1",
+      releaseImageTag: "sha-new",
+      releaseVersion: "main-2026-05-20",
+      reason: "Verified live health.",
+    });
   });
 
   it("rejects integration configuration without explicit boolean toggles", async () => {

@@ -15,6 +15,7 @@ const {
     },
     communicationInstallation: {
       findFirst: vi.fn(),
+      updateMany: vi.fn(),
     },
     communicationMessage: {
       findMany: vi.fn(),
@@ -97,6 +98,7 @@ describe("Slack context jobs", () => {
       id: "install-1",
       settings: {},
     });
+    prismaMock.communicationInstallation.updateMany.mockResolvedValue({ count: 1 });
     prismaMock.communicationMessage.findMany.mockResolvedValue([]);
     prismaMock.communicationMessage.count.mockResolvedValue(0);
     prismaMock.communicationChannel.findMany.mockResolvedValue([
@@ -224,6 +226,37 @@ describe("Slack context jobs", () => {
         messageId: "message-1",
       }),
     }));
+  });
+
+  it("marks Slack installations reauth-required after invalid_auth and stops proactive work", async () => {
+    prismaMock.communicationMessage.findMany.mockResolvedValueOnce([
+      candidate({
+        text: "Does anyone know who owns the customer follow-up?",
+        messageTs: new Date("2026-04-29T15:30:00.000Z"),
+      }),
+    ]);
+    sendSlackMessageMock.mockRejectedValueOnce(new Error("An API error occurred: invalid_auth"));
+
+    const { runSlackProactiveScan } = await import("./slack-context");
+    await expect(runSlackProactiveScan({
+      workspaceId: "workspace-1",
+      installationId: "install-1",
+      workflowJobId: "job-1",
+    })).resolves.toEqual({ skipped: true, reason: "slack_reauth_required" });
+
+    expect(prismaMock.communicationInstallation.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: "install-1",
+        workspaceId: "workspace-1",
+        provider: "SLACK",
+      },
+      data: expect.objectContaining({
+        status: "ERROR",
+        lastError: "invalid_auth",
+        disconnectedAt: expect.any(Date),
+      }),
+    });
+    expect(prismaMock.communicationEntityLink.create).not.toHaveBeenCalled();
   });
 
   it("respects proactive confidence thresholds before creating private drafts", async () => {

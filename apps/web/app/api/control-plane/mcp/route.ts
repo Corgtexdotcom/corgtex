@@ -18,6 +18,7 @@ import {
   listControlPlaneFeatureFlags,
   listControlPlaneReleaseRolloutJobs,
   probeControlPlaneDeploymentHealth,
+  recordVerifiedControlPlaneRelease,
   requireControlPlaneAccess,
   requireControlPlaneScope,
   refreshControlPlaneFleetSnapshots,
@@ -257,6 +258,20 @@ const tools = [
     inputSchema: { type: "object", properties: { deploymentId: { type: "string" }, reason: { type: "string" } }, required: ["deploymentId", "reason"] },
   },
   {
+    name: "record_verified_release",
+    description: "Reconcile control-plane release metadata after probing a verified live customer release.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        deploymentId: { type: "string" },
+        releaseImageTag: { type: "string" },
+        releaseVersion: { type: "string" },
+        reason: { type: "string" },
+      },
+      required: ["deploymentId", "releaseImageTag", "reason"],
+    },
+  },
+  {
     name: "refresh_fleet_snapshots",
     description: "Refresh cached fleet snapshots for one customer deployment without relying on list-page fanout.",
     inputSchema: {
@@ -375,6 +390,7 @@ const toolScopes: Record<string, string> = {
   run_meeting_recorder_operation: "control-plane:integrations:write",
   run_context_sync: "control-plane:context:write",
   probe_customer_deployment_health: "control-plane:releases:write",
+  record_verified_release: "control-plane:releases:write",
   refresh_fleet_snapshots: "control-plane:fleet:write",
   enqueue_fleet_snapshot_jobs: "control-plane:fleet:write",
   prepare_release_upgrade: "control-plane:releases:write",
@@ -676,6 +692,14 @@ export async function POST(request: NextRequest) {
     if (name === "probe_customer_deployment_health") {
       return rpcResult(id, textContent(await probeControlPlaneDeploymentHealth(actor, {
         deploymentId: argString(args, "deploymentId"),
+        reason: argString(args, "reason"),
+      })));
+    }
+    if (name === "record_verified_release") {
+      return rpcResult(id, textContent(await recordVerifiedControlPlaneRelease(actor, {
+        deploymentId: argString(args, "deploymentId"),
+        releaseImageTag: argString(args, "releaseImageTag"),
+        releaseVersion: argOptionalString(args, "releaseVersion"),
         reason: argString(args, "reason"),
       })));
     }
