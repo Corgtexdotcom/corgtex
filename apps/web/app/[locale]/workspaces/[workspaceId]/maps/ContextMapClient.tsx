@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, useTransition, type CSSProperties } from "react";
+import { useEffect, useMemo, useState, useTransition, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import {
   Background,
   Controls,
@@ -172,6 +172,12 @@ type RegionContext = Awaited<ReturnType<typeof buildSelectedRegionContextAction>
 type InspectorDock = "right" | "bottom";
 type StatusFilter = "active" | "approved" | "needs-review" | "all";
 
+const INSPECTOR_DOCK_STORAGE_KEY = "corgtex.contextMap.inspectorDock";
+const INSPECTOR_WIDTH_STORAGE_KEY = "corgtex.contextMap.inspectorWidth";
+const INSPECTOR_DEFAULT_WIDTH = 430;
+const INSPECTOR_MIN_WIDTH = 340;
+const INSPECTOR_MAX_WIDTH = 680;
+
 const NODE_COLORS: Record<string, { border: string; background: string; accent: string }> = {
   Process: { border: "#2563eb", background: "#eff6ff", accent: "#1d4ed8" },
   ProcessStep: { border: "#0f766e", background: "#ecfdf5", accent: "#0f766e" },
@@ -210,10 +216,6 @@ function stableDateLabel(value: string | null) {
   return date.toISOString().slice(0, 10);
 }
 
-function objectMeta(object: ContextGraphObject) {
-  return [object.objectType, object.status, confidenceLabel(object.confidence)].join(" - ");
-}
-
 function propertyText(properties: Record<string, unknown> | null | undefined, key: string) {
   const value = properties?.[key];
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
@@ -228,6 +230,136 @@ function propertyStringArray(properties: Record<string, unknown> | null | undefi
 
 function titleizeMachineValue(value: string) {
   return value.replace(/_/g, " ").replace(/\b\w/g, (character) => character.toUpperCase());
+}
+
+function clampInspectorWidth(value: number) {
+  return Math.min(INSPECTOR_MAX_WIDTH, Math.max(INSPECTOR_MIN_WIDTH, Math.round(value)));
+}
+
+function storedInspectorDock() {
+  if (typeof window === "undefined") return "right";
+  return window.localStorage.getItem(INSPECTOR_DOCK_STORAGE_KEY) === "bottom" ? "bottom" : "right";
+}
+
+function storedInspectorWidth() {
+  if (typeof window === "undefined") return INSPECTOR_DEFAULT_WIDTH;
+  const value = Number(window.localStorage.getItem(INSPECTOR_WIDTH_STORAGE_KEY));
+  return Number.isFinite(value) ? clampInspectorWidth(value) : INSPECTOR_DEFAULT_WIDTH;
+}
+
+function humanStatusLabel(status: string) {
+  const labels: Record<string, string> = {
+    approved: "Approved",
+    proposed: "Needs review",
+    draft: "Draft",
+    stale: "Needs refresh",
+    disputed: "Disputed",
+    archived: "Archived",
+  };
+  return labels[status] ?? titleizeMachineValue(status);
+}
+
+function humanObjectTypeLabel(objectType: string, viewType?: string) {
+  if (viewType === "org" && objectType === "Team") return "Circle or team";
+  if (viewType === "agent" && objectType === "Document") return "Source or output";
+  const labels: Record<string, string> = {
+    ProcessStep: "Process step",
+    Evidence: "Audit evidence",
+    Metric: "Metric",
+  };
+  return labels[objectType] ?? objectType;
+}
+
+function humanRelationshipLabel(type: string) {
+  const labels: Record<string, string> = {
+    assigned_to: "Assigned to",
+    blocks: "Blocks",
+    created_in: "Created in",
+    decided_in: "Decided in",
+    depends_on: "Depends on",
+    has_evidence: "Supported by evidence",
+    input_to: "Feeds",
+    member_of: "Member of",
+    needs_approval_from: "Needs approval from",
+    output_of: "Output of",
+    owns: "Owns",
+    part_of: "Part of",
+    reports_to: "Reports to",
+    supports: "Supports",
+    uses: "Uses",
+  };
+  return labels[type] ?? titleizeMachineValue(type);
+}
+
+function humanRelationshipSentence(
+  relationship: ContextGraphRelationship,
+  selectedObjectId: string | null,
+  objects: Map<string, ContextGraphObject>,
+) {
+  const source = objects.get(relationship.sourceObjectId)?.title ?? "This item";
+  const target = objects.get(relationship.targetObjectId)?.title ?? "another item";
+  const selectedIsSource = selectedObjectId === relationship.sourceObjectId;
+  const selectedIsTarget = selectedObjectId === relationship.targetObjectId;
+  const otherTitle = selectedIsSource ? target : source;
+
+  switch (relationship.relationshipType) {
+    case "owns":
+      return selectedIsTarget ? `${source} owns this.` : `Owns ${target}.`;
+    case "assigned_to":
+      return selectedIsSource ? `Assigned to ${target}.` : `${source} is assigned here.`;
+    case "needs_approval_from":
+      return selectedIsSource ? `Needs approval from ${target}.` : `${source} needs this approval.`;
+    case "depends_on":
+      return selectedIsSource ? `Depends on ${target}.` : `${source} depends on this.`;
+    case "blocks":
+      return selectedIsSource ? `Blocks ${target}.` : `Blocked by ${source}.`;
+    case "supports":
+      return selectedIsSource ? `Supports ${target}.` : `Supported by ${source}.`;
+    case "part_of":
+      return selectedIsSource ? `Part of ${target}.` : `Includes ${source}.`;
+    case "member_of":
+      return selectedIsSource ? `Member of ${target}.` : `${source} is a member here.`;
+    case "reports_to":
+      return selectedIsSource ? `Reports to ${target}.` : `${source} reports here.`;
+    case "uses":
+      return selectedIsSource ? `Uses ${target}.` : `Used by ${source}.`;
+    case "input_to":
+      return selectedIsSource ? `Feeds into ${target}.` : `Receives input from ${source}.`;
+    case "output_of":
+      return selectedIsSource ? `Output from ${target}.` : `Produces ${source}.`;
+    case "created_in":
+      return selectedIsSource ? `Created in ${target}.` : `Created ${source}.`;
+    case "decided_in":
+      return selectedIsSource ? `Decided in ${target}.` : `Includes decision: ${source}.`;
+    case "has_evidence":
+      return selectedIsSource ? `Supported by ${target}.` : `Supports ${source}.`;
+    default:
+      return selectedIsSource || selectedIsTarget
+        ? `${humanRelationshipLabel(relationship.relationshipType)} ${otherTitle}.`
+        : `${source} ${humanRelationshipLabel(relationship.relationshipType).toLowerCase()} ${target}.`;
+  }
+}
+
+function evidenceSourceLabel(sourceType: string) {
+  const labels: Record<string, string> = {
+    AGENT_IDENTITY: "Agent",
+    AGENT_RUN: "Agent run",
+    AUDIT_TRAIL: "Audit trail",
+    BRAIN_ARTICLE: "Brain article",
+    CONTEXT_PACKET: "Selected map brief",
+    DOCUMENT: "Document",
+    MCP_TOOL: "Tool",
+    MEETING: "Meeting",
+    MEETING_INSIGHT: "Meeting note",
+    MEMBER_RECORD: "Member record",
+    POLICY_RECORD: "Policy",
+    PROPOSED_DIFF: "Proposed change",
+    REGION_CONTEXT: "Selected map context",
+    RISK_REGISTER: "Risk record",
+    ROLE_RECORD: "Role record",
+    SOURCE_RECORD: "Record",
+  };
+  return labels[sourceType] ?? titleizeMachineValue(sourceType);
 }
 
 function sameIds(left: string[], right: string[]) {
@@ -263,18 +395,14 @@ function viewScopeLabel(view: ContextMapView) {
   return view.createdByUserId ? "Personal" : "Master";
 }
 
-function mapViewUrl(viewId: string, includeStale: boolean) {
+function mapViewUrl(viewId: string, includeStale: boolean, fullscreen = false) {
   const url = new URL(window.location.href);
   url.searchParams.set("view", viewId);
   if (includeStale) url.searchParams.set("stale", "1");
   else url.searchParams.delete("stale");
+  if (fullscreen) url.searchParams.set("fullscreen", "1");
+  else url.searchParams.delete("fullscreen");
   return `${url.pathname}${url.search}`;
-}
-
-function directNeighborHeading(viewType: string) {
-  if (viewType === "org") return "Direct roles, people, and reporting links";
-  if (viewType === "agent") return "Direct inputs, policies, tools, and outputs";
-  return "Direct blockers, owners, dependencies";
 }
 
 function diffJsonRecord(value: unknown): DiffJsonInput {
@@ -297,7 +425,7 @@ function normalizeProposedDiff(value: {
   };
 }
 
-function diffCountLabel(diffJson: unknown) {
+function diffTechnicalCountLabel(diffJson: unknown) {
   const diff = diffJsonRecord(diffJson);
   const parts = [
     `${diff.objects?.length ?? 0} objects`,
@@ -312,41 +440,97 @@ function objectTitleFromId(objects: Map<string, ContextGraphObject>, objectId: s
   return objectId ? objects.get(objectId)?.title ?? objectId : "new object";
 }
 
-function relationshipEndpointLabel(value: DiffRelationshipInput, key: "source" | "target", objects: Map<string, ContextGraphObject>) {
-  const objectId = key === "source" ? value.sourceObjectId : value.targetObjectId;
-  const ref = key === "source" ? value.sourceRef : value.targetRef;
-  return objectId ? objectTitleFromId(objects, objectId) : ref ? `new: ${ref}` : "unknown";
+function proposedObjectLabel(object: DiffObjectInput | undefined) {
+  if (!object) return "the new item";
+  return `${humanObjectTypeLabel(object.objectType ?? "Item").toLowerCase()} ${humanDiffTitle(object.title)}`;
 }
 
-function diffPreviewLines(diffJson: unknown, objects: Map<string, ContextGraphObject>, mapViews: ContextMapView[]) {
+function humanDiffTitle(title: string | null | undefined) {
+  if (!title) return "Untitled";
+  return title
+    .replace(/^Review fact:\s*/i, "Review what is known about ")
+    .replace(/^Clarify blocker:\s*/i, "Clarify blocker: ")
+    .replace(/^Resolve blocker:\s*/i, "Resolve blocker: ");
+}
+
+function relationshipEndpointLabel(
+  value: DiffRelationshipInput,
+  key: "source" | "target",
+  objects: Map<string, ContextGraphObject>,
+  proposedObjects: Map<string, DiffObjectInput>,
+) {
+  const objectId = key === "source" ? value.sourceObjectId : value.targetObjectId;
+  const ref = key === "source" ? value.sourceRef : value.targetRef;
+  return objectId ? objectTitleFromId(objects, objectId) : ref ? proposedObjectLabel(proposedObjects.get(ref)) : "an item";
+}
+
+function diffHumanPreview(diffJson: unknown, objects: Map<string, ContextGraphObject>, mapViews: ContextMapView[]) {
   const diff = diffJsonRecord(diffJson);
-  const before: string[] = [];
-  const after: string[] = [];
+  const proposedObjects = new Map((diff.objects ?? []).flatMap((object) => object.ref ? [[object.ref, object] as const] : []));
+  const currentMap: string[] = [];
+  const ifApproved: string[] = [];
+  const adds: string[] = [];
+  const connects: string[] = [];
+  const updates: string[] = [];
+  const needsApproval: string[] = [];
+
   for (const object of diff.objects ?? []) {
-    before.push(`${object.objectType ?? "Object"}: no approved change until applied`);
-    after.push(`${object.objectType ?? "Object"}: ${object.title ?? object.ref ?? "Untitled"} (${object.status ?? "approved on apply"})`);
+    const label = `${humanObjectTypeLabel(object.objectType ?? "Item")}: ${humanDiffTitle(object.title ?? object.ref)}`;
+    currentMap.push(`${label} is not on the approved map yet.`);
+    ifApproved.push(`Add ${label}.`);
+    adds.push(`Add ${label}.`);
   }
   for (const relationship of diff.relationships ?? []) {
-    const source = relationshipEndpointLabel(relationship, "source", objects);
-    const target = relationshipEndpointLabel(relationship, "target", objects);
-    before.push(`${relationship.relationshipType ?? "relationship"}: not present as approved truth`);
-    after.push(`${source} ${relationship.relationshipType ?? "relates to"} ${target}`);
+    const source = relationshipEndpointLabel(relationship, "source", objects, proposedObjects);
+    const target = relationshipEndpointLabel(relationship, "target", objects, proposedObjects);
+    const label = `${source} ${humanRelationshipLabel(relationship.relationshipType ?? "relates to").toLowerCase()} ${target}`;
+    currentMap.push(`${label} is not connected on the approved map yet.`);
+    ifApproved.push(`Connect ${label}.`);
+    connects.push(`Connect ${label}.`);
   }
   for (const evidence of diff.evidenceRefs ?? []) {
-    before.push(`Evidence: ${evidence.sourceType ?? "source"} not attached`);
-    after.push(`Attach ${evidence.sourceType ?? "source"}:${evidence.sourceId ?? "record"} to ${evidence.objectId ?? evidence.objectRef ?? evidence.relationshipId ?? evidence.relationshipRef ?? "fact"}`);
+    currentMap.push("The supporting evidence is not attached yet.");
+    ifApproved.push(`Attach ${evidenceSourceLabel(evidence.sourceType ?? "source")} evidence.`);
+    updates.push(`Attach ${evidenceSourceLabel(evidence.sourceType ?? "source")} evidence.`);
   }
   for (const layoutUpdate of diff.mapLayoutUpdates ?? []) {
     const viewName = mapViews.find((view) => view.id === layoutUpdate.mapViewId)?.name ?? layoutUpdate.mapViewId ?? "map view";
     const count = layoutUpdate.items?.length ?? 0;
-    before.push(`${viewName}: current saved layout`);
-    after.push(`${viewName}: ${count} node positions updated`);
+    currentMap.push(`${viewName} keeps its current layout.`);
+    ifApproved.push(`Move ${count} map card${count === 1 ? "" : "s"} in ${viewName}.`);
+    updates.push(`Move ${count} map card${count === 1 ? "" : "s"}.`);
   }
-  if (before.length === 0 && after.length === 0) {
-    before.push("No graph truth changes encoded.");
-    after.push("No graph truth changes encoded.");
+  if (currentMap.length === 0 && ifApproved.length === 0) {
+    currentMap.push("No visible map change is included.");
+    ifApproved.push("Nothing changes on approval.");
   }
-  return { before: before.slice(0, 6), after: after.slice(0, 6) };
+  if (adds.length + connects.length + updates.length > 0) {
+    needsApproval.push("A human must approve this before it changes company truth.");
+  }
+
+  const addedTitles = (diff.objects ?? [])
+    .map((object) => object.title)
+    .filter((title): title is string => typeof title === "string" && title.trim().length > 0)
+    .map((title) => humanDiffTitle(title))
+    .slice(0, 2);
+  const firstExistingTarget = (diff.relationships ?? [])
+    .map((relationship) => relationship.targetObjectId ? objectTitleFromId(objects, relationship.targetObjectId) : null)
+    .find((title): title is string => Boolean(title));
+  const topic = firstExistingTarget ?? addedTitles[0] ?? "the selected map area";
+
+  return {
+    summary: adds.length || connects.length || updates.length
+      ? `This proposes clarifying ${topic}${addedTitles.length > 0 ? ` by adding ${addedTitles.join(" and ")}` : ""}${connects.length > 0 ? " and connecting the follow-up work" : ""}.`
+      : "This proposal is waiting for human review.",
+    currentMap: currentMap.slice(0, 6),
+    ifApproved: ifApproved.slice(0, 6),
+    groups: {
+      adds: adds.slice(0, 5),
+      connects: connects.slice(0, 5),
+      updates: updates.slice(0, 5),
+      needsApproval,
+    },
+  };
 }
 
 export default function ContextMapClient({ workspaceId, data, includeStale = false }: { workspaceId: string; data: ContextMapClientData; includeStale?: boolean }) {
@@ -357,11 +541,15 @@ export default function ContextMapClient({ workspaceId, data, includeStale = fal
   const [regionContextStatus, setRegionContextStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const [message, setMessage] = useState<{ tone: "info" | "error"; text: string } | null>(null);
   const [isCompactLayout, setIsCompactLayout] = useState(false);
-  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(() => {
+    if (typeof window === "undefined") return false;
+    return new URL(window.location.href).searchParams.get("fullscreen") === "1";
+  });
   const [showFilters, setShowFilters] = useState(false);
   const [typeFilter, setTypeFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("active");
-  const [inspectorDock, setInspectorDock] = useState<InspectorDock>("right");
+  const [inspectorDock, setInspectorDock] = useState<InspectorDock>(storedInspectorDock);
+  const [inspectorWidth, setInspectorWidth] = useState(storedInspectorWidth);
   const [layoutDirty, setLayoutDirty] = useState(false);
   const [expandedDiffId, setExpandedDiffId] = useState<string | null>(data.proposedDiffs[0]?.id ?? null);
   const [editingDiffId, setEditingDiffId] = useState<string | null>(null);
@@ -406,16 +594,14 @@ export default function ContextMapClient({ workspaceId, data, includeStale = fal
             style={{ "--node-border": colors.border, "--node-bg": colors.background, "--node-accent": colors.accent } as CSSProperties}
           >
             <div className="context-map-node-topline">
-              <span>{object.objectType}</span>
-              <span className={`context-map-status context-map-status--${statusClass(object.status)}`}>{object.status}</span>
+              <span>{humanObjectTypeLabel(object.objectType, data.mapView.viewType)}</span>
+              <span className={`context-map-status context-map-status--${statusClass(object.status)}`}>{humanStatusLabel(object.status)}</span>
             </div>
             <strong>{object.title}</strong>
             <div className="context-map-node-meta">
-              <span>{confidenceLabel(object.confidence)}</span>
               {workState && <span>{titleizeMachineValue(workState)}</span>}
               {pathStage && <span>{pathStage}</span>}
               {staffingState && <span>{titleizeMachineValue(staffingState)}</span>}
-              {object.evidenceRefs.length > 0 && <span>{object.evidenceRefs.length} evidence</span>}
             </div>
           </div>
         ),
@@ -428,7 +614,7 @@ export default function ContextMapClient({ workspaceId, data, includeStale = fal
         boxShadow: "none",
       },
     };
-  }), [filteredObjects, layoutByObjectId]);
+  }), [data.mapView.viewType, filteredObjects, layoutByObjectId]);
 
   const initialEdges = useMemo<Edge[]>(() => data.relationships
     .filter((relationship) => (
@@ -443,7 +629,7 @@ export default function ContextMapClient({ workspaceId, data, includeStale = fal
         source: relationship.sourceObjectId,
         target: relationship.targetObjectId,
         type: "smoothstep",
-        label: relationship.relationshipType,
+        label: humanRelationshipLabel(relationship.relationshipType),
         animated: relationship.status === "proposed",
         markerEnd: { type: MarkerType.ArrowClosed, color: stroke },
         style: {
@@ -463,12 +649,22 @@ export default function ContextMapClient({ workspaceId, data, includeStale = fal
     const updateLayout = () => {
       const compact = window.innerWidth < 920;
       setIsCompactLayout(compact);
-      if (compact) setInspectorDock("bottom");
+      setInspectorDock(compact ? "bottom" : storedInspectorDock());
     };
     updateLayout();
     window.addEventListener("resize", updateLayout);
     return () => window.removeEventListener("resize", updateLayout);
   }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || isCompactLayout) return;
+    window.localStorage.setItem(INSPECTOR_DOCK_STORAGE_KEY, inspectorDock);
+  }, [inspectorDock, isCompactLayout]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(INSPECTOR_WIDTH_STORAGE_KEY, String(inspectorWidth));
+  }, [inspectorWidth]);
 
   useEffect(() => {
     if (!isFullscreen) return;
@@ -482,6 +678,14 @@ export default function ContextMapClient({ workspaceId, data, includeStale = fal
       document.body.style.overflow = previousOverflow;
       window.removeEventListener("keydown", onKeyDown);
     };
+  }, [isFullscreen]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const url = new URL(window.location.href);
+    if (isFullscreen) url.searchParams.set("fullscreen", "1");
+    else url.searchParams.delete("fullscreen");
+    window.history.replaceState(null, "", `${url.pathname}${url.search}`);
   }, [isFullscreen]);
 
   useEffect(() => {
@@ -511,6 +715,27 @@ export default function ContextMapClient({ workspaceId, data, includeStale = fal
   const selectedControls = selectedObject ? propertyStringArray(selectedObject.properties, "governanceControls") : [];
   const selectedAllowedActions = selectedObject ? propertyStringArray(selectedObject.properties, "allowedActions") : [];
   const selectedOrgKind = selectedObject ? propertyText(selectedObject.properties, "orgKind") : null;
+  const selectedDataFlow = selectedObject ? propertyText(selectedObject.properties, "dataFlow") : null;
+  const selectedApprovalRule = selectedObject ? propertyText(selectedObject.properties, "approvalRule") : null;
+  const selectedNextAction = selectedObject ? propertyText(selectedObject.properties, "nextAction") : null;
+  const selectedPathStage = selectedObject ? propertyText(selectedObject.properties, "pathStage") : null;
+  const selectedWorkState = selectedObject ? propertyText(selectedObject.properties, "workState") : null;
+  const selectedStaffingState = selectedObject ? propertyText(selectedObject.properties, "staffingState") : null;
+  const selectedAgentHref = selectedObject?.sourceEntityType === "AgentIdentity" && selectedObject.sourceEntityId
+    ? `/workspaces/${workspaceId}/agents/${selectedObject.sourceEntityId}`
+    : null;
+  const ownerRelationships = selectedObject
+    ? selectedRelationships.filter((relationship) => ["owns", "assigned_to", "needs_approval_from"].includes(relationship.relationshipType))
+    : [];
+  const dependencyRelationships = selectedObject
+    ? selectedRelationships.filter((relationship) => ["depends_on", "part_of", "member_of", "reports_to", "uses", "input_to", "output_of"].includes(relationship.relationshipType))
+    : [];
+  const blockerRelationships = selectedObject
+    ? selectedRelationships.filter((relationship) => ["blocks", "contradicts"].includes(relationship.relationshipType))
+    : [];
+  const supportingRelationships = selectedObject
+    ? selectedRelationships.filter((relationship) => ["supports", "created_in", "decided_in", "has_evidence"].includes(relationship.relationshipType))
+    : [];
 
   useEffect(() => {
     setNodes((currentNodes) => {
@@ -584,14 +809,29 @@ export default function ContextMapClient({ workspaceId, data, includeStale = fal
     flowInstance?.fitView({ padding: isFullscreen ? 0.12 : 0.18, duration: 220 });
   }
 
+  function scheduleFit() {
+    const delays = [80, 240, 520];
+    for (const delay of delays) {
+      window.setTimeout(() => {
+        flowInstance?.fitView({ padding: isFullscreen ? 0.12 : 0.18, duration: 220 });
+      }, delay);
+    }
+  }
+
+  useEffect(() => {
+    if (!flowInstance || nodes.length === 0) return;
+    scheduleFit();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [flowInstance, data.mapView.id, isFullscreen, statusFilter, typeFilter, includeStale, nodes.length, inspectorDock]);
+
   function resetLocalLayout() {
     setNodes(initialNodes);
     setLayoutDirty(false);
-    window.requestAnimationFrame(fitMap);
+    window.requestAnimationFrame(scheduleFit);
   }
 
   function navigateToView(viewId: string) {
-    window.location.href = mapViewUrl(viewId, includeStale);
+    window.location.href = mapViewUrl(viewId, includeStale, isFullscreen);
   }
 
   function toggleIncludeStale(next: boolean) {
@@ -635,7 +875,7 @@ export default function ContextMapClient({ workspaceId, data, includeStale = fal
         setLayoutDirty(false);
         setMessage({
           tone: "info",
-          text: result.mode === "proposed" ? "Created a master map update request for admin review." : "Saved the current map layout.",
+          text: result.mode === "proposed" ? "Created a map update request for admin review." : "Saved the current map layout.",
         });
       } catch {
         setMessage({ tone: "error", text: "Could not save this map layout." });
@@ -656,7 +896,7 @@ export default function ContextMapClient({ workspaceId, data, includeStale = fal
           name,
           items: currentLayoutItems(),
         });
-        window.location.href = mapViewUrl(mapView.id, includeStale);
+        window.location.href = mapViewUrl(mapView.id, includeStale, isFullscreen);
       } catch {
         setMessage({ tone: "error", text: "Could not save a personal map view." });
       }
@@ -666,7 +906,7 @@ export default function ContextMapClient({ workspaceId, data, includeStale = fal
   function createProposal() {
     const ids = selectedRegionIds;
     if (ids.length === 0) {
-      setMessage({ tone: "error", text: "Select at least one node before creating a proposed graph diff." });
+      setMessage({ tone: "error", text: "Select at least one map item before creating a proposal." });
       return;
     }
     startTransition(async () => {
@@ -678,9 +918,9 @@ export default function ContextMapClient({ workspaceId, data, includeStale = fal
         });
         setProposedDiffs((current) => [normalizeProposedDiff(diff), ...current]);
         setExpandedDiffId(diff.id);
-        setMessage({ tone: "info", text: "Created a proposed graph diff for this selected region." });
+        setMessage({ tone: "info", text: "Created a proposed change for this selected area." });
       } catch {
-        setMessage({ tone: "error", text: "Could not create a proposed graph diff." });
+        setMessage({ tone: "error", text: "Could not create a proposed change." });
       }
     });
   }
@@ -712,9 +952,9 @@ export default function ContextMapClient({ workspaceId, data, includeStale = fal
       try {
         await applyContextGraphProposedDiffAction({ workspaceId, proposedDiffId });
         setProposedDiffs((current) => current.filter((diff) => diff.id !== proposedDiffId));
-        setMessage({ tone: "info", text: "Applied proposed graph diff." });
+        setMessage({ tone: "info", text: "Applied the proposed map change." });
       } catch {
-        setMessage({ tone: "error", text: "You do not have permission to apply this proposed diff." });
+        setMessage({ tone: "error", text: "You do not have permission to apply this proposed change." });
       }
     });
   }
@@ -726,9 +966,9 @@ export default function ContextMapClient({ workspaceId, data, includeStale = fal
         setProposedDiffs((current) => status === "rejected"
           ? current.filter((diff) => diff.id !== proposedDiffId)
           : current.map((diff) => diff.id === proposedDiffId ? { ...diff, status: result.status } : diff));
-        setMessage({ tone: "info", text: status === "approved" ? "Approved proposed graph diff." : "Rejected proposed graph diff." });
+        setMessage({ tone: "info", text: status === "approved" ? "Approved the proposed change." : "Rejected the proposed change." });
       } catch {
-        setMessage({ tone: "error", text: "Could not review this proposed diff." });
+        setMessage({ tone: "error", text: "Could not review this proposed change." });
       }
     });
   }
@@ -760,11 +1000,36 @@ export default function ContextMapClient({ workspaceId, data, includeStale = fal
           ? { ...item, reason: updated.reason, diffJson: updated.diffJson, status: updated.status }
           : item));
         setEditingDiffId(null);
-        setMessage({ tone: "info", text: "Updated proposed graph diff." });
+        setMessage({ tone: "info", text: "Updated the proposed change." });
       } catch {
-        setMessage({ tone: "error", text: "Could not update this proposed diff." });
+        setMessage({ tone: "error", text: "Could not update this proposed change." });
       }
     });
+  }
+
+  function startInspectorResize(event: ReactPointerEvent<HTMLButtonElement>) {
+    if (inspectorDock !== "right" || isCompactLayout) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    const startX = event.clientX;
+    const startWidth = inspectorWidth;
+    const previousCursor = document.body.style.cursor;
+    const previousUserSelect = document.body.style.userSelect;
+    document.body.style.cursor = "ew-resize";
+    document.body.style.userSelect = "none";
+
+    const onPointerMove = (moveEvent: PointerEvent) => {
+      setInspectorWidth(clampInspectorWidth(startWidth + startX - moveEvent.clientX));
+    };
+    const onPointerUp = () => {
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousUserSelect;
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+      window.requestAnimationFrame(scheduleFit);
+    };
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp, { once: true });
   }
 
   const shellClass = [
@@ -772,9 +1037,12 @@ export default function ContextMapClient({ workspaceId, data, includeStale = fal
     isFullscreen ? "context-map-shell--fullscreen" : "",
     inspectorDock === "bottom" ? "context-map-shell--bottom-inspector" : "",
   ].filter(Boolean).join(" ");
+  const shellStyle = {
+    "--context-map-inspector-width": `${inspectorWidth}px`,
+  } as CSSProperties;
 
   return (
-    <section className={shellClass} data-context-map-shell>
+    <section className={shellClass} style={shellStyle} data-context-map-shell>
       <div className="context-map-toolbar">
         <div className="context-map-view-controls">
           <label className="context-map-view-select">
@@ -789,7 +1057,7 @@ export default function ContextMapClient({ workspaceId, data, includeStale = fal
           </label>
           <div className="context-map-title-block">
             <strong>{data.mapView.name}</strong>
-            <span>{data.objects.length} objects - {data.relationships.length} relationships - {data.mapView.viewType} view - {viewScopeLabel(data.mapView)}</span>
+            <span>{viewScopeLabel(data.mapView)} view for reviewing company context</span>
           </div>
         </div>
 
@@ -869,8 +1137,8 @@ export default function ContextMapClient({ workspaceId, data, includeStale = fal
           {nodes.length === 0 ? (
             <div className="context-map-empty">
               <CircleHelp size={32} aria-hidden="true" />
-              <h3>No context graph objects in this view</h3>
-              <p>Run meeting intelligence, sync source records, seed the demo workspace, or adjust filters to populate this map.</p>
+              <h3>No map items in this view</h3>
+              <p>Run meeting intelligence, sync approved records, seed the demo workspace, or adjust filters to populate this map.</p>
             </div>
           ) : (
             <ReactFlow
@@ -924,10 +1192,18 @@ export default function ContextMapClient({ workspaceId, data, includeStale = fal
         </div>
 
         <aside className={`context-map-inspector context-map-inspector--${inspectorDock}`}>
+          {inspectorDock === "right" && !isCompactLayout && (
+            <button
+              aria-label="Resize inspector"
+              className="context-map-inspector-resize"
+              type="button"
+              onPointerDown={startInspectorResize}
+            />
+          )}
           <div className="context-map-inspector-header">
             <div>
               <span className="context-map-eyebrow">Inspector</span>
-              <strong>{selectedRelationship ? "Relationship" : "Selection"}</strong>
+              <strong>{selectedRelationship ? "Connection" : "Selected item"}</strong>
             </div>
             <div className="context-map-inspector-actions">
               <button type="button" className="secondary small" onClick={() => setInspectorDock(inspectorDock === "right" ? "bottom" : "right")}>
@@ -945,257 +1221,326 @@ export default function ContextMapClient({ workspaceId, data, includeStale = fal
 
           <div className="context-map-inspector-scroll">
             {selectedRelationship ? (
-              <section className="context-map-inspector-section">
-                <h2>{selectedRelationship.relationshipType}</h2>
-                <p className="context-map-selection-title">
-                  {objectById.get(selectedRelationship.sourceObjectId)?.title ?? selectedRelationship.sourceObjectId}
-                  <span> to </span>
-                  {objectById.get(selectedRelationship.targetObjectId)?.title ?? selectedRelationship.targetObjectId}
-                </p>
-                <div className="context-map-pill-row">
-                  <span className={`context-map-status context-map-status--${statusClass(selectedRelationship.status)}`}>{selectedRelationship.status}</span>
-                  <span className="tag neutral">{confidenceLabel(selectedRelationship.confidence)}</span>
-                  {selectedRelationship.lastVerifiedAt && <span className="tag neutral">verified {stableDateLabel(selectedRelationship.lastVerifiedAt)}</span>}
-                </div>
-                <dl className="context-map-definition-list">
-                  <div><dt>Why</dt><dd>{sourceLabel(selectedRelationship)}</dd></div>
-                  <div><dt>Created by</dt><dd>{selectedRelationship.createdByType}</dd></div>
-                </dl>
-              </section>
-            ) : (
-              <section className="context-map-inspector-section">
-                <h2>Selection</h2>
-                {selectedObject ? (
+              <>
+                <section className="context-map-inspector-section">
+                  <h2>What this connection means</h2>
+                  <strong className="context-map-selection-title">
+                    {humanRelationshipSentence(selectedRelationship, selectedObjectId, objectById)}
+                  </strong>
+                  <div className="context-map-pill-row">
+                    <span className={`context-map-status context-map-status--${statusClass(selectedRelationship.status)}`}>{humanStatusLabel(selectedRelationship.status)}</span>
+                    {selectedRelationship.lastVerifiedAt && <span className="tag neutral">Verified {stableDateLabel(selectedRelationship.lastVerifiedAt)}</span>}
+                  </div>
+                </section>
+
+                <section className="context-map-inspector-section">
+                  <h2>Evidence</h2>
+                  {selectedRelationship.evidenceRefs.length ? (
+                    <div className="context-map-evidence-list">
+                      {selectedRelationship.evidenceRefs.slice(0, 5).map((evidence) => (
+                        <div key={evidence.id} className="context-map-evidence-item">
+                          <div className="nr-item-meta">{evidenceSourceLabel(evidence.sourceType)}</div>
+                          <p>{evidence.quote ?? "Evidence is attached, but no excerpt is available."}</p>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="muted">No supporting evidence is attached yet.</p>
+                  )}
+                </section>
+
+                <details className="context-map-technical-details">
+                  <summary>Technical details</summary>
+                  <dl className="context-map-definition-list">
+                    <div><dt>Type</dt><dd>{selectedRelationship.relationshipType}</dd></div>
+                    <div><dt>Status</dt><dd>{selectedRelationship.status}</dd></div>
+                    <div><dt>Confidence</dt><dd>{confidenceLabel(selectedRelationship.confidence)}</dd></div>
+                    <div><dt>Source</dt><dd>{sourceLabel(selectedRelationship)}</dd></div>
+                    <div><dt>ID</dt><dd>{selectedRelationship.id}</dd></div>
+                  </dl>
+                </details>
+              </>
+            ) : selectedObject ? (
+              <>
+                <section className="context-map-inspector-section">
+                  <h2>{data.mapView.viewType === "agent" && selectedObject.objectType === "Agent" ? "What this agent does" : "What this is"}</h2>
                   <div className="context-map-selection-stack">
                     <div>
-                      <div className="nr-item-meta">{objectMeta(selectedObject)}</div>
+                      <div className="nr-item-meta">{humanObjectTypeLabel(selectedObject.objectType, data.mapView.viewType)}</div>
                       <strong className="context-map-selection-title">{selectedObject.title}</strong>
                     </div>
                     {selectedObject.summary && <p>{selectedObject.summary.slice(0, 520)}</p>}
+                    {selectedDataFlow && <p>{selectedDataFlow}</p>}
                     <div className="context-map-pill-row">
-                      {selectedObject.sourceEntityType && <span className="tag neutral">{selectedObject.sourceEntityType}</span>}
-                      {selectedOrgKind && selectedOrgKind !== selectedObject.sourceEntityType && <span className="tag neutral">{selectedOrgKind}</span>}
-                      {propertyText(selectedObject.properties, "workState") && <span className="tag neutral">{titleizeMachineValue(propertyText(selectedObject.properties, "workState") ?? "")}</span>}
-                      {propertyText(selectedObject.properties, "staffingState") && <span className="tag neutral">{titleizeMachineValue(propertyText(selectedObject.properties, "staffingState") ?? "")}</span>}
-                      {propertyText(selectedObject.properties, "nextAction") && <span className="tag neutral">next action</span>}
-                      <span className="tag neutral">created by {selectedObject.createdByType}</span>
-                      {selectedObject.lastVerifiedAt && <span className="tag neutral">verified {stableDateLabel(selectedObject.lastVerifiedAt)}</span>}
+                      <span className={`context-map-status context-map-status--${statusClass(selectedObject.status)}`}>{humanStatusLabel(selectedObject.status)}</span>
+                      {selectedPathStage && <span className="tag neutral">{selectedPathStage}</span>}
+                      {selectedOrgKind && <span className="tag neutral">{selectedOrgKind}</span>}
+                      {selectedWorkState && <span className="tag neutral">{titleizeMachineValue(selectedWorkState)}</span>}
+                      {selectedStaffingState && <span className="tag neutral">{titleizeMachineValue(selectedStaffingState)}</span>}
                     </div>
-                    {propertyText(selectedObject.properties, "nextAction") && (
-                      <p className="context-map-next-action">{propertyText(selectedObject.properties, "nextAction")}</p>
-                    )}
-                    {propertyText(selectedObject.properties, "approvalRule") && (
-                      <p className="context-map-next-action">Approval: {propertyText(selectedObject.properties, "approvalRule")}</p>
-                    )}
-                    {selectedAccountabilities.length > 0 && (
-                      <div className="context-map-property-list">
-                        <strong>Accountabilities</strong>
-                        <ul>
-                          {selectedAccountabilities.slice(0, 5).map((accountability) => (
-                            <li key={accountability}>{accountability}</li>
-                          ))}
-                        </ul>
-                      </div>
-                    )}
-                    {selectedControls.length > 0 && (
-                      <div className="context-map-property-list">
-                        <strong>Governance controls</strong>
-                        <ul>
-                          {selectedControls.slice(0, 5).map((control) => (
-                            <li key={control}>{control}</li>
-                          ))}
-                        </ul>
-                      </div>
-                    )}
-                    {selectedAllowedActions.length > 0 && (
-                      <div className="context-map-property-list">
-                        <strong>Allowed actions</strong>
-                        <ul>
-                          {selectedAllowedActions.slice(0, 5).map((action) => (
-                            <li key={action}>{action}</li>
-                          ))}
-                        </ul>
-                      </div>
-                    )}
                   </div>
+                </section>
+
+                <section className="context-map-inspector-section">
+                  <h2>Current state</h2>
+                  <p>
+                    {selectedWorkState
+                      ? `This is ${titleizeMachineValue(selectedWorkState).toLowerCase()}.`
+                      : selectedStaffingState
+                        ? `Staffing is ${titleizeMachineValue(selectedStaffingState).toLowerCase()}.`
+                        : `This is ${humanStatusLabel(selectedObject.status).toLowerCase()}.`}
+                  </p>
+                  {selectedApprovalRule && <p className="context-map-next-action">{selectedApprovalRule}</p>}
+                </section>
+
+                {data.mapView.viewType === "agent" && selectedObject.objectType === "Agent" ? (
+                  <>
+                    <section className="context-map-inspector-section">
+                      <h2>What it can read or use</h2>
+                      {dependencyRelationships.length || supportingRelationships.length ? (
+                        <ul className="context-map-human-list">
+                          {[...dependencyRelationships, ...supportingRelationships].slice(0, 6).map((relationship) => (
+                            <li key={relationship.id}>{humanRelationshipSentence(relationship, selectedObject.id, objectById)}</li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <p className="muted">No input or tool is shown for this agent yet.</p>
+                      )}
+                    </section>
+
+                    <section className="context-map-inspector-section">
+                      <h2>What it can propose</h2>
+                      {selectedAllowedActions.length ? (
+                        <ul className="context-map-human-list">
+                          {selectedAllowedActions.slice(0, 5).map((action) => <li key={action}>{action}</li>)}
+                        </ul>
+                      ) : (
+                        <p className="muted">This map does not list proposal actions yet.</p>
+                      )}
+                    </section>
+
+                    <section className="context-map-inspector-section">
+                      <h2>What needs human approval</h2>
+                      {selectedControls.length || selectedApprovalRule ? (
+                        <ul className="context-map-human-list">
+                          {selectedApprovalRule && <li>{selectedApprovalRule}</li>}
+                          {selectedControls.slice(0, 5).map((control) => <li key={control}>{control}</li>)}
+                        </ul>
+                      ) : (
+                        <p className="muted">No approval rule is shown for this agent yet.</p>
+                      )}
+                      <p className="muted">Last run is available from the agent detail page.</p>
+                      {selectedAgentHref && (
+                        <a className="secondary small context-map-open-link" href={selectedAgentHref}>
+                          Open agent
+                        </a>
+                      )}
+                    </section>
+                  </>
                 ) : (
-                  <p className="muted">Select a node or relationship to inspect evidence and provenance.</p>
+                  <>
+                    <section className="context-map-inspector-section">
+                      <h2>Owner / accountable team</h2>
+                      {ownerRelationships.length ? (
+                        <ul className="context-map-human-list">
+                          {ownerRelationships.slice(0, 5).map((relationship) => (
+                            <li key={relationship.id}>{humanRelationshipSentence(relationship, selectedObject.id, objectById)}</li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <p className="muted">No owner is shown on this map yet.</p>
+                      )}
+                    </section>
+
+                    <section className="context-map-inspector-section">
+                      <h2>What it depends on</h2>
+                      {dependencyRelationships.length || supportingRelationships.length ? (
+                        <ul className="context-map-human-list">
+                          {[...dependencyRelationships, ...supportingRelationships].slice(0, 6).map((relationship) => (
+                            <li key={relationship.id}>{humanRelationshipSentence(relationship, selectedObject.id, objectById)}</li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <p className="muted">No dependency is shown on this map yet.</p>
+                      )}
+                    </section>
+
+                    <section className="context-map-inspector-section">
+                      <h2>What is blocking it</h2>
+                      {blockerRelationships.length ? (
+                        <ul className="context-map-human-list">
+                          {blockerRelationships.slice(0, 5).map((relationship) => (
+                            <li key={relationship.id}>{humanRelationshipSentence(relationship, selectedObject.id, objectById)}</li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <p className="muted">No blocker is shown on this map.</p>
+                      )}
+                    </section>
+                  </>
                 )}
+
+                <section className="context-map-inspector-section">
+                  <h2>Evidence</h2>
+                  {selectedObject.evidenceRefs.length ? (
+                    <div className="context-map-evidence-list">
+                      {selectedObject.evidenceRefs.slice(0, 5).map((evidence) => (
+                        <div key={evidence.id} className="context-map-evidence-item">
+                          <div className="nr-item-meta">{evidenceSourceLabel(evidence.sourceType)}</div>
+                          <p>{evidence.quote ?? "Evidence is attached, but no excerpt is available."}</p>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="muted">No supporting evidence is attached yet.</p>
+                  )}
+                </section>
+
+                <section className="context-map-inspector-section">
+                  <h2>Recommended next step</h2>
+                  {regionContextStatus === "loading" ? (
+                    <p className="muted" aria-live="polite">Looking for the best next step...</p>
+                  ) : regionContextStatus === "error" ? (
+                    <p className="form-message form-message-error" role="alert">Could not load recommendations for this selection.</p>
+                  ) : selectedNextAction ? (
+                    <p className="context-map-next-action">{selectedNextAction}</p>
+                  ) : regionContext?.likelyNextActions.length ? (
+                    <p className="context-map-next-action">{regionContext.likelyNextActions[0].title}</p>
+                  ) : regionContext?.contextGaps.length ? (
+                    <p className="context-map-next-action">{regionContext.contextGaps[0].title}</p>
+                  ) : (
+                    <p className="muted">No recommended action is shown yet.</p>
+                  )}
+                </section>
+
+                {selectedAccountabilities.length > 0 && (
+                  <section className="context-map-inspector-section">
+                    <h2>Responsibilities</h2>
+                    <ul className="context-map-human-list">
+                      {selectedAccountabilities.slice(0, 5).map((accountability) => (
+                        <li key={accountability}>{accountability}</li>
+                      ))}
+                    </ul>
+                  </section>
+                )}
+
+                <details className="context-map-technical-details">
+                  <summary>Technical details</summary>
+                  <dl className="context-map-definition-list">
+                    <div><dt>Type</dt><dd>{selectedObject.objectType}</dd></div>
+                    <div><dt>Status</dt><dd>{selectedObject.status}</dd></div>
+                    <div><dt>Confidence</dt><dd>{confidenceLabel(selectedObject.confidence)}</dd></div>
+                    <div><dt>Source</dt><dd>{sourceLabel(selectedObject)}</dd></div>
+                    <div><dt>ID</dt><dd>{selectedObject.id}</dd></div>
+                  </dl>
+                  {regionContext && (
+                    <div className="context-map-technical-stack">
+                      <strong>Agent context</strong>
+                      <p>{regionContext.objects.length} objects, {regionContext.relationships.length} relationships, {regionContext.evidenceRefs.length} evidence refs.</p>
+                      {regionContext.rankedFacts.length > 0 && (
+                        <div>
+                          <strong>Ranked facts</strong>
+                          <ul>
+                            {regionContext.rankedFacts.slice(0, 5).map((fact) => (
+                              <li key={`${fact.kind}-${fact.id}`}>{fact.type}: {fact.title}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                      {regionContext.sourceRecords.length > 0 && (
+                        <div>
+                          <strong>Source records</strong>
+                          <ul>
+                            {regionContext.sourceRecords.slice(0, 4).map((record) => (
+                              <li key={`${record.sourceType}-${record.sourceId}`}>
+                                {record.sourceType}: {record.sourceTitle ?? record.sourceId}
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </details>
+              </>
+            ) : (
+              <section className="context-map-inspector-section">
+                <h2>What this is</h2>
+                <p className="muted">Select a node or connection to inspect what it means, who owns it, what blocks it, and what can happen next.</p>
               </section>
             )}
 
             <section className="context-map-inspector-section">
-              <h2>Evidence</h2>
-              {(selectedRelationship?.evidenceRefs ?? selectedObject?.evidenceRefs ?? []).length ? (
-                <div className="context-map-evidence-list">
-                  {(selectedRelationship?.evidenceRefs ?? selectedObject?.evidenceRefs ?? []).slice(0, 5).map((evidence) => (
-                    <div key={evidence.id} className="context-map-evidence-item">
-                      <div className="nr-item-meta">{evidence.sourceType} - {confidenceLabel(evidence.relevanceScore)}</div>
-                      <p>{evidence.quote ?? evidence.sourceId}</p>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <p className="muted">No evidence refs attached yet.</p>
-              )}
-            </section>
-
-            <section className="context-map-inspector-section">
-              <h2>Neighbors</h2>
-              {selectedRelationships.length ? (
-                <div className="context-map-neighbor-list">
-                  {selectedRelationships.slice(0, 8).map((relationship) => {
-                    const otherId = relationship.sourceObjectId === selectedObject?.id ? relationship.targetObjectId : relationship.sourceObjectId;
-                    return (
-                      <button
-                        key={relationship.id}
-                        type="button"
-                        className="secondary small"
-                        onClick={() => {
-                          setSelectedRelationshipId(null);
-                          setSelectedObjectId(otherId);
-                          setSelectedObjectIds([otherId]);
-                        }}
-                      >
-                        {relationship.relationshipType}: {objectById.get(otherId)?.title ?? otherId}
-                      </button>
-                    );
-                  })}
-                </div>
-              ) : (
-                <p className="muted">No graph relationships connected to this object.</p>
-              )}
-            </section>
-
-            <section className="context-map-inspector-section">
-              <h2>Region Context</h2>
-              {regionContextStatus === "loading" ? (
-                <p className="muted" aria-live="polite">Loading selected-region context...</p>
-              ) : regionContextStatus === "error" ? (
-                <p className="form-message form-message-error" role="alert">Could not build context for this selection.</p>
-              ) : regionContext ? (
-                <div className="context-map-context-stack">
-                  <div className="context-map-pill-row">
-                    <span className="tag neutral">{regionContext.objects.length} objects</span>
-                    <span className="tag neutral">{regionContext.relationships.length} relationships</span>
-                    <span className="tag neutral">{regionContext.evidenceRefs.length} evidence refs</span>
-                    <span className="tag neutral">{regionContext.directNeighbors.length} direct neighbors</span>
-                    <span className="tag neutral">{regionContext.permissions.canPropose ? "can propose" : "read only"}</span>
-                    {regionContext.staleOrDisputed.length > 0 && <span className="tag danger">{regionContext.staleOrDisputed.length} stale/disputed</span>}
-                  </div>
-                  {regionContext.directNeighbors.length > 0 && (
-                    <div>
-                      <strong>{directNeighborHeading(data.mapView.viewType)}</strong>
-                      <ul>
-                        {regionContext.directNeighbors.slice(0, 4).map((neighbor) => (
-                          <li key={`${neighbor.relationshipId}-${neighbor.objectId}`}>
-                            {neighbor.relationshipType}: {neighbor.title}
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-                  {regionContext.contextGaps.length > 0 && (
-                    <div>
-                      <strong>Gaps</strong>
-                      <ul>
-                        {regionContext.contextGaps.slice(0, 4).map((gap) => (
-                          <li key={gap.id}>{gap.title}</li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-                  {regionContext.likelyNextActions.length > 0 && (
-                    <div>
-                      <strong>Likely next actions</strong>
-                      <ul>
-                        {regionContext.likelyNextActions.slice(0, 4).map((action) => (
-                          <li key={action.id}>{action.title}</li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-                  {regionContext.rankedFacts.length > 0 && (
-                    <div>
-                      <strong>Ranked facts</strong>
-                      <ul>
-                        {regionContext.rankedFacts.slice(0, 5).map((fact) => (
-                          <li key={`${fact.kind}-${fact.id}`}>{fact.type}: {fact.title}</li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-                  {regionContext.sourceRecords.length > 0 && (
-                    <div>
-                      <strong>Source records</strong>
-                      <ul>
-                        {regionContext.sourceRecords.slice(0, 4).map((record) => (
-                          <li key={`${record.sourceType}-${record.sourceId}`}>
-                            {record.sourceType}: {record.sourceTitle ?? record.sourceId}
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-                  {regionContext.openQuestions.length > 0 && (
-                    <div>
-                      <strong>Open questions</strong>
-                      <ul>
-                        {regionContext.openQuestions.slice(0, 3).map((question) => <li key={question.id}>{question.title}</li>)}
-                      </ul>
-                    </div>
-                  )}
-                  {regionContext.knowledgeChunks.length > 0 && (
-                    <div>
-                      <strong>Source snippets</strong>
-                      <ul>
-                        {regionContext.knowledgeChunks.slice(0, 3).map((chunk) => <li key={chunk.id}>{chunk.sourceTitle ?? chunk.sourceId}</li>)}
-                      </ul>
-                    </div>
-                  )}
-                </div>
-              ) : (
-                <p className="muted">Select a node, edge, or multi-node region to build scoped context.</p>
-              )}
-            </section>
-
-            <section className="context-map-inspector-section">
-              <h2>Proposed Diffs</h2>
+              <h2>Pending changes</h2>
               {proposedDiffs.length ? (
                 <div className="context-map-diff-list">
                   {proposedDiffs.map((diff) => {
-                    const preview = diffPreviewLines(diff.diffJson, objectById, data.mapViews);
+                    const preview = diffHumanPreview(diff.diffJson, objectById, data.mapViews);
                     const expanded = expandedDiffId === diff.id;
                     const editing = editingDiffId === diff.id;
                     return (
                       <div key={diff.id} className="context-map-diff-item">
                         <div className="context-map-diff-heading">
                           <div>
-                            <div className="nr-item-meta">{diff.status} - {stableDateLabel(diff.createdAt)}</div>
-                            <p>{diff.reason ?? "Proposed graph change"}</p>
+                            <div className="nr-item-meta">{humanStatusLabel(diff.status)} - {stableDateLabel(diff.createdAt)}</div>
+                            <p>{diff.reason ?? preview.summary}</p>
                           </div>
                           <button className="secondary small" type="button" onClick={() => setExpandedDiffId(expanded ? null : diff.id)}>
-                            {expanded ? "Hide" : "Compare"}
+                            {expanded ? "Hide" : "Review"}
                           </button>
                         </div>
+                        <p className="context-map-diff-summary">{preview.summary}</p>
                         <div className="context-map-pill-row">
-                          <span className={`context-map-status context-map-status--${diff.status === "approved" ? "approved" : diff.status === "pending" ? "pending" : "neutral"}`}>{diff.status}</span>
-                          <span className="tag neutral">{diffCountLabel(diff.diffJson)}</span>
+                          <span className={`context-map-status context-map-status--${diff.status === "approved" ? "approved" : diff.status === "pending" ? "pending" : "neutral"}`}>{humanStatusLabel(diff.status)}</span>
+                          <span className="tag neutral">Human review required</span>
                         </div>
                         {expanded && (
-                          <div className="context-map-diff-compare">
-                            <div>
-                              <strong>Before</strong>
-                              <ul>
-                                {preview.before.map((line, index) => <li key={`before-${index}-${line}`}>{line}</li>)}
-                              </ul>
+                          <div className="context-map-review-stack">
+                            <div className="context-map-diff-groups">
+                              {preview.groups.adds.length > 0 && (
+                                <div>
+                                  <strong>Adds</strong>
+                                  <ul>{preview.groups.adds.map((line) => <li key={line}>{line}</li>)}</ul>
+                                </div>
+                              )}
+                              {preview.groups.connects.length > 0 && (
+                                <div>
+                                  <strong>Connects</strong>
+                                  <ul>{preview.groups.connects.map((line) => <li key={line}>{line}</li>)}</ul>
+                                </div>
+                              )}
+                              {preview.groups.updates.length > 0 && (
+                                <div>
+                                  <strong>Updates</strong>
+                                  <ul>{preview.groups.updates.map((line) => <li key={line}>{line}</li>)}</ul>
+                                </div>
+                              )}
+                              {preview.groups.needsApproval.length > 0 && (
+                                <div>
+                                  <strong>Needs approval</strong>
+                                  <ul>{preview.groups.needsApproval.map((line) => <li key={line}>{line}</li>)}</ul>
+                                </div>
+                              )}
                             </div>
-                            <div>
-                              <strong>After approval</strong>
-                              <ul>
-                                {preview.after.map((line, index) => <li key={`after-${index}-${line}`}>{line}</li>)}
-                              </ul>
+                            <div className="context-map-diff-compare">
+                              <div>
+                                <strong>Current map</strong>
+                                <ul>
+                                  {preview.currentMap.map((line, index) => <li key={`before-${index}-${line}`}>{line}</li>)}
+                                </ul>
+                              </div>
+                              <div>
+                                <strong>If approved</strong>
+                                <ul>
+                                  {preview.ifApproved.map((line, index) => <li key={`after-${index}-${line}`}>{line}</li>)}
+                                </ul>
+                              </div>
                             </div>
+                            <details className="context-map-technical-details context-map-diff-technical">
+                              <summary>Technical details</summary>
+                              <p>{diffTechnicalCountLabel(diff.diffJson)}</p>
+                              <pre>{JSON.stringify(diffJsonRecord(diff.diffJson), null, 2)}</pre>
+                            </details>
                           </div>
                         )}
                         {editing && (
@@ -1247,7 +1592,7 @@ export default function ContextMapClient({ workspaceId, data, includeStale = fal
                   })}
                 </div>
               ) : (
-                <p className="muted">No pending graph diffs.</p>
+                <p className="muted">No pending changes.</p>
               )}
             </section>
 
