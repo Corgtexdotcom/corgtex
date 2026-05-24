@@ -357,6 +357,17 @@ function stringArrayFromQuery(query: Prisma.JsonValue, key: string) {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.length > 0) : [];
 }
 
+function jsonValueRecord(value: Prisma.JsonValue | null | undefined): JsonRecord {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return value as JsonRecord;
+}
+
+function stringProperty(value: Prisma.JsonValue | null | undefined, key: string) {
+  const record = jsonValueRecord(value);
+  const property = record[key];
+  return typeof property === "string" && property.trim().length > 0 ? property.trim() : null;
+}
+
 function visibleMapViewWhere(workspaceId: string, userId: string | null) {
   return {
     workspaceId,
@@ -500,9 +511,13 @@ export async function ensureDefaultContextMapView(actor: AppActor, workspaceId: 
   return prisma.contextMapView.create({
     data: {
       workspaceId,
-      name: "Living process map",
+      name: "Critical path process map",
       viewType: "process",
-      query: { objectTypes: ["Process", "ProcessStep", "Decision", "Task", "Risk", "Question", "Tool", "Team", "Role", "Meeting"] },
+      query: {
+        mode: "criticalPath",
+        objectTypes: ["Process", "ProcessStep", "Decision", "Task", "Risk", "Question", "Tool", "Team", "Role", "Meeting"],
+        relationshipTypes: ["part_of", "depends_on", "blocks", "owns", "assigned_to", "supports", "uses", "created_in", "decided_in", "needs_approval_from"],
+      },
       createdByUserId: null,
     },
   });
@@ -541,6 +556,7 @@ export async function getContextMapData(actor: AppActor, params: {
     take: 200,
   });
   const objectIds = objects.map((object) => object.id);
+  const relationshipTypes = stringArrayFromQuery(mapView.query, "relationshipTypes");
   const [relationships, mapViews, layoutItems, proposedDiffs] = await Promise.all([
     prisma.contextGraphRelationship.findMany({
       where: {
@@ -548,6 +564,7 @@ export async function getContextMapData(actor: AppActor, params: {
         status: params.includeStale ? { not: "archived" } : { notIn: ["archived", "stale"] },
         sourceObjectId: { in: objectIds },
         targetObjectId: { in: objectIds },
+        ...(relationshipTypes.length ? { relationshipType: { in: relationshipTypes } } : {}),
       },
       include: {
         evidenceRefs: {
@@ -903,6 +920,46 @@ export async function applyContextGraphProposedDiff(actor: AppActor, params: {
   });
 }
 
+const OBJECT_CONTEXT_WEIGHTS: Record<string, number> = {
+  Task: 36,
+  Risk: 34,
+  Decision: 30,
+  ProcessStep: 28,
+  Process: 24,
+  Team: 22,
+  Role: 20,
+  Person: 20,
+  Tool: 18,
+  Meeting: 12,
+  Document: 10,
+  Question: 26,
+};
+
+const RELATIONSHIP_CONTEXT_WEIGHTS: Record<string, number> = {
+  blocks: 44,
+  depends_on: 38,
+  owns: 34,
+  assigned_to: 34,
+  needs_approval_from: 32,
+  supports: 24,
+  uses: 20,
+  part_of: 18,
+  decided_in: 16,
+  created_in: 14,
+  contradicts: 30,
+};
+
+function statusContextWeight(status: string) {
+  if (status === "disputed" || status === "stale") return 28;
+  if (status === "proposed" || status === "draft") return 18;
+  if (status === "approved") return 8;
+  return 0;
+}
+
+function relationshipContextWeight(type: string) {
+  return RELATIONSHIP_CONTEXT_WEIGHTS[type] ?? 8;
+}
+
 export async function buildSelectedRegionContext(actor: AppActor, params: {
   workspaceId: string;
   mapViewId?: string | null;
@@ -929,6 +986,8 @@ export async function buildSelectedRegionContext(actor: AppActor, params: {
 
   const objectsById = new Map<string, Awaited<ReturnType<typeof prisma.contextGraphObject.findMany>>[number]>();
   const relationshipsById = new Map<string, Awaited<ReturnType<typeof prisma.contextGraphRelationship.findMany>>[number]>();
+  const objectDistanceById = new Map<string, number>();
+  const relationshipDistanceById = new Map<string, number>();
   let frontier = new Set(selectedIds);
 
   const selectedObjects = await prisma.contextGraphObject.findMany({
@@ -939,7 +998,10 @@ export async function buildSelectedRegionContext(actor: AppActor, params: {
     },
   });
   invariant(selectedObjects.length === selectedIds.length, 404, "NOT_FOUND", "One or more selected objects were not found.");
-  for (const object of selectedObjects) objectsById.set(object.id, object);
+  for (const object of selectedObjects) {
+    objectsById.set(object.id, object);
+    objectDistanceById.set(object.id, 0);
+  }
 
   for (let currentDepth = 0; currentDepth < depth; currentDepth += 1) {
     const frontierIds = [...frontier];
@@ -957,6 +1019,13 @@ export async function buildSelectedRegionContext(actor: AppActor, params: {
     for (const relationship of relationships) {
       if (!isReadableStatus(relationship.status, params.includeStale)) continue;
       relationshipsById.set(relationship.id, relationship);
+      relationshipDistanceById.set(
+        relationship.id,
+        Math.min(
+          relationshipDistanceById.get(relationship.id) ?? Number.POSITIVE_INFINITY,
+          currentDepth,
+        ),
+      );
       if (!objectsById.has(relationship.sourceObjectId)) nextFrontier.add(relationship.sourceObjectId);
       if (!objectsById.has(relationship.targetObjectId)) nextFrontier.add(relationship.targetObjectId);
     }
@@ -972,6 +1041,10 @@ export async function buildSelectedRegionContext(actor: AppActor, params: {
     for (const object of neighbors) {
       if (!isReadableStatus(object.status, params.includeStale)) continue;
       objectsById.set(object.id, object);
+      objectDistanceById.set(
+        object.id,
+        Math.min(objectDistanceById.get(object.id) ?? Number.POSITIVE_INFINITY, currentDepth + 1),
+      );
       frontier.add(object.id);
     }
   }
@@ -1017,16 +1090,246 @@ export async function buildSelectedRegionContext(actor: AppActor, params: {
     ...[...relationshipsById.values()].filter((relationship) => relationship.status === "stale" || relationship.status === "disputed"),
   ];
 
+  const selectedIdSet = new Set(selectedIds);
+  const objectEvidenceCountById = new Map<string, number>();
+  const relationshipEvidenceCountById = new Map<string, number>();
+  for (const evidenceRef of evidenceRefs) {
+    if (evidenceRef.objectId) objectEvidenceCountById.set(evidenceRef.objectId, (objectEvidenceCountById.get(evidenceRef.objectId) ?? 0) + 1);
+    if (evidenceRef.relationshipId) relationshipEvidenceCountById.set(evidenceRef.relationshipId, (relationshipEvidenceCountById.get(evidenceRef.relationshipId) ?? 0) + 1);
+  }
+
+  const relationshipsByObjectId = new Map<string, Array<Awaited<ReturnType<typeof prisma.contextGraphRelationship.findMany>>[number]>>();
+  for (const relationship of relationshipsById.values()) {
+    const sourceRelationships = relationshipsByObjectId.get(relationship.sourceObjectId) ?? [];
+    sourceRelationships.push(relationship);
+    relationshipsByObjectId.set(relationship.sourceObjectId, sourceRelationships);
+    const targetRelationships = relationshipsByObjectId.get(relationship.targetObjectId) ?? [];
+    targetRelationships.push(relationship);
+    relationshipsByObjectId.set(relationship.targetObjectId, targetRelationships);
+  }
+
+  const objectScore = (object: Awaited<ReturnType<typeof prisma.contextGraphObject.findMany>>[number]) => {
+    const distance = objectDistanceById.get(object.id) ?? 3;
+    const workState = stringProperty(object.properties, "workState");
+    const relatedRelationshipWeight = Math.max(
+      0,
+      ...(relationshipsByObjectId.get(object.id) ?? []).map((relationship) => relationshipContextWeight(relationship.relationshipType)),
+    );
+    return (
+      (selectedIdSet.has(object.id) ? 180 : 0)
+      + Math.max(0, 3 - distance) * 42
+      + (OBJECT_CONTEXT_WEIGHTS[object.objectType] ?? 8)
+      + statusContextWeight(object.status)
+      + (objectEvidenceCountById.get(object.id) ?? 0) * 12
+      + relatedRelationshipWeight * 0.6
+      + (workState === "blocked" ? 28 : workState === "in_progress" ? 18 : 0)
+    );
+  };
+
+  const relationshipScore = (relationship: Awaited<ReturnType<typeof prisma.contextGraphRelationship.findMany>>[number]) => {
+    const distance = relationshipDistanceById.get(relationship.id) ?? 3;
+    const touchesSelection = selectedIdSet.has(relationship.sourceObjectId) || selectedIdSet.has(relationship.targetObjectId);
+    return (
+      (touchesSelection ? 120 : 0)
+      + Math.max(0, 3 - distance) * 32
+      + relationshipContextWeight(relationship.relationshipType)
+      + statusContextWeight(relationship.status)
+      + (relationshipEvidenceCountById.get(relationship.id) ?? 0) * 14
+    );
+  };
+
+  const rankedObjects = [...objectsById.values()].sort((left, right) => objectScore(right) - objectScore(left) || left.title.localeCompare(right.title));
+  const rankedRelationships = [...relationshipsById.values()].sort((left, right) => relationshipScore(right) - relationshipScore(left) || left.relationshipType.localeCompare(right.relationshipType));
+
+  const directNeighbors = rankedRelationships
+    .filter((relationship) => {
+      const sourceSelected = selectedIdSet.has(relationship.sourceObjectId);
+      const targetSelected = selectedIdSet.has(relationship.targetObjectId);
+      return sourceSelected !== targetSelected;
+    })
+    .map((relationship) => {
+      const sourceSelected = selectedIdSet.has(relationship.sourceObjectId);
+      const neighborId = sourceSelected ? relationship.targetObjectId : relationship.sourceObjectId;
+      const neighbor = objectsById.get(neighborId);
+      return neighbor ? {
+        objectId: neighbor.id,
+        title: neighbor.title,
+        objectType: neighbor.objectType,
+        relationshipId: relationship.id,
+        relationshipType: relationship.relationshipType,
+        direction: sourceSelected ? "outgoing" : "incoming",
+        status: relationship.status,
+        score: relationshipScore(relationship),
+      } : null;
+    })
+    .filter((neighbor): neighbor is NonNullable<typeof neighbor> => Boolean(neighbor))
+    .slice(0, 12);
+
+  const chunkById = new Map(knowledgeChunks.map((chunk) => [chunk.id, chunk]));
+  const sourceRecordsByKey = new Map<string, {
+    sourceType: string;
+    sourceId: string;
+    sourceTitle: string | null;
+    quote: string | null;
+    relevanceScore: number | null;
+    evidenceRefIds: string[];
+  }>();
+  for (const evidenceRef of evidenceRefs) {
+    const key = `${evidenceRef.sourceType}:${evidenceRef.sourceId}`;
+    const chunk = evidenceRef.knowledgeChunkId ? chunkById.get(evidenceRef.knowledgeChunkId) : null;
+    const existing = sourceRecordsByKey.get(key);
+    const relevanceScore = evidenceRef.relevanceScore ?? existing?.relevanceScore ?? null;
+    sourceRecordsByKey.set(key, {
+      sourceType: evidenceRef.sourceType,
+      sourceId: evidenceRef.sourceId,
+      sourceTitle: chunk?.sourceTitle ?? existing?.sourceTitle ?? null,
+      quote: existing?.quote ?? evidenceRef.quote ?? null,
+      relevanceScore: existing?.relevanceScore != null && relevanceScore != null
+        ? Math.max(existing.relevanceScore, relevanceScore)
+        : relevanceScore,
+      evidenceRefIds: [...(existing?.evidenceRefIds ?? []), evidenceRef.id],
+    });
+  }
+  const sourceRecords = [...sourceRecordsByKey.values()]
+    .sort((left, right) => (right.relevanceScore ?? 0) - (left.relevanceScore ?? 0) || left.sourceType.localeCompare(right.sourceType))
+    .slice(0, 12);
+
+  const ownerRelationshipTypes = new Set(["owns", "assigned_to", "needs_approval_from"]);
+  const ownerObjectTypes = new Set(["Person", "Team", "Role"]);
+  const ownerRequiredTypes = new Set(["Process", "ProcessStep", "Decision", "Task", "Risk"]);
+  const evidenceRequiredTypes = new Set(["Process", "ProcessStep", "Decision", "Task", "Risk"]);
+  const focusObjects = rankedObjects.filter((object) => (objectDistanceById.get(object.id) ?? 3) <= 1).slice(0, 16);
+  const contextGaps: Array<{ id: string; objectId: string; kind: string; severity: "high" | "medium" | "low"; title: string; detail: string }> = [];
+
+  for (const object of focusObjects) {
+    const relatedRelationships = relationshipsByObjectId.get(object.id) ?? [];
+    const hasOwner = relatedRelationships.some((relationship) => {
+      if (!ownerRelationshipTypes.has(relationship.relationshipType)) return false;
+      const otherId = relationship.sourceObjectId === object.id ? relationship.targetObjectId : relationship.sourceObjectId;
+      const otherObject = objectsById.get(otherId);
+      return otherObject ? ownerObjectTypes.has(otherObject.objectType) : false;
+    });
+    const hasEvidence = (objectEvidenceCountById.get(object.id) ?? 0) > 0
+      || relatedRelationships.some((relationship) => (relationshipEvidenceCountById.get(relationship.id) ?? 0) > 0);
+    const hasBlocker = relatedRelationships.some((relationship) => relationship.relationshipType === "blocks");
+    const workState = stringProperty(object.properties, "workState");
+
+    if (ownerRequiredTypes.has(object.objectType) && !hasOwner) {
+      contextGaps.push({
+        id: `${object.id}:missing-owner`,
+        objectId: object.id,
+        kind: "missing_owner",
+        severity: object.objectType === "Task" || object.objectType === "Risk" ? "high" : "medium",
+        title: `Missing owner: ${object.title}`,
+        detail: `${object.objectType} has no direct owns, assigned_to, or approval-owner relationship in this region.`,
+      });
+    }
+    if (evidenceRequiredTypes.has(object.objectType) && !hasEvidence) {
+      contextGaps.push({
+        id: `${object.id}:missing-evidence`,
+        objectId: object.id,
+        kind: "missing_evidence",
+        severity: object.status === "approved" ? "high" : "medium",
+        title: `Missing evidence: ${object.title}`,
+        detail: `${object.objectType} is visible in the process path but has no attached evidence ref in the selected context.`,
+      });
+    }
+    if (workState === "blocked" && !hasBlocker) {
+      contextGaps.push({
+        id: `${object.id}:missing-blocker-link`,
+        objectId: object.id,
+        kind: "missing_blocker_link",
+        severity: "high",
+        title: `Blocked without blocker link: ${object.title}`,
+        detail: "The work state is blocked, but no blocks relationship explains what is blocking it.",
+      });
+    }
+    if (object.status === "proposed" || object.status === "draft") {
+      contextGaps.push({
+        id: `${object.id}:needs-review`,
+        objectId: object.id,
+        kind: "needs_review",
+        severity: object.objectType === "Risk" ? "high" : "medium",
+        title: `Needs review: ${object.title}`,
+        detail: `${object.objectType} is not approved graph truth yet and should be reviewed before agents act on it as fact.`,
+      });
+    }
+  }
+
+  const likelyNextActions: Array<{ id: string; title: string; reason: string }> = [];
+  for (const relationship of rankedRelationships.filter((item) => item.relationshipType === "blocks").slice(0, 2)) {
+    const sourceObject = objectsById.get(relationship.sourceObjectId);
+    const targetObject = objectsById.get(relationship.targetObjectId);
+    if (sourceObject && targetObject) {
+      likelyNextActions.push({
+        id: `${relationship.id}:resolve-blocker`,
+        title: `Resolve blocker: ${sourceObject.title}`,
+        reason: `${sourceObject.title} blocks ${targetObject.title}.`,
+      });
+    }
+  }
+  for (const gap of contextGaps.filter((item) => item.kind === "missing_owner" || item.kind === "missing_evidence").slice(0, 3)) {
+    likelyNextActions.push({
+      id: `${gap.id}:action`,
+      title: gap.kind === "missing_owner" ? gap.title.replace("Missing owner", "Assign owner") : gap.title.replace("Missing evidence", "Attach evidence"),
+      reason: gap.detail,
+    });
+  }
+  for (const object of rankedObjects.filter((item) => item.objectType === "Task" && (item.status === "draft" || item.status === "proposed")).slice(0, 2)) {
+    likelyNextActions.push({
+      id: `${object.id}:review-task`,
+      title: `Review task: ${object.title}`,
+      reason: "Task is still draft/proposed and needs human approval before it becomes company truth.",
+    });
+  }
+
+  const dedupedNextActions = [...new Map(likelyNextActions.map((action) => [action.title, action])).values()].slice(0, 5);
+  const rankedFacts = [
+    ...rankedObjects.map((object) => ({
+      kind: "object" as const,
+      id: object.id,
+      title: object.title,
+      type: object.objectType,
+      status: object.status,
+      distance: objectDistanceById.get(object.id) ?? null,
+      score: objectScore(object),
+      evidenceCount: objectEvidenceCountById.get(object.id) ?? 0,
+    })),
+    ...rankedRelationships.map((relationship) => {
+      const sourceObject = objectsById.get(relationship.sourceObjectId);
+      const targetObject = objectsById.get(relationship.targetObjectId);
+      return {
+        kind: "relationship" as const,
+        id: relationship.id,
+        title: `${sourceObject?.title ?? relationship.sourceObjectId} ${relationship.relationshipType} ${targetObject?.title ?? relationship.targetObjectId}`,
+        type: relationship.relationshipType,
+        status: relationship.status,
+        distance: relationshipDistanceById.get(relationship.id) ?? null,
+        score: relationshipScore(relationship),
+        evidenceCount: relationshipEvidenceCountById.get(relationship.id) ?? 0,
+      };
+    }),
+  ].sort((left, right) => right.score - left.score || left.title.localeCompare(right.title)).slice(0, 24);
+
   return {
     selectedObjectIds: selectedIds,
     mapViewId: params.mapViewId ?? null,
     temporalScope: { asOf: asOf?.toISOString() ?? "now", includeStale: Boolean(params.includeStale) },
-    objects: [...objectsById.values()],
-    relationships: [...relationshipsById.values()],
+    objects: rankedObjects,
+    relationships: rankedRelationships,
+    rankedFacts,
+    directNeighbors,
     evidenceRefs,
+    evidenceSnippets: evidenceRefs
+      .filter((evidenceRef) => evidenceRef.quote)
+      .sort((left, right) => (right.relevanceScore ?? 0) - (left.relevanceScore ?? 0))
+      .slice(0, 10),
+    sourceRecords,
     knowledgeChunks,
     staleOrDisputed,
-    openQuestions: [...objectsById.values()].filter((object) => object.objectType === "Question" && object.status !== "archived"),
+    contextGaps: contextGaps.slice(0, 12),
+    likelyNextActions: dedupedNextActions,
+    openQuestions: rankedObjects.filter((object) => object.objectType === "Question" && object.status !== "archived"),
     permissions: {
       actorKind: actor.kind,
       canRead: true,
