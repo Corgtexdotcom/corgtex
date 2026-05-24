@@ -59,10 +59,10 @@ async function main() {
 
   console.log(JSON.stringify(output, null, 2));
 
-  if (!dryRun && createIssues && incidents.length > 0) {
+  if (!dryRun && createIssues) {
     const issueResult = spawnSync(
       process.execPath,
-      [new URL("./github-incident.mjs", import.meta.url).pathname],
+      [new URL("./github-incident.mjs", import.meta.url).pathname, "--sync-resolved"],
       {
         input: JSON.stringify(incidents),
         encoding: "utf8",

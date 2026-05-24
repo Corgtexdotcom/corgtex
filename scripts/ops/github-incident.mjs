@@ -13,6 +13,8 @@ import {
 
 const args = parseArgs(process.argv.slice(2));
 const dryRun = Boolean(args["dry-run"]);
+const syncResolved = Boolean(args["sync-resolved"]);
+const RESOLUTION_BLOCKING_LABELS = new Set(["halt-agents", "needs-replan"]);
 
 async function main() {
   const incidents = await readIncidents();
@@ -25,17 +27,17 @@ async function main() {
   }));
 
   if (dryRun) {
-    console.log(JSON.stringify({ dryRun: true, issues: plans }, null, 2));
+    console.log(JSON.stringify({ dryRun: true, syncResolved, issues: plans }, null, 2));
     return;
   }
 
   const api = githubApiConfig();
   if (api) {
-    await publishWithGitHubApi(api, plans);
+    await publishWithGitHubApi(api, plans, { syncResolved });
     return;
   }
 
-  publishWithGh(plans);
+  publishWithGh(plans, { syncResolved });
 }
 
 async function readIncidents() {
@@ -66,7 +68,7 @@ async function readStdin() {
   return Buffer.concat(chunks).toString("utf8");
 }
 
-async function publishWithGitHubApi(api, plans) {
+async function publishWithGitHubApi(api, plans, options = {}) {
   for (const plan of plans) {
     await ensureLabelsWithApi(api, plan.labels);
     const existing = await findExistingIssueWithApi(api, plan.searchToken);
@@ -92,6 +94,10 @@ async function publishWithGitHubApi(api, plans) {
       },
     });
     console.log(issue.html_url);
+  }
+
+  if (options.syncResolved) {
+    await closeResolvedIssuesWithApi(api, activeSearchTokens(plans));
   }
 }
 
@@ -161,7 +167,36 @@ async function githubRequest(api, path, options = {}) {
   return payload;
 }
 
-function publishWithGh(plans) {
+async function closeResolvedIssuesWithApi(api, activeTokens) {
+  const issues = await githubRequest(
+    api,
+    `/repos/${api.owner}/${api.repo}/issues?state=open&labels=ops-auto-fix&per_page=100`,
+  );
+  for (const issue of issues) {
+    if (issue.pull_request || !shouldCloseIssue(issue, activeTokens)) continue;
+    const body = resolvedCommentBody();
+    const comment = await githubRequest(
+      api,
+      `/repos/${api.owner}/${api.repo}/issues/${issue.number}/comments`,
+      {
+        method: "POST",
+        body: { body },
+      },
+    );
+    const closed = await githubRequest(
+      api,
+      `/repos/${api.owner}/${api.repo}/issues/${issue.number}`,
+      {
+        method: "PATCH",
+        body: { state: "closed", state_reason: "completed" },
+      },
+    );
+    console.log(comment.html_url);
+    console.log(closed.html_url);
+  }
+}
+
+function publishWithGh(plans, options = {}) {
   for (const plan of plans) {
     ensureLabels(plan.labels);
     const existing = findExistingIssue(plan.searchToken);
@@ -180,6 +215,10 @@ function publishWithGh(plans) {
       "--label",
       plan.labels.join(","),
     ]);
+  }
+
+  if (options.syncResolved) {
+    closeResolvedIssuesWithGh(activeSearchTokens(plans));
   }
 }
 
@@ -204,6 +243,71 @@ function findExistingIssue(searchToken) {
   ]);
   const list = JSON.parse(output || "[]");
   return list[0] ?? null;
+}
+
+function closeResolvedIssuesWithGh(activeTokens) {
+  const output = runGh([
+    "issue",
+    "list",
+    "--state",
+    "open",
+    "--label",
+    "ops-auto-fix",
+    "--json",
+    "number,title,labels",
+    "--limit",
+    "100",
+  ]);
+  const issues = JSON.parse(output || "[]");
+  for (const issue of issues) {
+    if (!shouldCloseIssue(issue, activeTokens)) continue;
+    runGh([
+      "issue",
+      "close",
+      String(issue.number),
+      "--reason",
+      "completed",
+      "--comment",
+      resolvedCommentBody(),
+    ]);
+  }
+}
+
+function activeSearchTokens(plans) {
+  return new Set(plans.map((plan) => plan.searchToken));
+}
+
+function shouldCloseIssue(issue, activeTokens) {
+  const token = issueSearchToken(issue);
+  if (!token || activeTokens.has(token)) return false;
+  const labels = issueLabelNames(issue);
+  for (const label of labels) {
+    if (RESOLUTION_BLOCKING_LABELS.has(label)) return false;
+  }
+  return true;
+}
+
+function issueSearchToken(issue) {
+  const match = optionalString(issue?.title).match(/\[?(ops:[a-f0-9]{10})\]?/i);
+  return match?.[1] ? match[1].toLowerCase() : null;
+}
+
+function issueLabelNames(issue) {
+  return Array.isArray(issue?.labels)
+    ? issue.labels.map((label) => optionalString(label?.name ?? label).toLowerCase()).filter(Boolean)
+    : [];
+}
+
+function resolvedCommentBody() {
+  return [
+    `Resolved by clean ops sweep at ${new Date().toISOString()}.`,
+    "",
+    "The latest sweep did not report a matching active incident for this dedupe key. Closing so future builder runs focus on current signals.",
+  ].join("\n");
+}
+
+function optionalString(value) {
+  return typeof value === "string" ? value : "";
 }
 
 function updateBody(plan) {
