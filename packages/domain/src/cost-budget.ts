@@ -57,13 +57,16 @@ export async function checkBudget(workspaceId: string): Promise<{
   usedUsd: number;
   capUsd: number;
 }> {
-  const workspace = await prisma.workspace.findUnique({
-    where: { id: workspaceId },
-    select: {
-      plan: true,
-      trialEndsAt: true,
-    },
-  });
+  const workspaceDelegate = (prisma as typeof prisma & { workspace?: typeof prisma.workspace }).workspace;
+  const workspace = workspaceDelegate
+    ? await workspaceDelegate.findUnique({
+        where: { id: workspaceId },
+        select: {
+          plan: true,
+          trialEndsAt: true,
+        },
+      })
+    : null;
 
   if (workspace?.plan === "CORE_FREE") {
     return { allowed: false, usedPct: 100, usedUsd: 0, capUsd: 0 };

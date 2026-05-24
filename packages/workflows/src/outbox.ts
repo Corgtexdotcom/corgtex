@@ -837,6 +837,7 @@ export async function schedulePeriodicJobs() {
   
   const fleetSweepBatchSizeRaw = Number(process.env.CONTROL_PLANE_FLEET_SWEEP_BATCH_SIZE ?? 50);
   const fleetSweepBatchSize = Math.min(Math.max(Number.isFinite(fleetSweepBatchSizeRaw) ? fleetSweepBatchSizeRaw : 50, 1), 500);
+  const aiUsageLedgerEntryDelegate = (prisma as typeof prisma & { aiUsageLedgerEntry?: typeof prisma.aiUsageLedgerEntry }).aiUsageLedgerEntry;
   const [sources, slackInstallations, customerDeployments, pendingAiUsage] = await Promise.all([
     prisma.externalDataSource.findMany({
       where: { isActive: true },
@@ -862,22 +863,24 @@ export async function schedulePeriodicJobs() {
       take: fleetSweepBatchSize,
       select: { id: true },
     }),
-    prisma.aiUsageLedgerEntry.findMany({
-      where: {
-        status: "PENDING",
-        workspace: {
-          billingProfile: {
-            is: {
-              billingStatus: "ACTIVE",
-              stripeSubscriptionItemId: { not: null },
+    aiUsageLedgerEntryDelegate
+      ? aiUsageLedgerEntryDelegate.findMany({
+          where: {
+            status: "PENDING",
+            workspace: {
+              billingProfile: {
+                is: {
+                  billingStatus: "ACTIVE",
+                  stripeSubscriptionItemId: { not: null },
+                },
+              },
             },
           },
-        },
-      },
-      distinct: ["workspaceId"],
-      take: 200,
-      select: { workspaceId: true },
-    }),
+          distinct: ["workspaceId"],
+          take: 200,
+          select: { workspaceId: true },
+        })
+      : Promise.resolve([]),
   ]);
 
   let scheduledCount = 0;
