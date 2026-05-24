@@ -1,6 +1,11 @@
 import { prisma } from "@corgtex/shared";
 import { syncKnowledgeForSource, syncBrainArticleKnowledge } from "@corgtex/knowledge";
-import { fetchCalendarEvents, syncCalendarEventRecorder } from "@corgtex/domain";
+import {
+  fetchCalendarEvents,
+  fetchFilteredEmailMessages,
+  fetchSelectedDocuments,
+  syncCalendarEventRecorder,
+} from "@corgtex/domain";
 
 export async function handleKnowledgeSync(jobId: string, payload: { proposalId?: string }, workspaceId: string) {
   if (!payload.proposalId) {
@@ -403,6 +408,121 @@ export async function handleCalendarSync(jobId: string, payload: { connectionId?
       where: { id: connection.id },
       data: {
         lastSyncError: error instanceof Error ? error.message : "Calendar sync failed.",
+        status: "ERROR",
+      },
+    });
+    throw error;
+  }
+}
+
+function recordSection(settings: unknown, key: "documents" | "email") {
+  if (!settings || typeof settings !== "object" || Array.isArray(settings)) return {};
+  const section = (settings as Record<string, unknown>)[key];
+  return section && typeof section === "object" && !Array.isArray(section)
+    ? section as Record<string, unknown>
+    : {};
+}
+
+function stringArray(value: unknown) {
+  return Array.isArray(value)
+    ? value.map((entry) => typeof entry === "string" ? entry.trim() : "").filter(Boolean)
+    : [];
+}
+
+export async function handleOAuthDocumentsSync(jobId: string, payload: { connectionId?: string }, workspaceId: string) {
+  if (!payload.connectionId) return;
+  const connection = await prisma.oAuthConnection.findUnique({ where: { id: payload.connectionId } });
+  if (!connection || connection.status !== "ACTIVE") return;
+  if (connection.workspaceId && connection.workspaceId !== workspaceId) return;
+
+  const documentSettings = recordSection(connection.syncSettings, "documents");
+  if (documentSettings.enabled !== true) return;
+  const selectedDocumentIds = stringArray(documentSettings.selectedDriveIds ?? documentSettings.selectedDocumentIds);
+  if (selectedDocumentIds.length === 0) return;
+
+  try {
+    const documents = await fetchSelectedDocuments(connection.id, selectedDocumentIds);
+    for (const document of documents) {
+      if (!document.contentText.trim()) continue;
+      const documentSourceKey = document.sourceKey ?? document.id;
+      await syncKnowledgeForSource({
+        workspaceId,
+        sourceType: "DOCUMENT",
+        sourceId: `oauth-doc-${connection.id}-${document.provider.toLowerCase()}-${documentSourceKey}`,
+        sourceTitle: document.name,
+        content: [document.name, document.contentText].filter(Boolean).join("\n\n"),
+        metadata: {
+          connectionId: connection.id,
+          provider: document.provider,
+          providerDocumentId: document.id,
+          mimeType: document.mimeType,
+          webUrl: document.webUrl,
+          modifiedAt: document.modifiedAt?.toISOString() ?? null,
+          workflowJobId: jobId,
+        },
+        workflowJobId: jobId,
+      });
+    }
+    await prisma.oAuthConnection.update({
+      where: { id: connection.id },
+      data: { lastSyncAt: new Date(), lastSyncError: null, status: "ACTIVE" },
+    });
+  } catch (error) {
+    await prisma.oAuthConnection.update({
+      where: { id: connection.id },
+      data: {
+        lastSyncError: error instanceof Error ? error.message : "Document sync failed.",
+        status: "ERROR",
+      },
+    });
+    throw error;
+  }
+}
+
+export async function handleOAuthEmailSync(jobId: string, payload: { connectionId?: string }, workspaceId: string) {
+  if (!payload.connectionId) return;
+  const connection = await prisma.oAuthConnection.findUnique({ where: { id: payload.connectionId } });
+  if (!connection || connection.status !== "ACTIVE") return;
+  if (connection.workspaceId && connection.workspaceId !== workspaceId) return;
+
+  const emailSettings = recordSection(connection.syncSettings, "email");
+  if (emailSettings.enabled !== true) return;
+  const filters = stringArray(emailSettings.filters ?? emailSettings.queries);
+  if (filters.length === 0) return;
+
+  try {
+    const messages = await fetchFilteredEmailMessages(connection.id, filters);
+    for (const message of messages) {
+      if (!message.snippet.trim()) continue;
+      await syncKnowledgeForSource({
+        workspaceId,
+        sourceType: "DOCUMENT",
+        sourceId: `oauth-email-${connection.id}-${message.provider.toLowerCase()}-${message.id}`,
+        sourceTitle: `Email: ${message.subject}`,
+        content: [message.subject, message.from ? `From: ${message.from}` : null, message.snippet].filter(Boolean).join("\n\n"),
+        metadata: {
+          connectionId: connection.id,
+          provider: message.provider,
+          providerMessageId: message.id,
+          sourceKind: "email",
+          from: message.from,
+          receivedAt: message.receivedAt?.toISOString() ?? null,
+          webUrl: message.webUrl,
+          filter: message.filter,
+          workflowJobId: jobId,
+        },
+        workflowJobId: jobId,
+      });
+    }
+    await prisma.oAuthConnection.update({
+      where: { id: connection.id },
+      data: { lastSyncAt: new Date(), lastSyncError: null, status: "ACTIVE" },
+    });
+  } catch (error) {
+    await prisma.oAuthConnection.update({
+      where: { id: connection.id },
+      data: {
+        lastSyncError: error instanceof Error ? error.message : "Email sync failed.",
         status: "ERROR",
       },
     });

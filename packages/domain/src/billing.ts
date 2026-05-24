@@ -510,9 +510,8 @@ export async function handleStripeWebhook(rawBody: string, signatureHeader: stri
 
 export async function reportPendingAiUsageToStripe(params: { limit?: number } = {}) {
   const limit = Math.min(Math.max(params.limit ?? 100, 1), 500);
-  const entries = await prisma.aiUsageLedgerEntry.findMany({
+  const baseQuery = {
     where: {
-      status: "PENDING",
       workspace: {
         billingProfile: {
           is: {
@@ -523,7 +522,6 @@ export async function reportPendingAiUsageToStripe(params: { limit?: number } = 
       },
     },
     orderBy: { createdAt: "asc" },
-    take: limit,
     include: {
       workspace: {
         select: {
@@ -535,7 +533,23 @@ export async function reportPendingAiUsageToStripe(params: { limit?: number } = 
         },
       },
     },
+  } satisfies Omit<Prisma.AiUsageLedgerEntryFindManyArgs, "where" | "take"> & {
+    where: Omit<Prisma.AiUsageLedgerEntryWhereInput, "status">;
+  };
+  const pendingEntries = await prisma.aiUsageLedgerEntry.findMany({
+    ...baseQuery,
+    where: { ...baseQuery.where, status: "PENDING" },
+    take: limit,
   });
+  const failedRetryLimit = limit - pendingEntries.length;
+  const failedEntries = failedRetryLimit > 0
+    ? await prisma.aiUsageLedgerEntry.findMany({
+      ...baseQuery,
+      where: { ...baseQuery.where, status: "FAILED" },
+      take: failedRetryLimit,
+    })
+    : [];
+  const entries = [...pendingEntries, ...failedEntries];
 
   let reported = 0;
   for (const entry of entries) {

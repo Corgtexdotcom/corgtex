@@ -202,6 +202,109 @@ export async function updateOAuthConnectionSyncSettings(actor: AppActor, params:
   });
 }
 
+export async function deleteOAuthConnection(actor: AppActor, params: {
+  workspaceId: string;
+  connectionId: string;
+}) {
+  invariant(actor.kind === "user", 403, "FORBIDDEN", "Only users can delete OAuth connections.");
+  await requireWorkspaceMembership({
+    actor,
+    workspaceId: params.workspaceId,
+  });
+
+  const connection = await prisma.oAuthConnection.findFirst({
+    where: {
+      id: params.connectionId,
+      workspaceId: params.workspaceId,
+      userId: actor.user.id,
+    },
+    select: { id: true },
+  });
+  invariant(connection, 404, "NOT_FOUND", "OAuth connection not found.");
+
+  await prisma.oAuthConnection.delete({
+    where: { id: params.connectionId },
+  });
+
+  return { id: params.connectionId };
+}
+
+function syncSection(settings: unknown, key: "calendar" | "documents" | "email") {
+  if (!settings || typeof settings !== "object" || Array.isArray(settings)) return {};
+  const value = (settings as Record<string, unknown>)[key];
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function syncEnabled(settings: unknown, key: "calendar" | "documents" | "email", defaultEnabled = false) {
+  const section = syncSection(settings, key);
+  return section.enabled === true || (defaultEnabled && section.enabled !== false);
+}
+
+export async function enqueueOAuthConnectionSync(actor: AppActor, params: {
+  workspaceId: string;
+  connectionId: string;
+  kinds?: Array<"calendar" | "documents" | "email">;
+}) {
+  invariant(actor.kind === "user", 403, "FORBIDDEN", "Only users can sync OAuth connections.");
+  await requireWorkspaceMembership({
+    actor,
+    workspaceId: params.workspaceId,
+  });
+
+  const connection = await prisma.oAuthConnection.findFirst({
+    where: {
+      id: params.connectionId,
+      workspaceId: params.workspaceId,
+      userId: actor.user.id,
+    },
+    select: {
+      id: true,
+      status: true,
+      syncSettings: true,
+    },
+  });
+  invariant(connection, 404, "NOT_FOUND", "OAuth connection not found.");
+  invariant(connection.status === "ACTIVE", 400, "CONNECTION_NOT_ACTIVE", "OAuth connection is not active.");
+
+  const candidateKinds = params.kinds && params.kinds.length > 0
+    ? params.kinds
+    : ([
+      syncEnabled(connection.syncSettings, "calendar", true) ? "calendar" : null,
+      syncEnabled(connection.syncSettings, "documents") ? "documents" : null,
+      syncEnabled(connection.syncSettings, "email") ? "email" : null,
+    ].filter(Boolean) as Array<"calendar" | "documents" | "email">);
+  const requestedKinds = candidateKinds.filter((kind) => syncEnabled(
+    connection.syncSettings,
+    kind,
+    kind === "calendar",
+  ));
+
+  const jobTypes = {
+    calendar: "calendar.sync",
+    documents: "oauth.documents.sync",
+    email: "oauth.email.sync",
+  } as const;
+  const now = Date.now();
+  const jobs = [];
+  for (const kind of requestedKinds) {
+    jobs.push(await prisma.workflowJob.upsert({
+      where: { dedupeKey: `${params.connectionId}:${kind}:manual-sync:${now}` },
+      update: {},
+      create: {
+        workspaceId: params.workspaceId,
+        eventId: null,
+        type: jobTypes[kind],
+        payload: { connectionId: params.connectionId },
+        dedupeKey: `${params.connectionId}:${kind}:manual-sync:${now}`,
+      },
+    }));
+  }
+
+  return { scheduled: jobs.map((job) => job.type) };
+}
+
 async function requireDataSourceAdmin(actor: AppActor, workspaceId: string) {
   await requireWorkspaceMembership({
     actor,
@@ -455,6 +558,41 @@ export interface CalendarEvent {
   responseStatus: string | null;
 }
 
+export interface OAuthDocumentSource {
+  id: string;
+  sourceKey: string;
+  provider: OAuthProvider;
+  name: string;
+  mimeType: string | null;
+  webUrl: string | null;
+  modifiedAt: Date | null;
+  contentText: string;
+}
+
+export interface OAuthEmailMessage {
+  id: string;
+  provider: OAuthProvider;
+  subject: string;
+  from: string | null;
+  receivedAt: Date | null;
+  webUrl: string | null;
+  snippet: string;
+  filter: string;
+}
+
+async function readProviderTextResponse(response: Response, label: string) {
+  const text = await response.text();
+  if (!response.ok) {
+    throw new Error(`${label} API error: ${text}`);
+  }
+  return text;
+}
+
+async function readProviderJsonResponse(response: Response, label: string) {
+  const text = await readProviderTextResponse(response, label);
+  return text ? JSON.parse(text) as any : {};
+}
+
 export async function fetchCalendarEvents(connectionId: string, timeMin: Date, timeMax: Date): Promise<CalendarEvent[]> {
   const connection = await refreshOAuthTokenIfNeeded(connectionId);
   if (connection.status !== "ACTIVE") {
@@ -546,4 +684,201 @@ export async function fetchCalendarEvents(connectionId: string, timeMin: Date, t
   }
 
   return [];
+}
+
+function microsoftDriveItemPath(selectedId: string) {
+  const delimiter = selectedId.includes("|") ? "|" : selectedId.includes(":") ? ":" : null;
+  if (!delimiter) {
+    return `/me/drive/items/${encodeURIComponent(selectedId)}`;
+  }
+  const [driveId, itemId] = selectedId.split(delimiter, 2).map((part) => part.trim());
+  if (!driveId || !itemId) {
+    return `/me/drive/items/${encodeURIComponent(selectedId)}`;
+  }
+  return `/drives/${encodeURIComponent(driveId)}/items/${encodeURIComponent(itemId)}`;
+}
+
+function googleExportMimeType(mimeType: string | null) {
+  switch (mimeType) {
+    case "application/vnd.google-apps.document":
+      return "text/plain";
+    case "application/vnd.google-apps.spreadsheet":
+      return "text/csv";
+    case "application/vnd.google-apps.presentation":
+      return "text/plain";
+    default:
+      return null;
+  }
+}
+
+function isPlainTextDocumentMimeType(mimeType: string | null) {
+  if (!mimeType) return false;
+  const lower = mimeType.toLowerCase();
+  return lower.startsWith("text/")
+    || lower === "application/json"
+    || lower === "application/ld+json"
+    || lower === "application/xml"
+    || lower === "application/xhtml+xml"
+    || lower === "application/yaml"
+    || lower === "application/x-yaml"
+    || lower === "application/javascript"
+    || lower === "application/x-javascript"
+    || lower === "application/typescript"
+    || lower === "application/sql";
+}
+
+export async function fetchSelectedDocuments(connectionId: string, selectedDocumentIds: string[]): Promise<OAuthDocumentSource[]> {
+  const ids = selectedDocumentIds.map((id) => id.trim()).filter(Boolean);
+  if (ids.length === 0) return [];
+
+  const connection = await refreshOAuthTokenIfNeeded(connectionId);
+  if (connection.status !== "ACTIVE") return [];
+  const accessToken = oauthAccessToken(connection);
+  const documents: OAuthDocumentSource[] = [];
+
+  if (connection.provider === "GOOGLE") {
+    for (const id of ids) {
+      const metadata = await readProviderJsonResponse(await fetch(
+        `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(id)}?fields=id,name,mimeType,webViewLink,modifiedTime`,
+        { headers: { Authorization: `Bearer ${accessToken}` } },
+      ), "Google Drive");
+      const mimeType = typeof metadata.mimeType === "string" ? metadata.mimeType : null;
+      const isGoogleDoc = mimeType?.startsWith("application/vnd.google-apps.") ?? false;
+      const exportMimeType = isGoogleDoc ? googleExportMimeType(mimeType) : null;
+      if (isGoogleDoc && !exportMimeType) continue;
+      if (!isGoogleDoc && !isPlainTextDocumentMimeType(mimeType)) continue;
+      const contentUrl = isGoogleDoc && exportMimeType
+        ? `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(id)}/export?mimeType=${encodeURIComponent(exportMimeType)}`
+        : `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(id)}?alt=media`;
+      const contentText = await readProviderTextResponse(await fetch(contentUrl, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      }), "Google Drive");
+      documents.push({
+        id: String(metadata.id ?? id),
+        sourceKey: id,
+        provider: connection.provider,
+        name: String(metadata.name ?? "Untitled Google document"),
+        mimeType,
+        webUrl: typeof metadata.webViewLink === "string" ? metadata.webViewLink : null,
+        modifiedAt: typeof metadata.modifiedTime === "string" ? new Date(metadata.modifiedTime) : null,
+        contentText,
+      });
+    }
+    return documents;
+  }
+
+  if (connection.provider === "MICROSOFT") {
+    for (const id of ids) {
+      const itemPath = microsoftDriveItemPath(id);
+      const metadata = await readProviderJsonResponse(await fetch(
+        `https://graph.microsoft.com/v1.0${itemPath}`,
+        { headers: { Authorization: `Bearer ${accessToken}` } },
+      ), "Microsoft Graph");
+      const mimeType = typeof metadata.file?.mimeType === "string" ? metadata.file.mimeType : null;
+      if (!isPlainTextDocumentMimeType(mimeType)) continue;
+      const contentText = await readProviderTextResponse(await fetch(
+        `https://graph.microsoft.com/v1.0${itemPath}/content`,
+        { headers: { Authorization: `Bearer ${accessToken}` } },
+      ), "Microsoft Graph");
+      documents.push({
+        id: String(metadata.id ?? id),
+        sourceKey: id,
+        provider: connection.provider,
+        name: String(metadata.name ?? "Untitled Microsoft document"),
+        mimeType,
+        webUrl: typeof metadata.webUrl === "string" ? metadata.webUrl : null,
+        modifiedAt: typeof metadata.lastModifiedDateTime === "string" ? new Date(metadata.lastModifiedDateTime) : null,
+        contentText,
+      });
+    }
+  }
+
+  return documents;
+}
+
+function messageHeader(headers: unknown, name: string) {
+  if (!Array.isArray(headers)) return null;
+  const match = headers.find((header) => (
+    header &&
+    typeof header === "object" &&
+    typeof (header as { name?: unknown }).name === "string" &&
+    (header as { name: string }).name.toLowerCase() === name.toLowerCase()
+  ));
+  const value = match ? (match as { value?: unknown }).value : null;
+  return typeof value === "string" ? value : null;
+}
+
+export async function fetchFilteredEmailMessages(connectionId: string, filters: string[]): Promise<OAuthEmailMessage[]> {
+  const safeFilters = filters.map((filter) => filter.trim()).filter(Boolean);
+  if (safeFilters.length === 0) return [];
+
+  const connection = await refreshOAuthTokenIfNeeded(connectionId);
+  if (connection.status !== "ACTIVE") return [];
+  const accessToken = oauthAccessToken(connection);
+  const messages: OAuthEmailMessage[] = [];
+
+  if (connection.provider === "GOOGLE") {
+    for (const filter of safeFilters) {
+      const query = new URLSearchParams({ q: filter, maxResults: "10" });
+      const listing = await readProviderJsonResponse(await fetch(
+        `https://gmail.googleapis.com/gmail/v1/users/me/messages?${query}`,
+        { headers: { Authorization: `Bearer ${accessToken}` } },
+      ), "Gmail");
+      const messageRefs = Array.isArray(listing.messages) ? listing.messages : [];
+      for (const ref of messageRefs) {
+        const id = typeof ref?.id === "string" ? ref.id : null;
+        if (!id) continue;
+        const detail = await readProviderJsonResponse(await fetch(
+          `https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(id)}?format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=Date`,
+          { headers: { Authorization: `Bearer ${accessToken}` } },
+        ), "Gmail");
+        const headers = detail.payload?.headers;
+        const date = messageHeader(headers, "Date");
+        messages.push({
+          id: String(detail.id ?? id),
+          provider: connection.provider,
+          subject: messageHeader(headers, "Subject") ?? "Untitled email",
+          from: messageHeader(headers, "From"),
+          receivedAt: date ? new Date(date) : null,
+          webUrl: null,
+          snippet: typeof detail.snippet === "string" ? detail.snippet : "",
+          filter,
+        });
+      }
+    }
+    return messages;
+  }
+
+  if (connection.provider === "MICROSOFT") {
+    for (const filter of safeFilters) {
+      const query = new URLSearchParams({
+        $top: "10",
+        $search: `"${filter.replace(/"/g, "\\\"")}"`,
+        $select: "id,subject,from,receivedDateTime,webLink,bodyPreview",
+      });
+      const listing = await readProviderJsonResponse(await fetch(
+        `https://graph.microsoft.com/v1.0/me/messages?${query}`,
+        {
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            ConsistencyLevel: "eventual",
+          },
+        },
+      ), "Microsoft Graph");
+      for (const item of Array.isArray(listing.value) ? listing.value : []) {
+        messages.push({
+          id: String(item.id),
+          provider: connection.provider,
+          subject: typeof item.subject === "string" && item.subject.trim() ? item.subject : "Untitled email",
+          from: typeof item.from?.emailAddress?.address === "string" ? item.from.emailAddress.address : null,
+          receivedAt: typeof item.receivedDateTime === "string" ? new Date(item.receivedDateTime) : null,
+          webUrl: typeof item.webLink === "string" ? item.webLink : null,
+          snippet: typeof item.bodyPreview === "string" ? item.bodyPreview : "",
+          filter,
+        });
+      }
+    }
+  }
+
+  return messages;
 }

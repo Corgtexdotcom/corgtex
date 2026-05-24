@@ -1,0 +1,243 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const { prismaMock } = vi.hoisted(() => ({
+  prismaMock: {
+    oAuthConnection: {
+      findUnique: vi.fn(),
+      findFirst: vi.fn(),
+      update: vi.fn(),
+      delete: vi.fn(),
+    },
+    workflowJob: {
+      upsert: vi.fn(),
+    },
+  },
+}));
+
+vi.mock("@corgtex/shared", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@corgtex/shared")>();
+  return {
+    ...actual,
+    prisma: prismaMock,
+    encryptSecret: vi.fn((value: string) => `enc:${value}`),
+    decryptSecret: vi.fn((value: string) => value.replace(/^enc:/, "")),
+  };
+});
+
+vi.mock("./auth", () => ({
+  requireWorkspaceMembership: vi.fn(),
+}));
+
+describe("OAuth integration sync helpers", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    vi.clearAllMocks();
+    vi.stubGlobal("fetch", vi.fn());
+  });
+
+  it("fetches selected Google Drive documents only for explicit IDs", async () => {
+    prismaMock.oAuthConnection.findUnique.mockResolvedValue({
+      id: "conn-1",
+      provider: "GOOGLE",
+      status: "ACTIVE",
+      accessToken: "access-token",
+      refreshToken: "refresh-token",
+      tokenStorageVersion: "plaintext",
+      expiresAt: new Date(Date.now() + 60 * 60 * 1000),
+    });
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        id: "doc-1",
+        name: "Launch notes",
+        mimeType: "application/vnd.google-apps.document",
+        webViewLink: "https://drive.test/doc-1",
+        modifiedTime: "2026-05-24T12:00:00.000Z",
+      }), { status: 200 }))
+      .mockResolvedValueOnce(new Response("Launch content", { status: 200 }));
+    const { fetchSelectedDocuments } = await import("./integrations");
+
+    await expect(fetchSelectedDocuments("conn-1", ["doc-1"])).resolves.toEqual([
+      expect.objectContaining({
+        id: "doc-1",
+        provider: "GOOGLE",
+        name: "Launch notes",
+        contentText: "Launch content",
+      }),
+    ]);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("skips selected Google Drive binary files until extraction is supported", async () => {
+    prismaMock.oAuthConnection.findUnique.mockResolvedValue({
+      id: "conn-1",
+      provider: "GOOGLE",
+      status: "ACTIVE",
+      accessToken: "access-token",
+      refreshToken: "refresh-token",
+      tokenStorageVersion: "plaintext",
+      expiresAt: new Date(Date.now() + 60 * 60 * 1000),
+    });
+    vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify({
+      id: "pdf-1",
+      name: "Binary brief.pdf",
+      mimeType: "application/pdf",
+      webViewLink: "https://drive.test/pdf-1",
+      modifiedTime: "2026-05-24T12:00:00.000Z",
+    }), { status: 200 }));
+    const { fetchSelectedDocuments } = await import("./integrations");
+
+    await expect(fetchSelectedDocuments("conn-1", ["pdf-1"])).resolves.toEqual([]);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not fetch email when no filters are configured", async () => {
+    const { fetchFilteredEmailMessages } = await import("./integrations");
+
+    await expect(fetchFilteredEmailMessages("conn-1", [])).resolves.toEqual([]);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("fetches Microsoft Outlook messages through explicit filters", async () => {
+    prismaMock.oAuthConnection.findUnique.mockResolvedValue({
+      id: "conn-1",
+      provider: "MICROSOFT",
+      status: "ACTIVE",
+      accessToken: "access-token",
+      refreshToken: "refresh-token",
+      tokenStorageVersion: "plaintext",
+      expiresAt: new Date(Date.now() + 60 * 60 * 1000),
+    });
+    vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify({
+      value: [{
+        id: "msg-1",
+        subject: "Customer launch",
+        from: { emailAddress: { address: "customer@example.test" } },
+        receivedDateTime: "2026-05-24T12:00:00.000Z",
+        webLink: "https://outlook.test/msg-1",
+        bodyPreview: "Please connect the ERP export.",
+      }],
+    }), { status: 200 }));
+    const { fetchFilteredEmailMessages } = await import("./integrations");
+
+    await expect(fetchFilteredEmailMessages("conn-1", ["from:customer@example.test"])).resolves.toEqual([
+      expect.objectContaining({
+        id: "msg-1",
+        provider: "MICROSOFT",
+        subject: "Customer launch",
+        snippet: "Please connect the ERP export.",
+        filter: "from:customer@example.test",
+      }),
+    ]);
+  });
+
+  it("fetches Microsoft SharePoint documents through explicit drive item references", async () => {
+    prismaMock.oAuthConnection.findUnique.mockResolvedValue({
+      id: "conn-1",
+      provider: "MICROSOFT",
+      status: "ACTIVE",
+      accessToken: "access-token",
+      refreshToken: "refresh-token",
+      tokenStorageVersion: "plaintext",
+      expiresAt: new Date(Date.now() + 60 * 60 * 1000),
+    });
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        id: "item-1",
+        name: "SharePoint rollout",
+        file: { mimeType: "text/plain" },
+        webUrl: "https://sharepoint.test/item-1",
+        lastModifiedDateTime: "2026-05-24T12:00:00.000Z",
+      }), { status: 200 }))
+      .mockResolvedValueOnce(new Response("SharePoint content", { status: 200 }));
+    const { fetchSelectedDocuments } = await import("./integrations");
+
+    await expect(fetchSelectedDocuments("conn-1", ["drive-1:item-1"])).resolves.toEqual([
+      expect.objectContaining({
+        id: "item-1",
+        provider: "MICROSOFT",
+        name: "SharePoint rollout",
+        contentText: "SharePoint content",
+      }),
+    ]);
+    expect(fetch).toHaveBeenNthCalledWith(
+      1,
+      "https://graph.microsoft.com/v1.0/drives/drive-1/items/item-1",
+      expect.any(Object),
+    );
+    expect(fetch).toHaveBeenNthCalledWith(
+      2,
+      "https://graph.microsoft.com/v1.0/drives/drive-1/items/item-1/content",
+      expect.any(Object),
+    );
+  });
+
+  it("skips selected Microsoft binary files until extraction is supported", async () => {
+    prismaMock.oAuthConnection.findUnique.mockResolvedValue({
+      id: "conn-1",
+      provider: "MICROSOFT",
+      status: "ACTIVE",
+      accessToken: "access-token",
+      refreshToken: "refresh-token",
+      tokenStorageVersion: "plaintext",
+      expiresAt: new Date(Date.now() + 60 * 60 * 1000),
+    });
+    vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify({
+      id: "item-1",
+      name: "Launch deck.pptx",
+      file: { mimeType: "application/vnd.openxmlformats-officedocument.presentationml.presentation" },
+      webUrl: "https://sharepoint.test/item-1",
+      lastModifiedDateTime: "2026-05-24T12:00:00.000Z",
+    }), { status: 200 }));
+    const { fetchSelectedDocuments } = await import("./integrations");
+
+    await expect(fetchSelectedDocuments("conn-1", ["drive-1:item-1"])).resolves.toEqual([]);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("enqueues only enabled manual sync kinds for a connection", async () => {
+    prismaMock.oAuthConnection.findFirst.mockResolvedValue({
+      id: "conn-1",
+      status: "ACTIVE",
+      syncSettings: {
+        calendar: { enabled: true },
+        documents: { enabled: true, selectedDriveIds: ["doc-1"] },
+        email: { enabled: false, filters: [] },
+      },
+    });
+    prismaMock.workflowJob.upsert.mockImplementation(async (input: any) => ({ id: input.create.type, type: input.create.type }));
+    const { enqueueOAuthConnectionSync } = await import("./integrations");
+
+    await expect(enqueueOAuthConnectionSync({
+      kind: "user",
+      user: { id: "user-1", email: "user@example.test" },
+    } as any, {
+      workspaceId: "ws-1",
+      connectionId: "conn-1",
+    })).resolves.toEqual({
+      scheduled: ["calendar.sync", "oauth.documents.sync"],
+    });
+  });
+
+  it("does not let manual sync bypass disabled sections", async () => {
+    prismaMock.oAuthConnection.findFirst.mockResolvedValue({
+      id: "conn-1",
+      status: "ACTIVE",
+      syncSettings: {
+        calendar: { enabled: false },
+        documents: { enabled: false, selectedDriveIds: ["doc-1"] },
+        email: { enabled: false, filters: ["from:customer@example.test"] },
+      },
+    });
+    const { enqueueOAuthConnectionSync } = await import("./integrations");
+
+    await expect(enqueueOAuthConnectionSync({
+      kind: "user",
+      user: { id: "user-1", email: "user@example.test" },
+    } as any, {
+      workspaceId: "ws-1",
+      connectionId: "conn-1",
+      kinds: ["calendar", "documents", "email"],
+    })).resolves.toEqual({ scheduled: [] });
+    expect(prismaMock.workflowJob.upsert).not.toHaveBeenCalled();
+  });
+});

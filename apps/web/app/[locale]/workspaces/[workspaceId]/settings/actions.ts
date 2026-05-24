@@ -28,6 +28,9 @@ import {
   disconnectCommunicationInstallation,
   updateSlackAgendaSettings,
   updateMeetingRecorderConfig,
+  deleteOAuthConnection,
+  enqueueOAuthConnectionSync,
+  updateOAuthConnectionSyncSettings,
 } from "@corgtex/domain";
 import { sendEmail } from "@corgtex/shared";
 
@@ -490,6 +493,78 @@ export async function updateModelUsageBudgetAction(formData: FormData) {
     periodStartDay: isNaN(periodStartDay) ? 1 : periodStartDay,
   });
 
+  refresh(workspaceId);
+}
+
+function oauthSyncSettingsFromForm(formData: FormData) {
+  const documentsRaw = asOptional(formData, "documentIds") ?? "";
+  const emailFiltersRaw = asOptional(formData, "emailFilters") ?? "";
+  const selectedDriveIds = documentsRaw
+    .split(/[\n,]/)
+    .map((value) => value.trim())
+    .filter(Boolean);
+  const filters = emailFiltersRaw
+    .split(/\n/)
+    .map((value) => value.trim())
+    .filter(Boolean);
+
+  return {
+    calendar: {
+      enabled: formData.get("calendarEnabled") === "true",
+      includeAllEvents: formData.get("includeAllEvents") === "true",
+    },
+    documents: {
+      enabled: formData.get("documentsEnabled") === "true",
+      selectedDriveIds,
+    },
+    email: {
+      enabled: formData.get("emailEnabled") === "true",
+      filters,
+    },
+  };
+}
+
+export async function updateOAuthConnectionSettingsAction(formData: FormData) {
+  const workspaceId = asString(formData, "workspaceId");
+  await enforceDemoGuard(workspaceId);
+
+  const actor = await requirePageActor();
+  await updateOAuthConnectionSyncSettings(actor, {
+    workspaceId,
+    connectionId: asString(formData, "connectionId"),
+    syncSettings: oauthSyncSettingsFromForm(formData),
+    status: asString(formData, "status") as "ACTIVE" | "PAUSED",
+  });
+  refresh(workspaceId);
+}
+
+export async function runOAuthConnectionSyncAction(formData: FormData) {
+  const workspaceId = asString(formData, "workspaceId");
+  await enforceDemoGuard(workspaceId);
+
+  const actor = await requirePageActor();
+  const kinds = formData.getAll("syncKind")
+    .map((value) => String(value))
+    .filter((value): value is "calendar" | "documents" | "email" => (
+      value === "calendar" || value === "documents" || value === "email"
+    ));
+  await enqueueOAuthConnectionSync(actor, {
+    workspaceId,
+    connectionId: asString(formData, "connectionId"),
+    kinds,
+  });
+  refresh(workspaceId);
+}
+
+export async function deleteOAuthConnectionAction(formData: FormData) {
+  const workspaceId = asString(formData, "workspaceId");
+  await enforceDemoGuard(workspaceId);
+
+  const actor = await requirePageActor();
+  await deleteOAuthConnection(actor, {
+    workspaceId,
+    connectionId: asString(formData, "connectionId"),
+  });
   refresh(workspaceId);
 }
 

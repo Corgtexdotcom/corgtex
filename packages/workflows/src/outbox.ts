@@ -2,7 +2,7 @@ import type { EventStatus, NewspaperCadence, Prisma, WorkflowJobStatus } from "@
 import { logger, prisma } from "@corgtex/shared";
 import { deriveJobsForEvent } from "./derive-jobs";
 import { deriveNotificationsForEvent } from "./derive-notifications";
-import { handleKnowledgeSync, handleMeetingKnowledgeSync, handleDocumentKnowledgeSync, handleEventKnowledgeSync, handleTensionKnowledgeSync, handleActionKnowledgeSync, handleCircleKnowledgeSync, handleRoleKnowledgeSync, handleSlackMessageKnowledgeSync, handleCalendarSync, handleContextGraphSync } from "./handlers";
+import { handleKnowledgeSync, handleMeetingKnowledgeSync, handleDocumentKnowledgeSync, handleEventKnowledgeSync, handleTensionKnowledgeSync, handleActionKnowledgeSync, handleCircleKnowledgeSync, handleRoleKnowledgeSync, handleSlackMessageKnowledgeSync, handleCalendarSync, handleOAuthDocumentsSync, handleOAuthEmailSync, handleContextGraphSync } from "./handlers";
 import { handleGovernanceScoring } from "./handlers";
 import { runAgentWorkflowJob } from "./handlers";
 import { syncBrainArticleKnowledge } from "@corgtex/knowledge";
@@ -473,6 +473,16 @@ async function handleJob(job: ClaimedJob) {
 
   if (job.type === "calendar.sync") {
     await handleCalendarSync(job.id, payload as { connectionId?: string }, job.workspaceId);
+    return;
+  }
+
+  if (job.type === "oauth.documents.sync") {
+    await handleOAuthDocumentsSync(job.id, payload as { connectionId?: string }, job.workspaceId);
+    return;
+  }
+
+  if (job.type === "oauth.email.sync") {
+    await handleOAuthEmailSync(job.id, payload as { connectionId?: string }, job.workspaceId);
     return;
   }
 
