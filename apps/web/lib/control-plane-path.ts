@@ -1,5 +1,9 @@
 export type ControlPlaneLocale = "en" | "es";
 
+export function getControlPlaneDefaultLocale(): ControlPlaneLocale {
+  return process.env.NEXT_PUBLIC_DEFAULT_LOCALE === "es" ? "es" : "en";
+}
+
 export function normalizeControlPlaneLocale(locale: string | null | undefined): ControlPlaneLocale {
   return locale === "es" ? "es" : "en";
 }
@@ -11,8 +15,9 @@ export function controlPlaneLocaleCookie(locale: ControlPlaneLocale) {
 export function localizedControlPlanePath(pathname: string, locale: ControlPlaneLocale) {
   const normalizedPathname = pathname.startsWith("/") ? pathname : `/${pathname}`;
   const pathnameWithoutLocale = normalizedPathname.replace(/^\/(?:en|es)(?=\/|$)/, "") || "/";
+  const defaultLocale = getControlPlaneDefaultLocale();
 
-  const localePrefix = locale === "es" ? "/es" : "";
+  const localePrefix = locale === defaultLocale ? "" : `/${locale}`;
 
   return pathnameWithoutLocale === "/" ? localePrefix || "/" : `${localePrefix}${pathnameWithoutLocale}`;
 }

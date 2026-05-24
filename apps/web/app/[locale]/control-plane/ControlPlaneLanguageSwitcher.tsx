@@ -2,6 +2,7 @@
 
 import { usePathname } from "@/i18n/routing";
 import { useLocale, useTranslations } from "next-intl";
+import { Globe2 } from "lucide-react";
 import { controlPlaneLocaleCookie, localizedControlPlanePath, type ControlPlaneLocale } from "./locale-path";
 
 export function ControlPlaneLanguageSwitcher() {
@@ -10,8 +11,9 @@ export function ControlPlaneLanguageSwitcher() {
   const t = useTranslations("common");
 
   return (
-    <label className="muted" style={{ display: "grid", gap: 6, fontSize: "0.85rem", margin: "8px 0 0" }}>
-      {t("language")}
+    <label className="flex items-center gap-2 rounded-lg border border-[#202738] bg-[#141822] px-2 py-1.5 text-xs text-slate-300">
+      <Globe2 className="h-4 w-4 text-slate-500" />
+      <span className="sr-only">{t("language")}</span>
       <select
         value={locale}
         onChange={(event) => {
@@ -24,15 +26,8 @@ export function ControlPlaneLanguageSwitcher() {
           document.cookie = controlPlaneLocaleCookie(nextLocale);
           window.location.assign(localizedControlPlanePath(pathname, nextLocale));
         }}
-        style={{
-          width: "100%",
-          padding: "6px 8px",
-          fontSize: "0.85rem",
-          borderRadius: 6,
-          border: "1px solid var(--border-color)",
-          background: "var(--bg-panel)",
-          color: "var(--text)",
-        }}
+        className="bg-transparent text-xs font-semibold text-slate-200 outline-none"
+        aria-label={t("language")}
       >
         <option value="en">English</option>
         <option value="es">Español</option>

@@ -922,14 +922,22 @@ function normalizeMemberRow(member: {
   role: string;
   isActive: boolean;
   joinedAt?: Date | string | null;
+  userId?: string | null;
+  email?: string | null;
+  userEmail?: string | null;
+  displayName?: string | null;
+  name?: string | null;
   user?: { id?: string; email?: string | null; displayName?: string | null };
   roleAssignments?: Array<{ role?: { name?: string; circle?: { id?: string; name?: string } } }>;
 }) {
+  const email = member.user?.email ?? member.email ?? member.userEmail ?? null;
+  const displayName = member.user?.displayName ?? member.displayName ?? member.name ?? null;
+
   return {
     id: member.id,
-    userId: member.user?.id ?? null,
-    email: member.user?.email ?? null,
-    displayName: member.user?.displayName ?? null,
+    userId: member.user?.id ?? member.userId ?? null,
+    email,
+    displayName,
     role: member.role,
     isActive: member.isActive,
     joinedAt: member.joinedAt ?? null,
@@ -3294,6 +3302,10 @@ export function getControlPlaneLatestReleaseTarget(): ControlPlaneReleaseTarget 
   };
 }
 
+export function isControlPlaneRailwayDeployConfigured() {
+  return Boolean(process.env.RAILWAY_API_TOKEN?.trim());
+}
+
 function releasePreflightForDeployment(deployment: {
   customerSlug?: string | null;
   deploymentStatus?: string | null;
@@ -3307,7 +3319,8 @@ function releasePreflightForDeployment(deployment: {
   railwayEnvironmentId?: string | null;
   railwayWebServiceId?: string | null;
   railwayWorkerServiceId?: string | null;
-}, target: ControlPlaneReleaseTarget | null) {
+}, target: ControlPlaneReleaseTarget | null, options: { railwayDeployConfigured?: boolean } = {}) {
+  const railwayDeployConfigured = options.railwayDeployConfigured ?? isControlPlaneRailwayDeployConfigured();
   const checks: ControlPlaneReleasePreflightCheck[] = [
     {
       key: "target_configured",
@@ -3326,6 +3339,14 @@ function releasePreflightForDeployment(deployment: {
       label: "Railway target is complete",
       ok: Boolean(deployment.railwayProjectId && deployment.railwayEnvironmentId && deployment.railwayWebServiceId && deployment.railwayWorkerServiceId),
       detail: deployment.railwayProjectId ? "Project, environment, web, and worker services are recorded." : "Railway project and service IDs are required.",
+    },
+    {
+      key: "railway_api_token_configured",
+      label: "Railway release executor is configured",
+      ok: railwayDeployConfigured,
+      detail: railwayDeployConfigured
+        ? "Railway API token is configured for release execution."
+        : "Railway API token is not configured for control-plane release execution.",
     },
     {
       key: "health_known",
@@ -3393,7 +3414,7 @@ export async function deployLatestControlPlaneRelease(actor: AppActor, params: {
   await requireControlPlaneDeploymentWriteAccess(actor, params.deploymentId);
   const deployment = await getControlPlaneDeploymentWithWorkspace(actor, params.deploymentId);
   const target = params.target ?? getControlPlaneLatestReleaseTarget();
-  const preflight = releasePreflightForDeployment(deployment, target);
+  const preflight = releasePreflightForDeployment(deployment, target, { railwayDeployConfigured: Boolean(railwayClient) || isControlPlaneRailwayDeployConfigured() });
   const canForceDeploy = Boolean(params.force && canBypassDeployLatestPreflight(preflight));
   if (!preflight.eligible && !canForceDeploy) {
     throw new AppError(400, "RELEASE_PREFLIGHT_FAILED", preflight.blockers.join(" "));

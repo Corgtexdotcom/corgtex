@@ -31,7 +31,7 @@ export function ControlPlaneSidebar({ onOpenChat, onOpenSearch, className }: Sid
 
   const navItems = [
     {
-      group: "FLEET",
+      group: t("navGroups.fleet"),
       items: [
         {
           label: t("nav.dashboard"),
@@ -48,7 +48,7 @@ export function ControlPlaneSidebar({ onOpenChat, onOpenSearch, className }: Sid
       ],
     },
     {
-      group: "OBSERVE",
+      group: t("navGroups.observe"),
       items: [
         {
           label: t("nav.agents"),
@@ -65,7 +65,7 @@ export function ControlPlaneSidebar({ onOpenChat, onOpenSearch, className }: Sid
       ],
     },
     {
-      group: "OPERATE",
+      group: t("navGroups.operate"),
       items: [
         {
           label: t("nav.operations"),
@@ -140,12 +140,13 @@ export function ControlPlaneSidebar({ onOpenChat, onOpenSearch, className }: Sid
             "flex items-center gap-2 w-full text-slate-400 hover:text-white bg-[#141822] border border-[#202738] hover:border-[#2e3952] rounded-lg text-xs transition-all duration-150 py-2",
             isCollapsed ? "justify-center px-0 h-9" : "px-3"
           )}
-          title="Search Command Palette (Cmd+K)"
+          title={t("search.open")}
+          aria-label={t("search.open")}
         >
           <Search className="w-4 h-4 shrink-0" />
           {!isCollapsed && (
             <div className="flex items-center justify-between w-full">
-              <span>Search...</span>
+              <span>{t("search.placeholder")}</span>
               <kbd className="bg-[#1f2638] text-[10px] text-slate-500 px-1.5 py-0.5 rounded border border-[#2e3752]">
                 ⌘K
               </kbd>

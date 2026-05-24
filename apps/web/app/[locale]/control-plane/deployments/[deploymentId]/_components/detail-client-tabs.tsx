@@ -531,41 +531,68 @@ export function CustomerDetailClientTabs({
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[#1f2430]/60">
-                    {members.members.map((member: any) => (
-                      <tr key={member.id} className="hover:bg-[#141822]/40 transition-colors">
-                        <td className="p-3">
-                          <strong className="text-white text-xs block">{member.displayName || member.email}</strong>
-                          <span className="text-[10px] text-slate-500 block mt-0.5">{member.email || "No email"}</span>
-                        </td>
-                        <td className="p-3 text-slate-300 font-semibold">{member.role}</td>
-                        <td className="p-3">
-                          <span className={cn("px-2 py-0.5 rounded-full text-[10px] font-semibold border", member.isActive ? "text-emerald-400 border-emerald-500/20 bg-emerald-500/10" : "text-slate-400 border-slate-500/20 bg-slate-500/5")}>
-                            {member.isActive ? "Active" : "Inactive"}
-                          </span>
-                        </td>
-                        <td className="p-3 text-right">
-                          <div className="flex justify-end gap-2">
-                            <form action={resendControlPlaneAccessLinkAction}>
-                              <input type="hidden" name="deploymentId" value={customer.id} />
-                              <input type="hidden" name="memberId" value={member.id} />
-                              <input type="hidden" name="reason" value="Request link resend from control plane dashboard" />
-                              <button type="submit" className="bg-[#141822] hover:bg-[#1d2333] border border-[#202738] text-slate-300 hover:text-white px-2 py-1 rounded text-[10px] font-medium transition-colors">
-                                Resend Link
-                              </button>
-                            </form>
-                            <form action={updateControlPlaneMemberStatusAction}>
-                              <input type="hidden" name="deploymentId" value={customer.id} />
-                              <input type="hidden" name="memberId" value={member.id} />
-                              <input type="hidden" name="isActive" value={member.isActive ? "false" : "true"} />
-                              <input type="hidden" name="reason" value="Status toggled from control plane dashboard" />
-                              <button type="submit" className={cn("px-2 py-1 rounded text-[10px] font-medium transition-colors border", member.isActive ? "bg-rose-950/10 border-rose-500/30 text-rose-400 hover:bg-rose-950/20" : "bg-emerald-950/10 border-emerald-500/30 text-emerald-400 hover:bg-emerald-950/20")}>
-                                {member.isActive ? "Deactivate" : "Activate"}
-                              </button>
-                            </form>
-                          </div>
-                        </td>
-                      </tr>
-                    ))}
+                    {members.members.map((member: any) => {
+                      const displayName = typeof member.displayName === "string" ? member.displayName.trim() : "";
+                      const email = typeof member.email === "string" ? member.email.trim() : "";
+                      const canRunMemberAction = Boolean(email);
+                      const statusAction = member.isActive ? "Deactivate" : "Activate";
+
+                      return (
+                        <tr key={member.id} className="hover:bg-[#141822]/40 transition-colors">
+                          <td className="p-3">
+                            <strong className="text-white text-xs block">{displayName || email || "Member identity unavailable"}</strong>
+                            <span className={cn("text-[10px] block mt-0.5", email ? "text-slate-500" : "text-amber-400")}>
+                              {email || `Email unavailable for ${String(member.id).slice(0, 8)}`}
+                            </span>
+                          </td>
+                          <td className="p-3 text-slate-300 font-semibold">{member.role}</td>
+                          <td className="p-3">
+                            <span className={cn("px-2 py-0.5 rounded-full text-[10px] font-semibold border", member.isActive ? "text-emerald-400 border-emerald-500/20 bg-emerald-500/10" : "text-slate-400 border-slate-500/20 bg-slate-500/5")}>
+                              {member.isActive ? "Active" : "Inactive"}
+                            </span>
+                          </td>
+                          <td className="p-3 text-right">
+                            {canRunMemberAction ? (
+                              <div className="flex flex-col items-end gap-2">
+                                <form action={resendControlPlaneAccessLinkAction} className="flex flex-wrap justify-end gap-2">
+                                  <input type="hidden" name="deploymentId" value={customer.id} />
+                                  <input type="hidden" name="memberId" value={member.id} />
+                                  <input
+                                    name="reason"
+                                    required
+                                    aria-label={`Reason to resend access link for ${displayName || email}`}
+                                    placeholder="Reason to resend link"
+                                    className="min-w-44 bg-[#141822] border border-[#202738] text-[10px] text-slate-300 placeholder-slate-600 rounded px-2 py-1 focus:outline-none"
+                                  />
+                                  <button type="submit" className="bg-[#141822] hover:bg-[#1d2333] border border-[#202738] text-slate-300 hover:text-white px-2 py-1 rounded text-[10px] font-medium transition-colors">
+                                    Resend Link
+                                  </button>
+                                </form>
+                                <form action={updateControlPlaneMemberStatusAction} className="flex flex-wrap justify-end gap-2">
+                                  <input type="hidden" name="deploymentId" value={customer.id} />
+                                  <input type="hidden" name="memberId" value={member.id} />
+                                  <input type="hidden" name="isActive" value={member.isActive ? "false" : "true"} />
+                                  <input
+                                    name="reason"
+                                    required
+                                    aria-label={`Reason to ${statusAction.toLowerCase()} ${displayName || email}`}
+                                    placeholder={`Reason to ${statusAction.toLowerCase()}`}
+                                    className="min-w-44 bg-[#141822] border border-[#202738] text-[10px] text-slate-300 placeholder-slate-600 rounded px-2 py-1 focus:outline-none"
+                                  />
+                                  <button type="submit" className={cn("px-2 py-1 rounded text-[10px] font-medium transition-colors border", member.isActive ? "bg-rose-950/10 border-rose-500/30 text-rose-400 hover:bg-rose-950/20" : "bg-emerald-950/10 border-emerald-500/30 text-emerald-400 hover:bg-emerald-950/20")}>
+                                    {statusAction}
+                                  </button>
+                                </form>
+                              </div>
+                            ) : (
+                              <span className="inline-flex rounded border border-amber-500/25 bg-amber-500/10 px-2 py-1 text-[10px] font-medium text-amber-300">
+                                Email identity required
+                              </span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
                     {members.members.length === 0 && (
                       <tr>
                         <td colSpan={4} className="text-center py-6 text-slate-500">No members registered under this deployment.</td>

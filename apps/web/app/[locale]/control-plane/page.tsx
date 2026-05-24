@@ -1,6 +1,5 @@
 import { notFound } from "next/navigation";
-import { getFormatter } from "next-intl/server";
-import { listControlPlaneFleetPage, listControlPlaneReleaseRolloutJobs, requireControlPlaneAccess } from "@corgtex/domain";
+import { getControlPlaneLatestReleaseTarget, isControlPlaneRailwayDeployConfigured, listControlPlaneFleetPage, listControlPlaneReleaseRolloutJobs, requireControlPlaneAccess } from "@corgtex/domain";
 import { Link } from "@/i18n/routing";
 import { requirePageActor } from "@/lib/auth";
 import { enqueueDeployLatestRolloutAction } from "./actions";
@@ -107,7 +106,14 @@ export default async function ControlPlanePage({
     }),
     listControlPlaneReleaseRolloutJobs(actor, { take: 8 }),
   ]);
-  const format = await getFormatter();
+  const latestReleaseTarget = getControlPlaneLatestReleaseTarget();
+  const releaseExecutionConfigured = isControlPlaneRailwayDeployConfigured();
+  const canQueueReleaseRollouts = Boolean(latestReleaseTarget && releaseExecutionConfigured);
+  const releaseQueueLabel = !latestReleaseTarget
+    ? "Latest release not configured"
+    : releaseExecutionConfigured
+      ? "Queue rollouts"
+      : "Railway token not configured";
   const fleetLabelByDeploymentId = new Map(fleet.items.map((customer) => [customer.id, customer.label]));
   const paginationFilters = {
     q: fleet.filters.query,
@@ -155,9 +161,15 @@ export default async function ControlPlanePage({
             <input type="hidden" name="reason" value="Deploy latest rollout scheduled from Dashboard" />
             <button
               type="submit"
-              className="bg-brand-600 hover:bg-brand-500 text-white font-semibold text-xs px-3.5 py-2 rounded-lg shadow transition-all duration-150"
+              disabled={!canQueueReleaseRollouts}
+              className={cn(
+                "font-semibold text-xs px-3.5 py-2 rounded-lg shadow transition-all duration-150",
+                canQueueReleaseRollouts
+                  ? "bg-brand-600 hover:bg-brand-500 text-white"
+                  : "bg-[#141822]/40 border border-[#202738]/60 text-slate-500 cursor-not-allowed"
+              )}
             >
-              Queue rollouts
+              {releaseQueueLabel}
             </button>
           </form>
         </div>
@@ -261,6 +273,7 @@ export default async function ControlPlanePage({
                               type="checkbox"
                               name="deploymentIds"
                               value={customer.id}
+                              disabled={!canQueueReleaseRollouts}
                               className="rounded border-[#202738] bg-[#141822] text-brand-600 focus:ring-0 focus:ring-offset-0"
                             />
                           ) : null}
@@ -344,15 +357,22 @@ export default async function ControlPlanePage({
                     <input
                       type="checkbox"
                       name="includeUnhealthy"
+                      disabled={!canQueueReleaseRollouts}
                       className="rounded border-[#202738] bg-[#141822] text-brand-600 focus:ring-0"
                     />
                     Override health blocks
                   </label>
                   <button
                     type="submit"
-                    className="bg-[#141822] hover:bg-[#1d2333] border border-[#202738] hover:border-[#2f3952] text-slate-200 hover:text-white font-semibold text-xs px-4 py-2 rounded-lg shadow-sm transition-all duration-150"
+                    disabled={!canQueueReleaseRollouts}
+                    className={cn(
+                      "border font-semibold text-xs px-4 py-2 rounded-lg shadow-sm transition-all duration-150",
+                      canQueueReleaseRollouts
+                        ? "bg-[#141822] hover:bg-[#1d2333] border-[#202738] hover:border-[#2f3952] text-slate-200 hover:text-white"
+                        : "bg-[#141822]/40 border-[#202738]/60 text-slate-500 cursor-not-allowed"
+                    )}
                   >
-                    Deploy Selected
+                    {canQueueReleaseRollouts ? "Deploy Selected" : releaseQueueLabel}
                   </button>
                 </div>
               </div>

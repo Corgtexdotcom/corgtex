@@ -1227,10 +1227,33 @@
     "nav": {
       "dashboard": "Dashboard",
       "customers": "Customers",
-      "agents": "Agents",
+      "agents": "Agent Observatory",
       "releases": "Releases",
-      "operations": "Operations",
-      "users": "Users"
+      "operations": "Operations Log",
+      "users": "Users Directory",
+      "details": "Details"
+    },
+    "navGroups": {
+      "fleet": "Fleet",
+      "observe": "Observe",
+      "operate": "Operate"
+    },
+    "search": {
+      "open": "Open command palette",
+      "placeholder": "Search..."
+    },
+    "commandPalette": {
+      "placeholder": "Type a page name or section to navigate...",
+      "emptyTitle": "No pages match your query.",
+      "emptyHint": "Try typing \"agents\", \"releases\", or \"ops\".",
+      "items": {
+        "dashboard": "View fleet metrics, deployments, and overall stats.",
+        "customers": "Jump to the list of enterprise deployments.",
+        "agents": "Monitor agent governance, models, runs, and costs.",
+        "releases": "Inspect version distribution and rollouts.",
+        "operations": "Review fleet support logs and break-glass events.",
+        "users": "Manage global user profiles and client memberships."
+      }
     },
     "sections": {
       "fleet": {

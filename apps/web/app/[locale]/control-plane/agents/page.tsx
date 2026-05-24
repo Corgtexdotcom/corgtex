@@ -1,11 +1,59 @@
 import { notFound } from "next/navigation";
-import { getFormatter } from "next-intl/server";
-import { requireControlPlaneAccess } from "@corgtex/domain";
+import {
+  getControlPlaneAiGovernanceStatus,
+  getControlPlaneIntegrationStatus,
+  listControlPlaneFleetPage,
+  requireControlPlaneAccess,
+} from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
-import { prisma } from "@corgtex/shared";
 import { AgentObservatoryClient } from "./_components/observatory-client";
 
 export const dynamic = "force-dynamic";
+
+function dateLabel(value: Date | string | null | undefined) {
+  return value ? new Date(value).toLocaleString() : "Not recorded";
+}
+
+function durationLabel(run: any) {
+  const startedAt = run.startedAt ? new Date(run.startedAt).getTime() : null;
+  const completedAt = run.completedAt ? new Date(run.completedAt).getTime() : null;
+  const failedAt = run.failedAt ? new Date(run.failedAt).getTime() : null;
+  const end = completedAt ?? failedAt;
+  return startedAt && end ? `${((end - startedAt) / 1000).toFixed(1)}s` : "n/a";
+}
+
+function costLabel(value: unknown) {
+  const numeric = Number(value ?? 0);
+  return `$${Number.isFinite(numeric) ? numeric.toFixed(4) : "0.0000"}`;
+}
+
+function tokenLabel(value: unknown) {
+  const numeric = Number(value ?? 0);
+  return `${Number.isFinite(numeric) ? numeric.toLocaleString() : "0"} t`;
+}
+
+function agentNameFromKey(agentKey: string) {
+  return agentKey
+    .split(/[_-]/)
+    .filter(Boolean)
+    .map((part) => `${part.charAt(0).toUpperCase()}${part.slice(1).toLowerCase()}`)
+    .join(" ");
+}
+
+function countAgentRuns(summary: any) {
+  const agentRuns = summary?.agentRuns;
+  if (!agentRuns || typeof agentRuns !== "object") return 0;
+  return Object.values(agentRuns).reduce<number>((total, count) => total + Number(count ?? 0), 0);
+}
+
+function modelSpendValue(summary: any) {
+  const modelUsage = summary?.modelUsage as {
+    billableCostUsd?: unknown;
+    estimatedCostUsd?: unknown;
+  } | null | undefined;
+
+  return String(modelUsage?.billableCostUsd ?? modelUsage?.estimatedCostUsd ?? "0");
+}
 
 export default async function ControlPlaneAgentsPage() {
   const actor = await requirePageActor();
@@ -15,98 +63,135 @@ export default async function ControlPlaneAgentsPage() {
     notFound();
   }
 
-  // Fetch real data from PostgreSQL using Prisma
-  const [agents, runs, workspaces] = await Promise.all([
-    prisma.agentIdentity.findMany({
-      include: {
-        workspace: {
-          select: {
-            name: true,
-            slug: true,
-          },
-        },
-      },
-    }),
-    prisma.agentRun.findMany({
-      orderBy: { createdAt: "desc" },
-      take: 50,
-      include: {
-        steps: true,
-        toolCalls: true,
-        modelUsage: true,
-      },
-    }),
-    prisma.workspace.findMany({
-      select: {
-        id: true,
-        name: true,
-        slug: true,
-      },
-    }),
-  ]);
+  const fleet = await listControlPlaneFleetPage(actor, {
+    page: 1,
+    pageSize: 100,
+    sort: "customer",
+    direction: "asc",
+  });
 
-  const format = await getFormatter();
+  const customerDetails = await Promise.all(fleet.items.map(async (customer: any) => {
+    const [governanceResult, integrationsResult] = await Promise.allSettled([
+      getControlPlaneAiGovernanceStatus(actor, customer.id),
+      getControlPlaneIntegrationStatus(actor, customer.id),
+    ]);
+    const governance = governanceResult.status === "fulfilled" ? governanceResult.value : null;
+    const integrations = integrationsResult.status === "fulfilled" ? integrationsResult.value : null;
+    const recentRuns = Array.isArray(governance?.activity?.recentRuns) ? governance.activity.recentRuns : [];
+    const credentials = Array.isArray(governance?.access?.credentials) ? governance.access.credentials : [];
+    const integrationRows = Array.isArray(integrations?.integrations) ? integrations.integrations : [];
 
-  // Seed default agents for demo/dogfooding if DB is empty
-  const formattedAgents = agents.length > 0 
-    ? agents.map((a: any) => {
-        const agentRuns = runs.filter((r: any) => r.agentKey === a.agentKey && r.workspaceId === a.workspaceId);
-        const totalCost = agentRuns.reduce(
-          (sum: number, r: any) => sum + r.modelUsage.reduce((cost: number, mu: any) => cost + Number(mu.billableCostUsd ?? mu.estimatedCostUsd ?? 0), 0),
-          0,
-        );
-        return {
-          id: a.id,
-          name: a.displayName,
-          workspaceName: a.workspace.name,
-          workspaceSlug: a.workspace.slug,
-          status: a.isActive ? "ACTIVE" : "DISABLED",
-          modelTier: "QUALITY",
-          modelOverride: "Default",
-          runsCount: agentRuns.length,
-          costMtd: `$${totalCost.toFixed(2)}`,
-          lastRun: agentRuns[0]?.createdAt.toLocaleString() ?? "No runs yet",
-        };
-      })
-    : [
-        { id: "1", name: "Slack Triage Agent", workspaceName: "Atlas Workspace", workspaceSlug: "atlas", status: "ACTIVE", modelTier: "STANDARD", modelOverride: "gpt-4o-mini", runsCount: 382, costMtd: "$14.20", lastRun: "2 mins ago" },
-        { id: "2", name: "Constitution Compliance Steward", workspaceName: "Atlas Workspace", workspaceSlug: "atlas", status: "ACTIVE", modelTier: "QUALITY", modelOverride: "gemini-1.5-pro", runsCount: 94, costMtd: "$38.45", lastRun: "1h ago" },
-        { id: "3", name: "Finance Reconciler Agent", workspaceName: "Beacon Manufacturing", workspaceSlug: "beacon-manufacturing", status: "ACTIVE", modelTier: "QUALITY", modelOverride: "gpt-4o", runsCount: 52, costMtd: "$64.10", lastRun: "4h ago" },
-        { id: "4", name: "Document Ingestion Triage", workspaceName: "Summit Media", workspaceSlug: "summit-media", status: "DISABLED", modelTier: "FAST", modelOverride: "gpt-3.5-turbo", runsCount: 1204, costMtd: "$8.90", lastRun: "1d ago" },
-      ];
+    return {
+      customer,
+      governance,
+      integrations,
+      recentRuns,
+      credentials,
+      integrationRows,
+      errors: [
+        governanceResult.status === "rejected" ? "Agent governance unavailable" : null,
+        integrationsResult.status === "rejected" ? "Integrations unavailable" : null,
+      ].filter((error): error is string => Boolean(error)),
+    };
+  }));
 
-  const formattedRuns = runs.length > 0
-    ? runs.map((r: any) => {
-        const agent = agents.find((a: any) => a.agentKey === r.agentKey && a.workspaceId === r.workspaceId);
-        
-        const durationSec = r.startedAt && r.completedAt 
-          ? (r.completedAt.getTime() - r.startedAt.getTime()) / 1000
-          : r.failedAt && r.startedAt
-            ? (r.failedAt.getTime() - r.startedAt.getTime()) / 1000
-            : 1.2;
+  const customers = customerDetails.map(({ customer, governance, recentRuns, credentials, integrationRows, errors }) => {
+    const identityCount = Array.isArray(governance?.agents?.identities) ? governance.agents.identities.length : 0;
+    const configCount = Array.isArray(governance?.agents?.configs) ? governance.agents.configs.length : 0;
+    return {
+      id: customer.id,
+      name: customer.label,
+      slug: customer.customerSlug ?? customer.managedWorkspace?.slug ?? customer.remoteWorkspaceSlug ?? customer.id,
+      healthStatus: customer.lastHealthStatus ?? customer.provisioningStatus ?? "unknown",
+      supportConnectorStatus: customer.supportConnectorStatus ?? "not_configured",
+      supportMcpUrl: customer.supportMcpUrl ?? null,
+      accessMode: governance?.accessMode ?? customer.deploymentKind ?? "unknown",
+      hasManagedWorkspace: Boolean(governance?.hasManagedWorkspace),
+      agentCount: Math.max(identityCount, configCount, new Set(recentRuns.map((run: any) => run.agentKey).filter(Boolean)).size),
+      runCount: countAgentRuns(governance?.summary) || recentRuns.length,
+      credentialCount: credentials.length,
+      integrationCount: integrationRows.length,
+      modelSpend: modelSpendValue(governance?.summary),
+      errors,
+      credentials: credentials.map((credential: any) => ({
+        id: credential.id,
+        label: credential.label,
+        isActive: Boolean(credential.isActive),
+        scopes: Array.isArray(credential.scopes) ? credential.scopes : [],
+      })),
+      integrations: integrationRows.map((integration: any) => ({
+        key: integration.key,
+        label: integration.label,
+        status: integration.status ?? (integration.configured ? "configured" : "disabled"),
+        configured: Boolean(integration.configured),
+        lastError: integration.lastError ?? null,
+      })),
+    };
+  });
 
-        const totalInput = r.modelUsage.reduce((sum: number, mu: any) => sum + mu.inputTokens, 0);
-        const totalOutput = r.modelUsage.reduce((sum: number, mu: any) => sum + mu.outputTokens, 0);
-        const totalCost = r.modelUsage.reduce((sum: number, mu: any) => sum + Number(mu.billableCostUsd ?? mu.estimatedCostUsd ?? 0), 0);
+  const formattedAgents = customerDetails.flatMap(({ customer, governance, recentRuns }) => {
+    const identities = Array.isArray(governance?.agents?.identities) ? governance.agents.identities : [];
+    const configs = Array.isArray(governance?.agents?.configs) ? governance.agents.configs : [];
+    const usageByRunId = new Map((governance?.spend?.recentModelUsage ?? [])
+      .filter((usage: any) => usage.agentRun?.id)
+      .map((usage: any) => [usage.agentRun.id, usage]));
+    const identitiesByKey = new Map(identities.map((identity: any) => [identity.agentKey, identity]));
+    const configsByKey = new Map(configs.map((config: any) => [config.agentKey, config]));
+    const agentKeys = new Set<string>([
+      ...configs.map((config: any) => config.agentKey).filter(Boolean),
+      ...identities.map((identity: any) => identity.agentKey).filter(Boolean),
+      ...recentRuns.map((run: any) => run.agentKey).filter(Boolean),
+    ]);
 
-        return {
-          id: r.id,
-          agentName: agent ? agent.displayName : r.agentKey,
-          status: r.status,
-          duration: `${durationSec.toFixed(1)}s`,
-          cost: `$${totalCost.toFixed(4)}`,
-          tokens: `${(totalInput + totalOutput).toLocaleString()} t`,
-          timestamp: r.createdAt.toLocaleString(),
-          steps: r.steps.map((s: any) => ({ title: s.name, ok: s.status === 'COMPLETED' })),
-          toolCalls: r.toolCalls.map((tc: any) => ({ name: tc.name, duration: tc.completedAt && tc.startedAt ? `${tc.completedAt.getTime() - tc.startedAt.getTime()}ms` : "300ms" })),
-          error: r.status === 'FAILED' ? "Run execution failed" : undefined,
-        };
-      })
-    : [
-        { id: "r1", agentName: "Slack Triage Agent", status: "COMPLETED", duration: "1.4s", cost: "$0.04", tokens: "4,210 t", timestamp: "2 mins ago", steps: [{ title: "Analyze message compliance", ok: true }, { title: "Draft Slack response channel", ok: true }], toolCalls: [{ name: "slack.postMessage", duration: "450ms" }] },
-        { id: "r2", agentName: "Constitution Compliance Steward", status: "COMPLETED", duration: "4.8s", cost: "$0.42", tokens: "28,400 t", timestamp: "1h ago", steps: [{ title: "Audit circles amendment draft", ok: true }, { title: "Run constitutional integrity checker", ok: true }], toolCalls: [{ name: "governance.queryCircles", duration: "1.2s" }] },
-        { id: "r3", agentName: "Finance Reconciler Agent", status: "FAILED", duration: "2.1s", cost: "$0.08", tokens: "6,800 t", timestamp: "2h ago", steps: [{ title: "Verify transaction ledger", ok: false }], toolCalls: [{ name: "finance.getTransactions", duration: "800ms" }], error: "API connection timeout during ledger fetch" },
-      ];
+    return Array.from(agentKeys).map((agentKey) => {
+      const identity: any = identitiesByKey.get(agentKey);
+      const config: any = configsByKey.get(agentKey);
+      const runsForAgent = recentRuns.filter((run: any) => run.agentKey === agentKey);
+      const lastRun = runsForAgent[0];
+      const loadedSpend = runsForAgent.reduce((total: number, run: any) => {
+        const usage: any = usageByRunId.get(run.id);
+        return total + Number(usage?.billableCostUsd ?? usage?.estimatedCostUsd ?? 0);
+      }, 0);
+      return {
+        id: `${customer.id}:${identity?.id ?? config?.id ?? agentKey}`,
+        customerId: customer.id,
+        customerName: customer.label,
+        customerSlug: customer.customerSlug ?? customer.managedWorkspace?.slug ?? customer.remoteWorkspaceSlug ?? customer.id,
+        name: identity?.displayName ?? config?.label ?? agentNameFromKey(agentKey),
+        status: identity ? (identity.archivedAt ? "ARCHIVED" : identity.isActive ? "ACTIVE" : "DISABLED") : config?.enabled === false ? "DISABLED" : "AVAILABLE",
+        modelTier: config?.defaultModelTier ?? "Default",
+        modelOverride: config?.modelOverride ?? identity?.linkedCredential?.label ?? "Default",
+        runsCount: runsForAgent.length,
+        costMtd: costLabel(loadedSpend),
+        lastRun: lastRun ? dateLabel(lastRun.createdAt) : "No runs recorded",
+      };
+    });
+  });
+
+  const formattedRuns = customerDetails.flatMap(({ customer, recentRuns, governance }) => {
+    const usageByRunId = new Map((governance?.spend?.recentModelUsage ?? [])
+      .filter((usage: any) => usage.agentRun?.id)
+      .map((usage: any) => [usage.agentRun.id, usage]));
+
+    return recentRuns.map((run: any) => {
+      const usage: any = usageByRunId.get(run.id);
+      const tokens = Number(usage?.inputTokens ?? 0) + Number(usage?.outputTokens ?? 0);
+      return {
+        id: `${customer.id}:${run.id}`,
+        customerId: customer.id,
+        customerName: customer.label,
+        agentName: agentNameFromKey(run.agentKey ?? "agent"),
+        status: run.status,
+        duration: durationLabel(run),
+        cost: costLabel(usage?.billableCostUsd ?? usage?.estimatedCostUsd),
+        tokens: tokenLabel(tokens),
+        timestamp: dateLabel(run.createdAt),
+        steps: [],
+        toolCalls: [],
+        error: run.status === "FAILED" ? "Run execution failed" : undefined,
+      };
+    });
+  });
 
   return (
     <div className="space-y-6 animate-in fade-in duration-300">
@@ -128,7 +213,7 @@ export default async function ControlPlaneAgentsPage() {
       <AgentObservatoryClient
         agents={formattedAgents}
         runs={formattedRuns}
-        workspaces={workspaces}
+        customers={customers}
       />
 
     </div>

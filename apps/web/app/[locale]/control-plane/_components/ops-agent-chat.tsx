@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
-import { X, Send, Sparkles, AlertCircle, RefreshCw, CheckCircle2, DollarSign, ArrowRight } from "lucide-react";
+import { X, Send, Sparkles, ArrowRight } from "lucide-react";
 import { useTranslations } from "next-intl";
 import { cn } from "@/lib/utils";
 
@@ -86,60 +86,15 @@ export function OpsAgentChat({ isOpen, onClose, pageContext }: OpsAgentChatProps
     setTimeout(() => {
       setIsTyping(false);
       
-      const lower = textToSend.toLowerCase();
-      let replyText = "";
-      let structuredData: Message["structuredData"] = undefined;
-
-      // Simple keywords responses with structured cards
-      if (lower.includes("health") || lower.includes(" fleet")) {
-        replyText = "I have fetched the latest telemetry for the active fleet. We are currently tracking 2 degraded deployments: **Atlas Workspace** (release drift recorded) and **Beacon Manufacturing** (support connector sync issue). Active workflow agents are running normally with a 98.4% success rate.";
-        structuredData = {
-          type: "stat-card",
-          title: "Fleet Health Indicators",
-          stats: [
-            { label: "Active Deployments", value: "24", tone: "ok" },
-            { label: "Needs Attention", value: "2", tone: "attention" },
-            { label: "Uptime (7d)", value: "99.94%", tone: "ok" },
-            { label: "Success Rate", value: "98.4%", tone: "ok" }
-          ]
-        };
-      } else if (lower.includes("degraded") || lower.includes("failing") || lower.includes("attention")) {
-        replyText = "Here are the deployments that currently require operator intervention. The support connector was automatically blocked during the last deploy cycle on Beacon Manufacturing.";
-        structuredData = {
-          type: "table",
-          title: "Degraded Deployments",
-          columns: ["Client", "Issue", "Last Success", "Action Needed"],
-          rows: [
-            { Client: "Atlas Workspace", Issue: "Release drift (v1.2.3 vs v1.3.0)", "Last Success": "2h ago", "Action Needed": "Re-queue deploy latest" },
-            { Client: "Beacon Manufacturing", Issue: "Support token expired", "Last Success": "1d ago", "Action Needed": "Rotate support token" }
-          ]
-        };
-      } else if (lower.includes("spend") || lower.includes("cost") || lower.includes("budget")) {
-        replyText = "I have retrieved the aggregate model spend metrics across all workspaces for this billing cycle. Overall spend is well within limits. GPT-4o represents 64% of total tokens consumed.";
-        structuredData = {
-          type: "table",
-          title: "Top Client Model Budgets",
-          columns: ["Client", "Limit", "Usage (MTD)", "Budget Health"],
-          rows: [
-            { Client: "Atlas Workspace", Limit: "$200.00", "Usage (MTD)": "$87.42", "Budget Health": "Healthy (43%)" },
-            { Client: "Beacon Manufacturing", Limit: "$500.00", "Usage (MTD)": "$341.10", "Budget Health": "Warning (68%)" },
-            { Client: "Summit Media", Limit: "$1,000.00", "Usage (MTD)": "$12.04", "Budget Health": "Healthy (1%)" }
-          ]
-        };
-      } else if (lower.includes("flag") || lower.includes("feature")) {
-        replyText = "Sure, I have loaded the active feature flag overrides for the selected client context. Feature flag changes write an audited reason into the central control plane logs.";
-        structuredData = {
-          type: "table",
-          title: "Workspace Feature Overrides",
-          columns: ["Flag Key", "Status", "Last Changed By", "Audit Rationale"],
-          rows: [
-            { "Flag Key": "slack_connector_enabled", Status: "Enabled", "Last Changed By": "jan@corgtex.com", "Audit Rationale": "Enable support sync" },
-            { "Flag Key": "meeting_recorder_v2", Status: "Disabled", "Last Changed By": "system", "Audit Rationale": "Awaiting rollout" }
-          ]
-        };
-      } else {
-        replyText = `I have received your query regarding "${textToSend}". I am fully context-aware and know that you are viewing the **${pageContext.title}** page (${pageContext.path}). Under local execution guidelines, I can assist you with running preflight release rollouts, checking feature flag overrides, or inspecting active model spend.`;
-      }
+      const replyText = `I received your query regarding "${textToSend}". Live ops-copilot execution is not connected in this panel yet, so I will not fabricate fleet telemetry. Use the visible control-plane tables on **${pageContext.title}** (${pageContext.path}) for current customer, release, agent, integration, and operation data.`;
+      const structuredData: Message["structuredData"] = {
+        type: "stat-card",
+        title: "Live Copilot Not Connected",
+        stats: [
+          { label: "Response source", value: "UI context only", tone: "attention" },
+          { label: "Production data", value: "Not queried by chat", tone: "attention" },
+        ],
+      };
 
       const agentMsg: Message = {
         id: String(Date.now() + 1),

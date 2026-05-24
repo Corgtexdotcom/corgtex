@@ -61,7 +61,7 @@ export function UsersClient({ users }: UsersClientProps) {
           { title: "Platform Users", value: totalUsers, detail: "registered directory entries", icon: UsersIcon, tone: "text-slate-400" },
           { title: "Platform Admins", value: adminCount, detail: "unrestricted access control", icon: ShieldCheck, tone: "text-indigo-400" },
           { title: "Active Directory", value: activeCount, detail: "active user profiles", icon: UserCheck, tone: "text-emerald-400" },
-          { title: "Monthly Sign-ins", value: totalUsers * 4, tone: "text-brand-400", detail: "estimated dashboard sessions", icon: Clock },
+          { title: "Monthly Sign-ins", value: "Not tracked", tone: "text-brand-400", detail: "sign-in telemetry unavailable", icon: Clock },
         ].map((metric, i) => {
           const Icon = metric.icon;
           return (

@@ -6,23 +6,20 @@ import {
   CheckCircle,
   AlertTriangle,
   Play,
-  TrendingUp,
   Cpu,
-  Search,
   DollarSign,
-  ArrowRight,
   Clock,
   Code,
   X,
-  FileText,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 interface Agent {
   id: string;
+  customerId: string;
+  customerName: string;
+  customerSlug: string;
   name: string;
-  workspaceName: string;
-  workspaceSlug: string;
   status: string;
   modelTier: string;
   modelOverride: string;
@@ -33,6 +30,8 @@ interface Agent {
 
 interface Run {
   id: string;
+  customerId: string;
+  customerName: string;
   agentName: string;
   status: string;
   duration: string;
@@ -44,36 +43,116 @@ interface Run {
   error?: string;
 }
 
+interface CustomerSummary {
+  id: string;
+  name: string;
+  slug: string;
+  healthStatus: string;
+  supportConnectorStatus: string;
+  supportMcpUrl?: string | null;
+  accessMode: string;
+  hasManagedWorkspace: boolean;
+  agentCount: number;
+  runCount: number;
+  credentialCount: number;
+  integrationCount: number;
+  modelSpend: string | number | null;
+  errors: string[];
+  credentials: Array<{
+    id: string;
+    label: string;
+    isActive: boolean;
+    scopes: string[];
+  }>;
+  integrations: Array<{
+    key: string;
+    label: string;
+    status: string;
+    configured: boolean;
+    lastError?: string | null;
+  }>;
+}
+
 interface ObservatoryProps {
   agents: Agent[];
   runs: Run[];
-  workspaces: Array<{ id: string; name: string; slug: string }>;
+  customers: CustomerSummary[];
 }
 
-export function AgentObservatoryClient({ agents, runs, workspaces }: ObservatoryProps) {
+export function AgentObservatoryClient({ agents, runs, customers }: ObservatoryProps) {
   const [search, setSearch] = useState("");
-  const [selectedWorkspace, setSelectedWorkspace] = useState("");
+  const [selectedCustomerId, setSelectedCustomerId] = useState("");
   const [selectedStatus, setSelectedStatus] = useState("");
   const [selectedRun, setSelectedRun] = useState<Run | null>(null); // Active trace drawer
+  const selectedCustomer = customers.find((customer) => customer.id === selectedCustomerId) ?? null;
+  const scopedCustomers = selectedCustomer ? [selectedCustomer] : customers;
+  const scopedAgents = selectedCustomer ? agents.filter((agent) => agent.customerId === selectedCustomer.id) : agents;
+  const scopedRuns = selectedCustomer ? runs.filter((run) => run.customerId === selectedCustomer.id) : runs;
+  const completedRuns = scopedRuns.filter((run) => run.status === "COMPLETED").length;
+  const successRate = scopedRuns.length > 0 ? `${((completedRuns / scopedRuns.length) * 100).toFixed(1)}%` : "n/a";
+  const modelSpend = scopedRuns.reduce((total, run) => total + Number(run.cost.replace(/[^0-9.-]/g, "") || 0), 0);
 
   // Filter logic
-  const filteredAgents = agents.filter((agent) => {
+  const filteredAgents = scopedAgents.filter((agent) => {
     const matchesSearch = agent.name.toLowerCase().includes(search.toLowerCase());
-    const matchesWorkspace = selectedWorkspace === "" || agent.workspaceSlug === selectedWorkspace;
     const matchesStatus = selectedStatus === "" || agent.status === selectedStatus;
-    return matchesSearch && matchesWorkspace && matchesStatus;
+    return matchesSearch && matchesStatus;
   });
+  const filteredRuns = scopedRuns;
+  const connectionRows = scopedCustomers.flatMap((customer) => ([
+    {
+      id: `${customer.id}:support`,
+      customerName: customer.name,
+      label: customer.supportMcpUrl ? "Customer MCP endpoint" : "Support connector",
+      kind: customer.accessMode,
+      status: customer.supportConnectorStatus,
+      detail: customer.supportMcpUrl ?? "No MCP endpoint recorded",
+    },
+    ...customer.credentials.map((credential) => ({
+      id: `${customer.id}:credential:${credential.id}`,
+      customerName: customer.name,
+      label: credential.label,
+      kind: "MCP credential",
+      status: credential.isActive ? "active" : "disabled",
+      detail: credential.scopes.length > 0 ? credential.scopes.join(", ") : "No scopes recorded",
+    })),
+  ]));
+  const integrationRows = scopedCustomers.flatMap((customer) => customer.integrations.map((integration) => ({
+    ...integration,
+    id: `${customer.id}:integration:${integration.key}`,
+    customerName: customer.name,
+  })));
 
   return (
     <div className="space-y-6">
+      <div className="bg-[#0b0d12] border border-[#1f2430] rounded-xl p-5 shadow-sm flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+        <div>
+          <h2 className="text-sm font-bold text-white">Customer Scope</h2>
+          <p className="text-[10px] text-slate-500 mt-0.5">
+            Switch between the whole Corgtex platform and individual customer deployments.
+          </p>
+        </div>
+        <select
+          value={selectedCustomerId}
+          onChange={(event) => setSelectedCustomerId(event.target.value)}
+          className="bg-[#141822] border border-[#202738] text-xs text-slate-200 rounded-lg px-3 py-2 focus:outline-none lg:min-w-72"
+        >
+          <option value="">Whole platform</option>
+          {customers.map((customer) => (
+            <option key={customer.id} value={customer.id}>
+              {customer.name}
+            </option>
+          ))}
+        </select>
+      </div>
       
       {/* Metrics Row */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         {[
-          { title: "Total Agents", value: agents.length, detail: "across active instances", icon: Bot, tone: "text-slate-400" },
-          { title: "Success Rate", value: "98.4%", detail: "last 30d operations", icon: CheckCircle, tone: "text-emerald-400" },
-          { title: "30d Model Spend", value: "$114.95", detail: "aggregated API costs", icon: DollarSign, tone: "text-indigo-400" },
-          { title: "Call Volume", value: "1,862", tone: "text-brand-400", detail: "LLM completions MTD", icon: Cpu },
+          { title: "Customers", value: scopedCustomers.length, detail: selectedCustomer ? selectedCustomer.slug : "visible fleet scope", icon: Bot, tone: "text-slate-400" },
+          { title: "Total Agents", value: scopedAgents.length, detail: "known or configured agents", icon: CheckCircle, tone: "text-emerald-400" },
+          { title: "Success Rate", value: successRate, detail: "from loaded run traces", icon: CheckCircle, tone: "text-emerald-400" },
+          { title: "Model Spend", value: `$${modelSpend.toFixed(2)}`, detail: "from loaded run traces", icon: DollarSign, tone: "text-indigo-400" },
         ].map((metric, i) => {
           const Icon = metric.icon;
           return (
@@ -112,14 +191,15 @@ export function AgentObservatoryClient({ agents, runs, workspaces }: Observatory
                 className="bg-[#141822] border border-[#202738] text-xs text-slate-300 placeholder-slate-600 rounded-lg px-2.5 py-1.5 focus:border-[#2f3952] focus:outline-none"
               />
               <select
-                value={selectedWorkspace}
-                onChange={(e) => setSelectedWorkspace(e.target.value)}
+                value={selectedStatus}
+                onChange={(e) => setSelectedStatus(e.target.value)}
                 className="bg-[#141822] border border-[#202738] text-xs text-slate-400 rounded-lg px-2 py-1.5 focus:outline-none"
               >
-                <option value="">Any Customer</option>
-                {workspaces.map((ws) => (
-                  <option key={ws.slug} value={ws.slug}>{ws.name}</option>
-                ))}
+                <option value="">Any status</option>
+                <option value="ACTIVE">Active</option>
+                <option value="AVAILABLE">Available</option>
+                <option value="DISABLED">Disabled</option>
+                <option value="ARCHIVED">Archived</option>
               </select>
             </div>
           </div>
@@ -132,8 +212,8 @@ export function AgentObservatoryClient({ agents, runs, workspaces }: Observatory
                   <th className="p-3">Customer</th>
                   <th className="p-3">Status</th>
                   <th className="p-3">Model Config</th>
-                  <th className="p-3">Runs (MTD)</th>
-                  <th className="p-3 text-right">Gasto (MTD)</th>
+                  <th className="p-3">Runs</th>
+                  <th className="p-3 text-right">Spend</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-[#1f2430]/60">
@@ -144,8 +224,8 @@ export function AgentObservatoryClient({ agents, runs, workspaces }: Observatory
                       <span className="text-[9px] text-slate-500 block mt-0.5">Last run: {agent.lastRun}</span>
                     </td>
                     <td className="p-3">
-                      <span className="text-slate-300 font-semibold block">{agent.workspaceName}</span>
-                      <span className="text-[9px] text-slate-500 block mt-0.5">slug: {agent.workspaceSlug}</span>
+                      <span className="text-slate-300 font-semibold block">{agent.customerName}</span>
+                      <span className="text-[9px] text-slate-500 block mt-0.5">slug: {agent.customerSlug}</span>
                     </td>
                     <td className="p-3">
                       <span className={cn(
@@ -185,7 +265,7 @@ export function AgentObservatoryClient({ agents, runs, workspaces }: Observatory
           </div>
 
           <div className="space-y-2.5 max-h-[360px] overflow-y-auto pr-1 scrollbar-thin">
-            {runs.map((run) => (
+            {filteredRuns.map((run) => (
               <button
                 key={run.id}
                 onClick={() => setSelectedRun(run)}
@@ -205,15 +285,82 @@ export function AgentObservatoryClient({ agents, runs, workspaces }: Observatory
                   </span>
                 </div>
                 <div className="flex items-center justify-between text-[9px] text-slate-500 mt-1 w-full">
+                  <span>{run.customerName}</span>
+                </div>
+                <div className="flex items-center justify-between text-[9px] text-slate-500 mt-1 w-full">
                   <span>Tokens: {run.tokens}</span>
                   <span className="font-semibold text-slate-400">{run.cost}</span>
                 </div>
                 <span className="text-[8px] text-slate-600 block mt-1">Started {run.timestamp}</span>
               </button>
             ))}
+            {filteredRuns.length === 0 && (
+              <div className="text-center py-6 text-slate-500 text-[10px]">
+                No agent run traces are available for this scope.
+              </div>
+            )}
           </div>
         </div>
 
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div className="bg-[#0b0d12] border border-[#1f2430] rounded-xl p-5 shadow-sm space-y-4">
+          <div>
+            <h3 className="text-sm font-bold text-white">Connections & MCP</h3>
+            <p className="text-[10px] text-slate-500 mt-0.5">Support connectors, customer MCP endpoints, and active agent credentials by customer.</p>
+          </div>
+          <div className="space-y-2.5 max-h-[360px] overflow-y-auto pr-1 scrollbar-thin">
+            {connectionRows.map((connection) => (
+              <div key={connection.id} className="rounded-lg bg-[#141822] border border-[#202738] p-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <strong className="text-xs text-white block">{connection.label}</strong>
+                    <span className="text-[9px] text-slate-500 block mt-0.5">{connection.customerName} - {connection.kind}</span>
+                  </div>
+                  <span className="text-[8px] font-bold uppercase text-slate-300 border border-[#2d3548] rounded px-1.5 py-0.5">
+                    {connection.status}
+                  </span>
+                </div>
+                <p className="text-[9px] text-slate-500 mt-2 break-all">{connection.detail}</p>
+              </div>
+            ))}
+            {connectionRows.length === 0 && (
+              <div className="text-center py-6 text-slate-500 text-[10px]">No connector or MCP records are available for this scope.</div>
+            )}
+          </div>
+        </div>
+
+        <div className="bg-[#0b0d12] border border-[#1f2430] rounded-xl p-5 shadow-sm space-y-4">
+          <div>
+            <h3 className="text-sm font-bold text-white">Integration Registry</h3>
+            <p className="text-[10px] text-slate-500 mt-0.5">Customer integrations and data feeds visible from the control plane.</p>
+          </div>
+          <div className="space-y-2.5 max-h-[360px] overflow-y-auto pr-1 scrollbar-thin">
+            {integrationRows.map((integration) => (
+              <div key={integration.id} className="rounded-lg bg-[#141822] border border-[#202738] p-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <strong className="text-xs text-white block">{integration.label}</strong>
+                    <span className="text-[9px] text-slate-500 block mt-0.5">{integration.customerName}</span>
+                  </div>
+                  <span className={cn(
+                    "text-[8px] font-bold uppercase border rounded px-1.5 py-0.5",
+                    integration.configured ? "text-emerald-400 border-emerald-500/25 bg-emerald-500/10" : "text-slate-400 border-slate-500/20 bg-slate-500/5",
+                  )}>
+                    {integration.status}
+                  </span>
+                </div>
+                {integration.lastError && (
+                  <p className="text-[9px] text-rose-400 mt-2">{integration.lastError}</p>
+                )}
+              </div>
+            ))}
+            {integrationRows.length === 0 && (
+              <div className="text-center py-6 text-slate-500 text-[10px]">No integrations are available for this scope.</div>
+            )}
+          </div>
+        </div>
       </div>
 
       {/* Slide-out active Trace Drawer */}
