@@ -577,6 +577,57 @@ describe("ops-core control-plane incidents", () => {
     expect(incident.evidence).toContain("Latest failed run: 2026-05-24T00:20:00.000Z");
   });
 
+  it("orders failure-streak recovery by terminal timestamps", () => {
+    const incidents = buildTestControlPlaneIncidents([
+      {
+        id: "deployment-acme",
+        label: "Acme Production",
+        customerSlug: "acme",
+        hasSupportCredential: true,
+        fleetSnapshots: [
+          {
+            snapshotKind: "SUPPORT_READY",
+            observedAt: "2026-05-24T00:30:00.000Z",
+            summary: {
+              agentRuns: {
+                items: [
+                  {
+                    agentKey: "inbox-triage",
+                    status: "COMPLETED",
+                    createdAt: "2026-05-24T00:20:00.000Z",
+                    completedAt: "2026-05-24T00:21:00.000Z",
+                  },
+                  {
+                    agentKey: "inbox-triage",
+                    status: "FAILED",
+                    createdAt: "2026-05-24T00:10:00.000Z",
+                    failedAt: "2026-05-24T00:25:00.000Z",
+                  },
+                  {
+                    agentKey: "inbox-triage",
+                    status: "FAILED",
+                    createdAt: "2026-05-24T00:05:00.000Z",
+                    failedAt: "2026-05-24T00:24:00.000Z",
+                  },
+                  {
+                    agentKey: "inbox-triage",
+                    status: "FAILED",
+                    createdAt: "2026-05-24T00:00:00.000Z",
+                    failedAt: "2026-05-24T00:23:00.000Z",
+                  },
+                ],
+              },
+            },
+          },
+        ],
+      },
+    ]);
+
+    const incident = incidents.find((item) => item.status === "agentFailureStreak");
+    expect(incident).toBeDefined();
+    expect(incident.evidence).toContain("Latest failed run: 2026-05-24T00:25:00.000Z");
+  });
+
   it("suppresses undated support signals from timestamp-less snapshots", () => {
     const incidents = buildTestControlPlaneIncidents([
       {

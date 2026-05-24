@@ -484,16 +484,19 @@ function activeFailureStreak(runs, snapshotObservedAtMs, sweepNowMs) {
 }
 
 function agentRunOrderTimestamp(run) {
-  return optionalText(run?.createdAt) ?? agentRunFailureTimestamp(run);
+  return agentRunTerminalTimestamp(run) ?? optionalText(run?.createdAt);
 }
 
 function agentRunFailureTimestamp(run) {
+  return agentRunTerminalTimestamp(run) ?? optionalText(run?.createdAt);
+}
+
+function agentRunTerminalTimestamp(run) {
   return optionalText(run?.failedAt)
     ?? optionalText(run?.completedAt)
     ?? optionalText(run?.finishedAt)
     ?? optionalText(run?.endedAt)
-    ?? optionalText(run?.updatedAt)
-    ?? optionalText(run?.createdAt);
+    ?? optionalText(run?.updatedAt);
 }
 
 function normalizeAgentRunStatus(value) {
