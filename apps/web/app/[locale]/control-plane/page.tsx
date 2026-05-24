@@ -4,7 +4,19 @@ import { listControlPlaneFleetPage, listControlPlaneReleaseRolloutJobs, requireC
 import { Link } from "@/i18n/routing";
 import { requirePageActor } from "@/lib/auth";
 import { enqueueDeployLatestRolloutAction } from "./actions";
-import { ControlPlaneLanguageSwitcher } from "./ControlPlaneLanguageSwitcher";
+import { cn } from "@/lib/utils";
+import {
+  Users,
+  CheckCircle,
+  AlertTriangle,
+  Radio,
+  Shuffle,
+  ShieldCheck,
+  Search,
+  ArrowRight,
+  TrendingUp,
+  Cpu,
+} from "lucide-react";
 
 export const dynamic = "force-dynamic";
 
@@ -15,10 +27,17 @@ type ReleaseRollout = Awaited<ReturnType<typeof listControlPlaneReleaseRolloutJo
 const PAGE_SIZE = 25;
 
 function statusTone(status?: string | null) {
-  if (status === "ok" || status === "active" || status === "connected") return "var(--green-11)";
-  if (status === "attention" || status === "degraded" || status === "provisioning" || status === "configured" || status === "pending") return "var(--orange-11)";
-  if (status === "down" || status === "suspended" || status === "failed" || status === "FAILED") return "var(--red-11)";
-  return "var(--gray-11)";
+  if (status === "ok" || status === "active" || status === "connected") return "text-emerald-400 bg-emerald-500/10 border-emerald-500/20";
+  if (status === "attention" || status === "degraded" || status === "provisioning" || status === "configured" || status === "pending") return "text-amber-400 bg-amber-500/10 border-amber-500/20";
+  if (status === "down" || status === "suspended" || status === "failed" || status === "FAILED") return "text-rose-400 bg-rose-500/10 border-rose-500/20";
+  return "text-slate-400 bg-slate-500/10 border-slate-500/20";
+}
+
+function statusDot(status?: string | null) {
+  if (status === "ok" || status === "active" || status === "connected") return "bg-emerald-500 shadow-emerald-500/40 animate-pulse";
+  if (status === "attention" || status === "degraded" || status === "provisioning" || status === "configured" || status === "pending") return "bg-amber-500 shadow-amber-500/40";
+  if (status === "down" || status === "suspended" || status === "failed" || status === "FAILED") return "bg-rose-500 shadow-rose-500/40 animate-ping";
+  return "bg-slate-500";
 }
 
 function label(value?: string | null) {
@@ -59,17 +78,6 @@ function rolloutTarget(payload: ReleaseRollout["payload"]) {
   const releaseImageTag = typeof targetRecord.releaseImageTag === "string" ? targetRecord.releaseImageTag : null;
   const releaseVersion = typeof targetRecord.releaseVersion === "string" ? targetRecord.releaseVersion : null;
   return releaseVersion ? `${releaseImageTag ?? "unknown"} / ${releaseVersion}` : releaseImageTag;
-}
-
-function ReadinessCell({ customer }: { customer: FleetCustomer }) {
-  const health = customer.lastHealthStatus || latestSnapshot(customer, "HEALTH")?.status || customer.provisioningStatus;
-  const drift = releaseDrift(customer);
-  return (
-    <td style={{ padding: 12, minWidth: 180 }}>
-      <div style={{ color: statusTone(health), fontWeight: 700, textTransform: "capitalize" }}>{label(health)}</div>
-      {drift ? <div className="muted" style={{ fontSize: 12 }}>{drift}</div> : <div className="muted" style={{ fontSize: 12 }}>Cached status</div>}
-    </td>
-  );
 }
 
 export default async function ControlPlanePage({
@@ -114,237 +122,378 @@ export default async function ControlPlanePage({
   const nextHref = queryString({ ...paginationFilters, page: Math.min(fleet.page + 1, fleet.pageCount) });
 
   return (
-    <main className="control-plane-shell">
-      <aside className="control-plane-rail stack">
-        <strong>Ops Control Plane</strong>
-        <a className="ws-nav-link" href="#fleet"><span className="ws-nav-icon">◇</span>Fleet</a>
-        <a className="ws-nav-link" href="#rollout"><span className="ws-nav-icon">◇</span>Deploy latest</a>
-        <a className="ws-nav-link" href="#audit"><span className="ws-nav-icon">◇</span>Cached evidence</a>
-        <ControlPlaneLanguageSwitcher />
-      </aside>
+    <div className="space-y-6 pb-12 animate-in fade-in duration-300">
+      
+      {/* Page Header */}
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-[#1f2430] pb-6">
+        <div>
+          <span className="text-[10px] font-bold tracking-widest text-brand-400 uppercase">
+            Private operations surface
+          </span>
+          <h1 className="text-2xl font-bold tracking-tight text-white mt-1">
+            Fleet Control Plane
+          </h1>
+          <p className="text-xs text-slate-400 mt-1 max-w-2xl">
+            Real-time operations dashboard for Corgtex customer deployments. Monitor runtime health, feature flag overrides, enterprise integrations, and version rollouts.
+          </p>
+        </div>
 
-      <div className="control-plane-content stack">
-        <header className="page-header">
+        {/* Global deploy action shortcut strip */}
+        <div className="bg-[#0f121d] border border-[#23293b] rounded-xl p-4 flex flex-col sm:flex-row sm:items-center gap-4">
           <div>
-            <p className="muted" style={{ textTransform: "uppercase", fontSize: 12 }}>Private operations</p>
-            <h1 className="title-lg" style={{ margin: 0 }}>Customer Fleet</h1>
-            <p className="muted" style={{ maxWidth: 760 }}>
-              Scalable control plane for 10-100 customer deployments. The list reads cached deployment and fleet snapshot records only; live probes run on demand from customer detail pages.
+            <h4 className="text-xs font-bold text-white flex items-center gap-1.5">
+              <Shuffle className="w-3.5 h-3.5 text-brand-400" />
+              Upgrade All Eligible
+            </h4>
+            <p className="text-[10px] text-slate-500 mt-0.5">
+              Deploys latest stable release to healthy environments.
             </p>
           </div>
-        </header>
+          <form action={enqueueDeployLatestRolloutAction} className="flex gap-2">
+            <input type="hidden" name="allEligible" value="true" />
+            <input type="hidden" name="limit" value="100" />
+            <input type="hidden" name="reason" value="Deploy latest rollout scheduled from Dashboard" />
+            <button
+              type="submit"
+              className="bg-brand-600 hover:bg-brand-500 text-white font-semibold text-xs px-3.5 py-2 rounded-lg shadow transition-all duration-150"
+            >
+              Queue rollouts
+            </button>
+          </form>
+        </div>
+      </div>
 
-        <section style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12 }}>
-          {[
-            ["Customers", fleet.summary.totalCustomers, "registered clients"],
-            ["Active", fleet.summary.active, "active deployments"],
-            ["Needs attention", fleet.summary.attention, "cached health issues"],
-            ["Support ready", fleet.summary.supportReady, "connector configured"],
-            ["Release drift", fleet.summary.releaseDrift, "cached drift signals"],
-          ].map(([title, value, detail]) => (
-            <div className="panel" key={title} style={{ padding: 16 }}>
-              <div className="muted" style={{ fontSize: 12 }}>{title}</div>
-              <div style={{ fontSize: 28, fontWeight: 700 }}>{value}</div>
-              <div className="muted" style={{ fontSize: 12 }}>{detail}</div>
+      {/* Top Telemetry Stats Grid */}
+      <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
+        {[
+          { title: "Registered Customers", value: fleet.summary.totalCustomers, detail: "across active fleet", icon: Users, tone: "text-slate-400" },
+          { title: "Active Deployments", value: fleet.summary.active, detail: "provisioned instances", icon: CheckCircle, tone: "text-emerald-400" },
+          { title: "Needs Attention", value: fleet.summary.attention, detail: "open preparation gaps", icon: AlertTriangle, tone: fleet.summary.attention > 0 ? "text-amber-400" : "text-slate-400" },
+          { title: "Support Ready", value: fleet.summary.supportReady, detail: "connectors active", icon: ShieldCheck, tone: "text-indigo-400" },
+          { title: "Release Drift", value: fleet.summary.releaseDrift, detail: "drift signals recorded", icon: Radio, tone: fleet.summary.releaseDrift > 0 ? "text-rose-400" : "text-slate-400" },
+        ].map((card, i) => {
+          const Icon = card.icon;
+          return (
+            <div key={i} className="bg-[#0b0d12] border border-[#1f2430] hover:border-[#2b3244] rounded-xl p-4 flex items-start justify-between shadow-sm transition-all duration-150 group">
+              <div className="space-y-1">
+                <span className="text-[10px] font-semibold text-slate-500 tracking-wider block uppercase">
+                  {card.title}
+                </span>
+                <span className="text-2xl font-bold text-white tracking-tight block">
+                  {card.value}
+                </span>
+                <span className="text-[10px] text-slate-400 block">
+                  {card.detail}
+                </span>
+              </div>
+              <div className={cn("p-2 rounded-lg bg-[#141822] border border-[#202738] group-hover:scale-105 transition-transform", card.tone)}>
+                <Icon className="w-4 h-4" />
+              </div>
             </div>
-          ))}
-        </section>
+          );
+        })}
+      </div>
 
-        <section id="fleet" className="panel stack" style={{ padding: 18, gap: 16 }}>
-          <div className="row" style={{ alignItems: "end" }}>
+      {/* Dense Fleet Dashboard Layout (Main content + sidebar right) */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        
+        {/* Customer Fleet List Table (Col Span 2) */}
+        <div className="lg:col-span-2 space-y-4 bg-[#0b0d12] border border-[#1f2430] rounded-xl p-5 shadow-sm">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-[#1f2430]">
             <div>
-              <h2 style={{ margin: 0 }}>Fleet</h2>
-              <p className="muted" style={{ margin: "4px 0 0" }}>Server-side filters, pagination, and cached evidence. No fan-out from this page.</p>
+              <h2 className="text-sm font-bold text-white">Active Telemetry Fleet</h2>
+              <p className="text-[10px] text-slate-500 mt-0.5">Filter, search, or inspect details of Corgtex hosted clients.</p>
             </div>
-            <form method="get" style={{ display: "flex", flexWrap: "wrap", gap: 8, justifyContent: "flex-end" }}>
-              <input name="q" defaultValue={fleet.filters.query} placeholder="Search customer, URL, owner, release" style={{ minWidth: 280 }} />
-              <select name="health" defaultValue={fleet.filters.health}>
+            
+            {/* Filter controls */}
+            <form method="get" className="flex flex-wrap gap-2">
+              <input
+                name="q"
+                defaultValue={fleet.filters.query}
+                placeholder="Search..."
+                className="bg-[#141822] border border-[#202738] text-xs text-slate-200 placeholder-slate-500 rounded-lg px-2.5 py-1.5 focus:border-[#2f3952] focus:ring-0 focus:outline-none"
+              />
+              <select
+                name="health"
+                defaultValue={fleet.filters.health}
+                className="bg-[#141822] border border-[#202738] text-xs text-slate-400 rounded-lg px-2 py-1.5 focus:border-[#2f3952] focus:outline-none"
+              >
                 <option value="">Any health</option>
                 <option value="ok">Healthy</option>
                 <option value="degraded">Degraded</option>
                 <option value="down">Down</option>
-                <option value="active">Active</option>
               </select>
-              <select name="support" defaultValue={fleet.filters.support}>
-                <option value="">Any support</option>
-                <option value="connected">Connected</option>
-                <option value="configured">Configured</option>
-                <option value="not_configured">Not configured</option>
-                <option value="degraded">Degraded</option>
-              </select>
-              <select name="region" defaultValue={fleet.filters.region}>
-                <option value="">Any region</option>
-                {fleet.filters.regions.map((region) => <option key={region} value={region.toLowerCase()}>{region}</option>)}
-              </select>
-              <select name="owner" defaultValue={fleet.filters.owner}>
-                <option value="">Any owner</option>
-                {fleet.filters.owners.map((owner) => <option key={owner} value={owner.toLowerCase()}>{owner}</option>)}
-              </select>
-              <select name="sort" defaultValue={fleet.filters.sort}>
-                <option value="updated">Updated</option>
-                <option value="customer">Customer</option>
-                <option value="health">Health</option>
-                <option value="release">Release</option>
-                <option value="support">Support</option>
-                <option value="region">Region</option>
-                <option value="owner">Owner</option>
-              </select>
-              <select name="direction" defaultValue={fleet.filters.direction}>
-                <option value="desc">Descending</option>
-                <option value="asc">Ascending</option>
-              </select>
-              <button type="submit" className="button secondary small">Apply</button>
+              <button
+                type="submit"
+                className="bg-[#1c2230] hover:bg-[#252d40] border border-[#2e374d] text-xs text-slate-300 px-3 py-1.5 rounded-lg transition-colors"
+              >
+                Apply
+              </button>
             </form>
           </div>
 
-          <div className="control-plane-deploy-strip">
-            <div>
-              <strong>Deploy latest</strong>
-              <p className="muted" style={{ margin: "4px 0 0" }}>
-                Queue selected clients from the table, or send the configured latest release to all healthy eligible clients. Preflight still skips unsafe targets.
-              </p>
-            </div>
-            <form action={enqueueDeployLatestRolloutAction} className="control-plane-inline-form">
-              <input type="hidden" name="allEligible" value="true" />
-              <input type="hidden" name="limit" value="100" />
-              <input name="reason" required defaultValue="Deploy configured latest release to all eligible healthy clients." />
-              <button type="submit" className="button secondary small">Queue all eligible</button>
-            </form>
-          </div>
-
-          <form action={enqueueDeployLatestRolloutAction} className="stack" id="rollout" style={{ gap: 14 }}>
-            <div style={{ overflowX: "auto" }}>
-              <table className="table" style={{ width: "100%", borderCollapse: "collapse" }}>
+          {/* Interactive Multi-Select Deploy Rollout Panel */}
+          <form action={enqueueDeployLatestRolloutAction} className="space-y-4">
+            <div className="overflow-x-auto">
+              <table className="w-full border-collapse text-xs">
                 <thead>
-                  <tr style={{ textAlign: "left", borderBottom: "1px solid var(--border-color)" }}>
-                    <th style={{ padding: 12 }}><span className="muted">Select</span></th>
-                    <th style={{ padding: 12 }}>Customer</th>
-                    <th style={{ padding: 12 }}>Health</th>
-                    <th style={{ padding: 12 }}>Release</th>
-                    <th style={{ padding: 12 }}>Support</th>
-                    <th style={{ padding: 12 }}>Feature flags</th>
-                    <th style={{ padding: 12 }}>Owner</th>
-                    <th style={{ padding: 12 }}>Last checked</th>
-                    <th style={{ padding: 12 }}>Actions</th>
+                  <tr className="border-b border-[#1f2430] text-slate-400 text-left font-medium">
+                    <th className="p-3 w-8"><span className="sr-only">Select</span></th>
+                    <th className="p-3">Customer</th>
+                    <th className="p-3">Health Status</th>
+                    <th className="p-3">Active Version</th>
+                    <th className="p-3">Support Connector</th>
+                    <th className="p-3">Owner</th>
+                    <th className="p-3 text-right">Actions</th>
                   </tr>
                 </thead>
-                <tbody>
+                <tbody className="divide-y divide-[#1f2430]/60">
                   {fleet.items.map((customer) => {
+                    const health = customer.lastHealthStatus || latestSnapshot(customer, "HEALTH")?.status || customer.provisioningStatus;
+                    const drift = releaseDrift(customer);
                     const supportStatus = customer.hasSupportCredential ? customer.supportConnectorStatus : "not_configured";
-                    const integrationSnapshot = latestSnapshot(customer, "INTEGRATION");
+                    
                     return (
-                      <tr key={customer.id} style={{ borderBottom: "1px solid var(--border-color)" }}>
-                        <td style={{ padding: 12 }}>
-                          {customer.hasDeployment ? <input type="checkbox" name="deploymentIds" value={customer.id} aria-label={`Select ${customer.label}`} /> : null}
-                        </td>
-                        <td style={{ padding: 12, minWidth: 220 }}>
-                          <strong>{customer.label}</strong>
-                          <div className="muted">{customer.customerSlug || customer.customerAccount?.slug || customer.url}</div>
-                          <div className="muted" style={{ fontSize: 12 }}>{customer.region || "No region"} / {customer.dataResidency || "No residency"}</div>
-                        </td>
-                        <ReadinessCell customer={customer} />
-                        <td style={{ padding: 12, minWidth: 180 }}>
-                          <strong>{customer.releaseImageTag || customer.releaseVersion || "Unknown"}</strong>
-                          {releaseDrift(customer) ? <div style={{ color: "var(--red-11)", fontSize: 12 }}>Drift recorded</div> : <div className="muted" style={{ fontSize: 12 }}>No cached drift</div>}
-                        </td>
-                        <td style={{ padding: 12 }}>
-                          <span style={{ color: statusTone(supportStatus), fontWeight: 700, textTransform: "capitalize" }}>{label(supportStatus)}</span>
-                          <div className="muted" style={{ fontSize: 12 }}>{customer.managedWorkspace ? "Managed workspace" : "Remote connector"}</div>
-                        </td>
-                        <td style={{ padding: 12 }}>
-                          <span style={{ color: statusTone(integrationSnapshot?.status), fontWeight: 700, textTransform: "capitalize" }}>{label(integrationSnapshot?.status)}</span>
-                          <div className="muted" style={{ fontSize: 12 }}>Open client to edit</div>
-                        </td>
-                        <td style={{ padding: 12 }}>{customer.supportOwnerEmail || "Unassigned"}</td>
-                        <td style={{ padding: 12 }}>
-                          {customer.lastHealthCheck
-                            ? format.dateTime(customer.lastHealthCheck, { dateStyle: "medium", timeStyle: "short" })
-                            : latestSnapshot(customer, "HEALTH")?.observedAt
-                              ? format.dateTime(latestSnapshot(customer, "HEALTH")!.observedAt, { dateStyle: "medium", timeStyle: "short" })
-                              : "Never"}
-                        </td>
-                        <td style={{ padding: 12 }}>
+                      <tr key={customer.id} className="hover:bg-[#141822]/40 transition-colors group">
+                        <td className="p-3">
                           {customer.hasDeployment ? (
-                            <Link className="link-button small" href={`/control-plane/deployments/${customer.id}`}>Open</Link>
+                            <input
+                              type="checkbox"
+                              name="deploymentIds"
+                              value={customer.id}
+                              className="rounded border-[#202738] bg-[#141822] text-brand-600 focus:ring-0 focus:ring-offset-0"
+                            />
+                          ) : null}
+                        </td>
+                        <td className="p-3 min-w-[180px]">
+                          <span className="font-semibold text-white group-hover:text-brand-400 transition-colors block">
+                            {customer.label}
+                          </span>
+                          <span className="text-[10px] text-slate-500 block truncate mt-0.5">
+                            {customer.customerSlug || customer.customerAccount?.slug || customer.url}
+                          </span>
+                        </td>
+                        <td className="p-3">
+                          <div className="flex items-center gap-2">
+                            <span className={cn("w-1.5 h-1.5 rounded-full shrink-0", statusDot(health))} />
+                            <span className={cn("px-2 py-0.5 rounded-full text-[10px] font-semibold border capitalize", statusTone(health))}>
+                              {label(health)}
+                            </span>
+                          </div>
+                        </td>
+                        <td className="p-3">
+                          <span className="font-medium text-slate-300 block">
+                            {customer.releaseImageTag || customer.releaseVersion || "Unknown"}
+                          </span>
+                          {drift ? (
+                            <span className="text-[9px] text-rose-400 font-semibold block mt-0.5">Drift recorded</span>
                           ) : (
-                            <span className="muted">Needs deployment</span>
+                            <span className="text-[9px] text-slate-500 block mt-0.5">Aligned</span>
                           )}
+                        </td>
+                        <td className="p-3">
+                          <span className={cn("font-semibold uppercase text-[10px] block", supportStatus === "connected" ? "text-emerald-400" : "text-slate-500")}>
+                            {label(supportStatus)}
+                          </span>
+                          <span className="text-[9px] text-slate-500 block mt-0.5">
+                            {customer.managedWorkspace ? "Managed" : "Remote"}
+                          </span>
+                        </td>
+                        <td className="p-3 text-slate-400 truncate">
+                          {customer.supportOwnerEmail || "Unassigned"}
+                        </td>
+                        <td className="p-3 text-right">
+                          <Link
+                            href={`/control-plane/deployments/${customer.id}`}
+                            className="inline-flex items-center gap-1 bg-[#141822] hover:bg-[#1d2333] border border-[#202738] hover:border-[#2f3952] text-slate-300 hover:text-white px-2.5 py-1.5 rounded-lg text-[10px] font-medium transition-all"
+                          >
+                            Open
+                            <ArrowRight className="w-3 h-3 text-slate-500 group-hover:text-brand-400 transition-colors" />
+                          </Link>
                         </td>
                       </tr>
                     );
                   })}
                   {fleet.items.length === 0 && (
-                    <tr><td colSpan={9} className="muted" style={{ padding: 28, textAlign: "center" }}>No customers match these filters.</td></tr>
+                    <tr>
+                      <td colSpan={7} className="text-center py-8 text-slate-500">
+                        No enterprise deployments found matching these query parameters.
+                      </td>
+                    </tr>
                   )}
                 </tbody>
               </table>
             </div>
 
-            <div className="row" style={{ alignItems: "end", gap: 12 }}>
-              <label style={{ flex: "1 1 320px" }}>
-                Rollout reason
-                <input name="reason" required defaultValue="Deploy configured latest release to selected eligible clients." />
-              </label>
-              <label style={{ display: "flex", alignItems: "center", gap: 8, margin: 0 }}>
-                <input type="checkbox" name="includeUnhealthy" />
-                Confirm selected clients with health blockers
-              </label>
-              <button type="submit" className="button">Queue selected deploy latest</button>
-            </div>
+            {/* Bulk select rollout submit trigger */}
+            {fleet.items.length > 0 && (
+              <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4 pt-4 border-t border-[#1f2430]">
+                <div className="flex-1 max-w-sm">
+                  <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block mb-1.5">
+                    Upgrade rollout explanation
+                  </label>
+                  <input
+                    name="reason"
+                    required
+                    defaultValue="Execute stable release upgrade via control-plane selection."
+                    className="bg-[#141822] border border-[#202738] text-xs text-slate-200 rounded-lg px-3 py-2 w-full focus:border-[#2f3952] focus:outline-none"
+                  />
+                </div>
+                <div className="flex items-center gap-4">
+                  <label className="flex items-center gap-2 text-xs text-slate-400 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      name="includeUnhealthy"
+                      className="rounded border-[#202738] bg-[#141822] text-brand-600 focus:ring-0"
+                    />
+                    Override health blocks
+                  </label>
+                  <button
+                    type="submit"
+                    className="bg-[#141822] hover:bg-[#1d2333] border border-[#202738] hover:border-[#2f3952] text-slate-200 hover:text-white font-semibold text-xs px-4 py-2 rounded-lg shadow-sm transition-all duration-150"
+                  >
+                    Deploy Selected
+                  </button>
+                </div>
+              </div>
+            )}
           </form>
 
-          <section className="control-plane-rollout-panel stack">
-            <div className="row">
-              <div>
-                <h3 style={{ margin: 0 }}>Recent rollout progress</h3>
-                <p className="muted" style={{ margin: "4px 0 0" }}>Queued jobs are per client, so failures and retries stay visible without polling every customer instance.</p>
-              </div>
-              <span className="tag neutral">{recentRollouts.length} recent</span>
+          {/* Table pagination footer */}
+          <div className="flex items-center justify-between pt-2 text-[10px] text-slate-500">
+            <span>
+              Page {fleet.page} of {fleet.pageCount} (Showing {fleet.items.length} of {fleet.total} customers)
+            </span>
+            <div className="flex gap-2">
+              {fleet.page > 1 ? (
+                <Link href={previousHref} className="bg-[#141822] hover:bg-[#1d2333] border border-[#202738] text-slate-400 hover:text-slate-200 px-2 py-1 rounded transition-colors">
+                  Previous
+                </Link>
+              ) : (
+                <span className="bg-[#141822]/40 border border-[#202738]/50 text-slate-600 px-2 py-1 rounded select-none cursor-not-allowed">
+                  Previous
+                </span>
+              )}
+              {fleet.page < fleet.pageCount ? (
+                <Link href={nextHref} className="bg-[#141822] hover:bg-[#1d2333] border border-[#202738] text-slate-400 hover:text-slate-200 px-2 py-1 rounded transition-colors">
+                  Next
+                </Link>
+              ) : (
+                <span className="bg-[#141822]/40 border border-[#202738]/50 text-slate-600 px-2 py-1 rounded select-none cursor-not-allowed">
+                  Next
+                </span>
+              )}
             </div>
-            <div className="control-plane-rollout-list">
+          </div>
+        </div>
+
+        {/* Right Sidebar: Telemetry Logs & Alerts (Col Span 1) */}
+        <div className="space-y-6">
+          
+          {/* Actionable Alerts Box */}
+          <div className="bg-[#0b0d12] border border-[#1f2430] rounded-xl p-5 shadow-sm space-y-4">
+            <div>
+              <h3 className="text-sm font-bold text-white flex items-center gap-1.5">
+                <AlertTriangle className="w-4 h-4 text-amber-500" />
+                Outstanding Health Alerts
+              </h3>
+              <p className="text-[10px] text-slate-500 mt-0.5">Fleet segments reporting Degraded or Down status signals.</p>
+            </div>
+            
+            <div className="space-y-2 max-h-[220px] overflow-y-auto scrollbar-thin">
+              {fleet.items
+                .filter((c) => {
+                  const health = c.lastHealthStatus || latestSnapshot(c, "HEALTH")?.status || c.provisioningStatus;
+                  return health !== "ok" && health !== "active" && health !== "connected";
+                })
+                .map((customer) => {
+                  const health = customer.lastHealthStatus || latestSnapshot(customer, "HEALTH")?.status || customer.provisioningStatus;
+                  const drift = releaseDrift(customer);
+                  return (
+                    <Link
+                      key={customer.id}
+                      href={`/control-plane/deployments/${customer.id}`}
+                      className="flex flex-col p-2.5 rounded-lg bg-[#141822] border border-amber-500/10 hover:border-amber-500/20 hover:bg-[#1a202d] transition-all block group"
+                    >
+                      <div className="flex items-center justify-between">
+                        <strong className="text-white group-hover:text-brand-400 transition-colors text-xs font-semibold">
+                          {customer.label}
+                        </strong>
+                        <span className={cn("px-1.5 py-0.5 rounded text-[8px] font-bold border capitalize shrink-0", statusTone(health))}>
+                          {label(health)}
+                        </span>
+                      </div>
+                      <p className="text-[10px] text-slate-400 mt-1 truncate">
+                        {drift || "Support sync issue detected."}
+                      </p>
+                    </Link>
+                  );
+                })}
+              {fleet.items.filter((c) => {
+                const health = c.lastHealthStatus || latestSnapshot(c, "HEALTH")?.status || c.provisioningStatus;
+                return health !== "ok" && health !== "active" && health !== "connected";
+              }).length === 0 && (
+                <div className="text-center py-6 text-slate-500 text-[10px] bg-[#141822]/30 border border-[#202738] rounded-lg">
+                  All active fleet deployments are fully healthy.
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Rollouts Telemetry Logs */}
+          <div className="bg-[#0b0d12] border border-[#1f2430] rounded-xl p-5 shadow-sm space-y-4">
+            <div className="flex items-center justify-between border-b border-[#1f2430] pb-3">
+              <div>
+                <h3 className="text-sm font-bold text-white flex items-center gap-1.5">
+                  <Cpu className="w-4 h-4 text-brand-400" />
+                  Rollout Progress Log
+                </h3>
+                <p className="text-[10px] text-slate-500 mt-0.5">Telemetry log for queued release rollouts.</p>
+              </div>
+              <span className="px-2 py-0.5 rounded bg-[#141822] border border-[#202738] text-[9px] font-bold text-slate-400">
+                {recentRollouts.length} active
+              </span>
+            </div>
+
+            <div className="space-y-3 max-h-[360px] overflow-y-auto scrollbar-thin pr-1">
               {recentRollouts.map((rollout) => {
                 const deploymentId = payloadString(rollout.payload, "deploymentId");
                 const customerLabel = deploymentId ? fleetLabelByDeploymentId.get(deploymentId) ?? deploymentId : "Unknown client";
                 const target = rolloutTarget(rollout.payload);
+                const status = rollout.status;
+                
                 return (
-                  <div className="item" key={rollout.id}>
-                    <div className="row">
-                      <div>
-                        <strong>{customerLabel}</strong>
-                        <div className="muted" style={{ fontSize: 12 }}>{target ? `Target ${target}` : "Target not recorded"}</div>
-                      </div>
-                      <span style={{ color: statusTone(rollout.status), fontWeight: 700, textTransform: "capitalize" }}>{label(rollout.status)}</span>
+                  <div key={rollout.id} className="p-3 rounded-lg bg-[#141822] border border-[#202738] space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <strong className="text-white text-xs font-semibold">{customerLabel}</strong>
+                      <span className={cn("px-1.5 py-0.5 rounded text-[8px] font-bold border capitalize shrink-0", statusTone(status))}>
+                        {label(status)}
+                      </span>
                     </div>
-                    <div className="muted" style={{ fontSize: 12 }}>
-                      {format.dateTime(rollout.createdAt, { dateStyle: "medium", timeStyle: "short" })} / attempts {rollout.attempts}
-                      {rollout.completedAt ? ` / completed ${format.dateTime(rollout.completedAt, { dateStyle: "medium", timeStyle: "short" })}` : ""}
+                    <div className="flex items-center justify-between text-[9px] text-slate-500">
+                      <span>Target: {target || "not recorded"}</span>
+                      <span>Attempts: {rollout.attempts}</span>
                     </div>
-                    {rollout.error ? <div style={{ color: "var(--red-11)", fontSize: 12 }}>{rollout.error}</div> : null}
+                    {rollout.error && (
+                      <p className="text-[9px] text-rose-400 bg-rose-500/5 border border-rose-500/10 rounded p-1.5 mt-1 font-mono leading-tight whitespace-pre-wrap">
+                        {rollout.error}
+                      </p>
+                    )}
                   </div>
                 );
               })}
               {recentRollouts.length === 0 && (
-                <div className="item muted">No deploy latest jobs have been queued yet.</div>
+                <div className="text-center py-6 text-slate-500 text-[10px]">
+                  No deploy latest jobs have been queued recently.
+                </div>
               )}
             </div>
-          </section>
-
-          <div className="row">
-            <div className="muted">Page {fleet.page} of {fleet.pageCount}. Showing {fleet.items.length} of {fleet.total} matching customers.</div>
-            <div className="actions-inline">
-              {fleet.page > 1 ? <a className="link-button small" href={previousHref}>Previous</a> : <span className="link-button small muted" aria-disabled="true">Previous</span>}
-              {fleet.page < fleet.pageCount ? <a className="link-button small" href={nextHref}>Next</a> : <span className="link-button small muted" aria-disabled="true">Next</span>}
-            </div>
           </div>
-        </section>
 
-        <section id="audit" className="panel stack" style={{ padding: 18 }}>
-          <h2 style={{ margin: 0 }}>Operational model</h2>
-          <p className="muted" style={{ margin: 0 }}>
-            Fleet rendering stays fast because it uses central deployment rows and cached fleet snapshots. Health probes, support snapshots, access changes, feature flag writes, and deploy actions run from client detail pages or queued jobs and write the audit timeline.
-          </p>
-        </section>
+        </div>
+
       </div>
-    </main>
+
+    </div>
   );
 }

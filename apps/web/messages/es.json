@@ -1676,6 +1676,31 @@
         "supportOperations": "Operaciones de soporte",
         "supportOperationsDetail": "{failed} operaciones fallidas",
         "centralEndpoint": "Endpoint central"
+      },
+      "nav": {
+        "dashboard": "Panel de Control",
+        "customers": "Clientes",
+        "agents": "Observatorio de Agentes",
+        "releases": "Releases y Drift",
+        "operations": "Log de Operaciones",
+        "users": "Directorio de Usuarios"
+      },
+      "statCards": {
+        "totalCustomers": "Clientes Totales",
+        "activeAgents": "Agentes Activos",
+        "fleetUptime": "Uptime de la Flota",
+        "activeAlerts": "Alertas Activas"
+      },
+      "alerts": {
+        "title": "Alertas y Acciones",
+        "empty": "Todos los componentes de la flota están actualmente saludables."
+      },
+      "chat": {
+        "title": "Copiloto Ops Agent",
+        "placeholder": "Pregúntale al copiloto de la flota...",
+        "starter1": "Ver estado general de salud",
+        "starter2": "Identificar agentes degradados",
+        "starter3": "Último evento break-glass"
       }
     }
   },

@@ -1676,6 +1676,31 @@
         "supportOperations": "Support operations",
         "supportOperationsDetail": "{failed} failed operations",
         "centralEndpoint": "Central endpoint"
+      },
+      "nav": {
+        "dashboard": "Dashboard",
+        "customers": "Customers",
+        "agents": "Agent Observatory",
+        "releases": "Releases",
+        "operations": "Operations Log",
+        "users": "Users Directory"
+      },
+      "statCards": {
+        "totalCustomers": "Total Customers",
+        "activeAgents": "Active Agents",
+        "fleetUptime": "Fleet Uptime",
+        "activeAlerts": "Active Alerts"
+      },
+      "alerts": {
+        "title": "Alerts & Actions",
+        "empty": "All fleet components are currently healthy."
+      },
+      "chat": {
+        "title": "Ops Agent Copilot",
+        "placeholder": "Ask the fleet copilot a question...",
+        "starter1": "Check fleet health overview",
+        "starter2": "Identify degraded agents",
+        "starter3": "What was the last break-glass event?"
       }
     }
   },
