@@ -2,8 +2,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   applyContextGraphProposedDiff,
   buildSelectedRegionContext,
+  createPersonalContextMapView,
   createContextGraphProposedDiff,
   upsertContextGraphObject,
+  updateContextMapLayout,
 } from "./context-graph";
 import { prisma } from "@corgtex/shared";
 
@@ -31,6 +33,16 @@ const { prismaMock, appendEventsMock, recordAuditMock, requireWorkspaceMembershi
       findFirst: vi.fn(),
       findMany: vi.fn(),
       update: vi.fn(),
+    },
+    contextMapView: {
+      create: vi.fn(),
+      findFirst: vi.fn(),
+      findMany: vi.fn(),
+    },
+    contextMapLayoutItem: {
+      create: vi.fn(),
+      findMany: vi.fn(),
+      upsert: vi.fn(),
     },
     knowledgeChunk: {
       findMany: vi.fn(),
@@ -80,6 +92,25 @@ describe("context graph domain", () => {
     prismaMock.contextGraphEvidenceRef.findFirst.mockResolvedValue(null);
     prismaMock.contextGraphEvidenceRef.create.mockResolvedValue({ id: "evidence-1" });
     prismaMock.contextGraphProposedDiff.update.mockResolvedValue({ id: "diff-1", status: "applied" });
+    prismaMock.contextMapView.findFirst.mockResolvedValue({
+      id: "map-1",
+      workspaceId: "ws-1",
+      name: "Master process map",
+      viewType: "process",
+      query: {},
+      createdByUserId: null,
+    });
+    prismaMock.contextMapView.create.mockResolvedValue({
+      id: "personal-map-1",
+      workspaceId: "ws-1",
+      name: "My process map",
+      viewType: "process",
+      query: {},
+      createdByUserId: "user-1",
+    });
+    prismaMock.contextMapLayoutItem.findMany.mockResolvedValue([]);
+    prismaMock.contextMapLayoutItem.upsert.mockResolvedValue({ id: "layout-1" });
+    prismaMock.contextMapLayoutItem.create.mockResolvedValue({ id: "layout-copy-1" });
   });
 
   it("rejects unknown object types before writing graph objects", async () => {
@@ -219,5 +250,121 @@ describe("context graph domain", () => {
     expect(context.evidenceRefs).toHaveLength(1);
     expect(context.knowledgeChunks).toHaveLength(1);
     expect(context.permissions.canApprove).toBe(true);
+  });
+
+  it("lets admins update master map layouts directly", async () => {
+    await expect(updateContextMapLayout(actor, {
+      workspaceId: "ws-1",
+      mapViewId: "map-1",
+      items: [{ objectId: "process-1", x: 120, y: 80 }],
+    })).resolves.toMatchObject({ mode: "updated", updated: 1 });
+
+    expect(prismaMock.contextMapLayoutItem.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: { mapViewId_objectId: { mapViewId: "map-1", objectId: "process-1" } },
+      update: expect.objectContaining({ x: 120, y: 80 }),
+    }));
+    expect(recordAuditMock).toHaveBeenCalledWith(expect.anything(), actor, expect.objectContaining({
+      action: "context-map.layout.updated",
+    }));
+  });
+
+  it("routes contributor master layout updates through proposed diffs", async () => {
+    requireWorkspaceMembershipMock.mockResolvedValueOnce({
+      id: "member-1",
+      workspaceId: "ws-1",
+      userId: "user-1",
+      role: "CONTRIBUTOR",
+      isActive: true,
+    }).mockResolvedValueOnce({
+      id: "member-1",
+      workspaceId: "ws-1",
+      userId: "user-1",
+      role: "CONTRIBUTOR",
+      isActive: true,
+    });
+    prismaMock.contextGraphProposedDiff.create.mockResolvedValue({
+      id: "diff-layout-1",
+      status: "pending",
+      reason: "Request to update master map layout: Master process map",
+    });
+
+    await expect(updateContextMapLayout(actor, {
+      workspaceId: "ws-1",
+      mapViewId: "map-1",
+      items: [{ objectId: "process-1", x: 240, y: 140 }],
+    })).resolves.toMatchObject({ mode: "proposed", proposedDiffId: "diff-layout-1", updated: 0 });
+
+    expect(prismaMock.contextMapLayoutItem.upsert).not.toHaveBeenCalled();
+    expect(prismaMock.contextGraphProposedDiff.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        diffJson: expect.objectContaining({
+          mapLayoutUpdates: [expect.objectContaining({ mapViewId: "map-1" })],
+        }),
+      }),
+    }));
+  });
+
+  it("copies source layout into a personal map view", async () => {
+    prismaMock.contextMapLayoutItem.findMany.mockResolvedValueOnce([{
+      objectId: "process-1",
+      x: 100,
+      y: 200,
+      width: 230,
+      height: 110,
+      visualState: { expanded: true },
+    }]);
+
+    await expect(createPersonalContextMapView(actor, {
+      workspaceId: "ws-1",
+      sourceMapViewId: "map-1",
+      name: "My critical path",
+    })).resolves.toMatchObject({ id: "personal-map-1" });
+
+    expect(prismaMock.contextMapView.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        name: "My critical path",
+        createdByUserId: "user-1",
+        query: expect.objectContaining({ scope: "personal", sourceMapViewId: "map-1" }),
+      }),
+    }));
+    expect(prismaMock.contextMapLayoutItem.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        mapViewId: "personal-map-1",
+        objectId: "process-1",
+        x: 100,
+        y: 200,
+      }),
+    }));
+  });
+
+  it("applies proposed map layout updates during diff application", async () => {
+    prismaMock.contextGraphProposedDiff.findFirst.mockResolvedValue({
+      id: "diff-layout-1",
+      workspaceId: "ws-1",
+      status: "pending",
+      reviewedAt: null,
+      proposedByAgentRunId: null,
+      diffJson: {
+        mapLayoutUpdates: [{
+          mapViewId: "map-1",
+          items: [{ objectId: "process-1", x: 420, y: 160 }],
+        }],
+      },
+    });
+
+    await expect(applyContextGraphProposedDiff(actor, {
+      workspaceId: "ws-1",
+      proposedDiffId: "diff-layout-1",
+    })).resolves.toMatchObject({ id: "diff-1", status: "applied" });
+
+    expect(prismaMock.contextMapLayoutItem.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: { mapViewId_objectId: { mapViewId: "map-1", objectId: "process-1" } },
+      update: expect.objectContaining({ x: 420, y: 160 }),
+    }));
+    expect(appendEventsMock).toHaveBeenCalledWith(expect.anything(), [expect.objectContaining({
+      payload: expect.objectContaining({
+        layoutUpdates: [{ mapViewId: "map-1", updated: 1 }],
+      }),
+    })]);
   });
 });

@@ -6,6 +6,7 @@ import {
   applyContextGraphProposedDiff,
   buildSelectedRegionContext,
   createContextGraphProposedDiff,
+  createPersonalContextMapView,
   updateContextMapLayout,
 } from "@corgtex/domain";
 
@@ -17,12 +18,25 @@ export async function saveContextMapLayoutAction(params: {
   items: Array<{ objectId: string; x: number; y: number; width?: number | null; height?: number | null }>;
 }) {
   const actor = await requirePageActor();
-  await updateContextMapLayout(actor, {
+  const result = await updateContextMapLayout(actor, {
     workspaceId: params.workspaceId,
     mapViewId: params.mapViewId,
     items: params.items,
   });
   revalidatePath(`/workspaces/${params.workspaceId}/maps`);
+  return result;
+}
+
+export async function createPersonalContextMapViewAction(params: {
+  workspaceId: string;
+  sourceMapViewId: string;
+  name?: string | null;
+  items?: Array<{ objectId: string; x: number; y: number; width?: number | null; height?: number | null }>;
+}) {
+  const actor = await requirePageActor();
+  const mapView = await createPersonalContextMapView(actor, params);
+  revalidatePath(`/workspaces/${params.workspaceId}/maps`);
+  return { id: mapView.id, name: mapView.name };
 }
 
 export async function buildSelectedRegionContextAction(params: {

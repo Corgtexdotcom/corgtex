@@ -12,25 +12,36 @@ function serialize<T>(value: T): T {
 
 export default async function ContextMapsPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ workspaceId: string }>;
+  searchParams: Promise<{ view?: string; stale?: string }>;
 }) {
   const { workspaceId } = await params;
+  const query = await searchParams;
   await requireWorkspaceFeature(workspaceId, "CONTEXT_MAPS");
   const actor = await requirePageActor();
   await requireWorkspaceMembership({ actor, workspaceId });
 
-  const data = await getContextMapData(actor, { workspaceId });
+  const data = await getContextMapData(actor, {
+    workspaceId,
+    mapViewId: query.view ?? null,
+    includeStale: query.stale === "1",
+  });
 
   return (
-    <>
-      <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 24 }}>
+    <div className="context-map-page">
+      <header className="nr-masthead context-map-page-header" style={{ textAlign: "left" }}>
         <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2rem" }}>Context Map</h1>
         <div className="nr-masthead-meta">
           <span>Evidence-backed company context rendered as a spatial graph.</span>
         </div>
       </header>
-      <ContextMapClient workspaceId={workspaceId} data={serialize(data) as unknown as ContextMapClientData} />
-    </>
+      <ContextMapClient
+        workspaceId={workspaceId}
+        data={serialize(data) as unknown as ContextMapClientData}
+        includeStale={query.stale === "1"}
+      />
+    </div>
   );
 }
