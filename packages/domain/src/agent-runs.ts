@@ -92,6 +92,7 @@ export async function listAgentRuns(actor: AppActor, workspaceId: string, opts?:
           outputTokens: true,
           latencyMs: true,
           estimatedCostUsd: true,
+          billableCostUsd: true,
         },
         orderBy: { createdAt: "asc" },
       },

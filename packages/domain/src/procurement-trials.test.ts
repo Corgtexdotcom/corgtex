@@ -26,6 +26,14 @@ const {
     workspace: {
       findUnique: vi.fn(),
       create: vi.fn(),
+      update: vi.fn(),
+      updateMany: vi.fn(),
+    },
+    workspaceFeatureFlag: {
+      createMany: vi.fn(),
+    },
+    workspaceBillingProfile: {
+      upsert: vi.fn(),
     },
     customerAccount: {
       upsert: vi.fn(),
@@ -136,6 +144,10 @@ describe("procurement trials", () => {
     prismaMock.procurementTrial.updateMany.mockResolvedValue({ count: 0 });
     prismaMock.workspace.findUnique.mockResolvedValue(null);
     prismaMock.workspace.create.mockResolvedValue({ id: "ws-1", name: "Acme", slug: "acme" });
+    prismaMock.workspace.update.mockResolvedValue({ id: "ws-1" });
+    prismaMock.workspace.updateMany.mockResolvedValue({ count: 0 });
+    prismaMock.workspaceFeatureFlag.createMany.mockResolvedValue({ count: 6 });
+    prismaMock.workspaceBillingProfile.upsert.mockResolvedValue({});
     prismaMock.customerAccount.upsert.mockResolvedValue({ id: "cust-1", slug: "acme", primaryDeploymentId: null });
     prismaMock.customerAccount.findUnique.mockResolvedValue({ id: "cust-1", primaryDeploymentId: null });
     prismaMock.customerAccount.update.mockResolvedValue({ id: "cust-1", primaryDeploymentId: "inst-1" });
@@ -188,6 +200,24 @@ describe("procurement trials", () => {
     }));
     expect(prismaMock.modelUsageBudget.upsert).toHaveBeenCalledWith(expect.objectContaining({
       create: expect.objectContaining({ monthlyCostCapUsd: 5 }),
+    }));
+    expect(prismaMock.workspace.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        plan: "TRIAL",
+        trialEndsAt: expect.any(Date),
+      }),
+    }));
+    expect(prismaMock.workspaceFeatureFlag.createMany).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.arrayContaining([
+        expect.objectContaining({ flag: "TOOL_LINKS", enabled: true }),
+        expect.objectContaining({ flag: "CONTEXT_MAPS", enabled: true }),
+        expect.objectContaining({ flag: "MEETING_RECORDERS", enabled: false }),
+      ]),
+      skipDuplicates: true,
+    }));
+    expect(prismaMock.workspaceBillingProfile.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: { workspaceId: "ws-1" },
+      create: expect.objectContaining({ billingStatus: "NONE" }),
     }));
     expect(prismaMock.customerAccount.upsert).toHaveBeenCalledWith(expect.objectContaining({
       where: { slug: "acme" },
@@ -343,6 +373,10 @@ describe("procurement trials", () => {
       where: { id: "trial-1", status: "ACTIVE" },
       data: { status: "EXPIRED" },
     }));
+    expect(prismaMock.workspace.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "ws-1" },
+      data: expect.objectContaining({ plan: "CORE_FREE" }),
+    }));
     expect(prismaMock.agentCredential.updateMany).toHaveBeenCalledWith(expect.objectContaining({
       where: { id: "cred-1" },
       data: { isActive: false },
@@ -413,6 +447,10 @@ describe("procurement trials", () => {
       where: { id: "trial-1" },
       data: { status: "EXPIRED" },
     }));
+    expect(prismaMock.workspace.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "ws-1" },
+      data: expect.objectContaining({ plan: "CORE_FREE" }),
+    }));
     expect(prismaMock.agentCredential.update).toHaveBeenCalledWith(expect.objectContaining({
       where: { id: "cred-1" },
       data: { isActive: false },
@@ -460,6 +498,10 @@ describe("procurement trials", () => {
     expect(prismaMock.agentCredential.update).toHaveBeenCalledWith(expect.objectContaining({
       where: { id: "cred-1" },
       data: { isActive: false },
+    }));
+    expect(prismaMock.workspace.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "ws-1" },
+      data: expect.objectContaining({ plan: "CORE_FREE" }),
     }));
     expect(prismaMock.modelUsageBudget.upsert).toHaveBeenCalledWith(expect.objectContaining({
       where: { workspaceId: "ws-1" },

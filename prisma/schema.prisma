@@ -423,6 +423,36 @@ enum CustomerEntitlementStatus {
   SUSPENDED
 }
 
+enum WorkspacePlan {
+  TRIAL
+  CORE_FREE
+  PAYG_AI
+  ENTERPRISE_MANAGED
+}
+
+enum WorkspaceBillingStatus {
+  NONE
+  CHECKOUT_PENDING
+  ACTIVE
+  PAST_DUE
+  PAYMENT_REQUIRED
+  CANCELED
+}
+
+enum AiUsageLedgerStatus {
+  PENDING
+  REPORTED
+  INVOICED
+  FAILED
+}
+
+enum OAuthConnectionStatus {
+  ACTIVE
+  PAUSED
+  ERROR
+  DISCONNECTED
+}
+
 enum CustomerReleaseTargetStatus {
   PREPARED
   PROBING
@@ -434,12 +464,15 @@ enum CustomerReleaseTargetStatus {
 }
 
 model Workspace {
-  id                            String                          @id @default(uuid())
-  slug                          String                          @unique
+  id                            String                            @id @default(uuid())
+  slug                          String                            @unique
   name                          String
   description                   String?
-  createdAt                     DateTime                        @default(now())
-  updatedAt                     DateTime                        @updatedAt
+  plan                          WorkspacePlan                     @default(CORE_FREE)
+  planActivatedAt               DateTime                          @default(now())
+  trialEndsAt                   DateTime?
+  createdAt                     DateTime                          @default(now())
+  updatedAt                     DateTime                          @updatedAt
   members                       Member[]
   memberInviteRequests          MemberInviteRequest[]
   circles                       Circle[]
@@ -489,6 +522,9 @@ model Workspace {
   externalMcpConnections        ExternalMcpConnection[]
   ssoConfigs                    WorkspaceSsoConfig[]
   modelUsageBudget              ModelUsageBudget?
+  billingProfile                WorkspaceBillingProfile?
+  aiUsageLedgerEntries          AiUsageLedgerEntry[]
+  oauthConnections              OAuthConnection[]
   externalDataSources           ExternalDataSource[]
   featureFlags                  WorkspaceFeatureFlag[]
   meetingRecorderConfig         WorkspaceMeetingRecorderConfig?
@@ -512,8 +548,8 @@ model Workspace {
   archiveRecords                WorkspaceArchiveRecord[]
   crmQualifications             CrmQualification[]
   crmConversations              CrmConversation[]
-  crmProspectWorkspacesAsCrm    CrmProspectWorkspace[]          @relation("CrmWorkspace")
-  crmProspectWorkspacesAsTarget CrmProspectWorkspace[]          @relation("TargetWorkspace")
+  crmProspectWorkspacesAsCrm    CrmProspectWorkspace[]            @relation("CrmWorkspace")
+  crmProspectWorkspacesAsTarget CrmProspectWorkspace[]            @relation("TargetWorkspace")
   procurementSetupSessions      ProcurementSetupSession[]
   procurementBillingHandoffs    ProcurementBillingHandoff[]
   procurementTrials             ProcurementTrial[]
@@ -569,13 +605,13 @@ model CommunicationInstallation {
   createdAt           DateTime                        @default(now())
   updatedAt           DateTime                        @updatedAt
 
-  workspace        Workspace                     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  externalUsers    CommunicationExternalUser[]
-  channels         CommunicationChannel[]
-  messages         CommunicationMessage[]
-  contextSummaries CommunicationContextSummary[]
-  inboundEvents    CommunicationInboundEvent[]
-  entityLinks      CommunicationEntityLink[]
+  workspace              Workspace                     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  externalUsers          CommunicationExternalUser[]
+  channels               CommunicationChannel[]
+  messages               CommunicationMessage[]
+  contextSummaries       CommunicationContextSummary[]
+  inboundEvents          CommunicationInboundEvent[]
+  entityLinks            CommunicationEntityLink[]
   meetingFollowUpReviews MeetingFollowUpReview[]
 
   @@unique([provider, externalWorkspaceId])
@@ -966,31 +1002,31 @@ model WorkspaceToolLinkCircleTag {
 }
 
 model CatalogItem {
-  id                   String            @id @default(uuid())
-  workspaceId          String
-  createdByUserId      String?
-  ownerUserId          String?
-  type                 CatalogItemType
-  sourceType           CatalogSourceType @default(MANUAL)
-  sourceId             String?
-  title                String
-  slug                 String
-  outcome              String?
-  descriptionMd        String?           @db.Text
-  accessNotesMd        String?           @db.Text
-  url                  String?           @db.Text
-  category             String            @default("OTHER")
-  status               CatalogItemStatus @default(PUBLISHED)
-  accessMode           CatalogAccessMode @default(OPEN)
-  requestedScopes      String[]          @default([])
-  monthlyBudgetCents   Int?
-  dailyCallLimit       Int?
-  featured             Boolean           @default(false)
-  archivedAt           DateTime?
-  archivedByUserId     String?
-  archiveReason        String?
-  createdAt            DateTime          @default(now())
-  updatedAt            DateTime          @updatedAt
+  id                 String            @id @default(uuid())
+  workspaceId        String
+  createdByUserId    String?
+  ownerUserId        String?
+  type               CatalogItemType
+  sourceType         CatalogSourceType @default(MANUAL)
+  sourceId           String?
+  title              String
+  slug               String
+  outcome            String?
+  descriptionMd      String?           @db.Text
+  accessNotesMd      String?           @db.Text
+  url                String?           @db.Text
+  category           String            @default("OTHER")
+  status             CatalogItemStatus @default(PUBLISHED)
+  accessMode         CatalogAccessMode @default(OPEN)
+  requestedScopes    String[]          @default([])
+  monthlyBudgetCents Int?
+  dailyCallLimit     Int?
+  featured           Boolean           @default(false)
+  archivedAt         DateTime?
+  archivedByUserId   String?
+  archiveReason      String?
+  createdAt          DateTime          @default(now())
+  updatedAt          DateTime          @updatedAt
 
   workspace        Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   createdBy        User?             @relation("CatalogItemCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
@@ -1041,10 +1077,10 @@ model CatalogRequest {
   createdAt               DateTime             @default(now())
   updatedAt               DateTime             @updatedAt
 
-  workspace     Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  catalogItem   CatalogItem? @relation(fields: [catalogItemId], references: [id], onDelete: SetNull)
-  requester     User         @relation("CatalogRequestRequester", fields: [requesterUserId], references: [id], onDelete: Cascade)
-  decidedBy     User?        @relation("CatalogRequestDecider", fields: [decidedByUserId], references: [id], onDelete: SetNull)
+  workspace   Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  catalogItem CatalogItem? @relation(fields: [catalogItemId], references: [id], onDelete: SetNull)
+  requester   User         @relation("CatalogRequestRequester", fields: [requesterUserId], references: [id], onDelete: Cascade)
+  decidedBy   User?        @relation("CatalogRequestDecider", fields: [decidedByUserId], references: [id], onDelete: SetNull)
 
   @@index([workspaceId, status, createdAt])
   @@index([workspaceId, requesterUserId])
@@ -1625,14 +1661,14 @@ model Meeting {
   createdAt           DateTime      @default(now())
   updatedAt           DateTime      @updatedAt
 
-  workspace  Workspace          @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  series     MeetingSeries?     @relation(fields: [seriesId], references: [id], onDelete: SetNull)
-  proposals  Proposal[]
-  tensions   Tension[]
-  insights   MeetingInsight[]
+  workspace      Workspace                 @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  series         MeetingSeries?            @relation(fields: [seriesId], references: [id], onDelete: SetNull)
+  proposals      Proposal[]
+  tensions       Tension[]
+  insights       MeetingInsight[]
   followUpReview MeetingFollowUpReview?
-  recordings MeetingRecording[]
-  smokeRuns  MeetingRecorderSmokeRun[]
+  recordings     MeetingRecording[]
+  smokeRuns      MeetingRecorderSmokeRun[]
 
   @@index([workspaceId, recordedAt])
   @@index([workspaceId, status, recordedAt])
@@ -1660,27 +1696,27 @@ model WorkspaceMeetingRecorderConfig {
 }
 
 model WorkspaceRecorderCalendarSource {
-  id                         String                       @id @default(uuid())
-  workspaceId                String
-  provider                   OAuthProvider                @default(MICROSOFT)
-  providerAccountId          String
-  providerAccountEmail       String?
-  displayName                String?
-  accessTokenEnc             String                       @db.Text
-  refreshTokenEnc            String?                      @db.Text
-  expiresAt                  DateTime?
-  scopes                     String[]                     @default([])
-  status                     RecorderCalendarSourceStatus @default(ACTIVE)
-  lastSyncStartedAt          DateTime?
-  lastSyncCompletedAt        DateTime?
-  lastSyncAt                 DateTime?
-  lastSyncJobId              String?
-  lastSyncError              String?                      @db.Text
-  lastDryRunAt               DateTime?
-  lastUpcomingEventCount     Int                          @default(0)
-  lastSchedulableEventCount  Int                          @default(0)
-  createdAt                  DateTime                     @default(now())
-  updatedAt                  DateTime                     @updatedAt
+  id                        String                       @id @default(uuid())
+  workspaceId               String
+  provider                  OAuthProvider                @default(MICROSOFT)
+  providerAccountId         String
+  providerAccountEmail      String?
+  displayName               String?
+  accessTokenEnc            String                       @db.Text
+  refreshTokenEnc           String?                      @db.Text
+  expiresAt                 DateTime?
+  scopes                    String[]                     @default([])
+  status                    RecorderCalendarSourceStatus @default(ACTIVE)
+  lastSyncStartedAt         DateTime?
+  lastSyncCompletedAt       DateTime?
+  lastSyncAt                DateTime?
+  lastSyncJobId             String?
+  lastSyncError             String?                      @db.Text
+  lastDryRunAt              DateTime?
+  lastUpcomingEventCount    Int                          @default(0)
+  lastSchedulableEventCount Int                          @default(0)
+  createdAt                 DateTime                     @default(now())
+  updatedAt                 DateTime                     @updatedAt
 
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 
@@ -2043,27 +2079,27 @@ model KnowledgeChunk {
 }
 
 model ContextGraphObject {
-  id                    String   @id @default(uuid())
-  workspaceId           String
-  objectType            String
-  title                 String
-  summary               String?  @db.Text
-  properties            Json     @default("{}")
-  confidence            Float?
-  status                String   @default("draft")
-  createdByType         String   @default("human")
-  createdByUserId       String?
-  createdByAgentRunId   String?
-  sourceEntityType      String?
-  sourceEntityId        String?
-  dedupeKey             String?  @unique
-  validFrom             DateTime?
-  validTo               DateTime?
-  recordedAt            DateTime @default(now())
-  lastVerifiedAt        DateTime?
-  supersededByObjectId  String?
-  createdAt             DateTime @default(now())
-  updatedAt             DateTime @updatedAt
+  id                   String    @id @default(uuid())
+  workspaceId          String
+  objectType           String
+  title                String
+  summary              String?   @db.Text
+  properties           Json      @default("{}")
+  confidence           Float?
+  status               String    @default("draft")
+  createdByType        String    @default("human")
+  createdByUserId      String?
+  createdByAgentRunId  String?
+  sourceEntityType     String?
+  sourceEntityId       String?
+  dedupeKey            String?   @unique
+  validFrom            DateTime?
+  validTo              DateTime?
+  recordedAt           DateTime  @default(now())
+  lastVerifiedAt       DateTime?
+  supersededByObjectId String?
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
 
   workspace             Workspace                  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   outgoingRelationships ContextGraphRelationship[] @relation("ContextGraphRelationshipSource")
@@ -2077,32 +2113,32 @@ model ContextGraphObject {
 }
 
 model ContextGraphRelationship {
-  id                         String   @id @default(uuid())
+  id                         String    @id @default(uuid())
   workspaceId                String
   sourceObjectId             String
   targetObjectId             String
   relationshipType           String
-  properties                 Json     @default("{}")
+  properties                 Json      @default("{}")
   confidence                 Float?
-  status                     String   @default("draft")
-  createdByType              String   @default("human")
+  status                     String    @default("draft")
+  createdByType              String    @default("human")
   createdByUserId            String?
   createdByAgentRunId        String?
   sourceEntityType           String?
   sourceEntityId             String?
-  dedupeKey                  String?  @unique
+  dedupeKey                  String?   @unique
   validFrom                  DateTime?
   validTo                    DateTime?
-  recordedAt                 DateTime @default(now())
+  recordedAt                 DateTime  @default(now())
   lastVerifiedAt             DateTime?
   supersededByRelationshipId String?
-  createdAt                  DateTime @default(now())
-  updatedAt                  DateTime @updatedAt
+  createdAt                  DateTime  @default(now())
+  updatedAt                  DateTime  @updatedAt
 
-  workspace                  Workspace                 @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  sourceObject               ContextGraphObject        @relation("ContextGraphRelationshipSource", fields: [sourceObjectId], references: [id], onDelete: Cascade)
-  targetObject               ContextGraphObject        @relation("ContextGraphRelationshipTarget", fields: [targetObjectId], references: [id], onDelete: Cascade)
-  evidenceRefs               ContextGraphEvidenceRef[]
+  workspace    Workspace                 @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  sourceObject ContextGraphObject        @relation("ContextGraphRelationshipSource", fields: [sourceObjectId], references: [id], onDelete: Cascade)
+  targetObject ContextGraphObject        @relation("ContextGraphRelationshipTarget", fields: [targetObjectId], references: [id], onDelete: Cascade)
+  evidenceRefs ContextGraphEvidenceRef[]
 
   @@index([workspaceId, relationshipType, status])
   @@index([workspaceId, sourceObjectId])
@@ -2112,21 +2148,21 @@ model ContextGraphRelationship {
 }
 
 model ContextGraphEvidenceRef {
-  id             String   @id @default(uuid())
-  workspaceId    String
-  objectId       String?
-  relationshipId String?
-  sourceType     String
-  sourceId       String
+  id               String   @id @default(uuid())
+  workspaceId      String
+  objectId         String?
+  relationshipId   String?
+  sourceType       String
+  sourceId         String
   knowledgeChunkId String?
-  quote          String?  @db.Text
-  relevanceScore Float?
-  metadata       Json     @default("{}")
-  createdAt      DateTime @default(now())
+  quote            String?  @db.Text
+  relevanceScore   Float?
+  metadata         Json     @default("{}")
+  createdAt        DateTime @default(now())
 
-  workspace      Workspace                 @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  object         ContextGraphObject?       @relation(fields: [objectId], references: [id], onDelete: Cascade)
-  relationship   ContextGraphRelationship? @relation(fields: [relationshipId], references: [id], onDelete: Cascade)
+  workspace    Workspace                 @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  object       ContextGraphObject?       @relation(fields: [objectId], references: [id], onDelete: Cascade)
+  relationship ContextGraphRelationship? @relation(fields: [relationshipId], references: [id], onDelete: Cascade)
 
   @@index([workspaceId, sourceType, sourceId])
   @@index([workspaceId, objectId])
@@ -2145,8 +2181,8 @@ model ContextMapView {
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
-  workspace       Workspace              @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  layoutItems     ContextMapLayoutItem[]
+  workspace   Workspace              @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  layoutItems ContextMapLayoutItem[]
 
   @@index([workspaceId, viewType])
 }
@@ -2162,55 +2198,58 @@ model ContextMapLayoutItem {
   visualState Json     @default("{}")
   updatedAt   DateTime @updatedAt
 
-  mapView     ContextMapView    @relation(fields: [mapViewId], references: [id], onDelete: Cascade)
-  object      ContextGraphObject @relation(fields: [objectId], references: [id], onDelete: Cascade)
+  mapView ContextMapView     @relation(fields: [mapViewId], references: [id], onDelete: Cascade)
+  object  ContextGraphObject @relation(fields: [objectId], references: [id], onDelete: Cascade)
 
   @@unique([mapViewId, objectId])
 }
 
 model ContextGraphProposedDiff {
-  id                    String   @id @default(uuid())
-  workspaceId           String
-  proposedByType        String
-  proposedByUserId      String?
-  proposedByAgentRunId  String?
-  diffJson              Json
-  reason                String?  @db.Text
-  evidenceJson          Json?
-  status                String   @default("pending")
-  reviewedByUserId      String?
-  reviewedAt            DateTime?
-  appliedAt             DateTime?
-  createdAt             DateTime @default(now())
-  updatedAt             DateTime @updatedAt
+  id                   String    @id @default(uuid())
+  workspaceId          String
+  proposedByType       String
+  proposedByUserId     String?
+  proposedByAgentRunId String?
+  diffJson             Json
+  reason               String?   @db.Text
+  evidenceJson         Json?
+  status               String    @default("pending")
+  reviewedByUserId     String?
+  reviewedAt           DateTime?
+  appliedAt            DateTime?
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
 
-  workspace             Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 
   @@index([workspaceId, status, createdAt])
   @@index([workspaceId, proposedByType])
 }
 
 model ModelUsage {
-  id               String        @id @default(uuid())
-  workspaceId      String
-  workflowJobId    String?
-  agentRunId       String?
-  catalogItemId    String?
-  agentCredentialId String?
-  provider         String
-  model            String
-  taskType         ModelTaskType
-  inputTokens      Int           @default(0)
-  outputTokens     Int           @default(0)
-  latencyMs        Int           @default(0)
-  estimatedCostUsd Decimal?      @db.Decimal(12, 6)
-  createdAt        DateTime      @default(now())
+  id                 String        @id @default(uuid())
+  workspaceId        String
+  workflowJobId      String?
+  agentRunId         String?
+  catalogItemId      String?
+  agentCredentialId  String?
+  provider           String
+  model              String
+  taskType           ModelTaskType
+  inputTokens        Int           @default(0)
+  outputTokens       Int           @default(0)
+  latencyMs          Int           @default(0)
+  estimatedCostUsd   Decimal?      @db.Decimal(12, 6)
+  rawProviderCostUsd Decimal?      @db.Decimal(12, 6)
+  billableCostUsd    Decimal?      @db.Decimal(12, 6)
+  createdAt          DateTime      @default(now())
 
-  workspace   Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  workflowJob WorkflowJob? @relation(fields: [workflowJobId], references: [id], onDelete: SetNull)
-  agentRun    AgentRun?    @relation(fields: [agentRunId], references: [id], onDelete: SetNull)
-  catalogItem CatalogItem? @relation(fields: [catalogItemId], references: [id], onDelete: SetNull)
-  agentCredential AgentCredential? @relation(fields: [agentCredentialId], references: [id], onDelete: SetNull)
+  workspace          Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workflowJob        WorkflowJob?        @relation(fields: [workflowJobId], references: [id], onDelete: SetNull)
+  agentRun           AgentRun?           @relation(fields: [agentRunId], references: [id], onDelete: SetNull)
+  catalogItem        CatalogItem?        @relation(fields: [catalogItemId], references: [id], onDelete: SetNull)
+  agentCredential    AgentCredential?    @relation(fields: [agentCredentialId], references: [id], onDelete: SetNull)
+  aiUsageLedgerEntry AiUsageLedgerEntry?
 
   @@index([workspaceId, taskType, createdAt])
   @@index([workspaceId, catalogItemId, createdAt])
@@ -2218,20 +2257,20 @@ model ModelUsage {
 }
 
 model AgentCredential {
-  id              String    @id @default(uuid())
-  workspaceId     String
-  createdByUserId String?
-  catalogItemId   String?
-  label           String
-  tokenHash       String    @unique
-  scopes          String[]
-  reasonMd        String?   @db.Text
+  id                 String    @id @default(uuid())
+  workspaceId        String
+  createdByUserId    String?
+  catalogItemId      String?
+  label              String
+  tokenHash          String    @unique
+  scopes             String[]
+  reasonMd           String?   @db.Text
   monthlyBudgetCents Int?
-  dailyCallLimit  Int?
-  isActive        Boolean   @default(true)
-  lastUsedAt      DateTime?
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @updatedAt
+  dailyCallLimit     Int?
+  isActive           Boolean   @default(true)
+  lastUsedAt         DateTime?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
 
   workspace        Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   createdBy        User?             @relation("AgentCredentialCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
@@ -2611,21 +2650,31 @@ enum OAuthProvider {
 }
 
 model OAuthConnection {
-  id                String        @id @default(uuid())
-  userId            String
-  provider          OAuthProvider
-  providerAccountId String
-  accessToken       String        @db.Text
-  refreshToken      String?       @db.Text
-  expiresAt         DateTime?
-  scopes            String[]      @default([])
-  createdAt         DateTime      @default(now())
-  updatedAt         DateTime      @updatedAt
+  id                  String                @id @default(uuid())
+  userId              String
+  workspaceId         String?
+  provider            OAuthProvider
+  providerAccountId   String
+  accessToken         String                @db.Text
+  refreshToken        String?               @db.Text
+  tokenStorageVersion String                @default("plaintext")
+  expiresAt           DateTime?
+  scopes              String[]              @default([])
+  providerEmail       String?
+  status              OAuthConnectionStatus @default(ACTIVE)
+  syncSettings        Json?
+  lastSyncAt          DateTime?
+  lastSyncError       String?
+  disconnectedAt      DateTime?
+  createdAt           DateTime              @default(now())
+  updatedAt           DateTime              @updatedAt
 
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workspace Workspace? @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 
   @@unique([userId, provider])
   @@index([userId])
+  @@index([workspaceId, provider, status])
 }
 
 // --- Expertise Tracking ---
@@ -2934,6 +2983,66 @@ model ModelUsageBudget {
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 }
 
+model WorkspaceBillingProfile {
+  id                       String                 @id @default(uuid())
+  workspaceId              String                 @unique
+  stripeCustomerId         String?                @unique
+  stripeSubscriptionId     String?                @unique
+  stripeSubscriptionItemId String?
+  stripePriceId            String?
+  stripeCheckoutSessionId  String?
+  billingStatus            WorkspaceBillingStatus @default(NONE)
+  billingEmail             String?
+  aiUsageMarkupBps         Int                    @default(10000)
+  paymentMethodReady       Boolean                @default(false)
+  currentPeriodStart       DateTime?
+  currentPeriodEnd         DateTime?
+  failedPaymentAt          DateTime?
+  canceledAt               DateTime?
+  createdAt                DateTime               @default(now())
+  updatedAt                DateTime               @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([billingStatus])
+  @@index([stripeSubscriptionItemId])
+}
+
+model AiUsageLedgerEntry {
+  id                  String              @id @default(uuid())
+  workspaceId         String
+  modelUsageId        String?             @unique
+  provider            String
+  model               String
+  taskType            ModelTaskType
+  rawProviderCostUsd  Decimal             @db.Decimal(12, 6)
+  billableCostUsd     Decimal             @db.Decimal(12, 6)
+  status              AiUsageLedgerStatus @default(PENDING)
+  stripeUsageRecordId String?
+  stripeInvoiceId     String?
+  stripeReportedAt    DateTime?
+  lastReportError     String?
+  createdAt           DateTime            @default(now())
+  updatedAt           DateTime            @updatedAt
+
+  workspace  Workspace   @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  modelUsage ModelUsage? @relation(fields: [modelUsageId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId, status, createdAt])
+  @@index([status, createdAt])
+}
+
+model StripeWebhookEvent {
+  id          String    @id
+  type        String
+  payload     Json?
+  receivedAt  DateTime  @default(now())
+  processedAt DateTime?
+  error       String?
+
+  @@index([type, receivedAt])
+}
+
 model OAuthApp {
   id               String    @id @default(uuid())
   workspaceId      String
@@ -3197,15 +3306,15 @@ model MeetingInsight {
   confidence   Float?
   sourceQuote  String?
 
-  appliedEntityType String?
-  appliedEntityId   String?
-  targetEntityType  String?
-  targetEntityId    String?
+  appliedEntityType     String?
+  appliedEntityId       String?
+  targetEntityType      String?
+  targetEntityId        String?
   deliberationEntryType String?
-  resolutionOutcome ProposalResolutionOutcome?
-  dedupeKey         String?
-  autoAppliedAt     DateTime?
-  autoApplyError    String?
+  resolutionOutcome     ProposalResolutionOutcome?
+  dedupeKey             String?
+  autoAppliedAt         DateTime?
+  autoApplyError        String?
 
   reviewedByUserId String?
   reviewedAt       DateTime?
@@ -3217,8 +3326,8 @@ model MeetingInsight {
   meeting        Meeting   @relation(fields: [meetingId], references: [id], onDelete: Cascade)
   reviewedByUser User?     @relation(fields: [reviewedByUserId], references: [id], onDelete: SetNull)
 
-  @@index([workspaceId, meetingId, status])
   @@unique([meetingId, dedupeKey])
+  @@index([workspaceId, meetingId, status])
 }
 
 enum GoalCadence {

@@ -180,8 +180,23 @@ const managedWorkspaceSelect = {
   id: true,
   slug: true,
   name: true,
+  plan: true,
+  planActivatedAt: true,
+  trialEndsAt: true,
+  billingProfile: {
+    select: {
+      billingStatus: true,
+      stripeCustomerId: true,
+      stripeSubscriptionId: true,
+      paymentMethodReady: true,
+      failedPaymentAt: true,
+      canceledAt: true,
+      updatedAt: true,
+    },
+  },
   _count: {
     select: {
+      members: true,
       externalDataSources: true,
       brainArticles: true,
       brainSources: true,
@@ -1661,7 +1676,7 @@ export async function getControlPlaneIntegrationStatus(actor: AppActor, deployme
     };
   }
 
-  const [featureFlag, recorderConfig, recorderUsage, recorderFailures, recorderReadiness, communicationInstallations, dataSources] = await Promise.all([
+  const [featureFlag, recorderConfig, recorderUsage, recorderFailures, recorderReadiness, communicationInstallations, dataSources, oauthConnections] = await Promise.all([
     prisma.workspaceFeatureFlag.findUnique({
       where: {
         workspaceId_flag: {
@@ -1706,6 +1721,22 @@ export async function getControlPlaneIntegrationStatus(actor: AppActor, deployme
         lastSyncError: true,
       },
     }),
+    prisma.oAuthConnection.findMany({
+      where: { workspaceId: deployment.managedWorkspaceId },
+      orderBy: { updatedAt: "desc" },
+      select: {
+        id: true,
+        provider: true,
+        providerAccountId: true,
+        providerEmail: true,
+        scopes: true,
+        status: true,
+        syncSettings: true,
+        lastSyncAt: true,
+        lastSyncError: true,
+        updatedAt: true,
+      },
+    }),
   ]);
 
   return {
@@ -1713,6 +1744,14 @@ export async function getControlPlaneIntegrationStatus(actor: AppActor, deployme
     accessMode: "managed_workspace" as const,
     hasManagedWorkspace: true,
     managedWorkspace: deployment.managedWorkspace,
+    selfServe: deployment.managedWorkspace
+      ? {
+        plan: deployment.managedWorkspace.plan,
+        trialEndsAt: deployment.managedWorkspace.trialEndsAt,
+        billing: deployment.managedWorkspace.billingProfile,
+        memberCount: deployment.managedWorkspace._count.members,
+      }
+      : null,
     integrations: [
       {
         key: "meeting_recorders",
@@ -1744,6 +1783,18 @@ export async function getControlPlaneIntegrationStatus(actor: AppActor, deployme
         optionalScopes: installation.optionalScopes,
         lastEventAt: installation.lastEventAt,
         lastError: installation.lastError,
+      })),
+      ...oauthConnections.map((connection) => ({
+        key: `oauth_${connection.id}`,
+        label: connection.provider,
+        entitlementEnabled: true,
+        configured: connection.status !== "DISCONNECTED",
+        status: connection.status,
+        account: connection.providerEmail ?? connection.providerAccountId,
+        scopes: connection.scopes,
+        syncSettings: connection.syncSettings,
+        lastSyncAt: connection.lastSyncAt,
+        lastError: connection.lastSyncError,
       })),
       ...dataSources.map((source) => ({
         key: `data_source_${source.id}`,
@@ -2464,6 +2515,7 @@ export async function getControlPlaneAiGovernanceStatus(actor: AppActor, deploym
         inputTokens: true,
         outputTokens: true,
         estimatedCostUsd: true,
+        billableCostUsd: true,
       },
     }),
     prisma.agentRun.findMany({
@@ -2609,6 +2661,8 @@ export async function getControlPlaneAiGovernanceStatus(actor: AppActor, deploym
         outputTokens: true,
         latencyMs: true,
         estimatedCostUsd: true,
+        rawProviderCostUsd: true,
+        billableCostUsd: true,
         createdAt: true,
         agentRun: { select: { id: true, agentKey: true, status: true } },
         agentCredential: { select: { id: true, label: true, isActive: true } },
@@ -2741,7 +2795,8 @@ export async function getControlPlaneAiGovernanceStatus(actor: AppActor, deploym
       modelUsage: {
         inputTokens: modelUsage._sum.inputTokens ?? 0,
         outputTokens: modelUsage._sum.outputTokens ?? 0,
-        estimatedCostUsd: decimalToString(modelUsage._sum.estimatedCostUsd),
+        estimatedCostUsd: decimalToString(modelUsage._sum.billableCostUsd ?? modelUsage._sum.estimatedCostUsd),
+        billableCostUsd: decimalToString(modelUsage._sum.billableCostUsd),
       },
       recentRuns,
       recentFailedJobs,
@@ -2767,7 +2822,9 @@ export async function getControlPlaneAiGovernanceStatus(actor: AppActor, deploym
         : null,
       recentModelUsage: recentModelUsage.map((usage) => ({
         ...usage,
-        estimatedCostUsd: decimalToString(usage.estimatedCostUsd),
+        estimatedCostUsd: decimalToString(usage.billableCostUsd ?? usage.estimatedCostUsd),
+        rawProviderCostUsd: decimalToString(usage.rawProviderCostUsd),
+        billableCostUsd: decimalToString(usage.billableCostUsd),
       })),
     },
     activity: {

@@ -7,7 +7,8 @@ import type {
   ModelUsageInput,
   RerankRequest,
 } from "./contracts";
-import { assertCatalogModelBudget, recordModelUsage } from "./usage";
+import { assertCatalogModelBudget, assertWorkspaceModelBudget, recordModelUsage } from "./usage";
+import { estimateModelCost } from "./pricing";
 
 type UsageDetails = {
   provider: string;
@@ -16,6 +17,8 @@ type UsageDetails = {
   outputTokens: number;
   latencyMs: number;
   estimatedCostUsd: string;
+  rawProviderCostUsd: string;
+  billableCostUsd: string;
 };
 
 type ChatCompletionApiResponse = {
@@ -80,6 +83,8 @@ function usageDetails(input: ModelUsageInput): UsageDetails {
     outputTokens: input.outputTokens ?? 0,
     latencyMs: input.latencyMs ?? 0,
     estimatedCostUsd: input.estimatedCostUsd ?? "0.000000",
+    rawProviderCostUsd: input.rawProviderCostUsd ?? "0.000000",
+    billableCostUsd: input.billableCostUsd ?? input.estimatedCostUsd ?? "0.000000",
   };
 }
 
@@ -93,10 +98,13 @@ function usageContext(request: {
   };
 }
 
-function estimateCostUsd(inputTokens: number, outputTokens: number) {
-  // Cost estimation logic varies heavily by tier/model.
-  // We track raw token usage so we can calculate this retroactively if needed.
-  return undefined;
+function costFields(provider: string, model: string, inputTokens: number, outputTokens: number) {
+  return estimateModelCost({
+    provider,
+    model,
+    inputTokens,
+    outputTokens,
+  }) ?? {};
 }
 
 function isOpenRouterProvider() {
@@ -307,6 +315,7 @@ async function completeChat(
 ) {
   const startedAt = Date.now();
   const model = modelOverride ?? request.model ?? env.MODEL_CHAT_DEFAULT;
+  await assertWorkspaceModelBudget(request.workspaceId);
   await assertCatalogModelBudget({
     workspaceId: request.workspaceId,
     ...usageContext(request),
@@ -335,7 +344,7 @@ async function completeChat(
     inputTokens,
     outputTokens,
     latencyMs,
-    estimatedCostUsd: estimateCostUsd(inputTokens, outputTokens),
+    ...costFields(env.MODEL_PROVIDER, model, inputTokens, outputTokens),
   });
 
   return { content, tool_calls, usage };
@@ -349,6 +358,7 @@ async function* completeChatStream(
 ): AsyncGenerator<string, import("./contracts").ChatCompletionResponse> {
   const startedAt = Date.now();
   const model = modelOverride ?? request.model ?? env.MODEL_CHAT_DEFAULT;
+  await assertWorkspaceModelBudget(request.workspaceId);
   await assertCatalogModelBudget({
     workspaceId: request.workspaceId,
     ...usageContext(request),
@@ -466,7 +476,7 @@ async function* completeChatStream(
     inputTokens,
     outputTokens,
     latencyMs,
-    estimatedCostUsd: estimateCostUsd(inputTokens, outputTokens),
+    ...costFields(env.MODEL_PROVIDER, model, inputTokens, outputTokens),
   });
 
   return { content, tool_calls: finalTools.length > 0 ? finalTools : undefined, usage };
@@ -508,6 +518,7 @@ async function embedTexts(request: EmbeddingRequest) {
   const startedAt = Date.now();
   const inputs = Array.isArray(request.input) ? request.input : [request.input];
   const model = request.model ?? env.MODEL_EMBEDDING_DEFAULT;
+  await assertWorkspaceModelBudget(request.workspaceId);
   await assertCatalogModelBudget({
     workspaceId: request.workspaceId,
     ...usageContext(request),
@@ -599,7 +610,7 @@ export const openAICompatibleModelGateway: ModelGateway = {
       inputTokens: embedded.inputTokens,
       outputTokens: 0,
       latencyMs: embedded.latencyMs,
-      estimatedCostUsd: estimateCostUsd(embedded.inputTokens, 0),
+      ...costFields(env.MODEL_PROVIDER, embedded.model, embedded.inputTokens, 0),
     });
 
     return {
@@ -637,7 +648,7 @@ export const openAICompatibleModelGateway: ModelGateway = {
       inputTokens: embedded.inputTokens,
       outputTokens: 0,
       latencyMs: embedded.latencyMs,
-      estimatedCostUsd: estimateCostUsd(embedded.inputTokens, 0),
+      ...costFields(env.MODEL_PROVIDER, embedded.model, embedded.inputTokens, 0),
     });
 
     return {

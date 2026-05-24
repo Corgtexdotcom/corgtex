@@ -1,7 +1,7 @@
 import { requirePageActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
 import { type NextRequest, NextResponse } from "next/server";
-import { saveOAuthConnectionAndEnqueueCalendarSync } from "@corgtex/domain";
+import { saveOAuthConnectionAndEnqueueCalendarSync, verifyIntegrationOAuthState } from "@corgtex/domain";
 
 export async function GET(request: NextRequest, props: { params: Promise<{ provider: string }> }) {
   try {
@@ -21,14 +21,20 @@ export async function GET(request: NextRequest, props: { params: Promise<{ provi
     const state = request.nextUrl.searchParams.get("state");
     const error = request.nextUrl.searchParams.get("error");
 
-    const [userId, workspaceId] = (state || "").split(":");
+    let statePayload: { workspaceId: string | null };
+    try {
+      statePayload = verifyIntegrationOAuthState(state, actor.user.id);
+    } catch {
+      return NextResponse.redirect(new URL("/?error=invalid_request", appUrl));
+    }
+    const workspaceId = statePayload.workspaceId ?? "";
     const returnUrl = workspaceId ? `/workspaces/${workspaceId}/settings` : "/";
 
     if (error) {
       return NextResponse.redirect(new URL(`${returnUrl}?error=${error}`, appUrl));
     }
 
-    if (!code || !state || actor.user.id !== userId) {
+    if (!code || !state) {
       return NextResponse.redirect(new URL(`${returnUrl}?error=invalid_request`, appUrl));
     }
 
@@ -68,6 +74,7 @@ export async function GET(request: NextRequest, props: { params: Promise<{ provi
         refreshToken: typeof tokenData.refresh_token === "string" ? tokenData.refresh_token : null,
         expiresIn: typeof tokenData.expires_in === "number" ? tokenData.expires_in : null,
         providerAccountId: String(profileData.id),
+        providerEmail: typeof profileData.email === "string" ? profileData.email : null,
         scopes: typeof tokenData.scope === "string" ? tokenData.scope.split(" ") : [],
       });
 
@@ -90,7 +97,7 @@ export async function GET(request: NextRequest, props: { params: Promise<{ provi
           client_secret: clientSecret,
           redirect_uri: redirectUri,
           grant_type: "authorization_code",
-          scope: ["offline_access", "User.Read", "Calendars.ReadWrite"].join(" ")
+          scope: ["offline_access", "User.Read", "Calendars.Read", "Mail.Read", "Files.Read.All", "Sites.Read.All"].join(" ")
         }),
       });
 
@@ -110,6 +117,9 @@ export async function GET(request: NextRequest, props: { params: Promise<{ provi
         refreshToken: typeof tokenData.refresh_token === "string" ? tokenData.refresh_token : null,
         expiresIn: typeof tokenData.expires_in === "number" ? tokenData.expires_in : null,
         providerAccountId: String(profileData.id),
+        providerEmail: typeof profileData.mail === "string"
+          ? profileData.mail
+          : typeof profileData.userPrincipalName === "string" ? profileData.userPrincipalName : null,
         scopes: typeof tokenData.scope === "string" ? tokenData.scope.split(" ") : [],
       });
 

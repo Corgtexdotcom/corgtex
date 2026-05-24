@@ -15,6 +15,7 @@ import {
   listUserSessions,
   getUserNotificationPreferences,
   getMeetingRecorderConfig,
+  getWorkspacePlanState,
 } from "@corgtex/domain";
 import { env, prisma } from "@corgtex/shared";
 import { requirePageActor } from "@/lib/auth";
@@ -62,13 +63,23 @@ export default async function SettingsPage({
   }
 
   // Load core user constraints that apply to both tabs
-  const [webhookEndpoints, inboundWebhooks, userConnections, ssoConfigs, communicationInstallations, meetingRecorderConfig] = await Promise.all([
+  const [webhookEndpoints, inboundWebhooks, userConnections, ssoConfigs, communicationInstallations, meetingRecorderConfig, planState] = await Promise.all([
     listWebhookEndpoints(actor, workspaceId).catch(() => []),
     listInboundWebhooks(actor, workspaceId, { take: 20 }).catch(() => []),
-    actor.kind === "user" ? prisma.oAuthConnection.findMany({ where: { userId: actor.user.id } }).catch(() => []) : Promise.resolve([]),
+    actor.kind === "user" ? prisma.oAuthConnection.findMany({
+      where: {
+        userId: actor.user.id,
+        OR: [
+          { workspaceId },
+          { workspaceId: null },
+        ],
+      },
+      orderBy: { updatedAt: "desc" },
+    }).catch(() => []) : Promise.resolve([]),
     getSsoConfigByWorkspace(actor, workspaceId).catch(() => []),
     listCommunicationInstallations(actor, workspaceId).catch(() => []),
     featureFlags.MEETING_RECORDERS ? getMeetingRecorderConfig(actor, workspaceId).catch(() => null) : Promise.resolve(null),
+    getWorkspacePlanState(actor, workspaceId).catch(() => null),
   ]);
   const slackInstallation = communicationInstallations.find((installation) => installation.provider === "SLACK" && installation.status === "ACTIVE");
   const slackSettings = slackInstallation?.settings && typeof slackInstallation.settings === "object" && !Array.isArray(slackInstallation.settings)
@@ -220,6 +231,38 @@ export default async function SettingsPage({
       {tab === "general" && (
         <>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(340px, 1fr))", gap: "40px", marginBottom: 48 }}>
+            {planState && (
+              <section>
+                <h2 className="nr-section-header">Plan and AI usage</h2>
+                <div className="nr-item" style={{ padding: "14px 0" }}>
+                  <div className="row">
+                    <strong className="nr-item-title">{planState.plan.replace(/_/g, " ")}</strong>
+                    <span className="tag" style={{ background: planState.aiBudget.enabled ? "var(--accent-soft)" : "transparent" }}>
+                      {planState.aiBudget.enabled ? "AI enabled" : "Core only"}
+                    </span>
+                  </div>
+                  <p className="nr-item-meta" style={{ fontSize: "0.82rem", marginTop: 8 }}>
+                    {planState.trialEndsAt
+                      ? `Trial ends ${format.dateTime(planState.trialEndsAt, { dateStyle: "medium" })}. `
+                      : ""}
+                    AI spend this period: ${planState.aiBudget.usedUsd.toFixed(2)}
+                    {planState.aiBudget.capUsd != null && planState.aiBudget.capUsd >= 0 ? ` of $${planState.aiBudget.capUsd.toFixed(2)}` : ""}.
+                  </p>
+                  <div className="actions-inline" style={{ marginTop: 12 }}>
+                    {planState.plan !== "PAYG_AI" && (
+                      <a className="button primary small" href={`/api/billing/checkout?workspaceId=${workspaceId}`}>
+                        Enable pay-as-you-go AI
+                      </a>
+                    )}
+                    {planState.billing?.stripeCustomerId && (
+                      <a className="button secondary small" href={`/api/billing/portal?workspaceId=${workspaceId}`}>
+                        Billing portal
+                      </a>
+                    )}
+                  </div>
+                </div>
+              </section>
+            )}
             <section>
               <h2 className="nr-section-header">{t("sectionMyIntegrations")}</h2>
               <p className="nr-item-meta" style={{ fontSize: "0.85rem", marginBottom: 16 }}>
@@ -229,22 +272,44 @@ export default async function SettingsPage({
                 <div className="nr-item" style={{ padding: "12px 0" }}>
                   <div className="row">
                     <strong className="nr-item-title">{t("integrationGoogle")}</strong>
-                    {userConnections.find((c) => c.provider === "GOOGLE") ? (
+                    {userConnections.find((c) => c.provider === "GOOGLE" && c.status !== "DISCONNECTED") ? (
                       <span className="tag" style={{ background: "var(--accent-soft)" }}>{t("statusConnected")}</span>
                     ) : (
                       <a href={`/api/integrations/google/connect?workspaceId=${workspaceId}`} className="button secondary small">{t("btnConnectGoogle")}</a>
                     )}
                   </div>
+                  {userConnections.filter((c) => c.provider === "GOOGLE" && c.status !== "DISCONNECTED").map((connection) => (
+                    <div key={connection.id} className="row" style={{ marginTop: 8, alignItems: "center" }}>
+                      <span className="nr-item-meta" style={{ fontSize: "0.82rem" }}>
+                        {connection.providerEmail ?? connection.providerAccountId} · {connection.status.toLowerCase()} · {connection.lastSyncAt ? format.dateTime(connection.lastSyncAt, { dateStyle: "medium", timeStyle: "short" }) : "Not synced yet"}
+                      </span>
+                      <form action={`/api/integrations/connections/${connection.id}/disconnect`} method="post">
+                        <input type="hidden" name="workspaceId" value={workspaceId} />
+                        <button type="submit" className="button ghost small">Disconnect</button>
+                      </form>
+                    </div>
+                  ))}
                 </div>
                 <div className="nr-item" style={{ padding: "12px 0" }}>
                   <div className="row">
                     <strong className="nr-item-title">{t("integrationMicrosoft")}</strong>
-                    {userConnections.find((c) => c.provider === "MICROSOFT") ? (
+                    {userConnections.find((c) => c.provider === "MICROSOFT" && c.status !== "DISCONNECTED") ? (
                       <span className="tag" style={{ background: "var(--accent-soft)" }}>{t("statusConnected")}</span>
                     ) : (
                       <a href={`/api/integrations/microsoft/connect?workspaceId=${workspaceId}`} className="button secondary small">{t("btnConnectMicrosoft")}</a>
                     )}
                   </div>
+                  {userConnections.filter((c) => c.provider === "MICROSOFT" && c.status !== "DISCONNECTED").map((connection) => (
+                    <div key={connection.id} className="row" style={{ marginTop: 8, alignItems: "center" }}>
+                      <span className="nr-item-meta" style={{ fontSize: "0.82rem" }}>
+                        {connection.providerEmail ?? connection.providerAccountId} · {connection.status.toLowerCase()} · {connection.lastSyncAt ? format.dateTime(connection.lastSyncAt, { dateStyle: "medium", timeStyle: "short" }) : "Not synced yet"}
+                      </span>
+                      <form action={`/api/integrations/connections/${connection.id}/disconnect`} method="post">
+                        <input type="hidden" name="workspaceId" value={workspaceId} />
+                        <button type="submit" className="button ghost small">Disconnect</button>
+                      </form>
+                    </div>
+                  ))}
                 </div>
                 {featureFlags.MEETING_RECORDERS && meetingRecorderConfig ? (
                   <div className="nr-item" style={{ padding: "12px 0" }}>

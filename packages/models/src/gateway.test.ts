@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("./usage", () => ({
   assertCatalogModelBudget: vi.fn().mockResolvedValue(undefined),
+  assertWorkspaceModelBudget: vi.fn().mockResolvedValue(undefined),
   recordModelUsage: vi.fn().mockResolvedValue(undefined),
 }));
 

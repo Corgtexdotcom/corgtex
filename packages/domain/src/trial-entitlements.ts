@@ -1,5 +1,6 @@
 import { checkRateLimit, prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
+import type { Prisma } from "@prisma/client";
 import { AppError, invariant } from "./errors";
 import { requireGlobalOperator } from "./auth";
 import { appendEvents } from "./events";
@@ -23,11 +24,31 @@ type TrialLike = {
   mcpDailyCallLimit: number;
 };
 
+const TRIAL_ENABLED_FEATURE_FLAGS = [
+  ["GOALS", true],
+  ["AGENT_GOVERNANCE", true],
+  ["TOOL_LINKS", true],
+  ["CONTEXT_MAPS", true],
+  ["SETTINGS_GENERAL", true],
+  ["MEETING_RECORDERS", false],
+] as const;
+
 function procurementTrialDelegate() {
   return (prisma as typeof prisma & { procurementTrial?: typeof prisma.procurementTrial }).procurementTrial;
 }
 
-async function expireTrial(trial: Pick<TrialLike, "id" | "agentCredentialId">) {
+export async function applyTrialFeatureFlags(tx: Prisma.TransactionClient, workspaceId: string) {
+  await tx.workspaceFeatureFlag.createMany({
+    data: TRIAL_ENABLED_FEATURE_FLAGS.map(([flag, enabled]) => ({
+      workspaceId,
+      flag,
+      enabled,
+    })),
+    skipDuplicates: true,
+  });
+}
+
+async function expireTrial(trial: Pick<TrialLike, "id" | "workspaceId" | "agentCredentialId" | "trialExpiresAt">) {
   await prisma.$transaction(async (tx) => {
     await tx.procurementTrial.update({
       where: { id: trial.id },
@@ -35,6 +56,45 @@ async function expireTrial(trial: Pick<TrialLike, "id" | "agentCredentialId">) {
         status: TRIAL_STATUS_EXPIRED,
       },
     });
+    if (trial.workspaceId) {
+      await tx.workspace.update({
+        where: { id: trial.workspaceId },
+        data: {
+          plan: "CORE_FREE",
+          planActivatedAt: new Date(),
+          trialEndsAt: trial.trialExpiresAt,
+        },
+      });
+      await tx.modelUsageBudget.upsert({
+        where: { workspaceId: trial.workspaceId },
+        create: {
+          workspaceId: trial.workspaceId,
+          monthlyCostCapUsd: 0,
+        },
+        update: {
+          monthlyCostCapUsd: 0,
+        },
+      });
+      await tx.auditLog.create({
+        data: {
+          workspaceId: trial.workspaceId,
+          actorUserId: null,
+          action: "procurement_trial.expired",
+          entityType: "ProcurementTrial",
+          entityId: trial.id,
+          meta: { downgradePlan: "CORE_FREE" },
+        },
+      });
+      await appendEvents(tx, [
+        {
+          workspaceId: trial.workspaceId,
+          type: "procurement_trial.expired",
+          aggregateType: "ProcurementTrial",
+          aggregateId: trial.id,
+          payload: { trialId: trial.id, downgradePlan: "CORE_FREE" },
+        },
+      ]);
+    }
     if (trial.agentCredentialId) {
       await tx.agentCredential.update({
         where: { id: trial.agentCredentialId },
@@ -199,6 +259,13 @@ export async function suspendProcurementTrial(actor: AppActor, params: {
       });
     }
     if (trial.workspaceId) {
+      await tx.workspace.update({
+        where: { id: trial.workspaceId },
+        data: {
+          plan: "CORE_FREE",
+          planActivatedAt: new Date(),
+        },
+      });
       await tx.modelUsageBudget.upsert({
         where: { workspaceId: trial.workspaceId },
         create: {

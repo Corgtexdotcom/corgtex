@@ -107,6 +107,7 @@ export async function getAgentRunTrace(actor: AppActor, workspaceId: string, age
           outputTokens: true,
           latencyMs: true,
           estimatedCostUsd: true,
+          billableCostUsd: true,
           createdAt: true,
         },
         orderBy: { createdAt: "asc" },
@@ -138,6 +139,7 @@ export async function getModelUsageSummary(actor: AppActor, workspaceId: string,
       outputTokens: true,
       latencyMs: true,
       estimatedCostUsd: true,
+      billableCostUsd: true,
       createdAt: true,
       agentRun: {
         select: {
@@ -178,7 +180,7 @@ export async function getModelUsageSummary(actor: AppActor, workspaceId: string,
   }>();
 
   for (const usage of usages) {
-    const costUsd = parseCost(usage.estimatedCostUsd);
+    const costUsd = parseCost(usage.billableCostUsd ?? usage.estimatedCostUsd);
 
     // By model
     const modelKey = `${usage.provider}:${usage.model}`;

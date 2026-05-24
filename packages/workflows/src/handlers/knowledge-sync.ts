@@ -345,7 +345,16 @@ export async function handleSlackMessageKnowledgeSync(jobId: string, payload: { 
 export async function handleCalendarSync(jobId: string, payload: { connectionId?: string }, workspaceId: string) {
   if (!payload.connectionId) return;
   const connection = await prisma.oAuthConnection.findUnique({ where: { id: payload.connectionId } });
-  if (!connection) return;
+  if (!connection || connection.status !== "ACTIVE") return;
+  if (connection.workspaceId && connection.workspaceId !== workspaceId) return;
+  const syncSettings = connection.syncSettings && typeof connection.syncSettings === "object" && !Array.isArray(connection.syncSettings)
+    ? connection.syncSettings as Record<string, unknown>
+    : {};
+  const calendarSettings = syncSettings.calendar && typeof syncSettings.calendar === "object" && !Array.isArray(syncSettings.calendar)
+    ? syncSettings.calendar as Record<string, unknown>
+    : {};
+  if (calendarSettings.enabled === false) return;
+  const includeAllEvents = calendarSettings.includeAllEvents === true;
 
   const now = new Date();
   const oneMonthAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
@@ -355,6 +364,10 @@ export async function handleCalendarSync(jobId: string, payload: { connectionId?
     const events = await fetchCalendarEvents(connection.id, oneMonthAgo, oneMonthAhead);
     
     for (const event of events) {
+      const shouldIndex = includeAllEvents || Boolean(event.meetingUrl) || event.attendees.length > 1;
+      if (!shouldIndex) {
+        continue;
+      }
       const sourceId = `calendar-${event.id}`;
       await syncKnowledgeForSource({
         workspaceId,
@@ -376,8 +389,23 @@ export async function handleCalendarSync(jobId: string, payload: { connectionId?
         event,
       });
     }
+    await prisma.oAuthConnection.update({
+      where: { id: connection.id },
+      data: {
+        lastSyncAt: new Date(),
+        lastSyncError: null,
+        status: "ACTIVE",
+      },
+    });
   } catch (error) {
     console.warn("Calendar sync failed:", error);
+    await prisma.oAuthConnection.update({
+      where: { id: connection.id },
+      data: {
+        lastSyncError: error instanceof Error ? error.message : "Calendar sync failed.",
+        status: "ERROR",
+      },
+    });
     throw error;
   }
 }

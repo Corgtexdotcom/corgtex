@@ -1,5 +1,6 @@
 import { requirePageActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
+import { createIntegrationOAuthState } from "@corgtex/domain";
 import { type NextRequest, NextResponse } from "next/server";
 
 export async function GET(request: NextRequest, props: { params: Promise<{ provider: string }> }) {
@@ -24,10 +25,16 @@ export async function GET(request: NextRequest, props: { params: Promise<{ provi
       }
 
       const redirectUri = `${appUrl}/api/integrations/google/callback`;
-      const scopes = ["https://www.googleapis.com/auth/calendar.events", "https://www.googleapis.com/auth/calendar.readonly"].join(" ");
-
       const workspaceId = request.nextUrl.searchParams.get("workspaceId") || "";
-      const state = `${actor.user.id}:${workspaceId}`;
+      const scopes = [
+        "openid",
+        "email",
+        "profile",
+        "https://www.googleapis.com/auth/calendar.readonly",
+        "https://www.googleapis.com/auth/drive.readonly",
+        "https://www.googleapis.com/auth/gmail.readonly",
+      ].join(" ");
+      const state = createIntegrationOAuthState({ userId: actor.user.id, workspaceId });
 
       const authUrl = new URL("https://accounts.google.com/o/oauth2/v2/auth");
       authUrl.searchParams.set("client_id", clientId);
@@ -48,10 +55,9 @@ export async function GET(request: NextRequest, props: { params: Promise<{ provi
       }
 
       const redirectUri = `${appUrl}/api/integrations/microsoft/callback`;
-      const scopes = ["offline_access", "User.Read", "Calendars.ReadWrite"].join(" ");
-
       const workspaceId = request.nextUrl.searchParams.get("workspaceId") || "";
-      const state = `${actor.user.id}:${workspaceId}`;
+      const scopes = ["offline_access", "User.Read", "Calendars.Read", "Mail.Read", "Files.Read.All", "Sites.Read.All"].join(" ");
+      const state = createIntegrationOAuthState({ userId: actor.user.id, workspaceId });
 
       const authUrl = new URL("https://login.microsoftonline.com/common/oauth2/v2.0/authorize");
       authUrl.searchParams.set("client_id", clientId);

@@ -52,7 +52,7 @@ export default async function ControlPlaneAgentsPage() {
     ? agents.map((a: any) => {
         const agentRuns = runs.filter((r: any) => r.agentKey === a.agentKey && r.workspaceId === a.workspaceId);
         const totalCost = agentRuns.reduce(
-          (sum: number, r: any) => sum + r.modelUsage.reduce((cost: number, mu: any) => cost + Number(mu.estimatedCostUsd || 0), 0),
+          (sum: number, r: any) => sum + r.modelUsage.reduce((cost: number, mu: any) => cost + Number(mu.billableCostUsd ?? mu.estimatedCostUsd ?? 0), 0),
           0,
         );
         return {
@@ -87,7 +87,7 @@ export default async function ControlPlaneAgentsPage() {
 
         const totalInput = r.modelUsage.reduce((sum: number, mu: any) => sum + mu.inputTokens, 0);
         const totalOutput = r.modelUsage.reduce((sum: number, mu: any) => sum + mu.outputTokens, 0);
-        const totalCost = r.modelUsage.reduce((sum: number, mu: any) => sum + Number(mu.estimatedCostUsd || 0), 0);
+        const totalCost = r.modelUsage.reduce((sum: number, mu: any) => sum + Number(mu.billableCostUsd ?? mu.estimatedCostUsd ?? 0), 0);
 
         return {
           id: r.id,
