@@ -1224,6 +1224,14 @@
     "title": "Control Plane",
     "eyebrow": "Gobernanza de IA empresarial",
     "description": "Superficie operativa privada para instancias hospedadas de clientes, contexto gobernado, integraciones empresariales, controles del ciclo de vida de agentes de IA, despliegue de releases, soporte, auditoría y acceso Codex/MCP.",
+    "nav": {
+      "dashboard": "Panel",
+      "customers": "Clientes",
+      "agents": "Agentes",
+      "releases": "Releases",
+      "operations": "Operaciones",
+      "users": "Usuarios"
+    },
     "sections": {
       "fleet": {
         "label": "Flota",
