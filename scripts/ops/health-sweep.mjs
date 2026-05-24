@@ -94,19 +94,29 @@ main().catch((error) => {
 });
 
 function resolvedSyncDedupePrefixes(targets, controlPlaneCustomers, env) {
-  const prefixes = targets.map((target) => `${target.name}:${target.url}:`);
-  if (controlPlaneCustomers.length > 0 || controlPlaneConfigured(env)) {
+  const prefixes = targets.map((target) => normalizeDedupePrefix(`${target.name}:${target.url}:`));
+  if (controlPlaneCustomers.length > 0 || controlPlaneFetchConfigured(env)) {
     prefixes.push("control-plane:");
   }
   return prefixes;
 }
 
-function controlPlaneConfigured(env) {
+function controlPlaneFetchConfigured(env) {
   const token = optionalText(env.CONTROL_PLANE_AGENT_API_KEY);
-  const baseUrl = optionalText(env.CONTROL_PLANE_URL)
-    ?? optionalText(env.APP_URL)
-    ?? optionalText(env.OPS_CONTROL_PLANE_URL);
+  const baseUrl = firstHttpUrl(env.CONTROL_PLANE_URL, env.APP_URL, env.OPS_CONTROL_PLANE_URL);
   return Boolean(token && baseUrl);
+}
+
+function firstHttpUrl(...values) {
+  for (const value of values) {
+    const text = optionalText(value);
+    if (text && /^https?:\/\//i.test(text)) return text.replace(/\/$/, "");
+  }
+  return null;
+}
+
+function normalizeDedupePrefix(value) {
+  return String(value).trim().replace(/\s+/g, " ").toLowerCase();
 }
 
 function optionalText(value) {

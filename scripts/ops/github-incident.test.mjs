@@ -63,6 +63,18 @@ describe("github-incident resolved issue sync", () => {
     expect(result.state.issues[0].closed).toBeFalsy();
   });
 
+  it("rejects empty incident files when resolved sync is requested", async () => {
+    const staleToken = opsToken("stale-dedupe");
+    const result = await runWithFakeGh(githubIncidentPath, ["--sync-resolved"], null, {
+      fileContent: "  \n",
+      issues: [issue(7, `[${staleToken}] P2 web: stale`)],
+    });
+
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("--sync-resolved requires explicit incident JSON");
+    expect(result.state.issues[0].closed).toBeFalsy();
+  });
+
   it("scopes resolved sync to matching dedupe prefixes", async () => {
     const controlPlaneToken = opsToken("control-plane:deployment-1:slackInvalidAuth");
     const readinessToken = opsToken("client-readiness:example-client:smoke:1:none");
@@ -90,6 +102,22 @@ describe("github-incident resolved issue sync", () => {
     expect(result.code).toBe(0);
     expect(result.state.issues.find((item) => item.number === 8).closed).toBe(true);
     expect(result.state.issues.find((item) => item.number === 9).closed).toBeFalsy();
+  });
+
+  it("uses paged gh api issue listing for resolved sync", async () => {
+    const firstToken = opsToken("resolved-dedupe-1");
+    const secondToken = opsToken("resolved-dedupe-2");
+    const result = await runWithFakeGh(githubIncidentPath, ["--sync-resolved"], [], {
+      issueListLimit: 1,
+      issues: [
+        issue(10, `[${firstToken}] P2 web: stale 1`, ["ops-auto-fix"], "resolved-dedupe-1"),
+        issue(11, `[${secondToken}] P2 web: stale 2`, ["ops-auto-fix"], "resolved-dedupe-2"),
+      ],
+    });
+
+    expect(result.code).toBe(0);
+    expect(result.state.issues.every((item) => item.closed)).toBe(true);
+    expect(result.state.calls.some((call) => call[0] === "api" && call.includes("--paginate"))).toBe(true);
   });
 
   it("leaves open issues untouched when resolved sync is not requested", async () => {
@@ -131,6 +159,73 @@ describe("github-incident resolved issue sync", () => {
 
       expect(result.code).toBe(0);
       expect(result.state.issues[0].closed).toBe(true);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("normalizes health target prefixes before resolved sync", async () => {
+    const server = await startHealthServer();
+    try {
+      const staleDedupe = `site prod:${server.url}/api/health:down`;
+      const staleToken = opsToken(staleDedupe);
+      const result = await runWithFakeGh(healthSweepPath, [], null, {
+        issues: [issue(12, `[${staleToken}] P2 site: stale`, ["ops-auto-fix"], staleDedupe)],
+        env: {
+          OPS_CREATE_GITHUB_ISSUES: "true",
+          OPS_HEALTH_TARGETS_JSON: JSON.stringify([
+            {
+              name: "site   prod",
+              service: "site",
+              url: `${server.url}/api/health`,
+              expectJson: { status: "ok" },
+            },
+          ]),
+          CONTROL_PLANE_AGENT_API_KEY: "",
+          CONTROL_PLANE_URL: "",
+          APP_URL: "",
+          NEXT_PUBLIC_APP_URL: "",
+          NEXT_PUBLIC_SITE_URL: "",
+          OPS_PRIMARY_CLIENT_URL: "",
+        },
+      });
+
+      expect(result.code).toBe(0);
+      expect(result.state.issues[0].closed).toBe(true);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("does not enable control-plane resolved sync for invalid control-plane URLs", async () => {
+    const server = await startHealthServer();
+    try {
+      const staleDedupe = "control-plane:deployment-1:slackInvalidAuth";
+      const staleToken = opsToken(staleDedupe);
+      const result = await runWithFakeGh(healthSweepPath, [], null, {
+        issues: [issue(13, `[${staleToken}] P2 slack: stale`, ["ops-auto-fix"], staleDedupe)],
+        env: {
+          OPS_CREATE_GITHUB_ISSUES: "true",
+          OPS_HEALTH_TARGETS_JSON: JSON.stringify([
+            {
+              name: "site",
+              service: "site",
+              url: `${server.url}/api/health`,
+              expectJson: { status: "ok" },
+            },
+          ]),
+          CONTROL_PLANE_AGENT_API_KEY: "configured",
+          CONTROL_PLANE_URL: "not-a-url",
+          APP_URL: "",
+          OPS_CONTROL_PLANE_URL: "",
+          NEXT_PUBLIC_APP_URL: "",
+          NEXT_PUBLIC_SITE_URL: "",
+          OPS_PRIMARY_CLIENT_URL: "",
+        },
+      });
+
+      expect(result.code).toBe(0);
+      expect(result.state.issues[0].closed).toBeFalsy();
     } finally {
       await server.close();
     }
@@ -189,12 +284,19 @@ async function runWithFakeGh(scriptPath, args, input, options = {}) {
     issues: options.issues ?? [],
     calls: [],
     failIssueList: Boolean(options.failIssueList),
+    issueListLimit: options.issueListLimit ?? null,
   }));
   await writeFile(ghPath, fakeGhSource());
   await chmod(ghPath, 0o755);
+  const resolvedArgs = [...args];
+  if (Object.hasOwn(options, "fileContent")) {
+    const inputPath = path.join(tmp, "input.json");
+    await writeFile(inputPath, options.fileContent);
+    resolvedArgs.push("--file", inputPath);
+  }
 
   try {
-    const output = await runNodeScript(scriptPath, args, input, {
+    const output = await runNodeScript(scriptPath, resolvedArgs, input, {
       ...process.env,
       ...(options.env ?? {}),
       GH_BIN: ghPath,
@@ -270,13 +372,34 @@ if (argv[0] === "issue" && argv[1] === "list") {
   const issues = token
     ? state.issues.filter((issue) => issue.title.includes(token))
     : state.issues.filter((issue) => !issue.closed);
+  const limitedIssues = state.issueListLimit ? issues.slice(0, state.issueListLimit) : issues;
   save();
-  console.log(JSON.stringify(issues.map((issue) => ({
+  console.log(JSON.stringify(limitedIssues.map((issue) => ({
     number: issue.number,
     title: issue.title,
     body: issue.body,
     labels: issue.labels,
   }))));
+  process.exit(0);
+}
+
+if (argv[0] === "api" && argv.includes("repos/{owner}/{repo}/issues")) {
+  if (state.failIssueList) {
+    console.error("simulated issue list failure");
+    save();
+    process.exit(1);
+  }
+  const issues = state.issues
+    .filter((issue) => !issue.closed)
+    .map((issue) => ({
+      number: issue.number,
+      title: issue.title,
+      body: issue.body,
+      labels: issue.labels,
+      pull_request: issue.pull_request,
+    }));
+  save();
+  console.log(JSON.stringify([issues.slice(0, 1), issues.slice(1)]));
   process.exit(0);
 }
 

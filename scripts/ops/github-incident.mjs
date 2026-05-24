@@ -48,7 +48,7 @@ async function readIncidents() {
   const raw = args.file
     ? await readFile(args.file, "utf8")
     : await readStdin();
-  const explicitInput = Boolean(args.file || raw.trim());
+  const explicitInput = raw.trim().length > 0;
   const parsed = raw.trim() ? JSON.parse(raw) : sampleIncident();
   const list = Array.isArray(parsed) ? parsed : parsed.incidents ?? [parsed];
   return { incidents: list.map(normalizeIncident), explicitInput };
@@ -258,20 +258,9 @@ function findExistingIssue(searchToken) {
 }
 
 function closeResolvedIssuesWithGh(activeTokens, dedupePrefixes) {
-  const output = runGh([
-    "issue",
-    "list",
-    "--state",
-    "open",
-    "--label",
-    "ops-auto-fix",
-    "--json",
-    "number,title,labels,body",
-    "--limit",
-    "1000",
-  ]);
-  const issues = JSON.parse(output || "[]");
+  const issues = listOpenOpsIssuesWithGhApi();
   for (const issue of issues) {
+    if (issue.pull_request) continue;
     if (!shouldCloseIssue(issue, activeTokens, dedupePrefixes)) continue;
     runGh([
       "issue",
@@ -283,6 +272,25 @@ function closeResolvedIssuesWithGh(activeTokens, dedupePrefixes) {
       resolvedCommentBody(),
     ]);
   }
+}
+
+function listOpenOpsIssuesWithGhApi() {
+  const output = runGh([
+    "api",
+    "--method",
+    "GET",
+    "--paginate",
+    "--slurp",
+    "repos/{owner}/{repo}/issues",
+    "-f",
+    "state=open",
+    "-f",
+    "labels=ops-auto-fix",
+    "-f",
+    "per_page=100",
+  ]);
+  const pages = JSON.parse(output || "[]");
+  return pages.flatMap((page) => Array.isArray(page) ? page : [page]);
 }
 
 function activeSearchTokens(plans) {
@@ -308,7 +316,7 @@ function issueIsInDedupeScope(issue, dedupePrefixes) {
 
 function issueDedupeKey(issue) {
   const match = optionalString(issue?.body).match(/^- Dedupe key:\s*(.+)$/im);
-  return match?.[1]?.trim().toLowerCase() ?? null;
+  return match?.[1] ? normalizeDedupeText(match[1]) : null;
 }
 
 function issueSearchToken(issue) {
@@ -337,8 +345,12 @@ function optionalString(value) {
 function parseSyncDedupePrefixes(value) {
   return optionalString(value)
     .split(",")
-    .map((item) => item.trim().toLowerCase())
+    .map(normalizeDedupeText)
     .filter(Boolean);
+}
+
+function normalizeDedupeText(value) {
+  return optionalString(value).replace(/\s+/g, " ").toLowerCase();
 }
 
 function updateBody(plan) {
