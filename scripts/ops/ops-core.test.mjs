@@ -378,6 +378,68 @@ describe("ops-core control-plane incidents", () => {
     expect(incident.evidence).toContain("Failed runs in latest snapshot: 3");
   });
 
+  it("keeps agent failure-streak incidents while a newer retry is in flight", () => {
+    const incidents = buildTestControlPlaneIncidents([
+      {
+        id: "deployment-acme",
+        label: "Acme Production",
+        customerSlug: "acme",
+        hasSupportCredential: true,
+        fleetSnapshots: [
+          {
+            snapshotKind: "SUPPORT_READY",
+            observedAt: "2026-05-24T00:20:00.000Z",
+            summary: {
+              agentRuns: {
+                items: [
+                  { agentKey: "inbox-triage", status: "PENDING", createdAt: "2026-05-24T00:20:00.000Z" },
+                  { agentKey: "inbox-triage", status: "FAILED", createdAt: "2026-05-24T00:10:00.000Z" },
+                  { agentKey: "inbox-triage", status: "FAILED", createdAt: "2026-05-24T00:05:00.000Z" },
+                  { agentKey: "inbox-triage", status: "FAILED", createdAt: "2026-05-24T00:00:00.000Z" },
+                ],
+              },
+            },
+          },
+        ],
+      },
+    ]);
+
+    const incident = incidents.find((item) => item.status === "agentFailureStreak");
+    expect(incident).toBeDefined();
+    expect(incident.evidence).toContain("Failed runs in latest snapshot: 3");
+  });
+
+  it("preserves unknown-timestamp failures ahead of older successful runs", () => {
+    const incidents = buildTestControlPlaneIncidents([
+      {
+        id: "deployment-acme",
+        label: "Acme Production",
+        customerSlug: "acme",
+        hasSupportCredential: true,
+        fleetSnapshots: [
+          {
+            snapshotKind: "SUPPORT_READY",
+            observedAt: "2026-05-24T00:15:00.000Z",
+            summary: {
+              agentRuns: {
+                items: [
+                  { agentKey: "inbox-triage", status: "FAILED" },
+                  { agentKey: "inbox-triage", status: "FAILED", createdAt: "2026-05-24T00:10:00.000Z" },
+                  { agentKey: "inbox-triage", status: "FAILED", createdAt: "2026-05-24T00:05:00.000Z" },
+                  { agentKey: "inbox-triage", status: "COMPLETED", createdAt: "2026-05-24T00:00:00.000Z" },
+                ],
+              },
+            },
+          },
+        ],
+      },
+    ]);
+
+    const incident = incidents.find((item) => item.status === "agentFailureStreak");
+    expect(incident).toBeDefined();
+    expect(incident.evidence).toContain("Failed runs in latest snapshot: 3");
+  });
+
   it("suppresses recovered agent failure-streak incidents", () => {
     const incidents = buildTestControlPlaneIncidents([
       {

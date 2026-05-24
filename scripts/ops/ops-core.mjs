@@ -3,6 +3,16 @@ import { createHash } from "node:crypto";
 export const INCIDENT_SEVERITIES = ["P1", "P2", "P3"];
 export const RAILWAY_ACTIONS = ["inspect", "restart", "redeploy-current"];
 const ACTIVE_SUPPORT_SIGNAL_WINDOW_MS = 24 * 60 * 60 * 1000;
+const NONTERMINAL_AGENT_RUN_STATUSES = new Set([
+  "PENDING",
+  "QUEUED",
+  "RUNNING",
+  "IN_PROGRESS",
+  "STARTED",
+  "SCHEDULED",
+  "PROCESSING",
+  "WAITING_APPROVAL",
+]);
 
 export function parseArgs(argv) {
   const parsed = { _: [] };
@@ -427,17 +437,30 @@ function agentFailureStreakIncident(row, sweepNowMs) {
 }
 
 function activeFailureStreak(runs, snapshotObservedAtMs, sweepNowMs) {
-  const sortedRuns = [...runs].sort((a, b) => (timestampMs(b.createdAt) ?? 0) - (timestampMs(a.createdAt) ?? 0));
+  const sortedRuns = runs
+    .map((run, index) => ({ run, index, createdAtMs: timestampMs(run.createdAt) }))
+    .sort((a, b) => {
+      if (a.createdAtMs !== null && b.createdAtMs !== null) return b.createdAtMs - a.createdAtMs;
+      return a.index - b.index;
+    })
+    .map((item) => item.run);
   const failures = [];
   for (const run of sortedRuns) {
-    if (run.status !== "FAILED") break;
+    const status = normalizeAgentRunStatus(run.status);
+    if (NONTERMINAL_AGENT_RUN_STATUSES.has(status)) continue;
+    if (status !== "FAILED") break;
     failures.push(run);
   }
+  if (failures.length < 3) return [];
   const latestFailureAtMs = newestTimestampMs(failures.map((failure) => failure.createdAt)) ?? snapshotObservedAtMs;
   if (!latestFailureAtMs || sweepNowMs - latestFailureAtMs > ACTIVE_SUPPORT_SIGNAL_WINDOW_MS) {
     return [];
   }
   return failures;
+}
+
+function normalizeAgentRunStatus(value) {
+  return optionalText(value)?.toUpperCase() ?? "UNKNOWN";
 }
 
 function slackInvalidAuthIncident(row, sweepNowMs) {
