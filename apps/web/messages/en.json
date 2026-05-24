@@ -1224,6 +1224,14 @@
     "title": "Control Plane",
     "eyebrow": "Enterprise AI governance",
     "description": "Proprietary operations surface for customer deployments, governed context, enterprise integrations, AI-agent lifecycle controls, release rollout, support operations, audit, and Codex/MCP access.",
+    "nav": {
+      "dashboard": "Dashboard",
+      "customers": "Customers",
+      "agents": "Agents",
+      "releases": "Releases",
+      "operations": "Operations",
+      "users": "Users"
+    },
     "sections": {
       "fleet": {
         "label": "Fleet",
