@@ -6,8 +6,11 @@ import {
   applyContextGraphProposedDiff,
   buildSelectedRegionContext,
   createContextGraphProposedDiff,
+  createMissingRegionFactsProposal,
   createPersonalContextMapView,
+  reviewContextGraphProposedDiff,
   updateContextMapLayout,
+  updateContextGraphProposedDiff,
 } from "@corgtex/domain";
 
 import { requirePageActor } from "@/lib/auth";
@@ -92,6 +95,45 @@ export async function createRegionProposalAction(params: {
   });
   revalidatePath(`/workspaces/${params.workspaceId}/maps`);
   return proposedDiff;
+}
+
+export async function createMissingRegionFactsProposalAction(params: {
+  workspaceId: string;
+  mapViewId: string;
+  objectIds: string[];
+}) {
+  const actor = await requirePageActor();
+  const proposedDiff = await createMissingRegionFactsProposal(actor, params);
+  revalidatePath(`/workspaces/${params.workspaceId}/maps`);
+  return proposedDiff;
+}
+
+export async function updateContextGraphProposedDiffAction(params: {
+  workspaceId: string;
+  proposedDiffId: string;
+  reason?: string | null;
+  diff: unknown;
+}) {
+  const actor = await requirePageActor();
+  const result = await updateContextGraphProposedDiff(actor, {
+    workspaceId: params.workspaceId,
+    proposedDiffId: params.proposedDiffId,
+    reason: params.reason,
+    diff: params.diff as Parameters<typeof updateContextGraphProposedDiff>[1]["diff"],
+  });
+  revalidatePath(`/workspaces/${params.workspaceId}/maps`);
+  return result;
+}
+
+export async function reviewContextGraphProposedDiffAction(params: {
+  workspaceId: string;
+  proposedDiffId: string;
+  status: "approved" | "rejected";
+}) {
+  const actor = await requirePageActor();
+  const result = await reviewContextGraphProposedDiff(actor, params);
+  revalidatePath(`/workspaces/${params.workspaceId}/maps`);
+  return result;
 }
 
 export async function applyContextGraphProposedDiffAction(params: {

@@ -853,6 +853,49 @@ export async function listContextGraphProposedDiffs(actor: AppActor, params: {
   });
 }
 
+export async function updateContextGraphProposedDiff(actor: AppActor, params: {
+  workspaceId: string;
+  proposedDiffId: string;
+  reason?: string | null;
+  diff: ContextGraphDiffInput;
+  evidence?: JsonRecord | null;
+}) {
+  await requireGraphApprove(actor, params.workspaceId);
+  validateDiff(params.diff);
+
+  return prisma.$transaction(async (tx) => {
+    const proposedDiff = await tx.contextGraphProposedDiff.findFirst({
+      where: { id: params.proposedDiffId, workspaceId: params.workspaceId },
+    });
+    invariant(proposedDiff, 404, "NOT_FOUND", "Proposed graph diff not found.");
+    invariant(proposedDiff.status === "pending", 409, "INVALID_STATE", "Only pending graph diffs can be edited.");
+
+    const updated = await tx.contextGraphProposedDiff.update({
+      where: { id: proposedDiff.id },
+      data: {
+        reason: params.reason?.trim() || null,
+        diffJson: params.diff as Prisma.InputJsonObject,
+        ...(params.evidence !== undefined ? {
+          evidenceJson: params.evidence ? (params.evidence as Prisma.InputJsonObject) : Prisma.JsonNull,
+        } : {}),
+      },
+    });
+    await recordAudit(tx, actor, {
+      workspaceId: params.workspaceId,
+      action: "context-graph.diff.edited",
+      entityType: "ContextGraphProposedDiff",
+      entityId: proposedDiff.id,
+      meta: {
+        objectCount: params.diff.objects?.length ?? 0,
+        relationshipCount: params.diff.relationships?.length ?? 0,
+        evidenceRefCount: params.diff.evidenceRefs?.length ?? 0,
+        mapLayoutUpdateCount: params.diff.mapLayoutUpdates?.length ?? 0,
+      },
+    });
+    return updated;
+  });
+}
+
 export async function reviewContextGraphProposedDiff(actor: AppActor, params: {
   workspaceId: string;
   proposedDiffId: string;
@@ -1387,6 +1430,174 @@ export async function buildSelectedRegionContext(actor: AppActor, params: {
       maxSensitivity,
     },
   };
+}
+
+function selectedRegionSourceId(mapViewId: string | null | undefined, selectedObjectIds: string[]) {
+  return `${mapViewId ?? "context-map"}:${[...selectedObjectIds].sort().join(",")}`;
+}
+
+export async function createMissingRegionFactsProposal(actor: AppActor, params: {
+  workspaceId: string;
+  mapViewId: string;
+  objectIds: string[];
+}) {
+  const context = await buildSelectedRegionContext(actor, {
+    workspaceId: params.workspaceId,
+    mapViewId: params.mapViewId,
+    objectIds: params.objectIds,
+    depth: 2,
+  });
+
+  const sourceId = selectedRegionSourceId(params.mapViewId, context.selectedObjectIds);
+  const selectedObjectIds = [...context.selectedObjectIds];
+  const objects: ContextGraphObjectInput[] = [];
+  const relationships: ContextGraphRelationshipInput[] = [];
+  const evidenceRefs: ContextGraphEvidenceInput[] = [];
+  const addedTitles = new Set<string>();
+
+  function addProposal(input: {
+    kind: "task" | "risk" | "owner" | "question";
+    objectType: "Task" | "Risk" | "Question";
+    title: string;
+    summary: string;
+    targetObjectId?: string;
+    relationshipType?: ContextGraphRelationshipType;
+    confidence?: number;
+  }) {
+    const title = input.title.trim().slice(0, 180);
+    if (!title || addedTitles.has(title)) return;
+    addedTitles.add(title);
+    const ref = `missing-region-fact-${objects.length + 1}`;
+    const dedupeKey = [
+      params.workspaceId,
+      "missing-region-fact",
+      params.mapViewId,
+      selectedObjectIds.join("-"),
+      input.kind,
+      input.targetObjectId ?? "region",
+      title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 72),
+    ].join(":");
+
+    objects.push({
+      ref,
+      objectType: input.objectType,
+      title,
+      summary: input.summary,
+      status: "proposed",
+      confidence: input.confidence ?? 0.72,
+      sourceEntityType: "ContextMapView",
+      sourceEntityId: params.mapViewId,
+      dedupeKey,
+      properties: {
+        proposalKind: "missing_region_fact",
+        missingFactKind: input.kind,
+        selectedObjectIds,
+        nextAction: input.summary,
+      },
+    });
+
+    if (input.targetObjectId && input.relationshipType) {
+      relationships.push({
+        sourceRef: ref,
+        targetObjectId: input.targetObjectId,
+        relationshipType: input.relationshipType,
+        status: "proposed",
+        confidence: input.confidence ?? 0.72,
+        sourceEntityType: "ContextMapView",
+        sourceEntityId: params.mapViewId,
+        properties: {
+          proposalKind: "missing_region_fact",
+          selectedObjectIds,
+        },
+      });
+    }
+
+    evidenceRefs.push({
+      objectRef: ref,
+      sourceType: "REGION_CONTEXT",
+      sourceId,
+      quote: input.summary.slice(0, 600),
+      relevanceScore: input.confidence ?? 0.72,
+      metadata: {
+        mapViewId: params.mapViewId,
+        selectedObjectIds,
+        missingFactKind: input.kind,
+      },
+    });
+  }
+
+  const actionableGaps = context.contextGaps
+    .filter((gap) => ["missing_owner", "missing_blocker_link", "missing_evidence", "needs_review"].includes(gap.kind))
+    .slice(0, 5);
+  for (const gap of actionableGaps) {
+    if (gap.kind === "missing_blocker_link") {
+      addProposal({
+        kind: "risk",
+        objectType: "Risk",
+        title: gap.title.replace("Blocked without blocker link", "Clarify blocker"),
+        summary: gap.detail,
+        targetObjectId: gap.objectId,
+        relationshipType: "blocks",
+        confidence: gap.severity === "high" ? 0.82 : 0.68,
+      });
+      continue;
+    }
+    addProposal({
+      kind: gap.kind === "missing_owner" ? "owner" : "task",
+      objectType: "Task",
+      title: gap.kind === "missing_owner"
+        ? gap.title.replace("Missing owner", "Assign owner")
+        : gap.title.replace("Missing evidence", "Attach evidence").replace("Needs review", "Review fact"),
+      summary: gap.detail,
+      targetObjectId: gap.objectId,
+      relationshipType: "supports",
+      confidence: gap.severity === "high" ? 0.8 : 0.66,
+    });
+  }
+
+  for (const action of context.likelyNextActions.slice(0, 4)) {
+    if (objects.length >= 6) break;
+    addProposal({
+      kind: "task",
+      objectType: "Task",
+      title: action.title,
+      summary: action.reason,
+      targetObjectId: selectedObjectIds[0],
+      relationshipType: "supports",
+      confidence: 0.7,
+    });
+  }
+
+  if (objects.length === 0) {
+    addProposal({
+      kind: "question",
+      objectType: "Question",
+      title: `Review selected region for missing tasks, risks, or owners`,
+      summary: "No explicit gaps were detected automatically. Ask a human or agent to verify whether the selected region needs missing task, risk, or ownership facts before changing graph truth.",
+      targetObjectId: selectedObjectIds[0],
+      relationshipType: "supports",
+      confidence: 0.52,
+    });
+  }
+
+  return createContextGraphProposedDiff(actor, {
+    workspaceId: params.workspaceId,
+    reason: "Propose missing tasks, risks, or owners from the selected map region.",
+    evidence: {
+      kind: "selected-region-missing-facts",
+      mapViewId: params.mapViewId,
+      selectedObjectIds,
+      contextObjectCount: context.objects.length,
+      contextRelationshipCount: context.relationships.length,
+      contextGapCount: context.contextGaps.length,
+      likelyNextActionCount: context.likelyNextActions.length,
+    },
+    diff: {
+      objects,
+      relationships,
+      evidenceRefs,
+    },
+  });
 }
 
 export function contextGraphSystemActor(label = "context-graph-sync"): AppActor {
