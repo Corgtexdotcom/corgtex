@@ -13,9 +13,15 @@ import {
 
 const args = parseArgs(process.argv.slice(2));
 const dryRun = Boolean(args["dry-run"]);
+const syncResolved = Boolean(args["sync-resolved"]);
+const syncDedupePrefixes = parseSyncDedupePrefixes(args["sync-dedupe-prefixes"]);
+const RESOLUTION_BLOCKING_LABELS = new Set(["halt-agents", "needs-replan"]);
 
 async function main() {
-  const incidents = await readIncidents();
+  const { incidents, explicitInput } = await readIncidents();
+  if (syncResolved && !explicitInput) {
+    throw new Error("github-incident --sync-resolved requires explicit incident JSON on stdin or via --file.");
+  }
   const plans = incidents.map((incident) => ({
     incident,
     title: incidentTitle(incident),
@@ -25,26 +31,27 @@ async function main() {
   }));
 
   if (dryRun) {
-    console.log(JSON.stringify({ dryRun: true, issues: plans }, null, 2));
+    console.log(JSON.stringify({ dryRun: true, syncResolved, syncDedupePrefixes, issues: plans }, null, 2));
     return;
   }
 
   const api = githubApiConfig();
   if (api) {
-    await publishWithGitHubApi(api, plans);
+    await publishWithGitHubApi(api, plans, { syncResolved, syncDedupePrefixes });
     return;
   }
 
-  publishWithGh(plans);
+  publishWithGh(plans, { syncResolved, syncDedupePrefixes });
 }
 
 async function readIncidents() {
   const raw = args.file
     ? await readFile(args.file, "utf8")
     : await readStdin();
+  const explicitInput = raw.trim().length > 0;
   const parsed = raw.trim() ? JSON.parse(raw) : sampleIncident();
   const list = Array.isArray(parsed) ? parsed : parsed.incidents ?? [parsed];
-  return list.map(normalizeIncident);
+  return { incidents: list.map(normalizeIncident), explicitInput };
 }
 
 function sampleIncident() {
@@ -66,10 +73,11 @@ async function readStdin() {
   return Buffer.concat(chunks).toString("utf8");
 }
 
-async function publishWithGitHubApi(api, plans) {
+async function publishWithGitHubApi(api, plans, options = {}) {
+  const openIssues = await listOpenOpsIssuesWithApi(api);
   for (const plan of plans) {
     await ensureLabelsWithApi(api, plan.labels);
-    const existing = await findExistingIssueWithApi(api, plan.searchToken);
+    const existing = findExistingIssueFromList(openIssues, plan.searchToken);
     if (existing?.number) {
       const comment = await githubRequest(
         api,
@@ -91,7 +99,12 @@ async function publishWithGitHubApi(api, plans) {
         labels: plan.labels,
       },
     });
+    openIssues.push(issue);
     console.log(issue.html_url);
+  }
+
+  if (options.syncResolved) {
+    await closeResolvedIssuesWithApi(api, activeSearchTokens(plans), options.syncDedupePrefixes, openIssues);
   }
 }
 
@@ -112,11 +125,7 @@ async function ensureLabelsWithApi(api, labels) {
   }
 }
 
-async function findExistingIssueWithApi(api, searchToken) {
-  const issues = await githubRequest(
-    api,
-    `/repos/${api.owner}/${api.repo}/issues?state=open&labels=ops-auto-fix&per_page=100`,
-  );
+function findExistingIssueFromList(issues, searchToken) {
   return issues.find((issue) => !issue.pull_request && issue.title.includes(searchToken)) ?? null;
 }
 
@@ -161,7 +170,45 @@ async function githubRequest(api, path, options = {}) {
   return payload;
 }
 
-function publishWithGh(plans) {
+async function listOpenOpsIssuesWithApi(api) {
+  const issues = [];
+  for (let page = 1; ; page += 1) {
+    const batch = await githubRequest(
+      api,
+      `/repos/${api.owner}/${api.repo}/issues?state=open&labels=ops-auto-fix&per_page=100&page=${page}`,
+    );
+    issues.push(...batch);
+    if (batch.length < 100) break;
+  }
+  return issues;
+}
+
+async function closeResolvedIssuesWithApi(api, activeTokens, dedupePrefixes, issues) {
+  for (const issue of issues) {
+    if (issue.pull_request || !shouldCloseIssue(issue, activeTokens, dedupePrefixes)) continue;
+    const body = resolvedCommentBody();
+    const comment = await githubRequest(
+      api,
+      `/repos/${api.owner}/${api.repo}/issues/${issue.number}/comments`,
+      {
+        method: "POST",
+        body: { body },
+      },
+    );
+    const closed = await githubRequest(
+      api,
+      `/repos/${api.owner}/${api.repo}/issues/${issue.number}`,
+      {
+        method: "PATCH",
+        body: { state: "closed", state_reason: "completed" },
+      },
+    );
+    console.log(comment.html_url);
+    console.log(closed.html_url);
+  }
+}
+
+function publishWithGh(plans, options = {}) {
   for (const plan of plans) {
     ensureLabels(plan.labels);
     const existing = findExistingIssue(plan.searchToken);
@@ -180,6 +227,10 @@ function publishWithGh(plans) {
       "--label",
       plan.labels.join(","),
     ]);
+  }
+
+  if (options.syncResolved) {
+    closeResolvedIssuesWithGh(activeSearchTokens(plans), options.syncDedupePrefixes);
   }
 }
 
@@ -204,6 +255,117 @@ function findExistingIssue(searchToken) {
   ]);
   const list = JSON.parse(output || "[]");
   return list[0] ?? null;
+}
+
+function closeResolvedIssuesWithGh(activeTokens, dedupePrefixes) {
+  const issues = listOpenOpsIssuesWithGhApi();
+  for (const issue of issues) {
+    if (issue.pull_request) continue;
+    if (!shouldCloseIssue(issue, activeTokens, dedupePrefixes)) continue;
+    runGh([
+      "issue",
+      "close",
+      String(issue.number),
+      "--reason",
+      "completed",
+      "--comment",
+      resolvedCommentBody(),
+    ]);
+  }
+}
+
+function listOpenOpsIssuesWithGhApi() {
+  const issues = [];
+  for (let page = 1; ; page += 1) {
+    const output = runGh([
+      "api",
+      "--method",
+      "GET",
+      "repos/{owner}/{repo}/issues",
+      "-f",
+      "state=open",
+      "-f",
+      "labels=ops-auto-fix",
+      "-f",
+      "per_page=100",
+      "-f",
+      `page=${page}`,
+    ]);
+    const batch = JSON.parse(output || "[]");
+    if (!Array.isArray(batch)) {
+      throw new Error("GitHub issue listing returned a non-array payload.");
+    }
+    issues.push(...batch);
+    if (batch.length < 100) break;
+  }
+  return issues;
+}
+
+function activeSearchTokens(plans) {
+  return new Set(plans.map((plan) => plan.searchToken));
+}
+
+function shouldCloseIssue(issue, activeTokens, dedupePrefixes = []) {
+  if (!issueIsInDedupeScope(issue, dedupePrefixes)) return false;
+  const token = issueSearchToken(issue);
+  if (!token || activeTokens.has(token)) return false;
+  const labels = issueLabelNames(issue);
+  for (const label of labels) {
+    if (RESOLUTION_BLOCKING_LABELS.has(label)) return false;
+  }
+  return true;
+}
+
+function issueIsInDedupeScope(issue, dedupePrefixes) {
+  if (!dedupePrefixes.length) return true;
+  const dedupeKey = issueDedupeKey(issue);
+  return Boolean(dedupeKey && dedupePrefixes.some((prefix) => dedupeKey.startsWith(prefix)));
+}
+
+function issueDedupeKey(issue) {
+  const match = optionalString(issue?.body).match(/^- Dedupe key:\s*(.+)$/im);
+  return match?.[1] ? normalizeDedupeText(match[1]) : null;
+}
+
+function issueSearchToken(issue) {
+  const match = optionalString(issue?.title).match(/\[?(ops:[a-f0-9]{10})\]?/i);
+  return match?.[1] ? match[1].toLowerCase() : null;
+}
+
+function issueLabelNames(issue) {
+  return Array.isArray(issue?.labels)
+    ? issue.labels.map((label) => optionalString(label?.name ?? label).toLowerCase()).filter(Boolean)
+    : [];
+}
+
+function resolvedCommentBody() {
+  return [
+    `Resolved by clean ops sweep at ${new Date().toISOString()}.`,
+    "",
+    "The latest sweep did not report a matching active incident for this dedupe key. Closing so future builder runs focus on current signals.",
+  ].join("\n");
+}
+
+function optionalString(value) {
+  return typeof value === "string" ? value : "";
+}
+
+function parseSyncDedupePrefixes(value) {
+  const text = optionalString(value).trim();
+  if (!text) return [];
+  if (text.startsWith("[")) {
+    const parsed = JSON.parse(text);
+    if (!Array.isArray(parsed)) {
+      throw new Error("--sync-dedupe-prefixes JSON value must be an array.");
+    }
+    return parsed.map(normalizeDedupeText).filter(Boolean);
+  }
+  const normalized = normalizeDedupeText(text);
+  return normalized ? [normalized] : [];
+}
+
+function normalizeDedupeText(value) {
+  return optionalString(value).replace(/\s+/g, " ").toLowerCase();
 }
 
 function updateBody(plan) {
