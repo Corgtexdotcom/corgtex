@@ -1,6 +1,6 @@
 import { notFound } from "next/navigation";
 import { getFormatter } from "next-intl/server";
-import { requireControlPlaneAccess, listControlPlaneReleaseRolloutJobs } from "@corgtex/domain";
+import { getControlPlaneLatestReleaseTarget, requireControlPlaneAccess, listControlPlaneReleaseRolloutJobs } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { prisma } from "@corgtex/shared";
 import { Link } from "@/i18n/routing";
@@ -26,6 +26,11 @@ function statusTone(status?: string | null) {
   return "text-rose-400 border-rose-500/20 bg-rose-500/10";
 }
 
+function releaseLabel(imageTag?: string | null, version?: string | null) {
+  if (imageTag && version) return `${imageTag} / ${version}`;
+  return imageTag || version || "Unknown";
+}
+
 export default async function ControlPlaneReleasesPage() {
   const actor = await requirePageActor();
   try {
@@ -43,20 +48,30 @@ export default async function ControlPlaneReleasesPage() {
   ]);
 
   const format = await getFormatter();
+  const latestReleaseTarget = getControlPlaneLatestReleaseTarget();
+  const targetVersionLabel = latestReleaseTarget
+    ? releaseLabel(latestReleaseTarget.releaseImageTag, latestReleaseTarget.releaseVersion)
+    : "Not configured";
 
   // Map deployments to version items
   const formattedFleet = deployments.length > 0 
-    ? deployments.map((ws: any) => ({
-        id: ws.id,
-        name: ws.label,
-        slug: ws.customerSlug || "default-slug",
-        status: ws.deploymentStatus,
-        currentVersion: ws.releaseVersion || "v1.2.3",
-        targetVersion: "v1.3.0",
-        drift: ws.deploymentStatus === "DEGRADED" ? "Release drift" : null,
-        region: ws.region || "us-east1",
-        lastDeploy: "3 days ago",
-      }))
+    ? deployments.map((ws: any) => {
+        const targetDiffers = latestReleaseTarget
+          ? latestReleaseTarget.releaseImageTag !== ws.releaseImageTag
+            || latestReleaseTarget.releaseVersion !== (ws.releaseVersion ?? null)
+          : false;
+        return {
+          id: ws.id,
+          name: ws.label,
+          slug: ws.customerSlug || "default-slug",
+          status: ws.deploymentStatus,
+          currentVersion: releaseLabel(ws.releaseImageTag, ws.releaseVersion),
+          targetVersion: targetVersionLabel,
+          drift: targetDiffers ? `Target differs from current ${releaseLabel(ws.releaseImageTag, ws.releaseVersion)}` : null,
+          region: ws.region || "us-east1",
+          lastDeploy: ws.lastReleaseCheck ? ws.lastReleaseCheck.toLocaleString() : "Not checked",
+        };
+      })
     : [
         { id: "1", name: "Atlas Workspace", slug: "atlas", status: "ACTIVE", currentVersion: "v1.2.3", targetVersion: "v1.3.0", drift: "Release drift (v1.2.3 vs v1.3.0)", region: "europe-west1", lastDeploy: "2 days ago" },
         { id: "2", name: "Beacon Manufacturing", slug: "beacon-manufacturing", status: "ACTIVE", currentVersion: "v1.3.0", targetVersion: "v1.3.0", drift: null, region: "us-east1", lastDeploy: "1d ago" },

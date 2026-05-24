@@ -49,18 +49,25 @@ export default async function ControlPlaneAgentsPage() {
 
   // Seed default agents for demo/dogfooding if DB is empty
   const formattedAgents = agents.length > 0 
-    ? agents.map((a: any) => ({
-        id: a.id,
-        name: a.displayName,
-        workspaceName: a.workspace.name,
-        workspaceSlug: a.workspace.slug,
-        status: a.isActive ? "ACTIVE" : "DISABLED",
-        modelTier: "QUALITY",
-        modelOverride: "Default",
-        runsCount: 142, // aggregated count
-        costMtd: "$42.15",
-        lastRun: "10 mins ago",
-      }))
+    ? agents.map((a: any) => {
+        const agentRuns = runs.filter((r: any) => r.agentKey === a.agentKey && r.workspaceId === a.workspaceId);
+        const totalCost = agentRuns.reduce(
+          (sum: number, r: any) => sum + r.modelUsage.reduce((cost: number, mu: any) => cost + Number(mu.estimatedCostUsd || 0), 0),
+          0,
+        );
+        return {
+          id: a.id,
+          name: a.displayName,
+          workspaceName: a.workspace.name,
+          workspaceSlug: a.workspace.slug,
+          status: a.isActive ? "ACTIVE" : "DISABLED",
+          modelTier: "QUALITY",
+          modelOverride: "Default",
+          runsCount: agentRuns.length,
+          costMtd: `$${totalCost.toFixed(2)}`,
+          lastRun: agentRuns[0]?.createdAt.toLocaleString() ?? "No runs yet",
+        };
+      })
     : [
         { id: "1", name: "Slack Triage Agent", workspaceName: "Atlas Workspace", workspaceSlug: "atlas", status: "ACTIVE", modelTier: "STANDARD", modelOverride: "gpt-4o-mini", runsCount: 382, costMtd: "$14.20", lastRun: "2 mins ago" },
         { id: "2", name: "Constitution Compliance Steward", workspaceName: "Atlas Workspace", workspaceSlug: "atlas", status: "ACTIVE", modelTier: "QUALITY", modelOverride: "gemini-1.5-pro", runsCount: 94, costMtd: "$38.45", lastRun: "1h ago" },

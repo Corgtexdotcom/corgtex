@@ -59,19 +59,22 @@ export default async function ControlPlaneOperationsPage() {
 
   // If DB is empty, provide realistic mock entries for immediate support visual verification
   const formattedOps = operations.length > 0
-    ? operations.map((op: any) => ({
-        id: op.id,
-        type: op.action,
-        status: op.status,
-        description: op.reason || "Support operation executed",
-        isBreakGlass: op.action === "BREAK_GLASS" || op.action.includes("BREAK_GLASS") || op.action.includes("emergency"),
-        isMutating: op.action.includes("create") || op.action.includes("update") || op.action.includes("set") || op.action.includes("deploy") || op.action.includes("revoke") || op.action.includes("configure"),
-        customerName: op.deployment?.label || "Global System",
-        customerId: op.deployment?.id,
-        actorName: op.actor?.displayName || op.actor?.email || op.actorLabel || "System Daemon",
-        createdAt: op.createdAt.toLocaleString(),
-        error: op.error,
-      }))
+    ? operations.map((op: any) => {
+        const actionKey = op.action.toLowerCase();
+        return {
+          id: op.id,
+          type: op.action,
+          status: op.status,
+          description: op.reason || "Support operation executed",
+          isBreakGlass: actionKey.includes("break_glass") || actionKey.includes("emergency"),
+          isMutating: ["create", "update", "set", "deploy", "revoke", "configure", "suspend"].some((keyword) => actionKey.includes(keyword)),
+          customerName: op.deployment?.label || "Global System",
+          customerId: op.deployment?.id,
+          actorName: op.actor?.displayName || op.actor?.email || op.actorLabel || "System Daemon",
+          createdAt: op.createdAt.toLocaleString(),
+          error: op.error,
+        };
+      })
     : [
         { id: "o1", type: "WORKSPACE_CREATE", status: "COMPLETED", description: "Create workspace for Beacon Manufacturing", isBreakGlass: false, isMutating: true, customerName: "Beacon Manufacturing", customerId: "2", actorName: "ops@corgtex.local", createdAt: "10 mins ago" },
         { id: "o2", type: "DEPLOY", status: "COMPLETED", description: "Deploy latest stable release tag", isBreakGlass: false, isMutating: true, customerName: "Atlas Workspace", customerId: "1", actorName: "system", createdAt: "2h ago" },

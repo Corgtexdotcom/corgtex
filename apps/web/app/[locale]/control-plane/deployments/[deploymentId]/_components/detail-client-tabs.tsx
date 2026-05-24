@@ -82,8 +82,10 @@ export function CustomerDetailClientTabs({
     return "text-rose-400 border-rose-500/20 bg-rose-500/10";
   };
 
-  // Preflight calculations
-  const isPreflightPassed = deployPreflight.success;
+  const isPreflightPassed = Boolean(deployPreflight.eligible);
+  const preflightChecks = Array.isArray(deployPreflight.checks)
+    ? deployPreflight.checks
+    : [];
 
   return (
     <div className="space-y-6">
@@ -241,6 +243,7 @@ export function CustomerDetailClientTabs({
 
                 <form action={updateControlPlaneModelBudgetAction} className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4 items-end">
                   <input type="hidden" name="deploymentId" value={customer.id} />
+                  <input type="hidden" name="periodStartDay" value={aiGovernance.spend.budget?.periodStartDay ?? 1} />
                   <div>
                     <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block mb-1.5">Monthly Cap (USD)</label>
                     <input
@@ -461,6 +464,7 @@ export function CustomerDetailClientTabs({
 
               <form action={configureSupportConnectorAction} className="space-y-4 text-xs">
                 <input type="hidden" name="deploymentId" value={customer.id} />
+                <input type="hidden" name="supportNotes" value={customer.supportNotes ?? ""} />
                 <div>
                   <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block mb-1.5">Base URL</label>
                   <input
@@ -490,6 +494,7 @@ export function CustomerDetailClientTabs({
                   <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block mb-1.5">Credential Label</label>
                   <input
                     name="supportCredentialLabel"
+                    defaultValue={customer.supportCredentialLabel ?? ""}
                     placeholder="e.g. Production primary"
                     className="bg-[#141822] border border-[#202738] text-xs text-slate-300 rounded-lg px-2.5 py-1.5 w-full focus:outline-none"
                   />
@@ -696,18 +701,14 @@ export function CustomerDetailClientTabs({
                 </h3>
 
                 <div className="space-y-2">
-                  {[
-                    { label: "Target release version configured", status: deployPreflight.target ? "ok" : "blocked", detail: deployPreflight.target ? `Ready: ${deployPreflight.target.releaseImageTag}` : "Upgrade path target not found" },
-                    { label: "Current deployment environment verified", status: customer.hasDeployment ? "ok" : "blocked", detail: customer.hasDeployment ? "Active environment provisioned" : "Missing central deployment association" },
-                    { label: "Uptime Health constraints validated", status: customer.lastHealthStatus === "ok" ? "ok" : "blocked", detail: customer.lastHealthStatus === "ok" ? "All active probes responding healthy" : "Deployment reporting degraded signals" },
-                  ].map((chk, i) => (
+                  {preflightChecks.map((chk: any, i: number) => (
                     <div key={i} className="flex items-start justify-between p-3 rounded-lg bg-[#141822] border border-[#202738]">
                       <div>
                         <h4 className="text-xs font-semibold text-white">{chk.label}</h4>
                         <p className="text-[10px] text-slate-500 mt-0.5">{chk.detail}</p>
                       </div>
-                      <span className={cn("px-2 py-0.5 rounded text-[8px] font-bold uppercase border tracking-wider shrink-0", chk.status === "ok" ? "text-emerald-400 border-emerald-500/25 bg-emerald-500/10" : "text-rose-400 border-rose-500/25 bg-rose-500/10")}>
-                        {chk.status === "ok" ? "pass" : "blocked"}
+                      <span className={cn("px-2 py-0.5 rounded text-[8px] font-bold uppercase border tracking-wider shrink-0", chk.ok ? "text-emerald-400 border-emerald-500/25 bg-emerald-500/10" : "text-rose-400 border-rose-500/25 bg-rose-500/10")}>
+                        {chk.ok ? "pass" : "blocked"}
                       </span>
                     </div>
                   ))}
