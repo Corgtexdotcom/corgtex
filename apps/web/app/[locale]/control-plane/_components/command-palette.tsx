@@ -1,9 +1,9 @@
 "use client";
 
 import { useEffect, useState, useRef } from "react";
-import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { Search, LayoutDashboard, Bot, GitBranch, Activity, UserCheck, ShieldAlert, ArrowRight } from "lucide-react";
+import { useRouter } from "@/i18n/routing";
 import { cn } from "@/lib/utils";
 
 interface CommandPaletteProps {
@@ -80,10 +80,14 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
         onClose();
       } else if (e.key === "ArrowDown") {
         e.preventDefault();
-        setSelectedIndex((prev) => (prev + 1) % filteredItems.length);
+        if (filteredItems.length > 0) {
+          setSelectedIndex((prev) => (prev + 1) % filteredItems.length);
+        }
       } else if (e.key === "ArrowUp") {
         e.preventDefault();
-        setSelectedIndex((prev) => (prev - 1 + filteredItems.length) % filteredItems.length);
+        if (filteredItems.length > 0) {
+          setSelectedIndex((prev) => (prev - 1 + filteredItems.length) % filteredItems.length);
+        }
       } else if (e.key === "Enter") {
         e.preventDefault();
         if (filteredItems[selectedIndex]) {
