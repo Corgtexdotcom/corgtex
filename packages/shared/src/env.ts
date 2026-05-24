@@ -173,7 +173,7 @@ export const env: Env = {
     return optional("MODEL_CHAT_DEFAULT") ?? "qwen/qwen3-32b";
   },
   get MODEL_CHAT_FAST() {
-    return optional("MODEL_CHAT_FAST") ?? "google/gemma-4-12b-it";
+    return optional("MODEL_CHAT_FAST") ?? "google/gemini-2.5-flash-lite";
   },
   get MODEL_CHAT_STANDARD() {
     return optional("MODEL_CHAT_STANDARD") ?? "meta-llama/llama-4-scout";

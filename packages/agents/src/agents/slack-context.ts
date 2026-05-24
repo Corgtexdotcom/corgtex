@@ -225,6 +225,35 @@ function normalizeProactiveExtraction(output: Record<string, unknown>) {
   };
 }
 
+function isSlackInvalidAuthError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  const dataError = isRecord(error) && isRecord(error.data) ? asString(error.data.error) : "";
+  return message.includes("invalid_auth") || dataError === "invalid_auth";
+}
+
+async function markSlackInstallationReauthRequired(params: {
+  installationId: string;
+  workspaceId: string;
+  error: unknown;
+}) {
+  if (!isSlackInvalidAuthError(params.error)) {
+    return false;
+  }
+  await prisma.communicationInstallation.updateMany({
+    where: {
+      id: params.installationId,
+      workspaceId: params.workspaceId,
+      provider: "SLACK",
+    },
+    data: {
+      status: "ERROR",
+      disconnectedAt: new Date(),
+      lastError: "invalid_auth",
+    },
+  });
+  return true;
+}
+
 export async function runSlackProactiveScan(params: {
   workspaceId: string;
   installationId: string;
@@ -335,13 +364,20 @@ export async function runSlackProactiveScan(params: {
     });
     if (replies > 0) continue;
 
-    await sendSlackMessage(params.installationId, {
-      channel: candidate.externalChannelId,
-      threadTs,
-    }, [{
-      type: "section",
-      text: { type: "mrkdwn", text: "This looks unanswered. Should someone take it, or should I turn it into a Corgtex action?" },
-    }], "This looks unanswered.");
+    try {
+      await sendSlackMessage(params.installationId, {
+        channel: candidate.externalChannelId,
+        threadTs,
+      }, [{
+        type: "section",
+        text: { type: "mrkdwn", text: "This looks unanswered. Should someone take it, or should I turn it into a Corgtex action?" },
+      }], "This looks unanswered.");
+    } catch (error) {
+      if (await markSlackInstallationReauthRequired({ ...params, error })) {
+        return { skipped: true, reason: "slack_reauth_required" };
+      }
+      throw error;
+    }
 
     await prisma.communicationEntityLink.create({
       data: {
@@ -424,13 +460,20 @@ export async function runSlackProactiveScan(params: {
       open: false,
     });
 
-    await sendSlackMessage(params.installationId, {
-      channel: candidate.externalChannelId,
-      threadTs: candidate.threadExternalId || candidate.externalMessageId,
-    }, [{
-      type: "section",
-      text: { type: "mrkdwn", text: `I created a private Corgtex draft from this: <${item.webUrl}|${parsed.title}>.` },
-    }], `Created a private Corgtex draft: ${parsed.title}`);
+    try {
+      await sendSlackMessage(params.installationId, {
+        channel: candidate.externalChannelId,
+        threadTs: candidate.threadExternalId || candidate.externalMessageId,
+      }, [{
+        type: "section",
+        text: { type: "mrkdwn", text: `I created a private Corgtex draft from this: <${item.webUrl}|${parsed.title}>.` },
+      }], `Created a private Corgtex draft: ${parsed.title}`);
+    } catch (error) {
+      if (await markSlackInstallationReauthRequired({ ...params, error })) {
+        return { skipped: true, reason: "slack_reauth_required" };
+      }
+      throw error;
+    }
     drafts += 1;
   }
 

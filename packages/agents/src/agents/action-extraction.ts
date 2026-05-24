@@ -54,6 +54,16 @@ export async function runActionExtractionAgent(params: {
         };
       }
 
+      if (!meeting.transcript?.trim()) {
+        return {
+          resultJson: {
+            skipped: true,
+            reason: "missing_transcript",
+            meetingId: meeting.id,
+          },
+        };
+      }
+
       const actor: AppActor = {
         kind: "agent",
         authProvider: "bootstrap",

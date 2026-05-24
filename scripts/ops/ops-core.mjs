@@ -223,6 +223,60 @@ export async function checkHealthTarget(target, fetchImpl = fetch) {
   return withRetryEvidence(failures.at(-1), failures);
 }
 
+export async function fetchControlPlaneCustomers(env = process.env, fetchImpl = fetch) {
+  const configured = parseJsonEnv(env, "OPS_CONTROL_PLANE_CUSTOMERS_JSON", null);
+  if (configured) {
+    if (!Array.isArray(configured)) {
+      throw new Error("OPS_CONTROL_PLANE_CUSTOMERS_JSON must be an array.");
+    }
+    return configured;
+  }
+
+  const token = optionalText(env.CONTROL_PLANE_AGENT_API_KEY);
+  const baseUrl = firstUrl(env.CONTROL_PLANE_URL, env.APP_URL, env.OPS_CONTROL_PLANE_URL);
+  if (!token || !baseUrl) {
+    return [];
+  }
+
+  const response = await fetchImpl(`${baseUrl}/api/control-plane/mcp`, {
+    method: "POST",
+    headers: {
+      "authorization": `Bearer cp-${token}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: `ops-monitor-${Date.now()}`,
+      method: "tools/call",
+      params: {
+        name: "list_customers",
+        arguments: {},
+      },
+    }),
+  });
+  const body = await response.json().catch(() => null);
+  if (!response.ok || body?.error) {
+    throw new Error(body?.error?.message || `Control Plane list_customers failed with status ${response.status}.`);
+  }
+  const text = body?.result?.content?.find((item) => typeof item?.text === "string")?.text;
+  if (!text) return [];
+  const parsed = JSON.parse(text);
+  if (!Array.isArray(parsed)) {
+    throw new Error("Control Plane list_customers response must be an array.");
+  }
+  return parsed;
+}
+
+export function buildControlPlaneIncidents(customers) {
+  const rows = Array.isArray(customers) ? customers : [];
+  return rows.flatMap((row) => [
+    missingSupportConnectorIncident(row),
+    agentFailureStreakIncident(row),
+    slackInvalidAuthIncident(row),
+    releaseMetadataDriftIncident(row),
+  ].filter(Boolean).map(normalizeIncident));
+}
+
 async function checkHealthTargetOnce(target, fetchImpl) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), target.timeoutMs);
@@ -308,6 +362,156 @@ async function checkHealthTargetOnce(target, fetchImpl) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+function missingSupportConnectorIncident(row) {
+  if (!row || typeof row !== "object") return null;
+  if (row.managedWorkspaceId || row.hasSupportCredential) return null;
+  const status = optionalText(row.supportConnectorStatus) ?? "not_configured";
+  if (!["not_configured", "missing", "unconfigured"].includes(status)) return null;
+  const label = deploymentLabel(row);
+  return {
+    dedupeKey: `control-plane:${row.id}:missingSupportConnector`,
+    severity: "P2",
+    service: "control-plane",
+    clientSlug: clientSlug(row),
+    status: "missingSupportConnector",
+    summary: `${label} support connector is not configured`,
+    evidence: [
+      `Deployment: ${label}`,
+      `Deployment ID: ${optionalText(row.id) ?? "unknown"}`,
+      `Support connector status: ${status}`,
+      `Managed workspace: ${row.managedWorkspaceId ? "yes" : "no"}`,
+    ],
+    recommendedAction: "configure a support connector or managed workspace mapping before remote diagnostics",
+  };
+}
+
+function agentFailureStreakIncident(row) {
+  const runs = latestSupportItems(row, "agentRuns", ["items", "runs"]).map((run) => ({
+    agentKey: optionalText(run.agentKey) ?? optionalText(run.key) ?? optionalText(run.name) ?? "unknown",
+    status: optionalText(run.status) ?? "UNKNOWN",
+    createdAt: optionalText(run.createdAt),
+  }));
+  const failuresByAgent = new Map();
+  for (const run of runs) {
+    if (run.status !== "FAILED") continue;
+    const current = failuresByAgent.get(run.agentKey) ?? [];
+    current.push(run);
+    failuresByAgent.set(run.agentKey, current);
+  }
+  const [agentKey, failures] = [...failuresByAgent.entries()].find(([, items]) => items.length >= 3) ?? [];
+  if (!agentKey) return null;
+  const label = deploymentLabel(row);
+  return {
+    dedupeKey: `control-plane:${row.id}:agentFailureStreak:${agentKey}`,
+    severity: "P2",
+    service: "agents",
+    clientSlug: clientSlug(row),
+    status: "agentFailureStreak",
+    summary: `${label} has repeated ${agentKey} agent failures`,
+    evidence: [
+      `Deployment ID: ${optionalText(row.id) ?? "unknown"}`,
+      `Agent: ${agentKey}`,
+      `Failed runs in latest snapshot: ${failures.length}`,
+      `Latest failed run: ${failures[0]?.createdAt ?? "unknown"}`,
+    ],
+    recommendedAction: "inspect failed agent traces through the support connector and repair the root cause before retrying",
+  };
+}
+
+function slackInvalidAuthIncident(row) {
+  const failedJobs = latestSupportItems(row, "failedJobs", ["items", "jobs"]);
+  const matches = failedJobs.filter((job) => {
+    const type = optionalText(job.type) ?? optionalText(job.name) ?? "";
+    const error = optionalText(job.error) ?? "";
+    return /slack/i.test(type) && /invalid_auth/i.test(error);
+  });
+  if (matches.length === 0) return null;
+  const label = deploymentLabel(row);
+  return {
+    dedupeKey: `control-plane:${row.id}:slackInvalidAuth`,
+    severity: "P2",
+    service: "slack",
+    clientSlug: clientSlug(row),
+    status: "slackInvalidAuth",
+    summary: `${label} Slack installation requires reauthorization`,
+    evidence: [
+      `Deployment ID: ${optionalText(row.id) ?? "unknown"}`,
+      `Failed Slack jobs in latest snapshot: ${matches.length}`,
+      `Latest job type: ${optionalText(matches[0].type) ?? optionalText(matches[0].name) ?? "unknown"}`,
+      "Slack API error: invalid_auth",
+    ],
+    recommendedAction: "mark the Slack installation reauth-required and stop proactive scans until Slack is reconnected",
+  };
+}
+
+function releaseMetadataDriftIncident(row) {
+  const snapshot = latestSnapshot(row, "RELEASE");
+  const summary = record(snapshot?.summary);
+  const observed = record(summary?.observedRelease);
+  const expected = optionalText(summary?.expectedReleaseImageTag) ?? optionalText(row?.releaseImageTag);
+  const observedRelease = optionalText(observed?.imageTag) ?? optionalText(observed?.gitSha);
+  const driftError = optionalText(snapshot?.error) ?? optionalText(row?.lastHealthError);
+  if (!driftError?.includes("Release drift:") && (!expected || !observedRelease || expected === observedRelease)) {
+    return null;
+  }
+  const label = deploymentLabel(row);
+  return {
+    dedupeKey: `control-plane:${row.id}:releaseMetadataDrift`,
+    severity: "P2",
+    service: "control-plane-release",
+    clientSlug: clientSlug(row),
+    status: "releaseMetadataDrift",
+    summary: `${label} control-plane release metadata is stale`,
+    evidence: [
+      `Deployment ID: ${optionalText(row.id) ?? "unknown"}`,
+      `Expected release: ${expected ?? "unknown"}`,
+      `Observed release: ${observedRelease ?? "unknown"}`,
+      driftError ? `Drift detail: ${driftError}` : null,
+    ].filter(Boolean),
+    recommendedAction: "record the verified live release after health proof",
+  };
+}
+
+function latestSupportItems(row, key, nestedKeys) {
+  const snapshot = latestSnapshot(row, "SUPPORT_READY");
+  const summary = record(snapshot?.summary);
+  return itemsFrom(summary?.[key], nestedKeys);
+}
+
+function latestSnapshot(row, kind) {
+  const snapshots = Array.isArray(row?.fleetSnapshots) ? row.fleetSnapshots : [];
+  return snapshots
+    .filter((snapshot) => snapshot?.snapshotKind === kind)
+    .sort((a, b) => Date.parse(b.observedAt ?? b.createdAt ?? 0) - Date.parse(a.observedAt ?? a.createdAt ?? 0))[0] ?? null;
+}
+
+function itemsFrom(value, nestedKeys) {
+  if (Array.isArray(value)) return value.map(record).filter(Boolean);
+  const source = record(value);
+  if (!source) return [];
+  for (const key of nestedKeys) {
+    const candidate = source[key];
+    if (Array.isArray(candidate)) return candidate.map(record).filter(Boolean);
+  }
+  return [];
+}
+
+function record(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+}
+
+function deploymentLabel(row) {
+  return optionalText(row?.label)
+    ?? optionalText(row?.customerSlug)
+    ?? optionalText(row?.customerAccount?.displayName)
+    ?? optionalText(row?.customerAccount?.slug)
+    ?? "customer deployment";
+}
+
+function clientSlug(row) {
+  return optionalText(row?.customerSlug) ?? optionalText(row?.customerAccount?.slug);
 }
 
 function withRetryEvidence(result, failures) {

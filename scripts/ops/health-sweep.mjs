@@ -2,8 +2,10 @@
 
 import { spawnSync } from "node:child_process";
 import {
+  buildControlPlaneIncidents,
   buildHealthTargets,
   checkHealthTarget,
+  fetchControlPlaneCustomers,
   parseArgs,
 } from "./ops-core.mjs";
 
@@ -24,7 +26,12 @@ async function main() {
     }))
     : await Promise.all(targets.map((target) => checkHealthTarget(target)));
 
-  const incidents = results.filter((result) => result.incident).map((result) => result.incident);
+  const controlPlaneCustomers = dryRun ? [] : await fetchControlPlaneCustomers(process.env);
+  const controlPlaneIncidents = buildControlPlaneIncidents(controlPlaneCustomers);
+  const incidents = [
+    ...results.filter((result) => result.incident).map((result) => result.incident),
+    ...controlPlaneIncidents,
+  ];
   const output = {
     dryRun,
     checkedAt: new Date().toISOString(),
@@ -43,6 +50,10 @@ async function main() {
       httpStatus: result.httpStatus ?? null,
       attempts: result.attempts ?? 1,
     })),
+    controlPlane: {
+      customers: controlPlaneCustomers.length,
+      incidents: controlPlaneIncidents.length,
+    },
     incidents,
   };
 

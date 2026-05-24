@@ -252,6 +252,36 @@ describe("agent runtime", () => {
     });
   });
 
+  it("skips action extraction when the meeting has no transcript", async () => {
+    prismaMock.meeting.findUnique.mockResolvedValue({
+      id: "meeting-empty",
+      workspaceId: "ws-1",
+      title: "Empty recorder meeting",
+      transcript: "",
+      summaryMd: null,
+      insights: [],
+    });
+
+    const { runActionExtractionAgent } = await import(".");
+    await runActionExtractionAgent({
+      workspaceId: "ws-1",
+      triggerRef: "job-empty",
+      meetingId: "meeting-empty",
+    });
+
+    expect(autoApplyMeetingInsightsMock).not.toHaveBeenCalled();
+    expect(prismaMock.agentRun.update).toHaveBeenLastCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        status: "COMPLETED",
+        resultJson: expect.objectContaining({
+          skipped: true,
+          reason: "missing_transcript",
+          meetingId: "meeting-empty",
+        }),
+      }),
+    }));
+  });
+
   it("does not count waiting-approval runs against execution concurrency", async () => {
     prismaMock.meeting.findUnique.mockResolvedValue({
       id: "meeting-waiting",

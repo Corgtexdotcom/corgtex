@@ -63,6 +63,16 @@ export async function runMeetingSummaryAgent(params: {
         };
       }
 
+      if (!meeting.transcript?.trim()) {
+        return {
+          resultJson: {
+            skipped: true,
+            reason: "missing_transcript",
+            meetingId: meeting.id,
+          },
+        };
+      }
+
       const blockExtraction = await helpers.tool("model.extract.meeting-blocks", { meetingId: meeting.id }, async () => defaultModelGateway.extract({
         model,
         workspaceId: params.workspaceId,

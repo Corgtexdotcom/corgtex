@@ -439,6 +439,15 @@ function summarizeMcpResponse(value: unknown) {
   }
 }
 
+function supportMcpErrorMessage(value: unknown) {
+  const record = jsonRecord(value);
+  const text = typeof value === "string" ? value : stringField(record?.text);
+  if (!text) return null;
+  return /MCP credential is missing the required scope|Control Plane scope required|Workspace membership required|FORBIDDEN|INVALID_SIGNATURE/i.test(text)
+    ? text
+    : null;
+}
+
 async function callMcpTool(params: {
   mcpUrl: string;
   bearerToken: string;
@@ -2132,6 +2141,136 @@ function summarizeSupportOperationForGovernance(operation: {
   };
 }
 
+function jsonRecord(value: unknown): JsonRecord | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as JsonRecord : null;
+}
+
+function stringField(value: unknown) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function booleanField(value: unknown) {
+  return typeof value === "boolean" ? value : null;
+}
+
+function arrayItems(value: unknown, nestedKeys: string[] = []) {
+  if (Array.isArray(value)) {
+    return value.map(jsonRecord).filter((item): item is JsonRecord => Boolean(item));
+  }
+  const record = jsonRecord(value);
+  if (!record) return [];
+  for (const key of nestedKeys) {
+    const nested = record[key];
+    if (Array.isArray(nested)) {
+      return nested.map(jsonRecord).filter((item): item is JsonRecord => Boolean(item));
+    }
+  }
+  return [];
+}
+
+function normalizeRemoteAgentRun(run: JsonRecord) {
+  return {
+    id: stringField(run.id),
+    agentKey: stringField(run.agentKey) ?? stringField(run.key) ?? stringField(run.name) ?? "unknown",
+    triggerType: stringField(run.triggerType),
+    status: stringField(run.status) ?? "UNKNOWN",
+    goal: stringField(run.goal),
+    approvalRequired: booleanField(run.approvalRequired) ?? false,
+    createdAt: stringField(run.createdAt),
+    startedAt: stringField(run.startedAt),
+    completedAt: stringField(run.completedAt),
+    failedAt: stringField(run.failedAt),
+  };
+}
+
+function normalizeRemoteFailedJob(job: JsonRecord) {
+  return {
+    id: stringField(job.id),
+    type: stringField(job.type) ?? stringField(job.name) ?? "unknown",
+    status: stringField(job.status) ?? "FAILED",
+    attempts: typeof job.attempts === "number" ? job.attempts : null,
+    error: stringField(job.error),
+    createdAt: stringField(job.createdAt),
+    updatedAt: stringField(job.updatedAt),
+    completedAt: stringField(job.completedAt),
+  };
+}
+
+function summarizeCachedSupportReadySnapshot(snapshot: {
+  status: string;
+  summary: unknown;
+  error: string | null;
+  observedAt: Date;
+  createdAt: Date;
+} | null) {
+  const summary = jsonRecord(snapshot?.summary);
+  const recentRuns = arrayItems(summary?.agentRuns, ["items", "runs"])
+    .map(normalizeRemoteAgentRun)
+    .slice(0, 8);
+  const recentFailedJobs = arrayItems(summary?.failedJobs, ["items", "jobs"])
+    .map(normalizeRemoteFailedJob)
+    .slice(0, 8);
+  const agentRuns = recentRuns.reduce<Record<string, number>>((counts, run) => {
+    counts[run.status] = (counts[run.status] ?? 0) + 1;
+    return counts;
+  }, {});
+  const pendingApprovals = recentRuns.filter((run) => run.approvalRequired || run.status === "WAITING_APPROVAL").length;
+  const riskFindings = [
+    snapshot?.error
+      ? controlPlaneRiskFinding({
+        key: "remote-support-snapshot-degraded",
+        severity: "medium",
+        title: "Cached support snapshot is degraded",
+        detail: "The latest cached support-readiness snapshot reported an error.",
+        evidence: snapshot.error,
+      })
+      : null,
+    recentRuns.some((run) => run.status === "FAILED")
+      ? controlPlaneRiskFinding({
+        key: "remote-agent-run-failures",
+        severity: "medium",
+        title: "Remote agent runs are failing",
+        detail: `${recentRuns.filter((run) => run.status === "FAILED").length} failed run(s) appear in the latest cached support snapshot.`,
+        evidence: snapshot?.observedAt.toISOString() ?? null,
+      })
+      : null,
+    recentFailedJobs.length > 0
+      ? controlPlaneRiskFinding({
+        key: "remote-failed-workflow-jobs",
+        severity: "medium",
+        title: "Remote failed workflow jobs are cached",
+        detail: `${recentFailedJobs.length} failed job(s) appear in the latest cached support snapshot.`,
+        evidence: snapshot?.observedAt.toISOString() ?? null,
+      })
+      : null,
+  ].filter((finding): finding is NonNullable<typeof finding> => Boolean(finding));
+
+  return {
+    hasSnapshot: Boolean(snapshot),
+    snapshotStatus: snapshot?.status ?? null,
+    snapshotObservedAt: snapshot?.observedAt ?? null,
+    summary: snapshot
+      ? {
+        source: "cached_support_snapshot" as const,
+        agentRuns,
+        pendingApprovals,
+        failedJobs: recentFailedJobs.length,
+        modelUsage: {
+          inputTokens: 0,
+          outputTokens: 0,
+          estimatedCostUsd: null,
+        },
+        recentRuns,
+        recentFailedJobs,
+        riskyToolCalls: [],
+      }
+      : null,
+    recentRuns,
+    recentFailedJobs,
+    riskFindings,
+  };
+}
+
 function normalizeAgentScopes(scopes: string[] | undefined) {
   const normalized = [...new Set((scopes ?? []).map((scope) => scope.trim()).filter(Boolean))];
   const unknown = normalized.filter((scope) => !isKnownScope(scope));
@@ -2205,6 +2344,24 @@ export async function getControlPlaneAiGovernanceStatus(actor: AppActor, deploym
   });
 
   if (!adapter.canReadCentralWorkspace || !deployment.managedWorkspaceId) {
+    const latestSupportReadySnapshot = await prisma.fleetHealthSnapshot.findFirst({
+      where: {
+        deploymentId,
+        snapshotKind: "SUPPORT_READY",
+      },
+      orderBy: [
+        { observedAt: "desc" },
+        { createdAt: "desc" },
+      ],
+      select: {
+        status: true,
+        summary: true,
+        error: true,
+        observedAt: true,
+        createdAt: true,
+      },
+    });
+    const cachedSupport = summarizeCachedSupportReadySnapshot(latestSupportReadySnapshot);
     const riskFindings = [
       !deployment.hasSupportCredential
         ? controlPlaneRiskFinding({
@@ -2215,6 +2372,7 @@ export async function getControlPlaneAiGovernanceStatus(actor: AppActor, deploym
           evidence: deployment.supportConnectorStatus,
         })
         : null,
+      ...cachedSupport.riskFindings,
     ].filter((finding): finding is NonNullable<typeof finding> => Boolean(finding));
 
     return {
@@ -2230,7 +2388,7 @@ export async function getControlPlaneAiGovernanceStatus(actor: AppActor, deploym
         enabled: null,
         source: "remote_unavailable" as const,
       },
-      summary: null,
+      summary: cachedSupport.summary,
       agents: {
         identities: [],
         configs: [],
@@ -2243,14 +2401,19 @@ export async function getControlPlaneAiGovernanceStatus(actor: AppActor, deploym
         recentModelUsage: [],
       },
       activity: {
-        recentRuns: [],
-        recentFailedJobs: [],
+        recentRuns: cachedSupport.recentRuns,
+        recentFailedJobs: cachedSupport.recentFailedJobs,
         riskyToolCalls: [],
       },
       audit: {
         recentSupportOperations: recentGovernanceSupportOperations.map(summarizeSupportOperationForGovernance),
       },
       riskFindings,
+      cachedSupportSnapshot: {
+        available: cachedSupport.hasSnapshot,
+        status: cachedSupport.snapshotStatus,
+        observedAt: cachedSupport.snapshotObservedAt,
+      },
       remoteSupport: {
         available: Boolean(adapter.canUseSupportConnector && deployment.hasSupportCredential),
         message: deployment.hasSupportCredential
@@ -3631,6 +3794,157 @@ export async function probeControlPlaneDeploymentHealth(actor: AppActor, params:
   });
 }
 
+function runtimeHealthErrors(health: CustomerDeploymentHealthPayload | null) {
+  const errors = [];
+  if (!health) {
+    errors.push("Health payload missing");
+    return errors;
+  }
+  if (health.database && health.database !== "up") errors.push(`Database ${health.database}`);
+  if (health.schema && health.schema !== "ready") errors.push(`Schema ${health.schema}`);
+  if (health.runtime?.redis && health.runtime.redis !== "configured") errors.push(`Redis ${health.runtime.redis}`);
+  if (health.runtime?.storage && health.runtime.storage !== "configured") errors.push(`Storage ${health.runtime.storage}`);
+  return errors;
+}
+
+function observedReleaseMatches(health: CustomerDeploymentHealthPayload | null, releaseImageTag: string) {
+  const release = health?.release;
+  return Boolean(release && (release.imageTag === releaseImageTag || release.gitSha === releaseImageTag));
+}
+
+export async function recordVerifiedControlPlaneRelease(actor: AppActor, params: {
+  deploymentId: string;
+  releaseImageTag: string;
+  releaseVersion?: string | null;
+  reason?: string | null;
+}) {
+  requireControlPlaneScope(actor, "control-plane:releases:write");
+  const reason = requireMutationReason(params.reason);
+  const releaseImageTag = params.releaseImageTag.trim();
+  invariant(releaseImageTag, 400, "INVALID_INPUT", "Release image tag is required.");
+  const releaseVersion = params.releaseVersion?.trim() || null;
+  await requireControlPlaneDeploymentWriteAccess(actor, params.deploymentId);
+  const deployment = await getControlPlaneDeploymentWithWorkspace(actor, params.deploymentId);
+
+  let health: CustomerDeploymentHealthPayload | null = null;
+  let status = "ok";
+  let error: string | null = null;
+  try {
+    const response = await fetch(`${deployment.url.replace(/\/$/, "")}/api/health`, { method: "GET" });
+    health = await response.json().catch(() => null) as CustomerDeploymentHealthPayload | null;
+    invariant(response.ok, 400, "HEALTH_PROBE_FAILED", `Health probe returned status ${response.status}.`);
+    const errors = runtimeHealthErrors(health);
+    invariant(errors.length === 0, 409, "HEALTH_NOT_VERIFIED", errors.join("; "));
+    invariant(
+      observedReleaseMatches(health, releaseImageTag),
+      409,
+      "RELEASE_MISMATCH",
+      `Health reported release ${health?.release?.imageTag ?? health?.release?.gitSha ?? "unknown"}, not ${releaseImageTag}.`,
+    );
+  } catch (probeError) {
+    if (probeError instanceof AppError) {
+      throw probeError;
+    }
+    status = "down";
+    error = probeError instanceof Error ? probeError.message : "Health probe failed.";
+    throw new AppError(400, "HEALTH_PROBE_FAILED", error);
+  }
+
+  const evidence = {
+    reason,
+    releaseImageTag,
+    releaseVersion,
+    observedRelease: health?.release ?? null,
+  };
+
+  await prisma.$transaction(async (tx) => {
+    await tx.customerDeployment.update({
+      where: { id: params.deploymentId },
+      data: {
+        releaseImageTag,
+        releaseVersion,
+        lastHealthCheck: new Date(),
+        lastHealthStatus: status,
+        lastHealthError: error,
+        lastReleaseCheck: new Date(),
+        provisioningStatus: "active",
+        deploymentStatus: "ACTIVE",
+        lastProvisioningError: null,
+      },
+    });
+    if (deployment.customerAccountId) {
+      await tx.customerReleaseTarget.upsert({
+        where: {
+          deploymentId_targetReleaseImageTag: {
+            deploymentId: params.deploymentId,
+            targetReleaseImageTag: releaseImageTag,
+          },
+        },
+        update: {
+          targetReleaseVersion: releaseVersion,
+          status: "APPLIED",
+          evidence: redactObject(evidence) as Prisma.InputJsonObject,
+          preparedByUserId: actorUserId(actor),
+          preparedAt: new Date(),
+          appliedAt: new Date(),
+        },
+        create: {
+          customerAccountId: deployment.customerAccountId,
+          deploymentId: params.deploymentId,
+          targetReleaseImageTag: releaseImageTag,
+          targetReleaseVersion: releaseVersion,
+          status: "APPLIED",
+          evidence: redactObject(evidence) as Prisma.InputJsonObject,
+          preparedByUserId: actorUserId(actor),
+          appliedAt: new Date(),
+        },
+      });
+    }
+    await tx.customerDeploymentEvent.create({
+      data: {
+        deploymentId: params.deploymentId,
+        actorUserId: actorUserId(actor),
+        action: "control_plane.release.verified_recorded",
+        meta: redactObject(evidence) as Prisma.InputJsonObject,
+      },
+    });
+  });
+  await Promise.all([
+    recordFleetHealthSnapshot({
+      customerAccountId: deployment.customerAccountId,
+      deploymentId: params.deploymentId,
+      snapshotKind: "HEALTH",
+      status,
+      summary: {
+        reason,
+        health,
+      },
+      error,
+    }),
+    recordFleetHealthSnapshot({
+      customerAccountId: deployment.customerAccountId,
+      deploymentId: params.deploymentId,
+      snapshotKind: "RELEASE",
+      status,
+      summary: {
+        expectedReleaseImageTag: releaseImageTag,
+        expectedReleaseVersion: releaseVersion,
+        observedRelease: health?.release ?? null,
+      },
+      error: null,
+    }),
+  ]);
+
+  return {
+    deploymentId: params.deploymentId,
+    recorded: true,
+    releaseImageTag,
+    releaseVersion,
+    observedRelease: health?.release ?? null,
+    release: await getControlPlaneReleaseStatus(actor, params.deploymentId),
+  };
+}
+
 export async function configureSupportConnector(actor: AppActor, params: {
   deploymentId: string;
   supportBaseUrl?: string | null;
@@ -4054,6 +4368,10 @@ export async function runCustomerSupportOperation(actor: AppActor, params: {
       arguments: args,
     });
     const summarized = summarizeMcpResponse(result);
+    const remoteError = supportMcpErrorMessage(summarized);
+    if (remoteError) {
+      throw new AppError(502, "REMOTE_SUPPORT_OPERATION_FAILED", remoteError);
+    }
     const resultSummary = summarized && typeof summarized === "object"
       ? redactObject(summarized as JsonRecord)
       : { result: summarized };

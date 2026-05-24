@@ -673,7 +673,7 @@ export default async function ControlPlaneCustomerPage({
                 </div>
                 <div className="list">
                   {aiSummary.recentRuns.map((run) => (
-                    <div className="item" key={run.id}>
+                    <div className="item" key={run.id ?? `${run.agentKey}-${run.createdAt ?? "unknown"}`}>
                       <div className="row">
                         <div>
                           <strong>{run.agentKey}</strong>
@@ -682,7 +682,7 @@ export default async function ControlPlaneCustomerPage({
                         <span style={{ color: tone(run.status), fontWeight: 700 }}>{statusLabel(t, run.status)}</span>
                       </div>
                       <div className="muted">
-                        {run.triggerType} - {format.dateTime(run.createdAt, { dateStyle: "medium", timeStyle: "short" })}
+                        {run.triggerType ?? "REMOTE"} - {run.createdAt ? format.dateTime(new Date(run.createdAt), { dateStyle: "medium", timeStyle: "short" }) : "timestamp unavailable"}
                         {run.approvalRequired ? ` - ${t("customerDetail.aiGovernance.approvalRequired")}` : ""}
                       </div>
                     </div>
@@ -711,12 +711,12 @@ export default async function ControlPlaneCustomerPage({
                     </div>
                   ))}
                   {aiSummary.recentFailedJobs.map((job) => (
-                    <div className="item" key={job.id}>
+                    <div className="item" key={job.id ?? `${job.type}-${job.updatedAt ?? job.createdAt ?? "unknown"}`}>
                       <div className="row">
                         <strong>{job.type}</strong>
                         <span style={{ color: tone("FAILED"), fontWeight: 700 }}>{statusLabel(t, "FAILED")}</span>
                       </div>
-                      <div className="muted">{job.error || t("customerDetail.context.attempts", { count: job.attempts })}</div>
+                      <div className="muted">{job.error || t("customerDetail.context.attempts", { count: job.attempts ?? 0 })}</div>
                     </div>
                   ))}
                   {aiSummary.riskyToolCalls.length === 0 && aiSummary.recentFailedJobs.length === 0 && (

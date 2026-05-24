@@ -52,6 +52,7 @@ describe("env", () => {
     delete process.env.MODEL_PROVIDER;
     delete process.env.MODEL_BASE_URL;
     delete process.env.MODEL_CHAT_DEFAULT;
+    delete process.env.MODEL_CHAT_FAST;
     delete process.env.MODEL_EMBEDDING_DEFAULT;
 
     const { env } = await import("./env");
@@ -59,6 +60,7 @@ describe("env", () => {
     expect(env.MODEL_PROVIDER).toBe("openrouter");
     expect(env.MODEL_BASE_URL).toBe("https://openrouter.ai/api/v1");
     expect(env.MODEL_CHAT_DEFAULT).toBe("qwen/qwen3-32b");
+    expect(env.MODEL_CHAT_FAST).toBe("google/gemini-2.5-flash-lite");
     expect(env.MODEL_EMBEDDING_DEFAULT).toBe("google/gemini-embedding-001");
   });
 });

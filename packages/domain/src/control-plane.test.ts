@@ -24,6 +24,7 @@ const { prismaMock, encryptSecretMock, decryptSecretMock, memberMocks } = vi.hoi
     },
     fleetHealthSnapshot: {
       create: vi.fn(),
+      findFirst: vi.fn(),
     },
     customerDeployment: {
       findMany: vi.fn(),
@@ -204,6 +205,7 @@ describe("control plane domain", () => {
     prismaMock.modelUsage.findMany.mockResolvedValue([]);
     prismaMock.modelUsageBudget.findUnique.mockResolvedValue(null);
     prismaMock.supportOperation.findMany.mockResolvedValue([]);
+    prismaMock.fleetHealthSnapshot.findFirst.mockResolvedValue(null);
     prismaMock.customerAccount.findMany.mockResolvedValue([]);
     prismaMock.customerDeployment.findMany.mockResolvedValue([]);
     prismaMock.workspaceFeatureFlag.findMany.mockResolvedValue([]);
@@ -1326,6 +1328,82 @@ describe("control plane domain", () => {
     ]));
     expect(JSON.stringify(status)).not.toContain("Do not leak this policy body");
     expect(JSON.stringify(status)).not.toContain("tokenHash");
+  });
+
+  it("summarizes cached remote AI governance without creating support operations", async () => {
+    const { getControlPlaneAiGovernanceStatus } = await import("./control-plane");
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce({
+      id: "inst-remote",
+      label: "Acme Production",
+      customerAccountId: "cust-1",
+      deploymentKind: "REMOTE_MANAGED",
+      managedWorkspaceId: null,
+      managedWorkspace: null,
+      supportCredentialEnc: "encrypted-token",
+      supportConnectorStatus: "connected",
+      supportLastSyncAt: new Date("2026-05-24T00:00:00.000Z"),
+      remoteWorkspaceId: "remote-ws-1",
+    });
+    prismaMock.supportOperation.findMany.mockResolvedValueOnce([]);
+    prismaMock.fleetHealthSnapshot.findFirst.mockResolvedValueOnce({
+      status: "ok",
+      error: null,
+      observedAt: new Date("2026-05-24T00:00:00.000Z"),
+      createdAt: new Date("2026-05-24T00:00:00.000Z"),
+      summary: {
+        agentRuns: {
+          items: [
+            {
+              id: "run-1",
+              agentKey: "inbox-triage",
+              status: "FAILED",
+              goal: "Triage inbox.",
+              createdAt: "2026-05-24T00:00:00.000Z",
+              resultJson: { privateContent: "must not surface" },
+            },
+          ],
+        },
+        failedJobs: {
+          items: [
+            {
+              id: "job-1",
+              type: "communication.slack.proactive-scan",
+              attempts: 3,
+              error: "An API error occurred: invalid_auth",
+              payload: { token: "must not surface" },
+            },
+          ],
+        },
+      },
+    });
+
+    const status = await getControlPlaneAiGovernanceStatus(operatorActor, "inst-remote");
+
+    expect(status.summary).toMatchObject({
+      source: "cached_support_snapshot",
+      agentRuns: { FAILED: 1 },
+      failedJobs: 1,
+    });
+    expect(status.activity.recentRuns[0]).toMatchObject({
+      id: "run-1",
+      agentKey: "inbox-triage",
+      status: "FAILED",
+    });
+    expect(status.activity.recentFailedJobs[0]).toMatchObject({
+      id: "job-1",
+      type: "communication.slack.proactive-scan",
+      error: "An API error occurred: invalid_auth",
+    });
+    expect(status.riskFindings.map((finding) => finding.key)).toEqual(expect.arrayContaining([
+      "remote-agent-run-failures",
+      "remote-failed-workflow-jobs",
+    ]));
+    expect(status.cachedSupportSnapshot).toMatchObject({
+      available: true,
+      status: "ok",
+    });
+    expect(prismaMock.supportOperation.create).not.toHaveBeenCalled();
+    expect(JSON.stringify(status)).not.toContain("must not surface");
   });
 
   it("requires governance write scope and explicit reasons for agent governance mutations", async () => {
@@ -2505,6 +2583,94 @@ describe("control plane domain", () => {
     expect(result.status).toBe("ok");
   });
 
+  it("records a verified live release and clears release drift metadata", async () => {
+    const { recordVerifiedControlPlaneRelease } = await import("./control-plane");
+    const deployment = {
+      id: "inst-1",
+      label: "Acme Production",
+      customerAccountId: "cust-1",
+      url: "https://customer.test",
+      managedWorkspaceId: null,
+      managedWorkspace: null,
+      supportCredentialEnc: null,
+      releaseImageTag: "sha-old",
+      releaseVersion: "main-2026-05-15",
+      lastHealthStatus: "degraded",
+      lastHealthError: "Release drift: expected sha-old, got sha-new",
+      lastHealthCheck: new Date("2026-05-20T00:00:00.000Z"),
+      lastWorkerHealthStatus: "ok",
+      lastWorkerHealthCheck: new Date("2026-05-20T00:00:00.000Z"),
+      lastReleaseCheck: new Date("2026-05-20T00:00:00.000Z"),
+      provisioningStatus: "degraded",
+      bootstrapStatus: "completed",
+      lastProvisioningError: null,
+    };
+    prismaMock.customerDeployment.findUnique
+      .mockResolvedValueOnce(deployment)
+      .mockResolvedValueOnce({
+        ...deployment,
+        releaseImageTag: "sha-new",
+        releaseVersion: "main-2026-05-20",
+        lastHealthStatus: "ok",
+        lastHealthError: null,
+        provisioningStatus: "active",
+      });
+    prismaMock.customerDeployment.update.mockResolvedValueOnce({ id: "inst-1" });
+    prismaMock.customerDeploymentEvent.findMany.mockResolvedValueOnce([]);
+    global.fetch = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        database: "up",
+        schema: "ready",
+        runtime: { redis: "configured", storage: "configured" },
+        release: { gitSha: "sha-new" },
+      }),
+    })) as any;
+
+    const result = await recordVerifiedControlPlaneRelease(operatorActor, {
+      deploymentId: "inst-1",
+      releaseImageTag: "sha-new",
+      releaseVersion: "main-2026-05-20",
+      reason: "Verified live health after recovery deploy.",
+    });
+
+    expect(prismaMock.customerDeployment.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "inst-1" },
+      data: expect.objectContaining({
+        releaseImageTag: "sha-new",
+        releaseVersion: "main-2026-05-20",
+        lastHealthStatus: "ok",
+        lastHealthError: null,
+        provisioningStatus: "active",
+        deploymentStatus: "ACTIVE",
+      }),
+    }));
+    expect(prismaMock.customerReleaseTarget.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        deploymentId_targetReleaseImageTag: {
+          deploymentId: "inst-1",
+          targetReleaseImageTag: "sha-new",
+        },
+      },
+      update: expect.objectContaining({
+        status: "APPLIED",
+        targetReleaseVersion: "main-2026-05-20",
+      }),
+    }));
+    expect(prismaMock.customerDeploymentEvent.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        action: "control_plane.release.verified_recorded",
+      }),
+    }));
+    expect(result).toMatchObject({
+      recorded: true,
+      releaseImageTag: "sha-new",
+      releaseVersion: "main-2026-05-20",
+      observedRelease: { gitSha: "sha-new" },
+    });
+  });
+
   it("records and completes an audited remote support operation", async () => {
     const { runCustomerSupportOperation } = await import("./control-plane");
     prismaMock.supportOperation.create.mockResolvedValueOnce({
@@ -2550,6 +2716,70 @@ describe("control plane domain", () => {
       data: expect.objectContaining({ status: "COMPLETED" }),
     }));
     expect(result).toMatchObject({ id: "op-1", status: "COMPLETED" });
+  });
+
+  it("fails support operations when the remote MCP returns a scope error as text", async () => {
+    const { runCustomerSupportOperation } = await import("./control-plane");
+    prismaMock.supportOperation.create.mockResolvedValueOnce({
+      id: "op-scope",
+      action: "feature_flags.set",
+    });
+    prismaMock.customerDeployment.findUnique.mockResolvedValue({
+      id: "inst-1",
+      label: "Acme",
+      url: "https://customer.test",
+      supportMcpUrl: "https://customer.test/api/mcp",
+      supportCredentialEnc: "encrypted-token",
+      supportConnectorStatus: "connected",
+    });
+    prismaMock.supportOperation.update.mockResolvedValueOnce({
+      id: "op-scope",
+      status: "FAILED",
+    });
+    global.fetch = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ result: { content: [{ type: "text", text: JSON.stringify({ audited: true }) }] } }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          result: {
+            content: [{
+              type: "text",
+              text: "MCP credential is missing the required scope: workspace:write.",
+            }],
+          },
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ result: { content: [{ type: "text", text: JSON.stringify({ audited: true }) }] } }),
+      }) as any;
+
+    await expect(runCustomerSupportOperation(operatorActor, {
+      deploymentId: "inst-1",
+      action: "feature_flags.set",
+      reason: "Enable feature flag.",
+      arguments: {
+        flag: "AGENT_GOVERNANCE",
+        enabled: true,
+      },
+    })).rejects.toMatchObject({
+      status: 502,
+      code: "REMOTE_SUPPORT_OPERATION_FAILED",
+    });
+
+    expect(prismaMock.supportOperation.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "op-scope" },
+      data: expect.objectContaining({
+        status: "FAILED",
+        error: expect.stringContaining("workspace:write"),
+      }),
+    }));
   });
 
   it("runs the support proposal reopen repair through the audited connector", async () => {
