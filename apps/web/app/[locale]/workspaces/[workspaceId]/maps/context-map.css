@@ -100,6 +100,11 @@
   color: var(--warning) !important;
 }
 
+.context-map-danger-action {
+  border-color: color-mix(in srgb, var(--danger) 38%, var(--line)) !important;
+  color: var(--danger) !important;
+}
+
 .context-map-filter-bar {
   position: relative;
   z-index: 24;
@@ -443,6 +448,78 @@
   border-top: 1px solid var(--line);
 }
 
+.context-map-diff-heading,
+.context-map-diff-actions {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.context-map-diff-actions {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+}
+
+.context-map-diff-compare {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.context-map-diff-compare > div,
+.context-map-diff-editor {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-alt);
+}
+
+.context-map-diff-compare strong,
+.context-map-diff-editor span {
+  color: var(--text);
+  font-size: 0.76rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.context-map-diff-compare ul {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-left: 16px;
+  color: var(--muted);
+  font-size: 0.76rem;
+  line-height: 1.35;
+}
+
+.context-map-diff-editor label {
+  display: grid;
+  gap: 4px;
+}
+
+.context-map-diff-editor input,
+.context-map-diff-editor textarea {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.78rem;
+  padding: 7px 8px;
+}
+
+.context-map-diff-editor textarea {
+  resize: vertical;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  line-height: 1.4;
+}
+
 .context-map-neighbor-list button {
   justify-content: flex-start;
   text-align: left;
@@ -508,5 +585,9 @@
 
   .context-map-inspector {
     max-height: 50%;
+  }
+
+  .context-map-diff-compare {
+    grid-template-columns: 1fr;
   }
 }

@@ -12,14 +12,17 @@ import {
 import type { Edge, Node, ReactFlowInstance } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import {
+  Ban,
   Check,
   CircleHelp,
   Copy,
   Crosshair,
   FileSearch,
   GitBranch,
+  ListChecks,
   Maximize2,
   Minimize2,
+  Pencil,
   RefreshCcw,
   RotateCcw,
   Save,
@@ -30,9 +33,12 @@ import {
 import {
   applyContextGraphProposedDiffAction,
   buildSelectedRegionContextAction,
+  createMissingRegionFactsProposalAction,
   createPersonalContextMapViewAction,
   createRegionProposalAction,
+  reviewContextGraphProposedDiffAction,
   saveContextMapLayoutAction,
+  updateContextGraphProposedDiffAction,
 } from "./actions";
 import "./context-map.css";
 
@@ -106,6 +112,46 @@ type ContextGraphProposedDiff = {
   status: string;
   createdAt: string;
   diffJson: unknown;
+};
+
+type DiffObjectInput = {
+  ref?: string;
+  objectType?: string;
+  title?: string;
+  summary?: string | null;
+  status?: string;
+  sourceEntityType?: string | null;
+  sourceEntityId?: string | null;
+};
+
+type DiffRelationshipInput = {
+  sourceObjectId?: string;
+  sourceRef?: string;
+  targetObjectId?: string;
+  targetRef?: string;
+  relationshipType?: string;
+  status?: string;
+};
+
+type DiffEvidenceInput = {
+  objectId?: string;
+  objectRef?: string;
+  relationshipId?: string;
+  relationshipRef?: string;
+  sourceType?: string;
+  sourceId?: string;
+};
+
+type DiffLayoutInput = {
+  mapViewId?: string;
+  items?: Array<{ objectId?: string; x?: number; y?: number }>;
+};
+
+type DiffJsonInput = {
+  objects?: DiffObjectInput[];
+  relationships?: DiffRelationshipInput[];
+  evidenceRefs?: DiffEvidenceInput[];
+  mapLayoutUpdates?: DiffLayoutInput[];
 };
 
 export type ContextMapClientData = {
@@ -231,6 +277,78 @@ function directNeighborHeading(viewType: string) {
   return "Direct blockers, owners, dependencies";
 }
 
+function diffJsonRecord(value: unknown): DiffJsonInput {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as DiffJsonInput : {};
+}
+
+function normalizeProposedDiff(value: {
+  id: string;
+  reason: string | null;
+  status: string;
+  createdAt: string | Date;
+  diffJson: unknown;
+}): ContextGraphProposedDiff {
+  return {
+    id: value.id,
+    reason: value.reason,
+    status: value.status,
+    createdAt: value.createdAt instanceof Date ? value.createdAt.toISOString() : value.createdAt,
+    diffJson: value.diffJson,
+  };
+}
+
+function diffCountLabel(diffJson: unknown) {
+  const diff = diffJsonRecord(diffJson);
+  const parts = [
+    `${diff.objects?.length ?? 0} objects`,
+    `${diff.relationships?.length ?? 0} relationships`,
+    `${diff.evidenceRefs?.length ?? 0} evidence refs`,
+    `${diff.mapLayoutUpdates?.reduce((sum, update) => sum + (update.items?.length ?? 0), 0) ?? 0} layout moves`,
+  ];
+  return parts.join(" - ");
+}
+
+function objectTitleFromId(objects: Map<string, ContextGraphObject>, objectId: string | undefined) {
+  return objectId ? objects.get(objectId)?.title ?? objectId : "new object";
+}
+
+function relationshipEndpointLabel(value: DiffRelationshipInput, key: "source" | "target", objects: Map<string, ContextGraphObject>) {
+  const objectId = key === "source" ? value.sourceObjectId : value.targetObjectId;
+  const ref = key === "source" ? value.sourceRef : value.targetRef;
+  return objectId ? objectTitleFromId(objects, objectId) : ref ? `new: ${ref}` : "unknown";
+}
+
+function diffPreviewLines(diffJson: unknown, objects: Map<string, ContextGraphObject>, mapViews: ContextMapView[]) {
+  const diff = diffJsonRecord(diffJson);
+  const before: string[] = [];
+  const after: string[] = [];
+  for (const object of diff.objects ?? []) {
+    before.push(`${object.objectType ?? "Object"}: no approved change until applied`);
+    after.push(`${object.objectType ?? "Object"}: ${object.title ?? object.ref ?? "Untitled"} (${object.status ?? "approved on apply"})`);
+  }
+  for (const relationship of diff.relationships ?? []) {
+    const source = relationshipEndpointLabel(relationship, "source", objects);
+    const target = relationshipEndpointLabel(relationship, "target", objects);
+    before.push(`${relationship.relationshipType ?? "relationship"}: not present as approved truth`);
+    after.push(`${source} ${relationship.relationshipType ?? "relates to"} ${target}`);
+  }
+  for (const evidence of diff.evidenceRefs ?? []) {
+    before.push(`Evidence: ${evidence.sourceType ?? "source"} not attached`);
+    after.push(`Attach ${evidence.sourceType ?? "source"}:${evidence.sourceId ?? "record"} to ${evidence.objectId ?? evidence.objectRef ?? evidence.relationshipId ?? evidence.relationshipRef ?? "fact"}`);
+  }
+  for (const layoutUpdate of diff.mapLayoutUpdates ?? []) {
+    const viewName = mapViews.find((view) => view.id === layoutUpdate.mapViewId)?.name ?? layoutUpdate.mapViewId ?? "map view";
+    const count = layoutUpdate.items?.length ?? 0;
+    before.push(`${viewName}: current saved layout`);
+    after.push(`${viewName}: ${count} node positions updated`);
+  }
+  if (before.length === 0 && after.length === 0) {
+    before.push("No graph truth changes encoded.");
+    after.push("No graph truth changes encoded.");
+  }
+  return { before: before.slice(0, 6), after: after.slice(0, 6) };
+}
+
 export default function ContextMapClient({ workspaceId, data, includeStale = false }: { workspaceId: string; data: ContextMapClientData; includeStale?: boolean }) {
   const [selectedObjectIds, setSelectedObjectIds] = useState<string[]>(data.objects[0]?.id ? [data.objects[0].id] : []);
   const [selectedObjectId, setSelectedObjectId] = useState<string | null>(data.objects[0]?.id ?? null);
@@ -245,6 +363,11 @@ export default function ContextMapClient({ workspaceId, data, includeStale = fal
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("active");
   const [inspectorDock, setInspectorDock] = useState<InspectorDock>("right");
   const [layoutDirty, setLayoutDirty] = useState(false);
+  const [expandedDiffId, setExpandedDiffId] = useState<string | null>(data.proposedDiffs[0]?.id ?? null);
+  const [editingDiffId, setEditingDiffId] = useState<string | null>(null);
+  const [editReason, setEditReason] = useState("");
+  const [editDiffJson, setEditDiffJson] = useState("");
+  const [proposedDiffs, setProposedDiffs] = useState<ContextGraphProposedDiff[]>(data.proposedDiffs);
   const [flowInstance, setFlowInstance] = useState<ReactFlowInstance | null>(null);
   const [isPending, startTransition] = useTransition();
 
@@ -366,6 +489,11 @@ export default function ContextMapClient({ workspaceId, data, includeStale = fal
     setEdges(initialEdges);
     setLayoutDirty(false);
   }, [initialNodes, initialEdges, setEdges, setNodes]);
+
+  useEffect(() => {
+    setProposedDiffs(data.proposedDiffs);
+    setExpandedDiffId((current) => current ?? data.proposedDiffs[0]?.id ?? null);
+  }, [data.proposedDiffs]);
 
   const selectedObject = selectedObjectId ? objectById.get(selectedObjectId) ?? null : null;
   const selectedRelationship = selectedRelationshipId ? relationshipById.get(selectedRelationshipId) ?? null : null;
@@ -542,12 +670,40 @@ export default function ContextMapClient({ workspaceId, data, includeStale = fal
       return;
     }
     startTransition(async () => {
-      await createRegionProposalAction({
-        workspaceId,
-        mapViewId: data.mapView.id,
-        objectIds: ids,
-      });
-      setMessage({ tone: "info", text: "Created a proposed graph diff for this selected region." });
+      try {
+        const diff = await createRegionProposalAction({
+          workspaceId,
+          mapViewId: data.mapView.id,
+          objectIds: ids,
+        });
+        setProposedDiffs((current) => [normalizeProposedDiff(diff), ...current]);
+        setExpandedDiffId(diff.id);
+        setMessage({ tone: "info", text: "Created a proposed graph diff for this selected region." });
+      } catch {
+        setMessage({ tone: "error", text: "Could not create a proposed graph diff." });
+      }
+    });
+  }
+
+  function createMissingFactsProposal() {
+    const ids = selectedRegionIds;
+    if (ids.length === 0) {
+      setMessage({ tone: "error", text: "Select at least one node before proposing missing facts." });
+      return;
+    }
+    startTransition(async () => {
+      try {
+        const diff = await createMissingRegionFactsProposalAction({
+          workspaceId,
+          mapViewId: data.mapView.id,
+          objectIds: ids,
+        });
+        setProposedDiffs((current) => [normalizeProposedDiff(diff), ...current]);
+        setExpandedDiffId(diff.id);
+        setMessage({ tone: "info", text: "Proposed missing tasks, risks, or owners for this region." });
+      } catch {
+        setMessage({ tone: "error", text: "Could not propose missing tasks, risks, or owners." });
+      }
     });
   }
 
@@ -555,9 +711,58 @@ export default function ContextMapClient({ workspaceId, data, includeStale = fal
     startTransition(async () => {
       try {
         await applyContextGraphProposedDiffAction({ workspaceId, proposedDiffId });
+        setProposedDiffs((current) => current.filter((diff) => diff.id !== proposedDiffId));
         setMessage({ tone: "info", text: "Applied proposed graph diff." });
       } catch {
         setMessage({ tone: "error", text: "You do not have permission to apply this proposed diff." });
+      }
+    });
+  }
+
+  function reviewDiff(proposedDiffId: string, status: "approved" | "rejected") {
+    startTransition(async () => {
+      try {
+        const result = await reviewContextGraphProposedDiffAction({ workspaceId, proposedDiffId, status });
+        setProposedDiffs((current) => status === "rejected"
+          ? current.filter((diff) => diff.id !== proposedDiffId)
+          : current.map((diff) => diff.id === proposedDiffId ? { ...diff, status: result.status } : diff));
+        setMessage({ tone: "info", text: status === "approved" ? "Approved proposed graph diff." : "Rejected proposed graph diff." });
+      } catch {
+        setMessage({ tone: "error", text: "Could not review this proposed diff." });
+      }
+    });
+  }
+
+  function startEditingDiff(diff: ContextGraphProposedDiff) {
+    setEditingDiffId(diff.id);
+    setExpandedDiffId(diff.id);
+    setEditReason(diff.reason ?? "");
+    setEditDiffJson(JSON.stringify(diffJsonRecord(diff.diffJson), null, 2));
+  }
+
+  function saveEditedDiff(diff: ContextGraphProposedDiff) {
+    let parsedDiff: unknown;
+    try {
+      parsedDiff = JSON.parse(editDiffJson);
+    } catch {
+      setMessage({ tone: "error", text: "Diff JSON is not valid." });
+      return;
+    }
+    startTransition(async () => {
+      try {
+        const updated = await updateContextGraphProposedDiffAction({
+          workspaceId,
+          proposedDiffId: diff.id,
+          reason: editReason,
+          diff: parsedDiff,
+        });
+        setProposedDiffs((current) => current.map((item) => item.id === diff.id
+          ? { ...item, reason: updated.reason, diffJson: updated.diffJson, status: updated.status }
+          : item));
+        setEditingDiffId(null);
+        setMessage({ tone: "info", text: "Updated proposed graph diff." });
+      } catch {
+        setMessage({ tone: "error", text: "Could not update this proposed diff." });
       }
     });
   }
@@ -609,6 +814,9 @@ export default function ContextMapClient({ workspaceId, data, includeStale = fal
           </button>
           <button className="secondary small" type="button" onClick={createProposal} disabled={isPending} title="Create an agent-ready graph proposal">
             <GitBranch size={14} aria-hidden="true" /> Propose
+          </button>
+          <button className="secondary small" type="button" onClick={createMissingFactsProposal} disabled={isPending} title="Propose missing tasks, risks, or owners from this region">
+            <ListChecks size={14} aria-hidden="true" /> Suggest gaps
           </button>
           {data.permissions.canSavePersonalView && (
             <button className="secondary small" type="button" onClick={savePersonalView} disabled={isPending} title="Save as a personal map view">
@@ -953,17 +1161,90 @@ export default function ContextMapClient({ workspaceId, data, includeStale = fal
 
             <section className="context-map-inspector-section">
               <h2>Proposed Diffs</h2>
-              {data.proposedDiffs.length ? (
+              {proposedDiffs.length ? (
                 <div className="context-map-diff-list">
-                  {data.proposedDiffs.map((diff) => (
-                    <div key={diff.id} className="context-map-diff-item">
-                      <div className="nr-item-meta">{diff.status} - {stableDateLabel(diff.createdAt)}</div>
-                      <p>{diff.reason ?? "Proposed graph change"}</p>
-                      <button className="secondary small" type="button" onClick={() => applyDiff(diff.id)} disabled={isPending || !data.permissions.canUpdateMasterView}>
-                        <Check size={14} aria-hidden="true" /> Approve and apply
-                      </button>
-                    </div>
-                  ))}
+                  {proposedDiffs.map((diff) => {
+                    const preview = diffPreviewLines(diff.diffJson, objectById, data.mapViews);
+                    const expanded = expandedDiffId === diff.id;
+                    const editing = editingDiffId === diff.id;
+                    return (
+                      <div key={diff.id} className="context-map-diff-item">
+                        <div className="context-map-diff-heading">
+                          <div>
+                            <div className="nr-item-meta">{diff.status} - {stableDateLabel(diff.createdAt)}</div>
+                            <p>{diff.reason ?? "Proposed graph change"}</p>
+                          </div>
+                          <button className="secondary small" type="button" onClick={() => setExpandedDiffId(expanded ? null : diff.id)}>
+                            {expanded ? "Hide" : "Compare"}
+                          </button>
+                        </div>
+                        <div className="context-map-pill-row">
+                          <span className={`context-map-status context-map-status--${diff.status === "approved" ? "approved" : diff.status === "pending" ? "pending" : "neutral"}`}>{diff.status}</span>
+                          <span className="tag neutral">{diffCountLabel(diff.diffJson)}</span>
+                        </div>
+                        {expanded && (
+                          <div className="context-map-diff-compare">
+                            <div>
+                              <strong>Before</strong>
+                              <ul>
+                                {preview.before.map((line, index) => <li key={`before-${index}-${line}`}>{line}</li>)}
+                              </ul>
+                            </div>
+                            <div>
+                              <strong>After approval</strong>
+                              <ul>
+                                {preview.after.map((line, index) => <li key={`after-${index}-${line}`}>{line}</li>)}
+                              </ul>
+                            </div>
+                          </div>
+                        )}
+                        {editing && (
+                          <div className="context-map-diff-editor">
+                            <label>
+                              <span>Reason</span>
+                              <input value={editReason} onChange={(event) => setEditReason(event.target.value)} />
+                            </label>
+                            <label>
+                              <span>Diff JSON</span>
+                              <textarea value={editDiffJson} onChange={(event) => setEditDiffJson(event.target.value)} rows={8} spellCheck={false} />
+                            </label>
+                          </div>
+                        )}
+                        <div className="context-map-diff-actions">
+                          {data.permissions.canUpdateMasterView ? (
+                            <>
+                              {diff.status === "pending" && (
+                                <button className="secondary small" type="button" onClick={() => reviewDiff(diff.id, "approved")} disabled={isPending}>
+                                  <Check size={14} aria-hidden="true" /> Approve
+                                </button>
+                              )}
+                              <button className="secondary small" type="button" onClick={() => applyDiff(diff.id)} disabled={isPending || !["pending", "approved"].includes(diff.status)}>
+                                <Check size={14} aria-hidden="true" /> {diff.status === "approved" ? "Apply approved" : "Approve and apply"}
+                              </button>
+                              {diff.status === "pending" && (
+                                <button className="secondary small" type="button" onClick={() => editing ? saveEditedDiff(diff) : startEditingDiff(diff)} disabled={isPending}>
+                                  {editing ? <Save size={14} aria-hidden="true" /> : <Pencil size={14} aria-hidden="true" />}
+                                  {editing ? "Save edit" : "Edit"}
+                                </button>
+                              )}
+                              {editing && (
+                                <button className="secondary small" type="button" onClick={() => setEditingDiffId(null)} disabled={isPending}>
+                                  <X size={14} aria-hidden="true" /> Cancel
+                                </button>
+                              )}
+                              {diff.status === "pending" && (
+                                <button className="secondary small context-map-danger-action" type="button" onClick={() => reviewDiff(diff.id, "rejected")} disabled={isPending}>
+                                  <Ban size={14} aria-hidden="true" /> Reject
+                                </button>
+                              )}
+                            </>
+                          ) : (
+                            <p className="muted">Admins and facilitators can approve, edit, apply, or reject this proposed diff.</p>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
               ) : (
                 <p className="muted">No pending graph diffs.</p>

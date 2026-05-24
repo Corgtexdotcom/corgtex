@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
@@ -182,6 +183,23 @@ function jsonObject(value: JsonRecord | undefined): Prisma.InputJsonObject {
   return (value ?? {}) as Prisma.InputJsonObject;
 }
 
+function isJsonRecord(value: unknown): value is JsonRecord {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function requireStringField(value: unknown, message: string) {
+  invariant(typeof value === "string", 400, "INVALID_INPUT", message);
+  return value;
+}
+
+function requireOptionalArray(value: unknown, message: string) {
+  invariant(value === undefined || Array.isArray(value), 400, "INVALID_INPUT", message);
+}
+
+function shortHash(value: string) {
+  return createHash("sha256").update(value).digest("hex").slice(0, 24);
+}
+
 function isReadableStatus(status: string, includeStale = false) {
   if (status === "archived") return false;
   if (!includeStale && status === "stale") return false;
@@ -224,8 +242,8 @@ async function requireGraphApprove(actor: AppActor, workspaceId: string) {
 }
 
 function normalizeObjectInput(input: ContextGraphObjectInput) {
-  const objectType = input.objectType.trim();
-  const title = input.title.trim();
+  const objectType = requireStringField(input.objectType, "Context graph object type is required.").trim();
+  const title = requireStringField(input.title, "Context graph object title is required.").trim();
   requireKnownValue(objectType, CONTEXT_GRAPH_OBJECT_TYPES, "context graph object type");
   invariant(title.length > 0, 400, "INVALID_INPUT", "Context graph object title is required.");
   return {
@@ -245,7 +263,7 @@ function normalizeObjectInput(input: ContextGraphObjectInput) {
 }
 
 function normalizeRelationshipInput(input: ContextGraphRelationshipInput) {
-  const relationshipType = input.relationshipType.trim();
+  const relationshipType = requireStringField(input.relationshipType, "Context graph relationship type is required.").trim();
   requireKnownValue(relationshipType, CONTEXT_GRAPH_RELATIONSHIP_TYPES, "context graph relationship type");
   return {
     relationshipType,
@@ -424,10 +442,11 @@ function objectWhereForMapView(workspaceId: string, mapView: { query: Prisma.Jso
 }
 
 function normalizeLayoutItem(item: ContextMapLayoutItemInput) {
-  invariant(item.objectId.trim().length > 0, 400, "INVALID_INPUT", "Layout object id is required.");
+  const objectId = requireStringField(item.objectId, "Layout object id is required.").trim();
+  invariant(objectId.length > 0, 400, "INVALID_INPUT", "Layout object id is required.");
   invariant(Number.isFinite(item.x) && Number.isFinite(item.y), 400, "INVALID_INPUT", "Layout coordinates must be finite numbers.");
   return {
-    objectId: item.objectId.trim(),
+    objectId,
     x: item.x,
     y: item.y,
     width: item.width ?? null,
@@ -784,17 +803,43 @@ export async function createPersonalContextMapView(actor: AppActor, params: {
   });
 }
 
-function validateDiff(diff: ContextGraphDiffInput) {
-  for (const object of diff.objects ?? []) normalizeObjectInput(object);
-  for (const relationship of diff.relationships ?? []) normalizeRelationshipInput(relationship);
-  for (const evidence of diff.evidenceRefs ?? []) {
-    invariant(evidence.sourceType.trim().length > 0, 400, "INVALID_INPUT", "Evidence source type is required.");
-    invariant(evidence.sourceId.trim().length > 0, 400, "INVALID_INPUT", "Evidence source id is required.");
+function validateDiff(diff: unknown): asserts diff is ContextGraphDiffInput {
+  invariant(isJsonRecord(diff), 400, "INVALID_INPUT", "Context graph diff must be an object.");
+  requireOptionalArray(diff.objects, "Context graph diff objects must be an array.");
+  requireOptionalArray(diff.relationships, "Context graph diff relationships must be an array.");
+  requireOptionalArray(diff.evidenceRefs, "Context graph diff evidence refs must be an array.");
+  requireOptionalArray(diff.mapLayoutUpdates, "Context graph diff map layout updates must be an array.");
+
+  const objects = diff.objects as unknown[] | undefined;
+  const relationships = diff.relationships as unknown[] | undefined;
+  const evidenceRefs = diff.evidenceRefs as unknown[] | undefined;
+  const mapLayoutUpdates = diff.mapLayoutUpdates as unknown[] | undefined;
+
+  for (const object of objects ?? []) {
+    invariant(isJsonRecord(object), 400, "INVALID_INPUT", "Context graph diff objects must be objects.");
+    normalizeObjectInput(object as ContextGraphObjectInput);
   }
-  for (const layoutUpdate of diff.mapLayoutUpdates ?? []) {
-    invariant(layoutUpdate.mapViewId.trim().length > 0, 400, "INVALID_INPUT", "Map view id is required.");
+  for (const relationship of relationships ?? []) {
+    invariant(isJsonRecord(relationship), 400, "INVALID_INPUT", "Context graph diff relationships must be objects.");
+    normalizeRelationshipInput(relationship as ContextGraphRelationshipInput);
+  }
+  for (const evidence of evidenceRefs ?? []) {
+    invariant(isJsonRecord(evidence), 400, "INVALID_INPUT", "Context graph diff evidence refs must be objects.");
+    const sourceType = requireStringField(evidence.sourceType, "Evidence source type is required.").trim();
+    const sourceId = requireStringField(evidence.sourceId, "Evidence source id is required.").trim();
+    invariant(sourceType.length > 0, 400, "INVALID_INPUT", "Evidence source type is required.");
+    invariant(sourceId.length > 0, 400, "INVALID_INPUT", "Evidence source id is required.");
+  }
+  for (const layoutUpdate of mapLayoutUpdates ?? []) {
+    invariant(isJsonRecord(layoutUpdate), 400, "INVALID_INPUT", "Context graph diff map layout updates must be objects.");
+    const mapViewId = requireStringField(layoutUpdate.mapViewId, "Map view id is required.").trim();
+    invariant(mapViewId.length > 0, 400, "INVALID_INPUT", "Map view id is required.");
+    invariant(Array.isArray(layoutUpdate.items), 400, "INVALID_INPUT", "Map layout update items must be an array.");
     invariant(layoutUpdate.items.length > 0, 400, "INVALID_INPUT", "At least one layout item is required.");
-    for (const item of layoutUpdate.items) normalizeLayoutItem(item);
+    for (const item of layoutUpdate.items) {
+      invariant(isJsonRecord(item), 400, "INVALID_INPUT", "Map layout update items must be objects.");
+      normalizeLayoutItem(item as ContextMapLayoutItemInput);
+    }
   }
 }
 
@@ -850,6 +895,49 @@ export async function listContextGraphProposedDiffs(actor: AppActor, params: {
     },
     orderBy: { createdAt: "desc" },
     take: params.take ?? 50,
+  });
+}
+
+export async function updateContextGraphProposedDiff(actor: AppActor, params: {
+  workspaceId: string;
+  proposedDiffId: string;
+  reason?: string | null;
+  diff: ContextGraphDiffInput;
+  evidence?: JsonRecord | null;
+}) {
+  await requireGraphApprove(actor, params.workspaceId);
+  validateDiff(params.diff);
+
+  return prisma.$transaction(async (tx) => {
+    const proposedDiff = await tx.contextGraphProposedDiff.findFirst({
+      where: { id: params.proposedDiffId, workspaceId: params.workspaceId },
+    });
+    invariant(proposedDiff, 404, "NOT_FOUND", "Proposed graph diff not found.");
+    invariant(proposedDiff.status === "pending", 409, "INVALID_STATE", "Only pending graph diffs can be edited.");
+
+    const updated = await tx.contextGraphProposedDiff.update({
+      where: { id: proposedDiff.id },
+      data: {
+        reason: params.reason?.trim() || null,
+        diffJson: params.diff as Prisma.InputJsonObject,
+        ...(params.evidence !== undefined ? {
+          evidenceJson: params.evidence ? (params.evidence as Prisma.InputJsonObject) : Prisma.JsonNull,
+        } : {}),
+      },
+    });
+    await recordAudit(tx, actor, {
+      workspaceId: params.workspaceId,
+      action: "context-graph.diff.edited",
+      entityType: "ContextGraphProposedDiff",
+      entityId: proposedDiff.id,
+      meta: {
+        objectCount: params.diff.objects?.length ?? 0,
+        relationshipCount: params.diff.relationships?.length ?? 0,
+        evidenceRefCount: params.diff.evidenceRefs?.length ?? 0,
+        mapLayoutUpdateCount: params.diff.mapLayoutUpdates?.length ?? 0,
+      },
+    });
+    return updated;
   });
 }
 
@@ -1387,6 +1475,177 @@ export async function buildSelectedRegionContext(actor: AppActor, params: {
       maxSensitivity,
     },
   };
+}
+
+function selectedRegionSourceId(mapViewId: string | null | undefined, selectedObjectIds: string[]) {
+  return `${mapViewId ?? "context-map"}:${[...selectedObjectIds].sort().join(",")}`;
+}
+
+export async function createMissingRegionFactsProposal(actor: AppActor, params: {
+  workspaceId: string;
+  mapViewId: string;
+  objectIds: string[];
+}) {
+  const context = await buildSelectedRegionContext(actor, {
+    workspaceId: params.workspaceId,
+    mapViewId: params.mapViewId,
+    objectIds: params.objectIds,
+    depth: 2,
+  });
+
+  const sourceId = selectedRegionSourceId(params.mapViewId, context.selectedObjectIds);
+  const selectedObjectIds = [...context.selectedObjectIds].sort();
+  const selectedObjectSegment = shortHash(selectedObjectIds.join(","));
+  const objects: ContextGraphObjectInput[] = [];
+  const relationships: ContextGraphRelationshipInput[] = [];
+  const evidenceRefs: ContextGraphEvidenceInput[] = [];
+  const addedProposalKeys = new Set<string>();
+
+  function addProposal(input: {
+    kind: "task" | "risk" | "owner" | "question";
+    objectType: "Task" | "Risk" | "Question";
+    title: string;
+    summary: string;
+    targetObjectId?: string;
+    relationshipType?: ContextGraphRelationshipType;
+    confidence?: number;
+  }) {
+    const title = input.title.trim().slice(0, 180);
+    const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 72);
+    const proposalKey = [input.kind, input.targetObjectId ?? "region", slug].join(":");
+    if (!title || addedProposalKeys.has(proposalKey)) return;
+    addedProposalKeys.add(proposalKey);
+    const ref = `missing-region-fact-${objects.length + 1}`;
+    const dedupeKey = [
+      params.workspaceId,
+      "missing-region-fact",
+      params.mapViewId,
+      selectedObjectSegment,
+      input.kind,
+      input.targetObjectId ?? "region",
+      slug,
+    ].join(":");
+
+    objects.push({
+      ref,
+      objectType: input.objectType,
+      title,
+      summary: input.summary,
+      status: "proposed",
+      confidence: input.confidence ?? 0.72,
+      sourceEntityType: "ContextMapView",
+      sourceEntityId: params.mapViewId,
+      dedupeKey,
+      properties: {
+        proposalKind: "missing_region_fact",
+        missingFactKind: input.kind,
+        selectedObjectIds,
+        nextAction: input.summary,
+      },
+    });
+
+    if (input.targetObjectId && input.relationshipType) {
+      relationships.push({
+        sourceRef: ref,
+        targetObjectId: input.targetObjectId,
+        relationshipType: input.relationshipType,
+        status: "proposed",
+        confidence: input.confidence ?? 0.72,
+        sourceEntityType: "ContextMapView",
+        sourceEntityId: params.mapViewId,
+        properties: {
+          proposalKind: "missing_region_fact",
+          selectedObjectIds,
+        },
+      });
+    }
+
+    evidenceRefs.push({
+      objectRef: ref,
+      sourceType: "REGION_CONTEXT",
+      sourceId,
+      quote: input.summary.slice(0, 600),
+      relevanceScore: input.confidence ?? 0.72,
+      metadata: {
+        mapViewId: params.mapViewId,
+        selectedObjectIds,
+        missingFactKind: input.kind,
+      },
+    });
+  }
+
+  const actionableGaps = context.contextGaps
+    .filter((gap) => ["missing_owner", "missing_blocker_link", "missing_evidence", "needs_review"].includes(gap.kind))
+    .slice(0, 5);
+  for (const gap of actionableGaps) {
+    if (gap.kind === "missing_blocker_link") {
+      addProposal({
+        kind: "risk",
+        objectType: "Risk",
+        title: gap.title.replace("Blocked without blocker link", "Clarify blocker"),
+        summary: gap.detail,
+        targetObjectId: gap.objectId,
+        relationshipType: "blocks",
+        confidence: gap.severity === "high" ? 0.82 : 0.68,
+      });
+      continue;
+    }
+    addProposal({
+      kind: gap.kind === "missing_owner" ? "owner" : "task",
+      objectType: "Task",
+      title: gap.kind === "missing_owner"
+        ? gap.title.replace("Missing owner", "Assign owner")
+        : gap.title.replace("Missing evidence", "Attach evidence").replace("Needs review", "Review fact"),
+      summary: gap.detail,
+      targetObjectId: gap.objectId,
+      relationshipType: "supports",
+      confidence: gap.severity === "high" ? 0.8 : 0.66,
+    });
+  }
+
+  for (const action of context.likelyNextActions.slice(0, 4)) {
+    if (objects.length >= 6) break;
+    addProposal({
+      kind: "task",
+      objectType: "Task",
+      title: action.title,
+      summary: action.reason,
+      targetObjectId: selectedObjectIds[0],
+      relationshipType: "supports",
+      confidence: 0.7,
+    });
+  }
+
+  if (objects.length === 0) {
+    addProposal({
+      kind: "question",
+      objectType: "Question",
+      title: `Review selected region for missing tasks, risks, or owners`,
+      summary: "No explicit gaps were detected automatically. Ask a human or agent to verify whether the selected region needs missing task, risk, or ownership facts before changing graph truth.",
+      targetObjectId: selectedObjectIds[0],
+      relationshipType: "supports",
+      confidence: 0.52,
+    });
+  }
+
+  return createContextGraphProposedDiff(actor, {
+    workspaceId: params.workspaceId,
+    reason: "Propose missing tasks, risks, or owners from the selected map region.",
+    evidence: {
+      kind: "selected-region-missing-facts",
+      mapViewId: params.mapViewId,
+      selectedObjectIds,
+      contextObjectCount: context.objects.length,
+      contextRelationshipCount: context.relationships.length,
+      contextGapCount: context.contextGaps.length,
+      likelyNextActionCount: context.likelyNextActions.length,
+    },
+    diff: {
+      objects,
+      relationships,
+      evidenceRefs,
+    },
+  });
 }
 
 export function contextGraphSystemActor(label = "context-graph-sync"): AppActor {

@@ -2,9 +2,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   applyContextGraphProposedDiff,
   buildSelectedRegionContext,
+  createMissingRegionFactsProposal,
   createPersonalContextMapView,
   createContextGraphProposedDiff,
   listContextMapViews,
+  reviewContextGraphProposedDiff,
+  updateContextGraphProposedDiff,
   upsertContextGraphObject,
   updateContextMapLayout,
 } from "./context-graph";
@@ -210,6 +213,96 @@ describe("context graph domain", () => {
     })]);
   });
 
+  it("edits pending proposed diffs after validating the replacement diff", async () => {
+    prismaMock.contextGraphProposedDiff.findFirst.mockResolvedValue({
+      id: "diff-1",
+      workspaceId: "ws-1",
+      status: "pending",
+      diffJson: { objects: [] },
+    });
+    prismaMock.contextGraphProposedDiff.update.mockResolvedValue({
+      id: "diff-1",
+      status: "pending",
+      reason: "Edited review",
+      diffJson: {
+        objects: [{ objectType: "Task", title: "Assign owner for charter", status: "proposed" }],
+      },
+    });
+
+    await expect(updateContextGraphProposedDiff(actor, {
+      workspaceId: "ws-1",
+      proposedDiffId: "diff-1",
+      reason: "Edited review",
+      diff: {
+        objects: [{ objectType: "Task", title: "Assign owner for charter", status: "proposed" }],
+      },
+    })).resolves.toMatchObject({ id: "diff-1", reason: "Edited review" });
+
+    expect(prismaMock.contextGraphProposedDiff.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        reason: "Edited review",
+        diffJson: expect.objectContaining({
+          objects: [expect.objectContaining({ objectType: "Task", title: "Assign owner for charter" })],
+        }),
+      }),
+    }));
+    expect(recordAuditMock).toHaveBeenCalledWith(expect.anything(), actor, expect.objectContaining({
+      action: "context-graph.diff.edited",
+    }));
+  });
+
+  it("rejects invalid edited proposed diffs before writing", async () => {
+    await expect(updateContextGraphProposedDiff(actor, {
+      workspaceId: "ws-1",
+      proposedDiffId: "diff-1",
+      diff: {
+        objects: [{ objectType: "StickyNote", title: "Bad type" }],
+      },
+    })).rejects.toMatchObject({ code: "INVALID_INPUT" });
+
+    expect(prismaMock.contextGraphProposedDiff.update).not.toHaveBeenCalled();
+  });
+
+  it("rejects malformed edited proposed diffs without throwing runtime type errors", async () => {
+    await expect(updateContextGraphProposedDiff(actor, {
+      workspaceId: "ws-1",
+      proposedDiffId: "diff-1",
+      diff: null as any,
+    })).rejects.toMatchObject({ code: "INVALID_INPUT" });
+
+    await expect(updateContextGraphProposedDiff(actor, {
+      workspaceId: "ws-1",
+      proposedDiffId: "diff-1",
+      diff: {
+        evidenceRefs: [{ sourceType: 123, sourceId: "meeting-1" }],
+      } as any,
+    })).rejects.toMatchObject({ code: "INVALID_INPUT" });
+
+    expect(prismaMock.contextGraphProposedDiff.update).not.toHaveBeenCalled();
+  });
+
+  it("rejects pending proposed diffs without applying graph truth", async () => {
+    prismaMock.contextGraphProposedDiff.findFirst.mockResolvedValue({
+      id: "diff-1",
+      workspaceId: "ws-1",
+      status: "pending",
+      diffJson: { objects: [{ objectType: "Task", title: "Needs owner" }] },
+    });
+    prismaMock.contextGraphProposedDiff.update.mockResolvedValue({ id: "diff-1", status: "rejected" });
+
+    await expect(reviewContextGraphProposedDiff(actor, {
+      workspaceId: "ws-1",
+      proposedDiffId: "diff-1",
+      status: "rejected",
+    })).resolves.toMatchObject({ id: "diff-1", status: "rejected" });
+
+    expect(prismaMock.contextGraphObject.create).not.toHaveBeenCalled();
+    expect(prismaMock.contextGraphRelationship.upsert).not.toHaveBeenCalled();
+    expect(recordAuditMock).toHaveBeenCalledWith(expect.anything(), actor, expect.objectContaining({
+      action: "context-graph.diff.rejected",
+    }));
+  });
+
   it("assembles selected-region context from graph traversal and evidence", async () => {
     prismaMock.contextGraphObject.findMany
       .mockResolvedValueOnce([{ id: "process-1", workspaceId: "ws-1", objectType: "Process", title: "Onboarding", status: "approved" }])
@@ -372,6 +465,103 @@ describe("context graph domain", () => {
       objectId: "risk-1",
       kind: "missing_blocker_link",
     }));
+  });
+
+  it("creates proposed tasks, risks, and owner follow-ups from selected-region gaps", async () => {
+    prismaMock.contextGraphObject.findMany.mockResolvedValueOnce([{
+      id: "task-1",
+      workspaceId: "ws-1",
+      objectType: "Task",
+      title: "Draft governance charter",
+      status: "approved",
+      properties: { workState: "blocked" },
+    }]);
+    prismaMock.contextGraphRelationship.findMany.mockResolvedValueOnce([]);
+    prismaMock.contextGraphEvidenceRef.findMany.mockResolvedValueOnce([]);
+    prismaMock.knowledgeChunk.findMany.mockResolvedValueOnce([]);
+    prismaMock.contextGraphProposedDiff.create.mockResolvedValue({
+      id: "diff-missing-1",
+      status: "pending",
+      reason: "Propose missing tasks, risks, or owners from the selected map region.",
+    });
+
+    await expect(createMissingRegionFactsProposal(actor, {
+      workspaceId: "ws-1",
+      mapViewId: "map-1",
+      objectIds: ["task-1"],
+    })).resolves.toMatchObject({ id: "diff-missing-1", status: "pending" });
+
+    expect(prismaMock.contextGraphProposedDiff.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        diffJson: expect.objectContaining({
+          objects: expect.arrayContaining([
+            expect.objectContaining({ objectType: "Task", title: "Assign owner: Draft governance charter" }),
+            expect.objectContaining({ objectType: "Task", title: "Attach evidence: Draft governance charter" }),
+            expect.objectContaining({ objectType: "Risk", title: "Clarify blocker: Draft governance charter" }),
+          ]),
+          relationships: expect.arrayContaining([
+            expect.objectContaining({ targetObjectId: "task-1", relationshipType: "supports" }),
+            expect.objectContaining({ targetObjectId: "task-1", relationshipType: "blocks" }),
+          ]),
+          evidenceRefs: expect.arrayContaining([
+            expect.objectContaining({ sourceType: "REGION_CONTEXT", sourceId: "map-1:task-1" }),
+          ]),
+        }),
+      }),
+    }));
+  });
+
+  it("uses bounded canonical missing-fact dedupe keys per target and gap kind", async () => {
+    prismaMock.contextGraphObject.findMany.mockResolvedValueOnce([
+      {
+        id: "task-2",
+        workspaceId: "ws-1",
+        objectType: "Task",
+        title: "Duplicate task title",
+        status: "approved",
+        properties: {},
+      },
+      {
+        id: "task-1",
+        workspaceId: "ws-1",
+        objectType: "Task",
+        title: "Duplicate task title",
+        status: "approved",
+        properties: {},
+      },
+    ]);
+    prismaMock.contextGraphRelationship.findMany.mockResolvedValueOnce([]);
+    prismaMock.contextGraphEvidenceRef.findMany.mockResolvedValueOnce([]);
+    prismaMock.knowledgeChunk.findMany.mockResolvedValueOnce([]);
+    prismaMock.contextGraphProposedDiff.create.mockResolvedValue({
+      id: "diff-missing-2",
+      status: "pending",
+      reason: "Propose missing tasks, risks, or owners from the selected map region.",
+    });
+
+    await createMissingRegionFactsProposal(actor, {
+      workspaceId: "ws-1",
+      mapViewId: "map-1",
+      objectIds: ["task-2", "task-1"],
+    });
+
+    const diffJson = prismaMock.contextGraphProposedDiff.create.mock.calls[0]?.[0]?.data.diffJson as any;
+    const ownerProposals = diffJson.objects.filter((object: any) => (
+      object.title === "Assign owner: Duplicate task title" && object.properties?.missingFactKind === "owner"
+    ));
+    const dedupeKeys = diffJson.objects.map((object: any) => object.dedupeKey);
+
+    expect(ownerProposals).toHaveLength(2);
+    expect(dedupeKeys.every((key: string) => key.length < 180)).toBe(true);
+    expect(dedupeKeys.every((key: string) => !key.includes("task-1-task-2") && !key.includes("task-2-task-1"))).toBe(true);
+    expect(new Set(dedupeKeys).size).toBe(dedupeKeys.length);
+    expect(diffJson.relationships).toEqual(expect.arrayContaining([
+      expect.objectContaining({ targetObjectId: "task-1", relationshipType: "supports" }),
+      expect.objectContaining({ targetObjectId: "task-2", relationshipType: "supports" }),
+    ]));
+    expect(diffJson.evidenceRefs).toEqual(expect.arrayContaining([
+      expect.objectContaining({ sourceType: "REGION_CONTEXT", sourceId: "map-1:task-1,task-2" }),
+    ]));
   });
 
   it("ensures process, organization, and agent master views before listing maps", async () => {
