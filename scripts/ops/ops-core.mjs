@@ -268,12 +268,13 @@ export async function fetchControlPlaneCustomers(env = process.env, fetchImpl = 
   return parsed;
 }
 
-export function buildControlPlaneIncidents(customers) {
+export function buildControlPlaneIncidents(customers, options = {}) {
   const rows = Array.isArray(customers) ? customers : [];
+  const sweepNowMs = referenceTimeMs(options.now);
   return rows.flatMap((row) => [
     missingSupportConnectorIncident(row),
-    agentFailureStreakIncident(row),
-    slackInvalidAuthIncident(row),
+    agentFailureStreakIncident(row, sweepNowMs),
+    slackInvalidAuthIncident(row, sweepNowMs),
     releaseMetadataDriftIncident(row),
   ].filter(Boolean).map(normalizeIncident));
 }
@@ -388,9 +389,9 @@ function missingSupportConnectorIncident(row) {
   };
 }
 
-function agentFailureStreakIncident(row) {
+function agentFailureStreakIncident(row, sweepNowMs) {
   const snapshot = latestSnapshot(row, "SUPPORT_READY");
-  const snapshotObservedAtMs = timestampMs(optionalText(snapshot?.observedAt) ?? optionalText(snapshot?.createdAt)) ?? Date.now();
+  const snapshotObservedAtMs = timestampMs(optionalText(snapshot?.observedAt) ?? optionalText(snapshot?.createdAt)) ?? sweepNowMs;
   const summary = record(snapshot?.summary);
   const runs = itemsFrom(summary?.agentRuns, ["items", "runs"]).map((run) => ({
     agentKey: optionalText(run.agentKey) ?? optionalText(run.key) ?? optionalText(run.name) ?? "unknown",
@@ -404,7 +405,7 @@ function agentFailureStreakIncident(row) {
     runsByAgent.set(run.agentKey, current);
   }
   const [agentKey, failures] = [...runsByAgent.entries()]
-    .map(([key, items]) => [key, activeFailureStreak(items, snapshotObservedAtMs)])
+    .map(([key, items]) => [key, activeFailureStreak(items, snapshotObservedAtMs, sweepNowMs)])
     .find(([, items]) => items.length >= 3) ?? [];
   if (!agentKey) return null;
   const label = deploymentLabel(row);
@@ -425,30 +426,30 @@ function agentFailureStreakIncident(row) {
   };
 }
 
-function activeFailureStreak(runs, snapshotObservedAtMs) {
+function activeFailureStreak(runs, snapshotObservedAtMs, sweepNowMs) {
   const sortedRuns = [...runs].sort((a, b) => (timestampMs(b.createdAt) ?? 0) - (timestampMs(a.createdAt) ?? 0));
   const failures = [];
   for (const run of sortedRuns) {
     if (run.status !== "FAILED") break;
     failures.push(run);
   }
-  const latestFailureAtMs = timestampMs(failures[0]?.createdAt);
-  if (!latestFailureAtMs || snapshotObservedAtMs - latestFailureAtMs > ACTIVE_SUPPORT_SIGNAL_WINDOW_MS) {
+  const latestFailureAtMs = newestTimestampMs(failures.map((failure) => failure.createdAt)) ?? snapshotObservedAtMs;
+  if (!latestFailureAtMs || sweepNowMs - latestFailureAtMs > ACTIVE_SUPPORT_SIGNAL_WINDOW_MS) {
     return [];
   }
   return failures;
 }
 
-function slackInvalidAuthIncident(row) {
+function slackInvalidAuthIncident(row, sweepNowMs) {
   const snapshot = latestSnapshot(row, "SUPPORT_READY");
-  const snapshotObservedAtMs = timestampMs(optionalText(snapshot?.observedAt) ?? optionalText(snapshot?.createdAt)) ?? Date.now();
+  const snapshotObservedAtMs = timestampMs(optionalText(snapshot?.observedAt) ?? optionalText(snapshot?.createdAt)) ?? sweepNowMs;
   const summary = record(snapshot?.summary);
   const failedJobs = itemsFrom(summary?.failedJobs, ["items", "jobs"]);
   const matches = failedJobs.filter((job) => {
     const type = optionalText(job.type) ?? optionalText(job.name) ?? "";
     const error = optionalText(job.error) ?? "";
     if (!/slack/i.test(type) || !/invalid_auth/i.test(error)) return false;
-    return isActiveSupportSignal(job, snapshotObservedAtMs);
+    return isActiveSupportSignal(job, snapshotObservedAtMs, sweepNowMs);
   });
   if (matches.length === 0) return null;
   const label = deploymentLabel(row);
@@ -470,9 +471,9 @@ function slackInvalidAuthIncident(row) {
   };
 }
 
-function isActiveSupportSignal(item, snapshotObservedAtMs) {
-  const signalAtMs = timestampMs(supportSignalTimestamp(item));
-  return !signalAtMs || snapshotObservedAtMs - signalAtMs <= ACTIVE_SUPPORT_SIGNAL_WINDOW_MS;
+function isActiveSupportSignal(item, snapshotObservedAtMs, sweepNowMs) {
+  const signalAtMs = timestampMs(supportSignalTimestamp(item)) ?? snapshotObservedAtMs;
+  return Boolean(signalAtMs) && sweepNowMs - signalAtMs <= ACTIVE_SUPPORT_SIGNAL_WINDOW_MS;
 }
 
 function supportSignalTimestamp(item) {
@@ -480,6 +481,19 @@ function supportSignalTimestamp(item) {
     ?? optionalText(item?.updatedAt)
     ?? optionalText(item?.completedAt)
     ?? optionalText(item?.createdAt);
+}
+
+function referenceTimeMs(value) {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  return timestampMs(value) ?? Date.now();
+}
+
+function newestTimestampMs(values) {
+  return values.reduce((newest, value) => {
+    const current = timestampMs(value);
+    if (!current) return newest;
+    return newest === null || current > newest ? current : newest;
+  }, null);
 }
 
 function releaseMetadataDriftIncident(row) {
