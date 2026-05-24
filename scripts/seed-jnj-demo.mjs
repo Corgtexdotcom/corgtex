@@ -921,7 +921,7 @@ async function seedContextMapData({ wsId, circleMappings, memberMappings, meetin
 
   function rolePosition(circleId, index) {
     if (circleId === "board") return { x: index * 280, y: 170 };
-    return { x: segmentCircleIds.indexOf(circleId) * 340, y: 680 + index * 132 };
+    return { x: segmentCircleIds.indexOf(circleId) * 340, y: 680 + index * 150 };
   }
 
   const orgCircleSpecs = CIRCLES.map((circle) => ({
@@ -948,7 +948,7 @@ async function seedContextMapData({ wsId, circleMappings, memberMappings, meetin
       const personIndex = personLayoutByMemberKey.size;
       personLayoutByMemberKey.set(role.assignee, {
         x: (personIndex % 5) * 340,
-        y: 1400 + Math.floor(personIndex / 5) * 132,
+        y: 1500 + Math.floor(personIndex / 5) * 150,
         roleTitles: [],
       });
     }
@@ -996,9 +996,238 @@ async function seedContextMapData({ wsId, circleMappings, memberMappings, meetin
   });
 
   const orgObjectSpecs = [...orgCircleSpecs, ...orgRoleSpecs, ...orgPersonSpecs];
+  const agentObjectId = (key) => `${wsId}-ctx-agent-${key}`;
+  const agentObjectSpecs = [
+    {
+      id: agentObjectId("input-meeting-transcript"),
+      objectType: "Meeting",
+      title: "Meeting transcript source",
+      summary: "Source record containing decisions, actions, and tensions before any graph mutation is proposed.",
+      properties: {
+        governanceView: true,
+        pathStage: "Input",
+        dataFlow: "Transcript snippets enter the context extraction path as evidence, not approved graph truth.",
+        governanceControls: ["Snippet-level evidence required", "Workspace membership checked before read"],
+      },
+      sourceEntityType: "Meeting",
+      sourceEntityId: aiMeeting?.id ?? "innovation-ai-working-group",
+      x: 0,
+      y: 0,
+    },
+    {
+      id: agentObjectId("input-brain-articles"),
+      objectType: "Document",
+      title: "Brain articles and documents",
+      summary: "Reference records that can support or contradict proposed graph facts.",
+      properties: {
+        governanceView: true,
+        pathStage: "Input",
+        dataFlow: "Knowledge records are ranked as supporting evidence and kept separate from graph truth.",
+        governanceControls: ["Source record id retained", "Evidence quote shown in inspector"],
+      },
+      sourceEntityType: "BRAIN_ARTICLE",
+      sourceEntityId: "capital-allocation-framework",
+      x: 0,
+      y: 180,
+    },
+    {
+      id: agentObjectId("input-audit-trail"),
+      objectType: "Evidence",
+      title: "Audit and run records",
+      summary: "Agent runs, tool calls, and audit events explain what happened during a proposal path.",
+      properties: {
+        governanceView: true,
+        pathStage: "Input",
+        dataFlow: "Operational records feed traceability and controls, not autonomous truth mutation.",
+        governanceControls: ["Run id retained", "Tool call output captured"],
+      },
+      sourceEntityType: "AgentRun",
+      sourceEntityId: `${wsId}-showcase-run-meeting-summary-3`,
+      x: 0,
+      y: 360,
+    },
+    {
+      id: agentObjectId("region-context-agent"),
+      objectType: "Agent",
+      title: "Region Context Agent",
+      summary: "Reads scoped map selections and assembles a context packet with evidence, neighbors, stale facts, and open questions.",
+      properties: {
+        governanceView: true,
+        pathStage: "Agent",
+        allowedActions: ["Read selected-region context", "Rank evidence and neighbors", "Return open questions"],
+        governanceControls: ["Scoped to selected map region", "No write scope"],
+      },
+      sourceEntityType: "AgentIdentity",
+      sourceEntityId: `${wsId}-agent-daily-digest`,
+      x: 360,
+      y: 85,
+    },
+    {
+      id: agentObjectId("diff-proposal-agent"),
+      objectType: "Agent",
+      title: "Graph Diff Proposal Agent",
+      summary: "Uses selected-region context to propose missing tasks, owners, risks, or policy links for human review.",
+      properties: {
+        governanceView: true,
+        pathStage: "Agent",
+        allowedActions: ["Create proposed diffs", "Explain evidence", "Flag missing owners, tasks, and risks"],
+        governanceControls: ["Propose-only write path", "Cannot apply approved graph truth"],
+        approvalRule: "Every truth-changing diff needs human approval before application.",
+      },
+      sourceEntityType: "AgentIdentity",
+      sourceEntityId: `${wsId}-agent-meeting-summary`,
+      x: 360,
+      y: 280,
+    },
+    {
+      id: agentObjectId("policy-scoped-read"),
+      objectType: "Policy",
+      title: "Scoped context read policy",
+      summary: "Agents may read only the selected workspace and selected-region context packet.",
+      properties: {
+        governanceView: true,
+        pathStage: "Policy",
+        governanceControls: ["Workspace membership required", "Selection scope required", "Permissions included in packet"],
+        approvalRule: "Read access is bounded by actor permissions and workspace membership.",
+      },
+      sourceEntityType: "POLICY_RECORD",
+      sourceEntityId: "context-graph-scoped-read",
+      x: 720,
+      y: 0,
+    },
+    {
+      id: agentObjectId("policy-propose-only"),
+      objectType: "Policy",
+      title: "Propose-only truth policy",
+      summary: "Agent outputs that change company truth must be saved as proposed diffs.",
+      properties: {
+        governanceView: true,
+        pathStage: "Policy",
+        governanceControls: ["ContextGraphProposedDiff required", "Before/after payload retained", "No silent mutation"],
+        approvalRule: "Approved graph records remain human or policy controlled.",
+      },
+      sourceEntityType: "POLICY_RECORD",
+      sourceEntityId: "context-graph-propose-only",
+      x: 720,
+      y: 180,
+    },
+    {
+      id: agentObjectId("policy-human-approval"),
+      objectType: "Policy",
+      title: "Human approval gate",
+      summary: "Admins and facilitators review, edit, approve, or reject proposed graph and map changes.",
+      properties: {
+        governanceView: true,
+        pathStage: "Approval",
+        governanceControls: ["Approver role checked", "Audit event recorded", "Applied diffs are explicit"],
+        approvalRule: "Master graph and map truth changes require approval.",
+      },
+      sourceEntityType: "POLICY_RECORD",
+      sourceEntityId: "context-graph-human-approval",
+      x: 720,
+      y: 360,
+    },
+    {
+      id: agentObjectId("tool-context-read"),
+      objectType: "Tool",
+      title: "MCP context read",
+      summary: "Tool path that returns a ranked selected-region context packet without mutating graph truth.",
+      properties: {
+        governanceView: true,
+        pathStage: "Tool",
+        allowedActions: ["Read map view", "Read selected-region context"],
+        governanceControls: ["Read-only scope", "Evidence and source records returned"],
+      },
+      sourceEntityType: "MCP_TOOL",
+      sourceEntityId: "context-graph.read",
+      x: 1080,
+      y: 85,
+    },
+    {
+      id: agentObjectId("tool-proposed-diff"),
+      objectType: "Tool",
+      title: "MCP proposed diff writer",
+      summary: "Tool path that writes proposed graph or map diffs for approval instead of applying them directly.",
+      properties: {
+        governanceView: true,
+        pathStage: "Tool",
+        allowedActions: ["Create ContextGraphProposedDiff", "Attach evidence refs"],
+        governanceControls: ["Pending status by default", "Approval required before apply"],
+        approvalRule: "The tool can propose changes but cannot approve them.",
+      },
+      sourceEntityType: "MCP_TOOL",
+      sourceEntityId: "context-graph.propose",
+      x: 1080,
+      y: 280,
+    },
+    {
+      id: agentObjectId("output-region-context"),
+      objectType: "Document",
+      title: "Selected-region context packet",
+      summary: "Ranked context containing facts, direct neighbors, evidence snippets, stale facts, permissions, questions, and next actions.",
+      properties: {
+        governanceView: true,
+        pathStage: "Output",
+        governanceControls: ["Includes permission summary", "Separates approved, stale, disputed, and proposed facts"],
+      },
+      sourceEntityType: "ContextPacket",
+      sourceEntityId: `${wsId}-agent-region-context-packet`,
+      x: 1440,
+      y: 0,
+    },
+    {
+      id: agentObjectId("output-proposed-diff"),
+      objectType: "Task",
+      title: "Proposed missing tasks, risks, and owners",
+      summary: "Agent-created proposed diff that a human can compare, edit, approve, or reject.",
+      properties: {
+        governanceView: true,
+        pathStage: "Output",
+        workState: "needs_review",
+        nextAction: "Review the proposed diff before applying any graph truth changes.",
+        governanceControls: ["Human review required", "Evidence refs attached"],
+      },
+      sourceEntityType: "ContextGraphProposedDiff",
+      sourceEntityId: `${wsId}-ctx-agent-demo-diff`,
+      x: 1440,
+      y: 180,
+    },
+    {
+      id: agentObjectId("output-audit-event"),
+      objectType: "Evidence",
+      title: "Audit trail event",
+      summary: "Trace showing who proposed, reviewed, and applied or rejected the graph change.",
+      properties: {
+        governanceView: true,
+        pathStage: "Output",
+        governanceControls: ["Actor recorded", "Proposal id recorded", "Approval outcome recorded"],
+      },
+      sourceEntityType: "AuditTrail",
+      sourceEntityId: "context-graph.proposed-diff.created",
+      x: 1440,
+      y: 360,
+    },
+    {
+      id: agentObjectId("risk-silent-mutation"),
+      objectType: "Risk",
+      title: "Silent graph mutation risk",
+      summary: "Risk that an agent could make company truth look authoritative without evidence or review.",
+      properties: {
+        governanceView: true,
+        pathStage: "Control risk",
+        nextAction: "Keep all truth-changing agent actions on proposed diffs with evidence and approval.",
+        governanceControls: ["Propose-only path", "Approval gate", "Audit trail"],
+      },
+      sourceEntityType: "RISK_REGISTER",
+      sourceEntityId: "silent-graph-mutation",
+      x: 720,
+      y: 540,
+    },
+  ];
   const processObjectIds = processObjectSpecs.map((object) => object.id);
   const orgObjectIds = orgObjectSpecs.map((object) => object.id);
-  const objectSpecs = [...processObjectSpecs, ...orgObjectSpecs];
+  const agentObjectIds = agentObjectSpecs.map((object) => object.id);
+  const objectSpecs = [...processObjectSpecs, ...orgObjectSpecs, ...agentObjectSpecs];
   const objectIds = objectSpecs.map((object) => object.id);
   await prisma.contextGraphObject.deleteMany({
     where: {
@@ -1137,6 +1366,54 @@ async function seedContextMapData({ wsId, circleMappings, memberMappings, meetin
     });
   }
 
+  const agentMapView = await prisma.contextMapView.upsert({
+    where: { id: `${wsId}-ctx-map-agent` },
+    update: {
+      name: "J&J agent governance map",
+      viewType: "agent",
+      query: {
+        demo: true,
+        mode: "agentGovernance",
+        objectIds: agentObjectIds,
+        objectTypes: ["Agent", "Policy", "Tool", "Meeting", "Document", "Task", "Risk", "Evidence"],
+        relationshipTypes: ["input_to", "output_of", "uses", "supports", "needs_approval_from", "created_in", "has_evidence", "blocks"],
+      },
+    },
+    create: {
+      id: `${wsId}-ctx-map-agent`,
+      workspaceId: wsId,
+      name: "J&J agent governance map",
+      viewType: "agent",
+      query: {
+        demo: true,
+        mode: "agentGovernance",
+        objectIds: agentObjectIds,
+        objectTypes: ["Agent", "Policy", "Tool", "Meeting", "Document", "Task", "Risk", "Evidence"],
+        relationshipTypes: ["input_to", "output_of", "uses", "supports", "needs_approval_from", "created_in", "has_evidence", "blocks"],
+      },
+    },
+  });
+
+  for (const object of agentObjectSpecs) {
+    await prisma.contextMapLayoutItem.upsert({
+      where: {
+        mapViewId_objectId: {
+          mapViewId: agentMapView.id,
+          objectId: object.id,
+        },
+      },
+      update: { x: object.x, y: object.y, width: 240, height: 118 },
+      create: {
+        mapViewId: agentMapView.id,
+        objectId: object.id,
+        x: object.x,
+        y: object.y,
+        width: 240,
+        height: 118,
+      },
+    });
+  }
+
   const processRelationships = [
     { sourceObjectId: `${wsId}-ctx-step-working-group`, targetObjectId: `${wsId}-ctx-process-ai-governance`, relationshipType: "part_of", status: "approved", confidence: 0.9 },
     { sourceObjectId: `${wsId}-ctx-step-review-request`, targetObjectId: `${wsId}-ctx-process-ai-governance`, relationshipType: "part_of", status: "approved", confidence: 0.86 },
@@ -1231,7 +1508,138 @@ async function seedContextMapData({ wsId, circleMappings, memberMappings, meetin
     }),
   ];
 
-  const relationships = [...processRelationships, ...orgRelationships];
+  const agentRelationships = [
+    {
+      sourceObjectId: agentObjectId("input-meeting-transcript"),
+      targetObjectId: agentObjectId("region-context-agent"),
+      relationshipType: "input_to",
+      status: "approved",
+      confidence: 0.91,
+      properties: { governanceView: true, relationScope: "input" },
+    },
+    {
+      sourceObjectId: agentObjectId("input-brain-articles"),
+      targetObjectId: agentObjectId("region-context-agent"),
+      relationshipType: "input_to",
+      status: "approved",
+      confidence: 0.88,
+      properties: { governanceView: true, relationScope: "input" },
+    },
+    {
+      sourceObjectId: agentObjectId("input-audit-trail"),
+      targetObjectId: agentObjectId("diff-proposal-agent"),
+      relationshipType: "input_to",
+      status: "approved",
+      confidence: 0.84,
+      properties: { governanceView: true, relationScope: "traceability" },
+    },
+    {
+      sourceObjectId: agentObjectId("region-context-agent"),
+      targetObjectId: agentObjectId("tool-context-read"),
+      relationshipType: "uses",
+      status: "approved",
+      confidence: 0.94,
+      properties: { governanceView: true, relationScope: "tool-use" },
+    },
+    {
+      sourceObjectId: agentObjectId("diff-proposal-agent"),
+      targetObjectId: agentObjectId("tool-context-read"),
+      relationshipType: "uses",
+      status: "approved",
+      confidence: 0.89,
+      properties: { governanceView: true, relationScope: "tool-use" },
+    },
+    {
+      sourceObjectId: agentObjectId("diff-proposal-agent"),
+      targetObjectId: agentObjectId("tool-proposed-diff"),
+      relationshipType: "uses",
+      status: "approved",
+      confidence: 0.93,
+      properties: { governanceView: true, relationScope: "tool-use" },
+    },
+    {
+      sourceObjectId: agentObjectId("policy-scoped-read"),
+      targetObjectId: agentObjectId("region-context-agent"),
+      relationshipType: "supports",
+      status: "approved",
+      confidence: 0.92,
+      properties: { governanceView: true, relationScope: "policy-control" },
+    },
+    {
+      sourceObjectId: agentObjectId("policy-scoped-read"),
+      targetObjectId: agentObjectId("tool-context-read"),
+      relationshipType: "supports",
+      status: "approved",
+      confidence: 0.9,
+      properties: { governanceView: true, relationScope: "policy-control" },
+    },
+    {
+      sourceObjectId: agentObjectId("policy-propose-only"),
+      targetObjectId: agentObjectId("diff-proposal-agent"),
+      relationshipType: "supports",
+      status: "approved",
+      confidence: 0.92,
+      properties: { governanceView: true, relationScope: "policy-control" },
+    },
+    {
+      sourceObjectId: agentObjectId("policy-propose-only"),
+      targetObjectId: agentObjectId("tool-proposed-diff"),
+      relationshipType: "supports",
+      status: "approved",
+      confidence: 0.91,
+      properties: { governanceView: true, relationScope: "policy-control" },
+    },
+    {
+      sourceObjectId: agentObjectId("policy-human-approval"),
+      targetObjectId: agentObjectId("output-proposed-diff"),
+      relationshipType: "needs_approval_from",
+      status: "approved",
+      confidence: 0.9,
+      properties: { governanceView: true, relationScope: "approval" },
+    },
+    {
+      sourceObjectId: agentObjectId("output-region-context"),
+      targetObjectId: agentObjectId("region-context-agent"),
+      relationshipType: "output_of",
+      status: "approved",
+      confidence: 0.9,
+      properties: { governanceView: true, relationScope: "output" },
+    },
+    {
+      sourceObjectId: agentObjectId("output-proposed-diff"),
+      targetObjectId: agentObjectId("diff-proposal-agent"),
+      relationshipType: "output_of",
+      status: "approved",
+      confidence: 0.88,
+      properties: { governanceView: true, relationScope: "output" },
+    },
+    {
+      sourceObjectId: agentObjectId("output-audit-event"),
+      targetObjectId: agentObjectId("output-proposed-diff"),
+      relationshipType: "has_evidence",
+      status: "approved",
+      confidence: 0.86,
+      properties: { governanceView: true, relationScope: "audit" },
+    },
+    {
+      sourceObjectId: agentObjectId("risk-silent-mutation"),
+      targetObjectId: agentObjectId("output-proposed-diff"),
+      relationshipType: "blocks",
+      status: "approved",
+      confidence: 0.72,
+      properties: { governanceView: true, relationScope: "risk-control" },
+    },
+    {
+      sourceObjectId: agentObjectId("policy-human-approval"),
+      targetObjectId: agentObjectId("risk-silent-mutation"),
+      relationshipType: "supports",
+      status: "approved",
+      confidence: 0.84,
+      properties: { governanceView: true, relationScope: "mitigation" },
+    },
+  ];
+
+  const relationships = [...processRelationships, ...orgRelationships, ...agentRelationships];
 
   await prisma.contextGraphRelationship.deleteMany({
     where: {
@@ -1332,7 +1740,108 @@ async function seedContextMapData({ wsId, circleMappings, memberMappings, meetin
     }),
   ];
 
-  const evidenceSpecs = [...processEvidenceSpecs, ...orgEvidenceSpecs];
+  const agentEvidenceSpecs = [
+    {
+      objectId: agentObjectId("input-meeting-transcript"),
+      sourceType: "MEETING",
+      sourceId: aiMeeting?.id ?? "innovation-ai-working-group",
+      quote: "Discussed AI governance, drug discovery ML platforms, and digital twin pilots.",
+      relevanceScore: 0.86,
+    },
+    {
+      objectId: agentObjectId("input-brain-articles"),
+      sourceType: "BRAIN_ARTICLE",
+      sourceId: "capital-allocation-framework",
+      quote: "Capital allocation and governance records support agent proposals, but do not become graph truth without approval.",
+      relevanceScore: 0.8,
+    },
+    {
+      objectId: agentObjectId("input-audit-trail"),
+      sourceType: "AGENT_RUN",
+      sourceId: `${wsId}-showcase-run-meeting-summary-3`,
+      quote: "Meeting Summary Agent completed a traceable extraction run with tool calls and model usage.",
+      relevanceScore: 0.78,
+    },
+    {
+      objectId: agentObjectId("region-context-agent"),
+      sourceType: "AGENT_IDENTITY",
+      sourceId: `${wsId}-agent-daily-digest`,
+      quote: "The agent reads scoped context and returns ranked facts, evidence, permissions, questions, and next actions.",
+      relevanceScore: 0.82,
+    },
+    {
+      objectId: agentObjectId("diff-proposal-agent"),
+      sourceType: "AGENT_IDENTITY",
+      sourceId: `${wsId}-agent-meeting-summary`,
+      quote: "Agent outputs can propose graph changes, but company truth remains controlled by review and approval.",
+      relevanceScore: 0.84,
+    },
+    {
+      objectId: agentObjectId("policy-scoped-read"),
+      sourceType: "POLICY_RECORD",
+      sourceId: "context-graph-scoped-read",
+      quote: "Agents may read selected-region context only when workspace membership and permissions allow it.",
+      relevanceScore: 0.9,
+    },
+    {
+      objectId: agentObjectId("policy-propose-only"),
+      sourceType: "POLICY_RECORD",
+      sourceId: "context-graph-propose-only",
+      quote: "Truth-changing agent outputs must become proposed diffs for before/after review.",
+      relevanceScore: 0.92,
+    },
+    {
+      objectId: agentObjectId("policy-human-approval"),
+      sourceType: "POLICY_RECORD",
+      sourceId: "context-graph-human-approval",
+      quote: "Admins and facilitators approve, edit, or reject proposed graph and map changes.",
+      relevanceScore: 0.9,
+    },
+    {
+      objectId: agentObjectId("tool-context-read"),
+      sourceType: "MCP_TOOL",
+      sourceId: "context-graph.read",
+      quote: "The read path returns scoped context packets and does not mutate graph records.",
+      relevanceScore: 0.86,
+    },
+    {
+      objectId: agentObjectId("tool-proposed-diff"),
+      sourceType: "MCP_TOOL",
+      sourceId: "context-graph.propose",
+      quote: "The propose path writes pending ContextGraphProposedDiff records for review.",
+      relevanceScore: 0.88,
+    },
+    {
+      objectId: agentObjectId("output-region-context"),
+      sourceType: "CONTEXT_PACKET",
+      sourceId: `${wsId}-agent-region-context-packet`,
+      quote: "Selected-region context includes graph facts, evidence snippets, source records, permissions, gaps, and likely next actions.",
+      relevanceScore: 0.86,
+    },
+    {
+      objectId: agentObjectId("output-proposed-diff"),
+      sourceType: "PROPOSED_DIFF",
+      sourceId: `${wsId}-ctx-agent-demo-diff`,
+      quote: "Proposed diffs stay pending until an authorized human approves, edits, or rejects them.",
+      relevanceScore: 0.88,
+    },
+    {
+      objectId: agentObjectId("output-audit-event"),
+      sourceType: "AUDIT_TRAIL",
+      sourceId: "context-graph.proposed-diff.created",
+      quote: "Audit events preserve who proposed the graph change and what review outcome followed.",
+      relevanceScore: 0.82,
+    },
+    {
+      objectId: agentObjectId("risk-silent-mutation"),
+      sourceType: "RISK_REGISTER",
+      sourceId: "silent-graph-mutation",
+      quote: "Silent graph mutation is controlled by propose-only tools, approval policy, evidence display, and audit trails.",
+      relevanceScore: 0.86,
+    },
+  ];
+
+  const evidenceSpecs = [...processEvidenceSpecs, ...orgEvidenceSpecs, ...agentEvidenceSpecs];
 
   for (const evidence of evidenceSpecs) {
     const sourceType = evidence.sourceType ?? "MEETING";

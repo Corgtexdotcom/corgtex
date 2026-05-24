@@ -139,6 +139,9 @@ const NODE_COLORS: Record<string, { border: string; background: string; accent: 
   Tool: { border: "#059669", background: "#ecfdf5", accent: "#047857" },
   Agent: { border: "#0d9488", background: "#f0fdfa", accent: "#0f766e" },
   Policy: { border: "#334155", background: "#f8fafc", accent: "#1e293b" },
+  Document: { border: "#2563eb", background: "#eff6ff", accent: "#1d4ed8" },
+  Evidence: { border: "#64748b", background: "#f8fafc", accent: "#475569" },
+  Metric: { border: "#b45309", background: "#fffbeb", accent: "#92400e" },
 };
 
 function positionForIndex(index: number) {
@@ -377,6 +380,8 @@ export default function ContextMapClient({ workspaceId, data, includeStale = fal
     ? data.relationships.filter((relationship) => relationship.sourceObjectId === selectedObject.id || relationship.targetObjectId === selectedObject.id)
     : [];
   const selectedAccountabilities = selectedObject ? propertyStringArray(selectedObject.properties, "accountabilities") : [];
+  const selectedControls = selectedObject ? propertyStringArray(selectedObject.properties, "governanceControls") : [];
+  const selectedAllowedActions = selectedObject ? propertyStringArray(selectedObject.properties, "allowedActions") : [];
   const selectedOrgKind = selectedObject ? propertyText(selectedObject.properties, "orgKind") : null;
 
   useEffect(() => {
@@ -771,12 +776,35 @@ export default function ContextMapClient({ workspaceId, data, includeStale = fal
                     {propertyText(selectedObject.properties, "nextAction") && (
                       <p className="context-map-next-action">{propertyText(selectedObject.properties, "nextAction")}</p>
                     )}
+                    {propertyText(selectedObject.properties, "approvalRule") && (
+                      <p className="context-map-next-action">Approval: {propertyText(selectedObject.properties, "approvalRule")}</p>
+                    )}
                     {selectedAccountabilities.length > 0 && (
                       <div className="context-map-property-list">
                         <strong>Accountabilities</strong>
                         <ul>
                           {selectedAccountabilities.slice(0, 5).map((accountability) => (
                             <li key={accountability}>{accountability}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                    {selectedControls.length > 0 && (
+                      <div className="context-map-property-list">
+                        <strong>Governance controls</strong>
+                        <ul>
+                          {selectedControls.slice(0, 5).map((control) => (
+                            <li key={control}>{control}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                    {selectedAllowedActions.length > 0 && (
+                      <div className="context-map-property-list">
+                        <strong>Allowed actions</strong>
+                        <ul>
+                          {selectedAllowedActions.slice(0, 5).map((action) => (
+                            <li key={action}>{action}</li>
                           ))}
                         </ul>
                       </div>

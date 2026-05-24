@@ -145,6 +145,15 @@ const DEFAULT_CONTEXT_MAP_VIEW_CONFIGS: Array<{
       relationshipTypes: ["part_of", "member_of", "reports_to", "owns"],
     },
   },
+  {
+    name: "Agent governance map",
+    viewType: "agent",
+    query: {
+      mode: "agentGovernance",
+      objectTypes: ["Agent", "Policy", "Tool", "Meeting", "Document", "Task", "Decision", "Risk", "Evidence"],
+      relationshipTypes: ["input_to", "output_of", "uses", "supports", "needs_approval_from", "created_in", "has_evidence", "blocks"],
+    },
+  },
 ];
 
 export type ContextGraphDiffInput = {
