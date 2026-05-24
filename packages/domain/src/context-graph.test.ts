@@ -374,9 +374,10 @@ describe("context graph domain", () => {
     }));
   });
 
-  it("ensures process and organization master views before listing maps", async () => {
+  it("ensures process, organization, and agent master views before listing maps", async () => {
     prismaMock.contextMapView.findFirst.mockReset();
     prismaMock.contextMapView.findFirst
+      .mockResolvedValueOnce(null)
       .mockResolvedValueOnce(null)
       .mockResolvedValueOnce(null);
     prismaMock.contextMapView.create
@@ -395,13 +396,22 @@ describe("context graph domain", () => {
         viewType: "org",
         query: {},
         createdByUserId: null,
+      })
+      .mockResolvedValueOnce({
+        id: "agent-master",
+        workspaceId: "ws-1",
+        name: "Agent governance map",
+        viewType: "agent",
+        query: {},
+        createdByUserId: null,
       });
     prismaMock.contextMapView.findMany.mockResolvedValueOnce([
       { id: "process-master", viewType: "process", createdByUserId: null },
       { id: "org-master", viewType: "org", createdByUserId: null },
+      { id: "agent-master", viewType: "agent", createdByUserId: null },
     ]);
 
-    await expect(listContextMapViews(actor, "ws-1")).resolves.toHaveLength(2);
+    await expect(listContextMapViews(actor, "ws-1")).resolves.toHaveLength(3);
 
     expect(prismaMock.contextMapView.create).toHaveBeenNthCalledWith(1, expect.objectContaining({
       data: expect.objectContaining({
@@ -419,6 +429,18 @@ describe("context graph domain", () => {
           mode: "organization",
           objectTypes: ["Team", "Role", "Person"],
           relationshipTypes: ["part_of", "member_of", "reports_to", "owns"],
+        }),
+      }),
+    }));
+    expect(prismaMock.contextMapView.create).toHaveBeenNthCalledWith(3, expect.objectContaining({
+      data: expect.objectContaining({
+        name: "Agent governance map",
+        viewType: "agent",
+        createdByUserId: null,
+        query: expect.objectContaining({
+          mode: "agentGovernance",
+          objectTypes: ["Agent", "Policy", "Tool", "Meeting", "Document", "Task", "Decision", "Risk", "Evidence"],
+          relationshipTypes: ["input_to", "output_of", "uses", "supports", "needs_approval_from", "created_in", "has_evidence", "blocks"],
         }),
       }),
     }));
