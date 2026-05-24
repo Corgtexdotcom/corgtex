@@ -113,11 +113,16 @@ Determine:
   const createNew = result.createNew && typeof result.createNew === "object" ? result.createNew : null;
 
   const touchedArticleIds: string[] = [];
+  const skippedNonDraftSlugs: string[] = [];
 
   // Step 2: Update existing articles
   for (const slug of updateSlugs) {
     const existing = articles.find((a) => a.slug === slug);
     if (!existing) continue;
+    if (existing.authority !== "DRAFT") {
+      skippedNonDraftSlugs.push(existing.slug);
+      continue;
+    }
 
     const synthesized = await defaultModelGateway.chat({
       model,
@@ -233,12 +238,12 @@ Rules:
       },
     });
 
-    // Deduplicate and exclude already-touched articles, skip HISTORICAL
+    // Deduplicate and exclude already-touched articles. Agents may only edit draft articles.
     const candidateArticles = new Map<string, typeof inboundBacklinks[0]["fromArticle"]>();
     for (const bl of inboundBacklinks) {
       if (
         !touchedArticleIds.includes(bl.fromArticle.id) &&
-        bl.fromArticle.authority !== "HISTORICAL" &&
+        bl.fromArticle.authority === "DRAFT" &&
         !candidateArticles.has(bl.fromArticle.id)
       ) {
         candidateArticles.set(bl.fromArticle.id, bl.fromArticle);
@@ -316,6 +321,16 @@ Rules:
   // Step 5: Rebuild backlinks
   await rebuildBacklinks(agentActor, { workspaceId: params.workspaceId });
 
+  if (touchedArticleIds.length === 0 && skippedNonDraftSlugs.length > 0) {
+    return {
+      skipped: true,
+      reason: "non_draft_article",
+      sourceId: source.id,
+      skippedSlugs: skippedNonDraftSlugs,
+      summary: result.summary ?? null,
+    };
+  }
+
   // Step 6: Mark source absorbed
   await markSourceAbsorbed(agentActor, { sourceId: source.id });
 
@@ -325,6 +340,7 @@ Rules:
     updatedSlugs: updateSlugs,
     createdSlug: createNew?.slug ?? null,
     touchedArticleCount: touchedArticleIds.length,
+    skippedSlugs: skippedNonDraftSlugs,
     summary: result.summary ?? null,
   };
 }

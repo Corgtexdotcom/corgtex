@@ -475,6 +475,68 @@ describe("runDailyDigest", () => {
     }));
   });
 
+  it("updates an existing draft newspaper article instead of creating a duplicate slug", async () => {
+    prismaMock.buildArtifact.findMany.mockResolvedValue([mockRecentBuildArtifact()]);
+    prismaMock.brainArticle.findUnique
+      .mockResolvedValueOnce({
+        id: "digest-1",
+        slug: "daily-newspaper-2026-04-30",
+        authority: "DRAFT",
+        sourceIds: [],
+        bodyMd: "Old digest",
+      })
+      .mockResolvedValue({ bodyMd: "Member profile" });
+
+    const { runDailyDigest } = await import("./daily-digest");
+    await runDailyDigest({
+      workspaceId: "workspace-1",
+      dateISO: "2026-04-30T12:00:00.000Z",
+      cadence: "DAILY",
+    });
+
+    expect(createArticleMock).not.toHaveBeenCalled();
+    expect(updateArticleMock).toHaveBeenCalledWith(expect.objectContaining({ kind: "agent" }), expect.objectContaining({
+      workspaceId: "workspace-1",
+      slug: "daily-newspaper-2026-04-30",
+      title: "Daily Newspaper - 2026-04-30",
+      bodyMd: expect.stringContaining("## Built / Shipped Work"),
+    }));
+  });
+
+  it("skips writing over an existing non-draft newspaper article and still sends the digest", async () => {
+    prismaMock.buildArtifact.findMany.mockResolvedValue([mockRecentBuildArtifact()]);
+    prismaMock.brainArticle.findUnique
+      .mockResolvedValueOnce({
+        id: "digest-1",
+        slug: "daily-newspaper-2026-04-30",
+        authority: "REFERENCE",
+        sourceIds: [],
+        bodyMd: "Published digest",
+      })
+      .mockResolvedValue({ bodyMd: "Member profile" });
+
+    const { runDailyDigest } = await import("./daily-digest");
+    const result = await runDailyDigest({
+      workspaceId: "workspace-1",
+      dateISO: "2026-04-30T12:00:00.000Z",
+      cadence: "DAILY",
+    });
+
+    expect(result).toEqual(expect.objectContaining({
+      success: true,
+      sentEmails: 1,
+    }));
+    expect(createArticleMock).not.toHaveBeenCalled();
+    expect(updateArticleMock).not.toHaveBeenCalled();
+    expect(loggerMock.info).toHaveBeenCalledWith("newspaper_digest_article_write_skipped", expect.objectContaining({
+      reason: "non_draft_article",
+      slug: "daily-newspaper-2026-04-30",
+    }));
+    expect(sendEmailMock).toHaveBeenCalledWith(expect.objectContaining({
+      to: "member@example.com",
+    }));
+  });
+
   it("sends the curated demo welcome newspaper once and records a CRM activity", async () => {
     prismaMock.demoLead.findFirst.mockResolvedValue({
       id: "lead-1",

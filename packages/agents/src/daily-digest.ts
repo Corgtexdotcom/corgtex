@@ -404,7 +404,15 @@ Rules:
 
     const newBodyMd = profileMergeResult.content;
 
-    if (existingArticle) {
+    if (existingArticle?.authority && existingArticle.authority !== "DRAFT") {
+      logger.info("newspaper_profile_update_skipped", {
+        workspaceId: params.workspaceId,
+        workflowJobId: params.workflowJobId ?? null,
+        articleId: existingArticle.id,
+        slug,
+        reason: "non_draft_article",
+      });
+    } else if (existingArticle) {
       await updateArticle(agentActor, {
         workspaceId: params.workspaceId,
         slug,
@@ -499,14 +507,43 @@ Rules:
     };
   }
 
-  await createArticle(agentActor, {
-    workspaceId: params.workspaceId,
-    slug: digestSlug,
-    title: digestTitle,
-    type: "DIGEST" as BrainArticleType,
-    authority: "DRAFT",
-    bodyMd: renderNewspaperDigestMarkdown({ title: digestTitle, digest }),
+  const digestBodyMd = renderNewspaperDigestMarkdown({ title: digestTitle, digest });
+  const existingDigestArticle = await prisma.brainArticle.findUnique({
+    where: {
+      workspaceId_slug: {
+        workspaceId: params.workspaceId,
+        slug: digestSlug,
+      },
+    },
   });
+
+  if (existingDigestArticle?.authority && existingDigestArticle.authority !== "DRAFT") {
+    logger.info("newspaper_digest_article_write_skipped", {
+      workspaceId: params.workspaceId,
+      workflowJobId: params.workflowJobId ?? null,
+      articleId: existingDigestArticle.id,
+      slug: digestSlug,
+      reason: "non_draft_article",
+    });
+  } else if (existingDigestArticle) {
+    await updateArticle(agentActor, {
+      workspaceId: params.workspaceId,
+      slug: digestSlug,
+      title: digestTitle,
+      bodyMd: digestBodyMd,
+      changeSummary: `Regenerated ${cadence.toLowerCase()} newspaper for ${params.dateISO.split("T")[0]}`,
+      agentRunId: params.agentRunId ?? null,
+    });
+  } else {
+    await createArticle(agentActor, {
+      workspaceId: params.workspaceId,
+      slug: digestSlug,
+      title: digestTitle,
+      type: "DIGEST" as BrainArticleType,
+      authority: "DRAFT",
+      bodyMd: digestBodyMd,
+    });
+  }
 
   // 5. Rebuild backlinks
   await rebuildBacklinks(agentActor, { workspaceId: params.workspaceId });
