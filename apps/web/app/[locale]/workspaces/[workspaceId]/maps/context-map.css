@@ -145,6 +145,12 @@
   min-height: 680px;
 }
 
+@media (min-width: 921px) {
+  .context-map-shell:not(.context-map-shell--bottom-inspector) .context-map-canvas {
+    width: calc(100% - 418px);
+  }
+}
+
 .context-map-shell--fullscreen .context-map-canvas {
   height: calc(100dvh - 57px);
   min-height: 0;
@@ -211,12 +217,14 @@
   font-weight: 700;
 }
 
-.react-flow__node.selected .context-map-node-card {
+.react-flow__node.selected .context-map-node-card,
+.context-map-flow-node--selected .context-map-node-card {
   outline: 3px solid color-mix(in srgb, var(--accent) 36%, transparent);
   box-shadow: 0 18px 38px rgba(15, 23, 42, 0.16), 0 0 0 1px var(--accent);
 }
 
-.react-flow__edge.selected path {
+.react-flow__edge.selected path,
+.context-map-flow-edge--selected path {
   stroke-width: 3px;
 }
 
@@ -371,6 +379,14 @@
   color: var(--text);
   font-size: 0.94rem;
   line-height: 1.35;
+}
+
+.context-map-next-action {
+  padding: 8px 10px;
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: var(--accent-soft);
+  color: var(--text) !important;
 }
 
 .context-map-definition-list {

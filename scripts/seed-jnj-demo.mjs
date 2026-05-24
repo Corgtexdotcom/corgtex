@@ -743,22 +743,48 @@ async function seedContextMapData({ wsId, circleMappings, meetingMappings }) {
     {
       id: `${wsId}-ctx-process-ai-governance`,
       objectType: "Process",
-      title: "AI governance intake process",
-      summary: "A safe demo process for moving AI ideas from working-group discussion into reviewed operating context.",
+      title: "AI governance critical path",
+      summary: "A safe demo process for moving AI ideas from source-record capture into reviewed operating context.",
+      properties: {
+        criticalPath: true,
+        pathStage: "Process",
+        nextAction: "Review the blocked charter task and decide who owns MedTech transferability.",
+      },
       sourceEntityType: "DemoContext",
       sourceEntityId: "ai-governance-process",
       x: 0,
-      y: 80,
+      y: 96,
     },
     {
       id: `${wsId}-ctx-step-working-group`,
       objectType: "ProcessStep",
       title: "Working group captures opportunity",
-      summary: "R&D and MedTech leaders capture AI opportunities during the kickoff meeting.",
+      summary: "R&D and MedTech leaders capture AI opportunities from the kickoff meeting source record.",
+      properties: {
+        criticalPath: true,
+        pathStage: "1. Capture",
+        workState: "complete",
+      },
       sourceEntityType: "Meeting",
       sourceEntityId: aiMeeting?.id ?? "innovation-ai-working-group",
-      x: 300,
+      x: 280,
       y: 0,
+    },
+    {
+      id: `${wsId}-ctx-step-review-request`,
+      objectType: "ProcessStep",
+      title: "Review AI governance request",
+      summary: "The request is reviewed for operating-model impact, owner clarity, and evidence quality.",
+      properties: {
+        criticalPath: true,
+        pathStage: "2. Review",
+        workState: "in_progress",
+        nextAction: "Resolve MedTech transferability before approving the charter.",
+      },
+      sourceEntityType: "DemoContext",
+      sourceEntityId: "ai-governance-review-step",
+      x: 280,
+      y: 176,
     },
     {
       id: `${wsId}-ctx-decision-coe`,
@@ -766,21 +792,31 @@ async function seedContextMapData({ wsId, circleMappings, meetingMappings }) {
       title: "Create R&D AI Center of Excellence",
       summary: "The working group agreed to establish a shared AI Center of Excellence to standardize tooling.",
       confidence: 0.93,
+      properties: {
+        criticalPath: true,
+        pathStage: "Decision",
+        workState: "approved",
+      },
       sourceEntityType: "MeetingInsight",
       sourceEntityId: `${wsId}-insight-applied-ai-coe-decision`,
-      x: 620,
+      x: 560,
       y: 0,
     },
     {
       id: `${wsId}-ctx-task-charter`,
       objectType: "Task",
       title: "Draft AI governance working-group charter",
-      summary: "Open proposed follow-up to circulate a charter before the next R&D review.",
+      summary: "In-progress follow-up to circulate a charter before the next R&D review.",
       confidence: 0.72,
-      status: "proposed",
+      properties: {
+        criticalPath: true,
+        pathStage: "Execution",
+        workState: "in_progress",
+        nextAction: "Add MedTech transferability risk owner and blocker mitigation before review.",
+      },
       sourceEntityType: "MeetingInsight",
       sourceEntityId: `${wsId}-insight-needs-review-ai-governance`,
-      x: 620,
+      x: 560,
       y: 190,
     },
     {
@@ -788,20 +824,26 @@ async function seedContextMapData({ wsId, circleMappings, meetingMappings }) {
       objectType: "Team",
       title: "Research & Development",
       summary: "Cross-cutting R&D strategy and pipeline management.",
+      properties: {
+        pathStage: "Owner",
+      },
       sourceEntityType: "Circle",
       sourceEntityId: rdCircleId,
-      x: 300,
-      y: 210,
+      x: 280,
+      y: 352,
     },
     {
       id: `${wsId}-ctx-team-medtech`,
       objectType: "Team",
       title: "MedTech",
       summary: "Medical devices, surgical solutions, and vision.",
+      properties: {
+        pathStage: "Approver",
+      },
       sourceEntityType: "Circle",
       sourceEntityId: medtechCircleId,
-      x: 930,
-      y: 210,
+      x: 820,
+      y: 176,
     },
     {
       id: `${wsId}-ctx-risk-digital-twin`,
@@ -810,30 +852,57 @@ async function seedContextMapData({ wsId, circleMappings, meetingMappings }) {
       summary: "The transcript hints that MedTech digital twin pilots may need separate governance, but ownership is not yet clear.",
       confidence: 0.38,
       status: "proposed",
+      properties: {
+        criticalPath: true,
+        pathStage: "Blocker",
+        workState: "blocked",
+        nextAction: "Name a MedTech owner and decide whether digital twin pilots follow the same COE review.",
+      },
       sourceEntityType: "MeetingInsight",
       sourceEntityId: `${wsId}-insight-low-confidence-digital-twin`,
-      x: 930,
-      y: 20,
+      x: 820,
+      y: 0,
     },
     {
       id: `${wsId}-ctx-meeting-ai-kickoff`,
       objectType: "Meeting",
       title: "Innovation & AI Working Group Kickoff",
       summary: "Discussed AI governance, drug discovery ML platforms, and digital twin pilots.",
+      properties: {
+        pathStage: "Source record",
+      },
       sourceEntityType: "Meeting",
       sourceEntityId: aiMeeting?.id ?? "innovation-ai-working-group",
       x: 0,
       y: 300,
     },
     {
+      id: `${wsId}-ctx-tool-mcp-smoke`,
+      objectType: "Tool",
+      title: "MCP production smoke",
+      summary: "Control-plane smoke check that agents can use as evidence before proposing graph changes.",
+      confidence: 0.82,
+      properties: {
+        pathStage: "Control",
+        workState: "ready",
+      },
+      sourceEntityType: "DemoContext",
+      sourceEntityId: "mcp-production-smoke",
+      x: 820,
+      y: 352,
+    },
+    {
       id: `${wsId}-ctx-team-executive`,
       objectType: "Team",
       title: "Executive Committee",
       summary: "Company-wide governance and strategic oversight.",
+      properties: {
+        pathStage: "Governance",
+      },
       sourceEntityType: "Circle",
       sourceEntityId: boardCircleId,
-      x: 300,
-      y: 420,
+      x: 280,
+      y: 528,
     },
   ];
 
@@ -855,6 +924,7 @@ async function seedContextMapData({ wsId, circleMappings, meetingMappings }) {
         objectType: object.objectType,
         title: object.title,
         summary: object.summary,
+        properties: object.properties ?? {},
         confidence: object.confidence ?? null,
         status: object.status ?? "approved",
         sourceEntityType: object.sourceEntityType,
@@ -867,6 +937,7 @@ async function seedContextMapData({ wsId, circleMappings, meetingMappings }) {
         objectType: object.objectType,
         title: object.title,
         summary: object.summary,
+        properties: object.properties ?? {},
         confidence: object.confidence ?? null,
         status: object.status ?? "approved",
         createdByType: "integration",
@@ -880,16 +951,28 @@ async function seedContextMapData({ wsId, circleMappings, meetingMappings }) {
   const mapView = await prisma.contextMapView.upsert({
     where: { id: `${wsId}-ctx-map-process` },
     update: {
-      name: "AI governance process map",
+      name: "AI governance critical path",
       viewType: "process",
-      query: { demo: true, objectIds },
+      query: {
+        demo: true,
+        mode: "criticalPath",
+        objectIds,
+        objectTypes: ["Process", "ProcessStep", "Decision", "Task", "Risk", "Team", "Tool", "Meeting"],
+        relationshipTypes: ["part_of", "depends_on", "blocks", "owns", "assigned_to", "supports", "uses", "created_in", "decided_in", "needs_approval_from"],
+      },
     },
     create: {
       id: `${wsId}-ctx-map-process`,
       workspaceId: wsId,
-      name: "AI governance process map",
+      name: "AI governance critical path",
       viewType: "process",
-      query: { demo: true, objectIds },
+      query: {
+        demo: true,
+        mode: "criticalPath",
+        objectIds,
+        objectTypes: ["Process", "ProcessStep", "Decision", "Task", "Risk", "Team", "Tool", "Meeting"],
+        relationshipTypes: ["part_of", "depends_on", "blocks", "owns", "assigned_to", "supports", "uses", "created_in", "decided_in", "needs_approval_from"],
+      },
     },
   });
 
@@ -914,27 +997,45 @@ async function seedContextMapData({ wsId, circleMappings, meetingMappings }) {
   }
 
   const relationships = [
-    [`${wsId}-ctx-step-working-group`, `${wsId}-ctx-process-ai-governance`, "part_of", "approved"],
-    [`${wsId}-ctx-decision-coe`, `${wsId}-ctx-meeting-ai-kickoff`, "decided_in", "approved"],
-    [`${wsId}-ctx-task-charter`, `${wsId}-ctx-meeting-ai-kickoff`, "created_in", "proposed"],
-    [`${wsId}-ctx-task-charter`, `${wsId}-ctx-team-rd`, "assigned_to", "proposed"],
-    [`${wsId}-ctx-decision-coe`, `${wsId}-ctx-team-rd`, "owns", "approved"],
-    [`${wsId}-ctx-risk-digital-twin`, `${wsId}-ctx-team-medtech`, "needs_approval_from", "proposed"],
-    [`${wsId}-ctx-team-rd`, `${wsId}-ctx-team-executive`, "part_of", "approved"],
-    [`${wsId}-ctx-team-medtech`, `${wsId}-ctx-team-executive`, "part_of", "approved"],
+    { sourceObjectId: `${wsId}-ctx-step-working-group`, targetObjectId: `${wsId}-ctx-process-ai-governance`, relationshipType: "part_of", status: "approved", confidence: 0.9 },
+    { sourceObjectId: `${wsId}-ctx-step-review-request`, targetObjectId: `${wsId}-ctx-process-ai-governance`, relationshipType: "part_of", status: "approved", confidence: 0.86 },
+    { sourceObjectId: `${wsId}-ctx-meeting-ai-kickoff`, targetObjectId: `${wsId}-ctx-step-working-group`, relationshipType: "supports", status: "approved", confidence: 0.88 },
+    { sourceObjectId: `${wsId}-ctx-decision-coe`, targetObjectId: `${wsId}-ctx-meeting-ai-kickoff`, relationshipType: "decided_in", status: "approved", confidence: 0.93 },
+    { sourceObjectId: `${wsId}-ctx-decision-coe`, targetObjectId: `${wsId}-ctx-step-review-request`, relationshipType: "supports", status: "approved", confidence: 0.88 },
+    { sourceObjectId: `${wsId}-ctx-task-charter`, targetObjectId: `${wsId}-ctx-meeting-ai-kickoff`, relationshipType: "created_in", status: "approved", confidence: 0.72 },
+    { sourceObjectId: `${wsId}-ctx-task-charter`, targetObjectId: `${wsId}-ctx-decision-coe`, relationshipType: "depends_on", status: "approved", confidence: 0.82 },
+    { sourceObjectId: `${wsId}-ctx-task-charter`, targetObjectId: `${wsId}-ctx-team-rd`, relationshipType: "assigned_to", status: "approved", confidence: 0.84 },
+    { sourceObjectId: `${wsId}-ctx-risk-digital-twin`, targetObjectId: `${wsId}-ctx-task-charter`, relationshipType: "blocks", status: "proposed", confidence: 0.38 },
+    { sourceObjectId: `${wsId}-ctx-risk-digital-twin`, targetObjectId: `${wsId}-ctx-team-medtech`, relationshipType: "needs_approval_from", status: "proposed", confidence: 0.38 },
+    { sourceObjectId: `${wsId}-ctx-team-rd`, targetObjectId: `${wsId}-ctx-process-ai-governance`, relationshipType: "owns", status: "approved", confidence: 0.9 },
+    { sourceObjectId: `${wsId}-ctx-tool-mcp-smoke`, targetObjectId: `${wsId}-ctx-process-ai-governance`, relationshipType: "supports", status: "approved", confidence: 0.82 },
+    { sourceObjectId: `${wsId}-ctx-team-rd`, targetObjectId: `${wsId}-ctx-team-executive`, relationshipType: "part_of", status: "approved", confidence: 0.95 },
+    { sourceObjectId: `${wsId}-ctx-team-medtech`, targetObjectId: `${wsId}-ctx-team-executive`, relationshipType: "part_of", status: "approved", confidence: 0.95 },
   ];
 
-  for (const [sourceObjectId, targetObjectId, relationshipType, status] of relationships) {
-    const dedupeKey = `${wsId}:${sourceObjectId}:${relationshipType}:${targetObjectId}:demo`;
-    await prisma.contextGraphRelationship.upsert({
-      where: { dedupeKey },
-      update: { sourceObjectId, targetObjectId, relationshipType, status },
-      create: {
+  await prisma.contextGraphRelationship.deleteMany({
+    where: {
+      workspaceId: wsId,
+      createdByType: "integration",
+      dedupeKey: { endsWith: ":demo" },
+      OR: [
+        { sourceObjectId: { startsWith: `${wsId}-ctx-` } },
+        { targetObjectId: { startsWith: `${wsId}-ctx-` } },
+      ],
+    },
+  });
+
+  for (const relationship of relationships) {
+    const dedupeKey = `${wsId}:${relationship.sourceObjectId}:${relationship.relationshipType}:${relationship.targetObjectId}:demo`;
+    await prisma.contextGraphRelationship.create({
+      data: {
         workspaceId: wsId,
-        sourceObjectId,
-        targetObjectId,
-        relationshipType,
-        status,
+        sourceObjectId: relationship.sourceObjectId,
+        targetObjectId: relationship.targetObjectId,
+        relationshipType: relationship.relationshipType,
+        status: relationship.status,
+        confidence: relationship.confidence,
+        properties: { criticalPath: true },
         createdByType: "integration",
         dedupeKey,
       },
@@ -942,6 +1043,16 @@ async function seedContextMapData({ wsId, circleMappings, meetingMappings }) {
   }
 
   const evidenceSpecs = [
+    {
+      objectId: `${wsId}-ctx-process-ai-governance`,
+      quote: "The working group needs a repeatable path from source records to governed AI actions.",
+      relevanceScore: 0.86,
+    },
+    {
+      objectId: `${wsId}-ctx-step-working-group`,
+      quote: "Discussed AI governance, drug discovery ML platforms, and digital twin pilots.",
+      relevanceScore: 0.88,
+    },
     {
       objectId: `${wsId}-ctx-decision-coe`,
       quote: "Generative AI will change target optimization. We are establishing an internal COE to standardize tooling.",
@@ -956,6 +1067,11 @@ async function seedContextMapData({ wsId, circleMappings, meetingMappings }) {
       objectId: `${wsId}-ctx-risk-digital-twin`,
       quote: "Discussed AI governance, drug discovery ML platforms, and digital twin pilots.",
       relevanceScore: 0.38,
+    },
+    {
+      objectId: `${wsId}-ctx-tool-mcp-smoke`,
+      quote: "Use the MCP read/propose path to create graph proposals, but do not silently mutate approved truth.",
+      relevanceScore: 0.82,
     },
   ];
 

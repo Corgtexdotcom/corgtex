@@ -51,6 +51,7 @@ type ContextGraphObject = {
   objectType: string;
   title: string;
   summary: string | null;
+  properties: Record<string, unknown>;
   confidence: number | null;
   status: string;
   createdByType: string;
@@ -69,6 +70,7 @@ type ContextGraphRelationship = {
   sourceObjectId: string;
   targetObjectId: string;
   relationshipType: string;
+  properties: Record<string, unknown>;
   confidence: number | null;
   status: string;
   createdByType: string;
@@ -163,6 +165,15 @@ function objectMeta(object: ContextGraphObject) {
   return [object.objectType, object.status, confidenceLabel(object.confidence)].join(" - ");
 }
 
+function propertyText(properties: Record<string, unknown> | null | undefined, key: string) {
+  const value = properties?.[key];
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
+function titleizeMachineValue(value: string) {
+  return value.replace(/_/g, " ").replace(/\b\w/g, (character) => character.toUpperCase());
+}
+
 function sameIds(left: string[], right: string[]) {
   return left.length === right.length && left.every((value, index) => value === right[index]);
 }
@@ -242,6 +253,8 @@ export default function ContextMapClient({ workspaceId, data, includeStale = fal
     const layout = layoutByObjectId.get(object.id);
     const position = layout ? { x: layout.x, y: layout.y } : positionForIndex(index);
     const colors = NODE_COLORS[object.objectType] ?? { border: "#64748b", background: "#f8fafc", accent: "#475569" };
+    const workState = propertyText(object.properties, "workState");
+    const pathStage = propertyText(object.properties, "pathStage");
     return {
       id: object.id,
       type: "default",
@@ -259,6 +272,8 @@ export default function ContextMapClient({ workspaceId, data, includeStale = fal
             <strong>{object.title}</strong>
             <div className="context-map-node-meta">
               <span>{confidenceLabel(object.confidence)}</span>
+              {workState && <span>{titleizeMachineValue(workState)}</span>}
+              {pathStage && <span>{pathStage}</span>}
               {object.evidenceRefs.length > 0 && <span>{object.evidenceRefs.length} evidence</span>}
             </div>
           </div>
@@ -286,6 +301,7 @@ export default function ContextMapClient({ workspaceId, data, includeStale = fal
         id: relationship.id,
         source: relationship.sourceObjectId,
         target: relationship.targetObjectId,
+        type: "smoothstep",
         label: relationship.relationshipType,
         animated: relationship.status === "proposed",
         markerEnd: { type: MarkerType.ArrowClosed, color: stroke },
@@ -347,14 +363,30 @@ export default function ContextMapClient({ workspaceId, data, includeStale = fal
     : [];
 
   useEffect(() => {
-    setNodes((currentNodes) => currentNodes.map((node) => ({
-      ...node,
-      selected: selectedRegionIds.includes(node.id),
-    })));
-    setEdges((currentEdges) => currentEdges.map((edge) => ({
-      ...edge,
-      selected: edge.id === selectedRelationshipId,
-    })));
+    setNodes((currentNodes) => {
+      let changed = false;
+      const nextNodes = currentNodes.map((node) => {
+        const selected = selectedRegionIds.includes(node.id);
+        const baseClassName = (node.className ?? "").replace(/\bcontext-map-flow-node--selected\b/g, "").trim();
+        const className = selected ? `${baseClassName} context-map-flow-node--selected`.trim() : baseClassName;
+        if ((node.className ?? "") === className) return node;
+        changed = true;
+        return { ...node, className };
+      });
+      return changed ? nextNodes : currentNodes;
+    });
+    setEdges((currentEdges) => {
+      let changed = false;
+      const nextEdges = currentEdges.map((edge) => {
+        const selected = edge.id === selectedRelationshipId;
+        const baseClassName = (edge.className ?? "").replace(/\bcontext-map-flow-edge--selected\b/g, "").trim();
+        const className = selected ? `${baseClassName} context-map-flow-edge--selected`.trim() : baseClassName;
+        if ((edge.className ?? "") === className) return edge;
+        changed = true;
+        return { ...edge, className };
+      });
+      return changed ? nextEdges : currentEdges;
+    });
   }, [selectedRegionIds, selectedRelationshipId, setEdges, setNodes]);
 
   useEffect(() => {
@@ -632,12 +664,21 @@ export default function ContextMapClient({ workspaceId, data, includeStale = fal
               }}
               onSelectionChange={({ nodes: selectedNodes, edges: selectedEdges }) => {
                 const ids = selectedNodes.map((node) => node.id);
-                setSelectedObjectIds((current) => sameIds(current, ids) ? current : ids);
                 if (ids.length > 0) {
+                  setSelectedObjectIds((current) => sameIds(current, ids) ? current : ids);
                   setSelectedRelationshipId(null);
                   setSelectedObjectId((current) => current === ids[0] ? current : ids[0]);
                 } else if (selectedEdges.length > 0) {
+                  const relationship = relationshipById.get(selectedEdges[0].id);
                   setSelectedRelationshipId(selectedEdges[0].id);
+                  if (relationship) {
+                    const edgeObjectIds = [relationship.sourceObjectId, relationship.targetObjectId];
+                    setSelectedObjectIds((current) => sameIds(current, edgeObjectIds) ? current : edgeObjectIds);
+                    setSelectedObjectId((current) => current === relationship.sourceObjectId ? current : relationship.sourceObjectId);
+                  } else {
+                    setSelectedObjectIds([]);
+                    setSelectedObjectId(null);
+                  }
                 }
               }}
               onNodeDragStop={() => setLayoutDirty(true)}
@@ -703,9 +744,14 @@ export default function ContextMapClient({ workspaceId, data, includeStale = fal
                     {selectedObject.summary && <p>{selectedObject.summary.slice(0, 520)}</p>}
                     <div className="context-map-pill-row">
                       {selectedObject.sourceEntityType && <span className="tag neutral">{selectedObject.sourceEntityType}</span>}
+                      {propertyText(selectedObject.properties, "workState") && <span className="tag neutral">{titleizeMachineValue(propertyText(selectedObject.properties, "workState") ?? "")}</span>}
+                      {propertyText(selectedObject.properties, "nextAction") && <span className="tag neutral">next action</span>}
                       <span className="tag neutral">created by {selectedObject.createdByType}</span>
                       {selectedObject.lastVerifiedAt && <span className="tag neutral">verified {stableDateLabel(selectedObject.lastVerifiedAt)}</span>}
                     </div>
+                    {propertyText(selectedObject.properties, "nextAction") && (
+                      <p className="context-map-next-action">{propertyText(selectedObject.properties, "nextAction")}</p>
+                    )}
                   </div>
                 ) : (
                   <p className="muted">Select a node or relationship to inspect evidence and provenance.</p>
@@ -768,9 +814,64 @@ export default function ContextMapClient({ workspaceId, data, includeStale = fal
                     <span className="tag neutral">{regionContext.objects.length} objects</span>
                     <span className="tag neutral">{regionContext.relationships.length} relationships</span>
                     <span className="tag neutral">{regionContext.evidenceRefs.length} evidence refs</span>
+                    <span className="tag neutral">{regionContext.directNeighbors.length} direct neighbors</span>
                     <span className="tag neutral">{regionContext.permissions.canPropose ? "can propose" : "read only"}</span>
                     {regionContext.staleOrDisputed.length > 0 && <span className="tag danger">{regionContext.staleOrDisputed.length} stale/disputed</span>}
                   </div>
+                  {regionContext.directNeighbors.length > 0 && (
+                    <div>
+                      <strong>Direct blockers, owners, dependencies</strong>
+                      <ul>
+                        {regionContext.directNeighbors.slice(0, 4).map((neighbor) => (
+                          <li key={`${neighbor.relationshipId}-${neighbor.objectId}`}>
+                            {neighbor.relationshipType}: {neighbor.title}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  {regionContext.contextGaps.length > 0 && (
+                    <div>
+                      <strong>Gaps</strong>
+                      <ul>
+                        {regionContext.contextGaps.slice(0, 4).map((gap) => (
+                          <li key={gap.id}>{gap.title}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  {regionContext.likelyNextActions.length > 0 && (
+                    <div>
+                      <strong>Likely next actions</strong>
+                      <ul>
+                        {regionContext.likelyNextActions.slice(0, 4).map((action) => (
+                          <li key={action.id}>{action.title}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  {regionContext.rankedFacts.length > 0 && (
+                    <div>
+                      <strong>Ranked facts</strong>
+                      <ul>
+                        {regionContext.rankedFacts.slice(0, 5).map((fact) => (
+                          <li key={`${fact.kind}-${fact.id}`}>{fact.type}: {fact.title}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  {regionContext.sourceRecords.length > 0 && (
+                    <div>
+                      <strong>Source records</strong>
+                      <ul>
+                        {regionContext.sourceRecords.slice(0, 4).map((record) => (
+                          <li key={`${record.sourceType}-${record.sourceId}`}>
+                            {record.sourceType}: {record.sourceTitle ?? record.sourceId}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
                   {regionContext.openQuestions.length > 0 && (
                     <div>
                       <strong>Open questions</strong>

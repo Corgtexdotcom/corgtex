@@ -252,6 +252,127 @@ describe("context graph domain", () => {
     expect(context.permissions.canApprove).toBe(true);
   });
 
+  it("ranks critical-path context around blockers, owners, evidence, and gaps", async () => {
+    prismaMock.contextGraphObject.findMany
+      .mockResolvedValueOnce([{
+        id: "task-1",
+        workspaceId: "ws-1",
+        objectType: "Task",
+        title: "Draft governance charter",
+        status: "approved",
+        properties: { workState: "in_progress" },
+      }])
+      .mockResolvedValueOnce([
+        { id: "risk-1", workspaceId: "ws-1", objectType: "Risk", title: "Digital twin transferability", status: "proposed", properties: { workState: "blocked" } },
+        { id: "team-1", workspaceId: "ws-1", objectType: "Team", title: "R&D", status: "approved", properties: {} },
+        { id: "decision-1", workspaceId: "ws-1", objectType: "Decision", title: "Create AI COE", status: "approved", properties: {} },
+      ])
+      .mockResolvedValueOnce([
+        { id: "tool-1", workspaceId: "ws-1", objectType: "Tool", title: "MCP production smoke", status: "approved", properties: {} },
+        { id: "medtech-1", workspaceId: "ws-1", objectType: "Team", title: "MedTech", status: "approved", properties: {} },
+      ]);
+    prismaMock.contextGraphRelationship.findMany
+      .mockResolvedValueOnce([
+        { id: "blocker-1", workspaceId: "ws-1", sourceObjectId: "risk-1", targetObjectId: "task-1", relationshipType: "blocks", status: "proposed" },
+        { id: "owner-1", workspaceId: "ws-1", sourceObjectId: "task-1", targetObjectId: "team-1", relationshipType: "assigned_to", status: "approved" },
+        { id: "dependency-1", workspaceId: "ws-1", sourceObjectId: "task-1", targetObjectId: "decision-1", relationshipType: "depends_on", status: "approved" },
+      ])
+      .mockResolvedValueOnce([
+        { id: "tool-relationship-1", workspaceId: "ws-1", sourceObjectId: "tool-1", targetObjectId: "decision-1", relationshipType: "supports", status: "approved" },
+        { id: "approval-1", workspaceId: "ws-1", sourceObjectId: "risk-1", targetObjectId: "medtech-1", relationshipType: "needs_approval_from", status: "proposed" },
+      ]);
+    prismaMock.contextGraphEvidenceRef.findMany.mockResolvedValueOnce([
+      {
+        id: "evidence-task-1",
+        objectId: "task-1",
+        relationshipId: null,
+        sourceType: "MEETING",
+        sourceId: "meeting-1",
+        knowledgeChunkId: null,
+        quote: "Draft the charter before the next R&D review.",
+        relevanceScore: 0.82,
+      },
+      {
+        id: "evidence-blocker-1",
+        objectId: null,
+        relationshipId: "blocker-1",
+        sourceType: "MEETING",
+        sourceId: "meeting-1",
+        knowledgeChunkId: null,
+        quote: "Digital twin pilots may need separate governance.",
+        relevanceScore: 0.38,
+      },
+    ]);
+    prismaMock.knowledgeChunk.findMany.mockResolvedValueOnce([]);
+
+    const context = await buildSelectedRegionContext(actor, {
+      workspaceId: "ws-1",
+      objectIds: ["task-1"],
+      depth: 2,
+    });
+
+    expect(context.rankedFacts[0]).toMatchObject({ kind: "object", id: "task-1" });
+    expect(context.directNeighbors.map((neighbor) => neighbor.relationshipType).slice(0, 3)).toEqual(["blocks", "depends_on", "assigned_to"]);
+    expect(context.directNeighbors[0]).toMatchObject({ objectId: "risk-1", relationshipType: "blocks" });
+    expect(context.sourceRecords).toHaveLength(1);
+    expect(context.contextGaps.map((gap) => gap.kind)).toContain("needs_review");
+    expect(context.likelyNextActions[0]).toMatchObject({ title: "Resolve blocker: Digital twin transferability" });
+  });
+
+  it("requires incoming blocker edges before clearing blocked-object gaps", async () => {
+    prismaMock.contextGraphObject.findMany
+      .mockResolvedValueOnce([{
+        id: "risk-1",
+        workspaceId: "ws-1",
+        objectType: "Risk",
+        title: "Digital twin transferability",
+        status: "approved",
+        properties: { workState: "blocked" },
+      }])
+      .mockResolvedValueOnce([{
+        id: "task-1",
+        workspaceId: "ws-1",
+        objectType: "Task",
+        title: "Draft governance charter",
+        status: "approved",
+        properties: {},
+      }]);
+    prismaMock.contextGraphRelationship.findMany.mockResolvedValueOnce([
+      {
+        id: "outgoing-blocks-1",
+        workspaceId: "ws-1",
+        sourceObjectId: "risk-1",
+        targetObjectId: "task-1",
+        relationshipType: "blocks",
+        status: "approved",
+      },
+    ]);
+    prismaMock.contextGraphEvidenceRef.findMany.mockResolvedValueOnce([
+      {
+        id: "evidence-risk-1",
+        objectId: "risk-1",
+        relationshipId: null,
+        sourceType: "MEETING",
+        sourceId: "meeting-1",
+        knowledgeChunkId: null,
+        quote: "The risk is waiting on evidence from the pilot.",
+        relevanceScore: 0.72,
+      },
+    ]);
+    prismaMock.knowledgeChunk.findMany.mockResolvedValueOnce([]);
+
+    const context = await buildSelectedRegionContext(actor, {
+      workspaceId: "ws-1",
+      objectIds: ["risk-1"],
+      depth: 1,
+    });
+
+    expect(context.contextGaps).toContainEqual(expect.objectContaining({
+      objectId: "risk-1",
+      kind: "missing_blocker_link",
+    }));
+  });
+
   it("lets admins update master map layouts directly", async () => {
     await expect(updateContextMapLayout(actor, {
       workspaceId: "ws-1",
