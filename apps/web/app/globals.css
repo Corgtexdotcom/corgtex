@@ -49,7 +49,8 @@
   --overlay-fg: #ffffff;
   --mobile-topbar-height: 64px;
   --mobile-bottom-nav-height: 72px;
-  --safe-area-max-inset-bottom: env(safe-area-max-inset-bottom, 24px);
+  --mobile-top-offset: calc(var(--mobile-topbar-height) + env(safe-area-inset-top, 0px));
+  --mobile-bottom-offset: calc(var(--mobile-bottom-nav-height) + env(safe-area-inset-bottom, 0px));
 }
 
 .dark html,
@@ -2891,10 +2892,142 @@ a.wiki-list-item:hover {
   
   .nr-footer { @apply text-center py-8 border-t border-line mt-16 text-[0.85rem] text-muted normal-case tracking-normal; }
   
-  .nr-attention { @apply bg-warning-bg border border-line p-4 mb-8 flex flex-wrap gap-4 border-l-4 border-l-warning rounded; }
-  .nr-attention > div { @apply min-w-0; }
-  .nr-attention-block { @apply flex-1 min-w-[180px]; }
-  .nr-attention-block strong { @apply block text-[0.85rem] normal-case tracking-normal mb-2 border-b border-line pb-1; }
+  .nr-attention {
+    background: var(--warning-bg);
+    border: 1px solid var(--line);
+    border-left: 4px solid var(--warning);
+    border-radius: var(--radius-sm);
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: 16px;
+    margin-bottom: 32px;
+    padding: 16px;
+  }
+  .nr-attention-summary {
+    flex: 0 1 180px;
+    min-width: 0;
+    padding-right: 16px;
+    color: var(--warning);
+    font-weight: 700;
+    line-height: 1.3;
+  }
+  .nr-attention-body {
+    flex: 1 1 420px;
+    min-width: 0;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: 16px;
+  }
+  .nr-attention-block {
+    flex: 1 1 180px;
+    min-width: 0;
+  }
+  .nr-attention-block strong {
+    display: block;
+    margin-bottom: 8px;
+    padding-bottom: 4px;
+    border-bottom: 1px solid var(--line);
+    color: var(--text);
+    font-size: 0.85rem;
+    font-weight: 700;
+    line-height: 1.25;
+  }
+  .nr-attention-block-info {
+    border-left: 3px solid var(--info);
+    padding-left: 10px;
+  }
+  .nr-attention-block-header,
+  .nr-attention-notification-head,
+  .nr-attention-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+  }
+  .nr-attention-block-header,
+  .nr-attention-notification-head {
+    justify-content: space-between;
+  }
+  .nr-attention-item {
+    justify-content: space-between;
+    margin-bottom: 6px;
+  }
+  .nr-attention-item-main {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+  .nr-attention-kicker {
+    margin-bottom: 2px;
+    color: var(--muted);
+    font-size: 0.7rem;
+    line-height: 1.25;
+    text-transform: uppercase;
+  }
+  .nr-attention-title {
+    min-width: 0;
+    color: inherit;
+    font-size: 0.82rem;
+    font-weight: 600;
+    line-height: 1.35;
+    text-decoration: none;
+  }
+  .nr-attention-title-truncate {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  a.nr-attention-title {
+    text-decoration: underline dotted;
+  }
+  .nr-attention-copy {
+    display: block;
+    margin-top: 2px;
+    color: var(--muted);
+    font-size: 0.75rem;
+    line-height: 1.35;
+  }
+  .nr-attention-inline-link {
+    display: block;
+    margin-top: 4px;
+    font-size: 0.8rem;
+    text-decoration: underline;
+  }
+  .nr-attention-action,
+  .nr-attention-mark-read {
+    flex: 0 0 auto;
+    margin: 0;
+  }
+  .nr-attention-button,
+  .nr-attention-mark-read-button {
+    min-height: 28px;
+    border: 0;
+    box-shadow: none;
+    font-size: 0.72rem;
+    line-height: 1;
+  }
+  .nr-attention-button {
+    padding: 4px 10px;
+  }
+  .nr-attention-mark-read-button {
+    background: transparent;
+    color: var(--warning);
+    padding: 0 6px;
+  }
+  .nr-attention-time {
+    flex: 0 0 auto;
+    color: var(--muted);
+    font-size: 0.7rem;
+    line-height: 1.25;
+  }
+  .nr-attention-notification {
+    margin-bottom: 6px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--line);
+    min-width: 0;
+  }
   
   .nr-activity { @apply text-[0.85rem]; }
   .nr-activity-item { @apply py-[6px] border-b border-dashed border-line; }
@@ -3050,7 +3183,7 @@ a.wiki-list-item:hover {
   }
 
   .workspace-add-menu {
-    top: calc(var(--mobile-topbar-height) + 12px);
+    top: calc(var(--mobile-top-offset) + 12px);
     right: 16px;
   }
 
@@ -3099,7 +3232,7 @@ a.wiki-list-item:hover {
     left: 0;
     right: 0;
     z-index: 8000;
-    min-height: calc(var(--mobile-topbar-height) + env(safe-area-inset-top, 0px));
+    min-height: var(--mobile-top-offset);
     padding: calc(8px + env(safe-area-inset-top, 0px)) 12px 8px;
     display: flex;
     align-items: center;
@@ -3112,6 +3245,7 @@ a.wiki-list-item:hover {
   }
 
   .mobile-brand {
+    flex: 1 1 auto;
     min-width: 0;
     color: var(--text);
     text-decoration: none;
@@ -3125,7 +3259,7 @@ a.wiki-list-item:hover {
     white-space: nowrap;
     font-weight: 800;
     font-size: 0.98rem;
-    letter-spacing: 0.02em;
+    letter-spacing: 0;
   }
 
   .mobile-brand-label {
@@ -3137,9 +3271,11 @@ a.wiki-list-item:hover {
   }
 
   .mobile-mode-switch {
-    flex: 0 0 auto;
+    flex: 0 1 min(52vw, 260px);
+    min-width: 144px;
+    max-width: 260px;
     display: inline-grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     padding: 3px;
     border: 1px solid var(--line);
     border-radius: var(--radius-full);
@@ -3148,14 +3284,17 @@ a.wiki-list-item:hover {
 
   .mobile-mode-switch button {
     min-height: 36px;
-    min-width: 78px;
+    min-width: 0;
     border: 0;
     border-radius: var(--radius-full);
     background: transparent;
     color: var(--muted);
-    padding: 0 12px;
+    padding: 0 10px;
     box-shadow: none;
     font-size: 0.85rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .mobile-mode-switch button.active {
@@ -3172,15 +3311,15 @@ a.wiki-list-item:hover {
     position: fixed;
     left: 0;
     right: 0;
-    bottom: calc(env(safe-area-inset-bottom, 0px) - var(--safe-area-max-inset-bottom));
+    bottom: 0;
     z-index: 8000;
-    height: calc(var(--mobile-bottom-nav-height) + var(--safe-area-max-inset-bottom));
-    padding: 6px 8px var(--safe-area-max-inset-bottom);
+    height: var(--mobile-bottom-offset);
+    padding: 6px 8px max(6px, env(safe-area-inset-bottom, 0px));
     display: grid;
     grid-template-columns: repeat(5, minmax(0, 1fr));
     gap: 4px;
     border-top: 1px solid var(--line);
-    background: color-mix(in srgb, var(--surface-strong) 94%, transparent);
+    background: var(--surface-strong);
     backdrop-filter: blur(18px);
     -webkit-backdrop-filter: blur(18px);
   }
@@ -3246,7 +3385,7 @@ a.wiki-list-item:hover {
   .ws-layout {
     display: block;
     min-height: 100dvh;
-    padding-top: calc(var(--mobile-topbar-height) + env(safe-area-inset-top, 0px));
+    padding-top: var(--mobile-top-offset);
     overflow: visible;
   }
 
@@ -3262,7 +3401,7 @@ a.wiki-list-item:hover {
 
   .ws-main-content {
     max-width: 100%;
-    padding: 18px 14px calc(var(--mobile-bottom-nav-height) + var(--safe-area-max-inset-bottom) + 28px);
+    padding: 18px 14px calc(var(--mobile-bottom-offset) + 28px);
     overflow-x: clip;
   }
 
@@ -3273,7 +3412,7 @@ a.wiki-list-item:hover {
 
   .mobile-ai-workbench {
     position: fixed;
-    inset: calc(var(--mobile-topbar-height) + env(safe-area-inset-top, 0px)) 0 0 0;
+    inset: var(--mobile-top-offset) 0 0 0;
     z-index: 7000;
     display: flex;
     flex-direction: column;
@@ -3419,6 +3558,59 @@ a.wiki-list-item:hover {
   .nr-masthead-meta form {
     width: 100%;
     margin-left: 0 !important;
+  }
+
+  .nr-attention {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 14px;
+    padding: 14px;
+  }
+
+  .nr-attention-summary {
+    padding-right: 0;
+    font-size: 1rem;
+  }
+
+  .nr-attention-body {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 14px;
+  }
+
+  .nr-attention-block {
+    width: 100%;
+  }
+
+  .nr-attention-item,
+  .nr-attention-notification-head {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .nr-attention-title,
+  .nr-attention-title-truncate {
+    overflow: visible;
+    text-overflow: clip;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  .nr-attention-action {
+    margin-left: auto;
+  }
+
+  .nr-attention-button {
+    min-height: 34px;
+    min-width: 78px;
+  }
+
+  .nr-attention-mark-read-button {
+    min-height: 34px;
+  }
+
+  .nr-attention-time {
+    margin-left: auto;
   }
 
   .nr-paper,
@@ -3644,7 +3836,7 @@ a.wiki-list-item:hover {
 
   .admin-mobile-tabs {
     position: sticky;
-    top: calc(var(--mobile-topbar-height) + env(safe-area-inset-top, 0px));
+    top: var(--mobile-top-offset);
     z-index: 30;
     display: flex;
     flex-wrap: nowrap;
@@ -4123,4 +4315,26 @@ a.wiki-list-item:hover {
 
 .notif-pref-table tr:last-child td {
   border-bottom: none;
+}
+
+@media (max-width: 380px) {
+  .mobile-topbar {
+    gap: 8px;
+    padding-left: 10px;
+    padding-right: 10px;
+  }
+
+  .mobile-brand-name {
+    font-size: 0.92rem;
+  }
+
+  .mobile-mode-switch {
+    flex-basis: 48vw;
+    min-width: 132px;
+  }
+
+  .mobile-mode-switch button {
+    padding: 0 8px;
+    font-size: 0.8rem;
+  }
 }

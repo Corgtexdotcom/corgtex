@@ -270,11 +270,11 @@ export default async function WorkspaceDashboard({
 
       {totalAttentionItems > 0 && (
         <div className="nr-attention">
-          <div style={{ paddingRight: "16px", minWidth: "180px", fontWeight: 600, color: "var(--warning)" }}>
+          <div className="nr-attention-summary">
             {t("itemsNeedAttention", { count: totalAttentionItems })}
           </div>
-          
-          <div style={{ display: "flex", flex: 1, gap: "16px", flexWrap: "wrap" }}>
+
+          <div className="nr-attention-body">
             {pendingFlows.length > 0 && (
               <div className="nr-attention-block">
                 <strong>{t("approvalsPending", { count: pendingFlows.length })}</strong>
@@ -283,24 +283,22 @@ export default async function WorkspaceDashboard({
                   const label = (flow as any).subjectLabel || flow.subjectType;
                   const typeLabel = flow.subjectType.charAt(0) + flow.subjectType.slice(1).toLowerCase();
                   return (
-                    <div key={flow.id} style={{ marginBottom: 6 }}>
-                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                        <div style={{ flex: 1, minWidth: 0 }}>
-                          <div style={{ fontSize: "0.7rem", textTransform: "uppercase", letterSpacing: "0.04em", color: "var(--muted)", marginBottom: 2 }}>{typeLabel}</div>
-                          {href ? (
-                            <Link href={href} style={{ fontSize: "0.8rem", color: "inherit", textDecoration: "underline dotted", lineHeight: 1.3, display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                              {label}
-                            </Link>
-                          ) : (
-                            <span style={{ fontSize: "0.8rem", lineHeight: 1.3 }}>{label}</span>
-                          )}
-                        </div>
-                        <form action={decideApprovalAction} className="actions-inline" style={{ display: "inline-flex", marginLeft: 8, flexShrink: 0 }}>
-                          <input type="hidden" name="workspaceId" value={workspaceId} />
-                          <input type="hidden" name="flowId" value={flow.id} />
-                          <button type="submit" name="choice" value={flow.mode === "CONSENT" ? "AGREE" : "APPROVE"} style={{ padding: "2px 6px", fontSize: "0.7rem", minHeight: 0 }}>{t("approve")}</button>
-                        </form>
+                    <div key={flow.id} className="nr-attention-item">
+                      <div className="nr-attention-item-main">
+                        <div className="nr-attention-kicker">{typeLabel}</div>
+                        {href ? (
+                          <Link href={href} className="nr-attention-title nr-attention-title-truncate">
+                            {label}
+                          </Link>
+                        ) : (
+                          <span className="nr-attention-title">{label}</span>
+                        )}
                       </div>
+                      <form action={decideApprovalAction} className="nr-attention-action">
+                        <input type="hidden" name="workspaceId" value={workspaceId} />
+                        <input type="hidden" name="flowId" value={flow.id} />
+                        <button type="submit" name="choice" value={flow.mode === "CONSENT" ? "AGREE" : "APPROVE"} className="nr-attention-button">{t("approve")}</button>
+                      </form>
                     </div>
                   );
                 })}
@@ -310,36 +308,36 @@ export default async function WorkspaceDashboard({
             {visiblePendingAgentApprovals > 0 && (
               <div className="nr-attention-block">
                 <strong>{t("agentRuns")}</strong>
-                <span style={{ fontSize: "0.8rem" }}>{t("runsWaitingReview", { count: visiblePendingAgentApprovals })}</span>
-                <Link href={`/workspaces/${workspaceId}/operator`} style={{ display: "block", fontSize: "0.8rem", marginTop: 4, textDecoration: "underline" }}>{t("review")}</Link>
+                <span className="nr-attention-copy">{t("runsWaitingReview", { count: visiblePendingAgentApprovals })}</span>
+                <Link href={`/workspaces/${workspaceId}/operator`} className="nr-attention-inline-link">{t("review")}</Link>
               </div>
             )}
 
             {unreadNotifications.length > 0 && (
               <div className="nr-attention-block">
-                <div style={{ display: "flex", justifyContent: "space-between" }}>
+                <div className="nr-attention-block-header">
                   <strong>{t("notifications")}</strong>
-                  <form action={markAllNotificationsReadAction}>
+                  <form action={markAllNotificationsReadAction} className="nr-attention-mark-read">
                     <input type="hidden" name="workspaceId" value={workspaceId} />
-                    <button type="submit" style={{ padding: "0 6px", fontSize: "0.7rem", minHeight: 0, background: "transparent", color: "var(--warning)"}}>{t("markRead")}</button>
+                    <button type="submit" className="nr-attention-mark-read-button">{t("markRead")}</button>
                   </form>
                 </div>
                 {unreadNotifications.slice(0, 3).map((n) => {
                   const href = resolveEntityUrl(workspaceId, n.entityType, n.entityId);
                   return (
-                    <div key={n.id} style={{ marginBottom: 6, borderBottom: "1px solid var(--line)", paddingBottom: 6 }}>
-                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+                    <div key={n.id} className="nr-attention-notification">
+                      <div className="nr-attention-notification-head">
                         {href ? (
-                          <Link href={href} style={{ fontSize: "0.85rem", fontWeight: 600, color: "inherit", textDecoration: "underline dotted", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          <Link href={href} className="nr-attention-title nr-attention-title-truncate">
                             {n.title}
                           </Link>
                         ) : (
-                          <span style={{ fontSize: "0.85rem", fontWeight: 600, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{n.title}</span>
+                          <span className="nr-attention-title nr-attention-title-truncate">{n.title}</span>
                         )}
-                        <span style={{ fontSize: "0.7rem", color: "var(--muted)", marginLeft: 8, flexShrink: 0 }} suppressHydrationWarning>{ageText(n.createdAt)}</span>
+                        <span className="nr-attention-time" suppressHydrationWarning>{ageText(n.createdAt)}</span>
                       </div>
                       {n.bodyMd && (
-                        <div style={{ fontSize: "0.75rem", color: "var(--muted)", marginTop: 2, lineHeight: 1.3 }}>
+                        <div className="nr-attention-copy">
                           <MarkdownExcerpt markdown={n.bodyMd} maxLength={100} />
                         </div>
                       )}
@@ -350,16 +348,16 @@ export default async function WorkspaceDashboard({
             )}
 
             {advisoryRequests.length > 0 && (
-              <div className="nr-attention-block" style={{ borderLeft: "3px solid var(--info)" }}>
+              <div className="nr-attention-block nr-attention-block-info">
                 <strong>{t("advisoryRequests", { count: advisoryRequests.length })}</strong>
                 {advisoryRequests.slice(0, 2).map((ap: any) => (
-                  <div key={ap.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
-                    <Link href={`/workspaces/${workspaceId}/proposals?status=OPEN`} style={{ fontSize: "0.8rem", textDecoration: "none", color: "inherit" }}>
+                  <div key={ap.id} className="nr-attention-item">
+                    <Link href={`/workspaces/${workspaceId}/proposals?status=OPEN`} className="nr-attention-title">
                       {ap.proposal.title}
                     </Link>
                   </div>
                 ))}
-                {advisoryRequests.length > 2 && <div style={{ fontSize: "0.7rem", color: "var(--muted)" }}>{t("more", { count: advisoryRequests.length - 2 })}</div>}
+                {advisoryRequests.length > 2 && <div className="nr-attention-kicker">{t("more", { count: advisoryRequests.length - 2 })}</div>}
               </div>
             )}
           </div>
