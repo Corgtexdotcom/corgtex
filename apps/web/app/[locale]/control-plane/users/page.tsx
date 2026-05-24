@@ -60,8 +60,8 @@ export default async function ControlPlaneUsersPage() {
           membershipsCount: 2,
           lastActive: "Active now",
           memberships: [
-            { workspaceId: "1", workspaceName: "Crina Workspace", workspaceSlug: "crina", role: "OWNER" },
-            { workspaceId: "2", workspaceName: "Alumipres Corp", workspaceSlug: "alumipres", role: "ADMIN" },
+            { workspaceId: "1", workspaceName: "Atlas Workspace", workspaceSlug: "atlas", role: "OWNER" },
+            { workspaceId: "2", workspaceName: "Beacon Manufacturing", workspaceSlug: "beacon-manufacturing", role: "ADMIN" },
           ],
         },
         {
@@ -72,7 +72,7 @@ export default async function ControlPlaneUsersPage() {
           membershipsCount: 1,
           lastActive: "2h ago",
           memberships: [
-            { workspaceId: "1", workspaceName: "Crina Workspace", workspaceSlug: "crina", role: "MEMBER" },
+            { workspaceId: "1", workspaceName: "Atlas Workspace", workspaceSlug: "atlas", role: "MEMBER" },
           ],
         },
         {
@@ -83,9 +83,9 @@ export default async function ControlPlaneUsersPage() {
           membershipsCount: 3,
           lastActive: "1d ago",
           memberships: [
-            { workspaceId: "1", workspaceName: "Crina Workspace", workspaceSlug: "crina", role: "ADMIN" },
-            { workspaceId: "2", workspaceName: "Alumipres Corp", workspaceSlug: "alumipres", role: "ADMIN" },
-            { workspaceId: "3", workspaceName: "Vance Corp", workspaceSlug: "vance", role: "ADMIN" },
+            { workspaceId: "1", workspaceName: "Atlas Workspace", workspaceSlug: "atlas", role: "ADMIN" },
+            { workspaceId: "2", workspaceName: "Beacon Manufacturing", workspaceSlug: "beacon-manufacturing", role: "ADMIN" },
+            { workspaceId: "3", workspaceName: "Summit Media", workspaceSlug: "summit-media", role: "ADMIN" },
           ],
         },
       ];

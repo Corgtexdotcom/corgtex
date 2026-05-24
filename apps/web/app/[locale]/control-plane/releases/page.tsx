@@ -58,9 +58,9 @@ export default async function ControlPlaneReleasesPage() {
         lastDeploy: "3 days ago",
       }))
     : [
-        { id: "1", name: "Crina Workspace", slug: "crina", status: "ACTIVE", currentVersion: "v1.2.3", targetVersion: "v1.3.0", drift: "Release drift (v1.2.3 vs v1.3.0)", region: "europe-west1", lastDeploy: "2 days ago" },
-        { id: "2", name: "Alumipres Corp", slug: "alumipres", status: "ACTIVE", currentVersion: "v1.3.0", targetVersion: "v1.3.0", drift: null, region: "us-east1", lastDeploy: "1d ago" },
-        { id: "3", name: "Vance Corp", slug: "vance", status: "ACTIVE", currentVersion: "v1.1.0", targetVersion: "v1.3.0", drift: "Major drift (v1.1.0 vs v1.3.0)", region: "us-west2", lastDeploy: "1 week ago" },
+        { id: "1", name: "Atlas Workspace", slug: "atlas", status: "ACTIVE", currentVersion: "v1.2.3", targetVersion: "v1.3.0", drift: "Release drift (v1.2.3 vs v1.3.0)", region: "europe-west1", lastDeploy: "2 days ago" },
+        { id: "2", name: "Beacon Manufacturing", slug: "beacon-manufacturing", status: "ACTIVE", currentVersion: "v1.3.0", targetVersion: "v1.3.0", drift: null, region: "us-east1", lastDeploy: "1d ago" },
+        { id: "3", name: "Summit Media", slug: "summit-media", status: "ACTIVE", currentVersion: "v1.1.0", targetVersion: "v1.3.0", drift: "Major drift (v1.1.0 vs v1.3.0)", region: "us-west2", lastDeploy: "1 week ago" },
       ];
 
   return (

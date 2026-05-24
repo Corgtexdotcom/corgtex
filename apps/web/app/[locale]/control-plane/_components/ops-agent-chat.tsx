@@ -92,7 +92,7 @@ export function OpsAgentChat({ isOpen, onClose, pageContext }: OpsAgentChatProps
 
       // Simple keywords responses with structured cards
       if (lower.includes("health") || lower.includes(" fleet")) {
-        replyText = "I have fetched the latest telemetry for the active fleet. We are currently tracking 2 degraded deployments: **Crina** (release drift recorded) and **Alumipres** (support connector sync issue). Active workflow agents are running normally with a 98.4% success rate.";
+        replyText = "I have fetched the latest telemetry for the active fleet. We are currently tracking 2 degraded deployments: **Atlas Workspace** (release drift recorded) and **Beacon Manufacturing** (support connector sync issue). Active workflow agents are running normally with a 98.4% success rate.";
         structuredData = {
           type: "stat-card",
           title: "Fleet Health Indicators",
@@ -104,14 +104,14 @@ export function OpsAgentChat({ isOpen, onClose, pageContext }: OpsAgentChatProps
           ]
         };
       } else if (lower.includes("degraded") || lower.includes("failing") || lower.includes("attention")) {
-        replyText = "Here are the deployments that currently require operator intervention. The support connector was automatically blocked during the last deploy cycle on Alumipres.";
+        replyText = "Here are the deployments that currently require operator intervention. The support connector was automatically blocked during the last deploy cycle on Beacon Manufacturing.";
         structuredData = {
           type: "table",
           title: "Degraded Deployments",
           columns: ["Client", "Issue", "Last Success", "Action Needed"],
           rows: [
-            { Client: "Crina", Issue: "Release drift (v1.2.3 vs v1.3.0)", "Last Success": "2h ago", "Action Needed": "Re-queue deploy latest" },
-            { Client: "Alumipres", Issue: "Support token expired", "Last Success": "1d ago", "Action Needed": "Rotate support token" }
+            { Client: "Atlas Workspace", Issue: "Release drift (v1.2.3 vs v1.3.0)", "Last Success": "2h ago", "Action Needed": "Re-queue deploy latest" },
+            { Client: "Beacon Manufacturing", Issue: "Support token expired", "Last Success": "1d ago", "Action Needed": "Rotate support token" }
           ]
         };
       } else if (lower.includes("spend") || lower.includes("cost") || lower.includes("budget")) {
@@ -121,9 +121,9 @@ export function OpsAgentChat({ isOpen, onClose, pageContext }: OpsAgentChatProps
           title: "Top Client Model Budgets",
           columns: ["Client", "Limit", "Usage (MTD)", "Budget Health"],
           rows: [
-            { Client: "Crina", Limit: "$200.00", "Usage (MTD)": "$87.42", "Budget Health": "Healthy (43%)" },
-            { Client: "Alumipres", Limit: "$500.00", "Usage (MTD)": "$341.10", "Budget Health": "Warning (68%)" },
-            { Client: "Vance Corp", Limit: "$1,000.00", "Usage (MTD)": "$12.04", "Budget Health": "Healthy (1%)" }
+            { Client: "Atlas Workspace", Limit: "$200.00", "Usage (MTD)": "$87.42", "Budget Health": "Healthy (43%)" },
+            { Client: "Beacon Manufacturing", Limit: "$500.00", "Usage (MTD)": "$341.10", "Budget Health": "Warning (68%)" },
+            { Client: "Summit Media", Limit: "$1,000.00", "Usage (MTD)": "$12.04", "Budget Health": "Healthy (1%)" }
           ]
         };
       } else if (lower.includes("flag") || lower.includes("feature")) {

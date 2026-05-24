@@ -62,10 +62,10 @@ export default async function ControlPlaneAgentsPage() {
         lastRun: "10 mins ago",
       }))
     : [
-        { id: "1", name: "Slack Triage Agent", workspaceName: "Crina Workspace", workspaceSlug: "crina", status: "ACTIVE", modelTier: "STANDARD", modelOverride: "gpt-4o-mini", runsCount: 382, costMtd: "$14.20", lastRun: "2 mins ago" },
-        { id: "2", name: "Constitution Compliance Steward", workspaceName: "Crina Workspace", workspaceSlug: "crina", status: "ACTIVE", modelTier: "QUALITY", modelOverride: "gemini-1.5-pro", runsCount: 94, costMtd: "$38.45", lastRun: "1h ago" },
-        { id: "3", name: "Finance Reconciler Agent", workspaceName: "Alumipres Corp", workspaceSlug: "alumipres", status: "ACTIVE", modelTier: "QUALITY", modelOverride: "gpt-4o", runsCount: 52, costMtd: "$64.10", lastRun: "4h ago" },
-        { id: "4", name: "Document Ingestion Triage", workspaceName: "Vance Media", workspaceSlug: "vance-media", status: "DISABLED", modelTier: "FAST", modelOverride: "gpt-3.5-turbo", runsCount: 1204, costMtd: "$8.90", lastRun: "1d ago" },
+        { id: "1", name: "Slack Triage Agent", workspaceName: "Atlas Workspace", workspaceSlug: "atlas", status: "ACTIVE", modelTier: "STANDARD", modelOverride: "gpt-4o-mini", runsCount: 382, costMtd: "$14.20", lastRun: "2 mins ago" },
+        { id: "2", name: "Constitution Compliance Steward", workspaceName: "Atlas Workspace", workspaceSlug: "atlas", status: "ACTIVE", modelTier: "QUALITY", modelOverride: "gemini-1.5-pro", runsCount: 94, costMtd: "$38.45", lastRun: "1h ago" },
+        { id: "3", name: "Finance Reconciler Agent", workspaceName: "Beacon Manufacturing", workspaceSlug: "beacon-manufacturing", status: "ACTIVE", modelTier: "QUALITY", modelOverride: "gpt-4o", runsCount: 52, costMtd: "$64.10", lastRun: "4h ago" },
+        { id: "4", name: "Document Ingestion Triage", workspaceName: "Summit Media", workspaceSlug: "summit-media", status: "DISABLED", modelTier: "FAST", modelOverride: "gpt-3.5-turbo", runsCount: 1204, costMtd: "$8.90", lastRun: "1d ago" },
       ];
 
   const formattedRuns = runs.length > 0

@@ -73,10 +73,10 @@ export default async function ControlPlaneOperationsPage() {
         error: op.error,
       }))
     : [
-        { id: "o1", type: "WORKSPACE_CREATE", status: "COMPLETED", description: "Create workspace for Alumipres Corp", isBreakGlass: false, isMutating: true, customerName: "Alumipres Corp", customerId: "2", actorName: "jan@corgtex.com", createdAt: "10 mins ago" },
-        { id: "o2", type: "DEPLOY", status: "COMPLETED", description: "Deploy latest stable release tag", isBreakGlass: false, isMutating: true, customerName: "Crina Workspace", customerId: "1", actorName: "system", createdAt: "2h ago" },
-        { id: "o3", type: "HEALTH_CHECK", status: "FAILED", description: "Probing live environment endpoint", isBreakGlass: false, isMutating: false, customerName: "Alumipres Corp", customerId: "2", actorName: "system", createdAt: "4h ago", error: "Connection timeout on endpoint" },
-        { id: "o4", type: "USER_SUSPEND", status: "COMPLETED", description: "Suspend direct infrastructure access key", isBreakGlass: true, isMutating: true, customerName: "Vance Media", customerId: "3", actorName: "alex@corgtex.com", createdAt: "1d ago" },
+        { id: "o1", type: "WORKSPACE_CREATE", status: "COMPLETED", description: "Create workspace for Beacon Manufacturing", isBreakGlass: false, isMutating: true, customerName: "Beacon Manufacturing", customerId: "2", actorName: "ops@corgtex.local", createdAt: "10 mins ago" },
+        { id: "o2", type: "DEPLOY", status: "COMPLETED", description: "Deploy latest stable release tag", isBreakGlass: false, isMutating: true, customerName: "Atlas Workspace", customerId: "1", actorName: "system", createdAt: "2h ago" },
+        { id: "o3", type: "HEALTH_CHECK", status: "FAILED", description: "Probing live environment endpoint", isBreakGlass: false, isMutating: false, customerName: "Beacon Manufacturing", customerId: "2", actorName: "system", createdAt: "4h ago", error: "Connection timeout on endpoint" },
+        { id: "o4", type: "USER_SUSPEND", status: "COMPLETED", description: "Suspend direct infrastructure access key", isBreakGlass: true, isMutating: true, customerName: "Summit Media", customerId: "3", actorName: "support@corgtex.local", createdAt: "1d ago" },
       ];
 
   const totalOps = formattedOps.length;

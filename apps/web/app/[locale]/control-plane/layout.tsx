@@ -37,7 +37,7 @@ export default function ControlPlaneLayout({
   // Compute breadcrumbs dynamically based on path segments
   const getBreadcrumbs = () => {
     const segments = pathname.split("/").filter((s) => s && s !== "en" && s !== "es");
-    // e.g. ["control-plane", "deployments", "crina"]
+    // e.g. ["control-plane", "deployments", "atlas"]
     const crumbs = [];
 
     // Dashboard root
