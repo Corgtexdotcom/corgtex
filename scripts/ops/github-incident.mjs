@@ -14,10 +14,14 @@ import {
 const args = parseArgs(process.argv.slice(2));
 const dryRun = Boolean(args["dry-run"]);
 const syncResolved = Boolean(args["sync-resolved"]);
+const syncDedupePrefixes = parseSyncDedupePrefixes(args["sync-dedupe-prefixes"]);
 const RESOLUTION_BLOCKING_LABELS = new Set(["halt-agents", "needs-replan"]);
 
 async function main() {
-  const incidents = await readIncidents();
+  const { incidents, explicitInput } = await readIncidents();
+  if (syncResolved && !explicitInput) {
+    throw new Error("github-incident --sync-resolved requires explicit incident JSON on stdin or via --file.");
+  }
   const plans = incidents.map((incident) => ({
     incident,
     title: incidentTitle(incident),
@@ -27,26 +31,27 @@ async function main() {
   }));
 
   if (dryRun) {
-    console.log(JSON.stringify({ dryRun: true, syncResolved, issues: plans }, null, 2));
+    console.log(JSON.stringify({ dryRun: true, syncResolved, syncDedupePrefixes, issues: plans }, null, 2));
     return;
   }
 
   const api = githubApiConfig();
   if (api) {
-    await publishWithGitHubApi(api, plans, { syncResolved });
+    await publishWithGitHubApi(api, plans, { syncResolved, syncDedupePrefixes });
     return;
   }
 
-  publishWithGh(plans, { syncResolved });
+  publishWithGh(plans, { syncResolved, syncDedupePrefixes });
 }
 
 async function readIncidents() {
   const raw = args.file
     ? await readFile(args.file, "utf8")
     : await readStdin();
+  const explicitInput = Boolean(args.file || raw.trim());
   const parsed = raw.trim() ? JSON.parse(raw) : sampleIncident();
   const list = Array.isArray(parsed) ? parsed : parsed.incidents ?? [parsed];
-  return list.map(normalizeIncident);
+  return { incidents: list.map(normalizeIncident), explicitInput };
 }
 
 function sampleIncident() {
@@ -97,7 +102,7 @@ async function publishWithGitHubApi(api, plans, options = {}) {
   }
 
   if (options.syncResolved) {
-    await closeResolvedIssuesWithApi(api, activeSearchTokens(plans));
+    await closeResolvedIssuesWithApi(api, activeSearchTokens(plans), options.syncDedupePrefixes);
   }
 }
 
@@ -119,10 +124,7 @@ async function ensureLabelsWithApi(api, labels) {
 }
 
 async function findExistingIssueWithApi(api, searchToken) {
-  const issues = await githubRequest(
-    api,
-    `/repos/${api.owner}/${api.repo}/issues?state=open&labels=ops-auto-fix&per_page=100`,
-  );
+  const issues = await listOpenOpsIssuesWithApi(api);
   return issues.find((issue) => !issue.pull_request && issue.title.includes(searchToken)) ?? null;
 }
 
@@ -167,13 +169,23 @@ async function githubRequest(api, path, options = {}) {
   return payload;
 }
 
-async function closeResolvedIssuesWithApi(api, activeTokens) {
-  const issues = await githubRequest(
-    api,
-    `/repos/${api.owner}/${api.repo}/issues?state=open&labels=ops-auto-fix&per_page=100`,
-  );
+async function listOpenOpsIssuesWithApi(api) {
+  const issues = [];
+  for (let page = 1; ; page += 1) {
+    const batch = await githubRequest(
+      api,
+      `/repos/${api.owner}/${api.repo}/issues?state=open&labels=ops-auto-fix&per_page=100&page=${page}`,
+    );
+    issues.push(...batch);
+    if (batch.length < 100) break;
+  }
+  return issues;
+}
+
+async function closeResolvedIssuesWithApi(api, activeTokens, dedupePrefixes) {
+  const issues = await listOpenOpsIssuesWithApi(api);
   for (const issue of issues) {
-    if (issue.pull_request || !shouldCloseIssue(issue, activeTokens)) continue;
+    if (issue.pull_request || !shouldCloseIssue(issue, activeTokens, dedupePrefixes)) continue;
     const body = resolvedCommentBody();
     const comment = await githubRequest(
       api,
@@ -218,7 +230,7 @@ function publishWithGh(plans, options = {}) {
   }
 
   if (options.syncResolved) {
-    closeResolvedIssuesWithGh(activeSearchTokens(plans));
+    closeResolvedIssuesWithGh(activeSearchTokens(plans), options.syncDedupePrefixes);
   }
 }
 
@@ -245,7 +257,7 @@ function findExistingIssue(searchToken) {
   return list[0] ?? null;
 }
 
-function closeResolvedIssuesWithGh(activeTokens) {
+function closeResolvedIssuesWithGh(activeTokens, dedupePrefixes) {
   const output = runGh([
     "issue",
     "list",
@@ -254,13 +266,13 @@ function closeResolvedIssuesWithGh(activeTokens) {
     "--label",
     "ops-auto-fix",
     "--json",
-    "number,title,labels",
+    "number,title,labels,body",
     "--limit",
-    "100",
+    "1000",
   ]);
   const issues = JSON.parse(output || "[]");
   for (const issue of issues) {
-    if (!shouldCloseIssue(issue, activeTokens)) continue;
+    if (!shouldCloseIssue(issue, activeTokens, dedupePrefixes)) continue;
     runGh([
       "issue",
       "close",
@@ -277,7 +289,8 @@ function activeSearchTokens(plans) {
   return new Set(plans.map((plan) => plan.searchToken));
 }
 
-function shouldCloseIssue(issue, activeTokens) {
+function shouldCloseIssue(issue, activeTokens, dedupePrefixes = []) {
+  if (!issueIsInDedupeScope(issue, dedupePrefixes)) return false;
   const token = issueSearchToken(issue);
   if (!token || activeTokens.has(token)) return false;
   const labels = issueLabelNames(issue);
@@ -285,6 +298,17 @@ function shouldCloseIssue(issue, activeTokens) {
     if (RESOLUTION_BLOCKING_LABELS.has(label)) return false;
   }
   return true;
+}
+
+function issueIsInDedupeScope(issue, dedupePrefixes) {
+  if (!dedupePrefixes.length) return true;
+  const dedupeKey = issueDedupeKey(issue);
+  return Boolean(dedupeKey && dedupePrefixes.some((prefix) => dedupeKey.startsWith(prefix)));
+}
+
+function issueDedupeKey(issue) {
+  const match = optionalString(issue?.body).match(/^- Dedupe key:\s*(.+)$/im);
+  return match?.[1]?.trim().toLowerCase() ?? null;
 }
 
 function issueSearchToken(issue) {
@@ -308,6 +332,13 @@ function resolvedCommentBody() {
 
 function optionalString(value) {
   return typeof value === "string" ? value : "";
+}
+
+function parseSyncDedupePrefixes(value) {
+  return optionalString(value)
+    .split(",")
+    .map((item) => item.trim().toLowerCase())
+    .filter(Boolean);
 }
 
 function updateBody(plan) {

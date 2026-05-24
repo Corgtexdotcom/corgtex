@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -51,6 +52,46 @@ describe("github-incident resolved issue sync", () => {
     expect(result.state.issues.every((item) => !item.closed)).toBe(true);
   });
 
+  it("requires explicit incident input when resolved sync is requested", async () => {
+    const staleToken = opsToken("stale-dedupe");
+    const result = await runWithFakeGh(githubIncidentPath, ["--sync-resolved"], null, {
+      issues: [issue(7, `[${staleToken}] P2 web: stale`)],
+    });
+
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("--sync-resolved requires explicit incident JSON");
+    expect(result.state.issues[0].closed).toBeFalsy();
+  });
+
+  it("scopes resolved sync to matching dedupe prefixes", async () => {
+    const controlPlaneToken = opsToken("control-plane:deployment-1:slackInvalidAuth");
+    const readinessToken = opsToken("client-readiness:crina:smoke:1:none");
+    const result = await runWithFakeGh(githubIncidentPath, [
+      "--sync-resolved",
+      "--sync-dedupe-prefixes",
+      "control-plane:",
+    ], [], {
+      issues: [
+        issue(
+          8,
+          `[${controlPlaneToken}] P2 slack: stale`,
+          ["ops-auto-fix"],
+          "control-plane:deployment-1:slackInvalidAuth",
+        ),
+        issue(
+          9,
+          `[${readinessToken}] P2 client: readiness still owned elsewhere`,
+          ["ops-auto-fix"],
+          "client-readiness:crina:smoke:1:none",
+        ),
+      ],
+    });
+
+    expect(result.code).toBe(0);
+    expect(result.state.issues.find((item) => item.number === 8).closed).toBe(true);
+    expect(result.state.issues.find((item) => item.number === 9).closed).toBeFalsy();
+  });
+
   it("leaves open issues untouched when resolved sync is not requested", async () => {
     const staleToken = opsToken("stale-dedupe");
     const result = await runWithFakeGh(githubIncidentPath, [], [], {
@@ -63,23 +104,67 @@ describe("github-incident resolved issue sync", () => {
   });
 
   it("runs resolved sync from clean health sweeps that create issues", async () => {
-    const staleToken = opsToken("stale-dedupe");
-    const result = await runWithFakeGh(healthSweepPath, [], null, {
-      issues: [issue(6, `[${staleToken}] P2 slack: stale`)],
-      env: {
-        OPS_CREATE_GITHUB_ISSUES: "true",
-        OPS_HEALTH_TARGETS_JSON: "[]",
-        CONTROL_PLANE_AGENT_API_KEY: "",
-        CONTROL_PLANE_URL: "",
-        APP_URL: "",
-        NEXT_PUBLIC_APP_URL: "",
-        NEXT_PUBLIC_SITE_URL: "",
-        OPS_PRIMARY_CLIENT_URL: "",
-      },
-    });
+    const server = await startHealthServer();
+    try {
+      const staleDedupe = `site:${server.url}/api/health:down`;
+      const staleToken = opsToken(staleDedupe);
+      const result = await runWithFakeGh(healthSweepPath, [], null, {
+        issues: [issue(6, `[${staleToken}] P2 site: stale`, ["ops-auto-fix"], staleDedupe)],
+        env: {
+          OPS_CREATE_GITHUB_ISSUES: "true",
+          OPS_HEALTH_TARGETS_JSON: JSON.stringify([
+            {
+              name: "site",
+              service: "site",
+              url: `${server.url}/api/health`,
+              expectJson: { status: "ok" },
+            },
+          ]),
+          CONTROL_PLANE_AGENT_API_KEY: "",
+          CONTROL_PLANE_URL: "",
+          APP_URL: "",
+          NEXT_PUBLIC_APP_URL: "",
+          NEXT_PUBLIC_SITE_URL: "",
+          OPS_PRIMARY_CLIENT_URL: "",
+        },
+      });
 
-    expect(result.code).toBe(0);
-    expect(result.state.issues[0].closed).toBe(true);
+      expect(result.code).toBe(0);
+      expect(result.state.issues[0].closed).toBe(true);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("does not fail clean health sweeps when resolved sync fails", async () => {
+    const server = await startHealthServer();
+    try {
+      const result = await runWithFakeGh(healthSweepPath, [], null, {
+        failIssueList: true,
+        env: {
+          OPS_CREATE_GITHUB_ISSUES: "true",
+          OPS_HEALTH_TARGETS_JSON: JSON.stringify([
+            {
+              name: "site",
+              service: "site",
+              url: `${server.url}/api/health`,
+              expectJson: { status: "ok" },
+            },
+          ]),
+          CONTROL_PLANE_AGENT_API_KEY: "",
+          CONTROL_PLANE_URL: "",
+          APP_URL: "",
+          NEXT_PUBLIC_APP_URL: "",
+          NEXT_PUBLIC_SITE_URL: "",
+          OPS_PRIMARY_CLIENT_URL: "",
+        },
+      });
+
+      expect(result.code).toBe(0);
+      expect(result.stderr).toContain("Resolved issue sync failed during a clean sweep");
+    } finally {
+      await server.close();
+    }
   });
 });
 
@@ -87,10 +172,11 @@ function opsToken(dedupeKey) {
   return `ops:${shortHash(dedupeKey, 10)}`;
 }
 
-function issue(number, title, labels = ["ops-auto-fix"]) {
+function issue(number, title, labels = ["ops-auto-fix"], dedupeKey = null) {
   return {
     number,
     title,
+    body: dedupeKey ? ["## Routing", "", `- Dedupe key: ${dedupeKey}`].join("\n") : "",
     labels: labels.map((name) => ({ name })),
   };
 }
@@ -99,7 +185,11 @@ async function runWithFakeGh(scriptPath, args, input, options = {}) {
   const tmp = await mkdtemp(path.join(tmpdir(), "corgtex-gh-incident-"));
   const statePath = path.join(tmp, "state.json");
   const ghPath = path.join(tmp, "fake-gh.mjs");
-  await writeFile(statePath, JSON.stringify({ issues: options.issues ?? [], calls: [] }));
+  await writeFile(statePath, JSON.stringify({
+    issues: options.issues ?? [],
+    calls: [],
+    failIssueList: Boolean(options.failIssueList),
+  }));
   await writeFile(ghPath, fakeGhSource());
   await chmod(ghPath, 0o755);
 
@@ -170,6 +260,11 @@ if (argv[0] === "label" && argv[1] === "create") {
 }
 
 if (argv[0] === "issue" && argv[1] === "list") {
+  if (state.failIssueList) {
+    console.error("simulated issue list failure");
+    save();
+    process.exit(1);
+  }
   const search = argValue("--search");
   const token = search ? search.split(" ")[0] : null;
   const issues = token
@@ -179,6 +274,7 @@ if (argv[0] === "issue" && argv[1] === "list") {
   console.log(JSON.stringify(issues.map((issue) => ({
     number: issue.number,
     title: issue.title,
+    body: issue.body,
     labels: issue.labels,
   }))));
   process.exit(0);
@@ -219,4 +315,29 @@ console.error("unexpected gh call: " + argv.join(" "));
 save();
 process.exit(1);
 `;
+}
+
+async function startHealthServer() {
+  const server = createServer((request, response) => {
+    if (request.url === "/api/health") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ status: "ok" }));
+      return;
+    }
+    response.writeHead(404);
+    response.end();
+  });
+  await new Promise((resolve) => {
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  return {
+    url: `http://127.0.0.1:${address.port}`,
+    close: () => new Promise((resolve, reject) => {
+      server.close((error) => {
+        if (error) reject(error);
+        else resolve();
+      });
+    }),
+  };
 }
