@@ -37,6 +37,7 @@ const {
     },
     communicationInstallation: {
       findMany: vi.fn(),
+      updateMany: vi.fn(),
     },
     customerDeployment: {
       findMany: vi.fn(),
@@ -127,6 +128,7 @@ describe("runPendingJobs", () => {
     prismaMock.member.findMany.mockReset().mockResolvedValue([]);
     prismaMock.externalDataSource.findMany.mockReset().mockResolvedValue([]);
     prismaMock.communicationInstallation.findMany.mockReset().mockResolvedValue([]);
+    prismaMock.communicationInstallation.updateMany.mockReset().mockResolvedValue({ count: 1 });
     prismaMock.customerDeployment.findMany.mockReset().mockResolvedValue([]);
     txMock.$queryRaw.mockReset().mockResolvedValue([]);
     txMock.workflowJob.upsert.mockReset().mockResolvedValue({ id: "job-1" });
@@ -554,6 +556,43 @@ describe("runPendingJobs", () => {
       workspaceId: "ws-1",
       workflowJobId: "job-1",
       installationId: "install-1",
+    });
+    expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({
+      where: { id: "job-1" },
+      data: expect.objectContaining({
+        status: "COMPLETED",
+      }),
+    });
+  });
+
+  it("marks Slack installations reauth-required when proactive scans fail with invalid_auth", async () => {
+    const invalidAuthError = new Error("An API error occurred: invalid_auth");
+    runSlackProactiveScanMock.mockRejectedValueOnce(invalidAuthError);
+    txMock.$queryRaw.mockResolvedValue([
+      {
+        id: "job-1",
+        workspaceId: "ws-1",
+        type: "communication.slack.proactive-scan",
+        payload: {
+          installationId: "install-1",
+        },
+        attempts: 5,
+      },
+    ]);
+
+    await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
+
+    expect(prismaMock.communicationInstallation.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: "install-1",
+        workspaceId: "ws-1",
+        provider: "SLACK",
+      },
+      data: expect.objectContaining({
+        status: "ERROR",
+        disconnectedAt: expect.any(Date),
+        lastError: "invalid_auth",
+      }),
     });
     expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({
       where: { id: "job-1" },

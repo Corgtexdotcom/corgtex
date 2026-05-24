@@ -94,6 +94,37 @@ function releaseTargetFromPayload(value: unknown): ControlPlaneReleaseTarget | n
   };
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function isSlackInvalidAuthError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  const dataError = isRecord(error) && isRecord(error.data) && typeof error.data.error === "string"
+    ? error.data.error
+    : "";
+  return message.includes("invalid_auth") || dataError === "invalid_auth";
+}
+
+async function markSlackProactiveScanReauthRequired(job: ClaimedJob, installationId: string, error: unknown) {
+  if (!job.workspaceId || !isSlackInvalidAuthError(error)) return false;
+
+  const result = await prisma.communicationInstallation.updateMany({
+    where: {
+      id: installationId,
+      workspaceId: job.workspaceId,
+      provider: "SLACK",
+    },
+    data: {
+      status: "ERROR",
+      disconnectedAt: new Date(),
+      lastError: "invalid_auth",
+    },
+  });
+
+  return result.count > 0;
+}
+
 class RetryableWorkflowJobError extends Error {}
 
 export async function enqueueJob(tx: Prisma.TransactionClient, params: {
@@ -599,11 +630,18 @@ async function handleJob(job: ClaimedJob) {
   if (job.type === "communication.slack.proactive-scan") {
     const proactivePayload = payload as { installationId?: string };
     if (proactivePayload.installationId) {
-      await runSlackProactiveScan({
-        workspaceId: job.workspaceId,
-        workflowJobId: job.id,
-        installationId: proactivePayload.installationId,
-      });
+      try {
+        await runSlackProactiveScan({
+          workspaceId: job.workspaceId,
+          workflowJobId: job.id,
+          installationId: proactivePayload.installationId,
+        });
+      } catch (error) {
+        if (await markSlackProactiveScanReauthRequired(job, proactivePayload.installationId, error)) {
+          return;
+        }
+        throw error;
+      }
     }
     return;
   }
