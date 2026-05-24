@@ -669,7 +669,16 @@ export default function ContextMapClient({ workspaceId, data, includeStale = fal
                   setSelectedRelationshipId(null);
                   setSelectedObjectId((current) => current === ids[0] ? current : ids[0]);
                 } else if (selectedEdges.length > 0) {
+                  const relationship = relationshipById.get(selectedEdges[0].id);
                   setSelectedRelationshipId(selectedEdges[0].id);
+                  if (relationship) {
+                    const edgeObjectIds = [relationship.sourceObjectId, relationship.targetObjectId];
+                    setSelectedObjectIds((current) => sameIds(current, edgeObjectIds) ? current : edgeObjectIds);
+                    setSelectedObjectId((current) => current === relationship.sourceObjectId ? current : relationship.sourceObjectId);
+                  } else {
+                    setSelectedObjectIds([]);
+                    setSelectedObjectId(null);
+                  }
                 }
               }}
               onNodeDragStop={() => setLayoutDirty(true)}
