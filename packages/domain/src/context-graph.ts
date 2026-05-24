@@ -1211,7 +1211,9 @@ export async function buildSelectedRegionContext(actor: AppActor, params: {
     });
     const hasEvidence = (objectEvidenceCountById.get(object.id) ?? 0) > 0
       || relatedRelationships.some((relationship) => (relationshipEvidenceCountById.get(relationship.id) ?? 0) > 0);
-    const hasBlocker = relatedRelationships.some((relationship) => relationship.relationshipType === "blocks");
+    const hasBlocker = relatedRelationships.some((relationship) => (
+      relationship.relationshipType === "blocks" && relationship.targetObjectId === object.id
+    ));
     const workState = stringProperty(object.properties, "workState");
 
     if (ownerRequiredTypes.has(object.objectType) && !hasOwner) {

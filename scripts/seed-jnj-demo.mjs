@@ -1016,6 +1016,8 @@ async function seedContextMapData({ wsId, circleMappings, meetingMappings }) {
   await prisma.contextGraphRelationship.deleteMany({
     where: {
       workspaceId: wsId,
+      createdByType: "integration",
+      dedupeKey: { endsWith: ":demo" },
       OR: [
         { sourceObjectId: { startsWith: `${wsId}-ctx-` } },
         { targetObjectId: { startsWith: `${wsId}-ctx-` } },
