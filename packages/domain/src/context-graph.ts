@@ -108,10 +108,25 @@ type ContextGraphEvidenceInput = {
   metadata?: JsonRecord;
 };
 
+type ContextMapLayoutItemInput = {
+  objectId: string;
+  x: number;
+  y: number;
+  width?: number | null;
+  height?: number | null;
+  visualState?: JsonRecord;
+};
+
+type ContextMapLayoutUpdateInput = {
+  mapViewId: string;
+  items: ContextMapLayoutItemInput[];
+};
+
 export type ContextGraphDiffInput = {
   objects?: ContextGraphObjectInput[];
   relationships?: ContextGraphRelationshipInput[];
   evidenceRefs?: ContextGraphEvidenceInput[];
+  mapLayoutUpdates?: ContextMapLayoutUpdateInput[];
 };
 
 function requireKnownValue<T extends readonly string[]>(value: string, allowed: T, label: string): asserts value is T[number] {
@@ -145,6 +160,15 @@ function creatorData(actor: AppActor, agentRunId?: string | null) {
     createdByUserId: actor.kind === "user" ? actor.user.id : null,
     createdByAgentRunId: agentRunId ?? null,
   };
+}
+
+function actorUserId(actor: AppActor) {
+  return actor.kind === "user" ? actor.user.id : null;
+}
+
+function canApproveContextGraph(actor: AppActor, membership: Awaited<ReturnType<typeof requireWorkspaceMembership>>) {
+  if (actor.kind === "agent") return Boolean(actor.scopes?.includes("context-graph:approve"));
+  return membership?.role === "ADMIN" || membership?.role === "FACILITATOR";
 }
 
 async function requireGraphRead(actor: AppActor, workspaceId: string) {
@@ -327,6 +351,101 @@ async function attachEvidenceWithTx(
   return tx.contextGraphEvidenceRef.create({ data });
 }
 
+function stringArrayFromQuery(query: Prisma.JsonValue, key: string) {
+  if (!query || typeof query !== "object" || Array.isArray(query)) return [];
+  const value = (query as JsonRecord)[key];
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.length > 0) : [];
+}
+
+function visibleMapViewWhere(workspaceId: string, userId: string | null) {
+  return {
+    workspaceId,
+    OR: [
+      { createdByUserId: null },
+      ...(userId ? [{ createdByUserId: userId }] : []),
+    ],
+  };
+}
+
+function objectWhereForMapView(workspaceId: string, mapView: { query: Prisma.JsonValue }, includeStale = false): Prisma.ContextGraphObjectWhereInput {
+  const objectTypes = stringArrayFromQuery(mapView.query, "objectTypes");
+  const objectIds = stringArrayFromQuery(mapView.query, "objectIds");
+  return {
+    workspaceId,
+    status: includeStale ? { not: "archived" } : { notIn: ["archived", "stale"] },
+    ...(objectTypes.length ? { objectType: { in: objectTypes } } : {}),
+    ...(objectIds.length ? { id: { in: objectIds } } : {}),
+  };
+}
+
+function normalizeLayoutItem(item: ContextMapLayoutItemInput) {
+  invariant(item.objectId.trim().length > 0, 400, "INVALID_INPUT", "Layout object id is required.");
+  invariant(Number.isFinite(item.x) && Number.isFinite(item.y), 400, "INVALID_INPUT", "Layout coordinates must be finite numbers.");
+  return {
+    objectId: item.objectId.trim(),
+    x: item.x,
+    y: item.y,
+    width: item.width ?? null,
+    height: item.height ?? null,
+    visualState: jsonObject(item.visualState),
+  };
+}
+
+async function applyMapLayoutUpdateWithTx(
+  tx: Prisma.TransactionClient,
+  workspaceId: string,
+  update: ContextMapLayoutUpdateInput,
+  options?: { actor?: AppActor; requireMasterOrOwner?: boolean },
+) {
+  invariant(update.mapViewId.trim().length > 0, 400, "INVALID_INPUT", "Map view id is required.");
+  invariant(update.items.length > 0, 400, "INVALID_INPUT", "At least one layout item is required.");
+  const mapView = await tx.contextMapView.findFirst({
+    where: { id: update.mapViewId, workspaceId },
+    select: { id: true, createdByUserId: true },
+  });
+  invariant(mapView, 404, "NOT_FOUND", "Context map not found.");
+  if (options?.requireMasterOrOwner) {
+    const userId = options.actor ? actorUserId(options.actor) : null;
+    invariant(
+      mapView.createdByUserId === null || (userId !== null && mapView.createdByUserId === userId),
+      403,
+      "FORBIDDEN",
+      "Proposed map layout updates can only target shared master views or your personal map view.",
+    );
+  }
+
+  for (const rawItem of update.items) {
+    const item = normalizeLayoutItem(rawItem);
+    await resolveObjectId(tx, workspaceId, item.objectId);
+    await tx.contextMapLayoutItem.upsert({
+      where: {
+        mapViewId_objectId: {
+          mapViewId: update.mapViewId,
+          objectId: item.objectId,
+        },
+      },
+      update: {
+        x: item.x,
+        y: item.y,
+        width: item.width,
+        height: item.height,
+        visualState: item.visualState,
+      },
+      create: {
+        mapViewId: update.mapViewId,
+        objectId: item.objectId,
+        x: item.x,
+        y: item.y,
+        width: item.width,
+        height: item.height,
+        visualState: item.visualState,
+      },
+    });
+  }
+
+  return { mapViewId: update.mapViewId, updated: update.items.length };
+}
+
 export async function upsertContextGraphObject(actor: AppActor, params: ContextGraphObjectInput & {
   workspaceId: string;
   agentRunId?: string | null;
@@ -373,36 +492,29 @@ export async function attachContextGraphEvidence(actor: AppActor, params: Contex
 export async function ensureDefaultContextMapView(actor: AppActor, workspaceId: string) {
   await requireGraphRead(actor, workspaceId);
   const existing = await prisma.contextMapView.findFirst({
-    where: { workspaceId, viewType: "process" },
+    where: { workspaceId, viewType: "process", createdByUserId: null },
     orderBy: { createdAt: "asc" },
   });
   if (existing) return existing;
 
-  const createdByUserId = actor.kind === "user" ? actor.user.id : null;
   return prisma.contextMapView.create({
     data: {
       workspaceId,
       name: "Living process map",
       viewType: "process",
       query: { objectTypes: ["Process", "ProcessStep", "Decision", "Task", "Risk", "Question", "Tool", "Team", "Role", "Meeting"] },
-      createdByUserId,
+      createdByUserId: null,
     },
   });
 }
 
 export async function listContextMapViews(actor: AppActor, workspaceId: string) {
   await requireGraphRead(actor, workspaceId);
+  const userId = actorUserId(actor);
   return prisma.contextMapView.findMany({
-    where: { workspaceId },
-    orderBy: [{ viewType: "asc" }, { createdAt: "asc" }],
+    where: visibleMapViewWhere(workspaceId, userId),
+    orderBy: [{ createdByUserId: "asc" }, { viewType: "asc" }, { createdAt: "asc" }],
   });
-}
-
-function objectWhereForMap(workspaceId: string, includeStale = false): Prisma.ContextGraphObjectWhereInput {
-  return {
-    workspaceId,
-    status: includeStale ? { not: "archived" } : { notIn: ["archived", "stale"] },
-  };
 }
 
 export async function getContextMapData(actor: AppActor, params: {
@@ -410,14 +522,15 @@ export async function getContextMapData(actor: AppActor, params: {
   mapViewId?: string | null;
   includeStale?: boolean;
 }) {
-  await requireGraphRead(actor, params.workspaceId);
+  const membership = await requireGraphRead(actor, params.workspaceId);
+  const userId = actorUserId(actor);
   const mapView = params.mapViewId
-    ? await prisma.contextMapView.findFirst({ where: { id: params.mapViewId, workspaceId: params.workspaceId } })
+    ? await prisma.contextMapView.findFirst({ where: { id: params.mapViewId, ...visibleMapViewWhere(params.workspaceId, userId) } })
     : await ensureDefaultContextMapView(actor, params.workspaceId);
   invariant(mapView, 404, "NOT_FOUND", "Context map not found.");
 
   const objects = await prisma.contextGraphObject.findMany({
-    where: objectWhereForMap(params.workspaceId, params.includeStale),
+    where: objectWhereForMapView(params.workspaceId, mapView, params.includeStale),
     include: {
       evidenceRefs: {
         orderBy: { createdAt: "desc" },
@@ -428,7 +541,7 @@ export async function getContextMapData(actor: AppActor, params: {
     take: 200,
   });
   const objectIds = objects.map((object) => object.id);
-  const [relationships, layoutItems, proposedDiffs] = await Promise.all([
+  const [relationships, mapViews, layoutItems, proposedDiffs] = await Promise.all([
     prisma.contextGraphRelationship.findMany({
       where: {
         workspaceId: params.workspaceId,
@@ -444,6 +557,10 @@ export async function getContextMapData(actor: AppActor, params: {
       },
       take: 300,
     }),
+    prisma.contextMapView.findMany({
+      where: visibleMapViewWhere(params.workspaceId, userId),
+      orderBy: [{ createdByUserId: "asc" }, { viewType: "asc" }, { createdAt: "asc" }],
+    }),
     prisma.contextMapLayoutItem.findMany({
       where: { mapViewId: mapView.id },
     }),
@@ -454,7 +571,19 @@ export async function getContextMapData(actor: AppActor, params: {
     }),
   ]);
 
-  return { mapView, objects, relationships, layoutItems, proposedDiffs };
+  return {
+    mapView,
+    mapViews,
+    objects,
+    relationships,
+    layoutItems,
+    proposedDiffs,
+    permissions: {
+      canSavePersonalView: actor.kind === "user",
+      canUpdateMasterView: canApproveContextGraph(actor, membership),
+      canRequestMasterUpdate: actor.kind === "user",
+    },
+  };
 }
 
 export async function updateContextMapLayout(actor: AppActor, params: {
@@ -462,41 +591,43 @@ export async function updateContextMapLayout(actor: AppActor, params: {
   mapViewId: string;
   items: Array<{ objectId: string; x: number; y: number; width?: number | null; height?: number | null; visualState?: JsonRecord }>;
 }) {
-  await requireGraphPropose(actor, params.workspaceId);
+  const membership = await requireGraphPropose(actor, params.workspaceId);
+  const userId = actorUserId(actor);
   const mapView = await prisma.contextMapView.findFirst({
-    where: { id: params.mapViewId, workspaceId: params.workspaceId },
-    select: { id: true },
+    where: { id: params.mapViewId, ...visibleMapViewWhere(params.workspaceId, userId) },
+    select: { id: true, name: true, createdByUserId: true },
   });
   invariant(mapView, 404, "NOT_FOUND", "Context map not found.");
 
-  await prisma.$transaction(async (tx) => {
-    for (const item of params.items) {
-      await resolveObjectId(tx, params.workspaceId, item.objectId);
-      await tx.contextMapLayoutItem.upsert({
-        where: {
-          mapViewId_objectId: {
-            mapViewId: params.mapViewId,
-            objectId: item.objectId,
-          },
-        },
-        update: {
-          x: item.x,
-          y: item.y,
-          width: item.width ?? null,
-          height: item.height ?? null,
-          visualState: jsonObject(item.visualState),
-        },
-        create: {
+  const isPersonalOwner = Boolean(userId && mapView.createdByUserId === userId);
+  const isMaster = mapView.createdByUserId === null;
+  const canUpdateMaster = isMaster && canApproveContextGraph(actor, membership);
+  invariant(isPersonalOwner || isMaster, 403, "FORBIDDEN", "You cannot update another user's context map view.");
+
+  if (!isPersonalOwner && !canUpdateMaster) {
+    const proposedDiff = await createContextGraphProposedDiff(actor, {
+      workspaceId: params.workspaceId,
+      reason: `Request to update master map layout: ${mapView.name}`,
+      evidence: {
+        kind: "context-map-layout-update",
+        mapViewId: params.mapViewId,
+        itemCount: params.items.length,
+      },
+      diff: {
+        mapLayoutUpdates: [{
           mapViewId: params.mapViewId,
-          objectId: item.objectId,
-          x: item.x,
-          y: item.y,
-          width: item.width ?? null,
-          height: item.height ?? null,
-          visualState: jsonObject(item.visualState),
-        },
-      });
-    }
+          items: params.items,
+        }],
+      },
+    });
+    return { mode: "proposed" as const, proposedDiffId: proposedDiff.id, updated: 0 };
+  }
+
+  await prisma.$transaction(async (tx) => {
+    await applyMapLayoutUpdateWithTx(tx, params.workspaceId, {
+      mapViewId: params.mapViewId,
+      items: params.items,
+    });
     await recordAudit(tx, actor, {
       workspaceId: params.workspaceId,
       action: "context-map.layout.updated",
@@ -506,7 +637,89 @@ export async function updateContextMapLayout(actor: AppActor, params: {
     });
   });
 
-  return { updated: params.items.length };
+  return { mode: "updated" as const, updated: params.items.length };
+}
+
+export async function createPersonalContextMapView(actor: AppActor, params: {
+  workspaceId: string;
+  sourceMapViewId: string;
+  name?: string | null;
+  items?: ContextMapLayoutItemInput[];
+}) {
+  const membership = await requireGraphPropose(actor, params.workspaceId);
+  invariant(actor.kind === "user", 403, "FORBIDDEN", "Only workspace members can save personal map views.");
+  invariant(membership?.isActive, 403, "NOT_A_MEMBER", "You are not an active member of this workspace.");
+
+  const sourceMapView = await prisma.contextMapView.findFirst({
+    where: { id: params.sourceMapViewId, ...visibleMapViewWhere(params.workspaceId, actor.user.id) },
+  });
+  invariant(sourceMapView, 404, "NOT_FOUND", "Context map not found.");
+
+  const query = (sourceMapView.query && typeof sourceMapView.query === "object" && !Array.isArray(sourceMapView.query))
+    ? { ...(sourceMapView.query as JsonRecord) }
+    : {};
+  const name = params.name?.trim() || `${sourceMapView.name} - personal`;
+  const sourceLayoutItems = params.items?.length
+    ? params.items.map(normalizeLayoutItem)
+    : await prisma.contextMapLayoutItem.findMany({
+      where: { mapViewId: sourceMapView.id },
+      select: { objectId: true, x: true, y: true, width: true, height: true, visualState: true },
+    }).then((items) => items.map((item) => normalizeLayoutItem({
+      objectId: item.objectId,
+      x: item.x,
+      y: item.y,
+      width: item.width,
+      height: item.height,
+      visualState: item.visualState && typeof item.visualState === "object" && !Array.isArray(item.visualState)
+        ? item.visualState as JsonRecord
+        : undefined,
+    })));
+
+  return prisma.$transaction(async (tx) => {
+    for (const normalized of sourceLayoutItems) {
+      await resolveObjectId(tx, params.workspaceId, normalized.objectId);
+    }
+
+    const mapView = await tx.contextMapView.create({
+      data: {
+        workspaceId: params.workspaceId,
+        name: name.slice(0, 120),
+        viewType: sourceMapView.viewType,
+        query: {
+          ...query,
+          scope: "personal",
+          sourceMapViewId: sourceMapView.id,
+          savedFromName: sourceMapView.name,
+          savedAt: new Date().toISOString(),
+        },
+        createdByUserId: actor.user.id,
+      },
+    });
+
+    for (const normalized of sourceLayoutItems) {
+      await tx.contextMapLayoutItem.create({
+        data: {
+          mapViewId: mapView.id,
+          objectId: normalized.objectId,
+          x: normalized.x,
+          y: normalized.y,
+          width: normalized.width,
+          height: normalized.height,
+          visualState: normalized.visualState,
+        },
+      });
+    }
+
+    await recordAudit(tx, actor, {
+      workspaceId: params.workspaceId,
+      action: "context-map.view.personal.created",
+      entityType: "ContextMapView",
+      entityId: mapView.id,
+      meta: { sourceMapViewId: sourceMapView.id, name: mapView.name, count: sourceLayoutItems.length },
+    });
+
+    return mapView;
+  });
 }
 
 function validateDiff(diff: ContextGraphDiffInput) {
@@ -515,6 +728,11 @@ function validateDiff(diff: ContextGraphDiffInput) {
   for (const evidence of diff.evidenceRefs ?? []) {
     invariant(evidence.sourceType.trim().length > 0, 400, "INVALID_INPUT", "Evidence source type is required.");
     invariant(evidence.sourceId.trim().length > 0, 400, "INVALID_INPUT", "Evidence source id is required.");
+  }
+  for (const layoutUpdate of diff.mapLayoutUpdates ?? []) {
+    invariant(layoutUpdate.mapViewId.trim().length > 0, 400, "INVALID_INPUT", "Map view id is required.");
+    invariant(layoutUpdate.items.length > 0, 400, "INVALID_INPUT", "At least one layout item is required.");
+    for (const item of layoutUpdate.items) normalizeLayoutItem(item);
   }
 }
 
@@ -546,7 +764,12 @@ export async function createContextGraphProposedDiff(actor: AppActor, params: {
       action: "context-graph.diff.proposed",
       entityType: "ContextGraphProposedDiff",
       entityId: proposedDiff.id,
-      meta: { reason: proposedDiff.reason, objectCount: params.diff.objects?.length ?? 0, relationshipCount: params.diff.relationships?.length ?? 0 },
+      meta: {
+        reason: proposedDiff.reason,
+        objectCount: params.diff.objects?.length ?? 0,
+        relationshipCount: params.diff.relationships?.length ?? 0,
+        mapLayoutUpdateCount: params.diff.mapLayoutUpdates?.length ?? 0,
+      },
     });
     return proposedDiff;
   });
@@ -620,6 +843,7 @@ export async function applyContextGraphProposedDiff(actor: AppActor, params: {
     const refToRelationshipId = new Map<string, string>();
     const objectIds: string[] = [];
     const relationshipIds: string[] = [];
+    const layoutUpdates: Array<{ mapViewId: string; updated: number }> = [];
 
     for (const objectInput of diff.objects ?? []) {
       const object = await upsertObjectWithTx(tx, actor, params.workspaceId, {
@@ -643,6 +867,13 @@ export async function applyContextGraphProposedDiff(actor: AppActor, params: {
       await attachEvidenceWithTx(tx, params.workspaceId, evidenceInput, refToObjectId, refToRelationshipId);
     }
 
+    for (const layoutUpdate of diff.mapLayoutUpdates ?? []) {
+      layoutUpdates.push(await applyMapLayoutUpdateWithTx(tx, params.workspaceId, layoutUpdate, {
+        actor,
+        requireMasterOrOwner: true,
+      }));
+    }
+
     const updated = await tx.contextGraphProposedDiff.update({
       where: { id: proposedDiff.id },
       data: {
@@ -658,14 +889,14 @@ export async function applyContextGraphProposedDiff(actor: AppActor, params: {
       action: "context-graph.diff.applied",
       entityType: "ContextGraphProposedDiff",
       entityId: proposedDiff.id,
-      meta: { objectIds, relationshipIds },
+      meta: { objectIds, relationshipIds, layoutUpdates },
     });
     await appendEvents(tx, [{
       workspaceId: params.workspaceId,
       type: "context-graph.diff.applied",
       aggregateType: "ContextGraphProposedDiff",
       aggregateId: proposedDiff.id,
-      payload: { proposedDiffId: proposedDiff.id, objectIds, relationshipIds },
+      payload: { proposedDiffId: proposedDiff.id, objectIds, relationshipIds, layoutUpdates },
     }]);
 
     return updated;

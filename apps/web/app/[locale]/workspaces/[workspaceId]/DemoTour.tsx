@@ -37,6 +37,7 @@ export function DemoTour({ workspaceId }: { workspaceId: string }) {
   const driverRef = useRef<ReturnType<typeof driver> | null>(null);
   const targetStepIndexRef = useRef<number | null>(null);
   const [showBriefingCta, setShowBriefingCta] = useState(false);
+  const isMapRoute = Boolean(pathname?.includes(`/workspaces/${workspaceId}/maps`));
 
   const tourSteps: TourStep[] = useMemo(() => [
     {
@@ -173,7 +174,7 @@ export function DemoTour({ workspaceId }: { workspaceId: string }) {
     
     driverRef.current = initDriver();
 
-    if (!completed) {
+    if (!completed && !isMapRoute) {
       // Start tour on first visit after a brief delay
       setTimeout(() => {
         driverRef.current?.drive(0);
@@ -191,7 +192,7 @@ export function DemoTour({ workspaceId }: { workspaceId: string }) {
         driverRef.current?.destroy();
       }
     };
-  }, [workspaceId, initDriver, restartTour]);
+  }, [workspaceId, initDriver, isMapRoute, restartTour]);
 
   useEffect(() => {
     // Handle cross-page navigation continuation

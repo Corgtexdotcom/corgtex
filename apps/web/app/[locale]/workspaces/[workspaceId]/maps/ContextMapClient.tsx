@@ -1,23 +1,40 @@
 "use client";
 
-import { useEffect, useMemo, useState, useTransition } from "react";
+import { useEffect, useMemo, useState, useTransition, type CSSProperties } from "react";
 import {
   Background,
   Controls,
+  MarkerType,
   ReactFlow,
   useEdgesState,
   useNodesState,
 } from "@xyflow/react";
-import type { Edge, Node } from "@xyflow/react";
+import type { Edge, Node, ReactFlowInstance } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { Check, CircleHelp, FileSearch, GitBranch, RefreshCcw } from "lucide-react";
+import {
+  Check,
+  CircleHelp,
+  Copy,
+  Crosshair,
+  FileSearch,
+  GitBranch,
+  Maximize2,
+  Minimize2,
+  RefreshCcw,
+  RotateCcw,
+  Save,
+  SlidersHorizontal,
+  X,
+} from "lucide-react";
 
 import {
   applyContextGraphProposedDiffAction,
   buildSelectedRegionContextAction,
+  createPersonalContextMapViewAction,
   createRegionProposalAction,
   saveContextMapLayoutAction,
 } from "./actions";
+import "./context-map.css";
 
 type EvidenceRef = {
   id: string;
@@ -36,6 +53,9 @@ type ContextGraphObject = {
   summary: string | null;
   confidence: number | null;
   status: string;
+  createdByType: string;
+  createdByUserId: string | null;
+  createdByAgentRunId: string | null;
   sourceEntityType: string | null;
   sourceEntityId: string | null;
   validFrom: string | null;
@@ -51,6 +71,14 @@ type ContextGraphRelationship = {
   relationshipType: string;
   confidence: number | null;
   status: string;
+  createdByType: string;
+  createdByUserId: string | null;
+  createdByAgentRunId: string | null;
+  sourceEntityType: string | null;
+  sourceEntityId: string | null;
+  validFrom: string | null;
+  validTo: string | null;
+  lastVerifiedAt: string | null;
   evidenceRefs: EvidenceRef[];
 };
 
@@ -62,6 +90,14 @@ type ContextMapLayoutItem = {
   height: number | null;
 };
 
+type ContextMapView = {
+  id: string;
+  name: string;
+  viewType: string;
+  createdByUserId: string | null;
+  query: Record<string, unknown>;
+};
+
 type ContextGraphProposedDiff = {
   id: string;
   reason: string | null;
@@ -71,49 +107,43 @@ type ContextGraphProposedDiff = {
 };
 
 export type ContextMapClientData = {
-  mapView: {
-    id: string;
-    name: string;
-    viewType: string;
-  };
+  mapView: ContextMapView;
+  mapViews: ContextMapView[];
   objects: ContextGraphObject[];
   relationships: ContextGraphRelationship[];
   layoutItems: ContextMapLayoutItem[];
   proposedDiffs: ContextGraphProposedDiff[];
+  permissions: {
+    canSavePersonalView: boolean;
+    canUpdateMasterView: boolean;
+    canRequestMasterUpdate: boolean;
+  };
 };
 
 type RegionContext = Awaited<ReturnType<typeof buildSelectedRegionContextAction>>;
+type InspectorDock = "right" | "bottom";
+type StatusFilter = "active" | "approved" | "needs-review" | "all";
 
-const NODE_COLORS: Record<string, { border: string; background: string }> = {
-  Process: { border: "#2563eb", background: "#eff6ff" },
-  ProcessStep: { border: "#0f766e", background: "#ecfdf5" },
-  Decision: { border: "#7c3aed", background: "#f5f3ff" },
-  Task: { border: "#ca8a04", background: "#fefce8" },
-  Risk: { border: "#dc2626", background: "#fef2f2" },
-  Team: { border: "#0891b2", background: "#ecfeff" },
-  Role: { border: "#4f46e5", background: "#eef2ff" },
-  Meeting: { border: "#475569", background: "#f8fafc" },
-  Question: { border: "#9333ea", background: "#faf5ff" },
+const NODE_COLORS: Record<string, { border: string; background: string; accent: string }> = {
+  Process: { border: "#2563eb", background: "#eff6ff", accent: "#1d4ed8" },
+  ProcessStep: { border: "#0f766e", background: "#ecfdf5", accent: "#0f766e" },
+  Decision: { border: "#7c3aed", background: "#f5f3ff", accent: "#6d28d9" },
+  Task: { border: "#ca8a04", background: "#fefce8", accent: "#a16207" },
+  Risk: { border: "#dc2626", background: "#fef2f2", accent: "#b91c1c" },
+  Team: { border: "#0891b2", background: "#ecfeff", accent: "#0e7490" },
+  Role: { border: "#4f46e5", background: "#eef2ff", accent: "#4338ca" },
+  Meeting: { border: "#475569", background: "#f8fafc", accent: "#334155" },
+  Question: { border: "#9333ea", background: "#faf5ff", accent: "#7e22ce" },
+  Tool: { border: "#059669", background: "#ecfdf5", accent: "#047857" },
+  Agent: { border: "#0d9488", background: "#f0fdfa", accent: "#0f766e" },
+  Policy: { border: "#334155", background: "#f8fafc", accent: "#1e293b" },
 };
 
 function positionForIndex(index: number) {
   const columns = 4;
   return {
-    x: (index % columns) * 280,
-    y: Math.floor(index / columns) * 170,
-  };
-}
-
-function nodeStyle(object: ContextGraphObject) {
-  const colors = NODE_COLORS[object.objectType] ?? { border: "#64748b", background: "#f8fafc" };
-  return {
-    border: `1px solid ${colors.border}`,
-    borderRadius: 8,
-    background: colors.background,
-    color: "#111827",
-    width: 230,
-    padding: 12,
-    boxShadow: object.status === "disputed" || object.status === "stale" ? "0 0 0 3px rgba(220,38,38,0.15)" : "0 10px 24px rgba(15,23,42,0.08)",
+    x: (index % columns) * 300,
+    y: Math.floor(index / columns) * 180,
   };
 }
 
@@ -122,87 +152,210 @@ function confidenceLabel(value: number | null) {
   return `${Math.round(value * 100)}% confidence`;
 }
 
-function stableDateLabel(value: string) {
-  return new Date(value).toISOString().slice(0, 10);
+function stableDateLabel(value: string | null) {
+  if (!value) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toISOString().slice(0, 10);
 }
 
 function objectMeta(object: ContextGraphObject) {
-  return [object.objectType, object.status, confidenceLabel(object.confidence)].join(" · ");
+  return [object.objectType, object.status, confidenceLabel(object.confidence)].join(" - ");
 }
 
 function sameIds(left: string[], right: string[]) {
   return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
-export default function ContextMapClient({ workspaceId, data }: { workspaceId: string; data: ContextMapClientData }) {
-  const [selectedObjectIds, setSelectedObjectIds] = useState<string[]>([]);
+function statusClass(status: string) {
+  if (status === "stale" || status === "disputed") return "problem";
+  if (status === "proposed" || status === "draft") return "pending";
+  if (status === "approved") return "approved";
+  return "neutral";
+}
+
+function relationshipColor(relationship: ContextGraphRelationship) {
+  if (relationship.status === "stale" || relationship.status === "disputed") return "#dc2626";
+  if (relationship.status === "proposed" || relationship.status === "draft") return "#ca8a04";
+  return "#64748b";
+}
+
+function shouldShowStatus(status: string, filter: StatusFilter) {
+  if (filter === "all") return true;
+  if (filter === "approved") return status === "approved";
+  if (filter === "needs-review") return ["draft", "proposed", "stale", "disputed"].includes(status);
+  return status !== "archived";
+}
+
+function sourceLabel(value: { sourceEntityType: string | null; sourceEntityId: string | null; createdByType: string }) {
+  if (value.sourceEntityType) return `${value.sourceEntityType}${value.sourceEntityId ? ` - ${value.sourceEntityId}` : ""}`;
+  return `created by ${value.createdByType}`;
+}
+
+function viewScopeLabel(view: ContextMapView) {
+  return view.createdByUserId ? "Personal" : "Master";
+}
+
+function mapViewUrl(viewId: string, includeStale: boolean) {
+  const url = new URL(window.location.href);
+  url.searchParams.set("view", viewId);
+  if (includeStale) url.searchParams.set("stale", "1");
+  else url.searchParams.delete("stale");
+  return `${url.pathname}${url.search}`;
+}
+
+export default function ContextMapClient({ workspaceId, data, includeStale = false }: { workspaceId: string; data: ContextMapClientData; includeStale?: boolean }) {
+  const [selectedObjectIds, setSelectedObjectIds] = useState<string[]>(data.objects[0]?.id ? [data.objects[0].id] : []);
   const [selectedObjectId, setSelectedObjectId] = useState<string | null>(data.objects[0]?.id ?? null);
+  const [selectedRelationshipId, setSelectedRelationshipId] = useState<string | null>(null);
   const [regionContext, setRegionContext] = useState<RegionContext | null>(null);
   const [regionContextStatus, setRegionContextStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
-  const [message, setMessage] = useState<string | null>(null);
+  const [message, setMessage] = useState<{ tone: "info" | "error"; text: string } | null>(null);
   const [isCompactLayout, setIsCompactLayout] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [showFilters, setShowFilters] = useState(false);
+  const [typeFilter, setTypeFilter] = useState("all");
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>("active");
+  const [inspectorDock, setInspectorDock] = useState<InspectorDock>("right");
+  const [layoutDirty, setLayoutDirty] = useState(false);
+  const [flowInstance, setFlowInstance] = useState<ReactFlowInstance | null>(null);
   const [isPending, startTransition] = useTransition();
+
+  const isMasterView = data.mapView.createdByUserId === null;
+  const currentViewIsEditable = !isMasterView || data.permissions.canUpdateMasterView;
+  const layoutSaveLabel = isMasterView
+    ? data.permissions.canUpdateMasterView ? "Update master" : "Request master update"
+    : "Save view";
 
   const layoutByObjectId = useMemo(() => new Map(data.layoutItems.map((item) => [item.objectId, item])), [data.layoutItems]);
   const objectById = useMemo(() => new Map(data.objects.map((object) => [object.id, object])), [data.objects]);
+  const relationshipById = useMemo(() => new Map(data.relationships.map((relationship) => [relationship.id, relationship])), [data.relationships]);
+  const objectTypes = useMemo(() => [...new Set(data.objects.map((object) => object.objectType))].sort(), [data.objects]);
 
-  const initialNodes = useMemo<Node[]>(() => data.objects.map((object, index) => {
+  const filteredObjects = useMemo(() => data.objects.filter((object) => {
+    if (typeFilter !== "all" && object.objectType !== typeFilter) return false;
+    return shouldShowStatus(object.status, statusFilter);
+  }), [data.objects, statusFilter, typeFilter]);
+  const visibleObjectIds = useMemo(() => new Set(filteredObjects.map((object) => object.id)), [filteredObjects]);
+
+  const initialNodes = useMemo<Node[]>(() => filteredObjects.map((object, index) => {
     const layout = layoutByObjectId.get(object.id);
     const position = layout ? { x: layout.x, y: layout.y } : positionForIndex(index);
+    const colors = NODE_COLORS[object.objectType] ?? { border: "#64748b", background: "#f8fafc", accent: "#475569" };
     return {
       id: object.id,
       type: "default",
       position,
       data: {
         label: (
-          <div style={{ display: "grid", gap: 6 }}>
-            <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", color: "#475569" }}>{object.objectType}</div>
-            <strong style={{ fontSize: 14, lineHeight: 1.25 }}>{object.title}</strong>
-            <span style={{ fontSize: 11, color: "#64748b" }}>{object.status}</span>
+          <div
+            className={`context-map-node-card context-map-node-card--${statusClass(object.status)}`}
+            style={{ "--node-border": colors.border, "--node-bg": colors.background, "--node-accent": colors.accent } as CSSProperties}
+          >
+            <div className="context-map-node-topline">
+              <span>{object.objectType}</span>
+              <span className={`context-map-status context-map-status--${statusClass(object.status)}`}>{object.status}</span>
+            </div>
+            <strong>{object.title}</strong>
+            <div className="context-map-node-meta">
+              <span>{confidenceLabel(object.confidence)}</span>
+              {object.evidenceRefs.length > 0 && <span>{object.evidenceRefs.length} evidence</span>}
+            </div>
           </div>
         ),
       },
-      style: nodeStyle(object),
+      style: {
+        width: 250,
+        border: 0,
+        padding: 0,
+        background: "transparent",
+        boxShadow: "none",
+      },
     };
-  }), [data.objects, layoutByObjectId]);
+  }), [filteredObjects, layoutByObjectId]);
 
   const initialEdges = useMemo<Edge[]>(() => data.relationships
-    .filter((relationship) => objectById.has(relationship.sourceObjectId) && objectById.has(relationship.targetObjectId))
-    .map((relationship) => ({
-      id: relationship.id,
-      source: relationship.sourceObjectId,
-      target: relationship.targetObjectId,
-      label: relationship.relationshipType,
-      animated: relationship.status === "proposed",
-      style: {
-        stroke: relationship.status === "stale" || relationship.status === "disputed" ? "#dc2626" : "#64748b",
-        strokeWidth: 1.7,
-      },
-    })), [data.relationships, objectById]);
+    .filter((relationship) => (
+      visibleObjectIds.has(relationship.sourceObjectId)
+      && visibleObjectIds.has(relationship.targetObjectId)
+      && shouldShowStatus(relationship.status, statusFilter)
+    ))
+    .map((relationship) => {
+      const stroke = relationshipColor(relationship);
+      return {
+        id: relationship.id,
+        source: relationship.sourceObjectId,
+        target: relationship.targetObjectId,
+        label: relationship.relationshipType,
+        animated: relationship.status === "proposed",
+        markerEnd: { type: MarkerType.ArrowClosed, color: stroke },
+        style: {
+          stroke,
+          strokeWidth: relationship.status === "stale" || relationship.status === "disputed" ? 2.4 : 1.8,
+        },
+        labelStyle: { fill: "#334155", fontWeight: 700, fontSize: 11 },
+        labelBgStyle: { fill: "#ffffff", fillOpacity: 0.88 },
+        labelBgPadding: [6, 3],
+      };
+    }), [data.relationships, statusFilter, visibleObjectIds]);
 
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
 
   useEffect(() => {
-    const updateLayout = () => setIsCompactLayout(window.innerWidth < 920);
+    const updateLayout = () => {
+      const compact = window.innerWidth < 920;
+      setIsCompactLayout(compact);
+      if (compact) setInspectorDock("bottom");
+    };
     updateLayout();
     window.addEventListener("resize", updateLayout);
     return () => window.removeEventListener("resize", updateLayout);
   }, []);
 
   useEffect(() => {
+    if (!isFullscreen) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setIsFullscreen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [isFullscreen]);
+
+  useEffect(() => {
     setNodes(initialNodes);
     setEdges(initialEdges);
+    setLayoutDirty(false);
   }, [initialNodes, initialEdges, setEdges, setNodes]);
 
   const selectedObject = selectedObjectId ? objectById.get(selectedObjectId) ?? null : null;
-  const selectedRegionIds = useMemo(() => (
-    selectedObjectIds.length > 0 ? selectedObjectIds : selectedObjectId ? [selectedObjectId] : []
-  ), [selectedObjectId, selectedObjectIds]);
+  const selectedRelationship = selectedRelationshipId ? relationshipById.get(selectedRelationshipId) ?? null : null;
+  const selectedRegionIds = useMemo(() => {
+    if (selectedObjectIds.length > 0) return selectedObjectIds;
+    if (selectedRelationship) return [selectedRelationship.sourceObjectId, selectedRelationship.targetObjectId];
+    if (selectedObjectId) return [selectedObjectId];
+    return [];
+  }, [selectedObjectId, selectedObjectIds, selectedRelationship]);
   const selectedRegionKey = selectedRegionIds.join("|");
   const selectedRelationships = selectedObject
     ? data.relationships.filter((relationship) => relationship.sourceObjectId === selectedObject.id || relationship.targetObjectId === selectedObject.id)
     : [];
+
+  useEffect(() => {
+    setNodes((currentNodes) => currentNodes.map((node) => ({
+      ...node,
+      selected: selectedRegionIds.includes(node.id),
+    })));
+    setEdges((currentEdges) => currentEdges.map((edge) => ({
+      ...edge,
+      selected: edge.id === selectedRelationshipId,
+    })));
+  }, [selectedRegionIds, selectedRelationshipId, setEdges, setNodes]);
 
   useEffect(() => {
     if (selectedRegionIds.length === 0) {
@@ -235,6 +388,37 @@ export default function ContextMapClient({ workspaceId, data }: { workspaceId: s
     };
   }, [data.mapView.id, selectedRegionKey, selectedRegionIds, workspaceId]);
 
+  function currentLayoutItems() {
+    return nodes.map((node) => ({
+      objectId: node.id,
+      x: node.position.x,
+      y: node.position.y,
+      width: 250,
+      height: 112,
+    }));
+  }
+
+  function fitMap() {
+    flowInstance?.fitView({ padding: isFullscreen ? 0.12 : 0.18, duration: 220 });
+  }
+
+  function resetLocalLayout() {
+    setNodes(initialNodes);
+    setLayoutDirty(false);
+    window.requestAnimationFrame(fitMap);
+  }
+
+  function navigateToView(viewId: string) {
+    window.location.href = mapViewUrl(viewId, includeStale);
+  }
+
+  function toggleIncludeStale(next: boolean) {
+    const url = new URL(window.location.href);
+    if (next) url.searchParams.set("stale", "1");
+    else url.searchParams.delete("stale");
+    window.location.href = `${url.pathname}${url.search}`;
+  }
+
   function loadRegionContext(ids: string[]) {
     if (ids.length === 0) return;
     startTransition(async () => {
@@ -255,10 +439,52 @@ export default function ContextMapClient({ workspaceId, data }: { workspaceId: s
     });
   }
 
+  function saveLayout() {
+    const items = currentLayoutItems();
+    if (items.length === 0) return;
+    startTransition(async () => {
+      setMessage(null);
+      try {
+        const result = await saveContextMapLayoutAction({
+          workspaceId,
+          mapViewId: data.mapView.id,
+          items,
+        });
+        setLayoutDirty(false);
+        setMessage({
+          tone: "info",
+          text: result.mode === "proposed" ? "Created a master map update request for admin review." : "Saved the current map layout.",
+        });
+      } catch {
+        setMessage({ tone: "error", text: "Could not save this map layout." });
+      }
+    });
+  }
+
+  function savePersonalView() {
+    const defaultName = data.mapView.createdByUserId ? data.mapView.name : `${data.mapView.name} - personal`;
+    const name = window.prompt("Name this personal map view", defaultName);
+    if (name === null) return;
+    startTransition(async () => {
+      setMessage(null);
+      try {
+        const mapView = await createPersonalContextMapViewAction({
+          workspaceId,
+          sourceMapViewId: data.mapView.id,
+          name,
+          items: currentLayoutItems(),
+        });
+        window.location.href = mapViewUrl(mapView.id, includeStale);
+      } catch {
+        setMessage({ tone: "error", text: "Could not save a personal map view." });
+      }
+    });
+  }
+
   function createProposal() {
-    const ids = selectedObjectIds.length > 0 ? selectedObjectIds : selectedObjectId ? [selectedObjectId] : [];
+    const ids = selectedRegionIds;
     if (ids.length === 0) {
-      setMessage("Select at least one node before creating a proposed graph diff.");
+      setMessage({ tone: "error", text: "Select at least one node before creating a proposed graph diff." });
       return;
     }
     startTransition(async () => {
@@ -267,195 +493,336 @@ export default function ContextMapClient({ workspaceId, data }: { workspaceId: s
         mapViewId: data.mapView.id,
         objectIds: ids,
       });
-      setMessage("Created a proposed graph diff for this selected region.");
+      setMessage({ tone: "info", text: "Created a proposed graph diff for this selected region." });
     });
   }
 
   function applyDiff(proposedDiffId: string) {
     startTransition(async () => {
-      await applyContextGraphProposedDiffAction({ workspaceId, proposedDiffId });
-      setMessage("Applied proposed graph diff.");
+      try {
+        await applyContextGraphProposedDiffAction({ workspaceId, proposedDiffId });
+        setMessage({ tone: "info", text: "Applied proposed graph diff." });
+      } catch {
+        setMessage({ tone: "error", text: "You do not have permission to apply this proposed diff." });
+      }
     });
   }
 
+  const shellClass = [
+    "context-map-shell",
+    isFullscreen ? "context-map-shell--fullscreen" : "",
+    inspectorDock === "bottom" ? "context-map-shell--bottom-inspector" : "",
+  ].filter(Boolean).join(" ");
+
   return (
-    <section className="ws-section" style={{ padding: 0, overflow: "hidden" }}>
-      <div style={{ display: "grid", gridTemplateColumns: isCompactLayout ? "1fr" : "minmax(0, 1fr) 340px", minHeight: 720 }}>
-        <div style={{ minWidth: 0, borderRight: isCompactLayout ? "none" : "1px solid var(--border)", borderBottom: isCompactLayout ? "1px solid var(--border)" : "none" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", gap: 12, padding: "14px 16px", borderBottom: "1px solid var(--border)", alignItems: "center" }}>
-            <div>
-              <strong>{data.mapView.name}</strong>
-              <div className="nr-item-meta">{data.objects.length} objects · {data.relationships.length} relationships · {data.mapView.viewType} view</div>
-            </div>
-            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-              <button
-                className="secondary small"
-                type="button"
-                onClick={() => loadRegionContext(selectedRegionIds)}
-                disabled={isPending || regionContextStatus === "loading"}
-              >
-                <FileSearch size={14} aria-hidden="true" /> {regionContextStatus === "loading" ? "Loading" : "Context"}
-              </button>
-              <button className="secondary small" type="button" onClick={createProposal} disabled={isPending}>
-                <GitBranch size={14} aria-hidden="true" /> Propose
-              </button>
-            </div>
-          </div>
-          <div style={{ height: isCompactLayout ? 560 : 660 }}>
-            {nodes.length === 0 ? (
-              <div style={{ display: "grid", placeItems: "center", height: "100%", color: "#64748b", textAlign: "center", padding: 32 }}>
-                <div>
-                  <CircleHelp size={32} aria-hidden="true" style={{ marginBottom: 12 }} />
-                  <h3 style={{ margin: "0 0 8px" }}>No context graph objects yet</h3>
-                  <p style={{ margin: 0, maxWidth: 460 }}>Run meeting intelligence, sync source records, or seed the demo workspace to populate this map.</p>
-                </div>
-              </div>
-            ) : (
-              <ReactFlow
-                nodes={nodes}
-                edges={edges}
-                onNodesChange={onNodesChange}
-                onEdgesChange={onEdgesChange}
-                onNodeClick={(_, node) => {
-                  setSelectedObjectId(node.id);
-                  setSelectedObjectIds((current) => sameIds(current, [node.id]) ? current : [node.id]);
-                }}
-                onSelectionChange={({ nodes: selectedNodes }) => {
-                  const ids = selectedNodes.map((node) => node.id);
-                  setSelectedObjectIds((current) => sameIds(current, ids) ? current : ids);
-                  if (ids.length > 0) {
-                    setSelectedObjectId((current) => current === ids[0] ? current : ids[0]);
-                  }
-                }}
-                onNodeDragStop={(_, node) => {
-                  void saveContextMapLayoutAction({
-                    workspaceId,
-                    mapViewId: data.mapView.id,
-                    items: [{ objectId: node.id, x: node.position.x, y: node.position.y }],
-                  });
-                }}
-                fitView
-                minZoom={0.2}
-                maxZoom={1.7}
-              >
-                <Background />
-                <Controls />
-              </ReactFlow>
-            )}
+    <section className={shellClass} data-context-map-shell>
+      <div className="context-map-toolbar">
+        <div className="context-map-view-controls">
+          <label className="context-map-view-select">
+            <span>View</span>
+            <select value={data.mapView.id} onChange={(event) => navigateToView(event.target.value)}>
+              {data.mapViews.map((view) => (
+                <option key={view.id} value={view.id}>
+                  {view.name} ({viewScopeLabel(view)})
+                </option>
+              ))}
+            </select>
+          </label>
+          <div className="context-map-title-block">
+            <strong>{data.mapView.name}</strong>
+            <span>{data.objects.length} objects - {data.relationships.length} relationships - {data.mapView.viewType} view - {viewScopeLabel(data.mapView)}</span>
           </div>
         </div>
-        <aside style={{ padding: 18, display: "grid", gap: 18, alignContent: "start", background: "#f8fafc" }}>
-          {message && <div className="tag info" style={{ justifyContent: "flex-start" }}>{message}</div>}
-          <div>
-            <h2 style={{ fontSize: 16, margin: "0 0 10px" }}>Selection</h2>
-            {selectedObject ? (
-              <div style={{ display: "grid", gap: 10 }}>
-                <div>
-                  <div className="nr-item-meta">{objectMeta(selectedObject)}</div>
-                  <strong>{selectedObject.title}</strong>
-                </div>
-                {selectedObject.summary && <p style={{ margin: 0, color: "#334155", lineHeight: 1.45 }}>{selectedObject.summary.slice(0, 420)}</p>}
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                  {selectedObject.sourceEntityType && <span className="tag neutral">{selectedObject.sourceEntityType}</span>}
-                  {selectedObject.lastVerifiedAt && <span className="tag neutral">verified {stableDateLabel(selectedObject.lastVerifiedAt)}</span>}
-                </div>
-              </div>
-            ) : (
-              <p className="muted" style={{ margin: 0 }}>Select a node to inspect its evidence and neighbors.</p>
-            )}
-          </div>
 
-          <div>
-            <h2 style={{ fontSize: 16, margin: "0 0 10px" }}>Evidence</h2>
-            {selectedObject?.evidenceRefs.length ? (
-              <div style={{ display: "grid", gap: 10 }}>
-                {selectedObject.evidenceRefs.map((evidence) => (
-                  <div key={evidence.id} style={{ borderTop: "1px solid var(--border)", paddingTop: 10 }}>
-                    <div className="nr-item-meta">{evidence.sourceType} · {confidenceLabel(evidence.relevanceScore)}</div>
-                    <p style={{ margin: "4px 0 0", color: "#334155" }}>{evidence.quote ?? evidence.sourceId}</p>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <p className="muted" style={{ margin: 0 }}>No evidence refs attached yet.</p>
-            )}
-          </div>
-
-          <div>
-            <h2 style={{ fontSize: 16, margin: "0 0 10px" }}>Neighbors</h2>
-            {selectedRelationships.length ? (
-              <div style={{ display: "grid", gap: 8 }}>
-                {selectedRelationships.slice(0, 8).map((relationship) => {
-                  const otherId = relationship.sourceObjectId === selectedObject?.id ? relationship.targetObjectId : relationship.sourceObjectId;
-                  return (
-                    <button
-                      key={relationship.id}
-                      type="button"
-                      className="secondary small"
-                      style={{ justifyContent: "flex-start", textAlign: "left" }}
-                      onClick={() => {
-                        setSelectedObjectId(otherId);
-                        setSelectedObjectIds([otherId]);
-                      }}
-                    >
-                      {relationship.relationshipType}: {objectById.get(otherId)?.title ?? otherId}
-                    </button>
-                  );
-                })}
-              </div>
-            ) : (
-              <p className="muted" style={{ margin: 0 }}>No graph relationships connected to this object.</p>
-            )}
-          </div>
-
-          <div>
-            <h2 style={{ fontSize: 16, margin: "0 0 10px" }}>Region Context</h2>
-            {regionContextStatus === "loading" ? (
-              <p className="muted" style={{ margin: 0 }} aria-live="polite">Loading selected-region context...</p>
-            ) : regionContextStatus === "error" ? (
-              <p className="form-message form-message-error" role="alert" style={{ margin: 0 }}>Could not build context for this selection. Try refreshing the context.</p>
-            ) : regionContext ? (
-              <div style={{ display: "grid", gap: 8 }}>
-                <span className="tag neutral">{regionContext.objects.length} objects</span>
-                <span className="tag neutral">{regionContext.relationships.length} relationships</span>
-                <span className="tag neutral">{regionContext.evidenceRefs.length} evidence refs</span>
-                <span className="tag neutral">{regionContext.permissions.canPropose ? "can propose" : "read only"}</span>
-                {regionContext.staleOrDisputed.length > 0 && <span className="tag danger">{regionContext.staleOrDisputed.length} stale/disputed facts</span>}
-              </div>
-            ) : (
-              <p className="muted" style={{ margin: 0 }}>Build context from the selected node or multi-node region.</p>
-            )}
-          </div>
-
-          <div>
-            <h2 style={{ fontSize: 16, margin: "0 0 10px" }}>Proposed Diffs</h2>
-            {data.proposedDiffs.length ? (
-              <div style={{ display: "grid", gap: 10 }}>
-                {data.proposedDiffs.map((diff) => (
-                  <div key={diff.id} style={{ borderTop: "1px solid var(--border)", paddingTop: 10 }}>
-                    <div className="nr-item-meta">{diff.status} · {stableDateLabel(diff.createdAt)}</div>
-                    <p style={{ margin: "4px 0 8px", color: "#334155" }}>{diff.reason ?? "Proposed graph change"}</p>
-                    <button className="secondary small" type="button" onClick={() => applyDiff(diff.id)} disabled={isPending}>
-                      <Check size={14} aria-hidden="true" /> Approve and apply
-                    </button>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <p className="muted" style={{ margin: 0 }}>No pending graph diffs.</p>
-            )}
-          </div>
-
+        <div className="context-map-toolbar-actions">
+          <button className="secondary small" type="button" onClick={() => setShowFilters((value) => !value)} title="Filter visible facts">
+            <SlidersHorizontal size={14} aria-hidden="true" /> Filters
+          </button>
+          <button className="secondary small" type="button" onClick={fitMap} title="Fit map to view">
+            <Crosshair size={14} aria-hidden="true" /> Fit
+          </button>
+          <button className="secondary small" type="button" onClick={resetLocalLayout} title="Reset unsaved layout changes">
+            <RotateCcw size={14} aria-hidden="true" /> Reset
+          </button>
           <button
             className="secondary small"
             type="button"
-            onClick={() => {
-              setRegionContext(null);
-              setMessage(null);
-            }}
+            onClick={() => loadRegionContext(selectedRegionIds)}
+            disabled={isPending || regionContextStatus === "loading"}
+            title="Refresh selected-region context"
           >
-            <RefreshCcw size={14} aria-hidden="true" /> Clear panel state
+            <FileSearch size={14} aria-hidden="true" /> {regionContextStatus === "loading" ? "Loading" : "Context"}
           </button>
+          <button className="secondary small" type="button" onClick={createProposal} disabled={isPending} title="Create an agent-ready graph proposal">
+            <GitBranch size={14} aria-hidden="true" /> Propose
+          </button>
+          {data.permissions.canSavePersonalView && (
+            <button className="secondary small" type="button" onClick={savePersonalView} disabled={isPending} title="Save as a personal map view">
+              <Copy size={14} aria-hidden="true" /> Save copy
+            </button>
+          )}
+          <button
+            className={`secondary small ${layoutDirty ? "context-map-dirty-action" : ""}`}
+            type="button"
+            onClick={saveLayout}
+            disabled={isPending || nodes.length === 0}
+            title={currentViewIsEditable ? "Save this layout" : "Request a master layout update"}
+          >
+            <Save size={14} aria-hidden="true" /> {layoutSaveLabel}
+          </button>
+          <button className="secondary small" type="button" onClick={() => setIsFullscreen((value) => !value)} title={isFullscreen ? "Exit full screen" : "Full screen"}>
+            {isFullscreen ? <Minimize2 size={14} aria-hidden="true" /> : <Maximize2 size={14} aria-hidden="true" />}
+            {isFullscreen ? "Exit" : "Full screen"}
+          </button>
+        </div>
+      </div>
+
+      {showFilters && (
+        <div className="context-map-filter-bar">
+          <label>
+            <span>Type</span>
+            <select value={typeFilter} onChange={(event) => setTypeFilter(event.target.value)}>
+              <option value="all">All types</option>
+              {objectTypes.map((objectType) => <option key={objectType} value={objectType}>{objectType}</option>)}
+            </select>
+          </label>
+          <label>
+            <span>Status</span>
+            <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as StatusFilter)}>
+              <option value="active">Active facts</option>
+              <option value="needs-review">Needs review</option>
+              <option value="approved">Approved</option>
+              <option value="all">All loaded</option>
+            </select>
+          </label>
+          <label className="context-map-checkbox">
+            <input type="checkbox" checked={includeStale} onChange={(event) => toggleIncludeStale(event.target.checked)} />
+            <span>Load stale facts</span>
+          </label>
+        </div>
+      )}
+
+      <div className="context-map-stage">
+        <div className="context-map-canvas">
+          {nodes.length === 0 ? (
+            <div className="context-map-empty">
+              <CircleHelp size={32} aria-hidden="true" />
+              <h3>No context graph objects in this view</h3>
+              <p>Run meeting intelligence, sync source records, seed the demo workspace, or adjust filters to populate this map.</p>
+            </div>
+          ) : (
+            <ReactFlow
+              nodes={nodes}
+              edges={edges}
+              onNodesChange={onNodesChange}
+              onEdgesChange={onEdgesChange}
+              onInit={setFlowInstance}
+              onNodeClick={(_, node) => {
+                setSelectedRelationshipId(null);
+                setSelectedObjectId(node.id);
+                setSelectedObjectIds((current) => sameIds(current, [node.id]) ? current : [node.id]);
+              }}
+              onEdgeClick={(_, edge) => {
+                const relationship = relationshipById.get(edge.id);
+                setSelectedRelationshipId(edge.id);
+                if (relationship) {
+                  setSelectedObjectIds([relationship.sourceObjectId, relationship.targetObjectId]);
+                  setSelectedObjectId(relationship.sourceObjectId);
+                }
+              }}
+              onSelectionChange={({ nodes: selectedNodes, edges: selectedEdges }) => {
+                const ids = selectedNodes.map((node) => node.id);
+                setSelectedObjectIds((current) => sameIds(current, ids) ? current : ids);
+                if (ids.length > 0) {
+                  setSelectedRelationshipId(null);
+                  setSelectedObjectId((current) => current === ids[0] ? current : ids[0]);
+                } else if (selectedEdges.length > 0) {
+                  setSelectedRelationshipId(selectedEdges[0].id);
+                }
+              }}
+              onNodeDragStop={() => setLayoutDirty(true)}
+              fitView
+              minZoom={0.2}
+              maxZoom={1.8}
+              attributionPosition="bottom-right"
+            >
+              <Background gap={24} size={1} color="#d7dee8" />
+              <Controls />
+            </ReactFlow>
+          )}
+        </div>
+
+        <aside className={`context-map-inspector context-map-inspector--${inspectorDock}`}>
+          <div className="context-map-inspector-header">
+            <div>
+              <span className="context-map-eyebrow">Inspector</span>
+              <strong>{selectedRelationship ? "Relationship" : "Selection"}</strong>
+            </div>
+            <div className="context-map-inspector-actions">
+              <button type="button" className="secondary small" onClick={() => setInspectorDock(inspectorDock === "right" ? "bottom" : "right")}>
+                {inspectorDock === "right" ? "Bottom" : "Right"}
+              </button>
+              {message && (
+                <button type="button" className="secondary small context-map-icon-button" onClick={() => setMessage(null)} aria-label="Clear message">
+                  <X size={14} aria-hidden="true" />
+                </button>
+              )}
+            </div>
+          </div>
+
+          {message && <div className={`context-map-message context-map-message--${message.tone}`}>{message.text}</div>}
+
+          <div className="context-map-inspector-scroll">
+            {selectedRelationship ? (
+              <section className="context-map-inspector-section">
+                <h2>{selectedRelationship.relationshipType}</h2>
+                <p className="context-map-selection-title">
+                  {objectById.get(selectedRelationship.sourceObjectId)?.title ?? selectedRelationship.sourceObjectId}
+                  <span> to </span>
+                  {objectById.get(selectedRelationship.targetObjectId)?.title ?? selectedRelationship.targetObjectId}
+                </p>
+                <div className="context-map-pill-row">
+                  <span className={`context-map-status context-map-status--${statusClass(selectedRelationship.status)}`}>{selectedRelationship.status}</span>
+                  <span className="tag neutral">{confidenceLabel(selectedRelationship.confidence)}</span>
+                  {selectedRelationship.lastVerifiedAt && <span className="tag neutral">verified {stableDateLabel(selectedRelationship.lastVerifiedAt)}</span>}
+                </div>
+                <dl className="context-map-definition-list">
+                  <div><dt>Why</dt><dd>{sourceLabel(selectedRelationship)}</dd></div>
+                  <div><dt>Created by</dt><dd>{selectedRelationship.createdByType}</dd></div>
+                </dl>
+              </section>
+            ) : (
+              <section className="context-map-inspector-section">
+                <h2>Selection</h2>
+                {selectedObject ? (
+                  <div className="context-map-selection-stack">
+                    <div>
+                      <div className="nr-item-meta">{objectMeta(selectedObject)}</div>
+                      <strong className="context-map-selection-title">{selectedObject.title}</strong>
+                    </div>
+                    {selectedObject.summary && <p>{selectedObject.summary.slice(0, 520)}</p>}
+                    <div className="context-map-pill-row">
+                      {selectedObject.sourceEntityType && <span className="tag neutral">{selectedObject.sourceEntityType}</span>}
+                      <span className="tag neutral">created by {selectedObject.createdByType}</span>
+                      {selectedObject.lastVerifiedAt && <span className="tag neutral">verified {stableDateLabel(selectedObject.lastVerifiedAt)}</span>}
+                    </div>
+                  </div>
+                ) : (
+                  <p className="muted">Select a node or relationship to inspect evidence and provenance.</p>
+                )}
+              </section>
+            )}
+
+            <section className="context-map-inspector-section">
+              <h2>Evidence</h2>
+              {(selectedRelationship?.evidenceRefs ?? selectedObject?.evidenceRefs ?? []).length ? (
+                <div className="context-map-evidence-list">
+                  {(selectedRelationship?.evidenceRefs ?? selectedObject?.evidenceRefs ?? []).slice(0, 5).map((evidence) => (
+                    <div key={evidence.id} className="context-map-evidence-item">
+                      <div className="nr-item-meta">{evidence.sourceType} - {confidenceLabel(evidence.relevanceScore)}</div>
+                      <p>{evidence.quote ?? evidence.sourceId}</p>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="muted">No evidence refs attached yet.</p>
+              )}
+            </section>
+
+            <section className="context-map-inspector-section">
+              <h2>Neighbors</h2>
+              {selectedRelationships.length ? (
+                <div className="context-map-neighbor-list">
+                  {selectedRelationships.slice(0, 8).map((relationship) => {
+                    const otherId = relationship.sourceObjectId === selectedObject?.id ? relationship.targetObjectId : relationship.sourceObjectId;
+                    return (
+                      <button
+                        key={relationship.id}
+                        type="button"
+                        className="secondary small"
+                        onClick={() => {
+                          setSelectedRelationshipId(null);
+                          setSelectedObjectId(otherId);
+                          setSelectedObjectIds([otherId]);
+                        }}
+                      >
+                        {relationship.relationshipType}: {objectById.get(otherId)?.title ?? otherId}
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : (
+                <p className="muted">No graph relationships connected to this object.</p>
+              )}
+            </section>
+
+            <section className="context-map-inspector-section">
+              <h2>Region Context</h2>
+              {regionContextStatus === "loading" ? (
+                <p className="muted" aria-live="polite">Loading selected-region context...</p>
+              ) : regionContextStatus === "error" ? (
+                <p className="form-message form-message-error" role="alert">Could not build context for this selection.</p>
+              ) : regionContext ? (
+                <div className="context-map-context-stack">
+                  <div className="context-map-pill-row">
+                    <span className="tag neutral">{regionContext.objects.length} objects</span>
+                    <span className="tag neutral">{regionContext.relationships.length} relationships</span>
+                    <span className="tag neutral">{regionContext.evidenceRefs.length} evidence refs</span>
+                    <span className="tag neutral">{regionContext.permissions.canPropose ? "can propose" : "read only"}</span>
+                    {regionContext.staleOrDisputed.length > 0 && <span className="tag danger">{regionContext.staleOrDisputed.length} stale/disputed</span>}
+                  </div>
+                  {regionContext.openQuestions.length > 0 && (
+                    <div>
+                      <strong>Open questions</strong>
+                      <ul>
+                        {regionContext.openQuestions.slice(0, 3).map((question) => <li key={question.id}>{question.title}</li>)}
+                      </ul>
+                    </div>
+                  )}
+                  {regionContext.knowledgeChunks.length > 0 && (
+                    <div>
+                      <strong>Source snippets</strong>
+                      <ul>
+                        {regionContext.knowledgeChunks.slice(0, 3).map((chunk) => <li key={chunk.id}>{chunk.sourceTitle ?? chunk.sourceId}</li>)}
+                      </ul>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <p className="muted">Select a node, edge, or multi-node region to build scoped context.</p>
+              )}
+            </section>
+
+            <section className="context-map-inspector-section">
+              <h2>Proposed Diffs</h2>
+              {data.proposedDiffs.length ? (
+                <div className="context-map-diff-list">
+                  {data.proposedDiffs.map((diff) => (
+                    <div key={diff.id} className="context-map-diff-item">
+                      <div className="nr-item-meta">{diff.status} - {stableDateLabel(diff.createdAt)}</div>
+                      <p>{diff.reason ?? "Proposed graph change"}</p>
+                      <button className="secondary small" type="button" onClick={() => applyDiff(diff.id)} disabled={isPending || !data.permissions.canUpdateMasterView}>
+                        <Check size={14} aria-hidden="true" /> Approve and apply
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="muted">No pending graph diffs.</p>
+              )}
+            </section>
+
+            <button
+              className="secondary small"
+              type="button"
+              onClick={() => {
+                setRegionContext(null);
+                setMessage(null);
+              }}
+            >
+              <RefreshCcw size={14} aria-hidden="true" /> Clear panel state
+            </button>
+          </div>
         </aside>
       </div>
     </section>
