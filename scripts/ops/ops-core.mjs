@@ -401,7 +401,7 @@ function missingSupportConnectorIncident(row) {
 
 function agentFailureStreakIncident(row, sweepNowMs) {
   const snapshot = latestSnapshot(row, "SUPPORT_READY");
-  const snapshotObservedAtMs = timestampMs(optionalText(snapshot?.observedAt) ?? optionalText(snapshot?.createdAt)) ?? sweepNowMs;
+  const snapshotObservedAtMs = timestampMs(optionalText(snapshot?.observedAt) ?? optionalText(snapshot?.createdAt));
   const summary = record(snapshot?.summary);
   const runs = itemsFrom(summary?.agentRuns, ["items", "runs"]).map((run) => ({
     agentKey: optionalText(run.agentKey) ?? optionalText(run.key) ?? optionalText(run.name) ?? "unknown",
@@ -437,13 +437,10 @@ function agentFailureStreakIncident(row, sweepNowMs) {
 }
 
 function activeFailureStreak(runs, snapshotObservedAtMs, sweepNowMs) {
-  const sortedRuns = runs
-    .map((run, index) => ({ run, index, createdAtMs: timestampMs(run.createdAt) }))
-    .sort((a, b) => {
-      if (a.createdAtMs !== null && b.createdAtMs !== null) return b.createdAtMs - a.createdAtMs;
-      return a.index - b.index;
-    })
-    .map((item) => item.run);
+  const indexedRuns = runs.map((run, index) => ({ run, index, createdAtMs: timestampMs(run.createdAt) }));
+  const sortedRuns = indexedRuns.every((item) => item.createdAtMs !== null)
+    ? [...indexedRuns].sort((a, b) => b.createdAtMs - a.createdAtMs).map((item) => item.run)
+    : indexedRuns.map((item) => item.run);
   const failures = [];
   for (const run of sortedRuns) {
     const status = normalizeAgentRunStatus(run.status);
@@ -452,7 +449,9 @@ function activeFailureStreak(runs, snapshotObservedAtMs, sweepNowMs) {
     failures.push(run);
   }
   if (failures.length < 3) return [];
-  const latestFailureAtMs = newestTimestampMs(failures.map((failure) => failure.createdAt)) ?? snapshotObservedAtMs;
+  const latestFailureAtMs = timestampMs(failures[0]?.createdAt)
+    ?? snapshotObservedAtMs
+    ?? newestTimestampMs(failures.map((failure) => failure.createdAt));
   if (!latestFailureAtMs || sweepNowMs - latestFailureAtMs > ACTIVE_SUPPORT_SIGNAL_WINDOW_MS) {
     return [];
   }
@@ -465,7 +464,7 @@ function normalizeAgentRunStatus(value) {
 
 function slackInvalidAuthIncident(row, sweepNowMs) {
   const snapshot = latestSnapshot(row, "SUPPORT_READY");
-  const snapshotObservedAtMs = timestampMs(optionalText(snapshot?.observedAt) ?? optionalText(snapshot?.createdAt)) ?? sweepNowMs;
+  const snapshotObservedAtMs = timestampMs(optionalText(snapshot?.observedAt) ?? optionalText(snapshot?.createdAt));
   const summary = record(snapshot?.summary);
   const failedJobs = itemsFrom(summary?.failedJobs, ["items", "jobs"]);
   const matches = failedJobs.filter((job) => {

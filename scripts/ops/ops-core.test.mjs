@@ -440,6 +440,72 @@ describe("ops-core control-plane incidents", () => {
     expect(incident.evidence).toContain("Failed runs in latest snapshot: 3");
   });
 
+  it("uses the snapshot time when the newest failed run is undated", () => {
+    const incidents = buildTestControlPlaneIncidents([
+      {
+        id: "deployment-acme",
+        label: "Acme Production",
+        customerSlug: "acme",
+        hasSupportCredential: true,
+        fleetSnapshots: [
+          {
+            snapshotKind: "SUPPORT_READY",
+            observedAt: "2026-05-24T00:15:00.000Z",
+            summary: {
+              agentRuns: {
+                items: [
+                  { agentKey: "inbox-triage", status: "FAILED" },
+                  { agentKey: "inbox-triage", status: "FAILED", createdAt: "2026-05-20T00:10:00.000Z" },
+                  { agentKey: "inbox-triage", status: "FAILED", createdAt: "2026-05-20T00:05:00.000Z" },
+                ],
+              },
+            },
+          },
+        ],
+      },
+    ]);
+
+    const incident = incidents.find((item) => item.status === "agentFailureStreak");
+    expect(incident).toBeDefined();
+    expect(incident.evidence).toContain("Latest failed run: unknown");
+  });
+
+  it("suppresses undated support signals from timestamp-less snapshots", () => {
+    const incidents = buildTestControlPlaneIncidents([
+      {
+        id: "deployment-acme",
+        label: "Acme Production",
+        customerSlug: "acme",
+        hasSupportCredential: true,
+        fleetSnapshots: [
+          {
+            snapshotKind: "SUPPORT_READY",
+            summary: {
+              agentRuns: {
+                items: [
+                  { agentKey: "inbox-triage", status: "FAILED" },
+                  { agentKey: "inbox-triage", status: "FAILED" },
+                  { agentKey: "inbox-triage", status: "FAILED" },
+                ],
+              },
+              failedJobs: {
+                items: [
+                  {
+                    type: "communication.slack.proactive-scan",
+                    error: "An API error occurred: invalid_auth",
+                  },
+                ],
+              },
+            },
+          },
+        ],
+      },
+    ]);
+
+    expect(incidents.some((incident) => incident.status === "agentFailureStreak")).toBe(false);
+    expect(incidents.some((incident) => incident.status === "slackInvalidAuth")).toBe(false);
+  });
+
   it("suppresses recovered agent failure-streak incidents", () => {
     const incidents = buildTestControlPlaneIncidents([
       {
