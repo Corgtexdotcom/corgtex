@@ -146,6 +146,12 @@ describe("ops-core health targets", () => {
 });
 
 describe("ops-core control-plane incidents", () => {
+  const now = "2026-05-24T00:30:00.000Z";
+  const buildTestControlPlaneIncidents = (customers, options = {}) => buildControlPlaneIncidents(customers, {
+    now,
+    ...options,
+  });
+
   it("fetches customers from the Control Plane MCP endpoint", async () => {
     const customers = [{ id: "deployment-1", label: "Acme Production" }];
     const result = await fetchControlPlaneCustomers({
@@ -165,7 +171,7 @@ describe("ops-core control-plane incidents", () => {
   });
 
   it("builds sanitized incidents from cached support and release snapshots", () => {
-    const incidents = buildControlPlaneIncidents([
+    const incidents = buildTestControlPlaneIncidents([
       {
         id: "deployment-acme",
         label: "Acme Production",
@@ -219,6 +225,538 @@ describe("ops-core control-plane incidents", () => {
       "slackInvalidAuth",
     ].sort());
     expect(incidents.find((incident) => incident.status === "slackInvalidAuth").evidence.join("\n")).not.toContain("secret");
+  });
+
+  it("keeps recent Slack invalid-auth incidents", () => {
+    const incidents = buildTestControlPlaneIncidents([
+      {
+        id: "deployment-acme",
+        label: "Acme Production",
+        customerSlug: "acme",
+        hasSupportCredential: true,
+        fleetSnapshots: [
+          {
+            snapshotKind: "SUPPORT_READY",
+            observedAt: "2026-05-24T00:00:00.000Z",
+            summary: {
+              failedJobs: {
+                items: [
+                  {
+                    type: "communication.slack.proactive-scan",
+                    error: "An API error occurred: invalid_auth",
+                    updatedAt: "2026-05-23T23:30:00.000Z",
+                  },
+                ],
+              },
+            },
+          },
+        ],
+      },
+    ]);
+
+    const incident = incidents.find((item) => item.status === "slackInvalidAuth");
+    expect(incident).toBeDefined();
+    expect(incident.evidence).toContain("Latest failed job signal: 2026-05-23T23:30:00.000Z");
+  });
+
+  it("suppresses stale Slack invalid-auth incidents", () => {
+    const incidents = buildTestControlPlaneIncidents([
+      {
+        id: "deployment-acme",
+        label: "Acme Production",
+        customerSlug: "acme",
+        hasSupportCredential: true,
+        fleetSnapshots: [
+          {
+            snapshotKind: "SUPPORT_READY",
+            observedAt: "2026-05-24T00:00:00.000Z",
+            summary: {
+              failedJobs: {
+                items: [
+                  {
+                    type: "communication.slack.proactive-scan",
+                    error: "An API error occurred: invalid_auth",
+                    updatedAt: "2026-05-22T23:00:00.000Z",
+                  },
+                ],
+              },
+            },
+          },
+        ],
+      },
+    ]);
+
+    expect(incidents.some((incident) => incident.status === "slackInvalidAuth")).toBe(false);
+  });
+
+  it("ages undated Slack invalid-auth jobs from the snapshot timestamp", () => {
+    const incidents = buildTestControlPlaneIncidents([
+      {
+        id: "deployment-acme",
+        label: "Acme Production",
+        customerSlug: "acme",
+        hasSupportCredential: true,
+        fleetSnapshots: [
+          {
+            snapshotKind: "SUPPORT_READY",
+            observedAt: "2026-05-22T23:00:00.000Z",
+            summary: {
+              failedJobs: {
+                items: [
+                  {
+                    type: "communication.slack.proactive-scan",
+                    error: "An API error occurred: invalid_auth",
+                  },
+                ],
+              },
+            },
+          },
+        ],
+      },
+    ]);
+
+    expect(incidents.some((incident) => incident.status === "slackInvalidAuth")).toBe(false);
+  });
+
+  it("requires consecutive agent failures for failure-streak incidents", () => {
+    const incidents = buildTestControlPlaneIncidents([
+      {
+        id: "deployment-acme",
+        label: "Acme Production",
+        customerSlug: "acme",
+        hasSupportCredential: true,
+        fleetSnapshots: [
+          {
+            snapshotKind: "SUPPORT_READY",
+            observedAt: "2026-05-24T00:00:00.000Z",
+            summary: {
+              agentRuns: {
+                items: [
+                  { agentKey: "inbox-triage", status: "FAILED", createdAt: "2026-05-24T00:00:00.000Z" },
+                  { agentKey: "inbox-triage", status: "FAILED", createdAt: "2026-05-23T23:55:00.000Z" },
+                  { agentKey: "inbox-triage", status: "COMPLETED", createdAt: "2026-05-23T23:50:00.000Z" },
+                  { agentKey: "inbox-triage", status: "FAILED", createdAt: "2026-05-23T23:45:00.000Z" },
+                  { agentKey: "inbox-triage", status: "FAILED", createdAt: "2026-05-23T23:40:00.000Z" },
+                ],
+              },
+            },
+          },
+        ],
+      },
+    ]);
+
+    expect(incidents.some((incident) => incident.status === "agentFailureStreak")).toBe(false);
+  });
+
+  it("keeps recent agent failure-streak incidents when a failed run lacks a timestamp", () => {
+    const incidents = buildTestControlPlaneIncidents([
+      {
+        id: "deployment-acme",
+        label: "Acme Production",
+        customerSlug: "acme",
+        hasSupportCredential: true,
+        fleetSnapshots: [
+          {
+            snapshotKind: "SUPPORT_READY",
+            observedAt: "2026-05-24T00:15:00.000Z",
+            summary: {
+              agentRuns: {
+                items: [
+                  { agentKey: "inbox-triage", status: "FAILED" },
+                  { agentKey: "inbox-triage", status: "FAILED", createdAt: "2026-05-24T00:10:00.000Z" },
+                  { agentKey: "inbox-triage", status: "FAILED", createdAt: "2026-05-24T00:05:00.000Z" },
+                ],
+              },
+            },
+          },
+        ],
+      },
+    ]);
+
+    const incident = incidents.find((item) => item.status === "agentFailureStreak");
+    expect(incident).toBeDefined();
+    expect(incident.evidence).toContain("Failed runs in latest snapshot: 3");
+  });
+
+  it("keeps agent failure-streak incidents while a newer retry is in flight", () => {
+    const incidents = buildTestControlPlaneIncidents([
+      {
+        id: "deployment-acme",
+        label: "Acme Production",
+        customerSlug: "acme",
+        hasSupportCredential: true,
+        fleetSnapshots: [
+          {
+            snapshotKind: "SUPPORT_READY",
+            observedAt: "2026-05-24T00:20:00.000Z",
+            summary: {
+              agentRuns: {
+                items: [
+                  { agentKey: "inbox-triage", status: "PENDING", createdAt: "2026-05-24T00:20:00.000Z" },
+                  { agentKey: "inbox-triage", status: "FAILED", createdAt: "2026-05-24T00:10:00.000Z" },
+                  { agentKey: "inbox-triage", status: "FAILED", createdAt: "2026-05-24T00:05:00.000Z" },
+                  { agentKey: "inbox-triage", status: "FAILED", createdAt: "2026-05-24T00:00:00.000Z" },
+                ],
+              },
+            },
+          },
+        ],
+      },
+    ]);
+
+    const incident = incidents.find((item) => item.status === "agentFailureStreak");
+    expect(incident).toBeDefined();
+    expect(incident.evidence).toContain("Failed runs in latest snapshot: 3");
+  });
+
+  it("keeps agent failure-streak incidents past unknown run statuses", () => {
+    const incidents = buildTestControlPlaneIncidents([
+      {
+        id: "deployment-acme",
+        label: "Acme Production",
+        customerSlug: "acme",
+        hasSupportCredential: true,
+        fleetSnapshots: [
+          {
+            snapshotKind: "SUPPORT_READY",
+            observedAt: "2026-05-24T00:20:00.000Z",
+            summary: {
+              agentRuns: {
+                items: [
+                  { agentKey: "inbox-triage", createdAt: "2026-05-24T00:20:00.000Z" },
+                  { agentKey: "inbox-triage", status: "FAILED", createdAt: "2026-05-24T00:10:00.000Z" },
+                  { agentKey: "inbox-triage", status: "FAILED", createdAt: "2026-05-24T00:05:00.000Z" },
+                  { agentKey: "inbox-triage", status: "FAILED", createdAt: "2026-05-24T00:00:00.000Z" },
+                ],
+              },
+            },
+          },
+        ],
+      },
+    ]);
+
+    const incident = incidents.find((item) => item.status === "agentFailureStreak");
+    expect(incident).toBeDefined();
+    expect(incident.evidence).toContain("Failed runs in latest snapshot: 3");
+  });
+
+  it("keeps agent failure-streak incidents past cancelled runs", () => {
+    const incidents = buildTestControlPlaneIncidents([
+      {
+        id: "deployment-acme",
+        label: "Acme Production",
+        customerSlug: "acme",
+        hasSupportCredential: true,
+        fleetSnapshots: [
+          {
+            snapshotKind: "SUPPORT_READY",
+            observedAt: "2026-05-24T00:20:00.000Z",
+            summary: {
+              agentRuns: {
+                items: [
+                  { agentKey: "inbox-triage", status: "CANCELLED", createdAt: "2026-05-24T00:20:00.000Z" },
+                  { agentKey: "inbox-triage", status: "FAILED", createdAt: "2026-05-24T00:10:00.000Z" },
+                  { agentKey: "inbox-triage", status: "FAILED", createdAt: "2026-05-24T00:05:00.000Z" },
+                  { agentKey: "inbox-triage", status: "FAILED", createdAt: "2026-05-24T00:00:00.000Z" },
+                ],
+              },
+            },
+          },
+        ],
+      },
+    ]);
+
+    const incident = incidents.find((item) => item.status === "agentFailureStreak");
+    expect(incident).toBeDefined();
+    expect(incident.evidence).toContain("Failed runs in latest snapshot: 3");
+  });
+
+  it("preserves unknown-timestamp failures ahead of older successful runs", () => {
+    const incidents = buildTestControlPlaneIncidents([
+      {
+        id: "deployment-acme",
+        label: "Acme Production",
+        customerSlug: "acme",
+        hasSupportCredential: true,
+        fleetSnapshots: [
+          {
+            snapshotKind: "SUPPORT_READY",
+            observedAt: "2026-05-24T00:15:00.000Z",
+            summary: {
+              agentRuns: {
+                items: [
+                  { agentKey: "inbox-triage", status: "FAILED" },
+                  { agentKey: "inbox-triage", status: "FAILED", createdAt: "2026-05-24T00:10:00.000Z" },
+                  { agentKey: "inbox-triage", status: "FAILED", createdAt: "2026-05-24T00:05:00.000Z" },
+                  { agentKey: "inbox-triage", status: "COMPLETED", createdAt: "2026-05-24T00:00:00.000Z" },
+                ],
+              },
+            },
+          },
+        ],
+      },
+    ]);
+
+    const incident = incidents.find((item) => item.status === "agentFailureStreak");
+    expect(incident).toBeDefined();
+    expect(incident.evidence).toContain("Failed runs in latest snapshot: 3");
+  });
+
+  it("uses the snapshot time when the newest failed run is undated", () => {
+    const incidents = buildTestControlPlaneIncidents([
+      {
+        id: "deployment-acme",
+        label: "Acme Production",
+        customerSlug: "acme",
+        hasSupportCredential: true,
+        fleetSnapshots: [
+          {
+            snapshotKind: "SUPPORT_READY",
+            observedAt: "2026-05-24T00:15:00.000Z",
+            summary: {
+              agentRuns: {
+                items: [
+                  { agentKey: "inbox-triage", status: "FAILED" },
+                  { agentKey: "inbox-triage", status: "FAILED", createdAt: "2026-05-20T00:10:00.000Z" },
+                  { agentKey: "inbox-triage", status: "FAILED", createdAt: "2026-05-20T00:05:00.000Z" },
+                ],
+              },
+            },
+          },
+        ],
+      },
+    ]);
+
+    const incident = incidents.find((item) => item.status === "agentFailureStreak");
+    expect(incident).toBeDefined();
+    expect(incident.evidence).toContain("Latest failed run: unknown");
+  });
+
+  it("uses failure lifecycle timestamps for failure-streak freshness", () => {
+    const incidents = buildTestControlPlaneIncidents([
+      {
+        id: "deployment-acme",
+        label: "Acme Production",
+        customerSlug: "acme",
+        hasSupportCredential: true,
+        fleetSnapshots: [
+          {
+            snapshotKind: "SUPPORT_READY",
+            observedAt: "2026-05-24T00:25:00.000Z",
+            summary: {
+              agentRuns: {
+                items: [
+                  {
+                    agentKey: "inbox-triage",
+                    status: "FAILED",
+                    createdAt: "2026-05-22T00:00:00.000Z",
+                    failedAt: "2026-05-24T00:20:00.000Z",
+                  },
+                  {
+                    agentKey: "inbox-triage",
+                    status: "FAILED",
+                    createdAt: "2026-05-21T23:55:00.000Z",
+                    completedAt: "2026-05-24T00:15:00.000Z",
+                  },
+                  {
+                    agentKey: "inbox-triage",
+                    status: "FAILED",
+                    createdAt: "2026-05-21T23:50:00.000Z",
+                    updatedAt: "2026-05-24T00:10:00.000Z",
+                  },
+                ],
+              },
+            },
+          },
+        ],
+      },
+    ]);
+
+    const incident = incidents.find((item) => item.status === "agentFailureStreak");
+    expect(incident).toBeDefined();
+    expect(incident.evidence).toContain("Latest failed run: 2026-05-24T00:20:00.000Z");
+  });
+
+  it("orders failure-streak recovery by terminal timestamps", () => {
+    const incidents = buildTestControlPlaneIncidents([
+      {
+        id: "deployment-acme",
+        label: "Acme Production",
+        customerSlug: "acme",
+        hasSupportCredential: true,
+        fleetSnapshots: [
+          {
+            snapshotKind: "SUPPORT_READY",
+            observedAt: "2026-05-24T00:30:00.000Z",
+            summary: {
+              agentRuns: {
+                items: [
+                  {
+                    agentKey: "inbox-triage",
+                    status: "COMPLETED",
+                    createdAt: "2026-05-24T00:20:00.000Z",
+                    completedAt: "2026-05-24T00:21:00.000Z",
+                  },
+                  {
+                    agentKey: "inbox-triage",
+                    status: "FAILED",
+                    createdAt: "2026-05-24T00:10:00.000Z",
+                    failedAt: "2026-05-24T00:25:00.000Z",
+                  },
+                  {
+                    agentKey: "inbox-triage",
+                    status: "FAILED",
+                    createdAt: "2026-05-24T00:05:00.000Z",
+                    failedAt: "2026-05-24T00:24:00.000Z",
+                  },
+                  {
+                    agentKey: "inbox-triage",
+                    status: "FAILED",
+                    createdAt: "2026-05-24T00:00:00.000Z",
+                    failedAt: "2026-05-24T00:23:00.000Z",
+                  },
+                ],
+              },
+            },
+          },
+        ],
+      },
+    ]);
+
+    const incident = incidents.find((item) => item.status === "agentFailureStreak");
+    expect(incident).toBeDefined();
+    expect(incident.evidence).toContain("Latest failed run: 2026-05-24T00:25:00.000Z");
+  });
+
+  it("suppresses undated support signals from timestamp-less snapshots", () => {
+    const incidents = buildTestControlPlaneIncidents([
+      {
+        id: "deployment-acme",
+        label: "Acme Production",
+        customerSlug: "acme",
+        hasSupportCredential: true,
+        fleetSnapshots: [
+          {
+            snapshotKind: "SUPPORT_READY",
+            summary: {
+              agentRuns: {
+                items: [
+                  { agentKey: "inbox-triage", status: "FAILED" },
+                  { agentKey: "inbox-triage", status: "FAILED" },
+                  { agentKey: "inbox-triage", status: "FAILED" },
+                ],
+              },
+              failedJobs: {
+                items: [
+                  {
+                    type: "communication.slack.proactive-scan",
+                    error: "An API error occurred: invalid_auth",
+                  },
+                ],
+              },
+            },
+          },
+        ],
+      },
+    ]);
+
+    expect(incidents.some((incident) => incident.status === "agentFailureStreak")).toBe(false);
+    expect(incidents.some((incident) => incident.status === "slackInvalidAuth")).toBe(false);
+  });
+
+  it("suppresses recovered agent failure-streak incidents", () => {
+    const incidents = buildTestControlPlaneIncidents([
+      {
+        id: "deployment-acme",
+        label: "Acme Production",
+        customerSlug: "acme",
+        hasSupportCredential: true,
+        fleetSnapshots: [
+          {
+            snapshotKind: "SUPPORT_READY",
+            observedAt: "2026-05-24T00:00:00.000Z",
+            summary: {
+              agentRuns: {
+                items: [
+                  { agentKey: "inbox-triage", status: "COMPLETED", createdAt: "2026-05-24T00:00:00.000Z" },
+                  { agentKey: "inbox-triage", status: "FAILED", createdAt: "2026-05-23T23:55:00.000Z" },
+                  { agentKey: "inbox-triage", status: "FAILED", createdAt: "2026-05-23T23:50:00.000Z" },
+                  { agentKey: "inbox-triage", status: "FAILED", createdAt: "2026-05-23T23:45:00.000Z" },
+                ],
+              },
+            },
+          },
+        ],
+      },
+    ]);
+
+    expect(incidents.some((incident) => incident.status === "agentFailureStreak")).toBe(false);
+  });
+
+  it("suppresses support incidents from stale cached snapshots", () => {
+    const incidents = buildTestControlPlaneIncidents([
+      {
+        id: "deployment-acme",
+        label: "Acme Production",
+        customerSlug: "acme",
+        hasSupportCredential: true,
+        fleetSnapshots: [
+          {
+            snapshotKind: "SUPPORT_READY",
+            observedAt: "2026-05-20T00:00:00.000Z",
+            summary: {
+              agentRuns: {
+                items: [
+                  { agentKey: "meeting-summary", status: "FAILED", createdAt: "2026-05-19T23:55:00.000Z" },
+                  { agentKey: "meeting-summary", status: "FAILED", createdAt: "2026-05-19T23:50:00.000Z" },
+                  { agentKey: "meeting-summary", status: "FAILED", createdAt: "2026-05-19T23:45:00.000Z" },
+                ],
+              },
+              failedJobs: {
+                items: [
+                  {
+                    type: "communication.slack.proactive-scan",
+                    error: "An API error occurred: invalid_auth",
+                    updatedAt: "2026-05-19T23:55:00.000Z",
+                  },
+                ],
+              },
+            },
+          },
+        ],
+      },
+    ]);
+
+    expect(incidents.some((incident) => incident.status === "agentFailureStreak")).toBe(false);
+    expect(incidents.some((incident) => incident.status === "slackInvalidAuth")).toBe(false);
+  });
+
+  it("suppresses stale agent failure-streak incidents", () => {
+    const incidents = buildTestControlPlaneIncidents([
+      {
+        id: "deployment-acme",
+        label: "Acme Production",
+        customerSlug: "acme",
+        hasSupportCredential: true,
+        fleetSnapshots: [
+          {
+            snapshotKind: "SUPPORT_READY",
+            observedAt: "2026-05-24T00:00:00.000Z",
+            summary: {
+              agentRuns: {
+                items: [
+                  { agentKey: "meeting-summary", status: "FAILED", createdAt: "2026-05-20T00:00:00.000Z" },
+                  { agentKey: "meeting-summary", status: "FAILED", createdAt: "2026-05-19T23:55:00.000Z" },
+                  { agentKey: "meeting-summary", status: "FAILED", createdAt: "2026-05-19T23:50:00.000Z" },
+                ],
+              },
+            },
+          },
+        ],
+      },
+    ]);
+
+    expect(incidents.some((incident) => incident.status === "agentFailureStreak")).toBe(false);
   });
 });
 

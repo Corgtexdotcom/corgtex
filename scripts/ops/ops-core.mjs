@@ -2,6 +2,33 @@ import { createHash } from "node:crypto";
 
 export const INCIDENT_SEVERITIES = ["P1", "P2", "P3"];
 export const RAILWAY_ACTIONS = ["inspect", "restart", "redeploy-current"];
+const ACTIVE_SUPPORT_SIGNAL_WINDOW_MS = 24 * 60 * 60 * 1000;
+const NONTERMINAL_AGENT_RUN_STATUSES = new Set([
+  "PENDING",
+  "QUEUED",
+  "RUNNING",
+  "IN_PROGRESS",
+  "STARTED",
+  "SCHEDULED",
+  "PROCESSING",
+  "WAITING_APPROVAL",
+]);
+const RECOVERY_AGENT_RUN_STATUSES = new Set([
+  "COMPLETED",
+  "COMPLETE",
+  "SUCCESS",
+  "SUCCEEDED",
+  "PASSED",
+  "OK",
+]);
+const NEUTRAL_AGENT_RUN_STATUSES = new Set([
+  ...NONTERMINAL_AGENT_RUN_STATUSES,
+  "UNKNOWN",
+  "CANCELLED",
+  "CANCELED",
+  "SKIPPED",
+  "ABORTED",
+]);
 
 export function parseArgs(argv) {
   const parsed = { _: [] };
@@ -267,12 +294,13 @@ export async function fetchControlPlaneCustomers(env = process.env, fetchImpl = 
   return parsed;
 }
 
-export function buildControlPlaneIncidents(customers) {
+export function buildControlPlaneIncidents(customers, options = {}) {
   const rows = Array.isArray(customers) ? customers : [];
+  const sweepNowMs = referenceTimeMs(options.now);
   return rows.flatMap((row) => [
     missingSupportConnectorIncident(row),
-    agentFailureStreakIncident(row),
-    slackInvalidAuthIncident(row),
+    agentFailureStreakIncident(row, sweepNowMs),
+    slackInvalidAuthIncident(row, sweepNowMs),
     releaseMetadataDriftIncident(row),
   ].filter(Boolean).map(normalizeIncident));
 }
@@ -387,20 +415,29 @@ function missingSupportConnectorIncident(row) {
   };
 }
 
-function agentFailureStreakIncident(row) {
-  const runs = latestSupportItems(row, "agentRuns", ["items", "runs"]).map((run) => ({
+function agentFailureStreakIncident(row, sweepNowMs) {
+  const snapshot = latestSnapshot(row, "SUPPORT_READY");
+  const snapshotObservedAtMs = timestampMs(optionalText(snapshot?.observedAt) ?? optionalText(snapshot?.createdAt));
+  const summary = record(snapshot?.summary);
+  const runs = itemsFrom(summary?.agentRuns, ["items", "runs"]).map((run) => ({
     agentKey: optionalText(run.agentKey) ?? optionalText(run.key) ?? optionalText(run.name) ?? "unknown",
     status: optionalText(run.status) ?? "UNKNOWN",
     createdAt: optionalText(run.createdAt),
+    failedAt: optionalText(run.failedAt),
+    completedAt: optionalText(run.completedAt),
+    finishedAt: optionalText(run.finishedAt),
+    endedAt: optionalText(run.endedAt),
+    updatedAt: optionalText(run.updatedAt),
   }));
-  const failuresByAgent = new Map();
+  const runsByAgent = new Map();
   for (const run of runs) {
-    if (run.status !== "FAILED") continue;
-    const current = failuresByAgent.get(run.agentKey) ?? [];
+    const current = runsByAgent.get(run.agentKey) ?? [];
     current.push(run);
-    failuresByAgent.set(run.agentKey, current);
+    runsByAgent.set(run.agentKey, current);
   }
-  const [agentKey, failures] = [...failuresByAgent.entries()].find(([, items]) => items.length >= 3) ?? [];
+  const [agentKey, failures] = [...runsByAgent.entries()]
+    .map(([key, items]) => [key, activeFailureStreak(items, snapshotObservedAtMs, sweepNowMs)])
+    .find(([, items]) => items.length >= 3) ?? [];
   if (!agentKey) return null;
   const label = deploymentLabel(row);
   return {
@@ -414,18 +451,68 @@ function agentFailureStreakIncident(row) {
       `Deployment ID: ${optionalText(row.id) ?? "unknown"}`,
       `Agent: ${agentKey}`,
       `Failed runs in latest snapshot: ${failures.length}`,
-      `Latest failed run: ${failures[0]?.createdAt ?? "unknown"}`,
+      `Latest failed run: ${agentRunFailureTimestamp(failures[0]) ?? "unknown"}`,
     ],
     recommendedAction: "inspect failed agent traces through the support connector and repair the root cause before retrying",
   };
 }
 
-function slackInvalidAuthIncident(row) {
-  const failedJobs = latestSupportItems(row, "failedJobs", ["items", "jobs"]);
+function activeFailureStreak(runs, snapshotObservedAtMs, sweepNowMs) {
+  const indexedRuns = runs.map((run, index) => ({ run, index, orderAtMs: timestampMs(agentRunOrderTimestamp(run)) }));
+  const sortedRuns = indexedRuns.every((item) => item.orderAtMs !== null)
+    ? [...indexedRuns].sort((a, b) => b.orderAtMs - a.orderAtMs).map((item) => item.run)
+    : indexedRuns.map((item) => item.run);
+  const failures = [];
+  for (const run of sortedRuns) {
+    const status = normalizeAgentRunStatus(run.status);
+    if (status === "FAILED") {
+      failures.push(run);
+      continue;
+    }
+    if (NEUTRAL_AGENT_RUN_STATUSES.has(status)) continue;
+    if (RECOVERY_AGENT_RUN_STATUSES.has(status)) break;
+    continue;
+  }
+  if (failures.length < 3) return [];
+  const latestFailureAtMs = timestampMs(agentRunFailureTimestamp(failures[0]))
+    ?? snapshotObservedAtMs
+    ?? newestTimestampMs(failures.map(agentRunFailureTimestamp));
+  if (!latestFailureAtMs || sweepNowMs - latestFailureAtMs > ACTIVE_SUPPORT_SIGNAL_WINDOW_MS) {
+    return [];
+  }
+  return failures;
+}
+
+function agentRunOrderTimestamp(run) {
+  return agentRunTerminalTimestamp(run) ?? optionalText(run?.createdAt);
+}
+
+function agentRunFailureTimestamp(run) {
+  return agentRunTerminalTimestamp(run) ?? optionalText(run?.createdAt);
+}
+
+function agentRunTerminalTimestamp(run) {
+  return optionalText(run?.failedAt)
+    ?? optionalText(run?.completedAt)
+    ?? optionalText(run?.finishedAt)
+    ?? optionalText(run?.endedAt)
+    ?? optionalText(run?.updatedAt);
+}
+
+function normalizeAgentRunStatus(value) {
+  return optionalText(value)?.toUpperCase() ?? "UNKNOWN";
+}
+
+function slackInvalidAuthIncident(row, sweepNowMs) {
+  const snapshot = latestSnapshot(row, "SUPPORT_READY");
+  const snapshotObservedAtMs = timestampMs(optionalText(snapshot?.observedAt) ?? optionalText(snapshot?.createdAt));
+  const summary = record(snapshot?.summary);
+  const failedJobs = itemsFrom(summary?.failedJobs, ["items", "jobs"]);
   const matches = failedJobs.filter((job) => {
     const type = optionalText(job.type) ?? optionalText(job.name) ?? "";
     const error = optionalText(job.error) ?? "";
-    return /slack/i.test(type) && /invalid_auth/i.test(error);
+    if (!/slack/i.test(type) || !/invalid_auth/i.test(error)) return false;
+    return isActiveSupportSignal(job, snapshotObservedAtMs, sweepNowMs);
   });
   if (matches.length === 0) return null;
   const label = deploymentLabel(row);
@@ -440,10 +527,36 @@ function slackInvalidAuthIncident(row) {
       `Deployment ID: ${optionalText(row.id) ?? "unknown"}`,
       `Failed Slack jobs in latest snapshot: ${matches.length}`,
       `Latest job type: ${optionalText(matches[0].type) ?? optionalText(matches[0].name) ?? "unknown"}`,
+      `Latest failed job signal: ${supportSignalTimestamp(matches[0]) ?? "unknown"}`,
       "Slack API error: invalid_auth",
     ],
     recommendedAction: "mark the Slack installation reauth-required and stop proactive scans until Slack is reconnected",
   };
+}
+
+function isActiveSupportSignal(item, snapshotObservedAtMs, sweepNowMs) {
+  const signalAtMs = timestampMs(supportSignalTimestamp(item)) ?? snapshotObservedAtMs;
+  return Boolean(signalAtMs) && sweepNowMs - signalAtMs <= ACTIVE_SUPPORT_SIGNAL_WINDOW_MS;
+}
+
+function supportSignalTimestamp(item) {
+  return optionalText(item?.failedAt)
+    ?? optionalText(item?.updatedAt)
+    ?? optionalText(item?.completedAt)
+    ?? optionalText(item?.createdAt);
+}
+
+function referenceTimeMs(value) {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  return timestampMs(value) ?? Date.now();
+}
+
+function newestTimestampMs(values) {
+  return values.reduce((newest, value) => {
+    const current = timestampMs(value);
+    if (!current) return newest;
+    return newest === null || current > newest ? current : newest;
+  }, null);
 }
 
 function releaseMetadataDriftIncident(row) {
@@ -656,6 +769,13 @@ function optionalText(value) {
   if (value === null || value === undefined) return null;
   const text = String(value).trim();
   return text.length > 0 ? text : null;
+}
+
+function timestampMs(value) {
+  const text = optionalText(value);
+  if (!text) return null;
+  const parsed = Date.parse(text);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function positiveInt(value, fallback) {
