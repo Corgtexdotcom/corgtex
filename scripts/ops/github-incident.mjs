@@ -74,9 +74,10 @@ async function readStdin() {
 }
 
 async function publishWithGitHubApi(api, plans, options = {}) {
+  const openIssues = await listOpenOpsIssuesWithApi(api);
   for (const plan of plans) {
     await ensureLabelsWithApi(api, plan.labels);
-    const existing = await findExistingIssueWithApi(api, plan.searchToken);
+    const existing = findExistingIssueFromList(openIssues, plan.searchToken);
     if (existing?.number) {
       const comment = await githubRequest(
         api,
@@ -98,11 +99,12 @@ async function publishWithGitHubApi(api, plans, options = {}) {
         labels: plan.labels,
       },
     });
+    openIssues.push(issue);
     console.log(issue.html_url);
   }
 
   if (options.syncResolved) {
-    await closeResolvedIssuesWithApi(api, activeSearchTokens(plans), options.syncDedupePrefixes);
+    await closeResolvedIssuesWithApi(api, activeSearchTokens(plans), options.syncDedupePrefixes, openIssues);
   }
 }
 
@@ -123,8 +125,7 @@ async function ensureLabelsWithApi(api, labels) {
   }
 }
 
-async function findExistingIssueWithApi(api, searchToken) {
-  const issues = await listOpenOpsIssuesWithApi(api);
+function findExistingIssueFromList(issues, searchToken) {
   return issues.find((issue) => !issue.pull_request && issue.title.includes(searchToken)) ?? null;
 }
 
@@ -182,8 +183,7 @@ async function listOpenOpsIssuesWithApi(api) {
   return issues;
 }
 
-async function closeResolvedIssuesWithApi(api, activeTokens, dedupePrefixes) {
-  const issues = await listOpenOpsIssuesWithApi(api);
+async function closeResolvedIssuesWithApi(api, activeTokens, dedupePrefixes, issues) {
   for (const issue of issues) {
     if (issue.pull_request || !shouldCloseIssue(issue, activeTokens, dedupePrefixes)) continue;
     const body = resolvedCommentBody();
@@ -275,22 +275,30 @@ function closeResolvedIssuesWithGh(activeTokens, dedupePrefixes) {
 }
 
 function listOpenOpsIssuesWithGhApi() {
-  const output = runGh([
-    "api",
-    "--method",
-    "GET",
-    "--paginate",
-    "--slurp",
-    "repos/{owner}/{repo}/issues",
-    "-f",
-    "state=open",
-    "-f",
-    "labels=ops-auto-fix",
-    "-f",
-    "per_page=100",
-  ]);
-  const pages = JSON.parse(output || "[]");
-  return pages.flatMap((page) => Array.isArray(page) ? page : [page]);
+  const issues = [];
+  for (let page = 1; ; page += 1) {
+    const output = runGh([
+      "api",
+      "--method",
+      "GET",
+      "repos/{owner}/{repo}/issues",
+      "-f",
+      "state=open",
+      "-f",
+      "labels=ops-auto-fix",
+      "-f",
+      "per_page=100",
+      "-f",
+      `page=${page}`,
+    ]);
+    const batch = JSON.parse(output || "[]");
+    if (!Array.isArray(batch)) {
+      throw new Error("GitHub issue listing returned a non-array payload.");
+    }
+    issues.push(...batch);
+    if (batch.length < 100) break;
+  }
+  return issues;
 }
 
 function activeSearchTokens(plans) {
@@ -343,10 +351,17 @@ function optionalString(value) {
 }
 
 function parseSyncDedupePrefixes(value) {
-  return optionalString(value)
-    .split(",")
-    .map(normalizeDedupeText)
-    .filter(Boolean);
+  const text = optionalString(value).trim();
+  if (!text) return [];
+  if (text.startsWith("[")) {
+    const parsed = JSON.parse(text);
+    if (!Array.isArray(parsed)) {
+      throw new Error("--sync-dedupe-prefixes JSON value must be an array.");
+    }
+    return parsed.map(normalizeDedupeText).filter(Boolean);
+  }
+  const normalized = normalizeDedupeText(text);
+  return normalized ? [normalized] : [];
 }
 
 function normalizeDedupeText(value) {

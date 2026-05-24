@@ -104,20 +104,21 @@ describe("github-incident resolved issue sync", () => {
     expect(result.state.issues.find((item) => item.number === 9).closed).toBeFalsy();
   });
 
-  it("uses paged gh api issue listing for resolved sync", async () => {
-    const firstToken = opsToken("resolved-dedupe-1");
-    const secondToken = opsToken("resolved-dedupe-2");
+  it("uses bounded paged gh api issue listing for resolved sync", async () => {
+    const issues = Array.from({ length: 101 }, (_, index) => {
+      const dedupeKey = `resolved-dedupe-${index + 1}`;
+      return issue(index + 10, `[${opsToken(dedupeKey)}] P2 web: stale ${index + 1}`, ["ops-auto-fix"], dedupeKey);
+    });
     const result = await runWithFakeGh(githubIncidentPath, ["--sync-resolved"], [], {
-      issueListLimit: 1,
-      issues: [
-        issue(10, `[${firstToken}] P2 web: stale 1`, ["ops-auto-fix"], "resolved-dedupe-1"),
-        issue(11, `[${secondToken}] P2 web: stale 2`, ["ops-auto-fix"], "resolved-dedupe-2"),
-      ],
+      issues,
     });
 
     expect(result.code).toBe(0);
     expect(result.state.issues.every((item) => item.closed)).toBe(true);
-    expect(result.state.calls.some((call) => call[0] === "api" && call.includes("--paginate"))).toBe(true);
+    const apiCalls = result.state.calls.filter((call) => call[0] === "api" && call.includes("repos/{owner}/{repo}/issues"));
+    expect(apiCalls.length).toBe(2);
+    expect(apiCalls[0]).toContain("page=1");
+    expect(apiCalls[1]).toContain("page=2");
   });
 
   it("leaves open issues untouched when resolved sync is not requested", async () => {
@@ -192,6 +193,75 @@ describe("github-incident resolved issue sync", () => {
 
       expect(result.code).toBe(0);
       expect(result.state.issues[0].closed).toBe(true);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("truncates health target prefixes to match stored incident dedupe keys", async () => {
+    const server = await startHealthServer();
+    try {
+      const targetName = `site-${"x".repeat(220)}`;
+      const normalizedDedupe = `${targetName}:${server.url}/api/health:down`.slice(0, 200).toLowerCase();
+      const staleToken = opsToken(normalizedDedupe);
+      const result = await runWithFakeGh(healthSweepPath, [], null, {
+        issues: [issue(14, `[${staleToken}] P2 site: stale`, ["ops-auto-fix"], normalizedDedupe)],
+        env: {
+          OPS_CREATE_GITHUB_ISSUES: "true",
+          OPS_HEALTH_TARGETS_JSON: JSON.stringify([
+            {
+              name: targetName,
+              service: "site",
+              url: `${server.url}/api/health`,
+              expectJson: { status: "ok" },
+            },
+          ]),
+          CONTROL_PLANE_AGENT_API_KEY: "",
+          CONTROL_PLANE_URL: "",
+          APP_URL: "",
+          NEXT_PUBLIC_APP_URL: "",
+          NEXT_PUBLIC_SITE_URL: "",
+          OPS_PRIMARY_CLIENT_URL: "",
+        },
+      });
+
+      expect(result.code).toBe(0);
+      expect(result.state.issues[0].closed).toBe(true);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("keeps comma-bearing health target prefixes intact during resolved sync", async () => {
+    const server = await startHealthServer();
+    try {
+      const staleDedupe = `site,prod:${server.url}/api/health:down`;
+      const staleToken = opsToken(staleDedupe);
+      const result = await runWithFakeGh(healthSweepPath, [], null, {
+        issues: [issue(15, `[${staleToken}] P2 site: stale`, ["ops-auto-fix"], staleDedupe)],
+        env: {
+          OPS_CREATE_GITHUB_ISSUES: "true",
+          OPS_HEALTH_TARGETS_JSON: JSON.stringify([
+            {
+              name: "site,prod",
+              service: "site",
+              url: `${server.url}/api/health`,
+              expectJson: { status: "ok" },
+            },
+          ]),
+          CONTROL_PLANE_AGENT_API_KEY: "",
+          CONTROL_PLANE_URL: "",
+          APP_URL: "",
+          NEXT_PUBLIC_APP_URL: "",
+          NEXT_PUBLIC_SITE_URL: "",
+          OPS_PRIMARY_CLIENT_URL: "",
+        },
+      });
+
+      expect(result.code).toBe(0);
+      expect(result.state.issues[0].closed).toBe(true);
+      const syncCall = result.state.calls.find((call) => call[0] === "api");
+      expect(syncCall).toBeTruthy();
     } finally {
       await server.close();
     }
@@ -389,6 +459,11 @@ if (argv[0] === "api" && argv.includes("repos/{owner}/{repo}/issues")) {
     save();
     process.exit(1);
   }
+  const pageArg = argv.find((arg) => arg.startsWith("page="));
+  const page = pageArg ? Number(pageArg.split("=")[1]) : 1;
+  const perPageArg = argv.find((arg) => arg.startsWith("per_page="));
+  const perPage = perPageArg ? Number(perPageArg.split("=")[1]) : 100;
+  const effectivePerPage = state.issueListLimit ?? perPage;
   const issues = state.issues
     .filter((issue) => !issue.closed)
     .map((issue) => ({
@@ -398,8 +473,9 @@ if (argv[0] === "api" && argv.includes("repos/{owner}/{repo}/issues")) {
       labels: issue.labels,
       pull_request: issue.pull_request,
     }));
+  const start = (page - 1) * effectivePerPage;
   save();
-  console.log(JSON.stringify([issues.slice(0, 1), issues.slice(1)]));
+  console.log(JSON.stringify(issues.slice(start, start + effectivePerPage)));
   process.exit(0);
 }
 

@@ -63,7 +63,7 @@ async function main() {
   if (!dryRun && createIssues) {
     const incidentArgs = [new URL("./github-incident.mjs", import.meta.url).pathname];
     if (syncDedupePrefixes.length > 0) {
-      incidentArgs.push("--sync-resolved", "--sync-dedupe-prefixes", syncDedupePrefixes.join(","));
+      incidentArgs.push("--sync-resolved", "--sync-dedupe-prefixes", JSON.stringify(syncDedupePrefixes));
     }
     const issueResult = spawnSync(
       process.execPath,
@@ -116,7 +116,7 @@ function firstHttpUrl(...values) {
 }
 
 function normalizeDedupePrefix(value) {
-  return String(value).trim().replace(/\s+/g, " ").toLowerCase();
+  return String(value).trim().replace(/\s+/g, " ").slice(0, 200).toLowerCase();
 }
 
 function optionalText(value) {
