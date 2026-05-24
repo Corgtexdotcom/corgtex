@@ -13,6 +13,22 @@ const NONTERMINAL_AGENT_RUN_STATUSES = new Set([
   "PROCESSING",
   "WAITING_APPROVAL",
 ]);
+const RECOVERY_AGENT_RUN_STATUSES = new Set([
+  "COMPLETED",
+  "COMPLETE",
+  "SUCCESS",
+  "SUCCEEDED",
+  "PASSED",
+  "OK",
+]);
+const NEUTRAL_AGENT_RUN_STATUSES = new Set([
+  ...NONTERMINAL_AGENT_RUN_STATUSES,
+  "UNKNOWN",
+  "CANCELLED",
+  "CANCELED",
+  "SKIPPED",
+  "ABORTED",
+]);
 
 export function parseArgs(argv) {
   const parsed = { _: [] };
@@ -407,6 +423,11 @@ function agentFailureStreakIncident(row, sweepNowMs) {
     agentKey: optionalText(run.agentKey) ?? optionalText(run.key) ?? optionalText(run.name) ?? "unknown",
     status: optionalText(run.status) ?? "UNKNOWN",
     createdAt: optionalText(run.createdAt),
+    failedAt: optionalText(run.failedAt),
+    completedAt: optionalText(run.completedAt),
+    finishedAt: optionalText(run.finishedAt),
+    endedAt: optionalText(run.endedAt),
+    updatedAt: optionalText(run.updatedAt),
   }));
   const runsByAgent = new Map();
   for (const run of runs) {
@@ -430,32 +451,49 @@ function agentFailureStreakIncident(row, sweepNowMs) {
       `Deployment ID: ${optionalText(row.id) ?? "unknown"}`,
       `Agent: ${agentKey}`,
       `Failed runs in latest snapshot: ${failures.length}`,
-      `Latest failed run: ${failures[0]?.createdAt ?? "unknown"}`,
+      `Latest failed run: ${agentRunFailureTimestamp(failures[0]) ?? "unknown"}`,
     ],
     recommendedAction: "inspect failed agent traces through the support connector and repair the root cause before retrying",
   };
 }
 
 function activeFailureStreak(runs, snapshotObservedAtMs, sweepNowMs) {
-  const indexedRuns = runs.map((run, index) => ({ run, index, createdAtMs: timestampMs(run.createdAt) }));
-  const sortedRuns = indexedRuns.every((item) => item.createdAtMs !== null)
-    ? [...indexedRuns].sort((a, b) => b.createdAtMs - a.createdAtMs).map((item) => item.run)
+  const indexedRuns = runs.map((run, index) => ({ run, index, orderAtMs: timestampMs(agentRunOrderTimestamp(run)) }));
+  const sortedRuns = indexedRuns.every((item) => item.orderAtMs !== null)
+    ? [...indexedRuns].sort((a, b) => b.orderAtMs - a.orderAtMs).map((item) => item.run)
     : indexedRuns.map((item) => item.run);
   const failures = [];
   for (const run of sortedRuns) {
     const status = normalizeAgentRunStatus(run.status);
-    if (NONTERMINAL_AGENT_RUN_STATUSES.has(status)) continue;
-    if (status !== "FAILED") break;
-    failures.push(run);
+    if (status === "FAILED") {
+      failures.push(run);
+      continue;
+    }
+    if (NEUTRAL_AGENT_RUN_STATUSES.has(status)) continue;
+    if (RECOVERY_AGENT_RUN_STATUSES.has(status)) break;
+    continue;
   }
   if (failures.length < 3) return [];
-  const latestFailureAtMs = timestampMs(failures[0]?.createdAt)
+  const latestFailureAtMs = timestampMs(agentRunFailureTimestamp(failures[0]))
     ?? snapshotObservedAtMs
-    ?? newestTimestampMs(failures.map((failure) => failure.createdAt));
+    ?? newestTimestampMs(failures.map(agentRunFailureTimestamp));
   if (!latestFailureAtMs || sweepNowMs - latestFailureAtMs > ACTIVE_SUPPORT_SIGNAL_WINDOW_MS) {
     return [];
   }
   return failures;
+}
+
+function agentRunOrderTimestamp(run) {
+  return optionalText(run?.createdAt) ?? agentRunFailureTimestamp(run);
+}
+
+function agentRunFailureTimestamp(run) {
+  return optionalText(run?.failedAt)
+    ?? optionalText(run?.completedAt)
+    ?? optionalText(run?.finishedAt)
+    ?? optionalText(run?.endedAt)
+    ?? optionalText(run?.updatedAt)
+    ?? optionalText(run?.createdAt);
 }
 
 function normalizeAgentRunStatus(value) {
