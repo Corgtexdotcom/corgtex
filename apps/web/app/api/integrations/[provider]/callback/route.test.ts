@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 
-const { requirePageActor, saveOAuthConnectionAndEnqueueCalendarSync } = vi.hoisted(() => ({
+const { requirePageActor, saveOAuthConnectionAndEnqueueCalendarSync, verifyIntegrationOAuthState } = vi.hoisted(() => ({
   requirePageActor: vi.fn(),
   saveOAuthConnectionAndEnqueueCalendarSync: vi.fn(),
+  verifyIntegrationOAuthState: vi.fn(),
 }));
 
 vi.mock("@/lib/auth", () => ({
@@ -12,6 +13,7 @@ vi.mock("@/lib/auth", () => ({
 
 vi.mock("@corgtex/domain", () => ({
   saveOAuthConnectionAndEnqueueCalendarSync,
+  verifyIntegrationOAuthState,
 }));
 
 beforeEach(() => {
@@ -34,6 +36,7 @@ describe("GET /api/integrations/[provider]/callback", () => {
       user: { id: "user-1" },
     });
     saveOAuthConnectionAndEnqueueCalendarSync.mockResolvedValue({ id: "conn-1" });
+    verifyIntegrationOAuthState.mockReturnValue({ userId: "user-1", workspaceId: "ws-1" });
 
     const fetchMock = vi.mocked(fetch);
     fetchMock
@@ -65,6 +68,7 @@ describe("GET /api/integrations/[provider]/callback", () => {
         refreshToken: "refresh-token",
         expiresIn: 3600,
         providerAccountId: "google-user-1",
+        providerEmail: null,
         scopes: ["calendar", "profile"],
       },
     );

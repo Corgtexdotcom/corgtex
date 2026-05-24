@@ -7,7 +7,7 @@ import type {
   ModelUsageInput,
   RerankRequest,
 } from "./contracts";
-import { assertCatalogModelBudget, recordModelUsage } from "./usage";
+import { assertCatalogModelBudget, assertWorkspaceModelBudget, recordModelUsage } from "./usage";
 
 function usageDetails(input: ModelUsageInput) {
   return {
@@ -17,6 +17,8 @@ function usageDetails(input: ModelUsageInput) {
     outputTokens: input.outputTokens ?? 0,
     latencyMs: input.latencyMs ?? 0,
     estimatedCostUsd: input.estimatedCostUsd ?? "0.000000",
+    rawProviderCostUsd: input.rawProviderCostUsd ?? "0.000000",
+    billableCostUsd: input.billableCostUsd ?? input.estimatedCostUsd ?? "0.000000",
   };
 }
 
@@ -71,6 +73,7 @@ async function recordUsage(input: ModelUsageInput) {
 export const fakeModelGateway: ModelGateway = {
   async chat(request: ChatCompletionRequest) {
     const startedAt = Date.now();
+    await assertWorkspaceModelBudget(request.workspaceId);
     await assertCatalogModelBudget({
       workspaceId: request.workspaceId,
       ...usageContext(request),
@@ -107,6 +110,7 @@ export const fakeModelGateway: ModelGateway = {
 
   async extract(request: ExtractionRequest) {
     const startedAt = Date.now();
+    await assertWorkspaceModelBudget(request.workspaceId);
     await assertCatalogModelBudget({
       workspaceId: request.workspaceId,
       ...usageContext(request),
@@ -159,6 +163,7 @@ export const fakeModelGateway: ModelGateway = {
 
   async embed(request: EmbeddingRequest) {
     const startedAt = Date.now();
+    await assertWorkspaceModelBudget(request.workspaceId);
     await assertCatalogModelBudget({
       workspaceId: request.workspaceId,
       ...usageContext(request),
@@ -188,6 +193,7 @@ export const fakeModelGateway: ModelGateway = {
 
   async rerank(request: RerankRequest) {
     const startedAt = Date.now();
+    await assertWorkspaceModelBudget(request.workspaceId);
     await assertCatalogModelBudget({
       workspaceId: request.workspaceId,
       ...usageContext(request),

@@ -8,6 +8,7 @@ type ModelUsageLike = {
   outputTokens: number;
   latencyMs: number;
   estimatedCostUsd: Prisma.Decimal | string | number | null;
+  billableCostUsd?: Prisma.Decimal | string | number | null;
 };
 
 export type AgentRunModelUsageSummary = {
@@ -40,7 +41,7 @@ export function summarizeAgentRunModelUsage(usages: ModelUsageLike[]) {
   for (const usage of usages) {
     const key = [usage.provider, usage.model, usage.taskType].join("::");
     const current = grouped.get(key);
-    const estimatedCostUsd = asCostNumber(usage.estimatedCostUsd);
+    const estimatedCostUsd = asCostNumber(usage.billableCostUsd ?? usage.estimatedCostUsd);
 
     if (current) {
       current.inputTokens += usage.inputTokens;
@@ -99,10 +100,10 @@ export async function getWorkspaceMonthlyUsage(workspaceId: string, periodStartD
       }
     },
     select: {
-      estimatedCostUsd: true
+      estimatedCostUsd: true,
+      billableCostUsd: true,
     }
   });
 
-  return usages.reduce((total, usage) => total + asCostNumber(usage.estimatedCostUsd), 0);
+  return usages.reduce((total, usage) => total + asCostNumber(usage.billableCostUsd ?? usage.estimatedCostUsd), 0);
 }
-

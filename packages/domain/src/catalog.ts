@@ -549,6 +549,7 @@ export async function getCatalogItem(actor: AppActor, params: {
         inputTokens: true,
         outputTokens: true,
         estimatedCostUsd: true,
+        billableCostUsd: true,
       },
     }),
     prisma.agentCredential.count({
@@ -561,7 +562,7 @@ export async function getCatalogItem(actor: AppActor, params: {
   ]);
 
   invariant(item && isCatalogItemAvailable(item, featureFlags), 404, "NOT_FOUND", "Catalog item not found.");
-  const totalCostUsd = usageRows.reduce((sum, row) => sum + Number(row.estimatedCostUsd ?? 0), 0);
+  const totalCostUsd = usageRows.reduce((sum, row) => sum + Number(row.billableCostUsd ?? row.estimatedCostUsd ?? 0), 0);
   const totalTokens = usageRows.reduce((sum, row) => sum + row.inputTokens + row.outputTokens, 0);
 
   return {

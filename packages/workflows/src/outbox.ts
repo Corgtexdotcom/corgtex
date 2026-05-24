@@ -24,6 +24,7 @@ import {
   runControlPlaneFleetSnapshotJob,
   runControlPlaneReleaseDeployJob,
   syncSlackPublicArchiveForWorkspace,
+  reportPendingAiUsageToStripe,
   type ControlPlaneReleaseTarget,
   type SlackAgentJobPayload,
 } from "@corgtex/domain";
@@ -390,6 +391,14 @@ async function handleJob(job: ClaimedJob) {
   }
 
   if (!job.workspaceId) {
+    if (job.type === "billing.ai-usage.report") {
+      await reportPendingAiUsageToStripe({ limit: typeof payload.limit === "number" ? payload.limit : undefined });
+    }
+    return;
+  }
+
+  if (job.type === "billing.ai-usage.report") {
+    await reportPendingAiUsageToStripe({ limit: typeof payload.limit === "number" ? payload.limit : undefined });
     return;
   }
 
@@ -828,7 +837,8 @@ export async function schedulePeriodicJobs() {
   
   const fleetSweepBatchSizeRaw = Number(process.env.CONTROL_PLANE_FLEET_SWEEP_BATCH_SIZE ?? 50);
   const fleetSweepBatchSize = Math.min(Math.max(Number.isFinite(fleetSweepBatchSizeRaw) ? fleetSweepBatchSizeRaw : 50, 1), 500);
-  const [sources, slackInstallations, customerDeployments] = await Promise.all([
+  const aiUsageLedgerEntryDelegate = (prisma as typeof prisma & { aiUsageLedgerEntry?: typeof prisma.aiUsageLedgerEntry }).aiUsageLedgerEntry;
+  const [sources, slackInstallations, customerDeployments, pendingAiUsage] = await Promise.all([
     prisma.externalDataSource.findMany({
       where: { isActive: true },
       select: { id: true, workspaceId: true, pullCadenceMinutes: true, lastSyncAt: true }
@@ -853,6 +863,24 @@ export async function schedulePeriodicJobs() {
       take: fleetSweepBatchSize,
       select: { id: true },
     }),
+    aiUsageLedgerEntryDelegate
+      ? aiUsageLedgerEntryDelegate.findMany({
+          where: {
+            status: "PENDING",
+            workspace: {
+              billingProfile: {
+                is: {
+                  billingStatus: "ACTIVE",
+                  stripeSubscriptionItemId: { not: null },
+                },
+              },
+            },
+          },
+          distinct: ["workspaceId"],
+          take: 200,
+          select: { workspaceId: true },
+        })
+      : Promise.resolve([]),
   ]);
 
   let scheduledCount = 0;
@@ -893,6 +921,17 @@ export async function schedulePeriodicJobs() {
           reason: "Scheduled Control Plane fleet sweep.",
         },
         dedupeKey: `${deployment.id}:control-plane-fleet-snapshot:${hourlyBucket}`,
+      });
+      scheduledCount++;
+    }
+
+    if (pendingAiUsage.length > 0) {
+      await enqueueJob(tx, {
+        workspaceId: null,
+        eventId: null,
+        type: "billing.ai-usage.report",
+        payload: { limit: 500 },
+        dedupeKey: `billing:ai-usage-report:${hourlyBucket}`,
       });
       scheduledCount++;
     }

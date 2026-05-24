@@ -13,6 +13,18 @@ export class CatalogBudgetError extends Error {
   }
 }
 
+export class WorkspaceModelBudgetError extends Error {
+  status: number;
+  code: string;
+
+  constructor(code: string, message: string) {
+    super(message);
+    this.name = "WorkspaceModelBudgetError";
+    this.status = 429;
+    this.code = code;
+  }
+}
+
 type BudgetSubject = {
   catalogItemId: string | null;
   monthlyBudgetCents: number | null;
@@ -37,7 +49,7 @@ function decimalToNumber(value: unknown) {
   return 0;
 }
 
-function estimatedUsdToCents(value: unknown) {
+function costUsdToCents(value: unknown) {
   const usd = decimalToNumber(value);
   if (usd <= 0) return 0;
   return Math.ceil(usd * 100);
@@ -151,9 +163,10 @@ export async function assertCatalogModelBudget(input: {
       },
       select: {
         estimatedCostUsd: true,
+        billableCostUsd: true,
       },
     });
-    const spentCents = usage.reduce((sum, row) => sum + estimatedUsdToCents(row.estimatedCostUsd), 0);
+    const spentCents = usage.reduce((sum, row) => sum + costUsdToCents(row.billableCostUsd ?? row.estimatedCostUsd), 0);
 
     if (spentCents >= subject.monthlyBudgetCents) {
       throw new CatalogBudgetError("CATALOG_MONTHLY_BUDGET_EXCEEDED", "This catalog item has reached its monthly AI budget.");
@@ -161,8 +174,96 @@ export async function assertCatalogModelBudget(input: {
   }
 }
 
+export async function assertWorkspaceModelBudget(workspaceId: string) {
+  const workspace = await prisma.workspace.findUnique({
+    where: { id: workspaceId },
+    select: {
+      plan: true,
+      trialEndsAt: true,
+      modelUsageBudget: true,
+      procurementTrials: {
+        where: { status: "ACTIVE" },
+        orderBy: { createdAt: "desc" },
+        take: 1,
+        select: {
+          id: true,
+          agentCredentialId: true,
+          trialExpiresAt: true,
+        },
+      },
+    },
+  });
+
+  if (!workspace) {
+    throw new WorkspaceModelBudgetError("WORKSPACE_NOT_FOUND", "Workspace not found.");
+  }
+
+  if (workspace.plan === "CORE_FREE") {
+    throw new WorkspaceModelBudgetError("AI_BUDGET_PAUSED", "AI usage is paused for this workspace.");
+  }
+
+  if (workspace.plan === "TRIAL" && workspace.trialEndsAt && workspace.trialEndsAt.getTime() <= Date.now()) {
+    const activeTrial = workspace.procurementTrials[0];
+    await prisma.$transaction(async (tx) => {
+      await tx.workspace.update({
+        where: { id: workspaceId },
+        data: {
+          plan: "CORE_FREE",
+          planActivatedAt: new Date(),
+        },
+      });
+      await tx.modelUsageBudget.upsert({
+        where: { workspaceId },
+        create: { workspaceId, monthlyCostCapUsd: 0 },
+        update: { monthlyCostCapUsd: 0 },
+      });
+      if (activeTrial) {
+        await tx.procurementTrial.update({
+          where: { id: activeTrial.id },
+          data: { status: "EXPIRED" },
+        });
+        if (activeTrial.agentCredentialId) {
+          await tx.agentCredential.update({
+            where: { id: activeTrial.agentCredentialId },
+            data: { isActive: false },
+          });
+        }
+      }
+    });
+    throw new WorkspaceModelBudgetError("TRIAL_EXPIRED", "Trial AI usage has expired.");
+  }
+
+  const budget = workspace.modelUsageBudget;
+  if (!budget) {
+    return;
+  }
+
+  const capUsd = decimalToNumber(budget.monthlyCostCapUsd);
+  if (capUsd < 0) {
+    return;
+  }
+  if (capUsd === 0) {
+    throw new WorkspaceModelBudgetError("AI_BUDGET_PAUSED", "AI usage is paused for this workspace.");
+  }
+
+  const usage = await prisma.modelUsage.findMany({
+    where: {
+      workspaceId,
+      createdAt: { gte: startOfUtcMonth() },
+    },
+    select: {
+      estimatedCostUsd: true,
+      billableCostUsd: true,
+    },
+  });
+  const usedUsd = usage.reduce((sum, row) => sum + decimalToNumber(row.billableCostUsd ?? row.estimatedCostUsd), 0);
+  if (usedUsd >= capUsd) {
+    throw new WorkspaceModelBudgetError("AI_BUDGET_EXCEEDED", "This workspace has reached its AI budget.");
+  }
+}
+
 export async function recordModelUsage(input: ModelUsageInput) {
-  await prisma.modelUsage.create({
+  const modelUsage = await prisma.modelUsage.create({
     data: {
       workspaceId: input.workspaceId,
       workflowJobId: input.workflowJobId,
@@ -176,6 +277,22 @@ export async function recordModelUsage(input: ModelUsageInput) {
       outputTokens: input.outputTokens ?? 0,
       latencyMs: input.latencyMs ?? 0,
       estimatedCostUsd: input.estimatedCostUsd ?? null,
+      rawProviderCostUsd: input.rawProviderCostUsd ?? null,
+      billableCostUsd: input.billableCostUsd ?? input.estimatedCostUsd ?? null,
     },
   });
+
+  if (input.rawProviderCostUsd && input.billableCostUsd) {
+    await prisma.aiUsageLedgerEntry.create({
+      data: {
+        workspaceId: input.workspaceId,
+        modelUsageId: modelUsage.id,
+        provider: input.provider,
+        model: input.model,
+        taskType: input.taskType,
+        rawProviderCostUsd: input.rawProviderCostUsd,
+        billableCostUsd: input.billableCostUsd,
+      },
+    });
+  }
 }

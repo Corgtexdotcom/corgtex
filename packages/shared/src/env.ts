@@ -79,6 +79,9 @@ type Env = {
   readonly MODEL_CHAT_EXCELLENT: string;
   readonly MODEL_CHAT_CONVERSATION: string;
   readonly MODEL_EMBEDDING_DEFAULT: string;
+  readonly STRIPE_SECRET_KEY: string | undefined;
+  readonly STRIPE_WEBHOOK_SECRET: string | undefined;
+  readonly STRIPE_PRICE_AI_USAGE_ID: string | undefined;
   readonly AGENT_KILL_SWITCH: boolean;
   readonly WORKSPACE_AGENT_MAX_CONCURRENCY: number;
   readonly WORKER_POLL_INTERVAL_MS: number;
@@ -189,6 +192,15 @@ export const env: Env = {
   },
   get MODEL_EMBEDDING_DEFAULT() {
     return optional("MODEL_EMBEDDING_DEFAULT") ?? "google/gemini-embedding-001";
+  },
+  get STRIPE_SECRET_KEY() {
+    return optional("STRIPE_SECRET_KEY");
+  },
+  get STRIPE_WEBHOOK_SECRET() {
+    return optional("STRIPE_WEBHOOK_SECRET");
+  },
+  get STRIPE_PRICE_AI_USAGE_ID() {
+    return optional("STRIPE_PRICE_AI_USAGE_ID");
   },
   get AGENT_KILL_SWITCH() {
     return booleanFromEnv("AGENT_KILL_SWITCH", false);

@@ -41,10 +41,10 @@ export default async function AgentProfilePage({
       agentRun: { agentKey: agent.agentKey },
       createdAt: { gte: thirtyDaysAgo },
     },
-    _sum: { estimatedCostUsd: true },
+    _sum: { estimatedCostUsd: true, billableCostUsd: true },
   });
 
-  const costRaw = usageStats._sum.estimatedCostUsd;
+  const costRaw = usageStats._sum.billableCostUsd ?? usageStats._sum.estimatedCostUsd;
   const thirtyDaySpendUsd = costRaw ? Number(costRaw) : 0;
 
   // Circles

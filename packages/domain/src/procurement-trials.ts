@@ -18,10 +18,11 @@ import {
   TRIAL_STATUS_SUSPENDED,
   TRIAL_STATUS_EXPIRED,
   TRIAL_STATUS_CONVERTED,
+  applyTrialFeatureFlags,
 } from "./trial-entitlements";
 import { registerCustomerDeployment } from "./customer-lifecycle";
 
-export const PROCUREMENT_TRIAL_TTL_DAYS = 14;
+export const PROCUREMENT_TRIAL_TTL_DAYS = 30;
 export const PROCUREMENT_TRIAL_LIMITS = {
   modelMonthlyBudgetCents: 500,
   storageLimitMb: 100,
@@ -327,6 +328,8 @@ async function expireStaleTrialsForIdentity(input: NormalizedTrialInput) {
     select: {
       id: true,
       agentCredentialId: true,
+      workspaceId: true,
+      trialExpiresAt: true,
     },
   });
   if (staleTrials.length === 0) return;
@@ -340,6 +343,21 @@ async function expireStaleTrialsForIdentity(input: NormalizedTrialInput) {
       where: { id: { in: staleIds } },
       data: { status: TRIAL_STATUS_EXPIRED },
     }),
+    prisma.workspace.updateMany({
+      where: { id: { in: staleTrials.map((trial) => trial.workspaceId).filter((id): id is string => Boolean(id)) } },
+      data: {
+        plan: "CORE_FREE",
+        planActivatedAt: new Date(),
+      },
+    }),
+    ...staleTrials
+      .map((trial) => trial.workspaceId)
+      .filter((id): id is string => Boolean(id))
+      .map((workspaceId) => prisma.modelUsageBudget.upsert({
+        where: { workspaceId },
+        create: { workspaceId, monthlyCostCapUsd: 0 },
+        update: { monthlyCostCapUsd: 0 },
+      })),
     ...(credentialIds.length > 0
       ? [
           prisma.agentCredential.updateMany({
@@ -351,12 +369,29 @@ async function expireStaleTrialsForIdentity(input: NormalizedTrialInput) {
   ]);
 }
 
-async function expireTrialConnector(trial: { id: string; agentCredentialId: string | null }) {
+async function expireTrialConnector(trial: { id: string; workspaceId?: string | null; agentCredentialId: string | null; trialExpiresAt?: Date | null }) {
   await prisma.$transaction([
     prisma.procurementTrial.updateMany({
       where: { id: trial.id, status: TRIAL_STATUS_ACTIVE },
       data: { status: TRIAL_STATUS_EXPIRED },
     }),
+    ...(trial.workspaceId
+      ? [
+          prisma.workspace.update({
+            where: { id: trial.workspaceId },
+            data: {
+              plan: "CORE_FREE",
+              planActivatedAt: new Date(),
+              ...(trial.trialExpiresAt ? { trialEndsAt: trial.trialExpiresAt } : {}),
+            },
+          }),
+          prisma.modelUsageBudget.upsert({
+            where: { workspaceId: trial.workspaceId },
+            create: { workspaceId: trial.workspaceId, monthlyCostCapUsd: 0 },
+            update: { monthlyCostCapUsd: 0 },
+          }),
+        ]
+      : []),
     ...(trial.agentCredentialId
       ? [
           prisma.agentCredential.updateMany({
@@ -671,6 +706,9 @@ async function createActiveTrial(params: {
         name: params.normalized.companyName,
         slug,
         description: `Corgtex trial workspace for ${params.normalized.companyName}.`,
+        plan: "TRIAL",
+        planActivatedAt: new Date(),
+        trialEndsAt: params.expiresAt,
       },
       select: {
         id: true,
@@ -678,6 +716,8 @@ async function createActiveTrial(params: {
         slug: true,
       },
     });
+
+    await applyTrialFeatureFlags(tx, workspace.id);
 
     await registerCustomerDeployment({
       accountSlug: workspace.slug,
@@ -764,6 +804,18 @@ async function createActiveTrial(params: {
         monthlyCostCapUsd: PROCUREMENT_TRIAL_LIMITS.modelMonthlyBudgetCents / 100,
         alertThresholdPct: 80,
         periodStartDay: 1,
+      },
+    });
+
+    await tx.workspaceBillingProfile.upsert({
+      where: { workspaceId: workspace.id },
+      create: {
+        workspaceId: workspace.id,
+        billingStatus: "NONE",
+        billingEmail: params.normalized.billingContactEmail ?? params.normalized.adminEmail,
+      },
+      update: {
+        billingEmail: params.normalized.billingContactEmail ?? params.normalized.adminEmail,
       },
     });
 

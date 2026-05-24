@@ -13,6 +13,8 @@ export type ModelUsageInput = {
   outputTokens?: number;
   latencyMs?: number;
   estimatedCostUsd?: string;
+  rawProviderCostUsd?: string;
+  billableCostUsd?: string;
 };
 
 export type ToolCall = {
