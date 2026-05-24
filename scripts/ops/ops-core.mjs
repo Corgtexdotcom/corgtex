@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 export const INCIDENT_SEVERITIES = ["P1", "P2", "P3"];
 export const RAILWAY_ACTIONS = ["inspect", "restart", "redeploy-current"];
+const ACTIVE_AGENT_FAILURE_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 export function parseArgs(argv) {
   const parsed = { _: [] };
@@ -388,19 +389,23 @@ function missingSupportConnectorIncident(row) {
 }
 
 function agentFailureStreakIncident(row) {
-  const runs = latestSupportItems(row, "agentRuns", ["items", "runs"]).map((run) => ({
+  const snapshot = latestSnapshot(row, "SUPPORT_READY");
+  const snapshotObservedAtMs = timestampMs(optionalText(snapshot?.observedAt) ?? optionalText(snapshot?.createdAt)) ?? Date.now();
+  const summary = record(snapshot?.summary);
+  const runs = itemsFrom(summary?.agentRuns, ["items", "runs"]).map((run) => ({
     agentKey: optionalText(run.agentKey) ?? optionalText(run.key) ?? optionalText(run.name) ?? "unknown",
     status: optionalText(run.status) ?? "UNKNOWN",
     createdAt: optionalText(run.createdAt),
   }));
-  const failuresByAgent = new Map();
+  const runsByAgent = new Map();
   for (const run of runs) {
-    if (run.status !== "FAILED") continue;
-    const current = failuresByAgent.get(run.agentKey) ?? [];
+    const current = runsByAgent.get(run.agentKey) ?? [];
     current.push(run);
-    failuresByAgent.set(run.agentKey, current);
+    runsByAgent.set(run.agentKey, current);
   }
-  const [agentKey, failures] = [...failuresByAgent.entries()].find(([, items]) => items.length >= 3) ?? [];
+  const [agentKey, failures] = [...runsByAgent.entries()]
+    .map(([key, items]) => [key, activeFailureStreak(items, snapshotObservedAtMs)])
+    .find(([, items]) => items.length >= 3) ?? [];
   if (!agentKey) return null;
   const label = deploymentLabel(row);
   return {
@@ -418,6 +423,20 @@ function agentFailureStreakIncident(row) {
     ],
     recommendedAction: "inspect failed agent traces through the support connector and repair the root cause before retrying",
   };
+}
+
+function activeFailureStreak(runs, snapshotObservedAtMs) {
+  const sortedRuns = [...runs].sort((a, b) => (timestampMs(b.createdAt) ?? 0) - (timestampMs(a.createdAt) ?? 0));
+  const failures = [];
+  for (const run of sortedRuns) {
+    if (run.status !== "FAILED") break;
+    failures.push(run);
+  }
+  const latestFailureAtMs = timestampMs(failures[0]?.createdAt);
+  if (!latestFailureAtMs || snapshotObservedAtMs - latestFailureAtMs > ACTIVE_AGENT_FAILURE_WINDOW_MS) {
+    return [];
+  }
+  return failures;
 }
 
 function slackInvalidAuthIncident(row) {
@@ -656,6 +675,13 @@ function optionalText(value) {
   if (value === null || value === undefined) return null;
   const text = String(value).trim();
   return text.length > 0 ? text : null;
+}
+
+function timestampMs(value) {
+  const text = optionalText(value);
+  if (!text) return null;
+  const parsed = Date.parse(text);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function positiveInt(value, fallback) {
