@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache";
 
 import {
+  AppError,
   applyContextGraphProposedDiff,
   buildSelectedRegionContext,
   createContextGraphProposedDiff,
@@ -14,6 +15,23 @@ import {
 } from "@corgtex/domain";
 
 import { requirePageActor } from "@/lib/auth";
+
+type EditableContextGraphDiff = Parameters<typeof updateContextGraphProposedDiff>[1]["diff"];
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function assertEditableContextGraphDiff(value: unknown): asserts value is EditableContextGraphDiff {
+  if (!isRecord(value)) {
+    throw new AppError(400, "INVALID_INPUT", "Edited graph diff must be an object.");
+  }
+  for (const key of ["objects", "relationships", "evidenceRefs", "mapLayoutUpdates"] as const) {
+    if (value[key] !== undefined && !Array.isArray(value[key])) {
+      throw new AppError(400, "INVALID_INPUT", `Edited graph diff ${key} must be an array.`);
+    }
+  }
+}
 
 export async function saveContextMapLayoutAction(params: {
   workspaceId: string;
@@ -115,11 +133,12 @@ export async function updateContextGraphProposedDiffAction(params: {
   diff: unknown;
 }) {
   const actor = await requirePageActor();
+  assertEditableContextGraphDiff(params.diff);
   const result = await updateContextGraphProposedDiff(actor, {
     workspaceId: params.workspaceId,
     proposedDiffId: params.proposedDiffId,
     reason: params.reason,
-    diff: params.diff as Parameters<typeof updateContextGraphProposedDiff>[1]["diff"],
+    diff: params.diff,
   });
   revalidatePath(`/workspaces/${params.workspaceId}/maps`);
   return result;

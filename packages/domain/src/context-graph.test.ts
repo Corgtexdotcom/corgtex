@@ -263,6 +263,24 @@ describe("context graph domain", () => {
     expect(prismaMock.contextGraphProposedDiff.update).not.toHaveBeenCalled();
   });
 
+  it("rejects malformed edited proposed diffs without throwing runtime type errors", async () => {
+    await expect(updateContextGraphProposedDiff(actor, {
+      workspaceId: "ws-1",
+      proposedDiffId: "diff-1",
+      diff: null as any,
+    })).rejects.toMatchObject({ code: "INVALID_INPUT" });
+
+    await expect(updateContextGraphProposedDiff(actor, {
+      workspaceId: "ws-1",
+      proposedDiffId: "diff-1",
+      diff: {
+        evidenceRefs: [{ sourceType: 123, sourceId: "meeting-1" }],
+      } as any,
+    })).rejects.toMatchObject({ code: "INVALID_INPUT" });
+
+    expect(prismaMock.contextGraphProposedDiff.update).not.toHaveBeenCalled();
+  });
+
   it("rejects pending proposed diffs without applying graph truth", async () => {
     prismaMock.contextGraphProposedDiff.findFirst.mockResolvedValue({
       id: "diff-1",
@@ -491,6 +509,59 @@ describe("context graph domain", () => {
         }),
       }),
     }));
+  });
+
+  it("uses bounded canonical missing-fact dedupe keys per target and gap kind", async () => {
+    prismaMock.contextGraphObject.findMany.mockResolvedValueOnce([
+      {
+        id: "task-2",
+        workspaceId: "ws-1",
+        objectType: "Task",
+        title: "Duplicate task title",
+        status: "approved",
+        properties: {},
+      },
+      {
+        id: "task-1",
+        workspaceId: "ws-1",
+        objectType: "Task",
+        title: "Duplicate task title",
+        status: "approved",
+        properties: {},
+      },
+    ]);
+    prismaMock.contextGraphRelationship.findMany.mockResolvedValueOnce([]);
+    prismaMock.contextGraphEvidenceRef.findMany.mockResolvedValueOnce([]);
+    prismaMock.knowledgeChunk.findMany.mockResolvedValueOnce([]);
+    prismaMock.contextGraphProposedDiff.create.mockResolvedValue({
+      id: "diff-missing-2",
+      status: "pending",
+      reason: "Propose missing tasks, risks, or owners from the selected map region.",
+    });
+
+    await createMissingRegionFactsProposal(actor, {
+      workspaceId: "ws-1",
+      mapViewId: "map-1",
+      objectIds: ["task-2", "task-1"],
+    });
+
+    const diffJson = prismaMock.contextGraphProposedDiff.create.mock.calls[0]?.[0]?.data.diffJson as any;
+    const ownerProposals = diffJson.objects.filter((object: any) => (
+      object.title === "Assign owner: Duplicate task title" && object.properties?.missingFactKind === "owner"
+    ));
+    const dedupeKeys = diffJson.objects.map((object: any) => object.dedupeKey);
+
+    expect(ownerProposals).toHaveLength(2);
+    expect(dedupeKeys.every((key: string) => key.length < 180)).toBe(true);
+    expect(dedupeKeys.every((key: string) => !key.includes("task-1-task-2") && !key.includes("task-2-task-1"))).toBe(true);
+    expect(new Set(dedupeKeys).size).toBe(dedupeKeys.length);
+    expect(diffJson.relationships).toEqual(expect.arrayContaining([
+      expect.objectContaining({ targetObjectId: "task-1", relationshipType: "supports" }),
+      expect.objectContaining({ targetObjectId: "task-2", relationshipType: "supports" }),
+    ]));
+    expect(diffJson.evidenceRefs).toEqual(expect.arrayContaining([
+      expect.objectContaining({ sourceType: "REGION_CONTEXT", sourceId: "map-1:task-1,task-2" }),
+    ]));
   });
 
   it("ensures process, organization, and agent master views before listing maps", async () => {

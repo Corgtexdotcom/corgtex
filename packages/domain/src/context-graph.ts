@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
@@ -182,6 +183,23 @@ function jsonObject(value: JsonRecord | undefined): Prisma.InputJsonObject {
   return (value ?? {}) as Prisma.InputJsonObject;
 }
 
+function isJsonRecord(value: unknown): value is JsonRecord {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function requireStringField(value: unknown, message: string) {
+  invariant(typeof value === "string", 400, "INVALID_INPUT", message);
+  return value;
+}
+
+function requireOptionalArray(value: unknown, message: string) {
+  invariant(value === undefined || Array.isArray(value), 400, "INVALID_INPUT", message);
+}
+
+function shortHash(value: string) {
+  return createHash("sha256").update(value).digest("hex").slice(0, 24);
+}
+
 function isReadableStatus(status: string, includeStale = false) {
   if (status === "archived") return false;
   if (!includeStale && status === "stale") return false;
@@ -224,8 +242,8 @@ async function requireGraphApprove(actor: AppActor, workspaceId: string) {
 }
 
 function normalizeObjectInput(input: ContextGraphObjectInput) {
-  const objectType = input.objectType.trim();
-  const title = input.title.trim();
+  const objectType = requireStringField(input.objectType, "Context graph object type is required.").trim();
+  const title = requireStringField(input.title, "Context graph object title is required.").trim();
   requireKnownValue(objectType, CONTEXT_GRAPH_OBJECT_TYPES, "context graph object type");
   invariant(title.length > 0, 400, "INVALID_INPUT", "Context graph object title is required.");
   return {
@@ -245,7 +263,7 @@ function normalizeObjectInput(input: ContextGraphObjectInput) {
 }
 
 function normalizeRelationshipInput(input: ContextGraphRelationshipInput) {
-  const relationshipType = input.relationshipType.trim();
+  const relationshipType = requireStringField(input.relationshipType, "Context graph relationship type is required.").trim();
   requireKnownValue(relationshipType, CONTEXT_GRAPH_RELATIONSHIP_TYPES, "context graph relationship type");
   return {
     relationshipType,
@@ -424,10 +442,11 @@ function objectWhereForMapView(workspaceId: string, mapView: { query: Prisma.Jso
 }
 
 function normalizeLayoutItem(item: ContextMapLayoutItemInput) {
-  invariant(item.objectId.trim().length > 0, 400, "INVALID_INPUT", "Layout object id is required.");
+  const objectId = requireStringField(item.objectId, "Layout object id is required.").trim();
+  invariant(objectId.length > 0, 400, "INVALID_INPUT", "Layout object id is required.");
   invariant(Number.isFinite(item.x) && Number.isFinite(item.y), 400, "INVALID_INPUT", "Layout coordinates must be finite numbers.");
   return {
-    objectId: item.objectId.trim(),
+    objectId,
     x: item.x,
     y: item.y,
     width: item.width ?? null,
@@ -784,17 +803,43 @@ export async function createPersonalContextMapView(actor: AppActor, params: {
   });
 }
 
-function validateDiff(diff: ContextGraphDiffInput) {
-  for (const object of diff.objects ?? []) normalizeObjectInput(object);
-  for (const relationship of diff.relationships ?? []) normalizeRelationshipInput(relationship);
-  for (const evidence of diff.evidenceRefs ?? []) {
-    invariant(evidence.sourceType.trim().length > 0, 400, "INVALID_INPUT", "Evidence source type is required.");
-    invariant(evidence.sourceId.trim().length > 0, 400, "INVALID_INPUT", "Evidence source id is required.");
+function validateDiff(diff: unknown): asserts diff is ContextGraphDiffInput {
+  invariant(isJsonRecord(diff), 400, "INVALID_INPUT", "Context graph diff must be an object.");
+  requireOptionalArray(diff.objects, "Context graph diff objects must be an array.");
+  requireOptionalArray(diff.relationships, "Context graph diff relationships must be an array.");
+  requireOptionalArray(diff.evidenceRefs, "Context graph diff evidence refs must be an array.");
+  requireOptionalArray(diff.mapLayoutUpdates, "Context graph diff map layout updates must be an array.");
+
+  const objects = diff.objects as unknown[] | undefined;
+  const relationships = diff.relationships as unknown[] | undefined;
+  const evidenceRefs = diff.evidenceRefs as unknown[] | undefined;
+  const mapLayoutUpdates = diff.mapLayoutUpdates as unknown[] | undefined;
+
+  for (const object of objects ?? []) {
+    invariant(isJsonRecord(object), 400, "INVALID_INPUT", "Context graph diff objects must be objects.");
+    normalizeObjectInput(object as ContextGraphObjectInput);
   }
-  for (const layoutUpdate of diff.mapLayoutUpdates ?? []) {
-    invariant(layoutUpdate.mapViewId.trim().length > 0, 400, "INVALID_INPUT", "Map view id is required.");
+  for (const relationship of relationships ?? []) {
+    invariant(isJsonRecord(relationship), 400, "INVALID_INPUT", "Context graph diff relationships must be objects.");
+    normalizeRelationshipInput(relationship as ContextGraphRelationshipInput);
+  }
+  for (const evidence of evidenceRefs ?? []) {
+    invariant(isJsonRecord(evidence), 400, "INVALID_INPUT", "Context graph diff evidence refs must be objects.");
+    const sourceType = requireStringField(evidence.sourceType, "Evidence source type is required.").trim();
+    const sourceId = requireStringField(evidence.sourceId, "Evidence source id is required.").trim();
+    invariant(sourceType.length > 0, 400, "INVALID_INPUT", "Evidence source type is required.");
+    invariant(sourceId.length > 0, 400, "INVALID_INPUT", "Evidence source id is required.");
+  }
+  for (const layoutUpdate of mapLayoutUpdates ?? []) {
+    invariant(isJsonRecord(layoutUpdate), 400, "INVALID_INPUT", "Context graph diff map layout updates must be objects.");
+    const mapViewId = requireStringField(layoutUpdate.mapViewId, "Map view id is required.").trim();
+    invariant(mapViewId.length > 0, 400, "INVALID_INPUT", "Map view id is required.");
+    invariant(Array.isArray(layoutUpdate.items), 400, "INVALID_INPUT", "Map layout update items must be an array.");
     invariant(layoutUpdate.items.length > 0, 400, "INVALID_INPUT", "At least one layout item is required.");
-    for (const item of layoutUpdate.items) normalizeLayoutItem(item);
+    for (const item of layoutUpdate.items) {
+      invariant(isJsonRecord(item), 400, "INVALID_INPUT", "Map layout update items must be objects.");
+      normalizeLayoutItem(item as ContextMapLayoutItemInput);
+    }
   }
 }
 
@@ -1449,11 +1494,12 @@ export async function createMissingRegionFactsProposal(actor: AppActor, params: 
   });
 
   const sourceId = selectedRegionSourceId(params.mapViewId, context.selectedObjectIds);
-  const selectedObjectIds = [...context.selectedObjectIds];
+  const selectedObjectIds = [...context.selectedObjectIds].sort();
+  const selectedObjectSegment = shortHash(selectedObjectIds.join(","));
   const objects: ContextGraphObjectInput[] = [];
   const relationships: ContextGraphRelationshipInput[] = [];
   const evidenceRefs: ContextGraphEvidenceInput[] = [];
-  const addedTitles = new Set<string>();
+  const addedProposalKeys = new Set<string>();
 
   function addProposal(input: {
     kind: "task" | "risk" | "owner" | "question";
@@ -1465,17 +1511,19 @@ export async function createMissingRegionFactsProposal(actor: AppActor, params: 
     confidence?: number;
   }) {
     const title = input.title.trim().slice(0, 180);
-    if (!title || addedTitles.has(title)) return;
-    addedTitles.add(title);
+    const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 72);
+    const proposalKey = [input.kind, input.targetObjectId ?? "region", slug].join(":");
+    if (!title || addedProposalKeys.has(proposalKey)) return;
+    addedProposalKeys.add(proposalKey);
     const ref = `missing-region-fact-${objects.length + 1}`;
     const dedupeKey = [
       params.workspaceId,
       "missing-region-fact",
       params.mapViewId,
-      selectedObjectIds.join("-"),
+      selectedObjectSegment,
       input.kind,
       input.targetObjectId ?? "region",
-      title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 72),
+      slug,
     ].join(":");
 
     objects.push({
