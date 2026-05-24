@@ -65,7 +65,7 @@ describe("github-incident resolved issue sync", () => {
 
   it("scopes resolved sync to matching dedupe prefixes", async () => {
     const controlPlaneToken = opsToken("control-plane:deployment-1:slackInvalidAuth");
-    const readinessToken = opsToken("client-readiness:crina:smoke:1:none");
+    const readinessToken = opsToken("client-readiness:example-client:smoke:1:none");
     const result = await runWithFakeGh(githubIncidentPath, [
       "--sync-resolved",
       "--sync-dedupe-prefixes",
@@ -82,7 +82,7 @@ describe("github-incident resolved issue sync", () => {
           9,
           `[${readinessToken}] P2 client: readiness still owned elsewhere`,
           ["ops-auto-fix"],
-          "client-readiness:crina:smoke:1:none",
+          "client-readiness:example-client:smoke:1:none",
         ),
       ],
     });
