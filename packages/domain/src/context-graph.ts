@@ -122,6 +122,31 @@ type ContextMapLayoutUpdateInput = {
   items: ContextMapLayoutItemInput[];
 };
 
+const DEFAULT_CONTEXT_MAP_VIEW_CONFIGS: Array<{
+  name: string;
+  viewType: ContextMapViewType;
+  query: Prisma.InputJsonObject;
+}> = [
+  {
+    name: "Critical path process map",
+    viewType: "process",
+    query: {
+      mode: "criticalPath",
+      objectTypes: ["Process", "ProcessStep", "Decision", "Task", "Risk", "Question", "Tool", "Team", "Role", "Meeting"],
+      relationshipTypes: ["part_of", "depends_on", "blocks", "owns", "assigned_to", "supports", "uses", "created_in", "decided_in", "needs_approval_from"],
+    },
+  },
+  {
+    name: "Organization map",
+    viewType: "org",
+    query: {
+      mode: "organization",
+      objectTypes: ["Team", "Role", "Person"],
+      relationshipTypes: ["part_of", "member_of", "reports_to", "owns"],
+    },
+  },
+];
+
 export type ContextGraphDiffInput = {
   objects?: ContextGraphObjectInput[];
   relationships?: ContextGraphRelationshipInput[];
@@ -500,32 +525,42 @@ export async function attachContextGraphEvidence(actor: AppActor, params: Contex
   return prisma.$transaction(async (tx) => attachEvidenceWithTx(tx, params.workspaceId, params, new Map(), new Map()));
 }
 
+async function ensureDefaultContextMapViewsForWorkspace(workspaceId: string) {
+  const views = [];
+  for (const config of DEFAULT_CONTEXT_MAP_VIEW_CONFIGS) {
+    const existing = await prisma.contextMapView.findFirst({
+      where: { workspaceId, viewType: config.viewType, createdByUserId: null },
+      orderBy: { createdAt: "asc" },
+    });
+    if (existing) {
+      views.push(existing);
+      continue;
+    }
+
+    views.push(await prisma.contextMapView.create({
+      data: {
+        workspaceId,
+        name: config.name,
+        viewType: config.viewType,
+        query: config.query,
+        createdByUserId: null,
+      },
+    }));
+  }
+
+  return views;
+}
+
 export async function ensureDefaultContextMapView(actor: AppActor, workspaceId: string) {
   await requireGraphRead(actor, workspaceId);
-  const existing = await prisma.contextMapView.findFirst({
-    where: { workspaceId, viewType: "process", createdByUserId: null },
-    orderBy: { createdAt: "asc" },
-  });
-  if (existing) return existing;
-
-  return prisma.contextMapView.create({
-    data: {
-      workspaceId,
-      name: "Critical path process map",
-      viewType: "process",
-      query: {
-        mode: "criticalPath",
-        objectTypes: ["Process", "ProcessStep", "Decision", "Task", "Risk", "Question", "Tool", "Team", "Role", "Meeting"],
-        relationshipTypes: ["part_of", "depends_on", "blocks", "owns", "assigned_to", "supports", "uses", "created_in", "decided_in", "needs_approval_from"],
-      },
-      createdByUserId: null,
-    },
-  });
+  const views = await ensureDefaultContextMapViewsForWorkspace(workspaceId);
+  return views.find((view) => view.viewType === "process") ?? views[0];
 }
 
 export async function listContextMapViews(actor: AppActor, workspaceId: string) {
   await requireGraphRead(actor, workspaceId);
   const userId = actorUserId(actor);
+  await ensureDefaultContextMapViewsForWorkspace(workspaceId);
   return prisma.contextMapView.findMany({
     where: visibleMapViewWhere(workspaceId, userId),
     orderBy: [{ createdByUserId: "asc" }, { viewType: "asc" }, { createdAt: "asc" }],
@@ -539,9 +574,10 @@ export async function getContextMapData(actor: AppActor, params: {
 }) {
   const membership = await requireGraphRead(actor, params.workspaceId);
   const userId = actorUserId(actor);
+  const defaultViews = await ensureDefaultContextMapViewsForWorkspace(params.workspaceId);
   const mapView = params.mapViewId
     ? await prisma.contextMapView.findFirst({ where: { id: params.mapViewId, ...visibleMapViewWhere(params.workspaceId, userId) } })
-    : await ensureDefaultContextMapView(actor, params.workspaceId);
+    : defaultViews.find((view) => view.viewType === "process") ?? defaultViews[0];
   invariant(mapView, 404, "NOT_FOUND", "Context map not found.");
 
   const objects = await prisma.contextGraphObject.findMany({

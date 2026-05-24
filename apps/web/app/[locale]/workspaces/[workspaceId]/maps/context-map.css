@@ -389,6 +389,26 @@
   color: var(--text) !important;
 }
 
+.context-map-property-list {
+  display: grid;
+  gap: 6px;
+}
+
+.context-map-property-list strong {
+  color: var(--text);
+  font-size: 0.82rem;
+}
+
+.context-map-property-list ul {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-left: 18px;
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+
 .context-map-definition-list {
   display: grid;
   gap: 6px;

@@ -4,6 +4,7 @@ import {
   buildSelectedRegionContext,
   createPersonalContextMapView,
   createContextGraphProposedDiff,
+  listContextMapViews,
   upsertContextGraphObject,
   updateContextMapLayout,
 } from "./context-graph";
@@ -370,6 +371,56 @@ describe("context graph domain", () => {
     expect(context.contextGaps).toContainEqual(expect.objectContaining({
       objectId: "risk-1",
       kind: "missing_blocker_link",
+    }));
+  });
+
+  it("ensures process and organization master views before listing maps", async () => {
+    prismaMock.contextMapView.findFirst.mockReset();
+    prismaMock.contextMapView.findFirst
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(null);
+    prismaMock.contextMapView.create
+      .mockResolvedValueOnce({
+        id: "process-master",
+        workspaceId: "ws-1",
+        name: "Critical path process map",
+        viewType: "process",
+        query: {},
+        createdByUserId: null,
+      })
+      .mockResolvedValueOnce({
+        id: "org-master",
+        workspaceId: "ws-1",
+        name: "Organization map",
+        viewType: "org",
+        query: {},
+        createdByUserId: null,
+      });
+    prismaMock.contextMapView.findMany.mockResolvedValueOnce([
+      { id: "process-master", viewType: "process", createdByUserId: null },
+      { id: "org-master", viewType: "org", createdByUserId: null },
+    ]);
+
+    await expect(listContextMapViews(actor, "ws-1")).resolves.toHaveLength(2);
+
+    expect(prismaMock.contextMapView.create).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      data: expect.objectContaining({
+        name: "Critical path process map",
+        viewType: "process",
+        createdByUserId: null,
+      }),
+    }));
+    expect(prismaMock.contextMapView.create).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      data: expect.objectContaining({
+        name: "Organization map",
+        viewType: "org",
+        createdByUserId: null,
+        query: expect.objectContaining({
+          mode: "organization",
+          objectTypes: ["Team", "Role", "Person"],
+          relationshipTypes: ["part_of", "member_of", "reports_to", "owns"],
+        }),
+      }),
     }));
   });
 

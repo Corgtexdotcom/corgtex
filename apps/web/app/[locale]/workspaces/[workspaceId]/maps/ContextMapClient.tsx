@@ -170,6 +170,13 @@ function propertyText(properties: Record<string, unknown> | null | undefined, ke
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
 }
 
+function propertyStringArray(properties: Record<string, unknown> | null | undefined, key: string) {
+  const value = properties?.[key];
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0).map((item) => item.trim())
+    : [];
+}
+
 function titleizeMachineValue(value: string) {
   return value.replace(/_/g, " ").replace(/\b\w/g, (character) => character.toUpperCase());
 }
@@ -215,6 +222,12 @@ function mapViewUrl(viewId: string, includeStale: boolean) {
   return `${url.pathname}${url.search}`;
 }
 
+function directNeighborHeading(viewType: string) {
+  if (viewType === "org") return "Direct roles, people, and reporting links";
+  if (viewType === "agent") return "Direct inputs, policies, tools, and outputs";
+  return "Direct blockers, owners, dependencies";
+}
+
 export default function ContextMapClient({ workspaceId, data, includeStale = false }: { workspaceId: string; data: ContextMapClientData; includeStale?: boolean }) {
   const [selectedObjectIds, setSelectedObjectIds] = useState<string[]>(data.objects[0]?.id ? [data.objects[0].id] : []);
   const [selectedObjectId, setSelectedObjectId] = useState<string | null>(data.objects[0]?.id ?? null);
@@ -255,6 +268,7 @@ export default function ContextMapClient({ workspaceId, data, includeStale = fal
     const colors = NODE_COLORS[object.objectType] ?? { border: "#64748b", background: "#f8fafc", accent: "#475569" };
     const workState = propertyText(object.properties, "workState");
     const pathStage = propertyText(object.properties, "pathStage");
+    const staffingState = propertyText(object.properties, "staffingState");
     return {
       id: object.id,
       type: "default",
@@ -274,6 +288,7 @@ export default function ContextMapClient({ workspaceId, data, includeStale = fal
               <span>{confidenceLabel(object.confidence)}</span>
               {workState && <span>{titleizeMachineValue(workState)}</span>}
               {pathStage && <span>{pathStage}</span>}
+              {staffingState && <span>{titleizeMachineValue(staffingState)}</span>}
               {object.evidenceRefs.length > 0 && <span>{object.evidenceRefs.length} evidence</span>}
             </div>
           </div>
@@ -361,6 +376,8 @@ export default function ContextMapClient({ workspaceId, data, includeStale = fal
   const selectedRelationships = selectedObject
     ? data.relationships.filter((relationship) => relationship.sourceObjectId === selectedObject.id || relationship.targetObjectId === selectedObject.id)
     : [];
+  const selectedAccountabilities = selectedObject ? propertyStringArray(selectedObject.properties, "accountabilities") : [];
+  const selectedOrgKind = selectedObject ? propertyText(selectedObject.properties, "orgKind") : null;
 
   useEffect(() => {
     setNodes((currentNodes) => {
@@ -744,13 +761,25 @@ export default function ContextMapClient({ workspaceId, data, includeStale = fal
                     {selectedObject.summary && <p>{selectedObject.summary.slice(0, 520)}</p>}
                     <div className="context-map-pill-row">
                       {selectedObject.sourceEntityType && <span className="tag neutral">{selectedObject.sourceEntityType}</span>}
+                      {selectedOrgKind && selectedOrgKind !== selectedObject.sourceEntityType && <span className="tag neutral">{selectedOrgKind}</span>}
                       {propertyText(selectedObject.properties, "workState") && <span className="tag neutral">{titleizeMachineValue(propertyText(selectedObject.properties, "workState") ?? "")}</span>}
+                      {propertyText(selectedObject.properties, "staffingState") && <span className="tag neutral">{titleizeMachineValue(propertyText(selectedObject.properties, "staffingState") ?? "")}</span>}
                       {propertyText(selectedObject.properties, "nextAction") && <span className="tag neutral">next action</span>}
                       <span className="tag neutral">created by {selectedObject.createdByType}</span>
                       {selectedObject.lastVerifiedAt && <span className="tag neutral">verified {stableDateLabel(selectedObject.lastVerifiedAt)}</span>}
                     </div>
                     {propertyText(selectedObject.properties, "nextAction") && (
                       <p className="context-map-next-action">{propertyText(selectedObject.properties, "nextAction")}</p>
+                    )}
+                    {selectedAccountabilities.length > 0 && (
+                      <div className="context-map-property-list">
+                        <strong>Accountabilities</strong>
+                        <ul>
+                          {selectedAccountabilities.slice(0, 5).map((accountability) => (
+                            <li key={accountability}>{accountability}</li>
+                          ))}
+                        </ul>
+                      </div>
                     )}
                   </div>
                 ) : (
@@ -820,7 +849,7 @@ export default function ContextMapClient({ workspaceId, data, includeStale = fal
                   </div>
                   {regionContext.directNeighbors.length > 0 && (
                     <div>
-                      <strong>Direct blockers, owners, dependencies</strong>
+                      <strong>{directNeighborHeading(data.mapView.viewType)}</strong>
                       <ul>
                         {regionContext.directNeighbors.slice(0, 4).map((neighbor) => (
                           <li key={`${neighbor.relationshipId}-${neighbor.objectId}`}>
