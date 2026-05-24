@@ -36,6 +36,7 @@ const prismaMock = {
   meeting: {
     findUnique: vi.fn(),
     update: vi.fn(),
+    updateMany: vi.fn(),
   },
   spendRequest: {
     findMany: vi.fn(),
@@ -151,6 +152,7 @@ describe("agent runtime", () => {
     prismaMock.proposal.findUnique.mockReset().mockResolvedValue(null);
     prismaMock.meeting.findUnique.mockReset().mockResolvedValue(null);
     prismaMock.meeting.update.mockReset().mockResolvedValue({});
+    prismaMock.meeting.updateMany.mockReset().mockResolvedValue({ count: 1 });
     buildMeetingIntelligenceContextMock.mockReset().mockImplementation(async ({ workspaceId, meetingId }: { workspaceId: string; meetingId: string }) => {
       const meeting = await prismaMock.meeting.findUnique({ where: { id: meetingId, workspaceId } });
       return {
@@ -335,8 +337,8 @@ describe("agent runtime", () => {
       meetingId: "meeting-2",
     });
 
-    expect(prismaMock.meeting.update).toHaveBeenCalledWith(expect.objectContaining({
-      where: { id: "meeting-2" },
+    expect(prismaMock.meeting.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "meeting-2", workspaceId: "ws-1" },
       data: expect.objectContaining({ summaryMd: "Concise meeting summary" }),
     }));
     expect(prismaMock.agentRun.update).toHaveBeenLastCalledWith(expect.objectContaining({
