@@ -337,6 +337,20 @@ describe("context graph domain", () => {
     }));
   });
 
+  it("rejects personal map copies with objects outside the workspace", async () => {
+    prismaMock.contextGraphObject.findFirst.mockResolvedValueOnce(null);
+
+    await expect(createPersonalContextMapView(actor, {
+      workspaceId: "ws-1",
+      sourceMapViewId: "map-1",
+      name: "Tampered map",
+      items: [{ objectId: "other-workspace-object", x: 100, y: 200 }],
+    })).rejects.toMatchObject({ code: "NOT_FOUND" });
+
+    expect(prismaMock.contextMapView.create).not.toHaveBeenCalled();
+    expect(prismaMock.contextMapLayoutItem.create).not.toHaveBeenCalled();
+  });
+
   it("applies proposed map layout updates during diff application", async () => {
     prismaMock.contextGraphProposedDiff.findFirst.mockResolvedValue({
       id: "diff-layout-1",
@@ -366,5 +380,37 @@ describe("context graph domain", () => {
         layoutUpdates: [{ mapViewId: "map-1", updated: 1 }],
       }),
     })]);
+  });
+
+  it("rejects proposed layout diffs targeting another user's personal map view", async () => {
+    prismaMock.contextGraphProposedDiff.findFirst.mockResolvedValue({
+      id: "diff-layout-2",
+      workspaceId: "ws-1",
+      status: "pending",
+      reviewedAt: null,
+      proposedByAgentRunId: null,
+      diffJson: {
+        mapLayoutUpdates: [{
+          mapViewId: "personal-map-2",
+          items: [{ objectId: "process-1", x: 420, y: 160 }],
+        }],
+      },
+    });
+    prismaMock.contextMapView.findFirst.mockResolvedValueOnce({
+      id: "personal-map-2",
+      workspaceId: "ws-1",
+      name: "Other personal map",
+      viewType: "process",
+      query: {},
+      createdByUserId: "user-2",
+    });
+
+    await expect(applyContextGraphProposedDiff(actor, {
+      workspaceId: "ws-1",
+      proposedDiffId: "diff-layout-2",
+    })).rejects.toMatchObject({ code: "FORBIDDEN" });
+
+    expect(prismaMock.contextMapLayoutItem.upsert).not.toHaveBeenCalled();
+    expect(prismaMock.contextGraphProposedDiff.update).not.toHaveBeenCalled();
   });
 });

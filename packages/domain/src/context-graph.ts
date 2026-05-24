@@ -395,14 +395,24 @@ async function applyMapLayoutUpdateWithTx(
   tx: Prisma.TransactionClient,
   workspaceId: string,
   update: ContextMapLayoutUpdateInput,
+  options?: { actor?: AppActor; requireMasterOrOwner?: boolean },
 ) {
   invariant(update.mapViewId.trim().length > 0, 400, "INVALID_INPUT", "Map view id is required.");
   invariant(update.items.length > 0, 400, "INVALID_INPUT", "At least one layout item is required.");
   const mapView = await tx.contextMapView.findFirst({
     where: { id: update.mapViewId, workspaceId },
-    select: { id: true },
+    select: { id: true, createdByUserId: true },
   });
   invariant(mapView, 404, "NOT_FOUND", "Context map not found.");
+  if (options?.requireMasterOrOwner) {
+    const userId = options.actor ? actorUserId(options.actor) : null;
+    invariant(
+      mapView.createdByUserId === null || (userId !== null && mapView.createdByUserId === userId),
+      403,
+      "FORBIDDEN",
+      "Proposed map layout updates can only target shared master views or your personal map view.",
+    );
+  }
 
   for (const rawItem of update.items) {
     const item = normalizeLayoutItem(rawItem);
@@ -666,6 +676,10 @@ export async function createPersonalContextMapView(actor: AppActor, params: {
     })));
 
   return prisma.$transaction(async (tx) => {
+    for (const normalized of sourceLayoutItems) {
+      await resolveObjectId(tx, params.workspaceId, normalized.objectId);
+    }
+
     const mapView = await tx.contextMapView.create({
       data: {
         workspaceId: params.workspaceId,
@@ -854,7 +868,10 @@ export async function applyContextGraphProposedDiff(actor: AppActor, params: {
     }
 
     for (const layoutUpdate of diff.mapLayoutUpdates ?? []) {
-      layoutUpdates.push(await applyMapLayoutUpdateWithTx(tx, params.workspaceId, layoutUpdate));
+      layoutUpdates.push(await applyMapLayoutUpdateWithTx(tx, params.workspaceId, layoutUpdate, {
+        actor,
+        requireMasterOrOwner: true,
+      }));
     }
 
     const updated = await tx.contextGraphProposedDiff.update({
