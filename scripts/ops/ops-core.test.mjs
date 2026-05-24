@@ -221,6 +221,68 @@ describe("ops-core control-plane incidents", () => {
     expect(incidents.find((incident) => incident.status === "slackInvalidAuth").evidence.join("\n")).not.toContain("secret");
   });
 
+  it("keeps recent Slack invalid-auth incidents", () => {
+    const incidents = buildControlPlaneIncidents([
+      {
+        id: "deployment-acme",
+        label: "Acme Production",
+        customerSlug: "acme",
+        hasSupportCredential: true,
+        fleetSnapshots: [
+          {
+            snapshotKind: "SUPPORT_READY",
+            observedAt: "2026-05-24T00:00:00.000Z",
+            summary: {
+              failedJobs: {
+                items: [
+                  {
+                    type: "communication.slack.proactive-scan",
+                    error: "An API error occurred: invalid_auth",
+                    updatedAt: "2026-05-23T23:30:00.000Z",
+                  },
+                ],
+              },
+            },
+          },
+        ],
+      },
+    ]);
+
+    const incident = incidents.find((item) => item.status === "slackInvalidAuth");
+    expect(incident).toBeDefined();
+    expect(incident.evidence).toContain("Latest failed job signal: 2026-05-23T23:30:00.000Z");
+  });
+
+  it("suppresses stale Slack invalid-auth incidents", () => {
+    const incidents = buildControlPlaneIncidents([
+      {
+        id: "deployment-acme",
+        label: "Acme Production",
+        customerSlug: "acme",
+        hasSupportCredential: true,
+        fleetSnapshots: [
+          {
+            snapshotKind: "SUPPORT_READY",
+            observedAt: "2026-05-24T00:00:00.000Z",
+            summary: {
+              failedJobs: {
+                items: [
+                  {
+                    type: "communication.slack.proactive-scan",
+                    error: "An API error occurred: invalid_auth",
+                    updatedAt: "2026-05-22T23:00:00.000Z",
+                  },
+                ],
+              },
+            },
+          },
+        ],
+      },
+    ]);
+
+    expect(incidents.some((incident) => incident.status === "slackInvalidAuth")).toBe(false);
+  });
+
   it("requires consecutive agent failures for failure-streak incidents", () => {
     const incidents = buildControlPlaneIncidents([
       {

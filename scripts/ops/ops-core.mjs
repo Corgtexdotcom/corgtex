@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 
 export const INCIDENT_SEVERITIES = ["P1", "P2", "P3"];
 export const RAILWAY_ACTIONS = ["inspect", "restart", "redeploy-current"];
-const ACTIVE_AGENT_FAILURE_WINDOW_MS = 24 * 60 * 60 * 1000;
+const ACTIVE_SUPPORT_SIGNAL_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 export function parseArgs(argv) {
   const parsed = { _: [] };
@@ -433,18 +433,22 @@ function activeFailureStreak(runs, snapshotObservedAtMs) {
     failures.push(run);
   }
   const latestFailureAtMs = timestampMs(failures[0]?.createdAt);
-  if (!latestFailureAtMs || snapshotObservedAtMs - latestFailureAtMs > ACTIVE_AGENT_FAILURE_WINDOW_MS) {
+  if (!latestFailureAtMs || snapshotObservedAtMs - latestFailureAtMs > ACTIVE_SUPPORT_SIGNAL_WINDOW_MS) {
     return [];
   }
   return failures;
 }
 
 function slackInvalidAuthIncident(row) {
-  const failedJobs = latestSupportItems(row, "failedJobs", ["items", "jobs"]);
+  const snapshot = latestSnapshot(row, "SUPPORT_READY");
+  const snapshotObservedAtMs = timestampMs(optionalText(snapshot?.observedAt) ?? optionalText(snapshot?.createdAt)) ?? Date.now();
+  const summary = record(snapshot?.summary);
+  const failedJobs = itemsFrom(summary?.failedJobs, ["items", "jobs"]);
   const matches = failedJobs.filter((job) => {
     const type = optionalText(job.type) ?? optionalText(job.name) ?? "";
     const error = optionalText(job.error) ?? "";
-    return /slack/i.test(type) && /invalid_auth/i.test(error);
+    if (!/slack/i.test(type) || !/invalid_auth/i.test(error)) return false;
+    return isActiveSupportSignal(job, snapshotObservedAtMs);
   });
   if (matches.length === 0) return null;
   const label = deploymentLabel(row);
@@ -459,10 +463,23 @@ function slackInvalidAuthIncident(row) {
       `Deployment ID: ${optionalText(row.id) ?? "unknown"}`,
       `Failed Slack jobs in latest snapshot: ${matches.length}`,
       `Latest job type: ${optionalText(matches[0].type) ?? optionalText(matches[0].name) ?? "unknown"}`,
+      `Latest failed job signal: ${supportSignalTimestamp(matches[0]) ?? "unknown"}`,
       "Slack API error: invalid_auth",
     ],
     recommendedAction: "mark the Slack installation reauth-required and stop proactive scans until Slack is reconnected",
   };
+}
+
+function isActiveSupportSignal(item, snapshotObservedAtMs) {
+  const signalAtMs = timestampMs(supportSignalTimestamp(item));
+  return !signalAtMs || snapshotObservedAtMs - signalAtMs <= ACTIVE_SUPPORT_SIGNAL_WINDOW_MS;
+}
+
+function supportSignalTimestamp(item) {
+  return optionalText(item?.failedAt)
+    ?? optionalText(item?.updatedAt)
+    ?? optionalText(item?.completedAt)
+    ?? optionalText(item?.createdAt);
 }
 
 function releaseMetadataDriftIncident(row) {
