@@ -161,13 +161,22 @@ export async function runMeetingSummaryAgent(params: {
       }));
 
       const summaryMd = applyGuidanceTermCorrections(summary.content, meeting.ingestionGuidanceMd);
-      await helpers.step("persist-summary", { meetingId: meeting.id }, async () => prisma.meeting.update({
-        where: { id: meeting.id },
+      const persisted = await helpers.step("persist-summary", { meetingId: meeting.id }, async () => prisma.meeting.updateMany({
+        where: { id: meeting.id, workspaceId: params.workspaceId },
         data: {
           summaryMd,
           blocksJson: toInputJson(meetingBlocks),
         },
       }));
+      if (persisted.count === 0) {
+        return {
+          resultJson: {
+            skipped: true,
+            reason: "missing_meeting",
+            meetingId: meeting.id,
+          },
+        };
+      }
       return {
         resultJson: {
           meetingId: meeting.id,

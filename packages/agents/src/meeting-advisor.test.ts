@@ -30,7 +30,7 @@ const prismaMock = {
   },
   meeting: {
     findUnique: vi.fn(),
-    update: vi.fn(),
+    updateMany: vi.fn(),
   },
   $transaction: vi.fn(),
   agentIdentity: {
@@ -125,7 +125,7 @@ describe("runMeetingSummaryAgent", () => {
       followUps: [],
       knowledge: [],
     });
-    prismaMock.meeting.update.mockReset().mockResolvedValue({ id: "meeting-1" });
+    prismaMock.meeting.updateMany.mockReset().mockResolvedValue({ count: 1 });
 
     // Mock $transaction to execute the callback
     prismaMock.$transaction.mockReset().mockImplementation(async (fn: any) => fn(prismaMock));
@@ -244,7 +244,8 @@ describe("runMeetingSummaryAgent", () => {
         }),
       ]),
     }));
-    expect(prismaMock.meeting.update).toHaveBeenCalledWith(expect.objectContaining({
+    expect(prismaMock.meeting.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "meeting-1", workspaceId: "ws-1" },
       data: expect.objectContaining({
         summaryMd: expect.stringContaining("Opening check-in"),
         blocksJson: expect.objectContaining({
@@ -296,7 +297,7 @@ describe("runMeetingSummaryAgent", () => {
       meetingId: "meeting-1",
     });
 
-    const persistedSummary = prismaMock.meeting.update.mock.calls.at(-1)?.[0]?.data?.summaryMd;
+    const persistedSummary = prismaMock.meeting.updateMany.mock.calls.at(-1)?.[0]?.data?.summaryMd;
     expect(persistedSummary).toContain("corporate rebels");
     expect(persistedSummary).toContain("info@corporate-rebels.com");
     expect(persistedSummary).not.toContain("company name for Corporate-rebels.com");
@@ -319,7 +320,7 @@ describe("runMeetingSummaryAgent", () => {
     });
 
     expect(defaultModelGateway.chat).not.toHaveBeenCalled();
-    expect(prismaMock.meeting.update).not.toHaveBeenCalled();
+    expect(prismaMock.meeting.updateMany).not.toHaveBeenCalled();
     expect(result).toEqual(expect.objectContaining({ status: "COMPLETED" }));
     expect(prismaMock.agentRun.update).toHaveBeenLastCalledWith(expect.objectContaining({
       data: expect.objectContaining({
@@ -369,7 +370,7 @@ describe("runMeetingSummaryAgent", () => {
 
     expect(defaultModelGateway.extract).not.toHaveBeenCalled();
     expect(defaultModelGateway.chat).not.toHaveBeenCalled();
-    expect(prismaMock.meeting.update).not.toHaveBeenCalled();
+    expect(prismaMock.meeting.updateMany).not.toHaveBeenCalled();
     expect(result).toEqual(expect.objectContaining({ status: "COMPLETED" }));
     expect(prismaMock.agentRun.update).toHaveBeenLastCalledWith(expect.objectContaining({
       data: expect.objectContaining({
@@ -378,6 +379,44 @@ describe("runMeetingSummaryAgent", () => {
           skipped: true,
           reason: "missing_transcript",
           meetingId: "meeting-empty",
+        }),
+      }),
+    }));
+  });
+
+  it("skips cleanly when the meeting disappears before persistence", async () => {
+    const { defaultModelGateway } = await import("@corgtex/models");
+    vi.mocked(defaultModelGateway.extract).mockResolvedValueOnce({
+      output: { blocks: [{ sequence: 1, title: "Operations", kind: "update", summaryMd: "Operations were discussed." }] },
+      raw: "{}",
+      usage: modelUsage,
+    });
+    vi.mocked(defaultModelGateway.chat).mockResolvedValueOnce({
+      content: "Operations summary",
+      usage: modelUsage,
+    });
+    prismaMock.meeting.updateMany.mockResolvedValueOnce({ count: 0 });
+
+    const { runMeetingSummaryAgent } = await import(".");
+
+    const result = await runMeetingSummaryAgent({
+      workspaceId: "ws-1",
+      triggerRef: "trigger-deleted",
+      triggerType: "EVENT",
+      meetingId: "meeting-1",
+    });
+
+    expect(prismaMock.meeting.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "meeting-1", workspaceId: "ws-1" },
+    }));
+    expect(result).toEqual(expect.objectContaining({ status: "COMPLETED" }));
+    expect(prismaMock.agentRun.update).toHaveBeenLastCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        status: "COMPLETED",
+        resultJson: expect.objectContaining({
+          skipped: true,
+          reason: "missing_meeting",
+          meetingId: "meeting-1",
         }),
       }),
     }));
