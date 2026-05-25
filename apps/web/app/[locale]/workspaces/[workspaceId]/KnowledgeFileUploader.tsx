@@ -76,10 +76,18 @@ export function KnowledgeFileUploader({
   const [isUploading, setIsUploading] = useState(false);
   const [overallGuidance, setOverallGuidance] = useState("");
   const [items, setItems] = useState<UploadItem[]>([]);
+  const itemsRef = useRef<UploadItem[]>([]);
+  const isUploadingRef = useRef(false);
+
+  function setUploadItems(updater: (current: UploadItem[]) => UploadItem[]) {
+    const next = updater(itemsRef.current);
+    itemsRef.current = next;
+    setItems(next);
+  }
 
   function addFiles(files: FileList | null) {
     if (!files || files.length === 0) return;
-    setItems((current) => [
+    setUploadItems((current) => [
       ...current,
       ...Array.from(files).map((file) => ({
         id: uploadId(),
@@ -93,63 +101,74 @@ export function KnowledgeFileUploader({
   }
 
   function updateItem(id: string, patch: Partial<UploadItem>) {
-    setItems((current) => current.map((item) => (item.id === id ? { ...item, ...patch } : item)));
+    setUploadItems((current) => current.map((item) => (item.id === id ? { ...item, ...patch } : item)));
   }
 
   function removeItem(id: string) {
-    setItems((current) => current.filter((item) => item.id !== id));
+    setUploadItems((current) => current.filter((item) => item.id !== id));
   }
 
   async function uploadItems() {
-    const uploadable = items.filter((item) => item.status !== "done");
-    if (uploadable.length === 0 || isUploading) return;
+    if (isUploadingRef.current) return;
 
+    const uploadableIds = itemsRef.current.filter((item) => item.status !== "done").map((item) => item.id);
+    if (uploadableIds.length === 0) return;
+
+    isUploadingRef.current = true;
     setIsUploading(true);
-    for (const item of uploadable) {
-      if (item.file.size > MAX_FILE_SIZE_BYTES) {
-        updateItem(item.id, {
-          status: "error",
-          error: t("uploadFilesFileTooLarge"),
-        });
-        continue;
-      }
-
-      updateItem(item.id, { status: "uploading", error: undefined });
-      const formData = new FormData();
-      formData.set("file", item.file);
-      formData.set("source", defaultSource);
-      formData.set("title", item.title.trim() || item.file.name);
-      const guidance = combineGuidance(overallGuidance, item.guidance);
-      if (guidance) {
-        formData.set("ingestionGuidanceMd", guidance);
-      }
-
-      try {
-        const response = await fetch(`/api/workspaces/${workspaceId}/documents`, {
-          method: "POST",
-          body: formData,
-        });
-
-        if (response.ok) {
-          updateItem(item.id, { status: "done", error: undefined });
+    try {
+      for (const itemId of uploadableIds) {
+        const item = itemsRef.current.find((current) => current.id === itemId);
+        if (!item || item.status === "done") {
           continue;
         }
 
-        const data = await response.json().catch(() => null);
-        updateItem(item.id, {
-          status: "error",
-          error: errorMessage(data, t("uploadFilesErrorGeneric")),
-        });
-      } catch {
-        updateItem(item.id, {
-          status: "error",
-          error: t("uploadFilesErrorNetwork"),
-        });
-      }
-    }
+        if (item.file.size > MAX_FILE_SIZE_BYTES) {
+          updateItem(item.id, {
+            status: "error",
+            error: t("uploadFilesFileTooLarge"),
+          });
+          continue;
+        }
 
-    setIsUploading(false);
-    router.refresh();
+        updateItem(item.id, { status: "uploading", error: undefined });
+        const formData = new FormData();
+        formData.set("file", item.file);
+        formData.set("source", defaultSource);
+        formData.set("title", item.title.trim() || item.file.name);
+        const guidance = combineGuidance(overallGuidance, item.guidance);
+        if (guidance) {
+          formData.set("ingestionGuidanceMd", guidance);
+        }
+
+        try {
+          const response = await fetch(`/api/workspaces/${workspaceId}/documents`, {
+            method: "POST",
+            body: formData,
+          });
+
+          if (response.ok) {
+            updateItem(item.id, { status: "done", error: undefined });
+            continue;
+          }
+
+          const data = await response.json().catch(() => null);
+          updateItem(item.id, {
+            status: "error",
+            error: errorMessage(data, t("uploadFilesErrorGeneric")),
+          });
+        } catch {
+          updateItem(item.id, {
+            status: "error",
+            error: t("uploadFilesErrorNetwork"),
+          });
+        }
+      }
+    } finally {
+      isUploadingRef.current = false;
+      setIsUploading(false);
+      router.refresh();
+    }
   }
 
   const hasPendingUploads = items.some((item) => item.status !== "done");
