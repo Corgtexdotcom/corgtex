@@ -28,6 +28,9 @@ import {
   disconnectCommunicationInstallationAction,
   updateMeetingRecorderConfigAction,
   updateSlackAgendaSettingsAction,
+  deleteOAuthConnectionAction,
+  runOAuthConnectionSyncAction,
+  updateOAuthConnectionSettingsAction,
 } from "../actions";
 import { CorgtexConnectorManager } from "./CorgtexConnectorManager";
 import { MembersTable } from "./MembersTable";
@@ -41,6 +44,118 @@ import { notFound } from "next/navigation";
 import { getWorkspaceFeatureFlags } from "@/lib/workspace-feature-flags";
 
 export const dynamic = "force-dynamic";
+
+function settingsRecord(value: unknown) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function settingsSection(settings: unknown, key: "calendar" | "documents" | "email") {
+  return settingsRecord(settingsRecord(settings)[key]);
+}
+
+function settingsStringList(value: unknown) {
+  return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
+}
+
+function OAuthConnectionControls({ connection, workspaceId, format }: {
+  connection: {
+    id: string;
+    providerAccountId: string;
+    providerEmail: string | null;
+    scopes: string[];
+    status: string;
+    syncSettings: unknown;
+    lastSyncAt: Date | null;
+    lastSyncError: string | null;
+  };
+  workspaceId: string;
+  format: Awaited<ReturnType<typeof getFormatter>>;
+}) {
+  const calendar = settingsSection(connection.syncSettings, "calendar");
+  const documents = settingsSection(connection.syncSettings, "documents");
+  const email = settingsSection(connection.syncSettings, "email");
+  const documentIds = settingsStringList(documents.selectedDriveIds ?? documents.selectedDocumentIds).join("\n");
+  const emailFilters = settingsStringList(email.filters ?? email.queries).join("\n");
+
+  return (
+    <div key={connection.id} className="nr-item" style={{ marginTop: 8, padding: "12px 0" }}>
+      <div className="row" style={{ alignItems: "center" }}>
+        <span className="nr-item-meta" style={{ fontSize: "0.82rem" }}>
+          {connection.providerEmail ?? connection.providerAccountId} · {connection.status.toLowerCase()} · {connection.lastSyncAt ? format.dateTime(connection.lastSyncAt, { dateStyle: "medium", timeStyle: "short" }) : "Not synced yet"}
+        </span>
+      </div>
+      <p className="nr-item-meta" style={{ fontSize: "0.78rem", marginTop: 6 }}>
+        Scopes: {connection.scopes.length > 0 ? connection.scopes.join(", ") : "none recorded"}
+      </p>
+      {connection.lastSyncError && (
+        <p className="form-message form-message-error" style={{ marginTop: 8 }}>{connection.lastSyncError}</p>
+      )}
+      <form action={updateOAuthConnectionSettingsAction} className="stack" style={{ gap: 8, marginTop: 10 }}>
+        <input type="hidden" name="workspaceId" value={workspaceId} />
+        <input type="hidden" name="connectionId" value={connection.id} />
+        <label style={{ fontSize: "0.82rem" }}>
+          Connection status
+          <select name="status" defaultValue={connection.status === "PAUSED" ? "PAUSED" : "ACTIVE"}>
+            <option value="ACTIVE">Active</option>
+            <option value="PAUSED">Paused</option>
+          </select>
+        </label>
+        <div className="grid-2">
+          <label style={{ fontSize: "0.82rem" }}>
+            Calendar sync
+            <select name="calendarEnabled" defaultValue={calendar.enabled === false ? "false" : "true"}>
+              <option value="true">Enabled</option>
+              <option value="false">Paused</option>
+            </select>
+          </label>
+          <label style={{ fontSize: "0.82rem" }}>
+            Calendar relevance
+            <select name="includeAllEvents" defaultValue={calendar.includeAllEvents === true ? "true" : "false"}>
+              <option value="false">Relevant events only</option>
+              <option value="true">All events</option>
+            </select>
+          </label>
+        </div>
+        <label style={{ fontSize: "0.82rem" }}>
+          Documents
+          <select name="documentsEnabled" defaultValue={documents.enabled === true ? "true" : "false"}>
+            <option value="false">Disabled</option>
+            <option value="true">Selected documents only</option>
+          </select>
+        </label>
+        <textarea name="documentIds" rows={3} defaultValue={documentIds} placeholder="One Google Drive, OneDrive, or driveId:itemId file reference per line" />
+        <label style={{ fontSize: "0.82rem" }}>
+          Email
+          <select name="emailEnabled" defaultValue={email.enabled === true ? "true" : "false"}>
+            <option value="false">Disabled</option>
+            <option value="true">Filtered messages only</option>
+          </select>
+        </label>
+        <textarea name="emailFilters" rows={3} defaultValue={emailFilters} placeholder="One Gmail/Outlook search filter per line" />
+        <div className="actions-inline">
+          <button type="submit" className="button secondary small">Save connector settings</button>
+        </div>
+      </form>
+      <div className="actions-inline" style={{ marginTop: 10 }}>
+        {connection.status === "ACTIVE" ? (
+          <form action={runOAuthConnectionSyncAction} className="actions-inline">
+            <input type="hidden" name="workspaceId" value={workspaceId} />
+            <input type="hidden" name="connectionId" value={connection.id} />
+            {calendar.enabled !== false && <input type="hidden" name="syncKind" value="calendar" />}
+            {documents.enabled === true && <input type="hidden" name="syncKind" value="documents" />}
+            {email.enabled === true && <input type="hidden" name="syncKind" value="email" />}
+            <button type="submit" className="button secondary small">Run sync</button>
+          </form>
+        ) : null}
+        <form action={deleteOAuthConnectionAction}>
+          <input type="hidden" name="workspaceId" value={workspaceId} />
+          <input type="hidden" name="connectionId" value={connection.id} />
+          <button type="submit" className="button ghost small">Delete connection</button>
+        </form>
+      </div>
+    </div>
+  );
+}
 
 
 export default async function SettingsPage({
@@ -279,15 +394,7 @@ export default async function SettingsPage({
                     )}
                   </div>
                   {userConnections.filter((c) => c.provider === "GOOGLE" && c.status !== "DISCONNECTED").map((connection) => (
-                    <div key={connection.id} className="row" style={{ marginTop: 8, alignItems: "center" }}>
-                      <span className="nr-item-meta" style={{ fontSize: "0.82rem" }}>
-                        {connection.providerEmail ?? connection.providerAccountId} · {connection.status.toLowerCase()} · {connection.lastSyncAt ? format.dateTime(connection.lastSyncAt, { dateStyle: "medium", timeStyle: "short" }) : "Not synced yet"}
-                      </span>
-                      <form action={`/api/integrations/connections/${connection.id}/disconnect`} method="post">
-                        <input type="hidden" name="workspaceId" value={workspaceId} />
-                        <button type="submit" className="button ghost small">Disconnect</button>
-                      </form>
-                    </div>
+                    <OAuthConnectionControls key={connection.id} connection={connection} workspaceId={workspaceId} format={format} />
                   ))}
                 </div>
                 <div className="nr-item" style={{ padding: "12px 0" }}>
@@ -300,15 +407,7 @@ export default async function SettingsPage({
                     )}
                   </div>
                   {userConnections.filter((c) => c.provider === "MICROSOFT" && c.status !== "DISCONNECTED").map((connection) => (
-                    <div key={connection.id} className="row" style={{ marginTop: 8, alignItems: "center" }}>
-                      <span className="nr-item-meta" style={{ fontSize: "0.82rem" }}>
-                        {connection.providerEmail ?? connection.providerAccountId} · {connection.status.toLowerCase()} · {connection.lastSyncAt ? format.dateTime(connection.lastSyncAt, { dateStyle: "medium", timeStyle: "short" }) : "Not synced yet"}
-                      </span>
-                      <form action={`/api/integrations/connections/${connection.id}/disconnect`} method="post">
-                        <input type="hidden" name="workspaceId" value={workspaceId} />
-                        <button type="submit" className="button ghost small">Disconnect</button>
-                      </form>
-                    </div>
+                    <OAuthConnectionControls key={connection.id} connection={connection} workspaceId={workspaceId} format={format} />
                   ))}
                 </div>
                 {featureFlags.MEETING_RECORDERS && meetingRecorderConfig ? (
