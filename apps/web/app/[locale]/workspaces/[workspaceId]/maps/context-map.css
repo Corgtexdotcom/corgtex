@@ -126,6 +126,38 @@
   font-weight: 700;
 }
 
+.context-map-change-bar {
+  position: relative;
+  z-index: 24;
+  display: grid;
+  grid-template-columns: auto minmax(180px, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--surface-strong) 88%, var(--bg-alt));
+}
+
+.context-map-change-bar textarea,
+.context-map-change-stack textarea,
+.context-map-inline-form input,
+.context-map-inline-form select {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.8rem;
+  line-height: 1.35;
+  padding: 7px 8px;
+}
+
+.context-map-change-bar textarea {
+  resize: none;
+}
+
 .context-map-checkbox input {
   width: 14px;
   height: 14px;
@@ -140,7 +172,7 @@
 }
 
 .context-map-shell--fullscreen .context-map-stage {
-  height: calc(100dvh - 57px);
+  height: calc(100dvh - 108px);
   min-height: 0;
 }
 
@@ -157,7 +189,7 @@
 }
 
 .context-map-shell--fullscreen .context-map-canvas {
-  height: calc(100dvh - 57px);
+  height: calc(100dvh - 108px);
   min-height: 0;
 }
 
@@ -401,6 +433,8 @@
 .context-map-selection-stack,
 .context-map-context-stack,
 .context-map-evidence-list,
+.context-map-detail-list,
+.context-map-change-stack,
 .context-map-diff-list,
 .context-map-neighbor-list,
 .context-map-review-stack,
@@ -426,6 +460,54 @@
 .context-map-property-list {
   display: grid;
   gap: 6px;
+}
+
+.context-map-detail-item {
+  display: grid;
+  gap: 6px;
+  padding: 9px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-alt);
+}
+
+.context-map-detail-item strong {
+  color: var(--text);
+  font-size: 0.84rem;
+  line-height: 1.35;
+}
+
+.context-map-detail-item--risk {
+  border-color: color-mix(in srgb, var(--danger) 28%, var(--line));
+}
+
+.context-map-detail-item--metric {
+  border-color: color-mix(in srgb, var(--warning) 34%, var(--line));
+}
+
+.context-map-change-stack label {
+  display: grid;
+  gap: 5px;
+}
+
+.context-map-change-stack label span {
+  color: var(--muted);
+  font-size: 0.74rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.context-map-button-row,
+.context-map-inline-form {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.context-map-inline-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
 }
 
 .context-map-property-list strong {
@@ -638,6 +720,14 @@
   .context-map-toolbar-actions,
   .context-map-view-controls {
     justify-content: flex-start;
+  }
+
+  .context-map-change-bar {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .context-map-change-bar > svg {
+    display: none;
   }
 
   .context-map-canvas,

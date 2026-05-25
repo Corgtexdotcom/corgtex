@@ -6,6 +6,7 @@ import {
   AppError,
   applyContextGraphProposedDiff,
   buildSelectedRegionContext,
+  createContextMapChangeProposal,
   createContextGraphProposedDiff,
   createMissingRegionFactsProposal,
   createPersonalContextMapView,
@@ -26,7 +27,7 @@ function assertEditableContextGraphDiff(value: unknown): asserts value is Editab
   if (!isRecord(value)) {
     throw new AppError(400, "INVALID_INPUT", "Edited graph diff must be an object.");
   }
-  for (const key of ["objects", "relationships", "evidenceRefs", "mapLayoutUpdates"] as const) {
+  for (const key of ["objects", "objectUpdates", "relationships", "relationshipUpdates", "evidenceRefs", "mapLayoutUpdates"] as const) {
     if (value[key] !== undefined && !Array.isArray(value[key])) {
       throw new AppError(400, "INVALID_INPUT", `Edited graph diff ${key} must be an array.`);
     }
@@ -124,6 +125,18 @@ export async function createMissingRegionFactsProposalAction(params: {
   const proposedDiff = await createMissingRegionFactsProposal(actor, params);
   revalidatePath(`/workspaces/${params.workspaceId}/maps`);
   return proposedDiff;
+}
+
+export async function createContextMapChangeProposalAction(params: {
+  workspaceId: string;
+  mapViewId: string;
+  selectedObjectIds?: string[];
+  instruction: string;
+}) {
+  const actor = await requirePageActor();
+  const result = await createContextMapChangeProposal(actor, params);
+  revalidatePath(`/workspaces/${params.workspaceId}/maps`);
+  return result;
 }
 
 export async function updateContextGraphProposedDiffAction(params: {

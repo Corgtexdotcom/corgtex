@@ -78,6 +78,21 @@ type ContextGraphObjectInput = {
   lastVerifiedAt?: Date | string | null;
 };
 
+type ContextGraphObjectUpdateInput = {
+  id: string;
+  title?: string;
+  summary?: string | null;
+  properties?: JsonRecord;
+  confidence?: number | null;
+  status?: string;
+  sourceEntityType?: string | null;
+  sourceEntityId?: string | null;
+  dedupeKey?: string | null;
+  validFrom?: Date | string | null;
+  validTo?: Date | string | null;
+  lastVerifiedAt?: Date | string | null;
+};
+
 type ContextGraphRelationshipInput = {
   ref?: string;
   sourceObjectId?: string;
@@ -85,6 +100,22 @@ type ContextGraphRelationshipInput = {
   targetObjectId?: string;
   targetRef?: string;
   relationshipType: string;
+  properties?: JsonRecord;
+  confidence?: number | null;
+  status?: string;
+  sourceEntityType?: string | null;
+  sourceEntityId?: string | null;
+  dedupeKey?: string | null;
+  validFrom?: Date | string | null;
+  validTo?: Date | string | null;
+  lastVerifiedAt?: Date | string | null;
+};
+
+type ContextGraphRelationshipUpdateInput = {
+  id: string;
+  sourceObjectId?: string;
+  targetObjectId?: string;
+  relationshipType?: string;
   properties?: JsonRecord;
   confidence?: number | null;
   status?: string;
@@ -143,7 +174,7 @@ const DEFAULT_CONTEXT_MAP_VIEW_CONFIGS: Array<{
     viewType: "process",
     query: {
       mode: "criticalPath",
-      objectTypes: ["Process", "ProcessStep", "Decision", "Task", "Risk", "Question", "Tool", "Team", "Role", "Meeting"],
+      objectTypes: ["Process", "ProcessStep", "Decision", "Task", "Risk", "Metric", "Question", "Hypothesis", "Tool", "Team", "Role", "Meeting"],
       relationshipTypes: ["part_of", "depends_on", "blocks", "owns", "assigned_to", "supports", "uses", "created_in", "decided_in", "needs_approval_from"],
     },
   },
@@ -169,9 +200,23 @@ const DEFAULT_CONTEXT_MAP_VIEW_CONFIGS: Array<{
 
 export type ContextGraphDiffInput = {
   objects?: ContextGraphObjectInput[];
+  objectUpdates?: ContextGraphObjectUpdateInput[];
   relationships?: ContextGraphRelationshipInput[];
+  relationshipUpdates?: ContextGraphRelationshipUpdateInput[];
   evidenceRefs?: ContextGraphEvidenceInput[];
   mapLayoutUpdates?: ContextMapLayoutUpdateInput[];
+};
+
+export type ContextMapChangeProposalResult = {
+  mode: "needs_clarification";
+  message: string;
+} | {
+  mode: "proposed";
+  proposedDiffId: string;
+  reason: string | null;
+  status: string;
+  createdAt: Date;
+  diffJson: unknown;
 };
 
 export type ContextGraphMapImportInput = {
@@ -308,6 +353,80 @@ function normalizeRelationshipInput(input: ContextGraphRelationshipInput) {
   };
 }
 
+function normalizeObjectUpdateInput(input: ContextGraphObjectUpdateInput) {
+  const id = requireStringField(input.id, "Context graph object id is required.").trim();
+  invariant(id.length > 0, 400, "INVALID_INPUT", "Context graph object id is required.");
+  const data: Prisma.ContextGraphObjectUpdateInput = {};
+
+  if (input.title !== undefined) {
+    const title = requireStringField(input.title, "Context graph object title is required.").trim();
+    invariant(title.length > 0, 400, "INVALID_INPUT", "Context graph object title is required.");
+    data.title = title;
+  }
+  if (input.summary !== undefined) data.summary = input.summary?.trim() || null;
+  if (input.properties !== undefined) data.properties = jsonObject(input.properties);
+  if (input.confidence !== undefined) data.confidence = input.confidence;
+  if (input.status !== undefined) data.status = normalizeStatus(input.status);
+  if (input.sourceEntityType !== undefined) data.sourceEntityType = input.sourceEntityType?.trim() || null;
+  if (input.sourceEntityId !== undefined) data.sourceEntityId = input.sourceEntityId?.trim() || null;
+  if (input.dedupeKey !== undefined) data.dedupeKey = input.dedupeKey?.trim() || null;
+  if (input.validFrom !== undefined) data.validFrom = normalizeDate(input.validFrom);
+  if (input.validTo !== undefined) data.validTo = normalizeDate(input.validTo);
+  if (input.lastVerifiedAt !== undefined) data.lastVerifiedAt = normalizeDate(input.lastVerifiedAt);
+
+  invariant(Object.keys(data).length > 0, 400, "INVALID_INPUT", "Context graph object update must include at least one changed field.");
+  return { id, data };
+}
+
+function normalizeRelationshipUpdateInput(input: ContextGraphRelationshipUpdateInput) {
+  const id = requireStringField(input.id, "Context graph relationship id is required.").trim();
+  invariant(id.length > 0, 400, "INVALID_INPUT", "Context graph relationship id is required.");
+  const data: Prisma.ContextGraphRelationshipUpdateInput = {};
+
+  if (input.sourceObjectId !== undefined) {
+    const sourceObjectId = requireStringField(input.sourceObjectId, "Relationship source object is required.").trim();
+    invariant(sourceObjectId.length > 0, 400, "INVALID_INPUT", "Relationship source object is required.");
+    data.sourceObject = { connect: { id: sourceObjectId } };
+  }
+  if (input.targetObjectId !== undefined) {
+    const targetObjectId = requireStringField(input.targetObjectId, "Relationship target object is required.").trim();
+    invariant(targetObjectId.length > 0, 400, "INVALID_INPUT", "Relationship target object is required.");
+    data.targetObject = { connect: { id: targetObjectId } };
+  }
+  if (input.relationshipType !== undefined) {
+    const relationshipType = requireStringField(input.relationshipType, "Context graph relationship type is required.").trim();
+    requireKnownValue(relationshipType, CONTEXT_GRAPH_RELATIONSHIP_TYPES, "context graph relationship type");
+    data.relationshipType = relationshipType;
+  }
+  if (input.properties !== undefined) data.properties = jsonObject(input.properties);
+  if (input.confidence !== undefined) data.confidence = input.confidence;
+  if (input.status !== undefined) data.status = normalizeStatus(input.status);
+  if (input.sourceEntityType !== undefined) data.sourceEntityType = input.sourceEntityType?.trim() || null;
+  if (input.sourceEntityId !== undefined) data.sourceEntityId = input.sourceEntityId?.trim() || null;
+  if (input.dedupeKey !== undefined) data.dedupeKey = input.dedupeKey?.trim() || null;
+  if (input.validFrom !== undefined) data.validFrom = normalizeDate(input.validFrom);
+  if (input.validTo !== undefined) data.validTo = normalizeDate(input.validTo);
+  if (input.lastVerifiedAt !== undefined) data.lastVerifiedAt = normalizeDate(input.lastVerifiedAt);
+
+  invariant(Object.keys(data).length > 0, 400, "INVALID_INPUT", "Context graph relationship update must include at least one changed field.");
+  return { id, data };
+}
+
+function relationshipDedupeKey(params: {
+  workspaceId: string;
+  sourceObjectId: string;
+  targetObjectId: string;
+  relationshipType: string;
+  sourceEntityType?: string | null;
+  sourceEntityId?: string | null;
+}) {
+  return `${params.workspaceId}:${params.sourceObjectId}:${params.relationshipType}:${params.targetObjectId}:${params.sourceEntityType ?? "manual"}:${params.sourceEntityId ?? "manual"}`;
+}
+
+function objectDedupeKey(workspaceId: string, sourceEntityType: string | null | undefined, sourceEntityId: string | null | undefined) {
+  return sourceEntityType && sourceEntityId ? `${workspaceId}:${sourceEntityType}:${sourceEntityId}` : null;
+}
+
 async function upsertObjectWithTx(
   tx: Prisma.TransactionClient,
   actor: AppActor,
@@ -321,8 +440,7 @@ async function upsertObjectWithTx(
     ...creatorData(actor, agentRunId),
   };
 
-  const dedupeKey = data.dedupeKey
-    ?? (data.sourceEntityType && data.sourceEntityId ? `${workspaceId}:${data.sourceEntityType}:${data.sourceEntityId}` : null);
+  const dedupeKey = data.dedupeKey ?? objectDedupeKey(workspaceId, data.sourceEntityType, data.sourceEntityId);
 
   if (dedupeKey) {
     return tx.contextGraphObject.upsert({
@@ -353,6 +471,38 @@ async function resolveObjectId(tx: Prisma.TransactionClient, workspaceId: string
   return object.id;
 }
 
+async function updateObjectWithTx(
+  tx: Prisma.TransactionClient,
+  workspaceId: string,
+  input: ContextGraphObjectUpdateInput,
+) {
+  const update = normalizeObjectUpdateInput(input);
+  const object = await tx.contextGraphObject.findFirst({
+    where: { id: update.id, workspaceId },
+    select: {
+      id: true,
+      sourceEntityType: true,
+      sourceEntityId: true,
+      dedupeKey: true,
+    },
+  });
+  invariant(object, 404, "NOT_FOUND", "Context graph object not found.");
+  if (
+    input.dedupeKey === undefined
+    && (input.sourceEntityType !== undefined || input.sourceEntityId !== undefined)
+  ) {
+    update.data.dedupeKey = objectDedupeKey(
+      workspaceId,
+      input.sourceEntityType !== undefined ? input.sourceEntityType?.trim() || null : object.sourceEntityType,
+      input.sourceEntityId !== undefined ? input.sourceEntityId?.trim() || null : object.sourceEntityId,
+    );
+  }
+  return tx.contextGraphObject.update({
+    where: { id: update.id },
+    data: update.data,
+  });
+}
+
 async function upsertRelationshipWithTx(
   tx: Prisma.TransactionClient,
   actor: AppActor,
@@ -361,8 +511,12 @@ async function upsertRelationshipWithTx(
   refToObjectId: Map<string, string>,
   agentRunId?: string | null,
 ) {
-  const sourceObjectId = input.sourceObjectId ?? (input.sourceRef ? refToObjectId.get(input.sourceRef) : undefined);
-  const targetObjectId = input.targetObjectId ?? (input.targetRef ? refToObjectId.get(input.targetRef) : undefined);
+  const sourceObjectId = input.sourceObjectId !== undefined
+    ? input.sourceObjectId.trim()
+    : (input.sourceRef ? refToObjectId.get(input.sourceRef) : undefined);
+  const targetObjectId = input.targetObjectId !== undefined
+    ? input.targetObjectId.trim()
+    : (input.targetRef ? refToObjectId.get(input.targetRef) : undefined);
   invariant(sourceObjectId, 400, "INVALID_INPUT", "Relationship source object is required.");
   invariant(targetObjectId, 400, "INVALID_INPUT", "Relationship target object is required.");
 
@@ -370,7 +524,14 @@ async function upsertRelationshipWithTx(
   await resolveObjectId(tx, workspaceId, targetObjectId);
 
   const data = normalizeRelationshipInput(input);
-  const dedupeKey = data.dedupeKey ?? `${workspaceId}:${sourceObjectId}:${data.relationshipType}:${targetObjectId}:${data.sourceEntityType ?? "manual"}:${data.sourceEntityId ?? "manual"}`;
+  const dedupeKey = data.dedupeKey ?? relationshipDedupeKey({
+    workspaceId,
+    sourceObjectId,
+    targetObjectId,
+    relationshipType: data.relationshipType,
+    sourceEntityType: data.sourceEntityType,
+    sourceEntityId: data.sourceEntityId,
+  });
   const writeData = {
     ...data,
     dedupeKey,
@@ -386,6 +547,61 @@ async function upsertRelationshipWithTx(
       workspaceId,
       ...writeData,
     },
+  });
+}
+
+async function updateRelationshipWithTx(
+  tx: Prisma.TransactionClient,
+  workspaceId: string,
+  input: ContextGraphRelationshipUpdateInput,
+) {
+  const update = normalizeRelationshipUpdateInput(input);
+  const relationship = await tx.contextGraphRelationship.findFirst({
+    where: { id: update.id, workspaceId },
+    select: {
+      id: true,
+      sourceObjectId: true,
+      targetObjectId: true,
+      relationshipType: true,
+      sourceEntityType: true,
+      sourceEntityId: true,
+      dedupeKey: true,
+    },
+  });
+  invariant(relationship, 404, "NOT_FOUND", "Context graph relationship not found.");
+  const normalizedSourceObjectId = input.sourceObjectId !== undefined
+    ? requireStringField(input.sourceObjectId, "Relationship source object is required.").trim()
+    : undefined;
+  const normalizedTargetObjectId = input.targetObjectId !== undefined
+    ? requireStringField(input.targetObjectId, "Relationship target object is required.").trim()
+    : undefined;
+  const normalizedRelationshipType = input.relationshipType !== undefined
+    ? requireStringField(input.relationshipType, "Context graph relationship type is required.").trim()
+    : undefined;
+  if (normalizedSourceObjectId) await resolveObjectId(tx, workspaceId, normalizedSourceObjectId);
+  if (normalizedTargetObjectId) await resolveObjectId(tx, workspaceId, normalizedTargetObjectId);
+  if (
+    input.dedupeKey === undefined
+    && (
+      input.sourceObjectId !== undefined
+      || input.targetObjectId !== undefined
+      || input.relationshipType !== undefined
+      || input.sourceEntityType !== undefined
+      || input.sourceEntityId !== undefined
+    )
+  ) {
+    update.data.dedupeKey = relationshipDedupeKey({
+      workspaceId,
+      sourceObjectId: normalizedSourceObjectId ?? relationship.sourceObjectId,
+      targetObjectId: normalizedTargetObjectId ?? relationship.targetObjectId,
+      relationshipType: normalizedRelationshipType ?? relationship.relationshipType,
+      sourceEntityType: input.sourceEntityType !== undefined ? input.sourceEntityType?.trim() || null : relationship.sourceEntityType,
+      sourceEntityId: input.sourceEntityId !== undefined ? input.sourceEntityId?.trim() || null : relationship.sourceEntityId,
+    });
+  }
+  return tx.contextGraphRelationship.update({
+    where: { id: update.id },
+    data: update.data,
   });
 }
 
@@ -998,12 +1214,16 @@ export async function createPersonalContextMapView(actor: AppActor, params: {
 function validateDiff(diff: unknown): asserts diff is ContextGraphDiffInput {
   invariant(isJsonRecord(diff), 400, "INVALID_INPUT", "Context graph diff must be an object.");
   requireOptionalArray(diff.objects, "Context graph diff objects must be an array.");
+  requireOptionalArray(diff.objectUpdates, "Context graph diff objectUpdates must be an array.");
   requireOptionalArray(diff.relationships, "Context graph diff relationships must be an array.");
+  requireOptionalArray(diff.relationshipUpdates, "Context graph diff relationshipUpdates must be an array.");
   requireOptionalArray(diff.evidenceRefs, "Context graph diff evidence refs must be an array.");
   requireOptionalArray(diff.mapLayoutUpdates, "Context graph diff map layout updates must be an array.");
 
   const objects = diff.objects as unknown[] | undefined;
+  const objectUpdates = diff.objectUpdates as unknown[] | undefined;
   const relationships = diff.relationships as unknown[] | undefined;
+  const relationshipUpdates = diff.relationshipUpdates as unknown[] | undefined;
   const evidenceRefs = diff.evidenceRefs as unknown[] | undefined;
   const mapLayoutUpdates = diff.mapLayoutUpdates as unknown[] | undefined;
 
@@ -1011,9 +1231,17 @@ function validateDiff(diff: unknown): asserts diff is ContextGraphDiffInput {
     invariant(isJsonRecord(object), 400, "INVALID_INPUT", "Context graph diff objects must be objects.");
     normalizeObjectInput(object as ContextGraphObjectInput);
   }
+  for (const objectUpdate of objectUpdates ?? []) {
+    invariant(isJsonRecord(objectUpdate), 400, "INVALID_INPUT", "Context graph diff objectUpdates must be objects.");
+    normalizeObjectUpdateInput(objectUpdate as ContextGraphObjectUpdateInput);
+  }
   for (const relationship of relationships ?? []) {
     invariant(isJsonRecord(relationship), 400, "INVALID_INPUT", "Context graph diff relationships must be objects.");
     normalizeRelationshipInput(relationship as ContextGraphRelationshipInput);
+  }
+  for (const relationshipUpdate of relationshipUpdates ?? []) {
+    invariant(isJsonRecord(relationshipUpdate), 400, "INVALID_INPUT", "Context graph diff relationshipUpdates must be objects.");
+    normalizeRelationshipUpdateInput(relationshipUpdate as ContextGraphRelationshipUpdateInput);
   }
   for (const evidence of evidenceRefs ?? []) {
     invariant(isJsonRecord(evidence), 400, "INVALID_INPUT", "Context graph diff evidence refs must be objects.");
@@ -1063,7 +1291,9 @@ export async function createContextGraphProposedDiff(actor: AppActor, params: {
       meta: {
         reason: proposedDiff.reason,
         objectCount: params.diff.objects?.length ?? 0,
+        objectUpdateCount: params.diff.objectUpdates?.length ?? 0,
         relationshipCount: params.diff.relationships?.length ?? 0,
+        relationshipUpdateCount: params.diff.relationshipUpdates?.length ?? 0,
         mapLayoutUpdateCount: params.diff.mapLayoutUpdates?.length ?? 0,
       },
     });
@@ -1121,7 +1351,9 @@ export async function updateContextGraphProposedDiff(actor: AppActor, params: {
       entityId: proposedDiff.id,
       meta: {
         objectCount: params.diff.objects?.length ?? 0,
+        objectUpdateCount: params.diff.objectUpdates?.length ?? 0,
         relationshipCount: params.diff.relationships?.length ?? 0,
+        relationshipUpdateCount: params.diff.relationshipUpdates?.length ?? 0,
         evidenceRefCount: params.diff.evidenceRefs?.length ?? 0,
         mapLayoutUpdateCount: params.diff.mapLayoutUpdates?.length ?? 0,
       },
@@ -1181,7 +1413,9 @@ export async function applyContextGraphProposedDiff(actor: AppActor, params: {
     const refToObjectId = new Map<string, string>();
     const refToRelationshipId = new Map<string, string>();
     const objectIds: string[] = [];
+    const objectUpdateIds: string[] = [];
     const relationshipIds: string[] = [];
+    const relationshipUpdateIds: string[] = [];
     const layoutUpdates: Array<{ mapViewId: string; updated: number }> = [];
 
     for (const objectInput of diff.objects ?? []) {
@@ -1193,6 +1427,11 @@ export async function applyContextGraphProposedDiff(actor: AppActor, params: {
       if (objectInput.ref) refToObjectId.set(objectInput.ref, object.id);
     }
 
+    for (const objectUpdateInput of diff.objectUpdates ?? []) {
+      const object = await updateObjectWithTx(tx, params.workspaceId, objectUpdateInput);
+      objectUpdateIds.push(object.id);
+    }
+
     for (const relationshipInput of diff.relationships ?? []) {
       const relationship = await upsertRelationshipWithTx(tx, actor, params.workspaceId, {
         ...relationshipInput,
@@ -1200,6 +1439,11 @@ export async function applyContextGraphProposedDiff(actor: AppActor, params: {
       }, refToObjectId, proposedDiff.proposedByAgentRunId);
       relationshipIds.push(relationship.id);
       if (relationshipInput.ref) refToRelationshipId.set(relationshipInput.ref, relationship.id);
+    }
+
+    for (const relationshipUpdateInput of diff.relationshipUpdates ?? []) {
+      const relationship = await updateRelationshipWithTx(tx, params.workspaceId, relationshipUpdateInput);
+      relationshipUpdateIds.push(relationship.id);
     }
 
     for (const evidenceInput of diff.evidenceRefs ?? []) {
@@ -1228,14 +1472,14 @@ export async function applyContextGraphProposedDiff(actor: AppActor, params: {
       action: "context-graph.diff.applied",
       entityType: "ContextGraphProposedDiff",
       entityId: proposedDiff.id,
-      meta: { objectIds, relationshipIds, layoutUpdates },
+      meta: { objectIds, objectUpdateIds, relationshipIds, relationshipUpdateIds, layoutUpdates },
     });
     await appendEvents(tx, [{
       workspaceId: params.workspaceId,
       type: "context-graph.diff.applied",
       aggregateType: "ContextGraphProposedDiff",
       aggregateId: proposedDiff.id,
-      payload: { proposedDiffId: proposedDiff.id, objectIds, relationshipIds, layoutUpdates },
+      payload: { proposedDiffId: proposedDiff.id, objectIds, objectUpdateIds, relationshipIds, relationshipUpdateIds, layoutUpdates },
     }]);
 
     return updated;
@@ -1668,6 +1912,256 @@ export async function buildSelectedRegionContext(actor: AppActor, params: {
 
 function selectedRegionSourceId(mapViewId: string | null | undefined, selectedObjectIds: string[]) {
   return `${mapViewId ?? "context-map"}:${[...selectedObjectIds].sort().join(",")}`;
+}
+
+const WORK_STATE_ALIASES: Array<{ pattern: RegExp; value: string }> = [
+  { pattern: /\b(stalled|blocked|stuck|stop|stopped)\b/i, value: "stalled" },
+  { pattern: /\b(moving|in progress|progressing|active)\b/i, value: "moving" },
+  { pattern: /\b(pending decision|decision pending|needs decision)\b/i, value: "pending_decision" },
+];
+
+function cleanInstructionFragment(value: string) {
+  return value
+    .replace(/^["'\s:,-]+|["'\s.,;]+$/g, "")
+    .trim()
+    .slice(0, 180);
+}
+
+const AMBIGUOUS_SINGLE_TOKEN_TITLES = new Set([
+  "agent",
+  "archive",
+  "change",
+  "connect",
+  "decision",
+  "edit",
+  "metric",
+  "process",
+  "question",
+  "remove",
+  "risk",
+  "status",
+  "step",
+  "task",
+  "team",
+  "update",
+]);
+
+function normalizedInstructionText(value: string) {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim().replace(/\s+/g, " ");
+}
+
+function instructionMentionsObjectTitle(instruction: string, title: string) {
+  const normalizedTitle = normalizedInstructionText(title);
+  if (!normalizedTitle) return false;
+  const titleTokens = normalizedTitle.split(" ");
+  if (titleTokens.length === 1 && (titleTokens[0].length < 6 || AMBIGUOUS_SINGLE_TOKEN_TITLES.has(titleTokens[0]))) {
+    return false;
+  }
+  return ` ${normalizedInstructionText(instruction)} `.includes(` ${normalizedTitle} `);
+}
+
+function extractInstructionValue(instruction: string, patterns: RegExp[]) {
+  for (const pattern of patterns) {
+    const match = instruction.match(pattern);
+    const value = match?.[1] ? cleanInstructionFragment(match[1]) : null;
+    if (value) return value;
+  }
+  return null;
+}
+
+function workStateFromInstruction(instruction: string) {
+  return WORK_STATE_ALIASES.find((alias) => alias.pattern.test(instruction))?.value ?? null;
+}
+
+function mapChangeReason(targetTitles: string[], instruction: string) {
+  return `Map change request${targetTitles.length ? ` for ${targetTitles.slice(0, 3).join(", ")}` : ""}: ${instruction.slice(0, 180)}`;
+}
+
+export async function createContextMapChangeProposal(actor: AppActor, params: {
+  workspaceId: string;
+  mapViewId: string;
+  selectedObjectIds?: string[];
+  instruction: string;
+}): Promise<ContextMapChangeProposalResult> {
+  await requireGraphPropose(actor, params.workspaceId);
+  const instruction = params.instruction.trim();
+  invariant(instruction.length > 0, 400, "INVALID_INPUT", "Change instruction is required.");
+
+  const userId = actorUserId(actor);
+  const mapView = await prisma.contextMapView.findFirst({
+    where: { id: params.mapViewId, ...visibleMapViewWhere(params.workspaceId, userId) },
+  });
+  invariant(mapView, 404, "NOT_FOUND", "Context map not found.");
+
+  const selectedIds = [...new Set(params.selectedObjectIds ?? [])];
+  const mapObjectWhere = objectWhereForMapView(params.workspaceId, mapView, false);
+  const [mapObjects, explicitSelectedObjects] = await Promise.all([
+    prisma.contextGraphObject.findMany({
+      where: mapObjectWhere,
+      ...(selectedIds.length ? { take: 200 } : {}),
+    }),
+    selectedIds.length
+      ? prisma.contextGraphObject.findMany({
+        where: { AND: [mapObjectWhere, { id: { in: selectedIds } }] },
+      })
+      : Promise.resolve([]),
+  ]);
+  const objectById = new Map([...mapObjects, ...explicitSelectedObjects].map((object) => [object.id, object]));
+  const scopedObjects = [...objectById.values()];
+  const selectableObjects = scopedObjects.filter((object) => ["Process", "ProcessStep", "Team"].includes(object.objectType));
+  const selectedObjectById = new Map(scopedObjects.map((object) => [object.id, object]));
+  const selectedObjects = selectedIds.length
+    ? selectedIds.map((id) => selectedObjectById.get(id)).filter((object): object is (typeof scopedObjects)[number] => Boolean(object))
+    : [];
+  let targets = selectedObjects;
+
+  if (targets.length === 0) {
+    targets = selectableObjects.filter((object) => instructionMentionsObjectTitle(instruction, object.title));
+  }
+
+  if (targets.length === 0) {
+    return {
+      mode: "needs_clarification",
+      message: "Select a process or step, or name exactly one visible process/step in the request.",
+    };
+  }
+  if (targets.length > 1 && !/\b(connect|depends on|block|blocks|archive|remove|delete)\b/i.test(instruction)) {
+    return {
+      mode: "needs_clarification",
+      message: "This matches more than one map item. Select the exact item before asking for the change.",
+    };
+  }
+
+  const titleUpdate = extractInstructionValue(instruction, [
+    /\brename(?: it)? to\s+(.+)$/i,
+    /\btitle(?: should be| to| is)\s+(.+)$/i,
+  ]);
+  const nextAction = extractInstructionValue(instruction, [
+    /\bnext action(?: should be| to| is)\s+(.+)$/i,
+    /\bwhat(?:'s| is) needed(?: to proceed)?(?: should be| to| is)\s+(.+)$/i,
+    /\bneeded to proceed(?: should be| to| is)\s+(.+)$/i,
+  ]);
+  const summaryUpdate = extractInstructionValue(instruction, [
+    /\bsummary(?: should be| to| is)\s+(.+)$/i,
+  ]);
+  const workState = workStateFromInstruction(instruction);
+  const addStepTitle = extractInstructionValue(instruction, [
+    /\badd(?: a)?(?: process)? step(?: called| named)?\s+(.+?)\s+(?:under|inside|within)\s+.+$/i,
+    /\badd(?: a)?(?: process)? step(?: called| named)?\s+(.+)$/i,
+  ]);
+  const shouldArchive = /\b(archive|remove|delete)\b/i.test(instruction);
+  const wantsConnect = /\b(connect|depends on|block|blocks)\b/i.test(instruction);
+  if (wantsConnect && targets.length !== 2) {
+    return {
+      mode: "needs_clarification",
+      message: "Select exactly two process items before asking to connect them.",
+    };
+  }
+  if (targets.length > 1 && shouldArchive && selectedObjects.length !== targets.length) {
+    return {
+      mode: "needs_clarification",
+      message: "This matches more than one map item. Select the exact items before asking to archive them.",
+    };
+  }
+  const shouldConnect = wantsConnect;
+
+  const diff: ContextGraphDiffInput = {};
+  const evidence: JsonRecord = {
+    kind: "context-map-change-request",
+    mapViewId: params.mapViewId,
+    selectedObjectIds: selectedIds,
+    instruction,
+  };
+
+  if (addStepTitle) {
+    const parent = targets.find((object) => ["Process", "Team"].includes(object.objectType)) ?? targets[0];
+    invariant(parent, 400, "INVALID_INPUT", "A parent process or stream is required.");
+    const ref = "requested-step";
+    diff.objects = [{
+      ref,
+      objectType: "ProcessStep",
+      title: addStepTitle,
+      status: "proposed",
+      sourceEntityType: "ContextMapView",
+      sourceEntityId: params.mapViewId,
+      properties: {
+        requestedBy: "context_map_changes",
+        nextAction: "Review and fill in the working details for this step.",
+      },
+    }];
+    diff.relationships = [{
+      sourceRef: ref,
+      targetObjectId: parent.id,
+      relationshipType: "part_of",
+      status: "proposed",
+      sourceEntityType: "ContextMapView",
+      sourceEntityId: params.mapViewId,
+    }];
+  } else if (shouldConnect) {
+    const relationshipType = /\bblock|blocks\b/i.test(instruction) ? "blocks" : "depends_on";
+    diff.relationships = [{
+      sourceObjectId: targets[0].id,
+      targetObjectId: targets[1].id,
+      relationshipType,
+      status: "proposed",
+      sourceEntityType: "ContextMapView",
+      sourceEntityId: params.mapViewId,
+    }];
+  } else {
+    const objectUpdates: ContextGraphObjectUpdateInput[] = [];
+    const hasObjectChange = Boolean(titleUpdate || summaryUpdate || nextAction || workState || shouldArchive);
+    if (!hasObjectChange) {
+      return {
+        mode: "needs_clarification",
+        message: "Say whether to rename, change status, set next action, add a step, connect two selected items, or archive the selected item.",
+      };
+    }
+    for (const target of shouldArchive ? targets : targets.slice(0, 1)) {
+      const currentProperties = jsonValueRecord(target.properties);
+      const properties = {
+        ...currentProperties,
+        ...(nextAction ? { nextAction } : {}),
+        ...(workState ? { workState } : {}),
+      };
+      const update: ContextGraphObjectUpdateInput = {
+        id: target.id,
+        ...(titleUpdate ? { title: titleUpdate } : {}),
+        ...(summaryUpdate ? { summary: summaryUpdate } : {}),
+        ...(nextAction || workState ? { properties } : {}),
+        ...(shouldArchive ? { status: "archived" } : {}),
+      };
+      objectUpdates.push(update);
+    }
+    if (objectUpdates.length) diff.objectUpdates = objectUpdates;
+  }
+
+  if (
+    (diff.objects?.length ?? 0) === 0
+    && (diff.objectUpdates?.length ?? 0) === 0
+    && (diff.relationships?.length ?? 0) === 0
+    && (diff.relationshipUpdates?.length ?? 0) === 0
+  ) {
+    return {
+      mode: "needs_clarification",
+      message: "Say whether to rename, change status, set next action, add a step, connect two selected items, or archive the selected item.",
+    };
+  }
+
+  const proposedDiff = await createContextGraphProposedDiff(actor, {
+    workspaceId: params.workspaceId,
+    reason: mapChangeReason(targets.map((target) => target.title), instruction),
+    evidence,
+    diff,
+  });
+
+  return {
+    mode: "proposed",
+    proposedDiffId: proposedDiff.id,
+    reason: proposedDiff.reason,
+    status: proposedDiff.status,
+    createdAt: proposedDiff.createdAt,
+    diffJson: proposedDiff.diffJson,
+  };
 }
 
 export async function createMissingRegionFactsProposal(actor: AppActor, params: {

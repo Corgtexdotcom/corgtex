@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   applyContextGraphProposedDiff,
   buildSelectedRegionContext,
+  createContextMapChangeProposal,
   createMissingRegionFactsProposal,
   createPersonalContextMapView,
   createContextGraphProposedDiff,
@@ -19,12 +20,15 @@ const { prismaMock, appendEventsMock, recordAuditMock, requireWorkspaceMembershi
     $transaction: vi.fn(async (callback: (tx: any) => Promise<unknown>) => callback(prismaMock)),
     contextGraphObject: {
       create: vi.fn(),
+      update: vi.fn(),
       upsert: vi.fn(),
       findFirst: vi.fn(),
       findMany: vi.fn(),
     },
     contextGraphRelationship: {
       upsert: vi.fn(),
+      update: vi.fn(),
+      findFirst: vi.fn(),
       findMany: vi.fn(),
     },
     contextGraphEvidenceRef: {
@@ -95,6 +99,11 @@ describe("context graph domain", () => {
       isActive: true,
     });
     prismaMock.contextGraphObject.findFirst.mockResolvedValue({ id: "object-existing" });
+    prismaMock.contextGraphObject.findMany.mockResolvedValue([]);
+    prismaMock.contextGraphObject.update.mockResolvedValue({ id: "object-existing" });
+    prismaMock.contextGraphRelationship.findFirst.mockResolvedValue({ id: "relationship-existing" });
+    prismaMock.contextGraphRelationship.findMany.mockResolvedValue([]);
+    prismaMock.contextGraphRelationship.update.mockResolvedValue({ id: "relationship-existing" });
     prismaMock.contextGraphEvidenceRef.findFirst.mockResolvedValue(null);
     prismaMock.contextGraphEvidenceRef.create.mockResolvedValue({ id: "evidence-1" });
     prismaMock.contextGraphProposedDiff.update.mockResolvedValue({ id: "diff-1", status: "applied" });
@@ -221,6 +230,57 @@ describe("context graph domain", () => {
     expect(appendEventsMock).toHaveBeenCalledWith(expect.anything(), [expect.objectContaining({
       type: "context-graph.diff.applied",
     })]);
+  });
+
+  it("applies proposed updates to existing objects and relationships by id", async () => {
+    prismaMock.contextGraphProposedDiff.findFirst.mockResolvedValue({
+      id: "diff-update-1",
+      workspaceId: "ws-1",
+      status: "pending",
+      reviewedAt: null,
+      proposedByAgentRunId: null,
+      diffJson: {
+        objectUpdates: [{
+          id: "step-1",
+          title: "Decision to proceed",
+          status: "approved",
+          properties: { workState: "stalled", nextAction: "NDA required before financials released." },
+        }],
+        relationshipUpdates: [{
+          id: "dependency-1",
+          status: "archived",
+        }],
+      },
+    });
+    prismaMock.contextGraphObject.findFirst.mockResolvedValueOnce({ id: "step-1" });
+    prismaMock.contextGraphObject.update.mockResolvedValueOnce({ id: "step-1" });
+    prismaMock.contextGraphRelationship.findFirst.mockResolvedValueOnce({ id: "dependency-1" });
+    prismaMock.contextGraphRelationship.update.mockResolvedValueOnce({ id: "dependency-1" });
+
+    await expect(applyContextGraphProposedDiff(actor, {
+      workspaceId: "ws-1",
+      proposedDiffId: "diff-update-1",
+    })).resolves.toMatchObject({ id: "diff-1", status: "applied" });
+
+    expect(prismaMock.contextGraphObject.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "step-1" },
+      data: expect.objectContaining({
+        title: "Decision to proceed",
+        status: "approved",
+        properties: expect.objectContaining({ workState: "stalled" }),
+      }),
+    }));
+    expect(prismaMock.contextGraphRelationship.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "dependency-1" },
+      data: expect.objectContaining({ status: "archived" }),
+    }));
+    expect(recordAuditMock).toHaveBeenCalledWith(expect.anything(), actor, expect.objectContaining({
+      action: "context-graph.diff.applied",
+      meta: expect.objectContaining({
+        objectUpdateIds: ["step-1"],
+        relationshipUpdateIds: ["dependency-1"],
+      }),
+    }));
   });
 
   it("imports an approved context map with graph data, evidence, and layout", async () => {
@@ -602,6 +662,475 @@ describe("context graph domain", () => {
         }),
       }),
     }));
+  });
+
+  it("recomputes canonical relationship dedupe keys when identity fields change", async () => {
+    prismaMock.contextGraphProposedDiff.findFirst.mockResolvedValue({
+      id: "diff-update-relationship-1",
+      workspaceId: "ws-1",
+      status: "pending",
+      reviewedAt: null,
+      proposedByAgentRunId: null,
+      diffJson: {
+        relationshipUpdates: [{
+          id: "dependency-1",
+          sourceObjectId: " step-2 ",
+          relationshipType: " blocks ",
+        }],
+      },
+    });
+    prismaMock.contextGraphRelationship.findFirst.mockResolvedValueOnce({
+      id: "dependency-1",
+      sourceObjectId: "step-1",
+      targetObjectId: "step-3",
+      relationshipType: "depends_on",
+      sourceEntityType: "ContextMapView",
+      sourceEntityId: "map-1",
+      dedupeKey: "old-key",
+    });
+    prismaMock.contextGraphObject.findFirst.mockResolvedValueOnce({ id: "step-2" });
+    prismaMock.contextGraphRelationship.update.mockResolvedValueOnce({ id: "dependency-1" });
+
+    await expect(applyContextGraphProposedDiff(actor, {
+      workspaceId: "ws-1",
+      proposedDiffId: "diff-update-relationship-1",
+    })).resolves.toMatchObject({ id: "diff-1", status: "applied" });
+
+    expect(prismaMock.contextGraphRelationship.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "dependency-1" },
+      data: expect.objectContaining({
+        sourceObject: { connect: { id: "step-2" } },
+        relationshipType: "blocks",
+        dedupeKey: "ws-1:step-2:blocks:step-3:ContextMapView:map-1",
+      }),
+    }));
+  });
+
+  it("recomputes canonical object dedupe keys when source identity fields change", async () => {
+    prismaMock.contextGraphProposedDiff.findFirst.mockResolvedValue({
+      id: "diff-update-object-source-1",
+      workspaceId: "ws-1",
+      status: "pending",
+      reviewedAt: null,
+      proposedByAgentRunId: null,
+      diffJson: {
+        objectUpdates: [{
+          id: "step-1",
+          sourceEntityId: "scorecard-row-2",
+        }],
+      },
+    });
+    prismaMock.contextGraphObject.findFirst.mockResolvedValueOnce({
+      id: "step-1",
+      sourceEntityType: "BrainDocument",
+      sourceEntityId: "scorecard-row-1",
+      dedupeKey: "ws-1:BrainDocument:scorecard-row-1",
+    });
+    prismaMock.contextGraphObject.update.mockResolvedValueOnce({ id: "step-1" });
+
+    await expect(applyContextGraphProposedDiff(actor, {
+      workspaceId: "ws-1",
+      proposedDiffId: "diff-update-object-source-1",
+    })).resolves.toMatchObject({ id: "diff-1", status: "applied" });
+
+    expect(prismaMock.contextGraphObject.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "step-1" },
+      data: expect.objectContaining({
+        sourceEntityId: "scorecard-row-2",
+        dedupeKey: "ws-1:BrainDocument:scorecard-row-2",
+      }),
+    }));
+  });
+
+  it("creates review-first map change proposals for clear selected-step instructions", async () => {
+    prismaMock.contextMapView.findFirst.mockResolvedValueOnce({
+      id: "map-1",
+      workspaceId: "ws-1",
+      name: "CRNA Critical Path",
+      viewType: "process",
+      query: {},
+      createdByUserId: null,
+    });
+    prismaMock.contextGraphObject.findMany.mockResolvedValueOnce([
+      {
+        id: "step-1",
+        workspaceId: "ws-1",
+        objectType: "ProcessStep",
+        title: "Decision to proceed",
+        status: "approved",
+        properties: { workState: "moving" },
+      },
+    ]);
+    prismaMock.contextGraphProposedDiff.create.mockResolvedValueOnce({
+      id: "diff-change-1",
+      status: "pending",
+      reason: "Map change request for Decision to proceed: Set next action to get NDA signed",
+      createdAt: new Date("2026-05-25T00:00:00.000Z"),
+      diffJson: {
+        objectUpdates: [{
+          id: "step-1",
+          properties: { workState: "moving", nextAction: "get NDA signed" },
+        }],
+      },
+    });
+
+    await expect(createContextMapChangeProposal(actor, {
+      workspaceId: "ws-1",
+      mapViewId: "map-1",
+      selectedObjectIds: ["step-1"],
+      instruction: "Set next action to get NDA signed",
+    })).resolves.toMatchObject({
+      mode: "proposed",
+      proposedDiffId: "diff-change-1",
+      status: "pending",
+    });
+
+    expect(prismaMock.contextGraphProposedDiff.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        diffJson: expect.objectContaining({
+          objectUpdates: [expect.objectContaining({
+            id: "step-1",
+            properties: expect.objectContaining({ nextAction: "get NDA signed" }),
+          })],
+        }),
+      }),
+    }));
+    expect(prismaMock.contextGraphObject.update).not.toHaveBeenCalled();
+  });
+
+  it("keeps explicitly selected map-agent targets even when they are outside the first map page", async () => {
+    prismaMock.contextMapView.findFirst.mockResolvedValueOnce({
+      id: "map-1",
+      workspaceId: "ws-1",
+      name: "CRNA Critical Path",
+      viewType: "process",
+      query: {},
+      createdByUserId: null,
+    });
+    prismaMock.contextGraphObject.findMany
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        {
+          id: "step-201",
+          workspaceId: "ws-1",
+          objectType: "ProcessStep",
+          title: "Late selected step",
+          status: "approved",
+          properties: {},
+        },
+      ]);
+    prismaMock.contextGraphProposedDiff.create.mockResolvedValueOnce({
+      id: "diff-change-201",
+      status: "pending",
+      reason: "Map change request for Late selected step: Rename it to Final selected step",
+      createdAt: new Date("2026-05-25T00:00:00.000Z"),
+      diffJson: {
+        objectUpdates: [{
+          id: "step-201",
+          title: "Final selected step",
+        }],
+      },
+    });
+
+    await expect(createContextMapChangeProposal(actor, {
+      workspaceId: "ws-1",
+      mapViewId: "map-1",
+      selectedObjectIds: ["step-201"],
+      instruction: "Rename it to Final selected step",
+    })).resolves.toMatchObject({
+      mode: "proposed",
+      proposedDiffId: "diff-change-201",
+    });
+
+    expect(prismaMock.contextGraphProposedDiff.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        diffJson: expect.objectContaining({
+          objectUpdates: [expect.objectContaining({
+            id: "step-201",
+            title: "Final selected step",
+          })],
+        }),
+      }),
+    }));
+  });
+
+  it("searches the full map scope before inferring named map-agent targets", async () => {
+    prismaMock.contextMapView.findFirst.mockResolvedValueOnce({
+      id: "map-1",
+      workspaceId: "ws-1",
+      name: "CRNA Critical Path",
+      viewType: "process",
+      query: {},
+      createdByUserId: null,
+    });
+    prismaMock.contextGraphObject.findMany.mockResolvedValueOnce([
+      {
+        id: "step-300",
+        workspaceId: "ws-1",
+        objectType: "ProcessStep",
+        title: "Decision to proceed",
+        status: "approved",
+        properties: {},
+      },
+    ]);
+    prismaMock.contextGraphProposedDiff.create.mockResolvedValueOnce({
+      id: "diff-change-300",
+      status: "pending",
+      reason: "Map change request for Decision to proceed: Set next action to get NDA signed for Decision to proceed",
+      createdAt: new Date("2026-05-25T00:00:00.000Z"),
+      diffJson: {
+        objectUpdates: [{
+          id: "step-300",
+          properties: { nextAction: "get NDA signed for Decision to proceed" },
+        }],
+      },
+    });
+
+    await expect(createContextMapChangeProposal(actor, {
+      workspaceId: "ws-1",
+      mapViewId: "map-1",
+      instruction: "Set next action to get NDA signed for Decision to proceed",
+    })).resolves.toMatchObject({
+      mode: "proposed",
+      proposedDiffId: "diff-change-300",
+    });
+
+    expect(prismaMock.contextGraphObject.findMany.mock.calls[0][0]).not.toHaveProperty("take");
+    expect(prismaMock.contextGraphObject.findMany.mock.calls[0][0]).toMatchObject({
+      where: expect.objectContaining({ status: { notIn: ["archived", "stale"] } }),
+    });
+  });
+
+  it("does not infer map-agent targets from ambiguous single-word titles", async () => {
+    prismaMock.contextMapView.findFirst.mockResolvedValueOnce({
+      id: "map-1",
+      workspaceId: "ws-1",
+      name: "CRNA Critical Path",
+      viewType: "process",
+      query: {},
+      createdByUserId: null,
+    });
+    prismaMock.contextGraphObject.findMany.mockResolvedValueOnce([
+      { id: "step-1", workspaceId: "ws-1", objectType: "ProcessStep", title: "Step", status: "approved", properties: {} },
+    ]);
+
+    await expect(createContextMapChangeProposal(actor, {
+      workspaceId: "ws-1",
+      mapViewId: "map-1",
+      instruction: "Set next action to check status for this step",
+    })).resolves.toMatchObject({
+      mode: "needs_clarification",
+    });
+
+    expect(prismaMock.contextGraphProposedDiff.create).not.toHaveBeenCalled();
+  });
+
+  it("asks for clarification instead of connecting an ambiguous target set", async () => {
+    prismaMock.contextMapView.findFirst.mockResolvedValueOnce({
+      id: "map-1",
+      workspaceId: "ws-1",
+      name: "CRNA Critical Path",
+      viewType: "process",
+      query: {},
+      createdByUserId: null,
+    });
+    prismaMock.contextGraphObject.findMany.mockResolvedValueOnce([
+      { id: "step-1", workspaceId: "ws-1", objectType: "ProcessStep", title: "Decision to proceed", status: "approved", properties: {} },
+      { id: "step-2", workspaceId: "ws-1", objectType: "ProcessStep", title: "Start date defined", status: "approved", properties: {} },
+      { id: "step-3", workspaceId: "ws-1", objectType: "ProcessStep", title: "Holdco formed", status: "approved", properties: {} },
+    ]);
+
+    await expect(createContextMapChangeProposal(actor, {
+      workspaceId: "ws-1",
+      mapViewId: "map-1",
+      selectedObjectIds: ["step-1", "step-2", "step-3"],
+      instruction: "Connect these selected steps",
+    })).resolves.toMatchObject({
+      mode: "needs_clarification",
+      message: "Select exactly two process items before asking to connect them.",
+    });
+
+    expect(prismaMock.contextGraphProposedDiff.create).not.toHaveBeenCalled();
+  });
+
+  it("asks for clarification instead of proposing no-op selected map-agent updates", async () => {
+    prismaMock.contextMapView.findFirst.mockResolvedValueOnce({
+      id: "map-1",
+      workspaceId: "ws-1",
+      name: "CRNA Critical Path",
+      viewType: "process",
+      query: {},
+      createdByUserId: null,
+    });
+    prismaMock.contextGraphObject.findMany.mockResolvedValueOnce([
+      { id: "step-1", workspaceId: "ws-1", objectType: "ProcessStep", title: "Decision to proceed", status: "approved", properties: {} },
+    ]);
+
+    await expect(createContextMapChangeProposal(actor, {
+      workspaceId: "ws-1",
+      mapViewId: "map-1",
+      selectedObjectIds: ["step-1"],
+      instruction: "Update this step",
+    })).resolves.toMatchObject({
+      mode: "needs_clarification",
+    });
+
+    expect(prismaMock.contextGraphProposedDiff.create).not.toHaveBeenCalled();
+  });
+
+  it("creates one archive proposal for every explicitly selected map-agent target", async () => {
+    prismaMock.contextMapView.findFirst.mockResolvedValueOnce({
+      id: "map-1",
+      workspaceId: "ws-1",
+      name: "CRNA Critical Path",
+      viewType: "process",
+      query: {},
+      createdByUserId: null,
+    });
+    prismaMock.contextGraphObject.findMany.mockResolvedValueOnce([
+      { id: "step-1", workspaceId: "ws-1", objectType: "ProcessStep", title: "Decision to proceed", status: "approved", properties: {} },
+      { id: "step-2", workspaceId: "ws-1", objectType: "ProcessStep", title: "Start date defined", status: "approved", properties: {} },
+    ]);
+    prismaMock.contextGraphProposedDiff.create.mockResolvedValueOnce({
+      id: "diff-archive-1",
+      status: "pending",
+      reason: "Map change request for Decision to proceed, Start date defined: Archive selected steps",
+      createdAt: new Date("2026-05-25T00:00:00.000Z"),
+      diffJson: {
+        objectUpdates: [
+          { id: "step-1", status: "archived" },
+          { id: "step-2", status: "archived" },
+        ],
+      },
+    });
+
+    await expect(createContextMapChangeProposal(actor, {
+      workspaceId: "ws-1",
+      mapViewId: "map-1",
+      selectedObjectIds: ["step-1", "step-2"],
+      instruction: "Archive selected steps",
+    })).resolves.toMatchObject({
+      mode: "proposed",
+      proposedDiffId: "diff-archive-1",
+    });
+
+    expect(prismaMock.contextGraphProposedDiff.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        diffJson: expect.objectContaining({
+          objectUpdates: [
+            expect.objectContaining({ id: "step-1", status: "archived" }),
+            expect.objectContaining({ id: "step-2", status: "archived" }),
+          ],
+        }),
+      }),
+    }));
+  });
+
+  it("honors explicitly selected non-process canvas objects for archive proposals", async () => {
+    prismaMock.contextMapView.findFirst.mockResolvedValueOnce({
+      id: "map-1",
+      workspaceId: "ws-1",
+      name: "CRNA Critical Path",
+      viewType: "process",
+      query: {},
+      createdByUserId: null,
+    });
+    prismaMock.contextGraphObject.findMany
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        { id: "task-1", workspaceId: "ws-1", objectType: "Task", title: "Review materials", status: "approved", properties: {} },
+      ]);
+    prismaMock.contextGraphProposedDiff.create.mockResolvedValueOnce({
+      id: "diff-archive-task-1",
+      status: "pending",
+      reason: "Map change request for Review materials: Archive selected item",
+      createdAt: new Date("2026-05-25T00:00:00.000Z"),
+      diffJson: { objectUpdates: [{ id: "task-1", status: "archived" }] },
+    });
+
+    await expect(createContextMapChangeProposal(actor, {
+      workspaceId: "ws-1",
+      mapViewId: "map-1",
+      selectedObjectIds: ["task-1"],
+      instruction: "Archive selected item",
+    })).resolves.toMatchObject({
+      mode: "proposed",
+      proposedDiffId: "diff-archive-task-1",
+    });
+
+    expect(prismaMock.contextGraphProposedDiff.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        diffJson: expect.objectContaining({
+          objectUpdates: [expect.objectContaining({ id: "task-1", status: "archived" })],
+        }),
+      }),
+    }));
+  });
+
+  it("preserves add-step titles containing in or to", async () => {
+    prismaMock.contextMapView.findFirst.mockResolvedValueOnce({
+      id: "map-1",
+      workspaceId: "ws-1",
+      name: "CRNA Critical Path",
+      viewType: "process",
+      query: {},
+      createdByUserId: null,
+    });
+    prismaMock.contextGraphObject.findMany.mockResolvedValueOnce([
+      { id: "process-1", workspaceId: "ws-1", objectType: "Process", title: "Buying", status: "approved", properties: {} },
+    ]);
+    prismaMock.contextGraphProposedDiff.create.mockResolvedValueOnce({
+      id: "diff-add-step-1",
+      status: "pending",
+      reason: "Map change request for Buying: Add step Move to legal review",
+      createdAt: new Date("2026-05-25T00:00:00.000Z"),
+      diffJson: {
+        objects: [{ ref: "requested-step", objectType: "ProcessStep", title: "Move to legal review" }],
+      },
+    });
+
+    await expect(createContextMapChangeProposal(actor, {
+      workspaceId: "ws-1",
+      mapViewId: "map-1",
+      selectedObjectIds: ["process-1"],
+      instruction: "Add step Move to legal review",
+    })).resolves.toMatchObject({
+      mode: "proposed",
+      proposedDiffId: "diff-add-step-1",
+    });
+
+    expect(prismaMock.contextGraphProposedDiff.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        diffJson: expect.objectContaining({
+          objects: [expect.objectContaining({ title: "Move to legal review" })],
+        }),
+      }),
+    }));
+  });
+
+  it("asks for clarification instead of proposing ambiguous map-agent changes", async () => {
+    prismaMock.contextMapView.findFirst.mockResolvedValueOnce({
+      id: "map-1",
+      workspaceId: "ws-1",
+      name: "CRNA Critical Path",
+      viewType: "process",
+      query: {},
+      createdByUserId: null,
+    });
+    prismaMock.contextGraphObject.findMany.mockResolvedValueOnce([
+      { id: "step-1", workspaceId: "ws-1", objectType: "ProcessStep", title: "Decision to proceed", status: "approved", properties: {} },
+      { id: "step-2", workspaceId: "ws-1", objectType: "ProcessStep", title: "Start date defined", status: "approved", properties: {} },
+    ]);
+
+    await expect(createContextMapChangeProposal(actor, {
+      workspaceId: "ws-1",
+      mapViewId: "map-1",
+      instruction: "Update this process",
+    })).resolves.toMatchObject({
+      mode: "needs_clarification",
+    });
+
+    expect(prismaMock.contextGraphProposedDiff.create).not.toHaveBeenCalled();
   });
 
   it("uses bounded canonical missing-fact dedupe keys per target and gap kind", async () => {
