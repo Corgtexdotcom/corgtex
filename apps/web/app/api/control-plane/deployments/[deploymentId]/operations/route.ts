@@ -25,6 +25,7 @@ const operationSchema = z.object({
     "runtime.retry_failed_job",
     "runtime.discard_failed_job",
     "documents.upload_text",
+    "context_graph.import_map",
     "proposals.list",
     "proposals.get",
     "proposals.create",

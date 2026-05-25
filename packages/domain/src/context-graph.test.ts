@@ -5,6 +5,7 @@ import {
   createMissingRegionFactsProposal,
   createPersonalContextMapView,
   createContextGraphProposedDiff,
+  importContextGraphMap,
   listContextMapViews,
   reviewContextGraphProposedDiff,
   updateContextGraphProposedDiff,
@@ -42,6 +43,7 @@ const { prismaMock, appendEventsMock, recordAuditMock, requireWorkspaceMembershi
       create: vi.fn(),
       findFirst: vi.fn(),
       findMany: vi.fn(),
+      update: vi.fn(),
     },
     contextMapLayoutItem: {
       create: vi.fn(),
@@ -111,6 +113,14 @@ describe("context graph domain", () => {
       viewType: "process",
       query: {},
       createdByUserId: "user-1",
+    });
+    prismaMock.contextMapView.update.mockResolvedValue({
+      id: "map-1",
+      workspaceId: "ws-1",
+      name: "Master process map",
+      viewType: "process",
+      query: {},
+      createdByUserId: null,
     });
     prismaMock.contextMapLayoutItem.findMany.mockResolvedValue([]);
     prismaMock.contextMapLayoutItem.upsert.mockResolvedValue({ id: "layout-1" });
@@ -210,6 +220,89 @@ describe("context graph domain", () => {
     }));
     expect(appendEventsMock).toHaveBeenCalledWith(expect.anything(), [expect.objectContaining({
       type: "context-graph.diff.applied",
+    })]);
+  });
+
+  it("imports an approved context map with graph data, evidence, and layout", async () => {
+    prismaMock.contextMapView.findFirst.mockResolvedValueOnce({
+      id: "map-import-1",
+      workspaceId: "ws-1",
+      name: "CRNA Critical Path",
+      viewType: "process",
+      query: {},
+      createdByUserId: null,
+    });
+    prismaMock.contextMapView.update.mockResolvedValueOnce({
+      id: "map-import-1",
+      workspaceId: "ws-1",
+      name: "CRNA Critical Path",
+      viewType: "process",
+      query: {},
+      createdByUserId: null,
+    });
+    prismaMock.contextGraphObject.upsert
+      .mockResolvedValueOnce({ id: "process-1", objectType: "Process", title: "CR North America critical path", status: "approved" })
+      .mockResolvedValueOnce({ id: "step-1", objectType: "ProcessStep", title: "Decision to proceed", status: "approved" });
+    prismaMock.contextGraphObject.findFirst
+      .mockResolvedValueOnce({ id: "process-1" })
+      .mockResolvedValueOnce({ id: "step-1" })
+      .mockResolvedValueOnce({ id: "step-1" });
+    prismaMock.contextGraphRelationship.upsert.mockResolvedValueOnce({
+      id: "relationship-1",
+      relationshipType: "part_of",
+      status: "approved",
+    });
+
+    await expect(importContextGraphMap(actor, {
+      workspaceId: "ws-1",
+      name: "CRNA Critical Path",
+      query: {
+        mode: "criticalPath",
+        objectTypes: ["Process", "ProcessStep"],
+        relationshipTypes: ["part_of"],
+      },
+      objects: [
+        { ref: "process", objectType: "Process", title: "CR North America critical path", dedupeKey: "ws-1:crna:process" },
+        { ref: "step", objectType: "ProcessStep", title: "Decision to proceed", dedupeKey: "ws-1:crna:step:decision", properties: { workState: "stalled" } },
+      ],
+      relationships: [
+        { ref: "part", sourceRef: "step", targetRef: "process", relationshipType: "part_of", dedupeKey: "ws-1:crna:step:decision:part_of:process" },
+      ],
+      evidenceRefs: [
+        { objectRef: "step", sourceType: "DOCUMENT", sourceId: "doc-1", quote: "NDA required before financials released." },
+        { relationshipRef: "part", sourceType: "DOCUMENT", sourceId: "doc-1", quote: "Decision is part of the critical path." },
+      ],
+      layoutItems: [
+        { objectRef: "step", x: 280, y: 120, width: 250, height: 112 },
+      ],
+    })).resolves.toEqual({
+      mapViewId: "map-import-1",
+      objectCount: 2,
+      relationshipCount: 1,
+      evidenceCount: 2,
+      layoutItemCount: 1,
+    });
+
+    expect(prismaMock.contextMapView.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "map-import-1" },
+      data: expect.objectContaining({ viewType: "process" }),
+    }));
+    expect(prismaMock.contextGraphObject.upsert).toHaveBeenCalledTimes(2);
+    expect(prismaMock.contextGraphRelationship.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: { dedupeKey: "ws-1:crna:step:decision:part_of:process" },
+    }));
+    expect(prismaMock.contextGraphEvidenceRef.create).toHaveBeenCalledTimes(2);
+    expect(prismaMock.contextMapLayoutItem.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: { mapViewId_objectId: { mapViewId: "map-import-1", objectId: "step-1" } },
+      update: expect.objectContaining({ x: 280, y: 120 }),
+    }));
+    expect(recordAuditMock).toHaveBeenCalledWith(expect.anything(), actor, expect.objectContaining({
+      action: "context-graph.map.imported",
+      entityType: "ContextMapView",
+      entityId: "map-import-1",
+    }));
+    expect(appendEventsMock).toHaveBeenCalledWith(expect.anything(), [expect.objectContaining({
+      type: "context-graph.map.imported",
     })]);
   });
 

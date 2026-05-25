@@ -114,6 +114,7 @@ import {
   searchConnectedExternalMcpContext,
   buildSelectedRegionContext,
   createContextGraphProposedDiff,
+  importContextGraphMap,
   getContextMapData,
 } from "@corgtex/domain";
 import type { AgentScope } from "@corgtex/domain";
@@ -189,6 +190,7 @@ const TOOL_CAPABILITIES = {
   get_context_evidence: { scopes: ["context-graph:read"] },
   get_selected_region_context: { scopes: ["context-graph:read"] },
   create_context_graph_proposed_diff: { scopes: ["context-graph:propose"] },
+  import_context_graph_map: { scopes: ["context-graph:approve"], sensitive: true },
   search: { scopes: ["brain:read"] },
   fetch: { scopes: ["brain:read"] },
   list_connected_tools: { scopes: ["external-tools:read"] },
@@ -664,6 +666,42 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         evidence,
       });
       return jsonResult({ id: proposedDiff.id, status: proposedDiff.status, webUrl: webUrl(workspaceId, "/maps") });
+    },
+  );
+
+  tool(
+    "import_context_graph_map",
+    "Import an approved context graph map with objects, relationships, evidence refs, and layout in one audited operation.",
+    {
+      name: z.string().describe("Master context map view name"),
+      viewType: z.string().optional().describe("Context map view type, default process"),
+      query: z.record(z.string(), z.unknown()).optional(),
+      objects: z.array(z.record(z.string(), z.any())).min(1),
+      relationships: z.array(z.record(z.string(), z.any())).optional(),
+      evidenceRefs: z.array(z.record(z.string(), z.any())).optional(),
+      layoutItems: z.array(z.record(z.string(), z.any())).optional(),
+    },
+    async (params: {
+      name: string;
+      viewType?: string;
+      query?: Record<string, unknown>;
+      objects: Array<Record<string, unknown>>;
+      relationships?: Array<Record<string, unknown>>;
+      evidenceRefs?: Array<Record<string, unknown>>;
+      layoutItems?: Array<Record<string, unknown>>;
+    }) => {
+      requireToolCapability("import_context_graph_map");
+      const result = await importContextGraphMap(actor, {
+        workspaceId,
+        name: params.name,
+        viewType: params.viewType,
+        query: params.query,
+        objects: params.objects as any,
+        relationships: params.relationships as any,
+        evidenceRefs: params.evidenceRefs as any,
+        layoutItems: params.layoutItems as any,
+      });
+      return jsonResult({ ...result, webUrl: webUrl(workspaceId, `/maps?view=${result.mapViewId}`) });
     },
   );
 

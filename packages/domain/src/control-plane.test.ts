@@ -2970,6 +2970,56 @@ describe("control plane domain", () => {
     }));
   });
 
+  it("routes context map imports through the audited support connector", async () => {
+    const { runCustomerSupportOperation } = await import("./control-plane");
+    prismaMock.supportOperation.create.mockResolvedValueOnce({
+      id: "op-context-map",
+      action: "context_graph.import_map",
+    });
+    prismaMock.customerDeployment.findUnique.mockResolvedValue({
+      id: "inst-1",
+      label: "Acme",
+      url: "https://customer.test",
+      supportMcpUrl: "https://customer.test/api/mcp",
+      supportCredentialEnc: "encrypted-token",
+      supportConnectorStatus: "connected",
+    });
+    prismaMock.supportOperation.update.mockResolvedValueOnce({
+      id: "op-context-map",
+      status: "COMPLETED",
+    });
+
+    await runCustomerSupportOperation(operatorActor, {
+      deploymentId: "inst-1",
+      action: "context_graph.import_map",
+      reason: "Import approved critical-path map from support scorecard.",
+      arguments: {
+        name: "CRNA Critical Path",
+        objects: [{ ref: "process", objectType: "Process", title: "CR North America critical path" }],
+      },
+    });
+
+    expect(fetch).toHaveBeenCalledTimes(3);
+    const toolCall = vi.mocked(fetch).mock.calls[1]?.[1] as RequestInit;
+    expect(JSON.parse(String(toolCall.body))).toEqual(expect.objectContaining({
+      params: expect.objectContaining({
+        name: "import_context_graph_map",
+        arguments: expect.objectContaining({
+          name: "CRNA Critical Path",
+          objects: [{ ref: "process", objectType: "Process", title: "CR North America critical path" }],
+        }),
+      }),
+    }));
+    expect(prismaMock.supportOperation.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        action: "context_graph.import_map",
+        inputSummary: expect.objectContaining({
+          name: "CRNA Critical Path",
+        }),
+      }),
+    }));
+  });
+
   it("refreshes cached connector snapshots without remote calls when connector setup is missing", async () => {
     const { refreshControlPlaneFleetSnapshots } = await import("./control-plane");
     prismaMock.customerDeployment.findUnique.mockResolvedValueOnce({

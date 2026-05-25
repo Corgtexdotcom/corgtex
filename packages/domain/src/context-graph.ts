@@ -123,6 +123,16 @@ type ContextMapLayoutUpdateInput = {
   items: ContextMapLayoutItemInput[];
 };
 
+type ContextMapImportLayoutItemInput = {
+  objectId?: string;
+  objectRef?: string;
+  x: number;
+  y: number;
+  width?: number | null;
+  height?: number | null;
+  visualState?: JsonRecord;
+};
+
 const DEFAULT_CONTEXT_MAP_VIEW_CONFIGS: Array<{
   name: string;
   viewType: ContextMapViewType;
@@ -162,6 +172,25 @@ export type ContextGraphDiffInput = {
   relationships?: ContextGraphRelationshipInput[];
   evidenceRefs?: ContextGraphEvidenceInput[];
   mapLayoutUpdates?: ContextMapLayoutUpdateInput[];
+};
+
+export type ContextGraphMapImportInput = {
+  name: string;
+  viewType?: string | null;
+  query?: JsonRecord;
+  objects: ContextGraphObjectInput[];
+  relationships?: ContextGraphRelationshipInput[];
+  evidenceRefs?: ContextGraphEvidenceInput[];
+  layoutItems?: ContextMapImportLayoutItemInput[];
+  agentRunId?: string | null;
+};
+
+export type ContextGraphMapImportResult = {
+  mapViewId: string;
+  objectCount: number;
+  relationshipCount: number;
+  evidenceCount: number;
+  layoutItemCount: number;
 };
 
 function requireKnownValue<T extends readonly string[]>(value: string, allowed: T, label: string): asserts value is T[number] {
@@ -510,6 +539,169 @@ async function applyMapLayoutUpdateWithTx(
   return { mapViewId: update.mapViewId, updated: update.items.length };
 }
 
+function validateEvidenceInput(input: ContextGraphEvidenceInput) {
+  const sourceType = requireStringField(input.sourceType, "Evidence source type is required.").trim();
+  const sourceId = requireStringField(input.sourceId, "Evidence source id is required.").trim();
+  invariant(sourceType.length > 0, 400, "INVALID_INPUT", "Evidence source type is required.");
+  invariant(sourceId.length > 0, 400, "INVALID_INPUT", "Evidence source id is required.");
+}
+
+function validateImportLayoutItem(input: ContextMapImportLayoutItemInput) {
+  invariant(Boolean(input.objectId) !== Boolean(input.objectRef), 400, "INVALID_INPUT", "Map import layout items must point to exactly one object id or object ref.");
+  invariant(Number.isFinite(input.x) && Number.isFinite(input.y), 400, "INVALID_INPUT", "Layout coordinates must be finite numbers.");
+}
+
+function normalizeMapImportInput(input: ContextGraphMapImportInput) {
+  const name = requireStringField(input.name, "Context map name is required.").trim();
+  invariant(name.length > 0, 400, "INVALID_INPUT", "Context map name is required.");
+  const viewType = (input.viewType?.trim() || "process");
+  requireKnownValue(viewType, CONTEXT_MAP_VIEW_TYPES, "context map view type");
+  invariant(Array.isArray(input.objects), 400, "INVALID_INPUT", "Context map import objects must be an array.");
+  invariant(input.objects.length > 0, 400, "INVALID_INPUT", "Context map import requires at least one object.");
+  requireOptionalArray(input.relationships, "Context map import relationships must be an array.");
+  requireOptionalArray(input.evidenceRefs, "Context map import evidence refs must be an array.");
+  requireOptionalArray(input.layoutItems, "Context map import layout items must be an array.");
+
+  const objectTypes = new Set<string>();
+  const relationshipTypes = new Set<string>();
+  for (const object of input.objects) {
+    const normalized = normalizeObjectInput(object);
+    objectTypes.add(normalized.objectType);
+  }
+  for (const relationship of input.relationships ?? []) {
+    const normalized = normalizeRelationshipInput(relationship);
+    relationshipTypes.add(normalized.relationshipType);
+  }
+  for (const evidence of input.evidenceRefs ?? []) validateEvidenceInput(evidence);
+  for (const item of input.layoutItems ?? []) validateImportLayoutItem(item);
+
+  return {
+    name,
+    viewType,
+    query: input.query
+      ? jsonObject(input.query)
+      : {
+        mode: "imported",
+        objectTypes: [...objectTypes].sort(),
+        relationshipTypes: [...relationshipTypes].sort(),
+      } satisfies Prisma.InputJsonObject,
+  };
+}
+
+function layoutItemFromImport(item: ContextMapImportLayoutItemInput, refToObjectId: Map<string, string>) {
+  const objectId = item.objectId ?? (item.objectRef ? refToObjectId.get(item.objectRef) : undefined);
+  invariant(objectId, 400, "INVALID_INPUT", "Map import layout item object ref was not found.");
+  return normalizeLayoutItem({
+    objectId,
+    x: item.x,
+    y: item.y,
+    width: item.width,
+    height: item.height,
+    visualState: item.visualState,
+  });
+}
+
+export async function importContextGraphMap(actor: AppActor, params: ContextGraphMapImportInput & {
+  workspaceId: string;
+}): Promise<ContextGraphMapImportResult> {
+  await requireGraphApprove(actor, params.workspaceId);
+  const mapInput = normalizeMapImportInput(params);
+
+  return prisma.$transaction(async (tx) => {
+    const existingMapView = await tx.contextMapView.findFirst({
+      where: { workspaceId: params.workspaceId, name: mapInput.name, createdByUserId: null },
+      orderBy: { createdAt: "asc" },
+    });
+    const mapView = existingMapView
+      ? await tx.contextMapView.update({
+        where: { id: existingMapView.id },
+        data: {
+          viewType: mapInput.viewType,
+          query: mapInput.query,
+        },
+      })
+      : await tx.contextMapView.create({
+        data: {
+          workspaceId: params.workspaceId,
+          name: mapInput.name,
+          viewType: mapInput.viewType,
+          query: mapInput.query,
+          createdByUserId: null,
+        },
+      });
+
+    const refToObjectId = new Map<string, string>();
+    const refToRelationshipId = new Map<string, string>();
+    const objectIds: string[] = [];
+    const relationshipIds: string[] = [];
+
+    for (const objectInput of params.objects) {
+      const object = await upsertObjectWithTx(tx, actor, params.workspaceId, {
+        ...objectInput,
+        status: objectInput.status ?? "approved",
+      }, params.agentRunId);
+      objectIds.push(object.id);
+      if (objectInput.ref) refToObjectId.set(objectInput.ref, object.id);
+    }
+
+    for (const relationshipInput of params.relationships ?? []) {
+      const relationship = await upsertRelationshipWithTx(tx, actor, params.workspaceId, {
+        ...relationshipInput,
+        status: relationshipInput.status ?? "approved",
+      }, refToObjectId, params.agentRunId);
+      relationshipIds.push(relationship.id);
+      if (relationshipInput.ref) refToRelationshipId.set(relationshipInput.ref, relationship.id);
+    }
+
+    for (const evidenceInput of params.evidenceRefs ?? []) {
+      await attachEvidenceWithTx(tx, params.workspaceId, evidenceInput, refToObjectId, refToRelationshipId);
+    }
+
+    const layoutItems = (params.layoutItems ?? []).map((item) => layoutItemFromImport(item, refToObjectId));
+    if (layoutItems.length) {
+      await applyMapLayoutUpdateWithTx(tx, params.workspaceId, {
+        mapViewId: mapView.id,
+        items: layoutItems,
+      }, {
+        actor,
+        requireMasterOrOwner: true,
+      });
+    }
+
+    const result = {
+      mapViewId: mapView.id,
+      objectCount: objectIds.length,
+      relationshipCount: relationshipIds.length,
+      evidenceCount: params.evidenceRefs?.length ?? 0,
+      layoutItemCount: layoutItems.length,
+    };
+
+    await recordAudit(tx, actor, {
+      workspaceId: params.workspaceId,
+      action: "context-graph.map.imported",
+      entityType: "ContextMapView",
+      entityId: mapView.id,
+      meta: {
+        name: mapView.name,
+        viewType: mapView.viewType,
+        ...result,
+      },
+    });
+    await appendEvents(tx, [{
+      workspaceId: params.workspaceId,
+      type: "context-graph.map.imported",
+      aggregateType: "ContextMapView",
+      aggregateId: mapView.id,
+      payload: {
+        name: mapView.name,
+        ...result,
+      },
+    }]);
+
+    return result;
+  });
+}
+
 export async function upsertContextGraphObject(actor: AppActor, params: ContextGraphObjectInput & {
   workspaceId: string;
   agentRunId?: string | null;
@@ -825,10 +1017,7 @@ function validateDiff(diff: unknown): asserts diff is ContextGraphDiffInput {
   }
   for (const evidence of evidenceRefs ?? []) {
     invariant(isJsonRecord(evidence), 400, "INVALID_INPUT", "Context graph diff evidence refs must be objects.");
-    const sourceType = requireStringField(evidence.sourceType, "Evidence source type is required.").trim();
-    const sourceId = requireStringField(evidence.sourceId, "Evidence source id is required.").trim();
-    invariant(sourceType.length > 0, 400, "INVALID_INPUT", "Evidence source type is required.");
-    invariant(sourceId.length > 0, 400, "INVALID_INPUT", "Evidence source id is required.");
+    validateEvidenceInput(evidence as ContextGraphEvidenceInput);
   }
   for (const layoutUpdate of mapLayoutUpdates ?? []) {
     invariant(isJsonRecord(layoutUpdate), 400, "INVALID_INPUT", "Context graph diff map layout updates must be objects.");
