@@ -69,7 +69,7 @@ export async function GET(request: NextRequest, props: { params: Promise<{ provi
       const scopes = ["offline_access", "User.Read", "Calendars.Read"].join(" ");
       const state = createIntegrationOAuthState({ userId: actor.user.id, workspaceId });
 
-      const authUrl = new URL("https://login.microsoftonline.com/common/oauth2/v2.0/authorize");
+      const authUrl = new URL("https://login.microsoftonline.com/organizations/oauth2/v2.0/authorize");
       authUrl.searchParams.set("client_id", clientId);
       authUrl.searchParams.set("response_type", "code");
       authUrl.searchParams.set("redirect_uri", redirectUri);

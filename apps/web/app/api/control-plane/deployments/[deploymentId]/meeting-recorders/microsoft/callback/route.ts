@@ -62,7 +62,7 @@ export async function GET(
     }
 
     const redirectUri = `${origin}/api/control-plane/deployments/${deploymentId}/meeting-recorders/microsoft/callback`;
-    const tokenResponse = await fetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
+    const tokenResponse = await fetch("https://login.microsoftonline.com/organizations/oauth2/v2.0/token", {
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({

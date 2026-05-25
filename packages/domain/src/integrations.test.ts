@@ -117,6 +117,40 @@ describe("OAuth integration sync helpers", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
+  it("refreshes Microsoft workspace tokens through the work-school organization endpoint", async () => {
+    vi.stubEnv("MICROSOFT_CLIENT_ID", "microsoft-client-id");
+    vi.stubEnv("MICROSOFT_CLIENT_SECRET", "microsoft-client-secret");
+    prismaMock.oAuthConnection.findUnique.mockResolvedValue({
+      id: "conn-1",
+      provider: "MICROSOFT",
+      status: "ACTIVE",
+      accessToken: "enc:old-access-token",
+      refreshToken: "enc:refresh-token",
+      tokenStorageVersion: "aes-256-gcm",
+      expiresAt: new Date(Date.now() - 1000),
+    });
+    prismaMock.oAuthConnection.update.mockResolvedValue({
+      id: "conn-1",
+      accessToken: "enc:new-access-token",
+      refreshToken: "enc:new-refresh-token",
+      tokenStorageVersion: "aes-256-gcm",
+      status: "ACTIVE",
+    });
+    vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify({
+      access_token: "new-access-token",
+      refresh_token: "new-refresh-token",
+      expires_in: 3600,
+    }), { status: 200 }));
+    const { refreshOAuthTokenIfNeeded } = await import("./integrations");
+
+    await refreshOAuthTokenIfNeeded("conn-1");
+
+    expect(fetch).toHaveBeenCalledWith(
+      "https://login.microsoftonline.com/organizations/oauth2/v2.0/token",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
   it("fetches selected Google Drive documents only for explicit IDs", async () => {
     prismaMock.oAuthConnection.findUnique.mockResolvedValue({
       id: "conn-1",
