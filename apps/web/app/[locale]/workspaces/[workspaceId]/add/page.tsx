@@ -19,7 +19,6 @@ import {
   listRoles,
   requireWorkspaceMembership,
 } from "@corgtex/domain";
-import { ingestFile } from "@corgtex/knowledge";
 import { encrypt } from "@corgtex/connectors-sql";
 import { prisma } from "@corgtex/shared";
 
@@ -27,6 +26,7 @@ import { requirePageActor } from "@/lib/auth";
 import { enforceDemoGuard } from "@/lib/demo-guard";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { getWorkspaceFeatureFlags } from "@/lib/workspace-feature-flags";
+import { KnowledgeFileUploader } from "../KnowledgeFileUploader";
 import {
   getWorkspaceAddActions,
   isWorkspaceAddActionKind,
@@ -232,6 +232,9 @@ export default async function WorkspaceAddPage({
     : roles;
   const currentUserId = actor.kind === "user" ? actor.user.id : "";
   const title = `Add ${WORKSPACE_ADD_ACTION_DEFINITIONS[kind].label}`;
+  const uploadDefaultSource = workspaceSubpath(returnUrl.pathname, workspaceId)?.startsWith("/settings")
+    ? "settings-upload"
+    : "brain-upload";
 
   async function createActionAndReturn(formData: FormData) {
     "use server";
@@ -423,27 +426,6 @@ export default async function WorkspaceAddPage({
         descriptionMd,
         category: "VIBE_CODED",
       },
-    });
-    refresh(workspaceId);
-    redirect(returnTo);
-  }
-
-  async function uploadFileAndReturn(formData: FormData) {
-    "use server";
-    const workspaceId = asString(formData, "workspaceId");
-    await enforceDemoGuard(workspaceId);
-    const actor = await requirePageActor();
-    const file = formData.get("file");
-    if (!(file instanceof File) || file.size === 0) {
-      throw new Error("File is required.");
-    }
-    await ingestFile(actor, {
-      workspaceId,
-      fileBuffer: Buffer.from(await file.arrayBuffer()),
-      fileName: file.name,
-      mimeType: file.type || "application/octet-stream",
-      uploadSource: asOptional(formData, "source") ?? "settings-upload",
-      documentTitle: asOptional(formData, "title") ?? file.name,
     });
     refresh(workspaceId);
     redirect(returnTo);
@@ -944,13 +926,13 @@ export default async function WorkspaceAddPage({
         )}
 
         {kind === "upload_file" && (
-          <form action={uploadFileAndReturn} className="stack nr-form-section">
-            {hiddenWorkspace(workspaceId)}
-            <label>Title<input name="title" /></label>
-            <label>Source<input name="source" defaultValue="settings-upload" /></label>
-            <label>File<input name="file" type="file" required /></label>
-            <div className="actions-inline"><button type="submit">Upload file</button>{cancelLink(returnTo)}</div>
-          </form>
+          <KnowledgeFileUploader
+            workspaceId={workspaceId}
+            defaultSource={uploadDefaultSource}
+            initiallyOpen
+            showTrigger={false}
+            cancelHref={returnTo}
+          />
         )}
 
         {kind === "paste_text" && (

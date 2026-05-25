@@ -6,6 +6,7 @@ const {
   listDocuments,
   requireWorkspaceMembership,
   resolveRequestActor,
+  checkApiDemoGuard,
   handleRouteError,
 } = vi.hoisted(() => ({
   createDocument: vi.fn(),
@@ -13,6 +14,7 @@ const {
   listDocuments: vi.fn(),
   requireWorkspaceMembership: vi.fn(),
   resolveRequestActor: vi.fn(),
+  checkApiDemoGuard: vi.fn(),
   handleRouteError: vi.fn(),
 }));
 
@@ -42,6 +44,10 @@ vi.mock("@/lib/auth", () => ({
   resolveRequestActor,
 }));
 
+vi.mock("@/lib/demo-guard", () => ({
+  checkApiDemoGuard,
+}));
+
 vi.mock("@/lib/http", () => ({
   handleRouteError,
 }));
@@ -59,6 +65,7 @@ describe("POST /api/workspaces/[workspaceId]/documents", () => {
     const formData = new FormData();
     formData.set("file", new File(["hello world"], "notes.txt", { type: "text/plain" }));
     formData.set("source", "chat-upload");
+    formData.set("ingestionGuidanceMd", "Overall guidance:\nTrack follow-ups.");
 
     const response = await POST(
       new Request("http://localhost/api/workspaces/ws-1/documents", {
@@ -77,8 +84,10 @@ describe("POST /api/workspaces/[workspaceId]/documents", () => {
         mimeType: "text/plain",
         uploadSource: "chat-upload",
         documentTitle: "notes.txt",
+        ingestionGuidanceMd: "Overall guidance:\nTrack follow-ups.",
       }),
     );
+    expect(checkApiDemoGuard).toHaveBeenCalledWith("ws-1");
     expect(handleRouteError).not.toHaveBeenCalled();
   });
 

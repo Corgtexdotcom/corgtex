@@ -5,6 +5,7 @@ import { createArticleAction, publishArticleAction, returnArticleToDraftAction }
 import { getTranslations } from "next-intl/server";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownExcerpt } from "@/lib/components/MarkdownRenderer";
+import { KnowledgeFileUploader } from "../KnowledgeFileUploader";
 
 export const dynamic = "force-dynamic";
 
@@ -69,6 +70,8 @@ export default async function BrainPage({
           </span>
         </div>
       </div>
+
+      <KnowledgeFileUploader workspaceId={workspaceId} defaultSource="brain-upload" />
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "48px", borderBottom: "4px solid var(--line)", paddingBottom: "48px", marginBottom: "48px" }}>
         

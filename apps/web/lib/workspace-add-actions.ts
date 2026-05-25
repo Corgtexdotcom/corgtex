@@ -236,7 +236,7 @@ export function getWorkspaceAddActions(context: WorkspaceAddActionContext): Work
     case "finance":
       return [action("spend"), action("ledger_account")];
     case "brain":
-      return [action("article")];
+      return [action("upload_file"), action("article")];
     case "tools":
       return context.featureFlags.TOOL_LINKS ? [action("tool_app"), action("tool_link")] : [];
     case "leads": {
