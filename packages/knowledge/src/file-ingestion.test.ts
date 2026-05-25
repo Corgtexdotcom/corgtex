@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { ingestFile } from "./file-ingestion";
 import { prisma } from "@corgtex/shared";
+import { isGlobalOperator, requireWorkspaceMembership } from "@corgtex/domain";
 
 vi.mock("@corgtex/shared", () => ({
   prisma: {
@@ -17,6 +18,7 @@ vi.mock("@corgtex/shared", () => ({
 vi.mock("@corgtex/domain", () => ({
   appendEvents: vi.fn(),
   requireWorkspaceMembership: vi.fn().mockResolvedValue({ id: "mem1" }),
+  isGlobalOperator: vi.fn().mockReturnValue(false),
   getStorageUsageSummary: vi.fn().mockResolvedValue({ usageBytes: 0, limitBytes: Infinity }),
   AppError: class extends Error { constructor(status: number, code: string, msg: string) { super(msg); } },
 }));
@@ -36,6 +38,8 @@ const VALID_PDF_BUFFER = Buffer.from(
 describe("file-ingestion", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(requireWorkspaceMembership).mockResolvedValue({ id: "mem1" } as any);
+    vi.mocked(isGlobalOperator).mockReturnValue(false);
   });
 
   const actor = { kind: "user" as const, user: { id: "usr1", email: "test@example.com", displayName: "Test User" } };
@@ -101,6 +105,45 @@ describe("file-ingestion", () => {
         data: expect.objectContaining({
           ingestionGuidanceMd: "Overall guidance:\nPreserve contract terms.",
           content: expect.stringContaining("User guidance for this upload:"),
+        }),
+      }),
+    );
+  });
+
+  it("does not persist the synthetic global operator membership as a Brain source author", async () => {
+    vi.mocked(isGlobalOperator).mockReturnValue(true);
+    vi.mocked(requireWorkspaceMembership).mockResolvedValueOnce({
+      id: "global-operator",
+      workspaceId: "ws_1",
+      userId: "usr1",
+      role: "ADMIN",
+      isActive: true,
+    } as any);
+
+    await ingestFile(
+      { kind: "user" as const, user: { id: "usr1", email: "admin@example.com", displayName: "Admin", globalRole: "OPERATOR" } },
+      {
+        workspaceId: "ws_1",
+        fileName: "operator-upload.txt",
+        mimeType: "text/plain",
+        fileBuffer: Buffer.from("Operator upload"),
+        uploadSource: "brain-upload",
+      },
+    );
+
+    const txMock = vi.mocked(prisma.$transaction).mock.calls[0][0] as any;
+    const txObj = {
+      document: { create: vi.fn().mockResolvedValue({ id: "doc1", title: "Operator Upload", source: "brain-upload" }) },
+      brainSource: { create: vi.fn().mockResolvedValue({ id: "src1", sourceType: "FILE_UPLOAD", tier: 2 }) },
+      auditLog: { create: vi.fn() },
+      eventRecord: { createMany: vi.fn() },
+    };
+    await txMock(txObj);
+
+    expect(txObj.brainSource.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          authorMemberId: null,
         }),
       }),
     );

@@ -4,7 +4,7 @@ import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { PDFParse } from "pdf-parse";
 import { defaultStorage } from "@corgtex/storage";
-import { appendEvents, requireWorkspaceMembership, AppError, getStorageUsageSummary } from "@corgtex/domain";
+import { appendEvents, requireWorkspaceMembership, AppError, getStorageUsageSummary, isGlobalOperator } from "@corgtex/domain";
 import mammoth from "mammoth";
 
 function asRecord(value: Record<string, unknown> | undefined) {
@@ -146,7 +146,7 @@ export async function ingestFile(actor: AppActor, params: {
     workspaceId: params.workspaceId,
   });
 
-  const authorMemberId = params.authorMemberId || membership?.id;
+  const authorMemberId = params.authorMemberId || (actor.kind === "user" && !isGlobalOperator(actor) ? membership?.id : undefined);
   const fileName = params.fileName.trim().replace(/[^A-Za-z0-9._-]+/g, "-") || "upload.bin";
   const source = params.uploadSource?.trim() || "upload";
   const documentTitle = params.documentTitle?.trim() || fileName;
