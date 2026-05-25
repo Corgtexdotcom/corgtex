@@ -19,20 +19,25 @@ import {
   Crosshair,
   FileSearch,
   GitBranch,
+  Link2,
   ListChecks,
   Maximize2,
+  MessageSquare,
   Minimize2,
   Pencil,
+  Plus,
   RefreshCcw,
   RotateCcw,
   Save,
   SlidersHorizontal,
+  Trash2,
   X,
 } from "lucide-react";
 
 import {
   applyContextGraphProposedDiffAction,
   buildSelectedRegionContextAction,
+  createContextMapChangeProposalAction,
   createMissingRegionFactsProposalAction,
   createPersonalContextMapViewAction,
   createRegionProposalAction,
@@ -116,6 +121,7 @@ type ContextGraphProposedDiff = {
 
 type DiffObjectInput = {
   ref?: string;
+  id?: string;
   objectType?: string;
   title?: string;
   summary?: string | null;
@@ -125,6 +131,7 @@ type DiffObjectInput = {
 };
 
 type DiffRelationshipInput = {
+  id?: string;
   sourceObjectId?: string;
   sourceRef?: string;
   targetObjectId?: string;
@@ -149,7 +156,9 @@ type DiffLayoutInput = {
 
 type DiffJsonInput = {
   objects?: DiffObjectInput[];
+  objectUpdates?: DiffObjectInput[];
   relationships?: DiffRelationshipInput[];
+  relationshipUpdates?: DiffRelationshipInput[];
   evidenceRefs?: DiffEvidenceInput[];
   mapLayoutUpdates?: DiffLayoutInput[];
 };
@@ -195,6 +204,29 @@ const NODE_COLORS: Record<string, { border: string; background: string; accent: 
   Evidence: { border: "#64748b", background: "#f8fafc", accent: "#475569" },
   Metric: { border: "#b45309", background: "#fffbeb", accent: "#92400e" },
 };
+
+const PROCESS_DETAIL_TYPES = new Set(["Risk", "Metric", "Question", "Hypothesis"]);
+const STRUCTURAL_PROCESS_TYPES = new Set(["Process", "ProcessStep", "Team"]);
+
+function mapObjectDisplayRole(object: ContextGraphObject, view: ContextMapView) {
+  const explicitRole = propertyText(object.properties, "contextMapDisplay") ?? propertyText(object.properties, "displayRole");
+  const mapRole = propertyText(object.properties, "mapRole");
+  if (explicitRole === "canvas" || explicitRole === "detail" || explicitRole === "context") return explicitRole;
+  if (explicitRole === "embedded") return "detail";
+  if (mapRole === "context") return "context";
+  if (view.viewType === "process" && PROCESS_DETAIL_TYPES.has(object.objectType)) return "detail";
+  return "canvas";
+}
+
+function isDetailObject(object: ContextGraphObject | undefined, view: ContextMapView) {
+  return Boolean(object && mapObjectDisplayRole(object, view) === "detail");
+}
+
+function isCanvasObject(object: ContextGraphObject, view: ContextMapView) {
+  if (mapObjectDisplayRole(object, view) !== "canvas") return false;
+  if (view.viewType !== "process") return true;
+  return STRUCTURAL_PROCESS_TYPES.has(object.objectType) || !PROCESS_DETAIL_TYPES.has(object.objectType);
+}
 
 function positionForIndex(index: number) {
   const columns = 4;
@@ -429,7 +461,9 @@ function diffTechnicalCountLabel(diffJson: unknown) {
   const diff = diffJsonRecord(diffJson);
   const parts = [
     `${diff.objects?.length ?? 0} objects`,
+    `${diff.objectUpdates?.length ?? 0} object updates`,
     `${diff.relationships?.length ?? 0} relationships`,
+    `${diff.relationshipUpdates?.length ?? 0} relationship updates`,
     `${diff.evidenceRefs?.length ?? 0} evidence refs`,
     `${diff.mapLayoutUpdates?.reduce((sum, update) => sum + (update.items?.length ?? 0), 0) ?? 0} layout moves`,
   ];
@@ -480,6 +514,14 @@ function diffHumanPreview(diffJson: unknown, objects: Map<string, ContextGraphOb
     ifApproved.push(`Add ${label}.`);
     adds.push(`Add ${label}.`);
   }
+  for (const objectUpdate of diff.objectUpdates ?? []) {
+    const currentTitle = objectTitleFromId(objects, objectUpdate.id);
+    const nextTitle = objectUpdate.title ? humanDiffTitle(objectUpdate.title) : currentTitle;
+    const label = `${currentTitle}${nextTitle !== currentTitle ? ` -> ${nextTitle}` : ""}`;
+    currentMap.push(`${currentTitle} keeps its current details.`);
+    ifApproved.push(`Update ${label}${objectUpdate.status ? ` (${humanStatusLabel(objectUpdate.status)})` : ""}.`);
+    updates.push(`Update ${label}.`);
+  }
   for (const relationship of diff.relationships ?? []) {
     const source = relationshipEndpointLabel(relationship, "source", objects, proposedObjects);
     const target = relationshipEndpointLabel(relationship, "target", objects, proposedObjects);
@@ -487,6 +529,12 @@ function diffHumanPreview(diffJson: unknown, objects: Map<string, ContextGraphOb
     currentMap.push(`${label} is not connected on the approved map yet.`);
     ifApproved.push(`Connect ${label}.`);
     connects.push(`Connect ${label}.`);
+  }
+  for (const relationshipUpdate of diff.relationshipUpdates ?? []) {
+    const label = relationshipUpdate.id ?? "connection";
+    currentMap.push(`${label} keeps its current connection details.`);
+    ifApproved.push(`Update ${label}${relationshipUpdate.status ? ` (${humanStatusLabel(relationshipUpdate.status)})` : ""}.`);
+    updates.push(`Update ${label}.`);
   }
   for (const evidence of diff.evidenceRefs ?? []) {
     currentMap.push("The supporting evidence is not attached yet.");
@@ -534,8 +582,9 @@ function diffHumanPreview(diffJson: unknown, objects: Map<string, ContextGraphOb
 }
 
 export default function ContextMapClient({ workspaceId, data, includeStale = false }: { workspaceId: string; data: ContextMapClientData; includeStale?: boolean }) {
-  const [selectedObjectIds, setSelectedObjectIds] = useState<string[]>(data.objects[0]?.id ? [data.objects[0].id] : []);
-  const [selectedObjectId, setSelectedObjectId] = useState<string | null>(data.objects[0]?.id ?? null);
+  const initialSelectedObjectId = data.objects.find((object) => isCanvasObject(object, data.mapView))?.id ?? null;
+  const [selectedObjectIds, setSelectedObjectIds] = useState<string[]>(initialSelectedObjectId ? [initialSelectedObjectId] : []);
+  const [selectedObjectId, setSelectedObjectId] = useState<string | null>(initialSelectedObjectId);
   const [selectedRelationshipId, setSelectedRelationshipId] = useState<string | null>(null);
   const [regionContext, setRegionContext] = useState<RegionContext | null>(null);
   const [regionContextStatus, setRegionContextStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
@@ -555,6 +604,9 @@ export default function ContextMapClient({ workspaceId, data, includeStale = fal
   const [editingDiffId, setEditingDiffId] = useState<string | null>(null);
   const [editReason, setEditReason] = useState("");
   const [editDiffJson, setEditDiffJson] = useState("");
+  const [changeInstruction, setChangeInstruction] = useState("");
+  const [stepTitle, setStepTitle] = useState("");
+  const [dependencyTargetId, setDependencyTargetId] = useState("");
   const [proposedDiffs, setProposedDiffs] = useState<ContextGraphProposedDiff[]>(data.proposedDiffs);
   const [flowInstance, setFlowInstance] = useState<ReactFlowInstance | null>(null);
   const [isPending, startTransition] = useTransition();
@@ -568,12 +620,13 @@ export default function ContextMapClient({ workspaceId, data, includeStale = fal
   const layoutByObjectId = useMemo(() => new Map(data.layoutItems.map((item) => [item.objectId, item])), [data.layoutItems]);
   const objectById = useMemo(() => new Map(data.objects.map((object) => [object.id, object])), [data.objects]);
   const relationshipById = useMemo(() => new Map(data.relationships.map((relationship) => [relationship.id, relationship])), [data.relationships]);
-  const objectTypes = useMemo(() => [...new Set(data.objects.map((object) => object.objectType))].sort(), [data.objects]);
+  const canvasObjects = useMemo(() => data.objects.filter((object) => isCanvasObject(object, data.mapView)), [data.mapView, data.objects]);
+  const objectTypes = useMemo(() => [...new Set(canvasObjects.map((object) => object.objectType))].sort(), [canvasObjects]);
 
-  const filteredObjects = useMemo(() => data.objects.filter((object) => {
+  const filteredObjects = useMemo(() => canvasObjects.filter((object) => {
     if (typeFilter !== "all" && object.objectType !== typeFilter) return false;
     return shouldShowStatus(object.status, statusFilter);
-  }), [data.objects, statusFilter, typeFilter]);
+  }), [canvasObjects, statusFilter, typeFilter]);
   const visibleObjectIds = useMemo(() => new Set(filteredObjects.map((object) => object.id)), [filteredObjects]);
 
   const initialNodes = useMemo<Node[]>(() => filteredObjects.map((object, index) => {
@@ -711,6 +764,23 @@ export default function ContextMapClient({ workspaceId, data, includeStale = fal
   const selectedRelationships = selectedObject
     ? data.relationships.filter((relationship) => relationship.sourceObjectId === selectedObject.id || relationship.targetObjectId === selectedObject.id)
     : [];
+  const selectedDetailEntries = selectedObject
+    ? selectedRelationships
+      .map((relationship) => {
+        const otherId = relationship.sourceObjectId === selectedObject.id ? relationship.targetObjectId : relationship.sourceObjectId;
+        const object = objectById.get(otherId);
+        return object && isDetailObject(object, data.mapView) ? { object, relationship } : null;
+      })
+      .filter((entry): entry is { object: ContextGraphObject; relationship: ContextGraphRelationship } => Boolean(entry))
+    : [];
+  const structuralRelationships = selectedRelationships.filter((relationship) => {
+    const source = objectById.get(relationship.sourceObjectId);
+    const target = objectById.get(relationship.targetObjectId);
+    return !isDetailObject(source, data.mapView) && !isDetailObject(target, data.mapView);
+  });
+  const selectedRiskDetails = selectedDetailEntries.filter((entry) => entry.object.objectType === "Risk" || entry.object.objectType === "Question");
+  const selectedMetricDetails = selectedDetailEntries.filter((entry) => entry.object.objectType === "Metric");
+  const selectedAssumptionDetails = selectedDetailEntries.filter((entry) => entry.object.objectType === "Hypothesis");
   const selectedAccountabilities = selectedObject ? propertyStringArray(selectedObject.properties, "accountabilities") : [];
   const selectedControls = selectedObject ? propertyStringArray(selectedObject.properties, "governanceControls") : [];
   const selectedAllowedActions = selectedObject ? propertyStringArray(selectedObject.properties, "allowedActions") : [];
@@ -725,16 +795,16 @@ export default function ContextMapClient({ workspaceId, data, includeStale = fal
     ? `/workspaces/${workspaceId}/agents/${selectedObject.sourceEntityId}`
     : null;
   const ownerRelationships = selectedObject
-    ? selectedRelationships.filter((relationship) => ["owns", "assigned_to", "needs_approval_from"].includes(relationship.relationshipType))
+    ? structuralRelationships.filter((relationship) => ["owns", "assigned_to", "needs_approval_from"].includes(relationship.relationshipType))
     : [];
   const dependencyRelationships = selectedObject
-    ? selectedRelationships.filter((relationship) => ["depends_on", "part_of", "member_of", "reports_to", "uses", "input_to", "output_of"].includes(relationship.relationshipType))
+    ? structuralRelationships.filter((relationship) => ["depends_on", "part_of", "member_of", "reports_to", "uses", "input_to", "output_of"].includes(relationship.relationshipType))
     : [];
   const blockerRelationships = selectedObject
-    ? selectedRelationships.filter((relationship) => ["blocks", "contradicts"].includes(relationship.relationshipType))
+    ? structuralRelationships.filter((relationship) => ["blocks", "contradicts"].includes(relationship.relationshipType))
     : [];
   const supportingRelationships = selectedObject
-    ? selectedRelationships.filter((relationship) => ["supports", "created_in", "decided_in", "has_evidence"].includes(relationship.relationshipType))
+    ? structuralRelationships.filter((relationship) => ["supports", "created_in", "decided_in", "has_evidence"].includes(relationship.relationshipType))
     : [];
 
   useEffect(() => {
@@ -1007,6 +1077,66 @@ export default function ContextMapClient({ workspaceId, data, includeStale = fal
     });
   }
 
+  function submitMapChange(instruction: string, objectIds: string[] = []) {
+    const trimmed = instruction.trim();
+    if (!trimmed) {
+      setMessage({ tone: "error", text: "Describe the map change first." });
+      return;
+    }
+    startTransition(async () => {
+      try {
+        const result = await createContextMapChangeProposalAction({
+          workspaceId,
+          mapViewId: data.mapView.id,
+          selectedObjectIds: objectIds,
+          instruction: trimmed,
+        });
+        if (result.mode === "needs_clarification") {
+          setMessage({ tone: "error", text: result.message });
+          return;
+        }
+        const diff = normalizeProposedDiff({
+          id: result.proposedDiffId,
+          reason: result.reason,
+          status: result.status,
+          createdAt: result.createdAt,
+          diffJson: result.diffJson,
+        });
+        setProposedDiffs((current) => [diff, ...current]);
+        setExpandedDiffId(diff.id);
+        setChangeInstruction("");
+        setStepTitle("");
+        setDependencyTargetId("");
+        setMessage({ tone: "info", text: "Created a proposed map change for review." });
+      } catch {
+        setMessage({ tone: "error", text: "Could not create this proposed map change." });
+      }
+    });
+  }
+
+  function proposeStepAddition() {
+    if (!selectedObject) return;
+    const title = stepTitle.trim();
+    if (!title) {
+      setMessage({ tone: "error", text: "Name the process step first." });
+      return;
+    }
+    submitMapChange(`Add step ${title}`, [selectedObject.id]);
+  }
+
+  function proposeArchiveSelected() {
+    if (!selectedObject) return;
+    submitMapChange("Archive selected item", [selectedObject.id]);
+  }
+
+  function proposeDependency() {
+    if (!selectedObject || !dependencyTargetId) {
+      setMessage({ tone: "error", text: "Choose another step to connect." });
+      return;
+    }
+    submitMapChange("Connect selected items with depends on", [selectedObject.id, dependencyTargetId]);
+  }
+
   function startInspectorResize(event: ReactPointerEvent<HTMLButtonElement>) {
     if (inspectorDock !== "right" || isCompactLayout) return;
     event.preventDefault();
@@ -1131,6 +1261,19 @@ export default function ContextMapClient({ workspaceId, data, includeStale = fal
           </label>
         </div>
       )}
+
+      <div className="context-map-change-bar">
+        <MessageSquare size={16} aria-hidden="true" />
+        <textarea
+          value={changeInstruction}
+          onChange={(event) => setChangeInstruction(event.target.value)}
+          rows={1}
+          placeholder="Ask for a map change"
+        />
+        <button className="secondary small" type="button" onClick={() => submitMapChange(changeInstruction, [])} disabled={isPending}>
+          Propose
+        </button>
+      </div>
 
       <div className="context-map-stage">
         <div className="context-map-canvas">
@@ -1377,8 +1520,103 @@ export default function ContextMapClient({ workspaceId, data, includeStale = fal
                         <p className="muted">No blocker is shown on this map.</p>
                       )}
                     </section>
+
+                    {selectedRiskDetails.length > 0 && (
+                      <section className="context-map-inspector-section">
+                        <h2>Risks and questions</h2>
+                        <div className="context-map-detail-list">
+                          {selectedRiskDetails.slice(0, 6).map(({ object, relationship }) => (
+                            <div key={`${relationship.id}:${object.id}`} className="context-map-detail-item context-map-detail-item--risk">
+                              <div className="nr-item-meta">{humanObjectTypeLabel(object.objectType)} - {humanRelationshipLabel(relationship.relationshipType)}</div>
+                              <strong>{object.title}</strong>
+                              {object.summary && <p>{object.summary.slice(0, 280)}</p>}
+                              <div className="context-map-pill-row">
+                                <span className={`context-map-status context-map-status--${statusClass(object.status)}`}>{humanStatusLabel(object.status)}</span>
+                                {propertyText(object.properties, "severity") && <span className="tag neutral">{propertyText(object.properties, "severity")}</span>}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </section>
+                    )}
+
+                    {selectedMetricDetails.length > 0 && (
+                      <section className="context-map-inspector-section">
+                        <h2>Metrics</h2>
+                        <div className="context-map-detail-list">
+                          {selectedMetricDetails.slice(0, 6).map(({ object, relationship }) => (
+                            <div key={`${relationship.id}:${object.id}`} className="context-map-detail-item context-map-detail-item--metric">
+                              <div className="nr-item-meta">{humanObjectTypeLabel(object.objectType)}</div>
+                              <strong>{object.title}</strong>
+                              {object.summary && <p>{object.summary.slice(0, 280)}</p>}
+                              {propertyText(object.properties, "value") && <p className="context-map-next-action">{propertyText(object.properties, "value")}</p>}
+                            </div>
+                          ))}
+                        </div>
+                      </section>
+                    )}
+
+                    {selectedAssumptionDetails.length > 0 && (
+                      <section className="context-map-inspector-section">
+                        <h2>Assumptions</h2>
+                        <div className="context-map-detail-list">
+                          {selectedAssumptionDetails.slice(0, 6).map(({ object, relationship }) => (
+                            <div key={`${relationship.id}:${object.id}`} className="context-map-detail-item">
+                              <div className="nr-item-meta">{humanObjectTypeLabel(object.objectType)}</div>
+                              <strong>{object.title}</strong>
+                              {object.summary && <p>{object.summary.slice(0, 280)}</p>}
+                              {propertyText(object.properties, "testMethod") && <p className="context-map-next-action">{propertyText(object.properties, "testMethod")}</p>}
+                            </div>
+                          ))}
+                        </div>
+                      </section>
+                    )}
                   </>
                 )}
+
+                <section className="context-map-inspector-section">
+                  <h2>Changes</h2>
+                  <div className="context-map-change-stack">
+                    <label>
+                      <span>Ask agent for this item</span>
+                      <textarea
+                        value={changeInstruction}
+                        onChange={(event) => setChangeInstruction(event.target.value)}
+                        rows={3}
+                        placeholder="Rename it, set next action, change status, add a step, or archive it"
+                      />
+                    </label>
+                    <div className="context-map-button-row">
+                      <button className="secondary small" type="button" onClick={() => submitMapChange(changeInstruction, selectedRegionIds)} disabled={isPending || selectedRegionIds.length === 0}>
+                        <MessageSquare size={14} aria-hidden="true" /> Propose change
+                      </button>
+                      <button className="secondary small context-map-danger-action" type="button" onClick={proposeArchiveSelected} disabled={isPending || !selectedObject}>
+                        <Trash2 size={14} aria-hidden="true" /> Archive
+                      </button>
+                    </div>
+                    {(selectedObject.objectType === "Process" || selectedObject.objectType === "Team") && (
+                      <div className="context-map-inline-form">
+                        <input value={stepTitle} onChange={(event) => setStepTitle(event.target.value)} placeholder="New process step" />
+                        <button className="secondary small" type="button" onClick={proposeStepAddition} disabled={isPending}>
+                          <Plus size={14} aria-hidden="true" /> Add step
+                        </button>
+                      </div>
+                    )}
+                    {selectedObject.objectType === "ProcessStep" && (
+                      <div className="context-map-inline-form">
+                        <select value={dependencyTargetId} onChange={(event) => setDependencyTargetId(event.target.value)}>
+                          <option value="">Depends on...</option>
+                          {canvasObjects.filter((object) => object.id !== selectedObject.id && object.objectType === "ProcessStep").map((object) => (
+                            <option key={object.id} value={object.id}>{object.title}</option>
+                          ))}
+                        </select>
+                        <button className="secondary small" type="button" onClick={proposeDependency} disabled={isPending || !dependencyTargetId}>
+                          <Link2 size={14} aria-hidden="true" /> Connect
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </section>
 
                 <section className="context-map-inspector-section">
                   <h2>Evidence</h2>
