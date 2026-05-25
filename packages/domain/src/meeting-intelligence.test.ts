@@ -193,12 +193,12 @@ describe("meeting-intelligence", () => {
             {
               type: "ACTION_ITEM",
               operation: "CREATE",
-              title: "#001 > Alice Next Steps - follow up on email",
-              body: "**CONTEXT:** Received customer feedback\n**REQUEST:** Need to follow up\n**ANSWER:** Alice will follow up\n**RESULT:** OPEN",
+              title: "#001 > Cortex Next Steps - follow up on email",
+              body: "**CONTEXT:** Received Cortex customer feedback\n**REQUEST:** Need to follow up\n**ANSWER:** Alice will follow up in Cortex\n**RESULT:** OPEN",
               assigneeHint: "Alice",
               dueAt: "2026-04-30T17:00:00.000Z",
               confidence: 0.9,
-              sourceQuote: "I will follow up tomorrow",
+              sourceQuote: "I will follow up in Cortex tomorrow",
             }
           ]
         }
@@ -216,13 +216,17 @@ describe("meeting-intelligence", () => {
         meetingId: "meeting-1"
       });
 
-      expect(defaultModelGateway.extract).toHaveBeenCalledWith(expect.objectContaining({
-        workspaceId: "ws-1",
-        instruction: expect.stringContaining("Number items sequentially"),
-        input: expect.stringContaining("Prioritize follow-up actions."),
-      }));
+      const extractCall = vi.mocked(defaultModelGateway.extract).mock.calls[0]?.[0] as { instruction: string; input: string; workspaceId: string };
+      expect(extractCall.workspaceId).toBe("ws-1");
+      expect(extractCall.instruction).not.toContain("Number items sequentially");
+      expect(extractCall.instruction).not.toContain("**CONTEXT:**");
+      expect(extractCall.instruction).toContain("Treat owner-backed commitments as ACTION_ITEM");
+      expect(extractCall.input).toContain("Prioritize follow-up actions.");
       expect(defaultModelGateway.extract).toHaveBeenCalledWith(expect.objectContaining({
         instruction: expect.stringContaining("trusted operator context for spelling, name, and terminology corrections"),
+      }));
+      expect(defaultModelGateway.extract).toHaveBeenCalledWith(expect.objectContaining({
+        instruction: expect.stringContaining("Cortex means Corgtex"),
       }));
       expect(defaultModelGateway.extract).toHaveBeenCalledWith(expect.objectContaining({
         input: expect.stringContaining("Alice: I will follow up tomorrow."),
@@ -230,9 +234,15 @@ describe("meeting-intelligence", () => {
       expect(prisma.meetingInsight.createMany).toHaveBeenCalledWith(expect.objectContaining({
         data: [expect.objectContaining({
           type: "ACTION_ITEM",
-          title: "#001 > Alice Next Steps - follow up on email",
-          bodyMd: expect.stringContaining("**CONTEXT:**"),
+          title: "Corgtex Next Steps - follow up on email",
+          bodyMd: expect.stringContaining("### Outcome"),
+          sourceQuote: "I will follow up in Corgtex tomorrow",
           dueAt: new Date("2026-04-30T17:00:00.000Z"),
+        })],
+      }));
+      expect(prisma.meetingInsight.createMany).toHaveBeenCalledWith(expect.objectContaining({
+        data: [expect.objectContaining({
+          bodyMd: expect.stringContaining("Corgtex customer feedback"),
         })],
       }));
     });
@@ -500,6 +510,8 @@ describe("meeting-intelligence", () => {
         data: [expect.objectContaining({
           type: "ACTION_ITEM",
           operation: "CREATE",
+          title: "Alice Follow-up",
+          bodyMd: expect.stringContaining("### Outcome"),
           sourceQuote: "x".repeat(200),
         })],
       }));
@@ -629,7 +641,13 @@ describe("meeting-intelligence", () => {
         type: "TENSION",
         status: "CONFIRMED",
         title: "Onboarding ownership is unclear",
-        bodyMd: "The handoff owner was unclear.",
+        bodyMd: [
+          "**MEETING BLOCK:** Onboarding discussion",
+          "**BLOCK KIND:** tension",
+          "",
+          "### Current reality",
+          "The handoff owner was unclear.",
+        ].join("\n"),
         assigneeHint: "Milan",
         meeting: {
           id: "meeting-1",
@@ -649,9 +667,13 @@ describe("meeting-intelligence", () => {
       expect(createTensionMock).toHaveBeenCalledWith(mockActor, expect.objectContaining({
         workspaceId: "ws-1",
         title: "Onboarding ownership is unclear",
+        bodyMd: expect.not.stringContaining("MEETING BLOCK"),
         raisedByMemberId: "member-raised",
         meetingId: "meeting-1",
         isPrivate: false,
+      }));
+      expect(createTensionMock).toHaveBeenCalledWith(mockActor, expect.objectContaining({
+        bodyMd: expect.stringContaining("### Current reality"),
       }));
       expect(updateTensionMock).toHaveBeenCalledWith(mockActor, expect.objectContaining({
         workspaceId: "ws-1",
@@ -827,7 +849,7 @@ describe("meeting-intelligence", () => {
               dedupeKey: null,
               type: "ACTION_ITEM",
               operation: "CREATE",
-              title: "#001 > Alice Follow-up",
+              title: "Alice Follow-up",
               bodyMd: "Alice owns the follow-up.",
             }),
           ]),

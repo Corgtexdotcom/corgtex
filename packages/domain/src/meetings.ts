@@ -441,7 +441,7 @@ export async function listUpcomingMeetings(workspaceId: string, opts?: { from?: 
 }
 
 export async function getMeeting(workspaceId: string, meetingId: string) {
-  return prisma.meeting.findFirst({
+  const meeting = await prisma.meeting.findFirst({
     where: {
       id: meetingId,
       workspaceId,
@@ -491,6 +491,50 @@ export async function getMeeting(workspaceId: string, meetingId: string) {
       },
     },
   });
+  if (!meeting) return null;
+
+  const raisedActionIds = [...new Set(meeting.insights
+    .filter((insight) => (
+      insight.status === "APPLIED"
+      && insight.appliedEntityType === "Action"
+      && insight.appliedEntityId
+      && insight.operation === "CREATE"
+      && (insight.type === "ACTION_ITEM" || insight.type === "FOLLOW_UP")
+    ))
+    .map((insight) => insight.appliedEntityId as string))];
+  const raisedActions = raisedActionIds.length > 0
+    ? await prisma.action.findMany({
+      where: {
+        workspaceId,
+        id: { in: raisedActionIds },
+        archivedAt: null,
+      },
+      include: {
+        author: {
+          select: {
+            displayName: true,
+            email: true,
+          },
+        },
+        assigneeMember: {
+          include: {
+            user: {
+              select: {
+                displayName: true,
+                email: true,
+              },
+            },
+          },
+        },
+      },
+      orderBy: { createdAt: "desc" },
+    })
+    : [];
+
+  return {
+    ...meeting,
+    raisedActions,
+  };
 }
 
 export async function getMeetingParticipants(workspaceId: string, participantIds: string[]) {

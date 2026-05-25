@@ -961,7 +961,7 @@
     "updateSummaryRaisedTitle": "Update summary and raised items",
     "updateSummaryRaisedDescription": "Add guidance when the summary missed context, duplicated something, or created the wrong tensions or proposals.",
     "raisedItemsTitle": "Raised from this meeting",
-    "raisedItemsDescription": "Tensions and proposals created from the meeting, with source evidence when available.",
+    "raisedItemsDescription": "Tensions, actions, and proposals created from the meeting, with source evidence when available.",
     "raisedItemsEmpty": "No tensions or proposals have been raised from this meeting yet.",
     "raisedTypeTension": "Tension",
     "raisedTypeProposal": "Proposal",

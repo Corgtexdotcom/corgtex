@@ -10,7 +10,12 @@ import { createProposal, createProposalFromTension, resolveProposal, submitPropo
 import { postDeliberationEntry } from "./deliberation";
 import { buildMeetingIntelligenceContext } from "./meeting-intelligence-context";
 import { shouldBypassAutoApplyForSlackMeetingActionReview } from "./meeting-action-review";
-import { prependMeetingBlockContext, resolveMeetingBlockReference } from "./meeting-blocks";
+import {
+  normalizeMeetingProductTerminology,
+  prependMeetingBlockContext,
+  resolveMeetingBlockReference,
+  stripMeetingBlockContext,
+} from "./meeting-blocks";
 
 const AUTO_APPLY_CONFIDENCE_THRESHOLD = 0.8;
 const AUTO_APPLY_DELIBERATION_THRESHOLD = 0.85;
@@ -125,6 +130,100 @@ function normalizeDueAt(value: unknown) {
   return Number.isFinite(parsed.getTime()) ? parsed : null;
 }
 
+function normalizeInsightTitle(value: unknown) {
+  if (typeof value !== "string") return "";
+  let title = value.trim();
+  for (let index = 0; index < 3; index += 1) {
+    const stripped = title
+      .replace(/^(?:item\s*)?(?:#\s*)?\d{1,4}\s*(?:[.)\]-]|>)\s*/i, "")
+      .trim();
+    if (stripped === title) break;
+    title = stripped;
+  }
+  return title;
+}
+
+function extractTechnicalBodyFields(bodyMd: string) {
+  const markerPattern = /\*{0,2}(CONTEXT|REQUEST|ANSWER|RESULT):\*{0,2}/gi;
+  const markers = [...bodyMd.matchAll(markerPattern)];
+  if (markers.length === 0) return null;
+
+  const fields: Partial<Record<"CONTEXT" | "REQUEST" | "ANSWER" | "RESULT", string>> = {};
+  markers.forEach((marker, index) => {
+    const key = marker[1]?.toUpperCase() as "CONTEXT" | "REQUEST" | "ANSWER" | "RESULT";
+    const start = (marker.index ?? 0) + marker[0].length;
+    const end = markers[index + 1]?.index ?? bodyMd.length;
+    const value = bodyMd.slice(start, end).trim();
+    if (value) fields[key] = value;
+  });
+
+  return Object.keys(fields).length > 0 ? fields : null;
+}
+
+function markdownSections(sections: Array<{ title: string; body?: string | null }>) {
+  return sections
+    .map((section) => {
+      const body = section.body?.trim();
+      return body ? `### ${section.title}\n${body}` : null;
+    })
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+function normalizeInsightBody(bodyMd: string, type: MeetingInsightType) {
+  const body = bodyMd.trim();
+  const fields = extractTechnicalBodyFields(body);
+  if (!fields) return body;
+
+  if (type === "ACTION_ITEM") {
+    return markdownSections([
+      { title: "Outcome", body: fields.ANSWER || fields.REQUEST },
+      { title: "Owner and timing", body: fields.RESULT },
+      { title: "Context", body: fields.CONTEXT },
+    ]) || body;
+  }
+
+  if (type === "FOLLOW_UP") {
+    return markdownSections([
+      { title: "Follow-up topic", body: fields.REQUEST || fields.ANSWER },
+      { title: "Why it matters", body: fields.CONTEXT },
+      { title: "Current status", body: fields.RESULT },
+    ]) || body;
+  }
+
+  if (type === "TENSION") {
+    return markdownSections([
+      { title: "Current reality", body: fields.CONTEXT },
+      { title: "Gap / desired future", body: fields.REQUEST },
+      { title: "Why it matters", body: fields.ANSWER },
+      { title: "Current status", body: fields.RESULT },
+    ]) || body;
+  }
+
+  if (type === "PROPOSAL") {
+    return markdownSections([
+      { title: "Tension / why", body: fields.CONTEXT },
+      { title: "Proposed change", body: fields.REQUEST || fields.ANSWER },
+      { title: "Expected effect", body: fields.REQUEST && fields.ANSWER ? fields.ANSWER : null },
+      { title: "Open questions", body: fields.RESULT },
+    ]) || body;
+  }
+
+  if (type === "DECISION") {
+    return markdownSections([
+      { title: "Decision", body: fields.ANSWER || fields.RESULT },
+      { title: "Context", body: fields.CONTEXT },
+      { title: "What was considered", body: fields.REQUEST },
+    ]) || body;
+  }
+
+  return markdownSections([
+    { title: "Discussion context", body: fields.CONTEXT },
+    { title: "Point raised", body: fields.REQUEST || fields.ANSWER },
+    { title: "Current status", body: fields.RESULT },
+  ]) || body;
+}
+
 function deterministicInsightDedupeKey(params: {
   meetingId: string;
   type: MeetingInsightType;
@@ -216,19 +315,21 @@ Extract all:
 - RESOLUTIONS: existing actions, tensions, or proposals that the meeting clearly completed, resolved, adopted, rejected, or withdrew
 
 Use any user-provided ingestion guidance to prioritize what matters and what follow-up work the operator wanted highlighted. Treat guidance as trusted operator context for spelling, name, and terminology corrections. When guidance corrects a transcript term, use the corrected term in titles and body text. Do not invent new decisions, tasks, tensions, proposals, or resolutions from guidance alone. If an item mainly comes from guidance rather than transcript evidence, say that clearly in the body and leave sourceQuote null.
+Correct meeting transcript drift where Cortex means Corgtex. Use Corgtex in human-facing titles, bodies, source quotes, and meeting block labels.
 If transcriptCondensedForExtraction is true, the full transcript was too large for direct structured extraction. Use summaryMd as the primary meeting digest and the transcript excerpts only as supporting evidence. Do not treat the transcript-shortening note itself as meeting content.
 When contextual intelligence is enabled, use Corgtex context to connect the meeting to previous recurring meetings, active actions, active tensions, open proposals, recent deliberation, and relevant knowledge. Prefer updating or discussing existing records over creating duplicates.
 Use meetingBlocks as the conversation map. Assign each extracted item to the most relevant block using blockSequence, blockTitle, and blockKind. If a proposal discussion leads to a decision or resolution, keep that connection in the body and target fields when supported by existingRecords.
+Treat owner-backed commitments as ACTION_ITEM items even when they appear in summaryMd, key takeaways, action item sections, or indirect transcript wording. If someone says they will do something, needs to contact someone, owns a follow-up, or must prepare a next step, extract a concrete ACTION_ITEM with that owner when the evidence is clear.
 
 For each item, provide:
 - operation: CREATE for new records/decisions/follow-ups, RESOLVE for existing records resolved in this meeting
 - type: one of DECISION, TENSION, ACTION_ITEM, PROPOSAL, FOLLOW_UP, DELIBERATION_ENTRY
-- title: a concise numbered summary, e.g. "#001 > Owner Name Topic/Category - short description"
-- body: use this structured markdown format:
-  **CONTEXT:** [Background or situation that prompted this item]
-  **REQUEST:** [What was asked, raised, or proposed]
-  **ANSWER:** [What was decided, agreed upon, or the next step]
-  **RESULT:** [PROCESSED / OPEN / PENDING — the current status]
+- title: a concise human title with no generated item number, no # prefix, and no ">" separator
+- body: human-first Markdown, not machine metadata. Do not use all-caps labels like CONTEXT, REQUEST, ANSWER, RESULT, MEETING BLOCK, or BLOCK KIND.
+  For TENSION items, structure the body around current reality, gap / desired future, why it matters, and likely processing path.
+  For PROPOSAL items, structure the body around tension / why, proposed change, expected effect, and open questions.
+  For ACTION_ITEM and FOLLOW_UP items, structure the body around concrete outcome, owner, due date if stated, and context.
+  For DECISION and DELIBERATION_ENTRY items, explain what was decided or discussed, what evidence supports it, and what remains open.
 - assigneeHint: who is responsible (display name from transcript), or null
 - dueAt: ISO 8601 due date/time for ACTION_ITEM or FOLLOW_UP only when the meeting explicitly states one, otherwise null
 - confidence: 0.0-1.0 how confident you are
@@ -241,7 +342,6 @@ For each item, provide:
 - dedupeKey: stable lowercase key based on type, target, and the discussed topic
 
 Be conservative — only extract items you're confident about.
-Number items sequentially (#001, #002, ...) across all types.
 `;
 
   const schemaHint = `
@@ -346,13 +446,15 @@ Number items sequentially (#001, #002, ...) across all types.
       if (requestedOperation === "RESOLVE" && targetEntityType === "Proposal" && targetEntityId && !resolvableProposalIds.has(targetEntityId)) continue;
 
       const type = normalizeInsightType(item.type, requestedOperation === "RESOLVE" ? targetEntityType : null);
-      const title = typeof item.title === "string" ? item.title.trim() : "";
+      const title = normalizeInsightTitle(normalizeMeetingProductTerminology(typeof item.title === "string" ? item.title : ""));
       const block = resolveMeetingBlockReference(meeting.blocksJson, {
         sequence: typeof item.blockSequence === "number" ? item.blockSequence : null,
-        title: typeof item.blockTitle === "string" ? item.blockTitle : null,
+        title: typeof item.blockTitle === "string" ? normalizeMeetingProductTerminology(item.blockTitle) : null,
         kind: typeof item.blockKind === "string" ? item.blockKind : null,
       });
-      const bodyMd = prependMeetingBlockContext(typeof item.body === "string" ? item.body.trim() : "", block);
+      if (!type) continue;
+      const rawBody = typeof item.body === "string" ? normalizeMeetingProductTerminology(item.body).trim() : "";
+      const bodyMd = prependMeetingBlockContext(normalizeInsightBody(rawBody, type), block);
       if (!type || title.length === 0 || bodyMd.length === 0) continue;
 
       const isDeliberationEntry = type === "DELIBERATION_ENTRY";
@@ -372,7 +474,7 @@ Number items sequentially (#001, #002, ...) across all types.
       );
       const deliberationEntryType = isDeliberationEntry ? normalizeDeliberationEntryType(item.deliberationEntryType) : null;
       const modelDedupeKey = typeof item.dedupeKey === "string"
-        ? item.dedupeKey.trim().toLowerCase().replace(/\s+/g, "-").slice(0, 160)
+        ? normalizeMeetingProductTerminology(item.dedupeKey).trim().toLowerCase().replace(/\s+/g, "-").slice(0, 160)
         : "";
       const dedupeKey = modelDedupeKey || deterministicInsightDedupeKey({
         meetingId: meeting.id,
@@ -396,10 +498,10 @@ Number items sequentially (#001, #002, ...) across all types.
         status: "SUGGESTED" as const,
         title,
         bodyMd,
-        assigneeHint: typeof item.assigneeHint === "string" ? item.assigneeHint : null,
+        assigneeHint: typeof item.assigneeHint === "string" ? item.assigneeHint.trim() || null : null,
         dueAt: type === "ACTION_ITEM" || type === "FOLLOW_UP" ? normalizeDueAt(item.dueAt ?? item.dueDate) : null,
         confidence: typeof item.confidence === "number" ? item.confidence : 0,
-        sourceQuote: typeof item.sourceQuote === "string" ? item.sourceQuote.slice(0, 200) : null,
+        sourceQuote: typeof item.sourceQuote === "string" ? normalizeMeetingProductTerminology(item.sourceQuote).slice(0, 200) : null,
         targetEntityType: keepTarget ? targetEntityType : null,
         targetEntityId: keepTarget ? targetEntityId : null,
         deliberationEntryType,
@@ -564,8 +666,9 @@ export async function applyInsight(
   let appliedEntityType: string | null = null;
   let appliedEntityId: string | null = null;
 
-  const meetingContext = `\n\n*Created from meeting:* [${insight.meeting.title || 'Untitled'}](/workspaces/${params.workspaceId}/meetings/${insight.meetingId})`;
-  const fullBody = (insight.bodyMd || "") + meetingContext;
+  const meetingContext = `*Created from meeting:* [${insight.meeting.title || "Untitled"}](/workspaces/${params.workspaceId}/meetings/${insight.meetingId})`;
+  const humanBody = stripMeetingBlockContext(insight.bodyMd);
+  const fullBody = [humanBody, meetingContext].filter(Boolean).join("\n\n");
 
   if (insight.type === "DELIBERATION_ENTRY") {
     invariant(insight.targetEntityType === "Proposal" || insight.targetEntityType === "Tension", 400, "INVALID_STATE", "Deliberation insights must point to a proposal or tension.");
@@ -641,7 +744,7 @@ export async function applyInsight(
     const items = Array.isArray(existing?.items) ? existing.items : [];
     items.push({
       title: insight.title,
-      bodyMd: insight.bodyMd,
+      bodyMd: humanBody,
       confirmedAt: new Date().toISOString(),
     });
 

@@ -18,6 +18,7 @@ type MeetingTab = "summary" | "raised" | "evidence";
 type MeetingInsightSummary = {
   status: string;
   type: string;
+  operation: string;
   title: string;
   confidence: number | null;
   sourceQuote: string | null;
@@ -86,6 +87,7 @@ export default async function MeetingDetailPage({
   const resolvedSearch = searchParams ? await searchParams : {};
   const actor = await requirePageActor();
   const t = await getTranslations("meetings");
+  const tActions = await getTranslations("actions");
   const format = await getFormatter();
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
 
@@ -156,20 +158,21 @@ export default async function MeetingDetailPage({
       href: `/workspaces/${workspaceId}/tensions/${tension.id}`,
     }]),
   ]);
+  const raisedActions = meeting.raisedActions ?? [];
   const raisedEvidenceByEntity = new Map<string, MeetingInsightSummary[]>();
   for (const insight of meeting.insights as MeetingInsightSummary[]) {
     if (insight.status !== "APPLIED" || !insight.appliedEntityType || !insight.appliedEntityId) continue;
-    if (insight.appliedEntityType !== "Proposal" && insight.appliedEntityType !== "Tension") continue;
+    if (insight.appliedEntityType !== "Proposal" && insight.appliedEntityType !== "Tension" && insight.appliedEntityType !== "Action") continue;
     const key = `${insight.appliedEntityType}:${insight.appliedEntityId}`;
     raisedEvidenceByEntity.set(key, [...(raisedEvidenceByEntity.get(key) ?? []), insight]);
   }
-  const raisedItemCount = meeting.tensions.length + meeting.proposals.length;
+  const raisedItemCount = meeting.tensions.length + meeting.proposals.length + raisedActions.length;
   const tabs: Array<{ key: MeetingTab; label: string }> = [
     { key: "summary", label: t("tabSummary") },
     { key: "raised", label: t("tabRaised", { count: raisedItemCount }) },
     { key: "evidence", label: t("tabEvidence") },
   ];
-  const evidenceFor = (entityType: "Proposal" | "Tension", entityId: string) => (
+  const evidenceFor = (entityType: "Proposal" | "Tension" | "Action", entityId: string) => (
     raisedEvidenceByEntity.get(`${entityType}:${entityId}`) ?? []
   );
   const renderRaisedEvidence = (evidence: MeetingInsightSummary[]) => {
@@ -330,6 +333,41 @@ export default async function MeetingDetailPage({
                           {renderRaisedEvidence(evidenceFor("Tension", tension.id))}
                         </Link>
                       ))}
+                    </div>
+                  </div>
+                )}
+
+                {raisedActions.length > 0 && (
+                  <div>
+                    <h3 className="meeting-raised-group-title">{t("insightType.action_item")}</h3>
+                    <div className="meeting-raised-grid">
+                      {raisedActions.map((action: any) => {
+                        const assigneeName = action.assigneeMember?.user?.displayName || action.assigneeMember?.user?.email || null;
+                        const dueDate = action.dueAt ? new Date(action.dueAt).toLocaleDateString() : null;
+
+                        return (
+                          <Link
+                            href={`/workspaces/${workspaceId}/actions`}
+                            className="meeting-raised-card"
+                            key={action.id}
+                          >
+                            <div className="meeting-raised-card-head">
+                              <span className="tag info">{t("insightType.action_item")}</span>
+                              <span className={`tag ${statusTagClass(action.status)}`}>
+                                {action.status}
+                              </span>
+                            </div>
+                            <h3>{action.title}</h3>
+                            <MarkdownExcerpt markdown={action.bodyMd} maxLength={240} as="div" className="nr-excerpt" />
+                            <div className="nr-item-meta">
+                              {action.author?.displayName || action.author?.email}
+                              {assigneeName ? ` · ${tActions("metaAssignee", { name: assigneeName })}` : ""}
+                              {dueDate ? ` · ${tActions("metaDue", { date: dueDate })}` : ""}
+                            </div>
+                            {renderRaisedEvidence(evidenceFor("Action", action.id))}
+                          </Link>
+                        );
+                      })}
                     </div>
                   </div>
                 )}
