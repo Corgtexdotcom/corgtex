@@ -27,6 +27,8 @@ const REQUIRED_ENV = [
   "WORKER_SHUTDOWN_TIMEOUT_MS",
 ];
 
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 function arg(name) {
   const prefix = `--${name}=`;
   return process.argv.find((entry) => entry.startsWith(prefix))?.slice(prefix.length);
@@ -47,6 +49,14 @@ function fail(message) {
 
 function configured(name) {
   return Boolean(process.env[name]?.trim());
+}
+
+function envValue(name) {
+  return process.env[name]?.trim() ?? "";
+}
+
+function looksLikeUuid(value) {
+  return UUID_PATTERN.test(value);
 }
 
 async function checkEndpoint(baseUrl, path, predicate, label) {
@@ -75,6 +85,11 @@ async function main() {
     } else {
       warn(`${name} missing`);
     }
+  }
+
+  const microsoftClientSecret = envValue("MICROSOFT_CLIENT_SECRET");
+  if (microsoftClientSecret && looksLikeUuid(microsoftClientSecret)) {
+    fail("MICROSOFT_CLIENT_SECRET looks like an Entra Secret ID. Use the client secret Value instead.");
   }
 
   if (!baseUrl) {

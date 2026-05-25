@@ -78,6 +78,7 @@ function integrationStatusMessage(params: {
     microsoft_tenant_access_denied: "Microsoft blocked this account for the selected tenant. Use an account in the app tenant, add the account as an external user, or switch the Entra app to the intended multitenant audience.",
     microsoft_admin_consent_required: "Microsoft requires tenant admin consent for this account or organization before Corgtex can connect.",
     microsoft_access_denied: "Microsoft access was denied before Corgtex received permission.",
+    microsoft_invalid_client_secret: "Microsoft rejected the client secret. In Entra, create and copy the client secret Value, not the Secret ID, then update the production secret before retrying.",
     oauth_state_invalid: "The OAuth session expired or did not match this browser session. Start the connection again from this settings page.",
     oauth_code_missing: "The provider did not return an authorization code. Start the connection again from this settings page.",
     google_token_exchange_failed: "Google returned an error while exchanging the authorization code. Check the OAuth client secret and redirect URI.",
