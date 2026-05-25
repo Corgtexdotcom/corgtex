@@ -76,8 +76,14 @@ export function KnowledgeFileUploader({
   const [isUploading, setIsUploading] = useState(false);
   const [overallGuidance, setOverallGuidance] = useState("");
   const [items, setItems] = useState<UploadItem[]>([]);
+  const overallGuidanceRef = useRef("");
   const itemsRef = useRef<UploadItem[]>([]);
   const isUploadingRef = useRef(false);
+
+  function updateOverallGuidance(value: string) {
+    overallGuidanceRef.current = value;
+    setOverallGuidance(value);
+  }
 
   function setUploadItems(updater: (current: UploadItem[]) => UploadItem[]) {
     const next = updater(itemsRef.current);
@@ -136,7 +142,7 @@ export function KnowledgeFileUploader({
         formData.set("file", item.file);
         formData.set("source", defaultSource);
         formData.set("title", item.title.trim() || item.file.name);
-        const guidance = combineGuidance(overallGuidance, item.guidance);
+        const guidance = combineGuidance(overallGuidanceRef.current, item.guidance);
         if (guidance) {
           formData.set("ingestionGuidanceMd", guidance);
         }
@@ -238,7 +244,7 @@ export function KnowledgeFileUploader({
             <MarkdownEditor
               name="overallGuidance"
               value={overallGuidance}
-              onValueChange={setOverallGuidance}
+              onValueChange={updateOverallGuidance}
               rows={3}
               placeholder={t("uploadFilesOverallGuidancePlaceholder")}
             />
