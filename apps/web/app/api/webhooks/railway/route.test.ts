@@ -82,6 +82,123 @@ describe("Railway webhook route", () => {
     );
   });
 
+  it("reads concrete services from Railway resource payloads", async () => {
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.startsWith("https://hooks.slack.test/")) {
+        return new Response("ok", { status: 200 });
+      }
+      if (url.endsWith("/labels")) {
+        return Response.json({ name: "label" }, { status: 201 });
+      }
+      if (url.includes("/issues?")) {
+        return Response.json([], { status: 200 });
+      }
+      if (url.endsWith("/issues")) {
+        return Response.json({ html_url: "https://github.test/corgtex/corgtex/issues/2" }, { status: 201 });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { POST } = await import("./route");
+    const response = await POST(railwayRequest({
+      type: "deployment.failed",
+      resource: { service: { name: "worker" } },
+      deployment: {
+        id: "deployment-resource-service",
+        status: "FAILED",
+      },
+    }));
+
+    await expect(response.json()).resolves.toMatchObject({
+      ok: true,
+      actionable: true,
+      githubUrl: "https://github.test/corgtex/corgtex/issues/2",
+      slackSent: true,
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.github.com/repos/corgtex/corgtex/issues",
+      expect.objectContaining({
+        method: "POST",
+        body: expect.stringContaining("worker Railway deployment failed"),
+      }),
+    );
+  });
+
+  it("keeps incidents for concrete services named railway", async () => {
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.startsWith("https://hooks.slack.test/")) {
+        return new Response("ok", { status: 200 });
+      }
+      if (url.endsWith("/labels")) {
+        return Response.json({ name: "label" }, { status: 201 });
+      }
+      if (url.includes("/issues?")) {
+        return Response.json([], { status: 200 });
+      }
+      if (url.endsWith("/issues")) {
+        return Response.json({ html_url: "https://github.test/corgtex/corgtex/issues/3" }, { status: 201 });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { POST } = await import("./route");
+    const response = await POST(railwayRequest({
+      type: "deployment.failed",
+      service: { name: "railway" },
+      deployment: {
+        id: "deployment-railway-service",
+        status: "FAILED",
+      },
+    }));
+
+    await expect(response.json()).resolves.toMatchObject({
+      ok: true,
+      actionable: true,
+      githubUrl: "https://github.test/corgtex/corgtex/issues/3",
+      slackSent: true,
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.github.com/repos/corgtex/corgtex/issues",
+      expect.objectContaining({
+        method: "POST",
+        body: expect.stringContaining("railway Railway deployment failed"),
+      }),
+    );
+  });
+
+  it("keeps generic failed deployment events out of GitHub incidents", async () => {
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.startsWith("https://hooks.slack.test/")) {
+        return new Response("ok", { status: 200 });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { POST } = await import("./route");
+    const response = await POST(railwayRequest({
+      type: "Deployment.crashed",
+      status: "Deployment.crashed",
+    }));
+
+    await expect(response.json()).resolves.toMatchObject({
+      ok: true,
+      actionable: false,
+      githubUrl: null,
+      slackSent: true,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://hooks.slack.test/services/ops",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
   it("does not create GitHub incidents for successful deployment events", async () => {
     const fetchMock = vi.fn(async (input: string | URL | Request) => {
       const url = String(input);

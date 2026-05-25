@@ -76,10 +76,7 @@ function railwayIncident(payload: unknown): OpsIncident | null {
     ?? fieldText(payload, ["status"])
     ?? fieldText(payload, ["deploymentStatus"])
     ?? event;
-  const service = fieldText(payload, ["service", "name"])
-    ?? fieldText(payload, ["serviceName"])
-    ?? fieldText(payload, ["service"])
-    ?? "railway";
+  const service = concreteServiceName(payload);
   const environment = fieldText(payload, ["environment", "name"])
     ?? fieldText(payload, ["environmentName"])
     ?? fieldText(payload, ["environment"]);
@@ -95,6 +92,7 @@ function railwayIncident(payload: unknown): OpsIncident | null {
   const failedDeployment = ["failed", "failure", "crashed", "crash", "error", "unhealthy"].some((term) => signal.includes(term));
 
   if (!volumeAlert && !failedDeployment) return null;
+  if (!service) return null;
 
   const severity: Severity = failedDeployment ? "P1" : "P2";
   const evidence = [
@@ -307,6 +305,19 @@ function fieldText(value: unknown, path: string[]) {
     current = record[segment];
   }
   return typeof current === "string" && current.trim() ? current.trim() : null;
+}
+
+function concreteServiceName(payload: unknown) {
+  const service = fieldText(payload, ["service", "name"])
+    ?? fieldText(payload, ["deployment", "service", "name"])
+    ?? fieldText(payload, ["resource", "service", "name"])
+    ?? fieldText(payload, ["deployment", "serviceName"])
+    ?? fieldText(payload, ["resource", "serviceName"])
+    ?? fieldText(payload, ["serviceName"])
+    ?? fieldText(payload, ["deployment", "service"])
+    ?? fieldText(payload, ["resource", "service"])
+    ?? fieldText(payload, ["service"]);
+  return service;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
