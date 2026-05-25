@@ -36,6 +36,10 @@ export type MeetingBlockReference = {
 export const MEETING_BLOCK_METADATA_PREFIX = "**MEETING BLOCK:**";
 export const MEETING_BLOCK_KIND_PREFIX = "**BLOCK KIND:**";
 
+export function normalizeMeetingProductTerminology(value: string | null | undefined) {
+  return (value ?? "").replace(/\bCortex\b/gi, "Corgtex");
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -70,7 +74,7 @@ function normalizeRelatedRecords(value: unknown): MeetingBlockRelatedRecord[] {
     return [{
       entityType,
       entityId,
-      title: text(item.title) || null,
+      title: normalizeMeetingProductTerminology(text(item.title)) || null,
     }];
   });
 }
@@ -80,8 +84,8 @@ export function normalizeMeetingBlocks(value: unknown): MeetingBlocksJson {
   const rawBlocks = Array.isArray(root.blocks) ? root.blocks : Array.isArray(value) ? value : [];
   const blocks = rawBlocks.flatMap((item, index): MeetingBlock[] => {
     if (!isRecord(item)) return [];
-    const title = text(item.title, 120);
-    const summaryMd = text(item.summaryMd ?? item.summary, 1200);
+    const title = normalizeMeetingProductTerminology(text(item.title, 120));
+    const summaryMd = normalizeMeetingProductTerminology(text(item.summaryMd ?? item.summary, 1200));
     if (!title || !summaryMd) return [];
     const sequence = numberValue(item.sequence) ?? index + 1;
     return [{
@@ -89,7 +93,7 @@ export function normalizeMeetingBlocks(value: unknown): MeetingBlocksJson {
       title,
       kind: normalizeKind(item.kind),
       summaryMd,
-      sourceQuote: text(item.sourceQuote, 240) || null,
+      sourceQuote: normalizeMeetingProductTerminology(text(item.sourceQuote, 240)) || null,
       relatedRecords: normalizeRelatedRecords(item.relatedRecords),
     }];
   }).sort((left, right) => left.sequence - right.sequence);
@@ -139,4 +143,20 @@ export function prependMeetingBlockContext(bodyMd: string, block: MeetingBlock |
     "",
     body,
   ].join("\n");
+}
+
+export function stripMeetingBlockContext(bodyMd: string | null | undefined) {
+  const body = bodyMd?.trim() ?? "";
+  if (!body.startsWith(MEETING_BLOCK_METADATA_PREFIX)) return body;
+
+  const lines = body.split(/\r?\n/);
+  let bodyStartIndex = 1;
+  if (lines[1]?.trim().startsWith(MEETING_BLOCK_KIND_PREFIX)) {
+    bodyStartIndex = 2;
+  }
+  while (bodyStartIndex < lines.length && lines[bodyStartIndex]?.trim() === "") {
+    bodyStartIndex += 1;
+  }
+
+  return lines.slice(bodyStartIndex).join("\n").trim();
 }

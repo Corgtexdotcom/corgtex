@@ -355,11 +355,6 @@ export default function MeetingIntelligence({
                                   )}
                                 </div>
                               )}
-                              {blockContext.blockKind && (
-                                <div className="nr-item-meta">
-                                  {blockContext.blockKind}
-                                </div>
-                              )}
                               {insight.deliberationEntryType && (
                                 <div className="nr-item-meta">
                                   {t("deliberationEntryType")} <strong>{insight.deliberationEntryType.toLowerCase()}</strong>

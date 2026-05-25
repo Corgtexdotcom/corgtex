@@ -156,6 +156,10 @@ describe("runMeetingSummaryAgent", () => {
           content: expect.stringContaining("trusted operator context for spelling, name, and terminology corrections"),
         }),
         expect.objectContaining({
+          role: "system",
+          content: expect.stringContaining("Cortex means Corgtex"),
+        }),
+        expect.objectContaining({
           role: "user",
           content: expect.stringContaining("Emphasize launch risks."),
         }),
@@ -236,7 +240,7 @@ describe("runMeetingSummaryAgent", () => {
       messages: expect.arrayContaining([
         expect.objectContaining({
           role: "system",
-          content: expect.stringContaining("dynamic meeting blocks"),
+          content: expect.stringContaining("roughly twice the useful context"),
         }),
         expect.objectContaining({
           role: "user",
@@ -263,7 +267,7 @@ describe("runMeetingSummaryAgent", () => {
   it("applies explicit guidance term corrections before persisting the meeting summary", async () => {
     const { defaultModelGateway } = await import("@corgtex/models");
     vi.mocked(defaultModelGateway.chat).mockResolvedValueOnce({
-      content: "The company name for Corporate-rebels.com was discussed.\nPuncar should configure info@karina.com.",
+      content: "The Cortex launch was discussed.\nThe company name for Corporate-rebels.com was discussed.\nPuncar should configure info@karina.com.",
       usage: modelUsage,
     });
     buildMeetingIntelligenceContextMock.mockResolvedValueOnce({
@@ -298,6 +302,8 @@ describe("runMeetingSummaryAgent", () => {
     });
 
     const persistedSummary = prismaMock.meeting.updateMany.mock.calls.at(-1)?.[0]?.data?.summaryMd;
+    expect(persistedSummary).toContain("Corgtex launch");
+    expect(persistedSummary).not.toContain("Cortex launch");
     expect(persistedSummary).toContain("corporate rebels");
     expect(persistedSummary).toContain("info@corporate-rebels.com");
     expect(persistedSummary).not.toContain("company name for Corporate-rebels.com");

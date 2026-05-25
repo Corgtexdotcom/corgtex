@@ -20,6 +20,9 @@ const { prismaMock } = vi.hoisted(() => {
     meetingInsight: {
       deleteMany: vi.fn(),
     },
+    action: {
+      findMany: vi.fn(),
+    },
     workspaceArchiveRecord: {
       create: vi.fn(),
     },
@@ -72,10 +75,38 @@ describe("meetings domain", () => {
   });
 
   it("getMeeting returns a meeting with related records", async () => {
-    prismaMock.meeting.findFirst.mockResolvedValue({ id: "meeting-1" });
+    prismaMock.meeting.findFirst.mockResolvedValue({
+      id: "meeting-1",
+      insights: [
+        {
+          status: "APPLIED",
+          type: "ACTION_ITEM",
+          operation: "CREATE",
+          appliedEntityType: "Action",
+          appliedEntityId: "action-1",
+        },
+        {
+          status: "APPLIED",
+          type: "ACTION_ITEM",
+          operation: "RESOLVE",
+          appliedEntityType: "Action",
+          appliedEntityId: "existing-action",
+        },
+      ],
+    });
+    prismaMock.action.findMany.mockResolvedValue([{ id: "action-1", title: "Follow up" }]);
 
     const { getMeeting } = await import("./meetings");
-    await expect(getMeeting("workspace-1", "meeting-1")).resolves.toEqual({ id: "meeting-1" });
+    await expect(getMeeting("workspace-1", "meeting-1")).resolves.toEqual(expect.objectContaining({
+      id: "meeting-1",
+      raisedActions: [{ id: "action-1", title: "Follow up" }],
+    }));
+    expect(prismaMock.action.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        workspaceId: "workspace-1",
+        id: { in: ["action-1"] },
+      }),
+    }));
   });
 
   it("getMeeting returns null when not found", async () => {
@@ -83,6 +114,7 @@ describe("meetings domain", () => {
 
     const { getMeeting } = await import("./meetings");
     await expect(getMeeting("workspace-1", "missing-meeting")).resolves.toBeNull();
+    expect(prismaMock.action.findMany).not.toHaveBeenCalled();
   });
 
   it("createMeeting creates a meeting and event", async () => {

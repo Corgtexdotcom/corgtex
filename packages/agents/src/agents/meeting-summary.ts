@@ -1,7 +1,13 @@
 import type { AgentTriggerType } from "@prisma/client";
 import { prisma, toInputJson } from "@corgtex/shared";
 import { defaultModelGateway } from "@corgtex/models";
-import { AppError, applyGuidanceTermCorrections, buildMeetingIntelligenceContext, normalizeMeetingBlocks } from "@corgtex/domain";
+import {
+  AppError,
+  applyGuidanceTermCorrections,
+  buildMeetingIntelligenceContext,
+  normalizeMeetingBlocks,
+  normalizeMeetingProductTerminology,
+} from "@corgtex/domain";
 import { executeAgentRun } from "../runtime";
 
 function isMissingMeetingError(error: unknown) {
@@ -83,6 +89,7 @@ export async function runMeetingSummaryAgent(params: {
           "A block can be a check-in, update, tension, proposal discussion, decision, planning segment, or custom topic.",
           "Tie proposal discussions and decisions to supplied existing proposal, tension, or action records only when the transcript and context support it.",
           "Personal check-ins can be blocks, but they are not governance records unless explicit work follows.",
+          "Correct meeting transcript drift where Cortex means Corgtex. Use Corgtex in block titles, block summaries, and source quotes.",
           "Return ordered blocks only. Do not invent transcript content.",
         ].join(" "),
         input: JSON.stringify({
@@ -126,13 +133,15 @@ export async function runMeetingSummaryAgent(params: {
             content: [
               "Summarize this meeting for an operator dashboard.",
               "Return clean Markdown only, with no preamble or closing disclaimer.",
-              "Write a slightly longer narrative summary organized around the supplied dynamic meeting blocks.",
+              "Write a fuller narrative summary organized around the supplied dynamic meeting blocks, with roughly twice the useful context of a terse recap and no repetition.",
               "Use the block titles as the main story spine. Preserve the meeting flow instead of forcing a fixed agenda template.",
-              "For each block, explain what happened, what context mattered, and how it connects to decisions, proposals, tensions, actions, or follow-ups when evidence supports it.",
+              "For each block, explain what happened, why it mattered, the outcome or open question, and how it connects to decisions, proposals, tensions, actions, or follow-ups when evidence supports it.",
               "Explicitly tie decisions to the proposal, tension, or topic they belong to. If no clear decision was made, say what remained open.",
+              "Do not leave owner-backed commitments only in the summary. Make action-oriented language explicit enough for downstream extraction to create separate action items.",
               "Use bullets for scannability. Include owners and dates only when the transcript supports them.",
               "Use user-provided ingestion guidance to decide what to emphasize or preserve, but do not invent facts unsupported by the transcript.",
               "Treat ingestion guidance as trusted operator context for spelling, name, and terminology corrections. If guidance corrects transcript wording, use the corrected wording in the summary and do not preserve conflicting text from currentSummary.",
+              "Correct meeting transcript drift where Cortex means Corgtex. Use Corgtex in the human-facing summary.",
               "When contextual intelligence is enabled, use the supplied Corgtex context to explain continuity from previous recurring meetings and to refer to active proposals, tensions, actions, deliberation, and relevant knowledge by title. Do not claim those records changed unless the transcript supports it.",
             ].join(" "),
           },
@@ -160,7 +169,9 @@ export async function runMeetingSummaryAgent(params: {
         ],
       }));
 
-      const summaryMd = applyGuidanceTermCorrections(summary.content, meeting.ingestionGuidanceMd);
+      const summaryMd = normalizeMeetingProductTerminology(
+        applyGuidanceTermCorrections(summary.content, meeting.ingestionGuidanceMd),
+      );
       const persisted = await helpers.step("persist-summary", { meetingId: meeting.id }, async () => prisma.meeting.updateMany({
         where: { id: meeting.id, workspaceId: params.workspaceId },
         data: {

@@ -961,7 +961,7 @@
     "updateSummaryRaisedTitle": "Actualizar resumen y elementos planteados",
     "updateSummaryRaisedDescription": "Agrega una guía cuando falte contexto, haya duplicados o se hayan creado tensiones o propuestas incorrectas.",
     "raisedItemsTitle": "Planteado desde esta reunión",
-    "raisedItemsDescription": "Tensiones y propuestas creadas desde la reunión, con evidencia de origen cuando esté disponible.",
+    "raisedItemsDescription": "Tensiones, acciones y propuestas creadas desde la reunión, con evidencia de origen cuando esté disponible.",
     "raisedItemsEmpty": "Aún no se han planteado tensiones ni propuestas desde esta reunión.",
     "raisedTypeTension": "Tensión",
     "raisedTypeProposal": "Propuesta",
