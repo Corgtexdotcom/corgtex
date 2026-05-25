@@ -82,6 +82,35 @@ describe("Railway webhook route", () => {
     );
   });
 
+  it("keeps generic failed deployment events out of GitHub incidents", async () => {
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.startsWith("https://hooks.slack.test/")) {
+        return new Response("ok", { status: 200 });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { POST } = await import("./route");
+    const response = await POST(railwayRequest({
+      type: "Deployment.crashed",
+      status: "Deployment.crashed",
+    }));
+
+    await expect(response.json()).resolves.toMatchObject({
+      ok: true,
+      actionable: false,
+      githubUrl: null,
+      slackSent: true,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://hooks.slack.test/services/ops",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
   it("does not create GitHub incidents for successful deployment events", async () => {
     const fetchMock = vi.fn(async (input: string | URL | Request) => {
       const url = String(input);
