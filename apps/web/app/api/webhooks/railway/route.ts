@@ -310,9 +310,13 @@ function fieldText(value: unknown, path: string[]) {
 function concreteServiceName(payload: unknown) {
   const service = fieldText(payload, ["service", "name"])
     ?? fieldText(payload, ["deployment", "service", "name"])
+    ?? fieldText(payload, ["resource", "service", "name"])
+    ?? fieldText(payload, ["deployment", "serviceName"])
+    ?? fieldText(payload, ["resource", "serviceName"])
     ?? fieldText(payload, ["serviceName"])
+    ?? fieldText(payload, ["deployment", "service"])
+    ?? fieldText(payload, ["resource", "service"])
     ?? fieldText(payload, ["service"]);
-  if (!service || service.toLowerCase() === "railway") return null;
   return service;
 }
 
