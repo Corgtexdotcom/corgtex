@@ -21,10 +21,12 @@ export function requiredIdempotencyKey(request: NextRequest) {
   return idempotencyKey;
 }
 
-function clientIp(request: NextRequest): string {
+type HeaderReader = Pick<Headers, "get">;
+
+function clientIp(headers: HeaderReader): string {
   return (
-    request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ??
-    request.headers.get("x-real-ip") ??
+    headers.get("x-forwarded-for")?.split(",")[0]?.trim() ??
+    headers.get("x-real-ip") ??
     "unknown"
   );
 }
@@ -67,11 +69,11 @@ async function enforceRateLimit(key: string, limit: typeof RATE_LIMITS[keyof typ
   return null;
 }
 
-export async function rateLimitProcurementTrialCreate(request: NextRequest, params: {
+export async function rateLimitProcurementTrialCreateForHeaders(headers: HeaderReader, params: {
   adminEmail: string;
   companyName: string;
 }) {
-  const ip = clientIp(request);
+  const ip = clientIp(headers);
   const companyKey = normalizeKeyPart(params.companyName);
   const domainKey = emailDomain(params.adminEmail);
 
@@ -81,4 +83,11 @@ export async function rateLimitProcurementTrialCreate(request: NextRequest, para
     await enforceRateLimit(`company:${companyKey}:procurement-trial`, RATE_LIMITS.PROCUREMENT_TRIAL_PER_COMPANY, "Too many trial requests for this company.") ??
     await enforceRateLimit(`domain:${domainKey}:procurement-trial`, RATE_LIMITS.PROCUREMENT_TRIAL_PER_DOMAIN, "Too many trial requests for this email domain.")
   );
+}
+
+export async function rateLimitProcurementTrialCreate(request: NextRequest, params: {
+  adminEmail: string;
+  companyName: string;
+}) {
+  return rateLimitProcurementTrialCreateForHeaders(request.headers, params);
 }
