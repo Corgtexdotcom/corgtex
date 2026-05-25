@@ -1,17 +1,27 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 
-const { requirePageActor, getUserWorkspaceOnboardingState, completeUserWorkspaceOnboarding } = vi.hoisted(() => ({
-  requirePageActor: vi.fn(),
+const { resolveRequestActor, getUserWorkspaceOnboardingState, completeUserWorkspaceOnboarding } = vi.hoisted(() => ({
+  resolveRequestActor: vi.fn(),
   getUserWorkspaceOnboardingState: vi.fn(),
   completeUserWorkspaceOnboarding: vi.fn(),
 }));
 
 vi.mock("@/lib/auth", () => ({
-  requirePageActor,
+  resolveRequestActor,
 }));
 
 vi.mock("@corgtex/domain", () => ({
+  AppError: class AppError extends Error {
+    status: number;
+    code: string;
+
+    constructor(status: number, code: string, message: string) {
+      super(message);
+      this.status = status;
+      this.code = code;
+    }
+  },
   SELF_SERVE_WORKSPACE_TOUR_KEY: "self_serve_workspace",
   SELF_SERVE_WORKSPACE_TOUR_VERSION: "v1",
   getUserWorkspaceOnboardingState,
@@ -20,7 +30,7 @@ vi.mock("@corgtex/domain", () => ({
 
 beforeEach(() => {
   vi.resetModules();
-  requirePageActor.mockResolvedValue({
+  resolveRequestActor.mockResolvedValue({
     kind: "user",
     user: { id: "user-1" },
   });
@@ -31,6 +41,27 @@ afterEach(() => {
 });
 
 describe("/api/workspaces/[workspaceId]/onboarding", () => {
+  it("returns a clean auth error when the request has no session", async () => {
+    resolveRequestActor.mockRejectedValueOnce(Object.assign(new Error("Missing session."), {
+      status: 401,
+      code: "UNAUTHENTICATED",
+    }));
+    const { GET } = await import("./route");
+
+    const response = await GET(
+      new NextRequest("https://app.corgtex.com/api/workspaces/ws-1/onboarding"),
+      { params: Promise.resolve({ workspaceId: "ws-1" }) },
+    );
+
+    await expect(response.json()).resolves.toEqual({
+      error: {
+        code: "UNAUTHENTICATED",
+        message: "Missing session.",
+      },
+    });
+    expect(response.status).toBe(401);
+  });
+
   it("reads persisted onboarding completion for the current user", async () => {
     const completedAt = new Date("2026-05-25T10:00:00.000Z");
     getUserWorkspaceOnboardingState.mockResolvedValue({
