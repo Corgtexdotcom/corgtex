@@ -5,7 +5,7 @@ import {
   SELF_SERVE_WORKSPACE_TOUR_KEY,
   SELF_SERVE_WORKSPACE_TOUR_VERSION,
 } from "@corgtex/domain";
-import { requirePageActor } from "@/lib/auth";
+import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
 
 type Params = {
@@ -22,7 +22,7 @@ function tourParams(request: NextRequest) {
 export async function GET(request: NextRequest, { params }: Params) {
   try {
     const { workspaceId } = await params;
-    const actor = await requirePageActor();
+    const actor = await resolveRequestActor(request);
     const state = await getUserWorkspaceOnboardingState(actor, {
       workspaceId,
       ...tourParams(request),
@@ -46,7 +46,7 @@ export async function GET(request: NextRequest, { params }: Params) {
 export async function POST(request: NextRequest, { params }: Params) {
   try {
     const { workspaceId } = await params;
-    const actor = await requirePageActor();
+    const actor = await resolveRequestActor(request);
     const body = await request.json().catch(() => ({}));
     const state = await completeUserWorkspaceOnboarding(actor, {
       workspaceId,
