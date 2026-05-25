@@ -524,7 +524,7 @@ export async function refreshOAuthTokenIfNeeded(connectionId: string): Promise<O
     }
 
     if (connection.provider === "MICROSOFT") {
-      const response = await fetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
+      const response = await fetch("https://login.microsoftonline.com/organizations/oauth2/v2.0/token", {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: new URLSearchParams({

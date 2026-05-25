@@ -293,6 +293,78 @@ describe("meeting recorder domain", () => {
     }));
   });
 
+  it("refreshes recorder Microsoft tokens through the work-school organization endpoint", async () => {
+    vi.stubEnv("MICROSOFT_CLIENT_ID", "microsoft-client-id");
+    vi.stubEnv("MICROSOFT_CLIENT_SECRET", "microsoft-client-secret");
+    const { syncRecorderCalendarSource } = await import("./meeting-recorders");
+    prismaMock.workspaceRecorderCalendarSource.findFirst.mockResolvedValue({
+      id: "source-1",
+      workspaceId: "workspace-1",
+      provider: "MICROSOFT",
+      providerAccountId: "ms-user-1",
+      providerAccountEmail: "calendar@customer.test",
+      displayName: "Customer Recorder",
+      expiresAt: new Date("2026-05-05T15:00:00.000Z"),
+      scopes: ["Calendars.Read"],
+      status: "ACTIVE",
+      lastSyncStartedAt: null,
+      lastSyncCompletedAt: null,
+      lastSyncAt: null,
+      lastSyncJobId: null,
+      lastSyncError: null,
+      lastDryRunAt: null,
+      lastUpcomingEventCount: 0,
+      lastSchedulableEventCount: 0,
+      createdAt: new Date("2026-05-05T17:00:00.000Z"),
+      updatedAt: new Date("2026-05-05T17:00:00.000Z"),
+    });
+    prismaMock.workspaceRecorderCalendarSource.findUnique.mockResolvedValue({
+      id: "source-1",
+      workspaceId: "workspace-1",
+      provider: "MICROSOFT",
+      accessTokenEnc: "enc:old-access-token",
+      refreshTokenEnc: "enc:refresh-token",
+      expiresAt: new Date("2026-05-05T15:00:00.000Z"),
+      scopes: ["Calendars.Read"],
+      status: "ACTIVE",
+    });
+    prismaMock.workspaceRecorderCalendarSource.update.mockResolvedValue({
+      id: "source-1",
+      workspaceId: "workspace-1",
+      provider: "MICROSOFT",
+      accessTokenEnc: "enc:new-access-token",
+      refreshTokenEnc: "enc:new-refresh-token",
+      expiresAt: new Date("2026-05-05T18:00:00.000Z"),
+      scopes: ["Calendars.Read"],
+      status: "ACTIVE",
+    });
+    fetchMock
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          access_token: "new-access-token",
+          refresh_token: "new-refresh-token",
+          expires_in: 3600,
+          scope: "Calendars.Read",
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ value: [] }),
+      });
+
+    await expect(syncRecorderCalendarSource({
+      workspaceId: "workspace-1",
+      sourceId: "source-1",
+      workflowJobId: "job-1",
+      now: new Date("2026-05-05T16:00:00.000Z"),
+    })).resolves.toMatchObject({ action: "synced", teamsEvents: 0 });
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("https://login.microsoftonline.com/organizations/oauth2/v2.0/token");
+  });
+
   it("verifies Svix-style webhook signatures", async () => {
     const { verifySvixLikeSignature } = await import("./meeting-recorders");
     const payload = JSON.stringify({ event: "transcript.done" });

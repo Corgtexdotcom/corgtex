@@ -64,6 +64,7 @@ describe("GET /api/integrations/[provider]/connect", () => {
 
     const location = new URL(response.headers.get("location") ?? "");
     expect(location.origin).toBe("https://login.microsoftonline.com");
+    expect(location.pathname).toBe("/organizations/oauth2/v2.0/authorize");
     expect(location.searchParams.get("redirect_uri")).toBe("https://app.corgtex.com/api/integrations/microsoft/callback");
     expect(location.searchParams.get("scope")).toBe("offline_access User.Read Calendars.Read");
     expect(location.searchParams.get("scope")).not.toContain("Mail.Read");

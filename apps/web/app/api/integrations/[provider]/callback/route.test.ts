@@ -119,6 +119,7 @@ describe("GET /api/integrations/[provider]/callback", () => {
     );
 
     expect(response.headers.get("location")).toBe("http://localhost:3000/workspaces/ws-1/settings?tab=general&integration=microsoft&integrationStatus=error&integrationError=microsoft_tenant_access_denied");
+    expect(vi.mocked(fetch).mock.calls[0]?.[0]).toBe("https://login.microsoftonline.com/organizations/oauth2/v2.0/token");
   });
 
   it("redirects Microsoft invalid client secret failures with a specific operator-safe error", async () => {
