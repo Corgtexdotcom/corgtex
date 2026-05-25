@@ -5,6 +5,18 @@ import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownExcerpt, MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
+import {
+  TYPE_ORDER,
+  catalogItemComparator,
+  filterCatalogItems,
+  getCatalogCardActions,
+  hasCatalogFilter,
+  splitDefaultCatalogSections,
+  type CatalogCardAction,
+  type CatalogItemForUi,
+  type CatalogItemType,
+  type CatalogRequestType,
+} from "./catalog-ui";
 
 type CircleOption = {
   id: string;
@@ -38,32 +50,18 @@ type ToolLink = {
   canManage: boolean;
 };
 
-type CatalogItemType = "APP" | "AGENT" | "TOOL" | "AUTOMATION" | "CONNECTOR" | "DATA_SOURCE";
-type CatalogAccessMode = "OPEN" | "REQUEST" | "ADMIN_ONLY" | "DISABLED";
-type CatalogRequestType = "ACCESS" | "API_KEY" | "BUDGET_INCREASE" | "PUBLISH";
 type CatalogRequestStatus = "PENDING" | "APPROVED" | "REJECTED" | "CANCELLED";
 
-type CatalogItem = {
-  id: string;
-  type: CatalogItemType;
+type CatalogItem = CatalogItemForUi & {
   sourceType: string;
-  title: string;
-  outcome: string | null;
-  descriptionMd: string | null;
   accessNotesMd: string | null;
-  url: string | null;
-  category: string;
-  status: "DRAFT" | "PUBLISHED" | "REQUEST_ONLY" | "DISABLED" | "ARCHIVED";
-  accessMode: CatalogAccessMode;
   requestedScopes: string[];
   monthlyBudgetCents: number | null;
   dailyCallLimit: number | null;
-  featured: boolean;
   createdAt: string;
   updatedAt: string;
   createdBy: PersonSummary | null;
   owner: PersonSummary | null;
-  isFavorite: boolean;
   isUploaded: boolean;
   pendingRequestCount: number;
 };
@@ -166,8 +164,6 @@ const TYPE_LABELS: Record<CatalogItemType, string> = {
   DATA_SOURCE: "Data",
 };
 
-const TYPE_ORDER: CatalogItemType[] = ["APP", "AGENT", "TOOL", "AUTOMATION", "CONNECTOR", "DATA_SOURCE"];
-
 function domainFor(url: string) {
   try {
     return new URL(url, "https://corgtex.local").hostname.replace(/^www\./, "") || url;
@@ -250,31 +246,21 @@ export function ToolsDirectoryClient({
   }, [links]);
 
   const visibleItems = useMemo(() => {
-    const normalizedQuery = query.trim().toLowerCase();
-    return items
-      .filter((item) => activeType === "ALL" || item.type === activeType)
-      .filter((item) => {
-        if (!normalizedQuery) return true;
-        return [
-          item.title,
-          item.outcome,
-          item.descriptionMd,
-          item.category,
-          item.type,
-        ].some((value) => value?.toLowerCase().includes(normalizedQuery));
-      })
-      .sort((a, b) => Number(b.featured) - Number(a.featured) || a.title.localeCompare(b.title));
+    return filterCatalogItems(items, { activeType, query });
   }, [activeType, items, query]);
+
+  const hasActiveCatalogFilter = hasCatalogFilter({ activeType, query });
+  const defaultCatalogSections = useMemo(() => splitDefaultCatalogSections(visibleItems), [visibleItems]);
 
   const recommendedItems = useMemo(() => (
     [...items]
-      .filter((item) => item.status === "PUBLISHED" && (item.featured || item.isFavorite || item.type === "CONNECTOR"))
-      .sort((a, b) => Number(b.isFavorite) - Number(a.isFavorite) || Number(b.featured) - Number(a.featured) || a.title.localeCompare(b.title))
+      .filter((item) => item.type !== "CONNECTOR" && item.status === "PUBLISHED" && (item.featured || item.isFavorite))
+      .sort(catalogItemComparator)
       .slice(0, 6)
   ), [items]);
 
-  const favoriteItems = items.filter((item) => item.isFavorite);
-  const uploadedItems = items.filter((item) => item.isUploaded);
+  const favoriteItems = useMemo(() => items.filter((item) => item.isFavorite).sort(catalogItemComparator), [items]);
+  const uploadedItems = useMemo(() => items.filter((item) => item.isUploaded).sort(catalogItemComparator), [items]);
   const pendingRequests = requests.filter((request) => request.status === "PENDING");
   const summary = useMemo(() => {
     const activeConnectors = items.filter((item) => item.type === "CONNECTOR" && item.status !== "DISABLED").length;
@@ -541,8 +527,37 @@ export function ToolsDirectoryClient({
     window.setTimeout(() => setCopiedId(null), 1800);
   }
 
+  function renderCatalogAction(action: CatalogCardAction, item: CatalogItem) {
+    if (action.kind === "status") {
+      return <span key={action.label} className="tag info">{action.label}</span>;
+    }
+    if (action.kind === "request") {
+      return (
+        <button
+          key={`${action.kind}-${action.requestType}`}
+          type="button"
+          className={action.variant === "primary" ? "small" : "secondary small"}
+          onClick={() => openRequest(item, action.requestType)}
+        >
+          {action.label}
+        </button>
+      );
+    }
+    return (
+      <a
+        key={`${action.kind}-${action.href}-${action.label}`}
+        className={action.variant === "primary" ? "link-button small" : "link-button secondary small"}
+        href={action.href}
+        target={action.href.startsWith("/") ? undefined : "_blank"}
+        rel="noreferrer"
+      >
+        {action.label}
+      </a>
+    );
+  }
+
   function renderCatalogCard(item: CatalogItem, compact = false) {
-    const disabled = item.status === "DISABLED" || item.accessMode === "DISABLED";
+    const actions = getCatalogCardActions(item, { workspaceId, canManageCatalog });
     return (
       <article
         key={item.id}
@@ -594,23 +609,7 @@ export function ToolsDirectoryClient({
         </div>
 
         <div className="actions-inline" style={{ marginTop: "auto" }}>
-          {item.url && !disabled && (
-            <a className="link-button small" href={item.url} target={item.url.startsWith("/") ? undefined : "_blank"} rel="noreferrer">
-              Open
-            </a>
-          )}
-          <a className="link-button secondary small" href={`/workspaces/${workspaceId}/tools/${item.id}`}>
-            Details
-          </a>
-          <button type="button" className="secondary small" onClick={() => openRequest(item, "ACCESS")}>
-            Request access
-          </button>
-          <button type="button" className="secondary small" onClick={() => openRequest(item, "API_KEY")}>
-            API key
-          </button>
-          <button type="button" className="secondary small" onClick={() => openRequest(item, "BUDGET_INCREASE")}>
-            Budget
-          </button>
+          {actions.map((action) => renderCatalogAction(action, item))}
         </div>
       </article>
     );
@@ -856,10 +855,10 @@ export function ToolsDirectoryClient({
           />
           <div className="actions-inline" style={{ justifyContent: "flex-end" }}>
             <button type="button" className="small" onClick={() => setIsPublishOpen((open) => !open)}>
-              {isPublishOpen ? t("btnCancel") : "Submit app"}
+              {isPublishOpen ? t("btnCancel") : "Submit app for review"}
             </button>
             <button type="button" className="secondary small" onClick={() => setIsFormOpen((open) => !open)}>
-              {isFormOpen ? t("btnCancel") : "Publish shared link"}
+              {isFormOpen ? t("btnCancel") : "Add shared link"}
             </button>
           </div>
         </div>
@@ -922,7 +921,7 @@ export function ToolsDirectoryClient({
         >
           <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "flex-start" }}>
             <div>
-              <h2 style={{ margin: 0, fontSize: "1.1rem" }}>Submit vibe-coded app</h2>
+              <h2 style={{ margin: 0, fontSize: "1.1rem" }}>Submit app for review</h2>
               <p className="nr-item-meta" style={{ margin: "4px 0 0" }}>Employee-made apps go to workspace admins before they appear in Tools.</p>
             </div>
             <button type="button" className="secondary small" onClick={resetPublishForm}>{t("btnCancel")}</button>
@@ -1000,7 +999,7 @@ export function ToolsDirectoryClient({
           className="nr-form-section stack"
           style={{ border: "1px solid var(--line)", borderRadius: 8, padding: 20, marginBottom: 8 }}
         >
-          <h2 style={{ margin: 0, fontSize: "1.1rem" }}>{isEditing ? t("editTitle") : "Publish shared link"}</h2>
+          <h2 style={{ margin: 0, fontSize: "1.1rem" }}>{isEditing ? t("editTitle") : "Add shared link"}</h2>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 14 }}>
             <label>
               {t("formTitle")}
@@ -1086,7 +1085,7 @@ export function ToolsDirectoryClient({
             )}
           </fieldset>
           <div className="actions-inline">
-            <button type="submit" className="small">{isEditing ? t("btnUpdateTool") : "Publish link"}</button>
+            <button type="submit" className="small">{isEditing ? t("btnUpdateTool") : "Add link"}</button>
             <button type="button" className="secondary small" onClick={resetForm}>{t("btnCancel")}</button>
           </div>
         </form>
@@ -1190,23 +1189,33 @@ export function ToolsDirectoryClient({
         </section>
       )}
 
-      {renderSection("Recommended", recommendedItems, "No recommendations yet.", true)}
-      {renderSection("My favorites", favoriteItems, "Favorite apps, agents, connectors, or tools to keep them here.", true)}
-      {renderSection("My uploads", uploadedItems, "Your published links and vibe-coded apps will appear here.", true)}
+      {!hasActiveCatalogFilter && renderSection("Connectors", defaultCatalogSections.connectors, "No connectors are available yet.")}
+
+      {!hasActiveCatalogFilter && (
+        <>
+          {renderSection("Recommended", recommendedItems, "No recommendations yet.", true)}
+          {renderSection("My favorites", favoriteItems, "Favorite apps, agents, connectors, or tools to keep them here.", true)}
+          {renderSection("My uploads", uploadedItems, "Your published links and vibe-coded apps will appear here.", true)}
+        </>
+      )}
 
       <section className="stack" style={{ gap: 16 }}>
         <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "baseline" }}>
-          <h2 className="nr-section-header" style={{ margin: 0 }}>{activeType === "ALL" ? "Catalog" : TYPE_LABELS[activeType]}</h2>
-          <span className="nr-item-meta">{visibleItems.length} items</span>
+          <h2 className="nr-section-header" style={{ margin: 0 }}>
+            {activeType === "ALL" ? (hasActiveCatalogFilter ? "Search results" : "Catalog") : TYPE_LABELS[activeType]}
+          </h2>
+          <span className="nr-item-meta">
+            {(hasActiveCatalogFilter ? visibleItems : defaultCatalogSections.catalog).length} items
+          </span>
         </div>
-        {visibleItems.length === 0 ? (
+        {(hasActiveCatalogFilter ? visibleItems : defaultCatalogSections.catalog).length === 0 ? (
           <div className="nr-item" style={{ textAlign: "center", padding: "48px 24px" }}>
             <h2 style={{ margin: "0 0 8px", fontSize: "1.1rem" }}>No catalog items found.</h2>
-            <p className="muted" style={{ margin: 0 }}>Try another search or publish a shared link.</p>
+            <p className="muted" style={{ margin: 0 }}>Try another search or add a shared link.</p>
           </div>
         ) : (
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: 16 }}>
-            {visibleItems.map((item) => renderCatalogCard(item))}
+            {(hasActiveCatalogFilter ? visibleItems : defaultCatalogSections.catalog).map((item) => renderCatalogCard(item))}
           </div>
         )}
       </section>
