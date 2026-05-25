@@ -1,7 +1,9 @@
 import { requirePageActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
-import { createIntegrationOAuthState } from "@corgtex/domain";
+import { getPublicOrigin } from "@/lib/public-origin";
+import { createIntegrationOAuthState, requireWorkspaceMembership } from "@corgtex/domain";
 import { type NextRequest, NextResponse } from "next/server";
+import { integrationRedirectUrl, isIntegrationOAuthProvider, setOAuthStateCookie } from "../../oauth-flow";
 
 export async function GET(request: NextRequest, props: { params: Promise<{ provider: string }> }) {
   try {
@@ -12,27 +14,31 @@ export async function GET(request: NextRequest, props: { params: Promise<{ provi
       return NextResponse.json({ error: "Only users can perform OAuth flows" }, { status: 403 });
     }
 
-    const protocol = request.headers.get("x-forwarded-proto") || "http";
-    const host = request.headers.get("host") || "localhost:3000";
-    const appUrl = `${protocol}://${host}`;
-
+    const appUrl = getPublicOrigin(request);
+    const workspaceId = request.nextUrl.searchParams.get("workspaceId") || "";
+    if (workspaceId) {
+      await requireWorkspaceMembership({ actor, workspaceId });
+    }
     const { provider } = params;
+    if (!isIntegrationOAuthProvider(provider)) {
+      return NextResponse.json({ error: "Unsupported provider" }, { status: 400 });
+    }
 
     if (provider === "google") {
       const clientId = process.env.GOOGLE_CLIENT_ID;
       if (!clientId) {
-        return NextResponse.json({ error: "Google integration not configured" }, { status: 500 });
+        return NextResponse.redirect(integrationRedirectUrl(appUrl, workspaceId, provider, {
+          status: "error",
+          code: "google_not_configured",
+        }));
       }
 
       const redirectUri = `${appUrl}/api/integrations/google/callback`;
-      const workspaceId = request.nextUrl.searchParams.get("workspaceId") || "";
       const scopes = [
         "openid",
         "email",
         "profile",
         "https://www.googleapis.com/auth/calendar.readonly",
-        "https://www.googleapis.com/auth/drive.readonly",
-        "https://www.googleapis.com/auth/gmail.readonly",
       ].join(" ");
       const state = createIntegrationOAuthState({ userId: actor.user.id, workspaceId });
 
@@ -45,18 +51,22 @@ export async function GET(request: NextRequest, props: { params: Promise<{ provi
       authUrl.searchParams.set("prompt", "consent");
       authUrl.searchParams.set("state", state);
 
-      return NextResponse.redirect(authUrl.toString());
+      const response = NextResponse.redirect(authUrl.toString());
+      setOAuthStateCookie(response, provider, state);
+      return response;
     }
 
     if (provider === "microsoft") {
       const clientId = process.env.MICROSOFT_CLIENT_ID;
       if (!clientId) {
-        return NextResponse.json({ error: "Microsoft integration not configured" }, { status: 500 });
+        return NextResponse.redirect(integrationRedirectUrl(appUrl, workspaceId, provider, {
+          status: "error",
+          code: "microsoft_not_configured",
+        }));
       }
 
       const redirectUri = `${appUrl}/api/integrations/microsoft/callback`;
-      const workspaceId = request.nextUrl.searchParams.get("workspaceId") || "";
-      const scopes = ["offline_access", "User.Read", "Calendars.Read", "Mail.Read", "Files.Read.All", "Sites.Read.All"].join(" ");
+      const scopes = ["offline_access", "User.Read", "Calendars.Read"].join(" ");
       const state = createIntegrationOAuthState({ userId: actor.user.id, workspaceId });
 
       const authUrl = new URL("https://login.microsoftonline.com/common/oauth2/v2.0/authorize");
@@ -67,7 +77,9 @@ export async function GET(request: NextRequest, props: { params: Promise<{ provi
       authUrl.searchParams.set("scope", scopes);
       authUrl.searchParams.set("state", state);
 
-      return NextResponse.redirect(authUrl.toString());
+      const response = NextResponse.redirect(authUrl.toString());
+      setOAuthStateCookie(response, provider, state);
+      return response;
     }
 
     return NextResponse.json({ error: "Unsupported provider" }, { status: 400 });

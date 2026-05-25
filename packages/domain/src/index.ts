@@ -46,6 +46,7 @@ export * from "./workspaces";
 export * from "./integrations";
 export * from "./billing";
 export * from "./oauth-state";
+export * from "./onboarding";
 export * from "./storage-metrics";
 export * from "./password-reset";
 export * from "./expertise";

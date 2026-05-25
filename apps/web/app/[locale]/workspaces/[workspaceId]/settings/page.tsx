@@ -39,6 +39,7 @@ import { AgentBudgetManager } from "./agents/AgentBudgetManager";
 import { SsoConfigManager } from "./SsoConfigManager";
 import { DataSourcesManager } from "./DataSourcesManager";
 import { UserSettingsPanel } from "./UserSettingsPanel";
+import { OnboardingRestartButton } from "./OnboardingRestartButton";
 import { getTranslations, getFormatter } from "next-intl/server";
 import { notFound } from "next/navigation";
 import { getWorkspaceFeatureFlags } from "@/lib/workspace-feature-flags";
@@ -55,6 +56,87 @@ function settingsSection(settings: unknown, key: "calendar" | "documents" | "ema
 
 function settingsStringList(value: unknown) {
   return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
+}
+
+function integrationStatusMessage(params: {
+  provider?: string;
+  status?: string;
+  error?: string;
+  success?: string;
+}) {
+  if (!params.provider || !params.status) return null;
+  if (params.status === "success") {
+    if (params.success === "google_connected") return "Google Calendar connected. Calendar sync is queued.";
+    if (params.success === "microsoft_connected") return "Microsoft Calendar connected. Calendar sync is queued.";
+    return "Integration connected.";
+  }
+
+  const messages: Record<string, string> = {
+    google_not_configured: "Google is not configured in Corgtex yet. Add the Google OAuth client ID/secret and redirect URI before retrying.",
+    microsoft_not_configured: "Microsoft is not configured in Corgtex yet. Add the Entra OAuth client ID/secret and redirect URI before retrying.",
+    google_verification_or_tester_required: "Google blocked access because this app is still in testing or not verified. Add this email as an approved test user, or complete Google verification before public use.",
+    microsoft_tenant_access_denied: "Microsoft blocked this account for the selected tenant. Use an account in the app tenant, add the account as an external user, or switch the Entra app to the intended multitenant audience.",
+    microsoft_admin_consent_required: "Microsoft requires tenant admin consent for this account or organization before Corgtex can connect.",
+    microsoft_access_denied: "Microsoft access was denied before Corgtex received permission.",
+    oauth_state_invalid: "The OAuth session expired or did not match this browser session. Start the connection again from this settings page.",
+    oauth_code_missing: "The provider did not return an authorization code. Start the connection again from this settings page.",
+    google_token_exchange_failed: "Google returned an error while exchanging the authorization code. Check the OAuth client secret and redirect URI.",
+    microsoft_token_exchange_failed: "Microsoft returned an error while exchanging the authorization code. Check the client secret, redirect URI, and tenant consent.",
+    google_profile_failed: "Google connected but Corgtex could not read the signed-in profile. Check the granted OpenID/profile scopes.",
+    microsoft_profile_failed: "Microsoft connected but Corgtex could not read the signed-in profile. Check the User.Read permission.",
+    google_unexpected_error: "Google connection failed inside Corgtex. Retry once; if it repeats, check server logs for the OAuth callback.",
+    microsoft_unexpected_error: "Microsoft connection failed inside Corgtex. Retry once; if it repeats, check server logs for the OAuth callback.",
+  };
+  return messages[params.error ?? ""] ?? "The integration could not be connected. Retry from this settings page.";
+}
+
+function OAuthProviderCard({ provider, title, configured, connection, workspaceId, format }: {
+  provider: "google" | "microsoft";
+  title: string;
+  configured: boolean;
+  connection?: {
+    id: string;
+    providerAccountId: string;
+    providerEmail: string | null;
+    scopes: string[];
+    status: string;
+    syncSettings: unknown;
+    lastSyncAt: Date | null;
+    lastSyncError: string | null;
+  };
+  workspaceId: string;
+  format: Awaited<ReturnType<typeof getFormatter>>;
+}) {
+  const setupNote = provider === "google"
+    ? "Hidden beta requires the signed-in email to be added as a Google test user until Google verification is complete."
+    : "External client tenants may need publisher verification or admin consent before Microsoft will allow access.";
+  return (
+    <div className="nr-item" style={{ padding: "12px 0" }}>
+      <div className="row">
+        <strong className="nr-item-title">{title}</strong>
+        {connection ? (
+          <span className="tag" style={{ background: connection.status === "ACTIVE" ? "var(--accent-soft)" : "transparent" }}>
+            {connection.status === "ACTIVE" ? "Connected" : connection.status}
+          </span>
+        ) : configured ? (
+          <a href={`/api/integrations/${provider}/connect?workspaceId=${workspaceId}`} className="button secondary small">
+            Connect {provider === "google" ? "Google" : "Microsoft"}
+          </a>
+        ) : (
+          <span className="tag" style={{ border: "1px dashed var(--line)", background: "transparent" }}>Needs setup</span>
+        )}
+      </div>
+      <p className="nr-item-meta" style={{ fontSize: "0.82rem", marginTop: 8 }}>
+        Calendar sync is read-only by default. Documents and email remain opt-in and source-filtered before ingestion.
+      </p>
+      <p className="nr-item-meta" style={{ fontSize: "0.82rem", marginTop: 4 }}>
+        {configured ? setupNote : "Corgtex OAuth credentials are missing in this environment."}
+      </p>
+      {connection ? (
+        <OAuthConnectionControls connection={connection} workspaceId={workspaceId} format={format} />
+      ) : null}
+    </div>
+  );
 }
 
 function OAuthConnectionControls({ connection, workspaceId, format }: {
@@ -76,6 +158,9 @@ function OAuthConnectionControls({ connection, workspaceId, format }: {
   const email = settingsSection(connection.syncSettings, "email");
   const documentIds = settingsStringList(documents.selectedDriveIds ?? documents.selectedDocumentIds).join("\n");
   const emailFilters = settingsStringList(email.filters ?? email.queries).join("\n");
+  const scopes = connection.scopes.join(" ").toLowerCase();
+  const hasDocumentScope = scopes.includes("drive.readonly") || scopes.includes("files.read") || scopes.includes("sites.read");
+  const hasEmailScope = scopes.includes("gmail.readonly") || scopes.includes("mail.read");
 
   return (
     <div key={connection.id} className="nr-item" style={{ marginTop: 8, padding: "12px 0" }}>
@@ -118,20 +203,30 @@ function OAuthConnectionControls({ connection, workspaceId, format }: {
         </div>
         <label style={{ fontSize: "0.82rem" }}>
           Documents
-          <select name="documentsEnabled" defaultValue={documents.enabled === true ? "true" : "false"}>
+          <select name="documentsEnabled" defaultValue={documents.enabled === true && hasDocumentScope ? "true" : "false"} disabled={!hasDocumentScope}>
             <option value="false">Disabled</option>
             <option value="true">Selected documents only</option>
           </select>
         </label>
-        <textarea name="documentIds" rows={3} defaultValue={documentIds} placeholder="One Google Drive, OneDrive, or driveId:itemId file reference per line" />
+        <textarea name="documentIds" rows={3} defaultValue={documentIds} placeholder="One Google Drive, OneDrive, or driveId:itemId file reference per line" disabled={!hasDocumentScope} />
+        {!hasDocumentScope && (
+          <p className="nr-item-meta" style={{ fontSize: "0.78rem", margin: 0 }}>
+            Document ingestion needs an additional approved document scope and stays off for this calendar-only connection.
+          </p>
+        )}
         <label style={{ fontSize: "0.82rem" }}>
           Email
-          <select name="emailEnabled" defaultValue={email.enabled === true ? "true" : "false"}>
+          <select name="emailEnabled" defaultValue={email.enabled === true && hasEmailScope ? "true" : "false"} disabled={!hasEmailScope}>
             <option value="false">Disabled</option>
             <option value="true">Filtered messages only</option>
           </select>
         </label>
-        <textarea name="emailFilters" rows={3} defaultValue={emailFilters} placeholder="One Gmail/Outlook search filter per line" />
+        <textarea name="emailFilters" rows={3} defaultValue={emailFilters} placeholder="One Gmail/Outlook search filter per line" disabled={!hasEmailScope} />
+        {!hasEmailScope && (
+          <p className="nr-item-meta" style={{ fontSize: "0.78rem", margin: 0 }}>
+            Email ingestion needs an additional approved email scope and stays off until explicit source filters are ready.
+          </p>
+        )}
         <div className="actions-inline">
           <button type="submit" className="button secondary small">Save connector settings</button>
         </div>
@@ -142,8 +237,8 @@ function OAuthConnectionControls({ connection, workspaceId, format }: {
             <input type="hidden" name="workspaceId" value={workspaceId} />
             <input type="hidden" name="connectionId" value={connection.id} />
             {calendar.enabled !== false && <input type="hidden" name="syncKind" value="calendar" />}
-            {documents.enabled === true && <input type="hidden" name="syncKind" value="documents" />}
-            {email.enabled === true && <input type="hidden" name="syncKind" value="email" />}
+            {documents.enabled === true && hasDocumentScope && <input type="hidden" name="syncKind" value="documents" />}
+            {email.enabled === true && hasEmailScope && <input type="hidden" name="syncKind" value="email" />}
             <button type="submit" className="button secondary small">Run sync</button>
           </form>
         ) : null}
@@ -163,7 +258,7 @@ export default async function SettingsPage({
   searchParams,
 }: {
   params: Promise<{ workspaceId: string }>;
-  searchParams: Promise<{ tab?: string }>;
+  searchParams: Promise<{ tab?: string; integration?: string; integrationStatus?: string; integrationError?: string; integrationSuccess?: string }>;
 }) {
   const { workspaceId } = await params;
   const search = await searchParams;
@@ -286,6 +381,16 @@ export default async function SettingsPage({
   const connectorUrl = env.MCP_PUBLIC_URL ?? `${origin}/mcp`;
   const t = await getTranslations("settings");
   const format = await getFormatter();
+  const integrationMessage = integrationStatusMessage({
+    provider: search.integration,
+    status: search.integrationStatus,
+    error: search.integrationError,
+    success: search.integrationSuccess,
+  });
+  const googleConnection = userConnections.find((c) => c.provider === "GOOGLE" && c.status !== "DISCONNECTED");
+  const microsoftConnection = userConnections.find((c) => c.provider === "MICROSOFT" && c.status !== "DISCONNECTED");
+  const googleConfigured = Boolean(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET);
+  const microsoftConfigured = Boolean(process.env.MICROSOFT_CLIENT_ID && process.env.MICROSOFT_CLIENT_SECRET);
 
   return (
     <>
@@ -374,6 +479,7 @@ export default async function SettingsPage({
                         Billing portal
                       </a>
                     )}
+                    <OnboardingRestartButton />
                   </div>
                 </div>
               </section>
@@ -383,33 +489,31 @@ export default async function SettingsPage({
               <p className="nr-item-meta" style={{ fontSize: "0.85rem", marginBottom: 16 }}>
                 {t("descMyIntegrations")}
               </p>
+              {integrationMessage && (
+                <p
+                  className={`form-message ${search.integrationStatus === "success" ? "form-message-success" : "form-message-error"}`}
+                  style={{ marginBottom: 12 }}
+                >
+                  {integrationMessage}
+                </p>
+              )}
               <div>
-                <div className="nr-item" style={{ padding: "12px 0" }}>
-                  <div className="row">
-                    <strong className="nr-item-title">{t("integrationGoogle")}</strong>
-                    {userConnections.find((c) => c.provider === "GOOGLE" && c.status !== "DISCONNECTED") ? (
-                      <span className="tag" style={{ background: "var(--accent-soft)" }}>{t("statusConnected")}</span>
-                    ) : (
-                      <a href={`/api/integrations/google/connect?workspaceId=${workspaceId}`} className="button secondary small">{t("btnConnectGoogle")}</a>
-                    )}
-                  </div>
-                  {userConnections.filter((c) => c.provider === "GOOGLE" && c.status !== "DISCONNECTED").map((connection) => (
-                    <OAuthConnectionControls key={connection.id} connection={connection} workspaceId={workspaceId} format={format} />
-                  ))}
-                </div>
-                <div className="nr-item" style={{ padding: "12px 0" }}>
-                  <div className="row">
-                    <strong className="nr-item-title">{t("integrationMicrosoft")}</strong>
-                    {userConnections.find((c) => c.provider === "MICROSOFT" && c.status !== "DISCONNECTED") ? (
-                      <span className="tag" style={{ background: "var(--accent-soft)" }}>{t("statusConnected")}</span>
-                    ) : (
-                      <a href={`/api/integrations/microsoft/connect?workspaceId=${workspaceId}`} className="button secondary small">{t("btnConnectMicrosoft")}</a>
-                    )}
-                  </div>
-                  {userConnections.filter((c) => c.provider === "MICROSOFT" && c.status !== "DISCONNECTED").map((connection) => (
-                    <OAuthConnectionControls key={connection.id} connection={connection} workspaceId={workspaceId} format={format} />
-                  ))}
-                </div>
+                <OAuthProviderCard
+                  provider="google"
+                  title={t("integrationGoogle")}
+                  configured={googleConfigured}
+                  connection={googleConnection}
+                  workspaceId={workspaceId}
+                  format={format}
+                />
+                <OAuthProviderCard
+                  provider="microsoft"
+                  title={t("integrationMicrosoft")}
+                  configured={microsoftConfigured}
+                  connection={microsoftConnection}
+                  workspaceId={workspaceId}
+                  format={format}
+                />
                 {featureFlags.MEETING_RECORDERS && meetingRecorderConfig ? (
                   <div className="nr-item" style={{ padding: "12px 0" }}>
                     <div className="row">

@@ -1,18 +1,25 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { prismaMock } = vi.hoisted(() => ({
-  prismaMock: {
+const { prismaMock, requireWorkspaceMembershipMock } = vi.hoisted(() => {
+  const prismaMock: any = {
     oAuthConnection: {
       findUnique: vi.fn(),
       findFirst: vi.fn(),
+      upsert: vi.fn(),
       update: vi.fn(),
       delete: vi.fn(),
     },
     workflowJob: {
+      create: vi.fn(),
       upsert: vi.fn(),
     },
-  },
-}));
+  };
+  prismaMock.$transaction = vi.fn(async (callback: (tx: typeof prismaMock) => unknown) => callback(prismaMock));
+  return {
+    prismaMock,
+    requireWorkspaceMembershipMock: vi.fn(),
+  };
+});
 
 vi.mock("@corgtex/shared", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@corgtex/shared")>();
@@ -25,7 +32,7 @@ vi.mock("@corgtex/shared", async (importOriginal) => {
 });
 
 vi.mock("./auth", () => ({
-  requireWorkspaceMembership: vi.fn(),
+  requireWorkspaceMembership: requireWorkspaceMembershipMock,
 }));
 
 describe("OAuth integration sync helpers", () => {
@@ -33,6 +40,81 @@ describe("OAuth integration sync helpers", () => {
     vi.resetModules();
     vi.clearAllMocks();
     vi.stubGlobal("fetch", vi.fn());
+    requireWorkspaceMembershipMock.mockResolvedValue({ id: "member-1" });
+  });
+
+  it("encrypts OAuth tokens when saving a workspace connection", async () => {
+    prismaMock.oAuthConnection.upsert.mockResolvedValue({
+      id: "conn-1",
+      provider: "GOOGLE",
+      status: "ACTIVE",
+    });
+    prismaMock.workflowJob.create.mockResolvedValue({ id: "job-1" });
+    const { saveOAuthConnectionAndEnqueueCalendarSync } = await import("./integrations");
+
+    await saveOAuthConnectionAndEnqueueCalendarSync({
+      kind: "user",
+      user: { id: "user-1", email: "user@example.test" },
+    } as any, {
+      workspaceId: "ws-1",
+      provider: "GOOGLE",
+      providerAccountId: "google-user-1",
+      providerEmail: "user@example.test",
+      accessToken: "access-token",
+      refreshToken: "refresh-token",
+      expiresIn: 3600,
+      scopes: ["openid", "profile", "https://www.googleapis.com/auth/calendar.readonly"],
+    });
+
+    expect(prismaMock.oAuthConnection.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      update: expect.objectContaining({
+        accessToken: "enc:access-token",
+        refreshToken: "enc:refresh-token",
+        tokenStorageVersion: "aes-256-gcm",
+      }),
+      create: expect.objectContaining({
+        accessToken: "enc:access-token",
+        refreshToken: "enc:refresh-token",
+        tokenStorageVersion: "aes-256-gcm",
+      }),
+    }));
+    expect(prismaMock.workflowJob.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        workspaceId: "ws-1",
+        type: "calendar.sync",
+      }),
+    }));
+  });
+
+  it("opportunistically backfills plaintext OAuth tokens before sync use", async () => {
+    prismaMock.oAuthConnection.findUnique.mockResolvedValue({
+      id: "conn-1",
+      provider: "GOOGLE",
+      status: "ACTIVE",
+      accessToken: "access-token",
+      refreshToken: "refresh-token",
+      tokenStorageVersion: "plaintext",
+      expiresAt: new Date(Date.now() + 60 * 60 * 1000),
+    });
+    prismaMock.oAuthConnection.update.mockResolvedValue({
+      id: "conn-1",
+      accessToken: "enc:access-token",
+      refreshToken: "enc:refresh-token",
+      tokenStorageVersion: "aes-256-gcm",
+    });
+    const { refreshOAuthTokenIfNeeded } = await import("./integrations");
+
+    await refreshOAuthTokenIfNeeded("conn-1");
+
+    expect(prismaMock.oAuthConnection.update).toHaveBeenCalledWith({
+      where: { id: "conn-1" },
+      data: {
+        accessToken: "enc:access-token",
+        refreshToken: "enc:refresh-token",
+        tokenStorageVersion: "aes-256-gcm",
+      },
+    });
+    expect(fetch).not.toHaveBeenCalled();
   });
 
   it("fetches selected Google Drive documents only for explicit IDs", async () => {

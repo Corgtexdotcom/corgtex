@@ -21,6 +21,8 @@ beforeEach(() => {
   vi.stubGlobal("fetch", vi.fn());
   vi.stubEnv("GOOGLE_CLIENT_ID", "google-client-id");
   vi.stubEnv("GOOGLE_CLIENT_SECRET", "google-client-secret");
+  vi.stubEnv("MICROSOFT_CLIENT_ID", "microsoft-client-id");
+  vi.stubEnv("MICROSOFT_CLIENT_SECRET", "microsoft-client-secret");
 });
 
 afterEach(() => {
@@ -52,7 +54,9 @@ describe("GET /api/integrations/[provider]/callback", () => {
 
     const { GET } = await import("./route");
     const response = await GET(
-      new NextRequest("http://localhost/api/integrations/google/callback?code=auth-code&state=user-1:ws-1"),
+      new NextRequest("http://localhost:3000/api/integrations/google/callback?code=auth-code&state=signed-state", {
+        headers: { cookie: "corgtex_google_oauth_state=signed-state" },
+      }),
       { params: Promise.resolve({ provider: "google" }) },
     );
 
@@ -72,6 +76,64 @@ describe("GET /api/integrations/[provider]/callback", () => {
         scopes: ["calendar", "profile"],
       },
     );
-    expect(response.headers.get("location")).toBe("http://localhost:3000/workspaces/ws-1/settings?success=google_connected");
+    expect(response.headers.get("location")).toBe("http://localhost:3000/workspaces/ws-1/settings?tab=general&integration=google&integrationStatus=success&integrationSuccess=google_connected");
+    expect(response.headers.get("set-cookie")).toContain("corgtex_google_oauth_state=");
+  });
+
+  it("redirects provider access errors back to settings with a safe Google verification message", async () => {
+    requirePageActor.mockResolvedValue({
+      kind: "user",
+      user: { id: "user-1" },
+    });
+    verifyIntegrationOAuthState.mockReturnValue({ userId: "user-1", workspaceId: "ws-1" });
+
+    const { GET } = await import("./route");
+    const response = await GET(
+      new NextRequest("http://localhost:3000/api/integrations/google/callback?error=access_denied&state=signed-state", {
+        headers: { cookie: "corgtex_google_oauth_state=signed-state" },
+      }),
+      { params: Promise.resolve({ provider: "google" }) },
+    );
+
+    expect(saveOAuthConnectionAndEnqueueCalendarSync).not.toHaveBeenCalled();
+    expect(response.headers.get("location")).toBe("http://localhost:3000/workspaces/ws-1/settings?tab=general&integration=google&integrationStatus=error&integrationError=google_verification_or_tester_required");
+  });
+
+  it("redirects Microsoft tenant token failures back to settings instead of returning JSON", async () => {
+    requirePageActor.mockResolvedValue({
+      kind: "user",
+      user: { id: "user-1" },
+    });
+    verifyIntegrationOAuthState.mockReturnValue({ userId: "user-1", workspaceId: "ws-1" });
+    vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify({
+      error: "invalid_grant",
+      error_description: "AADSTS50020: User account does not exist in tenant.",
+    }), { status: 400 }));
+
+    const { GET } = await import("./route");
+    const response = await GET(
+      new NextRequest("http://localhost:3000/api/integrations/microsoft/callback?code=auth-code&state=signed-state", {
+        headers: { cookie: "corgtex_microsoft_oauth_state=signed-state" },
+      }),
+      { params: Promise.resolve({ provider: "microsoft" }) },
+    );
+
+    expect(response.headers.get("location")).toBe("http://localhost:3000/workspaces/ws-1/settings?tab=general&integration=microsoft&integrationStatus=error&integrationError=microsoft_tenant_access_denied");
+  });
+
+  it("rejects callbacks without the matching short-lived state cookie", async () => {
+    requirePageActor.mockResolvedValue({
+      kind: "user",
+      user: { id: "user-1" },
+    });
+
+    const { GET } = await import("./route");
+    const response = await GET(
+      new NextRequest("http://localhost:3000/api/integrations/google/callback?code=auth-code&state=signed-state"),
+      { params: Promise.resolve({ provider: "google" }) },
+    );
+
+    expect(verifyIntegrationOAuthState).not.toHaveBeenCalled();
+    expect(response.headers.get("location")).toBe("http://localhost:3000/?integration=google&integrationStatus=error&integrationError=oauth_state_invalid");
   });
 });

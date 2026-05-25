@@ -2285,6 +2285,39 @@
       "briefingCtaSecondary": "Seguir explorando"
     }
   },
+  "onboarding": {
+    "tour": {
+      "welcomeTitle": "Bienvenido a tu espacio de Corgtex",
+      "welcomeDescription": "Este recorrido rápido muestra dónde encontrar contexto, invitar colegas, conectar herramientas y revisar el uso de IA del periodo de prueba.",
+      "homeTitle": "Empieza con el periódico del espacio",
+      "homeDescription": "La vista inicial reúne conocimiento reciente, reuniones, tensiones, acciones y contexto útil para que el equipo se oriente rápido.",
+      "brainTitle": "Construye el Brain compartido",
+      "brainDescription": "Brain convierte documentos seleccionados, reuniones, notas y contexto de conectores en memoria organizacional buscable.",
+      "circlesTitle": "Mapea personas y responsabilidades",
+      "circlesDescription": "Los círculos muestran equipos, roles y responsabilidades que explican cómo se realiza el trabajo.",
+      "proposalsTitle": "Convierte tensiones en decisiones",
+      "proposalsDescription": "Tensiones, propuestas, objetivos y acciones mantienen el cambio visible en lugar de enterrado en reuniones o chats.",
+      "integrationsTitle": "Conecta herramientas aprobadas",
+      "integrationsDescription": "Usa ajustes para conectar clientes MCP, calendarios de Google o Microsoft, facturación y fuentes de contexto con activación segura.",
+      "membersTitle": "Invita colegas",
+      "membersDescription": "Los administradores pueden invitar personas una por una o en bloque para que el espacio sea útil para toda la organización.",
+      "assistantTitle": "Pide ayuda a Corgtex",
+      "assistantDescription": "El asistente puede usar el contexto del espacio y las herramientas habilitadas respetando el plan y el presupuesto de IA.",
+      "checklistTitle": "Termina la configuración",
+      "checklistDescription": "Estas ventanas de configuración siguen disponibles desde ajustes para que los administradores sepan qué completar.",
+      "inviteTitle": "Invita a los primeros colegas",
+      "inviteDescription": "Agrega a las personas que deben validar roles, propuestas y contexto del espacio.",
+      "mcpTitle": "Conecta un cliente MCP",
+      "mcpDescription": "Usa la tarjeta del conector MCP para conectar ChatGPT, Claude, Claude Code, Cursor u otro cliente compatible.",
+      "calendarTitle": "Conecta calendario cuando esté listo",
+      "calendarDescription": "Las conexiones de calendario de Google y Microsoft son de solo lectura por defecto y requieren aprobación del proveedor durante la beta oculta.",
+      "spendTitle": "Revisa el gasto de IA",
+      "spendDescription": "La prueba incluye crédito de IA de Corgtex con límite. La IA pagada se reactiva con facturación por uso.",
+      "contextTitle": "Agrega la primera fuente de contexto",
+      "contextDescription": "Sube un archivo, pega contexto o elige fuentes de conectores antes de habilitar indexación amplia.",
+      "checklistPrimary": "Listo"
+    }
+  },
   "shared": {
     "markdownEditor": {
       "write": "Escribir",
