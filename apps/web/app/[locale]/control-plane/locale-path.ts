@@ -1,5 +1,6 @@
 export {
   controlPlaneLocaleCookie,
+  getControlPlaneDefaultLocale,
   localizedControlPlanePath,
   normalizeControlPlaneLocale,
   type ControlPlaneLocale,

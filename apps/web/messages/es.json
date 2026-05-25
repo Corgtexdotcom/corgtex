@@ -1225,12 +1225,35 @@
     "eyebrow": "Gobernanza de IA empresarial",
     "description": "Superficie operativa privada para instancias hospedadas de clientes, contexto gobernado, integraciones empresariales, controles del ciclo de vida de agentes de IA, despliegue de releases, soporte, auditoría y acceso Codex/MCP.",
     "nav": {
-      "dashboard": "Panel",
+      "dashboard": "Panel de Control",
       "customers": "Clientes",
-      "agents": "Agentes",
-      "releases": "Releases",
-      "operations": "Operaciones",
-      "users": "Usuarios"
+      "agents": "Observatorio de Agentes",
+      "releases": "Releases y Drift",
+      "operations": "Log de Operaciones",
+      "users": "Directorio de Usuarios",
+      "details": "Detalles"
+    },
+    "navGroups": {
+      "fleet": "Flota",
+      "observe": "Observar",
+      "operate": "Operar"
+    },
+    "search": {
+      "open": "Abrir paleta de comandos",
+      "placeholder": "Buscar..."
+    },
+    "commandPalette": {
+      "placeholder": "Escribe una pagina o seccion para navegar...",
+      "emptyTitle": "Ninguna pagina coincide con tu busqueda.",
+      "emptyHint": "Prueba con \"agentes\", \"releases\" u \"ops\".",
+      "items": {
+        "dashboard": "Ver metricas de flota, despliegues y estadisticas generales.",
+        "customers": "Ir a la lista de despliegues empresariales.",
+        "agents": "Monitorear gobernanza de agentes, modelos, ejecuciones y costes.",
+        "releases": "Revisar distribucion de versiones y rollouts.",
+        "operations": "Revisar logs de soporte y eventos break-glass.",
+        "users": "Gestionar perfiles globales y membresias de clientes."
+      }
     },
     "sections": {
       "fleet": {

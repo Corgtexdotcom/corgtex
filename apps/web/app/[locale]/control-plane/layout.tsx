@@ -7,6 +7,7 @@ import { Menu, Bell, User, Search, Sparkles } from "lucide-react";
 import { ControlPlaneSidebar } from "./_components/sidebar";
 import { CommandPalette } from "./_components/command-palette";
 import { OpsAgentChat } from "./_components/ops-agent-chat";
+import { ControlPlaneLanguageSwitcher } from "./ControlPlaneLanguageSwitcher";
 import { Link } from "@/i18n/routing";
 import { cn } from "@/lib/utils";
 
@@ -25,7 +26,7 @@ export default function ControlPlaneLayout({
   // Bind keyboard listener for Cmd+K command palette
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === "k") {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
         setIsSearchOpen((prev) => !prev);
       }
@@ -41,7 +42,7 @@ export default function ControlPlaneLayout({
     const crumbs = [];
 
     // Dashboard root
-    crumbs.push({ label: "Fleet", href: "/control-plane" });
+    crumbs.push({ label: t("navGroups.fleet"), href: "/control-plane" });
 
     if (segments.length > 1) {
       if (segments[1] === "agents") {
@@ -54,7 +55,7 @@ export default function ControlPlaneLayout({
         crumbs.push({ label: t("nav.users"), href: "/control-plane/users" });
       } else if (segments[1] === "deployments" && segments[2]) {
         crumbs.push({ label: t("nav.customers"), href: "/control-plane#fleet" });
-        crumbs.push({ label: "Details", href: `/control-plane/deployments/${segments[2]}` });
+        crumbs.push({ label: t("nav.details"), href: `/control-plane/deployments/${segments[2]}` });
       }
     }
 
@@ -122,11 +123,14 @@ export default function ControlPlaneLayout({
 
           {/* Quick Header Actions */}
           <div className="flex items-center gap-3">
+            <ControlPlaneLanguageSwitcher />
+
             {/* Quick search button */}
             <button
               onClick={() => setIsSearchOpen(true)}
               className="p-2 rounded-lg bg-[#141822] border border-[#202738] text-slate-400 hover:text-white hover:bg-[#1a202d] transition-all duration-150"
-              title="Search Command Palette (Cmd+K)"
+              title={t("search.open")}
+              aria-label={t("search.open")}
             >
               <Search className="w-4 h-4" />
             </button>

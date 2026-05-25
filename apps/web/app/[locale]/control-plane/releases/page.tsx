@@ -1,6 +1,5 @@
 import { notFound } from "next/navigation";
-import { getFormatter } from "next-intl/server";
-import { getControlPlaneLatestReleaseTarget, requireControlPlaneAccess, listControlPlaneReleaseRolloutJobs } from "@corgtex/domain";
+import { getControlPlaneLatestReleaseTarget, isControlPlaneRailwayDeployConfigured, requireControlPlaneAccess, listControlPlaneReleaseRolloutJobs } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { prisma } from "@corgtex/shared";
 import { Link } from "@/i18n/routing";
@@ -47,36 +46,35 @@ export default async function ControlPlaneReleasesPage() {
     listControlPlaneReleaseRolloutJobs(actor, { take: 10 }),
   ]);
 
-  const format = await getFormatter();
   const latestReleaseTarget = getControlPlaneLatestReleaseTarget();
+  const releaseExecutionConfigured = isControlPlaneRailwayDeployConfigured();
+  const canQueueReleaseRollouts = Boolean(latestReleaseTarget && releaseExecutionConfigured);
+  const releaseQueueLabel = !latestReleaseTarget
+    ? "Latest release not configured"
+    : releaseExecutionConfigured
+      ? "Upgrade All Eligible"
+      : "Railway token not configured";
   const targetVersionLabel = latestReleaseTarget
     ? releaseLabel(latestReleaseTarget.releaseImageTag, latestReleaseTarget.releaseVersion)
     : "Not configured";
 
-  // Map deployments to version items
-  const formattedFleet = deployments.length > 0 
-    ? deployments.map((ws: any) => {
-        const targetDiffers = latestReleaseTarget
-          ? latestReleaseTarget.releaseImageTag !== ws.releaseImageTag
-            || latestReleaseTarget.releaseVersion !== (ws.releaseVersion ?? null)
-          : false;
-        return {
-          id: ws.id,
-          name: ws.label,
-          slug: ws.customerSlug || "default-slug",
-          status: ws.deploymentStatus,
-          currentVersion: releaseLabel(ws.releaseImageTag, ws.releaseVersion),
-          targetVersion: targetVersionLabel,
-          drift: targetDiffers ? `Target differs from current ${releaseLabel(ws.releaseImageTag, ws.releaseVersion)}` : null,
-          region: ws.region || "us-east1",
-          lastDeploy: ws.lastReleaseCheck ? ws.lastReleaseCheck.toLocaleString() : "Not checked",
-        };
-      })
-    : [
-        { id: "1", name: "Atlas Workspace", slug: "atlas", status: "ACTIVE", currentVersion: "v1.2.3", targetVersion: "v1.3.0", drift: "Release drift (v1.2.3 vs v1.3.0)", region: "europe-west1", lastDeploy: "2 days ago" },
-        { id: "2", name: "Beacon Manufacturing", slug: "beacon-manufacturing", status: "ACTIVE", currentVersion: "v1.3.0", targetVersion: "v1.3.0", drift: null, region: "us-east1", lastDeploy: "1d ago" },
-        { id: "3", name: "Summit Media", slug: "summit-media", status: "ACTIVE", currentVersion: "v1.1.0", targetVersion: "v1.3.0", drift: "Major drift (v1.1.0 vs v1.3.0)", region: "us-west2", lastDeploy: "1 week ago" },
-      ];
+  const formattedFleet = deployments.map((ws: any) => {
+    const targetDiffers = latestReleaseTarget
+      ? latestReleaseTarget.releaseImageTag !== ws.releaseImageTag
+        || latestReleaseTarget.releaseVersion !== (ws.releaseVersion ?? null)
+      : false;
+    return {
+      id: ws.id,
+      name: ws.label,
+      slug: ws.customerSlug || "default-slug",
+      status: ws.deploymentStatus,
+      currentVersion: releaseLabel(ws.releaseImageTag, ws.releaseVersion),
+      targetVersion: targetVersionLabel,
+      drift: targetDiffers ? `Target differs from current ${releaseLabel(ws.releaseImageTag, ws.releaseVersion)}` : null,
+      region: ws.region || "us-east1",
+      lastDeploy: ws.lastReleaseCheck ? ws.lastReleaseCheck.toLocaleString() : "Not checked",
+    };
+  });
 
   return (
     <div className="space-y-6 animate-in fade-in duration-300">
@@ -111,9 +109,15 @@ export default async function ControlPlaneReleasesPage() {
             <input type="hidden" name="limit" value="100" />
             <button
               type="submit"
-              className="bg-brand-600 hover:bg-brand-500 text-white font-semibold text-xs px-3.5 py-1.5 rounded shadow transition-all duration-150 h-8"
+              disabled={!canQueueReleaseRollouts}
+              className={cn(
+                "font-semibold text-xs px-3.5 py-1.5 rounded shadow transition-all duration-150 h-8",
+                canQueueReleaseRollouts
+                  ? "bg-brand-600 hover:bg-brand-500 text-white"
+                  : "bg-[#141822]/40 border border-[#202738]/60 text-slate-500 cursor-not-allowed"
+              )}
             >
-              Upgrade All Eligible
+              {releaseQueueLabel}
             </button>
           </form>
         </div>
@@ -173,6 +177,13 @@ export default async function ControlPlaneReleasesPage() {
                     </td>
                   </tr>
                 ))}
+                {formattedFleet.length === 0 && (
+                  <tr>
+                    <td colSpan={6} className="text-center py-8 text-slate-500">
+                      No customer deployments are registered in the control plane.
+                    </td>
+                  </tr>
+                )}
               </tbody>
             </table>
           </div>

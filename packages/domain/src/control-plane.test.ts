@@ -210,6 +210,7 @@ describe("control plane domain", () => {
     prismaMock.customerDeployment.findMany.mockResolvedValue([]);
     prismaMock.workspaceFeatureFlag.findMany.mockResolvedValue([]);
     memberMocks.sendMemberSetupEmail.mockResolvedValue({ status: "sent" });
+    vi.stubEnv("RAILWAY_API_TOKEN", "test-railway-token");
   });
 
   it("allows global operators and rejects normal users without deployment access", async () => {
@@ -775,6 +776,61 @@ describe("control plane domain", () => {
         {
           id: "member-r",
           email: "admin@remote.test",
+          role: "ADMIN",
+          isActive: true,
+        },
+      ],
+    });
+  });
+
+  it("normalizes top-level remote member identity from support connectors", async () => {
+    const { listControlPlaneCustomerMembers } = await import("./control-plane");
+    const readAgent: AppActor = {
+      kind: "agent",
+      authProvider: "control-plane",
+      label: "control-plane-agent",
+      scopes: ["control-plane:read"],
+    };
+    const deployment = {
+      id: "inst-1",
+      label: "Acme",
+      deploymentKind: "REMOTE_MANAGED",
+      managedWorkspaceId: null,
+      managedWorkspace: null,
+      remoteWorkspaceId: "remote-ws-1",
+      supportMcpUrl: "https://customer.test/api/mcp",
+      supportCredentialEnc: "encrypted-token",
+    };
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce(deployment);
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce(deployment);
+    prismaMock.supportOperation.create.mockResolvedValueOnce({ id: "op-members", action: "members.list" });
+    prismaMock.supportOperation.update.mockResolvedValueOnce({
+      id: "op-members",
+      status: "COMPLETED",
+      resultSummary: {
+        members: [
+          {
+            id: "member-r",
+            userId: "user-r",
+            email: "admin@remote.test",
+            displayName: "Remote Admin",
+            role: "ADMIN",
+            isActive: true,
+          },
+        ],
+      },
+    });
+
+    const result = await listControlPlaneCustomerMembers(readAgent, "inst-1");
+
+    expect(result).toMatchObject({
+      source: "support_connector",
+      members: [
+        {
+          id: "member-r",
+          userId: "user-r",
+          email: "admin@remote.test",
+          displayName: "Remote Admin",
           role: "ADMIN",
           isActive: true,
         },
@@ -1998,6 +2054,44 @@ describe("control plane domain", () => {
     });
   });
 
+  it("blocks deploy-latest preflight when Railway release execution is not configured", async () => {
+    vi.stubEnv("CONTROL_PLANE_LATEST_WEB_IMAGE", "ghcr.io/corgtex/web:new");
+    vi.stubEnv("CONTROL_PLANE_LATEST_WORKER_IMAGE", "ghcr.io/corgtex/worker:new");
+    vi.stubEnv("CONTROL_PLANE_LATEST_RELEASE_IMAGE_TAG", "release-new");
+    vi.stubEnv("RAILWAY_API_TOKEN", "");
+    const { getControlPlaneDeployLatestPreflight } = await import("./control-plane");
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce({
+      id: "inst-1",
+      label: "Acme",
+      customerAccountId: "cust-1",
+      customerSlug: "acme",
+      deploymentKind: "HOSTED",
+      deploymentStatus: "ACTIVE",
+      managedWorkspaceId: null,
+      managedWorkspace: null,
+      supportCredentialEnc: null,
+      provisioningStatus: "active",
+      releaseImageTag: "release-old",
+      releaseVersion: "0.1.0",
+      lastHealthStatus: "ok",
+      lastHealthCheck: new Date("2026-01-01T00:00:00.000Z"),
+      lastHealthError: null,
+      railwayProjectId: "project-1",
+      railwayEnvironmentId: "env-1",
+      railwayWebServiceId: "web-1",
+      railwayWorkerServiceId: "worker-1",
+    });
+
+    const preflight = await getControlPlaneDeployLatestPreflight(operatorActor, "inst-1");
+
+    expect(preflight.eligible).toBe(false);
+    expect(preflight.checks).toContainEqual(expect.objectContaining({
+      key: "railway_api_token_configured",
+      ok: false,
+      detail: "Railway API token is not configured for control-plane release execution.",
+    }));
+  });
+
   it("clears the runtime release version variable when latest release has no version", async () => {
     vi.stubEnv("CONTROL_PLANE_LATEST_WEB_IMAGE", "ghcr.io/corgtex/web:new");
     vi.stubEnv("CONTROL_PLANE_LATEST_WORKER_IMAGE", "ghcr.io/corgtex/worker:new");
@@ -2207,6 +2301,50 @@ describe("control plane domain", () => {
       results: [
         { deploymentId: "inst-1", status: "queued" },
         { deploymentId: "inst-2", status: "skipped" },
+      ],
+    });
+  });
+
+  it("skips bulk deploy-latest jobs when Railway release execution is not configured", async () => {
+    vi.stubEnv("CONTROL_PLANE_LATEST_WEB_IMAGE", "ghcr.io/corgtex/web:new");
+    vi.stubEnv("CONTROL_PLANE_LATEST_WORKER_IMAGE", "ghcr.io/corgtex/worker:new");
+    vi.stubEnv("CONTROL_PLANE_LATEST_RELEASE_IMAGE_TAG", "release-new");
+    vi.stubEnv("RAILWAY_API_TOKEN", "");
+    const { enqueueControlPlaneDeployLatestRollout } = await import("./control-plane");
+    prismaMock.customerDeployment.findMany.mockResolvedValueOnce([
+      {
+        id: "inst-1",
+        label: "Acme",
+        customerAccountId: "cust-1",
+        deploymentStatus: "ACTIVE",
+        provisioningStatus: "active",
+        releaseImageTag: "release-old",
+        releaseVersion: null,
+        lastHealthStatus: "ok",
+        lastHealthCheck: new Date("2026-01-01T00:00:00.000Z"),
+        lastHealthError: null,
+        railwayProjectId: "project-1",
+        railwayEnvironmentId: "env-1",
+        railwayWebServiceId: "web-1",
+        railwayWorkerServiceId: "worker-1",
+      },
+    ]);
+
+    const result = await enqueueControlPlaneDeployLatestRollout(operatorActor, {
+      allEligible: true,
+      reason: "Deploy latest to healthy customers.",
+    });
+
+    expect(prismaMock.workflowJob.createMany).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      requested: 1,
+      queuedJobs: 0,
+      results: [
+        {
+          deploymentId: "inst-1",
+          status: "skipped",
+          blockers: ["Railway API token is not configured for control-plane release execution."],
+        },
       ],
     });
   });

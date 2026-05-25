@@ -1,5 +1,10 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { localizedControlPlanePath, normalizeControlPlaneLocale, type ControlPlaneLocale } from "@/lib/control-plane-path";
+import {
+  getControlPlaneDefaultLocale,
+  localizedControlPlanePath,
+  normalizeControlPlaneLocale,
+  type ControlPlaneLocale,
+} from "@/lib/control-plane-path";
 
 const DEFAULT_CONTROL_PLANE_ORIGIN = "https://ops.corgtex.com";
 const RAW_OPS_RAILWAY_HOST = "web-production-6a3ab.up.railway.app";
@@ -35,7 +40,7 @@ function middlewareControlPlaneOrigin() {
 function splitLocale(pathname: string): { locale: ControlPlaneLocale; pathnameWithoutLocale: string } {
   const match = pathname.match(/^\/(en|es)(?=\/|$)/);
   if (!match) {
-    return { locale: "en", pathnameWithoutLocale: pathname || "/" };
+    return { locale: getControlPlaneDefaultLocale(), pathnameWithoutLocale: pathname || "/" };
   }
 
   const pathnameWithoutLocale = pathname.slice(match[0].length) || "/";

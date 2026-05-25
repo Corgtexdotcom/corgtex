@@ -22,37 +22,37 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
   const items = [
     {
       title: t("nav.dashboard"),
-      description: "View fleet metrics, deployments, and overall stats.",
+      description: t("commandPalette.items.dashboard"),
       href: "/control-plane",
       icon: LayoutDashboard,
     },
     {
       title: t("nav.customers"),
-      description: "Jump to the list of enterprise deployments.",
+      description: t("commandPalette.items.customers"),
       href: "/control-plane#fleet",
       icon: ShieldAlert,
     },
     {
       title: t("nav.agents"),
-      description: "Monitor agent governance, models, runs, and costs.",
+      description: t("commandPalette.items.agents"),
       href: "/control-plane/agents",
       icon: Bot,
     },
     {
       title: t("nav.releases"),
-      description: "Inspect version distribution and rollouts.",
+      description: t("commandPalette.items.releases"),
       href: "/control-plane/releases",
       icon: GitBranch,
     },
     {
       title: t("nav.operations"),
-      description: "Review fleet support logs and break-glass events.",
+      description: t("commandPalette.items.operations"),
       href: "/control-plane/operations",
       icon: Activity,
     },
     {
       title: t("nav.users"),
-      description: "Manage global user profiles and client memberships.",
+      description: t("commandPalette.items.users"),
       href: "/control-plane/users",
       icon: UserCheck,
     },
@@ -128,7 +128,7 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
             ref={inputRef}
             type="text"
             className="w-full bg-transparent border-0 ring-0 outline-none text-slate-100 placeholder-slate-500 text-sm focus:outline-none"
-            placeholder="Type a page or customer name to navigate..."
+            placeholder={t("commandPalette.placeholder")}
             value={query}
             onChange={(e) => {
               setQuery(e.target.value);
@@ -182,23 +182,10 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
 
           {filteredItems.length === 0 && (
             <div className="flex flex-col items-center justify-center py-10 px-4 text-center">
-              <p className="text-slate-400 font-medium text-xs">No pages match your query.</p>
-              <p className="text-[10px] text-slate-600 mt-1">Try typing &quot;agents&quot;, &quot;releases&quot;, or &quot;ops&quot;.</p>
+              <p className="text-slate-400 font-medium text-xs">{t("commandPalette.emptyTitle")}</p>
+              <p className="text-[10px] text-slate-600 mt-1">{t("commandPalette.emptyHint")}</p>
             </div>
           )}
-        </div>
-
-        {/* Footer shortcuts helper */}
-        <div className="flex items-center justify-between px-4 py-2 border-t border-[#202738] bg-[#0a0d14] text-[10px] text-slate-500 shrink-0">
-          <div className="flex gap-4">
-            <span>
-              <kbd className="bg-[#1f2638] border border-[#2d3750] px-1 py-0.5 rounded text-[8px]">↑↓</kbd> Navigate
-            </span>
-            <span>
-              <kbd className="bg-[#1f2638] border border-[#2d3750] px-1 py-0.5 rounded text-[8px]">Enter</kbd> Open
-            </span>
-          </div>
-          <span>Corgtex Control Plane Command Palette</span>
         </div>
 
       </div>

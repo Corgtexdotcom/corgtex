@@ -1,8 +1,19 @@
-import { describe, expect, it } from "vitest";
-import { controlPlaneLocaleCookie, localizedControlPlanePath, normalizeControlPlaneLocale } from "./locale-path";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  controlPlaneLocaleCookie,
+  getControlPlaneDefaultLocale,
+  localizedControlPlanePath,
+  normalizeControlPlaneLocale,
+} from "./locale-path";
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
 
 describe("localizedControlPlanePath", () => {
   it("uses the unprefixed default-locale path for English", () => {
+    vi.stubEnv("NEXT_PUBLIC_DEFAULT_LOCALE", "en");
+
     expect(localizedControlPlanePath("/control-plane", "en")).toBe("/control-plane");
     expect(localizedControlPlanePath("/control-plane/deployments/customer-1", "en")).toBe(
       "/control-plane/deployments/customer-1",
@@ -10,6 +21,8 @@ describe("localizedControlPlanePath", () => {
   });
 
   it("adds the Spanish prefix while preserving nested control plane paths", () => {
+    vi.stubEnv("NEXT_PUBLIC_DEFAULT_LOCALE", "en");
+
     expect(localizedControlPlanePath("/control-plane", "es")).toBe("/es/control-plane");
     expect(localizedControlPlanePath("/control-plane/deployments/customer-1", "es")).toBe(
       "/es/control-plane/deployments/customer-1",
@@ -17,9 +30,22 @@ describe("localizedControlPlanePath", () => {
   });
 
   it("normalizes paths that already include a locale prefix", () => {
+    vi.stubEnv("NEXT_PUBLIC_DEFAULT_LOCALE", "en");
+
     expect(localizedControlPlanePath("/es/control-plane", "en")).toBe("/control-plane");
     expect(localizedControlPlanePath("/en/control-plane/deployments/customer-1", "es")).toBe(
       "/es/control-plane/deployments/customer-1",
+    );
+  });
+
+  it("uses an English prefix when Spanish is configured as the default locale", () => {
+    vi.stubEnv("NEXT_PUBLIC_DEFAULT_LOCALE", "es");
+
+    expect(getControlPlaneDefaultLocale()).toBe("es");
+    expect(localizedControlPlanePath("/control-plane", "es")).toBe("/control-plane");
+    expect(localizedControlPlanePath("/control-plane", "en")).toBe("/en/control-plane");
+    expect(localizedControlPlanePath("/es/control-plane/deployments/customer-1", "en")).toBe(
+      "/en/control-plane/deployments/customer-1",
     );
   });
 });

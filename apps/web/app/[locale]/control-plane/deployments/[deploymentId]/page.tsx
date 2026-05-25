@@ -1,5 +1,5 @@
 import { notFound } from "next/navigation";
-import { getFormatter, getTranslations } from "next-intl/server";
+import { getTranslations } from "next-intl/server";
 import {
   AppError,
   getControlPlaneDeployLatestPreflight,
@@ -62,7 +62,6 @@ export default async function ControlPlaneCustomerPage({
     featureFlagsRaw,
     deployPreflight,
     rollouts,
-    format,
     t,
   ] = await Promise.all([
     getControlPlaneDeployment(actor, deploymentId),
@@ -84,7 +83,6 @@ export default async function ControlPlaneCustomerPage({
     })),
     getControlPlaneDeployLatestPreflight(actor, deploymentId),
     listControlPlaneReleaseRolloutJobs(actor, { deploymentId, take: 8 }),
-    getFormatter(),
     getTranslations("controlPlane"),
   ]).catch((error: unknown) => {
     if (error instanceof AppError && error.status === 404) {

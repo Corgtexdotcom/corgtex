@@ -1,5 +1,4 @@
 import { notFound } from "next/navigation";
-import { getFormatter } from "next-intl/server";
 import { requireControlPlaneAccess } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { prisma } from "@corgtex/shared";
@@ -55,32 +54,22 @@ export default async function ControlPlaneOperationsPage() {
     },
   });
 
-  const format = await getFormatter();
-
-  // If DB is empty, provide realistic mock entries for immediate support visual verification
-  const formattedOps = operations.length > 0
-    ? operations.map((op: any) => {
-        const actionKey = op.action.toLowerCase();
-        return {
-          id: op.id,
-          type: op.action,
-          status: op.status,
-          description: op.reason || "Support operation executed",
-          isBreakGlass: actionKey.includes("break_glass") || actionKey.includes("emergency"),
-          isMutating: ["create", "update", "set", "deploy", "revoke", "configure", "suspend"].some((keyword) => actionKey.includes(keyword)),
-          customerName: op.deployment?.label || "Global System",
-          customerId: op.deployment?.id,
-          actorName: op.actor?.displayName || op.actor?.email || op.actorLabel || "System Daemon",
-          createdAt: op.createdAt.toLocaleString(),
-          error: op.error,
-        };
-      })
-    : [
-        { id: "o1", type: "WORKSPACE_CREATE", status: "COMPLETED", description: "Create workspace for Beacon Manufacturing", isBreakGlass: false, isMutating: true, customerName: "Beacon Manufacturing", customerId: "2", actorName: "ops@corgtex.local", createdAt: "10 mins ago" },
-        { id: "o2", type: "DEPLOY", status: "COMPLETED", description: "Deploy latest stable release tag", isBreakGlass: false, isMutating: true, customerName: "Atlas Workspace", customerId: "1", actorName: "system", createdAt: "2h ago" },
-        { id: "o3", type: "HEALTH_CHECK", status: "FAILED", description: "Probing live environment endpoint", isBreakGlass: false, isMutating: false, customerName: "Beacon Manufacturing", customerId: "2", actorName: "system", createdAt: "4h ago", error: "Connection timeout on endpoint" },
-        { id: "o4", type: "USER_SUSPEND", status: "COMPLETED", description: "Suspend direct infrastructure access key", isBreakGlass: true, isMutating: true, customerName: "Summit Media", customerId: "3", actorName: "support@corgtex.local", createdAt: "1d ago" },
-      ];
+  const formattedOps = operations.map((op: any) => {
+    const actionKey = op.action.toLowerCase();
+    return {
+      id: op.id,
+      type: op.action,
+      status: op.status,
+      description: op.reason || "Support operation executed",
+      isBreakGlass: actionKey.includes("break_glass") || actionKey.includes("emergency"),
+      isMutating: ["create", "update", "set", "deploy", "revoke", "configure", "suspend"].some((keyword) => actionKey.includes(keyword)),
+      customerName: op.deployment?.label || "Global System",
+      customerId: op.deployment?.id,
+      actorName: op.actor?.displayName || op.actor?.email || op.actorLabel || "System Daemon",
+      createdAt: op.createdAt.toLocaleString(),
+      error: op.error,
+    };
+  });
 
   const totalOps = formattedOps.length;
   const breakGlassCount = formattedOps.filter((o: any) => o.isBreakGlass).length;
@@ -197,6 +186,13 @@ export default async function ControlPlaneOperationsPage() {
                   </td>
                 </tr>
               ))}
+              {formattedOps.length === 0 && (
+                <tr>
+                  <td colSpan={7} className="text-center py-8 text-slate-500">
+                    No control-plane operations have been recorded yet.
+                  </td>
+                </tr>
+              )}
             </tbody>
           </table>
         </div>
