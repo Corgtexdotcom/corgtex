@@ -27,6 +27,7 @@ const recordAuditMock = vi.fn();
 const searchIndexedKnowledgeMock = vi.fn();
 const buildSelectedRegionContextMock = vi.fn();
 const createContextGraphProposedDiffMock = vi.fn();
+const importContextGraphMapMock = vi.fn();
 const getContextMapDataMock = vi.fn();
 
 vi.mock("@corgtex/domain", () => ({
@@ -98,6 +99,7 @@ vi.mock("@corgtex/domain", () => ({
   recordAudit: recordAuditMock,
   buildSelectedRegionContext: buildSelectedRegionContextMock,
   createContextGraphProposedDiff: createContextGraphProposedDiffMock,
+  importContextGraphMap: importContextGraphMapMock,
   getContextMapData: getContextMapDataMock,
   searchConnectedExternalMcpContext: searchConnectedExternalMcpContextMock,
   listRuntimeJobs: vi.fn(),
@@ -185,6 +187,13 @@ describe("createCorgtexMcpServer", () => {
     recordAuditMock.mockReset().mockResolvedValue({ id: "audit-1" });
     searchConnectedExternalMcpContextMock.mockReset().mockResolvedValue({ results: [], errors: [] });
     searchIndexedKnowledgeMock.mockReset().mockResolvedValue([]);
+    importContextGraphMapMock.mockReset().mockResolvedValue({
+      mapViewId: "map-1",
+      objectCount: 2,
+      relationshipCount: 1,
+      evidenceCount: 2,
+      layoutItemCount: 2,
+    });
   });
 
   it("returns the opened spend identifier from create_spend", async () => {
@@ -316,6 +325,12 @@ describe("createCorgtexMcpServer", () => {
       openWorldHint: false,
     });
     expect((server as any)._registeredTools.support_reopen_resolved_proposals.annotations).toMatchObject({
+      readOnlyHint: false,
+      destructiveHint: false,
+      sensitiveHint: true,
+      openWorldHint: false,
+    });
+    expect((server as any)._registeredTools.import_context_graph_map.annotations).toMatchObject({
       readOnlyHint: false,
       destructiveHint: false,
       sensitiveHint: true,
@@ -509,6 +524,52 @@ describe("createCorgtexMcpServer", () => {
       workspaceId: "ws-1",
       reopened: [{ id: "proposal-1", status: "OPEN", flowId: "flow-1", policyCorpusRowsDeleted: 1 }],
       webUrls: ["https://app.test/workspaces/ws-1/proposals/proposal-1"],
+    });
+  });
+
+  it("imports an approved context graph map through the sensitive context-map tool", async () => {
+    const { createCorgtexMcpServer } = await import("./server");
+    const { requireScope } = await import("./auth");
+
+    const server = createCorgtexMcpServer({
+      actor: { kind: "agent", authProvider: "bootstrap" } as any,
+      workspaceId: "ws-1",
+      authKind: "agent",
+    });
+
+    const response = await (server as any)._registeredTools.import_context_graph_map.handler({
+      name: "CRNA Critical Path",
+      objects: [
+        { ref: "process", objectType: "Process", title: "CR North America critical path" },
+        { ref: "step", objectType: "ProcessStep", title: "Decision to proceed" },
+      ],
+      relationships: [
+        { sourceRef: "step", targetRef: "process", relationshipType: "part_of" },
+      ],
+      evidenceRefs: [
+        { objectRef: "step", sourceType: "DOCUMENT", sourceId: "doc-1" },
+      ],
+      layoutItems: [
+        { objectRef: "step", x: 280, y: 120 },
+      ],
+    });
+
+    expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "context-graph:approve");
+    expect(importContextGraphMapMock).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "agent" }),
+      expect.objectContaining({
+        workspaceId: "ws-1",
+        name: "CRNA Critical Path",
+        objects: expect.arrayContaining([expect.objectContaining({ title: "Decision to proceed" })]),
+      }),
+    );
+    expect(JSON.parse(response.content[0].text)).toEqual({
+      mapViewId: "map-1",
+      objectCount: 2,
+      relationshipCount: 1,
+      evidenceCount: 2,
+      layoutItemCount: 2,
+      webUrl: "https://app.test/workspaces/ws-1/maps?view=map-1",
     });
   });
 
