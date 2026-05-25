@@ -11,6 +11,57 @@ function asRecord(value: Record<string, unknown> | undefined) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
 
+function optionalTrimmed(value: string | undefined | null) {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+function formatFileSize(bytes: number) {
+  if (bytes < 1024) return `${bytes} bytes`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function buildBrainSourceContent(params: {
+  documentTitle: string;
+  fileName: string;
+  mimeType: string;
+  size: number;
+  textContent: string | null;
+  extractionSupported: boolean;
+  ingestionGuidanceMd?: string;
+}) {
+  const header = [
+    `Uploaded file: ${params.documentTitle}`,
+    `File name: ${params.fileName}`,
+    `MIME type: ${params.mimeType}`,
+    `Size: ${formatFileSize(params.size)}`,
+  ];
+
+  const guidance = params.ingestionGuidanceMd
+    ? [`User guidance for this upload:`, params.ingestionGuidanceMd]
+    : [];
+
+  if (params.textContent?.trim()) {
+    return [
+      ...header,
+      "",
+      params.textContent.trim(),
+      ...(guidance.length > 0 ? ["", ...guidance] : []),
+    ].join("\n");
+  }
+
+  const extractionStatus = params.extractionSupported
+    ? "Text extraction was attempted, but no readable body text was found."
+    : "Text extraction is not available for this file type. The original file is stored and linked; no file body text was parsed.";
+
+  return [
+    ...header,
+    `Text extraction: ${extractionStatus}`,
+    ...(guidance.length > 0 ? ["", ...guidance] : []),
+  ].join("\n");
+}
+
 async function extractPdfText(fileBuffer: Buffer) {
   const parser = new PDFParse({ data: fileBuffer });
   try {
@@ -88,6 +139,7 @@ export async function ingestFile(actor: AppActor, params: {
   authorMemberId?: string;
   documentTitle?: string;
   documentMetadata?: Record<string, unknown>;
+  ingestionGuidanceMd?: string;
 }) {
   const membership = await requireWorkspaceMembership({
     actor,
@@ -98,6 +150,7 @@ export async function ingestFile(actor: AppActor, params: {
   const fileName = params.fileName.trim().replace(/[^A-Za-z0-9._-]+/g, "-") || "upload.bin";
   const source = params.uploadSource?.trim() || "upload";
   const documentTitle = params.documentTitle?.trim() || fileName;
+  const ingestionGuidanceMd = optionalTrimmed(params.ingestionGuidanceMd);
   const size = params.fileBuffer.byteLength;
 
   // 0. Safety check: Prevent exceeding the 10GB free tier
@@ -111,10 +164,19 @@ export async function ingestFile(actor: AppActor, params: {
   await defaultStorage.put(storageKey, params.fileBuffer, { contentType: params.mimeType });
 
   // 2. Extract Text
-  const { textContent } = await extractTextFromFileBuffer({
+  const { textContent, supported, truncated } = await extractTextFromFileBuffer({
     fileBuffer: params.fileBuffer,
     fileName,
     mimeType: params.mimeType,
+  });
+  const brainSourceContent = buildBrainSourceContent({
+    documentTitle,
+    fileName,
+    mimeType: params.mimeType,
+    size,
+    textContent,
+    extractionSupported: supported,
+    ingestionGuidanceMd,
   });
 
   try {
@@ -132,6 +194,12 @@ export async function ingestFile(actor: AppActor, params: {
             ...asRecord(params.documentMetadata),
             fileName,
             size,
+            ...(ingestionGuidanceMd ? { ingestionGuidanceMd } : {}),
+            extraction: {
+              supported,
+              hasTextContent: Boolean(textContent?.trim()),
+              truncated,
+            },
           } as Prisma.InputJsonValue,
         },
       });
@@ -157,49 +225,58 @@ export async function ingestFile(actor: AppActor, params: {
         },
       ]);
 
-      // 4. Ingest to Brain if text is available
-      let brainSource = null;
-      if (textContent && textContent.length > 0) {
-        brainSource = await tx.brainSource.create({
-          data: {
-            workspaceId: params.workspaceId,
-            sourceType: "FILE_UPLOAD",
-            tier: 2,
-            content: textContent,
-            title: documentTitle,
-            authorMemberId: authorMemberId || null,
-            channel: source,
-            fileStorageKey: storageKey,
-            fileName,
-            fileMimeType: params.mimeType,
-            fileSizeBytes: size,
-            metadata: {
-              documentId: document.id,
-            } as Prisma.InputJsonValue,
-          },
-        });
+      // 4. Ingest to Brain. Non-extractable files get a metadata stub instead of body text.
+      const brainSource = await tx.brainSource.create({
+        data: {
+          workspaceId: params.workspaceId,
+          sourceType: "FILE_UPLOAD",
+          tier: 2,
+          content: brainSourceContent,
+          title: documentTitle,
+          authorMemberId: authorMemberId || null,
+          channel: source,
+          ingestionGuidanceMd: ingestionGuidanceMd ?? null,
+          fileStorageKey: storageKey,
+          fileName,
+          fileMimeType: params.mimeType,
+          fileSizeBytes: size,
+          metadata: {
+            documentId: document.id,
+            extraction: {
+              supported,
+              hasTextContent: Boolean(textContent?.trim()),
+              truncated,
+            },
+          } as Prisma.InputJsonValue,
+        },
+      });
 
-        await tx.auditLog.create({
-          data: {
-            workspaceId: params.workspaceId,
-            actorUserId: actor.kind === "user" ? actor.user.id : null,
-            action: "brain-source.created",
-            entityType: "BrainSource",
-            entityId: brainSource.id,
-            meta: { sourceType: brainSource.sourceType, tier: brainSource.tier },
+      await tx.auditLog.create({
+        data: {
+          workspaceId: params.workspaceId,
+          actorUserId: actor.kind === "user" ? actor.user.id : null,
+          action: "brain-source.created",
+          entityType: "BrainSource",
+          entityId: brainSource.id,
+          meta: {
+            sourceType: brainSource.sourceType,
+            tier: brainSource.tier,
+            hasIngestionGuidance: Boolean(ingestionGuidanceMd),
+            hasExtractedText: Boolean(textContent?.trim()),
+            extractionSupported: supported,
           },
-        });
+        },
+      });
 
-        await appendEvents(tx, [
-          {
-            workspaceId: params.workspaceId,
-            type: "brain-source.created",
-            aggregateType: "BrainSource",
-            aggregateId: brainSource.id,
-            payload: { sourceId: brainSource.id },
-          },
-        ]);
-      }
+      await appendEvents(tx, [
+        {
+          workspaceId: params.workspaceId,
+          type: "brain-source.created",
+          aggregateType: "BrainSource",
+          aggregateId: brainSource.id,
+          payload: { sourceId: brainSource.id },
+        },
+      ]);
 
       return { document, source: brainSource };
     });

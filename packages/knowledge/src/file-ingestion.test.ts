@@ -1,10 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { ingestFile } from "./file-ingestion";
 import { prisma } from "@corgtex/shared";
-import * as pdfParseModule from "pdf-parse";
-import * as mammothModule from "mammoth";
 
-// We need to bypass the PDFParse guard testing path or mock it
 vi.mock("@corgtex/shared", () => ({
   prisma: {
     $transaction: vi.fn((cb) => cb({
@@ -27,6 +24,7 @@ vi.mock("@corgtex/domain", () => ({
 vi.mock("@corgtex/storage", () => ({
   defaultStorage: {
     put: vi.fn().mockResolvedValue({ success: true }),
+    delete: vi.fn().mockResolvedValue(undefined),
   },
 }));
 
@@ -64,9 +62,47 @@ describe("file-ingestion", () => {
     expect(txObj.brainSource.create).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
-          content: "Hello text",
+          content: expect.stringContaining("Hello text"),
         })
       })
+    );
+  });
+
+  it("stores upload guidance on documents and brain sources", async () => {
+    await ingestFile(actor, {
+      workspaceId: "ws_1",
+      fileName: "guided.txt",
+      mimeType: "text/plain",
+      fileBuffer: Buffer.from("Guided body"),
+      uploadSource: "brain-upload",
+      ingestionGuidanceMd: " Overall guidance:\nPreserve contract terms. ",
+    });
+
+    const txMock = vi.mocked(prisma.$transaction).mock.calls[0][0] as any;
+    const txObj = {
+      document: { create: vi.fn().mockResolvedValue({ id: "doc1", title: "Guided Doc", source: "brain-upload" }) },
+      brainSource: { create: vi.fn().mockResolvedValue({ id: "src1", sourceType: "FILE_UPLOAD", tier: 2 }) },
+      auditLog: { create: vi.fn() },
+      eventRecord: { createMany: vi.fn() },
+    };
+    await txMock(txObj);
+
+    expect(txObj.document.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          metadata: expect.objectContaining({
+            ingestionGuidanceMd: "Overall guidance:\nPreserve contract terms.",
+          }),
+        }),
+      }),
+    );
+    expect(txObj.brainSource.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          ingestionGuidanceMd: "Overall guidance:\nPreserve contract terms.",
+          content: expect.stringContaining("User guidance for this upload:"),
+        }),
+      }),
     );
   });
 
@@ -93,7 +129,7 @@ describe("file-ingestion", () => {
     expect(callArgs.data.content).toContain("Hello PDF");
   });
   
-  it("gracefully falls back when PDF extraction fails", async () => {
+  it("creates a Brain source stub when PDF extraction fails", async () => {
     // A malformed PDF buffer will throw an error in PDFParse
     const invalidPdf = Buffer.from("Not a PDF");
     
@@ -105,7 +141,6 @@ describe("file-ingestion", () => {
       uploadSource: "FILE_UPLOAD",
     });
 
-    // Should still succeed but brainSource won't be created (or created without text if fallback)
     const txMock = vi.mocked(prisma.$transaction).mock.calls[0][0] as any;
     const txObj = {
       document: { create: vi.fn().mockResolvedValue({ id: "doc1", title: "Test Doc", source: "FILE_UPLOAD" }) },
@@ -114,8 +149,55 @@ describe("file-ingestion", () => {
       eventRecord: { createMany: vi.fn() },
     };
     await txMock(txObj);
-    
-    // brainSource.create should not be called because textContent is null
-    expect(txObj.brainSource.create).not.toHaveBeenCalled();
+
+    expect(txObj.brainSource.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          content: expect.stringContaining("Text extraction was attempted, but no readable body text was found."),
+          fileName: "broken.pdf",
+          metadata: expect.objectContaining({
+            extraction: expect.objectContaining({
+              supported: true,
+              hasTextContent: false,
+            }),
+          }),
+        }),
+      }),
+    );
+  });
+
+  it("creates a Brain source stub for unsupported file types", async () => {
+    await ingestFile(actor, {
+      workspaceId: "ws_1",
+      fileName: "diagram.png",
+      mimeType: "image/png",
+      fileBuffer: Buffer.from("fake image"),
+      uploadSource: "brain-upload",
+    });
+
+    const txMock = vi.mocked(prisma.$transaction).mock.calls[0][0] as any;
+    const txObj = {
+      document: { create: vi.fn().mockResolvedValue({ id: "doc1", title: "Diagram", source: "brain-upload" }) },
+      brainSource: { create: vi.fn().mockResolvedValue({ id: "src1", sourceType: "FILE_UPLOAD", tier: 2 }) },
+      auditLog: { create: vi.fn() },
+      eventRecord: { createMany: vi.fn() },
+    };
+    await txMock(txObj);
+
+    expect(txObj.brainSource.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          content: expect.stringContaining("Text extraction is not available for this file type."),
+          fileName: "diagram.png",
+          fileMimeType: "image/png",
+          metadata: expect.objectContaining({
+            extraction: expect.objectContaining({
+              supported: false,
+              hasTextContent: false,
+            }),
+          }),
+        }),
+      }),
+    );
   });
 });

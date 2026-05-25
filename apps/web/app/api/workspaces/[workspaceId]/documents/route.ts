@@ -4,6 +4,7 @@ import { AppError, createDocument, listDocuments, requireWorkspaceMembership } f
 import type { ArchiveFilter } from "@corgtex/domain";
 import { ingestFile } from "@corgtex/knowledge";
 import { resolveRequestActor } from "@/lib/auth";
+import { checkApiDemoGuard } from "@/lib/demo-guard";
 import { handleRouteError } from "@/lib/http";
 
 function parseDocumentMetadata(value: FormDataEntryValue | null | undefined) {
@@ -33,6 +34,11 @@ function normalizeUploadFileName(fileName: string) {
   return normalized.length > 0 ? normalized : "upload.bin";
 }
 
+function formString(formData: FormData, key: string) {
+  const value = formData.get(key);
+  return typeof value === "string" ? value.replace(/\r\n/g, "\n").trim() : "";
+}
+
 export async function GET(request: NextRequest, { params }: { params: Promise<{ workspaceId: string }> }) {
   try {
     const { workspaceId } = await params;
@@ -50,6 +56,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   try {
     const actor = await resolveRequestActor(request);
     const { workspaceId } = await params;
+    await checkApiDemoGuard(workspaceId);
     const contentType = request.headers.get("content-type") ?? "";
 
     if (contentType.includes("multipart/form-data")) {
@@ -63,8 +70,9 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       const file = fileEntry;
       const originalName = file.name.trim();
       const normalizedName = normalizeUploadFileName(originalName);
-      const providedTitle = typeof formData.get("title") === "string" ? String(formData.get("title")).trim() : "";
-      const providedSource = typeof formData.get("source") === "string" ? String(formData.get("source")).trim() : "";
+      const providedTitle = formString(formData, "title");
+      const providedSource = formString(formData, "source");
+      const ingestionGuidanceMd = formString(formData, "ingestionGuidanceMd");
       const parsedMetadata = parseDocumentMetadata(formData.get("metadata"));
 
       const buffer = Buffer.from(await file.arrayBuffer());
@@ -76,6 +84,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         mimeType: file.type || "application/octet-stream",
         uploadSource: providedSource || "upload",
         documentTitle: providedTitle || originalName || normalizedName,
+        ingestionGuidanceMd: ingestionGuidanceMd || undefined,
         documentMetadata:
           parsedMetadata && typeof parsedMetadata === "object" && !Array.isArray(parsedMetadata)
             ? (parsedMetadata as Record<string, unknown>)
