@@ -3,6 +3,11 @@ import { NextResponse } from "next/server";
 export type IntegrationOAuthProvider = "google" | "microsoft";
 
 const OAUTH_STATE_MAX_AGE_SECONDS = 15 * 60;
+const MICROSOFT_INVALID_CLIENT_SECRET_MARKERS = [
+  "aadsts7000215",
+  "invalid client secret",
+  "secret value, not the client secret id",
+];
 
 export function isIntegrationOAuthProvider(value: string): value is IntegrationOAuthProvider {
   return value === "google" || value === "microsoft";
@@ -60,6 +65,9 @@ export function providerOAuthErrorCode(provider: IntegrationOAuthProvider, error
     return "google_oauth_failed";
   }
 
+  if (MICROSOFT_INVALID_CLIENT_SECRET_MARKERS.some((marker) => raw.includes(marker))) {
+    return "microsoft_invalid_client_secret";
+  }
   if (raw.includes("aadsts50020") || raw.includes("tenant") || raw.includes("external user")) {
     return "microsoft_tenant_access_denied";
   }
@@ -74,6 +82,9 @@ export function providerOAuthErrorCode(provider: IntegrationOAuthProvider, error
 
 export function tokenExchangeErrorCode(provider: IntegrationOAuthProvider, description?: string | null) {
   const raw = (description ?? "").toLowerCase();
+  if (provider === "microsoft" && MICROSOFT_INVALID_CLIENT_SECRET_MARKERS.some((marker) => raw.includes(marker))) {
+    return "microsoft_invalid_client_secret";
+  }
   if (provider === "microsoft" && (raw.includes("aadsts50020") || raw.includes("tenant") || raw.includes("external user"))) {
     return "microsoft_tenant_access_denied";
   }

@@ -121,6 +121,28 @@ describe("GET /api/integrations/[provider]/callback", () => {
     expect(response.headers.get("location")).toBe("http://localhost:3000/workspaces/ws-1/settings?tab=general&integration=microsoft&integrationStatus=error&integrationError=microsoft_tenant_access_denied");
   });
 
+  it("redirects Microsoft invalid client secret failures with a specific operator-safe error", async () => {
+    requirePageActor.mockResolvedValue({
+      kind: "user",
+      user: { id: "user-1" },
+    });
+    verifyIntegrationOAuthState.mockReturnValue({ userId: "user-1", workspaceId: "ws-1" });
+    vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify({
+      error: "invalid_client",
+      error_description: "AADSTS7000215: Invalid client secret provided. Ensure the secret being sent in the request is the client secret value, not the client secret ID.",
+    }), { status: 400 }));
+
+    const { GET } = await import("./route");
+    const response = await GET(
+      new NextRequest("http://localhost:3000/api/integrations/microsoft/callback?code=auth-code&state=signed-state", {
+        headers: { cookie: "corgtex_microsoft_oauth_state=signed-state" },
+      }),
+      { params: Promise.resolve({ provider: "microsoft" }) },
+    );
+
+    expect(response.headers.get("location")).toBe("http://localhost:3000/workspaces/ws-1/settings?tab=general&integration=microsoft&integrationStatus=error&integrationError=microsoft_invalid_client_secret");
+  });
+
   it("rejects callbacks without the matching short-lived state cookie", async () => {
     requirePageActor.mockResolvedValue({
       kind: "user",
