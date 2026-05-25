@@ -493,6 +493,7 @@ model Workspace {
   governanceScores              GovernanceScore[]
   auditLogs                     AuditLog[]
   productAnalyticsEvents        ProductAnalyticsEvent[]
+  onboardingStates              UserWorkspaceOnboardingState[]
   events                        Event[]
   workflowJobs                  WorkflowJob[]
   knowledge                     KnowledgeChunk[]
@@ -818,6 +819,7 @@ model User {
   catalogRequestsDecided   CatalogRequest[]            @relation("CatalogRequestDecider")
   createdBuildArtifacts    BuildArtifact[]             @relation("BuildArtifactCreator")
   productAnalyticsEvents   ProductAnalyticsEvent[]
+  onboardingStates         UserWorkspaceOnboardingState[]
 }
 
 model Session {
@@ -1922,6 +1924,25 @@ model ProductAnalyticsEvent {
   @@index([workspaceId, eventName, createdAt])
   @@index([workspaceId, mode, createdAt])
   @@index([actorUserId, createdAt])
+}
+
+model UserWorkspaceOnboardingState {
+  id          String    @id @default(uuid())
+  userId      String
+  workspaceId String
+  tourKey     String    @db.VarChar(64)
+  tourVersion String    @db.VarChar(32)
+  completedAt DateTime?
+  restartedAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, workspaceId, tourKey, tourVersion], map: "UserWorkspaceOnboardingState_user_workspace_tour_key")
+  @@index([workspaceId, tourKey, tourVersion])
+  @@index([userId, updatedAt])
 }
 
 model WorkspaceArchiveRecord {

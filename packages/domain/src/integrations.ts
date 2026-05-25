@@ -456,11 +456,31 @@ export async function enqueueExternalDataSourceSync(actor: AppActor, params: {
 }
 
 export async function refreshOAuthTokenIfNeeded(connectionId: string): Promise<OAuthConnection> {
-  const connection = await prisma.oAuthConnection.findUnique({
+  let connection = await prisma.oAuthConnection.findUnique({
     where: { id: connectionId },
   });
 
   if (!connection) throw new Error("Connection not found");
+
+  if (connection.tokenStorageVersion !== ENCRYPTED_TOKEN_STORAGE_VERSION) {
+    const refreshToken = oauthRefreshToken(connection);
+    const accessTokenEnc = encryptOAuthToken(oauthAccessToken(connection));
+    const refreshTokenEnc = refreshToken ? encryptOAuthToken(refreshToken) : null;
+    await prisma.oAuthConnection.update({
+      where: { id: connection.id },
+      data: {
+        accessToken: accessTokenEnc,
+        refreshToken: refreshTokenEnc,
+        tokenStorageVersion: ENCRYPTED_TOKEN_STORAGE_VERSION,
+      },
+    });
+    connection = {
+      ...connection,
+      accessToken: accessTokenEnc,
+      refreshToken: refreshTokenEnc,
+      tokenStorageVersion: ENCRYPTED_TOKEN_STORAGE_VERSION,
+    };
+  }
 
   // Refresh if less than 5 minutes remain
   if (connection.expiresAt && connection.expiresAt.getTime() - Date.now() < 5 * 60 * 1000) {

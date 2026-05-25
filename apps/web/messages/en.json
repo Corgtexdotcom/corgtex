@@ -2287,6 +2287,39 @@
       "briefingCtaSecondary": "Keep Exploring"
     }
   },
+  "onboarding": {
+    "tour": {
+      "welcomeTitle": "Welcome to your Corgtex workspace",
+      "welcomeDescription": "This quick walkthrough shows where your team can find context, invite colleagues, connect tools, and watch trial AI usage.",
+      "homeTitle": "Start with the workspace newspaper",
+      "homeDescription": "The home view collects recent knowledge, meetings, tensions, actions, and useful context so people can orient quickly.",
+      "brainTitle": "Build the shared Brain",
+      "brainDescription": "The Brain is where selected documents, meetings, notes, and connector context become searchable organizational memory.",
+      "circlesTitle": "Map people and responsibilities",
+      "circlesDescription": "Circles show the teams, roles, and accountabilities that shape how work gets done.",
+      "proposalsTitle": "Turn tensions into decisions",
+      "proposalsDescription": "Tensions, proposals, goals, and actions keep change visible instead of buried in meetings or chat threads.",
+      "integrationsTitle": "Connect approved tools",
+      "integrationsDescription": "Use settings to connect MCP clients, Google or Microsoft calendars, billing, and safe opt-in context sources.",
+      "membersTitle": "Invite colleagues",
+      "membersDescription": "Admins can invite teammates one by one or in bulk so the workspace becomes useful for the whole organization.",
+      "assistantTitle": "Ask Corgtex for help",
+      "assistantDescription": "The assistant can use workspace context and enabled tools while respecting the current plan and AI budget.",
+      "checklistTitle": "Finish workspace setup",
+      "checklistDescription": "These setup windows stay available from settings so admins know what to complete next.",
+      "inviteTitle": "Invite the first colleagues",
+      "inviteDescription": "Add the people who should help validate roles, proposals, and workspace context.",
+      "mcpTitle": "Connect an MCP client",
+      "mcpDescription": "Use the MCP connector card to connect ChatGPT, Claude, Claude Code, Cursor, or another supported client.",
+      "calendarTitle": "Connect calendar when ready",
+      "calendarDescription": "Google and Microsoft calendar connections are read-only by default and require provider-side approval during hidden beta.",
+      "spendTitle": "Watch AI spend",
+      "spendDescription": "The trial includes capped Corgtex-paid AI credit. Paid AI resumes through usage billing after activation.",
+      "contextTitle": "Add the first context source",
+      "contextDescription": "Upload a file, paste context, or choose connector sources before broad indexing is enabled.",
+      "checklistPrimary": "Done"
+    }
+  },
   "shared": {
     "markdownEditor": {
       "write": "Write",

@@ -1,9 +1,10 @@
-import { isGlobalOperator, listActorWorkspaces, countUnreadNotifications, listConversations, requireWorkspaceMembership, getMemberInvitePolicy, getMeetingRecorderConfig } from "@corgtex/domain";
+import { isGlobalOperator, listActorWorkspaces, countUnreadNotifications, listConversations, requireWorkspaceMembership, getMemberInvitePolicy, getMeetingRecorderConfig, getUserWorkspaceOnboardingState } from "@corgtex/domain";
 import { workspaceBranding, prisma } from "@corgtex/shared";
 import type { Metadata } from "next";
 import { logoutAction, requirePageActor } from "@/lib/auth";
 import { DemoTour } from "./DemoTour";
 import { DemoBanner } from "./DemoBanner";
+import { WorkspaceOnboardingTour } from "./WorkspaceOnboardingTour";
 import { getTranslations } from "next-intl/server";
 import { LanguageSwitcher } from "./LanguageSwitcher";
 import { ThemeToggle } from "../../../ThemeToggle";
@@ -39,13 +40,15 @@ export default async function WorkspaceLayout({
   const { locale, workspaceId } = await params;
   const actor = await requirePageActor();
   const userId = actor.kind === "user" ? actor.user.id : null;
-  const [workspaces, unreadCount, conversationsResult, featureFlags, membership, invitePolicy] = await Promise.all([
+  const [workspaces, unreadCount, conversationsResult, featureFlags, membership, invitePolicy, workspaceRuntime, onboardingState] = await Promise.all([
     listActorWorkspaces(actor),
     userId ? countUnreadNotifications(userId, workspaceId) : Promise.resolve(0),
     listConversations(actor, workspaceId, { take: 30 }).catch(() => ({ items: [], total: 0, take: 30, skip: 0 })),
     getWorkspaceFeatureFlags(workspaceId),
     requireWorkspaceMembership({ actor, workspaceId }),
     getMemberInvitePolicy(workspaceId).catch(() => null),
+    prisma.workspace.findUnique({ where: { id: workspaceId }, select: { plan: true } }),
+    actor.kind === "user" ? getUserWorkspaceOnboardingState(actor, { workspaceId }).catch(() => null) : Promise.resolve(null),
   ]);
   const current = workspaces.find((w: Workspace) => w.id === workspaceId);
   const conversations = conversationsResult.items;
@@ -56,6 +59,7 @@ export default async function WorkspaceLayout({
   const currentBranding = current ? workspaceBranding(current) : { primaryName: "Corgtex", secondaryLabel: "Workspace" };
   const controlPlaneHref = getControlPlaneHref("/control-plane", locale);
   const isDemo = current?.slug === "jnj-demo";
+  const showSelfServeOnboarding = !isDemo && workspaceRuntime?.plan !== "ENTERPRISE_MANAGED" && Boolean(onboardingState);
   const meetingRecorderConfig = !isDemo && featureFlags.MEETING_RECORDERS
     ? await getMeetingRecorderConfig(actor, workspaceId).catch(() => null)
     : null;
@@ -131,6 +135,12 @@ export default async function WorkspaceLayout({
       <WorkspaceChatRail workspaceId={workspaceId} conversations={conversationSummaries} />
       {isDemo && (
         <DemoTour workspaceId={workspaceId} />
+      )}
+      {showSelfServeOnboarding && (
+        <WorkspaceOnboardingTour
+          workspaceId={workspaceId}
+          initialCompletedAt={onboardingState?.completedAt?.toISOString() ?? null}
+        />
       )}
     </div>
   );
