@@ -2,11 +2,12 @@ import { notFound } from "next/navigation";
 import {
   getControlPlaneAiGovernanceStatus,
   getControlPlaneIntegrationStatus,
-  listControlPlaneFleetPage,
+  listControlPlaneDeployments,
   requireControlPlaneAccess,
 } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { AgentObservatoryClient } from "./_components/observatory-client";
+import { aggregateModelUsageByRunId, sortAgentFleetRows } from "./view-model";
 
 export const dynamic = "force-dynamic";
 
@@ -63,14 +64,9 @@ export default async function ControlPlaneAgentsPage() {
     notFound();
   }
 
-  const fleet = await listControlPlaneFleetPage(actor, {
-    page: 1,
-    pageSize: 100,
-    sort: "customer",
-    direction: "asc",
-  });
+  const fleetRows = sortAgentFleetRows(await listControlPlaneDeployments(actor));
 
-  const customerDetails = await Promise.all(fleet.items.map(async (customer: any) => {
+  const customerDetails = await Promise.all(fleetRows.map(async (customer: any) => {
     const [governanceResult, integrationsResult] = await Promise.allSettled([
       getControlPlaneAiGovernanceStatus(actor, customer.id),
       getControlPlaneIntegrationStatus(actor, customer.id),
@@ -132,9 +128,7 @@ export default async function ControlPlaneAgentsPage() {
   const formattedAgents = customerDetails.flatMap(({ customer, governance, recentRuns }) => {
     const identities = Array.isArray(governance?.agents?.identities) ? governance.agents.identities : [];
     const configs = Array.isArray(governance?.agents?.configs) ? governance.agents.configs : [];
-    const usageByRunId = new Map((governance?.spend?.recentModelUsage ?? [])
-      .filter((usage: any) => usage.agentRun?.id)
-      .map((usage: any) => [usage.agentRun.id, usage]));
+    const usageByRunId = aggregateModelUsageByRunId(governance?.spend?.recentModelUsage);
     const identitiesByKey = new Map(identities.map((identity: any) => [identity.agentKey, identity]));
     const configsByKey = new Map(configs.map((config: any) => [config.agentKey, config]));
     const agentKeys = new Set<string>([
@@ -169,9 +163,7 @@ export default async function ControlPlaneAgentsPage() {
   });
 
   const formattedRuns = customerDetails.flatMap(({ customer, recentRuns, governance }) => {
-    const usageByRunId = new Map((governance?.spend?.recentModelUsage ?? [])
-      .filter((usage: any) => usage.agentRun?.id)
-      .map((usage: any) => [usage.agentRun.id, usage]));
+    const usageByRunId = aggregateModelUsageByRunId(governance?.spend?.recentModelUsage);
 
     return recentRuns.map((run: any) => {
       const usage: any = usageByRunId.get(run.id);
