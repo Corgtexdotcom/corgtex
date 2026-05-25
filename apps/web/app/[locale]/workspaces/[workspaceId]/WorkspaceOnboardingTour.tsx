@@ -9,7 +9,7 @@ import "../../../demo-tour-theme.css";
 import { Dialog } from "@/lib/components/Dialog";
 
 const TOUR_KEY = "self_serve_workspace";
-const TOUR_VERSION = "v1";
+const TOUR_VERSION = "v2";
 const RESTART_EVENT = "corgtex:restart-self-serve-tour";
 
 interface TourStep {
@@ -34,9 +34,15 @@ function currentUrl() {
 export function WorkspaceOnboardingTour({
   workspaceId,
   initialCompletedAt,
+  featureFlags,
+  capabilities,
 }: {
   workspaceId: string;
   initialCompletedAt: string | null;
+  featureFlags?: Record<string, boolean>;
+  capabilities?: {
+    canManageAgentGovernance?: boolean;
+  };
 }) {
   const router = useRouter();
   const pathname = usePathname();
@@ -44,84 +50,140 @@ export function WorkspaceOnboardingTour({
   const t = useTranslations("onboarding.tour");
   const driverRef = useRef<ReturnType<typeof driver> | null>(null);
   const targetStepIndexRef = useRef<number | null>(null);
+  const autoStartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const completedRef = useRef(Boolean(initialCompletedAt));
   const [completed, setCompleted] = useState(Boolean(initialCompletedAt));
   const [showChecklist, setShowChecklist] = useState(false);
   const isMapRoute = Boolean(pathname?.includes(`/workspaces/${workspaceId}/maps`));
   const routeKey = `${pathname ?? ""}?${searchParams?.toString() ?? ""}`;
+  const goalsTourEnabled = Boolean(featureFlags?.GOALS);
+  const contextMapsTourEnabled = Boolean(featureFlags?.CONTEXT_MAPS);
+  const agentGovernanceTourEnabled = Boolean(featureFlags?.AGENT_GOVERNANCE && capabilities?.canManageAgentGovernance);
 
-  const tourSteps: TourStep[] = useMemo(() => [
-    {
-      href: "/",
-      popover: {
-        title: t("welcomeTitle"),
-        description: t("welcomeDescription"),
+  const tourSteps: TourStep[] = useMemo(() => {
+    const steps: TourStep[] = [
+      {
+        href: "/",
+        popover: {
+          title: t("welcomeTitle"),
+          description: t("welcomeDescription"),
+        },
       },
-    },
-    {
-      href: "/",
-      element: ".ws-main-content",
-      popover: {
-        title: t("homeTitle"),
-        description: t("homeDescription"),
-        side: "top",
+      {
+        href: "/",
+        element: ".ws-main-content",
+        popover: {
+          title: t("homeTitle"),
+          description: t("homeDescription"),
+          side: "top",
+        },
       },
-    },
-    {
-      href: "/brain",
-      element: ".ws-main-content",
-      popover: {
-        title: t("brainTitle"),
-        description: t("brainDescription"),
-        side: "top",
+      {
+        href: "/circles",
+        element: ".ws-main-content",
+        popover: {
+          title: t("circlesTitle"),
+          description: t("circlesDescription"),
+          side: "top",
+        },
       },
-    },
-    {
-      href: "/circles",
-      element: ".ws-main-content",
-      popover: {
-        title: t("circlesTitle"),
-        description: t("circlesDescription"),
-        side: "top",
+      {
+        href: "/tensions",
+        element: ".ws-main-content",
+        popover: {
+          title: t("tensionsTitle"),
+          description: t("tensionsDescription"),
+          side: "top",
+        },
       },
-    },
-    {
-      href: "/proposals",
-      element: ".ws-main-content",
-      popover: {
-        title: t("proposalsTitle"),
-        description: t("proposalsDescription"),
-        side: "top",
+      {
+        href: "/actions",
+        element: ".ws-main-content",
+        popover: {
+          title: t("actionsTitle"),
+          description: t("actionsDescription"),
+          side: "top",
+        },
       },
-    },
-    {
-      href: "/settings?tab=general",
-      element: ".ws-main-content",
-      popover: {
-        title: t("integrationsTitle"),
-        description: t("integrationsDescription"),
-        side: "top",
+      {
+        href: "/meetings",
+        element: ".ws-main-content",
+        popover: {
+          title: t("meetingsTitle"),
+          description: t("meetingsDescription"),
+          side: "top",
+        },
       },
-    },
-    {
-      href: "/settings?tab=members",
-      element: ".ws-main-content",
-      popover: {
-        title: t("membersTitle"),
-        description: t("membersDescription"),
-        side: "top",
+      {
+        href: "/proposals",
+        element: ".ws-main-content",
+        popover: {
+          title: t("proposalsTitle"),
+          description: t("proposalsDescription"),
+          side: "top",
+        },
       },
-    },
-    {
-      href: "/",
-      element: ".ws-agent-sidebar",
-      popover: {
-        title: t("assistantTitle"),
-        description: t("assistantDescription"),
-        side: "left",
+    ];
+
+    if (goalsTourEnabled) {
+      steps.push({
+        href: "/goals",
+        element: ".ws-main-content",
+        popover: {
+          title: t("goalsTitle"),
+          description: t("goalsDescription"),
+          side: "top",
+        },
+      });
+    }
+
+    if (contextMapsTourEnabled) {
+      steps.push({
+        href: "/maps",
+        element: ".ws-main-content",
+        popover: {
+          title: t("mapsTitle"),
+          description: t("mapsDescription"),
+          side: "top",
+        },
+      });
+    }
+
+    if (agentGovernanceTourEnabled) {
+      steps.push({
+        href: "/agents",
+        element: ".ws-main-content",
+        popover: {
+          title: t("agentGovernanceTitle"),
+          description: t("agentGovernanceDescription"),
+          side: "top",
+        },
+      });
+    }
+
+    steps.push(
+      {
+        href: "/settings?tab=general",
+        element: ".ws-main-content",
+        popover: {
+          title: t("integrationsTitle"),
+          description: t("integrationsDescription"),
+          side: "top",
+        },
       },
-    },
-  ], [t]);
+      {
+        href: "/",
+        element: ".ws-agent-sidebar",
+        popover: {
+          title: t("assistantTitle"),
+          description: t("assistantDescription"),
+          side: "left",
+        },
+      }
+    );
+
+    return steps;
+  }, [t, goalsTourEnabled, contextMapsTourEnabled, agentGovernanceTourEnabled]);
 
   const markCompleted = useCallback(() => {
     completedRef.current = true;
@@ -206,9 +268,12 @@ export function WorkspaceOnboardingTour({
   useEffect(() => {
     driverRef.current = initDriver();
 
-    if (!completedRef.current && !isMapRoute) {
-      setTimeout(() => {
-        driverRef.current?.drive(0);
+    if (!completedRef.current && !isMapRoute && targetStepIndexRef.current === null) {
+      autoStartTimerRef.current = setTimeout(() => {
+        autoStartTimerRef.current = null;
+        if (targetStepIndexRef.current === null) {
+          driverRef.current?.drive(0);
+        }
       }, 1000);
     }
 
@@ -216,6 +281,10 @@ export function WorkspaceOnboardingTour({
 
     return () => {
       window.removeEventListener(RESTART_EVENT, restartTour);
+      if (autoStartTimerRef.current !== null) {
+        clearTimeout(autoStartTimerRef.current);
+        autoStartTimerRef.current = null;
+      }
       if (targetStepIndexRef.current === null) {
         driverRef.current?.destroy();
       }
@@ -236,17 +305,78 @@ export function WorkspaceOnboardingTour({
 
   return (
     <Dialog open={showChecklist} onClose={() => setShowChecklist(false)} title={t("checklistTitle")}>
-      <p className="demo-tour-briefing-copy">{t("checklistDescription")}</p>
-      <div className="stack" style={{ gap: 10, marginTop: 16 }}>
-        {["invite", "mcp", "calendar", "spend", "context"].map((item) => (
-          <div key={item} className="nr-item" style={{ padding: "10px 0" }}>
-            <strong className="nr-item-title">{t(`${item}Title`)}</strong>
-            <p className="nr-item-meta" style={{ marginTop: 4 }}>{t(`${item}Description`)}</p>
+      <p className="demo-tour-briefing-copy" style={{ marginBottom: 20 }}>{t("checklistDescription")}</p>
+
+      <div className="onboarding-flow">
+        <div className="onboarding-step">
+          <div className="onboarding-step-indicator">
+            <div className="onboarding-step-number">1</div>
+            <div className="onboarding-connector" />
           </div>
-        ))}
+          <div className="onboarding-step-content">
+            <h4 className="onboarding-step-title">{t("uploadTitle")}</h4>
+            <p className="onboarding-step-description">{t("uploadDescription")}</p>
+            <div className="onboarding-step-action">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowChecklist(false);
+                  router.push(`/workspaces/${workspaceId}/settings?tab=data-sources`);
+                }}
+              >
+                {t("uploadAction")}
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div className="onboarding-step">
+          <div className="onboarding-step-indicator">
+            <div className="onboarding-step-number">2</div>
+            <div className="onboarding-connector" />
+          </div>
+          <div className="onboarding-step-content">
+            <h4 className="onboarding-step-title">{t("connectEmailTitle")}</h4>
+            <p className="onboarding-step-description">{t("connectEmailDescription")}</p>
+            <div className="onboarding-step-action">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowChecklist(false);
+                  router.push(`/workspaces/${workspaceId}/settings?tab=general`);
+                }}
+              >
+                {t("connectEmailAction")}
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div className="onboarding-step">
+          <div className="onboarding-step-indicator">
+            <div className="onboarding-step-number">3</div>
+            <div className="onboarding-connector" />
+          </div>
+          <div className="onboarding-step-content">
+            <h4 className="onboarding-step-title">{t("connectClientTitle")}</h4>
+            <p className="onboarding-step-description">{t("connectClientDescription")}</p>
+            <div className="onboarding-step-action">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowChecklist(false);
+                  router.push(`/workspaces/${workspaceId}/settings?tab=general`);
+                }}
+              >
+                {t("connectClientAction")}
+              </button>
+            </div>
+          </div>
+        </div>
       </div>
-      <div className="demo-tour-briefing-actions">
-        <button type="button" onClick={() => setShowChecklist(false)}>
+
+      <div className="demo-tour-briefing-actions" style={{ marginTop: 28, justifyContent: "flex-end" }}>
+        <button type="button" className="driver-popover-next-btn" onClick={() => setShowChecklist(false)}>
           {t("checklistPrimary")}
         </button>
       </div>

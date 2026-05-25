@@ -48,7 +48,7 @@ export default async function WorkspaceLayout({
     requireWorkspaceMembership({ actor, workspaceId }),
     getMemberInvitePolicy(workspaceId).catch(() => null),
     prisma.workspace.findUnique({ where: { id: workspaceId }, select: { plan: true } }),
-    actor.kind === "user" ? getUserWorkspaceOnboardingState(actor, { workspaceId }).catch(() => null) : Promise.resolve(null),
+    actor.kind === "user" ? getUserWorkspaceOnboardingState(actor, { workspaceId, tourVersion: "v2" }).catch(() => null) : Promise.resolve(null),
   ]);
   const current = workspaces.find((w: Workspace) => w.id === workspaceId);
   const conversations = conversationsResult.items;
@@ -140,6 +140,8 @@ export default async function WorkspaceLayout({
         <WorkspaceOnboardingTour
           workspaceId={workspaceId}
           initialCompletedAt={onboardingState?.completedAt?.toISOString() ?? null}
+          featureFlags={featureFlags}
+          capabilities={capabilities}
         />
       )}
     </div>
