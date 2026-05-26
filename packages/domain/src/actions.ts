@@ -67,6 +67,8 @@ export async function createAction(actor: AppActor, params: {
   const title = params.title.trim();
   invariant(title.length > 0, 400, "INVALID_INPUT", "Action title is required.");
   const authorUserId = await actorUserIdForWorkspace(actor, params.workspaceId);
+  const isPrivate = params.isPrivate ?? true;
+  const publishedAt = isPrivate ? null : new Date();
 
   return prisma.$transaction(async (tx) => {
     const proposalId = await resolveWorkspaceProposalLink(tx, actor, membership, params.workspaceId, params.proposalId);
@@ -80,9 +82,9 @@ export async function createAction(actor: AppActor, params: {
         assigneeMemberId: params.assigneeMemberId || null,
         dueAt: params.dueAt ?? null,
         proposalId,
-        status: "DRAFT",
-        isPrivate: params.isPrivate ?? true,
-        publishedAt: null,
+        status: isPrivate ? "DRAFT" : "OPEN",
+        isPrivate,
+        publishedAt,
       },
     });
 
@@ -106,6 +108,26 @@ export async function createAction(actor: AppActor, params: {
         },
       },
     ]);
+
+    if (!isPrivate) {
+      await recordAudit(tx, actor, {
+        workspaceId: params.workspaceId,
+        action: "action.published",
+        entityType: "Action",
+        entityId: action.id,
+        meta: { title: action.title },
+      });
+
+      await appendEvents(tx, [
+        {
+          workspaceId: params.workspaceId,
+          type: "action.published",
+          aggregateType: "Action",
+          aggregateId: action.id,
+          payload: { actionId: action.id },
+        },
+      ]);
+    }
 
     return action;
   });

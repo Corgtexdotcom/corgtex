@@ -84,10 +84,27 @@ describe("proposal server actions", () => {
       title: "Clarify approval policy",
       bodyMd: "Proposal body",
       includeAiSummary: false,
+      isPrivate: false,
       sourceTensionId: "tension-1",
       relatedActionIds: ["action-1", "action-2"],
     }));
     expect(createProposal.mock.calls[0]?.[1]).not.toHaveProperty("summary");
+  });
+
+  it("passes checked private proposal form state through explicitly", async () => {
+    const { createProposalAction } = await import("./actions");
+    const formData = new FormData();
+    formData.set("workspaceId", "workspace-1");
+    formData.set("title", "Clarify approval policy");
+    formData.set("bodyMd", "Proposal body");
+    formData.set("isPrivate", "on");
+
+    await createProposalAction(formData);
+
+    expect(createProposal).toHaveBeenCalledWith(actor, expect.objectContaining({
+      workspaceId: "workspace-1",
+      isPrivate: true,
+    }));
   });
 
   it("drafts a proposal from a tension through the dedicated server action", async () => {

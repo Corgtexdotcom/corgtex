@@ -17,6 +17,7 @@ import {
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownExcerpt } from "@/lib/components/MarkdownRenderer";
 import { ItemActions } from "@/lib/components/ui/ItemActions";
+import { canOpenPrivateDraft } from "@/lib/governance-open-guards";
 
 export const dynamic = "force-dynamic";
 
@@ -109,7 +110,7 @@ export default async function ActionsPage({
 
                 {(() => {
                   let primary: React.ReactNode = null;
-                  if (canManage && action.status === "DRAFT") {
+                  if (canManage && canOpenPrivateDraft(action)) {
                     primary = (
                       <form action={publishActionAction}>
                         <input type="hidden" name="workspaceId" value={workspaceId} />

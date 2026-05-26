@@ -619,7 +619,7 @@ export default async function WorkspaceAddPage({
               <input type="checkbox" name="isPrivate" defaultChecked style={{ width: "auto" }} />
               Private draft
             </label>
-            <div className="actions-inline"><button type="submit">Create draft</button>{cancelLink(returnTo)}</div>
+            <div className="actions-inline"><button type="submit">Create proposal</button>{cancelLink(returnTo)}</div>
           </form>
         )}
 

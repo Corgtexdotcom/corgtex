@@ -12,6 +12,7 @@ import {
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownExcerpt } from "@/lib/components/MarkdownRenderer";
 import { ItemActions } from "@/lib/components/ui/ItemActions";
+import { canOpenPrivateDraft } from "@/lib/governance-open-guards";
 import { getTranslations } from "next-intl/server";
 
 export const dynamic = "force-dynamic";
@@ -138,7 +139,7 @@ export default async function TensionsPage({
 
                 {(() => {
                   let primary: React.ReactNode;
-                  if (canManage && tension.status === "DRAFT") {
+                  if (canManage && canOpenPrivateDraft(tension)) {
                     primary = (
                       <form action={publishTensionAction}>
                         <input type="hidden" name="workspaceId" value={workspaceId} />

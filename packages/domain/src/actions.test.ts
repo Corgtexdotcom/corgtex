@@ -61,6 +61,94 @@ describe("action domain lifecycle", () => {
     appendEvents.mockResolvedValue(undefined);
   });
 
+  it("creates form-submitted actions as private drafts by default", async () => {
+    prismaMock.action.create.mockResolvedValueOnce({
+      id: "action-private",
+      workspaceId: "workspace-1",
+      authorUserId: "user-1",
+      title: "Follow up",
+      status: "DRAFT",
+      isPrivate: true,
+      publishedAt: null,
+    });
+
+    const { createAction } = await import("./actions");
+    await expect(createAction(actor, {
+      workspaceId: "workspace-1",
+      title: " Follow up ",
+      bodyMd: " Notes ",
+    })).resolves.toMatchObject({
+      id: "action-private",
+      status: "DRAFT",
+      isPrivate: true,
+      publishedAt: null,
+    });
+
+    expect(prismaMock.action.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        workspaceId: "workspace-1",
+        title: "Follow up",
+        bodyMd: "Notes",
+        status: "DRAFT",
+        isPrivate: true,
+        publishedAt: null,
+      }),
+    });
+    expect(recordAudit).toHaveBeenCalledWith(expect.anything(), actor, expect.objectContaining({
+      action: "action.created",
+      entityId: "action-private",
+    }));
+    expect(recordAudit).not.toHaveBeenCalledWith(expect.anything(), actor, expect.objectContaining({
+      action: "action.published",
+    }));
+  });
+
+  it("creates unchecked-private actions as open public records", async () => {
+    prismaMock.action.create.mockResolvedValueOnce({
+      id: "action-public",
+      workspaceId: "workspace-1",
+      authorUserId: "user-1",
+      title: "Follow up",
+      status: "OPEN",
+      isPrivate: false,
+      publishedAt: new Date("2026-05-26T12:00:00.000Z"),
+    });
+
+    const { createAction } = await import("./actions");
+    await expect(createAction(actor, {
+      workspaceId: "workspace-1",
+      title: "Follow up",
+      isPrivate: false,
+    })).resolves.toMatchObject({
+      id: "action-public",
+      status: "OPEN",
+      isPrivate: false,
+    });
+
+    expect(prismaMock.action.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        status: "OPEN",
+        isPrivate: false,
+        publishedAt: expect.any(Date),
+      }),
+    });
+    expect(recordAudit).toHaveBeenCalledWith(expect.anything(), actor, expect.objectContaining({
+      action: "action.created",
+      entityId: "action-public",
+    }));
+    expect(recordAudit).toHaveBeenCalledWith(expect.anything(), actor, expect.objectContaining({
+      action: "action.published",
+      entityId: "action-public",
+    }));
+    expect(appendEvents).toHaveBeenCalledWith(expect.anything(), [
+      expect.objectContaining({
+        type: "action.published",
+        aggregateId: "action-public",
+        payload: { actionId: "action-public" },
+      }),
+    ]);
+  });
+
   it("opens an existing public draft action to recover records created by the bad form default", async () => {
     prismaMock.action.findUnique.mockResolvedValue({
       id: "action-1",

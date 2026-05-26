@@ -12,6 +12,7 @@ import {
   updateProposalAction,
 } from "../actions";
 import { ItemActions } from "@/lib/components/ui/ItemActions";
+import { canOpenPrivateDraft } from "@/lib/governance-open-guards";
 import { getTranslations } from "next-intl/server";
 import { prisma } from "@corgtex/shared";
 
@@ -173,7 +174,7 @@ export default async function ProposalsPage({
                 <ItemActions
                   moreLabel={tCommon("moreActions")}
                   primary={
-                    canManage && proposal.status === "DRAFT" ? (
+                    canManage && canOpenPrivateDraft(proposal) ? (
                       <form action={submitProposalAction}>
                         <input type="hidden" name="workspaceId" value={workspaceId} />
                         <input type="hidden" name="proposalId" value={proposal.id} />

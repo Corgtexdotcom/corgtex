@@ -101,7 +101,63 @@ describe("tensions domain", () => {
         title: "Test tension",
         bodyMd: "Details",
         raisedByMemberId: "raised-member-1",
+        status: "DRAFT",
+        isPrivate: true,
+        publishedAt: null,
       }),
+    });
+  });
+
+  it("creates unchecked-private tensions as open public records", async () => {
+    prismaMock.tension.create.mockResolvedValueOnce({
+      id: "t-public",
+      workspaceId: "ws-1",
+      title: "Public tension",
+      status: "OPEN",
+      isPrivate: false,
+      publishedAt: new Date("2026-05-26T12:00:00.000Z"),
+    });
+    const { createTension } = await import("./tensions");
+
+    await expect(createTension(actor, {
+      workspaceId: "ws-1",
+      title: " Public tension ",
+      isPrivate: false,
+    })).resolves.toMatchObject({
+      id: "t-public",
+      status: "OPEN",
+      isPrivate: false,
+    });
+
+    expect(prismaMock.tension.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        workspaceId: "ws-1",
+        title: "Public tension",
+        status: "OPEN",
+        isPrivate: false,
+        publishedAt: expect.any(Date),
+      }),
+    });
+    expect(prismaMock.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        action: "tension.created",
+        entityId: "t-public",
+      }),
+    }));
+    expect(prismaMock.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        action: "tension.published",
+        entityId: "t-public",
+      }),
+    }));
+    expect(prismaMock.event.createMany).toHaveBeenCalledWith({
+      data: [
+        expect.objectContaining({
+          type: "tension.published",
+          aggregateId: "t-public",
+          payload: { tensionId: "t-public" },
+        }),
+      ],
     });
   });
 

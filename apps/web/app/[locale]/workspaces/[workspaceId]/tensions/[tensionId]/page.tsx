@@ -5,6 +5,7 @@ import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
 import { DeliberationThread } from "@/lib/components/DeliberationThread";
 import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
 import { getDeliberationTargets } from "@/lib/deliberation-targets";
+import { canOpenPrivateDraft } from "@/lib/governance-open-guards";
 import { createProposalFromTensionAction, postTensionDeliberationAction, publishTensionAction, returnTensionToDraftAction, resolveTensionDeliberationAction, updateTensionAction } from "../../actions";
 import { getTranslations } from "next-intl/server";
 
@@ -84,7 +85,7 @@ export default async function TensionDetailPage({
       {(canManage || canDraftProposal) && (
         <section className="ws-section" style={{ marginBottom: 24 }}>
           <div className="actions-inline">
-            {canManage && tension.status === "DRAFT" && (
+            {canManage && canOpenPrivateDraft(tension) && (
               <form action={publishTensionAction}>
                 <input type="hidden" name="workspaceId" value={workspaceId} />
                 <input type="hidden" name="tensionId" value={tension.id} />
