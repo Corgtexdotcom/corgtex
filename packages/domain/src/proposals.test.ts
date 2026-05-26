@@ -255,6 +255,128 @@ describe("proposal AI summaries", () => {
   });
 });
 
+describe("proposal creation visibility", () => {
+  beforeEach(() => { vi.clearAllMocks(); });
+
+  it("creates private draft proposals by default", async () => {
+    const { appendEvents } = await import("./events");
+    const { getApprovalPolicy, ensureApprovalFlow } = await import("./approvals");
+    const { createProposal } = await import("./proposals");
+    const actor = { kind: "user", user: { id: "u-1" } } as any;
+
+    vi.mocked(prisma.proposal.create).mockResolvedValueOnce({
+      id: "p-private",
+      workspaceId: "ws-1",
+      authorUserId: "u-1",
+      title: "Private proposal",
+      status: "DRAFT",
+      isPrivate: true,
+      publishedAt: null,
+    } as any);
+
+    await expect(createProposal(actor, {
+      workspaceId: "ws-1",
+      title: "Private proposal",
+      bodyMd: "Proposal body",
+    })).resolves.toMatchObject({
+      id: "p-private",
+      status: "DRAFT",
+      isPrivate: true,
+      publishedAt: null,
+    });
+
+    expect(prisma.proposal.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        status: "DRAFT",
+        isPrivate: true,
+        publishedAt: null,
+        autoApproveAt: null,
+      }),
+    }));
+    expect(getApprovalPolicy).not.toHaveBeenCalled();
+    expect(ensureApprovalFlow).not.toHaveBeenCalled();
+    expect(appendEvents).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.arrayContaining([
+        expect.objectContaining({ type: "proposal.created" }),
+      ]),
+    );
+  });
+
+  it("creates unchecked-private proposals as open public records with an active approval flow", async () => {
+    const { appendEvents } = await import("./events");
+    const { getApprovalPolicy, ensureApprovalFlow } = await import("./approvals");
+    const { createProposal } = await import("./proposals");
+    const actor = { kind: "user", user: { id: "u-1" } } as any;
+
+    vi.mocked(prisma.proposal.create).mockResolvedValueOnce({
+      id: "p-public",
+      workspaceId: "ws-1",
+      authorUserId: "u-1",
+      title: "Public proposal",
+      status: "OPEN",
+      isPrivate: false,
+      publishedAt: new Date("2026-05-26T12:00:00.000Z"),
+    } as any);
+    vi.mocked(prisma.approvalFlow.update).mockResolvedValueOnce({ id: "flow-1", status: "ACTIVE" } as any);
+
+    await expect(createProposal(actor, {
+      workspaceId: "ws-1",
+      title: "Public proposal",
+      bodyMd: "Proposal body",
+      isPrivate: false,
+    })).resolves.toMatchObject({
+      id: "p-public",
+      status: "OPEN",
+      isPrivate: false,
+    });
+
+    expect(prisma.proposal.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        status: "OPEN",
+        isPrivate: false,
+        publishedAt: expect.any(Date),
+        autoApproveAt: null,
+      }),
+    }));
+    expect(getApprovalPolicy).toHaveBeenCalledWith("ws-1", "PROPOSAL");
+    expect(ensureApprovalFlow).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      workspaceId: "ws-1",
+      subjectType: "PROPOSAL",
+      subjectId: "p-public",
+    }));
+    expect(prisma.approvalFlow.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "flow-1" },
+      data: expect.objectContaining({
+        status: "ACTIVE",
+        openedAt: expect.any(Date),
+        closesAt: expect.any(Date),
+      }),
+    }));
+    expect(prisma.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        action: "proposal.opened",
+        entityId: "p-public",
+        meta: { flowId: "flow-1" },
+      }),
+    }));
+    expect(appendEvents).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "proposal.opened",
+          aggregateId: "p-public",
+          payload: expect.objectContaining({
+            proposalId: "p-public",
+            flowId: "flow-1",
+            title: "Public proposal",
+          }),
+        }),
+      ]),
+    );
+  });
+});
+
 describe("resolveProposal", () => {
   beforeEach(() => { vi.clearAllMocks(); });
 
@@ -567,6 +689,88 @@ describe("createProposalFromTension", () => {
       where: { id: "t-1" },
       data: { proposalId: "p-1" },
     });
+  });
+
+  it("creates an open public proposal from a tension when private is unchecked", async () => {
+    const { appendEvents } = await import("./events");
+    const { getApprovalPolicy, ensureApprovalFlow } = await import("./approvals");
+    const { createProposalFromTension } = await import("./proposals");
+    const actor = { kind: "user", user: { id: "u-1" } } as any;
+
+    vi.mocked(prisma.tension.findFirst).mockResolvedValueOnce({
+      id: "t-public",
+      workspaceId: "ws-1",
+      authorUserId: "u-1",
+      title: "Reimbursements are slow",
+      bodyMd: "The current flow takes two weeks.",
+      circleId: "circle-1",
+      meetingId: null,
+      proposalId: null,
+      status: "OPEN",
+    } as any);
+    vi.mocked(prisma.proposal.create).mockResolvedValueOnce({
+      id: "p-public-from-tension",
+      workspaceId: "ws-1",
+      title: "Resolve tension: Reimbursements are slow",
+      bodyMd: "Draft body",
+      status: "OPEN",
+      isPrivate: false,
+      publishedAt: new Date("2026-05-26T12:00:00.000Z"),
+    } as any);
+    vi.mocked(prisma.tension.update).mockResolvedValueOnce({ id: "t-public", proposalId: "p-public-from-tension" } as any);
+    vi.mocked(prisma.approvalFlow.update).mockResolvedValueOnce({ id: "flow-1", status: "ACTIVE" } as any);
+
+    await expect(createProposalFromTension(actor, {
+      workspaceId: "ws-1",
+      sourceTensionId: "t-public",
+      isPrivate: false,
+    })).resolves.toMatchObject({
+      id: "p-public-from-tension",
+      status: "OPEN",
+      isPrivate: false,
+    });
+
+    expect(prisma.proposal.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        status: "OPEN",
+        isPrivate: false,
+        publishedAt: expect.any(Date),
+        autoApproveAt: null,
+      }),
+    });
+    expect(getApprovalPolicy).toHaveBeenCalledWith("ws-1", "PROPOSAL");
+    expect(ensureApprovalFlow).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      workspaceId: "ws-1",
+      subjectType: "PROPOSAL",
+      subjectId: "p-public-from-tension",
+    }));
+    expect(prisma.approvalFlow.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "flow-1" },
+      data: expect.objectContaining({
+        status: "ACTIVE",
+        openedAt: expect.any(Date),
+        closesAt: expect.any(Date),
+      }),
+    }));
+    expect(prisma.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        action: "proposal.opened",
+        entityId: "p-public-from-tension",
+      }),
+    }));
+    expect(appendEvents).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "proposal.opened",
+          aggregateId: "p-public-from-tension",
+          payload: expect.objectContaining({
+            proposalId: "p-public-from-tension",
+            flowId: "flow-1",
+          }),
+        }),
+      ]),
+    );
   });
 
   it("links selected same-workspace actions to the drafted proposal", async () => {

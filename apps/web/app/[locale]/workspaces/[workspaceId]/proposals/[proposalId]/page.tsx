@@ -7,6 +7,7 @@ import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
 import { DeliberationThread } from "@/lib/components/DeliberationThread";
 import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
 import { getDeliberationTargets } from "@/lib/deliberation-targets";
+import { canOpenPrivateDraft } from "@/lib/governance-open-guards";
 import { postDeliberationEntryAction, resolveDeliberationEntryAction, resolveProposalAction, returnProposalToDraftAction, submitProposalAction, updateProposalAction } from "../actions";
 import { ProposalDraftFields } from "../ProposalDraftFields";
 import { getTranslations } from "next-intl/server";
@@ -138,7 +139,7 @@ export default async function ProposalDetailPage({
 
         {/* Sidebar */}
         <aside style={{ borderLeft: "1px solid var(--line)", paddingLeft: "32px", paddingRight: "16px" }}>
-          {canManage && proposal.status === "DRAFT" && (
+          {canManage && canOpenPrivateDraft(proposal) && (
             <div className="stack mb-8">
               <form action={submitProposalAction} style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
                 <input type="hidden" name="workspaceId" value={workspaceId} />

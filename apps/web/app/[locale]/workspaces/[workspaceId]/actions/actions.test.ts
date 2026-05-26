@@ -65,7 +65,7 @@ describe("action item server actions", () => {
     }));
   });
 
-  it("honors an explicit public draft control if one is later added to the form", async () => {
+  it("honors an explicit public create control if one is later added to the form", async () => {
     const { createActionAction } = await import("./actions");
     const formData = buildCreateFormData();
     formData.set("isPrivate", "off");

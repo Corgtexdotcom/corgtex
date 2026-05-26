@@ -96,6 +96,8 @@ export async function createTension(actor: AppActor, params: {
   const title = params.title.trim();
   invariant(title.length > 0, 400, "INVALID_INPUT", "Tension title is required.");
   const authorUserId = await actorUserIdForWorkspace(actor, params.workspaceId);
+  const isPrivate = params.isPrivate ?? true;
+  const publishedAt = isPrivate ? null : new Date();
 
   return prisma.$transaction(async (tx) => {
     const raisedByMemberId = await resolveRaisedByMemberId(tx, params.workspaceId, params.raisedByMemberId);
@@ -110,10 +112,10 @@ export async function createTension(actor: AppActor, params: {
         assigneeMemberId: params.assigneeMemberId || null,
         raisedByMemberId,
         proposalId,
-        status: "DRAFT",
-        isPrivate: params.isPrivate ?? true,
+        status: isPrivate ? "DRAFT" : "OPEN",
+        isPrivate,
         meetingId: params.meetingId || null,
-        publishedAt: null,
+        publishedAt,
       },
     });
 
@@ -140,6 +142,29 @@ export async function createTension(actor: AppActor, params: {
         },
       },
     ]);
+
+    if (!isPrivate) {
+      await tx.auditLog.create({
+        data: {
+          workspaceId: params.workspaceId,
+          actorUserId: actor.kind === "user" ? actor.user.id : null,
+          action: "tension.published",
+          entityType: "Tension",
+          entityId: tension.id,
+          meta: { title: tension.title },
+        },
+      });
+
+      await appendEvents(tx, [
+        {
+          workspaceId: params.workspaceId,
+          type: "tension.published",
+          aggregateType: "Tension",
+          aggregateId: tension.id,
+          payload: { tensionId: tension.id },
+        },
+      ]);
+    }
 
     return tension;
   });

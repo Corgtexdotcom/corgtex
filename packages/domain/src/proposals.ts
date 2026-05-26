@@ -13,6 +13,7 @@ import { requireDraftManager } from "./draft-permissions";
 const PROPOSAL_RESOLUTION_OUTCOMES = new Set<ProposalResolutionOutcome>(["ADOPTED", "NOT_ADOPTED", "WITHDRAWN"]);
 const AI_SUMMARY_WORD_THRESHOLD = 120;
 const SUPPORT_REOPEN_PROPOSALS_LIMIT = 25;
+type ProposalApprovalPolicy = Awaited<ReturnType<typeof getApprovalPolicy>>;
 
 type CreateProposalParams = {
   workspaceId: string;
@@ -35,6 +36,68 @@ type CreateProposalFromTensionParams = Omit<CreateProposalParams, "title" | "bod
 
 function normalizeIds(ids?: string[] | null) {
   return Array.from(new Set((ids ?? []).map((id) => id.trim()).filter(Boolean)));
+}
+
+async function activateProposalApprovalFlow(tx: Prisma.TransactionClient, params: {
+  actor: AppActor;
+  workspaceId: string;
+  proposalId: string;
+  policy: ProposalApprovalPolicy;
+  openedAt: Date;
+}) {
+  const flow = await ensureApprovalFlow(tx, {
+    workspaceId: params.workspaceId,
+    subjectType: "PROPOSAL",
+    subjectId: params.proposalId,
+    policy: params.policy,
+    createdByUserId: params.actor.kind === "user" ? params.actor.user.id : null,
+  });
+
+  await tx.approvalFlow.update({
+    where: { id: flow.id },
+    data: {
+      status: "ACTIVE",
+      openedAt: params.openedAt,
+      closesAt:
+        params.policy.mode === "CONSENT"
+          ? new Date(params.openedAt.getTime() + params.policy.decisionWindowHours * 60 * 60 * 1000)
+          : null,
+    },
+  });
+
+  return flow;
+}
+
+async function recordProposalOpened(tx: Prisma.TransactionClient, actor: AppActor, params: {
+  workspaceId: string;
+  proposalId: string;
+  proposalTitle: string;
+  flowId: string;
+}) {
+  await tx.auditLog.create({
+    data: {
+      workspaceId: params.workspaceId,
+      actorUserId: actor.kind === "user" ? actor.user.id : null,
+      action: "proposal.opened",
+      entityType: "Proposal",
+      entityId: params.proposalId,
+      meta: { flowId: params.flowId },
+    },
+  });
+
+  await appendEvents(tx, [
+    {
+      workspaceId: params.workspaceId,
+      type: "proposal.opened",
+      aggregateType: "Proposal",
+      aggregateId: params.proposalId,
+      payload: {
+        proposalId: params.proposalId,
+        flowId: params.flowId,
+        title: params.proposalTitle,
+      },
+    },
+  ]);
 }
 
 function requireSupportRepairActor(actor: AppActor) {
@@ -271,6 +334,9 @@ export async function createProposal(actor: AppActor, params: CreateProposalPara
   const summary = params.includeAiSummary === true
     ? await generateProposalSummary({ workspaceId: params.workspaceId, title, bodyMd })
     : params.summary?.trim() || null;
+  const isPrivate = params.isPrivate ?? true;
+  const openedAt = isPrivate ? null : new Date();
+  const policy = isPrivate ? null : await getApprovalPolicy(params.workspaceId, "PROPOSAL");
 
   return prisma.$transaction(async (tx) => {
     const sourceTension = await loadVisibleSourceTension(tx, actor, membership, params.workspaceId, params.sourceTensionId);
@@ -283,9 +349,11 @@ export async function createProposal(actor: AppActor, params: CreateProposalPara
         summary,
         bodyMd,
         circleId: params.circleId || sourceTension?.circleId || null,
-        isPrivate: params.isPrivate ?? true,
+        status: isPrivate ? "DRAFT" : "OPEN",
+        isPrivate,
         meetingId: params.meetingId || sourceTension?.meetingId || null,
-        publishedAt: null,
+        publishedAt: openedAt,
+        autoApproveAt: null,
       },
     });
 
@@ -341,6 +409,23 @@ export async function createProposal(actor: AppActor, params: CreateProposalPara
       },
     ]);
 
+    if (!isPrivate && policy && openedAt) {
+      const flow = await activateProposalApprovalFlow(tx, {
+        actor,
+        workspaceId: params.workspaceId,
+        proposalId: proposal.id,
+        policy,
+        openedAt,
+      });
+
+      await recordProposalOpened(tx, actor, {
+        workspaceId: params.workspaceId,
+        proposalId: proposal.id,
+        proposalTitle: proposal.title,
+        flowId: flow.id,
+      });
+    }
+
     return proposal;
   });
 }
@@ -352,6 +437,9 @@ export async function createProposalFromTension(actor: AppActor, params: CreateP
   });
 
   const authorUserId = await actorUserIdForWorkspace(actor, params.workspaceId);
+  const isPrivate = params.isPrivate ?? true;
+  const openedAt = isPrivate ? null : new Date();
+  const policy = isPrivate ? null : await getApprovalPolicy(params.workspaceId, "PROPOSAL");
 
   return prisma.$transaction(async (tx) => {
     const sourceTension = await loadVisibleSourceTension(tx, actor, membership, params.workspaceId, params.sourceTensionId);
@@ -367,9 +455,11 @@ export async function createProposalFromTension(actor: AppActor, params: CreateP
         summary: draft.summary,
         bodyMd: draft.bodyMd,
         circleId: params.circleId || sourceTension.circleId || null,
-        isPrivate: params.isPrivate ?? true,
+        status: isPrivate ? "DRAFT" : "OPEN",
+        isPrivate,
         meetingId: params.meetingId || sourceTension.meetingId || null,
-        publishedAt: null,
+        publishedAt: openedAt,
+        autoApproveAt: null,
       },
     });
 
@@ -422,6 +512,23 @@ export async function createProposalFromTension(actor: AppActor, params: CreateP
         },
       },
     ]);
+
+    if (!isPrivate && policy && openedAt) {
+      const flow = await activateProposalApprovalFlow(tx, {
+        actor,
+        workspaceId: params.workspaceId,
+        proposalId: proposal.id,
+        policy,
+        openedAt,
+      });
+
+      await recordProposalOpened(tx, actor, {
+        workspaceId: params.workspaceId,
+        proposalId: proposal.id,
+        proposalTitle: proposal.title,
+        flowId: flow.id,
+      });
+    }
 
     return proposal;
   });
@@ -528,12 +635,13 @@ export async function submitProposal(actor: AppActor, params: { workspaceId: str
     invariant(proposal.status === "DRAFT", 400, "INVALID_STATE", "Only draft proposals can be opened.");
     await requireDraftManager({ actor, workspaceId: params.workspaceId, record: proposal, resolvedMembership: membership });
 
-    const flow = await ensureApprovalFlow(tx, {
+    const openedAt = new Date();
+    const flow = await activateProposalApprovalFlow(tx, {
+      actor,
       workspaceId: params.workspaceId,
-      subjectType: "PROPOSAL",
-      subjectId: proposal.id,
+      proposalId: proposal.id,
       policy,
-      createdByUserId: actor.kind === "user" ? actor.user.id : null,
+      openedAt,
     });
 
     await tx.proposal.update({
@@ -541,47 +649,17 @@ export async function submitProposal(actor: AppActor, params: { workspaceId: str
       data: {
         status: "OPEN",
         isPrivate: false,
-        publishedAt: proposal.publishedAt || new Date(),
+        publishedAt: proposal.publishedAt || openedAt,
         autoApproveAt: null,
       },
     });
 
-    await tx.approvalFlow.update({
-      where: { id: flow.id },
-      data: {
-        status: "ACTIVE",
-        openedAt: new Date(),
-        closesAt:
-          policy.mode === "CONSENT"
-            ? new Date(Date.now() + policy.decisionWindowHours * 60 * 60 * 1000)
-            : null,
-      },
+    await recordProposalOpened(tx, actor, {
+      workspaceId: params.workspaceId,
+      proposalId: proposal.id,
+      proposalTitle: proposal.title,
+      flowId: flow.id,
     });
-
-    await tx.auditLog.create({
-      data: {
-        workspaceId: params.workspaceId,
-        actorUserId: actor.kind === "user" ? actor.user.id : null,
-        action: "proposal.opened",
-        entityType: "Proposal",
-        entityId: proposal.id,
-        meta: { flowId: flow.id },
-      },
-    });
-
-    await appendEvents(tx, [
-      {
-        workspaceId: params.workspaceId,
-        type: "proposal.opened",
-        aggregateType: "Proposal",
-        aggregateId: proposal.id,
-        payload: {
-          proposalId: proposal.id,
-          flowId: flow.id,
-          title: proposal.title,
-        },
-      },
-    ]);
 
     return {
       proposalId: proposal.id,
