@@ -5,6 +5,7 @@ import type { AppActor, MembershipSummary } from "@corgtex/shared";
 import { actorUserIdForWorkspace, requireWorkspaceMembership } from "./auth";
 import { invariant } from "./errors";
 import { defaultStorage } from "@corgtex/storage";
+import { withdrawActiveApprovalFlowForSubject } from "./approvals";
 
 export type ArchiveFilter = "active" | "archived" | "all";
 
@@ -404,6 +405,17 @@ export async function archiveWorkspaceArtifact(actor: AppActor, params: {
         },
       },
     });
+
+    if (config.entityType === "Proposal" || config.entityType === "SpendRequest") {
+      await withdrawActiveApprovalFlowForSubject(tx, {
+        workspaceId: params.workspaceId,
+        subjectType: config.entityType === "Proposal" ? "PROPOSAL" : "SPEND",
+        subjectId: record.id,
+        cleanupReason: `${config.entityType} archived`,
+        actorUserId: actorUserId(actor),
+        now: archivedAt,
+      });
+    }
 
     return updated;
   });

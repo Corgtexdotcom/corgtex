@@ -1,5 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { calculateApprovalOutcome, finalizeExpiredApprovalFlows, recordApprovalDecision } from "./approvals";
+import {
+  calculateApprovalOutcome,
+  finalizeExpiredApprovalFlows,
+  listActionableApprovalFlows,
+  recordApprovalDecision,
+  withdrawActiveApprovalFlowForSubject,
+} from "./approvals";
 
 const prismaMock = vi.hoisted(() => {
   const mock: any = {
@@ -7,8 +13,11 @@ const prismaMock = vi.hoisted(() => {
       upsert: vi.fn(),
     },
     approvalFlow: {
+      findMany: vi.fn(),
+      findFirst: vi.fn(),
       findUnique: vi.fn(),
       update: vi.fn(),
+      updateMany: vi.fn(),
     },
     auditLog: {
       create: vi.fn(),
@@ -20,9 +29,11 @@ const prismaMock = vi.hoisted(() => {
       upsert: vi.fn(),
     },
     proposal: {
+      findMany: vi.fn(),
       update: vi.fn(),
     },
     spendRequest: {
+      findMany: vi.fn(),
       update: vi.fn(),
     },
   };
@@ -59,8 +70,13 @@ beforeEach(() => {
   prismaMock.approvalDecision.upsert.mockResolvedValue({});
   prismaMock.approvalFlow.update.mockResolvedValue({});
   prismaMock.auditLog.create.mockResolvedValue({});
+  prismaMock.approvalFlow.findMany.mockResolvedValue([]);
+  prismaMock.approvalFlow.findFirst.mockResolvedValue(null);
+  prismaMock.approvalFlow.updateMany.mockResolvedValue({ count: 1 });
+  prismaMock.proposal.findMany.mockResolvedValue([]);
   prismaMock.proposal.update.mockResolvedValue({ id: "p-1" });
   prismaMock.policyCorpus.upsert.mockResolvedValue({});
+  prismaMock.spendRequest.findMany.mockResolvedValue([]);
   prismaMock.spendRequest.update.mockResolvedValue({ id: "spend-1" });
   appendEventsMock.mockResolvedValue(undefined);
 });
@@ -157,6 +173,140 @@ describe("recordApprovalDecision", () => {
         resultJson: expect.objectContaining({ approved: true }),
       },
     });
+  });
+});
+
+describe("listActionableApprovalFlows", () => {
+  it("only returns active approval flows whose subjects are still actionable", async () => {
+    prismaMock.approvalFlow.findMany.mockResolvedValue([
+      {
+        id: "flow-open-proposal",
+        workspaceId: "ws-1",
+        subjectType: "PROPOSAL",
+        subjectId: "proposal-open",
+        status: "ACTIVE",
+        createdAt: new Date("2026-05-26T12:00:00.000Z"),
+        decisions: [],
+      },
+      {
+        id: "flow-archived-proposal",
+        workspaceId: "ws-1",
+        subjectType: "PROPOSAL",
+        subjectId: "proposal-archived",
+        status: "ACTIVE",
+        createdAt: new Date("2026-05-26T11:00:00.000Z"),
+        decisions: [],
+      },
+      {
+        id: "flow-private-proposal",
+        workspaceId: "ws-1",
+        subjectType: "PROPOSAL",
+        subjectId: "proposal-private",
+        status: "ACTIVE",
+        createdAt: new Date("2026-05-26T10:00:00.000Z"),
+        decisions: [],
+      },
+      {
+        id: "flow-resolved-spend",
+        workspaceId: "ws-1",
+        subjectType: "SPEND",
+        subjectId: "spend-resolved",
+        status: "ACTIVE",
+        createdAt: new Date("2026-05-26T09:00:00.000Z"),
+        decisions: [],
+      },
+      {
+        id: "flow-open-spend",
+        workspaceId: "ws-1",
+        subjectType: "SPEND",
+        subjectId: "spend-open",
+        status: "ACTIVE",
+        createdAt: new Date("2026-05-26T08:00:00.000Z"),
+        decisions: [],
+      },
+      {
+        id: "flow-missing-proposal",
+        workspaceId: "ws-1",
+        subjectType: "PROPOSAL",
+        subjectId: "proposal-missing",
+        status: "ACTIVE",
+        createdAt: new Date("2026-05-26T07:00:00.000Z"),
+        decisions: [],
+      },
+    ]);
+    prismaMock.proposal.findMany.mockResolvedValue([
+      { id: "proposal-open", title: "Open proposal", status: "OPEN", isPrivate: false, archivedAt: null },
+      { id: "proposal-archived", title: "Archived proposal", status: "OPEN", isPrivate: false, archivedAt: new Date() },
+      { id: "proposal-private", title: "Private proposal", status: "OPEN", isPrivate: true, archivedAt: null },
+    ]);
+    prismaMock.spendRequest.findMany.mockResolvedValue([
+      { id: "spend-resolved", description: "Resolved spend", status: "RESOLVED", archivedAt: null },
+      { id: "spend-open", description: "Open spend", status: "OPEN", archivedAt: null },
+    ]);
+
+    await expect(listActionableApprovalFlows({ kind: "user", user: { id: "u-1" } } as any, "ws-1")).resolves.toMatchObject({
+      total: 2,
+      items: [
+        { id: "flow-open-proposal", subjectLabel: "Open proposal" },
+        { id: "flow-open-spend", subjectLabel: "Open spend" },
+      ],
+    });
+    expect(prismaMock.approvalFlow.findMany).toHaveBeenCalledWith(expect.not.objectContaining({ take: expect.any(Number) }));
+  });
+});
+
+describe("withdrawActiveApprovalFlowForSubject", () => {
+  it("marks an active flow withdrawn with cleanup metadata", async () => {
+    const now = new Date("2026-05-26T12:00:00.000Z");
+    prismaMock.approvalFlow.findFirst.mockResolvedValue({
+      id: "flow-1",
+      workspaceId: "ws-1",
+      subjectType: "PROPOSAL",
+      subjectId: "proposal-1",
+    });
+
+    await expect(withdrawActiveApprovalFlowForSubject(prismaMock, {
+      workspaceId: "ws-1",
+      subjectType: "PROPOSAL",
+      subjectId: "proposal-1",
+      cleanupReason: "Proposal archived",
+      actorUserId: "u-1",
+      now,
+    })).resolves.toMatchObject({ id: "flow-1" });
+
+    expect(prismaMock.approvalFlow.updateMany).toHaveBeenCalledWith({
+      where: { id: "flow-1", status: "ACTIVE" },
+      data: expect.objectContaining({
+        status: "WITHDRAWN",
+        closedAt: now,
+        resultJson: expect.objectContaining({ cleanupReason: "Proposal archived" }),
+      }),
+    });
+    expect(prismaMock.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        action: "approval.withdrawn",
+        entityId: "flow-1",
+      }),
+    }));
+  });
+
+  it("does not overwrite a flow that is no longer active", async () => {
+    prismaMock.approvalFlow.findFirst.mockResolvedValue({
+      id: "flow-1",
+      workspaceId: "ws-1",
+      subjectType: "SPEND",
+      subjectId: "spend-1",
+    });
+    prismaMock.approvalFlow.updateMany.mockResolvedValue({ count: 0 });
+
+    await expect(withdrawActiveApprovalFlowForSubject(prismaMock, {
+      workspaceId: "ws-1",
+      subjectType: "SPEND",
+      subjectId: "spend-1",
+      cleanupReason: "SpendRequest archived",
+    })).resolves.toBeNull();
+
+    expect(prismaMock.auditLog.create).not.toHaveBeenCalled();
   });
 });
 

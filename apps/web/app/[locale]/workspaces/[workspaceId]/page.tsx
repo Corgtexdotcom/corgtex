@@ -1,5 +1,7 @@
 import {
   computeNewspaperLayout,
+  countUnreadNotifications,
+  listActionableApprovalFlows,
   listMembers, listNotifications, listTensions,
   listAuditLogs, listArticles, listMeetings
 } from "@corgtex/domain";
@@ -17,6 +19,7 @@ import { getTranslations, getFormatter } from "next-intl/server";
 import { getDashboardAttentionCounts } from "@/lib/dashboard-attention";
 import { getWorkspaceCapabilities } from "@/lib/workspace-capabilities";
 import { MarkdownExcerpt } from "@/lib/components/MarkdownRenderer";
+import { selectDashboardKnowledgeArticles, selectLatestMeetingRecap } from "@/lib/dashboard-briefing";
 
 export const dynamic = "force-dynamic";
 
@@ -55,6 +58,7 @@ export default async function WorkspaceDashboard({
     pendingFlowsRaw,
     activeTensionsResult,
     pendingAgentApprovals,
+    unreadNotificationsCount,
     auditLogs,
     articlesResult,
     meetings,
@@ -67,31 +71,13 @@ export default async function WorkspaceDashboard({
   ] = await Promise.all([
     listTensions(actor, workspaceId, { take: 10 }),
     listMembers(workspaceId),
-    listNotifications(actor, workspaceId, { take: 5 }),
-    prisma.approvalFlow.findMany({
-      where: { workspaceId, status: "ACTIVE" },
-      include: { decisions: true },
-      orderBy: { createdAt: "desc" },
-      take: 5,
-    }).then(async (flows) => {
-      // Resolve entity labels for each flow so the UI can show what the approval is about
-      const enriched = await Promise.all(flows.map(async (flow) => {
-        let subjectLabel: string | null = null;
-        if (flow.subjectType === "PROPOSAL") {
-          const p = await prisma.proposal.findUnique({ where: { id: flow.subjectId }, select: { title: true } });
-          subjectLabel = p?.title ?? null;
-        } else if (flow.subjectType === "SPEND") {
-          const s = await prisma.spendRequest.findUnique({ where: { id: flow.subjectId }, select: { description: true } });
-          subjectLabel = s?.description ?? null;
-        }
-        return { ...flow, subjectLabel };
-      }));
-      return enriched;
-    }),
+    listNotifications(actor, workspaceId, { take: 5, unreadOnly: true }),
+    listActionableApprovalFlows(actor, workspaceId, { take: 5 }),
     prisma.tension.count({ where: { workspaceId, status: "OPEN", OR: [{ isPrivate: false }, { authorUserId: actor.kind === 'user' ? actor.user.id : '' }] } }),
     capabilities.canReviewAgentRuns
       ? prisma.agentRun.count({ where: { workspaceId, status: "WAITING_APPROVAL" } })
       : Promise.resolve(0),
+    actor.kind === "user" ? countUnreadNotifications(actor.user.id, workspaceId) : Promise.resolve(0),
     listAuditLogs(actor, workspaceId, { take: 10 }),
     listArticles(actor, { workspaceId, take: 50 }),
     listMeetings(workspaceId, { status: "COMPLETED" }),
@@ -133,11 +119,14 @@ export default async function WorkspaceDashboard({
     });
   }
 
-  const recentMeetings = meetings
-    .filter(m => actor.kind === 'user' ? m.participantIds?.includes(actor.user.id) : true)
-    .slice(0, 5);
-  const pendingFlows = pendingFlowsRaw;
-  const unreadNotifications = notifications.filter(n => !n.readAt);
+  const latestMeetingRecap = selectLatestMeetingRecap(meetings);
+  const recentMeetings = latestMeetingRecap
+    ? [latestMeetingRecap]
+    : [];
+  const pendingFlows = pendingFlowsRaw.items;
+  const pendingFlowTotal = pendingFlowsRaw.total;
+  const displayedApprovalFlows = pendingFlows.slice(0, 3);
+  const unreadNotifications = notifications;
   const memberOpenActions = currentMember
     ? await prisma.action.findMany({
       where: {
@@ -157,9 +146,9 @@ export default async function WorkspaceDashboard({
   const openTensionItems = tensions.filter((tension) => tension.status === "OPEN");
   
   const attentionCounts = getDashboardAttentionCounts({
-    pendingFlowsCount: pendingFlows.length,
+    pendingFlowsCount: pendingFlowTotal,
     pendingAgentApprovalsCount: pendingAgentApprovals,
-    unreadNotificationsCount: unreadNotifications.length,
+    unreadNotificationsCount,
     advisoryRequestsCount: advisoryRequests.length,
     canReviewAgentRuns: capabilities.canReviewAgentRuns,
   });
@@ -171,10 +160,10 @@ export default async function WorkspaceDashboard({
   const d = new Date();
   const dateString = format.dateTime(d, { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
 
-  // Separate latest authoritative articles
   const allArticles = articlesResult.items;
-  const featuredArticle = allArticles.find(a => a.authority === "AUTHORITATIVE") || allArticles[0];
-  const otherRecentArticles = allArticles.filter(a => a.id !== featuredArticle?.id).slice(0, 3);
+  const dashboardKnowledgeArticles = selectDashboardKnowledgeArticles(allArticles);
+  const featuredArticle = dashboardKnowledgeArticles[0];
+  const otherRecentArticles = dashboardKnowledgeArticles.slice(1);
 
   // Group by category for below the fold
   const articlesByCategory = allArticles.reduce((acc, a) => {
@@ -275,12 +264,12 @@ export default async function WorkspaceDashboard({
           </div>
 
           <div className="nr-attention-body">
-            {pendingFlows.length > 0 && (
+            {pendingFlowTotal > 0 && (
               <div className="nr-attention-block">
-                <strong>{t("approvalsPending", { count: pendingFlows.length })}</strong>
-                {pendingFlows.slice(0, 2).map((flow) => {
+                <strong>{t("approvalsPending", { count: pendingFlowTotal })}</strong>
+                {displayedApprovalFlows.map((flow) => {
                   const href = resolveEntityUrl(workspaceId, flow.subjectType, flow.subjectId);
-                  const label = (flow as any).subjectLabel || flow.subjectType;
+                  const label = flow.subjectLabel || flow.subjectType;
                   const typeLabel = flow.subjectType.charAt(0) + flow.subjectType.slice(1).toLowerCase();
                   return (
                     <div key={flow.id} className="nr-attention-item">
@@ -302,6 +291,17 @@ export default async function WorkspaceDashboard({
                     </div>
                   );
                 })}
+                {pendingFlowTotal > displayedApprovalFlows.length && (
+                  <>
+                    <span className="nr-attention-copy">{t("remainingApprovals", { count: pendingFlowTotal - displayedApprovalFlows.length })}</span>
+                    <Link href={`/workspaces/${workspaceId}/proposals?status=OPEN`} className="nr-attention-inline-link">
+                      {t("viewProposalApprovals")}
+                    </Link>
+                    <Link href={`/workspaces/${workspaceId}/finance?status=OPEN`} className="nr-attention-inline-link">
+                      {t("viewSpendApprovals")}
+                    </Link>
+                  </>
+                )}
               </div>
             )}
             
@@ -313,7 +313,7 @@ export default async function WorkspaceDashboard({
               </div>
             )}
 
-            {unreadNotifications.length > 0 && (
+            {unreadNotificationsCount > 0 && (
               <div className="nr-attention-block">
                 <div className="nr-attention-block-header">
                   <strong>{t("notifications")}</strong>
@@ -322,6 +322,7 @@ export default async function WorkspaceDashboard({
                     <button type="submit" className="nr-attention-mark-read-button">{t("markRead")}</button>
                   </form>
                 </div>
+                <span className="nr-attention-copy">{t("unreadNotificationsSummary", { count: unreadNotificationsCount })}</span>
                 {unreadNotifications.slice(0, 3).map((n) => {
                   const href = resolveEntityUrl(workspaceId, n.entityType, n.entityId);
                   return (
@@ -378,7 +379,7 @@ export default async function WorkspaceDashboard({
         {/* LEFT COLUMN: FEATURED */}
         {hasDashboardSection("featuredKnowledge") && featuredArticle && (
         <div className={dashboardSectionClassName("featuredKnowledge")}>
-          <h2 className="nr-section-header">{t("featuredKnowledge")}</h2>
+          <h2 className="nr-section-header">{t("freshKnowledge")}</h2>
             <div style={{ marginBottom: "24px" }}>
               <div className="nr-meta">{featuredArticle.type} · {t("updated")} <span suppressHydrationWarning>{ageText(featuredArticle.updatedAt)}</span></div>
               <Link href={`/workspaces/${workspaceId}/brain/${featuredArticle.slug}`} style={{ textDecoration: "none" }}>
@@ -404,10 +405,12 @@ export default async function WorkspaceDashboard({
         {/* CENTER COLUMN: MEETINGS */}
         {hasDashboardSection("meetings") && (
         <div className={dashboardSectionClassName("meetings")}>
-           <h2 className="nr-section-header">{t("yourMeetings")}</h2>
+           <h2 className="nr-section-header">{t("latestMeetingRecap")}</h2>
            {recentMeetings.slice(0, dashboardSectionLayout("meetings").itemCap).map((meeting) => (
              <div key={meeting.id} className="nr-item">
-               <div className="nr-item-title">{meeting.title || `${meeting.source} ${t("meeting")}`}</div>
+               <Link href={`/workspaces/${workspaceId}/meetings/${meeting.id}`} className="nr-item-title" style={{ display: "block", textDecoration: "none" }}>
+                 {meeting.title || `${meeting.source} ${t("meeting")}`}
+               </Link>
                <div className="nr-item-meta" suppressHydrationWarning>{format.dateTime(new Date(meeting.recordedAt), { month: "short", day: "numeric", year: "numeric" })}</div>
                {meeting.summaryMd && <MarkdownExcerpt markdown={meeting.summaryMd} maxLength={dashboardSectionLayout("meetings").excerptMaxLength} as="div" className="nr-item-meta" />}
              </div>
