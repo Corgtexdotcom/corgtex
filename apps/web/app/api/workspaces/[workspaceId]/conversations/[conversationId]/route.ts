@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getConversation, addConversationTurn, renameConversation, deleteConversation } from "@corgtex/domain";
-import { processConversationTurnStream } from "@corgtex/agents";
+import { processConversationTurnStream, sanitizeConversationPageContext } from "@corgtex/agents";
 import { defaultModelGateway } from "@corgtex/models";
 import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
@@ -39,8 +39,9 @@ export async function POST(
   try {
     const actor = await resolveRequestActor(request);
     const { workspaceId, conversationId } = await params;
-    const body = (await request.json()) as { message?: string };
+    const body = (await request.json()) as { message?: string; pageContext?: unknown };
     const userMessage = String(body.message ?? "").trim();
+    const pageContext = sanitizeConversationPageContext(body.pageContext);
     if (!userMessage) {
       return NextResponse.json({ error: "Message is required." }, { status: 400 });
     }
@@ -63,6 +64,7 @@ export async function POST(
       userMessage,
       systemPrompt: conversation.systemPrompt,
       actor,
+      pageContext,
     });
 
     const encoder = new TextEncoder();
@@ -71,7 +73,7 @@ export async function POST(
         try {
           let finalResult: {
             assistantMessage: string;
-            contextUsed: { knowledgeResults?: unknown[]; memories?: unknown[] };
+            contextUsed: { knowledgeResults?: unknown[]; memories?: unknown[]; pageContext?: unknown };
           } | undefined;
 
           while (true) {

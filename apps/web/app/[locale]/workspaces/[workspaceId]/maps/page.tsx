@@ -1,7 +1,7 @@
 import { getContextMapData, requireWorkspaceMembership } from "@corgtex/domain";
 
 import { requirePageActor } from "@/lib/auth";
-import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
+import { isWorkspaceFeatureEnabled, requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
 import ContextMapClient, { type ContextMapClientData } from "./ContextMapClient";
 
 export const dynamic = "force-dynamic";
@@ -23,11 +23,14 @@ export default async function ContextMapsPage({
   const actor = await requirePageActor();
   await requireWorkspaceMembership({ actor, workspaceId });
 
-  const data = await getContextMapData(actor, {
-    workspaceId,
-    mapViewId: query.view ?? null,
-    includeStale: query.stale === "1",
-  });
+  const [data, mapAiEnabled] = await Promise.all([
+    getContextMapData(actor, {
+      workspaceId,
+      mapViewId: query.view ?? null,
+      includeStale: query.stale === "1",
+    }),
+    isWorkspaceFeatureEnabled(workspaceId, "CONTEXT_MAP_AI"),
+  ]);
 
   return (
     <div className="context-map-page">
@@ -41,6 +44,7 @@ export default async function ContextMapsPage({
         workspaceId={workspaceId}
         data={serialize(data) as unknown as ContextMapClientData}
         includeStale={query.stale === "1"}
+        mapAiEnabled={mapAiEnabled}
       />
     </div>
   );

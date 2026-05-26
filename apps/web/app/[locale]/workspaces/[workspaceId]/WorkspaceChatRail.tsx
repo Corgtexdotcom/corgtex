@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { usePathname } from "next/navigation";
 import { ChatInterface } from "./chat/ChatInterface";
+import { OPEN_WORKSPACE_CHAT_EVENT, type OpenWorkspaceChatEventDetail, type WorkspaceChatPageContext } from "./chat/page-context";
 import { WorkspaceUtilityIcon } from "./WorkspaceNavIcon";
 
 type ConversationSummary = {
@@ -34,6 +35,8 @@ export function WorkspaceChatRail({
   const pathname = usePathname() ?? "";
   const defaultCollapsed = useMemo(() => !isWorkspaceHome(pathname, workspaceId), [pathname, workspaceId]);
   const [isCollapsed, setIsCollapsed] = useState(defaultCollapsed);
+  const [pageContext, setPageContext] = useState<WorkspaceChatPageContext | null>(null);
+  const [openSignal, setOpenSignal] = useState(0);
   const railRef = useRef<HTMLElement>(null);
 
   useEffect(() => {
@@ -60,6 +63,25 @@ export function WorkspaceChatRail({
       layout?.classList.remove("ws-layout-chat-collapsed");
     };
   }, [isCollapsed]);
+
+  useEffect(() => {
+    function handleOpenChat(event: Event) {
+      const detail = (event as CustomEvent<OpenWorkspaceChatEventDetail>).detail;
+      if (detail?.pageContext) {
+        setPageContext(detail.pageContext);
+      }
+      setIsCollapsed(false);
+      setOpenSignal((value) => value + 1);
+      try {
+        window.localStorage.setItem(STORAGE_KEY, "open");
+      } catch {
+        // The rail still opens without persistent storage.
+      }
+    }
+
+    window.addEventListener(OPEN_WORKSPACE_CHAT_EVENT, handleOpenChat);
+    return () => window.removeEventListener(OPEN_WORKSPACE_CHAT_EVENT, handleOpenChat);
+  }, []);
 
   function toggleCollapsed() {
     setIsCollapsed((current) => {
@@ -92,6 +114,8 @@ export function WorkspaceChatRail({
           activeSessionId={null}
           compact={true}
           claudeFooterEnabled={!isCollapsed}
+          pageContext={pageContext}
+          openSignal={openSignal}
         />
       </div>
     </aside>

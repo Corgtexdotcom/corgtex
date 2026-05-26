@@ -995,11 +995,16 @@ describe("control plane domain", () => {
 
     const flags = await listControlPlaneFeatureFlags(operatorActor, "inst-1");
     const finance = flags.flags.find((flag) => flag.flag === "FINANCE");
+    const contextMapAi = flags.flags.find((flag) => flag.flag === "CONTEXT_MAP_AI");
 
     expect(finance).toMatchObject({
       enabled: false,
       source: "workspace_override",
       lastChangedBy: "operator-1",
+    });
+    expect(contextMapAi).toMatchObject({
+      enabled: false,
+      source: "default",
     });
 
     prismaMock.customerDeployment.findUnique.mockResolvedValueOnce(deployment);

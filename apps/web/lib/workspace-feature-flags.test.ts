@@ -39,6 +39,7 @@ describe("filterNavGroupsByWorkspaceAccess", () => {
 
     expect(labels).not.toContain("tools");
     expect(labels).not.toContain("built");
+    expect(DEFAULT_WORKSPACE_FEATURE_FLAGS.CONTEXT_MAP_AI).toBe(false);
   });
 
   it("shows finance navigation by default for existing customers", () => {

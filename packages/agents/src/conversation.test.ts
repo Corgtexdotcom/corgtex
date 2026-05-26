@@ -1,25 +1,35 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
+  applyContextGraphProposedDiffMock,
+  buildSelectedRegionContextMock,
   checkBudgetMock,
   chatMock,
+  createContextGraphProposedDiffMock,
   executeExternalMcpToolMock,
   fetchConnectedExternalMcpContextMock,
+  getContextMapDataMock,
   listExternalMcpConnectionsMock,
   listWorkspaceToolLinksMock,
   loadRelevantMemoriesMock,
   searchConnectedExternalMcpContextMock,
   storeAgentMemoryMock,
+  workspaceFeatureFlagFindManyMock,
 } = vi.hoisted(() => ({
+  applyContextGraphProposedDiffMock: vi.fn(),
+  buildSelectedRegionContextMock: vi.fn(),
   checkBudgetMock: vi.fn(),
   chatMock: vi.fn(),
+  createContextGraphProposedDiffMock: vi.fn(),
   executeExternalMcpToolMock: vi.fn(),
   fetchConnectedExternalMcpContextMock: vi.fn(),
+  getContextMapDataMock: vi.fn(),
   listExternalMcpConnectionsMock: vi.fn(),
   listWorkspaceToolLinksMock: vi.fn(),
   loadRelevantMemoriesMock: vi.fn(),
   searchConnectedExternalMcpContextMock: vi.fn(),
   storeAgentMemoryMock: vi.fn(),
+  workspaceFeatureFlagFindManyMock: vi.fn(),
 }));
 
 vi.mock("@corgtex/shared", () => ({
@@ -35,6 +45,9 @@ vi.mock("@corgtex/shared", () => ({
     },
     oAuthConnection: {
       findFirst: vi.fn(),
+    },
+    workspaceFeatureFlag: {
+      findMany: workspaceFeatureFlagFindManyMock,
     },
   },
 }));
@@ -56,14 +69,18 @@ vi.mock("@corgtex/domain", () => ({
     }
   },
   archiveWorkspaceToolLink: vi.fn(),
+  applyContextGraphProposedDiff: applyContextGraphProposedDiffMock,
   assignRole: vi.fn(),
+  buildSelectedRegionContext: buildSelectedRegionContextMock,
   checkBudget: checkBudgetMock,
   createAction: vi.fn(),
+  createContextGraphProposedDiff: createContextGraphProposedDiffMock,
   createGoal: vi.fn(),
   createProposal: vi.fn(),
   createTension: vi.fn(),
   executeExternalMcpTool: executeExternalMcpToolMock,
   fetchConnectedExternalMcpContext: fetchConnectedExternalMcpContextMock,
+  getContextMapData: getContextMapDataMock,
   getMemberProfile: vi.fn(),
   ingestConversationOnDemand: vi.fn(),
   listExternalMcpConnections: listExternalMcpConnectionsMock,
@@ -88,6 +105,18 @@ describe("processConversationTurn", () => {
     checkBudgetMock.mockResolvedValue({ allowed: true, usedPct: 0, usedUsd: 0, capUsd: 5 });
     loadRelevantMemoriesMock.mockResolvedValue([]);
     storeAgentMemoryMock.mockResolvedValue(undefined);
+    workspaceFeatureFlagFindManyMock.mockResolvedValue([]);
+    createContextGraphProposedDiffMock.mockResolvedValue({ id: "diff-1", status: "pending" });
+    applyContextGraphProposedDiffMock.mockResolvedValue({ id: "diff-1", status: "applied" });
+    getContextMapDataMock.mockResolvedValue({
+      mapView: { id: "map-1", name: "CRNA Critical Path", viewType: "process" },
+      permissions: { canRead: true, canPropose: true, canApprove: true },
+      objects: [
+        { id: "step-1", objectType: "ProcessStep", title: "Decision to proceed", status: "approved", properties: {} },
+      ],
+      relationships: [],
+    });
+    buildSelectedRegionContextMock.mockResolvedValue({ objects: [], relationships: [], evidenceRefs: [] });
     executeExternalMcpToolMock.mockResolvedValue({ skipped: false, result: { ok: true } });
     fetchConnectedExternalMcpContextMock.mockResolvedValue({ providerKey: "notion", externalId: "page-1", content: {} });
     listExternalMcpConnectionsMock.mockResolvedValue([]);
@@ -100,6 +129,13 @@ describe("processConversationTurn", () => {
       },
     ]);
   });
+
+  function enableContextMapAi() {
+    workspaceFeatureFlagFindManyMock.mockResolvedValue([
+      { flag: "CONTEXT_MAPS", enabled: true },
+      { flag: "CONTEXT_MAP_AI", enabled: true },
+    ]);
+  }
 
   it("executes chat tools with the real user actor", async () => {
     const actor = {
@@ -267,6 +303,239 @@ describe("processConversationTurn", () => {
         }),
       ]),
     }));
+  });
+
+  it("adds sanitized context map page context without changing the visible user message", async () => {
+    const actor = {
+      kind: "user" as const,
+      user: {
+        id: "user-1",
+        email: "user@example.com",
+        displayName: "User",
+      },
+    };
+    chatMock.mockResolvedValueOnce({ content: "I know which map you are viewing." });
+
+    const { processConversationTurn } = await import("./conversation");
+    await processConversationTurn({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      userMessage: "yes, do it",
+      actor,
+      pageContext: {
+        surface: "context-map",
+        route: "/workspaces/ws-1/maps?view=map-1",
+        mapView: { id: "map-1", name: "CRNA Critical Path", viewType: "process" },
+        includeStale: false,
+        selectedObjectIds: ["step-1"],
+        selectedObjects: [{ id: "step-1", title: "Decision to proceed", objectType: "ProcessStep", status: "approved" }],
+        selectedRelationship: null,
+      },
+    });
+
+    expect(chatMock).toHaveBeenCalledWith(expect.objectContaining({
+      messages: expect.arrayContaining([
+        expect.objectContaining({
+          role: "system",
+          content: expect.stringContaining("CURRENT PAGE CONTEXT"),
+        }),
+        expect.objectContaining({
+          role: "user",
+          content: "yes, do it",
+        }),
+      ]),
+    }));
+  });
+
+  it("sanitizes context map page context before model use", async () => {
+    const { sanitizeConversationPageContext } = await import("./page-context");
+    const context = sanitizeConversationPageContext({
+      surface: "context-map",
+      route: `/workspaces/ws-1/maps?${"x".repeat(400)}`,
+      mapView: { id: "map-1", name: "CRNA Critical Path", viewType: "process" },
+      selectedObjectIds: Array.from({ length: 20 }, (_, index) => `step-${index}`),
+      selectedObjects: [{
+        id: "step-1",
+        title: "Decision to proceed",
+        objectType: "ProcessStep",
+        status: "approved",
+        summary: "This should not be carried into page context.",
+      }],
+      selectedRelationship: null,
+    });
+
+    expect(context?.route?.length).toBe(240);
+    expect(context?.selectedObjectIds).toHaveLength(12);
+    expect(context?.selectedObjects[0]).toEqual({
+      id: "step-1",
+      title: "Decision to proceed",
+      objectType: "ProcessStep",
+      status: "approved",
+    });
+  });
+
+  it("does not expose context map tools when the premium AI flag is disabled", async () => {
+    const actor = {
+      kind: "user" as const,
+      user: {
+        id: "user-1",
+        email: "user@example.com",
+        displayName: "User",
+      },
+    };
+    chatMock.mockResolvedValueOnce({ content: "Context map AI is not enabled." });
+
+    const { processConversationTurn } = await import("./conversation");
+    await processConversationTurn({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      userMessage: "Update this map",
+      actor,
+    });
+
+    const tools = chatMock.mock.calls[0]?.[0]?.tools ?? [];
+    const toolNames = tools.map((tool: any) => tool.function.name);
+    expect(toolNames).not.toContain("get_context_map_info");
+    expect(toolNames).not.toContain("apply_context_map_diff");
+  });
+
+  it("exposes context map tools and merge guidance when the premium AI flag is enabled", async () => {
+    enableContextMapAi();
+    const actor = {
+      kind: "user" as const,
+      user: {
+        id: "user-1",
+        email: "user@example.com",
+        displayName: "User",
+      },
+    };
+    chatMock.mockResolvedValueOnce({ content: "I can work with this map." });
+
+    const { processConversationTurn } = await import("./conversation");
+    await processConversationTurn({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      userMessage: "Merge these two process steps",
+      actor,
+    });
+
+    const firstCall = chatMock.mock.calls[0]?.[0];
+    const toolNames = (firstCall.tools ?? []).map((tool: any) => tool.function.name);
+    expect(toolNames).toContain("get_context_map_info");
+    expect(toolNames).toContain("apply_context_map_diff");
+    expect(firstCall.messages).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        role: "system",
+        content: expect.stringContaining("For merge requests, ask which item survives if unclear"),
+      }),
+    ]));
+  });
+
+  it("applies context map diffs through the audited proposed-diff path", async () => {
+    enableContextMapAi();
+    const actor = {
+      kind: "user" as const,
+      user: {
+        id: "user-1",
+        email: "user@example.com",
+        displayName: "User",
+      },
+    };
+    chatMock
+      .mockResolvedValueOnce({
+        content: "",
+        tool_calls: [{
+          id: "call-1",
+          function: {
+            name: "apply_context_map_diff",
+            arguments: JSON.stringify({
+              reason: "Merge duplicate steps",
+              diff: {
+                objectUpdates: [
+                  { id: "step-1", title: "Decision to proceed" },
+                  { id: "step-2", status: "archived" },
+                ],
+              },
+            }),
+          },
+        }],
+      })
+      .mockResolvedValueOnce({ content: "Applied the map change." });
+
+    const { processConversationTurn } = await import("./conversation");
+    const result = await processConversationTurn({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      userMessage: "yes, do it",
+      actor,
+    });
+
+    expect(createContextGraphProposedDiffMock).toHaveBeenCalledWith(actor, expect.objectContaining({
+      workspaceId: "ws-1",
+      reason: "Merge duplicate steps",
+      diff: expect.objectContaining({
+        objectUpdates: expect.any(Array),
+      }),
+    }));
+    expect(applyContextGraphProposedDiffMock).toHaveBeenCalledWith(actor, {
+      workspaceId: "ws-1",
+      proposedDiffId: "diff-1",
+    });
+    expect(result.assistantMessage).toBe("Applied the map change.");
+  });
+
+  it("leaves a pending context map diff when direct apply lacks approval permission", async () => {
+    enableContextMapAi();
+    applyContextGraphProposedDiffMock.mockRejectedValueOnce(Object.assign(new Error("Forbidden"), {
+      status: 403,
+      code: "FORBIDDEN",
+    }));
+    const actor = {
+      kind: "user" as const,
+      user: {
+        id: "user-1",
+        email: "user@example.com",
+        displayName: "User",
+      },
+    };
+    chatMock
+      .mockResolvedValueOnce({
+        content: "",
+        tool_calls: [{
+          id: "call-1",
+          function: {
+            name: "apply_context_map_diff",
+            arguments: JSON.stringify({
+              diff: {
+                objectUpdates: [{ id: "step-1", title: "Decision to proceed" }],
+              },
+            }),
+          },
+        }],
+      })
+      .mockResolvedValueOnce({ content: "I created a pending change for approval." });
+
+    const { processConversationTurn } = await import("./conversation");
+    await processConversationTurn({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      userMessage: "do it",
+      actor,
+    });
+
+    const toolMessage = chatMock.mock.calls[1]?.[0]?.messages.find((message: any) => message.role === "tool");
+    expect(toolMessage.content).toContain("approval_required");
+    expect(createContextGraphProposedDiffMock).toHaveBeenCalled();
   });
 
   it("rechecks budget before a tool-followup model call", async () => {
