@@ -57,6 +57,51 @@
   gap: 8px;
 }
 
+.context-map-add-wrapper {
+  position: relative;
+}
+
+.context-map-palette {
+  position: absolute;
+  z-index: 60;
+  top: calc(100% + 8px);
+  left: 0;
+  display: grid;
+  gap: 4px;
+  min-width: 170px;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-strong);
+  box-shadow: var(--shadow-lg);
+}
+
+.context-map-palette button,
+.context-map-menu button,
+.context-map-relation-grid button {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  min-height: 32px;
+  width: 100%;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.8rem;
+  font-weight: 750;
+  padding: 7px 9px;
+  text-align: left;
+}
+
+.context-map-palette button:hover,
+.context-map-menu button:hover,
+.context-map-relation-grid button:hover {
+  background: var(--bg-alt);
+}
+
 .context-map-view-select {
   display: flex;
   align-items: center;
@@ -139,6 +184,91 @@
     var(--bg);
 }
 
+.context-map-menu {
+  position: fixed;
+  z-index: 3000;
+  display: grid;
+  gap: 4px;
+  min-width: 190px;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-strong);
+  box-shadow: var(--shadow-lg);
+}
+
+.context-map-menu-danger {
+  color: var(--danger) !important;
+}
+
+.context-map-floating-panel {
+  position: fixed;
+  z-index: 2990;
+  top: 50%;
+  left: 50%;
+  display: grid;
+  gap: 12px;
+  width: min(360px, calc(100vw - 32px));
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-strong);
+  box-shadow: var(--shadow-lg);
+  transform: translate(-50%, -50%);
+}
+
+.context-map-floating-panel > div:first-child {
+  display: grid;
+  gap: 2px;
+}
+
+.context-map-floating-panel label {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.context-map-floating-panel input {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.86rem;
+  padding: 8px 9px;
+}
+
+.context-map-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.context-map-relation-grid {
+  display: grid;
+  gap: 5px;
+}
+
+.context-map-connect-hint {
+  position: fixed;
+  z-index: 2950;
+  left: 50%;
+  bottom: 28px;
+  padding: 8px 12px;
+  border: 1px solid color-mix(in srgb, var(--accent) 26%, var(--line));
+  border-radius: var(--radius-full);
+  background: var(--surface-strong);
+  color: var(--accent);
+  font-size: 0.8rem;
+  font-weight: 800;
+  box-shadow: var(--shadow-md);
+  transform: translateX(-50%);
+}
+
 .context-map-shell--fullscreen .context-map-stage {
   height: calc(100dvh - 108px);
   min-height: 0;
@@ -196,13 +326,39 @@
   box-shadow: 0 12px 26px rgba(15, 23, 42, 0.1);
 }
 
+.context-map-node-card--standard {
+  border-color: color-mix(in srgb, var(--node-border) 72%, var(--line));
+}
+
+.context-map-node-card--alert {
+  border-color: color-mix(in srgb, var(--danger) 58%, var(--node-border));
+  border-left-color: var(--danger);
+  background: color-mix(in srgb, #fef2f2 78%, var(--node-bg));
+}
+
+.context-map-node-card--preview {
+  border-style: dashed;
+  box-shadow: 0 10px 24px rgba(202, 138, 4, 0.16);
+}
+
 .context-map-node-handle {
-  width: 1px;
-  height: 1px;
-  border: 0;
-  background: transparent;
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--surface-strong);
+  background: var(--accent);
   opacity: 0;
-  pointer-events: none;
+  transition: opacity 0.14s ease, transform 0.14s ease;
+}
+
+.context-map-node-handle--target {
+  background: #64748b;
+}
+
+.react-flow__node:hover .context-map-node-handle,
+.react-flow__node.selected .context-map-node-handle,
+.context-map-flow-node--selected .context-map-node-handle {
+  opacity: 1;
+  transform: scale(1.05);
 }
 
 .context-map-node-card strong {
@@ -261,6 +417,26 @@
   text-align: center;
   text-transform: none;
   white-space: nowrap;
+}
+
+.context-map-flow-edge-label--blocks {
+  border-color: color-mix(in srgb, var(--danger) 40%, rgba(148, 163, 184, 0.36));
+  color: var(--danger);
+}
+
+.context-map-flow-edge-label--depends_on {
+  border-color: color-mix(in srgb, #0f766e 36%, rgba(148, 163, 184, 0.36));
+  color: #0f766e;
+}
+
+.context-map-flow-edge-label--needs_approval_from {
+  border-color: color-mix(in srgb, var(--warning) 44%, rgba(148, 163, 184, 0.36));
+  color: var(--warning);
+}
+
+.context-map-flow-edge-label--preview {
+  border-style: dashed;
+  background: color-mix(in srgb, #fff7ed 92%, white);
 }
 
 .context-map-status {

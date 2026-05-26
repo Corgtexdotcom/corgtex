@@ -149,9 +149,19 @@ type ContextMapLayoutItemInput = {
   visualState?: JsonRecord;
 };
 
+type ContextMapProposedLayoutItemInput = {
+  objectId?: string;
+  objectRef?: string;
+  x: number;
+  y: number;
+  width?: number | null;
+  height?: number | null;
+  visualState?: JsonRecord;
+};
+
 type ContextMapLayoutUpdateInput = {
   mapViewId: string;
-  items: ContextMapLayoutItemInput[];
+  items: ContextMapProposedLayoutItemInput[];
 };
 
 type ContextMapImportLayoutItemInput = {
@@ -217,6 +227,31 @@ export type ContextMapChangeProposalResult = {
   status: string;
   createdAt: Date;
   diffJson: unknown;
+};
+
+export type ContextMapManualCardKind = "standard" | "alert";
+export type ContextMapManualRelationIntent = "enables" | "blocks" | "supports" | "needs_approval_from";
+
+export type ContextMapManualEditInput = {
+  action: "add-card";
+  cardKind: ContextMapManualCardKind;
+  title: string;
+  position: { x: number; y: number };
+  sourceObjectId?: string | null;
+  relationIntent?: ContextMapManualRelationIntent | null;
+} | {
+  action: "add-connection";
+  sourceObjectId: string;
+  targetObjectId: string;
+  relationIntent: ContextMapManualRelationIntent;
+} | {
+  action: "update-connection";
+  relationshipId: string;
+  relationIntent?: ContextMapManualRelationIntent | null;
+  archive?: boolean;
+} | {
+  action: "archive-card";
+  objectId: string;
 };
 
 export type ContextGraphMapImportInput = {
@@ -700,11 +735,30 @@ function normalizeLayoutItem(item: ContextMapLayoutItemInput) {
   };
 }
 
+function validateProposedLayoutItem(input: ContextMapProposedLayoutItemInput) {
+  invariant(Boolean(input.objectId) !== Boolean(input.objectRef), 400, "INVALID_INPUT", "Map layout items must point to exactly one object id or object ref.");
+  invariant(Number.isFinite(input.x) && Number.isFinite(input.y), 400, "INVALID_INPUT", "Layout coordinates must be finite numbers.");
+}
+
+function layoutItemFromProposed(item: ContextMapProposedLayoutItemInput, refToObjectId: Map<string, string>) {
+  validateProposedLayoutItem(item);
+  const objectId = item.objectId?.trim() || (item.objectRef ? refToObjectId.get(item.objectRef) : undefined);
+  invariant(objectId, 400, "INVALID_INPUT", "Map layout item object ref was not found.");
+  return normalizeLayoutItem({
+    objectId,
+    x: item.x,
+    y: item.y,
+    width: item.width,
+    height: item.height,
+    visualState: item.visualState,
+  });
+}
+
 async function applyMapLayoutUpdateWithTx(
   tx: Prisma.TransactionClient,
   workspaceId: string,
   update: ContextMapLayoutUpdateInput,
-  options?: { actor?: AppActor; requireMasterOrOwner?: boolean },
+  options?: { actor?: AppActor; requireMasterOrOwner?: boolean; refToObjectId?: Map<string, string> },
 ) {
   invariant(update.mapViewId.trim().length > 0, 400, "INVALID_INPUT", "Map view id is required.");
   invariant(update.items.length > 0, 400, "INVALID_INPUT", "At least one layout item is required.");
@@ -724,7 +778,7 @@ async function applyMapLayoutUpdateWithTx(
   }
 
   for (const rawItem of update.items) {
-    const item = normalizeLayoutItem(rawItem);
+    const item = layoutItemFromProposed(rawItem, options?.refToObjectId ?? new Map());
     await resolveObjectId(tx, workspaceId, item.objectId);
     await tx.contextMapLayoutItem.upsert({
       where: {
@@ -1255,7 +1309,7 @@ function validateDiff(diff: unknown): asserts diff is ContextGraphDiffInput {
     invariant(layoutUpdate.items.length > 0, 400, "INVALID_INPUT", "At least one layout item is required.");
     for (const item of layoutUpdate.items) {
       invariant(isJsonRecord(item), 400, "INVALID_INPUT", "Map layout update items must be objects.");
-      normalizeLayoutItem(item as ContextMapLayoutItemInput);
+      validateProposedLayoutItem(item as ContextMapProposedLayoutItemInput);
     }
   }
 }
@@ -1454,6 +1508,7 @@ export async function applyContextGraphProposedDiff(actor: AppActor, params: {
       layoutUpdates.push(await applyMapLayoutUpdateWithTx(tx, params.workspaceId, layoutUpdate, {
         actor,
         requireMasterOrOwner: true,
+        refToObjectId,
       }));
     }
 
@@ -2150,6 +2205,251 @@ export async function createContextMapChangeProposal(actor: AppActor, params: {
   const proposedDiff = await createContextGraphProposedDiff(actor, {
     workspaceId: params.workspaceId,
     reason: mapChangeReason(targets.map((target) => target.title), instruction),
+    evidence,
+    diff,
+  });
+
+  return {
+    mode: "proposed",
+    proposedDiffId: proposedDiff.id,
+    reason: proposedDiff.reason,
+    status: proposedDiff.status,
+    createdAt: proposedDiff.createdAt,
+    diffJson: proposedDiff.diffJson,
+  };
+}
+
+function requireManualRelationIntent(value: string | null | undefined): ContextMapManualRelationIntent {
+  const intent = value?.trim();
+  invariant(
+    intent === "enables" || intent === "blocks" || intent === "supports" || intent === "needs_approval_from",
+    400,
+    "INVALID_INPUT",
+    "Choose a supported connection type.",
+  );
+  return intent;
+}
+
+function manualRelationshipInputForVisual(
+  intent: ContextMapManualRelationIntent,
+  visualSource: { objectId?: string; ref?: string },
+  visualTarget: { objectId?: string; ref?: string },
+): ContextGraphRelationshipInput {
+  const base = {
+    status: "proposed",
+    sourceEntityType: "ContextMapView",
+    properties: {
+      manualMapEdit: true,
+      relationIntent: intent,
+    },
+  } satisfies Partial<ContextGraphRelationshipInput>;
+
+  if (intent === "enables") {
+    return {
+      ...base,
+      relationshipType: "depends_on",
+      sourceObjectId: visualTarget.objectId,
+      sourceRef: visualTarget.ref,
+      targetObjectId: visualSource.objectId,
+      targetRef: visualSource.ref,
+    };
+  }
+
+  return {
+    ...base,
+    relationshipType: intent,
+    sourceObjectId: visualSource.objectId,
+    sourceRef: visualSource.ref,
+    targetObjectId: visualTarget.objectId,
+    targetRef: visualTarget.ref,
+  };
+}
+
+function manualRelationshipUpdateForVisual(
+  id: string,
+  intent: ContextMapManualRelationIntent,
+  visualSourceObjectId: string,
+  visualTargetObjectId: string,
+  existingProperties?: Prisma.JsonValue | null,
+): ContextGraphRelationshipUpdateInput {
+  const properties = {
+    ...jsonValueRecord(existingProperties),
+    manualMapEdit: true,
+    relationIntent: intent,
+  };
+
+  if (intent === "enables") {
+    return {
+      id,
+      relationshipType: "depends_on",
+      sourceObjectId: visualTargetObjectId,
+      targetObjectId: visualSourceObjectId,
+      properties,
+    };
+  }
+
+  return {
+    id,
+    relationshipType: intent,
+    sourceObjectId: visualSourceObjectId,
+    targetObjectId: visualTargetObjectId,
+    properties,
+  };
+}
+
+async function requireVisibleMapObject(workspaceId: string, mapView: { query: Prisma.JsonValue }, objectId: string, includeStale = false) {
+  const normalizedObjectId = requireStringField(objectId, "Context map object id is required.").trim();
+  invariant(normalizedObjectId.length > 0, 400, "INVALID_INPUT", "Context map object id is required.");
+  const object = await prisma.contextGraphObject.findFirst({
+    where: { AND: [objectWhereForMapView(workspaceId, mapView, includeStale), { id: normalizedObjectId }] },
+    select: { id: true, title: true, objectType: true },
+  });
+  invariant(object, 404, "NOT_FOUND", "Context graph object not found on this map.");
+  return object;
+}
+
+function manualEditReason(edit: ContextMapManualEditInput, title?: string | null) {
+  if (edit.action === "add-card") {
+    return `Manual map edit: add ${edit.cardKind === "alert" ? "alert card" : "standard card"}${title ? ` "${title}"` : ""}.`;
+  }
+  if (edit.action === "add-connection") {
+    return `Manual map edit: add ${edit.relationIntent.replace(/_/g, " ")} connection.`;
+  }
+  if (edit.action === "archive-card") return "Manual map edit: archive card.";
+  if (edit.archive) return "Manual map edit: archive connection.";
+  return `Manual map edit: change connection to ${edit.relationIntent?.replace(/_/g, " ") ?? "selected type"}.`;
+}
+
+export async function createContextMapManualEditProposal(actor: AppActor, params: {
+  workspaceId: string;
+  mapViewId: string;
+  includeStale?: boolean;
+  edit: ContextMapManualEditInput;
+}): Promise<Extract<ContextMapChangeProposalResult, { mode: "proposed" }>> {
+  await requireGraphPropose(actor, params.workspaceId);
+  const userId = actorUserId(actor);
+  const mapView = await prisma.contextMapView.findFirst({
+    where: { id: params.mapViewId, ...visibleMapViewWhere(params.workspaceId, userId) },
+  });
+  invariant(mapView, 404, "NOT_FOUND", "Context map not found.");
+
+  const edit = params.edit;
+  const diff: ContextGraphDiffInput = {};
+  const evidence: JsonRecord = {
+    kind: "context-map-manual-edit",
+    mapViewId: params.mapViewId,
+    action: edit.action,
+  };
+  let titleForReason: string | null = null;
+
+  if (edit.action === "add-card") {
+    const title = requireStringField(edit.title, "Card title is required.").trim();
+    invariant(title.length > 0, 400, "INVALID_INPUT", "Card title is required.");
+    invariant(Number.isFinite(edit.position.x) && Number.isFinite(edit.position.y), 400, "INVALID_INPUT", "Card position must be finite.");
+    titleForReason = title.slice(0, 120);
+    const ref = "manual-card";
+    const objectType: ContextGraphObjectType = edit.cardKind === "alert" ? "Risk" : "ProcessStep";
+    diff.objects = [{
+      ref,
+      objectType,
+      title: title.slice(0, 180),
+      summary: edit.cardKind === "alert"
+        ? "Manual alert card proposed from the context map."
+        : "Manual standard card proposed from the context map.",
+      status: "proposed",
+      properties: {
+        manualMapEdit: true,
+        cardKind: edit.cardKind,
+        contextMapDisplay: "canvas",
+        sourceMapViewId: params.mapViewId,
+        pathStage: edit.cardKind === "alert" ? "Alert" : "Manual",
+        workState: "needs_review",
+      },
+    }];
+    if (mapView.createdByUserId === null) {
+      diff.mapLayoutUpdates = [{
+        mapViewId: params.mapViewId,
+        items: [{
+          objectRef: ref,
+          x: edit.position.x,
+          y: edit.position.y,
+          width: 250,
+          height: 128,
+          visualState: {
+            manualMapEdit: true,
+            cardKind: edit.cardKind,
+          },
+        }],
+      }];
+    }
+
+    if (edit.sourceObjectId) {
+      await requireVisibleMapObject(params.workspaceId, mapView, edit.sourceObjectId, params.includeStale);
+      const intent = requireManualRelationIntent(edit.relationIntent ?? (edit.cardKind === "alert" ? "blocks" : "enables"));
+      diff.relationships = [intent === "blocks"
+        ? {
+          relationshipType: "blocks",
+          sourceRef: ref,
+          targetObjectId: edit.sourceObjectId,
+          status: "proposed",
+          sourceEntityType: "ContextMapView",
+          sourceEntityId: params.mapViewId,
+          properties: { manualMapEdit: true, relationIntent: intent },
+        }
+        : {
+          ...manualRelationshipInputForVisual(intent, { objectId: edit.sourceObjectId }, { ref }),
+          sourceEntityId: params.mapViewId,
+        }];
+    }
+  } else if (edit.action === "add-connection") {
+    invariant(edit.sourceObjectId !== edit.targetObjectId, 400, "INVALID_INPUT", "Choose two different map cards to connect.");
+    await requireVisibleMapObject(params.workspaceId, mapView, edit.sourceObjectId, params.includeStale);
+    await requireVisibleMapObject(params.workspaceId, mapView, edit.targetObjectId, params.includeStale);
+    const intent = requireManualRelationIntent(edit.relationIntent);
+    diff.relationships = [{
+      ...manualRelationshipInputForVisual(intent, { objectId: edit.sourceObjectId }, { objectId: edit.targetObjectId }),
+      sourceEntityId: params.mapViewId,
+    }];
+  } else if (edit.action === "archive-card") {
+    const object = await requireVisibleMapObject(params.workspaceId, mapView, edit.objectId, params.includeStale);
+    titleForReason = object.title;
+    diff.objectUpdates = [{ id: object.id, status: "archived" }];
+  } else {
+    const relationshipId = requireStringField(edit.relationshipId, "Connection id is required.").trim();
+    invariant(relationshipId.length > 0, 400, "INVALID_INPUT", "Connection id is required.");
+    const relationship = await prisma.contextGraphRelationship.findFirst({
+      where: { id: relationshipId, workspaceId: params.workspaceId },
+      select: {
+        id: true,
+        sourceObjectId: true,
+        targetObjectId: true,
+        relationshipType: true,
+        properties: true,
+      },
+    });
+    invariant(relationship, 404, "NOT_FOUND", "Context graph relationship not found.");
+    await requireVisibleMapObject(params.workspaceId, mapView, relationship.sourceObjectId, params.includeStale);
+    await requireVisibleMapObject(params.workspaceId, mapView, relationship.targetObjectId, params.includeStale);
+
+    if (edit.archive) {
+      diff.relationshipUpdates = [{ id: relationship.id, status: "archived" }];
+    } else {
+      const intent = requireManualRelationIntent(edit.relationIntent);
+      const visualSourceObjectId = relationship.relationshipType === "depends_on" ? relationship.targetObjectId : relationship.sourceObjectId;
+      const visualTargetObjectId = relationship.relationshipType === "depends_on" ? relationship.sourceObjectId : relationship.targetObjectId;
+      diff.relationshipUpdates = [manualRelationshipUpdateForVisual(
+        relationship.id,
+        intent,
+        visualSourceObjectId,
+        visualTargetObjectId,
+        relationship.properties,
+      )];
+    }
+  }
+
+  const proposedDiff = await createContextGraphProposedDiff(actor, {
+    workspaceId: params.workspaceId,
+    reason: manualEditReason(edit, titleForReason),
     evidence,
     diff,
   });
