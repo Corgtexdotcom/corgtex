@@ -43,6 +43,14 @@ type LoadedFlow = ApprovalFlow & {
 };
 
 const EXPIRING_FLOW_BATCH_SIZE = 25;
+const ACTIONABLE_APPROVAL_SCAN_LIMIT = 500;
+
+export type ActionableApprovalFlow = ApprovalFlow & {
+  decisions: Array<{
+    choice: ApprovalDecisionChoice;
+  }>;
+  subjectLabel: string;
+};
 
 export function buildDecisionSummary(decisions: Array<{ choice: ApprovalDecisionChoice }>): DecisionSummary {
   const summary: DecisionSummary = {
@@ -413,6 +421,142 @@ export async function ensureApprovalFlow(tx: Prisma.TransactionClient, params: {
       createdByUserId: params.createdByUserId ?? null,
     },
   });
+}
+
+async function activeApprovalFlowsForWorkspace(workspaceId: string, take = ACTIONABLE_APPROVAL_SCAN_LIMIT) {
+  return prisma.approvalFlow.findMany({
+    where: { workspaceId, status: "ACTIVE" },
+    include: {
+      decisions: {
+        select: {
+          choice: true,
+        },
+      },
+    },
+    orderBy: { createdAt: "desc" },
+    take,
+  });
+}
+
+export async function listActionableApprovalFlows(
+  actor: AppActor,
+  workspaceId: string,
+  opts?: { take?: number; skip?: number },
+) {
+  await requireWorkspaceMembership({ actor, workspaceId });
+
+  const flows = await activeApprovalFlowsForWorkspace(workspaceId);
+  const proposalIds = flows
+    .filter((flow) => flow.subjectType === "PROPOSAL")
+    .map((flow) => flow.subjectId);
+  const spendIds = flows
+    .filter((flow) => flow.subjectType === "SPEND")
+    .map((flow) => flow.subjectId);
+
+  const [proposals, spends] = await Promise.all([
+    proposalIds.length > 0
+      ? prisma.proposal.findMany({
+        where: { id: { in: proposalIds } },
+        select: { id: true, title: true, status: true, isPrivate: true, archivedAt: true },
+      })
+      : Promise.resolve([]),
+    spendIds.length > 0
+      ? prisma.spendRequest.findMany({
+        where: { id: { in: spendIds } },
+        select: { id: true, description: true, status: true, archivedAt: true },
+      })
+      : Promise.resolve([]),
+  ]);
+
+  const proposalById = new Map(proposals.map((proposal) => [proposal.id, proposal]));
+  const spendById = new Map(spends.map((spend) => [spend.id, spend]));
+  const actionable: ActionableApprovalFlow[] = [];
+
+  for (const flow of flows) {
+    if (flow.subjectType === "PROPOSAL") {
+      const proposal = proposalById.get(flow.subjectId);
+      if (!proposal || proposal.archivedAt || proposal.status !== "OPEN" || proposal.isPrivate) {
+        continue;
+      }
+      actionable.push({ ...flow, subjectLabel: proposal.title });
+    } else if (flow.subjectType === "SPEND") {
+      const spend = spendById.get(flow.subjectId);
+      if (!spend || spend.archivedAt || spend.status !== "OPEN") {
+        continue;
+      }
+      actionable.push({ ...flow, subjectLabel: spend.description });
+    }
+  }
+
+  const skip = opts?.skip ?? 0;
+  const take = opts?.take ?? 20;
+
+  return {
+    items: actionable.slice(skip, skip + take),
+    total: actionable.length,
+    take,
+    skip,
+  };
+}
+
+export async function withdrawActiveApprovalFlowForSubject(tx: Prisma.TransactionClient, params: {
+  workspaceId: string;
+  subjectType: string;
+  subjectId: string;
+  cleanupReason: string;
+  actorUserId?: string | null;
+  now?: Date;
+}) {
+  const flow = await tx.approvalFlow.findFirst({
+    where: {
+      workspaceId: params.workspaceId,
+      subjectType: params.subjectType,
+      subjectId: params.subjectId,
+      status: "ACTIVE",
+    },
+    select: {
+      id: true,
+      workspaceId: true,
+      subjectType: true,
+      subjectId: true,
+    },
+  });
+
+  if (!flow) {
+    return null;
+  }
+
+  const closedAt = params.now ?? new Date();
+  await tx.approvalFlow.update({
+    where: { id: flow.id },
+    data: {
+      status: "WITHDRAWN",
+      closedAt,
+      resultJson: {
+        cleanupReason: params.cleanupReason,
+        subjectType: params.subjectType,
+        subjectId: params.subjectId,
+        withdrawnAt: closedAt.toISOString(),
+      } as Prisma.InputJsonValue,
+    },
+  });
+
+  await tx.auditLog.create({
+    data: {
+      workspaceId: params.workspaceId,
+      actorUserId: params.actorUserId ?? null,
+      action: "approval.withdrawn",
+      entityType: "ApprovalFlow",
+      entityId: flow.id,
+      meta: {
+        cleanupReason: params.cleanupReason,
+        subjectType: params.subjectType,
+        subjectId: params.subjectId,
+      },
+    },
+  });
+
+  return flow;
 }
 
 export async function recordApprovalDecision(actor: AppActor, params: {

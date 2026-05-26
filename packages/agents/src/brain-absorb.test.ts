@@ -78,6 +78,8 @@ describe("absorbSource", () => {
         summary: "Launch context",
       },
     });
+    modelGatewayMock.chat.mockResolvedValue({ content: "## Launch notes\n\nLaunch context." });
+    createArticleMock.mockResolvedValue({ id: "article-created", slug: "launch-notes" });
     rebuildBacklinksMock.mockResolvedValue(undefined);
     markSourceAbsorbedMock.mockResolvedValue(undefined);
   });
@@ -97,7 +99,7 @@ describe("absorbSource", () => {
     }));
   });
 
-  it("skips non-draft article updates without failing the run", async () => {
+  it("creates a public reference recap when document sources match non-draft articles", async () => {
     prismaMock.brainArticle.findMany.mockResolvedValue([
       {
         id: "article-1",
@@ -127,12 +129,19 @@ describe("absorbSource", () => {
     });
 
     expect(result).toEqual(expect.objectContaining({
-      skipped: true,
-      reason: "non_draft_article",
+      absorbed: true,
       skippedSlugs: ["launch"],
+      createdSlug: "launch-notes",
+      touchedArticleCount: 1,
     }));
-    expect(modelGatewayMock.chat).not.toHaveBeenCalled();
     expect(updateArticleMock).not.toHaveBeenCalled();
-    expect(markSourceAbsorbedMock).not.toHaveBeenCalled();
+    expect(createArticleMock).toHaveBeenCalledWith(expect.objectContaining({ label: "brain-absorb" }), expect.objectContaining({
+      workspaceId: "workspace-1",
+      slug: "launch-notes",
+      title: "Launch notes",
+      authority: "REFERENCE",
+      sourceIds: ["source-1"],
+    }));
+    expect(markSourceAbsorbedMock).toHaveBeenCalledWith(expect.objectContaining({ label: "brain-absorb" }), { sourceId: "source-1" });
   });
 });

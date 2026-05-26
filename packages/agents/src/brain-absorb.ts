@@ -11,6 +11,29 @@ import { syncBrainArticleKnowledge } from "@corgtex/knowledge";
 import type { AppActor } from "@corgtex/shared";
 import type { BrainArticleType } from "@prisma/client";
 
+function isDocumentLikeSource(sourceType: string) {
+  return sourceType === "DOC" || sourceType === "FILE_UPLOAD";
+}
+
+function slugify(value: string, fallback: string) {
+  const slug = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 72);
+  return slug || fallback;
+}
+
+function uniqueSlug(base: string, existingSlugs: Set<string>) {
+  if (!existingSlugs.has(base)) return base;
+  for (let index = 2; index < 100; index += 1) {
+    const candidate = `${base}-${index}`;
+    if (!existingSlugs.has(candidate)) return candidate;
+  }
+  return `${base}-${Date.now()}`;
+}
+
 /**
  * Core absorption logic — called by the agent runtime.
  *
@@ -111,9 +134,11 @@ Determine:
   const articleType = (result.articleType ?? "GLOSSARY") as BrainArticleType;
   const updateSlugs = Array.isArray(result.updateSlugs) ? result.updateSlugs : [];
   const createNew = result.createNew && typeof result.createNew === "object" ? result.createNew : null;
+  const documentLikeSource = isDocumentLikeSource(source.sourceType);
 
   const touchedArticleIds: string[] = [];
   const skippedNonDraftSlugs: string[] = [];
+  let createdArticleSlug: string | null = null;
 
   // Step 2: Update existing articles
   for (const slug of updateSlugs) {
@@ -209,13 +234,73 @@ Rules:
         slug: createNew.slug,
         title: createNew.title,
         type: articleType,
-        authority: source.tier === 1 ? "REFERENCE" : "DRAFT",
+        authority: source.tier === 1 || documentLikeSource ? "REFERENCE" : "DRAFT",
         bodyMd: drafted.content,
         sourceIds: [source.id],
       });
 
       touchedArticleIds.push(article.id);
+      createdArticleSlug = createNew.slug;
     }
+  }
+
+  if (documentLikeSource && touchedArticleIds.length === 0) {
+    const fallbackTitle = source.title?.trim() || createNew?.title?.trim() || "Uploaded knowledge source";
+    const existingSlugs = new Set(articles.map((article) => article.slug));
+    const baseSlug = slugify(createNew?.slug || fallbackTitle, "uploaded-knowledge-source");
+    const slug = uniqueSlug(baseSlug, existingSlugs);
+    const drafted = await defaultModelGateway.chat({
+      model,
+      workspaceId: params.workspaceId,
+      agentRunId: params.agentRunId,
+      taskType: "AGENT",
+      messages: [
+        {
+          role: "system",
+          content: `Create a concise public reference article from an uploaded source.
+
+Rules:
+- Keep authoritative existing articles unchanged
+- Summarize only what the source supports
+- Use a neutral wiki style
+- Include why this source matters to the organization when the source makes that clear
+- Keep it short enough to be useful on a dashboard excerpt`,
+        },
+        {
+          role: "user",
+          content: JSON.stringify({
+            title: fallbackTitle,
+            sourceContent: source.content.slice(0, 4000),
+            ingestionGuidanceMd: source.ingestionGuidanceMd,
+            skippedExistingArticles: skippedNonDraftSlugs,
+            summary: result.summary ?? null,
+          }),
+        },
+      ],
+    });
+
+    const article = await createArticle(agentActor, {
+      workspaceId: params.workspaceId,
+      slug,
+      title: fallbackTitle,
+      type: articleType,
+      authority: "REFERENCE",
+      bodyMd: drafted.content,
+      sourceIds: [source.id],
+    });
+
+    touchedArticleIds.push(article.id);
+    createdArticleSlug = slug;
+  }
+
+  if (touchedArticleIds.length === 0 && skippedNonDraftSlugs.length > 0) {
+    return {
+      skipped: true,
+      reason: "non_draft_article",
+      sourceId: source.id,
+      skippedSlugs: skippedNonDraftSlugs,
+      summary: result.summary ?? null,
+    };
   }
 
   // --- Cascading updates ---
@@ -321,16 +406,6 @@ Rules:
   // Step 5: Rebuild backlinks
   await rebuildBacklinks(agentActor, { workspaceId: params.workspaceId });
 
-  if (touchedArticleIds.length === 0 && skippedNonDraftSlugs.length > 0) {
-    return {
-      skipped: true,
-      reason: "non_draft_article",
-      sourceId: source.id,
-      skippedSlugs: skippedNonDraftSlugs,
-      summary: result.summary ?? null,
-    };
-  }
-
   // Step 6: Mark source absorbed
   await markSourceAbsorbed(agentActor, { sourceId: source.id });
 
@@ -338,7 +413,7 @@ Rules:
     absorbed: true,
     sourceId: source.id,
     updatedSlugs: updateSlugs,
-    createdSlug: createNew?.slug ?? null,
+    createdSlug: createdArticleSlug,
     touchedArticleCount: touchedArticleIds.length,
     skippedSlugs: skippedNonDraftSlugs,
     summary: result.summary ?? null,

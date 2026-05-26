@@ -14,6 +14,10 @@ const { prismaMock, storageDeleteMock } = vi.hoisted(() => {
       update: vi.fn(),
       delete: vi.fn(),
     },
+    approvalFlow: {
+      findFirst: vi.fn(),
+      update: vi.fn(),
+    },
     spendRequest: {
       findFirst: vi.fn(),
       count: vi.fn(),
@@ -84,6 +88,8 @@ describe("workspace archive domain", () => {
     vi.clearAllMocks();
     prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof prismaMock) => Promise<unknown>) => callback(prismaMock));
     prismaMock.auditLog.create.mockResolvedValue({});
+    prismaMock.approvalFlow.findFirst.mockResolvedValue(null);
+    prismaMock.approvalFlow.update.mockResolvedValue({});
     prismaMock.workspaceArchiveRecord.create.mockResolvedValue({});
     prismaMock.workspaceArchiveRecord.update.mockResolvedValue({});
   });
@@ -157,6 +163,40 @@ describe("workspace archive domain", () => {
         status: "RESOLVED",
       }),
     }));
+  });
+
+  it("withdraws active proposal approval flows when proposals are archived", async () => {
+    const proposal = {
+      id: "proposal-1",
+      workspaceId: "workspace-1",
+      title: "Proposal",
+      archivedAt: null,
+      status: "OPEN",
+    };
+    prismaMock.proposal.findFirst.mockResolvedValue(proposal);
+    prismaMock.proposal.update.mockResolvedValue({ ...proposal, archivedAt: new Date("2026-04-25T12:00:00.000Z") });
+    prismaMock.approvalFlow.findFirst.mockResolvedValue({
+      id: "flow-1",
+      workspaceId: "workspace-1",
+      subjectType: "PROPOSAL",
+      subjectId: "proposal-1",
+    });
+
+    const { archiveWorkspaceArtifact } = await import("./archive");
+    await expect(archiveWorkspaceArtifact(actor, {
+      workspaceId: "workspace-1",
+      entityType: "Proposal",
+      entityId: "proposal-1",
+      reason: "obsolete",
+    })).resolves.toMatchObject({ id: "proposal-1" });
+
+    expect(prismaMock.approvalFlow.update).toHaveBeenCalledWith({
+      where: { id: "flow-1" },
+      data: expect.objectContaining({
+        status: "WITHDRAWN",
+        resultJson: expect.objectContaining({ cleanupReason: "Proposal archived" }),
+      }),
+    });
   });
 
   it("refuses to purge submitted spend requests", async () => {

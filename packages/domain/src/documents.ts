@@ -23,7 +23,7 @@ export async function createDocument(actor: AppActor, params: {
   textContent?: string | null;
   metadata?: Prisma.InputJsonValue;
 }) {
-  await requireWorkspaceMembership({
+  const membership = await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
   });
@@ -31,6 +31,7 @@ export async function createDocument(actor: AppActor, params: {
   const title = params.title.trim();
   const source = params.source.trim();
   const storageKey = params.storageKey.trim();
+  const textContent = params.textContent?.trim() || null;
 
   invariant(title.length > 0, 400, "INVALID_INPUT", "Document title is required.");
   invariant(source.length > 0, 400, "INVALID_INPUT", "Document source is required.");
@@ -49,7 +50,7 @@ export async function createDocument(actor: AppActor, params: {
         source,
         storageKey,
         mimeType: params.mimeType?.trim() || null,
-        textContent: params.textContent?.trim() || null,
+        textContent,
         ...(params.metadata === undefined ? {} : { metadata: params.metadata }),
       },
     });
@@ -68,7 +69,7 @@ export async function createDocument(actor: AppActor, params: {
       },
     });
 
-    await appendEvents(tx, [
+    const events: Parameters<typeof appendEvents>[1] = [
       {
         workspaceId: params.workspaceId,
         type: "document.created",
@@ -80,7 +81,51 @@ export async function createDocument(actor: AppActor, params: {
           source: document.source,
         },
       },
-    ]);
+    ];
+
+    if (textContent) {
+      const brainSource = await tx.brainSource.create({
+        data: {
+          workspaceId: params.workspaceId,
+          sourceType: "DOC",
+          tier: 2,
+          title,
+          content: [title, textContent].join("\n\n"),
+          authorMemberId: actor.kind === "user" ? membership?.id ?? null : null,
+          channel: source,
+          metadata: {
+            documentId: document.id,
+            storageKey,
+            mimeType: params.mimeType?.trim() || null,
+          } as Prisma.InputJsonValue,
+        },
+      });
+
+      await tx.auditLog.create({
+        data: {
+          workspaceId: params.workspaceId,
+          actorUserId: actor.kind === "user" ? actor.user.id : null,
+          action: "brain-source.created",
+          entityType: "BrainSource",
+          entityId: brainSource.id,
+          meta: {
+            sourceType: brainSource.sourceType,
+            tier: brainSource.tier,
+            documentId: document.id,
+          },
+        },
+      });
+
+      events.push({
+        workspaceId: params.workspaceId,
+        type: "brain-source.created",
+        aggregateType: "BrainSource",
+        aggregateId: brainSource.id,
+        payload: { sourceId: brainSource.id },
+      });
+    }
+
+    await appendEvents(tx, events);
 
     return document;
   });
