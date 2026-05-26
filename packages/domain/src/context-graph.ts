@@ -2270,17 +2270,21 @@ function manualRelationshipUpdateForVisual(
   intent: ContextMapManualRelationIntent,
   visualSourceObjectId: string,
   visualTargetObjectId: string,
+  existingProperties?: Prisma.JsonValue | null,
 ): ContextGraphRelationshipUpdateInput {
+  const properties = {
+    ...jsonValueRecord(existingProperties),
+    manualMapEdit: true,
+    relationIntent: intent,
+  };
+
   if (intent === "enables") {
     return {
       id,
       relationshipType: "depends_on",
       sourceObjectId: visualTargetObjectId,
       targetObjectId: visualSourceObjectId,
-      properties: {
-        manualMapEdit: true,
-        relationIntent: intent,
-      },
+      properties,
     };
   }
 
@@ -2289,18 +2293,15 @@ function manualRelationshipUpdateForVisual(
     relationshipType: intent,
     sourceObjectId: visualSourceObjectId,
     targetObjectId: visualTargetObjectId,
-    properties: {
-      manualMapEdit: true,
-      relationIntent: intent,
-    },
+    properties,
   };
 }
 
-async function requireVisibleMapObject(workspaceId: string, mapView: { query: Prisma.JsonValue }, objectId: string) {
+async function requireVisibleMapObject(workspaceId: string, mapView: { query: Prisma.JsonValue }, objectId: string, includeStale = false) {
   const normalizedObjectId = requireStringField(objectId, "Context map object id is required.").trim();
   invariant(normalizedObjectId.length > 0, 400, "INVALID_INPUT", "Context map object id is required.");
   const object = await prisma.contextGraphObject.findFirst({
-    where: { AND: [objectWhereForMapView(workspaceId, mapView, false), { id: normalizedObjectId }] },
+    where: { AND: [objectWhereForMapView(workspaceId, mapView, includeStale), { id: normalizedObjectId }] },
     select: { id: true, title: true, objectType: true },
   });
   invariant(object, 404, "NOT_FOUND", "Context graph object not found on this map.");
@@ -2322,6 +2323,7 @@ function manualEditReason(edit: ContextMapManualEditInput, title?: string | null
 export async function createContextMapManualEditProposal(actor: AppActor, params: {
   workspaceId: string;
   mapViewId: string;
+  includeStale?: boolean;
   edit: ContextMapManualEditInput;
 }): Promise<Extract<ContextMapChangeProposalResult, { mode: "proposed" }>> {
   await requireGraphPropose(actor, params.workspaceId);
@@ -2364,23 +2366,25 @@ export async function createContextMapManualEditProposal(actor: AppActor, params
         workState: "needs_review",
       },
     }];
-    diff.mapLayoutUpdates = [{
-      mapViewId: params.mapViewId,
-      items: [{
-        objectRef: ref,
-        x: edit.position.x,
-        y: edit.position.y,
-        width: 250,
-        height: 128,
-        visualState: {
-          manualMapEdit: true,
-          cardKind: edit.cardKind,
-        },
-      }],
-    }];
+    if (mapView.createdByUserId === null) {
+      diff.mapLayoutUpdates = [{
+        mapViewId: params.mapViewId,
+        items: [{
+          objectRef: ref,
+          x: edit.position.x,
+          y: edit.position.y,
+          width: 250,
+          height: 128,
+          visualState: {
+            manualMapEdit: true,
+            cardKind: edit.cardKind,
+          },
+        }],
+      }];
+    }
 
     if (edit.sourceObjectId) {
-      await requireVisibleMapObject(params.workspaceId, mapView, edit.sourceObjectId);
+      await requireVisibleMapObject(params.workspaceId, mapView, edit.sourceObjectId, params.includeStale);
       const intent = requireManualRelationIntent(edit.relationIntent ?? (edit.cardKind === "alert" ? "blocks" : "enables"));
       diff.relationships = [intent === "blocks"
         ? {
@@ -2399,15 +2403,15 @@ export async function createContextMapManualEditProposal(actor: AppActor, params
     }
   } else if (edit.action === "add-connection") {
     invariant(edit.sourceObjectId !== edit.targetObjectId, 400, "INVALID_INPUT", "Choose two different map cards to connect.");
-    await requireVisibleMapObject(params.workspaceId, mapView, edit.sourceObjectId);
-    await requireVisibleMapObject(params.workspaceId, mapView, edit.targetObjectId);
+    await requireVisibleMapObject(params.workspaceId, mapView, edit.sourceObjectId, params.includeStale);
+    await requireVisibleMapObject(params.workspaceId, mapView, edit.targetObjectId, params.includeStale);
     const intent = requireManualRelationIntent(edit.relationIntent);
     diff.relationships = [{
       ...manualRelationshipInputForVisual(intent, { objectId: edit.sourceObjectId }, { objectId: edit.targetObjectId }),
       sourceEntityId: params.mapViewId,
     }];
   } else if (edit.action === "archive-card") {
-    const object = await requireVisibleMapObject(params.workspaceId, mapView, edit.objectId);
+    const object = await requireVisibleMapObject(params.workspaceId, mapView, edit.objectId, params.includeStale);
     titleForReason = object.title;
     diff.objectUpdates = [{ id: object.id, status: "archived" }];
   } else {
@@ -2420,11 +2424,12 @@ export async function createContextMapManualEditProposal(actor: AppActor, params
         sourceObjectId: true,
         targetObjectId: true,
         relationshipType: true,
+        properties: true,
       },
     });
     invariant(relationship, 404, "NOT_FOUND", "Context graph relationship not found.");
-    await requireVisibleMapObject(params.workspaceId, mapView, relationship.sourceObjectId);
-    await requireVisibleMapObject(params.workspaceId, mapView, relationship.targetObjectId);
+    await requireVisibleMapObject(params.workspaceId, mapView, relationship.sourceObjectId, params.includeStale);
+    await requireVisibleMapObject(params.workspaceId, mapView, relationship.targetObjectId, params.includeStale);
 
     if (edit.archive) {
       diff.relationshipUpdates = [{ id: relationship.id, status: "archived" }];
@@ -2432,7 +2437,13 @@ export async function createContextMapManualEditProposal(actor: AppActor, params
       const intent = requireManualRelationIntent(edit.relationIntent);
       const visualSourceObjectId = relationship.relationshipType === "depends_on" ? relationship.targetObjectId : relationship.sourceObjectId;
       const visualTargetObjectId = relationship.relationshipType === "depends_on" ? relationship.sourceObjectId : relationship.targetObjectId;
-      diff.relationshipUpdates = [manualRelationshipUpdateForVisual(relationship.id, intent, visualSourceObjectId, visualTargetObjectId)];
+      diff.relationshipUpdates = [manualRelationshipUpdateForVisual(
+        relationship.id,
+        intent,
+        visualSourceObjectId,
+        visualTargetObjectId,
+        relationship.properties,
+      )];
     }
   }
 

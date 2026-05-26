@@ -1408,6 +1408,41 @@ describe("context graph domain", () => {
     }));
   });
 
+  it("omits manual card layout updates for personal map views", async () => {
+    prismaMock.contextMapView.findFirst.mockResolvedValueOnce({
+      id: "personal-map-1",
+      workspaceId: "ws-1",
+      name: "My process map",
+      viewType: "process",
+      query: {},
+      createdByUserId: "user-1",
+    });
+    prismaMock.contextGraphProposedDiff.create.mockResolvedValueOnce({
+      id: "diff-personal-card-1",
+      status: "pending",
+      reason: "Manual map edit: add standard card \"Personal card\".",
+      createdAt: new Date("2026-05-26T12:00:00.000Z"),
+      diffJson: {},
+    });
+
+    await createContextMapManualEditProposal(actor, {
+      workspaceId: "ws-1",
+      mapViewId: "personal-map-1",
+      edit: {
+        action: "add-card",
+        cardKind: "standard",
+        title: "Personal card",
+        position: { x: 180, y: 90 },
+      },
+    });
+
+    const diffJson = prismaMock.contextGraphProposedDiff.create.mock.calls[0]?.[0]?.data?.diffJson;
+    expect(diffJson).toEqual(expect.objectContaining({
+      objects: [expect.objectContaining({ ref: "manual-card", objectType: "ProcessStep" })],
+    }));
+    expect(diffJson).not.toHaveProperty("mapLayoutUpdates");
+  });
+
   it("creates a manual alert blocker proposal connected to an existing node", async () => {
     prismaMock.contextGraphObject.findFirst.mockResolvedValueOnce({
       id: "step-1",
@@ -1526,6 +1561,48 @@ describe("context graph domain", () => {
     }));
   });
 
+  it("validates manual connections against stale-visible map objects when requested", async () => {
+    prismaMock.contextGraphObject.findFirst
+      .mockResolvedValueOnce({ id: "stale-a", title: "Stale A", objectType: "ProcessStep" })
+      .mockResolvedValueOnce({ id: "stale-b", title: "Stale B", objectType: "ProcessStep" });
+    prismaMock.contextGraphProposedDiff.create.mockResolvedValueOnce({
+      id: "diff-stale-connection-1",
+      status: "pending",
+      reason: "Manual map edit: add supports connection.",
+      createdAt: new Date("2026-05-26T12:00:00.000Z"),
+      diffJson: {},
+    });
+
+    await createContextMapManualEditProposal(actor, {
+      workspaceId: "ws-1",
+      mapViewId: "map-1",
+      includeStale: true,
+      edit: {
+        action: "add-connection",
+        sourceObjectId: "stale-a",
+        targetObjectId: "stale-b",
+        relationIntent: "supports",
+      },
+    });
+
+    expect(prismaMock.contextGraphObject.findFirst).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      where: {
+        AND: [
+          expect.objectContaining({ status: { not: "archived" } }),
+          { id: "stale-a" },
+        ],
+      },
+    }));
+    expect(prismaMock.contextGraphObject.findFirst).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      where: {
+        AND: [
+          expect.objectContaining({ status: { not: "archived" } }),
+          { id: "stale-b" },
+        ],
+      },
+    }));
+  });
+
   it("creates proposed relationship updates for archive and connection-type changes", async () => {
     prismaMock.contextGraphRelationship.findFirst
       .mockResolvedValueOnce({
@@ -1539,6 +1616,7 @@ describe("context graph domain", () => {
         sourceObjectId: "step-a",
         targetObjectId: "step-b",
         relationshipType: "supports",
+        properties: { provenance: "seed", workflowId: "workflow-1" },
       });
     prismaMock.contextGraphObject.findFirst
       .mockResolvedValueOnce({ id: "risk-1", title: "Risk", objectType: "Risk" })
@@ -1587,6 +1665,12 @@ describe("context graph domain", () => {
             relationshipType: "needs_approval_from",
             sourceObjectId: "step-a",
             targetObjectId: "step-b",
+            properties: expect.objectContaining({
+              provenance: "seed",
+              workflowId: "workflow-1",
+              manualMapEdit: true,
+              relationIntent: "needs_approval_from",
+            }),
           })],
         }),
       }),

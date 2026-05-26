@@ -144,6 +144,7 @@ export async function createContextMapChangeProposalAction(params: {
 export async function createContextMapManualEditProposalAction(params: {
   workspaceId: string;
   mapViewId: string;
+  includeStale?: boolean;
   edit: ContextMapManualEditInput;
 }) {
   const actor = await requirePageActor();

@@ -1626,6 +1626,7 @@ export default function ContextMapClient({
         const result = await createContextMapManualEditProposalAction({
           workspaceId,
           mapViewId: data.mapView.id,
+          includeStale,
           edit: {
             action: "add-card",
             cardKind: cardDraft.cardKind,
@@ -1661,6 +1662,7 @@ export default function ContextMapClient({
         const result = await createContextMapManualEditProposalAction({
           workspaceId,
           mapViewId: data.mapView.id,
+          includeStale,
           edit: {
             action: "add-connection",
             sourceObjectId: connectionDraft.sourceObjectId,
@@ -1687,6 +1689,7 @@ export default function ContextMapClient({
         const result = await createContextMapManualEditProposalAction({
           workspaceId,
           mapViewId: data.mapView.id,
+          includeStale,
           edit: {
             action: "update-connection",
             relationshipId: edgeDraft.relationshipId,
@@ -1712,6 +1715,7 @@ export default function ContextMapClient({
         const result = await createContextMapManualEditProposalAction({
           workspaceId,
           mapViewId: data.mapView.id,
+          includeStale,
           edit: { action: "update-connection", relationshipId, archive: true },
         });
         const proposedDiff = normalizeManualEditProposal(result);
@@ -1732,6 +1736,7 @@ export default function ContextMapClient({
         const result = await createContextMapManualEditProposalAction({
           workspaceId,
           mapViewId: data.mapView.id,
+          includeStale,
           edit: { action: "archive-card", objectId },
         });
         const proposedDiff = normalizeManualEditProposal(result);
