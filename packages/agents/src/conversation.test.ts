@@ -462,6 +462,10 @@ describe("processConversationTurn", () => {
                   { id: "step-2", status: "archived" },
                 ],
               },
+              evidence: {
+                kind: "forged",
+                pageContext: { unsafe: true },
+              },
             }),
           },
         }],
@@ -484,12 +488,17 @@ describe("processConversationTurn", () => {
       diff: expect.objectContaining({
         objectUpdates: expect.any(Array),
       }),
+      evidence: expect.objectContaining({
+        kind: "context-map-chat",
+        pageContext: null,
+      }),
     }));
     expect(applyContextGraphProposedDiffMock).toHaveBeenCalledWith(actor, {
       workspaceId: "ws-1",
       proposedDiffId: "diff-1",
     });
     expect(result.assistantMessage).toBe("Applied the map change.");
+    expect(result.contextUsed.mapGraphChanged).toBe(true);
   });
 
   it("leaves a pending context map diff when direct apply lacks approval permission", async () => {
@@ -524,7 +533,7 @@ describe("processConversationTurn", () => {
       .mockResolvedValueOnce({ content: "I created a pending change for approval." });
 
     const { processConversationTurn } = await import("./conversation");
-    await processConversationTurn({
+    const result = await processConversationTurn({
       workspaceId: "ws-1",
       sessionId: "session-1",
       userId: "user-1",
@@ -536,6 +545,7 @@ describe("processConversationTurn", () => {
     const toolMessage = chatMock.mock.calls[1]?.[0]?.messages.find((message: any) => message.role === "tool");
     expect(toolMessage.content).toContain("approval_required");
     expect(createContextGraphProposedDiffMock).toHaveBeenCalled();
+    expect(result.contextUsed.mapGraphChanged).toBe(true);
   });
 
   it("rechecks budget before a tool-followup model call", async () => {

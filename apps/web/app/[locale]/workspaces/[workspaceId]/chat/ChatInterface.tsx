@@ -380,6 +380,7 @@ export function ChatInterface({
       const decoder = new TextDecoder();
       let assistantMessage = "";
       let buffer = "";
+      let shouldRefreshCurrentRoute = false;
 
       const updatePendingTurn = (nextMessage: string) => {
         setTurns((prev) =>
@@ -399,13 +400,16 @@ export function ChatInterface({
 
           if (line.startsWith("data: ") && line !== "data: [DONE]") {
             try {
-              const payload = JSON.parse(line.slice(6)) as { text?: string; topic?: string };
+              const payload = JSON.parse(line.slice(6)) as { text?: string; topic?: string; refreshCurrentRoute?: boolean };
               if (payload.topic) {
                 setConversations((prev) =>
                   prev.map((c) =>
                     c.id === currentSessionId ? { ...c, topic: payload.topic! } : c
                   )
                 );
+              }
+              if (payload.refreshCurrentRoute) {
+                shouldRefreshCurrentRoute = true;
               }
               if (payload.text) {
                 assistantMessage += payload.text;
@@ -442,7 +446,7 @@ export function ChatInterface({
             : conversation
         )
       );
-      if (pageContext?.surface === "context-map") {
+      if (shouldRefreshCurrentRoute) {
         router.refresh();
       }
     } catch (err) {

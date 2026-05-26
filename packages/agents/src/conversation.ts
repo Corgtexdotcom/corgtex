@@ -135,6 +135,7 @@ type ConversationContextUsed = {
   knowledgeResults?: unknown[];
   memories?: unknown[];
   pageContext?: ConversationPageContext;
+  mapGraphChanged?: boolean;
 };
 
 const BASE_TOOLS = [
@@ -176,6 +177,12 @@ async function toolsForContext(ctx: ConversationContext) {
     return [...BASE_TOOLS, ...contextMapTools];
   }
   return BASE_TOOLS;
+}
+
+const CONTEXT_MAP_MUTATION_TOOLS = new Set(["create_context_map_diff", "apply_context_map_diff"]);
+
+function isContextMapMutationTool(toolName: string) {
+  return CONTEXT_MAP_MUTATION_TOOLS.has(toolName);
 }
 
 const TOOL_HANDLERS: Record<string, (actor: AppActor, ctx: ConversationContext, args: any) => Promise<unknown>> = {
@@ -360,6 +367,7 @@ export async function processConversationTurn(ctx: ConversationContext): Promise
   });
 
   let finalMessage = response.content;
+  let mapGraphChanged = false;
 
   // Execute tools if the LLM requests it
   if (response.tool_calls && response.tool_calls.length > 0) {
@@ -372,6 +380,9 @@ export async function processConversationTurn(ctx: ConversationContext): Promise
         try {
           const args = call.function.arguments ? JSON.parse(call.function.arguments) : {};
           const result = await handler(actor, ctx, args);
+          if (isContextMapMutationTool(call.function.name)) {
+            mapGraphChanged = true;
+          }
           messages.push({ role: "tool", content: JSON.stringify(result), name: call.function.name, tool_call_id: call.id });
         } catch (err: any) {
           messages.push({ role: "tool", content: JSON.stringify({ error: err.message }), name: call.function.name, tool_call_id: call.id });
@@ -418,6 +429,7 @@ export async function processConversationTurn(ctx: ConversationContext): Promise
       knowledgeResults: knowledgeResults.length > 0 ? knowledgeResults : undefined,
       memories: memories.length > 0 ? memories : undefined,
       pageContext: ctx.pageContext ?? undefined,
+      mapGraphChanged: mapGraphChanged || undefined,
     },
   };
 }
@@ -505,6 +517,7 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
   const tools = await toolsForContext(ctx);
 
   let finalMessage = "";
+  let mapGraphChanged = false;
 
   const iterator = defaultModelGateway.chatStream({
     workspaceId: ctx.workspaceId,
@@ -536,6 +549,9 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
         try {
           const args = call.function.arguments ? JSON.parse(call.function.arguments) : {};
           const result = await handler(actor, ctx, args);
+          if (isContextMapMutationTool(call.function.name)) {
+            mapGraphChanged = true;
+          }
           messages.push({ role: "tool", content: JSON.stringify(result), name: call.function.name, tool_call_id: call.id });
         } catch (err: any) {
           messages.push({ role: "tool", content: JSON.stringify({ error: err.message }), name: call.function.name, tool_call_id: call.id });
@@ -587,6 +603,7 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
       knowledgeResults: knowledgeResults.length > 0 ? knowledgeResults : undefined,
       memories: memories.length > 0 ? memories : undefined,
       pageContext: ctx.pageContext ?? undefined,
+      mapGraphChanged: mapGraphChanged || undefined,
     },
   };
 }

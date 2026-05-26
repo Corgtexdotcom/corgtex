@@ -71,9 +71,9 @@ function mapRelationshipSummary(relationship: {
 
 function graphEvidence(ctx: ContextMapToolContext, evidence: unknown) {
   return {
+    ...(isRecord(evidence) ? evidence : {}),
     kind: "context-map-chat",
     pageContext: ctx.pageContext ?? null,
-    ...(isRecord(evidence) ? evidence : {}),
   };
 }
 

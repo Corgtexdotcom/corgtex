@@ -67,9 +67,7 @@ export function WorkspaceChatRail({
   useEffect(() => {
     function handleOpenChat(event: Event) {
       const detail = (event as CustomEvent<OpenWorkspaceChatEventDetail>).detail;
-      if (detail?.pageContext) {
-        setPageContext(detail.pageContext);
-      }
+      setPageContext(detail?.pageContext ?? null);
       setIsCollapsed(false);
       setOpenSignal((value) => value + 1);
       try {
@@ -82,6 +80,15 @@ export function WorkspaceChatRail({
     window.addEventListener(OPEN_WORKSPACE_CHAT_EVENT, handleOpenChat);
     return () => window.removeEventListener(OPEN_WORKSPACE_CHAT_EVENT, handleOpenChat);
   }, []);
+
+  const pageContextRoute = pageContext?.route ?? "";
+  useEffect(() => {
+    if (!pageContextRoute) return;
+    const contextPath = pageContextRoute.split("?")[0];
+    if (contextPath && pathname !== contextPath) {
+      setPageContext(null);
+    }
+  }, [pageContextRoute, pathname]);
 
   function toggleCollapsed() {
     setIsCollapsed((current) => {

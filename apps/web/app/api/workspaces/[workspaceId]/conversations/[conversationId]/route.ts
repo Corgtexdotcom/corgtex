@@ -73,7 +73,7 @@ export async function POST(
         try {
           let finalResult: {
             assistantMessage: string;
-            contextUsed: { knowledgeResults?: unknown[]; memories?: unknown[]; pageContext?: unknown };
+            contextUsed: { knowledgeResults?: unknown[]; memories?: unknown[]; pageContext?: unknown; mapGraphChanged?: boolean };
           } | undefined;
 
           while (true) {
@@ -125,6 +125,12 @@ export async function POST(
               } catch {
                 // Auto-naming is best-effort; don't break the stream
               }
+            }
+
+            if (finalResult.contextUsed.mapGraphChanged) {
+              controller.enqueue(
+                encoder.encode(`data: ${JSON.stringify({ refreshCurrentRoute: true })}\n\n`)
+              );
             }
           }
 
