@@ -10,6 +10,7 @@ export type WorkspaceFeatureFlag =
   | "MULTILINGUAL"
   | "MEETING_RECORDERS"
   | "MEETING_CONTEXTUAL_INTELLIGENCE"
+  | "CONTEXT_MAP_AI"
   | "SLACK_MEETING_ACTION_REVIEW";
 
 export type WorkspaceFeatureFlagMap = Record<WorkspaceFeatureFlag, boolean>;
@@ -28,6 +29,7 @@ export const DEFAULT_WORKSPACE_FEATURE_FLAGS: WorkspaceFeatureFlagMap = {
   MULTILINGUAL: false,
   MEETING_RECORDERS: false,
   MEETING_CONTEXTUAL_INTELLIGENCE: false,
+  CONTEXT_MAP_AI: false,
   SLACK_MEETING_ACTION_REVIEW: false,
 };
 
@@ -45,6 +47,7 @@ const WORKSPACE_FEATURE_FLAG_VALUES: WorkspaceFeatureFlag[] = [
   "MULTILINGUAL",
   "MEETING_RECORDERS",
   "MEETING_CONTEXTUAL_INTELLIGENCE",
+  "CONTEXT_MAP_AI",
   "SLACK_MEETING_ACTION_REVIEW",
 ];
 

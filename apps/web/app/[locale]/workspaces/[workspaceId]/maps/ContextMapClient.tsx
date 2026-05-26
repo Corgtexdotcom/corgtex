@@ -22,33 +22,26 @@ import {
   Copy,
   Crosshair,
   FileSearch,
-  GitBranch,
-  Link2,
-  ListChecks,
   Maximize2,
   MessageSquare,
   Minimize2,
   Pencil,
-  Plus,
   RefreshCcw,
   RotateCcw,
   Save,
   SlidersHorizontal,
-  Trash2,
   X,
 } from "lucide-react";
 
 import {
   applyContextGraphProposedDiffAction,
   buildSelectedRegionContextAction,
-  createContextMapChangeProposalAction,
-  createMissingRegionFactsProposalAction,
   createPersonalContextMapViewAction,
-  createRegionProposalAction,
   reviewContextGraphProposedDiffAction,
   saveContextMapLayoutAction,
   updateContextGraphProposedDiffAction,
 } from "./actions";
+import { openWorkspaceChat, type WorkspaceChatPageContext } from "../chat/page-context";
 import "./context-map.css";
 import {
   buildRoutedEdgePath,
@@ -774,7 +767,17 @@ function diffHumanPreview(diffJson: unknown, objects: Map<string, ContextGraphOb
   };
 }
 
-export default function ContextMapClient({ workspaceId, data, includeStale = false }: { workspaceId: string; data: ContextMapClientData; includeStale?: boolean }) {
+export default function ContextMapClient({
+  workspaceId,
+  data,
+  includeStale = false,
+  mapAiEnabled = false,
+}: {
+  workspaceId: string;
+  data: ContextMapClientData;
+  includeStale?: boolean;
+  mapAiEnabled?: boolean;
+}) {
   const initialSelectedObjectId = data.objects.find((object) => isCanvasObject(object, data.mapView))?.id ?? null;
   const [selectedObjectIds, setSelectedObjectIds] = useState<string[]>(initialSelectedObjectId ? [initialSelectedObjectId] : []);
   const [selectedObjectId, setSelectedObjectId] = useState<string | null>(initialSelectedObjectId);
@@ -797,9 +800,6 @@ export default function ContextMapClient({ workspaceId, data, includeStale = fal
   const [editingDiffId, setEditingDiffId] = useState<string | null>(null);
   const [editReason, setEditReason] = useState("");
   const [editDiffJson, setEditDiffJson] = useState("");
-  const [changeInstruction, setChangeInstruction] = useState("");
-  const [stepTitle, setStepTitle] = useState("");
-  const [dependencyTargetId, setDependencyTargetId] = useState("");
   const [proposedDiffs, setProposedDiffs] = useState<ContextGraphProposedDiff[]>(data.proposedDiffs);
   const [flowInstance, setFlowInstance] = useState<ReactFlowInstance<ContextMapFlowNode, ContextMapFlowEdge> | null>(null);
   const [isPending, startTransition] = useTransition();
@@ -1177,50 +1177,6 @@ export default function ContextMapClient({ workspaceId, data, includeStale = fal
     });
   }
 
-  function createProposal() {
-    const ids = selectedRegionIds;
-    if (ids.length === 0) {
-      setMessage({ tone: "error", text: "Select at least one map item before creating a proposal." });
-      return;
-    }
-    startTransition(async () => {
-      try {
-        const diff = await createRegionProposalAction({
-          workspaceId,
-          mapViewId: data.mapView.id,
-          objectIds: ids,
-        });
-        setProposedDiffs((current) => [normalizeProposedDiff(diff), ...current]);
-        setExpandedDiffId(diff.id);
-        setMessage({ tone: "info", text: "Created a proposed change for this selected area." });
-      } catch {
-        setMessage({ tone: "error", text: "Could not create a proposed change." });
-      }
-    });
-  }
-
-  function createMissingFactsProposal() {
-    const ids = selectedRegionIds;
-    if (ids.length === 0) {
-      setMessage({ tone: "error", text: "Select at least one node before proposing missing facts." });
-      return;
-    }
-    startTransition(async () => {
-      try {
-        const diff = await createMissingRegionFactsProposalAction({
-          workspaceId,
-          mapViewId: data.mapView.id,
-          objectIds: ids,
-        });
-        setProposedDiffs((current) => [normalizeProposedDiff(diff), ...current]);
-        setExpandedDiffId(diff.id);
-        setMessage({ tone: "info", text: "Proposed missing tasks, risks, or owners for this region." });
-      } catch {
-        setMessage({ tone: "error", text: "Could not propose missing tasks, risks, or owners." });
-      }
-    });
-  }
-
   function applyDiff(proposedDiffId: string) {
     startTransition(async () => {
       try {
@@ -1281,64 +1237,44 @@ export default function ContextMapClient({ workspaceId, data, includeStale = fal
     });
   }
 
-  function submitMapChange(instruction: string, objectIds: string[] = []) {
-    const trimmed = instruction.trim();
-    if (!trimmed) {
-      setMessage({ tone: "error", text: "Describe the map change first." });
-      return;
-    }
-    startTransition(async () => {
-      try {
-        const result = await createContextMapChangeProposalAction({
-          workspaceId,
-          mapViewId: data.mapView.id,
-          selectedObjectIds: objectIds,
-          instruction: trimmed,
-        });
-        if (result.mode === "needs_clarification") {
-          setMessage({ tone: "error", text: result.message });
-          return;
-        }
-        const diff = normalizeProposedDiff({
-          id: result.proposedDiffId,
-          reason: result.reason,
-          status: result.status,
-          createdAt: result.createdAt,
-          diffJson: result.diffJson,
-        });
-        setProposedDiffs((current) => [diff, ...current]);
-        setExpandedDiffId(diff.id);
-        setChangeInstruction("");
-        setStepTitle("");
-        setDependencyTargetId("");
-        setMessage({ tone: "info", text: "Created a proposed map change for review." });
-      } catch {
-        setMessage({ tone: "error", text: "Could not create this proposed map change." });
-      }
-    });
+  function buildChatPageContext(objectIds: string[] = selectedRegionIds): WorkspaceChatPageContext {
+    const selectedIds = [...new Set(objectIds)].slice(0, 12);
+    const selectedObjects = selectedIds
+      .map((id) => objectById.get(id))
+      .filter((object): object is ContextGraphObject => Boolean(object))
+      .slice(0, 12)
+      .map((object) => ({
+        id: object.id,
+        title: object.title,
+        objectType: object.objectType,
+        status: object.status,
+      }));
+    return {
+      surface: "context-map",
+      route: `${window.location.pathname}${window.location.search}`,
+      workspaceId,
+      mapView: {
+        id: data.mapView.id,
+        name: data.mapView.name,
+        viewType: data.mapView.viewType,
+      },
+      includeStale,
+      selectedObjectIds: selectedIds,
+      selectedObjects,
+      selectedRelationship: selectedRelationship
+        ? {
+            id: selectedRelationship.id,
+            sourceObjectId: selectedRelationship.sourceObjectId,
+            targetObjectId: selectedRelationship.targetObjectId,
+            relationshipType: selectedRelationship.relationshipType,
+            status: selectedRelationship.status,
+          }
+        : null,
+    };
   }
 
-  function proposeStepAddition() {
-    if (!selectedObject) return;
-    const title = stepTitle.trim();
-    if (!title) {
-      setMessage({ tone: "error", text: "Name the process step first." });
-      return;
-    }
-    submitMapChange(`Add step ${title}`, [selectedObject.id]);
-  }
-
-  function proposeArchiveSelected() {
-    if (!selectedObject) return;
-    submitMapChange("Archive selected item", [selectedObject.id]);
-  }
-
-  function proposeDependency() {
-    if (!selectedObject || !dependencyTargetId) {
-      setMessage({ tone: "error", text: "Choose another step to connect." });
-      return;
-    }
-    submitMapChange("Connect selected items with depends on", [selectedObject.id, dependencyTargetId]);
+  function openMapChat(objectIds: string[] = selectedRegionIds) {
+    openWorkspaceChat({ pageContext: buildChatPageContext(objectIds) });
   }
 
   function startInspectorResize(event: ReactPointerEvent<HTMLButtonElement>) {
@@ -1414,12 +1350,11 @@ export default function ContextMapClient({ workspaceId, data, includeStale = fal
           >
             <FileSearch size={14} aria-hidden="true" /> {regionContextStatus === "loading" ? "Loading" : "Context"}
           </button>
-          <button className="secondary small" type="button" onClick={createProposal} disabled={isPending} title="Create an agent-ready graph proposal">
-            <GitBranch size={14} aria-hidden="true" /> Propose
-          </button>
-          <button className="secondary small" type="button" onClick={createMissingFactsProposal} disabled={isPending} title="Propose missing tasks, risks, or owners from this region">
-            <ListChecks size={14} aria-hidden="true" /> Suggest gaps
-          </button>
+          {mapAiEnabled && (
+            <button className="secondary small" type="button" onClick={() => openMapChat()} title="Open chat with this map context">
+              <MessageSquare size={14} aria-hidden="true" /> Open chat
+            </button>
+          )}
           {data.permissions.canSavePersonalView && (
             <button className="secondary small" type="button" onClick={savePersonalView} disabled={isPending} title="Save as a personal map view">
               <Copy size={14} aria-hidden="true" /> Save copy
@@ -1465,19 +1400,6 @@ export default function ContextMapClient({ workspaceId, data, includeStale = fal
           </label>
         </div>
       )}
-
-      <div className="context-map-change-bar">
-        <MessageSquare size={16} aria-hidden="true" />
-        <textarea
-          value={changeInstruction}
-          onChange={(event) => setChangeInstruction(event.target.value)}
-          rows={1}
-          placeholder="Ask for a map change"
-        />
-        <button className="secondary small" type="button" onClick={() => submitMapChange(changeInstruction, [])} disabled={isPending}>
-          Propose
-        </button>
-      </div>
 
       <div className="context-map-stage">
         <div className="context-map-canvas">
@@ -1597,6 +1519,15 @@ export default function ContextMapClient({ workspaceId, data, includeStale = fal
                     <p className="muted">No supporting evidence is attached yet.</p>
                   )}
                 </section>
+
+                {mapAiEnabled && (
+                  <section className="context-map-inspector-section">
+                    <h2>Changes</h2>
+                    <button className="secondary small" type="button" onClick={() => openMapChat(selectedRegionIds)} disabled={selectedRegionIds.length === 0}>
+                      <MessageSquare size={14} aria-hidden="true" /> Open chat
+                    </button>
+                  </section>
+                )}
 
                 <details className="context-map-technical-details">
                   <summary>Technical details</summary>
@@ -1780,49 +1711,14 @@ export default function ContextMapClient({ workspaceId, data, includeStale = fal
                   </>
                 )}
 
-                <section className="context-map-inspector-section">
-                  <h2>Changes</h2>
-                  <div className="context-map-change-stack">
-                    <label>
-                      <span>Ask agent for this item</span>
-                      <textarea
-                        value={changeInstruction}
-                        onChange={(event) => setChangeInstruction(event.target.value)}
-                        rows={3}
-                        placeholder="Rename it, set next action, change status, add a step, or archive it"
-                      />
-                    </label>
-                    <div className="context-map-button-row">
-                      <button className="secondary small" type="button" onClick={() => submitMapChange(changeInstruction, selectedRegionIds)} disabled={isPending || selectedRegionIds.length === 0}>
-                        <MessageSquare size={14} aria-hidden="true" /> Propose change
-                      </button>
-                      <button className="secondary small context-map-danger-action" type="button" onClick={proposeArchiveSelected} disabled={isPending || !selectedObject}>
-                        <Trash2 size={14} aria-hidden="true" /> Archive
-                      </button>
-                    </div>
-                    {(selectedObject.objectType === "Process" || selectedObject.objectType === "Team") && (
-                      <div className="context-map-inline-form">
-                        <input value={stepTitle} onChange={(event) => setStepTitle(event.target.value)} placeholder="New process step" />
-                        <button className="secondary small" type="button" onClick={proposeStepAddition} disabled={isPending}>
-                          <Plus size={14} aria-hidden="true" /> Add step
-                        </button>
-                      </div>
-                    )}
-                    {selectedObject.objectType === "ProcessStep" && (
-                      <div className="context-map-inline-form">
-                        <select value={dependencyTargetId} onChange={(event) => setDependencyTargetId(event.target.value)}>
-                          <option value="">Depends on...</option>
-                          {canvasObjects.filter((object) => object.id !== selectedObject.id && object.objectType === "ProcessStep").map((object) => (
-                            <option key={object.id} value={object.id}>{object.title}</option>
-                          ))}
-                        </select>
-                        <button className="secondary small" type="button" onClick={proposeDependency} disabled={isPending || !dependencyTargetId}>
-                          <Link2 size={14} aria-hidden="true" /> Connect
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                </section>
+                {mapAiEnabled && (
+                  <section className="context-map-inspector-section">
+                    <h2>Changes</h2>
+                    <button className="secondary small" type="button" onClick={() => openMapChat(selectedRegionIds)} disabled={selectedRegionIds.length === 0}>
+                      <MessageSquare size={14} aria-hidden="true" /> Open chat
+                    </button>
+                  </section>
+                )}
 
                 <section className="context-map-inspector-section">
                   <h2>Evidence</h2>

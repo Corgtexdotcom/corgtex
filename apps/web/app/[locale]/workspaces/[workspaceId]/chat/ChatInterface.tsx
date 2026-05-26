@@ -1,10 +1,12 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback } from "react";
+import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { marked } from "marked";
 import { CLAUDE_CHAT_URL, CLAUDE_INSTALLER_PATH } from "@/lib/install-helpers";
 import { formatConversationDate } from "./date-format";
+import type { WorkspaceChatPageContext } from "./page-context";
 
 type ConversationSummary = {
   id: string;
@@ -131,6 +133,8 @@ export function ChatInterface({
   compact = false,
   mobileMode = false,
   claudeFooterEnabled = true,
+  pageContext = null,
+  openSignal = 0,
 }: {
   workspaceId: string;
   conversations: ConversationSummary[];
@@ -138,8 +142,11 @@ export function ChatInterface({
   compact?: boolean;
   mobileMode?: boolean;
   claudeFooterEnabled?: boolean;
+  pageContext?: WorkspaceChatPageContext | null;
+  openSignal?: number;
 }) {
   const t = useTranslations("chat");
+  const router = useRouter();
   const [conversations, setConversations] = useState(initialConversations);
   const [sessionId, setSessionId] = useState<string | null>(activeSessionId);
   const [turns, setTurns] = useState<Turn[]>([]);
@@ -212,6 +219,15 @@ export function ChatInterface({
       setTimeout(() => inputRef.current?.focus(), 50);
     }
   }
+
+  useEffect(() => {
+    if (!openSignal) return;
+    setError(null);
+    if (!sessionId && !showNewChat) {
+      setShowNewChat(true);
+    }
+    window.setTimeout(() => inputRef.current?.focus(), 80);
+  }, [openSignal, sessionId, showNewChat]);
 
   function openConversation(id: string) {
     setShowNewChat(false);
@@ -349,7 +365,7 @@ export function ChatInterface({
       const res = await fetch(`/api/workspaces/${workspaceId}/conversations/${currentSessionId}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: userMessage }),
+        body: JSON.stringify({ message: userMessage, pageContext }),
       });
 
       if (!res.ok) {
@@ -364,6 +380,7 @@ export function ChatInterface({
       const decoder = new TextDecoder();
       let assistantMessage = "";
       let buffer = "";
+      let shouldRefreshCurrentRoute = false;
 
       const updatePendingTurn = (nextMessage: string) => {
         setTurns((prev) =>
@@ -383,13 +400,16 @@ export function ChatInterface({
 
           if (line.startsWith("data: ") && line !== "data: [DONE]") {
             try {
-              const payload = JSON.parse(line.slice(6)) as { text?: string; topic?: string };
+              const payload = JSON.parse(line.slice(6)) as { text?: string; topic?: string; refreshCurrentRoute?: boolean };
               if (payload.topic) {
                 setConversations((prev) =>
                   prev.map((c) =>
                     c.id === currentSessionId ? { ...c, topic: payload.topic! } : c
                   )
                 );
+              }
+              if (payload.refreshCurrentRoute) {
+                shouldRefreshCurrentRoute = true;
               }
               if (payload.text) {
                 assistantMessage += payload.text;
@@ -426,6 +446,9 @@ export function ChatInterface({
             : conversation
         )
       );
+      if (shouldRefreshCurrentRoute) {
+        router.refresh();
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : t("errorFailedToSend"));
       setTurns((prev) => prev.filter((turn) => turn.id !== optimisticTurn.id));

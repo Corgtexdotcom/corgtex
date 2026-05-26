@@ -144,6 +144,7 @@ export const CONTROL_PLANE_WORKSPACE_FEATURE_FLAGS = [
   { flag: "MULTILINGUAL", label: "Multilingual", description: "Locale switcher and translated workspace UI.", defaultEnabled: false },
   { flag: "MEETING_RECORDERS", label: "Meeting recorders", description: "Managed meeting recorder entitlement and recorder config.", defaultEnabled: false },
   { flag: "MEETING_CONTEXTUAL_INTELLIGENCE", label: "Context-aware meeting intelligence", description: "Use workspace context to summarize meetings and automatically update related governance records.", defaultEnabled: false },
+  { flag: "CONTEXT_MAP_AI", label: "Context map AI", description: "Premium chat tools for reading, reasoning about, and applying living context map graph changes.", defaultEnabled: false },
   { flag: "SLACK_MEETING_ACTION_REVIEW", label: "Slack meeting action review", description: "Post meeting summaries and proposed action-item follow-ups to an approved Slack review surface before action creation.", defaultEnabled: false },
 ] as const;
 

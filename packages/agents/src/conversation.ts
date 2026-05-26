@@ -42,6 +42,8 @@ import {
   searchConnectedContextAction,
   searchConnectedContextTool,
 } from "./tools/external-mcp";
+import { contextMapToolHandlers, contextMapTools, isContextMapAiAvailable } from "./tools/context-map";
+import { formatConversationPageContextForModel, type ConversationPageContext } from "./page-context";
 import type { AppActor } from "@corgtex/shared";
 
 const MAX_HISTORY_TURNS = 20;
@@ -72,6 +74,7 @@ READ TOOLS:
 - 'list_tool_links' — shared workspace tools, access notes, and credential presence
 - 'list_connected_tools' — same-user external MCP tools connected to this workspace
 - 'search_connected_context', 'fetch_connected_context' — live search/fetch from Corgtex and connected tools such as Notion, with provenance
+- Premium context-map tools, when enabled — read the current map, fetch selected-region context, create pending graph diffs, and apply graph diffs through the audited review/apply path
 
 WRITE TOOLS:
 - 'create_tension', 'create_action' — create new items
@@ -80,10 +83,12 @@ WRITE TOOLS:
 - 'create_goal' — create a goal in the Goals tab with cadence and optional key results
 - 'upsert_tool_link', 'archive_tool_link', 'reveal_tool_link_credential' — manage and use the shared Tools directory
 - 'execute_external_tool' — run a same-user delegated external MCP tool such as Notion when the user explicitly asks or confidence is high
+- 'create_context_map_diff' and 'apply_context_map_diff', when enabled — propose or directly apply context-map graph changes without bypassing graph audit
 
 When asked about current state, ALWAYS use a query tool instead of guessing.
 When asked to create or update something, execute the write tool immediately — do not ask for confirmation. Report what you did clearly after executing.
 Every write action is fully audited and traceable.
+For context map work, use CURRENT PAGE CONTEXT only as a pointer to the map/view/selection. Fetch bounded map details with 'get_context_map_info' or 'get_selected_context_map_region' before proposing or applying graph changes. If the user asks for an ambiguous change, ask a clarifying question instead of guessing. If the user confirms with "yes", "do it", or similar, use the prior chat turns plus CURRENT PAGE CONTEXT to carry out the last clear map-change intent. For merge requests, ask which item survives if unclear; otherwise update the survivor, re-point absorbed relationships, archive the absorbed item, and preserve evidence refs on the survivor where available.
 Tool credential reveals are sensitive and audited. Use them only when the user asks to access or reveal a saved tool credential.
 Use live retrieval from connected tools first. Do not save Notion or other external content into Corgtex Brain unless the user explicitly asks you to save, upload, store, or remember it.
 When answering from connected tools, say whether the context came from Corgtex or the external provider.
@@ -123,9 +128,17 @@ type ConversationContext = {
   userMessage: string;
   systemPrompt?: string | null;
   actor?: AppActor;
+  pageContext?: ConversationPageContext | null;
 };
 
-const TOOLS = [
+type ConversationContextUsed = {
+  knowledgeResults?: unknown[];
+  memories?: unknown[];
+  pageContext?: ConversationPageContext;
+  mapGraphChanged?: boolean;
+};
+
+const BASE_TOOLS = [
   checkCalendarAvailabilityTool,
   scheduleMeetingTool,
   createCorgtexScheduledMeetingTool,
@@ -159,6 +172,19 @@ const TOOLS = [
   executeExternalToolTool,
 ];
 
+async function toolsForContext(ctx: ConversationContext) {
+  if (await isContextMapAiAvailable(ctx.workspaceId)) {
+    return [...BASE_TOOLS, ...contextMapTools];
+  }
+  return BASE_TOOLS;
+}
+
+const CONTEXT_MAP_MUTATION_TOOLS = new Set(["create_context_map_diff", "apply_context_map_diff"]);
+
+function isContextMapMutationTool(toolName: string) {
+  return CONTEXT_MAP_MUTATION_TOOLS.has(toolName);
+}
+
 const TOOL_HANDLERS: Record<string, (actor: AppActor, ctx: ConversationContext, args: any) => Promise<unknown>> = {
   check_calendar_availability: async (actor, ctx, args) => checkCalendarAvailability(ctx.userId, ctx.workspaceId, args.emails, args.timeMin, args.timeMax),
   schedule_meeting: async (actor, ctx, args) => scheduleMeeting(ctx.userId, ctx.workspaceId, args.title, args.description, args.startTime, args.endTime, args.attendeeEmails),
@@ -191,6 +217,7 @@ const TOOL_HANDLERS: Record<string, (actor: AppActor, ctx: ConversationContext, 
   search_connected_context: async (actor, ctx, args) => searchConnectedContextAction(actor, ctx, args),
   fetch_connected_context: async (actor, ctx, args) => fetchConnectedContextAction(actor, ctx, args),
   execute_external_tool: async (actor, ctx, args) => executeExternalToolAction(actor, ctx, args),
+  ...contextMapToolHandlers,
 };
 
 function requireConversationToolActor(ctx: ConversationContext): AppActor {
@@ -214,10 +241,7 @@ function catalogUsageContext(ctx: ConversationContext) {
 
 export async function processConversationTurn(ctx: ConversationContext): Promise<{
   assistantMessage: string;
-  contextUsed: {
-    knowledgeResults?: unknown[];
-    memories?: unknown[];
-  };
+  contextUsed: ConversationContextUsed;
 }> {
   await assertWorkspaceModelBudget(ctx.workspaceId);
 
@@ -316,6 +340,13 @@ export async function processConversationTurn(ctx: ConversationContext): Promise
     });
   }
 
+  if (ctx.pageContext) {
+    messages.push({
+      role: "system",
+      content: formatConversationPageContextForModel(ctx.pageContext),
+    });
+  }
+
   // Add conversation history
   for (const turn of priorTurns) {
     messages.push({ role: "user", content: turn.userMessage });
@@ -324,6 +355,7 @@ export async function processConversationTurn(ctx: ConversationContext): Promise
 
   // Add current user message
   messages.push({ role: "user", content: ctx.userMessage });
+  const tools = await toolsForContext(ctx);
 
   const response = await defaultModelGateway.chat({
     workspaceId: ctx.workspaceId,
@@ -331,10 +363,11 @@ export async function processConversationTurn(ctx: ConversationContext): Promise
     model: env.MODEL_CHAT_CONVERSATION,
     taskType: "AGENT",
     messages,
-    tools: TOOLS,
+    tools,
   });
 
   let finalMessage = response.content;
+  let mapGraphChanged = false;
 
   // Execute tools if the LLM requests it
   if (response.tool_calls && response.tool_calls.length > 0) {
@@ -347,6 +380,9 @@ export async function processConversationTurn(ctx: ConversationContext): Promise
         try {
           const args = call.function.arguments ? JSON.parse(call.function.arguments) : {};
           const result = await handler(actor, ctx, args);
+          if (isContextMapMutationTool(call.function.name)) {
+            mapGraphChanged = true;
+          }
           messages.push({ role: "tool", content: JSON.stringify(result), name: call.function.name, tool_call_id: call.id });
         } catch (err: any) {
           messages.push({ role: "tool", content: JSON.stringify({ error: err.message }), name: call.function.name, tool_call_id: call.id });
@@ -363,7 +399,7 @@ export async function processConversationTurn(ctx: ConversationContext): Promise
       model: env.MODEL_CHAT_CONVERSATION,
       taskType: "AGENT",
       messages,
-      tools: TOOLS,
+      tools,
     });
     
     finalMessage = followup.content;
@@ -392,16 +428,15 @@ export async function processConversationTurn(ctx: ConversationContext): Promise
     contextUsed: {
       knowledgeResults: knowledgeResults.length > 0 ? knowledgeResults : undefined,
       memories: memories.length > 0 ? memories : undefined,
+      pageContext: ctx.pageContext ?? undefined,
+      mapGraphChanged: mapGraphChanged || undefined,
     },
   };
 }
 
 export async function* processConversationTurnStream(ctx: ConversationContext): AsyncGenerator<string, {
   assistantMessage: string;
-  contextUsed: {
-    knowledgeResults?: unknown[];
-    memories?: unknown[];
-  };
+  contextUsed: ConversationContextUsed;
 }> {
   await assertWorkspaceModelBudget(ctx.workspaceId);
 
@@ -466,14 +501,23 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
     });
   }
 
+  if (ctx.pageContext) {
+    messages.push({
+      role: "system",
+      content: formatConversationPageContextForModel(ctx.pageContext),
+    });
+  }
+
   for (const turn of priorTurns) {
     messages.push({ role: "user", content: turn.userMessage });
     messages.push({ role: "assistant", content: turn.assistantMessage });
   }
 
   messages.push({ role: "user", content: ctx.userMessage });
+  const tools = await toolsForContext(ctx);
 
   let finalMessage = "";
+  let mapGraphChanged = false;
 
   const iterator = defaultModelGateway.chatStream({
     workspaceId: ctx.workspaceId,
@@ -481,7 +525,7 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
     model: env.MODEL_CHAT_CONVERSATION,
     taskType: "AGENT",
     messages,
-    tools: TOOLS,
+    tools,
   })[Symbol.asyncIterator]();
 
   let firstResult: import("@corgtex/models").ChatCompletionResponse;
@@ -505,6 +549,9 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
         try {
           const args = call.function.arguments ? JSON.parse(call.function.arguments) : {};
           const result = await handler(actor, ctx, args);
+          if (isContextMapMutationTool(call.function.name)) {
+            mapGraphChanged = true;
+          }
           messages.push({ role: "tool", content: JSON.stringify(result), name: call.function.name, tool_call_id: call.id });
         } catch (err: any) {
           messages.push({ role: "tool", content: JSON.stringify({ error: err.message }), name: call.function.name, tool_call_id: call.id });
@@ -521,7 +568,7 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
       model: env.MODEL_CHAT_CONVERSATION,
       taskType: "AGENT",
       messages,
-      tools: TOOLS,
+      tools,
     })[Symbol.asyncIterator]();
 
     while (true) {
@@ -555,6 +602,8 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
     contextUsed: {
       knowledgeResults: knowledgeResults.length > 0 ? knowledgeResults : undefined,
       memories: memories.length > 0 ? memories : undefined,
+      pageContext: ctx.pageContext ?? undefined,
+      mapGraphChanged: mapGraphChanged || undefined,
     },
   };
 }
