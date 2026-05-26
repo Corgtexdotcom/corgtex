@@ -1,9 +1,10 @@
 "use client";
 
-import { useEffect, useMemo, useState, useTransition, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useMemo, useRef, useState, useTransition, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import {
   Background,
   BaseEdge,
+  ConnectionMode,
   Controls,
   EdgeLabelRenderer,
   Handle,
@@ -13,7 +14,7 @@ import {
   useEdgesState,
   useNodesState,
 } from "@xyflow/react";
-import type { Edge, EdgeProps, EdgeTypes, Node, NodeProps, NodeTypes, ReactFlowInstance } from "@xyflow/react";
+import type { Connection, Edge, EdgeProps, EdgeTypes, Node, NodeProps, NodeTypes, ReactFlowInstance } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import {
   Ban,
@@ -36,6 +37,7 @@ import {
 import {
   applyContextGraphProposedDiffAction,
   buildSelectedRegionContextAction,
+  createContextMapManualEditProposalAction,
   createPersonalContextMapViewAction,
   reviewContextGraphProposedDiffAction,
   saveContextMapLayoutAction,
@@ -130,18 +132,21 @@ type DiffObjectInput = {
   objectType?: string;
   title?: string;
   summary?: string | null;
+  properties?: Record<string, unknown>;
   status?: string;
   sourceEntityType?: string | null;
   sourceEntityId?: string | null;
 };
 
 type DiffRelationshipInput = {
+  ref?: string;
   id?: string;
   sourceObjectId?: string;
   sourceRef?: string;
   targetObjectId?: string;
   targetRef?: string;
   relationshipType?: string;
+  properties?: Record<string, unknown>;
   status?: string;
 };
 
@@ -156,7 +161,15 @@ type DiffEvidenceInput = {
 
 type DiffLayoutInput = {
   mapViewId?: string;
-  items?: Array<{ objectId?: string; x?: number; y?: number }>;
+  items?: Array<{
+    objectId?: string;
+    objectRef?: string;
+    x?: number;
+    y?: number;
+    width?: number | null;
+    height?: number | null;
+    visualState?: Record<string, unknown>;
+  }>;
 };
 
 type DiffJsonInput = {
@@ -185,6 +198,33 @@ export type ContextMapClientData = {
 type RegionContext = Awaited<ReturnType<typeof buildSelectedRegionContextAction>>;
 type InspectorDock = "right" | "bottom";
 type StatusFilter = "active" | "approved" | "needs-review" | "all";
+type ContextMapNodeVariant = "standard" | "alert";
+type ContextMapManualCardKind = "standard" | "alert";
+type ContextMapManualRelationIntent = "enables" | "blocks" | "supports" | "needs_approval_from";
+
+type ContextMapMenuState =
+  | { kind: "pane"; x: number; y: number; position: { x: number; y: number } }
+  | { kind: "node"; x: number; y: number; nodeId: string }
+  | { kind: "edge"; x: number; y: number; edgeId: string };
+
+type ContextMapCardDraft = {
+  cardKind: ContextMapManualCardKind;
+  title: string;
+  position: { x: number; y: number };
+  sourceObjectId?: string | null;
+  relationIntent?: ContextMapManualRelationIntent | null;
+};
+
+type ContextMapConnectionDraft = {
+  sourceObjectId: string;
+  targetObjectId: string;
+  relationIntent?: ContextMapManualRelationIntent | null;
+};
+
+type ContextMapEdgeDraft = {
+  relationshipId: string;
+  relationIntent?: ContextMapManualRelationIntent | null;
+};
 
 type NodeColors = {
   border: string;
@@ -195,6 +235,9 @@ type NodeColors = {
 type ContextMapNodeData = Record<string, unknown> & {
   object: ContextGraphObject;
   colors: NodeColors;
+  variant: ContextMapNodeVariant;
+  preview: boolean;
+  connectable: boolean;
   workState: string | null;
   pathStage: string | null;
   staffingState: string | null;
@@ -204,6 +247,9 @@ type ContextMapNodeData = Record<string, unknown> & {
 type ContextMapEdgeData = Record<string, unknown> & {
   label: string;
   stroke: string;
+  strokeWidth: number;
+  strokeDasharray?: string;
+  preview: boolean;
   relationshipType: string;
   sourceSide: NodeSide;
   targetSide: NodeSide;
@@ -250,6 +296,14 @@ const NODE_COLORS: Record<string, NodeColors> = {
 
 const PROCESS_DETAIL_TYPES = new Set(["Risk", "Metric", "Question", "Hypothesis"]);
 const STRUCTURAL_PROCESS_TYPES = new Set(["Process", "ProcessStep", "Team"]);
+const ALERT_CARD_TYPES = new Set(["Risk", "Question", "Hypothesis"]);
+const PREVIEW_ID_PREFIX = "proposal:";
+const RELATION_INTENT_OPTIONS: Array<{ intent: ContextMapManualRelationIntent; label: string }> = [
+  { intent: "enables", label: "Enables" },
+  { intent: "blocks", label: "Blocks" },
+  { intent: "supports", label: "Supports" },
+  { intent: "needs_approval_from", label: "Needs approval from" },
+];
 
 function mapObjectDisplayRole(object: ContextGraphObject, view: ContextMapView) {
   const explicitRole = propertyText(object.properties, "contextMapDisplay") ?? propertyText(object.properties, "displayRole");
@@ -267,6 +321,8 @@ function isDetailObject(object: ContextGraphObject | undefined, view: ContextMap
 
 function isCanvasObject(object: ContextGraphObject, view: ContextMapView) {
   if (mapObjectDisplayRole(object, view) !== "canvas") return false;
+  const explicitRole = propertyText(object.properties, "contextMapDisplay") ?? propertyText(object.properties, "displayRole");
+  if (explicitRole === "canvas") return true;
   if (view.viewType !== "process") return true;
   return STRUCTURAL_PROCESS_TYPES.has(object.objectType) || !PROCESS_DETAIL_TYPES.has(object.objectType);
 }
@@ -448,10 +504,53 @@ function statusClass(status: string) {
   return "neutral";
 }
 
-function relationshipColor(relationship: ContextGraphRelationship) {
-  if (relationship.status === "stale" || relationship.status === "disputed") return "#dc2626";
-  if (relationship.status === "proposed" || relationship.status === "draft") return "#ca8a04";
-  return "#64748b";
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isPreviewId(id: string) {
+  return id.startsWith(PREVIEW_ID_PREFIX);
+}
+
+function isPreviewObject(object: ContextGraphObject) {
+  return object.sourceEntityType === "ContextGraphProposedDiff" || isPreviewId(object.id);
+}
+
+function cardVariantForObject(object: ContextGraphObject): ContextMapNodeVariant {
+  const explicitKind = propertyText(object.properties, "cardKind");
+  if (explicitKind === "alert") return "alert";
+  if (object.status === "stale" || object.status === "disputed") return "alert";
+  return ALERT_CARD_TYPES.has(object.objectType) ? "alert" : "standard";
+}
+
+function relationIntentLabel(intent: ContextMapManualRelationIntent) {
+  return RELATION_INTENT_OPTIONS.find((option) => option.intent === intent)?.label ?? titleizeMachineValue(intent);
+}
+
+function relationshipVisualStyle(relationship: ContextGraphRelationship) {
+  const pending = relationship.status === "proposed" || relationship.status === "draft" || isPreviewId(relationship.id);
+  if (relationship.status === "stale" || relationship.status === "disputed") {
+    return { stroke: "#dc2626", strokeWidth: 2.4, strokeDasharray: pending ? "7 5" : undefined };
+  }
+  if (pending) {
+    return { stroke: "#ca8a04", strokeWidth: 2, strokeDasharray: "7 5" };
+  }
+  if (relationship.relationshipType === "blocks") {
+    return { stroke: "#dc2626", strokeWidth: 2.6 };
+  }
+  if (relationship.relationshipType === "depends_on") {
+    return { stroke: "#0f766e", strokeWidth: 2 };
+  }
+  if (relationship.relationshipType === "needs_approval_from") {
+    return { stroke: "#ca8a04", strokeWidth: 2, strokeDasharray: "7 5" };
+  }
+  if (["supports", "has_evidence", "created_in", "decided_in"].includes(relationship.relationshipType)) {
+    return { stroke: "#64748b", strokeWidth: 1.8, strokeDasharray: "6 5" };
+  }
+  if (["uses", "input_to", "output_of"].includes(relationship.relationshipType)) {
+    return { stroke: "#2563eb", strokeWidth: 1.8 };
+  }
+  return { stroke: "#64748b", strokeWidth: 1.8 };
 }
 
 function nodeRectFromFlowNode(node: ContextMapFlowNode): NodeRect {
@@ -488,9 +587,9 @@ function ContextMapNode({ data }: NodeProps<ContextMapFlowNode>) {
       {NODE_SIDES.map((side) => (
         <Handle
           key={`source-${side}`}
-          className="context-map-node-handle"
+          className="context-map-node-handle context-map-node-handle--source"
           id={handleId("source", side)}
-          isConnectable={false}
+          isConnectable={data.connectable}
           position={SIDE_POSITION[side]}
           type="source"
         />
@@ -498,15 +597,20 @@ function ContextMapNode({ data }: NodeProps<ContextMapFlowNode>) {
       {NODE_SIDES.map((side) => (
         <Handle
           key={`target-${side}`}
-          className="context-map-node-handle"
+          className="context-map-node-handle context-map-node-handle--target"
           id={handleId("target", side)}
-          isConnectable={false}
+          isConnectable={data.connectable}
           position={SIDE_POSITION[side]}
           type="target"
         />
       ))}
       <div
-        className={`context-map-node-card context-map-node-card--${statusClass(object.status)}`}
+        className={[
+          "context-map-node-card",
+          `context-map-node-card--${statusClass(object.status)}`,
+          `context-map-node-card--${data.variant}`,
+          data.preview ? "context-map-node-card--preview" : "",
+        ].filter(Boolean).join(" ")}
         style={{ "--node-border": data.colors.border, "--node-bg": data.colors.background, "--node-accent": data.colors.accent } as CSSProperties}
       >
         <div className="context-map-node-topline">
@@ -541,6 +645,8 @@ function ContextMapRoutedEdge({
   const edgeData = data ?? {
     label: typeof label === "string" ? label : "",
     stroke: "#64748b",
+    strokeWidth: 1.8,
+    preview: false,
     relationshipType: "relates_to",
     sourceSide: "right" as const,
     targetSide: "left" as const,
@@ -569,6 +675,8 @@ function ContextMapRoutedEdge({
         style={{
           ...style,
           stroke: edgeData.stroke,
+          strokeWidth: selected ? Math.max(edgeData.strokeWidth + 0.6, 3) : edgeData.strokeWidth,
+          strokeDasharray: edgeData.strokeDasharray,
           strokeLinecap: "round",
           strokeLinejoin: "round",
         }}
@@ -576,7 +684,12 @@ function ContextMapRoutedEdge({
       {labelText && (
         <EdgeLabelRenderer>
           <div
-            className="context-map-flow-edge-label"
+            className={[
+              "context-map-flow-edge-label",
+              `context-map-flow-edge-label--${edgeData.relationshipType}`,
+              edgeData.preview ? "context-map-flow-edge-label--preview" : "",
+            ].filter(Boolean).join(" ")}
+            data-edge-id={id}
             style={{
               transform: `translate(-50%, -50%) translate(${route.labelX}px, ${route.labelY}px)`,
             }}
@@ -641,6 +754,159 @@ function normalizeProposedDiff(value: {
     createdAt: value.createdAt instanceof Date ? value.createdAt.toISOString() : value.createdAt,
     diffJson: value.diffJson,
   };
+}
+
+function normalizeManualEditProposal(value: {
+  proposedDiffId: string;
+  reason: string | null;
+  status: string;
+  createdAt: string | Date;
+  diffJson: unknown;
+}): ContextGraphProposedDiff {
+  return normalizeProposedDiff({
+    id: value.proposedDiffId,
+    reason: value.reason,
+    status: value.status,
+    createdAt: value.createdAt,
+    diffJson: value.diffJson,
+  });
+}
+
+function previewObjectId(diffId: string, ref: string) {
+  return `${PREVIEW_ID_PREFIX}${diffId}:${ref}`;
+}
+
+function previewRelationshipId(diffId: string, ref: string) {
+  return `${PREVIEW_ID_PREFIX}${diffId}:relationship:${ref}`;
+}
+
+function finiteLayoutItem(item: { x?: number; y?: number } | undefined) {
+  return item && Number.isFinite(item.x) && Number.isFinite(item.y);
+}
+
+function buildPendingMapPreview(
+  proposedDiffs: ContextGraphProposedDiff[],
+  mapView: ContextMapView,
+  baseObjectsById: Map<string, ContextGraphObject>,
+  baseRelationshipsById: Map<string, ContextGraphRelationship>,
+) {
+  const objects: ContextGraphObject[] = [];
+  const relationships: ContextGraphRelationship[] = [];
+  const layoutItems: ContextMapLayoutItem[] = [];
+
+  for (const proposedDiff of proposedDiffs) {
+    if (!["pending", "approved"].includes(proposedDiff.status)) continue;
+    const diff = diffJsonRecord(proposedDiff.diffJson);
+    const refToPreviewId = new Map<string, string>();
+    const layoutByRef = new Map<string, NonNullable<DiffLayoutInput["items"]>[number]>();
+    const layoutById = new Map<string, NonNullable<DiffLayoutInput["items"]>[number]>();
+
+    for (const layoutUpdate of diff.mapLayoutUpdates ?? []) {
+      if (layoutUpdate.mapViewId !== mapView.id) continue;
+      for (const item of layoutUpdate.items ?? []) {
+        if (!finiteLayoutItem(item)) continue;
+        if (item.objectRef) layoutByRef.set(item.objectRef, item);
+        if (item.objectId) layoutById.set(item.objectId, item);
+      }
+    }
+
+    for (const [index, object] of (diff.objects ?? []).entries()) {
+      const ref = object.ref ?? object.id ?? `object-${index}`;
+      const layout = object.ref ? layoutByRef.get(object.ref) : object.id ? layoutById.get(object.id) : undefined;
+      if (!layout || !finiteLayoutItem(layout)) continue;
+      const id = previewObjectId(proposedDiff.id, ref);
+      refToPreviewId.set(ref, id);
+      if (object.ref) refToPreviewId.set(object.ref, id);
+      const properties = isRecord(object.properties) ? object.properties : {};
+      objects.push({
+        id,
+        objectType: object.objectType ?? "ProcessStep",
+        title: humanDiffTitle(object.title ?? "Untitled card"),
+        summary: object.summary ?? null,
+        properties: {
+          ...properties,
+          contextMapDisplay: "canvas",
+        },
+        confidence: null,
+        status: object.status ?? "proposed",
+        createdByType: "human",
+        createdByUserId: null,
+        createdByAgentRunId: null,
+        sourceEntityType: "ContextGraphProposedDiff",
+        sourceEntityId: proposedDiff.id,
+        validFrom: null,
+        validTo: null,
+        lastVerifiedAt: null,
+        evidenceRefs: [],
+      });
+      layoutItems.push({
+        objectId: id,
+        x: layout.x ?? 0,
+        y: layout.y ?? 0,
+        width: layout.width ?? CONTEXT_MAP_NODE_WIDTH,
+        height: layout.height ?? CONTEXT_MAP_NODE_HEIGHT,
+      });
+    }
+
+    const resolveEndpoint = (objectId?: string, ref?: string) => {
+      if (objectId && baseObjectsById.has(objectId)) return objectId;
+      if (objectId && refToPreviewId.has(objectId)) return refToPreviewId.get(objectId);
+      if (ref && refToPreviewId.has(ref)) return refToPreviewId.get(ref);
+      return undefined;
+    };
+
+    for (const [index, relationship] of (diff.relationships ?? []).entries()) {
+      const sourceObjectId = resolveEndpoint(relationship.sourceObjectId, relationship.sourceRef);
+      const targetObjectId = resolveEndpoint(relationship.targetObjectId, relationship.targetRef);
+      if (!sourceObjectId || !targetObjectId) continue;
+      const ref = relationship.ref ?? `${sourceObjectId}:${relationship.relationshipType ?? "relates_to"}:${targetObjectId}:${index}`;
+      relationships.push({
+        id: previewRelationshipId(proposedDiff.id, ref),
+        sourceObjectId,
+        targetObjectId,
+        relationshipType: relationship.relationshipType ?? "supports",
+        properties: isRecord(relationship.properties) ? relationship.properties : {},
+        confidence: null,
+        status: relationship.status ?? "proposed",
+        createdByType: "human",
+        createdByUserId: null,
+        createdByAgentRunId: null,
+        sourceEntityType: "ContextGraphProposedDiff",
+        sourceEntityId: proposedDiff.id,
+        validFrom: null,
+        validTo: null,
+        lastVerifiedAt: null,
+        evidenceRefs: [],
+      });
+    }
+
+    for (const [index, relationshipUpdate] of (diff.relationshipUpdates ?? []).entries()) {
+      if (!relationshipUpdate.id) continue;
+      const baseRelationship = baseRelationshipsById.get(relationshipUpdate.id);
+      if (!baseRelationship) continue;
+      const sourceObjectId = relationshipUpdate.sourceObjectId ?? baseRelationship.sourceObjectId;
+      const targetObjectId = relationshipUpdate.targetObjectId ?? baseRelationship.targetObjectId;
+      if (!baseObjectsById.has(sourceObjectId) || !baseObjectsById.has(targetObjectId)) continue;
+      relationships.push({
+        ...baseRelationship,
+        id: previewRelationshipId(proposedDiff.id, `${relationshipUpdate.id}:${index}`),
+        sourceObjectId,
+        targetObjectId,
+        relationshipType: relationshipUpdate.relationshipType ?? baseRelationship.relationshipType,
+        properties: {
+          ...baseRelationship.properties,
+          ...(isRecord(relationshipUpdate.properties) ? relationshipUpdate.properties : {}),
+          previewUpdate: true,
+          previewArchive: relationshipUpdate.status === "archived",
+        },
+        status: relationshipUpdate.status === "archived" ? "proposed" : relationshipUpdate.status ?? "proposed",
+        sourceEntityType: "ContextGraphProposedDiff",
+        sourceEntityId: proposedDiff.id,
+      });
+    }
+  }
+
+  return { objects, relationships, layoutItems };
 }
 
 function diffTechnicalCountLabel(diffJson: unknown) {
@@ -779,6 +1045,7 @@ export default function ContextMapClient({
   mapAiEnabled?: boolean;
 }) {
   const initialSelectedObjectId = data.objects.find((object) => isCanvasObject(object, data.mapView))?.id ?? null;
+  const canvasRef = useRef<HTMLDivElement>(null);
   const [selectedObjectIds, setSelectedObjectIds] = useState<string[]>(initialSelectedObjectId ? [initialSelectedObjectId] : []);
   const [selectedObjectId, setSelectedObjectId] = useState<string | null>(initialSelectedObjectId);
   const [selectedRelationshipId, setSelectedRelationshipId] = useState<string | null>(null);
@@ -802,6 +1069,12 @@ export default function ContextMapClient({
   const [editDiffJson, setEditDiffJson] = useState("");
   const [proposedDiffs, setProposedDiffs] = useState<ContextGraphProposedDiff[]>(data.proposedDiffs);
   const [flowInstance, setFlowInstance] = useState<ReactFlowInstance<ContextMapFlowNode, ContextMapFlowEdge> | null>(null);
+  const [addPaletteOpen, setAddPaletteOpen] = useState(false);
+  const [contextMenu, setContextMenu] = useState<ContextMapMenuState | null>(null);
+  const [cardDraft, setCardDraft] = useState<ContextMapCardDraft | null>(null);
+  const [connectionDraft, setConnectionDraft] = useState<ContextMapConnectionDraft | null>(null);
+  const [edgeDraft, setEdgeDraft] = useState<ContextMapEdgeDraft | null>(null);
+  const [manualConnectSourceId, setManualConnectSourceId] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
 
   const isMasterView = data.mapView.createdByUserId === null;
@@ -810,10 +1083,19 @@ export default function ContextMapClient({
     ? data.permissions.canUpdateMasterView ? "Update master" : "Request master update"
     : "Save view";
 
-  const layoutByObjectId = useMemo(() => new Map(data.layoutItems.map((item) => [item.objectId, item])), [data.layoutItems]);
-  const objectById = useMemo(() => new Map(data.objects.map((object) => [object.id, object])), [data.objects]);
-  const relationshipById = useMemo(() => new Map(data.relationships.map((relationship) => [relationship.id, relationship])), [data.relationships]);
-  const canvasObjects = useMemo(() => data.objects.filter((object) => isCanvasObject(object, data.mapView)), [data.mapView, data.objects]);
+  const baseObjectById = useMemo(() => new Map(data.objects.map((object) => [object.id, object])), [data.objects]);
+  const baseRelationshipById = useMemo(() => new Map(data.relationships.map((relationship) => [relationship.id, relationship])), [data.relationships]);
+  const pendingPreview = useMemo(
+    () => buildPendingMapPreview(proposedDiffs, data.mapView, baseObjectById, baseRelationshipById),
+    [baseObjectById, baseRelationshipById, data.mapView, proposedDiffs],
+  );
+  const allObjects = useMemo(() => [...data.objects, ...pendingPreview.objects], [data.objects, pendingPreview.objects]);
+  const allRelationships = useMemo(() => [...data.relationships, ...pendingPreview.relationships], [data.relationships, pendingPreview.relationships]);
+  const allLayoutItems = useMemo(() => [...data.layoutItems, ...pendingPreview.layoutItems], [data.layoutItems, pendingPreview.layoutItems]);
+  const layoutByObjectId = useMemo(() => new Map(allLayoutItems.map((item) => [item.objectId, item])), [allLayoutItems]);
+  const objectById = useMemo(() => new Map(allObjects.map((object) => [object.id, object])), [allObjects]);
+  const relationshipById = useMemo(() => new Map(allRelationships.map((relationship) => [relationship.id, relationship])), [allRelationships]);
+  const canvasObjects = useMemo(() => allObjects.filter((object) => isCanvasObject(object, data.mapView)), [allObjects, data.mapView]);
   const objectTypes = useMemo(() => [...new Set(canvasObjects.map((object) => object.objectType))].sort(), [canvasObjects]);
 
   const filteredObjects = useMemo(() => canvasObjects.filter((object) => {
@@ -836,6 +1118,9 @@ export default function ContextMapClient({
       data: {
         object,
         colors,
+        variant: cardVariantForObject(object),
+        preview: isPreviewObject(object),
+        connectable: !isPreviewObject(object),
         workState,
         pathStage,
         staffingState,
@@ -857,7 +1142,7 @@ export default function ContextMapClient({
   const nodeRectsById = useMemo(() => new Map(nodes.map((node) => [node.id, nodeRectFromFlowNode(node)])), [nodes]);
   const edgeObstacles = useMemo(() => [...nodeRectsById.values()], [nodeRectsById]);
 
-  const routedEdges = useMemo<ContextMapFlowEdge[]>(() => data.relationships.flatMap((relationship) => {
+  const routedEdges = useMemo<ContextMapFlowEdge[]>(() => allRelationships.flatMap((relationship) => {
     const visual = visualRelationshipEndpoints(relationship);
     if (
       !visibleObjectIds.has(visual.sourceObjectId)
@@ -871,7 +1156,9 @@ export default function ContextMapClient({
     if (!sourceRect || !targetRect) return [];
     const sourceSide = nearestSourceSide(sourceRect, targetRect);
     const targetSide = oppositeSide(sourceSide);
-    const stroke = relationshipColor(relationship);
+    const visualStyle = relationshipVisualStyle(relationship);
+    const stroke = visualStyle.stroke;
+    const preview = isPreviewId(relationship.id);
     return [{
       id: relationship.id,
       source: visual.sourceObjectId,
@@ -879,23 +1166,31 @@ export default function ContextMapClient({
       sourceHandle: handleId("source", sourceSide),
       targetHandle: handleId("target", targetSide),
       type: "contextMapRouted",
-      animated: relationship.status === "proposed",
+      animated: relationship.status === "proposed" || preview,
       markerEnd: { type: MarkerType.ArrowClosed, color: stroke },
       data: {
         label: visual.label,
         stroke,
+        strokeWidth: visualStyle.strokeWidth,
+        strokeDasharray: visualStyle.strokeDasharray,
+        preview,
         relationshipType: relationship.relationshipType,
         sourceSide,
         targetSide,
         obstacles: edgeObstacles,
       },
-      className: `context-map-flow-edge context-map-flow-edge--${relationship.relationshipType}`,
+      className: [
+        "context-map-flow-edge",
+        `context-map-flow-edge--${relationship.relationshipType}`,
+        preview ? "context-map-flow-edge--preview" : "",
+      ].filter(Boolean).join(" "),
       style: {
         stroke,
-        strokeWidth: relationship.status === "stale" || relationship.status === "disputed" ? 2.4 : 1.8,
+        strokeWidth: visualStyle.strokeWidth,
+        strokeDasharray: visualStyle.strokeDasharray,
       },
     }];
-  }), [data.relationships, edgeObstacles, nodeRectsById, statusFilter, visibleObjectIds]);
+  }), [allRelationships, edgeObstacles, nodeRectsById, statusFilter, visibleObjectIds]);
 
   const [edges, setEdges, onEdgesChange] = useEdgesState<ContextMapFlowEdge>(routedEdges);
 
@@ -959,14 +1254,15 @@ export default function ContextMapClient({
   const selectedObject = selectedObjectId ? objectById.get(selectedObjectId) ?? null : null;
   const selectedRelationship = selectedRelationshipId ? relationshipById.get(selectedRelationshipId) ?? null : null;
   const selectedRegionIds = useMemo(() => {
-    if (selectedObjectIds.length > 0) return selectedObjectIds;
-    if (selectedRelationship) return [selectedRelationship.sourceObjectId, selectedRelationship.targetObjectId];
-    if (selectedObjectId) return [selectedObjectId];
+    const realSelectedObjectIds = selectedObjectIds.filter((id) => !isPreviewId(id));
+    if (realSelectedObjectIds.length > 0) return realSelectedObjectIds;
+    if (selectedRelationship && !isPreviewId(selectedRelationship.id)) return [selectedRelationship.sourceObjectId, selectedRelationship.targetObjectId].filter((id) => !isPreviewId(id));
+    if (selectedObjectId && !isPreviewId(selectedObjectId)) return [selectedObjectId];
     return [];
   }, [selectedObjectId, selectedObjectIds, selectedRelationship]);
   const selectedRegionKey = selectedRegionIds.join("|");
   const selectedRelationships = selectedObject
-    ? data.relationships.filter((relationship) => relationship.sourceObjectId === selectedObject.id || relationship.targetObjectId === selectedObject.id)
+    ? allRelationships.filter((relationship) => relationship.sourceObjectId === selectedObject.id || relationship.targetObjectId === selectedObject.id)
     : [];
   const selectedDetailEntries = selectedObject
     ? selectedRelationships
@@ -1070,13 +1366,15 @@ export default function ContextMapClient({
   }, [data.mapView.id, selectedRegionKey, selectedRegionIds, workspaceId]);
 
   function currentLayoutItems() {
-    return nodes.map((node) => ({
-      objectId: node.id,
-      x: node.position.x,
-      y: node.position.y,
-      width: CONTEXT_MAP_NODE_WIDTH,
-      height: CONTEXT_MAP_NODE_HEIGHT,
-    }));
+    return nodes
+      .filter((node) => !isPreviewId(node.id))
+      .map((node) => ({
+        objectId: node.id,
+        x: node.position.x,
+        y: node.position.y,
+        width: CONTEXT_MAP_NODE_WIDTH,
+        height: CONTEXT_MAP_NODE_HEIGHT,
+      }));
   }
 
   function fitMap() {
@@ -1277,6 +1575,180 @@ export default function ContextMapClient({
     openWorkspaceChat({ pageContext: buildChatPageContext(objectIds) });
   }
 
+  function closeMapMenus() {
+    setAddPaletteOpen(false);
+    setContextMenu(null);
+  }
+
+  function flowPositionFromClient(clientX: number, clientY: number) {
+    if (flowInstance) {
+      return flowInstance.screenToFlowPosition({ x: clientX, y: clientY });
+    }
+    const bounds = canvasRef.current?.getBoundingClientRect();
+    return bounds ? { x: clientX - bounds.left, y: clientY - bounds.top } : { x: 0, y: 0 };
+  }
+
+  function flowCenterPosition() {
+    const bounds = canvasRef.current?.getBoundingClientRect();
+    if (!bounds) return { x: 120, y: 120 };
+    return flowPositionFromClient(bounds.left + bounds.width / 2, bounds.top + Math.min(bounds.height / 2, 360));
+  }
+
+  function nextPositionFromNode(nodeId: string, offsetY = 0) {
+    const node = nodes.find((item) => item.id === nodeId);
+    if (!node) return flowCenterPosition();
+    return {
+      x: node.position.x + CONTEXT_MAP_NODE_WIDTH + 90,
+      y: node.position.y + offsetY,
+    };
+  }
+
+  function openCardDraft(
+    cardKind: ContextMapManualCardKind,
+    position: { x: number; y: number },
+    sourceObjectId?: string | null,
+    relationIntent?: ContextMapManualRelationIntent | null,
+  ) {
+    closeMapMenus();
+    setCardDraft({ cardKind, position, sourceObjectId, relationIntent, title: "" });
+  }
+
+  function submitCardDraft() {
+    if (!cardDraft) return;
+    const title = cardDraft.title.trim();
+    if (!title) {
+      setMessage({ tone: "error", text: "Add a short card title first." });
+      return;
+    }
+    startTransition(async () => {
+      setMessage(null);
+      try {
+        const result = await createContextMapManualEditProposalAction({
+          workspaceId,
+          mapViewId: data.mapView.id,
+          edit: {
+            action: "add-card",
+            cardKind: cardDraft.cardKind,
+            title,
+            position: cardDraft.position,
+            sourceObjectId: cardDraft.sourceObjectId,
+            relationIntent: cardDraft.relationIntent,
+          },
+        });
+        const proposedDiff = normalizeManualEditProposal(result);
+        setProposedDiffs((current) => [proposedDiff, ...current.filter((diff) => diff.id !== proposedDiff.id)]);
+        setExpandedDiffId(proposedDiff.id);
+        setCardDraft(null);
+        setMessage({ tone: "info", text: "Created a proposed card. It is shown on the map until review." });
+      } catch {
+        setMessage({ tone: "error", text: "Could not propose this card." });
+      }
+    });
+  }
+
+  function openConnectionDraft(sourceObjectId: string, targetObjectId: string) {
+    if (sourceObjectId === targetObjectId || isPreviewId(sourceObjectId) || isPreviewId(targetObjectId)) return;
+    closeMapMenus();
+    setManualConnectSourceId(null);
+    setConnectionDraft({ sourceObjectId, targetObjectId });
+  }
+
+  function submitConnectionDraft(intent: ContextMapManualRelationIntent) {
+    if (!connectionDraft) return;
+    startTransition(async () => {
+      setMessage(null);
+      try {
+        const result = await createContextMapManualEditProposalAction({
+          workspaceId,
+          mapViewId: data.mapView.id,
+          edit: {
+            action: "add-connection",
+            sourceObjectId: connectionDraft.sourceObjectId,
+            targetObjectId: connectionDraft.targetObjectId,
+            relationIntent: intent,
+          },
+        });
+        const proposedDiff = normalizeManualEditProposal(result);
+        setProposedDiffs((current) => [proposedDiff, ...current.filter((diff) => diff.id !== proposedDiff.id)]);
+        setExpandedDiffId(proposedDiff.id);
+        setConnectionDraft(null);
+        setMessage({ tone: "info", text: `Created a proposed ${relationIntentLabel(intent).toLowerCase()} connection.` });
+      } catch {
+        setMessage({ tone: "error", text: "Could not propose this connection." });
+      }
+    });
+  }
+
+  function submitEdgeUpdate(intent: ContextMapManualRelationIntent) {
+    if (!edgeDraft) return;
+    startTransition(async () => {
+      setMessage(null);
+      try {
+        const result = await createContextMapManualEditProposalAction({
+          workspaceId,
+          mapViewId: data.mapView.id,
+          edit: {
+            action: "update-connection",
+            relationshipId: edgeDraft.relationshipId,
+            relationIntent: intent,
+          },
+        });
+        const proposedDiff = normalizeManualEditProposal(result);
+        setProposedDiffs((current) => [proposedDiff, ...current.filter((diff) => diff.id !== proposedDiff.id)]);
+        setExpandedDiffId(proposedDiff.id);
+        setEdgeDraft(null);
+        setMessage({ tone: "info", text: `Created a proposed connection change to ${relationIntentLabel(intent).toLowerCase()}.` });
+      } catch {
+        setMessage({ tone: "error", text: "Could not propose this connection change." });
+      }
+    });
+  }
+
+  function archiveConnection(relationshipId: string) {
+    closeMapMenus();
+    startTransition(async () => {
+      setMessage(null);
+      try {
+        const result = await createContextMapManualEditProposalAction({
+          workspaceId,
+          mapViewId: data.mapView.id,
+          edit: { action: "update-connection", relationshipId, archive: true },
+        });
+        const proposedDiff = normalizeManualEditProposal(result);
+        setProposedDiffs((current) => [proposedDiff, ...current.filter((diff) => diff.id !== proposedDiff.id)]);
+        setExpandedDiffId(proposedDiff.id);
+        setMessage({ tone: "info", text: "Created a proposed archive for this connection." });
+      } catch {
+        setMessage({ tone: "error", text: "Could not propose archiving this connection." });
+      }
+    });
+  }
+
+  function archiveCard(objectId: string) {
+    closeMapMenus();
+    startTransition(async () => {
+      setMessage(null);
+      try {
+        const result = await createContextMapManualEditProposalAction({
+          workspaceId,
+          mapViewId: data.mapView.id,
+          edit: { action: "archive-card", objectId },
+        });
+        const proposedDiff = normalizeManualEditProposal(result);
+        setProposedDiffs((current) => [proposedDiff, ...current.filter((diff) => diff.id !== proposedDiff.id)]);
+        setExpandedDiffId(proposedDiff.id);
+        setMessage({ tone: "info", text: "Created a proposed archive for this card." });
+      } catch {
+        setMessage({ tone: "error", text: "Could not propose archiving this card." });
+      }
+    });
+  }
+
+  function handleConnect(connection: Connection) {
+    if (!connection.source || !connection.target) return;
+    openConnectionDraft(connection.source, connection.target);
+  }
+
   function startInspectorResize(event: ReactPointerEvent<HTMLButtonElement>) {
     if (inspectorDock !== "right" || isCompactLayout) return;
     event.preventDefault();
@@ -1332,6 +1804,29 @@ export default function ContextMapClient({
         </div>
 
         <div className="context-map-toolbar-actions">
+          <div className="context-map-add-wrapper">
+            <button
+              className="secondary small"
+              type="button"
+              onClick={() => {
+                setContextMenu(null);
+                setAddPaletteOpen((value) => !value);
+              }}
+              title="Add a proposed map card"
+            >
+              + Add
+            </button>
+            {addPaletteOpen && (
+              <div className="context-map-palette" role="menu">
+                <button type="button" onClick={() => openCardDraft("standard", flowCenterPosition())}>
+                  Standard card
+                </button>
+                <button type="button" onClick={() => openCardDraft("alert", flowCenterPosition())}>
+                  Alert card
+                </button>
+              </div>
+            )}
+          </div>
           <button className="secondary small" type="button" onClick={() => setShowFilters((value) => !value)} title="Filter visible facts">
             <SlidersHorizontal size={14} aria-hidden="true" /> Filters
           </button>
@@ -1402,7 +1897,45 @@ export default function ContextMapClient({
       )}
 
       <div className="context-map-stage">
-        <div className="context-map-canvas">
+        <div
+          className="context-map-canvas"
+          ref={canvasRef}
+          onContextMenu={(event) => {
+            event.preventDefault();
+            const target = event.target instanceof Element ? event.target : null;
+            const nodeElement = target?.closest(".react-flow__node");
+            const edgeLabelElement = target?.closest("[data-edge-id]");
+            const edgeElement = target?.closest(".react-flow__edge");
+            setAddPaletteOpen(false);
+            if (nodeElement) {
+              const nodeId = nodeElement.getAttribute("data-id");
+              if (nodeId && !isPreviewId(nodeId)) {
+                setContextMenu({ kind: "node", x: event.clientX, y: event.clientY, nodeId });
+              }
+              return;
+            }
+            if (edgeLabelElement) {
+              const edgeId = edgeLabelElement.getAttribute("data-edge-id");
+              if (edgeId && !isPreviewId(edgeId)) {
+                setContextMenu({ kind: "edge", x: event.clientX, y: event.clientY, edgeId });
+              }
+              return;
+            }
+            if (edgeElement) {
+              const edgeId = edgeElement.getAttribute("data-id");
+              if (edgeId && !isPreviewId(edgeId)) {
+                setContextMenu({ kind: "edge", x: event.clientX, y: event.clientY, edgeId });
+              }
+              return;
+            }
+            setContextMenu({
+              kind: "pane",
+              x: event.clientX,
+              y: event.clientY,
+              position: flowPositionFromClient(event.clientX, event.clientY),
+            });
+          }}
+        >
           {nodes.length === 0 ? (
             <div className="context-map-empty">
               <CircleHelp size={32} aria-hidden="true" />
@@ -1418,12 +1951,48 @@ export default function ContextMapClient({
               onNodesChange={onNodesChange}
               onEdgesChange={onEdgesChange}
               onInit={setFlowInstance}
+              onConnect={handleConnect}
+              onPaneClick={() => {
+                closeMapMenus();
+                if (manualConnectSourceId) {
+                  setManualConnectSourceId(null);
+                  setMessage(null);
+                }
+              }}
+              onPaneContextMenu={(event) => {
+                event.preventDefault();
+                setAddPaletteOpen(false);
+                setContextMenu({
+                  kind: "pane",
+                  x: event.clientX,
+                  y: event.clientY,
+                  position: flowPositionFromClient(event.clientX, event.clientY),
+                });
+              }}
+              onNodeContextMenu={(event, node) => {
+                event.preventDefault();
+                if (isPreviewId(node.id)) return;
+                setAddPaletteOpen(false);
+                setContextMenu({ kind: "node", x: event.clientX, y: event.clientY, nodeId: node.id });
+              }}
+              onEdgeContextMenu={(event, edge) => {
+                event.preventDefault();
+                if (isPreviewId(edge.id)) return;
+                setAddPaletteOpen(false);
+                setContextMenu({ kind: "edge", x: event.clientX, y: event.clientY, edgeId: edge.id });
+              }}
               onNodeClick={(_, node) => {
+                if (manualConnectSourceId && manualConnectSourceId !== node.id && !isPreviewId(node.id)) {
+                  openConnectionDraft(manualConnectSourceId, node.id);
+                  return;
+                }
+                closeMapMenus();
                 setSelectedRelationshipId(null);
                 setSelectedObjectId(node.id);
                 setSelectedObjectIds((current) => sameIds(current, [node.id]) ? current : [node.id]);
               }}
               onEdgeClick={(_, edge) => {
+                closeMapMenus();
                 const relationship = relationshipById.get(edge.id);
                 setSelectedRelationshipId(edge.id);
                 if (relationship) {
@@ -1451,6 +2020,9 @@ export default function ContextMapClient({
                 }
               }}
               onNodeDragStop={() => setLayoutDirty(true)}
+              nodesConnectable
+              connectionMode={ConnectionMode.Loose}
+              connectionRadius={28}
               fitView
               minZoom={0.2}
               maxZoom={1.8}
@@ -1461,6 +2033,144 @@ export default function ContextMapClient({
             </ReactFlow>
           )}
         </div>
+
+        {manualConnectSourceId && (
+          <div className="context-map-connect-hint" role="status">
+            Choose another card for the new connection.
+          </div>
+        )}
+
+        {contextMenu && (
+          <div
+            className="context-map-menu"
+            role="menu"
+            style={{ left: contextMenu.x, top: contextMenu.y }}
+          >
+            {contextMenu.kind === "pane" && (
+              <>
+                <button type="button" onClick={() => openCardDraft("standard", contextMenu.position)}>
+                  Add standard card here
+                </button>
+                <button type="button" onClick={() => openCardDraft("alert", contextMenu.position)}>
+                  Add alert card here
+                </button>
+              </>
+            )}
+            {contextMenu.kind === "node" && (
+              <>
+                <button type="button" onClick={() => openCardDraft("standard", nextPositionFromNode(contextMenu.nodeId), contextMenu.nodeId, "enables")}>
+                  Add next card
+                </button>
+                <button type="button" onClick={() => openCardDraft("alert", nextPositionFromNode(contextMenu.nodeId, 48), contextMenu.nodeId, "blocks")}>
+                  Add alert/blocker
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setManualConnectSourceId(contextMenu.nodeId);
+                    setContextMenu(null);
+                    setMessage({ tone: "info", text: "Choose another card to connect." });
+                  }}
+                >
+                  Connect from this card
+                </button>
+                <button type="button" className="context-map-menu-danger" onClick={() => archiveCard(contextMenu.nodeId)}>
+                  Archive
+                </button>
+              </>
+            )}
+            {contextMenu.kind === "edge" && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEdgeDraft({ relationshipId: contextMenu.edgeId });
+                    setContextMenu(null);
+                  }}
+                >
+                  Change connection type
+                </button>
+                <button type="button" className="context-map-menu-danger" onClick={() => archiveConnection(contextMenu.edgeId)}>
+                  Archive connection
+                </button>
+              </>
+            )}
+          </div>
+        )}
+
+        {cardDraft && (
+          <div className="context-map-floating-panel" role="dialog" aria-modal="false">
+            <div>
+              <span className="context-map-eyebrow">{cardDraft.cardKind === "alert" ? "Alert card" : "Standard card"}</span>
+              <strong>{cardDraft.sourceObjectId ? "Add connected card" : "Add card"}</strong>
+            </div>
+            <label>
+              <span>Title</span>
+              <input
+                autoFocus
+                value={cardDraft.title}
+                onChange={(event) => setCardDraft((current) => current ? { ...current, title: event.target.value } : current)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    submitCardDraft();
+                  }
+                }}
+                placeholder={cardDraft.cardKind === "alert" ? "Unresolved risk or blocker" : "Next step or context item"}
+              />
+            </label>
+            <div className="context-map-dialog-actions">
+              <button className="secondary small" type="button" onClick={() => setCardDraft(null)}>
+                Cancel
+              </button>
+              <button className="primary small" type="button" onClick={submitCardDraft} disabled={isPending}>
+                Propose
+              </button>
+            </div>
+          </div>
+        )}
+
+        {connectionDraft && (
+          <div className="context-map-floating-panel" role="dialog" aria-modal="false">
+            <div>
+              <span className="context-map-eyebrow">Connection</span>
+              <strong>Choose relationship</strong>
+            </div>
+            <div className="context-map-relation-grid">
+              {RELATION_INTENT_OPTIONS.map((option) => (
+                <button key={option.intent} type="button" onClick={() => submitConnectionDraft(option.intent)} disabled={isPending}>
+                  {option.label}
+                </button>
+              ))}
+            </div>
+            <div className="context-map-dialog-actions">
+              <button className="secondary small" type="button" onClick={() => setConnectionDraft(null)}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
+
+        {edgeDraft && (
+          <div className="context-map-floating-panel" role="dialog" aria-modal="false">
+            <div>
+              <span className="context-map-eyebrow">Connection</span>
+              <strong>Change relationship</strong>
+            </div>
+            <div className="context-map-relation-grid">
+              {RELATION_INTENT_OPTIONS.map((option) => (
+                <button key={option.intent} type="button" onClick={() => submitEdgeUpdate(option.intent)} disabled={isPending}>
+                  {option.label}
+                </button>
+              ))}
+            </div>
+            <div className="context-map-dialog-actions">
+              <button className="secondary small" type="button" onClick={() => setEdgeDraft(null)}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
 
         <aside className={`context-map-inspector context-map-inspector--${inspectorDock}`}>
           {inspectorDock === "right" && !isCompactLayout && (

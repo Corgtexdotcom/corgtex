@@ -3,6 +3,7 @@ import {
   applyContextGraphProposedDiff,
   buildSelectedRegionContext,
   createContextMapChangeProposal,
+  createContextMapManualEditProposal,
   createMissingRegionFactsProposal,
   createPersonalContextMapView,
   createContextGraphProposedDiff,
@@ -1355,6 +1356,241 @@ describe("context graph domain", () => {
 
     expect(prismaMock.contextMapView.create).not.toHaveBeenCalled();
     expect(prismaMock.contextMapLayoutItem.create).not.toHaveBeenCalled();
+  });
+
+  it("creates a manual standard-card proposal with object-ref layout", async () => {
+    prismaMock.contextGraphProposedDiff.create.mockResolvedValueOnce({
+      id: "diff-manual-card-1",
+      status: "pending",
+      reason: "Manual map edit: add standard card \"Confirm QA owner\".",
+      createdAt: new Date("2026-05-26T12:00:00.000Z"),
+      diffJson: {},
+    });
+
+    await expect(createContextMapManualEditProposal(actor, {
+      workspaceId: "ws-1",
+      mapViewId: "map-1",
+      edit: {
+        action: "add-card",
+        cardKind: "standard",
+        title: "Confirm QA owner",
+        position: { x: 300, y: 220 },
+      },
+    })).resolves.toMatchObject({
+      mode: "proposed",
+      proposedDiffId: "diff-manual-card-1",
+      status: "pending",
+    });
+
+    expect(prismaMock.contextGraphProposedDiff.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        diffJson: expect.objectContaining({
+          objects: [expect.objectContaining({
+            ref: "manual-card",
+            objectType: "ProcessStep",
+            title: "Confirm QA owner",
+            properties: expect.objectContaining({
+              manualMapEdit: true,
+              cardKind: "standard",
+              sourceMapViewId: "map-1",
+            }),
+          })],
+          mapLayoutUpdates: [expect.objectContaining({
+            mapViewId: "map-1",
+            items: [expect.objectContaining({
+              objectRef: "manual-card",
+              x: 300,
+              y: 220,
+            })],
+          })],
+        }),
+      }),
+    }));
+  });
+
+  it("creates a manual alert blocker proposal connected to an existing node", async () => {
+    prismaMock.contextGraphObject.findFirst.mockResolvedValueOnce({
+      id: "step-1",
+      title: "Decision to proceed",
+      objectType: "ProcessStep",
+    });
+    prismaMock.contextGraphProposedDiff.create.mockResolvedValueOnce({
+      id: "diff-alert-blocker-1",
+      status: "pending",
+      reason: "Manual map edit: add alert card \"Pilot approval risk\".",
+      createdAt: new Date("2026-05-26T12:00:00.000Z"),
+      diffJson: {},
+    });
+
+    await createContextMapManualEditProposal(actor, {
+      workspaceId: "ws-1",
+      mapViewId: "map-1",
+      edit: {
+        action: "add-card",
+        cardKind: "alert",
+        title: "Pilot approval risk",
+        position: { x: 640, y: 240 },
+        sourceObjectId: "step-1",
+        relationIntent: "blocks",
+      },
+    });
+
+    expect(prismaMock.contextGraphProposedDiff.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        diffJson: expect.objectContaining({
+          objects: [expect.objectContaining({ ref: "manual-card", objectType: "Risk" })],
+          relationships: [expect.objectContaining({
+            sourceRef: "manual-card",
+            targetObjectId: "step-1",
+            relationshipType: "blocks",
+            properties: expect.objectContaining({ manualMapEdit: true, relationIntent: "blocks" }),
+          })],
+        }),
+      }),
+    }));
+  });
+
+  it("applies a proposed manual card with layout resolved by objectRef", async () => {
+    prismaMock.contextGraphProposedDiff.findFirst.mockResolvedValue({
+      id: "diff-manual-layout-1",
+      workspaceId: "ws-1",
+      status: "pending",
+      reviewedAt: null,
+      proposedByAgentRunId: null,
+      diffJson: {
+        objects: [{
+          ref: "manual-card",
+          objectType: "ProcessStep",
+          title: "Manual card",
+          properties: { manualMapEdit: true },
+        }],
+        mapLayoutUpdates: [{
+          mapViewId: "map-1",
+          items: [{ objectRef: "manual-card", x: 111, y: 222, width: 250, height: 128 }],
+        }],
+      },
+    });
+    prismaMock.contextGraphObject.create.mockResolvedValueOnce({
+      id: "manual-card-1",
+      objectType: "ProcessStep",
+      title: "Manual card",
+      status: "approved",
+    });
+    prismaMock.contextGraphObject.findFirst.mockResolvedValueOnce({ id: "manual-card-1" });
+
+    await expect(applyContextGraphProposedDiff(actor, {
+      workspaceId: "ws-1",
+      proposedDiffId: "diff-manual-layout-1",
+    })).resolves.toMatchObject({ id: "diff-1", status: "applied" });
+
+    expect(prismaMock.contextMapLayoutItem.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: { mapViewId_objectId: { mapViewId: "map-1", objectId: "manual-card-1" } },
+      update: expect.objectContaining({ x: 111, y: 222 }),
+    }));
+  });
+
+  it("maps manual enables connections to depends_on with reversed storage direction", async () => {
+    prismaMock.contextGraphObject.findFirst
+      .mockResolvedValueOnce({ id: "step-a", title: "Step A", objectType: "ProcessStep" })
+      .mockResolvedValueOnce({ id: "step-b", title: "Step B", objectType: "ProcessStep" });
+    prismaMock.contextGraphProposedDiff.create.mockResolvedValueOnce({
+      id: "diff-enables-1",
+      status: "pending",
+      reason: "Manual map edit: add enables connection.",
+      createdAt: new Date("2026-05-26T12:00:00.000Z"),
+      diffJson: {},
+    });
+
+    await createContextMapManualEditProposal(actor, {
+      workspaceId: "ws-1",
+      mapViewId: "map-1",
+      edit: {
+        action: "add-connection",
+        sourceObjectId: "step-a",
+        targetObjectId: "step-b",
+        relationIntent: "enables",
+      },
+    });
+
+    expect(prismaMock.contextGraphProposedDiff.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        diffJson: expect.objectContaining({
+          relationships: [expect.objectContaining({
+            sourceObjectId: "step-b",
+            targetObjectId: "step-a",
+            relationshipType: "depends_on",
+            properties: expect.objectContaining({ relationIntent: "enables" }),
+          })],
+        }),
+      }),
+    }));
+  });
+
+  it("creates proposed relationship updates for archive and connection-type changes", async () => {
+    prismaMock.contextGraphRelationship.findFirst
+      .mockResolvedValueOnce({
+        id: "rel-1",
+        sourceObjectId: "risk-1",
+        targetObjectId: "step-1",
+        relationshipType: "blocks",
+      })
+      .mockResolvedValueOnce({
+        id: "rel-2",
+        sourceObjectId: "step-a",
+        targetObjectId: "step-b",
+        relationshipType: "supports",
+      });
+    prismaMock.contextGraphObject.findFirst
+      .mockResolvedValueOnce({ id: "risk-1", title: "Risk", objectType: "Risk" })
+      .mockResolvedValueOnce({ id: "step-1", title: "Step", objectType: "ProcessStep" })
+      .mockResolvedValueOnce({ id: "step-a", title: "Step A", objectType: "ProcessStep" })
+      .mockResolvedValueOnce({ id: "step-b", title: "Step B", objectType: "ProcessStep" });
+    prismaMock.contextGraphProposedDiff.create
+      .mockResolvedValueOnce({
+        id: "diff-archive-rel-1",
+        status: "pending",
+        reason: "Manual map edit: archive connection.",
+        createdAt: new Date("2026-05-26T12:00:00.000Z"),
+        diffJson: {},
+      })
+      .mockResolvedValueOnce({
+        id: "diff-change-rel-1",
+        status: "pending",
+        reason: "Manual map edit: change connection to needs approval from.",
+        createdAt: new Date("2026-05-26T12:01:00.000Z"),
+        diffJson: {},
+      });
+
+    await createContextMapManualEditProposal(actor, {
+      workspaceId: "ws-1",
+      mapViewId: "map-1",
+      edit: { action: "update-connection", relationshipId: "rel-1", archive: true },
+    });
+    await createContextMapManualEditProposal(actor, {
+      workspaceId: "ws-1",
+      mapViewId: "map-1",
+      edit: { action: "update-connection", relationshipId: "rel-2", relationIntent: "needs_approval_from" },
+    });
+
+    expect(prismaMock.contextGraphProposedDiff.create).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      data: expect.objectContaining({
+        diffJson: expect.objectContaining({
+          relationshipUpdates: [expect.objectContaining({ id: "rel-1", status: "archived" })],
+        }),
+      }),
+    }));
+    expect(prismaMock.contextGraphProposedDiff.create).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      data: expect.objectContaining({
+        diffJson: expect.objectContaining({
+          relationshipUpdates: [expect.objectContaining({
+            id: "rel-2",
+            relationshipType: "needs_approval_from",
+            sourceObjectId: "step-a",
+            targetObjectId: "step-b",
+          })],
+        }),
+      }),
+    }));
   });
 
   it("applies proposed map layout updates during diff application", async () => {

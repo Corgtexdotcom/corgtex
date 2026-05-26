@@ -7,6 +7,7 @@ import {
   applyContextGraphProposedDiff,
   buildSelectedRegionContext,
   createContextMapChangeProposal,
+  createContextMapManualEditProposal,
   createContextGraphProposedDiff,
   createMissingRegionFactsProposal,
   createPersonalContextMapView,
@@ -14,6 +15,7 @@ import {
   updateContextMapLayout,
   updateContextGraphProposedDiff,
 } from "@corgtex/domain";
+import type { ContextMapManualEditInput } from "@corgtex/domain";
 
 import { requirePageActor } from "@/lib/auth";
 
@@ -135,6 +137,17 @@ export async function createContextMapChangeProposalAction(params: {
 }) {
   const actor = await requirePageActor();
   const result = await createContextMapChangeProposal(actor, params);
+  revalidatePath(`/workspaces/${params.workspaceId}/maps`);
+  return result;
+}
+
+export async function createContextMapManualEditProposalAction(params: {
+  workspaceId: string;
+  mapViewId: string;
+  edit: ContextMapManualEditInput;
+}) {
+  const actor = await requirePageActor();
+  const result = await createContextMapManualEditProposal(actor, params);
   revalidatePath(`/workspaces/${params.workspaceId}/maps`);
   return result;
 }
