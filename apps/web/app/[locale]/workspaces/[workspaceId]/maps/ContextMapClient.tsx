@@ -3,13 +3,17 @@
 import { useEffect, useMemo, useState, useTransition, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import {
   Background,
+  BaseEdge,
   Controls,
+  EdgeLabelRenderer,
+  Handle,
   MarkerType,
+  Position,
   ReactFlow,
   useEdgesState,
   useNodesState,
 } from "@xyflow/react";
-import type { Edge, Node, ReactFlowInstance } from "@xyflow/react";
+import type { Edge, EdgeProps, EdgeTypes, Node, NodeProps, NodeTypes, ReactFlowInstance } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import {
   Ban,
@@ -46,6 +50,14 @@ import {
   updateContextGraphProposedDiffAction,
 } from "./actions";
 import "./context-map.css";
+import {
+  buildRoutedEdgePath,
+  handleId,
+  nearestSourceSide,
+  oppositeSide,
+  type NodeRect,
+  type NodeSide,
+} from "./context-map-routing";
 
 type EvidenceRef = {
   id: string;
@@ -181,13 +193,51 @@ type RegionContext = Awaited<ReturnType<typeof buildSelectedRegionContextAction>
 type InspectorDock = "right" | "bottom";
 type StatusFilter = "active" | "approved" | "needs-review" | "all";
 
+type NodeColors = {
+  border: string;
+  background: string;
+  accent: string;
+};
+
+type ContextMapNodeData = Record<string, unknown> & {
+  object: ContextGraphObject;
+  colors: NodeColors;
+  workState: string | null;
+  pathStage: string | null;
+  staffingState: string | null;
+  viewType: string;
+};
+
+type ContextMapEdgeData = Record<string, unknown> & {
+  label: string;
+  stroke: string;
+  relationshipType: string;
+  sourceSide: NodeSide;
+  targetSide: NodeSide;
+  obstacles: NodeRect[];
+};
+
+type ContextMapFlowNode = Node<ContextMapNodeData, "contextMapNode">;
+type ContextMapFlowEdge = Edge<ContextMapEdgeData, "contextMapRouted">;
+
 const INSPECTOR_DOCK_STORAGE_KEY = "corgtex.contextMap.inspectorDock";
 const INSPECTOR_WIDTH_STORAGE_KEY = "corgtex.contextMap.inspectorWidth";
 const INSPECTOR_DEFAULT_WIDTH = 430;
 const INSPECTOR_MIN_WIDTH = 340;
 const INSPECTOR_MAX_WIDTH = 680;
+const CONTEXT_MAP_NODE_WIDTH = 250;
+const CONTEXT_MAP_NODE_HEIGHT = 128;
 
-const NODE_COLORS: Record<string, { border: string; background: string; accent: string }> = {
+const NODE_SIDES: NodeSide[] = ["top", "right", "bottom", "left"];
+
+const SIDE_POSITION: Record<NodeSide, Position> = {
+  top: Position.Top,
+  right: Position.Right,
+  bottom: Position.Bottom,
+  left: Position.Left,
+};
+
+const NODE_COLORS: Record<string, NodeColors> = {
   Process: { border: "#2563eb", background: "#eff6ff", accent: "#1d4ed8" },
   ProcessStep: { border: "#0f766e", background: "#ecfdf5", accent: "#0f766e" },
   Decision: { border: "#7c3aed", background: "#f5f3ff", accent: "#6d28d9" },
@@ -411,6 +461,149 @@ function relationshipColor(relationship: ContextGraphRelationship) {
   return "#64748b";
 }
 
+function nodeRectFromFlowNode(node: ContextMapFlowNode): NodeRect {
+  const styleWidth = typeof node.style?.width === "number" ? node.style.width : null;
+  const styleHeight = typeof node.style?.height === "number" ? node.style.height : null;
+  return {
+    id: node.id,
+    x: node.position.x,
+    y: node.position.y,
+    width: node.width ?? node.initialWidth ?? styleWidth ?? CONTEXT_MAP_NODE_WIDTH,
+    height: Math.max(node.height ?? node.initialHeight ?? styleHeight ?? CONTEXT_MAP_NODE_HEIGHT, CONTEXT_MAP_NODE_HEIGHT),
+  };
+}
+
+function visualRelationshipEndpoints(relationship: ContextGraphRelationship) {
+  if (relationship.relationshipType === "depends_on") {
+    return {
+      sourceObjectId: relationship.targetObjectId,
+      targetObjectId: relationship.sourceObjectId,
+      label: "Enables",
+    };
+  }
+  return {
+    sourceObjectId: relationship.sourceObjectId,
+    targetObjectId: relationship.targetObjectId,
+    label: humanRelationshipLabel(relationship.relationshipType),
+  };
+}
+
+function ContextMapNode({ data }: NodeProps<ContextMapFlowNode>) {
+  const object = data.object;
+  return (
+    <>
+      {NODE_SIDES.map((side) => (
+        <Handle
+          key={`source-${side}`}
+          className="context-map-node-handle"
+          id={handleId("source", side)}
+          isConnectable={false}
+          position={SIDE_POSITION[side]}
+          type="source"
+        />
+      ))}
+      {NODE_SIDES.map((side) => (
+        <Handle
+          key={`target-${side}`}
+          className="context-map-node-handle"
+          id={handleId("target", side)}
+          isConnectable={false}
+          position={SIDE_POSITION[side]}
+          type="target"
+        />
+      ))}
+      <div
+        className={`context-map-node-card context-map-node-card--${statusClass(object.status)}`}
+        style={{ "--node-border": data.colors.border, "--node-bg": data.colors.background, "--node-accent": data.colors.accent } as CSSProperties}
+      >
+        <div className="context-map-node-topline">
+          <span>{humanObjectTypeLabel(object.objectType, data.viewType)}</span>
+          <span className={`context-map-status context-map-status--${statusClass(object.status)}`}>{humanStatusLabel(object.status)}</span>
+        </div>
+        <strong>{object.title}</strong>
+        <div className="context-map-node-meta">
+          {data.workState && <span>{titleizeMachineValue(data.workState)}</span>}
+          {data.pathStage && <span>{data.pathStage}</span>}
+          {data.staffingState && <span>{titleizeMachineValue(data.staffingState)}</span>}
+        </div>
+      </div>
+    </>
+  );
+}
+
+function ContextMapRoutedEdge({
+  id,
+  source,
+  target,
+  sourceX,
+  sourceY,
+  targetX,
+  targetY,
+  markerEnd,
+  style,
+  selected,
+  data,
+  label,
+}: EdgeProps<ContextMapFlowEdge>) {
+  const edgeData = data ?? {
+    label: typeof label === "string" ? label : "",
+    stroke: "#64748b",
+    relationshipType: "relates_to",
+    sourceSide: "right" as const,
+    targetSide: "left" as const,
+    obstacles: [],
+  };
+  const obstacles = edgeData.obstacles.filter((obstacle) => obstacle.id !== source && obstacle.id !== target);
+  const route = buildRoutedEdgePath({
+    sourceX,
+    sourceY,
+    targetX,
+    targetY,
+    sourceSide: edgeData.sourceSide,
+    targetSide: edgeData.targetSide,
+    obstacles,
+  });
+  const labelText = edgeData.label || label;
+
+  return (
+    <>
+      <BaseEdge
+        id={id}
+        className={selected ? "context-map-flow-edge-path context-map-flow-edge-path--selected" : "context-map-flow-edge-path"}
+        interactionWidth={24}
+        markerEnd={markerEnd}
+        path={route.path}
+        style={{
+          ...style,
+          stroke: edgeData.stroke,
+          strokeLinecap: "round",
+          strokeLinejoin: "round",
+        }}
+      />
+      {labelText && (
+        <EdgeLabelRenderer>
+          <div
+            className="context-map-flow-edge-label"
+            style={{
+              transform: `translate(-50%, -50%) translate(${route.labelX}px, ${route.labelY}px)`,
+            }}
+          >
+            {labelText}
+          </div>
+        </EdgeLabelRenderer>
+      )}
+    </>
+  );
+}
+
+const CONTEXT_MAP_NODE_TYPES = {
+  contextMapNode: ContextMapNode,
+} satisfies NodeTypes;
+
+const CONTEXT_MAP_EDGE_TYPES = {
+  contextMapRouted: ContextMapRoutedEdge,
+} satisfies EdgeTypes;
+
 function shouldShowStatus(status: string, filter: StatusFilter) {
   if (filter === "all") return true;
   if (filter === "approved") return status === "approved";
@@ -608,7 +801,7 @@ export default function ContextMapClient({ workspaceId, data, includeStale = fal
   const [stepTitle, setStepTitle] = useState("");
   const [dependencyTargetId, setDependencyTargetId] = useState("");
   const [proposedDiffs, setProposedDiffs] = useState<ContextGraphProposedDiff[]>(data.proposedDiffs);
-  const [flowInstance, setFlowInstance] = useState<ReactFlowInstance | null>(null);
+  const [flowInstance, setFlowInstance] = useState<ReactFlowInstance<ContextMapFlowNode, ContextMapFlowEdge> | null>(null);
   const [isPending, startTransition] = useTransition();
 
   const isMasterView = data.mapView.createdByUserId === null;
@@ -629,7 +822,7 @@ export default function ContextMapClient({ workspaceId, data, includeStale = fal
   }), [canvasObjects, statusFilter, typeFilter]);
   const visibleObjectIds = useMemo(() => new Set(filteredObjects.map((object) => object.id)), [filteredObjects]);
 
-  const initialNodes = useMemo<Node[]>(() => filteredObjects.map((object, index) => {
+  const initialNodes = useMemo<ContextMapFlowNode[]>(() => filteredObjects.map((object, index) => {
     const layout = layoutByObjectId.get(object.id);
     const position = layout ? { x: layout.x, y: layout.y } : positionForIndex(index);
     const colors = NODE_COLORS[object.objectType] ?? { border: "#64748b", background: "#f8fafc", accent: "#475569" };
@@ -638,29 +831,20 @@ export default function ContextMapClient({ workspaceId, data, includeStale = fal
     const staffingState = propertyText(object.properties, "staffingState");
     return {
       id: object.id,
-      type: "default",
+      type: "contextMapNode",
       position,
       data: {
-        label: (
-          <div
-            className={`context-map-node-card context-map-node-card--${statusClass(object.status)}`}
-            style={{ "--node-border": colors.border, "--node-bg": colors.background, "--node-accent": colors.accent } as CSSProperties}
-          >
-            <div className="context-map-node-topline">
-              <span>{humanObjectTypeLabel(object.objectType, data.mapView.viewType)}</span>
-              <span className={`context-map-status context-map-status--${statusClass(object.status)}`}>{humanStatusLabel(object.status)}</span>
-            </div>
-            <strong>{object.title}</strong>
-            <div className="context-map-node-meta">
-              {workState && <span>{titleizeMachineValue(workState)}</span>}
-              {pathStage && <span>{pathStage}</span>}
-              {staffingState && <span>{titleizeMachineValue(staffingState)}</span>}
-            </div>
-          </div>
-        ),
+        object,
+        colors,
+        workState,
+        pathStage,
+        staffingState,
+        viewType: data.mapView.viewType,
       },
+      initialWidth: CONTEXT_MAP_NODE_WIDTH,
+      initialHeight: CONTEXT_MAP_NODE_HEIGHT,
       style: {
-        width: 250,
+        width: CONTEXT_MAP_NODE_WIDTH,
         border: 0,
         padding: 0,
         background: "transparent",
@@ -669,34 +853,51 @@ export default function ContextMapClient({ workspaceId, data, includeStale = fal
     };
   }), [data.mapView.viewType, filteredObjects, layoutByObjectId]);
 
-  const initialEdges = useMemo<Edge[]>(() => data.relationships
-    .filter((relationship) => (
-      visibleObjectIds.has(relationship.sourceObjectId)
-      && visibleObjectIds.has(relationship.targetObjectId)
-      && shouldShowStatus(relationship.status, statusFilter)
-    ))
-    .map((relationship) => {
-      const stroke = relationshipColor(relationship);
-      return {
-        id: relationship.id,
-        source: relationship.sourceObjectId,
-        target: relationship.targetObjectId,
-        type: "smoothstep",
-        label: humanRelationshipLabel(relationship.relationshipType),
-        animated: relationship.status === "proposed",
-        markerEnd: { type: MarkerType.ArrowClosed, color: stroke },
-        style: {
-          stroke,
-          strokeWidth: relationship.status === "stale" || relationship.status === "disputed" ? 2.4 : 1.8,
-        },
-        labelStyle: { fill: "#334155", fontWeight: 700, fontSize: 11 },
-        labelBgStyle: { fill: "#ffffff", fillOpacity: 0.88 },
-        labelBgPadding: [6, 3],
-      };
-    }), [data.relationships, statusFilter, visibleObjectIds]);
+  const [nodes, setNodes, onNodesChange] = useNodesState<ContextMapFlowNode>(initialNodes);
+  const nodeRectsById = useMemo(() => new Map(nodes.map((node) => [node.id, nodeRectFromFlowNode(node)])), [nodes]);
+  const edgeObstacles = useMemo(() => [...nodeRectsById.values()], [nodeRectsById]);
 
-  const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
-  const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
+  const routedEdges = useMemo<ContextMapFlowEdge[]>(() => data.relationships.flatMap((relationship) => {
+    const visual = visualRelationshipEndpoints(relationship);
+    if (
+      !visibleObjectIds.has(visual.sourceObjectId)
+      || !visibleObjectIds.has(visual.targetObjectId)
+      || !shouldShowStatus(relationship.status, statusFilter)
+    ) {
+      return [];
+    }
+    const sourceRect = nodeRectsById.get(visual.sourceObjectId);
+    const targetRect = nodeRectsById.get(visual.targetObjectId);
+    if (!sourceRect || !targetRect) return [];
+    const sourceSide = nearestSourceSide(sourceRect, targetRect);
+    const targetSide = oppositeSide(sourceSide);
+    const stroke = relationshipColor(relationship);
+    return [{
+      id: relationship.id,
+      source: visual.sourceObjectId,
+      target: visual.targetObjectId,
+      sourceHandle: handleId("source", sourceSide),
+      targetHandle: handleId("target", targetSide),
+      type: "contextMapRouted",
+      animated: relationship.status === "proposed",
+      markerEnd: { type: MarkerType.ArrowClosed, color: stroke },
+      data: {
+        label: visual.label,
+        stroke,
+        relationshipType: relationship.relationshipType,
+        sourceSide,
+        targetSide,
+        obstacles: edgeObstacles,
+      },
+      className: `context-map-flow-edge context-map-flow-edge--${relationship.relationshipType}`,
+      style: {
+        stroke,
+        strokeWidth: relationship.status === "stale" || relationship.status === "disputed" ? 2.4 : 1.8,
+      },
+    }];
+  }), [data.relationships, edgeObstacles, nodeRectsById, statusFilter, visibleObjectIds]);
+
+  const [edges, setEdges, onEdgesChange] = useEdgesState<ContextMapFlowEdge>(routedEdges);
 
   useEffect(() => {
     const updateLayout = () => {
@@ -743,9 +944,12 @@ export default function ContextMapClient({ workspaceId, data, includeStale = fal
 
   useEffect(() => {
     setNodes(initialNodes);
-    setEdges(initialEdges);
     setLayoutDirty(false);
-  }, [initialNodes, initialEdges, setEdges, setNodes]);
+  }, [initialNodes, setNodes]);
+
+  useEffect(() => {
+    setEdges(routedEdges);
+  }, [routedEdges, setEdges]);
 
   useEffect(() => {
     setProposedDiffs(data.proposedDiffs);
@@ -870,8 +1074,8 @@ export default function ContextMapClient({ workspaceId, data, includeStale = fal
       objectId: node.id,
       x: node.position.x,
       y: node.position.y,
-      width: 250,
-      height: 112,
+      width: CONTEXT_MAP_NODE_WIDTH,
+      height: CONTEXT_MAP_NODE_HEIGHT,
     }));
   }
 
@@ -1284,9 +1488,11 @@ export default function ContextMapClient({ workspaceId, data, includeStale = fal
               <p>Run meeting intelligence, sync approved records, seed the demo workspace, or adjust filters to populate this map.</p>
             </div>
           ) : (
-            <ReactFlow
+            <ReactFlow<ContextMapFlowNode, ContextMapFlowEdge>
               nodes={nodes}
               edges={edges}
+              nodeTypes={CONTEXT_MAP_NODE_TYPES}
+              edgeTypes={CONTEXT_MAP_EDGE_TYPES}
               onNodesChange={onNodesChange}
               onEdgesChange={onEdgesChange}
               onInit={setFlowInstance}

@@ -218,7 +218,7 @@
   display: grid;
   gap: 7px;
   width: 250px;
-  min-height: 112px;
+  min-height: 128px;
   padding: 12px;
   border: 1px solid var(--node-border);
   border-left: 5px solid var(--node-accent);
@@ -226,6 +226,15 @@
   background: var(--node-bg);
   color: #111827;
   box-shadow: 0 12px 26px rgba(15, 23, 42, 0.1);
+}
+
+.context-map-node-handle {
+  width: 1px;
+  height: 1px;
+  border: 0;
+  background: transparent;
+  opacity: 0;
+  pointer-events: none;
 }
 
 .context-map-node-card strong {
@@ -263,6 +272,27 @@
 .react-flow__edge.selected path,
 .context-map-flow-edge--selected path {
   stroke-width: 3px;
+}
+
+.context-map-flow-edge-path {
+  fill: none;
+}
+
+.context-map-flow-edge-label {
+  position: absolute;
+  max-width: 128px;
+  padding: 3px 7px;
+  border: 1px solid rgba(148, 163, 184, 0.36);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.9);
+  color: #334155;
+  font-size: 0.68rem;
+  font-weight: 800;
+  line-height: 1.15;
+  pointer-events: all;
+  text-align: center;
+  text-transform: none;
+  white-space: nowrap;
 }
 
 .context-map-status {
