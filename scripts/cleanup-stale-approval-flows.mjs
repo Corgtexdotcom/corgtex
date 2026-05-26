@@ -99,9 +99,12 @@ async function main() {
   const now = new Date();
   let withdrawn = 0;
   for (const { flow, reason } of stale) {
-    await prisma.$transaction(async (tx) => {
-      await tx.approvalFlow.update({
-        where: { id: flow.id },
+    const didWithdraw = await prisma.$transaction(async (tx) => {
+      const updated = await tx.approvalFlow.updateMany({
+        where: {
+          id: flow.id,
+          status: "ACTIVE",
+        },
         data: {
           status: "WITHDRAWN",
           closedAt: now,
@@ -113,6 +116,10 @@ async function main() {
           },
         },
       });
+
+      if (updated.count === 0) {
+        return false;
+      }
 
       await tx.auditLog.create({
         data: {
@@ -129,8 +136,12 @@ async function main() {
           },
         },
       });
+
+      return true;
     });
-    withdrawn += 1;
+    if (didWithdraw) {
+      withdrawn += 1;
+    }
   }
 
   console.log(JSON.stringify({

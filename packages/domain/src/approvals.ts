@@ -43,8 +43,6 @@ type LoadedFlow = ApprovalFlow & {
 };
 
 const EXPIRING_FLOW_BATCH_SIZE = 25;
-const ACTIONABLE_APPROVAL_SCAN_LIMIT = 500;
-
 export type ActionableApprovalFlow = ApprovalFlow & {
   decisions: Array<{
     choice: ApprovalDecisionChoice;
@@ -423,7 +421,7 @@ export async function ensureApprovalFlow(tx: Prisma.TransactionClient, params: {
   });
 }
 
-async function activeApprovalFlowsForWorkspace(workspaceId: string, take = ACTIONABLE_APPROVAL_SCAN_LIMIT) {
+async function activeApprovalFlowsForWorkspace(workspaceId: string) {
   return prisma.approvalFlow.findMany({
     where: { workspaceId, status: "ACTIVE" },
     include: {
@@ -434,7 +432,6 @@ async function activeApprovalFlowsForWorkspace(workspaceId: string, take = ACTIO
       },
     },
     orderBy: { createdAt: "desc" },
-    take,
   });
 }
 
@@ -527,8 +524,11 @@ export async function withdrawActiveApprovalFlowForSubject(tx: Prisma.Transactio
   }
 
   const closedAt = params.now ?? new Date();
-  await tx.approvalFlow.update({
-    where: { id: flow.id },
+  const updated = await tx.approvalFlow.updateMany({
+    where: {
+      id: flow.id,
+      status: "ACTIVE",
+    },
     data: {
       status: "WITHDRAWN",
       closedAt,
@@ -540,6 +540,10 @@ export async function withdrawActiveApprovalFlowForSubject(tx: Prisma.Transactio
       } as Prisma.InputJsonValue,
     },
   });
+
+  if (updated.count === 0) {
+    return null;
+  }
 
   await tx.auditLog.create({
     data: {

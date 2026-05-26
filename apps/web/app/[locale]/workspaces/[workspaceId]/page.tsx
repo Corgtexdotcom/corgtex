@@ -292,9 +292,15 @@ export default async function WorkspaceDashboard({
                   );
                 })}
                 {pendingFlowTotal > displayedApprovalFlows.length && (
-                  <Link href={`/workspaces/${workspaceId}/proposals?status=OPEN`} className="nr-attention-inline-link">
-                    {t("viewAllApprovals", { count: pendingFlowTotal - displayedApprovalFlows.length })}
-                  </Link>
+                  <>
+                    <span className="nr-attention-copy">{t("remainingApprovals", { count: pendingFlowTotal - displayedApprovalFlows.length })}</span>
+                    <Link href={`/workspaces/${workspaceId}/proposals?status=OPEN`} className="nr-attention-inline-link">
+                      {t("viewProposalApprovals")}
+                    </Link>
+                    <Link href={`/workspaces/${workspaceId}/finance?status=OPEN`} className="nr-attention-inline-link">
+                      {t("viewSpendApprovals")}
+                    </Link>
+                  </>
                 )}
               </div>
             )}

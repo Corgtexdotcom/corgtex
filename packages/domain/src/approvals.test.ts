@@ -17,6 +17,7 @@ const prismaMock = vi.hoisted(() => {
       findFirst: vi.fn(),
       findUnique: vi.fn(),
       update: vi.fn(),
+      updateMany: vi.fn(),
     },
     auditLog: {
       create: vi.fn(),
@@ -71,6 +72,7 @@ beforeEach(() => {
   prismaMock.auditLog.create.mockResolvedValue({});
   prismaMock.approvalFlow.findMany.mockResolvedValue([]);
   prismaMock.approvalFlow.findFirst.mockResolvedValue(null);
+  prismaMock.approvalFlow.updateMany.mockResolvedValue({ count: 1 });
   prismaMock.proposal.findMany.mockResolvedValue([]);
   prismaMock.proposal.update.mockResolvedValue({ id: "p-1" });
   prismaMock.policyCorpus.upsert.mockResolvedValue({});
@@ -249,6 +251,7 @@ describe("listActionableApprovalFlows", () => {
         { id: "flow-open-spend", subjectLabel: "Open spend" },
       ],
     });
+    expect(prismaMock.approvalFlow.findMany).toHaveBeenCalledWith(expect.not.objectContaining({ take: expect.any(Number) }));
   });
 });
 
@@ -271,8 +274,8 @@ describe("withdrawActiveApprovalFlowForSubject", () => {
       now,
     })).resolves.toMatchObject({ id: "flow-1" });
 
-    expect(prismaMock.approvalFlow.update).toHaveBeenCalledWith({
-      where: { id: "flow-1" },
+    expect(prismaMock.approvalFlow.updateMany).toHaveBeenCalledWith({
+      where: { id: "flow-1", status: "ACTIVE" },
       data: expect.objectContaining({
         status: "WITHDRAWN",
         closedAt: now,
@@ -285,6 +288,25 @@ describe("withdrawActiveApprovalFlowForSubject", () => {
         entityId: "flow-1",
       }),
     }));
+  });
+
+  it("does not overwrite a flow that is no longer active", async () => {
+    prismaMock.approvalFlow.findFirst.mockResolvedValue({
+      id: "flow-1",
+      workspaceId: "ws-1",
+      subjectType: "SPEND",
+      subjectId: "spend-1",
+    });
+    prismaMock.approvalFlow.updateMany.mockResolvedValue({ count: 0 });
+
+    await expect(withdrawActiveApprovalFlowForSubject(prismaMock, {
+      workspaceId: "ws-1",
+      subjectType: "SPEND",
+      subjectId: "spend-1",
+      cleanupReason: "SpendRequest archived",
+    })).resolves.toBeNull();
+
+    expect(prismaMock.auditLog.create).not.toHaveBeenCalled();
   });
 });
 

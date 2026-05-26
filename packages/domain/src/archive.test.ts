@@ -17,6 +17,7 @@ const { prismaMock, storageDeleteMock } = vi.hoisted(() => {
     approvalFlow: {
       findFirst: vi.fn(),
       update: vi.fn(),
+      updateMany: vi.fn(),
     },
     spendRequest: {
       findFirst: vi.fn(),
@@ -90,6 +91,7 @@ describe("workspace archive domain", () => {
     prismaMock.auditLog.create.mockResolvedValue({});
     prismaMock.approvalFlow.findFirst.mockResolvedValue(null);
     prismaMock.approvalFlow.update.mockResolvedValue({});
+    prismaMock.approvalFlow.updateMany.mockResolvedValue({ count: 1 });
     prismaMock.workspaceArchiveRecord.create.mockResolvedValue({});
     prismaMock.workspaceArchiveRecord.update.mockResolvedValue({});
   });
@@ -190,8 +192,8 @@ describe("workspace archive domain", () => {
       reason: "obsolete",
     })).resolves.toMatchObject({ id: "proposal-1" });
 
-    expect(prismaMock.approvalFlow.update).toHaveBeenCalledWith({
-      where: { id: "flow-1" },
+    expect(prismaMock.approvalFlow.updateMany).toHaveBeenCalledWith({
+      where: { id: "flow-1", status: "ACTIVE" },
       data: expect.objectContaining({
         status: "WITHDRAWN",
         resultJson: expect.objectContaining({ cleanupReason: "Proposal archived" }),
