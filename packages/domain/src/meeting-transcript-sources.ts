@@ -481,15 +481,14 @@ export function normalizeMeetingTranscriptSourceArtifact(
 
   const nestedMeeting = asRecord(jsonRecord.meeting);
   const nestedRecording = asRecord(jsonRecord.recording);
-  const externalId = artifact.externalId?.trim()
+  const explicitExternalId = artifact.externalId?.trim()
     || asString(jsonRecord.id)
     || asString(jsonRecord.transcript_id)
     || asString(jsonRecord.transcriptId)
     || asString(jsonRecord.recording_id)
     || asString(jsonRecord.recordingId)
     || asString(nestedMeeting.id)
-    || asString(nestedRecording.id)
-    || `${provider.toLowerCase()}:${stableHash({ fileName: artifact.fileName, transcript }).slice(0, 24)}`;
+    || asString(nestedRecording.id);
   const title = artifact.title?.trim()
     || asString(jsonRecord.title)
     || asString(jsonRecord.name)
@@ -503,7 +502,13 @@ export function normalizeMeetingTranscriptSourceArtifact(
     || asDate(jsonRecord.start_time)
     || asDate(nestedMeeting.start_time)
     || parseDateFromText(`${artifact.fileName ?? ""}\n${text.slice(0, 2000)}`);
-  invariant(recordedAt, 400, "RECORDED_AT_REQUIRED", `Recorded date is required for ${artifact.fileName || externalId}.`);
+  invariant(recordedAt, 400, "RECORDED_AT_REQUIRED", `Recorded date is required for ${artifact.fileName || explicitExternalId || "transcript artifact"}.`);
+  const externalId = explicitExternalId
+    || `${provider.toLowerCase()}:${stableHash({
+      fileName: artifact.fileName,
+      recordedAt: recordedAt.toISOString(),
+      transcript,
+    }).slice(0, 24)}`;
   const sourceUpdatedAt = asDate(artifact.sourceUpdatedAt)
     || asDate(jsonRecord.updatedAt)
     || asDate(jsonRecord.updated_at)
@@ -549,7 +554,13 @@ export function normalizeMeetingTranscriptSourceArtifact(
     participantEmails: [...new Set(participantEmails)],
     participants,
     segments,
-    rawMetadata: metadata,
+    rawMetadata: {
+      ...metadata,
+      meetingUrl,
+      calendarExternalId: artifact.calendarExternalId?.trim() || asString(jsonRecord.calendarExternalId) || asString(jsonRecord.calendar_id),
+      participantEmails: [...new Set(participantEmails)],
+      participants,
+    },
     contentHash: "",
   };
   return { ...normalized, contentHash: contentHashFor(normalized) };
@@ -652,31 +663,39 @@ async function importOneNormalizedTranscript(actor: AppActor, params: {
   const incomingUpdatedAt = artifact.sourceUpdatedAt ?? artifact.recordedAt;
   const activeUpdatedAt = activeRecord ? activeRecord.sourceUpdatedAt ?? activeRecord.recordedAt : null;
   const isOlderRevision = Boolean(activeRecord && activeUpdatedAt && incomingUpdatedAt < activeUpdatedAt);
-  const record = await prisma.meetingTranscriptSourceRecord.create({
-    data: {
-      workspaceId: params.workspaceId,
-      connectionId: params.connectionId ?? null,
-      batchId: params.batchId ?? null,
-      meetingId: activeRecord?.meetingId ?? null,
-      provider: artifact.provider,
-      externalId: artifact.externalId,
-      externalRevisionId: artifact.sourceUpdatedAt?.toISOString() ?? artifact.contentHash.slice(0, 16),
-      title: artifact.title,
-      recordedAt: artifact.recordedAt,
-      sourceUpdatedAt: artifact.sourceUpdatedAt,
-      sourceUrl: artifact.sourceUrl,
-      contentHash: artifact.contentHash,
-      transcriptText: artifact.transcript,
-      summaryMd: artifact.summaryMd,
-      segmentsJson: artifact.segments.length > 0 ? toInputJson(artifact.segments) : undefined,
-      participantsJson: artifact.participants.length > 0 || artifact.participantEmails.length > 0
-        ? toInputJson({ participants: artifact.participants, participantEmails: artifact.participantEmails })
-        : undefined,
-      rawMetadataJson: toInputJson(artifact.rawMetadata),
-      status: isOlderRevision ? "SKIPPED" : "ACTIVE",
-      supersededByRecordId: isOlderRevision ? activeRecord?.id ?? null : null,
-    },
-  });
+  const recordData = {
+    workspaceId: params.workspaceId,
+    connectionId: params.connectionId ?? null,
+    batchId: params.batchId ?? null,
+    meetingId: activeRecord?.meetingId ?? null,
+    provider: artifact.provider,
+    externalId: artifact.externalId,
+    externalRevisionId: artifact.sourceUpdatedAt?.toISOString() ?? artifact.contentHash.slice(0, 16),
+    title: artifact.title,
+    recordedAt: artifact.recordedAt,
+    sourceUpdatedAt: artifact.sourceUpdatedAt,
+    sourceUrl: artifact.sourceUrl,
+    contentHash: artifact.contentHash,
+    transcriptText: artifact.transcript,
+    summaryMd: artifact.summaryMd,
+    segmentsJson: artifact.segments.length > 0 ? toInputJson(artifact.segments) : undefined,
+    participantsJson: artifact.participants.length > 0 || artifact.participantEmails.length > 0
+      ? toInputJson({ participants: artifact.participants, participantEmails: artifact.participantEmails })
+      : undefined,
+    rawMetadataJson: toInputJson(artifact.rawMetadata),
+    status: isOlderRevision ? "SKIPPED" as const : "ACTIVE" as const,
+    supersededByRecordId: isOlderRevision ? activeRecord?.id ?? null : null,
+    processedAt: null,
+    error: null,
+  };
+  const record = existingSameHash?.status === "FAILED"
+    ? await prisma.meetingTranscriptSourceRecord.update({
+      where: { id: existingSameHash.id },
+      data: recordData,
+    })
+    : await prisma.meetingTranscriptSourceRecord.create({
+      data: recordData,
+    });
   if (isOlderRevision) {
     return { status: "skipped" as const, record, meeting: null, reason: "older_revision" };
   }
@@ -801,8 +820,34 @@ export async function importMeetingTranscriptSourceArtifacts(actor: AppActor, pa
       if (result.status === "failed") failedCount += 1;
     } catch (error) {
       failedCount += 1;
-      await prisma.meetingTranscriptSourceRecord.create({
-        data: {
+      await prisma.meetingTranscriptSourceRecord.upsert({
+        where: {
+          workspaceId_provider_externalId_contentHash: {
+            workspaceId: params.workspaceId,
+            provider,
+            externalId: artifact.externalId,
+            contentHash: artifact.contentHash,
+          },
+        },
+        update: {
+          connectionId: params.connectionId ?? null,
+          batchId: batch.id,
+          title: artifact.title,
+          recordedAt: artifact.recordedAt,
+          sourceUpdatedAt: artifact.sourceUpdatedAt,
+          sourceUrl: artifact.sourceUrl,
+          transcriptText: artifact.transcript,
+          summaryMd: artifact.summaryMd,
+          segmentsJson: artifact.segments.length > 0 ? toInputJson(artifact.segments) : undefined,
+          participantsJson: artifact.participants.length > 0 || artifact.participantEmails.length > 0
+            ? toInputJson({ participants: artifact.participants, participantEmails: artifact.participantEmails })
+            : undefined,
+          rawMetadataJson: toInputJson(artifact.rawMetadata),
+          status: "FAILED",
+          processedAt: null,
+          error: error instanceof Error ? error.message : "Transcript import failed.",
+        },
+        create: {
           workspaceId: params.workspaceId,
           connectionId: params.connectionId ?? null,
           batchId: batch.id,
@@ -815,6 +860,10 @@ export async function importMeetingTranscriptSourceArtifacts(actor: AppActor, pa
           contentHash: artifact.contentHash,
           transcriptText: artifact.transcript,
           summaryMd: artifact.summaryMd,
+          segmentsJson: artifact.segments.length > 0 ? toInputJson(artifact.segments) : undefined,
+          participantsJson: artifact.participants.length > 0 || artifact.participantEmails.length > 0
+            ? toInputJson({ participants: artifact.participants, participantEmails: artifact.participantEmails })
+            : undefined,
           rawMetadataJson: toInputJson(artifact.rawMetadata),
           status: "FAILED",
           error: error instanceof Error ? error.message : "Transcript import failed.",
@@ -864,16 +913,29 @@ export async function retryMeetingTranscriptImportBatch(actor: AppActor, params:
     provider: batch.provider,
     connectionId: batch.connectionId,
     sourceKind: "retry",
-    artifacts: batch.records.map((record) => ({
-      externalId: record.externalId,
-      title: record.title,
-      recordedAt: record.recordedAt,
-      sourceUpdatedAt: record.sourceUpdatedAt,
-      sourceUrl: record.sourceUrl,
-      text: record.transcriptText,
-      summaryMd: record.summaryMd,
-      metadata: asRecord(record.rawMetadataJson),
-    })),
+    artifacts: batch.records.map((record) => {
+      const metadata = asRecord(record.rawMetadataJson);
+      const participants = asRecord(record.participantsJson);
+      return {
+        externalId: record.externalId,
+        title: record.title,
+        recordedAt: record.recordedAt,
+        sourceUpdatedAt: record.sourceUpdatedAt,
+        sourceUrl: record.sourceUrl,
+        meetingUrl: asString(metadata.meetingUrl) || asString(metadata.meeting_url),
+        calendarExternalId: asString(metadata.calendarExternalId) || asString(metadata.calendar_id),
+        text: record.transcriptText,
+        summaryMd: record.summaryMd,
+        participantEmails: asArray(participants.participantEmails)
+          .map(asString)
+          .filter((email): email is string => Boolean(email)),
+        participants: asArray(participants.participants),
+        segments: asArray(record.segmentsJson)
+          .map(normalizeSegment)
+          .filter((segment): segment is MeetingTranscriptSegment => Boolean(segment)),
+        metadata,
+      };
+    }),
   });
 }
 

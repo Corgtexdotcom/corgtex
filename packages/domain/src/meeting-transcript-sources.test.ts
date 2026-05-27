@@ -13,6 +13,7 @@ const { prismaMock, intakeMeetingTranscriptMock } = vi.hoisted(() => ({
       findUnique: vi.fn(),
       findFirst: vi.fn(),
       create: vi.fn(),
+      upsert: vi.fn(),
       update: vi.fn(),
       updateMany: vi.fn(),
     },
@@ -62,9 +63,15 @@ describe("meeting transcript sources", () => {
       ...data,
     }));
     prismaMock.meetingTranscriptSourceRecord.findUnique.mockResolvedValue(null);
+    prismaMock.meetingTranscriptSourceRecord.findFirst.mockResolvedValue(null);
     prismaMock.meetingTranscriptSourceRecord.create.mockImplementation(({ data }) => Promise.resolve({
       id: `record-${prismaMock.meetingTranscriptSourceRecord.create.mock.calls.length}`,
       ...data,
+    }));
+    prismaMock.meetingTranscriptSourceRecord.upsert.mockImplementation(({ create, update }) => Promise.resolve({
+      id: "record-upserted",
+      ...create,
+      ...update,
     }));
     prismaMock.meetingTranscriptSourceRecord.update.mockResolvedValue({});
     prismaMock.meetingTranscriptSourceRecord.updateMany.mockResolvedValue({ count: 1 });
@@ -130,6 +137,23 @@ describe("meeting transcript sources", () => {
     })).toThrow("Recorded date is required");
   });
 
+  it("includes the meeting date in fallback external IDs", async () => {
+    const { normalizeMeetingTranscriptSourceArtifact } = await import("./meeting-transcript-sources");
+
+    const first = normalizeMeetingTranscriptSourceArtifact("FIREFLIES", {
+      fileName: "transcript.txt",
+      recordedAt: "2026-05-01T10:00:00.000Z",
+      text: "Jan: Same export body.",
+    });
+    const second = normalizeMeetingTranscriptSourceArtifact("FIREFLIES", {
+      fileName: "transcript.txt",
+      recordedAt: "2026-05-02T10:00:00.000Z",
+      text: "Jan: Same export body.",
+    });
+
+    expect(first.externalId).not.toBe(second.externalId);
+  });
+
   it("imports batches oldest-to-newest and replaces a newer source revision", async () => {
     prismaMock.meetingTranscriptSourceRecord.findFirst
       .mockResolvedValueOnce(null)
@@ -171,6 +195,78 @@ describe("meeting transcript sources", () => {
     });
     expect(prismaMock.meetingTranscriptSourceRecord.updateMany).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({ status: "SUPERSEDED" }),
+    }));
+  });
+
+  it("reuses a failed same-hash source row when retrying the artifact", async () => {
+    prismaMock.meetingTranscriptSourceRecord.findUnique.mockResolvedValueOnce({
+      id: "failed-record",
+      status: "FAILED",
+      provider: "FIREFLIES",
+      externalId: "ff-failed",
+      contentHash: "same-hash",
+    });
+    prismaMock.meetingTranscriptSourceRecord.update.mockImplementation(({ where, data }) => Promise.resolve({
+      id: where.id,
+      ...data,
+    }));
+    const { importMeetingTranscriptSourceArtifacts } = await import("./meeting-transcript-sources");
+
+    const result = await importMeetingTranscriptSourceArtifacts(agentActor, {
+      workspaceId: "ws-1",
+      provider: "FIREFLIES",
+      artifacts: [{
+        externalId: "ff-failed",
+        title: "Retry me",
+        recordedAt: "2026-05-01T10:00:00.000Z",
+        text: "Jan: Retry this failed transcript.",
+      }],
+    });
+
+    expect(result.batch).toMatchObject({ status: "COMPLETED", importedCount: 1 });
+    expect(prismaMock.meetingTranscriptSourceRecord.create).not.toHaveBeenCalled();
+    expect(prismaMock.meetingTranscriptSourceRecord.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "failed-record" },
+      data: expect.objectContaining({ status: "ACTIVE", error: null }),
+    }));
+  });
+
+  it("preserves matching metadata when retrying failed batches", async () => {
+    prismaMock.meetingTranscriptImportBatch.findFirst.mockResolvedValueOnce({
+      id: "batch-failed",
+      workspaceId: "ws-1",
+      provider: "FIREFLIES",
+      connectionId: "connection-1",
+      records: [{
+        externalId: "ff-retry",
+        title: "Retry with metadata",
+        recordedAt: new Date("2026-05-01T10:00:00.000Z"),
+        sourceUpdatedAt: new Date("2026-05-01T11:00:00.000Z"),
+        sourceUrl: "https://fireflies.ai/transcripts/ff-retry",
+        transcriptText: "Jan: Retry with full matching context.",
+        summaryMd: null,
+        rawMetadataJson: {
+          meetingUrl: "https://meet.google.com/abc-defg-hij",
+          calendarExternalId: "calendar-event-1",
+        },
+        participantsJson: {
+          participantEmails: ["Jan@Example.com"],
+          participants: [{ name: "Jan" }],
+        },
+        segmentsJson: [],
+      }],
+    });
+    const { retryMeetingTranscriptImportBatch } = await import("./meeting-transcript-sources");
+
+    await retryMeetingTranscriptImportBatch(agentActor, {
+      workspaceId: "ws-1",
+      batchId: "batch-failed",
+    });
+
+    expect(intakeMeetingTranscriptMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      meetingUrl: "https://meet.google.com/abc-defg-hij",
+      calendarExternalId: "calendar-event-1",
+      participantEmails: ["jan@example.com"],
     }));
   });
 

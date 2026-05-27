@@ -263,6 +263,7 @@ async function findTranscriptMeetingCandidatesInternal(params: {
   title?: string | null;
   recordedAt: Date;
   participantEmails?: string[] | null;
+  meetingUrlHash?: string | null;
 }) {
   const start = new Date(params.recordedAt.getTime() - TRANSCRIPT_MATCH_WINDOW_MS);
   const end = new Date(params.recordedAt.getTime() + TRANSCRIPT_MATCH_WINDOW_MS);
@@ -297,11 +298,13 @@ async function findTranscriptMeetingCandidatesInternal(params: {
     const attendeeScore = participantEmails.length > 0
       ? 0.2 * (overlap / participantEmails.length)
       : 0.05;
-    const score = Number((titleScore + timeScore + attendeeScore).toFixed(3));
+    const urlScore = params.meetingUrlHash && meeting.meetingUrlHash === params.meetingUrlHash ? 0.15 : 0;
+    const score = Number(Math.min(1, titleScore + timeScore + attendeeScore + urlScore).toFixed(3));
     const reason = [
       titleScore > 0 ? "title" : null,
       timeScore > 0 ? "time" : null,
       attendeeScore > 0.05 ? "attendees" : null,
+      urlScore > 0 ? "meeting URL" : null,
     ].filter(Boolean).join(", ");
 
     return {
@@ -371,6 +374,7 @@ async function updateMeetingWithTranscriptTx(
   const externalId = params.externalId?.trim() || existing.externalId;
   const calendarExternalId = params.calendarExternalId?.trim() || existing.calendarExternalId;
 
+  const incomingSummaryMd = params.summaryMd?.trim() || null;
   const meeting = await tx.meeting.update({
     where: { id: params.meetingId },
     data: {
@@ -383,7 +387,7 @@ async function updateMeetingWithTranscriptTx(
       meetingUrlHash: meetingUrl ? meetingUrlHash(meetingUrl) : existing.meetingUrlHash,
       recordedAt: params.recordedAt && !Number.isNaN(params.recordedAt.valueOf()) ? params.recordedAt : undefined,
       transcript,
-      summaryMd: params.replaceTranscript ? params.summaryMd?.trim() || null : params.summaryMd?.trim() || existing.summaryMd || undefined,
+      summaryMd: incomingSummaryMd || existing.summaryMd || undefined,
       ingestionGuidanceMd,
       participantIds,
       participantEmails,
@@ -470,7 +474,7 @@ export async function getMeeting(workspaceId: string, meetingId: string) {
       series: true,
       insights: {
         orderBy: [
-          { sourceRecordedAt: "desc" },
+          { sourceRecordedAt: { sort: "desc", nulls: "last" } },
           { createdAt: "desc" },
         ],
       },
@@ -912,9 +916,6 @@ export async function uploadMeetingTranscript(actor: AppActor, params: {
   if (params.calendarExternalId?.trim()) {
     directMatchClauses.push({ calendarExternalId: params.calendarExternalId.trim() });
   }
-  if (normalizedMeetingUrlHash) {
-    directMatchClauses.push({ meetingUrlHash: normalizedMeetingUrlHash });
-  }
   if (directMatchClauses.length > 0) {
     const directMatch = await prisma.meeting.findFirst({
       where: {
@@ -934,7 +935,10 @@ export async function uploadMeetingTranscript(actor: AppActor, params: {
     }
   }
 
-  const candidates = await findTranscriptMeetingCandidatesInternal(params);
+  const candidates = await findTranscriptMeetingCandidatesInternal({
+    ...params,
+    meetingUrlHash: normalizedMeetingUrlHash,
+  });
   const [best, second] = candidates;
   if (best && best.score >= TRANSCRIPT_AUTO_MATCH_THRESHOLD && (!second || best.score - second.score >= TRANSCRIPT_MATCH_MARGIN)) {
     const meeting = await prisma.$transaction((tx) => updateMeetingWithTranscriptTx(tx, actor, {
