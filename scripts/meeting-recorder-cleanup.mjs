@@ -126,7 +126,7 @@ function recallDeleteCanFallBackToLeave(error) {
 
 async function cancelRecall(recording) {
   const apiKey = process.env.RECALL_API_KEY;
-  const region = process.env.RECALL_REGION || "us-west-2";
+  const region = process.env.RECALL_REGION || "us-east-1";
   if (!apiKey) {
     throw new Error("RECALL_API_KEY is missing.");
   }
@@ -332,11 +332,11 @@ async function main() {
         scheduledEndAt: true,
         recordings: {
           where: {
-            externalBotId: { not: null },
             OR: [
-              { status: { in: [...ACTIVE_STATUSES] } },
-              { status: "FAILED", failureCode: "STALE_RECORDER" },
-              { status: "COMPLETED", transcriptProcessedAt: null },
+              { externalBotId: { not: null }, status: { in: [...ACTIVE_STATUSES] } },
+              { externalBotId: { not: null }, status: "FAILED", failureCode: "STALE_RECORDER" },
+              { externalBotId: { not: null }, status: "COMPLETED", transcriptProcessedAt: null },
+              { activeDedupeKey: { not: null }, status: { in: [...ACTIVE_STATUSES] } },
             ],
           },
           orderBy: { createdAt: "desc" },
@@ -394,6 +394,7 @@ async function main() {
     for (const meeting of meetings) {
       const groups = new Map();
       for (const recording of meeting.recordings) {
+        if (!recording.externalBotId) continue;
         const key = groupKey(recording);
         groups.set(key, [...(groups.get(key) ?? []), recording]);
       }

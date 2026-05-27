@@ -1011,6 +1011,7 @@ type DuplicateRecorderCleanupScope = {
   meetingId?: string;
   provider?: MeetingRecorderProvider;
   joinAt?: Date;
+  meetingUrl?: string;
 };
 
 function duplicateGroupRestoreRank(group: RecordingWithMeetingTime[]) {
@@ -1049,16 +1050,29 @@ async function cleanupDuplicateScheduledProviderBots(
   workspaceId: string,
   scope: DuplicateRecorderCleanupScope = {},
 ): Promise<DuplicateRecorderCleanupStats> {
+  const scopedMeetingUrl = scope.meetingUrl ? normalizeMeetingUrl(scope.meetingUrl) : null;
   const recordings = await prisma.meetingRecording.findMany({
     where: {
       workspaceId,
       ...(scope.meetingId ? { meetingId: scope.meetingId } : {}),
       ...(scope.provider ? { provider: scope.provider } : {}),
       ...(scope.joinAt ? { joinAt: scope.joinAt } : {}),
-      externalBotId: { not: null },
       OR: [
-        { status: { in: ACTIVE_RECORDING_STATUSES } },
-        { status: "FAILED", failureCode: "STALE_RECORDER" },
+        {
+          externalBotId: { not: null },
+          ...(scopedMeetingUrl ? { meetingUrl: scopedMeetingUrl } : {}),
+          status: { in: ACTIVE_RECORDING_STATUSES },
+        },
+        {
+          externalBotId: { not: null },
+          ...(scopedMeetingUrl ? { meetingUrl: scopedMeetingUrl } : {}),
+          status: "FAILED",
+          failureCode: "STALE_RECORDER",
+        },
+        {
+          activeDedupeKey: { not: null },
+          status: { in: ACTIVE_RECORDING_STATUSES },
+        },
       ],
     },
     include: {
@@ -1073,6 +1087,7 @@ async function cleanupDuplicateScheduledProviderBots(
 
   const groups = new Map<string, RecordingWithMeetingTime[]>();
   for (const recording of recordings) {
+    if (!recording.externalBotId) continue;
     const key = duplicateRecorderGroupKey(recording);
     if (!key) continue;
     groups.set(key, [...(groups.get(key) ?? []), recording]);
@@ -1205,6 +1220,7 @@ async function reuseFutureProviderBotIfPresent(params: {
       meetingId: params.meetingId,
       provider: params.provider,
       joinAt: params.joinAt,
+      meetingUrl,
     });
     const active = await prisma.meetingRecording.findFirst({
       where: {

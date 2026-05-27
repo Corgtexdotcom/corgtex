@@ -1378,9 +1378,9 @@ describe("meeting recorder domain", () => {
         workspaceId: "workspace-1",
         meetingId: "meeting-1",
         provider: "RECALL_AI",
-        externalBotId: "recall-bot-current-active",
+        externalBotId: null,
         activeDedupeKey: "meeting-recording:workspace-1:meeting-1:RECALL_AI",
-        status: "SCHEDULED",
+        status: "PENDING",
         failureCode: null,
         failureMessage: null,
         joinAt: currentMeeting.recordedAt,
@@ -1967,6 +1967,9 @@ describe("meeting recorder domain", () => {
           meetingId: "meeting-1",
           provider: "RECALL_AI",
           joinAt: requestedJoinAt,
+          OR: expect.arrayContaining([
+            expect.objectContaining({ meetingUrl: "https://teams.microsoft.com/l/meetup-join/abc" }),
+          ]),
         }),
       }));
       expect(prismaMock.meetingRecording.create).not.toHaveBeenCalled();
