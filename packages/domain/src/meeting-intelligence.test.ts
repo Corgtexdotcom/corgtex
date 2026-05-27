@@ -1063,6 +1063,18 @@ describe("meeting-intelligence", () => {
           supersededByInsightId: "insight-new",
         }),
       }));
+      expect(prisma.meetingInsight.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+        where: expect.objectContaining({
+          workspaceId: "ws-1",
+          meetingId: "meeting-1",
+          sourceRecordId: { not: null },
+          NOT: { sourceRecordId: "source-record-new" },
+          supersededAt: null,
+        }),
+        data: expect.objectContaining({
+          supersededAt: expect.any(Date),
+        }),
+      }));
     });
   });
 
@@ -1074,7 +1086,7 @@ describe("meeting-intelligence", () => {
       });
 
       expect(prisma.meetingInsight.updateMany).toHaveBeenCalledWith({
-        where: { meetingId: "meeting-123", workspaceId: "ws-1", status: "SUGGESTED" },
+        where: { meetingId: "meeting-123", workspaceId: "ws-1", status: "SUGGESTED", supersededAt: null },
         data: {
           status: "CONFIRMED",
           reviewedByUserId: "user-123",
@@ -1127,6 +1139,7 @@ describe("meeting-intelligence", () => {
           workspaceId: "ws-1",
           meetingId: "meeting-1",
           status: { in: ["SUGGESTED", "CONFIRMED"] },
+          supersededAt: null,
           confidence: { gte: 0.8 },
         }),
       }));

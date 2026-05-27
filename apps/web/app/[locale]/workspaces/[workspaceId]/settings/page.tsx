@@ -29,7 +29,6 @@ import {
   disconnectCommunicationInstallationAction,
   updateMeetingRecorderConfigAction,
   connectMeetingTranscriptSourceAction,
-  importMeetingTranscriptSourceAction,
   retryMeetingTranscriptImportBatchAction,
   runMeetingTranscriptSourceBackfillAction,
   updateSlackAgendaSettingsAction,
@@ -633,10 +632,16 @@ export default async function SettingsPage({
                                     <button type="submit" className="secondary small">Save connection</button>
                                   </div>
                                 </form>
-                                <form action={importMeetingTranscriptSourceAction} className="stack nr-form-section">
+                                <form
+                                  action={`/api/workspaces/${workspaceId}/meeting-transcript-sources/${entry.slug}/import`}
+                                  method="post"
+                                  encType="multipart/form-data"
+                                  className="stack nr-form-section"
+                                >
                                   <input type="hidden" name="workspaceId" value={workspaceId} />
                                   <input type="hidden" name="provider" value={entry.slug} />
                                   <input type="hidden" name="sourceKind" value="settings-upload" />
+                                  <input type="hidden" name="redirectTo" value={`/workspaces/${workspaceId}/settings`} />
                                   <label style={{ fontSize: "0.85rem" }}>
                                     Transcript export or ZIP
                                     <input name="file" type="file" multiple accept=".zip,.json,.txt,.vtt,.srt,.docx,.pdf,.md,.csv,text/*,application/json,application/pdf,application/zip" />
