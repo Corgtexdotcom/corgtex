@@ -64,6 +64,7 @@ const { prismaMock, fetchMock } = vi.hoisted(() => {
     event: {
       createMany: vi.fn(),
     },
+    $executeRaw: vi.fn(),
     $queryRaw: vi.fn(),
     $transaction: vi.fn(),
   };
@@ -137,6 +138,7 @@ describe("meeting recorder domain", () => {
     fetchMock.mockReset();
     global.fetch = fetchMock as unknown as typeof fetch;
     prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof prismaMock) => Promise<unknown>) => callback(prismaMock));
+    prismaMock.$executeRaw.mockResolvedValue(0);
     prismaMock.$queryRaw.mockResolvedValue([]);
     prismaMock.workspaceFeatureFlag.findUnique.mockResolvedValue({ enabled: true });
     prismaMock.customerDeployment.findUnique.mockResolvedValue(null);
@@ -2148,6 +2150,8 @@ describe("meeting recorder domain", () => {
 
     await expect(reconcileMeetingRecorders("workspace-1")).resolves.toMatchObject({ staleFailed: 0, recoveredTranscripts: 1 });
 
+    expect(prismaMock.$executeRaw).toHaveBeenCalledTimes(1);
+    expect(prismaMock.$queryRaw).not.toHaveBeenCalled();
     expect(prismaMock.meetingRecording.findMany).toHaveBeenNthCalledWith(1, expect.objectContaining({
       where: expect.objectContaining({
         OR: expect.arrayContaining([
