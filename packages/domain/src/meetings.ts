@@ -323,12 +323,17 @@ async function updateMeetingWithTranscriptTx(
     workspaceId: string;
     meetingId: string;
     title?: string | null;
+    source?: string | null;
     recordedAt?: Date | null;
     transcript: string;
     summaryMd?: string | null;
     ingestionGuidanceMd?: string | null;
     participantIds?: string[] | null;
     participantEmails?: string[] | null;
+    externalId?: string | null;
+    calendarExternalId?: string | null;
+    meetingUrl?: string | null;
+    replaceTranscript?: boolean;
   }
 ) {
   const existing = await tx.meeting.findFirst({
@@ -341,11 +346,16 @@ async function updateMeetingWithTranscriptTx(
       ingestionGuidanceMd: true,
       participantIds: true,
       participantEmails: true,
+      source: true,
+      externalId: true,
+      calendarExternalId: true,
+      meetingUrl: true,
+      meetingUrlHash: true,
     },
   });
   invariant(existing, 404, "NOT_FOUND", "Meeting not found.");
 
-  const transcript = mergeTranscript(existing.transcript, params.transcript);
+  const transcript = params.replaceTranscript ? params.transcript.trim() : mergeTranscript(existing.transcript, params.transcript);
   const ingestionGuidanceMd = mergeMarkdownNote(existing.ingestionGuidanceMd, params.ingestionGuidanceMd);
   const participantIds = normalizeIds([
     ...existing.participantIds,
@@ -356,15 +366,24 @@ async function updateMeetingWithTranscriptTx(
     ...(params.participantEmails ?? []),
   ]);
   const title = chooseMergedTitle(existing.title, params.title);
+  const source = params.source?.trim() || existing.source;
+  const meetingUrl = params.meetingUrl?.trim() ? normalizeMeetingUrl(params.meetingUrl) : existing.meetingUrl;
+  const externalId = params.externalId?.trim() || existing.externalId;
+  const calendarExternalId = params.calendarExternalId?.trim() || existing.calendarExternalId;
 
   const meeting = await tx.meeting.update({
     where: { id: params.meetingId },
     data: {
       status: "COMPLETED",
       title,
+      source,
+      externalId,
+      calendarExternalId,
+      meetingUrl,
+      meetingUrlHash: meetingUrl ? meetingUrlHash(meetingUrl) : existing.meetingUrlHash,
       recordedAt: params.recordedAt && !Number.isNaN(params.recordedAt.valueOf()) ? params.recordedAt : undefined,
       transcript,
-      summaryMd: params.summaryMd?.trim() || existing.summaryMd || undefined,
+      summaryMd: params.replaceTranscript ? params.summaryMd?.trim() || null : params.summaryMd?.trim() || existing.summaryMd || undefined,
       ingestionGuidanceMd,
       participantIds,
       participantEmails,
@@ -450,7 +469,10 @@ export async function getMeeting(workspaceId: string, meetingId: string) {
     include: {
       series: true,
       insights: {
-        orderBy: { createdAt: "desc" },
+        orderBy: [
+          { sourceRecordedAt: "desc" },
+          { createdAt: "desc" },
+        ],
       },
       proposals: {
         include: {
@@ -848,12 +870,16 @@ export async function uploadMeetingTranscript(actor: AppActor, params: {
   meetingId?: string | null;
   title?: string | null;
   source?: string | null;
+  externalId?: string | null;
+  calendarExternalId?: string | null;
+  meetingUrl?: string | null;
   recordedAt: Date;
   transcript: string;
   summaryMd?: string | null;
   ingestionGuidanceMd?: string | null;
   participantIds?: string[] | null;
   participantEmails?: string[] | null;
+  replaceTranscript?: boolean;
 }) {
   await requireWorkspaceMembership({
     actor,
@@ -862,6 +888,8 @@ export async function uploadMeetingTranscript(actor: AppActor, params: {
 
   invariant(!Number.isNaN(params.recordedAt.valueOf()), 400, "INVALID_INPUT", "recordedAt must be a valid date.");
   invariant(params.transcript.trim().length > 0, 400, "INVALID_INPUT", "Transcript is required.");
+  const normalizedMeetingUrl = params.meetingUrl?.trim() ? normalizeMeetingUrl(params.meetingUrl) : null;
+  const normalizedMeetingUrlHash = normalizedMeetingUrl ? meetingUrlHash(normalizedMeetingUrl) : null;
 
   if (params.meetingId) {
     const existing = await prisma.meeting.findFirst({
@@ -875,6 +903,35 @@ export async function uploadMeetingTranscript(actor: AppActor, params: {
       meetingId: params.meetingId as string,
     }));
     return { status: "matched" as const, meeting, candidates: [] };
+  }
+
+  const directMatchClauses: Prisma.MeetingWhereInput[] = [];
+  if (params.externalId?.trim()) {
+    directMatchClauses.push({ externalId: params.externalId.trim() });
+  }
+  if (params.calendarExternalId?.trim()) {
+    directMatchClauses.push({ calendarExternalId: params.calendarExternalId.trim() });
+  }
+  if (normalizedMeetingUrlHash) {
+    directMatchClauses.push({ meetingUrlHash: normalizedMeetingUrlHash });
+  }
+  if (directMatchClauses.length > 0) {
+    const directMatch = await prisma.meeting.findFirst({
+      where: {
+        workspaceId: params.workspaceId,
+        archivedAt: null,
+        OR: directMatchClauses,
+      },
+      select: { id: true },
+    });
+    if (directMatch) {
+      const meeting = await prisma.$transaction((tx) => updateMeetingWithTranscriptTx(tx, actor, {
+        ...params,
+        meetingId: directMatch.id,
+        meetingUrl: normalizedMeetingUrl,
+      }));
+      return { status: "matched" as const, meeting, candidates: [] };
+    }
   }
 
   const candidates = await findTranscriptMeetingCandidatesInternal(params);
@@ -895,6 +952,9 @@ export async function uploadMeetingTranscript(actor: AppActor, params: {
     workspaceId: params.workspaceId,
     title: params.title,
     source: params.source || "transcript-upload",
+    externalId: params.externalId,
+    calendarExternalId: params.calendarExternalId,
+    meetingUrl: normalizedMeetingUrl,
     recordedAt: params.recordedAt,
     transcript: params.transcript,
     summaryMd: params.summaryMd,
@@ -988,6 +1048,9 @@ export async function createMeeting(actor: AppActor, params: {
   workspaceId: string;
   title?: string | null;
   source: string;
+  externalId?: string | null;
+  calendarExternalId?: string | null;
+  meetingUrl?: string | null;
   recordedAt: Date;
   scheduledEndAt?: Date | null;
   transcript?: string | null;
@@ -1002,6 +1065,7 @@ export async function createMeeting(actor: AppActor, params: {
   });
 
   const source = params.source.trim();
+  const meetingUrl = params.meetingUrl?.trim() ? normalizeMeetingUrl(params.meetingUrl) : null;
   invariant(source.length > 0, 400, "INVALID_INPUT", "Meeting source is required.");
   invariant(!Number.isNaN(params.recordedAt.valueOf()), 400, "INVALID_INPUT", "recordedAt must be a valid date.");
 
@@ -1011,6 +1075,10 @@ export async function createMeeting(actor: AppActor, params: {
         workspaceId: params.workspaceId,
         title: params.title?.trim() || null,
         source,
+        externalId: params.externalId?.trim() || null,
+        calendarExternalId: params.calendarExternalId?.trim() || null,
+        meetingUrl,
+        meetingUrlHash: meetingUrl ? meetingUrlHash(meetingUrl) : null,
         status: "COMPLETED",
         recordedAt: params.recordedAt,
         scheduledEndAt: params.scheduledEndAt ?? null,

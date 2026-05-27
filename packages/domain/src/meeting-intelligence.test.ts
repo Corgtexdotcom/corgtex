@@ -72,6 +72,9 @@ vi.mock("@corgtex/shared", async (importOriginal) => {
         update: vi.fn(),
         updateMany: vi.fn(),
       },
+      meetingTranscriptSourceRecord: {
+        findFirst: vi.fn(),
+      },
     },
   };
 });
@@ -966,6 +969,85 @@ describe("meeting-intelligence", () => {
       });
 
       expect(prisma.meetingInsight.createMany).not.toHaveBeenCalled();
+    });
+
+    it("links proposal-targeted insights to the newest transcript source and supersedes older suggestions", async () => {
+      const { defaultModelGateway } = await import("@corgtex/models");
+      buildMeetingIntelligenceContextMock.mockResolvedValueOnce({
+        contextualIntelligenceEnabled: true,
+        meeting: {
+          id: "meeting-1",
+          workspaceId: "ws-1",
+          title: "Proposal review",
+          transcript: "Jan: This changes the active proposal.",
+          summaryMd: null,
+          blocksJson: null,
+          ingestionGuidanceMd: null,
+          recordedAt: new Date("2026-05-03T10:00:00.000Z"),
+        },
+        actions: [],
+        tensions: [],
+        proposals: [{ id: "proposal-1", title: "Meeting template", status: "OPEN" }],
+        previousMeetings: [],
+        followUps: [],
+        deliberationEntries: [],
+        knowledgeSearchQuery: "",
+        knowledge: [],
+        attendees: [],
+      });
+      (prisma.meetingTranscriptSourceRecord.findFirst as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        id: "source-record-new",
+        recordedAt: new Date("2026-05-03T10:00:00.000Z"),
+        sourceUpdatedAt: new Date("2026-05-03T11:00:00.000Z"),
+      });
+      (defaultModelGateway.extract as ReturnType<typeof vi.fn>).mockResolvedValue({
+        output: {
+          insights: [
+            {
+              type: "DELIBERATION_ENTRY",
+              operation: "CREATE",
+              title: "Proposal evidence",
+              body: "The meeting adds newer evidence to the proposal.",
+              confidence: 0.9,
+              targetEntityType: "Proposal",
+              targetEntityId: "proposal-1",
+              deliberationEntryType: "REACTION",
+              sourceQuote: "This changes the active proposal.",
+            },
+          ],
+        },
+      });
+      (prisma.meetingInsight.findFirst as ReturnType<typeof vi.fn>)
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce({
+          id: "insight-new",
+          targetEntityType: "Proposal",
+          targetEntityId: "proposal-1",
+        });
+
+      await extractMeetingInsights(mockActor, {
+        workspaceId: "ws-1",
+        meetingId: "meeting-1",
+      });
+
+      expect(prisma.meetingInsight.createMany).toHaveBeenCalledWith(expect.objectContaining({
+        data: [expect.objectContaining({
+          sourceRecordId: "source-record-new",
+          sourceRecordedAt: new Date("2026-05-03T10:00:00.000Z"),
+          targetEntityType: "Proposal",
+          targetEntityId: "proposal-1",
+        })],
+      }));
+      expect(prisma.meetingInsight.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+        where: expect.objectContaining({
+          targetEntityType: "Proposal",
+          targetEntityId: "proposal-1",
+          supersededAt: null,
+        }),
+        data: expect.objectContaining({
+          supersededByInsightId: "insight-new",
+        }),
+      }));
     });
   });
 

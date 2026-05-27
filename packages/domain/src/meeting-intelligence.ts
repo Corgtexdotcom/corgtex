@@ -302,6 +302,19 @@ export async function extractMeetingInsights(
 
   invariant(meeting, 404, "NOT_FOUND", "Meeting not found.");
   invariant(meeting.transcript, 400, "INVALID_STATE", "Meeting has no transcript to analyze.");
+  const latestSourceRecord = await prisma.meetingTranscriptSourceRecord.findFirst({
+    where: {
+      workspaceId: params.workspaceId,
+      meetingId: meeting.id,
+      status: "ACTIVE",
+    },
+    orderBy: [{ sourceUpdatedAt: "desc" }, { recordedAt: "desc" }, { createdAt: "desc" }],
+    select: {
+      id: true,
+      recordedAt: true,
+      sourceUpdatedAt: true,
+    },
+  });
 
   const instruction = `
 You are analyzing a meeting transcript for a self-managed organization.
@@ -507,6 +520,8 @@ Be conservative — only extract items you're confident about.
         deliberationEntryType,
         resolutionOutcome,
         dedupeKey,
+        sourceRecordId: latestSourceRecord?.id ?? null,
+        sourceRecordedAt: latestSourceRecord?.recordedAt ?? meeting.recordedAt ?? null,
       };
 
       const existingInsight = await tx.meetingInsight.findFirst({
@@ -548,6 +563,26 @@ Be conservative — only extract items you're confident about.
       });
       if (created) {
         createdInsights.push(created);
+        if (created.targetEntityType && created.targetEntityId && insightData.sourceRecordedAt) {
+          await tx.meetingInsight.updateMany({
+            where: {
+              workspaceId: params.workspaceId,
+              id: { not: created.id },
+              status: "SUGGESTED",
+              targetEntityType: created.targetEntityType,
+              targetEntityId: created.targetEntityId,
+              supersededAt: null,
+              OR: [
+                { sourceRecordedAt: null },
+                { sourceRecordedAt: { lt: insightData.sourceRecordedAt } },
+              ],
+            },
+            data: {
+              supersededAt: new Date(),
+              supersededByInsightId: created.id,
+            },
+          });
+        }
       }
     }
 

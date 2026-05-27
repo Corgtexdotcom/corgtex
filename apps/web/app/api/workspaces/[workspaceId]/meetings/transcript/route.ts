@@ -51,6 +51,12 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         meetingId: formString(formData, "meetingId"),
         title: formString(formData, "title"),
         source: formString(formData, "source") ?? "transcript-upload",
+        provider: formString(formData, "provider"),
+        externalId: formString(formData, "externalId"),
+        sourceUpdatedAt: formString(formData, "sourceUpdatedAt"),
+        sourceUrl: formString(formData, "sourceUrl"),
+        meetingUrl: formString(formData, "meetingUrl"),
+        calendarExternalId: formString(formData, "calendarExternalId"),
         recordedAt: formString(formData, "recordedAt"),
         summaryMd: formString(formData, "summaryMd"),
         ingestionGuidanceMd: formString(formData, "ingestionGuidanceMd"),
@@ -65,6 +71,12 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       meetingId?: unknown;
       title?: unknown;
       source?: unknown;
+      provider?: unknown;
+      externalId?: unknown;
+      sourceUpdatedAt?: unknown;
+      sourceUrl?: unknown;
+      meetingUrl?: unknown;
+      calendarExternalId?: unknown;
       recordedAt?: unknown;
       transcript?: unknown;
       summaryMd?: unknown;
@@ -78,6 +90,12 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       meetingId: typeof body.meetingId === "string" ? body.meetingId : null,
       title: typeof body.title === "string" ? body.title : null,
       source: typeof body.source === "string" ? body.source : "transcript-upload",
+      provider: typeof body.provider === "string" ? body.provider : null,
+      externalId: typeof body.externalId === "string" ? body.externalId : null,
+      sourceUpdatedAt: typeof body.sourceUpdatedAt === "string" ? body.sourceUpdatedAt : null,
+      sourceUrl: typeof body.sourceUrl === "string" ? body.sourceUrl : null,
+      meetingUrl: typeof body.meetingUrl === "string" ? body.meetingUrl : null,
+      calendarExternalId: typeof body.calendarExternalId === "string" ? body.calendarExternalId : null,
       recordedAt: typeof body.recordedAt === "string" ? body.recordedAt : null,
       transcript: String(body.transcript ?? ""),
       summaryMd: typeof body.summaryMd === "string" ? body.summaryMd : null,
