@@ -79,6 +79,30 @@ describe("computeNewspaperLayout", () => {
     }));
   });
 
+  it("supports the unified dashboard knowledge feed and work rail sections", () => {
+    const layout = computeNewspaperLayout([
+      { id: "knowledgeFeed", priority: 1, itemCount: 8 },
+      { id: "proposals", priority: 2, itemCount: 7 },
+      { id: "actionItems", priority: 3, itemCount: 9 },
+      { id: "tensions", priority: 4, itemCount: 5 },
+    ]);
+
+    expect(layout.variant).toBe("balanced");
+    expect(layout.visibleSections.map((section) => section.id)).toEqual([
+      "knowledgeFeed",
+      "proposals",
+      "actionItems",
+      "tensions",
+    ]);
+    expect(layout.sectionCaps.knowledgeFeed).toEqual(expect.objectContaining({
+      itemCap: 6,
+      excerptMaxLength: 220,
+      placement: "standard",
+    }));
+    expect(layout.sectionCaps.proposals.itemCap).toBe(5);
+    expect(layout.sectionCaps.actionItems.itemCap).toBe(6);
+  });
+
   it("allocates wider placement and larger caps to meeting-heavy layouts", () => {
     const layout = computeNewspaperLayout([
       { id: "featuredKnowledge", priority: 1, itemCount: 3 },

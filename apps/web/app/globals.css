@@ -3132,6 +3132,115 @@ a.wiki-list-item:hover {
   .nr-paper-section-wide { grid-column: span 2; }
   .nr-paper-sparse .nr-paper-section-lead,
   .nr-paper-sparse .nr-paper-section-wide { grid-column: 1 / -1; }
+
+  .nr-dashboard-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr);
+    gap: 32px;
+    align-items: start;
+    margin-bottom: 48px;
+  }
+
+  .nr-knowledge-feed,
+  .nr-work-rail {
+    min-width: 0;
+  }
+
+  .nr-feed-list,
+  .nr-rail-list {
+    display: grid;
+    gap: 0;
+  }
+
+  .nr-feed-item {
+    border-bottom: 1px solid var(--line);
+    padding: 18px 0;
+  }
+
+  .nr-feed-item:first-child {
+    padding-top: 0;
+  }
+
+  .nr-feed-item:last-child {
+    border-bottom: 0;
+  }
+
+  .nr-feed-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 6px;
+    color: var(--muted);
+    font-size: 0.78rem;
+    line-height: 1.35;
+  }
+
+  .nr-feed-link {
+    color: inherit;
+    text-decoration: none;
+  }
+
+  .nr-feed-title {
+    margin: 0 0 8px;
+    color: var(--text);
+    font-size: 1.2rem;
+    font-weight: 700;
+    line-height: 1.25;
+  }
+
+  .nr-feed-item-lead .nr-feed-title {
+    font-size: 1.55rem;
+    line-height: 1.18;
+  }
+
+  .nr-work-rail {
+    display: grid;
+    gap: 24px;
+  }
+
+  .nr-rail-section {
+    min-width: 0;
+  }
+
+  .nr-rail-item {
+    display: block;
+    border-bottom: 1px dashed var(--line);
+    padding: 10px 0;
+    color: inherit;
+    text-decoration: none;
+  }
+
+  .nr-rail-item:first-child {
+    padding-top: 0;
+  }
+
+  .nr-rail-item:last-child {
+    border-bottom: 0;
+  }
+
+  .nr-rail-title {
+    display: block;
+    color: var(--text);
+    font-size: 0.9rem;
+    font-weight: 700;
+    line-height: 1.35;
+  }
+
+  .nr-rail-copy {
+    display: block;
+    margin-top: 4px;
+    color: var(--text);
+    font-size: 0.82rem;
+    line-height: 1.4;
+  }
+
+  .nr-rail-meta {
+    display: block;
+    margin-top: 4px;
+    color: var(--muted);
+    font-size: 0.78rem;
+    line-height: 1.35;
+  }
   
   .nr-section-header { @apply font-sans text-[0.95rem] border-t border-line pt-3 mb-4 font-semibold normal-case tracking-normal text-text; }
   .nr-lead-headline { @apply font-sans text-2xl font-bold leading-tight m-0 mb-3; }
@@ -3166,6 +3275,22 @@ a.wiki-list-item:hover {
     gap: 16px;
     margin-bottom: 32px;
     padding: 16px;
+  }
+  .nr-attention-rail {
+    display: grid;
+    gap: 14px;
+    margin-bottom: 0;
+  }
+  .nr-attention-rail .nr-attention-summary {
+    padding-right: 0;
+  }
+  .nr-attention-rail .nr-attention-body {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 14px;
+  }
+  .nr-attention-rail .nr-attention-block {
+    width: 100%;
   }
   .nr-attention-summary {
     flex: 0 1 180px;
@@ -3305,6 +3430,7 @@ a.wiki-list-item:hover {
   .nr-markdown { @apply text-text; }
 
   @media (max-width: 980px) {
+    .nr-dashboard-grid,
     .nr-paper,
     .nr-paper-balanced,
     .nr-paper-meeting-heavy {
@@ -3884,6 +4010,7 @@ a.wiki-list-item:hover {
   }
 
   .nr-paper,
+  .nr-dashboard-grid,
   .nr-category-grid,
   .ws-columns,
   .ws-columns > *,
