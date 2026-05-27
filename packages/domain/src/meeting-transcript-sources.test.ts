@@ -17,6 +17,17 @@ const { prismaMock, intakeMeetingTranscriptMock } = vi.hoisted(() => ({
       update: vi.fn(),
       updateMany: vi.fn(),
     },
+    meetingTranscriptSourceConnection: {
+      upsert: vi.fn(),
+      findUnique: vi.fn(),
+      update: vi.fn(),
+    },
+    member: {
+      findUnique: vi.fn(),
+    },
+    workspaceFeatureFlag: {
+      findUnique: vi.fn(),
+    },
     auditLog: {
       create: vi.fn(),
     },
@@ -44,6 +55,11 @@ const agentActor = {
   authProvider: "bootstrap" as const,
   label: "test-agent",
   workspaceIds: ["ws-1"],
+};
+
+const userActor = {
+  kind: "user" as const,
+  user: { id: "user-1", email: "jan@example.com", displayName: "Jan" },
 };
 
 describe("meeting transcript sources", () => {
@@ -75,6 +91,26 @@ describe("meeting transcript sources", () => {
     }));
     prismaMock.meetingTranscriptSourceRecord.update.mockResolvedValue({});
     prismaMock.meetingTranscriptSourceRecord.updateMany.mockResolvedValue({ count: 1 });
+    prismaMock.meetingTranscriptSourceConnection.upsert.mockImplementation(({ create, update }) => Promise.resolve({
+      id: "connection-1",
+      ...create,
+      ...update,
+    }));
+    prismaMock.meetingTranscriptSourceConnection.findUnique.mockResolvedValue({
+      id: "connection-1",
+      workspaceId: "ws-1",
+      provider: "FIREFLIES",
+      webhookSecretEnc: "enc:secret",
+    });
+    prismaMock.meetingTranscriptSourceConnection.update.mockResolvedValue({});
+    prismaMock.member.findUnique.mockResolvedValue({
+      id: "member-1",
+      workspaceId: "ws-1",
+      userId: "user-1",
+      role: "ADMIN",
+      isActive: true,
+    });
+    prismaMock.workspaceFeatureFlag.findUnique.mockResolvedValue({ enabled: true });
     prismaMock.auditLog.create.mockResolvedValue({});
     intakeMeetingTranscriptMock.mockResolvedValue({
       status: "meeting_matched",
@@ -148,6 +184,46 @@ describe("meeting transcript sources", () => {
     })).toThrow("Recorded date is required");
   });
 
+  it("gates transcript imports on the meeting recorder feature flag", async () => {
+    prismaMock.workspaceFeatureFlag.findUnique.mockResolvedValueOnce(null);
+    const { importMeetingTranscriptSourceArtifacts } = await import("./meeting-transcript-sources");
+
+    await expect(importMeetingTranscriptSourceArtifacts(agentActor, {
+      workspaceId: "ws-1",
+      provider: "FIREFLIES",
+      artifacts: [{
+        externalId: "ff-disabled",
+        recordedAt: "2026-05-01T10:00:00.000Z",
+        text: "Jan: This should not import while disabled.",
+      }],
+    })).rejects.toMatchObject({
+      code: "FEATURE_DISABLED",
+    });
+
+    expect(prismaMock.meetingTranscriptImportBatch.create).not.toHaveBeenCalled();
+  });
+
+  it("restricts provider credential writes to workspace admins", async () => {
+    prismaMock.member.findUnique.mockResolvedValueOnce({
+      id: "member-1",
+      workspaceId: "ws-1",
+      userId: "user-1",
+      role: "FACILITATOR",
+      isActive: true,
+    });
+    const { connectMeetingTranscriptSource } = await import("./meeting-transcript-sources");
+
+    await expect(connectMeetingTranscriptSource(userActor, {
+      workspaceId: "ws-1",
+      provider: "FIREFLIES",
+      apiKey: "fireflies-key",
+    })).rejects.toMatchObject({
+      code: "FORBIDDEN",
+    });
+
+    expect(prismaMock.meetingTranscriptSourceConnection.upsert).not.toHaveBeenCalled();
+  });
+
   it("includes the meeting date in fallback external IDs", async () => {
     const { normalizeMeetingTranscriptSourceArtifact } = await import("./meeting-transcript-sources");
 
@@ -213,6 +289,41 @@ describe("meeting transcript sources", () => {
     });
     expect(prismaMock.meetingTranscriptSourceRecord.updateMany).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({ status: "SUPERSEDED" }),
+    }));
+  });
+
+  it("imports changed revisions when providers omit updated-at timestamps", async () => {
+    prismaMock.meetingTranscriptSourceRecord.findFirst.mockResolvedValueOnce({
+      id: "record-active",
+      meetingId: "meeting-1",
+      contentHash: "previous-hash",
+      recordedAt: new Date("2026-05-01T10:00:00.000Z"),
+      sourceUpdatedAt: new Date("2026-05-02T11:00:00.000Z"),
+    });
+    const { importMeetingTranscriptSourceArtifacts } = await import("./meeting-transcript-sources");
+
+    const result = await importMeetingTranscriptSourceArtifacts(agentActor, {
+      workspaceId: "ws-1",
+      provider: "FIREFLIES",
+      artifacts: [{
+        externalId: "ff-1",
+        title: "Corrected transcript",
+        recordedAt: "2026-05-01T10:00:00.000Z",
+        text: "Jan: Corrected transcript body.",
+      }],
+    });
+
+    expect(result.batch).toMatchObject({ status: "COMPLETED", importedCount: 1, skippedCount: 0 });
+    expect(prismaMock.meetingTranscriptSourceRecord.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        status: "ACTIVE",
+        supersededByRecordId: null,
+        sourceUpdatedAt: null,
+      }),
+    }));
+    expect(intakeMeetingTranscriptMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      meetingId: "meeting-1",
+      replaceTranscript: true,
     }));
   });
 

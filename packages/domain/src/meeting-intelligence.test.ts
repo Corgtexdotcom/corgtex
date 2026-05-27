@@ -1012,6 +1012,7 @@ describe("meeting-intelligence", () => {
               targetEntityType: "Proposal",
               targetEntityId: "proposal-1",
               deliberationEntryType: "REACTION",
+              dedupeKey: "proposal:evidence",
               sourceQuote: "This changes the active proposal.",
             },
           ],
@@ -1039,6 +1040,7 @@ describe("meeting-intelligence", () => {
       }));
       expect(prisma.meetingInsight.createMany).toHaveBeenCalledWith(expect.objectContaining({
         data: [expect.objectContaining({
+          dedupeKey: "proposal:evidence:source:source-record-new",
           sourceRecordId: "source-record-new",
           sourceRecordedAt: new Date("2026-05-03T10:00:00.000Z"),
           targetEntityType: "Proposal",

@@ -509,8 +509,9 @@ Be conservative — only extract items you're confident about.
         deliberationEntryType,
         resolutionOutcome,
       });
-      if (seenDedupeKeys.has(dedupeKey)) continue;
-      seenDedupeKeys.add(dedupeKey);
+      const sourceDedupeKey = latestSourceRecord ? `${dedupeKey}:source:${latestSourceRecord.id}` : dedupeKey;
+      if (seenDedupeKeys.has(sourceDedupeKey)) continue;
+      seenDedupeKeys.add(sourceDedupeKey);
 
       const insightData = {
         meetingId: meeting.id,
@@ -528,7 +529,7 @@ Be conservative — only extract items you're confident about.
         targetEntityId: keepTarget ? targetEntityId : null,
         deliberationEntryType,
         resolutionOutcome,
-        dedupeKey,
+        dedupeKey: sourceDedupeKey,
         sourceRecordId: latestSourceRecord?.id ?? null,
         sourceRecordedAt: latestSourceRecord?.recordedAt ?? meeting.recordedAt ?? null,
       };
@@ -538,7 +539,7 @@ Be conservative — only extract items you're confident about.
           workspaceId: params.workspaceId,
           meetingId: meeting.id,
           OR: [
-            { dedupeKey },
+            { dedupeKey: sourceDedupeKey },
             {
               dedupeKey: null,
               type,
@@ -566,7 +567,7 @@ Be conservative — only extract items you're confident about.
         where: {
           workspaceId: params.workspaceId,
           meetingId: meeting.id,
-          dedupeKey,
+          dedupeKey: sourceDedupeKey,
         },
         orderBy: { createdAt: "desc" },
       });

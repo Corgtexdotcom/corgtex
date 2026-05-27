@@ -8,6 +8,7 @@ import { intakeMeetingTranscript, type MeetingTranscriptSegment } from "./meetin
 export type TranscriptAuthMode = "API_KEY" | "OAUTH_ADMIN" | "MCP" | "MANUAL_EXPORT";
 export type TranscriptSourceDataShape = "TRANSCRIPT_TEXT" | "SPEAKER_SEGMENTS" | "SUMMARY" | "ACTION_ITEMS" | "RECORDING_METADATA";
 export type TranscriptFormat = "json" | "vtt" | "srt" | "txt" | "docx" | "pdf" | "zip" | "csv";
+const MEETING_RECORDERS_FEATURE_FLAG = "MEETING_RECORDERS";
 
 export type MeetingTranscriptProviderCatalogEntry = {
   provider: MeetingTranscriptSourceProvider;
@@ -88,6 +89,19 @@ const PROVIDER_SLUGS: Record<string, MeetingTranscriptSourceProvider> = {
   manual: "MANUAL_UPLOAD",
   "manual-upload": "MANUAL_UPLOAD",
 };
+
+async function requireMeetingTranscriptSourcesFeature(workspaceId: string) {
+  const flag = await prisma.workspaceFeatureFlag.findUnique({
+    where: {
+      workspaceId_flag: {
+        workspaceId,
+        flag: MEETING_RECORDERS_FEATURE_FLAG,
+      },
+    },
+    select: { enabled: true },
+  });
+  invariant(flag?.enabled, 403, "FEATURE_DISABLED", "Meeting recorder transcript sources are not enabled for this workspace.");
+}
 
 const CATALOG: MeetingTranscriptProviderCatalogEntry[] = [
   {
@@ -597,7 +611,8 @@ export async function connectMeetingTranscriptSource(actor: AppActor, params: {
   refreshToken?: string | null;
   webhookSecret?: string | null;
 }) {
-  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, allowedRoles: ["ADMIN", "FACILITATOR"] });
+  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, allowedRoles: ["ADMIN"] });
+  await requireMeetingTranscriptSourcesFeature(params.workspaceId);
   const provider = typeof params.provider === "string" ? normalizeMeetingTranscriptSourceProvider(params.provider) : params.provider;
   const catalogEntry = getMeetingTranscriptProviderCatalogEntry(provider);
   const apiKey = params.apiKey?.trim();
@@ -684,7 +699,8 @@ async function importOneNormalizedTranscript(actor: AppActor, params: {
   });
   const incomingUpdatedAt = artifact.sourceUpdatedAt ?? artifact.recordedAt;
   const activeUpdatedAt = activeRecord ? activeRecord.sourceUpdatedAt ?? activeRecord.recordedAt : null;
-  const isOlderRevision = Boolean(activeRecord && activeUpdatedAt && incomingUpdatedAt < activeUpdatedAt);
+  const hasChangedContent = Boolean(activeRecord && activeRecord.contentHash !== artifact.contentHash);
+  const isOlderRevision = Boolean(activeRecord && !hasChangedContent && activeUpdatedAt && incomingUpdatedAt < activeUpdatedAt);
   const recordData = {
     workspaceId: params.workspaceId,
     connectionId: params.connectionId ?? null,
@@ -807,6 +823,7 @@ export async function importMeetingTranscriptSourceArtifacts(actor: AppActor, pa
   artifacts: MeetingTranscriptSourceArtifact[];
 }) {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  await requireMeetingTranscriptSourcesFeature(params.workspaceId);
   const provider = typeof params.provider === "string" ? normalizeMeetingTranscriptSourceProvider(params.provider) : params.provider;
   invariant(params.artifacts.length > 0, 400, "INVALID_INPUT", "At least one transcript artifact is required.");
   const sourceKind = params.sourceKind?.trim() || "manual_upload";
@@ -927,6 +944,7 @@ export async function retryMeetingTranscriptImportBatch(actor: AppActor, params:
   batchId: string;
 }) {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  await requireMeetingTranscriptSourcesFeature(params.workspaceId);
   const batch = await prisma.meetingTranscriptImportBatch.findFirst({
     where: { id: params.batchId, workspaceId: params.workspaceId },
     include: {
@@ -974,6 +992,7 @@ export async function runMeetingTranscriptSourceBackfill(actor: AppActor, params
   provider: MeetingTranscriptSourceProvider | string;
 }) {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, allowedRoles: ["ADMIN", "FACILITATOR"] });
+  await requireMeetingTranscriptSourcesFeature(params.workspaceId);
   const provider = typeof params.provider === "string" ? normalizeMeetingTranscriptSourceProvider(params.provider) : params.provider;
   const connection = await prisma.meetingTranscriptSourceConnection.findUnique({
     where: { workspaceId_provider: { workspaceId: params.workspaceId, provider } },
