@@ -674,7 +674,7 @@ async function cancelMeetingBaasBot(externalBotId: string) {
     headers: {
       "x-meeting-baas-api-key": apiKey,
     },
-  });
+  }, { okStatuses: [404] });
 }
 
 async function createRecallAsyncTranscript(recordingId: string) {
@@ -915,6 +915,7 @@ type DuplicateRecorderCleanupStats = {
   duplicateRecordersSkipped: number;
   duplicateProviderBotsCancelled: number;
   canonicalRecordingsRestored: number;
+  duplicateCancellationFailures: number;
 };
 
 function duplicateRecorderFailureMessage(canonicalId: string) {
@@ -944,7 +945,7 @@ function staleRecordingReadyAt(recording: RecordingWithMeetingTime) {
   if (!recording.externalBotId) {
     return new Date(recording.createdAt.getTime() + STALE_RECORDING_TIMEOUT_MS);
   }
-  return new Date(recordingExpectedEnd(recording).getTime() + RECALL_TRANSCRIPT_RECOVERY_GRACE_MS);
+  return new Date(recordingExpectedEnd(recording).getTime() + STALE_RECORDING_TIMEOUT_MS);
 }
 
 function compareCanonicalRecordings(left: MeetingRecording, right: MeetingRecording) {
@@ -1026,6 +1027,7 @@ async function cleanupDuplicateScheduledProviderBots(workspaceId: string, now = 
     duplicateRecordersSkipped: 0,
     duplicateProviderBotsCancelled: 0,
     canonicalRecordingsRestored: 0,
+    duplicateCancellationFailures: 0,
   };
 
   for (const group of groups.values()) {
@@ -1034,12 +1036,27 @@ async function cleanupDuplicateScheduledProviderBots(workspaceId: string, now = 
     if (!canonical) continue;
 
     const duplicates = group.filter((recording) => recording.id !== canonical.id);
+    let allDuplicatesHandled = true;
     for (const duplicate of duplicates) {
       invariant(duplicate.externalBotId, 409, "RECORDER_DUPLICATE_MISSING_BOT", "Duplicate recorder is missing its provider bot id.");
-      await providerCancel(duplicate.provider, duplicate.externalBotId, {
-        joinAt: recorderJoinInstant(duplicate),
-        status: duplicate.status,
-      });
+      try {
+        await providerCancel(duplicate.provider, duplicate.externalBotId, {
+          joinAt: recorderJoinInstant(duplicate),
+          status: duplicate.status,
+        });
+      } catch (error) {
+        allDuplicatesHandled = false;
+        stats.duplicateCancellationFailures += 1;
+        recorderLog("warn", "reconcile_duplicate_cancel_failed", {
+          workspaceId,
+          meetingId: duplicate.meetingId,
+          recordingId: duplicate.id,
+          provider: duplicate.provider,
+          canonicalRecordingId: canonical.id,
+          failureCode: providerFailureCode(error),
+        });
+        continue;
+      }
       stats.duplicateProviderBotsCancelled += 1;
       await markDuplicateRecordingSkipped(duplicate, canonical.id);
       stats.duplicateRecordersSkipped += 1;
@@ -1051,6 +1068,10 @@ async function cleanupDuplicateScheduledProviderBots(workspaceId: string, now = 
         canonicalRecordingId: canonical.id,
         failureCode: DUPLICATE_RECORDER_FAILURE_CODE,
       });
+    }
+
+    if (!allDuplicatesHandled) {
+      continue;
     }
 
     const activeDedupeKey = activeRecordingDedupeKey({
@@ -1105,6 +1126,8 @@ async function reuseFutureProviderBotIfPresent(params: {
         workspaceId: params.workspaceId,
         meetingId: params.meetingId,
         provider: params.provider,
+        externalBotId: { not: null },
+        joinAt: params.joinAt,
         status: { in: ACTIVE_RECORDING_STATUSES },
       },
       orderBy: { createdAt: "desc" },
@@ -1122,6 +1145,7 @@ async function reuseFutureProviderBotIfPresent(params: {
       },
       orderBy: { createdAt: "desc" },
     });
+    invariant(recordings.length <= 1, 409, "RECORDER_DUPLICATE_CLEANUP_BLOCKED", "Duplicate recorder cleanup did not finish; a new provider bot was not scheduled.");
   }
 
   const reusable = canonicalRecordingForGroup(recordings);
@@ -2967,23 +2991,49 @@ function groupRecoverableRecallRecordings(recordings: RecoverableRecallRecording
 }
 
 async function markDuplicateRecoveredRecordingsSkipped(group: RecoverableRecallRecording[], canonicalId: string) {
-  const duplicateIds = group
-    .filter((recording) => recording.id !== canonicalId && !recording.transcriptProcessedAt)
-    .map((recording) => recording.id);
-  if (duplicateIds.length === 0) {
-    return 0;
+  let skipped = 0;
+  for (const recording of group.filter((item) => item.id !== canonicalId && !item.transcriptProcessedAt)) {
+    if (ACTIVE_RECORDING_STATUSES.includes(recording.status)) {
+      if (!recording.externalBotId) {
+        recorderLog("warn", "reconcile_recall_duplicate_active_missing_bot", {
+          workspaceId: recording.workspaceId,
+          meetingId: recording.meetingId,
+          recordingId: recording.id,
+          provider: recording.provider,
+          canonicalRecordingId: canonicalId,
+        });
+        continue;
+      }
+      try {
+        await providerCancel(recording.provider, recording.externalBotId, {
+          joinAt: recorderJoinInstant(recording),
+          status: recording.status,
+        });
+      } catch (error) {
+        recorderLog("warn", "reconcile_recall_duplicate_cancel_failed", {
+          workspaceId: recording.workspaceId,
+          meetingId: recording.meetingId,
+          recordingId: recording.id,
+          provider: recording.provider,
+          canonicalRecordingId: canonicalId,
+          failureCode: providerFailureCode(error),
+        });
+        continue;
+      }
+    }
+    await prisma.meetingRecording.update({
+      where: { id: recording.id },
+      data: {
+        status: "SKIPPED",
+        activeDedupeKey: null,
+        endedAt: new Date(),
+        failureCode: DUPLICATE_RECORDER_FAILURE_CODE,
+        failureMessage: duplicateRecorderFailureMessage(canonicalId),
+      },
+    });
+    skipped += 1;
   }
-  const result = await prisma.meetingRecording.updateMany({
-    where: { id: { in: duplicateIds } },
-    data: {
-      status: "SKIPPED",
-      activeDedupeKey: null,
-      endedAt: new Date(),
-      failureCode: DUPLICATE_RECORDER_FAILURE_CODE,
-      failureMessage: duplicateRecorderFailureMessage(canonicalId),
-    },
-  });
-  return result.count;
+  return skipped;
 }
 
 async function findRecoverableRecallRecording(recordingId: string) {
@@ -3218,5 +3268,6 @@ export async function reconcileMeetingRecorders(workspaceId: string) {
     duplicateRecordersSkipped: duplicateCleanup.duplicateRecordersSkipped,
     duplicateProviderBotsCancelled: duplicateCleanup.duplicateProviderBotsCancelled,
     canonicalRecordingsRestored: duplicateCleanup.canonicalRecordingsRestored,
+    duplicateCancellationFailures: duplicateCleanup.duplicateCancellationFailures,
   };
 }
