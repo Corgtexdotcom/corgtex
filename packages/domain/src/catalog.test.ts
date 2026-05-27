@@ -370,6 +370,75 @@ describe("catalog domain", () => {
     }));
   });
 
+  it("derives meeting recorder as a requestable Tools option before recorder access is enabled", async () => {
+    const { listCatalogItems } = await import("./catalog");
+    prismaMock.workspaceToolLink.findMany.mockResolvedValue([]);
+    prismaMock.catalogItem.findMany.mockResolvedValue([]);
+    prismaMock.catalogFavorite.findMany.mockResolvedValue([]);
+    prismaMock.catalogRequest.findMany.mockResolvedValue([]);
+
+    await listCatalogItems(actor, "workspace-1");
+
+    expect(prismaMock.catalogItem.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        workspaceId_sourceType_sourceId: {
+          workspaceId: "workspace-1",
+          sourceType: "MEETING_RECORDER",
+          sourceId: "meeting-recorder",
+        },
+      },
+      create: expect.objectContaining({
+        type: "TOOL",
+        title: "Meeting recorder",
+        url: null,
+        category: "MEETINGS",
+        accessMode: "REQUEST",
+        requestedScopes: ["meetings:read", "meetings:write", "brain:read"],
+        featured: true,
+      }),
+      update: expect.objectContaining({
+        url: null,
+        accessMode: "REQUEST",
+        requestedScopes: ["meetings:read", "meetings:write", "brain:read"],
+        featured: true,
+      }),
+    }));
+  });
+
+  it("opens meeting recorder settings from Tools when recorder access is enabled", async () => {
+    const { listCatalogItems } = await import("./catalog");
+    prismaMock.workspaceFeatureFlag.findMany.mockResolvedValue([
+      { flag: "MEETING_RECORDERS", enabled: true },
+    ]);
+    prismaMock.workspaceToolLink.findMany.mockResolvedValue([]);
+    prismaMock.catalogItem.findMany.mockResolvedValue([]);
+    prismaMock.catalogFavorite.findMany.mockResolvedValue([]);
+    prismaMock.catalogRequest.findMany.mockResolvedValue([]);
+
+    await listCatalogItems(actor, "workspace-1");
+
+    expect(prismaMock.catalogItem.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        workspaceId_sourceType_sourceId: {
+          workspaceId: "workspace-1",
+          sourceType: "MEETING_RECORDER",
+          sourceId: "meeting-recorder",
+        },
+      },
+      create: expect.objectContaining({
+        type: "TOOL",
+        url: "/workspaces/workspace-1/settings?tab=general",
+        accessMode: "OPEN",
+        featured: true,
+      }),
+      update: expect.objectContaining({
+        url: "/workspaces/workspace-1/settings?tab=general",
+        accessMode: "OPEN",
+        featured: true,
+      }),
+    }));
+  });
+
   it("creates a catalog request with normalized scopes and budget limits", async () => {
     const { createCatalogRequest } = await import("./catalog");
 

@@ -99,4 +99,34 @@ describe("Tools catalog UI helpers", () => {
       { kind: "link", label: "Details", href: "/workspaces/workspace-1/tools/slack", variant: "secondary" },
     ]);
   });
+
+  it("lets users request meeting recorder access before the recorder is enabled", () => {
+    const actions = getCatalogCardActions(item({
+      id: "meeting-recorder",
+      type: "TOOL",
+      title: "Meeting recorder",
+      url: null,
+      accessMode: "REQUEST",
+    }), { workspaceId: "workspace-1", canManageCatalog: false });
+
+    expect(actions).toEqual([
+      { kind: "request", label: "Request access", requestType: "ACCESS", variant: "primary" },
+      { kind: "link", label: "Details", href: "/workspaces/workspace-1/tools/meeting-recorder", variant: "secondary" },
+    ]);
+  });
+
+  it("opens meeting recorder setup when the recorder is enabled", () => {
+    const actions = getCatalogCardActions(item({
+      id: "meeting-recorder",
+      type: "TOOL",
+      title: "Meeting recorder",
+      url: "/workspaces/workspace-1/settings?tab=general",
+      accessMode: "OPEN",
+    }), { workspaceId: "workspace-1", canManageCatalog: false });
+
+    expect(actions).toEqual([
+      { kind: "link", label: "Open", href: "/workspaces/workspace-1/settings?tab=general", variant: "primary" },
+      { kind: "link", label: "Details", href: "/workspaces/workspace-1/tools/meeting-recorder", variant: "secondary" },
+    ]);
+  });
 });

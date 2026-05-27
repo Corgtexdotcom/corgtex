@@ -2,19 +2,24 @@ import { listCatalogItems, listCatalogRequests, listCircles, listWorkspaceToolLi
 import { requirePageActor } from "@/lib/auth";
 import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
 import { getTranslations } from "next-intl/server";
+import { TYPE_ORDER, type CatalogItemType } from "./catalog-ui";
 import { ToolsDirectoryClient } from "./ToolsDirectoryClient";
 
 export const dynamic = "force-dynamic";
+
+function normalizeCatalogType(value: string | undefined): CatalogItemType | "ALL" {
+  return TYPE_ORDER.includes(value as CatalogItemType) ? value as CatalogItemType : "ALL";
+}
 
 export default async function ToolsPage({
   params,
   searchParams,
 }: {
   params: Promise<{ workspaceId: string }>;
-  searchParams: Promise<{ view?: string }>;
+  searchParams: Promise<{ view?: string; type?: string; q?: string }>;
 }) {
   const { workspaceId } = await params;
-  const { view } = await searchParams;
+  const { view, type, q } = await searchParams;
   const actor = await requirePageActor();
   await requireWorkspaceMembership({ actor, workspaceId });
   await requireWorkspaceFeature(workspaceId, "TOOL_LINKS");
@@ -59,6 +64,8 @@ export default async function ToolsPage({
       <ToolsDirectoryClient
         workspaceId={workspaceId}
         initialView={view === "grid" ? "grid" : "list"}
+        initialType={normalizeCatalogType(type)}
+        initialQuery={q?.slice(0, 120) ?? ""}
         initialCatalogItems={catalog.items.map((item) => ({
           ...item,
           createdAt: item.createdAt.toISOString(),

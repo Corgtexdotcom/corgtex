@@ -213,6 +213,8 @@ export function ToolsDirectoryClient({
   canManageCatalog,
   circles,
   initialView,
+  initialType,
+  initialQuery,
 }: {
   workspaceId: string;
   initialLinks: ToolLink[];
@@ -221,6 +223,8 @@ export function ToolsDirectoryClient({
   canManageCatalog: boolean;
   circles: CircleOption[];
   initialView: "list" | "grid";
+  initialType: CatalogItemType | "ALL";
+  initialQuery: string;
 }) {
   const router = useRouter();
   const t = useTranslations("tools");
@@ -230,8 +234,8 @@ export function ToolsDirectoryClient({
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [isFormOpen, setIsFormOpen] = useState(false);
-  const [activeType, setActiveType] = useState<CatalogItemType | "ALL">("ALL");
-  const [query, setQuery] = useState("");
+  const [activeType, setActiveType] = useState<CatalogItemType | "ALL">(initialType);
+  const [query, setQuery] = useState(initialQuery);
   const [requestDraft, setRequestDraft] = useState<RequestDraft>(EMPTY_REQUEST);
   const [publishDraft, setPublishDraft] = useState<PublishDraft>(EMPTY_PUBLISH);
   const [isPublishOpen, setIsPublishOpen] = useState(false);
