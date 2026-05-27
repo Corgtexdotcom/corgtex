@@ -23,6 +23,7 @@ const RECALL_TRANSCRIPT_RECOVERY_GRACE_MS = 20 * 60 * 1000;
 const FALLBACK_MEETING_DURATION_MS = 90 * 60 * 1000;
 const ACTIVE_RECORDING_STATUSES: MeetingRecordingStatus[] = ["PENDING", "SCHEDULED", "JOINING", "RECORDING"];
 const RECOVERABLE_RECALL_RECORDING_STATUSES: MeetingRecordingStatus[] = [...ACTIVE_RECORDING_STATUSES, "COMPLETED"];
+const DUPLICATE_RECORDER_FAILURE_CODE = "DUPLICATE_RECORDER";
 const RETRYABLE_VENDOR_STATUSES = new Set([408, 409, 425, 429, 500, 502, 503, 504, 507]);
 const RECORDER_LOG_COMPONENT = "meeting-recorder";
 const RECORDER_CALENDAR_SYNC_LOOKAHEAD_MS = 30 * 24 * 60 * 60 * 1000;
@@ -255,6 +256,15 @@ type RecorderReadinessCheck = {
 type ScheduleAttemptResult = {
   externalBotId: string;
   providerMetadata?: Prisma.InputJsonValue;
+};
+
+type RecordingCancelContext = {
+  joinAt?: Date | null;
+  status?: MeetingRecordingStatus | null;
+};
+
+type ProviderFetchOptions = {
+  okStatuses?: number[];
 };
 
 class ProviderRequestError extends Error {
@@ -559,11 +569,14 @@ export function buildMeetingBaasCreateBotRequest(input: MeetingRecorderScheduleI
   };
 }
 
-async function fetchJson(url: string, init: RequestInit) {
+async function fetchJson(url: string, init: RequestInit, options: ProviderFetchOptions = {}) {
   const response = await fetch(url, init);
   const text = await response.text();
-  if (!response.ok) {
+  if (!response.ok && !options.okStatuses?.includes(response.status)) {
     throw new ProviderRequestError(url.includes("meetingbaas") ? "MEETING_BAAS" : "RECALL_AI", response.status, text);
+  }
+  if (!response.ok) {
+    return null;
   }
   return text ? JSON.parse(text) as unknown : null;
 }
@@ -598,7 +611,33 @@ async function scheduleMeetingBaasBot(input: MeetingRecorderScheduleInput): Prom
   };
 }
 
-async function cancelRecallBot(externalBotId: string) {
+function shouldDeleteScheduledRecallBot(context?: RecordingCancelContext) {
+  if (context?.status === "JOINING" || context?.status === "RECORDING") {
+    return false;
+  }
+  const joinAtMs = context?.joinAt?.getTime();
+  if (joinAtMs && joinAtMs - Date.now() <= AUTO_SCHEDULE_MIN_LEAD_MS) {
+    return false;
+  }
+  return true;
+}
+
+function recallDeleteCanFallBackToLeave(error: unknown) {
+  return error instanceof ProviderRequestError && [400, 405, 409, 425].includes(error.status);
+}
+
+async function deleteScheduledRecallBot(externalBotId: string) {
+  const apiKey = requireVendorSecret("RECALL_AI");
+  await fetchJson(`https://${env.RECALL_REGION}.recall.ai/api/v1/bot/${externalBotId}/`, {
+    method: "DELETE",
+    headers: {
+      Authorization: recallAuthorization(apiKey),
+      accept: "application/json",
+    },
+  }, { okStatuses: [404] });
+}
+
+async function leaveRecallBot(externalBotId: string) {
   const apiKey = requireVendorSecret("RECALL_AI");
   await fetchJson(`https://${env.RECALL_REGION}.recall.ai/api/v1/bot/${externalBotId}/leave_call/`, {
     method: "POST",
@@ -607,7 +646,25 @@ async function cancelRecallBot(externalBotId: string) {
       accept: "application/json",
       "content-type": "application/json",
     },
-  });
+  }, { okStatuses: [404] });
+}
+
+async function cancelRecallBot(externalBotId: string, context?: RecordingCancelContext) {
+  if (shouldDeleteScheduledRecallBot(context)) {
+    try {
+      await deleteScheduledRecallBot(externalBotId);
+      return;
+    } catch (error) {
+      if (!recallDeleteCanFallBackToLeave(error)) {
+        throw error;
+      }
+      recorderLog("warn", "recall_delete_fell_back_to_leave", {
+        externalBotId,
+        failureCode: providerFailureCode(error),
+      });
+    }
+  }
+  await leaveRecallBot(externalBotId);
 }
 
 async function cancelMeetingBaasBot(externalBotId: string) {
@@ -617,7 +674,7 @@ async function cancelMeetingBaasBot(externalBotId: string) {
     headers: {
       "x-meeting-baas-api-key": apiKey,
     },
-  });
+  }, { okStatuses: [404] });
 }
 
 async function createRecallAsyncTranscript(recordingId: string) {
@@ -810,9 +867,9 @@ function providerSchedule(provider: MeetingRecorderProvider, input: MeetingRecor
   return provider === "RECALL_AI" ? scheduleRecallBot(input) : scheduleMeetingBaasBot(input);
 }
 
-async function providerCancel(provider: MeetingRecorderProvider, externalBotId: string) {
+async function providerCancel(provider: MeetingRecorderProvider, externalBotId: string, context?: RecordingCancelContext) {
   if (provider === "RECALL_AI") {
-    await cancelRecallBot(externalBotId);
+    await cancelRecallBot(externalBotId, context);
     return;
   }
   await cancelMeetingBaasBot(externalBotId);
@@ -845,6 +902,368 @@ function isUniqueConstraintError(error: unknown) {
 
 function activeRecordingDedupeKey(params: { workspaceId: string; meetingId: string; provider: MeetingRecorderProvider }) {
   return `meeting-recording:${params.workspaceId}:${params.meetingId}:${params.provider}`;
+}
+
+function ownedActiveRecordingDedupeKey(recording: Pick<MeetingRecording, "workspaceId" | "meetingId" | "provider" | "status" | "activeDedupeKey">) {
+  const activeDedupeKey = activeRecordingDedupeKey(recording);
+  return ACTIVE_RECORDING_STATUSES.includes(recording.status) && recording.activeDedupeKey === activeDedupeKey
+    ? activeDedupeKey
+    : null;
+}
+
+type RecordingWithMeetingTime = MeetingRecording & {
+  meeting: {
+    recordedAt: Date;
+    scheduledEndAt: Date | null;
+  };
+};
+
+type DuplicateRecorderCleanupStats = {
+  duplicateRecordersSkipped: number;
+  duplicateProviderBotsCancelled: number;
+  canonicalRecordingsRestored: number;
+  duplicateCancellationFailures: number;
+};
+
+function duplicateRecorderFailureMessage(canonicalId: string) {
+  return `Duplicate recorder skipped; canonical recording ${canonicalId} retained.`;
+}
+
+function recorderJoinInstant(recording: Pick<MeetingRecording, "joinAt"> & { meeting?: { recordedAt: Date } }) {
+  return recording.joinAt ?? recording.meeting?.recordedAt ?? null;
+}
+
+function duplicateRecorderGroupKey(recording: Pick<MeetingRecording, "workspaceId" | "meetingId" | "provider" | "joinAt"> & {
+  meeting?: { recordedAt: Date };
+}) {
+  const joinAt = recorderJoinInstant(recording);
+  if (!joinAt) return null;
+  return `${recording.workspaceId}:${recording.meetingId}:${recording.provider}:${joinAt.toISOString()}`;
+}
+
+function recordingExpectedEnd(recording: RecordingWithMeetingTime) {
+  const durationMs = recording.meeting.scheduledEndAt && recording.meeting.scheduledEndAt > recording.meeting.recordedAt
+    ? recording.meeting.scheduledEndAt.getTime() - recording.meeting.recordedAt.getTime()
+    : FALLBACK_MEETING_DURATION_MS;
+  const startAt = recording.joinAt ?? recording.meeting.recordedAt;
+  return new Date(startAt.getTime() + durationMs);
+}
+
+function staleRecordingReadyAt(recording: RecordingWithMeetingTime) {
+  if (!recording.externalBotId) {
+    return new Date(recording.createdAt.getTime() + STALE_RECORDING_TIMEOUT_MS);
+  }
+  return new Date(recordingExpectedEnd(recording).getTime() + STALE_RECORDING_TIMEOUT_MS);
+}
+
+function compareCanonicalRecordings(left: MeetingRecording, right: MeetingRecording) {
+  const leftActive = ACTIVE_RECORDING_STATUSES.includes(left.status) ? 1 : 0;
+  const rightActive = ACTIVE_RECORDING_STATUSES.includes(right.status) ? 1 : 0;
+  if (leftActive !== rightActive) return rightActive - leftActive;
+
+  const leftScheduledAt = left.scheduledAt?.getTime() ?? Number.NEGATIVE_INFINITY;
+  const rightScheduledAt = right.scheduledAt?.getTime() ?? Number.NEGATIVE_INFINITY;
+  if (leftScheduledAt !== rightScheduledAt) return rightScheduledAt - leftScheduledAt;
+
+  return right.createdAt.getTime() - left.createdAt.getTime();
+}
+
+function canonicalRecordingForGroup<T extends MeetingRecording>(recordings: T[]) {
+  return [...recordings].sort(compareCanonicalRecordings)[0] ?? null;
+}
+
+async function markDuplicateRecordingSkipped(recording: MeetingRecording, canonicalId: string) {
+  return prisma.meetingRecording.update({
+    where: { id: recording.id },
+    data: {
+      status: "SKIPPED",
+      activeDedupeKey: null,
+      endedAt: new Date(),
+      failureCode: DUPLICATE_RECORDER_FAILURE_CODE,
+      failureMessage: duplicateRecorderFailureMessage(canonicalId),
+    },
+  });
+}
+
+function restoredCanonicalStatus(recording: MeetingRecording) {
+  return ACTIVE_RECORDING_STATUSES.includes(recording.status) ? recording.status : "SCHEDULED";
+}
+
+async function restoreCanonicalScheduledRecording(recording: MeetingRecording) {
+  const activeDedupeKey = activeRecordingDedupeKey({
+    workspaceId: recording.workspaceId,
+    meetingId: recording.meetingId,
+    provider: recording.provider,
+  });
+  return prisma.meetingRecording.update({
+    where: { id: recording.id },
+    data: {
+      status: restoredCanonicalStatus(recording),
+      activeDedupeKey,
+      endedAt: null,
+      failureCode: null,
+      failureMessage: null,
+    },
+  });
+}
+
+type DuplicateRecorderCleanupScope = {
+  meetingId?: string;
+  provider?: MeetingRecorderProvider;
+  joinAt?: Date;
+  meetingUrl?: string;
+};
+
+function duplicateGroupRestoreRank(group: RecordingWithMeetingTime[]) {
+  const canonical = canonicalRecordingForGroup(group);
+  if (!canonical) {
+    return { matchesMeetingTime: 0, active: 0, joinAtMs: Number.NEGATIVE_INFINITY, canonical };
+  }
+  const joinAt = recorderJoinInstant(canonical);
+  return {
+    matchesMeetingTime: joinAt && joinAt.getTime() === canonical.meeting.recordedAt.getTime() ? 1 : 0,
+    active: ACTIVE_RECORDING_STATUSES.includes(canonical.status) ? 1 : 0,
+    joinAtMs: joinAt?.getTime() ?? Number.NEGATIVE_INFINITY,
+    canonical,
+  };
+}
+
+function compareDuplicateGroupsForRestore(left: RecordingWithMeetingTime[], right: RecordingWithMeetingTime[]) {
+  const leftRank = duplicateGroupRestoreRank(left);
+  const rightRank = duplicateGroupRestoreRank(right);
+  if (leftRank.matchesMeetingTime !== rightRank.matchesMeetingTime) {
+    return rightRank.matchesMeetingTime - leftRank.matchesMeetingTime;
+  }
+  if (leftRank.active !== rightRank.active) {
+    return rightRank.active - leftRank.active;
+  }
+  if (leftRank.joinAtMs !== rightRank.joinAtMs) {
+    return rightRank.joinAtMs - leftRank.joinAtMs;
+  }
+  if (!leftRank.canonical || !rightRank.canonical) {
+    return leftRank.canonical ? -1 : rightRank.canonical ? 1 : 0;
+  }
+  return compareCanonicalRecordings(leftRank.canonical, rightRank.canonical);
+}
+
+async function cleanupDuplicateScheduledProviderBots(
+  workspaceId: string,
+  scope: DuplicateRecorderCleanupScope = {},
+): Promise<DuplicateRecorderCleanupStats> {
+  const scopedMeetingUrl = scope.meetingUrl ? normalizeMeetingUrl(scope.meetingUrl) : null;
+  const recordings = await prisma.meetingRecording.findMany({
+    where: {
+      workspaceId,
+      ...(scope.meetingId ? { meetingId: scope.meetingId } : {}),
+      ...(scope.provider ? { provider: scope.provider } : {}),
+      ...(scope.joinAt ? { joinAt: scope.joinAt } : {}),
+      OR: [
+        {
+          externalBotId: { not: null },
+          ...(scopedMeetingUrl ? { meetingUrl: scopedMeetingUrl } : {}),
+          status: { in: ACTIVE_RECORDING_STATUSES },
+        },
+        {
+          externalBotId: { not: null },
+          ...(scopedMeetingUrl ? { meetingUrl: scopedMeetingUrl } : {}),
+          status: "FAILED",
+          failureCode: "STALE_RECORDER",
+        },
+        {
+          activeDedupeKey: { not: null },
+          status: { in: ACTIVE_RECORDING_STATUSES },
+        },
+      ],
+    },
+    include: {
+      meeting: {
+        select: {
+          recordedAt: true,
+          scheduledEndAt: true,
+        },
+      },
+    },
+  }) as RecordingWithMeetingTime[];
+
+  const groups = new Map<string, RecordingWithMeetingTime[]>();
+  for (const recording of recordings) {
+    if (!recording.externalBotId) continue;
+    const key = duplicateRecorderGroupKey(recording);
+    if (!key) continue;
+    groups.set(key, [...(groups.get(key) ?? []), recording]);
+  }
+
+  const stats: DuplicateRecorderCleanupStats = {
+    duplicateRecordersSkipped: 0,
+    duplicateProviderBotsCancelled: 0,
+    canonicalRecordingsRestored: 0,
+    duplicateCancellationFailures: 0,
+  };
+
+  const restoredDedupeKeys = new Set<string>();
+  for (const recording of recordings) {
+    const ownedKey = ownedActiveRecordingDedupeKey(recording);
+    if (ownedKey) {
+      restoredDedupeKeys.add(ownedKey);
+    }
+  }
+  for (const group of [...groups.values()].sort(compareDuplicateGroupsForRestore)) {
+    if (group.length <= 1) continue;
+    const canonical = canonicalRecordingForGroup(group);
+    if (!canonical) continue;
+
+    const duplicates = group.filter((recording) => recording.id !== canonical.id);
+    let allDuplicatesHandled = true;
+    for (const duplicate of duplicates) {
+      invariant(duplicate.externalBotId, 409, "RECORDER_DUPLICATE_MISSING_BOT", "Duplicate recorder is missing its provider bot id.");
+      try {
+        await providerCancel(duplicate.provider, duplicate.externalBotId, {
+          joinAt: recorderJoinInstant(duplicate),
+          status: duplicate.status,
+        });
+      } catch (error) {
+        allDuplicatesHandled = false;
+        stats.duplicateCancellationFailures += 1;
+        recorderLog("warn", "reconcile_duplicate_cancel_failed", {
+          workspaceId,
+          meetingId: duplicate.meetingId,
+          recordingId: duplicate.id,
+          provider: duplicate.provider,
+          canonicalRecordingId: canonical.id,
+          failureCode: providerFailureCode(error),
+        });
+        continue;
+      }
+      stats.duplicateProviderBotsCancelled += 1;
+      await markDuplicateRecordingSkipped(duplicate, canonical.id);
+      stats.duplicateRecordersSkipped += 1;
+      recorderLog("warn", "reconcile_duplicate_skipped", {
+        workspaceId,
+        meetingId: duplicate.meetingId,
+        recordingId: duplicate.id,
+        provider: duplicate.provider,
+        canonicalRecordingId: canonical.id,
+        failureCode: DUPLICATE_RECORDER_FAILURE_CODE,
+      });
+    }
+
+    if (!allDuplicatesHandled) {
+      continue;
+    }
+
+    const activeDedupeKey = activeRecordingDedupeKey({
+      workspaceId: canonical.workspaceId,
+      meetingId: canonical.meetingId,
+      provider: canonical.provider,
+    });
+    const canonicalAlreadyOwnsKey = canonical.activeDedupeKey === activeDedupeKey
+      && ACTIVE_RECORDING_STATUSES.includes(canonical.status);
+    if (canonicalAlreadyOwnsKey) {
+      restoredDedupeKeys.add(activeDedupeKey);
+    }
+    if (canonical.status !== "SCHEDULED" || canonical.activeDedupeKey !== activeDedupeKey || canonical.failureCode || canonical.endedAt) {
+      if (restoredDedupeKeys.has(activeDedupeKey) && !canonicalAlreadyOwnsKey) {
+        recorderLog("warn", "reconcile_canonical_restore_skipped", {
+          workspaceId,
+          meetingId: canonical.meetingId,
+          recordingId: canonical.id,
+          provider: canonical.provider,
+          failureCode: "RECORDER_DUPLICATE_ACTIVE_KEY_RESERVED",
+        });
+        continue;
+      }
+      await restoreCanonicalScheduledRecording(canonical);
+      restoredDedupeKeys.add(activeDedupeKey);
+      stats.canonicalRecordingsRestored += 1;
+      recorderLog("info", "reconcile_canonical_restored", {
+        workspaceId,
+        meetingId: canonical.meetingId,
+        recordingId: canonical.id,
+        provider: canonical.provider,
+      });
+    }
+  }
+
+  return stats;
+}
+
+async function reuseFutureProviderBotIfPresent(params: {
+  workspaceId: string;
+  meetingId: string;
+  provider: MeetingRecorderProvider;
+  meetingUrl: string;
+  joinAt: Date;
+}) {
+  if (params.joinAt.getTime() - Date.now() <= AUTO_SCHEDULE_MIN_LEAD_MS) {
+    return null;
+  }
+  const meetingUrl = normalizeMeetingUrl(params.meetingUrl);
+
+  let recordings = await prisma.meetingRecording.findMany({
+    where: {
+      workspaceId: params.workspaceId,
+      meetingId: params.meetingId,
+      provider: params.provider,
+      meetingUrl,
+      externalBotId: { not: null },
+      joinAt: params.joinAt,
+      OR: [
+        { status: { in: ACTIVE_RECORDING_STATUSES } },
+        { status: "FAILED", failureCode: "STALE_RECORDER" },
+      ],
+    },
+    orderBy: { createdAt: "desc" },
+  });
+
+  if (recordings.length > 1) {
+    await cleanupDuplicateScheduledProviderBots(params.workspaceId, {
+      meetingId: params.meetingId,
+      provider: params.provider,
+      joinAt: params.joinAt,
+      meetingUrl,
+    });
+    const active = await prisma.meetingRecording.findFirst({
+      where: {
+        workspaceId: params.workspaceId,
+        meetingId: params.meetingId,
+        provider: params.provider,
+        meetingUrl,
+        externalBotId: { not: null },
+        joinAt: params.joinAt,
+        status: { in: ACTIVE_RECORDING_STATUSES },
+      },
+      orderBy: { createdAt: "desc" },
+    });
+    if (active) return active;
+    recordings = await prisma.meetingRecording.findMany({
+      where: {
+        workspaceId: params.workspaceId,
+        meetingId: params.meetingId,
+        provider: params.provider,
+        meetingUrl,
+        externalBotId: { not: null },
+        joinAt: params.joinAt,
+        status: "FAILED",
+        failureCode: "STALE_RECORDER",
+      },
+      orderBy: { createdAt: "desc" },
+    });
+    invariant(recordings.length <= 1, 409, "RECORDER_DUPLICATE_CLEANUP_BLOCKED", "Duplicate recorder cleanup did not finish; a new provider bot was not scheduled.");
+  }
+
+  const reusable = canonicalRecordingForGroup(recordings);
+  if (!reusable || ACTIVE_RECORDING_STATUSES.includes(reusable.status)) {
+    return reusable ?? null;
+  }
+
+  const restored = await restoreCanonicalScheduledRecording(reusable);
+  recorderLog("info", "schedule_reused_future_provider_bot", {
+    workspaceId: params.workspaceId,
+    meetingId: params.meetingId,
+    recordingId: restored.id,
+    provider: restored.provider,
+  });
+  return restored;
 }
 
 async function recorderVendorMetadata(params: { workspaceId: string; meetingId: string; recordingId: string }) {
@@ -1857,6 +2276,10 @@ export async function scheduleMeetingRecording(actor: AppActor, params: {
     return existing;
   }
 
+  const provider = params.provider ?? config.defaultProvider;
+  const fallbackProvider = !params.provider && config.fallbackProvider && config.fallbackProvider !== provider
+    ? config.fallbackProvider
+    : null;
   const isAdmin = actor.kind === "user"
     ? membership?.role === "ADMIN"
     : actor.scopes?.includes("support:write");
@@ -1867,10 +2290,17 @@ export async function scheduleMeetingRecording(actor: AppActor, params: {
     allowOverride: params.mode !== "auto" && Boolean(isAdmin),
   });
 
-  const provider = params.provider ?? config.defaultProvider;
-  const fallbackProvider = !params.provider && config.fallbackProvider && config.fallbackProvider !== provider
-    ? config.fallbackProvider
-    : null;
+  const reusable = await reuseFutureProviderBotIfPresent({
+    workspaceId: params.workspaceId,
+    meetingId: params.meetingId,
+    provider,
+    meetingUrl: meeting.meetingUrl,
+    joinAt: meeting.recordedAt,
+  });
+  if (reusable) {
+    return reusable;
+  }
+
   const inputBase = {
     meetingUrl: meeting.meetingUrl,
     joinAt: meeting.recordedAt,
@@ -1886,6 +2316,26 @@ export async function scheduleMeetingRecording(actor: AppActor, params: {
   });
   if (first.status !== "FAILED" || !fallbackProvider || !first.retryable) {
     return first.recording;
+  }
+
+  const reusableFallback = await reuseFutureProviderBotIfPresent({
+    workspaceId: params.workspaceId,
+    meetingId: params.meetingId,
+    provider: fallbackProvider,
+    meetingUrl: meeting.meetingUrl,
+    joinAt: meeting.recordedAt,
+  });
+  if (reusableFallback) {
+    recorderLog("warn", "schedule_fallback", {
+      workspaceId: params.workspaceId,
+      meetingId: params.meetingId,
+      fromProvider: provider,
+      toProvider: fallbackProvider,
+      failedRecordingId: first.recording.id,
+      fallbackRecordingId: reusableFallback.id,
+      fallbackStatus: reusableFallback.status,
+    });
+    return reusableFallback;
   }
 
   const fallback = await attemptProviderSchedule({
@@ -2004,7 +2454,10 @@ export async function cancelMeetingRecording(actor: AppActor, params: { workspac
 
   if (recording.externalBotId) {
     try {
-      await providerCancel(recording.provider, recording.externalBotId);
+      await providerCancel(recording.provider, recording.externalBotId, {
+        joinAt: recording.joinAt,
+        status: recording.status,
+      });
     } catch (error) {
       recorderLog("error", "cancel_failed", {
         workspaceId: params.workspaceId,
@@ -2045,7 +2498,10 @@ async function cancelAutoRecordingsForMeeting(workspaceId: string, meetingId: st
   for (const recording of recordings) {
     if (recording.externalBotId) {
       try {
-        await providerCancel(recording.provider, recording.externalBotId);
+        await providerCancel(recording.provider, recording.externalBotId, {
+          joinAt: recording.joinAt,
+          status: recording.status,
+        });
       } catch (error) {
         recorderLog("warn", "calendar_cancel_failed", {
           workspaceId,
@@ -2287,6 +2743,10 @@ async function findRecordingForWebhook(provider: MeetingRecorderProvider, event:
 }
 
 async function applyWebhookState(recording: MeetingRecording, event: ProviderWebhookEvent) {
+  if (recording.failureCode === DUPLICATE_RECORDER_FAILURE_CODE) {
+    return recording;
+  }
+
   const data: Prisma.MeetingRecordingUpdateInput = {};
   if (event.externalBotId && !recording.externalBotId) data.externalBotId = event.externalBotId;
   if (event.status) data.status = event.status;
@@ -2373,13 +2833,16 @@ async function completeRecordingWithTranscriptArtifact(
 ) {
   const transcript = normalizeProviderTranscript(artifact.transcriptPayload);
   const completed = await prisma.$transaction(async (tx) => {
-    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${recording.id}, 0))`;
+    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`${recording.workspaceId}:${recording.meetingId}:${provider}:transcript`}, 0))`;
     const current = await tx.meetingRecording.findUnique({
       where: { id: recording.id },
       select: {
         id: true,
         workspaceId: true,
         meetingId: true,
+        provider: true,
+        joinAt: true,
+        failureCode: true,
         transcriptProcessedAt: true,
         meeting: {
           select: {
@@ -2391,6 +2854,16 @@ async function completeRecordingWithTranscriptArtifact(
     if (!current || current.transcriptProcessedAt) {
       return false;
     }
+    if (current.failureCode === DUPLICATE_RECORDER_FAILURE_CODE) {
+      recorderLog("info", "transcript_duplicate_ignored", {
+        workspaceId: current.workspaceId,
+        meetingId: current.meetingId,
+        recordingId: current.id,
+        provider,
+        failureCode: DUPLICATE_RECORDER_FAILURE_CODE,
+      });
+      return false;
+    }
 
     invariant(
       current.workspaceId === recording.workspaceId
@@ -2400,6 +2873,40 @@ async function completeRecordingWithTranscriptArtifact(
       "RECORDER_WORKSPACE_MISMATCH",
       "Recorder transcript target does not match the recording workspace.",
     );
+
+    const alreadyProcessedDuplicate = await tx.meetingRecording.findFirst({
+      where: {
+        workspaceId: current.workspaceId,
+        meetingId: current.meetingId,
+        provider: current.provider,
+        id: { not: current.id },
+        transcriptProcessedAt: { not: null },
+        failureCode: null,
+        ...(current.joinAt ? { joinAt: current.joinAt } : {}),
+      },
+      select: { id: true },
+    });
+    if (alreadyProcessedDuplicate) {
+      await tx.meetingRecording.update({
+        where: { id: current.id },
+        data: {
+          status: "SKIPPED",
+          activeDedupeKey: null,
+          endedAt: new Date(),
+          failureCode: DUPLICATE_RECORDER_FAILURE_CODE,
+          failureMessage: duplicateRecorderFailureMessage(alreadyProcessedDuplicate.id),
+        },
+      });
+      recorderLog("warn", "transcript_duplicate_skipped", {
+        workspaceId: current.workspaceId,
+        meetingId: current.meetingId,
+        recordingId: current.id,
+        provider,
+        canonicalRecordingId: alreadyProcessedDuplicate.id,
+        failureCode: DUPLICATE_RECORDER_FAILURE_CODE,
+      });
+      return false;
+    }
 
     if (transcript.trim().length === 0) {
       await markRecordingTranscriptEmpty(provider, recording, artifact, tx);
@@ -2451,7 +2958,7 @@ async function completeRecordingWithTranscriptArtifact(
 }
 
 async function ingestProviderTranscript(provider: MeetingRecorderProvider, recording: MeetingRecording, event: ProviderWebhookEvent) {
-  if (recording.transcriptProcessedAt) {
+  if (recording.transcriptProcessedAt || recording.failureCode === DUPLICATE_RECORDER_FAILURE_CODE) {
     return;
   }
   const artifact = provider === "RECALL_AI"
@@ -2606,11 +3113,64 @@ type RecoverableRecallRecording = MeetingRecording & {
 };
 
 function recallRecoveryReadyAt(recording: RecoverableRecallRecording) {
-  const expectedEnd = recording.meeting.scheduledEndAt
-    ?? (recording.joinAt
-      ? new Date(recording.joinAt.getTime() + FALLBACK_MEETING_DURATION_MS)
-      : new Date(recording.meeting.recordedAt.getTime() + FALLBACK_MEETING_DURATION_MS));
+  const expectedEnd = recordingExpectedEnd(recording);
   return new Date(expectedEnd.getTime() + RECALL_TRANSCRIPT_RECOVERY_GRACE_MS);
+}
+
+function groupRecoverableRecallRecordings(recordings: RecoverableRecallRecording[]) {
+  const groups = new Map<string, RecoverableRecallRecording[]>();
+  for (const recording of recordings) {
+    const key = duplicateRecorderGroupKey(recording);
+    if (!key) continue;
+    groups.set(key, [...(groups.get(key) ?? []), recording]);
+  }
+  return groups;
+}
+
+async function markDuplicateRecoveredRecordingsSkipped(group: RecoverableRecallRecording[], canonicalId: string) {
+  let skipped = 0;
+  for (const recording of group.filter((item) => item.id !== canonicalId && !item.transcriptProcessedAt)) {
+    if (ACTIVE_RECORDING_STATUSES.includes(recording.status)) {
+      if (!recording.externalBotId) {
+        recorderLog("warn", "reconcile_recall_duplicate_active_missing_bot", {
+          workspaceId: recording.workspaceId,
+          meetingId: recording.meetingId,
+          recordingId: recording.id,
+          provider: recording.provider,
+          canonicalRecordingId: canonicalId,
+        });
+        continue;
+      }
+      try {
+        await providerCancel(recording.provider, recording.externalBotId, {
+          joinAt: recorderJoinInstant(recording),
+          status: recording.status,
+        });
+      } catch (error) {
+        recorderLog("warn", "reconcile_recall_duplicate_cancel_failed", {
+          workspaceId: recording.workspaceId,
+          meetingId: recording.meetingId,
+          recordingId: recording.id,
+          provider: recording.provider,
+          canonicalRecordingId: canonicalId,
+          failureCode: providerFailureCode(error),
+        });
+        continue;
+      }
+    }
+    await prisma.meetingRecording.update({
+      where: { id: recording.id },
+      data: {
+        status: "SKIPPED",
+        activeDedupeKey: null,
+        endedAt: new Date(),
+        failureCode: DUPLICATE_RECORDER_FAILURE_CODE,
+        failureMessage: duplicateRecorderFailureMessage(canonicalId),
+      },
+    });
+    skipped += 1;
+  }
+  return skipped;
 }
 
 async function findRecoverableRecallRecording(recordingId: string) {
@@ -2689,66 +3249,75 @@ async function recoverRecallTranscripts(workspaceId: string) {
   }) as RecoverableRecallRecording[];
 
   let recovered = 0;
-  for (const recording of recordings) {
-    if (!recording.externalBotId || recallRecoveryReadyAt(recording) > now) {
-      continue;
-    }
+  for (const group of groupRecoverableRecallRecordings(recordings).values()) {
+    const candidates = [...group]
+      .filter((recording) => recording.externalBotId && recallRecoveryReadyAt(recording) <= now)
+      .sort(compareCanonicalRecordings);
 
-    try {
-      const current = await findRecoverableRecallRecording(recording.id);
-      if (!current || current.transcriptProcessedAt || !current.externalBotId) {
+    for (const recording of candidates) {
+      if (!recording.externalBotId) {
         continue;
       }
 
       try {
-        const bot = await fetchRecallBot(current.externalBotId);
-        if (!recallBotIsDone(bot)) {
+        const current = await findRecoverableRecallRecording(recording.id);
+        if (!current || current.transcriptProcessedAt || !current.externalBotId) {
           continue;
         }
-      } catch (error) {
-        recorderLog("warn", "recall_bot_status_fetch_failed", {
-          workspaceId,
-          meetingId: recording.meetingId,
-          recordingId: recording.id,
-          provider: recording.provider,
-          failureCode: providerFailureCode(error),
-        });
-        continue;
-      }
-      const artifact = await fetchRecallTranscriptArtifact({ externalBotId: current.externalBotId });
-      const latest = await findRecoverableRecallRecording(recording.id);
-      if (!latest || latest.transcriptProcessedAt || !latest.externalBotId) {
-        continue;
-      }
 
-      const completed = await completeRecordingWithTranscriptArtifact("RECALL_AI", latest, artifact);
-      if (completed) {
-        recovered += 1;
-        recorderLog("info", "reconcile_recall_transcript_recovered", {
-          workspaceId,
-          meetingId: latest.meetingId,
-          recordingId: latest.id,
-          provider: latest.provider,
-        });
-      }
-    } catch (error) {
-      if (transcriptRecoveryIsPending(error)) {
-        recorderLog("info", "reconcile_recall_transcript_pending", {
+        try {
+          const bot = await fetchRecallBot(current.externalBotId);
+          if (!recallBotIsDone(bot)) {
+            continue;
+          }
+        } catch (error) {
+          recorderLog("warn", "recall_bot_status_fetch_failed", {
+            workspaceId,
+            meetingId: recording.meetingId,
+            recordingId: recording.id,
+            provider: recording.provider,
+            failureCode: providerFailureCode(error),
+          });
+          continue;
+        }
+        const artifact = await fetchRecallTranscriptArtifact({ externalBotId: current.externalBotId });
+        const latest = await findRecoverableRecallRecording(recording.id);
+        if (!latest || latest.transcriptProcessedAt || !latest.externalBotId) {
+          continue;
+        }
+
+        const completed = await completeRecordingWithTranscriptArtifact("RECALL_AI", latest, artifact);
+        if (completed) {
+          recovered += 1;
+          const skipped = await markDuplicateRecoveredRecordingsSkipped(group, latest.id);
+          recorderLog("info", "reconcile_recall_transcript_recovered", {
+            workspaceId,
+            meetingId: latest.meetingId,
+            recordingId: latest.id,
+            provider: latest.provider,
+            duplicateRecordersSkipped: skipped,
+          });
+          break;
+        }
+      } catch (error) {
+        if (transcriptRecoveryIsPending(error)) {
+          recorderLog("info", "reconcile_recall_transcript_pending", {
+            workspaceId,
+            meetingId: recording.meetingId,
+            recordingId: recording.id,
+            provider: recording.provider,
+            failureCode: providerFailureCode(error),
+          });
+          continue;
+        }
+        recorderLog("warn", "reconcile_recall_transcript_failed", {
           workspaceId,
           meetingId: recording.meetingId,
           recordingId: recording.id,
           provider: recording.provider,
           failureCode: providerFailureCode(error),
         });
-        continue;
       }
-      recorderLog("warn", "reconcile_recall_transcript_failed", {
-        workspaceId,
-        meetingId: recording.meetingId,
-        recordingId: recording.id,
-        provider: recording.provider,
-        failureCode: providerFailureCode(error),
-      });
     }
   }
 
@@ -2757,15 +3326,50 @@ async function recoverRecallTranscripts(workspaceId: string) {
 
 export async function reconcileMeetingRecorders(workspaceId: string) {
   const recoveredTranscripts = await recoverRecallTranscripts(workspaceId);
-  const staleBefore = new Date(Date.now() - STALE_RECORDING_TIMEOUT_MS);
-  const stale = await prisma.meetingRecording.findMany({
+  const duplicateCleanup = await cleanupDuplicateScheduledProviderBots(workspaceId);
+  const staleCandidates = await prisma.meetingRecording.findMany({
     where: {
       workspaceId,
       status: { in: ACTIVE_RECORDING_STATUSES },
-      createdAt: { lt: staleBefore },
+      OR: [
+        {
+          externalBotId: null,
+          createdAt: { lt: new Date(Date.now() - STALE_RECORDING_TIMEOUT_MS) },
+        },
+        {
+          externalBotId: { not: null },
+        },
+      ],
     },
-  });
+    include: {
+      meeting: {
+        select: {
+          recordedAt: true,
+          scheduledEndAt: true,
+        },
+      },
+    },
+  }) as RecordingWithMeetingTime[];
+  const stale = staleCandidates.filter((recording) => staleRecordingReadyAt(recording).getTime() <= Date.now());
+  let staleFailed = 0;
   for (const recording of stale) {
+    if (recording.externalBotId) {
+      try {
+        await providerCancel(recording.provider, recording.externalBotId, {
+          joinAt: recorderJoinInstant(recording),
+          status: recording.status,
+        });
+      } catch (error) {
+        recorderLog("warn", "reconcile_stale_cancel_failed", {
+          workspaceId,
+          meetingId: recording.meetingId,
+          recordingId: recording.id,
+          provider: recording.provider,
+          failureCode: providerFailureCode(error),
+        });
+        continue;
+      }
+    }
     await prisma.meetingRecording.update({
       where: { id: recording.id },
       data: {
@@ -2776,6 +3380,7 @@ export async function reconcileMeetingRecorders(workspaceId: string) {
         endedAt: new Date(),
       },
     });
+    staleFailed += 1;
     recorderLog("warn", "reconcile_stale_failed", {
       workspaceId,
       meetingId: recording.meetingId,
@@ -2794,5 +3399,12 @@ export async function reconcileMeetingRecorders(workspaceId: string) {
       redactedAt: new Date(),
     },
   });
-  return { staleFailed: stale.length, recoveredTranscripts };
+  return {
+    staleFailed,
+    recoveredTranscripts,
+    duplicateRecordersSkipped: duplicateCleanup.duplicateRecordersSkipped,
+    duplicateProviderBotsCancelled: duplicateCleanup.duplicateProviderBotsCancelled,
+    canonicalRecordingsRestored: duplicateCleanup.canonicalRecordingsRestored,
+    duplicateCancellationFailures: duplicateCleanup.duplicateCancellationFailures,
+  };
 }
