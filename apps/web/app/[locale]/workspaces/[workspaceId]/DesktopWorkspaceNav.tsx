@@ -61,7 +61,7 @@ export function DesktopWorkspaceNav({
               >
                 <WorkspaceNavIcon name={item.icon} />
                 {tNav(item.labelKey as any)}
-                {item.href === "" && unreadCount > 0 && (
+                {item.href === "/notifications" && unreadCount > 0 && (
                   <span className="ws-notif-badge">{unreadCount}</span>
                 )}
               </a>

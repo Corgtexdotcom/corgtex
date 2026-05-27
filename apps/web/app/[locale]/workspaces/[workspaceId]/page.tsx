@@ -3,14 +3,13 @@ import {
   countUnreadNotifications,
   listActionableApprovalFlows,
   listMembers, listNotifications, listTensions,
-  listAuditLogs, listArticles, listMeetings
+  listArticles, listMeetings
 } from "@corgtex/domain";
 import { prisma, workspaceBranding } from "@corgtex/shared";
 import { requirePageActor } from "@/lib/auth";
 import {
   decideApprovalAction,
   markAllNotificationsReadAction,
-  updateActionAction,
 } from "./actions";
 import Link from "next/link";
 import { GoalProgress } from "./goals/GoalProgress";
@@ -19,26 +18,14 @@ import { getTranslations, getFormatter } from "next-intl/server";
 import { getDashboardAttentionCounts } from "@/lib/dashboard-attention";
 import { getWorkspaceCapabilities } from "@/lib/workspace-capabilities";
 import { MarkdownExcerpt } from "@/lib/components/MarkdownRenderer";
-import { selectDashboardKnowledgeArticles, selectLatestMeetingRecap } from "@/lib/dashboard-briefing";
+import { resolveWorkspaceEntityUrl } from "@/lib/workspace-entity-url";
+import {
+  selectDashboardActionItems,
+  selectDashboardFeedItems,
+  selectDashboardOpenProposals,
+} from "@/lib/dashboard-briefing";
 
 export const dynamic = "force-dynamic";
-
-function resolveEntityUrl(
-  workspaceId: string,
-  entityType: string | null,
-  entityId: string | null
-): string | null {
-  if (!entityType || !entityId) return null;
-  const t = entityType.toLowerCase();
-  if (t === "proposal") return `/workspaces/${workspaceId}/proposals/${entityId}`;
-  if (t === "tension") return `/workspaces/${workspaceId}/tensions`;
-  if (t === "action") return `/workspaces/${workspaceId}/actions`;
-  if (t === "meeting") return `/workspaces/${workspaceId}/meetings/${entityId}`;
-  if (t === "adviceprocess") return `/workspaces/${workspaceId}/proposals?status=OPEN`;
-  if (t === "advicerecord") return `/workspaces/${workspaceId}/proposals?status=OPEN`;
-  if (t === "spend" || t === "spendrequest") return `/workspaces/${workspaceId}/finance`;
-  return null;
-}
 
 export default async function WorkspaceDashboard({
   params,
@@ -56,12 +43,12 @@ export default async function WorkspaceDashboard({
     members,
     notifications,
     pendingFlowsRaw,
-    activeTensionsResult,
     pendingAgentApprovals,
     unreadNotificationsCount,
-    auditLogs,
     articlesResult,
     meetings,
+    openProposalCandidates,
+    teamActionCandidates,
     chunksCount,
     workspaceData,
     recentPublishedBase,
@@ -73,14 +60,63 @@ export default async function WorkspaceDashboard({
     listMembers(workspaceId),
     listNotifications(actor, workspaceId, { take: 5, unreadOnly: true }),
     listActionableApprovalFlows(actor, workspaceId, { take: 5 }),
-    prisma.tension.count({ where: { workspaceId, status: "OPEN", OR: [{ isPrivate: false }, { authorUserId: actor.kind === 'user' ? actor.user.id : '' }] } }),
     capabilities.canReviewAgentRuns
       ? prisma.agentRun.count({ where: { workspaceId, status: "WAITING_APPROVAL" } })
       : Promise.resolve(0),
     actor.kind === "user" ? countUnreadNotifications(actor.user.id, workspaceId) : Promise.resolve(0),
-    listAuditLogs(actor, workspaceId, { take: 10 }),
     listArticles(actor, { workspaceId, take: 50 }),
     listMeetings(workspaceId, { status: "COMPLETED" }),
+    prisma.proposal.findMany({
+      where: {
+        workspaceId,
+        status: "OPEN",
+        isPrivate: false,
+        archivedAt: null,
+      },
+      select: {
+        id: true,
+        title: true,
+        summary: true,
+        status: true,
+        isPrivate: true,
+        archivedAt: true,
+        createdAt: true,
+      },
+      orderBy: { createdAt: "desc" },
+      take: 20,
+    }),
+    prisma.action.findMany({
+      where: {
+        workspaceId,
+        status: { in: ["OPEN", "IN_PROGRESS"] },
+        isPrivate: false,
+        archivedAt: null,
+      },
+      select: {
+        id: true,
+        title: true,
+        bodyMd: true,
+        status: true,
+        isPrivate: true,
+        archivedAt: true,
+        dueAt: true,
+        createdAt: true,
+        assigneeMember: {
+          include: {
+            user: {
+              select: {
+                displayName: true,
+              },
+            },
+          },
+        },
+      },
+      orderBy: [
+        { dueAt: "asc" },
+        { createdAt: "desc" },
+      ],
+      take: 50,
+    }),
     prisma.knowledgeChunk.count({ where: { workspaceId } }),
     prisma.workspace.findUnique({ where: { id: workspaceId }, select: { slug: true, name: true } }),
     Promise.all([
@@ -119,30 +155,12 @@ export default async function WorkspaceDashboard({
     });
   }
 
-  const latestMeetingRecap = selectLatestMeetingRecap(meetings);
-  const recentMeetings = latestMeetingRecap
-    ? [latestMeetingRecap]
-    : [];
   const pendingFlows = pendingFlowsRaw.items;
   const pendingFlowTotal = pendingFlowsRaw.total;
   const displayedApprovalFlows = pendingFlows.slice(0, 3);
   const unreadNotifications = notifications;
-  const memberOpenActions = currentMember
-    ? await prisma.action.findMany({
-      where: {
-        workspaceId,
-        assigneeMemberId: currentMember.id,
-        status: { in: ["OPEN", "IN_PROGRESS"] },
-      },
-      select: {
-        id: true,
-        title: true,
-        bodyMd: true,
-      },
-      orderBy: { createdAt: "desc" },
-      take: 10,
-    })
-    : [];
+  const openProposalItems = selectDashboardOpenProposals(openProposalCandidates);
+  const teamActionItems = selectDashboardActionItems(teamActionCandidates);
   const openTensionItems = tensions.filter((tension) => tension.status === "OPEN");
   
   const attentionCounts = getDashboardAttentionCounts({
@@ -161,9 +179,11 @@ export default async function WorkspaceDashboard({
   const dateString = format.dateTime(d, { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
 
   const allArticles = articlesResult.items;
-  const dashboardKnowledgeArticles = selectDashboardKnowledgeArticles(allArticles);
-  const featuredArticle = dashboardKnowledgeArticles[0];
-  const otherRecentArticles = dashboardKnowledgeArticles.slice(1);
+  const dashboardFeedItems = selectDashboardFeedItems({
+    articles: allArticles,
+    meetings,
+    limit: 6,
+  });
 
   // Group by category for below the fold
   const articlesByCategory = allArticles.reduce((acc, a) => {
@@ -187,58 +207,174 @@ export default async function WorkspaceDashboard({
 
   const dashboardLayout = computeNewspaperLayout([
     {
-      id: "featuredKnowledge",
+      id: "knowledgeFeed",
       priority: 1,
-      itemCount: featuredArticle ? 1 + otherRecentArticles.length : 0,
-      estimatedTextLength: featuredArticle
-        ? featuredArticle.title.length + featuredArticle.bodyMd.length + otherRecentArticles.reduce((sum, article) => sum + article.title.length + article.bodyMd.length, 0)
-        : 0,
+      itemCount: dashboardFeedItems.length,
+      estimatedTextLength: dashboardFeedItems.reduce((sum, item) => (
+        sum
+        + (item.title?.length ?? 0)
+        + (item.kind === "MEETING" ? (item.summaryMd?.length ?? 0) : item.bodyMd.length)
+      ), 0),
     },
     {
-      id: "meetings",
+      id: "attention",
       priority: 2,
-      itemCount: recentMeetings.length,
-      estimatedTextLength: recentMeetings.reduce((sum, meeting) => sum + (meeting.title?.length ?? 0) + (meeting.summaryMd?.length ?? 0), 0),
+      itemCount: totalAttentionItems > 0 ? 1 : 0,
+      estimatedTextLength: 80,
     },
     {
-      id: "todos",
+      id: "proposals",
       priority: 3,
-      itemCount: memberOpenActions.length,
-      estimatedTextLength: memberOpenActions.reduce((sum, action) => sum + action.title.length + (action.bodyMd?.length ?? 0), 0),
+      itemCount: openProposalItems.length,
+      estimatedTextLength: openProposalItems.reduce((sum, proposal) => sum + proposal.title.length + (proposal.summary?.length ?? 0), 0),
+    },
+    {
+      id: "actionItems",
+      priority: 4,
+      itemCount: teamActionItems.length,
+      estimatedTextLength: teamActionItems.reduce((sum, action) => sum + action.title.length + (action.bodyMd?.length ?? 0), 0),
     },
     {
       id: "tensions",
-      priority: 4,
+      priority: 5,
       itemCount: openTensionItems.length,
       estimatedTextLength: openTensionItems.reduce((sum, tension) => sum + tension.title.length + (tension.bodyMd?.length ?? 0), 0),
     },
-    {
-      id: "activity",
-      priority: 5,
-      itemCount: auditLogs.length,
-      estimatedTextLength: auditLogs.reduce((sum, log) => sum + log.action.length + log.entityType.length, 0),
-    },
   ]);
-  const dashboardSectionIds = new Set<string>(dashboardLayout.visibleSections.map((section) => section.id));
-  const hasDashboardSection = (id: string) => dashboardSectionIds.has(id);
   const dashboardSectionLayout = (id: string) => dashboardLayout.sectionCaps[id] ?? {
     itemCap: 4,
     excerptMaxLength: 140,
     placement: "standard" as const,
   };
-  const dashboardPaperClassName = {
-    empty: "nr-paper nr-paper-empty",
-    sparse: "nr-paper nr-paper-sparse",
-    balanced: "nr-paper nr-paper-balanced",
-    "meeting-heavy": "nr-paper nr-paper-meeting-heavy",
-  }[dashboardLayout.variant];
-  const dashboardSectionClassName = (id: string) => {
-    const placement = dashboardSectionLayout(id).placement;
-    if (placement === "lead") return "nr-paper-section nr-paper-section-lead";
-    if (placement === "wide") return "nr-paper-section nr-paper-section-wide";
-    return "nr-paper-section nr-paper-section-standard";
-  };
+  const knowledgeFeedLayout = dashboardSectionLayout("knowledgeFeed");
+  const proposalLayout = dashboardSectionLayout("proposals");
+  const actionLayout = dashboardSectionLayout("actionItems");
+  const tensionLayout = dashboardSectionLayout("tensions");
+  const cappedFeedItems = dashboardFeedItems.slice(0, knowledgeFeedLayout.itemCap);
+  const cappedOpenProposalItems = openProposalItems.slice(0, proposalLayout.itemCap);
+  const cappedTeamActionItems = teamActionItems.slice(0, actionLayout.itemCap);
+  const cappedOpenTensionItems = openTensionItems.slice(0, tensionLayout.itemCap);
+  const hasWorkRail = totalAttentionItems > 0
+    || openProposalItems.length > 0
+    || teamActionItems.length > 0
+    || openTensionItems.length > 0;
+  const hasDashboardContent = cappedFeedItems.length > 0 || hasWorkRail;
   const hasStrategicDirection = strategicGoals.length > 0 || !!recentRecognition;
+  const attentionPanel = totalAttentionItems > 0 ? (
+    <section className="nr-rail-section nr-rail-section-attention">
+      <h2 className="nr-section-header">{t("attention")}</h2>
+      <div className="nr-attention nr-attention-rail">
+        <div className="nr-attention-summary">
+          {t("itemsNeedAttention", { count: totalAttentionItems })}
+        </div>
+
+        <div className="nr-attention-body">
+          {pendingFlowTotal > 0 && (
+            <div className="nr-attention-block">
+              <strong>{t("approvalsPending", { count: pendingFlowTotal })}</strong>
+              {displayedApprovalFlows.map((flow) => {
+                const href = resolveWorkspaceEntityUrl(workspaceId, flow.subjectType, flow.subjectId);
+                const label = flow.subjectLabel || flow.subjectType;
+                const typeLabel = flow.subjectType.charAt(0) + flow.subjectType.slice(1).toLowerCase();
+                return (
+                  <div key={flow.id} className="nr-attention-item">
+                    <div className="nr-attention-item-main">
+                      <div className="nr-attention-kicker">{typeLabel}</div>
+                      {href ? (
+                        <Link href={href} className="nr-attention-title nr-attention-title-truncate">
+                          {label}
+                        </Link>
+                      ) : (
+                        <span className="nr-attention-title">{label}</span>
+                      )}
+                    </div>
+                    <form action={decideApprovalAction} className="nr-attention-action">
+                      <input type="hidden" name="workspaceId" value={workspaceId} />
+                      <input type="hidden" name="flowId" value={flow.id} />
+                      <button type="submit" name="choice" value={flow.mode === "CONSENT" ? "AGREE" : "APPROVE"} className="nr-attention-button">{t("approve")}</button>
+                    </form>
+                  </div>
+                );
+              })}
+              {pendingFlowTotal > displayedApprovalFlows.length && (
+                <>
+                  <span className="nr-attention-copy">{t("remainingApprovals", { count: pendingFlowTotal - displayedApprovalFlows.length })}</span>
+                  <Link href={`/workspaces/${workspaceId}/proposals?status=OPEN`} className="nr-attention-inline-link">
+                    {t("viewProposalApprovals")}
+                  </Link>
+                  <Link href={`/workspaces/${workspaceId}/finance?status=OPEN`} className="nr-attention-inline-link">
+                    {t("viewSpendApprovals")}
+                  </Link>
+                </>
+              )}
+            </div>
+          )}
+
+          {visiblePendingAgentApprovals > 0 && (
+            <div className="nr-attention-block">
+              <strong>{t("agentRuns")}</strong>
+              <span className="nr-attention-copy">{t("runsWaitingReview", { count: visiblePendingAgentApprovals })}</span>
+              <Link href={`/workspaces/${workspaceId}/operator`} className="nr-attention-inline-link">{t("review")}</Link>
+            </div>
+          )}
+
+          {unreadNotificationsCount > 0 && (
+            <div className="nr-attention-block">
+              <div className="nr-attention-block-header">
+                <strong>
+                  <Link href={`/workspaces/${workspaceId}/notifications`} className="nr-attention-heading-link">
+                    {t("notifications")}
+                  </Link>
+                </strong>
+                <form action={markAllNotificationsReadAction} className="nr-attention-mark-read">
+                  <input type="hidden" name="workspaceId" value={workspaceId} />
+                  <button type="submit" className="nr-attention-mark-read-button">{t("markRead")}</button>
+                </form>
+              </div>
+              <span className="nr-attention-copy">{t("unreadNotificationsSummary", { count: unreadNotificationsCount })}</span>
+              {unreadNotifications.slice(0, 3).map((n) => {
+                const href = resolveWorkspaceEntityUrl(workspaceId, n.entityType, n.entityId);
+                return (
+                  <div key={n.id} className="nr-attention-notification">
+                    <div className="nr-attention-notification-head">
+                      {href ? (
+                        <Link href={href} className="nr-attention-title nr-attention-title-truncate">
+                          {n.title}
+                        </Link>
+                      ) : (
+                        <span className="nr-attention-title nr-attention-title-truncate">{n.title}</span>
+                      )}
+                      <span className="nr-attention-time" suppressHydrationWarning>{ageText(n.createdAt)}</span>
+                    </div>
+                    {n.bodyMd && (
+                      <div className="nr-attention-copy">
+                        <MarkdownExcerpt markdown={n.bodyMd} maxLength={100} />
+                      </div>
+                    )}
+                  </div>
+                );
+                })}
+              <Link href={`/workspaces/${workspaceId}/notifications`} className="nr-attention-inline-link">{t("viewAll")}</Link>
+            </div>
+          )}
+
+          {advisoryRequests.length > 0 && (
+            <div className="nr-attention-block nr-attention-block-info">
+              <strong>{t("advisoryRequests", { count: advisoryRequests.length })}</strong>
+              {advisoryRequests.slice(0, 2).map((ap: any) => (
+                <div key={ap.id} className="nr-attention-item">
+                  <Link href={`/workspaces/${workspaceId}/proposals?status=OPEN`} className="nr-attention-title">
+                    {ap.proposal.title}
+                  </Link>
+                </div>
+              ))}
+              {advisoryRequests.length > 2 && <div className="nr-attention-kicker">{t("more", { count: advisoryRequests.length - 2 })}</div>}
+            </div>
+          )}
+        </div>
+      </div>
+    </section>
+  ) : null;
 
   return (
     <>
@@ -257,114 +393,6 @@ export default async function WorkspaceDashboard({
         </div>
       </header>
 
-      {totalAttentionItems > 0 && (
-        <div className="nr-attention">
-          <div className="nr-attention-summary">
-            {t("itemsNeedAttention", { count: totalAttentionItems })}
-          </div>
-
-          <div className="nr-attention-body">
-            {pendingFlowTotal > 0 && (
-              <div className="nr-attention-block">
-                <strong>{t("approvalsPending", { count: pendingFlowTotal })}</strong>
-                {displayedApprovalFlows.map((flow) => {
-                  const href = resolveEntityUrl(workspaceId, flow.subjectType, flow.subjectId);
-                  const label = flow.subjectLabel || flow.subjectType;
-                  const typeLabel = flow.subjectType.charAt(0) + flow.subjectType.slice(1).toLowerCase();
-                  return (
-                    <div key={flow.id} className="nr-attention-item">
-                      <div className="nr-attention-item-main">
-                        <div className="nr-attention-kicker">{typeLabel}</div>
-                        {href ? (
-                          <Link href={href} className="nr-attention-title nr-attention-title-truncate">
-                            {label}
-                          </Link>
-                        ) : (
-                          <span className="nr-attention-title">{label}</span>
-                        )}
-                      </div>
-                      <form action={decideApprovalAction} className="nr-attention-action">
-                        <input type="hidden" name="workspaceId" value={workspaceId} />
-                        <input type="hidden" name="flowId" value={flow.id} />
-                        <button type="submit" name="choice" value={flow.mode === "CONSENT" ? "AGREE" : "APPROVE"} className="nr-attention-button">{t("approve")}</button>
-                      </form>
-                    </div>
-                  );
-                })}
-                {pendingFlowTotal > displayedApprovalFlows.length && (
-                  <>
-                    <span className="nr-attention-copy">{t("remainingApprovals", { count: pendingFlowTotal - displayedApprovalFlows.length })}</span>
-                    <Link href={`/workspaces/${workspaceId}/proposals?status=OPEN`} className="nr-attention-inline-link">
-                      {t("viewProposalApprovals")}
-                    </Link>
-                    <Link href={`/workspaces/${workspaceId}/finance?status=OPEN`} className="nr-attention-inline-link">
-                      {t("viewSpendApprovals")}
-                    </Link>
-                  </>
-                )}
-              </div>
-            )}
-            
-            {visiblePendingAgentApprovals > 0 && (
-              <div className="nr-attention-block">
-                <strong>{t("agentRuns")}</strong>
-                <span className="nr-attention-copy">{t("runsWaitingReview", { count: visiblePendingAgentApprovals })}</span>
-                <Link href={`/workspaces/${workspaceId}/operator`} className="nr-attention-inline-link">{t("review")}</Link>
-              </div>
-            )}
-
-            {unreadNotificationsCount > 0 && (
-              <div className="nr-attention-block">
-                <div className="nr-attention-block-header">
-                  <strong>{t("notifications")}</strong>
-                  <form action={markAllNotificationsReadAction} className="nr-attention-mark-read">
-                    <input type="hidden" name="workspaceId" value={workspaceId} />
-                    <button type="submit" className="nr-attention-mark-read-button">{t("markRead")}</button>
-                  </form>
-                </div>
-                <span className="nr-attention-copy">{t("unreadNotificationsSummary", { count: unreadNotificationsCount })}</span>
-                {unreadNotifications.slice(0, 3).map((n) => {
-                  const href = resolveEntityUrl(workspaceId, n.entityType, n.entityId);
-                  return (
-                    <div key={n.id} className="nr-attention-notification">
-                      <div className="nr-attention-notification-head">
-                        {href ? (
-                          <Link href={href} className="nr-attention-title nr-attention-title-truncate">
-                            {n.title}
-                          </Link>
-                        ) : (
-                          <span className="nr-attention-title nr-attention-title-truncate">{n.title}</span>
-                        )}
-                        <span className="nr-attention-time" suppressHydrationWarning>{ageText(n.createdAt)}</span>
-                      </div>
-                      {n.bodyMd && (
-                        <div className="nr-attention-copy">
-                          <MarkdownExcerpt markdown={n.bodyMd} maxLength={100} />
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-
-            {advisoryRequests.length > 0 && (
-              <div className="nr-attention-block nr-attention-block-info">
-                <strong>{t("advisoryRequests", { count: advisoryRequests.length })}</strong>
-                {advisoryRequests.slice(0, 2).map((ap: any) => (
-                  <div key={ap.id} className="nr-attention-item">
-                    <Link href={`/workspaces/${workspaceId}/proposals?status=OPEN`} className="nr-attention-title">
-                      {ap.proposal.title}
-                    </Link>
-                  </div>
-                ))}
-                {advisoryRequests.length > 2 && <div className="nr-attention-kicker">{t("more", { count: advisoryRequests.length - 2 })}</div>}
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-
       {currentMemberUrl && (
         <div className="nr-profile-link-row">
           <Link href={`/workspaces/${workspaceId}/members/${currentMemberUrl}`} className="nr-link">
@@ -373,126 +401,124 @@ export default async function WorkspaceDashboard({
         </div>
       )}
 
-      {/* HERO SECTION */}
-      {dashboardLayout.visibleSections.length > 0 && (
-      <section className={dashboardPaperClassName}>
-        {/* LEFT COLUMN: FEATURED */}
-        {hasDashboardSection("featuredKnowledge") && featuredArticle && (
-        <div className={dashboardSectionClassName("featuredKnowledge")}>
-          <h2 className="nr-section-header">{t("freshKnowledge")}</h2>
-            <div style={{ marginBottom: "24px" }}>
-              <div className="nr-meta">{featuredArticle.type} · {t("updated")} <span suppressHydrationWarning>{ageText(featuredArticle.updatedAt)}</span></div>
-              <Link href={`/workspaces/${workspaceId}/brain/${featuredArticle.slug}`} style={{ textDecoration: "none" }}>
-                <h3 className="nr-lead-headline">{featuredArticle.title}</h3>
-                <MarkdownExcerpt markdown={featuredArticle.bodyMd} maxLength={dashboardSectionLayout("featuredKnowledge").excerptMaxLength} as="p" className="nr-excerpt" />
-                <span className="nr-link">{t("readFullArticle")}</span>
-              </Link>
+      {hasDashboardContent && (
+      <section className="nr-dashboard-grid">
+        {cappedFeedItems.length > 0 && (
+          <div className="nr-knowledge-feed">
+            <h2 className="nr-section-header">{t("freshKnowledge")}</h2>
+            <div className="nr-feed-list">
+              {cappedFeedItems.map((item, index) => {
+                const href = item.kind === "MEETING"
+                  ? `/workspaces/${workspaceId}/meetings/${item.id}`
+                  : `/workspaces/${workspaceId}/brain/${item.slug}`;
+                const title = item.kind === "MEETING"
+                  ? (item.title || t("meeting"))
+                  : item.title;
+                const excerpt = item.kind === "MEETING" ? item.summaryMd : item.bodyMd;
+                const excerptMaxLength = index === 0
+                  ? knowledgeFeedLayout.excerptMaxLength
+                  : Math.min(170, knowledgeFeedLayout.excerptMaxLength);
+
+                return (
+                  <article key={`${item.kind}-${item.id}`} className={index === 0 ? "nr-feed-item nr-feed-item-lead" : "nr-feed-item"}>
+                    <div className="nr-feed-meta">
+                      <span>{item.label}</span>
+                      <span>·</span>
+                      <span suppressHydrationWarning>
+                        {item.kind === "MEETING"
+                          ? format.dateTime(item.recordedAt, { month: "short", day: "numeric", year: "numeric" })
+                          : `${t("updated")} ${ageText(item.updatedAt)}`}
+                      </span>
+                    </div>
+                    <Link href={href} className="nr-feed-link">
+                      <h3 className="nr-feed-title">{title}</h3>
+                      {excerpt && (
+                        <MarkdownExcerpt markdown={excerpt} maxLength={excerptMaxLength} as="p" className="nr-excerpt" />
+                      )}
+                      <span className="nr-link">
+                        {item.kind === "MEETING" ? t("viewMeetingTranscript") : t("readFullArticle")}
+                      </span>
+                    </Link>
+                  </article>
+                );
+              })}
             </div>
-          <div style={{ borderTop: "1px solid var(--line)", paddingTop: "16px" }}>
-            {otherRecentArticles.slice(0, Math.max(0, dashboardSectionLayout("featuredKnowledge").itemCap - 1)).map(a => (
-              <div key={a.id} className="nr-item" style={{ borderBottom: "1px solid var(--line)", paddingBottom: "16px", marginBottom: "16px" }}>
-                <div className="nr-meta" style={{ marginBottom: "4px" }}>{a.type}</div>
-                <Link href={`/workspaces/${workspaceId}/brain/${a.slug}`} style={{ textDecoration: "none" }}>
-                  <h4 className="nr-secondary-headline" style={{ fontSize: "1.2rem", marginBottom: "6px" }}>{a.title}</h4>
-                  <MarkdownExcerpt markdown={a.bodyMd} maxLength={140} as="p" className="nr-excerpt" />
-                </Link>
-              </div>
-            ))}
           </div>
-        </div>
         )}
 
-        {/* CENTER COLUMN: MEETINGS */}
-        {hasDashboardSection("meetings") && (
-        <div className={dashboardSectionClassName("meetings")}>
-           <h2 className="nr-section-header">{t("latestMeetingRecap")}</h2>
-           {recentMeetings.slice(0, dashboardSectionLayout("meetings").itemCap).map((meeting) => (
-             <div key={meeting.id} className="nr-item">
-               <Link href={`/workspaces/${workspaceId}/meetings/${meeting.id}`} className="nr-item-title" style={{ display: "block", textDecoration: "none" }}>
-                 {meeting.title || `${meeting.source} ${t("meeting")}`}
-               </Link>
-               <div className="nr-item-meta" suppressHydrationWarning>{format.dateTime(new Date(meeting.recordedAt), { month: "short", day: "numeric", year: "numeric" })}</div>
-               {meeting.summaryMd && <MarkdownExcerpt markdown={meeting.summaryMd} maxLength={dashboardSectionLayout("meetings").excerptMaxLength} as="div" className="nr-item-meta" />}
-             </div>
-           ))}
-           <div style={{ marginTop: "16px" }}>
-             <Link href={`/workspaces/${workspaceId}/meetings`} className="nr-link">{t("viewAllTranscripts")}</Link>
-           </div>
-        </div>
-        )}
+        {hasWorkRail && (
+          <aside className="nr-work-rail">
+            {attentionPanel}
 
-        {/* RIGHT COLUMN: TODOS & TENSIONS */}
-        {hasDashboardSection("todos") && (
-        <div className={dashboardSectionClassName("todos")}>
-           <h2 className="nr-section-header">{t("yourToDos")}</h2>
-           <div style={{ marginBottom: "32px"}}>
-             {memberOpenActions.slice(0, dashboardSectionLayout("todos").itemCap).map((action) => (
-               <div key={action.id} className="nr-item" style={{ display: "flex", gap: "8px", alignItems: "baseline", borderBottom: "none", padding: "6px 0" }}>
-                 <form action={updateActionAction} style={{ display: "inline-flex", flex: "0 0 auto", margin: 0 }}>
-                   <input type="hidden" name="workspaceId" value={workspaceId} />
-                   <input type="hidden" name="actionId" value={action.id} />
-                   <input type="hidden" name="status" value="COMPLETED" />
-                   <button
-                     type="submit"
-                     role="checkbox"
-                     aria-checked={false}
-                     aria-label={t("markTodoComplete", { title: action.title })}
-                     title={t("markTodoComplete", { title: action.title })}
-                     style={{
-                       appearance: "none",
-                       background: "var(--surface)",
-                       border: "1px solid var(--line)",
-                       borderRadius: "2px",
-                       cursor: "pointer",
-                       flex: "0 0 13px",
-                       height: "13px",
-                       margin: "2px 0 0",
-                       minHeight: 0,
-                       padding: 0,
-                       width: "13px",
-                     }}
-                   />
-                 </form>
-                 <Link href={`/workspaces/${workspaceId}/actions`} style={{ fontSize: "0.85rem", lineHeight: 1.4, textDecoration: "none", color: "var(--text)" }}>{action.title}</Link>
-               </div>
-             ))}
-           </div>
-        </div>
-        )}
+            {openProposalItems.length > 0 && (
+              <section className="nr-rail-section">
+                <h2 className="nr-section-header">{t("openProposals")}</h2>
+                <div className="nr-rail-list">
+                  {cappedOpenProposalItems.map((proposal) => (
+                    <Link key={proposal.id} href={`/workspaces/${workspaceId}/proposals/${proposal.id}`} className="nr-rail-item">
+                      <span className="nr-rail-title">{proposal.title}</span>
+                      {proposal.summary && <span className="nr-rail-copy">{proposal.summary}</span>}
+                      <span className="nr-rail-meta" suppressHydrationWarning>{ageText(proposal.createdAt)}</span>
+                    </Link>
+                  ))}
+                </div>
+                {openProposalItems.length > cappedOpenProposalItems.length && (
+                  <Link href={`/workspaces/${workspaceId}/proposals?status=OPEN`} className="nr-link">{t("viewAllProposals")}</Link>
+                )}
+              </section>
+            )}
 
-        {hasDashboardSection("tensions") && (
-        <div className={dashboardSectionClassName("tensions")}>
-           <h2 className="nr-section-header">{t("activeTensions")}</h2>
-           <div style={{ marginBottom: "16px" }}>
-             {openTensionItems.slice(0, dashboardSectionLayout("tensions").itemCap).map((tension) => (
-               <div key={tension.id} className="nr-item" style={{ padding: "8px 0" }}>
-                 <Link href={`/workspaces/${workspaceId}/tensions`} style={{ display: "block", textDecoration: "none" }}>
-                   <div style={{ fontSize: "0.85rem", fontWeight: 600, color: "var(--text)", marginBottom: "2px" }}>{tension.title}</div>
-                   <div className="nr-item-meta" suppressHydrationWarning>{ageText(tension.createdAt)}</div>
-                 </Link>
-               </div>
-             ))}
-           </div>
-        </div>
-        )}
+            {teamActionItems.length > 0 && (
+              <section className="nr-rail-section">
+                <h2 className="nr-section-header">{t("actionItems")}</h2>
+                <div className="nr-rail-list">
+                  {cappedTeamActionItems.map((action) => {
+                    const assigneeName = action.assigneeMember?.user?.displayName;
+                    return (
+                      <Link key={action.id} href={`/workspaces/${workspaceId}/actions`} className="nr-rail-item">
+                        <span className="nr-rail-title">{action.title}</span>
+                        {action.bodyMd && <MarkdownExcerpt markdown={action.bodyMd} maxLength={110} as="span" className="nr-rail-copy" />}
+                        {(action.dueAt || assigneeName) && (
+                          <span className="nr-rail-meta">
+                            {action.dueAt && (
+                              <span suppressHydrationWarning>{t("dueDate", { date: format.dateTime(action.dueAt, { month: "short", day: "numeric" }) })}</span>
+                            )}
+                            {action.dueAt && assigneeName && <span> · </span>}
+                            {assigneeName && <span>{t("assignedTo", { name: assigneeName })}</span>}
+                          </span>
+                        )}
+                      </Link>
+                    );
+                  })}
+                </div>
+                {teamActionItems.length > cappedTeamActionItems.length && (
+                  <Link href={`/workspaces/${workspaceId}/actions`} className="nr-link">{t("viewAllActions")}</Link>
+                )}
+              </section>
+            )}
 
-        {hasDashboardSection("activity") && (
-        <div className={dashboardSectionClassName("activity")}>
-           <h2 className="nr-section-header">{t("liveActivity")}</h2>
-           <div className="nr-activity">
-             {auditLogs.slice(0, dashboardSectionLayout("activity").itemCap).map(log => (
-               <div key={log.id} style={{ fontSize: "0.85rem", padding: "8px 0", borderBottom: "1px solid var(--line)" }}>
-                 <span style={{ color: "var(--muted)", marginRight: "6px" }} suppressHydrationWarning>{ageText(log.createdAt)}</span>
-                 <span>{log.actorUserId ? t("someone") : t("system")} {log.action.replace(/\./g, " ")} {t("activityOn")} {log.entityType}</span>
-               </div>
-             ))}
-           </div>
-        </div>
+            {openTensionItems.length > 0 && (
+              <section className="nr-rail-section">
+                <h2 className="nr-section-header">{t("activeTensions")}</h2>
+                <div className="nr-rail-list">
+                  {cappedOpenTensionItems.map((tension) => (
+                    <Link key={tension.id} href={`/workspaces/${workspaceId}/tensions/${tension.id}`} className="nr-rail-item">
+                      <span className="nr-rail-title">{tension.title}</span>
+                      <span className="nr-rail-meta" suppressHydrationWarning>{ageText(tension.createdAt)}</span>
+                    </Link>
+                  ))}
+                </div>
+                {openTensionItems.length > cappedOpenTensionItems.length && (
+                  <Link href={`/workspaces/${workspaceId}/tensions`} className="nr-link">{t("viewAllTensions")}</Link>
+                )}
+              </section>
+            )}
+          </aside>
         )}
       </section>
       )}
 
-      {dashboardLayout.visibleSections.length > 0 && hasStrategicDirection && <hr className="nr-divider" />}
+      {hasDashboardContent && hasStrategicDirection && <hr className="nr-divider" />}
 
       {hasStrategicDirection && (
       <>
@@ -533,7 +559,7 @@ export default async function WorkspaceDashboard({
       </>
       )}
 
-      {(hasStrategicDirection || dashboardLayout.visibleSections.length > 0) && recentlyPublished.length > 0 && <hr className="nr-divider" />}
+      {(hasStrategicDirection || hasDashboardContent) && recentlyPublished.length > 0 && <hr className="nr-divider" />}
 
       {recentlyPublished.length > 0 && (
       <>
@@ -552,7 +578,7 @@ export default async function WorkspaceDashboard({
       </>
       )}
 
-      {(recentlyPublished.length > 0 || hasStrategicDirection || dashboardLayout.visibleSections.length > 0) && sortedCategories.length > 0 && <hr className="nr-divider" />}
+      {(recentlyPublished.length > 0 || hasStrategicDirection || hasDashboardContent) && sortedCategories.length > 0 && <hr className="nr-divider" />}
 
       {sortedCategories.length > 0 && (
       <>
