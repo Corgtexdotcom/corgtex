@@ -11,6 +11,8 @@ const email = process.env.AGENT_E2E_EMAIL || "system+corgtex@corgtex.local";
 const password = process.env.AGENT_E2E_PASSWORD || "corgtex-test-agent-pw";
 const loginLocale = process.env.CLIENT_READINESS_LOCALE || "en";
 const loginTimeoutMs = positiveInt(process.env.CLIENT_READINESS_LOGIN_TIMEOUT_MS, 60_000);
+const mobileModeSwitchTimeoutMs = positiveInt(process.env.CLIENT_READINESS_MOBILE_MODE_SWITCH_TIMEOUT_MS, 15_000);
+const mobileModeSwitchRetryMs = positiveInt(process.env.CLIENT_READINESS_MOBILE_MODE_SWITCH_RETRY_MS, 750);
 
 function csvSet(name) {
   return new Set((process.env[name] || "").split(",").map((value) => value.trim()).filter(Boolean));
@@ -254,15 +256,50 @@ async function captureRoute(page, locale, workspacePath, name, suffix, viewport,
   await captureScreenshot(page, `${prefix}${name}.png`);
 }
 
-async function expectVisible(page, selector, label, findings) {
+async function expectVisible(page, selector, label, findings, timeout = 5000) {
   const locator = page.locator(selector).first();
-  await locator.waitFor({ state: "visible", timeout: 5000 }).catch(() => null);
+  await locator.waitFor({ state: "visible", timeout }).catch(() => null);
   if (!(await locator.isVisible().catch(() => false))) {
     findings.push({ name: label, route: page.url(), status: "missing-visible-selector", selector });
     await captureScreenshot(page, `${label}-missing.png`);
     return false;
   }
   return true;
+}
+
+export async function activateMobileMode(page, {
+  buttonText,
+  expectedSelector,
+  label,
+  findings,
+  timeoutMs = mobileModeSwitchTimeoutMs,
+  retryDelayMs = mobileModeSwitchRetryMs,
+}) {
+  const button = page.locator(".mobile-mode-switch button", { hasText: buttonText }).first();
+  const expected = page.locator(expectedSelector).first();
+  const attempts = Math.max(1, Math.ceil(timeoutMs / retryDelayMs));
+  const interactionTimeout = Math.max(250, Math.min(2000, retryDelayMs));
+
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    await button.waitFor({ state: "visible", timeout: interactionTimeout }).catch(() => null);
+    await button.click({ timeout: interactionTimeout }).catch(() => null);
+    await expected.waitFor({ state: "visible", timeout: retryDelayMs }).catch(() => null);
+
+    if (await expected.isVisible().catch(() => false)) {
+      return true;
+    }
+
+    await page.waitForTimeout(Math.min(250, retryDelayMs)).catch(() => null);
+  }
+
+  findings.push({
+    name: label,
+    route: page.url(),
+    status: "mode-switch-timeout",
+    selector: expectedSelector,
+  });
+  await captureScreenshot(page, `${label}-missing.png`);
+  return false;
 }
 
 async function expectTextVisible(page, selector, text, label, findings) {
@@ -295,6 +332,14 @@ async function verifyNoHorizontalOverflow(page, label, findings) {
 
 async function verifyMobileShell(page, locale, workspacePath, findings, routeResults) {
   let fakeConversationCounter = 0;
+  await page.route("**/api/workspaces/*/mobile-analytics", async (route) => {
+    if (route.request().method() !== "POST") {
+      await route.fallback();
+      return;
+    }
+
+    await route.fulfill({ status: 204 });
+  });
   await page.route("**/api/workspaces/*/conversations", async (route) => {
     if (route.request().method() !== "POST") {
       await route.fallback();
@@ -341,12 +386,42 @@ async function verifyMobileShell(page, locale, workspacePath, findings, routeRes
     await verifyNoHorizontalOverflow(page, `mobile-shell-${viewportName}`, findings);
     await captureScreenshot(page, `mobile-shell-${viewportName}-workspace.png`);
 
-    await page.locator(".mobile-mode-switch button", { hasText: /AI|IA/ }).first().click();
-    await expectVisible(page, ".mobile-ai-workbench", `mobile-shell-${viewportName}-ai`, findings);
-    await expectVisible(page, ".chat-input", `mobile-shell-${viewportName}-ai-input`, findings);
+    const aiModeReady = await activateMobileMode(page, {
+      buttonText: /AI|IA/,
+      expectedSelector: ".mobile-ai-workbench",
+      label: `mobile-shell-${viewportName}-ai`,
+      findings,
+    });
+    if (!aiModeReady) continue;
+
+    const inputReady = await expectVisible(
+      page,
+      ".mobile-ai-workbench .chat-input",
+      `mobile-shell-${viewportName}-ai-input`,
+      findings,
+    );
+    const sendReady = await expectVisible(
+      page,
+      ".mobile-ai-workbench .chat-send-btn",
+      `mobile-shell-${viewportName}-ai-send`,
+      findings,
+    );
+    if (!inputReady || !sendReady) continue;
+
     const smokePrompt = `Mobile smoke ${viewportName}`;
-    await page.locator(".mobile-ai-workbench .chat-input").first().fill(smokePrompt);
-    await page.locator(".mobile-ai-workbench .chat-send-btn").first().click();
+    try {
+      await page.locator(".mobile-ai-workbench .chat-input").first().fill(smokePrompt, { timeout: 5000 });
+      await page.locator(".mobile-ai-workbench .chat-send-btn").first().click({ timeout: 5000 });
+    } catch (error) {
+      findings.push({
+        name: `mobile-shell-${viewportName}-ai-submit`,
+        route: page.url(),
+        status: "chat-submit-failed",
+        error: error instanceof Error ? error.message : String(error),
+      });
+      await captureScreenshot(page, `mobile-shell-${viewportName}-ai-submit-failed.png`);
+      continue;
+    }
     await expectTextVisible(page, ".mobile-ai-workbench .chat-message.user", smokePrompt, `mobile-shell-${viewportName}-ai-user-message`, findings);
     await expectTextVisible(page, ".mobile-ai-workbench .chat-message.assistant", "Smoke response", `mobile-shell-${viewportName}-ai-response`, findings);
     const storedMode = await page.evaluate(() => window.localStorage.getItem("corgtex.mobileMode"));
@@ -357,7 +432,7 @@ async function verifyMobileShell(page, locale, workspacePath, findings, routeRes
 
     await page.reload({ waitUntil: "domcontentloaded" });
     await waitForPageSettled(page);
-    await expectVisible(page, ".mobile-ai-workbench", `mobile-shell-${viewportName}-ai-persisted`, findings);
+    await expectVisible(page, ".mobile-ai-workbench", `mobile-shell-${viewportName}-ai-persisted`, findings, mobileModeSwitchTimeoutMs);
 
     await page.locator(".mobile-mode-switch button", { hasText: /Workspace|Espacio/ }).first().click();
     await expectVisible(page, ".ws-main", `mobile-shell-${viewportName}-workspace-return`, findings);
