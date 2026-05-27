@@ -32,7 +32,9 @@ const MEETING_HEAVY_THRESHOLD = 3;
 
 const SECTION_ITEM_CAPS: Record<string, Partial<Record<NewspaperLayoutVariant, number>>> = {
   featuredKnowledge: { sparse: 4, balanced: 4, "meeting-heavy": 3 },
+  knowledgeFeed: { sparse: 6, balanced: 6, "meeting-heavy": 6 },
   meetings: { sparse: 3, balanced: 2, "meeting-heavy": 5 },
+  proposals: { sparse: 5, balanced: 5, "meeting-heavy": 4 },
   todos: { sparse: 6, balanced: 6, "meeting-heavy": 4 },
   tensions: { sparse: 4, balanced: 4, "meeting-heavy": 4 },
   activity: { sparse: 5, balanced: 5, "meeting-heavy": 4 },
@@ -49,7 +51,9 @@ const SECTION_ITEM_CAPS: Record<string, Partial<Record<NewspaperLayoutVariant, n
 
 const SECTION_EXCERPT_CAPS: Record<string, Partial<Record<NewspaperLayoutVariant, number>>> = {
   featuredKnowledge: { sparse: 260, balanced: 220, "meeting-heavy": 190 },
+  knowledgeFeed: { sparse: 260, balanced: 220, "meeting-heavy": 220 },
   meetings: { sparse: 160, balanced: 120, "meeting-heavy": 180 },
+  proposals: { sparse: 120, balanced: 100, "meeting-heavy": 90 },
   todos: { sparse: 120, balanced: 90, "meeting-heavy": 80 },
   tensions: { sparse: 140, balanced: 120, "meeting-heavy": 110 },
   activity: { sparse: 120, balanced: 100, "meeting-heavy": 90 },
