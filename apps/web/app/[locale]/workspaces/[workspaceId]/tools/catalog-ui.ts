@@ -21,6 +21,8 @@ export type CatalogFilterState = {
   query: string;
 };
 
+export type CatalogSearchParamValue = string | string[] | undefined;
+
 export type CatalogCardAction =
   | {
       kind: "link";
@@ -42,6 +44,19 @@ export type CatalogCardAction =
 export const TYPE_ORDER: CatalogItemType[] = ["CONNECTOR", "APP", "AGENT", "TOOL", "AUTOMATION", "DATA_SOURCE"];
 
 const TYPE_RANK = new Map(TYPE_ORDER.map((type, index) => [type, index]));
+
+function firstSearchParam(value: CatalogSearchParamValue) {
+  return Array.isArray(value) ? value[0] : value;
+}
+
+export function normalizeCatalogType(value: CatalogSearchParamValue): CatalogItemType | "ALL" {
+  const type = firstSearchParam(value);
+  return TYPE_ORDER.includes(type as CatalogItemType) ? type as CatalogItemType : "ALL";
+}
+
+export function normalizeCatalogQuery(value: CatalogSearchParamValue) {
+  return firstSearchParam(value)?.slice(0, 120) ?? "";
+}
 
 export function hasCatalogFilter({ activeType, query }: CatalogFilterState) {
   return activeType !== "ALL" || query.trim().length > 0;

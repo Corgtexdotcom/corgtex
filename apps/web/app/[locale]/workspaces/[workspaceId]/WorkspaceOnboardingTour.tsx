@@ -59,6 +59,9 @@ export function WorkspaceOnboardingTour({
   const goalsTourEnabled = Boolean(featureFlags?.GOALS);
   const contextMapsTourEnabled = Boolean(featureFlags?.CONTEXT_MAPS);
   const agentGovernanceTourEnabled = Boolean(featureFlags?.AGENT_GOVERNANCE && capabilities?.canManageAgentGovernance);
+  const meetingRecorderOnboardingPath = featureFlags?.TOOL_LINKS
+    ? "/tools?type=TOOL&q=meeting%20recorder"
+    : "/settings?tab=general";
 
   const tourSteps: TourStep[] = useMemo(() => {
     const steps: TourStep[] = [
@@ -163,7 +166,7 @@ export function WorkspaceOnboardingTour({
 
     steps.push(
       {
-        href: "/settings?tab=general",
+        href: meetingRecorderOnboardingPath,
         element: ".ws-main-content",
         popover: {
           title: t("integrationsTitle"),
@@ -183,7 +186,7 @@ export function WorkspaceOnboardingTour({
     );
 
     return steps;
-  }, [t, goalsTourEnabled, contextMapsTourEnabled, agentGovernanceTourEnabled]);
+  }, [t, goalsTourEnabled, contextMapsTourEnabled, agentGovernanceTourEnabled, meetingRecorderOnboardingPath]);
 
   const markCompleted = useCallback(() => {
     completedRef.current = true;
@@ -336,17 +339,17 @@ export function WorkspaceOnboardingTour({
             <div className="onboarding-connector" />
           </div>
           <div className="onboarding-step-content">
-            <h4 className="onboarding-step-title">{t("connectEmailTitle")}</h4>
-            <p className="onboarding-step-description">{t("connectEmailDescription")}</p>
+            <h4 className="onboarding-step-title">{t("connectRecorderTitle")}</h4>
+            <p className="onboarding-step-description">{t("connectRecorderDescription")}</p>
             <div className="onboarding-step-action">
               <button
                 type="button"
                 onClick={() => {
                   setShowChecklist(false);
-                  router.push(`/workspaces/${workspaceId}/settings?tab=general`);
+                  router.push(`/workspaces/${workspaceId}${meetingRecorderOnboardingPath}`);
                 }}
               >
-                {t("connectEmailAction")}
+                {t("connectRecorderAction")}
               </button>
             </div>
           </div>

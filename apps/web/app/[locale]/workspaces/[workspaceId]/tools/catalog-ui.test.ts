@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   filterCatalogItems,
   getCatalogCardActions,
+  normalizeCatalogQuery,
+  normalizeCatalogType,
   splitDefaultCatalogSections,
   type CatalogItemForUi,
 } from "./catalog-ui";
@@ -40,6 +42,13 @@ describe("Tools catalog UI helpers", () => {
     ], { activeType: "CONNECTOR", query: "" });
 
     expect(result.map((entry) => entry.id)).toEqual(["google"]);
+  });
+
+  it("normalizes repeated URL filter parameters", () => {
+    expect(normalizeCatalogType(["TOOL", "AGENT"])).toBe("TOOL");
+    expect(normalizeCatalogType(["BAD", "TOOL"])).toBe("ALL");
+    expect(normalizeCatalogQuery(["meeting", "recorder"])).toBe("meeting");
+    expect(normalizeCatalogQuery("x".repeat(140))).toHaveLength(120);
   });
 
   it("matches search across title, outcome, description, category, and type", () => {
@@ -97,6 +106,36 @@ describe("Tools catalog UI helpers", () => {
     expect(actions).toEqual([
       { kind: "status", label: "Admin setup required" },
       { kind: "link", label: "Details", href: "/workspaces/workspace-1/tools/slack", variant: "secondary" },
+    ]);
+  });
+
+  it("lets users request meeting recorder access before the recorder is enabled", () => {
+    const actions = getCatalogCardActions(item({
+      id: "meeting-recorder",
+      type: "TOOL",
+      title: "Meeting recorder",
+      url: null,
+      accessMode: "REQUEST",
+    }), { workspaceId: "workspace-1", canManageCatalog: false });
+
+    expect(actions).toEqual([
+      { kind: "request", label: "Request access", requestType: "ACCESS", variant: "primary" },
+      { kind: "link", label: "Details", href: "/workspaces/workspace-1/tools/meeting-recorder", variant: "secondary" },
+    ]);
+  });
+
+  it("opens meeting recorder setup when the recorder is enabled", () => {
+    const actions = getCatalogCardActions(item({
+      id: "meeting-recorder",
+      type: "TOOL",
+      title: "Meeting recorder",
+      url: "/workspaces/workspace-1/settings?tab=general",
+      accessMode: "OPEN",
+    }), { workspaceId: "workspace-1", canManageCatalog: false });
+
+    expect(actions).toEqual([
+      { kind: "link", label: "Open", href: "/workspaces/workspace-1/settings?tab=general", variant: "primary" },
+      { kind: "link", label: "Details", href: "/workspaces/workspace-1/tools/meeting-recorder", variant: "secondary" },
     ]);
   });
 });

@@ -181,18 +181,22 @@ function connectorSources(workspaceId: string, flags: CatalogFeatureFlags): Cata
       featured: true,
     });
   }
-  if (flags.MEETING_RECORDERS && flags.SETTINGS_GENERAL) {
+  if (flags.SETTINGS_GENERAL) {
+    const meetingRecordersEnabled = flags.MEETING_RECORDERS;
     sources.push({
-      type: "AUTOMATION",
+      type: "TOOL",
       sourceType: "MEETING_RECORDER",
       sourceId: "meeting-recorder",
       title: "Meeting recorder",
-      outcome: "Record meetings and turn transcripts into summaries, actions, tensions, and proposals.",
-      descriptionMd: "Corgtex-managed meeting recording for calendar meetings when the workspace has recorders enabled.",
-      url: `/workspaces/${workspaceId}/settings?tab=general`,
+      outcome: "Connect recorder transcripts so Corgtex extracts proposals, action items, and Brain context.",
+      descriptionMd: meetingRecordersEnabled
+        ? "Connect a meeting recorder or upload transcript exports so Corgtex can process meeting evidence from the start."
+        : "Request meeting recorder access, then connect a recorder or upload transcript exports as the first onboarding context source.",
+      url: meetingRecordersEnabled ? `/workspaces/${workspaceId}/settings?tab=general` : null,
       category: "MEETINGS",
-      accessMode: "ADMIN_ONLY",
-      requestedScopes: ["meetings:read", "meetings:write"],
+      accessMode: meetingRecordersEnabled ? "OPEN" : "REQUEST",
+      requestedScopes: ["meetings:read", "meetings:write", "brain:read"],
+      featured: true,
     });
   }
   return sources;
@@ -206,7 +210,7 @@ function isCatalogItemAvailable(item: Pick<CatalogItemRecord, "sourceType" | "so
     return flags.BUILD_ARTIFACTS;
   }
   if (item.sourceType === "MEETING_RECORDER") {
-    return flags.MEETING_RECORDERS && flags.SETTINGS_GENERAL;
+    return flags.SETTINGS_GENERAL;
   }
   if (item.sourceType === "DATA_SOURCE") {
     return flags.SETTINGS_GENERAL;
@@ -387,6 +391,7 @@ async function ensureDerivedCatalogItems(workspaceId: string) {
     update: {
       createdByUserId: source.createdByUserId ?? undefined,
       ownerUserId: source.ownerUserId ?? undefined,
+      type: source.type,
       title: source.title,
       outcome: normalizeString(source.outcome),
       descriptionMd: normalizeString(source.descriptionMd),
