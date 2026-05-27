@@ -394,6 +394,56 @@ function contentHashFor(value: Pick<NormalizedMeetingTranscriptSourceArtifact, "
   });
 }
 
+function failedArtifactFingerprint(provider: MeetingTranscriptSourceProvider, artifact: MeetingTranscriptSourceArtifact) {
+  return stableHash({
+    provider,
+    fileName: artifact.fileName ?? null,
+    externalId: artifact.externalId ?? null,
+    recordedAt: artifact.recordedAt ?? null,
+    text: artifact.text ?? null,
+    json: artifact.json ?? null,
+  });
+}
+
+function failedRecordInputFromArtifact(provider: MeetingTranscriptSourceProvider, artifact: MeetingTranscriptSourceArtifact) {
+  const transcriptText = artifact.text?.trim()
+    || (artifact.json ? JSON.stringify(artifact.json) : "")
+    || artifact.fileName?.trim()
+    || "Transcript artifact could not be normalized.";
+  const recordedAt = asDate(artifact.recordedAt)
+    ?? parseDateFromText(`${artifact.fileName ?? ""}\n${artifact.text ?? ""}`)
+    ?? new Date();
+  const fingerprint = failedArtifactFingerprint(provider, artifact);
+  const participants = artifact.participants ?? [];
+  const participantEmails = artifact.participantEmails ?? [];
+  const rawMetadata = {
+    ...(artifact.metadata ?? {}),
+    fileName: artifact.fileName ?? null,
+    mimeType: artifact.mimeType ?? null,
+    normalizationFailed: true,
+    originalArtifact: artifact,
+  };
+  return {
+    externalId: artifact.externalId?.trim() || `normalization-failed:${fingerprint.slice(0, 32)}`,
+    title: artifact.title?.trim() || artifact.fileName?.trim() || "Unrecognized transcript export",
+    recordedAt,
+    sourceUpdatedAt: asDate(artifact.sourceUpdatedAt),
+    sourceUrl: artifact.sourceUrl?.trim() || null,
+    contentHash: contentHashFor({
+      transcript: transcriptText,
+      summaryMd: artifact.summaryMd?.trim() || null,
+      segments: artifact.segments ?? [],
+    }),
+    transcriptText,
+    summaryMd: artifact.summaryMd?.trim() || null,
+    segmentsJson: artifact.segments && artifact.segments.length > 0 ? toInputJson(artifact.segments) : undefined,
+    participantsJson: participants.length > 0 || participantEmails.length > 0
+      ? toInputJson({ participants, participantEmails })
+      : undefined,
+    rawMetadataJson: toInputJson(rawMetadata),
+  };
+}
+
 function parseTimestampMs(value: string) {
   const match = value.match(/(?:(\d{1,2}):)?(\d{1,2}):(\d{2})(?:[,.](\d{1,3}))?/);
   if (!match) return null;
@@ -738,29 +788,64 @@ async function importOneNormalizedTranscript(actor: AppActor, params: {
     return { status: "skipped" as const, record, meeting: null, reason: "older_revision" };
   }
 
-  const result = await intakeMeetingTranscript(actor, {
-    workspaceId: params.workspaceId,
-    meetingId: activeRecord?.meetingId ?? null,
-    transcript: artifact.transcript,
-    fileName: artifact.rawMetadata.fileName as string | null,
-    title: artifact.title,
-    source: `meeting-transcript:${artifact.provider.toLowerCase()}`,
-    provider: artifact.provider,
-    externalId: transcriptMeetingExternalId(artifact.provider, artifact.externalId),
-    sourceUpdatedAt: artifact.sourceUpdatedAt,
-    sourceUrl: artifact.sourceUrl,
-    meetingUrl: artifact.meetingUrl,
-    calendarExternalId: artifact.calendarExternalId,
-    recordedAt: artifact.recordedAt,
-    summaryMd: artifact.summaryMd,
-    participantEmails: artifact.participantEmails,
-    segments: artifact.segments,
-    batchId: params.batchId,
-    sourceRecordId: record.id,
-    replaceTranscript: Boolean(activeRecord && activeRecord.contentHash !== artifact.contentHash),
-  });
+  let supersededActiveRecordBeforeIntake = false;
+  if (activeRecord && activeRecord.id !== record.id) {
+    await prisma.meetingTranscriptSourceRecord.updateMany({
+      where: {
+        workspaceId: params.workspaceId,
+        provider: artifact.provider,
+        externalId: artifact.externalId,
+        id: { not: record.id },
+        status: "ACTIVE",
+      },
+      data: {
+        status: "SUPERSEDED",
+        supersededByRecordId: record.id,
+      },
+    });
+    supersededActiveRecordBeforeIntake = true;
+  }
+
+  let result: Awaited<ReturnType<typeof intakeMeetingTranscript>>;
+  try {
+    result = await intakeMeetingTranscript(actor, {
+      workspaceId: params.workspaceId,
+      meetingId: activeRecord?.meetingId ?? null,
+      transcript: artifact.transcript,
+      fileName: artifact.rawMetadata.fileName as string | null,
+      title: artifact.title,
+      source: `meeting-transcript:${artifact.provider.toLowerCase()}`,
+      provider: artifact.provider,
+      externalId: transcriptMeetingExternalId(artifact.provider, artifact.externalId),
+      sourceUpdatedAt: artifact.sourceUpdatedAt,
+      sourceUrl: artifact.sourceUrl,
+      meetingUrl: artifact.meetingUrl,
+      calendarExternalId: artifact.calendarExternalId,
+      recordedAt: artifact.recordedAt,
+      summaryMd: artifact.summaryMd,
+      participantEmails: artifact.participantEmails,
+      segments: artifact.segments,
+      batchId: params.batchId,
+      sourceRecordId: record.id,
+      replaceTranscript: Boolean(activeRecord && activeRecord.contentHash !== artifact.contentHash),
+    });
+  } catch (error) {
+    if (supersededActiveRecordBeforeIntake && activeRecord) {
+      await prisma.meetingTranscriptSourceRecord.update({
+        where: { id: activeRecord.id },
+        data: { status: "ACTIVE", supersededByRecordId: null },
+      });
+    }
+    throw error;
+  }
 
   if (result.status === "needs_clarification") {
+    if (supersededActiveRecordBeforeIntake && activeRecord) {
+      await prisma.meetingTranscriptSourceRecord.update({
+        where: { id: activeRecord.id },
+        data: { status: "ACTIVE", supersededByRecordId: null },
+      });
+    }
     await prisma.meetingTranscriptSourceRecord.update({
       where: { id: record.id },
       data: {
@@ -772,21 +857,6 @@ async function importOneNormalizedTranscript(actor: AppActor, params: {
   }
 
   await prisma.$transaction(async (tx) => {
-    if (activeRecord && activeRecord.id !== record.id) {
-      await tx.meetingTranscriptSourceRecord.updateMany({
-        where: {
-          workspaceId: params.workspaceId,
-          provider: artifact.provider,
-          externalId: artifact.externalId,
-          id: { not: record.id },
-          status: "ACTIVE",
-        },
-        data: {
-          status: "SUPERSEDED",
-          supersededByRecordId: record.id,
-        },
-      });
-    }
     await tx.meetingTranscriptSourceRecord.update({
       where: { id: record.id },
       data: {
@@ -843,8 +913,54 @@ export async function importMeetingTranscriptSourceArtifacts(actor: AppActor, pa
   for (const artifact of params.artifacts) {
     try {
       normalized.push(normalizeMeetingTranscriptSourceArtifact(provider, artifact));
-    } catch {
+    } catch (error) {
       failedCount += 1;
+      const failedRecord = failedRecordInputFromArtifact(provider, artifact);
+      await prisma.meetingTranscriptSourceRecord.upsert({
+        where: {
+          workspaceId_provider_externalId_contentHash: {
+            workspaceId: params.workspaceId,
+            provider,
+            externalId: failedRecord.externalId,
+            contentHash: failedRecord.contentHash,
+          },
+        },
+        update: {
+          connectionId: params.connectionId ?? null,
+          batchId: batch.id,
+          title: failedRecord.title,
+          recordedAt: failedRecord.recordedAt,
+          sourceUpdatedAt: failedRecord.sourceUpdatedAt,
+          sourceUrl: failedRecord.sourceUrl,
+          transcriptText: failedRecord.transcriptText,
+          summaryMd: failedRecord.summaryMd,
+          segmentsJson: failedRecord.segmentsJson,
+          participantsJson: failedRecord.participantsJson,
+          rawMetadataJson: failedRecord.rawMetadataJson,
+          status: "FAILED",
+          processedAt: null,
+          error: error instanceof Error ? error.message : "Transcript normalization failed.",
+        },
+        create: {
+          workspaceId: params.workspaceId,
+          connectionId: params.connectionId ?? null,
+          batchId: batch.id,
+          provider,
+          externalId: failedRecord.externalId,
+          title: failedRecord.title,
+          recordedAt: failedRecord.recordedAt,
+          sourceUpdatedAt: failedRecord.sourceUpdatedAt,
+          sourceUrl: failedRecord.sourceUrl,
+          contentHash: failedRecord.contentHash,
+          transcriptText: failedRecord.transcriptText,
+          summaryMd: failedRecord.summaryMd,
+          segmentsJson: failedRecord.segmentsJson,
+          participantsJson: failedRecord.participantsJson,
+          rawMetadataJson: failedRecord.rawMetadataJson,
+          status: "FAILED",
+          error: error instanceof Error ? error.message : "Transcript normalization failed.",
+        },
+      });
     }
   }
   normalized.sort((left, right) => left.recordedAt.getTime() - right.recordedAt.getTime());
@@ -866,8 +982,7 @@ export async function importMeetingTranscriptSourceArtifacts(actor: AppActor, pa
       if (result.status === "skipped") skippedCount += 1;
       if (result.status === "failed") failedCount += 1;
     } catch (error) {
-      failedCount += 1;
-      await prisma.meetingTranscriptSourceRecord.upsert({
+      const existing = await prisma.meetingTranscriptSourceRecord.findUnique({
         where: {
           workspaceId_provider_externalId_contentHash: {
             workspaceId: params.workspaceId,
@@ -876,46 +991,47 @@ export async function importMeetingTranscriptSourceArtifacts(actor: AppActor, pa
             contentHash: artifact.contentHash,
           },
         },
-        update: {
-          connectionId: params.connectionId ?? null,
-          batchId: batch.id,
-          title: artifact.title,
-          recordedAt: artifact.recordedAt,
-          sourceUpdatedAt: artifact.sourceUpdatedAt,
-          sourceUrl: artifact.sourceUrl,
-          transcriptText: artifact.transcript,
-          summaryMd: artifact.summaryMd,
-          segmentsJson: artifact.segments.length > 0 ? toInputJson(artifact.segments) : undefined,
-          participantsJson: artifact.participants.length > 0 || artifact.participantEmails.length > 0
-            ? toInputJson({ participants: artifact.participants, participantEmails: artifact.participantEmails })
-            : undefined,
-          rawMetadataJson: toInputJson(artifact.rawMetadata),
-          status: "FAILED",
-          processedAt: null,
-          error: error instanceof Error ? error.message : "Transcript import failed.",
-        },
-        create: {
-          workspaceId: params.workspaceId,
-          connectionId: params.connectionId ?? null,
-          batchId: batch.id,
-          provider,
-          externalId: artifact.externalId,
-          title: artifact.title,
-          recordedAt: artifact.recordedAt,
-          sourceUpdatedAt: artifact.sourceUpdatedAt,
-          sourceUrl: artifact.sourceUrl,
-          contentHash: artifact.contentHash,
-          transcriptText: artifact.transcript,
-          summaryMd: artifact.summaryMd,
-          segmentsJson: artifact.segments.length > 0 ? toInputJson(artifact.segments) : undefined,
-          participantsJson: artifact.participants.length > 0 || artifact.participantEmails.length > 0
-            ? toInputJson({ participants: artifact.participants, participantEmails: artifact.participantEmails })
-            : undefined,
-          rawMetadataJson: toInputJson(artifact.rawMetadata),
-          status: "FAILED",
-          error: error instanceof Error ? error.message : "Transcript import failed.",
-        },
       });
+      if (existing && existing.status !== "FAILED" && (existing.meetingId || existing.processedAt)) {
+        skippedCount += 1;
+        results.push({ status: "skipped", record: existing, meeting: null, reason: "duplicate_content" });
+        continue;
+      }
+      failedCount += 1;
+      const failedData = {
+        connectionId: params.connectionId ?? null,
+        batchId: batch.id,
+        title: artifact.title,
+        recordedAt: artifact.recordedAt,
+        sourceUpdatedAt: artifact.sourceUpdatedAt,
+        sourceUrl: artifact.sourceUrl,
+        transcriptText: artifact.transcript,
+        summaryMd: artifact.summaryMd,
+        segmentsJson: artifact.segments.length > 0 ? toInputJson(artifact.segments) : undefined,
+        participantsJson: artifact.participants.length > 0 || artifact.participantEmails.length > 0
+          ? toInputJson({ participants: artifact.participants, participantEmails: artifact.participantEmails })
+          : undefined,
+        rawMetadataJson: toInputJson(artifact.rawMetadata),
+        status: "FAILED" as const,
+        processedAt: null,
+        error: error instanceof Error ? error.message : "Transcript import failed.",
+      };
+      if (existing) {
+        await prisma.meetingTranscriptSourceRecord.update({
+          where: { id: existing.id },
+          data: failedData,
+        });
+      } else {
+        await prisma.meetingTranscriptSourceRecord.create({
+          data: {
+            ...failedData,
+            workspaceId: params.workspaceId,
+            provider,
+            externalId: artifact.externalId,
+            contentHash: artifact.contentHash,
+          },
+        });
+      }
     }
   }
 
@@ -963,6 +1079,31 @@ export async function retryMeetingTranscriptImportBatch(actor: AppActor, params:
     sourceKind: "retry",
     artifacts: batch.records.map((record) => {
       const metadata = asRecord(record.rawMetadataJson);
+      const originalArtifact = asRecord(metadata.originalArtifact);
+      if (metadata.normalizationFailed && Object.keys(originalArtifact).length > 0) {
+        return {
+          fileName: asString(originalArtifact.fileName),
+          mimeType: asString(originalArtifact.mimeType),
+          externalId: asString(originalArtifact.externalId) ?? record.externalId,
+          title: asString(originalArtifact.title) ?? record.title,
+          recordedAt: asDate(originalArtifact.recordedAt) ?? asString(originalArtifact.recordedAt),
+          sourceUpdatedAt: asDate(originalArtifact.sourceUpdatedAt) ?? asString(originalArtifact.sourceUpdatedAt),
+          sourceUrl: asString(originalArtifact.sourceUrl),
+          meetingUrl: asString(originalArtifact.meetingUrl),
+          calendarExternalId: asString(originalArtifact.calendarExternalId),
+          text: asString(originalArtifact.text),
+          json: originalArtifact.json,
+          summaryMd: asString(originalArtifact.summaryMd),
+          participantEmails: asArray(originalArtifact.participantEmails)
+            .map(asString)
+            .filter((email): email is string => Boolean(email)),
+          participants: asArray(originalArtifact.participants),
+          segments: asArray(originalArtifact.segments)
+            .map(normalizeSegment)
+            .filter((segment): segment is MeetingTranscriptSegment => Boolean(segment)),
+          metadata: asRecord(originalArtifact.metadata),
+        };
+      }
       const participants = asRecord(record.participantsJson);
       return {
         externalId: record.externalId,
@@ -1127,20 +1268,34 @@ export function verifyMeetingTranscriptWebhookSignature(params: {
 
 function webhookArtifactFromPayload(provider: MeetingTranscriptSourceProvider, payload: Record<string, unknown>): MeetingTranscriptSourceArtifact {
   const data = asRecord(payload.data);
-  const transcript = asRecord(payload.transcript);
-  const recording = asRecord(payload.recording);
-  const meeting = asRecord(payload.meeting);
   const source = Object.keys(data).length > 0 ? data : payload;
+  const transcript = Object.keys(asRecord(payload.transcript)).length > 0
+    ? asRecord(payload.transcript)
+    : asRecord(source.transcript);
+  const recording = Object.keys(asRecord(payload.recording)).length > 0
+    ? asRecord(payload.recording)
+    : asRecord(source.recording);
+  const meeting = Object.keys(asRecord(payload.meeting)).length > 0
+    ? asRecord(payload.meeting)
+    : asRecord(source.meeting);
+  const sourceJson = Object.keys(transcript).length > 0
+    ? {
+      ...source,
+      transcript,
+      sentences: source.sentences ?? transcript.sentences,
+      segments: source.segments ?? transcript.segments,
+    }
+    : source;
   return {
-    json: source,
+    json: sourceJson,
     externalId: asString(source.transcript_id)
       ?? asString(source.transcriptId)
+      ?? asString(transcript.id)
       ?? asString(source.recording_id)
       ?? asString(source.recordingId)
-      ?? asString(source.id)
-      ?? asString(transcript.id)
       ?? asString(recording.id)
-      ?? asString(meeting.id),
+      ?? asString(meeting.id)
+      ?? asString(source.id),
     title: asString(source.title) ?? asString(recording.title) ?? asString(meeting.title),
     recordedAt: asDate(source.recordedAt)
       ?? asDate(source.recorded_at)
@@ -1150,7 +1305,12 @@ function webhookArtifactFromPayload(provider: MeetingTranscriptSourceProvider, p
       ?? asDate(meeting.start_time),
     sourceUpdatedAt: asDate(source.updatedAt) ?? asDate(source.updated_at) ?? new Date(),
     sourceUrl: asString(source.url) ?? asString(source.transcript_url),
-    text: asString(source.transcript_text) ?? asString(source.text) ?? null,
+    text: asString(source.transcript_text)
+      ?? asString(source.text)
+      ?? asString(transcript.transcript_text)
+      ?? asString(transcript.text)
+      ?? asString(transcript.transcript)
+      ?? null,
     summaryMd: asString(source.summary) ?? asString(asRecord(source.summary).overview),
     metadata: { provider, webhookPayload: payload },
   };

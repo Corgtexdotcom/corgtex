@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { AppError, importMeetingTranscriptSourceArtifacts, normalizeMeetingTranscriptSourceProvider } from "@corgtex/domain";
 import { resolveRequestActor } from "@/lib/auth";
+import { checkApiDemoGuard } from "@/lib/demo-guard";
 import { handleRouteError } from "@/lib/http";
 import { meetingTranscriptArtifactsFromFormData } from "@/lib/meeting-transcript-source-artifacts";
 
@@ -18,6 +19,7 @@ export async function POST(
   try {
     const actor = await resolveRequestActor(request);
     const { workspaceId, provider: providerParam } = await params;
+    await checkApiDemoGuard(workspaceId);
     const provider = normalizeMeetingTranscriptSourceProvider(providerParam);
     const contentType = request.headers.get("content-type") ?? "";
     const formData = contentType.includes("multipart/form-data") ? await request.formData() : null;

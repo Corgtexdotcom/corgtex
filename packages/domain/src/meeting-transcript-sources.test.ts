@@ -290,6 +290,8 @@ describe("meeting transcript sources", () => {
     expect(prismaMock.meetingTranscriptSourceRecord.updateMany).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({ status: "SUPERSEDED" }),
     }));
+    expect(prismaMock.meetingTranscriptSourceRecord.updateMany.mock.invocationCallOrder[0])
+      .toBeLessThan(intakeMeetingTranscriptMock.mock.invocationCallOrder[1]);
   });
 
   it("imports changed revisions when providers omit updated-at timestamps", async () => {
@@ -360,6 +362,35 @@ describe("meeting transcript sources", () => {
     }));
   });
 
+  it("treats active same-hash import races as duplicate skips", async () => {
+    prismaMock.meetingTranscriptSourceRecord.findUnique
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({
+        id: "active-record",
+        status: "ACTIVE",
+        meetingId: "meeting-1",
+        processedAt: new Date("2026-05-01T10:05:00.000Z"),
+      });
+    prismaMock.meetingTranscriptSourceRecord.create.mockRejectedValueOnce(new Error("Unique constraint failed"));
+    const { importMeetingTranscriptSourceArtifacts } = await import("./meeting-transcript-sources");
+
+    const result = await importMeetingTranscriptSourceArtifacts(agentActor, {
+      workspaceId: "ws-1",
+      provider: "FIREFLIES",
+      artifacts: [{
+        externalId: "ff-race",
+        title: "Duplicate webhook",
+        recordedAt: "2026-05-01T10:00:00.000Z",
+        text: "Jan: Duplicate delivery.",
+      }],
+    });
+
+    expect(result.batch).toMatchObject({ status: "COMPLETED", importedCount: 0, skippedCount: 1, failedCount: 0 });
+    expect(prismaMock.meetingTranscriptSourceRecord.update).not.toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ status: "FAILED" }),
+    }));
+  });
+
   it("preserves matching metadata when retrying failed batches", async () => {
     prismaMock.meetingTranscriptImportBatch.findFirst.mockResolvedValueOnce({
       id: "batch-failed",
@@ -420,6 +451,14 @@ describe("meeting transcript sources", () => {
     });
 
     expect(result.batch).toMatchObject({ status: "PARTIAL", importedCount: 1, failedCount: 1 });
+    expect(prismaMock.meetingTranscriptSourceRecord.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({
+        status: "FAILED",
+        rawMetadataJson: expect.objectContaining({
+          normalizationFailed: true,
+        }),
+      }),
+    }));
     expect(intakeMeetingTranscriptMock).toHaveBeenCalledTimes(1);
     expect(intakeMeetingTranscriptMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
       externalId: "meeting-transcript:FIREFLIES:ff-valid",
@@ -444,5 +483,33 @@ describe("meeting transcript sources", () => {
       secret: "wrong",
       headers: { "x-fireflies-signature": signature },
     })).toBe(false);
+  });
+
+  it("imports nested transcript bodies from signed webhooks without fetching provider APIs", async () => {
+    const { processMeetingTranscriptSourceWebhook } = await import("./meeting-transcript-sources");
+    const rawBody = JSON.stringify({
+      data: {
+        id: "webhook-event-1",
+        title: "Nested webhook",
+        recordedAt: "2026-05-01T10:00:00.000Z",
+      },
+      transcript: {
+        id: "ff-nested",
+        text: "Jan: Nested webhook text.",
+      },
+    });
+    const signature = `sha256=${createHmac("sha256", "secret").update(rawBody).digest("hex")}`;
+
+    await processMeetingTranscriptSourceWebhook({
+      workspaceId: "ws-1",
+      provider: "FIREFLIES",
+      rawBody,
+      headers: { "x-fireflies-signature": signature },
+    });
+
+    expect(intakeMeetingTranscriptMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      externalId: "meeting-transcript:FIREFLIES:ff-nested",
+      transcript: "Jan: Nested webhook text.",
+    }));
   });
 });
