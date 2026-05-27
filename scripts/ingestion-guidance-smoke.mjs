@@ -63,16 +63,29 @@ async function cleanupStaleMeetingSmokeArtifacts(prisma, workspaceId) {
     { bodyMd: { contains: "ingestion-guidance-smoke" } },
     { bodyMd: { contains: "ingestion guidance smoke" } },
   ];
+  const productionSmokeMeetingFilters = [
+    { title: { startsWith: "Temporary meeting ingestion" } },
+    { transcript: { contains: "ingestion-guidance-smoke" } },
+    { transcript: { contains: "ingestion guidance smoke" } },
+    { ingestionGuidanceMd: { contains: "ingestion-guidance-smoke" } },
+    { ingestionGuidanceMd: { contains: "ingestion guidance smoke" } },
+  ];
+  const legacySmokeMeetingFilters = [
+    { title: { startsWith: "Temporary meeting ingestion-guidance-smoke" } },
+    { title: { startsWith: "Temporary meeting ingestion guidance smoke" } },
+    { title: { contains: "ingestion-guidance-smoke" } },
+    { title: { contains: "ingestion guidance smoke" } },
+    { transcript: { contains: "ingestion-guidance-smoke" } },
+    { transcript: { contains: "ingestion guidance smoke" } },
+    { ingestionGuidanceMd: { contains: "ingestion-guidance-smoke" } },
+    { ingestionGuidanceMd: { contains: "ingestion guidance smoke" } },
+  ];
   const staleMeetings = await prisma.meeting.findMany({
     where: {
       workspaceId,
-      source: "production-smoke",
       OR: [
-        { title: { startsWith: "Temporary meeting ingestion" } },
-        { transcript: { contains: "ingestion-guidance-smoke" } },
-        { transcript: { contains: "ingestion guidance smoke" } },
-        { ingestionGuidanceMd: { contains: "ingestion-guidance-smoke" } },
-        { ingestionGuidanceMd: { contains: "ingestion guidance smoke" } },
+        { source: "production-smoke", OR: productionSmokeMeetingFilters },
+        ...legacySmokeMeetingFilters,
       ],
     },
     select: { id: true },
