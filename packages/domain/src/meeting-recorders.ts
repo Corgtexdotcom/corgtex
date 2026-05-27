@@ -977,6 +977,10 @@ async function markDuplicateRecordingSkipped(recording: MeetingRecording, canoni
   });
 }
 
+function restoredCanonicalStatus(recording: MeetingRecording) {
+  return ACTIVE_RECORDING_STATUSES.includes(recording.status) ? recording.status : "SCHEDULED";
+}
+
 async function restoreCanonicalScheduledRecording(recording: MeetingRecording) {
   const activeDedupeKey = activeRecordingDedupeKey({
     workspaceId: recording.workspaceId,
@@ -986,7 +990,7 @@ async function restoreCanonicalScheduledRecording(recording: MeetingRecording) {
   return prisma.meetingRecording.update({
     where: { id: recording.id },
     data: {
-      status: "SCHEDULED",
+      status: restoredCanonicalStatus(recording),
       activeDedupeKey,
       endedAt: null,
       failureCode: null,
@@ -995,10 +999,54 @@ async function restoreCanonicalScheduledRecording(recording: MeetingRecording) {
   });
 }
 
-async function cleanupDuplicateScheduledProviderBots(workspaceId: string): Promise<DuplicateRecorderCleanupStats> {
+type DuplicateRecorderCleanupScope = {
+  meetingId?: string;
+  provider?: MeetingRecorderProvider;
+  joinAt?: Date;
+};
+
+function duplicateGroupRestoreRank(group: RecordingWithMeetingTime[]) {
+  const canonical = canonicalRecordingForGroup(group);
+  if (!canonical) {
+    return { matchesMeetingTime: 0, active: 0, joinAtMs: Number.NEGATIVE_INFINITY, canonical };
+  }
+  const joinAt = recorderJoinInstant(canonical);
+  return {
+    matchesMeetingTime: joinAt && joinAt.getTime() === canonical.meeting.recordedAt.getTime() ? 1 : 0,
+    active: ACTIVE_RECORDING_STATUSES.includes(canonical.status) ? 1 : 0,
+    joinAtMs: joinAt?.getTime() ?? Number.NEGATIVE_INFINITY,
+    canonical,
+  };
+}
+
+function compareDuplicateGroupsForRestore(left: RecordingWithMeetingTime[], right: RecordingWithMeetingTime[]) {
+  const leftRank = duplicateGroupRestoreRank(left);
+  const rightRank = duplicateGroupRestoreRank(right);
+  if (leftRank.matchesMeetingTime !== rightRank.matchesMeetingTime) {
+    return rightRank.matchesMeetingTime - leftRank.matchesMeetingTime;
+  }
+  if (leftRank.active !== rightRank.active) {
+    return rightRank.active - leftRank.active;
+  }
+  if (leftRank.joinAtMs !== rightRank.joinAtMs) {
+    return rightRank.joinAtMs - leftRank.joinAtMs;
+  }
+  if (!leftRank.canonical || !rightRank.canonical) {
+    return leftRank.canonical ? -1 : rightRank.canonical ? 1 : 0;
+  }
+  return compareCanonicalRecordings(leftRank.canonical, rightRank.canonical);
+}
+
+async function cleanupDuplicateScheduledProviderBots(
+  workspaceId: string,
+  scope: DuplicateRecorderCleanupScope = {},
+): Promise<DuplicateRecorderCleanupStats> {
   const recordings = await prisma.meetingRecording.findMany({
     where: {
       workspaceId,
+      ...(scope.meetingId ? { meetingId: scope.meetingId } : {}),
+      ...(scope.provider ? { provider: scope.provider } : {}),
+      ...(scope.joinAt ? { joinAt: scope.joinAt } : {}),
       externalBotId: { not: null },
       OR: [
         { status: { in: ACTIVE_RECORDING_STATUSES } },
@@ -1029,7 +1077,8 @@ async function cleanupDuplicateScheduledProviderBots(workspaceId: string): Promi
     duplicateCancellationFailures: 0,
   };
 
-  for (const group of groups.values()) {
+  const restoredDedupeKeys = new Set<string>();
+  for (const group of [...groups.values()].sort(compareDuplicateGroupsForRestore)) {
     if (group.length <= 1) continue;
     const canonical = canonicalRecordingForGroup(group);
     if (!canonical) continue;
@@ -1078,8 +1127,24 @@ async function cleanupDuplicateScheduledProviderBots(workspaceId: string): Promi
       meetingId: canonical.meetingId,
       provider: canonical.provider,
     });
+    const canonicalAlreadyOwnsKey = canonical.activeDedupeKey === activeDedupeKey
+      && ACTIVE_RECORDING_STATUSES.includes(canonical.status);
+    if (canonicalAlreadyOwnsKey) {
+      restoredDedupeKeys.add(activeDedupeKey);
+    }
     if (canonical.status !== "SCHEDULED" || canonical.activeDedupeKey !== activeDedupeKey || canonical.failureCode || canonical.endedAt) {
+      if (restoredDedupeKeys.has(activeDedupeKey) && !canonicalAlreadyOwnsKey) {
+        recorderLog("warn", "reconcile_canonical_restore_skipped", {
+          workspaceId,
+          meetingId: canonical.meetingId,
+          recordingId: canonical.id,
+          provider: canonical.provider,
+          failureCode: "RECORDER_DUPLICATE_ACTIVE_KEY_RESERVED",
+        });
+        continue;
+      }
       await restoreCanonicalScheduledRecording(canonical);
+      restoredDedupeKeys.add(activeDedupeKey);
       stats.canonicalRecordingsRestored += 1;
       recorderLog("info", "reconcile_canonical_restored", {
         workspaceId,
@@ -1119,7 +1184,11 @@ async function reuseFutureProviderBotIfPresent(params: {
   });
 
   if (recordings.length > 1) {
-    await cleanupDuplicateScheduledProviderBots(params.workspaceId);
+    await cleanupDuplicateScheduledProviderBots(params.workspaceId, {
+      meetingId: params.meetingId,
+      provider: params.provider,
+      joinAt: params.joinAt,
+    });
     const active = await prisma.meetingRecording.findFirst({
       where: {
         workspaceId: params.workspaceId,
@@ -2176,16 +2245,6 @@ export async function scheduleMeetingRecording(actor: AppActor, params: {
   const fallbackProvider = !params.provider && config.fallbackProvider && config.fallbackProvider !== provider
     ? config.fallbackProvider
     : null;
-  const reusable = await reuseFutureProviderBotIfPresent({
-    workspaceId: params.workspaceId,
-    meetingId: params.meetingId,
-    provider,
-    joinAt: meeting.recordedAt,
-  });
-  if (reusable) {
-    return reusable;
-  }
-
   const isAdmin = actor.kind === "user"
     ? membership?.role === "ADMIN"
     : actor.scopes?.includes("support:write");
@@ -2195,6 +2254,16 @@ export async function scheduleMeetingRecording(actor: AppActor, params: {
     estimatedMinutes: estimatedMeetingMinutes(meeting),
     allowOverride: params.mode !== "auto" && Boolean(isAdmin),
   });
+
+  const reusable = await reuseFutureProviderBotIfPresent({
+    workspaceId: params.workspaceId,
+    meetingId: params.meetingId,
+    provider,
+    joinAt: meeting.recordedAt,
+  });
+  if (reusable) {
+    return reusable;
+  }
 
   const inputBase = {
     meetingUrl: meeting.meetingUrl,

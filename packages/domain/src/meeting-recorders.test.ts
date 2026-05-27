@@ -1375,6 +1375,72 @@ describe("meeting recorder domain", () => {
     }
   });
 
+  it("preserves an in-flight canonical recorder status during duplicate cleanup", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-27T16:02:00.000Z"));
+    try {
+      const { reconcileMeetingRecorders } = await import("./meeting-recorders");
+      const meeting = {
+        recordedAt: new Date("2026-05-27T16:00:00.000Z"),
+        scheduledEndAt: new Date("2026-05-27T17:00:00.000Z"),
+      };
+      const canonical = {
+        id: "recording-live-canonical",
+        workspaceId: "workspace-1",
+        meetingId: "meeting-1",
+        provider: "RECALL_AI",
+        externalBotId: "recall-bot-live-canonical",
+        activeDedupeKey: null,
+        status: "RECORDING",
+        failureCode: null,
+        failureMessage: null,
+        joinAt: meeting.recordedAt,
+        scheduledAt: new Date("2026-05-27T15:45:00.000Z"),
+        endedAt: null,
+        createdAt: new Date("2026-05-27T15:45:00.000Z"),
+        meeting,
+      };
+      const duplicate = {
+        ...canonical,
+        id: "recording-live-duplicate",
+        externalBotId: "recall-bot-live-duplicate",
+        status: "JOINING",
+        scheduledAt: new Date("2026-05-27T15:40:00.000Z"),
+        createdAt: new Date("2026-05-27T15:40:00.000Z"),
+      };
+      prismaMock.meetingRecording.findMany
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([canonical, duplicate])
+        .mockResolvedValueOnce([]);
+      fetchMock.mockResolvedValue(new Response("", { status: 200 }));
+      prismaMock.meetingRecording.update.mockImplementation(async ({ where, data }: { where: { id: string }; data: Record<string, unknown> }) => ({
+        ...(where.id === canonical.id ? canonical : duplicate),
+        ...data,
+      }));
+      prismaMock.meetingRecorderProviderEvent.updateMany.mockResolvedValue({ count: 0 });
+
+      await expect(reconcileMeetingRecorders("workspace-1")).resolves.toMatchObject({
+        duplicateProviderBotsCancelled: 1,
+        duplicateRecordersSkipped: 1,
+        canonicalRecordingsRestored: 1,
+      });
+
+      expect(fetchMock).toHaveBeenCalledWith(
+        "https://us-west-2.recall.ai/api/v1/bot/recall-bot-live-duplicate/leave_call/",
+        expect.objectContaining({ method: "POST" }),
+      );
+      expect(prismaMock.meetingRecording.update).toHaveBeenCalledWith(expect.objectContaining({
+        where: { id: "recording-live-canonical" },
+        data: expect.objectContaining({
+          status: "RECORDING",
+          activeDedupeKey: "meeting-recording:workspace-1:meeting-1:RECALL_AI",
+        }),
+      }));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("reuses a future canonical provider bot instead of creating another bot", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-05-27T12:00:00.000Z"));
@@ -1433,6 +1499,64 @@ describe("meeting recorder domain", () => {
           activeDedupeKey: "meeting-recording:workspace-1:meeting-1:RECALL_AI",
         }),
       }));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("enforces the monthly cap before reusing a stale future provider bot", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-27T12:00:00.000Z"));
+    try {
+      const { scheduleMeetingRecording } = await import("./meeting-recorders");
+      const reusable = {
+        id: "recording-reusable",
+        workspaceId: "workspace-1",
+        meetingId: "meeting-1",
+        provider: "RECALL_AI",
+        externalBotId: "recall-bot-reusable",
+        activeDedupeKey: null,
+        status: "FAILED",
+        failureCode: "STALE_RECORDER",
+        failureMessage: "stale",
+        joinAt: new Date("2026-06-03T16:00:00.000Z"),
+        scheduledAt: new Date("2026-05-20T12:00:00.000Z"),
+        endedAt: new Date("2026-05-20T18:00:00.000Z"),
+        createdAt: new Date("2026-05-20T12:00:00.000Z"),
+      };
+      prismaMock.workspaceMeetingRecorderConfig.findUnique.mockResolvedValue({
+        workspaceId: "workspace-1",
+        enabled: true,
+        defaultProvider: "RECALL_AI",
+        fallbackProvider: "MEETING_BAAS",
+        botName: "Corgtex Recorder",
+        entryMessage: "Recording notice",
+        autoRecordEnabled: true,
+        monthlyMinuteCap: 10,
+      });
+      prismaMock.meeting.findFirst.mockResolvedValue({
+        id: "meeting-1",
+        title: "Weekly",
+        recordedAt: reusable.joinAt,
+        scheduledEndAt: new Date("2026-06-03T17:00:00.000Z"),
+        meetingUrl: "https://teams.microsoft.com/l/meetup-join/abc",
+        participantEmails: [],
+      });
+      prismaMock.meetingRecording.findFirst.mockResolvedValueOnce(null);
+      prismaMock.meetingRecording.aggregate.mockResolvedValue({ _sum: { durationSeconds: 10 * 60 } });
+      prismaMock.meetingRecording.findMany.mockResolvedValueOnce([reusable]);
+
+      await expect(scheduleMeetingRecording(facilitatorActor, {
+        workspaceId: "workspace-1",
+        meetingId: "meeting-1",
+        mode: "auto",
+      })).rejects.toMatchObject({
+        code: "RECORDER_MONTHLY_CAP_EXCEEDED",
+      });
+
+      expect(prismaMock.meetingRecording.findMany).not.toHaveBeenCalled();
+      expect(prismaMock.meetingRecording.update).not.toHaveBeenCalled();
+      expect(fetchMock).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
     }
@@ -1537,6 +1661,13 @@ describe("meeting recorder domain", () => {
           externalBotId: { not: null },
           joinAt: requestedJoinAt,
           status: { in: ["PENDING", "SCHEDULED", "JOINING", "RECORDING"] },
+        }),
+      }));
+      expect(prismaMock.meetingRecording.findMany).toHaveBeenNthCalledWith(2, expect.objectContaining({
+        where: expect.objectContaining({
+          meetingId: "meeting-1",
+          provider: "RECALL_AI",
+          joinAt: requestedJoinAt,
         }),
       }));
       expect(prismaMock.meetingRecording.create).not.toHaveBeenCalled();
