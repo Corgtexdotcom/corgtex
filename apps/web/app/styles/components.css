@@ -1489,6 +1489,8 @@ details[open] > .settings-disclosure-summary::before {
   --font-playfair: 'Playfair Display', serif;
 }
 
+@tailwind components;
+
 @layer components {
   .nr-masthead { @apply text-left mb-7; }
   .nr-masthead h1 { @apply font-sans text-[2rem] font-bold m-0 p-0 leading-tight border-none; }
