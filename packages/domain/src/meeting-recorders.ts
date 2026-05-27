@@ -2743,6 +2743,10 @@ async function findRecordingForWebhook(provider: MeetingRecorderProvider, event:
 }
 
 async function applyWebhookState(recording: MeetingRecording, event: ProviderWebhookEvent) {
+  if (recording.failureCode === DUPLICATE_RECORDER_FAILURE_CODE) {
+    return recording;
+  }
+
   const data: Prisma.MeetingRecordingUpdateInput = {};
   if (event.externalBotId && !recording.externalBotId) data.externalBotId = event.externalBotId;
   if (event.status) data.status = event.status;
@@ -2838,6 +2842,7 @@ async function completeRecordingWithTranscriptArtifact(
         meetingId: true,
         provider: true,
         joinAt: true,
+        failureCode: true,
         transcriptProcessedAt: true,
         meeting: {
           select: {
@@ -2847,6 +2852,16 @@ async function completeRecordingWithTranscriptArtifact(
       },
     });
     if (!current || current.transcriptProcessedAt) {
+      return false;
+    }
+    if (current.failureCode === DUPLICATE_RECORDER_FAILURE_CODE) {
+      recorderLog("info", "transcript_duplicate_ignored", {
+        workspaceId: current.workspaceId,
+        meetingId: current.meetingId,
+        recordingId: current.id,
+        provider,
+        failureCode: DUPLICATE_RECORDER_FAILURE_CODE,
+      });
       return false;
     }
 
@@ -2943,7 +2958,7 @@ async function completeRecordingWithTranscriptArtifact(
 }
 
 async function ingestProviderTranscript(provider: MeetingRecorderProvider, recording: MeetingRecording, event: ProviderWebhookEvent) {
-  if (recording.transcriptProcessedAt) {
+  if (recording.transcriptProcessedAt || recording.failureCode === DUPLICATE_RECORDER_FAILURE_CODE) {
     return;
   }
   const artifact = provider === "RECALL_AI"

@@ -454,7 +454,6 @@ async function main() {
                   externalBotHash: hashId(duplicate.externalBotId),
                   reason: safeErrorMessage(error),
                 });
-                break;
               }
             }
           }

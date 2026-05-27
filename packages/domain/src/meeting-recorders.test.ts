@@ -554,6 +554,70 @@ describe("meeting recorder domain", () => {
     expect(prismaMock.meetingRecorderSmokeRun.updateMany).not.toHaveBeenCalled();
   });
 
+  it("ignores late transcript webhooks for recorder rows already skipped as duplicates", async () => {
+    const { processMeetingRecorderWebhook } = await import("./meeting-recorders");
+    const payload = JSON.stringify({
+      id: "event-duplicate-transcript-1",
+      event: "transcript.done",
+      data: {
+        bot: {
+          id: "bot-duplicate",
+          metadata: {
+            workspaceId: "workspace-1",
+            meetingId: "meeting-1",
+            recordingId: "recording-duplicate",
+          },
+        },
+        transcript: {
+          id: "transcript-duplicate",
+          data: {
+            download_url: "https://signed.example.com/duplicate-transcript.json",
+          },
+        },
+      },
+    });
+    const msgId = "msg_1";
+    const timestamp = "1770000000";
+    const signature = createHmac("sha256", Buffer.from("recall-secret"))
+      .update(`${msgId}.${timestamp}.${payload}`)
+      .digest("base64");
+    const recording = {
+      id: "recording-duplicate",
+      workspaceId: "workspace-1",
+      meetingId: "meeting-1",
+      provider: "RECALL_AI",
+      externalBotId: "bot-duplicate",
+      status: "SKIPPED",
+      failureCode: "DUPLICATE_RECORDER",
+      failureMessage: "Duplicate provider bot was skipped.",
+      transcriptProcessedAt: null,
+      joinAt: new Date("2026-05-04T16:00:00.000Z"),
+      startedAt: new Date("2026-05-04T16:00:30.000Z"),
+      createdAt: new Date("2026-05-04T15:55:00.000Z"),
+    };
+    prismaMock.meetingRecorderProviderEvent.findUnique.mockResolvedValue(null);
+    prismaMock.meetingRecorderProviderEvent.upsert.mockResolvedValue({ id: "provider-event-1" });
+    prismaMock.meetingRecorderProviderEvent.update.mockResolvedValue({ id: "provider-event-1" });
+    prismaMock.meetingRecording.findUnique.mockResolvedValue(recording);
+
+    await expect(processMeetingRecorderWebhook("RECALL_AI", {
+      rawBody: payload,
+      headers: {
+        "svix-id": msgId,
+        "svix-timestamp": timestamp,
+        "svix-signature": `v1,${signature}`,
+      },
+    })).resolves.toMatchObject({
+      processed: true,
+      duplicate: false,
+      recordingId: "recording-duplicate",
+    });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(prismaMock.meeting.update).not.toHaveBeenCalled();
+    expect(prismaMock.meetingRecording.update).not.toHaveBeenCalled();
+  });
+
   it("normalizes structured transcript segments into Corgtex transcript text", async () => {
     const { normalizeProviderTranscript } = await import("./meeting-recorders");
 
