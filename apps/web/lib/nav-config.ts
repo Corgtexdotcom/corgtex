@@ -46,6 +46,7 @@ export type WorkspaceNavIconName =
   | "agents"
   | "governance"
   | "audit"
+  | "notifications"
   | "settings";
 
 export const WORKSPACE_NAV_GROUPS: NavGroup[] = [
@@ -101,6 +102,7 @@ export const WORKSPACE_NAV_GROUPS: NavGroup[] = [
     items: [
       { href: "/governance", labelKey: "osMetrics", icon: "governance", featureFlag: "OS_METRICS" },
       { href: "/audit", labelKey: "auditTrail", icon: "audit" },
+      { href: "/notifications", labelKey: "notifications", icon: "notifications" },
       { href: "/settings", labelKey: "settings", icon: "settings" },
     ],
   },

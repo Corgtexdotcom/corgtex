@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  Bell,
   Brain,
   CalendarDays,
   CheckSquare,
@@ -45,6 +46,7 @@ const ICONS: Record<WorkspaceNavIconName, LucideIcon> = {
   agents: Hexagon,
   governance: Gauge,
   audit: ClipboardList,
+  notifications: Bell,
   settings: Settings,
 };
 

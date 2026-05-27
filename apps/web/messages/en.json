@@ -687,6 +687,23 @@
     "yourToDos": "Your To-Dos",
     "zeroInbox": "Zero inbox"
   },
+  "notificationsPage": {
+    "emptyAll": "No notifications yet.",
+    "emptyUnread": "No unread notifications.",
+    "eyebrow": "System",
+    "markAllRead": "Mark all read",
+    "markRead": "Mark read",
+    "next": "Next",
+    "openRelated": "Open related item",
+    "paginationLabel": "Notification pages",
+    "previous": "Previous",
+    "tabAll": "All",
+    "tabsLabel": "Notification filter",
+    "tabUnread": "Unread ({count})",
+    "title": "Notifications",
+    "unread": "Unread",
+    "unreadSummary": "{count, plural, =0 {No unread notifications} =1 {# unread notification} other {# unread notifications}}"
+  },
   "error": {
     "defaultMessage": "An unexpected error occurred.",
     "goHome": "Go home",
@@ -1257,6 +1274,7 @@
     "home": "Home",
     "meetings": "Meetings",
     "members": "Members",
+    "notifications": "Notifications",
     "operations": "Operations",
     "osMetrics": "OS Metrics",
     "platformAdmin": "Platform Admin",

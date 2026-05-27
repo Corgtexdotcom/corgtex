@@ -41,7 +41,7 @@ describe("notifications domain", () => {
     prismaMock.notification.findMany.mockResolvedValue([{ id: "notification-1" }]);
 
     const { listNotifications } = await import("./notifications");
-    await expect(listNotifications(actor, "workspace-1", { unreadOnly: true, take: 10 })).resolves.toEqual([{ id: "notification-1" }]);
+    await expect(listNotifications(actor, "workspace-1", { unreadOnly: true, take: 10, skip: 20 })).resolves.toEqual([{ id: "notification-1" }]);
     expect(prismaMock.notification.findMany).toHaveBeenCalledWith({
       where: {
         workspaceId: "workspace-1",
@@ -50,6 +50,7 @@ describe("notifications domain", () => {
       },
       orderBy: { createdAt: "desc" },
       take: 10,
+      skip: 20,
     });
   });
 
@@ -62,9 +63,9 @@ describe("notifications domain", () => {
 
   it("markNotificationRead marks one notification for the actor", async () => {
     const { markNotificationRead } = await import("./notifications");
-    await markNotificationRead(actor, "notification-1");
+    await markNotificationRead(actor, "workspace-1", "notification-1");
     expect(prismaMock.notification.updateMany).toHaveBeenCalledWith({
-      where: { id: "notification-1", userId: "user-1" },
+      where: { id: "notification-1", workspaceId: "workspace-1", userId: "user-1" },
       data: { readAt: new Date("2026-04-24T12:00:00.000Z") },
     });
   });

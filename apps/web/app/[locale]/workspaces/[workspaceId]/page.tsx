@@ -19,26 +19,10 @@ import { getTranslations, getFormatter } from "next-intl/server";
 import { getDashboardAttentionCounts } from "@/lib/dashboard-attention";
 import { getWorkspaceCapabilities } from "@/lib/workspace-capabilities";
 import { MarkdownExcerpt } from "@/lib/components/MarkdownRenderer";
+import { resolveWorkspaceEntityUrl } from "@/lib/workspace-entity-url";
 import { selectDashboardKnowledgeArticles, selectLatestMeetingRecap } from "@/lib/dashboard-briefing";
 
 export const dynamic = "force-dynamic";
-
-function resolveEntityUrl(
-  workspaceId: string,
-  entityType: string | null,
-  entityId: string | null
-): string | null {
-  if (!entityType || !entityId) return null;
-  const t = entityType.toLowerCase();
-  if (t === "proposal") return `/workspaces/${workspaceId}/proposals/${entityId}`;
-  if (t === "tension") return `/workspaces/${workspaceId}/tensions`;
-  if (t === "action") return `/workspaces/${workspaceId}/actions`;
-  if (t === "meeting") return `/workspaces/${workspaceId}/meetings/${entityId}`;
-  if (t === "adviceprocess") return `/workspaces/${workspaceId}/proposals?status=OPEN`;
-  if (t === "advicerecord") return `/workspaces/${workspaceId}/proposals?status=OPEN`;
-  if (t === "spend" || t === "spendrequest") return `/workspaces/${workspaceId}/finance`;
-  return null;
-}
 
 export default async function WorkspaceDashboard({
   params,
@@ -268,7 +252,7 @@ export default async function WorkspaceDashboard({
               <div className="nr-attention-block">
                 <strong>{t("approvalsPending", { count: pendingFlowTotal })}</strong>
                 {displayedApprovalFlows.map((flow) => {
-                  const href = resolveEntityUrl(workspaceId, flow.subjectType, flow.subjectId);
+                  const href = resolveWorkspaceEntityUrl(workspaceId, flow.subjectType, flow.subjectId);
                   const label = flow.subjectLabel || flow.subjectType;
                   const typeLabel = flow.subjectType.charAt(0) + flow.subjectType.slice(1).toLowerCase();
                   return (
@@ -316,7 +300,11 @@ export default async function WorkspaceDashboard({
             {unreadNotificationsCount > 0 && (
               <div className="nr-attention-block">
                 <div className="nr-attention-block-header">
-                  <strong>{t("notifications")}</strong>
+                  <strong>
+                    <Link href={`/workspaces/${workspaceId}/notifications`} className="nr-attention-heading-link">
+                      {t("notifications")}
+                    </Link>
+                  </strong>
                   <form action={markAllNotificationsReadAction} className="nr-attention-mark-read">
                     <input type="hidden" name="workspaceId" value={workspaceId} />
                     <button type="submit" className="nr-attention-mark-read-button">{t("markRead")}</button>
@@ -324,7 +312,7 @@ export default async function WorkspaceDashboard({
                 </div>
                 <span className="nr-attention-copy">{t("unreadNotificationsSummary", { count: unreadNotificationsCount })}</span>
                 {unreadNotifications.slice(0, 3).map((n) => {
-                  const href = resolveEntityUrl(workspaceId, n.entityType, n.entityId);
+                  const href = resolveWorkspaceEntityUrl(workspaceId, n.entityType, n.entityId);
                   return (
                     <div key={n.id} className="nr-attention-notification">
                       <div className="nr-attention-notification-head">
@@ -345,6 +333,7 @@ export default async function WorkspaceDashboard({
                     </div>
                   );
                 })}
+                <Link href={`/workspaces/${workspaceId}/notifications`} className="nr-attention-inline-link">{t("viewAll")}</Link>
               </div>
             )}
 
