@@ -935,10 +935,11 @@ function duplicateRecorderGroupKey(recording: Pick<MeetingRecording, "workspaceI
 }
 
 function recordingExpectedEnd(recording: RecordingWithMeetingTime) {
-  return recording.meeting.scheduledEndAt
-    ?? (recording.joinAt
-      ? new Date(recording.joinAt.getTime() + FALLBACK_MEETING_DURATION_MS)
-      : new Date(recording.meeting.recordedAt.getTime() + FALLBACK_MEETING_DURATION_MS));
+  const durationMs = recording.meeting.scheduledEndAt && recording.meeting.scheduledEndAt > recording.meeting.recordedAt
+    ? recording.meeting.scheduledEndAt.getTime() - recording.meeting.recordedAt.getTime()
+    : FALLBACK_MEETING_DURATION_MS;
+  const startAt = recording.joinAt ?? recording.meeting.recordedAt;
+  return new Date(startAt.getTime() + durationMs);
 }
 
 function staleRecordingReadyAt(recording: RecordingWithMeetingTime) {
@@ -2288,6 +2289,26 @@ export async function scheduleMeetingRecording(actor: AppActor, params: {
     return first.recording;
   }
 
+  const reusableFallback = await reuseFutureProviderBotIfPresent({
+    workspaceId: params.workspaceId,
+    meetingId: params.meetingId,
+    provider: fallbackProvider,
+    meetingUrl: meeting.meetingUrl,
+    joinAt: meeting.recordedAt,
+  });
+  if (reusableFallback) {
+    recorderLog("warn", "schedule_fallback", {
+      workspaceId: params.workspaceId,
+      meetingId: params.meetingId,
+      fromProvider: provider,
+      toProvider: fallbackProvider,
+      failedRecordingId: first.recording.id,
+      fallbackRecordingId: reusableFallback.id,
+      fallbackStatus: reusableFallback.status,
+    });
+    return reusableFallback;
+  }
+
   const fallback = await attemptProviderSchedule({
     ...inputBase,
     workspaceId: params.workspaceId,
@@ -3048,10 +3069,7 @@ type RecoverableRecallRecording = MeetingRecording & {
 };
 
 function recallRecoveryReadyAt(recording: RecoverableRecallRecording) {
-  const expectedEnd = recording.meeting.scheduledEndAt
-    ?? (recording.joinAt
-      ? new Date(recording.joinAt.getTime() + FALLBACK_MEETING_DURATION_MS)
-      : new Date(recording.meeting.recordedAt.getTime() + FALLBACK_MEETING_DURATION_MS));
+  const expectedEnd = recordingExpectedEnd(recording);
   return new Date(expectedEnd.getTime() + RECALL_TRANSCRIPT_RECOVERY_GRACE_MS);
 }
 

@@ -85,6 +85,14 @@ function fail(message) {
   process.exit(1);
 }
 
+function safeErrorMessage(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  if (/^[A-Z_]+ returned \d+\.$/.test(message)) return message;
+  if (/^[A-Z_]+_API_KEY is missing\.$/.test(message)) return message;
+  if (message === "duplicate recording is missing provider bot id.") return message;
+  return "provider cancellation failed.";
+}
+
 function recallAuthorization(apiKey) {
   return /^(Token|Bearer)\s+/i.test(apiKey) ? apiKey : `Token ${apiKey}`;
 }
@@ -372,6 +380,7 @@ async function main() {
       duplicateProviderBotsToCancel: 0,
       duplicateRecordersToSkip: 0,
       duplicateProviderBotsCancelled: 0,
+      duplicateProviderBotCancellationFailures: 0,
       duplicateRecordersSkipped: 0,
       details: [],
       reconcileJob: null,
@@ -405,24 +414,43 @@ async function main() {
           canonical: safeRecording(canonical),
           duplicates: duplicates.map(safeRecording),
           cancellationMethods: [],
+          cancellationFailures: [],
           canonicalRestoreSkipped: false,
         };
 
         if (isFuture) {
+          let allDuplicatesHandled = true;
+          summary.duplicateProviderBotsToCancel += duplicates.length;
+          summary.duplicateRecordersToSkip += duplicates.length;
           for (const duplicate of duplicates) {
-            summary.duplicateProviderBotsToCancel += 1;
-            summary.duplicateRecordersToSkip += 1;
             if (apply) {
-              const method = await cancelProviderBot(duplicate);
-              detail.cancellationMethods.push({
-                recordingHash: hashId(duplicate.id),
-                externalBotHash: hashId(duplicate.externalBotId),
-                method,
-              });
-              await markDuplicateSkipped(prisma, duplicate, canonical);
-              summary.duplicateProviderBotsCancelled += 1;
-              summary.duplicateRecordersSkipped += 1;
+              try {
+                const method = await cancelProviderBot(duplicate);
+                detail.cancellationMethods.push({
+                  recordingHash: hashId(duplicate.id),
+                  externalBotHash: hashId(duplicate.externalBotId),
+                  method,
+                });
+                await markDuplicateSkipped(prisma, duplicate, canonical);
+                summary.duplicateProviderBotsCancelled += 1;
+                summary.duplicateRecordersSkipped += 1;
+              } catch (error) {
+                allDuplicatesHandled = false;
+                summary.duplicateProviderBotCancellationFailures += 1;
+                detail.cancellationFailures.push({
+                  recordingHash: hashId(duplicate.id),
+                  externalBotHash: hashId(duplicate.externalBotId),
+                  reason: safeErrorMessage(error),
+                });
+                break;
+              }
             }
+          }
+          if (!allDuplicatesHandled) {
+            detail.canonicalRestoreSkipped = true;
+            summary.canonicalRecordingsRestoreSkipped += 1;
+            summary.details.push(detail);
+            continue;
           }
           const key = activeDedupeKey(canonical);
           const canonicalAlreadyOwnsKey = canonical.activeDedupeKey === key && ACTIVE_STATUSES.has(canonical.status);
