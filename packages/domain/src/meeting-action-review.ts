@@ -46,6 +46,7 @@ type ReviewInsight = {
   confidence: number | null;
   sourceQuote: string | null;
   status: string;
+  supersededAt?: Date | null;
   appliedEntityId?: string | null;
 };
 
@@ -182,6 +183,7 @@ export async function listMeetingFollowUpProposals(params: {
       type: "ACTION_ITEM",
       operation: "CREATE",
       status: { in: params.includeReviewed ? ["SUGGESTED", "CONFIRMED", "APPLIED", "DISMISSED"] : ["SUGGESTED", "CONFIRMED"] },
+      supersededAt: null,
     },
     orderBy: [
       { confidence: "desc" },
@@ -197,6 +199,7 @@ export async function listMeetingFollowUpProposals(params: {
       confidence: true,
       sourceQuote: true,
       status: true,
+      supersededAt: true,
       appliedEntityId: true,
     },
   });
@@ -435,7 +438,7 @@ function buildProposalBlocks(params: {
       },
     });
 
-    if (insight.status === "SUGGESTED" || insight.status === "CONFIRMED") {
+    if ((insight.status === "SUGGESTED" || insight.status === "CONFIRMED") && !insight.supersededAt) {
       blocks.push({
         type: "actions",
         block_id: `meeting_review_${insight.id}`,
@@ -675,6 +678,7 @@ async function maybeCloseReview(reviewId: string, workspaceId: string, meetingId
       type: "ACTION_ITEM",
       operation: "CREATE",
       status: { in: ["SUGGESTED", "CONFIRMED"] },
+      supersededAt: null,
     },
   });
   if (remaining === 0) {
@@ -727,6 +731,7 @@ async function loadReviewInsight(workspaceId: string, reviewId: string, insightI
       meetingId: review.meetingId,
       type: "ACTION_ITEM",
       operation: "CREATE",
+      supersededAt: null,
     },
   });
   invariant(insight, 404, "NOT_FOUND", "Meeting follow-up proposal not found.");

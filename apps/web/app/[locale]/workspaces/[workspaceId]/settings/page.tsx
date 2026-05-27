@@ -15,6 +15,7 @@ import {
   listUserSessions,
   getUserNotificationPreferences,
   getMeetingRecorderConfig,
+  listMeetingTranscriptSourceState,
   getWorkspacePlanState,
 } from "@corgtex/domain";
 import { env, prisma } from "@corgtex/shared";
@@ -27,6 +28,9 @@ import {
   rotateWebhookSecretAction,
   disconnectCommunicationInstallationAction,
   updateMeetingRecorderConfigAction,
+  connectMeetingTranscriptSourceAction,
+  retryMeetingTranscriptImportBatchAction,
+  runMeetingTranscriptSourceBackfillAction,
   updateSlackAgendaSettingsAction,
   deleteOAuthConnectionAction,
   runOAuthConnectionSyncAction,
@@ -274,7 +278,7 @@ export default async function SettingsPage({
   }
 
   // Load core user constraints that apply to both tabs
-  const [webhookEndpoints, inboundWebhooks, userConnections, ssoConfigs, communicationInstallations, meetingRecorderConfig, planState] = await Promise.all([
+  const [webhookEndpoints, inboundWebhooks, userConnections, ssoConfigs, communicationInstallations, meetingRecorderConfig, meetingTranscriptSources, planState] = await Promise.all([
     listWebhookEndpoints(actor, workspaceId).catch(() => []),
     listInboundWebhooks(actor, workspaceId, { take: 20 }).catch(() => []),
     actor.kind === "user" ? prisma.oAuthConnection.findMany({
@@ -290,6 +294,7 @@ export default async function SettingsPage({
     getSsoConfigByWorkspace(actor, workspaceId).catch(() => []),
     listCommunicationInstallations(actor, workspaceId).catch(() => []),
     featureFlags.MEETING_RECORDERS ? getMeetingRecorderConfig(actor, workspaceId).catch(() => null) : Promise.resolve(null),
+    featureFlags.MEETING_RECORDERS ? listMeetingTranscriptSourceState(actor, workspaceId).catch(() => null) : Promise.resolve(null),
     getWorkspacePlanState(actor, workspaceId).catch(() => null),
   ]);
   const slackInstallation = communicationInstallations.find((installation) => installation.provider === "SLACK" && installation.status === "ACTIVE");
@@ -576,6 +581,138 @@ export default async function SettingsPage({
                       </p>
                       <button type="submit" className="secondary small">Save recorder settings</button>
                     </form>
+                  </div>
+                ) : null}
+                {featureFlags.MEETING_RECORDERS && meetingTranscriptSources ? (
+                  <div className="nr-item" style={{ padding: "12px 0" }}>
+                    <div className="row">
+                      <strong className="nr-item-title">Meeting records</strong>
+                      <span className="tag" style={{ background: meetingTranscriptSources.connections.length > 0 ? "var(--accent-soft)" : "transparent" }}>
+                        {meetingTranscriptSources.connections.length > 0 ? `${meetingTranscriptSources.connections.length} connected` : "Ready"}
+                      </span>
+                    </div>
+                    <p className="nr-item-meta" style={{ fontSize: "0.82rem", marginTop: 8 }}>
+                      Bring in recorder transcripts as the first onboarding source. Batches are processed oldest to newest, and newer source revisions replace stale active transcripts while keeping the older evidence.
+                    </p>
+                    <details>
+                      <summary className="nr-hide-marker settings-disclosure-summary" style={{ color: "var(--accent)", cursor: "pointer", marginTop: 8 }}>
+                        Connect providers and upload exports
+                      </summary>
+                      <div className="stack" style={{ gap: 20, marginTop: 12 }}>
+                        {meetingTranscriptSources.catalog.slice(0, 8).map((entry) => {
+                          const connection = meetingTranscriptSources.connections.find((item) => item.provider === entry.provider);
+                          const webhookUrl = `${origin}/api/integrations/meeting-transcripts/${entry.slug}/webhook?workspaceId=${workspaceId}`;
+                          return (
+                            <div key={entry.provider} style={{ borderTop: "1px solid var(--line)", paddingTop: 12 }}>
+                              <div className="row">
+                                <strong className="nr-item-title">{entry.label}</strong>
+                                <span className="tag" style={{ background: connection?.status === "ACTIVE" ? "var(--accent-soft)" : "transparent" }}>
+                                  {connection?.status === "ACTIVE" ? "Connected" : entry.connectionStatus}
+                                </span>
+                              </div>
+                              <p className="nr-item-meta" style={{ fontSize: "0.82rem", margin: "6px 0" }}>
+                                {entry.firstPath}
+                              </p>
+                              <div className="stack" style={{ gap: 8 }}>
+                                <form action={connectMeetingTranscriptSourceAction} className="stack nr-form-section">
+                                  <input type="hidden" name="workspaceId" value={workspaceId} />
+                                  <input type="hidden" name="provider" value={entry.slug} />
+                                  <label style={{ fontSize: "0.85rem" }}>
+                                    API key
+                                    <input name="apiKey" type="password" autoComplete="off" placeholder={connection?.hasApiKey ? "Stored" : "Provider API key"} />
+                                  </label>
+                                  <label style={{ fontSize: "0.85rem" }}>
+                                    Webhook secret
+                                    <input name="webhookSecret" type="password" autoComplete="off" placeholder={connection?.hasWebhookSecret ? "Stored" : "Provider webhook secret"} />
+                                  </label>
+                                  <p className="nr-item-meta" style={{ fontSize: "0.78rem", margin: 0, wordBreak: "break-all" }}>
+                                    Webhook URL: {webhookUrl}
+                                  </p>
+                                  <div className="actions-inline">
+                                    <button type="submit" className="secondary small">Save connection</button>
+                                  </div>
+                                </form>
+                                <form
+                                  action={`/api/workspaces/${workspaceId}/meeting-transcript-sources/${entry.slug}/import`}
+                                  method="post"
+                                  encType="multipart/form-data"
+                                  className="stack nr-form-section"
+                                >
+                                  <input type="hidden" name="workspaceId" value={workspaceId} />
+                                  <input type="hidden" name="provider" value={entry.slug} />
+                                  <input type="hidden" name="sourceKind" value="settings-upload" />
+                                  <input type="hidden" name="redirectTo" value={`/workspaces/${workspaceId}/settings`} />
+                                  <label style={{ fontSize: "0.85rem" }}>
+                                    Transcript export or ZIP
+                                    <input name="file" type="file" multiple accept=".zip,.json,.txt,.vtt,.srt,.docx,.pdf,.md,.csv,text/*,application/json,application/pdf,application/zip" />
+                                  </label>
+                                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                                    <label style={{ fontSize: "0.85rem" }}>
+                                      Title fallback
+                                      <input name="title" placeholder="Weekly tactical" />
+                                    </label>
+                                    <label style={{ fontSize: "0.85rem" }}>
+                                      Recorded at fallback
+                                      <input name="recordedAt" type="datetime-local" />
+                                    </label>
+                                  </div>
+                                  <label style={{ fontSize: "0.85rem" }}>
+                                    Participant emails
+                                    <input name="participantEmails" placeholder="name@example.com, name2@example.com" />
+                                  </label>
+                                  <label style={{ fontSize: "0.85rem" }}>
+                                    Paste transcript
+                                    <textarea name="transcript" rows={3} placeholder="Optional when uploading files" />
+                                  </label>
+                                  <div className="actions-inline">
+                                    <button type="submit" className="secondary small">Import batch</button>
+                                  </div>
+                                </form>
+                                {connection ? (
+                                  <form action={runMeetingTranscriptSourceBackfillAction}>
+                                    <input type="hidden" name="workspaceId" value={workspaceId} />
+                                    <input type="hidden" name="provider" value={entry.slug} />
+                                    <button type="submit" className="ghost small">Run backfill</button>
+                                  </form>
+                                ) : null}
+                                <p className="nr-item-meta" style={{ fontSize: "0.78rem", margin: 0 }}>
+                                  Manual path: {entry.manualExportInstructions.join(" ")}
+                                </p>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </details>
+                    {meetingTranscriptSources.batches.length > 0 && (
+                      <div className="stack" style={{ gap: 8, marginTop: 14 }}>
+                        <strong className="nr-item-title">Recent import batches</strong>
+                        {meetingTranscriptSources.batches.slice(0, 5).map((batch) => (
+                          <div key={batch.id} className="row" style={{ alignItems: "center" }}>
+                            <span className="nr-item-meta" style={{ fontSize: "0.82rem" }}>
+                              {batch.provider} · {batch.status} · {batch.importedCount} imported · {batch.skippedCount} skipped · {batch.failedCount} failed
+                            </span>
+                            {batch.failedCount > 0 ? (
+                              <form action={retryMeetingTranscriptImportBatchAction}>
+                                <input type="hidden" name="workspaceId" value={workspaceId} />
+                                <input type="hidden" name="batchId" value={batch.id} />
+                                <button type="submit" className="ghost small">Retry</button>
+                              </form>
+                            ) : null}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {meetingTranscriptSources.records.length > 0 && (
+                      <div className="stack" style={{ gap: 6, marginTop: 14 }}>
+                        <strong className="nr-item-title">Latest source records</strong>
+                        {meetingTranscriptSources.records.slice(0, 6).map((record) => (
+                          <div key={record.id} className="nr-item-meta" style={{ fontSize: "0.82rem" }} suppressHydrationWarning>
+                            {record.provider} · {record.status} · {record.title || record.externalId} · {format.dateTime(new Date(record.recordedAt), { dateStyle: "medium" })}
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 ) : null}
                 <div className="nr-item" style={{ padding: "12px 0" }}>

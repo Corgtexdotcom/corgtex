@@ -266,6 +266,10 @@ function hasMeetingEvidenceForAutoApply(insight: Pick<MeetingInsight, "operation
   return true;
 }
 
+function isActiveReviewableInsight(insight: Pick<MeetingInsight, "status" | "supersededAt">) {
+  return (insight.status === "SUGGESTED" || insight.status === "CONFIRMED") && !insight.supersededAt;
+}
+
 export async function extractMeetingInsights(
   actor: AppActor,
   params: { workspaceId: string; meetingId: string }
@@ -302,6 +306,23 @@ export async function extractMeetingInsights(
 
   invariant(meeting, 404, "NOT_FOUND", "Meeting not found.");
   invariant(meeting.transcript, 400, "INVALID_STATE", "Meeting has no transcript to analyze.");
+  const latestSourceRecord = await prisma.meetingTranscriptSourceRecord.findFirst({
+    where: {
+      workspaceId: params.workspaceId,
+      meetingId: meeting.id,
+      status: "ACTIVE",
+    },
+    orderBy: [
+      { sourceUpdatedAt: { sort: "desc", nulls: "last" } },
+      { recordedAt: "desc" },
+      { createdAt: "desc" },
+    ],
+    select: {
+      id: true,
+      recordedAt: true,
+      sourceUpdatedAt: true,
+    },
+  });
 
   const instruction = `
 You are analyzing a meeting transcript for a self-managed organization.
@@ -431,6 +452,7 @@ Be conservative — only extract items you're confident about.
         workspaceId: params.workspaceId,
         meetingId: meeting.id,
         status: "SUGGESTED",
+        sourceRecordId: null,
       },
     });
     
@@ -487,8 +509,9 @@ Be conservative — only extract items you're confident about.
         deliberationEntryType,
         resolutionOutcome,
       });
-      if (seenDedupeKeys.has(dedupeKey)) continue;
-      seenDedupeKeys.add(dedupeKey);
+      const sourceDedupeKey = latestSourceRecord ? `${dedupeKey}:source:${latestSourceRecord.id}` : dedupeKey;
+      if (seenDedupeKeys.has(sourceDedupeKey)) continue;
+      seenDedupeKeys.add(sourceDedupeKey);
 
       const insightData = {
         meetingId: meeting.id,
@@ -506,7 +529,9 @@ Be conservative — only extract items you're confident about.
         targetEntityId: keepTarget ? targetEntityId : null,
         deliberationEntryType,
         resolutionOutcome,
-        dedupeKey,
+        dedupeKey: sourceDedupeKey,
+        sourceRecordId: latestSourceRecord?.id ?? null,
+        sourceRecordedAt: latestSourceRecord?.recordedAt ?? meeting.recordedAt ?? null,
       };
 
       const existingInsight = await tx.meetingInsight.findFirst({
@@ -514,7 +539,7 @@ Be conservative — only extract items you're confident about.
           workspaceId: params.workspaceId,
           meetingId: meeting.id,
           OR: [
-            { dedupeKey },
+            { dedupeKey: sourceDedupeKey },
             {
               dedupeKey: null,
               type,
@@ -542,13 +567,49 @@ Be conservative — only extract items you're confident about.
         where: {
           workspaceId: params.workspaceId,
           meetingId: meeting.id,
-          dedupeKey,
+          dedupeKey: sourceDedupeKey,
         },
         orderBy: { createdAt: "desc" },
       });
       if (created) {
         createdInsights.push(created);
+        if (created.targetEntityType && created.targetEntityId && insightData.sourceRecordedAt) {
+          await tx.meetingInsight.updateMany({
+            where: {
+              workspaceId: params.workspaceId,
+              id: { not: created.id },
+              status: "SUGGESTED",
+              targetEntityType: created.targetEntityType,
+              targetEntityId: created.targetEntityId,
+              supersededAt: null,
+              OR: [
+                { sourceRecordedAt: null },
+                { sourceRecordedAt: { lt: insightData.sourceRecordedAt } },
+              ],
+            },
+            data: {
+              supersededAt: new Date(),
+              supersededByInsightId: created.id,
+            },
+          });
+        }
       }
+    }
+
+    if (latestSourceRecord) {
+      await tx.meetingInsight.updateMany({
+        where: {
+          workspaceId: params.workspaceId,
+          meetingId: meeting.id,
+          status: "SUGGESTED",
+          sourceRecordId: { not: null },
+          NOT: { sourceRecordId: latestSourceRecord.id },
+          supersededAt: null,
+        },
+        data: {
+          supersededAt: new Date(),
+        },
+      });
     }
 
     await tx.meeting.update({
@@ -575,6 +636,7 @@ export async function confirmInsight(
 
   invariant(insight, 404, "NOT_FOUND", "Insight not found.");
   invariant(insight.status === "SUGGESTED", 400, "INVALID_STATE", "Insight is not in SUGGESTED state.");
+  invariant(!insight.supersededAt, 400, "INVALID_STATE", "Insight has been superseded by newer transcript evidence.");
 
   return prisma.meetingInsight.update({
     where: { id: params.insightId },
@@ -600,7 +662,7 @@ export async function updateInsight(
   });
 
   invariant(insight, 404, "NOT_FOUND", "Insight not found.");
-  invariant(insight.status === "SUGGESTED" || insight.status === "CONFIRMED", 400, "INVALID_STATE", "Only reviewable insights can be edited.");
+  invariant(isActiveReviewableInsight(insight), 400, "INVALID_STATE", "Only reviewable insights can be edited.");
 
   const title = params.title?.trim();
   const bodyMd = params.bodyMd?.trim();
@@ -661,7 +723,7 @@ export async function applyInsight(
   });
 
   invariant(insight, 404, "NOT_FOUND", "Insight not found.");
-  invariant(insight.status === "CONFIRMED" || insight.status === "SUGGESTED", 400, "INVALID_STATE", "Insight must be suggested or confirmed before applying.");
+  invariant(isActiveReviewableInsight(insight), 400, "INVALID_STATE", "Insight must be active and reviewable before applying.");
 
   let appliedEntityType: string | null = null;
   let appliedEntityId: string | null = null;
@@ -855,6 +917,7 @@ export async function autoApplyMeetingInsights(
       workspaceId: params.workspaceId,
       meetingId: params.meetingId,
       status: { in: ["SUGGESTED", "CONFIRMED"] },
+      supersededAt: null,
       confidence: { gte: confidenceThreshold },
     },
     orderBy: { createdAt: "asc" },
@@ -925,6 +988,7 @@ export async function confirmAllInsights(
     workspaceId: params.workspaceId,
     meetingId: params.meetingId,
     status: "SUGGESTED",
+    supersededAt: null,
   };
   if (params.onlyType) {
     updateWhere.type = params.onlyType;

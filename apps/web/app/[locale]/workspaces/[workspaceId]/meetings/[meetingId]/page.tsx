@@ -26,6 +26,7 @@ type MeetingInsightSummary = {
   appliedEntityId: string | null;
   targetEntityType: string | null;
   targetEntityId: string | null;
+  supersededAt?: Date | string | null;
 };
 
 function normalizeMeetingTab(value: string | string[] | undefined): MeetingTab {
@@ -49,7 +50,9 @@ function statusTagClass(status: string, resolutionOutcome?: string | null) {
 function getMeetingProcessingStatus(meeting: NonNullable<Awaited<ReturnType<typeof getMeeting>>>) {
   if (!meeting.transcript) return null;
 
-  const reviewCount = meeting.insights.filter((insight: MeetingInsightSummary) => insight.status === "SUGGESTED" || insight.status === "CONFIRMED").length;
+  const reviewCount = meeting.insights.filter((insight: MeetingInsightSummary) =>
+    (insight.status === "SUGGESTED" || insight.status === "CONFIRMED") && !insight.supersededAt
+  ).length;
   if (meeting.aiProcessedAt) {
     return {
       className: "complete",

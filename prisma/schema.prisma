@@ -533,6 +533,9 @@ model Workspace {
   meetingRecordings             MeetingRecording[]
   meetingRecorderProviderEvents MeetingRecorderProviderEvent[]
   meetingRecorderSmokeRuns      MeetingRecorderSmokeRun[]
+  meetingTranscriptConnections   MeetingTranscriptSourceConnection[]
+  meetingTranscriptImportBatches MeetingTranscriptImportBatch[]
+  meetingTranscriptSourceRecords MeetingTranscriptSourceRecord[]
   meetingInsights               MeetingInsight[]
   goals                         Goal[]
   recognitions                  Recognition[]
@@ -1609,6 +1612,46 @@ enum MeetingRecorderSmokeRunStatus {
   CANCELLED
 }
 
+enum MeetingTranscriptSourceProvider {
+  FIREFLIES
+  FATHOM
+  OTTER
+  GRANOLA
+  ZOOM
+  MICROSOFT_TEAMS
+  GOOGLE_MEET
+  READ_AI
+  TLDV
+  AVOMA
+  GONG
+  FELLOW
+  MEETGEEK
+  RECALL_AI
+  MEETING_BAAS
+  MANUAL_UPLOAD
+}
+
+enum MeetingTranscriptSourceConnectionStatus {
+  ACTIVE
+  DISABLED
+  ERROR
+}
+
+enum MeetingTranscriptImportBatchStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  PARTIAL
+  FAILED
+}
+
+enum MeetingTranscriptSourceRecordStatus {
+  ACTIVE
+  SUPERSEDED
+  SKIPPED
+  FAILED
+}
+
 model MeetingSeries {
   id                     String    @id @default(uuid())
   workspaceId            String
@@ -1671,6 +1714,7 @@ model Meeting {
   followUpReview MeetingFollowUpReview?
   recordings     MeetingRecording[]
   smokeRuns      MeetingRecorderSmokeRun[]
+  transcriptSourceRecords MeetingTranscriptSourceRecord[]
 
   @@index([workspaceId, recordedAt])
   @@index([workspaceId, status, recordedAt])
@@ -1943,6 +1987,98 @@ model UserWorkspaceOnboardingState {
   @@unique([userId, workspaceId, tourKey, tourVersion], map: "UserWorkspaceOnboardingState_user_workspace_tour_key")
   @@index([workspaceId, tourKey, tourVersion])
   @@index([userId, updatedAt])
+}
+
+model MeetingTranscriptSourceConnection {
+  id               String                                  @id @default(uuid())
+  workspaceId      String
+  provider         MeetingTranscriptSourceProvider
+  displayName      String?
+  status           MeetingTranscriptSourceConnectionStatus @default(ACTIVE)
+  authMode         String
+  accessTokenEnc   String?                                 @db.Text
+  refreshTokenEnc  String?                                 @db.Text
+  apiKeyEnc        String?                                 @db.Text
+  webhookSecretEnc String?                                 @db.Text
+  cursorJson       Json?
+  lastSyncAt       DateTime?
+  lastBackfillAt   DateTime?
+  lastError        String?                                 @db.Text
+  createdAt        DateTime                                @default(now())
+  updatedAt        DateTime                                @updatedAt
+
+  workspace Workspace                       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  batches   MeetingTranscriptImportBatch[]
+  records   MeetingTranscriptSourceRecord[]
+
+  @@unique([workspaceId, provider])
+  @@index([workspaceId, status])
+}
+
+model MeetingTranscriptImportBatch {
+  id            String                             @id @default(uuid())
+  workspaceId   String
+  connectionId  String?
+  provider      MeetingTranscriptSourceProvider
+  sourceKind    String
+  status        MeetingTranscriptImportBatchStatus @default(PENDING)
+  startedAt     DateTime?
+  finishedAt    DateTime?
+  importedCount Int                                @default(0)
+  skippedCount  Int                                @default(0)
+  failedCount   Int                                @default(0)
+  error         String?                            @db.Text
+  createdAt     DateTime                           @default(now())
+  updatedAt     DateTime                           @updatedAt
+
+  workspace  Workspace                          @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  connection MeetingTranscriptSourceConnection? @relation(fields: [connectionId], references: [id], onDelete: SetNull)
+  records    MeetingTranscriptSourceRecord[]
+
+  @@index([workspaceId, provider, createdAt])
+  @@index([connectionId, createdAt])
+  @@index([workspaceId, status])
+}
+
+model MeetingTranscriptSourceRecord {
+  id                 String                              @id @default(uuid())
+  workspaceId        String
+  connectionId       String?
+  batchId            String?
+  meetingId          String?
+  provider           MeetingTranscriptSourceProvider
+  externalId         String
+  externalRevisionId String?
+  title              String?
+  recordedAt         DateTime
+  sourceUpdatedAt    DateTime?
+  sourceUrl          String?                             @db.Text
+  contentHash        String
+  transcriptText     String                              @db.Text
+  summaryMd          String?                             @db.Text
+  segmentsJson       Json?
+  participantsJson   Json?
+  rawMetadataJson    Json?
+  status             MeetingTranscriptSourceRecordStatus @default(ACTIVE)
+  supersededByRecordId String?
+  processedAt        DateTime?
+  error              String?                             @db.Text
+  createdAt          DateTime                            @default(now())
+  updatedAt          DateTime                            @updatedAt
+
+  workspace           Workspace                          @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  connection          MeetingTranscriptSourceConnection? @relation(fields: [connectionId], references: [id], onDelete: SetNull)
+  batch               MeetingTranscriptImportBatch?      @relation(fields: [batchId], references: [id], onDelete: SetNull)
+  meeting             Meeting?                           @relation(fields: [meetingId], references: [id], onDelete: SetNull)
+  supersededByRecord  MeetingTranscriptSourceRecord?     @relation("MeetingTranscriptRecordSupersession", fields: [supersededByRecordId], references: [id], onDelete: SetNull)
+  supersededRecords   MeetingTranscriptSourceRecord[]    @relation("MeetingTranscriptRecordSupersession")
+  meetingInsights     MeetingInsight[]
+
+  @@unique([workspaceId, provider, externalId, contentHash])
+  @@index([workspaceId, provider, externalId])
+  @@index([workspaceId, recordedAt])
+  @@index([meetingId])
+  @@index([batchId])
 }
 
 model WorkspaceArchiveRecord {
@@ -3339,16 +3475,23 @@ model MeetingInsight {
 
   reviewedByUserId String?
   reviewedAt       DateTime?
+  sourceRecordId   String?
+  sourceRecordedAt DateTime?
+  supersededAt     DateTime?
+  supersededByInsightId String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  workspace      Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  meeting        Meeting   @relation(fields: [meetingId], references: [id], onDelete: Cascade)
-  reviewedByUser User?     @relation(fields: [reviewedByUserId], references: [id], onDelete: SetNull)
+  workspace      Workspace                      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  meeting        Meeting                        @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  reviewedByUser User?                          @relation(fields: [reviewedByUserId], references: [id], onDelete: SetNull)
+  sourceRecord   MeetingTranscriptSourceRecord? @relation(fields: [sourceRecordId], references: [id], onDelete: SetNull)
 
   @@unique([meetingId, dedupeKey])
   @@index([workspaceId, meetingId, status])
+  @@index([workspaceId, targetEntityType, targetEntityId, sourceRecordedAt])
+  @@index([sourceRecordId])
 }
 
 enum GoalCadence {

@@ -20,6 +20,9 @@ const { prismaMock } = vi.hoisted(() => {
     meetingInsight: {
       deleteMany: vi.fn(),
     },
+    meetingTranscriptSourceRecord: {
+      updateMany: vi.fn(),
+    },
     action: {
       findMany: vi.fn(),
     },
@@ -61,6 +64,7 @@ describe("meetings domain", () => {
     prismaMock.auditLog.create.mockResolvedValue({});
     prismaMock.event.createMany.mockResolvedValue({ count: 1 });
     prismaMock.meetingInsight.deleteMany.mockResolvedValue({ count: 0 });
+    prismaMock.meetingTranscriptSourceRecord.updateMany.mockResolvedValue({ count: 1 });
   });
 
   it("listMeetings returns meetings newest first", async () => {
@@ -100,6 +104,16 @@ describe("meetings domain", () => {
     await expect(getMeeting("workspace-1", "meeting-1")).resolves.toEqual(expect.objectContaining({
       id: "meeting-1",
       raisedActions: [{ id: "action-1", title: "Follow up" }],
+    }));
+    expect(prismaMock.meeting.findFirst).toHaveBeenCalledWith(expect.objectContaining({
+      include: expect.objectContaining({
+        insights: {
+          orderBy: [
+            { sourceRecordedAt: { sort: "desc", nulls: "last" } },
+            { createdAt: "desc" },
+          ],
+        },
+      }),
     }));
     expect(prismaMock.action.findMany).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({
@@ -387,6 +401,7 @@ describe("meetings domain", () => {
         meetingId: "scheduled-1",
         workspaceId: "workspace-1",
         status: "SUGGESTED",
+        sourceRecordId: null,
       },
     });
   });
@@ -452,6 +467,304 @@ describe("meetings domain", () => {
     expect(prismaMock.event.createMany).toHaveBeenCalled();
   });
 
+  it("uploadMeetingTranscript does not directly match recurring meetings by URL alone", async () => {
+    const recordedAt = new Date("2026-04-30T17:10:00.000Z");
+    prismaMock.meeting.findMany.mockResolvedValue([
+      {
+        id: "scheduled-1",
+        workspaceId: "workspace-1",
+        title: "Weekly Tactical",
+        source: "internal",
+        status: "SCHEDULED",
+        recordedAt: new Date("2026-04-30T17:00:00.000Z"),
+        scheduledEndAt: new Date("2026-04-30T18:00:00.000Z"),
+        participantEmails: [],
+        meetingUrlHash: "shared-url",
+      },
+    ]);
+    prismaMock.meeting.findFirst.mockResolvedValue({
+      id: "scheduled-1",
+      title: "Weekly Tactical",
+      transcript: null,
+      summaryMd: null,
+      ingestionGuidanceMd: null,
+      participantIds: [],
+      participantEmails: [],
+      meetingUrl: "https://meet.google.com/abc-defg-hij",
+      meetingUrlHash: "shared-url",
+    });
+    prismaMock.meeting.update.mockResolvedValue({
+      id: "scheduled-1",
+      workspaceId: "workspace-1",
+      title: "Weekly Tactical",
+      source: "internal",
+      status: "COMPLETED",
+      recordedAt,
+      transcript: "Transcript text",
+    });
+
+    const { uploadMeetingTranscript } = await import("./meetings");
+    await expect(uploadMeetingTranscript(actor, {
+      workspaceId: "workspace-1",
+      title: "Weekly Tactical",
+      source: "manual",
+      recordedAt,
+      transcript: "Transcript text",
+      meetingUrl: "https://meet.google.com/abc-defg-hij",
+    })).resolves.toMatchObject({
+      status: "matched",
+      meeting: { id: "scheduled-1" },
+    });
+
+    expect(prismaMock.meeting.findMany.mock.invocationCallOrder[0]).toBeLessThan(
+      prismaMock.meeting.findFirst.mock.invocationCallOrder[0],
+    );
+  });
+
+  it("uploadMeetingTranscript does not directly match recurring meetings by calendar UID alone", async () => {
+    const recordedAt = new Date("2026-04-30T17:10:00.000Z");
+    prismaMock.meeting.findMany.mockResolvedValue([
+      {
+        id: "scheduled-1",
+        workspaceId: "workspace-1",
+        title: "Weekly Tactical",
+        source: "internal",
+        status: "SCHEDULED",
+        recordedAt: new Date("2026-04-30T17:00:00.000Z"),
+        scheduledEndAt: new Date("2026-04-30T18:00:00.000Z"),
+        participantEmails: [],
+        calendarExternalId: "recurring-event-uid",
+      },
+    ]);
+    prismaMock.meeting.findFirst.mockResolvedValue({
+      id: "scheduled-1",
+      title: "Weekly Tactical",
+      transcript: null,
+      summaryMd: null,
+      ingestionGuidanceMd: null,
+      participantIds: [],
+      participantEmails: [],
+      calendarExternalId: "recurring-event-uid",
+    });
+    prismaMock.meeting.update.mockResolvedValue({
+      id: "scheduled-1",
+      workspaceId: "workspace-1",
+      title: "Weekly Tactical",
+      source: "internal",
+      status: "COMPLETED",
+      recordedAt,
+      transcript: "Transcript text",
+    });
+
+    const { uploadMeetingTranscript } = await import("./meetings");
+    await expect(uploadMeetingTranscript(actor, {
+      workspaceId: "workspace-1",
+      title: "Weekly Tactical",
+      source: "manual",
+      recordedAt,
+      transcript: "Transcript text",
+      calendarExternalId: "recurring-event-uid",
+    })).resolves.toMatchObject({
+      status: "matched",
+      meeting: { id: "scheduled-1" },
+    });
+
+    expect(prismaMock.meeting.findMany.mock.invocationCallOrder[0]).toBeLessThan(
+      prismaMock.meeting.findFirst.mock.invocationCallOrder[0],
+    );
+  });
+
+  it("uploadMeetingTranscript preserves existing calendar meeting identifiers", async () => {
+    const recordedAt = new Date("2026-04-30T17:10:00.000Z");
+    prismaMock.meeting.findFirst
+      .mockResolvedValueOnce({ id: "scheduled-1" })
+      .mockResolvedValueOnce({
+        id: "scheduled-1",
+        title: "Weekly Tactical",
+        transcript: null,
+        summaryMd: null,
+        ingestionGuidanceMd: null,
+        participantIds: [],
+        participantEmails: [],
+        externalId: "meeting-series:series-1:2026-04-30T17:00:00.000Z",
+        calendarExternalId: "recurring-event-uid",
+      });
+    prismaMock.meeting.update.mockResolvedValue({
+      id: "scheduled-1",
+      workspaceId: "workspace-1",
+      title: "Weekly Tactical",
+      source: "internal",
+      status: "COMPLETED",
+      recordedAt,
+      transcript: "Transcript text",
+    });
+
+    const { uploadMeetingTranscript } = await import("./meetings");
+    await expect(uploadMeetingTranscript(actor, {
+      workspaceId: "workspace-1",
+      meetingId: "scheduled-1",
+      title: "Weekly Tactical",
+      source: "meeting-transcript:fireflies",
+      recordedAt,
+      transcript: "Transcript text",
+      externalId: "meeting-transcript:FIREFLIES:ff-1",
+      calendarExternalId: "incoming-calendar-id",
+    })).resolves.toMatchObject({
+      status: "matched",
+      meeting: { id: "scheduled-1" },
+    });
+
+    expect(prismaMock.meeting.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "scheduled-1" },
+      data: expect.objectContaining({
+        externalId: "meeting-series:series-1:2026-04-30T17:00:00.000Z",
+        calendarExternalId: "recurring-event-uid",
+      }),
+    }));
+  });
+
+  it("uploadMeetingTranscript preserves an existing summary when a replacement has none", async () => {
+    const recordedAt = new Date("2026-04-30T17:10:00.000Z");
+    prismaMock.meeting.findFirst
+      .mockResolvedValueOnce({ id: "completed-1" })
+      .mockResolvedValueOnce({
+        id: "completed-1",
+        title: "Weekly Tactical",
+        transcript: "Jan: Existing transcript.",
+        summaryMd: "Existing summary",
+        ingestionGuidanceMd: null,
+        participantIds: [],
+        participantEmails: [],
+      });
+    prismaMock.meeting.update.mockResolvedValue({
+      id: "completed-1",
+      workspaceId: "workspace-1",
+      title: "Weekly Tactical",
+      source: "chat-transcript-upload",
+      status: "COMPLETED",
+      recordedAt,
+      transcript: "Replacement transcript",
+    });
+
+    const { uploadMeetingTranscript } = await import("./meetings");
+    await expect(uploadMeetingTranscript(actor, {
+      workspaceId: "workspace-1",
+      meetingId: "completed-1",
+      title: "Weekly Tactical",
+      source: "chat-transcript-upload",
+      recordedAt,
+      transcript: "Replacement transcript",
+      replaceTranscript: true,
+    })).resolves.toMatchObject({
+      status: "matched",
+      meeting: { id: "completed-1" },
+    });
+
+    expect(prismaMock.meeting.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "completed-1" },
+      data: expect.objectContaining({
+        transcript: "Replacement transcript",
+        summaryMd: "Existing summary",
+      }),
+    }));
+  });
+
+  it("uploadMeetingTranscript links source records before transcript processing is queued", async () => {
+    const recordedAt = new Date("2026-04-30T17:10:00.000Z");
+    prismaMock.meeting.findFirst
+      .mockResolvedValueOnce({ id: "completed-1" })
+      .mockResolvedValueOnce({
+        id: "completed-1",
+        title: "Weekly Tactical",
+        transcript: "Jan: Existing transcript.",
+        summaryMd: null,
+        ingestionGuidanceMd: null,
+        participantIds: [],
+        participantEmails: [],
+        externalId: null,
+        calendarExternalId: null,
+        meetingUrl: null,
+        meetingUrlHash: null,
+      });
+    prismaMock.meeting.update.mockResolvedValue({
+      id: "completed-1",
+      workspaceId: "workspace-1",
+      title: "Weekly Tactical",
+      source: "meeting-transcript:fireflies",
+      status: "COMPLETED",
+      recordedAt,
+      transcript: "Replacement transcript",
+      ingestionGuidanceMd: null,
+    });
+
+    const { uploadMeetingTranscript } = await import("./meetings");
+    await expect(uploadMeetingTranscript(actor, {
+      workspaceId: "workspace-1",
+      meetingId: "completed-1",
+      title: "Weekly Tactical",
+      source: "meeting-transcript:fireflies",
+      recordedAt,
+      transcript: "Replacement transcript",
+      sourceRecordId: "source-record-1",
+      replaceTranscript: true,
+    })).resolves.toMatchObject({
+      status: "matched",
+      meeting: { id: "completed-1" },
+    });
+
+    expect(prismaMock.meetingTranscriptSourceRecord.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: "source-record-1",
+        workspaceId: "workspace-1",
+      },
+      data: {
+        meetingId: "completed-1",
+      },
+    });
+    expect(prismaMock.meetingTranscriptSourceRecord.updateMany.mock.invocationCallOrder[0]).toBeLessThan(
+      prismaMock.event.createMany.mock.invocationCallOrder[0],
+    );
+  });
+
+  it("uploadMeetingTranscript scopes transcript source external IDs on new meetings", async () => {
+    const recordedAt = new Date("2026-04-30T17:10:00.000Z");
+    prismaMock.meeting.findFirst.mockResolvedValue(null);
+    prismaMock.meeting.findMany.mockResolvedValue([]);
+    prismaMock.meeting.create.mockResolvedValue({
+      id: "created-1",
+      workspaceId: "workspace-1",
+      title: "Imported transcript",
+      source: "meeting-transcript:fireflies",
+      status: "COMPLETED",
+      recordedAt,
+      transcript: "Transcript text",
+    });
+
+    const { uploadMeetingTranscript } = await import("./meetings");
+    await expect(uploadMeetingTranscript(actor, {
+      workspaceId: "workspace-1",
+      title: "Imported transcript",
+      source: "meeting-transcript:fireflies",
+      recordedAt,
+      transcript: "Transcript text",
+      externalId: "meeting-transcript:FIREFLIES:ff-1",
+    })).resolves.toMatchObject({
+      status: "created",
+      meeting: { id: "created-1" },
+    });
+
+    expect(prismaMock.meeting.findFirst).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        OR: [{ externalId: "workspace:workspace-1:meeting-transcript:FIREFLIES:ff-1" }],
+      }),
+    }));
+    expect(prismaMock.meeting.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        externalId: "workspace:workspace-1:meeting-transcript:FIREFLIES:ff-1",
+      }),
+    }));
+  });
+
   it("requestMeetingIntelligenceRegeneration appends guidance and requeues transcript processing", async () => {
     prismaMock.meeting.findFirst.mockResolvedValue({
       id: "meeting-1",
@@ -489,6 +802,7 @@ describe("meetings domain", () => {
         meetingId: "meeting-1",
         workspaceId: "workspace-1",
         status: "SUGGESTED",
+        sourceRecordId: null,
       },
     });
     expect(prismaMock.event.createMany).toHaveBeenCalled();

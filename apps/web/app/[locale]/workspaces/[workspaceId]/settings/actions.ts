@@ -28,11 +28,17 @@ import {
   disconnectCommunicationInstallation,
   updateSlackAgendaSettings,
   updateMeetingRecorderConfig,
+  connectMeetingTranscriptSource,
+  importMeetingTranscriptSourceArtifacts,
+  normalizeMeetingTranscriptSourceProvider,
+  retryMeetingTranscriptImportBatch,
+  runMeetingTranscriptSourceBackfill,
   deleteOAuthConnection,
   enqueueOAuthConnectionSync,
   updateOAuthConnectionSyncSettings,
 } from "@corgtex/domain";
 import { sendEmail } from "@corgtex/shared";
+import { meetingTranscriptArtifactsFromFormData } from "@/lib/meeting-transcript-source-artifacts";
 
 async function sendInvitationEmail(email: string, displayName: string | null, token: string) {
   const appUrl = process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000";
@@ -332,6 +338,64 @@ export async function updateMeetingRecorderConfigAction(formData: FormData) {
     botName: asString(formData, "botName"),
     entryMessage: asOptional(formData, "entryMessage"),
     monthlyMinuteCap: asOptionalInt(formData, "monthlyMinuteCap") ?? 6000,
+  });
+  refresh(workspaceId);
+}
+
+export async function connectMeetingTranscriptSourceAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  await connectMeetingTranscriptSource(actor, {
+    workspaceId,
+    provider: normalizeMeetingTranscriptSourceProvider(asString(formData, "provider")),
+    displayName: asOptional(formData, "displayName"),
+    apiKey: asOptional(formData, "apiKey"),
+    webhookSecret: asOptional(formData, "webhookSecret"),
+  });
+  refresh(workspaceId);
+}
+
+export async function importMeetingTranscriptSourceAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  const artifacts = await meetingTranscriptArtifactsFromFormData(formData);
+  await importMeetingTranscriptSourceArtifacts(actor, {
+    workspaceId,
+    provider: normalizeMeetingTranscriptSourceProvider(asString(formData, "provider")),
+    sourceKind: asOptional(formData, "sourceKind") ?? "settings-upload",
+    artifacts,
+  });
+  refresh(workspaceId);
+}
+
+export async function runMeetingTranscriptSourceBackfillAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  await runMeetingTranscriptSourceBackfill(actor, {
+    workspaceId,
+    provider: normalizeMeetingTranscriptSourceProvider(asString(formData, "provider")),
+  });
+  refresh(workspaceId);
+}
+
+export async function retryMeetingTranscriptImportBatchAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  await retryMeetingTranscriptImportBatch(actor, {
+    workspaceId,
+    batchId: asString(formData, "batchId"),
   });
   refresh(workspaceId);
 }

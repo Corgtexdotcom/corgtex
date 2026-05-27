@@ -67,4 +67,31 @@ describe("meeting transcript intake", () => {
       source: "chat-transcript-upload",
     });
   });
+
+  it("keeps source URLs out of meeting join URL matching", async () => {
+    uploadMeetingTranscriptMock.mockResolvedValueOnce({
+      status: "created",
+      meeting: { id: "meeting-1" },
+      candidates: [],
+    });
+    const { intakeMeetingTranscript } = await import("./meeting-transcript-intake");
+
+    await intakeMeetingTranscript({
+      kind: "agent",
+      authProvider: "bootstrap",
+      label: "test-agent",
+      workspaceIds: ["workspace-1"],
+    }, {
+      workspaceId: "workspace-1",
+      title: "Weekly Tactical",
+      recordedAt: new Date("2026-05-17T10:00:00.000Z"),
+      source: "meeting-transcript:fireflies",
+      sourceUrl: "https://app.fireflies.ai/view/transcript-123",
+      transcript: "Jan: Follow up next week.",
+    });
+
+    expect(uploadMeetingTranscriptMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      meetingUrl: null,
+    }));
+  });
 });

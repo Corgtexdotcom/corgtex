@@ -135,7 +135,7 @@ export default function MeetingIntelligence({
 
   if (!hasTranscript) return null;
 
-  const reviewable = insights.filter((insight) => insight.status === "SUGGESTED" || insight.status === "CONFIRMED");
+  const reviewable = insights.filter((insight) => (insight.status === "SUGGESTED" || insight.status === "CONFIRMED") && !insight.supersededAt);
   const applied = insights.filter((insight) => insight.status === "APPLIED");
   const needsReview = reviewable.filter((insight) => confidenceValue(insight) >= 0.5);
   const lowConfidence = reviewable.filter((insight) => confidenceValue(insight) < 0.5);

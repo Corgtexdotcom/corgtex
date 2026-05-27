@@ -1,4 +1,4 @@
-import type { Meeting } from "@prisma/client";
+import type { Meeting, MeetingTranscriptSourceProvider } from "@prisma/client";
 import { defaultModelGateway } from "@corgtex/models";
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
@@ -32,6 +32,13 @@ export type MeetingTranscriptMetadata = {
   recordedAt: Date | null;
   participantEmails: string[];
   source: string;
+};
+
+export type MeetingTranscriptSegment = {
+  speaker?: string | null;
+  startMs?: number | null;
+  endMs?: number | null;
+  text: string;
 };
 
 function cleanTitle(value: string | null | undefined) {
@@ -162,6 +169,17 @@ export async function intakeMeetingTranscript(actor: AppActor, params: {
   meetingId?: string | null;
   title?: string | null;
   source?: string | null;
+  provider?: MeetingTranscriptSourceProvider | string | null;
+  externalId?: string | null;
+  sourceUpdatedAt?: Date | string | null;
+  sourceUrl?: string | null;
+  meetingUrl?: string | null;
+  calendarExternalId?: string | null;
+  segments?: MeetingTranscriptSegment[] | null;
+  batchId?: string | null;
+  sourceRecordId?: string | null;
+  batchMetadata?: Record<string, unknown> | null;
+  replaceTranscript?: boolean;
   recordedAt?: Date | string | null;
   summaryMd?: string | null;
   ingestionGuidanceMd?: string | null;
@@ -200,12 +218,17 @@ export async function intakeMeetingTranscript(actor: AppActor, params: {
     meetingId: params.meetingId ?? null,
     title: inferred.title,
     source: inferred.source,
+    externalId: params.externalId ?? null,
+    calendarExternalId: params.calendarExternalId ?? null,
+    meetingUrl: params.meetingUrl ?? null,
     recordedAt: inferred.recordedAt,
     transcript,
     summaryMd: params.summaryMd,
     ingestionGuidanceMd: params.ingestionGuidanceMd,
     participantIds: params.participantIds ?? [],
     participantEmails: inferred.participantEmails,
+    sourceRecordId: params.sourceRecordId ?? null,
+    replaceTranscript: params.replaceTranscript,
   });
 
   if (result.status === "needs_selection") {
