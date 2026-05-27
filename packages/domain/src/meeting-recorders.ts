@@ -904,6 +904,13 @@ function activeRecordingDedupeKey(params: { workspaceId: string; meetingId: stri
   return `meeting-recording:${params.workspaceId}:${params.meetingId}:${params.provider}`;
 }
 
+function ownedActiveRecordingDedupeKey(recording: Pick<MeetingRecording, "workspaceId" | "meetingId" | "provider" | "status" | "activeDedupeKey">) {
+  const activeDedupeKey = activeRecordingDedupeKey(recording);
+  return ACTIVE_RECORDING_STATUSES.includes(recording.status) && recording.activeDedupeKey === activeDedupeKey
+    ? activeDedupeKey
+    : null;
+}
+
 type RecordingWithMeetingTime = MeetingRecording & {
   meeting: {
     recordedAt: Date;
@@ -1079,6 +1086,12 @@ async function cleanupDuplicateScheduledProviderBots(
   };
 
   const restoredDedupeKeys = new Set<string>();
+  for (const recording of recordings) {
+    const ownedKey = ownedActiveRecordingDedupeKey(recording);
+    if (ownedKey) {
+      restoredDedupeKeys.add(ownedKey);
+    }
+  }
   for (const group of [...groups.values()].sort(compareDuplicateGroupsForRestore)) {
     if (group.length <= 1) continue;
     const canonical = canonicalRecordingForGroup(group);

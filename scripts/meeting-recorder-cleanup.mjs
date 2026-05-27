@@ -247,6 +247,11 @@ function activeDedupeKey(recording) {
   return `meeting-recording:${recording.workspaceId}:${recording.meetingId}:${recording.provider}`;
 }
 
+function ownedActiveDedupeKey(recording) {
+  const key = activeDedupeKey(recording);
+  return ACTIVE_STATUSES.has(recording.status) && recording.activeDedupeKey === key ? key : null;
+}
+
 function duplicateFailureMessage(canonicalId) {
   return `Duplicate recorder skipped; canonical recording ${canonicalId} retained.`;
 }
@@ -393,6 +398,12 @@ async function main() {
         groups.set(key, [...(groups.get(key) ?? []), recording]);
       }
       const restoredDedupeKeys = new Set();
+      for (const recording of meeting.recordings) {
+        const ownedKey = ownedActiveDedupeKey(recording);
+        if (ownedKey) {
+          restoredDedupeKeys.add(ownedKey);
+        }
+      }
       for (const group of [...groups.values()].sort(compareGroupsForRestore)) {
         if (group.length <= 1) continue;
         summary.duplicateGroupsFound += 1;

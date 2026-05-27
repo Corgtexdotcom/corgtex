@@ -1360,6 +1360,94 @@ describe("meeting recorder domain", () => {
     }
   });
 
+  it("does not restore an obsolete duplicate group over an existing active recorder", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-27T12:00:00.000Z"));
+    try {
+      const { reconcileMeetingRecorders } = await import("./meeting-recorders");
+      const currentMeeting = {
+        recordedAt: new Date("2026-06-03T16:00:00.000Z"),
+        scheduledEndAt: new Date("2026-06-03T17:00:00.000Z"),
+      };
+      const oldMeeting = {
+        recordedAt: new Date("2026-06-03T16:00:00.000Z"),
+        scheduledEndAt: new Date("2026-06-03T17:00:00.000Z"),
+      };
+      const currentActive = {
+        id: "recording-current-active",
+        workspaceId: "workspace-1",
+        meetingId: "meeting-1",
+        provider: "RECALL_AI",
+        externalBotId: "recall-bot-current-active",
+        activeDedupeKey: "meeting-recording:workspace-1:meeting-1:RECALL_AI",
+        status: "SCHEDULED",
+        failureCode: null,
+        failureMessage: null,
+        joinAt: currentMeeting.recordedAt,
+        scheduledAt: new Date("2026-05-27T12:00:00.000Z"),
+        endedAt: null,
+        createdAt: new Date("2026-05-27T12:00:00.000Z"),
+        meeting: currentMeeting,
+      };
+      const oldCanonical = {
+        ...currentActive,
+        id: "recording-old-canonical",
+        externalBotId: "recall-bot-old-canonical",
+        activeDedupeKey: null,
+        status: "FAILED",
+        failureCode: "STALE_RECORDER",
+        failureMessage: "stale",
+        joinAt: new Date("2026-05-20T16:00:00.000Z"),
+        scheduledAt: new Date("2026-05-13T12:00:00.000Z"),
+        endedAt: new Date("2026-05-20T18:00:00.000Z"),
+        createdAt: new Date("2026-05-13T12:00:00.000Z"),
+        meeting: oldMeeting,
+      };
+      const oldDuplicate = {
+        ...oldCanonical,
+        id: "recording-old-duplicate",
+        externalBotId: "recall-bot-old-duplicate",
+        scheduledAt: new Date("2026-05-13T11:50:00.000Z"),
+        createdAt: new Date("2026-05-13T11:50:00.000Z"),
+      };
+      prismaMock.meetingRecording.findMany
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([currentActive, oldCanonical, oldDuplicate])
+        .mockResolvedValueOnce([]);
+      fetchMock.mockResolvedValue(new Response("", { status: 200 }));
+      prismaMock.meetingRecording.update.mockImplementation(async ({ where, data }: { where: { id: string }; data: Record<string, unknown> }) => ({
+        ...[currentActive, oldCanonical, oldDuplicate].find((recording) => recording.id === where.id),
+        ...data,
+      }));
+      prismaMock.meetingRecorderProviderEvent.updateMany.mockResolvedValue({ count: 0 });
+
+      await expect(reconcileMeetingRecorders("workspace-1")).resolves.toMatchObject({
+        staleFailed: 0,
+        duplicateProviderBotsCancelled: 1,
+        duplicateRecordersSkipped: 1,
+        canonicalRecordingsRestored: 0,
+      });
+
+      expect(fetchMock).toHaveBeenCalledWith(
+        "https://us-west-2.recall.ai/api/v1/bot/recall-bot-old-duplicate/leave_call/",
+        expect.objectContaining({ method: "POST" }),
+      );
+      expect(prismaMock.meetingRecording.update).toHaveBeenCalledWith(expect.objectContaining({
+        where: { id: "recording-old-duplicate" },
+        data: expect.objectContaining({
+          status: "SKIPPED",
+          activeDedupeKey: null,
+          failureCode: "DUPLICATE_RECORDER",
+        }),
+      }));
+      expect(prismaMock.meetingRecording.update).not.toHaveBeenCalledWith(expect.objectContaining({
+        where: { id: "recording-old-canonical" },
+      }));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("cancels near-join duplicate provider bots with Recall leave call", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-05-27T15:55:00.000Z"));
