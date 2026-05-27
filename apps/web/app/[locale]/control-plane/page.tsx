@@ -29,7 +29,7 @@ function statusTone(status?: string | null) {
   if (status === "ok" || status === "active" || status === "connected") return "text-emerald-400 bg-emerald-500/10 border-emerald-500/20";
   if (status === "attention" || status === "degraded" || status === "provisioning" || status === "configured" || status === "pending") return "text-amber-400 bg-amber-500/10 border-amber-500/20";
   if (status === "down" || status === "suspended" || status === "failed" || status === "FAILED") return "text-rose-400 bg-rose-500/10 border-rose-500/20";
-  return "text-slate-400 bg-slate-500/10 border-slate-500/20";
+  return "text-muted bg-slate-500/10 border-slate-500/20";
 }
 
 function statusDot(status?: string | null) {
@@ -131,7 +131,7 @@ export default async function ControlPlanePage({
     <div className="space-y-6 pb-12 animate-in fade-in duration-300">
       
       {/* Page Header */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-[#1f2430] pb-6">
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-line pb-6">
         <div>
           <span className="text-[10px] font-bold tracking-widest text-brand-400 uppercase">
             Private operations surface
@@ -139,19 +139,19 @@ export default async function ControlPlanePage({
           <h1 className="text-2xl font-bold tracking-tight text-white mt-1">
             Fleet Control Plane
           </h1>
-          <p className="text-xs text-slate-400 mt-1 max-w-2xl">
+          <p className="text-xs text-muted mt-1 max-w-2xl">
             Real-time operations dashboard for Corgtex customer deployments. Monitor runtime health, feature flag overrides, enterprise integrations, and version rollouts.
           </p>
         </div>
 
         {/* Global deploy action shortcut strip */}
-        <div className="bg-[#0f121d] border border-[#23293b] rounded-xl p-4 flex flex-col sm:flex-row sm:items-center gap-4">
+        <div className="bg-surface-strong border border-line rounded-xl p-4 flex flex-col sm:flex-row sm:items-center gap-4">
           <div>
             <h4 className="text-xs font-bold text-white flex items-center gap-1.5">
               <Shuffle className="w-3.5 h-3.5 text-brand-400" />
               Upgrade All Eligible
             </h4>
-            <p className="text-[10px] text-slate-500 mt-0.5">
+            <p className="text-[10px] text-muted mt-0.5">
               Deploys latest stable release to healthy environments.
             </p>
           </div>
@@ -166,7 +166,7 @@ export default async function ControlPlanePage({
                 "font-semibold text-xs px-3.5 py-2 rounded-lg shadow transition-all duration-150",
                 canQueueReleaseRollouts
                   ? "bg-brand-600 hover:bg-brand-500 text-white"
-                  : "bg-[#141822]/40 border border-[#202738]/60 text-slate-500 cursor-not-allowed"
+                  : "bg-surface/40 border border-line/60 text-muted cursor-not-allowed"
               )}
             >
               {releaseQueueLabel}
@@ -178,27 +178,27 @@ export default async function ControlPlanePage({
       {/* Top Telemetry Stats Grid */}
       <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
         {[
-          { title: "Registered Customers", value: fleet.summary.totalCustomers, detail: "across active fleet", icon: Users, tone: "text-slate-400" },
+          { title: "Registered Customers", value: fleet.summary.totalCustomers, detail: "across active fleet", icon: Users, tone: "text-muted" },
           { title: "Active Deployments", value: fleet.summary.active, detail: "provisioned instances", icon: CheckCircle, tone: "text-emerald-400" },
-          { title: "Needs Attention", value: fleet.summary.attention, detail: "open preparation gaps", icon: AlertTriangle, tone: fleet.summary.attention > 0 ? "text-amber-400" : "text-slate-400" },
+          { title: "Needs Attention", value: fleet.summary.attention, detail: "open preparation gaps", icon: AlertTriangle, tone: fleet.summary.attention > 0 ? "text-amber-400" : "text-muted" },
           { title: "Support Ready", value: fleet.summary.supportReady, detail: "connectors active", icon: ShieldCheck, tone: "text-indigo-400" },
-          { title: "Release Drift", value: fleet.summary.releaseDrift, detail: "drift signals recorded", icon: Radio, tone: fleet.summary.releaseDrift > 0 ? "text-rose-400" : "text-slate-400" },
+          { title: "Release Drift", value: fleet.summary.releaseDrift, detail: "drift signals recorded", icon: Radio, tone: fleet.summary.releaseDrift > 0 ? "text-rose-400" : "text-muted" },
         ].map((card, i) => {
           const Icon = card.icon;
           return (
-            <div key={i} className="bg-[#0b0d12] border border-[#1f2430] hover:border-[#2b3244] rounded-xl p-4 flex items-start justify-between shadow-sm transition-all duration-150 group">
+            <div key={i} className="bg-bg-alt border border-line hover:border-line rounded-xl p-4 flex items-start justify-between shadow-sm transition-all duration-150 group">
               <div className="space-y-1">
-                <span className="text-[10px] font-semibold text-slate-500 tracking-wider block uppercase">
+                <span className="text-[10px] font-semibold text-muted tracking-wider block uppercase">
                   {card.title}
                 </span>
                 <span className="text-2xl font-bold text-white tracking-tight block">
                   {card.value}
                 </span>
-                <span className="text-[10px] text-slate-400 block">
+                <span className="text-[10px] text-muted block">
                   {card.detail}
                 </span>
               </div>
-              <div className={cn("p-2 rounded-lg bg-[#141822] border border-[#202738] group-hover:scale-105 transition-transform", card.tone)}>
+              <div className={cn("p-2 rounded-lg bg-surface border border-line group-hover:scale-105 transition-transform", card.tone)}>
                 <Icon className="w-4 h-4" />
               </div>
             </div>
@@ -210,11 +210,11 @@ export default async function ControlPlanePage({
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         
         {/* Customer Fleet List Table (Col Span 2) */}
-        <div className="lg:col-span-2 space-y-4 bg-[#0b0d12] border border-[#1f2430] rounded-xl p-5 shadow-sm">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-[#1f2430]">
+        <div className="lg:col-span-2 space-y-4 bg-bg-alt border border-line rounded-xl p-5 shadow-sm">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-line">
             <div>
               <h2 className="text-sm font-bold text-white">Active Telemetry Fleet</h2>
-              <p className="text-[10px] text-slate-500 mt-0.5">Filter, search, or inspect details of Corgtex hosted clients.</p>
+              <p className="text-[10px] text-muted mt-0.5">Filter, search, or inspect details of Corgtex hosted clients.</p>
             </div>
             
             {/* Filter controls */}
@@ -223,12 +223,12 @@ export default async function ControlPlanePage({
                 name="q"
                 defaultValue={fleet.filters.query}
                 placeholder="Search..."
-                className="bg-[#141822] border border-[#202738] text-xs text-slate-200 placeholder-slate-500 rounded-lg px-2.5 py-1.5 focus:border-[#2f3952] focus:ring-0 focus:outline-none"
+                className="bg-surface border border-line text-xs text-text placeholder-slate-500 rounded-lg px-2.5 py-1.5 focus:border-line focus:ring-0 focus:outline-none"
               />
               <select
                 name="health"
                 defaultValue={fleet.filters.health}
-                className="bg-[#141822] border border-[#202738] text-xs text-slate-400 rounded-lg px-2 py-1.5 focus:border-[#2f3952] focus:outline-none"
+                className="bg-surface border border-line text-xs text-muted rounded-lg px-2 py-1.5 focus:border-line focus:outline-none"
               >
                 <option value="">Any health</option>
                 <option value="ok">Healthy</option>
@@ -237,7 +237,7 @@ export default async function ControlPlanePage({
               </select>
               <button
                 type="submit"
-                className="bg-[#1c2230] hover:bg-[#252d40] border border-[#2e374d] text-xs text-slate-300 px-3 py-1.5 rounded-lg transition-colors"
+                className="bg-surface-strong hover:bg-surface border border-line text-xs text-text px-3 py-1.5 rounded-lg transition-colors"
               >
                 Apply
               </button>
@@ -249,7 +249,7 @@ export default async function ControlPlanePage({
             <div className="overflow-x-auto">
               <table className="w-full border-collapse text-xs">
                 <thead>
-                  <tr className="border-b border-[#1f2430] text-slate-400 text-left font-medium">
+                  <tr className="border-b border-line text-muted text-left font-medium">
                     <th className="p-3 w-8"><span className="sr-only">Select</span></th>
                     <th className="p-3">Customer</th>
                     <th className="p-3">Health Status</th>
@@ -259,14 +259,14 @@ export default async function ControlPlanePage({
                     <th className="p-3 text-right">Actions</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-[#1f2430]/60">
+                <tbody className="divide-y divide-line">
                   {fleet.items.map((customer) => {
                     const health = customer.lastHealthStatus || latestSnapshot(customer, "HEALTH")?.status || customer.provisioningStatus;
                     const drift = releaseDrift(customer);
                     const supportStatus = customer.hasSupportCredential ? customer.supportConnectorStatus : "not_configured";
                     
                     return (
-                      <tr key={customer.id} className="hover:bg-[#141822]/40 transition-colors group">
+                      <tr key={customer.id} className="hover:bg-surface/40 transition-colors group">
                         <td className="p-3">
                           {customer.hasDeployment ? (
                             <input
@@ -274,7 +274,7 @@ export default async function ControlPlanePage({
                               name="deploymentIds"
                               value={customer.id}
                               disabled={!canQueueReleaseRollouts}
-                              className="rounded border-[#202738] bg-[#141822] text-brand-600 focus:ring-0 focus:ring-offset-0"
+                              className="rounded border-line bg-surface text-brand-600 focus:ring-0 focus:ring-offset-0"
                             />
                           ) : null}
                         </td>
@@ -282,7 +282,7 @@ export default async function ControlPlanePage({
                           <span className="font-semibold text-white group-hover:text-brand-400 transition-colors block">
                             {customer.label}
                           </span>
-                          <span className="text-[10px] text-slate-500 block truncate mt-0.5">
+                          <span className="text-[10px] text-muted block truncate mt-0.5">
                             {customer.customerSlug || customer.customerAccount?.slug || customer.url}
                           </span>
                         </td>
@@ -295,33 +295,33 @@ export default async function ControlPlanePage({
                           </div>
                         </td>
                         <td className="p-3">
-                          <span className="font-medium text-slate-300 block">
+                          <span className="font-medium text-text block">
                             {customer.releaseImageTag || customer.releaseVersion || "Unknown"}
                           </span>
                           {drift ? (
                             <span className="text-[9px] text-rose-400 font-semibold block mt-0.5">Drift recorded</span>
                           ) : (
-                            <span className="text-[9px] text-slate-500 block mt-0.5">Aligned</span>
+                            <span className="text-[9px] text-muted block mt-0.5">Aligned</span>
                           )}
                         </td>
                         <td className="p-3">
-                          <span className={cn("font-semibold uppercase text-[10px] block", supportStatus === "connected" ? "text-emerald-400" : "text-slate-500")}>
+                          <span className={cn("font-semibold uppercase text-[10px] block", supportStatus === "connected" ? "text-emerald-400" : "text-muted")}>
                             {label(supportStatus)}
                           </span>
-                          <span className="text-[9px] text-slate-500 block mt-0.5">
+                          <span className="text-[9px] text-muted block mt-0.5">
                             {customer.managedWorkspace ? "Managed" : "Remote"}
                           </span>
                         </td>
-                        <td className="p-3 text-slate-400 truncate">
+                        <td className="p-3 text-muted truncate">
                           {customer.supportOwnerEmail || "Unassigned"}
                         </td>
                         <td className="p-3 text-right">
                           <Link
                             href={`/control-plane/deployments/${customer.id}`}
-                            className="inline-flex items-center gap-1 bg-[#141822] hover:bg-[#1d2333] border border-[#202738] hover:border-[#2f3952] text-slate-300 hover:text-white px-2.5 py-1.5 rounded-lg text-[10px] font-medium transition-all"
+                            className="inline-flex items-center gap-1 bg-surface hover:bg-surface-strong border border-line hover:border-line text-text hover:text-white px-2.5 py-1.5 rounded-lg text-[10px] font-medium transition-all"
                           >
                             Open
-                            <ArrowRight className="w-3 h-3 text-slate-500 group-hover:text-brand-400 transition-colors" />
+                            <ArrowRight className="w-3 h-3 text-muted group-hover:text-brand-400 transition-colors" />
                           </Link>
                         </td>
                       </tr>
@@ -329,7 +329,7 @@ export default async function ControlPlanePage({
                   })}
                   {fleet.items.length === 0 && (
                     <tr>
-                      <td colSpan={7} className="text-center py-8 text-slate-500">
+                      <td colSpan={7} className="text-center py-8 text-muted">
                         No enterprise deployments found matching these query parameters.
                       </td>
                     </tr>
@@ -340,25 +340,25 @@ export default async function ControlPlanePage({
 
             {/* Bulk select rollout submit trigger */}
             {fleet.items.length > 0 && (
-              <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4 pt-4 border-t border-[#1f2430]">
+              <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4 pt-4 border-t border-line">
                 <div className="flex-1 max-w-sm">
-                  <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block mb-1.5">
+                  <label className="text-[10px] font-bold text-muted uppercase tracking-wider block mb-1.5">
                     Upgrade rollout explanation
                   </label>
                   <input
                     name="reason"
                     required
                     defaultValue="Execute stable release upgrade via control-plane selection."
-                    className="bg-[#141822] border border-[#202738] text-xs text-slate-200 rounded-lg px-3 py-2 w-full focus:border-[#2f3952] focus:outline-none"
+                    className="bg-surface border border-line text-xs text-text rounded-lg px-3 py-2 w-full focus:border-line focus:outline-none"
                   />
                 </div>
                 <div className="flex items-center gap-4">
-                  <label className="flex items-center gap-2 text-xs text-slate-400 cursor-pointer select-none">
+                  <label className="flex items-center gap-2 text-xs text-muted cursor-pointer select-none">
                     <input
                       type="checkbox"
                       name="includeUnhealthy"
                       disabled={!canQueueReleaseRollouts}
-                      className="rounded border-[#202738] bg-[#141822] text-brand-600 focus:ring-0"
+                      className="rounded border-line bg-surface text-brand-600 focus:ring-0"
                     />
                     Override health blocks
                   </label>
@@ -368,8 +368,8 @@ export default async function ControlPlanePage({
                     className={cn(
                       "border font-semibold text-xs px-4 py-2 rounded-lg shadow-sm transition-all duration-150",
                       canQueueReleaseRollouts
-                        ? "bg-[#141822] hover:bg-[#1d2333] border-[#202738] hover:border-[#2f3952] text-slate-200 hover:text-white"
-                        : "bg-[#141822]/40 border-[#202738]/60 text-slate-500 cursor-not-allowed"
+                        ? "bg-surface hover:bg-surface-strong border-line hover:border-line text-text hover:text-white"
+                        : "bg-surface/40 border-line/60 text-muted cursor-not-allowed"
                     )}
                   >
                     {canQueueReleaseRollouts ? "Deploy Selected" : releaseQueueLabel}
@@ -380,26 +380,26 @@ export default async function ControlPlanePage({
           </form>
 
           {/* Table pagination footer */}
-          <div className="flex items-center justify-between pt-2 text-[10px] text-slate-500">
+          <div className="flex items-center justify-between pt-2 text-[10px] text-muted">
             <span>
               Page {fleet.page} of {fleet.pageCount} (Showing {fleet.items.length} of {fleet.total} customers)
             </span>
             <div className="flex gap-2">
               {fleet.page > 1 ? (
-                <Link href={previousHref} className="bg-[#141822] hover:bg-[#1d2333] border border-[#202738] text-slate-400 hover:text-slate-200 px-2 py-1 rounded transition-colors">
+                <Link href={previousHref} className="bg-surface hover:bg-surface-strong border border-line text-muted hover:text-text px-2 py-1 rounded transition-colors">
                   Previous
                 </Link>
               ) : (
-                <span className="bg-[#141822]/40 border border-[#202738]/50 text-slate-600 px-2 py-1 rounded select-none cursor-not-allowed">
+                <span className="bg-surface/40 border border-line/50 text-muted px-2 py-1 rounded select-none cursor-not-allowed">
                   Previous
                 </span>
               )}
               {fleet.page < fleet.pageCount ? (
-                <Link href={nextHref} className="bg-[#141822] hover:bg-[#1d2333] border border-[#202738] text-slate-400 hover:text-slate-200 px-2 py-1 rounded transition-colors">
+                <Link href={nextHref} className="bg-surface hover:bg-surface-strong border border-line text-muted hover:text-text px-2 py-1 rounded transition-colors">
                   Next
                 </Link>
               ) : (
-                <span className="bg-[#141822]/40 border border-[#202738]/50 text-slate-600 px-2 py-1 rounded select-none cursor-not-allowed">
+                <span className="bg-surface/40 border border-line/50 text-muted px-2 py-1 rounded select-none cursor-not-allowed">
                   Next
                 </span>
               )}
@@ -411,13 +411,13 @@ export default async function ControlPlanePage({
         <div className="space-y-6">
           
           {/* Actionable Alerts Box */}
-          <div className="bg-[#0b0d12] border border-[#1f2430] rounded-xl p-5 shadow-sm space-y-4">
+          <div className="bg-bg-alt border border-line rounded-xl p-5 shadow-sm space-y-4">
             <div>
               <h3 className="text-sm font-bold text-white flex items-center gap-1.5">
                 <AlertTriangle className="w-4 h-4 text-amber-500" />
                 Outstanding Health Alerts
               </h3>
-              <p className="text-[10px] text-slate-500 mt-0.5">Fleet segments reporting Degraded or Down status signals.</p>
+              <p className="text-[10px] text-muted mt-0.5">Fleet segments reporting Degraded or Down status signals.</p>
             </div>
             
             <div className="space-y-2 max-h-[220px] overflow-y-auto scrollbar-thin">
@@ -433,7 +433,7 @@ export default async function ControlPlanePage({
                     <Link
                       key={customer.id}
                       href={`/control-plane/deployments/${customer.id}`}
-                      className="flex flex-col p-2.5 rounded-lg bg-[#141822] border border-amber-500/10 hover:border-amber-500/20 hover:bg-[#1a202d] transition-all block group"
+                      className="flex flex-col p-2.5 rounded-lg bg-surface border border-amber-500/10 hover:border-amber-500/20 hover:bg-surface-strong transition-all block group"
                     >
                       <div className="flex items-center justify-between">
                         <strong className="text-white group-hover:text-brand-400 transition-colors text-xs font-semibold">
@@ -443,7 +443,7 @@ export default async function ControlPlanePage({
                           {label(health)}
                         </span>
                       </div>
-                      <p className="text-[10px] text-slate-400 mt-1 truncate">
+                      <p className="text-[10px] text-muted mt-1 truncate">
                         {drift || "Support sync issue detected."}
                       </p>
                     </Link>
@@ -453,7 +453,7 @@ export default async function ControlPlanePage({
                 const health = c.lastHealthStatus || latestSnapshot(c, "HEALTH")?.status || c.provisioningStatus;
                 return health !== "ok" && health !== "active" && health !== "connected";
               }).length === 0 && (
-                <div className="text-center py-6 text-slate-500 text-[10px] bg-[#141822]/30 border border-[#202738] rounded-lg">
+                <div className="text-center py-6 text-muted text-[10px] bg-surface/30 border border-line rounded-lg">
                   All active fleet deployments are fully healthy.
                 </div>
               )}
@@ -461,16 +461,16 @@ export default async function ControlPlanePage({
           </div>
 
           {/* Rollouts Telemetry Logs */}
-          <div className="bg-[#0b0d12] border border-[#1f2430] rounded-xl p-5 shadow-sm space-y-4">
-            <div className="flex items-center justify-between border-b border-[#1f2430] pb-3">
+          <div className="bg-bg-alt border border-line rounded-xl p-5 shadow-sm space-y-4">
+            <div className="flex items-center justify-between border-b border-line pb-3">
               <div>
                 <h3 className="text-sm font-bold text-white flex items-center gap-1.5">
                   <Cpu className="w-4 h-4 text-brand-400" />
                   Rollout Progress Log
                 </h3>
-                <p className="text-[10px] text-slate-500 mt-0.5">Telemetry log for queued release rollouts.</p>
+                <p className="text-[10px] text-muted mt-0.5">Telemetry log for queued release rollouts.</p>
               </div>
-              <span className="px-2 py-0.5 rounded bg-[#141822] border border-[#202738] text-[9px] font-bold text-slate-400">
+              <span className="px-2 py-0.5 rounded bg-surface border border-line text-[9px] font-bold text-muted">
                 {recentRollouts.length} active
               </span>
             </div>
@@ -483,14 +483,14 @@ export default async function ControlPlanePage({
                 const status = rollout.status;
                 
                 return (
-                  <div key={rollout.id} className="p-3 rounded-lg bg-[#141822] border border-[#202738] space-y-1.5">
+                  <div key={rollout.id} className="p-3 rounded-lg bg-surface border border-line space-y-1.5">
                     <div className="flex items-center justify-between">
                       <strong className="text-white text-xs font-semibold">{customerLabel}</strong>
                       <span className={cn("px-1.5 py-0.5 rounded text-[8px] font-bold border capitalize shrink-0", statusTone(status))}>
                         {label(status)}
                       </span>
                     </div>
-                    <div className="flex items-center justify-between text-[9px] text-slate-500">
+                    <div className="flex items-center justify-between text-[9px] text-muted">
                       <span>Target: {target || "not recorded"}</span>
                       <span>Attempts: {rollout.attempts}</span>
                     </div>
@@ -503,7 +503,7 @@ export default async function ControlPlanePage({
                 );
               })}
               {recentRollouts.length === 0 && (
-                <div className="text-center py-6 text-slate-500 text-[10px]">
+                <div className="text-center py-6 text-muted text-[10px]">
                   No deploy latest jobs have been queued recently.
                 </div>
               )}

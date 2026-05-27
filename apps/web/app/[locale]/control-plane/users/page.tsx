@@ -58,7 +58,7 @@ export default async function ControlPlaneUsersPage() {
         <h1 className="text-2xl font-bold tracking-tight text-white mt-1">
           Platform User Directory
         </h1>
-        <p className="text-xs text-slate-400 mt-1 max-w-2xl">
+        <p className="text-xs text-muted mt-1 max-w-2xl">
           Search and review platform administrators, support engineers, and customer-specific workspace member accounts across all deployments.
         </p>
       </div>

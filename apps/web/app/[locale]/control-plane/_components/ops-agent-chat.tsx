@@ -111,23 +111,23 @@ export function OpsAgentChat({ isOpen, onClose, pageContext }: OpsAgentChatProps
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-y-0 right-0 z-50 flex w-full max-w-md bg-[#0b0d13]/95 backdrop-blur-md border-l border-[#1f2430] shadow-2xl text-slate-100 transform transition-transform animate-in slide-in-from-right duration-300">
+    <div className="fixed inset-y-0 right-0 z-50 flex w-full max-w-md bg-bg-alt/95 backdrop-blur-md border-l border-line shadow-2xl text-text-strong transform transition-transform animate-in slide-in-from-right duration-300">
       
       {/* Container */}
       <div className="flex flex-col w-full h-full relative">
         
         {/* Header */}
-        <div className="flex items-center justify-between px-4 h-16 border-b border-[#1f2430] bg-[#07090e]">
+        <div className="flex items-center justify-between px-4 h-16 border-b border-line bg-bg">
           <div className="flex items-center gap-2">
             <Sparkles className="w-5 h-5 text-brand-400 animate-pulse" />
             <div>
               <h2 className="text-sm font-semibold tracking-wide text-white">Ops Agent Copilot</h2>
-              <p className="text-[10px] text-slate-400">Context: {pageContext.title}</p>
+              <p className="text-[10px] text-muted">Context: {pageContext.title}</p>
             </div>
           </div>
           <button
             onClick={onClose}
-            className="p-1.5 rounded-lg hover:bg-[#1a1f2c] border border-transparent hover:border-[#2d3548] text-slate-400 hover:text-white transition-all duration-150"
+            className="p-1.5 rounded-lg hover:bg-surface-strong border border-transparent hover:border-line text-muted hover:text-white transition-all duration-150"
             aria-label="Close panel"
           >
             <X className="w-4 h-4" />
@@ -150,7 +150,7 @@ export function OpsAgentChat({ isOpen, onClose, pageContext }: OpsAgentChatProps
                   "p-3 rounded-xl text-xs leading-relaxed border",
                   msg.sender === "user"
                     ? "bg-brand-600 border-brand-500 text-white rounded-br-none"
-                    : "bg-[#141822] border-[#202738] text-slate-200 rounded-bl-none"
+                    : "bg-surface border-line text-text rounded-bl-none"
                 )}
               >
                 {msg.text}
@@ -158,10 +158,10 @@ export function OpsAgentChat({ isOpen, onClose, pageContext }: OpsAgentChatProps
 
               {/* Structured Reply Cards */}
               {msg.structuredData && (
-                <div className="w-full bg-[#0a0d14] border border-[#202738] rounded-lg p-3 space-y-2.5 overflow-hidden animate-in fade-in duration-300">
-                  <div className="flex items-center gap-1.5 border-b border-[#202738] pb-1.5">
+                <div className="w-full bg-bg-alt border border-line rounded-lg p-3 space-y-2.5 overflow-hidden animate-in fade-in duration-300">
+                  <div className="flex items-center gap-1.5 border-b border-line pb-1.5">
                     <Sparkles className="w-3.5 h-3.5 text-brand-400" />
-                    <span className="text-[10px] font-bold tracking-wider uppercase text-slate-300">
+                    <span className="text-[10px] font-bold tracking-wider uppercase text-text">
                       {msg.structuredData.title || "Telemetry Report"}
                     </span>
                   </div>
@@ -170,8 +170,8 @@ export function OpsAgentChat({ isOpen, onClose, pageContext }: OpsAgentChatProps
                   {msg.structuredData.type === "stat-card" && msg.structuredData.stats && (
                     <div className="grid grid-cols-2 gap-2">
                       {msg.structuredData.stats.map((stat, i) => (
-                        <div key={i} className="bg-[#121622] border border-[#212739] rounded-lg p-2 flex flex-col">
-                          <span className="text-[9px] text-slate-400 uppercase font-medium">{stat.label}</span>
+                        <div key={i} className="bg-surface border border-line rounded-lg p-2 flex flex-col">
+                          <span className="text-[9px] text-muted uppercase font-medium">{stat.label}</span>
                           <span className="text-xs font-bold text-white mt-0.5">{stat.value}</span>
                         </div>
                       ))}
@@ -183,7 +183,7 @@ export function OpsAgentChat({ isOpen, onClose, pageContext }: OpsAgentChatProps
                     <div className="overflow-x-auto">
                       <table className="w-full border-collapse text-[10px]">
                         <thead>
-                          <tr className="border-b border-[#212739] text-left text-slate-400">
+                          <tr className="border-b border-line text-left text-muted">
                             {msg.structuredData.columns.map((col, idx) => (
                               <th key={idx} className="p-1 pb-1.5 font-medium">{col}</th>
                             ))}
@@ -193,7 +193,7 @@ export function OpsAgentChat({ isOpen, onClose, pageContext }: OpsAgentChatProps
                           {msg.structuredData.rows.map((row, rIdx) => {
                             const cols = msg.structuredData?.columns || [];
                             return (
-                              <tr key={rIdx} className="border-b border-[#212739]/50 hover:bg-[#121622] text-slate-200">
+                              <tr key={rIdx} className="border-b border-line/50 hover:bg-surface text-text">
                                 {cols.map((col, cIdx) => (
                                   <td key={cIdx} className="p-1 py-1.5 font-medium">{row[col]}</td>
                                 ))}
@@ -208,7 +208,7 @@ export function OpsAgentChat({ isOpen, onClose, pageContext }: OpsAgentChatProps
               )}
 
               {/* Timestamp */}
-              <span className="text-[9px] text-slate-500 px-1">
+              <span className="text-[9px] text-muted px-1">
                 {msg.timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
               </span>
             </div>
@@ -216,7 +216,7 @@ export function OpsAgentChat({ isOpen, onClose, pageContext }: OpsAgentChatProps
 
           {/* Typing Indicator */}
           {isTyping && (
-            <div className="flex items-center gap-1 bg-[#141822] border border-[#202738] rounded-xl px-4 py-2.5 w-16 mr-auto rounded-bl-none">
+            <div className="flex items-center gap-1 bg-surface border border-line rounded-xl px-4 py-2.5 w-16 mr-auto rounded-bl-none">
               <span className="w-1.5 h-1.5 bg-slate-400 rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
               <span className="w-1.5 h-1.5 bg-slate-400 rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
               <span className="w-1.5 h-1.5 bg-slate-400 rounded-full animate-bounce" style={{ animationDelay: "300ms" }} />
@@ -226,8 +226,8 @@ export function OpsAgentChat({ isOpen, onClose, pageContext }: OpsAgentChatProps
 
         {/* Starters Carousel */}
         {messages.length === 1 && !isTyping && (
-          <div className="px-4 py-2.5 bg-[#07090e]/60 border-t border-[#1f2430]/50 space-y-1.5 shrink-0">
-            <span className="text-[9px] font-semibold text-slate-400 uppercase tracking-wider block mb-1">
+          <div className="px-4 py-2.5 bg-bg/60 border-t border-line/50 space-y-1.5 shrink-0">
+            <span className="text-[9px] font-semibold text-muted uppercase tracking-wider block mb-1">
               Suggested operations
             </span>
             <div className="flex flex-col gap-1.5">
@@ -235,10 +235,10 @@ export function OpsAgentChat({ isOpen, onClose, pageContext }: OpsAgentChatProps
                 <button
                   key={i}
                   onClick={() => handleSend(starter.query)}
-                  className="flex items-center justify-between text-left text-[10px] w-full px-3 py-2 rounded-lg bg-[#141822] border border-[#202738] hover:border-[#2f3952] hover:bg-[#1a202d] text-slate-300 hover:text-white transition-all duration-150 group"
+                  className="flex items-center justify-between text-left text-[10px] w-full px-3 py-2 rounded-lg bg-surface border border-line hover:border-line hover:bg-surface-strong text-text hover:text-white transition-all duration-150 group"
                 >
                   <span className="truncate pr-2">{starter.label}</span>
-                  <ArrowRight className="w-3.5 h-3.5 text-slate-500 group-hover:text-brand-400 shrink-0 transform group-hover:translate-x-0.5 transition-transform" />
+                  <ArrowRight className="w-3.5 h-3.5 text-muted group-hover:text-brand-400 shrink-0 transform group-hover:translate-x-0.5 transition-transform" />
                 </button>
               ))}
             </div>
@@ -246,17 +246,17 @@ export function OpsAgentChat({ isOpen, onClose, pageContext }: OpsAgentChatProps
         )}
 
         {/* Input Panel */}
-        <div className="p-4 border-t border-[#1f2430] bg-[#07090e] shrink-0">
+        <div className="p-4 border-t border-line bg-bg shrink-0">
           <form
             onSubmit={(e) => {
               e.preventDefault();
               handleSend(input);
             }}
-            className="flex items-center gap-2 relative bg-[#141822] border border-[#202738] focus-within:border-[#2f3952] rounded-xl px-3 py-2 transition-all"
+            className="flex items-center gap-2 relative bg-surface border border-line focus-within:border-line rounded-xl px-3 py-2 transition-all"
           >
             <input
               type="text"
-              className="w-full bg-transparent border-0 ring-0 outline-none text-slate-200 placeholder-slate-500 text-xs focus:outline-none focus:ring-0"
+              className="w-full bg-transparent border-0 ring-0 outline-none text-text placeholder-slate-500 text-xs focus:outline-none focus:ring-0"
               placeholder={t("chat.placeholder")}
               value={input}
               onChange={(e) => setInput(e.target.value)}
@@ -265,7 +265,7 @@ export function OpsAgentChat({ isOpen, onClose, pageContext }: OpsAgentChatProps
             <button
               type="submit"
               disabled={!input.trim() || isTyping}
-              className="p-1.5 rounded-lg bg-brand-600 text-white disabled:bg-[#1a1f2c] disabled:text-slate-600 transition-colors shrink-0"
+              className="p-1.5 rounded-lg bg-brand-600 text-white disabled:bg-surface-strong disabled:text-muted transition-colors shrink-0"
             >
               <Send className="w-3.5 h-3.5" />
             </button>

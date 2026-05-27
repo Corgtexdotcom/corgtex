@@ -86,13 +86,13 @@ export function ControlPlaneSidebar({ onOpenChat, onOpenSearch, className }: Sid
   return (
     <aside
       className={cn(
-        "flex flex-col h-screen sticky top-0 bg-[#0b0d12] border-r border-[#1f2430] text-slate-200 transition-all duration-300 z-40 shrink-0",
+        "flex flex-col h-screen sticky top-0 bg-bg-alt border-r border-line text-text transition-all duration-300 z-40 shrink-0",
         isCollapsed ? "w-16" : "w-64",
         className
       )}
     >
       {/* Header */}
-      <div className="flex items-center justify-between h-16 px-4 border-b border-[#1f2430]">
+      <div className="flex items-center justify-between h-16 px-4 border-b border-line">
         {!isCollapsed && (
           <div className="flex items-center gap-2 font-bold text-lg tracking-wide text-white">
             <span className="flex items-center justify-center w-8 h-8 rounded-lg bg-gradient-to-tr from-brand-600 to-indigo-500 shadow-md">
@@ -111,7 +111,7 @@ export function ControlPlaneSidebar({ onOpenChat, onOpenSearch, className }: Sid
         {!isCollapsed && (
           <button
             onClick={() => setIsCollapsed(true)}
-            className="p-1.5 rounded-md hover:bg-[#1a1f2c] border border-transparent hover:border-[#2d3548] text-slate-400 hover:text-white transition-all duration-150"
+            className="p-1.5 rounded-md hover:bg-surface-strong border border-transparent hover:border-line text-muted hover:text-white transition-all duration-150"
             aria-label="Collapse sidebar"
           >
             <ChevronLeft className="w-4 h-4" />
@@ -121,10 +121,10 @@ export function ControlPlaneSidebar({ onOpenChat, onOpenSearch, className }: Sid
 
       {/* Expand trigger when collapsed */}
       {isCollapsed && (
-        <div className="flex justify-center py-2 border-b border-[#1f2430]">
+        <div className="flex justify-center py-2 border-b border-line">
           <button
             onClick={() => setIsCollapsed(false)}
-            className="p-1.5 rounded-md hover:bg-[#1a1f2c] border border-[#2d3548] text-slate-400 hover:text-white transition-all duration-150"
+            className="p-1.5 rounded-md hover:bg-surface-strong border border-line text-muted hover:text-white transition-all duration-150"
             aria-label="Expand sidebar"
           >
             <ChevronRight className="w-4 h-4" />
@@ -137,7 +137,7 @@ export function ControlPlaneSidebar({ onOpenChat, onOpenSearch, className }: Sid
         <button
           onClick={onOpenSearch}
           className={cn(
-            "flex items-center gap-2 w-full text-slate-400 hover:text-white bg-[#141822] border border-[#202738] hover:border-[#2e3952] rounded-lg text-xs transition-all duration-150 py-2",
+            "flex items-center gap-2 w-full text-muted hover:text-white bg-surface border border-line hover:border-line rounded-lg text-xs transition-all duration-150 py-2",
             isCollapsed ? "justify-center px-0 h-9" : "px-3"
           )}
           title={t("search.open")}
@@ -147,7 +147,7 @@ export function ControlPlaneSidebar({ onOpenChat, onOpenSearch, className }: Sid
           {!isCollapsed && (
             <div className="flex items-center justify-between w-full">
               <span>{t("search.placeholder")}</span>
-              <kbd className="bg-[#1f2638] text-[10px] text-slate-500 px-1.5 py-0.5 rounded border border-[#2e3752]">
+              <kbd className="bg-surface-strong text-[10px] text-muted px-1.5 py-0.5 rounded border border-line">
                 ⌘K
               </kbd>
             </div>
@@ -160,7 +160,7 @@ export function ControlPlaneSidebar({ onOpenChat, onOpenSearch, className }: Sid
         {navItems.map((group) => (
           <div key={group.group} className="space-y-1">
             {!isCollapsed && (
-              <h3 className="px-3 text-[10px] font-semibold text-slate-500 tracking-wider uppercase mb-2">
+              <h3 className="px-3 text-[10px] font-semibold text-muted tracking-wider uppercase mb-2">
                 {group.group}
               </h3>
             )}
@@ -174,10 +174,10 @@ export function ControlPlaneSidebar({ onOpenChat, onOpenSearch, className }: Sid
                     "flex items-center gap-3 px-3 py-2 text-sm rounded-lg font-medium transition-all duration-150",
                     item.active
                       ? "bg-brand-600/10 text-brand-400 border border-brand-500/20 shadow-sm"
-                      : "text-slate-400 hover:text-slate-200 hover:bg-[#141822] border border-transparent hover:border-[#1c2230]"
+                      : "text-muted hover:text-text hover:bg-surface border border-transparent hover:border-line"
                   )}
                 >
-                  <Icon className={cn("w-4 h-4 shrink-0", item.active ? "text-brand-400" : "text-slate-400")} />
+                  <Icon className={cn("w-4 h-4 shrink-0", item.active ? "text-brand-400" : "text-muted")} />
                   {!isCollapsed && <span className="truncate">{item.label}</span>}
                 </Link>
               );
@@ -187,7 +187,7 @@ export function ControlPlaneSidebar({ onOpenChat, onOpenSearch, className }: Sid
       </nav>
 
       {/* Footer / Copilot Trigger */}
-      <div className="p-3 border-t border-[#1f2430]">
+      <div className="p-3 border-t border-line">
         <button
           onClick={onOpenChat}
           className={cn(
