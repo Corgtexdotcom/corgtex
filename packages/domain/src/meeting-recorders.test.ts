@@ -1492,6 +1492,11 @@ describe("meeting recorder domain", () => {
 
       expect(prismaMock.meetingRecording.create).not.toHaveBeenCalled();
       expect(fetchMock).not.toHaveBeenCalled();
+      expect(prismaMock.meetingRecording.findMany).toHaveBeenCalledWith(expect.objectContaining({
+        where: expect.objectContaining({
+          meetingUrl: "https://teams.microsoft.com/l/meetup-join/abc",
+        }),
+      }));
       expect(prismaMock.meetingRecording.update).toHaveBeenCalledWith(expect.objectContaining({
         where: { id: "recording-reusable" },
         data: expect.objectContaining({
@@ -1499,6 +1504,81 @@ describe("meeting recorder domain", () => {
           activeDedupeKey: "meeting-recording:workspace-1:meeting-1:RECALL_AI",
         }),
       }));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not reuse a stale provider bot from a previous meeting URL", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-27T12:00:00.000Z"));
+    try {
+      const { scheduleMeetingRecording } = await import("./meeting-recorders");
+      const currentUrl = "https://teams.microsoft.com/l/meetup-join/new";
+      const oldReusable = {
+        id: "recording-old-url",
+        workspaceId: "workspace-1",
+        meetingId: "meeting-1",
+        provider: "RECALL_AI",
+        externalBotId: "recall-bot-old-url",
+        activeDedupeKey: null,
+        meetingUrl: "https://teams.microsoft.com/l/meetup-join/old",
+        status: "FAILED",
+        failureCode: "STALE_RECORDER",
+        failureMessage: "stale",
+        joinAt: new Date("2026-06-03T16:00:00.000Z"),
+        scheduledAt: new Date("2026-05-20T12:00:00.000Z"),
+        endedAt: new Date("2026-05-20T18:00:00.000Z"),
+        createdAt: new Date("2026-05-20T12:00:00.000Z"),
+      };
+      prismaMock.meeting.findFirst.mockResolvedValue({
+        id: "meeting-1",
+        title: "Weekly",
+        recordedAt: oldReusable.joinAt,
+        scheduledEndAt: new Date("2026-06-03T17:00:00.000Z"),
+        meetingUrl: currentUrl,
+        participantEmails: [],
+      });
+      prismaMock.meetingRecording.findFirst.mockResolvedValueOnce(null);
+      prismaMock.meetingRecording.findMany.mockImplementation(async ({ where }: { where: Record<string, unknown> }) => (
+        where.meetingUrl === currentUrl ? [] : [oldReusable]
+      ));
+      prismaMock.meetingRecording.create.mockResolvedValue({
+        id: "recording-new-url",
+        workspaceId: "workspace-1",
+        meetingId: "meeting-1",
+        provider: "RECALL_AI",
+        meetingUrl: currentUrl,
+        status: "PENDING",
+      });
+      prismaMock.meetingRecording.update.mockResolvedValue({
+        id: "recording-new-url",
+        workspaceId: "workspace-1",
+        meetingId: "meeting-1",
+        provider: "RECALL_AI",
+        externalBotId: "recall-bot-new-url",
+        meetingUrl: currentUrl,
+        status: "SCHEDULED",
+      });
+      fetchMock.mockResolvedValue({ ok: true, status: 200, text: async () => JSON.stringify({ id: "recall-bot-new-url" }) });
+
+      await expect(scheduleMeetingRecording(operatorActor, {
+        workspaceId: "workspace-1",
+        meetingId: "meeting-1",
+        mode: "auto",
+      })).resolves.toMatchObject({
+        id: "recording-new-url",
+        externalBotId: "recall-bot-new-url",
+      });
+
+      expect(prismaMock.meetingRecording.findMany).toHaveBeenCalledWith(expect.objectContaining({
+        where: expect.objectContaining({ meetingUrl: currentUrl }),
+      }));
+      expect(prismaMock.meetingRecording.update).not.toHaveBeenCalledWith(expect.objectContaining({
+        where: { id: "recording-old-url" },
+      }));
+      expect(prismaMock.meetingRecording.create).toHaveBeenCalled();
+      expect(fetchMock).toHaveBeenCalledTimes(1);
     } finally {
       vi.useRealTimers();
     }
@@ -1660,6 +1740,7 @@ describe("meeting recorder domain", () => {
         where: expect.objectContaining({
           externalBotId: { not: null },
           joinAt: requestedJoinAt,
+          meetingUrl: "https://teams.microsoft.com/l/meetup-join/abc",
           status: { in: ["PENDING", "SCHEDULED", "JOINING", "RECORDING"] },
         }),
       }));

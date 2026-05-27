@@ -1162,17 +1162,20 @@ async function reuseFutureProviderBotIfPresent(params: {
   workspaceId: string;
   meetingId: string;
   provider: MeetingRecorderProvider;
+  meetingUrl: string;
   joinAt: Date;
 }) {
   if (params.joinAt.getTime() - Date.now() <= AUTO_SCHEDULE_MIN_LEAD_MS) {
     return null;
   }
+  const meetingUrl = normalizeMeetingUrl(params.meetingUrl);
 
   let recordings = await prisma.meetingRecording.findMany({
     where: {
       workspaceId: params.workspaceId,
       meetingId: params.meetingId,
       provider: params.provider,
+      meetingUrl,
       externalBotId: { not: null },
       joinAt: params.joinAt,
       OR: [
@@ -1194,6 +1197,7 @@ async function reuseFutureProviderBotIfPresent(params: {
         workspaceId: params.workspaceId,
         meetingId: params.meetingId,
         provider: params.provider,
+        meetingUrl,
         externalBotId: { not: null },
         joinAt: params.joinAt,
         status: { in: ACTIVE_RECORDING_STATUSES },
@@ -1206,6 +1210,7 @@ async function reuseFutureProviderBotIfPresent(params: {
         workspaceId: params.workspaceId,
         meetingId: params.meetingId,
         provider: params.provider,
+        meetingUrl,
         externalBotId: { not: null },
         joinAt: params.joinAt,
         status: "FAILED",
@@ -2259,6 +2264,7 @@ export async function scheduleMeetingRecording(actor: AppActor, params: {
     workspaceId: params.workspaceId,
     meetingId: params.meetingId,
     provider,
+    meetingUrl: meeting.meetingUrl,
     joinAt: meeting.recordedAt,
   });
   if (reusable) {
