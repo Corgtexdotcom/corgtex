@@ -391,6 +391,7 @@ async function ensureDerivedCatalogItems(workspaceId: string) {
     update: {
       createdByUserId: source.createdByUserId ?? undefined,
       ownerUserId: source.ownerUserId ?? undefined,
+      type: source.type,
       title: source.title,
       outcome: normalizeString(source.outcome),
       descriptionMd: normalizeString(source.descriptionMd),

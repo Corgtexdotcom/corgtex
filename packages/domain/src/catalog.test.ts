@@ -397,6 +397,7 @@ describe("catalog domain", () => {
         featured: true,
       }),
       update: expect.objectContaining({
+        type: "TOOL",
         url: null,
         accessMode: "REQUEST",
         requestedScopes: ["meetings:read", "meetings:write", "brain:read"],
@@ -432,6 +433,7 @@ describe("catalog domain", () => {
         featured: true,
       }),
       update: expect.objectContaining({
+        type: "TOOL",
         url: "/workspaces/workspace-1/settings?tab=general",
         accessMode: "OPEN",
         featured: true,

@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   filterCatalogItems,
   getCatalogCardActions,
+  normalizeCatalogQuery,
+  normalizeCatalogType,
   splitDefaultCatalogSections,
   type CatalogItemForUi,
 } from "./catalog-ui";
@@ -40,6 +42,13 @@ describe("Tools catalog UI helpers", () => {
     ], { activeType: "CONNECTOR", query: "" });
 
     expect(result.map((entry) => entry.id)).toEqual(["google"]);
+  });
+
+  it("normalizes repeated URL filter parameters", () => {
+    expect(normalizeCatalogType(["TOOL", "AGENT"])).toBe("TOOL");
+    expect(normalizeCatalogType(["BAD", "TOOL"])).toBe("ALL");
+    expect(normalizeCatalogQuery(["meeting", "recorder"])).toBe("meeting");
+    expect(normalizeCatalogQuery("x".repeat(140))).toHaveLength(120);
   });
 
   it("matches search across title, outcome, description, category, and type", () => {

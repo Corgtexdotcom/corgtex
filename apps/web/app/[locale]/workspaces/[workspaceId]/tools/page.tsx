@@ -2,21 +2,17 @@ import { listCatalogItems, listCatalogRequests, listCircles, listWorkspaceToolLi
 import { requirePageActor } from "@/lib/auth";
 import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
 import { getTranslations } from "next-intl/server";
-import { TYPE_ORDER, type CatalogItemType } from "./catalog-ui";
+import { normalizeCatalogQuery, normalizeCatalogType, type CatalogSearchParamValue } from "./catalog-ui";
 import { ToolsDirectoryClient } from "./ToolsDirectoryClient";
 
 export const dynamic = "force-dynamic";
-
-function normalizeCatalogType(value: string | undefined): CatalogItemType | "ALL" {
-  return TYPE_ORDER.includes(value as CatalogItemType) ? value as CatalogItemType : "ALL";
-}
 
 export default async function ToolsPage({
   params,
   searchParams,
 }: {
   params: Promise<{ workspaceId: string }>;
-  searchParams: Promise<{ view?: string; type?: string; q?: string }>;
+  searchParams: Promise<{ view?: CatalogSearchParamValue; type?: CatalogSearchParamValue; q?: CatalogSearchParamValue }>;
 }) {
   const { workspaceId } = await params;
   const { view, type, q } = await searchParams;
@@ -24,6 +20,8 @@ export default async function ToolsPage({
   await requireWorkspaceMembership({ actor, workspaceId });
   await requireWorkspaceFeature(workspaceId, "TOOL_LINKS");
   const t = await getTranslations("tools");
+  const selectedView = Array.isArray(view) ? view[0] : view;
+  const initialView = selectedView === "grid" ? "grid" : "list";
 
   const [toolLinks, circles, catalog, catalogRequests] = await Promise.all([
     listWorkspaceToolLinks(actor, { workspaceId }),
@@ -46,14 +44,14 @@ export default async function ToolsPage({
             <a
               href={`/workspaces/${workspaceId}/tools?view=list`}
               className="link-button small"
-              style={{ opacity: view === "grid" ? 0.62 : 1 }}
+              style={{ opacity: initialView === "grid" ? 0.62 : 1 }}
             >
               {t("btnListView")}
             </a>
             <a
               href={`/workspaces/${workspaceId}/tools?view=grid`}
               className="link-button small"
-              style={{ opacity: view === "grid" ? 1 : 0.62 }}
+              style={{ opacity: initialView === "grid" ? 1 : 0.62 }}
             >
               {t("btnGridView")}
             </a>
@@ -63,9 +61,9 @@ export default async function ToolsPage({
 
       <ToolsDirectoryClient
         workspaceId={workspaceId}
-        initialView={view === "grid" ? "grid" : "list"}
+        initialView={initialView}
         initialType={normalizeCatalogType(type)}
-        initialQuery={q?.slice(0, 120) ?? ""}
+        initialQuery={normalizeCatalogQuery(q)}
         initialCatalogItems={catalog.items.map((item) => ({
           ...item,
           createdAt: item.createdAt.toISOString(),
