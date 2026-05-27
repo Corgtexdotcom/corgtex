@@ -308,7 +308,11 @@ export async function extractMeetingInsights(
       meetingId: meeting.id,
       status: "ACTIVE",
     },
-    orderBy: [{ sourceUpdatedAt: "desc" }, { recordedAt: "desc" }, { createdAt: "desc" }],
+    orderBy: [
+      { sourceUpdatedAt: { sort: "desc", nulls: "last" } },
+      { recordedAt: "desc" },
+      { createdAt: "desc" },
+    ],
     select: {
       id: true,
       recordedAt: true,

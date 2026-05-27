@@ -150,8 +150,14 @@ describe("meeting transcript sources", () => {
       recordedAt: "2026-05-02T10:00:00.000Z",
       text: "Jan: Same export body.",
     });
+    const corrected = normalizeMeetingTranscriptSourceArtifact("FIREFLIES", {
+      fileName: "transcript.txt",
+      recordedAt: "2026-05-01T10:00:00.000Z",
+      text: "Jan: Corrected export body.",
+    });
 
     expect(first.externalId).not.toBe(second.externalId);
+    expect(corrected.externalId).toBe(first.externalId);
   });
 
   it("imports batches oldest-to-newest and replaces a newer source revision", async () => {

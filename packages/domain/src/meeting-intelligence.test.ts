@@ -1030,6 +1030,13 @@ describe("meeting-intelligence", () => {
         meetingId: "meeting-1",
       });
 
+      expect(prisma.meetingTranscriptSourceRecord.findFirst).toHaveBeenCalledWith(expect.objectContaining({
+        orderBy: [
+          { sourceUpdatedAt: { sort: "desc", nulls: "last" } },
+          { recordedAt: "desc" },
+          { createdAt: "desc" },
+        ],
+      }));
       expect(prisma.meetingInsight.createMany).toHaveBeenCalledWith(expect.objectContaining({
         data: [expect.objectContaining({
           sourceRecordId: "source-record-new",

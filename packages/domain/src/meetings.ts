@@ -264,6 +264,7 @@ async function findTranscriptMeetingCandidatesInternal(params: {
   recordedAt: Date;
   participantEmails?: string[] | null;
   meetingUrlHash?: string | null;
+  calendarExternalId?: string | null;
 }) {
   const start = new Date(params.recordedAt.getTime() - TRANSCRIPT_MATCH_WINDOW_MS);
   const end = new Date(params.recordedAt.getTime() + TRANSCRIPT_MATCH_WINDOW_MS);
@@ -299,12 +300,14 @@ async function findTranscriptMeetingCandidatesInternal(params: {
       ? 0.2 * (overlap / participantEmails.length)
       : 0.05;
     const urlScore = params.meetingUrlHash && meeting.meetingUrlHash === params.meetingUrlHash ? 0.15 : 0;
-    const score = Number(Math.min(1, titleScore + timeScore + attendeeScore + urlScore).toFixed(3));
+    const calendarScore = params.calendarExternalId?.trim() && meeting.calendarExternalId === params.calendarExternalId.trim() ? 0.15 : 0;
+    const score = Number(Math.min(1, titleScore + timeScore + attendeeScore + urlScore + calendarScore).toFixed(3));
     const reason = [
       titleScore > 0 ? "title" : null,
       timeScore > 0 ? "time" : null,
       attendeeScore > 0.05 ? "attendees" : null,
       urlScore > 0 ? "meeting URL" : null,
+      calendarScore > 0 ? "calendar id" : null,
     ].filter(Boolean).join(", ");
 
     return {
@@ -371,8 +374,8 @@ async function updateMeetingWithTranscriptTx(
   const title = chooseMergedTitle(existing.title, params.title);
   const source = params.source?.trim() || existing.source;
   const meetingUrl = params.meetingUrl?.trim() ? normalizeMeetingUrl(params.meetingUrl) : existing.meetingUrl;
-  const externalId = params.externalId?.trim() || existing.externalId;
-  const calendarExternalId = params.calendarExternalId?.trim() || existing.calendarExternalId;
+  const externalId = existing.externalId || params.externalId?.trim() || null;
+  const calendarExternalId = existing.calendarExternalId || params.calendarExternalId?.trim() || null;
 
   const incomingSummaryMd = params.summaryMd?.trim() || null;
   const meeting = await tx.meeting.update({
@@ -913,9 +916,6 @@ export async function uploadMeetingTranscript(actor: AppActor, params: {
   if (params.externalId?.trim()) {
     directMatchClauses.push({ externalId: params.externalId.trim() });
   }
-  if (params.calendarExternalId?.trim()) {
-    directMatchClauses.push({ calendarExternalId: params.calendarExternalId.trim() });
-  }
   if (directMatchClauses.length > 0) {
     const directMatch = await prisma.meeting.findFirst({
       where: {
@@ -938,6 +938,7 @@ export async function uploadMeetingTranscript(actor: AppActor, params: {
   const candidates = await findTranscriptMeetingCandidatesInternal({
     ...params,
     meetingUrlHash: normalizedMeetingUrlHash,
+    calendarExternalId: params.calendarExternalId,
   });
   const [best, second] = candidates;
   if (best && best.score >= TRANSCRIPT_AUTO_MATCH_THRESHOLD && (!second || best.score - second.score >= TRANSCRIPT_MATCH_MARGIN)) {

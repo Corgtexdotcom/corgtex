@@ -507,7 +507,8 @@ export function normalizeMeetingTranscriptSourceArtifact(
     || `${provider.toLowerCase()}:${stableHash({
       fileName: artifact.fileName,
       recordedAt: recordedAt.toISOString(),
-      transcript,
+      title,
+      sourceUrl: artifact.sourceUrl?.trim() || asString(jsonRecord.url) || asString(jsonRecord.sourceUrl) || asString(jsonRecord.transcript_url) || null,
     }).slice(0, 24)}`;
   const sourceUpdatedAt = asDate(artifact.sourceUpdatedAt)
     || asDate(jsonRecord.updatedAt)
