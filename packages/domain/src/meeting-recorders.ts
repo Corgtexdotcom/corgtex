@@ -2833,7 +2833,7 @@ async function completeRecordingWithTranscriptArtifact(
 ) {
   const transcript = normalizeProviderTranscript(artifact.transcriptPayload);
   const completed = await prisma.$transaction(async (tx) => {
-    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`${recording.workspaceId}:${recording.meetingId}:${provider}:transcript`}, 0))`;
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`${recording.workspaceId}:${recording.meetingId}:${provider}:transcript`}, 0))`;
     const current = await tx.meetingRecording.findUnique({
       where: { id: recording.id },
       select: {
