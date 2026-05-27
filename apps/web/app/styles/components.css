@@ -2818,3 +2818,240 @@ details[open] > .settings-disclosure-summary::before {
 
 }
 
+
+/* ── Inline Style Migration Batch 2: Proposals & File Uploader ── */
+
+.nr-checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: normal;
+  cursor: pointer;
+}
+
+.nr-masthead-left {
+  text-align: left;
+}
+
+.nr-masthead-title {
+  border: none;
+  padding: 0;
+  margin: 0;
+  font-size: 2rem;
+}
+
+.nr-empty-state {
+  text-align: center;
+  padding: 48px 24px;
+}
+
+.nr-empty-title {
+  margin: 0 0 8px;
+}
+
+.nr-empty-desc {
+  margin: 0 auto;
+  max-width: 500px;
+}
+
+.nr-action-summary {
+  cursor: pointer;
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 0.88rem;
+  font-weight: 500;
+}
+
+.nr-list-card {
+  position: relative;
+  padding: 16px;
+  border-radius: 8px;
+  border-bottom: 1px dashed var(--line);
+}
+
+.nr-list-link {
+  display: block;
+  text-decoration: none;
+  color: inherit;
+}
+
+.nr-tag-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.tag-sm {
+  padding: 2px 6px;
+  font-size: 0.75rem;
+}
+
+.nr-section-toggle {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.nr-section-header-inline {
+  border-top: none;
+  display: inline-block;
+  padding: 0;
+  margin: 0;
+}
+
+.nr-meta-flex {
+  display: flex;
+  gap: 12px;
+}
+
+.nr-link-inherit {
+  color: inherit;
+  text-decoration: none;
+}
+
+.nr-page-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 16px;
+}
+
+.nr-page-title {
+  border: none;
+  padding: 0;
+  margin: 0;
+  font-size: 2rem;
+  max-width: 800px;
+}
+
+.nr-page-date {
+  font-size: 0.85rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.nr-detail-grid {
+  display: grid;
+  grid-template-columns: 3fr 1fr;
+  gap: 64px;
+}
+
+.nr-article {
+  font-size: 1.1rem;
+  line-height: 1.8;
+  color: var(--text);
+}
+
+.nr-summary-section {
+  border-left: 3px solid var(--accent);
+  margin-bottom: 32px;
+  padding-left: 20px;
+}
+
+.nr-summary-title {
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin: 0 0 8px;
+  color: var(--muted);
+}
+
+.nr-summary-body {
+  margin: 0;
+  font-size: 1rem;
+  line-height: 1.6;
+  color: var(--text);
+}
+
+.nr-divider-lg {
+  margin: 48px 0;
+}
+
+.nr-sidebar {
+  border-left: 1px solid var(--line);
+  padding-left: 32px;
+  padding-right: 16px;
+}
+
+.nr-form-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.nr-sidebar-title {
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text);
+  margin-bottom: 16px;
+}
+
+.nr-upload-dropzone {
+  padding: 24px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: transparent;
+}
+
+.nr-upload-dropzone-active {
+  border: 2px dashed var(--accent);
+  background: var(--accent-soft);
+}
+
+.nr-upload-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+
+.nr-upload-title {
+  margin: 0;
+}
+
+.nr-upload-desc {
+  margin-top: 6px;
+  margin-bottom: 0;
+}
+
+.nr-upload-area {
+  padding: 18px;
+  border: 1px dashed var(--line);
+  border-radius: 6px;
+  text-align: center;
+}
+
+.nr-upload-list {
+  gap: 14px;
+}
+
+.nr-upload-item {
+  padding: 14px 0;
+}
+
+.nr-upload-item-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+}
+
+.nr-upload-item-content {
+  min-width: 0;
+}
+
+.nr-truncate {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nr-upload-item-fields {
+  gap: 10px;
+  margin-top: 12px;
+}

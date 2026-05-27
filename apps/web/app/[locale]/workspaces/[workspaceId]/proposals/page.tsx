@@ -55,8 +55,8 @@ export default async function ProposalsPage({
 
   return (
     <>
-      <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 32 }}>
-        <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2rem" }}>{t("pageTitle")}</h1>
+      <header className="nr-masthead nr-masthead-left">
+        <h1 className="nr-masthead-title">{t("pageTitle")}</h1>
         <div className="nr-masthead-meta">
           <span>{t("pageDescription")}</span>
         </div>
@@ -77,9 +77,9 @@ export default async function ProposalsPage({
 
         <div>
           {(!displayProposals || displayProposals.length === 0) && (
-            <div className="nr-item" style={{ textAlign: "center", padding: "48px 24px" }}>
-              <h3 style={{ margin: "0 0 8px" }}>{t("whatIsProposalTitle")}</h3>
-              <p className="muted" style={{ margin: 0, maxWidth: 500, marginInline: "auto" }}>
+            <div className="nr-item nr-empty-state">
+              <h3 className="nr-empty-title">{t("whatIsProposalTitle")}</h3>
+              <p className="muted nr-empty-desc">
                 {t("whatIsProposalDesc")}
               </p>
             </div>
@@ -115,7 +115,7 @@ export default async function ProposalsPage({
             if (canManage && proposal.status === "DRAFT") {
               moreItems.push(
                 <details key="edit">
-                  <summary className="nr-hide-marker" style={{ cursor: "pointer", padding: "8px 10px", borderRadius: 8, fontSize: "0.88rem", fontWeight: 500 }}>
+                  <summary className="nr-hide-marker nr-action-summary">
                     {t("btnEdit")}
                   </summary>
                   <form action={updateProposalAction} className="action-menu-form">
@@ -138,11 +138,11 @@ export default async function ProposalsPage({
               );
             }
             return (
-            <div className="nr-item hover:bg-bg-alt transition-colors duration-200" key={proposal.id} style={{ position: "relative", padding: "16px", borderRadius: "8px", borderBottom: "1px dashed var(--line)" }}>
-              <a href={`/workspaces/${workspaceId}/proposals/${proposal.id}`} style={{ display: "block", textDecoration: "none", color: "inherit" }}>
-                <div className="row" style={{ alignItems: "center" }}>
+            <div className="nr-item nr-list-card" key={proposal.id}>
+              <a href={`/workspaces/${workspaceId}/proposals/${proposal.id}`} className="nr-list-link">
+                <div className="row items-center">
                   <strong className="nr-item-title">
-                    {proposal.status === "DRAFT" && <span title={t("privateDraftTooltip")} className="tag info" style={{ marginRight: 6 }}>{t("statusDraft")}</span>}
+                    {proposal.status === "DRAFT" && <span title={t("privateDraftTooltip")} className="tag info mr-1">{t("statusDraft")}</span>}
                     {proposal.title}
                   </strong>
                   <span className={`tag ${proposal.status === "DRAFT" ? "info" : proposal.status === "OPEN" ? "warning" : proposal.resolutionOutcome === "ADOPTED" ? "success" : proposal.status === "RESOLVED" ? "info" : ""}`}>
@@ -150,19 +150,19 @@ export default async function ProposalsPage({
                   </span>
                 </div>
                 <MarkdownExcerpt markdown={proposal.summary ?? proposal.bodyMd} maxLength={180} as="div" className="nr-excerpt" />
-                <div className="nr-item-meta" style={{ marginTop: 8 }}>
+                <div className="nr-item-meta mt-2">
                    {proposal.author.displayName || proposal.author.email} · {new Date(proposal.createdAt).toLocaleDateString()}
                 </div>
                 
                 {(proposal.tensions?.length > 0 || proposal.actions?.length > 0) && (
-                  <div style={{ marginTop: 8, fontSize: "0.82rem", display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                  <div className="nr-tag-group">
                     {proposal.tensions?.map((linkedTension: any) => (
-                      <span key={linkedTension.id} className="tag info" style={{ padding: "2px 6px", fontSize: "0.75rem" }}>
+                      <span key={linkedTension.id} className="tag info tag-sm">
                         {t("tensionTag", { title: linkedTension.title })}
                       </span>
                     ))}
                     {proposal.actions?.map((a: any) => (
-                      <span key={a.id} className="tag info" style={{ padding: "2px 6px", fontSize: "0.75rem" }}>
+                      <span key={a.id} className="tag info tag-sm">
                         {t("actionTag", { title: a.title })}
                       </span>
                     ))}
@@ -197,8 +197,8 @@ export default async function ProposalsPage({
       {!isDemo && (
         <section className="ws-section">
           <details open={resolvedSearch.open === "new"}>
-            <summary className="nr-hide-marker" style={{ cursor: "pointer", fontWeight: 600, color: "var(--accent)" }}>
-              <span className="nr-section-header" style={{ borderTop: "none", display: "inline-block", padding: 0, margin: 0 }}>{t("newProposalTitle")}</span>
+            <summary className="nr-hide-marker nr-section-toggle">
+              <span className="nr-section-header nr-section-header-inline">{t("newProposalTitle")}</span>
             </summary>
             <CreateProposalForm workspaceId={workspaceId} />
           </details>

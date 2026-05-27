@@ -181,7 +181,7 @@ export function KnowledgeFileUploader({
   const doneCount = items.filter((item) => item.status === "done").length;
 
   return (
-    <section className="stack" style={{ marginBottom: 32 }}>
+    <section className="stack mb-8">
       {showTrigger && (
         <div className="actions-inline">
           <button type="button" className="small" onClick={() => setIsOpen((open) => !open)}>
@@ -192,13 +192,7 @@ export function KnowledgeFileUploader({
 
       {isOpen && (
         <div
-          className="nr-form-section stack"
-          style={{
-            padding: 24,
-            border: isDragging ? "2px dashed var(--accent)" : "1px solid var(--line)",
-            borderRadius: 8,
-            background: isDragging ? "var(--accent-soft)" : "transparent",
-          }}
+          className={`nr-form-section stack nr-upload-dropzone ${isDragging ? "nr-upload-dropzone-active" : ""}`}
           onDragOver={(event) => {
             event.preventDefault();
             setIsDragging(true);
@@ -210,10 +204,10 @@ export function KnowledgeFileUploader({
             addFiles(event.dataTransfer.files);
           }}
         >
-          <div style={{ display: "flex", justifyContent: "space-between", gap: 16, alignItems: "flex-start", flexWrap: "wrap" }}>
+          <div className="nr-upload-header">
             <div>
-              <h3 style={{ margin: 0 }}>{t("uploadFilesTitle")}</h3>
-              <p className="nr-item-meta" style={{ marginTop: 6, marginBottom: 0 }}>
+              <h3 className="nr-upload-title">{t("uploadFilesTitle")}</h3>
+              <p className="nr-upload-desc">
                 {t("uploadFilesDescription")}
               </p>
             </div>
@@ -226,14 +220,14 @@ export function KnowledgeFileUploader({
             ref={fileInputRef}
             type="file"
             multiple
-            style={{ display: "none" }}
+            className="hidden"
             onChange={(event) => {
               addFiles(event.target.files);
               event.currentTarget.value = "";
             }}
           />
 
-          <div style={{ padding: 18, border: "1px dashed var(--line)", borderRadius: 6, textAlign: "center" }}>
+          <div className="nr-upload-area">
             <button type="button" className="link-button secondary" onClick={() => fileInputRef.current?.click()}>
               {t("uploadFilesDrop")}
             </button>
@@ -253,15 +247,15 @@ export function KnowledgeFileUploader({
           {items.length === 0 ? (
             <p className="nr-item-meta">{t("uploadFilesEmpty")}</p>
           ) : (
-            <div className="stack" style={{ gap: 14 }}>
+            <div className="stack nr-upload-list">
               <div className="nr-item-meta">
                 {t("uploadFilesSelectedCount", { count: items.length, done: doneCount })}
               </div>
               {items.map((item, index) => (
-                <div key={item.id} className="nr-item" style={{ padding: "14px 0" }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
-                    <div style={{ minWidth: 0 }}>
-                      <strong className="nr-item-title" style={{ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                <div key={item.id} className="nr-item nr-upload-item">
+                  <div className="nr-upload-item-header">
+                    <div className="nr-upload-item-content">
+                      <strong className="nr-item-title nr-truncate">
                         {item.file.name}
                       </strong>
                       <span className="nr-item-meta">
@@ -278,7 +272,7 @@ export function KnowledgeFileUploader({
                       {t("uploadFilesRemove")}
                     </button>
                   </div>
-                  <div className="stack" style={{ gap: 10, marginTop: 12 }}>
+                  <div className="stack nr-upload-item-fields">
                     <label>
                       {t("uploadFilesFileTitle")}
                       <input
