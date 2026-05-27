@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  activateMobileMode,
   isWorkspaceUrl,
   labelConsoleEntry,
   submitLoginForm,
@@ -87,5 +88,76 @@ describe("client readiness smoke login handling", () => {
       type: "error",
       text: "boom",
     });
+  });
+});
+
+describe("client readiness mobile mode handling", () => {
+  function mobileModePage({ visibleAfterClicks = 1 } = {}) {
+    let clicks = 0;
+    const button = {
+      waitFor: vi.fn(async () => null),
+      click: vi.fn(async () => {
+        clicks += 1;
+      }),
+    };
+    const expected = {
+      waitFor: vi.fn(async () => null),
+      isVisible: vi.fn(async () => clicks >= visibleAfterClicks),
+    };
+    return {
+      button,
+      expected,
+      page: {
+        locator: vi.fn((selector) => ({
+          first: vi.fn(() => (selector === ".mobile-mode-switch button" ? button : expected)),
+        })),
+        screenshot: vi.fn(async () => null),
+        url: vi.fn(() => "http://localhost/workspaces/workspace-1"),
+        waitForTimeout: vi.fn(async () => null),
+      },
+    };
+  }
+
+  it("retries the mobile mode switch until the expected mode is visible", async () => {
+    const findings = [];
+    const { button, page } = mobileModePage({ visibleAfterClicks: 2 });
+
+    await expect(activateMobileMode(page, {
+      buttonText: /AI|IA/,
+      expectedSelector: ".mobile-ai-workbench",
+      label: "mobile-shell-iphone-modern-ai",
+      findings,
+      timeoutMs: 3,
+      retryDelayMs: 1,
+    })).resolves.toBe(true);
+
+    expect(button.click).toHaveBeenCalledTimes(2);
+    expect(findings).toEqual([]);
+    expect(page.screenshot).not.toHaveBeenCalled();
+  });
+
+  it("records a finding instead of throwing when mobile mode never becomes visible", async () => {
+    const findings = [];
+    const { button, page } = mobileModePage({ visibleAfterClicks: 10 });
+
+    await expect(activateMobileMode(page, {
+      buttonText: /AI|IA/,
+      expectedSelector: ".mobile-ai-workbench",
+      label: "mobile-shell-iphone-modern-ai",
+      findings,
+      timeoutMs: 3,
+      retryDelayMs: 1,
+    })).resolves.toBe(false);
+
+    expect(button.click).toHaveBeenCalledTimes(3);
+    expect(findings).toEqual([{
+      name: "mobile-shell-iphone-modern-ai",
+      route: "http://localhost/workspaces/workspace-1",
+      status: "mode-switch-timeout",
+      selector: ".mobile-ai-workbench",
+    }]);
+    expect(page.screenshot).toHaveBeenCalledWith(expect.objectContaining({
+      path: expect.stringContaining("mobile-shell-iphone-modern-ai-missing.png"),
+    }));
   });
 });
