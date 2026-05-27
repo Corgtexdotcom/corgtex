@@ -664,6 +664,45 @@ describe("meetings domain", () => {
     }));
   });
 
+  it("uploadMeetingTranscript scopes transcript source external IDs on new meetings", async () => {
+    const recordedAt = new Date("2026-04-30T17:10:00.000Z");
+    prismaMock.meeting.findFirst.mockResolvedValue(null);
+    prismaMock.meeting.findMany.mockResolvedValue([]);
+    prismaMock.meeting.create.mockResolvedValue({
+      id: "created-1",
+      workspaceId: "workspace-1",
+      title: "Imported transcript",
+      source: "meeting-transcript:fireflies",
+      status: "COMPLETED",
+      recordedAt,
+      transcript: "Transcript text",
+    });
+
+    const { uploadMeetingTranscript } = await import("./meetings");
+    await expect(uploadMeetingTranscript(actor, {
+      workspaceId: "workspace-1",
+      title: "Imported transcript",
+      source: "meeting-transcript:fireflies",
+      recordedAt,
+      transcript: "Transcript text",
+      externalId: "meeting-transcript:FIREFLIES:ff-1",
+    })).resolves.toMatchObject({
+      status: "created",
+      meeting: { id: "created-1" },
+    });
+
+    expect(prismaMock.meeting.findFirst).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        OR: [{ externalId: "workspace:workspace-1:meeting-transcript:FIREFLIES:ff-1" }],
+      }),
+    }));
+    expect(prismaMock.meeting.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        externalId: "workspace:workspace-1:meeting-transcript:FIREFLIES:ff-1",
+      }),
+    }));
+  });
+
   it("requestMeetingIntelligenceRegeneration appends guidance and requeues transcript processing", async () => {
     prismaMock.meeting.findFirst.mockResolvedValue({
       id: "meeting-1",

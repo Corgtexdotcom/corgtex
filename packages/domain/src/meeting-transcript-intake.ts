@@ -220,7 +220,7 @@ export async function intakeMeetingTranscript(actor: AppActor, params: {
     source: inferred.source,
     externalId: params.externalId ?? null,
     calendarExternalId: params.calendarExternalId ?? null,
-    meetingUrl: params.meetingUrl ?? params.sourceUrl ?? null,
+    meetingUrl: params.meetingUrl ?? null,
     recordedAt: inferred.recordedAt,
     transcript,
     summaryMd: params.summaryMd,

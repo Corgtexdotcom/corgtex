@@ -123,6 +123,13 @@ function meetingUrlHash(value: string) {
   return createHash("sha256").update(normalizeMeetingUrl(value)).digest("hex");
 }
 
+function workspaceScopedMeetingExternalId(workspaceId: string, externalId?: string | null) {
+  const trimmed = externalId?.trim();
+  if (!trimmed) return null;
+  const prefix = `workspace:${workspaceId}:`;
+  return trimmed.startsWith(prefix) ? trimmed : `${prefix}${trimmed}`;
+}
+
 function addDays(value: Date, days: number) {
   return new Date(value.getTime() + days * 24 * 60 * 60 * 1000);
 }
@@ -374,7 +381,7 @@ async function updateMeetingWithTranscriptTx(
   const title = chooseMergedTitle(existing.title, params.title);
   const source = params.source?.trim() || existing.source;
   const meetingUrl = params.meetingUrl?.trim() ? normalizeMeetingUrl(params.meetingUrl) : existing.meetingUrl;
-  const externalId = existing.externalId || params.externalId?.trim() || null;
+  const externalId = existing.externalId || workspaceScopedMeetingExternalId(params.workspaceId, params.externalId);
   const calendarExternalId = existing.calendarExternalId || params.calendarExternalId?.trim() || null;
 
   const incomingSummaryMd = params.summaryMd?.trim() || null;
@@ -913,8 +920,9 @@ export async function uploadMeetingTranscript(actor: AppActor, params: {
   }
 
   const directMatchClauses: Prisma.MeetingWhereInput[] = [];
-  if (params.externalId?.trim()) {
-    directMatchClauses.push({ externalId: params.externalId.trim() });
+  const scopedExternalId = workspaceScopedMeetingExternalId(params.workspaceId, params.externalId);
+  if (scopedExternalId) {
+    directMatchClauses.push({ externalId: scopedExternalId });
   }
   if (directMatchClauses.length > 0) {
     const directMatch = await prisma.meeting.findFirst({
@@ -1080,7 +1088,7 @@ export async function createMeeting(actor: AppActor, params: {
         workspaceId: params.workspaceId,
         title: params.title?.trim() || null,
         source,
-        externalId: params.externalId?.trim() || null,
+        externalId: workspaceScopedMeetingExternalId(params.workspaceId, params.externalId),
         calendarExternalId: params.calendarExternalId?.trim() || null,
         meetingUrl,
         meetingUrlHash: meetingUrl ? meetingUrlHash(meetingUrl) : null,

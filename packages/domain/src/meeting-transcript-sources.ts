@@ -335,8 +335,28 @@ function asDate(value: unknown): Date | null {
   return null;
 }
 
+function emailSearchStrings(value: unknown, depth = 0): string[] {
+  if (depth > 4 || value == null) return [];
+  if (typeof value === "string" || typeof value === "number") return [String(value)];
+  if (Array.isArray(value)) return value.flatMap((item) => emailSearchStrings(item, depth + 1));
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    const direct = [
+      record.email,
+      record.emailAddress,
+      record.mail,
+      asRecord(record.user).email,
+      asRecord(record.profile).email,
+    ].flatMap((item) => emailSearchStrings(item, depth + 1));
+    return direct.length > 0 ? direct : Object.values(record).flatMap((item) => emailSearchStrings(item, depth + 1));
+  }
+  return [];
+}
+
 function uniqueEmails(values: unknown[]) {
-  const emails = values.flatMap((value) => String(value ?? "").match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) ?? []);
+  const emails = values
+    .flatMap((value) => emailSearchStrings(value))
+    .flatMap((value) => value.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) ?? []);
   return [...new Set(emails.map((email) => email.toLowerCase()))];
 }
 
@@ -703,6 +723,7 @@ async function importOneNormalizedTranscript(actor: AppActor, params: {
 
   const result = await intakeMeetingTranscript(actor, {
     workspaceId: params.workspaceId,
+    meetingId: activeRecord?.meetingId ?? null,
     transcript: artifact.transcript,
     fileName: artifact.rawMetadata.fileName as string | null,
     title: artifact.title,
@@ -787,9 +808,6 @@ export async function importMeetingTranscriptSourceArtifacts(actor: AppActor, pa
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
   const provider = typeof params.provider === "string" ? normalizeMeetingTranscriptSourceProvider(params.provider) : params.provider;
   invariant(params.artifacts.length > 0, 400, "INVALID_INPUT", "At least one transcript artifact is required.");
-  const normalized = params.artifacts
-    .map((artifact) => normalizeMeetingTranscriptSourceArtifact(provider, artifact))
-    .sort((left, right) => left.recordedAt.getTime() - right.recordedAt.getTime());
   const sourceKind = params.sourceKind?.trim() || "manual_upload";
   const batch = await prisma.meetingTranscriptImportBatch.create({
     data: {
@@ -802,9 +820,19 @@ export async function importMeetingTranscriptSourceArtifacts(actor: AppActor, pa
     },
   });
 
+  const normalized: NormalizedMeetingTranscriptSourceArtifact[] = [];
+  let failedCount = 0;
+  for (const artifact of params.artifacts) {
+    try {
+      normalized.push(normalizeMeetingTranscriptSourceArtifact(provider, artifact));
+    } catch {
+      failedCount += 1;
+    }
+  }
+  normalized.sort((left, right) => left.recordedAt.getTime() - right.recordedAt.getTime());
+
   let importedCount = 0;
   let skippedCount = 0;
-  let failedCount = 0;
   const results: Array<Awaited<ReturnType<typeof importOneNormalizedTranscript>>> = [];
   for (const artifact of normalized) {
     try {

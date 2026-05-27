@@ -103,6 +103,7 @@ describe("meeting transcript sources", () => {
         id: "ff-1",
         title: "Product Weekly",
         date: "2026-05-01T10:00:00.000Z",
+        participants: [{ name: "Jan", email: "Jan@Example.com" }],
         sentences: [
           { speaker_name: "Jan", text: "We should import recorders first.", start_time: 1, end_time: 4 },
         ],
@@ -121,7 +122,7 @@ describe("meeting transcript sources", () => {
       externalId: "ff-1",
       title: "Product Weekly",
       transcript: "Jan: We should import recorders first.",
-      participantEmails: [],
+      participantEmails: ["jan@example.com"],
     });
     expect(json.segments[0]).toMatchObject({ speaker: "Jan", startMs: 1000 });
     expect(vtt.recordedAt).toEqual(new Date("2026-05-02T00:00:00.000Z"));
@@ -196,6 +197,7 @@ describe("meeting transcript sources", () => {
     expect(result.batch).toMatchObject({ status: "COMPLETED", importedCount: 2, skippedCount: 0, failedCount: 0 });
     expect(intakeMeetingTranscriptMock.mock.calls[0][1]).toMatchObject({ externalId: "meeting-transcript:FIREFLIES:ff-0" });
     expect(intakeMeetingTranscriptMock.mock.calls[1][1]).toMatchObject({
+      meetingId: "meeting-1",
       externalId: "meeting-transcript:FIREFLIES:ff-1",
       replaceTranscript: true,
     });
@@ -273,6 +275,33 @@ describe("meeting transcript sources", () => {
       meetingUrl: "https://meet.google.com/abc-defg-hij",
       calendarExternalId: "calendar-event-1",
       participantEmails: ["jan@example.com"],
+    }));
+  });
+
+  it("imports valid artifacts when another batch file cannot be normalized", async () => {
+    const { importMeetingTranscriptSourceArtifacts } = await import("./meeting-transcript-sources");
+
+    const result = await importMeetingTranscriptSourceArtifacts(agentActor, {
+      workspaceId: "ws-1",
+      provider: "FIREFLIES",
+      artifacts: [
+        {
+          fileName: "readme.txt",
+          text: "This ZIP sidecar has no meeting date.",
+        },
+        {
+          externalId: "ff-valid",
+          title: "Valid transcript",
+          recordedAt: "2026-05-01T10:00:00.000Z",
+          text: "Jan: This valid meeting should still import.",
+        },
+      ],
+    });
+
+    expect(result.batch).toMatchObject({ status: "PARTIAL", importedCount: 1, failedCount: 1 });
+    expect(intakeMeetingTranscriptMock).toHaveBeenCalledTimes(1);
+    expect(intakeMeetingTranscriptMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      externalId: "meeting-transcript:FIREFLIES:ff-valid",
     }));
   });
 
