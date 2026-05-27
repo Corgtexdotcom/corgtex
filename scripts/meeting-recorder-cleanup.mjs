@@ -207,6 +207,34 @@ function compareCanonical(left, right) {
   return right.createdAt.getTime() - left.createdAt.getTime();
 }
 
+function canonicalForGroup(group) {
+  return [...group].sort(compareCanonical)[0];
+}
+
+function compareGroupsForRestore(left, right) {
+  const leftCanonical = canonicalForGroup(left);
+  const rightCanonical = canonicalForGroup(right);
+  const leftJoinAt = leftCanonical.joinAt ?? leftCanonical.meeting.recordedAt;
+  const rightJoinAt = rightCanonical.joinAt ?? rightCanonical.meeting.recordedAt;
+  const leftMatchesMeeting = leftJoinAt.getTime() === leftCanonical.meeting.recordedAt.getTime() ? 1 : 0;
+  const rightMatchesMeeting = rightJoinAt.getTime() === rightCanonical.meeting.recordedAt.getTime() ? 1 : 0;
+  if (leftMatchesMeeting !== rightMatchesMeeting) {
+    return rightMatchesMeeting - leftMatchesMeeting;
+  }
+
+  const leftActive = ACTIVE_STATUSES.has(leftCanonical.status) ? 1 : 0;
+  const rightActive = ACTIVE_STATUSES.has(rightCanonical.status) ? 1 : 0;
+  if (leftActive !== rightActive) {
+    return rightActive - leftActive;
+  }
+
+  if (leftJoinAt.getTime() !== rightJoinAt.getTime()) {
+    return rightJoinAt.getTime() - leftJoinAt.getTime();
+  }
+
+  return compareCanonical(leftCanonical, rightCanonical);
+}
+
 function activeDedupeKey(recording) {
   return `meeting-recording:${recording.workspaceId}:${recording.meetingId}:${recording.provider}`;
 }
@@ -232,7 +260,7 @@ async function restoreCanonical(prisma, canonical) {
   await prisma.meetingRecording.update({
     where: { id: canonical.id },
     data: {
-      status: "SCHEDULED",
+      status: ACTIVE_STATUSES.has(canonical.status) ? canonical.status : "SCHEDULED",
       activeDedupeKey: activeDedupeKey(canonical),
       endedAt: null,
       failureCode: null,
@@ -340,6 +368,7 @@ async function main() {
       pastDuplicateGroupsFound: 0,
       canonicalRecordingsRetained: 0,
       canonicalRecordingsRestored: 0,
+      canonicalRecordingsRestoreSkipped: 0,
       duplicateProviderBotsToCancel: 0,
       duplicateRecordersToSkip: 0,
       duplicateProviderBotsCancelled: 0,
@@ -354,10 +383,11 @@ async function main() {
         const key = groupKey(recording);
         groups.set(key, [...(groups.get(key) ?? []), recording]);
       }
-      for (const group of groups.values()) {
+      const restoredDedupeKeys = new Set();
+      for (const group of [...groups.values()].sort(compareGroupsForRestore)) {
         if (group.length <= 1) continue;
         summary.duplicateGroupsFound += 1;
-        const canonical = [...group].sort(compareCanonical)[0];
+        const canonical = canonicalForGroup(group);
         const duplicates = group.filter((recording) => recording.id !== canonical.id);
         const joinAt = canonical.joinAt ?? canonical.meeting.recordedAt;
         const isFuture = joinAt.getTime() - Date.now() > AUTO_SCHEDULE_MIN_LEAD_MS;
@@ -375,6 +405,7 @@ async function main() {
           canonical: safeRecording(canonical),
           duplicates: duplicates.map(safeRecording),
           cancellationMethods: [],
+          canonicalRestoreSkipped: false,
         };
 
         if (isFuture) {
@@ -393,10 +424,30 @@ async function main() {
               summary.duplicateRecordersSkipped += 1;
             }
           }
-          if (apply) {
-            await restoreCanonical(prisma, canonical);
+          const key = activeDedupeKey(canonical);
+          const canonicalAlreadyOwnsKey = canonical.activeDedupeKey === key && ACTIVE_STATUSES.has(canonical.status);
+          if (canonicalAlreadyOwnsKey) {
+            restoredDedupeKeys.add(key);
           }
-          summary.canonicalRecordingsRestored += canonical.status !== "SCHEDULED" || canonical.activeDedupeKey !== activeDedupeKey(canonical) ? 1 : 0;
+          const shouldRestoreCanonical = canonical.status !== "SCHEDULED"
+            || canonical.activeDedupeKey !== key
+            || canonical.failureCode
+            || canonical.endedAt;
+          if (apply) {
+            if (restoredDedupeKeys.has(key) && !canonicalAlreadyOwnsKey) {
+              detail.canonicalRestoreSkipped = true;
+              summary.canonicalRecordingsRestoreSkipped += 1;
+            } else if (shouldRestoreCanonical) {
+              await restoreCanonical(prisma, canonical);
+              restoredDedupeKeys.add(key);
+            }
+          } else if (restoredDedupeKeys.has(key) && !canonicalAlreadyOwnsKey && shouldRestoreCanonical) {
+            detail.canonicalRestoreSkipped = true;
+            summary.canonicalRecordingsRestoreSkipped += 1;
+          } else if (shouldRestoreCanonical) {
+            restoredDedupeKeys.add(key);
+          }
+          summary.canonicalRecordingsRestored += shouldRestoreCanonical && !detail.canonicalRestoreSkipped ? 1 : 0;
           summary.canonicalRecordingsRetained += 1;
         }
 
