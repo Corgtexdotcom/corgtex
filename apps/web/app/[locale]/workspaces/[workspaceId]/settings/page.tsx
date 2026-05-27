@@ -633,7 +633,7 @@ export default async function SettingsPage({
                                     <button type="submit" className="secondary small">Save connection</button>
                                   </div>
                                 </form>
-                                <form action={importMeetingTranscriptSourceAction} className="stack nr-form-section" encType="multipart/form-data">
+                                <form action={importMeetingTranscriptSourceAction} className="stack nr-form-section">
                                   <input type="hidden" name="workspaceId" value={workspaceId} />
                                   <input type="hidden" name="provider" value={entry.slug} />
                                   <input type="hidden" name="sourceKind" value="settings-upload" />
