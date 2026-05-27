@@ -644,6 +644,7 @@
     "achieved": "{percent}% achieved",
     "actionItems": "Action Items",
     "activeTensions": "Active Tensions",
+    "added": "Added",
     "activityOn": "on",
     "assignedTo": "Assigned to {name}",
     "advisoryRequests": "{count, plural, =1 {# Advisory Request} other {# Advisory Requests}}",
