@@ -995,12 +995,11 @@ async function restoreCanonicalScheduledRecording(recording: MeetingRecording) {
   });
 }
 
-async function cleanupDuplicateScheduledProviderBots(workspaceId: string, now = new Date()): Promise<DuplicateRecorderCleanupStats> {
+async function cleanupDuplicateScheduledProviderBots(workspaceId: string): Promise<DuplicateRecorderCleanupStats> {
   const recordings = await prisma.meetingRecording.findMany({
     where: {
       workspaceId,
       externalBotId: { not: null },
-      joinAt: { gt: new Date(now.getTime() + AUTO_SCHEDULE_MIN_LEAD_MS) },
       OR: [
         { status: { in: ACTIVE_RECORDING_STATUSES } },
         { status: "FAILED", failureCode: "STALE_RECORDER" },
@@ -2742,6 +2741,7 @@ async function completeRecordingWithTranscriptArtifact(
         provider: current.provider,
         id: { not: current.id },
         transcriptProcessedAt: { not: null },
+        failureCode: null,
         ...(current.joinAt ? { joinAt: current.joinAt } : {}),
       },
       select: { id: true },

@@ -93,8 +93,7 @@ async function fetchProvider(url, init, provider, okStatuses = []) {
   const response = await fetch(url, init);
   const text = await response.text();
   if (!response.ok && !okStatuses.includes(response.status)) {
-    const message = text ? ` ${text.slice(0, 80).replace(/\s+/g, " ")}` : "";
-    throw new Error(`${provider} returned ${response.status}.${message}`);
+    throw new Error(`${provider} returned ${response.status}.`);
   }
   if (!response.ok) {
     return null;
