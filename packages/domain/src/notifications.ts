@@ -5,6 +5,7 @@ import { requireWorkspaceMembership } from "./auth";
 export async function listNotifications(actor: AppActor, workspaceId: string, opts?: {
   unreadOnly?: boolean;
   take?: number;
+  skip?: number;
 }) {
   const userId = actor.kind === "user" ? actor.user.id : null;
   if (!userId) return [];
@@ -19,6 +20,7 @@ export async function listNotifications(actor: AppActor, workspaceId: string, op
     },
     orderBy: { createdAt: "desc" },
     take: opts?.take ?? 30,
+    skip: opts?.skip,
   });
 }
 
@@ -28,12 +30,14 @@ export async function countUnreadNotifications(userId: string, workspaceId: stri
   });
 }
 
-export async function markNotificationRead(actor: AppActor, notificationId: string) {
+export async function markNotificationRead(actor: AppActor, workspaceId: string, notificationId: string) {
   const userId = actor.kind === "user" ? actor.user.id : null;
   if (!userId) return;
 
+  await requireWorkspaceMembership({ actor, workspaceId });
+
   await prisma.notification.updateMany({
-    where: { id: notificationId, userId },
+    where: { id: notificationId, workspaceId, userId },
     data: { readAt: new Date() },
   });
 }
@@ -47,4 +51,3 @@ export async function markAllNotificationsRead(actor: AppActor, workspaceId: str
     data: { readAt: new Date() },
   });
 }
-

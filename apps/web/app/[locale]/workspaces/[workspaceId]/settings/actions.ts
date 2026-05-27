@@ -7,6 +7,7 @@ import {
   createMember,
   deactivateMember,
   markAllNotificationsRead,
+  markNotificationRead,
   updateMember,
   resolveAgentRun,
   createWebhookEndpoint,
@@ -295,6 +296,16 @@ export async function markAllNotificationsReadAction(formData: FormData) {
   const actor = await requirePageActor();
   const workspaceId = asString(formData, "workspaceId");
   await markAllNotificationsRead(actor, workspaceId);
+  refresh(workspaceId);
+}
+
+export async function markNotificationReadAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  await markNotificationRead(actor, workspaceId, asString(formData, "notificationId"));
   refresh(workspaceId);
 }
 

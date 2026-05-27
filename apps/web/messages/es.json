@@ -687,6 +687,23 @@
     "yourToDos": "Tus tareas",
     "zeroInbox": "Bandeja de entrada vacía"
   },
+  "notificationsPage": {
+    "emptyAll": "Aún no hay notificaciones.",
+    "emptyUnread": "No hay notificaciones sin leer.",
+    "eyebrow": "Sistema",
+    "markAllRead": "Marcar todo como leído",
+    "markRead": "Marcar como leído",
+    "next": "Siguiente",
+    "openRelated": "Abrir elemento relacionado",
+    "paginationLabel": "Páginas de notificaciones",
+    "previous": "Anterior",
+    "tabAll": "Todas",
+    "tabsLabel": "Filtro de notificaciones",
+    "tabUnread": "Sin leer ({count})",
+    "title": "Notificaciones",
+    "unread": "Sin leer",
+    "unreadSummary": "{count, plural, =0 {No hay notificaciones sin leer} =1 {# notificación sin leer} other {# notificaciones sin leer}}"
+  },
   "error": {
     "defaultMessage": "Ocurrió un error inesperado.",
     "goHome": "Ir a inicio",
@@ -1257,6 +1274,7 @@
     "home": "Inicio",
     "meetings": "Reuniones",
     "members": "Miembros",
+    "notifications": "Notificaciones",
     "operations": "Operaciones",
     "osMetrics": "Métricas del SO",
     "platformAdmin": "Control Plane",

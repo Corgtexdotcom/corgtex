@@ -28,7 +28,7 @@ type MobileWorkspaceShellProps = {
 };
 
 const MODE_STORAGE_KEY = "corgtex.mobileMode";
-const PRIMARY_HREFS = ["", "/tensions", "/actions", "/proposals", "/tools"] as const;
+const PRIMARY_HREFS = ["", "/tensions", "/actions", "/notifications", "/proposals"] as const;
 
 function navHref(workspaceId: string, href: string) {
   return `/workspaces/${workspaceId}${href}`;
@@ -176,7 +176,7 @@ export function MobileWorkspaceShell({
               >
                 <WorkspaceNavIcon name={item.icon} className="mobile-bottom-icon" />
                 <span>{tNav(item.labelKey as any)}</span>
-                {item.href === "" && unreadCount > 0 && (
+                {item.href === "/notifications" && unreadCount > 0 && (
                   <span className="mobile-bottom-badge">{unreadCount}</span>
                 )}
               </a>
