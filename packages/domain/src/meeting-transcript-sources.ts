@@ -490,6 +490,7 @@ export function normalizeMeetingTranscriptSourceArtifact(
   const segments = artifact.segments?.length ? artifact.segments : candidateSegments.length > 0 ? candidateSegments : timedSegments;
   const jsonTranscript = asString(jsonRecord.transcript_text)
     ?? asString(jsonRecord.transcriptText)
+    ?? asString(jsonRecord.transcript)
     ?? asString(jsonRecord.text)
     ?? asString(jsonRecord.content)
     ?? asString(jsonRecord.markdown);

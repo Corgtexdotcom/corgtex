@@ -20,6 +20,9 @@ const { prismaMock } = vi.hoisted(() => {
     meetingInsight: {
       deleteMany: vi.fn(),
     },
+    meetingTranscriptSourceRecord: {
+      updateMany: vi.fn(),
+    },
     action: {
       findMany: vi.fn(),
     },
@@ -61,6 +64,7 @@ describe("meetings domain", () => {
     prismaMock.auditLog.create.mockResolvedValue({});
     prismaMock.event.createMany.mockResolvedValue({ count: 1 });
     prismaMock.meetingInsight.deleteMany.mockResolvedValue({ count: 0 });
+    prismaMock.meetingTranscriptSourceRecord.updateMany.mockResolvedValue({ count: 1 });
   });
 
   it("listMeetings returns meetings newest first", async () => {
@@ -397,6 +401,7 @@ describe("meetings domain", () => {
         meetingId: "scheduled-1",
         workspaceId: "workspace-1",
         status: "SUGGESTED",
+        sourceRecordId: null,
       },
     });
   });
@@ -664,6 +669,63 @@ describe("meetings domain", () => {
     }));
   });
 
+  it("uploadMeetingTranscript links source records before transcript processing is queued", async () => {
+    const recordedAt = new Date("2026-04-30T17:10:00.000Z");
+    prismaMock.meeting.findFirst
+      .mockResolvedValueOnce({ id: "completed-1" })
+      .mockResolvedValueOnce({
+        id: "completed-1",
+        title: "Weekly Tactical",
+        transcript: "Jan: Existing transcript.",
+        summaryMd: null,
+        ingestionGuidanceMd: null,
+        participantIds: [],
+        participantEmails: [],
+        externalId: null,
+        calendarExternalId: null,
+        meetingUrl: null,
+        meetingUrlHash: null,
+      });
+    prismaMock.meeting.update.mockResolvedValue({
+      id: "completed-1",
+      workspaceId: "workspace-1",
+      title: "Weekly Tactical",
+      source: "meeting-transcript:fireflies",
+      status: "COMPLETED",
+      recordedAt,
+      transcript: "Replacement transcript",
+      ingestionGuidanceMd: null,
+    });
+
+    const { uploadMeetingTranscript } = await import("./meetings");
+    await expect(uploadMeetingTranscript(actor, {
+      workspaceId: "workspace-1",
+      meetingId: "completed-1",
+      title: "Weekly Tactical",
+      source: "meeting-transcript:fireflies",
+      recordedAt,
+      transcript: "Replacement transcript",
+      sourceRecordId: "source-record-1",
+      replaceTranscript: true,
+    })).resolves.toMatchObject({
+      status: "matched",
+      meeting: { id: "completed-1" },
+    });
+
+    expect(prismaMock.meetingTranscriptSourceRecord.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: "source-record-1",
+        workspaceId: "workspace-1",
+      },
+      data: {
+        meetingId: "completed-1",
+      },
+    });
+    expect(prismaMock.meetingTranscriptSourceRecord.updateMany.mock.invocationCallOrder[0]).toBeLessThan(
+      prismaMock.event.createMany.mock.invocationCallOrder[0],
+    );
+  });
+
   it("uploadMeetingTranscript scopes transcript source external IDs on new meetings", async () => {
     const recordedAt = new Date("2026-04-30T17:10:00.000Z");
     prismaMock.meeting.findFirst.mockResolvedValue(null);
@@ -740,6 +802,7 @@ describe("meetings domain", () => {
         meetingId: "meeting-1",
         workspaceId: "workspace-1",
         status: "SUGGESTED",
+        sourceRecordId: null,
       },
     });
     expect(prismaMock.event.createMany).toHaveBeenCalled();

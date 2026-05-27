@@ -346,6 +346,7 @@ async function updateMeetingWithTranscriptTx(
     externalId?: string | null;
     calendarExternalId?: string | null;
     meetingUrl?: string | null;
+    sourceRecordId?: string | null;
     replaceTranscript?: boolean;
   }
 ) {
@@ -410,8 +411,21 @@ async function updateMeetingWithTranscriptTx(
       meetingId: meeting.id,
       workspaceId: params.workspaceId,
       status: "SUGGESTED",
+      sourceRecordId: null,
     },
   });
+
+  if (params.sourceRecordId) {
+    await tx.meetingTranscriptSourceRecord.updateMany({
+      where: {
+        id: params.sourceRecordId,
+        workspaceId: params.workspaceId,
+      },
+      data: {
+        meetingId: meeting.id,
+      },
+    });
+  }
 
   await tx.auditLog.create({
     data: {
@@ -441,6 +455,7 @@ async function updateMeetingWithTranscriptTx(
         status: meeting.status,
         hasTranscript: Boolean(meeting.transcript),
         hasIngestionGuidance: Boolean(meeting.ingestionGuidanceMd),
+        sourceRecordId: params.sourceRecordId ?? null,
       },
     },
   ]);
@@ -893,6 +908,7 @@ export async function uploadMeetingTranscript(actor: AppActor, params: {
   ingestionGuidanceMd?: string | null;
   participantIds?: string[] | null;
   participantEmails?: string[] | null;
+  sourceRecordId?: string | null;
   replaceTranscript?: boolean;
 }) {
   await requireWorkspaceMembership({
@@ -974,6 +990,7 @@ export async function uploadMeetingTranscript(actor: AppActor, params: {
     ingestionGuidanceMd: params.ingestionGuidanceMd,
     participantIds: params.participantIds ?? [],
     participantEmails: params.participantEmails ?? [],
+    sourceRecordId: params.sourceRecordId ?? null,
   });
 
   return { status: "created" as const, meeting, candidates: [] };
@@ -1020,6 +1037,7 @@ export async function requestMeetingIntelligenceRegeneration(actor: AppActor, pa
         meetingId: meeting.id,
         workspaceId: params.workspaceId,
         status: "SUGGESTED",
+        sourceRecordId: null,
       },
     });
 
@@ -1071,6 +1089,7 @@ export async function createMeeting(actor: AppActor, params: {
   ingestionGuidanceMd?: string | null;
   participantIds?: string[];
   participantEmails?: string[];
+  sourceRecordId?: string | null;
 }) {
   await requireWorkspaceMembership({
     actor,
@@ -1118,6 +1137,18 @@ export async function createMeeting(actor: AppActor, params: {
       },
     });
 
+    if (params.sourceRecordId) {
+      await tx.meetingTranscriptSourceRecord.updateMany({
+        where: {
+          id: params.sourceRecordId,
+          workspaceId: params.workspaceId,
+        },
+        data: {
+          meetingId: meeting.id,
+        },
+      });
+    }
+
     await appendEvents(tx, [
       {
         workspaceId: params.workspaceId,
@@ -1131,6 +1162,7 @@ export async function createMeeting(actor: AppActor, params: {
           status: meeting.status,
           hasTranscript: Boolean(meeting.transcript),
           hasIngestionGuidance: Boolean(meeting.ingestionGuidanceMd),
+          sourceRecordId: params.sourceRecordId ?? null,
         },
       },
     ]);

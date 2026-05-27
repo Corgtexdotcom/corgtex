@@ -448,6 +448,7 @@ Be conservative — only extract items you're confident about.
         workspaceId: params.workspaceId,
         meetingId: meeting.id,
         status: "SUGGESTED",
+        sourceRecordId: null,
       },
     });
     

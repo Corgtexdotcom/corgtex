@@ -227,6 +227,7 @@ export async function intakeMeetingTranscript(actor: AppActor, params: {
     ingestionGuidanceMd: params.ingestionGuidanceMd,
     participantIds: params.participantIds ?? [],
     participantEmails: inferred.participantEmails,
+    sourceRecordId: params.sourceRecordId ?? null,
     replaceTranscript: params.replaceTranscript,
   });
 

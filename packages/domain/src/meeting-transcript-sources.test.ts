@@ -109,6 +109,15 @@ describe("meeting transcript sources", () => {
         ],
       },
     });
+    const stringTranscriptJson = normalizeMeetingTranscriptSourceArtifact("OTTER", {
+      fileName: "otter.json",
+      json: {
+        id: "otter-1",
+        title: "Customer Call",
+        date: "2026-05-03T10:00:00.000Z",
+        transcript: "Jan: This transcript field is already plain text.",
+      },
+    });
     const vtt = normalizeMeetingTranscriptSourceArtifact("FATHOM", {
       fileName: "2026-05-02-fathom.vtt",
       text: [
@@ -125,6 +134,7 @@ describe("meeting transcript sources", () => {
       participantEmails: ["jan@example.com"],
     });
     expect(json.segments[0]).toMatchObject({ speaker: "Jan", startMs: 1000 });
+    expect(stringTranscriptJson.transcript).toBe("Jan: This transcript field is already plain text.");
     expect(vtt.recordedAt).toEqual(new Date("2026-05-02T00:00:00.000Z"));
     expect(vtt.transcript).toContain("Milan: Newer transcript evidence should win.");
   });

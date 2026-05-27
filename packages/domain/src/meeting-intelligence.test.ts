@@ -1045,6 +1045,14 @@ describe("meeting-intelligence", () => {
           targetEntityId: "proposal-1",
         })],
       }));
+      expect(prisma.meetingInsight.deleteMany).toHaveBeenCalledWith({
+        where: {
+          workspaceId: "ws-1",
+          meetingId: "meeting-1",
+          status: "SUGGESTED",
+          sourceRecordId: null,
+        },
+      });
       expect(prisma.meetingInsight.updateMany).toHaveBeenCalledWith(expect.objectContaining({
         where: expect.objectContaining({
           targetEntityType: "Proposal",
