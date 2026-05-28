@@ -44,7 +44,6 @@ export default async function RootLayout({
     <html lang={locale} className={`${inter.variable} ${playfair.variable} ${sourceSerif.variable}`} suppressHydrationWarning>
       <body
         className={`${inter.variable} ${playfair.variable} ${sourceSerif.variable} font-sans`}
-        style={{ background: "var(--bg)" }}
       >
         <ThemeProvider>
           <ToastProvider>

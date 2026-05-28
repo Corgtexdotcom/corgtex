@@ -45,8 +45,8 @@ export function DesktopWorkspaceNav({
   return (
     <nav className="ws-nav">
       {navGroups.map((group) => (
-        <div key={group.labelKey} style={{ marginBottom: "16px" }}>
-          <div className="muted" style={{ fontSize: "0.75rem", textTransform: "uppercase", letterSpacing: "0.05em", padding: "0 12px", marginBottom: "4px", fontWeight: 600 }}>
+        <div key={group.labelKey} className="ws-nav-group">
+          <div className="ws-nav-group-title muted">
             {tNav(group.labelKey as any)}
           </div>
           {group.items.map((item) => {
@@ -71,8 +71,8 @@ export function DesktopWorkspaceNav({
       ))}
 
       {showPlatformAdmin && (
-        <div style={{ marginBottom: "16px" }}>
-          <div className="muted" style={{ fontSize: "0.75rem", textTransform: "uppercase", letterSpacing: "0.05em", padding: "0 12px", marginBottom: "4px", fontWeight: 600 }}>
+        <div className="ws-nav-group">
+          <div className="ws-nav-group-title muted">
             {tNav("globalAdmin")}
           </div>
           <a href={controlPlaneHref} className="ws-nav-link">
