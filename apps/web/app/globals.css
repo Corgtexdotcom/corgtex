@@ -31,11 +31,6 @@ body {
   min-height: 100vh;
 }
 
-.mobile-shell,
-.mobile-ai-workbench {
-  display: none;
-}
-
 a {
   color: inherit;
   transition: background-color 0.15s, border-color 0.15s, color 0.15s, var(--transition);
@@ -659,4 +654,3 @@ button:disabled {
     inset: 0;
   }
 }
-

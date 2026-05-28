@@ -67,6 +67,28 @@ describe("selectDashboardKnowledgeArticles", () => {
     expect(selected.map((article) => article.id)).toEqual(["fresh-reference"]);
   });
 
+  it("ranks newly created articles ahead of old articles that were only updated recently", () => {
+    const now = new Date("2026-05-27T12:00:00.000Z");
+    const selected = selectDashboardKnowledgeArticles([
+      {
+        id: "old-recently-updated",
+        authority: "REFERENCE",
+        isPrivate: false,
+        createdAt: new Date("2026-03-01T12:00:00.000Z"),
+        updatedAt: new Date("2026-05-27T11:00:00.000Z"),
+      },
+      {
+        id: "new-article",
+        authority: "REFERENCE",
+        isPrivate: false,
+        createdAt: new Date("2026-05-26T12:00:00.000Z"),
+        updatedAt: new Date("2026-05-26T12:00:00.000Z"),
+      },
+    ], now, 2);
+
+    expect(selected.map((article) => article.id)).toEqual(["new-article", "old-recently-updated"]);
+  });
+
   it("falls back to stable public authoritative or reference articles", () => {
     const now = new Date("2026-05-26T12:00:00.000Z");
     const selected = selectDashboardKnowledgeArticles([
@@ -161,6 +183,33 @@ describe("selectDashboardFeedItems", () => {
       "older-meeting",
       "second",
       "third",
+    ]);
+  });
+
+  it("keeps recently updated old articles below new articles and the latest meeting", () => {
+    const items = selectDashboardFeedItems({
+      now: new Date("2026-05-27T12:00:00.000Z"),
+      limit: 5,
+      articles: [
+        article({
+          id: "old-recently-updated",
+          createdAt: "2026-03-01T09:00:00.000Z",
+          updatedAt: "2026-05-27T11:00:00.000Z",
+        }),
+        article({
+          id: "new-article",
+          createdAt: "2026-05-26T09:00:00.000Z",
+        }),
+      ],
+      meetings: [
+        meeting({ id: "weekly", recordedAt: "2026-05-20T09:00:00.000Z" }),
+      ],
+    });
+
+    expect(items.map((item) => item.id)).toEqual([
+      "new-article",
+      "weekly",
+      "old-recently-updated",
     ]);
   });
 

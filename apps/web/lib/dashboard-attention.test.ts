@@ -3,29 +3,19 @@ import { describe, expect, it } from "vitest";
 import { getDashboardAttentionCounts } from "./dashboard-attention";
 
 describe("getDashboardAttentionCounts", () => {
-  it("omits pending agent approvals when the user cannot review agent runs", () => {
+  it("counts only unread notifications", () => {
     expect(getDashboardAttentionCounts({
-      pendingFlowsCount: 1,
-      pendingAgentApprovalsCount: 3,
       unreadNotificationsCount: 2,
-      advisoryRequestsCount: 1,
-      canReviewAgentRuns: false,
     })).toEqual({
-      pendingAgentApprovalsCount: 0,
-      totalAttentionItems: 4,
+      totalAttentionItems: 2,
     });
   });
 
-  it("includes pending agent approvals when the user can review agent runs", () => {
+  it("returns zero when there are no unread notifications", () => {
     expect(getDashboardAttentionCounts({
-      pendingFlowsCount: 1,
-      pendingAgentApprovalsCount: 3,
-      unreadNotificationsCount: 2,
-      advisoryRequestsCount: 1,
-      canReviewAgentRuns: true,
+      unreadNotificationsCount: 0,
     })).toEqual({
-      pendingAgentApprovalsCount: 3,
-      totalAttentionItems: 7,
+      totalAttentionItems: 0,
     });
   });
 });

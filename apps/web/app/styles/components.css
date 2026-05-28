@@ -1,5 +1,10 @@
 /* ── Workspace Shell ── */
 
+.mobile-shell,
+.mobile-ai-workbench {
+  display: none;
+}
+
 .ws-layout {
   display: grid;
   grid-template-columns: 240px minmax(0, 1fr) 350px;
@@ -61,16 +66,30 @@
 }
 
 .ws-workspace-name {
-  font-size: 0.82rem;
-  color: var(--muted);
-  margin-top: 4px;
+  margin-top: 2px;
+  font-weight: 500;
+  opacity: 0.8;
+  font-size: 0.8rem;
+  letter-spacing: 0.02em;
 }
 
 .ws-nav {
   display: flex;
   flex-direction: column;
-  gap: 2px;
   flex: 1;
+}
+
+.ws-nav-group {
+  margin-bottom: 16px;
+}
+
+.ws-nav-group-title {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 0 12px;
+  margin-bottom: 4px;
+  font-weight: 600;
 }
 
 .ws-nav-link {
@@ -2794,4 +2813,3 @@ details[open] > .settings-disclosure-summary::before {
   }
 
 }
-
