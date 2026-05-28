@@ -891,7 +891,7 @@ export default async function SettingsPage({
                       {wh.processedAt ? (
                         <span style={{ color: "var(--accent)", fontSize: "0.82rem" }}>{t("statusProcessed")}</span>
                       ) : wh.error ? (
-                        <span style={{ color: "#842029", fontSize: "0.82rem" }}>{t("statusError")}</span>
+                        <span style={{ color: "var(--danger)", fontSize: "0.82rem" }}>{t("statusError")}</span>
                       ) : (
                         <span className="nr-item-meta" style={{ fontSize: "0.82rem" }}>{t("statusPending")}</span>
                       )}
@@ -902,7 +902,7 @@ export default async function SettingsPage({
                       </div>
                     )}
                     {wh.error && (
-                      <div style={{ color: "#842029", fontSize: "0.82rem", marginTop: 4 }}>
+                      <div style={{ color: "var(--danger)", fontSize: "0.82rem", marginTop: 4 }}>
                         {wh.error}
                       </div>
                     )}

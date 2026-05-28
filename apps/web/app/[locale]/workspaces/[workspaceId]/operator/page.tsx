@@ -249,7 +249,7 @@ export default async function OperatorPage({
                     attempts: event.attempts,
                   })}
                 </div>
-                {event.error && <p className="muted" style={{ margin: "8px 0 0", color: "#b45309" }}>{event.error}</p>}
+                {event.error && <p className="muted" style={{ margin: "8px 0 0", color: "var(--warning)" }}>{event.error}</p>}
                 {canOperate && (
                   <form action={replayEventAction} className="operator-card-actions" style={{ marginTop: 8 }}>
                     <input type="hidden" name="workspaceId" value={workspaceId} />
@@ -277,7 +277,7 @@ export default async function OperatorPage({
                     date: formatDateTime(job.runAfter, t("notSet")),
                   })}
                 </div>
-                {job.error && <p className="muted" style={{ margin: "8px 0 0", color: "#b45309" }}>{job.error}</p>}
+                {job.error && <p className="muted" style={{ margin: "8px 0 0", color: "var(--warning)" }}>{job.error}</p>}
                 {canOperate && (
                   <form action={replayWorkflowJobAction} className="operator-card-actions" style={{ marginTop: 8 }}>
                     <input type="hidden" name="workspaceId" value={workspaceId} />
@@ -307,7 +307,7 @@ export default async function OperatorPage({
                     date: formatDateTime(job.updatedAt ?? job.createdAt, t("notSet")),
                   })}
                 </div>
-                {job.error && <p className="muted" style={{ margin: "8px 0 0", color: "#b45309" }}>{job.error}</p>}
+                {job.error && <p className="muted" style={{ margin: "8px 0 0", color: "var(--warning)" }}>{job.error}</p>}
                 {canOperate && (
                   <div className="row operator-card-actions" style={{ marginTop: 8, gap: 8, justifyContent: "flex-start" }}>
                     <form action={replayWorkflowJobAction}>

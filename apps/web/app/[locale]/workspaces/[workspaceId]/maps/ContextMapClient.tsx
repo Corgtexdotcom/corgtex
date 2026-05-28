@@ -291,7 +291,7 @@ const NODE_COLORS: Record<string, NodeColors> = {
   Policy: { border: "#334155", background: "#f8fafc", accent: "#1e293b" },
   Document: { border: "#2563eb", background: "#eff6ff", accent: "#1d4ed8" },
   Evidence: { border: "#64748b", background: "#f8fafc", accent: "#475569" },
-  Metric: { border: "#b45309", background: "#fffbeb", accent: "#92400e" },
+  Metric: { border: "var(--warning)", background: "var(--warning-soft)", accent: "var(--warning)" },
 };
 
 const PROCESS_DETAIL_TYPES = new Set(["Risk", "Metric", "Question", "Hypothesis"]);

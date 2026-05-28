@@ -219,7 +219,7 @@ export function AgentConnectionManager({ workspaceId, mcpUrl, initialCredentials
             </p>
             <div style={{ position: "relative", marginBottom: 24 }}>
               <pre style={{ background: "black", padding: 16, borderRadius: 6, fontSize: "0.85rem", overflowX: "auto", border: "1px solid var(--line)", margin: 0 }}>
-                <code style={{ fontFamily: "monospace", color: "#e2e8f0" }}>{`cat > ~/Library/Application\\ Support/Claude/claude_desktop_config.json << 'EOF'
+                <code style={{ fontFamily: "monospace", color: "var(--code-fg)" }}>{`cat > ~/Library/Application\\ Support/Claude/claude_desktop_config.json << 'EOF'
 {
   "mcpServers": {
     "corgtex": {
@@ -253,7 +253,7 @@ EOF`}</code>
             </p>
             <div style={{ position: "relative" }}>
               <pre style={{ background: "black", padding: 16, borderRadius: 6, fontSize: "0.85rem", overflowX: "auto", border: "1px solid var(--line)", margin: 0 }}>
-                <code style={{ fontFamily: "monospace", color: "#e2e8f0" }}>{`{
+                <code style={{ fontFamily: "monospace", color: "var(--code-fg)" }}>{`{
   "mcpServers": {
     "corgtex": {
       "command": "npx",
@@ -286,7 +286,7 @@ EOF`}</code>
             </p>
             <div style={{ position: "relative", marginBottom: 16 }}>
               <pre style={{ background: "black", padding: 16, paddingRight: 100, borderRadius: 6, fontSize: "0.85rem", overflowX: "auto", border: "1px solid var(--line)", margin: 0, whiteSpace: "pre-wrap", wordBreak: "break-all" }}>
-                <code style={{ fontFamily: "monospace", color: "#e2e8f0" }}>{`npx -y mcp-remote@latest ${mcpUrl} --header "Authorization: Bearer ${token}"`}</code>
+                <code style={{ fontFamily: "monospace", color: "var(--code-fg)" }}>{`npx -y mcp-remote@latest ${mcpUrl} --header "Authorization: Bearer ${token}"`}</code>
               </pre>
               <button
                 onClick={() => handleCopy(`npx -y mcp-remote@latest ${mcpUrl} --header "Authorization: Bearer ${token}"`)}

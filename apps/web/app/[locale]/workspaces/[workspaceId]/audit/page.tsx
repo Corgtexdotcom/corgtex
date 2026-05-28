@@ -37,9 +37,9 @@ function actionLabel(action: string): string {
 
 function statusColor(status: string): string {
   if (status === "COMPLETED" || status === "DELIVERED" || status === "SENT") return "var(--accent)";
-  if (status === "FAILED") return "#842029";
+  if (status === "FAILED") return "var(--danger)";
   if (status === "RUNNING" || status === "PENDING" || status === "SKIPPED") return "var(--warning)";
-  if (status === "WAITING_APPROVAL") return "#b45309";
+  if (status === "WAITING_APPROVAL") return "var(--warning)";
   return "inherit";
 }
 
