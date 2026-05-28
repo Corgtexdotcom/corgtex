@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -159,5 +160,24 @@ describe("client readiness mobile mode handling", () => {
     expect(page.screenshot).toHaveBeenCalledWith(expect.objectContaining({
       path: expect.stringContaining("mobile-shell-iphone-modern-ai-missing.png"),
     }));
+  });
+});
+
+describe("client readiness mobile stylesheet contract", () => {
+  it("keeps the mobile shell default hidden rule before the mobile breakpoint override", async () => {
+    const [globalsCss, componentsCss] = await Promise.all([
+      readFile("apps/web/app/globals.css", "utf8"),
+      readFile("apps/web/app/styles/components.css", "utf8"),
+    ]);
+
+    expect(globalsCss).not.toContain(".mobile-shell,\n.mobile-ai-workbench {\n  display: none;\n}");
+
+    const defaultHiddenIndex = componentsCss.indexOf(".mobile-shell,\n.mobile-ai-workbench {\n  display: none;\n}");
+    const mobileBreakpointIndex = componentsCss.indexOf("@media (max-width: 720px)");
+    const mobileVisibleIndex = componentsCss.indexOf(".mobile-shell {\n    display: block;\n  }", mobileBreakpointIndex);
+
+    expect(defaultHiddenIndex).toBeGreaterThanOrEqual(0);
+    expect(mobileBreakpointIndex).toBeGreaterThan(defaultHiddenIndex);
+    expect(mobileVisibleIndex).toBeGreaterThan(mobileBreakpointIndex);
   });
 });

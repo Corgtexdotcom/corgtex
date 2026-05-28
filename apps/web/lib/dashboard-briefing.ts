@@ -68,20 +68,60 @@ function articleActivityTime(article: DashboardBrainArticle) {
   return Math.max(article.createdAt.getTime(), article.updatedAt.getTime());
 }
 
+function articleCreatedTime(article: DashboardBrainArticle) {
+  return article.createdAt.getTime();
+}
+
+function articleUpdatedTime(article: DashboardBrainArticle) {
+  return article.updatedAt.getTime();
+}
+
+function freshnessCutoff(now: Date) {
+  return now.getTime() - FRESH_KNOWLEDGE_WINDOW_DAYS * 24 * 60 * 60 * 1000;
+}
+
+function articleRank(article: DashboardBrainArticle, now: Date) {
+  const cutoff = freshnessCutoff(now);
+  const createdAt = articleCreatedTime(article);
+  const updatedAt = articleUpdatedTime(article);
+
+  if (createdAt >= cutoff) {
+    return { tier: 0, timestamp: createdAt };
+  }
+
+  if (updatedAt >= cutoff) {
+    return { tier: 1, timestamp: updatedAt };
+  }
+
+  return { tier: 2, timestamp: createdAt };
+}
+
 export function selectDashboardKnowledgeArticles<T extends DashboardBrainArticle>(
   articles: T[],
   now = new Date(),
   limit = 4,
 ) {
-  const cutoff = now.getTime() - FRESH_KNOWLEDGE_WINDOW_DAYS * 24 * 60 * 60 * 1000;
+  const cutoff = freshnessCutoff(now);
   const publicArticles = articles.filter((article) => !article.isPrivate);
-  const freshArticles = publicArticles.filter((article) => articleActivityTime(article) >= cutoff);
+  const newArticles = publicArticles.filter((article) => articleCreatedTime(article) >= cutoff);
+  const recentlyUpdatedArticles = publicArticles.filter((article) => (
+    articleCreatedTime(article) < cutoff
+    && articleUpdatedTime(article) >= cutoff
+  ));
   const stableArticles = publicArticles.filter((article) => (
     article.authority === "AUTHORITATIVE" || article.authority === "REFERENCE"
   ));
   const selectedById = new Map<string, T>();
-  for (const group of [freshArticles, stableArticles, publicArticles]) {
-    for (const article of [...group].sort((a, b) => articleActivityTime(b) - articleActivityTime(a))) {
+
+  const groups = [
+    [...newArticles].sort((a, b) => articleCreatedTime(b) - articleCreatedTime(a)),
+    [...recentlyUpdatedArticles].sort((a, b) => articleUpdatedTime(b) - articleUpdatedTime(a)),
+    [...stableArticles].sort((a, b) => articleCreatedTime(b) - articleCreatedTime(a)),
+    [...publicArticles].sort((a, b) => articleCreatedTime(b) - articleCreatedTime(a)),
+  ];
+
+  for (const group of groups) {
+    for (const article of group) {
       selectedById.set(article.id, article);
       if (selectedById.size >= limit) break;
     }
@@ -145,7 +185,17 @@ export function selectDashboardFeedItems<
     : null;
 
   const ranked = [...articleItems, ...(meetingItem ? [meetingItem] : [])]
-    .sort((a, b) => b.freshnessAt.getTime() - a.freshnessAt.getTime());
+    .sort((a, b) => {
+      const aRank = a.kind === "MEETING"
+        ? { tier: 0, timestamp: a.recordedAt.getTime() }
+        : articleRank(a.source, now);
+      const bRank = b.kind === "MEETING"
+        ? { tier: 0, timestamp: b.recordedAt.getTime() }
+        : articleRank(b.source, now);
+
+      if (aRank.tier !== bRank.tier) return aRank.tier - bRank.tier;
+      return bRank.timestamp - aRank.timestamp;
+    });
 
   if (meetingItem) {
     const currentIndex = ranked.findIndex((item) => item.kind === "MEETING" && item.id === meetingItem.id);

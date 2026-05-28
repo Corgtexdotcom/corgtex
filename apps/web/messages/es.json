@@ -644,6 +644,7 @@
     "achieved": "{percent}% logrado",
     "actionItems": "Acciones",
     "activeTensions": "Tensiones activas",
+    "added": "Añadido",
     "activityOn": "en",
     "assignedTo": "Asignado a {name}",
     "advisoryRequests": "{count, plural, =1 {# solicitud de asesoramiento} other {# solicitudes de asesoramiento}}",

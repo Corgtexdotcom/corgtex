@@ -1,14 +1,12 @@
 import {
   computeNewspaperLayout,
   countUnreadNotifications,
-  listActionableApprovalFlows,
   listMembers, listNotifications, listTensions,
   listArticles, listMeetings
 } from "@corgtex/domain";
 import { prisma, workspaceBranding } from "@corgtex/shared";
 import { requirePageActor } from "@/lib/auth";
 import {
-  decideApprovalAction,
   markAllNotificationsReadAction,
 } from "./actions";
 import Link from "next/link";
@@ -16,7 +14,6 @@ import { GoalProgress } from "./goals/GoalProgress";
 import { RecognitionCard } from "./goals/RecognitionCard";
 import { getTranslations, getFormatter } from "next-intl/server";
 import { getDashboardAttentionCounts } from "@/lib/dashboard-attention";
-import { getWorkspaceCapabilities } from "@/lib/workspace-capabilities";
 import { MarkdownExcerpt } from "@/lib/components/MarkdownRenderer";
 import { resolveWorkspaceEntityUrl } from "@/lib/workspace-entity-url";
 import {
@@ -36,14 +33,11 @@ export default async function WorkspaceDashboard({
   const actor = await requirePageActor();
   const t = await getTranslations("dashboard");
   const format = await getFormatter();
-  const capabilities = await getWorkspaceCapabilities(actor, workspaceId);
 
   const [
     { items: tensions },
     members,
     notifications,
-    pendingFlowsRaw,
-    pendingAgentApprovals,
     unreadNotificationsCount,
     articlesResult,
     meetings,
@@ -52,17 +46,12 @@ export default async function WorkspaceDashboard({
     chunksCount,
     workspaceData,
     recentPublishedBase,
-    activeAdviceProcesses,
     strategicGoals,
     recentRecognition
   ] = await Promise.all([
     listTensions(actor, workspaceId, { take: 10 }),
     listMembers(workspaceId),
     listNotifications(actor, workspaceId, { take: 5, unreadOnly: true }),
-    listActionableApprovalFlows(actor, workspaceId, { take: 5 }),
-    capabilities.canReviewAgentRuns
-      ? prisma.agentRun.count({ where: { workspaceId, status: "WAITING_APPROVAL" } })
-      : Promise.resolve(0),
     actor.kind === "user" ? countUnreadNotifications(actor.user.id, workspaceId) : Promise.resolve(0),
     listArticles(actor, { workspaceId, take: 50 }),
     listMeetings(workspaceId, { status: "COMPLETED" }),
@@ -125,11 +114,6 @@ export default async function WorkspaceDashboard({
       prisma.proposal.findMany({ where: { workspaceId, isPrivate: false, publishedAt: { not: null } }, select: { id: true, title: true, publishedAt: true, author: { select: { displayName: true } } }, orderBy: { publishedAt: "desc" }, take: 10 }),
       prisma.brainArticle.findMany({ where: { workspaceId, isPrivate: false, publishedAt: { not: null } }, select: { id: true, slug: true, title: true, publishedAt: true, ownerMember: { select: { user: { select: { displayName: true } } } } }, orderBy: { publishedAt: "desc" }, take: 10 }),
     ]),
-    prisma.adviceProcess.findMany({
-      where: { workspaceId, status: { in: ["GATHERING", "READY"] } },
-      include: { proposal: { select: { id: true, title: true } } },
-      orderBy: { createdAt: "desc" },
-    }),
     prisma.goal.findMany({
       where: { workspaceId, level: "COMPANY", status: { notIn: ["DRAFT", "ABANDONED"] } },
       orderBy: [{ sortOrder: "asc" }, { createdAt: "desc" }],
@@ -144,38 +128,23 @@ export default async function WorkspaceDashboard({
 
   const branding = workspaceData ? workspaceBranding(workspaceData) : { primaryName: "Corgtex", secondaryLabel: "powered by Corgtex" };
 
-  // Filter advice processes where there is a suggestion for the current user
-  let advisoryRequests: any[] = [];
   const currentMember = actor.kind === 'user' ? members.find(m => m.userId === actor.user.id) : undefined;
   const currentMemberUrl = currentMember?.id;
-  if (currentMemberUrl) {
-    advisoryRequests = activeAdviceProcesses.filter(ap => {
-      if (!ap.advisorySuggestionsJson || !Array.isArray((ap.advisorySuggestionsJson as any).advisors)) return false;
-      return (ap.advisorySuggestionsJson as any).advisors.some((a: any) => a.memberId === currentMemberUrl);
-    });
-  }
 
-  const pendingFlows = pendingFlowsRaw.items;
-  const pendingFlowTotal = pendingFlowsRaw.total;
-  const displayedApprovalFlows = pendingFlows.slice(0, 3);
   const unreadNotifications = notifications;
   const openProposalItems = selectDashboardOpenProposals(openProposalCandidates);
   const teamActionItems = selectDashboardActionItems(teamActionCandidates);
   const openTensionItems = tensions.filter((tension) => tension.status === "OPEN");
   
   const attentionCounts = getDashboardAttentionCounts({
-    pendingFlowsCount: pendingFlowTotal,
-    pendingAgentApprovalsCount: pendingAgentApprovals,
     unreadNotificationsCount,
-    advisoryRequestsCount: advisoryRequests.length,
-    canReviewAgentRuns: capabilities.canReviewAgentRuns,
   });
   const totalAttentionItems = attentionCounts.totalAttentionItems;
-  const visiblePendingAgentApprovals = attentionCounts.pendingAgentApprovalsCount;
 
   const ageText = (date: Date) => format.relativeTime(date);
 
   const d = new Date();
+  const freshKnowledgeWindowMs = 14 * 24 * 60 * 60 * 1000;
   const dateString = format.dateTime(d, { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
 
   const allArticles = articlesResult.items;
@@ -265,112 +234,46 @@ export default async function WorkspaceDashboard({
       <h2 className="nr-section-header">{t("attention")}</h2>
       <div className="nr-attention nr-attention-rail">
         <div className="nr-attention-summary">
-          {t("itemsNeedAttention", { count: totalAttentionItems })}
+          {t("unreadNotificationsSummary", { count: unreadNotificationsCount })}
         </div>
 
         <div className="nr-attention-body">
-          {pendingFlowTotal > 0 && (
-            <div className="nr-attention-block">
-              <strong>{t("approvalsPending", { count: pendingFlowTotal })}</strong>
-              {displayedApprovalFlows.map((flow) => {
-                const href = resolveWorkspaceEntityUrl(workspaceId, flow.subjectType, flow.subjectId);
-                const label = flow.subjectLabel || flow.subjectType;
-                const typeLabel = flow.subjectType.charAt(0) + flow.subjectType.slice(1).toLowerCase();
-                return (
-                  <div key={flow.id} className="nr-attention-item">
-                    <div className="nr-attention-item-main">
-                      <div className="nr-attention-kicker">{typeLabel}</div>
-                      {href ? (
-                        <Link href={href} className="nr-attention-title nr-attention-title-truncate">
-                          {label}
-                        </Link>
-                      ) : (
-                        <span className="nr-attention-title">{label}</span>
-                      )}
-                    </div>
-                    <form action={decideApprovalAction} className="nr-attention-action">
-                      <input type="hidden" name="workspaceId" value={workspaceId} />
-                      <input type="hidden" name="flowId" value={flow.id} />
-                      <button type="submit" name="choice" value={flow.mode === "CONSENT" ? "AGREE" : "APPROVE"} className="nr-attention-button">{t("approve")}</button>
-                    </form>
-                  </div>
-                );
-              })}
-              {pendingFlowTotal > displayedApprovalFlows.length && (
-                <>
-                  <span className="nr-attention-copy">{t("remainingApprovals", { count: pendingFlowTotal - displayedApprovalFlows.length })}</span>
-                  <Link href={`/workspaces/${workspaceId}/proposals?status=OPEN`} className="nr-attention-inline-link">
-                    {t("viewProposalApprovals")}
-                  </Link>
-                  <Link href={`/workspaces/${workspaceId}/finance?status=OPEN`} className="nr-attention-inline-link">
-                    {t("viewSpendApprovals")}
-                  </Link>
-                </>
-              )}
+          <div className="nr-attention-block">
+            <div className="nr-attention-block-header">
+              <strong>
+                <Link href={`/workspaces/${workspaceId}/notifications`} className="nr-attention-heading-link">
+                  {t("notifications")}
+                </Link>
+              </strong>
+              <form action={markAllNotificationsReadAction} className="nr-attention-mark-read">
+                <input type="hidden" name="workspaceId" value={workspaceId} />
+                <button type="submit" className="nr-attention-mark-read-button">{t("markRead")}</button>
+              </form>
             </div>
-          )}
-
-          {visiblePendingAgentApprovals > 0 && (
-            <div className="nr-attention-block">
-              <strong>{t("agentRuns")}</strong>
-              <span className="nr-attention-copy">{t("runsWaitingReview", { count: visiblePendingAgentApprovals })}</span>
-              <Link href={`/workspaces/${workspaceId}/operator`} className="nr-attention-inline-link">{t("review")}</Link>
-            </div>
-          )}
-
-          {unreadNotificationsCount > 0 && (
-            <div className="nr-attention-block">
-              <div className="nr-attention-block-header">
-                <strong>
-                  <Link href={`/workspaces/${workspaceId}/notifications`} className="nr-attention-heading-link">
-                    {t("notifications")}
-                  </Link>
-                </strong>
-                <form action={markAllNotificationsReadAction} className="nr-attention-mark-read">
-                  <input type="hidden" name="workspaceId" value={workspaceId} />
-                  <button type="submit" className="nr-attention-mark-read-button">{t("markRead")}</button>
-                </form>
-              </div>
-              <span className="nr-attention-copy">{t("unreadNotificationsSummary", { count: unreadNotificationsCount })}</span>
-              {unreadNotifications.slice(0, 3).map((n) => {
-                const href = resolveWorkspaceEntityUrl(workspaceId, n.entityType, n.entityId);
-                return (
-                  <div key={n.id} className="nr-attention-notification">
-                    <div className="nr-attention-notification-head">
-                      {href ? (
-                        <Link href={href} className="nr-attention-title nr-attention-title-truncate">
-                          {n.title}
-                        </Link>
-                      ) : (
-                        <span className="nr-attention-title nr-attention-title-truncate">{n.title}</span>
-                      )}
-                      <span className="nr-attention-time" suppressHydrationWarning>{ageText(n.createdAt)}</span>
-                    </div>
-                    {n.bodyMd && (
-                      <div className="nr-attention-copy">
-                        <MarkdownExcerpt markdown={n.bodyMd} maxLength={100} />
-                      </div>
+            {unreadNotifications.slice(0, 3).map((n) => {
+              const href = resolveWorkspaceEntityUrl(workspaceId, n.entityType, n.entityId);
+              return (
+                <div key={n.id} className="nr-attention-notification">
+                  <div className="nr-attention-notification-head">
+                    {href ? (
+                      <Link href={href} className="nr-attention-title nr-attention-title-truncate">
+                        {n.title}
+                      </Link>
+                    ) : (
+                      <span className="nr-attention-title nr-attention-title-truncate">{n.title}</span>
                     )}
+                    <span className="nr-attention-time" suppressHydrationWarning>{ageText(n.createdAt)}</span>
                   </div>
-                );
-                })}
-              <Link href={`/workspaces/${workspaceId}/notifications`} className="nr-attention-inline-link">{t("viewAll")}</Link>
-            </div>
-          )}
-
-          {advisoryRequests.length > 0 && (
-            <div className="nr-attention-block nr-attention-block-info">
-              <strong>{t("advisoryRequests", { count: advisoryRequests.length })}</strong>
-              {advisoryRequests.slice(0, 2).map((ap: any) => (
-                <div key={ap.id} className="nr-attention-item">
-                  <Link href={`/workspaces/${workspaceId}/proposals?status=OPEN`} className="nr-attention-title">
-                    {ap.proposal.title}
-                  </Link>
+                  {n.bodyMd && (
+                    <div className="nr-attention-copy">
+                      <MarkdownExcerpt markdown={n.bodyMd} maxLength={100} />
+                    </div>
+                  )}
                 </div>
-              ))}
-              {advisoryRequests.length > 2 && <div className="nr-attention-kicker">{t("more", { count: advisoryRequests.length - 2 })}</div>}
-            </div>
-          )}
+              );
+            })}
+            <Link href={`/workspaces/${workspaceId}/notifications`} className="nr-attention-inline-link">{t("viewAll")}</Link>
+          </div>
         </div>
       </div>
     </section>
@@ -427,7 +330,9 @@ export default async function WorkspaceDashboard({
                       <span suppressHydrationWarning>
                         {item.kind === "MEETING"
                           ? format.dateTime(item.recordedAt, { month: "short", day: "numeric", year: "numeric" })
-                          : `${t("updated")} ${ageText(item.updatedAt)}`}
+                          : item.createdAt.getTime() >= d.getTime() - freshKnowledgeWindowMs
+                            ? `${t("added")} ${ageText(item.createdAt)}`
+                            : `${t("updated")} ${ageText(item.updatedAt)}`}
                       </span>
                     </div>
                     <Link href={href} className="nr-feed-link">

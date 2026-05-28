@@ -1,5 +1,10 @@
 /* ── Workspace Shell ── */
 
+.mobile-shell,
+.mobile-ai-workbench {
+  display: none;
+}
+
 .ws-layout {
   display: grid;
   grid-template-columns: 240px minmax(0, 1fr) 350px;
