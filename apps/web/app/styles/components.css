@@ -2940,6 +2940,12 @@ details[open] > .settings-disclosure-summary::before {
   gap: 64px;
 }
 
+@media (max-width: 900px) {
+  .nr-detail-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 .nr-article {
   font-size: 1.1rem;
   line-height: 1.8;
