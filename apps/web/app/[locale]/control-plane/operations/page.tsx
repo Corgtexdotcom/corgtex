@@ -86,7 +86,7 @@ export default async function ControlPlaneOperationsPage() {
         <h1 className="text-2xl font-bold tracking-tight text-white mt-1">
           Operational Audit Logs
         </h1>
-        <p className="text-xs text-slate-400 mt-1 max-w-2xl">
+        <p className="text-xs text-muted mt-1 max-w-2xl">
           Unified central audit trail tracking all platform actions, background syncs, feature flag changes, and emergency break-glass sessions across the fleet.
         </p>
       </div>
@@ -94,20 +94,20 @@ export default async function ControlPlaneOperationsPage() {
       {/* Top Indicators Row */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         {[
-          { title: "Total Operations", value: totalOps, detail: "logged across fleet", icon: Activity, tone: "text-slate-400" },
+          { title: "Total Operations", value: totalOps, detail: "logged across fleet", icon: Activity, tone: "text-muted" },
           { title: "Mutating Events", value: formattedOps.filter((o: any) => o.isMutating).length, detail: "state alterations recorded", icon: Layers, tone: "text-indigo-400" },
-          { title: "Break-Glass Incidents", value: breakGlassCount, detail: "emergency sessions logged", icon: AlertTriangle, tone: breakGlassCount > 0 ? "text-amber-500" : "text-slate-400" },
-          { title: "Failed Processes", value: errorCount, detail: "workflow errors recorded", icon: ShieldCheck, tone: errorCount > 0 ? "text-rose-400" : "text-slate-400" },
+          { title: "Break-Glass Incidents", value: breakGlassCount, detail: "emergency sessions logged", icon: AlertTriangle, tone: breakGlassCount > 0 ? "text-amber-500" : "text-muted" },
+          { title: "Failed Processes", value: errorCount, detail: "workflow errors recorded", icon: ShieldCheck, tone: errorCount > 0 ? "text-rose-400" : "text-muted" },
         ].map((stat, i) => {
           const Icon = stat.icon;
           return (
-            <div key={i} className="bg-[#0b0d12] border border-[#1f2430] rounded-xl p-4 flex justify-between items-start">
+            <div key={i} className="bg-bg-alt border border-line rounded-xl p-4 flex justify-between items-start">
               <div className="space-y-1">
-                <span className="text-[10px] text-slate-500 font-semibold uppercase">{stat.title}</span>
+                <span className="text-[10px] text-muted font-semibold uppercase">{stat.title}</span>
                 <span className="text-xl font-bold text-white block">{stat.value}</span>
-                <span className="text-[10px] text-slate-400 block">{stat.detail}</span>
+                <span className="text-[10px] text-muted block">{stat.detail}</span>
               </div>
-              <div className={cn("p-2 rounded-lg bg-[#141822] border border-[#202738]", stat.tone)}>
+              <div className={cn("p-2 rounded-lg bg-surface border border-line", stat.tone)}>
                 <Icon className="w-4 h-4" />
               </div>
             </div>
@@ -116,16 +116,16 @@ export default async function ControlPlaneOperationsPage() {
       </div>
 
       {/* Operations log table */}
-      <div className="bg-[#0b0d12] border border-[#1f2430] rounded-xl p-5 shadow-sm space-y-4">
+      <div className="bg-bg-alt border border-line rounded-xl p-5 shadow-sm space-y-4">
         <div>
           <h2 className="text-sm font-bold text-white">Central Operational Audit Trail</h2>
-          <p className="text-[10px] text-slate-500 mt-0.5">Chronological ledger of reasoned mutations and platform inquiries.</p>
+          <p className="text-[10px] text-muted mt-0.5">Chronological ledger of reasoned mutations and platform inquiries.</p>
         </div>
 
         <div className="overflow-x-auto">
           <table className="w-full border-collapse text-xs">
             <thead>
-              <tr className="border-b border-[#1f2430] text-slate-400 text-left font-medium">
+              <tr className="border-b border-line text-muted text-left font-medium">
                 <th className="p-3">Incident / Type</th>
                 <th className="p-3">Description</th>
                 <th className="p-3">Customer Context</th>
@@ -135,9 +135,9 @@ export default async function ControlPlaneOperationsPage() {
                 <th className="p-3 text-right">Details</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-[#1f2430]/60">
+            <tbody className="divide-y divide-line">
               {formattedOps.map((op: any) => (
-                <tr key={op.id} className={cn("hover:bg-[#141822]/40 transition-colors", op.isBreakGlass && "bg-amber-500/[0.02]")}>
+                <tr key={op.id} className={cn("hover:bg-surface/40 transition-colors", op.isBreakGlass && "bg-amber-500/[0.02]")}>
                   <td className="p-3">
                     <div className="flex items-center gap-2">
                       {op.isBreakGlass && <AlertTriangle className="w-3.5 h-3.5 text-amber-500 shrink-0" />}
@@ -152,12 +152,12 @@ export default async function ControlPlaneOperationsPage() {
                     )}
                   </td>
                   <td className="p-3 min-w-[200px]">
-                    <span className="text-slate-200 block font-medium">{op.description}</span>
+                    <span className="text-text block font-medium">{op.description}</span>
                     {op.error && (
                       <span className="text-[9px] font-mono text-rose-400 block mt-1">{op.error}</span>
                     )}
                   </td>
-                  <td className="p-3 font-semibold text-slate-300">
+                  <td className="p-3 font-semibold text-text">
                     {op.customerName}
                   </td>
                   <td className="p-3">
@@ -165,30 +165,30 @@ export default async function ControlPlaneOperationsPage() {
                       {op.status}
                     </span>
                   </td>
-                  <td className="p-3 text-slate-400 font-medium">
+                  <td className="p-3 text-muted font-medium">
                     {op.actorName}
                   </td>
-                  <td className="p-3 text-slate-500 font-semibold">
+                  <td className="p-3 text-muted font-semibold">
                     {op.createdAt}
                   </td>
                   <td className="p-3 text-right">
                     {op.customerId ? (
                       <Link
                         href={`/control-plane/deployments/${op.customerId}?tab=logs`}
-                        className="inline-flex items-center gap-1 bg-[#141822] hover:bg-[#1d2333] border border-[#202738] text-slate-300 px-2 py-1 rounded text-[10px] font-medium transition-colors"
+                        className="inline-flex items-center gap-1 bg-surface hover:bg-surface-strong border border-line text-text px-2 py-1 rounded text-[10px] font-medium transition-colors"
                       >
                         Inspect
-                        <ArrowRight className="w-3 h-3 text-slate-500" />
+                        <ArrowRight className="w-3 h-3 text-muted" />
                       </Link>
                     ) : (
-                      <span className="text-slate-600">-</span>
+                      <span className="text-muted">-</span>
                     )}
                   </td>
                 </tr>
               ))}
               {formattedOps.length === 0 && (
                 <tr>
-                  <td colSpan={7} className="text-center py-8 text-slate-500">
+                  <td colSpan={7} className="text-center py-8 text-muted">
                     No control-plane operations have been recorded yet.
                   </td>
                 </tr>

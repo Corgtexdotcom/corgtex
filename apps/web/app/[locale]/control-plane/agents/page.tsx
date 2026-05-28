@@ -196,7 +196,7 @@ export default async function ControlPlaneAgentsPage() {
         <h1 className="text-2xl font-bold tracking-tight text-white mt-1">
           Agent Observatory
         </h1>
-        <p className="text-xs text-slate-400 mt-1 max-w-2xl">
+        <p className="text-xs text-muted mt-1 max-w-2xl">
           Global operations center to monitor, filter, and audit all autonomous AI agents running across customer workspaces. Check model tiers, execution costs, and trace run steps.
         </p>
       </div>

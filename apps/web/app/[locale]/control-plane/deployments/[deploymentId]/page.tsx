@@ -99,7 +99,7 @@ export default async function ControlPlaneCustomerPage({
     <div className="space-y-6 pb-12 animate-in fade-in duration-300">
       
       {/* Detail Header area */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-[#1f2430] pb-6">
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-line pb-6">
         <div>
           <span className="text-[10px] font-bold tracking-widest text-brand-400 uppercase">
             {t("customerDetail.eyebrow")}
@@ -107,7 +107,7 @@ export default async function ControlPlaneCustomerPage({
           <h1 className="text-2xl font-bold tracking-tight text-white mt-1">
             {customer.label}
           </h1>
-          <p className="text-xs text-slate-400 mt-1 max-w-2xl">
+          <p className="text-xs text-muted mt-1 max-w-2xl">
             Public URL: <a href={customer.url} target="_blank" rel="noreferrer" className="text-brand-400 hover:underline">{customer.url}</a>
           </p>
         </div>
@@ -118,7 +118,7 @@ export default async function ControlPlaneCustomerPage({
             href={customer.url}
             target="_blank"
             rel="noreferrer"
-            className="bg-[#141822] hover:bg-[#1d2333] border border-[#202738] text-slate-300 hover:text-white px-3.5 py-2 rounded-lg text-xs font-semibold transition-all"
+            className="bg-surface hover:bg-surface-strong border border-line text-text hover:text-white px-3.5 py-2 rounded-lg text-xs font-semibold transition-all"
           >
             {t("customerDetail.openCustomer")}
           </a>

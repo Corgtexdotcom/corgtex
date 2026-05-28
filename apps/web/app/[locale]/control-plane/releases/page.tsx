@@ -80,7 +80,7 @@ export default async function ControlPlaneReleasesPage() {
     <div className="space-y-6 animate-in fade-in duration-300">
       
       {/* Header */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-[#1f2430] pb-6">
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-line pb-6">
         <div>
           <span className="text-[10px] font-bold tracking-widest text-brand-400 uppercase">
             Observe & Upgrade
@@ -88,21 +88,21 @@ export default async function ControlPlaneReleasesPage() {
           <h1 className="text-2xl font-bold tracking-tight text-white mt-1">
             Releases and Upgrade Cockpit
           </h1>
-          <p className="text-xs text-slate-400 mt-1 max-w-2xl">
+          <p className="text-xs text-muted mt-1 max-w-2xl">
             Track release versions, preflight staging checklists, rollbacks, and version drifts across all hosted environments. Trigger cluster upgrades with audited rationale logs.
           </p>
         </div>
 
         {/* Global Bulk Rollout Trigger */}
-        <div className="bg-[#0b0d12] border border-[#1f2430] rounded-xl p-4 flex items-center gap-4">
+        <div className="bg-bg-alt border border-line rounded-xl p-4 flex items-center gap-4">
           <form action={enqueueDeployLatestRolloutAction} className="flex flex-col sm:flex-row sm:items-end gap-3">
             <div>
-              <label className="text-[9px] font-bold text-slate-500 uppercase block mb-1">Bulk Upgrade Reason</label>
+              <label className="text-[9px] font-bold text-muted uppercase block mb-1">Bulk Upgrade Reason</label>
               <input
                 name="reason"
                 required
                 defaultValue="Staged fleet upgrade following production release verification."
-                className="bg-[#141822] border border-[#202738] text-xs text-slate-300 rounded px-2 py-1 w-64 focus:outline-none"
+                className="bg-surface border border-line text-xs text-text rounded px-2 py-1 w-64 focus:outline-none"
               />
             </div>
             <input type="hidden" name="allEligible" value="true" />
@@ -114,7 +114,7 @@ export default async function ControlPlaneReleasesPage() {
                 "font-semibold text-xs px-3.5 py-1.5 rounded shadow transition-all duration-150 h-8",
                 canQueueReleaseRollouts
                   ? "bg-brand-600 hover:bg-brand-500 text-white"
-                  : "bg-[#141822]/40 border border-[#202738]/60 text-slate-500 cursor-not-allowed"
+                  : "bg-surface/40 border border-line/60 text-muted cursor-not-allowed"
               )}
             >
               {releaseQueueLabel}
@@ -127,16 +127,16 @@ export default async function ControlPlaneReleasesPage() {
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         
         {/* Version Matrix Table (Col Span 2) */}
-        <div className="lg:col-span-2 bg-[#0b0d12] border border-[#1f2430] rounded-xl p-5 shadow-sm space-y-4">
+        <div className="lg:col-span-2 bg-bg-alt border border-line rounded-xl p-5 shadow-sm space-y-4">
           <div>
             <h2 className="text-sm font-bold text-white">Fleet Version Distribution Matrix</h2>
-            <p className="text-[10px] text-slate-500 mt-0.5">Summary of version alignment and recorded client drifts.</p>
+            <p className="text-[10px] text-muted mt-0.5">Summary of version alignment and recorded client drifts.</p>
           </div>
 
           <div className="overflow-x-auto">
             <table className="w-full border-collapse text-xs">
               <thead>
-                <tr className="border-b border-[#1f2430] text-slate-400 text-left font-medium">
+                <tr className="border-b border-line text-muted text-left font-medium">
                   <th className="p-3">Environment</th>
                   <th className="p-3">Current Version</th>
                   <th className="p-3">Target Version</th>
@@ -145,15 +145,15 @@ export default async function ControlPlaneReleasesPage() {
                   <th className="p-3 text-right">Actions</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-[#1f2430]/60">
+              <tbody className="divide-y divide-line">
                 {formattedFleet.map((env) => (
-                  <tr key={env.id} className="hover:bg-[#141822]/40 transition-colors">
+                  <tr key={env.id} className="hover:bg-surface/40 transition-colors">
                     <td className="p-3">
                       <span className="font-semibold text-white block">{env.name}</span>
-                      <span className="text-[9px] text-slate-500 block mt-0.5">slug: {env.slug}</span>
+                      <span className="text-[9px] text-muted block mt-0.5">slug: {env.slug}</span>
                     </td>
-                    <td className="p-3 text-slate-300 font-mono font-medium">{env.currentVersion}</td>
-                    <td className="p-3 text-slate-500 font-mono font-medium">{env.targetVersion}</td>
+                    <td className="p-3 text-text font-mono font-medium">{env.currentVersion}</td>
+                    <td className="p-3 text-muted font-mono font-medium">{env.targetVersion}</td>
                     <td className="p-3">
                       {env.drift ? (
                         <span className="px-2 py-0.5 rounded text-[9px] font-bold border border-rose-500/20 bg-rose-500/10 text-rose-400">
@@ -165,21 +165,21 @@ export default async function ControlPlaneReleasesPage() {
                         </span>
                       )}
                     </td>
-                    <td className="p-3 text-slate-400 font-medium uppercase">{env.region}</td>
+                    <td className="p-3 text-muted font-medium uppercase">{env.region}</td>
                     <td className="p-3 text-right">
                       <Link
                         href={`/control-plane/deployments/${env.id}`}
-                        className="inline-flex items-center gap-1 bg-[#141822] hover:bg-[#1d2333] border border-[#202738] text-slate-300 px-2.5 py-1 rounded text-[10px] font-medium transition-colors"
+                        className="inline-flex items-center gap-1 bg-surface hover:bg-surface-strong border border-line text-text px-2.5 py-1 rounded text-[10px] font-medium transition-colors"
                       >
                         Rollout
-                        <ArrowRight className="w-3 h-3 text-slate-500" />
+                        <ArrowRight className="w-3 h-3 text-muted" />
                       </Link>
                     </td>
                   </tr>
                 ))}
                 {formattedFleet.length === 0 && (
                   <tr>
-                    <td colSpan={6} className="text-center py-8 text-slate-500">
+                    <td colSpan={6} className="text-center py-8 text-muted">
                       No customer deployments are registered in the control plane.
                     </td>
                   </tr>
@@ -190,13 +190,13 @@ export default async function ControlPlaneReleasesPage() {
         </div>
 
         {/* Upgrade Rollout Progress logs (Col Span 1) */}
-        <div className="bg-[#0b0d12] border border-[#1f2430] rounded-xl p-5 shadow-sm space-y-4">
+        <div className="bg-bg-alt border border-line rounded-xl p-5 shadow-sm space-y-4">
           <div>
             <h3 className="text-sm font-bold text-white flex items-center gap-1.5">
               <Cpu className="w-4 h-4 text-brand-400" />
               Upgrade Rollout Queue
             </h3>
-            <p className="text-[10px] text-slate-500 mt-0.5">Recent deploy latest rollout status logs.</p>
+            <p className="text-[10px] text-muted mt-0.5">Recent deploy latest rollout status logs.</p>
           </div>
 
           <div className="space-y-3 max-h-[360px] overflow-y-auto scrollbar-thin pr-1">
@@ -204,14 +204,14 @@ export default async function ControlPlaneReleasesPage() {
               const status = rollout.status;
               
               return (
-                <div key={rollout.id} className="p-3 rounded-lg bg-[#141822] border border-[#202738] space-y-2">
+                <div key={rollout.id} className="p-3 rounded-lg bg-surface border border-line space-y-2">
                   <div className="flex items-center justify-between">
                     <strong className="text-xs text-white">Staged Job {rollout.id.slice(0, 8)}</strong>
                     <span className={cn("px-1.5 py-0.5 rounded text-[8px] font-bold uppercase border tracking-wider shrink-0", statusTone(status))}>
                       {status}
                     </span>
                   </div>
-                  <div className="text-[9px] text-slate-500 flex justify-between">
+                  <div className="text-[9px] text-muted flex justify-between">
                     <span>Attempts: {rollout.attempts}</span>
                     <span>Started: {new Date(rollout.createdAt).toLocaleDateString()}</span>
                   </div>
@@ -222,7 +222,7 @@ export default async function ControlPlaneReleasesPage() {
               );
             })}
             {rollouts.length === 0 && (
-              <div className="text-center py-6 text-slate-500 text-[10px]">No rollout jobs queued yet.</div>
+              <div className="text-center py-6 text-muted text-[10px]">No rollout jobs queued yet.</div>
             )}
           </div>
         </div>

@@ -69,7 +69,7 @@ export default function ControlPlaneLayout({
   };
 
   return (
-    <div className="flex h-screen w-full bg-[#07090e] text-slate-100 overflow-hidden font-sans">
+    <div className="dark flex h-screen w-full bg-bg text-text-strong overflow-hidden font-sans">
       
       {/* Sidebar Navigation */}
       <ControlPlaneSidebar
@@ -93,26 +93,26 @@ export default function ControlPlaneLayout({
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden h-full">
         
         {/* Header Bar */}
-        <header className="flex items-center justify-between h-16 px-6 bg-[#0b0d12] border-b border-[#1f2430] shrink-0 z-10">
+        <header className="flex items-center justify-between h-16 px-6 bg-bg-alt border-b border-line shrink-0 z-10">
           <div className="flex items-center gap-4">
             {/* Mobile Hamburger Trigger */}
             <button
               onClick={() => setIsSidebarOpen(true)}
-              className="p-1.5 rounded-lg bg-[#141822] border border-[#202738] text-slate-400 hover:text-white md:hidden"
+              className="p-1.5 rounded-lg bg-surface border border-line text-muted hover:text-white md:hidden"
               aria-label="Open menu"
             >
               <Menu className="w-5 h-5" />
             </button>
 
             {/* Dynamic Breadcrumbs */}
-            <nav className="flex items-center gap-1.5 text-xs text-slate-400 font-medium">
+            <nav className="flex items-center gap-1.5 text-xs text-muted font-medium">
               {getBreadcrumbs().map((crumb, idx, arr) => (
                 <div key={crumb.href} className="flex items-center gap-1.5">
-                  {idx > 0 && <span className="text-slate-600">/</span>}
+                  {idx > 0 && <span className="text-muted">/</span>}
                   {idx === arr.length - 1 ? (
-                    <span className="text-slate-100 font-semibold tracking-wide capitalize">{crumb.label}</span>
+                    <span className="text-text-strong font-semibold tracking-wide capitalize">{crumb.label}</span>
                   ) : (
-                    <Link href={crumb.href} className="hover:text-slate-200 transition-colors">
+                    <Link href={crumb.href} className="hover:text-text transition-colors">
                       {crumb.label}
                     </Link>
                   )}
@@ -128,7 +128,7 @@ export default function ControlPlaneLayout({
             {/* Quick search button */}
             <button
               onClick={() => setIsSearchOpen(true)}
-              className="p-2 rounded-lg bg-[#141822] border border-[#202738] text-slate-400 hover:text-white hover:bg-[#1a202d] transition-all duration-150"
+              className="p-2 rounded-lg bg-surface border border-line text-muted hover:text-white hover:bg-surface-strong transition-all duration-150"
               title={t("search.open")}
               aria-label={t("search.open")}
             >
@@ -136,26 +136,26 @@ export default function ControlPlaneLayout({
             </button>
 
             {/* Notification alert bells */}
-            <button className="p-2 rounded-lg bg-[#141822] border border-[#202738] text-slate-400 hover:text-white hover:bg-[#1a202d] transition-all duration-150 relative">
+            <button className="p-2 rounded-lg bg-surface border border-line text-muted hover:text-white hover:bg-surface-strong transition-all duration-150 relative">
               <Bell className="w-4 h-4" />
-              <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-brand-500 ring-2 ring-[#0b0d12]" />
+              <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-brand-500 ring-2 ring-bg-alt" />
             </button>
 
             {/* User identity avatar */}
-            <div className="flex items-center gap-2 pl-2 border-l border-[#1f2430]">
+            <div className="flex items-center gap-2 pl-2 border-l border-line">
               <div className="flex items-center justify-center w-8 h-8 rounded-full bg-indigo-600 border border-indigo-500 text-white font-bold text-xs select-none">
                 OP
               </div>
               <div className="hidden sm:block text-left">
-                <p className="text-xs font-semibold leading-none text-slate-200">Operator</p>
-                <p className="text-[10px] text-slate-500 leading-none mt-1">Super Admin</p>
+                <p className="text-xs font-semibold leading-none text-text">Operator</p>
+                <p className="text-[10px] text-muted leading-none mt-1">Super Admin</p>
               </div>
             </div>
           </div>
         </header>
 
         {/* Scrollable Main Content Frame */}
-        <div className="flex-1 overflow-y-auto bg-[#07090e] p-6 relative">
+        <div className="flex-1 overflow-y-auto bg-bg p-6 relative">
           <div className="max-w-6xl mx-auto w-full">
             {children}
           </div>

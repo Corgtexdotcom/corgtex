@@ -89,7 +89,7 @@ export default async function WorkspaceLayout({
         <div className="ws-sidebar-header">
           <a href="/" className="ws-logo">{currentBranding.primaryName}</a>
           {current && (
-            <div className="ws-workspace-name" style={{ marginTop: "2px", fontWeight: 500, opacity: 0.8, fontSize: "0.8rem", letterSpacing: "0.02em" }}>
+            <div className="ws-workspace-name">
               {currentBranding.secondaryLabel}
             </div>
           )}
@@ -107,11 +107,11 @@ export default async function WorkspaceLayout({
           {featureFlags.MULTILINGUAL && <LanguageSwitcher />}
           <ThemeToggle />
           
-          <a href={`/workspaces/${workspaceId}/settings?tab=user`} className="ws-nav-link ws-logout-btn" style={{ marginTop: "4px" }}>
+          <a href={`/workspaces/${workspaceId}/settings?tab=user`} className="ws-nav-link ws-logout-btn mt-1">
             {tNav("settings")} (User)
           </a>
 
-          <form action={logoutAction} style={{ marginTop: "4px" }}>
+          <form action={logoutAction} className="mt-1">
             <button type="submit" className="ws-nav-link ws-logout-btn">{tCommon("logout")}</button>
           </form>
         </div>
