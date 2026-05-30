@@ -1008,7 +1008,7 @@
     "participant": "Participant",
     "moreRoles": " +{count} more",
     "summary": "Summary",
-    "userGuidance": "User guidance",
+    "userGuidance": "Processing instructions (applied, not shown in summary)",
     "tensionsRaised": "Tensions Raised",
     "proposalsCreated": "Proposals Created",
     "discussion": "Discussion",

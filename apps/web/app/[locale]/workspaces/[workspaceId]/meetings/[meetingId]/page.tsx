@@ -277,13 +277,6 @@ export default async function MeetingDetailPage({
               </section>
             )}
 
-            {meeting.ingestionGuidanceMd && (
-              <section className="ws-section" style={{ marginBottom: 32 }}>
-                <h2 className="nr-section-header">{t("userGuidance")}</h2>
-                <MarkdownRenderer markdown={meeting.ingestionGuidanceMd} variant="document" />
-              </section>
-            )}
-
             <section className="ws-section" style={{ marginBottom: 32 }}>
               <h2 className="nr-section-header">{t("summary")}</h2>
               {meeting.summaryMd ? (
@@ -292,6 +285,15 @@ export default async function MeetingDetailPage({
                 <p className="meeting-empty-state">{t("summaryEmpty")}</p>
               )}
             </section>
+
+            {meeting.ingestionGuidanceMd && (
+              <details className="ws-section meeting-guidance-disclosure" style={{ marginBottom: 32 }}>
+                <summary className="nr-item-meta meeting-guidance-summary" style={{ cursor: "pointer" }}>{t("userGuidance")}</summary>
+                <div style={{ marginTop: 12 }}>
+                  <MarkdownRenderer markdown={meeting.ingestionGuidanceMd} variant="document" />
+                </div>
+              </details>
+            )}
 
             <MeetingRegenerationPanel
               workspaceId={workspaceId}
