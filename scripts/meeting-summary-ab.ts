@@ -74,13 +74,24 @@ function parseJsonLoose(raw: string): unknown {
 }
 
 async function runForModel(model: string, transcript: string) {
-  const blockRaw = await chatCompletion(model, [
+  const blockMessages: ChatMessage[] = [
     {
       role: "system",
       content: `${MEETING_BLOCK_EXTRACTION_INSTRUCTION}\n\nReturn ONLY a JSON object matching this shape:\n${MEETING_BLOCK_SCHEMA_HINT}`,
     },
     { role: "user", content: JSON.stringify({ transcript }) },
-  ], true);
+  ];
+  let blockRaw: string;
+  try {
+    blockRaw = await chatCompletion(model, blockMessages, true);
+  } catch (error) {
+    // Some providers reject response_format json_object; retry without it.
+    if (/structured-outputs|response_format|json/i.test(String(error))) {
+      blockRaw = await chatCompletion(model, blockMessages, false);
+    } else {
+      throw error;
+    }
+  }
   const blocks = normalizeMeetingBlocks(parseJsonLoose(blockRaw));
 
   const summary = await chatCompletion(model, [
