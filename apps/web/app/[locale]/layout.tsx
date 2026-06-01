@@ -45,7 +45,6 @@ export default async function RootLayout({
     <html lang={locale} className={`${inter.variable} ${playfair.variable} ${sourceSerif.variable} ${ibmPlexMono.variable}`} suppressHydrationWarning>
       <body
         className={`${inter.variable} ${playfair.variable} ${sourceSerif.variable} ${ibmPlexMono.variable} font-sans`}
-        style={{ background: "var(--bg)" }}
       >
         <ThemeProvider>
           <ToastProvider>

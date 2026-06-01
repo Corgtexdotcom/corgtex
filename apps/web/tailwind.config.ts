@@ -82,6 +82,7 @@ const config: Config = {
       },
       fontFamily: {
         sans: ["var(--font-inter)", ...defaultTheme.fontFamily.sans],
+        mono: ["var(--font-mono)", ...defaultTheme.fontFamily.mono],
         playfair: ["var(--font-playfair)", "serif"],
         document: ["var(--font-document)", "Georgia", "serif"],
         inter: ["var(--font-inter)", "sans-serif"],
