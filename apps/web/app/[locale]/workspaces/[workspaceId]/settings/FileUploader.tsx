@@ -86,8 +86,8 @@ export function FileUploader({ workspaceId }: { workspaceId: string }) {
                <div key={i} className="row" style={{ fontSize: '0.85rem' }}>
                   <span style={{flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap'}}>{s.name}</span>
                   {s.status === 'uploading' && <span style={{color: 'var(--accent)'}}>{t("statusUploading")}</span>}
-                  {s.status === 'done' && <span style={{color: '#198754'}}>{t("statusDone")}</span>}
-                  {s.status === 'error' && <span style={{color: '#dc3545'}}>{t("uploadError", { error: s.error || t("valUnknown") })}</span>}
+                  {s.status === 'done' && <span style={{color: 'var(--success)'}}>{t("statusDone")}</span>}
+                  {s.status === 'error' && <span style={{color: 'var(--danger)'}}>{t("uploadError", { error: s.error || t("valUnknown") })}</span>}
                </div>
             ))}
          </div>

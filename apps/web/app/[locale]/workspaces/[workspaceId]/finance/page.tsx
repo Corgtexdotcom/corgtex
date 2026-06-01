@@ -411,7 +411,7 @@ export default async function FinancePage({
                                   <form action={archiveSpendAction} className="fin-dropdown-form">
                                     <input type="hidden" name="workspaceId" value={workspaceId} />
                                     <input type="hidden" name="spendId" value={spend.id} />
-                                    <button type="submit" className="fin-action-btn" style={{ color: "#842029" }}>{t("btnArchiveSpend")}</button>
+                                    <button type="submit" className="fin-action-btn" style={{ color: "var(--danger)" }}>{t("btnArchiveSpend")}</button>
                                   </form>
                                 </div>
                               </details>
@@ -546,7 +546,7 @@ export default async function FinancePage({
                             <form action={archiveLedgerAccountAction} className="fin-dropdown-form">
                               <input type="hidden" name="workspaceId" value={workspaceId} />
                               <input type="hidden" name="accountId" value={account.id} />
-                              <button type="submit" className="fin-action-btn" style={{ color: "#842029" }}>{t("btnArchiveAccount")}</button>
+                              <button type="submit" className="fin-action-btn" style={{ color: "var(--danger)" }}>{t("btnArchiveAccount")}</button>
                             </form>
                           </div>
                         </details>

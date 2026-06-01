@@ -4,9 +4,9 @@ import { getTranslations, getFormatter } from "next-intl/server";
 
 function statusColor(status: string): string {
   if (status === "COMPLETED" || status === "DELIVERED") return "var(--accent)";
-  if (status === "FAILED") return "#842029";
+  if (status === "FAILED") return "var(--danger)";
   if (status === "RUNNING" || status === "PENDING") return "var(--warning)";
-  if (status === "WAITING_APPROVAL") return "#b45309";
+  if (status === "WAITING_APPROVAL") return "var(--warning)";
   return "inherit";
 }
 
@@ -124,7 +124,7 @@ export async function ObservabilityTab({
                             width: 10,
                             height: 10,
                             borderRadius: "50%",
-                            background: step.status === "COMPLETED" ? "var(--accent)" : step.error ? "#842029" : "var(--warning)",
+                            background: step.status === "COMPLETED" ? "var(--accent)" : step.error ? "var(--danger)" : "var(--warning)",
                             flexShrink: 0,
                           }} />
                           <strong className="nr-item-title" style={{ fontSize: "0.85rem" }}>{step.name}</strong>
@@ -134,7 +134,7 @@ export async function ObservabilityTab({
                         </span>
                       </div>
                       {step.error && (
-                        <div style={{ color: "#842029", fontSize: "0.8rem", marginTop: 6, marginLeft: 22 }}>
+                        <div style={{ color: "var(--danger)", fontSize: "0.8rem", marginTop: 6, marginLeft: 22 }}>
                           {step.error}
                         </div>
                       )}
@@ -177,7 +177,7 @@ export async function ObservabilityTab({
                         </span>
                       </div>
                       {tc.error && (
-                        <div style={{ color: "#842029", fontSize: "0.8rem", marginTop: 6 }}>
+                        <div style={{ color: "var(--danger)", fontSize: "0.8rem", marginTop: 6 }}>
                           {tc.error}
                         </div>
                       )}
