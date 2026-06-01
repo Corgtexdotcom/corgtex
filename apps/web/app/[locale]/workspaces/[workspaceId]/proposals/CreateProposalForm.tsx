@@ -31,10 +31,10 @@ export function CreateProposalForm({ workspaceId }: { workspaceId: string }) {
   }
 
   return (
-    <form ref={formRef} action={handleCreateProposal} className="stack nr-form-section" style={{ marginTop: "16px" }}>
+    <form ref={formRef} action={handleCreateProposal} className="stack nr-form-section mt-4">
       <input type="hidden" name="workspaceId" value={workspaceId} />
       <ProposalDraftFields key={editorKey} />
-      <label style={{ display: "flex", alignItems: "center", gap: "8px", fontWeight: "normal", cursor: "pointer" }}>
+      <label className="nr-checkbox-label">
         <input type="checkbox" name="isPrivate" defaultChecked />
         <span>{t("formPrivateDraft")}</span>
       </label>

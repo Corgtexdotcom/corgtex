@@ -61,9 +61,9 @@ export default async function ProposalDetailPage({
 
   return (
     <>
-      <div className="nr-masthead" style={{ textAlign: "left", marginBottom: 32 }}>
-        <p className="nr-meta" style={{ marginBottom: "12px", display: "flex", gap: "12px" }}>
-          <span><Link href={`/workspaces/${workspaceId}/proposals`} style={{ color: "inherit", textDecoration: "none" }}>{t("backToProposals")}</Link></span>
+      <div className="nr-masthead nr-masthead-left mb-8">
+        <p className="nr-meta nr-meta-flex mb-3">
+          <span><Link href={`/workspaces/${workspaceId}/proposals`} className="nr-link-inherit">{t("backToProposals")}</Link></span>
           <span>·</span>
           <span>{proposal.author.displayName || proposal.author.email}</span>
           <span>·</span>
@@ -71,35 +71,31 @@ export default async function ProposalDetailPage({
             {proposal.status === "RESOLVED" && proposal.resolutionOutcome ? `${proposal.status} · ${proposal.resolutionOutcome.replace("_", " ")}` : proposal.status}
           </span>
         </p>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", borderBottom: "1px solid var(--line)", paddingBottom: 16 }}>
-          <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2rem", maxWidth: "800px" }}>{proposal.title}</h1>
-          <span style={{ fontSize: "0.85rem", color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.05em" }}>
+        <div className="nr-page-header">
+          <h1 className="nr-page-title">{proposal.title}</h1>
+          <span className="nr-page-date">
             {t("updatedAt", { date: ageText(proposal.updatedAt) })}
           </span>
         </div>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "3fr 1fr", gap: "64px" }}>
+      <div className="nr-detail-grid">
         {/* Main Article Body */}
-        <article style={{ fontSize: "1.1rem", lineHeight: 1.8, color: "var(--text)" }}>
+        <article className="nr-article">
           {proposal.summary && (
             <section
               aria-label={t("summaryTitle")}
-              style={{
-                borderLeft: "3px solid var(--accent)",
-                marginBottom: "32px",
-                paddingLeft: "20px",
-              }}
+              className="nr-summary-section"
             >
-              <h2 style={{ fontSize: "0.85rem", textTransform: "uppercase", letterSpacing: "0.05em", margin: "0 0 8px", color: "var(--muted)" }}>
+              <h2 className="nr-summary-title">
                 {t("summaryTitle")}
               </h2>
-              <p style={{ margin: 0, fontSize: "1rem", lineHeight: 1.6, color: "var(--text)" }}>{proposal.summary}</p>
+              <p className="nr-summary-body">{proposal.summary}</p>
             </section>
           )}
           <MarkdownRenderer markdown={proposal.bodyMd} variant="document" className="nr-markdown" />
 
-          <hr className="nr-divider" style={{ margin: "48px 0" }} />
+          <hr className="nr-divider nr-divider-lg" />
 
           <h3 className="font-playfair font-semibold mb-6 text-[1.4rem]">{t("sectionDeliberation")}</h3>
           <DeliberationThread
@@ -138,10 +134,10 @@ export default async function ProposalDetailPage({
         </article>
 
         {/* Sidebar */}
-        <aside style={{ borderLeft: "1px solid var(--line)", paddingLeft: "32px", paddingRight: "16px" }}>
+        <aside className="nr-sidebar">
           {canManage && canOpenPrivateDraft(proposal) && (
             <div className="stack mb-8">
-              <form action={submitProposalAction} style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+              <form action={submitProposalAction} className="nr-form-stack">
                 <input type="hidden" name="workspaceId" value={workspaceId} />
                 <input type="hidden" name="proposalId" value={proposal.id} />
                 <button className="w-full">{t("btnOpen")}</button>
@@ -150,7 +146,7 @@ export default async function ProposalDetailPage({
           )}
           {canManage && proposal.status === "OPEN" && (
             <div className="stack mb-8">
-              <form action={returnProposalToDraftAction} style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+              <form action={returnProposalToDraftAction} className="nr-form-stack">
                 <input type="hidden" name="workspaceId" value={workspaceId} />
                 <input type="hidden" name="proposalId" value={proposal.id} />
                 <button className="secondary w-full">{t("btnReturnToDraft")}</button>
@@ -159,8 +155,8 @@ export default async function ProposalDetailPage({
           )}
           {canManage && proposal.status === "DRAFT" && (
             <details className="stack mb-8">
-              <summary className="secondary small nr-hide-marker" style={{ cursor: "pointer" }}>{t("btnEdit")}</summary>
-              <form action={updateProposalAction} className="stack nr-form-section" style={{ marginTop: 12 }}>
+              <summary className="secondary small nr-hide-marker cursor-pointer">{t("btnEdit")}</summary>
+              <form action={updateProposalAction} className="stack nr-form-section mt-3">
                 <input type="hidden" name="workspaceId" value={workspaceId} />
                 <input type="hidden" name="proposalId" value={proposal.id} />
                 <ProposalDraftFields defaultTitle={proposal.title} defaultBodyMd={proposal.bodyMd} />
@@ -171,7 +167,7 @@ export default async function ProposalDetailPage({
 
           {canResolve && proposal.status === "OPEN" && (
             <div className="stack mb-8">
-              <h3 style={{ fontSize: "0.85rem", textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--text)", marginBottom: "16px" }}>{t("resolveProposalTitle")}</h3>
+              <h3 className="nr-sidebar-title">{t("resolveProposalTitle")}</h3>
               <form action={resolveProposalAction} className="stack nr-form-section">
                 <input type="hidden" name="workspaceId" value={workspaceId} />
                 <input type="hidden" name="proposalId" value={proposal.id} />
@@ -192,16 +188,16 @@ export default async function ProposalDetailPage({
             </div>
           )}
           
-          <h3 style={{ fontSize: "0.85rem", textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--text)", marginBottom: "16px" }}>{t("aboutTitle")}</h3>
+          <h3 className="nr-sidebar-title">{t("aboutTitle")}</h3>
           <div className="nr-meta mb-4">
             <strong>{t("aboutCreated")}</strong> {new Date(proposal.createdAt).toLocaleDateString()}
           </div>
           {(proposal.tensions.length > 0 || proposal.actions.length > 0) && (
             <div className="nr-meta mb-4">
               <strong>{t("aboutRelated")}</strong>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
+              <div className="nr-tag-group mt-2">
                 {proposal.tensions.map((tension) => (
-                  <Link key={tension.id} href={`/workspaces/${workspaceId}/tensions/${tension.id}`} className="tag info" style={{ textDecoration: "none" }}>
+                  <Link key={tension.id} href={`/workspaces/${workspaceId}/tensions/${tension.id}`} className="tag info no-underline">
                     {t("tensionTag", { title: tension.title })}
                   </Link>
                 ))}
