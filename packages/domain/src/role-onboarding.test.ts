@@ -71,6 +71,8 @@ const onboardingRecord = {
   },
   member: {
     id: "member-1",
+    role: "CONTRIBUTOR",
+    userId: "user-1",
     user: {
       displayName: "Alex",
       email: "alex@example.com",
@@ -164,6 +166,24 @@ describe("role onboarding domain", () => {
         OR: [
           { participantIds: { has: "member-1" } },
           { participantIds: { has: "user-1" } },
+        ],
+      }),
+    }));
+    expect(prismaMock.action.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        AND: [
+          {
+            OR: [
+              { isPrivate: false },
+              { isPrivate: true, status: "DRAFT", authorUserId: "user-1" },
+            ],
+          },
+          {
+            OR: [
+              { assigneeMemberId: "member-1" },
+              { circleId: "circle-1" },
+            ],
+          },
         ],
       }),
     }));

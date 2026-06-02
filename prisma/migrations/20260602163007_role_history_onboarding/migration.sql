@@ -145,10 +145,12 @@ SELECT
     ra."assignedAt",
     ra."id"
 FROM "RoleAssignment" ra
+JOIN "Member" m ON m."id" = ra."memberId"
 JOIN "Role" r ON r."id" = ra."roleId"
 JOIN "Circle" c ON c."id" = r."circleId"
 WHERE r."archivedAt" IS NULL
   AND c."archivedAt" IS NULL
+  AND m."isActive" = true
   AND NOT EXISTS (
       SELECT 1
       FROM "RoleHolderHistory" rh
@@ -176,11 +178,14 @@ SELECT
     caa."assignedAt",
     caa."id"
 FROM "CircleAgentAssignment" caa
+JOIN "AgentIdentity" ai ON ai."id" = caa."agentIdentityId"
 JOIN "Role" r ON r."id" = caa."roleId"
 JOIN "Circle" c ON c."id" = r."circleId"
 WHERE caa."roleId" IS NOT NULL
   AND r."archivedAt" IS NULL
   AND c."archivedAt" IS NULL
+  AND ai."isActive" = true
+  AND ai."archivedAt" IS NULL
   AND NOT EXISTS (
       SELECT 1
       FROM "RoleHolderHistory" rh

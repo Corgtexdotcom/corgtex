@@ -420,6 +420,16 @@ async function loadRoleOnboardingContext(params: {
 
   if (!session) return null;
 
+  const privateDraftVisibility = session.member.role === "ADMIN"
+    ? [
+      { isPrivate: false },
+      { isPrivate: true, status: "DRAFT" as const },
+    ]
+    : [
+      { isPrivate: false },
+      { isPrivate: true, status: "DRAFT" as const, authorUserId: params.userId },
+    ];
+
   const [policies, actions, tensions, proposals, meetings] = await Promise.all([
     prisma.policyCorpus.findMany({
       where: {
@@ -438,9 +448,14 @@ async function loadRoleOnboardingContext(params: {
         workspaceId: params.workspaceId,
         archivedAt: null,
         status: { not: "COMPLETED" },
-        OR: [
-          { assigneeMemberId: session.memberId },
-          { circleId: session.role.circleId },
+        AND: [
+          { OR: privateDraftVisibility },
+          {
+            OR: [
+              { assigneeMemberId: session.memberId },
+              { circleId: session.role.circleId },
+            ],
+          },
         ],
       },
       select: { title: true, status: true, dueAt: true },
@@ -452,10 +467,15 @@ async function loadRoleOnboardingContext(params: {
         workspaceId: params.workspaceId,
         archivedAt: null,
         status: "OPEN",
-        OR: [
-          { assigneeMemberId: session.memberId },
-          { raisedByMemberId: session.memberId },
-          { circleId: session.role.circleId },
+        AND: [
+          { OR: privateDraftVisibility },
+          {
+            OR: [
+              { assigneeMemberId: session.memberId },
+              { raisedByMemberId: session.memberId },
+              { circleId: session.role.circleId },
+            ],
+          },
         ],
       },
       select: { title: true, priority: true },
@@ -468,6 +488,7 @@ async function loadRoleOnboardingContext(params: {
         archivedAt: null,
         status: "OPEN",
         circleId: session.role.circleId,
+        OR: privateDraftVisibility,
       },
       select: { title: true, summary: true },
       orderBy: { updatedAt: "desc" },
