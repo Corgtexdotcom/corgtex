@@ -25,6 +25,7 @@ import {
   runControlPlaneReleaseDeployJob,
   syncSlackPublicArchiveForWorkspace,
   reportPendingAiUsageToStripe,
+  createRoleOnboardingIntro,
   type ControlPlaneReleaseTarget,
   type SlackAgentJobPayload,
 } from "@corgtex/domain";
@@ -669,6 +670,17 @@ async function handleJob(job: ClaimedJob) {
     const result = await runAgentWorkflowJob(job);
     if (result && typeof result === "object" && "skipped" in result && result.reason === "concurrency_limit") {
       throw new RetryableWorkflowJobError("Agent concurrency limit reached.");
+    }
+    return;
+  }
+
+  if (job.type === "agent.role-onboarding-intro") {
+    const onboardingSessionId = (payload as { onboardingSessionId?: string }).onboardingSessionId;
+    if (onboardingSessionId) {
+      await createRoleOnboardingIntro({
+        workspaceId: job.workspaceId,
+        onboardingSessionId,
+      });
     }
     return;
   }

@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppActor } from "@corgtex/shared";
-import { listCircleTree, suggestMaturityUpgrade, updateCircle } from "./circles";
+import { deleteCircle, listCircleTree, suggestMaturityUpgrade, updateCircle } from "./circles";
 import { prisma } from "@corgtex/shared";
 
 vi.mock("@corgtex/shared", () => ({
@@ -8,9 +8,28 @@ vi.mock("@corgtex/shared", () => ({
     $transaction: vi.fn(),
     circle: {
       findMany: vi.fn(),
+      findFirst: vi.fn(),
       findUnique: vi.fn(),
       create: vi.fn(),
       update: vi.fn(),
+    },
+    role: {
+      findMany: vi.fn(),
+    },
+    roleHolderHistory: {
+      updateMany: vi.fn(),
+    },
+    roleOnboardingSession: {
+      updateMany: vi.fn(),
+    },
+    roleAssignment: {
+      deleteMany: vi.fn(),
+    },
+    circleAgentAssignment: {
+      updateMany: vi.fn(),
+    },
+    workspaceArchiveRecord: {
+      create: vi.fn(),
     },
     auditLog: {
       create: vi.fn(),
@@ -40,6 +59,11 @@ beforeEach(() => {
   vi.mocked(prisma.$transaction).mockImplementation(async (callback: (tx: typeof prisma) => Promise<unknown>) => callback(prisma));
   vi.mocked(prisma.auditLog.create).mockResolvedValue({} as any);
   vi.mocked(prisma.event.createMany).mockResolvedValue({ count: 1 } as any);
+  vi.mocked(prisma.workspaceArchiveRecord.create).mockResolvedValue({} as any);
+  vi.mocked(prisma.roleHolderHistory.updateMany).mockResolvedValue({ count: 1 } as any);
+  vi.mocked(prisma.roleOnboardingSession.updateMany).mockResolvedValue({ count: 1 } as any);
+  vi.mocked(prisma.roleAssignment.deleteMany).mockResolvedValue({ count: 1 } as any);
+  vi.mocked(prisma.circleAgentAssignment.updateMany).mockResolvedValue({ count: 1 } as any);
 });
 
 describe("suggestMaturityUpgrade", () => {
@@ -278,6 +302,63 @@ describe("listCircleTree", () => {
     expect(result[0]?.roles[0]?.assignments[0]?.member.user).toMatchObject({
       avatarUrl: "https://example.com/avatar.png",
       bio: "Design and delivery.",
+    });
+  });
+});
+
+describe("deleteCircle", () => {
+  it("archives the circle and closes role lifecycle records for roles in that circle only", async () => {
+    vi.mocked(prisma.circle.findFirst).mockResolvedValueOnce({
+      id: "circle-1",
+      workspaceId: "ws-1",
+      name: "Product",
+      archivedAt: null,
+    } as any);
+    vi.mocked(prisma.circle.update).mockResolvedValueOnce({
+      id: "circle-1",
+      workspaceId: "ws-1",
+      archivedAt: new Date("2026-06-02T12:00:00.000Z"),
+    } as any);
+    vi.mocked(prisma.role.findMany).mockResolvedValueOnce([
+      { id: "role-1" },
+    ] as any);
+
+    await expect(deleteCircle(actor, {
+      workspaceId: "ws-1",
+      circleId: "circle-1",
+    })).resolves.toEqual({ id: "circle-1" });
+
+    expect(prisma.role.findMany).toHaveBeenCalledWith({
+      where: {
+        circleId: "circle-1",
+        archivedAt: null,
+      },
+      select: { id: true },
+    });
+    expect(prisma.roleHolderHistory.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        workspaceId: "ws-1",
+        roleId: { in: ["role-1"] },
+        endedAt: null,
+      }),
+    }));
+    expect(prisma.roleOnboardingSession.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        workspaceId: "ws-1",
+        roleId: { in: ["role-1"] },
+        status: { in: ["PENDING", "ACTIVE"] },
+      }),
+      data: expect.objectContaining({
+        status: "DISMISSED",
+        dismissedAt: expect.any(Date),
+      }),
+    }));
+    expect(prisma.roleAssignment.deleteMany).toHaveBeenCalledWith({
+      where: { roleId: { in: ["role-1"] } },
+    });
+    expect(prisma.circleAgentAssignment.updateMany).toHaveBeenCalledWith({
+      where: { roleId: { in: ["role-1"] } },
+      data: { roleId: null },
     });
   });
 });

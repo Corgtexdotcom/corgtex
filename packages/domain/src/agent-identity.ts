@@ -4,6 +4,7 @@ import type { AppActor } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { invariant } from "./errors";
+import { closeRoleLifecycleForAgent, endRoleHolderHistory, startRoleHolderHistory } from "./role-onboarding";
 import { AGENT_REGISTRY } from "./agent-registry";// ---------------------------------------------------------------------------
 // CRUD — AgentIdentity
 // ---------------------------------------------------------------------------
@@ -69,19 +70,31 @@ export async function updateAgentIdentity(
   });
   invariant(existing, 404, "NOT_FOUND", "Agent identity not found.");
 
-  return prisma.agentIdentity.update({
-    where: { id: params.agentIdentityId },
-    data: {
-      ...(params.displayName !== undefined && { displayName: params.displayName }),
-      ...(params.avatarUrl !== undefined && { avatarUrl: params.avatarUrl }),
-      ...(params.purposeMd !== undefined && { purposeMd: params.purposeMd }),
-      ...(params.memberType !== undefined && { memberType: params.memberType }),
-      ...(params.linkedCredentialId !== undefined && { linkedCredentialId: params.linkedCredentialId }),
-      ...(params.maxSpendPerRunCents !== undefined && { maxSpendPerRunCents: params.maxSpendPerRunCents }),
-      ...(params.maxRunsPerDay !== undefined && { maxRunsPerDay: params.maxRunsPerDay }),
-      ...(params.maxRunsPerHour !== undefined && { maxRunsPerHour: params.maxRunsPerHour }),
-      ...(params.isActive !== undefined && { isActive: params.isActive }),
-    },
+  return prisma.$transaction(async (tx) => {
+    const updated = await tx.agentIdentity.update({
+      where: { id: params.agentIdentityId },
+      data: {
+        ...(params.displayName !== undefined && { displayName: params.displayName }),
+        ...(params.avatarUrl !== undefined && { avatarUrl: params.avatarUrl }),
+        ...(params.purposeMd !== undefined && { purposeMd: params.purposeMd }),
+        ...(params.memberType !== undefined && { memberType: params.memberType }),
+        ...(params.linkedCredentialId !== undefined && { linkedCredentialId: params.linkedCredentialId }),
+        ...(params.maxSpendPerRunCents !== undefined && { maxSpendPerRunCents: params.maxSpendPerRunCents }),
+        ...(params.maxRunsPerDay !== undefined && { maxRunsPerDay: params.maxRunsPerDay }),
+        ...(params.maxRunsPerHour !== undefined && { maxRunsPerHour: params.maxRunsPerHour }),
+        ...(params.isActive !== undefined && { isActive: params.isActive }),
+      },
+    });
+
+    if (params.isActive === false && existing.isActive) {
+      await closeRoleLifecycleForAgent(tx, {
+        workspaceId: params.workspaceId,
+        agentIdentityId: params.agentIdentityId,
+        actor,
+      });
+    }
+
+    return updated;
   });
 }
 
@@ -133,12 +146,22 @@ export async function deactivateAgentIdentity(
   });
   invariant(existing, 404, "NOT_FOUND", "Agent identity not found.");
 
-  return archiveWorkspaceArtifact(actor, {
+  const archived = await archiveWorkspaceArtifact(actor, {
     workspaceId,
     entityType: "AgentIdentity",
     entityId: agentIdentityId,
     reason: "Archived from agent identity deactivate path.",
   });
+
+  await prisma.$transaction(async (tx) => {
+    await closeRoleLifecycleForAgent(tx, {
+      workspaceId,
+      agentIdentityId,
+      actor,
+    });
+  });
+
+  return archived;
 }
 
 // ---------------------------------------------------------------------------
@@ -212,21 +235,54 @@ export async function assignAgentToCircle(
     invariant(role, 404, "NOT_FOUND", "Role not found.");
   }
 
-  return prisma.circleAgentAssignment.upsert({
-    where: {
-      circleId_agentIdentityId: {
+  return prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`
+      SELECT pg_advisory_xact_lock(hashtext('circle_agent_assignment'), hashtext(${`${params.circleId}:${params.agentIdentityId}`}))
+    `;
+    const existing = await tx.circleAgentAssignment.findUnique({
+      where: {
+        circleId_agentIdentityId: {
+          circleId: params.circleId,
+          agentIdentityId: params.agentIdentityId,
+        },
+      },
+    });
+
+    const assignment = await tx.circleAgentAssignment.upsert({
+      where: {
+        circleId_agentIdentityId: {
+          circleId: params.circleId,
+          agentIdentityId: params.agentIdentityId,
+        },
+      },
+      update: { roleId },
+      create: {
         circleId: params.circleId,
         agentIdentityId: params.agentIdentityId,
+        roleId,
       },
-    },
-    create: {
-      circleId: params.circleId,
-      agentIdentityId: params.agentIdentityId,
-      roleId,
-    },
-    update: {
-      roleId,
-    },
+    });
+
+    if (existing?.roleId && existing.roleId !== roleId) {
+      await endRoleHolderHistory(tx, {
+        workspaceId: params.workspaceId,
+        roleId: existing.roleId,
+        agentIdentityId: params.agentIdentityId,
+        actor,
+      });
+    }
+
+    if (roleId && existing?.roleId !== roleId) {
+      await startRoleHolderHistory(tx, {
+        workspaceId: params.workspaceId,
+        roleId,
+        agentIdentityId: params.agentIdentityId,
+        assignmentId: assignment.id,
+        actor,
+      });
+    }
+
+    return assignment;
   });
 }
 
@@ -240,18 +296,34 @@ export async function removeAgentFromCircle(
 ) {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, allowedRoles: ["ADMIN"] });
 
-  const assignment = await prisma.circleAgentAssignment.findUnique({
-    where: {
-      circleId_agentIdentityId: {
-        circleId: params.circleId,
-        agentIdentityId: params.agentIdentityId,
+  return prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`
+      SELECT pg_advisory_xact_lock(hashtext('circle_agent_assignment'), hashtext(${`${params.circleId}:${params.agentIdentityId}`}))
+    `;
+    const assignment = await tx.circleAgentAssignment.findUnique({
+      where: {
+        circleId_agentIdentityId: {
+          circleId: params.circleId,
+          agentIdentityId: params.agentIdentityId,
+        },
       },
-    },
-  });
-  invariant(assignment, 404, "NOT_FOUND", "Circle agent assignment not found.");
+    });
+    invariant(assignment, 404, "NOT_FOUND", "Circle agent assignment not found.");
 
-  return prisma.circleAgentAssignment.delete({
-    where: { id: assignment.id },
+    const deleted = await tx.circleAgentAssignment.delete({
+      where: { id: assignment.id },
+    });
+
+    if (assignment.roleId) {
+      await endRoleHolderHistory(tx, {
+        workspaceId: params.workspaceId,
+        roleId: assignment.roleId,
+        agentIdentityId: params.agentIdentityId,
+        actor,
+      });
+    }
+
+    return deleted;
   });
 }
 

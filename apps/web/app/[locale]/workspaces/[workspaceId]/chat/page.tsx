@@ -37,6 +37,13 @@ export default async function ChatPage({
           status: c.status,
           updatedAt: c.updatedAt.toISOString(),
           lastMessage: c.turns[0]?.assistantMessage.slice(0, 100) ?? null,
+          roleOnboarding: c.roleOnboarding
+            ? {
+              id: c.roleOnboarding.id,
+              status: c.roleOnboarding.status,
+              roleName: c.roleOnboarding.role.name,
+            }
+            : null,
         }))}
         activeSessionId={activeSessionId ?? null}
       />

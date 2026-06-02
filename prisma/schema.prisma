@@ -562,6 +562,9 @@ model Workspace {
   procurementBillingHandoffs    ProcurementBillingHandoff[]
   procurementTrials             ProcurementTrial[]
   toolLinks                     WorkspaceToolLink[]
+  roleVersions                  RoleVersion[]
+  roleHolderHistory             RoleHolderHistory[]
+  roleOnboardingSessions        RoleOnboardingSession[]
   catalogItems                  CatalogItem[]
   catalogFavorites              CatalogFavorite[]
   catalogRequests               CatalogRequest[]
@@ -829,6 +832,9 @@ model User {
   createdBuildArtifacts    BuildArtifact[]             @relation("BuildArtifactCreator")
   productAnalyticsEvents   ProductAnalyticsEvent[]
   onboardingStates         UserWorkspaceOnboardingState[]
+  changedRoleVersions      RoleVersion[]               @relation("RoleVersionChangedBy")
+  startedRoleHolderHistory RoleHolderHistory[]          @relation("RoleHolderHistoryStartedBy")
+  endedRoleHolderHistory   RoleHolderHistory[]          @relation("RoleHolderHistoryEndedBy")
 }
 
 model Session {
@@ -893,6 +899,8 @@ model Member {
   recognitionsGiven           Recognition[]            @relation("RecognitionAuthor")
   targetedDeliberationEntries DeliberationEntry[]      @relation("DeliberationTargetMember")
   newspaperDeliveries         NewspaperDelivery[]
+  roleHolderHistory           RoleHolderHistory[]
+  roleOnboardingSessions      RoleOnboardingSession[]
 
   @@unique([workspaceId, userId])
   @@index([workspaceId, role])
@@ -1189,9 +1197,62 @@ model Role {
   circle           Circle                  @relation(fields: [circleId], references: [id], onDelete: Cascade)
   assignments      RoleAssignment[]
   agentAssignments CircleAgentAssignment[]
+  versions         RoleVersion[]
+  holderHistory    RoleHolderHistory[]
+  onboardingSessions RoleOnboardingSession[]
 
   @@index([circleId])
   @@index([circleId, archivedAt])
+}
+
+model RoleVersion {
+  id               String   @id @default(uuid())
+  workspaceId      String
+  roleId           String
+  circleId         String
+  version          Int
+  name             String
+  purposeMd        String?
+  accountabilities String[]
+  artifacts        String[]
+  metricsMd        String?
+  coreRoleType     String?
+  changeType       String
+  changedByUserId  String?
+  createdAt        DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  role      Role      @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  changedBy User?     @relation("RoleVersionChangedBy", fields: [changedByUserId], references: [id], onDelete: SetNull)
+
+  @@unique([roleId, version])
+  @@index([workspaceId, createdAt])
+  @@index([roleId, createdAt])
+}
+
+model RoleHolderHistory {
+  id              String         @id @default(uuid())
+  workspaceId     String
+  roleId          String
+  holderKind      RoleHolderKind
+  memberId        String?
+  agentIdentityId String?
+  startedAt       DateTime       @default(now())
+  endedAt         DateTime?
+  startedByUserId String?
+  endedByUserId   String?
+  assignmentId    String?
+
+  workspace     Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  role          Role           @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  member        Member?        @relation(fields: [memberId], references: [id], onDelete: SetNull)
+  agentIdentity AgentIdentity? @relation(fields: [agentIdentityId], references: [id], onDelete: SetNull)
+  startedBy     User?          @relation("RoleHolderHistoryStartedBy", fields: [startedByUserId], references: [id], onDelete: SetNull)
+  endedBy       User?          @relation("RoleHolderHistoryEndedBy", fields: [endedByUserId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId, roleId, startedAt])
+  @@index([memberId, endedAt])
+  @@index([agentIdentityId, endedAt])
 }
 
 model RoleAssignment {
@@ -1204,6 +1265,28 @@ model RoleAssignment {
   member Member @relation(fields: [memberId], references: [id], onDelete: Cascade)
 
   @@unique([roleId, memberId])
+}
+
+model RoleOnboardingSession {
+  id             String               @id @default(uuid())
+  workspaceId    String
+  roleId         String
+  memberId       String
+  conversationId String               @unique
+  status         RoleOnboardingStatus @default(PENDING)
+  startedAt      DateTime?
+  completedAt    DateTime?
+  dismissedAt    DateTime?
+  createdAt      DateTime             @default(now())
+  updatedAt      DateTime             @updatedAt
+
+  workspace    Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  role         Role                @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  member       Member              @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  conversation ConversationSession @relation(fields: [conversationId], references: [id], onDelete: Restrict)
+
+  @@index([workspaceId, memberId, status])
+  @@index([roleId, status])
 }
 
 model Action {
@@ -2566,6 +2649,7 @@ model ConversationSession {
   workspace Workspace          @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   user      User               @relation(fields: [userId], references: [id], onDelete: Cascade)
   turns     ConversationTurn[]
+  roleOnboarding RoleOnboardingSession?
 
   @@index([workspaceId, userId, status])
 }
@@ -2574,6 +2658,18 @@ enum ConversationStatus {
   ACTIVE
   COMPLETED
   PAUSED
+}
+
+enum RoleHolderKind {
+  MEMBER
+  AGENT
+}
+
+enum RoleOnboardingStatus {
+  PENDING
+  ACTIVE
+  COMPLETED
+  DISMISSED
 }
 
 model ConversationTurn {
@@ -3778,6 +3874,7 @@ model AgentIdentity {
   createdByUser     User?                   @relation("AgentIdentityCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
   linkedCredential  AgentCredential?        @relation(fields: [linkedCredentialId], references: [id], onDelete: SetNull)
   circleAssignments CircleAgentAssignment[]
+  roleHolderHistory RoleHolderHistory[]
 
   @@unique([workspaceId, agentKey])
   @@index([workspaceId, isActive])
