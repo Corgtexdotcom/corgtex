@@ -30,6 +30,7 @@ type RoleAssignmentRecord = {
   member?: {
     id?: string | null;
     user?: {
+      id?: string | null;
       displayName?: string | null;
       email?: string | null;
     } | null;
@@ -66,6 +67,7 @@ export default async function CircleDetailPage({
 }) {
   const { workspaceId, circleId } = await params;
   const actor = await requirePageActor();
+  const currentUserId = actor.kind === "user" ? actor.user.id : null;
   const t = await getTranslations("circles");
   const tCommon = await getTranslations("common");
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
@@ -103,7 +105,6 @@ export default async function CircleDetailPage({
       prisma.roleVersion.findMany({
         where: { workspaceId, roleId: { in: roleIds } },
         orderBy: [{ roleId: "asc" }, { version: "desc" }],
-        take: 60,
       }),
       prisma.roleHolderHistory.findMany({
         where: { workspaceId, roleId: { in: roleIds } },
@@ -120,7 +121,6 @@ export default async function CircleDetailPage({
           },
         },
         orderBy: { startedAt: "desc" },
-        take: 80,
       }),
       prisma.roleOnboardingSession.findMany({
         where: { workspaceId, roleId: { in: roleIds } },
@@ -366,20 +366,29 @@ export default async function CircleDetailPage({
                       <div style={{ display: "grid", gap: 8 }}>
                         {assignments.map((assignment: RoleAssignmentRecord) => {
                           const memberId = assignment.member?.id;
+                          const onboarding = memberId ? onboardingByRoleMember.get(`${role.id}:${memberId}`) : null;
+                          const canOpenOnboarding = Boolean(
+                            onboarding && assignment.member?.user?.id === currentUserId,
+                          );
                           if (!memberId) return null;
                           return (
                             <div key={assignment.id} className="row" style={{ gap: 12 }}>
                               <Link href={`/workspaces/${workspaceId}/members/${memberId}`} style={{ color: "inherit", textDecoration: "none" }}>
                                 {memberName(assignment)}
                               </Link>
-                              {onboardingByRoleMember.has(`${role.id}:${memberId}`) && (
+                              {onboarding && canOpenOnboarding && (
                                 <Link
-                                  href={`/workspaces/${workspaceId}/chat?session=${onboardingByRoleMember.get(`${role.id}:${memberId}`)?.conversationId}`}
+                                  href={`/workspaces/${workspaceId}/chat?session=${onboarding.conversationId}`}
                                   className="tag info"
                                   style={{ fontSize: "0.7rem", padding: "2px 6px", textDecoration: "none" }}
                                 >
-                                  onboarding {onboardingByRoleMember.get(`${role.id}:${memberId}`)?.status.toLowerCase()}
+                                  onboarding {onboarding.status.toLowerCase()}
                                 </Link>
+                              )}
+                              {onboarding && !canOpenOnboarding && (
+                                <span className="tag info" style={{ fontSize: "0.7rem", padding: "2px 6px" }}>
+                                  onboarding {onboarding.status.toLowerCase()}
+                                </span>
                               )}
                               {canManageStructure && (
                                 <form action={unassignRoleAction}>

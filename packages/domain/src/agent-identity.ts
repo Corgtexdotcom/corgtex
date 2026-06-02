@@ -214,6 +214,9 @@ export async function assignAgentToCircle(
   }
 
   return prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`
+      SELECT pg_advisory_xact_lock(hashtext('circle_agent_assignment'), hashtext(${`${params.circleId}:${params.agentIdentityId}`}))
+    `;
     const existing = await tx.circleAgentAssignment.findUnique({
       where: {
         circleId_agentIdentityId: {
@@ -223,18 +226,20 @@ export async function assignAgentToCircle(
       },
     });
 
-    const assignment = existing
-      ? await tx.circleAgentAssignment.update({
-        where: { id: existing.id },
-        data: { roleId },
-      })
-      : await tx.circleAgentAssignment.create({
-        data: {
+    const assignment = await tx.circleAgentAssignment.upsert({
+      where: {
+        circleId_agentIdentityId: {
           circleId: params.circleId,
           agentIdentityId: params.agentIdentityId,
-          roleId,
         },
-      });
+      },
+      update: { roleId },
+      create: {
+        circleId: params.circleId,
+        agentIdentityId: params.agentIdentityId,
+        roleId,
+      },
+    });
 
     if (existing?.roleId && existing.roleId !== roleId) {
       await endRoleHolderHistory(tx, {

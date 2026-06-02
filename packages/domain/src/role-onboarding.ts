@@ -134,6 +134,9 @@ export async function ensureRoleOnboardingForAssignment(
     member: MemberForOnboarding;
   },
 ) {
+  await tx.$executeRaw`
+    SELECT pg_advisory_xact_lock(hashtext('role_onboarding'), hashtext(${`${params.role.id}:${params.member.id}`}))
+  `;
   const existing = await tx.roleOnboardingSession.findFirst({
     where: {
       workspaceId: params.workspaceId,

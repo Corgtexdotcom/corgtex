@@ -29,6 +29,7 @@ const { prismaMock } = vi.hoisted(() => {
     roleAssignment: {
       create: vi.fn(),
       findUnique: vi.fn(),
+      upsert: vi.fn(),
       delete: vi.fn(),
       findMany: vi.fn(),
     },
@@ -95,6 +96,7 @@ describe("roles domain", () => {
     });
     prismaMock.roleOnboardingSession.updateMany.mockResolvedValue({ count: 1 });
     prismaMock.notification.create.mockResolvedValue({});
+    prismaMock.roleAssignment.upsert.mockResolvedValue({ id: "assignment-1" });
   });
 
   it("listRoles scopes roles by workspace through circles", async () => {
@@ -342,7 +344,6 @@ describe("roles domain", () => {
       user: { displayName: "Member", email: "member@example.com" },
     });
     prismaMock.roleAssignment.findUnique.mockResolvedValue(null);
-    prismaMock.roleAssignment.create.mockResolvedValue({ id: "assignment-1" });
 
     const { assignRole } = await import("./roles");
     await expect(assignRole(actor, {
@@ -369,6 +370,19 @@ describe("roles domain", () => {
         entityType: "ConversationSession",
         entityId: "conversation-1",
       }),
+    }));
+    expect(prismaMock.roleAssignment.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        roleId_memberId: {
+          roleId: "role-1",
+          memberId: "member-1",
+        },
+      },
+      update: {},
+      create: {
+        roleId: "role-1",
+        memberId: "member-1",
+      },
     }));
   });
 

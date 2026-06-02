@@ -323,20 +323,25 @@ export async function assignRole(actor: AppActor, params: {
     });
     invariant(member && member.workspaceId === params.workspaceId && member.isActive, 404, "NOT_FOUND", "Member not found.");
 
+    const assignmentKey = {
+      roleId: params.roleId,
+      memberId: params.memberId,
+    };
+    await tx.$executeRaw`
+      SELECT pg_advisory_xact_lock(hashtext('role_assignment'), hashtext(${`${assignmentKey.roleId}:${assignmentKey.memberId}`}))
+    `;
     const existingAssignment = await tx.roleAssignment.findUnique({
       where: {
-        roleId_memberId: {
-          roleId: params.roleId,
-          memberId: params.memberId,
-        },
+        roleId_memberId: assignmentKey,
       },
     });
 
-    const assignment = existingAssignment ?? await tx.roleAssignment.create({
-      data: {
-        roleId: params.roleId,
-        memberId: params.memberId,
+    const assignment = await tx.roleAssignment.upsert({
+      where: {
+        roleId_memberId: assignmentKey,
       },
+      update: {},
+      create: assignmentKey,
     });
 
     if (!existingAssignment) {

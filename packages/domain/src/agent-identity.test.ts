@@ -49,6 +49,7 @@ vi.mock("@corgtex/shared", () => ({
     auditLog: {
       create: vi.fn(),
     },
+    $executeRaw: vi.fn(),
     $transaction: vi.fn(async (cb) => cb(prisma)),
   },
 }));
@@ -75,6 +76,7 @@ describe("agent-identity", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockMembership();
+    vi.mocked(prisma.$executeRaw).mockResolvedValue(0 as any);
     vi.mocked(prisma.roleHolderHistory.create).mockResolvedValue({} as any);
     vi.mocked(prisma.roleHolderHistory.updateMany).mockResolvedValue({ count: 1 } as any);
   });
@@ -153,7 +155,7 @@ describe("agent-identity", () => {
     vi.mocked(prisma.agentIdentity.findFirst).mockResolvedValue({ id: "ai-1", workspaceId: wsId } as any);
     vi.mocked(prisma.circle.findFirst).mockResolvedValue({ id: "c-1", workspaceId: wsId } as any);
     vi.mocked(prisma.circleAgentAssignment.findUnique).mockResolvedValue(null);
-    vi.mocked(prisma.circleAgentAssignment.create).mockResolvedValue({ id: "ca-1", circleId: "c-1", agentIdentityId: "ai-1", roleId: null } as any);
+    vi.mocked(prisma.circleAgentAssignment.upsert).mockResolvedValue({ id: "ca-1", circleId: "c-1", agentIdentityId: "ai-1", roleId: null } as any);
 
     const result = await assignAgentToCircle(adminActor, {
       workspaceId: wsId,
@@ -162,6 +164,20 @@ describe("agent-identity", () => {
     });
 
     expect(result.circleId).toBe("c-1");
+    expect(prisma.circleAgentAssignment.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        circleId_agentIdentityId: {
+          circleId: "c-1",
+          agentIdentityId: "ai-1",
+        },
+      },
+      update: { roleId: null },
+      create: {
+        circleId: "c-1",
+        agentIdentityId: "ai-1",
+        roleId: null,
+      },
+    }));
   });
 
   it("assigns an agent to a role in the same circle", async () => {
@@ -169,7 +185,7 @@ describe("agent-identity", () => {
     vi.mocked(prisma.circle.findFirst).mockResolvedValue({ id: "c-1", workspaceId: wsId } as any);
     vi.mocked(prisma.role.findFirst).mockResolvedValue({ id: "r-1" } as any);
     vi.mocked(prisma.circleAgentAssignment.findUnique).mockResolvedValue(null);
-    vi.mocked(prisma.circleAgentAssignment.create).mockResolvedValue({
+    vi.mocked(prisma.circleAgentAssignment.upsert).mockResolvedValue({
       id: "ca-1",
       circleId: "c-1",
       agentIdentityId: "ai-1",
@@ -192,8 +208,9 @@ describe("agent-identity", () => {
       },
       select: { id: true },
     });
-    expect(prisma.circleAgentAssignment.create).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({ roleId: "r-1" }),
+    expect(prisma.circleAgentAssignment.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      update: { roleId: "r-1" },
+      create: expect.objectContaining({ roleId: "r-1" }),
     }));
     expect(prisma.roleHolderHistory.create).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
