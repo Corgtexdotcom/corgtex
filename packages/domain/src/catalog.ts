@@ -179,7 +179,9 @@ function connectorSources(workspaceId: string, flags: CatalogFeatureFlags): Cata
       title: "Corgtex MCP",
       outcome: "Use Corgtex from ChatGPT, Claude, Cursor, Claude Code, and other MCP clients.",
       descriptionMd: "Connect external AI clients to Corgtex with workspace-scoped OAuth access.",
-      url: `/workspaces/${workspaceId}/settings?tab=general`,
+      url: flags.AI_WORKSPACES
+        ? `/workspaces/${workspaceId}/settings?tab=ai-workspaces`
+        : `/workspaces/${workspaceId}/settings?tab=general`,
       category: "AI",
       accessMode: "OPEN",
       requestedScopes: ["workspace:read", "brain:read", "conversations:write"],
@@ -207,7 +209,7 @@ function connectorSources(workspaceId: string, flags: CatalogFeatureFlags): Cata
   return sources;
 }
 
-function aiWorkspaceSources(flags: CatalogFeatureFlags): CatalogSourceInput[] {
+function aiWorkspaceSources(workspaceId: string, flags: CatalogFeatureFlags): CatalogSourceInput[] {
   if (!flags.AI_WORKSPACES) return [];
 
   return listAiWorkspaceProviders().map((provider) => {
@@ -224,7 +226,7 @@ function aiWorkspaceSources(flags: CatalogFeatureFlags): CatalogSourceInput[] {
       title: provider.label,
       outcome: provider.outcome,
       descriptionMd: provider.description,
-      url: null,
+      url: `/workspaces/${workspaceId}/settings?tab=ai-workspaces&provider=${provider.key}`,
       category,
       accessMode: provider.setupPath === "request" ? "REQUEST" : "OPEN",
       requestedScopes: ["workspace:read", "brain:read", "conversations:write"],
@@ -233,8 +235,8 @@ function aiWorkspaceSources(flags: CatalogFeatureFlags): CatalogSourceInput[] {
   });
 }
 
-function managedEnterpriseServiceSources(flags: CatalogFeatureFlags): CatalogSourceInput[] {
-  if (!flags.MANAGED_ENTERPRISE_SERVICES) return [];
+function managedEnterpriseServiceSources(workspaceId: string, flags: CatalogFeatureFlags): CatalogSourceInput[] {
+  if (!flags.MANAGED_ENTERPRISE_SERVICES || !flags.AI_WORKSPACES) return [];
 
   return listEnterpriseServices()
     .filter((service) => service.key !== "meeting_recorder")
@@ -245,7 +247,7 @@ function managedEnterpriseServiceSources(flags: CatalogFeatureFlags): CatalogSou
       title: service.label,
       outcome: service.outcome,
       descriptionMd: service.description,
-      url: null,
+      url: `/workspaces/${workspaceId}/settings?tab=ai-workspaces&service=${service.key}`,
       category: "ENTERPRISE_SERVICES",
       accessMode: "REQUEST",
       requestedScopes: ["workspace:read", "integrations:read", "runtime:read"],
@@ -273,7 +275,7 @@ function isCatalogItemAvailable(item: Pick<CatalogItemRecord, "sourceType" | "so
     return flags.AI_WORKSPACES;
   }
   if (item.sourceType === "ENTERPRISE_SERVICE") {
-    return flags.MANAGED_ENTERPRISE_SERVICES;
+    return flags.MANAGED_ENTERPRISE_SERVICES && flags.AI_WORKSPACES;
   }
   if (item.sourceType === "COMMUNICATION_INSTALLATION" && item.sourceId === "slack") {
     return Boolean(process.env.SLACK_CLIENT_ID && process.env.SLACK_CLIENT_SECRET);
@@ -416,8 +418,8 @@ async function ensureDerivedCatalogItems(workspaceId: string) {
       requestedScopes: ["data-sources:read"],
     })) : []),
     ...connectorSources(workspaceId, featureFlags),
-    ...aiWorkspaceSources(featureFlags),
-    ...managedEnterpriseServiceSources(featureFlags),
+    ...aiWorkspaceSources(workspaceId, featureFlags),
+    ...managedEnterpriseServiceSources(workspaceId, featureFlags),
   ];
 
   await Promise.all(sources.map((source) => prisma.catalogItem.upsert({

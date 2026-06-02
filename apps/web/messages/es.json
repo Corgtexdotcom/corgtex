@@ -2179,6 +2179,7 @@
     "stepSetInstructionsDesc": "Pega esta plantilla en el cuadro de instrucciones:",
     "tabGeneral": "General",
     "tabAgents": "Agentes",
+    "tabAiWorkspaces": "Espacios de IA",
     "tabKnowledgeSources": "Fuentes de conocimiento",
     "tabMembers": "Miembros",
     "titleAddPostgres": "Agregar base de datos PostgreSQL",

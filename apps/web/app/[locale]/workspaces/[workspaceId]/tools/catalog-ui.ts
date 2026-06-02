@@ -94,6 +94,14 @@ export function splitDefaultCatalogSections<T extends CatalogItemForUi>(items: T
   };
 }
 
+function isAiWorkspaceItem(item: CatalogItemForUi) {
+  return item.category === "AI_DEFAULT" || item.category === "AI_BYO" || item.category === "AI_ADVANCED";
+}
+
+function isEnterpriseServiceItem(item: CatalogItemForUi) {
+  return item.category === "ENTERPRISE_SERVICES";
+}
+
 export function getCatalogCardActions(
   item: CatalogItemForUi,
   { workspaceId, canManageCatalog }: { workspaceId: string; canManageCatalog: boolean },
@@ -112,12 +120,22 @@ export function getCatalogCardActions(
       return [{ kind: "status", label: "Admin setup required" }, details];
     }
     return item.url
-      ? [{ kind: "link", label: "Connect", href: item.url, variant: "primary" }, details]
+      ? [{ kind: "link", label: isAiWorkspaceItem(item) ? "Set up" : "Connect", href: item.url, variant: "primary" }, details]
       : [details];
   }
 
   if (item.type === "APP" || item.type === "TOOL") {
     if (disabled) return [details];
+    if (isEnterpriseServiceItem(item)) {
+      const actions: CatalogCardAction[] = [];
+      if (item.url) {
+        actions.push({ kind: "link", label: "Open setup", href: item.url, variant: "primary" });
+      }
+      if (item.accessMode === "REQUEST") {
+        actions.push({ kind: "request", label: "Request managed service", requestType: "ACCESS", variant: item.url ? "secondary" : "primary" });
+      }
+      return [...actions, details];
+    }
     if (item.accessMode === "OPEN" && item.url) {
       return [{ kind: "link", label: "Open", href: item.url, variant: "primary" }, details];
     }

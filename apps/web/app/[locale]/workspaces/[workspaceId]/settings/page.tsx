@@ -17,6 +17,8 @@ import {
   getMeetingRecorderConfig,
   listMeetingTranscriptSourceState,
   getWorkspacePlanState,
+  listAiWorkspaceProviders,
+  listEnterpriseServices,
 } from "@corgtex/domain";
 import { env, prisma } from "@corgtex/shared";
 import { requirePageActor } from "@/lib/auth";
@@ -44,6 +46,8 @@ import { SsoConfigManager } from "./SsoConfigManager";
 import { DataSourcesManager } from "./DataSourcesManager";
 import { UserSettingsPanel } from "./UserSettingsPanel";
 import { OnboardingRestartButton } from "./OnboardingRestartButton";
+import { AiWorkspaceManager } from "./AiWorkspaceManager";
+import { normalizeSelectedProvider, normalizeSelectedService } from "./ai-workspace-ui";
 import { getTranslations, getFormatter } from "next-intl/server";
 import { notFound } from "next/navigation";
 import { getWorkspaceFeatureFlags } from "@/lib/workspace-feature-flags";
@@ -257,13 +261,23 @@ function OAuthConnectionControls({ connection, workspaceId, format }: {
   );
 }
 
+type SearchParamValue = string | string[] | undefined;
+
 
 export default async function SettingsPage({
   params,
   searchParams,
 }: {
   params: Promise<{ workspaceId: string }>;
-  searchParams: Promise<{ tab?: string; integration?: string; integrationStatus?: string; integrationError?: string; integrationSuccess?: string }>;
+  searchParams: Promise<{
+    tab?: string;
+    integration?: string;
+    integrationStatus?: string;
+    integrationError?: string;
+    integrationSuccess?: string;
+    provider?: SearchParamValue;
+    service?: SearchParamValue;
+  }>;
 }) {
   const { workspaceId } = await params;
   const search = await searchParams;
@@ -274,6 +288,9 @@ export default async function SettingsPage({
     notFound();
   }
   if (!featureFlags.SETTINGS_GENERAL && search.tab === "general") {
+    notFound();
+  }
+  if (!featureFlags.AI_WORKSPACES && tab === "ai-workspaces") {
     notFound();
   }
 
@@ -397,6 +414,18 @@ export default async function SettingsPage({
   const microsoftConnection = userConnections.find((c) => c.provider === "MICROSOFT" && c.status !== "DISCONNECTED");
   const googleConfigured = Boolean(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET);
   const microsoftConfigured = Boolean(process.env.MICROSOFT_CLIENT_ID && process.env.MICROSOFT_CLIENT_SECRET);
+  const aiWorkspaceProviders = featureFlags.AI_WORKSPACES
+    ? listAiWorkspaceProviders().map((provider) => ({
+        ...provider,
+        capabilities: [...provider.capabilities],
+        supportedOwnershipModes: [...provider.supportedOwnershipModes],
+      }))
+    : [];
+  const enterpriseServices = featureFlags.AI_WORKSPACES && featureFlags.MANAGED_ENTERPRISE_SERVICES
+    ? listEnterpriseServices().map((service) => ({ ...service }))
+    : [];
+  const selectedProviderKey = normalizeSelectedProvider(search.provider, aiWorkspaceProviders);
+  const selectedServiceKey = normalizeSelectedService(search.service, enterpriseServices);
 
   return (
     <>
@@ -435,6 +464,14 @@ export default async function SettingsPage({
             className={`nr-tab ${tab === "agents" ? "nr-tab-active" : ""}`}
           >
             {t("tabAgents")}
+          </a>
+        )}
+        {featureFlags.AI_WORKSPACES && (
+          <a
+            href={`/workspaces/${workspaceId}/settings?tab=ai-workspaces`}
+            className={`nr-tab ${tab === "ai-workspaces" ? "nr-tab-active" : ""}`}
+          >
+            {t("tabAiWorkspaces")}
           </a>
         )}
         <a
@@ -772,13 +809,15 @@ export default async function SettingsPage({
 
             <SsoConfigManager workspaceId={workspaceId} configs={ssoConfigs} />
 
-            <section className="stack" style={{ gap: 40 }}>
-                 <h2 className="nr-section-header">{t("sectionCorgtexConnector")}</h2>
-                 <p className="nr-item-meta" style={{ fontSize: "0.85rem", marginBottom: 16 }}>
-                   {t("descCorgtexConnector")}
-                 </p>
-                 <CorgtexConnectorManager connectorUrl={connectorUrl} />
-            </section>
+            {!featureFlags.AI_WORKSPACES && (
+              <section className="stack" style={{ gap: 40 }}>
+                <h2 className="nr-section-header">{t("sectionCorgtexConnector")}</h2>
+                <p className="nr-item-meta" style={{ fontSize: "0.85rem", marginBottom: 16 }}>
+                  {t("descCorgtexConnector")}
+                </p>
+                <CorgtexConnectorManager connectorUrl={connectorUrl} />
+              </section>
+            )}
           </div>
 
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(340px, 1fr))", gap: "40px" }}>
@@ -930,6 +969,18 @@ export default async function SettingsPage({
 
       {tab === "agents" && (
         <AgentSettingsClient workspaceId={workspaceId} agents={agents} />
+      )}
+
+      {tab === "ai-workspaces" && featureFlags.AI_WORKSPACES && (
+        <AiWorkspaceManager
+          connectorUrl={connectorUrl}
+          origin={origin}
+          providers={aiWorkspaceProviders}
+          enterpriseServices={enterpriseServices}
+          managedServicesEnabled={featureFlags.MANAGED_ENTERPRISE_SERVICES}
+          selectedProviderKey={selectedProviderKey}
+          selectedServiceKey={selectedServiceKey}
+        />
       )}
     </>
   );
