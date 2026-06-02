@@ -135,9 +135,10 @@ function requestFixture(overrides: Record<string, unknown> = {}) {
 
 describe("execution plumbing domain", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
     prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof prismaMock) => Promise<unknown>) => callback(prismaMock));
     prismaMock.workspace.findUnique.mockResolvedValue(workspace);
+    prismaMock.executionRequest.findFirst.mockResolvedValue(requestFixture());
     prismaMock.executionRequest.findUnique.mockResolvedValue(null);
     prismaMock.executionResult.findUnique.mockResolvedValue(null);
     prismaMock.executionRequest.create.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => requestFixture(data));
@@ -250,8 +251,41 @@ describe("execution plumbing domain", () => {
     });
 
     expect(result).toMatchObject({ id: "result-existing", writeback: { entityId: "action-1" } });
+    expect(prismaMock.executionRequest.findFirst).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "request-1", workspaceId: "workspace-1" },
+    }));
     expect(createAction).not.toHaveBeenCalled();
     expect(prismaMock.executionResult.create).not.toHaveBeenCalled();
+  });
+
+  it("does not return duplicate results before workspace-scoped request authorization", async () => {
+    prismaMock.executionRequest.findFirst.mockResolvedValueOnce(null);
+    prismaMock.executionResult.findUnique.mockResolvedValueOnce({
+      id: "result-other",
+      executionRequestId: "request-1",
+      status: "ACCEPTED",
+      idempotencyKey: "same-key",
+      targetType: "ACTION",
+      targetId: null,
+      outputJson: { title: "Other workspace" },
+      artifactJson: null,
+      errorMessage: null,
+      writebackEntityType: "Action",
+      writebackEntityId: "action-other",
+      submittedAt: new Date("2026-06-02T10:10:00.000Z"),
+      acceptedAt: new Date("2026-06-02T10:10:00.000Z"),
+      rejectedAt: null,
+    });
+
+    const { submitExecutionResult } = await import("./execution-plumbing");
+    await expect(submitExecutionResult(agentActor, {
+      workspaceId: "workspace-1",
+      requestId: "request-1",
+      idempotencyKey: "same-key",
+      output: { title: "Follow up" },
+    })).rejects.toThrow("Execution request not found.");
+
+    expect(prismaMock.executionResult.findUnique).not.toHaveBeenCalled();
   });
 
   it("rejects cross-workspace write-back targets before storing a result", async () => {
@@ -265,6 +299,94 @@ describe("execution plumbing domain", () => {
       idempotencyKey: "result-key",
       output: { title: "Follow up" },
     })).rejects.toThrow("Action write-back target not found");
+
+    expect(prismaMock.executionResult.create).not.toHaveBeenCalled();
+    expect(createAction).not.toHaveBeenCalled();
+  });
+
+  it("applies visibility filters when listing write-back targets", async () => {
+    requireWorkspaceMembership.mockResolvedValueOnce({ id: "member-1", workspaceId: "workspace-1", userId: "user-1", role: "MEMBER", isActive: true });
+    prismaMock.action.findMany.mockResolvedValueOnce([]);
+
+    const { listWritebackTargets } = await import("./execution-plumbing");
+    await listWritebackTargets(actor, {
+      workspaceId: "workspace-1",
+      targetTypes: ["action"],
+      query: "launch",
+    });
+
+    expect(prismaMock.action.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        workspaceId: "workspace-1",
+        archivedAt: null,
+        title: { contains: "launch", mode: "insensitive" },
+        OR: [
+          { isPrivate: false },
+          { isPrivate: true, status: "DRAFT", authorUserId: "user-1" },
+        ],
+      }),
+    }));
+  });
+
+  it("applies Brain draft visibility when listing article write-back targets", async () => {
+    requireWorkspaceMembership.mockResolvedValueOnce({ id: "member-1", workspaceId: "workspace-1", userId: "user-1", role: "MEMBER", isActive: true });
+    prismaMock.brainArticle.findMany.mockResolvedValueOnce([]);
+
+    const brainAgent = {
+      ...agentActor,
+      scopes: [...(agentActor.scopes ?? []), "brain:read"],
+    };
+
+    const { listWritebackTargets } = await import("./execution-plumbing");
+    await listWritebackTargets(brainAgent, {
+      workspaceId: "workspace-1",
+      targetTypes: ["brain"],
+    });
+
+    expect(prismaMock.brainArticle.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        AND: [
+          { workspaceId: "workspace-1", archivedAt: null },
+          { OR: [{ isPrivate: false }, { isPrivate: true, authority: "DRAFT" }] },
+        ],
+      },
+    }));
+  });
+
+  it("rejects result targets outside the execution request allowed scopes", async () => {
+    prismaMock.executionRequest.findFirst.mockResolvedValueOnce(requestFixture({
+      writebackTargetType: null,
+      allowedScopes: ["execution:read", "execution:write"],
+    }));
+
+    const broadAgent = {
+      ...agentActor,
+      scopes: [...(agentActor.scopes ?? []), "proposals:write"],
+    };
+
+    const { submitExecutionResult } = await import("./execution-plumbing");
+    await expect(submitExecutionResult(broadAgent, {
+      workspaceId: "workspace-1",
+      requestId: "request-1",
+      idempotencyKey: "result-key",
+      targetType: "PROPOSAL",
+      output: { title: "Governance update", bodyMd: "Do the thing." },
+    })).rejects.toThrow("Execution request does not allow the required scope: proposals:write.");
+
+    expect(prismaMock.executionResult.create).not.toHaveBeenCalled();
+    expect(createProposal).not.toHaveBeenCalled();
+  });
+
+  it("rejects invalid native output before storing a result shell", async () => {
+    prismaMock.executionRequest.findFirst.mockResolvedValueOnce(requestFixture());
+
+    const { submitExecutionResult } = await import("./execution-plumbing");
+    await expect(submitExecutionResult(agentActor, {
+      workspaceId: "workspace-1",
+      requestId: "request-1",
+      idempotencyKey: "result-key",
+      output: { bodyMd: "Missing title" },
+    })).rejects.toThrow("Action title is required.");
 
     expect(prismaMock.executionResult.create).not.toHaveBeenCalled();
     expect(createAction).not.toHaveBeenCalled();

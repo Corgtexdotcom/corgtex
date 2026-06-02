@@ -1,5 +1,5 @@
 import { prisma } from "@corgtex/shared";
-import type { AppActor } from "@corgtex/shared";
+import type { AppActor, MembershipSummary } from "@corgtex/shared";
 import {
   AiWorkspaceProvider,
   BrainArticleAuthority,
@@ -22,6 +22,7 @@ import { recordAudit } from "./audit-trail";
 import { actorUserIdForWorkspace, requireWorkspaceMembership } from "./auth";
 import { AppError, invariant } from "./errors";
 import { isKnownScope, type AgentScope } from "./agent-auth";
+import { privacyFilter } from "./privacy";
 
 const SECRET_KEY_PATTERN = /(token|secret|password|credential|api[_-]?key|access[_-]?key|refresh|authorization|bearer)/i;
 const MAX_CONTEXT_ITEMS = 20;
@@ -209,6 +210,16 @@ function titleMatches(query: string | null | undefined) {
   return trimmed ? { contains: trimmed, mode: "insensitive" as const } : undefined;
 }
 
+function brainArticlePrivacyFilter(actor: AppActor, membership?: MembershipSummary | null) {
+  if (actor.kind === "agent" || membership?.role === "ADMIN") {
+    return [{ isPrivate: false }, { isPrivate: true, authority: "DRAFT" as const }];
+  }
+  if (actor.kind === "user" && membership) {
+    return [{ isPrivate: false }, { isPrivate: true, ownerMemberId: membership.id }];
+  }
+  return [{ isPrivate: false }];
+}
+
 async function loadExecutionRequest(workspaceId: string, requestId: string) {
   const request = await prisma.executionRequest.findFirst({
     where: { id: requestId, workspaceId },
@@ -283,7 +294,13 @@ function serializeExecutionRequest(request: NonNullable<ExecutionRequestRecord>)
   };
 }
 
-async function validateWritebackTarget(workspaceId: string, type: ExecutionWritebackTargetType | null, targetId?: string | null) {
+async function validateWritebackTarget(
+  workspaceId: string,
+  type: ExecutionWritebackTargetType | null,
+  targetId?: string | null,
+  actor?: AppActor,
+  membership?: MembershipSummary | null,
+) {
   if (!type) return null;
   if (!targetId) {
     return {
@@ -297,17 +314,26 @@ async function validateWritebackTarget(workspaceId: string, type: ExecutionWrite
 
   switch (type) {
     case "ACTION": {
-      const item = await prisma.action.findFirst({ where: { id: targetId, workspaceId, archivedAt: null }, select: { id: true, title: true, status: true } });
+      const item = await prisma.action.findFirst({
+        where: { id: targetId, workspaceId, archivedAt: null, ...(actor ? privacyFilter(actor, membership) : {}) },
+        select: { id: true, title: true, status: true },
+      });
       invariant(item, 404, "NOT_FOUND", "Action write-back target not found.");
       return { type, id: item.id, title: item.title, status: item.status, webPath: `/actions/${item.id}` };
     }
     case "TENSION": {
-      const item = await prisma.tension.findFirst({ where: { id: targetId, workspaceId, archivedAt: null }, select: { id: true, title: true, status: true } });
+      const item = await prisma.tension.findFirst({
+        where: { id: targetId, workspaceId, archivedAt: null, ...(actor ? privacyFilter(actor, membership) : {}) },
+        select: { id: true, title: true, status: true },
+      });
       invariant(item, 404, "NOT_FOUND", "Tension write-back target not found.");
       return { type, id: item.id, title: item.title, status: item.status, webPath: `/tensions/${item.id}` };
     }
     case "PROPOSAL": {
-      const item = await prisma.proposal.findFirst({ where: { id: targetId, workspaceId, archivedAt: null }, select: { id: true, title: true, status: true } });
+      const item = await prisma.proposal.findFirst({
+        where: { id: targetId, workspaceId, archivedAt: null, ...(actor ? privacyFilter(actor, membership) : {}) },
+        select: { id: true, title: true, status: true },
+      });
       invariant(item, 404, "NOT_FOUND", "Proposal write-back target not found.");
       return { type, id: item.id, title: item.title, status: item.status, webPath: `/proposals/${item.id}` };
     }
@@ -317,7 +343,15 @@ async function validateWritebackTarget(workspaceId: string, type: ExecutionWrite
       return { type, id: item.id, title: item.title ?? "Untitled meeting", status: item.status, webPath: `/meetings/${item.id}` };
     }
     case "BRAIN_ARTICLE": {
-      const item = await prisma.brainArticle.findFirst({ where: { id: targetId, workspaceId, archivedAt: null }, select: { id: true, title: true, authority: true, slug: true } });
+      const item = await prisma.brainArticle.findFirst({
+        where: {
+          AND: [
+            { id: targetId, workspaceId, archivedAt: null },
+            ...(actor ? [{ OR: brainArticlePrivacyFilter(actor, membership) }] : []),
+          ],
+        },
+        select: { id: true, title: true, authority: true, slug: true },
+      });
       invariant(item, 404, "NOT_FOUND", "Brain article write-back target not found.");
       return { type, id: item.id, title: item.title, status: item.authority, webPath: `/brain/${item.slug}` };
     }
@@ -375,13 +409,13 @@ function buildExecutionPacket(params: {
 
 export async function createExecutionRequest(actor: AppActor, params: CreateExecutionRequestParams) {
   requireExecutionScope(actor, "execution:write");
-  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
 
   const goal = params.goal.trim();
   invariant(goal.length > 0, 400, "INVALID_INPUT", "Execution goal is required.");
   const provider = normalizeProvider(params.provider);
   const targetType = normalizeExecutionTargetType(params.writebackTargetType);
-  const target = await validateWritebackTarget(params.workspaceId, targetType, params.writebackTargetId);
+  const target = await validateWritebackTarget(params.workspaceId, targetType, params.writebackTargetId, actor, membership);
   const allowedScopes = normalizeKnownScopes(params.allowedScopes ?? defaultScopesForTarget(targetType));
   const idempotencyKey = optionalString(params.idempotencyKey);
 
@@ -562,7 +596,7 @@ function targetTypeSet(targetTypes?: Array<string | ExecutionWritebackTargetType
 
 export async function listWritebackTargets(actor: AppActor, params: ListWritebackTargetsParams) {
   requireExecutionScope(actor, "execution:read");
-  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
   const selectedTypes = targetTypeSet(params.targetTypes);
   const take = Math.min(Math.max(params.take ?? 10, 1), 50);
   const title = titleMatches(params.query);
@@ -572,7 +606,7 @@ export async function listWritebackTargets(actor: AppActor, params: ListWritebac
   if (includeType("ACTION")) {
     requireExecutionScope(actor, "actions:read");
     const records = await prisma.action.findMany({
-      where: { workspaceId: params.workspaceId, archivedAt: null, ...(title ? { title } : {}) },
+      where: { workspaceId: params.workspaceId, archivedAt: null, ...privacyFilter(actor, membership), ...(title ? { title } : {}) },
       select: { id: true, title: true, status: true },
       orderBy: { updatedAt: "desc" },
       take,
@@ -582,7 +616,7 @@ export async function listWritebackTargets(actor: AppActor, params: ListWritebac
   if (includeType("TENSION")) {
     requireExecutionScope(actor, "tensions:read");
     const records = await prisma.tension.findMany({
-      where: { workspaceId: params.workspaceId, archivedAt: null, ...(title ? { title } : {}) },
+      where: { workspaceId: params.workspaceId, archivedAt: null, ...privacyFilter(actor, membership), ...(title ? { title } : {}) },
       select: { id: true, title: true, status: true },
       orderBy: { updatedAt: "desc" },
       take,
@@ -592,7 +626,7 @@ export async function listWritebackTargets(actor: AppActor, params: ListWritebac
   if (includeType("PROPOSAL")) {
     requireExecutionScope(actor, "proposals:read");
     const records = await prisma.proposal.findMany({
-      where: { workspaceId: params.workspaceId, archivedAt: null, ...(title ? { title } : {}) },
+      where: { workspaceId: params.workspaceId, archivedAt: null, ...privacyFilter(actor, membership), ...(title ? { title } : {}) },
       select: { id: true, title: true, status: true },
       orderBy: { updatedAt: "desc" },
       take,
@@ -612,7 +646,12 @@ export async function listWritebackTargets(actor: AppActor, params: ListWritebac
   if (includeType("BRAIN_ARTICLE")) {
     requireExecutionScope(actor, "brain:read");
     const records = await prisma.brainArticle.findMany({
-      where: { workspaceId: params.workspaceId, archivedAt: null, ...(title ? { title } : {}) },
+      where: {
+        AND: [
+          { workspaceId: params.workspaceId, archivedAt: null, ...(title ? { title } : {}) },
+          { OR: brainArticlePrivacyFilter(actor, membership) },
+        ],
+      },
       select: { id: true, slug: true, title: true, authority: true },
       orderBy: { updatedAt: "desc" },
       take,
@@ -721,18 +760,47 @@ async function createNativeWriteback(actor: AppActor, params: {
   }
 }
 
+function validateNativeWritebackOutput(type: ExecutionWritebackTargetType, targetId: string | null, output: JsonRecord) {
+  if (targetId || type === "COMMENT") return;
+
+  switch (type) {
+    case "ACTION":
+      requiredString(output.title, "Action title");
+      return;
+    case "TENSION":
+      requiredString(output.title, "Tension title");
+      return;
+    case "PROPOSAL":
+      requiredString(output.title, "Proposal title");
+      requiredString(output.bodyMd ?? output.body, "Proposal body");
+      return;
+    case "MEETING":
+      optionalDate(output.recordedAt);
+      return;
+    case "BRAIN_ARTICLE":
+      requiredString(output.title, "Brain article title");
+      requiredString(output.bodyMd ?? output.body, "Brain article body");
+      return;
+    case "BUILD_ARTIFACT":
+      requiredString(output.repositoryOwner, "Repository owner");
+      requiredString(output.repositoryName, "Repository name");
+      requiredString(output.title, "Build artifact title");
+      return;
+  }
+}
+
 export async function submitExecutionResult(actor: AppActor, params: SubmitExecutionResultParams) {
   requireExecutionScope(actor, "execution:write");
-  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
 
   const idempotencyKey = params.idempotencyKey.trim();
   invariant(idempotencyKey.length > 0, 400, "INVALID_INPUT", "Result idempotency key is required.");
+  const request = await loadExecutionRequest(params.workspaceId, params.requestId);
   const existing = await prisma.executionResult.findUnique({
-    where: { executionRequestId_idempotencyKey: { executionRequestId: params.requestId, idempotencyKey } },
+    where: { executionRequestId_idempotencyKey: { executionRequestId: request.id, idempotencyKey } },
   });
   if (existing) return serializeExecutionResult(existing);
 
-  const request = await loadExecutionRequest(params.workspaceId, params.requestId);
   invariant(!["COMPLETED", "FAILED", "CANCELLED"].includes(request.status), 400, "INVALID_STATE", "Execution request is not accepting new results.");
 
   const targetType = normalizeExecutionTargetType(params.targetType) ?? request.writebackTargetType;
@@ -744,11 +812,16 @@ export async function submitExecutionResult(actor: AppActor, params: SubmitExecu
   if (request.writebackTargetId) {
     invariant(targetId === request.writebackTargetId, 400, "INVALID_INPUT", "Result target id does not match the execution request.");
   }
-  requireExecutionScope(actor, targetWriteScope(targetType));
-  await validateWritebackTarget(params.workspaceId, targetType, targetId);
+  const writeScope = targetWriteScope(targetType);
+  requireExecutionScope(actor, writeScope);
+  invariant(request.allowedScopes.includes(writeScope), 403, "FORBIDDEN", `Execution request does not allow the required scope: ${writeScope}.`);
+  await validateWritebackTarget(params.workspaceId, targetType, targetId, actor, membership);
 
   const output = objectInput(params.output);
   const errorMessage = optionalString(params.errorMessage);
+  if (!errorMessage) {
+    validateNativeWritebackOutput(targetType, targetId ?? null, output);
+  }
 
   let resultShell: Awaited<ReturnType<typeof prisma.executionResult.create>>;
   try {
@@ -796,7 +869,7 @@ export async function submitExecutionResult(actor: AppActor, params: SubmitExecu
   } catch (error) {
     if (!isPrismaUniqueError(error)) throw error;
     const duplicate = await prisma.executionResult.findUnique({
-      where: { executionRequestId_idempotencyKey: { executionRequestId: params.requestId, idempotencyKey } },
+      where: { executionRequestId_idempotencyKey: { executionRequestId: request.id, idempotencyKey } },
     });
     invariant(duplicate, 409, "CONFLICT", "Execution result idempotency conflict.");
     return serializeExecutionResult(duplicate);
