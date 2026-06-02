@@ -68,8 +68,18 @@ export type AiWorkspaceSetupCard = {
   connectorUrl: string;
   command?: string;
   actions: AiWorkspaceSetupAction[];
+  resources: AiWorkspaceSetupResource[];
   steps: string[];
   notes: string[];
+  verificationChecks: string[];
+};
+
+export type AiWorkspaceSetupResource = {
+  title: string;
+  label: string;
+  value: string;
+  copiedMessage: string;
+  fallbackMessage: string;
 };
 
 const CHATGPT_APPS_URL = "https://chatgpt.com/apps";
@@ -179,6 +189,8 @@ export function buildAiWorkspaceSetupCards(
     };
 
     if (provider.key === "openwork") {
+      const instructionsPackage = buildOpenWorkInstructionsPackage(connectorUrl);
+      const testPrompt = buildOpenWorkTestPrompt();
       return {
         ...base,
         actions: [
@@ -189,18 +201,42 @@ export function buildAiWorkspaceSetupCards(
             copiedMessage: "Copied the Corgtex MCP URL for OpenWork.",
             fallbackMessage: "Clipboard access was blocked. Select and copy the MCP URL.",
           },
+          {
+            kind: "copy",
+            label: "Copy instructions",
+            value: instructionsPackage.value,
+            copiedMessage: instructionsPackage.copiedMessage,
+            fallbackMessage: instructionsPackage.fallbackMessage,
+          },
+          {
+            kind: "copy",
+            label: "Copy test prompt",
+            value: testPrompt.value,
+            copiedMessage: testPrompt.copiedMessage,
+            fallbackMessage: testPrompt.fallbackMessage,
+          },
           { kind: "open", label: "Open OpenWork", href: OPENWORK_SITE_URL, variant: "primary" },
           { kind: "open", label: "View source", href: OPENWORK_REPO_URL, variant: "secondary" },
         ],
+        resources: [instructionsPackage, testPrompt],
         steps: [
           "Open OpenWork desktop, cloud, or self-hosted workspace.",
           "Add Corgtex as a remote MCP or HTTP connector using the MCP URL.",
-          "Complete browser sign-in and keep the default workspace scopes.",
-          "Send the first task from Corgtex once execution packets are enabled.",
+          "Install the Corgtex instructions as the OpenWork workspace or skill guidance.",
+          "Complete browser sign-in and keep the recommended workspace scopes.",
+          "Run the test prompt before sending production work from Corgtex.",
         ],
         notes: [
           "Free self-managed pilots should start here.",
+          "Corgtex remains the context, policy, scope, audit, and write-back system; OpenWork remains the execution workspace.",
           "Managed OpenWork rollout still needs license, security, and commercial review.",
+        ],
+        verificationChecks: [
+          "OpenWork can reach the Corgtex MCP URL and complete browser sign-in.",
+          "The test prompt can read company context through Corgtex.",
+          "The test prompt can list allowed write-back targets without exposing private targets outside its scopes.",
+          "Execution packet tools are visible for governed work requests.",
+          "OpenWork is instructed to submit results back to Corgtex instead of writing directly to unsupported destinations.",
         ],
       };
     }
@@ -222,7 +258,9 @@ export function buildAiWorkspaceSetupCards(
           "Paste the Corgtex MCP URL as the remote server.",
           "Complete browser sign-in when ChatGPT starts the connector flow.",
         ],
+        resources: [],
         notes: ["Workspace admins may need to publish the connector for Business, Enterprise, or Edu users."],
+        verificationChecks: [],
       };
     }
 
@@ -251,7 +289,9 @@ export function buildAiWorkspaceSetupCards(
           "Add Corgtex as a custom connector using the MCP URL.",
           "Complete browser sign-in and select this Corgtex workspace.",
         ],
+        resources: [],
         notes: ["Claude Team or Enterprise owners may need to add the connector at organization level first."],
+        verificationChecks: [],
       };
     }
 
@@ -271,7 +311,9 @@ export function buildAiWorkspaceSetupCards(
           "Approve the MCP server named Corgtex.",
           "Complete browser sign-in when Cursor asks to authenticate.",
         ],
+        resources: [],
         notes: ["Use this for technical teams that want Corgtex context inside code and product work."],
+        verificationChecks: [],
       };
     }
 
@@ -294,7 +336,9 @@ export function buildAiWorkspaceSetupCards(
           "Open Claude Code and inspect MCP connections.",
           "Authenticate Corgtex through browser sign-in when prompted.",
         ],
+        resources: [],
         notes: ["User scope keeps Corgtex available across projects; local scope can be added later per project."],
+        verificationChecks: [],
       };
     }
 
@@ -315,7 +359,9 @@ export function buildAiWorkspaceSetupCards(
           "Add Corgtex as a remote MCP or HTTP server using the MCP URL.",
           "Complete browser sign-in if the client prompts for OAuth.",
         ],
+        resources: [],
         notes: ["Consumer Gemini web support is not assumed; this path is for technical CLI users."],
+        verificationChecks: [],
       };
     }
 
@@ -335,9 +381,65 @@ export function buildAiWorkspaceSetupCards(
         "Paste the Corgtex MCP URL.",
         "Complete browser OAuth and use the workspace-scoped Corgtex tools.",
       ],
+      resources: [],
       notes: ["Use this for internal tools or AI workspaces that already support remote MCP."],
+      verificationChecks: [],
     };
   });
+}
+
+function buildOpenWorkInstructionsPackage(connectorUrl: string): AiWorkspaceSetupResource {
+  return {
+    title: "Corgtex OpenWork instructions package",
+    label: "Instructions package",
+    copiedMessage: "Copied the Corgtex OpenWork instructions package.",
+    fallbackMessage: "Clipboard access was blocked. Select and copy the instructions package.",
+    value: [
+      "# Corgtex OpenWork Instructions",
+      "",
+      "Use OpenWork as the execution workspace and Corgtex as the enterprise plumbing layer.",
+      "",
+      `Corgtex MCP server: ${connectorUrl}`,
+      "",
+      "Operating rules:",
+      "- Pull company context, policies, and allowed scopes from Corgtex before planning work.",
+      "- Use Corgtex execution packets as the source of task goal, actor, policy constraints, expected output, approval rule, and write-back target.",
+      "- Do not invent authority, bypass scopes, or write to destinations that are not listed by Corgtex.",
+      "- Ask for approval when the packet approval rule requires review before write-back.",
+      "- Submit execution results back to Corgtex with artifacts, status, and idempotency instead of leaving work only in chat.",
+      "- Treat Corgtex audit, model usage, and write-back state as the durable record.",
+      "",
+      "Useful Corgtex tools:",
+      "- get_company_context: read company context within granted scopes.",
+      "- list_writeback_targets: inspect allowed output destinations.",
+      "- create_execution_request: create governed work from Corgtex when the user asks from OpenWork.",
+      "- get_execution_packet: claim a governed request before executing.",
+      "- submit_execution_result: return output, artifacts, status, and write-back mapping to Corgtex.",
+      "",
+      "Default behavior:",
+      "- Prefer concise status updates and concrete outputs.",
+      "- Show assumptions and blockers before executing risky work.",
+      "- Keep private or scoped context inside the Corgtex-authorized workflow.",
+    ].join("\n"),
+  };
+}
+
+function buildOpenWorkTestPrompt(): AiWorkspaceSetupResource {
+  return {
+    title: "OpenWork connection test prompt",
+    label: "Test prompt",
+    copiedMessage: "Copied the OpenWork test prompt.",
+    fallbackMessage: "Clipboard access was blocked. Select and copy the test prompt.",
+    value: [
+      "Test the Corgtex connection without making any external changes.",
+      "",
+      "1. Use Corgtex to read the current company context.",
+      "2. List available write-back targets and summarize which target types are available.",
+      "3. Confirm whether execution request, packet retrieval, and result submission tools are visible.",
+      "4. Do not submit a result or create a write-back unless I explicitly approve it.",
+      "5. Return a short readiness report with connected, missing setup, scope limitations, and the next safe action.",
+    ].join("\n"),
+  };
 }
 
 function setupLabel(setupPath: AiWorkspaceProviderView["setupPath"]) {
