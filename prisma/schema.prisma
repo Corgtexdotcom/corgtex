@@ -466,115 +466,117 @@ enum CustomerReleaseTargetStatus {
 }
 
 model Workspace {
-  id                            String                            @id @default(uuid())
-  slug                          String                            @unique
-  name                          String
-  description                   String?
-  plan                          WorkspacePlan                     @default(CORE_FREE)
-  planActivatedAt               DateTime                          @default(now())
-  trialEndsAt                   DateTime?
-  createdAt                     DateTime                          @default(now())
-  updatedAt                     DateTime                          @updatedAt
-  members                       Member[]
-  memberInviteRequests          MemberInviteRequest[]
-  circles                       Circle[]
-  actions                       Action[]
-  tensions                      Tension[]
-  proposals                     Proposal[]
-  approvalFlows                 ApprovalFlow[]
-  approvalPolicy                ApprovalPolicy[]
-  cycles                        Cycle[]
-  ledgerAccounts                LedgerAccount[]
-  ledgerEntries                 LedgerEntry[]
-  spendRequests                 SpendRequest[]
-  meetings                      Meeting[]
-  meetingSeries                 MeetingSeries[]
-  documents                     Document[]
-  policyCorpus                  PolicyCorpus[]
-  constitutions                 Constitution[]
-  governanceScores              GovernanceScore[]
-  auditLogs                     AuditLog[]
-  productAnalyticsEvents        ProductAnalyticsEvent[]
-  onboardingStates              UserWorkspaceOnboardingState[]
-  events                        Event[]
-  workflowJobs                  WorkflowJob[]
-  knowledge                     KnowledgeChunk[]
-  modelUsage                    ModelUsage[]
-  agentRuns                     AgentRun[]
-  agentCreds                    AgentCredential[]
-  notifications                 Notification[]
-  conversations                 ConversationSession[]
-  agentMemories                 AgentMemory[]
-  webhookEndpoints              WebhookEndpoint[]
-  inboundWebhooks               InboundWebhook[]
-  brainArticles                 BrainArticle[]
-  brainSources                  BrainSource[]
-  brainBacklinks                BrainBacklink[]
-  expertiseTags                 ExpertiseTag[]
-  adviceProcesses               AdviceProcess[]
-  impactFootprints              ImpactFootprint[]
-  checkIns                      CheckIn[]
-  demoLeads                     DemoLead[]
-  crmContacts                   CrmContact[]
-  crmDeals                      CrmDeal[]
-  crmActivities                 CrmActivity[]
-  agentConfigs                  WorkspaceAgentConfig[]
-  oauthApps                     OAuthApp[]
-  mcpOAuthCodes                 McpOAuthAuthorizationCode[]
-  mcpOAuthTokens                McpOAuthAccessToken[]
-  externalMcpConnections        ExternalMcpConnection[]
-  aiWorkspaceConnections        AiWorkspaceConnection[]
-  enterpriseServices            WorkspaceEnterpriseService[]
-  ssoConfigs                    WorkspaceSsoConfig[]
-  modelUsageBudget              ModelUsageBudget?
-  billingProfile                WorkspaceBillingProfile?
-  aiUsageLedgerEntries          AiUsageLedgerEntry[]
-  oauthConnections              OAuthConnection[]
-  externalDataSources           ExternalDataSource[]
-  featureFlags                  WorkspaceFeatureFlag[]
-  meetingRecorderConfig         WorkspaceMeetingRecorderConfig?
-  recorderCalendarSources       WorkspaceRecorderCalendarSource[]
-  meetingRecordings             MeetingRecording[]
-  meetingRecorderProviderEvents MeetingRecorderProviderEvent[]
-  meetingRecorderSmokeRuns      MeetingRecorderSmokeRun[]
+  id                             String                              @id @default(uuid())
+  slug                           String                              @unique
+  name                           String
+  description                    String?
+  plan                           WorkspacePlan                       @default(CORE_FREE)
+  planActivatedAt                DateTime                            @default(now())
+  trialEndsAt                    DateTime?
+  createdAt                      DateTime                            @default(now())
+  updatedAt                      DateTime                            @updatedAt
+  members                        Member[]
+  memberInviteRequests           MemberInviteRequest[]
+  circles                        Circle[]
+  actions                        Action[]
+  tensions                       Tension[]
+  proposals                      Proposal[]
+  approvalFlows                  ApprovalFlow[]
+  approvalPolicy                 ApprovalPolicy[]
+  cycles                         Cycle[]
+  ledgerAccounts                 LedgerAccount[]
+  ledgerEntries                  LedgerEntry[]
+  spendRequests                  SpendRequest[]
+  meetings                       Meeting[]
+  meetingSeries                  MeetingSeries[]
+  documents                      Document[]
+  policyCorpus                   PolicyCorpus[]
+  constitutions                  Constitution[]
+  governanceScores               GovernanceScore[]
+  auditLogs                      AuditLog[]
+  productAnalyticsEvents         ProductAnalyticsEvent[]
+  onboardingStates               UserWorkspaceOnboardingState[]
+  events                         Event[]
+  workflowJobs                   WorkflowJob[]
+  knowledge                      KnowledgeChunk[]
+  modelUsage                     ModelUsage[]
+  agentRuns                      AgentRun[]
+  agentCreds                     AgentCredential[]
+  notifications                  Notification[]
+  conversations                  ConversationSession[]
+  agentMemories                  AgentMemory[]
+  webhookEndpoints               WebhookEndpoint[]
+  inboundWebhooks                InboundWebhook[]
+  brainArticles                  BrainArticle[]
+  brainSources                   BrainSource[]
+  brainBacklinks                 BrainBacklink[]
+  expertiseTags                  ExpertiseTag[]
+  adviceProcesses                AdviceProcess[]
+  impactFootprints               ImpactFootprint[]
+  checkIns                       CheckIn[]
+  demoLeads                      DemoLead[]
+  crmContacts                    CrmContact[]
+  crmDeals                       CrmDeal[]
+  crmActivities                  CrmActivity[]
+  agentConfigs                   WorkspaceAgentConfig[]
+  oauthApps                      OAuthApp[]
+  mcpOAuthCodes                  McpOAuthAuthorizationCode[]
+  mcpOAuthTokens                 McpOAuthAccessToken[]
+  externalMcpConnections         ExternalMcpConnection[]
+  aiWorkspaceConnections         AiWorkspaceConnection[]
+  executionRequests              ExecutionRequest[]
+  executionResults               ExecutionResult[]
+  enterpriseServices             WorkspaceEnterpriseService[]
+  ssoConfigs                     WorkspaceSsoConfig[]
+  modelUsageBudget               ModelUsageBudget?
+  billingProfile                 WorkspaceBillingProfile?
+  aiUsageLedgerEntries           AiUsageLedgerEntry[]
+  oauthConnections               OAuthConnection[]
+  externalDataSources            ExternalDataSource[]
+  featureFlags                   WorkspaceFeatureFlag[]
+  meetingRecorderConfig          WorkspaceMeetingRecorderConfig?
+  recorderCalendarSources        WorkspaceRecorderCalendarSource[]
+  meetingRecordings              MeetingRecording[]
+  meetingRecorderProviderEvents  MeetingRecorderProviderEvent[]
+  meetingRecorderSmokeRuns       MeetingRecorderSmokeRun[]
   meetingTranscriptConnections   MeetingTranscriptSourceConnection[]
   meetingTranscriptImportBatches MeetingTranscriptImportBatch[]
   meetingTranscriptSourceRecords MeetingTranscriptSourceRecord[]
-  meetingInsights               MeetingInsight[]
-  goals                         Goal[]
-  recognitions                  Recognition[]
-  agentIdentities               AgentIdentity[]
-  deliberationEntries           DeliberationEntry[]
-  communicationInstallations    CommunicationInstallation[]
-  communicationExternalUsers    CommunicationExternalUser[]
-  communicationChannels         CommunicationChannel[]
-  communicationMessages         CommunicationMessage[]
-  communicationContextSummaries CommunicationContextSummary[]
-  communicationInboundEvents    CommunicationInboundEvent[]
-  communicationEntityLinks      CommunicationEntityLink[]
-  meetingFollowUpReviews        MeetingFollowUpReview[]
-  archiveRecords                WorkspaceArchiveRecord[]
-  crmQualifications             CrmQualification[]
-  crmConversations              CrmConversation[]
-  crmProspectWorkspacesAsCrm    CrmProspectWorkspace[]            @relation("CrmWorkspace")
-  crmProspectWorkspacesAsTarget CrmProspectWorkspace[]            @relation("TargetWorkspace")
-  procurementSetupSessions      ProcurementSetupSession[]
-  procurementBillingHandoffs    ProcurementBillingHandoff[]
-  procurementTrials             ProcurementTrial[]
-  toolLinks                     WorkspaceToolLink[]
-  catalogItems                  CatalogItem[]
-  catalogFavorites              CatalogFavorite[]
-  catalogRequests               CatalogRequest[]
-  catalogSettings               CatalogSettings?
-  buildArtifacts                BuildArtifact[]
-  newspaperDeliveries           NewspaperDelivery[]
-  newspaperTrackedLinks         NewspaperTrackedLink[]
-  contextGraphObjects           ContextGraphObject[]
-  contextGraphRelationships     ContextGraphRelationship[]
-  contextGraphEvidenceRefs      ContextGraphEvidenceRef[]
-  contextMapViews               ContextMapView[]
-  contextGraphProposedDiffs     ContextGraphProposedDiff[]
-  managedCustomerDeployment     CustomerDeployment?
+  meetingInsights                MeetingInsight[]
+  goals                          Goal[]
+  recognitions                   Recognition[]
+  agentIdentities                AgentIdentity[]
+  deliberationEntries            DeliberationEntry[]
+  communicationInstallations     CommunicationInstallation[]
+  communicationExternalUsers     CommunicationExternalUser[]
+  communicationChannels          CommunicationChannel[]
+  communicationMessages          CommunicationMessage[]
+  communicationContextSummaries  CommunicationContextSummary[]
+  communicationInboundEvents     CommunicationInboundEvent[]
+  communicationEntityLinks       CommunicationEntityLink[]
+  meetingFollowUpReviews         MeetingFollowUpReview[]
+  archiveRecords                 WorkspaceArchiveRecord[]
+  crmQualifications              CrmQualification[]
+  crmConversations               CrmConversation[]
+  crmProspectWorkspacesAsCrm     CrmProspectWorkspace[]              @relation("CrmWorkspace")
+  crmProspectWorkspacesAsTarget  CrmProspectWorkspace[]              @relation("TargetWorkspace")
+  procurementSetupSessions       ProcurementSetupSession[]
+  procurementBillingHandoffs     ProcurementBillingHandoff[]
+  procurementTrials              ProcurementTrial[]
+  toolLinks                      WorkspaceToolLink[]
+  catalogItems                   CatalogItem[]
+  catalogFavorites               CatalogFavorite[]
+  catalogRequests                CatalogRequest[]
+  catalogSettings                CatalogSettings?
+  buildArtifacts                 BuildArtifact[]
+  newspaperDeliveries            NewspaperDelivery[]
+  newspaperTrackedLinks          NewspaperTrackedLink[]
+  contextGraphObjects            ContextGraphObject[]
+  contextGraphRelationships      ContextGraphRelationship[]
+  contextGraphEvidenceRefs       ContextGraphEvidenceRef[]
+  contextMapViews                ContextMapView[]
+  contextGraphProposedDiffs      ContextGraphProposedDiff[]
+  managedCustomerDeployment      CustomerDeployment?
 }
 
 model WorkspaceFeatureFlag {
@@ -777,58 +779,60 @@ model CommunicationEntityLink {
 }
 
 model User {
-  id                       String                      @id @default(uuid())
-  email                    String                      @unique
-  displayName              String?
-  bio                      String?                     @db.Text
-  avatarUrl                String?                     @db.Text
-  linkedinUrl              String?                     @db.Text
-  websiteUrl               String?                     @db.Text
-  passwordHash             String
-  globalRole               GlobalRole                  @default(USER)
-  createdAt                DateTime                    @default(now())
-  updatedAt                DateTime                    @updatedAt
-  sessions                 Session[]
-  memberships              Member[]
-  authoredActions          Action[]                    @relation("ActionAuthor")
-  authoredTensions         Tension[]                   @relation("TensionAuthor")
-  authoredProposals        Proposal[]                  @relation("ProposalAuthor")
-  spendRequests            SpendRequest[]              @relation("SpendRequester")
-  spendComments            SpendComment[]              @relation("SpendCommentAuthor")
-  cycleUpdates             CycleUpdate[]
-  allocationsFrom          Allocation[]                @relation("AllocFrom")
-  allocationsTo            Allocation[]                @relation("AllocTo")
-  reactions                ProposalReaction[]
-  objections               Objection[]
-  tensionUpvotes           TensionUpvote[]
-  agentCreds               AgentCredential[]           @relation("AgentCredentialCreator")
-  notifications            Notification[]
-  conversations            ConversationSession[]
-  oauthConnections         OAuthConnection[]
-  mcpOAuthCodes            McpOAuthAuthorizationCode[]
-  mcpOAuthTokens           McpOAuthAccessToken[]
-  externalMcpConnections   ExternalMcpConnection[]
-  createdAiWorkspaceConnections AiWorkspaceConnection[] @relation("AiWorkspaceConnectionCreator")
-  ownedAiWorkspaceConnections   AiWorkspaceConnection[] @relation("AiWorkspaceConnectionOwner")
-  resetTokens              PasswordResetToken[]
-  ssoIdentities            UserSsoIdentity[]
-  meetingInsights          MeetingInsight[]
-  createdAgentIdentities   AgentIdentity[]             @relation("AgentIdentityCreator")
-  deliberationEntries      DeliberationEntry[]
-  notificationPrefs        NotificationPreference[]
-  crmConversationMessages  CrmConversationMessage[]
-  reviewedQualifications   CrmQualification[]          @relation("QualificationReviewer")
-  customerDeploymentAccess CustomerDeploymentAccess[]
-  supportOperations        SupportOperation[]          @relation("SupportOperationActor")
-  createdToolLinks         WorkspaceToolLink[]         @relation("WorkspaceToolLinkCreator")
-  createdCatalogItems      CatalogItem[]               @relation("CatalogItemCreator")
-  ownedCatalogItems        CatalogItem[]               @relation("CatalogItemOwner")
-  catalogFavorites         CatalogFavorite[]
-  catalogRequestsMade      CatalogRequest[]            @relation("CatalogRequestRequester")
-  catalogRequestsDecided   CatalogRequest[]            @relation("CatalogRequestDecider")
-  createdBuildArtifacts    BuildArtifact[]             @relation("BuildArtifactCreator")
-  productAnalyticsEvents   ProductAnalyticsEvent[]
-  onboardingStates         UserWorkspaceOnboardingState[]
+  id                            String                         @id @default(uuid())
+  email                         String                         @unique
+  displayName                   String?
+  bio                           String?                        @db.Text
+  avatarUrl                     String?                        @db.Text
+  linkedinUrl                   String?                        @db.Text
+  websiteUrl                    String?                        @db.Text
+  passwordHash                  String
+  globalRole                    GlobalRole                     @default(USER)
+  createdAt                     DateTime                       @default(now())
+  updatedAt                     DateTime                       @updatedAt
+  sessions                      Session[]
+  memberships                   Member[]
+  authoredActions               Action[]                       @relation("ActionAuthor")
+  authoredTensions              Tension[]                      @relation("TensionAuthor")
+  authoredProposals             Proposal[]                     @relation("ProposalAuthor")
+  spendRequests                 SpendRequest[]                 @relation("SpendRequester")
+  spendComments                 SpendComment[]                 @relation("SpendCommentAuthor")
+  cycleUpdates                  CycleUpdate[]
+  allocationsFrom               Allocation[]                   @relation("AllocFrom")
+  allocationsTo                 Allocation[]                   @relation("AllocTo")
+  reactions                     ProposalReaction[]
+  objections                    Objection[]
+  tensionUpvotes                TensionUpvote[]
+  agentCreds                    AgentCredential[]              @relation("AgentCredentialCreator")
+  notifications                 Notification[]
+  conversations                 ConversationSession[]
+  oauthConnections              OAuthConnection[]
+  mcpOAuthCodes                 McpOAuthAuthorizationCode[]
+  mcpOAuthTokens                McpOAuthAccessToken[]
+  externalMcpConnections        ExternalMcpConnection[]
+  createdAiWorkspaceConnections AiWorkspaceConnection[]        @relation("AiWorkspaceConnectionCreator")
+  ownedAiWorkspaceConnections   AiWorkspaceConnection[]        @relation("AiWorkspaceConnectionOwner")
+  createdExecutionRequests      ExecutionRequest[]             @relation("ExecutionRequestCreator")
+  submittedExecutionResults     ExecutionResult[]              @relation("ExecutionResultSubmitter")
+  resetTokens                   PasswordResetToken[]
+  ssoIdentities                 UserSsoIdentity[]
+  meetingInsights               MeetingInsight[]
+  createdAgentIdentities        AgentIdentity[]                @relation("AgentIdentityCreator")
+  deliberationEntries           DeliberationEntry[]
+  notificationPrefs             NotificationPreference[]
+  crmConversationMessages       CrmConversationMessage[]
+  reviewedQualifications        CrmQualification[]             @relation("QualificationReviewer")
+  customerDeploymentAccess      CustomerDeploymentAccess[]
+  supportOperations             SupportOperation[]             @relation("SupportOperationActor")
+  createdToolLinks              WorkspaceToolLink[]            @relation("WorkspaceToolLinkCreator")
+  createdCatalogItems           CatalogItem[]                  @relation("CatalogItemCreator")
+  ownedCatalogItems             CatalogItem[]                  @relation("CatalogItemOwner")
+  catalogFavorites              CatalogFavorite[]
+  catalogRequestsMade           CatalogRequest[]               @relation("CatalogRequestRequester")
+  catalogRequestsDecided        CatalogRequest[]               @relation("CatalogRequestDecider")
+  createdBuildArtifacts         BuildArtifact[]                @relation("BuildArtifactCreator")
+  productAnalyticsEvents        ProductAnalyticsEvent[]
+  onboardingStates              UserWorkspaceOnboardingState[]
 }
 
 model Session {
@@ -1039,15 +1043,15 @@ model CatalogItem {
   createdAt          DateTime          @default(now())
   updatedAt          DateTime          @updatedAt
 
-  workspace        Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  createdBy        User?             @relation("CatalogItemCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
-  owner            User?             @relation("CatalogItemOwner", fields: [ownerUserId], references: [id], onDelete: SetNull)
-  favorites        CatalogFavorite[]
-  requests         CatalogRequest[]
-  agentCredentials AgentCredential[]
+  workspace              Workspace                    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  createdBy              User?                        @relation("CatalogItemCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  owner                  User?                        @relation("CatalogItemOwner", fields: [ownerUserId], references: [id], onDelete: SetNull)
+  favorites              CatalogFavorite[]
+  requests               CatalogRequest[]
+  agentCredentials       AgentCredential[]
   aiWorkspaceConnections AiWorkspaceConnection[]
   enterpriseServices     WorkspaceEnterpriseService[]
-  modelUsage       ModelUsage[]
+  modelUsage             ModelUsage[]
 
   @@unique([workspaceId, slug])
   @@unique([workspaceId, sourceType, sourceId])
@@ -1714,14 +1718,14 @@ model Meeting {
   createdAt           DateTime      @default(now())
   updatedAt           DateTime      @updatedAt
 
-  workspace      Workspace                 @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  series         MeetingSeries?            @relation(fields: [seriesId], references: [id], onDelete: SetNull)
-  proposals      Proposal[]
-  tensions       Tension[]
-  insights       MeetingInsight[]
-  followUpReview MeetingFollowUpReview?
-  recordings     MeetingRecording[]
-  smokeRuns      MeetingRecorderSmokeRun[]
+  workspace               Workspace                       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  series                  MeetingSeries?                  @relation(fields: [seriesId], references: [id], onDelete: SetNull)
+  proposals               Proposal[]
+  tensions                Tension[]
+  insights                MeetingInsight[]
+  followUpReview          MeetingFollowUpReview?
+  recordings              MeetingRecording[]
+  smokeRuns               MeetingRecorderSmokeRun[]
   transcriptSourceRecords MeetingTranscriptSourceRecord[]
 
   @@index([workspaceId, recordedAt])
@@ -2049,38 +2053,38 @@ model MeetingTranscriptImportBatch {
 }
 
 model MeetingTranscriptSourceRecord {
-  id                 String                              @id @default(uuid())
-  workspaceId        String
-  connectionId       String?
-  batchId            String?
-  meetingId          String?
-  provider           MeetingTranscriptSourceProvider
-  externalId         String
-  externalRevisionId String?
-  title              String?
-  recordedAt         DateTime
-  sourceUpdatedAt    DateTime?
-  sourceUrl          String?                             @db.Text
-  contentHash        String
-  transcriptText     String                              @db.Text
-  summaryMd          String?                             @db.Text
-  segmentsJson       Json?
-  participantsJson   Json?
-  rawMetadataJson    Json?
-  status             MeetingTranscriptSourceRecordStatus @default(ACTIVE)
+  id                   String                              @id @default(uuid())
+  workspaceId          String
+  connectionId         String?
+  batchId              String?
+  meetingId            String?
+  provider             MeetingTranscriptSourceProvider
+  externalId           String
+  externalRevisionId   String?
+  title                String?
+  recordedAt           DateTime
+  sourceUpdatedAt      DateTime?
+  sourceUrl            String?                             @db.Text
+  contentHash          String
+  transcriptText       String                              @db.Text
+  summaryMd            String?                             @db.Text
+  segmentsJson         Json?
+  participantsJson     Json?
+  rawMetadataJson      Json?
+  status               MeetingTranscriptSourceRecordStatus @default(ACTIVE)
   supersededByRecordId String?
-  processedAt        DateTime?
-  error              String?                             @db.Text
-  createdAt          DateTime                            @default(now())
-  updatedAt          DateTime                            @updatedAt
+  processedAt          DateTime?
+  error                String?                             @db.Text
+  createdAt            DateTime                            @default(now())
+  updatedAt            DateTime                            @updatedAt
 
-  workspace           Workspace                          @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  connection          MeetingTranscriptSourceConnection? @relation(fields: [connectionId], references: [id], onDelete: SetNull)
-  batch               MeetingTranscriptImportBatch?      @relation(fields: [batchId], references: [id], onDelete: SetNull)
-  meeting             Meeting?                           @relation(fields: [meetingId], references: [id], onDelete: SetNull)
-  supersededByRecord  MeetingTranscriptSourceRecord?     @relation("MeetingTranscriptRecordSupersession", fields: [supersededByRecordId], references: [id], onDelete: SetNull)
-  supersededRecords   MeetingTranscriptSourceRecord[]    @relation("MeetingTranscriptRecordSupersession")
-  meetingInsights     MeetingInsight[]
+  workspace          Workspace                          @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  connection         MeetingTranscriptSourceConnection? @relation(fields: [connectionId], references: [id], onDelete: SetNull)
+  batch              MeetingTranscriptImportBatch?      @relation(fields: [batchId], references: [id], onDelete: SetNull)
+  meeting            Meeting?                           @relation(fields: [meetingId], references: [id], onDelete: SetNull)
+  supersededByRecord MeetingTranscriptSourceRecord?     @relation("MeetingTranscriptRecordSupersession", fields: [supersededByRecordId], references: [id], onDelete: SetNull)
+  supersededRecords  MeetingTranscriptSourceRecord[]    @relation("MeetingTranscriptRecordSupersession")
+  meetingInsights    MeetingInsight[]
 
   @@unique([workspaceId, provider, externalId, contentHash])
   @@index([workspaceId, provider, externalId])
@@ -2437,12 +2441,14 @@ model AgentCredential {
   createdAt          DateTime  @default(now())
   updatedAt          DateTime  @updatedAt
 
-  workspace        Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  createdBy        User?             @relation("AgentCredentialCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
-  catalogItem      CatalogItem?      @relation(fields: [catalogItemId], references: [id], onDelete: SetNull)
-  agentIdentities  AgentIdentity[]
-  modelUsage       ModelUsage[]
-  procurementTrial ProcurementTrial?
+  workspace         Workspace          @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  createdBy         User?              @relation("AgentCredentialCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  catalogItem       CatalogItem?       @relation(fields: [catalogItemId], references: [id], onDelete: SetNull)
+  agentIdentities   AgentIdentity[]
+  executionRequests ExecutionRequest[]
+  executionResults  ExecutionResult[]
+  modelUsage        ModelUsage[]
+  procurementTrial  ProcurementTrial?
 
   @@index([workspaceId, catalogItemId])
 }
@@ -3387,6 +3393,31 @@ enum EnterpriseServiceHealthStatus {
   MANAGED_EXTERNALLY
 }
 
+enum ExecutionRequestStatus {
+  PENDING
+  IN_PROGRESS
+  RESULT_SUBMITTED
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum ExecutionResultStatus {
+  SUBMITTED
+  ACCEPTED
+  REJECTED
+}
+
+enum ExecutionWritebackTargetType {
+  ACTION
+  TENSION
+  PROPOSAL
+  MEETING
+  BRAIN_ARTICLE
+  BUILD_ARTIFACT
+  COMMENT
+}
+
 model ExternalMcpConnection {
   id              String                      @id @default(uuid())
   workspaceId     String
@@ -3412,28 +3443,28 @@ model ExternalMcpConnection {
 }
 
 model AiWorkspaceConnection {
-  id                          String                    @id @default(uuid())
+  id                          String                   @id @default(uuid())
   workspaceId                 String
   createdByUserId             String?
   ownerUserId                 String?
   catalogItemId               String?
   provider                    AiWorkspaceProvider
-  ownershipMode               AiWorkspaceOwnershipMode  @default(USER_MANAGED)
+  ownershipMode               AiWorkspaceOwnershipMode @default(USER_MANAGED)
   displayName                 String
-  serverUrl                   String?                   @db.Text
-  accessTokenEnc              String?                   @db.Text
-  refreshTokenEnc             String?                   @db.Text
-  apiKeyEnc                   String?                   @db.Text
-  scopes                      String[]                  @default([])
+  serverUrl                   String?                  @db.Text
+  accessTokenEnc              String?                  @db.Text
+  refreshTokenEnc             String?                  @db.Text
+  apiKeyEnc                   String?                  @db.Text
+  scopes                      String[]                 @default([])
   capabilities                Json?
   setupState                  Json?
-  healthStatus                AiWorkspaceHealthStatus   @default(NEEDS_SETUP)
+  healthStatus                AiWorkspaceHealthStatus  @default(NEEDS_SETUP)
   lastHealthCheckAt           DateTime?
   lastSuccessfulHealthCheckAt DateTime?
-  lastError                   String?                   @db.Text
-  isDefault                   Boolean                   @default(false)
-  createdAt                   DateTime                  @default(now())
-  updatedAt                   DateTime                  @updatedAt
+  lastError                   String?                  @db.Text
+  isDefault                   Boolean                  @default(false)
+  createdAt                   DateTime                 @default(now())
+  updatedAt                   DateTime                 @updatedAt
 
   workspace   Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   createdBy   User?        @relation("AiWorkspaceConnectionCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
@@ -3445,6 +3476,75 @@ model AiWorkspaceConnection {
   @@index([workspaceId, isDefault])
   @@index([ownerUserId, provider])
   @@index([catalogItemId])
+}
+
+model ExecutionRequest {
+  id                    String                        @id @default(uuid())
+  workspaceId           String
+  createdByUserId       String?
+  agentCredentialId     String?
+  provider              AiWorkspaceProvider?
+  status                ExecutionRequestStatus        @default(PENDING)
+  goal                  String                        @db.Text
+  actorJson             Json?
+  contextJson           Json?
+  allowedScopes         String[]                      @default([])
+  policyConstraintsJson Json?
+  expectedOutputJson    Json?
+  approvalRule          String?                       @db.Text
+  writebackTargetType   ExecutionWritebackTargetType?
+  writebackTargetId     String?
+  writebackTargetLabel  String?
+  packetJson            Json?
+  idempotencyKey        String?
+  claimedAt             DateTime?
+  completedAt           DateTime?
+  failedAt              DateTime?
+  cancelledAt           DateTime?
+  createdAt             DateTime                      @default(now())
+  updatedAt             DateTime                      @updatedAt
+
+  workspace       Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  createdBy       User?             @relation("ExecutionRequestCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  agentCredential AgentCredential?  @relation(fields: [agentCredentialId], references: [id], onDelete: SetNull)
+  results         ExecutionResult[]
+
+  @@unique([workspaceId, idempotencyKey])
+  @@index([workspaceId, status, createdAt])
+  @@index([workspaceId, writebackTargetType, writebackTargetId])
+  @@index([agentCredentialId])
+}
+
+model ExecutionResult {
+  id                  String                        @id @default(uuid())
+  workspaceId         String
+  executionRequestId  String
+  submittedByUserId   String?
+  agentCredentialId   String?
+  status              ExecutionResultStatus         @default(SUBMITTED)
+  idempotencyKey      String
+  targetType          ExecutionWritebackTargetType?
+  targetId            String?
+  outputJson          Json?
+  artifactJson        Json?
+  errorMessage        String?                       @db.Text
+  writebackEntityType String?
+  writebackEntityId   String?
+  submittedAt         DateTime                      @default(now())
+  acceptedAt          DateTime?
+  rejectedAt          DateTime?
+  createdAt           DateTime                      @default(now())
+  updatedAt           DateTime                      @updatedAt
+
+  workspace        Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  executionRequest ExecutionRequest @relation(fields: [executionRequestId], references: [id], onDelete: Cascade)
+  submittedBy      User?            @relation("ExecutionResultSubmitter", fields: [submittedByUserId], references: [id], onDelete: SetNull)
+  agentCredential  AgentCredential? @relation(fields: [agentCredentialId], references: [id], onDelete: SetNull)
+
+  @@unique([executionRequestId, idempotencyKey])
+  @@index([workspaceId, submittedAt])
+  @@index([workspaceId, targetType, targetId])
+  @@index([agentCredentialId])
 }
 
 model WorkspaceEnterpriseService {
@@ -3592,11 +3692,11 @@ model MeetingInsight {
   autoAppliedAt         DateTime?
   autoApplyError        String?
 
-  reviewedByUserId String?
-  reviewedAt       DateTime?
-  sourceRecordId   String?
-  sourceRecordedAt DateTime?
-  supersededAt     DateTime?
+  reviewedByUserId      String?
+  reviewedAt            DateTime?
+  sourceRecordId        String?
+  sourceRecordedAt      DateTime?
+  supersededAt          DateTime?
   supersededByInsightId String?
 
   createdAt DateTime @default(now())
