@@ -185,6 +185,7 @@ export default async function ControlPlaneAgentsPage() {
       configs,
       credentials,
       recentRuns,
+      pendingApprovalRuns: governance?.activity?.pendingApprovalRuns,
       usageByAgent: agentUsageByAgent(governance?.spend?.recentModelUsage),
       runCountsByAgent: agentRunCountsByAgent(recentRuns),
       workspaceBudget: governance?.spend?.budget,

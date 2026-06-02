@@ -4,88 +4,49 @@ type NamedRef = { id?: string | null; name?: string | null };
 export type AgentAuthorityStatus = "ACTIVE" | "DISABLED" | "ARCHIVED" | "AVAILABLE";
 
 export type AgentAuthorityCredentialInput = {
-  id: string;
-  label: string;
-  scopes?: string[] | null;
-  isActive?: boolean | null;
-  lastUsedAt?: Dateish;
-  monthlyBudgetCents?: number | null;
-  dailyCallLimit?: number | null;
+  id: string; label: string; scopes?: string[] | null; isActive?: boolean | null; lastUsedAt?: Dateish;
+  monthlyBudgetCents?: number | null; dailyCallLimit?: number | null;
 };
 
 export type AgentAuthorityIdentityInput = {
-  id?: string | null;
-  agentKey: string;
-  memberType?: string | null;
-  displayName?: string | null;
-  isActive?: boolean | null;
-  archivedAt?: Dateish;
-  linkedCredentialId?: string | null;
-  linkedCredential?: AgentAuthorityCredentialInput | null;
-  maxSpendPerRunCents?: number | null;
-  maxRunsPerDay?: number | null;
-  maxRunsPerHour?: number | null;
+  id?: string | null; agentKey: string; memberType?: string | null; displayName?: string | null;
+  isActive?: boolean | null; archivedAt?: Dateish; linkedCredentialId?: string | null;
+  linkedCredential?: AgentAuthorityCredentialInput | null; maxSpendPerRunCents?: number | null;
+  maxRunsPerDay?: number | null; maxRunsPerHour?: number | null;
   circleAssignments?: Array<{ circle?: NamedRef | null; role?: NamedRef | null }> | null;
 };
 
 export type AgentAuthorityConfigInput = {
-  agentKey: string;
-  label?: string | null;
-  category?: string | null;
-  costTier?: string | null;
-  defaultModelTier?: string | null;
-  enabled?: boolean | null;
-  modelOverride?: string | null;
-  governancePolicy?: string | null;
-  hasGovernancePolicy?: boolean | null;
+  agentKey: string; label?: string | null; category?: string | null; canDisable?: boolean | null;
+  costTier?: string | null; defaultModelTier?: string | null; enabled?: boolean | null;
+  modelOverride?: string | null; governancePolicy?: string | null; hasGovernancePolicy?: boolean | null;
 };
 
 export type AgentAuthorityRunInput = {
-  id?: string | null;
-  agentKey: string;
-  status: string;
-  goal?: string | null;
-  approvalRequired?: boolean | null;
-  createdAt?: Dateish;
-  startedAt?: Dateish;
+  id?: string | null; agentKey: string; status: string; goal?: string | null;
+  approvalRequired?: boolean | null; createdAt?: Dateish; startedAt?: Dateish;
 };
 
 export type AgentAuthorityUsageInput = { agentKey: string; callCount?: number | null; totalCostUsd?: number | string | null };
 
 export type AgentAuthoritySummary = {
-  agentKey: string;
-  identityId: string | null;
-  displayName: string;
-  status: AgentAuthorityStatus;
-  memberType: string;
-  category: string | null;
-  costTier: string | null;
-  defaultModelTier: string | null;
-  modelOverride: string | null;
+  agentKey: string; identityId: string | null; displayName: string; status: AgentAuthorityStatus;
+  memberType: string; canDisable: boolean; category: string | null; costTier: string | null;
+  defaultModelTier: string | null; modelOverride: string | null;
   roleAssignments: Array<{ circleId: string | null; circleName: string; roleId: string | null; roleName: string | null }>;
   toolsAndDataAccess: {
-    credentialId: string | null;
-    credentialLabel: string | null;
-    credentialActive: boolean | null;
+    credentialId: string | null; credentialLabel: string | null; credentialActive: boolean | null;
     scopes: Array<{ name: string; label: string; group: string; isWrite: boolean; isSensitive: boolean }>;
-    scopeCount: number;
-    writeScopeCount: number;
-    sensitiveScopeCount: number;
-    lastUsedAt: Dateish;
+    scopeCount: number; writeScopeCount: number; sensitiveScopeCount: number; lastUsedAt: Dateish;
   };
   limits: {
-    maxSpendPerRunCents: number | null;
-    maxRunsPerDay: number | null;
-    maxRunsPerHour: number | null;
-    credentialMonthlyBudgetCents: number | null;
-    credentialDailyCallLimit: number | null;
+    maxSpendPerRunCents: number | null; maxRunsPerDay: number | null; maxRunsPerHour: number | null;
+    credentialMonthlyBudgetCents: number | null; credentialDailyCallLimit: number | null;
     workspaceMonthlyCostCapUsd: number | string | null;
     workspaceBudgetConfigured: boolean;
   };
   approval: {
-    hasGovernancePolicy: boolean;
-    governancePolicy: string | null;
-    pendingApprovalCount: number;
+    hasGovernancePolicy: boolean; governancePolicy: string | null; pendingApprovalCount: number;
     latestApprovalRequiredRun: AgentAuthorityRunInput | null;
   };
   recentActivity: { latestRun: AgentAuthorityRunInput | null; runCount30d: number; modelCallCount30d: number; spend30dUsd: number };
@@ -96,6 +57,7 @@ export type BuildAgentAuthoritySummariesInput = {
   configs?: AgentAuthorityConfigInput[] | null;
   credentials?: AgentAuthorityCredentialInput[] | null;
   recentRuns?: AgentAuthorityRunInput[] | null;
+  pendingApprovalRuns?: AgentAuthorityRunInput[] | null;
   usageByAgent?: AgentAuthorityUsageInput[] | null;
   runCountsByAgent?: Array<{ agentKey: string; count: number }> | null;
   workspaceBudget?: { monthlyCostCapUsd?: number | string | null; alertThresholdPct?: number | null } | null;
@@ -149,15 +111,20 @@ export function buildAgentAuthoritySummaries(input: BuildAgentAuthoritySummaries
   const usageByAgent = new Map((input.usageByAgent ?? []).map((usage) => [usage.agentKey, usage]));
   const runCountsByAgent = new Map((input.runCountsByAgent ?? []).map((row) => [row.agentKey, row.count]));
   const runsByAgent = new Map<string, AgentAuthorityRunInput[]>();
+  const pendingRunsByAgent = new Map<string, AgentAuthorityRunInput[]>();
 
   for (const run of input.recentRuns ?? []) {
     runsByAgent.set(run.agentKey, [...(runsByAgent.get(run.agentKey) ?? []), run]);
+  }
+  for (const run of input.pendingApprovalRuns ?? []) {
+    pendingRunsByAgent.set(run.agentKey, [...(pendingRunsByAgent.get(run.agentKey) ?? []), run]);
   }
 
   return Array.from(new Set([
     ...configs.map((config) => config.agentKey).filter(Boolean),
     ...identities.map((identity) => identity.agentKey).filter(Boolean),
     ...(input.recentRuns ?? []).map((run) => run.agentKey).filter(Boolean),
+    ...(input.pendingApprovalRuns ?? []).map((run) => run.agentKey).filter(Boolean),
   ])).map((agentKey) => {
     const identity = identitiesByKey.get(agentKey);
     const config = configsByKey.get(agentKey);
@@ -165,7 +132,8 @@ export function buildAgentAuthoritySummaries(input: BuildAgentAuthoritySummaries
     const linkedCredential = identity?.linkedCredential ? { ...credentialFromList, ...identity.linkedCredential } : credentialFromList ?? null;
     const scopes = scopeSummary(linkedCredential?.scopes);
     const runsForAgent = [...(runsByAgent.get(agentKey) ?? [])].sort((a, b) => timeValue(b.startedAt ?? b.createdAt) - timeValue(a.startedAt ?? a.createdAt));
-    const approvalRuns = runsForAgent.filter((run) => run.approvalRequired || run.status === "WAITING_APPROVAL");
+    const approvalRuns = [...(pendingRunsByAgent.get(agentKey) ?? runsForAgent.filter((run) => run.status === "WAITING_APPROVAL"))]
+      .sort((a, b) => timeValue(b.startedAt ?? b.createdAt) - timeValue(a.startedAt ?? a.createdAt));
     const usage = usageByAgent.get(agentKey);
     const governancePolicy = config?.governancePolicy?.trim() || null;
 
@@ -175,6 +143,7 @@ export function buildAgentAuthoritySummaries(input: BuildAgentAuthoritySummaries
       displayName: identity?.displayName ?? config?.label ?? agentNameFromKey(agentKey),
       status: statusFor(identity, config),
       memberType: identity?.memberType ?? "INTERNAL",
+      canDisable: config?.canDisable ?? true,
       category: config?.category ?? null,
       costTier: config?.costTier ?? null,
       defaultModelTier: config?.defaultModelTier ?? null,

@@ -123,11 +123,9 @@ function AgentAuthorityRow({
         </div>
 
         <div style={{ display: "flex", justifyContent: "flex-end" }}>
-          <AgentRegistryToggle
-            workspaceId={workspaceId}
-            agentKey={agent.agentKey}
-            enabled={enabled}
-          />
+          {agent.canDisable ? (
+            <AgentRegistryToggle workspaceId={workspaceId} agentKey={agent.agentKey} enabled={enabled} />
+          ) : <span className="nr-tag">Always on</span>}
         </div>
       </div>
 
@@ -198,6 +196,7 @@ export async function AgentRegistryTab({
     credentials,
     budget,
     recentRuns,
+    pendingApprovalRuns,
     runCounts,
     t,
     format,
@@ -211,6 +210,19 @@ export async function AgentRegistryTab({
       where: { workspaceId },
       orderBy: { createdAt: "desc" },
       take: 100,
+      select: {
+        id: true,
+        agentKey: true,
+        status: true,
+        goal: true,
+        approvalRequired: true,
+        createdAt: true,
+        startedAt: true,
+      },
+    }),
+    prisma.agentRun.findMany({
+      where: { workspaceId, status: "WAITING_APPROVAL" },
+      orderBy: { createdAt: "desc" },
       select: {
         id: true,
         agentKey: true,
@@ -235,6 +247,7 @@ export async function AgentRegistryTab({
     configs,
     credentials,
     recentRuns,
+    pendingApprovalRuns,
     usageByAgent: usageSummary.byAgent,
     runCountsByAgent: (runCounts as Array<{ agentKey: string; _count: { _all: number } }>)
       .map((row) => ({ agentKey: row.agentKey, count: row._count._all })),
