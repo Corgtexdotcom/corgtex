@@ -1,4 +1,4 @@
-import type { Prisma, RoleOnboardingStatus } from "@prisma/client";
+import { Prisma, type RoleOnboardingStatus } from "@prisma/client";
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
@@ -49,16 +49,21 @@ export async function createRoleVersionSnapshot(
     actor: AppActor;
   },
 ) {
-  const version = await tx.roleVersion.count({
+  await tx.$executeRaw`
+    SELECT pg_advisory_xact_lock(hashtext('role_version'), hashtext(${params.role.id}))
+  `;
+  const latestVersion = await tx.roleVersion.aggregate({
     where: { roleId: params.role.id },
+    _max: { version: true },
   });
+  const version = (latestVersion._max.version ?? 0) + 1;
 
   return tx.roleVersion.create({
     data: {
       workspaceId: params.workspaceId,
       roleId: params.role.id,
       circleId: params.role.circleId,
-      version: version + 1,
+      version,
       name: params.role.name,
       purposeMd: params.role.purposeMd,
       accountabilities: params.role.accountabilities,
@@ -139,7 +144,7 @@ export async function ensureRoleOnboardingForAssignment(
     include: { conversation: true },
   });
   if (existing) {
-    return existing;
+    return { ...existing, wasCreated: false };
   }
 
   const assigneeName = params.member.user?.displayName ?? params.member.user?.email ?? "New role holder";
@@ -175,7 +180,7 @@ export async function ensureRoleOnboardingForAssignment(
     },
   });
 
-  return session;
+  return { ...session, wasCreated: true };
 }
 
 export async function dismissRoleOnboardingForAssignment(
@@ -322,7 +327,10 @@ async function loadRoleOnboardingContext(params: {
       where: {
         workspaceId: params.workspaceId,
         archivedAt: null,
-        participantIds: { has: params.userId },
+        OR: [
+          { participantIds: { has: session.memberId } },
+          { participantIds: { has: params.userId } },
+        ],
       },
       select: { title: true, recordedAt: true, summaryMd: true },
       orderBy: { recordedAt: "desc" },
@@ -476,6 +484,7 @@ export async function updateRoleOnboardingStatusByConversation(
       workspaceId: params.workspaceId,
       conversationId: params.conversationId,
       conversation: { userId },
+      status: { in: ACTIVE_ONBOARDING_STATUSES },
     },
     select: { id: true },
   });

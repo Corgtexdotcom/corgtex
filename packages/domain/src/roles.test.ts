@@ -13,9 +13,10 @@ const { prismaMock } = vi.hoisted(() => {
       update: vi.fn(),
     },
     roleVersion: {
-      count: vi.fn(),
+      aggregate: vi.fn(),
       create: vi.fn(),
     },
+    $executeRaw: vi.fn(),
     workspaceArchiveRecord: {
       create: vi.fn(),
     },
@@ -80,7 +81,8 @@ describe("roles domain", () => {
     prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof prismaMock) => Promise<unknown>) => callback(prismaMock));
     prismaMock.auditLog.create.mockResolvedValue({});
     prismaMock.event.createMany.mockResolvedValue({ count: 1 });
-    prismaMock.roleVersion.count.mockResolvedValue(0);
+    prismaMock.$executeRaw.mockResolvedValue(0);
+    prismaMock.roleVersion.aggregate.mockResolvedValue({ _max: { version: null } });
     prismaMock.roleVersion.create.mockResolvedValue({});
     prismaMock.roleHolderHistory.create.mockResolvedValue({});
     prismaMock.roleHolderHistory.updateMany.mockResolvedValue({ count: 1 });
@@ -224,6 +226,7 @@ describe("roles domain", () => {
         changeType: "created",
       }),
     }));
+    expect(prismaMock.$executeRaw).toHaveBeenCalled();
   });
 
   it("createRole rejects a blank name", async () => {
@@ -366,6 +369,53 @@ describe("roles domain", () => {
         entityType: "ConversationSession",
         entityId: "conversation-1",
       }),
+    }));
+  });
+
+  it("assignRole emits the onboarding intro event when an existing assignment gets a new onboarding session", async () => {
+    prismaMock.role.findUnique.mockResolvedValue({
+      id: "role-1",
+      circleId: "circle-1",
+      name: "Lead",
+      purposeMd: "Lead the work.",
+      accountabilities: ["Coordinate"],
+      artifacts: [],
+      metricsMd: null,
+      coreRoleType: null,
+      archivedAt: null,
+      circle: {
+        id: "circle-1",
+        workspaceId: "workspace-1",
+        name: "Circle",
+        purposeMd: null,
+        domainMd: null,
+      },
+    });
+    prismaMock.member.findUnique.mockResolvedValue({
+      id: "member-1",
+      userId: "user-1",
+      workspaceId: "workspace-1",
+      isActive: true,
+      user: { displayName: "Member", email: "member@example.com" },
+    });
+    prismaMock.roleAssignment.findUnique.mockResolvedValue({ id: "assignment-1" });
+
+    const { assignRole } = await import("./roles");
+    await expect(assignRole(actor, {
+      workspaceId: "workspace-1",
+      roleId: "role-1",
+      memberId: "member-1",
+    })).resolves.toEqual({ id: "assignment-1" });
+
+    expect(prismaMock.roleHolderHistory.create).not.toHaveBeenCalled();
+    expect(prismaMock.event.createMany).toHaveBeenCalledWith(expect.objectContaining({
+      data: [expect.objectContaining({
+        type: "role.assigned",
+        payload: expect.objectContaining({
+          onboardingSessionId: "onboarding-1",
+          conversationId: "conversation-1",
+        }),
+      })],
     }));
   });
 

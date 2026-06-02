@@ -366,7 +366,7 @@ export async function assignRole(actor: AppActor, params: {
       },
     });
 
-    if (!existingAssignment) {
+    if (!existingAssignment || onboarding.wasCreated) {
       await appendEvents(tx, [
         {
           workspaceId: params.workspaceId,

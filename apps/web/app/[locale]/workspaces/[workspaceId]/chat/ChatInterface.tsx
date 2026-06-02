@@ -654,7 +654,7 @@ export function ChatInterface({
                   <span className="tag info" style={{ fontSize: "0.72rem", padding: "3px 7px" }}>
                     {activeRoleOnboarding.roleName} - {activeRoleOnboarding.status.toLowerCase()}
                   </span>
-                  {activeRoleOnboarding.status !== "COMPLETED" && (
+                  {["PENDING", "ACTIVE"].includes(activeRoleOnboarding.status) && (
                     <button
                       className="secondary small"
                       type="button"

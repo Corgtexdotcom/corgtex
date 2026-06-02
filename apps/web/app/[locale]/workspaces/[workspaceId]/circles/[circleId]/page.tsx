@@ -149,7 +149,13 @@ export default async function CircleDetailPage({
     histories.push(history);
     holderHistoryByRole.set(history.roleId, histories);
   }
-  const onboardingByRoleMember = new Map(onboardingSessions.map((session) => [`${session.roleId}:${session.memberId}`, session]));
+  const onboardingByRoleMember = new Map<string, (typeof onboardingSessions)[number]>();
+  for (const session of onboardingSessions) {
+    const key = `${session.roleId}:${session.memberId}`;
+    if (!onboardingByRoleMember.has(key)) {
+      onboardingByRoleMember.set(key, session);
+    }
+  }
 
   async function archiveCircleAndReturn(formData: FormData) {
     "use server";

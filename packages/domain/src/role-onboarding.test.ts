@@ -126,5 +126,36 @@ describe("role onboarding domain", () => {
     expect(context).toContain("Integrator");
     expect(context).toContain("Advice process");
     expect(context).toContain("Publish weekly status");
+    expect(prismaMock.meeting.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        OR: [
+          { participantIds: { has: "member-1" } },
+          { participantIds: { has: "user-1" } },
+        ],
+      }),
+    }));
+  });
+
+  it("rejects completion for dismissed onboarding sessions", async () => {
+    prismaMock.roleOnboardingSession.findFirst.mockResolvedValue(null);
+
+    const { updateRoleOnboardingStatusByConversation } = await import("./role-onboarding");
+    await expect(updateRoleOnboardingStatusByConversation({
+      kind: "user",
+      user: {
+        id: "user-1",
+        email: "user@example.com",
+        displayName: "User",
+        globalRole: "OPERATOR",
+      },
+    }, {
+      workspaceId: "workspace-1",
+      conversationId: "conversation-1",
+      status: "COMPLETED",
+    })).rejects.toMatchObject({
+      status: 404,
+      code: "NOT_FOUND",
+    });
+    expect(prismaMock.roleOnboardingSession.update).not.toHaveBeenCalled();
   });
 });
