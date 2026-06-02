@@ -27,6 +27,10 @@ function jsonSnapshot(record: unknown) {
   return JSON.parse(JSON.stringify(record)) as Record<string, unknown>;
 }
 
+function sameStringList(a: string[], b: string[]) {
+  return a.length === b.length && a.every((value, index) => value === b[index]);
+}
+
 export async function listRoles(workspaceId: string, opts?: { archiveFilter?: ArchiveFilter }) {
   return prisma.role.findMany({
     where: {
@@ -221,17 +225,32 @@ export async function updateRole(actor: AppActor, params: {
     if (params.name !== undefined) {
       const name = params.name.trim();
       invariant(name.length > 0, 400, "INVALID_INPUT", "Role name is required.");
-      data.name = name;
+      if (name !== role.name) data.name = name;
     }
-    if (params.purposeMd !== undefined) data.purposeMd = params.purposeMd?.trim() || null;
+    if (params.purposeMd !== undefined) {
+      const purposeMd = params.purposeMd?.trim() || null;
+      if (purposeMd !== role.purposeMd) data.purposeMd = purposeMd;
+    }
     if (params.accountabilities !== undefined) {
-      data.accountabilities = params.accountabilities.map((v) => v.trim()).filter(Boolean);
+      const accountabilities = params.accountabilities.map((v) => v.trim()).filter(Boolean);
+      if (!sameStringList(accountabilities, role.accountabilities)) data.accountabilities = accountabilities;
     }
     if (params.artifacts !== undefined) {
-      data.artifacts = params.artifacts.map((v) => v.trim()).filter(Boolean);
+      const artifacts = params.artifacts.map((v) => v.trim()).filter(Boolean);
+      if (!sameStringList(artifacts, role.artifacts)) data.artifacts = artifacts;
     }
     if (params.coreRoleType !== undefined) {
-      data.coreRoleType = params.coreRoleType?.trim() || null;
+      const coreRoleType = params.coreRoleType?.trim() || null;
+      if (coreRoleType !== role.coreRoleType) data.coreRoleType = coreRoleType;
+    }
+
+    if (Object.keys(data).length === 0) {
+      const unchanged = await tx.role.findUnique({
+        where: { id: params.roleId },
+        include: { circle: { select: { id: true, name: true } } },
+      });
+      invariant(unchanged, 404, "NOT_FOUND", "Role not found.");
+      return unchanged;
     }
 
     const updated = await tx.role.update({

@@ -339,35 +339,9 @@ export async function closeRoleLifecycleForCircleTree(
     now?: Date;
   },
 ) {
-  const circles = await tx.circle.findMany({
-    where: {
-      workspaceId: params.workspaceId,
-      archivedAt: null,
-    },
-    select: {
-      id: true,
-      parentCircleId: true,
-    },
-  });
-  const childrenByParent = new Map<string | null, string[]>();
-  for (const circle of circles) {
-    const children = childrenByParent.get(circle.parentCircleId) ?? [];
-    children.push(circle.id);
-    childrenByParent.set(circle.parentCircleId, children);
-  }
-
-  const circleIds = new Set<string>();
-  const pending = [params.circleId];
-  while (pending.length > 0) {
-    const current = pending.pop()!;
-    if (circleIds.has(current)) continue;
-    circleIds.add(current);
-    pending.push(...(childrenByParent.get(current) ?? []));
-  }
-
   const roles = await tx.role.findMany({
     where: {
-      circleId: { in: [...circleIds] },
+      circleId: params.circleId,
       archivedAt: null,
     },
     select: { id: true },
@@ -635,13 +609,29 @@ export async function createRoleOnboardingIntro(params: {
       });
     }
 
-    return tx.roleOnboardingSession.update({
-      where: { id: onboarding.id },
+    const startedAt = onboarding.startedAt ?? new Date();
+    const updated = await tx.roleOnboardingSession.updateMany({
+      where: {
+        id: onboarding.id,
+        status: { in: ACTIVE_ONBOARDING_STATUSES },
+      },
       data: {
         status: "ACTIVE",
-        startedAt: onboarding.startedAt ?? new Date(),
+        startedAt,
       },
     });
+    if (updated.count === 0) {
+      const current = await tx.roleOnboardingSession.findFirst({
+        where: {
+          id: onboarding.id,
+          workspaceId: params.workspaceId,
+        },
+      });
+      invariant(current, 404, "NOT_FOUND", "Role onboarding session not found.");
+      return current;
+    }
+
+    return { ...onboarding, status: "ACTIVE" as const, startedAt };
   });
 }
 

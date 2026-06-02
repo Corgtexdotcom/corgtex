@@ -307,7 +307,7 @@ describe("listCircleTree", () => {
 });
 
 describe("deleteCircle", () => {
-  it("archives the circle and closes role lifecycle records for roles in its tree", async () => {
+  it("archives the circle and closes role lifecycle records for roles in that circle only", async () => {
     vi.mocked(prisma.circle.findFirst).mockResolvedValueOnce({
       id: "circle-1",
       workspaceId: "ws-1",
@@ -319,14 +319,8 @@ describe("deleteCircle", () => {
       workspaceId: "ws-1",
       archivedAt: new Date("2026-06-02T12:00:00.000Z"),
     } as any);
-    vi.mocked(prisma.circle.findMany).mockResolvedValueOnce([
-      { id: "circle-1", parentCircleId: null },
-      { id: "child-1", parentCircleId: "circle-1" },
-      { id: "other-1", parentCircleId: null },
-    ] as any);
     vi.mocked(prisma.role.findMany).mockResolvedValueOnce([
       { id: "role-1" },
-      { id: "child-role-1" },
     ] as any);
 
     await expect(deleteCircle(actor, {
@@ -336,7 +330,7 @@ describe("deleteCircle", () => {
 
     expect(prisma.role.findMany).toHaveBeenCalledWith({
       where: {
-        circleId: { in: ["circle-1", "child-1"] },
+        circleId: "circle-1",
         archivedAt: null,
       },
       select: { id: true },
@@ -344,14 +338,14 @@ describe("deleteCircle", () => {
     expect(prisma.roleHolderHistory.updateMany).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({
         workspaceId: "ws-1",
-        roleId: { in: ["role-1", "child-role-1"] },
+        roleId: { in: ["role-1"] },
         endedAt: null,
       }),
     }));
     expect(prisma.roleOnboardingSession.updateMany).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({
         workspaceId: "ws-1",
-        roleId: { in: ["role-1", "child-role-1"] },
+        roleId: { in: ["role-1"] },
         status: { in: ["PENDING", "ACTIVE"] },
       }),
       data: expect.objectContaining({
@@ -360,10 +354,10 @@ describe("deleteCircle", () => {
       }),
     }));
     expect(prisma.roleAssignment.deleteMany).toHaveBeenCalledWith({
-      where: { roleId: { in: ["role-1", "child-role-1"] } },
+      where: { roleId: { in: ["role-1"] } },
     });
     expect(prisma.circleAgentAssignment.updateMany).toHaveBeenCalledWith({
-      where: { roleId: { in: ["role-1", "child-role-1"] } },
+      where: { roleId: { in: ["role-1"] } },
       data: { roleId: null },
     });
   });

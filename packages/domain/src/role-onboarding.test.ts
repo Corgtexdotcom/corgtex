@@ -7,6 +7,7 @@ const { prismaMock } = vi.hoisted(() => {
     roleOnboardingSession: {
       findFirst: vi.fn(),
       update: vi.fn(),
+      updateMany: vi.fn(),
     },
     conversationTurn: {
       findFirst: vi.fn(),
@@ -85,6 +86,7 @@ describe("role onboarding domain", () => {
     prismaMock.$executeRaw.mockResolvedValue(0);
     prismaMock.roleOnboardingSession.findFirst.mockResolvedValue(onboardingRecord);
     prismaMock.roleOnboardingSession.update.mockResolvedValue({ ...onboardingRecord, status: "ACTIVE" });
+    prismaMock.roleOnboardingSession.updateMany.mockResolvedValue({ count: 1 });
     prismaMock.conversationTurn.findFirst.mockResolvedValue(null);
     prismaMock.conversationTurn.create.mockResolvedValue({});
     prismaMock.policyCorpus.findMany.mockResolvedValue([{ title: "Advice process", bodyMd: "Ask for advice before high-impact changes.", acceptedAt: new Date("2026-01-01") }]);
@@ -110,12 +112,38 @@ describe("role onboarding domain", () => {
       }),
     }));
     expect(prismaMock.$executeRaw).toHaveBeenCalled();
-    expect(prismaMock.roleOnboardingSession.update).toHaveBeenCalledWith(expect.objectContaining({
+    expect(prismaMock.roleOnboardingSession.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        id: "onboarding-1",
+        status: { in: ["PENDING", "ACTIVE"] },
+      }),
       data: expect.objectContaining({
         status: "ACTIVE",
         startedAt: expect.any(Date),
       }),
     }));
+  });
+
+  it("does not reactivate a dismissed session when intro activation loses a race", async () => {
+    prismaMock.roleOnboardingSession.updateMany.mockResolvedValue({ count: 0 });
+    prismaMock.roleOnboardingSession.findFirst
+      .mockResolvedValueOnce(onboardingRecord)
+      .mockResolvedValueOnce({ ...onboardingRecord, status: "DISMISSED" });
+
+    const { createRoleOnboardingIntro } = await import("./role-onboarding");
+
+    await expect(createRoleOnboardingIntro({
+      workspaceId: "workspace-1",
+      onboardingSessionId: "onboarding-1",
+    })).resolves.toMatchObject({ status: "DISMISSED" });
+
+    expect(prismaMock.roleOnboardingSession.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        id: "onboarding-1",
+        status: { in: ["PENDING", "ACTIVE"] },
+      }),
+    }));
+    expect(prismaMock.roleOnboardingSession.update).not.toHaveBeenCalled();
   });
 
   it("builds live role context for onboarding conversation follow-ups", async () => {

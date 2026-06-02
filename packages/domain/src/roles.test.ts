@@ -294,6 +294,43 @@ describe("roles domain", () => {
     }));
   });
 
+  it("updateRole skips audit, events, and version snapshots when normalized fields are unchanged", async () => {
+    const existingRole = {
+      id: "role-1",
+      circleId: "circle-1",
+      name: "Lead",
+      purposeMd: "Own the operating cadence.",
+      accountabilities: ["Run tactical meetings"],
+      artifacts: ["Operating dashboard"],
+      metricsMd: null,
+      coreRoleType: "LEAD_LINK",
+      archivedAt: null,
+      circle: { workspaceId: "workspace-1" },
+    };
+    prismaMock.role.findUnique
+      .mockResolvedValueOnce(existingRole)
+      .mockResolvedValueOnce({
+        ...existingRole,
+        circle: { id: "circle-1", name: "Circle" },
+      });
+
+    const { updateRole } = await import("./roles");
+    await expect(updateRole(actor, {
+      workspaceId: "workspace-1",
+      roleId: "role-1",
+      name: " Lead ",
+      purposeMd: " Own the operating cadence. ",
+      accountabilities: [" Run tactical meetings ", ""],
+      artifacts: [" Operating dashboard "],
+      coreRoleType: " LEAD_LINK ",
+    })).resolves.toMatchObject({ id: "role-1", name: "Lead" });
+
+    expect(prismaMock.role.update).not.toHaveBeenCalled();
+    expect(prismaMock.auditLog.create).not.toHaveBeenCalled();
+    expect(prismaMock.roleVersion.create).not.toHaveBeenCalled();
+    expect(prismaMock.event.createMany).not.toHaveBeenCalled();
+  });
+
   it("deleteRole archives an existing role", async () => {
     prismaMock.role.findFirst.mockResolvedValue({ id: "role-1", name: "Lead", archivedAt: null, circle: { workspaceId: "workspace-1" } });
     prismaMock.role.update.mockResolvedValue({ id: "role-1", archivedAt: new Date("2026-04-25T12:00:00.000Z") });
