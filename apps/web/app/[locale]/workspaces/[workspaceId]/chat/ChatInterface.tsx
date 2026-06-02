@@ -15,6 +15,11 @@ type ConversationSummary = {
   status: string;
   updatedAt: string;
   lastMessage: string | null;
+  roleOnboarding?: {
+    id: string;
+    status: string;
+    roleName: string;
+  } | null;
 };
 
 type Turn = {
@@ -187,7 +192,33 @@ export function ChatInterface({
       const res = await fetch(`/api/workspaces/${workspaceId}/conversations/${id}`);
       if (!res.ok) throw new Error(t("errorFailedToLoad"));
       const data = await res.json();
-      setTurns(data.conversation.turns);
+      const loadedTurns = data.conversation.turns as Turn[];
+      const lastTurn = loadedTurns.at(-1);
+      const loadedConversation: ConversationSummary = {
+        id: data.conversation.id,
+        topic: data.conversation.topic,
+        agentKey: data.conversation.agentKey,
+        status: data.conversation.status,
+        updatedAt: data.conversation.updatedAt,
+        lastMessage: lastTurn?.assistantMessage || lastTurn?.userMessage || null,
+        roleOnboarding: data.conversation.roleOnboarding
+          ? {
+            id: data.conversation.roleOnboarding.id,
+            status: data.conversation.roleOnboarding.status,
+            roleName: data.conversation.roleOnboarding.role.name,
+          }
+          : null,
+      };
+      setTurns(loadedTurns);
+      setConversations((prev) => {
+        const existing = prev.find((conversation) => conversation.id === id);
+        if (!existing) return [loadedConversation, ...prev];
+        return prev.map((conversation) =>
+          conversation.id === id
+            ? { ...conversation, ...loadedConversation }
+            : conversation
+        );
+      });
       setSessionId(id);
       setError(null);
     } catch {
@@ -254,6 +285,35 @@ export function ChatInterface({
       });
     } catch {
       // Rename is best-effort
+    }
+  }
+
+  async function completeRoleOnboarding() {
+    if (!sessionId) return;
+    setConversations((prev) =>
+      prev.map((conversation) =>
+        conversation.id === sessionId && conversation.roleOnboarding
+          ? {
+            ...conversation,
+            roleOnboarding: {
+              ...conversation.roleOnboarding,
+              status: "COMPLETED",
+            },
+          }
+          : conversation
+      )
+    );
+
+    try {
+      const response = await fetch(`/api/workspaces/${workspaceId}/conversations/${sessionId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ roleOnboardingStatus: "COMPLETED" }),
+      });
+      if (!response.ok) throw new Error(t("errorFailedToSend"));
+      router.refresh();
+    } catch {
+      setError(t("errorFailedToSend"));
     }
   }
 
@@ -479,6 +539,11 @@ export function ChatInterface({
             className={`chat-session-item ${conversation.id === sessionId ? "active" : ""}`}
           >
             <div className="chat-session-topic">{conversation.topic || t("newConversation")}</div>
+            {conversation.roleOnboarding && (
+              <div className="chat-session-preview">
+                Role onboarding - {conversation.roleOnboarding.status.toLowerCase()}
+              </div>
+            )}
             <div className="chat-session-meta">
               <div className="chat-session-preview">{conversation.lastMessage || t("emptyPreview")}</div>
               <div className="chat-session-time">
@@ -497,6 +562,8 @@ export function ChatInterface({
   }
 
   const showClaudeConnectorFooter = compact && !isFullScreen && claudeFooterEnabled;
+  const activeConversation = conversations.find((conversation) => conversation.id === sessionId) ?? null;
+  const activeRoleOnboarding = activeConversation?.roleOnboarding ?? null;
 
   return (
     <div className={`${isFullScreen ? "chat-fullscreen" : "chat-layout"} ${mobileMode ? "chat-mobile-mode" : ""}`}>
@@ -592,6 +659,22 @@ export function ChatInterface({
                   </div>
                 )}
               </div>
+              {activeRoleOnboarding && (
+                <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
+                  <span className="tag info" style={{ fontSize: "0.72rem", padding: "3px 7px" }}>
+                    {activeRoleOnboarding.roleName} - {activeRoleOnboarding.status.toLowerCase()}
+                  </span>
+                  {["PENDING", "ACTIVE"].includes(activeRoleOnboarding.status) && (
+                    <button
+                      className="secondary small"
+                      type="button"
+                      onClick={() => void completeRoleOnboarding()}
+                    >
+                      Complete onboarding
+                    </button>
+                  )}
+                </div>
+              )}
               {mobileMode && (
                 <button className="chat-new-btn" type="button" onClick={openNewConversation}>
                   {t("btnNew")}

@@ -52,4 +52,23 @@ describe("deriveJobsForEvent", () => {
       },
     ]);
   });
+
+  it("derives a role onboarding intro job for role assignments", () => {
+    const jobs = deriveJobsForEvent({
+      id: "event-role-1",
+      type: "role.assigned",
+      workspaceId: "ws-1",
+      payload: { onboardingSessionId: "onboarding-1" },
+    });
+
+    expect(jobs).toEqual([
+      {
+        workspaceId: "ws-1",
+        eventId: "event-role-1",
+        type: "agent.role-onboarding-intro",
+        payload: { onboardingSessionId: "onboarding-1" },
+        dedupeKey: "event-role-1:role-onboarding-intro:onboarding-1",
+      },
+    ]);
+  });
 });

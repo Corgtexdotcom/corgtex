@@ -2,6 +2,7 @@ import { prisma, toInputJson } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
 import { invariant } from "./errors";
+import { updateRoleOnboardingStatusByConversation } from "./role-onboarding";
 
 export async function listConversations(actor: AppActor, workspaceId: string, opts?: {
   take?: number;
@@ -18,6 +19,15 @@ export async function listConversations(actor: AppActor, workspaceId: string, op
     prisma.conversationSession.findMany({
       where: { workspaceId, userId },
       include: {
+        roleOnboarding: {
+          select: {
+            id: true,
+            status: true,
+            role: {
+              select: { id: true, name: true },
+            },
+          },
+        },
         turns: {
           orderBy: { sequenceNumber: "desc" },
           take: 1,
@@ -46,6 +56,15 @@ export async function getConversation(actor: AppActor, workspaceId: string, conv
   const session = await prisma.conversationSession.findUnique({
     where: { id: conversationId },
     include: {
+      roleOnboarding: {
+        select: {
+          id: true,
+          status: true,
+          role: {
+            select: { id: true, name: true },
+          },
+        },
+      },
       turns: {
         orderBy: { sequenceNumber: "asc" },
       },
@@ -89,35 +108,40 @@ export async function addConversationTurn(actor: AppActor, params: {
   invariant(userId, 401, "AUTH_REQUIRED", "Conversations require a user actor.");
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
 
-  const session = await prisma.conversationSession.findUnique({
-    where: { id: params.conversationId },
-    select: { id: true, workspaceId: true, userId: true },
-  });
-  invariant(session && session.workspaceId === params.workspaceId && session.userId === userId, 404, "NOT_FOUND", "Conversation not found.");
+  return prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`
+      SELECT pg_advisory_xact_lock(hashtext('conversation_turn'), hashtext(${params.conversationId}))
+    `;
+    const session = await tx.conversationSession.findUnique({
+      where: { id: params.conversationId },
+      select: { id: true, workspaceId: true, userId: true },
+    });
+    invariant(session && session.workspaceId === params.workspaceId && session.userId === userId, 404, "NOT_FOUND", "Conversation not found.");
 
-  const lastTurn = await prisma.conversationTurn.findFirst({
-    where: { conversationId: params.conversationId },
-    orderBy: { sequenceNumber: "desc" },
-    select: { sequenceNumber: true },
-  });
+    const lastTurn = await tx.conversationTurn.findFirst({
+      where: { conversationId: params.conversationId },
+      orderBy: { sequenceNumber: "desc" },
+      select: { sequenceNumber: true },
+    });
 
-  const turn = await prisma.conversationTurn.create({
-    data: {
-      conversationId: params.conversationId,
-      sequenceNumber: (lastTurn?.sequenceNumber ?? 0) + 1,
-      userMessage: params.userMessage,
-      assistantMessage: params.assistantMessage,
-      contextJson: params.contextJson ? toInputJson(params.contextJson) : undefined,
-      agentRunId: params.agentRunId ?? null,
-    },
-  });
+    const turn = await tx.conversationTurn.create({
+      data: {
+        conversationId: params.conversationId,
+        sequenceNumber: (lastTurn?.sequenceNumber ?? 0) + 1,
+        userMessage: params.userMessage,
+        assistantMessage: params.assistantMessage,
+        contextJson: params.contextJson ? toInputJson(params.contextJson) : undefined,
+        agentRunId: params.agentRunId ?? null,
+      },
+    });
 
-  await prisma.conversationSession.update({
-    where: { id: params.conversationId },
-    data: { updatedAt: new Date() },
-  });
+    await tx.conversationSession.update({
+      where: { id: params.conversationId },
+      data: { updatedAt: new Date() },
+    });
 
-  return turn;
+    return turn;
+  });
 }
 
 export async function closeConversation(actor: AppActor, params: {
@@ -137,6 +161,17 @@ export async function closeConversation(actor: AppActor, params: {
   return prisma.conversationSession.update({
     where: { id: params.conversationId },
     data: { status: "COMPLETED" },
+  });
+}
+
+export async function completeRoleOnboardingConversation(actor: AppActor, params: {
+  workspaceId: string;
+  conversationId: string;
+}) {
+  return updateRoleOnboardingStatusByConversation(actor, {
+    workspaceId: params.workspaceId,
+    conversationId: params.conversationId,
+    status: "COMPLETED",
   });
 }
 
@@ -190,9 +225,34 @@ export async function deleteConversation(actor: AppActor, params: {
 
   const session = await prisma.conversationSession.findUnique({
     where: { id: params.conversationId },
-    select: { id: true, workspaceId: true, userId: true },
+    select: {
+      id: true,
+      workspaceId: true,
+      userId: true,
+      roleOnboarding: { select: { id: true } },
+    },
   });
   invariant(session && session.workspaceId === params.workspaceId && session.userId === userId, 404, "NOT_FOUND", "Conversation not found.");
+  if (session.roleOnboarding) {
+    return prisma.$transaction(async (tx) => {
+      const now = new Date();
+      await tx.roleOnboardingSession.updateMany({
+        where: {
+          conversationId: params.conversationId,
+          status: { in: ["PENDING", "ACTIVE"] },
+        },
+        data: {
+          status: "DISMISSED",
+          dismissedAt: now,
+        },
+      });
+
+      return tx.conversationSession.update({
+        where: { id: params.conversationId },
+        data: { status: "COMPLETED", updatedAt: now },
+      });
+    });
+  }
 
   return prisma.conversationSession.delete({
     where: { id: params.conversationId },

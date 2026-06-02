@@ -41,6 +41,7 @@ export * from "./notifications";
 export * from "./proposals";
 export * from "./reactions";
 export * from "./roles";
+export * from "./role-onboarding";
 export * from "./runtime";
 export * from "./tensions";
 export * from "./webhooks";

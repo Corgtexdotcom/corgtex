@@ -371,6 +371,19 @@ export function deriveJobsForEvent(event: {
     }
   }
 
+  if (event.type === "role.assigned") {
+    const payload = event.payload as { onboardingSessionId?: string };
+    if (payload.onboardingSessionId && event.workspaceId) {
+      jobs.push({
+        workspaceId: event.workspaceId,
+        eventId: event.id,
+        type: "agent.role-onboarding-intro",
+        payload: { onboardingSessionId: payload.onboardingSessionId },
+        dedupeKey: `${event.id}:role-onboarding-intro:${payload.onboardingSessionId}`,
+      });
+    }
+  }
+
   if (event.type === "checkin.response_received") {
     const payload = event.payload as { checkInId?: string; memberId?: string };
     if (payload.memberId && event.workspaceId) {
