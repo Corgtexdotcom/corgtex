@@ -25,6 +25,9 @@ import { isKnownScope, type AgentScope } from "./agent-auth";
 import { privacyFilter } from "./privacy";
 
 const SECRET_KEY_PATTERN = /(token|secret|password|credential|api[_-]?key|access[_-]?key|refresh|authorization|bearer)/i;
+const SECRET_QUERY_VALUE_PATTERN = /([?&](?:access[_-]?token|refresh[_-]?token|id[_-]?token|token|api[_-]?key|secret|signature|sig|authorization)=)[^&#\s]+/gi;
+const BEARER_VALUE_PATTERN = /\bBearer\s+[A-Za-z0-9._~+/=-]+/gi;
+const JWT_VALUE_PATTERN = /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g;
 const MAX_CONTEXT_ITEMS = 20;
 
 type JsonRecord = Record<string, unknown>;
@@ -165,6 +168,12 @@ function redactJson(value: unknown): unknown {
   if (value == null) return null;
   if (value instanceof Date) return value.toISOString();
   if (Array.isArray(value)) return value.map(redactJson);
+  if (typeof value === "string") {
+    return value
+      .replace(SECRET_QUERY_VALUE_PATTERN, "$1[redacted]")
+      .replace(BEARER_VALUE_PATTERN, "Bearer [redacted]")
+      .replace(JWT_VALUE_PATTERN, "[redacted]");
+  }
   if (typeof value === "object") {
     const output: JsonRecord = {};
     for (const [key, child] of Object.entries(value as JsonRecord)) {
@@ -293,7 +302,6 @@ function serializeExecutionRequest(request: NonNullable<ExecutionRequestRecord>)
     status: request.status,
     goal: request.goal,
     actor: request.actorJson,
-    context: request.contextJson,
     allowedScopes: request.allowedScopes,
     policyConstraints: request.policyConstraintsJson,
     expectedOutput: request.expectedOutputJson,
@@ -453,50 +461,61 @@ export async function createExecutionRequest(actor: AppActor, params: CreateExec
   });
   invariant(workspace, 404, "NOT_FOUND", "Workspace not found.");
   const createdByUserId = actor.kind === "user" ? actor.user.id : await actorUserIdForWorkspace(actor, params.workspaceId);
-  const request = await prisma.$transaction(async (tx) => {
-    const created = await tx.executionRequest.create({
-      data: {
+  let request: NonNullable<ExecutionRequestRecord>;
+  try {
+    request = await prisma.$transaction(async (tx) => {
+      const created = await tx.executionRequest.create({
+        data: {
+          workspaceId: params.workspaceId,
+          createdByUserId,
+          agentCredentialId: actorCredentialId(actor),
+          provider,
+          goal,
+          actorJson: jsonInput(params.actor ?? { actorKind: actor.kind }),
+          contextJson: jsonInput(params.context ?? null),
+          allowedScopes,
+          policyConstraintsJson: jsonInput(params.policyConstraints ?? null),
+          expectedOutputJson: jsonInput(params.expectedOutput ?? null),
+          approvalRule: optionalString(params.approvalRule),
+          writebackTargetType: targetType,
+          writebackTargetId: target?.id ?? null,
+          writebackTargetLabel: optionalString(params.writebackTargetLabel) ?? target?.title ?? null,
+          packetJson: Prisma.JsonNull,
+          idempotencyKey,
+        },
+        include: { results: { orderBy: { submittedAt: "desc" }, take: 10 } },
+      });
+      const packet = buildExecutionPacket({ request: created, workspace });
+      const updated = await tx.executionRequest.update({
+        where: { id: created.id },
+        data: { packetJson: packet as Prisma.InputJsonValue },
+        include: { results: { orderBy: { submittedAt: "desc" }, take: 10 } },
+      });
+
+      await recordAudit(tx, actor, {
         workspaceId: params.workspaceId,
-        createdByUserId,
-        agentCredentialId: actorCredentialId(actor),
-        provider,
-        goal,
-        actorJson: jsonInput(params.actor ?? { actorKind: actor.kind }),
-        contextJson: jsonInput(params.context ?? null),
-        allowedScopes,
-        policyConstraintsJson: jsonInput(params.policyConstraints ?? null),
-        expectedOutputJson: jsonInput(params.expectedOutput ?? null),
-        approvalRule: optionalString(params.approvalRule),
-        writebackTargetType: targetType,
-        writebackTargetId: target?.id ?? null,
-        writebackTargetLabel: optionalString(params.writebackTargetLabel) ?? target?.title ?? null,
-        packetJson: Prisma.JsonNull,
-        idempotencyKey,
-      },
+        action: "execution_request.created",
+        entityType: "ExecutionRequest",
+        entityId: created.id,
+        meta: {
+          provider,
+          writebackTargetType: targetType,
+          writebackTargetId: target?.id ?? null,
+          allowedScopes,
+        },
+      });
+
+      return updated;
+    });
+  } catch (error) {
+    if (!idempotencyKey || !isPrismaUniqueError(error)) throw error;
+    const existing = await prisma.executionRequest.findUnique({
+      where: { workspaceId_idempotencyKey: { workspaceId: params.workspaceId, idempotencyKey } },
       include: { results: { orderBy: { submittedAt: "desc" }, take: 10 } },
     });
-    const packet = buildExecutionPacket({ request: created, workspace });
-    const updated = await tx.executionRequest.update({
-      where: { id: created.id },
-      data: { packetJson: packet as Prisma.InputJsonValue },
-      include: { results: { orderBy: { submittedAt: "desc" }, take: 10 } },
-    });
-
-    await recordAudit(tx, actor, {
-      workspaceId: params.workspaceId,
-      action: "execution_request.created",
-      entityType: "ExecutionRequest",
-      entityId: created.id,
-      meta: {
-        provider,
-        writebackTargetType: targetType,
-        writebackTargetId: target?.id ?? null,
-        allowedScopes,
-      },
-    });
-
-    return updated;
-  });
+    invariant(existing, 409, "CONFLICT", "Execution request idempotency conflict.");
+    return serializeExecutionRequest(existing);
+  }
 
   return serializeExecutionRequest(request);
 }

@@ -204,6 +204,7 @@ describe("execution plumbing domain", () => {
       provider: "openwork",
       goal: "Draft launch follow-up",
       actor: { displayName: "User", accessToken: "secret-token" },
+      context: { brainArticle: { title: "Private runbook" } },
       writebackTargetType: "action",
       idempotencyKey: "req-key",
     });
@@ -214,9 +215,11 @@ describe("execution plumbing domain", () => {
       writebackTarget: { type: "ACTION" },
     });
     expect(created).not.toHaveProperty("packet");
+    expect(created).not.toHaveProperty("context");
     expect(prismaMock.executionRequest.create).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
         actorJson: expect.objectContaining({ accessToken: "[redacted]" }),
+        contextJson: expect.objectContaining({ brainArticle: { title: "Private runbook" } }),
         allowedScopes: expect.arrayContaining(["execution:read", "execution:write", "actions:read", "actions:write"]),
       }),
     }));
@@ -252,6 +255,27 @@ describe("execution plumbing domain", () => {
 
     expect(prismaMock.action.findFirst).not.toHaveBeenCalled();
     expect(prismaMock.executionRequest.create).not.toHaveBeenCalled();
+  });
+
+  it("returns an existing execution request on concurrent idempotency create races", async () => {
+    prismaMock.executionRequest.findUnique
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(requestFixture({ id: "request-race", results: [] }));
+    prismaMock.$transaction.mockRejectedValueOnce({ code: "P2002" });
+
+    const { createExecutionRequest } = await import("./execution-plumbing");
+    const existing = await createExecutionRequest(actor, {
+      workspaceId: "workspace-1",
+      provider: "openwork",
+      goal: "Draft launch follow-up",
+      writebackTargetType: "ACTION",
+      idempotencyKey: "race-key",
+    });
+
+    expect(existing).toMatchObject({ id: "request-race" });
+    expect(prismaMock.executionRequest.findUnique).toHaveBeenLastCalledWith(expect.objectContaining({
+      where: { workspaceId_idempotencyKey: { workspaceId: "workspace-1", idempotencyKey: "race-key" } },
+    }));
   });
 
   it("returns existing execution requests before revalidating stale targets", async () => {
@@ -545,7 +569,13 @@ describe("execution plumbing domain", () => {
       workspaceId: "workspace-1",
       requestId: "request-1",
       idempotencyKey: "result-key",
-      output: { title: " Follow up ", bodyMd: "Notes", apiKey: "secret" },
+      output: {
+        title: " Follow up ",
+        bodyMd: "Notes",
+        apiKey: "secret",
+        downloadUrl: "https://example.test/file?access_token=clear-token&ok=1",
+      },
+      artifacts: [{ log: "Authorization: Bearer clear-token-value" }],
     });
 
     expect(createAction).toHaveBeenCalledWith(agentActor, expect.objectContaining({
@@ -560,7 +590,11 @@ describe("execution plumbing domain", () => {
     });
     expect(prismaMock.executionResult.create).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
-        outputJson: expect.objectContaining({ apiKey: "[redacted]" }),
+        outputJson: expect.objectContaining({
+          apiKey: "[redacted]",
+          downloadUrl: "https://example.test/file?access_token=[redacted]&ok=1",
+        }),
+        artifactJson: [{ log: "Authorization: Bearer [redacted]" }],
       }),
     }));
     expect(prismaMock.executionResult.update).toHaveBeenCalledWith(expect.objectContaining({
