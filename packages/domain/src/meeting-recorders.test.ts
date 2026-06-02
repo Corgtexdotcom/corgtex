@@ -11,6 +11,9 @@ const { prismaMock, fetchMock } = vi.hoisted(() => {
       findUnique: vi.fn(),
       upsert: vi.fn(),
     },
+    workspaceEnterpriseService: {
+      upsert: vi.fn(),
+    },
     workspaceMeetingRecorderConfig: {
       findUnique: vi.fn(),
       upsert: vi.fn(),
@@ -786,6 +789,98 @@ describe("meeting recorder domain", () => {
       status: 402,
       code: "RECORDER_MONTHLY_CAP_EXCEEDED",
     });
+  });
+
+  it("syncs enterprise service status when recorder config changes", async () => {
+    const { updateMeetingRecorderConfig } = await import("./meeting-recorders");
+    const lastSyncAt = new Date("2026-05-05T18:00:00.000Z");
+    prismaMock.workspaceMeetingRecorderConfig.upsert.mockResolvedValue({ enabled: true });
+    prismaMock.workspaceRecorderCalendarSource.findUnique.mockResolvedValue({
+      id: "source-1",
+      workspaceId: "workspace-1",
+      provider: "MICROSOFT",
+      providerAccountId: "ms-user-1",
+      providerAccountEmail: "calendar@customer.test",
+      displayName: "Customer Recorder",
+      status: "ACTIVE",
+      lastSyncAt,
+      lastSyncStartedAt: new Date("2026-05-05T17:59:00.000Z"),
+      lastSyncCompletedAt: lastSyncAt,
+      lastSyncJobId: "job-success",
+      lastSyncError: null,
+      lastDryRunAt: null,
+      lastUpcomingEventCount: 1,
+      lastSchedulableEventCount: 1,
+      createdAt: new Date("2026-05-05T17:00:00.000Z"),
+      updatedAt: lastSyncAt,
+    });
+    prismaMock.meetingRecorderSmokeRun.findFirst.mockResolvedValue({
+      id: "smoke-1",
+      workspaceId: "workspace-1",
+      status: "COMPLETED",
+      provider: "RECALL_AI",
+      createdAt: new Date("2026-05-05T18:05:00.000Z"),
+    });
+    prismaMock.meetingRecording.aggregate.mockResolvedValue({ _sum: { durationSeconds: 1500 } });
+
+    await updateMeetingRecorderConfig(operatorActor, {
+      workspaceId: "workspace-1",
+      enabled: true,
+    });
+
+    expect(prismaMock.workspaceEnterpriseService.upsert).toHaveBeenCalledWith({
+      where: {
+        workspaceId_serviceKey: {
+          workspaceId: "workspace-1",
+          serviceKey: "MEETING_RECORDER",
+        },
+      },
+      update: expect.objectContaining({
+        displayName: "Meeting recorder",
+        providerKey: "RECALL_AI",
+        healthStatus: "ACTIVE",
+        lastSuccessfulSyncAt: lastSyncAt,
+        lastError: null,
+        usageJson: expect.objectContaining({
+          recorder: expect.objectContaining({
+            usedSeconds: 1500,
+            usedMinutes: 25,
+            monthlyMinuteCap: 6000,
+            remainingMinutes: 5975,
+          }),
+        }),
+      }),
+      create: expect.objectContaining({
+        workspaceId: "workspace-1",
+        serviceKey: "MEETING_RECORDER",
+        ownershipMode: "CUSTOMER_MANAGED",
+        displayName: "Meeting recorder",
+        providerKey: "RECALL_AI",
+        healthStatus: "ACTIVE",
+      }),
+    });
+  });
+
+  it("clears stale successful enterprise health checks when recorder readiness fails", async () => {
+    const { syncMeetingRecorderEnterpriseService } = await import("./meeting-recorders");
+    const now = new Date("2026-05-06T18:00:00.000Z");
+    prismaMock.workspaceRecorderCalendarSource.findUnique.mockResolvedValue(null);
+
+    await syncMeetingRecorderEnterpriseService("workspace-1", now);
+
+    const payload = prismaMock.workspaceEnterpriseService.upsert.mock.calls[0]?.[0];
+    expect(payload.update).toMatchObject({
+      healthStatus: "DISCONNECTED",
+      lastHealthCheckAt: now,
+      lastSuccessfulHealthCheckAt: null,
+      lastSuccessfulSyncAt: null,
+    });
+    expect(payload.create).toMatchObject({
+      ownershipMode: "CUSTOMER_MANAGED",
+      healthStatus: "DISCONNECTED",
+      lastSuccessfulHealthCheckAt: null,
+    });
+    expect(payload.update).not.toHaveProperty("ownershipMode");
   });
 
   it("treats private, free, declined, past, and too-soon calendar events as ineligible", async () => {

@@ -18,7 +18,7 @@ import {
   listMeetingTranscriptSourceState,
   getWorkspacePlanState,
   listAiWorkspaceProviders,
-  listEnterpriseServices,
+  listWorkspaceEnterpriseServiceStates,
 } from "@corgtex/domain";
 import { env, prisma } from "@corgtex/shared";
 import { requirePageActor } from "@/lib/auth";
@@ -37,6 +37,7 @@ import {
   deleteOAuthConnectionAction,
   runOAuthConnectionSyncAction,
   updateOAuthConnectionSettingsAction,
+  requestManagedEnterpriseServiceAction,
 } from "../actions";
 import { CorgtexConnectorManager } from "./CorgtexConnectorManager";
 import { MembersTable } from "./MembersTable";
@@ -324,17 +325,18 @@ export default async function SettingsPage({
   let isAdmin = false;
   let invitePolicy: Awaited<ReturnType<typeof getMemberInvitePolicy>> = "ADMINS_ONLY";
   let inviteRequests: Awaited<ReturnType<typeof listMemberInviteRequests>> = [];
-  if (tab === "members") {
-    let membership: Awaited<ReturnType<typeof requireWorkspaceMembership>>;
+  if (tab === "members" || (tab === "ai-workspaces" && featureFlags.MANAGED_ENTERPRISE_SERVICES)) {
     try {
-      membership = await requireWorkspaceMembership({ actor, workspaceId });
+      const membership = await requireWorkspaceMembership({ actor, workspaceId });
+      isAdmin = membership?.role === "ADMIN";
     } catch (error) {
       if (error instanceof AppError && error.status === 403) {
         notFound();
       }
       throw error;
     }
-    isAdmin = membership?.role === "ADMIN";
+  }
+  if (tab === "members") {
     try {
       members = await listMembersEnriched(workspaceId, { includeInactive: true });
       invitePolicy = await getMemberInvitePolicy(workspaceId);
@@ -421,8 +423,28 @@ export default async function SettingsPage({
         supportedOwnershipModes: [...provider.supportedOwnershipModes],
       }))
     : [];
-  const enterpriseServices = featureFlags.AI_WORKSPACES && featureFlags.MANAGED_ENTERPRISE_SERVICES
-    ? listEnterpriseServices().map((service) => ({ ...service }))
+  const enterpriseServices = tab === "ai-workspaces" && featureFlags.AI_WORKSPACES && featureFlags.MANAGED_ENTERPRISE_SERVICES
+    ? (await listWorkspaceEnterpriseServiceStates(actor, workspaceId)).map((service) => ({
+        key: service.key,
+        label: service.label,
+        outcome: service.outcome,
+        description: service.description,
+        defaultOwnershipMode: service.defaultOwnershipMode,
+        persistedId: service.persistedId,
+        ownershipMode: service.ownershipMode,
+        healthStatus: service.healthStatus,
+        providerKey: service.providerKey,
+        lastHealthCheckAt: service.lastHealthCheckAt?.toISOString() ?? null,
+        lastSuccessfulHealthCheckAt: service.lastSuccessfulHealthCheckAt?.toISOString() ?? null,
+        lastSuccessfulSyncAt: service.lastSuccessfulSyncAt?.toISOString() ?? null,
+        lastError: service.lastError,
+        usageLabel: service.usageLabel,
+        usageDetail: service.usageDetail,
+        supportEscalationStatus: service.supportEscalationStatus,
+        supportEscalatedAt: service.supportEscalatedAt?.toISOString() ?? null,
+        supportNotesMd: service.supportNotesMd,
+        readinessChecks: service.readinessChecks,
+      }))
     : [];
   const selectedProviderKey = normalizeSelectedProvider(search.provider, aiWorkspaceProviders);
   const selectedServiceKey = normalizeSelectedService(search.service, enterpriseServices);
@@ -978,6 +1000,9 @@ export default async function SettingsPage({
           providers={aiWorkspaceProviders}
           enterpriseServices={enterpriseServices}
           managedServicesEnabled={featureFlags.MANAGED_ENTERPRISE_SERVICES}
+          canRequestManagedServices={isAdmin}
+          requestManagedServiceAction={requestManagedEnterpriseServiceAction}
+          workspaceId={workspaceId}
           selectedProviderKey={selectedProviderKey}
           selectedServiceKey={selectedServiceKey}
         />

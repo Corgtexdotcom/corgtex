@@ -27,6 +27,27 @@ export type EnterpriseServiceView = {
   outcome: string;
   description: string;
   defaultOwnershipMode: string;
+  persistedId?: string | null;
+  ownershipMode?: string | null;
+  healthStatus?: string | null;
+  providerKey?: string | null;
+  lastHealthCheckAt?: string | null;
+  lastSuccessfulHealthCheckAt?: string | null;
+  lastSuccessfulSyncAt?: string | null;
+  lastError?: string | null;
+  usageLabel?: string | null;
+  usageDetail?: string | null;
+  supportEscalationStatus?: string | null;
+  supportEscalatedAt?: string | null;
+  supportNotesMd?: string | null;
+  readinessChecks?: EnterpriseServiceReadinessCheckView[];
+};
+
+export type EnterpriseServiceReadinessCheckView = {
+  key: string;
+  label: string;
+  ok: boolean;
+  detail: string;
 };
 
 export type AiWorkspaceProviderGroup = "default" | "byo" | "advanced";
@@ -223,6 +244,22 @@ const CAPABILITY_LABELS: Record<string, string> = {
   code_execution: "Code execution",
 };
 
+const ENTERPRISE_SERVICE_OWNERSHIP_LABELS: Record<string, string> = {
+  CUSTOMER_MANAGED: "Customer-managed",
+  CORGTEX_MANAGED: "CORGTEX-managed",
+};
+
+const ENTERPRISE_SERVICE_HEALTH_LABELS: Record<string, string> = {
+  ACTIVE: "Active",
+  NEEDS_SETUP: "Needs setup",
+  UNHEALTHY: "Unhealthy",
+  DISCONNECTED: "Disconnected",
+  SUSPENDED: "Suspended",
+  MANAGED_EXTERNALLY: "Managed externally",
+};
+
+export type EnterpriseServiceHealthTone = "success" | "warning" | "danger" | "neutral" | "info";
+
 export function providerGroup(provider: AiWorkspaceProviderView): AiWorkspaceProviderGroup {
   if (provider.category === "DEFAULT" || provider.recommendedDefault) return "default";
   if (provider.category === "BYO") return "byo";
@@ -256,6 +293,38 @@ export function providerComparator(a: AiWorkspaceProviderView, b: AiWorkspacePro
 
 export function capabilityLabel(capability: string) {
   return CAPABILITY_LABELS[capability] ?? capability.replace(/_/g, " ");
+}
+
+export function enterpriseServiceOwnershipLabel(value: string | null | undefined) {
+  if (!value) return "Customer-managed";
+  return ENTERPRISE_SERVICE_OWNERSHIP_LABELS[value] ?? value.replace(/_/g, " ").toLowerCase();
+}
+
+export function enterpriseServiceHealthLabel(value: string | null | undefined) {
+  if (!value) return "Needs setup";
+  return ENTERPRISE_SERVICE_HEALTH_LABELS[value] ?? value.replace(/_/g, " ").toLowerCase();
+}
+
+export function enterpriseServiceHealthTone(value: string | null | undefined): EnterpriseServiceHealthTone {
+  if (value === "ACTIVE") return "success";
+  if (value === "NEEDS_SETUP" || value === "MANAGED_EXTERNALLY") return "warning";
+  if (value === "UNHEALTHY" || value === "DISCONNECTED" || value === "SUSPENDED") return "danger";
+  return "neutral";
+}
+
+export function enterpriseServiceProviderLabel(value: string | null | undefined) {
+  if (!value) return "No provider recorded";
+  return value.replace(/_/g, " ").toLowerCase();
+}
+
+export function formatServiceTimestamp(value: string | null | undefined) {
+  if (!value) return "Not recorded";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Not recorded";
+  return new Intl.DateTimeFormat("en", {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(date);
 }
 
 export function normalizeSelectedProvider(

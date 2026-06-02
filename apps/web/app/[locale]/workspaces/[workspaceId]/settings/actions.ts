@@ -37,6 +37,8 @@ import {
   deleteOAuthConnection,
   enqueueOAuthConnectionSync,
   updateOAuthConnectionSyncSettings,
+  requestManagedEnterpriseService,
+  type EnterpriseServiceKey,
 } from "@corgtex/domain";
 import { sendEmail } from "@corgtex/shared";
 import { meetingTranscriptArtifactsFromFormData } from "@/lib/meeting-transcript-source-artifacts";
@@ -349,6 +351,20 @@ export async function updateMeetingRecorderConfigAction(formData: FormData) {
     botName: asString(formData, "botName"),
     entryMessage: asOptional(formData, "entryMessage"),
     monthlyMinuteCap: asOptionalInt(formData, "monthlyMinuteCap") ?? 6000,
+  });
+  refresh(workspaceId);
+}
+
+export async function requestManagedEnterpriseServiceAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  await requestManagedEnterpriseService(actor, {
+    workspaceId,
+    serviceKey: asString(formData, "serviceKey") as EnterpriseServiceKey,
+    noteMd: asOptional(formData, "supportNotesMd"),
   });
   refresh(workspaceId);
 }

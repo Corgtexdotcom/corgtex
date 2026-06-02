@@ -3,6 +3,11 @@ import { describe, expect, it } from "vitest";
 import {
   buildAiWorkspaceSetupCards,
   capabilityLabel,
+  enterpriseServiceHealthLabel,
+  enterpriseServiceHealthTone,
+  enterpriseServiceOwnershipLabel,
+  enterpriseServiceProviderLabel,
+  formatServiceTimestamp,
   groupAiWorkspaceProviders,
   normalizeSelectedProvider,
   normalizeSelectedService,
@@ -43,6 +48,10 @@ const SERVICES: EnterpriseServiceView[] = [
     outcome: "Operate shared setup.",
     description: "Managed service",
     defaultOwnershipMode: "CUSTOMER_MANAGED",
+    ownershipMode: "CORGTEX_MANAGED",
+    healthStatus: "ACTIVE",
+    providerKey: "RECALL_AI",
+    usageLabel: "25 min this month",
   },
 ];
 
@@ -162,5 +171,16 @@ describe("AI workspace UI helpers", () => {
   it("formats known and unknown capability labels", () => {
     expect(capabilityLabel("remote_mcp")).toBe("Remote MCP");
     expect(capabilityLabel("custom_mode")).toBe("custom mode");
+  });
+
+  it("formats enterprise service ownership, health, provider, and timestamps", () => {
+    expect(enterpriseServiceOwnershipLabel("CORGTEX_MANAGED")).toBe("CORGTEX-managed");
+    expect(enterpriseServiceOwnershipLabel("CUSTOMER_MANAGED")).toBe("Customer-managed");
+    expect(enterpriseServiceHealthLabel("DISCONNECTED")).toBe("Disconnected");
+    expect(enterpriseServiceHealthTone("ACTIVE")).toBe("success");
+    expect(enterpriseServiceHealthTone("UNHEALTHY")).toBe("danger");
+    expect(enterpriseServiceProviderLabel("RECALL_AI")).toBe("recall ai");
+    expect(formatServiceTimestamp(null)).toBe("Not recorded");
+    expect(formatServiceTimestamp("not-a-date")).toBe("Not recorded");
   });
 });
