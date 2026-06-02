@@ -114,6 +114,8 @@
   },
   "agents": {
     "agentKey": "Clave del agente:",
+    "authorityDashboardDesc": "Revisa el alcance de rol, acceso vinculado, límites, postura de aprobación y actividad reciente de cada agente en un solo lugar.",
+    "authorityDashboardTitle": "Panel de autoridad de agentes",
     "cost30d": "Costo de 30 días:",
     "costBadge": "Costo {tier}",
     "credentialsDesc": "Crea credenciales para conectar clientes de IA externos, como Claude o Cursor, a tu espacio de trabajo mediante Model Context Protocol (MCP).",

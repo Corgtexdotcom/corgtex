@@ -114,6 +114,8 @@
   },
   "agents": {
     "agentKey": "Agent Key:",
+    "authorityDashboardDesc": "Review each agent's role scope, linked access, limits, approval posture, and recent activity in one place.",
+    "authorityDashboardTitle": "Agent authority dashboard",
     "cost30d": "30d Cost:",
     "costBadge": "{tier} cost",
     "credentialsDesc": "Create credentials to connect external AI clients (like Claude or Cursor) to your workspace via the Model Context Protocol (MCP).",
