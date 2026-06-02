@@ -11,7 +11,11 @@ export type WorkspaceFeatureFlag =
   | "MEETING_RECORDERS"
   | "MEETING_CONTEXTUAL_INTELLIGENCE"
   | "CONTEXT_MAP_AI"
-  | "SLACK_MEETING_ACTION_REVIEW";
+  | "SLACK_MEETING_ACTION_REVIEW"
+  | "AI_WORKSPACES"
+  | "OPENWORK_DEFAULT"
+  | "EXECUTION_PACKETS"
+  | "MANAGED_ENTERPRISE_SERVICES";
 
 export type WorkspaceFeatureFlagMap = Record<WorkspaceFeatureFlag, boolean>;
 
@@ -31,6 +35,10 @@ export const DEFAULT_WORKSPACE_FEATURE_FLAGS: WorkspaceFeatureFlagMap = {
   MEETING_CONTEXTUAL_INTELLIGENCE: false,
   CONTEXT_MAP_AI: false,
   SLACK_MEETING_ACTION_REVIEW: false,
+  AI_WORKSPACES: false,
+  OPENWORK_DEFAULT: false,
+  EXECUTION_PACKETS: false,
+  MANAGED_ENTERPRISE_SERVICES: false,
 };
 
 const WORKSPACE_FEATURE_FLAG_VALUES: WorkspaceFeatureFlag[] = [
@@ -49,6 +57,10 @@ const WORKSPACE_FEATURE_FLAG_VALUES: WorkspaceFeatureFlag[] = [
   "MEETING_CONTEXTUAL_INTELLIGENCE",
   "CONTEXT_MAP_AI",
   "SLACK_MEETING_ACTION_REVIEW",
+  "AI_WORKSPACES",
+  "OPENWORK_DEFAULT",
+  "EXECUTION_PACKETS",
+  "MANAGED_ENTERPRISE_SERVICES",
 ];
 
 function isKnownWorkspaceFeatureFlag(flag: string): flag is WorkspaceFeatureFlag {

@@ -79,6 +79,7 @@ vi.mock("./agent-auth", () => ({
     "integrations:read",
     "meetings:read",
     "meetings:write",
+    "runtime:read",
     "tools:read",
     "workspace:read",
   ],
@@ -286,7 +287,9 @@ describe("catalog domain", () => {
     const { listCatalogItems } = await import("./catalog");
     prismaMock.workspaceFeatureFlag.findMany.mockResolvedValue([
       { flag: "AGENT_GOVERNANCE", enabled: false },
+      { flag: "AI_WORKSPACES", enabled: false },
       { flag: "BUILD_ARTIFACTS", enabled: false },
+      { flag: "MANAGED_ENTERPRISE_SERVICES", enabled: false },
       { flag: "MEETING_RECORDERS", enabled: false },
       { flag: "SETTINGS_GENERAL", enabled: false },
     ]);
@@ -297,12 +300,117 @@ describe("catalog domain", () => {
       catalogItemFixture({ id: "recorder-1", title: "Meeting recorder", sourceType: "MEETING_RECORDER", sourceId: "meeting-recorder" }),
       catalogItemFixture({ id: "data-1", title: "Warehouse", sourceType: "DATA_SOURCE", sourceId: "data-1" }),
       catalogItemFixture({ id: "mcp-1", title: "Corgtex MCP", sourceType: "MCP_CONNECTOR", sourceId: "corgtex-mcp" }),
+      catalogItemFixture({ id: "openwork-1", title: "OpenWork Free", sourceType: "AI_WORKSPACE", sourceId: "openwork" }),
+      catalogItemFixture({ id: "managed-1", title: "Managed AI workspace", sourceType: "ENTERPRISE_SERVICE", sourceId: "ai_workspace" }),
       catalogItemFixture({ id: "google-1", title: "Google", sourceType: "OAUTH_CONNECTION", sourceId: "google" }),
     ]);
 
     const result = await listCatalogItems(actor, "workspace-1");
 
     expect(result.items.map((item) => item.title)).toEqual(["Miro board"]);
+  });
+
+  it("derives AI workspace catalog cards from the provider registry when enabled", async () => {
+    const { listCatalogItems } = await import("./catalog");
+    prismaMock.workspaceFeatureFlag.findMany.mockResolvedValue([
+      { flag: "AI_WORKSPACES", enabled: true },
+      { flag: "OPENWORK_DEFAULT", enabled: true },
+    ]);
+    prismaMock.workspaceToolLink.findMany.mockResolvedValue([]);
+    prismaMock.catalogItem.findMany.mockResolvedValue([]);
+    prismaMock.catalogFavorite.findMany.mockResolvedValue([]);
+    prismaMock.catalogRequest.findMany.mockResolvedValue([]);
+
+    await listCatalogItems(actor, "workspace-1");
+
+    expect(prismaMock.catalogItem.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        workspaceId_sourceType_sourceId: {
+          workspaceId: "workspace-1",
+          sourceType: "AI_WORKSPACE",
+          sourceId: "openwork",
+        },
+      },
+      create: expect.objectContaining({
+        type: "CONNECTOR",
+        title: "OpenWork Free",
+        category: "AI_DEFAULT",
+        accessMode: "OPEN",
+        requestedScopes: ["workspace:read", "brain:read", "conversations:write"],
+        featured: true,
+      }),
+      update: expect.objectContaining({
+        title: "OpenWork Free",
+        category: "AI_DEFAULT",
+        accessMode: "OPEN",
+        featured: true,
+      }),
+    }));
+    expect(prismaMock.catalogItem.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        workspaceId_sourceType_sourceId: {
+          workspaceId: "workspace-1",
+          sourceType: "AI_WORKSPACE",
+          sourceId: "chatgpt",
+        },
+      },
+      create: expect.objectContaining({
+        title: "ChatGPT",
+        category: "AI_BYO",
+        featured: false,
+      }),
+    }));
+    expect(prismaMock.catalogItem.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        workspaceId_sourceType_sourceId: {
+          workspaceId: "workspace-1",
+          sourceType: "AI_WORKSPACE",
+          sourceId: "generic_mcp",
+        },
+      },
+      create: expect.objectContaining({
+        category: "AI_ADVANCED",
+      }),
+    }));
+  });
+
+  it("derives managed enterprise service request cards when enabled", async () => {
+    const { listCatalogItems } = await import("./catalog");
+    prismaMock.workspaceFeatureFlag.findMany.mockResolvedValue([
+      { flag: "MANAGED_ENTERPRISE_SERVICES", enabled: true },
+    ]);
+    prismaMock.workspaceToolLink.findMany.mockResolvedValue([]);
+    prismaMock.catalogItem.findMany.mockResolvedValue([]);
+    prismaMock.catalogFavorite.findMany.mockResolvedValue([]);
+    prismaMock.catalogRequest.findMany.mockResolvedValue([]);
+
+    await listCatalogItems(actor, "workspace-1");
+
+    expect(prismaMock.catalogItem.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        workspaceId_sourceType_sourceId: {
+          workspaceId: "workspace-1",
+          sourceType: "ENTERPRISE_SERVICE",
+          sourceId: "ai_workspace",
+        },
+      },
+      create: expect.objectContaining({
+        type: "TOOL",
+        title: "Managed AI workspace",
+        category: "ENTERPRISE_SERVICES",
+        accessMode: "REQUEST",
+        requestedScopes: ["workspace:read", "integrations:read", "runtime:read"],
+      }),
+    }));
+    expect(prismaMock.catalogItem.upsert).not.toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        workspaceId_sourceType_sourceId: {
+          workspaceId: "workspace-1",
+          sourceType: "ENTERPRISE_SERVICE",
+          sourceId: "meeting_recorder",
+        },
+      },
+    }));
   });
 
   it("rejects actions against unavailable derived catalog items", async () => {

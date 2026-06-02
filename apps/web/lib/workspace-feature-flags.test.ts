@@ -40,6 +40,10 @@ describe("filterNavGroupsByWorkspaceAccess", () => {
     expect(labels).not.toContain("tools");
     expect(labels).not.toContain("built");
     expect(DEFAULT_WORKSPACE_FEATURE_FLAGS.CONTEXT_MAP_AI).toBe(false);
+    expect(DEFAULT_WORKSPACE_FEATURE_FLAGS.AI_WORKSPACES).toBe(false);
+    expect(DEFAULT_WORKSPACE_FEATURE_FLAGS.OPENWORK_DEFAULT).toBe(false);
+    expect(DEFAULT_WORKSPACE_FEATURE_FLAGS.EXECUTION_PACKETS).toBe(false);
+    expect(DEFAULT_WORKSPACE_FEATURE_FLAGS.MANAGED_ENTERPRISE_SERVICES).toBe(false);
   });
 
   it("shows finance navigation by default for existing customers", () => {

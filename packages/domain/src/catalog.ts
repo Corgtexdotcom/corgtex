@@ -11,6 +11,7 @@ import { prisma, randomOpaqueToken, sha256, toInputJson } from "@corgtex/shared"
 import type { AppActor, MembershipSummary } from "@corgtex/shared";
 import { AGENT_REGISTRY } from "./agent-registry";
 import { ALL_SCOPES } from "./agent-auth";
+import { listAiWorkspaceProviders, listEnterpriseServices } from "./ai-workspaces";
 import { actorUserIdForWorkspace, requireWorkspaceMembership } from "./auth";
 import { recordAudit } from "./audit-trail";
 import { AppError, invariant } from "./errors";
@@ -22,6 +23,10 @@ const CATALOG_FEATURE_DEFAULTS = {
   BUILD_ARTIFACTS: false,
   MEETING_RECORDERS: false,
   SETTINGS_GENERAL: true,
+  AI_WORKSPACES: false,
+  OPENWORK_DEFAULT: false,
+  EXECUTION_PACKETS: false,
+  MANAGED_ENTERPRISE_SERVICES: false,
 } as const;
 
 type CatalogFeatureFlag = keyof typeof CATALOG_FEATURE_DEFAULTS;
@@ -202,6 +207,52 @@ function connectorSources(workspaceId: string, flags: CatalogFeatureFlags): Cata
   return sources;
 }
 
+function aiWorkspaceSources(flags: CatalogFeatureFlags): CatalogSourceInput[] {
+  if (!flags.AI_WORKSPACES) return [];
+
+  return listAiWorkspaceProviders().map((provider) => {
+    const isOpenWorkDefault = provider.key === "openwork" && flags.OPENWORK_DEFAULT;
+    const category = provider.category === "DEFAULT"
+      ? "AI_DEFAULT"
+      : provider.category === "BYO"
+        ? "AI_BYO"
+        : "AI_ADVANCED";
+    return {
+      type: "CONNECTOR",
+      sourceType: "AI_WORKSPACE",
+      sourceId: provider.key,
+      title: provider.label,
+      outcome: provider.outcome,
+      descriptionMd: provider.description,
+      url: null,
+      category,
+      accessMode: provider.setupPath === "request" ? "REQUEST" : "OPEN",
+      requestedScopes: ["workspace:read", "brain:read", "conversations:write"],
+      featured: isOpenWorkDefault,
+    };
+  });
+}
+
+function managedEnterpriseServiceSources(flags: CatalogFeatureFlags): CatalogSourceInput[] {
+  if (!flags.MANAGED_ENTERPRISE_SERVICES) return [];
+
+  return listEnterpriseServices()
+    .filter((service) => service.key !== "meeting_recorder")
+    .map((service) => ({
+      type: "TOOL",
+      sourceType: "ENTERPRISE_SERVICE",
+      sourceId: service.key,
+      title: service.label,
+      outcome: service.outcome,
+      descriptionMd: service.description,
+      url: null,
+      category: "ENTERPRISE_SERVICES",
+      accessMode: "REQUEST",
+      requestedScopes: ["workspace:read", "integrations:read", "runtime:read"],
+      featured: false,
+    }));
+}
+
 function isCatalogItemAvailable(item: Pick<CatalogItemRecord, "sourceType" | "sourceId">, flags: CatalogFeatureFlags) {
   if (item.sourceType === "AGENT_CONFIG" || item.sourceType === "AGENT_IDENTITY") {
     return flags.AGENT_GOVERNANCE;
@@ -217,6 +268,12 @@ function isCatalogItemAvailable(item: Pick<CatalogItemRecord, "sourceType" | "so
   }
   if (item.sourceType === "MCP_CONNECTOR") {
     return flags.SETTINGS_GENERAL;
+  }
+  if (item.sourceType === "AI_WORKSPACE") {
+    return flags.AI_WORKSPACES;
+  }
+  if (item.sourceType === "ENTERPRISE_SERVICE") {
+    return flags.MANAGED_ENTERPRISE_SERVICES;
   }
   if (item.sourceType === "COMMUNICATION_INSTALLATION" && item.sourceId === "slack") {
     return Boolean(process.env.SLACK_CLIENT_ID && process.env.SLACK_CLIENT_SECRET);
@@ -359,6 +416,8 @@ async function ensureDerivedCatalogItems(workspaceId: string) {
       requestedScopes: ["data-sources:read"],
     })) : []),
     ...connectorSources(workspaceId, featureFlags),
+    ...aiWorkspaceSources(featureFlags),
+    ...managedEnterpriseServiceSources(featureFlags),
   ];
 
   await Promise.all(sources.map((source) => prisma.catalogItem.upsert({
