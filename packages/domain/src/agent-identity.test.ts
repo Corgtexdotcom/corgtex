@@ -27,6 +27,7 @@ vi.mock("@corgtex/shared", () => ({
       upsert: vi.fn(),
       create: vi.fn(),
       update: vi.fn(),
+      updateMany: vi.fn(),
       findUnique: vi.fn(),
       delete: vi.fn(),
     },
@@ -79,6 +80,7 @@ describe("agent-identity", () => {
     vi.mocked(prisma.$executeRaw).mockResolvedValue(0 as any);
     vi.mocked(prisma.roleHolderHistory.create).mockResolvedValue({} as any);
     vi.mocked(prisma.roleHolderHistory.updateMany).mockResolvedValue({ count: 1 } as any);
+    vi.mocked(prisma.circleAgentAssignment.updateMany).mockResolvedValue({ count: 1 } as any);
   });
 
   it("creates an agent identity", async () => {
@@ -143,6 +145,25 @@ describe("agent-identity", () => {
 
     const result = await deactivateAgentIdentity(adminActor, wsId, "ai-1");
     expect(result.isActive).toBe(false);
+    expect(prisma.roleHolderHistory.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        workspaceId: wsId,
+        agentIdentityId: "ai-1",
+        endedAt: null,
+      }),
+      data: expect.objectContaining({
+        endedAt: expect.any(Date),
+        endedByUserId: "u1",
+      }),
+    }));
+    expect(prisma.circleAgentAssignment.updateMany).toHaveBeenCalledWith({
+      where: {
+        agentIdentityId: "ai-1",
+        circle: { workspaceId: wsId },
+        roleId: { not: null },
+      },
+      data: { roleId: null },
+    });
   });
 
   it("rejects deactivation of non-existent identity", async () => {

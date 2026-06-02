@@ -85,6 +85,47 @@ CREATE INDEX "RoleOnboardingSession_workspaceId_memberId_status_idx" ON "RoleOnb
 -- CreateIndex
 CREATE INDEX "RoleOnboardingSession_roleId_status_idx" ON "RoleOnboardingSession"("roleId", "status");
 
+-- Backfill baseline definition history for existing active roles.
+INSERT INTO "RoleVersion" (
+    "id",
+    "workspaceId",
+    "roleId",
+    "circleId",
+    "version",
+    "name",
+    "purposeMd",
+    "accountabilities",
+    "artifacts",
+    "metricsMd",
+    "coreRoleType",
+    "changeType",
+    "createdAt"
+)
+SELECT
+    'role-version:baseline:' || r."id",
+    c."workspaceId",
+    r."id",
+    r."circleId",
+    1,
+    r."name",
+    r."purposeMd",
+    r."accountabilities",
+    r."artifacts",
+    r."metricsMd",
+    r."coreRoleType",
+    'created',
+    r."createdAt"
+FROM "Role" r
+JOIN "Circle" c ON c."id" = r."circleId"
+WHERE r."archivedAt" IS NULL
+  AND c."archivedAt" IS NULL
+  AND NOT EXISTS (
+      SELECT 1
+      FROM "RoleVersion" rv
+      WHERE rv."roleId" = r."id"
+        AND rv."version" = 1
+  );
+
 -- Backfill open holder history for current human role assignments.
 INSERT INTO "RoleHolderHistory" (
     "id",

@@ -6,6 +6,7 @@ import { requireWorkspaceMembership } from "./auth";
 import { recordAudit } from "./audit-trail";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { invariant } from "./errors";
+import { closeRoleLifecycleForCircleTree } from "./role-onboarding";
 
 async function validateParentCircle(tx: Prisma.TransactionClient, params: {
   workspaceId: string;
@@ -205,6 +206,14 @@ export async function deleteCircle(actor: AppActor, params: {
     entityType: "Circle",
     entityId: params.circleId,
     reason: "Archived from circle delete path.",
+  });
+
+  await prisma.$transaction(async (tx) => {
+    await closeRoleLifecycleForCircleTree(tx, {
+      workspaceId: params.workspaceId,
+      circleId: params.circleId,
+      actor,
+    });
   });
 
   return { id: params.circleId };

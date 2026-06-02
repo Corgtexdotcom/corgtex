@@ -4,7 +4,7 @@ import type { AppActor } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { invariant } from "./errors";
-import { endRoleHolderHistory, startRoleHolderHistory } from "./role-onboarding";
+import { closeRoleLifecycleForAgent, endRoleHolderHistory, startRoleHolderHistory } from "./role-onboarding";
 import { AGENT_REGISTRY } from "./agent-registry";// ---------------------------------------------------------------------------
 // CRUD — AgentIdentity
 // ---------------------------------------------------------------------------
@@ -70,19 +70,31 @@ export async function updateAgentIdentity(
   });
   invariant(existing, 404, "NOT_FOUND", "Agent identity not found.");
 
-  return prisma.agentIdentity.update({
-    where: { id: params.agentIdentityId },
-    data: {
-      ...(params.displayName !== undefined && { displayName: params.displayName }),
-      ...(params.avatarUrl !== undefined && { avatarUrl: params.avatarUrl }),
-      ...(params.purposeMd !== undefined && { purposeMd: params.purposeMd }),
-      ...(params.memberType !== undefined && { memberType: params.memberType }),
-      ...(params.linkedCredentialId !== undefined && { linkedCredentialId: params.linkedCredentialId }),
-      ...(params.maxSpendPerRunCents !== undefined && { maxSpendPerRunCents: params.maxSpendPerRunCents }),
-      ...(params.maxRunsPerDay !== undefined && { maxRunsPerDay: params.maxRunsPerDay }),
-      ...(params.maxRunsPerHour !== undefined && { maxRunsPerHour: params.maxRunsPerHour }),
-      ...(params.isActive !== undefined && { isActive: params.isActive }),
-    },
+  return prisma.$transaction(async (tx) => {
+    const updated = await tx.agentIdentity.update({
+      where: { id: params.agentIdentityId },
+      data: {
+        ...(params.displayName !== undefined && { displayName: params.displayName }),
+        ...(params.avatarUrl !== undefined && { avatarUrl: params.avatarUrl }),
+        ...(params.purposeMd !== undefined && { purposeMd: params.purposeMd }),
+        ...(params.memberType !== undefined && { memberType: params.memberType }),
+        ...(params.linkedCredentialId !== undefined && { linkedCredentialId: params.linkedCredentialId }),
+        ...(params.maxSpendPerRunCents !== undefined && { maxSpendPerRunCents: params.maxSpendPerRunCents }),
+        ...(params.maxRunsPerDay !== undefined && { maxRunsPerDay: params.maxRunsPerDay }),
+        ...(params.maxRunsPerHour !== undefined && { maxRunsPerHour: params.maxRunsPerHour }),
+        ...(params.isActive !== undefined && { isActive: params.isActive }),
+      },
+    });
+
+    if (params.isActive === false && existing.isActive) {
+      await closeRoleLifecycleForAgent(tx, {
+        workspaceId: params.workspaceId,
+        agentIdentityId: params.agentIdentityId,
+        actor,
+      });
+    }
+
+    return updated;
   });
 }
 
@@ -134,12 +146,22 @@ export async function deactivateAgentIdentity(
   });
   invariant(existing, 404, "NOT_FOUND", "Agent identity not found.");
 
-  return archiveWorkspaceArtifact(actor, {
+  const archived = await archiveWorkspaceArtifact(actor, {
     workspaceId,
     entityType: "AgentIdentity",
     entityId: agentIdentityId,
     reason: "Archived from agent identity deactivate path.",
   });
+
+  await prisma.$transaction(async (tx) => {
+    await closeRoleLifecycleForAgent(tx, {
+      workspaceId,
+      agentIdentityId,
+      actor,
+    });
+  });
+
+  return archived;
 }
 
 // ---------------------------------------------------------------------------

@@ -42,6 +42,15 @@ const { prismaMock } = vi.hoisted(() => {
       updateMany: vi.fn(),
       create: vi.fn(),
     },
+    roleHolderHistory: {
+      updateMany: vi.fn(),
+    },
+    roleOnboardingSession: {
+      updateMany: vi.fn(),
+    },
+    roleAssignment: {
+      deleteMany: vi.fn(),
+    },
     meeting: {
       findMany: vi.fn(),
     },
@@ -86,6 +95,9 @@ describe("members domain", () => {
     prismaMock.passwordResetToken.create.mockResolvedValue({});
     prismaMock.session.deleteMany.mockResolvedValue({ count: 0 });
     prismaMock.workspaceFeatureFlag.findUnique.mockResolvedValue(null);
+    prismaMock.roleHolderHistory.updateMany.mockResolvedValue({ count: 1 });
+    prismaMock.roleOnboardingSession.updateMany.mockResolvedValue({ count: 1 });
+    prismaMock.roleAssignment.deleteMany.mockResolvedValue({ count: 1 });
   });
 
   it("listMembers returns active members ordered by join date", async () => {
@@ -259,6 +271,34 @@ describe("members domain", () => {
       workspaceId: "workspace-1",
       memberId: "member-1",
     })).resolves.toMatchObject({ id: "member-1", isActive: false });
+    expect(prismaMock.roleHolderHistory.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        workspaceId: "workspace-1",
+        memberId: "member-1",
+        endedAt: null,
+      }),
+      data: expect.objectContaining({
+        endedAt: expect.any(Date),
+        endedByUserId: "admin-user",
+      }),
+    }));
+    expect(prismaMock.roleOnboardingSession.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        workspaceId: "workspace-1",
+        memberId: "member-1",
+        status: { in: ["PENDING", "ACTIVE"] },
+      }),
+      data: expect.objectContaining({
+        status: "DISMISSED",
+        dismissedAt: expect.any(Date),
+      }),
+    }));
+    expect(prismaMock.roleAssignment.deleteMany).toHaveBeenCalledWith({
+      where: {
+        memberId: "member-1",
+        role: { circle: { workspaceId: "workspace-1" } },
+      },
+    });
   });
 
   it("deactivateMember rejects an already deactivated member", async () => {

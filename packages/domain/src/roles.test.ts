@@ -311,7 +311,7 @@ describe("roles domain", () => {
     expect(prismaMock.roleHolderHistory.updateMany).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({
         workspaceId: "workspace-1",
-        roleId: "role-1",
+        roleId: { in: ["role-1"] },
         endedAt: null,
       }),
       data: expect.objectContaining({
@@ -322,7 +322,7 @@ describe("roles domain", () => {
     expect(prismaMock.roleOnboardingSession.updateMany).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({
         workspaceId: "workspace-1",
-        roleId: "role-1",
+        roleId: { in: ["role-1"] },
         status: { in: ["PENDING", "ACTIVE"] },
       }),
       data: expect.objectContaining({
@@ -331,10 +331,10 @@ describe("roles domain", () => {
       }),
     }));
     expect(prismaMock.roleAssignment.deleteMany).toHaveBeenCalledWith({
-      where: { roleId: "role-1" },
+      where: { roleId: { in: ["role-1"] } },
     });
     expect(prismaMock.circleAgentAssignment.updateMany).toHaveBeenCalledWith({
-      where: { roleId: "role-1" },
+      where: { roleId: { in: ["role-1"] } },
       data: { roleId: null },
     });
   });

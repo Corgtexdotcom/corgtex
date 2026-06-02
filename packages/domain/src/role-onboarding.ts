@@ -208,6 +208,179 @@ export async function dismissRoleOnboardingForAssignment(
   });
 }
 
+export async function closeRoleLifecycleForRoles(
+  tx: Prisma.TransactionClient,
+  params: {
+    workspaceId: string;
+    roleIds: string[];
+    actor: AppActor;
+    now?: Date;
+  },
+) {
+  if (params.roleIds.length === 0) return;
+  const now = params.now ?? new Date();
+
+  await tx.roleHolderHistory.updateMany({
+    where: {
+      workspaceId: params.workspaceId,
+      roleId: { in: params.roleIds },
+      endedAt: null,
+    },
+    data: {
+      endedAt: now,
+      endedByUserId: actorUserId(params.actor),
+    },
+  });
+
+  await tx.roleOnboardingSession.updateMany({
+    where: {
+      workspaceId: params.workspaceId,
+      roleId: { in: params.roleIds },
+      status: { in: ACTIVE_ONBOARDING_STATUSES },
+    },
+    data: {
+      status: "DISMISSED",
+      dismissedAt: now,
+    },
+  });
+
+  await tx.roleAssignment.deleteMany({
+    where: { roleId: { in: params.roleIds } },
+  });
+
+  await tx.circleAgentAssignment.updateMany({
+    where: { roleId: { in: params.roleIds } },
+    data: { roleId: null },
+  });
+}
+
+export async function closeRoleLifecycleForMember(
+  tx: Prisma.TransactionClient,
+  params: {
+    workspaceId: string;
+    memberId: string;
+    actor: AppActor;
+    now?: Date;
+  },
+) {
+  const now = params.now ?? new Date();
+
+  await tx.roleHolderHistory.updateMany({
+    where: {
+      workspaceId: params.workspaceId,
+      memberId: params.memberId,
+      endedAt: null,
+    },
+    data: {
+      endedAt: now,
+      endedByUserId: actorUserId(params.actor),
+    },
+  });
+
+  await tx.roleOnboardingSession.updateMany({
+    where: {
+      workspaceId: params.workspaceId,
+      memberId: params.memberId,
+      status: { in: ACTIVE_ONBOARDING_STATUSES },
+    },
+    data: {
+      status: "DISMISSED",
+      dismissedAt: now,
+    },
+  });
+
+  await tx.roleAssignment.deleteMany({
+    where: {
+      memberId: params.memberId,
+      role: { circle: { workspaceId: params.workspaceId } },
+    },
+  });
+}
+
+export async function closeRoleLifecycleForAgent(
+  tx: Prisma.TransactionClient,
+  params: {
+    workspaceId: string;
+    agentIdentityId: string;
+    actor: AppActor;
+    now?: Date;
+  },
+) {
+  const now = params.now ?? new Date();
+
+  await tx.roleHolderHistory.updateMany({
+    where: {
+      workspaceId: params.workspaceId,
+      agentIdentityId: params.agentIdentityId,
+      endedAt: null,
+    },
+    data: {
+      endedAt: now,
+      endedByUserId: actorUserId(params.actor),
+    },
+  });
+
+  await tx.circleAgentAssignment.updateMany({
+    where: {
+      agentIdentityId: params.agentIdentityId,
+      circle: { workspaceId: params.workspaceId },
+      roleId: { not: null },
+    },
+    data: { roleId: null },
+  });
+}
+
+export async function closeRoleLifecycleForCircleTree(
+  tx: Prisma.TransactionClient,
+  params: {
+    workspaceId: string;
+    circleId: string;
+    actor: AppActor;
+    now?: Date;
+  },
+) {
+  const circles = await tx.circle.findMany({
+    where: {
+      workspaceId: params.workspaceId,
+      archivedAt: null,
+    },
+    select: {
+      id: true,
+      parentCircleId: true,
+    },
+  });
+  const childrenByParent = new Map<string | null, string[]>();
+  for (const circle of circles) {
+    const children = childrenByParent.get(circle.parentCircleId) ?? [];
+    children.push(circle.id);
+    childrenByParent.set(circle.parentCircleId, children);
+  }
+
+  const circleIds = new Set<string>();
+  const pending = [params.circleId];
+  while (pending.length > 0) {
+    const current = pending.pop()!;
+    if (circleIds.has(current)) continue;
+    circleIds.add(current);
+    pending.push(...(childrenByParent.get(current) ?? []));
+  }
+
+  const roles = await tx.role.findMany({
+    where: {
+      circleId: { in: [...circleIds] },
+      archivedAt: null,
+    },
+    select: { id: true },
+  });
+
+  await closeRoleLifecycleForRoles(tx, {
+    workspaceId: params.workspaceId,
+    roleIds: roles.map((role) => role.id),
+    actor: params.actor,
+    now: params.now,
+  });
+}
+
 function listBlock(title: string, items: string[]) {
   if (items.length === 0) return `## ${title}\nNo current records found.`;
   return `## ${title}\n${items.map((item) => `- ${item}`).join("\n")}`;

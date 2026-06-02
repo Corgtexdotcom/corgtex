@@ -6,6 +6,7 @@ import { appendEvents } from "./events";
 import { isGlobalOperator, requireWorkspaceMembership } from "./auth";
 import { assertTrialMemberCapacity } from "./trial-entitlements";
 import { privacyFilter } from "./privacy";
+import { closeRoleLifecycleForMember } from "./role-onboarding";
 
 export type MemberInvitePolicy = "ADMINS_ONLY" | "MEMBERS_CAN_INVITE" | "MEMBERS_CAN_REQUEST";
 
@@ -500,6 +501,14 @@ export async function updateMember(actor: AppActor, params: {
         include: { user: { select: { id: true, email: true, displayName: true } } },
       });
     invariant(updated, 404, "NOT_FOUND", "Member not found.");
+
+    if (params.isActive === false && member.isActive) {
+      await closeRoleLifecycleForMember(tx, {
+        workspaceId: params.workspaceId,
+        memberId: params.memberId,
+        actor,
+      });
+    }
 
     const setupToken = emailChanged ? await issueSetupToken(tx, member.userId) : undefined;
     const fields = [

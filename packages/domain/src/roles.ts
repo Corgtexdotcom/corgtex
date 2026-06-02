@@ -6,6 +6,7 @@ import { requireWorkspaceMembership } from "./auth";
 import { archiveFilterWhere, type ArchiveFilter } from "./archive";
 import { invariant } from "./errors";
 import {
+  closeRoleLifecycleForRoles,
   createRoleVersionSnapshot,
   dismissRoleOnboardingForAssignment,
   endRoleHolderHistory,
@@ -339,37 +340,11 @@ export async function deleteRole(actor: AppActor, params: {
       });
     }
 
-    await tx.roleHolderHistory.updateMany({
-      where: {
-        workspaceId: params.workspaceId,
-        roleId: params.roleId,
-        endedAt: null,
-      },
-      data: {
-        endedAt: now,
-        endedByUserId: actorUserId(actor),
-      },
-    });
-
-    await tx.roleOnboardingSession.updateMany({
-      where: {
-        workspaceId: params.workspaceId,
-        roleId: params.roleId,
-        status: { in: ["PENDING", "ACTIVE"] },
-      },
-      data: {
-        status: "DISMISSED",
-        dismissedAt: now,
-      },
-    });
-
-    await tx.roleAssignment.deleteMany({
-      where: { roleId: params.roleId },
-    });
-
-    await tx.circleAgentAssignment.updateMany({
-      where: { roleId: params.roleId },
-      data: { roleId: null },
+    await closeRoleLifecycleForRoles(tx, {
+      workspaceId: params.workspaceId,
+      roleIds: [params.roleId],
+      actor,
+      now,
     });
 
     return { id: params.roleId };
