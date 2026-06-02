@@ -29,6 +29,11 @@ const buildSelectedRegionContextMock = vi.fn();
 const createContextGraphProposedDiffMock = vi.fn();
 const importContextGraphMapMock = vi.fn();
 const getContextMapDataMock = vi.fn();
+const createExecutionRequestMock = vi.fn();
+const getExecutionPacketMock = vi.fn();
+const getCompanyContextMock = vi.fn();
+const listWritebackTargetsMock = vi.fn();
+const submitExecutionResultMock = vi.fn();
 
 vi.mock("@corgtex/domain", () => ({
   CONTROL_PLANE_WORKSPACE_FEATURE_FLAGS: [
@@ -101,6 +106,11 @@ vi.mock("@corgtex/domain", () => ({
   createContextGraphProposedDiff: createContextGraphProposedDiffMock,
   importContextGraphMap: importContextGraphMapMock,
   getContextMapData: getContextMapDataMock,
+  createExecutionRequest: createExecutionRequestMock,
+  getExecutionPacket: getExecutionPacketMock,
+  getCompanyContext: getCompanyContextMock,
+  listWritebackTargets: listWritebackTargetsMock,
+  submitExecutionResult: submitExecutionResultMock,
   searchConnectedExternalMcpContext: searchConnectedExternalMcpContextMock,
   listRuntimeJobs: vi.fn(),
   listFailedJobs: vi.fn(),
@@ -187,6 +197,11 @@ describe("createCorgtexMcpServer", () => {
     recordAuditMock.mockReset().mockResolvedValue({ id: "audit-1" });
     searchConnectedExternalMcpContextMock.mockReset().mockResolvedValue({ results: [], errors: [] });
     searchIndexedKnowledgeMock.mockReset().mockResolvedValue([]);
+    createExecutionRequestMock.mockReset().mockResolvedValue({ id: "request-1", status: "PENDING" });
+    getExecutionPacketMock.mockReset().mockResolvedValue({ id: "request-1", goal: "Draft follow-up" });
+    getCompanyContextMock.mockReset().mockResolvedValue({ workspace: { id: "ws-1", name: "Acme" } });
+    listWritebackTargetsMock.mockReset().mockResolvedValue({ items: [{ type: "ACTION", id: "action-1", title: "Follow up" }] });
+    submitExecutionResultMock.mockReset().mockResolvedValue({ id: "result-1", status: "ACCEPTED" });
     importContextGraphMapMock.mockReset().mockResolvedValue({
       mapViewId: "map-1",
       objectCount: 2,
@@ -233,6 +248,123 @@ describe("createCorgtexMcpServer", () => {
       id: "spend-1",
       status: "OPEN",
       webUrl: "https://app.test/workspaces/ws-1/finance/spend/spend-1",
+    });
+  });
+
+  it("creates execution requests and returns execution packet context", async () => {
+    const { createCorgtexMcpServer } = await import("./server");
+    const { requireScope } = await import("./auth");
+
+    const server = createCorgtexMcpServer({
+      actor: { kind: "agent", authProvider: "bootstrap" } as any,
+      workspaceId: "ws-1",
+      authKind: "agent",
+    });
+
+    const createResponse = await (server as any)._registeredTools.create_execution_request.handler({
+      goal: "Draft the implementation follow-up",
+      provider: "OPENWORK",
+      writebackTargetType: "ACTION",
+      idempotencyKey: "request-key",
+    });
+    const packetResponse = await (server as any)._registeredTools.get_execution_packet.handler({
+      requestId: "request-1",
+    });
+
+    expect((server as any)._registeredTools.get_execution_packet.annotations).toMatchObject({
+      readOnlyHint: false,
+      idempotentHint: false,
+      destructiveHint: false,
+      openWorldHint: false,
+    });
+    expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "execution:write");
+    expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "execution:read");
+    expect(createExecutionRequestMock).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "agent" }),
+      expect.objectContaining({
+        workspaceId: "ws-1",
+        goal: "Draft the implementation follow-up",
+        provider: "OPENWORK",
+        writebackTargetType: "ACTION",
+        idempotencyKey: "request-key",
+      }),
+    );
+    expect(getExecutionPacketMock).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "agent" }),
+      { workspaceId: "ws-1", requestId: "request-1" },
+    );
+    expect(JSON.parse(createResponse.content[0].text)).toMatchObject({
+      id: "request-1",
+      webUrl: "https://app.test/workspaces/ws-1/settings?tab=ai-workspaces&executionRequest=request-1",
+    });
+    expect(JSON.parse(packetResponse.content[0].text)).toEqual({ id: "request-1", goal: "Draft follow-up" });
+  });
+
+  it("returns company context and write-back targets for execution clients", async () => {
+    const { createCorgtexMcpServer } = await import("./server");
+    const { requireScope } = await import("./auth");
+
+    const server = createCorgtexMcpServer({
+      actor: { kind: "agent", authProvider: "bootstrap" } as any,
+      workspaceId: "ws-1",
+      authKind: "agent",
+    });
+
+    const contextResponse = await (server as any)._registeredTools.get_company_context.handler({});
+    const targetsResponse = await (server as any)._registeredTools.list_writeback_targets.handler({
+      query: "Follow",
+      targetTypes: ["ACTION"],
+      take: 5,
+    });
+
+    expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "workspace:read");
+    expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "execution:read");
+    expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "actions:read");
+    expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "tensions:read");
+    expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "proposals:read");
+    expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "meetings:read");
+    expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "brain:read");
+    expect(getCompanyContextMock).toHaveBeenCalledWith(expect.objectContaining({ kind: "agent" }), "ws-1");
+    expect(listWritebackTargetsMock).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "agent" }),
+      { workspaceId: "ws-1", query: "Follow", targetTypes: ["ACTION"], take: 5 },
+    );
+    expect(JSON.parse(contextResponse.content[0].text)).toEqual({ workspace: { id: "ws-1", name: "Acme" } });
+    expect(JSON.parse(targetsResponse.content[0].text).items[0]).toEqual(expect.objectContaining({ type: "ACTION", id: "action-1" }));
+  });
+
+  it("submits idempotent execution results through the audited write-back path", async () => {
+    const { createCorgtexMcpServer } = await import("./server");
+    const { requireScope } = await import("./auth");
+
+    const server = createCorgtexMcpServer({
+      actor: { kind: "agent", authProvider: "bootstrap" } as any,
+      workspaceId: "ws-1",
+      authKind: "agent",
+    });
+
+    const response = await (server as any)._registeredTools.submit_execution_result.handler({
+      requestId: "request-1",
+      idempotencyKey: "result-key",
+      targetType: "ACTION",
+      output: { title: "Follow up" },
+    });
+
+    expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "execution:write");
+    expect(submitExecutionResultMock).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "agent" }),
+      {
+        workspaceId: "ws-1",
+        requestId: "request-1",
+        idempotencyKey: "result-key",
+        targetType: "ACTION",
+        output: { title: "Follow up" },
+      },
+    );
+    expect(JSON.parse(response.content[0].text)).toMatchObject({
+      id: "result-1",
+      status: "ACCEPTED",
+      webUrl: "https://app.test/workspaces/ws-1/settings?tab=ai-workspaces&executionRequest=request-1",
     });
   });
 

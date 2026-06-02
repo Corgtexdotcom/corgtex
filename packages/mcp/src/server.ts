@@ -116,6 +116,11 @@ import {
   createContextGraphProposedDiff,
   importContextGraphMap,
   getContextMapData,
+  createExecutionRequest,
+  getExecutionPacket,
+  getCompanyContext,
+  listWritebackTargets,
+  submitExecutionResult,
 } from "@corgtex/domain";
 import type { AgentScope } from "@corgtex/domain";
 import { searchIndexedKnowledge } from "@corgtex/knowledge";
@@ -199,6 +204,11 @@ const TOOL_CAPABILITIES = {
   execute_external_tool: { scopes: ["external-tools:write"] },
   get_workspace_info: { scopes: ["workspace:read"] },
   daily_overview: { scopes: ["workspace:read", "actions:read", "proposals:read", "tensions:read", "meetings:read", "finance:read"] },
+  create_execution_request: { scopes: ["execution:write"] },
+  get_execution_packet: { scopes: ["execution:read"] },
+  get_company_context: { scopes: ["execution:read", "workspace:read", "actions:read", "tensions:read", "proposals:read", "meetings:read", "brain:read"] },
+  list_writeback_targets: { scopes: ["execution:read"] },
+  submit_execution_result: { scopes: ["execution:write"] },
   record_support_audit: { scopes: ["support:write"], sensitive: true },
   list_integrations: { scopes: ["integrations:read"] },
   list_data_sources: { scopes: ["data-sources:read"] },
@@ -295,6 +305,8 @@ const TOOL_CAPABILITIES = {
   list_ledger_transactions: { scopes: ["finance:read"] },
 } satisfies Record<string, ToolCapability>;
 
+const MUTATING_READ_PREFIX_TOOLS = new Set(["get_execution_packet"]);
+
 function summarizeForExecutionAudit(value: unknown): unknown {
   if (value === null || value === undefined) return null;
   if (typeof value === "string") return { type: "string", length: value.length };
@@ -310,7 +322,7 @@ function summarizeForExecutionAudit(value: unknown): unknown {
 }
 
 function annotationsForTool(name: string) {
-  const readOnlyHint = /^(search|fetch|list_|get_|daily_overview$)/.test(name);
+  const readOnlyHint = /^(search|fetch|list_|get_|daily_overview$)/.test(name) && !MUTATING_READ_PREFIX_TOOLS.has(name);
   const capability = TOOL_CAPABILITIES[name as keyof typeof TOOL_CAPABILITIES];
   const policy = evaluateDelegatedActionPolicy({
     toolName: name,
@@ -934,6 +946,119 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
           pendingSpends: pendingSpends.length,
         },
       });
+    },
+  );
+
+  // ===========================================================================
+  // EXTERNAL EXECUTION PLUMBING
+  // ===========================================================================
+
+  tool(
+    "create_execution_request",
+    "Create a governed Corgtex execution request for an external AI workspace. Returns a durable request id and packet metadata; the external tool executes, Corgtex provides context, policy, scopes, and write-back rules.",
+    {
+      goal: z.string().describe("The work goal the external AI workspace should execute"),
+      provider: z.string().optional().describe("Optional provider key, such as OPENWORK, CHATGPT, CLAUDE, GEMINI, CURSOR, CLAUDE_CODE, or GENERIC_MCP"),
+      actor: z.record(z.string(), z.unknown()).optional().describe("Optional actor summary to include in the packet"),
+      context: z.unknown().optional().describe("Relevant context selected by the user or Corgtex"),
+      allowedScopes: z.array(z.string()).optional().describe("Scope set the execution client may rely on"),
+      policyConstraints: z.unknown().optional().describe("Company policy, security, approval, or governance constraints"),
+      expectedOutput: z.unknown().optional().describe("Expected output shape"),
+      approvalRule: z.string().optional().describe("Human approval or review rule"),
+      writebackTargetType: z.string().optional().describe("ACTION, TENSION, PROPOSAL, MEETING, BRAIN_ARTICLE, BUILD_ARTIFACT, or COMMENT"),
+      writebackTargetId: z.string().optional().describe("Optional existing target id for comment-style write-back"),
+      writebackTargetLabel: z.string().optional(),
+      idempotencyKey: z.string().optional().describe("Optional idempotency key supplied by the caller"),
+    },
+    async (params: {
+      goal: string;
+      provider?: string;
+      actor?: Record<string, unknown>;
+      context?: unknown;
+      allowedScopes?: string[];
+      policyConstraints?: unknown;
+      expectedOutput?: unknown;
+      approvalRule?: string;
+      writebackTargetType?: string;
+      writebackTargetId?: string;
+      writebackTargetLabel?: string;
+      idempotencyKey?: string;
+    }) => {
+      requireToolCapability("create_execution_request");
+      const request = await createExecutionRequest(actor, {
+        workspaceId,
+        ...params,
+      });
+      return jsonResult({ ...request, webUrl: webUrl(workspaceId, `/settings?tab=ai-workspaces&executionRequest=${request.id}`) });
+    },
+  );
+
+  tool(
+    "get_execution_packet",
+    "Retrieve the governed execution packet for an existing request. This returns goal, actor, context, allowed scopes, policy constraints, expected output, approval rule, and write-back target.",
+    {
+      requestId: z.string().describe("ExecutionRequest id"),
+    },
+    async ({ requestId }: { requestId: string }) => {
+      requireToolCapability("get_execution_packet");
+      const packet = await getExecutionPacket(actor, { workspaceId, requestId });
+      return structuredJsonResult(packet as Record<string, unknown>);
+    },
+  );
+
+  tool(
+    "get_company_context",
+    "Get scoped Corgtex company context for external execution: workspace metadata, recent public actions, tensions, proposals, meetings, Brain articles, and execution policy.",
+    {},
+    async () => {
+      requireToolCapability("get_company_context");
+      const context = await getCompanyContext(actor, workspaceId);
+      return structuredJsonResult(context as Record<string, unknown>);
+    },
+  );
+
+  tool(
+    "list_writeback_targets",
+    "List valid Corgtex write-back targets for an execution result. Use this before submitting output to avoid cross-workspace or invalid target ids.",
+    {
+      query: z.string().optional(),
+      targetTypes: z.array(z.string()).optional().describe("Optional target type filter"),
+      take: z.number().optional(),
+    },
+    async ({ query, targetTypes, take }: { query?: string; targetTypes?: string[]; take?: number }) => {
+      requireToolCapability("list_writeback_targets");
+      const targets = await listWritebackTargets(actor, { workspaceId, query, targetTypes, take });
+      return structuredJsonResult(targets);
+    },
+  );
+
+  tool(
+    "submit_execution_result",
+    "Submit an idempotent external AI workspace result back to Corgtex. Corgtex validates the target, creates draft/reviewable native records when appropriate, stores the result, and audits the write-back.",
+    {
+      requestId: z.string().describe("ExecutionRequest id"),
+      idempotencyKey: z.string().describe("Stable result idempotency key"),
+      targetType: z.string().optional().describe("Optional target override matching the request"),
+      targetId: z.string().optional().describe("Optional existing target id matching the request"),
+      output: z.record(z.string(), z.unknown()).optional().describe("Structured output; for new native records include title/bodyMd as needed"),
+      artifacts: z.unknown().optional(),
+      errorMessage: z.string().optional().describe("Set when execution failed; no native write-back will be created"),
+    },
+    async (params: {
+      requestId: string;
+      idempotencyKey: string;
+      targetType?: string;
+      targetId?: string;
+      output?: Record<string, unknown>;
+      artifacts?: unknown;
+      errorMessage?: string;
+    }) => {
+      requireToolCapability("submit_execution_result");
+      const result = await submitExecutionResult(actor, {
+        workspaceId,
+        ...params,
+      });
+      return jsonResult({ ...result, webUrl: webUrl(workspaceId, `/settings?tab=ai-workspaces&executionRequest=${params.requestId}`) });
     },
   );
 
