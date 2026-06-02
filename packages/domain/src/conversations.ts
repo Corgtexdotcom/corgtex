@@ -2,6 +2,7 @@ import { prisma, toInputJson } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
 import { invariant } from "./errors";
+import { updateRoleOnboardingStatusByConversation } from "./role-onboarding";
 
 export async function listConversations(actor: AppActor, workspaceId: string, opts?: {
   take?: number;
@@ -18,6 +19,15 @@ export async function listConversations(actor: AppActor, workspaceId: string, op
     prisma.conversationSession.findMany({
       where: { workspaceId, userId },
       include: {
+        roleOnboarding: {
+          select: {
+            id: true,
+            status: true,
+            role: {
+              select: { id: true, name: true },
+            },
+          },
+        },
         turns: {
           orderBy: { sequenceNumber: "desc" },
           take: 1,
@@ -46,6 +56,15 @@ export async function getConversation(actor: AppActor, workspaceId: string, conv
   const session = await prisma.conversationSession.findUnique({
     where: { id: conversationId },
     include: {
+      roleOnboarding: {
+        select: {
+          id: true,
+          status: true,
+          role: {
+            select: { id: true, name: true },
+          },
+        },
+      },
       turns: {
         orderBy: { sequenceNumber: "asc" },
       },
@@ -137,6 +156,17 @@ export async function closeConversation(actor: AppActor, params: {
   return prisma.conversationSession.update({
     where: { id: params.conversationId },
     data: { status: "COMPLETED" },
+  });
+}
+
+export async function completeRoleOnboardingConversation(actor: AppActor, params: {
+  workspaceId: string;
+  conversationId: string;
+}) {
+  return updateRoleOnboardingStatusByConversation(actor, {
+    workspaceId: params.workspaceId,
+    conversationId: params.conversationId,
+    status: "COMPLETED",
   });
 }
 

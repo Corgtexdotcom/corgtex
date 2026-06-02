@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const {
   applyContextGraphProposedDiffMock,
   buildSelectedRegionContextMock,
+  buildRoleOnboardingContextForConversationMock,
   checkBudgetMock,
   chatMock,
   createContextGraphProposedDiffMock,
@@ -18,6 +19,7 @@ const {
 } = vi.hoisted(() => ({
   applyContextGraphProposedDiffMock: vi.fn(),
   buildSelectedRegionContextMock: vi.fn(),
+  buildRoleOnboardingContextForConversationMock: vi.fn(),
   checkBudgetMock: vi.fn(),
   chatMock: vi.fn(),
   createContextGraphProposedDiffMock: vi.fn(),
@@ -72,6 +74,7 @@ vi.mock("@corgtex/domain", () => ({
   applyContextGraphProposedDiff: applyContextGraphProposedDiffMock,
   assignRole: vi.fn(),
   buildSelectedRegionContext: buildSelectedRegionContextMock,
+  buildRoleOnboardingContextForConversation: buildRoleOnboardingContextForConversationMock,
   checkBudget: checkBudgetMock,
   createAction: vi.fn(),
   createContextGraphProposedDiff: createContextGraphProposedDiffMock,
@@ -117,6 +120,7 @@ describe("processConversationTurn", () => {
       relationships: [],
     });
     buildSelectedRegionContextMock.mockResolvedValue({ objects: [], relationships: [], evidenceRefs: [] });
+    buildRoleOnboardingContextForConversationMock.mockResolvedValue(null);
     executeExternalMcpToolMock.mockResolvedValue({ skipped: false, result: { ok: true } });
     fetchConnectedExternalMcpContextMock.mockResolvedValue({ providerKey: "notion", externalId: "page-1", content: {} });
     listExternalMcpConnectionsMock.mockResolvedValue([]);
@@ -255,6 +259,35 @@ describe("processConversationTurn", () => {
         expect.objectContaining({
           role: "system",
           content: expect.stringContaining("Do not turn an action into a proposal unless the user explicitly asks"),
+        }),
+      ]),
+    }));
+  });
+
+  it("injects role onboarding context for guided onboarding conversations", async () => {
+    buildRoleOnboardingContextForConversationMock.mockResolvedValue("ROLE ONBOARDING CONTEXT\nRole: Integrator");
+    chatMock.mockResolvedValueOnce({ content: "Welcome to the Integrator role." });
+
+    const { processConversationTurn } = await import("./conversation");
+    const result = await processConversationTurn({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "role-onboarding",
+      userMessage: "What should I know first?",
+    });
+
+    expect(result.contextUsed.roleOnboardingContext).toContain("Integrator");
+    expect(buildRoleOnboardingContextForConversationMock).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      conversationId: "session-1",
+      userId: "user-1",
+    });
+    expect(chatMock).toHaveBeenCalledWith(expect.objectContaining({
+      messages: expect.arrayContaining([
+        expect.objectContaining({
+          role: "system",
+          content: expect.stringContaining("ROLE ONBOARDING CONTEXT"),
         }),
       ]),
     }));

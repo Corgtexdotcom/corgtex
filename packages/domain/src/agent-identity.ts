@@ -4,6 +4,7 @@ import type { AppActor } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { invariant } from "./errors";
+import { endRoleHolderHistory, startRoleHolderHistory } from "./role-onboarding";
 import { AGENT_REGISTRY } from "./agent-registry";// ---------------------------------------------------------------------------
 // CRUD — AgentIdentity
 // ---------------------------------------------------------------------------
@@ -212,21 +213,49 @@ export async function assignAgentToCircle(
     invariant(role, 404, "NOT_FOUND", "Role not found.");
   }
 
-  return prisma.circleAgentAssignment.upsert({
-    where: {
-      circleId_agentIdentityId: {
-        circleId: params.circleId,
-        agentIdentityId: params.agentIdentityId,
+  return prisma.$transaction(async (tx) => {
+    const existing = await tx.circleAgentAssignment.findUnique({
+      where: {
+        circleId_agentIdentityId: {
+          circleId: params.circleId,
+          agentIdentityId: params.agentIdentityId,
+        },
       },
-    },
-    create: {
-      circleId: params.circleId,
-      agentIdentityId: params.agentIdentityId,
-      roleId,
-    },
-    update: {
-      roleId,
-    },
+    });
+
+    const assignment = existing
+      ? await tx.circleAgentAssignment.update({
+        where: { id: existing.id },
+        data: { roleId },
+      })
+      : await tx.circleAgentAssignment.create({
+        data: {
+          circleId: params.circleId,
+          agentIdentityId: params.agentIdentityId,
+          roleId,
+        },
+      });
+
+    if (existing?.roleId && existing.roleId !== roleId) {
+      await endRoleHolderHistory(tx, {
+        workspaceId: params.workspaceId,
+        roleId: existing.roleId,
+        agentIdentityId: params.agentIdentityId,
+        actor,
+      });
+    }
+
+    if (roleId && existing?.roleId !== roleId) {
+      await startRoleHolderHistory(tx, {
+        workspaceId: params.workspaceId,
+        roleId,
+        agentIdentityId: params.agentIdentityId,
+        assignmentId: assignment.id,
+        actor,
+      });
+    }
+
+    return assignment;
   });
 }
 
@@ -250,8 +279,21 @@ export async function removeAgentFromCircle(
   });
   invariant(assignment, 404, "NOT_FOUND", "Circle agent assignment not found.");
 
-  return prisma.circleAgentAssignment.delete({
-    where: { id: assignment.id },
+  return prisma.$transaction(async (tx) => {
+    const deleted = await tx.circleAgentAssignment.delete({
+      where: { id: assignment.id },
+    });
+
+    if (assignment.roleId) {
+      await endRoleHolderHistory(tx, {
+        workspaceId: params.workspaceId,
+        roleId: assignment.roleId,
+        agentIdentityId: params.agentIdentityId,
+        actor,
+      });
+    }
+
+    return deleted;
   });
 }
 

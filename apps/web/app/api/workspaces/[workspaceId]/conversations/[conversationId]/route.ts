@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getConversation, addConversationTurn, renameConversation, deleteConversation } from "@corgtex/domain";
+import { getConversation, addConversationTurn, renameConversation, deleteConversation, completeRoleOnboardingConversation } from "@corgtex/domain";
 import { processConversationTurnStream, sanitizeConversationPageContext } from "@corgtex/agents";
 import { defaultModelGateway } from "@corgtex/models";
 import { resolveRequestActor } from "@/lib/auth";
@@ -161,7 +161,12 @@ export async function PATCH(
   try {
     const actor = await resolveRequestActor(request);
     const { workspaceId, conversationId } = await params;
-    const body = (await request.json()) as { topic?: string };
+    const body = (await request.json()) as { topic?: string; roleOnboardingStatus?: string };
+    if (body.roleOnboardingStatus === "COMPLETED") {
+      const updated = await completeRoleOnboardingConversation(actor, { workspaceId, conversationId });
+      return NextResponse.json({ roleOnboarding: updated });
+    }
+
     const topic = String(body.topic ?? "").trim();
     if (!topic) {
       return NextResponse.json({ error: "Topic is required." }, { status: 400 });

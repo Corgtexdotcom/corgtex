@@ -1,7 +1,7 @@
 import { prisma } from "@corgtex/shared";
 import { searchIndexedKnowledge } from "@corgtex/knowledge";
 import { defaultModelGateway } from "@corgtex/models";
-import { AppError, checkBudget, loadRelevantMemories, storeAgentMemory } from "@corgtex/domain";
+import { AppError, buildRoleOnboardingContextForConversation, checkBudget, loadRelevantMemories, storeAgentMemory } from "@corgtex/domain";
 import { env } from "@corgtex/shared";
 import type { ChatMessage } from "@corgtex/models";
 import { checkCalendarAvailabilityTool, scheduleMeetingTool, checkCalendarAvailability, scheduleMeeting } from "./tools/calendar";
@@ -118,6 +118,15 @@ If the user wants a calendar invite or availability check, invoke 'check_calenda
 When you have enough information, format the proposal clearly with markdown.`,
 
   "knowledge-qa": `You are a workspace knowledge assistant. Answer questions using the organization's indexed knowledge base (policies, meeting notes, documents, proposals). Always cite your sources when possible. If you don't have enough information, say so clearly.`,
+
+  "role-onboarding": `You are Corgtex role onboarding for a self-managing organization.
+Help the assigned person understand the role they are stepping into. Start from the supplied ROLE ONBOARDING CONTEXT and explain:
+- what the role is accountable for
+- how the role fits into its circle
+- what current commitments, tensions, policies, and meetings matter
+- what the person should inspect or ask about next
+
+Answer follow-up questions conversationally. Stay grounded in the supplied role context and workspace tools. If context is missing, say what is missing and suggest where the person can clarify it.`,
 };
 
 type ConversationContext = {
@@ -136,6 +145,7 @@ type ConversationContextUsed = {
   memories?: unknown[];
   pageContext?: ConversationPageContext;
   mapGraphChanged?: boolean;
+  roleOnboardingContext?: string;
 };
 
 const BASE_TOOLS = [
@@ -347,6 +357,21 @@ export async function processConversationTurn(ctx: ConversationContext): Promise
     });
   }
 
+  let roleOnboardingContext: string | null = null;
+  if (ctx.agentKey === "role-onboarding") {
+    roleOnboardingContext = await buildRoleOnboardingContextForConversation({
+      workspaceId: ctx.workspaceId,
+      conversationId: ctx.sessionId,
+      userId: ctx.userId,
+    });
+    if (roleOnboardingContext) {
+      messages.push({
+        role: "system",
+        content: roleOnboardingContext,
+      });
+    }
+  }
+
   // Add conversation history
   for (const turn of priorTurns) {
     messages.push({ role: "user", content: turn.userMessage });
@@ -430,6 +455,7 @@ export async function processConversationTurn(ctx: ConversationContext): Promise
       memories: memories.length > 0 ? memories : undefined,
       pageContext: ctx.pageContext ?? undefined,
       mapGraphChanged: mapGraphChanged || undefined,
+      roleOnboardingContext: roleOnboardingContext ?? undefined,
     },
   };
 }
@@ -506,6 +532,21 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
       role: "system",
       content: formatConversationPageContextForModel(ctx.pageContext),
     });
+  }
+
+  let roleOnboardingContext: string | null = null;
+  if (ctx.agentKey === "role-onboarding") {
+    roleOnboardingContext = await buildRoleOnboardingContextForConversation({
+      workspaceId: ctx.workspaceId,
+      conversationId: ctx.sessionId,
+      userId: ctx.userId,
+    });
+    if (roleOnboardingContext) {
+      messages.push({
+        role: "system",
+        content: roleOnboardingContext,
+      });
+    }
   }
 
   for (const turn of priorTurns) {
@@ -604,6 +645,7 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
       memories: memories.length > 0 ? memories : undefined,
       pageContext: ctx.pageContext ?? undefined,
       mapGraphChanged: mapGraphChanged || undefined,
+      roleOnboardingContext: roleOnboardingContext ?? undefined,
     },
   };
 }

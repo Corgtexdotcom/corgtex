@@ -97,6 +97,59 @@ export default async function CircleDetailPage({
   const accountabilityCount = countAccountabilities(circle);
   const assignedAgentIds = new Set(agentAssignments.map((assignment) => assignment.agentIdentityId));
   const availableAgents = allAgents.filter((agent) => !assignedAgentIds.has(agent.id));
+  const roleIds = circle.roles.map((role) => role.id);
+  const [roleVersions, holderHistory, onboardingSessions] = roleIds.length > 0
+    ? await Promise.all([
+      prisma.roleVersion.findMany({
+        where: { workspaceId, roleId: { in: roleIds } },
+        orderBy: [{ roleId: "asc" }, { version: "desc" }],
+        take: 60,
+      }),
+      prisma.roleHolderHistory.findMany({
+        where: { workspaceId, roleId: { in: roleIds } },
+        include: {
+          member: {
+            include: {
+              user: {
+                select: { displayName: true, email: true },
+              },
+            },
+          },
+          agentIdentity: {
+            select: { displayName: true, memberType: true },
+          },
+        },
+        orderBy: { startedAt: "desc" },
+        take: 80,
+      }),
+      prisma.roleOnboardingSession.findMany({
+        where: { workspaceId, roleId: { in: roleIds } },
+        select: {
+          id: true,
+          roleId: true,
+          memberId: true,
+          conversationId: true,
+          status: true,
+          updatedAt: true,
+        },
+        orderBy: { updatedAt: "desc" },
+        take: 80,
+      }),
+    ])
+    : [[], [], []];
+  const roleVersionsByRole = new Map<string, typeof roleVersions>();
+  for (const version of roleVersions) {
+    const versions = roleVersionsByRole.get(version.roleId) ?? [];
+    versions.push(version);
+    roleVersionsByRole.set(version.roleId, versions);
+  }
+  const holderHistoryByRole = new Map<string, typeof holderHistory>();
+  for (const history of holderHistory) {
+    const histories = holderHistoryByRole.get(history.roleId) ?? [];
+    histories.push(history);
+    holderHistoryByRole.set(history.roleId, histories);
+  }
+  const onboardingByRoleMember = new Map(onboardingSessions.map((session) => [`${session.roleId}:${session.memberId}`, session]));
 
   async function archiveCircleAndReturn(formData: FormData) {
     "use server";
@@ -262,6 +315,8 @@ export default async function CircleDetailPage({
           <div style={{ display: "grid", gap: 16 }}>
             {circle.roles.map((role) => {
               const assignments = role.assignments ?? [];
+              const versions = roleVersionsByRole.get(role.id) ?? [];
+              const holderEvents = holderHistoryByRole.get(role.id) ?? [];
               return (
                 <article key={role.id} className="nr-item">
                   <div className="row" style={{ alignItems: "flex-start", gap: 16 }}>
@@ -311,6 +366,15 @@ export default async function CircleDetailPage({
                               <Link href={`/workspaces/${workspaceId}/members/${memberId}`} style={{ color: "inherit", textDecoration: "none" }}>
                                 {memberName(assignment)}
                               </Link>
+                              {onboardingByRoleMember.has(`${role.id}:${memberId}`) && (
+                                <Link
+                                  href={`/workspaces/${workspaceId}/chat?session=${onboardingByRoleMember.get(`${role.id}:${memberId}`)?.conversationId}`}
+                                  className="tag info"
+                                  style={{ fontSize: "0.7rem", padding: "2px 6px", textDecoration: "none" }}
+                                >
+                                  onboarding {onboardingByRoleMember.get(`${role.id}:${memberId}`)?.status.toLowerCase()}
+                                </Link>
+                              )}
                               {canManageStructure && (
                                 <form action={unassignRoleAction}>
                                   {hiddenWorkspace(workspaceId)}
@@ -348,6 +412,47 @@ export default async function CircleDetailPage({
                         </label>
                         <button type="submit" className="secondary small">{tCommon("save")}</button>
                       </form>
+                    </details>
+                  )}
+
+                  {(versions.length > 0 || holderEvents.length > 0) && (
+                    <details style={{ marginTop: 16 }}>
+                      <summary className="secondary small nr-hide-marker" style={{ cursor: "pointer", display: "inline-block" }}>
+                        Role history
+                      </summary>
+                      <div style={{ display: "grid", gap: 12, marginTop: 12 }}>
+                        {versions.length > 0 && (
+                          <div>
+                            <strong style={{ display: "block", fontSize: "0.8rem", marginBottom: 6 }}>Definition versions</strong>
+                            <div style={{ display: "grid", gap: 6 }}>
+                              {versions.slice(0, 5).map((version) => (
+                                <div key={version.id} className="nr-item-meta">
+                                  v{version.version} {version.changeType} - {version.createdAt.toISOString().slice(0, 10)}
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                        {holderEvents.length > 0 && (
+                          <div>
+                            <strong style={{ display: "block", fontSize: "0.8rem", marginBottom: 6 }}>Holder history</strong>
+                            <div style={{ display: "grid", gap: 6 }}>
+                              {holderEvents.slice(0, 8).map((event) => {
+                                const holderName = event.member?.user.displayName
+                                  ?? event.member?.user.email
+                                  ?? event.agentIdentity?.displayName
+                                  ?? "Unknown holder";
+                                return (
+                                  <div key={event.id} className="nr-item-meta">
+                                    {holderName} - {event.startedAt.toISOString().slice(0, 10)}
+                                    {event.endedAt ? ` to ${event.endedAt.toISOString().slice(0, 10)}` : " to present"}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        )}
+                      </div>
                     </details>
                   )}
                 </article>

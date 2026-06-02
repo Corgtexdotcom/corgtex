@@ -644,10 +644,22 @@ button:disabled {
     height: auto;
   }
 
+  .chat-body {
+    flex-direction: column;
+    overflow: visible;
+  }
+
   .chat-sidebar {
+    width: 100%;
+    flex: none;
     border-right: none;
     border-bottom: 1px solid var(--line);
     max-height: 200px;
+  }
+
+  .chat-main {
+    width: 100%;
+    min-height: min(640px, calc(100vh - 240px));
   }
   
   .chat-fullscreen {

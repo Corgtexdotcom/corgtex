@@ -4,6 +4,13 @@ import { appendEvents } from "./events";
 import { requireWorkspaceMembership } from "./auth";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { invariant } from "./errors";
+import {
+  createRoleVersionSnapshot,
+  dismissRoleOnboardingForAssignment,
+  endRoleHolderHistory,
+  ensureRoleOnboardingForAssignment,
+  startRoleHolderHistory,
+} from "./role-onboarding";
 
 export async function listRoles(workspaceId: string, opts?: { archiveFilter?: ArchiveFilter }) {
   return prisma.role.findMany({
@@ -147,6 +154,13 @@ export async function createRole(actor: AppActor, params: {
       },
     });
 
+    await createRoleVersionSnapshot(tx, {
+      workspaceId: params.workspaceId,
+      role,
+      changeType: "created",
+      actor,
+    });
+
     await appendEvents(tx, [
       {
         workspaceId: params.workspaceId,
@@ -222,6 +236,28 @@ export async function updateRole(actor: AppActor, params: {
       },
     });
 
+    await createRoleVersionSnapshot(tx, {
+      workspaceId: params.workspaceId,
+      role: updated,
+      changeType: "updated",
+      actor,
+    });
+
+    await appendEvents(tx, [
+      {
+        workspaceId: params.workspaceId,
+        type: "role.updated",
+        aggregateType: "Role",
+        aggregateId: updated.id,
+        payload: {
+          roleId: updated.id,
+          circleId: updated.circle.id,
+          name: updated.name,
+          fields: Object.keys(data),
+        },
+      },
+    ]);
+
     return updated;
   });
 }
@@ -260,27 +296,63 @@ export async function assignRole(actor: AppActor, params: {
   return prisma.$transaction(async (tx) => {
     const role = await tx.role.findUnique({
       where: { id: params.roleId },
-      include: { circle: { select: { workspaceId: true } } },
+      include: {
+        circle: {
+          select: {
+            id: true,
+            workspaceId: true,
+            name: true,
+            purposeMd: true,
+            domainMd: true,
+          },
+        },
+      },
     });
     invariant(role && role.circle.workspaceId === params.workspaceId && !role.archivedAt, 404, "NOT_FOUND", "Role not found.");
 
     const member = await tx.member.findUnique({
       where: { id: params.memberId },
+      include: {
+        user: {
+          select: {
+            displayName: true,
+            email: true,
+          },
+        },
+      },
     });
     invariant(member && member.workspaceId === params.workspaceId && member.isActive, 404, "NOT_FOUND", "Member not found.");
 
-    const assignment = await tx.roleAssignment.upsert({
+    const existingAssignment = await tx.roleAssignment.findUnique({
       where: {
         roleId_memberId: {
           roleId: params.roleId,
           memberId: params.memberId,
         },
       },
-      update: {},
-      create: {
+    });
+
+    const assignment = existingAssignment ?? await tx.roleAssignment.create({
+      data: {
         roleId: params.roleId,
         memberId: params.memberId,
       },
+    });
+
+    if (!existingAssignment) {
+      await startRoleHolderHistory(tx, {
+        workspaceId: params.workspaceId,
+        roleId: params.roleId,
+        memberId: params.memberId,
+        assignmentId: assignment.id,
+        actor,
+      });
+    }
+
+    const onboarding = await ensureRoleOnboardingForAssignment(tx, {
+      workspaceId: params.workspaceId,
+      role,
+      member,
     });
 
     await tx.auditLog.create({
@@ -293,6 +365,24 @@ export async function assignRole(actor: AppActor, params: {
         meta: { roleId: params.roleId, memberId: params.memberId },
       },
     });
+
+    if (!existingAssignment) {
+      await appendEvents(tx, [
+        {
+          workspaceId: params.workspaceId,
+          type: "role.assigned",
+          aggregateType: "RoleAssignment",
+          aggregateId: assignment.id,
+          payload: {
+            roleId: params.roleId,
+            memberId: params.memberId,
+            assignmentId: assignment.id,
+            onboardingSessionId: onboarding.id,
+            conversationId: onboarding.conversationId,
+          },
+        },
+      ]);
+    }
 
     return assignment;
   });
@@ -330,6 +420,19 @@ export async function unassignRole(actor: AppActor, params: {
       where: { id: assignment.id },
     });
 
+    await endRoleHolderHistory(tx, {
+      workspaceId: params.workspaceId,
+      roleId: params.roleId,
+      memberId: params.memberId,
+      actor,
+    });
+
+    await dismissRoleOnboardingForAssignment(tx, {
+      workspaceId: params.workspaceId,
+      roleId: params.roleId,
+      memberId: params.memberId,
+    });
+
     await tx.auditLog.create({
       data: {
         workspaceId: params.workspaceId,
@@ -340,6 +443,20 @@ export async function unassignRole(actor: AppActor, params: {
         meta: { roleId: params.roleId, memberId: params.memberId },
       },
     });
+
+    await appendEvents(tx, [
+      {
+        workspaceId: params.workspaceId,
+        type: "role.unassigned",
+        aggregateType: "RoleAssignment",
+        aggregateId: assignment.id,
+        payload: {
+          roleId: params.roleId,
+          memberId: params.memberId,
+          assignmentId: assignment.id,
+        },
+      },
+    ]);
 
     return { id: assignment.id };
   });

@@ -13,6 +13,7 @@ export function resolveWorkspaceEntityUrl(
   if (normalizedType === "adviceprocess") return `/workspaces/${workspaceId}/proposals?status=OPEN`;
   if (normalizedType === "advicerecord") return `/workspaces/${workspaceId}/proposals?status=OPEN`;
   if (normalizedType === "spend" || normalizedType === "spendrequest") return `/workspaces/${workspaceId}/finance`;
+  if (normalizedType === "conversationsession") return `/workspaces/${workspaceId}/chat?session=${entityId}`;
 
   return null;
 }
