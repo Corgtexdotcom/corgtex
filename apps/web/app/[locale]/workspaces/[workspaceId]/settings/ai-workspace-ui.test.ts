@@ -92,9 +92,17 @@ describe("AI workspace UI helpers", () => {
     });
     expect(cards[0].actions.map((action) => action.label)).toEqual([
       "Copy MCP URL",
+      "Copy instructions",
+      "Copy test prompt",
       "Open OpenWork",
       "View source",
     ]);
+    expect(cards[0].resources.map((resource) => resource.label)).toEqual(["Instructions package", "Test prompt"]);
+    expect(cards[0].resources[0].value).toContain("Corgtex MCP server: https://app.corgtex.com/mcp");
+    expect(cards[0].resources[0].value).toContain("get_execution_packet");
+    expect(cards[0].resources[0].value).toContain("submit_execution_result");
+    expect(cards[0].resources[1].value).toContain("Do not submit a result or create a write-back");
+    expect(cards[0].verificationChecks).toContain("Execution packet tools are visible for governed work requests.");
   });
 
   it("builds provider-specific computed install actions outside the React component", () => {

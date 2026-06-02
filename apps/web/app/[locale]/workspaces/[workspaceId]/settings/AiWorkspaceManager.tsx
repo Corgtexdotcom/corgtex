@@ -375,6 +375,37 @@ export function AiWorkspaceManager({
             </div>
             {renderStatus(activeCard.provider.key)}
 
+            {activeCard.resources.length > 0 ? (
+              <div className="stack" style={{ gap: 12 }}>
+                <h3 style={{ fontSize: "0.95rem", margin: 0 }}>Setup resources</h3>
+                {activeCard.resources.map((resource) => (
+                  <div key={resource.title} style={{ display: "grid", gap: 6 }}>
+                    <span className="nr-item-meta" style={{ fontSize: "0.78rem", fontWeight: 700, textTransform: "uppercase" }}>
+                      {resource.label}
+                    </span>
+                    <pre
+                      aria-label={resource.title}
+                      style={{
+                        border: "1px solid var(--line)",
+                        borderRadius: 6,
+                        fontFamily: "monospace",
+                        fontSize: "0.78rem",
+                        lineHeight: 1.45,
+                        margin: 0,
+                        maxHeight: 180,
+                        overflow: "auto",
+                        padding: "10px 12px",
+                        whiteSpace: "pre-wrap",
+                        wordBreak: "break-word",
+                      }}
+                    >
+                      {resource.value}
+                    </pre>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+
             <ol className="stack" style={{ gap: 8, margin: 0, paddingLeft: 18 }}>
               {activeCard.steps.map((step) => (
                 <li key={step} className="nr-item-meta" style={{ fontSize: "0.86rem" }}>
@@ -382,6 +413,19 @@ export function AiWorkspaceManager({
                 </li>
               ))}
             </ol>
+
+            {activeCard.verificationChecks.length > 0 ? (
+              <div className="stack" style={{ gap: 8 }}>
+                <h3 style={{ fontSize: "0.95rem", margin: 0 }}>Verification checklist</h3>
+                <ul className="stack" style={{ gap: 6, margin: 0, paddingLeft: 18 }}>
+                  {activeCard.verificationChecks.map((check) => (
+                    <li key={check} className="nr-item-meta" style={{ fontSize: "0.84rem" }}>
+                      {check}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
 
             <div className="actions-inline" style={{ gap: 6 }}>
               {activeCard.provider.capabilities.map((capability) => (
