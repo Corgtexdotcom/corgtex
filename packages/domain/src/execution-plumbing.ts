@@ -246,18 +246,59 @@ function brainArticlePrivacyFilter(actor: AppActor, membership?: MembershipSumma
   return [{ isPrivate: false }];
 }
 
-async function loadExecutionRequest(workspaceId: string, requestId: string) {
+const executionRequestInclude = {
+  results: {
+    orderBy: { submittedAt: "desc" as const },
+    take: 10,
+  },
+};
+
+function executionRequestAccessWhere(actor: AppActor, workspaceId: string, requestId?: string): Prisma.ExecutionRequestWhereInput {
+  const where: Prisma.ExecutionRequestWhereInput = {
+    workspaceId,
+    ...(requestId ? { id: requestId } : {}),
+  };
+  if (actor.kind === "agent" && actor.authProvider === "credential") {
+    invariant(actor.credentialId, 403, "FORBIDDEN", "Agent credential is required for execution request access.");
+    where.agentCredentialId = actor.credentialId;
+  }
+  return where;
+}
+
+async function findExistingExecutionRequestByIdempotency(actor: AppActor, workspaceId: string, idempotencyKey: string) {
+  if (actor.kind === "agent" && actor.authProvider === "credential") {
+    return prisma.executionRequest.findFirst({
+      where: { ...executionRequestAccessWhere(actor, workspaceId), idempotencyKey },
+      include: executionRequestInclude,
+    });
+  }
+  return prisma.executionRequest.findUnique({
+    where: { workspaceId_idempotencyKey: { workspaceId, idempotencyKey } },
+    include: executionRequestInclude,
+  });
+}
+
+async function loadExecutionRequest(actor: AppActor, workspaceId: string, requestId: string) {
   const request = await prisma.executionRequest.findFirst({
-    where: { id: requestId, workspaceId },
-    include: {
-      results: {
-        orderBy: { submittedAt: "desc" },
-        take: 10,
-      },
-    },
+    where: executionRequestAccessWhere(actor, workspaceId, requestId),
+    include: executionRequestInclude,
   });
   invariant(request, 404, "NOT_FOUND", "Execution request not found.");
   return request;
+}
+
+function requestOwnerActor(request: { createdByUserId: string | null }, fallback: AppActor): AppActor {
+  if (fallback.kind !== "agent") return fallback;
+  invariant(request.createdByUserId, 400, "INVALID_STATE", "Execution request owner is required for private write-back.");
+  return {
+    kind: "user",
+    user: {
+      id: request.createdByUserId,
+      email: "execution-requester@corgtex.local",
+      displayName: "Execution requester",
+      globalRole: "USER",
+    },
+  };
 }
 
 function serializeExecutionResult(result: {
@@ -437,10 +478,7 @@ export async function createExecutionRequest(actor: AppActor, params: CreateExec
   const idempotencyKey = optionalString(params.idempotencyKey);
 
   if (idempotencyKey) {
-    const existing = await prisma.executionRequest.findUnique({
-      where: { workspaceId_idempotencyKey: { workspaceId: params.workspaceId, idempotencyKey } },
-      include: { results: { orderBy: { submittedAt: "desc" }, take: 10 } },
-    });
+    const existing = await findExistingExecutionRequestByIdempotency(actor, params.workspaceId, idempotencyKey);
     if (existing) return serializeExecutionRequest(existing);
   }
 
@@ -509,10 +547,7 @@ export async function createExecutionRequest(actor: AppActor, params: CreateExec
     });
   } catch (error) {
     if (!idempotencyKey || !isPrismaUniqueError(error)) throw error;
-    const existing = await prisma.executionRequest.findUnique({
-      where: { workspaceId_idempotencyKey: { workspaceId: params.workspaceId, idempotencyKey } },
-      include: { results: { orderBy: { submittedAt: "desc" }, take: 10 } },
-    });
+    const existing = await findExistingExecutionRequestByIdempotency(actor, params.workspaceId, idempotencyKey);
     invariant(existing, 409, "CONFLICT", "Execution request idempotency conflict.");
     return serializeExecutionRequest(existing);
   }
@@ -523,7 +558,7 @@ export async function createExecutionRequest(actor: AppActor, params: CreateExec
 export async function getExecutionRequest(actor: AppActor, params: { workspaceId: string; requestId: string }) {
   requireExecutionScope(actor, "execution:read");
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
-  return serializeExecutionRequest(await loadExecutionRequest(params.workspaceId, params.requestId));
+  return serializeExecutionRequest(await loadExecutionRequest(actor, params.workspaceId, params.requestId));
 }
 
 export async function listExecutionRequests(actor: AppActor, params: {
@@ -537,15 +572,10 @@ export async function listExecutionRequests(actor: AppActor, params: {
   invariant(!status || status in ExecutionRequestStatus, 400, "INVALID_INPUT", "Unsupported execution request status.");
   const requests = await prisma.executionRequest.findMany({
     where: {
-      workspaceId: params.workspaceId,
+      ...executionRequestAccessWhere(actor, params.workspaceId),
       ...(status ? { status: status as ExecutionRequestStatus } : {}),
     },
-    include: {
-      results: {
-        orderBy: { submittedAt: "desc" },
-        take: 10,
-      },
-    },
+    include: executionRequestInclude,
     orderBy: { createdAt: "desc" },
     take: Math.min(Math.max(params.take ?? 20, 1), 100),
   });
@@ -555,7 +585,7 @@ export async function listExecutionRequests(actor: AppActor, params: {
 export async function getExecutionPacket(actor: AppActor, params: { workspaceId: string; requestId: string }) {
   requireExecutionScope(actor, "execution:read");
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
-  const request = await loadExecutionRequest(params.workspaceId, params.requestId);
+  const request = await loadExecutionRequest(actor, params.workspaceId, params.requestId);
   invariant(!["FAILED", "CANCELLED"].includes(request.status), 400, "INVALID_STATE", "Execution packet is not available for failed or cancelled requests.");
 
   const workspace = await prisma.workspace.findUnique({
@@ -567,16 +597,11 @@ export async function getExecutionPacket(actor: AppActor, params: { workspaceId:
   let packetRequest = request;
   if (request.status === "PENDING") {
     const claim = await prisma.executionRequest.updateMany({
-      where: { id: request.id, workspaceId: params.workspaceId, status: "PENDING" },
+      where: { ...executionRequestAccessWhere(actor, params.workspaceId, request.id), status: "PENDING" },
       data: { status: "IN_PROGRESS", claimedAt: new Date() },
     });
-    packetRequest = await loadExecutionRequest(params.workspaceId, params.requestId);
-    invariant(
-      claim.count === 1 || packetRequest.status === "IN_PROGRESS",
-      409,
-      "INVALID_STATE",
-      "Execution packet is no longer available for claiming.",
-    );
+    invariant(claim.count === 1, 409, "INVALID_STATE", "Execution packet is no longer available for claiming.");
+    packetRequest = await loadExecutionRequest(actor, params.workspaceId, params.requestId);
   }
 
   const packet = buildExecutionPacket({ request: packetRequest, workspace });
@@ -734,14 +759,16 @@ async function createNativeWriteback(actor: AppActor, params: {
   output: JsonRecord;
   requestId: string;
   resultId: string;
+  requestCreatedByUserId: string | null;
 }) {
   if (params.targetId || params.type === "COMMENT") {
     return { entityType: "ExecutionResult", entityId: params.resultId };
   }
+  const writebackActor = requestOwnerActor({ createdByUserId: params.requestCreatedByUserId }, actor);
 
   switch (params.type) {
     case "ACTION": {
-      const action = await createAction(actor, {
+      const action = await createAction(writebackActor, {
         workspaceId: params.workspaceId,
         title: requiredString(params.output.title, "Action title"),
         bodyMd: optionalString(params.output.bodyMd) ?? optionalString(params.output.body) ?? null,
@@ -750,7 +777,7 @@ async function createNativeWriteback(actor: AppActor, params: {
       return { entityType: "Action", entityId: action.id };
     }
     case "TENSION": {
-      const tension = await createTension(actor, {
+      const tension = await createTension(writebackActor, {
         workspaceId: params.workspaceId,
         title: requiredString(params.output.title, "Tension title"),
         bodyMd: optionalString(params.output.bodyMd) ?? optionalString(params.output.body) ?? null,
@@ -759,7 +786,7 @@ async function createNativeWriteback(actor: AppActor, params: {
       return { entityType: "Tension", entityId: tension.id };
     }
     case "PROPOSAL": {
-      const proposal = await createProposal(actor, {
+      const proposal = await createProposal(writebackActor, {
         workspaceId: params.workspaceId,
         title: requiredString(params.output.title, "Proposal title"),
         summary: optionalString(params.output.summary),
@@ -769,7 +796,7 @@ async function createNativeWriteback(actor: AppActor, params: {
       return { entityType: "Proposal", entityId: proposal.id };
     }
     case "MEETING": {
-      const meeting = await createMeeting(actor, {
+      const meeting = await createMeeting(writebackActor, {
         workspaceId: params.workspaceId,
         title: optionalString(params.output.title),
         source: optionalString(params.output.source) ?? "external-execution",
@@ -781,7 +808,7 @@ async function createNativeWriteback(actor: AppActor, params: {
       return { entityType: "Meeting", entityId: meeting.id };
     }
     case "BRAIN_ARTICLE": {
-      const article = await createArticle(actor, {
+      const article = await createArticle(writebackActor, {
         workspaceId: params.workspaceId,
         title: requiredString(params.output.title, "Brain article title"),
         slug: optionalString(params.output.slug) ?? undefined,
@@ -793,7 +820,7 @@ async function createNativeWriteback(actor: AppActor, params: {
       return { entityType: "BrainArticle", entityId: article.id };
     }
     case "BUILD_ARTIFACT": {
-      const artifact = await upsertBuildArtifact(actor, {
+      const artifact = await upsertBuildArtifact(writebackActor, {
         workspaceId: params.workspaceId,
         repositoryOwner: requiredString(params.output.repositoryOwner, "Repository owner"),
         repositoryName: requiredString(params.output.repositoryName, "Repository name"),
@@ -853,7 +880,7 @@ export async function submitExecutionResult(actor: AppActor, params: SubmitExecu
 
   const idempotencyKey = params.idempotencyKey.trim();
   invariant(idempotencyKey.length > 0, 400, "INVALID_INPUT", "Result idempotency key is required.");
-  const request = await loadExecutionRequest(params.workspaceId, params.requestId);
+  const request = await loadExecutionRequest(actor, params.workspaceId, params.requestId);
   const existing = await prisma.executionResult.findUnique({
     where: { executionRequestId_idempotencyKey: { executionRequestId: request.id, idempotencyKey } },
   });
@@ -942,6 +969,7 @@ export async function submitExecutionResult(actor: AppActor, params: SubmitExecu
       output,
       requestId: request.id,
       resultId: resultShell.id,
+      requestCreatedByUserId: request.createdByUserId,
     });
 
   const result = await prisma.$transaction(async (tx) => {

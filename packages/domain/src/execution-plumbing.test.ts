@@ -96,6 +96,12 @@ const agentActor: AppActor = {
   scopes: ["execution:read", "execution:write", "workspace:read", "actions:read", "actions:write"],
 };
 
+const otherAgentActor: AppActor = {
+  ...agentActor,
+  credentialId: "cred-other",
+  label: "Other AI workspace",
+};
+
 const workspace = {
   id: "workspace-1",
   slug: "acme",
@@ -238,6 +244,7 @@ describe("execution plumbing domain", () => {
   });
 
   it("requires target scopes when creating scoped execution requests", async () => {
+    prismaMock.executionRequest.findFirst.mockResolvedValueOnce(null);
     const limitedAgent: AppActor = {
       ...agentActor,
       scopes: ["execution:write"],
@@ -300,6 +307,33 @@ describe("execution plumbing domain", () => {
     expect(prismaMock.executionRequest.create).not.toHaveBeenCalled();
   });
 
+  it("scopes agent request access to the creating credential", async () => {
+    prismaMock.executionRequest.findFirst.mockResolvedValueOnce(null);
+
+    const { getExecutionRequest, listExecutionRequests } = await import("./execution-plumbing");
+    await expect(getExecutionRequest(otherAgentActor, {
+      workspaceId: "workspace-1",
+      requestId: "request-1",
+    })).rejects.toThrow("Execution request not found.");
+
+    expect(prismaMock.executionRequest.findFirst).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        id: "request-1",
+        workspaceId: "workspace-1",
+        agentCredentialId: "cred-other",
+      }),
+    }));
+
+    prismaMock.executionRequest.findMany.mockResolvedValueOnce([]);
+    await listExecutionRequests(agentActor, { workspaceId: "workspace-1" });
+    expect(prismaMock.executionRequest.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        workspaceId: "workspace-1",
+        agentCredentialId: "cred-1",
+      }),
+    }));
+  });
+
   it("returns an existing result for duplicate idempotency keys without writing again", async () => {
     prismaMock.executionResult.findUnique.mockResolvedValueOnce({
       id: "result-existing",
@@ -328,7 +362,11 @@ describe("execution plumbing domain", () => {
 
     expect(result).toMatchObject({ id: "result-existing", writeback: { entityId: "action-1" } });
     expect(prismaMock.executionRequest.findFirst).toHaveBeenCalledWith(expect.objectContaining({
-      where: { id: "request-1", workspaceId: "workspace-1" },
+      where: expect.objectContaining({
+        id: "request-1",
+        workspaceId: "workspace-1",
+        agentCredentialId: "cred-1",
+      }),
     }));
     expect(createAction).not.toHaveBeenCalled();
     expect(prismaMock.executionResult.create).not.toHaveBeenCalled();
@@ -555,10 +593,28 @@ describe("execution plumbing domain", () => {
 
     expect(packet).toMatchObject({ id: "request-1", status: "IN_PROGRESS" });
     expect(prismaMock.executionRequest.updateMany).toHaveBeenCalledWith(expect.objectContaining({
-      where: { id: "request-1", workspaceId: "workspace-1", status: "PENDING" },
+      where: expect.objectContaining({
+        id: "request-1",
+        workspaceId: "workspace-1",
+        agentCredentialId: "cred-1",
+        status: "PENDING",
+      }),
       data: expect.objectContaining({ status: "IN_PROGRESS" }),
     }));
     expect(prismaMock.executionRequest.update).not.toHaveBeenCalled();
+  });
+
+  it("rejects packet claim losers after the pending-state compare-and-swap", async () => {
+    prismaMock.executionRequest.findFirst.mockResolvedValueOnce(requestFixture({ status: "PENDING" }));
+    prismaMock.executionRequest.updateMany.mockResolvedValueOnce({ count: 0 });
+
+    const { getExecutionPacket } = await import("./execution-plumbing");
+    await expect(getExecutionPacket(agentActor, {
+      workspaceId: "workspace-1",
+      requestId: "request-1",
+    })).rejects.toThrow("Execution packet is no longer available for claiming.");
+
+    expect(prismaMock.executionRequest.findFirst).toHaveBeenCalledTimes(1);
   });
 
   it("creates draft native records and audits accepted results", async () => {
@@ -578,7 +634,10 @@ describe("execution plumbing domain", () => {
       artifacts: [{ log: "Authorization: Bearer clear-token-value" }],
     });
 
-    expect(createAction).toHaveBeenCalledWith(agentActor, expect.objectContaining({
+    expect(createAction).toHaveBeenCalledWith(expect.objectContaining({
+      kind: "user",
+      user: expect.objectContaining({ id: "user-1" }),
+    }), expect.objectContaining({
       workspaceId: "workspace-1",
       title: "Follow up",
       bodyMd: "Notes",
