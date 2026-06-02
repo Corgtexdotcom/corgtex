@@ -327,6 +327,23 @@ describe("catalog domain", () => {
       where: {
         workspaceId_sourceType_sourceId: {
           workspaceId: "workspace-1",
+          sourceType: "MCP_CONNECTOR",
+          sourceId: "corgtex-mcp",
+        },
+      },
+      create: expect.objectContaining({
+        title: "Corgtex MCP",
+        url: "/workspaces/workspace-1/settings?tab=ai-workspaces",
+      }),
+      update: expect.objectContaining({
+        title: "Corgtex MCP",
+        url: "/workspaces/workspace-1/settings?tab=ai-workspaces",
+      }),
+    }));
+    expect(prismaMock.catalogItem.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        workspaceId_sourceType_sourceId: {
+          workspaceId: "workspace-1",
           sourceType: "AI_WORKSPACE",
           sourceId: "openwork",
         },
@@ -334,6 +351,7 @@ describe("catalog domain", () => {
       create: expect.objectContaining({
         type: "CONNECTOR",
         title: "OpenWork Free",
+        url: "/workspaces/workspace-1/settings?tab=ai-workspaces&provider=openwork",
         category: "AI_DEFAULT",
         accessMode: "OPEN",
         requestedScopes: ["workspace:read", "brain:read", "conversations:write"],
@@ -341,6 +359,7 @@ describe("catalog domain", () => {
       }),
       update: expect.objectContaining({
         title: "OpenWork Free",
+        url: "/workspaces/workspace-1/settings?tab=ai-workspaces&provider=openwork",
         category: "AI_DEFAULT",
         accessMode: "OPEN",
         featured: true,
@@ -356,6 +375,7 @@ describe("catalog domain", () => {
       },
       create: expect.objectContaining({
         title: "ChatGPT",
+        url: "/workspaces/workspace-1/settings?tab=ai-workspaces&provider=chatgpt",
         category: "AI_BYO",
         featured: false,
       }),
@@ -377,6 +397,7 @@ describe("catalog domain", () => {
   it("derives managed enterprise service request cards when enabled", async () => {
     const { listCatalogItems } = await import("./catalog");
     prismaMock.workspaceFeatureFlag.findMany.mockResolvedValue([
+      { flag: "AI_WORKSPACES", enabled: true },
       { flag: "MANAGED_ENTERPRISE_SERVICES", enabled: true },
     ]);
     prismaMock.workspaceToolLink.findMany.mockResolvedValue([]);
@@ -397,6 +418,7 @@ describe("catalog domain", () => {
       create: expect.objectContaining({
         type: "TOOL",
         title: "Managed AI workspace",
+        url: "/workspaces/workspace-1/settings?tab=ai-workspaces&service=ai_workspace",
         category: "ENTERPRISE_SERVICES",
         accessMode: "REQUEST",
         requestedScopes: ["workspace:read", "integrations:read", "runtime:read"],
@@ -408,6 +430,38 @@ describe("catalog domain", () => {
           workspaceId: "workspace-1",
           sourceType: "ENTERPRISE_SERVICE",
           sourceId: "meeting_recorder",
+        },
+      },
+    }));
+  });
+
+  it("does not derive managed enterprise services without the AI workspace setup surface", async () => {
+    const { listCatalogItems } = await import("./catalog");
+    prismaMock.workspaceFeatureFlag.findMany.mockResolvedValue([
+      { flag: "AI_WORKSPACES", enabled: false },
+      { flag: "MANAGED_ENTERPRISE_SERVICES", enabled: true },
+    ]);
+    prismaMock.workspaceToolLink.findMany.mockResolvedValue([]);
+    prismaMock.catalogItem.findMany.mockResolvedValue([
+      catalogItemFixture({
+        id: "managed-1",
+        title: "Managed AI workspace",
+        sourceType: "ENTERPRISE_SERVICE",
+        sourceId: "ai_workspace",
+      }),
+    ]);
+    prismaMock.catalogFavorite.findMany.mockResolvedValue([]);
+    prismaMock.catalogRequest.findMany.mockResolvedValue([]);
+
+    const result = await listCatalogItems(actor, "workspace-1");
+
+    expect(result.items).toHaveLength(0);
+    expect(prismaMock.catalogItem.upsert).not.toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        workspaceId_sourceType_sourceId: {
+          workspaceId: "workspace-1",
+          sourceType: "ENTERPRISE_SERVICE",
+          sourceId: "ai_workspace",
         },
       },
     }));

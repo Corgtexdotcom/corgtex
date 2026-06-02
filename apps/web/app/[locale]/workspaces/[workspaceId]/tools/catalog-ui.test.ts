@@ -138,4 +138,52 @@ describe("Tools catalog UI helpers", () => {
       { kind: "link", label: "Details", href: "/workspaces/workspace-1/tools/meeting-recorder", variant: "secondary" },
     ]);
   });
+
+  it("uses setup language for AI workspace catalog connectors", () => {
+    const actions = getCatalogCardActions(item({
+      id: "openwork",
+      type: "CONNECTOR",
+      title: "OpenWork Free",
+      url: "/workspaces/workspace-1/settings?tab=ai-workspaces&provider=openwork",
+      category: "AI_DEFAULT",
+      accessMode: "OPEN",
+    }), { workspaceId: "workspace-1", canManageCatalog: false });
+
+    expect(actions).toEqual([
+      {
+        kind: "link",
+        label: "Set up",
+        href: "/workspaces/workspace-1/settings?tab=ai-workspaces&provider=openwork",
+        variant: "primary",
+      },
+      { kind: "link", label: "Details", href: "/workspaces/workspace-1/tools/openwork", variant: "secondary" },
+    ]);
+  });
+
+  it("links managed enterprise services to setup while allowing a request", () => {
+    const actions = getCatalogCardActions(item({
+      id: "managed-ai-workspace",
+      type: "TOOL",
+      title: "Managed AI workspace",
+      url: "/workspaces/workspace-1/settings?tab=ai-workspaces&service=ai_workspace",
+      category: "ENTERPRISE_SERVICES",
+      accessMode: "REQUEST",
+    }), { workspaceId: "workspace-1", canManageCatalog: false });
+
+    expect(actions).toEqual([
+      {
+        kind: "link",
+        label: "Open setup",
+        href: "/workspaces/workspace-1/settings?tab=ai-workspaces&service=ai_workspace",
+        variant: "primary",
+      },
+      {
+        kind: "request",
+        label: "Request managed service",
+        requestType: "ACCESS",
+        variant: "secondary",
+      },
+      { kind: "link", label: "Details", href: "/workspaces/workspace-1/tools/managed-ai-workspace", variant: "secondary" },
+    ]);
+  });
 });

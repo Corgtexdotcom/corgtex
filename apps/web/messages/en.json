@@ -2181,6 +2181,7 @@
     "stepSetInstructionsDesc": "Paste this template into the Instructions box:",
     "tabGeneral": "General",
     "tabAgents": "Agents",
+    "tabAiWorkspaces": "AI Workspaces",
     "tabKnowledgeSources": "Knowledge Sources",
     "tabMembers": "Members",
     "titleAddPostgres": "Add PostgreSQL Database",
