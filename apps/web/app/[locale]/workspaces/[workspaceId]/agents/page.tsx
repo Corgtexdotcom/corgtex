@@ -27,7 +27,7 @@ export default async function AgentGovernancePage({
     notFound();
   }
 
-  const tab = search.tab ?? "inbox";
+  const tab = search.tab ?? "registry";
   const t = await getTranslations("agents");
 
   const [agents, runsPending, runsFailed] = await Promise.all([

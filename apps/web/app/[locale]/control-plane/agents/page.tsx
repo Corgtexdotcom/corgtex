@@ -1,9 +1,12 @@
 import { notFound } from "next/navigation";
 import {
+  buildAgentAuthoritySummaries,
   getControlPlaneAiGovernanceStatus,
   getControlPlaneIntegrationStatus,
   listControlPlaneDeployments,
   requireControlPlaneAccess,
+  type AgentAuthoritySummary,
+  type AgentAuthorityUsageInput,
 } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { AgentObservatoryClient } from "./_components/observatory-client";
@@ -54,6 +57,63 @@ function modelSpendValue(summary: any) {
   } | null | undefined;
 
   return String(modelUsage?.billableCostUsd ?? modelUsage?.estimatedCostUsd ?? "0");
+}
+
+function agentUsageByAgent(usages: any[] | null | undefined): AgentAuthorityUsageInput[] {
+  const totals = new Map<string, { callCount: number; totalCostUsd: number }>();
+  for (const usage of usages ?? []) {
+    const agentKey = usage.agentRun?.agentKey;
+    if (!agentKey) continue;
+    const current = totals.get(agentKey) ?? { callCount: 0, totalCostUsd: 0 };
+    totals.set(agentKey, {
+      callCount: current.callCount + 1,
+      totalCostUsd: current.totalCostUsd + Number(usage.billableCostUsd ?? usage.estimatedCostUsd ?? 0),
+    });
+  }
+  return Array.from(totals.entries()).map(([agentKey, usage]) => ({ agentKey, ...usage }));
+}
+
+function agentRunCountsByAgent(runs: any[]) {
+  const counts = new Map<string, number>();
+  for (const run of runs) {
+    if (!run.agentKey) continue;
+    counts.set(run.agentKey, (counts.get(run.agentKey) ?? 0) + 1);
+  }
+  return Array.from(counts.entries()).map(([agentKey, count]) => ({ agentKey, count }));
+}
+
+function pendingApprovalRunsForGovernance(governance: any) {
+  const summaryRuns = "pendingApprovalRuns" in (governance?.summary ?? {})
+    ? governance.summary.pendingApprovalRuns
+    : null;
+  if (Array.isArray(summaryRuns)) return summaryRuns;
+  return Array.isArray(governance?.activity?.pendingApprovalRuns) ? governance.activity.pendingApprovalRuns : undefined;
+}
+
+function authorityLabel(summary: AgentAuthoritySummary) {
+  if (summary.roleAssignments.length === 0) return "Not assigned";
+  return summary.roleAssignments
+    .map((assignment) => assignment.roleName ? `${assignment.circleName} / ${assignment.roleName}` : assignment.circleName)
+    .join(", ");
+}
+
+function accessLabel(summary: AgentAuthoritySummary) {
+  const access = summary.toolsAndDataAccess;
+  if (!access.credentialLabel) return "No linked credential";
+  return `${access.credentialLabel}${access.credentialActive === false ? " (revoked)" : ""}`;
+}
+
+function limitLabel(summary: AgentAuthoritySummary) {
+  const spendCap = summary.limits.maxSpendPerRunCents == null
+    ? "No run cap"
+    : `${costLabel(summary.limits.maxSpendPerRunCents / 100)} / run`;
+  const runCap = summary.limits.maxRunsPerDay == null ? "No daily cap" : `${summary.limits.maxRunsPerDay} / day`;
+  return `${spendCap}; ${runCap}`;
+}
+
+function approvalLabel(summary: AgentAuthoritySummary) {
+  const policy = summary.approval.hasGovernancePolicy ? "policy configured" : "policy missing";
+  return `${policy}; ${summary.approval.pendingApprovalCount} pending`;
 }
 
 export default async function ControlPlaneAgentsPage() {
@@ -125,39 +185,40 @@ export default async function ControlPlaneAgentsPage() {
     };
   });
 
-  const formattedAgents = customerDetails.flatMap(({ customer, governance, recentRuns }) => {
+  const formattedAgents = customerDetails.flatMap(({ customer, governance, recentRuns, credentials }) => {
     const identities = Array.isArray(governance?.agents?.identities) ? governance.agents.identities : [];
     const configs = Array.isArray(governance?.agents?.configs) ? governance.agents.configs : [];
-    const usageByRunId = aggregateModelUsageByRunId(governance?.spend?.recentModelUsage);
-    const identitiesByKey = new Map(identities.map((identity: any) => [identity.agentKey, identity]));
-    const configsByKey = new Map(configs.map((config: any) => [config.agentKey, config]));
-    const agentKeys = new Set<string>([
-      ...configs.map((config: any) => config.agentKey).filter(Boolean),
-      ...identities.map((identity: any) => identity.agentKey).filter(Boolean),
-      ...recentRuns.map((run: any) => run.agentKey).filter(Boolean),
-    ]);
+    const authoritySummaries = buildAgentAuthoritySummaries({
+      identities,
+      configs,
+      credentials,
+      recentRuns,
+      pendingApprovalRuns: pendingApprovalRunsForGovernance(governance),
+      usageByAgent: agentUsageByAgent(governance?.spend?.recentModelUsage),
+      runCountsByAgent: agentRunCountsByAgent(recentRuns),
+      workspaceBudget: governance?.spend?.budget,
+    });
 
-    return Array.from(agentKeys).map((agentKey) => {
-      const identity: any = identitiesByKey.get(agentKey);
-      const config: any = configsByKey.get(agentKey);
-      const runsForAgent = recentRuns.filter((run: any) => run.agentKey === agentKey);
-      const lastRun = runsForAgent[0];
-      const loadedSpend = runsForAgent.reduce((total: number, run: any) => {
-        const usage: any = usageByRunId.get(run.id);
-        return total + Number(usage?.billableCostUsd ?? usage?.estimatedCostUsd ?? 0);
-      }, 0);
+    return authoritySummaries.map((summary) => {
       return {
-        id: `${customer.id}:${identity?.id ?? config?.id ?? agentKey}`,
+        id: `${customer.id}:${summary.identityId ?? summary.agentKey}`,
         customerId: customer.id,
         customerName: customer.label,
         customerSlug: customer.customerSlug ?? customer.managedWorkspace?.slug ?? customer.remoteWorkspaceSlug ?? customer.id,
-        name: identity?.displayName ?? config?.label ?? agentNameFromKey(agentKey),
-        status: identity ? (identity.archivedAt ? "ARCHIVED" : identity.isActive ? "ACTIVE" : "DISABLED") : config?.enabled === false ? "DISABLED" : "AVAILABLE",
-        modelTier: config?.defaultModelTier ?? "Default",
-        modelOverride: config?.modelOverride ?? identity?.linkedCredential?.label ?? "Default",
-        runsCount: runsForAgent.length,
-        costMtd: costLabel(loadedSpend),
-        lastRun: lastRun ? dateLabel(lastRun.createdAt) : "No runs recorded",
+        name: summary.displayName,
+        status: summary.status,
+        modelTier: summary.defaultModelTier ?? "Default",
+        modelOverride: summary.modelOverride ?? "Default",
+        authority: authorityLabel(summary),
+        access: accessLabel(summary),
+        dataScope: `${summary.toolsAndDataAccess.scopeCount} scopes / ${summary.toolsAndDataAccess.writeScopeCount} write / ${summary.toolsAndDataAccess.sensitiveScopeCount} sensitive`,
+        limits: limitLabel(summary),
+        approval: approvalLabel(summary),
+        pendingApprovals: summary.approval.pendingApprovalCount,
+        runsCount: summary.recentActivity.runCount30d,
+        costMtd: costLabel(summary.recentActivity.spend30dUsd),
+        lastRun: summary.recentActivity.latestRun ? dateLabel(summary.recentActivity.latestRun.createdAt) : "No runs recorded",
+        latestRunStatus: summary.recentActivity.latestRun?.status ?? "NO_RUNS",
       };
     });
   });

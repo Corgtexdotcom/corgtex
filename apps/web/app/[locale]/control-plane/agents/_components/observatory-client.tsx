@@ -23,9 +23,16 @@ interface Agent {
   status: string;
   modelTier: string;
   modelOverride: string;
+  authority: string;
+  access: string;
+  dataScope: string;
+  limits: string;
+  approval: string;
+  pendingApprovals: number;
   runsCount: number;
   costMtd: string;
   lastRun: string;
+  latestRunStatus: string;
 }
 
 interface Run {
@@ -94,7 +101,15 @@ export function AgentObservatoryClient({ agents, runs, customers }: ObservatoryP
 
   // Filter logic
   const filteredAgents = scopedAgents.filter((agent) => {
-    const matchesSearch = agent.name.toLowerCase().includes(search.toLowerCase());
+    const query = search.toLowerCase();
+    const matchesSearch = [
+      agent.name,
+      agent.customerName,
+      agent.customerSlug,
+      agent.authority,
+      agent.access,
+      agent.dataScope,
+    ].some((value) => value.toLowerCase().includes(query));
     const matchesStatus = selectedStatus === "" || agent.status === selectedStatus;
     return matchesSearch && matchesStatus;
   });
@@ -177,15 +192,15 @@ export function AgentObservatoryClient({ agents, runs, customers }: ObservatoryP
         <div className="lg:col-span-2 space-y-4 bg-bg-alt border border-line rounded-xl p-5 shadow-sm">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-line">
             <div>
-              <h2 className="text-sm font-bold text-white">Agent Telemetry Registry</h2>
-              <p className="text-[10px] text-muted mt-0.5">Filter and review details of all active fleet agent constitutions.</p>
+              <h2 className="text-sm font-bold text-white">Agent Authority Registry</h2>
+              <p className="text-[10px] text-muted mt-0.5">Review who each agent serves, what it can access, its limits, approvals, and latest activity.</p>
             </div>
 
             {/* Filter controls */}
             <div className="flex gap-2">
               <input
                 type="text"
-                placeholder="Search agent name..."
+                placeholder="Search agents..."
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 className="bg-surface border border-line text-xs text-text placeholder-slate-600 rounded-lg px-2.5 py-1.5 focus:border-line focus:outline-none"
@@ -211,9 +226,11 @@ export function AgentObservatoryClient({ agents, runs, customers }: ObservatoryP
                   <th className="p-3">Agent</th>
                   <th className="p-3">Customer</th>
                   <th className="p-3">Status</th>
-                  <th className="p-3">Model Config</th>
-                  <th className="p-3">Runs</th>
-                  <th className="p-3 text-right">Spend</th>
+                  <th className="p-3">Authority</th>
+                  <th className="p-3">Access</th>
+                  <th className="p-3">Limits</th>
+                  <th className="p-3">Approval</th>
+                  <th className="p-3 text-right">Activity</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-line">
@@ -237,16 +254,30 @@ export function AgentObservatoryClient({ agents, runs, customers }: ObservatoryP
                         {agent.status}
                       </span>
                     </td>
-                    <td className="p-3 text-text font-mono text-[10px]">
-                      {agent.modelOverride}
+                    <td className="p-3 text-text text-[10px] max-w-[180px]">
+                      <span className="line-clamp-2">{agent.authority}</span>
                     </td>
-                    <td className="p-3 text-muted font-semibold">{agent.runsCount}</td>
-                    <td className="p-3 text-right font-bold text-white">{agent.costMtd}</td>
+                    <td className="p-3 text-text text-[10px] max-w-[180px]">
+                      <span className="font-semibold block truncate">{agent.access}</span>
+                      <span className="text-muted block mt-0.5">{agent.dataScope}</span>
+                    </td>
+                    <td className="p-3 text-muted text-[10px] max-w-[170px]">{agent.limits}</td>
+                    <td className="p-3 text-[10px] max-w-[170px]">
+                      <span className={cn(
+                        agent.pendingApprovals > 0 ? "text-amber-300" : "text-muted"
+                      )}>
+                        {agent.approval}
+                      </span>
+                    </td>
+                    <td className="p-3 text-right">
+                      <span className="font-bold text-white block">{agent.costMtd}</span>
+                      <span className="text-[9px] text-muted block">{agent.runsCount} runs / {agent.latestRunStatus}</span>
+                    </td>
                   </tr>
                 ))}
                 {filteredAgents.length === 0 && (
                   <tr>
-                    <td colSpan={6} className="text-center py-6 text-muted">No agents found matching this criteria.</td>
+                    <td colSpan={8} className="text-center py-6 text-muted">No agents found matching this criteria.</td>
                   </tr>
                 )}
               </tbody>

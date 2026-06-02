@@ -2468,6 +2468,7 @@ export async function getControlPlaneAiGovernanceStatus(actor: AppActor, deploym
       },
       activity: {
         recentRuns: cachedSupport.recentRuns,
+        pendingApprovalRuns: [],
         recentFailedJobs: cachedSupport.recentFailedJobs,
         riskyToolCalls: [],
       },
@@ -2499,7 +2500,7 @@ export async function getControlPlaneAiGovernanceStatus(actor: AppActor, deploym
   }
 
   const managedWorkspaceId = deployment.managedWorkspaceId;
-  const [featureFlag, agentRuns, pendingApprovals, failedJobs, modelUsage, recentRuns, recentFailedJobs, recentToolCalls, agentIdentities, agentConfigOverrides, credentials, budget, recentModelUsage] = await Promise.all([
+  const [featureFlag, agentRuns, pendingApprovals, failedJobs, modelUsage, recentRuns, pendingApprovalRuns, recentFailedJobs, recentToolCalls, agentIdentities, agentConfigOverrides, credentials, budget, recentModelUsage] = await Promise.all([
     prisma.workspaceFeatureFlag.findUnique({
       where: {
         workspaceId_flag: {
@@ -2537,6 +2538,22 @@ export async function getControlPlaneAiGovernanceStatus(actor: AppActor, deploym
       where: { workspaceId: managedWorkspaceId },
       orderBy: { createdAt: "desc" },
       take: 8,
+      select: {
+        id: true,
+        agentKey: true,
+        triggerType: true,
+        status: true,
+        goal: true,
+        approvalRequired: true,
+        createdAt: true,
+        startedAt: true,
+        completedAt: true,
+        failedAt: true,
+      },
+    }),
+    prisma.agentRun.findMany({
+      where: { workspaceId: managedWorkspaceId, status: "WAITING_APPROVAL" },
+      orderBy: { createdAt: "desc" },
       select: {
         id: true,
         agentKey: true,
@@ -2814,6 +2831,7 @@ export async function getControlPlaneAiGovernanceStatus(actor: AppActor, deploym
         billableCostUsd: decimalToString(modelUsage._sum.billableCostUsd),
       },
       recentRuns,
+      pendingApprovalRuns,
       recentFailedJobs,
       riskyToolCalls,
     },
