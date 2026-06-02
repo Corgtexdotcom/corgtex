@@ -423,7 +423,7 @@ export default async function SettingsPage({
         supportedOwnershipModes: [...provider.supportedOwnershipModes],
       }))
     : [];
-  const enterpriseServices = featureFlags.AI_WORKSPACES && featureFlags.MANAGED_ENTERPRISE_SERVICES
+  const enterpriseServices = tab === "ai-workspaces" && featureFlags.AI_WORKSPACES && featureFlags.MANAGED_ENTERPRISE_SERVICES
     ? (await listWorkspaceEnterpriseServiceStates(actor, workspaceId)).map((service) => ({
         key: service.key,
         label: service.label,

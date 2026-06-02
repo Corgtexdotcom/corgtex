@@ -877,12 +877,50 @@ describe("meeting recorder domain", () => {
       create: expect.objectContaining({
         workspaceId: "workspace-1",
         serviceKey: "MEETING_RECORDER",
-        ownershipMode: "CORGTEX_MANAGED",
+        ownershipMode: "CUSTOMER_MANAGED",
         displayName: "Meeting recorder",
         providerKey: "RECALL_AI",
         healthStatus: "ACTIVE",
       }),
     });
+  });
+
+  it("clears stale successful enterprise health checks when recorder readiness fails", async () => {
+    const { syncMeetingRecorderEnterpriseService } = await import("./meeting-recorders");
+    const now = new Date("2026-05-06T18:00:00.000Z");
+    prismaMock.workspaceRecorderCalendarSource.findUnique.mockResolvedValue(null);
+    prismaMock.meetingRecorderSmokeRun.findFirst.mockResolvedValue(null);
+    prismaMock.meetingRecording.aggregate.mockResolvedValue({ _sum: { durationSeconds: 0 } });
+    prismaMock.workspaceEnterpriseService.upsert.mockResolvedValue({
+      id: "service-recorder",
+      workspaceId: "workspace-1",
+      serviceKey: "MEETING_RECORDER",
+      ownershipMode: "CORGTEX_MANAGED",
+      healthStatus: "DISCONNECTED",
+    });
+
+    await syncMeetingRecorderEnterpriseService("workspace-1", now);
+
+    expect(prismaMock.workspaceEnterpriseService.upsert).toHaveBeenCalledWith({
+      where: {
+        workspaceId_serviceKey: {
+          workspaceId: "workspace-1",
+          serviceKey: "MEETING_RECORDER",
+        },
+      },
+      update: expect.objectContaining({
+        healthStatus: "DISCONNECTED",
+        lastHealthCheckAt: now,
+        lastSuccessfulHealthCheckAt: null,
+        lastSuccessfulSyncAt: null,
+      }),
+      create: expect.objectContaining({
+        ownershipMode: "CUSTOMER_MANAGED",
+        healthStatus: "DISCONNECTED",
+        lastSuccessfulHealthCheckAt: null,
+      }),
+    });
+    expect(prismaMock.workspaceEnterpriseService.upsert.mock.calls[0]?.[0].update).not.toHaveProperty("ownershipMode");
   });
 
   it("treats private, free, declined, past, and too-soon calendar events as ineligible", async () => {
