@@ -18,7 +18,7 @@ import {
   listMeetingTranscriptSourceState,
   getWorkspacePlanState,
   listAiWorkspaceProviders,
-  listEnterpriseServices,
+  listWorkspaceEnterpriseServiceStates,
 } from "@corgtex/domain";
 import { env, prisma } from "@corgtex/shared";
 import { requirePageActor } from "@/lib/auth";
@@ -37,6 +37,7 @@ import {
   deleteOAuthConnectionAction,
   runOAuthConnectionSyncAction,
   updateOAuthConnectionSettingsAction,
+  requestManagedEnterpriseServiceAction,
 } from "../actions";
 import { CorgtexConnectorManager } from "./CorgtexConnectorManager";
 import { MembersTable } from "./MembersTable";
@@ -422,7 +423,27 @@ export default async function SettingsPage({
       }))
     : [];
   const enterpriseServices = featureFlags.AI_WORKSPACES && featureFlags.MANAGED_ENTERPRISE_SERVICES
-    ? listEnterpriseServices().map((service) => ({ ...service }))
+    ? (await listWorkspaceEnterpriseServiceStates(actor, workspaceId)).map((service) => ({
+        key: service.key,
+        label: service.label,
+        outcome: service.outcome,
+        description: service.description,
+        defaultOwnershipMode: service.defaultOwnershipMode,
+        persistedId: service.persistedId,
+        ownershipMode: service.ownershipMode,
+        healthStatus: service.healthStatus,
+        providerKey: service.providerKey,
+        lastHealthCheckAt: service.lastHealthCheckAt?.toISOString() ?? null,
+        lastSuccessfulHealthCheckAt: service.lastSuccessfulHealthCheckAt?.toISOString() ?? null,
+        lastSuccessfulSyncAt: service.lastSuccessfulSyncAt?.toISOString() ?? null,
+        lastError: service.lastError,
+        usageLabel: service.usageLabel,
+        usageDetail: service.usageDetail,
+        supportEscalationStatus: service.supportEscalationStatus,
+        supportEscalatedAt: service.supportEscalatedAt?.toISOString() ?? null,
+        supportNotesMd: service.supportNotesMd,
+        readinessChecks: service.readinessChecks,
+      }))
     : [];
   const selectedProviderKey = normalizeSelectedProvider(search.provider, aiWorkspaceProviders);
   const selectedServiceKey = normalizeSelectedService(search.service, enterpriseServices);
@@ -978,6 +999,9 @@ export default async function SettingsPage({
           providers={aiWorkspaceProviders}
           enterpriseServices={enterpriseServices}
           managedServicesEnabled={featureFlags.MANAGED_ENTERPRISE_SERVICES}
+          canRequestManagedServices={isAdmin}
+          requestManagedServiceAction={requestManagedEnterpriseServiceAction}
+          workspaceId={workspaceId}
           selectedProviderKey={selectedProviderKey}
           selectedServiceKey={selectedServiceKey}
         />

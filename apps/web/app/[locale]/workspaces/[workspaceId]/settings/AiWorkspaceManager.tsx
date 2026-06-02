@@ -5,9 +5,15 @@ import { useMemo, useState } from "react";
 import {
   buildAiWorkspaceSetupCards,
   capabilityLabel,
+  enterpriseServiceHealthLabel,
+  enterpriseServiceHealthTone,
+  enterpriseServiceOwnershipLabel,
+  enterpriseServiceProviderLabel,
+  formatServiceTimestamp,
   groupAiWorkspaceProviders,
   type AiWorkspaceProviderView,
   type AiWorkspaceSetupAction,
+  type EnterpriseServiceHealthTone,
   type EnterpriseServiceView,
 } from "./ai-workspace-ui";
 
@@ -20,10 +26,13 @@ type ActionStatus = {
 
 type Props = {
   connectorUrl: string;
+  workspaceId: string;
   origin: string;
   providers: AiWorkspaceProviderView[];
   enterpriseServices: EnterpriseServiceView[];
   managedServicesEnabled: boolean;
+  canRequestManagedServices: boolean;
+  requestManagedServiceAction: (formData: FormData) => void | Promise<void>;
   selectedProviderKey: string | null;
   selectedServiceKey: string | null;
 };
@@ -52,16 +61,23 @@ function groupTitle(group: "default" | "byo" | "advanced") {
   return "Advanced clients";
 }
 
-function ownershipText(value: string) {
-  return value.replace(/_/g, " ").toLowerCase();
+function healthTagStyle(tone: EnterpriseServiceHealthTone) {
+  if (tone === "success") return { background: "var(--accent-soft)" };
+  if (tone === "warning") return { background: "rgba(255, 165, 0, 0.12)", border: "1px solid rgba(255, 165, 0, 0.35)" };
+  if (tone === "danger") return { background: "rgba(180, 35, 24, 0.1)", border: "1px solid rgba(180, 35, 24, 0.28)" };
+  if (tone === "info") return { background: "var(--surface-strong)" };
+  return { background: "transparent" };
 }
 
 export function AiWorkspaceManager({
   connectorUrl,
+  workspaceId,
   origin,
   providers,
   enterpriseServices,
   managedServicesEnabled,
+  canRequestManagedServices,
+  requestManagedServiceAction,
   selectedProviderKey,
   selectedServiceKey,
 }: Props) {
@@ -454,32 +470,105 @@ export function AiWorkspaceManager({
           </div>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 14 }}>
             {enterpriseServices.map((service) => (
-              <article
-                key={service.key}
-                id={`enterprise-service-${service.key}`}
-                style={{
-                  border: `1px solid ${selectedServiceKey === service.key ? "var(--accent)" : "var(--line)"}`,
-                  borderRadius: 8,
-                  display: "grid",
-                  gap: 10,
-                  padding: 16,
-                }}
-              >
-                <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "flex-start" }}>
-                  <h3 style={{ fontSize: "1rem", margin: 0 }}>{service.label}</h3>
-                  <span className="tag info">{ownershipText(service.defaultOwnershipMode)}</span>
-                </div>
-                <p className="nr-item-meta" style={{ fontSize: "0.86rem", lineHeight: 1.42, margin: 0 }}>
-                  {service.outcome}
-                </p>
-                <p className="nr-item-meta" style={{ fontSize: "0.82rem", lineHeight: 1.42, margin: 0 }}>
-                  {service.description}
-                </p>
-                <div className="actions-inline" style={{ gap: 6 }}>
-                  <span className="tag">Needs setup</span>
-                  <span className="tag">Request managed rollout</span>
-                </div>
-              </article>
+              (() => {
+                const healthTone = enterpriseServiceHealthTone(service.healthStatus);
+                const supportRequested = service.supportEscalationStatus === "REQUESTED";
+                return (
+                  <article
+                    key={service.key}
+                    id={`enterprise-service-${service.key}`}
+                    style={{
+                      border: `1px solid ${selectedServiceKey === service.key ? "var(--accent)" : "var(--line)"}`,
+                      borderRadius: 8,
+                      display: "grid",
+                      gap: 12,
+                      padding: 16,
+                    }}
+                  >
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "flex-start" }}>
+                      <h3 style={{ fontSize: "1rem", margin: 0 }}>{service.label}</h3>
+                      <span className="tag info">{enterpriseServiceOwnershipLabel(service.ownershipMode ?? service.defaultOwnershipMode)}</span>
+                    </div>
+                    <p className="nr-item-meta" style={{ fontSize: "0.86rem", lineHeight: 1.42, margin: 0 }}>
+                      {service.outcome}
+                    </p>
+                    <div className="actions-inline" style={{ gap: 6 }}>
+                      <span className="tag" style={healthTagStyle(healthTone)}>
+                        {enterpriseServiceHealthLabel(service.healthStatus)}
+                      </span>
+                      <span className="tag">{enterpriseServiceProviderLabel(service.providerKey)}</span>
+                      {supportRequested ? <span className="tag info">Support requested</span> : null}
+                    </div>
+                    <dl
+                      style={{
+                        display: "grid",
+                        gap: 8,
+                        gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))",
+                        margin: 0,
+                      }}
+                    >
+                      <div>
+                        <dt className="nr-item-meta" style={{ fontSize: "0.72rem", textTransform: "uppercase" }}>Last check</dt>
+                        <dd style={{ fontSize: "0.82rem", margin: 0 }}>{formatServiceTimestamp(service.lastHealthCheckAt)}</dd>
+                      </div>
+                      <div>
+                        <dt className="nr-item-meta" style={{ fontSize: "0.72rem", textTransform: "uppercase" }}>Last sync</dt>
+                        <dd style={{ fontSize: "0.82rem", margin: 0 }}>{formatServiceTimestamp(service.lastSuccessfulSyncAt)}</dd>
+                      </div>
+                      <div>
+                        <dt className="nr-item-meta" style={{ fontSize: "0.72rem", textTransform: "uppercase" }}>Usage</dt>
+                        <dd style={{ fontSize: "0.82rem", margin: 0 }}>{service.usageLabel ?? "Not recorded"}</dd>
+                      </div>
+                    </dl>
+                    {service.usageDetail ? (
+                      <p className="nr-item-meta" style={{ fontSize: "0.8rem", lineHeight: 1.4, margin: 0 }}>
+                        {service.usageDetail}
+                      </p>
+                    ) : null}
+                    {service.lastError ? (
+                      <p className="form-message form-message-error" style={{ margin: 0, whiteSpace: "pre-wrap" }}>
+                        {service.lastError}
+                      </p>
+                    ) : null}
+                    {service.readinessChecks?.length ? (
+                      <ul className="stack" style={{ gap: 5, margin: 0, paddingLeft: 18 }}>
+                        {service.readinessChecks.map((check) => (
+                          <li key={check.key} className="nr-item-meta" style={{ color: check.ok ? "var(--muted)" : "var(--text)", fontSize: "0.8rem" }}>
+                            {check.label}: {check.detail}
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="nr-item-meta" style={{ fontSize: "0.82rem", lineHeight: 1.42, margin: 0 }}>
+                        {service.description}
+                      </p>
+                    )}
+                    {canRequestManagedServices ? (
+                      <form action={requestManagedServiceAction} className="stack" style={{ borderTop: "1px solid var(--line)", gap: 8, paddingTop: 10 }}>
+                        <input type="hidden" name="workspaceId" value={workspaceId} />
+                        <input type="hidden" name="serviceKey" value={service.key} />
+                        <textarea
+                          name="supportNotesMd"
+                          defaultValue={service.supportNotesMd ?? ""}
+                          placeholder="Rollout notes, support blocker, or managed-service request"
+                          rows={2}
+                          style={{ fontSize: "0.82rem", minHeight: 58 }}
+                        />
+                        <div className="actions-inline">
+                          <button type="submit" className="button secondary small">
+                            {supportRequested ? "Update escalation" : "Request CORGTEX-managed rollout"}
+                          </button>
+                          {service.supportEscalatedAt ? (
+                            <span className="nr-item-meta" style={{ fontSize: "0.78rem" }}>
+                              Requested {formatServiceTimestamp(service.supportEscalatedAt)}
+                            </span>
+                          ) : null}
+                        </div>
+                      </form>
+                    ) : null}
+                  </article>
+                );
+              })()
             ))}
           </div>
         </section>

@@ -8,6 +8,7 @@ import {
 } from "@prisma/client";
 import { decryptSecret, encryptSecret, env, prisma, randomOpaqueToken } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
+import { enterpriseServiceToDb } from "./ai-workspaces";
 import { requireWorkspaceMembership } from "./auth";
 import { AppError, invariant } from "./errors";
 import { intakeMeetingTranscript } from "./meeting-transcript-intake";
@@ -246,7 +247,7 @@ type SafeRecorderCalendarSource = {
   updatedAt: Date;
 };
 
-type RecorderReadinessCheck = {
+export type RecorderReadinessCheck = {
   key: string;
   label: string;
   ok: boolean;
@@ -1879,6 +1880,12 @@ export async function updateMeetingRecorderConfig(actor: AppActor, params: {
       },
     });
   }
+  await syncMeetingRecorderEnterpriseService(params.workspaceId).catch((error) => {
+    recorderLog("warn", "enterprise_service_sync_failed", {
+      workspaceId: params.workspaceId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  });
   return config;
 }
 
@@ -2042,7 +2049,114 @@ export async function getMeetingRecorderEnterpriseReadiness(workspaceId: string)
     checks,
     calendarSource,
     lastSmokeRun,
+    config,
   };
+}
+
+function failedRecorderChecks(checks: RecorderReadinessCheck[]) {
+  return checks.filter((check) => !check.ok);
+}
+
+function recorderServiceHealthStatus(params: {
+  featureEnabled: boolean;
+  configEnabled: boolean;
+  checks: RecorderReadinessCheck[];
+}) {
+  if (!params.featureEnabled || !params.configEnabled) return "NEEDS_SETUP" as const;
+  const failed = failedRecorderChecks(params.checks);
+  if (failed.length === 0) return "ACTIVE" as const;
+  if (failed.some((check) => check.key === "calendar_source")) return "DISCONNECTED" as const;
+  if (failed.some((check) => check.key === "worker_sync" || check.key === "last_smoke")) return "UNHEALTHY" as const;
+  return "UNHEALTHY" as const;
+}
+
+function recorderServiceLastError(checks: RecorderReadinessCheck[]) {
+  const failed = failedRecorderChecks(checks);
+  if (failed.length === 0) return null;
+  return failed.map((check) => `${check.label}: ${check.detail}`).join("\n");
+}
+
+export async function getMeetingRecorderEnterpriseServiceSnapshot(workspaceId: string, now = new Date()) {
+  const [readiness, usage] = await Promise.all([
+    getMeetingRecorderEnterpriseReadiness(workspaceId),
+    getMeetingRecorderMonthlyUsage(workspaceId, now),
+  ]);
+  const entitlement = readiness.checks.find((check) => check.key === "entitlement")?.ok ?? false;
+  const healthStatus = recorderServiceHealthStatus({
+    featureEnabled: entitlement,
+    configEnabled: readiness.config.enabled,
+    checks: readiness.checks,
+  });
+  const usageJson = {
+    recorder: {
+      periodStart: usage.periodStart.toISOString(),
+      periodEnd: usage.periodEnd.toISOString(),
+      usedSeconds: usage.usedSeconds,
+      usedMinutes: usage.usedMinutes,
+      monthlyMinuteCap: readiness.config.monthlyMinuteCap,
+      remainingMinutes: Math.max(0, readiness.config.monthlyMinuteCap - usage.usedMinutes),
+    },
+    readiness: {
+      ready: readiness.ready,
+      failedChecks: failedRecorderChecks(readiness.checks).map((check) => ({
+        key: check.key,
+        label: check.label,
+        detail: check.detail,
+      })),
+    },
+  };
+
+  return {
+    serviceKey: "MEETING_RECORDER" as const,
+    displayName: "Meeting recorder",
+    providerKey: readiness.config.defaultProvider,
+    ownershipMode: entitlement ? ("CORGTEX_MANAGED" as const) : ("CUSTOMER_MANAGED" as const),
+    healthStatus,
+    lastHealthCheckAt: now,
+    lastSuccessfulHealthCheckAt: readiness.ready ? now : null,
+    lastSuccessfulSyncAt: readiness.calendarSource?.lastSyncAt ?? null,
+    lastError: recorderServiceLastError(readiness.checks),
+    usageJson,
+    usageLabel: `${usage.usedMinutes} min this month`,
+    usageDetail: `${usage.usedMinutes} of ${readiness.config.monthlyMinuteCap} recorder minutes used in the current billing period.`,
+    readinessChecks: readiness.checks,
+  };
+}
+
+export async function syncMeetingRecorderEnterpriseService(workspaceId: string, now = new Date()) {
+  const snapshot = await getMeetingRecorderEnterpriseServiceSnapshot(workspaceId, now);
+
+  return prisma.workspaceEnterpriseService.upsert({
+    where: {
+      workspaceId_serviceKey: {
+        workspaceId,
+        serviceKey: enterpriseServiceToDb("meeting_recorder"),
+      },
+    },
+    update: {
+      displayName: snapshot.displayName,
+      providerKey: snapshot.providerKey,
+      healthStatus: snapshot.healthStatus,
+      lastHealthCheckAt: snapshot.lastHealthCheckAt,
+      lastSuccessfulHealthCheckAt: snapshot.lastSuccessfulHealthCheckAt ?? undefined,
+      lastSuccessfulSyncAt: snapshot.lastSuccessfulSyncAt,
+      lastError: snapshot.lastError,
+      usageJson: jsonValue(snapshot.usageJson),
+    },
+    create: {
+      workspaceId,
+      serviceKey: enterpriseServiceToDb("meeting_recorder"),
+      ownershipMode: snapshot.ownershipMode,
+      displayName: snapshot.displayName,
+      providerKey: snapshot.providerKey,
+      healthStatus: snapshot.healthStatus,
+      lastHealthCheckAt: snapshot.lastHealthCheckAt,
+      lastSuccessfulHealthCheckAt: snapshot.lastSuccessfulHealthCheckAt,
+      lastSuccessfulSyncAt: snapshot.lastSuccessfulSyncAt,
+      lastError: snapshot.lastError,
+      usageJson: jsonValue(snapshot.usageJson),
+    },
+  });
 }
 
 export async function runMeetingRecorderSmoke(params: {

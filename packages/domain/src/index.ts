@@ -58,6 +58,7 @@ export * from "./impact-footprint";
 export * from "./privacy";
 export * from "./draft-permissions";
 export * from "./catalog";
+export * from "./enterprise-services";
 export * from "./execution-plumbing";
 export * from "./tool-links";
 export * from "./build-artifacts";

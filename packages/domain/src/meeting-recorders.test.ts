@@ -11,6 +11,9 @@ const { prismaMock, fetchMock } = vi.hoisted(() => {
       findUnique: vi.fn(),
       upsert: vi.fn(),
     },
+    workspaceEnterpriseService: {
+      upsert: vi.fn(),
+    },
     workspaceMeetingRecorderConfig: {
       findUnique: vi.fn(),
       upsert: vi.fn(),
@@ -785,6 +788,100 @@ describe("meeting recorder domain", () => {
     })).rejects.toMatchObject({
       status: 402,
       code: "RECORDER_MONTHLY_CAP_EXCEEDED",
+    });
+  });
+
+  it("syncs enterprise service status when recorder config changes", async () => {
+    const { updateMeetingRecorderConfig } = await import("./meeting-recorders");
+    const config = {
+      workspaceId: "workspace-1",
+      enabled: true,
+      defaultProvider: "RECALL_AI",
+      fallbackProvider: null,
+      botName: "Corgtex Recorder",
+      entryMessage: "Recording notice",
+      autoRecordEnabled: true,
+      monthlyMinuteCap: 6000,
+    };
+    const lastSyncAt = new Date("2026-05-05T18:00:00.000Z");
+    prismaMock.workspaceMeetingRecorderConfig.upsert.mockResolvedValue(config);
+    prismaMock.workspaceMeetingRecorderConfig.findUnique.mockResolvedValue(config);
+    prismaMock.workspaceRecorderCalendarSource.findUnique.mockResolvedValue({
+      id: "source-1",
+      workspaceId: "workspace-1",
+      provider: "MICROSOFT",
+      providerAccountId: "ms-user-1",
+      providerAccountEmail: "calendar@customer.test",
+      displayName: "Customer Recorder",
+      status: "ACTIVE",
+      lastSyncAt,
+      lastSyncStartedAt: new Date("2026-05-05T17:59:00.000Z"),
+      lastSyncCompletedAt: lastSyncAt,
+      lastSyncJobId: "job-success",
+      lastSyncError: null,
+      lastDryRunAt: null,
+      lastUpcomingEventCount: 1,
+      lastSchedulableEventCount: 1,
+      createdAt: new Date("2026-05-05T17:00:00.000Z"),
+      updatedAt: lastSyncAt,
+    });
+    prismaMock.meetingRecorderSmokeRun.findFirst.mockResolvedValue({
+      id: "smoke-1",
+      workspaceId: "workspace-1",
+      status: "COMPLETED",
+      provider: "RECALL_AI",
+      createdAt: new Date("2026-05-05T18:05:00.000Z"),
+    });
+    prismaMock.meetingRecording.aggregate.mockResolvedValue({ _sum: { durationSeconds: 1500 } });
+    prismaMock.workspaceEnterpriseService.upsert.mockResolvedValue({
+      id: "service-recorder",
+      workspaceId: "workspace-1",
+      serviceKey: "MEETING_RECORDER",
+      ownershipMode: "CORGTEX_MANAGED",
+      healthStatus: "ACTIVE",
+    });
+
+    await updateMeetingRecorderConfig(operatorActor, {
+      workspaceId: "workspace-1",
+      enabled: true,
+      defaultProvider: "RECALL_AI",
+      fallbackProvider: null,
+      botName: "Corgtex Recorder",
+      entryMessage: "Recording notice",
+      autoRecordEnabled: true,
+      monthlyMinuteCap: 6000,
+    });
+
+    expect(prismaMock.workspaceEnterpriseService.upsert).toHaveBeenCalledWith({
+      where: {
+        workspaceId_serviceKey: {
+          workspaceId: "workspace-1",
+          serviceKey: "MEETING_RECORDER",
+        },
+      },
+      update: expect.objectContaining({
+        displayName: "Meeting recorder",
+        providerKey: "RECALL_AI",
+        healthStatus: "ACTIVE",
+        lastSuccessfulSyncAt: lastSyncAt,
+        lastError: null,
+        usageJson: expect.objectContaining({
+          recorder: expect.objectContaining({
+            usedSeconds: 1500,
+            usedMinutes: 25,
+            monthlyMinuteCap: 6000,
+            remainingMinutes: 5975,
+          }),
+        }),
+      }),
+      create: expect.objectContaining({
+        workspaceId: "workspace-1",
+        serviceKey: "MEETING_RECORDER",
+        ownershipMode: "CORGTEX_MANAGED",
+        displayName: "Meeting recorder",
+        providerKey: "RECALL_AI",
+        healthStatus: "ACTIVE",
+      }),
     });
   });
 
