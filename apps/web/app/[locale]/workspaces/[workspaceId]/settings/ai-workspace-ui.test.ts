@@ -116,6 +116,8 @@ describe("AI workspace UI helpers", () => {
 
     expect(cards.find((card) => card.provider.key === "claude")?.actions.map((action) => action.kind)).toEqual([
       "open",
+      "copy",
+      "copy",
       "copyAndOpen",
       "copy",
     ]);
@@ -126,6 +128,35 @@ describe("AI workspace UI helpers", () => {
     expect(cards.find((card) => card.provider.key === "claude_code")?.command).toBe(
       "claude mcp add --transport http corgtex --scope user https://app.corgtex.com/mcp",
     );
+    expect(cards.find((card) => card.provider.key === "claude_code")?.resources[0].value).toContain(
+      "Install command: claude mcp add --transport http corgtex --scope user https://app.corgtex.com/mcp",
+    );
+  });
+
+  it("adds copyable setup recipes and safe test prompts for BYO and advanced providers", () => {
+    const providers = [
+      provider({ key: "chatgpt", label: "ChatGPT", category: "BYO" }),
+      provider({ key: "claude", label: "Claude", category: "BYO" }),
+      provider({ key: "gemini", label: "Gemini CLI", category: "ADVANCED" }),
+      provider({ key: "cursor", label: "Cursor", category: "ADVANCED" }),
+      provider({ key: "claude_code", label: "Claude Code", category: "ADVANCED" }),
+      provider({ key: "generic_mcp", label: "Generic MCP client", category: "ADVANCED" }),
+    ];
+
+    const cards = buildAiWorkspaceSetupCards(providers, "https://app.corgtex.com/mcp", "https://app.corgtex.com");
+
+    for (const providerKey of ["chatgpt", "claude", "gemini", "cursor", "claude_code", "generic_mcp"]) {
+      const card = cards.find((entry) => entry.provider.key === providerKey);
+
+      expect(card?.resources.map((resource) => resource.label)).toEqual(["Instructions package", "Test prompt"]);
+      expect(card?.resources[0].value).toContain("Corgtex MCP server: https://app.corgtex.com/mcp");
+      expect(card?.resources[0].value).toContain("submit_execution_result");
+      expect(card?.resources[1].value).toContain("without making external changes");
+      expect(card?.resources[1].value).toContain("Do not create records, submit results, change files, deploy, or write to external systems.");
+      expect(card?.verificationChecks.length).toBeGreaterThan(0);
+      expect(card?.actions.map((action) => action.label)).toContain("Copy instructions");
+      expect(card?.actions.map((action) => action.label)).toContain("Copy test prompt");
+    }
   });
 
   it("formats known and unknown capability labels", () => {
