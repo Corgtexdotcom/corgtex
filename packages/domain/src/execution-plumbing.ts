@@ -303,7 +303,6 @@ function serializeExecutionRequest(request: NonNullable<ExecutionRequestRecord>)
       id: request.writebackTargetId,
       label: request.writebackTargetLabel,
     } : null,
-    packet: request.packetJson,
     results: request.results.map(serializeExecutionResult),
     createdAt: request.createdAt,
     updatedAt: request.updatedAt,
@@ -441,8 +440,12 @@ export async function createExecutionRequest(actor: AppActor, params: CreateExec
   invariant(goal.length > 0, 400, "INVALID_INPUT", "Execution goal is required.");
   const provider = normalizeProvider(params.provider);
   const targetType = normalizeExecutionTargetType(params.writebackTargetType);
-  const target = await validateWritebackTarget(params.workspaceId, targetType, params.writebackTargetId, actor, membership);
   const allowedScopes = normalizeKnownScopes(params.allowedScopes ?? defaultScopesForTarget(targetType));
+  if (targetType) {
+    requireExecutionScope(actor, targetReadScope(targetType));
+    requireExecutionScope(actor, targetWriteScope(targetType));
+  }
+  const target = await validateWritebackTarget(params.workspaceId, targetType, params.writebackTargetId, actor, membership);
 
   const workspace = await prisma.workspace.findUnique({
     where: { id: params.workspaceId },
@@ -564,6 +567,11 @@ export async function getExecutionPacket(actor: AppActor, params: { workspaceId:
 export async function getCompanyContext(actor: AppActor, workspaceId: string) {
   requireExecutionScope(actor, "execution:read");
   requireExecutionScope(actor, "workspace:read");
+  requireExecutionScope(actor, "actions:read");
+  requireExecutionScope(actor, "tensions:read");
+  requireExecutionScope(actor, "proposals:read");
+  requireExecutionScope(actor, "meetings:read");
+  requireExecutionScope(actor, "brain:read");
   await requireWorkspaceMembership({ actor, workspaceId });
 
   const [workspace, actions, tensions, proposals, meetings, articles] = await Promise.all([

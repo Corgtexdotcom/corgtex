@@ -213,6 +213,7 @@ describe("execution plumbing domain", () => {
       provider: "OPENWORK",
       writebackTarget: { type: "ACTION" },
     });
+    expect(created).not.toHaveProperty("packet");
     expect(prismaMock.executionRequest.create).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
         actorJson: expect.objectContaining({ accessToken: "[redacted]" }),
@@ -231,6 +232,26 @@ describe("execution plumbing domain", () => {
       action: "execution_request.created",
       entityType: "ExecutionRequest",
     }));
+  });
+
+  it("requires target scopes when creating scoped execution requests", async () => {
+    const limitedAgent: AppActor = {
+      ...agentActor,
+      scopes: ["execution:write"],
+    };
+
+    const { createExecutionRequest } = await import("./execution-plumbing");
+    await expect(createExecutionRequest(limitedAgent, {
+      workspaceId: "workspace-1",
+      provider: "openwork",
+      goal: "Draft launch follow-up",
+      writebackTargetType: "ACTION",
+      writebackTargetId: "action-1",
+      idempotencyKey: "limited-create",
+    })).rejects.toThrow("Agent credential is missing the required scope: actions:read.");
+
+    expect(prismaMock.action.findFirst).not.toHaveBeenCalled();
+    expect(prismaMock.executionRequest.create).not.toHaveBeenCalled();
   });
 
   it("returns existing execution requests before revalidating stale targets", async () => {
@@ -357,6 +378,16 @@ describe("execution plumbing domain", () => {
         ],
       }),
     }));
+  });
+
+  it("requires content read scopes before returning company context", async () => {
+    const { getCompanyContext } = await import("./execution-plumbing");
+
+    await expect(getCompanyContext(agentActor, "workspace-1")).rejects.toThrow("Agent credential is missing the required scope: tensions:read.");
+
+    expect(requireWorkspaceMembership).not.toHaveBeenCalled();
+    expect(prismaMock.action.findMany).not.toHaveBeenCalled();
+    expect(prismaMock.tension.findMany).not.toHaveBeenCalled();
   });
 
   it("applies Brain draft visibility when listing article write-back targets", async () => {

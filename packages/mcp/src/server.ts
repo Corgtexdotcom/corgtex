@@ -206,7 +206,7 @@ const TOOL_CAPABILITIES = {
   daily_overview: { scopes: ["workspace:read", "actions:read", "proposals:read", "tensions:read", "meetings:read", "finance:read"] },
   create_execution_request: { scopes: ["execution:write"] },
   get_execution_packet: { scopes: ["execution:read"] },
-  get_company_context: { scopes: ["execution:read", "workspace:read"] },
+  get_company_context: { scopes: ["execution:read", "workspace:read", "actions:read", "tensions:read", "proposals:read", "meetings:read", "brain:read"] },
   list_writeback_targets: { scopes: ["execution:read"] },
   submit_execution_result: { scopes: ["execution:write"] },
   record_support_audit: { scopes: ["support:write"], sensitive: true },
@@ -305,6 +305,8 @@ const TOOL_CAPABILITIES = {
   list_ledger_transactions: { scopes: ["finance:read"] },
 } satisfies Record<string, ToolCapability>;
 
+const MUTATING_READ_PREFIX_TOOLS = new Set(["get_execution_packet"]);
+
 function summarizeForExecutionAudit(value: unknown): unknown {
   if (value === null || value === undefined) return null;
   if (typeof value === "string") return { type: "string", length: value.length };
@@ -320,7 +322,7 @@ function summarizeForExecutionAudit(value: unknown): unknown {
 }
 
 function annotationsForTool(name: string) {
-  const readOnlyHint = /^(search|fetch|list_|get_|daily_overview$)/.test(name);
+  const readOnlyHint = /^(search|fetch|list_|get_|daily_overview$)/.test(name) && !MUTATING_READ_PREFIX_TOOLS.has(name);
   const capability = TOOL_CAPABILITIES[name as keyof typeof TOOL_CAPABILITIES];
   const policy = evaluateDelegatedActionPolicy({
     toolName: name,

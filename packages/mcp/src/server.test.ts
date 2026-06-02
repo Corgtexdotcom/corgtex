@@ -271,6 +271,12 @@ describe("createCorgtexMcpServer", () => {
       requestId: "request-1",
     });
 
+    expect((server as any)._registeredTools.get_execution_packet.annotations).toMatchObject({
+      readOnlyHint: false,
+      idempotentHint: false,
+      destructiveHint: false,
+      openWorldHint: false,
+    });
     expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "execution:write");
     expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "execution:read");
     expect(createExecutionRequestMock).toHaveBeenCalledWith(
@@ -313,6 +319,11 @@ describe("createCorgtexMcpServer", () => {
 
     expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "workspace:read");
     expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "execution:read");
+    expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "actions:read");
+    expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "tensions:read");
+    expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "proposals:read");
+    expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "meetings:read");
+    expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "brain:read");
     expect(getCompanyContextMock).toHaveBeenCalledWith(expect.objectContaining({ kind: "agent" }), "ws-1");
     expect(listWritebackTargetsMock).toHaveBeenCalledWith(
       expect.objectContaining({ kind: "agent" }),
