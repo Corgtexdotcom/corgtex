@@ -1,8 +1,9 @@
 import { prisma } from "@corgtex/shared";
+import type { Prisma } from "@prisma/client";
 import type { AppActor } from "@corgtex/shared";
 import { appendEvents } from "./events";
 import { requireWorkspaceMembership } from "./auth";
-import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
+import { archiveFilterWhere, type ArchiveFilter } from "./archive";
 import { invariant } from "./errors";
 import {
   createRoleVersionSnapshot,
@@ -11,6 +12,19 @@ import {
   ensureRoleOnboardingForAssignment,
   startRoleHolderHistory,
 } from "./role-onboarding";
+
+function actorUserId(actor: AppActor) {
+  return actor.kind === "user" ? actor.user.id : null;
+}
+
+function actorLabel(actor: AppActor) {
+  if (actor.kind === "user") return actor.user.displayName ?? actor.user.email;
+  return actor.label ?? actor.authProvider ?? "agent";
+}
+
+function jsonSnapshot(record: unknown) {
+  return JSON.parse(JSON.stringify(record)) as Record<string, unknown>;
+}
 
 export async function listRoles(workspaceId: string, opts?: { archiveFilter?: ArchiveFilter }) {
   return prisma.role.findMany({
@@ -272,14 +286,94 @@ export async function deleteRole(actor: AppActor, params: {
     allowedRoles: ["FACILITATOR", "ADMIN"],
   });
 
-  await archiveWorkspaceArtifact(actor, {
-    workspaceId: params.workspaceId,
-    entityType: "Role",
-    entityId: params.roleId,
-    reason: "Archived from role delete path.",
-  });
+  return prisma.$transaction(async (tx) => {
+    const role = await tx.role.findFirst({
+      where: {
+        id: params.roleId,
+        circle: {
+          workspaceId: params.workspaceId,
+        },
+      },
+    });
+    invariant(role, 404, "NOT_FOUND", "Role not found.");
 
-  return { id: params.roleId };
+    const archiveReason = "Archived from role delete path.";
+    const now = new Date();
+    if (!role.archivedAt) {
+      const previousState = jsonSnapshot(role);
+      await tx.role.update({
+        where: { id: role.id },
+        data: {
+          archivedAt: now,
+          archivedByUserId: actorUserId(actor),
+          archiveReason,
+        },
+      });
+
+      await tx.workspaceArchiveRecord.create({
+        data: {
+          workspaceId: params.workspaceId,
+          entityType: "Role",
+          entityId: role.id,
+          entityLabel: role.name,
+          previousState: previousState as Prisma.InputJsonObject,
+          archiveReason,
+          archivedByUserId: actorUserId(actor),
+          archivedByLabel: actorLabel(actor),
+          archivedAt: now,
+        },
+      });
+
+      await tx.auditLog.create({
+        data: {
+          workspaceId: params.workspaceId,
+          actorUserId: actorUserId(actor),
+          action: "workspace-artifact.archived",
+          entityType: "Role",
+          entityId: role.id,
+          meta: {
+            label: role.name,
+            reason: archiveReason,
+          },
+        },
+      });
+    }
+
+    await tx.roleHolderHistory.updateMany({
+      where: {
+        workspaceId: params.workspaceId,
+        roleId: params.roleId,
+        endedAt: null,
+      },
+      data: {
+        endedAt: now,
+        endedByUserId: actorUserId(actor),
+      },
+    });
+
+    await tx.roleOnboardingSession.updateMany({
+      where: {
+        workspaceId: params.workspaceId,
+        roleId: params.roleId,
+        status: { in: ["PENDING", "ACTIVE"] },
+      },
+      data: {
+        status: "DISMISSED",
+        dismissedAt: now,
+      },
+    });
+
+    await tx.roleAssignment.deleteMany({
+      where: { roleId: params.roleId },
+    });
+
+    await tx.circleAgentAssignment.updateMany({
+      where: { roleId: params.roleId },
+      data: { roleId: null },
+    });
+
+    return { id: params.roleId };
+  });
 }
 
 export async function assignRole(actor: AppActor, params: {

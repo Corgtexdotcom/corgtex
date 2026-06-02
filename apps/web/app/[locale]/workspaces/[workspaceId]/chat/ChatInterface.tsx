@@ -192,23 +192,33 @@ export function ChatInterface({
       const res = await fetch(`/api/workspaces/${workspaceId}/conversations/${id}`);
       if (!res.ok) throw new Error(t("errorFailedToLoad"));
       const data = await res.json();
-      setTurns(data.conversation.turns);
-      if (data.conversation.roleOnboarding) {
-        setConversations((prev) =>
-          prev.map((conversation) =>
-            conversation.id === id
-              ? {
-                ...conversation,
-                roleOnboarding: {
-                  id: data.conversation.roleOnboarding.id,
-                  status: data.conversation.roleOnboarding.status,
-                  roleName: data.conversation.roleOnboarding.role.name,
-                },
-              }
-              : conversation
-          )
+      const loadedTurns = data.conversation.turns as Turn[];
+      const lastTurn = loadedTurns.at(-1);
+      const loadedConversation: ConversationSummary = {
+        id: data.conversation.id,
+        topic: data.conversation.topic,
+        agentKey: data.conversation.agentKey,
+        status: data.conversation.status,
+        updatedAt: data.conversation.updatedAt,
+        lastMessage: lastTurn?.assistantMessage || lastTurn?.userMessage || null,
+        roleOnboarding: data.conversation.roleOnboarding
+          ? {
+            id: data.conversation.roleOnboarding.id,
+            status: data.conversation.roleOnboarding.status,
+            roleName: data.conversation.roleOnboarding.role.name,
+          }
+          : null,
+      };
+      setTurns(loadedTurns);
+      setConversations((prev) => {
+        const existing = prev.find((conversation) => conversation.id === id);
+        if (!existing) return [loadedConversation, ...prev];
+        return prev.map((conversation) =>
+          conversation.id === id
+            ? { ...conversation, ...loadedConversation }
+            : conversation
         );
-      }
+      });
       setSessionId(id);
       setError(null);
     } catch {

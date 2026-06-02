@@ -31,7 +31,11 @@ const { prismaMock } = vi.hoisted(() => {
       findUnique: vi.fn(),
       upsert: vi.fn(),
       delete: vi.fn(),
+      deleteMany: vi.fn(),
       findMany: vi.fn(),
+    },
+    circleAgentAssignment: {
+      updateMany: vi.fn(),
     },
     roleHolderHistory: {
       create: vi.fn(),
@@ -97,6 +101,8 @@ describe("roles domain", () => {
     prismaMock.roleOnboardingSession.updateMany.mockResolvedValue({ count: 1 });
     prismaMock.notification.create.mockResolvedValue({});
     prismaMock.roleAssignment.upsert.mockResolvedValue({ id: "assignment-1" });
+    prismaMock.roleAssignment.deleteMany.mockResolvedValue({ count: 1 });
+    prismaMock.circleAgentAssignment.updateMany.mockResolvedValue({ count: 1 });
   });
 
   it("listRoles scopes roles by workspace through circles", async () => {
@@ -302,6 +308,35 @@ describe("roles domain", () => {
       where: { id: "role-1" },
       data: expect.objectContaining({ archivedAt: expect.any(Date) }),
     }));
+    expect(prismaMock.roleHolderHistory.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        workspaceId: "workspace-1",
+        roleId: "role-1",
+        endedAt: null,
+      }),
+      data: expect.objectContaining({
+        endedAt: expect.any(Date),
+        endedByUserId: "operator-1",
+      }),
+    }));
+    expect(prismaMock.roleOnboardingSession.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        workspaceId: "workspace-1",
+        roleId: "role-1",
+        status: { in: ["PENDING", "ACTIVE"] },
+      }),
+      data: expect.objectContaining({
+        status: "DISMISSED",
+        dismissedAt: expect.any(Date),
+      }),
+    }));
+    expect(prismaMock.roleAssignment.deleteMany).toHaveBeenCalledWith({
+      where: { roleId: "role-1" },
+    });
+    expect(prismaMock.circleAgentAssignment.updateMany).toHaveBeenCalledWith({
+      where: { roleId: "role-1" },
+      data: { roleId: null },
+    });
   });
 
   it("deleteRole rejects a missing role", async () => {
