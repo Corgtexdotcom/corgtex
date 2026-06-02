@@ -82,6 +82,14 @@ function agentRunCountsByAgent(runs: any[]) {
   return Array.from(counts.entries()).map(([agentKey, count]) => ({ agentKey, count }));
 }
 
+function pendingApprovalRunsForGovernance(governance: any) {
+  const summaryRuns = "pendingApprovalRuns" in (governance?.summary ?? {})
+    ? governance.summary.pendingApprovalRuns
+    : null;
+  if (Array.isArray(summaryRuns)) return summaryRuns;
+  return Array.isArray(governance?.activity?.pendingApprovalRuns) ? governance.activity.pendingApprovalRuns : undefined;
+}
+
 function authorityLabel(summary: AgentAuthoritySummary) {
   if (summary.roleAssignments.length === 0) return "Not assigned";
   return summary.roleAssignments
@@ -185,7 +193,7 @@ export default async function ControlPlaneAgentsPage() {
       configs,
       credentials,
       recentRuns,
-      pendingApprovalRuns: governance?.activity?.pendingApprovalRuns,
+      pendingApprovalRuns: pendingApprovalRunsForGovernance(governance),
       usageByAgent: agentUsageByAgent(governance?.spend?.recentModelUsage),
       runCountsByAgent: agentRunCountsByAgent(recentRuns),
       workspaceBudget: governance?.spend?.budget,
