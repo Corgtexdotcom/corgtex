@@ -205,6 +205,23 @@ function optionalDate(value: unknown) {
   return date;
 }
 
+function enumValue<TEnum extends Record<string, string>>(
+  enumObject: TEnum,
+  value: unknown,
+  fallback: TEnum[keyof TEnum],
+  label: string,
+) {
+  const raw = optionalString(value);
+  const normalized = raw ? raw.toUpperCase().replace(/[-\s]/g, "_") : fallback;
+  invariant(
+    Object.values(enumObject).includes(normalized),
+    400,
+    "INVALID_INPUT",
+    `${label} is unsupported.`,
+  );
+  return normalized as TEnum[keyof TEnum];
+}
+
 function titleMatches(query: string | null | undefined) {
   const trimmed = query?.trim();
   return trimmed ? { contains: trimmed, mode: "insensitive" as const } : undefined;
@@ -410,13 +427,6 @@ function buildExecutionPacket(params: {
 export async function createExecutionRequest(actor: AppActor, params: CreateExecutionRequestParams) {
   requireExecutionScope(actor, "execution:write");
   const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
-
-  const goal = params.goal.trim();
-  invariant(goal.length > 0, 400, "INVALID_INPUT", "Execution goal is required.");
-  const provider = normalizeProvider(params.provider);
-  const targetType = normalizeExecutionTargetType(params.writebackTargetType);
-  const target = await validateWritebackTarget(params.workspaceId, targetType, params.writebackTargetId, actor, membership);
-  const allowedScopes = normalizeKnownScopes(params.allowedScopes ?? defaultScopesForTarget(targetType));
   const idempotencyKey = optionalString(params.idempotencyKey);
 
   if (idempotencyKey) {
@@ -426,6 +436,13 @@ export async function createExecutionRequest(actor: AppActor, params: CreateExec
     });
     if (existing) return serializeExecutionRequest(existing);
   }
+
+  const goal = params.goal.trim();
+  invariant(goal.length > 0, 400, "INVALID_INPUT", "Execution goal is required.");
+  const provider = normalizeProvider(params.provider);
+  const targetType = normalizeExecutionTargetType(params.writebackTargetType);
+  const target = await validateWritebackTarget(params.workspaceId, targetType, params.writebackTargetId, actor, membership);
+  const allowedScopes = normalizeKnownScopes(params.allowedScopes ?? defaultScopesForTarget(targetType));
 
   const workspace = await prisma.workspace.findUnique({
     where: { id: params.workspaceId },
@@ -525,12 +542,20 @@ export async function getExecutionPacket(actor: AppActor, params: { workspaceId:
   });
   invariant(workspace, 404, "NOT_FOUND", "Workspace not found.");
 
-  const packetRequest = request.status === "PENDING"
-    ? await prisma.executionRequest.update({
-      where: { id: request.id },
+  let packetRequest = request;
+  if (request.status === "PENDING") {
+    const claim = await prisma.executionRequest.updateMany({
+      where: { id: request.id, workspaceId: params.workspaceId, status: "PENDING" },
       data: { status: "IN_PROGRESS", claimedAt: new Date() },
-    })
-    : request;
+    });
+    packetRequest = await loadExecutionRequest(params.workspaceId, params.requestId);
+    invariant(
+      claim.count === 1 || packetRequest.status === "IN_PROGRESS",
+      409,
+      "INVALID_STATE",
+      "Execution packet is no longer available for claiming.",
+    );
+  }
 
   const packet = buildExecutionPacket({ request: packetRequest, workspace });
   return packet;
@@ -681,9 +706,10 @@ async function createNativeWriteback(actor: AppActor, params: {
   targetId: string | null;
   output: JsonRecord;
   requestId: string;
+  resultId: string;
 }) {
   if (params.targetId || params.type === "COMMENT") {
-    return { entityType: "ExecutionComment", entityId: params.requestId };
+    return { entityType: "ExecutionResult", entityId: params.resultId };
   }
 
   switch (params.type) {
@@ -732,8 +758,8 @@ async function createNativeWriteback(actor: AppActor, params: {
         workspaceId: params.workspaceId,
         title: requiredString(params.output.title, "Brain article title"),
         slug: optionalString(params.output.slug) ?? undefined,
-        type: (optionalString(params.output.type) ?? "PROCESS") as BrainArticleType,
-        authority: (optionalString(params.output.authority) ?? "DRAFT") as BrainArticleAuthority,
+        type: enumValue(BrainArticleType, params.output.type, "PROCESS", "Brain article type"),
+        authority: enumValue(BrainArticleAuthority, params.output.authority, "DRAFT", "Brain article authority"),
         bodyMd: requiredString(params.output.bodyMd ?? params.output.body, "Brain article body"),
         isPrivate: true,
       });
@@ -751,9 +777,9 @@ async function createNativeWriteback(actor: AppActor, params: {
         mergeCommitSha: optionalString(params.output.mergeCommitSha),
         title: requiredString(params.output.title, "Build artifact title"),
         summaryMd: optionalString(params.output.summaryMd) ?? optionalString(params.output.summary),
-        status: (optionalString(params.output.status) ?? "OPEN") as BuildArtifactStatus,
-        classification: (optionalString(params.output.classification) ?? "INTERNAL") as BuildArtifactClassification,
-        visibility: (optionalString(params.output.visibility) ?? "PRIVATE") as BuildArtifactVisibility,
+        status: enumValue(BuildArtifactStatus, params.output.status, "OPEN", "Build artifact status"),
+        classification: enumValue(BuildArtifactClassification, params.output.classification, "INTERNAL", "Build artifact classification"),
+        visibility: enumValue(BuildArtifactVisibility, params.output.visibility, "PRIVATE", "Build artifact visibility"),
       });
       return { entityType: "BuildArtifact", entityId: artifact.id };
     }
@@ -780,11 +806,16 @@ function validateNativeWritebackOutput(type: ExecutionWritebackTargetType, targe
     case "BRAIN_ARTICLE":
       requiredString(output.title, "Brain article title");
       requiredString(output.bodyMd ?? output.body, "Brain article body");
+      enumValue(BrainArticleType, output.type, "PROCESS", "Brain article type");
+      enumValue(BrainArticleAuthority, output.authority, "DRAFT", "Brain article authority");
       return;
     case "BUILD_ARTIFACT":
       requiredString(output.repositoryOwner, "Repository owner");
       requiredString(output.repositoryName, "Repository name");
       requiredString(output.title, "Build artifact title");
+      enumValue(BuildArtifactStatus, output.status, "OPEN", "Build artifact status");
+      enumValue(BuildArtifactClassification, output.classification, "INTERNAL", "Build artifact classification");
+      enumValue(BuildArtifactVisibility, output.visibility, "PRIVATE", "Build artifact visibility");
       return;
   }
 }
@@ -801,25 +832,25 @@ export async function submitExecutionResult(actor: AppActor, params: SubmitExecu
   });
   if (existing) return serializeExecutionResult(existing);
 
-  invariant(!["COMPLETED", "FAILED", "CANCELLED"].includes(request.status), 400, "INVALID_STATE", "Execution request is not accepting new results.");
+  invariant(["PENDING", "IN_PROGRESS"].includes(request.status), 400, "INVALID_STATE", "Execution request is not accepting new results.");
 
   const targetType = normalizeExecutionTargetType(params.targetType) ?? request.writebackTargetType;
   const targetId = optionalString(params.targetId) ?? request.writebackTargetId;
-  invariant(targetType, 400, "INVALID_INPUT", "Result target type is required.");
   if (request.writebackTargetType) {
     invariant(targetType === request.writebackTargetType, 400, "INVALID_INPUT", "Result target type does not match the execution request.");
   }
   if (request.writebackTargetId) {
     invariant(targetId === request.writebackTargetId, 400, "INVALID_INPUT", "Result target id does not match the execution request.");
   }
-  const writeScope = targetWriteScope(targetType);
-  requireExecutionScope(actor, writeScope);
-  invariant(request.allowedScopes.includes(writeScope), 403, "FORBIDDEN", `Execution request does not allow the required scope: ${writeScope}.`);
-  await validateWritebackTarget(params.workspaceId, targetType, targetId, actor, membership);
 
   const output = objectInput(params.output);
   const errorMessage = optionalString(params.errorMessage);
   if (!errorMessage) {
+    invariant(targetType, 400, "INVALID_INPUT", "Result target type is required.");
+    const writeScope = targetWriteScope(targetType);
+    requireExecutionScope(actor, writeScope);
+    invariant(request.allowedScopes.includes(writeScope), 403, "FORBIDDEN", `Execution request does not allow the required scope: ${writeScope}.`);
+    await validateWritebackTarget(params.workspaceId, targetType, targetId, actor, membership);
     validateNativeWritebackOutput(targetType, targetId ?? null, output);
   }
 
@@ -875,7 +906,7 @@ export async function submitExecutionResult(actor: AppActor, params: SubmitExecu
     return serializeExecutionResult(duplicate);
   }
 
-  const writeback = errorMessage
+  const writeback = errorMessage || !targetType
     ? null
     : await createNativeWriteback(actor, {
       workspaceId: params.workspaceId,
@@ -883,6 +914,7 @@ export async function submitExecutionResult(actor: AppActor, params: SubmitExecu
       targetId: targetId ?? null,
       output,
       requestId: request.id,
+      resultId: resultShell.id,
     });
 
   const result = await prisma.$transaction(async (tx) => {

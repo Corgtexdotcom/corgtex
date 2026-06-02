@@ -13,6 +13,7 @@ const { prismaMock } = vi.hoisted(() => ({
       findMany: vi.fn(),
       findUnique: vi.fn(),
       update: vi.fn(),
+      updateMany: vi.fn(),
     },
     executionResult: {
       create: vi.fn(),
@@ -134,8 +135,11 @@ function requestFixture(overrides: Record<string, unknown> = {}) {
 }
 
 describe("execution plumbing domain", () => {
+  let lastCreatedResultData: Record<string, unknown> | null;
+
   beforeEach(() => {
     vi.resetAllMocks();
+    lastCreatedResultData = null;
     prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof prismaMock) => Promise<unknown>) => callback(prismaMock));
     prismaMock.workspace.findUnique.mockResolvedValue(workspace);
     prismaMock.executionRequest.findFirst.mockResolvedValue(requestFixture());
@@ -143,13 +147,17 @@ describe("execution plumbing domain", () => {
     prismaMock.executionResult.findUnique.mockResolvedValue(null);
     prismaMock.executionRequest.create.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => requestFixture(data));
     prismaMock.executionRequest.update.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => requestFixture(data));
-    prismaMock.executionResult.create.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => ({
-      id: "result-1",
-      submittedAt: new Date("2026-06-02T10:10:00.000Z"),
-      createdAt: new Date("2026-06-02T10:10:00.000Z"),
-      updatedAt: new Date("2026-06-02T10:10:00.000Z"),
-      ...data,
-    }));
+    prismaMock.executionRequest.updateMany.mockResolvedValue({ count: 1 });
+    prismaMock.executionResult.create.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => {
+      lastCreatedResultData = data;
+      return {
+        id: "result-1",
+        submittedAt: new Date("2026-06-02T10:10:00.000Z"),
+        createdAt: new Date("2026-06-02T10:10:00.000Z"),
+        updatedAt: new Date("2026-06-02T10:10:00.000Z"),
+        ...data,
+      };
+    });
     prismaMock.executionResult.update.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => ({
       id: "result-1",
       workspaceId: "workspace-1",
@@ -170,6 +178,7 @@ describe("execution plumbing domain", () => {
       rejectedAt: null,
       createdAt: new Date("2026-06-02T10:10:00.000Z"),
       updatedAt: new Date("2026-06-02T10:10:00.000Z"),
+      ...(lastCreatedResultData ?? {}),
       ...data,
     }));
     requireWorkspaceMembership.mockResolvedValue({ id: "member-1", workspaceId: "workspace-1", userId: "user-1", role: "ADMIN", isActive: true });
@@ -222,6 +231,28 @@ describe("execution plumbing domain", () => {
       action: "execution_request.created",
       entityType: "ExecutionRequest",
     }));
+  });
+
+  it("returns existing execution requests before revalidating stale targets", async () => {
+    prismaMock.executionRequest.findUnique.mockResolvedValueOnce(requestFixture({
+      id: "request-existing",
+      writebackTargetId: "action-old",
+      results: [],
+    }));
+
+    const { createExecutionRequest } = await import("./execution-plumbing");
+    const existing = await createExecutionRequest(actor, {
+      workspaceId: "workspace-1",
+      provider: "openwork",
+      goal: "",
+      writebackTargetType: "action",
+      writebackTargetId: "archived-action",
+      idempotencyKey: "req-key",
+    });
+
+    expect(existing).toMatchObject({ id: "request-existing" });
+    expect(prismaMock.action.findFirst).not.toHaveBeenCalled();
+    expect(prismaMock.executionRequest.create).not.toHaveBeenCalled();
   });
 
   it("returns an existing result for duplicate idempotency keys without writing again", async () => {
@@ -392,6 +423,57 @@ describe("execution plumbing domain", () => {
     expect(createAction).not.toHaveBeenCalled();
   });
 
+  it("rejects unsupported Brain enum values before storing a result shell", async () => {
+    prismaMock.executionRequest.findFirst.mockResolvedValueOnce(requestFixture({
+      writebackTargetType: "BRAIN_ARTICLE",
+      allowedScopes: ["execution:read", "execution:write", "brain:write"],
+    }));
+
+    const brainAgent = {
+      ...agentActor,
+      scopes: [...(agentActor.scopes ?? []), "brain:write"],
+    };
+
+    const { submitExecutionResult } = await import("./execution-plumbing");
+    await expect(submitExecutionResult(brainAgent, {
+      workspaceId: "workspace-1",
+      requestId: "request-1",
+      idempotencyKey: "result-key",
+      output: { title: "Launch runbook", bodyMd: "Steps", type: "unknown" },
+    })).rejects.toThrow("Brain article type is unsupported.");
+
+    expect(prismaMock.executionResult.create).not.toHaveBeenCalled();
+    expect(createArticle).not.toHaveBeenCalled();
+  });
+
+  it("rejects unsupported build artifact enum values before storing a result shell", async () => {
+    prismaMock.executionRequest.findFirst.mockResolvedValueOnce(requestFixture({
+      writebackTargetType: "BUILD_ARTIFACT",
+      allowedScopes: ["execution:read", "execution:write", "workspace:write"],
+    }));
+
+    const buildAgent = {
+      ...agentActor,
+      scopes: [...(agentActor.scopes ?? []), "workspace:write"],
+    };
+
+    const { submitExecutionResult } = await import("./execution-plumbing");
+    await expect(submitExecutionResult(buildAgent, {
+      workspaceId: "workspace-1",
+      requestId: "request-1",
+      idempotencyKey: "result-key",
+      output: {
+        repositoryOwner: "Corgtexdotcom",
+        repositoryName: "corgtex",
+        title: "PR 347",
+        status: "shipped",
+      },
+    })).rejects.toThrow("Build artifact status is unsupported.");
+
+    expect(prismaMock.executionResult.create).not.toHaveBeenCalled();
+    expect(upsertBuildArtifact).not.toHaveBeenCalled();
+  });
+
   it("rejects packets for cancelled execution requests", async () => {
     prismaMock.executionRequest.findFirst.mockResolvedValueOnce(requestFixture({ status: "CANCELLED" }));
 
@@ -401,6 +483,26 @@ describe("execution plumbing domain", () => {
       requestId: "request-1",
     })).rejects.toThrow("Execution packet is not available for failed or cancelled requests.");
 
+    expect(prismaMock.executionRequest.update).not.toHaveBeenCalled();
+    expect(prismaMock.executionRequest.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("claims pending packets with a state-scoped update", async () => {
+    prismaMock.executionRequest.findFirst
+      .mockResolvedValueOnce(requestFixture({ status: "PENDING" }))
+      .mockResolvedValueOnce(requestFixture({ status: "IN_PROGRESS", claimedAt: new Date("2026-06-02T10:05:00.000Z") }));
+
+    const { getExecutionPacket } = await import("./execution-plumbing");
+    const packet = await getExecutionPacket(agentActor, {
+      workspaceId: "workspace-1",
+      requestId: "request-1",
+    });
+
+    expect(packet).toMatchObject({ id: "request-1", status: "IN_PROGRESS" });
+    expect(prismaMock.executionRequest.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "request-1", workspaceId: "workspace-1", status: "PENDING" },
+      data: expect.objectContaining({ status: "IN_PROGRESS" }),
+    }));
     expect(prismaMock.executionRequest.update).not.toHaveBeenCalled();
   });
 
@@ -439,6 +541,83 @@ describe("execution plumbing domain", () => {
     expect(recordAudit).toHaveBeenCalledWith(expect.anything(), agentActor, expect.objectContaining({
       action: "execution_result.submitted",
       entityId: "request-1",
+    }));
+  });
+
+  it("accepts failure results without write-back targets", async () => {
+    prismaMock.executionRequest.findFirst.mockResolvedValueOnce(requestFixture({
+      writebackTargetType: null,
+      writebackTargetId: null,
+      writebackTargetLabel: null,
+      allowedScopes: ["execution:read", "execution:write"],
+    }));
+
+    const { submitExecutionResult } = await import("./execution-plumbing");
+    const result = await submitExecutionResult(agentActor, {
+      workspaceId: "workspace-1",
+      requestId: "request-1",
+      idempotencyKey: "result-key",
+      output: { details: "Could not reach external client" },
+      errorMessage: "OpenWork client disconnected",
+    });
+
+    expect(result).toMatchObject({ status: "REJECTED", errorMessage: "OpenWork client disconnected" });
+    expect(prismaMock.executionResult.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        targetType: null,
+        targetId: null,
+        errorMessage: "OpenWork client disconnected",
+      }),
+    }));
+    expect(prismaMock.executionResult.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        status: "REJECTED",
+        writebackEntityType: null,
+        writebackEntityId: null,
+      }),
+    }));
+    expect(createAction).not.toHaveBeenCalled();
+  });
+
+  it("rejects new result submissions after a result is already submitted", async () => {
+    prismaMock.executionRequest.findFirst.mockResolvedValueOnce(requestFixture({ status: "RESULT_SUBMITTED" }));
+
+    const { submitExecutionResult } = await import("./execution-plumbing");
+    await expect(submitExecutionResult(agentActor, {
+      workspaceId: "workspace-1",
+      requestId: "request-1",
+      idempotencyKey: "new-result-key",
+      output: { title: "Follow up" },
+    })).rejects.toThrow("Execution request is not accepting new results.");
+
+    expect(prismaMock.executionResult.create).not.toHaveBeenCalled();
+    expect(createAction).not.toHaveBeenCalled();
+  });
+
+  it("persists comment write-backs as durable execution results", async () => {
+    prismaMock.executionRequest.findFirst.mockResolvedValueOnce(requestFixture({
+      writebackTargetType: "COMMENT",
+      allowedScopes: ["execution:read", "execution:write"],
+    }));
+
+    const { submitExecutionResult } = await import("./execution-plumbing");
+    const result = await submitExecutionResult(agentActor, {
+      workspaceId: "workspace-1",
+      requestId: "request-1",
+      idempotencyKey: "result-key",
+      output: { bodyMd: "Execution note" },
+    });
+
+    expect(createAction).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      status: "ACCEPTED",
+      writeback: { entityType: "ExecutionResult", entityId: "result-1" },
+    });
+    expect(prismaMock.executionResult.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        writebackEntityType: "ExecutionResult",
+        writebackEntityId: "result-1",
+      }),
     }));
   });
 });
