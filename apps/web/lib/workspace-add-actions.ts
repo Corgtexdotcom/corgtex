@@ -121,6 +121,10 @@ export type WorkspaceAddAction = {
   description: string;
 };
 
+export type MobileCaptureAction = WorkspaceAddAction & {
+  href: string;
+};
+
 export type WorkspaceAddInvitePolicy = "ADMINS_ONLY" | "MEMBERS_CAN_INVITE" | "MEMBERS_CAN_REQUEST";
 
 type WorkspaceSearchParamsLike = {
@@ -202,6 +206,18 @@ function canRecordMeetingsManually(context: WorkspaceAddActionContext) {
   return Boolean(context.meetingRecorderEnabled && (context.role === "ADMIN" || context.role === "FACILITATOR"));
 }
 
+const MOBILE_CAPTURE_SPECS: Array<{
+  kind: WorkspaceAddActionKind;
+  subpath: string;
+}> = [
+  { kind: "tension", subpath: "/tensions" },
+  { kind: "action", subpath: "/actions" },
+  { kind: "meeting_transcript", subpath: "/meetings" },
+  { kind: "meeting_manual_recording", subpath: "/meetings" },
+  { kind: "upload_file", subpath: "/brain" },
+  { kind: "paste_text", subpath: "/settings?tab=data-sources" },
+];
+
 export function getWorkspaceAddActions(context: WorkspaceAddActionContext): WorkspaceAddAction[] {
   if (context.isDemo) return [];
 
@@ -266,6 +282,28 @@ export function getWorkspaceAddActions(context: WorkspaceAddActionContext): Work
     default:
       return [];
   }
+}
+
+export function getMobileCaptureActions(
+  context: Omit<WorkspaceAddActionContext, "pathname" | "searchParams">,
+): MobileCaptureAction[] {
+  return MOBILE_CAPTURE_SPECS.flatMap((spec) => {
+    const [path, query = ""] = spec.subpath.split("?");
+    const pathname = `/workspaces/${context.workspaceId}${path}`;
+    const returnTo = `${pathname}${query ? `?${query}` : ""}`;
+    const actions = getWorkspaceAddActions({
+      ...context,
+      pathname,
+      searchParams: query,
+    });
+    const action = actions.find((item) => item.kind === spec.kind);
+    if (!action) return [];
+
+    return [{
+      ...action,
+      href: `/workspaces/${context.workspaceId}/add?kind=${encodeURIComponent(action.kind)}&returnTo=${encodeURIComponent(returnTo)}`,
+    }];
+  });
 }
 
 export function isWorkspaceAddActionKind(value: unknown): value is WorkspaceAddActionKind {

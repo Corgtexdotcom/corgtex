@@ -718,21 +718,25 @@ async function seedShowcaseData({ wsId, memberMappings }) {
   console.log(`✅ ${SHOWCASE_AUDIT_EVENTS.length} Audit events refreshed`);
 }
 
-async function seedContextMapData({ wsId, circleMappings, memberMappings, meetingMappings }) {
+async function enableWorkspaceFeature(wsId, flag) {
   await prisma.workspaceFeatureFlag.upsert({
     where: {
       workspaceId_flag: {
         workspaceId: wsId,
-        flag: "CONTEXT_MAPS",
+        flag,
       },
     },
     update: { enabled: true },
     create: {
       workspaceId: wsId,
-      flag: "CONTEXT_MAPS",
+      flag,
       enabled: true,
     },
   });
+}
+
+async function seedContextMapData({ wsId, circleMappings, memberMappings, meetingMappings }) {
+  await enableWorkspaceFeature(wsId, "CONTEXT_MAPS");
 
   const aiMeeting = meetingMappings["Innovation & AI Working Group Kickoff"];
   const rdCircleId = circleMappings["rd"];
@@ -2365,6 +2369,7 @@ async function main() {
   }
 
   // 14. Safe showcase data for current customer-visible feature surfaces.
+  await enableWorkspaceFeature(wsId, "AI_WORKSPACES");
   await seedShowcaseData({ wsId, memberMappings });
   await seedContextMapData({ wsId, circleMappings, memberMappings, meetingMappings });
 

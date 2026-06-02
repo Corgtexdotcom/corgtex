@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { DEFAULT_WORKSPACE_FEATURE_FLAGS } from "@/lib/workspace-feature-flags";
 import {
+  getMobileCaptureActions,
   getWorkspaceAddActions,
   sanitizeWorkspaceReturnTo,
   workspaceSubpath,
@@ -108,6 +109,32 @@ describe("workspace add actions", () => {
       searchParams: "tab=general",
       role: "CONTRIBUTOR",
     })).toEqual([]);
+  });
+
+  it("selects mobile capture actions through the same Add page rules", () => {
+    expect(getMobileCaptureActions(context()).map((action) => action.kind)).toEqual([
+      "tension",
+      "action",
+      "meeting_transcript",
+      "upload_file",
+      "paste_text",
+    ]);
+    expect(getMobileCaptureActions(context())[0]?.href).toBe(
+      "/workspaces/ws-1/add?kind=tension&returnTo=%2Fworkspaces%2Fws-1%2Ftensions",
+    );
+  });
+
+  it("adds mobile manual recording only when recorder permissions allow it", () => {
+    expect(getMobileCaptureActions(context({ meetingRecorderEnabled: true })).map((action) => action.kind)).toContain(
+      "meeting_manual_recording",
+    );
+    expect(getMobileCaptureActions(context({ meetingRecorderEnabled: true, role: "CONTRIBUTOR" })).map((action) => action.kind)).not.toContain(
+      "meeting_manual_recording",
+    );
+  });
+
+  it("hides mobile capture actions in demo workspaces", () => {
+    expect(getMobileCaptureActions(context({ isDemo: true }))).toEqual([]);
   });
 });
 

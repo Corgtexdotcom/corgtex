@@ -594,10 +594,17 @@
   },
   "mobile": {
     "aiMode": "IA",
+    "aiTabsLabel": "Acciones del espacio de trabajo de IA",
     "aiWorkbenchLabel": "Espacio de trabajo de IA",
+    "askTab": "Preguntar",
     "bottomNavLabel": "Navegación móvil del espacio de trabajo",
+    "captureDescription": "Crea los registros fuente que Corgtex ya gobierna.",
+    "captureEmpty": "No hay acciones de captura disponibles para tu acceso actual al espacio de trabajo.",
+    "captureTab": "Capturar",
+    "captureTitle": "Capturar",
     "modeSwitchLabel": "Modo móvil",
     "shellLabel": "Interfaz móvil del espacio de trabajo",
+    "workTab": "Trabajo",
     "workspaceMode": "Espacio"
   },
   "cycles": {

@@ -6,7 +6,9 @@ import {
   CalendarDays,
   CheckSquare,
   CircleDot,
+  Clipboard,
   ClipboardList,
+  ExternalLink,
   FileText,
   Gauge,
   Hexagon,
@@ -16,6 +18,7 @@ import {
   Network,
   PackageCheck,
   RefreshCw,
+  Send,
   Settings,
   Shield,
   Target,
@@ -52,10 +55,20 @@ const ICONS: Record<WorkspaceNavIconName, LucideIcon> = {
 
 export type WorkspaceUtilityIconName =
   | "ai"
+  | "capture"
+  | "copy"
+  | "external"
+  | "send"
+  | "work"
   | "platformAdmin";
 
 const UTILITY_ICONS: Record<WorkspaceUtilityIconName, LucideIcon> = {
   ai: MessageSquare,
+  capture: FileText,
+  copy: Clipboard,
+  external: ExternalLink,
+  send: Send,
+  work: ClipboardList,
   platformAdmin: Shield,
 };
 

@@ -4,10 +4,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePathname } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { ChatInterface } from "./chat/ChatInterface";
+import { AiWorkspaceLaunchPanel } from "./AiWorkspaceLaunchPanel";
 import type { NavGroup } from "@/lib/nav-config";
-import { WorkspaceNavIcon } from "./WorkspaceNavIcon";
+import type { AiWorkspaceLaunchProvider } from "@/lib/ai-workspace-launch";
+import type { MobileCaptureAction } from "@/lib/workspace-add-actions";
+import { WorkspaceNavIcon, WorkspaceUtilityIcon } from "./WorkspaceNavIcon";
 
 type MobileMode = "workspace" | "ai";
+type MobileAiTab = "work" | "ask" | "capture";
 
 type ConversationSummary = {
   id: string;
@@ -25,6 +29,9 @@ type MobileWorkspaceShellProps = {
   navGroups: NavGroup[];
   unreadCount: number;
   conversations: ConversationSummary[];
+  aiWorkspaceProvider: AiWorkspaceLaunchProvider | null;
+  aiWorkspaceLaunchUrl: string | null;
+  captureActions: MobileCaptureAction[];
 };
 
 const MODE_STORAGE_KEY = "corgtex.mobileMode";
@@ -48,11 +55,15 @@ export function MobileWorkspaceShell({
   navGroups,
   unreadCount,
   conversations,
+  aiWorkspaceProvider,
+  aiWorkspaceLaunchUrl,
+  captureActions,
 }: MobileWorkspaceShellProps) {
   const pathname = usePathname() ?? "";
   const tNav = useTranslations("nav");
   const tMobile = useTranslations("mobile");
   const [mode, setModeState] = useState<MobileMode>("workspace");
+  const [aiTab, setAiTab] = useState<MobileAiTab>("ask");
   const [hasLoadedStoredMode, setHasLoadedStoredMode] = useState(false);
   const lastViewedKeyRef = useRef<string | null>(null);
 
@@ -187,13 +198,87 @@ export function MobileWorkspaceShell({
 
       {mode === "ai" && (
         <section className="mobile-ai-workbench" aria-label={tMobile("aiWorkbenchLabel")}>
-          <ChatInterface
-            workspaceId={workspaceId}
-            conversations={conversations}
-            activeSessionId={null}
-            compact={true}
-            mobileMode={true}
-          />
+          <div className="mobile-ai-tabs" role="tablist" aria-label={tMobile("aiTabsLabel")}>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={aiTab === "work"}
+              className={aiTab === "work" ? "active" : ""}
+              onClick={() => setAiTab("work")}
+            >
+              <WorkspaceUtilityIcon name="work" className="mobile-ai-tab-icon" />
+              {tMobile("workTab")}
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={aiTab === "ask"}
+              className={aiTab === "ask" ? "active" : ""}
+              onClick={() => setAiTab("ask")}
+            >
+              <WorkspaceUtilityIcon name="ai" className="mobile-ai-tab-icon" />
+              {tMobile("askTab")}
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={aiTab === "capture"}
+              className={aiTab === "capture" ? "active" : ""}
+              onClick={() => setAiTab("capture")}
+            >
+              <WorkspaceUtilityIcon name="capture" className="mobile-ai-tab-icon" />
+              {tMobile("captureTab")}
+            </button>
+          </div>
+
+          {aiTab === "work" && (
+            <div className="mobile-ai-pane mobile-ai-pane-work" role="tabpanel">
+              <AiWorkspaceLaunchPanel
+                workspaceId={workspaceId}
+                provider={aiWorkspaceProvider}
+                providerLaunchUrl={aiWorkspaceLaunchUrl}
+                variant="mobile"
+              />
+            </div>
+          )}
+
+          {aiTab === "ask" && (
+            <div className="mobile-ai-pane mobile-ai-pane-ask" role="tabpanel">
+              <ChatInterface
+                workspaceId={workspaceId}
+                conversations={conversations}
+                activeSessionId={null}
+                compact={true}
+                mobileMode={true}
+              />
+            </div>
+          )}
+
+          {aiTab === "capture" && (
+            <div className="mobile-ai-pane mobile-ai-pane-capture" role="tabpanel">
+              <div className="mobile-capture-panel">
+                <div className="mobile-capture-header">
+                  <WorkspaceUtilityIcon name="capture" className="mobile-capture-icon" />
+                  <div>
+                    <h2>{tMobile("captureTitle")}</h2>
+                    <p>{tMobile("captureDescription")}</p>
+                  </div>
+                </div>
+                {captureActions.length > 0 ? (
+                  <div className="mobile-capture-actions">
+                    {captureActions.map((action) => (
+                      <a key={action.kind} href={action.href} className="mobile-capture-action">
+                        <span>{action.label}</span>
+                        <small>{action.description}</small>
+                      </a>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="mobile-capture-empty">{tMobile("captureEmpty")}</p>
+                )}
+              </div>
+            </div>
+          )}
         </section>
       )}
     </>

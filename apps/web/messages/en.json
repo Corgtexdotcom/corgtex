@@ -594,10 +594,17 @@
   },
   "mobile": {
     "aiMode": "AI",
+    "aiTabsLabel": "AI workspace actions",
     "aiWorkbenchLabel": "AI workspace",
+    "askTab": "Ask",
     "bottomNavLabel": "Mobile workspace navigation",
+    "captureDescription": "Create the source records Corgtex already governs.",
+    "captureEmpty": "No capture actions are available for your current workspace access.",
+    "captureTab": "Capture",
+    "captureTitle": "Capture",
     "modeSwitchLabel": "Mobile mode",
     "shellLabel": "Mobile workspace shell",
+    "workTab": "Work",
     "workspaceMode": "Workspace"
   },
   "cycles": {
