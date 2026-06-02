@@ -277,6 +277,8 @@ enum CatalogSourceType {
   COMMUNICATION_INSTALLATION
   OAUTH_CONNECTION
   MCP_CONNECTOR
+  AI_WORKSPACE
+  ENTERPRISE_SERVICE
   MEETING_RECORDER
   DATA_SOURCE
   MANUAL
@@ -521,6 +523,8 @@ model Workspace {
   mcpOAuthCodes                 McpOAuthAuthorizationCode[]
   mcpOAuthTokens                McpOAuthAccessToken[]
   externalMcpConnections        ExternalMcpConnection[]
+  aiWorkspaceConnections        AiWorkspaceConnection[]
+  enterpriseServices            WorkspaceEnterpriseService[]
   ssoConfigs                    WorkspaceSsoConfig[]
   modelUsageBudget              ModelUsageBudget?
   billingProfile                WorkspaceBillingProfile?
@@ -804,6 +808,8 @@ model User {
   mcpOAuthCodes            McpOAuthAuthorizationCode[]
   mcpOAuthTokens           McpOAuthAccessToken[]
   externalMcpConnections   ExternalMcpConnection[]
+  createdAiWorkspaceConnections AiWorkspaceConnection[] @relation("AiWorkspaceConnectionCreator")
+  ownedAiWorkspaceConnections   AiWorkspaceConnection[] @relation("AiWorkspaceConnectionOwner")
   resetTokens              PasswordResetToken[]
   ssoIdentities            UserSsoIdentity[]
   meetingInsights          MeetingInsight[]
@@ -1039,6 +1045,8 @@ model CatalogItem {
   favorites        CatalogFavorite[]
   requests         CatalogRequest[]
   agentCredentials AgentCredential[]
+  aiWorkspaceConnections AiWorkspaceConnection[]
+  enterpriseServices     WorkspaceEnterpriseService[]
   modelUsage       ModelUsage[]
 
   @@unique([workspaceId, slug])
@@ -3332,6 +3340,53 @@ enum ExternalMcpConnectionStatus {
   ERROR
 }
 
+enum AiWorkspaceProvider {
+  OPENWORK
+  CHATGPT
+  CLAUDE
+  GEMINI
+  CURSOR
+  CLAUDE_CODE
+  GENERIC_MCP
+}
+
+enum AiWorkspaceOwnershipMode {
+  USER_MANAGED
+  WORKSPACE_MANAGED
+  CORGTEX_MANAGED
+}
+
+enum AiWorkspaceHealthStatus {
+  CONNECTED
+  NEEDS_SETUP
+  UNHEALTHY
+  DISCONNECTED
+  REVOKED
+  MANAGED_EXTERNALLY
+}
+
+enum EnterpriseServiceKey {
+  MEETING_RECORDER
+  AI_WORKSPACE
+  INTEGRATIONS
+  WORKERS
+  SUPPORT
+}
+
+enum EnterpriseServiceOwnershipMode {
+  CUSTOMER_MANAGED
+  CORGTEX_MANAGED
+}
+
+enum EnterpriseServiceHealthStatus {
+  ACTIVE
+  NEEDS_SETUP
+  UNHEALTHY
+  DISCONNECTED
+  SUSPENDED
+  MANAGED_EXTERNALLY
+}
+
 model ExternalMcpConnection {
   id              String                      @id @default(uuid())
   workspaceId     String
@@ -3354,6 +3409,70 @@ model ExternalMcpConnection {
   @@unique([workspaceId, userId, providerKey])
   @@index([workspaceId, providerKey, status])
   @@index([userId, providerKey])
+}
+
+model AiWorkspaceConnection {
+  id                          String                    @id @default(uuid())
+  workspaceId                 String
+  createdByUserId             String?
+  ownerUserId                 String?
+  catalogItemId               String?
+  provider                    AiWorkspaceProvider
+  ownershipMode               AiWorkspaceOwnershipMode  @default(USER_MANAGED)
+  displayName                 String
+  serverUrl                   String?                   @db.Text
+  accessTokenEnc              String?                   @db.Text
+  refreshTokenEnc             String?                   @db.Text
+  apiKeyEnc                   String?                   @db.Text
+  scopes                      String[]                  @default([])
+  capabilities                Json?
+  setupState                  Json?
+  healthStatus                AiWorkspaceHealthStatus   @default(NEEDS_SETUP)
+  lastHealthCheckAt           DateTime?
+  lastSuccessfulHealthCheckAt DateTime?
+  lastError                   String?                   @db.Text
+  isDefault                   Boolean                   @default(false)
+  createdAt                   DateTime                  @default(now())
+  updatedAt                   DateTime                  @updatedAt
+
+  workspace   Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  createdBy   User?        @relation("AiWorkspaceConnectionCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  owner       User?        @relation("AiWorkspaceConnectionOwner", fields: [ownerUserId], references: [id], onDelete: SetNull)
+  catalogItem CatalogItem? @relation(fields: [catalogItemId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId, provider, healthStatus])
+  @@index([workspaceId, ownershipMode])
+  @@index([workspaceId, isDefault])
+  @@index([ownerUserId, provider])
+  @@index([catalogItemId])
+}
+
+model WorkspaceEnterpriseService {
+  id                          String                         @id @default(uuid())
+  workspaceId                 String
+  catalogItemId               String?
+  serviceKey                  EnterpriseServiceKey
+  ownershipMode               EnterpriseServiceOwnershipMode @default(CUSTOMER_MANAGED)
+  displayName                 String
+  providerKey                 String?
+  healthStatus                EnterpriseServiceHealthStatus  @default(NEEDS_SETUP)
+  lastHealthCheckAt           DateTime?
+  lastSuccessfulHealthCheckAt DateTime?
+  lastSuccessfulSyncAt        DateTime?
+  lastError                   String?                        @db.Text
+  usageJson                   Json?
+  supportEscalationStatus     String?
+  supportEscalatedAt          DateTime?
+  supportNotesMd              String?                        @db.Text
+  createdAt                   DateTime                       @default(now())
+  updatedAt                   DateTime                       @updatedAt
+
+  workspace   Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  catalogItem CatalogItem? @relation(fields: [catalogItemId], references: [id], onDelete: SetNull)
+
+  @@unique([workspaceId, serviceKey])
+  @@index([workspaceId, ownershipMode, healthStatus])
+  @@index([catalogItemId])
 }
 
 model ExternalDataSource {

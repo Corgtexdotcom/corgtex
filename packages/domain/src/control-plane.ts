@@ -146,6 +146,10 @@ export const CONTROL_PLANE_WORKSPACE_FEATURE_FLAGS = [
   { flag: "MEETING_CONTEXTUAL_INTELLIGENCE", label: "Context-aware meeting intelligence", description: "Use workspace context to summarize meetings and automatically update related governance records.", defaultEnabled: false },
   { flag: "CONTEXT_MAP_AI", label: "Context map AI", description: "Premium chat tools for reading, reasoning about, and applying living context map graph changes.", defaultEnabled: false },
   { flag: "SLACK_MEETING_ACTION_REVIEW", label: "Slack meeting action review", description: "Post meeting summaries and proposed action-item follow-ups to an approved Slack review surface before action creation.", defaultEnabled: false },
+  { flag: "AI_WORKSPACES", label: "AI workspaces", description: "Catalog and setup foundation for OpenWork, ChatGPT, Claude, Gemini, Cursor, Claude Code, and generic MCP clients.", defaultEnabled: false },
+  { flag: "OPENWORK_DEFAULT", label: "OpenWork default", description: "Recommend OpenWork as the default free self-managed AI workspace.", defaultEnabled: false },
+  { flag: "EXECUTION_PACKETS", label: "Execution packets", description: "Durable execution request, context packet, and result write-back plumbing.", defaultEnabled: false },
+  { flag: "MANAGED_ENTERPRISE_SERVICES", label: "Managed enterprise services", description: "CORGTEX-managed service ownership, health, usage, and support escalation foundation.", defaultEnabled: false },
 ] as const;
 
 export type ControlPlaneWorkspaceFeatureFlag = typeof CONTROL_PLANE_WORKSPACE_FEATURE_FLAGS[number]["flag"];
