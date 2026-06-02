@@ -271,6 +271,7 @@ describe("agent-identity", () => {
     });
 
     expect(result.id).toBe("ca-1");
+    expect(prisma.$executeRaw).toHaveBeenCalled();
     expect(prisma.roleHolderHistory.updateMany).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({
         roleId: "r-1",

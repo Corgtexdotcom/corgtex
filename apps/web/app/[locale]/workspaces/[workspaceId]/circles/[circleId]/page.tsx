@@ -133,7 +133,6 @@ export default async function CircleDetailPage({
           updatedAt: true,
         },
         orderBy: { updatedAt: "desc" },
-        take: 80,
       }),
     ])
     : [[], [], []];

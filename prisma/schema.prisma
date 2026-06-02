@@ -1283,7 +1283,7 @@ model RoleOnboardingSession {
   workspace    Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   role         Role                @relation(fields: [roleId], references: [id], onDelete: Cascade)
   member       Member              @relation(fields: [memberId], references: [id], onDelete: Cascade)
-  conversation ConversationSession @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  conversation ConversationSession @relation(fields: [conversationId], references: [id], onDelete: Restrict)
 
   @@index([workspaceId, memberId, status])
   @@index([roleId, status])

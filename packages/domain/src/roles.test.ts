@@ -494,6 +494,7 @@ describe("roles domain", () => {
       roleId: "role-1",
       memberId: "member-1",
     })).resolves.toEqual({ id: "assignment-1" });
+    expect(prismaMock.$executeRaw).toHaveBeenCalled();
     expect(prismaMock.roleHolderHistory.updateMany).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({
         roleId: "role-1",

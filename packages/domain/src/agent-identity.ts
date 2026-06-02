@@ -296,17 +296,20 @@ export async function removeAgentFromCircle(
 ) {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, allowedRoles: ["ADMIN"] });
 
-  const assignment = await prisma.circleAgentAssignment.findUnique({
-    where: {
-      circleId_agentIdentityId: {
-        circleId: params.circleId,
-        agentIdentityId: params.agentIdentityId,
-      },
-    },
-  });
-  invariant(assignment, 404, "NOT_FOUND", "Circle agent assignment not found.");
-
   return prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`
+      SELECT pg_advisory_xact_lock(hashtext('circle_agent_assignment'), hashtext(${`${params.circleId}:${params.agentIdentityId}`}))
+    `;
+    const assignment = await tx.circleAgentAssignment.findUnique({
+      where: {
+        circleId_agentIdentityId: {
+          circleId: params.circleId,
+          agentIdentityId: params.agentIdentityId,
+        },
+      },
+    });
+    invariant(assignment, 404, "NOT_FOUND", "Circle agent assignment not found.");
+
     const deleted = await tx.circleAgentAssignment.delete({
       where: { id: assignment.id },
     });

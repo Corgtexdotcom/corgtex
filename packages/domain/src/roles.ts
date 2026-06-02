@@ -474,6 +474,9 @@ export async function unassignRole(actor: AppActor, params: {
   });
 
   return prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`
+      SELECT pg_advisory_xact_lock(hashtext('role_assignment'), hashtext(${`${params.roleId}:${params.memberId}`}))
+    `;
     const role = await tx.role.findUnique({
       where: { id: params.roleId },
       include: { circle: { select: { workspaceId: true } } },

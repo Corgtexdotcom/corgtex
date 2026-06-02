@@ -586,14 +586,7 @@ export async function createRoleOnboardingIntro(params: {
         workspaceId: params.workspaceId,
       },
       include: {
-        conversation: {
-          include: {
-            turns: {
-              orderBy: { sequenceNumber: "desc" },
-              take: 1,
-            },
-          },
-        },
+        conversation: true,
         role: {
           include: {
             circle: { select: { name: true, purposeMd: true, domainMd: true } },
@@ -610,6 +603,9 @@ export async function createRoleOnboardingIntro(params: {
     if (onboarding.status === "COMPLETED" || onboarding.status === "DISMISSED") {
       return onboarding;
     }
+    await tx.$executeRaw`
+      SELECT pg_advisory_xact_lock(hashtext('conversation_turn'), hashtext(${onboarding.conversationId}))
+    `;
 
     const assigneeName = onboarding.member.user.displayName ?? onboarding.member.user.email;
     const intro = [
@@ -622,7 +618,13 @@ export async function createRoleOnboardingIntro(params: {
       "Ask me anything about the role, the circle, current commitments, policies, meetings, or how to approach the first week. I will use live workspace context as you ask follow-up questions.",
     ].join("\n\n");
 
-    if (onboarding.conversation.turns.length === 0) {
+    const lastTurn = await tx.conversationTurn.findFirst({
+      where: { conversationId: onboarding.conversationId },
+      orderBy: { sequenceNumber: "desc" },
+      select: { sequenceNumber: true },
+    });
+
+    if (!lastTurn) {
       await tx.conversationTurn.create({
         data: {
           conversationId: onboarding.conversationId,

@@ -226,4 +226,4 @@ ALTER TABLE "RoleOnboardingSession" ADD CONSTRAINT "RoleOnboardingSession_roleId
 ALTER TABLE "RoleOnboardingSession" ADD CONSTRAINT "RoleOnboardingSession_memberId_fkey" FOREIGN KEY ("memberId") REFERENCES "Member"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "RoleOnboardingSession" ADD CONSTRAINT "RoleOnboardingSession_conversationId_fkey" FOREIGN KEY ("conversationId") REFERENCES "ConversationSession"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "RoleOnboardingSession" ADD CONSTRAINT "RoleOnboardingSession_conversationId_fkey" FOREIGN KEY ("conversationId") REFERENCES "ConversationSession"("id") ON DELETE RESTRICT ON UPDATE CASCADE;

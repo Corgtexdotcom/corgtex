@@ -2,12 +2,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const { prismaMock } = vi.hoisted(() => {
   const prisma = {
+    $executeRaw: vi.fn(),
     $transaction: vi.fn(),
     roleOnboardingSession: {
       findFirst: vi.fn(),
       update: vi.fn(),
     },
     conversationTurn: {
+      findFirst: vi.fn(),
       create: vi.fn(),
     },
     policyCorpus: {
@@ -80,8 +82,10 @@ describe("role onboarding domain", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof prismaMock) => Promise<unknown>) => callback(prismaMock));
+    prismaMock.$executeRaw.mockResolvedValue(0);
     prismaMock.roleOnboardingSession.findFirst.mockResolvedValue(onboardingRecord);
     prismaMock.roleOnboardingSession.update.mockResolvedValue({ ...onboardingRecord, status: "ACTIVE" });
+    prismaMock.conversationTurn.findFirst.mockResolvedValue(null);
     prismaMock.conversationTurn.create.mockResolvedValue({});
     prismaMock.policyCorpus.findMany.mockResolvedValue([{ title: "Advice process", bodyMd: "Ask for advice before high-impact changes.", acceptedAt: new Date("2026-01-01") }]);
     prismaMock.action.findMany.mockResolvedValue([{ title: "Publish weekly status", status: "OPEN", dueAt: null }]);
@@ -105,6 +109,7 @@ describe("role onboarding domain", () => {
         assistantMessage: expect.stringContaining("Integrator"),
       }),
     }));
+    expect(prismaMock.$executeRaw).toHaveBeenCalled();
     expect(prismaMock.roleOnboardingSession.update).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
         status: "ACTIVE",
