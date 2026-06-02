@@ -15,19 +15,9 @@ vi.mock("@corgtex/shared", () => ({ prisma: prismaMock }));
 vi.mock("./auth", () => ({ requireWorkspaceMembership: requireWorkspaceMembershipMock }));
 vi.mock("./meeting-recorders", () => ({ getMeetingRecorderEnterpriseServiceSnapshot: recorderSnapshotMock }));
 
-const actor: AppActor = {
-  kind: "user",
-  user: { id: "admin-1", email: "admin@example.com", displayName: "Admin", globalRole: "USER" },
-};
+const actor: AppActor = { kind: "user", user: { id: "admin-1", email: "admin@example.com", displayName: "Admin", globalRole: "USER" } };
 function row(overrides: Record<string, unknown> = {}) {
-  return {
-    id: "service-1",
-    serviceKey: "AI_WORKSPACE",
-    ownershipMode: "CUSTOMER_MANAGED",
-    displayName: "Managed AI workspace",
-    healthStatus: "NEEDS_SETUP",
-    ...overrides,
-  };
+  return { id: "service-1", serviceKey: "AI_WORKSPACE", ownershipMode: "CUSTOMER_MANAGED", displayName: "Managed AI workspace", healthStatus: "NEEDS_SETUP", ...overrides };
 }
 
 describe("enterprise services domain", () => {

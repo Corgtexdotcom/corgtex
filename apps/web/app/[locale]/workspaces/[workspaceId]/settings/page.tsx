@@ -325,17 +325,18 @@ export default async function SettingsPage({
   let isAdmin = false;
   let invitePolicy: Awaited<ReturnType<typeof getMemberInvitePolicy>> = "ADMINS_ONLY";
   let inviteRequests: Awaited<ReturnType<typeof listMemberInviteRequests>> = [];
-  if (tab === "members") {
-    let membership: Awaited<ReturnType<typeof requireWorkspaceMembership>>;
+  if (tab === "members" || (tab === "ai-workspaces" && featureFlags.MANAGED_ENTERPRISE_SERVICES)) {
     try {
-      membership = await requireWorkspaceMembership({ actor, workspaceId });
+      const membership = await requireWorkspaceMembership({ actor, workspaceId });
+      isAdmin = membership?.role === "ADMIN";
     } catch (error) {
       if (error instanceof AppError && error.status === 403) {
         notFound();
       }
       throw error;
     }
-    isAdmin = membership?.role === "ADMIN";
+  }
+  if (tab === "members") {
     try {
       members = await listMembersEnriched(workspaceId, { includeInactive: true });
       invitePolicy = await getMemberInvitePolicy(workspaceId);
