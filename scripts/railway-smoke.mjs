@@ -41,10 +41,14 @@ export function healthReleaseMismatch(health, expectedGitSha) {
   return `/api/health release.gitSha ${actualGitSha ?? "missing"} did not match expected ${expectedGitSha}`;
 }
 
-function healthPayloadMismatch(healthResponse, health) {
+export function healthPayloadMismatch(healthResponse, health, parseError = null) {
+  if (parseError) {
+    return `/api/health returned a non-JSON payload: ${parseError.message}`;
+  }
+
   if (
     healthResponse.ok &&
-    health.status === "ok" &&
+    health?.status === "ok" &&
     health.service === "web" &&
     health.database === "up" &&
     health.schema === "ready" &&
@@ -65,8 +69,12 @@ function sleep(ms) {
 
 async function fetchHealth(baseUrl) {
   const healthResponse = await fetch(new URL("/api/health", baseUrl));
-  const health = await healthResponse.json();
-  return { healthResponse, health };
+  try {
+    const health = await healthResponse.json();
+    return { healthResponse, health, parseError: null };
+  } catch (error) {
+    return { healthResponse, health: null, parseError: error };
+  }
 }
 
 async function waitForExpectedRelease(baseUrl, expectedGitSha, initialMismatch) {
@@ -77,8 +85,8 @@ async function waitForExpectedRelease(baseUrl, expectedGitSha, initialMismatch) 
   while (Date.now() - startTime < timeoutMs) {
     await sleep(Math.min(intervalMs, timeoutMs - (Date.now() - startTime)));
 
-    const { healthResponse, health } = await fetchHealth(baseUrl);
-    lastMismatch = healthPayloadMismatch(healthResponse, health) ?? healthReleaseMismatch(health, expectedGitSha);
+    const { healthResponse, health, parseError } = await fetchHealth(baseUrl);
+    lastMismatch = healthPayloadMismatch(healthResponse, health, parseError) ?? healthReleaseMismatch(health, expectedGitSha);
     if (!lastMismatch) return;
   }
 
@@ -113,16 +121,19 @@ async function main() {
   }
   pass("/login serves the Corgtex login page");
 
-  const { healthResponse, health } = await fetchHealth(baseUrl);
-  const healthMismatch = healthPayloadMismatch(healthResponse, health);
-  if (healthMismatch) fail(healthMismatch);
-  pass("/api/health reports the Corgtex fingerprint");
-
   const expectedGitSha = expectedHealthGitSha();
-  const releaseMismatch = healthReleaseMismatch(health, expectedGitSha);
-  if (releaseMismatch) {
+  const { healthResponse, health, parseError } = await fetchHealth(baseUrl);
+  const healthMismatch = healthPayloadMismatch(healthResponse, health, parseError);
+  if (healthMismatch && !expectedGitSha) {
+    fail(healthMismatch);
+  }
+
+  const releaseMismatch = healthMismatch ?? healthReleaseMismatch(health, expectedGitSha);
+  if (releaseMismatch && expectedGitSha) {
     await waitForExpectedRelease(baseUrl, expectedGitSha, releaseMismatch);
   }
+
+  pass("/api/health reports the Corgtex fingerprint");
   if (expectedGitSha) {
     pass(`/api/health release.gitSha matches ${expectedGitSha.slice(0, 12)}`);
   }

@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { expectedHealthGitSha, healthReleaseMismatch, releaseMatchRetryConfig } from "./railway-smoke.mjs";
+import {
+  expectedHealthGitSha,
+  healthPayloadMismatch,
+  healthReleaseMismatch,
+  releaseMatchRetryConfig,
+} from "./railway-smoke.mjs";
 
 describe("railway smoke release validation", () => {
   it("prefers an explicit expected release SHA over the GitHub SHA", () => {
@@ -36,6 +41,10 @@ describe("railway smoke release validation", () => {
       },
     }, "current-sha")).toContain("older-sha did not match expected current-sha");
     expect(healthReleaseMismatch({}, "current-sha")).toContain("missing did not match expected current-sha");
+  });
+
+  it("reports non-JSON health payloads as retryable mismatches", () => {
+    expect(healthPayloadMismatch({ ok: true }, null, new Error("Unexpected token <"))).toContain("non-JSON payload");
   });
 
   it("uses safe release-match retry defaults and positive overrides", () => {
