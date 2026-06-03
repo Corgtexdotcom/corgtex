@@ -127,10 +127,7 @@ export function AiWorkspaceLaunchPanel({
     setManualPrompt(copied ? null : handoffPrompt);
   }
 
-  async function copyAndOpenWorkspace() {
-    if (handoffPrompt) {
-      await copyHandoffPrompt();
-    }
+  function openWorkspace() {
     const opened = openExternalUrl(providerLaunchUrl);
     if (!opened && providerLaunchUrl) {
       setCopyStatus("Could not open the AI workspace. Use the setup link or open it manually.");
@@ -202,16 +199,11 @@ export function AiWorkspaceLaunchPanel({
             <WorkspaceUtilityIcon name="send" className="ai-workspace-action-icon" />
             {isSubmitting ? "Sending" : "Send to AI workspace"}
           </button>
-          {providerLaunchUrl ? (
-            <button type="button" className="button secondary small" onClick={() => void copyAndOpenWorkspace()}>
-              <WorkspaceUtilityIcon name="external" className="ai-workspace-action-icon" />
-              Open {provider.shortLabel}
-            </button>
-          ) : (
+          {!providerLaunchUrl ? (
             <a className="link-button secondary small" href={setupHref}>
               Setup
             </a>
-          )}
+          ) : null}
         </div>
       </div>
 
@@ -227,7 +219,7 @@ export function AiWorkspaceLaunchPanel({
               Copy handoff
             </button>
             {providerLaunchUrl ? (
-              <button type="button" className="button secondary small" onClick={() => void copyAndOpenWorkspace()}>
+              <button type="button" className="button secondary small" onClick={openWorkspace}>
                 <WorkspaceUtilityIcon name="external" className="ai-workspace-action-icon" />
                 Open {provider.shortLabel}
               </button>
