@@ -53,14 +53,22 @@ describe("env", () => {
     delete process.env.MODEL_BASE_URL;
     delete process.env.MODEL_CHAT_DEFAULT;
     delete process.env.MODEL_CHAT_FAST;
+    delete process.env.MODEL_CHAT_STANDARD;
+    delete process.env.MODEL_CHAT_QUALITY;
+    delete process.env.MODEL_CHAT_EXCELLENT;
+    delete process.env.MODEL_CHAT_CONVERSATION;
     delete process.env.MODEL_EMBEDDING_DEFAULT;
 
     const { env } = await import("./env");
 
     expect(env.MODEL_PROVIDER).toBe("openrouter");
     expect(env.MODEL_BASE_URL).toBe("https://openrouter.ai/api/v1");
-    expect(env.MODEL_CHAT_DEFAULT).toBe("qwen/qwen3-32b");
-    expect(env.MODEL_CHAT_FAST).toBe("google/gemini-2.5-flash-lite");
+    expect(env.MODEL_CHAT_DEFAULT).toBe("deepseek/deepseek-v4-flash");
+    expect(env.MODEL_CHAT_FAST).toBe("deepseek/deepseek-v4-flash");
+    expect(env.MODEL_CHAT_STANDARD).toBe("deepseek/deepseek-v4-flash");
+    expect(env.MODEL_CHAT_QUALITY).toBe("deepseek/deepseek-v4-pro");
+    expect(env.MODEL_CHAT_EXCELLENT).toBe("deepseek/deepseek-r1-0528");
+    expect(env.MODEL_CHAT_CONVERSATION).toBe("deepseek/deepseek-v4-pro");
     expect(env.MODEL_EMBEDDING_DEFAULT).toBe("google/gemini-embedding-001");
   });
 });
