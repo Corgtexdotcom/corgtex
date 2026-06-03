@@ -11,20 +11,43 @@ function handleRouteError(error: unknown) {
       service: "web",
       database: "down",
       schema: "unknown",
-        app: "corgtex",
-        auth: "password-session",
-        release: releaseFingerprint(),
-        runtime: runtimeFingerprint(),
-      },
+      app: "corgtex",
+      auth: "password-session",
+      release: releaseFingerprint(),
+      runtime: runtimeFingerprint(),
+    },
     { status: 503 },
   );
 }
 
+function optionalEnv(name: string) {
+  const value = process.env[name]?.trim();
+  return value || null;
+}
+
 function releaseFingerprint() {
+  const configuredVersion = optionalEnv("CORGTEX_RELEASE_VERSION");
+  const configuredImageTag = optionalEnv("CORGTEX_RELEASE_IMAGE_TAG");
+  const configuredGitSha = optionalEnv("CORGTEX_RELEASE_GIT_SHA");
+  const railwayGitSha = optionalEnv("RAILWAY_GIT_COMMIT_SHA");
+  const githubSha = optionalEnv("GITHUB_SHA");
+  const packageVersion = optionalEnv("npm_package_version");
+  const runtimeGitSha = railwayGitSha ?? githubSha;
+
   return {
-    version: process.env.CORGTEX_RELEASE_VERSION || process.env.npm_package_version || "development",
-    imageTag: process.env.CORGTEX_RELEASE_IMAGE_TAG || null,
-    gitSha: process.env.CORGTEX_RELEASE_GIT_SHA || process.env.RAILWAY_GIT_COMMIT_SHA || process.env.GITHUB_SHA || null,
+    version: configuredVersion ?? packageVersion ?? "development",
+    imageTag: runtimeGitSha ?? configuredImageTag,
+    gitSha: runtimeGitSha ?? configuredGitSha,
+    source: {
+      version: configuredVersion ? "configured" : packageVersion ? "package" : "development",
+      imageTag: runtimeGitSha ? "runtime" : configuredImageTag ? "configured" : "missing",
+      gitSha: railwayGitSha ? "railway" : githubSha ? "github" : configuredGitSha ? "configured" : "missing",
+    },
+    configured: {
+      version: configuredVersion,
+      imageTag: configuredImageTag,
+      gitSha: configuredGitSha,
+    },
   };
 }
 
@@ -96,11 +119,11 @@ export async function GET() {
           service: "web",
           database: "up",
           schema: "stale",
-            app: "corgtex",
-            auth: "password-session",
-            release: releaseFingerprint(),
-            runtime: runtimeFingerprint(),
-            missing: {
+          app: "corgtex",
+          auth: "password-session",
+          release: releaseFingerprint(),
+          runtime: runtimeFingerprint(),
+          missing: {
             brainTables: !brainTablesReady,
             knowledgeSourceType: !knowledgeSourceTypeReady,
             migrations: !migrationsHealthy,

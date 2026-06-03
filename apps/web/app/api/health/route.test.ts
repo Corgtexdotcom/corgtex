@@ -60,6 +60,16 @@ describe("GET /api/health", () => {
         version: "development",
         imageTag: null,
         gitSha: null,
+        source: {
+          version: "development",
+          imageTag: "missing",
+          gitSha: "missing",
+        },
+        configured: {
+          version: null,
+          imageTag: null,
+          gitSha: null,
+        },
       },
       runtime: {
         redis: "missing",
@@ -92,6 +102,16 @@ describe("GET /api/health", () => {
         version: "development",
         imageTag: null,
         gitSha: null,
+        source: {
+          version: "development",
+          imageTag: "missing",
+          gitSha: "missing",
+        },
+        configured: {
+          version: null,
+          imageTag: null,
+          gitSha: null,
+        },
       },
       runtime: {
         redis: "missing",
@@ -124,6 +144,16 @@ describe("GET /api/health", () => {
         version: "development",
         imageTag: null,
         gitSha: null,
+        source: {
+          version: "development",
+          imageTag: "missing",
+          gitSha: "missing",
+        },
+        configured: {
+          version: null,
+          imageTag: null,
+          gitSha: null,
+        },
       },
       runtime: {
         redis: "missing",
@@ -157,6 +187,16 @@ describe("GET /api/health", () => {
         version: "0.1.0",
         imageTag: "sha-abc",
         gitSha: "abc",
+        source: {
+          version: "configured",
+          imageTag: "configured",
+          gitSha: "configured",
+        },
+        configured: {
+          version: "0.1.0",
+          imageTag: "sha-abc",
+          gitSha: "abc",
+        },
       },
       runtime: {
         redis: "configured",
@@ -182,6 +222,40 @@ describe("GET /api/health", () => {
       runtime: {
         redis: "configured",
         storage: "missing",
+      },
+    });
+  });
+
+  it("prefers runtime deployment SHAs over stale configured release variables", async () => {
+    const { GET } = await import("./route");
+    process.env.CORGTEX_RELEASE_VERSION = "main-older";
+    process.env.CORGTEX_RELEASE_IMAGE_TAG = "older-sha";
+    process.env.CORGTEX_RELEASE_GIT_SHA = "older-sha";
+    process.env.RAILWAY_GIT_COMMIT_SHA = "current-sha";
+    queryRaw
+      .mockResolvedValueOnce([{ ok: 1 }])
+      .mockResolvedValueOnce([{ ready: true }])
+      .mockResolvedValueOnce([{ ready: true }])
+      .mockResolvedValueOnce([{ count: 0 }]);
+
+    const response = await GET();
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      release: {
+        version: "main-older",
+        imageTag: "current-sha",
+        gitSha: "current-sha",
+        source: {
+          version: "configured",
+          imageTag: "runtime",
+          gitSha: "railway",
+        },
+        configured: {
+          version: "main-older",
+          imageTag: "older-sha",
+          gitSha: "older-sha",
+        },
       },
     });
   });

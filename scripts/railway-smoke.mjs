@@ -1,4 +1,5 @@
 import process from "node:process";
+import { pathToFileURL } from "node:url";
 
 function fail(message) {
   console.error(`FAIL ${message}`);
@@ -7,6 +8,19 @@ function fail(message) {
 
 function pass(message) {
   console.log(`OK   ${message}`);
+}
+
+export function expectedHealthGitSha(env = process.env) {
+  return env.CORGTEX_EXPECTED_RELEASE_GIT_SHA?.trim() || env.GITHUB_SHA?.trim() || null;
+}
+
+export function healthReleaseMismatch(health, expectedGitSha) {
+  if (!expectedGitSha) return null;
+
+  const actualGitSha = typeof health?.release?.gitSha === "string" ? health.release.gitSha : null;
+  if (actualGitSha === expectedGitSha) return null;
+
+  return `/api/health release.gitSha ${actualGitSha ?? "missing"} did not match expected ${expectedGitSha}`;
 }
 
 function cookieHeaderFromSetCookie(setCookie) {
@@ -52,6 +66,15 @@ async function main() {
   }
   pass("/api/health reports the Corgtex fingerprint");
 
+  const expectedGitSha = expectedHealthGitSha();
+  const releaseMismatch = healthReleaseMismatch(health, expectedGitSha);
+  if (releaseMismatch) {
+    fail(releaseMismatch);
+  }
+  if (expectedGitSha) {
+    pass(`/api/health release.gitSha matches ${expectedGitSha.slice(0, 12)}`);
+  }
+
   const apiLoginResponse = await fetch(new URL("/api/auth/login", baseUrl), {
     method: "POST",
     headers: {
@@ -96,7 +119,9 @@ async function main() {
   pass("/ resolves into the authenticated workspace flow");
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exit(1);
-});
+if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
+  main().catch((error) => {
+    console.error(error);
+    process.exit(1);
+  });
+}
