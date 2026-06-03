@@ -75,10 +75,13 @@ npm run test:unit
 ## Visual Proof
 
 For UI changes under `apps/web/app/**`, `apps/web/components/**`, or
-`apps/web/lib/components/**`, link actual proof from the PR body. Use
-PR attachments, CI-uploaded artifacts, or another private artifact link.
-Do not commit screenshots, recordings, or generated QA output to
-`docs/assets/`.
+`apps/web/lib/components/**`, link actual proof from the PR body.
+Preferred: capture screenshots or videos under ignored `.artifacts/`,
+upload them to Corgtex Build Artifacts with
+`node scripts/upload-build-artifacts.mjs`, and paste the emitted
+markdown links here. Use PR attachments, CI-uploaded artifacts, or
+another private artifact link only when Build Artifacts is unavailable.
+Do not commit screenshots, recordings, or generated QA output.
 
 Delete this section if no UI paths changed.
 
