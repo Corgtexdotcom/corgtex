@@ -41,13 +41,21 @@ export function healthReleaseMismatch(health, expectedGitSha) {
   return `/api/health release.gitSha ${actualGitSha ?? "missing"} did not match expected ${expectedGitSha}`;
 }
 
-export function healthPayloadMismatch(healthResponse, health, parseError = null) {
+function errorMessage(error) {
+  return error?.message ?? String(error);
+}
+
+export function healthPayloadMismatch(healthResponse, health, parseError = null, fetchError = null) {
+  if (fetchError) {
+    return `/api/health fetch failed: ${errorMessage(fetchError)}`;
+  }
+
   if (parseError) {
-    return `/api/health returned a non-JSON payload: ${parseError.message}`;
+    return `/api/health returned a non-JSON payload: ${errorMessage(parseError)}`;
   }
 
   if (
-    healthResponse.ok &&
+    healthResponse?.ok &&
     health?.status === "ok" &&
     health.service === "web" &&
     health.database === "up" &&
@@ -68,12 +76,18 @@ function sleep(ms) {
 }
 
 async function fetchHealth(baseUrl) {
-  const healthResponse = await fetch(new URL("/api/health", baseUrl));
+  let healthResponse;
+  try {
+    healthResponse = await fetch(new URL("/api/health", baseUrl));
+  } catch (error) {
+    return { healthResponse: null, health: null, parseError: null, fetchError: error };
+  }
+
   try {
     const health = await healthResponse.json();
-    return { healthResponse, health, parseError: null };
+    return { healthResponse, health, parseError: null, fetchError: null };
   } catch (error) {
-    return { healthResponse, health: null, parseError: error };
+    return { healthResponse, health: null, parseError: error, fetchError: null };
   }
 }
 
@@ -85,8 +99,8 @@ async function waitForExpectedRelease(baseUrl, expectedGitSha, initialMismatch) 
   while (Date.now() - startTime < timeoutMs) {
     await sleep(Math.min(intervalMs, timeoutMs - (Date.now() - startTime)));
 
-    const { healthResponse, health, parseError } = await fetchHealth(baseUrl);
-    lastMismatch = healthPayloadMismatch(healthResponse, health, parseError) ?? healthReleaseMismatch(health, expectedGitSha);
+    const { healthResponse, health, parseError, fetchError } = await fetchHealth(baseUrl);
+    lastMismatch = healthPayloadMismatch(healthResponse, health, parseError, fetchError) ?? healthReleaseMismatch(health, expectedGitSha);
     if (!lastMismatch) return;
   }
 
@@ -122,8 +136,8 @@ async function main() {
   pass("/login serves the Corgtex login page");
 
   const expectedGitSha = expectedHealthGitSha();
-  const { healthResponse, health, parseError } = await fetchHealth(baseUrl);
-  const healthMismatch = healthPayloadMismatch(healthResponse, health, parseError);
+  const { healthResponse, health, parseError, fetchError } = await fetchHealth(baseUrl);
+  const healthMismatch = healthPayloadMismatch(healthResponse, health, parseError, fetchError);
   if (healthMismatch && !expectedGitSha) {
     fail(healthMismatch);
   }

@@ -47,6 +47,10 @@ describe("railway smoke release validation", () => {
     expect(healthPayloadMismatch({ ok: true }, null, new Error("Unexpected token <"))).toContain("non-JSON payload");
   });
 
+  it("reports health fetch failures as retryable mismatches", () => {
+    expect(healthPayloadMismatch(null, null, null, new Error("connection reset"))).toContain("fetch failed");
+  });
+
   it("uses safe release-match retry defaults and positive overrides", () => {
     expect(releaseMatchRetryConfig({})).toEqual({
       timeoutMs: 300_000,
