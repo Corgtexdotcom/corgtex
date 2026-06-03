@@ -466,14 +466,31 @@ function normalizeAgentRun(run) {
 }
 
 function dedupeAgentRuns(runs) {
-  const seen = new Set();
-  return runs.filter((run, index) => {
+  const seen = new Map();
+  const deduped = [];
+  runs.forEach((run, index) => {
     const key = run.id
       ?? `${run.agentKey}:${run.status}:${agentRunOrderTimestamp(run) ?? "unknown"}:${index}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
+    const existingIndex = seen.get(key);
+    if (existingIndex === undefined) {
+      seen.set(key, deduped.length);
+      deduped.push(run);
+      return;
+    }
+    if (isNewerAgentRunObservation(run, deduped[existingIndex])) {
+      deduped[existingIndex] = run;
+    }
   });
+  return deduped;
+}
+
+function isNewerAgentRunObservation(candidate, existing) {
+  const candidateAtMs = timestampMs(agentRunOrderTimestamp(candidate));
+  const existingAtMs = timestampMs(agentRunOrderTimestamp(existing));
+  if (candidateAtMs !== null && existingAtMs !== null) return candidateAtMs >= existingAtMs;
+  if (candidateAtMs !== null) return true;
+  if (existingAtMs !== null) return false;
+  return true;
 }
 
 function supportInspectionAgentRuns(row, snapshotObservedAtMs) {

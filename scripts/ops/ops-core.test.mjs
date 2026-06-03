@@ -739,6 +739,52 @@ describe("ops-core control-plane incidents", () => {
     expect(incidents.some((incident) => incident.status === "agentFailureStreak")).toBe(false);
   });
 
+  it("uses newer support inspection status when a cached run id is repeated", () => {
+    const incidents = buildTestControlPlaneIncidents([
+      {
+        id: "deployment-acme",
+        label: "Acme Production",
+        customerSlug: "acme",
+        hasSupportCredential: true,
+        supportOperations: [
+          {
+            action: "agents.list_runs",
+            status: "COMPLETED",
+            completedAt: "2026-05-24T00:15:00.000Z",
+            resultSummary: {
+              items: [
+                {
+                  id: "run-failed-3",
+                  agentKey: "meeting-summary",
+                  status: "COMPLETED",
+                  createdAt: "2026-05-23T23:55:00.000Z",
+                  completedAt: "2026-05-24T00:12:00.000Z",
+                },
+              ],
+            },
+          },
+        ],
+        fleetSnapshots: [
+          {
+            snapshotKind: "SUPPORT_READY",
+            observedAt: "2026-05-24T00:00:00.000Z",
+            summary: {
+              agentRuns: {
+                items: [
+                  { id: "run-failed-3", agentKey: "meeting-summary", status: "FAILED", createdAt: "2026-05-23T23:55:00.000Z" },
+                  { id: "run-failed-2", agentKey: "meeting-summary", status: "FAILED", createdAt: "2026-05-23T23:50:00.000Z" },
+                  { id: "run-failed-1", agentKey: "meeting-summary", status: "FAILED", createdAt: "2026-05-23T23:45:00.000Z" },
+                ],
+              },
+            },
+          },
+        ],
+      },
+    ]);
+
+    expect(incidents.some((incident) => incident.status === "agentFailureStreak")).toBe(false);
+  });
+
   it("keeps cached failure-streak incidents when support inspection predates the snapshot", () => {
     const incidents = buildTestControlPlaneIncidents([
       {
