@@ -79,6 +79,7 @@ type Env = {
   readonly MODEL_CHAT_EXCELLENT: string;
   readonly MODEL_CHAT_CONVERSATION: string;
   readonly MODEL_EMBEDDING_DEFAULT: string;
+  readonly MODEL_REQUEST_TIMEOUT_MS: number;
   readonly STRIPE_SECRET_KEY: string | undefined;
   readonly STRIPE_WEBHOOK_SECRET: string | undefined;
   readonly STRIPE_PRICE_AI_USAGE_ID: string | undefined;
@@ -192,6 +193,9 @@ export const env: Env = {
   },
   get MODEL_EMBEDDING_DEFAULT() {
     return optional("MODEL_EMBEDDING_DEFAULT") ?? "google/gemini-embedding-001";
+  },
+  get MODEL_REQUEST_TIMEOUT_MS() {
+    return numberFromEnv("MODEL_REQUEST_TIMEOUT_MS", 180_000);
   },
   get STRIPE_SECRET_KEY() {
     return optional("STRIPE_SECRET_KEY");

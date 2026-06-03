@@ -264,6 +264,79 @@ describe("runMeetingSummaryAgent", () => {
     }));
   });
 
+  it("condenses long transcripts before meeting-summary model calls", async () => {
+    const { defaultModelGateway } = await import("@corgtex/models");
+    const longTranscript = [
+      "BEGINNING_MARKER",
+      "a".repeat(30_000),
+      "MIDDLE_MARKER",
+      "b".repeat(30_000),
+      "c".repeat(3_000),
+      "ENDING_MARKER",
+      "c".repeat(3_000),
+    ].join("\n");
+    vi.mocked(defaultModelGateway.extract).mockClear().mockResolvedValueOnce({
+      output: {
+        blocks: [
+          {
+            sequence: 1,
+            title: "Long discussion",
+            kind: "custom",
+            summaryMd: "The long discussion was summarized from excerpts.",
+          },
+        ],
+      },
+      raw: "{}",
+      usage: modelUsage,
+    });
+    vi.mocked(defaultModelGateway.chat).mockClear().mockResolvedValueOnce({
+      content: "## Long discussion\nThe long discussion was handled.",
+      usage: modelUsage,
+    });
+    buildMeetingIntelligenceContextMock.mockResolvedValueOnce({
+      contextualIntelligenceEnabled: false,
+      meeting: {
+        id: "meeting-long",
+        workspaceId: "ws-1",
+        title: "Long recorder meeting",
+        source: "recorder",
+        transcript: longTranscript,
+        summaryMd: null,
+        blocksJson: null,
+        ingestionGuidanceMd: null,
+        recordedAt: new Date("2026-04-29T12:00:00.000Z"),
+      },
+      previousMeetings: [],
+      actions: [],
+      tensions: [],
+      proposals: [],
+      deliberationEntries: [],
+      followUps: [],
+      knowledge: [],
+    });
+
+    const { runMeetingSummaryAgent } = await import(".");
+    await runMeetingSummaryAgent({
+      workspaceId: "ws-1",
+      triggerRef: "trigger-long",
+      triggerType: "EVENT",
+      meetingId: "meeting-long",
+    });
+
+    const extractInput = JSON.parse(vi.mocked(defaultModelGateway.extract).mock.calls.at(-1)?.[0].input ?? "{}");
+    const chatMessage = vi.mocked(defaultModelGateway.chat).mock.calls.at(-1)?.[0].messages.find((message) => message.role === "user");
+    const chatInput = JSON.parse(chatMessage?.content ?? "{}");
+
+    expect(extractInput.transcriptCondensedForSummary).toBe(true);
+    expect(chatInput.transcriptCondensedForSummary).toBe(true);
+    expect(extractInput.transcript.length).toBeLessThan(longTranscript.length);
+    expect(chatInput.transcript.length).toBeLessThan(longTranscript.length);
+    expect(extractInput.transcript).toContain("shortened for summary generation");
+    expect(extractInput.transcript).toContain("BEGINNING_MARKER");
+    expect(extractInput.transcript).toContain("MIDDLE_MARKER");
+    expect(extractInput.transcript).toContain("ENDING_MARKER");
+  });
+
   it("applies explicit guidance term corrections before persisting the meeting summary", async () => {
     const { defaultModelGateway } = await import("@corgtex/models");
     vi.mocked(defaultModelGateway.chat).mockResolvedValueOnce({
