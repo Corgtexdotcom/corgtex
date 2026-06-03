@@ -173,22 +173,22 @@ export const env: Env = {
     return optional("MODEL_BASE_URL") ?? "https://openrouter.ai/api/v1";
   },
   get MODEL_CHAT_DEFAULT() {
-    return optional("MODEL_CHAT_DEFAULT") ?? "qwen/qwen3-32b";
+    return optional("MODEL_CHAT_DEFAULT") ?? "deepseek/deepseek-v4-flash";
   },
   get MODEL_CHAT_FAST() {
-    return optional("MODEL_CHAT_FAST") ?? "google/gemini-2.5-flash-lite";
+    return optional("MODEL_CHAT_FAST") ?? "deepseek/deepseek-v4-flash";
   },
   get MODEL_CHAT_STANDARD() {
-    return optional("MODEL_CHAT_STANDARD") ?? "meta-llama/llama-4-scout";
+    return optional("MODEL_CHAT_STANDARD") ?? "deepseek/deepseek-v4-flash";
   },
   get MODEL_CHAT_QUALITY() {
-    return optional("MODEL_CHAT_QUALITY") ?? "google/gemini-2.5-flash";
+    return optional("MODEL_CHAT_QUALITY") ?? "deepseek/deepseek-v4-pro";
   },
   get MODEL_CHAT_EXCELLENT() {
-    return optional("MODEL_CHAT_EXCELLENT") ?? "openai/gpt-4o";
+    return optional("MODEL_CHAT_EXCELLENT") ?? "deepseek/deepseek-r1-0528";
   },
   get MODEL_CHAT_CONVERSATION() {
-    return optional("MODEL_CHAT_CONVERSATION") ?? "google/gemini-2.5-flash";
+    return optional("MODEL_CHAT_CONVERSATION") ?? "deepseek/deepseek-v4-pro";
   },
   get MODEL_EMBEDDING_DEFAULT() {
     return optional("MODEL_EMBEDDING_DEFAULT") ?? "google/gemini-embedding-001";

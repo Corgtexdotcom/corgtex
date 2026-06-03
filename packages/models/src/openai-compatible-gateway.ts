@@ -135,6 +135,7 @@ function withProviderOptions(body: Record<string, unknown>) {
     provider: {
       allow_fallbacks: true,
       data_collection: "deny",
+      require_parameters: true,
     },
   };
 }

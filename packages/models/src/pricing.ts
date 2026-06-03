@@ -15,6 +15,9 @@ export type ModelCostEstimate = {
 const DEFAULT_AI_MARKUP_MULTIPLIER = 2;
 
 const MODEL_PRICES: ModelPrice[] = [
+  { provider: "openrouter", model: "deepseek/deepseek-v4-flash", inputUsdPerToken: 0.0000000983, outputUsdPerToken: 0.0000001966 },
+  { provider: "openrouter", model: "deepseek/deepseek-v4-pro", inputUsdPerToken: 0.000000435, outputUsdPerToken: 0.00000087 },
+  { provider: "openrouter", model: "deepseek/deepseek-r1-0528", inputUsdPerToken: 0.0000005, outputUsdPerToken: 0.00000215 },
   { provider: "openrouter", model: "qwen/qwen3-32b", inputUsdPerToken: 0.00000008, outputUsdPerToken: 0.00000028 },
   { provider: "openrouter", model: "google/gemini-2.5-flash-lite", inputUsdPerToken: 0.0000001, outputUsdPerToken: 0.0000004 },
   { provider: "openrouter", model: "meta-llama/llama-4-scout", inputUsdPerToken: 0.00000008, outputUsdPerToken: 0.0000003 },
