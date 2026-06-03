@@ -24,6 +24,11 @@ type BillingActivation = {
   currentPeriodEnd?: Date | null;
 };
 
+const MEETING_RECORDERS_FEATURE_FLAG = "MEETING_RECORDERS";
+const STRIPE_PAYG_RECORDER_ACCESS_KEY = "stripePaygAiRecorderAccess";
+const STRIPE_PAYG_RECORDER_ACCESS_GRANTED_AT_KEY = "stripePaygAiRecorderAccessGrantedAt";
+const RECORDER_ACCESS_EXTERNAL_TOUCH_GRACE_MS = 5000;
+
 function requireStripeSecret() {
   if (!env.STRIPE_SECRET_KEY) {
     throw new AppError(503, "STRIPE_NOT_CONFIGURED", "Stripe billing is not configured.");
@@ -113,6 +118,63 @@ async function getStripeSubscription(subscriptionId: string) {
   return stripeRequest(`/subscriptions/${encodeURIComponent(subscriptionId)}`, new URLSearchParams(), "GET");
 }
 
+function isJsonObject(value: Prisma.JsonValue | null | undefined): value is Prisma.JsonObject {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function hasStripePaygRecorderAccess(config: Prisma.JsonValue | null | undefined) {
+  return isJsonObject(config) && config[STRIPE_PAYG_RECORDER_ACCESS_KEY] === true;
+}
+
+function wasTouchedAfterStripeGrant(record: { updatedAt: Date; config: Prisma.JsonValue | null } | null | undefined) {
+  const rawGrantedAt = record && isJsonObject(record.config) ? record.config[STRIPE_PAYG_RECORDER_ACCESS_GRANTED_AT_KEY] : null;
+  const grantedAt = typeof rawGrantedAt === "string" ? Date.parse(rawGrantedAt) : NaN;
+  return Number.isFinite(grantedAt)
+    && record
+    && record.updatedAt.getTime() - grantedAt > RECORDER_ACCESS_EXTERNAL_TOUCH_GRACE_MS;
+}
+
+function recorderAccessConfig(config: Prisma.JsonValue | null | undefined, enabled: boolean): Prisma.InputJsonObject {
+  return {
+    ...(isJsonObject(config) ? config : {}),
+    [STRIPE_PAYG_RECORDER_ACCESS_KEY]: enabled,
+    ...(enabled ? { [STRIPE_PAYG_RECORDER_ACCESS_GRANTED_AT_KEY]: new Date().toISOString() } : {}),
+  };
+}
+
+async function setPurchasedRecorderAccess(tx: Prisma.TransactionClient, workspaceId: string, enabled: boolean) {
+  const existing = await tx.workspaceFeatureFlag.findUnique({
+    where: {
+      workspaceId_flag: {
+        workspaceId,
+        flag: MEETING_RECORDERS_FEATURE_FLAG,
+      },
+    },
+  });
+  if (enabled && existing?.enabled) {
+    return;
+  }
+  if (!enabled && (!hasStripePaygRecorderAccess(existing?.config) || wasTouchedAfterStripeGrant(existing))) {
+    return;
+  }
+  const config = recorderAccessConfig(existing?.config, enabled);
+  await tx.workspaceFeatureFlag.upsert({
+    where: {
+      workspaceId_flag: {
+        workspaceId,
+        flag: MEETING_RECORDERS_FEATURE_FLAG,
+      },
+    },
+    update: { enabled, config },
+    create: {
+      workspaceId,
+      flag: MEETING_RECORDERS_FEATURE_FLAG,
+      enabled,
+      config,
+    },
+  });
+}
+
 async function activatePaygAi(tx: Prisma.TransactionClient, workspaceId: string, params: BillingActivation) {
   await tx.workspace.update({
     where: { id: workspaceId },
@@ -159,6 +221,7 @@ async function activatePaygAi(tx: Prisma.TransactionClient, workspaceId: string,
       currentPeriodEnd: params.currentPeriodEnd ?? undefined,
     },
   });
+  await setPurchasedRecorderAccess(tx, workspaceId, true);
   await tx.customerAccount.updateMany({
     where: {
       deployments: {
@@ -190,6 +253,7 @@ async function pauseAiForBilling(tx: Prisma.TransactionClient, workspaceId: stri
       ...(status === "CANCELED" ? { canceledAt: new Date() } : { failedPaymentAt: new Date() }),
     },
   });
+  await setPurchasedRecorderAccess(tx, workspaceId, false);
 }
 
 export async function getWorkspacePlanState(actor: AppActor, workspaceId: string) {

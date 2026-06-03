@@ -6,6 +6,7 @@ const { prismaMock } = vi.hoisted(() => {
     $transaction: vi.fn(),
     workspace: { update: vi.fn(), findUnique: vi.fn() },
     modelUsageBudget: { upsert: vi.fn() },
+    workspaceFeatureFlag: { findUnique: vi.fn(), upsert: vi.fn() },
     workspaceBillingProfile: {
       findFirst: vi.fn(),
       findUnique: vi.fn(),
@@ -59,6 +60,8 @@ describe("billing", () => {
     prismaMock.stripeWebhookEvent.update.mockResolvedValue({});
     prismaMock.workspace.update.mockResolvedValue({});
     prismaMock.modelUsageBudget.upsert.mockResolvedValue({});
+    prismaMock.workspaceFeatureFlag.findUnique.mockResolvedValue(null);
+    prismaMock.workspaceFeatureFlag.upsert.mockResolvedValue({});
     prismaMock.workspaceBillingProfile.upsert.mockResolvedValue({});
     prismaMock.customerAccount.updateMany.mockResolvedValue({ count: 1 });
   });
@@ -108,6 +111,24 @@ describe("billing", () => {
         stripeSubscriptionItemId: "si-1",
       }),
     }));
+    expect(prismaMock.workspaceFeatureFlag.upsert).toHaveBeenCalledWith({
+      where: {
+        workspaceId_flag: {
+          workspaceId: "ws-1",
+          flag: "MEETING_RECORDERS",
+        },
+      },
+      update: {
+        enabled: true,
+        config: expect.objectContaining({ stripePaygAiRecorderAccess: true }),
+      },
+      create: {
+        workspaceId: "ws-1",
+        flag: "MEETING_RECORDERS",
+        enabled: true,
+        config: expect.objectContaining({ stripePaygAiRecorderAccess: true }),
+      },
+    });
   });
 
   it("rejects unsigned webhooks", async () => {
@@ -143,6 +164,10 @@ describe("billing", () => {
       data: { object: { metadata: { workspaceId: "ws-1" } } },
     };
     let rawBody = JSON.stringify(failed);
+    prismaMock.workspaceFeatureFlag.findUnique.mockResolvedValueOnce({
+      enabled: true,
+      config: { stripePaygAiRecorderAccess: true },
+    });
 
     await handleStripeWebhook(rawBody, signature(rawBody));
 
@@ -157,11 +182,26 @@ describe("billing", () => {
       where: { workspaceId: "ws-1" },
       data: expect.objectContaining({ billingStatus: "PAST_DUE", paymentMethodReady: false }),
     }));
+    expect(prismaMock.workspaceFeatureFlag.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        workspaceId_flag: {
+          workspaceId: "ws-1",
+          flag: "MEETING_RECORDERS",
+        },
+      },
+      update: { enabled: false, config: { stripePaygAiRecorderAccess: false } },
+      create: expect.objectContaining({
+        enabled: false,
+        config: { stripePaygAiRecorderAccess: false },
+      }),
+    }));
 
     vi.clearAllMocks();
     prismaMock.$transaction.mockImplementation(async (callback: any) => callback(prismaMock));
     prismaMock.stripeWebhookEvent.upsert.mockResolvedValue({ id: "evt-active", processedAt: null });
     prismaMock.stripeWebhookEvent.update.mockResolvedValue({});
+    prismaMock.workspaceFeatureFlag.findUnique.mockResolvedValue(null);
+    prismaMock.workspaceFeatureFlag.upsert.mockResolvedValue({});
     const active = {
       id: "evt-active",
       type: "customer.subscription.updated",
@@ -186,6 +226,49 @@ describe("billing", () => {
     expect(prismaMock.workspaceBillingProfile.upsert).toHaveBeenCalledWith(expect.objectContaining({
       update: expect.objectContaining({ billingStatus: "ACTIVE", paymentMethodReady: true }),
     }));
+    expect(prismaMock.workspaceFeatureFlag.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      update: {
+        enabled: true,
+        config: expect.objectContaining({ stripePaygAiRecorderAccess: true }),
+      },
+      create: expect.objectContaining({
+        enabled: true,
+        config: expect.objectContaining({ stripePaygAiRecorderAccess: true }),
+      }),
+    }));
+  });
+
+  it("does not disable recorder access touched after the Stripe grant", async () => {
+    const { handleStripeWebhook } = await import("./billing");
+    const event = {
+      id: "evt-manual-recorder",
+      type: "customer.subscription.updated",
+      data: {
+        object: {
+          id: "sub-1",
+          customer: "cus-1",
+          status: "past_due",
+          metadata: { workspaceId: "ws-1" },
+        },
+      },
+    };
+    const rawBody = JSON.stringify(event);
+    prismaMock.workspaceFeatureFlag.findUnique.mockResolvedValueOnce({
+      enabled: true,
+      updatedAt: new Date("2026-06-03T12:00:10.000Z"),
+      config: {
+        stripePaygAiRecorderAccess: true,
+        stripePaygAiRecorderAccessGrantedAt: "2026-06-03T12:00:00.000Z",
+      },
+    });
+
+    await handleStripeWebhook(rawBody, signature(rawBody));
+
+    expect(prismaMock.workspaceBillingProfile.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { workspaceId: "ws-1" },
+      data: expect.objectContaining({ billingStatus: "PAST_DUE", paymentMethodReady: false }),
+    }));
+    expect(prismaMock.workspaceFeatureFlag.upsert).not.toHaveBeenCalled();
   });
 
   it("pauses AI on canceled subscriptions and records detached payment methods", async () => {
@@ -202,6 +285,10 @@ describe("billing", () => {
       },
     };
     let rawBody = JSON.stringify(canceled);
+    prismaMock.workspaceFeatureFlag.findUnique.mockResolvedValue({
+      enabled: true,
+      config: { stripePaygAiRecorderAccess: true },
+    });
 
     await handleStripeWebhook(rawBody, signature(rawBody));
 
@@ -213,11 +300,26 @@ describe("billing", () => {
       where: { workspaceId: "ws-1" },
       data: expect.objectContaining({ billingStatus: "CANCELED", paymentMethodReady: false }),
     }));
+    expect(prismaMock.workspaceFeatureFlag.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        workspaceId_flag: {
+          workspaceId: "ws-1",
+          flag: "MEETING_RECORDERS",
+        },
+      },
+      update: { enabled: false, config: { stripePaygAiRecorderAccess: false } },
+      create: expect.objectContaining({
+        enabled: false,
+        config: { stripePaygAiRecorderAccess: false },
+      }),
+    }));
 
     vi.clearAllMocks();
     prismaMock.$transaction.mockImplementation(async (callback: any) => callback(prismaMock));
     prismaMock.stripeWebhookEvent.upsert.mockResolvedValue({ id: "evt-detached", processedAt: null });
     prismaMock.stripeWebhookEvent.update.mockResolvedValue({});
+    prismaMock.workspaceFeatureFlag.findUnique.mockResolvedValue(null);
+    prismaMock.workspaceFeatureFlag.upsert.mockResolvedValue({});
     const detached = {
       id: "evt-detached",
       type: "payment_method.detached",
@@ -236,6 +338,7 @@ describe("billing", () => {
       where: { workspaceId: "ws-1" },
       data: { paymentMethodReady: false },
     });
+    expect(prismaMock.workspaceFeatureFlag.upsert).not.toHaveBeenCalled();
   });
 
   it("marks reported usage invoiced on successful invoice payment", async () => {
@@ -257,6 +360,7 @@ describe("billing", () => {
     };
     const rawBody = JSON.stringify(event);
     const { handleStripeWebhook } = await import("./billing");
+    prismaMock.workspaceFeatureFlag.findUnique.mockResolvedValueOnce(null);
 
     await handleStripeWebhook(rawBody, signature(rawBody));
 
@@ -271,6 +375,18 @@ describe("billing", () => {
         stripeInvoiceId: "in-1",
       },
     });
+    expect(prismaMock.workspaceFeatureFlag.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      update: {
+        enabled: true,
+        config: expect.objectContaining({ stripePaygAiRecorderAccess: true }),
+      },
+      create: expect.objectContaining({
+        workspaceId: "ws-1",
+        flag: "MEETING_RECORDERS",
+        enabled: true,
+        config: expect.objectContaining({ stripePaygAiRecorderAccess: true }),
+      }),
+    }));
   });
 
   it("reports pending and failed usage entries to Stripe in billable cents", async () => {
