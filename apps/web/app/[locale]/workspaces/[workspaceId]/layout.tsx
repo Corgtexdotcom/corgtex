@@ -1,4 +1,4 @@
-import { isGlobalOperator, listActorWorkspaces, countUnreadNotifications, listConversations, requireWorkspaceMembership, getMemberInvitePolicy, getMeetingRecorderConfig, getUserWorkspaceOnboardingState } from "@corgtex/domain";
+import { isGlobalOperator, listActorWorkspaces, countUnreadNotifications, listConversations, requireWorkspaceMembership, getMemberInvitePolicy, getMeetingRecorderConfig, getUserWorkspaceOnboardingState, listAiWorkspaceProviders } from "@corgtex/domain";
 import { workspaceBranding, prisma } from "@corgtex/shared";
 import type { Metadata } from "next";
 import { logoutAction, requirePageActor } from "@/lib/auth";
@@ -15,6 +15,8 @@ import { MobileWorkspaceShell } from "./MobileWorkspaceShell";
 import { getControlPlaneHref } from "@/lib/control-plane-url";
 import { WorkspaceAddMenu } from "./WorkspaceAddMenu";
 import { WorkspaceChatRail } from "./WorkspaceChatRail";
+import { aiWorkspaceLaunchUrl } from "@/lib/ai-workspace-launch";
+import { getMobileCaptureActions } from "@/lib/workspace-add-actions";
 
 export const dynamic = "force-dynamic";
 
@@ -66,6 +68,27 @@ export default async function WorkspaceLayout({
   const meetingRecorderEnabled = Boolean(
     featureFlags.MEETING_RECORDERS && meetingRecorderConfig?.featureEnabled && meetingRecorderConfig.config.enabled,
   );
+  const aiWorkspaceProviderDefinitions = featureFlags.AI_WORKSPACES ? listAiWorkspaceProviders() : [];
+  const aiWorkspaceProviderDefinition =
+    aiWorkspaceProviderDefinitions.find((provider) => provider.recommendedDefault)
+    ?? aiWorkspaceProviderDefinitions[0]
+    ?? null;
+  const aiWorkspaceProvider = aiWorkspaceProviderDefinition
+    ? {
+        key: aiWorkspaceProviderDefinition.key,
+        label: aiWorkspaceProviderDefinition.label,
+        shortLabel: aiWorkspaceProviderDefinition.shortLabel,
+      }
+    : null;
+  const aiWorkspaceLaunchHref = aiWorkspaceLaunchUrl(aiWorkspaceProvider?.key);
+  const captureActions = getMobileCaptureActions({
+    workspaceId,
+    featureFlags,
+    role: membership?.role ?? null,
+    invitePolicy,
+    meetingRecorderEnabled,
+    isDemo,
+  });
   const conversationSummaries = conversations.map((c: any) => ({
     id: c.id,
     topic: c.topic,
@@ -84,6 +107,9 @@ export default async function WorkspaceLayout({
         navGroups={visibleNavGroups}
         unreadCount={unreadCount}
         conversations={conversationSummaries}
+        aiWorkspaceProvider={aiWorkspaceProvider}
+        aiWorkspaceLaunchUrl={aiWorkspaceLaunchHref}
+        captureActions={captureActions}
       />
       <aside className="ws-sidebar">
         <div className="ws-sidebar-header">
@@ -132,7 +158,12 @@ export default async function WorkspaceLayout({
         </div>
       </main>
 
-      <WorkspaceChatRail workspaceId={workspaceId} conversations={conversationSummaries} />
+      <WorkspaceChatRail
+        workspaceId={workspaceId}
+        conversations={conversationSummaries}
+        aiWorkspaceProvider={aiWorkspaceProvider}
+        aiWorkspaceLaunchUrl={aiWorkspaceLaunchHref}
+      />
       {isDemo && (
         <DemoTour workspaceId={workspaceId} />
       )}
