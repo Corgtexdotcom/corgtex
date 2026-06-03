@@ -14,6 +14,31 @@ function isMissingMeetingError(error: unknown) {
   return error instanceof AppError && error.status === 404 && error.code === "NOT_FOUND";
 }
 
+const MAX_DIRECT_SUMMARY_TRANSCRIPT_CHARS = 35_000;
+const SUMMARY_TRANSCRIPT_EXCERPT_CHARS = 8_000;
+
+function excerptLongMeetingTranscript(transcript: string) {
+  if (transcript.length <= MAX_DIRECT_SUMMARY_TRANSCRIPT_CHARS) {
+    return transcript;
+  }
+
+  const middleStart = Math.max(
+    SUMMARY_TRANSCRIPT_EXCERPT_CHARS,
+    Math.floor(transcript.length / 2) - Math.floor(SUMMARY_TRANSCRIPT_EXCERPT_CHARS / 2),
+  );
+  const middleEnd = Math.min(
+    transcript.length - SUMMARY_TRANSCRIPT_EXCERPT_CHARS,
+    middleStart + SUMMARY_TRANSCRIPT_EXCERPT_CHARS,
+  );
+
+  return [
+    `The full transcript is ${transcript.length} characters and was shortened for summary generation to avoid model timeouts. Use these beginning, middle, and ending excerpts as transcript evidence. Do not treat this shortening note as meeting content.`,
+    `BEGINNING EXCERPT:\n${transcript.slice(0, SUMMARY_TRANSCRIPT_EXCERPT_CHARS)}`,
+    `MIDDLE EXCERPT:\n${transcript.slice(middleStart, middleEnd)}`,
+    `ENDING EXCERPT:\n${transcript.slice(-SUMMARY_TRANSCRIPT_EXCERPT_CHARS)}`,
+  ].join("\n\n---\n\n");
+}
+
 export async function runMeetingSummaryAgent(params: {
   workspaceId: string;
   triggerRef: string;
@@ -79,6 +104,10 @@ export async function runMeetingSummaryAgent(params: {
         };
       }
 
+      const transcript = meeting.transcript.trim();
+      const transcriptForModel = excerptLongMeetingTranscript(transcript);
+      const transcriptCondensedForSummary = transcriptForModel !== transcript;
+
       const blockExtraction = await helpers.tool("model.extract.meeting-blocks", { meetingId: meeting.id }, async () => defaultModelGateway.extract({
         model,
         workspaceId: params.workspaceId,
@@ -96,7 +125,9 @@ export async function runMeetingSummaryAgent(params: {
           title: meeting.title,
           source: meeting.source,
           recordedAt: meeting.recordedAt,
-          transcript: meeting.transcript,
+          transcript: transcriptForModel,
+          transcriptLength: transcript.length,
+          transcriptCondensedForSummary,
           currentSummary: meeting.summaryMd,
           ingestionGuidanceMd: meeting.ingestionGuidanceMd,
           existingRecords: meetingContext?.contextualIntelligenceEnabled ? {
@@ -151,7 +182,9 @@ export async function runMeetingSummaryAgent(params: {
               title: meeting.title,
               source: meeting.source,
               recordedAt: meeting.recordedAt,
-              transcript: meeting.transcript,
+              transcript: transcriptForModel,
+              transcriptLength: transcript.length,
+              transcriptCondensedForSummary,
               currentSummary: meeting.summaryMd,
               meetingBlocks,
               ingestionGuidanceMd: meeting.ingestionGuidanceMd,

@@ -43,7 +43,7 @@ type EmbeddingApiResponse = {
   };
 };
 
-const REQUEST_TIMEOUT_MS = 45_000;
+const REQUEST_TIMEOUT_MS = env.MODEL_REQUEST_TIMEOUT_MS;
 const STREAM_TIMEOUT_MS = 120_000;
 const MAX_REQUEST_RETRIES = 2;
 const OPENROUTER_TITLE = "Corgtex";
