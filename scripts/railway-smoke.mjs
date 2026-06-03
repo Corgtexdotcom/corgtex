@@ -1,6 +1,9 @@
 import process from "node:process";
 import { pathToFileURL } from "node:url";
 
+const DEFAULT_RELEASE_MATCH_TIMEOUT_MS = 300_000;
+const DEFAULT_RELEASE_MATCH_INTERVAL_MS = 10_000;
+
 function fail(message) {
   console.error(`FAIL ${message}`);
   process.exit(1);
@@ -14,6 +17,21 @@ export function expectedHealthGitSha(env = process.env) {
   return env.CORGTEX_EXPECTED_RELEASE_GIT_SHA?.trim() || env.GITHUB_SHA?.trim() || null;
 }
 
+function positiveIntegerEnv(env, name, fallback) {
+  const raw = env[name]?.trim();
+  if (!raw) return fallback;
+
+  const value = Number(raw);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+export function releaseMatchRetryConfig(env = process.env) {
+  return {
+    timeoutMs: positiveIntegerEnv(env, "CORGTEX_RELEASE_MATCH_TIMEOUT_MS", DEFAULT_RELEASE_MATCH_TIMEOUT_MS),
+    intervalMs: positiveIntegerEnv(env, "CORGTEX_RELEASE_MATCH_INTERVAL_MS", DEFAULT_RELEASE_MATCH_INTERVAL_MS),
+  };
+}
+
 export function healthReleaseMismatch(health, expectedGitSha) {
   if (!expectedGitSha) return null;
 
@@ -21,6 +39,50 @@ export function healthReleaseMismatch(health, expectedGitSha) {
   if (actualGitSha === expectedGitSha) return null;
 
   return `/api/health release.gitSha ${actualGitSha ?? "missing"} did not match expected ${expectedGitSha}`;
+}
+
+function healthPayloadMismatch(healthResponse, health) {
+  if (
+    healthResponse.ok &&
+    health.status === "ok" &&
+    health.service === "web" &&
+    health.database === "up" &&
+    health.schema === "ready" &&
+    health.app === "corgtex" &&
+    health.auth === "password-session"
+  ) {
+    return null;
+  }
+
+  return `/api/health returned an unexpected payload: ${JSON.stringify(health)}`;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+async function fetchHealth(baseUrl) {
+  const healthResponse = await fetch(new URL("/api/health", baseUrl));
+  const health = await healthResponse.json();
+  return { healthResponse, health };
+}
+
+async function waitForExpectedRelease(baseUrl, expectedGitSha, initialMismatch) {
+  const { timeoutMs, intervalMs } = releaseMatchRetryConfig();
+  const startTime = Date.now();
+  let lastMismatch = initialMismatch;
+
+  while (Date.now() - startTime < timeoutMs) {
+    await sleep(Math.min(intervalMs, timeoutMs - (Date.now() - startTime)));
+
+    const { healthResponse, health } = await fetchHealth(baseUrl);
+    lastMismatch = healthPayloadMismatch(healthResponse, health) ?? healthReleaseMismatch(health, expectedGitSha);
+    if (!lastMismatch) return;
+  }
+
+  fail(`${lastMismatch}; expected release did not appear within ${timeoutMs}ms`);
 }
 
 function cookieHeaderFromSetCookie(setCookie) {
@@ -51,25 +113,15 @@ async function main() {
   }
   pass("/login serves the Corgtex login page");
 
-  const healthResponse = await fetch(new URL("/api/health", baseUrl));
-  const health = await healthResponse.json();
-  if (
-    !healthResponse.ok ||
-    health.status !== "ok" ||
-    health.service !== "web" ||
-    health.database !== "up" ||
-    health.schema !== "ready" ||
-    health.app !== "corgtex" ||
-    health.auth !== "password-session"
-  ) {
-    fail(`/api/health returned an unexpected payload: ${JSON.stringify(health)}`);
-  }
+  const { healthResponse, health } = await fetchHealth(baseUrl);
+  const healthMismatch = healthPayloadMismatch(healthResponse, health);
+  if (healthMismatch) fail(healthMismatch);
   pass("/api/health reports the Corgtex fingerprint");
 
   const expectedGitSha = expectedHealthGitSha();
   const releaseMismatch = healthReleaseMismatch(health, expectedGitSha);
   if (releaseMismatch) {
-    fail(releaseMismatch);
+    await waitForExpectedRelease(baseUrl, expectedGitSha, releaseMismatch);
   }
   if (expectedGitSha) {
     pass(`/api/health release.gitSha matches ${expectedGitSha.slice(0, 12)}`);

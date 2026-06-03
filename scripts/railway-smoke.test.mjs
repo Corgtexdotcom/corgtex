@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { expectedHealthGitSha, healthReleaseMismatch } from "./railway-smoke.mjs";
+import { expectedHealthGitSha, healthReleaseMismatch, releaseMatchRetryConfig } from "./railway-smoke.mjs";
 
 describe("railway smoke release validation", () => {
   it("prefers an explicit expected release SHA over the GitHub SHA", () => {
@@ -36,5 +36,26 @@ describe("railway smoke release validation", () => {
       },
     }, "current-sha")).toContain("older-sha did not match expected current-sha");
     expect(healthReleaseMismatch({}, "current-sha")).toContain("missing did not match expected current-sha");
+  });
+
+  it("uses safe release-match retry defaults and positive overrides", () => {
+    expect(releaseMatchRetryConfig({})).toEqual({
+      timeoutMs: 300_000,
+      intervalMs: 10_000,
+    });
+    expect(releaseMatchRetryConfig({
+      CORGTEX_RELEASE_MATCH_TIMEOUT_MS: "120000",
+      CORGTEX_RELEASE_MATCH_INTERVAL_MS: "5000",
+    })).toEqual({
+      timeoutMs: 120_000,
+      intervalMs: 5_000,
+    });
+    expect(releaseMatchRetryConfig({
+      CORGTEX_RELEASE_MATCH_TIMEOUT_MS: "0",
+      CORGTEX_RELEASE_MATCH_INTERVAL_MS: "not-a-number",
+    })).toEqual({
+      timeoutMs: 300_000,
+      intervalMs: 10_000,
+    });
   });
 });

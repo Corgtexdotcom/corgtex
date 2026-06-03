@@ -244,11 +244,11 @@ describe("GET /api/health", () => {
     await expect(response.json()).resolves.toMatchObject({
       release: {
         version: "main-older",
-        imageTag: "current-sha",
+        imageTag: "older-sha",
         gitSha: "current-sha",
         source: {
           version: "configured",
-          imageTag: "runtime",
+          imageTag: "configured",
           gitSha: "railway",
         },
         configured: {

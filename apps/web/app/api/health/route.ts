@@ -36,11 +36,11 @@ function releaseFingerprint() {
 
   return {
     version: configuredVersion ?? packageVersion ?? "development",
-    imageTag: runtimeGitSha ?? configuredImageTag,
+    imageTag: configuredImageTag,
     gitSha: runtimeGitSha ?? configuredGitSha,
     source: {
       version: configuredVersion ? "configured" : packageVersion ? "package" : "development",
-      imageTag: runtimeGitSha ? "runtime" : configuredImageTag ? "configured" : "missing",
+      imageTag: configuredImageTag ? "configured" : "missing",
       gitSha: railwayGitSha ? "railway" : githubSha ? "github" : configuredGitSha ? "configured" : "missing",
     },
     configured: {
