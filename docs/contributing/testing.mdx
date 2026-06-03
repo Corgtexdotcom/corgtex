@@ -70,7 +70,10 @@ Summary:
 When a PR touches `apps/web/app/**`, `apps/web/components/**`, or
 `apps/web/lib/components/**`, the Executor logs into the UI using
 seeded credentials and links a screen recording, screenshot, or CI
-artifact from the PR body's **Visual Proof** section. Generated browser
+artifact from the PR body's **Visual Proof** section. Preferred proof
+storage is Corgtex Build Artifacts: capture browser output under
+ignored `.artifacts/`, upload it with `node scripts/upload-build-artifacts.mjs`,
+and paste the emitted markdown links into the PR. Generated browser
 artifacts belong under `.artifacts/` or in CI artifacts, not under
 `docs/assets/`. Credentials live in `.env` (`AGENT_E2E_EMAIL`,
 `AGENT_E2E_PASSWORD`) — never hardcoded, never in PR descriptions. See the secrets section of

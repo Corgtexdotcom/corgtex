@@ -42,7 +42,7 @@ Homebrew; `/opt/homebrew/bin/gh` if not on `PATH`). The PR body:
 2. **States the risk tier** — `low`, `standard`, or `high`.
 3. **Summarizes what shipped** — one or two sentences, the "walkthrough."
 4. **Describes demo exposure** for customer-visible product changes. Update `scripts/seed-jnj-demo.mjs` when safe seeded data is needed, or explain why the feature cannot be shown safely in the public demo.
-5. **Links actual visual proof** in the **Visual Proof** section for any change under `apps/web/app/**`, `apps/web/components/**`, or `apps/web/lib/components/**`. Use PR attachments, CI-uploaded artifacts, or another private artifact link; do not commit generated screenshots or recordings under `docs/assets/`.
+5. **Links actual visual proof** in the **Visual Proof** section for any change under `apps/web/app/**`, `apps/web/components/**`, or `apps/web/lib/components/**`. Prefer Corgtex Build Artifacts: capture proof under ignored `.artifacts/`, upload it with `node scripts/upload-build-artifacts.mjs`, and paste the emitted markdown links into the PR body. Use PR attachments, CI-uploaded artifacts, or another private artifact link only when Build Artifacts is unavailable. Do not commit generated screenshots or recordings.
 
 Auto-merge is set by the Executor immediately (`gh pr merge --auto --squash`) so the PR merges as soon as the Reviewer approves and required checks are green.
 
@@ -69,8 +69,9 @@ The `docs/` tree is only for the public documentation site. Private or
 client-specific notes, partner analysis, handoff docs, generated QA
 output, screenshots, recordings, Slack manifests, and agent plan files
 must stay out of `docs/` and out of Git history. Keep local generated
-output under `.artifacts/`, and use PR attachments, CI artifacts, or
-private artifact links for review proof.
+output under `.artifacts/`, and prefer Corgtex Build Artifacts for
+review proof links. Use PR attachments, CI artifacts, or private
+artifact links only when Build Artifacts is unavailable.
 
 ## Labels
 

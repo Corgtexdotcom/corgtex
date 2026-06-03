@@ -90,7 +90,12 @@ reviews code line-by-line. The full specification lives in
 ### Public docs hygiene
 
 - `docs/` is only for public documentation-site files. Do not commit private/client/partner notes, handoff docs, agent plans, Slack manifests, screenshots, recordings, or generated QA output under `docs/`.
-- Generated proof belongs in PR attachments, CI artifacts, private artifact links, or ignored local `.artifacts/` output.
+- Generated proof belongs in ignored local `.artifacts/` output first. For
+  Corgtex PR visual proof, prefer Corgtex Build Artifacts: upload proof with
+  `node scripts/upload-build-artifacts.mjs` and paste the emitted markdown
+  links into the PR body's **Visual Proof** section. Use PR attachments,
+  CI artifacts, or other private artifact links only when Build Artifacts is
+  unavailable. Do not commit proof files.
 - Local pre-PR plan drafts belong under ignored `.agents/plans/`; the reviewed plan contract lives in the PR body and remains visible as GitHub PR metadata.
 - PR-body plans must be public-safe. Do not include private keys, API tokens, passwords, raw credentials, secret values, or customer-private facts. `scripts/check-plan.mjs` blocks obvious credential patterns in PR-body plans, but agents are still responsible for keeping plan prose sanitized.
 
@@ -126,7 +131,10 @@ merge.
 3a. **Domain test coverage:** If the plan adds or modifies files under `packages/domain/**`, you must create or update the corresponding `*.test.ts` file in the same package *before* opening the PR. The Reviewer will reject any PR that changes domain source without same-package test coverage (Criterion 7).
 3b. **Acceptance criteria traceability:** Before checking off an acceptance criterion, verify that *every* sub-requirement it describes is actually implemented. If a criterion says "A and B both do X", confirm both A and B do X — do not check the box after only implementing A. Run the relevant code paths locally or via tests to confirm.
 4. **Open the PR as ready-for-review** once all acceptance criteria are ticked. Use `gh pr create`. If `gh` isn't on `PATH`, invoke `/opt/homebrew/bin/gh`. The PR body must explicitly include the completed acceptance criteria checklist in Markdown.
-5. **Frontend changes:** add actual visual proof links in the PR body's **Visual Proof** section. Use PR attachments, CI-uploaded artifacts, or another private artifact link. Any change under `apps/web/app/**`, `apps/web/components/**`, or `apps/web/lib/components/**` requires proof. **You must run the app locally and capture actual proof of the feature running. Do not submit AI-generated mockups or generic placeholders. Do not commit screenshots, recordings, or generated QA output under `docs/assets/`.**
+5. **Frontend changes:** add actual visual proof links in the PR body's **Visual Proof** section. Any change under `apps/web/app/**`, `apps/web/components/**`, or `apps/web/lib/components/**` requires proof. **You must run the app locally and capture actual proof of the feature running. Do not submit AI-generated mockups or generic placeholders. Do not commit screenshots, recordings, or generated QA output under `docs/assets/`.**
+   - Preferred proof storage is Corgtex Build Artifacts. Capture screenshots or videos under ignored `.artifacts/`, then upload them with `node scripts/upload-build-artifacts.mjs`. The helper accepts `CORGTEX_API_BEARER` or `AGENT_API_KEY`, uploads screenshot/video assets, and prints markdown links for the PR.
+   - Use `visibility=PUBLIC_REVIEW` / `classification=OPEN_CORE` only after confirming the proof contains no private client data. For private proof, keep the artifact private and use an authenticated/private link.
+   - If Build Artifacts is unavailable because the target workspace feature flag, auth, or app URL is missing, use PR attachments, CI-uploaded artifacts, or another private artifact link and state that fallback in **Visual Proof**.
 5a. **Demo exposure:** For customer-visible product changes, either update `scripts/seed-jnj-demo.mjs` so the public J&J demo shows the safe parts of the feature, or state in the PR body's **Demo exposure** section why the feature cannot be shown safely (for example, because it requires private credentials, customer data, or write access).
 6. **CI fix loop cap:** if CI is red, you may push up to 3 fix commits. After the 3rd failed attempt, label the PR `needs-replan`, comment a summary, and stop. The human will re-prompt the Planner.
 7. **Never (default):** merge your own PR, use `--admin`, skip hooks with `--no-verify`, or run `prisma db push`. Never remove `export const dynamic = "force-dynamic"` from a Prisma-touching page. Never commit `.env` or any secret.
