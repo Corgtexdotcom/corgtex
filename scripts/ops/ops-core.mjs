@@ -419,16 +419,10 @@ function agentFailureStreakIncident(row, sweepNowMs) {
   const snapshot = latestSnapshot(row, "SUPPORT_READY");
   const snapshotObservedAtMs = timestampMs(optionalText(snapshot?.observedAt) ?? optionalText(snapshot?.createdAt));
   const summary = record(snapshot?.summary);
-  const runs = itemsFrom(summary?.agentRuns, ["items", "runs"]).map((run) => ({
-    agentKey: optionalText(run.agentKey) ?? optionalText(run.key) ?? optionalText(run.name) ?? "unknown",
-    status: optionalText(run.status) ?? "UNKNOWN",
-    createdAt: optionalText(run.createdAt),
-    failedAt: optionalText(run.failedAt),
-    completedAt: optionalText(run.completedAt),
-    finishedAt: optionalText(run.finishedAt),
-    endedAt: optionalText(run.endedAt),
-    updatedAt: optionalText(run.updatedAt),
-  }));
+  const runs = dedupeAgentRuns([
+    ...itemsFrom(summary?.agentRuns, ["items", "runs"]),
+    ...supportInspectionAgentRuns(row, snapshotObservedAtMs),
+  ].map(normalizeAgentRun));
   const runsByAgent = new Map();
   for (const run of runs) {
     const current = runsByAgent.get(run.agentKey) ?? [];
@@ -455,6 +449,52 @@ function agentFailureStreakIncident(row, sweepNowMs) {
     ],
     recommendedAction: "inspect failed agent traces through the support connector and repair the root cause before retrying",
   };
+}
+
+function normalizeAgentRun(run) {
+  return {
+    id: optionalText(run.id),
+    agentKey: optionalText(run.agentKey) ?? optionalText(run.key) ?? optionalText(run.name) ?? "unknown",
+    status: optionalText(run.status) ?? "UNKNOWN",
+    createdAt: optionalText(run.createdAt),
+    failedAt: optionalText(run.failedAt),
+    completedAt: optionalText(run.completedAt),
+    finishedAt: optionalText(run.finishedAt),
+    endedAt: optionalText(run.endedAt),
+    updatedAt: optionalText(run.updatedAt),
+  };
+}
+
+function dedupeAgentRuns(runs) {
+  const seen = new Set();
+  return runs.filter((run, index) => {
+    const key = run.id
+      ?? `${run.agentKey}:${run.status}:${agentRunOrderTimestamp(run) ?? "unknown"}:${index}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function supportInspectionAgentRuns(row, snapshotObservedAtMs) {
+  const operations = Array.isArray(row?.supportOperations) ? row.supportOperations : [];
+  return operations.flatMap((operation) => {
+    if (optionalText(operation?.action) !== "agents.list_runs") return [];
+    if (normalizeAgentRunStatus(operation?.status) !== "COMPLETED") return [];
+    const operationObservedAtMs = timestampMs(
+      optionalText(operation?.completedAt)
+        ?? optionalText(operation?.updatedAt)
+        ?? optionalText(operation?.createdAt),
+    );
+    if (snapshotObservedAtMs && (!operationObservedAtMs || operationObservedAtMs <= snapshotObservedAtMs)) {
+      return [];
+    }
+
+    const resultSummary = record(operation?.resultSummary)
+      ?? record(operation?.resultJson)
+      ?? record(operation?.outputJson);
+    return itemsFrom(resultSummary, ["items", "runs"]);
+  });
 }
 
 function activeFailureStreak(runs, snapshotObservedAtMs, sweepNowMs) {
