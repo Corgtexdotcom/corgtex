@@ -569,29 +569,33 @@ export async function consumeSelfServeSupportSession(params: {
   invariant(!supportSession.usedAt, 410, "SUPPORT_SESSION_USED", "Support session has already been used.");
   invariant(supportSession.expiresAt > now, 410, "SUPPORT_SESSION_EXPIRED", "Support session has expired.");
 
+  const claim = await prisma.selfServeSupportSession.updateMany({
+    where: {
+      id: supportSession.id,
+      usedAt: null,
+      expiresAt: { gt: now },
+    },
+    data: { usedAt: now },
+  });
+  invariant(claim.count === 1, 410, "SUPPORT_SESSION_USED", "Support session has already been used.");
+
   const session = await createSession(supportSession.supportUserId, {
     ipAddress: params.ipAddress,
     userAgent: params.userAgent,
   });
-  await prisma.$transaction([
-    prisma.selfServeSupportSession.update({
-      where: { id: supportSession.id },
-      data: { usedAt: now },
-    }),
-    prisma.auditLog.create({
-      data: {
-        workspaceId: supportSession.workspaceId,
-        actorUserId: supportSession.supportUserId,
-        action: "support.session.consumed",
-        entityType: "SelfServeSupportSession",
-        entityId: supportSession.id,
-        meta: {
-          operationId: supportSession.operationId,
-          targetMemberId: supportSession.targetMemberId,
-        },
+  await prisma.auditLog.create({
+    data: {
+      workspaceId: supportSession.workspaceId,
+      actorUserId: supportSession.supportUserId,
+      action: "support.session.consumed",
+      entityType: "SelfServeSupportSession",
+      entityId: supportSession.id,
+      meta: {
+        operationId: supportSession.operationId,
+        targetMemberId: supportSession.targetMemberId,
       },
-    }),
-  ]);
+    },
+  });
 
   return {
     workspaceId: supportSession.workspaceId,

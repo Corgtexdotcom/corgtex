@@ -37,6 +37,7 @@ const { prismaMock, sharedEnv } = vi.hoisted(() => ({
       findMany: vi.fn(),
       findUnique: vi.fn(),
       update: vi.fn(),
+      updateMany: vi.fn(),
     },
     workspace: {
       findUnique: vi.fn(),
@@ -98,6 +99,7 @@ describe("self-serve ops domain", () => {
     prismaMock.selfServeSmokeRun.upsert.mockResolvedValue({ id: "run-row-1" });
     prismaMock.customerDeploymentAccess.findUnique.mockResolvedValue(null);
     prismaMock.selfServeSupportSession.update.mockResolvedValue({});
+    prismaMock.selfServeSupportSession.updateMany.mockResolvedValue({ count: 1 });
     prismaMock.auditLog.create.mockResolvedValue({});
     prismaMock.session.create.mockResolvedValue({});
   });
@@ -275,9 +277,34 @@ describe("self-serve ops domain", () => {
         userAgent: "vitest",
       }),
     }));
-    expect(prismaMock.selfServeSupportSession.update).toHaveBeenCalledWith({
-      where: { id: "support-session-1" },
+    expect(prismaMock.selfServeSupportSession.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: "support-session-1",
+        usedAt: null,
+        expiresAt: { gt: expect.any(Date) },
+      },
       data: { usedAt: expect.any(Date) },
     });
+  });
+
+  it("rejects a support session that loses the one-time claim race", async () => {
+    prismaMock.selfServeSupportSession.findUnique.mockResolvedValue({
+      id: "support-session-1",
+      workspaceId: "workspace-1",
+      operationId: "operation-1",
+      supportUserId: "support-user",
+      targetMemberId: "member-target",
+      expiresAt: new Date(Date.now() + 60_000),
+      usedAt: null,
+    });
+    prismaMock.selfServeSupportSession.updateMany.mockResolvedValue({ count: 0 });
+    const { consumeSelfServeSupportSession } = await import("./self-serve-ops");
+
+    await expect(consumeSelfServeSupportSession({
+      token: "support-token",
+    })).rejects.toMatchObject({ status: 410, code: "SUPPORT_SESSION_USED" });
+
+    expect(prismaMock.session.create).not.toHaveBeenCalled();
+    expect(prismaMock.auditLog.create).not.toHaveBeenCalled();
   });
 });
