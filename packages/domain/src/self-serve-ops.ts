@@ -11,7 +11,7 @@ import {
 } from "@corgtex/shared";
 import type { AgentActor, AppActor } from "@corgtex/shared";
 import { AppError, invariant } from "./errors";
-import { createSession, isGlobalOperator } from "./auth";
+import { isGlobalOperator } from "./auth";
 
 const SUPPORT_SESSION_TTL_MS = 60 * 60 * 1000;
 const SUPPORT_EMAIL_DOMAIN = "corgtex.local";
@@ -405,6 +405,25 @@ async function cloneRoleAssignments(tx: Prisma.TransactionClient, params: {
   });
 }
 
+async function createSupportLoginSession(tx: Prisma.TransactionClient, params: {
+  userId: string;
+  ipAddress?: string | null;
+  userAgent?: string | null;
+}) {
+  const token = randomOpaqueToken();
+  const expiresAt = new Date(Date.now() + SUPPORT_SESSION_TTL_MS);
+  await tx.session.create({
+    data: {
+      userId: params.userId,
+      tokenHash: sha256(token),
+      expiresAt,
+      ipAddress: params.ipAddress,
+      userAgent: params.userAgent,
+    },
+  });
+  return { token, expiresAt };
+}
+
 export async function createSelfServeSupportSession(actor: AppActor, params: {
   deploymentId?: string | null;
   workspaceId?: string | null;
@@ -426,6 +445,7 @@ export async function createSelfServeSupportSession(actor: AppActor, params: {
     : null;
   const workspaceId = params.workspaceId?.trim() || deployment?.managedWorkspaceId || "";
   invariant(workspaceId, 400, "INVALID_INPUT", "A managed workspace is required for support sessions.");
+  invariant(!deployment || workspaceId === deployment.managedWorkspaceId, 400, "INVALID_INPUT", "Workspace does not match the deployment.");
 
   const workspace = await prisma.workspace.findUnique({
     where: { id: workspaceId },
@@ -491,7 +511,7 @@ export async function createSelfServeSupportSession(actor: AppActor, params: {
         deploymentId: deployment?.id ?? null,
         workspaceId,
         actorUserId: actorUserId(actor),
-        actorLabel: "Corgtex Support",
+        actorLabel: actorLabel(actor),
         action: "support.session.open",
         reason,
         status: "COMPLETED",
@@ -569,32 +589,36 @@ export async function consumeSelfServeSupportSession(params: {
   invariant(!supportSession.usedAt, 410, "SUPPORT_SESSION_USED", "Support session has already been used.");
   invariant(supportSession.expiresAt > now, 410, "SUPPORT_SESSION_EXPIRED", "Support session has expired.");
 
-  const claim = await prisma.selfServeSupportSession.updateMany({
-    where: {
-      id: supportSession.id,
-      usedAt: null,
-      expiresAt: { gt: now },
-    },
-    data: { usedAt: now },
-  });
-  invariant(claim.count === 1, 410, "SUPPORT_SESSION_USED", "Support session has already been used.");
-
-  const session = await createSession(supportSession.supportUserId, {
-    ipAddress: params.ipAddress,
-    userAgent: params.userAgent,
-  });
-  await prisma.auditLog.create({
-    data: {
-      workspaceId: supportSession.workspaceId,
-      actorUserId: supportSession.supportUserId,
-      action: "support.session.consumed",
-      entityType: "SelfServeSupportSession",
-      entityId: supportSession.id,
-      meta: {
-        operationId: supportSession.operationId,
-        targetMemberId: supportSession.targetMemberId,
+  const session = await prisma.$transaction(async (tx) => {
+    const claim = await tx.selfServeSupportSession.updateMany({
+      where: {
+        id: supportSession.id,
+        usedAt: null,
+        expiresAt: { gt: now },
       },
-    },
+      data: { usedAt: now },
+    });
+    invariant(claim.count === 1, 410, "SUPPORT_SESSION_USED", "Support session has already been used.");
+
+    const loginSession = await createSupportLoginSession(tx, {
+      userId: supportSession.supportUserId,
+      ipAddress: params.ipAddress,
+      userAgent: params.userAgent,
+    });
+    await tx.auditLog.create({
+      data: {
+        workspaceId: supportSession.workspaceId,
+        actorUserId: supportSession.supportUserId,
+        action: "support.session.consumed",
+        entityType: "SelfServeSupportSession",
+        entityId: supportSession.id,
+        meta: {
+          operationId: supportSession.operationId,
+          targetMemberId: supportSession.targetMemberId,
+        },
+      },
+    });
+    return loginSession;
   });
 
   return {

@@ -243,9 +243,28 @@ describe("self-serve ops domain", () => {
     expect(prismaMock.supportOperation.create).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
         action: "support.session.open",
+        actorLabel: "operator@example.com",
         status: "COMPLETED",
       }),
     }));
+  });
+
+  it("rejects support sessions when a supplied workspace does not match the deployment", async () => {
+    prismaMock.customerDeployment.findUnique.mockResolvedValue({
+      id: "deployment-1",
+      managedWorkspaceId: "workspace-1",
+      label: "Customer",
+    });
+    const { createSelfServeSupportSession } = await import("./self-serve-ops");
+
+    await expect(createSelfServeSupportSession(operatorActor, {
+      deploymentId: "deployment-1",
+      workspaceId: "workspace-2",
+      reason: "Reproduce reported role onboarding bug.",
+    })).rejects.toMatchObject({ status: 400, code: "INVALID_INPUT" });
+
+    expect(prismaMock.workspace.findUnique).not.toHaveBeenCalled();
+    expect(prismaMock.selfServeSupportSession.create).not.toHaveBeenCalled();
   });
 
   it("consumes support sessions once and creates a normal app session", async () => {
@@ -275,8 +294,11 @@ describe("self-serve ops domain", () => {
         tokenHash: "sha:support-token",
         ipAddress: "127.0.0.1",
         userAgent: "vitest",
+        expiresAt: expect.any(Date),
       }),
     }));
+    const sessionExpiresAt = prismaMock.session.create.mock.calls[0]?.[0]?.data?.expiresAt as Date;
+    expect(sessionExpiresAt.getTime()).toBeLessThanOrEqual(Date.now() + 60 * 60 * 1000 + 1_000);
     expect(prismaMock.selfServeSupportSession.updateMany).toHaveBeenCalledWith({
       where: {
         id: "support-session-1",
