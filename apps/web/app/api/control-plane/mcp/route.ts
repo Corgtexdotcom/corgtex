@@ -3,6 +3,7 @@ import type { NextRequest } from "next/server";
 import {
   configureControlPlaneMeetingRecorderIntegration,
   createControlPlaneCustomerMember,
+  createSelfServeSupportSession,
   deployLatestControlPlaneRelease,
   enqueueControlPlaneFleetSnapshots,
   enqueueControlPlaneDeployLatestRollout,
@@ -17,6 +18,7 @@ import {
   listControlPlaneDeployments,
   listControlPlaneFeatureFlags,
   listControlPlaneReleaseRolloutJobs,
+  listSelfServeCustomerRegistry,
   probeControlPlaneDeploymentHealth,
   recordVerifiedControlPlaneRelease,
   requireControlPlaneAccess,
@@ -29,6 +31,7 @@ import {
   runControlPlaneReleaseOperation,
   runCustomerSupportOperation,
   setControlPlaneFeatureFlag,
+  upsertSelfServeSmokeRun,
   updateControlPlaneAgentCredentialScopes,
   updateControlPlaneAgentPolicy,
   updateControlPlaneCustomerMemberStatus,
@@ -46,6 +49,54 @@ const tools = [
     name: "list_customers",
     description: "List customer deployments registered in the Corgtex control plane.",
     inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "list_self_serve_customers",
+    description: "List Corgtex Cloud self-serve trials, billing state, onboarding state, latest smoke result, setup-email capture status, and support-session status.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        take: { type: "number" },
+        status: { type: "string" },
+      },
+    },
+  },
+  {
+    name: "record_self_serve_smoke_run",
+    description: "Record browser/API self-serve smoke evidence for a trial, workspace, or customer deployment.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        runId: { type: "string" },
+        runKind: { type: "string" },
+        status: { type: "string" },
+        deploymentId: { type: "string" },
+        workspaceId: { type: "string" },
+        procurementTrialId: { type: "string" },
+        baseUrl: { type: "string" },
+        siteUrl: { type: "string" },
+        summary: { type: "object" },
+        artifacts: { type: "object" },
+        error: { type: "string" },
+        startedAt: { type: "string" },
+        completedAt: { type: "string" },
+      },
+      required: ["runId", "status"],
+    },
+  },
+  {
+    name: "create_self_serve_support_session",
+    description: "Create an audited one-time support login for a shared-cloud self-serve workspace.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        deploymentId: { type: "string" },
+        workspaceId: { type: "string" },
+        targetMemberId: { type: "string" },
+        reason: { type: "string" },
+      },
+      required: ["reason"],
+    },
   },
   {
     name: "get_customer_deployment_status",
@@ -369,6 +420,9 @@ const tools = [
 
 const toolScopes: Record<string, string> = {
   list_customers: "control-plane:read",
+  list_self_serve_customers: "control-plane:read",
+  record_self_serve_smoke_run: "control-plane:support:write",
+  create_self_serve_support_session: "control-plane:support:write",
   get_customer_deployment_status: "control-plane:read",
   list_customer_integrations: "control-plane:read",
   get_context_health: "control-plane:read",
@@ -529,6 +583,38 @@ export async function POST(request: NextRequest) {
 
     if (name === "list_customers") {
       return rpcResult(id, textContent(await listControlPlaneDeployments(actor)));
+    }
+    if (name === "list_self_serve_customers") {
+      return rpcResult(id, textContent(await listSelfServeCustomerRegistry(actor, {
+        take: argNumber(args, "take", 100),
+        status: argOptionalString(args, "status"),
+      })));
+    }
+    if (name === "record_self_serve_smoke_run") {
+      return rpcResult(id, textContent(await upsertSelfServeSmokeRun({
+        actor,
+        runId: argString(args, "runId"),
+        runKind: argString(args, "runKind") || "browser",
+        status: argString(args, "status"),
+        deploymentId: argOptionalString(args, "deploymentId"),
+        workspaceId: argOptionalString(args, "workspaceId"),
+        procurementTrialId: argOptionalString(args, "procurementTrialId"),
+        baseUrl: argOptionalString(args, "baseUrl"),
+        siteUrl: argOptionalString(args, "siteUrl"),
+        summary: Object.prototype.hasOwnProperty.call(args, "summary") ? args.summary : undefined,
+        artifacts: Object.prototype.hasOwnProperty.call(args, "artifacts") ? args.artifacts : undefined,
+        error: argOptionalString(args, "error"),
+        startedAt: argOptionalString(args, "startedAt"),
+        completedAt: argOptionalString(args, "completedAt"),
+      })));
+    }
+    if (name === "create_self_serve_support_session") {
+      return rpcResult(id, textContent(await createSelfServeSupportSession(actor, {
+        deploymentId: argOptionalString(args, "deploymentId"),
+        workspaceId: argOptionalString(args, "workspaceId"),
+        targetMemberId: argOptionalString(args, "targetMemberId"),
+        reason: argString(args, "reason"),
+      })));
     }
     if (name === "get_customer_deployment_status") {
       return rpcResult(id, textContent(await getControlPlaneDeployment(actor, String(args.deploymentId ?? ""))));

@@ -4,7 +4,7 @@ import { useState, useEffect } from "react";
 import { usePathname } from "next/navigation";
 import { useLocale, useTranslations } from "next-intl";
 import { localizedPath } from "../i18n/routing";
-import { demoGatePathForLocale, getSiteConfig } from "../lib/site";
+import { demoGatePathForLocale, getSiteConfig, signupUrlForLocale } from "../lib/site";
 
 const NAV_LINKS: { href: string; labelKey: string }[] = [
   { href: "/ai-readiness", labelKey: "aiReadiness" },
@@ -28,6 +28,7 @@ export function Navbar() {
   const { appUrl, bookDemoUrl } = getSiteConfig();
 
   const demoUrl = demoGatePathForLocale(locale);
+  const signupUrl = signupUrlForLocale(locale);
   const loginUrl = `${appUrl}/login`;
   const localePath = (path: string) => localizedPath(path, locale);
   const switchLocaleHref = localizedPath(unprefixedPath(pathname), locale === "es" ? "en" : "es");
@@ -73,8 +74,14 @@ export function Navbar() {
               {t("demo")}
             </a>
             <a
-              href={bookDemoUrl}
+              href={signupUrl}
               className="btn btn-primary"
+            >
+              {t("startTrial")}
+            </a>
+            <a
+              href={bookDemoUrl}
+              className="btn btn-secondary"
               target="_blank"
               rel="noopener noreferrer"
             >
@@ -135,8 +142,15 @@ export function Navbar() {
           {t("demo")}
         </a>
         <a
-          href={bookDemoUrl}
+          href={signupUrl}
           className="btn btn-primary"
+          onClick={() => setMobileOpen(false)}
+        >
+          {t("startTrial")}
+        </a>
+        <a
+          href={bookDemoUrl}
+          className="btn btn-secondary"
           target="_blank"
           rel="noopener noreferrer"
           onClick={() => setMobileOpen(false)}

@@ -7,6 +7,7 @@ import { isGlobalOperator, requireWorkspaceMembership } from "./auth";
 import { assertTrialMemberCapacity } from "./trial-entitlements";
 import { privacyFilter } from "./privacy";
 import { closeRoleLifecycleForMember } from "./role-onboarding";
+import { maybeCaptureSelfServeSetupEmail } from "./self-serve-ops";
 
 export type MemberInvitePolicy = "ADMINS_ONLY" | "MEMBERS_CAN_INVITE" | "MEMBERS_CAN_REQUEST";
 
@@ -41,21 +42,37 @@ export async function sendMemberSetupEmail(params: {
   displayName?: string | null;
   token: string;
   workspaceName?: string | null;
+  workspaceId?: string | null;
+  procurementTrialId?: string | null;
+  runId?: string | null;
 }): Promise<MemberSetupEmailStatus> {
   const email = normalizeEmail(params.email);
-  if (!env.RESEND_API_KEY) {
-    return { email, sent: false, error: "RESEND_API_KEY is not configured on the server." };
-  }
-
   const appUrl = env.APP_URL.replace(/\/$/, "");
   const setupUrl = `${appUrl}/setup-account/${encodeURIComponent(params.token)}`;
   const displayName = escapeHtml(params.displayName || "there");
   const workspaceName = escapeHtml(params.workspaceName || "a Corgtex workspace");
+  const subject = "You've been invited to Corgtex";
+  if (!env.RESEND_API_KEY) {
+    const error = "RESEND_API_KEY is not configured on the server.";
+    await maybeCaptureSelfServeSetupEmail({
+      email,
+      subject,
+      setupUrl,
+      providerStatus: { status: "SKIPPED", reason: error },
+      workspaceId: params.workspaceId,
+      procurementTrialId: params.procurementTrialId,
+      runId: params.runId,
+      source: "member_setup",
+    }).catch((captureError) => {
+      console.warn("[self-serve-smoke] setup-email capture failed:", captureError);
+    });
+    return { email, sent: false, error };
+  }
 
   try {
-    await sendEmail({
+    const providerStatus = await sendEmail({
       to: email,
-      subject: "You've been invited to Corgtex",
+      subject,
       html: `
         <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto; padding: 40px 20px;">
           <h2>Join Corgtex</h2>
@@ -67,12 +84,37 @@ export async function sendMemberSetupEmail(params: {
         </div>
       `,
     });
+    await maybeCaptureSelfServeSetupEmail({
+      email,
+      subject,
+      setupUrl,
+      providerStatus,
+      workspaceId: params.workspaceId,
+      procurementTrialId: params.procurementTrialId,
+      runId: params.runId,
+      source: "member_setup",
+    }).catch((error) => {
+      console.warn("[self-serve-smoke] setup-email capture failed:", error);
+    });
     return { email, sent: true };
   } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    await maybeCaptureSelfServeSetupEmail({
+      email,
+      subject,
+      setupUrl,
+      providerStatus: { status: "FAILED", error: message },
+      workspaceId: params.workspaceId,
+      procurementTrialId: params.procurementTrialId,
+      runId: params.runId,
+      source: "member_setup",
+    }).catch((captureError) => {
+      console.warn("[self-serve-smoke] setup-email capture failed:", captureError);
+    });
     return {
       email,
       sent: false,
-      error: error instanceof Error ? error.message : String(error),
+      error: message,
     };
   }
 }

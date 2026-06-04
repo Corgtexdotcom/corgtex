@@ -4329,6 +4329,77 @@ model SupportOperation {
   @@index([action, createdAt])
 }
 
+model SelfServeEmailCapture {
+  id                 String    @id @default(uuid())
+  workspaceId        String?
+  procurementTrialId String?
+  toEmail            String
+  emailDomain        String
+  subject            String
+  setupUrlEnc        String    @db.Text
+  providerStatus     Json?
+  runId              String?
+  source             String    @default("member_setup")
+  expiresAt          DateTime
+  consumedAt         DateTime?
+  createdAt          DateTime  @default(now())
+
+  @@index([toEmail, createdAt])
+  @@index([emailDomain, createdAt])
+  @@index([workspaceId, createdAt])
+  @@index([procurementTrialId, createdAt])
+  @@index([runId, createdAt])
+  @@index([expiresAt])
+}
+
+model SelfServeSmokeRun {
+  id                 String    @id @default(uuid())
+  deploymentId       String?
+  workspaceId        String?
+  procurementTrialId String?
+  runId              String    @unique
+  runKind            String
+  status             String
+  baseUrl            String?   @db.Text
+  siteUrl            String?   @db.Text
+  triggeredByUserId  String?
+  triggeredByLabel   String?
+  summary            Json?
+  artifacts          Json?
+  error              String?   @db.Text
+  startedAt          DateTime  @default(now())
+  completedAt        DateTime?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  @@index([status, createdAt])
+  @@index([runKind, createdAt])
+  @@index([deploymentId, createdAt])
+  @@index([workspaceId, createdAt])
+  @@index([procurementTrialId, createdAt])
+}
+
+model SelfServeSupportSession {
+  id              String    @id @default(uuid())
+  deploymentId    String?
+  workspaceId     String
+  operationId     String?
+  supportUserId   String
+  supportMemberId String
+  targetMemberId  String?
+  tokenHash       String    @unique
+  reason          String    @db.Text
+  expiresAt       DateTime
+  usedAt          DateTime?
+  createdAt       DateTime  @default(now())
+
+  @@index([workspaceId, createdAt])
+  @@index([deploymentId, createdAt])
+  @@index([operationId])
+  @@index([supportUserId])
+  @@index([expiresAt])
+}
+
 model CustomerDeploymentBootstrapRun {
   id                       String    @id @default(uuid())
   customerSlug             String

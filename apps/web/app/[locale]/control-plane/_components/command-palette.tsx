@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useRef } from "react";
 import { useTranslations } from "next-intl";
-import { Search, LayoutDashboard, Bot, GitBranch, Activity, UserCheck, ShieldAlert, ArrowRight } from "lucide-react";
+import { Search, LayoutDashboard, Bot, GitBranch, Activity, UserCheck, ShieldAlert, ArrowRight, Cloud } from "lucide-react";
 import { useRouter } from "@/i18n/routing";
 import { cn } from "@/lib/utils";
 
@@ -31,6 +31,12 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
       description: t("commandPalette.items.customers"),
       href: "/control-plane#fleet",
       icon: ShieldAlert,
+    },
+    {
+      title: t("nav.selfServe"),
+      description: t("commandPalette.items.selfServe"),
+      href: "/control-plane/self-serve",
+      icon: Cloud,
     },
     {
       title: t("nav.agents"),

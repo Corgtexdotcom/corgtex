@@ -47,6 +47,8 @@ export default function ControlPlaneLayout({
     if (segments.length > 1) {
       if (segments[1] === "agents") {
         crumbs.push({ label: t("nav.agents"), href: "/control-plane/agents" });
+      } else if (segments[1] === "self-serve") {
+        crumbs.push({ label: t("nav.selfServe"), href: "/control-plane/self-serve" });
       } else if (segments[1] === "releases") {
         crumbs.push({ label: t("nav.releases"), href: "/control-plane/releases" });
       } else if (segments[1] === "operations") {

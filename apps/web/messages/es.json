@@ -1325,6 +1325,7 @@
     "nav": {
       "dashboard": "Panel de Control",
       "customers": "Clientes",
+      "selfServe": "Autoservicio Cloud",
       "agents": "Observatorio de Agentes",
       "releases": "Releases y Drift",
       "operations": "Log de Operaciones",
@@ -1347,6 +1348,7 @@
       "items": {
         "dashboard": "Ver metricas de flota, despliegues y estadisticas generales.",
         "customers": "Ir a la lista de despliegues empresariales.",
+        "selfServe": "Revisar trials cloud, billing, smoke y acceso de soporte.",
         "agents": "Monitorear gobernanza de agentes, modelos, ejecuciones y costes.",
         "releases": "Revisar distribucion de versiones y rollouts.",
         "operations": "Revisar logs de soporte y eventos break-glass.",

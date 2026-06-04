@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   listControlPlaneDeployments: vi.fn(),
+  listSelfServeCustomerRegistry: vi.fn(),
+  upsertSelfServeSmokeRun: vi.fn(),
+  createSelfServeSupportSession: vi.fn(),
   requireControlPlaneAccess: vi.fn(),
   requireControlPlaneScope: vi.fn((actor: { kind?: string; scopes?: string[] }, scope: string) => {
     if (actor.kind !== "agent") return;
@@ -21,6 +24,9 @@ vi.mock("@corgtex/domain", () => ({
   getControlPlaneDeployment: vi.fn(), getControlPlaneIntegrationStatus: vi.fn(), getControlPlaneReleaseStatus: vi.fn(),
   listControlPlaneCustomerMembers: vi.fn(),
   listControlPlaneDeployments: mocks.listControlPlaneDeployments,
+  listSelfServeCustomerRegistry: mocks.listSelfServeCustomerRegistry,
+  upsertSelfServeSmokeRun: mocks.upsertSelfServeSmokeRun,
+  createSelfServeSupportSession: mocks.createSelfServeSupportSession,
   listControlPlaneFeatureFlags: vi.fn(), listControlPlaneReleaseRolloutJobs: vi.fn(),
   probeControlPlaneDeploymentHealth: vi.fn(),
   recordVerifiedControlPlaneRelease: vi.fn(),
@@ -46,6 +52,9 @@ describe("/api/control-plane/mcp", () => {
     mocks.resolveControlPlaneRequestActor.mockResolvedValue({ kind: "agent", authProvider: "control-plane", label: "control-plane-agent", scopes: ["control-plane:read"] });
     mocks.requireControlPlaneAccess.mockResolvedValue({ role: "OPERATOR" });
     mocks.listControlPlaneDeployments.mockResolvedValue([]);
+    mocks.listSelfServeCustomerRegistry.mockResolvedValue({ items: [], summary: { total: 0 } });
+    mocks.upsertSelfServeSmokeRun.mockResolvedValue({ id: "smoke-run-1" });
+    mocks.createSelfServeSupportSession.mockResolvedValue({ id: "support-session-1" });
   });
 
   afterEach(() => {
@@ -74,6 +83,9 @@ describe("/api/control-plane/mcp", () => {
     const body = await response.json();
     expect(body.result.tools.map((tool: { name: string }) => tool.name)).toEqual([
       "list_customers",
+      "list_self_serve_customers",
+      "record_self_serve_smoke_run",
+      "create_self_serve_support_session",
       "get_customer_deployment_status",
       "refresh_customer_deployment_snapshot",
       "list_customer_integrations",
