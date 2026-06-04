@@ -26,9 +26,11 @@ const { prismaMock, sharedEnv } = vi.hoisted(() => ({
       findMany: vi.fn(),
     },
     procurementTrial: {
+      findFirst: vi.fn(),
       findMany: vi.fn(),
     },
     customerDeployment: {
+      findFirst: vi.fn(),
       findMany: vi.fn(),
       findUnique: vi.fn(),
     },
@@ -100,6 +102,8 @@ describe("self-serve ops domain", () => {
     prismaMock.selfServeEmailCapture.update.mockResolvedValue({});
     prismaMock.selfServeSmokeRun.upsert.mockResolvedValue({ id: "run-row-1" });
     prismaMock.customerDeploymentAccess.findUnique.mockResolvedValue(null);
+    prismaMock.customerDeployment.findFirst.mockResolvedValue(null);
+    prismaMock.procurementTrial.findFirst.mockResolvedValue(null);
     prismaMock.selfServeSupportSession.update.mockResolvedValue({});
     prismaMock.selfServeSupportSession.updateMany.mockResolvedValue({ count: 1 });
     prismaMock.auditLog.create.mockResolvedValue({});
@@ -323,6 +327,26 @@ describe("self-serve ops domain", () => {
 
     expect(prismaMock.workspace.findUnique).not.toHaveBeenCalled();
     expect(prismaMock.selfServeSupportSession.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects workspace-only support sessions without a self-serve boundary", async () => {
+    const { createSelfServeSupportSession } = await import("./self-serve-ops");
+
+    await expect(createSelfServeSupportSession(operatorActor, {
+      workspaceId: "workspace-1",
+      reason: "Reproduce reported role onboarding bug.",
+    })).rejects.toMatchObject({ status: 404, code: "NOT_FOUND" });
+
+    expect(prismaMock.customerDeployment.findFirst).toHaveBeenCalledWith({
+      where: { managedWorkspaceId: "workspace-1" },
+      select: { id: true, managedWorkspaceId: true, label: true },
+    });
+    expect(prismaMock.procurementTrial.findFirst).toHaveBeenCalledWith({
+      where: { workspaceId: "workspace-1" },
+      select: { id: true },
+    });
+    expect(prismaMock.workspace.findUnique).not.toHaveBeenCalled();
+    expect(prismaMock.user.create).not.toHaveBeenCalled();
   });
 
   it("rejects support sessions when a requested target member does not exist", async () => {

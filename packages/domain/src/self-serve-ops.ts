@@ -450,14 +450,28 @@ export async function createSelfServeSupportSession(actor: AppActor, params: {
   }
 
   const deploymentId = params.deploymentId?.trim() || null;
-  const deployment = deploymentId
+  let deployment = deploymentId
     ? await prisma.customerDeployment.findUnique({
       where: { id: deploymentId },
       select: { id: true, managedWorkspaceId: true, label: true },
     })
     : null;
   invariant(!deploymentId || deployment, 404, "NOT_FOUND", "Customer deployment not found.");
-  const workspaceId = params.workspaceId?.trim() || deployment?.managedWorkspaceId || "";
+  const requestedWorkspaceId = params.workspaceId?.trim() || null;
+  if (!deployment && requestedWorkspaceId) {
+    deployment = await prisma.customerDeployment.findFirst({
+      where: { managedWorkspaceId: requestedWorkspaceId },
+      select: { id: true, managedWorkspaceId: true, label: true },
+    });
+  }
+  const trialBoundary = !deployment && requestedWorkspaceId
+    ? await prisma.procurementTrial.findFirst({
+      where: { workspaceId: requestedWorkspaceId },
+      select: { id: true },
+    })
+    : null;
+  invariant(deployment || trialBoundary, 404, "NOT_FOUND", "Self-serve deployment or trial not found for support session.");
+  const workspaceId = requestedWorkspaceId || deployment?.managedWorkspaceId || "";
   invariant(workspaceId, 400, "INVALID_INPUT", "A managed workspace is required for support sessions.");
   invariant(!deployment || workspaceId === deployment.managedWorkspaceId, 400, "INVALID_INPUT", "Workspace does not match the deployment.");
 
