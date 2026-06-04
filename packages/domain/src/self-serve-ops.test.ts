@@ -267,7 +267,21 @@ describe("self-serve ops domain", () => {
     expect(prismaMock.selfServeSupportSession.create).not.toHaveBeenCalled();
   });
 
-  it("consumes support sessions once and creates a normal app session", async () => {
+  it("rejects support sessions when a supplied deployment does not exist", async () => {
+    prismaMock.customerDeployment.findUnique.mockResolvedValue(null);
+    const { createSelfServeSupportSession } = await import("./self-serve-ops");
+
+    await expect(createSelfServeSupportSession(operatorActor, {
+      deploymentId: "missing-deployment",
+      workspaceId: "workspace-1",
+      reason: "Reproduce reported role onboarding bug.",
+    })).rejects.toMatchObject({ status: 404, code: "NOT_FOUND" });
+
+    expect(prismaMock.workspace.findUnique).not.toHaveBeenCalled();
+    expect(prismaMock.selfServeSupportSession.create).not.toHaveBeenCalled();
+  });
+
+  it("consumes support sessions once and creates a short support login session", async () => {
     prismaMock.selfServeSupportSession.findUnique.mockResolvedValue({
       id: "support-session-1",
       workspaceId: "workspace-1",

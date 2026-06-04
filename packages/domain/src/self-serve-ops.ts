@@ -437,12 +437,14 @@ export async function createSelfServeSupportSession(actor: AppActor, params: {
     invariant(isGlobalOperator(actor) || isControlPlaneAgent(actor), 403, "FORBIDDEN", "Control plane access is required.");
   }
 
-  const deployment = params.deploymentId?.trim()
+  const deploymentId = params.deploymentId?.trim() || null;
+  const deployment = deploymentId
     ? await prisma.customerDeployment.findUnique({
-      where: { id: params.deploymentId.trim() },
+      where: { id: deploymentId },
       select: { id: true, managedWorkspaceId: true, label: true },
     })
     : null;
+  invariant(!deploymentId || deployment, 404, "NOT_FOUND", "Customer deployment not found.");
   const workspaceId = params.workspaceId?.trim() || deployment?.managedWorkspaceId || "";
   invariant(workspaceId, 400, "INVALID_INPUT", "A managed workspace is required for support sessions.");
   invariant(!deployment || workspaceId === deployment.managedWorkspaceId, 400, "INVALID_INPUT", "Workspace does not match the deployment.");
