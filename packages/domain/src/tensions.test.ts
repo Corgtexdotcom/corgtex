@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const { prismaMock } = vi.hoisted(() => {
   const prisma = {
     $transaction: vi.fn(),
+    $executeRaw: vi.fn(),
     tension: {
       count: vi.fn(),
       create: vi.fn(),
@@ -19,6 +20,10 @@ const { prismaMock } = vi.hoisted(() => {
     },
     auditLog: {
       create: vi.fn(),
+    },
+    workItemVersion: {
+      create: vi.fn(),
+      findUnique: vi.fn(),
     },
     event: {
       createMany: vi.fn(),
@@ -43,6 +48,9 @@ describe("tensions domain", () => {
     vi.clearAllMocks();
     prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof prismaMock) => Promise<unknown>) => callback(prismaMock));
     prismaMock.auditLog.create.mockResolvedValue({});
+    prismaMock.$executeRaw.mockResolvedValue({});
+    prismaMock.workItemVersion.create.mockResolvedValue({});
+    prismaMock.workItemVersion.findUnique.mockResolvedValue(null);
     prismaMock.event.createMany.mockResolvedValue({ count: 1 });
     prismaMock.member.findFirst.mockResolvedValue({ id: "raised-member-1" });
     prismaMock.tension.count.mockResolvedValue(1);
@@ -64,8 +72,10 @@ describe("tensions domain", () => {
       authorUserId: "u-1",
       title: "Test tension",
       status: "DRAFT",
+      version: 1,
       publishedAt: null,
       archivedAt: null,
+      raisedByMemberId: null,
     });
     prismaMock.tension.update.mockResolvedValue({
       id: "t-1",
@@ -222,13 +232,32 @@ describe("tensions domain", () => {
       },
       select: { id: true },
     });
+    expect(prismaMock.workItemVersion.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        entityType: "Tension",
+        entityId: "t-1",
+        version: 1,
+        changedFields: ["raisedByMemberId"],
+      }),
+    }));
     expect(prismaMock.tension.update).toHaveBeenCalledWith({
       where: { id: "t-1" },
-      data: { raisedByMemberId: "raised-member-1" },
+      data: { raisedByMemberId: "raised-member-1", version: 2 },
     });
   });
 
   it("clears a tension raised-by member", async () => {
+    prismaMock.tension.findUnique.mockResolvedValueOnce({
+      id: "t-1",
+      workspaceId: "ws-1",
+      authorUserId: "u-1",
+      title: "Test tension",
+      status: "DRAFT",
+      version: 1,
+      publishedAt: null,
+      archivedAt: null,
+      raisedByMemberId: "raised-member-1",
+    });
     const { updateTension } = await import("./tensions");
 
     await updateTension(actor, {
@@ -240,8 +269,99 @@ describe("tensions domain", () => {
     expect(prismaMock.member.findFirst).not.toHaveBeenCalled();
     expect(prismaMock.tension.update).toHaveBeenCalledWith({
       where: { id: "t-1" },
-      data: { raisedByMemberId: null },
+      data: { raisedByMemberId: null, version: 2 },
     });
+  });
+
+  it("does not create a version for no-op content updates", async () => {
+    const { updateTension } = await import("./tensions");
+
+    await expect(updateTension(actor, {
+      workspaceId: "ws-1",
+      tensionId: "t-1",
+      raisedByMemberId: null,
+    })).resolves.toMatchObject({
+      id: "t-1",
+      version: 1,
+    });
+
+    expect(prismaMock.workItemVersion.create).not.toHaveBeenCalled();
+    expect(prismaMock.tension.update).not.toHaveBeenCalled();
+  });
+
+  it("allows the author to edit an open tension and preserves the previous version", async () => {
+    prismaMock.tension.findUnique.mockResolvedValueOnce({
+      id: "t-open",
+      workspaceId: "ws-1",
+      authorUserId: "u-1",
+      title: "Old title",
+      bodyMd: "Old body",
+      status: "OPEN",
+      version: 1,
+      publishedAt: new Date("2026-06-01T00:00:00.000Z"),
+      archivedAt: null,
+      raisedByMemberId: null,
+    });
+    prismaMock.tension.update.mockResolvedValueOnce({
+      id: "t-open",
+      workspaceId: "ws-1",
+      title: "New title",
+      status: "OPEN",
+      version: 2,
+    });
+    const { updateTension } = await import("./tensions");
+
+    await expect(updateTension(actor, {
+      workspaceId: "ws-1",
+      tensionId: "t-open",
+      title: "New title",
+    })).resolves.toMatchObject({
+      id: "t-open",
+      version: 2,
+    });
+
+    expect(prismaMock.workItemVersion.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        entityType: "Tension",
+        entityId: "t-open",
+        version: 1,
+        changedFields: ["title"],
+        previousState: expect.objectContaining({
+          title: "Old title",
+          version: 1,
+        }),
+      }),
+    }));
+    expect(prismaMock.tension.update).toHaveBeenCalledWith({
+      where: { id: "t-open" },
+      data: { title: "New title", version: 2 },
+    });
+  });
+
+  it("rejects open tension edits by non-authors", async () => {
+    prismaMock.tension.findUnique.mockResolvedValueOnce({
+      id: "t-open",
+      workspaceId: "ws-1",
+      authorUserId: "u-1",
+      title: "Old title",
+      status: "OPEN",
+      version: 1,
+      publishedAt: new Date("2026-06-01T00:00:00.000Z"),
+      archivedAt: null,
+    });
+    const { updateTension } = await import("./tensions");
+
+    await expect(updateTension({ kind: "user", user: { id: "u-2" } } as any, {
+      workspaceId: "ws-1",
+      tensionId: "t-open",
+      title: "Not mine",
+    })).rejects.toMatchObject({
+      status: 403,
+      code: "FORBIDDEN",
+    });
+
+    expect(prismaMock.workItemVersion.create).not.toHaveBeenCalled();
+    expect(prismaMock.tension.update).not.toHaveBeenCalled();
   });
 
   it("lists tensions with raised-by metadata", async () => {

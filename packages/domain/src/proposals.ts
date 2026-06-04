@@ -9,6 +9,13 @@ import { invariant } from "./errors";
 import { privacyFilter } from "./privacy";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { requireDraftManager } from "./draft-permissions";
+import {
+  changedDataFields,
+  pickJsonSnapshot,
+  recordWorkItemVersion,
+  requireSubmittedWorkItemAuthor,
+  resolveWorkspaceMemberUserId,
+} from "./work-item-versions";
 
 const PROPOSAL_RESOLUTION_OUTCOMES = new Set<ProposalResolutionOutcome>(["ADOPTED", "NOT_ADOPTED", "WITHDRAWN"]);
 const AI_SUMMARY_WORD_THRESHOLD = 120;
@@ -23,6 +30,7 @@ type CreateProposalParams = {
   bodyMd: string;
   circleId?: string | null;
   isPrivate?: boolean;
+  authorMemberId?: string | null;
   meetingId?: string | null;
   sourceTensionId?: string | null;
   relatedActionIds?: string[] | null;
@@ -330,7 +338,6 @@ export async function createProposal(actor: AppActor, params: CreateProposalPara
   const bodyMd = params.bodyMd.trim();
   invariant(title.length > 0, 400, "INVALID_INPUT", "Proposal title is required.");
   invariant(bodyMd.length > 0, 400, "INVALID_INPUT", "Proposal body is required.");
-  const authorUserId = await actorUserIdForWorkspace(actor, params.workspaceId);
   const summary = params.includeAiSummary === true
     ? await generateProposalSummary({ workspaceId: params.workspaceId, title, bodyMd })
     : params.summary?.trim() || null;
@@ -341,6 +348,12 @@ export async function createProposal(actor: AppActor, params: CreateProposalPara
   return prisma.$transaction(async (tx) => {
     const sourceTension = await loadVisibleSourceTension(tx, actor, membership, params.workspaceId, params.sourceTensionId);
     const relatedActionIds = await validateRelatedActions(tx, actor, membership, params.workspaceId, params.relatedActionIds);
+    let authorUserId = actor.kind === "user"
+      ? actor.user.id
+      : await actorUserIdForWorkspace(actor, params.workspaceId);
+    if (actor.kind === "agent" && params.authorMemberId) {
+      authorUserId = await resolveWorkspaceMemberUserId(tx, params.workspaceId, params.authorMemberId, "Proposal author must be an active member of this workspace.");
+    }
     const proposal = await tx.proposal.create({
       data: {
         workspaceId: params.workspaceId,
@@ -436,7 +449,6 @@ export async function createProposalFromTension(actor: AppActor, params: CreateP
     workspaceId: params.workspaceId,
   });
 
-  const authorUserId = await actorUserIdForWorkspace(actor, params.workspaceId);
   const isPrivate = params.isPrivate ?? true;
   const openedAt = isPrivate ? null : new Date();
   const policy = isPrivate ? null : await getApprovalPolicy(params.workspaceId, "PROPOSAL");
@@ -446,6 +458,12 @@ export async function createProposalFromTension(actor: AppActor, params: CreateP
     invariant(sourceTension, 404, "NOT_FOUND", "Source tension not found.");
     const relatedActionIds = await validateRelatedActions(tx, actor, membership, params.workspaceId, params.relatedActionIds);
     const draft = proposalDraftFromTension(sourceTension, params);
+    let authorUserId = actor.kind === "user"
+      ? actor.user.id
+      : await actorUserIdForWorkspace(actor, params.workspaceId);
+    if (actor.kind === "agent" && params.authorMemberId) {
+      authorUserId = await resolveWorkspaceMemberUserId(tx, params.workspaceId, params.authorMemberId, "Proposal author must be an active member of this workspace.");
+    }
 
     const proposal = await tx.proposal.create({
       data: {
@@ -554,8 +572,13 @@ export async function updateProposal(actor: AppActor, params: {
     });
 
     invariant(proposal && proposal.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Proposal not found.");
-    invariant(proposal.status === "DRAFT", 400, "INVALID_STATE", "Only draft proposals can be edited.");
-    await requireDraftManager({ actor, workspaceId: params.workspaceId, record: proposal, resolvedMembership: membership });
+    invariant(!proposal.archivedAt, 400, "INVALID_STATE", "Archived proposals cannot be edited.");
+    if (proposal.status === "DRAFT") {
+      await requireDraftManager({ actor, workspaceId: params.workspaceId, record: proposal, resolvedMembership: membership });
+    } else {
+      invariant(proposal.status === "OPEN", 400, "INVALID_STATE", "Only draft or open proposals can be edited.");
+      requireSubmittedWorkItemAuthor(actor, proposal.authorUserId);
+    }
 
     const data: Record<string, unknown> = {};
     if (params.title !== undefined) {
@@ -581,6 +604,31 @@ export async function updateProposal(actor: AppActor, params: {
     }
     if (params.circleId !== undefined) data.circleId = params.circleId || null;
 
+    const contentFields = ["title", "summary", "bodyMd", "circleId"];
+    const changedFields = changedDataFields(proposal as unknown as Record<string, unknown>, data)
+      .filter((field) => contentFields.includes(field));
+    if (changedFields.length > 0) {
+      data.version = await recordWorkItemVersion(tx, actor, {
+        workspaceId: params.workspaceId,
+        entityType: "Proposal",
+        entityId: proposal.id,
+        currentVersion: proposal.version,
+        changedFields,
+        previousState: pickJsonSnapshot(proposal as unknown as Record<string, unknown>, [
+          "id",
+          "workspaceId",
+          "title",
+          "summary",
+          "bodyMd",
+          "circleId",
+          "status",
+          "version",
+        ]),
+      });
+    }
+    const changedUpdateFields = changedDataFields(proposal as unknown as Record<string, unknown>, data);
+    if (changedUpdateFields.length === 0) return proposal;
+
     const updated = await tx.proposal.update({
       where: { id: params.proposalId },
       data,
@@ -593,7 +641,7 @@ export async function updateProposal(actor: AppActor, params: {
         action: "proposal.updated",
         entityType: "Proposal",
         entityId: updated.id,
-        meta: { fields: Object.keys(data) },
+        meta: { fields: changedUpdateFields, version: updated.version },
       },
     });
 

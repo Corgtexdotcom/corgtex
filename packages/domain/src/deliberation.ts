@@ -3,6 +3,7 @@ import { prisma } from "@corgtex/shared";
 import { requireWorkspaceMembership, actorUserIdForWorkspace } from "./auth";
 import { invariant } from "./errors";
 import { appendEvents } from "./events";
+import { getParentWorkItemVersion } from "./work-item-versions";
 
 const VALID_ENTRY_TYPES = ["REACTION", "OBJECTION"];
 const VALID_PARENT_TYPES = ["PROPOSAL", "SPEND", "TENSION", "MEETING", "BRAIN_ARTICLE"];
@@ -35,6 +36,11 @@ export async function postDeliberationEntry(actor: AppActor, params: {
       const targetCircle = await tx.circle.findUnique({ where: { id: params.targetCircleId } });
       invariant(targetCircle && targetCircle.workspaceId === params.workspaceId && !targetCircle.archivedAt, 400, "INVALID_INPUT", "Target circle must belong to this workspace.");
     }
+    const parentVersion = await getParentWorkItemVersion(tx, {
+      workspaceId: params.workspaceId,
+      parentType: params.parentType,
+      parentId: params.parentId,
+    });
 
     const entry = await tx.deliberationEntry.create({
       data: {
@@ -44,6 +50,7 @@ export async function postDeliberationEntry(actor: AppActor, params: {
         authorUserId,
         entryType: params.entryType,
         bodyMd,
+        parentVersion,
         targetMemberId: params.targetMemberId || null,
         targetCircleId: params.targetCircleId || null,
       }
@@ -66,7 +73,7 @@ export async function postDeliberationEntry(actor: AppActor, params: {
         action: "deliberation.entry_posted",
         entityType: "DeliberationEntry",
         entityId: entry.id,
-        meta: { parentType: params.parentType, parentId: params.parentId, entryType: params.entryType }
+        meta: { parentType: params.parentType, parentId: params.parentId, entryType: params.entryType, parentVersion }
       }
     });
 
@@ -81,6 +88,7 @@ export async function postDeliberationEntry(actor: AppActor, params: {
           parentType: params.parentType,
           parentId: params.parentId,
           entryType: params.entryType,
+          parentVersion,
         }
       }
     ]);

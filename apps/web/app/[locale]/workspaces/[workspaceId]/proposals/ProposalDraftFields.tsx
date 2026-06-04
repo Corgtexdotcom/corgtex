@@ -62,6 +62,7 @@ export function ProposalDraftFields({
       </label>
       {showAiSummaryToggle && (
         <label style={{ display: "flex", alignItems: "center", gap: "8px", fontWeight: "normal", cursor: "pointer" }}>
+          <input type="hidden" name="includeAiSummaryRendered" value="1" />
           <input
             type="checkbox"
             name="includeAiSummary"

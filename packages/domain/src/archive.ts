@@ -60,6 +60,13 @@ type ArchiveConfig = {
 const directWorkspace = (workspaceId: string, id: string) => ({ id, workspaceId });
 const titleOrName = (record: any) => record.title ?? record.name ?? record.label ?? record.slug ?? record.email ?? record.id ?? null;
 const FINANCE_ARCHIVE_ROLES = new Set<MemberRole>(["FINANCE_STEWARD", "ADMIN"]);
+const WORK_ITEM_ARCHIVE_ENTITY_TYPES = new Set<ArchiveEntityType>([
+  "Action",
+  "Goal",
+  "Proposal",
+  "SpendRequest",
+  "Tension",
+]);
 
 const ENTITY_CONFIGS: Record<ArchiveEntityType, ArchiveConfig> = {
   Action: {
@@ -495,6 +502,15 @@ export async function purgeWorkspaceArtifact(actor: AppActor, params: {
     }
     if (config.beforePurge) {
       await config.beforePurge(tx, record);
+    }
+    if (WORK_ITEM_ARCHIVE_ENTITY_TYPES.has(config.entityType)) {
+      await tx.workItemVersion.deleteMany({
+        where: {
+          workspaceId: params.workspaceId,
+          entityType: config.entityType,
+          entityId: record.id,
+        },
+      });
     }
 
     await delegate(tx, config).delete({ where: { id: record.id } });

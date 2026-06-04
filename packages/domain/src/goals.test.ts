@@ -15,6 +15,7 @@ vi.mock("@corgtex/shared", () => ({
     },
     member: {
       findUnique: vi.fn(),
+      findFirst: vi.fn(),
     },
     keyResult: {
       create: vi.fn(),
@@ -30,6 +31,11 @@ vi.mock("@corgtex/shared", () => ({
     goalLink: {
       findMany: vi.fn(),
     },
+    workItemVersion: {
+      create: vi.fn(),
+      findUnique: vi.fn(),
+    },
+    $executeRaw: vi.fn(),
     $transaction: vi.fn((fn) => fn(prisma)),
   },
   AppActor: {},
@@ -61,6 +67,13 @@ describe("Goals Domain", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked((prisma as any).$executeRaw).mockResolvedValue({});
+    vi.mocked((prisma as any).workItemVersion.create).mockResolvedValue({});
+    vi.mocked((prisma as any).workItemVersion.findUnique).mockResolvedValue(null);
+    vi.mocked(prisma.member.findFirst).mockResolvedValue({
+      id: "member-1",
+      userId: "user-1",
+    } as any);
   });
 
   describe("createGoal", () => {
@@ -238,6 +251,55 @@ describe("Goals Domain", () => {
       expect(prisma.goal.update).toHaveBeenCalledWith(expect.objectContaining({
         where: { id: "goal-1" },
         data: { status: "DRAFT" },
+      }));
+    });
+
+    it("allows the owner to edit active goal content and snapshots the previous version", async () => {
+      vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce({
+        id: "goal-1",
+        workspaceId: "ws-1",
+        archivedAt: null,
+        title: "Old goal",
+        descriptionMd: "Old description",
+        level: "COMPANY",
+        cadence: "QUARTERLY",
+        targetDate: null,
+        startDate: null,
+        parentGoalId: null,
+        circleId: null,
+        ownerMemberId: "member-1",
+        status: "ACTIVE",
+        progressPercent: 0,
+        version: 1,
+      } as any);
+      vi.mocked(prisma.goal.update).mockResolvedValueOnce({
+        id: "goal-1",
+        workspaceId: "ws-1",
+        title: "Updated goal",
+        status: "ACTIVE",
+        version: 2,
+      } as any);
+
+      await expect(updateGoal(actor, {
+        workspaceId: "ws-1",
+        goalId: "goal-1",
+        title: "Updated goal",
+      })).resolves.toMatchObject({
+        id: "goal-1",
+        version: 2,
+      });
+
+      expect((prisma as any).workItemVersion.create).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({
+          entityType: "Goal",
+          entityId: "goal-1",
+          version: 1,
+          changedFields: ["title"],
+        }),
+      }));
+      expect(prisma.goal.update).toHaveBeenCalledWith(expect.objectContaining({
+        where: { id: "goal-1" },
+        data: { title: "Updated goal", version: 2 },
       }));
     });
   });

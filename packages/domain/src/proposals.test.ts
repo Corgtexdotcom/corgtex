@@ -26,6 +26,10 @@ vi.mock("@corgtex/shared", () => ({
     auditLog: {
       create: vi.fn(),
     },
+    workItemVersion: {
+      create: vi.fn(),
+      findUnique: vi.fn(),
+    },
     event: {
       createMany: vi.fn(),
     },
@@ -48,6 +52,7 @@ vi.mock("@corgtex/shared", () => ({
       deleteMany: vi.fn(),
     },
     $transaction: vi.fn(async (cb) => cb(prisma)),
+    $executeRaw: vi.fn(),
   },
 }));
 
@@ -87,7 +92,12 @@ function words(count: number) {
 }
 
 describe("proposal AI summaries", () => {
-  beforeEach(() => { vi.clearAllMocks(); });
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked((prisma as any).workItemVersion.findUnique).mockResolvedValue(null);
+    vi.mocked((prisma as any).workItemVersion.create).mockResolvedValue({});
+    vi.mocked((prisma as any).$executeRaw).mockResolvedValue({});
+  });
 
   it("generates a saved summary for long proposals when requested", async () => {
     const { defaultModelGateway } = await import("@corgtex/models");
@@ -195,6 +205,7 @@ describe("proposal AI summaries", () => {
       bodyMd: "Old body",
       status: "DRAFT",
       archivedAt: null,
+      version: 1,
     } as any);
     vi.mocked(defaultModelGateway.extract).mockResolvedValueOnce({
       output: { summary: "Updated AI summary." },
@@ -205,6 +216,7 @@ describe("proposal AI summaries", () => {
       bodyMd: words(130),
       summary: "Updated AI summary.",
       status: "DRAFT",
+      version: 2,
     } as any);
 
     await updateProposal(actor, {
@@ -219,10 +231,22 @@ describe("proposal AI summaries", () => {
       data: expect.objectContaining({
         bodyMd: words(130),
         summary: "Updated AI summary.",
+        version: 2,
+      }),
+    }));
+    expect((prisma as any).workItemVersion.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        entityType: "Proposal",
+        entityId: "p-edit",
+        version: 1,
+        changedFields: expect.arrayContaining(["bodyMd", "summary"]),
       }),
     }));
 
     vi.clearAllMocks();
+    vi.mocked((prisma as any).workItemVersion.findUnique).mockResolvedValue(null);
+    vi.mocked((prisma as any).workItemVersion.create).mockResolvedValue({});
+    vi.mocked((prisma as any).$executeRaw).mockResolvedValue({});
     vi.mocked(prisma.proposal.findUnique).mockResolvedValueOnce({
       id: "p-edit",
       workspaceId: "ws-1",
@@ -232,11 +256,13 @@ describe("proposal AI summaries", () => {
       summary: "Updated AI summary.",
       status: "DRAFT",
       archivedAt: null,
+      version: 2,
     } as any);
     vi.mocked(prisma.proposal.update).mockResolvedValueOnce({
       id: "p-edit",
       summary: null,
       status: "DRAFT",
+      version: 3,
     } as any);
 
     await updateProposal(actor, {
@@ -250,6 +276,7 @@ describe("proposal AI summaries", () => {
     expect(prisma.proposal.update).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
         summary: null,
+        version: 3,
       }),
     }));
   });

@@ -352,6 +352,10 @@ function GoalNodeInner({
   const t = useTranslations("goals");
   const tCommon = useTranslations("common");
   const canManage = canManageAnyGoal || (Boolean(goal.ownerMemberId) && goal.ownerMemberId === membershipId);
+  const canSubmittedOwnerEdit = Boolean(goal.ownerMemberId) && goal.ownerMemberId === membershipId;
+  const canEditContent = goal.status === "DRAFT"
+    ? canManage
+    : ["ACTIVE", "ON_TRACK", "AT_RISK", "BEHIND"].includes(goal.status) && canSubmittedOwnerEdit;
   const canReturnToDraft = ["ACTIVE", "ON_TRACK", "AT_RISK", "BEHIND"].includes(goal.status);
   return (
     <div className="border border-line rounded-lg bg-surface-strong shadow-sm mb-3" style={{ marginLeft: `${level * 1.5}rem` }}>
@@ -392,6 +396,13 @@ function GoalNodeInner({
             <span className="text-xs font-semibold px-2 py-1 bg-accent-soft text-text rounded">
               {goal.status}
             </span>
+            {goal.version > 1 ? (
+              <a href={`/workspaces/${workspaceId}/versions?entityType=GOAL&entityId=${encodeURIComponent(goal.id)}`} className="text-xs mt-1 text-muted">
+                v{goal.version}
+              </a>
+            ) : (
+              <span className="text-xs mt-1 text-muted">v{goal.version}</span>
+            )}
             {goal.targetDate && (
               <span className="text-xs mt-1 text-muted">
                 {t("target")} {new Date(goal.targetDate).toLocaleDateString()}
@@ -454,7 +465,7 @@ function GoalNodeInner({
                     <button type="submit">{t("btnReturnToDraft")}</button>
                   </form>
                 )}
-                {goal.status === "DRAFT" && (
+                {canEditContent && (
                   <details>
                     <summary className="nr-hide-marker" style={{ cursor: "pointer", padding: "8px 10px", borderRadius: 8, fontSize: "0.88rem", fontWeight: 500 }}>
                       {t("btnEdit")}
@@ -527,7 +538,7 @@ function GoalNodeInner({
                           </select>
                         </label>
                       </div>
-                      <button type="submit" className="secondary small">{t("btnSaveDraft")}</button>
+                      <button type="submit" className="secondary small">{goal.status === "DRAFT" ? t("btnSaveDraft") : tCommon("save")}</button>
                     </form>
                   </details>
                 )}

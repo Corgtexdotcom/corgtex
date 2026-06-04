@@ -124,4 +124,22 @@ describe("proposal server actions", () => {
       isPrivate: true,
     }));
   });
+
+  it("passes false when the AI summary toggle was rendered but unchecked", async () => {
+    const { updateProposalAction } = await import("./actions");
+    const formData = new FormData();
+    formData.set("workspaceId", "workspace-1");
+    formData.set("proposalId", "proposal-1");
+    formData.set("title", "Clarify approval policy");
+    formData.set("bodyMd", "Long proposal body");
+    formData.set("includeAiSummaryRendered", "1");
+
+    await updateProposalAction(formData);
+
+    expect(updateProposal).toHaveBeenCalledWith(actor, expect.objectContaining({
+      workspaceId: "workspace-1",
+      proposalId: "proposal-1",
+      includeAiSummary: false,
+    }));
+  });
 });

@@ -1,4 +1,4 @@
-import { getTension, listDeliberationEntries, requireWorkspaceMembership } from "@corgtex/domain";
+import { getTension, listDeliberationEntries, listWorkItemVersions, requireWorkspaceMembership } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
@@ -19,9 +19,13 @@ export default async function TensionDetailPage({
   const { workspaceId, tensionId } = await params;
   const actor = await requirePageActor();
   const t = await getTranslations("tensions");
+  const tCommon = await getTranslations("common");
   const tension = await getTension(actor, { workspaceId, tensionId });
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
-  const entries = await listDeliberationEntries(actor, { workspaceId, parentType: "TENSION", parentId: tensionId });
+  const [entries, versionHistory] = await Promise.all([
+    listDeliberationEntries(actor, { workspaceId, parentType: "TENSION", parentId: tensionId }),
+    listWorkItemVersions(actor, { workspaceId, entityType: "TENSION", entityId: tensionId }),
+  ]);
   const deliberationTargets = await getDeliberationTargets({ actor, workspaceId, parentCircleId: tension.circleId });
   const targetOptions = deliberationTargets.options.map((option) => ({
     ...option,
@@ -52,6 +56,8 @@ export default async function TensionDetailPage({
   const priorityText = tension.priority > 0 ? t("priorityN", { priority: tension.priority }) : t("noPriority");
   const raisedByName = tension.raisedByMember?.user.displayName || tension.raisedByMember?.user.email || null;
   const canManage = actor.kind === "agent" || membership?.role === "ADMIN" || (actor.kind === "user" && tension.authorUserId === actor.user.id);
+  const canSubmittedAuthorEdit = actor.kind === "user" && tension.authorUserId === actor.user.id;
+  const canEditContent = tension.status === "DRAFT" ? canManage : tension.status === "OPEN" && canSubmittedAuthorEdit;
   const canDraftProposal = !tension.proposal && (canManage || !tension.isPrivate);
 
   return (
@@ -74,6 +80,13 @@ export default async function TensionDetailPage({
           {raisedByName && <span>{t("detailRaisedByMeta", { name: raisedByName })}</span>}
           <span>{t("detailPriorityMeta", { priority: priorityText })}</span>
           <span>{t("detailCreatedMeta", { date: new Date(tension.createdAt).toLocaleDateString() })}</span>
+          <span>
+            {versionHistory.versions.length > 0 ? (
+              <a href={`/workspaces/${workspaceId}/versions?entityType=TENSION&entityId=${encodeURIComponent(tension.id)}`}>v{tension.version}</a>
+            ) : (
+              <>v{tension.version}</>
+            )}
+          </span>
           {tension.proposal && (
             <span>
               <a href={`/workspaces/${workspaceId}/proposals/${tension.proposal.id}`}>{t("linkedProposalMeta", { title: tension.proposal.title })}</a>
@@ -107,7 +120,7 @@ export default async function TensionDetailPage({
               </form>
             )}
           </div>
-          {canManage && tension.status === "DRAFT" && (
+          {canEditContent && (
             <details style={{ marginTop: 12 }}>
               <summary className="secondary small nr-hide-marker" style={{ cursor: "pointer", display: "inline-block" }}>{t("btnEdit")}</summary>
               <form action={updateTensionAction} className="stack nr-form-section" style={{ marginTop: 12 }}>
@@ -125,7 +138,7 @@ export default async function TensionDetailPage({
                   {t("formPriority")}
                   <input name="priority" type="number" min={0} defaultValue={tension.priority} />
                 </label>
-                <button type="submit" className="secondary small">{t("btnSaveDraft")}</button>
+                <button type="submit" className="secondary small">{tension.status === "DRAFT" ? t("btnSaveDraft") : tCommon("save")}</button>
               </form>
             </details>
           )}

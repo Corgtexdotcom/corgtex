@@ -85,7 +85,9 @@ export default async function ProposalsPage({
             </div>
           )}
           {displayProposals.map((proposal) => {
+            const isAuthor = actor.kind === "user" && proposal.authorUserId === actor.user.id;
             const canManage = canManageProposal(proposal);
+            const canEditContent = proposal.status === "DRAFT" ? canManage : proposal.status === "OPEN" && isAuthor;
             const moreItems: React.ReactNode[] = [];
             if (canResolveProposal && proposal.status === "OPEN") {
               moreItems.push(
@@ -112,7 +114,7 @@ export default async function ProposalsPage({
                 </form>
               );
             }
-            if (canManage && proposal.status === "DRAFT") {
+            if (canEditContent) {
               moreItems.push(
                 <details key="edit">
                   <summary className="nr-hide-marker nr-action-summary">
@@ -122,7 +124,7 @@ export default async function ProposalsPage({
                     <input type="hidden" name="workspaceId" value={workspaceId} />
                     <input type="hidden" name="proposalId" value={proposal.id} />
                     <ProposalDraftFields defaultTitle={proposal.title} defaultBodyMd={proposal.bodyMd} />
-                    <button type="submit" className="secondary small">{t("btnSaveDraft")}</button>
+                    <button type="submit" className="secondary small">{proposal.status === "DRAFT" ? t("btnSaveDraft") : tCommon("save")}</button>
                   </form>
                 </details>
               );
@@ -152,6 +154,12 @@ export default async function ProposalsPage({
                 <MarkdownExcerpt markdown={proposal.summary ?? proposal.bodyMd} maxLength={180} as="div" className="nr-excerpt" />
                 <div className="nr-item-meta mt-2">
                    {proposal.author.displayName || proposal.author.email} · {new Date(proposal.createdAt).toLocaleDateString()}
+                   {" · "}
+                   {proposal.version > 1 ? (
+                     <a href={`/workspaces/${workspaceId}/versions?entityType=PROPOSAL&entityId=${encodeURIComponent(proposal.id)}`}>v{proposal.version}</a>
+                   ) : (
+                     <>v{proposal.version}</>
+                   )}
                 </div>
                 
                 {(proposal.tensions?.length > 0 || proposal.actions?.length > 0) && (

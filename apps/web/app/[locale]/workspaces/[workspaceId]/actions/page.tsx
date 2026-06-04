@@ -88,6 +88,10 @@ export default async function ActionsPage({
             const createdAge = ageText(action.createdAt);
             const dueDate = action.dueAt ? new Date(action.dueAt).toLocaleDateString() : null;
             const canManage = canManageAction(action);
+            const canSubmittedAuthorEdit = actor.kind === "user" && action.authorUserId === actor.user.id;
+            const canEditContent = action.status === "DRAFT"
+              ? canManage
+              : (action.status === "OPEN" || action.status === "IN_PROGRESS") && canSubmittedAuthorEdit;
 
             return (
               <div className="nr-item" key={action.id}>
@@ -106,6 +110,12 @@ export default async function ActionsPage({
                   {assigneeName ? ` · ${t("metaAssignee", { name: assigneeName })}` : ""}
                   {dueDate ? ` · ${t("metaDue", { date: dueDate })}` : ""}
                   {action.proposal?.title ? ` · ${t("metaLinkedToProposal", { title: action.proposal.title })}` : ""}
+                  {" · "}
+                  {action.version > 1 ? (
+                    <a href={`/workspaces/${workspaceId}/versions?entityType=ACTION&entityId=${encodeURIComponent(action.id)}`}>v{action.version}</a>
+                  ) : (
+                    <>v{action.version}</>
+                  )}
                 </div>
 
                 {(() => {
@@ -159,7 +169,7 @@ export default async function ActionsPage({
                       </form>
                     );
                   }
-                  if (canManage && action.status === "DRAFT") {
+                  if (canEditContent) {
                     moreItems.push(
                       <details key="edit">
                         <summary className="nr-hide-marker" style={{ cursor: "pointer", padding: "8px 10px", borderRadius: 8, fontSize: "0.88rem", fontWeight: 500 }}>
@@ -176,7 +186,7 @@ export default async function ActionsPage({
                             {t("formNotes")}
                             <MarkdownEditor name="bodyMd" defaultValue={action.bodyMd ?? ""} rows={5} />
                           </label>
-                          <button type="submit" className="secondary small">{t("btnSaveDraft")}</button>
+                          <button type="submit" className="secondary small">{action.status === "DRAFT" ? t("btnSaveDraft") : tCommon("save")}</button>
                         </form>
                       </details>
                     );

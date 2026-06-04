@@ -544,6 +544,7 @@ model Workspace {
   meetingTranscriptSourceRecords MeetingTranscriptSourceRecord[]
   meetingInsights                MeetingInsight[]
   goals                          Goal[]
+  workItemVersions               WorkItemVersion[]
   recognitions                   Recognition[]
   agentIdentities                AgentIdentity[]
   deliberationEntries            DeliberationEntry[]
@@ -839,6 +840,7 @@ model User {
   changedRoleVersions          RoleVersion[]                  @relation("RoleVersionChangedBy")
   startedRoleHolderHistory     RoleHolderHistory[]            @relation("RoleHolderHistoryStartedBy")
   endedRoleHolderHistory       RoleHolderHistory[]            @relation("RoleHolderHistoryEndedBy")
+  editedWorkItemVersions       WorkItemVersion[]              @relation("WorkItemVersionEditedBy")
 }
 
 model Session {
@@ -1302,6 +1304,7 @@ model Action {
   title            String
   bodyMd           String?
   status           ActionStatus @default(DRAFT)
+  version          Int          @default(1)
   dueAt            DateTime?
   completedVia     String?
   proposalId       String?
@@ -1333,6 +1336,7 @@ model Tension {
   title            String
   bodyMd           String?
   status           TensionStatus @default(DRAFT)
+  version          Int           @default(1)
   priority         Int           @default(0)
   urgency          Int?          @default(0)
   importance       Int?          @default(0)
@@ -1371,6 +1375,7 @@ model Proposal {
   summary           String?
   bodyMd            String
   status            ProposalStatus             @default(DRAFT)
+  version           Int                        @default(1)
   resolutionOutcome ProposalResolutionOutcome?
   decisionMd        String?
   isPrivate         Boolean                    @default(false)
@@ -1419,6 +1424,7 @@ model DeliberationEntry {
   workspaceId    String
   parentType     String // "PROPOSAL" | "SPEND" | "TENSION" | "MEETING" | "BRAIN_ARTICLE"
   parentId       String
+  parentVersion  Int?
   authorUserId   String
   entryType      String // "REACTION" | "OBJECTION"
   bodyMd         String?   @db.Text
@@ -1434,6 +1440,7 @@ model DeliberationEntry {
   targetCircle Circle?   @relation("DeliberationTargetCircle", fields: [targetCircleId], references: [id], onDelete: SetNull)
 
   @@index([parentType, parentId, createdAt])
+  @@index([parentType, parentId, parentVersion])
   @@index([workspaceId, parentType])
   @@index([targetCircleId])
   @@index([targetMemberId])
@@ -1612,6 +1619,7 @@ model SpendRequest {
   workspaceId          String
   requesterUserId      String
   status               SpendStatus               @default(DRAFT)
+  version              Int                       @default(1)
   resolutionOutcome    SpendResolutionOutcome?
   amountCents          Int
   currency             String
@@ -2040,6 +2048,28 @@ model AuditLog {
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 
   @@index([workspaceId, createdAt])
+}
+
+model WorkItemVersion {
+  id            String   @id @default(uuid())
+  workspaceId   String
+  entityType    String
+  entityId      String
+  version       Int
+  changedFields String[]
+  previousState Json
+  actorUserId   String?
+  actorLabel    String?
+  source        String   @default("WEB")
+  createdAt     DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  actor     User?     @relation("WorkItemVersionEditedBy", fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@unique([entityType, entityId, version])
+  @@index([workspaceId, entityType, entityId, version])
+  @@index([workspaceId, createdAt])
+  @@index([actorUserId, createdAt])
 }
 
 model ProductAnalyticsEvent {
@@ -3845,6 +3875,7 @@ model Goal {
   level            GoalLevel   @default(COMPANY)
   cadence          GoalCadence @default(QUARTERLY)
   status           GoalStatus  @default(DRAFT)
+  version          Int         @default(1)
   progressPercent  Int         @default(0)
   targetDate       DateTime?
   startDate        DateTime?

@@ -46,6 +46,9 @@ const { prismaMock, storageDeleteMock } = vi.hoisted(() => {
     auditLog: {
       create: vi.fn(),
     },
+    workItemVersion: {
+      deleteMany: vi.fn(),
+    },
   };
   return { prismaMock: prisma, storageDeleteMock: vi.fn() };
 });
@@ -94,6 +97,7 @@ describe("workspace archive domain", () => {
     prismaMock.approvalFlow.updateMany.mockResolvedValue({ count: 1 });
     prismaMock.workspaceArchiveRecord.create.mockResolvedValue({});
     prismaMock.workspaceArchiveRecord.update.mockResolvedValue({});
+    prismaMock.workItemVersion.deleteMany.mockResolvedValue({ count: 0 });
   });
 
   it("archives artifacts with metadata and an audit record", async () => {
@@ -222,6 +226,36 @@ describe("workspace archive domain", () => {
       code: "INVALID_STATE",
     });
     expect(prismaMock.spendRequest.delete).not.toHaveBeenCalled();
+  });
+
+  it("purges work item version snapshots when purging a work item", async () => {
+    const action = {
+      id: "action-1",
+      workspaceId: "workspace-1",
+      title: "Follow up",
+      archivedAt: new Date("2026-04-25T12:00:00.000Z"),
+      status: "DRAFT",
+    };
+    prismaMock.action.findFirst.mockResolvedValue(action);
+    prismaMock.workspaceArchiveRecord.findFirst.mockResolvedValue({ id: "archive-1" });
+    prismaMock.action.delete.mockResolvedValue(action);
+
+    const { purgeWorkspaceArtifact } = await import("./archive");
+    await expect(purgeWorkspaceArtifact(actor, {
+      workspaceId: "workspace-1",
+      entityType: "Action",
+      entityId: "action-1",
+      reason: "cleanup",
+    })).resolves.toEqual({ id: "action-1" });
+
+    expect(prismaMock.workItemVersion.deleteMany).toHaveBeenCalledWith({
+      where: {
+        workspaceId: "workspace-1",
+        entityType: "Action",
+        entityId: "action-1",
+      },
+    });
+    expect(prismaMock.action.delete).toHaveBeenCalledWith({ where: { id: "action-1" } });
   });
 
   it("lets requesters archive only their own draft spend requests", async () => {

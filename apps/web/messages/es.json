@@ -592,6 +592,19 @@
     "synthesizing": "Sintetizando...",
     "topPriorities": "Prioridades principales"
   },
+  "workItems": {
+    "backToItem": "Volver",
+    "currentVersion": "v{version} actual",
+    "entityAction": "acción",
+    "entityGoal": "objetivo",
+    "entityProposal": "propuesta",
+    "entitySpendRequest": "solicitud de gasto",
+    "entityTension": "tensión",
+    "historyTitle": "Historial de versiones de {item}",
+    "noPreviousVersions": "Aún no hay versiones anteriores.",
+    "version": "v{version}",
+    "viewSnapshot": "Ver instantánea"
+  },
   "mobile": {
     "aiMode": "IA",
     "aiTabsLabel": "Acciones del espacio de trabajo de IA",
