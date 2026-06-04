@@ -118,6 +118,17 @@ function emailDomain(email: string) {
   return email.split("@")[1]?.toLowerCase() ?? "";
 }
 
+function smokeCaptureDomains() {
+  return new Set((env.SMOKE_EMAIL_CAPTURE_ALLOWED_DOMAINS ?? "")
+    .split(",")
+    .map((value) => value.trim().toLowerCase())
+    .filter(Boolean));
+}
+
+function isSmokeCaptureDomain(domain: string) {
+  return Boolean(env.SMOKE_EMAIL_CAPTURE_SECRET) && smokeCaptureDomains().has(domain);
+}
+
 function normalizeSlug(value: string) {
   return value
     .trim()
@@ -369,6 +380,60 @@ async function expireStaleTrialsForIdentity(input: NormalizedTrialInput) {
   ]);
 }
 
+async function expireActiveSmokeTrialsForDomain(input: NormalizedTrialInput) {
+  if (!isSmokeCaptureDomain(input.emailDomain)) return;
+
+  const activeTrials = await prisma.procurementTrial.findMany({
+    where: {
+      status: TRIAL_STATUS_ACTIVE,
+      emailDomain: input.emailDomain,
+    },
+    select: {
+      id: true,
+      agentCredentialId: true,
+      workspaceId: true,
+    },
+  });
+  if (activeTrials.length === 0) return;
+
+  const credentialIds = activeTrials
+    .map((trial) => trial.agentCredentialId)
+    .filter((id): id is string => Boolean(id));
+  const workspaceIds = activeTrials
+    .map((trial) => trial.workspaceId)
+    .filter((id): id is string => Boolean(id));
+  await prisma.$transaction([
+    prisma.procurementTrial.updateMany({
+      where: { id: { in: activeTrials.map((trial) => trial.id) } },
+      data: { status: TRIAL_STATUS_EXPIRED },
+    }),
+    ...(workspaceIds.length > 0
+      ? [
+          prisma.workspace.updateMany({
+            where: { id: { in: workspaceIds } },
+            data: {
+              plan: "CORE_FREE",
+              planActivatedAt: new Date(),
+            },
+          }),
+          ...workspaceIds.map((workspaceId) => prisma.modelUsageBudget.upsert({
+            where: { workspaceId },
+            create: { workspaceId, monthlyCostCapUsd: 0 },
+            update: { monthlyCostCapUsd: 0 },
+          })),
+        ]
+      : []),
+    ...(credentialIds.length > 0
+      ? [
+          prisma.agentCredential.updateMany({
+            where: { id: { in: credentialIds } },
+            data: { isActive: false },
+          }),
+        ]
+      : []),
+  ]);
+}
+
 async function expireTrialConnector(trial: { id: string; workspaceId?: string | null; agentCredentialId: string | null; trialExpiresAt?: Date | null }) {
   await prisma.$transaction([
     prisma.procurementTrial.updateMany({
@@ -437,6 +502,12 @@ async function assessTrialRisk(input: NormalizedTrialInput): Promise<RiskAssessm
   }
   if (activeForDomain > 0) {
     riskReasons.push("ACTIVE_TRIAL_FOR_DOMAIN");
+  }
+  if (isSmokeCaptureDomain(input.emailDomain)) {
+    const index = riskReasons.indexOf("ACTIVE_TRIAL_FOR_DOMAIN");
+    if (index >= 0) {
+      riskReasons.splice(index, 1);
+    }
   }
 
   return {
@@ -898,6 +969,8 @@ async function createActiveTrial(params: {
     displayName: created.admin.user.displayName,
     token: created.admin.token,
     workspaceName: params.normalized.companyName,
+    workspaceId: created.trial.workspaceId,
+    procurementTrialId: created.trial.id,
   });
   const responseWithEmailStatus = {
     ...created.response,
@@ -948,6 +1021,7 @@ export async function createProcurementTrial(params: {
   }
 
   await expireStaleTrialsForIdentity(normalized);
+  await expireActiveSmokeTrialsForDomain(normalized);
   const risk = await assessTrialRisk(normalized);
   const expiresAt = new Date(Date.now() + PROCUREMENT_TRIAL_TTL_DAYS * 24 * 60 * 60 * 1000);
 

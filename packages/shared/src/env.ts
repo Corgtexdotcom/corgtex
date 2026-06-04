@@ -92,6 +92,9 @@ type Env = {
   readonly RESEND_API_KEY: string | undefined;
   readonly EMAIL_FROM: string;
   readonly EMAIL_REPLY_TO: string | undefined;
+  readonly SMOKE_EMAIL_CAPTURE_SECRET: string | undefined;
+  readonly SMOKE_EMAIL_CAPTURE_ALLOWED_DOMAINS: string | undefined;
+  readonly SMOKE_EMAIL_CAPTURE_TTL_MINUTES: number;
   readonly PROCUREMENT_NOTIFY_EMAIL: string | undefined;
   readonly SENTRY_DSN: string | undefined;
   readonly ENCRYPTION_KEY: string | undefined;
@@ -232,6 +235,15 @@ export const env: Env = {
   },
   get EMAIL_REPLY_TO() {
     return optional("EMAIL_REPLY_TO");
+  },
+  get SMOKE_EMAIL_CAPTURE_SECRET() {
+    return optional("SMOKE_EMAIL_CAPTURE_SECRET");
+  },
+  get SMOKE_EMAIL_CAPTURE_ALLOWED_DOMAINS() {
+    return optional("SMOKE_EMAIL_CAPTURE_ALLOWED_DOMAINS");
+  },
+  get SMOKE_EMAIL_CAPTURE_TTL_MINUTES() {
+    return numberFromEnv("SMOKE_EMAIL_CAPTURE_TTL_MINUTES", 30);
   },
   get PROCUREMENT_NOTIFY_EMAIL() {
     return optional("PROCUREMENT_NOTIFY_EMAIL");

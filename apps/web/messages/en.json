@@ -1312,6 +1312,7 @@
     "nav": {
       "dashboard": "Dashboard",
       "customers": "Customers",
+      "selfServe": "Cloud Self-Serve",
       "agents": "Agent Observatory",
       "releases": "Releases",
       "operations": "Operations Log",
@@ -1334,6 +1335,7 @@
       "items": {
         "dashboard": "View fleet metrics, deployments, and overall stats.",
         "customers": "Jump to the list of enterprise deployments.",
+        "selfServe": "Inspect shared-cloud trials, billing, smoke, and support access.",
         "agents": "Monitor agent governance, models, runs, and costs.",
         "releases": "Inspect version distribution and rollouts.",
         "operations": "Review fleet support logs and break-glass events.",

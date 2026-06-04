@@ -100,6 +100,8 @@ vi.mock("@corgtex/shared", async (importOriginal) => {
       APP_URL: "https://app.test",
       MCP_PUBLIC_URL: "https://mcp.test/mcp",
       RESEND_API_KEY: undefined,
+      SMOKE_EMAIL_CAPTURE_SECRET: "capture-secret",
+      SMOKE_EMAIL_CAPTURE_ALLOWED_DOMAINS: "smoke.test",
     },
     hashPassword: vi.fn((value: string) => `hash:${value}`),
     prisma: prismaMock,
@@ -240,6 +242,44 @@ describe("procurement trials", () => {
     const idempotencyCreate = prismaMock.procurementIdempotencyKey.create.mock.calls[0][0];
     expect(JSON.stringify(idempotencyCreate.data.responseJson)).not.toContain("agentc-credential-secret");
     expect(JSON.stringify(result.body)).not.toContain("admin-setup-token");
+  });
+
+  it("expires prior active smoke-domain trials before creating the next active smoke trial", async () => {
+    prismaMock.procurementTrial.findMany
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        {
+          id: "old-smoke-trial",
+          workspaceId: "old-smoke-workspace",
+          agentCredentialId: "old-smoke-credential",
+        },
+      ]);
+    const { createProcurementTrial } = await import("./procurement-trials");
+
+    const result = await createProcurementTrial({
+      idempotencyKey: "idem-smoke-1",
+      origin: "https://app.test",
+      input: {
+        companyName: "Smoke",
+        adminEmail: "agent@smoke.test",
+        adminName: "Smoke Agent",
+        acceptedTermsVersion: "2026-04",
+      },
+    });
+
+    expect(result.statusCode).toBe(201);
+    expect(result.body).toMatchObject({
+      status: "ACTIVE",
+      riskStatus: "LOW",
+    });
+    expect(prismaMock.procurementTrial.updateMany).toHaveBeenCalledWith({
+      where: { id: { in: ["old-smoke-trial"] } },
+      data: { status: "EXPIRED" },
+    });
+    expect(prismaMock.agentCredential.updateMany).toHaveBeenCalledWith({
+      where: { id: { in: ["old-smoke-credential"] } },
+      data: { isActive: false },
+    });
   });
 
   it("review-gates personal email domains without creating a workspace or connector", async () => {

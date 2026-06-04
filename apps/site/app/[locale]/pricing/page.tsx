@@ -3,7 +3,7 @@ import { ScrollReveal } from "../../../components/ScrollReveal";
 import { StructuredData } from "../../../components/StructuredData";
 import { localeFromParams, type LocaleParams } from "../../../lib/locale";
 import { buildMetadata } from "../../../lib/metadata";
-import { getSiteConfig } from "../../../lib/site";
+import { getSiteConfig, signupUrlForLocale } from "../../../lib/site";
 
 const copy = {
   en: {
@@ -24,6 +24,8 @@ const copy = {
     includedLabel: "All Inclusive",
     includedTitle: "Everything Included in Every Plan",
     includedBody: "No per-seat fees. No feature gates. Every enterprise partner gets the complete governed AI workforce.",
+    selfServe: "Start Free Trial",
+    selfServeNote: "Shared-cloud trial for teams that want to register with a work email and move immediately.",
     features: [
       ["Personalized Briefings", "Daily AI workforce briefings for every member based on their roles."],
       ["Workforce Graph", "Every AI agent mapped - what it does, what data it touches, who owns it."],
@@ -62,6 +64,8 @@ const copy = {
     includedLabel: "Todo incluido",
     includedTitle: "Todo incluido en cada plan",
     includedBody: "Sin tarifas por usuario. Sin funciones bloqueadas. Cada partner enterprise recibe la fuerza laboral de IA gobernada completa.",
+    selfServe: "Empezar prueba",
+    selfServeNote: "Trial shared-cloud para equipos que quieren registrarse con un correo laboral y avanzar de inmediato.",
     features: [
       ["Briefings personalizados", "Briefings diarios de la fuerza laboral de IA para cada miembro según sus roles."],
       ["Workforce Graph", "Cada agente de IA mapeado: qué hace, qué datos toca y quién lo posee."],
@@ -93,6 +97,7 @@ export default async function PricingPage({ params }: LocaleParams) {
   const locale = await localeFromParams(params);
   const t = copy[locale];
   const { bookDemoUrl } = getSiteConfig();
+  const signupUrl = signupUrlForLocale(locale);
   const structuredData = {
     "@context": "https://schema.org",
     "@type": "WebPage",
@@ -169,10 +174,20 @@ export default async function PricingPage({ params }: LocaleParams) {
 
           <ScrollReveal delay={200}>
             <div className="pricing-cta">
-              <a href={bookDemoUrl} className="btn btn-primary" target="_blank" rel="noopener noreferrer">
+              <div style={{ display: "flex", gap: "12px", justifyContent: "center", flexWrap: "wrap" }}>
+                <a href={signupUrl} className="btn btn-primary">
+                  {t.selfServe}
+                </a>
+                <a href={bookDemoUrl} className="btn btn-secondary" target="_blank" rel="noopener noreferrer">
+                  {t.scoping}
+                </a>
+              </div>
+              <p style={{ marginTop: "16px", fontSize: "0.9rem", color: "var(--text-secondary)" }}>{t.selfServeNote}</p>
+              <p style={{ marginTop: "6px", fontSize: "0.85rem", color: "var(--text-tertiary)" }}>
                 {t.scoping}
-              </a>
-              <p style={{ marginTop: "16px", fontSize: "0.9rem", color: "var(--text-tertiary)" }}>{t.scopingNote}</p>
+                {" - "}
+                {t.scopingNote}
+              </p>
             </div>
           </ScrollReveal>
         </div>
