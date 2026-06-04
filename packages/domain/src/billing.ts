@@ -353,7 +353,6 @@ export async function createStripeCheckoutSession(actor: AppActor, workspaceId: 
     success_url: appReturnUrl(workspace.id, "success"),
     cancel_url: appReturnUrl(workspace.id, "canceled"),
     "line_items[0][price]": priceId,
-    "line_items[0][quantity]": "1",
     "metadata[workspaceId]": workspace.id,
     "subscription_data[metadata][workspaceId]": workspace.id,
   }));
