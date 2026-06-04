@@ -14,6 +14,7 @@ const { prismaMock } = vi.hoisted(() => {
       update: vi.fn(),
       updateMany: vi.fn(),
     },
+    member: { findUnique: vi.fn() },
     customerAccount: { updateMany: vi.fn() },
     stripeWebhookEvent: {
       upsert: vi.fn(),
@@ -64,6 +65,54 @@ describe("billing", () => {
     prismaMock.workspaceFeatureFlag.upsert.mockResolvedValue({});
     prismaMock.workspaceBillingProfile.upsert.mockResolvedValue({});
     prismaMock.customerAccount.updateMany.mockResolvedValue({ count: 1 });
+    prismaMock.member.findUnique.mockResolvedValue({
+      id: "member-1",
+      workspaceId: "ws-1",
+      userId: "user-1",
+      role: "ADMIN",
+      isActive: true,
+    });
+  });
+
+  it("creates checkout sessions without quantity for the metered usage price", async () => {
+    prismaMock.workspace.findUnique.mockResolvedValueOnce({
+      id: "ws-1",
+      name: "Smoke Workspace",
+      slug: "smoke-workspace",
+      billingProfile: null,
+    });
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: "cus-1" }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: "cs-1", url: "https://checkout.stripe.test/session" }), { status: 200 }));
+    const { createStripeCheckoutSession } = await import("./billing");
+
+    await expect(createStripeCheckoutSession({
+      kind: "user",
+      user: {
+        id: "user-1",
+        email: "admin@example.test",
+        displayName: "Admin",
+        globalRole: "USER",
+      },
+    }, "ws-1")).resolves.toEqual({
+      id: "cs-1",
+      url: "https://checkout.stripe.test/session",
+    });
+
+    const [url, init] = vi.mocked(fetch).mock.calls[1] ?? [];
+    expect(String(url)).toBe("https://api.stripe.com/v1/checkout/sessions");
+    const body = init?.body as URLSearchParams;
+    expect(body.get("line_items[0][price]")).toBe("price_ai");
+    expect(body.has("line_items[0][quantity]")).toBe(false);
+    expect(body.get("mode")).toBe("subscription");
+    expect(body.get("metadata[workspaceId]")).toBe("ws-1");
+    expect(prismaMock.workspaceBillingProfile.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({
+        stripeCustomerId: "cus-1",
+        stripeCheckoutSessionId: "cs-1",
+        stripePriceId: "price_ai",
+      }),
+    }));
   });
 
   it("activates PAYG AI from a verified checkout webhook", async () => {
