@@ -12,8 +12,13 @@ const { prismaMock, txMock } = vi.hoisted(() => {
     findMany: vi.fn(),
   };
   const tx = {
+    $executeRaw: vi.fn(),
     spendRequest: txSpendRequest,
     auditLog: { create: vi.fn() },
+    workItemVersion: {
+      create: vi.fn(),
+      findUnique: vi.fn(),
+    },
     deliberationEntry: { count: vi.fn() },
     spendComment: {
       count: vi.fn(),
@@ -194,6 +199,9 @@ describe("markSpendPaid", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     txMock.auditLog.create.mockResolvedValue({});
+    txMock.$executeRaw.mockResolvedValue({});
+    txMock.workItemVersion.create.mockResolvedValue({});
+    txMock.workItemVersion.findUnique.mockResolvedValue(null);
     txMock.deliberationEntry.count.mockResolvedValue(0);
     txMock.spendComment.count.mockResolvedValue(0);
     txMock.spendComment.findMany.mockResolvedValue([]);
@@ -317,6 +325,9 @@ describe("submitSpend event payload", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     txMock.auditLog.create.mockResolvedValue({});
+    txMock.$executeRaw.mockResolvedValue({});
+    txMock.workItemVersion.create.mockResolvedValue({});
+    txMock.workItemVersion.findUnique.mockResolvedValue(null);
     txMock.deliberationEntry.count.mockResolvedValue(0);
     txMock.spendComment.count.mockResolvedValue(0);
     txMock.spendComment.findMany.mockResolvedValue([]);
@@ -465,6 +476,109 @@ describe("submitSpend event payload", () => {
       code: "FORBIDDEN",
     });
 
+    expect(txMock.spendRequest.update).not.toHaveBeenCalled();
+  });
+
+  it("allows the requester to edit an open unpaid spend and snapshots the previous version", async () => {
+    const { updateSpend } = await import("./finance");
+
+    txMock.spendRequest.findUnique.mockResolvedValue({
+      id: "sp-1",
+      workspaceId: "ws-1",
+      requesterUserId: "usr-1",
+      status: "OPEN",
+      version: 1,
+      description: "Annual SaaS license renewal",
+      amountCents: 5000,
+      currency: "USD",
+      category: "software",
+      vendor: null,
+      receiptUrl: null,
+      spentAt: null,
+      ledgerAccountId: null,
+      reconciliationStatus: "PENDING",
+      archivedAt: null,
+      proposalLinks: [],
+      comments: [],
+    });
+    txMock.spendRequest.update.mockResolvedValue({
+      id: "sp-1",
+      status: "OPEN",
+      version: 2,
+      description: "Annual SaaS license renewal updated",
+    });
+
+    await expect(updateSpend(
+      { kind: "user", user: { id: "usr-1" } } as any,
+      { workspaceId: "ws-1", spendId: "sp-1", description: "Annual SaaS license renewal updated" },
+    )).resolves.toMatchObject({
+      id: "sp-1",
+      version: 2,
+    });
+
+    expect(txMock.workItemVersion.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        entityType: "SpendRequest",
+        entityId: "sp-1",
+        version: 1,
+        changedFields: ["description"],
+      }),
+    }));
+    expect(txMock.spendRequest.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "sp-1" },
+      data: { description: "Annual SaaS license renewal updated", version: 2 },
+    }));
+  });
+
+  it("requires finance access before a requester changes the ledger account on an open spend", async () => {
+    const { updateSpend } = await import("./finance");
+    const { requireWorkspaceMembership } = await import("./auth");
+
+    vi.mocked(requireWorkspaceMembership)
+      .mockResolvedValueOnce({
+        id: "mem-requester",
+        workspaceId: "ws-1",
+        userId: "usr-1",
+        role: "CONTRIBUTOR",
+        isActive: true,
+      } as any)
+      .mockRejectedValueOnce({
+        status: 403,
+        code: "FORBIDDEN",
+      });
+    txMock.spendRequest.findUnique.mockResolvedValue({
+      id: "sp-1",
+      workspaceId: "ws-1",
+      requesterUserId: "usr-1",
+      status: "OPEN",
+      version: 1,
+      description: "Annual SaaS license renewal",
+      amountCents: 5000,
+      currency: "USD",
+      category: "software",
+      vendor: null,
+      receiptUrl: null,
+      spentAt: null,
+      ledgerAccountId: null,
+      reconciliationStatus: "PENDING",
+      archivedAt: null,
+      proposalLinks: [],
+      comments: [],
+    });
+
+    await expect(updateSpend(
+      { kind: "user", user: { id: "usr-1" } } as any,
+      { workspaceId: "ws-1", spendId: "sp-1", ledgerAccountId: "ledger-1" },
+    )).rejects.toMatchObject({
+      status: 403,
+      code: "FORBIDDEN",
+    });
+
+    expect(requireWorkspaceMembership).toHaveBeenLastCalledWith({
+      actor: { kind: "user", user: { id: "usr-1" } },
+      workspaceId: "ws-1",
+      allowedRoles: ["FINANCE_STEWARD", "ADMIN"],
+    });
     expect(txMock.spendRequest.update).not.toHaveBeenCalled();
   });
 });

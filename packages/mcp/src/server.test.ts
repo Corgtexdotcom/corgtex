@@ -34,6 +34,8 @@ const getExecutionPacketMock = vi.fn();
 const getCompanyContextMock = vi.fn();
 const listWritebackTargetsMock = vi.fn();
 const submitExecutionResultMock = vi.fn();
+const listWorkItemVersionsMock = vi.fn();
+const getWorkItemVersionMock = vi.fn();
 
 vi.mock("@corgtex/domain", () => ({
   CONTROL_PLANE_WORKSPACE_FEATURE_FLAGS: [
@@ -111,6 +113,8 @@ vi.mock("@corgtex/domain", () => ({
   getCompanyContext: getCompanyContextMock,
   listWritebackTargets: listWritebackTargetsMock,
   submitExecutionResult: submitExecutionResultMock,
+  listWorkItemVersions: listWorkItemVersionsMock,
+  getWorkItemVersion: getWorkItemVersionMock,
   searchConnectedExternalMcpContext: searchConnectedExternalMcpContextMock,
   listRuntimeJobs: vi.fn(),
   listFailedJobs: vi.fn(),
@@ -148,7 +152,7 @@ vi.mock("./auth", () => ({
 
 describe("createCorgtexMcpServer", () => {
   beforeEach(() => {
-    createSpendMock.mockReset().mockResolvedValue({ id: "spend-1" });
+    createSpendMock.mockReset().mockResolvedValue({ id: "spend-1", version: 1 });
     submitSpendMock.mockReset().mockResolvedValue({
       spendId: "spend-1",
     });
@@ -202,6 +206,18 @@ describe("createCorgtexMcpServer", () => {
     getCompanyContextMock.mockReset().mockResolvedValue({ workspace: { id: "ws-1", name: "Acme" } });
     listWritebackTargetsMock.mockReset().mockResolvedValue({ items: [{ type: "ACTION", id: "action-1", title: "Follow up" }] });
     submitExecutionResultMock.mockReset().mockResolvedValue({ id: "result-1", status: "ACCEPTED" });
+    listWorkItemVersionsMock.mockReset().mockResolvedValue({
+      entityType: "Tension",
+      entityId: "tension-1",
+      currentVersion: 3,
+      versions: [{ id: "v-2", version: 2, changedFields: ["title"] }],
+    });
+    getWorkItemVersionMock.mockReset().mockResolvedValue({
+      entityType: "Tension",
+      entityId: "tension-1",
+      currentVersion: 3,
+      version: { id: "v-2", version: 2, previousState: { title: "Old" } },
+    });
     importContextGraphMapMock.mockReset().mockResolvedValue({
       mapViewId: "map-1",
       objectCount: 2,
@@ -247,7 +263,52 @@ describe("createCorgtexMcpServer", () => {
     expect(JSON.parse(response.content[0].text)).toEqual({
       id: "spend-1",
       status: "OPEN",
+      version: 1,
       webUrl: "https://app.test/workspaces/ws-1/finance/spend/spend-1",
+    });
+  });
+
+  it("lists and fetches work item versions with the matching entity read scope", async () => {
+    const { createCorgtexMcpServer } = await import("./server");
+    const { requireScope } = await import("./auth");
+
+    const server = createCorgtexMcpServer({
+      actor: { kind: "agent", authProvider: "bootstrap" } as any,
+      workspaceId: "ws-1",
+      authKind: "agent",
+    });
+
+    const listResponse = await (server as any)._registeredTools.list_work_item_versions.handler({
+      entityType: "TENSION",
+      entityId: "tension-1",
+    });
+    const getResponse = await (server as any)._registeredTools.get_work_item_version.handler({
+      entityType: "TENSION",
+      entityId: "tension-1",
+      version: 2,
+    });
+
+    expect((server as any)._registeredTools.list_work_item_versions.annotations).toMatchObject({
+      readOnlyHint: true,
+      idempotentHint: true,
+    });
+    expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "tensions:read");
+    expect(listWorkItemVersionsMock).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "agent" }),
+      { workspaceId: "ws-1", entityType: "TENSION", entityId: "tension-1" },
+    );
+    expect(getWorkItemVersionMock).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "agent" }),
+      { workspaceId: "ws-1", entityType: "TENSION", entityId: "tension-1", version: 2 },
+    );
+    expect(JSON.parse(listResponse.content[0].text)).toMatchObject({
+      entityType: "Tension",
+      currentVersion: 3,
+      versions: [{ id: "v-2", version: 2 }],
+    });
+    expect(JSON.parse(getResponse.content[0].text)).toMatchObject({
+      entityType: "Tension",
+      version: { id: "v-2", version: 2 },
     });
   });
 

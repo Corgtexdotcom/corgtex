@@ -8,6 +8,7 @@ type DeliberationEntry = {
   authorInitials: string;
   bodyMd?: string | null;
   createdAt: Date;
+  parentVersion?: number | null;
   resolvedAt?: Date | null;
   resolvedNote?: string | null;
   targetLabel?: string | null;
@@ -60,6 +61,12 @@ export function DeliberationThread({ entries, canResolve, resolveAction, hiddenF
                 <>
                   <div className="muted" style={{ margin: "0 4px" }}>·</div>
                   <div className="muted">{entry.targetLabel}</div>
+                </>
+              )}
+              {entry.parentVersion && (
+                <>
+                  <div className="muted" style={{ margin: "0 4px" }}>·</div>
+                  <div className="muted">on v{entry.parentVersion}</div>
                 </>
               )}
               <div className={`tag ${tagClass}`} style={{ marginLeft: "auto" }}>{label}</div>

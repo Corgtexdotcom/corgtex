@@ -57,6 +57,7 @@ export * from "./advice-process";
 export * from "./impact-footprint";
 export * from "./privacy";
 export * from "./draft-permissions";
+export * from "./work-item-versions";
 export * from "./catalog";
 export * from "./enterprise-services";
 export * from "./execution-plumbing";

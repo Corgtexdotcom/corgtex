@@ -276,6 +276,10 @@ export default async function FinancePage({
                       (spend.status === "RESOLVED" && spend.resolutionOutcome === "APPROVED")
                     );
                     const canManage = canManageSpend(spend);
+                    const canSubmittedRequesterEdit = actor.kind === "user" && spend.requesterUserId === actor.user.id;
+                    const canEditContent = spend.status === "DRAFT"
+                      ? canManage
+                      : spend.status === "OPEN" && !spend.spentAt && spend.reconciliationStatus === "PENDING" && canSubmittedRequesterEdit;
                     const discussionHref = activeDiscussionId === spend.id
                       ? `?tab=spends&status=${statusFilter}`
                       : `?tab=spends&status=${statusFilter}&discuss=${spend.id}`;
@@ -297,6 +301,11 @@ export default async function FinancePage({
                               <span className={`fin-status-badge fin-status-${spend.status.toLowerCase()}`}>
                                 {filterLabel(spend.status as SpendFilter)}
                               </span>
+                              {spend.version > 1 ? (
+                                <Link href={`/workspaces/${workspaceId}/versions?entityType=SPEND&entityId=${encodeURIComponent(spend.id)}`} className="muted">v{spend.version}</Link>
+                              ) : (
+                                <span className="muted">v{spend.version}</span>
+                              )}
                               {spend.resolutionOutcome && (
                                 <span className={`tag ${spend.resolutionOutcome === "REJECTED" ? "danger" : "success"}`}>
                                   {outcomeLabel(spend.resolutionOutcome)}
@@ -338,7 +347,7 @@ export default async function FinancePage({
                               <details style={{ display: "inline-block" }}>
                                 <summary className="fin-action-btn" style={{ cursor: "pointer" }}>{t("btnEdit")}</summary>
                                 <div className="fin-dropdown" style={{ width: 320, padding: "16px" }}>
-                                  {canManage && spend.status === "DRAFT" && (
+                                  {canEditContent && (
                                     <form action={updateSpendAction} className="fin-dropdown-form">
                                       <input type="hidden" name="workspaceId" value={workspaceId} />
                                       <input type="hidden" name="spendId" value={spend.id} />
@@ -353,7 +362,7 @@ export default async function FinancePage({
                                           <option key={account.id} value={account.id}>{account.name} ({account.currency})</option>
                                         ))}
                                       </select>
-                                      <button type="submit" className="fin-action-btn">{t("btnSaveDraft")}</button>
+                                      <button type="submit" className="fin-action-btn">{spend.status === "DRAFT" ? t("btnSaveDraft") : t("btnSave")}</button>
                                     </form>
                                   )}
                                   {canPay && (
@@ -430,6 +439,7 @@ export default async function FinancePage({
                                     authorInitials: (entry.author?.displayName || entry.author?.email || "?").substring(0, 2).toUpperCase(),
                                     bodyMd: entry.bodyMd,
                                     createdAt: entry.createdAt,
+                                    parentVersion: entry.parentVersion,
                                     resolvedAt: entry.resolvedAt,
                                     resolvedNote: entry.resolvedNote,
                                     targetLabel: entry.targetCircle

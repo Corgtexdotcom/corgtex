@@ -110,6 +110,8 @@ export default async function TensionsPage({
             const authorName = tension.author.displayName || tension.author.email || t("authorUnknown");
             const raisedByName = tension.raisedByMember ? memberName(tension.raisedByMember) : null;
             const canManage = canManageTension(tension);
+            const canSubmittedAuthorEdit = actor.kind === "user" && tension.authorUserId === actor.user.id;
+            const canEditContent = tension.status === "DRAFT" ? canManage : tension.status === "OPEN" && canSubmittedAuthorEdit;
             const canDraftProposal = !tension.proposal && (canManage || !tension.isPrivate);
 
             return (
@@ -129,6 +131,12 @@ export default async function TensionsPage({
                   {t("createdByMeta", { name: authorName })}
                   {raisedByName ? ` · ${t("raisedByMeta", { name: raisedByName })}` : ""}
                   {` · ${ageText(tension.createdAt)} · ${t("upvotes", { count: tension.upvotes.length })} · ${t("priorityN", { priority: tension.priority })}`}
+                  {" · "}
+                  {tension.version > 1 ? (
+                    <a href={`/workspaces/${workspaceId}/versions?entityType=TENSION&entityId=${encodeURIComponent(tension.id)}`}>v{tension.version}</a>
+                  ) : (
+                    <>v{tension.version}</>
+                  )}
                   {tension.proposal && (
                     <>
                       {" · "}
@@ -194,7 +202,7 @@ export default async function TensionsPage({
                       </form>
                     );
                   }
-                  if (canManage && tension.status === "DRAFT") {
+                  if (canEditContent) {
                     moreItems.push(
                       <form key="edit-raised-by" action={updateTensionAction} className="action-menu-form">
                         <input type="hidden" name="workspaceId" value={workspaceId} />
@@ -229,7 +237,7 @@ export default async function TensionsPage({
                             {t("formPriority")}
                             <input name="priority" type="number" min={0} defaultValue={tension.priority} />
                           </label>
-                          <button type="submit" className="secondary small">{t("btnSaveDraft")}</button>
+                          <button type="submit" className="secondary small">{tension.status === "DRAFT" ? t("btnSaveDraft") : tCommon("save")}</button>
                         </form>
                       </details>
                     );

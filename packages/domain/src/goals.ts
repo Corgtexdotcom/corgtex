@@ -7,6 +7,13 @@ import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from
 import { invariant } from "./errors";
 import { requireDraftManager } from "./draft-permissions";
 import type { GoalLevel, GoalCadence, GoalStatus, Prisma } from "@prisma/client";
+import {
+  changedDataFields,
+  pickJsonSnapshot,
+  recordWorkItemVersion,
+  requireSubmittedWorkItemAuthor,
+  resolveWorkspaceMemberUserId,
+} from "./work-item-versions";
 
 type GoalKeyResultInput = {
   title: string;
@@ -33,7 +40,23 @@ function keyResultProgress(keyResult: GoalKeyResultInput) {
 async function assertGoalInWorkspace(tx: Prisma.TransactionClient, workspaceId: string, goalId: string) {
   const goal = await tx.goal.findUnique({
     where: { id: goalId },
-    select: { id: true, workspaceId: true, archivedAt: true, parentGoalId: true, ownerMemberId: true, status: true },
+    select: {
+      id: true,
+      workspaceId: true,
+      archivedAt: true,
+      title: true,
+      descriptionMd: true,
+      level: true,
+      cadence: true,
+      targetDate: true,
+      startDate: true,
+      parentGoalId: true,
+      circleId: true,
+      ownerMemberId: true,
+      status: true,
+      progressPercent: true,
+      version: true,
+    },
   });
   invariant(goal && goal.workspaceId === workspaceId && !goal.archivedAt, 404, "NOT_FOUND", "Goal not found.");
   return goal;
@@ -238,8 +261,15 @@ export async function updateGoal(
     const changesWorkflow = params.status !== undefined || params.progressPercent !== undefined;
 
     if (editsDraftContent) {
-      invariant(goal.status === "DRAFT", 400, "INVALID_STATE", "Only draft goals can be edited.");
-      await requireDraftManager({ actor, workspaceId: params.workspaceId, record: goal, resolvedMembership: membership });
+      if (goal.status === "DRAFT") {
+        await requireDraftManager({ actor, workspaceId: params.workspaceId, record: goal, resolvedMembership: membership });
+      } else {
+        invariant(["ACTIVE", "ON_TRACK", "AT_RISK", "BEHIND"].includes(goal.status), 400, "INVALID_STATE", "Only draft or active goals can be edited.");
+        const ownerUserId = goal.ownerMemberId
+          ? await resolveWorkspaceMemberUserId(tx, params.workspaceId, goal.ownerMemberId, "Goal owner must be an active member of this workspace.")
+          : null;
+        requireSubmittedWorkItemAuthor(actor, ownerUserId);
+      }
     }
     if (changesWorkflow) {
       if (params.status === "DRAFT") {
@@ -265,6 +295,36 @@ export async function updateGoal(
     if (params.circleId !== undefined) data.circleId = params.circleId || null;
     if (params.ownerMemberId !== undefined) data.ownerMemberId = params.ownerMemberId || null;
 
+    const contentFields = ["title", "descriptionMd", "level", "cadence", "targetDate", "startDate", "parentGoalId", "circleId", "ownerMemberId"];
+    const changedFields = changedDataFields(goal as unknown as Record<string, unknown>, data)
+      .filter((field) => contentFields.includes(field));
+    if (changedFields.length > 0) {
+      data.version = await recordWorkItemVersion(tx, actor, {
+        workspaceId: params.workspaceId,
+        entityType: "Goal",
+        entityId: goal.id,
+        currentVersion: goal.version,
+        changedFields,
+        previousState: pickJsonSnapshot(goal as unknown as Record<string, unknown>, [
+          "id",
+          "workspaceId",
+          "title",
+          "descriptionMd",
+          "level",
+          "cadence",
+          "targetDate",
+          "startDate",
+          "parentGoalId",
+          "circleId",
+          "ownerMemberId",
+          "status",
+          "version",
+        ]),
+      });
+    }
+    const changedUpdateFields = changedDataFields(goal as unknown as Record<string, unknown>, data);
+    if (changedUpdateFields.length === 0) return goal;
+
     const updated = await tx.goal.update({
       where: { id: params.goalId },
       data,
@@ -275,7 +335,7 @@ export async function updateGoal(
       action: "goal.updated",
       entityType: "Goal",
       entityId: updated.id,
-      meta: { fields: Object.keys(data) },
+      meta: { fields: changedUpdateFields, version: updated.version },
     });
 
     await appendEvents(tx, [
@@ -286,7 +346,7 @@ export async function updateGoal(
         aggregateId: updated.id,
         payload: {
           goalId: updated.id,
-          fields: Object.keys(data),
+          fields: changedUpdateFields,
         },
       },
     ]);

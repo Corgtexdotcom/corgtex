@@ -7,6 +7,13 @@ import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from
 import { invariant } from "./errors";
 import { requireDraftManager } from "./draft-permissions";
 import { resolveWorkspaceProposalLink } from "./proposal-links";
+import {
+  changedDataFields,
+  pickJsonSnapshot,
+  recordWorkItemVersion,
+  requireSubmittedWorkItemAuthor,
+  resolveWorkspaceMemberUserId,
+} from "./work-item-versions";
 
 import { privacyFilter } from "./privacy";
 
@@ -83,6 +90,7 @@ export async function createTension(actor: AppActor, params: {
   bodyMd?: string | null;
   circleId?: string | null;
   assigneeMemberId?: string | null;
+  authorMemberId?: string | null;
   raisedByMemberId?: string | null;
   proposalId?: string | null;
   isPrivate?: boolean;
@@ -95,13 +103,19 @@ export async function createTension(actor: AppActor, params: {
 
   const title = params.title.trim();
   invariant(title.length > 0, 400, "INVALID_INPUT", "Tension title is required.");
-  const authorUserId = await actorUserIdForWorkspace(actor, params.workspaceId);
   const isPrivate = params.isPrivate ?? true;
   const publishedAt = isPrivate ? null : new Date();
 
   return prisma.$transaction(async (tx) => {
     const raisedByMemberId = await resolveRaisedByMemberId(tx, params.workspaceId, params.raisedByMemberId);
     const proposalId = await resolveWorkspaceProposalLink(tx, actor, membership, params.workspaceId, params.proposalId);
+    let authorUserId = actor.kind === "user"
+      ? actor.user.id
+      : await actorUserIdForWorkspace(actor, params.workspaceId);
+    const attributedMemberId = params.authorMemberId || raisedByMemberId;
+    if (actor.kind === "agent" && attributedMemberId) {
+      authorUserId = await resolveWorkspaceMemberUserId(tx, params.workspaceId, attributedMemberId, "Tension author must be an active member of this workspace.");
+    }
     const tension = await tx.tension.create({
       data: {
         workspaceId: params.workspaceId,
@@ -195,16 +209,25 @@ export async function updateTension(actor: AppActor, params: {
 
     invariant(tension && tension.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Tension not found.");
 
+    invariant(!tension.archivedAt, 400, "INVALID_STATE", "Archived tensions cannot be edited.");
+
     const data: Record<string, unknown> = {};
-    const editsDraftContent = params.title !== undefined
+    const editsContent = params.title !== undefined
       || params.bodyMd !== undefined
       || params.circleId !== undefined
       || params.assigneeMemberId !== undefined
       || params.raisedByMemberId !== undefined
-      || params.priority !== undefined
-      || params.isPrivate !== undefined;
-    if (editsDraftContent) {
-      invariant(tension.status === "DRAFT", 400, "INVALID_STATE", "Only draft tensions can be edited.");
+      || params.priority !== undefined;
+    if (editsContent) {
+      if (tension.status === "DRAFT") {
+        await requireDraftManager({ actor, workspaceId: params.workspaceId, record: tension, resolvedMembership: membership });
+      } else {
+        invariant(tension.status === "OPEN", 400, "INVALID_STATE", "Only draft or open tensions can be edited.");
+        requireSubmittedWorkItemAuthor(actor, tension.authorUserId);
+      }
+    }
+    if (params.isPrivate !== undefined) {
+      invariant(tension.status === "DRAFT", 400, "INVALID_STATE", "Only draft tensions can change privacy.");
       await requireDraftManager({ actor, workspaceId: params.workspaceId, record: tension, resolvedMembership: membership });
     }
     if (params.title !== undefined) {
@@ -245,6 +268,33 @@ export async function updateTension(actor: AppActor, params: {
     if (params.priority !== undefined) data.priority = params.priority;
     if (params.isPrivate !== undefined) data.isPrivate = params.isPrivate;
 
+    const contentFields = ["title", "bodyMd", "circleId", "assigneeMemberId", "raisedByMemberId", "priority"];
+    const changedFields = changedDataFields(tension as unknown as Record<string, unknown>, data)
+      .filter((field) => contentFields.includes(field));
+    if (changedFields.length > 0) {
+      data.version = await recordWorkItemVersion(tx, actor, {
+        workspaceId: params.workspaceId,
+        entityType: "Tension",
+        entityId: tension.id,
+        currentVersion: tension.version,
+        changedFields,
+        previousState: pickJsonSnapshot(tension as unknown as Record<string, unknown>, [
+          "id",
+          "workspaceId",
+          "title",
+          "bodyMd",
+          "circleId",
+          "assigneeMemberId",
+          "raisedByMemberId",
+          "priority",
+          "status",
+          "version",
+        ]),
+      });
+    }
+    const changedUpdateFields = changedDataFields(tension as unknown as Record<string, unknown>, data);
+    if (changedUpdateFields.length === 0) return tension;
+
     const updated = await tx.tension.update({
       where: { id: params.tensionId },
       data,
@@ -257,7 +307,7 @@ export async function updateTension(actor: AppActor, params: {
         action: "tension.updated",
         entityType: "Tension",
         entityId: updated.id,
-        meta: { fields: Object.keys(data) },
+        meta: { fields: changedUpdateFields, version: updated.version },
       },
     });
 
@@ -269,7 +319,7 @@ export async function updateTension(actor: AppActor, params: {
         aggregateId: updated.id,
         payload: {
           tensionId: updated.id,
-          fields: Object.keys(data),
+          fields: changedUpdateFields,
         },
       },
     ]);

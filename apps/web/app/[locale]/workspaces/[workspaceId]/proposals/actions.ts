@@ -74,7 +74,7 @@ export async function updateProposalAction(formData: FormData) {
     proposalId: asString(formData, "proposalId"),
     title: asOptional(formData, "title") ?? undefined,
     bodyMd: asOptional(formData, "bodyMd") ?? undefined,
-    includeAiSummary: formData.get("includeAiSummary") === "on",
+    includeAiSummary: formData.has("includeAiSummaryRendered") ? formData.get("includeAiSummary") === "on" : undefined,
   });
   refresh(workspaceId);
 }

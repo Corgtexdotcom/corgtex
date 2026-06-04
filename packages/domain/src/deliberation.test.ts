@@ -55,6 +55,7 @@ describe("deliberation", () => {
 
     expect(entry.entryType).toBe("REACTION");
     expect(entry.bodyMd).toBe("What is this?");
+    expect(entry.parentVersion).toBe(1);
 
     const list = await listDeliberationEntries(adminActor, {
       workspaceId,
@@ -64,6 +65,7 @@ describe("deliberation", () => {
     expect(list.length).toBe(1);
     expect(list[0].id).toBe(entry.id);
     expect(list[0].author.displayName).toBe("Member");
+    expect(list[0].parentVersion).toBe(1);
   });
 
   it("requires bodyMd for OBJECTION", async () => {

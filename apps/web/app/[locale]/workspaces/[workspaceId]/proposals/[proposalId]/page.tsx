@@ -1,6 +1,6 @@
 import { notFound } from "next/navigation";
 import Link from "next/link";
-import { getProposal, listDeliberationEntries, requireWorkspaceMembership } from "@corgtex/domain";
+import { getProposal, listDeliberationEntries, listWorkItemVersions, requireWorkspaceMembership } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
@@ -22,16 +22,20 @@ export default async function ProposalDetailPage({
   const { workspaceId, proposalId } = await params;
   const actor = await requirePageActor();
   const t = await getTranslations("proposals");
+  const tCommon = await getTranslations("common");
 
   const proposal = await getProposal(actor, { workspaceId, proposalId });
   if (!proposal) notFound();
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
 
-  const deliberationEntries = await listDeliberationEntries(actor, {
-    workspaceId,
-    parentType: "PROPOSAL",
-    parentId: proposalId,
-  });
+  const [deliberationEntries, versionHistory] = await Promise.all([
+    listDeliberationEntries(actor, {
+      workspaceId,
+      parentType: "PROPOSAL",
+      parentId: proposalId,
+    }),
+    listWorkItemVersions(actor, { workspaceId, entityType: "PROPOSAL", entityId: proposalId }),
+  ]);
   const deliberationTargets = await getDeliberationTargets({ actor, workspaceId, parentCircleId: proposal.circleId });
   const targetOptions = deliberationTargets.options.map((option) => ({
     ...option,
@@ -57,6 +61,7 @@ export default async function ProposalDetailPage({
 
   const isAuthor = proposal.authorUserId === (actor.kind === "user" ? actor.user.id : "");
   const canManage = actor.kind === "agent" || membership?.role === "ADMIN" || isAuthor;
+  const canEditContent = proposal.status === "DRAFT" ? canManage : proposal.status === "OPEN" && isAuthor;
   const canResolve = actor.kind === "agent" || Boolean(membership);
 
   return (
@@ -69,6 +74,14 @@ export default async function ProposalDetailPage({
           <span>·</span>
           <span className={`tag ${statusClass}`}>
             {proposal.status === "RESOLVED" && proposal.resolutionOutcome ? `${proposal.status} · ${proposal.resolutionOutcome.replace("_", " ")}` : proposal.status}
+          </span>
+          <span>·</span>
+          <span>
+            {versionHistory.versions.length > 0 ? (
+              <Link href={`/workspaces/${workspaceId}/versions?entityType=PROPOSAL&entityId=${encodeURIComponent(proposal.id)}`} className="nr-link-inherit">v{proposal.version}</Link>
+            ) : (
+              <>v{proposal.version}</>
+            )}
           </span>
         </p>
         <div className="nr-page-header">
@@ -106,6 +119,7 @@ export default async function ProposalDetailPage({
               authorInitials: (e.author?.displayName || "U").substring(0, 2).toUpperCase(),
               bodyMd: e.bodyMd,
               createdAt: e.createdAt,
+              parentVersion: e.parentVersion,
               resolvedAt: e.resolvedAt,
               resolvedNote: e.resolvedNote,
               targetLabel: e.targetCircle
@@ -153,14 +167,14 @@ export default async function ProposalDetailPage({
               </form>
             </div>
           )}
-          {canManage && proposal.status === "DRAFT" && (
+          {canEditContent && (
             <details className="stack mb-8">
               <summary className="secondary small nr-hide-marker cursor-pointer">{t("btnEdit")}</summary>
               <form action={updateProposalAction} className="stack nr-form-section mt-3">
                 <input type="hidden" name="workspaceId" value={workspaceId} />
                 <input type="hidden" name="proposalId" value={proposal.id} />
                 <ProposalDraftFields defaultTitle={proposal.title} defaultBodyMd={proposal.bodyMd} />
-                <button type="submit" className="secondary small">{t("btnSaveDraft")}</button>
+                <button type="submit" className="secondary small">{proposal.status === "DRAFT" ? t("btnSaveDraft") : tCommon("save")}</button>
               </form>
             </details>
           )}

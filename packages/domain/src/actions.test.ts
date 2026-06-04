@@ -4,6 +4,7 @@ import type { AppActor } from "@corgtex/shared";
 const { prismaMock } = vi.hoisted(() => ({
   prismaMock: {
     $transaction: vi.fn(),
+    $executeRaw: vi.fn(),
     action: {
       create: vi.fn(),
       findUnique: vi.fn(),
@@ -11,6 +12,10 @@ const { prismaMock } = vi.hoisted(() => ({
     },
     proposal: {
       findFirst: vi.fn(),
+    },
+    workItemVersion: {
+      create: vi.fn(),
+      findUnique: vi.fn(),
     },
   },
 }));
@@ -59,6 +64,9 @@ describe("action domain lifecycle", () => {
     });
     recordAudit.mockResolvedValue(undefined);
     appendEvents.mockResolvedValue(undefined);
+    prismaMock.$executeRaw.mockResolvedValue({});
+    prismaMock.workItemVersion.create.mockResolvedValue({});
+    prismaMock.workItemVersion.findUnique.mockResolvedValue(null);
   });
 
   it("creates form-submitted actions as private drafts by default", async () => {
@@ -228,6 +236,56 @@ describe("action domain lifecycle", () => {
         publishedAt: null,
         completedVia: null,
       }),
+    }));
+  });
+
+  it("allows an author to edit an open action and snapshots the previous version", async () => {
+    prismaMock.action.findUnique.mockResolvedValue({
+      id: "action-1",
+      workspaceId: "workspace-1",
+      authorUserId: "user-1",
+      title: "Follow up",
+      bodyMd: "Old notes",
+      status: "OPEN",
+      version: 1,
+      isPrivate: false,
+      publishedAt: new Date("2026-06-01T00:00:00.000Z"),
+      archivedAt: null,
+    });
+    prismaMock.action.update.mockResolvedValue({
+      id: "action-1",
+      workspaceId: "workspace-1",
+      authorUserId: "user-1",
+      title: "Follow up now",
+      status: "OPEN",
+      version: 2,
+    });
+
+    const { updateAction } = await import("./actions");
+    await expect(updateAction(actor, {
+      workspaceId: "workspace-1",
+      actionId: "action-1",
+      title: "Follow up now",
+    })).resolves.toMatchObject({
+      id: "action-1",
+      version: 2,
+    });
+
+    expect(prismaMock.workItemVersion.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        entityType: "Action",
+        entityId: "action-1",
+        version: 1,
+        changedFields: ["title"],
+        previousState: expect.objectContaining({
+          title: "Follow up",
+          version: 1,
+        }),
+      }),
+    }));
+    expect(prismaMock.action.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "action-1" },
+      data: { title: "Follow up now", version: 2 },
     }));
   });
 

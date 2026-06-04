@@ -7,6 +7,13 @@ import { getApprovalPolicy } from "./approvals";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { invariant } from "./errors";
 import { requireDraftManager } from "./draft-permissions";
+import {
+  changedDataFields,
+  pickJsonSnapshot,
+  recordWorkItemVersion,
+  requireSubmittedWorkItemAuthor,
+  resolveWorkspaceMemberUserId,
+} from "./work-item-versions";
 
 const LEGACY_SPEND_COMMENT_ENTRY_ID_PREFIX = "legacy-spend-comment-";
 
@@ -293,6 +300,7 @@ export async function createSpend(actor: AppActor, params: {
   proposalId?: string | null;
   ledgerAccountId?: string | null;
   requesterEmail?: string | null;
+  requesterMemberId?: string | null;
 }) {
   await requireWorkspaceMembership({
     actor,
@@ -320,6 +328,13 @@ export async function createSpend(actor: AppActor, params: {
     });
     invariant(member, 404, "NOT_FOUND", `No active workspace member found with email "${email}".`);
     requesterUserId = member.userId;
+  } else if (actor.kind === "agent" && params.requesterMemberId) {
+    requesterUserId = await prisma.$transaction((tx) => resolveWorkspaceMemberUserId(
+      tx,
+      params.workspaceId,
+      params.requesterMemberId as string,
+      "Spend requester must be an active member of this workspace.",
+    ));
   } else {
     requesterUserId = await actorUserIdForWorkspace(actor, params.workspaceId);
   }
@@ -1074,8 +1089,17 @@ export async function updateSpend(actor: AppActor, params: {
 
   return prisma.$transaction(async (tx) => {
     const spend = await findSpendForWorkspace(tx, params.workspaceId, params.spendId);
-    invariant(spend.status === "DRAFT", 400, "INVALID_STATE", "Only draft spend requests can be updated.");
-    await requireDraftManager({ actor, workspaceId: params.workspaceId, record: spend, resolvedMembership: membership });
+    if (spend.status === "DRAFT") {
+      await requireDraftManager({ actor, workspaceId: params.workspaceId, record: spend, resolvedMembership: membership });
+    } else {
+      invariant(spend.status === "OPEN", 400, "INVALID_STATE", "Only draft or open spend requests can be updated.");
+      invariant(!spend.spentAt, 400, "INVALID_STATE", "Paid spend requests cannot be updated.");
+      invariant(spend.reconciliationStatus === "PENDING", 400, "INVALID_STATE", "Reconciled spend requests cannot be updated.");
+      requireSubmittedWorkItemAuthor(actor, spend.requesterUserId);
+      if (params.ledgerAccountId !== undefined) {
+        await requireFinanceAccess(actor, params.workspaceId);
+      }
+    }
 
     const data: Record<string, unknown> = {};
     if (params.amountCents !== undefined) {
@@ -1107,6 +1131,29 @@ export async function updateSpend(actor: AppActor, params: {
 
     invariant(Object.keys(data).length > 0, 400, "INVALID_INPUT", "At least one field must be updated.");
 
+    const changedFields = changedDataFields(spend as unknown as Record<string, unknown>, data);
+    if (changedFields.length === 0) return spend;
+    data.version = await recordWorkItemVersion(tx, actor, {
+      workspaceId: params.workspaceId,
+      entityType: "SpendRequest",
+      entityId: spend.id,
+      currentVersion: spend.version,
+      changedFields,
+      previousState: pickJsonSnapshot(spend as unknown as Record<string, unknown>, [
+        "id",
+        "workspaceId",
+        "amountCents",
+        "currency",
+        "category",
+        "description",
+        "vendor",
+        "ledgerAccountId",
+        "status",
+        "version",
+      ]),
+    });
+    const changedUpdateFields = changedDataFields(spend as unknown as Record<string, unknown>, data);
+
     const updated = await tx.spendRequest.update({
       where: { id: params.spendId },
       data,
@@ -1119,7 +1166,7 @@ export async function updateSpend(actor: AppActor, params: {
         action: "spend.updated",
         entityType: "SpendRequest",
         entityId: updated.id,
-        meta: { fields: Object.keys(data) },
+        meta: { fields: changedUpdateFields, version: updated.version },
       },
     });
 

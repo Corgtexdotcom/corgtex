@@ -121,6 +121,8 @@ import {
   getCompanyContext,
   listWritebackTargets,
   submitExecutionResult,
+  listWorkItemVersions,
+  getWorkItemVersion,
 } from "@corgtex/domain";
 import type { AgentScope } from "@corgtex/domain";
 import { searchIndexedKnowledge } from "@corgtex/knowledge";
@@ -303,6 +305,8 @@ const TOOL_CAPABILITIES = {
   restore_artifact: { scopes: ["archive:write"] },
   purge_artifact: { scopes: ["archive:write"], destructive: true },
   list_ledger_transactions: { scopes: ["finance:read"] },
+  list_work_item_versions: { scopes: [] },
+  get_work_item_version: { scopes: [] },
 } satisfies Record<string, ToolCapability>;
 
 const MUTATING_READ_PREFIX_TOOLS = new Set(["get_execution_packet"]);
@@ -364,6 +368,7 @@ const BRAIN_ARTICLE_TYPE = [
 ] as const;
 const BRAIN_ARTICLE_AUTHORITY = ["AUTHORITATIVE", "REFERENCE", "HISTORICAL", "DRAFT"] as const;
 const BRAIN_DISCUSSION_TARGET = ["ARTICLE", "SECTION", "LINE"] as const;
+const WORK_ITEM_ENTITY_TYPE = ["TENSION", "PROPOSAL", "ACTION", "SPEND", "GOAL"] as const;
 
 /**
  * Create and configure a new McpServer instance with all Corgtex tools and resources.
@@ -387,6 +392,16 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     for (const scope of TOOL_CAPABILITIES[name].scopes) {
       requireScope(sessionCtx, scope);
     }
+  };
+  const requireWorkItemVersionReadScope = (entityType: typeof WORK_ITEM_ENTITY_TYPE[number]) => {
+    const scopeByEntity = {
+      TENSION: "tensions:read",
+      PROPOSAL: "proposals:read",
+      ACTION: "actions:read",
+      SPEND: "finance:read",
+      GOAL: "goals:read",
+    } as const;
+    requireScope(sessionCtx, scopeByEntity[entityType]);
   };
   const auditToolExecution = async (name: string, input: unknown, result: unknown, error?: unknown) => {
     if (!hasToolCapability(name) || name === "record_support_audit") return;
@@ -862,6 +877,38 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         webUrl: webUrl(workspaceId, ""),
         counts: { proposals: proposalCount, actions: actionCount, tensions: tensionCount, members: memberCount },
       });
+    },
+  );
+
+  tool(
+    "list_work_item_versions",
+    "List previous saved versions for a tension, proposal, action, spend request, or goal. Versions are returned newest first and include the changed fields and previous state snapshot.",
+    {
+      entityType: z.enum(WORK_ITEM_ENTITY_TYPE).describe("TENSION, PROPOSAL, ACTION, SPEND, or GOAL"),
+      entityId: z.string().describe("Work item ID"),
+    },
+    async ({ entityType, entityId }: { entityType: typeof WORK_ITEM_ENTITY_TYPE[number]; entityId: string }) => {
+      requireWorkItemVersionReadScope(entityType);
+      const result = await listWorkItemVersions(actor, { workspaceId, entityType, entityId });
+      return jsonResult({
+        ...result,
+        webUrl: webUrl(workspaceId, `/versions?entityType=${entityType}&entityId=${encodeURIComponent(entityId)}`),
+      });
+    },
+  );
+
+  tool(
+    "get_work_item_version",
+    "Fetch one previous saved version snapshot for a tension, proposal, action, spend request, or goal.",
+    {
+      entityType: z.enum(WORK_ITEM_ENTITY_TYPE).describe("TENSION, PROPOSAL, ACTION, SPEND, or GOAL"),
+      entityId: z.string().describe("Work item ID"),
+      version: z.number().int().positive().describe("Previous version number to fetch"),
+    },
+    async ({ entityType, entityId, version }: { entityType: typeof WORK_ITEM_ENTITY_TYPE[number]; entityId: string; version: number }) => {
+      requireWorkItemVersionReadScope(entityType);
+      const result = await getWorkItemVersion(actor, { workspaceId, entityType, entityId, version });
+      return jsonResult(result);
     },
   );
 
@@ -1488,6 +1535,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         id: p.id,
         title: p.title,
         status: p.status,
+        version: p.version,
         resolutionOutcome: p.resolutionOutcome,
         decidedAt: p.decidedAt,
         archivedAt: p.archivedAt,
@@ -1530,14 +1578,16 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       title: z.string().describe("Proposal title"),
       bodyMd: z.string().describe("Proposal body in Markdown"),
       summary: z.string().optional().describe("Optional short summary"),
+      authorMemberId: z.string().optional().describe("Optional active member ID to attribute as author when an internal/credential agent creates the proposal"),
     },
-    async ({ title, bodyMd, summary }: { title: string; bodyMd: string; summary?: string }) => {
+    async ({ title, bodyMd, summary, authorMemberId }: { title: string; bodyMd: string; summary?: string; authorMemberId?: string }) => {
       requireScope(sessionCtx, "proposals:write");
-      const proposal = await createProposal(actor, { workspaceId, title, bodyMd, summary });
+      const proposal = await createProposal(actor, { workspaceId, title, bodyMd, summary, authorMemberId });
       return jsonResult({
         id: proposal.id,
         title: proposal.title,
         status: proposal.status,
+        version: proposal.version,
         webUrl: webUrl(workspaceId, `/proposals/${proposal.id}`),
       });
     },
@@ -1545,7 +1595,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
 
   tool(
     "update_proposal",
-    "Update a draft proposal's title, body, summary, or owning circle. Only DRAFT proposals can be edited.",
+    "Update a proposal's title, body, summary, or owning circle. Draft edits keep draft-manager permissions; OPEN proposal content edits require the connected author and create a saved previous version.",
     {
       proposalId: z.string(),
       title: z.string().optional(),
@@ -1566,6 +1616,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       return jsonResult({
         id: updated.id,
         status: updated.status,
+        version: updated.version,
         webUrl: webUrl(workspaceId, `/proposals/${updated.id}`),
       });
     },
@@ -1701,6 +1752,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         id: a.id,
         title: a.title,
         status: a.status,
+        version: a.version,
         author: a.author?.displayName ?? a.author?.email ?? "Unknown",
         assignee: a.assigneeMember?.user?.displayName ?? a.assigneeMember?.user?.email ?? null,
         dueAt: (a as Record<string, unknown>).dueAt ?? null,
@@ -1717,13 +1769,16 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     {
       title: z.string(),
       bodyMd: z.string().optional(),
+      assigneeMemberId: z.string().optional(),
+      authorMemberId: z.string().optional().describe("Optional active member ID to attribute as author when an internal/credential agent creates the action"),
     },
-    async ({ title, bodyMd }: { title: string; bodyMd?: string }) => {
+    async ({ title, bodyMd, assigneeMemberId, authorMemberId }: { title: string; bodyMd?: string; assigneeMemberId?: string; authorMemberId?: string }) => {
       requireScope(sessionCtx, "actions:write");
-      const action = await createAction(actor, { workspaceId, title, bodyMd });
+      const action = await createAction(actor, { workspaceId, title, bodyMd, assigneeMemberId, authorMemberId });
       return jsonResult({
         id: action.id,
         status: action.status,
+        version: action.version,
         webUrl: webUrl(workspaceId, `/actions/${action.id}`),
       });
     },
@@ -1731,7 +1786,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
 
   tool(
     "update_action",
-    "Update an action. Content fields are editable only while the action is DRAFT; status/progress workflow fields may be changed through the normal workflow.",
+    "Update an action. Draft content edits keep draft-manager permissions; OPEN/IN_PROGRESS content edits require the connected author and create a saved previous version.",
     {
       actionId: z.string(),
       title: z.string().optional(),
@@ -1764,6 +1819,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       return jsonResult({
         id: updated.id,
         status: updated.status,
+        version: updated.version,
         webUrl: webUrl(workspaceId, `/actions/${updated.id}`),
       });
     },
@@ -1781,6 +1837,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       return jsonResult({
         id: updated.id,
         status: updated.status,
+        version: updated.version,
         webUrl: webUrl(workspaceId, `/actions/${updated.id}`),
       });
     },
@@ -1835,6 +1892,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         id: t.id,
         title: t.title,
         status: t.status,
+        version: t.version,
         author: t.author?.displayName ?? t.author?.email ?? "Unknown",
         assignee: t.assigneeMember?.user?.displayName ?? t.assigneeMember?.user?.email ?? null,
         raisedBy: t.raisedByMember?.user?.displayName ?? t.raisedByMember?.user?.email ?? null,
@@ -1853,13 +1911,15 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       title: z.string(),
       bodyMd: z.string().optional(),
       raisedByMemberId: z.string().optional(),
+      authorMemberId: z.string().optional().describe("Optional active member ID to attribute as author when an internal/credential agent creates the tension"),
     },
-    async ({ title, bodyMd, raisedByMemberId }: { title: string; bodyMd?: string; raisedByMemberId?: string }) => {
+    async ({ title, bodyMd, raisedByMemberId, authorMemberId }: { title: string; bodyMd?: string; raisedByMemberId?: string; authorMemberId?: string }) => {
       requireScope(sessionCtx, "tensions:write");
-      const tension = await createTension(actor, { workspaceId, title, bodyMd, raisedByMemberId });
+      const tension = await createTension(actor, { workspaceId, title, bodyMd, raisedByMemberId, authorMemberId });
       return jsonResult({
         id: tension.id,
         status: tension.status,
+        version: tension.version,
         webUrl: webUrl(workspaceId, `/tensions/${tension.id}`),
       });
     },
@@ -1867,7 +1927,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
 
   tool(
     "update_tension",
-    "Update a tension. Content fields are editable only while the tension is DRAFT; resolution workflow fields may be changed through the normal workflow.",
+    "Update a tension. Draft content edits keep draft-manager permissions; OPEN tension content edits require the connected author and create a saved previous version.",
     {
       tensionId: z.string(),
       title: z.string().optional(),
@@ -1906,6 +1966,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       return jsonResult({
         id: updated.id,
         status: updated.status,
+        version: updated.version,
         webUrl: webUrl(workspaceId, `/tensions/${updated.id}`),
       });
     },
@@ -1994,6 +2055,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         cadence: goal.cadence,
         level: goal.level,
         status: goal.status,
+        version: goal.version,
         progressPercent: goal.progressPercent,
         circle: goal.circle?.name ?? null,
         owner: goal.ownerMember?.user?.displayName ?? goal.ownerMember?.user?.email ?? null,
@@ -2080,6 +2142,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         id: goal.id,
         title: goal.title,
         status: goal.status,
+        version: goal.version,
         webUrl: webUrl(workspaceId, `/goals?view=tree&cadence=${goal.cadence}`),
       });
     },
@@ -2135,6 +2198,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       return jsonResult({
         id: updated.id,
         status: updated.status,
+        version: updated.version,
         webUrl: webUrl(workspaceId, `/goals?view=tree&cadence=${updated.cadence}`),
       });
     },
@@ -2940,6 +3004,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         category: s.category,
         description: s.description,
         status: s.status,
+        version: s.version,
         vendor: s.vendor,
       }));
       return jsonResult({ items: simplified, total: result.total });
@@ -2956,6 +3021,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       description: z.string().describe("Description"),
       vendor: z.string().optional().describe("Vendor name"),
       requesterEmail: z.string().optional().describe("Optionally target a specific user via email"),
+      requesterMemberId: z.string().optional().describe("Optionally target a specific active workspace member as requester"),
     },
     async (params: {
       amountCents: number;
@@ -2964,6 +3030,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       description: string;
       vendor?: string;
       requesterEmail?: string;
+      requesterMemberId?: string;
     }) => {
       requireScope(sessionCtx, "finance:write");
       const spend = await createSpend(actor, {
@@ -2974,11 +3041,13 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         description: params.description,
         vendor: params.vendor,
         requesterEmail: params.requesterEmail,
+        requesterMemberId: params.requesterMemberId,
       });
       const submitted = await submitSpend(actor, { workspaceId, spendId: spend.id });
       return jsonResult({
         id: submitted.spendId,
         status: "OPEN",
+        version: spend.version,
         webUrl: webUrl(workspaceId, `/finance/spend/${submitted.spendId}`),
       });
     },
@@ -2994,6 +3063,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       description: z.string(),
       vendor: z.string().optional(),
       requesterEmail: z.string().optional(),
+      requesterMemberId: z.string().optional(),
       proposalId: z.string().optional(),
       ledgerAccountId: z.string().optional(),
     },
@@ -3004,6 +3074,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       description: string;
       vendor?: string;
       requesterEmail?: string;
+      requesterMemberId?: string;
       proposalId?: string;
       ledgerAccountId?: string;
     }) => {
@@ -3016,12 +3087,14 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         description: params.description,
         vendor: params.vendor,
         requesterEmail: params.requesterEmail,
+        requesterMemberId: params.requesterMemberId,
         proposalId: params.proposalId,
         ledgerAccountId: params.ledgerAccountId,
       });
       return jsonResult({
         id: spend.id,
         status: spend.status,
+        version: spend.version,
         webUrl: webUrl(workspaceId, `/finance/spend/${spend.id}`),
       });
     },
@@ -3046,7 +3119,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
 
   tool(
     "update_spend",
-    "Update a DRAFT spend request. Pass only the fields you want to change.",
+    "Update a spend request. Draft edits keep draft-manager permissions; OPEN unpaid/unreconciled spend content edits require the connected requester and create a saved previous version.",
     {
       spendId: z.string(),
       amountCents: z.number().optional(),
@@ -3079,6 +3152,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       return jsonResult({
         id: updated.id,
         status: updated.status,
+        version: updated.version,
         webUrl: webUrl(workspaceId, `/finance/spend/${updated.id}`),
       });
     },
