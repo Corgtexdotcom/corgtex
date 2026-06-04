@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppActor } from "@corgtex/shared";
 
-const { prismaMock } = vi.hoisted(() => {
+const { prismaMock, selfServeOpsMock, sendEmailMock, sharedEnv } = vi.hoisted(() => {
   const prisma = {
     $transaction: vi.fn(),
     member: {
@@ -61,7 +61,18 @@ const { prismaMock } = vi.hoisted(() => {
       findMany: vi.fn(),
     },
   };
-  return { prismaMock: prisma };
+  return {
+    prismaMock: prisma,
+    selfServeOpsMock: {
+      maybeCaptureSelfServeSetupEmail: vi.fn(),
+    },
+    sendEmailMock: vi.fn(),
+    sharedEnv: {
+      APP_URL: "https://app.example",
+      RESEND_API_KEY: "resend-key",
+      SESSION_LAST_SEEN_WRITE_INTERVAL_MS: 5 * 60 * 1000,
+    },
+  };
 });
 
 vi.mock("@corgtex/shared", () => ({
@@ -69,10 +80,13 @@ vi.mock("@corgtex/shared", () => ({
   hashPassword: vi.fn((value: string) => `hash:${value}`),
   randomOpaqueToken: vi.fn(() => "opaque-token"),
   sha256: vi.fn((value: string) => `sha:${value}`),
+  sendEmail: sendEmailMock,
   parseAllowedWorkspaceIds: vi.fn(() => new Set<string>()),
-  env: {
-    SESSION_LAST_SEEN_WRITE_INTERVAL_MS: 5 * 60 * 1000,
-  },
+  env: sharedEnv,
+}));
+
+vi.mock("./self-serve-ops", () => ({
+  maybeCaptureSelfServeSetupEmail: selfServeOpsMock.maybeCaptureSelfServeSetupEmail,
 }));
 
 const actor: AppActor = {
@@ -98,6 +112,10 @@ describe("members domain", () => {
     prismaMock.roleHolderHistory.updateMany.mockResolvedValue({ count: 1 });
     prismaMock.roleOnboardingSession.updateMany.mockResolvedValue({ count: 1 });
     prismaMock.roleAssignment.deleteMany.mockResolvedValue({ count: 1 });
+    sharedEnv.APP_URL = "https://app.example";
+    sharedEnv.RESEND_API_KEY = "resend-key";
+    sendEmailMock.mockResolvedValue({ id: "email-1" });
+    selfServeOpsMock.maybeCaptureSelfServeSetupEmail.mockResolvedValue(null);
   });
 
   it("listMembers returns active members ordered by join date", async () => {
@@ -164,6 +182,36 @@ describe("members domain", () => {
       code: "INVALID_INPUT",
     });
     expect(prismaMock.$transaction).not.toHaveBeenCalled();
+  });
+
+  it("captures setup links for smoke domains when the email provider fails", async () => {
+    sendEmailMock.mockRejectedValue(new Error("resend unavailable"));
+    const { sendMemberSetupEmail } = await import("./members");
+
+    await expect(sendMemberSetupEmail({
+      email: " AGENT@SMOKE.EXAMPLE ",
+      displayName: "Agent",
+      token: "setup-token",
+      workspaceName: "Smoke Workspace",
+      workspaceId: "workspace-1",
+      procurementTrialId: "trial-1",
+      runId: "run-1",
+    })).resolves.toEqual({
+      email: "agent@smoke.example",
+      sent: false,
+      error: "resend unavailable",
+    });
+
+    expect(selfServeOpsMock.maybeCaptureSelfServeSetupEmail).toHaveBeenCalledWith({
+      email: "agent@smoke.example",
+      subject: "You've been invited to Corgtex",
+      setupUrl: "https://app.example/setup-account/setup-token",
+      providerStatus: { status: "FAILED", error: "resend unavailable" },
+      workspaceId: "workspace-1",
+      procurementTrialId: "trial-1",
+      runId: "run-1",
+      source: "member_setup",
+    });
   });
 
   it("inviteMember uses the contributor role and the existing user/member path", async () => {

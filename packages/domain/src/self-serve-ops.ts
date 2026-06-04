@@ -455,12 +455,14 @@ export async function createSelfServeSupportSession(actor: AppActor, params: {
   });
   invariant(workspace, 404, "NOT_FOUND", "Workspace not found.");
 
-  const targetMember = params.targetMemberId?.trim()
+  const requestedTargetMemberId = params.targetMemberId?.trim() || null;
+  const targetMember = requestedTargetMemberId
     ? await prisma.member.findUnique({
-      where: { id: params.targetMemberId.trim() },
+      where: { id: requestedTargetMemberId },
       select: { id: true, workspaceId: true, role: true, user: { select: { email: true, displayName: true } } },
     })
     : null;
+  invariant(!requestedTargetMemberId || targetMember, 404, "NOT_FOUND", "Target member not found.");
   invariant(!targetMember || targetMember.workspaceId === workspaceId, 400, "INVALID_INPUT", "Target member does not belong to the workspace.");
   const supportRole: MemberRole = targetMember?.role ?? "ADMIN";
   const supportEmail = supportEmailForWorkspace(workspaceId);

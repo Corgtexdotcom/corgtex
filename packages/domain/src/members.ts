@@ -98,10 +98,23 @@ export async function sendMemberSetupEmail(params: {
     });
     return { email, sent: true };
   } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    await maybeCaptureSelfServeSetupEmail({
+      email,
+      subject,
+      setupUrl,
+      providerStatus: { status: "FAILED", error: message },
+      workspaceId: params.workspaceId,
+      procurementTrialId: params.procurementTrialId,
+      runId: params.runId,
+      source: "member_setup",
+    }).catch((captureError) => {
+      console.warn("[self-serve-smoke] setup-email capture failed:", captureError);
+    });
     return {
       email,
       sent: false,
-      error: error instanceof Error ? error.message : String(error),
+      error: message,
     };
   }
 }
