@@ -43,10 +43,12 @@ const { prismaMock, sharedEnv } = vi.hoisted(() => ({
       findUnique: vi.fn(),
     },
     member: {
+      create: vi.fn(),
       findUnique: vi.fn(),
       upsert: vi.fn(),
     },
     user: {
+      create: vi.fn(),
       upsert: vi.fn(),
     },
     roleAssignment: {
@@ -169,6 +171,11 @@ describe("self-serve ops domain", () => {
       where: { id: "capture-1" },
       data: { consumedAt: expect.any(Date) },
     });
+    expect(prismaMock.selfServeEmailCapture.findFirst).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        consumedAt: null,
+      }),
+    }));
   });
 
   it("persists smoke run evidence through the smoke secret", async () => {
@@ -199,6 +206,19 @@ describe("self-serve ops domain", () => {
     });
   });
 
+  it("rejects blank smoke run ids before writing evidence", async () => {
+    const { upsertSelfServeSmokeRun } = await import("./self-serve-ops");
+
+    await expect(upsertSelfServeSmokeRun({
+      secret: "capture-secret",
+      runId: " ",
+      runKind: "browser",
+      status: "PASSED",
+    })).rejects.toMatchObject({ status: 400, code: "INVALID_INPUT" });
+
+    expect(prismaMock.selfServeSmokeRun.upsert).not.toHaveBeenCalled();
+  });
+
   it("creates an audited support session and clones the target member role shape", async () => {
     prismaMock.customerDeployment.findUnique.mockResolvedValue({
       id: "deployment-1",
@@ -212,8 +232,8 @@ describe("self-serve ops domain", () => {
       role: "FACILITATOR",
       user: { email: "target@example.com", displayName: "Target" },
     });
-    prismaMock.user.upsert.mockResolvedValue({ id: "support-user", email: "support+workspace@corgtex.local", displayName: "Corgtex Support" });
-    prismaMock.member.upsert.mockResolvedValue({ id: "support-member", role: "FACILITATOR" });
+    prismaMock.user.create.mockResolvedValue({ id: "support-user", email: "support+workspace@corgtex.local", displayName: "Corgtex Support" });
+    prismaMock.member.create.mockResolvedValue({ id: "support-member", role: "FACILITATOR" });
     prismaMock.roleAssignment.findMany.mockResolvedValue([{ roleId: "role-1" }]);
     prismaMock.roleAssignment.createMany.mockResolvedValue({ count: 1 });
     prismaMock.supportOperation.create.mockResolvedValue({ id: "operation-1" });
@@ -232,9 +252,8 @@ describe("self-serve ops domain", () => {
       url: "https://app.example/support/sessions/support-token",
     });
 
-    expect(prismaMock.member.upsert).toHaveBeenCalledWith(expect.objectContaining({
-      update: expect.objectContaining({ role: "FACILITATOR", isActive: true }),
-      create: expect.objectContaining({ role: "FACILITATOR", isActive: true }),
+    expect(prismaMock.member.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ role: "FACILITATOR", isActive: true }),
     }));
     expect(prismaMock.roleAssignment.createMany).toHaveBeenCalledWith({
       data: [{ memberId: "support-member", roleId: "role-1" }],
@@ -247,6 +266,31 @@ describe("self-serve ops domain", () => {
         status: "COMPLETED",
       }),
     }));
+  });
+
+  it("rejects read-only deployment access before opening support sessions", async () => {
+    const viewerActor: AppActor = {
+      kind: "user",
+      user: {
+        id: "viewer-user",
+        email: "viewer@example.com",
+        displayName: "Viewer",
+        globalRole: "USER",
+      },
+    };
+    prismaMock.customerDeploymentAccess.findUnique.mockResolvedValue({
+      role: "SUPPORT_VIEWER",
+      isActive: true,
+    });
+    const { createSelfServeSupportSession } = await import("./self-serve-ops");
+
+    await expect(createSelfServeSupportSession(viewerActor, {
+      deploymentId: "deployment-1",
+      reason: "Reproduce reported role onboarding bug.",
+    })).rejects.toMatchObject({ status: 403, code: "CONTROL_PLANE_WRITE_ACCESS_REQUIRED" });
+
+    expect(prismaMock.customerDeployment.findUnique).not.toHaveBeenCalled();
+    expect(prismaMock.user.create).not.toHaveBeenCalled();
   });
 
   it("rejects support sessions when a supplied workspace does not match the deployment", async () => {
@@ -297,18 +341,19 @@ describe("self-serve ops domain", () => {
       reason: "Reproduce reported role onboarding bug.",
     })).rejects.toMatchObject({ status: 404, code: "NOT_FOUND" });
 
-    expect(prismaMock.user.upsert).not.toHaveBeenCalled();
+    expect(prismaMock.user.create).not.toHaveBeenCalled();
     expect(prismaMock.selfServeSupportSession.create).not.toHaveBeenCalled();
   });
 
   it("consumes support sessions once and creates a short support login session", async () => {
+    const supportExpiresAt = new Date(Date.now() + 60_000);
     prismaMock.selfServeSupportSession.findUnique.mockResolvedValue({
       id: "support-session-1",
       workspaceId: "workspace-1",
       operationId: "operation-1",
       supportUserId: "support-user",
       targetMemberId: "member-target",
-      expiresAt: new Date(Date.now() + 60_000),
+      expiresAt: supportExpiresAt,
       usedAt: null,
     });
     const { consumeSelfServeSupportSession } = await import("./self-serve-ops");
@@ -332,7 +377,7 @@ describe("self-serve ops domain", () => {
       }),
     }));
     const sessionExpiresAt = prismaMock.session.create.mock.calls[0]?.[0]?.data?.expiresAt as Date;
-    expect(sessionExpiresAt.getTime()).toBeLessThanOrEqual(Date.now() + 60 * 60 * 1000 + 1_000);
+    expect(sessionExpiresAt).toEqual(supportExpiresAt);
     expect(prismaMock.selfServeSupportSession.updateMany).toHaveBeenCalledWith({
       where: {
         id: "support-session-1",

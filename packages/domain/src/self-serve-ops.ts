@@ -1,4 +1,4 @@
-import type { MemberRole, Prisma } from "@prisma/client";
+import type { CustomerDeploymentAccessRole, MemberRole, Prisma } from "@prisma/client";
 import {
   decryptSecret,
   encryptSecret,
@@ -16,6 +16,7 @@ import { isGlobalOperator } from "./auth";
 const SUPPORT_SESSION_TTL_MS = 60 * 60 * 1000;
 const SUPPORT_EMAIL_DOMAIN = "corgtex.local";
 const CONTROL_PLANE_READ_SCOPE = "control-plane:read";
+const CONTROL_PLANE_DEPLOYMENT_WRITE_ROLES = new Set<CustomerDeploymentAccessRole>(["SUPPORT_ADMIN", "CUSTOMER_IT_ADMIN"]);
 
 type JsonRecord = Record<string, unknown>;
 
@@ -71,7 +72,7 @@ function requireSelfServeControlPlaneScope(actor: AppActor, scope: string) {
   invariant(hasControlPlaneScope(actor, scope), 403, "CONTROL_PLANE_SCOPE_REQUIRED", `Control Plane scope required: ${scope}.`);
 }
 
-async function requireSelfServeControlPlaneAccess(actor: AppActor, params: { deploymentId?: string } = {}) {
+async function requireSelfServeControlPlaneAccess(actor: AppActor, params: { deploymentId?: string; write?: boolean } = {}) {
   if (isGlobalOperator(actor)) return;
   if (isControlPlaneAgent(actor)) {
     requireSelfServeControlPlaneScope(actor, CONTROL_PLANE_READ_SCOPE);
@@ -85,9 +86,12 @@ async function requireSelfServeControlPlaneAccess(actor: AppActor, params: { dep
           userId: actor.user.id,
         },
       },
-      select: { isActive: true },
+      select: { role: true, isActive: true },
     });
-    if (access?.isActive) return;
+    if (access?.isActive && (!params.write || CONTROL_PLANE_DEPLOYMENT_WRITE_ROLES.has(access.role))) return;
+  }
+  if (params.write) {
+    throw new AppError(403, "CONTROL_PLANE_WRITE_ACCESS_REQUIRED", "Control plane write access is required for this deployment.");
   }
   throw new AppError(403, "FORBIDDEN", "Control plane access is required.");
 }
@@ -153,6 +157,7 @@ export async function getLatestSelfServeEmailCapture(params: {
     where: {
       toEmail: normalizeEmail(params.toEmail),
       expiresAt: { gt: new Date() },
+      consumedAt: null,
       ...(params.runId?.trim() ? { runId: params.runId.trim() } : {}),
     },
     orderBy: { createdAt: "desc" },
@@ -203,6 +208,9 @@ export async function upsertSelfServeSmokeRun(params: {
     throw new AppError(401, "UNAUTHORIZED", "Smoke run writes require an actor or smoke capture secret.");
   }
 
+  const runId = params.runId.trim();
+  invariant(runId.length > 0, 400, "INVALID_INPUT", "Smoke run id is required.");
+
   const startedAt = params.startedAt ? new Date(params.startedAt) : new Date();
   const completedAt = params.completedAt ? new Date(params.completedAt) : null;
   const data = {
@@ -223,9 +231,9 @@ export async function upsertSelfServeSmokeRun(params: {
   };
 
   return prisma.selfServeSmokeRun.upsert({
-    where: { runId: params.runId.trim() },
+    where: { runId },
     create: {
-      runId: params.runId.trim(),
+      runId,
       ...data,
     },
     update: data,
@@ -381,8 +389,12 @@ export async function listSelfServeCustomerRegistry(actor: AppActor, params: {
   };
 }
 
-function supportEmailForWorkspace(workspaceId: string) {
-  return `support+${workspaceId.slice(0, 12).replace(/[^a-z0-9]/gi, "").toLowerCase()}@${SUPPORT_EMAIL_DOMAIN}`;
+function supportEmailForWorkspace(workspaceId: string, sessionNonce: string) {
+  const workspaceKey = workspaceId.slice(0, 12).replace(/[^a-z0-9]/gi, "").toLowerCase() || "workspace";
+  const sessionKey = sessionNonce.slice(0, 12).replace(/[^a-z0-9]/gi, "").toLowerCase()
+    || randomOpaqueToken().slice(0, 12).replace(/[^a-z0-9]/gi, "").toLowerCase()
+    || "session";
+  return `support+${workspaceKey}-${sessionKey}@${SUPPORT_EMAIL_DOMAIN}`;
 }
 
 async function cloneRoleAssignments(tx: Prisma.TransactionClient, params: {
@@ -407,21 +419,21 @@ async function cloneRoleAssignments(tx: Prisma.TransactionClient, params: {
 
 async function createSupportLoginSession(tx: Prisma.TransactionClient, params: {
   userId: string;
+  expiresAt: Date;
   ipAddress?: string | null;
   userAgent?: string | null;
 }) {
   const token = randomOpaqueToken();
-  const expiresAt = new Date(Date.now() + SUPPORT_SESSION_TTL_MS);
   await tx.session.create({
     data: {
       userId: params.userId,
       tokenHash: sha256(token),
-      expiresAt,
+      expiresAt: params.expiresAt,
       ipAddress: params.ipAddress,
       userAgent: params.userAgent,
     },
   });
-  return { token, expiresAt };
+  return { token, expiresAt: params.expiresAt };
 }
 
 export async function createSelfServeSupportSession(actor: AppActor, params: {
@@ -432,7 +444,7 @@ export async function createSelfServeSupportSession(actor: AppActor, params: {
 }) {
   requireSelfServeControlPlaneScope(actor, "control-plane:support:write");
   if (params.deploymentId?.trim()) {
-    await requireSelfServeControlPlaneAccess(actor, { deploymentId: params.deploymentId.trim() });
+    await requireSelfServeControlPlaneAccess(actor, { deploymentId: params.deploymentId.trim(), write: true });
   } else {
     invariant(isGlobalOperator(actor) || isControlPlaneAgent(actor), 403, "FORBIDDEN", "Control plane access is required.");
   }
@@ -465,20 +477,15 @@ export async function createSelfServeSupportSession(actor: AppActor, params: {
   invariant(!requestedTargetMemberId || targetMember, 404, "NOT_FOUND", "Target member not found.");
   invariant(!targetMember || targetMember.workspaceId === workspaceId, 400, "INVALID_INPUT", "Target member does not belong to the workspace.");
   const supportRole: MemberRole = targetMember?.role ?? "ADMIN";
-  const supportEmail = supportEmailForWorkspace(workspaceId);
   const secret = randomOpaqueToken();
+  const supportEmail = supportEmailForWorkspace(workspaceId, randomOpaqueToken());
   const expiresAt = new Date(Date.now() + SUPPORT_SESSION_TTL_MS);
   const reason = params.reason.trim();
   invariant(reason.length > 0, 400, "INVALID_INPUT", "Support session reason is required.");
 
   const created = await prisma.$transaction(async (tx) => {
-    const supportUser = await tx.user.upsert({
-      where: { email: supportEmail },
-      update: {
-        displayName: "Corgtex Support",
-        passwordHash: hashPassword(randomOpaqueToken()),
-      },
-      create: {
+    const supportUser = await tx.user.create({
+      data: {
         email: supportEmail,
         displayName: "Corgtex Support",
         passwordHash: hashPassword(randomOpaqueToken()),
@@ -486,18 +493,8 @@ export async function createSelfServeSupportSession(actor: AppActor, params: {
       select: { id: true, email: true, displayName: true },
     });
 
-    const supportMember = await tx.member.upsert({
-      where: {
-        workspaceId_userId: {
-          workspaceId,
-          userId: supportUser.id,
-        },
-      },
-      update: {
-        role: supportRole,
-        isActive: true,
-      },
-      create: {
+    const supportMember = await tx.member.create({
+      data: {
         workspaceId,
         userId: supportUser.id,
         role: supportRole,
@@ -606,6 +603,7 @@ export async function consumeSelfServeSupportSession(params: {
 
     const loginSession = await createSupportLoginSession(tx, {
       userId: supportSession.supportUserId,
+      expiresAt: supportSession.expiresAt,
       ipAddress: params.ipAddress,
       userAgent: params.userAgent,
     });
