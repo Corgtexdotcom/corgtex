@@ -11,6 +11,10 @@ const listWorkspaceToolLinksMock = vi.fn();
 const upsertWorkspaceToolLinkMock = vi.fn();
 const archiveWorkspaceToolLinkMock = vi.fn();
 const revealWorkspaceToolLinkCredentialMock = vi.fn();
+const listInstalledAppsMock = vi.fn();
+const getAppRoutingGuidanceMock = vi.fn();
+const getAppConnectionInstructionsMock = vi.fn();
+const requestAppInstallMock = vi.fn();
 const supportReopenResolvedProposalsMock = vi.fn();
 const listAgentCredentialsMock = vi.fn();
 const updateAgentCredentialScopesMock = vi.fn();
@@ -99,6 +103,10 @@ vi.mock("@corgtex/domain", () => ({
   listCommunicationInstallations: vi.fn(),
   listExternalDataSources: vi.fn(),
   enqueueExternalDataSourceSync: vi.fn(),
+  listInstalledApps: listInstalledAppsMock,
+  getAppRoutingGuidance: getAppRoutingGuidanceMock,
+  getAppConnectionInstructions: getAppConnectionInstructionsMock,
+  requestAppInstall: requestAppInstallMock,
   listWorkspaceToolLinks: listWorkspaceToolLinksMock,
   upsertWorkspaceToolLink: upsertWorkspaceToolLinkMock,
   archiveWorkspaceToolLink: archiveWorkspaceToolLinkMock,
@@ -167,6 +175,17 @@ describe("createCorgtexMcpServer", () => {
     updateGoalMock.mockReset().mockResolvedValue({ id: "goal-1", status: "ACTIVE", cadence: "QUARTERLY" });
     deleteGoalMock.mockReset().mockResolvedValue(undefined);
     listWorkspaceToolLinksMock.mockReset().mockResolvedValue([]);
+    listInstalledAppsMock.mockReset().mockResolvedValue({ installed: [], available: [], webUrl: "/workspaces/ws-1/tools?type=APP" });
+    getAppRoutingGuidanceMock.mockReset().mockResolvedValue({ routing: "CORGTEX_MCP", guidance: "Use Corgtex." });
+    getAppConnectionInstructionsMock.mockReset().mockResolvedValue({
+      app: { id: "practice-ledger", title: "Practice Ledger" },
+      instructions: ["Connect Practice Ledger MCP."],
+      connectionReady: true,
+    });
+    requestAppInstallMock.mockReset().mockResolvedValue({
+      request: { id: "request-1", status: "PENDING" },
+      app: { id: "practice-ledger", title: "Practice Ledger" },
+    });
     upsertWorkspaceToolLinkMock.mockReset().mockResolvedValue({
       id: "tool-1",
       title: "Miro board",
@@ -994,6 +1013,101 @@ describe("createCorgtexMcpServer", () => {
       readOnlyHint: true,
       openWorldHint: true,
     });
+  });
+
+  it("lists installed marketplace apps and returns app routing guidance", async () => {
+    const { createCorgtexMcpServer } = await import("./server");
+    const { requireScope } = await import("./auth");
+    listInstalledAppsMock.mockResolvedValueOnce({
+      installed: [{
+        id: "app-1",
+        appKey: "practice-ledger",
+        title: "Practice Ledger",
+        category: "FINANCE",
+        installationStatus: "INSTALLED",
+      }],
+      available: [],
+    });
+    getAppRoutingGuidanceMock.mockResolvedValueOnce({
+      routing: "APP_MCP",
+      target: { appKey: "practice-ledger", title: "Practice Ledger" },
+      guidance: "Use Practice Ledger MCP for structured finance writes.",
+      corgtexDoesNotProxyWrites: true,
+    });
+
+    const actor = {
+      kind: "user",
+      user: { id: "user-1", email: "user@example.com", displayName: "User" },
+    } as any;
+    const server = createCorgtexMcpServer({
+      actor,
+      workspaceId: "ws-1",
+      authKind: "oauth",
+      scopes: ["tools:read"],
+    });
+
+    const listResponse = await (server as any)._registeredTools.list_installed_apps.handler({});
+    const guidanceResponse = await (server as any)._registeredTools.get_app_routing_guidance.handler({
+      intent: "save these expenses from a statement",
+    });
+
+    expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "tools:read");
+    expect(listInstalledAppsMock).toHaveBeenCalledWith(actor, { workspaceId: "ws-1" });
+    expect(getAppRoutingGuidanceMock).toHaveBeenCalledWith(actor, {
+      workspaceId: "ws-1",
+      intent: "save these expenses from a statement",
+      recordType: undefined,
+    });
+    expect(JSON.parse(listResponse.content[0].text).installed[0]).toEqual(expect.objectContaining({
+      appKey: "practice-ledger",
+    }));
+    expect(JSON.parse(guidanceResponse.content[0].text)).toEqual(expect.objectContaining({
+      routing: "APP_MCP",
+      corgtexDoesNotProxyWrites: true,
+    }));
+    expect((server as any)._registeredTools.get_app_routing_guidance.annotations).toMatchObject({
+      readOnlyHint: true,
+      openWorldHint: true,
+    });
+  });
+
+  it("returns app connection instructions and can request app install", async () => {
+    const { createCorgtexMcpServer } = await import("./server");
+    const { requireScope } = await import("./auth");
+    const actor = {
+      kind: "user",
+      user: { id: "user-1", email: "user@example.com", displayName: "User" },
+    } as any;
+    const server = createCorgtexMcpServer({
+      actor,
+      workspaceId: "ws-1",
+      authKind: "oauth",
+      scopes: ["tools:read", "tools:write"],
+    });
+
+    const instructionsResponse = await (server as any)._registeredTools.get_app_connection_instructions.handler({
+      appKey: "practice-ledger",
+    });
+    const requestResponse = await (server as any)._registeredTools.request_app_install.handler({
+      appKey: "practice-ledger",
+      reasonMd: "Need expense intake.",
+    });
+
+    expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "tools:read");
+    expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "tools:write");
+    expect(getAppConnectionInstructionsMock).toHaveBeenCalledWith(actor, {
+      workspaceId: "ws-1",
+      catalogItemId: undefined,
+      appKey: "practice-ledger",
+    });
+    expect(requestAppInstallMock).toHaveBeenCalledWith(actor, {
+      workspaceId: "ws-1",
+      catalogItemId: undefined,
+      appKey: "practice-ledger",
+      reasonMd: "Need expense intake.",
+    });
+    expect(JSON.parse(instructionsResponse.content[0].text).app.title).toBe("Practice Ledger");
+    expect(JSON.parse(requestResponse.content[0].text).request.status).toBe("PENDING");
   });
 
   it("searches connected Corgtex and external context with provenance", async () => {

@@ -1,6 +1,6 @@
 import { Fragment } from "react";
 import Link from "next/link";
-import { listDeliberationEntries, listLedgerAccounts, listSpends, requireWorkspaceMembership } from "@corgtex/domain";
+import { listCatalogItems, listDeliberationEntries, listLedgerAccounts, listSpends, requireWorkspaceMembership } from "@corgtex/domain";
 import { prisma } from "@corgtex/shared";
 import { requirePageActor } from "@/lib/auth";
 import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
@@ -63,15 +63,17 @@ export default async function FinancePage({
   const statusFilter = normalizeFilter(resolvedSearch.status);
   const activeDiscussionId = typeof resolvedSearch.discuss === "string" ? resolvedSearch.discuss : null;
 
-  const [spendsResult, ledgerAccountsResult, currentWorkspace, deliberationTargets] = await Promise.all([
+  const [spendsResult, ledgerAccountsResult, currentWorkspace, deliberationTargets, catalog] = await Promise.all([
     listSpends(actor, workspaceId, { take: 200 }),
     listLedgerAccounts(workspaceId, { take: 50 }),
     prisma.workspace.findUnique({ where: { id: workspaceId }, select: { slug: true } }),
     getDeliberationTargets({ actor, workspaceId }),
+    listCatalogItems(actor, workspaceId),
   ]);
   const isDemo = currentWorkspace?.slug === "jnj-demo";
   const spends = spendsResult.items;
   const ledgerAccounts = ledgerAccountsResult.items;
+  const practiceLedgerApp = catalog.items.find((item) => item.sourceType === "MARKETPLACE_APP" && item.sourceId === "practice-ledger");
   const targetOptions = deliberationTargets.options.map((option) => ({
     ...option,
     label: option.kind === "circle"
@@ -176,6 +178,35 @@ export default async function FinancePage({
           </Link>
         ))}
       </div>
+
+      {practiceLedgerApp && (
+        <section className="nr-item" style={{ padding: 16, marginBottom: 20 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+            <div>
+              <div className="actions-inline" style={{ gap: 6, marginBottom: 6 }}>
+                <span className="tag">Finance app</span>
+                <span className={`tag ${practiceLedgerApp.installationStatus === "INSTALLED" || practiceLedgerApp.installationStatus === "APPROVED" ? "success" : "info"}`}>
+                  {practiceLedgerApp.installationStatus.replace(/_/g, " ")}
+                </span>
+              </div>
+              <strong>{practiceLedgerApp.title}</strong>
+              <p className="nr-item-meta" style={{ margin: "4px 0 0" }}>
+                Consulting-finance records stay in Practice Ledger; Corgtex keeps Brain context, routing guidance, and governance.
+              </p>
+            </div>
+            <div className="actions-inline">
+              <Link className="link-button secondary small" href={`/workspaces/${workspaceId}/tools/${practiceLedgerApp.id}`}>
+                App details
+              </Link>
+              {practiceLedgerApp.url && (
+                <a className="link-button small" href={practiceLedgerApp.url} target="_blank" rel="noreferrer">
+                  Open app
+                </a>
+              )}
+            </div>
+          </div>
+        </section>
+      )}
 
       {ledgerAccounts.length > 0 && (
         <div className="fin-account-chips">

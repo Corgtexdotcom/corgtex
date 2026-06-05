@@ -19,6 +19,21 @@ function personName(person: { displayName: string | null; email: string } | null
   return person?.displayName ?? person?.email ?? "Workspace";
 }
 
+function displayEnum(value: string | null | undefined) {
+  return value ? value.replace(/_/g, " ").toLowerCase().replace(/\b\w/g, (letter) => letter.toUpperCase()) : "Not set";
+}
+
+function capabilityKeys(value: unknown) {
+  return Array.isArray(value)
+    ? value.map((entry) => {
+        const record = entry && typeof entry === "object" && !Array.isArray(entry)
+          ? entry as Record<string, unknown>
+          : null;
+        return typeof record?.key === "string" ? record.key : null;
+      }).filter((key): key is string => Boolean(key))
+    : [];
+}
+
 export default async function CatalogItemPage({
   params,
 }: {
@@ -44,6 +59,7 @@ export default async function CatalogItemPage({
           <span className="tag">{item.type.replace("_", " ")}</span>
           <span className="tag info">{item.accessMode.replace("_", " ")}</span>
           <span className="tag">{item.status.replace("_", " ")}</span>
+          {item.type === "APP" && <span className="tag info">{displayEnum(item.installationStatus)}</span>}
           {item.isFavorite && <span className="tag success">Favorite</span>}
         </div>
         <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2rem" }}>{item.title}</h1>
@@ -69,6 +85,12 @@ export default async function CatalogItemPage({
           <strong style={{ color: "var(--text)" }}>{formatUsd(usage.totalCostUsd)}</strong>
           <span>30-day AI spend</span>
         </div>
+        {item.type === "APP" && (
+          <div className="ws-stat-card">
+            <strong style={{ color: "var(--text)" }}>{displayEnum(item.integrationDepth)}</strong>
+            <span>Integration depth</span>
+          </div>
+        )}
       </div>
 
       <div style={{
@@ -96,6 +118,26 @@ export default async function CatalogItemPage({
               </a>
             </div>
           )}
+          {item.type === "APP" && (
+            <div className="nr-item" style={{ padding: 18 }}>
+              <h2 className="nr-section-header" style={{ marginTop: 0 }}>Agent routing</h2>
+              <p className="nr-item-meta" style={{ marginTop: 0 }}>
+                Corgtex MCP tells agents this app is available and what it handles. Structured app writes should go to the app MCP/runtime, not through Corgtex as a generic proxy.
+              </p>
+              {item.appMcpUrl ? (
+                <p className="nr-item-meta">App MCP: <a href={item.appMcpUrl} target="_blank" rel="noreferrer">{item.appMcpUrl}</a></p>
+              ) : (
+                <p className="nr-item-meta">No app MCP URL is configured yet.</p>
+              )}
+              {capabilityKeys(item.capabilitiesJson).length > 0 && (
+                <div className="actions-inline" style={{ gap: 6 }}>
+                  {capabilityKeys(item.capabilitiesJson).map((capability) => (
+                    <span className="tag" key={capability}>{capability}</span>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
         </section>
 
         <aside className="stack" style={{ gap: 14 }}>
@@ -110,7 +152,33 @@ export default async function CatalogItemPage({
             <p className="nr-item-meta" style={{ margin: "8px 0 0" }}>
               Source: {item.sourceType}
             </p>
+            {item.type === "APP" && (
+              <>
+                <p className="nr-item-meta" style={{ margin: "8px 0 0" }}>
+                  App category: {displayEnum(item.appCategory)}
+                </p>
+                <p className="nr-item-meta" style={{ margin: "8px 0 0" }}>
+                  Visibility: {displayEnum(item.appVisibility)}
+                </p>
+                <p className="nr-item-meta" style={{ margin: "8px 0 0" }}>
+                  Hosting: {displayEnum(item.hostingMode)}
+                </p>
+                <p className="nr-item-meta" style={{ margin: "8px 0 0" }}>
+                  Data: {item.dataClassification ?? "INTERNAL"}
+                </p>
+              </>
+            )}
           </div>
+          {item.type === "APP" && (item.supportUrl || item.proofUrl || item.reviewUrl) && (
+            <div className="nr-item" style={{ padding: 16 }}>
+              <h2 className="nr-section-header" style={{ marginTop: 0 }}>Review links</h2>
+              <div className="stack" style={{ gap: 8 }}>
+                {item.supportUrl && <a href={item.supportUrl} target="_blank" rel="noreferrer">Support</a>}
+                {item.proofUrl && <a href={item.proofUrl} target="_blank" rel="noreferrer">Proof</a>}
+                {item.reviewUrl && <a href={item.reviewUrl} target="_blank" rel="noreferrer">Review</a>}
+              </div>
+            </div>
+          )}
           <div className="nr-item" style={{ padding: 16 }}>
             <h2 className="nr-section-header" style={{ marginTop: 0 }}>Data scopes</h2>
             {item.requestedScopes.length === 0 ? (

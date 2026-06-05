@@ -1,6 +1,9 @@
 export type CatalogItemType = "APP" | "AGENT" | "TOOL" | "AUTOMATION" | "CONNECTOR" | "DATA_SOURCE";
 export type CatalogAccessMode = "OPEN" | "REQUEST" | "ADMIN_ONLY" | "DISABLED";
 export type CatalogRequestType = "ACCESS" | "API_KEY" | "BUDGET_INCREASE" | "PUBLISH";
+export type AppCategory = "FINANCE" | "KNOWLEDGE" | "COMMUNICATION" | "AI" | "OPERATIONS" | "GOVERNANCE" | "DATA" | "OTHER";
+export type AppInstallationStatus = "REQUESTED" | "APPROVED" | "INSTALLED" | "NEEDS_SETUP" | "UNHEALTHY" | "DISABLED";
+export type AppIntegrationDepth = "CATALOG_ONLY" | "LAUNCHABLE" | "MCP_ACTIONABLE" | "KNOWLEDGE_SYNCED" | "WORKFLOW_NATIVE";
 
 export type CatalogItemForUi = {
   id: string;
@@ -14,6 +17,11 @@ export type CatalogItemForUi = {
   accessMode: CatalogAccessMode;
   featured: boolean;
   isFavorite: boolean;
+  appCategory: AppCategory;
+  installationStatus: AppInstallationStatus;
+  integrationDepth: AppIntegrationDepth;
+  appMcpUrl: string | null;
+  pendingRequestCount?: number;
 };
 
 export type CatalogFilterState = {
@@ -80,6 +88,9 @@ export function filterCatalogItems<T extends CatalogItemForUi>(items: T[], { act
         item.outcome,
         item.descriptionMd,
         item.category,
+        item.appCategory,
+        item.integrationDepth,
+        item.installationStatus,
         item.type,
       ].some((value) => value?.toLowerCase().includes(normalizedQuery));
     })
@@ -126,6 +137,20 @@ export function getCatalogCardActions(
 
   if (item.type === "APP" || item.type === "TOOL") {
     if (disabled) return [details];
+    if (item.type === "APP") {
+      if (item.installationStatus === "INSTALLED" && item.url) {
+        return [{ kind: "link", label: "Open app", href: item.url, variant: "primary" }, details];
+      }
+      if (item.installationStatus === "APPROVED") {
+        return item.url
+          ? [{ kind: "link", label: "Open setup", href: item.url, variant: "primary" }, details]
+          : [{ kind: "status", label: "Approved" }, details];
+      }
+      if (item.installationStatus === "REQUESTED" || (item.pendingRequestCount ?? 0) > 0) {
+        return [{ kind: "status", label: "Requested" }, details];
+      }
+      return [{ kind: "request", label: "Request install", requestType: "ACCESS", variant: "primary" }, details];
+    }
     if (isEnterpriseServiceItem(item)) {
       const actions: CatalogCardAction[] = [];
       if (item.url) {

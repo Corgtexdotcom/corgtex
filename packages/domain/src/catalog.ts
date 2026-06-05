@@ -1,4 +1,9 @@
 import type {
+  AppCategory,
+  AppHostingMode,
+  AppInstallationStatus,
+  AppIntegrationDepth,
+  AppVisibility,
   CatalogAccessMode,
   CatalogItemStatus,
   CatalogItemType,
@@ -20,14 +25,22 @@ const CREDENTIAL_PREFIX = "agentc-";
 const CATALOG_ADMIN_ROLES = new Set(["ADMIN"]);
 const CATALOG_FEATURE_DEFAULTS = {
   AGENT_GOVERNANCE: true,
+  APP_MARKETPLACE: true,
   BUILD_ARTIFACTS: false,
   MEETING_RECORDERS: false,
   SETTINGS_GENERAL: true,
+  FINANCE: true,
   AI_WORKSPACES: false,
   OPENWORK_DEFAULT: false,
   EXECUTION_PACKETS: false,
   MANAGED_ENTERPRISE_SERVICES: false,
 } as const;
+
+const APP_CATEGORIES: AppCategory[] = ["FINANCE", "KNOWLEDGE", "COMMUNICATION", "AI", "OPERATIONS", "GOVERNANCE", "DATA", "OTHER"];
+const APP_VISIBILITIES: AppVisibility[] = ["PUBLIC_MARKETPLACE", "UNLISTED", "WORKSPACE_PRIVATE", "CORGTEX_MANAGED"];
+const HOSTING_MODES: AppHostingMode[] = ["EXTERNAL_URL", "CORGTEX_MANAGED_EXTERNAL", "CORGTEX_HOSTED_STATIC", "CORGTEX_HOSTED_CONTAINER", "MCP_SERVER"];
+const INTEGRATION_DEPTHS: AppIntegrationDepth[] = ["CATALOG_ONLY", "LAUNCHABLE", "MCP_ACTIONABLE", "KNOWLEDGE_SYNCED", "WORKFLOW_NATIVE"];
+const INSTALLATION_STATUSES: AppInstallationStatus[] = ["REQUESTED", "APPROVED", "INSTALLED", "NEEDS_SETUP", "UNHEALTHY", "DISABLED"];
 
 type CatalogFeatureFlag = keyof typeof CATALOG_FEATURE_DEFAULTS;
 type CatalogFeatureFlags = Record<CatalogFeatureFlag, boolean>;
@@ -48,6 +61,18 @@ type CatalogSourceInput = {
   createdByUserId?: string | null;
   ownerUserId?: string | null;
   featured?: boolean;
+  appCategory?: AppCategory;
+  appVisibility?: AppVisibility;
+  hostingMode?: AppHostingMode;
+  integrationDepth?: AppIntegrationDepth;
+  installationStatus?: AppInstallationStatus;
+  supportUrl?: string | null;
+  appMcpUrl?: string | null;
+  dataClassification?: string | null;
+  proofUrl?: string | null;
+  reviewUrl?: string | null;
+  manifestJson?: Record<string, unknown> | null;
+  capabilitiesJson?: Record<string, unknown>[] | null;
 };
 
 type CatalogItemRecord = Prisma.CatalogItemGetPayload<{
@@ -60,6 +85,34 @@ type CatalogItemRecord = Prisma.CatalogItemGetPayload<{
 function normalizeString(value: string | null | undefined) {
   const trimmed = value?.trim();
   return trimmed && trimmed.length > 0 ? trimmed : null;
+}
+
+function normalizeDataClassification(value: string | null | undefined) {
+  return normalizeString(value)?.toUpperCase().replace(/[^A-Z0-9_]/g, "_").slice(0, 64) ?? "INTERNAL";
+}
+
+function enumOrDefault<T extends string>(value: string | null | undefined, allowed: readonly T[], fallback: T) {
+  return allowed.includes(value as T) ? value as T : fallback;
+}
+
+function normalizeAppCategory(value: string | null | undefined): AppCategory {
+  return enumOrDefault(value, APP_CATEGORIES, "OTHER");
+}
+
+function normalizeAppVisibility(value: string | null | undefined): AppVisibility {
+  return enumOrDefault(value, APP_VISIBILITIES, "WORKSPACE_PRIVATE");
+}
+
+function normalizeHostingMode(value: string | null | undefined): AppHostingMode {
+  return enumOrDefault(value, HOSTING_MODES, "EXTERNAL_URL");
+}
+
+function normalizeIntegrationDepth(value: string | null | undefined): AppIntegrationDepth {
+  return enumOrDefault(value, INTEGRATION_DEPTHS, "CATALOG_ONLY");
+}
+
+function normalizeInstallationStatus(value: string | null | undefined): AppInstallationStatus {
+  return enumOrDefault(value, INSTALLATION_STATUSES, "NEEDS_SETUP");
 }
 
 function slugPart(value: string) {
@@ -122,6 +175,68 @@ function requireUser(actor: AppActor) {
     throw new AppError(403, "FORBIDDEN", "Only signed-in workspace members can use this catalog action.");
   }
   return actor.user;
+}
+
+function practiceLedgerCapabilities() {
+  return [
+    {
+      key: "expenses.create_draft",
+      description: "Create expense drafts from receipts, account statements, invoices, or user notes.",
+      requiredScopes: ["finance:write", "brain:read", "brain:write"],
+    },
+    {
+      key: "time_entries.create_draft",
+      description: "Create consultant time-entry drafts with source provenance.",
+      requiredScopes: ["finance:write", "brain:read", "brain:write"],
+    },
+    {
+      key: "budgets.read_status",
+      description: "Read budget, burn, remaining budget, and margin status.",
+      requiredScopes: ["finance:read", "brain:read"],
+    },
+    {
+      key: "knowledge.sync_summary",
+      description: "Sync finance summaries and source provenance into Corgtex Brain.",
+      requiredScopes: ["brain:write"],
+    },
+  ];
+}
+
+function marketplaceAppSources(_workspaceId: string, flags: CatalogFeatureFlags): CatalogSourceInput[] {
+  if (!flags.APP_MARKETPLACE || !flags.FINANCE) return [];
+
+  const practiceLedgerUrl = normalizeString(process.env.PRACTICE_LEDGER_APP_URL);
+  const practiceLedgerMcpUrl = normalizeString(process.env.PRACTICE_LEDGER_MCP_URL);
+  return [{
+    type: "APP",
+    sourceType: "MARKETPLACE_APP",
+    sourceId: "practice-ledger",
+    title: "Practice Ledger",
+    outcome: "Track consulting budgets, billing codes, time, expenses, margin, burn rate, and finance intake.",
+    descriptionMd: "Official Corgtex-built finance app for consulting practices. Practice Ledger owns structured finance records while syncing useful summaries, source provenance, and audit-readable context back into Corgtex Brain.",
+    accessNotesMd: "Install this app for workspaces that need consulting-finance operations. Connect the Practice Ledger MCP in the user's agent environment for expense, time, budget, and statement writes; Corgtex MCP provides app discovery, company context, Brain, governance, and routing guidance.",
+    url: practiceLedgerUrl,
+    category: "FINANCE",
+    accessMode: "REQUEST",
+    requestedScopes: ["workspace:read", "brain:read", "brain:write", "finance:read", "finance:write"],
+    featured: true,
+    appCategory: "FINANCE",
+    appVisibility: "CORGTEX_MANAGED",
+    hostingMode: practiceLedgerMcpUrl && !practiceLedgerUrl ? "MCP_SERVER" : "CORGTEX_MANAGED_EXTERNAL",
+    integrationDepth: "KNOWLEDGE_SYNCED",
+    installationStatus: "NEEDS_SETUP",
+    appMcpUrl: practiceLedgerMcpUrl,
+    dataClassification: "CLIENT_PRIVATE",
+    proofUrl: "https://github.com/Corgtexdotcom/practice-ledger",
+    reviewUrl: "https://github.com/Corgtexdotcom/practice-ledger",
+    manifestJson: {
+      appKey: "practice-ledger",
+      repository: "github.com/Corgtexdotcom/practice-ledger",
+      structuredRecordOwner: "Practice Ledger",
+      corgtexRole: "governed context, Brain sync, app discovery, routing guidance, and audit context",
+    },
+    capabilitiesJson: practiceLedgerCapabilities(),
+  }];
 }
 
 function connectorSources(workspaceId: string, flags: CatalogFeatureFlags): CatalogSourceInput[] {
@@ -277,6 +392,9 @@ function isCatalogItemAvailable(item: Pick<CatalogItemRecord, "sourceType" | "so
   if (item.sourceType === "ENTERPRISE_SERVICE") {
     return flags.MANAGED_ENTERPRISE_SERVICES && flags.AI_WORKSPACES;
   }
+  if (item.sourceType === "MARKETPLACE_APP") {
+    return flags.APP_MARKETPLACE;
+  }
   if (item.sourceType === "COMMUNICATION_INSTALLATION" && item.sourceId === "slack") {
     return Boolean(process.env.SLACK_CLIENT_ID && process.env.SLACK_CLIENT_SECRET);
   }
@@ -417,6 +535,7 @@ async function ensureDerivedCatalogItems(workspaceId: string) {
       accessMode: "ADMIN_ONLY" as const,
       requestedScopes: ["data-sources:read"],
     })) : []),
+    ...marketplaceAppSources(workspaceId, featureFlags),
     ...connectorSources(workspaceId, featureFlags),
     ...aiWorkspaceSources(workspaceId, featureFlags),
     ...managedEnterpriseServiceSources(workspaceId, featureFlags),
@@ -448,6 +567,18 @@ async function ensureDerivedCatalogItems(workspaceId: string) {
       accessMode: source.accessMode ?? "OPEN",
       requestedScopes: validateCatalogScopes(source.requestedScopes),
       featured: source.featured ?? false,
+      appCategory: source.appCategory ?? "OTHER",
+      appVisibility: source.appVisibility ?? "WORKSPACE_PRIVATE",
+      hostingMode: source.hostingMode ?? "EXTERNAL_URL",
+      integrationDepth: source.integrationDepth ?? "CATALOG_ONLY",
+      installationStatus: source.installationStatus ?? "INSTALLED",
+      supportUrl: normalizeString(source.supportUrl),
+      appMcpUrl: normalizeString(source.appMcpUrl),
+      dataClassification: normalizeDataClassification(source.dataClassification),
+      proofUrl: normalizeString(source.proofUrl),
+      reviewUrl: normalizeString(source.reviewUrl),
+      manifestJson: source.manifestJson ? toInputJson(source.manifestJson) : undefined,
+      capabilitiesJson: source.capabilitiesJson ? toInputJson(source.capabilitiesJson) : undefined,
     },
     update: {
       createdByUserId: source.createdByUserId ?? undefined,
@@ -463,6 +594,17 @@ async function ensureDerivedCatalogItems(workspaceId: string) {
       accessMode: source.accessMode ?? "OPEN",
       requestedScopes: validateCatalogScopes(source.requestedScopes),
       featured: source.featured ?? false,
+      appCategory: source.appCategory ?? "OTHER",
+      appVisibility: source.appVisibility ?? "WORKSPACE_PRIVATE",
+      hostingMode: source.hostingMode ?? "EXTERNAL_URL",
+      integrationDepth: source.integrationDepth ?? "CATALOG_ONLY",
+      supportUrl: normalizeString(source.supportUrl),
+      appMcpUrl: normalizeString(source.appMcpUrl),
+      dataClassification: normalizeDataClassification(source.dataClassification),
+      proofUrl: normalizeString(source.proofUrl),
+      reviewUrl: normalizeString(source.reviewUrl),
+      manifestJson: source.manifestJson ? toInputJson(source.manifestJson) : undefined,
+      capabilitiesJson: source.capabilitiesJson ? toInputJson(source.capabilitiesJson) : undefined,
       archivedAt: null,
       archivedByUserId: null,
       archiveReason: null,
@@ -499,6 +641,18 @@ function serializeCatalogItem(params: {
     monthlyBudgetCents: params.item.monthlyBudgetCents,
     dailyCallLimit: params.item.dailyCallLimit,
     featured: params.item.featured,
+    appCategory: params.item.appCategory,
+    appVisibility: params.item.appVisibility,
+    hostingMode: params.item.hostingMode,
+    integrationDepth: params.item.integrationDepth,
+    installationStatus: params.item.installationStatus,
+    supportUrl: params.item.supportUrl,
+    appMcpUrl: params.item.appMcpUrl,
+    dataClassification: params.item.dataClassification,
+    proofUrl: params.item.proofUrl,
+    reviewUrl: params.item.reviewUrl,
+    manifestJson: params.item.manifestJson,
+    capabilitiesJson: params.item.capabilitiesJson,
     createdAt: params.item.createdAt,
     updatedAt: params.item.updatedAt,
     createdBy: params.item.createdBy,
@@ -758,6 +912,13 @@ function payloadString(payload: Record<string, unknown>, key: string) {
   return typeof value === "string" ? normalizeString(value) : null;
 }
 
+function payloadRecordArray(payload: Record<string, unknown>, key: string) {
+  const value = payload[key];
+  return Array.isArray(value)
+    ? value.filter((entry): entry is Record<string, unknown> => Boolean(entry) && typeof entry === "object" && !Array.isArray(entry))
+    : null;
+}
+
 function payloadType(payload: Record<string, unknown>): CatalogItemType {
   const value = payloadString(payload, "type");
   return value === "APP" || value === "AGENT" || value === "TOOL" || value === "AUTOMATION" || value === "CONNECTOR" || value === "DATA_SOURCE"
@@ -791,6 +952,7 @@ export async function decideCatalogRequest(actor: AppActor, params: {
       const payload = payloadRecord(request.payloadJson);
       const title = request.title ?? payloadString(payload, "title") ?? "Untitled app";
       const proofUrl = payloadString(payload, "proofUrl");
+      const capabilities = payloadRecordArray(payload, "capabilities");
       const slug = await findAvailableCatalogSlug(tx, params.workspaceId, title);
       const item = await tx.catalogItem.create({
         data: {
@@ -806,16 +968,37 @@ export async function decideCatalogRequest(actor: AppActor, params: {
           descriptionMd: payloadString(payload, "descriptionMd") ?? request.reasonMd,
           accessNotesMd: payloadString(payload, "accessNotesMd") ?? (proofUrl ? `Proof link: ${proofUrl}` : null),
           url: payloadString(payload, "url"),
-          category: payloadString(payload, "category") ?? "VIBE_CODED",
+          category: payloadString(payload, "category") ?? payloadString(payload, "appCategory") ?? "VIBE_CODED",
           status: "PUBLISHED",
           accessMode: "REQUEST",
           requestedScopes: request.requestedScopes,
           monthlyBudgetCents: request.requestedBudgetCents,
           dailyCallLimit: request.requestedDailyCallLimit,
+          appCategory: normalizeAppCategory(payloadString(payload, "appCategory") ?? payloadString(payload, "category")),
+          appVisibility: normalizeAppVisibility(payloadString(payload, "appVisibility")),
+          hostingMode: normalizeHostingMode(payloadString(payload, "hostingMode")),
+          integrationDepth: normalizeIntegrationDepth(payloadString(payload, "integrationDepth")),
+          installationStatus: normalizeInstallationStatus(payloadString(payload, "installationStatus")),
+          supportUrl: payloadString(payload, "supportUrl"),
+          appMcpUrl: payloadString(payload, "appMcpUrl"),
+          dataClassification: normalizeDataClassification(payloadString(payload, "dataClassification")),
+          proofUrl,
+          reviewUrl: payloadString(payload, "reviewUrl"),
+          manifestJson: payload.manifestJson ? toInputJson(payloadRecord(payload.manifestJson as Prisma.JsonValue)) : undefined,
+          capabilitiesJson: capabilities ? toInputJson(capabilities) : undefined,
         },
         select: { id: true },
       });
       catalogItemId = item.id;
+    }
+
+    if (params.status === "APPROVED" && request.type === "ACCESS" && request.catalogItemId) {
+      await tx.catalogItem.update({
+        where: { id: request.catalogItemId },
+        data: {
+          installationStatus: request.catalogItem?.url || request.catalogItem?.appMcpUrl ? "INSTALLED" : "APPROVED",
+        },
+      });
     }
 
     if (params.status === "APPROVED" && request.type === "API_KEY") {
@@ -909,4 +1092,193 @@ export async function listCatalogRequests(actor: AppActor, params: {
     orderBy: { createdAt: "desc" },
     take: 100,
   });
+}
+
+type SerializedCatalogItem = ReturnType<typeof serializeCatalogItem>;
+
+function isMarketplaceApp(item: SerializedCatalogItem) {
+  return item.type === "APP";
+}
+
+function isInstalledAppStatus(status: AppInstallationStatus) {
+  return status === "APPROVED" || status === "INSTALLED";
+}
+
+function appKey(item: SerializedCatalogItem) {
+  return item.sourceId ?? item.slug;
+}
+
+function capabilityKeys(item: SerializedCatalogItem) {
+  const value = item.capabilitiesJson;
+  return Array.isArray(value)
+    ? value.map((entry) => {
+        const record = entry && typeof entry === "object" && !Array.isArray(entry)
+          ? entry as Record<string, unknown>
+          : null;
+        return typeof record?.key === "string" ? record.key : null;
+      }).filter((key): key is string => Boolean(key))
+    : [];
+}
+
+function appSummary(item: SerializedCatalogItem) {
+  return {
+    id: item.id,
+    appKey: appKey(item),
+    title: item.title,
+    category: item.appCategory,
+    visibility: item.appVisibility,
+    hostingMode: item.hostingMode,
+    integrationDepth: item.integrationDepth,
+    installationStatus: item.installationStatus,
+    launchUrl: item.url,
+    appMcpUrl: item.appMcpUrl,
+    supportUrl: item.supportUrl,
+    dataClassification: item.dataClassification,
+    requestedScopes: item.requestedScopes,
+    capabilities: capabilityKeys(item),
+    webCategory: item.category,
+  };
+}
+
+function appMatches(item: SerializedCatalogItem, value: string) {
+  const normalized = value.trim().toLowerCase();
+  return item.id === value ||
+    appKey(item).toLowerCase() === normalized ||
+    item.slug.toLowerCase() === normalized ||
+    item.title.toLowerCase() === normalized;
+}
+
+function financeIntent(intent: string, recordType?: string | null) {
+  const text = `${intent} ${recordType ?? ""}`.toLowerCase();
+  return /\b(expense|expenses|receipt|receipts|invoice|invoices|statement|statements|budget|budgets|billing|billable|time entr|timesheet|hours|margin|burn|purchase order|po)\b/.test(text);
+}
+
+function corgtexNativeIntent(intent: string, recordType?: string | null) {
+  const text = `${intent} ${recordType ?? ""}`.toLowerCase();
+  return /\b(proposal|proposals|action|actions|tension|tensions|brain|knowledge|policy|governance|decision|decisions|meeting|meetings|role|roles|circle|circles)\b/.test(text);
+}
+
+function findApp(items: SerializedCatalogItem[], params: { catalogItemId?: string | null; appKey?: string | null }) {
+  if (params.catalogItemId) {
+    return items.find((item) => item.id === params.catalogItemId) ?? null;
+  }
+  if (params.appKey) {
+    return items.find((item) => appMatches(item, params.appKey ?? "")) ?? null;
+  }
+  return null;
+}
+
+export async function listInstalledApps(actor: AppActor, params: {
+  workspaceId: string;
+}) {
+  const catalog = await listCatalogItems(actor, params.workspaceId);
+  const apps = catalog.items.filter(isMarketplaceApp);
+  const installed = apps.filter((item) => isInstalledAppStatus(item.installationStatus)).map(appSummary);
+  const available = apps.filter((item) => !isInstalledAppStatus(item.installationStatus) && item.installationStatus !== "DISABLED").map(appSummary);
+  return {
+    installed,
+    available,
+    webUrl: `/workspaces/${params.workspaceId}/tools?type=APP`,
+  };
+}
+
+export async function getAppRoutingGuidance(actor: AppActor, params: {
+  workspaceId: string;
+  intent: string;
+  recordType?: string | null;
+}) {
+  const catalog = await listCatalogItems(actor, params.workspaceId);
+  const apps = catalog.items.filter(isMarketplaceApp);
+  const installed = apps.filter((item) => isInstalledAppStatus(item.installationStatus));
+  const available = apps.filter((item) => !isInstalledAppStatus(item.installationStatus) && item.installationStatus !== "DISABLED");
+
+  if (financeIntent(params.intent, params.recordType)) {
+    const installedFinance = installed.find((item) => item.appCategory === "FINANCE");
+    if (installedFinance) {
+      return {
+        routing: "APP_MCP",
+        target: appSummary(installedFinance),
+        guidance: "Use the installed finance app for structured expense, statement, time, budget, and margin writes. Use Corgtex MCP for company context, Brain, governance, and audit guidance.",
+        corgtexDoesNotProxyWrites: true,
+        connectionNeeded: !installedFinance.appMcpUrl,
+        nextStep: installedFinance.appMcpUrl
+          ? "Connect the app MCP in the user's agent environment and call that app for structured finance writes."
+          : "Open the app details in Tools and connect the app MCP/runtime before structured finance writes.",
+      };
+    }
+    const availableFinance = available.find((item) => item.appCategory === "FINANCE");
+    if (availableFinance) {
+      return {
+        routing: "APP_NOT_INSTALLED",
+        target: appSummary(availableFinance),
+        guidance: "A finance app is available but not installed for this workspace. Do not save structured finance records into Corgtex Brain as the canonical database.",
+        corgtexDoesNotProxyWrites: true,
+        nextStep: "Request app install, then connect the app MCP in the user's agent environment.",
+      };
+    }
+  }
+
+  if (corgtexNativeIntent(params.intent, params.recordType)) {
+    return {
+      routing: "CORGTEX_MCP",
+      target: {
+        appKey: "corgtex",
+        title: "Corgtex",
+      },
+      guidance: "Use Corgtex MCP for Brain, proposals, actions, tensions, governance, meetings, roles, circles, and company context.",
+      corgtexDoesNotProxyWrites: false,
+    };
+  }
+
+  return {
+    routing: "AGENT_DECIDES",
+    guidance: "Choose between Corgtex MCP and installed app MCPs based on the record owner. Corgtex owns company context, Brain, governance, and routing guidance; deep apps own their own structured records.",
+    installedApps: installed.map(appSummary),
+    availableApps: available.map(appSummary),
+  };
+}
+
+export async function getAppConnectionInstructions(actor: AppActor, params: {
+  workspaceId: string;
+  catalogItemId?: string | null;
+  appKey?: string | null;
+}) {
+  const catalog = await listCatalogItems(actor, params.workspaceId);
+  const app = findApp(catalog.items.filter(isMarketplaceApp), params);
+  invariant(app, 404, "NOT_FOUND", "App not found.");
+  const summary = appSummary(app);
+  return {
+    app: summary,
+    instructions: [
+      "Install or approve the app in Corgtex Tools for this workspace.",
+      "Connect the app's MCP/server in the user's agent environment when structured app writes are needed.",
+      "Keep Corgtex MCP connected for company context, Brain, governance, routing guidance, and audit context.",
+      "Do not write structured app records into Corgtex Brain as the canonical database; let the app own those records and sync Brain context back to Corgtex.",
+    ],
+    connectionReady: isInstalledAppStatus(app.installationStatus) && Boolean(app.appMcpUrl || app.url),
+    webUrl: `/workspaces/${params.workspaceId}/tools/${app.id}`,
+  };
+}
+
+export async function requestAppInstall(actor: AppActor, params: {
+  workspaceId: string;
+  catalogItemId?: string | null;
+  appKey?: string | null;
+  reasonMd?: string | null;
+}) {
+  const catalog = await listCatalogItems(actor, params.workspaceId);
+  const app = findApp(catalog.items.filter(isMarketplaceApp), params);
+  invariant(app, 404, "NOT_FOUND", "App not found.");
+  const request = await createCatalogRequest(actor, {
+    workspaceId: params.workspaceId,
+    catalogItemId: app.id,
+    type: "ACCESS",
+    reasonMd: params.reasonMd ?? `Install ${app.title} for this workspace.`,
+    requestedScopes: app.requestedScopes,
+  });
+  return {
+    request,
+    app: appSummary(app),
+    webUrl: `/workspaces/${params.workspaceId}/tools/${app.id}`,
+  };
 }

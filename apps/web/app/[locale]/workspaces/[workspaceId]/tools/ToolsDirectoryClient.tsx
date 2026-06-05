@@ -13,6 +13,9 @@ import {
   hasCatalogFilter,
   splitDefaultCatalogSections,
   type CatalogCardAction,
+  type AppCategory,
+  type AppInstallationStatus,
+  type AppIntegrationDepth,
   type CatalogItemForUi,
   type CatalogItemType,
   type CatalogRequestType,
@@ -64,6 +67,17 @@ type CatalogItem = CatalogItemForUi & {
   owner: PersonSummary | null;
   isUploaded: boolean;
   pendingRequestCount: number;
+  appCategory: AppCategory;
+  appVisibility: "PUBLIC_MARKETPLACE" | "UNLISTED" | "WORKSPACE_PRIVATE" | "CORGTEX_MANAGED";
+  hostingMode: "EXTERNAL_URL" | "CORGTEX_MANAGED_EXTERNAL" | "CORGTEX_HOSTED_STATIC" | "CORGTEX_HOSTED_CONTAINER" | "MCP_SERVER";
+  integrationDepth: AppIntegrationDepth;
+  installationStatus: AppInstallationStatus;
+  supportUrl: string | null;
+  appMcpUrl: string | null;
+  dataClassification: string | null;
+  proofUrl: string | null;
+  reviewUrl: string | null;
+  capabilitiesJson: unknown;
 };
 
 type CatalogRequest = {
@@ -112,6 +126,14 @@ type PublishDraft = {
   requestedBudgetCents: string;
   requestedDailyCallLimit: string;
   proofUrl: string;
+  appCategory: AppCategory;
+  appVisibility: CatalogItem["appVisibility"];
+  hostingMode: CatalogItem["hostingMode"];
+  integrationDepth: AppIntegrationDepth;
+  appMcpUrl: string;
+  supportUrl: string;
+  dataClassification: string;
+  capabilities: string;
 };
 
 const EMPTY_FORM: FormState = {
@@ -145,15 +167,31 @@ const EMPTY_PUBLISH: PublishDraft = {
   requestedBudgetCents: "",
   requestedDailyCallLimit: "",
   proofUrl: "",
+  appCategory: "OPERATIONS",
+  appVisibility: "WORKSPACE_PRIVATE",
+  hostingMode: "EXTERNAL_URL",
+  integrationDepth: "LAUNCHABLE",
+  appMcpUrl: "",
+  supportUrl: "",
+  dataClassification: "INTERNAL",
+  capabilities: "",
 };
 
 const CATEGORIES = [
+  ["FINANCE", "Finance"],
+  ["KNOWLEDGE", "Knowledge"],
+  ["AI", "AI"],
   ["WHITEBOARD", "categoryWhiteboard"],
   ["FILES", "categoryFiles"],
   ["COMMUNICATION", "categoryCommunication"],
   ["OPERATIONS", "categoryOperations"],
   ["OTHER", "categoryOther"],
 ] as const;
+
+const APP_CATEGORY_OPTIONS: AppCategory[] = ["FINANCE", "KNOWLEDGE", "COMMUNICATION", "AI", "OPERATIONS", "GOVERNANCE", "DATA", "OTHER"];
+const APP_VISIBILITY_OPTIONS: CatalogItem["appVisibility"][] = ["PUBLIC_MARKETPLACE", "UNLISTED", "WORKSPACE_PRIVATE", "CORGTEX_MANAGED"];
+const HOSTING_MODE_OPTIONS: CatalogItem["hostingMode"][] = ["EXTERNAL_URL", "CORGTEX_MANAGED_EXTERNAL", "CORGTEX_HOSTED_STATIC", "CORGTEX_HOSTED_CONTAINER", "MCP_SERVER"];
+const INTEGRATION_DEPTH_OPTIONS: AppIntegrationDepth[] = ["CATALOG_ONLY", "LAUNCHABLE", "MCP_ACTIONABLE", "KNOWLEDGE_SYNCED", "WORKFLOW_NATIVE"];
 
 const TYPE_LABELS: Record<CatalogItemType, string> = {
   APP: "Apps",
@@ -183,6 +221,10 @@ function displayDate(value: string) {
 function formatCents(cents: number | null) {
   if (cents == null) return "No cap";
   return `$${(cents / 100).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+function displayEnum(value: string) {
+  return value.replace(/_/g, " ").toLowerCase().replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
 function personName(person: PersonSummary | null) {
@@ -268,10 +310,12 @@ export function ToolsDirectoryClient({
   const pendingRequests = requests.filter((request) => request.status === "PENDING");
   const summary = useMemo(() => {
     const activeConnectors = items.filter((item) => item.type === "CONNECTOR" && item.status !== "DISABLED").length;
+    const installedApps = items.filter((item) => item.type === "APP" && (item.installationStatus === "INSTALLED" || item.installationStatus === "APPROVED")).length;
     const budgetCents = items.reduce((sum, item) => sum + (item.monthlyBudgetCents ?? 0), 0);
     return {
       total: items.length,
       activeConnectors,
+      installedApps,
       budgetCents,
     };
   }, [items]);
@@ -461,8 +505,20 @@ export function ToolsDirectoryClient({
         url: publishDraft.url,
         outcome: publishDraft.outcome,
         descriptionMd: publishDraft.descriptionMd,
-        category: "VIBE_CODED",
+        category: publishDraft.appCategory,
+        appCategory: publishDraft.appCategory,
+        appVisibility: publishDraft.appVisibility,
+        hostingMode: publishDraft.hostingMode,
+        integrationDepth: publishDraft.integrationDepth,
+        appMcpUrl: publishDraft.appMcpUrl,
+        supportUrl: publishDraft.supportUrl,
+        dataClassification: publishDraft.dataClassification,
         proofUrl: publishDraft.proofUrl,
+        capabilities: publishDraft.capabilities
+          .split(/[\n,]+/)
+          .map((capability) => capability.trim())
+          .filter(Boolean)
+          .map((key) => ({ key })),
       },
     };
     if (budget) payload.requestedBudgetCents = Number(budget);
@@ -582,6 +638,10 @@ export function ToolsDirectoryClient({
               <span className={`tag ${item.accessMode === "OPEN" ? "success" : "info"}`}>
                 {item.accessMode === "OPEN" ? "Open" : item.accessMode === "ADMIN_ONLY" ? "Admin" : item.accessMode === "REQUEST" ? "Request" : "Disabled"}
               </span>
+              {item.type === "APP" && <span className="tag">{displayEnum(item.appCategory)}</span>}
+              {item.type === "APP" && <span className={`tag ${item.installationStatus === "INSTALLED" || item.installationStatus === "APPROVED" ? "success" : "info"}`}>
+                {displayEnum(item.installationStatus)}
+              </span>}
               {item.pendingRequestCount > 0 && <span className="tag info">{item.pendingRequestCount} pending</span>}
             </div>
             <h2 style={{ fontSize: compact ? "0.98rem" : "1.1rem", margin: 0, wordBreak: "break-word" }}>
@@ -610,6 +670,7 @@ export function ToolsDirectoryClient({
         <div className="nr-item-meta" style={{ margin: 0 }}>
           Owner: {personName(item.owner ?? item.createdBy)} · Budget: {formatCents(item.monthlyBudgetCents)}
           {item.dailyCallLimit != null ? ` · ${item.dailyCallLimit} calls/day` : ""}
+          {item.type === "APP" ? ` · ${displayEnum(item.integrationDepth)}` : ""}
         </div>
 
         <div className="actions-inline" style={{ marginTop: "auto" }}>
@@ -683,7 +744,8 @@ export function ToolsDirectoryClient({
 
   function categoryLabel(category: string) {
     const match = CATEGORIES.find(([value]) => value === category);
-    return match ? t(match[1]) : category;
+    if (!match) return category;
+    return match[1].startsWith("category") ? t(match[1]) : match[1];
   }
 
   function renderPreview(link: ToolLink) {
@@ -861,8 +923,11 @@ export function ToolsDirectoryClient({
             <button type="button" className="small" onClick={() => setIsPublishOpen((open) => !open)}>
               {isPublishOpen ? t("btnCancel") : "Submit app for review"}
             </button>
+            <a className="link-button secondary small" href={`/workspaces/${workspaceId}/brain`}>
+              Add reference to Brain
+            </a>
             <button type="button" className="secondary small" onClick={() => setIsFormOpen((open) => !open)}>
-              {isFormOpen ? t("btnCancel") : "Add shared link"}
+              {isFormOpen ? t("btnCancel") : "Add protected tool link"}
             </button>
           </div>
         </div>
@@ -877,8 +942,8 @@ export function ToolsDirectoryClient({
             <strong>{summary.activeConnectors}</strong>
           </div>
           <div className="ws-stat-card">
-            <span>AI budget caps</span>
-            <strong>{formatCents(summary.budgetCents)}</strong>
+            <span>Installed apps</span>
+            <strong>{summary.installedApps}</strong>
           </div>
           <div className="ws-stat-card">
             <span>Pending</span>
@@ -965,6 +1030,55 @@ export function ToolsDirectoryClient({
           </label>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 14 }}>
             <label>
+              App category
+              <select value={publishDraft.appCategory} onChange={(event) => setPublishField("appCategory", event.target.value as AppCategory)}>
+                {APP_CATEGORY_OPTIONS.map((option) => <option key={option} value={option}>{displayEnum(option)}</option>)}
+              </select>
+            </label>
+            <label>
+              Visibility
+              <select value={publishDraft.appVisibility} onChange={(event) => setPublishField("appVisibility", event.target.value as CatalogItem["appVisibility"])}>
+                {APP_VISIBILITY_OPTIONS.map((option) => <option key={option} value={option}>{displayEnum(option)}</option>)}
+              </select>
+            </label>
+            <label>
+              Hosting mode
+              <select value={publishDraft.hostingMode} onChange={(event) => setPublishField("hostingMode", event.target.value as CatalogItem["hostingMode"])}>
+                {HOSTING_MODE_OPTIONS.map((option) => <option key={option} value={option}>{displayEnum(option)}</option>)}
+              </select>
+            </label>
+            <label>
+              Integration depth
+              <select value={publishDraft.integrationDepth} onChange={(event) => setPublishField("integrationDepth", event.target.value as AppIntegrationDepth)}>
+                {INTEGRATION_DEPTH_OPTIONS.map((option) => <option key={option} value={option}>{displayEnum(option)}</option>)}
+              </select>
+            </label>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 14 }}>
+            <label>
+              App MCP URL
+              <input value={publishDraft.appMcpUrl} onChange={(event) => setPublishField("appMcpUrl", event.target.value)} placeholder="https://example.com/mcp" />
+            </label>
+            <label>
+              Support URL
+              <input value={publishDraft.supportUrl} onChange={(event) => setPublishField("supportUrl", event.target.value)} placeholder="https://example.com/support" />
+            </label>
+            <label>
+              Data classification
+              <input value={publishDraft.dataClassification} onChange={(event) => setPublishField("dataClassification", event.target.value)} placeholder="INTERNAL" />
+            </label>
+          </div>
+          <label>
+            Capability keys
+            <textarea
+              value={publishDraft.capabilities}
+              onChange={(event) => setPublishField("capabilities", event.target.value)}
+              placeholder="expenses.create_draft, budgets.read_status"
+              rows={2}
+            />
+          </label>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 14 }}>
+            <label>
               Requested scopes
               <input
                 value={publishDraft.requestedScopes}
@@ -1003,7 +1117,12 @@ export function ToolsDirectoryClient({
           className="nr-form-section stack"
           style={{ border: "1px solid var(--line)", borderRadius: 8, padding: 20, marginBottom: 8 }}
         >
-          <h2 style={{ margin: 0, fontSize: "1.1rem" }}>{isEditing ? t("editTitle") : "Add shared link"}</h2>
+          <div>
+            <h2 style={{ margin: 0, fontSize: "1.1rem" }}>{isEditing ? t("editTitle") : "Add protected tool link"}</h2>
+            <p className="nr-item-meta" style={{ margin: "4px 0 0" }}>
+              Keep credentials, launch URLs, installed tools, and access notes here. Put plain reference links and vendor notes in Brain.
+            </p>
+          </div>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 14 }}>
             <label>
               {t("formTitle")}
@@ -1017,7 +1136,7 @@ export function ToolsDirectoryClient({
               {t("formCategory")}
               <select value={form.category} onChange={(event) => setField("category", event.target.value)}>
                 {CATEGORIES.map(([value, labelKey]) => (
-                  <option key={value} value={value}>{t(labelKey)}</option>
+                  <option key={value} value={value}>{labelKey.startsWith("category") ? t(labelKey) : labelKey}</option>
                 ))}
               </select>
             </label>
@@ -1215,7 +1334,7 @@ export function ToolsDirectoryClient({
         {(hasActiveCatalogFilter ? visibleItems : defaultCatalogSections.catalog).length === 0 ? (
           <div className="nr-item" style={{ textAlign: "center", padding: "48px 24px" }}>
             <h2 style={{ margin: "0 0 8px", fontSize: "1.1rem" }}>No catalog items found.</h2>
-            <p className="muted" style={{ margin: 0 }}>Try another search or add a shared link.</p>
+            <p className="muted" style={{ margin: 0 }}>Try another search, add a protected tool link, or put reference material in Brain.</p>
           </div>
         ) : (
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: 16 }}>

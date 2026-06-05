@@ -21,6 +21,11 @@ function item(overrides: Partial<CatalogItemForUi>): CatalogItemForUi {
     accessMode: overrides.accessMode ?? "OPEN",
     featured: overrides.featured ?? false,
     isFavorite: overrides.isFavorite ?? false,
+    appCategory: overrides.appCategory ?? "OTHER",
+    installationStatus: overrides.installationStatus ?? "INSTALLED",
+    integrationDepth: overrides.integrationDepth ?? "CATALOG_ONLY",
+    appMcpUrl: overrides.appMcpUrl ?? null,
+    pendingRequestCount: overrides.pendingRequestCount ?? 0,
   };
 }
 
@@ -184,6 +189,24 @@ describe("Tools catalog UI helpers", () => {
         variant: "secondary",
       },
       { kind: "link", label: "Details", href: "/workspaces/workspace-1/tools/managed-ai-workspace", variant: "secondary" },
+    ]);
+  });
+
+  it("treats marketplace apps as installable rather than generic tool links", () => {
+    const actions = getCatalogCardActions(item({
+      id: "practice-ledger",
+      type: "APP",
+      title: "Practice Ledger",
+      url: null,
+      accessMode: "REQUEST",
+      appCategory: "FINANCE",
+      installationStatus: "NEEDS_SETUP",
+      integrationDepth: "KNOWLEDGE_SYNCED",
+    }), { workspaceId: "workspace-1", canManageCatalog: false });
+
+    expect(actions).toEqual([
+      { kind: "request", label: "Request install", requestType: "ACCESS", variant: "primary" },
+      { kind: "link", label: "Details", href: "/workspaces/workspace-1/tools/practice-ledger", variant: "secondary" },
     ]);
   });
 });
