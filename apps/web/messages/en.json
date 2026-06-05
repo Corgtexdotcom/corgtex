@@ -1328,6 +1328,7 @@
       "selfServe": "Cloud Self-Serve",
       "agents": "Agent Observatory",
       "releases": "Releases",
+      "recorders": "Recorders",
       "operations": "Operations Log",
       "users": "Users Directory",
       "details": "Details"
@@ -1351,6 +1352,7 @@
         "selfServe": "Inspect shared-cloud trials, billing, smoke, and support access.",
         "agents": "Monitor agent governance, models, runs, and costs.",
         "releases": "Inspect version distribution and rollouts.",
+        "recorders": "Inspect recorder readiness, usage, calendar sources, and provider state.",
         "operations": "Review fleet support logs and break-glass events.",
         "users": "Manage global user profiles and client memberships."
       }

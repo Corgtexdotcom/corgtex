@@ -1,6 +1,7 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   Bot,
   CheckCircle,
@@ -84,11 +85,15 @@ interface ObservatoryProps {
   agents: Agent[];
   runs: Run[];
   customers: CustomerSummary[];
+  initialCustomerId?: string | null;
 }
 
-export function AgentObservatoryClient({ agents, runs, customers }: ObservatoryProps) {
+export function AgentObservatoryClient({ agents, runs, customers, initialCustomerId }: ObservatoryProps) {
+  const router = useRouter();
+  const pathname = usePathname() || "";
+  const searchParams = useSearchParams();
   const [search, setSearch] = useState("");
-  const [selectedCustomerId, setSelectedCustomerId] = useState("");
+  const [selectedCustomerId, setSelectedCustomerId] = useState(initialCustomerId ?? "");
   const [selectedStatus, setSelectedStatus] = useState("");
   const [selectedRun, setSelectedRun] = useState<Run | null>(null); // Active trace drawer
   const selectedCustomer = customers.find((customer) => customer.id === selectedCustomerId) ?? null;
@@ -138,6 +143,22 @@ export function AgentObservatoryClient({ agents, runs, customers }: ObservatoryP
     customerName: customer.name,
   })));
 
+  useEffect(() => {
+    setSelectedCustomerId(initialCustomerId ?? "");
+  }, [initialCustomerId]);
+
+  const selectCustomer = (customerId: string) => {
+    setSelectedCustomerId(customerId);
+    const params = new URLSearchParams(searchParams?.toString() ?? "");
+    if (customerId) {
+      params.set("client", customerId);
+    } else {
+      params.delete("client");
+    }
+    const query = params.toString();
+    router.replace(query ? `${pathname}?${query}` : pathname, { scroll: false });
+  };
+
   return (
     <div className="space-y-6">
       <div className="bg-bg-alt border border-line rounded-xl p-5 shadow-sm flex flex-col lg:flex-row lg:items-center justify-between gap-4">
@@ -149,7 +170,7 @@ export function AgentObservatoryClient({ agents, runs, customers }: ObservatoryP
         </div>
         <select
           value={selectedCustomerId}
-          onChange={(event) => setSelectedCustomerId(event.target.value)}
+          onChange={(event) => selectCustomer(event.target.value)}
           className="bg-surface border border-line text-xs text-text rounded-lg px-3 py-2 focus:outline-none lg:min-w-72"
         >
           <option value="">Whole platform</option>

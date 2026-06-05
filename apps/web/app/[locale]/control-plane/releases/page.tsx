@@ -1,10 +1,11 @@
 import { notFound } from "next/navigation";
-import { getControlPlaneLatestReleaseTarget, isControlPlaneRailwayDeployConfigured, requireControlPlaneAccess, listControlPlaneReleaseRolloutJobs } from "@corgtex/domain";
+import { getControlPlaneClientOptions, getControlPlaneLatestReleaseTarget, isControlPlaneRailwayDeployConfigured, requireControlPlaneAccess, listControlPlaneReleaseRolloutJobs } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { prisma } from "@corgtex/shared";
 import { Link } from "@/i18n/routing";
 import { enqueueDeployLatestRolloutAction } from "../actions";
 import { cn } from "@/lib/utils";
+import { ClientContextSwitcher } from "../_components/client-context-switcher";
 import {
   GitBranch,
   Shuffle,
@@ -30,7 +31,12 @@ function releaseLabel(imageTag?: string | null, version?: string | null) {
   return imageTag || version || "Unknown";
 }
 
-export default async function ControlPlaneReleasesPage() {
+export default async function ControlPlaneReleasesPage({
+  searchParams,
+}: {
+  searchParams?: Promise<Record<string, string | undefined>>;
+}) {
+  const raw = await searchParams;
   const actor = await requirePageActor();
   try {
     await requireControlPlaneAccess(actor);
@@ -39,11 +45,12 @@ export default async function ControlPlaneReleasesPage() {
   }
 
   // Fetch all customer deployments and recent rollouts using Prisma
-  const [deployments, rollouts] = await Promise.all([
+  const [deployments, rollouts, clientOptions] = await Promise.all([
     prisma.customerDeployment.findMany({
       orderBy: { createdAt: "desc" },
     }),
     listControlPlaneReleaseRolloutJobs(actor, { take: 10 }),
+    getControlPlaneClientOptions(actor),
   ]);
 
   const latestReleaseTarget = getControlPlaneLatestReleaseTarget();
@@ -58,7 +65,10 @@ export default async function ControlPlaneReleasesPage() {
     ? releaseLabel(latestReleaseTarget.releaseImageTag, latestReleaseTarget.releaseVersion)
     : "Not configured";
 
-  const formattedFleet = deployments.map((ws: any) => {
+  const filteredDeployments = raw?.client
+    ? deployments.filter((deployment: any) => deployment.id === raw.client)
+    : deployments;
+  const formattedFleet = filteredDeployments.map((ws: any) => {
     const targetDiffers = latestReleaseTarget
       ? latestReleaseTarget.releaseImageTag !== ws.releaseImageTag
         || latestReleaseTarget.releaseVersion !== (ws.releaseVersion ?? null)
@@ -94,7 +104,13 @@ export default async function ControlPlaneReleasesPage() {
         </div>
 
         {/* Global Bulk Rollout Trigger */}
-        <div className="bg-bg-alt border border-line rounded-xl p-4 flex items-center gap-4">
+        <div className="bg-bg-alt border border-line rounded-xl p-4 flex flex-col sm:flex-row sm:items-center gap-4">
+          <ClientContextSwitcher
+            clients={clientOptions}
+            selectedClientId={raw?.client ?? ""}
+            mode="filter"
+            label="Client"
+          />
           <form action={enqueueDeployLatestRolloutAction} className="flex flex-col sm:flex-row sm:items-end gap-3">
             <div>
               <label className="text-[9px] font-bold text-muted uppercase block mb-1">Bulk Upgrade Reason</label>

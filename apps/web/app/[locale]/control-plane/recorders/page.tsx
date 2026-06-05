@@ -1,0 +1,307 @@
+import { notFound } from "next/navigation";
+import { getControlPlaneClientOptions, listControlPlaneRecorderMatrix, requireControlPlaneAccess } from "@corgtex/domain";
+import { Link } from "@/i18n/routing";
+import { requirePageActor } from "@/lib/auth";
+import { cn } from "@/lib/utils";
+import { ClientContextSwitcher } from "../_components/client-context-switcher";
+import { AlertTriangle, ArrowRight, CheckCircle, Radio, Search, ShieldCheck } from "lucide-react";
+
+export const dynamic = "force-dynamic";
+
+const PAGE_SIZE = 25;
+
+type RecorderPage = Awaited<ReturnType<typeof listControlPlaneRecorderMatrix>>;
+type RecorderRow = RecorderPage["items"][number];
+
+function statusTone(status?: string | null) {
+  if (status === "ready" || status === "active" || status === "connected") return "text-emerald-400 bg-emerald-500/10 border-emerald-500/20";
+  if (status === "needs_setup" || status === "requires_connector" || status === "unavailable" || status === "pending") return "text-amber-400 bg-amber-500/10 border-amber-500/20";
+  if (status === "disabled" || status === "failed" || status === "FAILED") return "text-rose-400 bg-rose-500/10 border-rose-500/20";
+  return "text-muted bg-slate-500/10 border-slate-500/20";
+}
+
+function statusDot(status?: string | null) {
+  if (status === "ready" || status === "active" || status === "connected") return "bg-emerald-500 shadow-emerald-500/40 animate-pulse";
+  if (status === "needs_setup" || status === "requires_connector" || status === "unavailable" || status === "pending") return "bg-amber-500 shadow-amber-500/40";
+  if (status === "disabled" || status === "failed" || status === "FAILED") return "bg-rose-500 shadow-rose-500/40";
+  return "bg-slate-500";
+}
+
+function label(value?: string | null) {
+  return value ? value.replace(/_/g, " ") : "unknown";
+}
+
+function queryString(params: Record<string, string | number | null | undefined>) {
+  const search = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== null && String(value).length > 0) {
+      search.set(key, String(value));
+    }
+  }
+  return `?${search.toString()}`;
+}
+
+function formatDate(value: Date | null) {
+  if (!value) return "Never";
+  return new Intl.DateTimeFormat("en", {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(value);
+}
+
+function usageLabel(row: RecorderRow) {
+  if (row.monthlyUsageMinutes === null) return "Unavailable";
+  if (row.monthlyMinuteCap === null || row.monthlyMinuteCap <= 0) return `${row.monthlyUsageMinutes} min`;
+  return `${row.monthlyUsageMinutes} / ${row.monthlyMinuteCap} min`;
+}
+
+export default async function ControlPlaneRecordersPage({
+  searchParams,
+}: {
+  searchParams?: Promise<Record<string, string | undefined>>;
+}) {
+  const actor = await requirePageActor();
+  try {
+    await requireControlPlaneAccess(actor);
+  } catch {
+    notFound();
+  }
+
+  const raw = await searchParams;
+  const [recorderMatrix, clientOptions] = await Promise.all([
+    listControlPlaneRecorderMatrix(actor, {
+      query: raw?.q,
+      client: raw?.client,
+      status: raw?.status,
+      page: Number(raw?.page ?? 1),
+      pageSize: PAGE_SIZE,
+    }),
+    getControlPlaneClientOptions(actor),
+  ]);
+  const paginationFilters = {
+    q: recorderMatrix.filters.query,
+    client: recorderMatrix.filters.client,
+    status: recorderMatrix.filters.status,
+  };
+  const previousHref = queryString({ ...paginationFilters, page: Math.max(recorderMatrix.page - 1, 1) });
+  const nextHref = queryString({ ...paginationFilters, page: Math.min(recorderMatrix.page + 1, recorderMatrix.pageCount) });
+
+  return (
+    <div className="space-y-6 pb-12 animate-in fade-in duration-300">
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-line pb-6">
+        <div>
+          <span className="text-[10px] font-bold tracking-widest text-brand-400 uppercase">
+            Function matrix
+          </span>
+          <h1 className="text-2xl font-bold tracking-tight text-white mt-1">
+            Recorder Control Plane
+          </h1>
+          <p className="text-xs text-muted mt-1 max-w-2xl">
+            Client-by-client recorder entitlement, configuration, provider, usage, readiness, calendar, and smoke-run state.
+          </p>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
+        {[
+          { title: "Clients", value: recorderMatrix.summary.totalClients, detail: "in recorder matrix", icon: Radio, tone: "text-muted" },
+          { title: "Ready", value: recorderMatrix.summary.ready, detail: "passing readiness", icon: CheckCircle, tone: "text-emerald-400" },
+          { title: "Needs Setup", value: recorderMatrix.summary.needsSetup, detail: "configuration gaps", icon: AlertTriangle, tone: recorderMatrix.summary.needsSetup > 0 ? "text-amber-400" : "text-muted" },
+          { title: "Disabled", value: recorderMatrix.summary.disabled, detail: "entitlement or config off", icon: ShieldCheck, tone: "text-rose-400" },
+          { title: "Connector Required", value: recorderMatrix.summary.requiresConnector, detail: "remote visibility gap", icon: Search, tone: recorderMatrix.summary.requiresConnector > 0 ? "text-amber-400" : "text-muted" },
+        ].map((card) => {
+          const Icon = card.icon;
+          return (
+            <div key={card.title} className="bg-bg-alt border border-line hover:border-line rounded-xl p-4 flex items-start justify-between shadow-sm transition-all duration-150 group">
+              <div className="space-y-1">
+                <span className="text-[10px] font-semibold text-muted tracking-wider block uppercase">
+                  {card.title}
+                </span>
+                <span className="text-2xl font-bold text-white tracking-tight block">
+                  {card.value}
+                </span>
+                <span className="text-[10px] text-muted block">
+                  {card.detail}
+                </span>
+              </div>
+              <div className={cn("p-2 rounded-lg bg-surface border border-line group-hover:scale-105 transition-transform", card.tone)}>
+                <Icon className="w-4 h-4" />
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      <div className="bg-bg-alt border border-line rounded-xl p-5 shadow-sm space-y-4">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 pb-4 border-b border-line">
+          <div>
+            <h2 className="text-sm font-bold text-white">Recorder Function Matrix</h2>
+            <p className="text-[10px] text-muted mt-0.5">Filter by client, readiness status, or provider/configuration text.</p>
+          </div>
+
+          <form method="get" className="flex flex-wrap items-center gap-2">
+            <input
+              name="q"
+              defaultValue={recorderMatrix.filters.query}
+              placeholder="Search..."
+              className="bg-surface border border-line text-xs text-text placeholder-slate-500 rounded-lg px-2.5 py-1.5 focus:border-line focus:ring-0 focus:outline-none"
+            />
+            <input type="hidden" name="client" value={recorderMatrix.filters.client} />
+            <ClientContextSwitcher
+              clients={clientOptions}
+              selectedClientId={recorderMatrix.filters.client}
+              mode="filter"
+              label="Client"
+            />
+            <select
+              name="status"
+              defaultValue={recorderMatrix.filters.status}
+              className="bg-surface border border-line text-xs text-muted rounded-lg px-2 py-1.5 focus:border-line focus:outline-none"
+            >
+              <option value="">Any status</option>
+              <option value="ready">Ready</option>
+              <option value="needs_setup">Needs setup</option>
+              <option value="disabled">Disabled</option>
+              <option value="requires_connector">Requires connector</option>
+              <option value="unavailable">Unavailable</option>
+            </select>
+            <button
+              type="submit"
+              className="bg-surface-strong hover:bg-surface border border-line text-xs text-text px-3 py-1.5 rounded-lg transition-colors"
+            >
+              Apply
+            </button>
+          </form>
+        </div>
+
+        <div className="overflow-x-auto">
+          <table className="w-full border-collapse text-xs">
+            <thead>
+              <tr className="border-b border-line text-muted text-left font-medium">
+                <th className="p-3">Client</th>
+                <th className="p-3">Readiness</th>
+                <th className="p-3">Entitlement</th>
+                <th className="p-3">Provider</th>
+                <th className="p-3">Monthly Usage</th>
+                <th className="p-3">Failures</th>
+                <th className="p-3">Calendar Source</th>
+                <th className="p-3">Last Smoke Run</th>
+                <th className="p-3 text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-line">
+              {recorderMatrix.items.map((row) => (
+                <tr key={row.deploymentId} className="hover:bg-surface/40 transition-colors group">
+                  <td className="p-3 min-w-[180px]">
+                    <span className="font-semibold text-white group-hover:text-brand-400 transition-colors block">
+                      {row.clientLabel}
+                    </span>
+                    <span className="text-[10px] text-muted block truncate mt-0.5">
+                      {row.clientSlug || row.deploymentId}
+                    </span>
+                  </td>
+                  <td className="p-3 min-w-[180px]">
+                    <div className="flex items-center gap-2">
+                      <span className={cn("w-1.5 h-1.5 rounded-full shrink-0", statusDot(row.status))} />
+                      <span className={cn("px-2 py-0.5 rounded-full text-[10px] font-semibold border capitalize", statusTone(row.status))}>
+                        {label(row.status)}
+                      </span>
+                    </div>
+                    <span className="text-[9px] text-muted block mt-1 truncate">
+                      {row.readiness.detail}
+                    </span>
+                  </td>
+                  <td className="p-3">
+                    <span className={cn("font-semibold uppercase text-[10px] block", row.entitlementEnabled ? "text-emerald-400" : "text-muted")}>
+                      {row.entitlementEnabled === null ? "unavailable" : row.entitlementEnabled ? "enabled" : "disabled"}
+                    </span>
+                    <span className="text-[9px] text-muted block mt-0.5">
+                      {row.configured === null ? "config unavailable" : row.configured ? "configured" : "not configured"}
+                    </span>
+                  </td>
+                  <td className="p-3 text-text">
+                    {row.provider ?? "Unavailable"}
+                  </td>
+                  <td className="p-3 text-text">
+                    {usageLabel(row)}
+                  </td>
+                  <td className="p-3">
+                    <span className={cn("font-semibold", row.failureCount && row.failureCount > 0 ? "text-rose-400" : "text-text")}>
+                      {row.failureCount ?? "n/a"}
+                    </span>
+                  </td>
+                  <td className="p-3 min-w-[160px]">
+                    <span className="text-text block">
+                      {row.calendarSource?.label ?? "Unavailable"}
+                    </span>
+                    <span className="text-[9px] text-muted block mt-0.5">
+                      {row.calendarSource ? `${label(row.calendarSource.status)} · ${formatDate(row.calendarSource.lastSyncAt)}` : "No source"}
+                    </span>
+                  </td>
+                  <td className="p-3 min-w-[130px]">
+                    <span className={cn("font-semibold uppercase text-[10px] block", row.lastSmokeRun?.status === "COMPLETED" ? "text-emerald-400" : "text-muted")}>
+                      {row.lastSmokeRun?.status ?? "none"}
+                    </span>
+                    <span className="text-[9px] text-muted block mt-0.5">
+                      {formatDate(row.lastSmokeRun?.createdAt ?? null)}
+                    </span>
+                  </td>
+                  <td className="p-3 text-right">
+                    {row.hasDeployment ? (
+                      <Link
+                        href={`/control-plane/deployments/${row.deploymentId}?tab=config`}
+                        className="inline-flex items-center gap-1 bg-surface hover:bg-surface-strong border border-line hover:border-line text-text hover:text-white px-2.5 py-1.5 rounded-lg text-[10px] font-medium transition-all"
+                      >
+                        Open client
+                        <ArrowRight className="w-3 h-3 text-muted group-hover:text-brand-400 transition-colors" />
+                      </Link>
+                    ) : (
+                      <span className="inline-flex items-center bg-surface/40 border border-line/60 text-muted px-2.5 py-1.5 rounded-lg text-[10px] font-medium">
+                        No deployment
+                      </span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+              {recorderMatrix.items.length === 0 && (
+                <tr>
+                  <td colSpan={9} className="text-center py-8 text-muted">
+                    No recorder rows found matching these query parameters.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+
+        <div className="flex items-center justify-between pt-2 text-[10px] text-muted">
+          <span>
+            Page {recorderMatrix.page} of {recorderMatrix.pageCount} (Showing {recorderMatrix.items.length} of {recorderMatrix.total} clients)
+          </span>
+          <div className="flex gap-2">
+            {recorderMatrix.page > 1 ? (
+              <Link href={previousHref} className="bg-surface hover:bg-surface-strong border border-line text-muted hover:text-text px-2 py-1 rounded transition-colors">
+                Previous
+              </Link>
+            ) : (
+              <span className="bg-surface/40 border border-line/50 text-muted px-2 py-1 rounded select-none cursor-not-allowed">
+                Previous
+              </span>
+            )}
+            {recorderMatrix.page < recorderMatrix.pageCount ? (
+              <Link href={nextHref} className="bg-surface hover:bg-surface-strong border border-line text-muted hover:text-text px-2 py-1 rounded transition-colors">
+                Next
+              </Link>
+            ) : (
+              <span className="bg-surface/40 border border-line/50 text-muted px-2 py-1 rounded select-none cursor-not-allowed">
+                Next
+              </span>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}

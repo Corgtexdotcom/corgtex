@@ -1328,6 +1328,7 @@
       "selfServe": "Autoservicio Cloud",
       "agents": "Observatorio de Agentes",
       "releases": "Releases y Drift",
+      "recorders": "Grabadores",
       "operations": "Log de Operaciones",
       "users": "Directorio de Usuarios",
       "details": "Detalles"
@@ -1351,6 +1352,7 @@
         "selfServe": "Revisar trials cloud, billing, smoke y acceso de soporte.",
         "agents": "Monitorear gobernanza de agentes, modelos, ejecuciones y costes.",
         "releases": "Revisar distribucion de versiones y rollouts.",
+        "recorders": "Revisar readiness, uso, calendarios y proveedores de grabadores.",
         "operations": "Revisar logs de soporte y eventos break-glass.",
         "users": "Gestionar perfiles globales y membresias de clientes."
       }

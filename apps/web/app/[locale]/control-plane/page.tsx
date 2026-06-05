@@ -1,5 +1,5 @@
 import { notFound } from "next/navigation";
-import { getControlPlaneLatestReleaseTarget, isControlPlaneRailwayDeployConfigured, listControlPlaneFleetPage, listControlPlaneReleaseRolloutJobs, requireControlPlaneAccess } from "@corgtex/domain";
+import { getControlPlaneLatestReleaseTarget, isControlPlaneRailwayDeployConfigured, listControlPlaneMatrix, listControlPlaneReleaseRolloutJobs, requireControlPlaneAccess } from "@corgtex/domain";
 import { Link } from "@/i18n/routing";
 import { requirePageActor } from "@/lib/auth";
 import { enqueueDeployLatestRolloutAction } from "./actions";
@@ -19,38 +19,28 @@ import {
 
 export const dynamic = "force-dynamic";
 
-type FleetPage = Awaited<ReturnType<typeof listControlPlaneFleetPage>>;
+type FleetPage = Awaited<ReturnType<typeof listControlPlaneMatrix>>;
 type FleetCustomer = FleetPage["items"][number];
 type ReleaseRollout = Awaited<ReturnType<typeof listControlPlaneReleaseRolloutJobs>>[number];
 
 const PAGE_SIZE = 25;
 
 function statusTone(status?: string | null) {
-  if (status === "ok" || status === "active" || status === "connected") return "text-emerald-400 bg-emerald-500/10 border-emerald-500/20";
-  if (status === "attention" || status === "degraded" || status === "provisioning" || status === "configured" || status === "pending") return "text-amber-400 bg-amber-500/10 border-amber-500/20";
-  if (status === "down" || status === "suspended" || status === "failed" || status === "FAILED") return "text-rose-400 bg-rose-500/10 border-rose-500/20";
+  if (status === "ok" || status === "active" || status === "connected" || status === "ready" || status === "managed") return "text-emerald-400 bg-emerald-500/10 border-emerald-500/20";
+  if (status === "attention" || status === "degraded" || status === "provisioning" || status === "configured" || status === "pending" || status === "needs_setup" || status === "requires_connector" || status === "unavailable") return "text-amber-400 bg-amber-500/10 border-amber-500/20";
+  if (status === "down" || status === "suspended" || status === "failed" || status === "FAILED" || status === "disabled") return "text-rose-400 bg-rose-500/10 border-rose-500/20";
   return "text-muted bg-slate-500/10 border-slate-500/20";
 }
 
 function statusDot(status?: string | null) {
-  if (status === "ok" || status === "active" || status === "connected") return "bg-emerald-500 shadow-emerald-500/40 animate-pulse";
-  if (status === "attention" || status === "degraded" || status === "provisioning" || status === "configured" || status === "pending") return "bg-amber-500 shadow-amber-500/40";
-  if (status === "down" || status === "suspended" || status === "failed" || status === "FAILED") return "bg-rose-500 shadow-rose-500/40 animate-ping";
+  if (status === "ok" || status === "active" || status === "connected" || status === "ready" || status === "managed") return "bg-emerald-500 shadow-emerald-500/40 animate-pulse";
+  if (status === "attention" || status === "degraded" || status === "provisioning" || status === "configured" || status === "pending" || status === "needs_setup" || status === "requires_connector" || status === "unavailable") return "bg-amber-500 shadow-amber-500/40";
+  if (status === "down" || status === "suspended" || status === "failed" || status === "FAILED" || status === "disabled") return "bg-rose-500 shadow-rose-500/40 animate-ping";
   return "bg-slate-500";
 }
 
 function label(value?: string | null) {
   return value ? value.replace(/_/g, " ") : "unknown";
-}
-
-function latestSnapshot(customer: FleetCustomer, kind: string) {
-  return customer.fleetSnapshots?.find((snapshot) => snapshot.snapshotKind === kind) ?? null;
-}
-
-function releaseDrift(customer: FleetCustomer) {
-  return customer.lastHealthError?.includes("Release drift:")
-    ? customer.lastHealthError
-    : latestSnapshot(customer, "RELEASE")?.error ?? null;
 }
 
 function queryString(params: Record<string, string | number | null | undefined>) {
@@ -93,7 +83,7 @@ export default async function ControlPlanePage({
 
   const raw = await searchParams;
   const [fleet, recentRollouts] = await Promise.all([
-    listControlPlaneFleetPage(actor, {
+    listControlPlaneMatrix(actor, {
       query: raw?.q,
       health: raw?.health,
       support: raw?.support,
@@ -253,7 +243,10 @@ export default async function ControlPlanePage({
                     <th className="p-3 w-8"><span className="sr-only">Select</span></th>
                     <th className="p-3">Customer</th>
                     <th className="p-3">Health Status</th>
-                    <th className="p-3">Active Version</th>
+                    <th className="p-3">Release</th>
+                    <th className="p-3">Recorder</th>
+                    <th className="p-3">Agents</th>
+                    <th className="p-3">Users</th>
                     <th className="p-3">Support Connector</th>
                     <th className="p-3">Owner</th>
                     <th className="p-3 text-right">Actions</th>
@@ -261,9 +254,9 @@ export default async function ControlPlanePage({
                 </thead>
                 <tbody className="divide-y divide-line">
                   {fleet.items.map((customer) => {
-                    const health = customer.lastHealthStatus || latestSnapshot(customer, "HEALTH")?.status || customer.provisioningStatus;
-                    const drift = releaseDrift(customer);
-                    const supportStatus = customer.hasSupportCredential ? customer.supportConnectorStatus : "not_configured";
+                    const health = customer.health.status;
+                    const drift = customer.release.detail;
+                    const supportStatus = customer.support.status;
                     
                     return (
                       <tr key={customer.id} className="hover:bg-surface/40 transition-colors group">
@@ -283,7 +276,7 @@ export default async function ControlPlanePage({
                             {customer.label}
                           </span>
                           <span className="text-[10px] text-muted block truncate mt-0.5">
-                            {customer.customerSlug || customer.customerAccount?.slug || customer.url}
+                            {customer.slug || customer.id}
                           </span>
                         </td>
                         <td className="p-3">
@@ -296,7 +289,7 @@ export default async function ControlPlanePage({
                         </td>
                         <td className="p-3">
                           <span className="font-medium text-text block">
-                            {customer.releaseImageTag || customer.releaseVersion || "Unknown"}
+                            {customer.release.label}
                           </span>
                           {drift ? (
                             <span className="text-[9px] text-rose-400 font-semibold block mt-0.5">Drift recorded</span>
@@ -305,31 +298,61 @@ export default async function ControlPlanePage({
                           )}
                         </td>
                         <td className="p-3">
+                          <span className={cn("px-2 py-0.5 rounded-full text-[10px] font-semibold border capitalize inline-flex", statusTone(customer.recorder.status))}>
+                            {label(customer.recorder.status)}
+                          </span>
+                          <span className="text-[9px] text-muted block mt-1">
+                            {customer.recorder.provider ?? "No provider"} · {customer.recorder.monthlyUsageMinutes ?? "n/a"} min
+                          </span>
+                        </td>
+                        <td className="p-3">
+                          <span className={cn("font-semibold uppercase text-[10px] block", customer.agents.status === "active" ? "text-emerald-400" : "text-muted")}>
+                            {label(customer.agents.status)}
+                          </span>
+                          <span className="text-[9px] text-muted block mt-0.5">
+                            {customer.agents.runCount ?? "n/a"} runs
+                          </span>
+                        </td>
+                        <td className="p-3">
+                          <span className="font-semibold text-text block">
+                            {customer.users.count ?? "n/a"}
+                          </span>
+                          <span className="text-[9px] text-muted block mt-0.5">
+                            {label(customer.users.status)}
+                          </span>
+                        </td>
+                        <td className="p-3">
                           <span className={cn("font-semibold uppercase text-[10px] block", supportStatus === "connected" ? "text-emerald-400" : "text-muted")}>
                             {label(supportStatus)}
                           </span>
                           <span className="text-[9px] text-muted block mt-0.5">
-                            {customer.managedWorkspace ? "Managed" : "Remote"}
+                            {label(customer.support.mode)}
                           </span>
                         </td>
                         <td className="p-3 text-muted truncate">
-                          {customer.supportOwnerEmail || "Unassigned"}
+                          {customer.ownerEmail || "Unassigned"}
                         </td>
                         <td className="p-3 text-right">
-                          <Link
-                            href={`/control-plane/deployments/${customer.id}`}
-                            className="inline-flex items-center gap-1 bg-surface hover:bg-surface-strong border border-line hover:border-line text-text hover:text-white px-2.5 py-1.5 rounded-lg text-[10px] font-medium transition-all"
-                          >
-                            Open
-                            <ArrowRight className="w-3 h-3 text-muted group-hover:text-brand-400 transition-colors" />
-                          </Link>
+                          {customer.hasDeployment ? (
+                            <Link
+                              href={`/control-plane/deployments/${customer.id}`}
+                              className="inline-flex items-center gap-1 bg-surface hover:bg-surface-strong border border-line hover:border-line text-text hover:text-white px-2.5 py-1.5 rounded-lg text-[10px] font-medium transition-all"
+                            >
+                              Open
+                              <ArrowRight className="w-3 h-3 text-muted group-hover:text-brand-400 transition-colors" />
+                            </Link>
+                          ) : (
+                            <span className="inline-flex items-center bg-surface/40 border border-line/60 text-muted px-2.5 py-1.5 rounded-lg text-[10px] font-medium">
+                              No deployment
+                            </span>
+                          )}
                         </td>
                       </tr>
                     );
                   })}
                   {fleet.items.length === 0 && (
                     <tr>
-                      <td colSpan={7} className="text-center py-8 text-muted">
+                      <td colSpan={10} className="text-center py-8 text-muted">
                         No enterprise deployments found matching these query parameters.
                       </td>
                     </tr>
@@ -422,13 +445,10 @@ export default async function ControlPlanePage({
             
             <div className="space-y-2 max-h-[220px] overflow-y-auto scrollbar-thin">
               {fleet.items
-                .filter((c) => {
-                  const health = c.lastHealthStatus || latestSnapshot(c, "HEALTH")?.status || c.provisioningStatus;
-                  return health !== "ok" && health !== "active" && health !== "connected";
-                })
+                .filter((c) => c.hasDeployment && c.health.tone !== "ok")
                 .map((customer) => {
-                  const health = customer.lastHealthStatus || latestSnapshot(customer, "HEALTH")?.status || customer.provisioningStatus;
-                  const drift = releaseDrift(customer);
+                  const health = customer.health.status;
+                  const drift = customer.release.detail;
                   return (
                     <Link
                       key={customer.id}
@@ -450,8 +470,7 @@ export default async function ControlPlanePage({
                   );
                 })}
               {fleet.items.filter((c) => {
-                const health = c.lastHealthStatus || latestSnapshot(c, "HEALTH")?.status || c.provisioningStatus;
-                return health !== "ok" && health !== "active" && health !== "connected";
+                return c.hasDeployment && c.health.tone !== "ok";
               }).length === 0 && (
                 <div className="text-center py-6 text-muted text-[10px] bg-surface/30 border border-line rounded-lg">
                   All active fleet deployments are fully healthy.

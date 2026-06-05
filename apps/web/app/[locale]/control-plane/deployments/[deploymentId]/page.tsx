@@ -4,6 +4,7 @@ import {
   AppError,
   getControlPlaneDeployLatestPreflight,
   getControlPlaneAiGovernanceStatus,
+  getControlPlaneClientOptions,
   getControlPlaneContextHealth,
   getControlPlaneDeployment,
   getControlPlaneIntegrationStatus,
@@ -34,16 +35,27 @@ import {
   revokeControlPlaneAgentCredentialAction,
   updateControlPlaneAgentCredentialScopesAction,
 } from "../../actions";
+import { ClientContextSwitcher } from "../../_components/client-context-switcher";
 import { CustomerDetailClientTabs } from "./_components/detail-client-tabs";
 
 export const dynamic = "force-dynamic";
 
+const CONTROL_PLANE_DETAIL_TABS = new Set(["overview", "agents", "config", "users", "releases", "logs"]);
+
+function normalizeDetailTab(tab?: string) {
+  return tab && CONTROL_PLANE_DETAIL_TABS.has(tab) ? tab as "overview" | "agents" | "config" | "users" | "releases" | "logs" : "overview";
+}
+
 export default async function ControlPlaneCustomerPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ locale: string; deploymentId: string }>;
+  searchParams?: Promise<{ tab?: string }>;
 }) {
   const { locale, deploymentId } = await params;
+  const rawSearchParams = await searchParams;
+  const activeTab = normalizeDetailTab(rawSearchParams?.tab);
   const actor = await requirePageActor();
   try {
     await requireControlPlaneAccess(actor, { deploymentId });
@@ -62,6 +74,7 @@ export default async function ControlPlaneCustomerPage({
     featureFlagsRaw,
     deployPreflight,
     rollouts,
+    clientOptions,
     t,
   ] = await Promise.all([
     getControlPlaneDeployment(actor, deploymentId),
@@ -83,6 +96,7 @@ export default async function ControlPlaneCustomerPage({
     })),
     getControlPlaneDeployLatestPreflight(actor, deploymentId),
     listControlPlaneReleaseRolloutJobs(actor, { deploymentId, take: 8 }),
+    getControlPlaneClientOptions(actor),
     getTranslations("controlPlane"),
   ]).catch((error: unknown) => {
     if (error instanceof AppError && error.status === 404) {
@@ -113,7 +127,14 @@ export default async function ControlPlaneCustomerPage({
         </div>
 
         {/* Global Live support refresh actions */}
-        <div className="flex gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <ClientContextSwitcher
+            clients={clientOptions}
+            selectedClientId={customer.id}
+            mode="detail"
+            className="bg-surface-strong border border-line rounded-lg px-3 py-1.5"
+            label="Inspect"
+          />
           <a
             href={customer.url}
             target="_blank"
@@ -148,6 +169,7 @@ export default async function ControlPlaneCustomerPage({
         deployPreflight={deployPreflight}
         rollouts={rollouts}
         locale={locale}
+        initialTab={activeTab}
       />
 
     </div>
