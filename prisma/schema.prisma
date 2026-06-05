@@ -274,6 +274,7 @@ enum CatalogSourceType {
   AGENT_CONFIG
   AGENT_IDENTITY
   BUILD_ARTIFACT
+  MARKETPLACE_APP
   COMMUNICATION_INSTALLATION
   OAUTH_CONNECTION
   MCP_CONNECTOR
@@ -316,6 +317,49 @@ enum CatalogRequestStatus {
 enum CatalogApprovalMode {
   ADMIN
   AGENT_ASSISTED
+}
+
+enum AppCategory {
+  FINANCE
+  KNOWLEDGE
+  COMMUNICATION
+  AI
+  OPERATIONS
+  GOVERNANCE
+  DATA
+  OTHER
+}
+
+enum AppVisibility {
+  PUBLIC_MARKETPLACE
+  UNLISTED
+  WORKSPACE_PRIVATE
+  CORGTEX_MANAGED
+}
+
+enum AppHostingMode {
+  EXTERNAL_URL
+  CORGTEX_MANAGED_EXTERNAL
+  CORGTEX_HOSTED_STATIC
+  CORGTEX_HOSTED_CONTAINER
+  MCP_SERVER
+}
+
+enum AppIntegrationDepth {
+  CATALOG_ONLY
+  LAUNCHABLE
+  MCP_ACTIONABLE
+  KNOWLEDGE_SYNCED
+  WORKFLOW_NATIVE
+}
+
+enum AppInstallationStatus {
+  REQUESTED
+  APPROVED
+  INSTALLED
+  NEEDS_SETUP
+  UNHEALTHY
+  DISABLED
 }
 
 enum BrainDiscussionTargetType {
@@ -1047,6 +1091,18 @@ model CatalogItem {
   monthlyBudgetCents Int?
   dailyCallLimit     Int?
   featured           Boolean           @default(false)
+  appCategory        AppCategory       @default(OTHER)
+  appVisibility      AppVisibility     @default(WORKSPACE_PRIVATE)
+  hostingMode        AppHostingMode    @default(EXTERNAL_URL)
+  integrationDepth   AppIntegrationDepth @default(CATALOG_ONLY)
+  installationStatus AppInstallationStatus @default(INSTALLED)
+  supportUrl         String?           @db.Text
+  appMcpUrl          String?           @db.Text
+  dataClassification String?           @default("INTERNAL")
+  proofUrl           String?           @db.Text
+  reviewUrl          String?           @db.Text
+  manifestJson       Json?
+  capabilitiesJson   Json?
   archivedAt         DateTime?
   archivedByUserId   String?
   archiveReason      String?
@@ -1066,6 +1122,7 @@ model CatalogItem {
   @@unique([workspaceId, slug])
   @@unique([workspaceId, sourceType, sourceId])
   @@index([workspaceId, type, status])
+  @@index([workspaceId, appCategory, installationStatus])
   @@index([workspaceId, ownerUserId])
   @@index([workspaceId, archivedAt])
 }

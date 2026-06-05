@@ -97,7 +97,11 @@ import {
   listExternalDataSources,
   enqueueExternalDataSourceSync,
   archiveWorkspaceToolLink,
+  getAppConnectionInstructions,
+  getAppRoutingGuidance,
+  listInstalledApps,
   listWorkspaceToolLinks,
+  requestAppInstall,
   revealWorkspaceToolLinkCredential,
   upsertWorkspaceToolLink,
   listRuntimeJobs,
@@ -201,6 +205,10 @@ const TOOL_CAPABILITIES = {
   search: { scopes: ["brain:read"] },
   fetch: { scopes: ["brain:read"] },
   list_connected_tools: { scopes: ["external-tools:read"] },
+  list_installed_apps: { scopes: ["tools:read"] },
+  get_app_routing_guidance: { scopes: ["tools:read"] },
+  get_app_connection_instructions: { scopes: ["tools:read"] },
+  request_app_install: { scopes: ["tools:write"] },
   search_connected_context: { scopes: ["external-tools:read"] },
   fetch_connected_context: { scopes: ["external-tools:read"] },
   execute_external_tool: { scopes: ["external-tools:write"] },
@@ -336,6 +344,10 @@ function annotationsForTool(name: string) {
   const destructiveHint = DESTRUCTIVE_TOOL_NAMES.has(name) || Boolean(capability?.destructive);
   const sensitiveHint = Boolean(capability?.sensitive) || policy.requiresSensitiveHandling;
   const openWorldHint = name === "list_connected_tools"
+    || name === "list_installed_apps"
+    || name === "get_app_routing_guidance"
+    || name === "get_app_connection_instructions"
+    || name === "request_app_install"
     || name === "search_connected_context"
     || name === "fetch_connected_context"
     || name === "execute_external_tool";
@@ -740,6 +752,60 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       requireToolCapability("list_connected_tools");
       const tools = await listExternalMcpConnections(actor, workspaceId);
       return structuredJsonResult({ items: tools });
+    },
+  );
+
+  tool(
+    "list_installed_apps",
+    "List Corgtex marketplace apps for this workspace, split into installed/approved apps and available apps. Does not proxy app writes.",
+    {},
+    async () => {
+      requireToolCapability("list_installed_apps");
+      const apps = await listInstalledApps(actor, { workspaceId });
+      return structuredJsonResult({ ...apps, webUrl: webUrl(workspaceId, "/tools?type=APP") });
+    },
+  );
+
+  tool(
+    "get_app_routing_guidance",
+    "Ask Corgtex where a user intent should be routed across Corgtex MCP and installed app MCPs. Returns guidance only; it does not write app records.",
+    {
+      intent: z.string().describe("What the user is trying to save, read, or update."),
+      recordType: z.string().optional().describe("Optional record type, such as expense, account statement, proposal, or Brain source."),
+    },
+    async ({ intent, recordType }: { intent: string; recordType?: string }) => {
+      requireToolCapability("get_app_routing_guidance");
+      const guidance = await getAppRoutingGuidance(actor, { workspaceId, intent, recordType });
+      return structuredJsonResult(guidance as Record<string, unknown>);
+    },
+  );
+
+  tool(
+    "get_app_connection_instructions",
+    "Get setup instructions for an installed or available Corgtex marketplace app. Use this before asking a user to connect a separate app MCP.",
+    {
+      catalogItemId: z.string().optional().describe("Catalog item id from list_installed_apps."),
+      appKey: z.string().optional().describe("App key such as practice-ledger."),
+    },
+    async ({ catalogItemId, appKey }: { catalogItemId?: string; appKey?: string }) => {
+      requireToolCapability("get_app_connection_instructions");
+      const instructions = await getAppConnectionInstructions(actor, { workspaceId, catalogItemId, appKey });
+      return structuredJsonResult({ ...instructions, webUrl: webUrl(workspaceId, `/tools/${instructions.app.id}`) });
+    },
+  );
+
+  tool(
+    "request_app_install",
+    "Create a Tools admin request to install an available marketplace app. Does not install or call the app directly.",
+    {
+      catalogItemId: z.string().optional().describe("Catalog item id from list_installed_apps."),
+      appKey: z.string().optional().describe("App key such as practice-ledger."),
+      reasonMd: z.string().optional().describe("Why this workspace needs the app."),
+    },
+    async ({ catalogItemId, appKey, reasonMd }: { catalogItemId?: string; appKey?: string; reasonMd?: string }) => {
+      requireToolCapability("request_app_install");
+      const result = await requestAppInstall(actor, { workspaceId, catalogItemId, appKey, reasonMd });
+      return structuredJsonResult({ ...result, webUrl: webUrl(workspaceId, `/tools/${result.app.id}`) });
     },
   );
 
@@ -1211,7 +1277,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
 
   tool(
     "list_tool_links",
-    "List shared workspace tool links and access notes. Does not return decrypted credentials.",
+    "List protected or launchable workspace tool links and access notes. Plain reference links and vendor notes belong in Brain. Does not return decrypted credentials.",
     {},
     async () => {
       requireToolCapability("list_tool_links");
@@ -1222,7 +1288,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
 
   tool(
     "upsert_tool_link",
-    "Create or update a shared workspace tool link. Pass toolLinkId to update an existing link. Credential values are encrypted and never returned.",
+    "Create or update a protected or launchable workspace tool link. Pass toolLinkId to update an existing link. Use Brain for plain reference links or vendor notes. Credential values are encrypted and never returned.",
     {
       toolLinkId: z.string().optional(),
       title: z.string(),

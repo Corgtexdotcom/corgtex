@@ -73,9 +73,12 @@ vi.mock("./agent-auth", () => ({
   ALL_SCOPES: [
     "agents:read",
     "brain:read",
+    "brain:write",
     "conversations:write",
     "data-sources:read",
     "documents:write",
+    "finance:read",
+    "finance:write",
     "integrations:read",
     "meetings:read",
     "meetings:write",
@@ -140,6 +143,18 @@ function catalogItemFixture(overrides: Record<string, unknown> = {}) {
     monthlyBudgetCents: null,
     dailyCallLimit: null,
     featured: false,
+    appCategory: "OTHER",
+    appVisibility: "WORKSPACE_PRIVATE",
+    hostingMode: "EXTERNAL_URL",
+    integrationDepth: "CATALOG_ONLY",
+    installationStatus: "INSTALLED",
+    supportUrl: null,
+    appMcpUrl: null,
+    dataClassification: "INTERNAL",
+    proofUrl: null,
+    reviewUrl: null,
+    manifestJson: null,
+    capabilitiesJson: null,
     archivedAt: null,
     archivedByUserId: null,
     archiveReason: null,
@@ -435,6 +450,42 @@ describe("catalog domain", () => {
     }));
   });
 
+  it("derives Practice Ledger as an official finance marketplace app", async () => {
+    const { listCatalogItems } = await import("./catalog");
+    vi.stubEnv("PRACTICE_LEDGER_APP_URL", "https://practice-ledger.example.com");
+    vi.stubEnv("PRACTICE_LEDGER_MCP_URL", "https://practice-ledger.example.com/mcp");
+    prismaMock.workspaceToolLink.findMany.mockResolvedValue([]);
+    prismaMock.catalogItem.findMany.mockResolvedValue([]);
+    prismaMock.catalogFavorite.findMany.mockResolvedValue([]);
+    prismaMock.catalogRequest.findMany.mockResolvedValue([]);
+
+    await listCatalogItems(actor, "workspace-1");
+
+    expect(prismaMock.catalogItem.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        workspaceId_sourceType_sourceId: {
+          workspaceId: "workspace-1",
+          sourceType: "MARKETPLACE_APP",
+          sourceId: "practice-ledger",
+        },
+      },
+      create: expect.objectContaining({
+        type: "APP",
+        title: "Practice Ledger",
+        url: "https://practice-ledger.example.com",
+        category: "FINANCE",
+        accessMode: "REQUEST",
+        appCategory: "FINANCE",
+        appVisibility: "CORGTEX_MANAGED",
+        hostingMode: "CORGTEX_MANAGED_EXTERNAL",
+        integrationDepth: "KNOWLEDGE_SYNCED",
+        installationStatus: "NEEDS_SETUP",
+        appMcpUrl: "https://practice-ledger.example.com/mcp",
+        requestedScopes: ["workspace:read", "brain:read", "brain:write", "finance:read", "finance:write"],
+      }),
+    }));
+  });
+
   it("does not derive managed enterprise services without the AI workspace setup surface", async () => {
     const { listCatalogItems } = await import("./catalog");
     prismaMock.workspaceFeatureFlag.findMany.mockResolvedValue([
@@ -677,5 +728,42 @@ describe("catalog domain", () => {
         entityType: "CatalogRequest",
       }),
     );
+  });
+
+  it("returns Practice Ledger routing guidance when the finance app is installed", async () => {
+    const { getAppRoutingGuidance } = await import("./catalog");
+    prismaMock.catalogItem.findMany.mockResolvedValue([
+      catalogItemFixture({
+        id: "practice-ledger",
+        type: "APP",
+        sourceType: "MARKETPLACE_APP",
+        sourceId: "practice-ledger",
+        title: "Practice Ledger",
+        appCategory: "FINANCE",
+        integrationDepth: "KNOWLEDGE_SYNCED",
+        installationStatus: "INSTALLED",
+        appMcpUrl: "https://practice-ledger.example.com/mcp",
+        capabilitiesJson: [{ key: "expenses.create_draft" }],
+      }),
+    ]);
+    prismaMock.catalogFavorite.findMany.mockResolvedValue([]);
+    prismaMock.catalogRequest.findMany.mockResolvedValue([]);
+
+    const result = await getAppRoutingGuidance(actor, {
+      workspaceId: "workspace-1",
+      intent: "save these expenses from my account statement",
+    });
+
+    expect(result).toMatchObject({
+      routing: "APP_MCP",
+      target: {
+        appKey: "practice-ledger",
+        title: "Practice Ledger",
+        category: "FINANCE",
+        appMcpUrl: "https://practice-ledger.example.com/mcp",
+        capabilities: ["expenses.create_draft"],
+      },
+      corgtexDoesNotProxyWrites: true,
+    });
   });
 });
