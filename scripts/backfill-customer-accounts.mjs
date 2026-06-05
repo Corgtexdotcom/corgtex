@@ -147,7 +147,7 @@ async function ensureWorkspaceAccount(tx, workspace, dryRun) {
     },
   });
   const deployment = await tx.customerDeployment.upsert({
-    where: { customerSlug: workspace.slug },
+    where: { url },
     update: {
       label: workspace.name,
       url,

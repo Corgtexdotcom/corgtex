@@ -15,23 +15,117 @@ const { prismaMock, encryptSecretMock, decryptSecretMock, memberMocks } = vi.hoi
     },
     customerAccount: {
       findMany: vi.fn(),
+      findUnique: vi.fn(),
+      upsert: vi.fn(),
+      update: vi.fn(),
     },
     customerEntitlement: {
+      count: vi.fn(),
+      findMany: vi.fn(),
       upsert: vi.fn(),
     },
     customerReleaseTarget: {
+      count: vi.fn(),
+      findMany: vi.fn(),
       upsert: vi.fn(),
     },
     fleetHealthSnapshot: {
+      count: vi.fn(),
       create: vi.fn(),
       findFirst: vi.fn(),
+      findMany: vi.fn(),
+    },
+    workspace: {
+      findUnique: vi.fn(),
+      create: vi.fn(),
+      count: vi.fn(),
+      findMany: vi.fn(),
+    },
+    approvalPolicy: {
+      count: vi.fn(),
+      createMany: vi.fn(),
+      findMany: vi.fn(),
+    },
+    member: {
+      count: vi.fn(),
+      findMany: vi.fn(),
+    },
+    circle: {
+      count: vi.fn(),
+      findMany: vi.fn(),
+    },
+    role: {
+      count: vi.fn(),
+      findMany: vi.fn(),
+    },
+    roleVersion: {
+      count: vi.fn(),
+      findMany: vi.fn(),
+    },
+    roleHolderHistory: {
+      count: vi.fn(),
+      findMany: vi.fn(),
+    },
+    roleAssignment: {
+      count: vi.fn(),
+      findMany: vi.fn(),
+    },
+    roleOnboardingSession: {
+      count: vi.fn(),
+      findMany: vi.fn(),
+    },
+    approvalFlow: {
+      count: vi.fn(),
+      findMany: vi.fn(),
+    },
+    approvalDecision: {
+      count: vi.fn(),
+      findMany: vi.fn(),
+    },
+    objection: {
+      count: vi.fn(),
+      findMany: vi.fn(),
+    },
+    cycle: {
+      count: vi.fn(),
+      findMany: vi.fn(),
+    },
+    cycleUpdate: {
+      count: vi.fn(),
+      findMany: vi.fn(),
+    },
+    allocation: {
+      count: vi.fn(),
+      findMany: vi.fn(),
+    },
+    ledgerAccount: {
+      count: vi.fn(),
+      findMany: vi.fn(),
+    },
+    ledgerEntry: {
+      count: vi.fn(),
+      findMany: vi.fn(),
+    },
+    spendRequest: {
+      count: vi.fn(),
+      findMany: vi.fn(),
     },
     customerDeployment: {
       findMany: vi.fn(),
       findUnique: vi.fn(),
+      upsert: vi.fn(),
       update: vi.fn(),
     },
+    clientMigrationRun: {
+      create: vi.fn(),
+      findUnique: vi.fn(),
+      update: vi.fn(),
+    },
+    clientMigrationIdMap: {
+      upsert: vi.fn(),
+    },
     workspaceFeatureFlag: {
+      count: vi.fn(),
       findUnique: vi.fn(),
       findMany: vi.fn(),
       upsert: vi.fn(),
@@ -57,13 +151,20 @@ const { prismaMock, encryptSecretMock, decryptSecretMock, memberMocks } = vi.hoi
       count: vi.fn(),
       create: vi.fn(),
       findFirst: vi.fn(),
+      findMany: vi.fn(),
       update: vi.fn(),
     },
     meeting: {
+      count: vi.fn(),
       create: vi.fn(),
       findFirst: vi.fn(),
+      findMany: vi.fn(),
     },
     brainSource: {
+      count: vi.fn(),
+      findMany: vi.fn(),
+    },
+    brainArticle: {
       count: vi.fn(),
       findMany: vi.fn(),
     },
@@ -75,6 +176,19 @@ const { prismaMock, encryptSecretMock, decryptSecretMock, memberMocks } = vi.hoi
     },
     knowledgeChunk: {
       count: vi.fn(),
+      findMany: vi.fn(),
+    },
+    document: {
+      count: vi.fn(),
+      findMany: vi.fn(),
+    },
+    auditLog: {
+      count: vi.fn(),
+      findMany: vi.fn(),
+    },
+    event: {
+      count: vi.fn(),
+      findMany: vi.fn(),
     },
     workflowJob: {
       count: vi.fn(),
@@ -89,6 +203,26 @@ const { prismaMock, encryptSecretMock, decryptSecretMock, memberMocks } = vi.hoi
       findMany: vi.fn(),
       groupBy: vi.fn(),
     },
+    oauthConnection: {
+      count: vi.fn(),
+      findMany: vi.fn(),
+    },
+    executionRequest: {
+      count: vi.fn(),
+      findMany: vi.fn(),
+    },
+    executionResult: {
+      count: vi.fn(),
+      findMany: vi.fn(),
+    },
+    contextGraphObject: {
+      count: vi.fn(),
+      findMany: vi.fn(),
+    },
+    contextGraphRelationship: {
+      count: vi.fn(),
+      findMany: vi.fn(),
+    },
     agentToolCall: {
       findMany: vi.fn(),
     },
@@ -100,19 +234,87 @@ const { prismaMock, encryptSecretMock, decryptSecretMock, memberMocks } = vi.hoi
       upsert: vi.fn(),
     },
     agentCredential: {
+      count: vi.fn(),
       findMany: vi.fn(),
       findUnique: vi.fn(),
       update: vi.fn(),
+    },
+    action: {
+      count: vi.fn(),
+      findMany: vi.fn(),
+    },
+    proposal: {
+      count: vi.fn(),
+      findMany: vi.fn(),
+    },
+    tension: {
+      count: vi.fn(),
+      findMany: vi.fn(),
     },
     modelUsage: {
       aggregate: vi.fn(),
       findMany: vi.fn(),
     },
     modelUsageBudget: {
+      count: vi.fn(),
+      findMany: vi.fn(),
       findUnique: vi.fn(),
       upsert: vi.fn(),
     },
+    workspaceBillingProfile: {
+      count: vi.fn(),
+      findMany: vi.fn(),
+    },
+    workspaceEnterpriseService: {
+      count: vi.fn(),
+      findMany: vi.fn(),
+    },
+    workspaceToolLink: {
+      count: vi.fn(),
+      findMany: vi.fn(),
+    },
+    workspaceToolLinkCircleTag: {
+      count: vi.fn(),
+      findMany: vi.fn(),
+    },
+    catalogItem: {
+      count: vi.fn(),
+      findMany: vi.fn(),
+    },
+    catalogFavorite: {
+      count: vi.fn(),
+      findMany: vi.fn(),
+    },
+    catalogRequest: {
+      count: vi.fn(),
+      findMany: vi.fn(),
+    },
+    catalogSettings: {
+      count: vi.fn(),
+      findMany: vi.fn(),
+    },
+    goal: {
+      count: vi.fn(),
+      findMany: vi.fn(),
+    },
+    goalUpdate: {
+      count: vi.fn(),
+      findMany: vi.fn(),
+    },
+    goalLink: {
+      count: vi.fn(),
+      findMany: vi.fn(),
+    },
+    recognition: {
+      count: vi.fn(),
+      findMany: vi.fn(),
+    },
+    checkIn: {
+      count: vi.fn(),
+      findMany: vi.fn(),
+    },
     supportOperation: {
+      count: vi.fn(),
       create: vi.fn(),
       findMany: vi.fn(),
       update: vi.fn(),
@@ -178,6 +380,7 @@ const userActor: AppActor = {
 
 describe("control plane domain", () => {
   beforeEach(() => {
+    vi.unstubAllEnvs();
     vi.clearAllMocks();
     prismaMock.$transaction.mockImplementation(async (operations: unknown[] | ((tx: unknown) => unknown)) => (
       typeof operations === "function" ? operations(prismaMock) : Promise.all(operations)
@@ -207,8 +410,111 @@ describe("control plane domain", () => {
     prismaMock.supportOperation.findMany.mockResolvedValue([]);
     prismaMock.fleetHealthSnapshot.findFirst.mockResolvedValue(null);
     prismaMock.customerAccount.findMany.mockResolvedValue([]);
+    prismaMock.customerAccount.upsert.mockResolvedValue({
+      id: "acct_1",
+      slug: "acme",
+      displayName: "Acme",
+      status: "ACTIVE",
+      managementAuthority: "CORGTEX",
+      supportOwnerEmail: null,
+      notes: null,
+      primaryDeploymentId: null,
+      createdAt: new Date("2026-01-01T00:00:00Z"),
+      updatedAt: new Date("2026-01-01T00:00:00Z"),
+    });
+    prismaMock.customerAccount.findUnique.mockResolvedValue({ id: "acct_1", primaryDeploymentId: null });
+    prismaMock.customerAccount.update.mockResolvedValue({ id: "acct_1", primaryDeploymentId: "dep-1" });
     prismaMock.customerDeployment.findMany.mockResolvedValue([]);
     prismaMock.workspaceFeatureFlag.findUnique.mockResolvedValue(null);
+    prismaMock.customerDeployment.findUnique.mockResolvedValue(null);
+    prismaMock.customerDeployment.upsert.mockResolvedValue({
+      id: "dep-1",
+      label: "Acme",
+      url: "https://app.test/workspaces/ws-1",
+      customerSlug: "acme",
+      customerAccountId: "acct_1",
+      deploymentKind: "SHARED_WORKSPACE",
+      deploymentStatus: "ACTIVE",
+      provisioningStatus: "active",
+      bootstrapStatus: "not_started",
+      managedWorkspaceId: "ws-1",
+      supportCredentialEnc: null,
+    });
+    prismaMock.workspace.findUnique.mockResolvedValue(null);
+    prismaMock.workspace.create.mockResolvedValue({
+      id: "ws-1",
+      slug: "acme",
+      name: "Acme",
+      description: null,
+    });
+    prismaMock.workspace.count.mockResolvedValue(0);
+    prismaMock.workspace.findMany.mockResolvedValue([]);
+    prismaMock.approvalPolicy.createMany.mockResolvedValue({ count: 2 });
+    prismaMock.member.count.mockResolvedValue(0);
+    prismaMock.member.findMany.mockResolvedValue([]);
+    for (const modelName of [
+      "circle",
+      "role",
+      "roleVersion",
+      "roleHolderHistory",
+      "roleAssignment",
+      "roleOnboardingSession",
+      "approvalPolicy",
+      "approvalFlow",
+      "approvalDecision",
+      "objection",
+      "cycle",
+      "cycleUpdate",
+      "allocation",
+      "ledgerAccount",
+      "ledgerEntry",
+      "spendRequest",
+      "workspaceFeatureFlag",
+      "workspaceToolLink",
+      "workspaceToolLinkCircleTag",
+      "catalogItem",
+      "catalogFavorite",
+      "catalogRequest",
+      "catalogSettings",
+      "brainSource",
+      "brainArticle",
+      "externalDataSource",
+      "knowledgeChunk",
+      "document",
+      "meeting",
+      "meetingRecording",
+      "action",
+      "proposal",
+      "tension",
+      "auditLog",
+      "event",
+      "workflowJob",
+      "agentRun",
+      "agentCredential",
+      "oauthConnection",
+      "executionRequest",
+      "executionResult",
+      "contextGraphObject",
+      "contextGraphRelationship",
+      "goal",
+      "goalUpdate",
+      "goalLink",
+      "recognition",
+      "checkIn",
+      "modelUsageBudget",
+      "workspaceBillingProfile",
+      "workspaceEnterpriseService",
+      "supportOperation",
+      "customerDeploymentEvent",
+      "fleetHealthSnapshot",
+      "customerEntitlement",
+      "customerReleaseTarget",
+    ]) {
+      const model = (prismaMock as Record<string, { count?: ReturnType<typeof vi.fn>; findMany?: ReturnType<typeof vi.fn> }>)[modelName];
+      model?.count?.mockResolvedValue(0);
+      model?.findMany?.mockResolvedValue([]);
+    }
+    prismaMock.clientMigrationIdMap.upsert.mockResolvedValue({ id: "map-1" });
     prismaMock.workspaceFeatureFlag.findMany.mockResolvedValue([]);
     prismaMock.workspaceMeetingRecorderConfig.findUnique.mockResolvedValue(null);
     prismaMock.workspaceRecorderCalendarSource.findUnique.mockResolvedValue(null);
@@ -238,6 +544,805 @@ describe("control plane domain", () => {
     });
 
     await expect(requireControlPlaneAccess(userActor, { deploymentId: "inst-1" })).resolves.toEqual({ role: "SUPPORT_VIEWER" });
+  });
+
+  it("creates a shared-workspace client with account deployment registration and feature posture", async () => {
+    const { createControlPlaneClient } = await import("./control-plane");
+    memberMocks.createMember.mockResolvedValueOnce({
+      user: { id: "user-admin", email: "admin@example.com", displayName: "Admin" },
+      member: { id: "member-admin", role: "ADMIN" },
+      token: "setup-token",
+    });
+
+    const result = await createControlPlaneClient(operatorActor, {
+      mode: "shared_workspace",
+      label: "Acme",
+      customerSlug: "acme",
+      reason: "Approved onboarding.",
+      supportOwnerEmail: "ops@corgtex.com",
+      featurePosture: "minimal",
+      initialAdmins: [{ email: "admin@example.com", displayName: "Admin" }],
+    });
+
+    expect(prismaMock.workspace.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        name: "Acme",
+        slug: "acme",
+      }),
+    });
+    expect(prismaMock.customerDeployment.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({
+        customerSlug: "acme",
+        deploymentKind: "SHARED_WORKSPACE",
+        deploymentStatus: "ACTIVE",
+        managedWorkspaceId: "ws-1",
+      }),
+    }));
+    expect(memberMocks.createMember).toHaveBeenCalledWith(operatorActor, expect.objectContaining({
+      workspaceId: "ws-1",
+      email: "admin@example.com",
+      role: "ADMIN",
+      skipAdminCheck: true,
+    }));
+    expect(prismaMock.workspaceFeatureFlag.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: { workspaceId_flag: { workspaceId: "ws-1", flag: "MEETING_RECORDERS" } },
+      update: { enabled: false },
+    }));
+    expect(result).toMatchObject({
+      clientMode: "shared_workspace",
+      deployment: { id: "dep-1", deploymentKind: "SHARED_WORKSPACE" },
+      readiness: { status: "ready" },
+    });
+  });
+
+  it("rejects raw runtime variables in hosted client creation", async () => {
+    const { createControlPlaneClient } = await import("./control-plane");
+
+    await expect(createControlPlaneClient(operatorActor, {
+      mode: "hosted_dedicated",
+      label: "Acme Hosted",
+      customerSlug: "acme-hosted",
+      reason: "Approved onboarding.",
+      region: "eu-west4",
+      dataResidency: "eu",
+      releaseImageTag: "sha-1",
+      variables: { MODEL_PROVIDER: "openrouter" },
+    })).rejects.toMatchObject({
+      status: 400,
+      code: "RAW_RUNTIME_VARIABLES_REJECTED",
+    });
+    expect(prismaMock.customerDeployment.upsert).not.toHaveBeenCalled();
+  });
+
+  it("keeps production client creation disabled unless explicitly enabled", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    const { createControlPlaneClient } = await import("./control-plane");
+
+    await expect(createControlPlaneClient(operatorActor, {
+      mode: "shared_workspace",
+      label: "Acme",
+      customerSlug: "acme",
+      reason: "Approved onboarding.",
+    })).rejects.toMatchObject({
+      status: 403,
+      code: "CONTROL_PLANE_CLIENT_CREATE_DISABLED",
+    });
+    expect(prismaMock.workspace.create).not.toHaveBeenCalled();
+    expect(prismaMock.customerDeployment.upsert).not.toHaveBeenCalled();
+  });
+
+  it("keeps production hosted creation behind a separate capability gate", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("CONTROL_PLANE_CLIENT_CREATE_ENABLED", "true");
+    const { createControlPlaneClient } = await import("./control-plane");
+
+    await expect(createControlPlaneClient(operatorActor, {
+      mode: "hosted_dedicated",
+      label: "Acme Hosted",
+      customerSlug: "acme-hosted",
+      reason: "Approved onboarding.",
+      region: "eu-west4",
+      dataResidency: "eu",
+      releaseImageTag: "sha-1",
+    })).rejects.toMatchObject({
+      status: 403,
+      code: "CONTROL_PLANE_HOSTED_CREATE_DISABLED",
+    });
+    expect(prismaMock.customerDeployment.upsert).not.toHaveBeenCalled();
+  });
+
+  it("rejects hosted client creation as primary until readiness or migration cutover promotes it", async () => {
+    const { createControlPlaneClient } = await import("./control-plane");
+
+    await expect(createControlPlaneClient(operatorActor, {
+      mode: "hosted_dedicated",
+      label: "Acme Hosted",
+      customerSlug: "acme-hosted",
+      reason: "Approved onboarding.",
+      region: "eu-west4",
+      dataResidency: "eu",
+      releaseImageTag: "sha-1",
+      primary: true,
+    })).rejects.toMatchObject({
+      status: 400,
+      code: "HOSTED_PRIMARY_UNSUPPORTED",
+    });
+    expect(prismaMock.customerDeployment.upsert).not.toHaveBeenCalled();
+  });
+
+  it("rejects hosted client setup inputs that cannot be applied without a generated bootstrap bundle", async () => {
+    const { createControlPlaneClient } = await import("./control-plane");
+
+    await expect(createControlPlaneClient(operatorActor, {
+      mode: "hosted_dedicated",
+      label: "Acme Hosted",
+      customerSlug: "acme-hosted",
+      reason: "Approved onboarding.",
+      region: "eu-west4",
+      dataResidency: "eu",
+      releaseImageTag: "sha-1",
+      initialAdmins: [{ email: "admin@example.com" }],
+    })).rejects.toMatchObject({
+      status: 400,
+      code: "HOSTED_INITIAL_ADMINS_UNSUPPORTED",
+    });
+
+    await expect(createControlPlaneClient(operatorActor, {
+      mode: "hosted_dedicated",
+      label: "Acme Hosted",
+      customerSlug: "acme-hosted",
+      reason: "Approved onboarding.",
+      region: "eu-west4",
+      dataResidency: "eu",
+      releaseImageTag: "sha-1",
+      featurePosture: "minimal",
+    })).rejects.toMatchObject({
+      status: 400,
+      code: "HOSTED_FEATURE_POSTURE_UNSUPPORTED",
+    });
+    expect(prismaMock.customerDeployment.upsert).not.toHaveBeenCalled();
+  });
+
+  it("fails migration dry-run when active source writes are not confirmed quiesced", async () => {
+    const { runControlPlaneClientMigrationDryRun } = await import("./control-plane");
+    const sourceDeployment = {
+      id: "dep-source",
+      label: "Acme Shared",
+      customerSlug: "acme",
+      customerAccountId: "acct_1",
+      customerAccount: {
+        id: "acct_1",
+        slug: "acme",
+        displayName: "Acme",
+        status: "ACTIVE",
+        managementAuthority: "CORGTEX",
+        supportOwnerEmail: null,
+        notes: null,
+        primaryDeploymentId: "dep-source",
+        createdAt: new Date("2026-01-01T00:00:00Z"),
+        updatedAt: new Date("2026-01-01T00:00:00Z"),
+      },
+      deploymentKind: "SHARED_WORKSPACE",
+      deploymentStatus: "ACTIVE",
+      managedWorkspaceId: "ws-1",
+      supportCredentialEnc: null,
+    };
+    prismaMock.customerDeployment.findUnique
+      .mockResolvedValueOnce(sourceDeployment)
+      .mockResolvedValueOnce(sourceDeployment);
+    prismaMock.clientMigrationRun.create.mockResolvedValue({
+      id: "mig-1",
+      customerAccountId: "acct_1",
+      sourceDeploymentId: "dep-source",
+      destinationDeploymentId: null,
+      direction: "shared_to_hosted",
+      status: "planned",
+      reason: "Move to hosted.",
+      planSummary: {},
+    });
+    prismaMock.clientMigrationRun.update.mockResolvedValue({
+      id: "mig-1",
+      customerAccountId: "acct_1",
+      sourceDeploymentId: "dep-source",
+      destinationDeploymentId: null,
+      direction: "shared_to_hosted",
+      status: "dry_run_failed",
+      reason: "Move to hosted.",
+      verificationSummary: {
+        dryRun: {
+          passed: false,
+          checks: [{ key: "source_writes_quiesced", ok: false }],
+        },
+      },
+      sourceDeployment,
+      destinationDeployment: null,
+      customerAccount: sourceDeployment.customerAccount,
+      _count: { idMaps: 0 },
+    });
+
+    const result = await runControlPlaneClientMigrationDryRun(operatorActor, {
+      sourceDeploymentId: "dep-source",
+      targetMode: "hosted_dedicated",
+      reason: "Move to hosted.",
+    });
+
+    expect(prismaMock.clientMigrationRun.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        status: "dry_run_failed",
+        error: "Dry-run checks failed.",
+      }),
+    }));
+    expect(result).toMatchObject({
+      id: "mig-1",
+      status: "dry_run_failed",
+      verificationSummary: {
+        dryRun: {
+          passed: false,
+        },
+      },
+    });
+  });
+
+  it("keeps production migration dry-run disabled unless explicitly enabled", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    const { runControlPlaneClientMigrationDryRun } = await import("./control-plane");
+
+    await expect(runControlPlaneClientMigrationDryRun(operatorActor, {
+      sourceDeploymentId: "dep-source",
+      targetMode: "hosted_dedicated",
+      reason: "Move to hosted.",
+    })).rejects.toMatchObject({
+      status: 403,
+      code: "CONTROL_PLANE_MIGRATION_DRY_RUN_DISABLED",
+    });
+    expect(prismaMock.clientMigrationRun.create).not.toHaveBeenCalled();
+    expect(prismaMock.customerDeployment.findUnique).not.toHaveBeenCalled();
+  });
+
+  it("records worker verification before migration execution can run", async () => {
+    const { recordControlPlaneClientMigrationWorkerVerification } = await import("./control-plane");
+    const destinationDeployment = {
+      id: "dep-destination",
+      customerAccountId: "acct_1",
+      deploymentKind: "HOSTED_DEDICATED",
+      deploymentStatus: "BOOTSTRAPPING",
+    };
+    const run = {
+      id: "mig-1",
+      customerAccountId: "acct_1",
+      sourceDeploymentId: "dep-source",
+      destinationDeploymentId: "dep-destination",
+      direction: "shared_to_hosted",
+      status: "dry_run_passed",
+      reason: "Move to hosted.",
+      verificationSummary: {
+        dryRun: {
+          inventory: [
+            { entityType: "Member", count: 2 },
+            { entityType: "SupportOperation", count: 0 },
+          ],
+        },
+      },
+      customerAccount: { id: "acct_1", slug: "acme", displayName: "Acme" },
+      sourceDeployment: {
+        id: "dep-source",
+        customerAccountId: "acct_1",
+        deploymentKind: "SHARED_WORKSPACE",
+        deploymentStatus: "ACTIVE",
+      },
+      destinationDeployment,
+      _count: { idMaps: 0 },
+    };
+    prismaMock.clientMigrationRun.findUnique.mockResolvedValueOnce(run);
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce(destinationDeployment);
+    prismaMock.clientMigrationRun.update.mockResolvedValueOnce({
+      ...run,
+      status: "import_verified",
+      verificationSummary: {
+        previous: run.verificationSummary,
+        worker: { verified: true },
+      },
+      _count: { idMaps: 2 },
+    });
+
+    const result = await recordControlPlaneClientMigrationWorkerVerification(operatorActor, {
+      migrationRunId: "mig-1",
+      verificationSummary: {
+        verified: true,
+        verificationSource: "control_plane_migration_worker",
+        importJobId: "import-1",
+        sourceChecksum: "checksum-1",
+        destinationChecksum: "checksum-1",
+        healthStatus: "ok",
+        counts: {
+          Member: { source: 2, destination: 2 },
+          SupportOperation: { source: 0, destination: 0 },
+        },
+      },
+      idMaps: [
+        { entityType: "Member", sourceId: "member-1", destinationId: "member-a", checksum: "hash-1" },
+        { entityType: "Member", sourceId: "member-2", destinationId: "member-b", checksum: "hash-2" },
+      ],
+      reason: "Worker import completed.",
+    });
+
+    expect(prismaMock.clientMigrationIdMap.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        migrationRunId_entityType_sourceId: {
+          migrationRunId: "mig-1",
+          entityType: "Member",
+          sourceId: "member-1",
+        },
+      },
+      update: expect.objectContaining({
+        destinationId: "member-a",
+        checksum: "hash-1",
+      }),
+    }));
+    expect(prismaMock.clientMigrationRun.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        status: "import_verified",
+        error: null,
+      }),
+    }));
+    expect(result).toMatchObject({
+      id: "mig-1",
+      status: "import_verified",
+      idMapCount: 2,
+    });
+  });
+
+  it("queues migration worker verification without changing primary routing", async () => {
+    const { CONTROL_PLANE_CLIENT_MIGRATION_VERIFY_JOB_TYPE, enqueueControlPlaneClientMigrationWorkerVerification } = await import("./control-plane");
+    const destinationDeployment = {
+      id: "dep-destination",
+      customerAccountId: "acct_1",
+      deploymentKind: "HOSTED_DEDICATED",
+      deploymentStatus: "BOOTSTRAPPING",
+    };
+    const run = {
+      id: "mig-1",
+      customerAccountId: "acct_1",
+      sourceDeploymentId: "dep-source",
+      destinationDeploymentId: "dep-destination",
+      direction: "shared_to_hosted",
+      status: "dry_run_passed",
+      reason: "Move to hosted.",
+      verificationSummary: {
+        dryRun: {
+          inventory: [
+            { entityType: "Member", count: 2 },
+          ],
+        },
+      },
+      customerAccount: { id: "acct_1", slug: "acme", displayName: "Acme", primaryDeploymentId: "dep-source" },
+      sourceDeployment: {
+        id: "dep-source",
+        customerAccountId: "acct_1",
+        deploymentKind: "SHARED_WORKSPACE",
+        deploymentStatus: "ACTIVE",
+      },
+      destinationDeployment,
+      _count: { idMaps: 0 },
+    };
+    prismaMock.clientMigrationRun.findUnique.mockResolvedValueOnce(run);
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce(destinationDeployment);
+    prismaMock.workflowJob.upsert.mockResolvedValueOnce({ id: "job-verify" });
+    prismaMock.clientMigrationRun.update.mockResolvedValueOnce({
+      ...run,
+      status: "import_verification_queued",
+      _count: { idMaps: 0 },
+    });
+
+    const result = await enqueueControlPlaneClientMigrationWorkerVerification(operatorActor, {
+      migrationRunId: "mig-1",
+      verificationSummary: {
+        verified: true,
+        verificationSource: "control_plane_migration_worker",
+        importJobId: "import-1",
+        sourceChecksum: "checksum-1",
+        destinationChecksum: "checksum-1",
+        healthStatus: "ok",
+        counts: {
+          Member: { source: 2, destination: 2 },
+        },
+      },
+      idMaps: [
+        { entityType: "Member", sourceId: "member-1", destinationId: "member-a", checksum: "hash-1" },
+        { entityType: "Member", sourceId: "member-2", destinationId: "member-b", checksum: "hash-2" },
+      ],
+      reason: "Worker import completed.",
+    });
+
+    expect(prismaMock.workflowJob.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({
+        workspaceId: null,
+        type: CONTROL_PLANE_CLIENT_MIGRATION_VERIFY_JOB_TYPE,
+        payload: expect.objectContaining({
+          migrationRunId: "mig-1",
+          destinationDeploymentId: "dep-destination",
+          reason: "Worker import completed.",
+        }),
+      }),
+    }));
+    expect(prismaMock.customerAccount.update).not.toHaveBeenCalled();
+    expect(prismaMock.customerDeployment.update).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      migration: {
+        id: "mig-1",
+        status: "import_verification_queued",
+      },
+      job: {
+        id: "job-verify",
+        type: CONTROL_PLANE_CLIENT_MIGRATION_VERIFY_JOB_TYPE,
+      },
+    });
+  });
+
+  it("runs queued migration worker verification from the workflow worker", async () => {
+    const { runControlPlaneClientMigrationWorkerVerificationJob } = await import("./control-plane");
+    const destinationDeployment = {
+      id: "dep-destination",
+      customerAccountId: "acct_1",
+      deploymentKind: "HOSTED_DEDICATED",
+      deploymentStatus: "BOOTSTRAPPING",
+    };
+    const run = {
+      id: "mig-1",
+      customerAccountId: "acct_1",
+      sourceDeploymentId: "dep-source",
+      destinationDeploymentId: "dep-destination",
+      direction: "shared_to_hosted",
+      status: "import_verification_queued",
+      reason: "Move to hosted.",
+      verificationSummary: {
+        dryRun: {
+          inventory: [
+            { entityType: "Member", count: 1 },
+          ],
+        },
+      },
+      customerAccount: { id: "acct_1", slug: "acme", displayName: "Acme" },
+      sourceDeployment: {
+        id: "dep-source",
+        customerAccountId: "acct_1",
+        deploymentKind: "SHARED_WORKSPACE",
+        deploymentStatus: "ACTIVE",
+      },
+      destinationDeployment,
+      _count: { idMaps: 0 },
+    };
+    prismaMock.clientMigrationRun.findUnique.mockResolvedValueOnce(run);
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce(destinationDeployment);
+    prismaMock.clientMigrationRun.update.mockResolvedValueOnce({
+      ...run,
+      status: "import_verified",
+      verificationSummary: {
+        previous: run.verificationSummary,
+        worker: { verified: true },
+      },
+      _count: { idMaps: 1 },
+    });
+
+    const result = await runControlPlaneClientMigrationWorkerVerificationJob({
+      migrationRunId: "mig-1",
+      destinationDeploymentId: "dep-destination",
+      verificationSummary: {
+        verified: true,
+        verificationSource: "control_plane_migration_worker",
+        importJobId: "import-1",
+        sourceChecksum: "checksum-1",
+        destinationChecksum: "checksum-1",
+        healthStatus: "ok",
+        counts: {
+          Member: { source: 1, destination: 1 },
+        },
+      },
+      idMaps: [
+        { entityType: "Member", sourceId: "member-1", destinationId: "member-a", checksum: "hash-1" },
+      ],
+      reason: "Queued worker verification.",
+    });
+
+    expect(prismaMock.clientMigrationIdMap.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        migrationRunId_entityType_sourceId: {
+          migrationRunId: "mig-1",
+          entityType: "Member",
+          sourceId: "member-1",
+        },
+      },
+    }));
+    expect(result).toMatchObject({
+      id: "mig-1",
+      status: "import_verified",
+      idMapCount: 1,
+    });
+  });
+
+  it("rejects migration destinations from another customer account", async () => {
+    const { planControlPlaneClientMigration } = await import("./control-plane");
+    prismaMock.customerDeployment.findUnique
+      .mockResolvedValueOnce({
+        id: "dep-source",
+        label: "Acme Shared",
+        customerAccountId: "acct_1",
+        customerAccount: { id: "acct_1" },
+        deploymentKind: "SHARED_WORKSPACE",
+        deploymentStatus: "ACTIVE",
+        managedWorkspaceId: "ws-1",
+      })
+      .mockResolvedValueOnce({
+        id: "dep-destination",
+        customerAccountId: "acct_2",
+        customerAccount: { id: "acct_2" },
+        deploymentKind: "HOSTED_DEDICATED",
+        deploymentStatus: "ACTIVE",
+      });
+
+    await expect(planControlPlaneClientMigration(operatorActor, {
+      sourceDeploymentId: "dep-source",
+      targetMode: "hosted_dedicated",
+      destinationDeploymentId: "dep-destination",
+      reason: "Move to hosted.",
+    })).rejects.toMatchObject({
+      code: "MIGRATION_DESTINATION_ACCOUNT_MISMATCH",
+    });
+    expect(prismaMock.clientMigrationRun.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects hosted-source migration dry-run until remote inventory is available", async () => {
+    const { runControlPlaneClientMigrationDryRun } = await import("./control-plane");
+    const sourceDeployment = {
+      id: "dep-hosted",
+      label: "Acme Hosted",
+      customerSlug: "acme",
+      customerAccountId: "acct_1",
+      customerAccount: { id: "acct_1" },
+      deploymentKind: "HOSTED_DEDICATED",
+      deploymentStatus: "ACTIVE",
+      managedWorkspaceId: null,
+      supportCredentialEnc: "encrypted-support-token",
+    };
+    prismaMock.customerDeployment.findUnique
+      .mockResolvedValueOnce(sourceDeployment)
+      .mockResolvedValueOnce(sourceDeployment);
+    prismaMock.clientMigrationRun.create.mockResolvedValue({
+      id: "mig-hosted",
+      customerAccountId: "acct_1",
+      sourceDeploymentId: "dep-hosted",
+      destinationDeploymentId: null,
+      direction: "hosted_to_shared",
+      status: "planned",
+      reason: "Move back to shared.",
+      planSummary: {},
+    });
+
+    await expect(runControlPlaneClientMigrationDryRun(operatorActor, {
+      sourceDeploymentId: "dep-hosted",
+      targetMode: "shared_workspace",
+      writesQuiesced: true,
+      acceptRequiresReauth: true,
+      reason: "Move back to shared.",
+    })).rejects.toMatchObject({
+      status: 400,
+      code: "MIGRATION_SOURCE_INVENTORY_UNAVAILABLE",
+    });
+    expect(prismaMock.clientMigrationRun.update).not.toHaveBeenCalled();
+  });
+
+  it("does not execute record-only migrations before the migration worker is available", async () => {
+    const { executeControlPlaneClientMigration } = await import("./control-plane");
+
+    await expect(executeControlPlaneClientMigration(operatorActor, {
+      migrationRunId: "mig-1",
+      reason: "Verified import.",
+    })).rejects.toMatchObject({
+      status: 501,
+      code: "MIGRATION_EXECUTION_NOT_IMPLEMENTED",
+    });
+    expect(prismaMock.clientMigrationRun.findUnique).not.toHaveBeenCalled();
+    expect(prismaMock.clientMigrationRun.update).not.toHaveBeenCalled();
+  });
+
+  it("does not rollback or mutate routing before the migration worker is available", async () => {
+    const { rollbackControlPlaneClientMigration } = await import("./control-plane");
+
+    await expect(rollbackControlPlaneClientMigration(operatorActor, {
+      migrationRunId: "mig-1",
+      reason: "Rollback failed dry run.",
+    })).rejects.toMatchObject({
+      status: 501,
+      code: "MIGRATION_EXECUTION_NOT_IMPLEMENTED",
+    });
+    expect(prismaMock.clientMigrationRun.findUnique).not.toHaveBeenCalled();
+    expect(prismaMock.customerAccount.update).not.toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ primaryDeploymentId: "dep-source" }),
+    }));
+  });
+
+  it("requires stored worker verification before gated migration execution mutates source state", async () => {
+    vi.stubEnv("CONTROL_PLANE_MIGRATION_EXECUTE_ENABLED", "true");
+    vi.stubEnv("CONTROL_PLANE_MIGRATION_READ_ONLY_ENFORCED", "true");
+    const { executeControlPlaneClientMigration } = await import("./control-plane");
+    prismaMock.clientMigrationRun.findUnique.mockResolvedValueOnce({
+      id: "mig-1",
+      customerAccountId: "acct_1",
+      sourceDeploymentId: "dep-source",
+      destinationDeploymentId: "dep-destination",
+      direction: "shared_to_hosted",
+      status: "dry_run_passed",
+      verificationSummary: {
+        dryRun: {
+          inventory: [{ entityType: "Member", count: 2 }],
+        },
+      },
+      customerAccount: { id: "acct_1", primaryDeploymentId: "dep-source" },
+      sourceDeployment: { id: "dep-source", customerAccountId: "acct_1" },
+      destinationDeployment: { id: "dep-destination", customerAccountId: "acct_1" },
+      _count: { idMaps: 0 },
+    });
+
+    await expect(executeControlPlaneClientMigration(operatorActor, {
+      migrationRunId: "mig-1",
+      reason: "Approved cutover.",
+    })).rejects.toMatchObject({
+      status: 400,
+      code: "MIGRATION_WORKER_VERIFICATION_REQUIRED",
+    });
+    expect(prismaMock.customerDeployment.update).not.toHaveBeenCalled();
+    expect(prismaMock.customerAccount.update).not.toHaveBeenCalled();
+  });
+
+  it("does not execute migrations when runtime source read-only enforcement is not enabled", async () => {
+    vi.stubEnv("CONTROL_PLANE_MIGRATION_EXECUTE_ENABLED", "true");
+    const { executeControlPlaneClientMigration } = await import("./control-plane");
+
+    await expect(executeControlPlaneClientMigration(operatorActor, {
+      migrationRunId: "mig-1",
+      reason: "Approved cutover.",
+    })).rejects.toMatchObject({
+      status: 501,
+      code: "MIGRATION_READ_ONLY_ENFORCEMENT_REQUIRED",
+    });
+    expect(prismaMock.clientMigrationRun.findUnique).not.toHaveBeenCalled();
+    expect(prismaMock.customerDeployment.update).not.toHaveBeenCalled();
+    expect(prismaMock.customerAccount.update).not.toHaveBeenCalled();
+  });
+
+  it("rechecks destination readiness before migration execution cutover", async () => {
+    vi.stubEnv("CONTROL_PLANE_MIGRATION_EXECUTE_ENABLED", "true");
+    vi.stubEnv("CONTROL_PLANE_MIGRATION_READ_ONLY_ENFORCED", "true");
+    const { executeControlPlaneClientMigration } = await import("./control-plane");
+    const destinationDeployment = {
+      id: "dep-destination",
+      customerAccountId: "acct_1",
+      deploymentKind: "HOSTED_DEDICATED",
+      deploymentStatus: "BOOTSTRAPPING",
+      lastHealthStatus: "ok",
+    };
+    prismaMock.clientMigrationRun.findUnique.mockResolvedValueOnce({
+      id: "mig-1",
+      customerAccountId: "acct_1",
+      sourceDeploymentId: "dep-source",
+      destinationDeploymentId: "dep-destination",
+      direction: "shared_to_hosted",
+      status: "import_verified",
+      verificationSummary: { worker: { verified: true } },
+      customerAccount: { id: "acct_1", primaryDeploymentId: "dep-source" },
+      sourceDeployment: { id: "dep-source", customerAccountId: "acct_1" },
+      destinationDeployment,
+      _count: { idMaps: 1 },
+    });
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce(destinationDeployment);
+
+    await expect(executeControlPlaneClientMigration(operatorActor, {
+      migrationRunId: "mig-1",
+      reason: "Approved cutover.",
+    })).rejects.toMatchObject({
+      status: 400,
+      code: "MIGRATION_DESTINATION_NOT_READY",
+    });
+    expect(prismaMock.customerDeployment.update).not.toHaveBeenCalled();
+    expect(prismaMock.customerAccount.update).not.toHaveBeenCalled();
+  });
+
+  it("rechecks hosted destination health before migration execution cutover", async () => {
+    vi.stubEnv("CONTROL_PLANE_MIGRATION_EXECUTE_ENABLED", "true");
+    vi.stubEnv("CONTROL_PLANE_MIGRATION_READ_ONLY_ENFORCED", "true");
+    const { executeControlPlaneClientMigration } = await import("./control-plane");
+    const destinationDeployment = {
+      id: "dep-destination",
+      customerAccountId: "acct_1",
+      deploymentKind: "HOSTED_DEDICATED",
+      deploymentStatus: "ACTIVE",
+      lastHealthStatus: "degraded",
+    };
+    prismaMock.clientMigrationRun.findUnique.mockResolvedValueOnce({
+      id: "mig-1",
+      customerAccountId: "acct_1",
+      sourceDeploymentId: "dep-source",
+      destinationDeploymentId: "dep-destination",
+      direction: "shared_to_hosted",
+      status: "import_verified",
+      verificationSummary: { worker: { verified: true } },
+      customerAccount: { id: "acct_1", primaryDeploymentId: "dep-source" },
+      sourceDeployment: { id: "dep-source", customerAccountId: "acct_1" },
+      destinationDeployment,
+      _count: { idMaps: 1 },
+    });
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce(destinationDeployment);
+
+    await expect(executeControlPlaneClientMigration(operatorActor, {
+      migrationRunId: "mig-1",
+      reason: "Approved cutover.",
+    })).rejects.toMatchObject({
+      status: 400,
+      code: "MIGRATION_DESTINATION_HEALTH_REQUIRED",
+    });
+    expect(prismaMock.customerDeployment.update).not.toHaveBeenCalled();
+    expect(prismaMock.customerAccount.update).not.toHaveBeenCalled();
+  });
+
+  it("gated migration execution cuts over primary routing and marks the source read-only before finalization", async () => {
+    vi.stubEnv("CONTROL_PLANE_MIGRATION_EXECUTE_ENABLED", "true");
+    vi.stubEnv("CONTROL_PLANE_MIGRATION_READ_ONLY_ENFORCED", "true");
+    const { executeControlPlaneClientMigration } = await import("./control-plane");
+    const destinationDeployment = {
+      id: "dep-destination",
+      customerAccountId: "acct_1",
+      deploymentKind: "HOSTED_DEDICATED",
+      deploymentStatus: "ACTIVE",
+      lastHealthStatus: "ok",
+    };
+    const run = {
+      id: "mig-1",
+      customerAccountId: "acct_1",
+      sourceDeploymentId: "dep-source",
+      destinationDeploymentId: "dep-destination",
+      direction: "shared_to_hosted",
+      status: "import_verified",
+      verificationSummary: {
+        worker: {
+          verified: true,
+          evidence: {
+            importJobId: "import-1",
+            healthStatus: "ok",
+          },
+        },
+      },
+      customerAccount: { id: "acct_1", primaryDeploymentId: "dep-source" },
+      sourceDeployment: { id: "dep-source", customerAccountId: "acct_1" },
+      destinationDeployment,
+      _count: { idMaps: 2 },
+    };
+    prismaMock.clientMigrationRun.findUnique.mockResolvedValueOnce(run);
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce(destinationDeployment);
+    prismaMock.clientMigrationRun.update.mockResolvedValueOnce({
+      ...run,
+      status: "executed",
+      executedAt: new Date("2026-01-01T00:00:00Z"),
+    });
+
+    const result = await executeControlPlaneClientMigration(operatorActor, {
+      migrationRunId: "mig-1",
+      reason: "Approved cutover.",
+    });
+
+    expect(prismaMock.customerDeployment.update).toHaveBeenCalledWith({
+      where: { id: "dep-source" },
+      data: {
+        provisioningStatus: "read_only_pending_finalize",
+      },
+    });
+    expect(prismaMock.customerAccount.update).toHaveBeenCalledWith({
+      where: { id: "acct_1" },
+      data: { primaryDeploymentId: "dep-destination" },
+    });
+    expect(result).toMatchObject({
+      id: "mig-1",
+      status: "executed",
+    });
   });
 
   it("defaults control-plane agent bearer access to read-only scopes", async () => {

@@ -69,6 +69,8 @@ vi.mock("@corgtex/shared", () => ({
     },
     customerDeployment: {
       findMany: vi.fn().mockResolvedValue([]),
+      findUnique: vi.fn().mockResolvedValue(null),
+      findFirst: vi.fn().mockResolvedValue(null),
       findUniqueOrThrow: vi.fn().mockResolvedValue({
         id: "inst_1",
         url: "http://fake-deployment.com",
@@ -478,7 +480,7 @@ describe("Platform Admin Tools", () => {
       }),
     }));
     expect(prisma.customerDeployment.upsert).toHaveBeenCalledWith({
-      where: { customerSlug: "acme" },
+      where: { url: "https://acme.corgtex.com" },
       update: expect.objectContaining({
         label: "Acme",
         url: "https://acme.corgtex.com",
@@ -676,7 +678,8 @@ describe("Platform Admin Tools", () => {
     });
     const railwayClient = {
       graphql: vi.fn()
-        .mockResolvedValueOnce({ projectCreate: { id: "project-1", defaultEnvironment: { id: "env-1" } } })
+        .mockResolvedValueOnce({ projectCreate: { id: "project-1" } })
+        .mockResolvedValueOnce({ environments: { edges: [{ node: { id: "env-1", name: "production" } }] } })
         .mockResolvedValueOnce({
           web: { id: "web-1" },
           worker: { id: "worker-1" },
@@ -712,11 +715,11 @@ describe("Platform Admin Tools", () => {
 
     expect(requireGlobalOperator).toHaveBeenCalledWith(dummyActor);
     expect(prisma.customerDeployment.upsert).toHaveBeenCalledWith(expect.objectContaining({
-      where: { customerSlug: "acme-prod" },
+      where: { url: "https://acme.corgtex.com" },
       create: expect.objectContaining({
         provisioningStatus: "provisioning",
         bootstrapStatus: "pending",
-        managedWorkspaceId: "ws_acme_prod",
+        managedWorkspaceId: null,
         storageBucketName: "customer-bucket",
         bootstrapBundleUri: "https://private.example/bundle.json",
         bootstrapBundleChecksum: "a".repeat(64),
@@ -736,7 +739,67 @@ describe("Platform Admin Tools", () => {
     expect(prisma.customerDeployment.upsert).toHaveBeenCalledWith(expect.not.objectContaining({
       create: expect.objectContaining({ railwayApiToken: expect.anything() }),
     }));
-    expect(railwayClient.graphql).toHaveBeenCalledTimes(8);
+    expect(railwayClient.graphql).toHaveBeenCalledTimes(9);
+  });
+
+  it("provisionCustomerDeployment rejects retries for partial Railway stacks", async () => {
+    (prisma.customerDeployment.findFirst as any).mockResolvedValueOnce({
+      id: "inst_partial",
+      customerSlug: "acme-prod",
+      deploymentKind: "HOSTED_DEDICATED",
+      environment: "production",
+      railwayProjectId: "project-1",
+      railwayEnvironmentId: null,
+      railwayWebServiceId: null,
+      railwayWorkerServiceId: null,
+      railwayPostgresServiceId: null,
+      railwayRedisServiceId: null,
+    });
+    const railwayClient = { graphql: vi.fn() } as any;
+
+    await expect(admin.provisionCustomerDeployment(dummyActor, {
+      label: "Acme Production",
+      customerSlug: "acme-prod",
+      region: "eu-west4",
+      dataResidency: "eu",
+      releaseImageTag: "sha-1",
+      webImage: "ghcr.io/corgtex/web:sha-1",
+      workerImage: "ghcr.io/corgtex/worker:sha-1",
+    }, railwayClient)).rejects.toMatchObject({
+      status: 409,
+      code: "RAILWAY_STACK_RECONCILIATION_REQUIRED",
+    });
+    expect(railwayClient.graphql).not.toHaveBeenCalled();
+  });
+
+  it("provisionCustomerDeployment rejects retries for existing hosted rows without saved Railway IDs", async () => {
+    (prisma.customerDeployment.findFirst as any).mockResolvedValueOnce({
+      id: "inst_existing",
+      customerSlug: "acme-prod",
+      deploymentKind: "HOSTED_DEDICATED",
+      environment: "production",
+      railwayProjectId: null,
+      railwayEnvironmentId: null,
+      railwayWebServiceId: null,
+      railwayWorkerServiceId: null,
+      railwayPostgresServiceId: null,
+      railwayRedisServiceId: null,
+    });
+    const railwayClient = { graphql: vi.fn() } as any;
+
+    await expect(admin.provisionCustomerDeployment(dummyActor, {
+      label: "Acme Production",
+      customerSlug: "acme-prod",
+      region: "eu-west4",
+      dataResidency: "eu",
+      releaseImageTag: "sha-1",
+      webImage: "ghcr.io/corgtex/web:sha-1",
+      workerImage: "ghcr.io/corgtex/worker:sha-1",
+    }, railwayClient)).rejects.toMatchObject({
+      status: 409,
+      code: "RAILWAY_STACK_RECONCILIATION_REQUIRED",
+    });
+    expect(railwayClient.graphql).not.toHaveBeenCalled();
   });
 
   it("provisionCustomerDeployment rejects EU data residency outside EU regions", async () => {

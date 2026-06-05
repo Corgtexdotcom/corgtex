@@ -217,6 +217,45 @@ function serviceInstanceUpdateInput(spec: RuntimeServiceSpec, region?: string) {
   };
 }
 
+async function resolveRailwayEnvironmentId(client: RailwayClient, projectId: string, environmentName: string) {
+  const normalizedEnvironmentName = normalizeOptional(environmentName) ?? "production";
+  const environments = await client.graphql<{
+    environments: {
+      edges?: Array<{ node?: { id: string; name: string } | null }>;
+    };
+  }>(
+    `query ListProjectEnvironments($projectId: String!) {
+      environments(projectId: $projectId, isEphemeral: false) {
+        edges { node { id name } }
+      }
+    }`,
+    { projectId },
+  );
+
+  const existing = environments.environments.edges
+    ?.map((edge) => edge.node)
+    .find((environment) => environment?.name === normalizedEnvironmentName);
+  if (existing?.id) {
+    return existing.id;
+  }
+
+  const created = await client.graphql<{
+    environmentCreate: { id: string; name: string };
+  }>(
+    `mutation CreateEnvironment($input: EnvironmentCreateInput!) {
+      environmentCreate(input: $input) { id name }
+    }`,
+    {
+      input: {
+        projectId,
+        name: normalizedEnvironmentName,
+      },
+    },
+  );
+
+  return created.environmentCreate.id;
+}
+
 export async function provisionRailwayCustomerStack(
   client: RailwayClient,
   input: RailwayProvisioningInput,
@@ -225,13 +264,10 @@ export async function provisionRailwayCustomerStack(
   const workerSpec = requireRuntimeServiceSpec("Worker service", input.workerImage, input.workerSource);
 
   const project = await client.graphql<{
-    projectCreate: { id: string; defaultEnvironment: { id: string } | null };
+    projectCreate: { id: string };
   }>(
     `mutation CreateProject($input: ProjectCreateInput!) {
-      projectCreate(input: $input) {
-        id
-        defaultEnvironment { id }
-      }
+      projectCreate(input: $input) { id }
     }`,
     {
       input: {
@@ -242,10 +278,7 @@ export async function provisionRailwayCustomerStack(
   );
 
   const projectId = project.projectCreate.id;
-  const environmentId = project.projectCreate.defaultEnvironment?.id;
-  if (!environmentId) {
-    throw new AppError(502, "RAILWAY_API_ERROR", "Railway project did not include a default environment.");
-  }
+  const environmentId = await resolveRailwayEnvironmentId(client, projectId, input.environmentName);
 
   const services = await client.graphql<{
     web: { id: string };

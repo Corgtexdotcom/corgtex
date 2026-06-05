@@ -14,6 +14,7 @@ const {
   purgeExpiredCommunicationMessagesMock,
   syncSlackPublicArchiveForWorkspaceMock,
   runMeetingAgendaThreadEditMock,
+  runControlPlaneClientMigrationWorkerVerificationJobMock,
   runControlPlaneFleetSnapshotJobMock,
   runControlPlaneReleaseDeployJobMock,
   syncRecorderCalendarSourceMock,
@@ -63,6 +64,7 @@ const {
   purgeExpiredCommunicationMessagesMock: vi.fn(),
   syncSlackPublicArchiveForWorkspaceMock: vi.fn(),
   runMeetingAgendaThreadEditMock: vi.fn(),
+  runControlPlaneClientMigrationWorkerVerificationJobMock: vi.fn(),
   runControlPlaneFleetSnapshotJobMock: vi.fn(),
   runControlPlaneReleaseDeployJobMock: vi.fn(),
   syncRecorderCalendarSourceMock: vi.fn(),
@@ -103,6 +105,8 @@ vi.mock("@corgtex/domain", () => ({
   purgeExpiredCommunicationMessages: purgeExpiredCommunicationMessagesMock,
   syncSlackPublicArchiveForWorkspace: syncSlackPublicArchiveForWorkspaceMock,
   runMeetingAgendaThreadEdit: runMeetingAgendaThreadEditMock,
+  CONTROL_PLANE_CLIENT_MIGRATION_VERIFY_JOB_TYPE: "control-plane.client-migration.verify",
+  runControlPlaneClientMigrationWorkerVerificationJob: runControlPlaneClientMigrationWorkerVerificationJobMock,
   CONTROL_PLANE_FLEET_SNAPSHOT_JOB_TYPE: "control-plane.fleet-snapshot",
   runControlPlaneFleetSnapshotJob: runControlPlaneFleetSnapshotJobMock,
   CONTROL_PLANE_RELEASE_DEPLOY_JOB_TYPE: "control-plane.release.deploy-latest",
@@ -142,6 +146,7 @@ describe("runPendingJobs", () => {
     purgeExpiredCommunicationMessagesMock.mockReset();
     syncSlackPublicArchiveForWorkspaceMock.mockReset();
     runMeetingAgendaThreadEditMock.mockReset();
+    runControlPlaneClientMigrationWorkerVerificationJobMock.mockReset().mockResolvedValue({ id: "mig-1", status: "import_verified" });
     runControlPlaneFleetSnapshotJobMock.mockReset().mockResolvedValue({ refreshed: true });
     runControlPlaneReleaseDeployJobMock.mockReset().mockResolvedValue({ status: "deployed" });
     syncRecorderCalendarSourceMock.mockReset().mockResolvedValue({ action: "synced" });
@@ -367,6 +372,65 @@ describe("runPendingJobs", () => {
       where: { id: "job-1" },
       data: expect.objectContaining({
         status: "COMPLETED",
+      }),
+    });
+  });
+
+  it("dispatches control-plane client migration verification jobs without a workspace id", async () => {
+    txMock.$queryRaw.mockResolvedValue([
+      {
+        id: "job-1",
+        workspaceId: null,
+        type: "control-plane.client-migration.verify",
+        payload: {
+          migrationRunId: "mig-1",
+          destinationDeploymentId: "dep-destination",
+          verificationSummary: { verified: true },
+          idMaps: [{ entityType: "Member", sourceId: "member-1", destinationId: "member-a" }],
+          reason: "Queued worker verification.",
+        },
+        attempts: 1,
+      },
+    ]);
+
+    await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
+
+    expect(runControlPlaneClientMigrationWorkerVerificationJobMock).toHaveBeenCalledWith({
+      migrationRunId: "mig-1",
+      destinationDeploymentId: "dep-destination",
+      verificationSummary: { verified: true },
+      idMaps: [{ entityType: "Member", sourceId: "member-1", destinationId: "member-a" }],
+      reason: "Queued worker verification.",
+    });
+    expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({
+      where: { id: "job-1" },
+      data: expect.objectContaining({
+        status: "COMPLETED",
+      }),
+    });
+  });
+
+  it("fails malformed control-plane client migration verification jobs without mutating migration state", async () => {
+    txMock.$queryRaw.mockResolvedValue([
+      {
+        id: "job-1",
+        workspaceId: null,
+        type: "control-plane.client-migration.verify",
+        payload: {
+          destinationDeploymentId: "dep-destination",
+        },
+        attempts: 5,
+      },
+    ]);
+
+    await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
+
+    expect(runControlPlaneClientMigrationWorkerVerificationJobMock).not.toHaveBeenCalled();
+    expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({
+      where: { id: "job-1" },
+      data: expect.objectContaining({
+        status: "FAILED",
+        error: "Control Plane client migration verification job is missing migrationRunId.",
       }),
     });
   });

@@ -40,6 +40,8 @@ const CUSTOMER_DEPLOYMENT_BOOTSTRAP_STATUSES = new Set([
   "failed",
 ]);
 
+const CONTROL_PLANE_CLIENTS_WRITE_SCOPE = "control-plane:clients:write";
+
 type CustomerDeploymentHealthPayload = {
   status?: string;
   database?: string;
@@ -71,6 +73,17 @@ function normalizeOptional(value: string | null | undefined) {
   return trimmed ? trimmed : null;
 }
 
+function hasControlPlaneAgentScope(actor: AppActor, scope: string) {
+  if (actor.kind !== "agent" || actor.authProvider !== "control-plane") return false;
+  const scopes = new Set(actor.scopes?.length ? actor.scopes : []);
+  return scopes.has("control-plane:*") || scopes.has(scope);
+}
+
+function requireCustomerProvisioningAccess(actor: AppActor) {
+  if (hasControlPlaneAgentScope(actor, CONTROL_PLANE_CLIENTS_WRITE_SCOPE)) return;
+  requireGlobalOperator(actor);
+}
+
 function requireStatus(value: string, valid: Set<string>, label: string) {
   const normalized = value.trim().toLowerCase();
   invariant(valid.has(normalized), 400, "INVALID_INPUT", `Invalid ${label} status.`);
@@ -88,6 +101,42 @@ function assertDataResidency(region: string, dataResidency: string) {
       "EU data residency requires an EU Railway region.",
     );
   }
+}
+
+function hasCompleteRailwayStack(deployment: {
+  railwayProjectId?: string | null;
+  railwayEnvironmentId?: string | null;
+  railwayWebServiceId?: string | null;
+  railwayWorkerServiceId?: string | null;
+  railwayPostgresServiceId?: string | null;
+  railwayRedisServiceId?: string | null;
+}) {
+  return Boolean(
+    deployment.railwayProjectId
+      && deployment.railwayEnvironmentId
+      && deployment.railwayWebServiceId
+      && deployment.railwayWorkerServiceId
+      && deployment.railwayPostgresServiceId
+      && deployment.railwayRedisServiceId,
+  );
+}
+
+function hasAnyRailwayStackResource(deployment: {
+  railwayProjectId?: string | null;
+  railwayEnvironmentId?: string | null;
+  railwayWebServiceId?: string | null;
+  railwayWorkerServiceId?: string | null;
+  railwayPostgresServiceId?: string | null;
+  railwayRedisServiceId?: string | null;
+}) {
+  return Boolean(
+    deployment.railwayProjectId
+      || deployment.railwayEnvironmentId
+      || deployment.railwayWebServiceId
+      || deployment.railwayWorkerServiceId
+      || deployment.railwayPostgresServiceId
+      || deployment.railwayRedisServiceId,
+  );
 }
 
 async function findManagedWorkspaceId(customerSlug: string | null | undefined) {
@@ -623,15 +672,41 @@ export async function provisionCustomerDeployment(actor: AppActor, params: {
   bootstrapBundleUri?: string | null;
   bootstrapBundleChecksum?: string | null;
   bootstrapBundleSchemaVersion?: string | null;
+  primary?: boolean;
   variables?: Record<string, string>;
 }, railwayClient: RailwayClient = createRailwayClientFromEnv()) {
-  requireGlobalOperator(actor);
+  requireCustomerProvisioningAccess(actor);
   const customerSlug = normalizeSlug(params.customerSlug);
-  const managedWorkspaceId = await findManagedWorkspaceId(customerSlug);
   assertDataResidency(params.region, params.dataResidency);
   const url = params.customDomain?.trim()
     ? `https://${params.customDomain.trim().replace(/^https?:\/\//, "").replace(/\/$/, "")}`
     : `https://${customerSlug}.corgtex.com`;
+
+  const existingDeployment = await prisma.customerDeployment.findFirst({
+    where: {
+      customerSlug,
+      deploymentKind: "HOSTED_DEDICATED",
+      environment: "production",
+    },
+  });
+  if (existingDeployment && hasCompleteRailwayStack(existingDeployment)) {
+    await recordCustomerDeploymentEvent(actor, existingDeployment.id, "customer_deployment.provisioning_skipped_existing_stack", {
+      customerSlug,
+      railwayProjectId: existingDeployment.railwayProjectId,
+      railwayEnvironmentId: existingDeployment.railwayEnvironmentId,
+      reason: "complete_railway_stack_already_registered",
+    });
+    return existingDeployment;
+  }
+  if (existingDeployment) {
+    throw new AppError(
+      409,
+      "RAILWAY_STACK_RECONCILIATION_REQUIRED",
+      hasAnyRailwayStackResource(existingDeployment)
+        ? "Existing hosted deployment has a partial Railway stack. Reconcile it before retrying provisioning."
+        : "Existing hosted deployment was already registered. Reconcile its Railway stack before retrying provisioning.",
+    );
+  }
 
   const { deployment } = await upsertCustomerDeployment({
     accountSlug: customerSlug,
@@ -656,8 +731,8 @@ export async function provisionCustomerDeployment(actor: AppActor, params: {
     bootstrapBundleSchemaVersion: params.bootstrapBundleSchemaVersion,
     provisioningStatus: "provisioning",
     bootstrapStatus: params.bootstrapBundleUri ? "pending" : "not_started",
-    managedWorkspaceId,
-    primary: true,
+    managedWorkspaceId: null,
+    primary: params.primary === true,
   });
 
   await recordCustomerDeploymentEvent(actor, deployment.id, "customer_deployment.provisioning_started", {
@@ -667,7 +742,6 @@ export async function provisionCustomerDeployment(actor: AppActor, params: {
     releaseImageTag: params.releaseImageTag,
     storageBucketConfigured: Boolean(params.storageBucketName),
     hasBootstrapBundle: Boolean(params.bootstrapBundleUri),
-    managedWorkspaceId,
   });
 
   try {

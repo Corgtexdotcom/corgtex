@@ -4128,6 +4128,7 @@ model CustomerAccount {
   fleetSnapshots    FleetHealthSnapshot[]
   entitlements      CustomerEntitlement[]
   releaseTargets    CustomerReleaseTarget[]
+  clientMigrations  ClientMigrationRun[]
 
   @@index([status])
   @@index([managementAuthority])
@@ -4140,7 +4141,7 @@ model CustomerDeployment {
   url                          String                   @unique
   environment                  String                   @default("production")
   notes                        String?
-  customerSlug                 String?                  @unique
+  customerSlug                 String?
   customerAccountId            String?
   deploymentKind               CustomerDeploymentKind   @default(REMOTE_MANAGED)
   deploymentStatus             CustomerDeploymentStatus @default(DRAFT)
@@ -4195,8 +4196,11 @@ model CustomerDeployment {
   fleetSnapshots    FleetHealthSnapshot[]
   entitlements      CustomerEntitlement[]
   releaseTargets    CustomerReleaseTarget[]
+  clientMigrationsAsSource      ClientMigrationRun[] @relation("ClientMigrationSourceDeployment")
+  clientMigrationsAsDestination ClientMigrationRun[] @relation("ClientMigrationDestinationDeployment")
 
   @@index([customerAccountId])
+  @@index([customerSlug])
   @@index([deploymentKind])
   @@index([deploymentStatus])
   @@index([provisioningStatus])
@@ -4283,6 +4287,52 @@ model CustomerDeploymentEvent {
 
   @@index([deploymentId, createdAt])
   @@index([action, createdAt])
+}
+
+model ClientMigrationRun {
+  id                      String    @id @default(uuid())
+  customerAccountId       String
+  sourceDeploymentId      String
+  destinationDeploymentId String?
+  direction               String
+  status                  String    @default("planned")
+  actorUserId             String?
+  actorLabel              String?
+  reason                  String
+  planSummary             Json?
+  verificationSummary     Json?
+  error                   String?
+  dryRunAt                DateTime?
+  executedAt              DateTime?
+  finalizedAt             DateTime?
+  rolledBackAt            DateTime?
+  createdAt               DateTime  @default(now())
+  updatedAt               DateTime  @updatedAt
+
+  customerAccount       CustomerAccount     @relation(fields: [customerAccountId], references: [id], onDelete: Cascade)
+  sourceDeployment      CustomerDeployment  @relation("ClientMigrationSourceDeployment", fields: [sourceDeploymentId], references: [id], onDelete: Cascade)
+  destinationDeployment CustomerDeployment? @relation("ClientMigrationDestinationDeployment", fields: [destinationDeploymentId], references: [id], onDelete: SetNull)
+  idMaps                ClientMigrationIdMap[]
+
+  @@index([customerAccountId, status, createdAt])
+  @@index([sourceDeploymentId, createdAt])
+  @@index([destinationDeploymentId, createdAt])
+}
+
+model ClientMigrationIdMap {
+  id               String   @id @default(uuid())
+  migrationRunId   String
+  entityType       String
+  sourceId         String
+  destinationId    String?
+  checksum         String?
+  metadata         Json?
+  createdAt        DateTime @default(now())
+
+  migrationRun ClientMigrationRun @relation(fields: [migrationRunId], references: [id], onDelete: Cascade)
+
+  @@unique([migrationRunId, entityType, sourceId])
+  @@index([destinationId])
 }
 
 model CustomerDeploymentAccess {

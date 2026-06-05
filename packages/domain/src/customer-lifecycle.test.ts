@@ -9,6 +9,7 @@ const { prismaMock } = vi.hoisted(() => ({
       update: vi.fn(),
     },
     customerDeployment: {
+      findUnique: vi.fn(),
       upsert: vi.fn(),
     },
     workspace: {
@@ -49,6 +50,7 @@ describe("customer lifecycle", () => {
       id: "cust-1",
       primaryDeploymentId: "inst-1",
     });
+    prismaMock.customerDeployment.findUnique.mockResolvedValue(null);
     prismaMock.customerDeployment.upsert.mockResolvedValue({
       id: "inst-1",
       customerSlug: "acme",
@@ -107,7 +109,7 @@ describe("customer lifecycle", () => {
 
     expect(result.deployment.id).toBe("inst-1");
     expect(prismaMock.customerDeployment.upsert).toHaveBeenCalledWith({
-      where: { customerSlug: "acme" },
+      where: { url: "https://acme.test" },
       update: expect.objectContaining({
         customerAccountId: "cust-1",
         deploymentKind: "HOSTED_DEDICATED",
@@ -125,6 +127,98 @@ describe("customer lifecycle", () => {
       where: { id: "cust-1" },
       data: { primaryDeploymentId: "inst-1" },
     });
+  });
+
+  it("rejects deployment URL reuse across customer accounts", async () => {
+    const { registerCustomerDeployment } = await import("./customer-lifecycle");
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce({
+      id: "inst-other",
+      customerAccountId: "cust-other",
+      customerSlug: "other",
+    });
+
+    await expect(registerCustomerDeployment({
+      accountSlug: "acme",
+      accountDisplayName: "Acme",
+      accountStatus: "ONBOARDING",
+      label: "Acme Production",
+      url: "https://acme.test/",
+      deploymentKind: "HOSTED_DEDICATED",
+      deploymentStatus: "PROVISIONING",
+      customerSlug: "acme",
+    })).rejects.toMatchObject({
+      status: 409,
+      code: "CUSTOMER_DEPLOYMENT_URL_CONFLICT",
+    });
+    expect(prismaMock.customerDeployment.upsert).not.toHaveBeenCalled();
+  });
+
+  it("rejects deployment URL reuse from unowned legacy rows", async () => {
+    const { registerCustomerDeployment } = await import("./customer-lifecycle");
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce({
+      id: "inst-legacy",
+      customerAccountId: null,
+      customerSlug: null,
+    });
+
+    await expect(registerCustomerDeployment({
+      accountSlug: "acme",
+      accountDisplayName: "Acme",
+      accountStatus: "ONBOARDING",
+      label: "Acme Production",
+      url: "https://acme.test/",
+      deploymentKind: "HOSTED_DEDICATED",
+      deploymentStatus: "PROVISIONING",
+      customerSlug: "acme",
+    })).rejects.toMatchObject({
+      status: 409,
+      code: "CUSTOMER_DEPLOYMENT_URL_CONFLICT",
+    });
+    expect(prismaMock.customerDeployment.upsert).not.toHaveBeenCalled();
+  });
+
+  it("does not replace an existing primary deployment unless explicitly forced", async () => {
+    const { registerCustomerDeployment } = await import("./customer-lifecycle");
+    prismaMock.customerAccount.findUnique.mockResolvedValueOnce({
+      id: "cust-1",
+      primaryDeploymentId: "inst-existing",
+    });
+
+    await registerCustomerDeployment({
+      accountSlug: "acme",
+      accountDisplayName: "Acme",
+      accountStatus: "ONBOARDING",
+      label: "Acme Hosted",
+      url: "https://acme-hosted.test/",
+      deploymentKind: "HOSTED_DEDICATED",
+      deploymentStatus: "PROVISIONING",
+      customerSlug: "acme",
+      primary: false,
+    });
+
+    expect(prismaMock.customerAccount.update).not.toHaveBeenCalled();
+  });
+
+  it("does not set a missing primary when primary is explicitly false", async () => {
+    const { registerCustomerDeployment } = await import("./customer-lifecycle");
+    prismaMock.customerAccount.findUnique.mockResolvedValueOnce({
+      id: "cust-1",
+      primaryDeploymentId: null,
+    });
+
+    await registerCustomerDeployment({
+      accountSlug: "acme",
+      accountDisplayName: "Acme",
+      accountStatus: "ONBOARDING",
+      label: "Acme Hosted",
+      url: "https://acme-hosted.test/",
+      deploymentKind: "HOSTED_DEDICATED",
+      deploymentStatus: "PROVISIONING",
+      customerSlug: "acme",
+      primary: false,
+    });
+
+    expect(prismaMock.customerAccount.update).not.toHaveBeenCalled();
   });
 
   it("links selected managed workspaces as shared workspace deployments", async () => {
