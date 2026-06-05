@@ -208,7 +208,13 @@ describe("control plane domain", () => {
     prismaMock.fleetHealthSnapshot.findFirst.mockResolvedValue(null);
     prismaMock.customerAccount.findMany.mockResolvedValue([]);
     prismaMock.customerDeployment.findMany.mockResolvedValue([]);
+    prismaMock.workspaceFeatureFlag.findUnique.mockResolvedValue(null);
     prismaMock.workspaceFeatureFlag.findMany.mockResolvedValue([]);
+    prismaMock.workspaceMeetingRecorderConfig.findUnique.mockResolvedValue(null);
+    prismaMock.workspaceRecorderCalendarSource.findUnique.mockResolvedValue(null);
+    prismaMock.meetingRecorderSmokeRun.findFirst.mockResolvedValue(null);
+    prismaMock.meetingRecording.aggregate.mockResolvedValue({ _sum: { durationSeconds: 0 } });
+    prismaMock.meetingRecording.count.mockResolvedValue(0);
     memberMocks.sendMemberSetupEmail.mockResolvedValue({ status: "sent" });
     vi.stubEnv("RAILWAY_API_TOKEN", "test-railway-token");
   });
@@ -375,6 +381,301 @@ describe("control plane domain", () => {
       hasDeployment: false,
       deploymentStatus: "DRAFT",
       supportConnectorStatus: "not_configured",
+    });
+  });
+
+  it("builds client switcher options and wide matrix rows without impersonation state", async () => {
+    const { getControlPlaneClientOptions, listControlPlaneMatrix } = await import("./control-plane");
+    const observedAt = new Date("2026-06-01T10:00:00.000Z");
+    vi.stubEnv("RECALL_API_KEY", "recall-token");
+    vi.stubEnv("RECALL_WEBHOOK_SECRET", "recall-secret");
+    prismaMock.customerAccount.findMany.mockResolvedValue([
+      {
+        id: "cust-1",
+        slug: "acme",
+        displayName: "Acme",
+        status: "ACTIVE",
+        managementAuthority: "CORGTEX",
+        supportOwnerEmail: "owner@corgtex.com",
+        notes: null,
+        primaryDeploymentId: "inst-1",
+        createdAt: observedAt,
+        updatedAt: observedAt,
+        fleetSnapshots: [],
+        deployments: [],
+        primaryDeployment: {
+          id: "inst-1",
+          label: "Acme",
+          url: "https://acme.test",
+          customerSlug: "acme",
+          customerAccountId: "cust-1",
+          supportOwnerEmail: "owner@corgtex.com",
+          provisioningStatus: "active",
+          lastHealthStatus: "ok",
+          lastHealthError: null,
+          releaseImageTag: "web:2026.06.01",
+          releaseVersion: "2026.06.01",
+          supportConnectorStatus: "connected",
+          supportCredentialEnc: null,
+          managedWorkspaceId: "ws-1",
+          managedWorkspace: {
+            id: "ws-1",
+            slug: "acme",
+            name: "Acme",
+            _count: {
+              members: 7,
+              externalDataSources: 2,
+              brainArticles: 12,
+              brainSources: 1,
+              agentRuns: 5,
+              workflowJobs: 7,
+              communicationInstallations: 1,
+              meetingRecordings: 3,
+            },
+          },
+          supportOperations: [],
+          fleetSnapshots: [],
+          _count: { supportOperations: 0, events: 0 },
+          createdAt: observedAt,
+          updatedAt: observedAt,
+        },
+      },
+      {
+        id: "cust-2",
+        slug: "future-co",
+        displayName: "Future Co",
+        status: "ONBOARDING",
+        managementAuthority: "CORGTEX",
+        supportOwnerEmail: null,
+        notes: null,
+        primaryDeploymentId: null,
+        createdAt: observedAt,
+        updatedAt: observedAt,
+        fleetSnapshots: [],
+        deployments: [],
+        primaryDeployment: null,
+      },
+    ] as any);
+    prismaMock.customerDeployment.findMany.mockResolvedValue([
+      {
+        id: "remote-1",
+        label: "Remote Co",
+        url: "https://remote.test",
+        customerSlug: "remote-co",
+        customerAccountId: null,
+        supportOwnerEmail: null,
+        provisioningStatus: "active",
+        lastHealthStatus: null,
+        lastHealthError: "Release drift: web image is behind target.",
+        releaseImageTag: "web:old",
+        releaseVersion: null,
+        supportConnectorStatus: "not_configured",
+        supportCredentialEnc: null,
+        managedWorkspaceId: null,
+        managedWorkspace: null,
+        supportOperations: [],
+        fleetSnapshots: [
+          {
+            snapshotKind: "HEALTH",
+            status: "degraded",
+            observedAt,
+            createdAt: observedAt,
+            summary: null,
+            error: null,
+          },
+        ],
+        _count: { supportOperations: 0, events: 0 },
+        createdAt: observedAt,
+        updatedAt: observedAt,
+      },
+    ] as any);
+    prismaMock.workspaceFeatureFlag.findUnique.mockResolvedValue({ enabled: true });
+    prismaMock.workspaceMeetingRecorderConfig.findUnique.mockResolvedValue({
+      enabled: true,
+      defaultProvider: "RECALL_AI",
+      fallbackProvider: null,
+      monthlyMinuteCap: 6000,
+    });
+    prismaMock.workspaceRecorderCalendarSource.findUnique.mockResolvedValue({
+      providerAccountId: "calendar-1",
+      providerAccountEmail: "calendar@acme.test",
+      status: "ACTIVE",
+      lastSyncAt: new Date("2026-06-01T09:00:00.000Z"),
+      lastSyncError: null,
+    });
+    prismaMock.meetingRecorderSmokeRun.findFirst.mockResolvedValue({
+      status: "COMPLETED",
+      createdAt: new Date("2026-06-01T09:05:00.000Z"),
+    });
+    prismaMock.workflowJob.count.mockResolvedValue(0);
+    prismaMock.meetingRecording.aggregate.mockResolvedValue({ _sum: { durationSeconds: 3600 } });
+    prismaMock.meetingRecording.count.mockResolvedValue(2);
+
+    const options = await getControlPlaneClientOptions(operatorActor);
+    const matrix = await listControlPlaneMatrix(operatorActor, { pageSize: 25 });
+
+    expect(options.map((option) => option.id)).toEqual(["inst-1", "remote-1"]);
+    expect(options.find((option) => option.id === "future-co")).toBeUndefined();
+    expect(matrix.items).toHaveLength(3);
+    expect(matrix.items.find((row) => row.id === "inst-1")).toMatchObject({
+      recorder: { status: "ready", provider: "RECALL_AI", monthlyUsageMinutes: 60, failureCount: 2 },
+      agents: { status: "active", runCount: 5 },
+      users: { status: "managed", count: 7 },
+      support: { mode: "managed" },
+    });
+    expect(matrix.items.find((row) => row.id === "remote-1")).toMatchObject({
+      release: { status: "drift" },
+      recorder: { status: "requires_connector" },
+      agents: { status: "requires_connector" },
+      users: { status: "requires_connector" },
+    });
+  });
+
+  it("marks disabled recorders when entitlement is off", async () => {
+    const { listControlPlaneRecorderMatrix } = await import("./control-plane");
+    const now = new Date("2026-06-01T10:00:00.000Z");
+    prismaMock.customerAccount.findMany.mockResolvedValue([
+      {
+        id: "cust-1",
+        slug: "acme",
+        displayName: "Acme",
+        supportOwnerEmail: null,
+        notes: null,
+        primaryDeploymentId: "inst-1",
+        createdAt: now,
+        updatedAt: now,
+        fleetSnapshots: [],
+        deployments: [],
+        primaryDeployment: {
+          id: "inst-1",
+          label: "Acme",
+          url: "https://acme.test",
+          customerSlug: "acme",
+          supportOwnerEmail: null,
+          provisioningStatus: "active",
+          lastHealthStatus: "ok",
+          releaseImageTag: "web:latest",
+          releaseVersion: null,
+          supportConnectorStatus: "connected",
+          supportCredentialEnc: null,
+          managedWorkspaceId: "ws-1",
+          managedWorkspace: { id: "ws-1", slug: "acme", name: "Acme", _count: { members: 2, agentRuns: 0 } },
+          supportOperations: [],
+          fleetSnapshots: [],
+          _count: { supportOperations: 0, events: 0 },
+          createdAt: now,
+          updatedAt: now,
+        },
+      },
+    ] as any);
+    prismaMock.customerDeployment.findMany.mockResolvedValue([]);
+    prismaMock.workspaceFeatureFlag.findUnique.mockResolvedValue({ enabled: false });
+    prismaMock.workspaceMeetingRecorderConfig.findUnique.mockResolvedValue({
+      enabled: false,
+      defaultProvider: "RECALL_AI",
+      fallbackProvider: null,
+      monthlyMinuteCap: 3000,
+    });
+
+    const matrix = await listControlPlaneRecorderMatrix(operatorActor, { status: "disabled" });
+
+    expect(matrix.items).toHaveLength(1);
+    expect(matrix.items[0]).toMatchObject({
+      deploymentId: "inst-1",
+      status: "disabled",
+      entitlementEnabled: false,
+      configured: true,
+      monthlyMinuteCap: 3000,
+    });
+  });
+
+  it("filters recorder matrix by client and surfaces readiness failures and missing remote data", async () => {
+    const { listControlPlaneRecorderMatrix } = await import("./control-plane");
+    const now = new Date("2026-06-01T10:00:00.000Z");
+    prismaMock.customerAccount.findMany.mockResolvedValue([
+      {
+        id: "cust-1",
+        slug: "acme",
+        displayName: "Acme",
+        supportOwnerEmail: null,
+        notes: null,
+        primaryDeploymentId: "inst-1",
+        createdAt: now,
+        updatedAt: now,
+        fleetSnapshots: [],
+        deployments: [],
+        primaryDeployment: {
+          id: "inst-1",
+          label: "Acme",
+          url: "https://acme.test",
+          customerSlug: "acme",
+          supportOwnerEmail: null,
+          provisioningStatus: "active",
+          lastHealthStatus: "ok",
+          releaseImageTag: "web:latest",
+          releaseVersion: null,
+          supportConnectorStatus: "connected",
+          supportCredentialEnc: null,
+          managedWorkspaceId: "ws-1",
+          managedWorkspace: { id: "ws-1", slug: "acme", name: "Acme", _count: { members: 2, agentRuns: 0 } },
+          supportOperations: [],
+          fleetSnapshots: [],
+          _count: { supportOperations: 0, events: 0 },
+          createdAt: now,
+          updatedAt: now,
+        },
+      },
+    ] as any);
+    prismaMock.customerDeployment.findMany.mockResolvedValue([
+      {
+        id: "remote-1",
+        label: "Remote Co",
+        url: "https://remote.test",
+        customerSlug: "remote-co",
+        supportOwnerEmail: null,
+        provisioningStatus: "active",
+        lastHealthStatus: "ok",
+        releaseImageTag: "web:latest",
+        releaseVersion: null,
+        supportConnectorStatus: "connected",
+        supportCredentialEnc: "encrypted-token",
+        managedWorkspaceId: null,
+        managedWorkspace: null,
+        supportOperations: [],
+        fleetSnapshots: [],
+        _count: { supportOperations: 0, events: 0 },
+        createdAt: now,
+        updatedAt: now,
+      },
+    ] as any);
+    prismaMock.workspaceFeatureFlag.findUnique.mockResolvedValue({ enabled: true });
+    prismaMock.workspaceMeetingRecorderConfig.findUnique.mockResolvedValue({
+      enabled: true,
+      defaultProvider: "RECALL_AI",
+      fallbackProvider: null,
+      monthlyMinuteCap: 6000,
+    });
+    prismaMock.workspaceRecorderCalendarSource.findUnique.mockResolvedValue(null);
+    prismaMock.meetingRecorderSmokeRun.findFirst.mockResolvedValue(null);
+
+    const filtered = await listControlPlaneRecorderMatrix(operatorActor, { client: "inst-1", status: "needs_setup" });
+    const unfiltered = await listControlPlaneRecorderMatrix(operatorActor, {});
+
+    expect(filtered.items).toHaveLength(1);
+    expect(filtered.items[0]).toMatchObject({
+      deploymentId: "inst-1",
+      status: "needs_setup",
+      readiness: {
+        ready: false,
+      },
+    });
+    expect(filtered.items[0].readiness.failedChecks.map((check) => check.key)).toContain("calendar_source");
+    expect(unfiltered.items.find((row) => row.deploymentId === "remote-1")).toMatchObject({
+      status: "unavailable",
+      configured: null,
+      readiness: {
+        detail: "No cached recorder integration snapshot is available.",
+      },
     });
   });
 

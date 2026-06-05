@@ -27,6 +27,7 @@ describe("control-plane copy", () => {
         customers: expect.any(String),
         agents: expect.any(String),
         releases: expect.any(String),
+        recorders: expect.any(String),
         operations: expect.any(String),
         users: expect.any(String),
         details: expect.any(String),
@@ -38,6 +39,7 @@ describe("control-plane copy", () => {
         customers: expect.any(String),
         agents: expect.any(String),
         releases: expect.any(String),
+        recorders: expect.any(String),
         operations: expect.any(String),
         users: expect.any(String),
       });
@@ -50,6 +52,7 @@ describe("control-plane copy", () => {
       "./operations/page.tsx",
       "./users/page.tsx",
       "./releases/page.tsx",
+      "./recorders/page.tsx",
       "./_components/ops-agent-chat.tsx",
     ].map(readSource).join("\n");
 
@@ -63,5 +66,20 @@ describe("control-plane copy", () => {
     ]) {
       expect(sources).not.toContain(forbidden);
     }
+  });
+
+  it("keeps detail tabs and client switching URL-backed", () => {
+    const detailPage = readSource("./deployments/[deploymentId]/page.tsx");
+    const tabs = readSource("./deployments/[deploymentId]/_components/detail-client-tabs.tsx");
+    const switcher = readSource("./_components/client-context-switcher.tsx");
+
+    expect(detailPage).toContain("searchParams?: Promise<{ tab?: string }>");
+    expect(detailPage).toContain("initialTab={activeTab}");
+    expect(tabs).toContain("new URLSearchParams(searchParams?.toString() ?? \"\")");
+    expect(tabs).toContain("router.replace(`${pathname}?${params.toString()}`, { scroll: false })");
+    expect(tabs).toContain("params.set(\"tab\", tabId)");
+    expect(switcher).toContain("/control-plane/deployments/${clientId}?tab=");
+    expect(switcher).toContain("params.set(\"client\", clientId)");
+    expect(switcher).toContain("params.delete(\"client\")");
   });
 });

@@ -1,9 +1,10 @@
 import { notFound } from "next/navigation";
-import { requireControlPlaneAccess } from "@corgtex/domain";
+import { getControlPlaneClientOptions, requireControlPlaneAccess } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { prisma } from "@corgtex/shared";
 import { Link } from "@/i18n/routing";
 import { cn } from "@/lib/utils";
+import { ClientContextSwitcher } from "../_components/client-context-switcher";
 import {
   Activity,
   AlertTriangle,
@@ -24,7 +25,12 @@ function statusTone(status?: string | null) {
   return "text-rose-400 border-rose-500/20 bg-rose-500/10";
 }
 
-export default async function ControlPlaneOperationsPage() {
+export default async function ControlPlaneOperationsPage({
+  searchParams,
+}: {
+  searchParams?: Promise<Record<string, string | undefined>>;
+}) {
+  const raw = await searchParams;
   const actor = await requirePageActor();
   try {
     await requireControlPlaneAccess(actor);
@@ -33,26 +39,30 @@ export default async function ControlPlaneOperationsPage() {
   }
 
   // Fetch real operations audit logs from database using Prisma SupportOperation
-  const operations = await prisma.supportOperation.findMany({
-    orderBy: { createdAt: "desc" },
-    take: 50,
-    include: {
-      deployment: {
-        select: {
-          id: true,
-          label: true,
-          customerSlug: true,
+  const [operations, clientOptions] = await Promise.all([
+    prisma.supportOperation.findMany({
+      where: raw?.client ? { deploymentId: raw.client } : undefined,
+      orderBy: { createdAt: "desc" },
+      take: 50,
+      include: {
+        deployment: {
+          select: {
+            id: true,
+            label: true,
+            customerSlug: true,
+          },
+        },
+        actor: {
+          select: {
+            id: true,
+            displayName: true,
+            email: true,
+          },
         },
       },
-      actor: {
-        select: {
-          id: true,
-          displayName: true,
-          email: true,
-        },
-      },
-    },
-  });
+    }),
+    getControlPlaneClientOptions(actor),
+  ]);
 
   const formattedOps = operations.map((op: any) => {
     const actionKey = op.action.toLowerCase();
@@ -79,16 +89,25 @@ export default async function ControlPlaneOperationsPage() {
     <div className="space-y-6 animate-in fade-in duration-300">
       
       {/* Header */}
-      <div>
-        <span className="text-[10px] font-bold tracking-widest text-brand-400 uppercase">
-          Operate & Audit
-        </span>
-        <h1 className="text-2xl font-bold tracking-tight text-white mt-1">
-          Operational Audit Logs
-        </h1>
-        <p className="text-xs text-muted mt-1 max-w-2xl">
-          Unified central audit trail tracking all platform actions, background syncs, feature flag changes, and emergency break-glass sessions across the fleet.
-        </p>
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+        <div>
+          <span className="text-[10px] font-bold tracking-widest text-brand-400 uppercase">
+            Operate & Audit
+          </span>
+          <h1 className="text-2xl font-bold tracking-tight text-white mt-1">
+            Operational Audit Logs
+          </h1>
+          <p className="text-xs text-muted mt-1 max-w-2xl">
+            Unified central audit trail tracking all platform actions, background syncs, feature flag changes, and emergency break-glass sessions across the fleet.
+          </p>
+        </div>
+        <ClientContextSwitcher
+          clients={clientOptions}
+          selectedClientId={raw?.client ?? ""}
+          mode="filter"
+          className="bg-bg-alt border border-line rounded-xl p-4"
+          label="Client"
+        />
       </div>
 
       {/* Top Indicators Row */}

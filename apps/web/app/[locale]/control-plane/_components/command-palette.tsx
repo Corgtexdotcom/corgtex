@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useRef } from "react";
 import { useTranslations } from "next-intl";
-import { Search, LayoutDashboard, Bot, GitBranch, Activity, UserCheck, ShieldAlert, ArrowRight, Cloud } from "lucide-react";
+import { Search, LayoutDashboard, Bot, GitBranch, Activity, UserCheck, ShieldAlert, ArrowRight, Cloud, Radio } from "lucide-react";
 import { useRouter } from "@/i18n/routing";
 import { cn } from "@/lib/utils";
 
@@ -49,6 +49,12 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
       description: t("commandPalette.items.releases"),
       href: "/control-plane/releases",
       icon: GitBranch,
+    },
+    {
+      title: t("nav.recorders"),
+      description: t("commandPalette.items.recorders"),
+      href: "/control-plane/recorders",
+      icon: Radio,
     },
     {
       title: t("nav.operations"),

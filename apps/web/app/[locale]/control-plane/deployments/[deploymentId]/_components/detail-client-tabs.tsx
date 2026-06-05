@@ -1,6 +1,7 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useTranslations } from "next-intl";
 import {
   Activity,
@@ -36,6 +37,8 @@ import {
   runReleaseOperationAction,
 } from "../../../actions";
 
+type DetailTabId = "overview" | "agents" | "config" | "users" | "releases" | "logs";
+
 interface TabProps {
   customer: any;
   integrations: any;
@@ -47,6 +50,7 @@ interface TabProps {
   deployPreflight: any;
   rollouts: any[];
   locale: string;
+  initialTab: DetailTabId;
 }
 
 export function CustomerDetailClientTabs({
@@ -60,9 +64,13 @@ export function CustomerDetailClientTabs({
   deployPreflight,
   rollouts,
   locale,
+  initialTab,
 }: TabProps) {
   const t = useTranslations("controlPlane");
-  const [activeTab, setActiveTab] = useState<"overview" | "agents" | "config" | "users" | "releases" | "logs">("overview");
+  const router = useRouter();
+  const pathname = usePathname() || "";
+  const searchParams = useSearchParams();
+  const [activeTab, setActiveTab] = useState<DetailTabId>(initialTab);
 
   // Local state for interactive details
   const [selectedAction, setSelectedAction] = useState("members.list");
@@ -75,6 +83,17 @@ export function CustomerDetailClientTabs({
     { id: "releases", label: "Releases & Matrix", icon: GitBranch },
     { id: "logs", label: "Support & Audit", icon: ShieldCheck },
   ] as const;
+
+  useEffect(() => {
+    setActiveTab(initialTab);
+  }, [initialTab]);
+
+  const selectTab = (tabId: DetailTabId) => {
+    setActiveTab(tabId);
+    const params = new URLSearchParams(searchParams?.toString() ?? "");
+    params.set("tab", tabId);
+    router.replace(`${pathname}?${params.toString()}`, { scroll: false });
+  };
 
   const tone = (status?: string | null) => {
     if (status === "ready" || status === "COMPLETED" || status === "ok" || status === "connected" || status === "active" || status === "enabled") return "text-emerald-400 border-emerald-500/20 bg-emerald-500/10";
@@ -98,7 +117,7 @@ export function CustomerDetailClientTabs({
           return (
             <button
               key={tab.id}
-              onClick={() => setActiveTab(tab.id)}
+              onClick={() => selectTab(tab.id)}
               className={cn(
                 "flex items-center gap-2 px-6 py-3 border-b-2 font-medium text-xs tracking-wide transition-all whitespace-nowrap",
                 isActive

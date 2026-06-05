@@ -116,7 +116,12 @@ function approvalLabel(summary: AgentAuthoritySummary) {
   return `${policy}; ${summary.approval.pendingApprovalCount} pending`;
 }
 
-export default async function ControlPlaneAgentsPage() {
+export default async function ControlPlaneAgentsPage({
+  searchParams,
+}: {
+  searchParams?: Promise<Record<string, string | undefined>>;
+}) {
+  const raw = await searchParams;
   const actor = await requirePageActor();
   try {
     await requireControlPlaneAccess(actor);
@@ -267,6 +272,7 @@ export default async function ControlPlaneAgentsPage() {
         agents={formattedAgents}
         runs={formattedRuns}
         customers={customers}
+        initialCustomerId={raw?.client ?? ""}
       />
 
     </div>

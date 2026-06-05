@@ -169,6 +169,94 @@ export type ControlPlaneFleetSort =
   | "owner"
   | "updated";
 
+export type ControlPlaneClientOption = {
+  id: string;
+  label: string;
+  slug: string | null;
+  healthStatus: string;
+  releaseLabel: string;
+  hasDeployment: boolean;
+  managedWorkspaceId: string | null;
+  supportConnectorStatus: string | null;
+};
+
+export type ControlPlaneMatrixStatus = "ok" | "attention" | "down" | "unknown";
+
+export type ControlPlaneRecorderMatrixStatus =
+  | "ready"
+  | "needs_setup"
+  | "disabled"
+  | "requires_connector"
+  | "unavailable";
+
+export type ControlPlaneRecorderMatrixRow = {
+  deploymentId: string;
+  clientLabel: string;
+  clientSlug: string | null;
+  hasDeployment: boolean;
+  hasManagedWorkspace: boolean;
+  supportConnectorStatus: string | null;
+  entitlementEnabled: boolean | null;
+  configured: boolean | null;
+  provider: MeetingRecorderProvider | null;
+  monthlyUsageMinutes: number | null;
+  monthlyMinuteCap: number | null;
+  failureCount: number | null;
+  status: ControlPlaneRecorderMatrixStatus;
+  readiness: {
+    ready: boolean | null;
+    detail: string;
+    failedChecks: Array<{
+      key: string;
+      label: string;
+      detail: string;
+    }>;
+  };
+  calendarSource: {
+    label: string;
+    status: string | null;
+    lastSyncAt: Date | null;
+  } | null;
+  lastSmokeRun: {
+    status: string;
+    createdAt: Date | null;
+  } | null;
+};
+
+export type ControlPlaneMatrixRow = {
+  id: string;
+  label: string;
+  slug: string | null;
+  hasDeployment: boolean;
+  ownerEmail: string | null;
+  health: {
+    status: string;
+    tone: ControlPlaneMatrixStatus;
+    detail: string | null;
+  };
+  release: {
+    label: string;
+    status: "aligned" | "drift" | "unknown";
+    detail: string | null;
+  };
+  support: {
+    status: string;
+    detail: string;
+    mode: "managed" | "remote" | "account_only";
+  };
+  recorder: Pick<ControlPlaneRecorderMatrixRow, "status" | "provider" | "monthlyUsageMinutes" | "failureCount" | "readiness">;
+  agents: {
+    status: string;
+    detail: string;
+    runCount: number | null;
+  };
+  users: {
+    status: string;
+    detail: string;
+    count: number | null;
+  };
+};
+
 export type ControlPlaneReleasePreflightCheck = {
   key: string;
   label: string;
@@ -748,7 +836,7 @@ function normalizedStatus(value: unknown) {
   return typeof value === "string" ? value.toLowerCase() : "";
 }
 
-function latestSnapshotForKind(deployment: { fleetSnapshots?: Array<{ snapshotKind: FleetSnapshotKind; status: string; observedAt: Date; error?: string | null }> }, kind: FleetSnapshotKind) {
+function latestSnapshotForKind(deployment: { fleetSnapshots?: Array<{ snapshotKind: FleetSnapshotKind; status: string; observedAt: Date; createdAt?: Date; summary?: unknown; error?: string | null }> }, kind: FleetSnapshotKind) {
   return deployment.fleetSnapshots?.find((snapshot) => snapshot.snapshotKind === kind) ?? null;
 }
 
@@ -859,6 +947,435 @@ export async function listControlPlaneFleetPage(actor: AppActor, params: {
       attention: rows.filter((row) => normalizedStatus(row.lastHealthStatus) && normalizedStatus(row.lastHealthStatus) !== "ok").length,
       supportReady: rows.filter((row) => Boolean(row.hasSupportCredential) && row.supportConnectorStatus !== "degraded").length,
       releaseDrift: rows.filter((row) => row.lastHealthError?.includes("Release drift:")).length,
+    },
+  };
+}
+
+type ControlPlaneDeploymentRow = Awaited<ReturnType<typeof listControlPlaneDeployments>>[number];
+
+function controlPlaneRowSlug(row: ControlPlaneDeploymentRow) {
+  return row.customerSlug
+    ?? row.customerAccount?.slug
+    ?? row.managedWorkspace?.slug
+    ?? row.remoteWorkspaceSlug
+    ?? null;
+}
+
+function controlPlaneHealthStatus(row: ControlPlaneDeploymentRow) {
+  return row.lastHealthStatus || latestSnapshotForKind(row, "HEALTH")?.status || row.provisioningStatus || "unknown";
+}
+
+function controlPlaneReleaseLabel(row: ControlPlaneDeploymentRow) {
+  return row.releaseImageTag || row.releaseVersion || "Unknown";
+}
+
+function controlPlaneReleaseDrift(row: ControlPlaneDeploymentRow) {
+  return row.lastHealthError?.includes("Release drift:")
+    ? row.lastHealthError
+    : latestSnapshotForKind(row, "RELEASE")?.error ?? null;
+}
+
+function controlPlaneMatrixTone(status?: string | null): ControlPlaneMatrixStatus {
+  const normalized = normalizedStatus(status);
+  if (["ok", "active", "connected", "configured", "ready", "completed", "aligned"].includes(normalized)) return "ok";
+  if (["down", "failed", "error", "suspended"].includes(normalized)) return "down";
+  if (["attention", "degraded", "provisioning", "pending", "needs_setup", "requires_connector", "unavailable"].includes(normalized)) {
+    return "attention";
+  }
+  return "unknown";
+}
+
+function controlPlaneSupportSummary(row: ControlPlaneDeploymentRow): ControlPlaneMatrixRow["support"] {
+  if (!row.hasDeployment) {
+    return {
+      status: "not_configured",
+      detail: "Deployment not provisioned.",
+      mode: "account_only",
+    };
+  }
+  if (row.managedWorkspaceId) {
+    return {
+      status: "managed",
+      detail: "Managed workspace is available locally.",
+      mode: "managed",
+    };
+  }
+  const cachedSnapshot = latestSnapshotForKind(row, "SUPPORT_READY");
+  const status = row.hasSupportCredential
+    ? row.supportConnectorStatus || cachedSnapshot?.status || "configured"
+    : cachedSnapshot?.status || "requires_connector";
+  return {
+    status,
+    detail: row.hasSupportCredential
+      ? "Support connector can inspect remote workspace state."
+      : "Support connector is required for live remote inspection.",
+    mode: "remote",
+  };
+}
+
+function controlPlaneAgentSummary(row: ControlPlaneDeploymentRow): ControlPlaneMatrixRow["agents"] {
+  const runCount = row.managedWorkspace?._count?.agentRuns ?? null;
+  if (runCount !== null) {
+    return {
+      status: runCount > 0 ? "active" : "idle",
+      detail: runCount > 0 ? `${runCount} run(s) recorded locally.` : "No local agent runs recorded.",
+      runCount,
+    };
+  }
+
+  const snapshot = latestSnapshotForKind(row, "SUPPORT_READY");
+  const cached = summarizeCachedSupportReadySnapshot(snapshot
+    ? {
+      status: snapshot.status,
+      summary: snapshot.summary,
+      error: snapshot.error ?? null,
+      observedAt: snapshot.observedAt,
+      createdAt: snapshot.createdAt ?? snapshot.observedAt,
+    }
+    : null);
+  const cachedRunCount = Object.values(cached.summary?.agentRuns ?? {}).reduce((total, count) => total + count, 0);
+  if (cachedRunCount > 0) {
+    return {
+      status: cached.riskFindings.length > 0 ? "attention" : "cached",
+      detail: `${cachedRunCount} run(s) from cached support snapshot.`,
+      runCount: cachedRunCount,
+    };
+  }
+
+  return {
+    status: row.hasSupportCredential ? "unavailable" : "requires_connector",
+    detail: row.hasSupportCredential ? "No cached agent snapshot is available." : "Support connector is required for remote agent visibility.",
+    runCount: null,
+  };
+}
+
+function controlPlaneUsersSummary(row: ControlPlaneDeploymentRow): ControlPlaneMatrixRow["users"] {
+  const count = row.managedWorkspace?._count?.members ?? null;
+  if (count !== null) {
+    return {
+      status: "managed",
+      detail: `${count} member(s) in the managed workspace.`,
+      count,
+    };
+  }
+  return {
+    status: row.hasSupportCredential ? "unavailable" : "requires_connector",
+    detail: row.hasSupportCredential ? "Use the client detail members tab for connector-backed users." : "Support connector is required for remote users.",
+    count: null,
+  };
+}
+
+function recorderProviderFromValue(value: unknown): MeetingRecorderProvider | null {
+  return typeof value === "string" && MEETING_RECORDER_PROVIDERS.has(value)
+    ? value as MeetingRecorderProvider
+    : null;
+}
+
+function dateField(value: unknown) {
+  if (value instanceof Date) return value;
+  if (typeof value !== "string") return null;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.valueOf()) ? null : parsed;
+}
+
+function fallbackRecorderRow(row: ControlPlaneDeploymentRow, status: ControlPlaneRecorderMatrixStatus, detail: string): ControlPlaneRecorderMatrixRow {
+  return {
+    deploymentId: row.id,
+    clientLabel: row.label,
+    clientSlug: controlPlaneRowSlug(row),
+    hasDeployment: row.hasDeployment,
+    hasManagedWorkspace: Boolean(row.managedWorkspaceId),
+    supportConnectorStatus: row.supportConnectorStatus,
+    entitlementEnabled: null,
+    configured: null,
+    provider: null,
+    monthlyUsageMinutes: null,
+    monthlyMinuteCap: null,
+    failureCount: null,
+    status,
+    readiness: {
+      ready: null,
+      detail,
+      failedChecks: [],
+    },
+    calendarSource: null,
+    lastSmokeRun: null,
+  };
+}
+
+function cachedRemoteRecorderRow(row: ControlPlaneDeploymentRow): ControlPlaneRecorderMatrixRow {
+  const snapshot = latestSnapshotForKind(row, "INTEGRATION");
+  const summary = jsonRecord(snapshot?.summary);
+  const integrations = arrayItems(summary?.integrations, ["items", "integrations"]);
+  const recorder = integrations.find((integration) => {
+    const key = stringField(integration.key)?.toLowerCase();
+    const label = stringField(integration.label)?.toLowerCase();
+    return key === "meeting_recorders" || key === "recorder" || Boolean(label?.includes("recorder"));
+  });
+  if (!recorder) {
+    return fallbackRecorderRow(
+      row,
+      row.hasSupportCredential ? "unavailable" : "requires_connector",
+      row.hasSupportCredential
+        ? "No cached recorder integration snapshot is available."
+        : "Support connector is required for remote recorder visibility.",
+    );
+  }
+
+  const ready = booleanField(recorder.vendorReadiness) ?? booleanField(recorder.ready);
+  const entitlementEnabled = booleanField(recorder.entitlementEnabled);
+  const configured = booleanField(recorder.configured);
+  const rawStatus = normalizedStatus(stringField(recorder.status));
+  const status: ControlPlaneRecorderMatrixStatus = ready
+    ? "ready"
+    : entitlementEnabled === false || rawStatus === "disabled"
+      ? "disabled"
+      : configured === false || rawStatus === "needs_setup"
+        ? "needs_setup"
+        : rawStatus === "enabled" || rawStatus === "active"
+          ? "needs_setup"
+          : "unavailable";
+  const usage = jsonRecord(recorder.usage);
+  const failures = typeof recorder.failures === "number" ? recorder.failures : null;
+  const calendarSource = jsonRecord(recorder.calendarSource);
+  const lastSmokeRun = jsonRecord(recorder.lastSmokeRun);
+
+  return {
+    deploymentId: row.id,
+    clientLabel: row.label,
+    clientSlug: controlPlaneRowSlug(row),
+    hasDeployment: row.hasDeployment,
+    hasManagedWorkspace: false,
+    supportConnectorStatus: row.supportConnectorStatus,
+    entitlementEnabled,
+    configured,
+    provider: recorderProviderFromValue(recorder.provider),
+    monthlyUsageMinutes: typeof usage?.usedMinutes === "number" ? usage.usedMinutes : null,
+    monthlyMinuteCap: typeof recorder.monthlyMinuteCap === "number" ? recorder.monthlyMinuteCap : null,
+    failureCount: failures,
+    status,
+    readiness: {
+      ready,
+      detail: snapshot?.error ?? (ready ? "Cached recorder snapshot is ready." : "Cached recorder snapshot needs review."),
+      failedChecks: [],
+    },
+    calendarSource: calendarSource
+      ? {
+        label: stringField(calendarSource.providerAccountEmail) ?? stringField(calendarSource.providerAccountId) ?? "Remote calendar",
+        status: stringField(calendarSource.status),
+        lastSyncAt: dateField(calendarSource.lastSyncAt),
+      }
+      : null,
+    lastSmokeRun: lastSmokeRun
+      ? {
+        status: stringField(lastSmokeRun.status) ?? "unknown",
+        createdAt: dateField(lastSmokeRun.createdAt),
+      }
+      : null,
+  };
+}
+
+async function buildManagedRecorderRow(row: ControlPlaneDeploymentRow): Promise<ControlPlaneRecorderMatrixRow> {
+  if (!row.managedWorkspaceId) return cachedRemoteRecorderRow(row);
+
+  const [config, usage, failureCount, readiness] = await Promise.all([
+    prisma.workspaceMeetingRecorderConfig.findUnique({ where: { workspaceId: row.managedWorkspaceId } }),
+    getMeetingRecorderMonthlyUsage(row.managedWorkspaceId),
+    prisma.meetingRecording.count({
+      where: {
+        workspaceId: row.managedWorkspaceId,
+        status: "FAILED",
+      },
+    }),
+    getMeetingRecorderEnterpriseReadiness(row.managedWorkspaceId),
+  ]);
+  const entitlementEnabled = readiness.checks.find((check) => check.key === "entitlement")?.ok ?? false;
+  const failedChecks = readiness.checks
+    .filter((check) => !check.ok)
+    .map((check) => ({
+      key: check.key,
+      label: check.label,
+      detail: check.detail,
+    }));
+  const status: ControlPlaneRecorderMatrixStatus = !entitlementEnabled
+    ? "disabled"
+    : !config
+      ? "needs_setup"
+      : !config.enabled
+        ? "disabled"
+        : readiness.ready
+          ? "ready"
+          : "needs_setup";
+  const calendarLabel = readiness.calendarSource?.providerAccountEmail
+    ?? readiness.calendarSource?.providerAccountId
+    ?? null;
+
+  return {
+    deploymentId: row.id,
+    clientLabel: row.label,
+    clientSlug: controlPlaneRowSlug(row),
+    hasDeployment: row.hasDeployment,
+    hasManagedWorkspace: true,
+    supportConnectorStatus: row.supportConnectorStatus,
+    entitlementEnabled,
+    configured: Boolean(config),
+    provider: config?.defaultProvider ?? readiness.config.defaultProvider,
+    monthlyUsageMinutes: usage.usedMinutes,
+    monthlyMinuteCap: config?.monthlyMinuteCap ?? readiness.config.monthlyMinuteCap,
+    failureCount,
+    status,
+    readiness: {
+      ready: readiness.ready,
+      detail: failedChecks[0]?.detail ?? "Recorder readiness checks are passing.",
+      failedChecks,
+    },
+    calendarSource: readiness.calendarSource
+      ? {
+        label: calendarLabel ?? "Microsoft calendar",
+        status: readiness.calendarSource.status,
+        lastSyncAt: readiness.calendarSource.lastSyncAt,
+      }
+      : null,
+    lastSmokeRun: readiness.lastSmokeRun
+      ? {
+        status: readiness.lastSmokeRun.status,
+        createdAt: readiness.lastSmokeRun.createdAt,
+      }
+      : null,
+  };
+}
+
+async function buildControlPlaneRecorderRows(rows: ControlPlaneDeploymentRow[]) {
+  return Promise.all(rows.map(async (row) => {
+    if (!row.hasDeployment) {
+      return fallbackRecorderRow(row, "unavailable", "Deployment is not provisioned yet.");
+    }
+    if (!row.managedWorkspaceId) {
+      return cachedRemoteRecorderRow(row);
+    }
+    return buildManagedRecorderRow(row);
+  }));
+}
+
+function controlPlaneMatrixRow(row: ControlPlaneDeploymentRow, recorder: ControlPlaneRecorderMatrixRow): ControlPlaneMatrixRow {
+  const healthStatus = controlPlaneHealthStatus(row);
+  const releaseDrift = controlPlaneReleaseDrift(row);
+  const support = controlPlaneSupportSummary(row);
+  return {
+    id: row.id,
+    label: row.label,
+    slug: controlPlaneRowSlug(row),
+    hasDeployment: row.hasDeployment,
+    ownerEmail: row.supportOwnerEmail,
+    health: {
+      status: healthStatus,
+      tone: controlPlaneMatrixTone(healthStatus),
+      detail: row.lastHealthError ?? latestSnapshotForKind(row, "HEALTH")?.error ?? null,
+    },
+    release: {
+      label: controlPlaneReleaseLabel(row),
+      status: releaseDrift ? "drift" : controlPlaneReleaseLabel(row) === "Unknown" ? "unknown" : "aligned",
+      detail: releaseDrift,
+    },
+    support,
+    recorder: {
+      status: recorder.status,
+      provider: recorder.provider,
+      monthlyUsageMinutes: recorder.monthlyUsageMinutes,
+      failureCount: recorder.failureCount,
+      readiness: recorder.readiness,
+    },
+    agents: controlPlaneAgentSummary(row),
+    users: controlPlaneUsersSummary(row),
+  };
+}
+
+export async function getControlPlaneClientOptions(actor: AppActor): Promise<ControlPlaneClientOption[]> {
+  const rows = await listControlPlaneDeployments(actor);
+  return rows
+    .filter((row) => row.hasDeployment)
+    .map((row) => ({
+      id: row.id,
+      label: row.label,
+      slug: controlPlaneRowSlug(row),
+      healthStatus: controlPlaneHealthStatus(row),
+      releaseLabel: controlPlaneReleaseLabel(row),
+      hasDeployment: row.hasDeployment,
+      managedWorkspaceId: row.managedWorkspaceId,
+      supportConnectorStatus: row.supportConnectorStatus,
+    }))
+    .sort((a, b) => a.label.localeCompare(b.label));
+}
+
+export async function listControlPlaneMatrix(actor: AppActor, params: Parameters<typeof listControlPlaneFleetPage>[1] = {}) {
+  const fleet = await listControlPlaneFleetPage(actor, params);
+  const recorderRows = await buildControlPlaneRecorderRows(fleet.items);
+  const recorderByDeploymentId = new Map(recorderRows.map((row) => [row.deploymentId, row]));
+  return {
+    ...fleet,
+    items: fleet.items.map((row) => controlPlaneMatrixRow(row, recorderByDeploymentId.get(row.id) ?? fallbackRecorderRow(
+      row,
+      "unavailable",
+      "Recorder state is unavailable.",
+    ))),
+    matrixSummary: {
+      recordersReady: recorderRows.filter((row) => row.status === "ready").length,
+      recordersNeedSetup: recorderRows.filter((row) => row.status === "needs_setup").length,
+      remoteConnectorRequired: recorderRows.filter((row) => row.status === "requires_connector").length,
+    },
+  };
+}
+
+export async function listControlPlaneRecorderMatrix(actor: AppActor, params: {
+  query?: string | null;
+  client?: string | null;
+  status?: string | null;
+  page?: number | null;
+  pageSize?: number | null;
+} = {}) {
+  const rows = await listControlPlaneDeployments(actor);
+  const query = params.query?.trim().toLowerCase() ?? "";
+  const client = params.client?.trim().toLowerCase() ?? "";
+  const status = params.status?.trim().toLowerCase() ?? "";
+  const pageSize = boundedInteger(params.pageSize, 25, 10, 100);
+  const page = boundedInteger(params.page, 1, 1, Number.MAX_SAFE_INTEGER);
+
+  const recorderRows = await buildControlPlaneRecorderRows(rows);
+  const filtered = recorderRows.filter((row) => {
+    const matchesQuery = !query || [
+      row.clientLabel,
+      row.clientSlug,
+      row.provider,
+      row.supportConnectorStatus,
+      row.readiness.detail,
+      row.calendarSource?.label,
+    ].some((value) => value?.toLowerCase().includes(query));
+    const matchesClient = !client || row.deploymentId.toLowerCase() === client || row.clientSlug?.toLowerCase() === client;
+    const matchesStatus = !status || row.status === status;
+    return matchesQuery && matchesClient && matchesStatus;
+  });
+  const pageCount = Math.max(Math.ceil(filtered.length / pageSize), 1);
+  const currentPage = Math.min(page, pageCount);
+  const start = (currentPage - 1) * pageSize;
+
+  return {
+    items: filtered.slice(start, start + pageSize),
+    total: filtered.length,
+    page: currentPage,
+    pageSize,
+    pageCount,
+    filters: {
+      query,
+      client,
+      status,
+    },
+    summary: {
+      totalClients: recorderRows.length,
+      ready: recorderRows.filter((row) => row.status === "ready").length,
+      needsSetup: recorderRows.filter((row) => row.status === "needs_setup").length,
+      disabled: recorderRows.filter((row) => row.status === "disabled").length,
+      unavailable: recorderRows.filter((row) => row.status === "unavailable").length,
+      requiresConnector: recorderRows.filter((row) => row.status === "requires_connector").length,
     },
   };
 }
