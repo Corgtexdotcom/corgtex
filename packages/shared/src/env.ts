@@ -80,6 +80,9 @@ type Env = {
   readonly MODEL_CHAT_CONVERSATION: string;
   readonly MODEL_EMBEDDING_DEFAULT: string;
   readonly MODEL_REQUEST_TIMEOUT_MS: number;
+  readonly NEXT_PUBLIC_INTERCOM_APP_ID: string | undefined;
+  readonly NEXT_PUBLIC_INTERCOM_API_BASE: string;
+  readonly INTERCOM_MESSENGER_SECRET: string | undefined;
   readonly STRIPE_SECRET_KEY: string | undefined;
   readonly STRIPE_WEBHOOK_SECRET: string | undefined;
   readonly STRIPE_PRICE_AI_USAGE_ID: string | undefined;
@@ -199,6 +202,15 @@ export const env: Env = {
   },
   get MODEL_REQUEST_TIMEOUT_MS() {
     return numberFromEnv("MODEL_REQUEST_TIMEOUT_MS", 180_000);
+  },
+  get NEXT_PUBLIC_INTERCOM_APP_ID() {
+    return optional("NEXT_PUBLIC_INTERCOM_APP_ID");
+  },
+  get NEXT_PUBLIC_INTERCOM_API_BASE() {
+    return optional("NEXT_PUBLIC_INTERCOM_API_BASE") ?? "https://api-iam.intercom.io";
+  },
+  get INTERCOM_MESSENGER_SECRET() {
+    return optional("INTERCOM_MESSENGER_SECRET");
   },
   get STRIPE_SECRET_KEY() {
     return optional("STRIPE_SECRET_KEY");

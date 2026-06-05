@@ -5,6 +5,7 @@ import { NextIntlClientProvider } from "next-intl";
 import { getMessages, getTranslations } from "next-intl/server";
 import "../globals.css";
 import { Footer } from "../../components/Footer";
+import { IntercomMessenger } from "../../components/IntercomMessenger";
 import { Navbar } from "../../components/Navbar";
 import { PageViewTracker } from "../../components/PageViewTracker";
 import { StructuredData } from "../../components/StructuredData";
@@ -165,6 +166,7 @@ export default async function LocaleLayout({ children, params }: LayoutProps) {
       <body>
         <NextIntlClientProvider messages={messages}>
           <PageViewTracker />
+          <IntercomMessenger locale={siteLocale} />
           <Navbar />
           <main>{children}</main>
           <Footer />

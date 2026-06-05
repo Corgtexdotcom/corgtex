@@ -69,6 +69,9 @@ Required environment variables for the core application (usually set in `.env` o
 | `WORKSPACE_SLUG` | URL slug identifier for the workspace |
 | `SEED_SCRIPTS` | Optional comma-separated seed scripts to run after the base seed at web startup |
 | `CORGTEX_AUTO_SEED_JNJ_DEMO` | Set to `true` only on demo/trial runtimes that should refresh the public J&J demo workspace on each deploy |
+| `NEXT_PUBLIC_INTERCOM_APP_ID` | Optional Intercom Messenger app ID. Leave unset to keep Intercom disabled, including for self-managed deployments. |
+| `NEXT_PUBLIC_INTERCOM_API_BASE` | Optional Intercom API base for the Messenger region. Defaults to `https://api-iam.intercom.io`. |
+| `INTERCOM_MESSENGER_SECRET` | Optional server-only Intercom Messenger JWT secret used to sign logged-in app users. Never expose this in browser code. |
 
 **Model Provider Settings (Optional but recommended):**
 - `MODEL_PROVIDER`: Set to `openrouter` or `openai`
