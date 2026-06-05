@@ -53,7 +53,8 @@ describe("Railway client", () => {
 
   it("provisions the customer stack with project, services, variables, deploys, and domain", async () => {
     const graphql = vi.fn()
-      .mockResolvedValueOnce({ projectCreate: { id: "project-1", defaultEnvironment: { id: "env-1" } } })
+      .mockResolvedValueOnce({ projectCreate: { id: "project-1" } })
+      .mockResolvedValueOnce({ environments: { edges: [{ node: { id: "env-1", name: "production" } }] } })
       .mockResolvedValueOnce({
         web: { id: "web-1" },
         worker: { id: "worker-1" },
@@ -88,20 +89,21 @@ describe("Railway client", () => {
       redisServiceId: "redis-1",
       webDomain: "acme.corgtex.com",
     });
-    expect(graphql).toHaveBeenCalledTimes(8);
-    expect(graphql.mock.calls[1][0]).toContain("ghcr.io/railwayapp-templates/postgres-ssl:17");
-    expect(graphql.mock.calls[1][0]).toContain("bitnami/redis:7.2.5");
-    expect(graphql.mock.calls[1][0]).not.toContain("region: $region");
-    expect(graphql.mock.calls[2][0]).toContain("serviceInstanceUpdate");
-    expect(graphql.mock.calls[2][1]).toMatchObject({
+    expect(graphql).toHaveBeenCalledTimes(9);
+    expect(graphql.mock.calls[1][0]).toContain("environments(projectId: $projectId");
+    expect(graphql.mock.calls[2][0]).toContain("ghcr.io/railwayapp-templates/postgres-ssl:17");
+    expect(graphql.mock.calls[2][0]).toContain("bitnami/redis:7.2.5");
+    expect(graphql.mock.calls[2][0]).not.toContain("region: $region");
+    expect(graphql.mock.calls[3][0]).toContain("serviceInstanceUpdate");
+    expect(graphql.mock.calls[3][1]).toMatchObject({
       environmentId: "env-1",
       webInput: { region: "eu-west4" },
       workerInput: { region: "eu-west4" },
       postgresInput: { region: "eu-west4" },
       redisInput: { region: "eu-west4" },
     });
-    expect(graphql.mock.calls[3][0]).toContain("volumeCreate");
-    expect(graphql.mock.calls[4][1]).toMatchObject({
+    expect(graphql.mock.calls[4][0]).toContain("volumeCreate");
+    expect(graphql.mock.calls[5][1]).toMatchObject({
       projectId: "project-1",
       environmentId: "env-1",
       postgresServiceId: "postgres-1",
@@ -113,7 +115,7 @@ describe("Railway client", () => {
         REDIS_URL: expect.stringContaining("${{Redis."),
       }),
     });
-    expect(graphql.mock.calls[5][1]).toMatchObject({
+    expect(graphql.mock.calls[6][1]).toMatchObject({
       projectId: "project-1",
       environmentId: "env-1",
       webServiceId: "web-1",
@@ -124,12 +126,13 @@ describe("Railway client", () => {
         REDIS_URL: "${{Redis.REDIS_URL}}",
       },
     });
-    expect(graphql.mock.calls[6][0]).toContain("serviceInstanceDeployV2");
+    expect(graphql.mock.calls[7][0]).toContain("serviceInstanceDeployV2");
   });
 
   it("provisions runtime services from the public repo with Dockerfile settings", async () => {
     const graphql = vi.fn()
-      .mockResolvedValueOnce({ projectCreate: { id: "project-1", defaultEnvironment: { id: "env-1" } } })
+      .mockResolvedValueOnce({ projectCreate: { id: "project-1" } })
+      .mockResolvedValueOnce({ environments: { edges: [{ node: { id: "env-1", name: "production" } }] } })
       .mockResolvedValueOnce({
         web: { id: "web-1" },
         worker: { id: "worker-1" },
@@ -163,14 +166,14 @@ describe("Railway client", () => {
       },
     });
 
-    expect(graphql).toHaveBeenCalledTimes(7);
-    expect(graphql.mock.calls[1][1]).toMatchObject({
+    expect(graphql).toHaveBeenCalledTimes(8);
+    expect(graphql.mock.calls[2][1]).toMatchObject({
       webSource: { repo: "Corgtexdotcom/corgtex" },
       webBranch: "main",
       workerSource: { repo: "Corgtexdotcom/corgtex" },
       workerBranch: "main",
     });
-    expect(graphql.mock.calls[2][1]).toMatchObject({
+    expect(graphql.mock.calls[3][1]).toMatchObject({
       webInput: {
         region: "us-west2",
         dockerfilePath: "deploy/Dockerfile.web",
@@ -180,7 +183,7 @@ describe("Railway client", () => {
         dockerfilePath: "deploy/Dockerfile.worker",
       },
     });
-    expect(graphql.mock.calls[6][1]).toMatchObject({
+    expect(graphql.mock.calls[7][1]).toMatchObject({
       webCommitSha: "abc123",
       workerCommitSha: "abc123",
     });

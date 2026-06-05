@@ -17,8 +17,11 @@ const mocks = vi.hoisted(() => ({
   resolveControlPlaneRequestActor: vi.fn(),
 }));
 vi.mock("@corgtex/domain", () => ({
-  configureControlPlaneMeetingRecorderIntegration: vi.fn(), createControlPlaneCustomerMember: vi.fn(), deployLatestControlPlaneRelease: vi.fn(),
+  configureControlPlaneMeetingRecorderIntegration: vi.fn(), createControlPlaneClient: vi.fn(), createControlPlaneCustomerMember: vi.fn(), deployLatestControlPlaneRelease: vi.fn(),
+  executeControlPlaneClientMigration: vi.fn(),
   enqueueControlPlaneDeployLatestRollout: vi.fn(), enqueueControlPlaneFleetSnapshots: vi.fn(), fetchCustomerSupportSnapshot: vi.fn(),
+  finalizeControlPlaneClientMigration: vi.fn(),
+  getControlPlaneClientMigrationStatus: vi.fn(),
   getControlPlaneDeployLatestPreflight: vi.fn(),
   getControlPlaneAiGovernanceStatus: vi.fn(), getControlPlaneContextHealth: vi.fn(),
   getControlPlaneDeployment: vi.fn(), getControlPlaneIntegrationStatus: vi.fn(), getControlPlaneReleaseStatus: vi.fn(),
@@ -33,8 +36,10 @@ vi.mock("@corgtex/domain", () => ({
   requireControlPlaneAccess: mocks.requireControlPlaneAccess,
   requireControlPlaneScope: mocks.requireControlPlaneScope,
   refreshControlPlaneFleetSnapshots: vi.fn(),
+  rollbackControlPlaneClientMigration: vi.fn(),
   revokeControlPlaneAgentCredential: vi.fn(),
-  resendControlPlaneCustomerMemberAccessLink: vi.fn(), runControlPlaneContextOperation: vi.fn(), runControlPlaneMeetingRecorderOperation: vi.fn(), runControlPlaneReleaseOperation: vi.fn(), runCustomerSupportOperation: vi.fn(),
+  resendControlPlaneCustomerMemberAccessLink: vi.fn(), runControlPlaneClientMigrationDryRun: vi.fn(), runControlPlaneContextOperation: vi.fn(), runControlPlaneMeetingRecorderOperation: vi.fn(), runControlPlaneReleaseOperation: vi.fn(), runCustomerSupportOperation: vi.fn(),
+  planControlPlaneClientMigration: vi.fn(),
   setControlPlaneFeatureFlag: vi.fn(), updateControlPlaneAgentCredentialScopes: vi.fn(), updateControlPlaneAgentPolicy: vi.fn(), updateControlPlaneCustomerMemberStatus: vi.fn(), updateControlPlaneModelBudget: vi.fn(),
 }));
 vi.mock("@/lib/auth", () => ({ resolveControlPlaneRequestActor: mocks.resolveControlPlaneRequestActor }));
@@ -86,6 +91,13 @@ describe("/api/control-plane/mcp", () => {
       "list_self_serve_customers",
       "record_self_serve_smoke_run",
       "create_self_serve_support_session",
+      "create_client",
+      "plan_client_migration",
+      "run_client_migration_dry_run",
+      "execute_client_migration",
+      "get_client_migration_status",
+      "finalize_client_migration",
+      "rollback_client_migration",
       "get_customer_deployment_status",
       "refresh_customer_deployment_snapshot",
       "list_customer_integrations",
@@ -122,6 +134,52 @@ describe("/api/control-plane/mcp", () => {
     const response = await POST(request({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "run_context_sync", arguments: { deploymentId: "inst-1", reason: "repair" } } }) as never);
     expect(response.status).toBe(403);
     await expect(response.json()).resolves.toEqual({ error: { code: "CONTROL_PLANE_SCOPE_REQUIRED", message: "Control Plane scope required: control-plane:context:write." } });
+  });
+
+  it("calls client creation with the client write-scoped actor", async () => {
+    mocks.resolveControlPlaneRequestActor.mockResolvedValueOnce({
+      kind: "agent",
+      authProvider: "control-plane",
+      label: "control-plane-agent",
+      scopes: ["control-plane:read", "control-plane:clients:write"],
+    });
+    const domain = await import("@corgtex/domain");
+    vi.mocked(domain.createControlPlaneClient).mockResolvedValueOnce({
+      clientMode: "shared_workspace",
+      deployment: { id: "dep-1" },
+    } as never);
+    const { POST } = await import("./route");
+
+    const response = await POST(request({
+      jsonrpc: "2.0",
+      id: 20,
+      method: "tools/call",
+      params: {
+        name: "create_client",
+        arguments: {
+          mode: "shared_workspace",
+          label: "Chirone",
+          customerSlug: "chirone",
+          reason: "Approved onboarding.",
+          initialAdmins: [{ email: "admin@example.com" }],
+          featurePosture: "minimal",
+        },
+      },
+    }) as never);
+
+    expect(response.status).toBe(200);
+    expect(vi.mocked(domain.createControlPlaneClient)).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "agent" }),
+      expect.objectContaining({
+        mode: "shared_workspace",
+        label: "Chirone",
+        customerSlug: "chirone",
+        reason: "Approved onboarding.",
+        initialAdmins: [{ email: "admin@example.com" }],
+        featurePosture: "minimal",
+        primary: false,
+      }),
+    );
   });
 
   it("denies AI governance writes when the control-plane agent lacks the governance write scope", async () => {

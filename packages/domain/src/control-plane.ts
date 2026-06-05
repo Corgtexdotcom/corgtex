@@ -16,6 +16,8 @@ import {
 } from "./meeting-recorders";
 import { createControlPlaneAdapter } from "./control-plane-adapters";
 import { createRailwayClientFromEnv, upgradeRailwayCustomerRelease, type RailwayClient } from "./railway-client";
+import { buildCustomerDeploymentReadiness, provisionCustomerDeployment } from "./admin";
+import { registerCustomerDeployment } from "./customer-lifecycle";
 import { AGENT_REGISTRY } from "./agent-registry";
 import { isKnownScope } from "./agent-auth";
 
@@ -27,10 +29,18 @@ const MEETING_RECORDER_PROVIDERS = new Set(["RECALL_AI", "MEETING_BAAS"]);
 const CONTROL_PLANE_CONTEXT_OPERATIONS = new Set(["sync_all", "sync_source", "disable_source"]);
 const CONTROL_PLANE_RELEASE_OPERATIONS = new Set(["prepare_upgrade"]);
 const CONTROL_PLANE_READ_SCOPE = "control-plane:read";
+const CONTROL_PLANE_CLIENTS_WRITE_SCOPE = "control-plane:clients:write";
+const CONTROL_PLANE_MIGRATIONS_WRITE_SCOPE = "control-plane:migrations:write";
 const CONTROL_PLANE_AI_GOVERNANCE_WRITE_SCOPE = "control-plane:ai-governance:write";
+const CONTROL_PLANE_CLIENT_CREATE_ENABLED_ENV = "CONTROL_PLANE_CLIENT_CREATE_ENABLED";
+const CONTROL_PLANE_HOSTED_CREATE_ENABLED_ENV = "CONTROL_PLANE_HOSTED_CREATE_ENABLED";
+const CONTROL_PLANE_MIGRATION_DRY_RUN_ENABLED_ENV = "CONTROL_PLANE_MIGRATION_DRY_RUN_ENABLED";
+const CONTROL_PLANE_MIGRATION_EXECUTE_ENABLED_ENV = "CONTROL_PLANE_MIGRATION_EXECUTE_ENABLED";
+const CONTROL_PLANE_MIGRATION_READ_ONLY_ENFORCED_ENV = "CONTROL_PLANE_MIGRATION_READ_ONLY_ENFORCED";
 const CONTROL_PLANE_DEPLOYMENT_WRITE_ROLES = new Set<CustomerDeploymentAccessRole>(["SUPPORT_ADMIN", "CUSTOMER_IT_ADMIN"]);
 export const CONTROL_PLANE_FLEET_SNAPSHOT_JOB_TYPE = "control-plane.fleet-snapshot";
 export const CONTROL_PLANE_RELEASE_DEPLOY_JOB_TYPE = "control-plane.release.deploy-latest";
+export const CONTROL_PLANE_CLIENT_MIGRATION_VERIFY_JOB_TYPE = "control-plane.client-migration.verify";
 const AGENT_GOVERNANCE_FEATURE_FLAG = "AGENT_GOVERNANCE";
 const STALE_CREDENTIAL_DAYS = 90;
 const CONTROL_PLANE_SNAPSHOT_KINDS = new Set<FleetSnapshotKind>([
@@ -717,6 +727,1577 @@ function requireControlPlaneFleetReleaseWriteAccess(actor: AppActor) {
     return;
   }
   throw new AppError(403, "CONTROL_PLANE_WRITE_ACCESS_REQUIRED", "Global control plane release access is required for fleet-wide rollouts.");
+}
+
+type ControlPlaneClientMode = "shared_workspace" | "hosted_dedicated";
+type ClientMigrationDirection = "shared_to_hosted" | "hosted_to_shared";
+
+type ClientInitialAdmin = {
+  email: string;
+  displayName?: string | null;
+};
+
+function controlPlaneCapabilityEnabled(envName: string, options: { defaultEnabledOutsideProduction?: boolean } = {}) {
+  const raw = process.env[envName]?.trim().toLowerCase();
+  if (raw) {
+    return ["1", "true", "yes", "on"].includes(raw);
+  }
+  return options.defaultEnabledOutsideProduction === true && process.env.NODE_ENV !== "production";
+}
+
+function assertControlPlaneCapabilityEnabled(envName: string, code: string, message: string, options: { defaultEnabledOutsideProduction?: boolean } = {}) {
+  invariant(controlPlaneCapabilityEnabled(envName, options), 403, code, message);
+}
+
+const CLIENT_FEATURE_POSTURES = {
+  standard: {},
+  minimal: {
+    TOOL_LINKS: false,
+    BUILD_ARTIFACTS: false,
+    CONTEXT_MAPS: false,
+    MEETING_RECORDERS: false,
+    MEETING_CONTEXTUAL_INTELLIGENCE: false,
+    CONTEXT_MAP_AI: false,
+    SLACK_MEETING_ACTION_REVIEW: false,
+    AI_WORKSPACES: false,
+    OPENWORK_DEFAULT: false,
+    EXECUTION_PACKETS: false,
+    MANAGED_ENTERPRISE_SERVICES: false,
+  },
+  enterprise: {
+    AGENT_GOVERNANCE: true,
+    SETTINGS_GENERAL: true,
+    MEETING_RECORDERS: true,
+    MEETING_CONTEXTUAL_INTELLIGENCE: true,
+    AI_WORKSPACES: true,
+    EXECUTION_PACKETS: true,
+    MANAGED_ENTERPRISE_SERVICES: true,
+  },
+} satisfies Record<string, Partial<Record<ControlPlaneWorkspaceFeatureFlag, boolean>>>;
+
+const migrationRunModel = () => (prisma as typeof prisma & {
+  clientMigrationRun: {
+    create(args: unknown): Promise<unknown>;
+    findUnique(args: unknown): Promise<unknown>;
+    update(args: unknown): Promise<unknown>;
+  };
+}).clientMigrationRun;
+
+const migrationIdMapModel = () => (prisma as typeof prisma & {
+  clientMigrationIdMap: {
+    upsert(args: unknown): Promise<unknown>;
+  };
+}).clientMigrationIdMap;
+
+function normalizeClientMode(value: string | null | undefined): ControlPlaneClientMode {
+  const normalized = value?.trim().toLowerCase();
+  invariant(normalized === "shared_workspace" || normalized === "hosted_dedicated", 400, "INVALID_INPUT", "Client mode must be shared_workspace or hosted_dedicated.");
+  return normalized;
+}
+
+function normalizeClientSlug(value: string | null | undefined) {
+  const slug = value?.trim().toLowerCase() ?? "";
+  invariant(/^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/.test(slug), 400, "INVALID_INPUT", "Customer slug must be a DNS-safe slug.");
+  return slug;
+}
+
+function normalizeRequiredText(value: string | null | undefined, label: string) {
+  const trimmed = value?.trim();
+  invariant(trimmed, 400, "INVALID_INPUT", `${label} is required.`);
+  return trimmed;
+}
+
+function normalizeOptionalControlPlaneText(value: string | null | undefined) {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : null;
+}
+
+function actorLabel(actor: AppActor) {
+  if (actor.kind === "user") return actor.user.email;
+  return actor.label;
+}
+
+function customerWorkspaceUrl(workspaceId: string) {
+  const baseUrl = env.APP_URL?.replace(/\/$/, "") || "https://app.corgtex.com";
+  return `${baseUrl}/workspaces/${workspaceId}`;
+}
+
+function normalizeInitialAdmins(value: unknown): ClientInitialAdmin[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((item) => {
+    invariant(item && typeof item === "object", 400, "INVALID_INPUT", "initialAdmins must contain objects.");
+    const record = item as Record<string, unknown>;
+    const email = normalizeRequiredText(typeof record.email === "string" ? record.email : null, "Admin email").toLowerCase();
+    return {
+      email,
+      displayName: typeof record.displayName === "string" ? normalizeOptionalControlPlaneText(record.displayName) : null,
+    };
+  });
+}
+
+function assertNoRuntimeVariables(variables: Record<string, string> | null | undefined) {
+  invariant(
+    Object.keys(variables ?? {}).length === 0,
+    400,
+    "RAW_RUNTIME_VARIABLES_REJECTED",
+    "Runtime variables must come from approved secret sources, not the control-plane create_client tool.",
+  );
+}
+
+function featurePostureName(value: string | null | undefined) {
+  const normalized = value?.trim().toLowerCase() || "standard";
+  invariant(normalized in CLIENT_FEATURE_POSTURES, 400, "INVALID_INPUT", "Unsupported feature posture.");
+  return normalized as keyof typeof CLIENT_FEATURE_POSTURES;
+}
+
+function featurePostureFlags(posture: keyof typeof CLIENT_FEATURE_POSTURES) {
+  const overrides = CLIENT_FEATURE_POSTURES[posture] as Partial<Record<ControlPlaneWorkspaceFeatureFlag, boolean>>;
+  return CONTROL_PLANE_WORKSPACE_FEATURE_FLAGS.map((definition) => ({
+    flag: definition.flag,
+    enabled: overrides[definition.flag] ?? definition.defaultEnabled,
+  }));
+}
+
+function hasCompleteBootstrapBundle(params: {
+  bootstrapBundleUri?: string | null;
+  bootstrapBundleChecksum?: string | null;
+  bootstrapBundleSchemaVersion?: string | null;
+}) {
+  return Boolean(params.bootstrapBundleUri && params.bootstrapBundleChecksum && params.bootstrapBundleSchemaVersion);
+}
+
+async function applyFeaturePosture(params: {
+  actor: AppActor;
+  deploymentId: string;
+  workspaceId: string;
+  posture: keyof typeof CLIENT_FEATURE_POSTURES;
+  reason: string;
+}) {
+  const flags = featurePostureFlags(params.posture);
+  await Promise.all(flags.map((entry) => prisma.workspaceFeatureFlag.upsert({
+    where: {
+      workspaceId_flag: {
+        workspaceId: params.workspaceId,
+        flag: entry.flag,
+      },
+    },
+    update: {
+      enabled: entry.enabled,
+    },
+    create: {
+      workspaceId: params.workspaceId,
+      flag: entry.flag,
+      enabled: entry.enabled,
+    },
+  })));
+  await recordCustomerDeploymentEvent(params.actor, params.deploymentId, "control_plane.client.feature_posture_applied", {
+    reason: params.reason,
+    featurePosture: params.posture,
+    flags: flags.map((entry) => ({ flag: entry.flag, enabled: entry.enabled })),
+  });
+  return flags;
+}
+
+async function createSharedClientWorkspace(params: {
+  label: string;
+  slug: string;
+  description?: string | null;
+}) {
+  return prisma.$transaction(async (tx) => {
+    const existing = await tx.workspace.findUnique({ where: { slug: params.slug } });
+    invariant(!existing, 409, "CONFLICT", "A workspace with this slug already exists.");
+
+    const workspace = await tx.workspace.create({
+      data: {
+        name: params.label,
+        slug: params.slug,
+        description: params.description ?? null,
+      },
+    });
+
+    await tx.approvalPolicy.createMany({
+      data: [
+        {
+          workspaceId: workspace.id,
+          subjectType: "PROPOSAL",
+          mode: "CONSENT",
+          quorumPercent: 0,
+          minApproverCount: 1,
+          decisionWindowHours: 72,
+        },
+        {
+          workspaceId: workspace.id,
+          subjectType: "SPEND",
+          mode: "SINGLE",
+          quorumPercent: 0,
+          minApproverCount: 1,
+          decisionWindowHours: 72,
+          requireProposalLink: false,
+        },
+      ],
+    });
+
+    return workspace;
+  });
+}
+
+function sharedClientReadiness(params: { initialAdmins: number; supportOwnerEmail?: string | null }) {
+  const checks = [
+    {
+      key: "workspace",
+      label: "Shared workspace",
+      status: "ok" as const,
+      detail: "Workspace registered in the main Corgtex app.",
+    },
+    {
+      key: "initial_admins",
+      label: "Initial admins",
+      status: params.initialAdmins > 0 ? "ok" as const : "warning" as const,
+      detail: params.initialAdmins > 0 ? `${params.initialAdmins} admin member(s) created.` : "No initial admins were provided.",
+    },
+    {
+      key: "support_owner",
+      label: "Support owner",
+      status: params.supportOwnerEmail ? "ok" as const : "warning" as const,
+      detail: params.supportOwnerEmail ? "Support owner recorded." : "No support owner recorded.",
+    },
+  ];
+  return {
+    status: checks.some((check) => check.status !== "ok") ? "attention" as const : "ready" as const,
+    checks,
+  };
+}
+
+function sanitizeDeploymentForControlPlane(deployment: Record<string, unknown>) {
+  return {
+    ...deployment,
+    supportCredentialEnc: undefined,
+    hasSupportCredential: Boolean(deployment.supportCredentialEnc),
+  };
+}
+
+export async function createControlPlaneClient(actor: AppActor, params: {
+  mode?: string | null;
+  clientMode?: string | null;
+  label: string;
+  customerSlug: string;
+  reason?: string | null;
+  supportOwnerEmail?: string | null;
+  description?: string | null;
+  featurePosture?: string | null;
+  initialAdmins?: unknown;
+  region?: string | null;
+  dataResidency?: string | null;
+  customDomain?: string | null;
+  releaseVersion?: string | null;
+  releaseImageTag?: string | null;
+  webImage?: string | null;
+  workerImage?: string | null;
+  webSource?: Parameters<typeof provisionCustomerDeployment>[1]["webSource"];
+  workerSource?: Parameters<typeof provisionCustomerDeployment>[1]["workerSource"];
+  storageBucketName?: string | null;
+  bootstrapBundleUri?: string | null;
+  bootstrapBundleChecksum?: string | null;
+  bootstrapBundleSchemaVersion?: string | null;
+  primary?: boolean | null;
+  variables?: Record<string, string>;
+}, railwayClient?: RailwayClient) {
+  await requireControlPlaneAccess(actor);
+  requireControlPlaneScope(actor, CONTROL_PLANE_CLIENTS_WRITE_SCOPE);
+  const reason = requireMutationReason(params.reason);
+  const mode = normalizeClientMode(params.mode ?? params.clientMode);
+  assertControlPlaneCapabilityEnabled(
+    CONTROL_PLANE_CLIENT_CREATE_ENABLED_ENV,
+    "CONTROL_PLANE_CLIENT_CREATE_DISABLED",
+    "Control-plane client creation is disabled for this environment.",
+    { defaultEnabledOutsideProduction: true },
+  );
+  if (mode === "hosted_dedicated") {
+    assertControlPlaneCapabilityEnabled(
+      CONTROL_PLANE_HOSTED_CREATE_ENABLED_ENV,
+      "CONTROL_PLANE_HOSTED_CREATE_DISABLED",
+      "Hosted dedicated client creation is disabled for this environment.",
+      { defaultEnabledOutsideProduction: true },
+    );
+  }
+  const label = normalizeRequiredText(params.label, "Client label");
+  const customerSlug = normalizeClientSlug(params.customerSlug);
+  const supportOwnerEmail = normalizeOptionalControlPlaneText(params.supportOwnerEmail);
+  const featurePosture = featurePostureName(params.featurePosture);
+
+  if (mode === "shared_workspace") {
+    const initialAdmins = normalizeInitialAdmins(params.initialAdmins);
+    const workspace = await createSharedClientWorkspace({
+      label,
+      slug: customerSlug,
+      description: normalizeOptionalControlPlaneText(params.description),
+    });
+    const { account, deployment } = await registerCustomerDeployment({
+      accountSlug: customerSlug,
+      accountDisplayName: label,
+      accountStatus: "ACTIVE",
+      managementAuthority: "CORGTEX",
+      label,
+      url: customerWorkspaceUrl(workspace.id),
+      environment: "production",
+      notes: normalizeOptionalControlPlaneText(params.description),
+      deploymentKind: "SHARED_WORKSPACE",
+      deploymentStatus: "ACTIVE",
+      customerSlug,
+      supportOwnerEmail,
+      managedWorkspaceId: workspace.id,
+      provisioningStatus: "active",
+      bootstrapStatus: "not_started",
+      primary: params.primary === true,
+    });
+    const admins = [];
+    for (const admin of initialAdmins) {
+      admins.push(await createMember(actor, {
+        workspaceId: workspace.id,
+        email: admin.email,
+        displayName: admin.displayName,
+        role: "ADMIN",
+        skipAdminCheck: true,
+      }));
+    }
+    const appliedFeatureFlags = await applyFeaturePosture({
+      actor,
+      deploymentId: deployment.id,
+      workspaceId: workspace.id,
+      posture: featurePosture,
+      reason,
+    });
+    await recordCustomerDeploymentEvent(actor, deployment.id, "control_plane.client.created", {
+      reason,
+      mode,
+      featurePosture,
+      initialAdminCount: admins.length,
+      supportOwnerEmail,
+    });
+    return {
+      clientMode: "shared_workspace" as const,
+      customerAccount: customerAccountSummary(account),
+      deployment: sanitizeDeploymentForControlPlane(deployment as unknown as Record<string, unknown>),
+      workspace,
+      readiness: sharedClientReadiness({ initialAdmins: admins.length, supportOwnerEmail }),
+      featurePosture,
+      appliedFeatureFlags,
+      initialAdmins: admins.map((admin) => ({
+        memberId: admin.member.id,
+        userId: admin.user.id,
+        email: admin.user.email,
+        displayName: admin.user.displayName,
+      })),
+    };
+  }
+
+  assertNoRuntimeVariables(params.variables);
+  invariant(
+    params.primary !== true,
+    400,
+    "HOSTED_PRIMARY_UNSUPPORTED",
+    "Hosted dedicated client creation starts non-primary; promote it only through verified readiness or migration cutover.",
+  );
+  const hostedInitialAdmins = normalizeInitialAdmins(params.initialAdmins);
+  const bootstrapBundleUri = normalizeOptionalControlPlaneText(params.bootstrapBundleUri);
+  const bootstrapBundleChecksum = normalizeOptionalControlPlaneText(params.bootstrapBundleChecksum);
+  const bootstrapBundleSchemaVersion = normalizeOptionalControlPlaneText(params.bootstrapBundleSchemaVersion);
+  const completeBootstrapBundle = hasCompleteBootstrapBundle({
+    bootstrapBundleUri,
+    bootstrapBundleChecksum,
+    bootstrapBundleSchemaVersion,
+  });
+  invariant(
+    hostedInitialAdmins.length === 0,
+    400,
+    "HOSTED_INITIAL_ADMINS_UNSUPPORTED",
+    "Hosted dedicated initial admins must be encoded in an approved bootstrap bundle; create_client cannot apply them directly yet.",
+  );
+  invariant(
+    featurePosture === "standard",
+    400,
+    "HOSTED_FEATURE_POSTURE_UNSUPPORTED",
+    "Hosted dedicated non-standard feature posture must be encoded in an approved bootstrap bundle; create_client cannot apply it directly yet.",
+  );
+  const latestTarget = getControlPlaneLatestReleaseTarget();
+  const releaseImageTag = normalizeOptionalControlPlaneText(params.releaseImageTag) ?? latestTarget?.releaseImageTag;
+  const webImage = normalizeOptionalControlPlaneText(params.webImage) ?? latestTarget?.webImage;
+  const workerImage = normalizeOptionalControlPlaneText(params.workerImage) ?? latestTarget?.workerImage;
+  invariant(releaseImageTag, 400, "LATEST_RELEASE_NOT_CONFIGURED", "Hosted dedicated creation requires releaseImageTag or a configured latest release target.");
+  const deployment = await provisionCustomerDeployment(actor, {
+    label,
+    customerSlug,
+    region: normalizeRequiredText(params.region, "Railway region"),
+    dataResidency: normalizeRequiredText(params.dataResidency, "Data residency"),
+    customDomain: normalizeOptionalControlPlaneText(params.customDomain),
+    supportOwnerEmail,
+    releaseVersion: normalizeOptionalControlPlaneText(params.releaseVersion) ?? latestTarget?.releaseVersion ?? null,
+    releaseImageTag,
+    webImage,
+    workerImage,
+    webSource: params.webSource ?? null,
+    workerSource: params.workerSource ?? null,
+    storageBucketName: normalizeOptionalControlPlaneText(params.storageBucketName),
+    bootstrapBundleUri,
+    bootstrapBundleChecksum,
+    bootstrapBundleSchemaVersion,
+    primary: false,
+    variables: {},
+  }, railwayClient);
+  await recordCustomerDeploymentEvent(actor, deployment.id, "control_plane.client.created", {
+    reason,
+    mode,
+    featurePosture,
+    initialAdminCount: hostedInitialAdmins.length,
+    supportOwnerEmail,
+    hasBootstrapBundle: completeBootstrapBundle,
+  });
+  return {
+    clientMode: "hosted_dedicated" as const,
+    deployment: sanitizeDeploymentForControlPlane(deployment as unknown as Record<string, unknown>),
+    readiness: buildCustomerDeploymentReadiness(deployment),
+    featurePosture,
+  };
+}
+
+function targetKindFromMode(mode: ControlPlaneClientMode) {
+  return mode === "shared_workspace" ? "SHARED_WORKSPACE" : "HOSTED_DEDICATED";
+}
+
+function normalizeMigrationDirection(sourceKind: string, targetMode: ControlPlaneClientMode): ClientMigrationDirection {
+  const targetKind = targetKindFromMode(targetMode);
+  invariant(sourceKind === "SHARED_WORKSPACE" || sourceKind === "HOSTED_DEDICATED", 400, "UNSUPPORTED_MIGRATION_SOURCE", "V1 migrations support only shared workspace and hosted dedicated deployments.");
+  invariant(sourceKind !== targetKind, 400, "INVALID_INPUT", "Migration target must be different from the source deployment lane.");
+  return sourceKind === "SHARED_WORKSPACE" ? "shared_to_hosted" : "hosted_to_shared";
+}
+
+async function loadMigrationSourceDeployment(actor: AppActor, deploymentId: string) {
+  await requireControlPlaneAccess(actor, { deploymentId });
+  const deployment = await prisma.customerDeployment.findUnique({
+    where: { id: deploymentId },
+    include: { customerAccount: true },
+  });
+  invariant(deployment, 404, "NOT_FOUND", "Source deployment not found.");
+  invariant(deployment.customerAccountId && deployment.customerAccount, 400, "CUSTOMER_ACCOUNT_REQUIRED", "Source deployment must be linked to a customer account.");
+  return deployment;
+}
+
+async function assertMigrationDestination(params: {
+  destinationDeploymentId?: string | null;
+  targetMode: ControlPlaneClientMode;
+  sourceDeploymentId: string;
+  customerAccountId: string;
+}) {
+  if (!params.destinationDeploymentId) return null;
+  const destination = await prisma.customerDeployment.findUnique({
+    where: { id: params.destinationDeploymentId },
+    include: { customerAccount: true },
+  });
+  invariant(destination, 404, "NOT_FOUND", "Destination deployment not found.");
+  invariant(destination.id !== params.sourceDeploymentId, 400, "INVALID_INPUT", "Destination deployment must be different from source deployment.");
+  invariant(destination.customerAccountId === params.customerAccountId, 400, "MIGRATION_DESTINATION_ACCOUNT_MISMATCH", "Destination deployment must belong to the same customer account as the source.");
+  invariant(destination.deploymentKind === targetKindFromMode(params.targetMode), 400, "MIGRATION_DESTINATION_KIND_MISMATCH", "Destination deployment kind does not match migration target.");
+  return destination;
+}
+
+function migrationPlanSummary(params: {
+  source: { id: string; label: string; deploymentKind: string; deploymentStatus: string; managedWorkspaceId?: string | null };
+  destinationDeploymentId?: string | null;
+  direction: ClientMigrationDirection;
+  targetMode: ControlPlaneClientMode;
+}) {
+  return {
+    direction: params.direction,
+    targetMode: params.targetMode,
+    source: {
+      deploymentId: params.source.id,
+      label: params.source.label,
+      kind: params.source.deploymentKind,
+      status: params.source.deploymentStatus,
+      managedWorkspaceId: params.source.managedWorkspaceId ?? null,
+    },
+    destination: {
+      deploymentId: params.destinationDeploymentId ?? null,
+      requiredKind: targetKindFromMode(params.targetMode),
+    },
+    phases: [
+      "dry_run_inventory",
+      "prepare_destination",
+      "export_source",
+      "import_destination",
+      "rebuild_derived_indexes",
+      "verify_counts_permissions_audit",
+      "cutover_primary_deployment",
+      "retain_source_until_finalize",
+    ],
+  };
+}
+
+function migrationExecutionAvailable() {
+  return controlPlaneCapabilityEnabled(CONTROL_PLANE_MIGRATION_EXECUTE_ENABLED_ENV);
+}
+
+function assertMigrationExecutionAvailable(operation: "execute" | "finalize" | "rollback") {
+  invariant(
+    migrationExecutionAvailable(),
+    501,
+    "MIGRATION_EXECUTION_NOT_IMPLEMENTED",
+    `Client migration ${operation} requires the dedicated migration worker, import/export verification, and runtime read-only enforcement.`,
+  );
+}
+
+function assertMigrationRuntimeReadOnlyEnforced() {
+  invariant(
+    controlPlaneCapabilityEnabled(CONTROL_PLANE_MIGRATION_READ_ONLY_ENFORCED_ENV),
+    501,
+    "MIGRATION_READ_ONLY_ENFORCEMENT_REQUIRED",
+    "Client migration execution requires runtime read-only enforcement for the retained source deployment.",
+  );
+}
+
+function assertMigrationDestinationReadyForCutover(destination: {
+  deploymentKind?: string | null;
+  deploymentStatus?: string | null;
+  lastHealthStatus?: string | null;
+}) {
+  invariant(destination.deploymentStatus === "ACTIVE", 400, "MIGRATION_DESTINATION_NOT_READY", "Destination deployment must be ACTIVE before migration cutover.");
+  if (destination.deploymentKind === "HOSTED_DEDICATED") {
+    invariant(destination.lastHealthStatus === "ok", 400, "MIGRATION_DESTINATION_HEALTH_REQUIRED", "Hosted destination health must be ok before migration cutover.");
+  }
+}
+
+async function createClientMigrationRun(actor: AppActor, params: {
+  sourceDeploymentId: string;
+  targetMode: ControlPlaneClientMode;
+  destinationDeploymentId?: string | null;
+  reason: string;
+}) {
+  const source = await loadMigrationSourceDeployment(actor, params.sourceDeploymentId);
+  await assertMigrationDestination({
+    destinationDeploymentId: params.destinationDeploymentId,
+    targetMode: params.targetMode,
+    sourceDeploymentId: params.sourceDeploymentId,
+    customerAccountId: source.customerAccountId!,
+  });
+  const direction = normalizeMigrationDirection(source.deploymentKind, params.targetMode);
+  const planSummary = migrationPlanSummary({
+    source,
+    destinationDeploymentId: params.destinationDeploymentId,
+    direction,
+    targetMode: params.targetMode,
+  });
+  const run = await migrationRunModel().create({
+    data: {
+      customerAccountId: source.customerAccountId,
+      sourceDeploymentId: source.id,
+      destinationDeploymentId: params.destinationDeploymentId ?? null,
+      direction,
+      status: "planned",
+      actorUserId: actorUserId(actor),
+      actorLabel: actorLabel(actor),
+      reason: params.reason,
+      planSummary: toInputJson(planSummary),
+    },
+  });
+  await recordCustomerDeploymentEvent(actor, source.id, "control_plane.client_migration.planned", {
+    reason: params.reason,
+    migrationRunId: (run as { id: string }).id,
+    direction,
+    destinationDeploymentId: params.destinationDeploymentId ?? null,
+  });
+  return run;
+}
+
+function migrationRunSummary(run: unknown) {
+  const record = run as Record<string, unknown> & {
+    _count?: { idMaps?: number };
+    sourceDeployment?: unknown;
+    destinationDeployment?: unknown;
+    customerAccount?: unknown;
+  };
+  return {
+    id: record.id,
+    customerAccountId: record.customerAccountId,
+    sourceDeploymentId: record.sourceDeploymentId,
+    destinationDeploymentId: record.destinationDeploymentId ?? null,
+    direction: record.direction,
+    status: record.status,
+    actorUserId: record.actorUserId ?? null,
+    actorLabel: record.actorLabel ?? null,
+    reason: record.reason,
+    planSummary: record.planSummary ?? null,
+    verificationSummary: record.verificationSummary ?? null,
+    error: record.error ?? null,
+    dryRunAt: record.dryRunAt ?? null,
+    executedAt: record.executedAt ?? null,
+    finalizedAt: record.finalizedAt ?? null,
+    rolledBackAt: record.rolledBackAt ?? null,
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt,
+    idMapCount: record._count?.idMaps ?? null,
+    sourceDeployment: record.sourceDeployment ? sanitizeDeploymentForControlPlane(record.sourceDeployment as Record<string, unknown>) : undefined,
+    destinationDeployment: record.destinationDeployment ? sanitizeDeploymentForControlPlane(record.destinationDeployment as Record<string, unknown>) : undefined,
+    customerAccount: record.customerAccount ? customerAccountSummary(record.customerAccount as Parameters<typeof customerAccountSummary>[0]) : undefined,
+  };
+}
+
+function runCustomerAccount(run: unknown) {
+  return (run as { customerAccount?: { primaryDeploymentId?: string | null } }).customerAccount ?? null;
+}
+
+function runDestinationDeployment(run: unknown) {
+  return (run as { destinationDeployment?: { id: string; customerAccountId?: string | null; deploymentKind?: string; deploymentStatus?: string; lastHealthStatus?: string | null } | null }).destinationDeployment ?? null;
+}
+
+function assertRunDestinationBelongsToAccount(run: unknown) {
+  const runRecord = run as { customerAccountId: string; destinationDeploymentId?: string | null };
+  const destination = runDestinationDeployment(run);
+  if (!runRecord.destinationDeploymentId) return;
+  invariant(destination, 404, "NOT_FOUND", "Destination deployment not found.");
+  invariant(destination.customerAccountId === runRecord.customerAccountId, 400, "MIGRATION_DESTINATION_ACCOUNT_MISMATCH", "Destination deployment must belong to the same customer account as the source.");
+}
+
+async function loadClientMigrationRun(actor: AppActor, migrationRunId: string) {
+  const run = await migrationRunModel().findUnique({
+    where: { id: migrationRunId },
+    include: {
+      customerAccount: true,
+      sourceDeployment: true,
+      destinationDeployment: true,
+      _count: { select: { idMaps: true } },
+    },
+  });
+  invariant(run, 404, "NOT_FOUND", "Client migration run not found.");
+  const sourceDeploymentId = (run as { sourceDeploymentId: string }).sourceDeploymentId;
+  await requireControlPlaneAccess(actor, { deploymentId: sourceDeploymentId });
+  return run;
+}
+
+export async function planControlPlaneClientMigration(actor: AppActor, params: {
+  sourceDeploymentId: string;
+  targetMode: string;
+  destinationDeploymentId?: string | null;
+  reason?: string | null;
+}) {
+  await requireControlPlaneAccess(actor);
+  requireControlPlaneScope(actor, CONTROL_PLANE_MIGRATIONS_WRITE_SCOPE);
+  assertControlPlaneCapabilityEnabled(
+    CONTROL_PLANE_MIGRATION_DRY_RUN_ENABLED_ENV,
+    "CONTROL_PLANE_MIGRATION_DRY_RUN_DISABLED",
+    "Control-plane client migration planning is disabled for this environment.",
+    { defaultEnabledOutsideProduction: true },
+  );
+  const reason = requireMutationReason(params.reason);
+  const targetMode = normalizeClientMode(params.targetMode);
+  const run = await createClientMigrationRun(actor, {
+    sourceDeploymentId: normalizeRequiredText(params.sourceDeploymentId, "Source deployment ID"),
+    targetMode,
+    destinationDeploymentId: normalizeOptionalControlPlaneText(params.destinationDeploymentId),
+    reason,
+  });
+  return migrationRunSummary(run);
+}
+
+type EntityInventorySpec = {
+  entityType: string;
+  modelName: string;
+  where: JsonRecord;
+  createIdMap?: boolean;
+};
+
+async function safeEntityCount(spec: EntityInventorySpec) {
+  const model = (prisma as unknown as Record<string, { count?: (args: unknown) => Promise<number> }>)[spec.modelName];
+  if (!model?.count) return null;
+  return model.count({ where: spec.where });
+}
+
+async function safeEntityIds(spec: EntityInventorySpec) {
+  if (!spec.createIdMap) return [];
+  const model = (prisma as unknown as Record<string, { findMany?: (args: unknown) => Promise<Array<{ id: string }>> }>)[spec.modelName];
+  if (!model?.findMany) return [];
+  const rows: Array<{ id: string }> = [];
+  let cursor: string | null = null;
+  for (;;) {
+    const page = await model.findMany({
+      where: spec.where,
+      select: { id: true },
+      orderBy: { id: "asc" },
+      take: 1_000,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+    });
+    rows.push(...page);
+    if (page.length < 1_000) break;
+    cursor = page[page.length - 1]?.id ?? null;
+    if (!cursor) break;
+  }
+  return rows;
+}
+
+async function buildMigrationInventory(deployment: {
+  id: string;
+  managedWorkspaceId?: string | null;
+  customerAccountId?: string | null;
+}) {
+  const specs: EntityInventorySpec[] = [
+    { entityType: "SupportOperation", modelName: "supportOperation", where: { deploymentId: deployment.id }, createIdMap: true },
+    { entityType: "CustomerDeploymentEvent", modelName: "customerDeploymentEvent", where: { deploymentId: deployment.id }, createIdMap: true },
+    { entityType: "FleetHealthSnapshot", modelName: "fleetHealthSnapshot", where: { deploymentId: deployment.id }, createIdMap: true },
+    { entityType: "CustomerEntitlement", modelName: "customerEntitlement", where: { deploymentId: deployment.id }, createIdMap: true },
+    { entityType: "CustomerReleaseTarget", modelName: "customerReleaseTarget", where: { deploymentId: deployment.id }, createIdMap: true },
+  ];
+
+  if (deployment.managedWorkspaceId) {
+    const workspaceId = deployment.managedWorkspaceId;
+    specs[0] = { entityType: "SupportOperation", modelName: "supportOperation", where: { OR: [{ deploymentId: deployment.id }, { workspaceId }] }, createIdMap: true };
+    specs.push(
+      { entityType: "Workspace", modelName: "workspace", where: { id: workspaceId }, createIdMap: true },
+      { entityType: "Member", modelName: "member", where: { workspaceId }, createIdMap: true },
+      { entityType: "Circle", modelName: "circle", where: { workspaceId }, createIdMap: true },
+      { entityType: "Role", modelName: "role", where: { circle: { workspaceId } }, createIdMap: true },
+      { entityType: "RoleVersion", modelName: "roleVersion", where: { workspaceId }, createIdMap: true },
+      { entityType: "RoleHolderHistory", modelName: "roleHolderHistory", where: { workspaceId }, createIdMap: true },
+      { entityType: "RoleAssignment", modelName: "roleAssignment", where: { role: { circle: { workspaceId } } }, createIdMap: true },
+      { entityType: "RoleOnboardingSession", modelName: "roleOnboardingSession", where: { workspaceId }, createIdMap: true },
+      { entityType: "ApprovalPolicy", modelName: "approvalPolicy", where: { workspaceId }, createIdMap: true },
+      { entityType: "ApprovalFlow", modelName: "approvalFlow", where: { workspaceId }, createIdMap: true },
+      { entityType: "ApprovalDecision", modelName: "approvalDecision", where: { flow: { workspaceId } }, createIdMap: true },
+      { entityType: "Objection", modelName: "objection", where: { flow: { workspaceId } }, createIdMap: true },
+      { entityType: "Cycle", modelName: "cycle", where: { workspaceId }, createIdMap: true },
+      { entityType: "CycleUpdate", modelName: "cycleUpdate", where: { cycle: { workspaceId } }, createIdMap: true },
+      { entityType: "Allocation", modelName: "allocation", where: { cycle: { workspaceId } }, createIdMap: true },
+      { entityType: "LedgerAccount", modelName: "ledgerAccount", where: { workspaceId }, createIdMap: true },
+      { entityType: "LedgerEntry", modelName: "ledgerEntry", where: { workspaceId }, createIdMap: true },
+      { entityType: "SpendRequest", modelName: "spendRequest", where: { workspaceId }, createIdMap: true },
+      { entityType: "WorkspaceFeatureFlag", modelName: "workspaceFeatureFlag", where: { workspaceId }, createIdMap: true },
+      { entityType: "WorkspaceToolLink", modelName: "workspaceToolLink", where: { workspaceId }, createIdMap: true },
+      { entityType: "WorkspaceToolLinkCircleTag", modelName: "workspaceToolLinkCircleTag", where: { toolLink: { workspaceId } }, createIdMap: true },
+      { entityType: "CatalogItem", modelName: "catalogItem", where: { workspaceId }, createIdMap: true },
+      { entityType: "CatalogFavorite", modelName: "catalogFavorite", where: { workspaceId }, createIdMap: true },
+      { entityType: "CatalogRequest", modelName: "catalogRequest", where: { workspaceId }, createIdMap: true },
+      { entityType: "CatalogSettings", modelName: "catalogSettings", where: { workspaceId }, createIdMap: true },
+      { entityType: "BrainSource", modelName: "brainSource", where: { workspaceId }, createIdMap: true },
+      { entityType: "BrainArticle", modelName: "brainArticle", where: { workspaceId }, createIdMap: true },
+      { entityType: "KnowledgeChunk", modelName: "knowledgeChunk", where: { workspaceId }, createIdMap: true },
+      { entityType: "ExternalDataSource", modelName: "externalDataSource", where: { workspaceId }, createIdMap: true },
+      { entityType: "Document", modelName: "document", where: { workspaceId }, createIdMap: true },
+      { entityType: "Meeting", modelName: "meeting", where: { workspaceId }, createIdMap: true },
+      { entityType: "MeetingRecording", modelName: "meetingRecording", where: { workspaceId }, createIdMap: true },
+      { entityType: "Action", modelName: "action", where: { workspaceId }, createIdMap: true },
+      { entityType: "Proposal", modelName: "proposal", where: { workspaceId }, createIdMap: true },
+      { entityType: "Tension", modelName: "tension", where: { workspaceId }, createIdMap: true },
+      { entityType: "AuditLog", modelName: "auditLog", where: { workspaceId }, createIdMap: true },
+      { entityType: "Event", modelName: "event", where: { workspaceId }, createIdMap: true },
+      { entityType: "WorkflowJob", modelName: "workflowJob", where: { workspaceId }, createIdMap: true },
+      { entityType: "AgentRun", modelName: "agentRun", where: { workspaceId }, createIdMap: true },
+      { entityType: "AgentCredential", modelName: "agentCredential", where: { workspaceId }, createIdMap: true },
+      { entityType: "OAuthConnection", modelName: "oauthConnection", where: { workspaceId }, createIdMap: true },
+      { entityType: "ExecutionRequest", modelName: "executionRequest", where: { workspaceId }, createIdMap: true },
+      { entityType: "ExecutionResult", modelName: "executionResult", where: { workspaceId }, createIdMap: true },
+      { entityType: "ContextGraphObject", modelName: "contextGraphObject", where: { workspaceId }, createIdMap: true },
+      { entityType: "ContextGraphRelationship", modelName: "contextGraphRelationship", where: { workspaceId }, createIdMap: true },
+      { entityType: "Goal", modelName: "goal", where: { workspaceId }, createIdMap: true },
+      { entityType: "GoalUpdate", modelName: "goalUpdate", where: { goal: { workspaceId } }, createIdMap: true },
+      { entityType: "GoalLink", modelName: "goalLink", where: { goal: { workspaceId } }, createIdMap: true },
+      { entityType: "Recognition", modelName: "recognition", where: { workspaceId }, createIdMap: true },
+      { entityType: "CheckIn", modelName: "checkIn", where: { workspaceId }, createIdMap: true },
+      { entityType: "ModelUsageBudget", modelName: "modelUsageBudget", where: { workspaceId }, createIdMap: true },
+      { entityType: "WorkspaceBillingProfile", modelName: "workspaceBillingProfile", where: { workspaceId }, createIdMap: true },
+      { entityType: "WorkspaceEnterpriseService", modelName: "workspaceEnterpriseService", where: { workspaceId }, createIdMap: true },
+    );
+  }
+
+  const entries = [];
+  const idMapSeeds: Array<{ entityType: string; sourceId: string }> = [];
+  for (const spec of specs) {
+    const [count, ids] = await Promise.all([
+      safeEntityCount(spec),
+      safeEntityIds(spec),
+    ]);
+    entries.push({
+      entityType: spec.entityType,
+      count,
+      idMapSampled: spec.createIdMap ? ids.length : 0,
+    });
+    for (const id of ids) {
+      idMapSeeds.push({ entityType: spec.entityType, sourceId: id.id });
+    }
+  }
+
+  return {
+    entries,
+    idMapSeeds,
+  };
+}
+
+async function buildMigrationActiveWriteEvidence(deployment: { managedWorkspaceId?: string | null }) {
+  if (!deployment.managedWorkspaceId) {
+    return { pendingWorkflowJobs: null };
+  }
+  const model = (prisma as unknown as Record<string, { count?: (args: unknown) => Promise<number> }>).workflowJob;
+  if (!model?.count) {
+    return { pendingWorkflowJobs: null };
+  }
+  return {
+    pendingWorkflowJobs: await model.count({
+      where: {
+        workspaceId: deployment.managedWorkspaceId,
+        status: { in: ["PENDING", "RUNNING"] },
+      },
+    }),
+  };
+}
+
+async function writeMigrationIdMapSeeds(migrationRunId: string, seeds: Array<{ entityType: string; sourceId: string }>) {
+  const model = migrationIdMapModel();
+  await Promise.all(seeds.map((seed) => model.upsert({
+    where: {
+      migrationRunId_entityType_sourceId: {
+        migrationRunId,
+        entityType: seed.entityType,
+        sourceId: seed.sourceId,
+      },
+    },
+    update: {},
+    create: {
+      migrationRunId,
+      entityType: seed.entityType,
+      sourceId: seed.sourceId,
+      destinationId: null,
+    },
+  })));
+}
+
+function dryRunChecks(params: {
+  sourceDeployment: {
+    id: string;
+    deploymentStatus: string;
+    deploymentKind: string;
+    managedWorkspaceId?: string | null;
+    supportCredentialEnc?: string | null;
+    customerAccount?: { primaryDeploymentId?: string | null } | null;
+  };
+  destinationDeployment?: { deploymentStatus: string; deploymentKind: string } | null;
+  targetMode: ControlPlaneClientMode;
+  writesQuiesced?: boolean | null;
+  acceptRequiresReauth?: boolean | null;
+  inventory: { entries: Array<{ entityType: string; count: number | null }> };
+  activeWriteEvidence: { pendingWorkflowJobs: number | null };
+}) {
+  const checks = [
+    {
+      key: "supported_direction",
+      ok: true,
+      detail: `V1 supports ${params.sourceDeployment.deploymentKind} to ${targetKindFromMode(params.targetMode)}.`,
+    },
+    {
+      key: "source_primary_routing",
+      ok: !params.sourceDeployment.customerAccount?.primaryDeploymentId
+        || params.sourceDeployment.customerAccount.primaryDeploymentId === params.sourceDeployment.id,
+      detail: !params.sourceDeployment.customerAccount?.primaryDeploymentId
+        || params.sourceDeployment.customerAccount.primaryDeploymentId === params.sourceDeployment.id
+        ? "Source is the account primary deployment or no primary is set."
+        : "Source is not the account primary deployment; re-plan against the current primary deployment.",
+    },
+    {
+      key: "source_writes_quiesced",
+      ok: params.sourceDeployment.deploymentStatus !== "ACTIVE" || Boolean(params.writesQuiesced),
+      detail: params.sourceDeployment.deploymentStatus !== "ACTIVE" || params.writesQuiesced
+        ? "Source write risk accepted for migration window."
+        : "Source is active; confirm writes are quiesced before migration.",
+    },
+    {
+      key: "pending_workflow_jobs",
+      ok: params.activeWriteEvidence.pendingWorkflowJobs === 0,
+      detail: params.activeWriteEvidence.pendingWorkflowJobs === 0
+        ? "No pending or running workspace jobs were found."
+        : params.activeWriteEvidence.pendingWorkflowJobs == null
+          ? "Pending/running workspace jobs could not be verified."
+          : `${params.activeWriteEvidence.pendingWorkflowJobs} pending or running workspace job(s) must finish before migration.`,
+    },
+    {
+      key: "destination_kind",
+      ok: !params.destinationDeployment || params.destinationDeployment.deploymentKind === targetKindFromMode(params.targetMode),
+      detail: params.destinationDeployment
+        ? "Destination kind matches target lane."
+        : "Destination is not attached yet; create it before execute.",
+    },
+    {
+      key: "destination_health",
+      ok: !params.destinationDeployment || ["ACTIVE", "BOOTSTRAPPING", "PROVISIONING"].includes(params.destinationDeployment.deploymentStatus),
+      detail: params.destinationDeployment
+        ? `Destination status is ${params.destinationDeployment.deploymentStatus}.`
+        : "Destination health will be verified after provisioning.",
+    },
+  ];
+  const missingCounts = params.inventory.entries.filter((entry) => entry.count == null);
+  checks.push({
+    key: "inventory_counts_complete",
+    ok: missingCounts.length === 0,
+    detail: missingCounts.length === 0
+      ? "All migration inventory counts were collected."
+      : `Missing inventory counts for: ${missingCounts.map((entry) => entry.entityType).join(", ")}.`,
+  });
+  const featureFlagInventory = params.inventory.entries.find((entry) => entry.entityType === "WorkspaceFeatureFlag");
+  checks.push({
+    key: "feature_flag_inventory",
+    ok: featureFlagInventory?.count != null,
+    detail: featureFlagInventory?.count != null
+      ? "Feature flag inventory was collected for parity verification."
+      : "Feature flag inventory is missing; feature parity cannot be verified.",
+  });
+  const secretEntities = params.inventory.entries.filter((entry) => (
+    (entry.entityType === "AgentCredential" || entry.entityType === "OAuthConnection") && (entry.count ?? 0) > 0
+  ));
+  checks.push({
+    key: "secret_prerequisites",
+    ok: secretEntities.length === 0 || Boolean(params.acceptRequiresReauth),
+    detail: secretEntities.length === 0
+      ? "No encrypted connector credentials require reissue."
+      : "Encrypted connector credentials require encrypted migration or customer reauthentication acceptance.",
+  });
+  return checks;
+}
+
+export async function runControlPlaneClientMigrationDryRun(actor: AppActor, params: {
+  migrationRunId?: string | null;
+  sourceDeploymentId?: string | null;
+  targetMode?: string | null;
+  destinationDeploymentId?: string | null;
+  writesQuiesced?: boolean | null;
+  acceptRequiresReauth?: boolean | null;
+  reason?: string | null;
+}) {
+  await requireControlPlaneAccess(actor);
+  requireControlPlaneScope(actor, CONTROL_PLANE_MIGRATIONS_WRITE_SCOPE);
+  assertControlPlaneCapabilityEnabled(
+    CONTROL_PLANE_MIGRATION_DRY_RUN_ENABLED_ENV,
+    "CONTROL_PLANE_MIGRATION_DRY_RUN_DISABLED",
+    "Control-plane client migration dry-run is disabled for this environment.",
+    { defaultEnabledOutsideProduction: true },
+  );
+  const reason = requireMutationReason(params.reason);
+  let run: unknown = params.migrationRunId
+    ? await loadClientMigrationRun(actor, params.migrationRunId)
+    : null;
+  if (!run) {
+    run = await createClientMigrationRun(actor, {
+      sourceDeploymentId: normalizeRequiredText(params.sourceDeploymentId, "Source deployment ID"),
+      targetMode: normalizeClientMode(params.targetMode),
+      destinationDeploymentId: normalizeOptionalControlPlaneText(params.destinationDeploymentId),
+      reason,
+    });
+  }
+  const runRecord = run as {
+    id: string;
+    sourceDeploymentId: string;
+    destinationDeploymentId?: string | null;
+    direction: ClientMigrationDirection;
+    sourceDeployment?: { id: string; deploymentKind: string; deploymentStatus: string; managedWorkspaceId?: string | null; supportCredentialEnc?: string | null; customerAccount?: { primaryDeploymentId?: string | null } | null };
+    destinationDeployment?: { deploymentKind: string; deploymentStatus: string } | null;
+  };
+  const sourceDeployment = runRecord.sourceDeployment ?? await prisma.customerDeployment.findUnique({
+    where: { id: runRecord.sourceDeploymentId },
+    include: { customerAccount: true },
+  });
+  invariant(sourceDeployment, 404, "NOT_FOUND", "Source deployment not found.");
+  invariant(
+    sourceDeployment.managedWorkspaceId,
+    400,
+    "MIGRATION_SOURCE_INVENTORY_UNAVAILABLE",
+    "Hosted dedicated source inventory requires the dedicated migration worker or support export endpoint before dry-run can proceed.",
+  );
+  const targetMode = runRecord.direction === "shared_to_hosted" ? "hosted_dedicated" : "shared_workspace";
+  const destinationDeploymentId = normalizeOptionalControlPlaneText(params.destinationDeploymentId) ?? runRecord.destinationDeploymentId ?? null;
+  const destinationDeployment = destinationDeploymentId
+    ? await assertMigrationDestination({
+      destinationDeploymentId,
+      targetMode,
+      sourceDeploymentId: runRecord.sourceDeploymentId,
+      customerAccountId: (run as { customerAccountId: string }).customerAccountId,
+    })
+    : null;
+  const inventory = await buildMigrationInventory({
+    id: runRecord.sourceDeploymentId,
+    managedWorkspaceId: sourceDeployment.managedWorkspaceId,
+  });
+  const activeWriteEvidence = await buildMigrationActiveWriteEvidence(sourceDeployment);
+  await writeMigrationIdMapSeeds(runRecord.id, inventory.idMapSeeds);
+  const checks = dryRunChecks({
+    sourceDeployment,
+    destinationDeployment,
+    targetMode,
+    writesQuiesced: params.writesQuiesced,
+    acceptRequiresReauth: params.acceptRequiresReauth,
+    inventory,
+    activeWriteEvidence,
+  });
+  const passed = checks.every((check) => check.ok);
+  const verificationSummary = {
+    dryRun: {
+      passed,
+      reason,
+      checks,
+      inventory: inventory.entries,
+      idMapSeedCount: inventory.idMapSeeds.length,
+      activeWriteEvidence,
+      writesQuiesced: Boolean(params.writesQuiesced),
+      acceptRequiresReauth: Boolean(params.acceptRequiresReauth),
+    },
+  };
+  const updated = await migrationRunModel().update({
+    where: { id: runRecord.id },
+    data: {
+      destinationDeploymentId,
+      status: passed ? "dry_run_passed" : "dry_run_failed",
+      verificationSummary: toInputJson(verificationSummary),
+      error: passed ? null : "Dry-run checks failed.",
+      dryRunAt: new Date(),
+    },
+    include: {
+      customerAccount: true,
+      sourceDeployment: true,
+      destinationDeployment: true,
+      _count: { select: { idMaps: true } },
+    },
+  });
+  await recordCustomerDeploymentEvent(actor, runRecord.sourceDeploymentId, "control_plane.client_migration.dry_run", {
+    reason,
+    migrationRunId: runRecord.id,
+    status: passed ? "dry_run_passed" : "dry_run_failed",
+    failedChecks: checks.filter((check) => !check.ok).map((check) => check.key),
+  });
+  return migrationRunSummary(updated);
+}
+
+function boundedVerificationString(value: unknown, label: string, maxLength = 160) {
+  if (value == null) return null;
+  invariant(typeof value === "string", 400, "INVALID_MIGRATION_VERIFICATION", `${label} must be a string.`);
+  const trimmed = value.trim();
+  invariant(trimmed.length <= maxLength, 400, "INVALID_MIGRATION_VERIFICATION", `${label} is too long.`);
+  return trimmed || null;
+}
+
+function sanitizeMigrationCountEvidence(value: unknown) {
+  if (value == null) return {};
+  invariant(value && typeof value === "object" && !Array.isArray(value), 400, "INVALID_MIGRATION_VERIFICATION", "counts must be an object.");
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([entityType, entry]) => {
+    invariant(/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(entityType), 400, "INVALID_MIGRATION_VERIFICATION", "Invalid count entity type.");
+    invariant(entry && typeof entry === "object" && !Array.isArray(entry), 400, "INVALID_MIGRATION_VERIFICATION", "Each count entry must be an object.");
+    const record = entry as Record<string, unknown>;
+    const source = record.source;
+    const destination = record.destination;
+    invariant(typeof source === "number" && Number.isSafeInteger(source) && source >= 0, 400, "INVALID_MIGRATION_VERIFICATION", "source count must be a non-negative integer.");
+    invariant(typeof destination === "number" && Number.isSafeInteger(destination) && destination >= 0, 400, "INVALID_MIGRATION_VERIFICATION", "destination count must be a non-negative integer.");
+    invariant(source === destination, 400, "MIGRATION_COUNT_MISMATCH", `Migration count mismatch for ${entityType}.`);
+    return [entityType, { source, destination }];
+  }));
+}
+
+function dryRunInventoryFromSummary(summary: unknown) {
+  const summaryRecord = summary && typeof summary === "object" ? summary as JsonRecord : null;
+  const dryRun = summaryRecord?.dryRun && typeof summaryRecord.dryRun === "object" ? summaryRecord.dryRun as JsonRecord : null;
+  const inventory = Array.isArray(dryRun?.inventory) ? dryRun.inventory : [];
+  return inventory.map((entry) => {
+    invariant(entry && typeof entry === "object", 400, "MIGRATION_DRY_RUN_REQUIRED", "Dry-run inventory is malformed.");
+    const record = entry as JsonRecord;
+    invariant(typeof record.entityType === "string", 400, "MIGRATION_DRY_RUN_REQUIRED", "Dry-run inventory entity type is missing.");
+    invariant(typeof record.count === "number" && Number.isSafeInteger(record.count) && record.count >= 0, 400, "MIGRATION_DRY_RUN_REQUIRED", "Dry-run inventory count is missing.");
+    return {
+      entityType: record.entityType,
+      count: record.count,
+    };
+  });
+}
+
+function requireMigrationVerification(value: unknown, expectedInventory: Array<{ entityType: string; count: number }>) {
+  invariant(expectedInventory.length > 0, 400, "MIGRATION_DRY_RUN_REQUIRED", "Migration execution requires complete dry-run inventory.");
+  const record = value && typeof value === "object" ? value as JsonRecord : null;
+  invariant(record?.verified === true, 400, "MIGRATION_VERIFICATION_REQUIRED", "Migration worker verification requires verified evidence from the destination import/check process.");
+  const verificationSource = boundedVerificationString(record.verificationSource, "verificationSource");
+  invariant(verificationSource === "control_plane_migration_worker", 400, "MIGRATION_VERIFICATION_REQUIRED", "Migration verification must come from the control-plane migration worker.");
+  const importJobId = boundedVerificationString(record.importJobId, "importJobId");
+  const sourceChecksum = boundedVerificationString(record.sourceChecksum, "sourceChecksum", 128);
+  const destinationChecksum = boundedVerificationString(record.destinationChecksum, "destinationChecksum", 128);
+  const healthStatus = boundedVerificationString(record.healthStatus, "healthStatus", 40);
+  invariant(importJobId, 400, "MIGRATION_VERIFICATION_REQUIRED", "Migration importJobId is required.");
+  invariant(sourceChecksum && destinationChecksum && sourceChecksum === destinationChecksum, 400, "MIGRATION_CHECKSUM_MISMATCH", "Migration source and destination checksums must match.");
+  invariant(healthStatus === "ok", 400, "MIGRATION_DESTINATION_HEALTH_REQUIRED", "Destination health must be ok.");
+  const counts = sanitizeMigrationCountEvidence(record.counts);
+  for (const expected of expectedInventory) {
+    const observed = counts[expected.entityType] as { source?: number; destination?: number } | undefined;
+    invariant(observed, 400, "MIGRATION_VERIFICATION_INCOMPLETE", `Migration verification is missing ${expected.entityType} counts.`);
+    invariant(
+      observed.source === expected.count && observed.destination === expected.count,
+      400,
+      "MIGRATION_COUNT_MISMATCH",
+      `Migration verification count mismatch for ${expected.entityType}.`,
+    );
+  }
+  return {
+    verified: true,
+    verificationSource,
+    importJobId,
+    sourceChecksum,
+    destinationChecksum,
+    healthStatus,
+    releaseImageTag: boundedVerificationString(record.releaseImageTag, "releaseImageTag", 160),
+    counts,
+  };
+}
+
+function sanitizeMigrationWorkerIdMaps(value: unknown) {
+  if (value == null) return [];
+  invariant(Array.isArray(value), 400, "INVALID_MIGRATION_ID_MAP", "idMaps must be an array.");
+  invariant(value.length <= 25_000, 400, "INVALID_MIGRATION_ID_MAP", "idMaps exceeds the per-run evidence limit.");
+  return value.map((entry) => {
+    invariant(entry && typeof entry === "object" && !Array.isArray(entry), 400, "INVALID_MIGRATION_ID_MAP", "Each idMap entry must be an object.");
+    const record = entry as JsonRecord;
+    const entityType = boundedVerificationString(record.entityType, "entityType", 64);
+    const sourceId = boundedVerificationString(record.sourceId, "sourceId", 160);
+    const destinationId = boundedVerificationString(record.destinationId, "destinationId", 160);
+    const checksum = boundedVerificationString(record.checksum, "checksum", 128);
+    invariant(entityType && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(entityType), 400, "INVALID_MIGRATION_ID_MAP", "Invalid idMap entity type.");
+    invariant(sourceId, 400, "INVALID_MIGRATION_ID_MAP", "idMap sourceId is required.");
+    invariant(destinationId, 400, "INVALID_MIGRATION_ID_MAP", "idMap destinationId is required.");
+    invariant(record.metadata == null || (typeof record.metadata === "object" && !Array.isArray(record.metadata)), 400, "INVALID_MIGRATION_ID_MAP", "idMap metadata must be an object.");
+    return {
+      entityType,
+      sourceId,
+      destinationId,
+      checksum,
+      metadata: record.metadata == null ? null : record.metadata,
+    };
+  });
+}
+
+async function writeMigrationWorkerIdMaps(migrationRunId: string, maps: ReturnType<typeof sanitizeMigrationWorkerIdMaps>) {
+  const model = migrationIdMapModel();
+  await Promise.all(maps.map((entry) => model.upsert({
+    where: {
+      migrationRunId_entityType_sourceId: {
+        migrationRunId,
+        entityType: entry.entityType,
+        sourceId: entry.sourceId,
+      },
+    },
+    update: {
+      destinationId: entry.destinationId,
+      checksum: entry.checksum,
+      metadata: entry.metadata == null ? undefined : toInputJson(entry.metadata),
+    },
+    create: {
+      migrationRunId,
+      entityType: entry.entityType,
+      sourceId: entry.sourceId,
+      destinationId: entry.destinationId,
+      checksum: entry.checksum,
+      metadata: entry.metadata == null ? undefined : toInputJson(entry.metadata),
+    },
+  })));
+}
+
+function requireStoredWorkerVerification(summary: unknown) {
+  const summaryRecord = summary && typeof summary === "object" ? summary as JsonRecord : null;
+  const worker = summaryRecord?.worker && typeof summaryRecord.worker === "object" ? summaryRecord.worker as JsonRecord : null;
+  invariant(worker?.verified === true, 400, "MIGRATION_WORKER_VERIFICATION_REQUIRED", "Migration execution requires stored verification from the control-plane migration worker.");
+  return worker;
+}
+
+export async function recordControlPlaneClientMigrationWorkerVerification(actor: AppActor, params: {
+  migrationRunId: string;
+  destinationDeploymentId?: string | null;
+  verificationSummary?: unknown;
+  idMaps?: unknown;
+  reason?: string | null;
+}) {
+  await requireControlPlaneAccess(actor);
+  requireControlPlaneScope(actor, CONTROL_PLANE_MIGRATIONS_WRITE_SCOPE);
+  const reason = requireMutationReason(params.reason);
+  const run = await loadClientMigrationRun(actor, params.migrationRunId);
+  const runRecord = run as {
+    id: string;
+    status: string;
+    customerAccountId: string;
+    sourceDeploymentId: string;
+    destinationDeploymentId?: string | null;
+    direction: ClientMigrationDirection;
+    verificationSummary?: unknown;
+  };
+  assertRunDestinationBelongsToAccount(run);
+  invariant(
+    runRecord.status === "dry_run_passed" || runRecord.status === "import_verification_queued",
+    400,
+    "MIGRATION_DRY_RUN_REQUIRED",
+    "Worker verification requires a passed dry-run.",
+  );
+  const targetMode = runRecord.direction === "shared_to_hosted" ? "hosted_dedicated" : "shared_workspace";
+  const destinationDeploymentId = normalizeOptionalControlPlaneText(params.destinationDeploymentId) ?? runRecord.destinationDeploymentId;
+  invariant(destinationDeploymentId, 400, "MIGRATION_DESTINATION_REQUIRED", "A destination deployment is required before worker verification.");
+  await assertMigrationDestination({
+    destinationDeploymentId,
+    targetMode,
+    sourceDeploymentId: runRecord.sourceDeploymentId,
+    customerAccountId: runRecord.customerAccountId,
+  });
+  const expectedInventory = dryRunInventoryFromSummary(runRecord.verificationSummary);
+  const evidence = requireMigrationVerification(params.verificationSummary, expectedInventory);
+  const idMaps = sanitizeMigrationWorkerIdMaps(params.idMaps);
+  await writeMigrationWorkerIdMaps(runRecord.id, idMaps);
+  const verificationSummary = {
+    previous: runRecord.verificationSummary ?? null,
+    worker: {
+      verified: true,
+      reason,
+      evidence,
+      idMapEvidenceCount: idMaps.length,
+      verifiedAt: new Date().toISOString(),
+    },
+  };
+  const updated = await migrationRunModel().update({
+    where: { id: runRecord.id },
+    data: {
+      destinationDeploymentId,
+      status: "import_verified",
+      verificationSummary: toInputJson(verificationSummary),
+      error: null,
+    },
+    include: {
+      customerAccount: true,
+      sourceDeployment: true,
+      destinationDeployment: true,
+      _count: { select: { idMaps: true } },
+    },
+  });
+  await recordCustomerDeploymentEvent(actor, runRecord.sourceDeploymentId, "control_plane.client_migration.worker_verified", {
+    reason,
+    migrationRunId: runRecord.id,
+    destinationDeploymentId,
+    idMapEvidenceCount: idMaps.length,
+  });
+  return migrationRunSummary(updated);
+}
+
+export async function enqueueControlPlaneClientMigrationWorkerVerification(actor: AppActor, params: {
+  migrationRunId: string;
+  destinationDeploymentId?: string | null;
+  verificationSummary?: unknown;
+  idMaps?: unknown;
+  reason?: string | null;
+}) {
+  await requireControlPlaneAccess(actor);
+  requireControlPlaneScope(actor, CONTROL_PLANE_MIGRATIONS_WRITE_SCOPE);
+  const reason = requireMutationReason(params.reason);
+  const run = await loadClientMigrationRun(actor, params.migrationRunId);
+  const runRecord = run as {
+    id: string;
+    status: string;
+    customerAccountId: string;
+    sourceDeploymentId: string;
+    destinationDeploymentId?: string | null;
+    direction: ClientMigrationDirection;
+    verificationSummary?: unknown;
+  };
+  assertRunDestinationBelongsToAccount(run);
+  invariant(runRecord.status === "dry_run_passed", 400, "MIGRATION_DRY_RUN_REQUIRED", "Migration worker verification requires a passed dry-run.");
+  const targetMode = runRecord.direction === "shared_to_hosted" ? "hosted_dedicated" : "shared_workspace";
+  const destinationDeploymentId = normalizeOptionalControlPlaneText(params.destinationDeploymentId) ?? runRecord.destinationDeploymentId;
+  invariant(destinationDeploymentId, 400, "MIGRATION_DESTINATION_REQUIRED", "A destination deployment is required before migration worker verification.");
+  await assertMigrationDestination({
+    destinationDeploymentId,
+    targetMode,
+    sourceDeploymentId: runRecord.sourceDeploymentId,
+    customerAccountId: runRecord.customerAccountId,
+  });
+  const expectedInventory = dryRunInventoryFromSummary(runRecord.verificationSummary);
+  requireMigrationVerification(params.verificationSummary, expectedInventory);
+  sanitizeMigrationWorkerIdMaps(params.idMaps);
+
+  const dedupeKey = `control-plane:client-migration-verify:${runRecord.id}:${destinationDeploymentId}`;
+  const job = await prisma.workflowJob.upsert({
+    where: { dedupeKey },
+    update: {},
+    create: {
+      workspaceId: null,
+      eventId: null,
+      type: CONTROL_PLANE_CLIENT_MIGRATION_VERIFY_JOB_TYPE,
+      payload: toInputJson({
+        migrationRunId: runRecord.id,
+        destinationDeploymentId,
+        verificationSummary: params.verificationSummary ?? null,
+        idMaps: params.idMaps ?? [],
+        reason,
+        requestedBy: actorUserId(actor) ?? (isControlPlaneAgent(actor) ? actor.label : "control-plane"),
+      }),
+      dedupeKey,
+    },
+  });
+  const updated = await migrationRunModel().update({
+    where: { id: runRecord.id },
+    data: {
+      destinationDeploymentId,
+      status: "import_verification_queued",
+      error: null,
+    },
+    include: {
+      customerAccount: true,
+      sourceDeployment: true,
+      destinationDeployment: true,
+      _count: { select: { idMaps: true } },
+    },
+  });
+  await recordCustomerDeploymentEvent(actor, runRecord.sourceDeploymentId, "control_plane.client_migration.worker_verification_queued", {
+    reason,
+    migrationRunId: runRecord.id,
+    destinationDeploymentId,
+    jobId: (job as { id?: string }).id ?? null,
+  });
+  return {
+    migration: migrationRunSummary(updated),
+    job: {
+      id: (job as { id?: string }).id ?? null,
+      dedupeKey,
+      type: CONTROL_PLANE_CLIENT_MIGRATION_VERIFY_JOB_TYPE,
+    },
+  };
+}
+
+export async function runControlPlaneClientMigrationWorkerVerificationJob(params: {
+  migrationRunId?: string | null;
+  destinationDeploymentId?: string | null;
+  verificationSummary?: unknown;
+  idMaps?: unknown;
+  reason?: string | null;
+}) {
+  return recordControlPlaneClientMigrationWorkerVerification(controlPlaneWorkerActor, {
+    migrationRunId: normalizeRequiredText(params.migrationRunId, "Migration run ID"),
+    destinationDeploymentId: normalizeOptionalControlPlaneText(params.destinationDeploymentId),
+    verificationSummary: params.verificationSummary,
+    idMaps: params.idMaps,
+    reason: params.reason || "Queued control-plane migration worker verification.",
+  });
+}
+
+export async function executeControlPlaneClientMigration(actor: AppActor, params: {
+  migrationRunId: string;
+  destinationDeploymentId?: string | null;
+  reason?: string | null;
+}) {
+  await requireControlPlaneAccess(actor);
+  requireControlPlaneScope(actor, CONTROL_PLANE_MIGRATIONS_WRITE_SCOPE);
+  assertMigrationExecutionAvailable("execute");
+  assertMigrationRuntimeReadOnlyEnforced();
+  const reason = requireMutationReason(params.reason);
+  const run = await loadClientMigrationRun(actor, params.migrationRunId);
+  const runRecord = run as {
+    id: string;
+    status: string;
+    customerAccountId: string;
+    sourceDeploymentId: string;
+    destinationDeploymentId?: string | null;
+    direction: ClientMigrationDirection;
+    verificationSummary?: unknown;
+  };
+  assertRunDestinationBelongsToAccount(run);
+  invariant(runRecord.status === "import_verified", 400, "MIGRATION_WORKER_VERIFICATION_REQUIRED", "Migration execution requires stored verification from the control-plane migration worker.");
+  const targetMode = runRecord.direction === "shared_to_hosted" ? "hosted_dedicated" : "shared_workspace";
+  const destinationDeploymentId = normalizeOptionalControlPlaneText(params.destinationDeploymentId) ?? runRecord.destinationDeploymentId;
+  invariant(destinationDeploymentId, 400, "MIGRATION_DESTINATION_REQUIRED", "A destination deployment is required before migration execution.");
+  const destination = await assertMigrationDestination({
+    destinationDeploymentId,
+    targetMode,
+    sourceDeploymentId: runRecord.sourceDeploymentId,
+    customerAccountId: (run as { customerAccountId: string }).customerAccountId,
+  });
+  invariant(destination, 404, "NOT_FOUND", "Destination deployment not found.");
+  assertMigrationDestinationReadyForCutover(destination);
+  const account = runCustomerAccount(run);
+  invariant(!account?.primaryDeploymentId || account.primaryDeploymentId === runRecord.sourceDeploymentId, 409, "MIGRATION_ROUTING_CHANGED", "Customer primary deployment changed after migration planning; re-plan before executing.");
+  const workerVerification = requireStoredWorkerVerification(runRecord.verificationSummary);
+  const verificationSummary = {
+    previous: runRecord.verificationSummary ?? null,
+    execution: {
+      verified: true,
+      reason,
+      workerVerification,
+      executedAt: new Date().toISOString(),
+    },
+  };
+  const updated = await prisma.$transaction(async (tx) => {
+    await tx.customerAccount.update({
+      where: { id: runRecord.customerAccountId },
+      data: { primaryDeploymentId: destinationDeploymentId },
+    });
+    await tx.customerDeployment.update({
+      where: { id: runRecord.sourceDeploymentId },
+      data: {
+        provisioningStatus: "read_only_pending_finalize",
+      },
+    });
+    return (tx as unknown as { clientMigrationRun: { update(args: unknown): Promise<unknown> } }).clientMigrationRun.update({
+      where: { id: runRecord.id },
+      data: {
+        destinationDeploymentId,
+        status: "executed",
+        verificationSummary: toInputJson(verificationSummary),
+        error: null,
+        executedAt: new Date(),
+      },
+      include: {
+        customerAccount: true,
+        sourceDeployment: true,
+        destinationDeployment: true,
+        _count: { select: { idMaps: true } },
+      },
+    });
+  });
+  await recordCustomerDeploymentEvent(actor, runRecord.sourceDeploymentId, "control_plane.client_migration.executed", {
+    reason,
+    migrationRunId: runRecord.id,
+    destinationDeploymentId,
+  });
+  return migrationRunSummary(updated);
+}
+
+export async function getControlPlaneClientMigrationStatus(actor: AppActor, migrationRunId: string) {
+  const run = await loadClientMigrationRun(actor, migrationRunId);
+  return migrationRunSummary(run);
+}
+
+export async function finalizeControlPlaneClientMigration(actor: AppActor, params: {
+  migrationRunId: string;
+  reason?: string | null;
+}) {
+  await requireControlPlaneAccess(actor);
+  requireControlPlaneScope(actor, CONTROL_PLANE_MIGRATIONS_WRITE_SCOPE);
+  assertMigrationExecutionAvailable("finalize");
+  const reason = requireMutationReason(params.reason);
+  const run = await loadClientMigrationRun(actor, params.migrationRunId);
+  const runRecord = run as {
+    id: string;
+    status: string;
+    customerAccountId: string;
+    sourceDeploymentId: string;
+    destinationDeploymentId?: string | null;
+  };
+  assertRunDestinationBelongsToAccount(run);
+  invariant(runRecord.status === "executed", 400, "MIGRATION_EXECUTION_REQUIRED", "Only an executed migration can be finalized.");
+  invariant(runRecord.destinationDeploymentId, 400, "MIGRATION_DESTINATION_REQUIRED", "Destination deployment is required before finalization.");
+  const account = runCustomerAccount(run);
+  invariant(!account?.primaryDeploymentId || account.primaryDeploymentId === runRecord.destinationDeploymentId, 409, "MIGRATION_ROUTING_CHANGED", "Customer primary deployment is not the migration destination; inspect manually before finalizing.");
+  const destination = runDestinationDeployment(run);
+  invariant(destination?.deploymentStatus === "ACTIVE", 400, "MIGRATION_DESTINATION_NOT_READY", "Destination deployment must be ACTIVE before finalization.");
+  if (destination.deploymentKind === "HOSTED_DEDICATED") {
+    invariant(destination.lastHealthStatus === "ok", 400, "MIGRATION_DESTINATION_HEALTH_REQUIRED", "Hosted destination health must be ok before finalization.");
+  }
+  const updated = await prisma.$transaction(async (tx) => {
+    await tx.customerAccount.update({
+      where: { id: runRecord.customerAccountId },
+      data: { primaryDeploymentId: runRecord.destinationDeploymentId },
+    });
+    await tx.customerDeployment.update({
+      where: { id: runRecord.destinationDeploymentId! },
+      data: {
+        deploymentStatus: "ACTIVE",
+        provisioningStatus: "active",
+      },
+    });
+    await tx.customerDeployment.update({
+      where: { id: runRecord.sourceDeploymentId },
+      data: {
+        deploymentStatus: "SUSPENDED",
+        provisioningStatus: "archived",
+      },
+    });
+    return (tx as unknown as { clientMigrationRun: { update(args: unknown): Promise<unknown> } }).clientMigrationRun.update({
+      where: { id: runRecord.id },
+      data: {
+        status: "finalized",
+        finalizedAt: new Date(),
+      },
+      include: {
+        customerAccount: true,
+        sourceDeployment: true,
+        destinationDeployment: true,
+        _count: { select: { idMaps: true } },
+      },
+    });
+  });
+  await recordCustomerDeploymentEvent(actor, runRecord.destinationDeploymentId, "control_plane.client_migration.finalized", {
+    reason,
+    migrationRunId: runRecord.id,
+    sourceDeploymentId: runRecord.sourceDeploymentId,
+  });
+  return migrationRunSummary(updated);
+}
+
+export async function rollbackControlPlaneClientMigration(actor: AppActor, params: {
+  migrationRunId: string;
+  reason?: string | null;
+}) {
+  await requireControlPlaneAccess(actor);
+  requireControlPlaneScope(actor, CONTROL_PLANE_MIGRATIONS_WRITE_SCOPE);
+  assertMigrationExecutionAvailable("rollback");
+  const reason = requireMutationReason(params.reason);
+  const run = await loadClientMigrationRun(actor, params.migrationRunId);
+  const runRecord = run as {
+    id: string;
+    status: string;
+    customerAccountId: string;
+    sourceDeploymentId: string;
+    destinationDeploymentId?: string | null;
+  };
+  assertRunDestinationBelongsToAccount(run);
+  invariant(runRecord.status === "executed", 400, "MIGRATION_ROLLBACK_NOT_AVAILABLE", "Rollback is available only after execution and before finalization.");
+  const account = runCustomerAccount(run);
+  invariant(
+    !account?.primaryDeploymentId
+      || account.primaryDeploymentId === runRecord.sourceDeploymentId
+      || account.primaryDeploymentId === runRecord.destinationDeploymentId,
+    409,
+    "MIGRATION_ROUTING_CHANGED",
+    "Customer primary deployment changed after migration execution; inspect manually before rollback.",
+  );
+  const updated = await prisma.$transaction(async (tx) => {
+    await tx.customerAccount.update({
+      where: { id: runRecord.customerAccountId },
+      data: { primaryDeploymentId: runRecord.sourceDeploymentId },
+    });
+    await tx.customerDeployment.update({
+      where: { id: runRecord.sourceDeploymentId },
+      data: {
+        deploymentStatus: "ACTIVE",
+        provisioningStatus: "active",
+      },
+    });
+    if (runRecord.destinationDeploymentId) {
+      await tx.customerDeployment.update({
+        where: { id: runRecord.destinationDeploymentId },
+        data: {
+          deploymentStatus: "SUSPENDED",
+          provisioningStatus: "rollback_retained",
+        },
+      });
+    }
+    return (tx as unknown as { clientMigrationRun: { update(args: unknown): Promise<unknown> } }).clientMigrationRun.update({
+      where: { id: runRecord.id },
+      data: {
+        status: "rolled_back",
+        rolledBackAt: new Date(),
+      },
+      include: {
+        customerAccount: true,
+        sourceDeployment: true,
+        destinationDeployment: true,
+        _count: { select: { idMaps: true } },
+      },
+    });
+  });
+  await recordCustomerDeploymentEvent(actor, runRecord.sourceDeploymentId, "control_plane.client_migration.rolled_back", {
+    reason,
+    migrationRunId: runRecord.id,
+    destinationDeploymentId: runRecord.destinationDeploymentId ?? null,
+  });
+  return migrationRunSummary(updated);
 }
 
 export async function listControlPlaneDeployments(actor: AppActor) {

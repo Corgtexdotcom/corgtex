@@ -10,6 +10,7 @@ import { syncBrainArticleKnowledge } from "@corgtex/knowledge";
 import { runDailyDigest, runSlackAgent, runSlackContextSummary, runSlackProactiveScan, sendDemoWelcomeNewspaper } from "@corgtex/agents";
 import {
   createWebhookDeliveries,
+  CONTROL_PLANE_CLIENT_MIGRATION_VERIFY_JOB_TYPE,
   CONTROL_PLANE_FLEET_SNAPSHOT_JOB_TYPE,
   CONTROL_PLANE_RELEASE_DEPLOY_JOB_TYPE,
   deliverWebhook,
@@ -22,6 +23,7 @@ import {
   runMeetingAgendaThreadEdit,
   runMeetingInsightsExtraction,
   runControlPlaneFleetSnapshotJob,
+  runControlPlaneClientMigrationWorkerVerificationJob,
   runControlPlaneReleaseDeployJob,
   syncSlackPublicArchiveForWorkspace,
   reportPendingAiUsageToStripe,
@@ -387,6 +389,20 @@ async function handleJob(job: ClaimedJob) {
       reason: typeof payload.reason === "string" ? payload.reason : null,
       force: typeof payload.force === "boolean" ? payload.force : null,
       target: releaseTargetFromPayload(payload.target),
+    });
+    return;
+  }
+
+  if (job.type === CONTROL_PLANE_CLIENT_MIGRATION_VERIFY_JOB_TYPE) {
+    if (typeof payload.migrationRunId !== "string") {
+      throw new Error("Control Plane client migration verification job is missing migrationRunId.");
+    }
+    await runControlPlaneClientMigrationWorkerVerificationJob({
+      migrationRunId: payload.migrationRunId,
+      destinationDeploymentId: typeof payload.destinationDeploymentId === "string" ? payload.destinationDeploymentId : null,
+      verificationSummary: payload.verificationSummary,
+      idMaps: payload.idMaps,
+      reason: typeof payload.reason === "string" ? payload.reason : null,
     });
     return;
   }

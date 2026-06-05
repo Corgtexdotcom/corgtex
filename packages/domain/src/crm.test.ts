@@ -53,6 +53,7 @@ vi.mock("@corgtex/shared", async (importOriginal) => {
         update: vi.fn(),
       },
       customerDeployment: {
+        findUnique: vi.fn(),
         upsert: vi.fn(),
       },
       $transaction: vi.fn((fn: any) =>
@@ -71,6 +72,7 @@ vi.mock("@corgtex/shared", async (importOriginal) => {
             update: vi.fn().mockResolvedValue({ id: "cust-1", primaryDeploymentId: "inst-1" }),
           },
           customerDeployment: {
+            findUnique: vi.fn().mockResolvedValue(null),
             upsert: vi.fn().mockResolvedValue({ id: "inst-1", customerSlug: "demo-123" }),
           },
           demoLead: {

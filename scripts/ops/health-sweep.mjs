@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import {
   buildControlPlaneIncidents,
   buildHealthTargets,
@@ -61,7 +62,7 @@ async function main() {
   console.log(JSON.stringify(output, null, 2));
 
   if (!dryRun && createIssues) {
-    const incidentArgs = [new URL("./github-incident.mjs", import.meta.url).pathname];
+    const incidentArgs = [fileURLToPath(new URL("./github-incident.mjs", import.meta.url))];
     if (syncDedupePrefixes.length > 0) {
       incidentArgs.push("--sync-resolved", "--sync-dedupe-prefixes", JSON.stringify(syncDedupePrefixes));
     }

@@ -8,6 +8,13 @@ function usage() {
     "Usage:",
     "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs tools",
     "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs list-customers",
+    "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs create-client '<json-args>'",
+    "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs plan-client-migration '<json-args>'",
+    "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs migration-dry-run '<json-args>'",
+    "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs execute-client-migration '<json-args>'",
+    "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs get-client-migration <migrationRunId>",
+    "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs finalize-client-migration <migrationRunId> <reason>",
+    "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs rollback-client-migration <migrationRunId> <reason>",
     "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs get-deployment <deploymentId>",
     "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs integrations <deploymentId>",
     "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs context <deploymentId>",
@@ -98,6 +105,26 @@ try {
     print(await requestMcp("tools/list"));
   } else if (command === "list-customers") {
     print(await callTool("list_customers"));
+  } else if (command === "create-client") {
+    print(await callTool("create_client", parseJsonArg(args[0])));
+  } else if (command === "plan-client-migration") {
+    print(await callTool("plan_client_migration", parseJsonArg(args[0])));
+  } else if (command === "migration-dry-run") {
+    print(await callTool("run_client_migration_dry_run", parseJsonArg(args[0])));
+  } else if (command === "execute-client-migration") {
+    print(await callTool("execute_client_migration", parseJsonArg(args[0])));
+  } else if (command === "get-client-migration") {
+    print(await callTool("get_client_migration_status", { migrationRunId: requireValue(args[0], "migrationRunId") }));
+  } else if (command === "finalize-client-migration") {
+    print(await callTool("finalize_client_migration", {
+      migrationRunId: requireValue(args[0], "migrationRunId"),
+      reason: requireValue(args[1], "reason"),
+    }));
+  } else if (command === "rollback-client-migration") {
+    print(await callTool("rollback_client_migration", {
+      migrationRunId: requireValue(args[0], "migrationRunId"),
+      reason: requireValue(args[1], "reason"),
+    }));
   } else if (command === "get-deployment") {
     print(await callTool("get_customer_deployment_status", { deploymentId: requireValue(args[0], "deploymentId") }));
   } else if (command === "integrations") {

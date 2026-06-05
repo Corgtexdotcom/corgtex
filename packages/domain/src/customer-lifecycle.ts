@@ -164,6 +164,7 @@ async function setPrimaryDeploymentIfMissing(db: DbClient, params: {
     select: { primaryDeploymentId: true },
   });
   if (!account) return;
+  if (params.forcePrimary === false) return;
   if (!account.primaryDeploymentId || params.forcePrimary) {
     await db.customerAccount.update({
       where: { id: params.customerAccountId },
@@ -288,8 +289,23 @@ export async function registerCustomerDeployment(params: {
       : deploymentStatus === "BOOTSTRAPPING" ? "pending" : "not_started",
   } satisfies Prisma.CustomerDeploymentUncheckedCreateInput;
 
+  const existingByUrl = await db.customerDeployment.findUnique({
+    where: { url: deploymentData.url },
+    select: { id: true, customerAccountId: true, customerSlug: true },
+  });
+  invariant(
+    !existingByUrl
+      || (
+        existingByUrl.customerAccountId === account.id
+        && existingByUrl.customerSlug === legacyCustomerSlug
+      ),
+    409,
+    "CUSTOMER_DEPLOYMENT_URL_CONFLICT",
+    "Deployment URL is already registered to another customer.",
+  );
+
   const deployment = await db.customerDeployment.upsert({
-    where: { customerSlug: legacyCustomerSlug },
+    where: { url: deploymentData.url },
     update: deploymentData,
     create: deploymentData,
   });

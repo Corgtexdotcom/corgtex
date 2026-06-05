@@ -2,12 +2,16 @@ import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import {
   configureControlPlaneMeetingRecorderIntegration,
+  createControlPlaneClient,
   createControlPlaneCustomerMember,
   createSelfServeSupportSession,
   deployLatestControlPlaneRelease,
   enqueueControlPlaneFleetSnapshots,
   enqueueControlPlaneDeployLatestRollout,
+  executeControlPlaneClientMigration,
+  finalizeControlPlaneClientMigration,
   fetchCustomerSupportSnapshot,
+  getControlPlaneClientMigrationStatus,
   getControlPlaneDeployLatestPreflight,
   getControlPlaneAiGovernanceStatus,
   getControlPlaneContextHealth,
@@ -24,12 +28,15 @@ import {
   requireControlPlaneAccess,
   requireControlPlaneScope,
   refreshControlPlaneFleetSnapshots,
+  rollbackControlPlaneClientMigration,
   revokeControlPlaneAgentCredential,
   resendControlPlaneCustomerMemberAccessLink,
+  runControlPlaneClientMigrationDryRun,
   runControlPlaneContextOperation,
   runControlPlaneMeetingRecorderOperation,
   runControlPlaneReleaseOperation,
   runCustomerSupportOperation,
+  planControlPlaneClientMigration,
   setControlPlaneFeatureFlag,
   upsertSelfServeSmokeRun,
   updateControlPlaneAgentCredentialScopes,
@@ -96,6 +103,105 @@ const tools = [
         reason: { type: "string" },
       },
       required: ["reason"],
+    },
+  },
+  {
+    name: "create_client",
+    description: "Create a new managed client as a shared workspace or hosted dedicated Railway deployment. Hosted dedicated deployments always start non-primary until verified readiness or migration cutover.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        mode: { type: "string" },
+        label: { type: "string" },
+        customerSlug: { type: "string" },
+        reason: { type: "string" },
+        supportOwnerEmail: { type: "string" },
+        description: { type: "string" },
+        featurePosture: { type: "string" },
+        primary: { type: "boolean", description: "Shared workspace only. Hosted dedicated client creation rejects primary=true." },
+        initialAdmins: { type: "array", items: { type: "object" } },
+        region: { type: "string" },
+        dataResidency: { type: "string" },
+        customDomain: { type: "string" },
+        releaseVersion: { type: "string" },
+        releaseImageTag: { type: "string" },
+        webImage: { type: "string" },
+        workerImage: { type: "string" },
+        webSource: { type: "object" },
+        workerSource: { type: "object" },
+        storageBucketName: { type: "string" },
+        bootstrapBundleUri: { type: "string" },
+        bootstrapBundleChecksum: { type: "string" },
+        bootstrapBundleSchemaVersion: { type: "string" },
+      },
+      required: ["mode", "label", "customerSlug", "reason"],
+    },
+  },
+  {
+    name: "plan_client_migration",
+    description: "Create a dry-run migration plan between shared workspace and hosted dedicated lanes.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        sourceDeploymentId: { type: "string" },
+        targetMode: { type: "string" },
+        destinationDeploymentId: { type: "string" },
+        reason: { type: "string" },
+      },
+      required: ["sourceDeploymentId", "targetMode", "reason"],
+    },
+  },
+  {
+    name: "run_client_migration_dry_run",
+    description: "Validate migration inventory, feature parity, secret prerequisites, active-write safety, and ID maps.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        migrationRunId: { type: "string" },
+        sourceDeploymentId: { type: "string" },
+        targetMode: { type: "string" },
+        destinationDeploymentId: { type: "string" },
+        writesQuiesced: { type: "boolean" },
+        acceptRequiresReauth: { type: "boolean" },
+        reason: { type: "string" },
+      },
+      required: ["reason"],
+    },
+  },
+  {
+    name: "execute_client_migration",
+    description: "Mark an approved migration executed after stored control-plane migration-worker verification exists.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        migrationRunId: { type: "string" },
+        destinationDeploymentId: { type: "string" },
+        reason: { type: "string" },
+      },
+      required: ["migrationRunId", "reason"],
+    },
+  },
+  {
+    name: "get_client_migration_status",
+    description: "Return sanitized migration progress, verification results, and ID-map count.",
+    inputSchema: { type: "object", properties: { migrationRunId: { type: "string" } }, required: ["migrationRunId"] },
+  },
+  {
+    name: "finalize_client_migration",
+    description: "Mark the destination primary and source archived after final verification.",
+    inputSchema: {
+      type: "object",
+      properties: { migrationRunId: { type: "string" }, reason: { type: "string" } },
+      required: ["migrationRunId", "reason"],
+    },
+  },
+  {
+    name: "rollback_client_migration",
+    description: "Restore primary routing to the retained source before a migration is finalized.",
+    inputSchema: {
+      type: "object",
+      properties: { migrationRunId: { type: "string" }, reason: { type: "string" } },
+      required: ["migrationRunId", "reason"],
     },
   },
   {
@@ -423,6 +529,13 @@ const toolScopes: Record<string, string> = {
   list_self_serve_customers: "control-plane:read",
   record_self_serve_smoke_run: "control-plane:support:write",
   create_self_serve_support_session: "control-plane:support:write",
+  create_client: "control-plane:clients:write",
+  plan_client_migration: "control-plane:migrations:write",
+  run_client_migration_dry_run: "control-plane:migrations:write",
+  execute_client_migration: "control-plane:migrations:write",
+  get_client_migration_status: "control-plane:read",
+  finalize_client_migration: "control-plane:migrations:write",
+  rollback_client_migration: "control-plane:migrations:write",
   get_customer_deployment_status: "control-plane:read",
   list_customer_integrations: "control-plane:read",
   get_context_health: "control-plane:read",
@@ -498,6 +611,11 @@ function argNumber(args: Record<string, unknown>, key: string, fallback: number)
 function argStringArray(args: Record<string, unknown>, key: string) {
   const value = args[key];
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : null;
+}
+
+function argObject(args: Record<string, unknown>, key: string) {
+  const value = args[key];
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
 
 function requiredStringArray(args: Record<string, unknown>, key: string) {
@@ -613,6 +731,73 @@ export async function POST(request: NextRequest) {
         deploymentId: argOptionalString(args, "deploymentId"),
         workspaceId: argOptionalString(args, "workspaceId"),
         targetMemberId: argOptionalString(args, "targetMemberId"),
+        reason: argString(args, "reason"),
+      })));
+    }
+    if (name === "create_client") {
+      return rpcResult(id, textContent(await createControlPlaneClient(actor, {
+        mode: argString(args, "mode") || argString(args, "clientMode"),
+        label: argString(args, "label"),
+        customerSlug: argString(args, "customerSlug"),
+        reason: argString(args, "reason"),
+        supportOwnerEmail: argOptionalString(args, "supportOwnerEmail"),
+        description: argOptionalString(args, "description"),
+        featurePosture: argOptionalString(args, "featurePosture"),
+        primary: argBoolean(args, "primary", false),
+        initialAdmins: Array.isArray(args.initialAdmins) ? args.initialAdmins : [],
+        region: argOptionalString(args, "region"),
+        dataResidency: argOptionalString(args, "dataResidency"),
+        customDomain: argOptionalString(args, "customDomain"),
+        releaseVersion: argOptionalString(args, "releaseVersion"),
+        releaseImageTag: argOptionalString(args, "releaseImageTag"),
+        webImage: argOptionalString(args, "webImage"),
+        workerImage: argOptionalString(args, "workerImage"),
+        webSource: argObject(args, "webSource") as never,
+        workerSource: argObject(args, "workerSource") as never,
+        storageBucketName: argOptionalString(args, "storageBucketName"),
+        bootstrapBundleUri: argOptionalString(args, "bootstrapBundleUri"),
+        bootstrapBundleChecksum: argOptionalString(args, "bootstrapBundleChecksum"),
+        bootstrapBundleSchemaVersion: argOptionalString(args, "bootstrapBundleSchemaVersion"),
+      })));
+    }
+    if (name === "plan_client_migration") {
+      return rpcResult(id, textContent(await planControlPlaneClientMigration(actor, {
+        sourceDeploymentId: argString(args, "sourceDeploymentId"),
+        targetMode: argString(args, "targetMode"),
+        destinationDeploymentId: argOptionalString(args, "destinationDeploymentId"),
+        reason: argString(args, "reason"),
+      })));
+    }
+    if (name === "run_client_migration_dry_run") {
+      return rpcResult(id, textContent(await runControlPlaneClientMigrationDryRun(actor, {
+        migrationRunId: argOptionalString(args, "migrationRunId"),
+        sourceDeploymentId: argOptionalString(args, "sourceDeploymentId"),
+        targetMode: argOptionalString(args, "targetMode"),
+        destinationDeploymentId: argOptionalString(args, "destinationDeploymentId"),
+        writesQuiesced: argBoolean(args, "writesQuiesced", false),
+        acceptRequiresReauth: argBoolean(args, "acceptRequiresReauth", false),
+        reason: argString(args, "reason"),
+      })));
+    }
+    if (name === "execute_client_migration") {
+      return rpcResult(id, textContent(await executeControlPlaneClientMigration(actor, {
+        migrationRunId: argString(args, "migrationRunId"),
+        destinationDeploymentId: argOptionalString(args, "destinationDeploymentId"),
+        reason: argString(args, "reason"),
+      })));
+    }
+    if (name === "get_client_migration_status") {
+      return rpcResult(id, textContent(await getControlPlaneClientMigrationStatus(actor, argString(args, "migrationRunId"))));
+    }
+    if (name === "finalize_client_migration") {
+      return rpcResult(id, textContent(await finalizeControlPlaneClientMigration(actor, {
+        migrationRunId: argString(args, "migrationRunId"),
+        reason: argString(args, "reason"),
+      })));
+    }
+    if (name === "rollback_client_migration") {
+      return rpcResult(id, textContent(await rollbackControlPlaneClientMigration(actor, {
+        migrationRunId: argString(args, "migrationRunId"),
         reason: argString(args, "reason"),
       })));
     }
