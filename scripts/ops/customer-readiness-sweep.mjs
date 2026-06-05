@@ -38,11 +38,27 @@ function customerSlug(customer) {
 }
 
 function customerUrl(customer) {
-  return optionalText(customer.url) || optionalText(customer.supportBaseUrl);
+  return optionalText(customer.supportBaseUrl) || customerDeploymentUrl(customer);
 }
 
 function appendPath(baseUrl, suffix) {
   return `${baseUrl.replace(/\/$/, "")}${suffix}`;
+}
+
+function customerDeploymentUrl(customer) {
+  const url = optionalText(customer.url);
+  if (!url || isWorkspaceUiUrl(url)) return null;
+  return url;
+}
+
+function isWorkspaceUiUrl(value) {
+  try {
+    const url = new URL(value);
+    const pathname = url.pathname.replace(/\/+$/, "");
+    return /^\/(?:[a-z]{2}(?:-[a-z]{2})?\/)?workspaces\/[^/]+$/i.test(pathname);
+  } catch {
+    return false;
+  }
 }
 
 function parseJsonEnv(name, fallback) {
