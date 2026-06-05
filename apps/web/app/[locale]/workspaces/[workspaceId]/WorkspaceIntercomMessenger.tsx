@@ -5,8 +5,11 @@ import { usePathname } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { useCallback, useEffect, useRef, useState } from "react";
 
+type IntercomQueueItem = IArguments | unknown[];
+
 type IntercomFunction = ((command: string, ...args: unknown[]) => void) & {
-  q?: unknown[][];
+  c?: (args: IArguments) => void;
+  q?: IntercomQueueItem[];
 };
 
 type IntercomTokenResponse =
@@ -33,11 +36,15 @@ function installIntercomScript(appId: string) {
   if (typeof window === "undefined") return;
 
   if (typeof window.Intercom !== "function") {
-    const intercom = ((...args: unknown[]) => {
-      intercom.q = intercom.q || [];
-      intercom.q.push(args);
+    let intercom: IntercomFunction;
+    intercom = (function () {
+      intercom.c?.(arguments);
     }) as IntercomFunction;
     intercom.q = [];
+    intercom.c = (args) => {
+      intercom.q = intercom.q || [];
+      intercom.q.push(args);
+    };
     window.Intercom = intercom;
   }
 
