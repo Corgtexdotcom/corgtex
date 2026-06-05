@@ -63,6 +63,16 @@ REDIS_URL="${{Redis.REDIS_URL}}"
 REDIS_KEY_PREFIX="client-slug-prod"
 ```
 
+## Intercom Support Settings
+
+These variables enable Intercom Messenger and Fin support on hosted Corgtex site/app surfaces. Leave them unset for customer-owned or self-managed runtimes unless that customer explicitly wants Intercom enabled.
+
+| Variable | Description |
+|---|---|
+| `NEXT_PUBLIC_INTERCOM_APP_ID` | Intercom Messenger app ID for the shared Corgtex support workspace. This is safe to expose to the browser. |
+| `NEXT_PUBLIC_INTERCOM_API_BASE` | Messenger API base for the Intercom workspace region. Defaults to `https://api-iam.intercom.io`. |
+| `INTERCOM_MESSENGER_SECRET` | Server-only Messenger JWT secret from Intercom's Messenger Security settings. Required for authenticated app users and must never be exposed to browser code, logs, PRs, or support messages. |
+
 ## Corgtex Connector Settings
 
 These variables configure the remote MCP connector used by ChatGPT, Claude, Cursor, and other MCP clients.

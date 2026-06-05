@@ -71,4 +71,18 @@ describe("env", () => {
     expect(env.MODEL_CHAT_CONVERSATION).toBe("deepseek/deepseek-v4-pro");
     expect(env.MODEL_EMBEDDING_DEFAULT).toBe("google/gemini-embedding-001");
   });
+
+  it("keeps Intercom disabled by default while providing a regional API base fallback", async () => {
+    restoreEnv();
+    Object.assign(process.env, { NODE_ENV: "development" });
+    delete process.env.NEXT_PUBLIC_INTERCOM_APP_ID;
+    delete process.env.NEXT_PUBLIC_INTERCOM_API_BASE;
+    delete process.env.INTERCOM_MESSENGER_SECRET;
+
+    const { env } = await import("./env");
+
+    expect(env.NEXT_PUBLIC_INTERCOM_APP_ID).toBeUndefined();
+    expect(env.NEXT_PUBLIC_INTERCOM_API_BASE).toBe("https://api-iam.intercom.io");
+    expect(env.INTERCOM_MESSENGER_SECRET).toBeUndefined();
+  });
 });

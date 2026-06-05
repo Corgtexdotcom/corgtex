@@ -15,6 +15,7 @@ import { MobileWorkspaceShell } from "./MobileWorkspaceShell";
 import { getControlPlaneHref } from "@/lib/control-plane-url";
 import { WorkspaceAddMenu } from "./WorkspaceAddMenu";
 import { WorkspaceChatRail } from "./WorkspaceChatRail";
+import { WorkspaceIntercomMessenger } from "./WorkspaceIntercomMessenger";
 import { aiWorkspaceLaunchUrl } from "@/lib/ai-workspace-launch";
 import { getMobileCaptureActions } from "@/lib/workspace-add-actions";
 
@@ -132,6 +133,7 @@ export default async function WorkspaceLayout({
         <div className="ws-sidebar-footer">
           {featureFlags.MULTILINGUAL && <LanguageSwitcher />}
           <ThemeToggle />
+          <WorkspaceIntercomMessenger locale={locale} workspaceId={workspaceId} />
           
           <a href={`/workspaces/${workspaceId}/settings?tab=user`} className="ws-nav-link ws-logout-btn mt-1">
             {tNav("settings")} (User)
