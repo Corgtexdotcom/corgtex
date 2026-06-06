@@ -10,6 +10,7 @@ const updateMany = vi.fn();
 const runStableClientSeed = vi.fn();
 
 vi.mock("@corgtex/shared", () => ({
+  isDatabaseUnavailableError: vi.fn(() => false),
   prisma: {
     customerDeploymentBootstrapRun: {
       findFirst,

@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { capturePostHogEvent } from "../../../lib/posthog-server";
 
 export const dynamic = "force-dynamic";
 
@@ -32,6 +33,7 @@ export async function POST(request: NextRequest) {
   }
 
   const event = {
+    anonymousId: stringField(payload.anonymousId, 120),
     href: stringField(payload.href, 300),
     name,
     path: stringField(payload.path, 300),
@@ -41,6 +43,15 @@ export async function POST(request: NextRequest) {
   };
 
   console.info("[site-analytics]", JSON.stringify(event));
+  await capturePostHogEvent({
+    event: `corgtex_site_${name}`,
+    distinctId: event.anonymousId ? `site:${event.anonymousId}` : "site:unknown",
+    properties: {
+      ...event,
+      surface: "website",
+    },
+    timestamp: event.timestamp,
+  });
 
   return NextResponse.json({ ok: true }, { status: 202 });
 }

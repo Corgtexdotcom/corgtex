@@ -836,6 +836,32 @@ describe("Platform Admin Tools", () => {
     });
   });
 
+  it("buildCustomerDeploymentRuntimeVariables includes capped PostHog settings when control-plane capture is enabled", () => {
+    vi.stubEnv("POSTHOG_ENABLED", "true");
+    vi.stubEnv("POSTHOG_PROJECT_TOKEN", "phc_test");
+    vi.stubEnv("POSTHOG_API_HOST", "https://us.i.posthog.com");
+
+    try {
+      expect(admin.buildCustomerDeploymentRuntimeVariables({
+        customerSlug: "acme-prod",
+        url: "https://acme.corgtex.com",
+        releaseImageTag: "sha-1",
+      })).toEqual(expect.objectContaining({
+        POSTHOG_ENABLED: "true",
+        POSTHOG_CAPTURE_KILL_SWITCH: "false",
+        POSTHOG_PROJECT_TOKEN: "phc_test",
+        POSTHOG_API_HOST: "https://us.i.posthog.com",
+        POSTHOG_INSTANCE_ID: "client-acme-prod-production",
+        POSTHOG_ENVIRONMENT: "production",
+        POSTHOG_EVENT_SAMPLE_RATE: "1",
+        POSTHOG_CAPTURE_TIMEOUT_MS: "1500",
+        POSTHOG_CAPTURE_DEBUG: "false",
+      }));
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("buildCustomerDeploymentReadiness returns ready only when Ops has complete customer deployment metadata", () => {
     const result = admin.buildCustomerDeploymentReadiness({
       url: "https://acme.corgtex.com",

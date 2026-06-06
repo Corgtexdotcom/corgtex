@@ -4,6 +4,7 @@ import { AppError, requireWorkspaceMembership } from "@corgtex/domain";
 import { prisma, toInputJson } from "@corgtex/shared";
 import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError, validateBody } from "@/lib/http";
+import { capturePostHogEvent } from "@/lib/posthog-server";
 
 const analyticsSchema = z.object({
   eventName: z.enum(["mode_viewed", "mode_changed"]),
@@ -24,8 +25,9 @@ function actorUserId(actor: Awaited<ReturnType<typeof resolveRequestActor>>) {
 }
 
 export async function POST(request: NextRequest, { params }: Params) {
+  let workspaceId: string | undefined;
   try {
-    const { workspaceId } = await params;
+    ({ workspaceId } = await params);
     const actor = await resolveRequestActor(request);
     const body = await validateBody(request, analyticsSchema);
 
@@ -35,10 +37,13 @@ export async function POST(request: NextRequest, { params }: Params) {
       throw new AppError(400, "VALIDATION_ERROR", "Mode change events must include a different previous mode.");
     }
 
+    const actorId = actorUserId(actor);
+    const serverReceivedAt = new Date().toISOString();
+
     await prisma.productAnalyticsEvent.create({
       data: {
         workspaceId,
-        actorUserId: actorUserId(actor),
+        actorUserId: actorId,
         eventName: body.eventName,
         surface: "mobile_mode",
         mode: body.mode,
@@ -48,13 +53,30 @@ export async function POST(request: NextRequest, { params }: Params) {
         viewportWidth: body.viewportWidth ?? null,
         coarsePointer: body.coarsePointer ?? null,
         meta: toInputJson({
-          serverReceivedAt: new Date().toISOString(),
+          serverReceivedAt,
         }),
       },
+    });
+    await capturePostHogEvent({
+      event: `corgtex_mobile_${body.eventName}`,
+      distinctId: actorId ? `user:${actorId}` : `workspace:${workspaceId}`,
+      properties: {
+        workspace_id: workspaceId,
+        actor_kind: actor.kind,
+        surface: "mobile_mode",
+        mode: body.mode,
+        previous_mode: body.previousMode,
+        source: body.source ?? "unknown",
+        route: body.route,
+        viewport_width: body.viewportWidth,
+        coarse_pointer: body.coarsePointer,
+        server_received_at: serverReceivedAt,
+      },
+      timestamp: serverReceivedAt,
     });
 
     return NextResponse.json({ ok: true }, { status: 202 });
   } catch (error) {
-    return handleRouteError(error);
+    return handleRouteError(error, { request, surface: "mobile_mode", workspaceId });
   }
 }

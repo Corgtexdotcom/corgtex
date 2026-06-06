@@ -69,6 +69,7 @@
     "ops:nightly-research": "node scripts/nightly-research-report.mjs",
     "control-plane": "node scripts/control-plane.mjs",
     "slack:sync-public-archive": "node scripts/sync-slack-public-archive.mjs",
+    "posthog:check": "node scripts/posthog-setup-check.mjs",
     "check:public-docs": "node scripts/check-public-docs.mjs",
     "check:private-boundary": "node scripts/check-private-boundary.mjs",
     "meeting-recorder:cleanup": "node scripts/meeting-recorder-cleanup.mjs",
