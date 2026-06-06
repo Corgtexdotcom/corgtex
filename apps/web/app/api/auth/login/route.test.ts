@@ -2,10 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
 
 const {
+  capturePostHogEvent,
   listActorWorkspaces,
   loginUserWithPassword,
   isDatabaseUnavailableError,
 } = vi.hoisted(() => ({
+  capturePostHogEvent: vi.fn(),
   listActorWorkspaces: vi.fn(),
   loginUserWithPassword: vi.fn(),
   isDatabaseUnavailableError: vi.fn(),
@@ -37,6 +39,10 @@ vi.mock("@corgtex/shared", async (importOriginal) => {
   };
 });
 
+vi.mock("@/lib/posthog-server", () => ({
+  capturePostHogEvent,
+}));
+
 async function clearRateLimits() {
   const { resetAllRateLimits } = await import("@corgtex/shared");
   resetAllRateLimits();
@@ -53,6 +59,10 @@ afterEach(async () => {
 });
 
 describe("POST /api/auth/login", () => {
+  beforeEach(() => {
+    capturePostHogEvent.mockResolvedValue({ status: "disabled" });
+  });
+
   it("returns LOGIN_UNAVAILABLE when the database is down", async () => {
     loginUserWithPassword.mockRejectedValue(new Error("db down"));
     isDatabaseUnavailableError.mockReturnValue(true);
@@ -77,6 +87,18 @@ describe("POST /api/auth/login", () => {
         code: "LOGIN_UNAVAILABLE",
         message: "Login is temporarily unavailable. Try again.",
       },
+    });
+    expect(capturePostHogEvent).toHaveBeenCalledWith({
+      event: "corgtex_auth_login_failed",
+      distinctId: expect.stringMatching(/^login:/),
+      properties: expect.objectContaining({
+        code: "LOGIN_UNAVAILABLE",
+        method: "password",
+        status: 503,
+        surface: "auth",
+        transient: true,
+      }),
+      processPersonProfile: false,
     });
   });
 
@@ -106,6 +128,18 @@ describe("POST /api/auth/login", () => {
         code: "UNAUTHENTICATED",
         message: "Invalid email or password.",
       },
+    });
+    expect(capturePostHogEvent).toHaveBeenCalledWith({
+      event: "corgtex_auth_login_failed",
+      distinctId: expect.stringMatching(/^login:/),
+      properties: expect.objectContaining({
+        code: "UNAUTHENTICATED",
+        method: "password",
+        status: 401,
+        surface: "auth",
+        transient: false,
+      }),
+      processPersonProfile: false,
     });
   });
 

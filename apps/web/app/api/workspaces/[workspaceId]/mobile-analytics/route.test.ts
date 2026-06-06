@@ -4,11 +4,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const {
   productAnalyticsEventCreate,
   handleRouteError,
+  capturePostHogEvent,
   requireWorkspaceMembership,
   resolveRequestActor,
 } = vi.hoisted(() => ({
   productAnalyticsEventCreate: vi.fn(),
   handleRouteError: vi.fn((error: unknown) => NextResponse.json({ error: String(error) }, { status: 500 })),
+  capturePostHogEvent: vi.fn(),
   requireWorkspaceMembership: vi.fn(),
   resolveRequestActor: vi.fn(),
 }));
@@ -50,6 +52,10 @@ vi.mock("@/lib/http", async () => {
   };
 });
 
+vi.mock("@/lib/posthog-server", () => ({
+  capturePostHogEvent,
+}));
+
 function context(workspaceId = "workspace-1") {
   return { params: Promise.resolve({ workspaceId }) };
 }
@@ -68,6 +74,7 @@ describe("POST /api/workspaces/[workspaceId]/mobile-analytics", () => {
     });
     requireWorkspaceMembership.mockResolvedValue({ id: "member-1" });
     productAnalyticsEventCreate.mockResolvedValue({ id: "analytics-1" });
+    capturePostHogEvent.mockResolvedValue({ status: "disabled" });
   });
 
   it("records a validated mobile mode analytics event after workspace authorization", async () => {
@@ -108,6 +115,22 @@ describe("POST /api/workspaces/[workspaceId]/mobile-analytics", () => {
         coarsePointer: true,
       }),
     });
+    expect(capturePostHogEvent).toHaveBeenCalledWith({
+      event: "corgtex_mobile_mode_changed",
+      distinctId: "user:user-1",
+      properties: expect.objectContaining({
+        workspace_id: "workspace-1",
+        actor_kind: "user",
+        surface: "mobile_mode",
+        mode: "ai",
+        previous_mode: "workspace",
+        source: "bottom_nav",
+        route: "/workspaces/workspace-1/actions",
+        viewport_width: 390,
+        coarse_pointer: true,
+      }),
+      timestamp: expect.any(String),
+    });
   });
 
   it("rejects unchanged mode_changed events", async () => {
@@ -126,7 +149,12 @@ describe("POST /api/workspaces/[workspaceId]/mobile-analytics", () => {
     );
 
     expect(response.status).toBe(500);
-    expect(handleRouteError).toHaveBeenCalledWith(expect.any(MockAppError));
+    expect(handleRouteError).toHaveBeenCalledWith(expect.any(MockAppError), {
+      request: expect.any(NextRequest),
+      surface: "mobile_mode",
+      workspaceId: "workspace-1",
+    });
     expect(productAnalyticsEventCreate).not.toHaveBeenCalled();
+    expect(capturePostHogEvent).not.toHaveBeenCalled();
   });
 });

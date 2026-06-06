@@ -192,7 +192,36 @@ export function buildCustomerDeploymentRuntimeVariables(params: {
     REDIS_KEY_PREFIX: `${params.customerSlug}-prod`,
     CORGTEX_RELEASE_IMAGE_TAG: params.releaseImageTag,
     ...(normalizeOptional(params.releaseVersion) ? { CORGTEX_RELEASE_VERSION: normalizeOptional(params.releaseVersion)! } : {}),
+    ...buildCustomerDeploymentPostHogVariables(params.customerSlug),
     ...(params.overrides ?? {}),
+  };
+}
+
+function postHogEnv(name: string, fallback: string) {
+  return normalizeOptional(process.env[name]) ?? fallback;
+}
+
+function postHogEnabled() {
+  const enabled = normalizeOptional(process.env.POSTHOG_ENABLED)?.toLowerCase();
+  return enabled === "1" || enabled === "true";
+}
+
+function buildCustomerDeploymentPostHogVariables(customerSlug: string): Record<string, string> {
+  const token = normalizeOptional(process.env.POSTHOG_PROJECT_TOKEN);
+  if (!postHogEnabled() || !token) {
+    return {};
+  }
+
+  return {
+    POSTHOG_ENABLED: "true",
+    POSTHOG_CAPTURE_KILL_SWITCH: postHogEnv("POSTHOG_CAPTURE_KILL_SWITCH", "false"),
+    POSTHOG_PROJECT_TOKEN: token,
+    POSTHOG_API_HOST: postHogEnv("POSTHOG_API_HOST", "https://us.i.posthog.com"),
+    POSTHOG_INSTANCE_ID: `client-${customerSlug}-production`,
+    POSTHOG_ENVIRONMENT: postHogEnv("POSTHOG_ENVIRONMENT", "production"),
+    POSTHOG_EVENT_SAMPLE_RATE: postHogEnv("POSTHOG_EVENT_SAMPLE_RATE", "1"),
+    POSTHOG_CAPTURE_TIMEOUT_MS: postHogEnv("POSTHOG_CAPTURE_TIMEOUT_MS", "1500"),
+    POSTHOG_CAPTURE_DEBUG: postHogEnv("POSTHOG_CAPTURE_DEBUG", "false"),
   };
 }
 
@@ -976,6 +1005,7 @@ export async function upgradeCustomerDeploymentRelease(actor: AppActor, params: 
       variables: {
         CORGTEX_RELEASE_IMAGE_TAG: params.releaseImageTag,
         ...(releaseVersion ? { CORGTEX_RELEASE_VERSION: releaseVersion } : {}),
+        ...buildCustomerDeploymentPostHogVariables(deployment.customerSlug),
         ...(params.variables ?? {}),
       },
     });

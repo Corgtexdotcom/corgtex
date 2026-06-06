@@ -15,7 +15,7 @@ export function withRoute<T>(
     try {
       return await handler(req, ctx);
     } catch (error) {
-      return handleRouteError(error);
+      return handleRouteError(error, { request: req });
     }
   };
 }
@@ -32,14 +32,17 @@ export function withWorkspaceRoute(
   ) => Promise<NextResponse>
 ) {
   return async (req: NextRequest, ctx: RouteContext) => {
+    let actorKind: AppActor["kind"] | undefined;
+    let workspaceId: string | undefined;
     try {
       const actor = await resolveRequestActor(req);
+      actorKind = actor.kind;
       const params = await ctx.params;
-      const workspaceId = params.workspaceId;
+      workspaceId = params.workspaceId;
       const membership = await requireWorkspaceMembership({ actor, workspaceId });
       return await handler(req, { actor, membership: membership ?? undefined, workspaceId, params });
     } catch (error) {
-      return handleRouteError(error);
+      return handleRouteError(error, { actorKind, request: req, workspaceId });
     }
   };
 }

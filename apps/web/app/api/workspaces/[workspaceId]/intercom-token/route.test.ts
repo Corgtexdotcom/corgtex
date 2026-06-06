@@ -52,6 +52,7 @@ vi.mock("@corgtex/domain", () => ({
 
 vi.mock("@corgtex/shared", () => ({
   env,
+  isDatabaseUnavailableError: vi.fn(() => false),
   prisma: {
     userWorkspaceOnboardingState: {
       findUnique: onboardingFindUnique,

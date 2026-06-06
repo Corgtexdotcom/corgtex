@@ -54,10 +54,12 @@ export function DemoGateForm() {
         trackEvent("demo_gate_submitted", { path: window.location.pathname });
         window.location.href = demoUrlForLocale(locale);
       } else {
+        trackEvent("demo_gate_failed", { path: window.location.pathname });
         setError(t("error"));
         setLoading(false);
       }
     } catch {
+      trackEvent("demo_gate_failed", { path: window.location.pathname });
       setError(t("error"));
       setLoading(false);
     }
