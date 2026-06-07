@@ -16,12 +16,15 @@ import {
   resolveMeetingBlockReference,
   stripMeetingBlockContext,
 } from "./meeting-blocks";
+import {
+  buildMeetingTranscriptChunks,
+  type MeetingTranscriptChunk,
+} from "./meeting-transcript-chunks";
 
 const AUTO_APPLY_CONFIDENCE_THRESHOLD = 0.8;
 const AUTO_APPLY_DELIBERATION_THRESHOLD = 0.85;
 const AUTO_APPLY_PROPOSAL_RESOLUTION_THRESHOLD = 0.92;
 const MAX_DIRECT_INSIGHT_TRANSCRIPT_CHARS = 35_000;
-const INSIGHT_TRANSCRIPT_EXCERPT_CHARS = 8_000;
 const MEETING_INSIGHT_TYPES = new Set<MeetingInsightType>([
   "DECISION",
   "TENSION",
@@ -52,23 +55,78 @@ const RESOLUTION_OUTCOMES = new Set<ProposalResolutionOutcome>([
 ]);
 const DELIBERATION_ENTRY_TYPES = new Set(["REACTION", "OBJECTION"]);
 
-function excerptLongTranscript(transcript: string) {
-  if (transcript.length <= MAX_DIRECT_INSIGHT_TRANSCRIPT_CHARS) {
-    return transcript;
-  }
+function directTranscriptChunk(transcript: string): MeetingTranscriptChunk {
+  return {
+    chunkIndex: 1,
+    chunkCount: 1,
+    startChar: 0,
+    endChar: transcript.length,
+    text: transcript,
+  };
+}
 
-  const middleStart = Math.max(
-    INSIGHT_TRANSCRIPT_EXCERPT_CHARS,
-    Math.floor(transcript.length / 2) - Math.floor(INSIGHT_TRANSCRIPT_EXCERPT_CHARS / 2),
-  );
-  const middleEnd = Math.min(transcript.length - INSIGHT_TRANSCRIPT_EXCERPT_CHARS, middleStart + INSIGHT_TRANSCRIPT_EXCERPT_CHARS);
+function transcriptChunksForExtraction(transcript: string) {
+  return transcript.length > MAX_DIRECT_INSIGHT_TRANSCRIPT_CHARS
+    ? buildMeetingTranscriptChunks(transcript)
+    : [directTranscriptChunk(transcript)];
+}
+
+function normalizeDedupeText(value: unknown) {
+  return typeof value === "string"
+    ? normalizeMeetingProductTerminology(value).toLowerCase().replace(/\s+/g, " ").trim()
+    : "";
+}
+
+function rawInsightMergeKey(item: Record<string, unknown>) {
+  const modelDedupeKey = normalizeDedupeText(item.dedupeKey).replace(/\s+/g, "-").slice(0, 160);
+  if (modelDedupeKey) return `model:${modelDedupeKey}`;
 
   return [
-    `The full transcript is ${transcript.length} characters and was shortened for extraction to avoid model timeouts. Use summaryMd first, then these transcript excerpts as supporting evidence.`,
-    `BEGINNING EXCERPT:\n${transcript.slice(0, INSIGHT_TRANSCRIPT_EXCERPT_CHARS)}`,
-    `MIDDLE EXCERPT:\n${transcript.slice(middleStart, middleEnd)}`,
-    `ENDING EXCERPT:\n${transcript.slice(-INSIGHT_TRANSCRIPT_EXCERPT_CHARS)}`,
-  ].join("\n\n---\n\n");
+    normalizeDedupeText(item.type),
+    normalizeDedupeText(item.operation),
+    normalizeDedupeText(item.title),
+    normalizeDedupeText(item.body),
+    normalizeDedupeText(item.assigneeHint),
+    normalizeDedupeText(item.targetEntityType),
+    normalizeDedupeText(item.targetEntityId),
+  ].join("|");
+}
+
+function mergeExtractedInsightItems(items: Array<Record<string, unknown>>) {
+  const byKey = new Map<string, Record<string, unknown>>();
+  for (const item of items) {
+    const key = rawInsightMergeKey(item);
+    const existing = byKey.get(key);
+    if (!existing) {
+      byKey.set(key, item);
+      continue;
+    }
+
+    const existingConfidence = typeof existing.confidence === "number" ? existing.confidence : 0;
+    const itemConfidence = typeof item.confidence === "number" ? item.confidence : 0;
+    if (itemConfidence > existingConfidence) {
+      byKey.set(key, item);
+    }
+  }
+  return [...byKey.values()];
+}
+
+function isCollectiveAssigneeHint(value: string | null | undefined) {
+  const normalized = normalizeDedupeText(value);
+  if (!normalized) return false;
+
+  return [
+    "team",
+    "the team",
+    "team members",
+    "everyone",
+    "everybody",
+    "all",
+    "all team members",
+    "workspace team",
+    "the workspace team",
+    "members",
+  ].includes(normalized) || /\b(team|members|everyone|everybody)\b/.test(normalized);
 }
 
 function normalizeInsightType(value: unknown, targetEntityType: string | null): MeetingInsightType | null {
@@ -266,6 +324,39 @@ function hasMeetingEvidenceForAutoApply(insight: Pick<MeetingInsight, "operation
   return true;
 }
 
+function isConcreteActionOrFollowUp(type: MeetingInsightType, title: string, bodyMd: string) {
+  if (type !== "ACTION_ITEM" && type !== "FOLLOW_UP") return true;
+
+  const text = normalizeDedupeText(`${title} ${bodyMd}`);
+  const vagueAwarenessOnly = [
+    /\bkeep (this|it|that) in mind\b/,
+    /\bbe aware\b/,
+    /\bfor awareness\b/,
+    /\bfyi\b/,
+  ].some((pattern) => pattern.test(text));
+  if (!vagueAwarenessOnly) return true;
+
+  return [
+    /\bsend\b/,
+    /\bset up\b/,
+    /\bschedule\b/,
+    /\bdraft\b/,
+    /\breview\b/,
+    /\bprovide\b/,
+    /\bpost\b/,
+    /\bclarify\b/,
+    /\bblock\b/,
+    /\bpick up\b/,
+    /\bfollow up\b/,
+    /\bcontact\b/,
+    /\bprepare\b/,
+    /\bidentify\b/,
+    /\bpursue\b/,
+    /\breport\b/,
+    /\bnurture\b/,
+  ].some((pattern) => pattern.test(text));
+}
+
 function isActiveReviewableInsight(insight: Pick<MeetingInsight, "status" | "supersededAt">) {
   return (insight.status === "SUGGESTED" || insight.status === "CONFIRMED") && !insight.supersededAt;
 }
@@ -306,6 +397,8 @@ export async function extractMeetingInsights(
 
   invariant(meeting, 404, "NOT_FOUND", "Meeting not found.");
   invariant(meeting.transcript, 400, "INVALID_STATE", "Meeting has no transcript to analyze.");
+  const transcript = meeting.transcript.trim();
+  invariant(transcript, 400, "INVALID_STATE", "Meeting has no transcript to analyze.");
   const latestSourceRecord = await prisma.meetingTranscriptSourceRecord.findFirst({
     where: {
       workspaceId: params.workspaceId,
@@ -337,10 +430,12 @@ Extract all:
 
 Use any user-provided ingestion guidance to prioritize what matters and what follow-up work the operator wanted highlighted. Treat guidance as trusted operator context for spelling, name, and terminology corrections. When guidance corrects a transcript term, use the corrected term in titles and body text. Do not invent new decisions, tasks, tensions, proposals, or resolutions from guidance alone. If an item mainly comes from guidance rather than transcript evidence, say that clearly in the body and leave sourceQuote null.
 Correct meeting transcript drift where Cortex means Corgtex. Use Corgtex in human-facing titles, bodies, source quotes, and meeting block labels.
-If transcriptCondensedForExtraction is true, the full transcript was too large for direct structured extraction. Use summaryMd as the primary meeting digest and the transcript excerpts only as supporting evidence. Do not treat the transcript-shortening note itself as meeting content.
+If transcriptChunkedForExtraction is true, analyze the supplied transcript chunk carefully. The full transcript is processed across multiple chunks, so do not treat chunk boundaries or processing metadata as meeting content.
 When contextual intelligence is enabled, use Corgtex context to connect the meeting to previous recurring meetings, active actions, active tensions, open proposals, recent deliberation, and relevant knowledge. Prefer updating or discussing existing records over creating duplicates.
 Use meetingBlocks as the conversation map. Assign each extracted item to the most relevant block using blockSequence, blockTitle, and blockKind. If a proposal discussion leads to a decision or resolution, keep that connection in the body and target fields when supported by existingRecords.
 Treat owner-backed commitments as ACTION_ITEM items even when they appear in summaryMd, key takeaways, action item sections, or indirect transcript wording. If someone says they will do something, needs to contact someone, owns a follow-up, or must prepare a next step, extract a concrete ACTION_ITEM with that owner when the evidence is clear.
+Treat team-update, scorecard, round-robin, department update, and status update sections as extraction-relevant. Do not drop action items, tensions, proposals, or follow-ups just because they are inside an update section.
+For team-scoped action items, extract one collective ACTION_ITEM with assigneeHint such as "Team members" or "Workspace team"; do not duplicate one action per person unless each person has a distinct named responsibility. If a coordinator owns setup and the team must self-select or pick up work, extract the coordinator action separately from the team-scoped follow-up. Do not create action items for vague awareness, general monitoring, or "keep in mind" language unless there is a concrete next step.
 
 For each item, provide:
 - operation: CREATE for new records/decisions/follow-ups, RESOLVE for existing records resolved in this meeting
@@ -399,40 +494,57 @@ Be conservative — only extract items you're confident about.
 }
 `;
 
-  const extraction = await defaultModelGateway.extract({
-    workspaceId: params.workspaceId,
-    instruction,
-    input: JSON.stringify({
-      transcript: excerptLongTranscript(meeting.transcript),
-      transcriptLength: meeting.transcript.length,
-      transcriptCondensedForExtraction: meeting.transcript.length > MAX_DIRECT_INSIGHT_TRANSCRIPT_CHARS,
-      summaryMd: meeting.summaryMd,
-      meetingBlocks: meeting.blocksJson,
-      ingestionGuidanceMd: meeting.ingestionGuidanceMd,
-      contextualIntelligenceEnabled: meetingContext.contextualIntelligenceEnabled,
-      existingRecords: {
-        actions: meetingContext.actions,
-        tensions: meetingContext.tensions,
-        proposals: meetingContext.proposals,
-      },
-      corgtexContext: meetingContext.contextualIntelligenceEnabled ? {
-        previousMeetings: meetingContext.previousMeetings,
-        followUps: meetingContext.followUps,
-        recentDeliberation: meetingContext.deliberationEntries,
-        knowledge: meetingContext.knowledge,
-        attendees: meetingContext.attendees,
-      } : null,
-      automationPolicy: {
-        createRecordsAt: AUTO_APPLY_CONFIDENCE_THRESHOLD,
-        deliberationAt: AUTO_APPLY_DELIBERATION_THRESHOLD,
-        proposalResolutionAt: AUTO_APPLY_PROPOSAL_RESOLUTION_THRESHOLD,
-      },
-    }),
-    schemaHint,
-  });
+  const transcriptChunks = transcriptChunksForExtraction(transcript);
+  const transcriptChunkedForExtraction = transcriptChunks.length > 1;
+  const extractedItems: Array<Record<string, unknown>> = [];
 
-  const parsed = extraction.output as { insights?: Array<Record<string, unknown>> };
-  const insights = Array.isArray(parsed.insights) ? parsed.insights : [];
+  for (const chunk of transcriptChunks) {
+    const extraction = await defaultModelGateway.extract({
+      workspaceId: params.workspaceId,
+      instruction,
+      input: JSON.stringify({
+        transcript: chunk.text,
+        transcriptLength: transcript.length,
+        transcriptChunkedForExtraction,
+        transcriptCondensedForExtraction: false,
+        transcriptChunk: {
+          chunkIndex: chunk.chunkIndex,
+          chunkCount: chunk.chunkCount,
+          startChar: chunk.startChar,
+          endChar: chunk.endChar,
+        },
+        summaryMd: meeting.summaryMd,
+        meetingBlocks: meeting.blocksJson,
+        ingestionGuidanceMd: meeting.ingestionGuidanceMd,
+        contextualIntelligenceEnabled: meetingContext.contextualIntelligenceEnabled,
+        existingRecords: {
+          actions: meetingContext.actions,
+          tensions: meetingContext.tensions,
+          proposals: meetingContext.proposals,
+        },
+        corgtexContext: meetingContext.contextualIntelligenceEnabled ? {
+          previousMeetings: meetingContext.previousMeetings,
+          followUps: meetingContext.followUps,
+          recentDeliberation: meetingContext.deliberationEntries,
+          knowledge: meetingContext.knowledge,
+          attendees: meetingContext.attendees,
+        } : null,
+        automationPolicy: {
+          createRecordsAt: AUTO_APPLY_CONFIDENCE_THRESHOLD,
+          deliberationAt: AUTO_APPLY_DELIBERATION_THRESHOLD,
+          proposalResolutionAt: AUTO_APPLY_PROPOSAL_RESOLUTION_THRESHOLD,
+        },
+      }),
+      schemaHint,
+    });
+
+    const parsed = extraction.output as { insights?: Array<Record<string, unknown>> };
+    if (Array.isArray(parsed.insights)) {
+      extractedItems.push(...parsed.insights);
+    }
+  }
+
+  const insights = mergeExtractedInsightItems(extractedItems);
 
   const validTargets = new Map<string, string>([
     ...meetingContext.actions.map((item: { id: string }) => [`Action:${item.id}`, item.id] as const),
@@ -476,6 +588,7 @@ Be conservative — only extract items you're confident about.
       });
       if (!type) continue;
       const rawBody = typeof item.body === "string" ? normalizeMeetingProductTerminology(item.body).trim() : "";
+      if (!isConcreteActionOrFollowUp(type, title, rawBody)) continue;
       const bodyMd = prependMeetingBlockContext(normalizeInsightBody(rawBody, type), block);
       if (!type || title.length === 0 || bodyMd.length === 0) continue;
 
@@ -817,7 +930,7 @@ export async function applyInsight(
   } else {
     // Attempt fuzzy match for a member reference if a hint exists.
     let hintedMemberId: string | null = null;
-    if (insight.assigneeHint) {
+    if (insight.assigneeHint && !isCollectiveAssigneeHint(insight.assigneeHint)) {
       const mems = await prisma.member.findMany({
         where: { workspaceId: params.workspaceId },
         include: { user: true }
@@ -950,6 +1063,14 @@ export async function autoApplyMeetingInsights(
       continue;
     }
     if (bypassSlackReviewedActionItems && insight.type === "ACTION_ITEM" && insight.operation === "CREATE") {
+      skipped++;
+      continue;
+    }
+    if (
+      (insight.type === "ACTION_ITEM" || insight.type === "FOLLOW_UP") &&
+      insight.operation === "CREATE" &&
+      isCollectiveAssigneeHint(insight.assigneeHint)
+    ) {
       skipped++;
       continue;
     }

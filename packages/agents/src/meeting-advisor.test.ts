@@ -264,30 +264,39 @@ describe("runMeetingSummaryAgent", () => {
     }));
   });
 
-  it("condenses long transcripts before meeting-summary model calls", async () => {
+  it("processes long transcripts in full-coverage chunks before meeting-summary model calls", async () => {
     const { defaultModelGateway } = await import("@corgtex/models");
     const longTranscript = [
       "BEGINNING_MARKER",
-      "a".repeat(30_000),
-      "MIDDLE_MARKER",
-      "b".repeat(30_000),
-      "c".repeat(3_000),
+      "a".repeat(12_000),
+      "TEAM_UPDATE_MARKER Datise will coordinate the Chicago team update follow-up.",
+      "b".repeat(45_000),
       "ENDING_MARKER",
-      "c".repeat(3_000),
     ].join("\n");
-    vi.mocked(defaultModelGateway.extract).mockClear().mockResolvedValueOnce({
-      output: {
-        blocks: [
-          {
-            sequence: 1,
-            title: "Long discussion",
-            kind: "custom",
-            summaryMd: "The long discussion was summarized from excerpts.",
-          },
-        ],
-      },
-      raw: "{}",
-      usage: modelUsage,
+    vi.mocked(defaultModelGateway.extract).mockClear().mockImplementation(async ({ input }) => {
+      const parsed = JSON.parse(input);
+      const chunkIndex = parsed.transcriptChunk?.chunkIndex ?? 1;
+      return {
+        output: {
+          blocks: [
+            parsed.transcript.includes("TEAM_UPDATE_MARKER")
+              ? {
+                sequence: 1,
+                title: "Team updates",
+                kind: "update",
+                summaryMd: "The team update included TEAM_UPDATE_MARKER and Datise owning a follow-up.",
+              }
+              : {
+                sequence: 1,
+                title: `Chunk ${chunkIndex} discussion`,
+                kind: "custom",
+                summaryMd: `Chunk ${chunkIndex} was summarized from full-coverage transcript processing.`,
+              },
+          ],
+        },
+        raw: "{}",
+        usage: modelUsage,
+      };
     });
     vi.mocked(defaultModelGateway.chat).mockClear().mockResolvedValueOnce({
       content: "## Long discussion\nThe long discussion was handled.",
@@ -323,18 +332,21 @@ describe("runMeetingSummaryAgent", () => {
       meetingId: "meeting-long",
     });
 
-    const extractInput = JSON.parse(vi.mocked(defaultModelGateway.extract).mock.calls.at(-1)?.[0].input ?? "{}");
+    const extractInputs = vi.mocked(defaultModelGateway.extract).mock.calls.map((call) => JSON.parse(call[0].input ?? "{}"));
     const chatMessage = vi.mocked(defaultModelGateway.chat).mock.calls.at(-1)?.[0].messages.find((message) => message.role === "user");
     const chatInput = JSON.parse(chatMessage?.content ?? "{}");
 
-    expect(extractInput.transcriptCondensedForSummary).toBe(true);
-    expect(chatInput.transcriptCondensedForSummary).toBe(true);
-    expect(extractInput.transcript.length).toBeLessThan(longTranscript.length);
-    expect(chatInput.transcript.length).toBeLessThan(longTranscript.length);
-    expect(extractInput.transcript).toContain("shortened for summary generation");
-    expect(extractInput.transcript).toContain("BEGINNING_MARKER");
-    expect(extractInput.transcript).toContain("MIDDLE_MARKER");
-    expect(extractInput.transcript).toContain("ENDING_MARKER");
+    expect(extractInputs.length).toBeGreaterThan(1);
+    expect(extractInputs.every((input) => input.transcriptChunkedForSummary === true)).toBe(true);
+    expect(extractInputs.every((input) => input.transcriptCondensedForSummary === false)).toBe(true);
+    expect(extractInputs.some((input) => input.transcript.includes("TEAM_UPDATE_MARKER"))).toBe(true);
+    expect(JSON.stringify(extractInputs)).not.toContain("shortened for summary generation");
+    expect(chatInput.transcriptChunkedForSummary).toBe(true);
+    expect(chatInput.transcriptCondensedForSummary).toBe(false);
+    expect(chatInput.transcriptChunks.length).toBeGreaterThan(1);
+    expect(chatInput.meetingBlocks.blocks).toEqual(expect.arrayContaining([
+      expect.objectContaining({ title: "Team updates", kind: "update" }),
+    ]));
   });
 
   it("applies explicit guidance term corrections before persisting the meeting summary", async () => {

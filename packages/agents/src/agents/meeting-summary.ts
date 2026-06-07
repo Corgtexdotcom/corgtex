@@ -5,6 +5,9 @@ import {
   AppError,
   applyGuidanceTermCorrections,
   buildMeetingIntelligenceContext,
+  buildMeetingTranscriptChunks,
+  type MeetingBlocksJson,
+  type MeetingTranscriptChunk,
   normalizeMeetingBlocks,
   normalizeMeetingProductTerminology,
 } from "@corgtex/domain";
@@ -15,28 +18,75 @@ function isMissingMeetingError(error: unknown) {
 }
 
 const MAX_DIRECT_SUMMARY_TRANSCRIPT_CHARS = 35_000;
-const SUMMARY_TRANSCRIPT_EXCERPT_CHARS = 8_000;
 
-function excerptLongMeetingTranscript(transcript: string) {
-  if (transcript.length <= MAX_DIRECT_SUMMARY_TRANSCRIPT_CHARS) {
-    return transcript;
-  }
+const MEETING_BLOCK_SCHEMA_HINT = `{
+  "version": 1,
+  "blocks": [
+    {
+      "sequence": "number",
+      "title": "string",
+      "kind": "check_in | update | tension | proposal_discussion | decision | planning | custom",
+      "summaryMd": "string",
+      "sourceQuote": "string",
+      "relatedRecords": [
+        { "entityType": "Action | Tension | Proposal", "entityId": "string", "title": "string" }
+      ]
+    }
+  ]
+}`;
 
-  const middleStart = Math.max(
-    SUMMARY_TRANSCRIPT_EXCERPT_CHARS,
-    Math.floor(transcript.length / 2) - Math.floor(SUMMARY_TRANSCRIPT_EXCERPT_CHARS / 2),
-  );
-  const middleEnd = Math.min(
-    transcript.length - SUMMARY_TRANSCRIPT_EXCERPT_CHARS,
-    middleStart + SUMMARY_TRANSCRIPT_EXCERPT_CHARS,
-  );
+function directTranscriptChunk(transcript: string): MeetingTranscriptChunk {
+  return {
+    chunkIndex: 1,
+    chunkCount: 1,
+    startChar: 0,
+    endChar: transcript.length,
+    text: transcript,
+  };
+}
+
+function transcriptChunksForSummary(transcript: string) {
+  return transcript.length > MAX_DIRECT_SUMMARY_TRANSCRIPT_CHARS
+    ? buildMeetingTranscriptChunks(transcript)
+    : [directTranscriptChunk(transcript)];
+}
+
+function normalizeBlockDedupeText(value: string | null | undefined) {
+  return (value ?? "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function mergeMeetingBlockOutputs(outputs: MeetingBlocksJson[]): MeetingBlocksJson {
+  const seen = new Set<string>();
+  const blocks = outputs.flatMap((output) => output.blocks).flatMap((block) => {
+    const key = [
+      normalizeBlockDedupeText(block.kind),
+      normalizeBlockDedupeText(block.title),
+      normalizeBlockDedupeText(block.summaryMd).slice(0, 240),
+    ].join("|");
+    if (seen.has(key)) return [];
+    seen.add(key);
+    return [block];
+  });
+
+  return {
+    version: 1,
+    blocks: blocks.map((block, index) => ({
+      ...block,
+      sequence: index + 1,
+    })),
+  };
+}
+
+function transcriptForSummaryChat(transcript: string, chunks: MeetingTranscriptChunk[]) {
+  if (chunks.length === 1) return transcript;
 
   return [
-    `The full transcript is ${transcript.length} characters and was shortened for summary generation to avoid model timeouts. Use these beginning, middle, and ending excerpts as transcript evidence. Do not treat this shortening note as meeting content.`,
-    `BEGINNING EXCERPT:\n${transcript.slice(0, SUMMARY_TRANSCRIPT_EXCERPT_CHARS)}`,
-    `MIDDLE EXCERPT:\n${transcript.slice(middleStart, middleEnd)}`,
-    `ENDING EXCERPT:\n${transcript.slice(-SUMMARY_TRANSCRIPT_EXCERPT_CHARS)}`,
-  ].join("\n\n---\n\n");
+    `The full transcript is ${transcript.length} characters and was processed in ${chunks.length} full-coverage chunks for block extraction.`,
+    "Use meetingBlocks as the transcript evidence for this long meeting. Do not treat this processing note as meeting content.",
+  ].join(" ");
 }
 
 export async function runMeetingSummaryAgent(params: {
@@ -105,54 +155,58 @@ export async function runMeetingSummaryAgent(params: {
       }
 
       const transcript = meeting.transcript.trim();
-      const transcriptForModel = excerptLongMeetingTranscript(transcript);
-      const transcriptCondensedForSummary = transcriptForModel !== transcript;
+      const transcriptChunks = transcriptChunksForSummary(transcript);
+      const transcriptChunkedForSummary = transcriptChunks.length > 1;
+      const blockOutputs: MeetingBlocksJson[] = [];
 
-      const blockExtraction = await helpers.tool("model.extract.meeting-blocks", { meetingId: meeting.id }, async () => defaultModelGateway.extract({
-        model,
-        workspaceId: params.workspaceId,
-        agentRunId: runId,
-        instruction: [
-          "Identify the meeting's actual discussion blocks from transcript evidence.",
-          "Do not force a fixed template. Use natural blocks from the conversation, including custom/ad-hoc topics.",
-          "A block can be a check-in, update, tension, proposal discussion, decision, planning segment, or custom topic.",
-          "Tie proposal discussions and decisions to supplied existing proposal, tension, or action records only when the transcript and context support it.",
-          "Personal check-ins can be blocks, but they are not governance records unless explicit work follows.",
-          "Correct meeting transcript drift where Cortex means Corgtex. Use Corgtex in block titles, block summaries, and source quotes.",
-          "Return ordered blocks only. Do not invent transcript content.",
-        ].join(" "),
-        input: JSON.stringify({
-          title: meeting.title,
-          source: meeting.source,
-          recordedAt: meeting.recordedAt,
-          transcript: transcriptForModel,
-          transcriptLength: transcript.length,
-          transcriptCondensedForSummary,
-          currentSummary: meeting.summaryMd,
-          ingestionGuidanceMd: meeting.ingestionGuidanceMd,
-          existingRecords: meetingContext?.contextualIntelligenceEnabled ? {
-            actions: meetingContext.actions,
-            tensions: meetingContext.tensions,
-            proposals: meetingContext.proposals,
-          } : null,
-        }),
-        schemaHint: `{
-          "version": 1,
-          "blocks": [
-            {
-              "sequence": "number",
-              "title": "string",
-              "kind": "check_in | update | tension | proposal_discussion | decision | planning | custom",
-              "summaryMd": "string",
-              "sourceQuote": "string",
-              "relatedRecords": [
-                { "entityType": "Action | Tension | Proposal", "entityId": "string", "title": "string" }
-              ]
-            }
-          ]
-        }`,
-      }));
-      const meetingBlocks = normalizeMeetingBlocks(blockExtraction.output);
+      for (const chunk of transcriptChunks) {
+        const blockExtraction = await helpers.tool("model.extract.meeting-blocks", {
+          meetingId: meeting.id,
+          chunkIndex: chunk.chunkIndex,
+          chunkCount: chunk.chunkCount,
+        }, async () => defaultModelGateway.extract({
+          model,
+          workspaceId: params.workspaceId,
+          agentRunId: runId,
+          instruction: [
+            "Identify the meeting's actual discussion blocks from transcript evidence.",
+            "Do not force a fixed template. Use natural blocks from the conversation, including custom/ad-hoc topics.",
+            "A block can be a check-in, update, tension, proposal discussion, decision, planning segment, or custom topic.",
+            "Preserve scorecard, round-robin, department, team-update, and status update segments as update blocks even when they are not decisions.",
+            "For owner-backed commitments inside updates, make the commitment visible in the block summary so downstream extraction can create action items.",
+            "Tie proposal discussions and decisions to supplied existing proposal, tension, or action records only when the transcript and context support it.",
+            "Personal check-ins can be blocks, but they are not governance records unless explicit work follows.",
+            "Correct meeting transcript drift where Cortex means Corgtex. Use Corgtex in block titles, block summaries, and source quotes.",
+            "Return ordered blocks only. Do not invent transcript content.",
+          ].join(" "),
+          input: JSON.stringify({
+            title: meeting.title,
+            source: meeting.source,
+            recordedAt: meeting.recordedAt,
+            transcript: chunk.text,
+            transcriptLength: transcript.length,
+            transcriptChunkedForSummary,
+            transcriptCondensedForSummary: false,
+            transcriptChunk: {
+              chunkIndex: chunk.chunkIndex,
+              chunkCount: chunk.chunkCount,
+              startChar: chunk.startChar,
+              endChar: chunk.endChar,
+            },
+            currentSummary: meeting.summaryMd,
+            ingestionGuidanceMd: meeting.ingestionGuidanceMd,
+            existingRecords: meetingContext?.contextualIntelligenceEnabled ? {
+              actions: meetingContext.actions,
+              tensions: meetingContext.tensions,
+              proposals: meetingContext.proposals,
+            } : null,
+          }),
+          schemaHint: MEETING_BLOCK_SCHEMA_HINT,
+        }));
+        blockOutputs.push(normalizeMeetingBlocks(blockExtraction.output));
+      }
+      const meetingBlocks = mergeMeetingBlockOutputs(blockOutputs);
+      const summaryTranscript = transcriptForSummaryChat(transcript, transcriptChunks);
 
       const summary = await helpers.tool("model.chat", { meetingId: meeting.id }, async () => defaultModelGateway.chat({ model,
         workspaceId: params.workspaceId,
@@ -182,9 +236,18 @@ export async function runMeetingSummaryAgent(params: {
               title: meeting.title,
               source: meeting.source,
               recordedAt: meeting.recordedAt,
-              transcript: transcriptForModel,
+              transcript: summaryTranscript,
               transcriptLength: transcript.length,
-              transcriptCondensedForSummary,
+              transcriptChunkedForSummary,
+              transcriptCondensedForSummary: false,
+              transcriptChunks: transcriptChunkedForSummary
+                ? transcriptChunks.map((chunk) => ({
+                  chunkIndex: chunk.chunkIndex,
+                  chunkCount: chunk.chunkCount,
+                  startChar: chunk.startChar,
+                  endChar: chunk.endChar,
+                }))
+                : null,
               currentSummary: meeting.summaryMd,
               meetingBlocks,
               ingestionGuidanceMd: meeting.ingestionGuidanceMd,
