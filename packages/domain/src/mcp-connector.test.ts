@@ -44,7 +44,7 @@ describe("MCP connector registry", () => {
           clientId: "mcp_client_test",
           name: "Corgtex",
           redirectUris: ["https://client.example/callback"],
-          scopes: ["workspace:read", "tools:read", "tools:write", "tools:credentials:read", "members:write", "runtime:write"],
+          scopes: ["workspace:read", "tools:read", "tools:write", "members:write", "runtime:write"],
           tokenEndpointAuthMethod: "none",
         }),
       },
@@ -58,15 +58,15 @@ describe("MCP connector registry", () => {
     });
 
     expect(MCP_CONNECTOR_DEFAULT_SCOPES).toContain("tools:write");
-    expect(MCP_CONNECTOR_DEFAULT_SCOPES).toContain("tools:credentials:read");
+    expect(MCP_CONNECTOR_DEFAULT_SCOPES).not.toContain("tools:credentials:read");
     expect(MCP_CONNECTOR_DEFAULT_SCOPES).toContain("runtime:write");
     expect(MCP_CONNECTOR_DEFAULT_SCOPES).not.toContain("support:write");
     expect(prismaMock.mcpOAuthClient.create).toHaveBeenCalledWith({
       data: expect.objectContaining({
-        scopes: expect.arrayContaining(["tools:read", "tools:write", "tools:credentials:read"]),
+        scopes: expect.arrayContaining(["tools:read", "tools:write"]),
       }),
     });
-    expect(result.scope).toContain("tools:credentials:read");
+    expect(result.scope).not.toContain("tools:credentials:read");
   });
 
   it("expands legacy default client scopes without expanding intentionally narrow clients", async () => {
@@ -78,9 +78,37 @@ describe("MCP connector registry", () => {
     } = await import("./mcp-connector");
 
     expect(resolveMcpClientAllowedScopes(MCP_CONNECTOR_LEGACY_DEFAULT_SCOPES)).toEqual(
-      expect.arrayContaining(["tools:write", "tools:credentials:read", "runtime:write"]),
+      expect.arrayContaining(["tools:write", "runtime:write"]),
     );
+    expect(resolveMcpClientAllowedScopes(MCP_CONNECTOR_LEGACY_DEFAULT_SCOPES)).not.toContain("tools:credentials:read");
     expect(resolveMcpClientAllowedScopes(["workspace:read", "brain:read"])).toEqual(["workspace:read", "brain:read"]);
+  });
+
+  it("rejects support-only scopes for user OAuth connector registration", async () => {
+    const prismaMock = {
+      mcpOAuthClient: {
+        create: vi.fn(),
+      },
+    };
+    installSharedMock(prismaMock);
+
+    const { registerMcpOAuthClient } = await import("./mcp-connector");
+    await expect(registerMcpOAuthClient({
+      name: "Corgtex",
+      redirectUris: ["https://client.example/callback"],
+      scopes: ["workspace:read", "support:write"],
+    })).rejects.toMatchObject({
+      status: 400,
+      code: "INVALID_INPUT",
+    });
+    expect(prismaMock.mcpOAuthClient.create).not.toHaveBeenCalled();
+  });
+
+  it("filters support-only scopes from existing OAuth connector clients", async () => {
+    installSharedMock({});
+
+    const { resolveMcpClientAllowedScopes } = await import("./mcp-connector");
+    expect(resolveMcpClientAllowedScopes(["workspace:read", "support:write"])).toEqual(["workspace:read"]);
   });
 
   it("defaults the current deployment to a registered active instance from WORKSPACE_SLUG", async () => {

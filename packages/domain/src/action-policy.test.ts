@@ -63,7 +63,6 @@ describe("delegated action policy", () => {
       "create_member",
       "update_member",
       "upsert_tool_link",
-      "set_feature_flag",
       "upload_meeting",
       "create_goal",
       "create_article",
@@ -84,6 +83,7 @@ describe("delegated action policy", () => {
   it("keeps credential reveal and support control-plane mutations sensitive", () => {
     for (const toolName of [
       "reveal_tool_link_credential",
+      "set_feature_flag",
       "record_support_audit",
       "support_reopen_resolved_proposals",
       "update_agent_policy",

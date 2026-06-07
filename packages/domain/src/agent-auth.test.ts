@@ -24,7 +24,7 @@ describe("scope defaults", () => {
 
     expect(DELEGATED_DEFAULT_SCOPES).toContain("tools:read");
     expect(DELEGATED_DEFAULT_SCOPES).toContain("tools:write");
-    expect(DELEGATED_DEFAULT_SCOPES).toContain("tools:credentials:read");
+    expect(DELEGATED_DEFAULT_SCOPES).not.toContain("tools:credentials:read");
     expect(DELEGATED_DEFAULT_SCOPES).toContain("external-tools:read");
     expect(DELEGATED_DEFAULT_SCOPES).toContain("external-tools:write");
     expect(DELEGATED_DEFAULT_SCOPES).toContain("members:write");

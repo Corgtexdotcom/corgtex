@@ -66,7 +66,7 @@ export const SCOPE_REGISTRY = {
   "members:write":       { label: "Manage members",             group: "people",     default: false, delegatedDefault: true,  description: "Create, update, and deactivate members through same-role delegation." },
   "tools:read":          { label: "Read shared tools",           group: "people",     default: true,  delegatedDefault: true,  description: "List shared workspace tool links and non-secret access notes." },
   "tools:write":         { label: "Manage shared tools",         group: "people",     default: false, delegatedDefault: true,  description: "Create, update, and archive shared workspace tool links through same-role delegation." },
-  "tools:credentials:read": { label: "Reveal shared tool credentials", group: "people", default: false, delegatedDefault: true, description: "Reveal encrypted credentials saved on shared tool links. Sensitive — same-role delegation and audited." },
+  "tools:credentials:read": { label: "Reveal shared tool credentials", group: "people", default: false, delegatedDefault: false, description: "Reveal encrypted credentials saved on shared tool links. Sensitive — explicit opt-in, same-role delegation, and audited." },
   "external-tools:read": { label: "Read connected tools",         group: "integrations", default: true, delegatedDefault: true, description: "List and search same-user delegated external MCP tools such as Notion." },
   "external-tools:write": { label: "Use connected tools",         group: "integrations", default: true, delegatedDefault: true, description: "Execute same-user delegated external MCP tools such as Notion tools." },
 

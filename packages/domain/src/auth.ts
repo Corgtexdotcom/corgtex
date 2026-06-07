@@ -137,6 +137,10 @@ export function requireGlobalOperator(actor: AppActor) {
   }
 }
 
+export function persistedMemberId(membership: MembershipSummary | null | undefined) {
+  return membership?.id === "global-operator" ? null : membership?.id ?? null;
+}
+
 export async function clearSession(token: string) {
   await prisma.session.deleteMany({
     where: {

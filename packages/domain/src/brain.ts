@@ -3,7 +3,7 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { appendEvents } from "./events";
-import { requireWorkspaceMembership } from "./auth";
+import { persistedMemberId, requireWorkspaceMembership } from "./auth";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { invariant } from "./errors";
 import { requireDraftManager } from "./draft-permissions";
@@ -52,6 +52,8 @@ export async function createArticle(actor: AppActor, params: {
 
   const isPrivate = params.isPrivate ?? ((params.authority ?? "DRAFT") === "DRAFT");
 
+  const membershipId = persistedMemberId(membership);
+
   return prisma.$transaction(async (tx) => {
     const article = await tx.brainArticle.create({
       data: {
@@ -62,7 +64,7 @@ export async function createArticle(actor: AppActor, params: {
         authority: params.authority ?? "DRAFT",
         bodyMd: params.bodyMd,
         frontmatterJson: params.frontmatterJson ?? Prisma.JsonNull,
-        ownerMemberId: (isPrivate && membership) ? membership.id : (params.ownerMemberId ?? null),
+        ownerMemberId: isPrivate ? (membershipId ?? params.ownerMemberId ?? null) : (params.ownerMemberId ?? null),
         staleAfterDays: params.staleAfterDays ?? 90,
         sourceIds: params.sourceIds ?? [],
         isPrivate,

@@ -22,6 +22,7 @@ const CREDENTIAL_REVEAL_TOOL_NAMES = new Set([
 
 const SUPPORT_CONTROL_PLANE_MUTATION_TOOL_NAMES = new Set([
   "record_support_audit",
+  "set_feature_flag",
   "support_reopen_resolved_proposals",
   "update_agent_credential_scopes",
   "revoke_agent_credential",

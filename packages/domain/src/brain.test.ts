@@ -5,6 +5,7 @@ const { prismaMock } = vi.hoisted(() => ({
     $transaction: vi.fn(),
     brainArticle: {
       count: vi.fn(),
+      create: vi.fn(),
       findMany: vi.fn(),
       findUnique: vi.fn(),
       update: vi.fn(),
@@ -33,6 +34,7 @@ vi.mock("@corgtex/shared", () => ({
 }));
 
 vi.mock("./auth", () => ({
+  persistedMemberId: (membership: { id?: string } | null | undefined) => membership?.id === "global-operator" ? null : membership?.id ?? null,
   requireWorkspaceMembership,
 }));
 
@@ -167,6 +169,39 @@ describe("Brain article draft lifecycle", () => {
         isPrivate: true,
         publishedAt: null,
       },
+    });
+  });
+
+  it("does not persist the synthetic global-operator membership as a private article owner", async () => {
+    const { createArticle } = await import("./brain");
+
+    requireWorkspaceMembership.mockResolvedValueOnce({
+      id: "global-operator",
+      workspaceId: "ws-1",
+      userId: "operator-1",
+      role: "ADMIN",
+      isActive: true,
+    });
+    prismaMock.brainArticle.create.mockResolvedValue({
+      id: "article-1",
+      slug: "operator-draft",
+      title: "Operator draft",
+      type: "RUNBOOK",
+      authority: "DRAFT",
+      isPrivate: true,
+    });
+
+    await createArticle({ kind: "user", user: { id: "operator-1" } } as any, {
+      workspaceId: "ws-1",
+      title: "Operator draft",
+      type: "RUNBOOK",
+      bodyMd: "Body",
+    });
+
+    expect(prismaMock.brainArticle.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        ownerMemberId: null,
+      }),
     });
   });
 });

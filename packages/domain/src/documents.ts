@@ -2,7 +2,7 @@ import type { Prisma } from "@prisma/client";
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { appendEvents } from "./events";
-import { requireWorkspaceMembership } from "./auth";
+import { persistedMemberId, requireWorkspaceMembership } from "./auth";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { invariant } from "./errors";
 import { assertTrialStorageCapacity } from "./trial-entitlements";
@@ -91,7 +91,7 @@ export async function createDocument(actor: AppActor, params: {
           tier: 2,
           title,
           content: [title, textContent].join("\n\n"),
-          authorMemberId: actor.kind === "user" ? membership?.id ?? null : null,
+          authorMemberId: actor.kind === "user" ? persistedMemberId(membership) : null,
           channel: source,
           metadata: {
             documentId: document.id,
