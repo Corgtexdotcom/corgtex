@@ -17,6 +17,16 @@ import {
 
 import { privacyFilter } from "./privacy";
 
+export type ListTensionsOptions = {
+  take?: number;
+  skip?: number;
+  archiveFilter?: ArchiveFilter;
+  openedFrom?: Date;
+  openedTo?: Date;
+  closedFrom?: Date;
+  closedTo?: Date;
+};
+
 async function resolveRaisedByMemberId(tx: Prisma.TransactionClient, workspaceId: string, raisedByMemberId?: string | null) {
   if (!raisedByMemberId) return null;
 
@@ -32,11 +42,26 @@ async function resolveRaisedByMemberId(tx: Prisma.TransactionClient, workspaceId
   return member.id;
 }
 
-export async function listTensions(actor: AppActor, workspaceId: string, opts?: { take?: number; skip?: number; archiveFilter?: ArchiveFilter }) {
+function dateRangeWhere(from?: Date, to?: Date): Prisma.DateTimeNullableFilter | undefined {
+  const filter: Prisma.DateTimeNullableFilter = {};
+  if (from) filter.gte = from;
+  if (to) filter.lte = to;
+  return Object.keys(filter).length > 0 ? filter : undefined;
+}
+
+export async function listTensions(actor: AppActor, workspaceId: string, opts?: ListTensionsOptions) {
   const take = opts?.take ?? 20;
   const skip = opts?.skip ?? 0;
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
-  const where = { workspaceId, ...privacyFilter(actor, membership), ...archiveFilterWhere(opts?.archiveFilter) };
+  const where: Prisma.TensionWhereInput = {
+    workspaceId,
+    ...privacyFilter(actor, membership),
+    ...archiveFilterWhere(opts?.archiveFilter),
+  };
+  const openedAt = dateRangeWhere(opts?.openedFrom, opts?.openedTo);
+  const closedAt = dateRangeWhere(opts?.closedFrom, opts?.closedTo);
+  if (openedAt) where.publishedAt = openedAt;
+  if (closedAt) where.resolvedAt = closedAt;
 
   const [items, total] = await Promise.all([
     prisma.tension.findMany({
@@ -243,6 +268,7 @@ export async function updateTension(actor: AppActor, params: {
         data.isPrivate = true;
         data.publishedAt = null;
         data.resolvedVia = null;
+        data.resolvedAt = null;
       } else if (tension.status === "DRAFT") {
         await requireDraftManager({ actor, workspaceId: params.workspaceId, record: tension, resolvedMembership: membership });
       }
@@ -255,6 +281,10 @@ export async function updateTension(actor: AppActor, params: {
         const resolvedVia = params.resolvedVia?.trim() || "";
         invariant(resolvedVia.length > 0, 400, "INVALID_INPUT", "Resolution note is required.");
         data.resolvedVia = resolvedVia;
+        data.resolvedAt = new Date();
+      } else {
+        if (params.status === "OPEN") data.resolvedVia = null;
+        data.resolvedAt = null;
       }
     }
     if (params.resolvedVia !== undefined && params.status !== "RESOLVED") {
@@ -363,6 +393,12 @@ export async function upvoteTension(actor: AppActor, params: {
   });
 
   invariant(tension && tension.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Tension not found.");
+  invariant(
+    tension.status === "OPEN" && !tension.isPrivate && !tension.archivedAt,
+    400,
+    "INVALID_STATE",
+    "Only open public tensions can be upvoted.",
+  );
 
   return prisma.tensionUpvote.upsert({
     where: {
@@ -400,7 +436,7 @@ export async function publishTension(actor: AppActor, params: {
 
     const updated = await tx.tension.update({
       where: { id: params.tensionId },
-      data: { status: "OPEN", isPrivate: false, publishedAt: new Date() },
+      data: { status: "OPEN", isPrivate: false, publishedAt: new Date(), resolvedAt: null },
     });
 
     await tx.auditLog.create({
@@ -453,6 +489,7 @@ export async function returnTensionToDraft(actor: AppActor, params: {
         isPrivate: true,
         publishedAt: null,
         resolvedVia: null,
+        resolvedAt: null,
       },
     });
 

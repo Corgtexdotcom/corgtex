@@ -22,6 +22,10 @@ const nDaysAgo = (days) => {
   return d;
 };
 
+const nDaysAgoAtNoonUtc = (days) => {
+  const d = nDaysAgo(days); d.setUTCHours(12, 0, 0, 0); return d;
+};
+
 // Data Definition
 const DEMO_LINKEDIN_URL = "https://www.linkedin.com/company/johnson-&-johnson/";
 const DEMO_WEBSITE_URL = "https://www.jnj.com/";
@@ -201,7 +205,7 @@ const TENSIONS = [
     body: "Competitors are accelerating lead optimization using generative AI. We lack a unified AI infrastructure across the R&D segment." },
   { title: "Post-Kenvue Brand Identity Transition", status: "OPEN", assignee: "vbroadhurst",
     body: "Need to fully distinguish J&J as an enterprise exclusively focused on healthcare innovation." },
-  { title: "MedTech Regulatory Approval Delays in EU", status: "OPEN", assignee: "tschmid",
+  { title: "MedTech Regulatory Approval Delays in EU", status: "RESOLVED", assignee: "tschmid", publishedAt: nDaysAgoAtNoonUtc(18), resolvedAt: nDaysAgoAtNoonUtc(5), resolvedVia: "Regulatory review owners were assigned by market and the EU launch calendar was resequenced around the highest-confidence approvals.",
     body: "MDR compliance is creating a bottleneck for our Vision products in specific EU markets." },
   { title: "Clinical Staff Retention in Key R&D Sites", status: "OPEN", assignee: "pfasolo",
     body: "We are seeing 15% attrition in our clinical site management talent, primarily to biotech startups." }
@@ -2106,7 +2110,9 @@ async function main() {
       bodyMd: t.body,
       status: t.status,
       isPrivate: false,
-      publishedAt: nDaysAgo(2),
+      publishedAt: t.publishedAt ?? nDaysAgo(2),
+      resolvedAt: t.resolvedAt ?? (t.status === "RESOLVED" ? nDaysAgo(1) : null),
+      resolvedVia: t.resolvedVia ?? null,
       archivedAt: null,
       archivedByUserId: null,
       archiveReason: null,
