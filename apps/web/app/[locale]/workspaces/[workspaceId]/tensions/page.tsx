@@ -14,6 +14,12 @@ import { MarkdownExcerpt } from "@/lib/components/MarkdownRenderer";
 import { ItemActions } from "@/lib/components/ui/ItemActions";
 import { canOpenPrivateDraft } from "@/lib/governance-open-guards";
 import { getTranslations } from "next-intl/server";
+import {
+  TENSION_STATUS_FILTERS,
+  buildTensionQuery,
+  groupTensionsByStatus,
+  resolveTensionSearch,
+} from "./view-model";
 
 export const dynamic = "force-dynamic";
 
@@ -29,23 +35,16 @@ export default async function TensionsPage({
   const t = await getTranslations("tensions");
   const tCommon = await getTranslations("common");
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
+  const resolvedSearch = searchParams ? await searchParams : {};
+  const { statusFilter, dateValues, dateFilters } = resolveTensionSearch(resolvedSearch);
   const [{ items: tensions }, { items: proposals }, members] = await Promise.all([
-    listTensions(actor, workspaceId, { take: 50 }),
+    listTensions(actor, workspaceId, { take: 50, ...dateFilters }),
     listProposals(actor, workspaceId, { take: 50 }),
     listMembers(workspaceId),
   ]);
 
   const activeProposals = proposals.filter((p) => p.status === "DRAFT" || p.status === "OPEN");
-
-  const resolvedSearch = searchParams ? await searchParams : {};
-  const statusFilter = typeof resolvedSearch.status === "string" ? resolvedSearch.status : "OPEN";
-
-  const groupedTensions = {
-    DRAFT: tensions.filter((tension) => tension.status === "DRAFT"),
-    OPEN: tensions.filter((t) => t.status === "OPEN" && !t.isPrivate),
-    RESOLVED: tensions.filter((tension) => tension.status === "RESOLVED" && !tension.isPrivate),
-    ALL: tensions,
-  };
+  const groupedTensions = groupTensionsByStatus(tensions);
 
   const displayTensions = statusFilter === "ALL" 
     ? groupedTensions.ALL 
@@ -66,7 +65,7 @@ export default async function TensionsPage({
     return labels[status] ?? status;
   };
 
-  const statusFilters = (["DRAFT", "OPEN", "RESOLVED", "ALL"] as const).map((status) => ({
+  const statusFilters = TENSION_STATUS_FILTERS.map((status) => ({
     status,
     label: statusLabel(status),
   }));
@@ -85,17 +84,39 @@ export default async function TensionsPage({
       </header>
 
       <section className="ws-section">
-        <div className="nr-filter-bar">
+        <div className="nr-filter-bar nr-filter-bar-wrap">
           {statusFilters.map(({ status, label }) => (
             <a 
               key={status}
-              href={`?status=${status}`}
+              href={buildTensionQuery({ status, dateValues })}
               className={`nr-filter-item ${statusFilter === status ? "nr-filter-active" : ""}`}
             >
               {t("filterWithCount", { label, count: groupedTensions[status].length })}
             </a>
           ))}
         </div>
+
+        <form className="nr-filter-bar nr-filter-bar-wrap" action={`/workspaces/${workspaceId}/tensions`} style={{ alignItems: "flex-end" }}>
+          <input type="hidden" name="status" value={statusFilter} />
+          <label style={{ display: "grid", gap: 4 }}>
+            <span className="nr-item-meta">{t("filterOpenedFrom")}</span>
+            <input name="openedFrom" type="date" defaultValue={dateValues.openedFrom ?? ""} />
+          </label>
+          <label style={{ display: "grid", gap: 4 }}>
+            <span className="nr-item-meta">{t("filterOpenedTo")}</span>
+            <input name="openedTo" type="date" defaultValue={dateValues.openedTo ?? ""} />
+          </label>
+          <label style={{ display: "grid", gap: 4 }}>
+            <span className="nr-item-meta">{t("filterClosedFrom")}</span>
+            <input name="closedFrom" type="date" defaultValue={dateValues.closedFrom ?? ""} />
+          </label>
+          <label style={{ display: "grid", gap: 4 }}>
+            <span className="nr-item-meta">{t("filterClosedTo")}</span>
+            <input name="closedTo" type="date" defaultValue={dateValues.closedTo ?? ""} />
+          </label>
+          <button type="submit" className="secondary small">{t("btnApplyFilters")}</button>
+          <a className="link-button small" href={buildTensionQuery({ status: statusFilter, dateValues: {} })}>{t("btnClearDates")}</a>
+        </form>
 
         <div>
           {(!displayTensions || displayTensions.length === 0) && (
@@ -113,6 +134,8 @@ export default async function TensionsPage({
             const canSubmittedAuthorEdit = actor.kind === "user" && tension.authorUserId === actor.user.id;
             const canEditContent = tension.status === "DRAFT" ? canManage : tension.status === "OPEN" && canSubmittedAuthorEdit;
             const canDraftProposal = !tension.proposal && (canManage || !tension.isPrivate);
+            const openedDate = tension.publishedAt ? new Date(tension.publishedAt).toLocaleDateString() : null;
+            const closedDate = tension.resolvedAt ? new Date(tension.resolvedAt).toLocaleDateString() : null;
 
             return (
               <div className="nr-item" key={tension.id}>
@@ -131,6 +154,8 @@ export default async function TensionsPage({
                   {t("createdByMeta", { name: authorName })}
                   {raisedByName ? ` · ${t("raisedByMeta", { name: raisedByName })}` : ""}
                   {` · ${ageText(tension.createdAt)} · ${t("upvotes", { count: tension.upvotes.length })} · ${t("priorityN", { priority: tension.priority })}`}
+                  {openedDate ? ` · ${t("openedOnMeta", { date: openedDate })}` : ""}
+                  {closedDate ? ` · ${t("closedOnMeta", { date: closedDate })}` : ""}
                   {" · "}
                   {tension.version > 1 ? (
                     <a href={`/workspaces/${workspaceId}/versions?entityType=TENSION&entityId=${encodeURIComponent(tension.id)}`}>v{tension.version}</a>
@@ -155,9 +180,7 @@ export default async function TensionsPage({
                         <button type="submit" className="primary small">{t("btnOpen")}</button>
                       </form>
                     );
-                  } else if (!tension.isPrivate && tension.status !== "DRAFT") {
-                    // upvoteTension only checks membership, so OPEN and RESOLVED
-                    // public tensions both keep the upvote primary CTA.
+                  } else if (!tension.isPrivate && tension.status === "OPEN") {
                     primary = (
                       <form action={upvoteTensionAction}>
                         <input type="hidden" name="workspaceId" value={workspaceId} />

@@ -12,6 +12,9 @@ const { prismaMock } = vi.hoisted(() => {
       findUnique: vi.fn(),
       update: vi.fn(),
     },
+    tensionUpvote: {
+      upsert: vi.fn(),
+    },
     member: {
       findFirst: vi.fn(),
     },
@@ -82,6 +85,11 @@ describe("tensions domain", () => {
       workspaceId: "ws-1",
       title: "Test tension",
       raisedByMemberId: "raised-member-1",
+    });
+    prismaMock.tensionUpvote.upsert.mockResolvedValue({
+      id: "upvote-1",
+      tensionId: "t-1",
+      userId: "u-1",
     });
   });
 
@@ -393,6 +401,134 @@ describe("tensions domain", () => {
     }));
   });
 
+  it("applies opened and closed date filters when listing tensions", async () => {
+    const { listTensions } = await import("./tensions");
+    const openedFrom = new Date("2026-06-01T00:00:00.000Z");
+    const openedTo = new Date("2026-06-02T23:59:59.999Z");
+    const closedFrom = new Date("2026-06-03T00:00:00.000Z");
+    const closedTo = new Date("2026-06-04T23:59:59.999Z");
+
+    await listTensions(actor, "ws-1", {
+      openedFrom,
+      openedTo,
+      closedFrom,
+      closedTo,
+    });
+
+    expect(prismaMock.tension.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        publishedAt: { gte: openedFrom, lte: openedTo },
+        resolvedAt: { gte: closedFrom, lte: closedTo },
+      }),
+    }));
+    expect(prismaMock.tension.count).toHaveBeenCalledWith({
+      where: expect.objectContaining({
+        publishedAt: { gte: openedFrom, lte: openedTo },
+        resolvedAt: { gte: closedFrom, lte: closedTo },
+      }),
+    });
+  });
+
+  it("sets resolvedAt when resolving a tension", async () => {
+    prismaMock.tension.findUnique.mockResolvedValueOnce({
+      id: "t-open",
+      workspaceId: "ws-1",
+      authorUserId: "u-1",
+      title: "Test tension",
+      status: "OPEN",
+      version: 1,
+      isPrivate: false,
+      publishedAt: new Date("2026-06-01T00:00:00.000Z"),
+      resolvedVia: null,
+      resolvedAt: null,
+      archivedAt: null,
+    });
+    prismaMock.tension.update.mockResolvedValueOnce({
+      id: "t-open",
+      workspaceId: "ws-1",
+      title: "Test tension",
+      status: "RESOLVED",
+      resolvedVia: "Process changed",
+      resolvedAt: new Date("2026-06-05T00:00:00.000Z"),
+    });
+    const { updateTension } = await import("./tensions");
+
+    await updateTension(actor, {
+      workspaceId: "ws-1",
+      tensionId: "t-open",
+      status: "RESOLVED",
+      resolvedVia: " Process changed ",
+    });
+
+    expect(prismaMock.tension.update).toHaveBeenCalledWith({
+      where: { id: "t-open" },
+      data: expect.objectContaining({
+        status: "RESOLVED",
+        isPrivate: false,
+        resolvedVia: "Process changed",
+        resolvedAt: expect.any(Date),
+      }),
+    });
+  });
+
+  it("rejects upvotes for non-open public tensions", async () => {
+    const { upvoteTension } = await import("./tensions");
+    for (const tension of [
+      { status: "RESOLVED", isPrivate: false, archivedAt: null },
+      { status: "DRAFT", isPrivate: true, archivedAt: null },
+      { status: "OPEN", isPrivate: true, archivedAt: null },
+      { status: "OPEN", isPrivate: false, archivedAt: new Date("2026-06-01T00:00:00.000Z") },
+    ]) {
+      vi.clearAllMocks();
+      prismaMock.tension.findUnique.mockResolvedValueOnce({
+        id: "t-1",
+        workspaceId: "ws-1",
+        ...tension,
+      });
+
+      await expect(upvoteTension(actor, {
+        workspaceId: "ws-1",
+        tensionId: "t-1",
+      })).rejects.toMatchObject({
+        status: 400,
+        code: "INVALID_STATE",
+      });
+      expect(prismaMock.tensionUpvote.upsert).not.toHaveBeenCalled();
+    }
+  });
+
+  it("upvotes open public tensions", async () => {
+    prismaMock.tension.findUnique.mockResolvedValueOnce({
+      id: "t-1",
+      workspaceId: "ws-1",
+      status: "OPEN",
+      isPrivate: false,
+      archivedAt: null,
+    });
+    const { upvoteTension } = await import("./tensions");
+
+    await expect(upvoteTension(actor, {
+      workspaceId: "ws-1",
+      tensionId: "t-1",
+    })).resolves.toMatchObject({
+      id: "upvote-1",
+    });
+
+    expect(prismaMock.tensionUpvote.upsert).toHaveBeenCalledWith({
+      where: {
+        tensionId_userId: {
+          tensionId: "t-1",
+          userId: "u-1",
+        },
+      },
+      update: {},
+      create: {
+        tensionId: "t-1",
+        userId: "u-1",
+      },
+    });
+  });
+
   it("fetches tension details with raised-by metadata and requires membership", async () => {
     const { getTension } = await import("./tensions");
     const { requireWorkspaceMembership } = await import("./auth");
@@ -489,6 +625,7 @@ describe("tensions domain", () => {
       status: "DRAFT",
       isPrivate: true,
       publishedAt: null,
+      resolvedAt: null,
       resolvedVia: null,
     });
 
@@ -510,6 +647,7 @@ describe("tensions domain", () => {
         isPrivate: true,
         publishedAt: null,
         resolvedVia: null,
+        resolvedAt: null,
       },
     });
   });

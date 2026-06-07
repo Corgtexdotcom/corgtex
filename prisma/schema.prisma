@@ -1398,6 +1398,7 @@ model Tension {
   urgency          Int?          @default(0)
   importance       Int?          @default(0)
   resolvedVia      String?
+  resolvedAt       DateTime?
   proposalId       String?
   proposal         Proposal?     @relation(fields: [proposalId], references: [id], onDelete: SetNull)
   meetingId        String?
@@ -1419,6 +1420,8 @@ model Tension {
 
   @@index([workspaceId, status])
   @@index([workspaceId, archivedAt])
+  @@index([workspaceId, publishedAt])
+  @@index([workspaceId, resolvedAt])
   @@index([raisedByMemberId])
 }
 
