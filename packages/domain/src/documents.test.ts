@@ -24,6 +24,7 @@ vi.mock("@corgtex/shared", () => ({
 }));
 
 vi.mock("./auth", () => ({
+  persistedMemberId: (membership: { id?: string } | null | undefined) => membership?.id === "global-operator" ? null : membership?.id ?? null,
   requireWorkspaceMembership: requireWorkspaceMembershipMock,
 }));
 
@@ -93,6 +94,33 @@ describe("createDocument", () => {
         payload: { sourceId: "source-1" },
       }),
     ]));
+  });
+
+  it("does not persist the synthetic global-operator membership as a Brain source author", async () => {
+    const { createDocument } = await import("./documents");
+
+    requireWorkspaceMembershipMock.mockResolvedValueOnce({
+      id: "global-operator",
+      workspaceId: "workspace-1",
+      userId: "operator-1",
+      role: "ADMIN",
+      isActive: true,
+    });
+
+    await createDocument({ kind: "user", user: { id: "operator-1" } } as any, {
+      workspaceId: "workspace-1",
+      title: "Critical path",
+      source: "api",
+      storageKey: "doc-key",
+      mimeType: "text/plain",
+      textContent: "The critical path runs through finance approval.",
+    });
+
+    expect(prismaMock.brainSource.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        authorMemberId: null,
+      }),
+    });
   });
 
   it("does not create a Brain source for documents without text", async () => {

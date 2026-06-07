@@ -127,6 +127,8 @@ import {
   submitExecutionResult,
   listWorkItemVersions,
   getWorkItemVersion,
+  AppError,
+  requireWorkspaceMembership,
 } from "@corgtex/domain";
 import type { AgentScope } from "@corgtex/domain";
 import { searchIndexedKnowledge } from "@corgtex/knowledge";
@@ -414,6 +416,12 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       GOAL: "goals:read",
     } as const;
     requireScope(sessionCtx, scopeByEntity[entityType]);
+  };
+  const requireSupportCredential = () => {
+    requireScope(sessionCtx, "support:write");
+    if (sessionCtx.authKind !== "agent") {
+      throw new AppError(403, "FORBIDDEN", "Support MCP tools require support connector credentials.");
+    }
   };
   const auditToolExecution = async (name: string, input: unknown, result: unknown, error?: unknown) => {
     if (!hasToolCapability(name) || name === "record_support_audit") return;
@@ -1198,7 +1206,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       result?: unknown;
       error?: string | null;
     }) => {
-      requireScope(sessionCtx, "support:write");
+      requireSupportCredential();
       const audit = await prisma.auditLog.create({
         data: {
           workspaceId,
@@ -1224,6 +1232,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     {},
     async () => {
       requireScope(sessionCtx, "integrations:read");
+      await requireWorkspaceMembership({ actor, workspaceId, allowedRoles: ["ADMIN"] });
       const [communicationInstallations, oauthConnections] = await Promise.all([
         listCommunicationInstallations(actor, workspaceId),
         prisma.oAuthConnection.findMany({
@@ -1410,7 +1419,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       scopes: z.array(z.string()),
     },
     async ({ credentialId, scopes }: { credentialId: string; scopes: string[] }) => {
-      requireScope(sessionCtx, "support:write");
+      requireSupportCredential();
       const credential = await updateAgentCredentialScopes(actor, { workspaceId, credentialId, scopes });
       return jsonResult({ credential: agentCredentialSummary(credential) });
     },
@@ -1423,7 +1432,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       credentialId: z.string(),
     },
     async ({ credentialId }: { credentialId: string }) => {
-      requireScope(sessionCtx, "support:write");
+      requireSupportCredential();
       const credential = await revokeAgentCredential(actor, { workspaceId, credentialId });
       return jsonResult({ credential: agentCredentialSummary(credential) });
     },
@@ -1459,7 +1468,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       modelOverride: z.string().nullable().optional(),
     },
     async (params: { agentKey: string; governancePolicy?: string | null; modelOverride?: string | null }) => {
-      requireScope(sessionCtx, "support:write");
+      requireSupportCredential();
       const config = await updateAgentConfig(actor, {
         workspaceId,
         agentKey: params.agentKey,
@@ -1499,7 +1508,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       periodStartDay: z.number().optional(),
     },
     async (params: { monthlyCostCapUsd: number; alertThresholdPct?: number; periodStartDay?: number }) => {
-      requireScope(sessionCtx, "support:write");
+      requireSupportCredential();
       const budget = await updateModelUsageBudget(actor, { workspaceId, ...params });
       return jsonResult({ budget });
     },
@@ -1785,7 +1794,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       reason: z.string(),
     },
     async ({ proposalIds, reason }: { proposalIds: string[]; reason: string }) => {
-      requireScope(sessionCtx, "support:write");
+      requireSupportCredential();
       requireScope(sessionCtx, "proposals:write");
       const result = await supportReopenResolvedProposals(actor, {
         workspaceId,
@@ -2452,6 +2461,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     async (input: { flag: string; enabled: boolean; config?: unknown }) => {
       const { flag, enabled, config } = input;
       requireScope(sessionCtx, "workspace:write");
+      await requireWorkspaceMembership({ actor, workspaceId, allowedRoles: ["ADMIN"] });
       const hasConfig = Object.prototype.hasOwnProperty.call(input, "config");
       const configData = hasConfig ? { config: config == null ? null : toInputJson(config) } : {};
       const record = await prisma.workspaceFeatureFlag.upsert({

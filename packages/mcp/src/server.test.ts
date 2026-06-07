@@ -40,20 +40,33 @@ const listWritebackTargetsMock = vi.fn();
 const submitExecutionResultMock = vi.fn();
 const listWorkItemVersionsMock = vi.fn();
 const getWorkItemVersionMock = vi.fn();
+const requireWorkspaceMembershipMock = vi.fn();
 
 vi.mock("@corgtex/domain", () => ({
+  AppError: class AppError extends Error {
+    status: number;
+    code: string;
+
+    constructor(status: number, code: string, message: string) {
+      super(message);
+      this.status = status;
+      this.code = code;
+    }
+  },
   CONTROL_PLANE_WORKSPACE_FEATURE_FLAGS: [
     { flag: "GOALS", label: "Goals", description: "Goals", defaultEnabled: true },
     { flag: "FINANCE", label: "Finance", description: "Finance", defaultEnabled: false },
   ],
+  requireWorkspaceMembership: requireWorkspaceMembershipMock,
   listProposals: vi.fn(),
   createProposal: vi.fn(),
   supportReopenResolvedProposals: supportReopenResolvedProposalsMock,
   evaluateDelegatedActionPolicy: vi.fn((input: { toolName?: string | null; operation?: "read" | "write" | null; confidence?: number | null; explicitUserIntent?: boolean }) => {
     if ([
-      "reveal_tool_link_credential",
-      "record_support_audit",
-      "support_reopen_resolved_proposals",
+	      "reveal_tool_link_credential",
+	      "record_support_audit",
+	      "set_feature_flag",
+	      "support_reopen_resolved_proposals",
       "update_agent_credential_scopes",
       "revoke_agent_credential",
       "update_agent_policy",
@@ -236,6 +249,13 @@ describe("createCorgtexMcpServer", () => {
       entityId: "tension-1",
       currentVersion: 3,
       version: { id: "v-2", version: 2, previousState: { title: "Old" } },
+    });
+    requireWorkspaceMembershipMock.mockReset().mockResolvedValue({
+      id: "member-1",
+      workspaceId: "ws-1",
+      userId: "user-1",
+      role: "ADMIN",
+      isActive: true,
     });
     importContextGraphMapMock.mockReset().mockResolvedValue({
       mapViewId: "map-1",
@@ -487,6 +507,11 @@ describe("createCorgtexMcpServer", () => {
       update: expect.objectContaining({ enabled: true, config: { channelId: "C456" } }),
       create: expect.objectContaining({ enabled: true, config: { channelId: "C456" } }),
     }));
+    expect(requireWorkspaceMembershipMock).toHaveBeenCalledWith({
+      actor: expect.objectContaining({ kind: "agent" }),
+      workspaceId: "ws-1",
+      allowedRoles: ["ADMIN"],
+    });
     expect(JSON.parse(setResponse.content[0].text)).toMatchObject({
       flag: "FINANCE",
       enabled: true,
@@ -531,6 +556,12 @@ describe("createCorgtexMcpServer", () => {
       openWorldHint: false,
     });
     expect((server as any)._registeredTools.reveal_tool_link_credential.annotations).toMatchObject({
+      readOnlyHint: false,
+      destructiveHint: false,
+      sensitiveHint: true,
+      openWorldHint: false,
+    });
+    expect((server as any)._registeredTools.set_feature_flag.annotations).toMatchObject({
       readOnlyHint: false,
       destructiveHint: false,
       sensitiveHint: true,
@@ -941,6 +972,29 @@ describe("createCorgtexMcpServer", () => {
       toolLinkId: "tool-1",
       credentialLabel: "Board password",
       credentialSecret: "board-pass",
+    });
+  });
+
+  it("rejects support-only tools from OAuth user sessions even when support scope is present", async () => {
+    const { createCorgtexMcpServer } = await import("./server");
+
+    const server = createCorgtexMcpServer({
+      actor: {
+        kind: "user",
+        user: { id: "user-1", email: "user@example.com", displayName: "User" },
+      } as any,
+      workspaceId: "ws-1",
+      authKind: "oauth",
+      scopes: ["support:write"],
+    });
+
+    await expect((server as any)._registeredTools.record_support_audit.handler({
+      action: "support.test",
+      reason: "Regression",
+      operationId: "operation-1",
+    })).rejects.toMatchObject({
+      status: 403,
+      code: "FORBIDDEN",
     });
   });
 

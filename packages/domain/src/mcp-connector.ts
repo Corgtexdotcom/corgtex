@@ -31,6 +31,10 @@ export const MCP_CONNECTOR_READ_ONLY_SCOPES: AgentScope[] = MCP_CONNECTOR_DEFAUL
   (scope) => !scope.endsWith(":write"),
 );
 
+const MCP_USER_DELEGATION_FORBIDDEN_SCOPES = new Set<AgentScope>([
+  "support:write",
+]);
+
 type InstanceStatus = "active" | "disabled";
 
 export type McpConnectorInstance = {
@@ -262,6 +266,13 @@ function validateMcpScopes(scopes: string[] | undefined): AgentScope[] {
     "INVALID_INPUT",
     `Unknown MCP scope(s): ${unknown.join(", ")}.`,
   );
+  const forbidden = effective.filter((scope) => MCP_USER_DELEGATION_FORBIDDEN_SCOPES.has(scope as AgentScope));
+  invariant(
+    forbidden.length === 0,
+    400,
+    "INVALID_INPUT",
+    `MCP OAuth user delegation cannot request support-only scope(s): ${forbidden.join(", ")}.`,
+  );
   return effective as AgentScope[];
 }
 
@@ -271,7 +282,8 @@ export function resolveMcpClientAllowedScopes(scopes: string[]): AgentScope[] {
   const matchesLegacyDefault = normalized.length === legacyDefault.size &&
     normalized.every((scope) => legacyDefault.has(scope as AgentScope));
 
-  return matchesLegacyDefault ? MCP_CONNECTOR_DEFAULT_SCOPES : (normalized as AgentScope[]);
+  const allowed = matchesLegacyDefault ? MCP_CONNECTOR_DEFAULT_SCOPES : (normalized as AgentScope[]);
+  return allowed.filter((scope) => !MCP_USER_DELEGATION_FORBIDDEN_SCOPES.has(scope));
 }
 
 function requestedScopes(scopes: string[] | undefined, allowedScopes: string[]) {
