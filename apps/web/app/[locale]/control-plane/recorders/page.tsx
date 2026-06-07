@@ -4,7 +4,12 @@ import { Link } from "@/i18n/routing";
 import { requirePageActor } from "@/lib/auth";
 import { cn } from "@/lib/utils";
 import { ClientContextSwitcher } from "../_components/client-context-switcher";
-import { AlertTriangle, ArrowRight, CheckCircle, Radio, Search, ShieldCheck } from "lucide-react";
+import {
+  ControlPlanePageHeader,
+  ControlPlaneStatusStrip,
+  controlPlaneButtonClass,
+  controlPlaneInputClass,
+} from "../_components/control-plane-ui";
 
 export const dynamic = "force-dynamic";
 
@@ -21,7 +26,7 @@ function statusTone(status?: string | null) {
 }
 
 function statusDot(status?: string | null) {
-  if (status === "ready" || status === "active" || status === "connected") return "bg-emerald-500 shadow-emerald-500/40 animate-pulse";
+  if (status === "ready" || status === "active" || status === "connected") return "bg-emerald-500 shadow-emerald-500/40";
   if (status === "needs_setup" || status === "requires_connector" || status === "unavailable" || status === "pending") return "bg-amber-500 shadow-amber-500/40";
   if (status === "disabled" || status === "failed" || status === "FAILED") return "bg-rose-500 shadow-rose-500/40";
   return "bg-slate-500";
@@ -89,50 +94,22 @@ export default async function ControlPlaneRecordersPage({
   const nextHref = queryString({ ...paginationFilters, page: Math.min(recorderMatrix.page + 1, recorderMatrix.pageCount) });
 
   return (
-    <div className="space-y-6 pb-12 animate-in fade-in duration-300">
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-line pb-6">
-        <div>
-          <span className="text-[10px] font-bold tracking-widest text-brand-400 uppercase">
-            Function matrix
-          </span>
-          <h1 className="text-2xl font-bold tracking-tight text-white mt-1">
-            Recorder Control Plane
-          </h1>
-          <p className="text-xs text-muted mt-1 max-w-2xl">
-            Client-by-client recorder entitlement, configuration, provider, usage, readiness, calendar, and smoke-run state.
-          </p>
-        </div>
-      </div>
+    <div className="space-y-5 pb-12">
+      <ControlPlanePageHeader
+        eyebrow="Function matrix"
+        title="Recorder Control Plane"
+        description="Client-by-client recorder entitlement, configuration, provider, usage, readiness, calendar, and smoke-run state."
+      />
 
-      <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
-        {[
-          { title: "Clients", value: recorderMatrix.summary.totalClients, detail: "in recorder matrix", icon: Radio, tone: "text-muted" },
-          { title: "Ready", value: recorderMatrix.summary.ready, detail: "passing readiness", icon: CheckCircle, tone: "text-emerald-400" },
-          { title: "Needs Setup", value: recorderMatrix.summary.needsSetup, detail: "configuration gaps", icon: AlertTriangle, tone: recorderMatrix.summary.needsSetup > 0 ? "text-amber-400" : "text-muted" },
-          { title: "Disabled", value: recorderMatrix.summary.disabled, detail: "entitlement or config off", icon: ShieldCheck, tone: "text-rose-400" },
-          { title: "Connector Required", value: recorderMatrix.summary.requiresConnector, detail: "remote visibility gap", icon: Search, tone: recorderMatrix.summary.requiresConnector > 0 ? "text-amber-400" : "text-muted" },
-        ].map((card) => {
-          const Icon = card.icon;
-          return (
-            <div key={card.title} className="bg-bg-alt border border-line hover:border-line rounded-xl p-4 flex items-start justify-between shadow-sm transition-all duration-150 group">
-              <div className="space-y-1">
-                <span className="text-[10px] font-semibold text-muted tracking-wider block uppercase">
-                  {card.title}
-                </span>
-                <span className="text-2xl font-bold text-white tracking-tight block">
-                  {card.value}
-                </span>
-                <span className="text-[10px] text-muted block">
-                  {card.detail}
-                </span>
-              </div>
-              <div className={cn("p-2 rounded-lg bg-surface border border-line group-hover:scale-105 transition-transform", card.tone)}>
-                <Icon className="w-4 h-4" />
-              </div>
-            </div>
-          );
-        })}
-      </div>
+      <ControlPlaneStatusStrip
+        items={[
+          { label: "Clients", value: recorderMatrix.summary.totalClients, detail: "in matrix" },
+          { label: "Ready", value: recorderMatrix.summary.ready, detail: "passing", status: "ready" },
+          { label: "Needs setup", value: recorderMatrix.summary.needsSetup, detail: "gaps", status: recorderMatrix.summary.needsSetup > 0 ? "needs_setup" : "ok" },
+          { label: "Disabled", value: recorderMatrix.summary.disabled, detail: "off", status: recorderMatrix.summary.disabled > 0 ? "disabled" : "ok" },
+          { label: "Connector", value: recorderMatrix.summary.requiresConnector, detail: "required", status: recorderMatrix.summary.requiresConnector > 0 ? "requires_connector" : "ok" },
+        ]}
+      />
 
       <div className="bg-bg-alt border border-line rounded-xl p-5 shadow-sm space-y-4">
         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 pb-4 border-b border-line">
@@ -146,7 +123,7 @@ export default async function ControlPlaneRecordersPage({
               name="q"
               defaultValue={recorderMatrix.filters.query}
               placeholder="Search..."
-              className="bg-surface border border-line text-xs text-text placeholder-slate-500 rounded-lg px-2.5 py-1.5 focus:border-line focus:ring-0 focus:outline-none"
+              className={controlPlaneInputClass}
             />
             <input type="hidden" name="client" value={recorderMatrix.filters.client} />
             <ClientContextSwitcher
@@ -158,7 +135,7 @@ export default async function ControlPlaneRecordersPage({
             <select
               name="status"
               defaultValue={recorderMatrix.filters.status}
-              className="bg-surface border border-line text-xs text-muted rounded-lg px-2 py-1.5 focus:border-line focus:outline-none"
+              className={controlPlaneInputClass}
             >
               <option value="">Any status</option>
               <option value="ready">Ready</option>
@@ -169,7 +146,7 @@ export default async function ControlPlaneRecordersPage({
             </select>
             <button
               type="submit"
-              className="bg-surface-strong hover:bg-surface border border-line text-xs text-text px-3 py-1.5 rounded-lg transition-colors"
+              className={controlPlaneButtonClass}
             >
               Apply
             </button>
@@ -252,10 +229,9 @@ export default async function ControlPlaneRecordersPage({
                     {row.hasDeployment ? (
                       <Link
                         href={`/control-plane/deployments/${row.deploymentId}?tab=config`}
-                        className="inline-flex items-center gap-1 bg-surface hover:bg-surface-strong border border-line hover:border-line text-text hover:text-white px-2.5 py-1.5 rounded-lg text-[10px] font-medium transition-all"
+                        className={controlPlaneButtonClass}
                       >
                         Open client
-                        <ArrowRight className="w-3 h-3 text-muted group-hover:text-brand-400 transition-colors" />
                       </Link>
                     ) : (
                       <span className="inline-flex items-center bg-surface/40 border border-line/60 text-muted px-2.5 py-1.5 rounded-lg text-[10px] font-medium">
@@ -282,7 +258,7 @@ export default async function ControlPlaneRecordersPage({
           </span>
           <div className="flex gap-2">
             {recorderMatrix.page > 1 ? (
-              <Link href={previousHref} className="bg-surface hover:bg-surface-strong border border-line text-muted hover:text-text px-2 py-1 rounded transition-colors">
+              <Link href={previousHref} className={controlPlaneButtonClass}>
                 Previous
               </Link>
             ) : (
@@ -291,7 +267,7 @@ export default async function ControlPlaneRecordersPage({
               </span>
             )}
             {recorderMatrix.page < recorderMatrix.pageCount ? (
-              <Link href={nextHref} className="bg-surface hover:bg-surface-strong border border-line text-muted hover:text-text px-2 py-1 rounded transition-colors">
+              <Link href={nextHref} className={controlPlaneButtonClass}>
                 Next
               </Link>
             ) : (

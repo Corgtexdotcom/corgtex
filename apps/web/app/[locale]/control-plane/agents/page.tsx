@@ -11,6 +11,7 @@ import {
 import { requirePageActor } from "@/lib/auth";
 import { AgentObservatoryClient } from "./_components/observatory-client";
 import { aggregateModelUsageByRunId, sortAgentFleetRows } from "./view-model";
+import { ControlPlanePageHeader } from "../_components/control-plane-ui";
 
 export const dynamic = "force-dynamic";
 
@@ -252,22 +253,13 @@ export default async function ControlPlaneAgentsPage({
   });
 
   return (
-    <div className="space-y-6 animate-in fade-in duration-300">
-      
-      {/* Header */}
-      <div>
-        <span className="text-[10px] font-bold tracking-widest text-brand-400 uppercase">
-          Observe & Govern
-        </span>
-        <h1 className="text-2xl font-bold tracking-tight text-white mt-1">
-          Agent Observatory
-        </h1>
-        <p className="text-xs text-muted mt-1 max-w-2xl">
-          Global operations center to monitor, filter, and audit all autonomous AI agents running across customer workspaces. Check model tiers, execution costs, and trace run steps.
-        </p>
-      </div>
+    <div className="space-y-5">
+      <ControlPlanePageHeader
+        eyebrow="Observe and govern"
+        title="Agent Observatory"
+        description="Operations center for autonomous agent health, authority, model cost, approvals, credentials, and recent runs across customer workspaces."
+      />
 
-      {/* Render Client Observatory list & charts */}
       <AgentObservatoryClient
         agents={formattedAgents}
         runs={formattedRuns}

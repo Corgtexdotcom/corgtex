@@ -1,21 +1,14 @@
 "use client";
 
 import { useState } from "react";
+import { X } from "lucide-react";
 import {
-  Users as UsersIcon,
-  Search,
-  ShieldCheck,
-  UserCheck,
-  Clock,
-  ChevronRight,
-  X,
-  ExternalLink,
-  Mail,
-  User,
-  Briefcase,
-  AlertTriangle,
-} from "lucide-react";
-import { cn } from "@/lib/utils";
+  ControlPlaneSection,
+  ControlPlaneStatusStrip,
+  StatusBadge,
+  controlPlaneButtonClass,
+  controlPlaneInputClass,
+} from "../../_components/control-plane-ui";
 
 interface Membership {
   workspaceId: string;
@@ -53,56 +46,35 @@ export function UsersClient({ users }: UsersClientProps) {
   const activeCount = users.filter(u => u.lastActive !== "Never").length;
 
   return (
-    <div className="space-y-6">
-      
-      {/* Metrics Row */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        {[
-          { title: "Platform Users", value: totalUsers, detail: "registered directory entries", icon: UsersIcon, tone: "text-muted" },
-          { title: "Platform Admins", value: adminCount, detail: "unrestricted access control", icon: ShieldCheck, tone: "text-indigo-400" },
-          { title: "Active Directory", value: activeCount, detail: "active user profiles", icon: UserCheck, tone: "text-emerald-400" },
-          { title: "Monthly Sign-ins", value: "Not tracked", tone: "text-brand-400", detail: "sign-in telemetry unavailable", icon: Clock },
-        ].map((metric, i) => {
-          const Icon = metric.icon;
-          return (
-            <div key={i} className="bg-bg-alt border border-line rounded-xl p-4 flex justify-between items-start shadow-sm">
-              <div className="space-y-1">
-                <span className="text-[10px] text-muted font-semibold uppercase">{metric.title}</span>
-                <span className="text-xl font-bold text-white block">{metric.value}</span>
-                <span className="text-[10px] text-muted block">{metric.detail}</span>
-              </div>
-              <div className={cn("p-2 rounded-lg bg-surface border border-line", metric.tone)}>
-                <Icon className="w-4 h-4" />
-              </div>
-            </div>
-          );
-        })}
-      </div>
+    <div className="space-y-5">
+      <ControlPlaneStatusStrip
+        items={[
+          { label: "Users", value: totalUsers, detail: "registered" },
+          { label: "Admins", value: adminCount, detail: "global" },
+          { label: "Active", value: activeCount, detail: "profiles" },
+          { label: "Sign-ins", value: "Not tracked", detail: "unavailable", status: "blocked" },
+        ]}
+      />
 
-      {/* Main Users Table */}
-      <div className="bg-bg-alt border border-line rounded-xl p-5 shadow-sm space-y-4">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-line">
-          <div>
-            <h2 className="text-sm font-bold text-white">Platform Users Directory</h2>
-            <p className="text-[10px] text-muted mt-0.5">Search and examine platform permissions and individual client workspace roles.</p>
-          </div>
-
-          <div className="relative max-w-xs w-full">
-            <Search className="absolute left-3 top-2.5 w-4 h-4 text-muted" />
+      <ControlPlaneSection
+        title="Platform Users Directory"
+        description="Search platform permissions and individual client workspace roles."
+        actions={
+          <div className="max-w-xs w-full">
             <input
               type="text"
               placeholder="Search by name or email..."
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              className="bg-surface border border-line text-xs text-text placeholder-slate-600 rounded-lg pl-9 pr-4 py-2 w-full focus:border-line focus:outline-none"
+              className={`${controlPlaneInputClass} w-full`}
             />
           </div>
-        </div>
-
+        }
+      >
         <div className="overflow-x-auto">
           <table className="w-full border-collapse text-xs">
             <thead>
-              <tr className="border-b border-line text-muted text-left font-medium">
+              <tr className="border-b border-line text-left text-[10px] font-semibold uppercase tracking-wide text-muted">
                 <th className="p-3">User</th>
                 <th className="p-3">Global Role</th>
                 <th className="p-3">Client Memberships</th>
@@ -112,20 +84,13 @@ export function UsersClient({ users }: UsersClientProps) {
             </thead>
             <tbody className="divide-y divide-line">
               {filteredUsers.map((u) => (
-                <tr key={u.id} className="hover:bg-surface/40 transition-colors group">
+                <tr key={u.id} className="hover:bg-surface/40">
                   <td className="p-3 min-w-[200px]">
                     <span className="font-semibold text-white block">{u.name}</span>
                     <span className="text-[10px] text-muted block mt-0.5">{u.email}</span>
                   </td>
                   <td className="p-3">
-                    <span className={cn(
-                      "px-2 py-0.5 rounded-full text-[9px] font-bold uppercase border",
-                      u.role === "ADMIN" 
-                        ? "text-indigo-400 border-indigo-500/25 bg-indigo-500/10" 
-                        : "text-muted border-slate-500/20 bg-slate-500/5"
-                    )}>
-                      {u.role}
-                    </span>
+                    <StatusBadge status={u.role === "ADMIN" ? "managed" : "unknown"}>{u.role}</StatusBadge>
                   </td>
                   <td className="p-3 text-text font-semibold">
                     {u.membershipsCount} {u.membershipsCount === 1 ? "workspace" : "workspaces"}
@@ -136,10 +101,9 @@ export function UsersClient({ users }: UsersClientProps) {
                   <td className="p-3 text-right">
                     <button
                       onClick={() => setSelectedUser(u)}
-                      className="inline-flex items-center gap-1 bg-surface hover:bg-surface-strong border border-line text-text px-2.5 py-1.5 rounded-lg text-[10px] font-medium transition-colors"
+                      className={controlPlaneButtonClass}
                     >
                       Inspect Profile
-                      <ChevronRight className="w-3.5 h-3.5 text-muted group-hover:text-brand-400 transition-colors" />
                     </button>
                   </td>
                 </tr>
@@ -154,16 +118,16 @@ export function UsersClient({ users }: UsersClientProps) {
             </tbody>
           </table>
         </div>
-      </div>
+      </ControlPlaneSection>
 
       {/* User profile side-drawer */}
       {selectedUser && (
-        <div className="fixed inset-y-0 right-0 z-50 flex w-full max-w-md bg-bg-alt/95 backdrop-blur-md border-l border-line shadow-2xl text-text-strong transform transition-transform animate-in slide-in-from-right duration-300">
+        <div className="fixed inset-y-0 right-0 z-50 flex w-full max-w-md border-l border-line bg-bg-alt text-text-strong shadow-2xl">
           <div className="flex flex-col w-full h-full relative p-5 space-y-5">
             {/* Header */}
             <div className="flex items-center justify-between pb-3 border-b border-line">
               <div className="flex items-center gap-2">
-                <div className="flex items-center justify-center w-8 h-8 rounded-full bg-brand-600 border border-brand-500 text-white font-bold text-xs select-none">
+                <div className="flex h-8 w-8 select-none items-center justify-center rounded-md border border-line bg-surface text-xs font-semibold text-white">
                   {selectedUser.name.slice(0, 2).toUpperCase()}
                 </div>
                 <div>
@@ -172,8 +136,9 @@ export function UsersClient({ users }: UsersClientProps) {
                 </div>
               </div>
               <button
+                aria-label="Close user profile"
                 onClick={() => setSelectedUser(null)}
-                className="p-1 rounded hover:bg-surface-strong border border-transparent hover:border-line text-muted hover:text-white transition-all duration-150"
+                className="rounded-md border border-line bg-surface p-1 text-muted hover:bg-surface-strong hover:text-white"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -181,12 +146,12 @@ export function UsersClient({ users }: UsersClientProps) {
 
             {/* Profile Overview cards */}
             <div className="grid grid-cols-2 gap-3">
-              <div className="bg-surface border border-line rounded-xl p-3">
-                <span className="text-[8px] text-muted font-semibold uppercase flex items-center gap-1"><ShieldCheck className="w-2.5 h-2.5" /> Global Role</span>
+              <div className="bg-surface border border-line rounded-lg p-3">
+                <span className="text-[8px] text-muted font-semibold uppercase">Global Role</span>
                 <span className="text-xs font-bold text-white mt-1 block capitalize">{selectedUser.role.toLowerCase()}</span>
               </div>
-              <div className="bg-surface border border-line rounded-xl p-3">
-                <span className="text-[8px] text-muted font-semibold uppercase flex items-center gap-1"><Clock className="w-2.5 h-2.5" /> Last Active</span>
+              <div className="bg-surface border border-line rounded-lg p-3">
+                <span className="text-[8px] text-muted font-semibold uppercase">Last Active</span>
                 <span className="text-xs font-bold text-white mt-1 block">{selectedUser.lastActive}</span>
               </div>
             </div>
@@ -197,7 +162,7 @@ export function UsersClient({ users }: UsersClientProps) {
               
               <div className="space-y-2">
                 {selectedUser.memberships.map((m) => (
-                  <div key={m.workspaceId} className="p-3 bg-surface/60 border border-line rounded-xl flex items-center justify-between">
+                  <div key={m.workspaceId} className="p-3 bg-surface/60 border border-line rounded-lg flex items-center justify-between">
                     <div>
                       <strong className="text-xs text-white font-semibold block">{m.workspaceName}</strong>
                       <span className="text-[9px] text-muted block mt-0.5">slug: {m.workspaceSlug}</span>
