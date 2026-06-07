@@ -3,9 +3,10 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { appendEvents } from "./events";
-import { persistedMemberId, requireWorkspaceMembership } from "./auth";
+import { requireWorkspaceMembership } from "./auth";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { invariant } from "./errors";
+import { persistedMemberId } from "./membership";
 import { requireDraftManager } from "./draft-permissions";
 
 // ---------------------------------------------------------------------------

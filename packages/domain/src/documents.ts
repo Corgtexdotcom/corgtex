@@ -2,9 +2,10 @@ import type { Prisma } from "@prisma/client";
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { appendEvents } from "./events";
-import { persistedMemberId, requireWorkspaceMembership } from "./auth";
+import { requireWorkspaceMembership } from "./auth";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { invariant } from "./errors";
+import { persistedMemberId } from "./membership";
 import { assertTrialStorageCapacity } from "./trial-entitlements";
 
 export async function listDocuments(workspaceId: string, opts?: { archiveFilter?: ArchiveFilter }) {
