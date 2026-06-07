@@ -325,19 +325,35 @@ describe("meeting-intelligence", () => {
       }));
     });
 
-    it("uses the summary and excerpts for long transcripts to avoid extraction timeouts", async () => {
+    it("processes long transcripts in full-coverage chunks for insight extraction", async () => {
       const { defaultModelGateway } = await import("@corgtex/models");
-      (defaultModelGateway.extract as ReturnType<typeof vi.fn>).mockResolvedValue({
-        output: {
-          insights: [],
-        },
+      (defaultModelGateway.extract as ReturnType<typeof vi.fn>).mockImplementation(async ({ input }) => {
+        const parsed = JSON.parse(input);
+        return {
+          output: {
+            insights: parsed.transcript.includes("TEAM_UPDATE_MARKER")
+              ? [
+                {
+                  type: "ACTION_ITEM",
+                  operation: "CREATE",
+                  title: "Datise coordinate team update follow-up",
+                  body: "Datise will coordinate the TEAM_UPDATE_MARKER follow-up from the team update section.",
+                  assigneeHint: "Datise",
+                  confidence: 0.9,
+                  sourceQuote: "TEAM_UPDATE_MARKER Datise will coordinate",
+                  dedupeKey: "action:datise-team-update-follow-up",
+                },
+              ]
+              : [],
+          },
+        };
       });
 
       const longTranscript = [
         "Alice: Beginning action item.",
-        "Filler ".repeat(6000),
-        "Milan: Middle concern.",
-        "More filler ".repeat(6000),
+        "Filler ".repeat(2_000),
+        "Datise: TEAM_UPDATE_MARKER I will coordinate the team update follow-up.",
+        "More filler ".repeat(4_000),
         "Jan: Ending decision.",
       ].join("\n");
 
@@ -375,13 +391,79 @@ describe("meeting-intelligence", () => {
         meetingId: "meeting-1",
       });
 
-      const call = (defaultModelGateway.extract as ReturnType<typeof vi.fn>).mock.calls[0]?.[0];
-      expect(call.input).toContain("\"transcriptCondensedForExtraction\":true");
-      expect(call.input).toContain("Summary: Alice owns the follow-up");
-      expect(call.input).toContain("BEGINNING EXCERPT");
-      expect(call.input).toContain("MIDDLE EXCERPT");
-      expect(call.input).toContain("ENDING EXCERPT");
-      expect(call.input.length).toBeLessThan(longTranscript.length);
+      const calls = (defaultModelGateway.extract as ReturnType<typeof vi.fn>).mock.calls.map((call) => call[0]);
+      const inputs = calls.map((call) => JSON.parse(call.input));
+      expect(inputs.length).toBeGreaterThan(1);
+      expect(inputs.every((input) => input.transcriptChunkedForExtraction === true)).toBe(true);
+      expect(inputs.every((input) => input.transcriptCondensedForExtraction === false)).toBe(true);
+      expect(inputs.some((input) => input.transcript.includes("TEAM_UPDATE_MARKER"))).toBe(true);
+      expect(JSON.stringify(inputs)).not.toContain("BEGINNING EXCERPT");
+      expect(JSON.stringify(inputs)).not.toContain("MIDDLE EXCERPT");
+      expect(JSON.stringify(inputs)).not.toContain("ENDING EXCERPT");
+      expect(prisma.meetingInsight.createMany).toHaveBeenCalledWith(expect.objectContaining({
+        data: [expect.objectContaining({
+          type: "ACTION_ITEM",
+          title: "Datise coordinate team update follow-up",
+          assigneeHint: "Datise",
+        })],
+      }));
+    });
+
+    it("extracts named, collective, and coordinator team actions without awareness-only items", async () => {
+      const { defaultModelGateway } = await import("@corgtex/models");
+      const action = (title: string, body: string, assigneeHint: string, dedupeKey: string) => ({
+        type: "ACTION_ITEM",
+        operation: "CREATE",
+        title,
+        body,
+        assigneeHint,
+        confidence: 0.9,
+        sourceQuote: body.slice(0, 80),
+        dedupeKey,
+      });
+      (defaultModelGateway.extract as ReturnType<typeof vi.fn>).mockResolvedValue({
+        output: {
+          insights: [
+            action("Puncar send email setup testing instructions", "Puncar will send instructions for testing the Microsoft/Zinata email setup to Datise and Andy.", "Puncar", "action:puncar-email-setup-instructions"),
+            action("Review CR US website titles and provide photos", "Team members will review their CR US website titles and provide photos for Puncar.", "Team members", "action:team-review-cr-us-titles"),
+            action("Post Chicago Ground Campaign document", "Andy will post the Chicago Ground Campaign document on Slack and clarify tactical assignments.", "Andy", "action:andy-post-chicago-ground-campaign"),
+            action("Pick up Chicago outreach contacts", "Team members will pick up specific Chicago outreach contacts to follow up and nurture.", "Team members", "action:team-pick-up-chicago-contacts"),
+            action("Keep the website reframe in mind", "Everyone should keep this in mind for awareness.", "Everyone", "action:vague-awareness"),
+          ],
+        },
+      });
+
+      await extractMeetingInsights(mockActor, {
+        workspaceId: "ws-1",
+        meetingId: "meeting-1",
+      });
+
+      const extractCall = (defaultModelGateway.extract as ReturnType<typeof vi.fn>).mock.calls[0]?.[0];
+      expect(extractCall.instruction).toContain("team-update, scorecard, round-robin");
+      expect(extractCall.instruction).toContain("extract one collective ACTION_ITEM");
+      expect(extractCall.instruction).toContain("vague awareness");
+
+      const saved = (prisma.meetingInsight.createMany as ReturnType<typeof vi.fn>).mock.calls.flatMap((call) => call[0].data);
+      expect(saved).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          title: "Puncar send email setup testing instructions",
+          assigneeHint: "Puncar",
+        }),
+        expect.objectContaining({
+          title: "Review CR US website titles and provide photos",
+          assigneeHint: "Team members",
+        }),
+        expect.objectContaining({
+          title: "Post Chicago Ground Campaign document",
+          assigneeHint: "Andy",
+        }),
+        expect.objectContaining({
+          title: "Pick up Chicago outreach contacts",
+          assigneeHint: "Team members",
+        }),
+      ]));
+      expect(saved.filter((item) => item.title === "Review CR US website titles and provide photos")).toHaveLength(1);
+      expect(saved.map((item) => item.title)).not.toContain("Keep the website reframe in mind");
     });
 
     it("skips archived meetings that disappeared before extraction runs", async () => {
@@ -1156,6 +1238,33 @@ describe("meeting-intelligence", () => {
           autoAppliedAt: expect.any(Date),
         }),
       }));
+    });
+
+    it("skips collective team-scoped actions during auto-apply", async () => {
+      (prisma.meetingInsight.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([
+        {
+          id: "insight-team-action",
+          type: "ACTION_ITEM",
+          operation: "CREATE",
+          targetEntityType: null,
+          targetEntityId: null,
+          confidence: 0.92,
+          sourceQuote: "Team members will pick up contacts.",
+          assigneeHint: "Team members",
+        },
+      ]);
+
+      await expect(autoApplyMeetingInsights(mockActor, {
+        workspaceId: "ws-1",
+        meetingId: "meeting-1",
+      })).resolves.toMatchObject({
+        applied: 0,
+        failed: 0,
+        skipped: 1,
+      });
+
+      expect(prisma.meetingInsight.findUnique).not.toHaveBeenCalled();
+      expect(createActionMock).not.toHaveBeenCalled();
     });
 
     it("uses stricter automatic thresholds for deliberation and proposal resolutions", async () => {
