@@ -1812,6 +1812,99 @@ describe("control plane domain", () => {
     });
   });
 
+  it("uses customer recorder entitlement evidence for remote-only deployments", async () => {
+    const { listControlPlaneMatrix, listControlPlaneRecorderMatrix } = await import("./control-plane");
+    const now = new Date("2026-06-01T10:00:00.000Z");
+    prismaMock.customerAccount.findMany.mockResolvedValue([
+      {
+        id: "cust-remote",
+        slug: "remote-co",
+        displayName: "Remote Co",
+        status: "ACTIVE",
+        managementAuthority: "CORGTEX",
+        supportOwnerEmail: "ops@corgtex.com",
+        notes: null,
+        primaryDeploymentId: "remote-1",
+        createdAt: now,
+        updatedAt: now,
+        fleetSnapshots: [],
+        deployments: [],
+        primaryDeployment: {
+          id: "remote-1",
+          label: "Remote Co",
+          url: "https://remote.test",
+          customerSlug: "remote-co",
+          customerAccountId: "cust-remote",
+          supportOwnerEmail: "ops@corgtex.com",
+          provisioningStatus: "active",
+          lastHealthStatus: "ok",
+          lastHealthError: null,
+          releaseImageTag: "web:latest",
+          releaseVersion: null,
+          supportConnectorStatus: "connected",
+          supportCredentialEnc: "encrypted-token",
+          managedWorkspaceId: null,
+          managedWorkspace: null,
+          supportOperations: [],
+          fleetSnapshots: [],
+          _count: { supportOperations: 0, events: 0 },
+          createdAt: now,
+          updatedAt: now,
+        },
+      },
+    ] as any);
+    prismaMock.customerDeployment.findMany.mockResolvedValue([]);
+    prismaMock.customerEntitlement.findMany.mockResolvedValue([{
+      customerAccountId: "cust-remote",
+      deploymentId: "remote-1",
+      scopeKey: "deployment:remote-1",
+      enabled: true,
+      status: "ENABLED",
+      evidence: {
+        configEnabled: true,
+        defaultProvider: "RECALL_AI",
+        monthlyMinuteCap: 6000,
+      },
+      createdAt: new Date("2026-06-01T08:30:00.000Z"),
+      updatedAt: now,
+    }]);
+
+    const recorderMatrix = await listControlPlaneRecorderMatrix(operatorActor, {});
+    const fleetMatrix = await listControlPlaneMatrix(operatorActor, {});
+
+    expect(recorderMatrix.items[0]).toMatchObject({
+      deploymentId: "remote-1",
+      status: "needs_setup",
+      availability: { status: "available" },
+      entitlementEnabled: true,
+      configured: true,
+      provider: "RECALL_AI",
+      monthlyMinuteCap: 6000,
+      readiness: {
+        ready: false,
+        detail: "No cached recorder integration snapshot is available.",
+        failedChecks: [
+          {
+            key: "remote_snapshot",
+            label: "Remote recorder snapshot",
+          },
+        ],
+      },
+    });
+    expect(fleetMatrix.items[0]).toMatchObject({
+      recorder: {
+        status: "needs_setup",
+        availability: { status: "available" },
+      },
+    });
+    const recorderIssue = fleetMatrix.items[0].issues.find((issue) => issue.source === "recorder");
+    expect(recorderIssue).toMatchObject({
+      title: "Recorder readiness gap",
+      status: "needs_setup",
+      detail: expect.stringContaining("Remote recorder snapshot"),
+    });
+  });
+
   it("configures meeting recorder entitlements for managed workspaces and audits the reason", async () => {
     const { configureControlPlaneMeetingRecorderIntegration } = await import("./control-plane");
     prismaMock.customerDeployment.findUnique.mockResolvedValueOnce({

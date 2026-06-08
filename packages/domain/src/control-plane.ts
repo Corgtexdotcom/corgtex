@@ -2820,7 +2820,176 @@ function fallbackRecorderRow(row: ControlPlaneDeploymentRow, status: ControlPlan
   };
 }
 
-function cachedRemoteRecorderRow(row: ControlPlaneDeploymentRow): ControlPlaneRecorderMatrixRow {
+type RemoteRecorderEntitlement = {
+  customerAccountId: string;
+  deploymentId: string | null;
+  scopeKey: string;
+  enabled: boolean;
+  status: string;
+  evidence: Prisma.JsonValue | null;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+type BatchedRemoteRecorderState = {
+  entitlementByDeploymentId: Map<string, RemoteRecorderEntitlement>;
+  entitlementByAccountScope: Map<string, RemoteRecorderEntitlement>;
+};
+
+function newerRemoteEntitlement(
+  current: RemoteRecorderEntitlement | undefined,
+  candidate: RemoteRecorderEntitlement,
+) {
+  return !current || candidate.updatedAt > current.updatedAt ? candidate : current;
+}
+
+async function loadBatchedRemoteRecorderState(rows: ControlPlaneDeploymentRow[]): Promise<BatchedRemoteRecorderState> {
+  const remoteRows = rows.filter((row) => row.hasDeployment && !row.managedWorkspaceId);
+  const deploymentIds = [...new Set(remoteRows.map((row) => row.id))];
+  const customerAccountIds = [...new Set(remoteRows.map((row) => row.customerAccountId).filter((id): id is string => Boolean(id)))];
+  const scopeKeys = deploymentIds.map((id) => `deployment:${id}`);
+  const whereClauses: Prisma.CustomerEntitlementWhereInput[] = [];
+  if (deploymentIds.length > 0) {
+    whereClauses.push({ deploymentId: { in: deploymentIds } });
+  }
+  if (customerAccountIds.length > 0 && scopeKeys.length > 0) {
+    whereClauses.push({
+      customerAccountId: { in: customerAccountIds },
+      scopeKey: { in: scopeKeys },
+    });
+  }
+  if (whereClauses.length === 0) {
+    return {
+      entitlementByDeploymentId: new Map(),
+      entitlementByAccountScope: new Map(),
+    };
+  }
+
+  const entitlements = await prisma.customerEntitlement.findMany({
+    where: {
+      entitlementKey: MEETING_RECORDERS_FEATURE_FLAG,
+      OR: whereClauses,
+    },
+    orderBy: { updatedAt: "desc" },
+    select: {
+      customerAccountId: true,
+      deploymentId: true,
+      scopeKey: true,
+      enabled: true,
+      status: true,
+      evidence: true,
+      createdAt: true,
+      updatedAt: true,
+    },
+  });
+  const entitlementByDeploymentId = new Map<string, RemoteRecorderEntitlement>();
+  const entitlementByAccountScope = new Map<string, RemoteRecorderEntitlement>();
+  for (const entitlement of entitlements) {
+    if (entitlement.deploymentId) {
+      entitlementByDeploymentId.set(
+        entitlement.deploymentId,
+        newerRemoteEntitlement(entitlementByDeploymentId.get(entitlement.deploymentId), entitlement),
+      );
+    }
+    const accountScopeKey = `${entitlement.customerAccountId}:${entitlement.scopeKey}`;
+    entitlementByAccountScope.set(
+      accountScopeKey,
+      newerRemoteEntitlement(entitlementByAccountScope.get(accountScopeKey), entitlement),
+    );
+  }
+
+  return { entitlementByDeploymentId, entitlementByAccountScope };
+}
+
+function remoteRecorderEntitlementForRow(row: ControlPlaneDeploymentRow, state: BatchedRemoteRecorderState) {
+  const deploymentEntitlement = state.entitlementByDeploymentId.get(row.id);
+  if (deploymentEntitlement) return deploymentEntitlement;
+  return row.customerAccountId
+    ? state.entitlementByAccountScope.get(`${row.customerAccountId}:deployment:${row.id}`) ?? null
+    : null;
+}
+
+function remoteRecorderEntitlementEnabled(entitlement: RemoteRecorderEntitlement | null | undefined) {
+  if (!entitlement) return null;
+  const status = normalizedStatus(entitlement.status);
+  if (status === "disabled" || status === "suspended") return false;
+  if (status === "enabled") return true;
+  return entitlement.enabled;
+}
+
+function remoteRecorderEvidence(entitlement: RemoteRecorderEntitlement | null | undefined) {
+  const evidence = jsonRecord(entitlement?.evidence);
+  const configEnabled = booleanField(evidence?.configEnabled);
+  const provider = recorderProviderFromValue(evidence?.defaultProvider);
+  const monthlyMinuteCap = typeof evidence?.monthlyMinuteCap === "number" && Number.isFinite(evidence.monthlyMinuteCap)
+    ? Math.trunc(evidence.monthlyMinuteCap)
+    : null;
+  const configured = configEnabled !== null || provider !== null || monthlyMinuteCap !== null ? true : null;
+  return { configEnabled, configured, provider, monthlyMinuteCap };
+}
+
+function remoteRecorderEntitlementRow(
+  row: ControlPlaneDeploymentRow,
+  entitlement: RemoteRecorderEntitlement,
+  detail = "No cached recorder integration snapshot is available.",
+): ControlPlaneRecorderMatrixRow {
+  const evidence = remoteRecorderEvidence(entitlement);
+  const entitlementEnabled = remoteRecorderEntitlementEnabled(entitlement);
+  const failedChecks = entitlementEnabled
+    ? evidence.configured
+      ? [{
+          key: "remote_snapshot",
+          label: "Remote recorder snapshot",
+          detail,
+        }]
+      : [{
+          key: "recorder_config",
+          label: "Recorder config",
+          detail: "Recorder entitlement exists, but cached configuration evidence is missing.",
+        }]
+    : [];
+  const readinessDetail = failedChecks[0]?.detail ?? "Recorder entitlement is disabled.";
+  const availability = recorderAvailability({
+    hasDeployment: row.hasDeployment,
+    hasSupportCredential: row.hasSupportCredential,
+    entitlementEnabled,
+    configured: evidence.configured,
+    configEnabled: evidence.configEnabled,
+    detail: readinessDetail,
+  });
+  const status: ControlPlaneRecorderMatrixStatus = !entitlementEnabled
+    ? "disabled"
+    : evidence.configured
+      ? evidence.configEnabled === false ? "disabled" : "needs_setup"
+      : "needs_setup";
+
+  return {
+    deploymentId: row.id,
+    clientLabel: row.label,
+    clientSlug: controlPlaneRowSlug(row),
+    hasDeployment: row.hasDeployment,
+    hasManagedWorkspace: false,
+    supportConnectorStatus: row.supportConnectorStatus,
+    entitlementEnabled,
+    configured: evidence.configured,
+    provider: evidence.provider,
+    monthlyUsageMinutes: null,
+    monthlyMinuteCap: evidence.monthlyMinuteCap,
+    failureCount: null,
+    status,
+    availability,
+    observedAt: entitlement.updatedAt ?? entitlement.createdAt ?? null,
+    readiness: {
+      ready: entitlementEnabled ? false : null,
+      detail: sanitizeDiagnosticText(readinessDetail),
+      failedChecks,
+    },
+    calendarSource: null,
+    lastSmokeRun: null,
+  };
+}
+
+function cachedRemoteRecorderRow(row: ControlPlaneDeploymentRow, entitlement?: RemoteRecorderEntitlement | null): ControlPlaneRecorderMatrixRow {
   const snapshot = latestSnapshotForKind(row, "INTEGRATION");
   const summary = jsonRecord(snapshot?.summary);
   const integrations = arrayItems(summary?.integrations, ["items", "integrations"]);
@@ -2830,6 +2999,9 @@ function cachedRemoteRecorderRow(row: ControlPlaneDeploymentRow): ControlPlaneRe
     return key === "meeting_recorders" || key === "recorder" || Boolean(label?.includes("recorder"));
   });
   if (!recorder) {
+    if (entitlement) {
+      return remoteRecorderEntitlementRow(row, entitlement);
+    }
     return fallbackRecorderRow(
       row,
       row.hasSupportCredential ? "unavailable" : "requires_connector",
@@ -2840,8 +3012,9 @@ function cachedRemoteRecorderRow(row: ControlPlaneDeploymentRow): ControlPlaneRe
   }
 
   const ready = booleanField(recorder.vendorReadiness) ?? booleanField(recorder.ready);
-  const entitlementEnabled = booleanField(recorder.entitlementEnabled);
-  const configured = booleanField(recorder.configured);
+  const entitlementEvidence = remoteRecorderEvidence(entitlement);
+  const entitlementEnabled = booleanField(recorder.entitlementEnabled) ?? remoteRecorderEntitlementEnabled(entitlement);
+  const configured = booleanField(recorder.configured) ?? entitlementEvidence.configured;
   const rawStatus = normalizedStatus(stringField(recorder.status));
   const readinessRecord = jsonRecord(recorder.readiness);
   const readinessChecks = arrayItems(readinessRecord?.checks, ["checks"])
@@ -2863,6 +3036,7 @@ function cachedRemoteRecorderRow(row: ControlPlaneDeploymentRow): ControlPlaneRe
     hasSupportCredential: row.hasSupportCredential,
     entitlementEnabled,
     configured,
+    configEnabled: entitlementEvidence.configEnabled,
     rawStatus,
     detail: snapshot?.error ?? "Cached recorder state is unavailable.",
   });
@@ -2874,6 +3048,8 @@ function cachedRemoteRecorderRow(row: ControlPlaneDeploymentRow): ControlPlaneRe
         ? "needs_setup"
         : rawStatus === "enabled" || rawStatus === "active"
           ? "needs_setup"
+          : entitlementEnabled === true && configured === true
+            ? "needs_setup"
           : "unavailable";
   const usage = jsonRecord(recorder.usage);
   const failures = typeof recorder.failures === "number" ? recorder.failures : null;
@@ -2889,13 +3065,13 @@ function cachedRemoteRecorderRow(row: ControlPlaneDeploymentRow): ControlPlaneRe
     supportConnectorStatus: row.supportConnectorStatus,
     entitlementEnabled,
     configured,
-    provider: recorderProviderFromValue(recorder.provider),
+    provider: recorderProviderFromValue(recorder.provider) ?? entitlementEvidence.provider,
     monthlyUsageMinutes: typeof usage?.usedMinutes === "number" ? usage.usedMinutes : null,
-    monthlyMinuteCap: typeof recorder.monthlyMinuteCap === "number" ? recorder.monthlyMinuteCap : null,
+    monthlyMinuteCap: typeof recorder.monthlyMinuteCap === "number" ? recorder.monthlyMinuteCap : entitlementEvidence.monthlyMinuteCap,
     failureCount: failures,
     status,
     availability,
-    observedAt: snapshot?.observedAt ?? snapshot?.createdAt ?? null,
+    observedAt: snapshot?.observedAt ?? snapshot?.createdAt ?? entitlement?.updatedAt ?? null,
     readiness: {
       ready,
       detail: sanitizeDiagnosticText(snapshot?.error ?? failedChecks[0]?.detail ?? (ready ? "Cached recorder snapshot is ready." : "Cached recorder snapshot needs review.")),
@@ -3164,15 +3340,18 @@ function buildManagedRecorderRow(row: ControlPlaneDeploymentRow, state: BatchedM
 }
 
 async function buildControlPlaneRecorderRows(rows: ControlPlaneDeploymentRow[]) {
-  const managedState = await loadBatchedManagedRecorderState(
-    rows.map((row) => row.managedWorkspaceId).filter((workspaceId): workspaceId is string => Boolean(workspaceId)),
-  );
+  const [managedState, remoteState] = await Promise.all([
+    loadBatchedManagedRecorderState(
+      rows.map((row) => row.managedWorkspaceId).filter((workspaceId): workspaceId is string => Boolean(workspaceId)),
+    ),
+    loadBatchedRemoteRecorderState(rows),
+  ]);
   return rows.map((row) => {
     if (!row.hasDeployment) {
       return fallbackRecorderRow(row, "unavailable", "Deployment is not provisioned yet.");
     }
     if (!row.managedWorkspaceId) {
-      return cachedRemoteRecorderRow(row);
+      return cachedRemoteRecorderRow(row, remoteRecorderEntitlementForRow(row, remoteState));
     }
     return buildManagedRecorderRow(row, managedState);
   });
