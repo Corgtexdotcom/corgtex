@@ -28,6 +28,7 @@ import {
 } from "@corgtex/domain";
 import type { SupportAction } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
+import { invalidateControlPlaneReadCache } from "./cache";
 
 function asString(formData: FormData, key: string) {
   const value = formData.get(key);
@@ -146,6 +147,7 @@ function parseJsonObject(value: string) {
 }
 
 function revalidateControlPlaneDeployment(deploymentId: string) {
+  invalidateControlPlaneReadCache();
   revalidatePath(`/control-plane/deployments/${deploymentId}`);
   revalidatePath(`/es/control-plane/deployments/${deploymentId}`);
   revalidatePath(`/control-plane/deployments/${deploymentId}/agent-governance`);
@@ -471,6 +473,7 @@ export async function enqueueDeployLatestRolloutAction(formData: FormData) {
     reason: asString(formData, "reason"),
     limit: asOptionalNumber(formData, "limit") ?? 100,
   });
+  invalidateControlPlaneReadCache();
   revalidatePath("/control-plane");
   revalidatePath("/es/control-plane");
 }

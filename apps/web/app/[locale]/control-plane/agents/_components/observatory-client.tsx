@@ -100,6 +100,8 @@ export function AgentObservatoryClient({ agents, runs, customers, initialCustome
   const scopedCustomers = selectedCustomer ? [selectedCustomer] : customers;
   const scopedAgents = selectedCustomer ? agents.filter((agent) => agent.customerId === selectedCustomer.id) : agents;
   const scopedRuns = selectedCustomer ? runs.filter((run) => run.customerId === selectedCustomer.id) : runs;
+  const summaryAgentCount = scopedCustomers.reduce((total, customer) => total + customer.agentCount, 0);
+  const summaryRunCount = scopedCustomers.reduce((total, customer) => total + customer.runCount, 0);
   const completedRuns = scopedRuns.filter((run) => run.status === "COMPLETED").length;
   const successRate = scopedRuns.length > 0 ? `${((completedRuns / scopedRuns.length) * 100).toFixed(1)}%` : "n/a";
   const modelSpend = scopedRuns.reduce((total, run) => total + Number(run.cost.replace(/[^0-9.-]/g, "") || 0), 0);
@@ -186,8 +188,8 @@ export function AgentObservatoryClient({ agents, runs, customers, initialCustome
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         {[
           { title: "Customers", value: scopedCustomers.length, detail: selectedCustomer ? selectedCustomer.slug : "visible fleet scope", icon: Bot, tone: "text-muted" },
-          { title: "Total Agents", value: scopedAgents.length, detail: "known or configured agents", icon: CheckCircle, tone: "text-emerald-400" },
-          { title: "Success Rate", value: successRate, detail: "from loaded run traces", icon: CheckCircle, tone: "text-emerald-400" },
+          { title: "Total Agents", value: scopedAgents.length || summaryAgentCount, detail: "known or configured agents", icon: CheckCircle, tone: "text-emerald-400" },
+          { title: "Run Traces", value: scopedRuns.length || summaryRunCount, detail: scopedRuns.length ? successRate : "summary count", icon: CheckCircle, tone: "text-emerald-400" },
           { title: "Model Spend", value: `$${modelSpend.toFixed(2)}`, detail: "from loaded run traces", icon: DollarSign, tone: "text-indigo-400" },
         ].map((metric, i) => {
           const Icon = metric.icon;

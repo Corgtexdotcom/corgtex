@@ -5,8 +5,6 @@
   grid-template-columns: 220px minmax(0, 1fr);
   gap: 28px;
   width: 100%;
-  max-width: 1500px;
-  margin: 0 auto;
   padding: 32px;
 }
 

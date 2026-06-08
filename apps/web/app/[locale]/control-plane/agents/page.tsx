@@ -8,10 +8,12 @@ import {
   type AgentAuthoritySummary,
   type AgentAuthorityUsageInput,
 } from "@corgtex/domain";
+import { Link } from "@/i18n/routing";
 import { requirePageActor } from "@/lib/auth";
 import { AgentObservatoryClient } from "./_components/observatory-client";
 import { aggregateModelUsageByRunId, sortAgentFleetRows } from "./view-model";
-import { ControlPlanePageHeader } from "../_components/control-plane-ui";
+import { ControlPlaneCacheMeta, ControlPlanePageHeader, controlPlaneButtonClass } from "../_components/control-plane-ui";
+import { controlPlaneActorCacheKey, readControlPlaneCached, shouldRefreshControlPlaneCache } from "../cache";
 
 export const dynamic = "force-dynamic";
 
@@ -117,6 +119,16 @@ function approvalLabel(summary: AgentAuthoritySummary) {
   return `${policy}; ${summary.approval.pendingApprovalCount} pending`;
 }
 
+function queryString(params: Record<string, string | number | null | undefined>) {
+  const search = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== null && String(value).length > 0) {
+      search.set(key, String(value));
+    }
+  }
+  return `?${search.toString()}`;
+}
+
 export default async function ControlPlaneAgentsPage({
   searchParams,
 }: {
@@ -130,15 +142,28 @@ export default async function ControlPlaneAgentsPage({
     notFound();
   }
 
-  const fleetRows = sortAgentFleetRows(await listControlPlaneDeployments(actor));
+  const selectedCustomerId = raw?.client ?? "";
+  const refresh = shouldRefreshControlPlaneCache(raw?.refresh);
+  const actorCacheKey = controlPlaneActorCacheKey(actor);
+  const fleetRowsRead = await readControlPlaneCached(["control-plane", "agents", "fleet", actorCacheKey], refresh, () => (
+    listControlPlaneDeployments(actor)
+  ));
+  const fleetRows = sortAgentFleetRows(fleetRowsRead.data);
+  const detailedRows = selectedCustomerId
+    ? fleetRows.filter((customer: any) => customer.id === selectedCustomerId)
+    : [];
 
-  const customerDetails = await Promise.all(fleetRows.map(async (customer: any) => {
+  const customerDetails = await Promise.all(detailedRows.map(async (customer: any) => {
     const [governanceResult, integrationsResult] = await Promise.allSettled([
-      getControlPlaneAiGovernanceStatus(actor, customer.id),
-      getControlPlaneIntegrationStatus(actor, customer.id),
+      readControlPlaneCached(["control-plane", "agents", "governance", actorCacheKey, customer.id], refresh, () => (
+        getControlPlaneAiGovernanceStatus(actor, customer.id)
+      )),
+      readControlPlaneCached(["control-plane", "agents", "integrations", actorCacheKey, customer.id], refresh, () => (
+        getControlPlaneIntegrationStatus(actor, customer.id)
+      )),
     ]);
-    const governance = governanceResult.status === "fulfilled" ? governanceResult.value : null;
-    const integrations = integrationsResult.status === "fulfilled" ? integrationsResult.value : null;
+    const governance = governanceResult.status === "fulfilled" ? governanceResult.value.data : null;
+    const integrations = integrationsResult.status === "fulfilled" ? integrationsResult.value.data : null;
     const recentRuns = Array.isArray(governance?.activity?.recentRuns) ? governance.activity.recentRuns : [];
     const credentials = Array.isArray(governance?.access?.credentials) ? governance.access.credentials : [];
     const integrationRows = Array.isArray(integrations?.integrations) ? integrations.integrations : [];
@@ -156,10 +181,18 @@ export default async function ControlPlaneAgentsPage({
       ].filter((error): error is string => Boolean(error)),
     };
   }));
+  const detailsByCustomerId = new Map(customerDetails.map((detail) => [detail.customer.id, detail]));
 
-  const customers = customerDetails.map(({ customer, governance, recentRuns, credentials, integrationRows, errors }) => {
+  const customers = fleetRows.map((customer: any) => {
+    const details = detailsByCustomerId.get(customer.id);
+    const governance = details?.governance ?? null;
+    const recentRuns = details?.recentRuns ?? [];
+    const credentials = details?.credentials ?? [];
+    const integrationRows = details?.integrationRows ?? [];
+    const errors = details?.errors ?? [];
     const identityCount = Array.isArray(governance?.agents?.identities) ? governance.agents.identities.length : 0;
     const configCount = Array.isArray(governance?.agents?.configs) ? governance.agents.configs.length : 0;
+    const localRunCount = customer.managedWorkspace?._count?.agentRuns ?? 0;
     return {
       id: customer.id,
       name: customer.label,
@@ -168,9 +201,9 @@ export default async function ControlPlaneAgentsPage({
       supportConnectorStatus: customer.supportConnectorStatus ?? "not_configured",
       supportMcpUrl: customer.supportMcpUrl ?? null,
       accessMode: governance?.accessMode ?? customer.deploymentKind ?? "unknown",
-      hasManagedWorkspace: Boolean(governance?.hasManagedWorkspace),
+      hasManagedWorkspace: Boolean(governance?.hasManagedWorkspace ?? customer.managedWorkspaceId),
       agentCount: Math.max(identityCount, configCount, new Set(recentRuns.map((run: any) => run.agentKey).filter(Boolean)).size),
-      runCount: countAgentRuns(governance?.summary) || recentRuns.length,
+      runCount: countAgentRuns(governance?.summary) || recentRuns.length || localRunCount,
       credentialCount: credentials.length,
       integrationCount: integrationRows.length,
       modelSpend: modelSpendValue(governance?.summary),
@@ -258,6 +291,12 @@ export default async function ControlPlaneAgentsPage({
         eyebrow="Observe and govern"
         title="Agent Observatory"
         description="Operations center for autonomous agent health, authority, model cost, approvals, credentials, and recent runs across customer workspaces."
+      />
+
+      <ControlPlaneCacheMeta
+        cachedAt={fleetRowsRead.cachedAt}
+        cacheStatus={fleetRowsRead.cacheStatus}
+        refreshAction={<Link href={queryString({ client: selectedCustomerId, refresh: 1 })} className={controlPlaneButtonClass}>Refresh live data</Link>}
       />
 
       <AgentObservatoryClient

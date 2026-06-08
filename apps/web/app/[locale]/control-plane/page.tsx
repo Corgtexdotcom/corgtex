@@ -11,6 +11,7 @@ import { requirePageActor } from "@/lib/auth";
 import { enqueueDeployLatestRolloutAction } from "./actions";
 import {
   ControlPlanePageHeader,
+  ControlPlaneCacheMeta,
   ControlPlaneSection,
   ControlPlaneStatusStrip,
   DisabledActionHint,
@@ -19,6 +20,8 @@ import {
   controlPlaneInputClass,
   controlPlaneLabel,
 } from "./_components/control-plane-ui";
+import { ControlPlaneIssueDiagnostics, type ControlPlaneIssueView } from "./_components/issue-diagnostics";
+import { controlPlaneActorCacheKey, readControlPlaneCached, shouldRefreshControlPlaneCache } from "./cache";
 
 export const dynamic = "force-dynamic";
 
@@ -59,6 +62,13 @@ function rolloutBlockerLabel(latestReleaseTarget: unknown, releaseExecutionConfi
   return null;
 }
 
+function serializeIssues(issues: FleetPage["items"][number]["issues"]): ControlPlaneIssueView[] {
+  return issues.map((issue) => ({
+    ...issue,
+    observedAt: issue.observedAt ? issue.observedAt.toISOString() : null,
+  }));
+}
+
 export default async function ControlPlanePage({
   searchParams,
 }: {
@@ -72,20 +82,29 @@ export default async function ControlPlanePage({
   }
 
   const raw = await searchParams;
-  const [fleet, recentRollouts] = await Promise.all([
-    listControlPlaneMatrix(actor, {
-      query: raw?.q,
-      health: raw?.health,
-      support: raw?.support,
-      region: raw?.region,
-      owner: raw?.owner,
-      sort: raw?.sort,
-      direction: raw?.direction,
-      page: Number(raw?.page ?? 1),
-      pageSize: PAGE_SIZE,
-    }),
-    listControlPlaneReleaseRolloutJobs(actor, { take: 8 }),
+  const refresh = shouldRefreshControlPlaneCache(raw?.refresh);
+  const fleetParams = {
+    query: raw?.q,
+    health: raw?.health,
+    support: raw?.support,
+    region: raw?.region,
+    owner: raw?.owner,
+    sort: raw?.sort,
+    direction: raw?.direction,
+    page: Number(raw?.page ?? 1),
+    pageSize: PAGE_SIZE,
+  };
+  const actorCacheKey = controlPlaneActorCacheKey(actor);
+  const [fleetRead, recentRolloutsRead] = await Promise.all([
+    readControlPlaneCached(["control-plane", "fleet", actorCacheKey, fleetParams], refresh, () => (
+      listControlPlaneMatrix(actor, fleetParams)
+    )),
+    readControlPlaneCached(["control-plane", "rollouts", actorCacheKey, { take: 8 }], refresh, () => (
+      listControlPlaneReleaseRolloutJobs(actor, { take: 8 })
+    )),
   ]);
+  const fleet = fleetRead.data;
+  const recentRollouts = recentRolloutsRead.data;
 
   const latestReleaseTarget = getControlPlaneLatestReleaseTarget();
   const releaseExecutionConfigured = isControlPlaneRailwayDeployConfigured();
@@ -103,7 +122,8 @@ export default async function ControlPlanePage({
   };
   const previousHref = queryString({ ...paginationFilters, page: Math.max(fleet.page - 1, 1) });
   const nextHref = queryString({ ...paginationFilters, page: Math.min(fleet.page + 1, fleet.pageCount) });
-  const attentionItems = fleet.items.filter((customer) => customer.hasDeployment && customer.health.tone !== "ok");
+  const refreshHref = queryString({ ...paginationFilters, page: fleet.page, refresh: 1 });
+  const attentionItems = fleet.items.filter((customer) => customer.hasDeployment && customer.issues.length > 0);
 
   return (
     <div className="space-y-5 pb-12">
@@ -122,6 +142,12 @@ export default async function ControlPlanePage({
             {rolloutBlocker && <DisabledActionHint>{rolloutBlocker}</DisabledActionHint>}
           </form>
         }
+      />
+
+      <ControlPlaneCacheMeta
+        cachedAt={fleetRead.cachedAt}
+        cacheStatus={fleetRead.cacheStatus}
+        refreshAction={<Link href={refreshHref} className={controlPlaneButtonClass}>Refresh live data</Link>}
       />
 
       <ControlPlaneStatusStrip
@@ -198,6 +224,7 @@ export default async function ControlPlanePage({
                       <span className="mt-1 block max-w-[180px] truncate text-[10px] text-muted">
                         {customer.health.detail || "No current error"}
                       </span>
+                      <ControlPlaneIssueDiagnostics issues={serializeIssues(customer.issues)} className="mt-2" />
                     </td>
                     <td className="p-3">
                       <span className="block max-w-[190px] truncate font-medium text-text">{customer.release.label}</span>
@@ -206,10 +233,13 @@ export default async function ControlPlanePage({
                       </span>
                     </td>
                     <td className="p-3">
-                      <StatusBadge status={customer.recorder.status} />
+                      <StatusBadge status={customer.recorder.availability.status} />
                       <span className="mt-1 block text-[10px] text-muted">
                         {customer.recorder.provider ?? "No provider"} / {customer.recorder.monthlyUsageMinutes ?? "n/a"} min
                       </span>
+                      {customer.recorder.availability.status === "available" && customer.recorder.readiness.ready === false && (
+                        <span className="mt-1 block text-[10px] text-amber-300">Readiness gaps</span>
+                      )}
                     </td>
                     <td className="p-3">
                       <StatusBadge status={customer.agents.status} />
@@ -290,15 +320,21 @@ export default async function ControlPlanePage({
         <ControlPlaneSection title="Health Alerts" description="Clients with degraded, blocked, or missing operational signals.">
           <div className="space-y-2">
             {attentionItems.map((customer) => (
-              <Link key={customer.id} href={`/control-plane/deployments/${customer.id}`} className="block rounded-md border border-line bg-surface p-3 hover:bg-surface-strong">
+              <div key={customer.id} className="rounded-md border border-line bg-surface p-3">
                 <div className="flex items-center justify-between gap-3">
                   <strong className="text-xs text-white">{customer.label}</strong>
-                  <StatusBadge status={customer.health.status} />
+                  <StatusBadge status={customer.issues[0]?.status ?? customer.health.status} />
                 </div>
                 <p className="mt-1 truncate text-[10px] text-muted">
-                  {customer.health.detail || customer.release.detail || "Support sync issue detected."}
+                  {customer.issues[0]?.detail || "Support sync issue detected."}
                 </p>
-              </Link>
+                <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+                  <ControlPlaneIssueDiagnostics issues={serializeIssues(customer.issues)} />
+                  <Link href={`/control-plane/deployments/${customer.id}`} className={controlPlaneButtonClass}>
+                    Open details
+                  </Link>
+                </div>
+              </div>
             ))}
             {attentionItems.length === 0 && (
               <div className="rounded-md border border-line bg-surface/40 p-4 text-center text-xs text-muted">

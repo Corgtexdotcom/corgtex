@@ -87,7 +87,7 @@ export default function ControlPlaneLayout({
 
         {/* Scrollable Main Content Frame */}
         <div className="relative flex-1 overflow-y-auto bg-bg p-6">
-          <div className="mx-auto w-full max-w-7xl">
+          <div className="w-full">
             {children}
           </div>
         </div>
