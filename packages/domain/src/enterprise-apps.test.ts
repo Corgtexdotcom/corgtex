@@ -942,6 +942,30 @@ describe("enterprise app platform", () => {
     }));
   });
 
+  it("preserves active release status when refreshing existing release metadata", async () => {
+    const { createEnterpriseAppRelease } = await import("./enterprise-apps");
+    prismaMock.appRelease.findFirst.mockResolvedValueOnce(releaseFixture({
+      id: "release-active",
+      version: "0.1.0",
+      status: "ACTIVE",
+    }));
+
+    await createEnterpriseAppRelease(actor, {
+      workspaceId: "workspace-1",
+      appInstallationId: "installation-1",
+      version: "0.1.0",
+      gitSha: "def456",
+      imageTag: "ghcr.io/corgtexdotcom/practice-ledger:0.1.0",
+    });
+
+    expect(prismaMock.appRelease.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "release-active" },
+      data: expect.objectContaining({
+        status: "ACTIVE",
+      }),
+    }));
+  });
+
   it("promotes a prepared release and rolls back the prior active release metadata", async () => {
     const { promoteEnterpriseAppRelease } = await import("./enterprise-apps");
     prismaMock.appRelease.findFirst.mockResolvedValueOnce(releaseFixture({
@@ -984,6 +1008,29 @@ describe("enterprise app platform", () => {
         releaseId: "release-2",
         status: "INSTALLED",
       }),
+    }));
+  });
+
+  it("rejects rollback activation of failed releases", async () => {
+    const { rollbackEnterpriseAppRelease } = await import("./enterprise-apps");
+    prismaMock.appRelease.findFirst.mockResolvedValueOnce(releaseFixture({
+      id: "release-failed",
+      version: "0.2.0",
+      status: "FAILED",
+    }));
+
+    await expect(rollbackEnterpriseAppRelease(actor, {
+      workspaceId: "workspace-1",
+      appInstallationId: "installation-1",
+      releaseId: "release-failed",
+    })).rejects.toMatchObject({
+      status: 400,
+      code: "APP_RELEASE_FAILED",
+    });
+    expect(prismaMock.appRelease.updateMany).not.toHaveBeenCalled();
+    expect(prismaMock.appRelease.update).not.toHaveBeenCalled();
+    expect(prismaMock.appInstallation.update).not.toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ releaseId: "release-failed" }),
     }));
   });
 

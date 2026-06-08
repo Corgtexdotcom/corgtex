@@ -1311,7 +1311,7 @@ export async function createEnterpriseAppRelease(actor: AppActor, params: {
           gitSha: text(params.gitSha),
           imageTag: text(params.imageTag),
           manifestVersion: text(params.manifestVersion) ?? manifest?.version ?? existing.manifestVersion,
-          status: "PREPARED",
+          status: existing.status === "ACTIVE" ? "ACTIVE" : "PREPARED",
           metadataJson: toInputJson({
             ...runtimeMetadata(existing.metadataJson),
             manifestCheckedAt: manifest ? new Date().toISOString() : undefined,
@@ -1430,6 +1430,7 @@ export async function rollbackEnterpriseAppRelease(actor: AppActor, params: {
     },
   });
   invariant(target, 404, "NOT_FOUND", "Enterprise app release not found.");
+  invariant(target.status !== "FAILED", 400, "APP_RELEASE_FAILED", "Failed releases cannot be activated by rollback.");
   const rolledBackAt = new Date();
   await prisma.$transaction(async (tx) => {
     await tx.appRelease.updateMany({
