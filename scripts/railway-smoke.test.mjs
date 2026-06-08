@@ -5,6 +5,7 @@ import {
   healthPayloadMismatch,
   healthReleaseMismatch,
   releaseMatchRetryConfig,
+  smokeFetchRetryConfig,
 } from "./railway-smoke.mjs";
 
 describe("railway smoke release validation", () => {
@@ -69,6 +70,27 @@ describe("railway smoke release validation", () => {
     })).toEqual({
       timeoutMs: 300_000,
       intervalMs: 10_000,
+    });
+  });
+
+  it("uses safe smoke fetch retry defaults and positive overrides", () => {
+    expect(smokeFetchRetryConfig({})).toEqual({
+      attempts: 3,
+      intervalMs: 2_000,
+    });
+    expect(smokeFetchRetryConfig({
+      CORGTEX_SMOKE_FETCH_ATTEMPTS: "5",
+      CORGTEX_SMOKE_FETCH_RETRY_INTERVAL_MS: "250",
+    })).toEqual({
+      attempts: 5,
+      intervalMs: 250,
+    });
+    expect(smokeFetchRetryConfig({
+      CORGTEX_SMOKE_FETCH_ATTEMPTS: "-1",
+      CORGTEX_SMOKE_FETCH_RETRY_INTERVAL_MS: "nope",
+    })).toEqual({
+      attempts: 3,
+      intervalMs: 2_000,
     });
   });
 });
