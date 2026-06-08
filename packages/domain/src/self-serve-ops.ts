@@ -249,39 +249,59 @@ export async function listSelfServeCustomerRegistry(actor: AppActor, params: {
 
   const take = Math.min(Math.max(Math.floor(params.take ?? 100), 1), 250);
   const status = params.status?.trim();
-  const trials = await prisma.procurementTrial.findMany({
-    where: status ? { status } : {},
-    orderBy: { createdAt: "desc" },
-    take,
-    include: {
-      workspace: {
-        select: {
-          id: true,
-          name: true,
-          slug: true,
-          plan: true,
-          trialEndsAt: true,
-          billingProfile: {
-            select: {
-              billingStatus: true,
-              paymentMethodReady: true,
-              stripeCustomerId: true,
-              updatedAt: true,
-            },
+  const trialWorkspaceInclude = {
+    workspace: {
+      select: {
+        id: true,
+        name: true,
+        slug: true,
+        plan: true,
+        trialEndsAt: true,
+        billingProfile: {
+          select: {
+            billingStatus: true,
+            paymentMethodReady: true,
+            stripeCustomerId: true,
+            updatedAt: true,
           },
-          _count: {
-            select: {
-              members: true,
-              roleOnboardingSessions: true,
-              onboardingStates: true,
-            },
+        },
+        _count: {
+          select: {
+            members: true,
+            roleOnboardingSessions: true,
+            onboardingStates: true,
           },
         },
       },
     },
+  } satisfies Prisma.ProcurementTrialInclude;
+  const trials = await prisma.procurementTrial.findMany({
+    where: status ? { status } : {},
+    orderBy: { createdAt: "desc" },
+    take,
+    include: trialWorkspaceInclude,
   });
 
-  const workspaceIds = trials.map((trial) => trial.workspaceId).filter((value): value is string => Boolean(value));
+  const reviewTrials = trials.filter((trial) => trial.status === "REVIEW_REQUIRED");
+  const reviewEmails = [...new Set(reviewTrials.map((trial) => normalizeEmail(trial.adminEmail)).filter(Boolean))];
+  const reviewDomains = [...new Set(reviewTrials.map((trial) => trial.emailDomain.toLowerCase()).filter(Boolean))];
+  const existingActiveTrials = reviewTrials.length
+    ? await prisma.procurementTrial.findMany({
+      where: {
+        status: "ACTIVE",
+        workspaceId: { not: null },
+        OR: [
+          ...(reviewEmails.length ? [{ adminEmail: { in: reviewEmails } }] : []),
+          ...(reviewDomains.length ? [{ emailDomain: { in: reviewDomains } }] : []),
+        ],
+      },
+      orderBy: { createdAt: "desc" },
+      take: Math.min(Math.max(reviewTrials.length * 3, 10), 250),
+      include: trialWorkspaceInclude,
+    })
+    : [];
+  const trialsForLookups = [...trials, ...existingActiveTrials];
+  const workspaceIds = [...new Set(trialsForLookups.map((trial) => trial.workspaceId).filter((value): value is string => Boolean(value)))];
   const trialIds = trials.map((trial) => trial.id);
   const [deployments, smokeRuns, emailCaptures, supportSessions] = await Promise.all([
     workspaceIds.length
@@ -352,9 +372,25 @@ export async function listSelfServeCustomerRegistry(actor: AppActor, params: {
       latestSupportByWorkspaceId.set(session.workspaceId, session);
     }
   }
+  const activeTrialsForReviewLookup = [...trials, ...existingActiveTrials]
+    .filter((trial) => trial.status === "ACTIVE" && trial.workspaceId && trial.workspace);
+
+  function findExistingActiveTrial(trial: typeof trials[number]) {
+    if (trial.status !== "REVIEW_REQUIRED" || trial.workspaceId || trial.workspace) return null;
+    const adminEmail = normalizeEmail(trial.adminEmail);
+    const domain = trial.emailDomain.toLowerCase();
+    return activeTrialsForReviewLookup.find((candidate) => (
+      candidate.id !== trial.id
+      && (normalizeEmail(candidate.adminEmail) === adminEmail || candidate.emailDomain.toLowerCase() === domain)
+    )) ?? null;
+  }
 
   const items = trials.map((trial) => {
     const deployment = trial.workspaceId ? deploymentByWorkspaceId.get(trial.workspaceId) ?? null : null;
+    const existingActiveTrial = findExistingActiveTrial(trial);
+    const existingActiveDeployment = existingActiveTrial?.workspaceId
+      ? deploymentByWorkspaceId.get(existingActiveTrial.workspaceId) ?? null
+      : null;
     const latestSmoke = latestSmokeByKey.get(`trial:${trial.id}`)
       ?? (trial.workspaceId ? latestSmokeByKey.get(`workspace:${trial.workspaceId}`) : null)
       ?? null;
@@ -376,6 +412,19 @@ export async function listSelfServeCustomerRegistry(actor: AppActor, params: {
       workspace: trial.workspace,
       deployment,
       billing: trial.workspace?.billingProfile ?? null,
+      existingActiveTrial: existingActiveTrial
+        ? {
+          trialId: existingActiveTrial.id,
+          status: existingActiveTrial.status,
+          companyName: existingActiveTrial.companyName,
+          adminEmail: existingActiveTrial.adminEmail,
+          emailDomain: existingActiveTrial.emailDomain,
+          trialExpiresAt: existingActiveTrial.trialExpiresAt,
+          createdAt: existingActiveTrial.createdAt,
+          workspace: existingActiveTrial.workspace,
+          deployment: existingActiveDeployment,
+        }
+        : null,
       latestSmoke,
       latestEmailCapture: latestEmailByTrialId.get(trial.id) ?? null,
       latestSupportSession: trial.workspaceId ? latestSupportByWorkspaceId.get(trial.workspaceId) ?? null : null,

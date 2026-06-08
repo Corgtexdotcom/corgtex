@@ -19,6 +19,7 @@ const { prismaMock, sharedEnv } = vi.hoisted(() => ({
     selfServeEmailCapture: {
       create: vi.fn(),
       findFirst: vi.fn(),
+      findMany: vi.fn(),
       update: vi.fn(),
     },
     selfServeSmokeRun: {
@@ -101,9 +102,14 @@ describe("self-serve ops domain", () => {
     prismaMock.selfServeEmailCapture.create.mockResolvedValue({ id: "capture-1" });
     prismaMock.selfServeEmailCapture.update.mockResolvedValue({});
     prismaMock.selfServeSmokeRun.upsert.mockResolvedValue({ id: "run-row-1" });
+    prismaMock.selfServeSmokeRun.findMany.mockResolvedValue([]);
     prismaMock.customerDeploymentAccess.findUnique.mockResolvedValue(null);
     prismaMock.customerDeployment.findFirst.mockResolvedValue(null);
+    prismaMock.customerDeployment.findMany.mockResolvedValue([]);
     prismaMock.procurementTrial.findFirst.mockResolvedValue(null);
+    prismaMock.procurementTrial.findMany.mockResolvedValue([]);
+    prismaMock.selfServeEmailCapture.findMany.mockResolvedValue([]);
+    prismaMock.selfServeSupportSession.findMany.mockResolvedValue([]);
     prismaMock.selfServeSupportSession.update.mockResolvedValue({});
     prismaMock.selfServeSupportSession.updateMany.mockResolvedValue({ count: 1 });
     prismaMock.auditLog.create.mockResolvedValue({});
@@ -221,6 +227,104 @@ describe("self-serve ops domain", () => {
     })).rejects.toMatchObject({ status: 400, code: "INVALID_INPUT" });
 
     expect(prismaMock.selfServeSmokeRun.upsert).not.toHaveBeenCalled();
+  });
+
+  it("links review-gated duplicate requests to their existing active workspace", async () => {
+    const createdAt = new Date("2026-06-08T14:16:17.918Z");
+    const activeCreatedAt = new Date("2026-05-25T17:47:59.348Z");
+    const trialExpiresAt = new Date("2026-06-24T17:47:59.196Z");
+    const workspace = {
+      id: "workspace-1",
+      name: "How To DAO",
+      slug: "how-to-dao",
+      plan: "TRIAL",
+      trialEndsAt: trialExpiresAt,
+      billingProfile: {
+        billingStatus: "trialing",
+        paymentMethodReady: false,
+        stripeCustomerId: null,
+        updatedAt: activeCreatedAt,
+      },
+      _count: {
+        members: 1,
+        roleOnboardingSessions: 0,
+        onboardingStates: 0,
+      },
+    };
+    prismaMock.procurementTrial.findMany
+      .mockResolvedValueOnce([
+        {
+          id: "review-trial",
+          status: "REVIEW_REQUIRED",
+          riskStatus: "REVIEW_REQUIRED",
+          riskReasons: ["ACTIVE_TRIAL_FOR_EMAIL", "ACTIVE_TRIAL_FOR_DOMAIN"],
+          companyName: "How To DAO",
+          adminEmail: "info@howtodao.xyz",
+          adminName: "Jan Puncar Brezina",
+          emailDomain: "howtodao.xyz",
+          trialExpiresAt: null,
+          createdAt,
+          updatedAt: createdAt,
+          suspendedAt: null,
+          suspensionReason: null,
+          claimEmailStatus: null,
+          workspaceId: null,
+          workspace: null,
+        },
+      ])
+      .mockResolvedValueOnce([
+        {
+          id: "active-trial",
+          status: "ACTIVE",
+          riskStatus: "CLEAR",
+          riskReasons: [],
+          companyName: "How To DAO",
+          adminEmail: "info@howtodao.xyz",
+          adminName: "Jan Puncar Brezina",
+          emailDomain: "howtodao.xyz",
+          trialExpiresAt,
+          createdAt: activeCreatedAt,
+          updatedAt: activeCreatedAt,
+          suspendedAt: null,
+          suspensionReason: null,
+          claimEmailStatus: { sent: true },
+          workspaceId: "workspace-1",
+          workspace,
+        },
+      ]);
+    prismaMock.customerDeployment.findMany.mockResolvedValue([
+      {
+        id: "deployment-1",
+        managedWorkspaceId: "workspace-1",
+        label: "How To DAO",
+        deploymentStatus: "DEGRADED",
+        supportConnectorStatus: "CONFIGURED",
+      },
+    ]);
+    const { listSelfServeCustomerRegistry } = await import("./self-serve-ops");
+
+    const registry = await listSelfServeCustomerRegistry(operatorActor, {
+      status: "REVIEW_REQUIRED",
+      take: 50,
+    });
+
+    expect(registry.items).toHaveLength(1);
+    expect(registry.items[0]).toMatchObject({
+      trialId: "review-trial",
+      status: "REVIEW_REQUIRED",
+      existingActiveTrial: {
+        trialId: "active-trial",
+        companyName: "How To DAO",
+        workspace: { id: "workspace-1", name: "How To DAO" },
+        deployment: { id: "deployment-1", deploymentStatus: "DEGRADED" },
+      },
+    });
+    expect(prismaMock.procurementTrial.findMany).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      where: expect.objectContaining({
+        status: "ACTIVE",
+        workspaceId: { not: null },
+      }),
+    }));
   });
 
   it("creates an audited support session and clones the target member role shape", async () => {

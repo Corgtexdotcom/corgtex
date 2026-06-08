@@ -52,6 +52,16 @@ function workspaceHref(item: RegistryItem) {
   return null;
 }
 
+function existingWorkspaceHref(item: RegistryItem) {
+  if (item.existingActiveTrial?.deployment?.id) {
+    return `/control-plane/deployments/${item.existingActiveTrial.deployment.id}`;
+  }
+  if (item.existingActiveTrial?.workspace?.id) {
+    return `/workspaces/${item.existingActiveTrial.workspace.id}`;
+  }
+  return null;
+}
+
 function onboardingLabel(item: RegistryItem) {
   const onboardingStates = item.workspace?._count.onboardingStates ?? 0;
   const roleSessions = item.workspace?._count.roleOnboardingSessions ?? 0;
@@ -117,33 +127,67 @@ export default async function ControlPlaneSelfServePage() {
           <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
             <div>
               <h2 className="text-sm font-bold text-white">Needs review</h2>
-              <p className="mt-0.5 text-[10px] text-muted">Requests that were accepted but did not create a workspace yet.</p>
+              <p className="mt-0.5 text-[10px] text-muted">Requests that need a decision or already match an active workspace.</p>
             </div>
             <span className="inline-flex rounded-lg border border-amber-500/20 bg-bg-alt px-3 py-1 text-[10px] font-bold uppercase tracking-wide text-amber-300">
               {reviewItems.length} pending
             </span>
           </div>
           <div className="space-y-3">
-            {reviewItems.map((item) => (
-              <div key={item.trialId} className="grid gap-3 rounded-lg border border-line bg-bg-alt p-3 md:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)_auto] md:items-start">
-                <div className="min-w-0">
-                  <p className="truncate text-sm font-bold text-white">{item.companyName}</p>
-                  <p className="truncate text-[11px] text-muted">{item.adminEmail}</p>
-                  {item.adminName && <p className="truncate text-[10px] text-muted">Requested by {item.adminName}</p>}
+            {reviewItems.map((item) => {
+              const existing = item.existingActiveTrial;
+              const existingHref = existingWorkspaceHref(item);
+              return (
+                <div key={item.trialId} className="grid gap-3 rounded-lg border border-line bg-bg-alt p-3 md:grid-cols-[minmax(0,1.3fr)_minmax(0,1.15fr)_auto] md:items-start">
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-bold text-white">{item.companyName}</p>
+                    <p className="truncate text-[11px] text-muted">{item.adminEmail}</p>
+                    {item.adminName && <p className="truncate text-[10px] text-muted">Requested by {item.adminName}</p>}
+                  </div>
+                  <div className="space-y-1">
+                    {existing ? pill("ACTIVE") : pill(item.riskStatus)}
+                    <p className="text-[10px] text-muted">Created {formatDate(item.createdAt)}</p>
+                    {existing ? (
+                      <>
+                        <p className="text-[10px] text-muted">
+                          Existing workspace: {existing.workspace?.name ?? existing.companyName}
+                        </p>
+                        <p className="text-[10px] text-muted">
+                          Deployment: {existing.deployment?.deploymentStatus?.replace(/_/g, " ") ?? "not registered"}
+                        </p>
+                      </>
+                    ) : (
+                      <p className="text-[10px] text-muted">
+                        {item.riskReasons.length > 0 ? item.riskReasons.join(", ").replace(/_/g, " ") : "No risk reason recorded"}
+                      </p>
+                    )}
+                  </div>
+                  {existing ? (
+                    <div className="flex flex-col items-end gap-2">
+                      {existingHref && (
+                        <Link
+                          href={existingHref}
+                          className="inline-flex h-8 items-center rounded-lg border border-line bg-surface px-2.5 text-[10px] font-bold uppercase tracking-wide text-text transition-colors hover:bg-surface-strong"
+                        >
+                          Inspect existing
+                        </Link>
+                      )}
+                      <TrialReviewButtons
+                        trialId={item.trialId}
+                        companyName={item.companyName}
+                        allowApprove={false}
+                        rejectLabel="Reject request"
+                      />
+                    </div>
+                  ) : (
+                    <TrialReviewButtons
+                      trialId={item.trialId}
+                      companyName={item.companyName}
+                    />
+                  )}
                 </div>
-                <div className="space-y-1">
-                  {pill(item.riskStatus)}
-                  <p className="text-[10px] text-muted">Created {formatDate(item.createdAt)}</p>
-                  <p className="text-[10px] text-muted">
-                    {item.riskReasons.length > 0 ? item.riskReasons.join(", ").replace(/_/g, " ") : "No risk reason recorded"}
-                  </p>
-                </div>
-                <TrialReviewButtons
-                  trialId={item.trialId}
-                  companyName={item.companyName}
-                />
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       )}
@@ -177,7 +221,7 @@ export default async function ControlPlaneSelfServePage() {
             </thead>
             <tbody className="divide-y divide-line">
               {registry.items.map((item) => {
-                const href = workspaceHref(item);
+                const href = existingWorkspaceHref(item) ?? workspaceHref(item);
                 return (
                   <tr key={item.trialId} className="hover:bg-surface/40">
                     <td className="p-3 align-top">
@@ -197,6 +241,11 @@ export default async function ControlPlaneSelfServePage() {
                         {pill(item.status)}
                         <p className="text-[10px] text-muted">Created {formatDate(item.createdAt)}</p>
                         <p className="text-[10px] text-muted">Expires {formatDate(item.trialExpiresAt)}</p>
+                        {item.existingActiveTrial && (
+                          <p className="text-[10px] text-emerald-400">
+                            Existing workspace active
+                          </p>
+                        )}
                       </div>
                     </td>
                     <td className="p-3 align-top">
@@ -244,7 +293,24 @@ export default async function ControlPlaneSelfServePage() {
                     </td>
                     <td className="p-3 align-top text-right">
                       <div className="flex flex-col items-end gap-2">
-                        {item.status === "REVIEW_REQUIRED" && !item.workspace ? (
+                        {item.status === "REVIEW_REQUIRED" && item.existingActiveTrial ? (
+                          <>
+                            {href && (
+                              <Link
+                                href={href}
+                                className="inline-flex h-8 items-center rounded-lg border border-line bg-surface px-2.5 text-[10px] font-bold uppercase tracking-wide text-text transition-colors hover:bg-surface-strong"
+                              >
+                                Inspect existing
+                              </Link>
+                            )}
+                            <TrialReviewButtons
+                              trialId={item.trialId}
+                              companyName={item.companyName}
+                              allowApprove={false}
+                              rejectLabel="Reject request"
+                            />
+                          </>
+                        ) : item.status === "REVIEW_REQUIRED" && !item.workspace ? (
                           <TrialReviewButtons
                             trialId={item.trialId}
                             companyName={item.companyName}
