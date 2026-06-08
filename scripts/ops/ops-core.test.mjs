@@ -154,12 +154,17 @@ describe("ops-core control-plane incidents", () => {
 
   it("fetches customers from the Control Plane MCP endpoint", async () => {
     const customers = [{ id: "deployment-1", label: "Acme Production" }];
+    const urls = [];
     const result = await fetchControlPlaneCustomers({
       CONTROL_PLANE_URL: "https://ops.example",
       CONTROL_PLANE_AGENT_API_KEY: "test-token",
     }, async (url, init) => {
-      expect(url).toBe("https://ops.example/api/control-plane/mcp");
+      urls.push(url);
       expect(init.headers.authorization).toBe("Bearer cp-test-token");
+      if (url === "https://ops.example/api/control-plane/deployments/deployment-1/operations") {
+        return response({ operations: [] });
+      }
+      expect(url).toBe("https://ops.example/api/control-plane/mcp");
       return response({
         result: {
           content: [{ text: JSON.stringify(customers) }],
@@ -168,6 +173,83 @@ describe("ops-core control-plane incidents", () => {
     });
 
     expect(result).toEqual(customers);
+    expect(urls).toEqual([
+      "https://ops.example/api/control-plane/mcp",
+      "https://ops.example/api/control-plane/deployments/deployment-1/operations",
+    ]);
+  });
+
+  it("enriches fetched customers with a wider support-operation window", async () => {
+    const result = await fetchControlPlaneCustomers({
+      CONTROL_PLANE_URL: "https://ops.example",
+      CONTROL_PLANE_AGENT_API_KEY: "test-token",
+    }, async (url) => {
+      if (url === "https://ops.example/api/control-plane/deployments/deployment-1/operations") {
+        return response({
+          operations: [
+            {
+              id: "operation-recovery",
+              action: "agents.list_runs",
+              status: "COMPLETED",
+              completedAt: "2026-05-24T00:15:00.000Z",
+              resultSummary: {
+                items: [
+                  {
+                    id: "run-recovered",
+                    agentKey: "meeting-summary",
+                    status: "COMPLETED",
+                    completedAt: "2026-05-24T00:12:00.000Z",
+                  },
+                ],
+              },
+            },
+          ],
+        });
+      }
+
+      return response({
+        result: {
+          content: [{
+            text: JSON.stringify([
+              {
+                id: "deployment-1",
+                label: "Acme Production",
+                customerSlug: "acme",
+                hasSupportCredential: true,
+                supportOperations: [
+                  { id: "operation-newer-noise", action: "runtime.list_jobs", status: "COMPLETED" },
+                  { id: "operation-newer-noise-2", action: "members.list", status: "COMPLETED" },
+                  { id: "operation-newer-noise-3", action: "integrations.list", status: "COMPLETED" },
+                ],
+                fleetSnapshots: [
+                  {
+                    snapshotKind: "SUPPORT_READY",
+                    observedAt: "2026-05-24T00:00:00.000Z",
+                    summary: {
+                      agentRuns: {
+                        items: [
+                          { id: "run-failed-3", agentKey: "meeting-summary", status: "FAILED", createdAt: "2026-05-23T23:55:00.000Z" },
+                          { id: "run-failed-2", agentKey: "meeting-summary", status: "FAILED", createdAt: "2026-05-23T23:50:00.000Z" },
+                          { id: "run-failed-1", agentKey: "meeting-summary", status: "FAILED", createdAt: "2026-05-23T23:45:00.000Z" },
+                        ],
+                      },
+                    },
+                  },
+                ],
+              },
+            ]),
+          }],
+        },
+      });
+    });
+
+    expect(result[0].supportOperations.map((operation) => operation.id)).toEqual([
+      "operation-newer-noise",
+      "operation-newer-noise-2",
+      "operation-newer-noise-3",
+      "operation-recovery",
+    ]);
+    expect(buildTestControlPlaneIncidents(result).some((incident) => incident.status === "agentFailureStreak")).toBe(false);
   });
 
   it("builds sanitized incidents from cached support and release snapshots", () => {
@@ -728,6 +810,50 @@ describe("ops-core control-plane incidents", () => {
                   { id: "run-failed-3", agentKey: "meeting-summary", status: "FAILED", createdAt: "2026-05-23T23:55:00.000Z" },
                   { id: "run-failed-2", agentKey: "meeting-summary", status: "FAILED", createdAt: "2026-05-23T23:50:00.000Z" },
                   { id: "run-failed-1", agentKey: "meeting-summary", status: "FAILED", createdAt: "2026-05-23T23:45:00.000Z" },
+                ],
+              },
+            },
+          },
+        ],
+      },
+    ]);
+
+    expect(incidents.some((incident) => incident.status === "agentFailureStreak")).toBe(false);
+  });
+
+  it("suppresses cached failure-streak incidents when cached failures lack timestamps", () => {
+    const incidents = buildTestControlPlaneIncidents([
+      {
+        id: "deployment-acme",
+        label: "Acme Production",
+        customerSlug: "acme",
+        hasSupportCredential: true,
+        supportOperations: [
+          {
+            action: "agents.list_runs",
+            status: "COMPLETED",
+            completedAt: "2026-05-24T00:15:00.000Z",
+            resultSummary: {
+              items: [
+                {
+                  agentKey: "meeting-summary",
+                  status: "COMPLETED",
+                  completedAt: "2026-05-24T00:12:00.000Z",
+                },
+              ],
+            },
+          },
+        ],
+        fleetSnapshots: [
+          {
+            snapshotKind: "SUPPORT_READY",
+            observedAt: "2026-05-24T00:00:00.000Z",
+            summary: {
+              agentRuns: {
+                items: [
+                  { agentKey: "meeting-summary", status: "FAILED" },
+                  { agentKey: "meeting-summary", status: "FAILED" },
+                  { agentKey: "meeting-summary", status: "FAILED" },
                 ],
               },
             },
