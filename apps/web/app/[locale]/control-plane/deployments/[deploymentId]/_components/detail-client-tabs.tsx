@@ -25,6 +25,11 @@ import {
   updateControlPlaneAgentCredentialScopesAction,
   deployLatestControlPlaneReleaseAction,
   runReleaseOperationAction,
+  installEnterpriseAppFromControlPlaneAction,
+  updateEnterpriseAppFromControlPlaneAction,
+  setEnterpriseAppSurfaceFromControlPlaneAction,
+  probeEnterpriseAppHealthFromControlPlaneAction,
+  revokeEnterpriseAppSessionsFromControlPlaneAction,
 } from "../../../actions";
 
 type DetailTabId = "overview" | "agents" | "config" | "users" | "releases" | "logs";
@@ -43,7 +48,7 @@ interface TabProps {
   releases: any;
   members: { members: any[] };
   featureFlags: { flags: any[] };
-  enterpriseApps: { installations: any[]; error?: string | null };
+  enterpriseApps: { canManage?: boolean; installations: any[]; error?: string | null };
   deployPreflight: any;
   rollouts: any[];
   locale: string;
@@ -97,6 +102,7 @@ export function CustomerDetailClientTabs({
   const preflightChecks = Array.isArray(deployPreflight.checks)
     ? deployPreflight.checks
     : [];
+  const canManageEnterpriseApps = Boolean(enterpriseApps.canManage && customer.managedWorkspaceId);
 
   return (
     <div className="space-y-6">
@@ -381,10 +387,26 @@ export function CustomerDetailClientTabs({
                   </div>
                 )}
 
+                {canManageEnterpriseApps && (
+                  <form action={installEnterpriseAppFromControlPlaneAction} className={`${detailInnerPanelClass} grid grid-cols-1 gap-3 lg:grid-cols-5`}>
+                    <input type="hidden" name="deploymentId" value={customer.id} />
+                    <input type="hidden" name="workspaceId" value={customer.managedWorkspaceId} />
+                    <input type="hidden" name="appKey" value="practice-ledger" />
+                    <input type="hidden" name="runtimeMode" value="SELF_MANAGED_EXTERNAL" />
+                    <input type="hidden" name="surface" value="FINANCE" />
+                    <input name="runtimeBaseUrl" placeholder="Runtime URL" className={controlPlaneInputClass} />
+                    <input name="tenantExternalId" placeholder="Tenant / org id" className={controlPlaneInputClass} />
+                    <input name="launchPath" placeholder="/dashboard?embedded=1" className={controlPlaneInputClass} />
+                    <input name="reason" required placeholder="Audit reason" className={controlPlaneInputClass} />
+                    <button type="submit" className={detailPrimaryButtonClass}>Install app</button>
+                  </form>
+                )}
+
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   {enterpriseApps.installations.map((installation: any) => {
                     const runtime = installation.runtime;
                     const surfaces = Array.isArray(installation.surfaces) ? installation.surfaces.filter((surface: any) => surface.enabled) : [];
+                    const financeAssigned = surfaces.some((surface: any) => surface.surface === "FINANCE");
                     const statusStyle = installation.status === "INSTALLED"
                       ? "text-emerald-400 border-emerald-500/20 bg-emerald-500/10"
                       : installation.status === "UNHEALTHY" || installation.status === "DISABLED"
@@ -425,6 +447,65 @@ export function CustomerDetailClientTabs({
                           <a href={runtime.baseUrl} target="_blank" rel="noreferrer" className="inline-flex items-center text-[10px] text-brand-400 hover:underline">
                             Open runtime
                           </a>
+                        )}
+
+                        {canManageEnterpriseApps && (
+                          <div className="space-y-3 border-t border-line pt-3">
+                            <form action={updateEnterpriseAppFromControlPlaneAction} className="grid grid-cols-1 gap-2">
+                              <input type="hidden" name="deploymentId" value={customer.id} />
+                              <input type="hidden" name="workspaceId" value={customer.managedWorkspaceId} />
+                              <input type="hidden" name="appInstallationId" value={installation.id} />
+                              <div className="grid grid-cols-2 gap-2">
+                                <select name="status" defaultValue={installation.status} className={controlPlaneInputClass}>
+                                  {["INSTALLED", "NEEDS_SETUP", "UNHEALTHY", "DISABLED"].map((status) => (
+                                    <option key={status} value={status}>{status.replace(/_/g, " ")}</option>
+                                  ))}
+                                </select>
+                                <select name="runtimeStatus" defaultValue={runtime?.status ?? "ACTIVE"} className={controlPlaneInputClass}>
+                                  {["ACTIVE", "UNHEALTHY", "DISABLED"].map((status) => (
+                                    <option key={status} value={status}>{status.replace(/_/g, " ")}</option>
+                                  ))}
+                                </select>
+                              </div>
+                              <input name="runtimeBaseUrl" defaultValue={runtime?.baseUrl ?? ""} placeholder="Runtime URL" className={controlPlaneInputClass} />
+                              <input name="runtimeHealthUrl" defaultValue={runtime?.healthUrl ?? ""} placeholder="Health URL" className={controlPlaneInputClass} />
+                              <input name="runtimeMcpUrl" defaultValue={runtime?.mcpUrl ?? ""} placeholder="MCP URL" className={controlPlaneInputClass} />
+                              <div className="grid grid-cols-2 gap-2">
+                                <input name="tenantExternalId" defaultValue={installation.tenantExternalId ?? ""} placeholder="Tenant / org id" className={controlPlaneInputClass} />
+                                <input name="launchPath" defaultValue={installation.launchPath ?? ""} placeholder="Launch path" className={controlPlaneInputClass} />
+                              </div>
+                              <div className="flex gap-2">
+                                <input name="reason" required placeholder="Audit reason" className={`${controlPlaneInputClass} w-full`} />
+                                <button type="submit" className={`${detailPrimaryButtonClass} shrink-0`}>Save</button>
+                              </div>
+                            </form>
+
+                            <form action={probeEnterpriseAppHealthFromControlPlaneAction} className="flex gap-2">
+                              <input type="hidden" name="deploymentId" value={customer.id} />
+                              <input type="hidden" name="workspaceId" value={customer.managedWorkspaceId} />
+                              <input type="hidden" name="appInstallationId" value={installation.id} />
+                              <input name="reason" required placeholder="Health probe reason" className={`${controlPlaneInputClass} w-full`} />
+                              <button type="submit" className={`${detailPrimaryButtonClass} shrink-0`}>Probe</button>
+                            </form>
+
+                            <form action={setEnterpriseAppSurfaceFromControlPlaneAction} className="flex gap-2">
+                              <input type="hidden" name="deploymentId" value={customer.id} />
+                              <input type="hidden" name="workspaceId" value={customer.managedWorkspaceId} />
+                              <input type="hidden" name="appInstallationId" value={installation.id} />
+                              <input type="hidden" name="surface" value="FINANCE" />
+                              <input type="hidden" name="enabled" value={financeAssigned ? "false" : "true"} />
+                              <input name="reason" required placeholder="Surface reason" className={`${controlPlaneInputClass} w-full`} />
+                              <button type="submit" className={`${detailPrimaryButtonClass} shrink-0`}>{financeAssigned ? "Unassign" : "Assign"}</button>
+                            </form>
+
+                            <form action={revokeEnterpriseAppSessionsFromControlPlaneAction} className="flex gap-2">
+                              <input type="hidden" name="deploymentId" value={customer.id} />
+                              <input type="hidden" name="workspaceId" value={customer.managedWorkspaceId} />
+                              <input type="hidden" name="appInstallationId" value={installation.id} />
+                              <input name="reason" required placeholder="Session revoke reason" className={`${controlPlaneInputClass} w-full`} />
+                              <button type="submit" className={`${detailDangerButtonClass} shrink-0`}>Revoke sessions</button>
+                            </form>
+                          </div>
                         )}
                       </div>
                     );
