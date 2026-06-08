@@ -47,6 +47,7 @@ interface TabProps {
   releases: any;
   members: { members: any[] };
   featureFlags: { flags: any[] };
+  enterpriseApps: { installations: any[]; error?: string | null };
   deployPreflight: any;
   rollouts: any[];
   locale: string;
@@ -61,6 +62,7 @@ export function CustomerDetailClientTabs({
   releases,
   members,
   featureFlags,
+  enterpriseApps,
   deployPreflight,
   rollouts,
   locale,
@@ -413,6 +415,77 @@ export function CustomerDetailClientTabs({
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 animate-in fade-in duration-200">
             {/* Feature Flags Grid left */}
             <div className="lg:col-span-2 space-y-6">
+              <div className="bg-bg-alt border border-line rounded-xl p-5 space-y-4">
+                <div>
+                  <h3 className="text-sm font-bold text-white flex items-center gap-1.5">
+                    <Briefcase className="w-4 h-4 text-brand-400" />
+                    Enterprise Apps
+                  </h3>
+                  <p className="text-[10px] text-muted mt-0.5">Installed customer apps, runtime posture, and workspace surface assignments.</p>
+                </div>
+
+                {enterpriseApps.error && (
+                  <div className="rounded-lg border border-amber-500/25 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-300">
+                    {enterpriseApps.error}
+                  </div>
+                )}
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {enterpriseApps.installations.map((installation: any) => {
+                    const runtime = installation.runtime;
+                    const surfaces = Array.isArray(installation.surfaces) ? installation.surfaces.filter((surface: any) => surface.enabled) : [];
+                    const statusStyle = installation.status === "INSTALLED"
+                      ? "text-emerald-400 border-emerald-500/20 bg-emerald-500/10"
+                      : installation.status === "UNHEALTHY" || installation.status === "DISABLED"
+                        ? "text-rose-400 border-rose-500/20 bg-rose-500/10"
+                        : "text-amber-400 border-amber-500/20 bg-amber-500/10";
+                    return (
+                      <div key={installation.id} className="bg-surface border border-line rounded-xl p-4 space-y-3">
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <strong className="text-xs text-white block">{installation.app?.title ?? "Enterprise app"}</strong>
+                            <span className="text-[10px] text-muted">{installation.app?.appKey ?? installation.id}</span>
+                          </div>
+                          <span className={cn("text-[9px] font-bold px-1.5 py-0.5 rounded border", statusStyle)}>
+                            {String(installation.status).replace(/_/g, " ")}
+                          </span>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-2 text-[10px] text-muted">
+                          <div>
+                            <span className="block uppercase tracking-wider text-[9px]">Runtime</span>
+                            <span className="text-text">{runtime?.mode ? String(runtime.mode).replace(/_/g, " ") : "Not configured"}</span>
+                          </div>
+                          <div>
+                            <span className="block uppercase tracking-wider text-[9px]">Health</span>
+                            <span className="text-text">{runtime?.lastHealthStatus ?? installation.lastHealthStatus ?? runtime?.status ?? "Unknown"}</span>
+                          </div>
+                          <div>
+                            <span className="block uppercase tracking-wider text-[9px]">Tenant</span>
+                            <span className="text-text">{installation.tenantExternalId ?? "Not mapped"}</span>
+                          </div>
+                          <div>
+                            <span className="block uppercase tracking-wider text-[9px]">Surface</span>
+                            <span className="text-text">{surfaces.length ? surfaces.map((surface: any) => String(surface.surface).toLowerCase()).join(", ") : "None"}</span>
+                          </div>
+                        </div>
+
+                        {runtime?.baseUrl && (
+                          <a href={runtime.baseUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-[10px] text-brand-400 hover:underline">
+                            <ExternalLink className="w-3 h-3" />
+                            Open runtime
+                          </a>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {enterpriseApps.installations.length === 0 && !enterpriseApps.error && (
+                  <p className="text-[11px] text-muted">No enterprise apps are installed for this customer workspace.</p>
+                )}
+              </div>
+
               <div className="bg-bg-alt border border-line rounded-xl p-5 space-y-4">
                 <div>
                   <h3 className="text-sm font-bold text-white flex items-center gap-1.5">

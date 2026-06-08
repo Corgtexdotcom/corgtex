@@ -1,6 +1,14 @@
 import { Fragment } from "react";
 import Link from "next/link";
-import { listCatalogItems, listDeliberationEntries, listLedgerAccounts, listSpends, requireWorkspaceMembership } from "@corgtex/domain";
+import {
+  getEnterpriseAppSurface,
+  issueEnterpriseAppSession,
+  listCatalogItems,
+  listDeliberationEntries,
+  listLedgerAccounts,
+  listSpends,
+  requireWorkspaceMembership,
+} from "@corgtex/domain";
 import { prisma } from "@corgtex/shared";
 import { requirePageActor } from "@/lib/auth";
 import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
@@ -30,6 +38,7 @@ export const dynamic = "force-dynamic";
 
 const spendFilters = ["ALL", "DRAFT", "OPEN", "BLOCKED", "RESOLVED", "PAID", "RECONCILED"] as const;
 type SpendFilter = (typeof spendFilters)[number];
+type FinanceAppSurface = Awaited<ReturnType<typeof getEnterpriseAppSurface>>;
 
 function fmt(cents: number, currency: string = "USD") {
   const abs = Math.abs(cents / 100);
@@ -46,6 +55,92 @@ function outcomeLabel(outcome?: string | null) {
   return outcome ? outcome.replace("_", " ") : null;
 }
 
+function EnterpriseFinanceAppFrame({
+  workspaceId,
+  surface,
+  launchUrl,
+}: {
+  workspaceId: string;
+  surface: Extract<FinanceAppSurface, { mode: "app" }>;
+  launchUrl: string;
+}) {
+  const app = surface.installation.app;
+  const runtime = surface.installation.runtime;
+  return (
+    <section className="ws-section stack" style={{ gap: 16 }}>
+      <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 0 }}>
+        <div className="actions-inline" style={{ gap: 6, marginBottom: 8 }}>
+          <span className="tag">Enterprise app</span>
+          <span className="tag success">{surface.installation.status.replace(/_/g, " ")}</span>
+          {runtime?.mode && <span className="tag">{runtime.mode.replace(/_/g, " ")}</span>}
+        </div>
+        <h1>{app.title}</h1>
+        <div className="nr-masthead-meta">
+          <span>{app.dataClassification.replace(/_/g, " ")} finance workspace</span>
+        </div>
+      </header>
+
+      <div className="nr-item" style={{ padding: 0, overflow: "hidden" }}>
+        <iframe
+          title={`${app.title} finance workspace`}
+          src={launchUrl}
+          style={{ border: 0, display: "block", width: "100%", minHeight: "min(980px, calc(100vh - 170px))" }}
+          referrerPolicy="no-referrer"
+          sandbox="allow-downloads allow-forms allow-popups allow-same-origin allow-scripts"
+        />
+      </div>
+
+      {surface.canManage && (
+        <div className="actions-inline">
+          <Link className="link-button secondary small" href={`/workspaces/${workspaceId}/tools`}>
+            Manage in Tools
+          </Link>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function EnterpriseFinanceAppUnavailable({
+  workspaceId,
+  surface,
+}: {
+  workspaceId: string;
+  surface: Extract<FinanceAppSurface, { mode: "unavailable" }>;
+}) {
+  return (
+    <section className="ws-section stack" style={{ gap: 18 }}>
+      <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 0 }}>
+        <div className="actions-inline" style={{ gap: 6, marginBottom: 8 }}>
+          <span className="tag">Enterprise app</span>
+          <span className="tag danger">Unavailable</span>
+        </div>
+        <h1>{surface.installation.app.title}</h1>
+        <div className="nr-masthead-meta">
+          <span>The assigned finance app is not ready, so Corgtex is holding the native finance surface available for recovery.</span>
+        </div>
+      </header>
+
+      <div className="nr-item" style={{ padding: 18 }}>
+        <h2 className="nr-section-header" style={{ marginTop: 0 }}>Recovery checks</h2>
+        <ul className="stack" style={{ gap: 8, margin: 0, paddingLeft: 18 }}>
+          {surface.reasons.map((reason) => (
+            <li key={reason} className="nr-item-meta">{reason}</li>
+          ))}
+        </ul>
+      </div>
+
+      {surface.canManage && (
+        <div className="actions-inline">
+          <Link className="link-button small" href={`/workspaces/${workspaceId}/tools`}>
+            Review app setup
+          </Link>
+        </div>
+      )}
+    </section>
+  );
+}
+
 export default async function FinancePage({
   params,
   searchParams,
@@ -56,6 +151,36 @@ export default async function FinancePage({
   const { workspaceId } = await params;
   const actor = await requirePageActor();
   await requireWorkspaceFeature(workspaceId, "FINANCE");
+  const enterpriseSurface = await getEnterpriseAppSurface(actor, { workspaceId, surface: "FINANCE" });
+  if (enterpriseSurface.mode === "app") {
+    const session = await issueEnterpriseAppSession(actor, {
+      workspaceId,
+      appInstallationId: enterpriseSurface.installation.id,
+    }).catch(() => null);
+    if (session) {
+      return (
+        <EnterpriseFinanceAppFrame
+          workspaceId={workspaceId}
+          surface={enterpriseSurface}
+          launchUrl={session.launchUrl}
+        />
+      );
+    }
+    return (
+      <EnterpriseFinanceAppUnavailable
+        workspaceId={workspaceId}
+        surface={{
+          ...enterpriseSurface,
+          mode: "unavailable",
+          nativeAvailable: true,
+          reasons: ["Corgtex could not issue an enterprise app launch session."],
+        }}
+      />
+    );
+  }
+  if (enterpriseSurface.mode === "unavailable") {
+    return <EnterpriseFinanceAppUnavailable workspaceId={workspaceId} surface={enterpriseSurface} />;
+  }
   const t = await getTranslations("finance");
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
   const resolvedSearch = searchParams ? await searchParams : {};
