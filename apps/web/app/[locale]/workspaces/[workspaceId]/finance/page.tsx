@@ -65,7 +65,10 @@ function EnterpriseFinanceAppFrame({
   const app = surface.installation.app;
   return (
     <section
+      className="enterprise-app-surface-frame"
       aria-label={`${app.title} finance workspace`}
+      data-workspace-surface="enterprise-app"
+      data-workspace-surface-key="FINANCE"
       style={{
         display: "flex",
         minHeight: "calc(100vh - 32px)",

@@ -14,6 +14,7 @@ const revealWorkspaceToolLinkCredentialMock = vi.fn();
 const listInstalledAppsMock = vi.fn();
 const getAppRoutingGuidanceMock = vi.fn();
 const getAppConnectionInstructionsMock = vi.fn();
+const invokeInstalledAppToolMock = vi.fn();
 const requestAppInstallMock = vi.fn();
 const supportReopenResolvedProposalsMock = vi.fn();
 const listAgentCredentialsMock = vi.fn();
@@ -122,6 +123,7 @@ vi.mock("@corgtex/domain", () => ({
   listInstalledApps: listInstalledAppsMock,
   getAppRoutingGuidance: getAppRoutingGuidanceMock,
   getAppConnectionInstructions: getAppConnectionInstructionsMock,
+  invokeInstalledAppTool: invokeInstalledAppToolMock,
   requestAppInstall: requestAppInstallMock,
   listWorkspaceToolLinks: listWorkspaceToolLinksMock,
   upsertWorkspaceToolLink: upsertWorkspaceToolLinkMock,
@@ -203,6 +205,13 @@ describe("createCorgtexMcpServer", () => {
       app: { id: "practice-ledger", title: "Practice Ledger" },
       instructions: ["Connect Practice Ledger MCP."],
       connectionReady: true,
+    });
+    invokeInstalledAppToolMock.mockReset().mockResolvedValue({
+      appKey: "practice-ledger",
+      appInstallationId: "installation-1",
+      toolName: "create_expenses",
+      scopes: ["finance:write"],
+      result: { persisted: { created: 1 } },
     });
     requestAppInstallMock.mockReset().mockResolvedValue({
       request: { id: "request-1", status: "PENDING" },
@@ -1407,6 +1416,47 @@ describe("createCorgtexMcpServer", () => {
     });
     expect(JSON.parse(instructionsResponse.content[0].text).app.title).toBe("Practice Ledger");
     expect(JSON.parse(requestResponse.content[0].text).request.status).toBe("PENDING");
+  });
+
+  it("invokes installed app tools through Corgtex app governance", async () => {
+    const { createCorgtexMcpServer } = await import("./server");
+    const { requireScope } = await import("./auth");
+    const actor = {
+      kind: "user",
+      user: { id: "user-1", email: "user@example.com", displayName: "User" },
+    } as any;
+    const server = createCorgtexMcpServer({
+      actor,
+      workspaceId: "ws-1",
+      authKind: "oauth",
+      scopes: ["tools:write", "finance:write"],
+    });
+
+    const response = await (server as any)._registeredTools.invoke_installed_app_tool.handler({
+      surface: "FINANCE",
+      toolName: "create_expenses",
+      arguments: { expenses: [{ amountCents: 4200 }] },
+    });
+
+    expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "tools:write");
+    expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "finance:write");
+    expect(invokeInstalledAppToolMock).toHaveBeenCalledWith(actor, {
+      workspaceId: "ws-1",
+      appKey: undefined,
+      surface: "FINANCE",
+      toolName: "create_expenses",
+      arguments: { expenses: [{ amountCents: 4200 }] },
+      requiredScopes: ["finance:write"],
+    });
+    expect(JSON.parse(response.content[0].text)).toEqual(expect.objectContaining({
+      appKey: "practice-ledger",
+      toolName: "create_expenses",
+      webUrl: "https://app.test/workspaces/ws-1/finance",
+    }));
+    expect((server as any)._registeredTools.invoke_installed_app_tool.annotations).toMatchObject({
+      readOnlyHint: false,
+      openWorldHint: true,
+    });
   });
 
   it("searches connected Corgtex and external context with provenance", async () => {

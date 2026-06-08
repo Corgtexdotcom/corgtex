@@ -27,7 +27,13 @@ import {
 const APP_ADMIN_ROLES = new Set(["ADMIN"]);
 const APP_KEY_PATTERN = /^[a-z0-9][a-z0-9-]{1,94}[a-z0-9]$/;
 const DEFAULT_SESSION_TTL_SECONDS = 5 * 60;
+const DEFAULT_APP_MCP_TIMEOUT_MS = 10_000;
 const SESSION_TOKEN_PARAM = "corgtex_launch_token";
+const APP_MCP_TOOL_SCOPE_REQUIREMENTS: Record<string, string[]> = {
+  create_time_entries: ["finance:write"],
+  create_expenses: ["finance:write"],
+  submit_finance_entries: ["finance:write"],
+};
 
 const APP_SURFACES: AppSurface[] = ["FINANCE"];
 const APP_CATEGORIES: AppCategory[] = ["FINANCE", "KNOWLEDGE", "COMMUNICATION", "AI", "OPERATIONS", "GOVERNANCE", "DATA", "OTHER"];
@@ -277,6 +283,32 @@ async function fetchJsonWithTimeout(url: string, timeoutMs = DEFAULT_HEALTH_TIME
   }
 }
 
+async function postJsonWithTimeout(url: string, params: {
+  token: string;
+  body: unknown;
+  timeoutMs?: number | null;
+}) {
+  const timeoutMs = Math.min(Math.max(Math.floor(params.timeoutMs ?? DEFAULT_APP_MCP_TIMEOUT_MS), 1_000), 30_000);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${params.token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(params.body),
+      signal: controller.signal,
+      cache: "no-store",
+    });
+    const body = await response.json().catch(() => null);
+    return { response, body };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 function practiceLedgerDefinition() {
   const appUrl = normalizeOptionalUrl(process.env.PRACTICE_LEDGER_APP_URL, "Practice Ledger app URL");
   const mcpUrl = normalizeOptionalUrl(process.env.PRACTICE_LEDGER_MCP_URL, "Practice Ledger MCP URL");
@@ -430,6 +462,64 @@ async function getInstallation(workspaceId: string, appInstallationId: string) {
   return row;
 }
 
+async function getInstallationByAppKey(workspaceId: string, appKey: string) {
+  const row = await prisma.appInstallation.findFirst({
+    where: {
+      workspaceId,
+      appDefinition: { appKey },
+    },
+    include: {
+      appDefinition: true,
+      runtime: true,
+      release: true,
+      catalogItem: {
+        select: {
+          id: true,
+          title: true,
+          url: true,
+          appMcpUrl: true,
+          installationStatus: true,
+        },
+      },
+      surfaceAssignments: true,
+    },
+  });
+  invariant(row, 404, "NOT_FOUND", "Enterprise app installation not found.");
+  return row;
+}
+
+async function getInstallationBySurface(workspaceId: string, surface: AppSurface) {
+  const assignment = await prisma.appSurfaceAssignment.findUnique({
+    where: {
+      workspaceId_surface: {
+        workspaceId,
+        surface,
+      },
+    },
+    include: {
+      appInstallation: {
+        include: {
+          appDefinition: true,
+          runtime: true,
+          release: true,
+          catalogItem: {
+            select: {
+              id: true,
+              title: true,
+              url: true,
+              appMcpUrl: true,
+              installationStatus: true,
+            },
+          },
+          surfaceAssignments: true,
+        },
+      },
+    },
+  });
+  invariant(assignment?.enabled, 404, "NOT_FOUND", "No enabled enterprise app is assigned to this surface.");
+  return assignment.appInstallation;
+}
+
 function unavailableReasons(row: EnterpriseAppInstallationRecord) {
   const reasons: string[] = [];
   if (row.appDefinition.status !== "ACTIVE") reasons.push("App definition is disabled.");
@@ -451,6 +541,89 @@ function buildLaunchUrl(row: EnterpriseAppInstallationRecord, token: string) {
   url.searchParams.set("corgtex_app_installation_id", row.id);
   url.searchParams.set("embedded", "1");
   return url.toString();
+}
+
+function normalizeOptionalScopes(scopes: unknown, label = "scopes") {
+  if (scopes === null || scopes === undefined) return [];
+  invariant(Array.isArray(scopes), 400, "INVALID_INPUT", `${label} must be an array.`);
+  const normalized = [...new Set(scopes.map((scope) => text(scope)).filter((scope): scope is string => Boolean(scope)))];
+  const unknown = normalized.filter((scope) => !ALL_SCOPES.includes(scope as typeof ALL_SCOPES[number]));
+  invariant(unknown.length === 0, 400, "INVALID_INPUT", `Unknown scope(s): ${unknown.join(", ")}.`);
+  return normalized;
+}
+
+function appMcpUrlFor(row: EnterpriseAppInstallationRecord) {
+  return row.runtime?.mcpUrl || row.catalogItem?.appMcpUrl || null;
+}
+
+function scopedAppToolRequirements(toolName: string, requiredScopes?: string[] | null) {
+  const inferredScopes = APP_MCP_TOOL_SCOPE_REQUIREMENTS[toolName] ?? [];
+  const explicitScopes = requiredScopes ?? [];
+  invariant(
+    inferredScopes.length > 0 || explicitScopes.length > 0,
+    400,
+    "APP_MCP_SCOPE_REQUIRED",
+    "Installed app MCP calls require at least one required scope.",
+  );
+  return [...new Set([
+    ...inferredScopes,
+    ...explicitScopes,
+  ])];
+}
+
+async function createEnterpriseAppSession(actor: AppActor, params: {
+  workspaceId: string;
+  row: EnterpriseAppInstallationRecord;
+  membership: MembershipSummary | null;
+  ttlSeconds?: number | null;
+}) {
+  const row = params.row;
+  const token = randomOpaqueToken();
+  const expiresAt = new Date(Date.now() + Math.max(params.ttlSeconds || row.sessionTtlSeconds || DEFAULT_SESSION_TTL_SECONDS, 60) * 1000);
+  const actorPayload = actor.kind === "user"
+    ? {
+      user: {
+        id: actor.user.id,
+        email: actor.user.email,
+        displayName: actor.user.displayName,
+        role: params.membership?.role ?? "ADMIN",
+      },
+    }
+    : {
+      agent: {
+        label: actor.label,
+        authProvider: actor.authProvider,
+        credentialId: actor.credentialId,
+        agentIdentityId: actor.agentIdentityId,
+      },
+    };
+  const payload = {
+    issuer: "corgtex",
+    audience: row.appDefinition.appKey,
+    appKey: row.appDefinition.appKey,
+    appInstallationId: row.id,
+    workspaceId: params.workspaceId,
+    ...actorPayload,
+    tenantExternalId: row.tenantExternalId,
+    tenantMappingJson: row.tenantMappingJson,
+    scopes: row.grantedScopes,
+    dataClassification: row.appDefinition.dataClassification,
+    expiresAt: expiresAt.toISOString(),
+  };
+  await prisma.appSession.create({
+    data: {
+      workspaceId: params.workspaceId,
+      appInstallationId: row.id,
+      actorUserId: actor.kind === "user" ? actor.user.id : null,
+      audience: row.appDefinition.appKey,
+      tokenHash: sha256(token),
+      scopes: row.grantedScopes,
+      payloadJson: toInputJson(payload),
+      expiresAt,
+    },
+  });
+
+  return { token, expiresAt, payload };
 }
 
 export function validateEnterpriseAppManifest(value: unknown): EnterpriseAppManifest {
@@ -1645,45 +1818,109 @@ export async function issueEnterpriseAppSession(actor: AppActor, params: {
   const row = await getInstallation(params.workspaceId, params.appInstallationId);
   const reasons = unavailableReasons(row);
   invariant(reasons.length === 0, 400, "APP_RUNTIME_UNAVAILABLE", reasons.join(" "));
-  const token = randomOpaqueToken();
-  const expiresAt = new Date(Date.now() + Math.max(row.sessionTtlSeconds || DEFAULT_SESSION_TTL_SECONDS, 60) * 1000);
-  const payload = {
-    issuer: "corgtex",
-    audience: row.appDefinition.appKey,
-    appKey: row.appDefinition.appKey,
-    appInstallationId: row.id,
+  const session = await createEnterpriseAppSession(actor, {
     workspaceId: params.workspaceId,
-    user: {
-      id: actor.user.id,
-      email: actor.user.email,
-      displayName: actor.user.displayName,
-      role: membership?.role ?? "ADMIN",
-    },
-    tenantExternalId: row.tenantExternalId,
-    tenantMappingJson: row.tenantMappingJson,
-    scopes: row.grantedScopes,
-    dataClassification: row.appDefinition.dataClassification,
-    expiresAt: expiresAt.toISOString(),
-  };
-  await prisma.appSession.create({
-    data: {
-      workspaceId: params.workspaceId,
-      appInstallationId: row.id,
-      actorUserId: actor.user.id,
-      audience: row.appDefinition.appKey,
-      tokenHash: sha256(token),
-      scopes: row.grantedScopes,
-      payloadJson: toInputJson(payload),
-      expiresAt,
-    },
+    row,
+    membership,
   });
 
   return {
-    token,
-    expiresAt,
-    launchUrl: buildLaunchUrl(row, token),
-    payload,
+    token: session.token,
+    expiresAt: session.expiresAt,
+    launchUrl: buildLaunchUrl(row, session.token),
+    payload: session.payload,
   };
+}
+
+export async function invokeInstalledAppTool(actor: AppActor, params: {
+  workspaceId: string;
+  appKey?: string | null;
+  surface?: string | null;
+  toolName: string;
+  arguments?: Record<string, unknown> | null;
+  requiredScopes?: string[] | null;
+  timeoutMs?: number | null;
+}) {
+  const workspaceId = text(params.workspaceId);
+  invariant(workspaceId, 400, "INVALID_INPUT", "Workspace ID is required.");
+  const toolName = text(params.toolName);
+  invariant(toolName, 400, "INVALID_INPUT", "Tool name is required.");
+  const membership = await requireWorkspaceMembership({ actor, workspaceId });
+  const appKey = params.appKey ? normalizeAppKey(params.appKey) : null;
+  const surface = params.surface ? normalizeSurface(params.surface) : null;
+  invariant(appKey || surface, 400, "INVALID_INPUT", "Provide appKey or surface.");
+  const row = surface
+    ? await getInstallationBySurface(workspaceId, surface)
+    : await getInstallationByAppKey(workspaceId, appKey!);
+  let requiredScopes: string[] = [];
+  const auditBase = () => ({
+    appKey: row.appDefinition.appKey,
+    appInstallationId: row.id,
+    toolName,
+    scopes: requiredScopes,
+  });
+
+  try {
+    requiredScopes = scopedAppToolRequirements(toolName, normalizeOptionalScopes(params.requiredScopes, "requiredScopes"));
+    const mcpUrl = appMcpUrlFor(row);
+    const reasons = unavailableReasons(row);
+    invariant(reasons.length === 0, 400, "APP_RUNTIME_UNAVAILABLE", reasons.join(" "));
+    invariant(mcpUrl, 400, "APP_MCP_UNAVAILABLE", "Installed app MCP URL is not configured.");
+    const missingScopes = requiredScopes.filter((scope) => !row.grantedScopes.includes(scope));
+    invariant(missingScopes.length === 0, 403, "APP_SCOPE_MISSING", `Installed app is missing granted scope(s): ${missingScopes.join(", ")}.`);
+
+    const session = await createEnterpriseAppSession(actor, {
+      workspaceId,
+      row,
+      membership,
+      ttlSeconds: DEFAULT_SESSION_TTL_SECONDS,
+    });
+    const response = await postJsonWithTimeout(mcpUrl, {
+      token: session.token,
+      timeoutMs: params.timeoutMs,
+      body: {
+        toolName,
+        arguments: params.arguments ?? {},
+      },
+    });
+    if (!response.response.ok) {
+      const message = isRecord(response.body) && isRecord(response.body.error) && text(response.body.error.message)
+        ? text(response.body.error.message)
+        : `Installed app MCP returned status ${response.response.status}.`;
+      throw new AppError(response.response.status, "APP_MCP_CALL_FAILED", message ?? "Installed app MCP call failed.");
+    }
+    await recordAudit(prisma, actor, {
+      workspaceId,
+      action: "enterprise_app.mcp_invoked",
+      entityType: "AppInstallation",
+      entityId: row.id,
+      meta: {
+        ...auditBase(),
+        success: true,
+        status: response.response.status,
+      },
+    });
+    return {
+      appKey: row.appDefinition.appKey,
+      appInstallationId: row.id,
+      toolName,
+      scopes: requiredScopes,
+      result: response.body,
+    };
+  } catch (error) {
+    await recordAudit(prisma, actor, {
+      workspaceId,
+      action: "enterprise_app.mcp_invoked",
+      entityType: "AppInstallation",
+      entityId: row.id,
+      meta: {
+        ...auditBase(),
+        success: false,
+        failureReason: error instanceof Error ? error.message : "Installed app MCP call failed.",
+      },
+    }).catch(() => undefined);
+    throw error;
+  }
 }
 
 export async function consumeEnterpriseAppSessionToken(params: {

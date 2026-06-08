@@ -1207,6 +1207,131 @@ describe("enterprise app platform", () => {
     }));
   });
 
+  it("invokes installed app MCP with a scoped app session and audit", async () => {
+    const { invokeInstalledAppTool } = await import("./enterprise-apps");
+    prismaMock.appSurfaceAssignment.findUnique.mockResolvedValueOnce(assignmentFixture());
+    vi.mocked(fetch).mockResolvedValueOnce(Response.json({
+      result: { created: 1 },
+      persisted: { submitted: true },
+    }) as never);
+
+    await expect(invokeInstalledAppTool(actor, {
+      workspaceId: "workspace-1",
+      surface: "FINANCE",
+      toolName: "create_expenses",
+      arguments: { expenses: [{ amountCents: 5000 }] },
+    })).resolves.toMatchObject({
+      appKey: "practice-ledger",
+      appInstallationId: "installation-1",
+      toolName: "create_expenses",
+      scopes: ["finance:write"],
+      result: {
+        persisted: { submitted: true },
+      },
+    });
+
+    expect(prismaMock.appSession.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        audience: "practice-ledger",
+        tokenHash: "hash:launch-token",
+        scopes: ["workspace:read", "brain:read", "finance:read", "finance:write"],
+      }),
+    }));
+    expect(fetch).toHaveBeenCalledWith("https://practice-ledger.test/api/mcp", expect.objectContaining({
+      method: "POST",
+      headers: expect.objectContaining({
+        authorization: "Bearer launch-token",
+      }),
+      body: JSON.stringify({
+        toolName: "create_expenses",
+        arguments: { expenses: [{ amountCents: 5000 }] },
+      }),
+    }));
+    expect(recordAudit).toHaveBeenCalledWith(prismaMock, actor, expect.objectContaining({
+      workspaceId: "workspace-1",
+      action: "enterprise_app.mcp_invoked",
+      entityType: "AppInstallation",
+      entityId: "installation-1",
+      meta: expect.objectContaining({
+        appKey: "practice-ledger",
+        toolName: "create_expenses",
+        scopes: ["finance:write"],
+        success: true,
+      }),
+    }));
+  });
+
+  it("rejects installed app MCP calls when the app is missing required granted scopes", async () => {
+    const { invokeInstalledAppTool } = await import("./enterprise-apps");
+    prismaMock.appInstallation.findFirst.mockResolvedValueOnce(installationFixture({
+      grantedScopes: ["workspace:read", "finance:read"],
+    }));
+
+    await expect(invokeInstalledAppTool(actor, {
+      workspaceId: "workspace-1",
+      appKey: "practice-ledger",
+      toolName: "create_expenses",
+    })).rejects.toMatchObject({
+      code: "APP_SCOPE_MISSING",
+    });
+
+    expect(prismaMock.appSession.create).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalledWith("https://practice-ledger.test/api/mcp", expect.anything());
+    expect(recordAudit).toHaveBeenCalledWith(prismaMock, actor, expect.objectContaining({
+      action: "enterprise_app.mcp_invoked",
+      meta: expect.objectContaining({
+        success: false,
+        failureReason: expect.stringContaining("finance:write"),
+      }),
+    }));
+  });
+
+  it("rejects installed app MCP calls when the runtime is unhealthy", async () => {
+    const { invokeInstalledAppTool } = await import("./enterprise-apps");
+    prismaMock.appInstallation.findFirst.mockResolvedValueOnce(installationFixture({
+      runtime: runtimeFixture({ status: "UNHEALTHY", lastHealthStatus: "down" }),
+    }));
+
+    await expect(invokeInstalledAppTool(actor, {
+      workspaceId: "workspace-1",
+      appKey: "practice-ledger",
+      toolName: "submit_finance_entries",
+    })).rejects.toMatchObject({
+      code: "APP_RUNTIME_UNAVAILABLE",
+    });
+    expect(prismaMock.appSession.create).not.toHaveBeenCalled();
+    expect(recordAudit).toHaveBeenCalledWith(prismaMock, actor, expect.objectContaining({
+      action: "enterprise_app.mcp_invoked",
+      meta: expect.objectContaining({
+        success: false,
+        failureReason: expect.stringContaining("Runtime status is UNHEALTHY"),
+      }),
+    }));
+  });
+
+  it("rejects installed app MCP calls without inferred or explicit scopes", async () => {
+    const { invokeInstalledAppTool } = await import("./enterprise-apps");
+    prismaMock.appInstallation.findFirst.mockResolvedValueOnce(installationFixture());
+
+    await expect(invokeInstalledAppTool(actor, {
+      workspaceId: "workspace-1",
+      appKey: "practice-ledger",
+      toolName: "unknown_app_tool",
+    })).rejects.toMatchObject({
+      code: "APP_MCP_SCOPE_REQUIRED",
+    });
+
+    expect(prismaMock.appSession.create).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalledWith("https://practice-ledger.test/api/mcp", expect.anything());
+    expect(recordAudit).toHaveBeenCalledWith(prismaMock, actor, expect.objectContaining({
+      action: "enterprise_app.mcp_invoked",
+      meta: expect.objectContaining({
+        success: false,
+        failureReason: expect.stringContaining("required scope"),
+      }),
+    }));
+  });
+
   it("validates reusable launch tokens and rejects expired, wrong-audience, and revoked tokens", async () => {
     const { consumeEnterpriseAppSessionToken } = await import("./enterprise-apps");
     prismaMock.appSession.findUnique.mockResolvedValueOnce({
