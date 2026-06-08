@@ -7,6 +7,8 @@ import {
   buildCopilotCliCommand,
   buildCopilotCliMcpConfig,
   buildCursorInstallLinks,
+  buildCursorMcpJsonConfig,
+  buildGeminiMcpCommand,
   buildGeminiMcpConfig,
   buildVsCodeMcpConfig,
   CLAUDE_CODE_INSTALLER_PATH,
@@ -592,6 +594,12 @@ export function buildAiWorkspaceSetupCards(
 
     if (provider.key === "cursor") {
       const recipe = buildProviderRecipe(provider, connectorUrl);
+      const cursorConfig = buildJsonResource({
+        title: "Cursor MCP JSON",
+        label: "Cursor MCP config",
+        value: buildCursorMcpJsonConfig(connectorUrl),
+        copiedMessage: "Copied the Cursor MCP configuration.",
+      });
       return {
         ...base,
         actions: [
@@ -601,16 +609,23 @@ export function buildAiWorkspaceSetupCards(
             appHref: cursorLinks.app,
             browserHref: cursorLinks.browser,
           },
+          {
+            kind: "copy",
+            label: "Copy Cursor config",
+            value: cursorConfig.value,
+            copiedMessage: cursorConfig.copiedMessage,
+            fallbackMessage: cursorConfig.fallbackMessage,
+          },
           ...buildResourceCopyActions(recipe.resources),
         ],
         steps: [
           "Open the Cursor install prompt.",
-          "Approve the MCP server named Corgtex.",
+          "Approve the MCP server named Corgtex, or copy the manual JSON fallback into Cursor MCP settings.",
           "Complete browser sign-in when Cursor asks to authenticate.",
           "Add the Corgtex instructions to workspace rules when the team wants governed code work.",
           "Run the safe test prompt before modifying files.",
         ],
-        resources: recipe.resources,
+        resources: [cursorConfig, ...recipe.resources],
         notes: ["Use this for technical teams that want Corgtex context inside code and product work."],
         verificationChecks: recipe.verificationChecks,
       };
@@ -647,6 +662,12 @@ export function buildAiWorkspaceSetupCards(
 
     if (provider.key === "gemini") {
       const recipe = buildProviderRecipe(provider, connectorUrl);
+      const geminiCommand = buildCommandResource({
+        title: "Gemini CLI MCP command",
+        label: "Gemini CLI command",
+        value: buildGeminiMcpCommand(connectorUrl),
+        copiedMessage: "Copied the Gemini CLI MCP command.",
+      });
       const geminiConfig = buildJsonResource({
         title: "Gemini CLI settings.json",
         label: "Gemini settings",
@@ -655,13 +676,14 @@ export function buildAiWorkspaceSetupCards(
       });
       return {
         ...base,
+        command: geminiCommand.value,
         actions: [
           {
             kind: "copy",
-            label: "Copy MCP URL",
-            value: connectorUrl,
-            copiedMessage: "Copied the Corgtex MCP URL for Gemini CLI.",
-            fallbackMessage: "Clipboard access was blocked. Select and copy the MCP URL.",
+            label: "Copy Gemini command",
+            value: geminiCommand.value,
+            copiedMessage: geminiCommand.copiedMessage,
+            fallbackMessage: geminiCommand.fallbackMessage,
           },
           {
             kind: "copy",
@@ -674,13 +696,13 @@ export function buildAiWorkspaceSetupCards(
           { kind: "open", label: "Gemini MCP docs", href: GEMINI_MCP_DOCS_URL, variant: "secondary" },
         ],
         steps: [
-          "Open Gemini CLI MCP settings.",
-          "Add Corgtex as a remote MCP or HTTP server using the MCP URL.",
+          "Run the generated Gemini CLI command to add Corgtex as a user-scoped HTTP MCP server.",
+          "Use the settings JSON fallback when manual configuration is easier.",
           "Complete browser sign-in if the client prompts for OAuth.",
           "Copy the Corgtex instructions into the CLI session or project guidance.",
           "Run the safe test prompt before using Gemini CLI for governed work.",
         ],
-        resources: [geminiConfig, ...recipe.resources],
+        resources: [geminiCommand, geminiConfig, ...recipe.resources],
         notes: ["Consumer Gemini web support is not assumed; this path is for technical CLI users."],
         verificationChecks: recipe.verificationChecks,
       };

@@ -9,6 +9,12 @@ export type CursorMcpConfig = {
   url: string;
 };
 
+export type CursorMcpJsonConfig = {
+  mcpServers: {
+    corgtex: CursorMcpConfig;
+  };
+};
+
 export type VsCodeMcpConfig = {
   servers: {
     corgtex: {
@@ -40,6 +46,14 @@ export function buildCursorMcpConfig(connectorUrl: string): CursorMcpConfig {
   return {
     type: "http",
     url: connectorUrl,
+  };
+}
+
+export function buildCursorMcpJsonConfig(connectorUrl: string): CursorMcpJsonConfig {
+  return {
+    mcpServers: {
+      corgtex: buildCursorMcpConfig(connectorUrl),
+    },
   };
 }
 
@@ -112,6 +126,10 @@ export function buildClaudeCodeCommand(connectorUrl: string): string {
 
 export function buildCopilotCliCommand(connectorUrl: string): string {
   return `copilot mcp add corgtex --type http --url ${connectorUrl} --tools "*"`;
+}
+
+export function buildGeminiMcpCommand(connectorUrl: string): string {
+  return `gemini mcp add --transport http --scope user corgtex ${connectorUrl}`;
 }
 
 export const CLAUDE_CONNECTORS_URL = "https://claude.ai/customize/connectors";

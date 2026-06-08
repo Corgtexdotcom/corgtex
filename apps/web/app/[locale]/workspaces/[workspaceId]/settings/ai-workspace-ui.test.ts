@@ -135,9 +135,12 @@ describe("AI workspace UI helpers", () => {
     const providers = [
       provider({ key: "claude", label: "Claude", category: "BYO" }),
       provider({ key: "cursor", label: "Cursor", category: "ADVANCED" }),
+      provider({ key: "gemini", label: "Gemini CLI", category: "ADVANCED" }),
     ];
 
     const cards = buildAiWorkspaceSetupCards(providers, "https://app.corgtex.com/mcp");
+    const cursorCard = cards.find((card) => card.provider.key === "cursor");
+    const geminiCard = cards.find((card) => card.provider.key === "gemini");
 
     expect(cards.find((card) => card.provider.key === "claude")?.actions.map((action) => action.kind)).toEqual([
       "open",
@@ -151,10 +154,17 @@ describe("AI workspace UI helpers", () => {
       "claude mcp add --transport http corgtex --scope user https://app.corgtex.com/mcp",
     );
     expect(cards.find((card) => card.provider.key === "claude")?.resources.map((resource) => resource.label)).toContain("Claude Code command");
-    expect(cards.find((card) => card.provider.key === "cursor")?.actions[0]).toMatchObject({
+    expect(cursorCard?.actions[0]).toMatchObject({
       kind: "cursorInstall",
       label: "Add to Cursor",
     });
+    expect(cursorCard?.actions.map((action) => action.label)).toContain("Copy Cursor config");
+    expect(cursorCard?.resources.find((resource) => resource.label === "Cursor MCP config")?.value).toContain("\"mcpServers\"");
+    expect(geminiCard?.command).toBe(
+      "gemini mcp add --transport http --scope user corgtex https://app.corgtex.com/mcp",
+    );
+    expect(geminiCard?.actions.map((action) => action.label)).toContain("Copy Gemini command");
+    expect(geminiCard?.resources.map((resource) => resource.label)).toContain("Gemini CLI command");
   });
 
   it("adds copyable setup recipes and safe test prompts for BYO and advanced providers", () => {

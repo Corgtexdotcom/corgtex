@@ -8,6 +8,8 @@ import {
   buildCopilotCliMcpConfig,
   buildCursorInstallLinks,
   buildCursorMcpConfig,
+  buildCursorMcpJsonConfig,
+  buildGeminiMcpCommand,
   buildGeminiMcpConfig,
   buildVsCodeMcpConfig,
   CLAUDE_CHAT_URL,
@@ -31,6 +33,14 @@ describe("CorgtexConnectorManager setup helpers", () => {
     expect(buildCursorMcpConfig(CONNECTOR_URL)).toEqual({
       type: "http",
       url: CONNECTOR_URL,
+    });
+    expect(buildCursorMcpJsonConfig(CONNECTOR_URL)).toEqual({
+      mcpServers: {
+        corgtex: {
+          type: "http",
+          url: CONNECTOR_URL,
+        },
+      },
     });
   });
 
@@ -87,6 +97,9 @@ describe("CorgtexConnectorManager setup helpers", () => {
   });
 
   it("builds Gemini CLI Streamable HTTP MCP settings", () => {
+    expect(buildGeminiMcpCommand(CONNECTOR_URL)).toBe(
+      "gemini mcp add --transport http --scope user corgtex https://mcp.corgtex.com/mcp",
+    );
     expect(buildGeminiMcpConfig(CONNECTOR_URL)).toEqual({
       mcpServers: {
         corgtex: {

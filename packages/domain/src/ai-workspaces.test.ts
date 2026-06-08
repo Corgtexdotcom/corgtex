@@ -52,12 +52,20 @@ describe("AI workspace provider registry", () => {
       "cursor",
       "generic_mcp",
     ]);
+    expect(AI_WORKSPACE_PROVIDER_REGISTRY.chatgpt.setupVariants.map((variant) => variant.variantKey)).toEqual([
+      "chatgpt_workspace_admin",
+      "chatgpt_developer_mode",
+    ]);
     expect(AI_WORKSPACE_PROVIDER_REGISTRY.claude_code.visibleInToolPicker).toBe(false);
     expect(AI_WORKSPACE_PROVIDER_REGISTRY.claude.setupVariants.map((variant) => variant.variantKey)).toContain("claude_code_cli");
     expect(AI_WORKSPACE_PROVIDER_REGISTRY.copilot.setupVariants.map((variant) => variant.variantKey)).toEqual([
       "copilot_vscode",
       "copilot_cli",
       "copilot_cloud_agent",
+    ]);
+    expect(AI_WORKSPACE_PROVIDER_REGISTRY.cursor.setupVariants.map((variant) => variant.variantKey)).toEqual([
+      "cursor_deeplink",
+      "cursor_manual_config",
     ]);
   });
 
