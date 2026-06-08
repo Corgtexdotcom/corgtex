@@ -291,7 +291,58 @@ export async function fetchControlPlaneCustomers(env = process.env, fetchImpl = 
   if (!Array.isArray(parsed)) {
     throw new Error("Control Plane list_customers response must be an array.");
   }
-  return parsed;
+  return enrichControlPlaneSupportOperations(parsed, baseUrl, token, fetchImpl);
+}
+
+async function enrichControlPlaneSupportOperations(customers, baseUrl, token, fetchImpl) {
+  return Promise.all(customers.map(async (customer) => {
+    const deploymentId = optionalText(customer?.id);
+    if (!deploymentId) return customer;
+
+    const operations = await fetchControlPlaneDeploymentOperations(baseUrl, token, deploymentId, fetchImpl);
+    if (!operations || operations.length === 0) return customer;
+
+    return {
+      ...customer,
+      supportOperations: mergeSupportOperations(customer.supportOperations, operations),
+    };
+  }));
+}
+
+async function fetchControlPlaneDeploymentOperations(baseUrl, token, deploymentId, fetchImpl) {
+  const url = new URL(`/api/control-plane/deployments/${encodeURIComponent(deploymentId)}/operations`, baseUrl);
+  const response = await fetchImpl(url.href, {
+    method: "GET",
+    headers: {
+      "authorization": `Bearer cp-${token}`,
+    },
+  });
+  if (!response.ok) return null;
+
+  const body = await response.json().catch(() => null);
+  return Array.isArray(body?.operations) ? body.operations : null;
+}
+
+function mergeSupportOperations(primary, additional) {
+  const operations = [
+    ...(Array.isArray(primary) ? primary : []),
+    ...(Array.isArray(additional) ? additional : []),
+  ];
+  const seen = new Set();
+  return operations.filter((operation, index) => {
+    const key = optionalText(operation?.id)
+      ?? [
+        optionalText(operation?.action) ?? "unknown",
+        optionalText(operation?.status) ?? "UNKNOWN",
+        optionalText(operation?.completedAt)
+          ?? optionalText(operation?.updatedAt)
+          ?? optionalText(operation?.createdAt)
+          ?? String(index),
+      ].join(":");
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 export function buildControlPlaneIncidents(customers, options = {}) {
@@ -419,16 +470,13 @@ function agentFailureStreakIncident(row, sweepNowMs) {
   const snapshot = latestSnapshot(row, "SUPPORT_READY");
   const snapshotObservedAtMs = timestampMs(optionalText(snapshot?.observedAt) ?? optionalText(snapshot?.createdAt));
   const summary = record(snapshot?.summary);
-  const runs = itemsFrom(summary?.agentRuns, ["items", "runs"]).map((run) => ({
-    agentKey: optionalText(run.agentKey) ?? optionalText(run.key) ?? optionalText(run.name) ?? "unknown",
-    status: optionalText(run.status) ?? "UNKNOWN",
-    createdAt: optionalText(run.createdAt),
-    failedAt: optionalText(run.failedAt),
-    completedAt: optionalText(run.completedAt),
-    finishedAt: optionalText(run.finishedAt),
-    endedAt: optionalText(run.endedAt),
-    updatedAt: optionalText(run.updatedAt),
-  }));
+  const runs = dedupeAgentRuns([
+    ...itemsFrom(summary?.agentRuns, ["items", "runs"]).map((run) => ({
+      ...run,
+      observedAt: snapshotObservedAtMs ? new Date(snapshotObservedAtMs).toISOString() : optionalText(run?.observedAt),
+    })),
+    ...supportInspectionAgentRuns(row, snapshotObservedAtMs),
+  ].map(normalizeAgentRun));
   const runsByAgent = new Map();
   for (const run of runs) {
     const current = runsByAgent.get(run.agentKey) ?? [];
@@ -455,6 +503,74 @@ function agentFailureStreakIncident(row, sweepNowMs) {
     ],
     recommendedAction: "inspect failed agent traces through the support connector and repair the root cause before retrying",
   };
+}
+
+function normalizeAgentRun(run) {
+  return {
+    id: optionalText(run.id),
+    agentKey: optionalText(run.agentKey) ?? optionalText(run.key) ?? optionalText(run.name) ?? "unknown",
+    status: optionalText(run.status) ?? "UNKNOWN",
+    createdAt: optionalText(run.createdAt),
+    failedAt: optionalText(run.failedAt),
+    completedAt: optionalText(run.completedAt),
+    finishedAt: optionalText(run.finishedAt),
+    endedAt: optionalText(run.endedAt),
+    updatedAt: optionalText(run.updatedAt),
+    observedAt: optionalText(run.observedAt),
+  };
+}
+
+function dedupeAgentRuns(runs) {
+  const seen = new Map();
+  const deduped = [];
+  runs.forEach((run, index) => {
+    const key = run.id
+      ?? `${run.agentKey}:${run.status}:${agentRunOrderTimestamp(run) ?? "unknown"}:${index}`;
+    const existingIndex = seen.get(key);
+    if (existingIndex === undefined) {
+      seen.set(key, deduped.length);
+      deduped.push(run);
+      return;
+    }
+    if (isNewerAgentRunObservation(run, deduped[existingIndex])) {
+      deduped[existingIndex] = run;
+    }
+  });
+  return deduped;
+}
+
+function isNewerAgentRunObservation(candidate, existing) {
+  const candidateAtMs = timestampMs(agentRunOrderTimestamp(candidate));
+  const existingAtMs = timestampMs(agentRunOrderTimestamp(existing));
+  if (candidateAtMs !== null && existingAtMs !== null) return candidateAtMs >= existingAtMs;
+  if (candidateAtMs !== null) return true;
+  if (existingAtMs !== null) return false;
+  return true;
+}
+
+function supportInspectionAgentRuns(row, snapshotObservedAtMs) {
+  const operations = Array.isArray(row?.supportOperations) ? row.supportOperations : [];
+  return operations.flatMap((operation) => {
+    if (optionalText(operation?.action) !== "agents.list_runs") return [];
+    if (normalizeAgentRunStatus(operation?.status) !== "COMPLETED") return [];
+    const operationObservedAtMs = timestampMs(
+      optionalText(operation?.completedAt)
+        ?? optionalText(operation?.updatedAt)
+        ?? optionalText(operation?.createdAt),
+    );
+    if (snapshotObservedAtMs && (!operationObservedAtMs || operationObservedAtMs <= snapshotObservedAtMs)) {
+      return [];
+    }
+
+    const resultSummary = record(operation?.resultSummary)
+      ?? record(operation?.resultJson)
+      ?? record(operation?.outputJson);
+    const observedAt = operationObservedAtMs ? new Date(operationObservedAtMs).toISOString() : null;
+    return itemsFrom(resultSummary, ["items", "runs"]).map((run) => ({
+      ...run,
+      observedAt: optionalText(run?.observedAt) ?? observedAt,
+    }));
+  });
 }
 
 function activeFailureStreak(runs, snapshotObservedAtMs, sweepNowMs) {
@@ -484,7 +600,7 @@ function activeFailureStreak(runs, snapshotObservedAtMs, sweepNowMs) {
 }
 
 function agentRunOrderTimestamp(run) {
-  return agentRunTerminalTimestamp(run) ?? optionalText(run?.createdAt);
+  return agentRunTerminalTimestamp(run) ?? optionalText(run?.createdAt) ?? optionalText(run?.observedAt);
 }
 
 function agentRunFailureTimestamp(run) {
