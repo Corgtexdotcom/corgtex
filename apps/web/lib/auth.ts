@@ -7,15 +7,32 @@ import type { AppActor } from "@corgtex/shared";
 import { AppError } from "@corgtex/domain";
 
 const SESSION_UNAVAILABLE_REDIRECT = "/login?error=session-unavailable";
+const SESSION_RESOLUTION_TIMEOUT_MS = 15_000;
 
 function sessionUnavailableError() {
   return new AppError(503, "SESSION_UNAVAILABLE", "Session is temporarily unavailable. Try again.");
 }
 
+function isSessionUnavailableError(error: unknown) {
+  return isDatabaseUnavailableError(error) || (error instanceof AppError && error.code === "SESSION_UNAVAILABLE");
+}
+
 function rethrowIfSessionUnavailable(error: unknown) {
-  if (isDatabaseUnavailableError(error)) {
+  if (isSessionUnavailableError(error)) {
     throw sessionUnavailableError();
   }
+}
+
+function withSessionResolutionTimeout<T>(operation: Promise<T>) {
+  let timeout: ReturnType<typeof setTimeout> | null = null;
+  const timeoutPromise = new Promise<never>((_resolve, reject) => {
+    timeout = setTimeout(() => {
+      reject(sessionUnavailableError());
+    }, SESSION_RESOLUTION_TIMEOUT_MS);
+  });
+  return Promise.race([operation, timeoutPromise]).finally(() => {
+    if (timeout) clearTimeout(timeout);
+  });
 }
 
 function assertAllowedInControlPlaneMode(actor: AppActor) {
@@ -30,7 +47,7 @@ export async function resolveRequestActor(request: NextRequest) {
     const bearer = authorization.slice("Bearer ".length).trim();
     let agentActor;
     try {
-      agentActor = await resolveAgentActorFromBearer(bearer);
+      agentActor = await withSessionResolutionTimeout(resolveAgentActorFromBearer(bearer));
     } catch (error) {
       rethrowIfSessionUnavailable(error);
       throw error;
@@ -49,7 +66,7 @@ export async function resolveRequestActor(request: NextRequest) {
 
   let actor;
   try {
-    actor = await resolveSessionActor(token);
+    actor = await withSessionResolutionTimeout(resolveSessionActor(token));
   } catch (error) {
     rethrowIfSessionUnavailable(error);
     throw error;
@@ -67,7 +84,13 @@ export async function resolveControlPlaneRequestActor(request: NextRequest) {
   const authorization = request.headers.get("authorization");
   if (authorization?.startsWith("Bearer ")) {
     const bearer = authorization.slice("Bearer ".length).trim();
-    const agentActor = await resolveControlPlaneAgentFromBearer(bearer);
+    let agentActor;
+    try {
+      agentActor = await withSessionResolutionTimeout(resolveControlPlaneAgentFromBearer(bearer));
+    } catch (error) {
+      rethrowIfSessionUnavailable(error);
+      throw error;
+    }
     if (agentActor) {
       return agentActor;
     }
@@ -85,9 +108,9 @@ export async function requirePageActor() {
 
   let actor;
   try {
-    actor = await resolveSessionActor(token);
+    actor = await withSessionResolutionTimeout(resolveSessionActor(token));
   } catch (error) {
-    if (isDatabaseUnavailableError(error)) {
+    if (isSessionUnavailableError(error)) {
       redirect(SESSION_UNAVAILABLE_REDIRECT);
     }
     throw error;

@@ -5,6 +5,8 @@ import { env } from "@corgtex/shared";
 import { setSessionCookie } from "@/lib/auth";
 import type { LoginActionState } from "./state";
 
+const LOGIN_ACTION_TIMEOUT_MS = 15_000;
+
 function localizedRedirect(path: string, locale: string) {
   return locale === "es" ? `/es${path}` : path;
 }
@@ -17,8 +19,24 @@ function loginErrorState(email: string, error: string): LoginActionState {
   };
 }
 
+function loginTimeoutError(label: string) {
+  return new AppError(503, "LOGIN_TIMEOUT", `${label} timed out. Try again.`);
+}
+
+function withLoginTimeout<T>(operation: Promise<T>, label: string) {
+  let timeout: ReturnType<typeof setTimeout> | null = null;
+  const timeoutPromise = new Promise<never>((_resolve, reject) => {
+    timeout = setTimeout(() => {
+      reject(loginTimeoutError(label));
+    }, LOGIN_ACTION_TIMEOUT_MS);
+  });
+  return Promise.race([operation, timeoutPromise]).finally(() => {
+    if (timeout) clearTimeout(timeout);
+  });
+}
+
 function messageForLoginError(error: unknown) {
-  if (error instanceof AppError && (error.status === 400 || error.status === 401)) {
+  if (error instanceof AppError && (error.status === 400 || error.status === 401 || error.status === 503)) {
     return error.message;
   }
 
@@ -36,7 +54,7 @@ export async function loginAction(
 
   let result;
   try {
-    result = await loginUserWithPassword({ email, password });
+    result = await withLoginTimeout(loginUserWithPassword({ email, password }), "Login");
   } catch (error) {
     return loginErrorState(email, messageForLoginError(error));
   }
@@ -47,7 +65,11 @@ export async function loginAction(
   };
 
   if (env.CONTROL_PLANE_MODE && isGlobalOperator(actor)) {
-    await setSessionCookie(result.token, result.expiresAt);
+    try {
+      await withLoginTimeout(setSessionCookie(result.token, result.expiresAt), "Session setup");
+    } catch (error) {
+      return loginErrorState(email, messageForLoginError(error));
+    }
     return {
       email,
       error: null,
@@ -57,13 +79,16 @@ export async function loginAction(
 
   let workspaces;
   try {
-    workspaces = await listActorWorkspaces(actor);
+    workspaces = await withLoginTimeout(listActorWorkspaces(actor), "Workspace lookup");
   } catch (error) {
-    console.error("Login workspace lookup failed.", error);
-    return loginErrorState(email, "Login is temporarily unavailable. Try again.");
+    return loginErrorState(email, messageForLoginError(error));
   }
 
-  await setSessionCookie(result.token, result.expiresAt);
+  try {
+    await withLoginTimeout(setSessionCookie(result.token, result.expiresAt), "Session setup");
+  } catch (error) {
+    return loginErrorState(email, messageForLoginError(error));
+  }
   return {
     email,
     error: null,

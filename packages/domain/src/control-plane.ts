@@ -221,6 +221,17 @@ export type ControlPlaneIssue = {
   agentPrompt: string;
 };
 
+export type ControlPlaneToolSummary = {
+  status: "active" | "available" | "empty" | "unavailable";
+  detail: string;
+  total: number | null;
+  toolLinks: number | null;
+  agentCredentials: number | null;
+  enterpriseApps: number | null;
+  communicationIntegrations: number | null;
+  enabledToolFlags: number | null;
+};
+
 export type ControlPlaneRecorderMatrixRow = {
   deploymentId: string;
   clientLabel: string;
@@ -287,11 +298,13 @@ export type ControlPlaneMatrixRow = {
     detail: string;
     runCount: number | null;
   };
+  tools: ControlPlaneToolSummary;
   users: {
     status: string;
     detail: string;
     count: number | null;
   };
+  lastCheckedAt: Date | null;
   issues: ControlPlaneIssue[];
 };
 
@@ -340,6 +353,18 @@ const managedWorkspaceSelect = {
     },
   },
 } satisfies Prisma.WorkspaceSelect;
+
+const CONTROL_PLANE_TOOL_FEATURE_FLAGS = new Set<string>([
+  "TOOL_LINKS",
+  "BUILD_ARTIFACTS",
+  "AGENT_GOVERNANCE",
+  "AI_WORKSPACES",
+  "OPENWORK_DEFAULT",
+  "EXECUTION_PACKETS",
+  "MANAGED_ENTERPRISE_SERVICES",
+  "CONTEXT_MAP_AI",
+  "SLACK_MEETING_ACTION_REVIEW",
+]);
 
 const controlPlaneDeploymentInclude = {
   supportOperations: {
@@ -567,6 +592,34 @@ const controlPlaneWorkerActor: AppActor = {
   scopes: ["control-plane:*"],
 };
 
+const CONTROL_PLANE_REMOTE_MCP_TIMEOUT_MS = 10_000;
+const CONTROL_PLANE_HEALTH_PROBE_TIMEOUT_MS = 8_000;
+
+function isFetchAbortError(error: unknown) {
+  return error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError");
+}
+
+async function fetchWithControlPlaneTimeout(
+  input: string,
+  init: RequestInit,
+  timeoutMs: number,
+  timeoutCode: string,
+  timeoutMessage: string,
+) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } catch (error) {
+    if (isFetchAbortError(error)) {
+      throw new AppError(504, timeoutCode, timeoutMessage);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 function normalizeSupportMcpUrl(deployment: { url: string; supportMcpUrl?: string | null }) {
   if (deployment.supportMcpUrl?.trim()) {
     return deployment.supportMcpUrl.trim();
@@ -602,23 +655,29 @@ async function callMcpTool(params: {
   toolName: string;
   arguments: JsonRecord;
 }) {
-  const response = await fetch(params.mcpUrl, {
-    method: "POST",
-    headers: {
-      "authorization": `Bearer ${params.bearerToken}`,
-      "content-type": "application/json",
-      "accept": "application/json, text/event-stream",
-    },
-    body: JSON.stringify({
-      jsonrpc: "2.0",
-      id: `support-${Date.now()}`,
-      method: "tools/call",
-      params: {
-        name: params.toolName,
-        arguments: params.arguments,
+  const response = await fetchWithControlPlaneTimeout(
+    params.mcpUrl,
+    {
+      method: "POST",
+      headers: {
+        "authorization": `Bearer ${params.bearerToken}`,
+        "content-type": "application/json",
+        "accept": "application/json, text/event-stream",
       },
-    }),
-  });
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: `support-${Date.now()}`,
+        method: "tools/call",
+        params: {
+          name: params.toolName,
+          arguments: params.arguments,
+        },
+      }),
+    },
+    CONTROL_PLANE_REMOTE_MCP_TIMEOUT_MS,
+    "REMOTE_SUPPORT_TIMEOUT",
+    "Remote support connector timed out. Retry after the connector is healthy.",
+  );
 
   const body = await response.json().catch(() => null);
   if (!response.ok) {
@@ -2674,6 +2733,152 @@ function controlPlaneUsersSummary(row: ControlPlaneDeploymentRow): ControlPlaneM
   };
 }
 
+type BatchedToolSummaryState = Awaited<ReturnType<typeof loadBatchedToolSummaryState>>;
+
+function incrementCount(map: Map<string, number>, workspaceId: string | null | undefined) {
+  if (!workspaceId) return;
+  map.set(workspaceId, (map.get(workspaceId) ?? 0) + 1);
+}
+
+async function loadBatchedToolSummaryState(workspaceIds: string[]) {
+  const uniqueWorkspaceIds = [...new Set(workspaceIds.filter(Boolean))];
+  const empty = {
+    toolLinksByWorkspaceId: new Map<string, number>(),
+    credentialsByWorkspaceId: new Map<string, number>(),
+    appsByWorkspaceId: new Map<string, number>(),
+    communicationByWorkspaceId: new Map<string, number>(),
+    featureFlagsByWorkspaceId: new Map<string, number>(),
+  };
+  if (uniqueWorkspaceIds.length === 0) return empty;
+
+  const [
+    toolLinks,
+    credentials,
+    apps,
+    communicationInstallations,
+    featureFlags,
+  ] = await Promise.all([
+    prisma.workspaceToolLink.findMany({
+      where: {
+        workspaceId: { in: uniqueWorkspaceIds },
+        archivedAt: null,
+      },
+      select: { workspaceId: true },
+    }),
+    prisma.agentCredential.findMany({
+      where: {
+        workspaceId: { in: uniqueWorkspaceIds },
+        isActive: true,
+      },
+      select: { workspaceId: true },
+    }),
+    prisma.appInstallation.findMany({
+      where: {
+        workspaceId: { in: uniqueWorkspaceIds },
+        status: { not: "DISABLED" },
+      },
+      select: { workspaceId: true },
+    }),
+    prisma.communicationInstallation.findMany({
+      where: {
+        workspaceId: { in: uniqueWorkspaceIds },
+        status: "ACTIVE",
+      },
+      select: { workspaceId: true },
+    }),
+    prisma.workspaceFeatureFlag.findMany({
+      where: {
+        workspaceId: { in: uniqueWorkspaceIds },
+        enabled: true,
+        flag: { in: Array.from(CONTROL_PLANE_TOOL_FEATURE_FLAGS) },
+      },
+      select: { workspaceId: true },
+    }),
+  ]);
+
+  const toolLinksByWorkspaceId = new Map<string, number>();
+  const credentialsByWorkspaceId = new Map<string, number>();
+  const appsByWorkspaceId = new Map<string, number>();
+  const communicationByWorkspaceId = new Map<string, number>();
+  const featureFlagsByWorkspaceId = new Map<string, number>();
+  for (const row of toolLinks) incrementCount(toolLinksByWorkspaceId, row.workspaceId);
+  for (const row of credentials) incrementCount(credentialsByWorkspaceId, row.workspaceId);
+  for (const row of apps) incrementCount(appsByWorkspaceId, row.workspaceId);
+  for (const row of communicationInstallations) incrementCount(communicationByWorkspaceId, row.workspaceId);
+  for (const row of featureFlags) incrementCount(featureFlagsByWorkspaceId, row.workspaceId);
+
+  return {
+    toolLinksByWorkspaceId,
+    credentialsByWorkspaceId,
+    appsByWorkspaceId,
+    communicationByWorkspaceId,
+    featureFlagsByWorkspaceId,
+  };
+}
+
+function controlPlaneToolSummary(row: ControlPlaneDeploymentRow, state: BatchedToolSummaryState): ControlPlaneToolSummary {
+  if (!row.hasDeployment) {
+    return {
+      status: "unavailable",
+      detail: "Deployment not provisioned.",
+      total: null,
+      toolLinks: null,
+      agentCredentials: null,
+      enterpriseApps: null,
+      communicationIntegrations: null,
+      enabledToolFlags: null,
+    };
+  }
+  if (!row.managedWorkspaceId) {
+    return {
+      status: "unavailable",
+      detail: "Local tool inventory requires a managed workspace link.",
+      total: null,
+      toolLinks: null,
+      agentCredentials: null,
+      enterpriseApps: null,
+      communicationIntegrations: null,
+      enabledToolFlags: null,
+    };
+  }
+
+  const toolLinks = state.toolLinksByWorkspaceId.get(row.managedWorkspaceId) ?? 0;
+  const agentCredentials = state.credentialsByWorkspaceId.get(row.managedWorkspaceId) ?? 0;
+  const enterpriseApps = state.appsByWorkspaceId.get(row.managedWorkspaceId) ?? 0;
+  const communicationIntegrations = state.communicationByWorkspaceId.get(row.managedWorkspaceId) ?? 0;
+  const enabledToolFlags = state.featureFlagsByWorkspaceId.get(row.managedWorkspaceId) ?? 0;
+  const total = toolLinks + agentCredentials + enterpriseApps + communicationIntegrations + enabledToolFlags;
+
+  return {
+    status: total > 0 ? "active" : "empty",
+    detail: total > 0
+      ? `${total} local tool/app signal(s).`
+      : "No local tool or app signals recorded.",
+    total,
+    toolLinks,
+    agentCredentials,
+    enterpriseApps,
+    communicationIntegrations,
+    enabledToolFlags,
+  };
+}
+
+function controlPlaneLastCheckedAt(row: ControlPlaneDeploymentRow, recorder: ControlPlaneRecorderMatrixRow) {
+  const candidates = [
+    row.lastHealthCheck,
+    row.lastReleaseCheck,
+    row.supportLastSyncAt,
+    recorder.observedAt,
+    latestSnapshotForKind(row, "HEALTH")?.observedAt,
+    latestSnapshotForKind(row, "RELEASE")?.observedAt,
+    latestSnapshotForKind(row, "SUPPORT_READY")?.observedAt,
+    latestSnapshotForKind(row, "INTEGRATION")?.observedAt,
+    row.updatedAt,
+  ].filter((value): value is Date => value instanceof Date);
+  if (candidates.length === 0) return null;
+  return candidates.sort((left, right) => right.getTime() - left.getTime())[0] ?? null;
+}
+
 function recorderProviderFromValue(value: unknown): MeetingRecorderProvider | null {
   return typeof value === "string" && MEETING_RECORDER_PROVIDERS.has(value)
     ? value as MeetingRecorderProvider
@@ -3503,7 +3708,11 @@ function controlPlaneMatrixIssues(params: {
   return issues;
 }
 
-function controlPlaneMatrixRow(row: ControlPlaneDeploymentRow, recorder: ControlPlaneRecorderMatrixRow): ControlPlaneMatrixRow {
+function controlPlaneMatrixRow(
+  row: ControlPlaneDeploymentRow,
+  recorder: ControlPlaneRecorderMatrixRow,
+  toolState: BatchedToolSummaryState,
+): ControlPlaneMatrixRow {
   const healthStatus = controlPlaneHealthStatus(row);
   const releaseDrift = controlPlaneReleaseDrift(row);
   const support = controlPlaneSupportSummary(row);
@@ -3518,6 +3727,7 @@ function controlPlaneMatrixRow(row: ControlPlaneDeploymentRow, recorder: Control
     detail: releaseDrift,
   };
   const agents = controlPlaneAgentSummary(row);
+  const tools = controlPlaneToolSummary(row, toolState);
   const users = controlPlaneUsersSummary(row);
   const recorderSummary = {
     status: recorder.status,
@@ -3539,7 +3749,9 @@ function controlPlaneMatrixRow(row: ControlPlaneDeploymentRow, recorder: Control
     support,
     recorder: recorderSummary,
     agents,
+    tools,
     users,
+    lastCheckedAt: controlPlaneLastCheckedAt(row, recorder),
     issues: controlPlaneMatrixIssues({
       row,
       health,
@@ -3571,13 +3783,18 @@ export async function getControlPlaneClientOptions(actor: AppActor): Promise<Con
 
 export async function listControlPlaneMatrix(actor: AppActor, params: Parameters<typeof listControlPlaneFleetPage>[1] = {}) {
   const fleet = await listControlPlaneFleetPage(actor, params);
-  const recorderRows = await buildControlPlaneRecorderRows(fleet.items);
+  const [recorderRows, toolState] = await Promise.all([
+    buildControlPlaneRecorderRows(fleet.items),
+    loadBatchedToolSummaryState(
+      fleet.items.map((row) => row.managedWorkspaceId).filter((workspaceId): workspaceId is string => Boolean(workspaceId)),
+    ),
+  ]);
   const recorderByDeploymentId = new Map(recorderRows.map((row) => [row.deploymentId, row]));
   const items = fleet.items.map((row) => controlPlaneMatrixRow(row, recorderByDeploymentId.get(row.id) ?? fallbackRecorderRow(
     row,
     "unavailable",
     "Recorder state is unavailable.",
-  )));
+  ), toolState));
   return {
     ...fleet,
     items,
@@ -3590,6 +3807,18 @@ export async function listControlPlaneMatrix(actor: AppActor, params: Parameters
       recordersAvailable: recorderRows.filter((row) => row.availability.status === "available").length,
       recordersNeedSetup: recorderRows.filter((row) => row.status === "needs_setup").length,
       remoteConnectorRequired: recorderRows.filter((row) => row.status === "requires_connector").length,
+    },
+  };
+}
+
+export async function getControlPlaneFleetOverview(actor: AppActor, params: Parameters<typeof listControlPlaneFleetPage>[1] = {}) {
+  const overview = await listControlPlaneMatrix(actor, params);
+  return {
+    ...overview,
+    cacheMeta: {
+      source: "local" as const,
+      generatedAt: new Date(),
+      liveRefreshRequired: true,
     },
   };
 }
@@ -6596,7 +6825,13 @@ async function probeControlPlaneDeploymentHealthCore(actor: AppActor, params: {
   let health: CustomerDeploymentHealthPayload | null = null;
 
   try {
-    const response = await fetch(`${deployment.url.replace(/\/$/, "")}/api/health`, { method: "GET" });
+    const response = await fetchWithControlPlaneTimeout(
+      `${deployment.url.replace(/\/$/, "")}/api/health`,
+      { method: "GET" },
+      CONTROL_PLANE_HEALTH_PROBE_TIMEOUT_MS,
+      "HEALTH_PROBE_TIMEOUT",
+      "Health probe timed out. Retry after the customer deployment is reachable.",
+    );
     health = await response.json().catch(() => null) as CustomerDeploymentHealthPayload | null;
     if (response.ok) {
       status = "ok";
@@ -6719,7 +6954,13 @@ export async function recordVerifiedControlPlaneRelease(actor: AppActor, params:
   let status = "ok";
   let error: string | null = null;
   try {
-    const response = await fetch(`${deployment.url.replace(/\/$/, "")}/api/health`, { method: "GET" });
+    const response = await fetchWithControlPlaneTimeout(
+      `${deployment.url.replace(/\/$/, "")}/api/health`,
+      { method: "GET" },
+      CONTROL_PLANE_HEALTH_PROBE_TIMEOUT_MS,
+      "HEALTH_PROBE_TIMEOUT",
+      "Health probe timed out. Retry after the customer deployment is reachable.",
+    );
     health = await response.json().catch(() => null) as CustomerDeploymentHealthPayload | null;
     invariant(response.ok, 400, "HEALTH_PROBE_FAILED", `Health probe returned status ${response.status}.`);
     const errors = runtimeHealthErrors(health);

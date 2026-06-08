@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
 import { Link } from "@/i18n/routing";
 import { useTranslations } from "next-intl";
@@ -14,6 +15,11 @@ interface SidebarProps {
 export function ControlPlaneSidebar({ className, onNavigate }: SidebarProps) {
   const pathname = usePathname() || "";
   const t = useTranslations("controlPlane");
+  const [pendingKey, setPendingKey] = useState<string | null>(null);
+
+  useEffect(() => {
+    setPendingKey(null);
+  }, [pathname]);
 
   return (
     <aside
@@ -37,20 +43,30 @@ export function ControlPlaneSidebar({ className, onNavigate }: SidebarProps) {
             </h3>
             {group.items.map((item) => {
               const active = isControlPlaneNavItemActive(pathname, item);
+              const pending = pendingKey === item.key;
               return (
                 <Link
                   key={item.key}
                   href={item.href}
-                  onClick={onNavigate}
+                  onClick={() => {
+                    if (!active) setPendingKey(item.key);
+                    onNavigate?.();
+                  }}
                   className={cn(
                     "flex items-center justify-between rounded-md border px-3 py-2 text-sm font-medium transition-colors",
                     active
                       ? "border-line bg-surface-strong text-white"
+                      : pending
+                        ? "border-amber-500/30 bg-amber-500/10 text-amber-100"
                       : "border-transparent text-muted hover:border-line hover:bg-surface hover:text-text"
                   )}
                 >
                   <span className="truncate">{t(item.labelKey)}</span>
-                  {active && <span className="h-1.5 w-1.5 rounded-full bg-brand-400" aria-hidden />}
+                  {pending ? (
+                    <span className="text-[9px] font-semibold uppercase tracking-wide text-amber-300">Loading</span>
+                  ) : active ? (
+                    <span className="h-1.5 w-1.5 rounded-full bg-brand-400" aria-hidden />
+                  ) : null}
                 </Link>
               );
             })}

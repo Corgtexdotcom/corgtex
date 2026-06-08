@@ -7,6 +7,7 @@ import {
   getControlPlaneClientOptions,
   getControlPlaneDeployment,
   listControlPlaneCustomerMembers,
+  getControlPlaneIntegrationStatus,
   listControlPlaneFeatureFlags,
   listControlPlaneReleaseRolloutJobs,
   listWorkspaceEnterpriseApps,
@@ -45,10 +46,10 @@ import { CustomerDetailClientTabs } from "./_components/detail-client-tabs";
 
 export const dynamic = "force-dynamic";
 
-const CONTROL_PLANE_DETAIL_TABS = new Set(["overview", "agents", "config", "users", "releases", "logs"]);
+const CONTROL_PLANE_DETAIL_TABS = new Set(["overview", "agents", "config", "users", "recorders", "releases", "logs"]);
 
 function normalizeDetailTab(tab?: string) {
-  return tab && CONTROL_PLANE_DETAIL_TABS.has(tab) ? tab as "overview" | "agents" | "config" | "users" | "releases" | "logs" : "overview";
+  return tab && CONTROL_PLANE_DETAIL_TABS.has(tab) ? tab as "overview" | "agents" | "config" | "users" | "recorders" | "releases" | "logs" : "overview";
 }
 
 export default async function ControlPlaneCustomerPage({
@@ -117,7 +118,18 @@ export default async function ControlPlaneCustomerPage({
     target: null,
   };
 
-  const [aiGovernanceRead, membersRead, featureFlagsRead, deployPreflightRead, rolloutsRead] = await Promise.all([
+  const [integrationsRead, aiGovernanceRead, membersRead, featureFlagsRead, deployPreflightRead, rolloutsRead] = await Promise.all([
+    activeTab === "recorders"
+      ? readControlPlaneCached(["control-plane", "deployment", "integrations", actorCacheKey, deploymentId], refresh, async () => (
+        getControlPlaneIntegrationStatus(actor, deploymentId).catch((err: unknown) => ({
+          deploymentId,
+          accessMode: "unavailable" as const,
+          hasManagedWorkspace: Boolean(customer.managedWorkspaceId),
+          integrations: [],
+          error: err instanceof Error ? err.message : "Unable to load integrations.",
+        }))
+      ))
+      : Promise.resolve({ data: emptyIntegrations, cachedAt: customerRead.cachedAt, cacheStatus: customerRead.cacheStatus }),
     activeTab === "agents"
       ? readControlPlaneCached(["control-plane", "deployment", "agents", actorCacheKey, deploymentId], refresh, () => (
         getControlPlaneAiGovernanceStatus(actor, deploymentId)
@@ -216,7 +228,7 @@ export default async function ControlPlaneCustomerPage({
 
       <CustomerDetailClientTabs
         customer={customer}
-        integrations={emptyIntegrations}
+        integrations={integrationsRead.data}
         context={emptyContext}
         aiGovernance={aiGovernanceRead.data}
         releases={{ deploymentId }}

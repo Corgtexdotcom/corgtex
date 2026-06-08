@@ -6,6 +6,7 @@ const redirect = vi.fn((location: string) => {
 const cookies = vi.fn();
 const clearSession = vi.fn();
 const resolveAgentActorFromBearer = vi.fn();
+const resolveControlPlaneAgentFromBearer = vi.fn();
 const resolveSessionActor = vi.fn();
 const isDatabaseUnavailableError = vi.fn();
 
@@ -32,6 +33,7 @@ vi.mock("@corgtex/domain", () => ({
   AppError: MockAppError,
   clearSession,
   resolveAgentActorFromBearer,
+  resolveControlPlaneAgentFromBearer,
   resolveSessionActor,
 }));
 
@@ -45,6 +47,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.clearAllMocks();
 });
 
@@ -59,6 +62,22 @@ describe("requirePageActor", () => {
     const { requirePageActor } = await import("./auth");
 
     await expect(requirePageActor()).rejects.toThrow("redirect:/login?error=session-unavailable");
+    expect(redirect).toHaveBeenCalledWith("/login?error=session-unavailable");
+  });
+
+  it("redirects to the friendly unavailable state when session lookup times out", async () => {
+    vi.useFakeTimers();
+    cookies.mockResolvedValue({
+      get: () => ({ value: "session-token" }),
+    });
+    resolveSessionActor.mockReturnValue(new Promise(() => undefined));
+    isDatabaseUnavailableError.mockReturnValue(false);
+
+    const { requirePageActor } = await import("./auth");
+    const result = expect(requirePageActor()).rejects.toThrow("redirect:/login?error=session-unavailable");
+    await vi.advanceTimersByTimeAsync(15_000);
+
+    await result;
     expect(redirect).toHaveBeenCalledWith("/login?error=session-unavailable");
   });
 });
