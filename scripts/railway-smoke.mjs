@@ -45,9 +45,10 @@ export function healthReleaseMismatch(health, expectedGitSha) {
   if (!expectedGitSha) return null;
 
   const actualGitSha = typeof health?.release?.gitSha === "string" ? health.release.gitSha : null;
-  if (actualGitSha === expectedGitSha) return null;
+  const actualImageTag = typeof health?.release?.imageTag === "string" ? health.release.imageTag : null;
+  if (actualGitSha === expectedGitSha || actualImageTag === expectedGitSha) return null;
 
-  return `/api/health release.gitSha ${actualGitSha ?? "missing"} did not match expected ${expectedGitSha}`;
+  return `/api/health release.gitSha ${actualGitSha ?? "missing"} or release.imageTag ${actualImageTag ?? "missing"} did not match expected ${expectedGitSha}`;
 }
 
 function errorMessage(error) {

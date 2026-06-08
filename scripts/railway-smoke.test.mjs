@@ -35,13 +35,22 @@ describe("railway smoke release validation", () => {
     }, "current-sha")).toBeNull();
   });
 
+  it("accepts matching health release image tags when runtime gitSha metadata lags", () => {
+    expect(healthReleaseMismatch({
+      release: {
+        gitSha: "older-sha",
+        imageTag: "current-sha",
+      },
+    }, "current-sha")).toBeNull();
+  });
+
   it("reports mismatched or missing health release SHAs", () => {
     expect(healthReleaseMismatch({
       release: {
         gitSha: "older-sha",
       },
-    }, "current-sha")).toContain("older-sha did not match expected current-sha");
-    expect(healthReleaseMismatch({}, "current-sha")).toContain("missing did not match expected current-sha");
+    }, "current-sha")).toContain("older-sha or release.imageTag missing did not match expected current-sha");
+    expect(healthReleaseMismatch({}, "current-sha")).toContain("release.gitSha missing or release.imageTag missing did not match expected current-sha");
   });
 
   it("reports non-JSON health payloads as retryable mismatches", () => {

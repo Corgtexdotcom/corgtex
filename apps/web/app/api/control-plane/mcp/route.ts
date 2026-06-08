@@ -19,8 +19,8 @@ import {
   getControlPlaneDeployment,
   getControlPlaneIntegrationStatus,
   getControlPlaneReleaseStatus,
+  listControlPlaneCustomerSummaries,
   listControlPlaneCustomerMembers,
-  listControlPlaneDeployments,
   listControlPlaneFeatureFlags,
   listControlPlaneReleaseRolloutJobs,
   listSelfServeCustomerRegistry,
@@ -57,7 +57,15 @@ const tools = [
   {
     name: "list_customers",
     description: "List customer deployments registered in the Corgtex control plane.",
-    inputSchema: { type: "object", properties: {} },
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string" },
+        health: { type: "string" },
+        support: { type: "string" },
+        limit: { type: "number" },
+      },
+    },
   },
   {
     name: "list_self_serve_customers",
@@ -728,7 +736,12 @@ export async function POST(request: NextRequest) {
     }
 
     if (name === "list_customers") {
-      return rpcResult(id, textContent(await listControlPlaneDeployments(actor)));
+      return rpcResult(id, textContent(await listControlPlaneCustomerSummaries(actor, {
+        query: argOptionalString(args, "query"),
+        health: argOptionalString(args, "health"),
+        support: argOptionalString(args, "support"),
+        limit: argNumber(args, "limit", 500),
+      })));
     }
     if (name === "list_self_serve_customers") {
       return rpcResult(id, textContent(await listSelfServeCustomerRegistry(actor, {

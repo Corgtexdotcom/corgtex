@@ -601,9 +601,14 @@ export async function probeCustomerDeploymentHealth(actor: AppActor, id: string)
       if (health?.runtime?.storage && health.runtime.storage !== "configured") {
         runtimeErrors.push(`Storage ${health.runtime.storage}`);
       }
-      const actualRelease = health?.release?.imageTag || health?.release?.gitSha || null;
-      if (deployment.releaseImageTag && actualRelease && actualRelease !== deployment.releaseImageTag) {
-        runtimeErrors.push(`Release drift: expected ${deployment.releaseImageTag}, got ${actualRelease}`);
+      const actualReleaseValues = [health?.release?.imageTag, health?.release?.gitSha]
+        .filter((value): value is string => typeof value === "string" && value.trim().length > 0);
+      if (
+        deployment.releaseImageTag &&
+        actualReleaseValues.length > 0 &&
+        !actualReleaseValues.includes(deployment.releaseImageTag)
+      ) {
+        runtimeErrors.push(`Release drift: expected ${deployment.releaseImageTag}, got ${actualReleaseValues.join(" / ")}`);
       }
       if (runtimeErrors.length > 0) {
         status = "degraded";

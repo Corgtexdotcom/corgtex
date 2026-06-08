@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   listControlPlaneDeployments: vi.fn(),
+  listControlPlaneCustomerSummaries: vi.fn(),
   listSelfServeCustomerRegistry: vi.fn(),
   upsertSelfServeSmokeRun: vi.fn(),
   createSelfServeSupportSession: vi.fn(),
@@ -30,6 +31,7 @@ vi.mock("@corgtex/domain", () => ({
   getControlPlaneDeployment: vi.fn(), getControlPlaneIntegrationStatus: vi.fn(), getControlPlaneReleaseStatus: vi.fn(),
   listControlPlaneCustomerMembers: vi.fn(),
   listControlPlaneDeployments: mocks.listControlPlaneDeployments,
+  listControlPlaneCustomerSummaries: mocks.listControlPlaneCustomerSummaries,
   listSelfServeCustomerRegistry: mocks.listSelfServeCustomerRegistry,
   upsertSelfServeSmokeRun: mocks.upsertSelfServeSmokeRun,
   createSelfServeSupportSession: mocks.createSelfServeSupportSession,
@@ -61,6 +63,7 @@ describe("/api/control-plane/mcp", () => {
     mocks.resolveControlPlaneRequestActor.mockResolvedValue({ kind: "agent", authProvider: "control-plane", label: "control-plane-agent", scopes: ["control-plane:read"] });
     mocks.requireControlPlaneAccess.mockResolvedValue({ role: "OPERATOR" });
     mocks.listControlPlaneDeployments.mockResolvedValue([]);
+    mocks.listControlPlaneCustomerSummaries.mockResolvedValue([]);
     mocks.listSelfServeCustomerRegistry.mockResolvedValue({ items: [], summary: { total: 0 } });
     mocks.upsertSelfServeSmokeRun.mockResolvedValue({ id: "smoke-run-1" });
     mocks.createSelfServeSupportSession.mockResolvedValue({ id: "support-session-1" });
@@ -137,6 +140,55 @@ describe("/api/control-plane/mcp", () => {
       "run_customer_support_operation",
     ]);
   });
+
+  it("returns a compatible lean customer array from list_customers", async () => {
+    mocks.listControlPlaneCustomerSummaries.mockResolvedValueOnce([{
+      id: "deployment-1",
+      label: "Acme Production",
+      customerSlug: "acme",
+      url: "https://acme.test",
+      hasDeployment: true,
+      hasSupportCredential: true,
+      supportConnectorStatus: "connected",
+      lastHealthStatus: "ok",
+      lastHealthError: null,
+      lastHealthCheck: new Date("2026-06-01T10:00:00.000Z"),
+      lastReleaseCheck: new Date("2026-06-01T10:01:00.000Z"),
+      releaseImageTag: "sha-1",
+      releaseVersion: "main-2026-06-01",
+      managedWorkspaceId: "ws-1",
+      provisioningStatus: "active",
+      supportOperations: [],
+    }]);
+    const { POST } = await import("./route");
+
+    const response = await POST(request({
+      jsonrpc: "2.0",
+      id: 11,
+      method: "tools/call",
+      params: {
+        name: "list_customers",
+        arguments: { query: "acme", health: "ok", support: "connected", limit: 42 },
+      },
+    }) as never);
+    const body = await response.json();
+    const parsed = JSON.parse(body.result.content[0].text);
+
+    expect(parsed).toEqual([expect.objectContaining({
+      id: "deployment-1",
+      label: "Acme Production",
+      customerSlug: "acme",
+      supportOperations: [],
+    })]);
+    expect(mocks.listControlPlaneCustomerSummaries).toHaveBeenCalledWith(expect.objectContaining({ kind: "agent" }), {
+      query: "acme",
+      health: "ok",
+      support: "connected",
+      limit: 42,
+    });
+    expect(mocks.listControlPlaneDeployments).not.toHaveBeenCalled();
+  });
+
   it("denies mutating tools when the control-plane agent only has read scope", async () => {
     const { POST } = await import("./route");
     const response = await POST(request({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "run_context_sync", arguments: { deploymentId: "inst-1", reason: "repair" } } }) as never);

@@ -1460,10 +1460,14 @@ describe("control plane domain", () => {
         primaryDeployment: expect.any(Object),
       }),
     }));
+    const accountListArgs = prismaMock.customerAccount.findMany.mock.calls[0]?.[0] as any;
+    expect(accountListArgs.include.primaryDeployment.include.supportOperations).toBeUndefined();
+    expect(accountListArgs.include.primaryDeployment.include._count).toBeUndefined();
     expect(result[0]).toMatchObject({
       id: "inst-1",
       customerAccountId: "cust-1",
       hasSupportCredential: true,
+      supportOperations: [],
       managedWorkspace: {
         slug: "acme",
         _count: { brainArticles: 12 },
@@ -1503,6 +1507,78 @@ describe("control plane domain", () => {
       deploymentStatus: "DRAFT",
       supportConnectorStatus: "not_configured",
     });
+  });
+
+  it("returns lean MCP-compatible customer summaries", async () => {
+    const { listControlPlaneCustomerSummaries } = await import("./control-plane");
+    const observedAt = new Date("2026-06-01T10:00:00.000Z");
+    prismaMock.customerAccount.findMany.mockResolvedValueOnce([
+      {
+        id: "cust-1",
+        slug: "acme",
+        displayName: "Acme",
+        status: "ACTIVE",
+        managementAuthority: "CORGTEX",
+        supportOwnerEmail: null,
+        notes: null,
+        primaryDeploymentId: "inst-1",
+        createdAt: observedAt,
+        updatedAt: observedAt,
+        fleetSnapshots: [],
+        deployments: [],
+        primaryDeployment: {
+          id: "inst-1",
+          label: "Acme",
+          url: "https://acme.test",
+          customerSlug: "acme",
+          customerAccountId: "cust-1",
+          supportCredentialEnc: "encrypted-token",
+          supportConnectorStatus: "connected",
+          provisioningStatus: "active",
+          lastHealthStatus: "ok",
+          lastHealthError: null,
+          lastHealthCheck: observedAt,
+          lastReleaseCheck: observedAt,
+          releaseImageTag: "sha-1",
+          releaseVersion: "main-2026-06-01",
+          managedWorkspaceId: "ws-1",
+          managedWorkspace: {
+            id: "ws-1",
+            slug: "acme",
+            name: "Acme",
+            _count: { members: 2, agentRuns: 1 },
+          },
+          fleetSnapshots: [],
+        },
+      },
+    ] as any);
+    prismaMock.customerDeployment.findMany.mockResolvedValueOnce([]);
+
+    const result = await listControlPlaneCustomerSummaries(operatorActor, {
+      query: "acme",
+      health: "ok",
+      support: "connected",
+      limit: 10,
+    });
+
+    expect(result).toEqual([{
+      id: "inst-1",
+      label: "Acme",
+      customerSlug: "acme",
+      url: "https://acme.test",
+      hasDeployment: true,
+      hasSupportCredential: true,
+      supportConnectorStatus: "connected",
+      lastHealthStatus: "ok",
+      lastHealthError: null,
+      lastHealthCheck: observedAt,
+      lastReleaseCheck: observedAt,
+      releaseImageTag: "sha-1",
+      releaseVersion: "main-2026-06-01",
+      managedWorkspaceId: "ws-1",
+      provisioningStatus: "active",
+      supportOperations: [],
+    }]);
   });
 
   it("builds client switcher options and wide local fleet overview rows without impersonation state", async () => {
@@ -1683,6 +1759,18 @@ describe("control plane domain", () => {
       users: { status: "requires_connector" },
     });
     expect(matrix.items.find((row) => row.id === "remote-1")?.issues.map((issue) => issue.source)).toContain("release");
+
+    prismaMock.meetingRecording.groupBy
+      .mockResolvedValueOnce([{ workspaceId: "ws-1", _sum: { durationSeconds: 3600 } }])
+      .mockResolvedValueOnce([{ workspaceId: "ws-1", _count: { _all: 2 } }]);
+    const filteredMatrix = await getControlPlaneFleetOverview(operatorActor, {
+      query: "remote",
+      issues: "1",
+      missingTools: "1",
+      pageSize: 25,
+    });
+    expect(filteredMatrix.total).toBe(1);
+    expect(filteredMatrix.items.map((row) => row.id)).toEqual(["remote-1"]);
   });
 
   it("builds a 100-client local fleet overview without remote connector calls", async () => {
