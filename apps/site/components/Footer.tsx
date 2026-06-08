@@ -24,7 +24,6 @@ export function Footer() {
           <div className="footer-col">
             <h4>{t("product")}</h4>
             <ul>
-              <li><a href={localePath("/ai-readiness")}>{t("aiReadiness")}</a></li>
               <li><a href={demoGatePathForLocale(locale)}>{t("liveDemo")}</a></li>
               <li><a href={localePath("/pricing")}>{t("pricing")}</a></li>
               <li><a href={localePath("/faq")}>{t("faq")}</a></li>

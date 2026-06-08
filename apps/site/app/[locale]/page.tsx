@@ -4,17 +4,17 @@ import { DemoGateForm } from "../../components/DemoGateForm";
 import { ScrollReveal } from "../../components/ScrollReveal";
 import { localeFromParams, hrefFor, type LocaleParams } from "../../lib/locale";
 import { buildMetadata } from "../../lib/metadata";
-import { getSiteConfig } from "../../lib/site";
+import { getSiteConfig, signupUrlForLocale } from "../../lib/site";
 
 const homeCopy = {
   en: {
     metadata: {
       title: "Corgtex",
-      description: "Run your AI workforce like an accountable team. See every agent, govern it with your rules, and know what it costs.",
+      description: "Empower your people and govern your AI. Corgtex gives self-managed, employee-owned teams a governed AI workforce - every agent visible, every rule yours, every cost in the open.",
     },
-    heroTitle: "Run your AI workforce like an accountable team.",
-    heroSubtitle: "See what every agent is doing. Govern it with your rules. Know what it costs. Live in weeks, with your people still in control.",
-    aiReadinessCta: "Run AI Readiness X-Ray",
+    heroTitle: "Empower your people. Govern your AI.",
+    heroSubtitle: "Corgtex gives self-managed, employee-owned teams a governed AI workforce - every agent visible, every rule yours, every cost in the open. So your people stay in control as AI scales the work.",
+    freeTrial: "Start Free Trial",
     briefing: "Schedule a Briefing",
     dailyLabel: "The Daily Surface",
     dailyTitle: "Every morning, one page. Everything your AI workforce produced overnight.",
@@ -44,9 +44,9 @@ const homeCopy = {
         result: "Cross-organization visibility without surveillance. Tensions surfaced before they cost money.",
       },
     ],
-    commandLabel: "Command Your Workforce",
-    commandTitle: "Direct Your Organization",
-    commandBody: "Don't just monitor. Act. Query agent performance, trigger governance workflows, or redirect AI resources from a single interface.",
+    commandLabel: "Direct Your AI, Together",
+    commandTitle: "Empower Every Member to Steer the Work",
+    commandBody: "Don't just monitor. Your team queries agent performance, triggers governance workflows, and redirects AI resources - distributed authority, not a single command desk.",
     terminal: {
       q1: "What needs my attention this week?",
       a1: "Corgtex: Three items requiring attention:",
@@ -61,12 +61,12 @@ const homeCopy = {
     capabilitiesBody: "Everything you need to see, govern, and afford your AI workforce in a single operating surface.",
     capabilities: [
       { label: "Visibility", title: "Workforce Graph", body: "Every AI agent and embedded AI feature, what they're doing, what data they touch, who owns them." },
-      { label: "Control", title: "Governance & Guardrails", body: "Policies, approvals, and human review keep high-impact AI actions under your rules." },
+      { label: "Shared Control", title: "Governance & Guardrails", body: "Policies, approvals, and human review keep high-impact AI actions under your people's rules - not a black box." },
       { label: "Economics", title: "Spend & ROI", body: "AI costs attributed to work, budgets, forecasts, surfaced next to output." },
     ],
     productionLabel: "In Production",
     productionTitle: "Already Powering Real Transformation",
-    productionBody: "Our first enterprise client uses Corgtex's governed AI workforce to acquire and transform 1,000 companies across the United States into self-managed, employee-owned organizations.",
+    productionBody: "Our first client uses Corgtex's governed AI workforce to transform companies across the United States into self-managed, employee-owned organizations - with people, not the platform, staying in control.",
     implementationLabel: "Implementation",
     implementationTitle: "Live in Weeks, Yours to Own",
     implementationBody: "A simple path from fragmented tooling to an intelligent, governed AI workforce that your organization can understand, trust, and control.",
@@ -88,11 +88,11 @@ const homeCopy = {
   es: {
     metadata: {
       title: "Corgtex",
-      description: "Dirige tu fuerza laboral de IA como un equipo responsable. Ve cada agente, gobierna con tus reglas y conoce el costo.",
+      description: "Empodera a tu gente y gobierna tu IA. Corgtex da a los equipos autogestionados y propiedad de sus empleados una fuerza laboral de IA gobernada: cada agente visible, tus reglas y costos claros.",
     },
-    heroTitle: "Dirige tu fuerza laboral de IA como un equipo responsable.",
-    heroSubtitle: "Ve qué hace cada agente. Gobierna con tus reglas. Conoce el costo. En vivo en semanas, con tu equipo en control.",
-    aiReadinessCta: "X-Ray de preparación IA",
+    heroTitle: "Empodera a tu gente. Gobierna tu IA.",
+    heroSubtitle: "Corgtex da a los equipos autogestionados y propiedad de sus empleados una fuerza laboral de IA gobernada: cada agente visible, tus reglas y costos claros. Para que tu gente siga en control mientras la IA escala el trabajo.",
+    freeTrial: "Iniciar prueba gratis",
     briefing: "Agendar una sesión",
     dailyLabel: "La superficie diaria",
     dailyTitle: "Cada mañana, una sola página. Todo lo que tu fuerza laboral de IA produjo durante la noche.",
@@ -122,9 +122,9 @@ const homeCopy = {
         result: "Visibilidad transversal sin vigilancia. Las tensiones aparecen antes de costar dinero.",
       },
     ],
-    commandLabel: "Dirige tu fuerza laboral",
-    commandTitle: "Coordina tu organización",
-    commandBody: "No solo monitorees. Actúa. Consulta el rendimiento de agentes, activa flujos de gobernanza o redirige recursos de IA desde una sola interfaz.",
+    commandLabel: "Dirige tu IA, en equipo",
+    commandTitle: "Empodera a cada miembro para guiar el trabajo",
+    commandBody: "No solo monitorees. Tu equipo consulta el rendimiento de agentes, activa flujos de gobernanza y redirige recursos de IA: autoridad distribuida, no un único centro de mando.",
     terminal: {
       q1: "¿Qué requiere mi atención esta semana?",
       a1: "Corgtex: Tres elementos requieren atención:",
@@ -139,12 +139,12 @@ const homeCopy = {
     capabilitiesBody: "Todo lo que necesitas para ver, gobernar y costear tu fuerza laboral de IA en una sola superficie operativa.",
     capabilities: [
       { label: "Visibilidad", title: "Workforce Graph", body: "Cada agente de IA y función embebida, qué hace, qué datos toca y quién lo posee." },
-      { label: "Control", title: "Gobernanza y guardrails", body: "Políticas, aprobaciones y revisión humana mantienen las acciones de IA de alto impacto bajo tus reglas." },
+      { label: "Control compartido", title: "Gobernanza y guardrails", body: "Políticas, aprobaciones y revisión humana mantienen las acciones de IA de alto impacto bajo las reglas de tu gente, no en una caja negra." },
       { label: "Economía", title: "Gasto y ROI", body: "Costos de IA atribuidos al trabajo, presupuestos y proyecciones junto a los resultados." },
     ],
     productionLabel: "En producción",
     productionTitle: "Ya impulsa transformación real",
-    productionBody: "Nuestro primer cliente enterprise usa la fuerza laboral de IA gobernada de Corgtex para adquirir y transformar 1,000 empresas en Estados Unidos hacia organizaciones autogestionadas y propiedad de sus empleados.",
+    productionBody: "Nuestro primer cliente usa la fuerza laboral de IA gobernada de Corgtex para transformar empresas en Estados Unidos hacia organizaciones autogestionadas y propiedad de sus empleados, con las personas - no la plataforma - en control.",
     implementationLabel: "Implementación",
     implementationTitle: "En vivo en semanas, bajo tu control",
     implementationBody: "Un camino simple desde herramientas fragmentadas hacia una fuerza laboral de IA inteligente y gobernada que tu organización puede entender, confiar y controlar.",
@@ -178,6 +178,7 @@ export default async function HomePage({ params }: LocaleParams) {
   const locale = await localeFromParams(params);
   const copy = homeCopy[locale];
   const { bookDemoUrl } = getSiteConfig();
+  const signupUrl = signupUrlForLocale(locale);
 
   return (
     <>
@@ -193,10 +194,7 @@ export default async function HomePage({ params }: LocaleParams) {
             <ScrollReveal delay={300}>
               <div className="btn-group">
                 <DemoGateForm />
-                <a href={hrefFor(locale, "/ai-readiness")} className="btn btn-secondary">
-                  {copy.aiReadinessCta}
-                </a>
-                <a href={bookDemoUrl} className="btn btn-primary" target="_blank" rel="noopener noreferrer">
+                <a href={bookDemoUrl} className="btn btn-secondary" target="_blank" rel="noopener noreferrer">
                   {copy.briefing}
                 </a>
               </div>
@@ -274,7 +272,9 @@ export default async function HomePage({ params }: LocaleParams) {
                 <h2>{copy.commandTitle}</h2>
                 <p>{copy.commandBody}</p>
                 <div className="btn-group">
-                  <DemoGateForm />
+                  <a href={signupUrl} className="btn btn-primary">
+                    {copy.freeTrial}
+                  </a>
                 </div>
               </div>
               <div className="demo-panel-visual">
@@ -417,7 +417,6 @@ export default async function HomePage({ params }: LocaleParams) {
             <h2>{copy.finalTitle}</h2>
             <p>{copy.finalBody}</p>
             <div className="btn-group">
-              <DemoGateForm />
               <a href={bookDemoUrl} className="btn btn-primary" target="_blank" rel="noopener noreferrer">
                 {copy.briefing}
               </a>
