@@ -8,8 +8,10 @@ import {
   randomOpaqueToken,
   sha256,
 } from "@corgtex/shared";
+import type { AgentActor, AppActor } from "@corgtex/shared";
 import { AppError, invariant } from "./errors";
 import { appendEvents } from "./events";
+import { isGlobalOperator } from "./auth";
 import { getMcpPublicUrl } from "./mcp-connector";
 import { sendMemberSetupEmail, type MemberSetupEmailStatus } from "./members";
 import {
@@ -50,6 +52,7 @@ export const TRIAL_CONNECTOR_SCOPES = [
 const AGENT_CREDENTIAL_PREFIX = "agentc-";
 const MEMBER_SETUP_TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const TRIAL_IDEMPOTENCY_SCOPE = "procurement:v1:trials";
+const CONTROL_PLANE_CLIENTS_WRITE_SCOPE = "control-plane:clients:write";
 
 const PERSONAL_EMAIL_DOMAINS = new Set([
   "aol.com",
@@ -104,6 +107,25 @@ type RiskAssessment = {
 };
 
 type TrialUniquenessReason = "ACTIVE_TRIAL_FOR_EMAIL" | "ACTIVE_TRIAL_FOR_DOMAIN";
+
+function isControlPlaneAgent(actor: AppActor): actor is AgentActor & { authProvider: "control-plane" } {
+  return actor.kind === "agent" && actor.authProvider === "control-plane";
+}
+
+function requireTrialReviewWriteAccess(actor: AppActor) {
+  if (isGlobalOperator(actor)) return;
+  if (isControlPlaneAgent(actor)) {
+    const scopes = new Set(actor.scopes?.length ? actor.scopes : []);
+    invariant(
+      scopes.has("control-plane:*") || scopes.has(CONTROL_PLANE_CLIENTS_WRITE_SCOPE),
+      403,
+      "CONTROL_PLANE_SCOPE_REQUIRED",
+      `Control Plane scope required: ${CONTROL_PLANE_CLIENTS_WRITE_SCOPE}.`,
+    );
+    return;
+  }
+  throw new AppError(403, "FORBIDDEN", "Control plane trial review access is required.");
+}
 
 function normalizeEmail(email: string) {
   return email.trim().toLowerCase();
@@ -169,6 +191,12 @@ function sourceAgentJson(sourceAgent?: Record<string, unknown> | null): Prisma.I
   return sourceAgent ? (sourceAgent as Prisma.InputJsonObject) : undefined;
 }
 
+function sourceAgentRecord(sourceAgent: unknown): Record<string, unknown> | null {
+  return sourceAgent && typeof sourceAgent === "object" && !Array.isArray(sourceAgent)
+    ? sourceAgent as Record<string, unknown>
+    : null;
+}
+
 function normalizeInput(input: ProcurementTrialInput): NormalizedTrialInput {
   const companyName = input.companyName.trim();
   const adminEmail = normalizeEmail(input.adminEmail);
@@ -187,6 +215,26 @@ function normalizeInput(input: ProcurementTrialInput): NormalizedTrialInput {
     acceptedTermsVersion,
     sourceAgent: input.sourceAgent ?? null,
     emailDomain: domain,
+  };
+}
+
+function normalizedInputFromTrial(trial: {
+  companyName: string;
+  adminEmail: string;
+  adminName: string | null;
+  billingContactEmail: string | null;
+  acceptedTermsVersion: string;
+  sourceAgent: unknown;
+  emailDomain: string;
+}): NormalizedTrialInput {
+  return {
+    companyName: trial.companyName,
+    adminEmail: trial.adminEmail,
+    adminName: trial.adminName,
+    billingContactEmail: trial.billingContactEmail,
+    acceptedTermsVersion: trial.acceptedTermsVersion,
+    sourceAgent: sourceAgentRecord(trial.sourceAgent),
+    emailDomain: trial.emailDomain,
   };
 }
 
@@ -516,6 +564,35 @@ async function assessTrialRisk(input: NormalizedTrialInput): Promise<RiskAssessm
   };
 }
 
+async function assertNoActiveTrialForIdentity(input: NormalizedTrialInput, excludeTrialId?: string | null) {
+  const now = new Date();
+  const exclusion = excludeTrialId ? { id: { not: excludeTrialId } } : {};
+  const [activeForEmail, activeForDomain] = await Promise.all([
+    prisma.procurementTrial.count({
+      where: {
+        ...exclusion,
+        adminEmail: input.adminEmail,
+        status: TRIAL_STATUS_ACTIVE,
+        trialExpiresAt: { gt: now },
+      },
+    }),
+    prisma.procurementTrial.count({
+      where: {
+        ...exclusion,
+        emailDomain: input.emailDomain,
+        status: TRIAL_STATUS_ACTIVE,
+        trialExpiresAt: { gt: now },
+      },
+    }),
+  ]);
+  if (activeForEmail > 0) {
+    throw new AppError(409, "ACTIVE_TRIAL_FOR_EMAIL", "An active trial already exists for this admin email.");
+  }
+  if (activeForDomain > 0) {
+    throw new AppError(409, "ACTIVE_TRIAL_FOR_DOMAIN", "An active trial already exists for this email domain.");
+  }
+}
+
 function trialLimits() {
   return {
     modelMonthlyBudgetCents: PROCUREMENT_TRIAL_LIMITS.modelMonthlyBudgetCents,
@@ -767,8 +844,11 @@ async function createActiveTrial(params: {
   risk: RiskAssessment;
   expiresAt: Date;
   origin?: string;
-  idemKeyHash: string;
+  idemKeyHash?: string;
   idemRequestHash: string;
+  reviewTrialId?: string;
+  reviewReason?: string;
+  actor?: AppActor;
 }) {
   const created = await prisma.$transaction(async (tx) => {
     const slug = await findAvailableSlug(tx, params.normalized.companyName);
@@ -890,35 +970,43 @@ async function createActiveTrial(params: {
       },
     });
 
-    const trial = await tx.procurementTrial.create({
-      data: {
-        workspaceId: workspace.id,
-        agentCredentialId: credential.id,
-        status: TRIAL_STATUS_ACTIVE,
-        companyName: params.normalized.companyName,
-        adminEmail: params.normalized.adminEmail,
-        adminName: params.normalized.adminName,
-        emailDomain: params.normalized.emailDomain,
-        billingContactEmail: params.normalized.billingContactEmail,
-        acceptedTermsVersion: params.normalized.acceptedTermsVersion,
-        sourceAgent: sourceAgentJson(params.normalized.sourceAgent),
-        riskStatus: params.risk.riskStatus,
-        riskReasons: params.risk.riskReasons,
-        connectorTokenEnc: encryptSecret(connectorToken),
-        connectorTokenRevealedAt: new Date(),
-        modelMonthlyBudgetCents: PROCUREMENT_TRIAL_LIMITS.modelMonthlyBudgetCents,
-        storageLimitMb: PROCUREMENT_TRIAL_LIMITS.storageLimitMb,
-        memberLimit: PROCUREMENT_TRIAL_LIMITS.memberLimit,
-        mcpDailyCallLimit: PROCUREMENT_TRIAL_LIMITS.mcpDailyCallLimit,
-        trialExpiresAt: params.expiresAt,
-      },
-    });
+    const trialData = {
+      workspaceId: workspace.id,
+      agentCredentialId: credential.id,
+      status: TRIAL_STATUS_ACTIVE,
+      companyName: params.normalized.companyName,
+      adminEmail: params.normalized.adminEmail,
+      adminName: params.normalized.adminName,
+      emailDomain: params.normalized.emailDomain,
+      billingContactEmail: params.normalized.billingContactEmail,
+      acceptedTermsVersion: params.normalized.acceptedTermsVersion,
+      sourceAgent: sourceAgentJson(params.normalized.sourceAgent),
+      riskStatus: params.risk.riskStatus,
+      riskReasons: params.risk.riskReasons,
+      connectorTokenEnc: encryptSecret(connectorToken),
+      connectorTokenRevealedAt: new Date(),
+      modelMonthlyBudgetCents: PROCUREMENT_TRIAL_LIMITS.modelMonthlyBudgetCents,
+      storageLimitMb: PROCUREMENT_TRIAL_LIMITS.storageLimitMb,
+      memberLimit: PROCUREMENT_TRIAL_LIMITS.memberLimit,
+      mcpDailyCallLimit: PROCUREMENT_TRIAL_LIMITS.mcpDailyCallLimit,
+      trialExpiresAt: params.expiresAt,
+      suspendedAt: null,
+      suspensionReason: null,
+    };
+    const trial = params.reviewTrialId
+      ? await tx.procurementTrial.update({
+          where: { id: params.reviewTrialId },
+          data: trialData,
+        })
+      : await tx.procurementTrial.create({
+          data: trialData,
+        });
 
     await tx.auditLog.create({
       data: {
         workspaceId: workspace.id,
-        actorUserId: null,
-        action: "procurement_trial.created",
+        actorUserId: params.actor?.kind === "user" ? params.actor.user.id : null,
+        action: params.reviewTrialId ? "procurement_trial.approved" : "procurement_trial.created",
         entityType: "ProcurementTrial",
         entityId: trial.id,
         meta: {
@@ -926,18 +1014,20 @@ async function createActiveTrial(params: {
           emailDomain: params.normalized.emailDomain,
           riskStatus: params.risk.riskStatus,
           riskReasons: params.risk.riskReasons,
+          ...(params.reviewReason ? { reason: params.reviewReason } : {}),
         },
       },
     });
     await appendEvents(tx, [
       {
         workspaceId: workspace.id,
-        type: "procurement_trial.created",
+        type: params.reviewTrialId ? "procurement_trial.approved" : "procurement_trial.created",
         aggregateType: "ProcurementTrial",
         aggregateId: trial.id,
         payload: {
           trialId: trial.id,
           agentCredentialId: credential.id,
+          ...(params.reviewReason ? { reason: params.reviewReason } : {}),
         },
       },
     ]);
@@ -946,15 +1036,29 @@ async function createActiveTrial(params: {
       origin: params.origin,
       trial,
     });
-    await tx.procurementIdempotencyKey.create({
-      data: {
-        scope: TRIAL_IDEMPOTENCY_SCOPE,
-        keyHash: params.idemKeyHash,
-        requestHash: params.idemRequestHash,
-        workspaceId: workspace.id,
-        responseJson: response as Prisma.InputJsonObject,
-      },
-    });
+    if (params.idemKeyHash) {
+      await tx.procurementIdempotencyKey.create({
+        data: {
+          scope: TRIAL_IDEMPOTENCY_SCOPE,
+          keyHash: params.idemKeyHash,
+          requestHash: params.idemRequestHash,
+          workspaceId: workspace.id,
+          responseJson: response as Prisma.InputJsonObject,
+        },
+      });
+    } else {
+      await tx.procurementIdempotencyKey.updateMany({
+        where: {
+          scope: TRIAL_IDEMPOTENCY_SCOPE,
+          requestHash: params.idemRequestHash,
+          workspaceId: null,
+        },
+        data: {
+          workspaceId: workspace.id,
+          responseJson: response as Prisma.InputJsonObject,
+        },
+      });
+    }
 
     return {
       admin,
@@ -981,10 +1085,19 @@ async function createActiveTrial(params: {
       where: { id: created.trial.id },
       data: { claimEmailStatus: claimEmailStatus as unknown as Prisma.InputJsonValue },
     }),
-    prisma.procurementIdempotencyKey.update({
-      where: { keyHash: params.idemKeyHash },
-      data: { responseJson: responseWithEmailStatus as Prisma.InputJsonObject },
-    }),
+    params.idemKeyHash
+      ? prisma.procurementIdempotencyKey.update({
+          where: { keyHash: params.idemKeyHash },
+          data: { responseJson: responseWithEmailStatus as Prisma.InputJsonObject },
+        })
+      : prisma.procurementIdempotencyKey.updateMany({
+          where: {
+            scope: TRIAL_IDEMPOTENCY_SCOPE,
+            requestHash: params.idemRequestHash,
+            workspaceId: created.trial.workspaceId,
+          },
+          data: { responseJson: responseWithEmailStatus as Prisma.InputJsonObject },
+        }),
   ]);
 
   return {
@@ -1076,6 +1189,106 @@ export async function createProcurementTrial(params: {
     }
     throw error;
   }
+}
+
+export async function approveReviewGatedProcurementTrial(actor: AppActor, params: {
+  trialId: string;
+  reason: string;
+  origin?: string;
+}) {
+  requireTrialReviewWriteAccess(actor);
+  const reason = params.reason.trim();
+  invariant(reason.length > 0, 400, "INVALID_INPUT", "Approval reason is required.");
+
+  const trial = await prisma.procurementTrial.findUnique({
+    where: { id: params.trialId },
+    select: {
+      id: true,
+      status: true,
+      workspaceId: true,
+      companyName: true,
+      adminEmail: true,
+      adminName: true,
+      emailDomain: true,
+      billingContactEmail: true,
+      acceptedTermsVersion: true,
+      sourceAgent: true,
+      riskStatus: true,
+      riskReasons: true,
+    },
+  });
+  invariant(trial, 404, "NOT_FOUND", "Procurement trial not found.");
+  invariant(trial.status === TRIAL_STATUS_REVIEW_REQUIRED, 400, "INVALID_STATE", "Only review-required trials can be approved.");
+  invariant(!trial.workspaceId, 400, "INVALID_STATE", "This trial already has a workspace.");
+
+  const normalized = normalizedInputFromTrial(trial);
+  await expireStaleTrialsForIdentity(normalized);
+  await assertNoActiveTrialForIdentity(normalized, trial.id);
+
+  const riskStatus: RiskAssessment["riskStatus"] = trial.riskStatus === "LOW" ? "LOW" : "REVIEW_REQUIRED";
+  const expiresAt = new Date(Date.now() + PROCUREMENT_TRIAL_TTL_DAYS * 24 * 60 * 60 * 1000);
+  try {
+    return await createActiveTrial({
+      normalized,
+      risk: {
+        riskStatus,
+        riskReasons: trial.riskReasons,
+      },
+      expiresAt,
+      origin: params.origin,
+      idemRequestHash: requestHash(normalized),
+      reviewTrialId: trial.id,
+      reviewReason: reason,
+      actor,
+    });
+  } catch (error) {
+    const uniquenessReason = activeTrialUniquenessReason(error);
+    if (uniquenessReason) {
+      throw new AppError(409, uniquenessReason, uniquenessReason === "ACTIVE_TRIAL_FOR_EMAIL"
+        ? "An active trial already exists for this admin email."
+        : "An active trial already exists for this email domain.");
+    }
+    throw error;
+  }
+}
+
+export async function rejectReviewGatedProcurementTrial(actor: AppActor, params: {
+  trialId: string;
+  reason: string;
+}) {
+  requireTrialReviewWriteAccess(actor);
+  const reason = params.reason.trim();
+  invariant(reason.length > 0, 400, "INVALID_INPUT", "Rejection reason is required.");
+
+  const trial = await prisma.procurementTrial.findUnique({
+    where: { id: params.trialId },
+    select: {
+      id: true,
+      status: true,
+      workspaceId: true,
+      agentCredentialId: true,
+    },
+  });
+  invariant(trial, 404, "NOT_FOUND", "Procurement trial not found.");
+  invariant(trial.status === TRIAL_STATUS_REVIEW_REQUIRED, 400, "INVALID_STATE", "Only review-required trials can be rejected.");
+  invariant(!trial.workspaceId && !trial.agentCredentialId, 400, "INVALID_STATE", "This trial already has provisioned resources.");
+
+  return prisma.procurementTrial.update({
+    where: { id: trial.id },
+    data: {
+      status: TRIAL_STATUS_SUSPENDED,
+      suspendedAt: new Date(),
+      suspensionReason: reason,
+    },
+    select: {
+      id: true,
+      status: true,
+      workspaceId: true,
+      suspendedAt: true,
+      suspensionReason: true,
+      updatedAt: true,
+    },
+  });
 }
 
 export async function getProcurementTrialStatus(trialId: string, origin?: string) {

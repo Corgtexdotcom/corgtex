@@ -304,6 +304,8 @@
       "termsRequired": "Acepta los términos para iniciar la prueba.",
       "unavailable": "El registro no está disponible temporalmente. Inténtalo de nuevo."
     },
+    "signupExistingAccountDescription": "Ya tienes una cuenta creada. Te enviamos un correo para restablecer tu contraseña y que puedas volver a iniciar sesión.",
+    "signupExistingAccountTitle": "La cuenta ya existe",
     "signupNameLabel": "Tu nombre",
     "signupReviewDescription": "Necesitamos revisar esta solicitud antes de crear el espacio de trabajo. Te responderemos por correo.",
     "signupReviewTitle": "Solicitud recibida",

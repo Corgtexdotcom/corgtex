@@ -2,7 +2,8 @@
 
 import { randomUUID } from "node:crypto";
 import { headers } from "next/headers";
-import { AppError, createProcurementTrial } from "@corgtex/domain";
+import { AppError, createProcurementTrial, requestPasswordResetForActiveMember } from "@corgtex/domain";
+import { sendEmail } from "@corgtex/shared";
 import { rateLimitProcurementTrialCreateForHeaders } from "@/lib/procurement-api";
 import { getPublicOrigin } from "@/lib/public-origin";
 import type { SignupErrorKey, SignupState } from "./state";
@@ -25,6 +26,33 @@ function publicOrigin(requestHeaders: HeaderReader) {
   return getPublicOrigin(new Request("https://app.corgtex.com/signup", {
     headers: originHeaders,
   }));
+}
+
+function buildResetEmailHtml(resetUrl: string, displayName: string | null) {
+  return `
+    <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 480px; margin: 0 auto; padding: 40px 20px;">
+      <h2 style="color: #111; margin-bottom: 8px;">Reset your password</h2>
+      <p style="color: #555; line-height: 1.6;">
+        Hi${displayName ? ` ${displayName}` : ""},
+      </p>
+      <p style="color: #555; line-height: 1.6;">
+        We received a request to reset your Corgtex password. Click the button below to choose a new password.
+      </p>
+      <div style="margin: 32px 0;">
+        <a href="${resetUrl}"
+          style="background-color: #111; color: #fff; padding: 12px 24px; border-radius: 6px; text-decoration: none; display: inline-block; font-weight: 500;">
+          Reset Password
+        </a>
+      </div>
+      <p style="color: #888; font-size: 14px; line-height: 1.5;">
+        This link expires in 15 minutes. If you didn't request a password reset, you can safely ignore this email.
+      </p>
+      <hr style="border: none; border-top: 1px solid #eee; margin: 32px 0;" />
+      <p style="color: #aaa; font-size: 12px;">
+        Corgtex
+      </p>
+    </div>
+  `;
 }
 
 function withError(previousState: SignupState, updates: Partial<SignupState>, errorKey: SignupErrorKey): SignupState {
@@ -71,6 +99,27 @@ export async function signupAction(
     if (rateLimit) {
       return withError(previousState, formState, "rateLimited");
     }
+    const origin = publicOrigin(requestHeaders);
+
+    const existingAccountReset = await requestPasswordResetForActiveMember(adminEmail);
+    if (existingAccountReset) {
+      const resetUrl = `${origin}/reset-password/${existingAccountReset.token}`;
+      try {
+        await sendEmail({
+          to: existingAccountReset.user.email,
+          subject: "Reset your Corgtex password",
+          html: buildResetEmailHtml(resetUrl, existingAccountReset.user.displayName),
+        });
+      } catch (emailError) {
+        console.error("Failed to send existing-account password reset email:", emailError);
+      }
+
+      return {
+        ...formState,
+        errorKey: null,
+        status: "existingAccount",
+      };
+    }
 
     const result = await createProcurementTrial({
       idempotencyKey,
@@ -84,7 +133,7 @@ export async function signupAction(
           surface: "/signup",
         },
       },
-      origin: publicOrigin(requestHeaders),
+      origin,
     });
 
     return {

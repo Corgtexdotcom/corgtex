@@ -3,26 +3,7 @@ import { AppError, invariant } from "./errors";
 
 const RESET_TOKEN_TTL_MS = 1000 * 60 * 15; // 15 minutes
 
-/**
- * Generate a password reset token for the given email.
- * Returns null silently if the user doesn't exist (prevents enumeration).
- * Invalidates any existing unused tokens for this user.
- */
-export async function requestPasswordReset(email: string) {
-  const normalizedEmail = email.trim().toLowerCase();
-  invariant(normalizedEmail.length > 0, 400, "INVALID_INPUT", "Email is required.");
-
-  const user = await prisma.user.findUnique({
-    where: { email: normalizedEmail },
-    select: { id: true, email: true, displayName: true },
-  });
-
-  if (!user) {
-    // Silently return null — caller should still return 200 to prevent enumeration
-    return null;
-  }
-
-  // Invalidate any existing unused tokens for this user
+async function issuePasswordResetToken(user: { id: string; email: string; displayName: string | null }) {
   await prisma.passwordResetToken.updateMany({
     where: {
       userId: user.id,
@@ -45,6 +26,57 @@ export async function requestPasswordReset(email: string) {
   });
 
   return { token, user };
+}
+
+/**
+ * Generate a password reset token for the given email.
+ * Returns null silently if the user doesn't exist (prevents enumeration).
+ * Invalidates any existing unused tokens for this user.
+ */
+export async function requestPasswordReset(email: string) {
+  const normalizedEmail = email.trim().toLowerCase();
+  invariant(normalizedEmail.length > 0, 400, "INVALID_INPUT", "Email is required.");
+
+  const user = await prisma.user.findUnique({
+    where: { email: normalizedEmail },
+    select: { id: true, email: true, displayName: true },
+  });
+
+  if (!user) {
+    // Silently return null — caller should still return 200 to prevent enumeration
+    return null;
+  }
+
+  return issuePasswordResetToken(user);
+}
+
+export async function requestPasswordResetForActiveMember(email: string) {
+  const normalizedEmail = email.trim().toLowerCase();
+  invariant(normalizedEmail.length > 0, 400, "INVALID_INPUT", "Email is required.");
+
+  const user = await prisma.user.findUnique({
+    where: { email: normalizedEmail },
+    select: {
+      id: true,
+      email: true,
+      displayName: true,
+      memberships: {
+        where: { isActive: true },
+        select: { id: true },
+        take: 1,
+      },
+    },
+  });
+
+  if (!user || user.memberships.length === 0) {
+    return null;
+  }
+
+  return issuePasswordResetToken({
+    id: user.id,
+    email: user.email,
+    displayName: user.displayName,
+  });
 }
 
 /**

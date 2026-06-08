@@ -14,6 +14,7 @@ const {
       findUnique: vi.fn(),
       create: vi.fn(),
       update: vi.fn(),
+      updateMany: vi.fn(),
     },
     procurementTrial: {
       count: vi.fn(),
@@ -135,6 +136,7 @@ describe("procurement trials", () => {
     prismaMock.procurementIdempotencyKey.findUnique.mockResolvedValue(null);
     prismaMock.procurementIdempotencyKey.create.mockResolvedValue({});
     prismaMock.procurementIdempotencyKey.update.mockResolvedValue({});
+    prismaMock.procurementIdempotencyKey.updateMany.mockResolvedValue({ count: 1 });
     prismaMock.procurementTrial.count.mockResolvedValue(0);
     prismaMock.procurementTrial.findMany.mockResolvedValue([]);
     prismaMock.procurementTrial.create.mockImplementation(async ({ data }: any) => ({
@@ -466,6 +468,171 @@ describe("procurement trials", () => {
     const idempotencyCreate = prismaMock.procurementIdempotencyKey.create.mock.calls.at(-1)?.[0];
     expect(idempotencyCreate.data.workspaceId).toBeUndefined();
     expect(idempotencyCreate.data.responseJson).not.toHaveProperty("connector");
+  });
+
+  it("approves a review-gated trial by provisioning an active workspace on the same trial id", async () => {
+    prismaMock.procurementTrial.findUnique.mockResolvedValueOnce({
+      id: "trial-review",
+      status: "REVIEW_REQUIRED",
+      workspaceId: null,
+      companyName: "Acme",
+      adminEmail: "person@gmail.com",
+      adminName: "Person",
+      emailDomain: "gmail.com",
+      billingContactEmail: null,
+      acceptedTermsVersion: "2026-04",
+      sourceAgent: { kind: "app-signup" },
+      riskStatus: "REVIEW_REQUIRED",
+      riskReasons: ["PERSONAL_EMAIL_DOMAIN"],
+    });
+    prismaMock.procurementTrial.update.mockImplementation(async ({ data }: any) => ({
+      id: "trial-review",
+      claimEmailStatus: null,
+      ...data,
+    }));
+    const { approveReviewGatedProcurementTrial } = await import("./procurement-trials");
+
+    const result = await approveReviewGatedProcurementTrial(
+      {
+        kind: "user",
+        user: {
+          id: "operator-1",
+          email: "operator@corgtex.test",
+          displayName: "Operator",
+          globalRole: "OPERATOR",
+        },
+      },
+      {
+        trialId: "trial-review",
+        reason: "Verified customer request.",
+        origin: "https://app.test",
+      },
+    );
+
+    expect(result.statusCode).toBe(201);
+    expect(result.body).toMatchObject({
+      trialId: "trial-review",
+      status: "ACTIVE",
+      riskStatus: "REVIEW_REQUIRED",
+      riskReasons: ["PERSONAL_EMAIL_DOMAIN"],
+      workspace: { id: "ws-1" },
+      connector: { token: "agentc-credential-secret" },
+    });
+    expect(prismaMock.procurementTrial.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "trial-review" },
+      data: expect.objectContaining({
+        workspaceId: "ws-1",
+        agentCredentialId: "cred-1",
+        status: "ACTIVE",
+        trialExpiresAt: expect.any(Date),
+      }),
+    }));
+    expect(prismaMock.procurementTrial.create).not.toHaveBeenCalled();
+    expect(prismaMock.procurementIdempotencyKey.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        scope: "procurement:v1:trials",
+        workspaceId: null,
+      }),
+      data: expect.objectContaining({
+        workspaceId: "ws-1",
+      }),
+    }));
+    expect(prismaMock.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        action: "procurement_trial.approved",
+        actorUserId: "operator-1",
+        meta: expect.objectContaining({ reason: "Verified customer request." }),
+      }),
+    }));
+  });
+
+  it("does not approve a review-gated trial when an active email conflict exists", async () => {
+    prismaMock.procurementTrial.findUnique.mockResolvedValueOnce({
+      id: "trial-review",
+      status: "REVIEW_REQUIRED",
+      workspaceId: null,
+      companyName: "Acme",
+      adminEmail: "person@gmail.com",
+      adminName: "Person",
+      emailDomain: "gmail.com",
+      billingContactEmail: null,
+      acceptedTermsVersion: "2026-04",
+      sourceAgent: null,
+      riskStatus: "REVIEW_REQUIRED",
+      riskReasons: ["PERSONAL_EMAIL_DOMAIN"],
+    });
+    prismaMock.procurementTrial.count
+      .mockResolvedValueOnce(1)
+      .mockResolvedValueOnce(0);
+    const { approveReviewGatedProcurementTrial } = await import("./procurement-trials");
+
+    await expect(approveReviewGatedProcurementTrial(
+      {
+        kind: "user",
+        user: {
+          id: "operator-1",
+          email: "operator@corgtex.test",
+          displayName: "Operator",
+          globalRole: "OPERATOR",
+        },
+      },
+      {
+        trialId: "trial-review",
+        reason: "Verified customer request.",
+      },
+    )).rejects.toMatchObject({
+      status: 409,
+      code: "ACTIVE_TRIAL_FOR_EMAIL",
+    });
+
+    expect(prismaMock.workspace.create).not.toHaveBeenCalled();
+    expect(prismaMock.procurementTrial.update).not.toHaveBeenCalled();
+  });
+
+  it("rejects a review-gated trial by suspending it with a reason", async () => {
+    const suspendedAt = new Date("2026-04-30T17:00:00.000Z");
+    prismaMock.procurementTrial.findUnique.mockResolvedValueOnce({
+      id: "trial-review",
+      status: "REVIEW_REQUIRED",
+      workspaceId: null,
+      agentCredentialId: null,
+    });
+    prismaMock.procurementTrial.update.mockResolvedValueOnce({
+      id: "trial-review",
+      workspaceId: null,
+      status: "SUSPENDED",
+      suspendedAt,
+      suspensionReason: "Rejected from review queue.",
+    });
+    const { rejectReviewGatedProcurementTrial } = await import("./procurement-trials");
+
+    await expect(rejectReviewGatedProcurementTrial(
+      {
+        kind: "user",
+        user: {
+          id: "operator-1",
+          email: "operator@corgtex.test",
+          displayName: "Operator",
+          globalRole: "OPERATOR",
+        },
+      },
+      {
+        trialId: "trial-review",
+        reason: " Rejected from review queue. ",
+      },
+    )).resolves.toMatchObject({
+      id: "trial-review",
+      status: "SUSPENDED",
+      suspensionReason: "Rejected from review queue.",
+    });
+
+    expect(prismaMock.procurementTrial.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "trial-review" },
+      data: expect.objectContaining({
+        status: "SUSPENDED",
+        suspensionReason: "Rejected from review queue.",
+      }),
+    }));
   });
 
   it("blocks MCP access for expired trials and revokes the connector", async () => {

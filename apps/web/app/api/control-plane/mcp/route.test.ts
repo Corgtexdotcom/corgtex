@@ -4,6 +4,8 @@ const mocks = vi.hoisted(() => ({
   listSelfServeCustomerRegistry: vi.fn(),
   upsertSelfServeSmokeRun: vi.fn(),
   createSelfServeSupportSession: vi.fn(),
+  approveReviewGatedProcurementTrial: vi.fn(),
+  rejectReviewGatedProcurementTrial: vi.fn(),
   requireControlPlaneAccess: vi.fn(),
   requireControlPlaneScope: vi.fn((actor: { kind?: string; scopes?: string[] }, scope: string) => {
     if (actor.kind !== "agent") return;
@@ -17,6 +19,7 @@ const mocks = vi.hoisted(() => ({
   resolveControlPlaneRequestActor: vi.fn(),
 }));
 vi.mock("@corgtex/domain", () => ({
+  approveReviewGatedProcurementTrial: mocks.approveReviewGatedProcurementTrial,
   configureControlPlaneMeetingRecorderIntegration: vi.fn(), createControlPlaneClient: vi.fn(), createControlPlaneCustomerMember: vi.fn(), deployLatestControlPlaneRelease: vi.fn(),
   executeControlPlaneClientMigration: vi.fn(),
   enqueueControlPlaneDeployLatestRollout: vi.fn(), enqueueControlPlaneFleetSnapshots: vi.fn(), fetchCustomerSupportSnapshot: vi.fn(),
@@ -33,6 +36,7 @@ vi.mock("@corgtex/domain", () => ({
   listControlPlaneFeatureFlags: vi.fn(), listControlPlaneReleaseRolloutJobs: vi.fn(),
   probeControlPlaneDeploymentHealth: vi.fn(),
   recordVerifiedControlPlaneRelease: vi.fn(),
+  rejectReviewGatedProcurementTrial: mocks.rejectReviewGatedProcurementTrial,
   requireControlPlaneAccess: mocks.requireControlPlaneAccess,
   requireControlPlaneScope: mocks.requireControlPlaneScope,
   refreshControlPlaneFleetSnapshots: vi.fn(),
@@ -60,6 +64,8 @@ describe("/api/control-plane/mcp", () => {
     mocks.listSelfServeCustomerRegistry.mockResolvedValue({ items: [], summary: { total: 0 } });
     mocks.upsertSelfServeSmokeRun.mockResolvedValue({ id: "smoke-run-1" });
     mocks.createSelfServeSupportSession.mockResolvedValue({ id: "support-session-1" });
+    mocks.approveReviewGatedProcurementTrial.mockResolvedValue({ statusCode: 201, body: { trialId: "trial-review", status: "ACTIVE" } });
+    mocks.rejectReviewGatedProcurementTrial.mockResolvedValue({ id: "trial-review", status: "SUSPENDED" });
   });
 
   afterEach(() => {
@@ -91,6 +97,8 @@ describe("/api/control-plane/mcp", () => {
       "list_self_serve_customers",
       "record_self_serve_smoke_run",
       "create_self_serve_support_session",
+      "approve_self_serve_trial_request",
+      "reject_self_serve_trial_request",
       "create_client",
       "plan_client_migration",
       "run_client_migration_dry_run",
@@ -179,6 +187,96 @@ describe("/api/control-plane/mcp", () => {
         featurePosture: "minimal",
         primary: false,
       }),
+    );
+  });
+
+  it("approves self-serve trial requests with the client write-scoped actor", async () => {
+    mocks.resolveControlPlaneRequestActor.mockResolvedValueOnce({
+      kind: "agent",
+      authProvider: "control-plane",
+      label: "control-plane-agent",
+      scopes: ["control-plane:read", "control-plane:clients:write"],
+    });
+    const { POST } = await import("./route");
+
+    const response = await POST(request({
+      jsonrpc: "2.0",
+      id: 21,
+      method: "tools/call",
+      params: {
+        name: "approve_self_serve_trial_request",
+        arguments: {
+          trialId: "trial-review",
+          reason: "Verified customer request.",
+        },
+      },
+    }) as never);
+
+    expect(response.status).toBe(200);
+    expect(mocks.approveReviewGatedProcurementTrial).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "agent" }),
+      {
+        trialId: "trial-review",
+        reason: "Verified customer request.",
+      },
+    );
+  });
+
+  it("denies self-serve trial approval without the client write scope", async () => {
+    const { POST } = await import("./route");
+
+    const response = await POST(request({
+      jsonrpc: "2.0",
+      id: 22,
+      method: "tools/call",
+      params: {
+        name: "approve_self_serve_trial_request",
+        arguments: {
+          trialId: "trial-review",
+          reason: "Verified customer request.",
+        },
+      },
+    }) as never);
+
+    expect(response.status).toBe(403);
+    expect(mocks.approveReviewGatedProcurementTrial).not.toHaveBeenCalled();
+    await expect(response.json()).resolves.toEqual({
+      error: {
+        code: "CONTROL_PLANE_SCOPE_REQUIRED",
+        message: "Control Plane scope required: control-plane:clients:write.",
+      },
+    });
+  });
+
+  it("rejects self-serve trial requests with the client write-scoped actor", async () => {
+    mocks.resolveControlPlaneRequestActor.mockResolvedValueOnce({
+      kind: "agent",
+      authProvider: "control-plane",
+      label: "control-plane-agent",
+      scopes: ["control-plane:read", "control-plane:clients:write"],
+    });
+    const { POST } = await import("./route");
+
+    const response = await POST(request({
+      jsonrpc: "2.0",
+      id: 23,
+      method: "tools/call",
+      params: {
+        name: "reject_self_serve_trial_request",
+        arguments: {
+          trialId: "trial-review",
+          reason: "Rejected after review.",
+        },
+      },
+    }) as never);
+
+    expect(response.status).toBe(200);
+    expect(mocks.rejectReviewGatedProcurementTrial).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "agent" }),
+      {
+        trialId: "trial-review",
+        reason: "Rejected after review.",
+      },
     );
   });
 

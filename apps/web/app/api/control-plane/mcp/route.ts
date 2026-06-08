@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import {
+  approveReviewGatedProcurementTrial,
   configureControlPlaneMeetingRecorderIntegration,
   createControlPlaneClient,
   createControlPlaneCustomerMember,
@@ -25,6 +26,7 @@ import {
   listSelfServeCustomerRegistry,
   probeControlPlaneDeploymentHealth,
   recordVerifiedControlPlaneRelease,
+  rejectReviewGatedProcurementTrial,
   requireControlPlaneAccess,
   requireControlPlaneScope,
   refreshControlPlaneFleetSnapshots,
@@ -103,6 +105,30 @@ const tools = [
         reason: { type: "string" },
       },
       required: ["reason"],
+    },
+  },
+  {
+    name: "approve_self_serve_trial_request",
+    description: "Approve a review-gated self-serve signup request and provision the shared-cloud trial workspace.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        trialId: { type: "string" },
+        reason: { type: "string" },
+      },
+      required: ["trialId", "reason"],
+    },
+  },
+  {
+    name: "reject_self_serve_trial_request",
+    description: "Reject a review-gated self-serve signup request by marking it suspended with a reason.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        trialId: { type: "string" },
+        reason: { type: "string" },
+      },
+      required: ["trialId", "reason"],
     },
   },
   {
@@ -529,6 +555,8 @@ const toolScopes: Record<string, string> = {
   list_self_serve_customers: "control-plane:read",
   record_self_serve_smoke_run: "control-plane:support:write",
   create_self_serve_support_session: "control-plane:support:write",
+  approve_self_serve_trial_request: "control-plane:clients:write",
+  reject_self_serve_trial_request: "control-plane:clients:write",
   create_client: "control-plane:clients:write",
   plan_client_migration: "control-plane:migrations:write",
   run_client_migration_dry_run: "control-plane:migrations:write",
@@ -731,6 +759,18 @@ export async function POST(request: NextRequest) {
         deploymentId: argOptionalString(args, "deploymentId"),
         workspaceId: argOptionalString(args, "workspaceId"),
         targetMemberId: argOptionalString(args, "targetMemberId"),
+        reason: argString(args, "reason"),
+      })));
+    }
+    if (name === "approve_self_serve_trial_request") {
+      return rpcResult(id, textContent(await approveReviewGatedProcurementTrial(actor, {
+        trialId: argString(args, "trialId"),
+        reason: argString(args, "reason"),
+      })));
+    }
+    if (name === "reject_self_serve_trial_request") {
+      return rpcResult(id, textContent(await rejectReviewGatedProcurementTrial(actor, {
+        trialId: argString(args, "trialId"),
         reason: argString(args, "reason"),
       })));
     }

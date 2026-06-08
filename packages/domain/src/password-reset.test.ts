@@ -31,7 +31,7 @@ vi.mock("@corgtex/shared", () => ({
   sha256: vi.fn((v: string) => `sha256:${v}`),
 }));
 
-import { requestPasswordReset, consumePasswordReset } from "./password-reset";
+import { requestPasswordReset, requestPasswordResetForActiveMember, consumePasswordReset } from "./password-reset";
 import { AppError } from "./errors";
 
 describe("requestPasswordReset", () => {
@@ -65,6 +65,47 @@ describe("requestPasswordReset", () => {
 
   it("throws on empty email", async () => {
     await expect(requestPasswordReset("")).rejects.toThrow(AppError);
+  });
+});
+
+describe("requestPasswordResetForActiveMember", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("generates a token for a user with active workspace membership", async () => {
+    mockFindUnique.mockResolvedValue({
+      id: "user-1",
+      email: "member@example.com",
+      displayName: "Member",
+      memberships: [{ id: "member-1" }],
+    });
+    mockUpdateMany.mockResolvedValue({ count: 0 });
+    mockCreate.mockResolvedValue({});
+
+    const result = await requestPasswordResetForActiveMember("member@example.com");
+
+    expect(result).toEqual({
+      token: "mock-token-abc123",
+      user: {
+        id: "user-1",
+        email: "member@example.com",
+        displayName: "Member",
+      },
+    });
+    expect(mockCreate).toHaveBeenCalled();
+  });
+
+  it("returns null when the user has no active workspace membership", async () => {
+    mockFindUnique.mockResolvedValue({
+      id: "user-1",
+      email: "member@example.com",
+      displayName: "Member",
+      memberships: [],
+    });
+
+    await expect(requestPasswordResetForActiveMember("member@example.com")).resolves.toBeNull();
+    expect(mockCreate).not.toHaveBeenCalled();
   });
 });
 
