@@ -38,16 +38,16 @@ function customerSlug(customer) {
 }
 
 function customerUrl(customer) {
-  return optionalText(customer.supportBaseUrl) || customerDeploymentUrl(customer);
+  return runtimeUrl(customer.supportBaseUrl) || runtimeUrl(customer.url);
 }
 
 function appendPath(baseUrl, suffix) {
   return `${baseUrl.replace(/\/$/, "")}${suffix}`;
 }
 
-function customerDeploymentUrl(customer) {
-  const url = optionalText(customer.url);
-  if (!url || isWorkspaceUiUrl(url)) return null;
+function runtimeUrl(value) {
+  const url = optionalText(value);
+  if (!url || !/^https?:\/\//i.test(url) || isWorkspaceUiUrl(url)) return null;
   return url;
 }
 
@@ -55,7 +55,7 @@ function isWorkspaceUiUrl(value) {
   try {
     const url = new URL(value);
     const pathname = url.pathname.replace(/\/+$/, "");
-    return /^\/(?:[a-z]{2}(?:-[a-z]{2})?\/)?workspaces\/[^/]+$/i.test(pathname);
+    return /^\/(?:[a-z]{2}(?:-[a-z]{2})?\/)?workspaces\/[^/]+(?:\/.*)?$/i.test(pathname);
   } catch {
     return false;
   }

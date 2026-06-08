@@ -60,6 +60,62 @@ describe("customer readiness sweep URL selection", () => {
     expect(resultText(output)).not.toContain("/workspaces/workspace-1/api/health");
   });
 
+  it("skips nested workspace UI URLs", () => {
+    const output = runDryRun([
+      {
+        id: "deployment-chirone",
+        slug: "chirone",
+        label: "Chirone Production",
+        url: "https://ops.corgtex.com/workspaces/workspace-1/settings",
+        supportBaseUrl: null,
+        provisioningStatus: "degraded",
+      },
+    ]);
+
+    expect(output.customers).toEqual([]);
+    expect(resultText(output)).not.toContain("/workspaces/workspace-1/settings/api/health");
+  });
+
+  it("filters workspace supportBaseUrl values before falling back to deployment URLs", () => {
+    const output = runDryRun([
+      {
+        id: "deployment-chirone",
+        slug: "chirone",
+        label: "Chirone Production",
+        url: "https://chirone.example",
+        supportBaseUrl: "https://ops.corgtex.com/workspaces/workspace-1/settings",
+        provisioningStatus: "degraded",
+      },
+    ]);
+
+    expect(output.customers).toHaveLength(1);
+    expect(output.customers[0]).toMatchObject({
+      slug: "chirone",
+      url: "https://chirone.example",
+      healthUrl: "https://chirone.example/api/health",
+    });
+  });
+
+  it("skips invalid supportBaseUrl values before falling back to deployment URLs", () => {
+    const output = runDryRun([
+      {
+        id: "deployment-chirone",
+        slug: "chirone",
+        label: "Chirone Production",
+        url: "https://chirone.example",
+        supportBaseUrl: "mailto:support@example.com",
+        provisioningStatus: "degraded",
+      },
+    ]);
+
+    expect(output.customers).toHaveLength(1);
+    expect(output.customers[0]).toMatchObject({
+      slug: "chirone",
+      url: "https://chirone.example",
+      healthUrl: "https://chirone.example/api/health",
+    });
+  });
+
   it("keeps ordinary deployment runtime URLs", () => {
     const output = runDryRun([
       {
