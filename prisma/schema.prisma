@@ -3729,6 +3729,7 @@ enum AiWorkspaceProvider {
   OPENWORK
   CHATGPT
   CLAUDE
+  COPILOT
   GEMINI
   CURSOR
   CLAUDE_CODE

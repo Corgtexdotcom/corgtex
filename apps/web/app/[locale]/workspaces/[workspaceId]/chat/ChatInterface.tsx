@@ -4,7 +4,6 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { marked } from "marked";
-import { CLAUDE_CHAT_URL, CLAUDE_INSTALLER_PATH } from "@/lib/install-helpers";
 import { formatConversationDate } from "./date-format";
 import type { WorkspaceChatPageContext } from "./page-context";
 
@@ -30,13 +29,6 @@ type Turn = {
   createdAt: string;
 };
 
-type McpConnectionsResponse = {
-  claude?: {
-    connected?: boolean;
-    connectedAt?: string | null;
-  };
-};
-
 function renderAssistantMarkdown(markdown: string) {
   const escaped = markdown
     .replaceAll("&", "&amp;")
@@ -48,88 +40,6 @@ function renderAssistantMarkdown(markdown: string) {
 
 const MAX_MESSAGE_LENGTH = 100_000;
 const WARNING_LENGTH = 80_000;
-const CLAUDE_STATUS_POLL_INTERVAL_MS = 5_000;
-const CLAUDE_STATUS_MAX_POLLS = 24;
-
-function ClaudeConnectorFooter({ workspaceId }: { workspaceId: string }) {
-  const t = useTranslations("chat");
-  const [isConnected, setIsConnected] = useState(false);
-  const [isLoaded, setIsLoaded] = useState(false);
-
-  useEffect(() => {
-    let cancelled = false;
-    let timeoutId: number | null = null;
-    let pollCount = 0;
-
-    async function loadStatus() {
-      pollCount += 1;
-      try {
-        const response = await fetch(`/api/workspaces/${workspaceId}/mcp-connections`, {
-          cache: "no-store",
-        });
-        if (response.ok) {
-          const data = await response.json() as McpConnectionsResponse;
-          const connected = Boolean(data.claude?.connected);
-          if (!cancelled) {
-            setIsConnected(connected);
-            setIsLoaded(true);
-          }
-          if (connected) return;
-        } else if (!cancelled) {
-          setIsConnected(false);
-          setIsLoaded(true);
-        }
-      } catch {
-        if (!cancelled) {
-          setIsConnected(false);
-          setIsLoaded(true);
-        }
-      }
-
-      if (!cancelled && pollCount < CLAUDE_STATUS_MAX_POLLS) {
-        timeoutId = window.setTimeout(loadStatus, CLAUDE_STATUS_POLL_INTERVAL_MS);
-      }
-    }
-
-    void loadStatus();
-
-    return () => {
-      cancelled = true;
-      if (timeoutId) {
-        window.clearTimeout(timeoutId);
-      }
-    };
-  }, [workspaceId]);
-
-  if (isConnected) {
-    return (
-      <div className="chat-claude-footer chat-claude-footer-connected">
-        <span className="chat-claude-status-dot" aria-hidden="true" />
-        <div className="chat-claude-footer-copy">
-          <div className="chat-claude-footer-title">{t("claudeConnectedLabel")}</div>
-        </div>
-        <a className="chat-claude-footer-action" href={CLAUDE_CHAT_URL} target="_blank" rel="noreferrer">
-          {t("btnOpenClaude")}
-        </a>
-      </div>
-    );
-  }
-
-  return (
-    <a
-      href={CLAUDE_INSTALLER_PATH}
-      target="_blank"
-      rel="noreferrer"
-      className="chat-claude-footer chat-claude-footer-link"
-      aria-busy={!isLoaded}
-    >
-      <div className="chat-claude-footer-copy">
-        <div className="chat-claude-footer-title">{t("connectClaudeLabel")}</div>
-        <div className="chat-claude-footer-description">{t("connectClaudeDescription")}</div>
-      </div>
-    </a>
-  );
-}
 
 export function ChatInterface({
   workspaceId,
@@ -137,7 +47,6 @@ export function ChatInterface({
   activeSessionId,
   compact = false,
   mobileMode = false,
-  claudeFooterEnabled = true,
   pageContext = null,
   openSignal = 0,
 }: {
@@ -146,7 +55,6 @@ export function ChatInterface({
   activeSessionId: string | null;
   compact?: boolean;
   mobileMode?: boolean;
-  claudeFooterEnabled?: boolean;
   pageContext?: WorkspaceChatPageContext | null;
   openSignal?: number;
 }) {
@@ -561,7 +469,6 @@ export function ChatInterface({
     );
   }
 
-  const showClaudeConnectorFooter = compact && !isFullScreen && claudeFooterEnabled;
   const activeConversation = conversations.find((conversation) => conversation.id === sessionId) ?? null;
   const activeRoleOnboarding = activeConversation?.roleOnboarding ?? null;
 
@@ -829,7 +736,6 @@ export function ChatInterface({
           </div>
         )}
       </div>
-      {showClaudeConnectorFooter ? <ClaudeConnectorFooter workspaceId={workspaceId} /> : null}
     </div>
   );
 }

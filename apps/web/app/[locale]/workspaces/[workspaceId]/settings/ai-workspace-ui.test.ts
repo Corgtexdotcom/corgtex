@@ -39,6 +39,12 @@ const PROVIDERS: AiWorkspaceProviderView[] = [
     category: "BYO",
     recommendedDefault: false,
   }),
+  provider({
+    key: "copilot",
+    label: "GitHub Copilot",
+    category: "BYO",
+    recommendedDefault: false,
+  }),
 ];
 
 const SERVICES: EnterpriseServiceView[] = [
@@ -68,6 +74,17 @@ function provider(overrides: Partial<AiWorkspaceProviderView>): AiWorkspaceProvi
     setupPath: overrides.setupPath ?? "recipe",
     capabilities: overrides.capabilities ?? ["remote_mcp"],
     supportedOwnershipModes: overrides.supportedOwnershipModes ?? ["USER_MANAGED", "WORKSPACE_MANAGED"],
+    setupVariants: overrides.setupVariants ?? [
+      {
+        variantKey: `${overrides.key ?? "generic_mcp"}_default`,
+        label: "Default setup",
+        audience: "Users",
+        primaryAction: "copy",
+        manualSteps: ["Add the MCP URL."],
+        limitations: [],
+        verificationPrompt: "Test the connection.",
+      },
+    ],
   };
 }
 
@@ -78,7 +95,7 @@ describe("AI workspace UI helpers", () => {
     const groups = groupAiWorkspaceProviders(PROVIDERS);
 
     expect(groups.default.map((entry) => entry.key)).toEqual(["openwork"]);
-    expect(groups.byo.map((entry) => entry.key)).toEqual(["chatgpt"]);
+    expect(groups.byo.map((entry) => entry.key)).toEqual(["chatgpt", "copilot"]);
     expect(groups.advanced.map((entry) => entry.key)).toEqual(["cursor"]);
   });
 
@@ -93,7 +110,7 @@ describe("AI workspace UI helpers", () => {
   it("builds OpenWork setup before BYO providers with the Corgtex MCP URL", () => {
     const cards = buildAiWorkspaceSetupCards(PROVIDERS, "https://app.corgtex.com/mcp", "https://app.corgtex.com");
 
-    expect(cards.map((card) => card.provider.key)).toEqual(["openwork", "chatgpt", "cursor"]);
+    expect(cards.map((card) => card.provider.key)).toEqual(["openwork", "chatgpt", "copilot", "cursor"]);
     expect(cards[0]).toMatchObject({
       group: "default",
       statusLabel: "Recommended default",
@@ -118,10 +135,12 @@ describe("AI workspace UI helpers", () => {
     const providers = [
       provider({ key: "claude", label: "Claude", category: "BYO" }),
       provider({ key: "cursor", label: "Cursor", category: "ADVANCED" }),
-      provider({ key: "claude_code", label: "Claude Code", category: "ADVANCED" }),
+      provider({ key: "gemini", label: "Gemini CLI", category: "ADVANCED" }),
     ];
 
     const cards = buildAiWorkspaceSetupCards(providers, "https://app.corgtex.com/mcp");
+    const cursorCard = cards.find((card) => card.provider.key === "cursor");
+    const geminiCard = cards.find((card) => card.provider.key === "gemini");
 
     expect(cards.find((card) => card.provider.key === "claude")?.actions.map((action) => action.kind)).toEqual([
       "open",
@@ -129,39 +148,47 @@ describe("AI workspace UI helpers", () => {
       "copy",
       "copyAndOpen",
       "copy",
+      "copy",
     ]);
-    expect(cards.find((card) => card.provider.key === "cursor")?.actions[0]).toMatchObject({
+    expect(cards.find((card) => card.provider.key === "claude")?.command).toBe(
+      "claude mcp add --transport http corgtex --scope user https://app.corgtex.com/mcp",
+    );
+    expect(cards.find((card) => card.provider.key === "claude")?.resources.map((resource) => resource.label)).toContain("Claude Code command");
+    expect(cursorCard?.actions[0]).toMatchObject({
       kind: "cursorInstall",
       label: "Add to Cursor",
     });
-    expect(cards.find((card) => card.provider.key === "claude_code")?.command).toBe(
-      "claude mcp add --transport http corgtex --scope user https://app.corgtex.com/mcp",
+    expect(cursorCard?.actions.map((action) => action.label)).toContain("Copy Cursor config");
+    expect(cursorCard?.resources.find((resource) => resource.label === "Cursor MCP config")?.value).toContain("\"mcpServers\"");
+    expect(geminiCard?.command).toBe(
+      "gemini mcp add --transport http --scope user corgtex https://app.corgtex.com/mcp",
     );
-    expect(cards.find((card) => card.provider.key === "claude_code")?.resources[0].value).toContain(
-      "Install command: claude mcp add --transport http corgtex --scope user https://app.corgtex.com/mcp",
-    );
+    expect(geminiCard?.actions.map((action) => action.label)).toContain("Copy Gemini command");
+    expect(geminiCard?.resources.map((resource) => resource.label)).toContain("Gemini CLI command");
   });
 
   it("adds copyable setup recipes and safe test prompts for BYO and advanced providers", () => {
     const providers = [
       provider({ key: "chatgpt", label: "ChatGPT", category: "BYO" }),
       provider({ key: "claude", label: "Claude", category: "BYO" }),
+      provider({ key: "copilot", label: "GitHub Copilot", category: "BYO" }),
       provider({ key: "gemini", label: "Gemini CLI", category: "ADVANCED" }),
       provider({ key: "cursor", label: "Cursor", category: "ADVANCED" }),
-      provider({ key: "claude_code", label: "Claude Code", category: "ADVANCED" }),
       provider({ key: "generic_mcp", label: "Generic MCP client", category: "ADVANCED" }),
     ];
 
     const cards = buildAiWorkspaceSetupCards(providers, "https://app.corgtex.com/mcp", "https://app.corgtex.com");
 
-    for (const providerKey of ["chatgpt", "claude", "gemini", "cursor", "claude_code", "generic_mcp"]) {
+    for (const providerKey of ["chatgpt", "claude", "copilot", "gemini", "cursor", "generic_mcp"]) {
       const card = cards.find((entry) => entry.provider.key === providerKey);
 
-      expect(card?.resources.map((resource) => resource.label)).toEqual(["Instructions package", "Test prompt"]);
-      expect(card?.resources[0].value).toContain("Corgtex MCP server: https://app.corgtex.com/mcp");
-      expect(card?.resources[0].value).toContain("submit_execution_result");
-      expect(card?.resources[1].value).toContain("without making external changes");
-      expect(card?.resources[1].value).toContain("Do not create records, submit results, change files, deploy, or write to external systems.");
+      expect(card?.resources.map((resource) => resource.label)).toContain("Instructions package");
+      expect(card?.resources.map((resource) => resource.label)).toContain("Test prompt");
+      expect(card?.resources.some((resource) => resource.value.includes("https://app.corgtex.com/mcp"))).toBe(true);
+      expect(card?.resources.some((resource) => resource.value.includes("submit_execution_result"))).toBe(true);
+      const testPrompt = card?.resources.find((resource) => resource.label === "Test prompt");
+      expect(testPrompt?.value).toContain("without making external changes");
+      expect(testPrompt?.value).toContain("Do not create records, submit results, change files, deploy, or write to external systems.");
       expect(card?.verificationChecks.length).toBeGreaterThan(0);
       expect(card?.actions.map((action) => action.label)).toContain("Copy instructions");
       expect(card?.actions.map((action) => action.label)).toContain("Copy test prompt");

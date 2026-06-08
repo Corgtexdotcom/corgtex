@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  activeAiWorkspaceProvider,
   aiWorkspaceLaunchUrl,
   aiWorkspaceSettingsHref,
   buildExecutionRequestHandoffPrompt,
@@ -10,11 +11,41 @@ import {
 
 describe("ai workspace launch helpers", () => {
   it("resolves OpenWork launch and settings links without modeling provider state in UI", () => {
-    expect(aiWorkspaceLaunchUrl("openwork")).toBe("https://openworklabs.com/");
-    expect(aiWorkspaceLaunchUrl("chatgpt")).toBeNull();
+    expect(aiWorkspaceLaunchUrl("openwork")).toBe("https://openworklabs.com/download");
+    expect(aiWorkspaceLaunchUrl("copilot")).toBe("https://code.visualstudio.com/docs/copilot/chat/mcp-servers");
+    expect(aiWorkspaceLaunchUrl("generic_mcp")).toBeNull();
     expect(aiWorkspaceSettingsHref("workspace-1", "openwork")).toBe(
       "/workspaces/workspace-1/settings?tab=ai-workspaces&provider=openwork",
     );
+  });
+
+  it("resolves the active provider only after a tool is chosen", () => {
+    const providers = [
+      {
+        key: "openwork",
+        label: "OpenWork Free",
+        shortLabel: "OpenWork",
+        outcome: "Default",
+        description: "Default",
+        recommendedDefault: true,
+        freeDefault: true,
+        setupVariants: [],
+      },
+      {
+        key: "copilot",
+        label: "GitHub Copilot",
+        shortLabel: "Copilot",
+        outcome: "BYO",
+        description: "BYO",
+        recommendedDefault: false,
+        freeDefault: false,
+        setupVariants: [],
+      },
+    ];
+
+    expect(activeAiWorkspaceProvider({ activeProviderKey: null, providers })).toBeNull();
+    expect(activeAiWorkspaceProvider({ activeProviderKey: "copilot", providers })?.shortLabel).toBe("Copilot");
+    expect(activeAiWorkspaceProvider({ activeProviderKey: "missing", providers })).toBeNull();
   });
 
   it("builds governed execution request payloads for the existing API", () => {

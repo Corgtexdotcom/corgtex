@@ -1,6 +1,7 @@
 export * from "./actions";
 export * from "./agent-auth";
 export * from "./ai-workspaces";
+export * from "./ai-workspace-selection";
 export * from "./action-policy";
 export * from "./oauth-server";
 export * from "./mcp-connector";

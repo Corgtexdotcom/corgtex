@@ -400,6 +400,21 @@ describe("catalog domain", () => {
         workspaceId_sourceType_sourceId: {
           workspaceId: "workspace-1",
           sourceType: "AI_WORKSPACE",
+          sourceId: "copilot",
+        },
+      },
+      create: expect.objectContaining({
+        title: "GitHub Copilot",
+        url: "/workspaces/workspace-1/settings?tab=ai-workspaces&provider=copilot",
+        category: "AI_BYO",
+        featured: false,
+      }),
+    }));
+    expect(prismaMock.catalogItem.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        workspaceId_sourceType_sourceId: {
+          workspaceId: "workspace-1",
+          sourceType: "AI_WORKSPACE",
           sourceId: "generic_mcp",
         },
       },

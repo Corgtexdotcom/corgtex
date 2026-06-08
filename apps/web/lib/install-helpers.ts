@@ -9,10 +9,84 @@ export type CursorMcpConfig = {
   url: string;
 };
 
+export type CursorMcpJsonConfig = {
+  mcpServers: {
+    corgtex: CursorMcpConfig;
+  };
+};
+
+export type VsCodeMcpConfig = {
+  servers: {
+    corgtex: {
+      type: "http";
+      url: string;
+    };
+  };
+};
+
+export type CopilotCliMcpConfig = {
+  mcpServers: {
+    corgtex: {
+      type: "http";
+      url: string;
+      tools: string[];
+    };
+  };
+};
+
+export type GeminiMcpConfig = {
+  mcpServers: {
+    corgtex: {
+      httpUrl: string;
+    };
+  };
+};
+
 export function buildCursorMcpConfig(connectorUrl: string): CursorMcpConfig {
   return {
     type: "http",
     url: connectorUrl,
+  };
+}
+
+export function buildCursorMcpJsonConfig(connectorUrl: string): CursorMcpJsonConfig {
+  return {
+    mcpServers: {
+      corgtex: buildCursorMcpConfig(connectorUrl),
+    },
+  };
+}
+
+export function buildVsCodeMcpConfig(connectorUrl: string): VsCodeMcpConfig {
+  return {
+    servers: {
+      corgtex: {
+        type: "http",
+        url: connectorUrl,
+      },
+    },
+  };
+}
+
+export function buildCopilotCliMcpConfig(connectorUrl: string): CopilotCliMcpConfig {
+  return {
+    mcpServers: {
+      corgtex: {
+        type: "http",
+        url: connectorUrl,
+        tools: ["*"],
+      },
+    },
+  };
+}
+
+export function buildGeminiMcpConfig(connectorUrl: string): GeminiMcpConfig {
+  return {
+    mcpServers: {
+      corgtex: {
+        httpUrl: connectorUrl,
+      },
+    },
   };
 }
 
@@ -50,8 +124,22 @@ export function buildClaudeCodeCommand(connectorUrl: string): string {
   return `claude mcp add --transport http corgtex --scope user ${connectorUrl}`;
 }
 
+export function buildCopilotCliCommand(connectorUrl: string): string {
+  return `copilot mcp add corgtex --type http --url ${connectorUrl} --tools "*"`;
+}
+
+export function buildGeminiMcpCommand(connectorUrl: string): string {
+  return `gemini mcp add --transport http --scope user corgtex ${connectorUrl}`;
+}
+
 export const CLAUDE_CONNECTORS_URL = "https://claude.ai/customize/connectors";
 export const CLAUDE_CHAT_URL = "https://claude.ai/new";
+export const CHATGPT_APPS_URL = "https://chatgpt.com/apps";
+export const COPILOT_DOCS_URL = "https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-command-reference";
+export const COPILOT_VSCODE_MCP_DOCS_URL = "https://code.visualstudio.com/docs/copilot/chat/mcp-servers";
+export const CURSOR_MCP_DOCS_URL = "https://docs.cursor.com/context/model-context-protocol";
+export const GEMINI_MCP_DOCS_URL = "https://google-gemini.github.io/gemini-cli/docs/tools/mcp-server.html";
+export const OPENWORK_DOWNLOAD_URL = "https://openworklabs.com/download";
 
 /**
  * Path to the hosted Claude installer landing page. Use this from anywhere

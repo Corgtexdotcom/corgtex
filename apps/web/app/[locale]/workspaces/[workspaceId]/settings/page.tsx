@@ -17,7 +17,7 @@ import {
   getMeetingRecorderConfig,
   listMeetingTranscriptSourceState,
   getWorkspacePlanState,
-  listAiWorkspaceProviders,
+  listAiWorkspaceToolProviders,
   listWorkspaceEnterpriseServiceStates,
 } from "@corgtex/domain";
 import { env, prisma } from "@corgtex/shared";
@@ -417,10 +417,15 @@ export default async function SettingsPage({
   const googleConfigured = Boolean(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET);
   const microsoftConfigured = Boolean(process.env.MICROSOFT_CLIENT_ID && process.env.MICROSOFT_CLIENT_SECRET);
   const aiWorkspaceProviders = featureFlags.AI_WORKSPACES
-    ? listAiWorkspaceProviders().map((provider) => ({
+    ? listAiWorkspaceToolProviders().map((provider) => ({
         ...provider,
         capabilities: [...provider.capabilities],
         supportedOwnershipModes: [...provider.supportedOwnershipModes],
+        setupVariants: provider.setupVariants.map((variant) => ({
+          ...variant,
+          manualSteps: [...variant.manualSteps],
+          limitations: [...variant.limitations],
+        })),
       }))
     : [];
   const enterpriseServices = tab === "ai-workspaces" && featureFlags.AI_WORKSPACES && featureFlags.MANAGED_ENTERPRISE_SERVICES

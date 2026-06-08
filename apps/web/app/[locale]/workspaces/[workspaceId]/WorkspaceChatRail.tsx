@@ -5,7 +5,7 @@ import { usePathname } from "next/navigation";
 import { ChatInterface } from "./chat/ChatInterface";
 import { OPEN_WORKSPACE_CHAT_EVENT, type OpenWorkspaceChatEventDetail, type WorkspaceChatPageContext } from "./chat/page-context";
 import { AiWorkspaceLaunchPanel } from "./AiWorkspaceLaunchPanel";
-import type { AiWorkspaceLaunchProvider } from "@/lib/ai-workspace-launch";
+import type { AiWorkspaceLaunchState } from "@/lib/ai-workspace-launch";
 import { WorkspaceUtilityIcon } from "./WorkspaceNavIcon";
 
 type ConversationSummary = {
@@ -30,13 +30,11 @@ function isWorkspaceHome(pathname: string, workspaceId: string) {
 export function WorkspaceChatRail({
   workspaceId,
   conversations,
-  aiWorkspaceProvider,
-  aiWorkspaceLaunchUrl,
+  aiWorkspaceState,
 }: {
   workspaceId: string;
   conversations: ConversationSummary[];
-  aiWorkspaceProvider: AiWorkspaceLaunchProvider | null;
-  aiWorkspaceLaunchUrl: string | null;
+  aiWorkspaceState: AiWorkspaceLaunchState;
 }) {
   const pathname = usePathname() ?? "";
   const defaultCollapsed = useMemo(() => !isWorkspaceHome(pathname, workspaceId), [pathname, workspaceId]);
@@ -123,8 +121,7 @@ export function WorkspaceChatRail({
       <div className="ws-agent-chat-shell" hidden={isCollapsed} aria-hidden={isCollapsed}>
         <AiWorkspaceLaunchPanel
           workspaceId={workspaceId}
-          provider={aiWorkspaceProvider}
-          providerLaunchUrl={aiWorkspaceLaunchUrl}
+          initialState={aiWorkspaceState}
           variant="rail"
         />
         <ChatInterface
@@ -132,7 +129,6 @@ export function WorkspaceChatRail({
           conversations={conversations}
           activeSessionId={null}
           compact={true}
-          claudeFooterEnabled={!isCollapsed}
           pageContext={pageContext}
           openSignal={openSignal}
         />

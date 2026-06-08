@@ -6,7 +6,7 @@ import { useTranslations } from "next-intl";
 import { ChatInterface } from "./chat/ChatInterface";
 import { AiWorkspaceLaunchPanel } from "./AiWorkspaceLaunchPanel";
 import type { NavGroup } from "@/lib/nav-config";
-import type { AiWorkspaceLaunchProvider } from "@/lib/ai-workspace-launch";
+import type { AiWorkspaceLaunchState } from "@/lib/ai-workspace-launch";
 import type { MobileCaptureAction } from "@/lib/workspace-add-actions";
 import { WorkspaceNavIcon, WorkspaceUtilityIcon } from "./WorkspaceNavIcon";
 
@@ -29,8 +29,7 @@ type MobileWorkspaceShellProps = {
   navGroups: NavGroup[];
   unreadCount: number;
   conversations: ConversationSummary[];
-  aiWorkspaceProvider: AiWorkspaceLaunchProvider | null;
-  aiWorkspaceLaunchUrl: string | null;
+  aiWorkspaceState: AiWorkspaceLaunchState;
   captureActions: MobileCaptureAction[];
 };
 
@@ -55,8 +54,7 @@ export function MobileWorkspaceShell({
   navGroups,
   unreadCount,
   conversations,
-  aiWorkspaceProvider,
-  aiWorkspaceLaunchUrl,
+  aiWorkspaceState,
   captureActions,
 }: MobileWorkspaceShellProps) {
   const pathname = usePathname() ?? "";
@@ -235,8 +233,7 @@ export function MobileWorkspaceShell({
             <div className="mobile-ai-pane mobile-ai-pane-work" role="tabpanel">
               <AiWorkspaceLaunchPanel
                 workspaceId={workspaceId}
-                provider={aiWorkspaceProvider}
-                providerLaunchUrl={aiWorkspaceLaunchUrl}
+                initialState={aiWorkspaceState}
                 variant="mobile"
               />
             </div>
