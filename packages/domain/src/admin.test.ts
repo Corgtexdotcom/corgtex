@@ -641,6 +641,38 @@ describe("Platform Admin Tools", () => {
     });
   });
 
+  it("probeCustomerDeploymentHealth accepts matching release gitSha when imageTag metadata is stale", async () => {
+    (prisma.customerDeployment.findUniqueOrThrow as any).mockResolvedValueOnce({
+      id: "inst_1",
+      url: "http://fake-deployment.com",
+      releaseImageTag: "sha-expected",
+    });
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: vi.fn().mockResolvedValue({
+        database: "up",
+        schema: "ready",
+        runtime: {
+          redis: "configured",
+          storage: "configured",
+        },
+        release: { imageTag: "stale-image-tag", gitSha: "sha-expected" },
+      }),
+    });
+
+    await admin.probeCustomerDeploymentHealth(dummyActor, "inst_1");
+
+    expect(prisma.customerDeployment.update).toHaveBeenCalledWith({
+      where: { id: "inst_1" },
+      data: expect.objectContaining({
+        lastHealthStatus: "ok",
+        lastHealthError: null,
+        provisioningStatus: "active",
+        lastReleaseCheck: expect.any(Date),
+      }),
+    });
+  });
+
   it("probeCustomerDeploymentHealth marks missing runtime dependencies as degraded", async () => {
     global.fetch = vi.fn().mockResolvedValue({
       ok: true,

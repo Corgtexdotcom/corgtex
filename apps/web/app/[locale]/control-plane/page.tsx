@@ -107,6 +107,10 @@ export default async function ControlPlanePage({
     support: raw?.support,
     region: raw?.region,
     owner: raw?.owner,
+    unhealthy: raw?.unhealthy,
+    issues: raw?.issues,
+    missingTools: raw?.missingTools,
+    stale: raw?.stale,
     sort: raw?.sort,
     direction: raw?.direction,
     page: Number(raw?.page ?? 1),
@@ -135,6 +139,10 @@ export default async function ControlPlanePage({
     support: fleet.filters.support,
     region: fleet.filters.region,
     owner: fleet.filters.owner,
+    unhealthy: fleet.filters.unhealthy ? "1" : "",
+    issues: fleet.filters.issues ? "1" : "",
+    missingTools: fleet.filters.missingTools ? "1" : "",
+    stale: fleet.filters.stale ? "1" : "",
     sort: fleet.filters.sort,
     direction: fleet.filters.direction,
   };
@@ -212,6 +220,22 @@ export default async function ControlPlanePage({
               <option value="not_configured">Not configured</option>
               <option value="degraded">Degraded</option>
             </select>
+            <label className="flex min-h-9 items-center gap-2 rounded-md border border-line bg-surface px-3 text-xs text-muted">
+              <input type="checkbox" name="unhealthy" value="1" defaultChecked={fleet.filters.unhealthy} className="rounded border-line bg-bg-alt text-brand-600 focus:ring-0" />
+              Unhealthy
+            </label>
+            <label className="flex min-h-9 items-center gap-2 rounded-md border border-line bg-surface px-3 text-xs text-muted">
+              <input type="checkbox" name="issues" value="1" defaultChecked={fleet.filters.issues} className="rounded border-line bg-bg-alt text-brand-600 focus:ring-0" />
+              Open issues
+            </label>
+            <label className="flex min-h-9 items-center gap-2 rounded-md border border-line bg-surface px-3 text-xs text-muted">
+              <input type="checkbox" name="missingTools" value="1" defaultChecked={fleet.filters.missingTools} className="rounded border-line bg-bg-alt text-brand-600 focus:ring-0" />
+              Missing tools/apps
+            </label>
+            <label className="flex min-h-9 items-center gap-2 rounded-md border border-line bg-surface px-3 text-xs text-muted">
+              <input type="checkbox" name="stale" value="1" defaultChecked={fleet.filters.stale} className="rounded border-line bg-bg-alt text-brand-600 focus:ring-0" />
+              Stale data
+            </label>
             <button type="submit" className={controlPlaneButtonClass}>Apply</button>
           </form>
         }

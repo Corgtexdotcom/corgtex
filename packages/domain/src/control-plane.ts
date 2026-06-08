@@ -366,20 +366,15 @@ const CONTROL_PLANE_TOOL_FEATURE_FLAGS = new Set<string>([
   "SLACK_MEETING_ACTION_REVIEW",
 ]);
 
+const CONTROL_PLANE_STALE_AFTER_MS = 24 * 60 * 60 * 1000;
+
 const controlPlaneDeploymentInclude = {
-  supportOperations: {
-    orderBy: { createdAt: "desc" },
-    take: 3,
-  },
   managedWorkspace: {
     select: managedWorkspaceSelect,
   },
   fleetSnapshots: {
     orderBy: { createdAt: "desc" },
     take: 6,
-  },
-  _count: {
-    select: { supportOperations: true, events: true },
   },
 } satisfies Prisma.CustomerDeploymentInclude;
 
@@ -511,6 +506,12 @@ function readPositiveInteger(value: string | undefined, fallback: number, max: n
 function boundedInteger(value: number | null | undefined, fallback: number, min: number, max: number) {
   const parsed = typeof value === "number" && Number.isFinite(value) ? Math.floor(value) : fallback;
   return Math.min(Math.max(parsed, min), max);
+}
+
+function booleanFilter(value: string | boolean | null | undefined) {
+  if (typeof value === "boolean") return value;
+  if (typeof value !== "string") return false;
+  return ["1", "true", "yes", "on"].includes(value.trim().toLowerCase());
 }
 
 function deploymentHealthStatus(status: string) {
@@ -2479,6 +2480,7 @@ export async function listControlPlaneDeployments(actor: AppActor) {
       customerAccountId: account.id,
       hasDeployment: true,
       hasSupportCredential: Boolean(deployment.supportCredentialEnc),
+      supportOperations: [],
       supportCredentialEnc: undefined,
     };
   });
@@ -2494,6 +2496,7 @@ export async function listControlPlaneDeployments(actor: AppActor) {
     customerAccount: null,
     hasDeployment: true,
     hasSupportCredential: Boolean(deployment.supportCredentialEnc),
+    supportOperations: [],
     supportCredentialEnc: undefined,
   }));
 
@@ -2557,6 +2560,10 @@ export async function listControlPlaneFleetPage(actor: AppActor, params: {
   support?: string | null;
   region?: string | null;
   owner?: string | null;
+  unhealthy?: string | boolean | null;
+  issues?: string | boolean | null;
+  missingTools?: string | boolean | null;
+  stale?: string | boolean | null;
   sort?: string | null;
   direction?: string | null;
   page?: number | null;
@@ -2572,7 +2579,7 @@ export async function listControlPlaneFleetPage(actor: AppActor, params: {
     ? params.sort
     : "updated") as ControlPlaneFleetSort;
   const direction = params.direction === "asc" ? "asc" : "desc";
-  const pageSize = boundedInteger(params.pageSize, 25, 10, 100);
+  const pageSize = boundedInteger(params.pageSize, 25, 10, 500);
   const page = boundedInteger(params.page, 1, 1, Number.MAX_SAFE_INTEGER);
 
   const filtered = rows.filter((row) => {
@@ -2604,6 +2611,10 @@ export async function listControlPlaneFleetPage(actor: AppActor, params: {
       support,
       region,
       owner,
+      unhealthy: booleanFilter(params.unhealthy),
+      issues: booleanFilter(params.issues),
+      missingTools: booleanFilter(params.missingTools),
+      stale: booleanFilter(params.stale),
       sort,
       direction,
       regions,
@@ -2641,6 +2652,60 @@ function controlPlaneReleaseDrift(row: ControlPlaneDeploymentRow) {
   return row.lastHealthError?.includes("Release drift:")
     ? row.lastHealthError
     : latestSnapshotForKind(row, "RELEASE")?.error ?? null;
+}
+
+export type ControlPlaneCustomerSummary = {
+  id: string;
+  label: string;
+  customerSlug: string | null;
+  url: string;
+  hasDeployment: boolean;
+  hasSupportCredential: boolean;
+  supportConnectorStatus: string | null;
+  lastHealthStatus: string | null;
+  lastHealthError: string | null;
+  lastHealthCheck: Date | null;
+  lastReleaseCheck: Date | null;
+  releaseImageTag: string | null;
+  releaseVersion: string | null;
+  managedWorkspaceId: string | null;
+  provisioningStatus: string | null;
+  supportOperations: [];
+};
+
+export async function listControlPlaneCustomerSummaries(actor: AppActor, params: {
+  query?: string | null;
+  health?: string | null;
+  support?: string | null;
+  limit?: number | null;
+} = {}): Promise<ControlPlaneCustomerSummary[]> {
+  const limit = boundedInteger(params.limit, 500, 1, 500);
+  const fleet = await listControlPlaneFleetPage(actor, {
+    query: params.query,
+    health: params.health,
+    support: params.support,
+    page: 1,
+    pageSize: Math.max(limit, 10),
+  });
+
+  return fleet.items.slice(0, limit).map((row) => ({
+    id: row.id,
+    label: row.label,
+    customerSlug: controlPlaneRowSlug(row),
+    url: row.url,
+    hasDeployment: row.hasDeployment,
+    hasSupportCredential: row.hasSupportCredential,
+    supportConnectorStatus: row.supportConnectorStatus,
+    lastHealthStatus: row.lastHealthStatus,
+    lastHealthError: row.lastHealthError,
+    lastHealthCheck: row.lastHealthCheck,
+    lastReleaseCheck: row.lastReleaseCheck,
+    releaseImageTag: row.releaseImageTag,
+    releaseVersion: row.releaseVersion,
+    managedWorkspaceId: row.managedWorkspaceId,
+    provisioningStatus: row.provisioningStatus,
+    supportOperations: [],
+  }));
 }
 
 function controlPlaneMatrixTone(status?: string | null): ControlPlaneMatrixStatus {
@@ -2877,6 +2942,36 @@ function controlPlaneLastCheckedAt(row: ControlPlaneDeploymentRow, recorder: Con
   ].filter((value): value is Date => value instanceof Date);
   if (candidates.length === 0) return null;
   return candidates.sort((left, right) => right.getTime() - left.getTime())[0] ?? null;
+}
+
+function controlPlaneMatrixFilterFlags(params: Parameters<typeof listControlPlaneFleetPage>[1] = {}) {
+  return {
+    unhealthy: booleanFilter(params.unhealthy),
+    issues: booleanFilter(params.issues),
+    missingTools: booleanFilter(params.missingTools),
+    stale: booleanFilter(params.stale),
+  };
+}
+
+function hasControlPlaneMatrixFilters(params: Parameters<typeof listControlPlaneFleetPage>[1] = {}) {
+  const filters = controlPlaneMatrixFilterFlags(params);
+  return filters.unhealthy || filters.issues || filters.missingTools || filters.stale;
+}
+
+function controlPlaneMatrixRowIsStale(row: ControlPlaneMatrixRow, now = new Date()) {
+  return !row.lastCheckedAt || now.getTime() - row.lastCheckedAt.getTime() > CONTROL_PLANE_STALE_AFTER_MS;
+}
+
+function controlPlaneMatrixRowMatchesFilters(
+  row: ControlPlaneMatrixRow,
+  filters: ReturnType<typeof controlPlaneMatrixFilterFlags>,
+  now: Date,
+) {
+  if (filters.unhealthy && row.health.tone === "ok") return false;
+  if (filters.issues && row.issues.length === 0) return false;
+  if (filters.missingTools && row.tools.status === "active" && (row.tools.total ?? 0) > 0) return false;
+  if (filters.stale && !controlPlaneMatrixRowIsStale(row, now)) return false;
+  return true;
 }
 
 function recorderProviderFromValue(value: unknown): MeetingRecorderProvider | null {
@@ -3782,7 +3877,12 @@ export async function getControlPlaneClientOptions(actor: AppActor): Promise<Con
 }
 
 export async function listControlPlaneMatrix(actor: AppActor, params: Parameters<typeof listControlPlaneFleetPage>[1] = {}) {
-  const fleet = await listControlPlaneFleetPage(actor, params);
+  const matrixFiltersEnabled = hasControlPlaneMatrixFilters(params);
+  const requestedPageSize = boundedInteger(params.pageSize, 25, 10, 500);
+  const requestedPage = boundedInteger(params.page, 1, 1, Number.MAX_SAFE_INTEGER);
+  const fleet = await listControlPlaneFleetPage(actor, matrixFiltersEnabled
+    ? { ...params, page: 1, pageSize: 500 }
+    : params);
   const [recorderRows, toolState] = await Promise.all([
     buildControlPlaneRecorderRows(fleet.items),
     loadBatchedToolSummaryState(
@@ -3795,12 +3895,26 @@ export async function listControlPlaneMatrix(actor: AppActor, params: Parameters
     "unavailable",
     "Recorder state is unavailable.",
   ), toolState));
+  const matrixFilters = controlPlaneMatrixFilterFlags(params);
+  const filteredItems = matrixFiltersEnabled
+    ? items.filter((row) => controlPlaneMatrixRowMatchesFilters(row, matrixFilters, new Date()))
+    : items;
+  const pageCount = Math.max(Math.ceil(filteredItems.length / requestedPageSize), 1);
+  const currentPage = matrixFiltersEnabled ? Math.min(requestedPage, pageCount) : fleet.page;
+  const start = (currentPage - 1) * requestedPageSize;
+  const pagedItems = matrixFiltersEnabled
+    ? filteredItems.slice(start, start + requestedPageSize)
+    : filteredItems;
   return {
     ...fleet,
-    items,
+    items: pagedItems,
+    total: matrixFiltersEnabled ? filteredItems.length : fleet.total,
+    page: currentPage,
+    pageSize: matrixFiltersEnabled ? requestedPageSize : fleet.pageSize,
+    pageCount: matrixFiltersEnabled ? pageCount : fleet.pageCount,
     summary: {
       ...fleet.summary,
-      attention: items.filter((row) => row.hasDeployment && row.issues.length > 0).length,
+      attention: filteredItems.filter((row) => row.hasDeployment && row.issues.length > 0).length,
     },
     matrixSummary: {
       recordersReady: recorderRows.filter((row) => row.status === "ready").length,
