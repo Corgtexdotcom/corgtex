@@ -17,6 +17,7 @@ const {
   runControlPlaneClientMigrationWorkerVerificationJobMock,
   runControlPlaneFleetSnapshotJobMock,
   runControlPlaneReleaseDeployJobMock,
+  runEnterpriseAppHealthCheckJobMock,
   syncRecorderCalendarSourceMock,
   isAgentEnabledMock,
   getWorkspaceNewspaperCadenceMock,
@@ -43,6 +44,9 @@ const {
     customerDeployment: {
       findMany: vi.fn(),
     },
+    appRuntime: {
+      findMany: vi.fn(),
+    },
   },
   txMock: {
     $queryRaw: vi.fn(),
@@ -67,6 +71,7 @@ const {
   runControlPlaneClientMigrationWorkerVerificationJobMock: vi.fn(),
   runControlPlaneFleetSnapshotJobMock: vi.fn(),
   runControlPlaneReleaseDeployJobMock: vi.fn(),
+  runEnterpriseAppHealthCheckJobMock: vi.fn(),
   syncRecorderCalendarSourceMock: vi.fn(),
   isAgentEnabledMock: vi.fn(),
   getWorkspaceNewspaperCadenceMock: vi.fn(),
@@ -111,6 +116,8 @@ vi.mock("@corgtex/domain", () => ({
   runControlPlaneFleetSnapshotJob: runControlPlaneFleetSnapshotJobMock,
   CONTROL_PLANE_RELEASE_DEPLOY_JOB_TYPE: "control-plane.release.deploy-latest",
   runControlPlaneReleaseDeployJob: runControlPlaneReleaseDeployJobMock,
+  ENTERPRISE_APP_HEALTH_CHECK_JOB_TYPE: "enterprise-app.health.check",
+  runEnterpriseAppHealthCheckJob: runEnterpriseAppHealthCheckJobMock,
   syncRecorderCalendarSource: syncRecorderCalendarSourceMock,
   isAgentEnabled: isAgentEnabledMock,
   getWorkspaceNewspaperCadence: getWorkspaceNewspaperCadenceMock,
@@ -134,6 +141,7 @@ describe("runPendingJobs", () => {
     prismaMock.communicationInstallation.findMany.mockReset().mockResolvedValue([]);
     prismaMock.communicationInstallation.updateMany.mockReset().mockResolvedValue({ count: 1 });
     prismaMock.customerDeployment.findMany.mockReset().mockResolvedValue([]);
+    prismaMock.appRuntime.findMany.mockReset().mockResolvedValue([]);
     txMock.$queryRaw.mockReset().mockResolvedValue([]);
     txMock.workflowJob.upsert.mockReset().mockResolvedValue({ id: "job-1" });
     runAgentWorkflowJobMock.mockReset();
@@ -149,6 +157,7 @@ describe("runPendingJobs", () => {
     runControlPlaneClientMigrationWorkerVerificationJobMock.mockReset().mockResolvedValue({ id: "mig-1", status: "import_verified" });
     runControlPlaneFleetSnapshotJobMock.mockReset().mockResolvedValue({ refreshed: true });
     runControlPlaneReleaseDeployJobMock.mockReset().mockResolvedValue({ status: "deployed" });
+    runEnterpriseAppHealthCheckJobMock.mockReset().mockResolvedValue({ status: "ok" });
     syncRecorderCalendarSourceMock.mockReset().mockResolvedValue({ action: "synced" });
     isAgentEnabledMock.mockReset().mockResolvedValue(false);
     getWorkspaceNewspaperCadenceMock.mockReset().mockResolvedValue("DAILY");
@@ -488,6 +497,34 @@ describe("runPendingJobs", () => {
     });
   });
 
+  it("dispatches enterprise app health check jobs without a workspace id", async () => {
+    txMock.$queryRaw.mockResolvedValue([
+      {
+        id: "job-1",
+        workspaceId: null,
+        type: "enterprise-app.health.check",
+        payload: {
+          runtimeId: "runtime-1",
+          reason: "Scheduled enterprise app health sweep.",
+        },
+        attempts: 1,
+      },
+    ]);
+
+    await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
+
+    expect(runEnterpriseAppHealthCheckJobMock).toHaveBeenCalledWith({
+      runtimeId: "runtime-1",
+      reason: "Scheduled enterprise app health sweep.",
+    });
+    expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({
+      where: { id: "job-1" },
+      data: expect.objectContaining({
+        status: "COMPLETED",
+      }),
+    });
+  });
+
   it("dispatches Slack agent jobs", async () => {
     txMock.$queryRaw.mockResolvedValue([
       {
@@ -676,6 +713,7 @@ describe("schedulePeriodicJobs", () => {
       { id: "install-1", workspaceId: "ws-1" },
     ]);
     prismaMock.customerDeployment.findMany.mockReset().mockResolvedValue([]);
+    prismaMock.appRuntime.findMany.mockReset().mockResolvedValue([]);
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-04-29T20:15:00Z"));
   });
@@ -721,6 +759,40 @@ describe("schedulePeriodicJobs", () => {
           reason: "Scheduled Control Plane fleet sweep.",
         }),
         dedupeKey: "inst-1:control-plane-fleet-snapshot:493748",
+      }),
+    }));
+  });
+
+  it("schedules bounded enterprise app health jobs", async () => {
+    prismaMock.communicationInstallation.findMany.mockResolvedValue([]);
+    prismaMock.appRuntime.findMany.mockResolvedValue([
+      { id: "runtime-1" },
+      { id: "runtime-2" },
+    ]);
+
+    await expect(schedulePeriodicJobs()).resolves.toBe(2);
+
+    expect(prismaMock.appRuntime.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        status: { not: "DISABLED" },
+        OR: [
+          { healthUrl: { not: null } },
+          { baseUrl: { not: null } },
+        ],
+      },
+      take: 100,
+      select: { id: true },
+    }));
+    expect(txMock.workflowJob.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({
+        workspaceId: null,
+        eventId: null,
+        type: "enterprise-app.health.check",
+        payload: expect.objectContaining({
+          runtimeId: "runtime-1",
+          reason: "Scheduled enterprise app health sweep.",
+        }),
+        dedupeKey: "runtime-1:enterprise-app-health:1974993",
       }),
     }));
   });

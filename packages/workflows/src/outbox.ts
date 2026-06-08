@@ -11,6 +11,7 @@ import { runDailyDigest, runSlackAgent, runSlackContextSummary, runSlackProactiv
 import {
   createWebhookDeliveries,
   CONTROL_PLANE_CLIENT_MIGRATION_VERIFY_JOB_TYPE,
+  ENTERPRISE_APP_HEALTH_CHECK_JOB_TYPE,
   CONTROL_PLANE_FLEET_SNAPSHOT_JOB_TYPE,
   CONTROL_PLANE_RELEASE_DEPLOY_JOB_TYPE,
   deliverWebhook,
@@ -28,6 +29,7 @@ import {
   syncSlackPublicArchiveForWorkspace,
   reportPendingAiUsageToStripe,
   createRoleOnboardingIntro,
+  runEnterpriseAppHealthCheckJob,
   type ControlPlaneReleaseTarget,
   type SlackAgentJobPayload,
 } from "@corgtex/domain";
@@ -402,6 +404,17 @@ async function handleJob(job: ClaimedJob) {
       destinationDeploymentId: typeof payload.destinationDeploymentId === "string" ? payload.destinationDeploymentId : null,
       verificationSummary: payload.verificationSummary,
       idMaps: payload.idMaps,
+      reason: typeof payload.reason === "string" ? payload.reason : null,
+    });
+    return;
+  }
+
+  if (job.type === ENTERPRISE_APP_HEALTH_CHECK_JOB_TYPE) {
+    if (typeof payload.runtimeId !== "string") {
+      throw new Error("Enterprise app health check job is missing runtimeId.");
+    }
+    await runEnterpriseAppHealthCheckJob({
+      runtimeId: payload.runtimeId,
       reason: typeof payload.reason === "string" ? payload.reason : null,
     });
     return;
@@ -875,8 +888,12 @@ export async function schedulePeriodicJobs() {
   
   const fleetSweepBatchSizeRaw = Number(process.env.CONTROL_PLANE_FLEET_SWEEP_BATCH_SIZE ?? 50);
   const fleetSweepBatchSize = Math.min(Math.max(Number.isFinite(fleetSweepBatchSizeRaw) ? fleetSweepBatchSizeRaw : 50, 1), 500);
+  const appHealthBatchSizeRaw = Number(process.env.ENTERPRISE_APP_HEALTH_SWEEP_BATCH_SIZE ?? 100);
+  const appHealthBatchSize = Math.min(Math.max(Number.isFinite(appHealthBatchSizeRaw) ? appHealthBatchSizeRaw : 100, 1), 500);
+  const appHealthIntervalMinutesRaw = Number(process.env.ENTERPRISE_APP_HEALTH_SWEEP_INTERVAL_MINUTES ?? 15);
+  const appHealthIntervalMinutes = Math.min(Math.max(Number.isFinite(appHealthIntervalMinutesRaw) ? appHealthIntervalMinutesRaw : 15, 5), 240);
   const aiUsageLedgerEntryDelegate = (prisma as typeof prisma & { aiUsageLedgerEntry?: typeof prisma.aiUsageLedgerEntry }).aiUsageLedgerEntry;
-  const [sources, slackInstallations, customerDeployments, pendingAiUsage] = await Promise.all([
+  const [sources, slackInstallations, customerDeployments, appRuntimes, pendingAiUsage] = await Promise.all([
     prisma.externalDataSource.findMany({
       where: { isActive: true },
       select: { id: true, workspaceId: true, pullCadenceMinutes: true, lastSyncAt: true }
@@ -899,6 +916,21 @@ export async function schedulePeriodicJobs() {
         { createdAt: "asc" },
       ],
       take: fleetSweepBatchSize,
+      select: { id: true },
+    }),
+    prisma.appRuntime.findMany({
+      where: {
+        status: { not: "DISABLED" },
+        OR: [
+          { healthUrl: { not: null } },
+          { baseUrl: { not: null } },
+        ],
+      },
+      orderBy: [
+        { lastHealthAt: "asc" },
+        { createdAt: "asc" },
+      ],
+      take: appHealthBatchSize,
       select: { id: true },
     }),
     aiUsageLedgerEntryDelegate
@@ -938,6 +970,7 @@ export async function schedulePeriodicJobs() {
     }
 
     const hourlyBucket = Math.floor(now.getTime() / (60 * 60 * 1000));
+    const appHealthBucket = Math.floor(now.getTime() / (appHealthIntervalMinutes * 60 * 1000));
     for (const installation of slackInstallations) {
       await enqueueJob(tx, {
         workspaceId: installation.workspaceId,
@@ -959,6 +992,20 @@ export async function schedulePeriodicJobs() {
           reason: "Scheduled Control Plane fleet sweep.",
         },
         dedupeKey: `${deployment.id}:control-plane-fleet-snapshot:${hourlyBucket}`,
+      });
+      scheduledCount++;
+    }
+
+    for (const runtime of appRuntimes) {
+      await enqueueJob(tx, {
+        workspaceId: null,
+        eventId: null,
+        type: ENTERPRISE_APP_HEALTH_CHECK_JOB_TYPE,
+        payload: {
+          runtimeId: runtime.id,
+          reason: "Scheduled enterprise app health sweep.",
+        },
+        dedupeKey: `${runtime.id}:enterprise-app-health:${appHealthBucket}`,
       });
       scheduledCount++;
     }
