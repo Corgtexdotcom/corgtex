@@ -66,6 +66,9 @@ import {
   createDiscussionThread,
   addDiscussionComment,
   resolveDiscussionThread,
+  listDeliberationEntries,
+  postDeliberationEntry,
+  resolveDeliberationEntry,
   listCycles,
   createCycle,
   updateCycle,
@@ -244,6 +247,9 @@ const TOOL_CAPABILITIES = {
   upload_document_text: { scopes: ["documents:write"] },
   list_proposals: { scopes: ["proposals:read"] },
   get_proposal: { scopes: ["proposals:read"] },
+  list_proposal_comments: { scopes: ["proposals:read"] },
+  post_proposal_comment: { scopes: ["proposals:write"] },
+  resolve_proposal_comment: { scopes: ["proposals:write"] },
   create_proposal: { scopes: ["proposals:write"] },
   update_proposal: { scopes: ["proposals:write"] },
   resolve_proposal: { scopes: ["proposals:write"] },
@@ -263,6 +269,9 @@ const TOOL_CAPABILITIES = {
   update_tension: { scopes: ["tensions:write"] },
   return_tension_to_draft: { scopes: ["tensions:write"] },
   upvote_tension: { scopes: ["tensions:write"] },
+  list_tension_comments: { scopes: ["tensions:read"] },
+  post_tension_comment: { scopes: ["tensions:write"] },
+  resolve_tension_comment: { scopes: ["tensions:write"] },
   delete_tension: { scopes: ["tensions:write"] },
   list_goals: { scopes: ["goals:read"] },
   get_goal: { scopes: ["goals:read"] },
@@ -383,6 +392,59 @@ const BRAIN_ARTICLE_TYPE = [
 const BRAIN_ARTICLE_AUTHORITY = ["AUTHORITATIVE", "REFERENCE", "HISTORICAL", "DRAFT"] as const;
 const BRAIN_DISCUSSION_TARGET = ["ARTICLE", "SECTION", "LINE"] as const;
 const WORK_ITEM_ENTITY_TYPE = ["TENSION", "PROPOSAL", "ACTION", "SPEND", "GOAL"] as const;
+const DELIBERATION_ENTRY_TYPE = ["REACTION", "OBJECTION"] as const;
+
+function deliberationEntryResult(entry: {
+  id: string;
+  parentType: string;
+  parentId: string;
+  parentVersion?: number | null;
+  entryType: string;
+  bodyMd?: string | null;
+  resolvedAt?: Date | string | null;
+  resolvedNote?: string | null;
+  createdAt?: Date | string | null;
+  author?: { id?: string | null; displayName?: string | null; email?: string | null } | null;
+  targetCircle?: { id?: string; name?: string } | null;
+  targetMember?: { id?: string; user?: { id?: string; displayName?: string | null; email?: string | null } | null } | null;
+}) {
+  return {
+    id: entry.id,
+    parentType: entry.parentType,
+    parentId: entry.parentId,
+    parentVersion: entry.parentVersion ?? null,
+    entryType: entry.entryType,
+    bodyMd: entry.bodyMd ?? null,
+    resolvedAt: entry.resolvedAt ?? null,
+    resolvedNote: entry.resolvedNote ?? null,
+    createdAt: entry.createdAt ?? null,
+    author: entry.author
+      ? {
+        id: entry.author.id ?? null,
+        displayName: entry.author.displayName ?? null,
+        email: entry.author.email ?? null,
+      }
+      : null,
+    targetCircle: entry.targetCircle
+      ? {
+        id: entry.targetCircle.id,
+        name: entry.targetCircle.name,
+      }
+      : null,
+    targetMember: entry.targetMember
+      ? {
+        id: entry.targetMember.id,
+        user: entry.targetMember.user
+          ? {
+            id: entry.targetMember.user.id,
+            displayName: entry.targetMember.user.displayName ?? null,
+            email: entry.targetMember.user.email ?? null,
+          }
+          : null,
+      }
+      : null,
+  };
+}
 
 /**
  * Create and configure a new McpServer instance with all Corgtex tools and resources.
@@ -473,6 +535,19 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       }
       : handler;
     return server.tool(name, description, inputSchema, annotationsForTool(name), guardedHandler);
+  };
+  const requireDeliberationEntryParent = async (parentType: "PROPOSAL" | "TENSION", entryId: string) => {
+    const entry = await prisma.deliberationEntry.findFirst({
+      where: {
+        id: entryId,
+        workspaceId,
+        parentType,
+      },
+      select: { id: true },
+    });
+    if (!entry) {
+      throw new AppError(404, "NOT_FOUND", `${parentType === "PROPOSAL" ? "Proposal" : "Tension"} comment not found.`);
+    }
   };
 
   // ===========================================================================
@@ -1645,6 +1720,82 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
   );
 
+  tool(
+    "list_proposal_comments",
+    "List deliberation comments on a proposal, including reactions and objections. This is separate from Brain article discussion comments.",
+    {
+      proposalId: z.string().describe("Proposal ID"),
+    },
+    async ({ proposalId }: { proposalId: string }) => {
+      requireScope(sessionCtx, "proposals:read");
+      const entries = await listDeliberationEntries(actor, {
+        workspaceId,
+        parentType: "PROPOSAL",
+        parentId: proposalId,
+      });
+      return jsonResult({
+        items: entries.map(deliberationEntryResult),
+        webUrl: webUrl(workspaceId, `/proposals/${proposalId}`),
+      });
+    },
+  );
+
+  tool(
+    "post_proposal_comment",
+    "Post a deliberation comment on a proposal. Use entryType REACTION for normal comments and OBJECTION for formal objections.",
+    {
+      proposalId: z.string().describe("Proposal ID"),
+      bodyMd: z.string().describe("Comment body in Markdown"),
+      entryType: z.enum(DELIBERATION_ENTRY_TYPE).optional().describe("REACTION or OBJECTION; defaults to REACTION"),
+      targetMemberId: z.string().optional().describe("Optional member ID this comment is directed to"),
+      targetCircleId: z.string().optional().describe("Optional circle ID this comment is directed to"),
+    },
+    async (params: {
+      proposalId: string;
+      bodyMd: string;
+      entryType?: typeof DELIBERATION_ENTRY_TYPE[number];
+      targetMemberId?: string;
+      targetCircleId?: string;
+    }) => {
+      requireScope(sessionCtx, "proposals:write");
+      const entry = await postDeliberationEntry(actor, {
+        workspaceId,
+        parentType: "PROPOSAL",
+        parentId: params.proposalId,
+        entryType: params.entryType ?? "REACTION",
+        bodyMd: params.bodyMd,
+        targetMemberId: params.targetMemberId,
+        targetCircleId: params.targetCircleId,
+      });
+      return jsonResult({
+        ...deliberationEntryResult(entry),
+        webUrl: webUrl(workspaceId, `/proposals/${params.proposalId}`),
+      });
+    },
+  );
+
+  tool(
+    "resolve_proposal_comment",
+    "Resolve a proposal deliberation comment or objection with a required resolution note.",
+    {
+      entryId: z.string().describe("Deliberation entry ID returned by list_proposal_comments or post_proposal_comment"),
+      resolvedNote: z.string().min(1).describe("Resolution note"),
+    },
+    async ({ entryId, resolvedNote }: { entryId: string; resolvedNote: string }) => {
+      requireScope(sessionCtx, "proposals:write");
+      await requireDeliberationEntryParent("PROPOSAL", entryId);
+      const updated = await resolveDeliberationEntry(actor, {
+        workspaceId,
+        entryId,
+        resolvedNote,
+      });
+      return jsonResult({
+        ...deliberationEntryResult(updated),
+        webUrl: webUrl(workspaceId, `/proposals/${updated.parentId}`),
+      });
+    },
+  );
+
   // @ts-expect-error — MCP SDK overload triggers TS2589 with zod schemas
   tool(
     "create_proposal",
@@ -2077,6 +2228,82 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         id: tensionId,
         upvoteId: upvote.tensionId,
         webUrl: webUrl(workspaceId, `/tensions/${tensionId}`),
+      });
+    },
+  );
+
+  tool(
+    "list_tension_comments",
+    "List deliberation comments on a tension, including reactions and objections. This is separate from Brain article discussion comments.",
+    {
+      tensionId: z.string().describe("Tension ID"),
+    },
+    async ({ tensionId }: { tensionId: string }) => {
+      requireScope(sessionCtx, "tensions:read");
+      const entries = await listDeliberationEntries(actor, {
+        workspaceId,
+        parentType: "TENSION",
+        parentId: tensionId,
+      });
+      return jsonResult({
+        items: entries.map(deliberationEntryResult),
+        webUrl: webUrl(workspaceId, `/tensions/${tensionId}`),
+      });
+    },
+  );
+
+  tool(
+    "post_tension_comment",
+    "Post a deliberation comment on a tension. Use entryType REACTION for normal comments and OBJECTION for formal objections.",
+    {
+      tensionId: z.string().describe("Tension ID"),
+      bodyMd: z.string().describe("Comment body in Markdown"),
+      entryType: z.enum(DELIBERATION_ENTRY_TYPE).optional().describe("REACTION or OBJECTION; defaults to REACTION"),
+      targetMemberId: z.string().optional().describe("Optional member ID this comment is directed to"),
+      targetCircleId: z.string().optional().describe("Optional circle ID this comment is directed to"),
+    },
+    async (params: {
+      tensionId: string;
+      bodyMd: string;
+      entryType?: typeof DELIBERATION_ENTRY_TYPE[number];
+      targetMemberId?: string;
+      targetCircleId?: string;
+    }) => {
+      requireScope(sessionCtx, "tensions:write");
+      const entry = await postDeliberationEntry(actor, {
+        workspaceId,
+        parentType: "TENSION",
+        parentId: params.tensionId,
+        entryType: params.entryType ?? "REACTION",
+        bodyMd: params.bodyMd,
+        targetMemberId: params.targetMemberId,
+        targetCircleId: params.targetCircleId,
+      });
+      return jsonResult({
+        ...deliberationEntryResult(entry),
+        webUrl: webUrl(workspaceId, `/tensions/${params.tensionId}`),
+      });
+    },
+  );
+
+  tool(
+    "resolve_tension_comment",
+    "Resolve a tension deliberation comment or objection with a required resolution note.",
+    {
+      entryId: z.string().describe("Deliberation entry ID returned by list_tension_comments or post_tension_comment"),
+      resolvedNote: z.string().min(1).describe("Resolution note"),
+    },
+    async ({ entryId, resolvedNote }: { entryId: string; resolvedNote: string }) => {
+      requireScope(sessionCtx, "tensions:write");
+      await requireDeliberationEntryParent("TENSION", entryId);
+      const updated = await resolveDeliberationEntry(actor, {
+        workspaceId,
+        entryId,
+        resolvedNote,
+      });
+      return jsonResult({
+        ...deliberationEntryResult(updated),
+        webUrl: webUrl(workspaceId, `/tensions/${updated.parentId}`),
       });
     },
   );
