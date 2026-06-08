@@ -1,9 +1,11 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { checkRateLimitMock, createProcurementTrialMock, headersMock } = vi.hoisted(() => ({
+const { checkRateLimitMock, createProcurementTrialMock, headersMock, requestPasswordResetForActiveMemberMock, sendEmailMock } = vi.hoisted(() => ({
   checkRateLimitMock: vi.fn(),
   createProcurementTrialMock: vi.fn(),
   headersMock: vi.fn(),
+  requestPasswordResetForActiveMemberMock: vi.fn(),
+  sendEmailMock: vi.fn(),
 }));
 
 class MockAppError extends Error {
@@ -24,6 +26,7 @@ vi.mock("next/headers", () => ({
 vi.mock("@corgtex/domain", () => ({
   AppError: MockAppError,
   createProcurementTrial: createProcurementTrialMock,
+  requestPasswordResetForActiveMember: requestPasswordResetForActiveMemberMock,
 }));
 
 vi.mock("@corgtex/shared", async (importOriginal) => {
@@ -31,6 +34,7 @@ vi.mock("@corgtex/shared", async (importOriginal) => {
   return {
     ...actual,
     checkRateLimit: checkRateLimitMock,
+    sendEmail: sendEmailMock,
   };
 });
 
@@ -56,6 +60,13 @@ function form(overrides: Record<string, string | boolean> = {}) {
   }
   return formData;
 }
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  vi.unstubAllEnvs();
+  requestPasswordResetForActiveMemberMock.mockResolvedValue(null);
+  sendEmailMock.mockResolvedValue({ status: "SENT", providerMessageId: "email-1" });
+});
 
 afterEach(() => {
   vi.clearAllMocks();
@@ -126,6 +137,43 @@ describe("signupAction", () => {
       errorKey: null,
       status: "review",
     });
+  });
+
+  it("sends a password reset and skips trial creation for an existing active member", async () => {
+    headersMock.mockResolvedValue(new Headers({
+      host: "app.test",
+      "x-forwarded-proto": "https",
+    }));
+    checkRateLimitMock.mockResolvedValue({
+      allowed: true,
+      remaining: 9,
+      resetAtMs: Date.now() + 60_000,
+    });
+    requestPasswordResetForActiveMemberMock.mockResolvedValueOnce({
+      token: "reset-token",
+      user: {
+        email: "admin@acme.test",
+        displayName: "Ada Admin",
+      },
+    });
+
+    const { signupAction } = await import("./actions");
+    const result = await signupAction(state(), form());
+
+    expect(result).toEqual({
+      adminEmail: "admin@acme.test",
+      adminName: "Ada Admin",
+      companyName: "Acme Corp",
+      errorKey: null,
+      idempotencyKey: "idem-signup-1",
+      status: "existingAccount",
+    });
+    expect(createProcurementTrialMock).not.toHaveBeenCalled();
+    expect(sendEmailMock).toHaveBeenCalledWith(expect.objectContaining({
+      to: "admin@acme.test",
+      subject: "Reset your Corgtex password",
+      html: expect.stringContaining("https://app.test/reset-password/reset-token"),
+    }));
   });
 
   it("normalizes proxy-chain forwarded headers before creating a trial origin", async () => {

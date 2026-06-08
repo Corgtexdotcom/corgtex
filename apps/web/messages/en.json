@@ -304,6 +304,8 @@
       "termsRequired": "Accept the terms to start the trial.",
       "unavailable": "Signup is temporarily unavailable. Try again."
     },
+    "signupExistingAccountDescription": "You already have an account created. We sent you a password reset email so you can log back in.",
+    "signupExistingAccountTitle": "Account already exists",
     "signupNameLabel": "Your name",
     "signupReviewDescription": "We need to review this request before creating the workspace. We will follow up by email.",
     "signupReviewTitle": "Request received",

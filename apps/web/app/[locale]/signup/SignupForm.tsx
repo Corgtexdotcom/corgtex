@@ -54,6 +54,22 @@ export function SignupForm({ initialState }: { initialState: SignupState }) {
     );
   }
 
+  if (state.status === "existingAccount") {
+    return (
+      <div className="stack" style={{ marginTop: 20 }}>
+        <div className="form-message form-message-success" role="status">
+          <p style={{ fontWeight: 600, marginBottom: 4 }}>{t("signupExistingAccountTitle")}</p>
+          <p className="muted" style={{ fontSize: 14 }}>
+            {t("signupExistingAccountDescription")}
+          </p>
+        </div>
+        <Link href="/login" style={{ marginTop: 12, display: "inline-block" }}>
+          {t("backToLogin")}
+        </Link>
+      </div>
+    );
+  }
+
   return (
     <form action={formAction} className="stack" style={{ marginTop: 20 }}>
       <input type="hidden" name="idempotencyKey" value={state.idempotencyKey} />

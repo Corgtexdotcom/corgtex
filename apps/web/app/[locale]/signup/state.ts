@@ -5,7 +5,7 @@ export type SignupErrorKey =
   | "rateLimited"
   | "unavailable";
 
-export type SignupStatus = "idle" | "active" | "review";
+export type SignupStatus = "idle" | "active" | "review" | "existingAccount";
 
 export type SignupState = {
   adminEmail: string;
