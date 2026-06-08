@@ -10,7 +10,7 @@ const defaultLocale = locales.includes(configuredDefaultLocale as (typeof locale
 export const routing = defineRouting({
   locales,
   defaultLocale,
-  localePrefix: 'as-needed'
+  localePrefix: 'always'
 });
 
 export const {Link, redirect, usePathname, useRouter, getPathname} =
