@@ -41,6 +41,9 @@ const submitExecutionResultMock = vi.fn();
 const listWorkItemVersionsMock = vi.fn();
 const getWorkItemVersionMock = vi.fn();
 const requireWorkspaceMembershipMock = vi.fn();
+const listDeliberationEntriesMock = vi.fn();
+const postDeliberationEntryMock = vi.fn();
+const resolveDeliberationEntryMock = vi.fn();
 
 vi.mock("@corgtex/domain", () => ({
   AppError: class AppError extends Error {
@@ -136,6 +139,9 @@ vi.mock("@corgtex/domain", () => ({
   submitExecutionResult: submitExecutionResultMock,
   listWorkItemVersions: listWorkItemVersionsMock,
   getWorkItemVersion: getWorkItemVersionMock,
+  listDeliberationEntries: listDeliberationEntriesMock,
+  postDeliberationEntry: postDeliberationEntryMock,
+  resolveDeliberationEntry: resolveDeliberationEntryMock,
   searchConnectedExternalMcpContext: searchConnectedExternalMcpContextMock,
   listRuntimeJobs: vi.fn(),
   listFailedJobs: vi.fn(),
@@ -161,6 +167,9 @@ vi.mock("@corgtex/shared", () => ({
     workspaceFeatureFlag: {
       findMany: vi.fn(),
       upsert: vi.fn(),
+    },
+    deliberationEntry: {
+      findFirst: vi.fn(),
     },
   },
   env: { APP_URL: "https://app.test" },
@@ -249,6 +258,31 @@ describe("createCorgtexMcpServer", () => {
       entityId: "tension-1",
       currentVersion: 3,
       version: { id: "v-2", version: 2, previousState: { title: "Old" } },
+    });
+    listDeliberationEntriesMock.mockReset().mockResolvedValue([]);
+    postDeliberationEntryMock.mockReset().mockResolvedValue({
+      id: "entry-1",
+      workspaceId: "ws-1",
+      parentType: "PROPOSAL",
+      parentId: "proposal-1",
+      parentVersion: 1,
+      entryType: "REACTION",
+      bodyMd: "Looks good.",
+      resolvedAt: null,
+      resolvedNote: null,
+      createdAt: new Date("2026-06-01T00:00:00.000Z"),
+    });
+    resolveDeliberationEntryMock.mockReset().mockResolvedValue({
+      id: "entry-1",
+      workspaceId: "ws-1",
+      parentType: "PROPOSAL",
+      parentId: "proposal-1",
+      parentVersion: 1,
+      entryType: "REACTION",
+      bodyMd: "Looks good.",
+      resolvedAt: new Date("2026-06-01T01:00:00.000Z"),
+      resolvedNote: "Addressed.",
+      createdAt: new Date("2026-06-01T00:00:00.000Z"),
     });
     requireWorkspaceMembershipMock.mockReset().mockResolvedValue({
       id: "member-1",
@@ -349,6 +383,217 @@ describe("createCorgtexMcpServer", () => {
       entityType: "Tension",
       version: { id: "v-2", version: 2 },
     });
+  });
+
+  it("lists, posts, and resolves proposal and tension comments through scoped MCP tools", async () => {
+    const { createCorgtexMcpServer } = await import("./server");
+    const { requireScope } = await import("./auth");
+    const { prisma } = await import("@corgtex/shared");
+
+    vi.mocked(prisma.deliberationEntry.findFirst)
+      .mockReset()
+      .mockResolvedValueOnce({ id: "proposal-entry-1" } as never)
+      .mockResolvedValueOnce({ id: "tension-entry-1" } as never);
+
+    listDeliberationEntriesMock
+      .mockResolvedValueOnce([{
+        id: "proposal-entry-1",
+        parentType: "PROPOSAL",
+        parentId: "proposal-1",
+        parentVersion: 2,
+        entryType: "REACTION",
+        bodyMd: "Proposal looks good.",
+        resolvedAt: null,
+        resolvedNote: null,
+        createdAt: new Date("2026-06-01T00:00:00.000Z"),
+        author: { id: "user-1", displayName: "User", email: "user@example.com" },
+      }])
+      .mockResolvedValueOnce([{
+        id: "tension-entry-1",
+        parentType: "TENSION",
+        parentId: "tension-1",
+        parentVersion: 1,
+        entryType: "OBJECTION",
+        bodyMd: "Tension needs more context.",
+        resolvedAt: null,
+        resolvedNote: null,
+        createdAt: new Date("2026-06-01T00:00:00.000Z"),
+        author: { id: "user-1", displayName: "User", email: "user@example.com" },
+      }]);
+    postDeliberationEntryMock
+      .mockResolvedValueOnce({
+        id: "proposal-entry-2",
+        parentType: "PROPOSAL",
+        parentId: "proposal-1",
+        parentVersion: 2,
+        entryType: "REACTION",
+        bodyMd: "Posted from MCP.",
+        resolvedAt: null,
+        resolvedNote: null,
+        createdAt: new Date("2026-06-01T00:05:00.000Z"),
+      })
+      .mockResolvedValueOnce({
+        id: "tension-entry-2",
+        parentType: "TENSION",
+        parentId: "tension-1",
+        parentVersion: 1,
+        entryType: "OBJECTION",
+        bodyMd: "Blocked until owner is clear.",
+        resolvedAt: null,
+        resolvedNote: null,
+        createdAt: new Date("2026-06-01T00:05:00.000Z"),
+      });
+    resolveDeliberationEntryMock
+      .mockResolvedValueOnce({
+        id: "proposal-entry-1",
+        parentType: "PROPOSAL",
+        parentId: "proposal-1",
+        parentVersion: 2,
+        entryType: "REACTION",
+        bodyMd: "Proposal looks good.",
+        resolvedAt: new Date("2026-06-01T01:00:00.000Z"),
+        resolvedNote: "Acknowledged.",
+        createdAt: new Date("2026-06-01T00:00:00.000Z"),
+      })
+      .mockResolvedValueOnce({
+        id: "tension-entry-1",
+        parentType: "TENSION",
+        parentId: "tension-1",
+        parentVersion: 1,
+        entryType: "OBJECTION",
+        bodyMd: "Tension needs more context.",
+        resolvedAt: new Date("2026-06-01T01:00:00.000Z"),
+        resolvedNote: "Owner added.",
+        createdAt: new Date("2026-06-01T00:00:00.000Z"),
+      });
+
+    const server = createCorgtexMcpServer({
+      actor: { kind: "agent", authProvider: "bootstrap" } as any,
+      workspaceId: "ws-1",
+      authKind: "agent",
+    });
+
+    const proposalListResponse = await (server as any)._registeredTools.list_proposal_comments.handler({ proposalId: "proposal-1" });
+    const proposalPostResponse = await (server as any)._registeredTools.post_proposal_comment.handler({
+      proposalId: "proposal-1",
+      bodyMd: "Posted from MCP.",
+    });
+    const proposalResolveResponse = await (server as any)._registeredTools.resolve_proposal_comment.handler({
+      entryId: "proposal-entry-1",
+      resolvedNote: "Acknowledged.",
+    });
+    const tensionListResponse = await (server as any)._registeredTools.list_tension_comments.handler({ tensionId: "tension-1" });
+    const tensionPostResponse = await (server as any)._registeredTools.post_tension_comment.handler({
+      tensionId: "tension-1",
+      bodyMd: "Blocked until owner is clear.",
+      entryType: "OBJECTION",
+      targetCircleId: "circle-1",
+    });
+    const tensionResolveResponse = await (server as any)._registeredTools.resolve_tension_comment.handler({
+      entryId: "tension-entry-1",
+      resolvedNote: "Owner added.",
+    });
+
+    expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "proposals:read");
+    expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "proposals:write");
+    expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "tensions:read");
+    expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "tensions:write");
+    expect(listDeliberationEntriesMock).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "agent" }),
+      { workspaceId: "ws-1", parentType: "PROPOSAL", parentId: "proposal-1" },
+    );
+    expect(listDeliberationEntriesMock).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "agent" }),
+      { workspaceId: "ws-1", parentType: "TENSION", parentId: "tension-1" },
+    );
+    expect(postDeliberationEntryMock).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "agent" }),
+      expect.objectContaining({
+        workspaceId: "ws-1",
+        parentType: "PROPOSAL",
+        parentId: "proposal-1",
+        entryType: "REACTION",
+        bodyMd: "Posted from MCP.",
+      }),
+    );
+    expect(postDeliberationEntryMock).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "agent" }),
+      expect.objectContaining({
+        workspaceId: "ws-1",
+        parentType: "TENSION",
+        parentId: "tension-1",
+        entryType: "OBJECTION",
+        targetCircleId: "circle-1",
+      }),
+    );
+    expect(prisma.deliberationEntry.findFirst).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ id: "proposal-entry-1", workspaceId: "ws-1", parentType: "PROPOSAL" }),
+    }));
+    expect(prisma.deliberationEntry.findFirst).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ id: "tension-entry-1", workspaceId: "ws-1", parentType: "TENSION" }),
+    }));
+    expect(resolveDeliberationEntryMock).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "agent" }),
+      { workspaceId: "ws-1", entryId: "proposal-entry-1", resolvedNote: "Acknowledged." },
+    );
+    expect(resolveDeliberationEntryMock).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "agent" }),
+      { workspaceId: "ws-1", entryId: "tension-entry-1", resolvedNote: "Owner added." },
+    );
+    expect((server as any)._registeredTools.list_proposal_comments.annotations).toMatchObject({ readOnlyHint: true });
+    expect((server as any)._registeredTools.post_proposal_comment.annotations).toMatchObject({ readOnlyHint: false });
+    expect((server as any)._registeredTools.list_tension_comments.annotations).toMatchObject({ readOnlyHint: true });
+    expect((server as any)._registeredTools.post_tension_comment.annotations).toMatchObject({ readOnlyHint: false });
+    expect(JSON.parse(proposalListResponse.content[0].text)).toMatchObject({
+      items: [{ id: "proposal-entry-1", parentType: "PROPOSAL", bodyMd: "Proposal looks good." }],
+      webUrl: "https://app.test/workspaces/ws-1/proposals/proposal-1",
+    });
+    expect(JSON.parse(proposalPostResponse.content[0].text)).toMatchObject({
+      id: "proposal-entry-2",
+      entryType: "REACTION",
+      webUrl: "https://app.test/workspaces/ws-1/proposals/proposal-1",
+    });
+    expect(JSON.parse(proposalResolveResponse.content[0].text)).toMatchObject({
+      id: "proposal-entry-1",
+      resolvedNote: "Acknowledged.",
+      webUrl: "https://app.test/workspaces/ws-1/proposals/proposal-1",
+    });
+    expect(JSON.parse(tensionListResponse.content[0].text)).toMatchObject({
+      items: [{ id: "tension-entry-1", parentType: "TENSION", bodyMd: "Tension needs more context." }],
+      webUrl: "https://app.test/workspaces/ws-1/tensions/tension-1",
+    });
+    expect(JSON.parse(tensionPostResponse.content[0].text)).toMatchObject({
+      id: "tension-entry-2",
+      entryType: "OBJECTION",
+      webUrl: "https://app.test/workspaces/ws-1/tensions/tension-1",
+    });
+    expect(JSON.parse(tensionResolveResponse.content[0].text)).toMatchObject({
+      id: "tension-entry-1",
+      resolvedNote: "Owner added.",
+      webUrl: "https://app.test/workspaces/ws-1/tensions/tension-1",
+    });
+  });
+
+  it("does not let proposal-scoped comment resolution resolve a tension entry", async () => {
+    const { createCorgtexMcpServer } = await import("./server");
+    const { prisma } = await import("@corgtex/shared");
+
+    vi.mocked(prisma.deliberationEntry.findFirst).mockReset().mockResolvedValueOnce(null as never);
+
+    const server = createCorgtexMcpServer({
+      actor: { kind: "agent", authProvider: "bootstrap" } as any,
+      workspaceId: "ws-1",
+      authKind: "agent",
+    });
+
+    await expect((server as any)._registeredTools.resolve_proposal_comment.handler({
+      entryId: "tension-entry-1",
+      resolvedNote: "Wrong parent type.",
+    })).rejects.toMatchObject({
+      status: 404,
+      code: "NOT_FOUND",
+    });
+    expect(resolveDeliberationEntryMock).not.toHaveBeenCalled();
   });
 
   it("creates execution requests and returns execution packet context", async () => {
