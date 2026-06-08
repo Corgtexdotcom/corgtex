@@ -9,9 +9,16 @@ type Action = "approve" | "reject";
 type Props = {
   trialId: string;
   companyName: string;
+  allowApprove?: boolean;
+  rejectLabel?: string;
 };
 
-export function TrialReviewButtons({ trialId, companyName }: Props) {
+export function TrialReviewButtons({
+  trialId,
+  companyName,
+  allowApprove = true,
+  rejectLabel = "Reject",
+}: Props) {
   const router = useRouter();
   const [pendingAction, setPendingAction] = useState<Action | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -48,15 +55,17 @@ export function TrialReviewButtons({ trialId, companyName }: Props) {
   return (
     <div className="flex flex-col items-end gap-1">
       <div className="flex items-center gap-1.5">
-        <button
-          type="button"
-          onClick={() => submit("approve")}
-          disabled={pendingAction !== null}
-          className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-emerald-500/20 bg-emerald-500/10 px-2.5 text-[10px] font-bold uppercase tracking-wide text-emerald-300 transition-colors hover:bg-emerald-500/15 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {pendingAction === "approve" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
-          Approve
-        </button>
+        {allowApprove && (
+          <button
+            type="button"
+            onClick={() => submit("approve")}
+            disabled={pendingAction !== null}
+            className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-emerald-500/20 bg-emerald-500/10 px-2.5 text-[10px] font-bold uppercase tracking-wide text-emerald-300 transition-colors hover:bg-emerald-500/15 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {pendingAction === "approve" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
+            Approve
+          </button>
+        )}
         <button
           type="button"
           onClick={() => submit("reject")}
@@ -64,7 +73,7 @@ export function TrialReviewButtons({ trialId, companyName }: Props) {
           className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-rose-500/20 bg-rose-500/10 px-2.5 text-[10px] font-bold uppercase tracking-wide text-rose-300 transition-colors hover:bg-rose-500/15 disabled:cursor-not-allowed disabled:opacity-50"
         >
           {pendingAction === "reject" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <X className="h-3.5 w-3.5" />}
-          Reject
+          {rejectLabel}
         </button>
       </div>
       {error && (
