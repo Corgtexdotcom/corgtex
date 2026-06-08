@@ -37,6 +37,7 @@ const { prismaMock, randomOpaqueTokenMock, sha256Mock, toInputJsonMock } = vi.ho
       findFirst: vi.fn(),
       findUnique: vi.fn(),
       update: vi.fn(),
+      updateMany: vi.fn(),
     },
     auditLog: {
       create: vi.fn(),
@@ -246,6 +247,7 @@ describe("enterprise app platform", () => {
     prismaMock.appSurfaceAssignment.upsert.mockResolvedValue({});
     prismaMock.appSession.create.mockResolvedValue({ id: "session-1" });
     prismaMock.appSession.update.mockResolvedValue({});
+    prismaMock.appSession.updateMany.mockResolvedValue({ count: 2 });
     vi.stubGlobal("fetch", vi.fn(async (url: string) => {
       if (url.includes(".well-known")) {
         return Response.json({
@@ -345,6 +347,37 @@ describe("enterprise app platform", () => {
     expect(prismaMock.appInstallation.upsert).not.toHaveBeenCalled();
   });
 
+  it("keeps app management updates admin-only", async () => {
+    const {
+      probeEnterpriseAppInstallationHealth,
+      revokeEnterpriseAppInstallationSessions,
+      updateEnterpriseAppInstallation,
+    } = await import("./enterprise-apps");
+    requireWorkspaceMembership.mockResolvedValue({
+      id: "member-1",
+      workspaceId: "workspace-1",
+      userId: "user-1",
+      role: "CONTRIBUTOR",
+      isActive: true,
+    });
+
+    await expect(updateEnterpriseAppInstallation(actor, {
+      workspaceId: "workspace-1",
+      appInstallationId: "installation-1",
+      status: "DISABLED",
+    })).rejects.toMatchObject({ status: 403, code: "FORBIDDEN" });
+    await expect(probeEnterpriseAppInstallationHealth(actor, {
+      workspaceId: "workspace-1",
+      appInstallationId: "installation-1",
+    })).rejects.toMatchObject({ status: 403, code: "FORBIDDEN" });
+    await expect(revokeEnterpriseAppInstallationSessions(actor, {
+      workspaceId: "workspace-1",
+      appInstallationId: "installation-1",
+    })).rejects.toMatchObject({ status: 403, code: "FORBIDDEN" });
+    expect(prismaMock.appInstallation.update).not.toHaveBeenCalled();
+    expect(prismaMock.appSession.updateMany).not.toHaveBeenCalled();
+  });
+
   it("installs an app and assigns a workspace surface without using feature flag config", async () => {
     const { installEnterpriseApp } = await import("./enterprise-apps");
 
@@ -381,6 +414,54 @@ describe("enterprise app platform", () => {
     }));
   });
 
+  it("updates app installation runtime, tenant mapping, status, and audit state", async () => {
+    const { updateEnterpriseAppInstallation } = await import("./enterprise-apps");
+
+    await updateEnterpriseAppInstallation(actor, {
+      workspaceId: "workspace-1",
+      appInstallationId: "installation-1",
+      status: "DISABLED",
+      runtimeStatus: "DISABLED",
+      runtimeBaseUrl: "https://practice-ledger-new.test",
+      runtimeMcpUrl: "https://practice-ledger-new.test/api/mcp",
+      tenantExternalId: "practice-org-2",
+      tenantMappingJson: { organizationId: "practice-org-2" },
+      launchPath: "/embedded",
+      grantedScopes: ["workspace:read", "finance:read"],
+      reason: "Customer asked to pause finance app.",
+    });
+
+    expect(prismaMock.appRuntime.update).toHaveBeenCalledWith({
+      where: { id: "runtime-1" },
+      data: expect.objectContaining({
+        status: "DISABLED",
+        baseUrl: "https://practice-ledger-new.test",
+        healthUrl: "https://practice-ledger-new.test/api/health",
+        mcpUrl: "https://practice-ledger-new.test/api/mcp",
+      }),
+    });
+    expect(prismaMock.appInstallation.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "installation-1" },
+      data: expect.objectContaining({
+        status: "DISABLED",
+        tenantExternalId: "practice-org-2",
+        tenantMappingJson: { organizationId: "practice-org-2" },
+        launchPath: "/embedded",
+        grantedScopes: ["workspace:read", "finance:read"],
+      }),
+    }));
+    expect(recordAudit).toHaveBeenCalledWith(prismaMock, actor, expect.objectContaining({
+      action: "enterprise_app.updated",
+      entityId: "installation-1",
+      meta: expect.objectContaining({
+        appKey: "practice-ledger",
+        status: "DISABLED",
+        runtimeChanged: true,
+        reason: "Customer asked to pause finance app.",
+      }),
+    }));
+  });
+
   it("returns native finance when no surface assignment exists", async () => {
     const { getEnterpriseAppSurface } = await import("./enterprise-apps");
 
@@ -413,6 +494,27 @@ describe("enterprise app platform", () => {
       mode: "unavailable",
       nativeAvailable: true,
       reasons: expect.arrayContaining(["Runtime status is UNHEALTHY.", "Runtime health is degraded."]),
+    });
+  });
+
+  it("returns a native recovery state for disabled assigned apps", async () => {
+    const { getEnterpriseAppSurface } = await import("./enterprise-apps");
+    prismaMock.appSurfaceAssignment.findUnique.mockResolvedValueOnce(assignmentFixture({
+      appInstallation: installationFixture({
+        status: "DISABLED",
+        runtime: runtimeFixture({ status: "DISABLED" }),
+      }),
+    }));
+
+    const surface = await getEnterpriseAppSurface(actor, {
+      workspaceId: "workspace-1",
+      surface: "FINANCE",
+    });
+
+    expect(surface).toMatchObject({
+      mode: "unavailable",
+      nativeAvailable: true,
+      reasons: expect.arrayContaining(["Installation status is DISABLED.", "Runtime status is DISABLED."]),
     });
   });
 
@@ -554,6 +656,62 @@ describe("enterprise app platform", () => {
       data: expect.objectContaining({
         status: "UNHEALTHY",
         lastHealthStatus: "degraded",
+      }),
+    }));
+  });
+
+  it("runs manual health probes and writes an audit entry", async () => {
+    const { probeEnterpriseAppInstallationHealth } = await import("./enterprise-apps");
+
+    const result = await probeEnterpriseAppInstallationHealth(actor, {
+      workspaceId: "workspace-1",
+      appInstallationId: "installation-1",
+      reason: "Admin requested immediate status.",
+    });
+
+    expect(result.result).toMatchObject({
+      runtimeId: "runtime-1",
+      status: "ok",
+    });
+    expect(recordAudit).toHaveBeenCalledWith(prismaMock, actor, expect.objectContaining({
+      action: "enterprise_app.health_probed",
+      entityId: "installation-1",
+      meta: expect.objectContaining({
+        appKey: "practice-ledger",
+        status: "ok",
+        reason: "Admin requested immediate status.",
+      }),
+    }));
+  });
+
+  it("revokes active sessions for an app installation and audits the count", async () => {
+    const { revokeEnterpriseAppInstallationSessions } = await import("./enterprise-apps");
+
+    await expect(revokeEnterpriseAppInstallationSessions(actor, {
+      workspaceId: "workspace-1",
+      appInstallationId: "installation-1",
+      reason: "Runtime credentials rotated.",
+    })).resolves.toEqual({
+      appInstallationId: "installation-1",
+      revoked: 2,
+    });
+
+    expect(prismaMock.appSession.updateMany).toHaveBeenCalledWith({
+      where: {
+        workspaceId: "workspace-1",
+        appInstallationId: "installation-1",
+        revokedAt: null,
+        expiresAt: { gt: now },
+      },
+      data: { revokedAt: now },
+    });
+    expect(recordAudit).toHaveBeenCalledWith(prismaMock, actor, expect.objectContaining({
+      action: "enterprise_app.sessions_revoked",
+      entityId: "installation-1",
+      meta: expect.objectContaining({
+        appKey: "practice-ledger",
+        count: 2,
+        reason: "Runtime credentials rotated.",
       }),
     }));
   });

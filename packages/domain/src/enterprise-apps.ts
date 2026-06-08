@@ -761,6 +761,160 @@ export async function assignEnterpriseAppSurface(actor: AppActor, params: {
   return getEnterpriseAppSurface(actor, { workspaceId: params.workspaceId, surface });
 }
 
+export async function updateEnterpriseAppInstallation(actor: AppActor, params: {
+  workspaceId: string;
+  appInstallationId: string;
+  status?: string | null;
+  runtimeMode?: string | null;
+  runtimeStatus?: string | null;
+  runtimeBaseUrl?: string | null;
+  runtimeHealthUrl?: string | null;
+  runtimeMcpUrl?: string | null;
+  tenantExternalId?: string | null;
+  tenantMappingJson?: Record<string, unknown> | null;
+  launchPath?: string | null;
+  grantedScopes?: string[];
+  reason?: string | null;
+}) {
+  const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  assertCanManageEnterpriseApps(membership);
+  const row = await getInstallation(params.workspaceId, params.appInstallationId);
+  const runtimeBaseUrl = params.runtimeBaseUrl !== undefined ? normalizeOptionalUrl(params.runtimeBaseUrl, "Runtime base URL") : undefined;
+  const runtimeHealthUrl = params.runtimeHealthUrl !== undefined ? normalizeOptionalUrl(params.runtimeHealthUrl, "Runtime health URL") : undefined;
+  const runtimeMcpUrl = params.runtimeMcpUrl !== undefined ? normalizeOptionalUrl(params.runtimeMcpUrl, "Runtime MCP URL") : undefined;
+  const status = params.status !== undefined ? installationStatus(params.status) : undefined;
+  const tenantExternalId = params.tenantExternalId !== undefined ? text(params.tenantExternalId) : undefined;
+  const launchPath = params.launchPath !== undefined ? normalizePath(params.launchPath) : undefined;
+  const grantedScopes = params.grantedScopes !== undefined ? normalizeScopes(params.grantedScopes, "grantedScopes") : undefined;
+  const runtimeChanged = params.runtimeMode !== undefined
+    || params.runtimeStatus !== undefined
+    || params.runtimeBaseUrl !== undefined
+    || params.runtimeHealthUrl !== undefined
+    || params.runtimeMcpUrl !== undefined;
+
+  const installation = await prisma.$transaction(async (tx) => {
+    let runtimeId = row.runtimeId;
+    if (runtimeChanged) {
+      const runtimeData = {
+        ...(params.runtimeMode !== undefined ? { mode: runtimeMode(params.runtimeMode) } : {}),
+        ...(params.runtimeStatus !== undefined ? { status: runtimeStatus(params.runtimeStatus) } : {}),
+        ...(params.runtimeBaseUrl !== undefined ? { baseUrl: runtimeBaseUrl } : {}),
+        ...(params.runtimeHealthUrl !== undefined ? { healthUrl: runtimeHealthUrl } : params.runtimeBaseUrl !== undefined && runtimeBaseUrl ? { healthUrl: `${runtimeBaseUrl}/api/health` } : {}),
+        ...(params.runtimeMcpUrl !== undefined ? { mcpUrl: runtimeMcpUrl } : {}),
+      };
+      if (runtimeId) {
+        await tx.appRuntime.update({ where: { id: runtimeId }, data: runtimeData });
+      } else {
+        const runtime = await tx.appRuntime.create({
+          data: {
+            appDefinitionId: row.appDefinitionId,
+            mode: params.runtimeMode !== undefined ? runtimeMode(params.runtimeMode) : "SELF_MANAGED_EXTERNAL",
+            status: params.runtimeStatus !== undefined ? runtimeStatus(params.runtimeStatus) : "ACTIVE",
+            baseUrl: runtimeBaseUrl ?? null,
+            healthUrl: runtimeHealthUrl ?? (runtimeBaseUrl ? `${runtimeBaseUrl}/api/health` : null),
+            mcpUrl: runtimeMcpUrl ?? null,
+          },
+        });
+        runtimeId = runtime.id;
+      }
+    }
+
+    const updated = await tx.appInstallation.update({
+      where: { id: row.id },
+      data: {
+        ...(runtimeChanged && runtimeId ? { runtimeId } : {}),
+        ...(status ? { status, installedAt: status === "INSTALLED" && !row.installedAt ? new Date() : undefined } : {}),
+        ...(tenantExternalId !== undefined ? { tenantExternalId } : {}),
+        ...(params.tenantMappingJson ? { tenantMappingJson: toInputJson(params.tenantMappingJson) } : {}),
+        ...(launchPath !== undefined ? { launchPath } : {}),
+        ...(grantedScopes !== undefined ? { grantedScopes } : {}),
+      },
+    });
+    await recordAudit(tx, actor, {
+      workspaceId: params.workspaceId,
+      action: "enterprise_app.updated",
+      entityType: "AppInstallation",
+      entityId: row.id,
+      meta: {
+        appKey: row.appDefinition.appKey,
+        status: status ?? row.status,
+        runtimeChanged,
+        reason: text(params.reason),
+      },
+    });
+    return updated;
+  });
+
+  return serializeInstallation(await getInstallation(params.workspaceId, installation.id));
+}
+
+export async function probeEnterpriseAppInstallationHealth(actor: AppActor, params: {
+  workspaceId: string;
+  appInstallationId: string;
+  reason?: string | null;
+}) {
+  const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  assertCanManageEnterpriseApps(membership);
+  const row = await getInstallation(params.workspaceId, params.appInstallationId);
+  invariant(row.runtimeId, 400, "APP_RUNTIME_UNAVAILABLE", "App runtime is not configured.");
+  const result = await runEnterpriseAppHealthCheckJob({
+    runtimeId: row.runtimeId,
+    reason: text(params.reason) ?? "Manual enterprise app health probe.",
+  });
+  await prisma.$transaction(async (tx) => {
+    await recordAudit(tx, actor, {
+      workspaceId: params.workspaceId,
+      action: "enterprise_app.health_probed",
+      entityType: "AppInstallation",
+      entityId: row.id,
+      meta: {
+        appKey: row.appDefinition.appKey,
+        status: result.status,
+        reason: text(params.reason),
+      },
+    });
+  });
+  return {
+    result,
+    installation: serializeInstallation(await getInstallation(params.workspaceId, row.id)),
+  };
+}
+
+export async function revokeEnterpriseAppInstallationSessions(actor: AppActor, params: {
+  workspaceId: string;
+  appInstallationId: string;
+  reason?: string | null;
+}) {
+  const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  assertCanManageEnterpriseApps(membership);
+  const row = await getInstallation(params.workspaceId, params.appInstallationId);
+  const revokedAt = new Date();
+  const revoked = await prisma.$transaction(async (tx) => {
+    const result = await tx.appSession.updateMany({
+      where: {
+        workspaceId: params.workspaceId,
+        appInstallationId: row.id,
+        revokedAt: null,
+        expiresAt: { gt: revokedAt },
+      },
+      data: { revokedAt },
+    });
+    await recordAudit(tx, actor, {
+      workspaceId: params.workspaceId,
+      action: "enterprise_app.sessions_revoked",
+      entityType: "AppInstallation",
+      entityId: row.id,
+      meta: {
+        appKey: row.appDefinition.appKey,
+        count: result.count,
+        reason: text(params.reason),
+      },
+    });
+    return result.count;
+  });
+  return { appInstallationId: row.id, revoked };
+}
+
 export async function getEnterpriseAppSurface(actor: AppActor, params: {
   workspaceId: string;
   surface: string;

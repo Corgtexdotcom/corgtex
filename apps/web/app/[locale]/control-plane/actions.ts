@@ -7,8 +7,12 @@ import {
   createControlPlaneCustomerMember,
   deployLatestControlPlaneRelease,
   enqueueControlPlaneDeployLatestRollout,
+  assignEnterpriseAppSurface,
   fetchCustomerSupportSnapshot,
+  installEnterpriseApp,
+  probeEnterpriseAppInstallationHealth,
   recordBreakGlassSupportNote,
+  revokeEnterpriseAppInstallationSessions,
   revokeControlPlaneAgentCredential,
   resendControlPlaneCustomerMemberAccessLink,
   runControlPlaneContextOperation,
@@ -20,6 +24,7 @@ import {
   updateControlPlaneAgentPolicy,
   updateControlPlaneCustomerMemberStatus,
   updateControlPlaneModelBudget,
+  updateEnterpriseAppInstallation,
 } from "@corgtex/domain";
 import type { SupportAction } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
@@ -145,6 +150,13 @@ function revalidateControlPlaneDeployment(deploymentId: string) {
   revalidatePath(`/es/control-plane/deployments/${deploymentId}`);
   revalidatePath(`/control-plane/deployments/${deploymentId}/agent-governance`);
   revalidatePath(`/es/control-plane/deployments/${deploymentId}/agent-governance`);
+}
+
+function revalidateEnterpriseAppWorkspace(workspaceId: string) {
+  revalidatePath(`/workspaces/${workspaceId}/finance`);
+  revalidatePath(`/es/workspaces/${workspaceId}/finance`);
+  revalidatePath(`/workspaces/${workspaceId}/tools`);
+  revalidatePath(`/es/workspaces/${workspaceId}/tools`);
 }
 
 export async function configureSupportConnectorAction(formData: FormData) {
@@ -302,6 +314,88 @@ export async function setControlPlaneFeatureFlagAction(formData: FormData) {
     reason: asString(formData, "reason"),
   });
   revalidateControlPlaneDeployment(deploymentId);
+}
+
+export async function installEnterpriseAppFromControlPlaneAction(formData: FormData) {
+  const actor = await requirePageActor();
+  const deploymentId = asString(formData, "deploymentId");
+  const workspaceId = asString(formData, "workspaceId");
+  await installEnterpriseApp(actor, {
+    workspaceId,
+    appKey: asString(formData, "appKey") || "practice-ledger",
+    surface: optionalString(formData, "surface"),
+    runtimeMode: optionalString(formData, "runtimeMode"),
+    runtimeBaseUrl: optionalString(formData, "runtimeBaseUrl"),
+    runtimeHealthUrl: optionalString(formData, "runtimeHealthUrl"),
+    runtimeMcpUrl: optionalString(formData, "runtimeMcpUrl"),
+    tenantExternalId: optionalString(formData, "tenantExternalId"),
+    launchPath: optionalString(formData, "launchPath"),
+    reason: asString(formData, "reason"),
+  });
+  revalidateControlPlaneDeployment(deploymentId);
+  revalidateEnterpriseAppWorkspace(workspaceId);
+}
+
+export async function updateEnterpriseAppFromControlPlaneAction(formData: FormData) {
+  const actor = await requirePageActor();
+  const deploymentId = asString(formData, "deploymentId");
+  const workspaceId = asString(formData, "workspaceId");
+  await updateEnterpriseAppInstallation(actor, {
+    workspaceId,
+    appInstallationId: asString(formData, "appInstallationId"),
+    status: optionalString(formData, "status"),
+    runtimeMode: optionalString(formData, "runtimeMode"),
+    runtimeStatus: optionalString(formData, "runtimeStatus"),
+    runtimeBaseUrl: optionalString(formData, "runtimeBaseUrl"),
+    runtimeHealthUrl: optionalString(formData, "runtimeHealthUrl"),
+    runtimeMcpUrl: optionalString(formData, "runtimeMcpUrl"),
+    tenantExternalId: optionalString(formData, "tenantExternalId"),
+    launchPath: optionalString(formData, "launchPath"),
+    reason: asString(formData, "reason"),
+  });
+  revalidateControlPlaneDeployment(deploymentId);
+  revalidateEnterpriseAppWorkspace(workspaceId);
+}
+
+export async function setEnterpriseAppSurfaceFromControlPlaneAction(formData: FormData) {
+  const actor = await requirePageActor();
+  const deploymentId = asString(formData, "deploymentId");
+  const workspaceId = asString(formData, "workspaceId");
+  await assignEnterpriseAppSurface(actor, {
+    workspaceId,
+    appInstallationId: asString(formData, "appInstallationId"),
+    surface: asString(formData, "surface"),
+    enabled: asRequiredBoolean(formData, "enabled"),
+    reason: asString(formData, "reason"),
+  });
+  revalidateControlPlaneDeployment(deploymentId);
+  revalidateEnterpriseAppWorkspace(workspaceId);
+}
+
+export async function probeEnterpriseAppHealthFromControlPlaneAction(formData: FormData) {
+  const actor = await requirePageActor();
+  const deploymentId = asString(formData, "deploymentId");
+  const workspaceId = asString(formData, "workspaceId");
+  await probeEnterpriseAppInstallationHealth(actor, {
+    workspaceId,
+    appInstallationId: asString(formData, "appInstallationId"),
+    reason: asString(formData, "reason"),
+  });
+  revalidateControlPlaneDeployment(deploymentId);
+  revalidateEnterpriseAppWorkspace(workspaceId);
+}
+
+export async function revokeEnterpriseAppSessionsFromControlPlaneAction(formData: FormData) {
+  const actor = await requirePageActor();
+  const deploymentId = asString(formData, "deploymentId");
+  const workspaceId = asString(formData, "workspaceId");
+  await revokeEnterpriseAppInstallationSessions(actor, {
+    workspaceId,
+    appInstallationId: asString(formData, "appInstallationId"),
+    reason: asString(formData, "reason"),
+  });
+  revalidateControlPlaneDeployment(deploymentId);
+  revalidateEnterpriseAppWorkspace(workspaceId);
 }
 
 export async function updateControlPlaneAgentCredentialScopesAction(formData: FormData) {
