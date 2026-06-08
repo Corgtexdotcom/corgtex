@@ -30,6 +30,8 @@ const INTEGRATION_DEPTHS: AppIntegrationDepth[] = ["CATALOG_ONLY", "LAUNCHABLE",
 const INSTALLATION_STATUSES: AppInstallationStatus[] = ["REQUESTED", "APPROVED", "INSTALLED", "NEEDS_SETUP", "UNHEALTHY", "DISABLED"];
 const RUNTIME_MODES: AppRuntimeMode[] = ["SHARED_MULTI_TENANT", "ISOLATED_SINGLE_TENANT", "SELF_MANAGED_EXTERNAL"];
 const RUNTIME_STATUSES: AppRuntimeStatus[] = ["PROVISIONING", "ACTIVE", "UNHEALTHY", "DISABLED"];
+export const ENTERPRISE_APP_HEALTH_CHECK_JOB_TYPE = "enterprise-app.health.check";
+const DEFAULT_HEALTH_TIMEOUT_MS = 5_000;
 
 type JsonRecord = Record<string, unknown>;
 
@@ -148,6 +150,44 @@ function healthyStatus(value: string | null | undefined) {
   if (!value) return true;
   const normalized = value.trim().toLowerCase();
   return normalized === "ok" || normalized === "healthy" || normalized === "active" || normalized === "ready";
+}
+
+function unhealthyStatus(value: string | null | undefined) {
+  if (!value) return "degraded";
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "down" || normalized === "offline" || normalized === "failed") return "down";
+  return "degraded";
+}
+
+function manifestHealthUrlFor(runtime: { healthUrl?: string | null; baseUrl?: string | null }) {
+  if (runtime.healthUrl) return runtime.healthUrl;
+  return runtime.baseUrl ? `${runtime.baseUrl.replace(/\/$/, "")}/api/health` : null;
+}
+
+function healthPayloadSummary(value: unknown) {
+  if (!isRecord(value)) return null;
+  const summary: JsonRecord = {};
+  const status = text(value.status);
+  const service = text(value.service);
+  if (status) summary.status = status;
+  if (service) summary.service = service;
+  return Object.keys(summary).length > 0 ? summary : null;
+}
+
+async function fetchJsonWithTimeout(url: string, timeoutMs = DEFAULT_HEALTH_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, {
+      method: "GET",
+      signal: controller.signal,
+      cache: "no-store",
+    });
+    const body = await response.json().catch(() => null);
+    return { response, body };
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 function practiceLedgerDefinition() {
@@ -351,6 +391,128 @@ export function validateEnterpriseAppManifest(value: unknown): EnterpriseAppMani
       supported: Boolean(embed.supported ?? value.embedSupported),
       path: normalizePath(text(embed.path ?? value.embedPath)),
     },
+  };
+}
+
+export async function runEnterpriseAppHealthCheckJob(params: {
+  runtimeId: string;
+  reason?: string | null;
+  timeoutMs?: number | null;
+}) {
+  const runtimeId = text(params.runtimeId);
+  invariant(runtimeId, 400, "INVALID_INPUT", "Runtime ID is required.");
+  const runtime = await prisma.appRuntime.findUnique({
+    where: { id: runtimeId },
+    include: {
+      appDefinition: true,
+      installations: true,
+      releases: true,
+    },
+  });
+  invariant(runtime, 404, "NOT_FOUND", "Enterprise app runtime not found.");
+
+  const timeoutMs = Math.min(Math.max(Math.floor(params.timeoutMs ?? DEFAULT_HEALTH_TIMEOUT_MS), 1_000), 30_000);
+  const checkedAt = new Date();
+  let manifest: EnterpriseAppManifest | null = null;
+  let status = "ok";
+  let error: string | null = null;
+  let healthPayload: unknown = null;
+
+  try {
+    if (runtime.appDefinition.manifestUrl) {
+      const manifestResponse = await fetchJsonWithTimeout(runtime.appDefinition.manifestUrl, timeoutMs);
+      invariant(manifestResponse.response.ok, 400, "APP_MANIFEST_UNAVAILABLE", `Manifest returned status ${manifestResponse.response.status}.`);
+      const nextManifest = validateEnterpriseAppManifest(manifestResponse.body);
+      invariant(nextManifest.appKey === runtime.appDefinition.appKey, 400, "APP_MANIFEST_MISMATCH", "Manifest app key does not match the app definition.");
+      manifest = nextManifest;
+    }
+
+    const healthUrl = manifest?.healthUrl ?? manifestHealthUrlFor(runtime);
+    invariant(healthUrl, 400, "APP_HEALTH_URL_MISSING", "Enterprise app runtime health URL is not configured.");
+    const healthResponse = await fetchJsonWithTimeout(healthUrl, timeoutMs);
+    healthPayload = healthResponse.body;
+    if (!healthResponse.response.ok) {
+      status = "down";
+      error = `Health returned status ${healthResponse.response.status}.`;
+    } else if (isRecord(healthPayload) && typeof healthPayload.status === "string" && !healthyStatus(healthPayload.status)) {
+      status = unhealthyStatus(healthPayload.status);
+      error = `Health reported ${healthPayload.status}.`;
+    }
+  } catch (healthError) {
+    status = healthError instanceof AppError && healthError.code !== "APP_HEALTH_URL_MISSING" ? "degraded" : "down";
+    error = healthError instanceof Error ? healthError.message : "Enterprise app health check failed.";
+  }
+
+  const nextRuntimeStatus: AppRuntimeStatus = runtime.status === "DISABLED"
+    ? "DISABLED"
+    : status === "ok"
+      ? "ACTIVE"
+      : "UNHEALTHY";
+  const nextInstallationStatus = (installation: typeof runtime.installations[number]): AppInstallationStatus => {
+    if (installation.status === "DISABLED" || installation.status === "REQUESTED" || installation.status === "APPROVED") return installation.status;
+    if (status !== "ok") return installation.status === "NEEDS_SETUP" ? "NEEDS_SETUP" : "UNHEALTHY";
+    return installation.tenantExternalId && runtime.baseUrl ? "INSTALLED" : installation.status;
+  };
+
+  await prisma.$transaction(async (tx) => {
+    if (manifest) {
+      await tx.appDefinition.update({
+        where: { id: runtime.appDefinitionId },
+        data: {
+          manifestJson: toInputJson(manifest),
+          supportedSurfaces: manifest.supportedSurfaces,
+          requestedScopes: manifest.requestedScopes,
+          dataClassification: manifest.dataClassification,
+        },
+      });
+    }
+    await tx.appRuntime.update({
+      where: { id: runtime.id },
+      data: {
+        status: nextRuntimeStatus,
+        healthUrl: manifest?.healthUrl ?? runtime.healthUrl,
+        mcpUrl: manifest?.mcpUrl ?? runtime.mcpUrl,
+        lastHealthAt: checkedAt,
+        lastHealthStatus: status,
+        lastHealthError: error,
+        metadataJson: toInputJson({
+          ...(isRecord(runtime.metadataJson) ? runtime.metadataJson : {}),
+          lastHealthReason: text(params.reason),
+          lastHealthPayload: healthPayloadSummary(healthPayload),
+        }),
+      },
+    });
+    for (const installation of runtime.installations) {
+      await tx.appInstallation.update({
+        where: { id: installation.id },
+        data: {
+          status: nextInstallationStatus(installation),
+          lastHealthAt: checkedAt,
+          lastHealthStatus: status,
+          lastHealthError: error,
+        },
+      });
+    }
+    await tx.appRelease.updateMany({
+      where: {
+        runtimeId: runtime.id,
+        status: { in: ["PREPARED", "ACTIVE"] },
+      },
+      data: {
+        healthStatus: status,
+      },
+    });
+  });
+
+  return {
+    runtimeId: runtime.id,
+    appKey: runtime.appDefinition.appKey,
+    status,
+    error,
+    checkedAt,
+    manifestVersion: manifest?.version ?? null,
+    installationCount: runtime.installations.length,
+    releaseCount: runtime.releases.length,
   };
 }
 

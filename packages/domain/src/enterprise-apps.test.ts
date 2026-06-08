@@ -10,16 +10,22 @@ const { prismaMock, randomOpaqueTokenMock, sha256Mock, toInputJsonMock } = vi.ho
     appDefinition: {
       findMany: vi.fn(),
       findUnique: vi.fn(),
+      update: vi.fn(),
       upsert: vi.fn(),
     },
     appRuntime: {
       create: vi.fn(),
+      findUnique: vi.fn(),
       update: vi.fn(),
+    },
+    appRelease: {
+      updateMany: vi.fn(),
     },
     appInstallation: {
       findFirst: vi.fn(),
       findMany: vi.fn(),
       findUnique: vi.fn(),
+      update: vi.fn(),
       upsert: vi.fn(),
     },
     appSurfaceAssignment: {
@@ -127,6 +133,35 @@ function runtimeFixture(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function releaseFixture(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "release-1",
+    appDefinitionId: "definition-1",
+    runtimeId: "runtime-1",
+    version: "0.1.0",
+    gitSha: "abc123",
+    imageTag: "practice-ledger:0.1.0",
+    manifestVersion: "0.1.0",
+    status: "ACTIVE",
+    healthStatus: "ok",
+    releasedAt: now,
+    metadataJson: null,
+    createdAt: now,
+    updatedAt: now,
+    ...overrides,
+  };
+}
+
+function runtimeWithRelationsFixture(overrides: Record<string, unknown> = {}) {
+  return {
+    ...runtimeFixture(),
+    appDefinition: definitionFixture(),
+    installations: [installationFixture()],
+    releases: [releaseFixture()],
+    ...overrides,
+  };
+}
+
 function installationFixture(overrides: Record<string, unknown> = {}) {
   return {
     id: "installation-1",
@@ -195,10 +230,14 @@ describe("enterprise app platform", () => {
     });
     prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof prismaMock) => Promise<unknown>) => callback(prismaMock));
     prismaMock.appDefinition.upsert.mockResolvedValue(definitionFixture());
+    prismaMock.appDefinition.update.mockResolvedValue(definitionFixture());
     prismaMock.appDefinition.findUnique.mockResolvedValue(definitionFixture());
     prismaMock.appDefinition.findMany.mockResolvedValue([definitionFixture()]);
     prismaMock.appRuntime.create.mockResolvedValue(runtimeFixture());
+    prismaMock.appRuntime.findUnique.mockResolvedValue(runtimeWithRelationsFixture());
     prismaMock.appRuntime.update.mockResolvedValue(runtimeFixture());
+    prismaMock.appRelease.updateMany.mockResolvedValue({ count: 1 });
+    prismaMock.appInstallation.update.mockResolvedValue(installationFixture());
     prismaMock.appInstallation.findUnique.mockResolvedValue(null);
     prismaMock.appInstallation.findFirst.mockResolvedValue(installationFixture());
     prismaMock.appInstallation.findMany.mockResolvedValue([installationFixture()]);
@@ -207,6 +246,23 @@ describe("enterprise app platform", () => {
     prismaMock.appSurfaceAssignment.upsert.mockResolvedValue({});
     prismaMock.appSession.create.mockResolvedValue({ id: "session-1" });
     prismaMock.appSession.update.mockResolvedValue({});
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      if (url.includes(".well-known")) {
+        return Response.json({
+          appKey: "practice-ledger",
+          version: "0.1.1",
+          supportedSurfaces: ["FINANCE"],
+          requestedScopes: ["workspace:read", "finance:read"],
+          auth: { mode: "corgtex_launch_token" },
+          healthUrl: "https://practice-ledger.test/api/health",
+          mcpUrl: "https://practice-ledger.test/api/mcp",
+          dataClassification: "client private",
+          tenantMode: "multi_tenant",
+          embed: { supported: true, path: "/dashboard?embedded=1" },
+        });
+      }
+      return Response.json({ status: "ok" });
+    }));
     recordAudit.mockResolvedValue(undefined);
   });
 
@@ -358,6 +414,148 @@ describe("enterprise app platform", () => {
       nativeAvailable: true,
       reasons: expect.arrayContaining(["Runtime status is UNHEALTHY.", "Runtime health is degraded."]),
     });
+  });
+
+  it("runs healthy lifecycle checks and refreshes manifest, runtime, installation, and release health", async () => {
+    const { runEnterpriseAppHealthCheckJob } = await import("./enterprise-apps");
+
+    const result = await runEnterpriseAppHealthCheckJob({
+      runtimeId: "runtime-1",
+      reason: "Scheduled sweep.",
+    });
+
+    expect(result).toMatchObject({
+      runtimeId: "runtime-1",
+      appKey: "practice-ledger",
+      status: "ok",
+      manifestVersion: "0.1.1",
+      installationCount: 1,
+    });
+    expect(fetch).toHaveBeenCalledWith("https://practice-ledger.test/.well-known/corgtex-app.json", expect.objectContaining({
+      method: "GET",
+      cache: "no-store",
+    }));
+    expect(prismaMock.appDefinition.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "definition-1" },
+      data: expect.objectContaining({
+        dataClassification: "CLIENT_PRIVATE",
+        supportedSurfaces: ["FINANCE"],
+        requestedScopes: ["workspace:read", "finance:read"],
+      }),
+    }));
+    expect(prismaMock.appRuntime.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "runtime-1" },
+      data: expect.objectContaining({
+        status: "ACTIVE",
+        lastHealthStatus: "ok",
+        lastHealthError: null,
+        metadataJson: expect.objectContaining({
+          lastHealthPayload: { status: "ok" },
+        }),
+      }),
+    }));
+    expect(prismaMock.appInstallation.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "installation-1" },
+      data: expect.objectContaining({
+        status: "INSTALLED",
+        lastHealthStatus: "ok",
+      }),
+    }));
+    expect(prismaMock.appRelease.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        runtimeId: "runtime-1",
+        status: { in: ["PREPARED", "ACTIVE"] },
+      },
+      data: {
+        healthStatus: "ok",
+      },
+    }));
+  });
+
+  it("marks runtime and installed apps unhealthy when health reports degraded", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => (
+      url.includes(".well-known")
+        ? Response.json({
+            appKey: "practice-ledger",
+            version: "0.1.1",
+            supportedSurfaces: ["FINANCE"],
+            requestedScopes: ["workspace:read", "finance:read"],
+            auth: { mode: "corgtex_launch_token" },
+            healthUrl: "https://practice-ledger.test/api/health",
+            dataClassification: "client private",
+            tenantMode: "multi_tenant",
+            embed: { supported: true, path: "/dashboard?embedded=1" },
+          })
+        : Response.json({ status: "degraded" })
+    )));
+    const { runEnterpriseAppHealthCheckJob } = await import("./enterprise-apps");
+
+    await expect(runEnterpriseAppHealthCheckJob({ runtimeId: "runtime-1" })).resolves.toMatchObject({
+      status: "degraded",
+      error: "Health reported degraded.",
+    });
+
+    expect(prismaMock.appRuntime.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        status: "UNHEALTHY",
+        lastHealthStatus: "degraded",
+        lastHealthError: "Health reported degraded.",
+      }),
+    }));
+    expect(prismaMock.appInstallation.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        status: "UNHEALTHY",
+        lastHealthStatus: "degraded",
+      }),
+    }));
+  });
+
+  it("uses the manifest health URL when the runtime has no stored health URL", async () => {
+    prismaMock.appRuntime.findUnique.mockResolvedValueOnce(runtimeWithRelationsFixture({
+      baseUrl: null,
+      healthUrl: null,
+    }));
+    const { runEnterpriseAppHealthCheckJob } = await import("./enterprise-apps");
+
+    await expect(runEnterpriseAppHealthCheckJob({ runtimeId: "runtime-1" })).resolves.toMatchObject({
+      status: "ok",
+      manifestVersion: "0.1.1",
+    });
+
+    expect(fetch).toHaveBeenCalledWith("https://practice-ledger.test/api/health", expect.objectContaining({
+      method: "GET",
+    }));
+    expect(prismaMock.appRuntime.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        healthUrl: "https://practice-ledger.test/api/health",
+        lastHealthStatus: "ok",
+      }),
+    }));
+  });
+
+  it("records degraded health when manifest validation fails before probing pages", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({
+      appKey: "wrong-app",
+      version: "0.1.1",
+      supportedSurfaces: ["FINANCE"],
+      requestedScopes: ["workspace:read", "finance:read"],
+      auth: { mode: "corgtex_launch_token" },
+      healthUrl: "https://practice-ledger.test/api/health",
+    })));
+    const { runEnterpriseAppHealthCheckJob } = await import("./enterprise-apps");
+
+    await expect(runEnterpriseAppHealthCheckJob({ runtimeId: "runtime-1" })).resolves.toMatchObject({
+      status: "degraded",
+      error: "Manifest app key does not match the app definition.",
+    });
+
+    expect(prismaMock.appDefinition.update).not.toHaveBeenCalled();
+    expect(prismaMock.appRuntime.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        status: "UNHEALTHY",
+        lastHealthStatus: "degraded",
+      }),
+    }));
   });
 
   it("issues launch sessions with workspace, user, role, scopes, expiry, and audience", async () => {
