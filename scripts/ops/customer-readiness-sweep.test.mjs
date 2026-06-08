@@ -44,20 +44,47 @@ describe("customer readiness sweep URL selection", () => {
     });
   });
 
+  it("falls back to deployment URLs when supportBaseUrl is not a runtime URL", () => {
+    const output = runDryRun([
+      {
+        id: "deployment-chirone",
+        slug: "chirone",
+        label: "Chirone Production",
+        url: "https://deploy-chirone.example",
+        supportBaseUrl: "https://app.corgtex.com/workspaces/workspace-1",
+        provisioningStatus: "degraded",
+      },
+      {
+        id: "deployment-malformed",
+        slug: "malformed",
+        label: "Malformed Support",
+        url: "https://malformed.example",
+        supportBaseUrl: "not-a-url",
+        provisioningStatus: "active",
+      },
+    ]);
+
+    expect(output.customers.map((customer) => customer.healthUrl)).toEqual([
+      "https://deploy-chirone.example/api/health",
+      "https://malformed.example/api/health",
+    ]);
+    expect(resultText(output)).not.toContain("/workspaces/workspace-1/api/health");
+  });
+
   it("skips workspace UI URLs when no runtime URL is configured", () => {
     const output = runDryRun([
       {
         id: "deployment-chirone",
         slug: "chirone",
         label: "Chirone Production",
-        url: "https://ops.corgtex.com/workspaces/workspace-1",
+        url: "https://ops.corgtex.com/es/workspaces/workspace-1/settings",
         supportBaseUrl: null,
         provisioningStatus: "degraded",
       },
     ]);
 
     expect(output.customers).toEqual([]);
-    expect(resultText(output)).not.toContain("/workspaces/workspace-1/api/health");
+    expect(resultText(output)).not.toContain("/workspaces/workspace-1/settings/api/health");
   });
 
   it("skips nested workspace UI URLs", () => {
