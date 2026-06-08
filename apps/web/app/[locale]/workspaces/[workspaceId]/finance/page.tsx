@@ -56,47 +56,36 @@ function outcomeLabel(outcome?: string | null) {
 }
 
 function EnterpriseFinanceAppFrame({
-  workspaceId,
   surface,
   launchUrl,
 }: {
-  workspaceId: string;
   surface: Extract<FinanceAppSurface, { mode: "app" }>;
   launchUrl: string;
 }) {
   const app = surface.installation.app;
-  const runtime = surface.installation.runtime;
   return (
-    <section className="ws-section stack" style={{ gap: 16 }}>
-      <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 0 }}>
-        <div className="actions-inline" style={{ gap: 6, marginBottom: 8 }}>
-          <span className="tag">Enterprise app</span>
-          <span className="tag success">{surface.installation.status.replace(/_/g, " ")}</span>
-          {runtime?.mode && <span className="tag">{runtime.mode.replace(/_/g, " ")}</span>}
-        </div>
-        <h1>{app.title}</h1>
-        <div className="nr-masthead-meta">
-          <span>{app.dataClassification.replace(/_/g, " ")} finance workspace</span>
-        </div>
-      </header>
-
-      <div className="nr-item" style={{ padding: 0, overflow: "hidden" }}>
-        <iframe
-          title={`${app.title} finance workspace`}
-          src={launchUrl}
-          style={{ border: 0, display: "block", width: "100%", minHeight: "min(980px, calc(100vh - 170px))" }}
-          referrerPolicy="no-referrer"
-          sandbox="allow-downloads allow-forms allow-popups allow-same-origin allow-scripts"
-        />
-      </div>
-
-      {surface.canManage && (
-        <div className="actions-inline">
-          <Link className="link-button secondary small" href={`/workspaces/${workspaceId}/tools`}>
-            Manage in Tools
-          </Link>
-        </div>
-      )}
+    <section
+      aria-label={`${app.title} finance workspace`}
+      style={{
+        display: "flex",
+        minHeight: "calc(100vh - 32px)",
+        width: "100%",
+      }}
+    >
+      <iframe
+        title={`${app.title} finance workspace`}
+        src={launchUrl}
+        style={{
+          background: "transparent",
+          border: 0,
+          display: "block",
+          flex: "1 1 auto",
+          minHeight: 720,
+          width: "100%",
+        }}
+        referrerPolicy="no-referrer"
+        sandbox="allow-downloads allow-forms allow-popups allow-same-origin allow-scripts"
+      />
     </section>
   );
 }
@@ -160,7 +149,6 @@ export default async function FinancePage({
     if (session) {
       return (
         <EnterpriseFinanceAppFrame
-          workspaceId={workspaceId}
           surface={enterpriseSurface}
           launchUrl={session.launchUrl}
         />
