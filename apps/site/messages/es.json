@@ -6,14 +6,12 @@
     "ogAlt": "Corgtex - Dirige tu fuerza laboral de IA como un equipo responsable"
   },
   "nav": {
-    "aiReadiness": "Preparación IA",
     "about": "Acerca de",
     "pricing": "Precios",
     "howWeWork": "Cómo trabajamos",
     "blog": "Blog",
     "faq": "FAQ",
     "login": "Iniciar sesión",
-    "demo": "Acceder a la demo",
     "startTrial": "Empezar prueba",
     "briefing": "Agendar una sesión",
     "toggle": "Abrir menú",
@@ -22,7 +20,6 @@
   "footer": {
     "tagline": "Tu fuerza laboral de IA gobernada. Ve cada agente, aplica tus reglas y conoce el costo.",
     "product": "Producto",
-    "aiReadiness": "Preparación IA",
     "liveDemo": "Demo en vivo",
     "pricing": "Precios",
     "faq": "FAQ",

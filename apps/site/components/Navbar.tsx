@@ -4,10 +4,9 @@ import { useState, useEffect } from "react";
 import { usePathname } from "next/navigation";
 import { useLocale, useTranslations } from "next-intl";
 import { localizedPath } from "../i18n/routing";
-import { demoGatePathForLocale, getSiteConfig, signupUrlForLocale } from "../lib/site";
+import { getSiteConfig, signupUrlForLocale } from "../lib/site";
 
 const NAV_LINKS: { href: string; labelKey: string }[] = [
-  { href: "/ai-readiness", labelKey: "aiReadiness" },
   { href: "/about", labelKey: "about" },
   { href: "/pricing", labelKey: "pricing" },
   { href: "/how-we-work", labelKey: "howWeWork" },
@@ -27,7 +26,6 @@ export function Navbar() {
   const t = useTranslations("nav");
   const { appUrl, bookDemoUrl } = getSiteConfig();
 
-  const demoUrl = demoGatePathForLocale(locale);
   const signupUrl = signupUrlForLocale(locale);
   const loginUrl = `${appUrl}/login`;
   const localePath = (path: string) => localizedPath(path, locale);
@@ -66,12 +64,6 @@ export function Navbar() {
               className="navbar-login"
             >
               {t("login")}
-            </a>
-            <a
-              href={demoUrl}
-              className="btn btn-secondary"
-            >
-              {t("demo")}
             </a>
             <a
               href={signupUrl}
@@ -133,13 +125,6 @@ export function Navbar() {
           onClick={() => setMobileOpen(false)}
         >
           {t("login")}
-        </a>
-        <a
-          href={demoUrl}
-          className="btn btn-secondary"
-          onClick={() => setMobileOpen(false)}
-        >
-          {t("demo")}
         </a>
         <a
           href={signupUrl}
