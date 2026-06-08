@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { Copy, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { StatusBadge, controlPlaneButtonClass, controlPlaneLabel } from "./control-plane-ui";
@@ -40,10 +40,20 @@ export function ControlPlaneIssueDiagnostics({
   issues,
   className,
   maxVisible = 3,
+  triggerLabel,
+  triggerClassName,
+  triggerAriaLabel,
+  triggerIssueId,
+  hideBadges = false,
 }: {
   issues: ControlPlaneIssueView[];
   className?: string;
   maxVisible?: number;
+  triggerLabel?: ReactNode;
+  triggerClassName?: string;
+  triggerAriaLabel?: string;
+  triggerIssueId?: string;
+  hideBadges?: boolean;
 }) {
   const [selectedIssueId, setSelectedIssueId] = useState<string | null>(null);
   const selectedIssue = useMemo(
@@ -57,32 +67,44 @@ export function ControlPlaneIssueDiagnostics({
 
   return (
     <>
-      <div className={cn("flex flex-wrap gap-1.5", className)}>
-        {visibleIssues.map((issue) => (
-          <button
-            key={issue.id}
-            type="button"
-            onClick={() => setSelectedIssueId(issue.id)}
-            className={cn(
-              "rounded-md border px-2 py-1 text-[9px] font-semibold uppercase tracking-wide transition-colors",
-              issue.severity === "critical"
-                ? "border-rose-500/30 bg-rose-500/10 text-rose-300 hover:bg-rose-500/20"
-                : "border-amber-500/30 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20",
-            )}
-          >
-            {controlPlaneLabel(issue.source)}
-          </button>
-        ))}
-        {hiddenCount > 0 && (
-          <button
-            type="button"
-            onClick={() => setSelectedIssueId(issues[maxVisible]?.id ?? issues[0]?.id ?? null)}
-            className="rounded-md border border-line bg-surface px-2 py-1 text-[9px] font-semibold text-muted hover:bg-surface-strong"
-          >
-            +{hiddenCount}
-          </button>
-        )}
-      </div>
+      {triggerLabel && (
+        <button
+          type="button"
+          onClick={() => setSelectedIssueId(triggerIssueId ?? issues[0]?.id ?? null)}
+          className={triggerClassName}
+          aria-label={triggerAriaLabel}
+        >
+          {triggerLabel}
+        </button>
+      )}
+      {!hideBadges && (
+        <div className={cn("flex flex-wrap gap-1.5", className)}>
+          {visibleIssues.map((issue) => (
+            <button
+              key={issue.id}
+              type="button"
+              onClick={() => setSelectedIssueId(issue.id)}
+              className={cn(
+                "rounded-md border px-2 py-1 text-[9px] font-semibold uppercase tracking-wide transition-colors",
+                issue.severity === "critical"
+                  ? "border-rose-500/30 bg-rose-500/10 text-rose-300 hover:bg-rose-500/20"
+                  : "border-amber-500/30 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20",
+              )}
+            >
+              {controlPlaneLabel(issue.source)}
+            </button>
+          ))}
+          {hiddenCount > 0 && (
+            <button
+              type="button"
+              onClick={() => setSelectedIssueId(issues[maxVisible]?.id ?? issues[0]?.id ?? null)}
+              className="rounded-md border border-line bg-surface px-2 py-1 text-[9px] font-semibold text-muted hover:bg-surface-strong"
+            >
+              +{hiddenCount}
+            </button>
+          )}
+        </div>
+      )}
 
       {selectedIssue && (
         <div className="fixed inset-0 z-50">

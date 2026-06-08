@@ -100,15 +100,22 @@ export function ControlPlaneSection({
 export function ControlPlaneStatusStrip({
   items,
 }: {
-  items: Array<{ label: string; value: ReactNode; detail?: string; status?: string | null }>;
+  items: Array<{ label: string; value: ReactNode; detail?: string; status?: string | null; action?: ReactNode }>;
 }) {
   return (
     <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
       {items.map((item) => (
-        <div key={item.label} className="rounded-lg border border-line bg-bg-alt px-3 py-2">
+        <div
+          key={item.label}
+          className={cn(
+            "relative rounded-lg border border-line bg-bg-alt px-3 py-2",
+            item.action ? "transition-colors hover:border-amber-500/40 hover:bg-surface" : null,
+          )}
+        >
           <span className="block text-[10px] font-semibold uppercase tracking-wide text-muted">{item.label}</span>
           <span className="mt-1 block text-xl font-semibold text-white">{item.value}</span>
           {item.detail && <span className={cn("mt-0.5 block text-[10px]", item.status ? controlPlaneTone(item.status).split(" ").at(-1) : "text-muted")}>{item.detail}</span>}
+          {item.action}
         </div>
       ))}
     </div>

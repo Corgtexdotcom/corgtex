@@ -124,6 +124,7 @@ export default async function ControlPlanePage({
   const nextHref = queryString({ ...paginationFilters, page: Math.min(fleet.page + 1, fleet.pageCount) });
   const refreshHref = queryString({ ...paginationFilters, page: fleet.page, refresh: 1 });
   const attentionItems = fleet.items.filter((customer) => customer.hasDeployment && customer.issues.length > 0);
+  const firstAttentionIssue = attentionItems[0]?.issues[0] ? serializeIssues([attentionItems[0].issues[0]]) : [];
 
   return (
     <div className="space-y-5 pb-12">
@@ -154,7 +155,21 @@ export default async function ControlPlanePage({
         items={[
           { label: "Customers", value: fleet.summary.totalCustomers, detail: "registered" },
           { label: "Deployments", value: fleet.summary.active, detail: "active" },
-          { label: "Needs attention", value: fleet.summary.attention, detail: "open gaps", status: fleet.summary.attention > 0 ? "degraded" : "ok" },
+          {
+            label: "Needs attention",
+            value: fleet.summary.attention,
+            detail: "open gaps",
+            status: fleet.summary.attention > 0 ? "degraded" : "ok",
+            action: firstAttentionIssue.length > 0 ? (
+              <ControlPlaneIssueDiagnostics
+                issues={firstAttentionIssue}
+                hideBadges
+                triggerLabel={<span className="sr-only">Open needs attention diagnostics</span>}
+                triggerAriaLabel="Open needs attention diagnostics"
+                triggerClassName="absolute inset-0 rounded-lg outline-none focus-visible:ring-2 focus-visible:ring-amber-400/70"
+              />
+            ) : null,
+          },
           { label: "Support ready", value: fleet.summary.supportReady, detail: "connectors" },
           { label: "Release drift", value: fleet.summary.releaseDrift, detail: "signals", status: fleet.summary.releaseDrift > 0 ? "failed" : "ok" },
         ]}
