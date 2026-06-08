@@ -1291,7 +1291,8 @@ model AppRelease {
   runtime       AppRuntime?       @relation(fields: [runtimeId], references: [id], onDelete: SetNull)
   installations AppInstallation[]
 
-  @@unique([appDefinitionId, version])
+  @@unique([appDefinitionId, runtimeId, version])
+  @@index([appDefinitionId, version])
   @@index([runtimeId, status])
 }
 

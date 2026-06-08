@@ -16,6 +16,13 @@ import { ALL_SCOPES } from "./agent-auth";
 import { requireWorkspaceMembership } from "./auth";
 import { recordAudit } from "./audit-trail";
 import { AppError, invariant } from "./errors";
+import {
+  createRailwayClientFromEnv,
+  provisionRailwayAppRuntime,
+  upgradeRailwayAppRuntimeRelease,
+  type RailwayClient,
+  type RailwayRuntimeServiceSource,
+} from "./railway-client";
 
 const APP_ADMIN_ROLES = new Set(["ADMIN"]);
 const APP_KEY_PATTERN = /^[a-z0-9][a-z0-9-]{1,94}[a-z0-9]$/;
@@ -30,6 +37,7 @@ const INTEGRATION_DEPTHS: AppIntegrationDepth[] = ["CATALOG_ONLY", "LAUNCHABLE",
 const INSTALLATION_STATUSES: AppInstallationStatus[] = ["REQUESTED", "APPROVED", "INSTALLED", "NEEDS_SETUP", "UNHEALTHY", "DISABLED"];
 const RUNTIME_MODES: AppRuntimeMode[] = ["SHARED_MULTI_TENANT", "ISOLATED_SINGLE_TENANT", "SELF_MANAGED_EXTERNAL"];
 const RUNTIME_STATUSES: AppRuntimeStatus[] = ["PROVISIONING", "ACTIVE", "UNHEALTHY", "DISABLED"];
+const RELEASE_STATUSES = ["PREPARED", "ACTIVE", "ROLLED_BACK", "FAILED"] as const;
 export const ENTERPRISE_APP_HEALTH_CHECK_JOB_TYPE = "enterprise-app.health.check";
 const DEFAULT_HEALTH_TIMEOUT_MS = 5_000;
 
@@ -146,6 +154,10 @@ function runtimeStatus(value: string | null | undefined): AppRuntimeStatus {
   return enumOrDefault(value, RUNTIME_STATUSES, "ACTIVE");
 }
 
+function releaseStatus(value: string | null | undefined) {
+  return enumOrDefault(value, RELEASE_STATUSES, "PREPARED");
+}
+
 function healthyStatus(value: string | null | undefined) {
   if (!value) return true;
   const normalized = value.trim().toLowerCase();
@@ -172,6 +184,81 @@ function healthPayloadSummary(value: unknown) {
   if (status) summary.status = status;
   if (service) summary.service = service;
   return Object.keys(summary).length > 0 ? summary : null;
+}
+
+function runtimeMetadata(value: unknown): JsonRecord {
+  return isRecord(value) ? value : {};
+}
+
+function hasCompleteRailwayAppRuntime(runtime: {
+  railwayProjectId?: string | null;
+  railwayEnvironmentId?: string | null;
+  railwayServiceId?: string | null;
+  metadataJson?: unknown;
+}) {
+  const metadata = runtimeMetadata(runtime.metadataJson);
+  return Boolean(
+    runtime.railwayProjectId
+      && runtime.railwayEnvironmentId
+      && runtime.railwayServiceId
+      && text(metadata.railwayPostgresServiceId)
+      && text(metadata.railwayRedisServiceId),
+  );
+}
+
+function hasAnyRailwayAppRuntimeResource(runtime: {
+  railwayProjectId?: string | null;
+  railwayEnvironmentId?: string | null;
+  railwayServiceId?: string | null;
+  metadataJson?: unknown;
+}) {
+  const metadata = runtimeMetadata(runtime.metadataJson);
+  return Boolean(
+    runtime.railwayProjectId
+      || runtime.railwayEnvironmentId
+      || runtime.railwayServiceId
+      || text(metadata.railwayPostgresServiceId)
+      || text(metadata.railwayRedisServiceId),
+  );
+}
+
+function projectNameForAppRuntime(appKey: string, workspaceId: string, mode: AppRuntimeMode) {
+  const suffix = mode === "SHARED_MULTI_TENANT" ? "shared" : workspaceId.slice(0, 8).toLowerCase();
+  return `corgtex-app-${appKey}-${suffix}`.replace(/[^a-z0-9-]/g, "-").slice(0, 96);
+}
+
+function buildEnterpriseAppRuntimeVariables(params: {
+  appKey: string;
+  workspaceId: string;
+  runtimeMode: AppRuntimeMode;
+  baseUrl: string;
+  releaseVersion?: string | null;
+  imageTag?: string | null;
+  overrides?: Record<string, string> | null;
+}) {
+  return {
+    CORGTEX_APP_KEY: params.appKey,
+    CORGTEX_WORKSPACE_ID: params.workspaceId,
+    CORGTEX_APP_RUNTIME_MODE: params.runtimeMode,
+    APP_URL: params.baseUrl,
+    ...(params.releaseVersion ? { CORGTEX_APP_RELEASE_VERSION: params.releaseVersion } : {}),
+    ...(params.imageTag ? { CORGTEX_APP_RELEASE_IMAGE_TAG: params.imageTag } : {}),
+    ...(params.overrides ?? {}),
+  };
+}
+
+function assertManifestCompatible(manifest: unknown, definition: {
+  appKey: string;
+  supportedSurfaces: AppSurface[];
+  requestedScopes: string[];
+}) {
+  const parsed = validateEnterpriseAppManifest(manifest);
+  invariant(parsed.appKey === definition.appKey, 400, "APP_MANIFEST_MISMATCH", "Manifest app key does not match the app definition.");
+  const missingSurfaces = definition.supportedSurfaces.filter((surface) => !parsed.supportedSurfaces.includes(surface));
+  invariant(missingSurfaces.length === 0, 400, "APP_MANIFEST_INCOMPATIBLE", `Manifest is missing supported surface(s): ${missingSurfaces.join(", ")}.`);
+  const missingScopes = definition.requestedScopes.filter((scope) => !parsed.requestedScopes.includes(scope));
+  invariant(missingScopes.length === 0, 400, "APP_MANIFEST_INCOMPATIBLE", `Manifest is missing requested scope(s): ${missingScopes.join(", ")}.`);
+  return parsed;
 }
 
 async function fetchJsonWithTimeout(url: string, timeoutMs = DEFAULT_HEALTH_TIMEOUT_MS) {
@@ -301,8 +388,13 @@ function serializeInstallation(row: EnterpriseAppInstallationRecord) {
     release: row.release ? {
       id: row.release.id,
       version: row.release.version,
+      gitSha: row.release.gitSha,
+      imageTag: row.release.imageTag,
+      manifestVersion: row.release.manifestVersion,
       status: row.release.status,
       healthStatus: row.release.healthStatus,
+      releasedAt: row.release.releasedAt,
+      metadataJson: row.release.metadataJson,
     } : null,
     catalogItem: row.catalogItem,
     surfaces: row.surfaceAssignments.map((assignment) => ({
@@ -913,6 +1005,568 @@ export async function revokeEnterpriseAppInstallationSessions(actor: AppActor, p
     return result.count;
   });
   return { appInstallationId: row.id, revoked };
+}
+
+export async function provisionEnterpriseAppRuntime(actor: AppActor, params: {
+  workspaceId: string;
+  appInstallationId: string;
+  runtimeMode: string;
+  runtimeBaseUrl?: string | null;
+  runtimeHealthUrl?: string | null;
+  runtimeMcpUrl?: string | null;
+  environment?: string | null;
+  region?: string | null;
+  customDomain?: string | null;
+  secretsRef?: string | null;
+  releaseVersion?: string | null;
+  releaseImageTag?: string | null;
+  appImage?: string | null;
+  appSource?: RailwayRuntimeServiceSource | null;
+  variables?: Record<string, string>;
+  reason?: string | null;
+}, railwayClient?: RailwayClient) {
+  const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  assertCanManageEnterpriseApps(membership);
+  const row = await getInstallation(params.workspaceId, params.appInstallationId);
+  const mode = runtimeMode(params.runtimeMode);
+  const runtimeBaseUrl = normalizeOptionalUrl(params.runtimeBaseUrl, "Runtime base URL");
+  const runtimeHealthUrl = normalizeOptionalUrl(params.runtimeHealthUrl, "Runtime health URL");
+  const runtimeMcpUrl = normalizeOptionalUrl(params.runtimeMcpUrl, "Runtime MCP URL");
+  const customDomain = text(params.customDomain)?.replace(/^https?:\/\//, "").replace(/\/$/, "") ?? null;
+  const baseUrl = runtimeBaseUrl ?? (customDomain ? `https://${customDomain}` : null);
+  invariant(baseUrl, 400, "APP_RUNTIME_URL_REQUIRED", "Runtime base URL or custom domain is required.");
+  const environment = text(params.environment) ?? "production";
+  const secretsRef = text(params.secretsRef);
+
+  if (mode === "SELF_MANAGED_EXTERNAL") {
+    const installation = await prisma.$transaction(async (tx) => {
+      const runtime = row.runtimeId
+        ? await tx.appRuntime.update({
+            where: { id: row.runtimeId },
+            data: {
+              mode,
+              status: "PROVISIONING",
+              environment,
+              baseUrl,
+              healthUrl: runtimeHealthUrl ?? `${baseUrl}/api/health`,
+              mcpUrl: runtimeMcpUrl,
+              secretsRef,
+              metadataJson: toInputJson({
+                ...runtimeMetadata(row.runtime?.metadataJson),
+                hosting: "self_managed_external",
+                lastProvisionedAt: new Date().toISOString(),
+              }),
+            },
+          })
+        : await tx.appRuntime.create({
+            data: {
+              appDefinitionId: row.appDefinitionId,
+              mode,
+              status: "PROVISIONING",
+              environment,
+              baseUrl,
+              healthUrl: runtimeHealthUrl ?? `${baseUrl}/api/health`,
+              mcpUrl: runtimeMcpUrl,
+              secretsRef,
+              metadataJson: toInputJson({
+                hosting: "self_managed_external",
+                lastProvisionedAt: new Date().toISOString(),
+              }),
+            },
+          });
+      const updated = await tx.appInstallation.update({
+        where: { id: row.id },
+        data: {
+          runtimeId: runtime.id,
+          status: row.status === "DISABLED" ? "DISABLED" : "NEEDS_SETUP",
+        },
+      });
+      await recordAudit(tx, actor, {
+        workspaceId: params.workspaceId,
+        action: "enterprise_app.runtime_registered",
+        entityType: "AppRuntime",
+        entityId: runtime.id,
+        meta: {
+          appKey: row.appDefinition.appKey,
+          mode,
+          reason: text(params.reason),
+        },
+      });
+      return updated;
+    });
+    return serializeInstallation(await getInstallation(params.workspaceId, installation.id));
+  }
+
+  invariant(secretsRef, 400, "APP_RUNTIME_SECRETS_REF_REQUIRED", "Managed app runtimes require a secretsRef.");
+  const region = text(params.region);
+  invariant(region, 400, "INVALID_INPUT", "Managed app runtimes require a Railway region.");
+  invariant(params.appImage || params.appSource?.repo, 400, "INVALID_INPUT", "Managed app runtimes require an app image or repository source.");
+  if (row.runtime && row.runtime.mode !== "SELF_MANAGED_EXTERNAL") {
+    if (hasCompleteRailwayAppRuntime(row.runtime)) {
+      await recordAudit(prisma, actor, {
+        workspaceId: params.workspaceId,
+        action: "enterprise_app.runtime_provisioning_skipped",
+        entityType: "AppRuntime",
+        entityId: row.runtime.id,
+        meta: {
+          appKey: row.appDefinition.appKey,
+          mode: row.runtime.mode,
+          reason: "complete_railway_stack_already_registered",
+        },
+      });
+      return serializeInstallation(row);
+    }
+    if (hasAnyRailwayAppRuntimeResource(row.runtime)) {
+      throw new AppError(409, "RAILWAY_APP_RUNTIME_RECONCILIATION_REQUIRED", "Existing app runtime has a partial Railway stack. Reconcile it before retrying provisioning.");
+    }
+  }
+
+  const provisionalRuntime = row.runtimeId
+    ? await prisma.appRuntime.update({
+        where: { id: row.runtimeId },
+        data: {
+          mode,
+          status: "PROVISIONING",
+          environment,
+          baseUrl,
+          healthUrl: runtimeHealthUrl ?? `${baseUrl}/api/health`,
+          mcpUrl: runtimeMcpUrl,
+          secretsRef,
+          lastHealthError: null,
+        },
+      })
+    : await prisma.appRuntime.create({
+        data: {
+          appDefinitionId: row.appDefinitionId,
+          mode,
+          status: "PROVISIONING",
+          environment,
+          baseUrl,
+          healthUrl: runtimeHealthUrl ?? `${baseUrl}/api/health`,
+          mcpUrl: runtimeMcpUrl,
+          secretsRef,
+        },
+      });
+
+  await prisma.appInstallation.update({
+    where: { id: row.id },
+    data: {
+      runtimeId: provisionalRuntime.id,
+      status: row.status === "DISABLED" ? "DISABLED" : "NEEDS_SETUP",
+    },
+  });
+
+  try {
+    const result = await provisionRailwayAppRuntime(railwayClient ?? createRailwayClientFromEnv(), {
+      projectName: projectNameForAppRuntime(row.appDefinition.appKey, params.workspaceId, mode),
+      environmentName: environment,
+      region,
+      appImage: params.appImage,
+      appSource: params.appSource,
+      customDomain,
+      variables: buildEnterpriseAppRuntimeVariables({
+        appKey: row.appDefinition.appKey,
+        workspaceId: params.workspaceId,
+        runtimeMode: mode,
+        baseUrl,
+        releaseVersion: params.releaseVersion,
+        imageTag: params.releaseImageTag,
+        overrides: params.variables,
+      }),
+    });
+    await prisma.$transaction(async (tx) => {
+      await tx.appRuntime.update({
+        where: { id: provisionalRuntime.id },
+        data: {
+          status: "PROVISIONING",
+          baseUrl: result.appDomain ? `https://${result.appDomain}` : baseUrl,
+          healthUrl: runtimeHealthUrl ?? `${result.appDomain ? `https://${result.appDomain}` : baseUrl}/api/health`,
+          mcpUrl: runtimeMcpUrl,
+          railwayProjectId: result.projectId,
+          railwayEnvironmentId: result.environmentId,
+          railwayServiceId: result.appServiceId,
+          secretsRef,
+          lastHealthError: null,
+          metadataJson: toInputJson({
+            railwayPostgresServiceId: result.postgresServiceId,
+            railwayRedisServiceId: result.redisServiceId,
+            lastProvisionedAt: new Date().toISOString(),
+            releaseVersion: text(params.releaseVersion),
+            releaseImageTag: text(params.releaseImageTag),
+          }),
+        },
+      });
+      await recordAudit(tx, actor, {
+        workspaceId: params.workspaceId,
+        action: "enterprise_app.runtime_provisioned",
+        entityType: "AppRuntime",
+        entityId: provisionalRuntime.id,
+        meta: {
+          appKey: row.appDefinition.appKey,
+          mode,
+          railwayProjectId: result.projectId,
+          railwayEnvironmentId: result.environmentId,
+          railwayServiceId: result.appServiceId,
+          reason: text(params.reason),
+        },
+      });
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown Railway provisioning error.";
+    await prisma.appRuntime.update({
+      where: { id: provisionalRuntime.id },
+      data: {
+        status: "UNHEALTHY",
+        lastHealthStatus: "down",
+        lastHealthError: message,
+      },
+    });
+    await recordAudit(prisma, actor, {
+      workspaceId: params.workspaceId,
+      action: "enterprise_app.runtime_provisioning_failed",
+      entityType: "AppRuntime",
+      entityId: provisionalRuntime.id,
+      meta: {
+        appKey: row.appDefinition.appKey,
+        mode,
+        error: message,
+      },
+    });
+    throw error;
+  }
+
+  return serializeInstallation(await getInstallation(params.workspaceId, row.id));
+}
+
+export async function preflightEnterpriseAppRuntime(actor: AppActor, params: {
+  workspaceId: string;
+  appInstallationId: string;
+  reason?: string | null;
+}) {
+  const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  assertCanManageEnterpriseApps(membership);
+  const row = await getInstallation(params.workspaceId, params.appInstallationId);
+  invariant(row.runtimeId, 400, "APP_RUNTIME_UNAVAILABLE", "App runtime is not configured.");
+  if (row.appDefinition.manifestUrl) {
+    const manifestResponse = await fetchJsonWithTimeout(row.appDefinition.manifestUrl);
+    invariant(manifestResponse.response.ok, 400, "APP_MANIFEST_UNAVAILABLE", `Manifest returned status ${manifestResponse.response.status}.`);
+    assertManifestCompatible(manifestResponse.body, row.appDefinition);
+  } else if (row.appDefinition.manifestJson) {
+    assertManifestCompatible(row.appDefinition.manifestJson, row.appDefinition);
+  }
+  const result = await runEnterpriseAppHealthCheckJob({
+    runtimeId: row.runtimeId,
+    reason: text(params.reason) ?? "Enterprise app runtime preflight.",
+  });
+  invariant(result.status === "ok", 400, "APP_PREFLIGHT_FAILED", result.error ?? "Enterprise app runtime preflight failed.");
+  await prisma.$transaction(async (tx) => {
+    await tx.appRuntime.update({
+      where: { id: row.runtimeId! },
+      data: { status: "ACTIVE" },
+    });
+    await recordAudit(tx, actor, {
+      workspaceId: params.workspaceId,
+      action: "enterprise_app.runtime_preflight_passed",
+      entityType: "AppRuntime",
+      entityId: row.runtimeId!,
+      meta: {
+        appKey: row.appDefinition.appKey,
+        reason: text(params.reason),
+      },
+    });
+  });
+  return {
+    result,
+    installation: serializeInstallation(await getInstallation(params.workspaceId, row.id)),
+  };
+}
+
+export async function createEnterpriseAppRelease(actor: AppActor, params: {
+  workspaceId: string;
+  appInstallationId: string;
+  version: string;
+  gitSha?: string | null;
+  imageTag?: string | null;
+  manifestVersion?: string | null;
+  manifestJson?: unknown;
+}) {
+  const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  assertCanManageEnterpriseApps(membership);
+  const row = await getInstallation(params.workspaceId, params.appInstallationId);
+  invariant(row.runtimeId, 400, "APP_RUNTIME_UNAVAILABLE", "App runtime is not configured.");
+  const version = text(params.version);
+  invariant(version, 400, "INVALID_INPUT", "Release version is required.");
+  const manifest = params.manifestJson ? assertManifestCompatible(params.manifestJson, row.appDefinition) : null;
+  const existing = await prisma.appRelease.findFirst({
+    where: {
+      appDefinitionId: row.appDefinitionId,
+      runtimeId: row.runtimeId,
+      version,
+    },
+  });
+  const release = existing
+    ? await prisma.appRelease.update({
+        where: { id: existing.id },
+        data: {
+          gitSha: text(params.gitSha),
+          imageTag: text(params.imageTag),
+          manifestVersion: text(params.manifestVersion) ?? manifest?.version ?? existing.manifestVersion,
+          status: "PREPARED",
+          metadataJson: toInputJson({
+            ...runtimeMetadata(existing.metadataJson),
+            manifestCheckedAt: manifest ? new Date().toISOString() : undefined,
+          }),
+        },
+      })
+    : await prisma.appRelease.create({
+        data: {
+          appDefinitionId: row.appDefinitionId,
+          runtimeId: row.runtimeId,
+          version,
+          gitSha: text(params.gitSha),
+          imageTag: text(params.imageTag),
+          manifestVersion: text(params.manifestVersion) ?? manifest?.version ?? null,
+          status: "PREPARED",
+          metadataJson: toInputJson({
+            createdByUserId: actor.kind === "user" ? actor.user.id : null,
+            manifestCheckedAt: manifest ? new Date().toISOString() : undefined,
+          }),
+        },
+      });
+  await recordAudit(prisma, actor, {
+    workspaceId: params.workspaceId,
+    action: "enterprise_app.release_created",
+    entityType: "AppRelease",
+    entityId: release.id,
+    meta: {
+      appKey: row.appDefinition.appKey,
+      version,
+    },
+  });
+  return { release };
+}
+
+export async function promoteEnterpriseAppRelease(actor: AppActor, params: {
+  workspaceId: string;
+  appInstallationId: string;
+  releaseId: string;
+  reason?: string | null;
+}) {
+  const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  assertCanManageEnterpriseApps(membership);
+  const row = await getInstallation(params.workspaceId, params.appInstallationId);
+  invariant(row.runtimeId, 400, "APP_RUNTIME_UNAVAILABLE", "App runtime is not configured.");
+  const release = await prisma.appRelease.findFirst({
+    where: {
+      id: params.releaseId,
+      appDefinitionId: row.appDefinitionId,
+      runtimeId: row.runtimeId,
+    },
+  });
+  invariant(release, 404, "NOT_FOUND", "Enterprise app release not found.");
+  invariant(release.status !== "FAILED", 400, "APP_RELEASE_FAILED", "Failed releases cannot be promoted.");
+  const promotedAt = new Date();
+  await prisma.$transaction(async (tx) => {
+    await tx.appRelease.updateMany({
+      where: {
+        appDefinitionId: row.appDefinitionId,
+        runtimeId: row.runtimeId,
+        status: "ACTIVE",
+        id: { not: release.id },
+      },
+      data: {
+        status: "ROLLED_BACK",
+        metadataJson: toInputJson({
+          rolledBackByReleaseId: release.id,
+          rolledBackAt: promotedAt.toISOString(),
+        }),
+      },
+    });
+    await tx.appRelease.update({
+      where: { id: release.id },
+      data: {
+        status: "ACTIVE",
+        releasedAt: promotedAt,
+        healthStatus: row.runtime?.lastHealthStatus ?? release.healthStatus,
+      },
+    });
+    await tx.appInstallation.update({
+      where: { id: row.id },
+      data: {
+        releaseId: release.id,
+        status: row.runtime?.status === "ACTIVE" && row.tenantExternalId ? "INSTALLED" : row.status,
+      },
+    });
+    await recordAudit(tx, actor, {
+      workspaceId: params.workspaceId,
+      action: "enterprise_app.release_promoted",
+      entityType: "AppRelease",
+      entityId: release.id,
+      meta: {
+        appKey: row.appDefinition.appKey,
+        version: release.version,
+        reason: text(params.reason),
+      },
+    });
+  });
+  return serializeInstallation(await getInstallation(params.workspaceId, row.id));
+}
+
+export async function rollbackEnterpriseAppRelease(actor: AppActor, params: {
+  workspaceId: string;
+  appInstallationId: string;
+  releaseId: string;
+  reason?: string | null;
+}) {
+  const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  assertCanManageEnterpriseApps(membership);
+  const row = await getInstallation(params.workspaceId, params.appInstallationId);
+  invariant(row.runtimeId, 400, "APP_RUNTIME_UNAVAILABLE", "App runtime is not configured.");
+  const target = await prisma.appRelease.findFirst({
+    where: {
+      id: params.releaseId,
+      appDefinitionId: row.appDefinitionId,
+      runtimeId: row.runtimeId,
+    },
+  });
+  invariant(target, 404, "NOT_FOUND", "Enterprise app release not found.");
+  const rolledBackAt = new Date();
+  await prisma.$transaction(async (tx) => {
+    await tx.appRelease.updateMany({
+      where: {
+        appDefinitionId: row.appDefinitionId,
+        runtimeId: row.runtimeId,
+        status: "ACTIVE",
+        id: { not: target.id },
+      },
+      data: {
+        status: "ROLLED_BACK",
+        metadataJson: toInputJson({
+          rollbackTargetReleaseId: target.id,
+          rolledBackAt: rolledBackAt.toISOString(),
+          reason: text(params.reason),
+        }),
+      },
+    });
+    await tx.appRelease.update({
+      where: { id: target.id },
+      data: {
+        status: "ACTIVE",
+        releasedAt: rolledBackAt,
+        metadataJson: toInputJson({
+          ...runtimeMetadata(target.metadataJson),
+          rollbackActivatedAt: rolledBackAt.toISOString(),
+          reason: text(params.reason),
+        }),
+      },
+    });
+    await tx.appInstallation.update({
+      where: { id: row.id },
+      data: { releaseId: target.id },
+    });
+    await recordAudit(tx, actor, {
+      workspaceId: params.workspaceId,
+      action: "enterprise_app.release_rolled_back",
+      entityType: "AppRelease",
+      entityId: target.id,
+      meta: {
+        appKey: row.appDefinition.appKey,
+        version: target.version,
+        reason: text(params.reason),
+      },
+    });
+  });
+  return serializeInstallation(await getInstallation(params.workspaceId, row.id));
+}
+
+export async function upgradeEnterpriseAppRuntimeRelease(actor: AppActor, params: {
+  workspaceId: string;
+  appInstallationId: string;
+  releaseId: string;
+  appImage?: string | null;
+  appSource?: RailwayRuntimeServiceSource | null;
+  variables?: Record<string, string>;
+  reason?: string | null;
+}, railwayClient: RailwayClient = createRailwayClientFromEnv()) {
+  const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  assertCanManageEnterpriseApps(membership);
+  const row = await getInstallation(params.workspaceId, params.appInstallationId);
+  invariant(row.runtime, 400, "APP_RUNTIME_UNAVAILABLE", "App runtime is not configured.");
+  invariant(row.runtime.mode !== "SELF_MANAGED_EXTERNAL", 400, "APP_RUNTIME_SELF_MANAGED", "Self-managed app runtimes must be upgraded outside Corgtex.");
+  invariant(hasCompleteRailwayAppRuntime(row.runtime), 400, "APP_RUNTIME_INCOMPLETE", "Managed app runtime is missing Railway project, environment, app, Postgres, or Redis IDs.");
+  invariant(params.appImage || params.appSource?.repo, 400, "INVALID_INPUT", "Release upgrade requires an app image or repository source.");
+  const release = await prisma.appRelease.findFirst({
+    where: {
+      id: params.releaseId,
+      appDefinitionId: row.appDefinitionId,
+      runtimeId: row.runtimeId,
+    },
+  });
+  invariant(release, 404, "NOT_FOUND", "Enterprise app release not found.");
+
+  try {
+    const result = await upgradeRailwayAppRuntimeRelease(railwayClient, {
+      projectId: row.runtime.railwayProjectId!,
+      environmentId: row.runtime.railwayEnvironmentId!,
+      appServiceId: row.runtime.railwayServiceId!,
+      appImage: params.appImage,
+      appSource: params.appSource,
+      variables: {
+        CORGTEX_APP_RELEASE_VERSION: release.version,
+        ...(release.imageTag ? { CORGTEX_APP_RELEASE_IMAGE_TAG: release.imageTag } : {}),
+        ...(params.variables ?? {}),
+      },
+    });
+    const updatedRelease = await prisma.appRelease.update({
+      where: { id: release.id },
+      data: {
+        status: releaseStatus(release.status),
+        metadataJson: toInputJson({
+          ...runtimeMetadata(release.metadataJson),
+          lastUpgradeDeploymentId: result.appDeploymentId,
+          lastUpgradeAt: new Date().toISOString(),
+        }),
+      },
+    });
+    await recordAudit(prisma, actor, {
+      workspaceId: params.workspaceId,
+      action: "enterprise_app.release_upgrade_started",
+      entityType: "AppRelease",
+      entityId: release.id,
+      meta: {
+        appKey: row.appDefinition.appKey,
+        version: release.version,
+        deploymentId: result.appDeploymentId,
+        reason: text(params.reason),
+      },
+    });
+    return { release: updatedRelease, deployment: result };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown Railway upgrade error.";
+    await prisma.appRelease.update({
+      where: { id: release.id },
+      data: {
+        status: "FAILED",
+        metadataJson: toInputJson({
+          ...runtimeMetadata(release.metadataJson),
+          lastUpgradeFailedAt: new Date().toISOString(),
+          lastUpgradeError: message,
+        }),
+      },
+    });
+    await recordAudit(prisma, actor, {
+      workspaceId: params.workspaceId,
+      action: "enterprise_app.release_upgrade_failed",
+      entityType: "AppRelease",
+      entityId: release.id,
+      meta: {
+        appKey: row.appDefinition.appKey,
+        version: release.version,
+        error: message,
+      },
+    });
+    throw error;
+  }
 }
 
 export async function getEnterpriseAppSurface(actor: AppActor, params: {
