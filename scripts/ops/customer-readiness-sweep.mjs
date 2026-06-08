@@ -38,11 +38,33 @@ function customerSlug(customer) {
 }
 
 function customerUrl(customer) {
-  return optionalText(customer.url) || optionalText(customer.supportBaseUrl);
+  return runtimeUrl(customer.supportBaseUrl) || runtimeUrl(customer.url);
 }
 
 function appendPath(baseUrl, suffix) {
   return `${baseUrl.replace(/\/$/, "")}${suffix}`;
+}
+
+function runtimeUrl(value) {
+  const text = optionalText(value);
+  if (!text) return null;
+  try {
+    const url = new URL(text);
+    if (!["http:", "https:"].includes(url.protocol) || isWorkspaceUiUrl(url)) return null;
+    return text;
+  } catch {
+    return null;
+  }
+}
+
+function isWorkspaceUiUrl(value) {
+  try {
+    const url = value instanceof URL ? value : new URL(value);
+    const pathname = url.pathname.replace(/\/+$/, "");
+    return /^\/(?:[a-z]{2}(?:-[a-z]{2})?\/)?workspaces\/[^/]+(?:\/.*)?$/i.test(pathname);
+  } catch {
+    return false;
+  }
 }
 
 function parseJsonEnv(name, fallback) {
