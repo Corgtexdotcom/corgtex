@@ -4,8 +4,12 @@ import { describe, expect, it } from "vitest";
 import {
   buildClaudeCodeCommand,
   buildClaudeInstallerShareUrl,
+  buildCopilotCliCommand,
+  buildCopilotCliMcpConfig,
   buildCursorInstallLinks,
   buildCursorMcpConfig,
+  buildGeminiMcpConfig,
+  buildVsCodeMcpConfig,
   CLAUDE_CHAT_URL,
   CLAUDE_CONNECTORS_URL,
   CLAUDE_INSTALLER_PATH,
@@ -57,6 +61,39 @@ describe("CorgtexConnectorManager setup helpers", () => {
     expect(buildClaudeCodeCommand(CONNECTOR_URL)).toBe(
       "claude mcp add --transport http corgtex --scope user https://mcp.corgtex.com/mcp",
     );
+  });
+
+  it("builds Copilot and VS Code MCP setup snippets", () => {
+    expect(buildCopilotCliCommand(CONNECTOR_URL)).toBe(
+      "copilot mcp add corgtex --type http --url https://mcp.corgtex.com/mcp --tools \"*\"",
+    );
+    expect(buildCopilotCliMcpConfig(CONNECTOR_URL)).toEqual({
+      mcpServers: {
+        corgtex: {
+          type: "http",
+          url: CONNECTOR_URL,
+          tools: ["*"],
+        },
+      },
+    });
+    expect(buildVsCodeMcpConfig(CONNECTOR_URL)).toEqual({
+      servers: {
+        corgtex: {
+          type: "http",
+          url: CONNECTOR_URL,
+        },
+      },
+    });
+  });
+
+  it("builds Gemini CLI Streamable HTTP MCP settings", () => {
+    expect(buildGeminiMcpConfig(CONNECTOR_URL)).toEqual({
+      mcpServers: {
+        corgtex: {
+          httpUrl: CONNECTOR_URL,
+        },
+      },
+    });
   });
 
   it("opens Claude's current connector settings address", () => {

@@ -5,11 +5,14 @@ import {
   AI_WORKSPACE_PROVIDER_KEYS,
   AI_WORKSPACE_PROVIDER_REGISTRY,
   ENTERPRISE_SERVICE_REGISTRY,
+  aiWorkspaceProviderFromDb,
   aiWorkspaceProviderToDb,
+  aiWorkspaceToolProviderKey,
   enterpriseServiceToDb,
   isAiWorkspaceProviderKey,
   isEnterpriseServiceKey,
   listAiWorkspaceProviders,
+  listAiWorkspaceToolProviders,
   listEnterpriseServices,
   requireAiWorkspaceProvider,
   requireEnterpriseService,
@@ -23,6 +26,7 @@ describe("AI workspace provider registry", () => {
       "openwork",
       "chatgpt",
       "claude",
+      "copilot",
       "gemini",
       "cursor",
       "claude_code",
@@ -37,6 +41,23 @@ describe("AI workspace provider registry", () => {
     expect(providers.filter((provider) => provider.category === "BYO").map((provider) => provider.key)).toEqual([
       "chatgpt",
       "claude",
+      "copilot",
+    ]);
+    expect(listAiWorkspaceToolProviders().map((provider) => provider.key)).toEqual([
+      "openwork",
+      "chatgpt",
+      "claude",
+      "copilot",
+      "gemini",
+      "cursor",
+      "generic_mcp",
+    ]);
+    expect(AI_WORKSPACE_PROVIDER_REGISTRY.claude_code.visibleInToolPicker).toBe(false);
+    expect(AI_WORKSPACE_PROVIDER_REGISTRY.claude.setupVariants.map((variant) => variant.variantKey)).toContain("claude_code_cli");
+    expect(AI_WORKSPACE_PROVIDER_REGISTRY.copilot.setupVariants.map((variant) => variant.variantKey)).toEqual([
+      "copilot_vscode",
+      "copilot_cli",
+      "copilot_cloud_agent",
     ]);
   });
 
@@ -46,6 +67,7 @@ describe("AI workspace provider registry", () => {
     expect(AI_WORKSPACE_PROVIDER_REGISTRY.openwork.capabilities).toContain("skill_install");
     expect(AI_WORKSPACE_PROVIDER_REGISTRY.openwork.capabilities).toContain("hosted_worker");
     expect(AI_WORKSPACE_PROVIDER_REGISTRY.chatgpt.capabilities).toContain("remote_mcp");
+    expect(AI_WORKSPACE_PROVIDER_REGISTRY.copilot.capabilities).toContain("code_execution");
     expect(AI_WORKSPACE_PROVIDER_REGISTRY.gemini.description).toContain("Consumer Gemini web support is not assumed");
   });
 
@@ -53,6 +75,9 @@ describe("AI workspace provider registry", () => {
     expect(AI_WORKSPACE_PROVIDER_KEYS.every((key) => isAiWorkspaceProviderKey(key))).toBe(true);
     expect(isAiWorkspaceProviderKey("cowork")).toBe(false);
     expect(requireAiWorkspaceProvider("claude").label).toBe("Claude");
+    expect(aiWorkspaceProviderToDb("copilot")).toBe("COPILOT");
+    expect(aiWorkspaceProviderFromDb("COPILOT")).toBe("copilot");
+    expect(aiWorkspaceToolProviderKey("claude_code")).toBe("claude");
     expect(aiWorkspaceProviderToDb("generic_mcp")).toBe("GENERIC_MCP");
     expect(() => requireAiWorkspaceProvider("cowork")).toThrow("Unsupported AI workspace provider");
   });

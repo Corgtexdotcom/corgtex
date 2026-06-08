@@ -4,11 +4,14 @@ import { useMemo, useState } from "react";
 
 import {
   EXECUTION_WRITEBACK_OPTIONS,
+  activeAiWorkspaceProvider,
   aiWorkspaceSettingsHref,
+  aiWorkspaceLaunchUrl,
   buildExecutionRequestHandoffPrompt,
   buildExecutionRequestPayload,
   createUiIdempotencyKey,
   writebackOptionLabel,
+  type AiWorkspaceLaunchState,
   type AiWorkspaceLaunchProvider,
 } from "@/lib/ai-workspace-launch";
 import { WorkspaceUtilityIcon } from "./WorkspaceNavIcon";
@@ -24,8 +27,7 @@ type CreatedExecutionRequest = {
 
 type Props = {
   workspaceId: string;
-  provider: AiWorkspaceLaunchProvider | null;
-  providerLaunchUrl: string | null;
+  initialState: AiWorkspaceLaunchState;
   variant: "mobile" | "rail";
 };
 
@@ -56,10 +58,12 @@ function parseRouteError(value: unknown) {
 
 export function AiWorkspaceLaunchPanel({
   workspaceId,
-  provider,
-  providerLaunchUrl,
+  initialState,
   variant,
 }: Props) {
+  const [selectionState, setSelectionState] = useState(initialState);
+  const [isChoosing, setIsChoosing] = useState(!initialState.activeProviderKey);
+  const [selectingProviderKey, setSelectingProviderKey] = useState<string | null>(null);
   const [goal, setGoal] = useState("");
   const [writebackTargetType, setWritebackTargetType] = useState("ACTION");
   const [createdRequest, setCreatedRequest] = useState<CreatedExecutionRequest | null>(null);
@@ -68,7 +72,9 @@ export function AiWorkspaceLaunchPanel({
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const setupHref = aiWorkspaceSettingsHref(workspaceId, provider?.key ?? "openwork");
+  const provider = activeAiWorkspaceProvider(selectionState);
+  const providerLaunchUrl = aiWorkspaceLaunchUrl(provider?.key);
+  const setupHref = aiWorkspaceSettingsHref(workspaceId, provider?.key ?? selectionState.providers[0]?.key ?? "openwork");
   const isRail = variant === "rail";
   const currentGoal = createdRequest?.goal ?? goal;
   const currentWritebackLabel = createdRequest?.writebackTarget?.label
@@ -82,6 +88,36 @@ export function AiWorkspaceLaunchPanel({
       writebackTargetLabel: currentWritebackLabel,
     });
   }, [createdRequest, currentGoal, currentWritebackLabel, provider]);
+
+  async function selectProvider(nextProvider: AiWorkspaceLaunchProvider) {
+    if (selectingProviderKey) return;
+
+    setSelectingProviderKey(nextProvider.key);
+    setError(null);
+    setCopyStatus(null);
+    setManualPrompt(null);
+
+    try {
+      const response = await fetch(`/api/workspaces/${workspaceId}/ai-workspace-selection`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ providerKey: nextProvider.key }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(parseRouteError(data) ?? "Could not choose the AI work tool.");
+      }
+      const nextState = data as AiWorkspaceLaunchState;
+      setSelectionState(nextState);
+      setIsChoosing(false);
+      setCreatedRequest(null);
+      setGoal("");
+    } catch (selectionError) {
+      setError(selectionError instanceof Error ? selectionError.message : "Could not choose the AI work tool.");
+    } finally {
+      setSelectingProviderKey(null);
+    }
+  }
 
   async function submitRequest() {
     if (!provider || !goal.trim() || isSubmitting) return;
@@ -134,7 +170,37 @@ export function AiWorkspaceLaunchPanel({
     }
   }
 
-  if (!provider) {
+  function renderProviderChoice(choice: AiWorkspaceLaunchProvider) {
+    const isActive = choice.key === selectionState.activeProviderKey;
+    return (
+      <div key={choice.key} className={`ai-workspace-choice ${isActive ? "active" : ""}`}>
+        <div>
+          <strong>{choice.shortLabel}</strong>
+          <span>{choice.outcome}</span>
+          <div className="ai-workspace-choice-tags">
+            {choice.recommendedDefault ? <span className="tag success">Recommended</span> : null}
+            {choice.freeDefault ? <span className="tag">Free</span> : null}
+            {choice.setupVariants.length > 1 ? <span className="tag">{choice.setupVariants.length} setup paths</span> : null}
+          </div>
+        </div>
+        <div className="ai-workspace-choice-actions">
+          <button
+            type="button"
+            className={isActive ? "button secondary small" : "button small"}
+            onClick={() => void selectProvider(choice)}
+            disabled={selectingProviderKey !== null}
+          >
+            {selectingProviderKey === choice.key ? "Choosing" : isActive ? "Keep using" : `Use ${choice.shortLabel}`}
+          </button>
+          <a className="link-button secondary small" href={aiWorkspaceSettingsHref(workspaceId, choice.key)}>
+            Setup
+          </a>
+        </div>
+      </div>
+    );
+  }
+
+  if (selectionState.providers.length === 0) {
     return (
       <div className={`ai-workspace-launch ai-workspace-launch-${variant}`}>
         <div className="ai-workspace-launch-header">
@@ -148,13 +214,50 @@ export function AiWorkspaceLaunchPanel({
     );
   }
 
+  if (!provider || isChoosing) {
+    const choices = provider
+      ? selectionState.providers.filter((choice) => choice.key !== provider.key)
+      : selectionState.providers;
+    return (
+      <div className={`ai-workspace-launch ai-workspace-launch-${variant}`}>
+        <div className="ai-workspace-launch-header">
+          <WorkspaceUtilityIcon name="work" className="ai-workspace-launch-icon" />
+          <div>
+            <strong>{provider ? "Connect more" : "Choose AI work tool"}</strong>
+            <span>
+              {provider
+                ? `${provider.shortLabel} is selected. Switch only if your team will work somewhere else.`
+                : "Choose the AI workspace your team will use for governed work."}
+            </span>
+          </div>
+        </div>
+
+        <div className="ai-workspace-choice-list">
+          {choices.map((choice) => renderProviderChoice(choice))}
+        </div>
+
+        <div className="ai-workspace-launch-actions">
+          {provider ? (
+            <button type="button" className="button secondary small" onClick={() => setIsChoosing(false)}>
+              Back to {provider.shortLabel}
+            </button>
+          ) : null}
+          <a className="link-button secondary small" href={aiWorkspaceSettingsHref(workspaceId, choices[0]?.key ?? "openwork")}>
+            Setup details
+          </a>
+        </div>
+        {error ? <div className="form-message form-message-error">{error}</div> : null}
+      </div>
+    );
+  }
+
   return (
     <div className={`ai-workspace-launch ai-workspace-launch-${variant}`}>
       <div className="ai-workspace-launch-header">
         <WorkspaceUtilityIcon name="work" className="ai-workspace-launch-icon" />
         <div>
           <strong>{isRail ? "Send to AI workspace" : "Work"}</strong>
-          <span>{provider.shortLabel} executes. Corgtex supplies context, policy, audit, and write-back.</span>
+          <span>{provider.shortLabel} is selected. Corgtex supplies context, policy, audit, and write-back.</span>
         </div>
       </div>
 
@@ -199,10 +302,19 @@ export function AiWorkspaceLaunchPanel({
             <WorkspaceUtilityIcon name="send" className="ai-workspace-action-icon" />
             {isSubmitting ? "Sending" : "Send to AI workspace"}
           </button>
-          {!providerLaunchUrl ? (
-            <a className="link-button secondary small" href={setupHref}>
-              Setup
-            </a>
+          <a className="link-button secondary small" href={setupHref}>
+            Setup
+          </a>
+          {providerLaunchUrl ? (
+            <button type="button" className="button secondary small" onClick={openWorkspace}>
+              <WorkspaceUtilityIcon name="external" className="ai-workspace-action-icon" />
+              Open
+            </button>
+          ) : null}
+          {selectionState.providers.length > 1 ? (
+            <button type="button" className="button secondary small" onClick={() => setIsChoosing(true)}>
+              Connect more
+            </button>
           ) : null}
         </div>
       </div>

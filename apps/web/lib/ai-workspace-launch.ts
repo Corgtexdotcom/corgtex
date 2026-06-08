@@ -1,7 +1,36 @@
+import {
+  CHATGPT_APPS_URL,
+  CLAUDE_CHAT_URL,
+  COPILOT_VSCODE_MCP_DOCS_URL,
+  CURSOR_MCP_DOCS_URL,
+  GEMINI_MCP_DOCS_URL,
+  OPENWORK_DOWNLOAD_URL,
+} from "@/lib/install-helpers";
+
+export type AiWorkspaceSetupVariant = {
+  variantKey: string;
+  label: string;
+  audience: string;
+  primaryAction: "open" | "copy" | "copyAndOpen" | "cursorInstall";
+  manualSteps: string[];
+  limitations: string[];
+  verificationPrompt: string;
+};
+
 export type AiWorkspaceLaunchProvider = {
   key: string;
   label: string;
   shortLabel: string;
+  outcome: string;
+  description: string;
+  recommendedDefault: boolean;
+  freeDefault: boolean;
+  setupVariants: AiWorkspaceSetupVariant[];
+};
+
+export type AiWorkspaceLaunchState = {
+  activeProviderKey: string | null;
+  providers: AiWorkspaceLaunchProvider[];
 };
 
 export type ExecutionWritebackOption = {
@@ -27,7 +56,12 @@ export type BuildHandoffPromptParams = {
 };
 
 const AI_WORKSPACE_LAUNCH_URLS: Record<string, string> = {
-  openwork: "https://openworklabs.com/",
+  openwork: OPENWORK_DOWNLOAD_URL,
+  chatgpt: CHATGPT_APPS_URL,
+  claude: CLAUDE_CHAT_URL,
+  copilot: COPILOT_VSCODE_MCP_DOCS_URL,
+  cursor: CURSOR_MCP_DOCS_URL,
+  gemini: GEMINI_MCP_DOCS_URL,
 };
 
 export const EXECUTION_WRITEBACK_OPTIONS: ExecutionWritebackOption[] = [
@@ -48,6 +82,11 @@ export function aiWorkspaceSettingsHref(workspaceId: string, providerKey: string
   const params = new URLSearchParams({ tab: "ai-workspaces" });
   if (providerKey) params.set("provider", providerKey);
   return `/workspaces/${workspaceId}/settings?${params.toString()}`;
+}
+
+export function activeAiWorkspaceProvider(state: AiWorkspaceLaunchState | null | undefined) {
+  if (!state?.activeProviderKey) return null;
+  return state.providers.find((provider) => provider.key === state.activeProviderKey) ?? null;
 }
 
 export function writebackOptionLabel(value: string | null | undefined) {

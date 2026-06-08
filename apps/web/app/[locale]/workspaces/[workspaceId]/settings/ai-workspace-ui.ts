@@ -1,10 +1,19 @@
 import {
+  CHATGPT_APPS_URL,
+  COPILOT_DOCS_URL,
+  COPILOT_VSCODE_MCP_DOCS_URL,
   buildClaudeCodeCommand,
   buildClaudeInstallerShareUrl,
+  buildCopilotCliCommand,
+  buildCopilotCliMcpConfig,
   buildCursorInstallLinks,
+  buildGeminiMcpConfig,
+  buildVsCodeMcpConfig,
   CLAUDE_CODE_INSTALLER_PATH,
   CLAUDE_CONNECTORS_URL,
   CLAUDE_INSTALLER_PATH,
+  GEMINI_MCP_DOCS_URL,
+  OPENWORK_DOWNLOAD_URL,
 } from "@/lib/install-helpers";
 
 export type AiWorkspaceProviderView = {
@@ -19,6 +28,17 @@ export type AiWorkspaceProviderView = {
   setupPath: "guided" | "recipe" | "request";
   capabilities: string[];
   supportedOwnershipModes: string[];
+  setupVariants: AiWorkspaceSetupVariantView[];
+};
+
+export type AiWorkspaceSetupVariantView = {
+  variantKey: string;
+  label: string;
+  audience: string;
+  primaryAction: "open" | "copy" | "copyAndOpen" | "cursorInstall";
+  manualSteps: string[];
+  limitations: string[];
+  verificationPrompt: string;
 };
 
 export type EnterpriseServiceView = {
@@ -88,6 +108,7 @@ export type AiWorkspaceSetupCard = {
   setupLabel: string;
   connectorUrl: string;
   command?: string;
+  setupVariants: AiWorkspaceSetupVariantView[];
   actions: AiWorkspaceSetupAction[];
   resources: AiWorkspaceSetupResource[];
   steps: string[];
@@ -103,8 +124,6 @@ export type AiWorkspaceSetupResource = {
   fallbackMessage: string;
 };
 
-const CHATGPT_APPS_URL = "https://chatgpt.com/apps";
-const OPENWORK_SITE_URL = "https://openworklabs.com/";
 const OPENWORK_REPO_URL = "https://github.com/different-ai/openwork";
 
 type ProviderRecipeDefinition = {
@@ -197,6 +216,23 @@ const PROVIDER_RECIPE_DEFINITIONS: Record<string, ProviderRecipeDefinition> = {
       "Claude Code can explain the approval rule before changing files.",
     ],
   },
+  copilot: {
+    title: "GitHub Copilot MCP instructions",
+    surface: "GitHub Copilot",
+    setupTarget: "Use VS Code MCP settings, Copilot CLI MCP configuration, or repository Copilot MCP settings depending on the Copilot surface.",
+    executionBoundary: "Use Copilot for code and repository execution; use Corgtex for company context, scopes, policy, approval rules, and durable write-back.",
+    extraRules: [
+      "For VS Code, confirm organization Copilot policy allows custom MCP servers.",
+      "For Copilot CLI, review remote MCP tool calls because remote servers are treated as lower trust.",
+      "For Copilot coding agent or code review, do not assume OAuth remote MCP works; use repository settings only when compatible with the agent environment.",
+    ],
+    verificationChecks: [
+      "Copilot can list the Corgtex MCP server and tools.",
+      "Copilot can read scoped company context without private copy-paste.",
+      "Copilot can list write-back targets before proposing output destinations.",
+      "The test prompt returns a readiness report without changing files or repository state.",
+    ],
+  },
   generic_mcp: {
     title: "Generic MCP client instructions",
     surface: "Generic MCP client",
@@ -225,10 +261,11 @@ const PROVIDER_RANK: Record<string, number> = {
   openwork: 0,
   chatgpt: 1,
   claude: 2,
-  gemini: 3,
-  cursor: 4,
-  claude_code: 5,
-  generic_mcp: 6,
+  copilot: 3,
+  gemini: 4,
+  cursor: 5,
+  claude_code: 6,
+  generic_mcp: 7,
 };
 
 const CAPABILITY_LABELS: Record<string, string> = {
@@ -363,6 +400,7 @@ export function buildAiWorkspaceSetupCards(
       ownershipLabel: ownershipLabel(provider.supportedOwnershipModes),
       setupLabel: setupLabel(provider.setupPath),
       connectorUrl,
+      setupVariants: provider.setupVariants,
     };
 
     if (provider.key === "openwork") {
@@ -392,7 +430,7 @@ export function buildAiWorkspaceSetupCards(
             copiedMessage: testPrompt.copiedMessage,
             fallbackMessage: testPrompt.fallbackMessage,
           },
-          { kind: "open", label: "Open OpenWork", href: OPENWORK_SITE_URL, variant: "primary" },
+          { kind: "open", label: "Open OpenWork", href: OPENWORK_DOWNLOAD_URL, variant: "primary" },
           { kind: "open", label: "View source", href: OPENWORK_REPO_URL, variant: "secondary" },
         ],
         resources: [instructionsPackage, testPrompt],
@@ -447,8 +485,16 @@ export function buildAiWorkspaceSetupCards(
 
     if (provider.key === "claude") {
       const recipe = buildProviderRecipe(provider, connectorUrl);
+      const claudeCodeCommand = buildClaudeCodeCommand(connectorUrl);
+      const claudeCodeResource = buildCommandResource({
+        title: "Claude Code MCP command",
+        label: "Claude Code command",
+        value: claudeCodeCommand,
+        copiedMessage: "Copied the Claude Code command.",
+      });
       return {
         ...base,
+        command: claudeCodeCommand,
         actions: [
           { kind: "open", label: "Open guided installer", href: CLAUDE_INSTALLER_PATH, variant: "primary" },
           ...buildResourceCopyActions(recipe.resources),
@@ -466,16 +512,80 @@ export function buildAiWorkspaceSetupCards(
             copiedMessage: "Copied the Claude installer share link.",
             fallbackMessage: "Clipboard access was blocked. Select and copy the share link.",
           },
+          {
+            kind: "copy",
+            label: "Copy Claude Code command",
+            value: claudeCodeCommand,
+            copiedMessage: "Copied the Claude Code command.",
+            fallbackMessage: "Clipboard access was blocked. Select and copy the command.",
+          },
         ],
         steps: [
-          "Open Claude connector settings or the guided installer.",
-          "Add Corgtex as a custom connector using the MCP URL.",
+          "Use the Claude web/Desktop/Cowork guided installer for non-technical teammates.",
+          "Use the Claude Code command for terminal-based technical work.",
           "Complete browser sign-in and select this Corgtex workspace.",
-          "Copy the Corgtex instructions into Claude project or connector guidance.",
+          "Copy the Corgtex instructions into Claude project or connector guidance when supported.",
           "Run the safe test prompt before sending governed work.",
         ],
-        resources: recipe.resources,
+        resources: [...recipe.resources, claudeCodeResource],
         notes: ["Claude Team or Enterprise owners may need to add the connector at organization level first."],
+        verificationChecks: recipe.verificationChecks,
+      };
+    }
+
+    if (provider.key === "copilot") {
+      const recipe = buildProviderRecipe(provider, connectorUrl);
+      const vscodeConfig = buildJsonResource({
+        title: "VS Code mcp.json",
+        label: "VS Code mcp.json",
+        value: buildVsCodeMcpConfig(connectorUrl),
+        copiedMessage: "Copied the VS Code MCP configuration.",
+      });
+      const copilotCliCommand = buildCommandResource({
+        title: "Copilot CLI MCP command",
+        label: "Copilot CLI command",
+        value: buildCopilotCliCommand(connectorUrl),
+        copiedMessage: "Copied the Copilot CLI command.",
+      });
+      const copilotCliConfig = buildJsonResource({
+        title: "Copilot CLI mcp-config.json",
+        label: "Copilot CLI config",
+        value: buildCopilotCliMcpConfig(connectorUrl),
+        copiedMessage: "Copied the Copilot CLI MCP configuration.",
+      });
+      return {
+        ...base,
+        actions: [
+          {
+            kind: "copy",
+            label: "Copy VS Code config",
+            value: vscodeConfig.value,
+            copiedMessage: vscodeConfig.copiedMessage,
+            fallbackMessage: vscodeConfig.fallbackMessage,
+          },
+          {
+            kind: "copy",
+            label: "Copy Copilot CLI command",
+            value: copilotCliCommand.value,
+            copiedMessage: copilotCliCommand.copiedMessage,
+            fallbackMessage: copilotCliCommand.fallbackMessage,
+          },
+          ...buildResourceCopyActions(recipe.resources),
+          { kind: "open", label: "VS Code MCP docs", href: COPILOT_VSCODE_MCP_DOCS_URL, variant: "secondary" },
+          { kind: "open", label: "Copilot CLI docs", href: COPILOT_DOCS_URL, variant: "secondary" },
+        ],
+        steps: [
+          "For VS Code, add Corgtex to user or workspace mcp.json and trust the server when prompted.",
+          "For Copilot CLI, use the generated command or edit ~/.copilot/mcp-config.json.",
+          "For Copilot cloud agent or code review, configure repository MCP settings only when the auth mode is compatible.",
+          "Confirm Corgtex tools are visible before asking Copilot to execute governed work.",
+          "Run the safe test prompt before modifying files or repository state.",
+        ],
+        resources: [vscodeConfig, copilotCliCommand, copilotCliConfig, ...recipe.resources],
+        notes: [
+          "Copilot coding agent does not currently support OAuth-backed remote MCP servers, so the cloud variant may need a non-OAuth setup.",
+          "Remote MCP tools in Copilot should be treated as reviewed, explicit-approval tools.",
+        ],
         verificationChecks: recipe.verificationChecks,
       };
     }
@@ -537,6 +647,12 @@ export function buildAiWorkspaceSetupCards(
 
     if (provider.key === "gemini") {
       const recipe = buildProviderRecipe(provider, connectorUrl);
+      const geminiConfig = buildJsonResource({
+        title: "Gemini CLI settings.json",
+        label: "Gemini settings",
+        value: buildGeminiMcpConfig(connectorUrl),
+        copiedMessage: "Copied the Gemini CLI MCP settings.",
+      });
       return {
         ...base,
         actions: [
@@ -547,7 +663,15 @@ export function buildAiWorkspaceSetupCards(
             copiedMessage: "Copied the Corgtex MCP URL for Gemini CLI.",
             fallbackMessage: "Clipboard access was blocked. Select and copy the MCP URL.",
           },
+          {
+            kind: "copy",
+            label: "Copy Gemini settings",
+            value: geminiConfig.value,
+            copiedMessage: geminiConfig.copiedMessage,
+            fallbackMessage: geminiConfig.fallbackMessage,
+          },
           ...buildResourceCopyActions(recipe.resources),
+          { kind: "open", label: "Gemini MCP docs", href: GEMINI_MCP_DOCS_URL, variant: "secondary" },
         ],
         steps: [
           "Open Gemini CLI MCP settings.",
@@ -556,7 +680,7 @@ export function buildAiWorkspaceSetupCards(
           "Copy the Corgtex instructions into the CLI session or project guidance.",
           "Run the safe test prompt before using Gemini CLI for governed work.",
         ],
-        resources: recipe.resources,
+        resources: [geminiConfig, ...recipe.resources],
         notes: ["Consumer Gemini web support is not assumed; this path is for technical CLI users."],
         verificationChecks: recipe.verificationChecks,
       };
@@ -612,6 +736,36 @@ function buildResourceCopyActions(resources: AiWorkspaceSetupResource[]): AiWork
     copiedMessage: resource.copiedMessage,
     fallbackMessage: resource.fallbackMessage,
   }));
+}
+
+function buildCommandResource(params: {
+  title: string;
+  label: string;
+  value: string;
+  copiedMessage: string;
+}): AiWorkspaceSetupResource {
+  return {
+    title: params.title,
+    label: params.label,
+    value: params.value,
+    copiedMessage: params.copiedMessage,
+    fallbackMessage: "Clipboard access was blocked. Select and copy the command.",
+  };
+}
+
+function buildJsonResource(params: {
+  title: string;
+  label: string;
+  value: unknown;
+  copiedMessage: string;
+}): AiWorkspaceSetupResource {
+  return {
+    title: params.title,
+    label: params.label,
+    value: JSON.stringify(params.value, null, 2),
+    copiedMessage: params.copiedMessage,
+    fallbackMessage: "Clipboard access was blocked. Select and copy the configuration.",
+  };
 }
 
 function buildProviderInstructionsResource(

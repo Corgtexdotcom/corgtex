@@ -2,6 +2,7 @@ export const AI_WORKSPACE_PROVIDER_KEYS = [
   "openwork",
   "chatgpt",
   "claude",
+  "copilot",
   "gemini",
   "cursor",
   "claude_code",
@@ -44,6 +45,16 @@ export const AI_WORKSPACE_CAPABILITIES = [
 
 export type AiWorkspaceCapability = typeof AI_WORKSPACE_CAPABILITIES[number];
 
+export type AiWorkspaceSetupVariantDefinition = {
+  variantKey: string;
+  label: string;
+  audience: string;
+  primaryAction: "open" | "copy" | "copyAndOpen" | "cursorInstall";
+  manualSteps: string[];
+  limitations: string[];
+  verificationPrompt: string;
+};
+
 export type AiWorkspaceProviderDefinition = {
   key: AiWorkspaceProviderKey;
   label: string;
@@ -53,9 +64,11 @@ export type AiWorkspaceProviderDefinition = {
   category: "DEFAULT" | "BYO" | "ADVANCED";
   recommendedDefault: boolean;
   freeDefault: boolean;
+  visibleInToolPicker: boolean;
   supportedOwnershipModes: AiWorkspaceOwnershipMode[];
   capabilities: AiWorkspaceCapability[];
   setupPath: "guided" | "recipe" | "request";
+  setupVariants: AiWorkspaceSetupVariantDefinition[];
 };
 
 function provider(
@@ -74,6 +87,7 @@ export const AI_WORKSPACE_PROVIDER_REGISTRY = {
     category: "DEFAULT",
     recommendedDefault: true,
     freeDefault: true,
+    visibleInToolPicker: true,
     supportedOwnershipModes: ["USER_MANAGED", "WORKSPACE_MANAGED", "CORGTEX_MANAGED"],
     capabilities: [
       "remote_mcp",
@@ -88,6 +102,22 @@ export const AI_WORKSPACE_PROVIDER_REGISTRY = {
       "code_execution",
     ],
     setupPath: "guided",
+    setupVariants: [
+      {
+        variantKey: "openwork_app",
+        label: "OpenWork desktop or cloud",
+        audience: "Teams that want the free default execution workspace.",
+        primaryAction: "copy",
+        manualSteps: [
+          "Open or download OpenWork.",
+          "Add Corgtex as a remote MCP or HTTP connector using the Corgtex MCP URL.",
+          "Install the Corgtex instructions as workspace or skill guidance.",
+          "Complete browser sign-in and run the test prompt.",
+        ],
+        limitations: ["Managed OpenWork rollout still needs license, security, and commercial review."],
+        verificationPrompt: "Test the Corgtex connection in OpenWork without making external changes.",
+      },
+    ],
   }),
   chatgpt: provider({
     key: "chatgpt",
@@ -98,9 +128,26 @@ export const AI_WORKSPACE_PROVIDER_REGISTRY = {
     category: "BYO",
     recommendedDefault: false,
     freeDefault: false,
+    visibleInToolPicker: true,
     supportedOwnershipModes: ["USER_MANAGED", "WORKSPACE_MANAGED"],
     capabilities: ["remote_mcp", "oauth", "health_check", "write_back"],
     setupPath: "recipe",
+    setupVariants: [
+      {
+        variantKey: "chatgpt_developer_mode",
+        label: "ChatGPT custom MCP app",
+        audience: "Business, Enterprise, and Edu workspaces with developer mode enabled.",
+        primaryAction: "copyAndOpen",
+        manualSteps: [
+          "Ask a workspace admin to enable developer mode and custom MCP app creation if needed.",
+          "Create a custom app or connector for the Corgtex remote MCP server.",
+          "Paste the Corgtex MCP URL and complete browser sign-in.",
+          "Test the app before publishing it to normal users.",
+        ],
+        limitations: ["Full MCP and write-capable apps are plan and admin-policy dependent."],
+        verificationPrompt: "Test the Corgtex app in ChatGPT without creating records or external changes.",
+      },
+    ],
   }),
   claude: provider({
     key: "claude",
@@ -111,9 +158,98 @@ export const AI_WORKSPACE_PROVIDER_REGISTRY = {
     category: "BYO",
     recommendedDefault: false,
     freeDefault: false,
+    visibleInToolPicker: true,
     supportedOwnershipModes: ["USER_MANAGED", "WORKSPACE_MANAGED"],
     capabilities: ["remote_mcp", "oauth", "health_check", "write_back"],
     setupPath: "recipe",
+    setupVariants: [
+      {
+        variantKey: "claude_remote_connector",
+        label: "Claude web, Desktop, or Cowork",
+        audience: "Non-technical teammates using Claude as the work surface.",
+        primaryAction: "copyAndOpen",
+        manualSteps: [
+          "Open Claude connector settings or the guided installer.",
+          "Add Corgtex as a custom remote connector using the Corgtex MCP URL.",
+          "Complete browser sign-in and select this workspace.",
+          "Run the test prompt before governed work.",
+        ],
+        limitations: ["Team and Enterprise owners may need to approve or publish the connector first."],
+        verificationPrompt: "Test the Corgtex connection in Claude without making external changes.",
+      },
+      {
+        variantKey: "claude_code_cli",
+        label: "Claude Code",
+        audience: "Technical teammates working from a terminal.",
+        primaryAction: "copy",
+        manualSteps: [
+          "Run the generated Claude Code MCP command in Terminal.",
+          "Open Claude Code and use /mcp to inspect the Corgtex server.",
+          "Complete browser sign-in when prompted.",
+          "Run the test prompt before changing files.",
+        ],
+        limitations: ["Use user scope for broad availability; use project scope only when a project needs a different boundary."],
+        verificationPrompt: "Use Claude Code /mcp to confirm Corgtex is connected before changing files.",
+      },
+    ],
+  }),
+  copilot: provider({
+    key: "copilot",
+    label: "GitHub Copilot",
+    shortLabel: "Copilot",
+    outcome: "Use Corgtex context in GitHub Copilot across VS Code, Copilot CLI, or repository agents.",
+    description: "Use this path when the customer already standardizes on GitHub Copilot and wants Corgtex as a governed MCP source.",
+    category: "BYO",
+    recommendedDefault: false,
+    freeDefault: false,
+    visibleInToolPicker: true,
+    supportedOwnershipModes: ["USER_MANAGED", "WORKSPACE_MANAGED"],
+    capabilities: ["remote_mcp", "oauth", "health_check", "write_back", "code_execution"],
+    setupPath: "recipe",
+    setupVariants: [
+      {
+        variantKey: "copilot_vscode",
+        label: "VS Code and Copilot Chat",
+        audience: "Developers using Copilot agent mode in VS Code.",
+        primaryAction: "copy",
+        manualSteps: [
+          "Run MCP: Add Server in VS Code or open the user/workspace mcp.json file.",
+          "Add Corgtex as a Streamable HTTP MCP server using the Corgtex MCP URL.",
+          "Start the server, trust it, and complete browser sign-in if prompted.",
+          "Confirm Corgtex tools appear in Copilot Chat agent mode.",
+        ],
+        limitations: ["Organization Copilot policies can restrict MCP server access."],
+        verificationPrompt: "Ask Copilot Chat to use Corgtex tools for a no-change readiness report.",
+      },
+      {
+        variantKey: "copilot_cli",
+        label: "Copilot CLI",
+        audience: "Developers using GitHub Copilot from Terminal.",
+        primaryAction: "copy",
+        manualSteps: [
+          "Run the generated copilot mcp add command or use /mcp add in Copilot CLI.",
+          "Save the server in the user-level Copilot MCP configuration.",
+          "Complete browser sign-in if the remote server requires OAuth.",
+          "Use copilot mcp list or /mcp to confirm Corgtex is available.",
+        ],
+        limitations: ["Remote MCP servers are low-trust and require explicit tool approval."],
+        verificationPrompt: "Ask Copilot CLI for a no-change Corgtex readiness report.",
+      },
+      {
+        variantKey: "copilot_cloud_agent",
+        label: "Copilot coding agent or code review",
+        audience: "Repository owners configuring cloud agent MCP access.",
+        primaryAction: "copy",
+        manualSteps: [
+          "Configure repository MCP servers in GitHub Copilot settings.",
+          "Add required COPILOT_MCP_ variables or secrets for any non-OAuth setup.",
+          "Allowlist only the Corgtex tools needed for repository work.",
+          "Run a repository-safe readiness check before assigning production tasks.",
+        ],
+        limitations: ["Copilot coding agent does not currently support remote OAuth MCP servers, so Corgtex browser OAuth may not work in this cloud variant."],
+        verificationPrompt: "Confirm the Copilot cloud agent can list permitted Corgtex tools without performing writes.",
+      },
+    ],
   }),
   gemini: provider({
     key: "gemini",
@@ -124,9 +260,26 @@ export const AI_WORKSPACE_PROVIDER_REGISTRY = {
     category: "ADVANCED",
     recommendedDefault: false,
     freeDefault: false,
+    visibleInToolPicker: true,
     supportedOwnershipModes: ["USER_MANAGED", "WORKSPACE_MANAGED"],
     capabilities: ["remote_mcp", "api_key", "health_check", "write_back", "code_execution"],
     setupPath: "recipe",
+    setupVariants: [
+      {
+        variantKey: "gemini_cli_http",
+        label: "Gemini CLI HTTP MCP",
+        audience: "Technical teams using Gemini CLI.",
+        primaryAction: "copy",
+        manualSteps: [
+          "Add a Corgtex entry under mcpServers in Gemini CLI settings.json.",
+          "Use httpUrl for the Corgtex Streamable HTTP MCP URL.",
+          "Complete OAuth browser sign-in when Gemini detects the protected server.",
+          "Use /mcp to verify the server and available tools.",
+        ],
+        limitations: ["OAuth requires a local browser and localhost redirect support."],
+        verificationPrompt: "Use Gemini CLI /mcp and request a no-change Corgtex readiness report.",
+      },
+    ],
   }),
   cursor: provider({
     key: "cursor",
@@ -137,9 +290,26 @@ export const AI_WORKSPACE_PROVIDER_REGISTRY = {
     category: "ADVANCED",
     recommendedDefault: false,
     freeDefault: false,
+    visibleInToolPicker: true,
     supportedOwnershipModes: ["USER_MANAGED", "WORKSPACE_MANAGED"],
     capabilities: ["remote_mcp", "oauth", "health_check", "write_back", "code_execution"],
     setupPath: "recipe",
+    setupVariants: [
+      {
+        variantKey: "cursor_deeplink",
+        label: "Cursor MCP install",
+        audience: "Technical and product teams using Cursor.",
+        primaryAction: "cursorInstall",
+        manualSteps: [
+          "Open the Add to Cursor prompt or use Cursor MCP settings.",
+          "Install the Corgtex Streamable HTTP MCP server.",
+          "Complete browser sign-in when Cursor asks to authenticate.",
+          "Confirm Corgtex tools are visible before changing files.",
+        ],
+        limitations: ["Teams may need to approve the MCP server in workspace or organization policy."],
+        verificationPrompt: "Ask Cursor for a no-change Corgtex readiness report before editing files.",
+      },
+    ],
   }),
   claude_code: provider({
     key: "claude_code",
@@ -150,9 +320,11 @@ export const AI_WORKSPACE_PROVIDER_REGISTRY = {
     category: "ADVANCED",
     recommendedDefault: false,
     freeDefault: false,
+    visibleInToolPicker: false,
     supportedOwnershipModes: ["USER_MANAGED", "WORKSPACE_MANAGED"],
     capabilities: ["remote_mcp", "oauth", "health_check", "write_back", "code_execution"],
     setupPath: "recipe",
+    setupVariants: [],
   }),
   generic_mcp: provider({
     key: "generic_mcp",
@@ -163,9 +335,26 @@ export const AI_WORKSPACE_PROVIDER_REGISTRY = {
     category: "ADVANCED",
     recommendedDefault: false,
     freeDefault: false,
+    visibleInToolPicker: true,
     supportedOwnershipModes: ["USER_MANAGED", "WORKSPACE_MANAGED", "CORGTEX_MANAGED"],
     capabilities: ["remote_mcp", "oauth", "api_key", "health_check", "write_back"],
     setupPath: "recipe",
+    setupVariants: [
+      {
+        variantKey: "generic_remote_mcp",
+        label: "Remote MCP client",
+        audience: "Teams with another MCP-compatible AI workspace.",
+        primaryAction: "copy",
+        manualSteps: [
+          "Choose remote MCP, Streamable HTTP, or HTTP MCP server in the client.",
+          "Paste the Corgtex MCP URL.",
+          "Complete browser OAuth if the client supports it.",
+          "Run the test prompt before production work.",
+        ],
+        limitations: ["If the client cannot list Corgtex tools or scopes, treat it as not ready."],
+        verificationPrompt: "Test the Corgtex connection without making external changes.",
+      },
+    ],
   }),
 } as const satisfies Record<AiWorkspaceProviderKey, AiWorkspaceProviderDefinition>;
 
@@ -173,6 +362,7 @@ export const AI_WORKSPACE_PROVIDER_DB_VALUES = {
   openwork: "OPENWORK",
   chatgpt: "CHATGPT",
   claude: "CLAUDE",
+  copilot: "COPILOT",
   gemini: "GEMINI",
   cursor: "CURSOR",
   claude_code: "CLAUDE_CODE",
@@ -280,6 +470,21 @@ export function aiWorkspaceProviderToDb(value: AiWorkspaceProviderKey) {
   return AI_WORKSPACE_PROVIDER_DB_VALUES[value];
 }
 
+export function aiWorkspaceProviderFromDb(value: string): AiWorkspaceProviderKey | null {
+  const entry = Object.entries(AI_WORKSPACE_PROVIDER_DB_VALUES)
+    .find(([, dbValue]) => dbValue === value);
+  return (entry?.[0] as AiWorkspaceProviderKey | undefined) ?? null;
+}
+
+export function aiWorkspaceToolProviderKey(value: AiWorkspaceProviderKey) {
+  if (value === "claude_code") return "claude";
+  return value;
+}
+
+export function isVisibleAiWorkspaceToolProvider(value: string): value is AiWorkspaceProviderKey {
+  return isAiWorkspaceProviderKey(value) && AI_WORKSPACE_PROVIDER_REGISTRY[value].visibleInToolPicker;
+}
+
 export function isEnterpriseServiceKey(value: string): value is EnterpriseServiceKey {
   return ENTERPRISE_SERVICE_KEYS.includes(value as EnterpriseServiceKey);
 }
@@ -297,6 +502,10 @@ export function enterpriseServiceToDb(value: EnterpriseServiceKey) {
 
 export function listAiWorkspaceProviders() {
   return AI_WORKSPACE_PROVIDER_KEYS.map((key) => AI_WORKSPACE_PROVIDER_REGISTRY[key]);
+}
+
+export function listAiWorkspaceToolProviders() {
+  return listAiWorkspaceProviders().filter((provider) => provider.visibleInToolPicker);
 }
 
 export function listEnterpriseServices() {

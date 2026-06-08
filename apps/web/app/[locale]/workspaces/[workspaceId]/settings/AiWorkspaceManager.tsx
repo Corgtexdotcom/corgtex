@@ -391,6 +391,48 @@ export function AiWorkspaceManager({
             </div>
             {renderStatus(activeCard.provider.key)}
 
+            {activeCard.setupVariants.length > 0 ? (
+              <div className="stack" style={{ gap: 10 }}>
+                <h3 style={{ fontSize: "0.95rem", margin: 0 }}>Setup paths</h3>
+                {activeCard.setupVariants.map((variant) => (
+                  <div
+                    key={variant.variantKey}
+                    style={{
+                      border: "1px solid var(--line)",
+                      borderRadius: 8,
+                      display: "grid",
+                      gap: 8,
+                      padding: 12,
+                    }}
+                  >
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "flex-start", flexWrap: "wrap" }}>
+                      <strong style={{ fontSize: "0.9rem" }}>{variant.label}</strong>
+                      <span className="tag info">{variant.primaryAction}</span>
+                    </div>
+                    <p className="nr-item-meta" style={{ fontSize: "0.82rem", lineHeight: 1.4, margin: 0 }}>
+                      {variant.audience}
+                    </p>
+                    <ol className="stack" style={{ gap: 5, margin: 0, paddingLeft: 18 }}>
+                      {variant.manualSteps.map((step) => (
+                        <li key={step} className="nr-item-meta" style={{ fontSize: "0.8rem" }}>
+                          {step}
+                        </li>
+                      ))}
+                    </ol>
+                    {variant.limitations.length > 0 ? (
+                      <div className="stack" style={{ gap: 4 }}>
+                        {variant.limitations.map((limitation) => (
+                          <p key={limitation} className="nr-item-meta" style={{ fontSize: "0.78rem", margin: 0 }}>
+                            {limitation}
+                          </p>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+            ) : null}
+
             {activeCard.resources.length > 0 ? (
               <div className="stack" style={{ gap: 12 }}>
                 <h3 style={{ fontSize: "0.95rem", margin: 0 }}>Setup resources</h3>

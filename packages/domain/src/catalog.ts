@@ -16,7 +16,7 @@ import { prisma, randomOpaqueToken, sha256, toInputJson } from "@corgtex/shared"
 import type { AppActor, MembershipSummary } from "@corgtex/shared";
 import { AGENT_REGISTRY } from "./agent-registry";
 import { ALL_SCOPES } from "./agent-auth";
-import { listAiWorkspaceProviders, listEnterpriseServices } from "./ai-workspaces";
+import { listAiWorkspaceToolProviders, listEnterpriseServices } from "./ai-workspaces";
 import { actorUserIdForWorkspace, requireWorkspaceMembership } from "./auth";
 import { recordAudit } from "./audit-trail";
 import { AppError, invariant } from "./errors";
@@ -327,7 +327,7 @@ function connectorSources(workspaceId: string, flags: CatalogFeatureFlags): Cata
 function aiWorkspaceSources(workspaceId: string, flags: CatalogFeatureFlags): CatalogSourceInput[] {
   if (!flags.AI_WORKSPACES) return [];
 
-  return listAiWorkspaceProviders().map((provider) => {
+  return listAiWorkspaceToolProviders().map((provider) => {
     const isOpenWorkDefault = provider.key === "openwork" && flags.OPENWORK_DEFAULT;
     const category = provider.category === "DEFAULT"
       ? "AI_DEFAULT"
