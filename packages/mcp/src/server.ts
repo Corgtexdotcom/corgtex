@@ -102,6 +102,7 @@ import {
   archiveWorkspaceToolLink,
   getAppConnectionInstructions,
   getAppRoutingGuidance,
+  invokeInstalledAppTool,
   listInstalledApps,
   listWorkspaceToolLinks,
   requestAppInstall,
@@ -192,6 +193,12 @@ const DESTRUCTIVE_TOOL_NAMES = new Set([
   "revoke_agent_credential",
 ]);
 
+const FINANCE_APP_MCP_TOOLS = new Set([
+  "create_time_entries",
+  "create_expenses",
+  "submit_finance_entries",
+]);
+
 type ToolCapability = {
   scopes: AgentScope[];
   destructive?: boolean;
@@ -213,6 +220,7 @@ const TOOL_CAPABILITIES = {
   list_installed_apps: { scopes: ["tools:read"] },
   get_app_routing_guidance: { scopes: ["tools:read"] },
   get_app_connection_instructions: { scopes: ["tools:read"] },
+  invoke_installed_app_tool: { scopes: ["tools:write"] },
   request_app_install: { scopes: ["tools:write"] },
   search_connected_context: { scopes: ["external-tools:read"] },
   fetch_connected_context: { scopes: ["external-tools:read"] },
@@ -330,6 +338,10 @@ const TOOL_CAPABILITIES = {
 
 const MUTATING_READ_PREFIX_TOOLS = new Set(["get_execution_packet"]);
 
+function requiredScopesForInstalledAppTool(toolName: string): AgentScope[] {
+  return FINANCE_APP_MCP_TOOLS.has(toolName) ? ["finance:write"] : [];
+}
+
 function summarizeForExecutionAudit(value: unknown): unknown {
   if (value === null || value === undefined) return null;
   if (typeof value === "string") return { type: "string", length: value.length };
@@ -358,6 +370,7 @@ function annotationsForTool(name: string) {
     || name === "list_installed_apps"
     || name === "get_app_routing_guidance"
     || name === "get_app_connection_instructions"
+    || name === "invoke_installed_app_tool"
     || name === "request_app_install"
     || name === "search_connected_context"
     || name === "fetch_connected_context"
@@ -874,6 +887,46 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       requireToolCapability("get_app_connection_instructions");
       const instructions = await getAppConnectionInstructions(actor, { workspaceId, catalogItemId, appKey });
       return structuredJsonResult({ ...instructions, webUrl: webUrl(workspaceId, `/tools/${instructions.app.id}`) });
+    },
+  );
+
+  tool(
+    "invoke_installed_app_tool",
+    "Invoke a scoped MCP tool on an installed enterprise app through Corgtex governance, app-session auth, and audit.",
+    {
+      appKey: z.string().optional().describe("Installed app key such as practice-ledger."),
+      surface: z.enum(["FINANCE"]).optional().describe("Workspace surface assigned to the installed app."),
+      toolName: z.string().describe("Installed app MCP tool name, such as create_expenses."),
+      arguments: z.record(z.string(), z.unknown()).optional().describe("Installed app MCP tool arguments."),
+    },
+    async ({
+      appKey,
+      surface,
+      toolName,
+      arguments: args,
+    }: {
+      appKey?: string;
+      surface?: "FINANCE";
+      toolName: string;
+      arguments?: Record<string, unknown>;
+    }) => {
+      requireToolCapability("invoke_installed_app_tool");
+      const requiredScopes = requiredScopesForInstalledAppTool(toolName);
+      for (const scope of requiredScopes) {
+        requireScope(sessionCtx, scope);
+      }
+      const result = await invokeInstalledAppTool(actor, {
+        workspaceId,
+        appKey,
+        surface,
+        toolName,
+        arguments: args ?? {},
+        requiredScopes,
+      });
+      return structuredJsonResult({
+        ...result,
+        webUrl: webUrl(workspaceId, "/finance"),
+      });
     },
   );
 
