@@ -46,14 +46,20 @@ function appendPath(baseUrl, suffix) {
 }
 
 function runtimeUrl(value) {
-  const url = optionalText(value);
-  if (!url || !/^https?:\/\//i.test(url) || isWorkspaceUiUrl(url)) return null;
-  return url;
+  const text = optionalText(value);
+  if (!text) return null;
+  try {
+    const url = new URL(text);
+    if (!["http:", "https:"].includes(url.protocol) || isWorkspaceUiUrl(url)) return null;
+    return text;
+  } catch {
+    return null;
+  }
 }
 
 function isWorkspaceUiUrl(value) {
   try {
-    const url = new URL(value);
+    const url = value instanceof URL ? value : new URL(value);
     const pathname = url.pathname.replace(/\/+$/, "");
     return /^\/(?:[a-z]{2}(?:-[a-z]{2})?\/)?workspaces\/[^/]+(?:\/.*)?$/i.test(pathname);
   } catch {

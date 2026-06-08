@@ -133,14 +133,20 @@ describe("customer readiness sweep URL selection", () => {
         supportBaseUrl: "mailto:support@example.com",
         provisioningStatus: "degraded",
       },
+      {
+        id: "deployment-malformed",
+        slug: "malformed",
+        label: "Malformed Support",
+        url: "https://malformed.example",
+        supportBaseUrl: "https://[::1",
+        provisioningStatus: "active",
+      },
     ]);
 
-    expect(output.customers).toHaveLength(1);
-    expect(output.customers[0]).toMatchObject({
-      slug: "chirone",
-      url: "https://chirone.example",
-      healthUrl: "https://chirone.example/api/health",
-    });
+    expect(output.customers.map((customer) => customer.healthUrl)).toEqual([
+      "https://chirone.example/api/health",
+      "https://malformed.example/api/health",
+    ]);
   });
 
   it("keeps ordinary deployment runtime URLs", () => {
