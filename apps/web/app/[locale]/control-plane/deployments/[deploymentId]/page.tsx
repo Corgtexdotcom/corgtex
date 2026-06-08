@@ -5,16 +5,14 @@ import {
   getControlPlaneDeployLatestPreflight,
   getControlPlaneAiGovernanceStatus,
   getControlPlaneClientOptions,
-  getControlPlaneContextHealth,
   getControlPlaneDeployment,
-  getControlPlaneIntegrationStatus,
-  getControlPlaneReleaseStatus,
   listControlPlaneCustomerMembers,
   listControlPlaneFeatureFlags,
   listControlPlaneReleaseRolloutJobs,
   listWorkspaceEnterpriseApps,
   requireControlPlaneAccess,
 } from "@corgtex/domain";
+import { Link } from "@/i18n/routing";
 import { requirePageActor } from "@/lib/auth";
 import { getControlPlaneHref } from "@/lib/control-plane-url";
 import {
@@ -38,9 +36,11 @@ import {
 } from "../../actions";
 import { ClientContextSwitcher } from "../../_components/client-context-switcher";
 import {
+  ControlPlaneCacheMeta,
   ControlPlanePageHeader,
   controlPlaneButtonClass,
 } from "../../_components/control-plane-ui";
+import { controlPlaneActorCacheKey, readControlPlaneCached, shouldRefreshControlPlaneCache } from "../../cache";
 import { CustomerDetailClientTabs } from "./_components/detail-client-tabs";
 
 export const dynamic = "force-dynamic";
@@ -56,7 +56,7 @@ export default async function ControlPlaneCustomerPage({
   searchParams,
 }: {
   params: Promise<{ locale: string; deploymentId: string }>;
-  searchParams?: Promise<{ tab?: string }>;
+  searchParams?: Promise<{ tab?: string; refresh?: string }>;
 }) {
   const { locale, deploymentId } = await params;
   const rawSearchParams = await searchParams;
@@ -68,40 +68,15 @@ export default async function ControlPlaneCustomerPage({
     notFound();
   }
 
-  // Parallel server side data fetching
-  const [
-    customer,
-    integrations,
-    context,
-    aiGovernance,
-    releases,
-    membersRaw,
-    featureFlagsRaw,
-    deployPreflight,
-    rollouts,
-    clientOptions,
-    t,
-  ] = await Promise.all([
-    getControlPlaneDeployment(actor, deploymentId),
-    getControlPlaneIntegrationStatus(actor, deploymentId),
-    getControlPlaneContextHealth(actor, deploymentId),
-    getControlPlaneAiGovernanceStatus(actor, deploymentId),
-    getControlPlaneReleaseStatus(actor, deploymentId),
-    listControlPlaneCustomerMembers(actor, deploymentId).catch((err: unknown) => ({
-      deploymentId,
-      source: "unavailable" as const,
-      members: [],
-      error: err instanceof Error ? err.message : "Unable to load members.",
-    })),
-    listControlPlaneFeatureFlags(actor, deploymentId).catch((err: unknown) => ({
-      deploymentId,
-      source: "unavailable" as const,
-      flags: [],
-      error: err instanceof Error ? err.message : "Unable to load feature flags.",
-    })),
-    getControlPlaneDeployLatestPreflight(actor, deploymentId),
-    listControlPlaneReleaseRolloutJobs(actor, { deploymentId, take: 8 }),
-    getControlPlaneClientOptions(actor),
+  const refresh = shouldRefreshControlPlaneCache(rawSearchParams?.refresh);
+  const actorCacheKey = controlPlaneActorCacheKey(actor);
+  const [customerRead, clientOptionsRead, t] = await Promise.all([
+    readControlPlaneCached(["control-plane", "deployment", actorCacheKey, deploymentId], refresh, () => (
+      getControlPlaneDeployment(actor, deploymentId)
+    )),
+    readControlPlaneCached(["control-plane", "client-options", actorCacheKey], refresh, () => (
+      getControlPlaneClientOptions(actor)
+    )),
     getTranslations("controlPlane"),
   ]).catch((error: unknown) => {
     if (error instanceof AppError && error.status === 404) {
@@ -109,20 +84,93 @@ export default async function ControlPlaneCustomerPage({
     }
     throw error;
   });
+  const customer = customerRead.data;
+  const clientOptions = clientOptionsRead.data;
+  const emptyIntegrations = {
+    deploymentId,
+    accessMode: "inactive_tab",
+    hasManagedWorkspace: Boolean(customer.managedWorkspaceId),
+    integrations: [],
+  };
+  const emptyContext = {
+    deploymentId,
+    accessMode: "inactive_tab",
+    hasManagedWorkspace: Boolean(customer.managedWorkspaceId),
+    summary: null,
+    sources: [],
+  };
+  const emptyAiGovernance = {
+    deploymentId,
+    accessMode: "inactive_tab",
+    hasManagedWorkspace: Boolean(customer.managedWorkspaceId),
+    agents: { identities: [], configs: [] },
+    access: { credentials: [] },
+    spend: { budget: null, recentModelUsage: [] },
+    activity: { recentRuns: [] },
+    summary: null,
+  };
+  const emptyDeployPreflight = {
+    deploymentId,
+    eligible: false,
+    checks: [],
+    blockers: [],
+    target: null,
+  };
+
+  const [aiGovernanceRead, membersRead, featureFlagsRead, deployPreflightRead, rolloutsRead] = await Promise.all([
+    activeTab === "agents"
+      ? readControlPlaneCached(["control-plane", "deployment", "agents", actorCacheKey, deploymentId], refresh, () => (
+        getControlPlaneAiGovernanceStatus(actor, deploymentId)
+      ))
+      : Promise.resolve({ data: emptyAiGovernance, cachedAt: customerRead.cachedAt, cacheStatus: customerRead.cacheStatus }),
+    activeTab === "users"
+      ? readControlPlaneCached(["control-plane", "deployment", "members", actorCacheKey, deploymentId], refresh, async () => (
+        listControlPlaneCustomerMembers(actor, deploymentId).catch((err: unknown) => ({
+          deploymentId,
+          source: "unavailable" as const,
+          members: [],
+          error: err instanceof Error ? err.message : "Unable to load members.",
+        }))
+      ))
+      : Promise.resolve({ data: { deploymentId, source: "inactive_tab" as const, members: [] }, cachedAt: customerRead.cachedAt, cacheStatus: customerRead.cacheStatus }),
+    activeTab === "config"
+      ? readControlPlaneCached(["control-plane", "deployment", "flags", actorCacheKey, deploymentId], refresh, async () => (
+        listControlPlaneFeatureFlags(actor, deploymentId).catch((err: unknown) => ({
+          deploymentId,
+          source: "unavailable" as const,
+          flags: [],
+          error: err instanceof Error ? err.message : "Unable to load feature flags.",
+        }))
+      ))
+      : Promise.resolve({ data: { deploymentId, source: "inactive_tab" as const, flags: [] }, cachedAt: customerRead.cachedAt, cacheStatus: customerRead.cacheStatus }),
+    activeTab === "releases"
+      ? readControlPlaneCached(["control-plane", "deployment", "preflight", actorCacheKey, deploymentId], refresh, () => (
+        getControlPlaneDeployLatestPreflight(actor, deploymentId)
+      ))
+      : Promise.resolve({ data: emptyDeployPreflight, cachedAt: customerRead.cachedAt, cacheStatus: customerRead.cacheStatus }),
+    activeTab === "releases"
+      ? readControlPlaneCached(["control-plane", "deployment", "rollouts", actorCacheKey, deploymentId], refresh, () => (
+        listControlPlaneReleaseRolloutJobs(actor, { deploymentId, take: 8 })
+      ))
+      : Promise.resolve({ data: [], cachedAt: customerRead.cachedAt, cacheStatus: customerRead.cacheStatus }),
+  ]);
 
   // Standardize response types for client component
-  const members = "members" in membersRaw ? membersRaw : { members: [] };
-  const featureFlags = "flags" in featureFlagsRaw ? featureFlagsRaw : { flags: [] };
-  const enterpriseApps = customer.managedWorkspaceId
-    ? await listWorkspaceEnterpriseApps(actor, customer.managedWorkspaceId).catch((err: unknown) => ({
+  const members = "members" in membersRead.data ? membersRead.data : { members: [] };
+  const featureFlags = "flags" in featureFlagsRead.data ? featureFlagsRead.data : { flags: [] };
+  const enterpriseWorkspaceId = activeTab === "config" ? customer.managedWorkspaceId : null;
+  const enterpriseApps = enterpriseWorkspaceId
+    ? (await readControlPlaneCached(["control-plane", "deployment", "enterprise-apps", actorCacheKey, enterpriseWorkspaceId], refresh, async () => (
+      listWorkspaceEnterpriseApps(actor, enterpriseWorkspaceId).catch((err: unknown) => ({
         canManage: false,
         installations: [],
         error: err instanceof Error ? err.message : "Unable to load enterprise apps.",
       }))
+    ))).data
     : {
         canManage: false,
         installations: [],
-        error: "Enterprise app inspection requires a managed workspace.",
+        error: activeTab === "config" ? "Enterprise app inspection requires a managed workspace." : null,
       };
 
   return (
@@ -160,17 +208,23 @@ export default async function ControlPlaneCustomerPage({
         }
       />
 
+      <ControlPlaneCacheMeta
+        cachedAt={customerRead.cachedAt}
+        cacheStatus={customerRead.cacheStatus}
+        refreshAction={<Link href={`?tab=${activeTab}&refresh=1`} className={controlPlaneButtonClass}>Refresh live data</Link>}
+      />
+
       <CustomerDetailClientTabs
         customer={customer}
-        integrations={integrations}
-        context={context}
-        aiGovernance={aiGovernance}
-        releases={releases}
+        integrations={emptyIntegrations}
+        context={emptyContext}
+        aiGovernance={aiGovernanceRead.data}
+        releases={{ deploymentId }}
         members={members}
         featureFlags={featureFlags}
         enterpriseApps={enterpriseApps}
-        deployPreflight={deployPreflight}
-        rollouts={rollouts}
+        deployPreflight={deployPreflightRead.data}
+        rollouts={rolloutsRead.data}
         locale={locale}
         initialTab={activeTab}
       />

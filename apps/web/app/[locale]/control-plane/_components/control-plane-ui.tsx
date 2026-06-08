@@ -7,10 +7,10 @@ export function controlPlaneLabel(value?: string | null) {
 
 export function controlPlaneTone(status?: string | null) {
   const normalized = status?.toLowerCase();
-  if (["ok", "active", "connected", "ready", "managed", "completed", "passed", "enabled", "aligned"].includes(normalized ?? "")) {
+  if (["ok", "active", "connected", "ready", "managed", "completed", "passed", "enabled", "aligned", "available"].includes(normalized ?? "")) {
     return "border-emerald-500/25 bg-emerald-500/10 text-emerald-400";
   }
-  if (["attention", "degraded", "provisioning", "configured", "pending", "needs_setup", "requires_connector", "unavailable", "running", "blocked", "trialing", "review_required"].includes(normalized ?? "")) {
+  if (["attention", "degraded", "provisioning", "configured", "pending", "needs_setup", "not_configured", "requires_connector", "unavailable", "running", "blocked", "trialing", "review_required"].includes(normalized ?? "")) {
     return "border-amber-500/25 bg-amber-500/10 text-amber-400";
   }
   if (["down", "suspended", "failed", "disabled", "past_due"].includes(normalized ?? "")) {
@@ -111,6 +111,32 @@ export function ControlPlaneStatusStrip({
           {item.detail && <span className={cn("mt-0.5 block text-[10px]", item.status ? controlPlaneTone(item.status).split(" ").at(-1) : "text-muted")}>{item.detail}</span>}
         </div>
       ))}
+    </div>
+  );
+}
+
+export function controlPlaneCacheAgeLabel(cachedAt: Date) {
+  const ageSeconds = Math.max(0, Math.round((Date.now() - cachedAt.getTime()) / 1000));
+  if (ageSeconds < 5) return "just now";
+  if (ageSeconds < 60) return `${ageSeconds}s ago`;
+  return `${Math.floor(ageSeconds / 60)}m ago`;
+}
+
+export function ControlPlaneCacheMeta({
+  cachedAt,
+  cacheStatus,
+  refreshAction,
+}: {
+  cachedAt: Date;
+  cacheStatus: "hit" | "miss" | "refresh";
+  refreshAction?: ReactNode;
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-2 text-[10px] text-muted">
+      <span className="rounded-md border border-line bg-surface px-2 py-1">
+        {cacheStatus === "refresh" ? "Refreshed" : "Cached"} {controlPlaneCacheAgeLabel(cachedAt)}
+      </span>
+      {refreshAction}
     </div>
   );
 }

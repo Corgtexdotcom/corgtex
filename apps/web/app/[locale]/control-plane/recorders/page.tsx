@@ -5,11 +5,13 @@ import { requirePageActor } from "@/lib/auth";
 import { cn } from "@/lib/utils";
 import { ClientContextSwitcher } from "../_components/client-context-switcher";
 import {
+  ControlPlaneCacheMeta,
   ControlPlanePageHeader,
   ControlPlaneStatusStrip,
   controlPlaneButtonClass,
   controlPlaneInputClass,
 } from "../_components/control-plane-ui";
+import { controlPlaneActorCacheKey, readControlPlaneCached, shouldRefreshControlPlaneCache } from "../cache";
 
 export const dynamic = "force-dynamic";
 
@@ -19,15 +21,15 @@ type RecorderPage = Awaited<ReturnType<typeof listControlPlaneRecorderMatrix>>;
 type RecorderRow = RecorderPage["items"][number];
 
 function statusTone(status?: string | null) {
-  if (status === "ready" || status === "active" || status === "connected") return "text-emerald-400 bg-emerald-500/10 border-emerald-500/20";
-  if (status === "needs_setup" || status === "requires_connector" || status === "unavailable" || status === "pending") return "text-amber-400 bg-amber-500/10 border-amber-500/20";
+  if (status === "ready" || status === "available" || status === "active" || status === "connected") return "text-emerald-400 bg-emerald-500/10 border-emerald-500/20";
+  if (status === "needs_setup" || status === "not_configured" || status === "requires_connector" || status === "unavailable" || status === "pending") return "text-amber-400 bg-amber-500/10 border-amber-500/20";
   if (status === "disabled" || status === "failed" || status === "FAILED") return "text-rose-400 bg-rose-500/10 border-rose-500/20";
   return "text-muted bg-slate-500/10 border-slate-500/20";
 }
 
 function statusDot(status?: string | null) {
-  if (status === "ready" || status === "active" || status === "connected") return "bg-emerald-500 shadow-emerald-500/40";
-  if (status === "needs_setup" || status === "requires_connector" || status === "unavailable" || status === "pending") return "bg-amber-500 shadow-amber-500/40";
+  if (status === "ready" || status === "available" || status === "active" || status === "connected") return "bg-emerald-500 shadow-emerald-500/40";
+  if (status === "needs_setup" || status === "not_configured" || status === "requires_connector" || status === "unavailable" || status === "pending") return "bg-amber-500 shadow-amber-500/40";
   if (status === "disabled" || status === "failed" || status === "FAILED") return "bg-rose-500 shadow-rose-500/40";
   return "bg-slate-500";
 }
@@ -75,16 +77,25 @@ export default async function ControlPlaneRecordersPage({
   }
 
   const raw = await searchParams;
-  const [recorderMatrix, clientOptions] = await Promise.all([
-    listControlPlaneRecorderMatrix(actor, {
-      query: raw?.q,
-      client: raw?.client,
-      status: raw?.status,
-      page: Number(raw?.page ?? 1),
-      pageSize: PAGE_SIZE,
-    }),
-    getControlPlaneClientOptions(actor),
+  const refresh = shouldRefreshControlPlaneCache(raw?.refresh);
+  const actorCacheKey = controlPlaneActorCacheKey(actor);
+  const recorderParams = {
+    query: raw?.q,
+    client: raw?.client,
+    status: raw?.status,
+    page: Number(raw?.page ?? 1),
+    pageSize: PAGE_SIZE,
+  };
+  const [recorderMatrixRead, clientOptionsRead] = await Promise.all([
+    readControlPlaneCached(["control-plane", "recorders", actorCacheKey, recorderParams], refresh, () => (
+      listControlPlaneRecorderMatrix(actor, recorderParams)
+    )),
+    readControlPlaneCached(["control-plane", "client-options", actorCacheKey], refresh, () => (
+      getControlPlaneClientOptions(actor)
+    )),
   ]);
+  const recorderMatrix = recorderMatrixRead.data;
+  const clientOptions = clientOptionsRead.data;
   const paginationFilters = {
     q: recorderMatrix.filters.query,
     client: recorderMatrix.filters.client,
@@ -92,6 +103,7 @@ export default async function ControlPlaneRecordersPage({
   };
   const previousHref = queryString({ ...paginationFilters, page: Math.max(recorderMatrix.page - 1, 1) });
   const nextHref = queryString({ ...paginationFilters, page: Math.min(recorderMatrix.page + 1, recorderMatrix.pageCount) });
+  const refreshHref = queryString({ ...paginationFilters, page: recorderMatrix.page, refresh: 1 });
 
   return (
     <div className="space-y-5 pb-12">
@@ -104,11 +116,17 @@ export default async function ControlPlaneRecordersPage({
       <ControlPlaneStatusStrip
         items={[
           { label: "Clients", value: recorderMatrix.summary.totalClients, detail: "in matrix" },
+          { label: "Available", value: recorderMatrix.summary.available, detail: "configured", status: recorderMatrix.summary.available > 0 ? "available" : "unknown" },
           { label: "Ready", value: recorderMatrix.summary.ready, detail: "passing", status: "ready" },
           { label: "Needs setup", value: recorderMatrix.summary.needsSetup, detail: "gaps", status: recorderMatrix.summary.needsSetup > 0 ? "needs_setup" : "ok" },
-          { label: "Disabled", value: recorderMatrix.summary.disabled, detail: "off", status: recorderMatrix.summary.disabled > 0 ? "disabled" : "ok" },
           { label: "Connector", value: recorderMatrix.summary.requiresConnector, detail: "required", status: recorderMatrix.summary.requiresConnector > 0 ? "requires_connector" : "ok" },
         ]}
+      />
+
+      <ControlPlaneCacheMeta
+        cachedAt={recorderMatrixRead.cachedAt}
+        cacheStatus={recorderMatrixRead.cacheStatus}
+        refreshAction={<Link href={refreshHref} className={controlPlaneButtonClass}>Refresh live data</Link>}
       />
 
       <div className="bg-bg-alt border border-line rounded-xl p-5 shadow-sm space-y-4">
@@ -138,8 +156,10 @@ export default async function ControlPlaneRecordersPage({
               className={controlPlaneInputClass}
             >
               <option value="">Any status</option>
+              <option value="available">Available</option>
               <option value="ready">Ready</option>
               <option value="needs_setup">Needs setup</option>
+              <option value="not_configured">Not configured</option>
               <option value="disabled">Disabled</option>
               <option value="requires_connector">Requires connector</option>
               <option value="unavailable">Unavailable</option>
@@ -158,7 +178,7 @@ export default async function ControlPlaneRecordersPage({
             <thead>
               <tr className="border-b border-line text-muted text-left font-medium">
                 <th className="p-3">Client</th>
-                <th className="p-3">Readiness</th>
+                <th className="p-3">Availability</th>
                 <th className="p-3">Entitlement</th>
                 <th className="p-3">Provider</th>
                 <th className="p-3">Monthly Usage</th>
@@ -181,14 +201,29 @@ export default async function ControlPlaneRecordersPage({
                   </td>
                   <td className="p-3 min-w-[180px]">
                     <div className="flex items-center gap-2">
-                      <span className={cn("w-1.5 h-1.5 rounded-full shrink-0", statusDot(row.status))} />
-                      <span className={cn("px-2 py-0.5 rounded-full text-[10px] font-semibold border capitalize", statusTone(row.status))}>
-                        {label(row.status)}
+                      <span className={cn("w-1.5 h-1.5 rounded-full shrink-0", statusDot(row.availability.status))} />
+                      <span className={cn("px-2 py-0.5 rounded-full text-[10px] font-semibold border capitalize", statusTone(row.availability.status))}>
+                        {label(row.availability.status)}
                       </span>
                     </div>
                     <span className="text-[9px] text-muted block mt-1 truncate">
+                      Readiness: {label(row.status)}
+                    </span>
+                    <span className="text-[9px] text-muted block mt-1 truncate">
                       {row.readiness.detail}
                     </span>
+                    {row.readiness.failedChecks.length > 0 && (
+                      <details className="mt-1 text-[9px] text-muted">
+                        <summary className="cursor-pointer text-amber-300">View checks</summary>
+                        <div className="mt-1 space-y-1 rounded-md border border-line bg-bg p-2">
+                          {row.readiness.failedChecks.map((check) => (
+                            <p key={check.key} className="whitespace-pre-wrap">
+                              <strong className="text-text">{check.label}:</strong> {check.detail}
+                            </p>
+                          ))}
+                        </div>
+                      </details>
+                    )}
                   </td>
                   <td className="p-3">
                     <span className={cn("font-semibold uppercase text-[10px] block", row.entitlementEnabled ? "text-emerald-400" : "text-muted")}>

@@ -131,11 +131,13 @@ const { prismaMock, encryptSecretMock, decryptSecretMock, memberMocks } = vi.hoi
       upsert: vi.fn(),
     },
     workspaceMeetingRecorderConfig: {
+      findMany: vi.fn(),
       findUnique: vi.fn(),
       upsert: vi.fn(),
       update: vi.fn(),
     },
     workspaceRecorderCalendarSource: {
+      findMany: vi.fn(),
       findUnique: vi.fn(),
       findFirst: vi.fn(),
       upsert: vi.fn(),
@@ -143,6 +145,7 @@ const { prismaMock, encryptSecretMock, decryptSecretMock, memberMocks } = vi.hoi
     },
     meetingRecorderSmokeRun: {
       create: vi.fn(),
+      findMany: vi.fn(),
       findFirst: vi.fn(),
       update: vi.fn(),
     },
@@ -152,6 +155,7 @@ const { prismaMock, encryptSecretMock, decryptSecretMock, memberMocks } = vi.hoi
       create: vi.fn(),
       findFirst: vi.fn(),
       findMany: vi.fn(),
+      groupBy: vi.fn(),
       update: vi.fn(),
     },
     meeting: {
@@ -516,11 +520,15 @@ describe("control plane domain", () => {
     }
     prismaMock.clientMigrationIdMap.upsert.mockResolvedValue({ id: "map-1" });
     prismaMock.workspaceFeatureFlag.findMany.mockResolvedValue([]);
+    prismaMock.workspaceMeetingRecorderConfig.findMany.mockResolvedValue([]);
     prismaMock.workspaceMeetingRecorderConfig.findUnique.mockResolvedValue(null);
+    prismaMock.workspaceRecorderCalendarSource.findMany.mockResolvedValue([]);
     prismaMock.workspaceRecorderCalendarSource.findUnique.mockResolvedValue(null);
+    prismaMock.meetingRecorderSmokeRun.findMany.mockResolvedValue([]);
     prismaMock.meetingRecorderSmokeRun.findFirst.mockResolvedValue(null);
     prismaMock.meetingRecording.aggregate.mockResolvedValue({ _sum: { durationSeconds: 0 } });
     prismaMock.meetingRecording.count.mockResolvedValue(0);
+    prismaMock.meetingRecording.groupBy.mockResolvedValue([]);
     memberMocks.sendMemberSetupEmail.mockResolvedValue({ status: "sent" });
     vi.stubEnv("RAILWAY_API_TOKEN", "test-railway-token");
   });
@@ -1492,6 +1500,7 @@ describe("control plane domain", () => {
   it("builds client switcher options and wide matrix rows without impersonation state", async () => {
     const { getControlPlaneClientOptions, listControlPlaneMatrix } = await import("./control-plane");
     const observedAt = new Date("2026-06-01T10:00:00.000Z");
+    vi.stubEnv("MEETING_RECORDER_PUBLIC_BASE_URL", "https://recorder.test");
     vi.stubEnv("RECALL_API_KEY", "recall-token");
     vi.stubEnv("RECALL_WEBHOOK_SECRET", "recall-secret");
     prismaMock.customerAccount.findMany.mockResolvedValue([
@@ -1594,27 +1603,33 @@ describe("control plane domain", () => {
         updatedAt: observedAt,
       },
     ] as any);
-    prismaMock.workspaceFeatureFlag.findUnique.mockResolvedValue({ enabled: true });
-    prismaMock.workspaceMeetingRecorderConfig.findUnique.mockResolvedValue({
+    prismaMock.workspaceFeatureFlag.findMany.mockResolvedValue([{ workspaceId: "ws-1", enabled: true }]);
+    prismaMock.workspaceMeetingRecorderConfig.findMany.mockResolvedValue([{
+      workspaceId: "ws-1",
       enabled: true,
       defaultProvider: "RECALL_AI",
       fallbackProvider: null,
       monthlyMinuteCap: 6000,
-    });
-    prismaMock.workspaceRecorderCalendarSource.findUnique.mockResolvedValue({
+      updatedAt: observedAt,
+    }]);
+    prismaMock.workspaceRecorderCalendarSource.findMany.mockResolvedValue([{
+      workspaceId: "ws-1",
       providerAccountId: "calendar-1",
       providerAccountEmail: "calendar@acme.test",
       status: "ACTIVE",
       lastSyncAt: new Date("2026-06-01T09:00:00.000Z"),
       lastSyncError: null,
-    });
-    prismaMock.meetingRecorderSmokeRun.findFirst.mockResolvedValue({
+      updatedAt: observedAt,
+    }]);
+    prismaMock.meetingRecorderSmokeRun.findMany.mockResolvedValue([{
+      workspaceId: "ws-1",
       status: "COMPLETED",
       createdAt: new Date("2026-06-01T09:05:00.000Z"),
-    });
-    prismaMock.workflowJob.count.mockResolvedValue(0);
-    prismaMock.meetingRecording.aggregate.mockResolvedValue({ _sum: { durationSeconds: 3600 } });
-    prismaMock.meetingRecording.count.mockResolvedValue(2);
+    }]);
+    prismaMock.workflowJob.findMany.mockResolvedValue([]);
+    prismaMock.meetingRecording.groupBy
+      .mockResolvedValueOnce([{ workspaceId: "ws-1", _sum: { durationSeconds: 3600 } }])
+      .mockResolvedValueOnce([{ workspaceId: "ws-1", _count: { _all: 2 } }]);
 
     const options = await getControlPlaneClientOptions(operatorActor);
     const matrix = await listControlPlaneMatrix(operatorActor, { pageSize: 25 });
@@ -1623,17 +1638,24 @@ describe("control plane domain", () => {
     expect(options.find((option) => option.id === "future-co")).toBeUndefined();
     expect(matrix.items).toHaveLength(3);
     expect(matrix.items.find((row) => row.id === "inst-1")).toMatchObject({
-      recorder: { status: "ready", provider: "RECALL_AI", monthlyUsageMinutes: 60, failureCount: 2 },
+      recorder: {
+        status: "ready",
+        availability: { status: "available" },
+        provider: "RECALL_AI",
+        monthlyUsageMinutes: 60,
+        failureCount: 2,
+      },
       agents: { status: "active", runCount: 5 },
       users: { status: "managed", count: 7 },
       support: { mode: "managed" },
     });
     expect(matrix.items.find((row) => row.id === "remote-1")).toMatchObject({
       release: { status: "drift" },
-      recorder: { status: "requires_connector" },
+      recorder: { status: "requires_connector", availability: { status: "requires_connector" } },
       agents: { status: "requires_connector" },
       users: { status: "requires_connector" },
     });
+    expect(matrix.items.find((row) => row.id === "remote-1")?.issues.map((issue) => issue.source)).toContain("release");
   });
 
   it("marks disabled recorders when entitlement is off", async () => {
@@ -1674,13 +1696,15 @@ describe("control plane domain", () => {
       },
     ] as any);
     prismaMock.customerDeployment.findMany.mockResolvedValue([]);
-    prismaMock.workspaceFeatureFlag.findUnique.mockResolvedValue({ enabled: false });
-    prismaMock.workspaceMeetingRecorderConfig.findUnique.mockResolvedValue({
+    prismaMock.workspaceFeatureFlag.findMany.mockResolvedValue([{ workspaceId: "ws-1", enabled: false }]);
+    prismaMock.workspaceMeetingRecorderConfig.findMany.mockResolvedValue([{
+      workspaceId: "ws-1",
       enabled: false,
       defaultProvider: "RECALL_AI",
       fallbackProvider: null,
       monthlyMinuteCap: 3000,
-    });
+      updatedAt: now,
+    }]);
 
     const matrix = await listControlPlaneRecorderMatrix(operatorActor, { status: "disabled" });
 
@@ -1688,6 +1712,7 @@ describe("control plane domain", () => {
     expect(matrix.items[0]).toMatchObject({
       deploymentId: "inst-1",
       status: "disabled",
+      availability: { status: "disabled" },
       entitlementEnabled: false,
       configured: true,
       monthlyMinuteCap: 3000,
@@ -1753,15 +1778,17 @@ describe("control plane domain", () => {
         updatedAt: now,
       },
     ] as any);
-    prismaMock.workspaceFeatureFlag.findUnique.mockResolvedValue({ enabled: true });
-    prismaMock.workspaceMeetingRecorderConfig.findUnique.mockResolvedValue({
+    prismaMock.workspaceFeatureFlag.findMany.mockResolvedValue([{ workspaceId: "ws-1", enabled: true }]);
+    prismaMock.workspaceMeetingRecorderConfig.findMany.mockResolvedValue([{
+      workspaceId: "ws-1",
       enabled: true,
       defaultProvider: "RECALL_AI",
       fallbackProvider: null,
       monthlyMinuteCap: 6000,
-    });
-    prismaMock.workspaceRecorderCalendarSource.findUnique.mockResolvedValue(null);
-    prismaMock.meetingRecorderSmokeRun.findFirst.mockResolvedValue(null);
+      updatedAt: now,
+    }]);
+    prismaMock.workspaceRecorderCalendarSource.findMany.mockResolvedValue([]);
+    prismaMock.meetingRecorderSmokeRun.findMany.mockResolvedValue([]);
 
     const filtered = await listControlPlaneRecorderMatrix(operatorActor, { client: "inst-1", status: "needs_setup" });
     const unfiltered = await listControlPlaneRecorderMatrix(operatorActor, {});
@@ -1770,6 +1797,7 @@ describe("control plane domain", () => {
     expect(filtered.items[0]).toMatchObject({
       deploymentId: "inst-1",
       status: "needs_setup",
+      availability: { status: "available" },
       readiness: {
         ready: false,
       },

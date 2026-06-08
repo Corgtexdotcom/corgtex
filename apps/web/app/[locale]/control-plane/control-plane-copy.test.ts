@@ -80,7 +80,7 @@ describe("control-plane copy", () => {
     const tabs = readSource("./deployments/[deploymentId]/_components/detail-client-tabs.tsx");
     const switcher = readSource("./_components/client-context-switcher.tsx");
 
-    expect(detailPage).toContain("searchParams?: Promise<{ tab?: string }>");
+    expect(detailPage).toContain("searchParams?: Promise<{ tab?: string; refresh?: string }>");
     expect(detailPage).toContain("initialTab={activeTab}");
     expect(tabs).toContain("new URLSearchParams(searchParams?.toString() ?? \"\")");
     expect(tabs).toContain("router.replace(`${pathname}?${params.toString()}`, { scroll: false })");
