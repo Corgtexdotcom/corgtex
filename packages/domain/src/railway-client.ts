@@ -73,6 +73,38 @@ export type RailwayReleaseUpgradeResult = {
   workerDeploymentId?: string | null;
 };
 
+export type RailwayAppRuntimeProvisioningInput = {
+  projectName: string;
+  environmentName: string;
+  region: string;
+  appImage?: string | null;
+  appSource?: RailwayRuntimeServiceSource | null;
+  variables: Record<string, string>;
+  customDomain?: string | null;
+};
+
+export type RailwayAppRuntimeProvisioningResult = {
+  projectId: string;
+  environmentId: string;
+  appServiceId: string;
+  postgresServiceId: string;
+  redisServiceId: string;
+  appDomain?: string | null;
+};
+
+export type RailwayAppRuntimeUpgradeInput = {
+  projectId: string;
+  environmentId: string;
+  appServiceId: string;
+  appImage?: string | null;
+  appSource?: RailwayRuntimeServiceSource | null;
+  variables?: Record<string, string>;
+};
+
+export type RailwayAppRuntimeUpgradeResult = {
+  appDeploymentId?: string | null;
+};
+
 export function createRailwayClient(options: RailwayClientOptions): RailwayClient {
   const token = options.token.trim();
   if (!token) {
@@ -533,6 +565,246 @@ export async function provisionRailwayCustomerStack(
   };
 }
 
+export async function provisionRailwayAppRuntime(
+  client: RailwayClient,
+  input: RailwayAppRuntimeProvisioningInput,
+): Promise<RailwayAppRuntimeProvisioningResult> {
+  const appSpec = requireRuntimeServiceSpec("App service", input.appImage, input.appSource);
+
+  const project = await client.graphql<{
+    projectCreate: { id: string };
+  }>(
+    `mutation CreateProject($input: ProjectCreateInput!) {
+      projectCreate(input: $input) { id }
+    }`,
+    {
+      input: {
+        name: input.projectName,
+        defaultEnvironmentName: input.environmentName,
+      },
+    },
+  );
+
+  const projectId = project.projectCreate.id;
+  const environmentId = await resolveRailwayEnvironmentId(client, projectId, input.environmentName);
+
+  const services = await client.graphql<{
+    app: { id: string };
+    postgres: { id: string };
+    redis: { id: string };
+  }>(
+    `mutation CreateAppRuntimeServices(
+      $projectId: String!
+      $environmentId: String!
+      $appSource: ServiceSourceInput!
+      $appBranch: String
+    ) {
+      app: serviceCreate(input: {
+        projectId: $projectId
+        environmentId: $environmentId
+        name: "app"
+        source: $appSource
+        branch: $appBranch
+      }) { id }
+      postgres: serviceCreate(input: {
+        projectId: $projectId
+        environmentId: $environmentId
+        name: "Postgres"
+        source: { image: "ghcr.io/railwayapp-templates/postgres-ssl:17" }
+      }) { id }
+      redis: serviceCreate(input: {
+        projectId: $projectId
+        environmentId: $environmentId
+        name: "Redis"
+        source: { image: "bitnami/redis:7.2.5" }
+      }) { id }
+    }`,
+    {
+      projectId,
+      environmentId,
+      appSource: appSpec.source,
+      appBranch: appSpec.branch,
+    },
+  );
+
+  await client.graphql<unknown>(
+    `mutation ConfigureAppRuntimeServices(
+      $environmentId: String!
+      $appServiceId: String!
+      $postgresServiceId: String!
+      $redisServiceId: String!
+      $appInput: ServiceInstanceUpdateInput!
+      $postgresInput: ServiceInstanceUpdateInput!
+      $redisInput: ServiceInstanceUpdateInput!
+    ) {
+      app: serviceInstanceUpdate(
+        serviceId: $appServiceId
+        environmentId: $environmentId
+        input: $appInput
+      )
+      postgres: serviceInstanceUpdate(
+        serviceId: $postgresServiceId
+        environmentId: $environmentId
+        input: $postgresInput
+      )
+      redis: serviceInstanceUpdate(
+        serviceId: $redisServiceId
+        environmentId: $environmentId
+        input: $redisInput
+      )
+    }`,
+    {
+      environmentId,
+      appServiceId: services.app.id,
+      postgresServiceId: services.postgres.id,
+      redisServiceId: services.redis.id,
+      appInput: serviceInstanceSettings(appSpec, input.region),
+      postgresInput: { region: input.region },
+      redisInput: { region: input.region },
+    },
+  );
+
+  await client.graphql<unknown>(
+    `mutation CreateAppRuntimeBackingVolumes(
+      $projectId: String!
+      $environmentId: String!
+      $postgresServiceId: String!
+      $redisServiceId: String!
+      $postgresMountPath: String!
+      $redisMountPath: String!
+    ) {
+      postgres: volumeCreate(input: {
+        projectId: $projectId
+        environmentId: $environmentId
+        serviceId: $postgresServiceId
+        name: "postgres-data"
+        mountPath: $postgresMountPath
+      }) { id }
+      redis: volumeCreate(input: {
+        projectId: $projectId
+        environmentId: $environmentId
+        serviceId: $redisServiceId
+        name: "redis-data"
+        mountPath: $redisMountPath
+      }) { id }
+    }`,
+    {
+      projectId,
+      environmentId,
+      postgresServiceId: services.postgres.id,
+      redisServiceId: services.redis.id,
+      postgresMountPath: POSTGRES_VOLUME_MOUNT_PATH,
+      redisMountPath: REDIS_VOLUME_MOUNT_PATH,
+    },
+  );
+
+  await client.graphql<unknown>(
+    `mutation UpsertAppRuntimeBackingVariables(
+      $projectId: String!
+      $environmentId: String!
+      $postgresServiceId: String!
+      $redisServiceId: String!
+      $postgresVariables: EnvironmentVariables!
+      $redisVariables: EnvironmentVariables!
+    ) {
+      postgres: variableCollectionUpsert(input: {
+        projectId: $projectId
+        environmentId: $environmentId
+        serviceId: $postgresServiceId
+        variables: $postgresVariables
+        replace: false
+      })
+      redis: variableCollectionUpsert(input: {
+        projectId: $projectId
+        environmentId: $environmentId
+        serviceId: $redisServiceId
+        variables: $redisVariables
+        replace: false
+      })
+    }`,
+    {
+      projectId,
+      environmentId,
+      postgresServiceId: services.postgres.id,
+      redisServiceId: services.redis.id,
+      postgresVariables: postgresServiceVariables(),
+      redisVariables: redisServiceVariables(),
+    },
+  );
+
+  await client.graphql<unknown>(
+    `mutation UpsertAppRuntimeVariables(
+      $projectId: String!
+      $environmentId: String!
+      $appServiceId: String!
+      $variables: EnvironmentVariables!
+    ) {
+      app: variableCollectionUpsert(input: {
+        projectId: $projectId
+        environmentId: $environmentId
+        serviceId: $appServiceId
+        variables: $variables
+        replace: false
+      })
+    }`,
+    {
+      projectId,
+      environmentId,
+      appServiceId: services.app.id,
+      variables: runtimeVariablesWithBackingServices(input.variables),
+    },
+  );
+
+  await client.graphql<unknown>(
+    `mutation DeployAppRuntimeServices(
+      $appServiceId: String!
+      $postgresServiceId: String!
+      $redisServiceId: String!
+      $environmentId: String!
+      $appCommitSha: String
+    ) {
+      app: serviceInstanceDeployV2(serviceId: $appServiceId, environmentId: $environmentId, commitSha: $appCommitSha)
+      postgres: serviceInstanceDeployV2(serviceId: $postgresServiceId, environmentId: $environmentId)
+      redis: serviceInstanceDeployV2(serviceId: $redisServiceId, environmentId: $environmentId)
+    }`,
+    {
+      appServiceId: services.app.id,
+      postgresServiceId: services.postgres.id,
+      redisServiceId: services.redis.id,
+      environmentId,
+      appCommitSha: appSpec.commitSha,
+    },
+  );
+
+  let appDomain: string | null = null;
+  if (input.customDomain) {
+    const domain = await client.graphql<{ customDomainCreate: { domain: string } }>(
+      `mutation CreateCustomDomain($environmentId: String!, $serviceId: String!, $domain: String!) {
+        customDomainCreate(input: {
+          environmentId: $environmentId
+          serviceId: $serviceId
+          domain: $domain
+        }) { domain }
+      }`,
+      {
+        environmentId,
+        serviceId: services.app.id,
+        domain: input.customDomain,
+      },
+    );
+    appDomain = domain.customDomainCreate.domain;
+  }
+
+  return {
+    projectId,
+    environmentId,
+    appServiceId: services.app.id,
+    postgresServiceId: services.postgres.id,
+    redisServiceId: services.redis.id,
+    appDomain,
+  };
+}
+
 export async function upgradeRailwayCustomerRelease(
   client: RailwayClient,
   input: RailwayReleaseUpgradeInput,
@@ -628,5 +900,75 @@ export async function upgradeRailwayCustomerRelease(
   return {
     webDeploymentId: deployments.web,
     workerDeploymentId: deployments.worker,
+  };
+}
+
+export async function upgradeRailwayAppRuntimeRelease(
+  client: RailwayClient,
+  input: RailwayAppRuntimeUpgradeInput,
+): Promise<RailwayAppRuntimeUpgradeResult> {
+  const appSpec = requireRuntimeServiceSpec("App service", input.appImage, input.appSource);
+
+  await client.graphql<unknown>(
+    `mutation UpdateAppRuntimeSource(
+      $environmentId: String!
+      $appServiceId: String!
+      $appInput: ServiceInstanceUpdateInput!
+    ) {
+      app: serviceInstanceUpdate(
+        serviceId: $appServiceId
+        environmentId: $environmentId
+        input: $appInput
+      )
+    }`,
+    {
+      environmentId: input.environmentId,
+      appServiceId: input.appServiceId,
+      appInput: serviceInstanceUpdateInput(appSpec),
+    },
+  );
+
+  if (input.variables && Object.keys(input.variables).length > 0) {
+    await client.graphql<unknown>(
+      `mutation UpsertAppRuntimeUpgradeVariables(
+        $projectId: String!
+        $environmentId: String!
+        $appServiceId: String!
+        $variables: EnvironmentVariables!
+      ) {
+        app: variableCollectionUpsert(input: {
+          projectId: $projectId
+          environmentId: $environmentId
+          serviceId: $appServiceId
+          variables: $variables
+          replace: false
+        })
+      }`,
+      {
+        projectId: input.projectId,
+        environmentId: input.environmentId,
+        appServiceId: input.appServiceId,
+        variables: input.variables,
+      },
+    );
+  }
+
+  const deployment = await client.graphql<{ app: string | null }>(
+    `mutation DeployUpdatedAppRuntime(
+      $appServiceId: String!
+      $environmentId: String!
+      $appCommitSha: String
+    ) {
+      app: serviceInstanceDeployV2(serviceId: $appServiceId, environmentId: $environmentId, commitSha: $appCommitSha)
+    }`,
+    {
+      appServiceId: input.appServiceId,
+      environmentId: input.environmentId,
+      appCommitSha: appSpec.commitSha,
+    },
+  );
+
+  return {
+    appDeploymentId: deployment.app,
   };
 }

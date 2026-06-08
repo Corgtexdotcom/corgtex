@@ -19,6 +19,9 @@ const { prismaMock, randomOpaqueTokenMock, sha256Mock, toInputJsonMock } = vi.ho
       update: vi.fn(),
     },
     appRelease: {
+      create: vi.fn(),
+      findFirst: vi.fn(),
+      update: vi.fn(),
       updateMany: vi.fn(),
     },
     appInstallation: {
@@ -237,6 +240,9 @@ describe("enterprise app platform", () => {
     prismaMock.appRuntime.create.mockResolvedValue(runtimeFixture());
     prismaMock.appRuntime.findUnique.mockResolvedValue(runtimeWithRelationsFixture());
     prismaMock.appRuntime.update.mockResolvedValue(runtimeFixture());
+    prismaMock.appRelease.create.mockResolvedValue(releaseFixture());
+    prismaMock.appRelease.findFirst.mockResolvedValue(null);
+    prismaMock.appRelease.update.mockResolvedValue(releaseFixture());
     prismaMock.appRelease.updateMany.mockResolvedValue({ count: 1 });
     prismaMock.appInstallation.update.mockResolvedValue(installationFixture());
     prismaMock.appInstallation.findUnique.mockResolvedValue(null);
@@ -713,6 +719,458 @@ describe("enterprise app platform", () => {
         count: 2,
         reason: "Runtime credentials rotated.",
       }),
+    }));
+  });
+
+  it("keeps runtime provisioning, preflight, and release mutations admin-only", async () => {
+    const {
+      createEnterpriseAppRelease,
+      preflightEnterpriseAppRuntime,
+      promoteEnterpriseAppRelease,
+      provisionEnterpriseAppRuntime,
+      rollbackEnterpriseAppRelease,
+      upgradeEnterpriseAppRuntimeRelease,
+    } = await import("./enterprise-apps");
+    requireWorkspaceMembership.mockResolvedValue({
+      id: "member-1",
+      workspaceId: "workspace-1",
+      userId: "user-1",
+      role: "CONTRIBUTOR",
+      isActive: true,
+    });
+    const railwayClient = { graphql: vi.fn() } as any;
+
+    await expect(provisionEnterpriseAppRuntime(actor, {
+      workspaceId: "workspace-1",
+      appInstallationId: "installation-1",
+      runtimeMode: "SELF_MANAGED_EXTERNAL",
+      runtimeBaseUrl: "https://practice-ledger.test",
+    }, railwayClient)).rejects.toMatchObject({ status: 403, code: "FORBIDDEN" });
+    await expect(preflightEnterpriseAppRuntime(actor, {
+      workspaceId: "workspace-1",
+      appInstallationId: "installation-1",
+    })).rejects.toMatchObject({ status: 403, code: "FORBIDDEN" });
+    await expect(createEnterpriseAppRelease(actor, {
+      workspaceId: "workspace-1",
+      appInstallationId: "installation-1",
+      version: "0.2.0",
+    })).rejects.toMatchObject({ status: 403, code: "FORBIDDEN" });
+    await expect(promoteEnterpriseAppRelease(actor, {
+      workspaceId: "workspace-1",
+      appInstallationId: "installation-1",
+      releaseId: "release-1",
+    })).rejects.toMatchObject({ status: 403, code: "FORBIDDEN" });
+    await expect(rollbackEnterpriseAppRelease(actor, {
+      workspaceId: "workspace-1",
+      appInstallationId: "installation-1",
+      releaseId: "release-1",
+    })).rejects.toMatchObject({ status: 403, code: "FORBIDDEN" });
+    await expect(upgradeEnterpriseAppRuntimeRelease(actor, {
+      workspaceId: "workspace-1",
+      appInstallationId: "installation-1",
+      releaseId: "release-1",
+      appImage: "ghcr.io/corgtexdotcom/practice-ledger:0.2.0",
+    }, railwayClient)).rejects.toMatchObject({ status: 403, code: "FORBIDDEN" });
+    expect(railwayClient.graphql).not.toHaveBeenCalled();
+  });
+
+  it("provisions a managed Railway app runtime without storing raw secrets", async () => {
+    const { provisionEnterpriseAppRuntime } = await import("./enterprise-apps");
+    const railwayClient = {
+      graphql: vi.fn()
+        .mockResolvedValueOnce({ projectCreate: { id: "project-1" } })
+        .mockResolvedValueOnce({ environments: { edges: [{ node: { id: "env-1", name: "production" } }] } })
+        .mockResolvedValueOnce({
+          app: { id: "app-1" },
+          postgres: { id: "postgres-1" },
+          redis: { id: "redis-1" },
+        })
+        .mockResolvedValueOnce({})
+        .mockResolvedValueOnce({})
+        .mockResolvedValueOnce({})
+        .mockResolvedValueOnce({})
+        .mockResolvedValueOnce({})
+        .mockResolvedValueOnce({ customDomainCreate: { domain: "ledger.acme.test" } }),
+    } as any;
+
+    await provisionEnterpriseAppRuntime(actor, {
+      workspaceId: "workspace-1",
+      appInstallationId: "installation-1",
+      runtimeMode: "ISOLATED_SINGLE_TENANT",
+      runtimeBaseUrl: "https://ledger.acme.test",
+      runtimeMcpUrl: "https://ledger.acme.test/api/mcp",
+      region: "us-west2",
+      customDomain: "ledger.acme.test",
+      secretsRef: "railway://project-1/app/env/practice-ledger",
+      releaseVersion: "0.2.0",
+      releaseImageTag: "ghcr.io/corgtexdotcom/practice-ledger:0.2.0",
+      appImage: "ghcr.io/corgtexdotcom/practice-ledger:0.2.0",
+      variables: {
+        PRACTICE_LEDGER_API_KEY: "raw-secret-value",
+      },
+    }, railwayClient);
+
+    expect(railwayClient.graphql).toHaveBeenCalledTimes(9);
+    expect(prismaMock.appRuntime.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "runtime-1" },
+      data: expect.objectContaining({
+        railwayProjectId: "project-1",
+        railwayEnvironmentId: "env-1",
+        railwayServiceId: "app-1",
+        secretsRef: "railway://project-1/app/env/practice-ledger",
+        metadataJson: expect.objectContaining({
+          railwayPostgresServiceId: "postgres-1",
+          railwayRedisServiceId: "redis-1",
+        }),
+      }),
+    }));
+    const dbWrites = JSON.stringify(prismaMock.appRuntime.update.mock.calls);
+    expect(dbWrites).not.toContain("raw-secret-value");
+  });
+
+  it("registers self-managed external runtimes without Railway calls", async () => {
+    const { provisionEnterpriseAppRuntime } = await import("./enterprise-apps");
+    const railwayClient = { graphql: vi.fn() } as any;
+
+    await provisionEnterpriseAppRuntime(actor, {
+      workspaceId: "workspace-1",
+      appInstallationId: "installation-1",
+      runtimeMode: "SELF_MANAGED_EXTERNAL",
+      runtimeBaseUrl: "https://customer-ledger.example",
+      runtimeMcpUrl: "https://customer-ledger.example/api/mcp",
+      secretsRef: "customer-vault://practice-ledger",
+    }, railwayClient);
+
+    expect(railwayClient.graphql).not.toHaveBeenCalled();
+    expect(prismaMock.appRuntime.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        mode: "SELF_MANAGED_EXTERNAL",
+        status: "PROVISIONING",
+        baseUrl: "https://customer-ledger.example",
+        secretsRef: "customer-vault://practice-ledger",
+      }),
+    }));
+  });
+
+  it("rejects retries for partial Railway app runtime stacks", async () => {
+    const { provisionEnterpriseAppRuntime } = await import("./enterprise-apps");
+    prismaMock.appInstallation.findFirst.mockResolvedValueOnce(installationFixture({
+      runtime: runtimeFixture({
+        railwayProjectId: "project-1",
+        railwayEnvironmentId: null,
+        railwayServiceId: null,
+        metadataJson: null,
+      }),
+    }));
+    const railwayClient = { graphql: vi.fn() } as any;
+
+    await expect(provisionEnterpriseAppRuntime(actor, {
+      workspaceId: "workspace-1",
+      appInstallationId: "installation-1",
+      runtimeMode: "SHARED_MULTI_TENANT",
+      runtimeBaseUrl: "https://practice-ledger.test",
+      region: "us-west2",
+      secretsRef: "railway://project-1/app/env/practice-ledger",
+      appImage: "ghcr.io/corgtexdotcom/practice-ledger:0.2.0",
+    }, railwayClient)).rejects.toMatchObject({
+      status: 409,
+      code: "RAILWAY_APP_RUNTIME_RECONCILIATION_REQUIRED",
+    });
+    expect(railwayClient.graphql).not.toHaveBeenCalled();
+  });
+
+  it("preflights manifest compatibility before activating runtime", async () => {
+    const { preflightEnterpriseAppRuntime } = await import("./enterprise-apps");
+    prismaMock.appInstallation.findFirst.mockResolvedValueOnce(installationFixture({
+      appDefinition: definitionFixture({
+        manifestUrl: null,
+        requestedScopes: ["workspace:read", "finance:read"],
+        manifestJson: {
+          appKey: "practice-ledger",
+          version: "0.2.0",
+          supportedSurfaces: ["FINANCE"],
+          requestedScopes: ["workspace:read"],
+          auth: { mode: "corgtex_launch_token" },
+          healthUrl: "https://practice-ledger.test/api/health",
+        },
+      }),
+    }));
+
+    await expect(preflightEnterpriseAppRuntime(actor, {
+      workspaceId: "workspace-1",
+      appInstallationId: "installation-1",
+    })).rejects.toMatchObject({
+      code: "APP_MANIFEST_INCOMPATIBLE",
+    });
+    expect(fetch).not.toHaveBeenCalledWith("https://practice-ledger.test/api/health", expect.anything());
+  });
+
+  it("creates releases scoped to the target runtime and validates manifest compatibility", async () => {
+    const { createEnterpriseAppRelease } = await import("./enterprise-apps");
+
+    await createEnterpriseAppRelease(actor, {
+      workspaceId: "workspace-1",
+      appInstallationId: "installation-1",
+      version: "0.2.0",
+      gitSha: "abc123",
+      imageTag: "ghcr.io/corgtexdotcom/practice-ledger:0.2.0",
+      manifestJson: {
+        appKey: "practice-ledger",
+        version: "0.2.0",
+        supportedSurfaces: ["FINANCE"],
+        requestedScopes: ["workspace:read", "brain:read", "finance:read", "finance:write"],
+        auth: { mode: "corgtex_launch_token" },
+        healthUrl: "https://practice-ledger.test/api/health",
+      },
+    });
+
+    expect(prismaMock.appRelease.findFirst).toHaveBeenCalledWith({
+      where: {
+        appDefinitionId: "definition-1",
+        runtimeId: "runtime-1",
+        version: "0.2.0",
+      },
+    });
+    expect(prismaMock.appRelease.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        appDefinitionId: "definition-1",
+        runtimeId: "runtime-1",
+        version: "0.2.0",
+        manifestVersion: "0.2.0",
+        status: "PREPARED",
+      }),
+    }));
+  });
+
+  it("preserves active release status when refreshing existing release metadata", async () => {
+    const { createEnterpriseAppRelease } = await import("./enterprise-apps");
+    prismaMock.appRelease.findFirst.mockResolvedValueOnce(releaseFixture({
+      id: "release-active",
+      version: "0.1.0",
+      status: "ACTIVE",
+    }));
+
+    await createEnterpriseAppRelease(actor, {
+      workspaceId: "workspace-1",
+      appInstallationId: "installation-1",
+      version: "0.1.0",
+      gitSha: "def456",
+      imageTag: "ghcr.io/corgtexdotcom/practice-ledger:0.1.0",
+    });
+
+    expect(prismaMock.appRelease.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "release-active" },
+      data: expect.objectContaining({
+        status: "ACTIVE",
+      }),
+    }));
+  });
+
+  it("promotes a prepared release and rolls back the prior active release metadata", async () => {
+    const { promoteEnterpriseAppRelease } = await import("./enterprise-apps");
+    prismaMock.appRelease.findFirst.mockResolvedValueOnce(releaseFixture({
+      id: "release-2",
+      version: "0.2.0",
+      status: "PREPARED",
+    }));
+
+    await promoteEnterpriseAppRelease(actor, {
+      workspaceId: "workspace-1",
+      appInstallationId: "installation-1",
+      releaseId: "release-2",
+      reason: "Promote after preflight.",
+    });
+
+    expect(prismaMock.appRelease.updateMany).toHaveBeenCalledWith({
+      where: {
+        appDefinitionId: "definition-1",
+        runtimeId: "runtime-1",
+        status: "ACTIVE",
+        id: { not: "release-2" },
+      },
+      data: expect.objectContaining({
+        status: "ROLLED_BACK",
+        metadataJson: expect.objectContaining({
+          rolledBackByReleaseId: "release-2",
+        }),
+      }),
+    });
+    expect(prismaMock.appRelease.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "release-2" },
+      data: expect.objectContaining({
+        status: "ACTIVE",
+        releasedAt: expect.any(Date),
+      }),
+    }));
+    expect(prismaMock.appInstallation.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "installation-1" },
+      data: expect.objectContaining({
+        releaseId: "release-2",
+        status: "INSTALLED",
+      }),
+    }));
+  });
+
+  it("rejects rollback activation of failed releases", async () => {
+    const { rollbackEnterpriseAppRelease } = await import("./enterprise-apps");
+    prismaMock.appRelease.findFirst.mockResolvedValueOnce(releaseFixture({
+      id: "release-failed",
+      version: "0.2.0",
+      status: "FAILED",
+    }));
+
+    await expect(rollbackEnterpriseAppRelease(actor, {
+      workspaceId: "workspace-1",
+      appInstallationId: "installation-1",
+      releaseId: "release-failed",
+    })).rejects.toMatchObject({
+      status: 400,
+      code: "APP_RELEASE_FAILED",
+    });
+    expect(prismaMock.appRelease.updateMany).not.toHaveBeenCalled();
+    expect(prismaMock.appRelease.update).not.toHaveBeenCalled();
+    expect(prismaMock.appInstallation.update).not.toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ releaseId: "release-failed" }),
+    }));
+  });
+
+  it("starts managed release upgrades and leaves promotion to a later preflight", async () => {
+    const { upgradeEnterpriseAppRuntimeRelease } = await import("./enterprise-apps");
+    prismaMock.appInstallation.findFirst.mockResolvedValueOnce(installationFixture({
+      runtime: runtimeFixture({
+        railwayProjectId: "project-1",
+        railwayEnvironmentId: "env-1",
+        railwayServiceId: "app-1",
+        metadataJson: {
+          railwayPostgresServiceId: "postgres-1",
+          railwayRedisServiceId: "redis-1",
+        },
+      }),
+    }));
+    prismaMock.appRelease.findFirst.mockResolvedValueOnce(releaseFixture({
+      id: "release-2",
+      version: "0.2.0",
+      imageTag: "ghcr.io/corgtexdotcom/practice-ledger:0.2.0",
+      status: "PREPARED",
+    }));
+    const railwayClient = {
+      graphql: vi.fn()
+        .mockResolvedValueOnce({})
+        .mockResolvedValueOnce({})
+        .mockResolvedValueOnce({ app: "deploy-app-1" }),
+    } as any;
+
+    await upgradeEnterpriseAppRuntimeRelease(actor, {
+      workspaceId: "workspace-1",
+      appInstallationId: "installation-1",
+      releaseId: "release-2",
+      appImage: "ghcr.io/corgtexdotcom/practice-ledger:0.2.0",
+    }, railwayClient);
+
+    expect(railwayClient.graphql).toHaveBeenCalledTimes(3);
+    expect(prismaMock.appRelease.update).toHaveBeenCalledWith({
+      where: { id: "release-2" },
+      data: expect.objectContaining({
+        status: "PREPARED",
+        metadataJson: expect.objectContaining({
+          lastUpgradeDeploymentId: "deploy-app-1",
+        }),
+      }),
+    });
+    expect(prismaMock.appInstallation.update).not.toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ releaseId: "release-2" }),
+    }));
+  });
+
+  it("marks failed app release upgrades without changing the active installation release", async () => {
+    const { upgradeEnterpriseAppRuntimeRelease } = await import("./enterprise-apps");
+    prismaMock.appInstallation.findFirst.mockResolvedValueOnce(installationFixture({
+      releaseId: "release-active",
+      runtime: runtimeFixture({
+        railwayProjectId: "project-1",
+        railwayEnvironmentId: "env-1",
+        railwayServiceId: "app-1",
+        metadataJson: {
+          railwayPostgresServiceId: "postgres-1",
+          railwayRedisServiceId: "redis-1",
+        },
+      }),
+    }));
+    prismaMock.appRelease.findFirst.mockResolvedValueOnce(releaseFixture({
+      id: "release-2",
+      version: "0.2.0",
+      status: "PREPARED",
+    }));
+    const railwayClient = {
+      graphql: vi.fn(async () => {
+        throw new Error("Railway unavailable");
+      }),
+    } as any;
+
+    await expect(upgradeEnterpriseAppRuntimeRelease(actor, {
+      workspaceId: "workspace-1",
+      appInstallationId: "installation-1",
+      releaseId: "release-2",
+      appImage: "ghcr.io/corgtexdotcom/practice-ledger:0.2.0",
+    }, railwayClient)).rejects.toThrow("Railway unavailable");
+
+    expect(prismaMock.appRelease.update).toHaveBeenCalledWith({
+      where: { id: "release-2" },
+      data: expect.objectContaining({
+        status: "FAILED",
+        metadataJson: expect.objectContaining({
+          lastUpgradeError: "Railway unavailable",
+        }),
+      }),
+    });
+    expect(prismaMock.appInstallation.update).not.toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ releaseId: "release-2" }),
+    }));
+  });
+
+  it("preserves active release status when an in-place app upgrade fails", async () => {
+    const { upgradeEnterpriseAppRuntimeRelease } = await import("./enterprise-apps");
+    prismaMock.appInstallation.findFirst.mockResolvedValueOnce(installationFixture({
+      releaseId: "release-active",
+      runtime: runtimeFixture({
+        railwayProjectId: "project-1",
+        railwayEnvironmentId: "env-1",
+        railwayServiceId: "app-1",
+        metadataJson: {
+          railwayPostgresServiceId: "postgres-1",
+          railwayRedisServiceId: "redis-1",
+        },
+      }),
+    }));
+    prismaMock.appRelease.findFirst.mockResolvedValueOnce(releaseFixture({
+      id: "release-active",
+      version: "0.1.0",
+      status: "ACTIVE",
+    }));
+    const railwayClient = {
+      graphql: vi.fn(async () => {
+        throw new Error("Railway unavailable");
+      }),
+    } as any;
+
+    await expect(upgradeEnterpriseAppRuntimeRelease(actor, {
+      workspaceId: "workspace-1",
+      appInstallationId: "installation-1",
+      releaseId: "release-active",
+      appImage: "ghcr.io/corgtexdotcom/practice-ledger:0.1.0",
+    }, railwayClient)).rejects.toThrow("Railway unavailable");
+
+    expect(prismaMock.appRelease.update).toHaveBeenCalledWith({
+      where: { id: "release-active" },
+      data: expect.objectContaining({
+        status: "ACTIVE",
+        metadataJson: expect.objectContaining({
+          lastUpgradeError: "Railway unavailable",
+        }),
+      }),
+    });
+    expect(prismaMock.appInstallation.update).not.toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ releaseId: "release-active" }),
     }));
   });
 
