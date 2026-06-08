@@ -1081,6 +1081,52 @@ describe("enterprise app platform", () => {
     }));
   });
 
+  it("preserves active release status when an in-place app upgrade fails", async () => {
+    const { upgradeEnterpriseAppRuntimeRelease } = await import("./enterprise-apps");
+    prismaMock.appInstallation.findFirst.mockResolvedValueOnce(installationFixture({
+      releaseId: "release-active",
+      runtime: runtimeFixture({
+        railwayProjectId: "project-1",
+        railwayEnvironmentId: "env-1",
+        railwayServiceId: "app-1",
+        metadataJson: {
+          railwayPostgresServiceId: "postgres-1",
+          railwayRedisServiceId: "redis-1",
+        },
+      }),
+    }));
+    prismaMock.appRelease.findFirst.mockResolvedValueOnce(releaseFixture({
+      id: "release-active",
+      version: "0.1.0",
+      status: "ACTIVE",
+    }));
+    const railwayClient = {
+      graphql: vi.fn(async () => {
+        throw new Error("Railway unavailable");
+      }),
+    } as any;
+
+    await expect(upgradeEnterpriseAppRuntimeRelease(actor, {
+      workspaceId: "workspace-1",
+      appInstallationId: "installation-1",
+      releaseId: "release-active",
+      appImage: "ghcr.io/corgtexdotcom/practice-ledger:0.1.0",
+    }, railwayClient)).rejects.toThrow("Railway unavailable");
+
+    expect(prismaMock.appRelease.update).toHaveBeenCalledWith({
+      where: { id: "release-active" },
+      data: expect.objectContaining({
+        status: "ACTIVE",
+        metadataJson: expect.objectContaining({
+          lastUpgradeError: "Railway unavailable",
+        }),
+      }),
+    });
+    expect(prismaMock.appInstallation.update).not.toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ releaseId: "release-active" }),
+    }));
+  });
+
   it("issues launch sessions with workspace, user, role, scopes, expiry, and audience", async () => {
     const { issueEnterpriseAppSession } = await import("./enterprise-apps");
 

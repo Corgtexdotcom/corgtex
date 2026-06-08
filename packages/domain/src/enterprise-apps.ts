@@ -1546,7 +1546,7 @@ export async function upgradeEnterpriseAppRuntimeRelease(actor: AppActor, params
     await prisma.appRelease.update({
       where: { id: release.id },
       data: {
-        status: "FAILED",
+        status: release.status === "ACTIVE" ? "ACTIVE" : "FAILED",
         metadataJson: toInputJson({
           ...runtimeMetadata(release.metadataJson),
           lastUpgradeFailedAt: new Date().toISOString(),
