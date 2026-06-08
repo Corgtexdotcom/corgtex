@@ -194,9 +194,6 @@ export default async function HomePage({ params }: LocaleParams) {
             <ScrollReveal delay={300}>
               <div className="btn-group">
                 <DemoGateForm />
-                <a href={bookDemoUrl} className="btn btn-secondary" target="_blank" rel="noopener noreferrer">
-                  {copy.briefing}
-                </a>
               </div>
             </ScrollReveal>
           </div>
