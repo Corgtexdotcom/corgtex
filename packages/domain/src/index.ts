@@ -59,6 +59,7 @@ export * from "./privacy";
 export * from "./draft-permissions";
 export * from "./work-item-versions";
 export * from "./catalog";
+export * from "./enterprise-apps";
 export * from "./enterprise-services";
 export * from "./execution-plumbing";
 export * from "./tool-links";

@@ -12,6 +12,7 @@ import {
   listControlPlaneCustomerMembers,
   listControlPlaneFeatureFlags,
   listControlPlaneReleaseRolloutJobs,
+  listWorkspaceEnterpriseApps,
   requireControlPlaneAccess,
 } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
@@ -108,6 +109,17 @@ export default async function ControlPlaneCustomerPage({
   // Standardize response types for client component
   const members = "members" in membersRaw ? membersRaw : { members: [] };
   const featureFlags = "flags" in featureFlagsRaw ? featureFlagsRaw : { flags: [] };
+  const enterpriseApps = customer.managedWorkspaceId
+    ? await listWorkspaceEnterpriseApps(actor, customer.managedWorkspaceId).catch((err: unknown) => ({
+        canManage: false,
+        installations: [],
+        error: err instanceof Error ? err.message : "Unable to load enterprise apps.",
+      }))
+    : {
+        canManage: false,
+        installations: [],
+        error: "Enterprise app inspection requires a managed workspace.",
+      };
 
   return (
     <div className="space-y-6 pb-12 animate-in fade-in duration-300">
@@ -166,6 +178,7 @@ export default async function ControlPlaneCustomerPage({
         releases={releases}
         members={members}
         featureFlags={featureFlags}
+        enterpriseApps={enterpriseApps}
         deployPreflight={deployPreflight}
         rollouts={rollouts}
         locale={locale}
