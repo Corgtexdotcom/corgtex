@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useTransition } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { cn } from "@/lib/utils";
@@ -12,8 +12,10 @@ import {
   controlPlaneLabel,
 } from "../../../_components/control-plane-ui";
 import {
+  configureMeetingRecorderIntegrationAction,
   configureSupportConnectorAction,
   runSupportOperationAction,
+  runMeetingRecorderOperationAction,
   recordBreakGlassAction,
   createControlPlaneMemberAction,
   resendControlPlaneAccessLinkAction,
@@ -32,7 +34,7 @@ import {
   revokeEnterpriseAppSessionsFromControlPlaneAction,
 } from "../../../actions";
 
-type DetailTabId = "overview" | "agents" | "config" | "users" | "releases" | "logs";
+type DetailTabId = "overview" | "agents" | "config" | "users" | "recorders" | "releases" | "logs";
 
 const detailPanelClass = "rounded-lg border border-line bg-bg-alt p-4";
 const detailInnerPanelClass = "rounded-md border border-line bg-surface p-3";
@@ -74,28 +76,40 @@ export function CustomerDetailClientTabs({
   const pathname = usePathname() || "";
   const searchParams = useSearchParams();
   const [activeTab, setActiveTab] = useState<DetailTabId>(initialTab);
+  const [pendingTab, setPendingTab] = useState<DetailTabId | null>(null);
+  const [isPending, startTransition] = useTransition();
 
   // Local state for interactive details
   const [selectedAction, setSelectedAction] = useState("members.list");
+  const [timezoneOffsetMinutes, setTimezoneOffsetMinutes] = useState("0");
 
   const tabs = [
     { id: "overview", label: "Overview" },
     { id: "agents", label: "Agents & Governance" },
-    { id: "config", label: "Configuration & Flags" },
+    { id: "config", label: "Config & Tools" },
     { id: "users", label: "Users & Access" },
+    { id: "recorders", label: "Recorders" },
     { id: "releases", label: "Releases & Matrix" },
     { id: "logs", label: "Support & Audit" },
   ] as const;
 
   useEffect(() => {
     setActiveTab(initialTab);
+    setPendingTab(null);
   }, [initialTab]);
 
+  useEffect(() => {
+    setTimezoneOffsetMinutes(String(new Date().getTimezoneOffset()));
+  }, []);
+
   const selectTab = (tabId: DetailTabId) => {
-    setActiveTab(tabId);
+    if (tabId === activeTab && !pendingTab) return;
+    setPendingTab(tabId);
     const params = new URLSearchParams(searchParams?.toString() ?? "");
     params.set("tab", tabId);
-    router.replace(`${pathname}?${params.toString()}`, { scroll: false });
+    startTransition(() => {
+      router.replace(`${pathname}?${params.toString()}`, { scroll: false });
+    });
   };
 
   const isPreflightPassed = Boolean(deployPreflight.eligible);
@@ -103,6 +117,14 @@ export function CustomerDetailClientTabs({
     ? deployPreflight.checks
     : [];
   const canManageEnterpriseApps = Boolean(enterpriseApps.canManage && customer.managedWorkspaceId);
+  const integrationRows = Array.isArray(integrations.integrations) ? integrations.integrations : [];
+  const recorderIntegration = integrationRows.find((integration: any) => integration.key === "meeting_recorders") ?? null;
+  const recorderReadiness = recorderIntegration?.readiness ?? null;
+  const recorderFailedChecks = Array.isArray(recorderReadiness?.failedChecks)
+    ? recorderReadiness.failedChecks
+    : [];
+  const recorderCalendarSource = recorderIntegration?.calendarSource ?? null;
+  const recorderLastSmokeRun = recorderIntegration?.lastSmokeRun ?? null;
 
   return (
     <div className="space-y-6">
@@ -110,6 +132,7 @@ export function CustomerDetailClientTabs({
       <div className="flex overflow-x-auto border-b border-line scrollbar-none">
         {tabs.map((tab) => {
           const isActive = activeTab === tab.id;
+          const isPendingTab = pendingTab === tab.id;
           return (
             <button
               key={tab.id}
@@ -118,6 +141,8 @@ export function CustomerDetailClientTabs({
                 "!min-h-0 !rounded-none !border-x-0 !border-t-0 !bg-transparent !shadow-none border-b-2 px-4 py-2.5 text-xs font-semibold transition-colors whitespace-nowrap",
                 isActive
                   ? "border-brand-500 text-white"
+                  : isPendingTab
+                    ? "border-amber-500/70 text-amber-200"
                   : "border-transparent text-muted hover:!bg-surface/30 hover:text-text"
               )}
             >
@@ -126,6 +151,12 @@ export function CustomerDetailClientTabs({
           );
         })}
       </div>
+
+      {(pendingTab || isPending) && (
+        <div className="rounded-md border border-amber-500/25 bg-amber-500/10 px-3 py-2 text-[10px] font-medium text-amber-200">
+          Loading {tabs.find((tab) => tab.id === pendingTab)?.label ?? "tab"} details...
+        </div>
+      )}
 
       {/* Tab Panels */}
       <div className="space-y-6">
@@ -760,6 +791,146 @@ export function CustomerDetailClientTabs({
                   Invite member
                 </button>
               </form>
+            </div>
+          </div>
+        )}
+
+        {/* RECORDERS TAB */}
+        {activeTab === "recorders" && (
+          <div className="grid grid-cols-1 gap-5 lg:grid-cols-3">
+            <div className="space-y-6 lg:col-span-2">
+              <div className={`${detailPanelClass} space-y-4`}>
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                  <div>
+                    <h3 className="text-sm font-semibold text-white">Meeting Recorder Readiness</h3>
+                    <p className="mt-0.5 text-[10px] text-muted">Loaded only when this customer recorder tab is opened.</p>
+                  </div>
+                  <StatusBadge status={recorderIntegration?.vendorReadiness ? "ready" : recorderIntegration?.status ?? "not_configured"}>
+                    {recorderIntegration?.vendorReadiness ? "Ready" : controlPlaneLabel(recorderIntegration?.status ?? "not_configured")}
+                  </StatusBadge>
+                </div>
+
+                {integrations.error && <DisabledActionHint>{integrations.error}</DisabledActionHint>}
+
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                  {[
+                    { label: "Entitlement", value: recorderIntegration?.entitlementEnabled ? "Enabled" : "Disabled" },
+                    { label: "Configuration", value: recorderIntegration?.configured ? "Configured" : "Not configured" },
+                    { label: "Provider", value: recorderIntegration?.provider ?? "Not set" },
+                    { label: "Fallback", value: recorderIntegration?.fallbackProvider ?? "None" },
+                    { label: "Monthly cap", value: recorderIntegration?.monthlyMinuteCap ? `${recorderIntegration.monthlyMinuteCap} minutes` : "Not set" },
+                    { label: "Usage", value: recorderIntegration?.usage?.minutesUsed !== undefined ? `${recorderIntegration.usage.minutesUsed} minutes` : "No usage recorded" },
+                    { label: "Failures", value: recorderIntegration?.failures ?? 0 },
+                    { label: "Auto record", value: recorderIntegration?.autoRecordEnabled ? "Enabled" : "Disabled" },
+                    { label: "Calendar", value: recorderCalendarSource?.providerAccountEmail ?? recorderCalendarSource?.status ?? "Not connected" },
+                  ].map((item) => (
+                    <div key={item.label} className={detailInnerPanelClass}>
+                      <span className="block text-[9px] font-bold uppercase tracking-wider text-muted">{item.label}</span>
+                      <strong className="mt-1 block truncate text-xs text-white">{item.value}</strong>
+                    </div>
+                  ))}
+                </div>
+
+                <div className={detailInnerPanelClass}>
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div>
+                      <h4 className="text-xs font-semibold text-white">Readiness Checks</h4>
+                      <p className="mt-0.5 text-[10px] text-muted">
+                        {recorderReadiness?.detail ?? "Recorder readiness has not been recorded yet."}
+                      </p>
+                    </div>
+                    <StatusBadge status={recorderReadiness?.ready ? "ready" : "needs_setup"}>
+                      {recorderReadiness?.ready ? "Ready" : "Needs setup"}
+                    </StatusBadge>
+                  </div>
+                  <div className="mt-3 space-y-2">
+                    {recorderFailedChecks.map((check: any) => (
+                      <div key={check.key ?? check.label} className="rounded-md border border-amber-500/20 bg-amber-500/10 p-2">
+                        <strong className="block text-[10px] text-amber-200">{check.label ?? "Recorder check"}</strong>
+                        <span className="mt-0.5 block text-[10px] text-amber-100/80">{check.detail ?? "Needs operator review."}</span>
+                      </div>
+                    ))}
+                    {recorderFailedChecks.length === 0 && (
+                      <p className="text-[10px] text-muted">No failed recorder readiness checks recorded.</p>
+                    )}
+                  </div>
+                </div>
+
+                <div className={detailInnerPanelClass}>
+                  <h4 className="text-xs font-semibold text-white">Last Smoke Run</h4>
+                  <div className="mt-2 grid grid-cols-1 gap-2 text-[10px] text-muted sm:grid-cols-3">
+                    <span>Status: <strong className="text-text">{recorderLastSmokeRun?.status ?? "Not run"}</strong></span>
+                    <span>Provider: <strong className="text-text">{recorderLastSmokeRun?.provider ?? recorderIntegration?.provider ?? "Not set"}</strong></span>
+                    <span>Updated: <strong className="text-text">{recorderLastSmokeRun?.createdAt ? new Date(recorderLastSmokeRun.createdAt).toLocaleString() : "n/a"}</strong></span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className={`${detailPanelClass} h-fit space-y-5`}>
+              <div>
+                <h3 className="text-sm font-semibold text-white">Recorder Configuration</h3>
+                <p className="mt-0.5 text-[10px] text-muted">Changes are audited and require a managed workspace.</p>
+              </div>
+
+              <form action={configureMeetingRecorderIntegrationAction} className="space-y-3 text-xs">
+                <input type="hidden" name="deploymentId" value={customer.id} />
+                <div className="grid grid-cols-2 gap-2">
+                  <label className="space-y-1">
+                    <span className="block text-[9px] font-bold uppercase tracking-wider text-muted">Entitlement</span>
+                    <select name="entitlementEnabled" defaultValue={String(Boolean(recorderIntegration?.entitlementEnabled))} className={`${controlPlaneInputClass} w-full`}>
+                      <option value="true">Enabled</option>
+                      <option value="false">Disabled</option>
+                    </select>
+                  </label>
+                  <label className="space-y-1">
+                    <span className="block text-[9px] font-bold uppercase tracking-wider text-muted">Recorder</span>
+                    <select name="enabled" defaultValue={String(Boolean(recorderIntegration?.status === "enabled" || recorderIntegration?.configured))} className={`${controlPlaneInputClass} w-full`}>
+                      <option value="true">Enabled</option>
+                      <option value="false">Disabled</option>
+                    </select>
+                  </label>
+                </div>
+                <label className="space-y-1 block">
+                  <span className="block text-[9px] font-bold uppercase tracking-wider text-muted">Auto record</span>
+                  <select name="autoRecordEnabled" defaultValue={String(Boolean(recorderIntegration?.autoRecordEnabled))} className={`${controlPlaneInputClass} w-full`}>
+                    <option value="false">Disabled</option>
+                    <option value="true">Enabled</option>
+                  </select>
+                </label>
+                <div className="grid grid-cols-2 gap-2">
+                  <input name="defaultProvider" defaultValue={recorderIntegration?.provider ?? "RECALL_AI"} placeholder="Default provider" className={controlPlaneInputClass} />
+                  <input name="fallbackProvider" defaultValue={recorderIntegration?.fallbackProvider ?? ""} placeholder="Fallback provider" className={controlPlaneInputClass} />
+                </div>
+                <input name="monthlyMinuteCap" type="number" min={0} defaultValue={recorderIntegration?.monthlyMinuteCap ?? 6000} className={`${controlPlaneInputClass} w-full`} />
+                <input name="botName" defaultValue={recorderIntegration?.botName ?? ""} placeholder="Recorder bot name" className={`${controlPlaneInputClass} w-full`} />
+                <input name="entryMessage" defaultValue={recorderIntegration?.entryMessage ?? ""} placeholder="Recorder entry message" className={`${controlPlaneInputClass} w-full`} />
+                <input name="reason" required placeholder="Audit reason" className={`${controlPlaneInputClass} w-full`} />
+                <button type="submit" disabled={!customer.managedWorkspaceId} className={`${detailPrimaryButtonClass} w-full`}>
+                  Save recorder config
+                </button>
+              </form>
+
+              <div className="border-t border-line pt-4">
+                <h3 className="text-sm font-semibold text-white">Recorder Operations</h3>
+                <form action={runMeetingRecorderOperationAction} className="mt-3 space-y-3 text-xs">
+                  <input type="hidden" name="deploymentId" value={customer.id} />
+                  <input type="hidden" name="joinAtTimezoneOffsetMinutes" value={timezoneOffsetMinutes} />
+                  <select name="operation" defaultValue="enqueue_calendar_sync" className={`${controlPlaneInputClass} w-full`}>
+                    <option value="enqueue_calendar_sync">Queue calendar sync</option>
+                    <option value="dry_run_scan">Dry-run calendar scan</option>
+                    <option value="live_smoke">Live smoke test</option>
+                    <option value="enable_auto_recording_after_smoke">Enable auto-recording after smoke</option>
+                  </select>
+                  <input name="provider" defaultValue={recorderIntegration?.provider ?? "RECALL_AI"} placeholder="Provider" className={`${controlPlaneInputClass} w-full`} />
+                  <input name="meetingUrl" placeholder="Meeting URL for live smoke" className={`${controlPlaneInputClass} w-full`} />
+                  <input name="joinAt" type="datetime-local" className={`${controlPlaneInputClass} w-full`} />
+                  <input name="reason" required placeholder="Audit reason" className={`${controlPlaneInputClass} w-full`} />
+                  <button type="submit" disabled={!customer.managedWorkspaceId} className={`${detailPrimaryButtonClass} w-full`}>
+                    Run recorder operation
+                  </button>
+                </form>
+              </div>
             </div>
           </div>
         )}

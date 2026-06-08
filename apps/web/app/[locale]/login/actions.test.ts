@@ -37,6 +37,7 @@ function buildFormData(email: string, password: string, locale = "en") {
 }
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.clearAllMocks();
   vi.unstubAllEnvs();
 });
@@ -57,6 +58,24 @@ describe("loginAction", () => {
       redirectTo: null,
     });
 
+    expect(listActorWorkspaces).not.toHaveBeenCalled();
+    expect(setSessionCookie).not.toHaveBeenCalled();
+  });
+
+  it("returns a retryable inline error when login takes longer than the timeout", async () => {
+    vi.useFakeTimers();
+    const { loginAction } = await import("./actions");
+    const { initialLoginActionState } = await import("./state");
+    loginUserWithPassword.mockReturnValue(new Promise(() => undefined));
+
+    const result = loginAction(initialLoginActionState, buildFormData("ops@example.com", "password123"));
+    await vi.advanceTimersByTimeAsync(15_000);
+
+    await expect(result).resolves.toEqual({
+      email: "ops@example.com",
+      error: "Login timed out. Try again.",
+      redirectTo: null,
+    });
     expect(listActorWorkspaces).not.toHaveBeenCalled();
     expect(setSessionCookie).not.toHaveBeenCalled();
   });

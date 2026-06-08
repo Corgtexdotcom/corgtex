@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useTransition } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   Bot,
@@ -94,8 +94,10 @@ export function AgentObservatoryClient({ agents, runs, customers, initialCustome
   const searchParams = useSearchParams();
   const [search, setSearch] = useState("");
   const [selectedCustomerId, setSelectedCustomerId] = useState(initialCustomerId ?? "");
+  const [pendingCustomerId, setPendingCustomerId] = useState<string | null>(null);
   const [selectedStatus, setSelectedStatus] = useState("");
   const [selectedRun, setSelectedRun] = useState<Run | null>(null); // Active trace drawer
+  const [isPending, startTransition] = useTransition();
   const selectedCustomer = customers.find((customer) => customer.id === selectedCustomerId) ?? null;
   const scopedCustomers = selectedCustomer ? [selectedCustomer] : customers;
   const scopedAgents = selectedCustomer ? agents.filter((agent) => agent.customerId === selectedCustomer.id) : agents;
@@ -147,10 +149,13 @@ export function AgentObservatoryClient({ agents, runs, customers, initialCustome
 
   useEffect(() => {
     setSelectedCustomerId(initialCustomerId ?? "");
+    setPendingCustomerId(null);
   }, [initialCustomerId]);
 
   const selectCustomer = (customerId: string) => {
+    if (customerId === selectedCustomerId) return;
     setSelectedCustomerId(customerId);
+    setPendingCustomerId(customerId);
     const params = new URLSearchParams(searchParams?.toString() ?? "");
     if (customerId) {
       params.set("client", customerId);
@@ -158,7 +163,9 @@ export function AgentObservatoryClient({ agents, runs, customers, initialCustome
       params.delete("client");
     }
     const query = params.toString();
-    router.replace(query ? `${pathname}?${query}` : pathname, { scroll: false });
+    startTransition(() => {
+      router.replace(query ? `${pathname}?${query}` : pathname, { scroll: false });
+    });
   };
 
   return (
@@ -182,6 +189,9 @@ export function AgentObservatoryClient({ agents, runs, customers, initialCustome
             </option>
           ))}
         </select>
+        {(pendingCustomerId !== null || isPending) && (
+          <span className="text-[10px] font-semibold text-amber-300">Loading customer scope...</span>
+        )}
       </div>
       
       {/* Metrics Row */}

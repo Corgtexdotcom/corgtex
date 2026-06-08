@@ -1,8 +1,8 @@
 import { notFound } from "next/navigation";
 import {
+  getControlPlaneFleetOverview,
   getControlPlaneLatestReleaseTarget,
   isControlPlaneRailwayDeployConfigured,
-  listControlPlaneMatrix,
   listControlPlaneReleaseRolloutJobs,
   requireControlPlaneAccess,
 } from "@corgtex/domain";
@@ -25,7 +25,7 @@ import { controlPlaneActorCacheKey, readControlPlaneCached, shouldRefreshControl
 
 export const dynamic = "force-dynamic";
 
-type FleetPage = Awaited<ReturnType<typeof listControlPlaneMatrix>>;
+type FleetPage = Awaited<ReturnType<typeof getControlPlaneFleetOverview>>;
 type ReleaseRollout = Awaited<ReturnType<typeof listControlPlaneReleaseRolloutJobs>>[number];
 
 const PAGE_SIZE = 25;
@@ -69,6 +69,24 @@ function serializeIssues(issues: FleetPage["items"][number]["issues"]): ControlP
   }));
 }
 
+function formatFreshness(value?: Date | string | null) {
+  if (!value) return "Not checked";
+  const checkedAt = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(checkedAt.valueOf())) return "Not checked";
+  const ageSeconds = Math.max(0, Math.round((Date.now() - checkedAt.getTime()) / 1000));
+  if (ageSeconds < 60) return `${ageSeconds}s ago`;
+  const ageMinutes = Math.floor(ageSeconds / 60);
+  if (ageMinutes < 60) return `${ageMinutes}m ago`;
+  const ageHours = Math.floor(ageMinutes / 60);
+  if (ageHours < 24) return `${ageHours}h ago`;
+  return `${Math.floor(ageHours / 24)}d ago`;
+}
+
+function issueStatusLabel(issues: FleetPage["items"][number]["issues"]) {
+  if (issues.length === 0) return "ok";
+  return issues.some((issue) => issue.severity === "critical") ? "failed" : "degraded";
+}
+
 export default async function ControlPlanePage({
   searchParams,
 }: {
@@ -97,7 +115,7 @@ export default async function ControlPlanePage({
   const actorCacheKey = controlPlaneActorCacheKey(actor);
   const [fleetRead, recentRolloutsRead] = await Promise.all([
     readControlPlaneCached(["control-plane", "fleet", actorCacheKey, fleetParams], refresh, () => (
-      listControlPlaneMatrix(actor, fleetParams)
+      getControlPlaneFleetOverview(actor, fleetParams)
     )),
     readControlPlaneCached(["control-plane", "rollouts", actorCacheKey, { take: 8 }], refresh, () => (
       listControlPlaneReleaseRolloutJobs(actor, { take: 8 })
@@ -206,12 +224,12 @@ export default async function ControlPlanePage({
                   <th className="p-3 w-8"><span className="sr-only">Select</span></th>
                   <th className="p-3">Client</th>
                   <th className="p-3">Health</th>
-                  <th className="p-3">Release</th>
-                  <th className="p-3">Recorder</th>
-                  <th className="p-3">Agents</th>
-                  <th className="p-3">Users</th>
                   <th className="p-3">Support</th>
-                  <th className="p-3">Owner</th>
+                  <th className="p-3">Agents</th>
+                  <th className="p-3">Tools / Apps</th>
+                  <th className="p-3">Issues</th>
+                  <th className="p-3">Release / Recorder</th>
+                  <th className="p-3">Last checked</th>
                   <th className="p-3 text-right">Action</th>
                 </tr>
               </thead>
@@ -239,36 +257,46 @@ export default async function ControlPlanePage({
                       <span className="mt-1 block max-w-[180px] truncate text-[10px] text-muted">
                         {customer.health.detail || "No current error"}
                       </span>
-                      <ControlPlaneIssueDiagnostics issues={serializeIssues(customer.issues)} className="mt-2" />
                     </td>
                     <td className="p-3">
-                      <span className="block max-w-[190px] truncate font-medium text-text">{customer.release.label}</span>
-                      <span className="mt-1 block text-[10px] text-muted">
-                        {customer.release.detail ? "Drift recorded" : "Aligned"}
-                      </span>
-                    </td>
-                    <td className="p-3">
-                      <StatusBadge status={customer.recorder.availability.status} />
-                      <span className="mt-1 block text-[10px] text-muted">
-                        {customer.recorder.provider ?? "No provider"} / {customer.recorder.monthlyUsageMinutes ?? "n/a"} min
-                      </span>
-                      {customer.recorder.availability.status === "available" && customer.recorder.readiness.ready === false && (
-                        <span className="mt-1 block text-[10px] text-amber-300">Readiness gaps</span>
-                      )}
+                      <StatusBadge status={customer.support.status} />
+                      <span className="mt-1 block text-[10px] text-muted">{controlPlaneLabel(customer.support.mode)}</span>
                     </td>
                     <td className="p-3">
                       <StatusBadge status={customer.agents.status} />
                       <span className="mt-1 block text-[10px] text-muted">{customer.agents.runCount ?? "n/a"} runs</span>
                     </td>
                     <td className="p-3">
-                      <span className="block font-semibold text-text">{customer.users.count ?? "n/a"}</span>
-                      <span className="mt-1 block text-[10px] text-muted">{controlPlaneLabel(customer.users.status)}</span>
+                      <StatusBadge status={customer.tools.status} />
+                      <span className="mt-1 block text-[10px] text-muted">
+                        {customer.tools.total ?? "n/a"} local signals
+                      </span>
+                      {customer.tools.total !== null && (
+                        <span className="mt-1 block max-w-[220px] truncate text-[9px] text-muted">
+                          Links {customer.tools.toolLinks} / creds {customer.tools.agentCredentials} / apps {customer.tools.enterpriseApps} / integrations {customer.tools.communicationIntegrations}
+                        </span>
+                      )}
                     </td>
                     <td className="p-3">
-                      <StatusBadge status={customer.support.status} />
-                      <span className="mt-1 block text-[10px] text-muted">{controlPlaneLabel(customer.support.mode)}</span>
+                      <StatusBadge status={issueStatusLabel(customer.issues)}>
+                        {customer.issues.length === 0 ? "None" : `${customer.issues.length} open`}
+                      </StatusBadge>
+                      <ControlPlaneIssueDiagnostics issues={serializeIssues(customer.issues)} className="mt-2" />
                     </td>
-                    <td className="p-3 max-w-[180px] truncate text-muted">{customer.ownerEmail || "Unassigned"}</td>
+                    <td className="p-3 min-w-[210px]">
+                      <span className="block max-w-[190px] truncate font-medium text-text">{customer.release.label}</span>
+                      <span className="mt-1 block text-[10px] text-muted">
+                        {customer.release.detail ? "Release drift" : "Release aligned"}
+                      </span>
+                      <span className="mt-1 block text-[10px] text-muted">
+                        Recorder: {controlPlaneLabel(customer.recorder.status)}
+                        {customer.recorder.provider ? ` / ${customer.recorder.provider}` : ""}
+                      </span>
+                    </td>
+                    <td className="p-3">
+                      <span className="block font-semibold text-text">{formatFreshness(customer.lastCheckedAt)}</span>
+                      <span className="mt-1 block text-[10px] text-muted">local snapshot</span>
+                    </td>
                     <td className="p-3 text-right">
                       {customer.hasDeployment ? (
                         <Link href={`/control-plane/deployments/${customer.id}`} className={controlPlaneButtonClass}>
