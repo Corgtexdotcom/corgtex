@@ -2834,6 +2834,7 @@ type RemoteRecorderEntitlement = {
 type BatchedRemoteRecorderState = {
   entitlementByDeploymentId: Map<string, RemoteRecorderEntitlement>;
   entitlementByAccountScope: Map<string, RemoteRecorderEntitlement>;
+  entitlementByAccountId: Map<string, RemoteRecorderEntitlement>;
 };
 
 function newerRemoteEntitlement(
@@ -2847,21 +2848,18 @@ async function loadBatchedRemoteRecorderState(rows: ControlPlaneDeploymentRow[])
   const remoteRows = rows.filter((row) => row.hasDeployment && !row.managedWorkspaceId);
   const deploymentIds = [...new Set(remoteRows.map((row) => row.id))];
   const customerAccountIds = [...new Set(remoteRows.map((row) => row.customerAccountId).filter((id): id is string => Boolean(id)))];
-  const scopeKeys = deploymentIds.map((id) => `deployment:${id}`);
   const whereClauses: Prisma.CustomerEntitlementWhereInput[] = [];
   if (deploymentIds.length > 0) {
     whereClauses.push({ deploymentId: { in: deploymentIds } });
   }
-  if (customerAccountIds.length > 0 && scopeKeys.length > 0) {
-    whereClauses.push({
-      customerAccountId: { in: customerAccountIds },
-      scopeKey: { in: scopeKeys },
-    });
+  if (customerAccountIds.length > 0) {
+    whereClauses.push({ customerAccountId: { in: customerAccountIds } });
   }
   if (whereClauses.length === 0) {
     return {
       entitlementByDeploymentId: new Map(),
       entitlementByAccountScope: new Map(),
+      entitlementByAccountId: new Map(),
     };
   }
 
@@ -2884,6 +2882,7 @@ async function loadBatchedRemoteRecorderState(rows: ControlPlaneDeploymentRow[])
   });
   const entitlementByDeploymentId = new Map<string, RemoteRecorderEntitlement>();
   const entitlementByAccountScope = new Map<string, RemoteRecorderEntitlement>();
+  const entitlementByAccountId = new Map<string, RemoteRecorderEntitlement>();
   for (const entitlement of entitlements) {
     if (entitlement.deploymentId) {
       entitlementByDeploymentId.set(
@@ -2896,17 +2895,22 @@ async function loadBatchedRemoteRecorderState(rows: ControlPlaneDeploymentRow[])
       accountScopeKey,
       newerRemoteEntitlement(entitlementByAccountScope.get(accountScopeKey), entitlement),
     );
+    entitlementByAccountId.set(
+      entitlement.customerAccountId,
+      newerRemoteEntitlement(entitlementByAccountId.get(entitlement.customerAccountId), entitlement),
+    );
   }
 
-  return { entitlementByDeploymentId, entitlementByAccountScope };
+  return { entitlementByDeploymentId, entitlementByAccountScope, entitlementByAccountId };
 }
 
 function remoteRecorderEntitlementForRow(row: ControlPlaneDeploymentRow, state: BatchedRemoteRecorderState) {
   const deploymentEntitlement = state.entitlementByDeploymentId.get(row.id);
   if (deploymentEntitlement) return deploymentEntitlement;
-  return row.customerAccountId
-    ? state.entitlementByAccountScope.get(`${row.customerAccountId}:deployment:${row.id}`) ?? null
-    : null;
+  if (!row.customerAccountId) return null;
+  return state.entitlementByAccountScope.get(`${row.customerAccountId}:deployment:${row.id}`)
+    ?? state.entitlementByAccountId.get(row.customerAccountId)
+    ?? null;
 }
 
 function remoteRecorderEntitlementEnabled(entitlement: RemoteRecorderEntitlement | null | undefined) {
