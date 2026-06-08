@@ -3,27 +3,16 @@ import { getControlPlaneClientOptions, requireControlPlaneAccess } from "@corgte
 import { requirePageActor } from "@/lib/auth";
 import { prisma } from "@corgtex/shared";
 import { Link } from "@/i18n/routing";
-import { cn } from "@/lib/utils";
 import { ClientContextSwitcher } from "../_components/client-context-switcher";
 import {
-  Activity,
-  AlertTriangle,
-  User,
-  ShieldCheck,
-  Calendar,
-  Layers,
-  Clock,
-  ArrowRight,
-  TrendingUp,
-} from "lucide-react";
+  ControlPlanePageHeader,
+  ControlPlaneSection,
+  ControlPlaneStatusStrip,
+  StatusBadge,
+  controlPlaneButtonClass,
+} from "../_components/control-plane-ui";
 
 export const dynamic = "force-dynamic";
-
-function statusTone(status?: string | null) {
-  if (status === "ok" || status === "active" || status === "connected" || status === "COMPLETED") return "text-emerald-400 border-emerald-500/20 bg-emerald-500/10";
-  if (status === "attention" || status === "degraded" || status === "provisioning" || status === "configured" || status === "pending" || status === "IN_PROGRESS") return "text-amber-400 border-amber-500/20 bg-amber-500/10";
-  return "text-rose-400 border-rose-500/20 bg-rose-500/10";
-}
 
 export default async function ControlPlaneOperationsPage({
   searchParams,
@@ -86,68 +75,43 @@ export default async function ControlPlaneOperationsPage({
   const errorCount = formattedOps.filter((o: any) => o.status === "FAILED").length;
 
   return (
-    <div className="space-y-6 animate-in fade-in duration-300">
-      
-      {/* Header */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-        <div>
-          <span className="text-[10px] font-bold tracking-widest text-brand-400 uppercase">
-            Operate & Audit
-          </span>
-          <h1 className="text-2xl font-bold tracking-tight text-white mt-1">
-            Operational Audit Logs
-          </h1>
-          <p className="text-xs text-muted mt-1 max-w-2xl">
-            Unified central audit trail tracking all platform actions, background syncs, feature flag changes, and emergency break-glass sessions across the fleet.
-          </p>
-        </div>
-        <ClientContextSwitcher
-          clients={clientOptions}
-          selectedClientId={raw?.client ?? ""}
-          mode="filter"
-          className="bg-bg-alt border border-line rounded-xl p-4"
-          label="Client"
-        />
-      </div>
+    <div className="space-y-5">
+      <ControlPlanePageHeader
+        eyebrow="Operate and audit"
+        title="Operational Audit Logs"
+        description="Central audit trail for platform actions, background syncs, feature flag changes, and emergency support sessions."
+        actions={
+          <div className="rounded-lg border border-line bg-bg-alt p-3">
+            <ClientContextSwitcher
+              clients={clientOptions}
+              selectedClientId={raw?.client ?? ""}
+              mode="filter"
+              label="Client"
+            />
+          </div>
+        }
+      />
 
-      {/* Top Indicators Row */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        {[
-          { title: "Total Operations", value: totalOps, detail: "logged across fleet", icon: Activity, tone: "text-muted" },
-          { title: "Mutating Events", value: formattedOps.filter((o: any) => o.isMutating).length, detail: "state alterations recorded", icon: Layers, tone: "text-indigo-400" },
-          { title: "Break-Glass Incidents", value: breakGlassCount, detail: "emergency sessions logged", icon: AlertTriangle, tone: breakGlassCount > 0 ? "text-amber-500" : "text-muted" },
-          { title: "Failed Processes", value: errorCount, detail: "workflow errors recorded", icon: ShieldCheck, tone: errorCount > 0 ? "text-rose-400" : "text-muted" },
-        ].map((stat, i) => {
-          const Icon = stat.icon;
-          return (
-            <div key={i} className="bg-bg-alt border border-line rounded-xl p-4 flex justify-between items-start">
-              <div className="space-y-1">
-                <span className="text-[10px] text-muted font-semibold uppercase">{stat.title}</span>
-                <span className="text-xl font-bold text-white block">{stat.value}</span>
-                <span className="text-[10px] text-muted block">{stat.detail}</span>
-              </div>
-              <div className={cn("p-2 rounded-lg bg-surface border border-line", stat.tone)}>
-                <Icon className="w-4 h-4" />
-              </div>
-            </div>
-          );
-        })}
-      </div>
+      <ControlPlaneStatusStrip
+        items={[
+          { label: "Operations", value: totalOps, detail: "logged" },
+          { label: "Mutations", value: formattedOps.filter((o: any) => o.isMutating).length, detail: "state changes" },
+          { label: "Break-glass", value: breakGlassCount, detail: "incidents", status: breakGlassCount > 0 ? "degraded" : "ok" },
+          { label: "Failures", value: errorCount, detail: "failed", status: errorCount > 0 ? "failed" : "ok" },
+        ]}
+      />
 
-      {/* Operations log table */}
-      <div className="bg-bg-alt border border-line rounded-xl p-5 shadow-sm space-y-4">
-        <div>
-          <h2 className="text-sm font-bold text-white">Central Operational Audit Trail</h2>
-          <p className="text-[10px] text-muted mt-0.5">Chronological ledger of reasoned mutations and platform inquiries.</p>
-        </div>
-
+      <ControlPlaneSection
+        title="Central Operational Audit Trail"
+        description="Chronological ledger of reasoned mutations and platform inquiries."
+      >
         <div className="overflow-x-auto">
-          <table className="w-full border-collapse text-xs">
+          <table className="w-full min-w-[1080px] border-collapse text-xs">
             <thead>
-              <tr className="border-b border-line text-muted text-left font-medium">
-                <th className="p-3">Incident / Type</th>
+              <tr className="border-b border-line text-left text-[10px] font-semibold uppercase tracking-wide text-muted">
+                <th className="p-3">Type</th>
                 <th className="p-3">Description</th>
-                <th className="p-3">Customer Context</th>
+                <th className="p-3">Client</th>
                 <th className="p-3">Status</th>
                 <th className="p-3">Actor</th>
                 <th className="p-3">Recorded</th>
@@ -156,48 +120,29 @@ export default async function ControlPlaneOperationsPage({
             </thead>
             <tbody className="divide-y divide-line">
               {formattedOps.map((op: any) => (
-                <tr key={op.id} className={cn("hover:bg-surface/40 transition-colors", op.isBreakGlass && "bg-amber-500/[0.02]")}>
+                <tr key={op.id} className="hover:bg-surface/40">
                   <td className="p-3">
-                    <div className="flex items-center gap-2">
-                      {op.isBreakGlass && <AlertTriangle className="w-3.5 h-3.5 text-amber-500 shrink-0" />}
-                      <span className={cn("font-mono font-bold tracking-wide text-[10px]", op.isBreakGlass ? "text-amber-400" : "text-brand-400")}>
-                        {op.type}
-                      </span>
-                    </div>
+                    <span className="block font-mono text-[10px] font-semibold tracking-wide text-brand-400">
+                      {op.type}
+                    </span>
                     {op.isBreakGlass && (
-                      <span className="text-[8px] font-bold text-amber-500 uppercase tracking-widest block mt-0.5">
+                      <span className="mt-0.5 block text-[9px] font-semibold uppercase tracking-wide text-amber-400">
                         Break-glass
                       </span>
                     )}
                   </td>
-                  <td className="p-3 min-w-[200px]">
-                    <span className="text-text block font-medium">{op.description}</span>
-                    {op.error && (
-                      <span className="text-[9px] font-mono text-rose-400 block mt-1">{op.error}</span>
-                    )}
+                  <td className="p-3 min-w-[240px]">
+                    <span className="block font-medium text-text">{op.description}</span>
+                    {op.error && <span className="mt-1 block font-mono text-[10px] text-rose-400">{op.error}</span>}
                   </td>
-                  <td className="p-3 font-semibold text-text">
-                    {op.customerName}
-                  </td>
-                  <td className="p-3">
-                    <span className={cn("px-2 py-0.5 rounded-full text-[9px] font-bold border uppercase shrink-0", statusTone(op.status))}>
-                      {op.status}
-                    </span>
-                  </td>
-                  <td className="p-3 text-muted font-medium">
-                    {op.actorName}
-                  </td>
-                  <td className="p-3 text-muted font-semibold">
-                    {op.createdAt}
-                  </td>
+                  <td className="p-3 font-semibold text-text">{op.customerName}</td>
+                  <td className="p-3"><StatusBadge status={op.status} /></td>
+                  <td className="p-3 text-muted">{op.actorName}</td>
+                  <td className="p-3 text-muted">{op.createdAt}</td>
                   <td className="p-3 text-right">
                     {op.customerId ? (
-                      <Link
-                        href={`/control-plane/deployments/${op.customerId}?tab=logs`}
-                        className="inline-flex items-center gap-1 bg-surface hover:bg-surface-strong border border-line text-text px-2 py-1 rounded text-[10px] font-medium transition-colors"
-                      >
+                      <Link href={`/control-plane/deployments/${op.customerId}?tab=logs`} className={controlPlaneButtonClass}>
                         Inspect
-                        <ArrowRight className="w-3 h-3 text-muted" />
                       </Link>
                     ) : (
                       <span className="text-muted">-</span>
@@ -207,7 +152,7 @@ export default async function ControlPlaneOperationsPage({
               ))}
               {formattedOps.length === 0 && (
                 <tr>
-                  <td colSpan={7} className="text-center py-8 text-muted">
+                  <td colSpan={7} className="py-8 text-center text-muted">
                     No control-plane operations have been recorded yet.
                   </td>
                 </tr>
@@ -215,7 +160,7 @@ export default async function ControlPlaneOperationsPage({
             </tbody>
           </table>
         </div>
-      </div>
+      </ControlPlaneSection>
 
     </div>
   );

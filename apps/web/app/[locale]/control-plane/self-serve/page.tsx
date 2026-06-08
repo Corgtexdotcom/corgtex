@@ -1,18 +1,15 @@
 import { notFound } from "next/navigation";
 import {
-  CreditCard,
   MailCheck,
-  ShieldCheck,
   Timer,
   UserRound,
-  Users,
-  Zap,
 } from "lucide-react";
 import { listSelfServeCustomerRegistry, requireControlPlaneAccess } from "@corgtex/domain";
 import { Link } from "@/i18n/routing";
 import { requirePageActor } from "@/lib/auth";
 import { cn } from "@/lib/utils";
 import { SupportSessionButton } from "./_components/support-session-button";
+import { ControlPlanePageHeader, ControlPlaneStatusStrip } from "../_components/control-plane-ui";
 
 export const dynamic = "force-dynamic";
 
@@ -80,39 +77,21 @@ export default async function ControlPlaneSelfServePage() {
   const supportReady = registry.items.filter((item) => Boolean(item.latestSupportSession)).length;
 
   return (
-    <div className="space-y-6 pb-12 animate-in fade-in duration-300">
-      <div className="flex flex-col gap-4 border-b border-line pb-6 md:flex-row md:items-end md:justify-between">
-        <div>
-          <span className="text-[10px] font-bold uppercase tracking-widest text-brand-400">
-            Shared-cloud launch surface
-          </span>
-          <h1 className="mt-1 text-2xl font-bold tracking-tight text-white">
-            Self-Serve Cloud Registry
-          </h1>
-          <p className="mt-1 max-w-2xl text-xs text-muted">
-            Registered trials, onboarding, billing readiness, latest browser/API smoke, setup-email capture, and audited support access across Corgtex Cloud.
-          </p>
-        </div>
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-          {[
-            { title: "Customers", value: registry.summary.total, icon: Users, tone: "text-muted" },
-            { title: "Smoke covered", value: registry.summary.smokeCovered, icon: Zap, tone: "text-indigo-400" },
-            { title: "Billing ready", value: billingReady, icon: CreditCard, tone: "text-emerald-400" },
-            { title: "Support used", value: supportReady, icon: ShieldCheck, tone: "text-amber-400" },
-          ].map((stat) => {
-            const Icon = stat.icon;
-            return (
-              <div key={stat.title} className="min-w-28 rounded-xl border border-line bg-bg-alt p-3 shadow-sm">
-                <div className={cn("mb-2 inline-flex rounded-lg border border-line bg-surface p-1.5", stat.tone)}>
-                  <Icon className="h-3.5 w-3.5" />
-                </div>
-                <span className="block text-[10px] font-semibold uppercase tracking-wide text-muted">{stat.title}</span>
-                <span className="block text-xl font-bold text-white">{stat.value}</span>
-              </div>
-            );
-          })}
-        </div>
-      </div>
+    <div className="space-y-5 pb-12">
+      <ControlPlanePageHeader
+        eyebrow="Shared-cloud launch surface"
+        title="Self-Serve Cloud Registry"
+        description="Registered trials, onboarding, billing readiness, latest browser/API smoke, setup-email capture, and audited support access across Corgtex Cloud."
+      />
+
+      <ControlPlaneStatusStrip
+        items={[
+          { label: "Customers", value: registry.summary.total, detail: "registered" },
+          { label: "Smoke covered", value: registry.summary.smokeCovered, detail: "latest proof" },
+          { label: "Billing ready", value: billingReady, detail: "payment method" },
+          { label: "Support used", value: supportReady, detail: "sessions" },
+        ]}
+      />
 
       <div className="rounded-xl border border-line bg-bg-alt p-5 shadow-sm">
         <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">

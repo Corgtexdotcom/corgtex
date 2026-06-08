@@ -37,6 +37,10 @@ import {
   updateControlPlaneAgentCredentialScopesAction,
 } from "../../actions";
 import { ClientContextSwitcher } from "../../_components/client-context-switcher";
+import {
+  ControlPlanePageHeader,
+  controlPlaneButtonClass,
+} from "../../_components/control-plane-ui";
 import { CustomerDetailClientTabs } from "./_components/detail-client-tabs";
 
 export const dynamic = "force-dynamic";
@@ -122,54 +126,40 @@ export default async function ControlPlaneCustomerPage({
       };
 
   return (
-    <div className="space-y-6 pb-12 animate-in fade-in duration-300">
-      
-      {/* Detail Header area */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-line pb-6">
-        <div>
-          <span className="text-[10px] font-bold tracking-widest text-brand-400 uppercase">
-            {t("customerDetail.eyebrow")}
-          </span>
-          <h1 className="text-2xl font-bold tracking-tight text-white mt-1">
-            {customer.label}
-          </h1>
-          <p className="text-xs text-muted mt-1 max-w-2xl">
-            Public URL: <a href={customer.url} target="_blank" rel="noreferrer" className="text-brand-400 hover:underline">{customer.url}</a>
-          </p>
-        </div>
+    <div className="space-y-5 pb-10">
+      <ControlPlanePageHeader
+        eyebrow={t("customerDetail.eyebrow")}
+        title={customer.label}
+        description={`Public URL: ${customer.url}`}
+        actions={
+          <div className="flex flex-wrap items-center gap-2">
+            <ClientContextSwitcher
+              clients={clientOptions}
+              selectedClientId={customer.id}
+              mode="detail"
+              className="rounded-md border border-line bg-surface px-2.5 py-1.5"
+              label="Inspect"
+            />
+            <a
+              href={customer.url}
+              target="_blank"
+              rel="noreferrer"
+              className={controlPlaneButtonClass}
+            >
+              {t("customerDetail.openCustomer")}
+            </a>
+            {customer.hasSupportCredential && (
+              <form action={refreshSupportSnapshotAction}>
+                <input type="hidden" name="deploymentId" value={customer.id} />
+                <button type="submit" className={controlPlaneButtonClass}>
+                  {t("customerDetail.refreshSnapshot")}
+                </button>
+              </form>
+            )}
+          </div>
+        }
+      />
 
-        {/* Global Live support refresh actions */}
-        <div className="flex flex-wrap items-center gap-2">
-          <ClientContextSwitcher
-            clients={clientOptions}
-            selectedClientId={customer.id}
-            mode="detail"
-            className="bg-surface-strong border border-line rounded-lg px-3 py-1.5"
-            label="Inspect"
-          />
-          <a
-            href={customer.url}
-            target="_blank"
-            rel="noreferrer"
-            className="bg-surface hover:bg-surface-strong border border-line text-text hover:text-white px-3.5 py-2 rounded-lg text-xs font-semibold transition-all"
-          >
-            {t("customerDetail.openCustomer")}
-          </a>
-          {customer.hasSupportCredential && (
-            <form action={refreshSupportSnapshotAction}>
-              <input type="hidden" name="deploymentId" value={customer.id} />
-              <button
-                type="submit"
-                className="bg-brand-600 hover:bg-brand-500 text-white font-semibold text-xs px-3.5 py-2 rounded-lg shadow transition-all duration-150"
-              >
-                {t("customerDetail.refreshSnapshot")}
-              </button>
-            </form>
-          )}
-        </div>
-      </div>
-
-      {/* Render Client-Side Tab Switcher component */}
       <CustomerDetailClientTabs
         customer={customer}
         integrations={integrations}
@@ -184,7 +174,6 @@ export default async function ControlPlaneCustomerPage({
         locale={locale}
         initialTab={activeTab}
       />
-
     </div>
   );
 }

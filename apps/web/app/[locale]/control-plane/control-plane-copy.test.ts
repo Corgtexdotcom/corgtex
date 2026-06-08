@@ -5,10 +5,6 @@ function readJson(path: string) {
   return JSON.parse(readFileSync(new URL(path, import.meta.url), "utf8")) as {
     controlPlane: {
       nav?: Record<string, string>;
-      commandPalette?: {
-        placeholder?: string;
-        items?: Record<string, string>;
-      };
     };
   };
 }
@@ -18,7 +14,7 @@ function readSource(path: string) {
 }
 
 describe("control-plane copy", () => {
-  it("defines the root navigation and command palette keys used by the shell", () => {
+  it("defines the root navigation keys used by the shell", () => {
     for (const locale of ["en", "es"] as const) {
       const messages = readJson(`../../../messages/${locale}.json`);
 
@@ -32,17 +28,6 @@ describe("control-plane copy", () => {
         users: expect.any(String),
         details: expect.any(String),
       });
-      expect(messages.controlPlane.commandPalette?.placeholder).toEqual(expect.any(String));
-      expect(messages.controlPlane.commandPalette?.placeholder).not.toMatch(/customer name/i);
-      expect(messages.controlPlane.commandPalette?.items).toMatchObject({
-        dashboard: expect.any(String),
-        customers: expect.any(String),
-        agents: expect.any(String),
-        releases: expect.any(String),
-        recorders: expect.any(String),
-        operations: expect.any(String),
-        users: expect.any(String),
-      });
     }
   });
 
@@ -53,7 +38,6 @@ describe("control-plane copy", () => {
       "./users/page.tsx",
       "./releases/page.tsx",
       "./recorders/page.tsx",
-      "./_components/ops-agent-chat.tsx",
     ].map(readSource).join("\n");
 
     for (const forbidden of [
@@ -65,6 +49,29 @@ describe("control-plane copy", () => {
       "demo/dogfooding",
     ]) {
       expect(sources).not.toContain(forbidden);
+    }
+  });
+
+  it("keeps primary shell navigation real and removes fake global controls", () => {
+    const layout = readSource("./layout.tsx");
+    const sidebar = readSource("./_components/sidebar.tsx");
+    const dashboard = readSource("./page.tsx");
+
+    expect(sidebar).toContain("controlPlaneNavGroups");
+    expect(sidebar).toContain("isControlPlaneNavItemActive");
+    expect(dashboard).toContain('id="fleet"');
+
+    for (const removed of [
+      "CommandPalette",
+      "OpsAgentChat",
+      "Ops Copilot",
+      "Ready for queries",
+      "Bell",
+      "Sparkles",
+      "onOpenSearch",
+      "onOpenChat",
+    ]) {
+      expect(`${layout}\n${sidebar}`).not.toContain(removed);
     }
   });
 
