@@ -2673,39 +2673,208 @@ export type ControlPlaneCustomerSummary = {
   supportOperations: [];
 };
 
+const controlPlaneCustomerSummaryDeploymentSelect = {
+  id: true,
+  label: true,
+  url: true,
+  customerSlug: true,
+  customerAccountId: true,
+  deploymentStatus: true,
+  remoteWorkspaceSlug: true,
+  provisioningStatus: true,
+  releaseImageTag: true,
+  releaseVersion: true,
+  lastHealthStatus: true,
+  lastHealthError: true,
+  lastHealthCheck: true,
+  lastReleaseCheck: true,
+  supportCredentialEnc: true,
+  supportConnectorStatus: true,
+  managedWorkspaceId: true,
+  createdAt: true,
+  updatedAt: true,
+} satisfies Prisma.CustomerDeploymentSelect;
+
+type ControlPlaneCustomerSummaryDeployment = Prisma.CustomerDeploymentGetPayload<{
+  select: typeof controlPlaneCustomerSummaryDeploymentSelect;
+}>;
+
+type ControlPlaneCustomerSummaryRow = ControlPlaneCustomerSummary & {
+  sortDate: Date;
+  queryValues: string[];
+  healthValue: string;
+  supportValue: string;
+};
+
+function controlPlaneCustomerSummaryFromDeployment(params: {
+  deployment: ControlPlaneCustomerSummaryDeployment;
+  account?: {
+    id: string;
+    slug: string;
+    displayName: string;
+    updatedAt: Date;
+  } | null;
+}): ControlPlaneCustomerSummaryRow {
+  const deployment = params.deployment;
+  const customerSlug = deployment.customerSlug
+    ?? params.account?.slug
+    ?? deployment.remoteWorkspaceSlug
+    ?? null;
+  const summary: ControlPlaneCustomerSummary = {
+    id: deployment.id,
+    label: deployment.label || params.account?.displayName || customerSlug || deployment.id,
+    customerSlug,
+    url: deployment.url,
+    hasDeployment: true,
+    hasSupportCredential: Boolean(deployment.supportCredentialEnc),
+    supportConnectorStatus: deployment.supportConnectorStatus,
+    lastHealthStatus: deployment.lastHealthStatus,
+    lastHealthError: deployment.lastHealthError,
+    lastHealthCheck: deployment.lastHealthCheck,
+    lastReleaseCheck: deployment.lastReleaseCheck,
+    releaseImageTag: deployment.releaseImageTag,
+    releaseVersion: deployment.releaseVersion,
+    managedWorkspaceId: deployment.managedWorkspaceId,
+    provisioningStatus: deployment.provisioningStatus,
+    supportOperations: [],
+  };
+
+  return {
+    ...summary,
+    sortDate: deployment.updatedAt ?? deployment.createdAt ?? params.account?.updatedAt ?? new Date(0),
+    healthValue: normalizedStatus(summary.lastHealthStatus || summary.provisioningStatus),
+    supportValue: normalizedStatus(summary.supportConnectorStatus),
+    queryValues: [
+      summary.label,
+      summary.customerSlug,
+      summary.url,
+      summary.lastHealthStatus,
+      summary.lastHealthError,
+      summary.releaseImageTag,
+      summary.releaseVersion,
+      summary.provisioningStatus,
+      params.account?.displayName,
+      params.account?.slug,
+    ].filter((value): value is string => Boolean(value)),
+  };
+}
+
+function controlPlaneCustomerSummaryFromAccount(account: {
+  id: string;
+  slug: string;
+  displayName: string;
+  createdAt: Date;
+  updatedAt: Date;
+}): ControlPlaneCustomerSummaryRow {
+  const summary: ControlPlaneCustomerSummary = {
+    id: account.id,
+    label: account.displayName,
+    customerSlug: account.slug,
+    url: "",
+    hasDeployment: false,
+    hasSupportCredential: false,
+    supportConnectorStatus: "not_configured",
+    lastHealthStatus: null,
+    lastHealthError: null,
+    lastHealthCheck: null,
+    lastReleaseCheck: null,
+    releaseImageTag: null,
+    releaseVersion: null,
+    managedWorkspaceId: null,
+    provisioningStatus: "draft",
+    supportOperations: [],
+  };
+
+  return {
+    ...summary,
+    sortDate: account.updatedAt ?? account.createdAt,
+    healthValue: normalizedStatus(summary.provisioningStatus),
+    supportValue: normalizedStatus(summary.supportConnectorStatus),
+    queryValues: [summary.label, summary.customerSlug, summary.provisioningStatus].filter((value): value is string => Boolean(value)),
+  };
+}
+
+function controlPlaneCustomerSummaryMatches(row: ControlPlaneCustomerSummaryRow, filters: {
+  query: string;
+  health: string;
+  support: string;
+}) {
+  return (!filters.query || row.queryValues.some((value) => value.toLowerCase().includes(filters.query)))
+    && (!filters.health || row.healthValue === filters.health)
+    && (!filters.support || row.supportValue === filters.support);
+}
+
 export async function listControlPlaneCustomerSummaries(actor: AppActor, params: {
   query?: string | null;
   health?: string | null;
   support?: string | null;
   limit?: number | null;
 } = {}): Promise<ControlPlaneCustomerSummary[]> {
+  await requireControlPlaneAccess(actor);
   const limit = boundedInteger(params.limit, 500, 1, 500);
-  const fleet = await listControlPlaneFleetPage(actor, {
-    query: params.query,
-    health: params.health,
-    support: params.support,
-    page: 1,
-    pageSize: Math.max(limit, 10),
+  const filters = {
+    query: params.query?.trim().toLowerCase() ?? "",
+    health: params.health?.trim().toLowerCase() ?? "",
+    support: params.support?.trim().toLowerCase() ?? "",
+  };
+
+  const accounts = await prisma.customerAccount.findMany({
+    orderBy: { createdAt: "desc" },
+    select: {
+      id: true,
+      slug: true,
+      displayName: true,
+      primaryDeploymentId: true,
+      createdAt: true,
+      updatedAt: true,
+    },
+  });
+  const accountIds = accounts.map((account) => account.id);
+  const deployments = await prisma.customerDeployment.findMany({
+    where: accountIds.length
+      ? {
+          OR: [
+            { customerAccountId: { in: accountIds } },
+            { customerAccountId: null },
+          ],
+        }
+      : { customerAccountId: null },
+    orderBy: { createdAt: "desc" },
+    select: controlPlaneCustomerSummaryDeploymentSelect,
   });
 
-  return fleet.items.slice(0, limit).map((row) => ({
-    id: row.id,
-    label: row.label,
-    customerSlug: controlPlaneRowSlug(row),
-    url: row.url,
-    hasDeployment: row.hasDeployment,
-    hasSupportCredential: row.hasSupportCredential,
-    supportConnectorStatus: row.supportConnectorStatus,
-    lastHealthStatus: row.lastHealthStatus,
-    lastHealthError: row.lastHealthError,
-    lastHealthCheck: row.lastHealthCheck,
-    lastReleaseCheck: row.lastReleaseCheck,
-    releaseImageTag: row.releaseImageTag,
-    releaseVersion: row.releaseVersion,
-    managedWorkspaceId: row.managedWorkspaceId,
-    provisioningStatus: row.provisioningStatus,
-    supportOperations: [],
+  const deploymentsByAccount = new Map<string, ControlPlaneCustomerSummaryDeployment[]>();
+  const orphanedDeployments: ControlPlaneCustomerSummaryDeployment[] = [];
+  for (const deployment of deployments) {
+    if (!deployment.customerAccountId) {
+      orphanedDeployments.push(deployment);
+      continue;
+    }
+    const accountDeployments = deploymentsByAccount.get(deployment.customerAccountId) ?? [];
+    accountDeployments.push(deployment);
+    deploymentsByAccount.set(deployment.customerAccountId, accountDeployments);
+  }
+
+  const accountRows = accounts.map((account) => {
+    const accountDeployments = deploymentsByAccount.get(account.id) ?? [];
+    const deployment = accountDeployments.find((candidate) => candidate.id === account.primaryDeploymentId)
+      ?? accountDeployments.find((candidate) => candidate.deploymentStatus === "ACTIVE")
+      ?? accountDeployments[0]
+      ?? null;
+    return deployment
+      ? controlPlaneCustomerSummaryFromDeployment({ deployment, account })
+      : controlPlaneCustomerSummaryFromAccount(account);
+  });
+  const orphanedRows = orphanedDeployments.map((deployment) => controlPlaneCustomerSummaryFromDeployment({
+    deployment,
+    account: null,
   }));
+
+  return [...accountRows, ...orphanedRows]
+    .filter((row) => controlPlaneCustomerSummaryMatches(row, filters))
+    .sort((a, b) => b.sortDate.getTime() - a.sortDate.getTime())
+    .slice(0, limit)
+    .map(({ sortDate: _sortDate, queryValues: _queryValues, healthValue: _healthValue, supportValue: _supportValue, ...summary }) => summary);
 }
 
 function controlPlaneMatrixTone(status?: string | null): ControlPlaneMatrixStatus {

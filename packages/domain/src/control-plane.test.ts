@@ -1517,42 +1517,32 @@ describe("control plane domain", () => {
         id: "cust-1",
         slug: "acme",
         displayName: "Acme",
-        status: "ACTIVE",
-        managementAuthority: "CORGTEX",
-        supportOwnerEmail: null,
-        notes: null,
         primaryDeploymentId: "inst-1",
         createdAt: observedAt,
         updatedAt: observedAt,
-        fleetSnapshots: [],
-        deployments: [],
-        primaryDeployment: {
-          id: "inst-1",
-          label: "Acme",
-          url: "https://acme.test",
-          customerSlug: "acme",
-          customerAccountId: "cust-1",
-          supportCredentialEnc: "encrypted-token",
-          supportConnectorStatus: "connected",
-          provisioningStatus: "active",
-          lastHealthStatus: "ok",
-          lastHealthError: null,
-          lastHealthCheck: observedAt,
-          lastReleaseCheck: observedAt,
-          releaseImageTag: "sha-1",
-          releaseVersion: "main-2026-06-01",
-          managedWorkspaceId: "ws-1",
-          managedWorkspace: {
-            id: "ws-1",
-            slug: "acme",
-            name: "Acme",
-            _count: { members: 2, agentRuns: 1 },
-          },
-          fleetSnapshots: [],
-        },
       },
     ] as any);
-    prismaMock.customerDeployment.findMany.mockResolvedValueOnce([]);
+    prismaMock.customerDeployment.findMany.mockResolvedValueOnce([{
+      id: "inst-1",
+      label: "Acme",
+      url: "https://acme.test",
+      customerSlug: "acme",
+      customerAccountId: "cust-1",
+      deploymentStatus: "ACTIVE",
+      remoteWorkspaceSlug: null,
+      supportCredentialEnc: "encrypted-token",
+      supportConnectorStatus: "connected",
+      provisioningStatus: "active",
+      lastHealthStatus: "ok",
+      lastHealthError: null,
+      lastHealthCheck: observedAt,
+      lastReleaseCheck: observedAt,
+      releaseImageTag: "sha-1",
+      releaseVersion: "main-2026-06-01",
+      managedWorkspaceId: "ws-1",
+      createdAt: observedAt,
+      updatedAt: observedAt,
+    }] as any);
 
     const result = await listControlPlaneCustomerSummaries(operatorActor, {
       query: "acme",
@@ -1579,6 +1569,24 @@ describe("control plane domain", () => {
       provisioningStatus: "active",
       supportOperations: [],
     }]);
+    expect(prismaMock.customerAccount.findMany).toHaveBeenCalledWith({
+      orderBy: { createdAt: "desc" },
+      select: {
+        id: true,
+        slug: true,
+        displayName: true,
+        primaryDeploymentId: true,
+        createdAt: true,
+        updatedAt: true,
+      },
+    });
+    expect(prismaMock.customerDeployment.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      select: expect.not.objectContaining({
+        managedWorkspace: expect.anything(),
+        fleetSnapshots: expect.anything(),
+        supportOperations: expect.anything(),
+      }),
+    }));
   });
 
   it("builds client switcher options and wide local fleet overview rows without impersonation state", async () => {
