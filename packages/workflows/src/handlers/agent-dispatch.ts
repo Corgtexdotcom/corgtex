@@ -1,4 +1,4 @@
-import { runInboxTriageAgent, runDailyCheckInAgent, runMeetingSummaryAgent, runActionExtractionAgent, runProposalDraftingAgent, runConstitutionUpdateTriggerAgent, runFinanceReconciliationPrepAgent, runConstitutionSynthesisAgent, runAdviceRoutingAgent, runProcessLintingAgent, runSpendSubmissionAgent, runCrmDripFollowupAgent, runCrmEmailExtractionAgent, runCrmLeadEnrichmentAgent } from "@corgtex/agents";
+import { runInboxTriageAgent, runDailyCheckInAgent, runMeetingSummaryAgent, runActionExtractionAgent, runProposalDraftingAgent, runConstitutionUpdateTriggerAgent, runFinanceReconciliationPrepAgent, runConstitutionSynthesisAgent, runAdviceRoutingAgent, runProcessLintingAgent, runSpendSubmissionAgent, runCrmDripFollowupAgent, runCrmEmailExtractionAgent, runCrmLeadEnrichmentAgent, runCompanyUnderstandingAgent } from "@corgtex/agents";
 import { executeAgentRun } from "@corgtex/agents";
 import { runBrainMaintenance, absorbSource } from "@corgtex/agents";
 
@@ -136,6 +136,15 @@ export async function runAgentWorkflowJob(job: {
           });
           return { resultJson: result };
         }),
+    });
+  }
+
+  if (job.type === "agent.company-understanding") {
+    return runCompanyUnderstandingAgent({
+      workspaceId: job.workspaceId,
+      triggerRef: job.id,
+      sourceId: asString(payload.sourceId) || null,
+      triggerType: payload.triggerType === "MANUAL" ? "MANUAL" : "EVENT",
     });
   }
 

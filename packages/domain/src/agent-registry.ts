@@ -79,6 +79,16 @@ export const AGENT_REGISTRY = {
     inputs: ["brain source content", "article index"],
     outputs: ["updated/created articles", "backlinks"],
   },
+  "company-understanding": {
+    label: "Company Understanding",
+    description: "Synthesizes Brain evidence into company direction, questions, and context-map proposals.",
+    category: "knowledge",
+    canDisable: true,
+    defaultModelTier: "quality" as const,
+    costTier: "high" as const,
+    inputs: ["absorbed Brain articles", "recent Brain sources", "existing goals"],
+    outputs: ["evidence-backed goals", "open questions", "proposed context-map diffs"],
+  },
   "brain-maintenance": {
     label: "Brain Maintenance",
     description: "Weekly: stale detection, dead links, orphans, backlink rebuild.",
