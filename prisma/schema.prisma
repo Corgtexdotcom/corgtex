@@ -481,6 +481,13 @@ enum CustomerDeploymentStatus {
   RETIRED
 }
 
+enum CustomerDeploymentCloudProvider {
+  RAILWAY
+  AZURE
+  SELF_HOSTED
+  UNKNOWN
+}
+
 enum FleetSnapshotKind {
   HEALTH
   RELEASE
@@ -913,10 +920,10 @@ model User {
   createdBuildArtifacts         BuildArtifact[]                @relation("BuildArtifactCreator")
   productAnalyticsEvents        ProductAnalyticsEvent[]
   onboardingStates              UserWorkspaceOnboardingState[]
-  changedRoleVersions          RoleVersion[]                  @relation("RoleVersionChangedBy")
-  startedRoleHolderHistory     RoleHolderHistory[]            @relation("RoleHolderHistoryStartedBy")
-  endedRoleHolderHistory       RoleHolderHistory[]            @relation("RoleHolderHistoryEndedBy")
-  editedWorkItemVersions       WorkItemVersion[]              @relation("WorkItemVersionEditedBy")
+  changedRoleVersions           RoleVersion[]                  @relation("RoleVersionChangedBy")
+  startedRoleHolderHistory      RoleHolderHistory[]            @relation("RoleHolderHistoryStartedBy")
+  endedRoleHolderHistory        RoleHolderHistory[]            @relation("RoleHolderHistoryEndedBy")
+  editedWorkItemVersions        WorkItemVersion[]              @relation("WorkItemVersionEditedBy")
 }
 
 model Session {
@@ -1117,43 +1124,43 @@ model WorkspaceToolLinkCircleTag {
 }
 
 model CatalogItem {
-  id                 String            @id @default(uuid())
+  id                 String                @id @default(uuid())
   workspaceId        String
   createdByUserId    String?
   ownerUserId        String?
   type               CatalogItemType
-  sourceType         CatalogSourceType @default(MANUAL)
+  sourceType         CatalogSourceType     @default(MANUAL)
   sourceId           String?
   title              String
   slug               String
   outcome            String?
-  descriptionMd      String?           @db.Text
-  accessNotesMd      String?           @db.Text
-  url                String?           @db.Text
-  category           String            @default("OTHER")
-  status             CatalogItemStatus @default(PUBLISHED)
-  accessMode         CatalogAccessMode @default(OPEN)
-  requestedScopes    String[]          @default([])
+  descriptionMd      String?               @db.Text
+  accessNotesMd      String?               @db.Text
+  url                String?               @db.Text
+  category           String                @default("OTHER")
+  status             CatalogItemStatus     @default(PUBLISHED)
+  accessMode         CatalogAccessMode     @default(OPEN)
+  requestedScopes    String[]              @default([])
   monthlyBudgetCents Int?
   dailyCallLimit     Int?
-  featured           Boolean           @default(false)
-  appCategory        AppCategory       @default(OTHER)
-  appVisibility      AppVisibility     @default(WORKSPACE_PRIVATE)
-  hostingMode        AppHostingMode    @default(EXTERNAL_URL)
-  integrationDepth   AppIntegrationDepth @default(CATALOG_ONLY)
+  featured           Boolean               @default(false)
+  appCategory        AppCategory           @default(OTHER)
+  appVisibility      AppVisibility         @default(WORKSPACE_PRIVATE)
+  hostingMode        AppHostingMode        @default(EXTERNAL_URL)
+  integrationDepth   AppIntegrationDepth   @default(CATALOG_ONLY)
   installationStatus AppInstallationStatus @default(INSTALLED)
-  supportUrl         String?           @db.Text
-  appMcpUrl          String?           @db.Text
-  dataClassification String?           @default("INTERNAL")
-  proofUrl           String?           @db.Text
-  reviewUrl          String?           @db.Text
+  supportUrl         String?               @db.Text
+  appMcpUrl          String?               @db.Text
+  dataClassification String?               @default("INTERNAL")
+  proofUrl           String?               @db.Text
+  reviewUrl          String?               @db.Text
   manifestJson       Json?
   capabilitiesJson   Json?
   archivedAt         DateTime?
   archivedByUserId   String?
   archiveReason      String?
-  createdAt          DateTime          @default(now())
-  updatedAt          DateTime          @updatedAt
+  createdAt          DateTime              @default(now())
+  updatedAt          DateTime              @updatedAt
 
   workspace              Workspace                    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   createdBy              User?                        @relation("CatalogItemCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
@@ -1229,24 +1236,24 @@ model CatalogSettings {
 }
 
 model AppDefinition {
-  id                      String               @id @default(uuid())
-  appKey                  String               @unique @db.VarChar(96)
+  id                      String              @id @default(uuid())
+  appKey                  String              @unique @db.VarChar(96)
   title                   String
-  descriptionMd           String?              @db.Text
-  repositoryUrl           String?              @db.Text
-  manifestUrl             String?              @db.Text
-  category                AppCategory          @default(OTHER)
-  visibility              AppVisibility        @default(CORGTEX_MANAGED)
-  defaultHostingMode      AppHostingMode       @default(CORGTEX_MANAGED_EXTERNAL)
-  defaultIntegrationDepth AppIntegrationDepth  @default(LAUNCHABLE)
-  dataClassification      String               @default("INTERNAL") @db.VarChar(64)
-  supportedSurfaces       AppSurface[]         @default([])
-  requestedScopes         String[]             @default([])
+  descriptionMd           String?             @db.Text
+  repositoryUrl           String?             @db.Text
+  manifestUrl             String?             @db.Text
+  category                AppCategory         @default(OTHER)
+  visibility              AppVisibility       @default(CORGTEX_MANAGED)
+  defaultHostingMode      AppHostingMode      @default(CORGTEX_MANAGED_EXTERNAL)
+  defaultIntegrationDepth AppIntegrationDepth @default(LAUNCHABLE)
+  dataClassification      String              @default("INTERNAL") @db.VarChar(64)
+  supportedSurfaces       AppSurface[]        @default([])
+  requestedScopes         String[]            @default([])
   manifestJson            Json?
   capabilitiesJson        Json?
-  status                  AppDefinitionStatus  @default(ACTIVE)
-  createdAt               DateTime             @default(now())
-  updatedAt               DateTime             @updatedAt
+  status                  AppDefinitionStatus @default(ACTIVE)
+  createdAt               DateTime            @default(now())
+  updatedAt               DateTime            @updatedAt
 
   installations AppInstallation[]
   runtimes      AppRuntime[]
@@ -1258,8 +1265,8 @@ model AppDefinition {
 
 model AppRuntime {
   id                   String           @id @default(uuid())
-  appDefinitionId       String
-  customerDeploymentId  String?
+  appDefinitionId      String
+  customerDeploymentId String?
   mode                 AppRuntimeMode
   status               AppRuntimeStatus @default(PROVISIONING)
   environment          String           @default("production") @db.VarChar(64)
@@ -1311,35 +1318,35 @@ model AppRelease {
 }
 
 model AppInstallation {
-  id                 String                @id @default(uuid())
-  workspaceId        String
-  appDefinitionId    String
-  catalogItemId      String?
-  runtimeId          String?
-  releaseId          String?
-  status             AppInstallationStatus @default(NEEDS_SETUP)
-  tenantExternalId   String?
-  tenantMappingJson  Json?
-  installedByUserId  String?
-  installedAt        DateTime?
-  requestedScopes    String[]              @default([])
-  grantedScopes      String[]              @default([])
-  launchPath         String?               @db.Text
-  sessionTtlSeconds  Int                   @default(300)
-  configJson         Json?
-  lastHealthAt       DateTime?
-  lastHealthStatus   String?
-  lastHealthError    String?               @db.Text
-  createdAt          DateTime              @default(now())
-  updatedAt          DateTime              @updatedAt
+  id                String                @id @default(uuid())
+  workspaceId       String
+  appDefinitionId   String
+  catalogItemId     String?
+  runtimeId         String?
+  releaseId         String?
+  status            AppInstallationStatus @default(NEEDS_SETUP)
+  tenantExternalId  String?
+  tenantMappingJson Json?
+  installedByUserId String?
+  installedAt       DateTime?
+  requestedScopes   String[]              @default([])
+  grantedScopes     String[]              @default([])
+  launchPath        String?               @db.Text
+  sessionTtlSeconds Int                   @default(300)
+  configJson        Json?
+  lastHealthAt      DateTime?
+  lastHealthStatus  String?
+  lastHealthError   String?               @db.Text
+  createdAt         DateTime              @default(now())
+  updatedAt         DateTime              @updatedAt
 
-  workspace       Workspace              @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  appDefinition   AppDefinition          @relation(fields: [appDefinitionId], references: [id], onDelete: Cascade)
-  catalogItem     CatalogItem?           @relation(fields: [catalogItemId], references: [id], onDelete: SetNull)
-  runtime         AppRuntime?            @relation(fields: [runtimeId], references: [id], onDelete: SetNull)
-  release         AppRelease?            @relation(fields: [releaseId], references: [id], onDelete: SetNull)
+  workspace          Workspace              @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  appDefinition      AppDefinition          @relation(fields: [appDefinitionId], references: [id], onDelete: Cascade)
+  catalogItem        CatalogItem?           @relation(fields: [catalogItemId], references: [id], onDelete: SetNull)
+  runtime            AppRuntime?            @relation(fields: [runtimeId], references: [id], onDelete: SetNull)
+  release            AppRelease?            @relation(fields: [releaseId], references: [id], onDelete: SetNull)
   surfaceAssignments AppSurfaceAssignment[]
-  sessions        AppSession[]
+  sessions           AppSession[]
 
   @@unique([workspaceId, appDefinitionId])
   @@index([workspaceId, status])
@@ -1348,15 +1355,15 @@ model AppInstallation {
 }
 
 model AppSurfaceAssignment {
-  id                String   @id @default(uuid())
+  id                String     @id @default(uuid())
   workspaceId       String
   surface           AppSurface
   appInstallationId String
-  enabled           Boolean  @default(true)
+  enabled           Boolean    @default(true)
   assignedByUserId  String?
-  reasonMd          String?  @db.Text
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
+  reasonMd          String?    @db.Text
+  createdAt         DateTime   @default(now())
+  updatedAt         DateTime   @updatedAt
 
   workspace       Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   appInstallation AppInstallation @relation(fields: [appInstallationId], references: [id], onDelete: Cascade)
@@ -1464,11 +1471,11 @@ model Role {
   createdAt        DateTime  @default(now())
   updatedAt        DateTime  @updatedAt
 
-  circle           Circle                  @relation(fields: [circleId], references: [id], onDelete: Cascade)
-  assignments      RoleAssignment[]
-  agentAssignments CircleAgentAssignment[]
-  versions         RoleVersion[]
-  holderHistory    RoleHolderHistory[]
+  circle             Circle                  @relation(fields: [circleId], references: [id], onDelete: Cascade)
+  assignments        RoleAssignment[]
+  agentAssignments   CircleAgentAssignment[]
+  versions           RoleVersion[]
+  holderHistory      RoleHolderHistory[]
   onboardingSessions RoleOnboardingSession[]
 
   @@index([circleId])
@@ -2949,11 +2956,11 @@ model ConversationSession {
   createdAt    DateTime           @default(now())
   updatedAt    DateTime           @updatedAt
 
-  workspace Workspace          @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  user      User               @relation(fields: [userId], references: [id], onDelete: Cascade)
-  turns     ConversationTurn[]
+  workspace      Workspace              @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user           User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  turns          ConversationTurn[]
   roleOnboarding RoleOnboardingSession?
-  checkIns  CheckIn[]
+  checkIns       CheckIn[]
 
   @@index([workspaceId, userId, status])
 }
@@ -4408,23 +4415,24 @@ model CustomerAccount {
 }
 
 model CustomerDeployment {
-  id                           String                   @id @default(uuid())
+  id                           String                          @id @default(uuid())
   label                        String
-  url                          String                   @unique
-  environment                  String                   @default("production")
+  url                          String                          @unique
+  environment                  String                          @default("production")
   notes                        String?
   customerSlug                 String?
   customerAccountId            String?
-  deploymentKind               CustomerDeploymentKind   @default(REMOTE_MANAGED)
-  deploymentStatus             CustomerDeploymentStatus @default(DRAFT)
+  deploymentKind               CustomerDeploymentKind          @default(REMOTE_MANAGED)
+  deploymentStatus             CustomerDeploymentStatus        @default(DRAFT)
+  cloudProvider                CustomerDeploymentCloudProvider @default(RAILWAY)
   remoteWorkspaceSlug          String?
   remoteWorkspaceId            String?
   region                       String?
   dataResidency                String?
   customDomain                 String?
   supportOwnerEmail            String?
-  provisioningStatus           String                   @default("draft")
-  bootstrapStatus              String                   @default("not_started")
+  provisioningStatus           String                          @default("draft")
+  bootstrapStatus              String                          @default("not_started")
   releaseVersion               String?
   releaseImageTag              String?
   railwayProjectId             String?
@@ -4433,6 +4441,18 @@ model CustomerDeployment {
   railwayWorkerServiceId       String?
   railwayPostgresServiceId     String?
   railwayRedisServiceId        String?
+  providerSubscriptionId       String?
+  providerResourceGroup        String?
+  providerProjectId            String?
+  providerEnvironmentId        String?
+  providerWebServiceId         String?
+  providerWorkerServiceId      String?
+  providerPostgresServiceId    String?
+  providerRedisServiceId       String?
+  providerStorageResourceId    String?
+  providerLogsUrl              String?
+  providerCostUrl              String?
+  providerMetadata             Json?
   storageBucketName            String?
   bootstrapBundleUri           String?
   bootstrapBundleChecksum      String?
@@ -4448,34 +4468,36 @@ model CustomerDeployment {
   supportMcpUrl                String?
   supportCredentialEnc         String?
   supportCredentialLabel       String?
-  supportConnectorStatus       String                   @default("not_configured")
-  supportAccessMode            String                   @default("broad")
+  supportConnectorStatus       String                          @default("not_configured")
+  supportAccessMode            String                          @default("broad")
   supportLastConnectedAt       DateTime?
   supportLastSyncAt            DateTime?
   supportLastSyncError         String?
   supportNotes                 String?
-  managedWorkspaceId           String?                  @unique
-  createdAt                    DateTime                 @default(now())
-  updatedAt                    DateTime                 @updatedAt
+  managedWorkspaceId           String?                         @unique
+  createdAt                    DateTime                        @default(now())
+  updatedAt                    DateTime                        @updatedAt
 
-  events            CustomerDeploymentEvent[]
-  accessGrants      CustomerDeploymentAccess[]
-  supportOperations SupportOperation[]
-  recorderSmokeRuns MeetingRecorderSmokeRun[]
-  managedWorkspace  Workspace?                 @relation(fields: [managedWorkspaceId], references: [id], onDelete: SetNull)
-  customerAccount   CustomerAccount?           @relation("CustomerAccountDeployments", fields: [customerAccountId], references: [id], onDelete: SetNull)
-  primaryForAccount CustomerAccount?           @relation("CustomerAccountPrimaryDeployment")
-  fleetSnapshots    FleetHealthSnapshot[]
-  entitlements      CustomerEntitlement[]
-  releaseTargets    CustomerReleaseTarget[]
-  appRuntimes       AppRuntime[]
-  clientMigrationsAsSource      ClientMigrationRun[] @relation("ClientMigrationSourceDeployment")
-  clientMigrationsAsDestination ClientMigrationRun[] @relation("ClientMigrationDestinationDeployment")
+  events                        CustomerDeploymentEvent[]
+  accessGrants                  CustomerDeploymentAccess[]
+  supportOperations             SupportOperation[]
+  recorderSmokeRuns             MeetingRecorderSmokeRun[]
+  managedWorkspace              Workspace?                 @relation(fields: [managedWorkspaceId], references: [id], onDelete: SetNull)
+  customerAccount               CustomerAccount?           @relation("CustomerAccountDeployments", fields: [customerAccountId], references: [id], onDelete: SetNull)
+  primaryForAccount             CustomerAccount?           @relation("CustomerAccountPrimaryDeployment")
+  fleetSnapshots                FleetHealthSnapshot[]
+  entitlements                  CustomerEntitlement[]
+  releaseTargets                CustomerReleaseTarget[]
+  appRuntimes                   AppRuntime[]
+  clientMigrationsAsSource      ClientMigrationRun[]       @relation("ClientMigrationSourceDeployment")
+  clientMigrationsAsDestination ClientMigrationRun[]       @relation("ClientMigrationDestinationDeployment")
 
   @@index([customerAccountId])
   @@index([customerSlug])
   @@index([deploymentKind])
   @@index([deploymentStatus])
+  @@index([cloudProvider])
+  @@index([cloudProvider, deploymentStatus])
   @@index([provisioningStatus])
   @@index([bootstrapStatus])
   @@index([region])
@@ -4582,9 +4604,9 @@ model ClientMigrationRun {
   createdAt               DateTime  @default(now())
   updatedAt               DateTime  @updatedAt
 
-  customerAccount       CustomerAccount     @relation(fields: [customerAccountId], references: [id], onDelete: Cascade)
-  sourceDeployment      CustomerDeployment  @relation("ClientMigrationSourceDeployment", fields: [sourceDeploymentId], references: [id], onDelete: Cascade)
-  destinationDeployment CustomerDeployment? @relation("ClientMigrationDestinationDeployment", fields: [destinationDeploymentId], references: [id], onDelete: SetNull)
+  customerAccount       CustomerAccount        @relation(fields: [customerAccountId], references: [id], onDelete: Cascade)
+  sourceDeployment      CustomerDeployment     @relation("ClientMigrationSourceDeployment", fields: [sourceDeploymentId], references: [id], onDelete: Cascade)
+  destinationDeployment CustomerDeployment?    @relation("ClientMigrationDestinationDeployment", fields: [destinationDeploymentId], references: [id], onDelete: SetNull)
   idMaps                ClientMigrationIdMap[]
 
   @@index([customerAccountId, status, createdAt])
@@ -4593,14 +4615,14 @@ model ClientMigrationRun {
 }
 
 model ClientMigrationIdMap {
-  id               String   @id @default(uuid())
-  migrationRunId   String
-  entityType       String
-  sourceId         String
-  destinationId    String?
-  checksum         String?
-  metadata         Json?
-  createdAt        DateTime @default(now())
+  id             String   @id @default(uuid())
+  migrationRunId String
+  entityType     String
+  sourceId       String
+  destinationId  String?
+  checksum       String?
+  metadata       Json?
+  createdAt      DateTime @default(now())
 
   migrationRun ClientMigrationRun @relation(fields: [migrationRunId], references: [id], onDelete: Cascade)
 

@@ -2,7 +2,7 @@ import { createHash, createHmac } from "node:crypto";
 
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
-import type { MemberRole, Prisma } from "@prisma/client";
+import type { CustomerDeploymentCloudProvider, MemberRole, Prisma } from "@prisma/client";
 import { AppError, invariant } from "./errors";
 import { requestPasswordReset } from "./password-reset";
 import { createMember } from "./members";
@@ -41,6 +41,76 @@ const CUSTOMER_DEPLOYMENT_BOOTSTRAP_STATUSES = new Set([
 ]);
 
 const CONTROL_PLANE_CLIENTS_WRITE_SCOPE = "control-plane:clients:write";
+
+const CUSTOMER_DEPLOYMENT_CLOUD_PROVIDER_LABELS: Record<CustomerDeploymentCloudProvider, string> = {
+  RAILWAY: "Railway",
+  AZURE: "Azure",
+  SELF_HOSTED: "Self-hosted",
+  UNKNOWN: "Unknown",
+};
+
+type CustomerDeploymentProviderFields = {
+  cloudProvider?: CustomerDeploymentCloudProvider | null;
+  railwayProjectId?: string | null;
+  railwayEnvironmentId?: string | null;
+  railwayWebServiceId?: string | null;
+  railwayWorkerServiceId?: string | null;
+  railwayPostgresServiceId?: string | null;
+  railwayRedisServiceId?: string | null;
+  providerSubscriptionId?: string | null;
+  providerResourceGroup?: string | null;
+  providerProjectId?: string | null;
+  providerEnvironmentId?: string | null;
+  providerWebServiceId?: string | null;
+  providerWorkerServiceId?: string | null;
+  providerPostgresServiceId?: string | null;
+  providerRedisServiceId?: string | null;
+  providerStorageResourceId?: string | null;
+  providerLogsUrl?: string | null;
+  providerCostUrl?: string | null;
+  providerMetadata?: unknown;
+  storageBucketName?: string | null;
+};
+
+export type CustomerDeploymentProviderReadModel = {
+  cloudProvider: CustomerDeploymentCloudProvider;
+  providerLabel: string;
+  providerSubscriptionId: string | null;
+  providerResourceGroup: string | null;
+  providerProjectId: string | null;
+  providerEnvironmentId: string | null;
+  providerWebServiceId: string | null;
+  providerWorkerServiceId: string | null;
+  providerPostgresServiceId: string | null;
+  providerRedisServiceId: string | null;
+  providerStorageResourceId: string | null;
+  providerLogsUrl: string | null;
+  providerCostUrl: string | null;
+  providerMetadata: unknown;
+};
+
+export function buildCustomerDeploymentProviderReadModel(
+  deployment: CustomerDeploymentProviderFields,
+): CustomerDeploymentProviderReadModel {
+  const cloudProvider = deployment.cloudProvider ?? "RAILWAY";
+  const useRailwayFallback = cloudProvider === "RAILWAY";
+  return {
+    cloudProvider,
+    providerLabel: CUSTOMER_DEPLOYMENT_CLOUD_PROVIDER_LABELS[cloudProvider],
+    providerSubscriptionId: deployment.providerSubscriptionId ?? null,
+    providerResourceGroup: deployment.providerResourceGroup ?? null,
+    providerProjectId: deployment.providerProjectId ?? (useRailwayFallback ? deployment.railwayProjectId ?? null : null),
+    providerEnvironmentId: deployment.providerEnvironmentId ?? (useRailwayFallback ? deployment.railwayEnvironmentId ?? null : null),
+    providerWebServiceId: deployment.providerWebServiceId ?? (useRailwayFallback ? deployment.railwayWebServiceId ?? null : null),
+    providerWorkerServiceId: deployment.providerWorkerServiceId ?? (useRailwayFallback ? deployment.railwayWorkerServiceId ?? null : null),
+    providerPostgresServiceId: deployment.providerPostgresServiceId ?? (useRailwayFallback ? deployment.railwayPostgresServiceId ?? null : null),
+    providerRedisServiceId: deployment.providerRedisServiceId ?? (useRailwayFallback ? deployment.railwayRedisServiceId ?? null : null),
+    providerStorageResourceId: deployment.providerStorageResourceId ?? deployment.storageBucketName ?? null,
+    providerLogsUrl: deployment.providerLogsUrl ?? null,
+    providerCostUrl: deployment.providerCostUrl ?? null,
+    providerMetadata: deployment.providerMetadata ?? null,
+  };
+}
 
 type CustomerDeploymentHealthPayload = {
   status?: string;
@@ -498,6 +568,7 @@ export async function listCustomerDeployments(actor: AppActor) {
   });
   return deployments.map((deployment) => ({
     ...deployment,
+    provider: buildCustomerDeploymentProviderReadModel(deployment),
     readiness: buildCustomerDeploymentReadiness(deployment),
   }));
 }
@@ -854,6 +925,7 @@ function readinessCheck(
 }
 
 export function buildCustomerDeploymentReadiness(deployment: {
+  cloudProvider?: CustomerDeploymentCloudProvider | null;
   url?: string | null;
   customDomain?: string | null;
   region?: string | null;
@@ -869,33 +941,78 @@ export function buildCustomerDeploymentReadiness(deployment: {
   railwayWorkerServiceId?: string | null;
   railwayPostgresServiceId?: string | null;
   railwayRedisServiceId?: string | null;
+  providerSubscriptionId?: string | null;
+  providerResourceGroup?: string | null;
+  providerProjectId?: string | null;
+  providerEnvironmentId?: string | null;
+  providerWebServiceId?: string | null;
+  providerWorkerServiceId?: string | null;
+  providerPostgresServiceId?: string | null;
+  providerRedisServiceId?: string | null;
+  providerStorageResourceId?: string | null;
+  providerLogsUrl?: string | null;
+  providerCostUrl?: string | null;
+  providerMetadata?: unknown;
   storageBucketName?: string | null;
   lastHealthStatus?: string | null;
   lastHealthError?: string | null;
   lastHealthCheck?: Date | string | null;
   lastReleaseCheck?: Date | string | null;
 }) {
-  const railwayServicesPresent = Boolean(
-    deployment.railwayProjectId
-    && deployment.railwayEnvironmentId
-    && deployment.railwayWebServiceId
-    && deployment.railwayWorkerServiceId
-    && deployment.railwayPostgresServiceId
-    && deployment.railwayRedisServiceId,
-  );
+  const provider = buildCustomerDeploymentProviderReadModel(deployment);
   const healthOk = deployment.lastHealthStatus === "ok";
   const releasePinned = Boolean(deployment.releaseImageTag || deployment.releaseVersion);
   const releaseVerified = releasePinned && Boolean(deployment.lastReleaseCheck) && !deployment.lastHealthError?.includes("Release drift:");
   const runtimeVerified = healthOk && !deployment.lastHealthError;
+  const storageLabel = provider.cloudProvider === "AZURE"
+    ? "Azure Blob storage"
+    : provider.cloudProvider === "RAILWAY" ? "Railway Bucket storage" : `${provider.providerLabel} storage`;
+  const providerResourcesCheck = (() => {
+    if (provider.cloudProvider === "AZURE") {
+      return readinessCheck(
+        "azure_resources",
+        "Azure resources",
+        Boolean(
+          provider.providerSubscriptionId
+          && provider.providerResourceGroup
+          && provider.providerEnvironmentId
+          && provider.providerWebServiceId
+          && provider.providerWorkerServiceId
+          && provider.providerPostgresServiceId
+          && provider.providerRedisServiceId,
+        ),
+        "Subscription, resource group, Container Apps, Postgres, and Redis resources are recorded.",
+        "Record the Azure subscription, resource group, Container Apps environment, web, worker, Postgres, and Redis resource IDs.",
+      );
+    }
+    if (provider.cloudProvider === "RAILWAY") {
+      return readinessCheck(
+        "railway_project",
+        "Railway services",
+        Boolean(
+          provider.providerProjectId
+          && provider.providerEnvironmentId
+          && provider.providerWebServiceId
+          && provider.providerWorkerServiceId
+          && provider.providerPostgresServiceId
+          && provider.providerRedisServiceId,
+        ),
+        "Project, environment, web, worker, Postgres, and Redis IDs are recorded.",
+        "Record the Railway project, environment, web, worker, Postgres, and Redis IDs.",
+      );
+    }
+    return readinessCheck(
+      "provider_metadata",
+      `${provider.providerLabel} resources`,
+      Boolean(provider.providerMetadata),
+      "Provider metadata is recorded.",
+      "Record sanitized provider metadata for this deployment.",
+      "warning",
+    );
+  })();
 
   const checks: CustomerDeploymentReadinessCheck[] = [
-    readinessCheck(
-      "railway_project",
-      "Railway services",
-      railwayServicesPresent,
-      "Project, environment, web, worker, Postgres, and Redis IDs are recorded.",
-      "Record the Railway project, environment, web, worker, Postgres, and Redis IDs.",
-    ),
+    providerResourcesCheck,
     readinessCheck(
       "region",
       "Region and residency",
@@ -913,10 +1030,12 @@ export function buildCustomerDeploymentReadiness(deployment: {
     ),
     readinessCheck(
       "storage",
-      "Railway Bucket storage",
-      Boolean(deployment.storageBucketName),
-      deployment.storageBucketName || "Storage bucket recorded.",
-      "Record the Railway Bucket name for this customer.",
+      storageLabel,
+      Boolean(provider.providerStorageResourceId),
+      provider.providerStorageResourceId || "Storage resource recorded.",
+      provider.cloudProvider === "AZURE"
+        ? "Record the Azure Blob Storage account or container resource ID for this customer."
+        : `Record the ${storageLabel} resource for this customer.`,
     ),
     readinessCheck(
       "health",

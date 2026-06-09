@@ -129,6 +129,51 @@ describe("customer lifecycle", () => {
     });
   });
 
+  it("registers Azure provider metadata without Railway service IDs", async () => {
+    const { registerCustomerDeployment } = await import("./customer-lifecycle");
+
+    await registerCustomerDeployment({
+      accountSlug: "selfserve",
+      accountDisplayName: "Self-Serve",
+      accountStatus: "ONBOARDING",
+      label: "Self-Serve Azure",
+      url: "https://selfserve.corgtex.com/",
+      deploymentKind: "SHARED_WORKSPACE",
+      deploymentStatus: "PROVISIONING",
+      cloudProvider: "AZURE",
+      customerSlug: "selfserve",
+      region: "westus2",
+      dataResidency: "us",
+      providerSubscriptionId: "sub-1",
+      providerResourceGroup: "rg-corgtex-selfserve-staging",
+      providerEnvironmentId: "aca-env-1",
+      providerWebServiceId: "aca-web-1",
+      providerWorkerServiceId: "aca-worker-1",
+      providerPostgresServiceId: "postgres-1",
+      providerRedisServiceId: "redis-1",
+      providerStorageResourceId: "storage-1",
+      providerLogsUrl: "https://portal.azure.com/logs",
+      providerCostUrl: "https://portal.azure.com/costs",
+    });
+
+    expect(prismaMock.customerDeployment.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: { url: "https://selfserve.corgtex.com" },
+      update: expect.objectContaining({
+        cloudProvider: "AZURE",
+        providerSubscriptionId: "sub-1",
+        providerResourceGroup: "rg-corgtex-selfserve-staging",
+        providerEnvironmentId: "aca-env-1",
+        providerWebServiceId: "aca-web-1",
+        providerWorkerServiceId: "aca-worker-1",
+        providerPostgresServiceId: "postgres-1",
+        providerRedisServiceId: "redis-1",
+        providerStorageResourceId: "storage-1",
+        providerLogsUrl: "https://portal.azure.com/logs",
+        providerCostUrl: "https://portal.azure.com/costs",
+      }),
+    }));
+  });
+
   it("rejects deployment URL reuse across customer accounts", async () => {
     const { registerCustomerDeployment } = await import("./customer-lifecycle");
     prismaMock.customerDeployment.findUnique.mockResolvedValueOnce({
