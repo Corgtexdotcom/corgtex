@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { addKeyResult, createGoal, recomputeGoalProgress, returnGoalToDraft, updateGoal } from "./goals";
+import { addKeyResult, createGoal, createGoalLink, recomputeGoalProgress, returnGoalToDraft, updateGoal } from "./goals";
 import { prisma } from "@corgtex/shared";
 
 vi.mock("@corgtex/shared", () => ({
@@ -30,6 +30,7 @@ vi.mock("@corgtex/shared", () => ({
     },
     goalLink: {
       findMany: vi.fn(),
+      upsert: vi.fn(),
     },
     workItemVersion: {
       create: vi.fn(),
@@ -170,6 +171,55 @@ describe("Goals Domain", () => {
       });
 
       expect(prisma.goal.create).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("createGoalLink", () => {
+    it("stores evidence confidence and generated source metadata", async () => {
+      vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce({
+        id: "goal-1",
+        workspaceId: "ws-1",
+        archivedAt: null,
+      } as any);
+      vi.mocked(prisma.goalLink.upsert).mockResolvedValueOnce({
+        id: "link-1",
+        goalId: "goal-1",
+        entityType: "BrainSource",
+        entityId: "source-1",
+        confidence: 0.86,
+        linkedBy: "agent",
+        source: "company-understanding",
+      } as any);
+
+      const result = await createGoalLink(actor, {
+        workspaceId: "ws-1",
+        goalId: "goal-1",
+        entityType: "BrainSource",
+        entityId: "source-1",
+        confidence: 0.86,
+        linkedBy: "agent",
+        source: "company-understanding",
+        metadata: { snippet: "Expand customer onboarding" },
+      });
+
+      expect(result.id).toBe("link-1");
+      expect(prisma.goalLink.upsert).toHaveBeenCalledWith(expect.objectContaining({
+        create: expect.objectContaining({
+          goalId: "goal-1",
+          entityType: "BrainSource",
+          entityId: "source-1",
+          confidence: 0.86,
+          linkedBy: "agent",
+          source: "company-understanding",
+          metadata: { snippet: "Expand customer onboarding" },
+        }),
+        update: expect.objectContaining({
+          confidence: 0.86,
+          linkedBy: "agent",
+          source: "company-understanding",
+          metadata: { snippet: "Expand customer onboarding" },
+        }),
+      }));
     });
   });
 

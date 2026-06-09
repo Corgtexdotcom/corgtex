@@ -30,6 +30,13 @@ function clampProgressPercent(value: number, fieldName = "Progress") {
   return rounded;
 }
 
+function clampConfidence(value: number | undefined, fieldName = "Confidence") {
+  if (value === undefined) return undefined;
+  invariant(Number.isFinite(value), 400, "INVALID_INPUT", `${fieldName} must be a number.`);
+  invariant(value >= 0 && value <= 1, 400, "INVALID_INPUT", `${fieldName} must be between 0 and 1.`);
+  return value;
+}
+
 function keyResultProgress(keyResult: GoalKeyResultInput) {
   if (keyResult.targetValue && keyResult.targetValue > 0) {
     return clampProgressPercent(((keyResult.currentValue || 0) / keyResult.targetValue) * 100, "Key result progress");
@@ -691,6 +698,10 @@ export async function createGoalLink(
     goalId: string;
     entityType: string;
     entityId: string;
+    confidence?: number;
+    linkedBy?: string;
+    source?: string | null;
+    metadata?: Prisma.InputJsonValue;
     _membership?: MembershipSummary | null;
   }
 ) {
@@ -704,6 +715,9 @@ export async function createGoalLink(
     where: { id: params.goalId },
   });
   invariant(goal && goal.workspaceId === params.workspaceId && !goal.archivedAt, 404, "NOT_FOUND", "Goal not found.");
+  const confidence = clampConfidence(params.confidence) ?? 1;
+  const linkedBy = params.linkedBy?.trim() || "human";
+  const source = params.source?.trim() || null;
 
   return prisma.$transaction(async (tx) => {
     const link = await tx.goalLink.upsert({
@@ -718,8 +732,17 @@ export async function createGoalLink(
         goalId: params.goalId,
         entityType: params.entityType,
         entityId: params.entityId,
+        confidence,
+        linkedBy,
+        source,
+        metadata: params.metadata,
       },
-      update: {}, // no update needed if it exists
+      update: {
+        confidence,
+        linkedBy,
+        source,
+        metadata: params.metadata,
+      },
     });
 
     await appendEvents(tx, [
@@ -732,6 +755,8 @@ export async function createGoalLink(
           goalId: link.goalId,
           entityType: link.entityType,
           entityId: link.entityId,
+          confidence: link.confidence,
+          source: link.source,
         },
       },
     ]);
