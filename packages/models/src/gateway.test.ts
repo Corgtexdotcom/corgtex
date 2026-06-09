@@ -1,5 +1,20 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+const azureIdentityMock = vi.hoisted(() => ({
+  getToken: vi.fn(),
+  credentialOptions: [] as unknown[],
+  DefaultAzureCredential: vi.fn(function MockDefaultAzureCredential(options: unknown) {
+    azureIdentityMock.credentialOptions.push(options);
+    return {
+      getToken: azureIdentityMock.getToken,
+    };
+  }),
+}));
+
+vi.mock("@azure/identity", () => ({
+  DefaultAzureCredential: azureIdentityMock.DefaultAzureCredential,
+}));
+
 vi.mock("./usage", () => ({
   assertCatalogModelBudget: vi.fn().mockResolvedValue(undefined),
   assertWorkspaceModelBudget: vi.fn().mockResolvedValue(undefined),
@@ -20,6 +35,9 @@ afterEach(() => {
   vi.resetModules();
   vi.unstubAllGlobals();
   vi.useRealTimers();
+  azureIdentityMock.getToken.mockReset();
+  azureIdentityMock.DefaultAzureCredential.mockClear();
+  azureIdentityMock.credentialOptions.length = 0;
 });
 
 describe("fakeModelGateway", () => {
@@ -185,6 +203,141 @@ describe("openAICompatibleModelGateway", () => {
         type: "json_object",
       },
     });
+  });
+
+  it("sends Azure OpenAI API key headers without OpenRouter provider options", async () => {
+    restoreEnv();
+    Object.assign(process.env, {
+      MODEL_PROVIDER: "azure-openai",
+      MODEL_BASE_URL: "https://corgtex-openai.openai.azure.com/openai/v1",
+      AZURE_OPENAI_AUTH_MODE: "api_key",
+      AZURE_OPENAI_API_KEY: "azure-key",
+      MODEL_CHAT_DEFAULT: "corgtex-chat-fast",
+      MODEL_PRICE_OVERRIDES_JSON: JSON.stringify([
+        {
+          provider: "azure-openai",
+          model: "corgtex-chat-fast",
+          inputUsdPerToken: 0.00000015,
+          outputUsdPerToken: 0.0000006,
+        },
+      ]),
+    });
+
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({
+      choices: [{ message: { content: "Azure answer" } }],
+      usage: { prompt_tokens: 10, completion_tokens: 4 },
+    }), { status: 200 }));
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
+
+    const chat = await openAICompatibleModelGateway.chat({
+      workspaceId: "ws-1",
+      taskType: "CHAT",
+      messages: [{ role: "user", content: "Hello" }],
+    });
+
+    expect(chat.content).toBe("Azure answer");
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+
+    expect(url).toBe("https://corgtex-openai.openai.azure.com/openai/v1/chat/completions");
+    expect(init.headers).toMatchObject({
+      "api-key": "azure-key",
+      "content-type": "application/json",
+    });
+    expect(init.headers).not.toMatchObject({
+      authorization: expect.any(String),
+      "HTTP-Referer": expect.any(String),
+      "X-Title": expect.any(String),
+    });
+    expect(body.provider).toBeUndefined();
+    expect(chat.usage).toMatchObject({
+      provider: "azure-openai",
+      model: "corgtex-chat-fast",
+      estimatedCostUsd: "0.000008",
+    });
+  });
+
+  it("sends Azure OpenAI managed identity bearer tokens", async () => {
+    restoreEnv();
+    Object.assign(process.env, {
+      MODEL_PROVIDER: "azure-openai",
+      MODEL_BASE_URL: "https://corgtex-openai.openai.azure.com/openai/v1",
+      AZURE_OPENAI_AUTH_MODE: "managed_identity",
+      AZURE_OPENAI_SCOPE: "https://example.azure.test/.default",
+      AZURE_CLIENT_ID: "user-assigned-client-id",
+      MODEL_CHAT_DEFAULT: "corgtex-chat-fast",
+      MODEL_PRICE_OVERRIDES_JSON: JSON.stringify([
+        {
+          provider: "azure-openai",
+          model: "corgtex-chat-fast",
+          inputUsdPerToken: 0.00000015,
+          outputUsdPerToken: 0.0000006,
+        },
+      ]),
+    });
+    azureIdentityMock.getToken.mockResolvedValueOnce({
+      token: "entra-token",
+      expiresOnTimestamp: Date.now() + 60 * 60 * 1000,
+    });
+
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({
+      choices: [{ message: { content: "Azure answer" } }],
+      usage: { prompt_tokens: 10, completion_tokens: 4 },
+    }), { status: 200 }));
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
+
+    await openAICompatibleModelGateway.chat({
+      workspaceId: "ws-1",
+      taskType: "CHAT",
+      messages: [{ role: "user", content: "Hello" }],
+    });
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+
+    expect(azureIdentityMock.DefaultAzureCredential).toHaveBeenCalledTimes(1);
+    expect(azureIdentityMock.credentialOptions).toContainEqual({
+      managedIdentityClientId: "user-assigned-client-id",
+    });
+    expect(azureIdentityMock.getToken).toHaveBeenCalledWith("https://example.azure.test/.default");
+    expect(init.headers).toMatchObject({
+      authorization: "Bearer entra-token",
+      "content-type": "application/json",
+    });
+    expect(init.headers).not.toMatchObject({
+      "api-key": expect.any(String),
+      "HTTP-Referer": expect.any(String),
+      "X-Title": expect.any(String),
+    });
+  });
+
+  it("blocks Azure OpenAI calls when deployment pricing is missing", async () => {
+    restoreEnv();
+    Object.assign(process.env, {
+      MODEL_PROVIDER: "azure-openai",
+      MODEL_BASE_URL: "https://corgtex-openai.openai.azure.com/openai/v1",
+      AZURE_OPENAI_AUTH_MODE: "api_key",
+      AZURE_OPENAI_API_KEY: "azure-key",
+      MODEL_CHAT_DEFAULT: "unpriced-deployment",
+    });
+
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
+
+    await expect(openAICompatibleModelGateway.chat({
+      workspaceId: "ws-1",
+      taskType: "CHAT",
+      messages: [{ role: "user", content: "Hello" }],
+    })).rejects.toThrow("Missing model price for azure-openai/unpriced-deployment");
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("recovers fenced extraction JSON without a repair pass", async () => {

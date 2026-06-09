@@ -72,6 +72,35 @@ describe("env", () => {
     expect(env.MODEL_EMBEDDING_DEFAULT).toBe("google/gemini-embedding-001");
   });
 
+  it("exposes Azure OpenAI auth configuration without changing model defaults", async () => {
+    restoreEnv();
+    Object.assign(process.env, {
+      NODE_ENV: "development",
+      AZURE_OPENAI_AUTH_MODE: "managed_identity",
+      AZURE_OPENAI_SCOPE: "https://example.azure.test/.default",
+      AZURE_CLIENT_ID: "client-id",
+    });
+
+    const { env } = await import("./env");
+
+    expect(env.MODEL_PROVIDER).toBe("openrouter");
+    expect(env.AZURE_OPENAI_AUTH_MODE).toBe("managed_identity");
+    expect(env.AZURE_OPENAI_SCOPE).toBe("https://example.azure.test/.default");
+    expect(env.AZURE_CLIENT_ID).toBe("client-id");
+  });
+
+  it("rejects unsupported Azure OpenAI auth modes", async () => {
+    restoreEnv();
+    Object.assign(process.env, {
+      NODE_ENV: "development",
+      AZURE_OPENAI_AUTH_MODE: "password",
+    });
+
+    const { env } = await import("./env");
+
+    expect(() => env.AZURE_OPENAI_AUTH_MODE).toThrowError("Invalid AZURE_OPENAI_AUTH_MODE.");
+  });
+
   it("keeps Intercom disabled by default while providing a regional API base fallback", async () => {
     restoreEnv();
     Object.assign(process.env, { NODE_ENV: "development" });

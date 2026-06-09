@@ -1,5 +1,18 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { estimateModelCost, getModelPrice } from "./pricing";
+
+const ORIGINAL_ENV = { ...process.env };
+
+function restoreEnv() {
+  for (const key of Object.keys(process.env)) {
+    delete process.env[key];
+  }
+  Object.assign(process.env, ORIGINAL_ENV);
+}
+
+afterEach(() => {
+  restoreEnv();
+});
 
 describe("model pricing", () => {
   it("calculates raw provider cost and 100 percent markup for DeepSeek quality models", () => {
@@ -37,5 +50,31 @@ describe("model pricing", () => {
       inputTokens: 1000,
       outputTokens: 1000,
     })).toBeNull();
+  });
+
+  it("loads explicit Azure deployment pricing from env overrides", () => {
+    process.env.MODEL_PRICE_OVERRIDES_JSON = JSON.stringify([
+      {
+        provider: "azure-openai",
+        model: "corgtex-chat-fast",
+        inputUsdPerToken: 0.00000015,
+        outputUsdPerToken: 0.0000006,
+      },
+    ]);
+
+    expect(getModelPrice("azure-openai", "corgtex-chat-fast")).toMatchObject({
+      inputUsdPerToken: 0.00000015,
+      outputUsdPerToken: 0.0000006,
+    });
+    expect(estimateModelCost({
+      provider: "azure-openai",
+      model: "corgtex-chat-fast",
+      inputTokens: 1000,
+      outputTokens: 500,
+    })).toMatchObject({
+      rawProviderCostUsd: "0.000450",
+      billableCostUsd: "0.000900",
+      estimatedCostUsd: "0.000900",
+    });
   });
 });
