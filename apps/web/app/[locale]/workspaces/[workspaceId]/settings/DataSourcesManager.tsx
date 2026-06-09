@@ -2,10 +2,10 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { FileUploader } from "./FileUploader";
 import { TextPasteUploader } from "./TextPasteUploader";
 import { RecentUploads } from "./RecentUploads";
 import { useLocale, useTranslations } from "next-intl";
+import { KnowledgeFileUploader } from "../KnowledgeFileUploader";
 
 type DataSource = {
   id: string;
@@ -136,7 +136,12 @@ export function DataSourcesManager({ workspaceId, dataSources, documents }: { wo
           </div>
         </div>
         
-        <FileUploader workspaceId={workspaceId} />
+        <KnowledgeFileUploader
+          workspaceId={workspaceId}
+          defaultSource="settings-upload"
+          initiallyOpen
+          showTrigger={false}
+        />
         <TextPasteUploader workspaceId={workspaceId} />
 
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 40, marginBottom: 16 }}>

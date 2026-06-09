@@ -5,6 +5,7 @@ import { type NextRequest, NextResponse } from "next/server";
 import { saveOAuthConnectionAndEnqueueCalendarSync, verifyIntegrationOAuthState } from "@corgtex/domain";
 import {
   clearOAuthStateCookie,
+  type IntegrationOAuthIntent,
   integrationRedirectUrl,
   isIntegrationOAuthProvider,
   oauthStateCookieName,
@@ -16,6 +17,7 @@ import {
 function redirectWithStateCleared(origin: string, workspaceId: string | null | undefined, provider: IntegrationOAuthProvider, params: {
   status: "success" | "error";
   code: string;
+  intent?: IntegrationOAuthIntent;
 }) {
   const response = NextResponse.redirect(integrationRedirectUrl(origin, workspaceId, provider, params));
   clearOAuthStateCookie(response, provider);
@@ -61,7 +63,7 @@ export async function GET(request: NextRequest, props: { params: Promise<{ provi
     const errorDescription = request.nextUrl.searchParams.get("error_description");
     const cookieState = request.cookies.get(oauthStateCookieName(provider))?.value;
 
-    let statePayload: { workspaceId: string | null };
+    let statePayload: { workspaceId: string | null; intent?: IntegrationOAuthIntent };
     try {
       if (!state || !cookieState || state !== cookieState) {
         throw new Error("OAuth state cookie mismatch");
@@ -74,12 +76,14 @@ export async function GET(request: NextRequest, props: { params: Promise<{ provi
       });
     }
     const workspaceId = statePayload.workspaceId ?? "";
+    const intent = statePayload.intent ?? "calendar";
     workspaceIdForError = workspaceId || null;
 
     if (error) {
       return redirectWithStateCleared(appUrl, workspaceId, provider, {
         status: "error",
         code: providerOAuthErrorCode(provider, error, errorDescription),
+        intent,
       });
     }
 
@@ -87,6 +91,7 @@ export async function GET(request: NextRequest, props: { params: Promise<{ provi
       return redirectWithStateCleared(appUrl, workspaceId, provider, {
         status: "error",
         code: "oauth_code_missing",
+        intent,
       });
     }
 
@@ -99,6 +104,7 @@ export async function GET(request: NextRequest, props: { params: Promise<{ provi
         return redirectWithStateCleared(appUrl, workspaceId, provider, {
           status: "error",
           code: "google_not_configured",
+          intent,
         });
       }
 
@@ -121,6 +127,7 @@ export async function GET(request: NextRequest, props: { params: Promise<{ provi
         return redirectWithStateCleared(appUrl, workspaceId, provider, {
           status: "error",
           code: tokenExchangeErrorCode(provider, message),
+          intent,
         });
       }
 
@@ -134,6 +141,7 @@ export async function GET(request: NextRequest, props: { params: Promise<{ provi
         return redirectWithStateCleared(appUrl, workspaceId, provider, {
           status: "error",
           code: "google_profile_failed",
+          intent,
         });
       }
 
@@ -151,6 +159,7 @@ export async function GET(request: NextRequest, props: { params: Promise<{ provi
       return redirectWithStateCleared(appUrl, workspaceId, provider, {
         status: "success",
         code: "google_connected",
+        intent,
       });
     }
 
@@ -163,6 +172,7 @@ export async function GET(request: NextRequest, props: { params: Promise<{ provi
         return redirectWithStateCleared(appUrl, workspaceId, provider, {
           status: "error",
           code: "microsoft_not_configured",
+          intent,
         });
       }
 
@@ -186,6 +196,7 @@ export async function GET(request: NextRequest, props: { params: Promise<{ provi
         return redirectWithStateCleared(appUrl, workspaceId, provider, {
           status: "error",
           code: tokenExchangeErrorCode(provider, message),
+          intent,
         });
       }
 
@@ -199,6 +210,7 @@ export async function GET(request: NextRequest, props: { params: Promise<{ provi
         return redirectWithStateCleared(appUrl, workspaceId, provider, {
           status: "error",
           code: "microsoft_profile_failed",
+          intent,
         });
       }
 
@@ -218,6 +230,7 @@ export async function GET(request: NextRequest, props: { params: Promise<{ provi
       return redirectWithStateCleared(appUrl, workspaceId, provider, {
         status: "success",
         code: "microsoft_connected",
+        intent,
       });
     }
 

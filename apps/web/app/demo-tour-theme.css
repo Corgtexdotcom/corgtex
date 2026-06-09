@@ -279,6 +279,76 @@
   margin-top: 8px;
 }
 
+.onboarding-setup {
+  width: min(1120px, calc(100vw - 48px));
+  max-width: 100%;
+}
+
+.onboarding-setup-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr));
+  gap: 16px;
+}
+
+.onboarding-setup-panel {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 16px;
+  background: var(--surface);
+  min-width: 0;
+}
+
+.onboarding-setup-panel h3 {
+  margin: 0 0 6px;
+  font-size: 1rem;
+}
+
+.onboarding-setup-panel .nr-upload-dropzone {
+  margin-bottom: 0;
+}
+
+.onboarding-drive-list {
+  max-height: 220px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 8px;
+}
+
+.onboarding-drive-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px;
+  border-radius: var(--radius-sm);
+}
+
+.onboarding-drive-row:hover {
+  background: var(--surface-sunken);
+}
+
+.onboarding-drive-row span {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.onboarding-drive-row strong {
+  font-size: 0.86rem;
+  overflow-wrap: anywhere;
+}
+
+.onboarding-drive-row small {
+  color: var(--muted);
+  font-size: 0.74rem;
+  overflow-wrap: anywhere;
+}
+
+.onboarding-setup-actions {
+  justify-content: flex-end;
+}
+
 /* Remove connector on the last step */
 .onboarding-step:last-child .onboarding-connector {
   display: none;

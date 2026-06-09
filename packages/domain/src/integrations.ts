@@ -589,6 +589,14 @@ export interface OAuthDocumentSource {
   contentText: string;
 }
 
+export interface GoogleDriveDocumentCandidate {
+  id: string;
+  name: string;
+  mimeType: string | null;
+  webUrl: string | null;
+  modifiedAt: Date | null;
+}
+
 export interface OAuthEmailMessage {
   id: string;
   provider: OAuthProvider;
@@ -611,6 +619,163 @@ async function readProviderTextResponse(response: Response, label: string) {
 async function readProviderJsonResponse(response: Response, label: string) {
   const text = await readProviderTextResponse(response, label);
   return text ? JSON.parse(text) as any : {};
+}
+
+const GOOGLE_DRIVE_DOCUMENT_MIME_TYPES = [
+  "application/vnd.google-apps.document",
+  "application/vnd.google-apps.spreadsheet",
+  "application/vnd.google-apps.presentation",
+];
+
+function hasGoogleDriveDocumentScope(scopes: string[]) {
+  return scopes.some((scope) => scope.toLowerCase() === "https://www.googleapis.com/auth/drive.readonly");
+}
+
+function escapeGoogleDriveQuery(value: string) {
+  return value.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+}
+
+function syncSettingsRecord(value: unknown) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function mergeDocumentSyncSettings(settings: unknown, selectedDriveIds: string[]) {
+  const current = syncSettingsRecord(settings);
+  return {
+    calendar: syncSettingsRecord(current.calendar),
+    documents: {
+      ...syncSettingsRecord(current.documents),
+      enabled: true,
+      selectedDriveIds,
+    },
+    email: syncSettingsRecord(current.email),
+  };
+}
+
+async function findUserGoogleDriveConnection(actor: AppActor, workspaceId: string) {
+  invariant(actor.kind === "user", 403, "FORBIDDEN", "Only users can connect Google Drive.");
+  await requireWorkspaceMembership({ actor, workspaceId });
+
+  return prisma.oAuthConnection.findFirst({
+    where: {
+      userId: actor.user.id,
+      provider: "GOOGLE",
+      status: "ACTIVE",
+      OR: [
+        { workspaceId },
+        { workspaceId: null },
+      ],
+    },
+    orderBy: { updatedAt: "desc" },
+    select: {
+      id: true,
+      workspaceId: true,
+      providerEmail: true,
+      providerAccountId: true,
+      scopes: true,
+      syncSettings: true,
+      status: true,
+    },
+  });
+}
+
+export async function listGoogleDriveDocuments(actor: AppActor, params: {
+  workspaceId: string;
+  query?: string | null;
+  take?: number;
+}) {
+  const connection = await findUserGoogleDriveConnection(actor, params.workspaceId);
+  if (!connection) {
+    return {
+      connection: null,
+      documents: [] as GoogleDriveDocumentCandidate[],
+    };
+  }
+
+  const hasDocumentScope = hasGoogleDriveDocumentScope(connection.scopes);
+  const connectionSummary = {
+    id: connection.id,
+    providerEmail: connection.providerEmail,
+    providerAccountId: connection.providerAccountId,
+    hasDocumentScope,
+  };
+  if (!hasDocumentScope) {
+    return {
+      connection: connectionSummary,
+      documents: [] as GoogleDriveDocumentCandidate[],
+    };
+  }
+
+  const refreshed = await refreshOAuthTokenIfNeeded(connection.id);
+  if (refreshed.status !== "ACTIVE") {
+    return {
+      connection: connectionSummary,
+      documents: [] as GoogleDriveDocumentCandidate[],
+    };
+  }
+
+  const mimeQuery = GOOGLE_DRIVE_DOCUMENT_MIME_TYPES
+    .map((mimeType) => `mimeType='${mimeType}'`)
+    .join(" or ");
+  const trimmedQuery = params.query?.trim();
+  const q = [
+    "trashed=false",
+    `(${mimeQuery})`,
+    trimmedQuery ? `name contains '${escapeGoogleDriveQuery(trimmedQuery)}'` : null,
+  ].filter(Boolean).join(" and ");
+  const searchParams = new URLSearchParams({
+    q,
+    fields: "files(id,name,mimeType,webViewLink,modifiedTime)",
+    orderBy: "modifiedTime desc",
+    pageSize: String(Math.max(1, Math.min(params.take ?? 25, 50))),
+  });
+
+  const data = await readProviderJsonResponse(await fetch(
+    `https://www.googleapis.com/drive/v3/files?${searchParams}`,
+    { headers: { Authorization: `Bearer ${oauthAccessToken(refreshed)}` } },
+  ), "Google Drive");
+
+  const documents = Array.isArray(data.files)
+    ? data.files.map((item: any) => ({
+      id: String(item.id ?? ""),
+      name: String(item.name ?? "Untitled Google document"),
+      mimeType: typeof item.mimeType === "string" ? item.mimeType : null,
+      webUrl: typeof item.webViewLink === "string" ? item.webViewLink : null,
+      modifiedAt: typeof item.modifiedTime === "string" ? new Date(item.modifiedTime) : null,
+    })).filter((item: GoogleDriveDocumentCandidate) => item.id)
+    : [];
+
+  return {
+    connection: connectionSummary,
+    documents,
+  };
+}
+
+export async function selectGoogleDriveDocumentsForSync(actor: AppActor, params: {
+  workspaceId: string;
+  documentIds: string[];
+}) {
+  const selectedDriveIds = Array.from(new Set(params.documentIds.map((id) => id.trim()).filter(Boolean))).slice(0, 50);
+  invariant(selectedDriveIds.length > 0, 400, "INVALID_INPUT", "Select at least one Google Drive document.");
+
+  const connection = await findUserGoogleDriveConnection(actor, params.workspaceId);
+  invariant(connection, 404, "NOT_FOUND", "Google Drive is not connected.");
+  invariant(hasGoogleDriveDocumentScope(connection.scopes), 403, "GOOGLE_DRIVE_SCOPE_REQUIRED", "Google Drive document access has not been granted.");
+
+  await prisma.oAuthConnection.update({
+    where: { id: connection.id },
+    data: {
+      workspaceId: params.workspaceId,
+      syncSettings: mergeDocumentSyncSettings(connection.syncSettings, selectedDriveIds) as Prisma.InputJsonValue,
+      lastSyncError: null,
+    },
+  });
+
+  return enqueueOAuthConnectionSync(actor, {
+    workspaceId: params.workspaceId,
+    connectionId: connection.id,
+    kinds: ["documents"],
+  });
 }
 
 export async function fetchCalendarEvents(connectionId: string, timeMin: Date, timeMax: Date): Promise<CalendarEvent[]> {

@@ -52,7 +52,30 @@ describe("GET /api/integrations/[provider]/connect", () => {
     expect(location.searchParams.get("scope")).toBe("openid email profile https://www.googleapis.com/auth/calendar.readonly");
     expect(location.searchParams.get("scope")).not.toContain("gmail.readonly");
     expect(location.searchParams.get("scope")).not.toContain("drive.readonly");
+    expect(createIntegrationOAuthState).toHaveBeenCalledWith({
+      userId: "user-1",
+      workspaceId: "ws-1",
+      intent: "calendar",
+    });
     expect(response.headers.get("set-cookie")).toContain("corgtex_google_oauth_state=signed-state");
+  });
+
+  it("starts Google document OAuth only when the documents intent is requested", async () => {
+    const { GET } = await import("./route");
+    const response = await GET(
+      new NextRequest("https://app.corgtex.com/api/integrations/google/connect?workspaceId=ws-1&intent=documents"),
+      { params: Promise.resolve({ provider: "google" }) },
+    );
+
+    const location = new URL(response.headers.get("location") ?? "");
+    expect(location.searchParams.get("scope")).toContain("https://www.googleapis.com/auth/calendar.readonly");
+    expect(location.searchParams.get("scope")).toContain("https://www.googleapis.com/auth/drive.readonly");
+    expect(location.searchParams.get("scope")).not.toContain("gmail.readonly");
+    expect(createIntegrationOAuthState).toHaveBeenCalledWith({
+      userId: "user-1",
+      workspaceId: "ws-1",
+      intent: "documents",
+    });
   });
 
   it("starts Microsoft OAuth with calendar read-only scope only for self-serve", async () => {

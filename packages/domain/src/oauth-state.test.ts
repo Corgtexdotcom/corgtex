@@ -24,6 +24,23 @@ describe("OAuth state", () => {
     expect(verifyIntegrationOAuthState(state, "user-1")).toEqual({
       userId: "user-1",
       workspaceId: "ws-1",
+      intent: "calendar",
+    });
+  });
+
+  it("round-trips document setup intent in signed state", async () => {
+    const { createIntegrationOAuthState, verifyIntegrationOAuthState } = await import("./oauth-state");
+
+    const state = createIntegrationOAuthState({
+      userId: "user-1",
+      workspaceId: "ws-1",
+      intent: "documents",
+    });
+
+    expect(verifyIntegrationOAuthState(state, "user-1")).toEqual({
+      userId: "user-1",
+      workspaceId: "ws-1",
+      intent: "documents",
     });
   });
 

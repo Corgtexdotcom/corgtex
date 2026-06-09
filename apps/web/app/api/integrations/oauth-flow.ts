@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 export type IntegrationOAuthProvider = "google" | "microsoft";
+export type IntegrationOAuthIntent = "calendar" | "documents";
 
 const OAUTH_STATE_MAX_AGE_SECONDS = 15 * 60;
 const MICROSOFT_INVALID_CLIENT_SECRET_MARKERS = [
@@ -40,10 +41,17 @@ export function clearOAuthStateCookie(response: NextResponse, provider: Integrat
 export function integrationRedirectUrl(origin: string, workspaceId: string | null | undefined, provider: IntegrationOAuthProvider, params: {
   status: "success" | "error";
   code: string;
+  intent?: IntegrationOAuthIntent;
 }) {
-  const path = workspaceId ? `/workspaces/${workspaceId}/settings` : "/";
+  const path = workspaceId
+    ? params.intent === "documents"
+      ? `/workspaces/${workspaceId}`
+      : `/workspaces/${workspaceId}/settings`
+    : "/";
   const url = new URL(path, origin);
-  if (workspaceId) {
+  if (workspaceId && params.intent === "documents") {
+    url.searchParams.set("onboarding", "setup");
+  } else if (workspaceId) {
     url.searchParams.set("tab", "general");
   }
   url.searchParams.set("integration", provider);

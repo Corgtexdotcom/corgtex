@@ -7,9 +7,12 @@ const OAUTH_STATE_TTL_MS = 15 * 60 * 1000;
 type OAuthStatePayload = {
   userId: string;
   workspaceId: string | null;
+  intent: IntegrationOAuthIntent;
   nonce: string;
   issuedAt: number;
 };
+
+export type IntegrationOAuthIntent = "calendar" | "documents";
 
 function signingSecret() {
   return env.SESSION_COOKIE_SECRET;
@@ -26,10 +29,12 @@ function sign(payload: string) {
 export function createIntegrationOAuthState(params: {
   userId: string;
   workspaceId?: string | null;
+  intent?: IntegrationOAuthIntent;
 }) {
   const payload = base64UrlJson({
     userId: params.userId,
     workspaceId: params.workspaceId?.trim() || null,
+    intent: params.intent ?? "calendar",
     nonce: randomOpaqueToken(16),
     issuedAt: Date.now(),
   } satisfies OAuthStatePayload);
@@ -61,5 +66,6 @@ export function verifyIntegrationOAuthState(state: string | null | undefined, ex
   return {
     userId: payload.userId,
     workspaceId: payload.workspaceId,
+    intent: payload.intent ?? "calendar",
   };
 }
