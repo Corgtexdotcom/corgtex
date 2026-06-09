@@ -122,6 +122,7 @@ import {
   searchConnectedExternalMcpContext,
   buildSelectedRegionContext,
   createContextGraphProposedDiff,
+  getContextGraphMapSchema,
   importContextGraphMap,
   getContextMapData,
   createExecutionRequest,
@@ -212,6 +213,7 @@ const TOOL_CAPABILITIES = {
   get_context_neighbors: { scopes: ["context-graph:read"] },
   get_context_evidence: { scopes: ["context-graph:read"] },
   get_selected_region_context: { scopes: ["context-graph:read"] },
+  get_context_graph_map_schema: { scopes: ["context-graph:read"] },
   create_context_graph_proposed_diff: { scopes: ["context-graph:propose"] },
   import_context_graph_map: { scopes: ["context-graph:approve"], sensitive: true },
   search: { scopes: ["brain:read"] },
@@ -781,6 +783,16 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         asOf: asOf ?? null,
       });
       return structuredJsonResult({ ...context, webUrl: webUrl(workspaceId, "/maps") });
+    },
+  );
+
+  tool(
+    "get_context_graph_map_schema",
+    "Return the context-map schema external agents should use before proposing or importing maps: allowed object types, relationship types, evidence refs, layout items, default maps, and example payloads.",
+    {},
+    async () => {
+      requireToolCapability("get_context_graph_map_schema");
+      return structuredJsonResult(getContextGraphMapSchema());
     },
   );
 

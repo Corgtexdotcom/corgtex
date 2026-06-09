@@ -188,6 +188,14 @@ export type ContextMapClientData = {
   relationships: ContextGraphRelationship[];
   layoutItems: ContextMapLayoutItem[];
   proposedDiffs: ContextGraphProposedDiff[];
+  guidance: {
+    evidenceBacked: boolean;
+    defaultMapKey: string | null;
+    description: string;
+    missingEvidencePrompt: string;
+    emptyTitle: string;
+    emptyDescription: string;
+  };
   permissions: {
     canSavePersonalView: boolean;
     canUpdateMasterView: boolean;
@@ -1944,8 +1952,8 @@ export default function ContextMapClient({
           {nodes.length === 0 ? (
             <div className="context-map-empty">
               <CircleHelp size={32} aria-hidden="true" />
-              <h3>No map items in this view</h3>
-              <p>Run meeting intelligence, sync approved records, seed the demo workspace, or adjust filters to populate this map.</p>
+              <h3>{data.guidance.emptyTitle}</h3>
+              <p>{data.guidance.emptyDescription}</p>
             </div>
           ) : (
             <ReactFlow<ContextMapFlowNode, ContextMapFlowEdge>

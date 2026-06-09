@@ -32,6 +32,7 @@ const recordAuditMock = vi.fn();
 const searchIndexedKnowledgeMock = vi.fn();
 const buildSelectedRegionContextMock = vi.fn();
 const createContextGraphProposedDiffMock = vi.fn();
+const getContextGraphMapSchemaMock = vi.fn();
 const importContextGraphMapMock = vi.fn();
 const getContextMapDataMock = vi.fn();
 const createExecutionRequestMock = vi.fn();
@@ -132,6 +133,7 @@ vi.mock("@corgtex/domain", () => ({
   recordAudit: recordAuditMock,
   buildSelectedRegionContext: buildSelectedRegionContextMock,
   createContextGraphProposedDiff: createContextGraphProposedDiffMock,
+  getContextGraphMapSchema: getContextGraphMapSchemaMock,
   importContextGraphMap: importContextGraphMapMock,
   getContextMapData: getContextMapDataMock,
   createExecutionRequest: createExecutionRequestMock,
@@ -299,6 +301,15 @@ describe("createCorgtexMcpServer", () => {
       userId: "user-1",
       role: "ADMIN",
       isActive: true,
+    });
+    getContextGraphMapSchemaMock.mockReset().mockReturnValue({
+      objectTypes: ["Process", "Agent", "Evidence"],
+      relationshipTypes: ["supports", "has_evidence"],
+      evidenceRefFormat: { sourceType: "BrainSource", sourceId: "brain-source-id" },
+      layoutItemFormat: { objectRef: "process", x: 80, y: 80 },
+      defaultMaps: [{ key: "critical-path", name: "Critical path process map" }],
+      exampleImportPayloads: [{ name: "Critical path process map", objects: [] }],
+      writePath: { auditedImportTool: "import_context_graph_map" },
     });
     importContextGraphMapMock.mockReset().mockResolvedValue({
       mapViewId: "map-1",
@@ -1068,6 +1079,29 @@ describe("createCorgtexMcpServer", () => {
       layoutItemCount: 2,
       webUrl: "https://app.test/workspaces/ws-1/maps?view=map-1",
     });
+  });
+
+  it("exposes context graph map schema through a read-scoped MCP tool", async () => {
+    const { createCorgtexMcpServer } = await import("./server");
+    const { requireScope } = await import("./auth");
+
+    const server = createCorgtexMcpServer({
+      actor: { kind: "agent", authProvider: "bootstrap" } as any,
+      workspaceId: "ws-1",
+      authKind: "agent",
+    });
+
+    const response = await (server as any)._registeredTools.get_context_graph_map_schema.handler({});
+
+    expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "context-graph:read");
+    expect(getContextGraphMapSchemaMock).toHaveBeenCalled();
+    expect(JSON.parse(response.content[0].text)).toEqual(expect.objectContaining({
+      objectTypes: ["Process", "Agent", "Evidence"],
+      relationshipTypes: ["supports", "has_evidence"],
+      evidenceRefFormat: expect.objectContaining({ sourceType: "BrainSource" }),
+      layoutItemFormat: expect.objectContaining({ objectRef: "process" }),
+      writePath: expect.objectContaining({ auditedImportTool: "import_context_graph_map" }),
+    }));
   });
 
   it("returns the created goal identifier from create_goal", async () => {
