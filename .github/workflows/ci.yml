@@ -361,6 +361,7 @@ jobs:
         if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
         env:
           CORGTEX_SKIP_RELEASE_MATCH: ${{ steps.railway-watch.outputs.skip_release_match }}
+          CORGTEX_RELEASE_MATCH_TIMEOUT_MS: 1200000
       - run: node scripts/ingestion-guidance-smoke.mjs https://app.corgtex.com ${{ secrets.ADMIN_EMAIL }} ${{ secrets.ADMIN_PASSWORD }}
         if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
         env:
