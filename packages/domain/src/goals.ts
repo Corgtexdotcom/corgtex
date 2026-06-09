@@ -23,6 +23,62 @@ type GoalKeyResultInput = {
   sortOrder?: number | null;
 };
 
+const COMPANY_UNDERSTANDING_SOURCE = "company-understanding";
+const SHORT_TERM_DIRECTION_CADENCES = new Set<GoalCadence>(["WEEKLY", "MONTHLY", "QUARTERLY"]);
+
+export type CompanyDirectionEvidenceLink = {
+  id: string;
+  entityType: string;
+  entityId: string;
+  confidence: number;
+  label: string;
+  detail: string | null;
+  quote: string | null;
+  articleSlug: string | null;
+};
+
+export type CompanyDirectionGoal = {
+  id: string;
+  title: string;
+  descriptionMd: string | null;
+  cadence: GoalCadence;
+  status: GoalStatus;
+  confidence: number | null;
+  updatedAt: Date;
+  evidenceLinks: CompanyDirectionEvidenceLink[];
+};
+
+export type CompanyDirectionQuestion = {
+  id: string;
+  questionText: string;
+  priority: number;
+  confidence: number | null;
+  reason: string | null;
+  responseUsePolicy: string;
+  createdAt: Date;
+  relatedEvidence: Omit<CompanyDirectionEvidenceLink, "id" | "confidence" | "quote"> | null;
+};
+
+export type CompanyDirectionFromBrain = {
+  decisionsNow: CompanyDirectionGoal[];
+  strategyLater: CompanyDirectionGoal[];
+  openQuestions: CompanyDirectionQuestion[];
+  generatedGoalCount: number;
+  evidenceLinkCount: number;
+};
+
+function jsonRecord(value: Prisma.JsonValue | null | undefined) {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function metadataString(value: Prisma.JsonValue | null | undefined, key: string) {
+  const record = jsonRecord(value);
+  const raw = record?.[key];
+  return typeof raw === "string" && raw.trim().length > 0 ? raw.trim() : null;
+}
+
 function clampProgressPercent(value: number, fieldName = "Progress") {
   invariant(Number.isFinite(value), 400, "INVALID_INPUT", `${fieldName} must be a number.`);
   const rounded = Math.round(value);
@@ -489,6 +545,195 @@ export async function listGoals(
       circle: true,
     },
   });
+}
+
+export async function listCompanyDirectionFromBrain(
+  actor: AppActor,
+  params: {
+    workspaceId: string;
+    take?: number;
+    questionTake?: number;
+    _membership?: MembershipSummary | null;
+  },
+): Promise<CompanyDirectionFromBrain> {
+  const membership = await requireWorkspaceMembership({
+    actor,
+    workspaceId: params.workspaceId,
+    resolvedMembership: params._membership,
+  });
+  const take = Math.min(Math.max(params.take ?? 24, 1), 100);
+  const questionTake = Math.min(Math.max(params.questionTake ?? 8, 1), 25);
+
+  const [goals, questions] = await Promise.all([
+    prisma.goal.findMany({
+      where: {
+        workspaceId: params.workspaceId,
+        archivedAt: null,
+        links: {
+          some: {
+            source: COMPANY_UNDERSTANDING_SOURCE,
+          },
+        },
+      },
+      orderBy: [{ updatedAt: "desc" }],
+      take,
+      include: {
+        links: {
+          where: {
+            source: COMPANY_UNDERSTANDING_SOURCE,
+          },
+          orderBy: [{ createdAt: "asc" }],
+        },
+      },
+    }),
+    membership
+      ? prisma.checkIn.findMany({
+          where: {
+            workspaceId: params.workspaceId,
+            memberId: membership.id,
+            questionType: "COMPANY_UNDERSTANDING",
+            status: "OPEN",
+          },
+          orderBy: [{ priority: "desc" }, { createdAt: "desc" }],
+          take: questionTake,
+        })
+      : Promise.resolve([]),
+  ]);
+
+  const brainSourceIds = new Set<string>();
+  const brainArticleIds = new Set<string>();
+  for (const goal of goals) {
+    for (const link of goal.links) {
+      if (link.entityType === "BrainSource") brainSourceIds.add(link.entityId);
+      if (link.entityType === "BrainArticle") brainArticleIds.add(link.entityId);
+    }
+  }
+  for (const question of questions) {
+    if (question.relatedEntityType === "BrainSource" && question.relatedEntityId) brainSourceIds.add(question.relatedEntityId);
+    if (question.relatedEntityType === "BrainArticle" && question.relatedEntityId) brainArticleIds.add(question.relatedEntityId);
+  }
+
+  const [brainSources, brainArticles] = await Promise.all([
+    brainSourceIds.size > 0
+      ? prisma.brainSource.findMany({
+          where: {
+            workspaceId: params.workspaceId,
+            id: { in: Array.from(brainSourceIds) },
+            archivedAt: null,
+          },
+          select: {
+            id: true,
+            sourceType: true,
+            title: true,
+            fileName: true,
+            channel: true,
+            createdAt: true,
+          },
+        })
+      : Promise.resolve([]),
+    brainArticleIds.size > 0
+      ? prisma.brainArticle.findMany({
+          where: {
+            workspaceId: params.workspaceId,
+            id: { in: Array.from(brainArticleIds) },
+            archivedAt: null,
+          },
+          select: {
+            id: true,
+            slug: true,
+            title: true,
+            type: true,
+            authority: true,
+          },
+        })
+      : Promise.resolve([]),
+  ]);
+
+  const sourceById = new Map(brainSources.map((source) => [source.id, source]));
+  const articleById = new Map(brainArticles.map((article) => [article.id, article]));
+
+  const evidenceDisplay = (entityType: string, entityId: string) => {
+    if (entityType === "BrainSource") {
+      const source = sourceById.get(entityId);
+      return {
+        label: source?.title || source?.fileName || source?.channel || (source ? `${source.sourceType} source` : `Brain source ${entityId.slice(0, 8)}`),
+        detail: source ? `${source.sourceType} source` : "Brain source",
+        articleSlug: null,
+      };
+    }
+    if (entityType === "BrainArticle") {
+      const article = articleById.get(entityId);
+      return {
+        label: article?.title || `Brain article ${entityId.slice(0, 8)}`,
+        detail: article ? `${article.type} article - ${article.authority.toLowerCase()}` : "Brain article",
+        articleSlug: article?.slug ?? null,
+      };
+    }
+    return {
+      label: `${entityType} ${entityId.slice(0, 8)}`,
+      detail: entityType,
+      articleSlug: null,
+    };
+  };
+
+  const mapEvidenceLink = (link: (typeof goals)[number]["links"][number]): CompanyDirectionEvidenceLink => {
+    const display = evidenceDisplay(link.entityType, link.entityId);
+    return {
+      id: link.id,
+      entityType: link.entityType,
+      entityId: link.entityId,
+      confidence: link.confidence,
+      label: metadataString(link.metadata, "label") ?? display.label,
+      detail: display.detail,
+      quote: metadataString(link.metadata, "quote"),
+      articleSlug: display.articleSlug,
+    };
+  };
+
+  const mappedGoals = goals.map((goal): CompanyDirectionGoal => {
+    const evidenceLinks = goal.links.map(mapEvidenceLink);
+    const confidence = evidenceLinks.length > 0
+      ? Math.max(...evidenceLinks.map((link) => link.confidence))
+      : null;
+    return {
+      id: goal.id,
+      title: goal.title,
+      descriptionMd: goal.descriptionMd,
+      cadence: goal.cadence,
+      status: goal.status,
+      confidence,
+      updatedAt: goal.updatedAt,
+      evidenceLinks,
+    };
+  });
+
+  const mappedQuestions = questions.map((question): CompanyDirectionQuestion => {
+    const relatedEvidence = question.relatedEntityType && question.relatedEntityId
+      ? {
+          entityType: question.relatedEntityType,
+          entityId: question.relatedEntityId,
+          ...evidenceDisplay(question.relatedEntityType, question.relatedEntityId),
+        }
+      : null;
+    return {
+      id: question.id,
+      questionText: question.questionText,
+      priority: question.priority,
+      confidence: question.confidence,
+      reason: metadataString(question.metadata, "reason"),
+      responseUsePolicy: question.responseUsePolicy,
+      createdAt: question.createdAt,
+      relatedEvidence,
+    };
+  });
+
+  return {
+    decisionsNow: mappedGoals.filter((goal) => SHORT_TERM_DIRECTION_CADENCES.has(goal.cadence)),
+    strategyLater: mappedGoals.filter((goal) => !SHORT_TERM_DIRECTION_CADENCES.has(goal.cadence)),
+    openQuestions: mappedQuestions,
+    generatedGoalCount: mappedGoals.length,
+    evidenceLinkCount: mappedGoals.reduce((count, goal) => count + goal.evidenceLinks.length, 0),
+  };
 }
 
 export async function addKeyResult(

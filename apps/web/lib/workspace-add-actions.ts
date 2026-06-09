@@ -241,7 +241,7 @@ export function getWorkspaceAddActions(context: WorkspaceAddActionContext): Work
     case "proposals":
       return [action("proposal")];
     case "goals":
-      return context.featureFlags.GOALS ? [action("goal")] : [];
+      return context.featureFlags.GOALS ? [action("goal"), action("upload_file"), action("paste_text")] : [];
     case "circles":
       if (!isStructureManager(context.role)) return [];
       return (segments?.length ?? 0) > 1
