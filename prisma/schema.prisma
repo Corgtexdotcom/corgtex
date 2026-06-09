@@ -1009,21 +1009,35 @@ model MemberInviteRequest {
 }
 
 model CheckIn {
-  id             String    @id @default(uuid())
-  workspaceId    String
-  memberId       String
-  questionText   String
-  questionSource String
-  responseMd     String?   @db.Text
-  sentiment      String?
-  aiAnalysis     Json?
-  respondedAt    DateTime?
-  createdAt      DateTime  @default(now())
+  id                    String    @id @default(uuid())
+  workspaceId           String
+  memberId              String
+  questionText          String
+  questionSource        String
+  questionType          String    @default("WELLBEING")
+  priority              Int       @default(0)
+  status                String    @default("OPEN")
+  confidence            Float?
+  metadata              Json?
+  relatedEntityType     String?
+  relatedEntityId       String?
+  relatedConversationId String?
+  responseUsePolicy     String    @default("MEMBER_CHECKIN")
+  responseMd            String?   @db.Text
+  sentiment             String?
+  aiAnalysis            Json?
+  respondedAt           DateTime?
+  createdAt             DateTime  @default(now())
 
-  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  member    Member    @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  workspace           Workspace            @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  member              Member               @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  relatedConversation ConversationSession? @relation(fields: [relatedConversationId], references: [id], onDelete: SetNull)
 
   @@index([workspaceId, memberId, createdAt])
+  @@index([workspaceId, memberId, status, createdAt])
+  @@index([workspaceId, questionType, status])
+  @@index([relatedEntityType, relatedEntityId])
+  @@index([relatedConversationId])
 }
 
 model Circle {
@@ -2939,6 +2953,7 @@ model ConversationSession {
   user      User               @relation(fields: [userId], references: [id], onDelete: Cascade)
   turns     ConversationTurn[]
   roleOnboarding RoleOnboardingSession?
+  checkIns  CheckIn[]
 
   @@index([workspaceId, userId, status])
 }
@@ -4198,12 +4213,15 @@ model GoalLink {
   entityId   String
   confidence Float    @default(1.0)
   linkedBy   String   @default("human")
+  source     String?
+  metadata   Json?
   createdAt  DateTime @default(now())
 
   goal Goal @relation(fields: [goalId], references: [id], onDelete: Cascade)
 
   @@unique([goalId, entityType, entityId])
   @@index([entityType, entityId])
+  @@index([source])
 }
 
 model Recognition {
