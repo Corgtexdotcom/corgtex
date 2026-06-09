@@ -4,6 +4,7 @@ import {
   expectedHealthGitSha,
   healthPayloadMismatch,
   healthReleaseMismatch,
+  releaseMatchDisabled,
   releaseMatchRetryConfig,
   smokeFetchRetryConfig,
 } from "./railway-smoke.mjs";
@@ -20,6 +21,16 @@ describe("railway smoke release validation", () => {
     expect(expectedHealthGitSha({
       GITHUB_SHA: "github-sha",
     })).toBe("github-sha");
+  });
+
+  it("allows CI to explicitly skip release matching for Railway-skipped commits", () => {
+    expect(releaseMatchDisabled({
+      CORGTEX_SKIP_RELEASE_MATCH: "true",
+    })).toBe(true);
+    expect(expectedHealthGitSha({
+      CORGTEX_SKIP_RELEASE_MATCH: "true",
+      GITHUB_SHA: "github-sha",
+    })).toBeNull();
   });
 
   it("does not require release matching outside CI-like environments", () => {
