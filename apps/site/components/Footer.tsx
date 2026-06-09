@@ -38,6 +38,7 @@ export function Footer() {
               <li><a href={localePath("/about")}>{t("about")}</a></li>
               <li><a href={localePath("/blog")}>{t("blog")}</a></li>
               <li><a href={localePath("/updates")}>{t("updates")}</a></li>
+              <li><a href="https://github.com/Corgtexdotcom/corgtex" rel="noreferrer" target="_blank">{t("github")}</a></li>
               <li><a href="mailto:hello@corgtex.com">{t("contact")}</a></li>
             </ul>
           </div>
