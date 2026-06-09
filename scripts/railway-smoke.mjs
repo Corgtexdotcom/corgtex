@@ -16,7 +16,15 @@ function pass(message) {
 }
 
 export function expectedHealthGitSha(env = process.env) {
+  if (releaseMatchDisabled(env)) {
+    return null;
+  }
   return env.CORGTEX_EXPECTED_RELEASE_GIT_SHA?.trim() || env.GITHUB_SHA?.trim() || null;
+}
+
+export function releaseMatchDisabled(env = process.env) {
+  const value = env.CORGTEX_SKIP_RELEASE_MATCH?.trim().toLowerCase();
+  return value === "1" || value === "true" || value === "yes";
 }
 
 function positiveIntegerEnv(env, name, fallback) {
