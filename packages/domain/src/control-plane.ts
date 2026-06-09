@@ -1,4 +1,4 @@
-import type { CustomerDeploymentAccessRole, FleetSnapshotKind, MeetingRecorderProvider, MemberRole, Prisma } from "@prisma/client";
+import type { CustomerDeploymentAccessRole, CustomerDeploymentCloudProvider, FleetSnapshotKind, MeetingRecorderProvider, MemberRole, Prisma } from "@prisma/client";
 import { decryptSecret, encryptSecret, env, prisma, toInputJson } from "@corgtex/shared";
 import type { AgentActor, AppActor } from "@corgtex/shared";
 import { AppError, invariant } from "./errors";
@@ -16,7 +16,7 @@ import {
 } from "./meeting-recorders";
 import { createControlPlaneAdapter } from "./control-plane-adapters";
 import { createRailwayClientFromEnv, upgradeRailwayCustomerRelease, type RailwayClient } from "./railway-client";
-import { buildCustomerDeploymentReadiness, provisionCustomerDeployment } from "./admin";
+import { buildCustomerDeploymentProviderReadModel, buildCustomerDeploymentReadiness, provisionCustomerDeployment } from "./admin";
 import { registerCustomerDeployment } from "./customer-lifecycle";
 import { AGENT_REGISTRY } from "./agent-registry";
 import { isKnownScope } from "./agent-auth";
@@ -2427,6 +2427,7 @@ export async function listControlPlaneDeployments(actor: AppActor) {
         hasDeployment: false,
         deploymentKind: null,
         deploymentStatus: "DRAFT" as const,
+        cloudProvider: null,
         remoteWorkspaceSlug: null,
         remoteWorkspaceId: null,
         region: null,
@@ -2443,6 +2444,18 @@ export async function listControlPlaneDeployments(actor: AppActor) {
         railwayWorkerServiceId: null,
         railwayPostgresServiceId: null,
         railwayRedisServiceId: null,
+        providerSubscriptionId: null,
+        providerResourceGroup: null,
+        providerProjectId: null,
+        providerEnvironmentId: null,
+        providerWebServiceId: null,
+        providerWorkerServiceId: null,
+        providerPostgresServiceId: null,
+        providerRedisServiceId: null,
+        providerStorageResourceId: null,
+        providerLogsUrl: null,
+        providerCostUrl: null,
+        providerMetadata: null,
         storageBucketName: null,
         bootstrapBundleUri: null,
         bootstrapBundleChecksum: null,
@@ -2660,6 +2673,13 @@ export type ControlPlaneCustomerSummary = {
   customerSlug: string | null;
   url: string;
   hasDeployment: boolean;
+  cloudProvider: CustomerDeploymentCloudProvider | null;
+  providerLabel: string | null;
+  providerProjectId: string | null;
+  providerEnvironmentId: string | null;
+  providerResourceGroup: string | null;
+  providerLogsUrl: string | null;
+  providerCostUrl: string | null;
   hasSupportCredential: boolean;
   supportConnectorStatus: string | null;
   lastHealthStatus: string | null;
@@ -2680,6 +2700,7 @@ const controlPlaneCustomerSummaryDeploymentSelect = {
   customerSlug: true,
   customerAccountId: true,
   deploymentStatus: true,
+  cloudProvider: true,
   remoteWorkspaceSlug: true,
   provisioningStatus: true,
   releaseImageTag: true,
@@ -2691,6 +2712,25 @@ const controlPlaneCustomerSummaryDeploymentSelect = {
   supportCredentialEnc: true,
   supportConnectorStatus: true,
   managedWorkspaceId: true,
+  railwayProjectId: true,
+  railwayEnvironmentId: true,
+  railwayWebServiceId: true,
+  railwayWorkerServiceId: true,
+  railwayPostgresServiceId: true,
+  railwayRedisServiceId: true,
+  providerSubscriptionId: true,
+  providerResourceGroup: true,
+  providerProjectId: true,
+  providerEnvironmentId: true,
+  providerWebServiceId: true,
+  providerWorkerServiceId: true,
+  providerPostgresServiceId: true,
+  providerRedisServiceId: true,
+  providerStorageResourceId: true,
+  providerLogsUrl: true,
+  providerCostUrl: true,
+  providerMetadata: true,
+  storageBucketName: true,
   createdAt: true,
   updatedAt: true,
 } satisfies Prisma.CustomerDeploymentSelect;
@@ -2720,12 +2760,20 @@ function controlPlaneCustomerSummaryFromDeployment(params: {
     ?? params.account?.slug
     ?? deployment.remoteWorkspaceSlug
     ?? null;
+  const provider = buildCustomerDeploymentProviderReadModel(deployment);
   const summary: ControlPlaneCustomerSummary = {
     id: deployment.id,
     label: deployment.label || params.account?.displayName || customerSlug || deployment.id,
     customerSlug,
     url: deployment.url,
     hasDeployment: true,
+    cloudProvider: provider.cloudProvider,
+    providerLabel: provider.providerLabel,
+    providerProjectId: provider.providerProjectId,
+    providerEnvironmentId: provider.providerEnvironmentId,
+    providerResourceGroup: provider.providerResourceGroup,
+    providerLogsUrl: provider.providerLogsUrl,
+    providerCostUrl: provider.providerCostUrl,
     hasSupportCredential: Boolean(deployment.supportCredentialEnc),
     supportConnectorStatus: deployment.supportConnectorStatus,
     lastHealthStatus: deployment.lastHealthStatus,
@@ -2753,6 +2801,10 @@ function controlPlaneCustomerSummaryFromDeployment(params: {
       summary.releaseImageTag,
       summary.releaseVersion,
       summary.provisioningStatus,
+      summary.providerLabel,
+      summary.providerProjectId,
+      summary.providerEnvironmentId,
+      summary.providerResourceGroup,
       params.account?.displayName,
       params.account?.slug,
     ].filter((value): value is string => Boolean(value)),
@@ -2772,6 +2824,13 @@ function controlPlaneCustomerSummaryFromAccount(account: {
     customerSlug: account.slug,
     url: "",
     hasDeployment: false,
+    cloudProvider: null,
+    providerLabel: null,
+    providerProjectId: null,
+    providerEnvironmentId: null,
+    providerResourceGroup: null,
+    providerLogsUrl: null,
+    providerCostUrl: null,
     hasSupportCredential: false,
     supportConnectorStatus: "not_configured",
     lastHealthStatus: null,

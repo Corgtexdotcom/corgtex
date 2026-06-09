@@ -1,5 +1,6 @@
 import type {
   CustomerAccountStatus,
+  CustomerDeploymentCloudProvider,
   CustomerDeploymentKind,
   CustomerDeploymentStatus,
   CustomerManagementAuthority,
@@ -45,6 +46,13 @@ const CUSTOMER_DEPLOYMENT_STATUSES = new Set<CustomerDeploymentStatus>([
   "DEGRADED",
   "SUSPENDED",
   "RETIRED",
+]);
+
+const CUSTOMER_DEPLOYMENT_CLOUD_PROVIDERS = new Set<CustomerDeploymentCloudProvider>([
+  "RAILWAY",
+  "AZURE",
+  "SELF_HOSTED",
+  "UNKNOWN",
 ]);
 
 function dbClient(tx?: Prisma.TransactionClient): DbClient {
@@ -150,6 +158,11 @@ function assertDeploymentStatus(status: CustomerDeploymentStatus) {
   return status;
 }
 
+function assertCloudProvider(provider: CustomerDeploymentCloudProvider) {
+  invariant(CUSTOMER_DEPLOYMENT_CLOUD_PROVIDERS.has(provider), 400, "INVALID_INPUT", "Invalid customer deployment cloud provider.");
+  return provider;
+}
+
 function customerWorkspaceUrl(workspaceId: string) {
   return `${env.APP_URL.replace(/\/$/, "")}/workspaces/${workspaceId}`;
 }
@@ -227,6 +240,7 @@ export async function registerCustomerDeployment(params: {
   notes?: string | null;
   deploymentKind: CustomerDeploymentKind;
   deploymentStatus: CustomerDeploymentStatus;
+  cloudProvider?: CustomerDeploymentCloudProvider | null;
   customerSlug?: string | null;
   region?: string | null;
   dataResidency?: string | null;
@@ -241,6 +255,17 @@ export async function registerCustomerDeployment(params: {
   managedWorkspaceId?: string | null;
   remoteWorkspaceSlug?: string | null;
   remoteWorkspaceId?: string | null;
+  providerSubscriptionId?: string | null;
+  providerResourceGroup?: string | null;
+  providerProjectId?: string | null;
+  providerEnvironmentId?: string | null;
+  providerWebServiceId?: string | null;
+  providerWorkerServiceId?: string | null;
+  providerPostgresServiceId?: string | null;
+  providerRedisServiceId?: string | null;
+  providerStorageResourceId?: string | null;
+  providerLogsUrl?: string | null;
+  providerCostUrl?: string | null;
   provisioningStatus?: string | null;
   bootstrapStatus?: string | null;
   primary?: boolean;
@@ -250,6 +275,7 @@ export async function registerCustomerDeployment(params: {
   const legacyCustomerSlug = normalizeCustomerSlug(params.customerSlug ?? accountSlug);
   const deploymentStatus = assertDeploymentStatus(params.deploymentStatus);
   const deploymentKind = assertDeploymentKind(params.deploymentKind);
+  const cloudProvider = params.cloudProvider ? assertCloudProvider(params.cloudProvider) : "RAILWAY";
   const supportOwnerEmail = normalizeOptionalText(params.supportOwnerEmail);
   const account = await ensureCustomerAccount({
     slug: accountSlug,
@@ -268,6 +294,7 @@ export async function registerCustomerDeployment(params: {
     customerAccountId: account.id,
     deploymentKind,
     deploymentStatus,
+    cloudProvider,
     region: normalizeOptionalText(params.region),
     dataResidency: normalizeOptionalText(params.dataResidency),
     customDomain: normalizeOptionalText(params.customDomain),
@@ -281,6 +308,17 @@ export async function registerCustomerDeployment(params: {
     managedWorkspaceId: normalizeOptionalText(params.managedWorkspaceId),
     remoteWorkspaceSlug: normalizeOptionalText(params.remoteWorkspaceSlug),
     remoteWorkspaceId: normalizeOptionalText(params.remoteWorkspaceId),
+    providerSubscriptionId: normalizeOptionalText(params.providerSubscriptionId),
+    providerResourceGroup: normalizeOptionalText(params.providerResourceGroup),
+    providerProjectId: normalizeOptionalText(params.providerProjectId),
+    providerEnvironmentId: normalizeOptionalText(params.providerEnvironmentId),
+    providerWebServiceId: normalizeOptionalText(params.providerWebServiceId),
+    providerWorkerServiceId: normalizeOptionalText(params.providerWorkerServiceId),
+    providerPostgresServiceId: normalizeOptionalText(params.providerPostgresServiceId),
+    providerRedisServiceId: normalizeOptionalText(params.providerRedisServiceId),
+    providerStorageResourceId: normalizeOptionalText(params.providerStorageResourceId),
+    providerLogsUrl: normalizeOptionalText(params.providerLogsUrl),
+    providerCostUrl: normalizeOptionalText(params.providerCostUrl),
     provisioningStatus: params.provisioningStatus
       ? params.provisioningStatus.trim().toLowerCase()
       : provisioningStatusFromDeploymentStatus(deploymentStatus),

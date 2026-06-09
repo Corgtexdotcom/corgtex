@@ -418,6 +418,28 @@ describe("Platform Admin Tools", () => {
     expect(result).toHaveLength(1);
   });
 
+  it("buildCustomerDeploymentProviderReadModel exposes Railway IDs through provider-neutral fields", () => {
+    expect(admin.buildCustomerDeploymentProviderReadModel({
+      railwayProjectId: "railway-project",
+      railwayEnvironmentId: "railway-env",
+      railwayWebServiceId: "railway-web",
+      railwayWorkerServiceId: "railway-worker",
+      railwayPostgresServiceId: "railway-postgres",
+      railwayRedisServiceId: "railway-redis",
+      storageBucketName: "railway-bucket",
+    })).toEqual(expect.objectContaining({
+      cloudProvider: "RAILWAY",
+      providerLabel: "Railway",
+      providerProjectId: "railway-project",
+      providerEnvironmentId: "railway-env",
+      providerWebServiceId: "railway-web",
+      providerWorkerServiceId: "railway-worker",
+      providerPostgresServiceId: "railway-postgres",
+      providerRedisServiceId: "railway-redis",
+      providerStorageResourceId: "railway-bucket",
+    }));
+  });
+
   it("listCustomerDeploymentEvents returns recent audit events", async () => {
     (prisma.customerDeploymentEvent.findMany as any).mockResolvedValue([
       { id: "event_1", action: "customer_deployment.provisioned" },
@@ -919,6 +941,38 @@ describe("Platform Admin Tools", () => {
 
     expect(result.status).toBe("ready");
     expect(result.checks.every((check) => check.status === "ok")).toBe(true);
+  });
+
+  it("buildCustomerDeploymentReadiness uses Azure resource checks for Azure deployments", () => {
+    const result = admin.buildCustomerDeploymentReadiness({
+      cloudProvider: "AZURE",
+      url: "https://selfserve.corgtex.com",
+      customDomain: "selfserve.corgtex.com",
+      region: "westus2",
+      dataResidency: "us",
+      supportOwnerEmail: "ops@corgtex.com",
+      provisioningStatus: "active",
+      bootstrapStatus: "applied",
+      releaseImageTag: "sha-1",
+      providerSubscriptionId: "sub-1",
+      providerResourceGroup: "rg-corgtex-selfserve-staging",
+      providerEnvironmentId: "aca-env-1",
+      providerWebServiceId: "aca-web-1",
+      providerWorkerServiceId: "aca-worker-1",
+      providerPostgresServiceId: "postgres-1",
+      providerRedisServiceId: "redis-1",
+      providerStorageResourceId: "storage-1",
+      lastHealthStatus: "ok",
+      lastHealthError: null,
+      lastHealthCheck: new Date(),
+      lastReleaseCheck: new Date(),
+    });
+
+    expect(result.status).toBe("ready");
+    expect(result.checks).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: "azure_resources", label: "Azure resources", status: "ok" }),
+      expect.objectContaining({ key: "storage", label: "Azure Blob storage", status: "ok" }),
+    ]));
   });
 
   it("buildCustomerDeploymentReadiness flags incomplete customer deployment metadata", () => {
