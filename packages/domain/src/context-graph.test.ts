@@ -7,6 +7,8 @@ import {
   createMissingRegionFactsProposal,
   createPersonalContextMapView,
   createContextGraphProposedDiff,
+  getContextGraphMapSchema,
+  getContextMapData,
   importContextGraphMap,
   listContextMapViews,
   reviewContextGraphProposedDiff,
@@ -1231,6 +1233,11 @@ describe("context graph domain", () => {
         name: "Critical path process map",
         viewType: "process",
         createdByUserId: null,
+        query: expect.objectContaining({
+          mode: "criticalPath",
+          defaultMapKey: "critical-path",
+          evidenceBacked: true,
+        }),
       }),
     }));
     expect(prismaMock.contextMapView.create).toHaveBeenNthCalledWith(2, expect.objectContaining({
@@ -1240,6 +1247,8 @@ describe("context graph domain", () => {
         createdByUserId: null,
         query: expect.objectContaining({
           mode: "organization",
+          defaultMapKey: "org-structure",
+          evidenceBacked: true,
           objectTypes: ["Team", "Role", "Person"],
           relationshipTypes: ["part_of", "member_of", "reports_to", "owns"],
         }),
@@ -1252,11 +1261,85 @@ describe("context graph domain", () => {
         createdByUserId: null,
         query: expect.objectContaining({
           mode: "agentGovernance",
+          defaultMapKey: "agent-governance",
+          evidenceBacked: true,
           objectTypes: ["Agent", "Policy", "Tool", "Meeting", "Document", "Task", "Decision", "Risk", "Evidence"],
           relationshipTypes: ["input_to", "output_of", "uses", "supports", "needs_approval_from", "created_in", "has_evidence", "blocks"],
         }),
       }),
     }));
+  });
+
+  it("exposes context map schema and example import payloads for external agents", () => {
+    const schema = getContextGraphMapSchema();
+
+    expect(schema.objectTypes).toEqual(expect.arrayContaining(["Team", "Agent", "Evidence"]));
+    expect(schema.relationshipTypes).toEqual(expect.arrayContaining(["owns", "depends_on", "has_evidence"]));
+    expect(schema.defaultMaps.map((map) => map.key)).toEqual(["critical-path", "org-structure", "agent-governance"]);
+    expect(schema.evidenceRefFormat).toEqual(expect.objectContaining({
+      sourceType: expect.any(String),
+      sourceId: expect.any(String),
+    }));
+    expect(schema.layoutItemFormat).toEqual(expect.objectContaining({
+      objectRef: expect.any(String),
+      x: expect.any(String),
+      y: expect.any(String),
+    }));
+    expect(schema.exampleImportPayloads[0]).toEqual(expect.objectContaining({
+      name: "Critical path process map",
+      objects: expect.arrayContaining([expect.objectContaining({ ref: "process-onboarding" })]),
+      evidenceRefs: expect.arrayContaining([expect.objectContaining({ sourceType: "BrainSource" })]),
+    }));
+    expect(schema.writePath.auditedImportTool).toBe("import_context_graph_map");
+  });
+
+  it("returns evidence-backed guidance for empty default maps", async () => {
+    prismaMock.contextMapView.findFirst.mockReset();
+    prismaMock.contextMapView.findFirst
+      .mockResolvedValueOnce({
+        id: "process-master",
+        workspaceId: "ws-1",
+        name: "Critical path process map",
+        viewType: "process",
+        query: {
+          mode: "criticalPath",
+          defaultMapKey: "critical-path",
+          evidenceBacked: true,
+          objectTypes: ["Process", "Decision"],
+          relationshipTypes: ["supports"],
+        },
+        createdByUserId: null,
+      })
+      .mockResolvedValueOnce({
+        id: "org-master",
+        workspaceId: "ws-1",
+        name: "Organization map",
+        viewType: "org",
+        query: {},
+        createdByUserId: null,
+      })
+      .mockResolvedValueOnce({
+        id: "agent-master",
+        workspaceId: "ws-1",
+        name: "Agent governance map",
+        viewType: "agent",
+        query: {},
+        createdByUserId: null,
+      });
+    prismaMock.contextGraphObject.findMany.mockResolvedValueOnce([]);
+    prismaMock.contextGraphRelationship.findMany.mockResolvedValueOnce([]);
+    prismaMock.contextMapView.findMany.mockResolvedValueOnce([]);
+    prismaMock.contextMapLayoutItem.findMany.mockResolvedValueOnce([]);
+    prismaMock.contextGraphProposedDiff.findMany.mockResolvedValueOnce([]);
+
+    await expect(getContextMapData(actor, { workspaceId: "ws-1" })).resolves.toMatchObject({
+      guidance: {
+        evidenceBacked: true,
+        defaultMapKey: "critical-path",
+        emptyTitle: "Critical path process map needs evidence",
+        emptyDescription: expect.stringContaining("current goals"),
+      },
+    });
   });
 
   it("lets admins update master map layouts directly", async () => {

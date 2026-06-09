@@ -175,33 +175,51 @@ type ContextMapImportLayoutItemInput = {
 };
 
 const DEFAULT_CONTEXT_MAP_VIEW_CONFIGS: Array<{
+  key: "critical-path" | "org-structure" | "agent-governance";
   name: string;
   viewType: ContextMapViewType;
+  description: string;
+  missingEvidencePrompt: string;
   query: Prisma.InputJsonObject;
 }> = [
   {
+    key: "critical-path",
     name: "Critical path process map",
     viewType: "process",
+    description: "Evidence-backed process, decision, blocker, and ownership facts that explain the current critical path.",
+    missingEvidencePrompt: "Upload or answer evidence about current goals, decisions, owners, blockers, handoffs, and process steps before CORGTEX proposes critical-path nodes.",
     query: {
       mode: "criticalPath",
+      defaultMapKey: "critical-path",
+      evidenceBacked: true,
       objectTypes: ["Process", "ProcessStep", "Decision", "Task", "Risk", "Metric", "Question", "Hypothesis", "Tool", "Team", "Role", "Meeting"],
       relationshipTypes: ["part_of", "depends_on", "blocks", "owns", "assigned_to", "supports", "uses", "created_in", "decided_in", "needs_approval_from"],
     },
   },
   {
+    key: "org-structure",
     name: "Organization map",
     viewType: "org",
+    description: "Evidence-backed teams, roles, people, and reporting or ownership relationships.",
+    missingEvidencePrompt: "Upload or answer evidence about teams, roles, people, reporting lines, and ownership before CORGTEX proposes organization nodes.",
     query: {
       mode: "organization",
+      defaultMapKey: "org-structure",
+      evidenceBacked: true,
       objectTypes: ["Team", "Role", "Person"],
       relationshipTypes: ["part_of", "member_of", "reports_to", "owns"],
     },
   },
   {
+    key: "agent-governance",
     name: "Agent governance map",
     viewType: "agent",
+    description: "Evidence-backed agents, tools, policies, risks, approvals, and evidence flows.",
+    missingEvidencePrompt: "Connect or upload evidence about active agents, tools, policies, approvals, risks, and evidence flows before CORGTEX proposes agent-governance nodes.",
     query: {
       mode: "agentGovernance",
+      defaultMapKey: "agent-governance",
+      evidenceBacked: true,
       objectTypes: ["Agent", "Policy", "Tool", "Meeting", "Document", "Task", "Decision", "Risk", "Evidence"],
       relationshipTypes: ["input_to", "output_of", "uses", "supports", "needs_approval_from", "created_in", "has_evidence", "blocks"],
     },
@@ -272,6 +290,87 @@ export type ContextGraphMapImportResult = {
   evidenceCount: number;
   layoutItemCount: number;
 };
+
+export function getContextGraphMapSchema() {
+  return {
+    objectTypes: [...CONTEXT_GRAPH_OBJECT_TYPES],
+    relationshipTypes: [...CONTEXT_GRAPH_RELATIONSHIP_TYPES],
+    objectStatuses: [...CONTEXT_GRAPH_STATUSES],
+    mapViewTypes: [...CONTEXT_MAP_VIEW_TYPES],
+    diffStatuses: [...CONTEXT_GRAPH_DIFF_STATUSES],
+    defaultMaps: DEFAULT_CONTEXT_MAP_VIEW_CONFIGS.map((config) => ({
+      key: config.key,
+      name: config.name,
+      viewType: config.viewType,
+      description: config.description,
+      query: config.query,
+      missingEvidencePrompt: config.missingEvidencePrompt,
+    })),
+    objectFormat: {
+      ref: "stable-object-ref-used-by-relationships-layout-and-evidence",
+      objectType: "one of objectTypes",
+      title: "human-readable title",
+      summary: "optional short summary",
+      confidence: "optional number from 0 to 1",
+      status: "draft|proposed|approved|disputed|stale|archived",
+      sourceEntityType: "optional source type such as BrainSource or BrainArticle",
+      sourceEntityId: "optional source id",
+      properties: "optional JSON object",
+    },
+    relationshipFormat: {
+      ref: "stable-relationship-ref-used-by-evidence",
+      sourceRef: "object ref from objects[]",
+      targetRef: "object ref from objects[]",
+      relationshipType: "one of relationshipTypes",
+      confidence: "optional number from 0 to 1",
+      status: "draft|proposed|approved|disputed|stale|archived",
+      properties: "optional JSON object",
+    },
+    evidenceRefFormat: {
+      objectRef: "object ref, required unless relationshipRef is provided",
+      relationshipRef: "relationship ref, required unless objectRef is provided",
+      sourceType: "source system or entity type, for example BrainSource, BrainArticle, DOCUMENT, MEETING",
+      sourceId: "id in the source system",
+      quote: "optional short supporting excerpt",
+      relevanceScore: "optional number from 0 to 1",
+      metadata: "optional JSON object",
+    },
+    layoutItemFormat: {
+      objectRef: "object ref from objects[]",
+      x: "finite number",
+      y: "finite number",
+      width: "optional finite number",
+      height: "optional finite number",
+      visualState: "optional JSON object",
+    },
+    exampleImportPayloads: [
+      {
+        name: "Critical path process map",
+        viewType: "process",
+        query: DEFAULT_CONTEXT_MAP_VIEW_CONFIGS[0].query,
+        objects: [
+          { ref: "process-onboarding", objectType: "Process", title: "Customer onboarding", status: "approved", confidence: 0.9 },
+          { ref: "decision-launch", objectType: "Decision", title: "Launch readiness decision", status: "approved", confidence: 0.86 },
+        ],
+        relationships: [
+          { ref: "decision-supports-process", sourceRef: "decision-launch", targetRef: "process-onboarding", relationshipType: "supports", status: "approved", confidence: 0.86 },
+        ],
+        evidenceRefs: [
+          { objectRef: "decision-launch", sourceType: "BrainSource", sourceId: "brain-source-id", quote: "Launch readiness is the blocker.", relevanceScore: 0.86 },
+        ],
+        layoutItems: [
+          { objectRef: "process-onboarding", x: 80, y: 80 },
+          { objectRef: "decision-launch", x: 360, y: 80 },
+        ],
+      },
+    ],
+    writePath: {
+      proposalTool: "create_context_graph_proposed_diff",
+      auditedImportTool: "import_context_graph_map",
+      rule: "Use proposed diffs for uncertain or review-needed facts. Use import_context_graph_map only for approved, evidence-backed maps.",
+    },
+  };
+}
 
 function requireKnownValue<T extends readonly string[]>(value: string, allowed: T, label: string): asserts value is T[number] {
   invariant((allowed as readonly string[]).includes(value), 400, "INVALID_INPUT", `Unknown ${label}: ${value}.`);
@@ -721,6 +820,26 @@ function objectWhereForMapView(workspaceId: string, mapView: { query: Prisma.Jso
   };
 }
 
+function contextMapGuidance(mapView: { name: string; viewType: string; query: Prisma.JsonValue }, counts: {
+  objectCount: number;
+  proposedDiffCount: number;
+}) {
+  const key = stringProperty(mapView.query, "defaultMapKey");
+  const config = DEFAULT_CONTEXT_MAP_VIEW_CONFIGS.find((item) => item.key === key || item.viewType === mapView.viewType);
+  const description = config?.description ?? "Evidence-backed company context for this map view.";
+  const missingEvidencePrompt = config?.missingEvidencePrompt ?? "Add evidence before CORGTEX proposes new context-map facts.";
+  return {
+    evidenceBacked: true,
+    defaultMapKey: config?.key ?? null,
+    description,
+    missingEvidencePrompt,
+    emptyTitle: `${mapView.name} needs evidence`,
+    emptyDescription: counts.proposedDiffCount > 0
+      ? "Review pending evidence-backed proposals in the inspector before applying map facts."
+      : missingEvidencePrompt,
+  };
+}
+
 function normalizeLayoutItem(item: ContextMapLayoutItemInput) {
   const objectId = requireStringField(item.objectId, "Layout object id is required.").trim();
   invariant(objectId.length > 0, 400, "INVALID_INPUT", "Layout object id is required.");
@@ -1121,6 +1240,10 @@ export async function getContextMapData(actor: AppActor, params: {
     relationships,
     layoutItems,
     proposedDiffs,
+    guidance: contextMapGuidance(mapView, {
+      objectCount: objects.length,
+      proposedDiffCount: proposedDiffs.length,
+    }),
     permissions: {
       canSavePersonalView: actor.kind === "user",
       canUpdateMasterView: canApproveContextGraph(actor, membership),
