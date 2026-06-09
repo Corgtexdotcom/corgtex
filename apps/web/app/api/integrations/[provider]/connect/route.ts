@@ -16,6 +16,7 @@ export async function GET(request: NextRequest, props: { params: Promise<{ provi
 
     const appUrl = getPublicOrigin(request);
     const workspaceId = request.nextUrl.searchParams.get("workspaceId") || "";
+    const intent = request.nextUrl.searchParams.get("intent") === "documents" ? "documents" : "calendar";
     if (workspaceId) {
       await requireWorkspaceMembership({ actor, workspaceId });
     }
@@ -39,8 +40,9 @@ export async function GET(request: NextRequest, props: { params: Promise<{ provi
         "email",
         "profile",
         "https://www.googleapis.com/auth/calendar.readonly",
+        ...(intent === "documents" ? ["https://www.googleapis.com/auth/drive.readonly"] : []),
       ].join(" ");
-      const state = createIntegrationOAuthState({ userId: actor.user.id, workspaceId });
+      const state = createIntegrationOAuthState({ userId: actor.user.id, workspaceId, intent });
 
       const authUrl = new URL("https://accounts.google.com/o/oauth2/v2/auth");
       authUrl.searchParams.set("client_id", clientId);

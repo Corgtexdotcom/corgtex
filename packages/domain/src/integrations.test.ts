@@ -183,6 +183,113 @@ describe("OAuth integration sync helpers", () => {
     expect(fetch).toHaveBeenCalledTimes(2);
   });
 
+  it("lists Google Drive document candidates through a document-scoped connection", async () => {
+    prismaMock.oAuthConnection.findFirst.mockResolvedValue({
+      id: "conn-1",
+      workspaceId: "ws-1",
+      providerEmail: "user@example.test",
+      providerAccountId: "google-user-1",
+      scopes: ["https://www.googleapis.com/auth/drive.readonly"],
+      syncSettings: null,
+      status: "ACTIVE",
+    });
+    prismaMock.oAuthConnection.findUnique.mockResolvedValue({
+      id: "conn-1",
+      provider: "GOOGLE",
+      status: "ACTIVE",
+      accessToken: "access-token",
+      refreshToken: null,
+      tokenStorageVersion: "plaintext",
+      expiresAt: new Date(Date.now() + 60 * 60 * 1000),
+    });
+    prismaMock.oAuthConnection.update.mockResolvedValue({
+      id: "conn-1",
+      provider: "GOOGLE",
+      status: "ACTIVE",
+      accessToken: "enc:access-token",
+      refreshToken: null,
+      tokenStorageVersion: "aes-256-gcm",
+      expiresAt: new Date(Date.now() + 60 * 60 * 1000),
+    });
+    vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify({
+      files: [{
+        id: "doc-1",
+        name: "Launch notes",
+        mimeType: "application/vnd.google-apps.document",
+        webViewLink: "https://drive.test/doc-1",
+        modifiedTime: "2026-05-24T12:00:00.000Z",
+      }],
+    }), { status: 200 }));
+    const { listGoogleDriveDocuments } = await import("./integrations");
+
+    await expect(listGoogleDriveDocuments({
+      kind: "user",
+      user: { id: "user-1", email: "user@example.test" },
+    } as any, {
+      workspaceId: "ws-1",
+      query: "Launch",
+    })).resolves.toEqual({
+      connection: expect.objectContaining({
+        id: "conn-1",
+        hasDocumentScope: true,
+      }),
+      documents: [expect.objectContaining({
+        id: "doc-1",
+        name: "Launch notes",
+      })],
+    });
+    expect(fetch).toHaveBeenCalledWith(
+      expect.stringContaining("https://www.googleapis.com/drive/v3/files?"),
+      expect.objectContaining({
+        headers: { Authorization: "Bearer access-token" },
+      }),
+    );
+  });
+
+  it("selects Google Drive documents into sync settings and queues document sync", async () => {
+    prismaMock.oAuthConnection.findFirst.mockResolvedValueOnce({
+      id: "conn-1",
+      workspaceId: "ws-1",
+      providerEmail: "user@example.test",
+      providerAccountId: "google-user-1",
+      scopes: ["https://www.googleapis.com/auth/drive.readonly"],
+      syncSettings: { calendar: { enabled: true }, documents: { enabled: false, selectedDriveIds: [] } },
+      status: "ACTIVE",
+    }).mockResolvedValueOnce({
+      id: "conn-1",
+      status: "ACTIVE",
+      syncSettings: { calendar: { enabled: true }, documents: { enabled: true, selectedDriveIds: ["doc-1"] } },
+    });
+    prismaMock.oAuthConnection.update.mockResolvedValue({
+      id: "conn-1",
+      status: "ACTIVE",
+    });
+    prismaMock.workflowJob.upsert.mockImplementation(async (input: any) => ({ id: input.create.type, type: input.create.type }));
+    const { selectGoogleDriveDocumentsForSync } = await import("./integrations");
+
+    await expect(selectGoogleDriveDocumentsForSync({
+      kind: "user",
+      user: { id: "user-1", email: "user@example.test" },
+    } as any, {
+      workspaceId: "ws-1",
+      documentIds: ["doc-1", "doc-1", " "],
+    })).resolves.toEqual({
+      scheduled: ["oauth.documents.sync"],
+    });
+    expect(prismaMock.oAuthConnection.update).toHaveBeenCalledWith({
+      where: { id: "conn-1" },
+      data: expect.objectContaining({
+        workspaceId: "ws-1",
+        syncSettings: expect.objectContaining({
+          documents: expect.objectContaining({
+            enabled: true,
+            selectedDriveIds: ["doc-1"],
+          }),
+        }),
+      }),
+    });
+  });
+
   it("skips selected Google Drive binary files until extraction is supported", async () => {
     prismaMock.oAuthConnection.findUnique.mockResolvedValue({
       id: "conn-1",

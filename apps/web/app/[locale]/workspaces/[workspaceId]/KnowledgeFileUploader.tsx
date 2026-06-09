@@ -7,12 +7,15 @@ import { useTranslations } from "next-intl";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 
 const MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024;
+const IGNORED_FILE_NAMES = new Set([".ds_store"]);
 
 type UploadStatus = "ready" | "uploading" | "done" | "error";
 
 type UploadItem = {
   id: string;
   file: File;
+  displayName: string;
+  relativePath: string | null;
   title: string;
   guidance: string;
   status: UploadStatus;
@@ -55,22 +58,46 @@ function errorMessage(value: unknown, fallback: string) {
   return fallback;
 }
 
+function fileRelativePath(file: File) {
+  const path = (file as File & { webkitRelativePath?: string }).webkitRelativePath?.trim();
+  return path || null;
+}
+
+function fileDisplayName(file: File) {
+  return fileRelativePath(file) ?? file.name;
+}
+
+function isIgnoredFile(file: File) {
+  const name = file.name.trim().toLowerCase();
+  const path = fileRelativePath(file)?.toLowerCase() ?? "";
+  return IGNORED_FILE_NAMES.has(name) || path.split("/").some((segment) => IGNORED_FILE_NAMES.has(segment));
+}
+
 export function KnowledgeFileUploader({
   workspaceId,
   defaultSource = "brain-upload",
   initiallyOpen = false,
   showTrigger = true,
+  showFolderSelect = true,
+  doneLabel,
   cancelHref,
+  onUploaded,
+  onDone,
 }: {
   workspaceId: string;
   defaultSource?: string;
   initiallyOpen?: boolean;
   showTrigger?: boolean;
+  showFolderSelect?: boolean;
+  doneLabel?: string;
   cancelHref?: string;
+  onUploaded?: (count: number) => void;
+  onDone?: () => void;
 }) {
   const router = useRouter();
   const t = useTranslations("brain");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const folderInputRef = useRef<HTMLInputElement | null>(null);
   const [isOpen, setIsOpen] = useState(initiallyOpen);
   const [isDragging, setIsDragging] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
@@ -93,15 +120,23 @@ export function KnowledgeFileUploader({
 
   function addFiles(files: FileList | null) {
     if (!files || files.length === 0) return;
+    const selectedFiles = Array.from(files).filter((file) => !isIgnoredFile(file));
+    if (selectedFiles.length === 0) return;
     setUploadItems((current) => [
       ...current,
-      ...Array.from(files).map((file) => ({
-        id: uploadId(),
-        file,
-        title: "",
-        guidance: "",
-        status: "ready" as const,
-      })),
+      ...selectedFiles.map((file) => {
+        const relativePath = fileRelativePath(file);
+        const displayName = fileDisplayName(file);
+        return {
+          id: uploadId(),
+          file,
+          displayName,
+          relativePath,
+          title: "",
+          guidance: "",
+          status: "ready" as const,
+        };
+      }),
     ]);
     setIsOpen(true);
   }
@@ -122,6 +157,7 @@ export function KnowledgeFileUploader({
 
     isUploadingRef.current = true;
     setIsUploading(true);
+    let uploadedCount = 0;
     try {
       for (const itemId of uploadableIds) {
         const item = itemsRef.current.find((current) => current.id === itemId);
@@ -141,7 +177,10 @@ export function KnowledgeFileUploader({
         const formData = new FormData();
         formData.set("file", item.file);
         formData.set("source", defaultSource);
-        formData.set("title", item.title.trim() || item.file.name);
+        formData.set("title", item.title.trim() || item.displayName);
+        if (item.relativePath) {
+          formData.set("metadata", JSON.stringify({ relativePath: item.relativePath }));
+        }
         const guidance = combineGuidance(overallGuidanceRef.current, item.guidance);
         if (guidance) {
           formData.set("ingestionGuidanceMd", guidance);
@@ -155,6 +194,7 @@ export function KnowledgeFileUploader({
 
           if (response.ok) {
             updateItem(item.id, { status: "done", error: undefined });
+            uploadedCount += 1;
             continue;
           }
 
@@ -173,12 +213,16 @@ export function KnowledgeFileUploader({
     } finally {
       isUploadingRef.current = false;
       setIsUploading(false);
+      if (uploadedCount > 0) {
+        onUploaded?.(uploadedCount);
+      }
       router.refresh();
     }
   }
 
   const hasPendingUploads = items.some((item) => item.status !== "done");
   const doneCount = items.filter((item) => item.status === "done").length;
+  const hasCompletedUploads = doneCount > 0 && !hasPendingUploads && !isUploading;
 
   return (
     <section className="stack mb-8">
@@ -211,9 +255,16 @@ export function KnowledgeFileUploader({
                 {t("uploadFilesDescription")}
               </p>
             </div>
-            <button type="button" className="secondary small" onClick={() => fileInputRef.current?.click()}>
-              {t("uploadFilesSelect")}
-            </button>
+            <div className="actions-inline">
+              <button type="button" className="secondary small" onClick={() => fileInputRef.current?.click()}>
+                {t("uploadFilesSelect")}
+              </button>
+              {showFolderSelect && (
+                <button type="button" className="secondary small" onClick={() => folderInputRef.current?.click()}>
+                  {t("uploadFilesSelectFolder")}
+                </button>
+              )}
+            </div>
           </div>
 
           <input
@@ -226,6 +277,21 @@ export function KnowledgeFileUploader({
               event.currentTarget.value = "";
             }}
           />
+          {showFolderSelect && (
+            <input
+              ref={folderInputRef}
+              type="file"
+              multiple
+              className="hidden"
+              // @ts-expect-error directory attributes are non-standard but supported by Chromium.
+              webkitdirectory=""
+              directory=""
+              onChange={(event) => {
+                addFiles(event.target.files);
+                event.currentTarget.value = "";
+              }}
+            />
+          )}
 
           <div className="nr-upload-area">
             <button type="button" className="link-button secondary" onClick={() => fileInputRef.current?.click()}>
@@ -256,7 +322,7 @@ export function KnowledgeFileUploader({
                   <div className="nr-upload-item-header">
                     <div className="nr-upload-item-content">
                       <strong className="nr-item-title nr-truncate">
-                        {item.file.name}
+                        {item.displayName}
                       </strong>
                       <span className="nr-item-meta">
                         {t(`uploadFilesStatus.${item.status}`)}
@@ -279,7 +345,7 @@ export function KnowledgeFileUploader({
                         value={item.title}
                         disabled={item.status === "uploading"}
                         onChange={(event) => updateItem(item.id, { title: event.target.value })}
-                        placeholder={item.file.name}
+                        placeholder={item.displayName}
                       />
                     </label>
                     <label>
@@ -303,6 +369,11 @@ export function KnowledgeFileUploader({
             <button type="button" disabled={!hasPendingUploads || isUploading} onClick={uploadItems}>
               {isUploading ? t("uploadFilesSubmitting") : t("uploadFilesSubmit")}
             </button>
+            {hasCompletedUploads && onDone && (
+              <button type="button" className="secondary" onClick={onDone}>
+                {doneLabel ?? t("uploadFilesDone")}
+              </button>
+            )}
             {cancelHref && <a className="link-button secondary" href={cancelHref}>{t("cancel")}</a>}
           </div>
         </div>

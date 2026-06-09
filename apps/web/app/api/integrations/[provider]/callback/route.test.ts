@@ -80,6 +80,46 @@ describe("GET /api/integrations/[provider]/callback", () => {
     expect(response.headers.get("set-cookie")).toContain("corgtex_google_oauth_state=");
   });
 
+  it("returns document-scope Google OAuth to the onboarding setup modal", async () => {
+    requirePageActor.mockResolvedValue({
+      kind: "user",
+      user: { id: "user-1" },
+    });
+    saveOAuthConnectionAndEnqueueCalendarSync.mockResolvedValue({ id: "conn-1" });
+    verifyIntegrationOAuthState.mockReturnValue({ userId: "user-1", workspaceId: "ws-1", intent: "documents" });
+
+    const fetchMock = vi.mocked(fetch);
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        access_token: "access-token",
+        refresh_token: "refresh-token",
+        expires_in: 3600,
+        scope: "openid profile https://www.googleapis.com/auth/drive.readonly",
+      }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        id: "google-user-1",
+        email: "user@example.test",
+      }), { status: 200 }));
+
+    const { GET } = await import("./route");
+    const response = await GET(
+      new NextRequest("http://localhost:3000/api/integrations/google/callback?code=auth-code&state=signed-state", {
+        headers: { cookie: "corgtex_google_oauth_state=signed-state" },
+      }),
+      { params: Promise.resolve({ provider: "google" }) },
+    );
+
+    expect(saveOAuthConnectionAndEnqueueCalendarSync).toHaveBeenCalledWith(
+      { kind: "user", user: { id: "user-1" } },
+      expect.objectContaining({
+        workspaceId: "ws-1",
+        provider: "GOOGLE",
+        scopes: ["openid", "profile", "https://www.googleapis.com/auth/drive.readonly"],
+      }),
+    );
+    expect(response.headers.get("location")).toBe("http://localhost:3000/workspaces/ws-1?onboarding=setup&integration=google&integrationStatus=success&integrationSuccess=google_connected");
+  });
+
   it("redirects provider access errors back to settings with a safe Google verification message", async () => {
     requirePageActor.mockResolvedValue({
       kind: "user",

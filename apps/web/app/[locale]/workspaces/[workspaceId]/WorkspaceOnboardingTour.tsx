@@ -7,6 +7,8 @@ import { driver } from "driver.js";
 import "driver.js/dist/driver.css";
 import "../../../demo-tour-theme.css";
 import { Dialog } from "@/lib/components/Dialog";
+import { KnowledgeFileUploader } from "./KnowledgeFileUploader";
+import { workspaceRouteMatches, workspaceStepUrl } from "./onboarding-tour-routing";
 
 const TOUR_KEY = "self_serve_workspace";
 const TOUR_VERSION = "v2";
@@ -23,22 +25,58 @@ interface TourStep {
   };
 }
 
-function targetUrl(workspaceId: string, step: TourStep) {
-  return `/workspaces/${workspaceId}${step.href === "/" ? "" : step.href}`;
-}
+type SetupMode = "setup" | "setupReturn" | null;
+
+type DriveConnection = {
+  id: string;
+  providerEmail: string | null;
+  providerAccountId: string;
+  hasDocumentScope: boolean;
+};
+
+type DriveDocument = {
+  id: string;
+  name: string;
+  mimeType: string | null;
+  webUrl: string | null;
+  modifiedAt: string | null;
+};
+
+type RecorderStatus = {
+  featureEnabled: boolean;
+  enabled: boolean;
+  autoRecordEnabled: boolean;
+  defaultProvider: string;
+  botName: string;
+  monthlyMinuteCap: number;
+  usedMinutes: number;
+};
 
 function currentUrl() {
   return `${window.location.pathname}${window.location.search}`;
 }
 
+function parseApiError(value: unknown, fallback: string) {
+  if (value && typeof value === "object" && "error" in value) {
+    const error = (value as { error?: unknown }).error;
+    if (error && typeof error === "object" && "message" in error) {
+      const message = (error as { message?: unknown }).message;
+      if (typeof message === "string" && message.trim()) return message;
+    }
+  }
+  return fallback;
+}
+
 export function WorkspaceOnboardingTour({
   workspaceId,
   initialCompletedAt,
+  hasInitialKnowledge,
   featureFlags,
   capabilities,
 }: {
   workspaceId: string;
   initialCompletedAt: string | null;
+  hasInitialKnowledge: boolean;
   featureFlags?: Record<string, boolean>;
   capabilities?: {
     canManageAgentGovernance?: boolean;
@@ -52,10 +90,25 @@ export function WorkspaceOnboardingTour({
   const targetStepIndexRef = useRef<number | null>(null);
   const autoStartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const completedRef = useRef(Boolean(initialCompletedAt));
+  const hasContextRef = useRef(hasInitialKnowledge);
   const [completed, setCompleted] = useState(Boolean(initialCompletedAt));
-  const [showChecklist, setShowChecklist] = useState(false);
+  const [hasContext, setHasContext] = useState(hasInitialKnowledge);
+  const [setupMode, setSetupMode] = useState<SetupMode>(null);
+  const [setupMessage, setSetupMessage] = useState<string | null>(null);
+  const [driveConnection, setDriveConnection] = useState<DriveConnection | null>(null);
+  const [driveDocuments, setDriveDocuments] = useState<DriveDocument[]>([]);
+  const [driveQuery, setDriveQuery] = useState("");
+  const [driveSelectedIds, setDriveSelectedIds] = useState<string[]>([]);
+  const [driveLoading, setDriveLoading] = useState(false);
+  const [driveSaving, setDriveSaving] = useState(false);
+  const [driveError, setDriveError] = useState<string | null>(null);
+  const [recorderStatus, setRecorderStatus] = useState<RecorderStatus | null>(null);
+  const [recorderLoading, setRecorderLoading] = useState(false);
+  const [recorderSaving, setRecorderSaving] = useState(false);
+  const [recorderError, setRecorderError] = useState<string | null>(null);
   const isMapRoute = Boolean(pathname?.includes(`/workspaces/${workspaceId}/maps`));
   const routeKey = `${pathname ?? ""}?${searchParams?.toString() ?? ""}`;
+  const onboardingRequested = searchParams?.get("onboarding") === "setup";
   const goalsTourEnabled = Boolean(featureFlags?.GOALS);
   const contextMapsTourEnabled = Boolean(featureFlags?.CONTEXT_MAPS);
   const agentGovernanceTourEnabled = Boolean(featureFlags?.AGENT_GOVERNANCE && capabilities?.canManageAgentGovernance);
@@ -182,7 +235,7 @@ export function WorkspaceOnboardingTour({
           description: t("assistantDescription"),
           side: "left",
         },
-      }
+      },
     );
 
     return steps;
@@ -198,10 +251,25 @@ export function WorkspaceOnboardingTour({
     });
   }, [workspaceId]);
 
+  const startTour = useCallback(() => {
+    setSetupMode(null);
+    setSetupMessage(null);
+    const homePath = workspaceStepUrl(workspaceId, "/");
+    if (!workspaceRouteMatches(currentUrl(), homePath)) {
+      targetStepIndexRef.current = 0;
+      router.push(homePath);
+      return;
+    }
+    driverRef.current?.drive(0);
+  }, [router, workspaceId]);
+
   const finishTour = useCallback((driverObj: ReturnType<typeof driver>) => {
-    markCompleted();
     driverObj.destroy();
-    setShowChecklist(true);
+    if (hasContextRef.current) {
+      markCompleted();
+      return;
+    }
+    setSetupMode("setupReturn");
   }, [markCompleted]);
 
   const initDriver = useCallback(() => {
@@ -220,8 +288,8 @@ export function WorkspaceOnboardingTour({
               return;
             }
 
-            const expectedUrl = targetUrl(workspaceId, nextStep);
-            if (currentUrl() !== expectedUrl) {
+            const expectedUrl = workspaceStepUrl(workspaceId, nextStep.href);
+            if (!workspaceRouteMatches(currentUrl(), expectedUrl)) {
               targetStepIndexRef.current = index + 1;
               router.push(expectedUrl);
               driverObj.destroy();
@@ -233,8 +301,8 @@ export function WorkspaceOnboardingTour({
             const prevStep = tourSteps[index - 1];
             if (!prevStep) return;
 
-            const expectedUrl = targetUrl(workspaceId, prevStep);
-            if (currentUrl() !== expectedUrl) {
+            const expectedUrl = workspaceStepUrl(workspaceId, prevStep.href);
+            if (!workspaceRouteMatches(currentUrl(), expectedUrl)) {
               targetStepIndexRef.current = index - 1;
               router.push(expectedUrl);
               driverObj.destroy();
@@ -245,7 +313,11 @@ export function WorkspaceOnboardingTour({
         },
       })),
       onCloseClick: () => {
-        markCompleted();
+        if (hasContextRef.current) {
+          markCompleted();
+        } else {
+          setSetupMode("setupReturn");
+        }
         driverObj.destroy();
       },
     });
@@ -254,9 +326,9 @@ export function WorkspaceOnboardingTour({
   }, [finishTour, markCompleted, router, tourSteps, workspaceId]);
 
   const restartTour = useCallback(() => {
-    setShowChecklist(false);
-    const homePath = `/workspaces/${workspaceId}`;
-    if (window.location.pathname !== homePath || window.location.search) {
+    setSetupMode(null);
+    const homePath = workspaceStepUrl(workspaceId, "/");
+    if (!workspaceRouteMatches(currentUrl(), homePath)) {
       targetStepIndexRef.current = 0;
       router.push(homePath);
       return;
@@ -264,20 +336,143 @@ export function WorkspaceOnboardingTour({
     driverRef.current?.drive(0);
   }, [router, workspaceId]);
 
+  const loadDriveDocuments = useCallback(async (query = "") => {
+    setDriveLoading(true);
+    setDriveError(null);
+    try {
+      const params = query.trim() ? `?q=${encodeURIComponent(query.trim())}` : "";
+      const response = await fetch(`/api/workspaces/${workspaceId}/onboarding/google-drive${params}`);
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        throw new Error(parseApiError(data, t("driveErrorLoad")));
+      }
+      setDriveConnection(data.connection ?? null);
+      setDriveDocuments(Array.isArray(data.documents) ? data.documents : []);
+    } catch (error) {
+      setDriveError(error instanceof Error ? error.message : t("driveErrorLoad"));
+    } finally {
+      setDriveLoading(false);
+    }
+  }, [t, workspaceId]);
+
+  const saveDriveSelection = useCallback(async () => {
+    if (driveSelectedIds.length === 0) return;
+    setDriveSaving(true);
+    setDriveError(null);
+    try {
+      const response = await fetch(`/api/workspaces/${workspaceId}/onboarding/google-drive`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ documentIds: driveSelectedIds }),
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        throw new Error(parseApiError(data, t("driveErrorSave")));
+      }
+      hasContextRef.current = true;
+      setHasContext(true);
+      setSetupMessage(t("driveSyncQueued"));
+      setDriveSelectedIds([]);
+      router.refresh();
+    } catch (error) {
+      setDriveError(error instanceof Error ? error.message : t("driveErrorSave"));
+    } finally {
+      setDriveSaving(false);
+    }
+  }, [driveSelectedIds, router, t, workspaceId]);
+
+  const loadRecorderStatus = useCallback(async () => {
+    if (!featureFlags?.MEETING_RECORDERS) return;
+    setRecorderLoading(true);
+    setRecorderError(null);
+    try {
+      const response = await fetch(`/api/workspaces/${workspaceId}/onboarding/meeting-recorder`);
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        throw new Error(parseApiError(data, t("recorderErrorLoad")));
+      }
+      setRecorderStatus(data);
+    } catch (error) {
+      setRecorderError(error instanceof Error ? error.message : t("recorderErrorLoad"));
+    } finally {
+      setRecorderLoading(false);
+    }
+  }, [featureFlags?.MEETING_RECORDERS, t, workspaceId]);
+
+  const enableRecorder = useCallback(async () => {
+    setRecorderSaving(true);
+    setRecorderError(null);
+    try {
+      const response = await fetch(`/api/workspaces/${workspaceId}/onboarding/meeting-recorder`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: true, autoRecordEnabled: false }),
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        throw new Error(parseApiError(data, t("recorderErrorSave")));
+      }
+      setRecorderStatus(data);
+      setSetupMessage(t("recorderEnabled"));
+      router.refresh();
+    } catch (error) {
+      setRecorderError(error instanceof Error ? error.message : t("recorderErrorSave"));
+    } finally {
+      setRecorderSaving(false);
+    }
+  }, [router, t, workspaceId]);
+
+  const toggleDriveSelection = useCallback((documentId: string) => {
+    setDriveSelectedIds((current) => (
+      current.includes(documentId)
+        ? current.filter((id) => id !== documentId)
+        : [...current, documentId]
+    ));
+  }, []);
+
+  const handleUploaded = useCallback((count: number) => {
+    hasContextRef.current = true;
+    setHasContext(true);
+    setSetupMessage(t("uploadComplete", { count }));
+  }, [t]);
+
+  const handleSetupClose = useCallback(() => {
+    if (hasContextRef.current) {
+      markCompleted();
+      setSetupMode(null);
+      return;
+    }
+
+    if (setupMode === "setup") {
+      startTour();
+      return;
+    }
+
+    setSetupMode(null);
+  }, [markCompleted, setupMode, startTour]);
+
   useEffect(() => {
     completedRef.current = completed;
   }, [completed]);
 
   useEffect(() => {
+    hasContextRef.current = hasContext;
+  }, [hasContext]);
+
+  useEffect(() => {
     driverRef.current = initDriver();
 
     if (!completedRef.current && !isMapRoute && targetStepIndexRef.current === null) {
-      autoStartTimerRef.current = setTimeout(() => {
-        autoStartTimerRef.current = null;
-        if (targetStepIndexRef.current === null) {
-          driverRef.current?.drive(0);
-        }
-      }, 1000);
+      if (onboardingRequested || !hasContextRef.current) {
+        setSetupMode((current) => current ?? "setup");
+      } else {
+        autoStartTimerRef.current = setTimeout(() => {
+          autoStartTimerRef.current = null;
+          if (targetStepIndexRef.current === null) {
+            driverRef.current?.drive(0);
+          }
+        }, 1000);
+      }
     }
 
     window.addEventListener(RESTART_EVENT, restartTour);
@@ -292,7 +487,13 @@ export function WorkspaceOnboardingTour({
         driverRef.current?.destroy();
       }
     };
-  }, [initDriver, isMapRoute, restartTour]);
+  }, [initDriver, isMapRoute, onboardingRequested, restartTour]);
+
+  useEffect(() => {
+    if (!setupMode) return;
+    void loadDriveDocuments("");
+    void loadRecorderStatus();
+  }, [loadDriveDocuments, loadRecorderStatus, setupMode]);
 
   useEffect(() => {
     if (targetStepIndexRef.current !== null) {
@@ -307,81 +508,143 @@ export function WorkspaceOnboardingTour({
   }, [routeKey, initDriver]);
 
   return (
-    <Dialog open={showChecklist} onClose={() => setShowChecklist(false)} title={t("checklistTitle")}>
-      <p className="demo-tour-briefing-copy" style={{ marginBottom: 20 }}>{t("checklistDescription")}</p>
+    <Dialog
+      open={setupMode !== null}
+      onClose={handleSetupClose}
+      title={setupMode === "setupReturn" ? t("setupReturnTitle") : t("setupTitle")}
+    >
+      <div className="onboarding-setup stack">
+        <p className="demo-tour-briefing-copy">
+          {setupMode === "setupReturn" ? t("setupReturnDescription") : t("setupDescription")}
+        </p>
 
-      <div className="onboarding-flow">
-        <div className="onboarding-step">
-          <div className="onboarding-step-indicator">
-            <div className="onboarding-step-number">1</div>
-            <div className="onboarding-connector" />
-          </div>
-          <div className="onboarding-step-content">
-            <h4 className="onboarding-step-title">{t("uploadTitle")}</h4>
-            <p className="onboarding-step-description">{t("uploadDescription")}</p>
-            <div className="onboarding-step-action">
-              <button
-                type="button"
-                onClick={() => {
-                  setShowChecklist(false);
-                  router.push(`/workspaces/${workspaceId}/settings?tab=data-sources`);
-                }}
-              >
-                {t("uploadAction")}
-              </button>
+        {setupMessage && <p className="form-message form-message-success">{setupMessage}</p>}
+
+        <div className="onboarding-setup-grid">
+          <section className="onboarding-setup-panel stack">
+            <div>
+              <h3>{t("uploadTitle")}</h3>
+              <p className="nr-item-meta">{t("uploadDescription")}</p>
             </div>
-          </div>
+            <KnowledgeFileUploader
+              workspaceId={workspaceId}
+              defaultSource="onboarding-upload"
+              initiallyOpen
+              showTrigger={false}
+              doneLabel={t("setupContinueTour")}
+              onUploaded={handleUploaded}
+              onDone={startTour}
+            />
+          </section>
+
+          <section className="onboarding-setup-panel stack">
+            <div>
+              <h3>{t("driveTitle")}</h3>
+              <p className="nr-item-meta">{t("driveDescription")}</p>
+            </div>
+            {driveLoading && <p className="nr-item-meta">{t("driveLoading")}</p>}
+            {driveError && <p className="form-message form-message-error">{driveError}</p>}
+            {!driveLoading && (!driveConnection || !driveConnection.hasDocumentScope) && (
+              <div className="stack">
+                <p className="nr-item-meta">
+                  {driveConnection ? t("driveScopeNeeded") : t("driveConnectNeeded")}
+                </p>
+                <a className="button secondary small" href={`/api/integrations/google/connect?workspaceId=${workspaceId}&intent=documents`}>
+                  {t("driveConnectAction")}
+                </a>
+              </div>
+            )}
+            {driveConnection?.hasDocumentScope && (
+              <div className="stack">
+                <div className="actions-inline">
+                  <input
+                    value={driveQuery}
+                    onChange={(event) => setDriveQuery(event.target.value)}
+                    placeholder={t("driveSearchPlaceholder")}
+                  />
+                  <button type="button" className="secondary small" disabled={driveLoading} onClick={() => loadDriveDocuments(driveQuery)}>
+                    {t("driveSearchAction")}
+                  </button>
+                </div>
+                {driveDocuments.length === 0 ? (
+                  <p className="nr-item-meta">{t("driveEmpty")}</p>
+                ) : (
+                  <div className="stack onboarding-drive-list">
+                    {driveDocuments.map((document) => (
+                      <label key={document.id} className="onboarding-drive-row">
+                        <input
+                          type="checkbox"
+                          checked={driveSelectedIds.includes(document.id)}
+                          onChange={() => toggleDriveSelection(document.id)}
+                        />
+                        <span>
+                          <strong>{document.name}</strong>
+                          <small>{document.mimeType ?? t("driveUnknownType")}</small>
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                )}
+                <button type="button" disabled={driveSelectedIds.length === 0 || driveSaving} onClick={saveDriveSelection}>
+                  {driveSaving ? t("driveSaving") : t("driveSaveAction", { count: driveSelectedIds.length })}
+                </button>
+              </div>
+            )}
+          </section>
+
+          <section className="onboarding-setup-panel stack">
+            <div>
+              <h3>{t("connectRecorderTitle")}</h3>
+              <p className="nr-item-meta">{t("connectRecorderDescription")}</p>
+            </div>
+            {!featureFlags?.MEETING_RECORDERS ? (
+              <p className="nr-item-meta">{t("recorderUnavailable")}</p>
+            ) : (
+              <div className="stack">
+                {recorderLoading && <p className="nr-item-meta">{t("recorderLoading")}</p>}
+                {recorderError && <p className="form-message form-message-error">{recorderError}</p>}
+                {recorderStatus && (
+                  <div className="nr-item">
+                    <div className="row">
+                      <strong className="nr-item-title">{t("recorderStatusTitle")}</strong>
+                      <span className="tag">{recorderStatus.enabled ? t("recorderStatusEnabled") : t("recorderStatusDisabled")}</span>
+                    </div>
+                    <p className="nr-item-meta">
+                      {t("recorderMeta", {
+                        provider: recorderStatus.defaultProvider,
+                        minutes: recorderStatus.monthlyMinuteCap,
+                      })}
+                    </p>
+                  </div>
+                )}
+                <div className="actions-inline">
+                  <button type="button" className="secondary small" disabled={recorderSaving || recorderStatus?.enabled === true} onClick={enableRecorder}>
+                    {recorderSaving ? t("recorderSaving") : t("connectRecorderAction")}
+                  </button>
+                  <a className="link-button secondary" href={workspaceStepUrl(workspaceId, meetingRecorderOnboardingPath)}>
+                    {t("recorderDetailsAction")}
+                  </a>
+                </div>
+              </div>
+            )}
+          </section>
         </div>
 
-        <div className="onboarding-step">
-          <div className="onboarding-step-indicator">
-            <div className="onboarding-step-number">2</div>
-            <div className="onboarding-connector" />
-          </div>
-          <div className="onboarding-step-content">
-            <h4 className="onboarding-step-title">{t("connectRecorderTitle")}</h4>
-            <p className="onboarding-step-description">{t("connectRecorderDescription")}</p>
-            <div className="onboarding-step-action">
-              <button
-                type="button"
-                onClick={() => {
-                  setShowChecklist(false);
-                  router.push(`/workspaces/${workspaceId}${meetingRecorderOnboardingPath}`);
-                }}
-              >
-                {t("connectRecorderAction")}
-              </button>
-            </div>
-          </div>
+        <div className="demo-tour-briefing-actions onboarding-setup-actions">
+          <button type="button" className="secondary" onClick={startTour}>
+            {t("setupSkipTour")}
+          </button>
+          {hasContext && (
+            <button type="button" onClick={startTour}>
+              {t("setupContinueTour")}
+            </button>
+          )}
+          {setupMode === "setupReturn" && !hasContext && (
+            <button type="button" className="ghost" onClick={() => setSetupMode(null)}>
+              {t("setupLater")}
+            </button>
+          )}
         </div>
-
-        <div className="onboarding-step">
-          <div className="onboarding-step-indicator">
-            <div className="onboarding-step-number">3</div>
-            <div className="onboarding-connector" />
-          </div>
-          <div className="onboarding-step-content">
-            <h4 className="onboarding-step-title">{t("connectClientTitle")}</h4>
-            <p className="onboarding-step-description">{t("connectClientDescription")}</p>
-            <div className="onboarding-step-action">
-              <button
-                type="button"
-                onClick={() => {
-                  setShowChecklist(false);
-                  router.push(`/workspaces/${workspaceId}/settings?tab=general`);
-                }}
-              >
-                {t("connectClientAction")}
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <div className="demo-tour-briefing-actions" style={{ marginTop: 28, justifyContent: "flex-end" }}>
-        <button type="button" className="driver-popover-next-btn" onClick={() => setShowChecklist(false)}>
-          {t("checklistPrimary")}
-        </button>
       </div>
     </Dialog>
   );

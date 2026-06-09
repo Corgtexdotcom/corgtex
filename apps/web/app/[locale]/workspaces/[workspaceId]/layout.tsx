@@ -25,6 +25,38 @@ type Workspace = Awaited<ReturnType<typeof listActorWorkspaces>>[number];
 
 import { WORKSPACE_NAV_GROUPS as navGroups } from "@/lib/nav-config";
 
+async function hasWorkspaceInitialKnowledge(workspaceId: string) {
+  const [documentCount, brainSourceCount, meetingCount, knowledgeChunkCount] = await Promise.all([
+    prisma.document.count({
+      where: { workspaceId, archivedAt: null },
+    }),
+    prisma.brainSource.count({
+      where: {
+        workspaceId,
+        archivedAt: null,
+        sourceType: { in: ["FILE_UPLOAD", "DOC", "ARTICLE", "MEETING"] },
+      },
+    }),
+    prisma.meeting.count({
+      where: {
+        workspaceId,
+        archivedAt: null,
+        OR: [
+          { transcript: { not: null } },
+          { summaryMd: { not: null } },
+        ],
+      },
+    }),
+    prisma.knowledgeChunk.count({
+      where: {
+        workspaceId,
+        sourceType: { in: ["DOCUMENT", "MEETING"] },
+      },
+    }),
+  ]);
+  return documentCount + brainSourceCount + meetingCount + knowledgeChunkCount > 0;
+}
+
 export async function generateMetadata({ params }: { params: Promise<{ locale: string; workspaceId: string }> }): Promise<Metadata> {
   const { workspaceId } = await params;
   const workspace = await prisma.workspace.findUnique({ where: { id: workspaceId }, select: { slug: true, name: true } });
@@ -43,7 +75,7 @@ export default async function WorkspaceLayout({
   const { locale, workspaceId } = await params;
   const actor = await requirePageActor();
   const userId = actor.kind === "user" ? actor.user.id : null;
-  const [workspaces, unreadCount, conversationsResult, featureFlags, membership, invitePolicy, workspaceRuntime, onboardingState] = await Promise.all([
+  const [workspaces, unreadCount, conversationsResult, featureFlags, membership, invitePolicy, workspaceRuntime, onboardingState, hasInitialKnowledge] = await Promise.all([
     listActorWorkspaces(actor),
     userId ? countUnreadNotifications(userId, workspaceId) : Promise.resolve(0),
     listConversations(actor, workspaceId, { take: 30 }).catch(() => ({ items: [], total: 0, take: 30, skip: 0 })),
@@ -52,6 +84,7 @@ export default async function WorkspaceLayout({
     getMemberInvitePolicy(workspaceId).catch(() => null),
     prisma.workspace.findUnique({ where: { id: workspaceId }, select: { plan: true } }),
     actor.kind === "user" ? getUserWorkspaceOnboardingState(actor, { workspaceId, tourVersion: "v2" }).catch(() => null) : Promise.resolve(null),
+    hasWorkspaceInitialKnowledge(workspaceId).catch(() => false),
   ]);
   const current = workspaces.find((w: Workspace) => w.id === workspaceId);
   const conversations = conversationsResult.items;
@@ -182,6 +215,7 @@ export default async function WorkspaceLayout({
         <WorkspaceOnboardingTour
           workspaceId={workspaceId}
           initialCompletedAt={onboardingState?.completedAt?.toISOString() ?? null}
+          hasInitialKnowledge={hasInitialKnowledge}
           featureFlags={featureFlags}
           capabilities={capabilities}
         />
