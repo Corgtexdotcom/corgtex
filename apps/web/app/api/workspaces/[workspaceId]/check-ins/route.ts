@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@corgtex/shared";
-import { requireWorkspaceMembership, respondToCheckIn } from "@corgtex/domain";
+import { requireWorkspaceMembership, respondToCheckIn, skipCompanyUnderstandingQuestion, startCompanyUnderstandingQuestionConversation } from "@corgtex/domain";
 import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
 
@@ -38,15 +38,34 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     const { workspaceId } = await params;
     const body = await request.json();
 
+    const action = String(body.action ?? "answer");
     const checkInId = String(body.checkInId ?? "");
+    if (action === "start_company_understanding_conversation") {
+      const conversation = await startCompanyUnderstandingQuestionConversation(actor, {
+        workspaceId,
+        checkInId,
+      });
+      return NextResponse.json({ conversation });
+    }
+
+    if (action === "skip_company_understanding") {
+      const checkIn = await skipCompanyUnderstandingQuestion(actor, {
+        workspaceId,
+        checkInId,
+      });
+      return NextResponse.json({ checkIn });
+    }
+
     const responseMd = String(body.responseMd ?? "");
     const sentiment = typeof body.sentiment === "string" ? body.sentiment : undefined;
+    const relatedConversationId = typeof body.relatedConversationId === "string" ? body.relatedConversationId : null;
 
     const checkIn = await respondToCheckIn(actor, {
       workspaceId,
       checkInId,
       responseMd,
       sentiment,
+      relatedConversationId,
     });
 
     return NextResponse.json({ checkIn });
