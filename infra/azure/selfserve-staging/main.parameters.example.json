@@ -1,0 +1,42 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "location": {
+      "value": "westus2"
+    },
+    "namePrefix": {
+      "value": "corgtex-ss-stg"
+    },
+    "deployContainerApps": {
+      "value": false
+    },
+    "appUrl": {
+      "value": "https://selfserve-staging.corgtex.com"
+    },
+    "siteUrl": {
+      "value": "https://www.corgtex.com"
+    },
+    "controlPlaneUrl": {
+      "value": "https://ops.corgtex.com"
+    },
+    "webImage": {
+      "value": "ghcr.io/corgtexdotcom/corgtex/web:sha-replace-with-git-sha"
+    },
+    "workerImage": {
+      "value": "ghcr.io/corgtexdotcom/corgtex/worker:sha-replace-with-git-sha"
+    },
+    "registryUsername": {
+      "value": "corgtex-deploy"
+    },
+    "azureOpenAiBaseUrl": {
+      "value": "https://replace-me.openai.azure.com/openai/v1"
+    },
+    "azureOpenAiAuthMode": {
+      "value": "managed_identity"
+    },
+    "allowAzureServicePostgresFirewall": {
+      "value": false
+    }
+  }
+}
