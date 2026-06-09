@@ -1,9 +1,4 @@
-import type { AgentTriggerType } from "@prisma/client";
-import { prisma, env } from "@corgtex/shared";
-import { defaultModelGateway } from "@corgtex/models";
-import { searchIndexedKnowledge } from "@corgtex/knowledge";
-import { createConstitutionVersion } from "@corgtex/domain";
-import { executeAgentRun, normalizeActionDrafts, normalizeProposalDraft, asString } from "../runtime";
+import { executeAgentRun } from "../runtime";
 
 export async function runDailyCheckInAgent(params: {
   workspaceId: string;
@@ -16,28 +11,29 @@ export async function runDailyCheckInAgent(params: {
     workspaceId: params.workspaceId,
     triggerType: params.triggerType,
     triggerRef: params.triggerRef,
-    goal: "Generate contextual check-in questions to monitor sentiment and prevent burnout.",
+    goal: "Generate optional company-understanding questions that fill Brain evidence gaps.",
     payload: { memberId: params.memberId },
-    plan: ["load-context", "generate-check-ins", "persist-check-ins"],
-    buildContext: async (helpers) => {
+    plan: ["load-member-gaps", "dedupe-daily-questions", "persist-company-understanding-questions"],
+    buildContext: async () => {
       return { memberId: params.memberId };
     },
-    execute: async (context, helpers, runId, model) => {
+    execute: async (_context, helpers, _runId, _model) => {
       const result = await helpers.step("persist-check-ins", {}, async () => {
-        const { createCheckIn } = await import("@corgtex/domain");
-        await createCheckIn(
-          { role: "SYSTEM", id: "system" } as any,
+        const { createDailyCompanyUnderstandingQuestions } = await import("@corgtex/domain");
+        return createDailyCompanyUnderstandingQuestions(
+          {
+            kind: "agent",
+            authProvider: "bootstrap",
+            label: "daily-check-in",
+            workspaceIds: [params.workspaceId],
+          },
           {
             workspaceId: params.workspaceId,
             memberId: params.memberId,
-            questionText: "How are you feeling about your assigned tensions today?",
-            questionSource: "AI",
           },
         );
-        return { created: 1 };
       });
       return { resultJson: result };
     },
   });
 }
-

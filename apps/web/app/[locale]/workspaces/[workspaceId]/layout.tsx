@@ -1,4 +1,4 @@
-import { isGlobalOperator, listActorWorkspaces, countUnreadNotifications, listConversations, requireWorkspaceMembership, getMemberInvitePolicy, getMeetingRecorderConfig, getUserWorkspaceOnboardingState, getAiWorkspaceSelectionState } from "@corgtex/domain";
+import { isGlobalOperator, listActorWorkspaces, countUnreadNotifications, listConversations, listDailyCompanyUnderstandingQuestions, requireWorkspaceMembership, getMemberInvitePolicy, getMeetingRecorderConfig, getUserWorkspaceOnboardingState, getAiWorkspaceSelectionState } from "@corgtex/domain";
 import { workspaceBranding, prisma } from "@corgtex/shared";
 import type { Metadata } from "next";
 import { logoutAction, requirePageActor } from "@/lib/auth";
@@ -75,10 +75,11 @@ export default async function WorkspaceLayout({
   const { locale, workspaceId } = await params;
   const actor = await requirePageActor();
   const userId = actor.kind === "user" ? actor.user.id : null;
-  const [workspaces, unreadCount, conversationsResult, featureFlags, membership, invitePolicy, workspaceRuntime, onboardingState, hasInitialKnowledge] = await Promise.all([
+  const [workspaces, unreadCount, conversationsResult, dailyQuestions, featureFlags, membership, invitePolicy, workspaceRuntime, onboardingState, hasInitialKnowledge] = await Promise.all([
     listActorWorkspaces(actor),
     userId ? countUnreadNotifications(userId, workspaceId) : Promise.resolve(0),
     listConversations(actor, workspaceId, { take: 30 }).catch(() => ({ items: [], total: 0, take: 30, skip: 0 })),
+    userId ? listDailyCompanyUnderstandingQuestions(actor, { workspaceId, take: 3 }).catch(() => []) : Promise.resolve([]),
     getWorkspaceFeatureFlags(workspaceId),
     requireWorkspaceMembership({ actor, workspaceId }),
     getMemberInvitePolicy(workspaceId).catch(() => null),
@@ -206,6 +207,14 @@ export default async function WorkspaceLayout({
       <WorkspaceChatRail
         workspaceId={workspaceId}
         conversations={conversationSummaries}
+        companyQuestions={dailyQuestions.map((question) => ({
+          id: question.id,
+          questionText: question.questionText,
+          confidence: question.confidence,
+          priority: question.priority,
+          relatedConversationId: question.relatedConversationId,
+          createdAt: question.createdAt.toISOString(),
+        }))}
         aiWorkspaceState={aiWorkspaceState}
       />
       {isDemo && (

@@ -1,10 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createCheckIn,
+  createDailyCompanyUnderstandingQuestions,
   createCompanyUnderstandingQuestion,
   getOverwhelmSignals,
   listCompanyUnderstandingQuestions,
   respondToCheckIn,
+  startCompanyUnderstandingQuestionConversation,
   skipCompanyUnderstandingQuestion,
 } from "./check-ins";
 import { prisma } from "@corgtex/shared";
@@ -14,9 +16,24 @@ vi.mock("@corgtex/shared", () => ({
   prisma: {
     checkIn: {
       create: vi.fn(),
+      count: vi.fn(),
       findUnique: vi.fn(),
       findMany: vi.fn(),
       update: vi.fn(),
+    },
+    member: {
+      findUnique: vi.fn(),
+    },
+    brainSource: {
+      create: vi.fn(),
+    },
+    conversationSession: {
+      create: vi.fn(),
+      findUnique: vi.fn(),
+      findUniqueOrThrow: vi.fn(),
+    },
+    conversationTurn: {
+      create: vi.fn(),
     },
     $transaction: vi.fn((fn) => fn(prisma)),
   },
@@ -42,6 +59,7 @@ describe("getOverwhelmSignals", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked((prisma as any).$transaction).mockImplementation(async (fn: any) => fn(prisma));
+    vi.mocked((prisma as any).member.findUnique).mockResolvedValue({ id: memberId, workspaceId, isActive: true });
   });
 
   it("getOverwhelmSignals flags member with 3+ negative responses in 7 days", async () => {
@@ -124,6 +142,42 @@ describe("getOverwhelmSignals", () => {
     }));
   });
 
+  it("creates at most three daily company understanding questions and dedupes existing prompts", async () => {
+    vi.mocked((prisma as any).checkIn.count).mockResolvedValueOnce(1);
+    vi.mocked(prisma.checkIn.findMany).mockResolvedValueOnce([
+      { questionText: "What document, customer note, or working file would give CORGTEX the most useful company context today?" },
+    ] as any);
+    vi.mocked(prisma.checkIn.create).mockResolvedValue({ id: "checkin-new" } as any);
+
+    const result = await createDailyCompanyUnderstandingQuestions(actor, {
+      workspaceId,
+      memberId,
+      now: new Date("2026-06-09T12:00:00.000Z"),
+    });
+
+    expect(result).toEqual({ created: 2, cap: 3 });
+    expect(prisma.checkIn.create).toHaveBeenCalledTimes(2);
+    expect(prisma.checkIn.create).not.toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        questionText: "What document, customer note, or working file would give CORGTEX the most useful company context today?",
+      }),
+    }));
+  });
+
+  it("does not create daily questions after the same-day cap is reached", async () => {
+    vi.mocked((prisma as any).checkIn.count).mockResolvedValueOnce(3);
+    vi.mocked(prisma.checkIn.findMany).mockResolvedValueOnce([]);
+
+    const result = await createDailyCompanyUnderstandingQuestions(actor, {
+      workspaceId,
+      memberId,
+      now: new Date("2026-06-09T12:00:00.000Z"),
+    });
+
+    expect(result).toEqual({ created: 0, cap: 3 });
+    expect(prisma.checkIn.create).not.toHaveBeenCalled();
+  });
+
   it("lists open company understanding questions for the signed-in member", async () => {
     vi.mocked(prisma.checkIn.findMany).mockResolvedValueOnce([{ id: "checkin-1" }] as any);
 
@@ -141,11 +195,12 @@ describe("getOverwhelmSignals", () => {
     }));
   });
 
-  it("marks check-ins answered when a member responds", async () => {
+  it("marks regular check-ins answered when a member responds", async () => {
     vi.mocked(prisma.checkIn.findUnique).mockResolvedValueOnce({
       id: "checkin-1",
       workspaceId,
       memberId,
+      questionType: "WELLBEING",
     } as any);
     vi.mocked(prisma.checkIn.update).mockResolvedValueOnce({
       id: "checkin-1",
@@ -170,6 +225,86 @@ describe("getOverwhelmSignals", () => {
     expect(appendEvents).toHaveBeenCalledWith(prisma, expect.arrayContaining([
       expect.objectContaining({ type: "checkin.response_received" }),
     ]));
+    expect((prisma as any).brainSource.create).not.toHaveBeenCalled();
+  });
+
+  it("saves company understanding answers as brain sources", async () => {
+    vi.mocked(prisma.checkIn.findUnique).mockResolvedValueOnce({
+      id: "checkin-1",
+      workspaceId,
+      memberId,
+      questionType: "COMPANY_UNDERSTANDING",
+      questionText: "Who owns onboarding?",
+      status: "OPEN",
+      relatedConversationId: null,
+    } as any);
+    vi.mocked(prisma.checkIn.update).mockResolvedValueOnce({
+      id: "checkin-1",
+      workspaceId,
+      memberId,
+      status: "ANSWERED",
+      relatedConversationId: "conversation-1",
+    } as any);
+    vi.mocked((prisma as any).brainSource.create).mockResolvedValueOnce({ id: "source-1" });
+
+    await respondToCheckIn(actor, {
+      workspaceId,
+      checkInId: "checkin-1",
+      responseMd: "The operations lead owns onboarding.",
+      relatedConversationId: "conversation-1",
+    });
+
+    expect((prisma as any).brainSource.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        workspaceId,
+        sourceType: "CONVERSATION_INSIGHT",
+        authorMemberId: memberId,
+        channel: "daily-question",
+        metadata: expect.objectContaining({
+          checkInId: "checkin-1",
+          relatedConversationId: "conversation-1",
+          responseUsePolicy: "COMPANY_KNOWLEDGE",
+        }),
+      }),
+    }));
+    expect(appendEvents).toHaveBeenCalledWith(prisma, expect.arrayContaining([
+      expect.objectContaining({ type: "brain-source.created", aggregateId: "source-1" }),
+      expect.objectContaining({ type: "checkin.response_received" }),
+    ]));
+  });
+
+  it("starts a linked conversation for open company understanding questions", async () => {
+    vi.mocked(prisma.checkIn.findUnique).mockResolvedValueOnce({
+      id: "checkin-1",
+      workspaceId,
+      memberId,
+      questionType: "COMPANY_UNDERSTANDING",
+      questionText: "Which goal is unclear?",
+      status: "OPEN",
+      relatedConversationId: null,
+    } as any);
+    vi.mocked((prisma as any).conversationSession.create).mockResolvedValueOnce({ id: "conversation-1" });
+    vi.mocked((prisma as any).conversationSession.findUniqueOrThrow).mockResolvedValueOnce({
+      id: "conversation-1",
+      turns: [{ id: "turn-1" }],
+    });
+
+    const result = await startCompanyUnderstandingQuestionConversation(actor, {
+      workspaceId,
+      checkInId: "checkin-1",
+    });
+
+    expect(result).toEqual(expect.objectContaining({ id: "conversation-1" }));
+    expect((prisma as any).conversationTurn.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        conversationId: "conversation-1",
+        assistantMessage: expect.stringContaining("Which goal is unclear?"),
+      }),
+    }));
+    expect(prisma.checkIn.update).toHaveBeenCalledWith({
+      where: { id: "checkin-1" },
+      data: { relatedConversationId: "conversation-1" },
+    });
   });
 
   it("skips open company understanding questions", async () => {

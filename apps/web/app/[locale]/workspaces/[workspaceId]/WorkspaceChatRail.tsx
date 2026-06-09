@@ -17,6 +17,15 @@ type ConversationSummary = {
   lastMessage: string | null;
 };
 
+type CompanyQuestionSummary = {
+  id: string;
+  questionText: string;
+  confidence: number | null;
+  priority: number;
+  relatedConversationId: string | null;
+  createdAt: string;
+};
+
 const STORAGE_KEY = "corgtex.workspaceChatRail";
 
 function isWorkspaceHome(pathname: string, workspaceId: string) {
@@ -30,10 +39,12 @@ function isWorkspaceHome(pathname: string, workspaceId: string) {
 export function WorkspaceChatRail({
   workspaceId,
   conversations,
+  companyQuestions,
   aiWorkspaceState,
 }: {
   workspaceId: string;
   conversations: ConversationSummary[];
+  companyQuestions: CompanyQuestionSummary[];
   aiWorkspaceState: AiWorkspaceLaunchState;
 }) {
   const pathname = usePathname() ?? "";
@@ -127,6 +138,7 @@ export function WorkspaceChatRail({
         <ChatInterface
           workspaceId={workspaceId}
           conversations={conversations}
+          companyQuestions={companyQuestions}
           activeSessionId={null}
           compact={true}
           pageContext={pageContext}

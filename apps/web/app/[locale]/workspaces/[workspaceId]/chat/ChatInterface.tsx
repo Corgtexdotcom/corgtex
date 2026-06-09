@@ -21,6 +21,15 @@ type ConversationSummary = {
   } | null;
 };
 
+type CompanyQuestionSummary = {
+  id: string;
+  questionText: string;
+  confidence: number | null;
+  priority: number;
+  relatedConversationId: string | null;
+  createdAt: string;
+};
+
 type Turn = {
   id: string;
   sequenceNumber: number;
@@ -44,6 +53,7 @@ const WARNING_LENGTH = 80_000;
 export function ChatInterface({
   workspaceId,
   conversations: initialConversations,
+  companyQuestions: initialCompanyQuestions = [],
   activeSessionId,
   compact = false,
   mobileMode = false,
@@ -52,6 +62,7 @@ export function ChatInterface({
 }: {
   workspaceId: string;
   conversations: ConversationSummary[];
+  companyQuestions?: CompanyQuestionSummary[];
   activeSessionId: string | null;
   compact?: boolean;
   mobileMode?: boolean;
@@ -61,6 +72,8 @@ export function ChatInterface({
   const t = useTranslations("chat");
   const router = useRouter();
   const [conversations, setConversations] = useState(initialConversations);
+  const [companyQuestions, setCompanyQuestions] = useState(initialCompanyQuestions);
+  const [activeQuestionId, setActiveQuestionId] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(activeSessionId);
   const [turns, setTurns] = useState<Turn[]>([]);
   const [input, setInput] = useState("");
@@ -143,8 +156,13 @@ export function ChatInterface({
     }
   }, [activeSessionId, loadConversation]);
 
+  useEffect(() => {
+    setCompanyQuestions(initialCompanyQuestions);
+  }, [initialCompanyQuestions]);
+
   function openNewConversation() {
     setSessionId(null);
+    setActiveQuestionId(null);
     setTurns([]);
     setError(null);
     setInput("");
@@ -172,10 +190,79 @@ export function ChatInterface({
     setShowNewChat(false);
     setShowMobileHistory(false);
     setEditingTopic(false);
+    setActiveQuestionId(null);
     if (!compact) {
       window.history.pushState({}, "", `/workspaces/${workspaceId}/chat?session=${id}`);
     }
     void loadConversation(id);
+  }
+
+  async function openCompanyQuestion(question: CompanyQuestionSummary) {
+    setLoading(true);
+    setError(null);
+    setShowMobileHistory(false);
+    setEditingTopic(false);
+    try {
+      const response = await fetch(`/api/workspaces/${workspaceId}/check-ins`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "start_company_understanding_conversation",
+          checkInId: question.id,
+        }),
+      });
+      if (!response.ok) throw new Error(t("errorFailedToLoad"));
+      const data = await response.json();
+      const conversation = data.conversation as ConversationSummary & { turns?: Turn[] };
+      const loadedTurns = conversation.turns ?? [];
+      setTurns(loadedTurns);
+      setSessionId(conversation.id);
+      setActiveQuestionId(question.id);
+      setShowNewChat(false);
+      setConversations((prev) => {
+        const summary = {
+          id: conversation.id,
+          topic: conversation.topic ?? question.questionText.slice(0, 64),
+          agentKey: conversation.agentKey ?? "company-understanding",
+          status: conversation.status ?? "ACTIVE",
+          updatedAt: conversation.updatedAt ?? new Date().toISOString(),
+          lastMessage: loadedTurns.at(-1)?.assistantMessage?.slice(0, 100) ?? question.questionText.slice(0, 100),
+        };
+        const existing = prev.find((item) => item.id === summary.id);
+        return existing ? prev.map((item) => (item.id === summary.id ? { ...item, ...summary } : item)) : [summary, ...prev];
+      });
+      setCompanyQuestions((prev) =>
+        prev.map((item) => item.id === question.id ? { ...item, relatedConversationId: conversation.id } : item)
+      );
+      if (!compact) {
+        window.history.pushState({}, "", `/workspaces/${workspaceId}/chat?session=${conversation.id}`);
+      }
+      setTimeout(() => inputRef.current?.focus(), 50);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t("errorFailedToLoad"));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function skipCompanyQuestion(questionId: string) {
+    setError(null);
+    try {
+      const response = await fetch(`/api/workspaces/${workspaceId}/check-ins`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "skip_company_understanding",
+          checkInId: questionId,
+        }),
+      });
+      if (!response.ok) throw new Error(t("errorFailedToSend"));
+      setCompanyQuestions((prev) => prev.filter((question) => question.id !== questionId));
+      if (activeQuestionId === questionId) setActiveQuestionId(null);
+      router.refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t("errorFailedToSend"));
+    }
   }
 
   async function handleRenameSave() {
@@ -318,6 +405,31 @@ export function ChatInterface({
       }
     }
 
+    const answeredQuestionId = activeQuestionId;
+    if (answeredQuestionId) {
+      try {
+        const response = await fetch(`/api/workspaces/${workspaceId}/check-ins`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            checkInId: answeredQuestionId,
+            responseMd: userMessage,
+            relatedConversationId: currentSessionId,
+          }),
+        });
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => ({}));
+          throw new Error(errorData.error || t("errorFailedToSend"));
+        }
+        setCompanyQuestions((prev) => prev.filter((question) => question.id !== answeredQuestionId));
+        setActiveQuestionId(null);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : t("errorFailedToSend"));
+        setLoading(false);
+        return;
+      }
+    }
+
     setInput("");
 
     const optimisticTurn: Turn = {
@@ -416,6 +528,8 @@ export function ChatInterface({
       );
       if (shouldRefreshCurrentRoute) {
         router.refresh();
+      } else if (answeredQuestionId) {
+        router.refresh();
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : t("errorFailedToSend"));
@@ -439,6 +553,38 @@ export function ChatInterface({
   function renderConversationList() {
     return (
       <div className="chat-session-list">
+        {companyQuestions.length > 0 && (
+          <div className="chat-unread-questions" aria-label={t("companyQuestionsTitle")}>
+            <div className="chat-unread-header">
+              <span>{t("companyQuestionsTitle")}</span>
+              <span className="chat-unread-count">{companyQuestions.length}</span>
+            </div>
+            {companyQuestions.map((question) => (
+              <div key={question.id} className={`chat-unread-question ${activeQuestionId === question.id ? "active" : ""}`}>
+                <button
+                  type="button"
+                  className="chat-unread-question-open"
+                  onClick={() => void openCompanyQuestion(question)}
+                >
+                  <span className="chat-unread-label">{t("companyQuestionUnread")}</span>
+                  <span className="chat-unread-question-text">{question.questionText}</span>
+                  {question.confidence !== null && (
+                    <span className="chat-unread-meta">
+                      {t("companyQuestionConfidence", { confidence: Math.round(question.confidence * 100) })}
+                    </span>
+                  )}
+                </button>
+                <button
+                  type="button"
+                  className="chat-unread-skip"
+                  onClick={() => void skipCompanyQuestion(question.id)}
+                >
+                  {t("companyQuestionSkip")}
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
         {conversations.map((conversation) => (
           <button
             key={conversation.id}
@@ -553,7 +699,13 @@ export function ChatInterface({
                   />
                 ) : (
                   <div
-                    style={{ fontWeight: 600, fontSize: "0.95rem", cursor: sessionId ? "pointer" : "default" }}
+                    style={{
+                      fontWeight: 600,
+                      fontSize: "0.95rem",
+                      lineHeight: 1.25,
+                      cursor: sessionId ? "pointer" : "default",
+                      overflowWrap: "anywhere",
+                    }}
                     title={sessionId ? t("titleClickToRename") : undefined}
                     onClick={() => {
                       if (!sessionId) return;
@@ -610,6 +762,12 @@ export function ChatInterface({
                 </button>
               </div>
               {renderConversationList()}
+            </div>
+          )}
+
+          {activeQuestionId && (
+            <div className="chat-question-policy">
+              {t("companyQuestionPolicy")}
             </div>
           )}
 

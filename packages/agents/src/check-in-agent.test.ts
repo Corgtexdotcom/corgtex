@@ -37,7 +37,7 @@ const envMock = {
   WORKSPACE_AGENT_MAX_CONCURRENCY: 4,
 };
 
-const createCheckInMock = vi.fn();
+const createDailyCompanyUnderstandingQuestionsMock = vi.fn();
 
 vi.mock("@corgtex/shared", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@corgtex/shared")>();
@@ -53,7 +53,7 @@ vi.mock("@corgtex/domain", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@corgtex/domain")>();
   return {
     ...actual,
-    createCheckIn: createCheckInMock,
+    createDailyCompanyUnderstandingQuestions: createDailyCompanyUnderstandingQuestionsMock,
     isAgentEnabled: vi.fn().mockResolvedValue(true),
     getAgentModelOverride: vi.fn().mockResolvedValue(undefined),
     resolveAgentIdentityLimits: vi.fn().mockResolvedValue(null),
@@ -107,10 +107,10 @@ describe("runDailyCheckInAgent", () => {
     prismaMock.modelUsageBudget.findUnique.mockReset().mockResolvedValue(null);
     prismaMock.$transaction.mockReset().mockImplementation(async (fn: any) => fn(prismaMock));
     prismaMock.agentIdentity.findUnique.mockReset().mockResolvedValue(null);
-    createCheckInMock.mockReset().mockResolvedValue({ id: "checkin-1" });
+    createDailyCompanyUnderstandingQuestionsMock.mockReset().mockResolvedValue({ created: 2, cap: 3 });
   });
 
-  it("creates a check-in without requiring a database", async () => {
+  it("creates daily company understanding questions without requiring a database", async () => {
     const { runDailyCheckInAgent } = await import(".");
 
     const result = await runDailyCheckInAgent({
@@ -120,12 +120,11 @@ describe("runDailyCheckInAgent", () => {
       triggerType: "SCHEDULE",
     });
 
-    expect(createCheckInMock).toHaveBeenCalledWith(
-      expect.objectContaining({ role: "SYSTEM" }),
+    expect(createDailyCompanyUnderstandingQuestionsMock).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "agent", label: "daily-check-in" }),
       expect.objectContaining({
         workspaceId: "ws-1",
         memberId: "member-1",
-        questionSource: "AI",
       }),
     );
     expect(result).toEqual(expect.objectContaining({ status: "COMPLETED" }));
