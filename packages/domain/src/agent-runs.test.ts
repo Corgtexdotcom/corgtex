@@ -12,10 +12,42 @@ vi.mock("@corgtex/shared", async (importOriginal) => {
   return {
     ...actual,
     prisma: mockedPrisma,
+    checkRateLimit: vi.fn().mockResolvedValue({ allowed: true }),
+    RATE_LIMITS: actual.RATE_LIMITS,
   };
 });
 
+vi.mock("./auth", () => ({
+  requireWorkspaceMembership: vi.fn().mockResolvedValue(true),
+}));
+
 describe("agent-runs", () => {
+  it("routes manual company-understanding triggers to the company-understanding workflow job", async () => {
+    const { prisma } = await import("@corgtex/shared");
+    const { triggerAgentRun } = await import("./agent-runs");
+    (prisma as any).workflowJob = { create: vi.fn() };
+    (prisma as any).auditLog = { create: vi.fn() };
+    vi.mocked((prisma as any).workflowJob.create).mockResolvedValue({
+      id: "job-1",
+      type: "agent.company-understanding",
+      status: "PENDING",
+      createdAt: new Date(),
+    });
+
+    await triggerAgentRun({ kind: "user", user: { id: "u-1" } } as any, {
+      workspaceId: "ws-1",
+      agentKey: "company-understanding",
+    });
+
+    expect((prisma as any).workflowJob.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        workspaceId: "ws-1",
+        type: "agent.company-understanding",
+        payload: expect.objectContaining({ triggerType: "MANUAL" }),
+      }),
+    }));
+  });
+
   describe("submitAgentFeedback", () => {
     it("verifies run ownership, scopes step update by agentRunId, and resumes the run", async () => {
       const { prisma } = await import("@corgtex/shared");
@@ -36,10 +68,6 @@ describe("agent-runs", () => {
         id: "run-1",
         status: "PENDING",
       } as any);
-
-      vi.mock("./auth", () => ({
-        requireWorkspaceMembership: vi.fn().mockResolvedValue(true),
-      }));
 
       const actor = { kind: "user", user: { id: "u-1" } } as any;
 

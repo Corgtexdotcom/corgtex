@@ -5,6 +5,7 @@ describe("AGENT_REGISTRY", () => {
   it("has correct model tier assignments", () => {
     expect(AGENT_REGISTRY["finance-reconciliation-prep"].defaultModelTier).toBe("standard");
     expect(AGENT_REGISTRY["brain-absorb"].defaultModelTier).toBe("quality");
+    expect(AGENT_REGISTRY["company-understanding"].defaultModelTier).toBe("quality");
     expect(AGENT_REGISTRY["meeting-summary"].defaultModelTier).toBe("quality");
     expect(AGENT_REGISTRY["action-extraction"].defaultModelTier).toBe("quality");
     expect(AGENT_REGISTRY["inbox-triage"].defaultModelTier).toBe("fast");

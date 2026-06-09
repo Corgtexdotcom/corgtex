@@ -107,6 +107,35 @@ describe("deriveJobsForEvent", () => {
     expect(jobs[2]?.type).toBe("knowledge.sync.event");
   });
 
+  it("runs company understanding after brain source absorption", () => {
+    const jobs = deriveJobsForEvent({
+      id: "event-brain-source",
+      type: "brain-source.created",
+      workspaceId: "workspace-1",
+      payload: {
+        sourceId: "source-1",
+      },
+    });
+
+    expect(jobs).toEqual([
+      {
+        workspaceId: "workspace-1",
+        eventId: "event-brain-source",
+        type: "agent.brain-absorb",
+        payload: { sourceId: "source-1" },
+        dedupeKey: "event-brain-source:brain-absorb",
+      },
+      {
+        workspaceId: "workspace-1",
+        eventId: "event-brain-source",
+        type: "agent.company-understanding",
+        payload: { sourceId: "source-1" },
+        dependsOnDedupeKey: "event-brain-source:brain-absorb",
+        dedupeKey: "event-brain-source:company-understanding",
+      },
+    ]);
+  });
+
   it("indexes proposals when they are opened", () => {
     const jobs = deriveJobsForEvent({
       id: "event-proposal-opened",

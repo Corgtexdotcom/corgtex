@@ -13,6 +13,7 @@ export type AgentKey =
   | "constitution-synthesis"
   | "finance-reconciliation-prep"
   | "brain-absorb"
+  | "company-understanding"
   | "brain-maintenance"
   | "advice-routing"
   | "process-linting"
@@ -41,6 +42,8 @@ function jobTypeForAgent(agentKey: AgentKey) {
       return "agent.finance-reconciliation-prep";
     case "brain-absorb":
       return "agent.brain-absorb";
+    case "company-understanding":
+      return "agent.company-understanding";
     case "brain-maintenance":
       return "agent.brain-maintenance";
     case "advice-routing":

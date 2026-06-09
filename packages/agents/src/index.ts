@@ -1,5 +1,6 @@
 export * from "./brain-absorb";
 export * from "./brain-maintenance";
+export * from "./company-understanding";
 export * from "./conversation";
 export * from "./page-context";
 export * from "./runtime";

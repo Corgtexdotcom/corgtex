@@ -260,12 +260,21 @@ export function deriveJobsForEvent(event: {
   if (event.type === "brain-source.created") {
     const payload = event.payload as { sourceId?: string };
     if (payload.sourceId && event.workspaceId) {
+      const absorbDedupeKey = `${event.id}:brain-absorb`;
       jobs.push({
         workspaceId: event.workspaceId,
         eventId: event.id,
         type: "agent.brain-absorb",
         payload: { sourceId: payload.sourceId },
-        dedupeKey: `${event.id}:brain-absorb`,
+        dedupeKey: absorbDedupeKey,
+      });
+      jobs.push({
+        workspaceId: event.workspaceId,
+        eventId: event.id,
+        type: "agent.company-understanding",
+        payload: { sourceId: payload.sourceId },
+        dependsOnDedupeKey: absorbDedupeKey,
+        dedupeKey: `${event.id}:company-understanding`,
       });
     }
   }
