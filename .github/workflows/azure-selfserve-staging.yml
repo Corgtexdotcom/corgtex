@@ -1,0 +1,368 @@
+name: Azure Self-Serve Staging
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: "what-if previews changes; deploy applies them."
+        required: true
+        type: choice
+        default: what-if
+        options:
+          - what-if
+          - deploy
+      resource_group:
+        description: "Azure resource group for staging."
+        required: true
+        type: string
+        default: rg-corgtex-selfserve-staging
+      location:
+        description: "Azure region for app/data resources."
+        required: true
+        type: string
+        default: westus2
+      name_prefix:
+        description: "Short lowercase Azure resource prefix."
+        required: true
+        type: string
+        default: corgtex-ss-stg
+      deploy_container_apps:
+        description: "Create/update web, worker, and migration job after Key Vault secrets exist."
+        required: true
+        type: boolean
+        default: false
+      run_migration_job:
+        description: "Run the one-shot migrate/seed job after deploy."
+        required: true
+        type: boolean
+        default: false
+      run_health_smoke:
+        description: "Probe the Azure web app /api/health endpoint."
+        required: true
+        type: boolean
+        default: false
+      run_browser_smoke:
+        description: "Run the self-serve browser signup smoke against app_url."
+        required: true
+        type: boolean
+        default: false
+      app_url:
+        description: "Configured Azure self-serve app origin."
+        required: true
+        type: string
+        default: https://selfserve-staging.corgtex.com
+      site_url:
+        description: "Marketing site origin used by signup smoke."
+        required: true
+        type: string
+        default: https://www.corgtex.com
+      control_plane_url:
+        description: "Control-plane origin for app runtime configuration."
+        required: true
+        type: string
+        default: https://ops.corgtex.com
+      azure_openai_auth_mode:
+        description: "Azure OpenAI auth mode for the runtime."
+        required: true
+        type: choice
+        default: managed_identity
+        options:
+          - managed_identity
+          - api_key
+      allow_azure_service_postgres_firewall:
+        description: "Allow Azure services through the Postgres firewall."
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  id-token: write
+  packages: write
+
+concurrency:
+  group: azure-selfserve-staging
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy and smoke Azure staging
+    runs-on: ubuntu-latest
+    environment: azure-selfserve-staging
+    env:
+      OPERATION: ${{ inputs.operation }}
+      RESOURCE_GROUP: ${{ inputs.resource_group }}
+      LOCATION: ${{ inputs.location }}
+      NAME_PREFIX: ${{ inputs.name_prefix }}
+      DEPLOY_CONTAINER_APPS: ${{ inputs.deploy_container_apps }}
+      RUN_MIGRATION_JOB: ${{ inputs.run_migration_job }}
+      RUN_HEALTH_SMOKE: ${{ inputs.run_health_smoke }}
+      RUN_BROWSER_SMOKE: ${{ inputs.run_browser_smoke }}
+      APP_URL: ${{ inputs.app_url }}
+      SITE_URL: ${{ inputs.site_url }}
+      CONTROL_PLANE_URL: ${{ inputs.control_plane_url }}
+      AZURE_OPENAI_AUTH_MODE: ${{ inputs.azure_openai_auth_mode }}
+      ALLOW_AZURE_SERVICE_POSTGRES_FIREWALL: ${{ inputs.allow_azure_service_postgres_firewall }}
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      POSTGRES_ADMIN_PASSWORD: ${{ secrets.AZURE_SELFSERVE_STAGING_POSTGRES_ADMIN_PASSWORD }}
+      AZURE_OPENAI_BASE_URL: ${{ vars.AZURE_SELFSERVE_STAGING_OPENAI_BASE_URL }}
+      SMOKE_EMAIL_CAPTURE_SECRET: ${{ secrets.AZURE_SELFSERVE_STAGING_SMOKE_EMAIL_CAPTURE_SECRET }}
+      SELF_SERVE_SMOKE_EMAIL_DOMAIN: ${{ vars.AZURE_SELFSERVE_STAGING_SMOKE_EMAIL_DOMAIN }}
+      REGISTRY_USERNAME: corgtex-deploy
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Validate workflow configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          missing=()
+          require() {
+            local name="$1"
+            local value="${!name:-}"
+            if [[ -z "$value" ]]; then
+              missing+=("$name")
+            fi
+          }
+
+          require AZURE_CLIENT_ID
+          require AZURE_TENANT_ID
+          require AZURE_SUBSCRIPTION_ID
+          require POSTGRES_ADMIN_PASSWORD
+          require AZURE_OPENAI_BASE_URL
+
+          if [[ "$RUN_BROWSER_SMOKE" == "true" ]]; then
+            require SMOKE_EMAIL_CAPTURE_SECRET
+            require SELF_SERVE_SMOKE_EMAIL_DOMAIN
+          fi
+
+          if [[ "$RUN_MIGRATION_JOB" == "true" && "$OPERATION" != "deploy" ]]; then
+            echo "::error::run_migration_job requires operation=deploy."
+            exit 1
+          fi
+
+          if (( ${#missing[@]} > 0 )); then
+            printf "::error::Missing GitHub environment settings: %s\\n" "${missing[*]}"
+            exit 1
+          fi
+
+      - name: Log in to Azure
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Confirm Azure context
+        shell: bash
+        run: |
+          set -euo pipefail
+          az account show --query "{tenantId: tenantId, subscriptionId: id, name: name}" --output table
+
+      - uses: docker/setup-buildx-action@v3
+        if: ${{ inputs.operation == 'deploy' && inputs.deploy_container_apps }}
+
+      - name: Log in to GHCR
+        if: ${{ inputs.operation == 'deploy' && inputs.deploy_container_apps }}
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute immutable image tags
+        id: image
+        shell: bash
+        run: |
+          set -euo pipefail
+          repo="ghcr.io/${GITHUB_REPOSITORY,,}"
+          sha_tag="sha-${GITHUB_SHA}"
+          echo "web=${repo}/web:${sha_tag}" >> "$GITHUB_OUTPUT"
+          echo "worker=${repo}/worker:${sha_tag}" >> "$GITHUB_OUTPUT"
+          echo "web_image=${repo}/web:${sha_tag}" >> "$GITHUB_ENV"
+          echo "worker_image=${repo}/worker:${sha_tag}" >> "$GITHUB_ENV"
+
+      - name: Build and push web image
+        if: ${{ inputs.operation == 'deploy' && inputs.deploy_container_apps }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile.web
+          push: true
+          tags: ${{ steps.image.outputs.web }}
+
+      - name: Build and push worker image
+        if: ${{ inputs.operation == 'deploy' && inputs.deploy_container_apps }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile.worker
+          push: true
+          tags: ${{ steps.image.outputs.worker }}
+
+      - name: Ensure resource group for deployment
+        if: ${{ inputs.operation == 'deploy' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          az group create \
+            --name "$RESOURCE_GROUP" \
+            --location "$LOCATION" \
+            --tags app=corgtex environment=staging workload=self-serve managed-by=github-actions \
+            --output none
+
+      - name: Confirm resource group exists for what-if
+        if: ${{ inputs.operation == 'what-if' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$(az group exists --name "$RESOURCE_GROUP")" != "true" ]]; then
+            echo "::error::Resource group $RESOURCE_GROUP does not exist. Run operation=deploy with deploy_container_apps=false after approval to create backing resources."
+            exit 1
+          fi
+
+      - name: Preview Azure deployment
+        shell: bash
+        run: |
+          set -euo pipefail
+          parameters=(
+            "location=$LOCATION"
+            "namePrefix=$NAME_PREFIX"
+            "deployContainerApps=$DEPLOY_CONTAINER_APPS"
+            "appUrl=$APP_URL"
+            "siteUrl=$SITE_URL"
+            "controlPlaneUrl=$CONTROL_PLANE_URL"
+            "webImage=$web_image"
+            "workerImage=$worker_image"
+            "registryUsername=$REGISTRY_USERNAME"
+            "azureOpenAiBaseUrl=$AZURE_OPENAI_BASE_URL"
+            "azureOpenAiAuthMode=$AZURE_OPENAI_AUTH_MODE"
+            "allowAzureServicePostgresFirewall=$ALLOW_AZURE_SERVICE_POSTGRES_FIREWALL"
+            "postgresAdminPassword=$POSTGRES_ADMIN_PASSWORD"
+          )
+          az deployment group what-if \
+            --resource-group "$RESOURCE_GROUP" \
+            --template-file infra/azure/selfserve-staging/main.bicep \
+            --parameters "${parameters[@]}"
+
+      - name: Apply Azure deployment
+        if: ${{ inputs.operation == 'deploy' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          parameters=(
+            "location=$LOCATION"
+            "namePrefix=$NAME_PREFIX"
+            "deployContainerApps=$DEPLOY_CONTAINER_APPS"
+            "appUrl=$APP_URL"
+            "siteUrl=$SITE_URL"
+            "controlPlaneUrl=$CONTROL_PLANE_URL"
+            "webImage=$web_image"
+            "workerImage=$worker_image"
+            "registryUsername=$REGISTRY_USERNAME"
+            "azureOpenAiBaseUrl=$AZURE_OPENAI_BASE_URL"
+            "azureOpenAiAuthMode=$AZURE_OPENAI_AUTH_MODE"
+            "allowAzureServicePostgresFirewall=$ALLOW_AZURE_SERVICE_POSTGRES_FIREWALL"
+            "postgresAdminPassword=$POSTGRES_ADMIN_PASSWORD"
+          )
+          az deployment group create \
+            --resource-group "$RESOURCE_GROUP" \
+            --name "selfserve-staging-${GITHUB_RUN_ID}" \
+            --template-file infra/azure/selfserve-staging/main.bicep \
+            --parameters "${parameters[@]}" \
+            --output table
+
+      - name: Run migration job
+        if: ${{ inputs.run_migration_job }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          job_name="caj-${NAME_PREFIX}-migrate"
+          execution_name="$(az containerapp job start \
+            --name "$job_name" \
+            --resource-group "$RESOURCE_GROUP" \
+            --query name \
+            --output tsv)"
+
+          echo "Started migration execution $execution_name."
+          deadline=$((SECONDS + 1800))
+          while (( SECONDS < deadline )); do
+            status="$(az containerapp job execution show \
+              --name "$job_name" \
+              --resource-group "$RESOURCE_GROUP" \
+              --job-execution-name "$execution_name" \
+              --query properties.status \
+              --output tsv)"
+            echo "Migration status: $status"
+            case "$status" in
+              Succeeded)
+                exit 0
+                ;;
+              Failed|Canceled)
+                echo "::error::Migration job ended with status $status."
+                exit 1
+                ;;
+            esac
+            sleep 20
+          done
+
+          echo "::error::Migration job did not finish within 30 minutes."
+          exit 1
+
+      - name: Probe Azure web health
+        if: ${{ inputs.run_health_smoke || (inputs.operation == 'deploy' && inputs.deploy_container_apps) }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          web_app_name="ca-${NAME_PREFIX}-web"
+          fqdn="$(az containerapp show \
+            --name "$web_app_name" \
+            --resource-group "$RESOURCE_GROUP" \
+            --query properties.configuration.ingress.fqdn \
+            --output tsv)"
+
+          urls=("$APP_URL")
+          if [[ -n "$fqdn" ]]; then
+            urls+=("https://${fqdn}")
+          fi
+
+          for base_url in "${urls[@]}"; do
+            echo "Probing ${base_url}/api/health"
+            if curl --fail --silent --show-error --retry 18 --retry-delay 10 --retry-all-errors "${base_url}/api/health"; then
+              echo
+              exit 0
+            fi
+          done
+
+          echo "::error::Azure web health smoke failed for configured app URL and Container Apps FQDN."
+          exit 1
+
+      - name: Install browser smoke dependencies
+        if: ${{ inputs.run_browser_smoke }}
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+
+      - name: Run self-serve browser smoke
+        if: ${{ inputs.run_browser_smoke }}
+        env:
+          SELF_SERVE_BROWSER_ALLOW_BILLING_SKIP: "1"
+        run: |
+          node scripts/self-serve-browser-smoke.mjs \
+            --base-url "$APP_URL" \
+            --site-url "$SITE_URL" \
+            --run-id "azure-selfserve-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --email-domain "$SELF_SERVE_SMOKE_EMAIL_DOMAIN" \
+            --artifacts-dir ".artifacts/azure-selfserve-staging/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+
+      - name: Upload browser smoke artifacts
+        if: ${{ always() && inputs.run_browser_smoke }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: azure-selfserve-browser-smoke-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .artifacts/azure-selfserve-staging/${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: ignore

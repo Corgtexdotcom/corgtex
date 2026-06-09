@@ -24,6 +24,35 @@ az deployment group create \
 
 After the Key Vault exists and all required secrets are populated, redeploy with `deployContainerApps=true` to create or update the web app, worker app, and migration job.
 
+## GitHub Actions deployment
+
+Use the `Azure Self-Serve Staging` workflow for repeatable staging deploys. The workflow is manual-only and uses the `azure-selfserve-staging` GitHub environment so repository/environment approval rules can gate the run.
+
+Required GitHub environment secrets:
+
+- `AZURE_CLIENT_ID`
+- `AZURE_TENANT_ID`
+- `AZURE_SUBSCRIPTION_ID`
+- `AZURE_SELFSERVE_STAGING_POSTGRES_ADMIN_PASSWORD`
+- `AZURE_SELFSERVE_STAGING_SMOKE_EMAIL_CAPTURE_SECRET` when browser smoke is enabled
+
+Required GitHub environment variables:
+
+- `AZURE_SELFSERVE_STAGING_OPENAI_BASE_URL`
+- `AZURE_SELFSERVE_STAGING_SMOKE_EMAIL_DOMAIN` when browser smoke is enabled
+
+The Azure identity used by GitHub OIDC needs enough permission to create the resource group resources and write role assignments for the managed identity. In practice that means `Contributor` plus `User Access Administrator` at the target scope, or `Owner` for the staging resource group/subscription scope. Key Vault uses Azure RBAC, so secret population remains a manual gate before `deployContainerApps=true`.
+
+Suggested run order:
+
+1. Run `operation=deploy` with `deployContainerApps=false` to create backing resources only.
+2. Populate the Key Vault secrets listed below and grant the managed identity access to the Azure OpenAI or Foundry model resource when using managed identity auth.
+3. Run `operation=deploy` with `deployContainerApps=true` to build and push GHCR images tagged `sha-<git-sha>`, then create or update the web app, worker, and migration job.
+4. Enable `run_migration_job=true` for the first app deploy of a new image.
+5. Enable `run_health_smoke=true` and, after DNS/email/OAuth gates are ready, `run_browser_smoke=true`.
+
+The workflow does not configure DNS or OAuth callback registrations. Keep `selfserve-staging.corgtex.com` and `selfserve.corgtex.com` as manual gates until provider credentials and DNS access are approved.
+
 ## Required manual gates
 
 - Confirm the Azure account is the Corgtex work account and the target subscription has approved credits, budget alert permissions, and enough quota in the selected region.
