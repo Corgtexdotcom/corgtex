@@ -320,6 +320,30 @@ jobs:
       
       - uses: actions/checkout@v5
         if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
+        with:
+          fetch-depth: 2
+      - name: Check Railway watched files changed
+        id: railway-watch
+        if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          if ! git rev-parse HEAD^ >/dev/null 2>&1; then
+            echo "skip_release_match=false" >> "$GITHUB_OUTPUT"
+            echo "No parent commit available; keeping release match required."
+            exit 0
+          fi
+
+          changed_files="$(git diff --name-only HEAD^ HEAD)"
+          echo "Changed files:"
+          printf '%s\n' "$changed_files"
+
+          if printf '%s\n' "$changed_files" | grep -Eq '^(apps/web/|apps/site/package\.json$|apps/worker/package\.json$|packages/|prisma/|scripts/|package\.json$|package-lock\.json$|tsconfig\.json$|tsconfig\.base\.json$|eslint\.config\.mjs$|postcss\.config\.cjs$|tailwind\.config\.ts$|deploy/)'; then
+            echo "skip_release_match=false" >> "$GITHUB_OUTPUT"
+            echo "Railway-watched files changed; release match remains required."
+          else
+            echo "skip_release_match=true" >> "$GITHUB_OUTPUT"
+            echo "No Railway-watched files changed; skipping release match wait."
+          fi
       - uses: actions/setup-node@v5
         if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
         with:
@@ -335,6 +359,8 @@ jobs:
           DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
       - run: node scripts/railway-smoke.mjs https://app.corgtex.com ${{ secrets.ADMIN_EMAIL }} ${{ secrets.ADMIN_PASSWORD }}
         if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
+        env:
+          CORGTEX_SKIP_RELEASE_MATCH: ${{ steps.railway-watch.outputs.skip_release_match }}
       - run: node scripts/ingestion-guidance-smoke.mjs https://app.corgtex.com ${{ secrets.ADMIN_EMAIL }} ${{ secrets.ADMIN_PASSWORD }}
         if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
         env:
