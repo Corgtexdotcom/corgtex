@@ -3,6 +3,7 @@ import { getTranslations } from "next-intl/server";
 import {
   getGoalTree,
   getMyGoalSlice,
+  listCompanyDirectionFromBrain,
   listCircles,
   listGoals,
   listMembers,
@@ -13,6 +14,7 @@ import { requirePageActor } from "@/lib/auth";
 import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
 import { GoalProgress } from "./GoalProgress";
 import { RecognitionCard } from "./RecognitionCard";
+import { CompanyDirectionFromBrain } from "./CompanyDirectionFromBrain";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
 import { ItemActions } from "@/lib/components/ui/ItemActions";
@@ -53,11 +55,13 @@ export default async function GoalsPage({
   const t = await getTranslations("goals");
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
   const canManageAnyGoal = actor.kind === "agent" || membership?.role === "ADMIN";
+  const canRefreshFromBrain = actor.kind === "agent" || membership?.role === "ADMIN" || membership?.role === "FACILITATOR";
 
-  const [allGoals, circles, members] = await Promise.all([
+  const [allGoals, circles, members, companyDirection] = await Promise.all([
     listGoals(actor, { workspaceId }),
     listCircles(workspaceId),
     listMembers(workspaceId),
+    listCompanyDirectionFromBrain(actor, { workspaceId, _membership: membership }),
   ]);
 
   let tree: any[] = [];
@@ -100,6 +104,13 @@ export default async function GoalsPage({
           </a>
         </div>
       </div>
+
+      <CompanyDirectionFromBrain
+        workspaceId={workspaceId}
+        direction={companyDirection}
+        canManageGoals={canManageAnyGoal}
+        canRefreshFromBrain={canRefreshFromBrain}
+      />
 
       {view === "tree" && (
         <section className="ws-section">

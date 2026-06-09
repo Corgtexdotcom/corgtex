@@ -14,6 +14,9 @@ import {
   createGoalLink,
   deleteGoalLink,
   createRecognition,
+  respondToCheckIn,
+  skipCompanyUnderstandingQuestion,
+  triggerAgentRun,
 } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import type { GoalLevel, GoalCadence, GoalStatus } from "@prisma/client";
@@ -166,6 +169,46 @@ export async function returnGoalToDraftFormAction(formData: FormData) {
   await returnGoalToDraft(actor, {
     workspaceId,
     goalId: asString(formData, "goalId"),
+  });
+  refresh(workspaceId);
+}
+
+export async function refreshCompanyDirectionFromBrainFormAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = await requireGoalsEnabled(formData);
+  await triggerAgentRun(actor, {
+    workspaceId,
+    agentKey: "company-understanding",
+  });
+  refresh(workspaceId);
+}
+
+export async function answerCompanyUnderstandingQuestionFormAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = await requireGoalsEnabled(formData);
+  await respondToCheckIn(actor, {
+    workspaceId,
+    checkInId: asString(formData, "checkInId"),
+    responseMd: asString(formData, "responseMd"),
+  });
+  refresh(workspaceId);
+}
+
+export async function skipCompanyUnderstandingQuestionFormAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = await requireGoalsEnabled(formData);
+  await skipCompanyUnderstandingQuestion(actor, {
+    workspaceId,
+    checkInId: asString(formData, "checkInId"),
   });
   refresh(workspaceId);
 }

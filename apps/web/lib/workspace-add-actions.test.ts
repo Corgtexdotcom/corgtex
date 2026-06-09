@@ -62,6 +62,10 @@ describe("workspace add actions", () => {
     expect(kinds({ pathname: "/workspaces/ws-1/proposals" })).toEqual(["proposal"]);
   });
 
+  it("offers goal creation plus evidence capture from Goals", () => {
+    expect(kinds({ pathname: "/workspaces/ws-1/goals" })).toEqual(["goal", "upload_file", "paste_text"]);
+  });
+
   it("offers Brain upload before article creation", () => {
     expect(kinds({ pathname: "/workspaces/ws-1/brain" })).toEqual(["upload_file", "article"]);
   });

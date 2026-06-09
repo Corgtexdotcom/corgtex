@@ -1,5 +1,13 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { addKeyResult, createGoal, createGoalLink, recomputeGoalProgress, returnGoalToDraft, updateGoal } from "./goals";
+import {
+  addKeyResult,
+  createGoal,
+  createGoalLink,
+  listCompanyDirectionFromBrain,
+  recomputeGoalProgress,
+  returnGoalToDraft,
+  updateGoal,
+} from "./goals";
 import { prisma } from "@corgtex/shared";
 
 vi.mock("@corgtex/shared", () => ({
@@ -31,6 +39,15 @@ vi.mock("@corgtex/shared", () => ({
     goalLink: {
       findMany: vi.fn(),
       upsert: vi.fn(),
+    },
+    brainSource: {
+      findMany: vi.fn(),
+    },
+    brainArticle: {
+      findMany: vi.fn(),
+    },
+    checkIn: {
+      findMany: vi.fn(),
     },
     workItemVersion: {
       create: vi.fn(),
@@ -220,6 +237,112 @@ describe("Goals Domain", () => {
           metadata: { snippet: "Expand customer onboarding" },
         }),
       }));
+    });
+  });
+
+  describe("listCompanyDirectionFromBrain", () => {
+    it("groups Brain-generated goals by horizon and resolves evidence labels", async () => {
+      const now = new Date("2026-06-09T12:00:00.000Z");
+      vi.mocked(prisma.goal.findMany).mockResolvedValueOnce([
+        {
+          id: "goal-decision",
+          title: "Pick the onboarding owner",
+          descriptionMd: "A short-term decision from the uploaded plan.",
+          cadence: "QUARTERLY",
+          status: "ACTIVE",
+          updatedAt: now,
+          links: [
+            {
+              id: "link-source",
+              entityType: "BrainSource",
+              entityId: "source-1",
+              confidence: 0.88,
+              metadata: { quote: "Operations needs one accountable owner." },
+            },
+          ],
+        },
+        {
+          id: "goal-strategy",
+          title: "Build the managed-client strategy",
+          descriptionMd: "A long-term direction from the strategy article.",
+          cadence: "ANNUAL",
+          status: "DRAFT",
+          updatedAt: now,
+          links: [
+            {
+              id: "link-article",
+              entityType: "BrainArticle",
+              entityId: "article-1",
+              confidence: 0.72,
+              metadata: { label: "Strategy article" },
+            },
+          ],
+        },
+      ] as any);
+      vi.mocked(prisma.checkIn.findMany).mockResolvedValueOnce([
+        {
+          id: "checkin-1",
+          questionText: "Which document names the onboarding owner?",
+          priority: 5,
+          confidence: 0.61,
+          metadata: { reason: "Missing owner evidence" },
+          responseUsePolicy: "COMPANY_KNOWLEDGE",
+          relatedEntityType: "BrainSource",
+          relatedEntityId: "source-1",
+          createdAt: now,
+        },
+      ] as any);
+      vi.mocked(prisma.brainSource.findMany).mockResolvedValueOnce([
+        {
+          id: "source-1",
+          sourceType: "DOC",
+          title: "Q3 onboarding plan",
+          fileName: null,
+          channel: null,
+          createdAt: now,
+        },
+      ] as any);
+      vi.mocked(prisma.brainArticle.findMany).mockResolvedValueOnce([
+        {
+          id: "article-1",
+          slug: "managed-client-strategy",
+          title: "Managed client strategy",
+          type: "STRATEGY",
+          authority: "DRAFT",
+        },
+      ] as any);
+
+      const result = await listCompanyDirectionFromBrain(actor, { workspaceId: "ws-1" });
+
+      expect(result.decisionsNow).toHaveLength(1);
+      expect(result.decisionsNow[0]).toMatchObject({
+        id: "goal-decision",
+        confidence: 0.88,
+        evidenceLinks: [
+          expect.objectContaining({
+            label: "Q3 onboarding plan",
+            quote: "Operations needs one accountable owner.",
+          }),
+        ],
+      });
+      expect(result.strategyLater).toHaveLength(1);
+      expect(result.strategyLater[0]).toMatchObject({
+        id: "goal-strategy",
+        confidence: 0.72,
+        evidenceLinks: [
+          expect.objectContaining({
+            label: "Strategy article",
+            articleSlug: "managed-client-strategy",
+          }),
+        ],
+      });
+      expect(result.openQuestions[0]).toMatchObject({
+        questionText: "Which document names the onboarding owner?",
+        responseUsePolicy: "COMPANY_KNOWLEDGE",
+        relatedEvidence: expect.objectContaining({
+          label: "Q3 onboarding plan",
+        }),
+      });
     });
   });
 
