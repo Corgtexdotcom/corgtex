@@ -1,4 +1,5 @@
 import { env, cosineSimilarity } from "@corgtex/shared";
+import { DefaultAzureCredential } from "@azure/identity";
 import type {
   ChatCompletionRequest,
   EmbeddingRequest,
@@ -8,7 +9,7 @@ import type {
   RerankRequest,
 } from "./contracts";
 import { assertCatalogModelBudget, assertWorkspaceModelBudget, recordModelUsage } from "./usage";
-import { estimateModelCost } from "./pricing";
+import { estimateModelCost, getModelPrice } from "./pricing";
 
 type UsageDetails = {
   provider: string;
@@ -47,6 +48,7 @@ const REQUEST_TIMEOUT_MS = env.MODEL_REQUEST_TIMEOUT_MS;
 const STREAM_TIMEOUT_MS = 120_000;
 const MAX_REQUEST_RETRIES = 2;
 const OPENROUTER_TITLE = "Corgtex";
+const AZURE_TOKEN_REFRESH_SKEW_MS = 60_000;
 
 class ExtractionParseError extends Error {
   readonly raw: string;
@@ -63,6 +65,12 @@ class ExtractionParseError extends Error {
   }
 }
 
+let azureCredential: DefaultAzureCredential | null = null;
+let azureAccessTokenCache: {
+  token: string;
+  expiresOnTimestamp: number;
+} | null = null;
+
 function baseUrl() {
   return env.MODEL_BASE_URL?.replace(/\/+$/, "") ?? "https://api.openai.com/v1";
 }
@@ -73,6 +81,15 @@ function requireApiKey() {
   }
 
   return env.MODEL_API_KEY;
+}
+
+function requireAzureApiKey() {
+  const key = env.AZURE_OPENAI_API_KEY ?? env.MODEL_API_KEY;
+  if (!key) {
+    throw new Error("AZURE_OPENAI_API_KEY or MODEL_API_KEY is required for Azure OpenAI API key authentication.");
+  }
+
+  return key;
 }
 
 function usageDetails(input: ModelUsageInput): UsageDetails {
@@ -107,15 +124,72 @@ function costFields(provider: string, model: string, inputTokens: number, output
   }) ?? {};
 }
 
+function requiresKnownModelPrice(provider: string) {
+  return provider === "azure-openai";
+}
+
+function assertKnownModelPrice(provider: string, model: string) {
+  if (!requiresKnownModelPrice(provider)) {
+    return;
+  }
+
+  if (!getModelPrice(provider, model)) {
+    throw new Error(`Missing model price for ${provider}/${model}. Configure MODEL_PRICE_OVERRIDES_JSON before enabling this Azure deployment.`);
+  }
+}
+
 function isOpenRouterProvider() {
   return env.MODEL_PROVIDER === "openrouter";
 }
 
-function requestHeaders() {
+function isAzureOpenAiProvider() {
+  return env.MODEL_PROVIDER === "azure-openai";
+}
+
+function azureCredentialClient() {
+  if (!azureCredential) {
+    azureCredential = new DefaultAzureCredential({
+      managedIdentityClientId: env.AZURE_CLIENT_ID,
+    });
+  }
+  return azureCredential;
+}
+
+async function getAzureAccessToken() {
+  if (
+    azureAccessTokenCache &&
+    azureAccessTokenCache.expiresOnTimestamp - AZURE_TOKEN_REFRESH_SKEW_MS > Date.now()
+  ) {
+    return azureAccessTokenCache.token;
+  }
+
+  const token = await azureCredentialClient().getToken(env.AZURE_OPENAI_SCOPE);
+  if (!token?.token || !token.expiresOnTimestamp) {
+    throw new Error("Failed to acquire Azure OpenAI managed identity token.");
+  }
+
+  azureAccessTokenCache = {
+    token: token.token,
+    expiresOnTimestamp: token.expiresOnTimestamp,
+  };
+  return token.token;
+}
+
+async function requestHeaders() {
   const headers: Record<string, string> = {
     "content-type": "application/json",
-    authorization: `Bearer ${requireApiKey()}`,
   };
+
+  if (isAzureOpenAiProvider()) {
+    if (env.AZURE_OPENAI_AUTH_MODE === "managed_identity") {
+      headers.authorization = `Bearer ${await getAzureAccessToken()}`;
+    } else {
+      headers["api-key"] = requireAzureApiKey();
+    }
+    return headers;
+  }
+
+  headers.authorization = `Bearer ${requireApiKey()}`;
 
   if (isOpenRouterProvider()) {
     headers["HTTP-Referer"] = env.APP_URL;
@@ -172,7 +246,7 @@ async function postJson<TResponse>(path: string, body: Record<string, unknown>) 
     try {
       const response = await fetch(`${baseUrl()}${path}`, {
         method: "POST",
-        headers: requestHeaders(),
+        headers: await requestHeaders(),
         body: payload,
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });
@@ -316,6 +390,7 @@ async function completeChat(
 ) {
   const startedAt = Date.now();
   const model = modelOverride ?? request.model ?? env.MODEL_CHAT_DEFAULT;
+  assertKnownModelPrice(env.MODEL_PROVIDER, model);
   await assertWorkspaceModelBudget(request.workspaceId);
   await assertCatalogModelBudget({
     workspaceId: request.workspaceId,
@@ -382,7 +457,7 @@ async function* completeChatStream(
     try {
       response = await fetch(`${baseUrl()}/chat/completions`, {
         method: "POST",
-        headers: requestHeaders(),
+        headers: await requestHeaders(),
         body: payload,
         signal: AbortSignal.timeout(STREAM_TIMEOUT_MS),
       });
@@ -519,6 +594,7 @@ async function embedTexts(request: EmbeddingRequest) {
   const startedAt = Date.now();
   const inputs = Array.isArray(request.input) ? request.input : [request.input];
   const model = request.model ?? env.MODEL_EMBEDDING_DEFAULT;
+  assertKnownModelPrice(env.MODEL_PROVIDER, model);
   await assertWorkspaceModelBudget(request.workspaceId);
   await assertCatalogModelBudget({
     workspaceId: request.workspaceId,

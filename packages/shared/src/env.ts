@@ -1,4 +1,5 @@
 type NodeEnv = "development" | "test" | "production";
+type AzureOpenAiAuthMode = "api_key" | "managed_identity";
 
 type RequiredOptions = {
   testFallback?: string;
@@ -51,6 +52,14 @@ function nodeEnv(): NodeEnv {
   return value;
 }
 
+function azureOpenAiAuthMode(): AzureOpenAiAuthMode {
+  const value = optional("AZURE_OPENAI_AUTH_MODE") ?? "api_key";
+  if (value !== "api_key" && value !== "managed_identity") {
+    throw new Error("Invalid AZURE_OPENAI_AUTH_MODE.");
+  }
+  return value;
+}
+
 type Env = {
   readonly NODE_ENV: NodeEnv;
   readonly DATABASE_URL: string;
@@ -72,6 +81,11 @@ type Env = {
   readonly MODEL_PROVIDER: string;
   readonly MODEL_API_KEY: string | undefined;
   readonly MODEL_BASE_URL: string | undefined;
+  readonly MODEL_PRICE_OVERRIDES_JSON: string | undefined;
+  readonly AZURE_OPENAI_AUTH_MODE: AzureOpenAiAuthMode;
+  readonly AZURE_OPENAI_API_KEY: string | undefined;
+  readonly AZURE_OPENAI_SCOPE: string;
+  readonly AZURE_CLIENT_ID: string | undefined;
   readonly MODEL_CHAT_DEFAULT: string;
   readonly MODEL_CHAT_FAST: string;
   readonly MODEL_CHAT_STANDARD: string;
@@ -178,6 +192,21 @@ export const env: Env = {
   },
   get MODEL_BASE_URL() {
     return optional("MODEL_BASE_URL") ?? "https://openrouter.ai/api/v1";
+  },
+  get MODEL_PRICE_OVERRIDES_JSON() {
+    return optional("MODEL_PRICE_OVERRIDES_JSON");
+  },
+  get AZURE_OPENAI_AUTH_MODE() {
+    return azureOpenAiAuthMode();
+  },
+  get AZURE_OPENAI_API_KEY() {
+    return optional("AZURE_OPENAI_API_KEY");
+  },
+  get AZURE_OPENAI_SCOPE() {
+    return optional("AZURE_OPENAI_SCOPE") ?? "https://cognitiveservices.azure.com/.default";
+  },
+  get AZURE_CLIENT_ID() {
+    return optional("AZURE_CLIENT_ID");
   },
   get MODEL_CHAT_DEFAULT() {
     return optional("MODEL_CHAT_DEFAULT") ?? "deepseek/deepseek-v4-flash";
