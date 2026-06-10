@@ -2,7 +2,7 @@ import type { EventStatus, NewspaperCadence, Prisma, WorkflowJobStatus } from "@
 import { logger, prisma } from "@corgtex/shared";
 import { deriveJobsForEvent } from "./derive-jobs";
 import { deriveNotificationsForEvent } from "./derive-notifications";
-import { handleKnowledgeSync, handleMeetingKnowledgeSync, handleDocumentKnowledgeSync, handleEventKnowledgeSync, handleTensionKnowledgeSync, handleActionKnowledgeSync, handleCircleKnowledgeSync, handleRoleKnowledgeSync, handleSlackMessageKnowledgeSync, handleCalendarSync, handleOAuthDocumentsSync, handleOAuthEmailSync, handleContextGraphSync } from "./handlers";
+import { handleKnowledgeSync, handleMeetingKnowledgeSync, handleDocumentKnowledgeSync, handleEventKnowledgeSync, handleTensionKnowledgeSync, handleActionKnowledgeSync, handleCircleKnowledgeSync, handleRoleKnowledgeSync, handleSlackMessageKnowledgeSync, handleCalendarSync, handleOAuthDocumentsSync, handleOAuthEmailSync, handleContextGraphSync, handleContextGraphStalenessSweep, handleContextGraphReconcile } from "./handlers";
 import { handleGovernanceScoring } from "./handlers";
 import { runAgentWorkflowJob } from "./handlers";
 import { syncBrainArticleKnowledge } from "@corgtex/knowledge";
@@ -493,6 +493,16 @@ async function handleJob(job: ClaimedJob) {
 
   if (job.type === "context-graph.sync") {
     await handleContextGraphSync(job.id, payload as { sourceType?: string; sourceId?: string }, job.workspaceId);
+    return;
+  }
+
+  if (job.type === "context-graph.staleness-sweep") {
+    await handleContextGraphStalenessSweep(job.id, payload as { staleAfterDays?: number }, job.workspaceId);
+    return;
+  }
+
+  if (job.type === "context-graph.reconcile") {
+    await handleContextGraphReconcile(job.id, payload as { dateISO?: string }, job.workspaceId);
     return;
   }
 
@@ -1114,6 +1124,22 @@ export async function scheduleDailyJobs() {
 
   await prisma.$transaction(async (tx) => {
     for (const workspace of workspaces) {
+      await enqueueJob(tx, {
+        workspaceId: workspace.id,
+        type: "context-graph.staleness-sweep",
+        payload: {},
+        dedupeKey: `${workspace.id}:context-graph-staleness:${todayISO}`,
+      });
+
+      if (isWeeklyWindow) {
+        await enqueueJob(tx, {
+          workspaceId: workspace.id,
+          type: "context-graph.reconcile",
+          payload: { dateISO: todayISO },
+          dedupeKey: `${workspace.id}:context-graph-reconcile:${todayISO}`,
+        });
+      }
+
       await enqueueJob(tx, {
         workspaceId: workspace.id,
         type: "communication.raw-retention",

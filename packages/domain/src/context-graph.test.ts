@@ -11,6 +11,7 @@ import {
   getContextMapData,
   importContextGraphMap,
   listContextMapViews,
+  markStaleContextGraphFacts,
   reviewContextGraphProposedDiff,
   updateContextGraphProposedDiff,
   upsertContextGraphObject,
@@ -24,6 +25,7 @@ const { prismaMock, appendEventsMock, recordAuditMock, requireWorkspaceMembershi
     contextGraphObject: {
       create: vi.fn(),
       update: vi.fn(),
+      updateMany: vi.fn(),
       upsert: vi.fn(),
       findFirst: vi.fn(),
       findMany: vi.fn(),
@@ -31,6 +33,7 @@ const { prismaMock, appendEventsMock, recordAuditMock, requireWorkspaceMembershi
     contextGraphRelationship: {
       upsert: vi.fn(),
       update: vi.fn(),
+      updateMany: vi.fn(),
       findFirst: vi.fn(),
       findMany: vi.fn(),
     },
@@ -1268,6 +1271,37 @@ describe("context graph domain", () => {
         }),
       }),
     }));
+  });
+
+  it("marks aged approved facts stale without touching fresh or non-approved facts", async () => {
+    prismaMock.contextGraphObject.updateMany.mockResolvedValueOnce({ count: 3 });
+    prismaMock.contextGraphRelationship.updateMany.mockResolvedValueOnce({ count: 2 });
+
+    const now = new Date("2026-06-09T00:00:00.000Z");
+    const result = await markStaleContextGraphFacts(actor, {
+      workspaceId: "ws-1",
+      staleAfterDays: 30,
+      now,
+    });
+
+    const cutoff = new Date("2026-05-10T00:00:00.000Z");
+    const expectedWhere = {
+      workspaceId: "ws-1",
+      status: "approved",
+      OR: [
+        { lastVerifiedAt: { lt: cutoff } },
+        { lastVerifiedAt: null, updatedAt: { lt: cutoff } },
+      ],
+    };
+    expect(prismaMock.contextGraphObject.updateMany).toHaveBeenCalledWith({
+      where: expectedWhere,
+      data: { status: "stale" },
+    });
+    expect(prismaMock.contextGraphRelationship.updateMany).toHaveBeenCalledWith({
+      where: expectedWhere,
+      data: { status: "stale" },
+    });
+    expect(result).toEqual({ staleObjects: 3, staleRelationships: 2, cutoff });
   });
 
   it("refreshes drifted master default view queries to the current built-in config", async () => {
