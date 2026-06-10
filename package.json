@@ -59,6 +59,7 @@
     "smoke:client": "node scripts/client-readiness-smoke.mjs",
     "smoke:self-serve-browser": "node scripts/self-serve-browser-smoke.mjs",
     "smoke:self-serve-readiness": "node scripts/self-serve-production-readiness.mjs",
+    "smoke:azure-domain-readiness": "node scripts/azure-selfserve-domain-readiness.mjs",
     "smoke:self-serve-hidden-prod": "node scripts/self-serve-hidden-production-smoke.mjs",
     "smoke:stripe-billing": "node scripts/stripe-billing-smoke.mjs",
     "ops:health-sweep": "node scripts/ops/health-sweep.mjs",
