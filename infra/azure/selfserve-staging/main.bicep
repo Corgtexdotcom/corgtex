@@ -245,7 +245,8 @@ var commonRuntimeEnv = concat([
   { name: 'NEXT_PUBLIC_APP_URL', value: appUrl }
   { name: 'NEXT_PUBLIC_SITE_URL', value: siteUrl }
   { name: 'CONTROL_PLANE_URL', value: controlPlaneUrl }
-  { name: 'MCP_PUBLIC_URL', value: appUrl }
+  { name: 'MCP_PUBLIC_URL', value: '${appUrl}/mcp' }
+  { name: 'MEETING_RECORDER_PUBLIC_BASE_URL', value: appUrl }
   { name: 'DATABASE_URL', secretRef: 'database-url' }
   { name: 'REDIS_URL', secretRef: 'redis-url' }
   { name: 'REDIS_KEY_PREFIX', value: compactPrefix }

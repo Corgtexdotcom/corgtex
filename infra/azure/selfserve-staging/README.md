@@ -53,6 +53,32 @@ Suggested run order:
 
 The workflow does not configure DNS or OAuth callback registrations. Keep `selfserve-staging.corgtex.com` and `selfserve.corgtex.com` as manual gates until provider credentials and DNS access are approved.
 
+## Domain and callback readiness
+
+Use the readiness command before enabling browser smoke, OAuth, Stripe, Resend inbound email, Slack, Intercom, or external MCP clients for the Azure self-serve runtime:
+
+```bash
+npm run smoke:azure-domain-readiness -- \
+  --app-url=https://selfserve-staging.corgtex.com \
+  --site-url=https://www.corgtex.com
+```
+
+For production readiness, use `--app-url=https://selfserve.corgtex.com`. Add `--strict` only after the provider credentials are populated in the target runtime; strict mode requires the OAuth, Stripe, and Resend webhook env names to be present without printing their values.
+
+The callback/webhook URLs that must be registered with external providers are:
+
+| Provider | Staging URL | Production URL |
+| --- | --- | --- |
+| Google OAuth | `https://selfserve-staging.corgtex.com/api/integrations/google/callback` | `https://selfserve.corgtex.com/api/integrations/google/callback` |
+| Microsoft OAuth | `https://selfserve-staging.corgtex.com/api/integrations/microsoft/callback` | `https://selfserve.corgtex.com/api/integrations/microsoft/callback` |
+| Workspace SSO | `https://selfserve-staging.corgtex.com/api/auth/sso/callback` | `https://selfserve.corgtex.com/api/auth/sso/callback` |
+| Slack OAuth | `https://selfserve-staging.corgtex.com/api/integrations/slack/callback` | `https://selfserve.corgtex.com/api/integrations/slack/callback` |
+| Stripe webhook | `https://selfserve-staging.corgtex.com/api/webhooks/stripe` | `https://selfserve.corgtex.com/api/webhooks/stripe` |
+| Resend inbound webhook | `https://selfserve-staging.corgtex.com/api/webhooks/resend-inbound` | `https://selfserve.corgtex.com/api/webhooks/resend-inbound` |
+| MCP connector | `https://selfserve-staging.corgtex.com/mcp` | `https://selfserve.corgtex.com/mcp` |
+
+Do not remove or replace existing provider callbacks for `app.corgtex.com` during this phase. Add the Azure self-serve URLs beside the existing Railway URLs until public signup routing and rollback have both been verified.
+
 ## Required manual gates
 
 - Confirm the Azure account is the Corgtex work account and the target subscription has approved credits, budget alert permissions, and enough quota in the selected region.
@@ -62,6 +88,8 @@ The workflow does not configure DNS or OAuth callback registrations. Keep `selfs
 - Confirm GHCR image access. The Key Vault secret named `ghcr-pat` must contain a package-read token for `ghcr.io/corgtexdotcom/corgtex`.
 - Confirm the PostgreSQL firewall decision. `allowAzureServicePostgresFirewall` defaults to `false`; enable it only after review or replace it with approved explicit firewall rules.
 - Keep DNS manual until the `selfserve-staging.corgtex.com` or `selfserve.corgtex.com` record is approved and configured through the DNS provider.
+- Confirm the Container Apps custom domain has issued TLS before provider callback tests are run.
+- Confirm `APP_URL`, `NEXT_PUBLIC_APP_URL`, `MCP_PUBLIC_URL`, and `MEETING_RECORDER_PUBLIC_BASE_URL` all describe the Azure runtime, not the Railway production app.
 
 ## Key Vault secrets
 
@@ -97,4 +125,5 @@ If `azureOpenAiAuthMode=api_key`, also create `azure-openai-api-key`. Production
 
 ```bash
 az bicep build --file infra/azure/selfserve-staging/main.bicep
+npm run smoke:azure-domain-readiness -- --app-url=https://selfserve-staging.corgtex.com --site-url=https://www.corgtex.com
 ```
