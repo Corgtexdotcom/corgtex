@@ -11,6 +11,7 @@ const { prismaMock, encryptSecretMock, decryptSecretMock, memberMocks } = vi.hoi
     },
     customerDeploymentEvent: {
       create: vi.fn(),
+      findFirst: vi.fn(),
       findMany: vi.fn(),
     },
     customerAccount: {
@@ -148,6 +149,9 @@ const { prismaMock, encryptSecretMock, decryptSecretMock, memberMocks } = vi.hoi
       findMany: vi.fn(),
       findFirst: vi.fn(),
       update: vi.fn(),
+    },
+    selfServeSmokeRun: {
+      findFirst: vi.fn(),
     },
     meetingRecording: {
       aggregate: vi.fn(),
@@ -419,6 +423,8 @@ describe("control plane domain", () => {
     prismaMock.modelUsageBudget.findUnique.mockResolvedValue(null);
     prismaMock.supportOperation.findMany.mockResolvedValue([]);
     prismaMock.fleetHealthSnapshot.findFirst.mockResolvedValue(null);
+    prismaMock.customerDeploymentEvent.findFirst.mockResolvedValue(null);
+    prismaMock.selfServeSmokeRun.findFirst.mockResolvedValue(null);
     prismaMock.customerAccount.findMany.mockResolvedValue([]);
     prismaMock.customerAccount.upsert.mockResolvedValue({
       id: "acct_1",
@@ -1600,6 +1606,180 @@ describe("control plane domain", () => {
         supportOperations: expect.anything(),
       }),
     }));
+  });
+
+  it("returns a read-only Azure provider status from stored control-plane facts", async () => {
+    const { getControlPlaneProviderStatus } = await import("./control-plane");
+    const observedAt = new Date("2026-06-09T12:00:00.000Z");
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce({
+      id: "dep-azure",
+      label: "Azure Self Serve",
+      url: "https://selfserve.corgtex.com",
+      customerSlug: "selfserve",
+      customerAccountId: "acct_azure",
+      deploymentKind: "HOSTED_DEDICATED",
+      deploymentStatus: "ACTIVE",
+      cloudProvider: "AZURE",
+      provisioningStatus: "active",
+      bootstrapStatus: "completed",
+      releaseVersion: "main-2026-06-09",
+      releaseImageTag: "sha-azure",
+      lastHealthStatus: "ok",
+      lastHealthError: null,
+      lastHealthCheck: observedAt,
+      lastWorkerHealthStatus: "ok",
+      lastWorkerHealthCheck: observedAt,
+      lastReleaseCheck: observedAt,
+      providerSubscriptionId: "sub-1",
+      providerResourceGroup: "rg-corgtex-selfserve-staging",
+      providerEnvironmentId: "aca-env-1",
+      providerWebServiceId: "web-app",
+      providerWorkerServiceId: "worker-app",
+      providerPostgresServiceId: "pg-flex",
+      providerRedisServiceId: "redis-cache",
+      providerStorageResourceId: "storage-account",
+      providerLogsUrl: "https://portal.azure.com/logs",
+      providerCostUrl: "https://portal.azure.com/costs",
+      providerMetadata: {
+        azure: {
+          costSummary: {
+            currentMonthUsd: "12.34",
+            secretToken: "do-not-return",
+          },
+        },
+      },
+      supportCredentialEnc: null,
+      supportMcpUrl: null,
+      supportConnectorStatus: "not_configured",
+      managedWorkspaceId: null,
+      managedWorkspace: null,
+    } as any);
+    prismaMock.fleetHealthSnapshot.findMany.mockResolvedValueOnce([
+      {
+        id: "snap-health",
+        snapshotKind: "HEALTH",
+        status: "ok",
+        summary: { health: { database: "up", secretToken: "hidden" } },
+        error: null,
+        observedAt,
+        createdAt: observedAt,
+      },
+      {
+        id: "snap-release",
+        snapshotKind: "RELEASE",
+        status: "ok",
+        summary: { observedRelease: { imageTag: "sha-azure" } },
+        error: null,
+        observedAt,
+        createdAt: observedAt,
+      },
+    ] as any);
+    prismaMock.selfServeSmokeRun.findFirst.mockResolvedValueOnce({
+      runId: "smoke-1",
+      runKind: "browser",
+      status: "PASSED",
+      baseUrl: "https://selfserve.corgtex.com",
+      siteUrl: "https://www.corgtex.com",
+      summary: {
+        email: "private-admin@example.com",
+        steps: [{ name: "signup", status: "PASSED", token: "hidden" }],
+        warnings: [{ name: "budget", status: "WARN", token: "hidden" }],
+      },
+      error: null,
+      startedAt: observedAt,
+      completedAt: observedAt,
+      createdAt: observedAt,
+    });
+    prismaMock.customerDeploymentEvent.findFirst.mockResolvedValueOnce({
+      id: "event-1",
+      meta: {
+        sourceId: "azure-selfserve",
+        sourceUrl: "https://selfserve.corgtex.com",
+        sourceDeploymentId: "dep-azure",
+        summary: { total: 1, activeTrials: 1 },
+        items: [{ trialId: "trial-private", adminEmail: "private-admin@example.com" }],
+        receivedAt: "2026-06-09T12:01:00.000Z",
+      },
+      createdAt: observedAt,
+    });
+
+    const result = await getControlPlaneProviderStatus(operatorActor, "dep-azure");
+
+    expect(result).toMatchObject({
+      deploymentId: "dep-azure",
+      adapter: {
+        kind: "azure_read_model",
+        readOnly: true,
+        canReadProviderStatus: true,
+      },
+      provider: {
+        cloudProvider: "AZURE",
+        providerLabel: "Azure",
+        resourceGroup: "rg-corgtex-selfserve-staging",
+        webServiceId: "web-app",
+      },
+      health: {
+        status: "ok",
+        latestSnapshot: { id: "snap-health", status: "ok" },
+      },
+      release: {
+        releaseImageTag: "sha-azure",
+        latestSnapshot: { id: "snap-release", status: "ok" },
+      },
+      logs: {
+        url: "https://portal.azure.com/logs",
+        available: true,
+      },
+      smoke: {
+        status: "PASSED",
+        runId: "smoke-1",
+        summary: {
+          steps: [{ name: "signup", status: "PASSED" }],
+          warnings: [{ name: "budget", status: "WARN" }],
+        },
+      },
+      cost: {
+        url: "https://portal.azure.com/costs",
+        available: true,
+        source: "provider_metadata",
+        summary: {
+          currentMonthUsd: "12.34",
+          secretToken: "[redacted]",
+        },
+      },
+      registrySync: {
+        eventId: "event-1",
+        sourceId: "azure-selfserve",
+        itemCount: 1,
+        summary: { total: 1, activeTrials: 1 },
+      },
+    });
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain("private-admin@example.com");
+    expect(serialized).not.toContain("do-not-return");
+    expect(serialized).not.toContain("hidden");
+    expect(prismaMock.customerDeployment.update).not.toHaveBeenCalled();
+    expect(prismaMock.customerDeploymentEvent.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects Azure provider status reads for non-Azure deployments", async () => {
+    const { getControlPlaneProviderStatus } = await import("./control-plane");
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce({
+      id: "dep-railway",
+      cloudProvider: "RAILWAY",
+      railwayProjectId: "project-1",
+      railwayEnvironmentId: "env-1",
+      supportCredentialEnc: null,
+      managedWorkspaceId: null,
+      managedWorkspace: null,
+    } as any);
+
+    await expect(getControlPlaneProviderStatus(operatorActor, "dep-railway")).rejects.toMatchObject({
+      status: 400,
+      code: "AZURE_PROVIDER_REQUIRED",
+    });
+    expect(prismaMock.fleetHealthSnapshot.findMany).not.toHaveBeenCalled();
+    expect(prismaMock.selfServeSmokeRun.findFirst).not.toHaveBeenCalled();
   });
 
   it("builds client switcher options and wide local fleet overview rows without impersonation state", async () => {

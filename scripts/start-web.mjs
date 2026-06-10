@@ -75,14 +75,14 @@ export function startupPlanForMode(mode) {
   };
 }
 
-async function verifyMigrations() {
+export async function verifyMigrations() {
   console.log("[start-web] Step 2.5: Verifying DB Migrations before Next.js");
   try {
     const { PrismaClient } = await import("@prisma/client");
     const prisma = new PrismaClient();
     const failedMigrationsRaw = await prisma.$queryRaw`
       SELECT migration_name FROM _prisma_migrations
-      WHERE rolled_back_at IS NOT NULL OR (finished_at IS NULL AND applied_steps_count = 0)
+      WHERE finished_at IS NULL AND rolled_back_at IS NULL
     `;
     console.log("[start-web] Migrations requiring attention:", failedMigrationsRaw);
     await prisma.$disconnect();

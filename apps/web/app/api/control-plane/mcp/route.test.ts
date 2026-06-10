@@ -18,6 +18,7 @@ const mocks = vi.hoisted(() => ({
     throw error;
   }),
   resolveControlPlaneRequestActor: vi.fn(),
+  getControlPlaneProviderStatus: vi.fn(),
 }));
 vi.mock("@corgtex/domain", () => ({
   approveReviewGatedProcurementTrial: mocks.approveReviewGatedProcurementTrial,
@@ -28,7 +29,7 @@ vi.mock("@corgtex/domain", () => ({
   getControlPlaneClientMigrationStatus: vi.fn(),
   getControlPlaneDeployLatestPreflight: vi.fn(),
   getControlPlaneAiGovernanceStatus: vi.fn(), getControlPlaneContextHealth: vi.fn(),
-  getControlPlaneDeployment: vi.fn(), getControlPlaneIntegrationStatus: vi.fn(), getControlPlaneReleaseStatus: vi.fn(),
+  getControlPlaneDeployment: vi.fn(), getControlPlaneIntegrationStatus: vi.fn(), getControlPlaneProviderStatus: mocks.getControlPlaneProviderStatus, getControlPlaneReleaseStatus: vi.fn(),
   listControlPlaneCustomerMembers: vi.fn(),
   listControlPlaneDeployments: mocks.listControlPlaneDeployments,
   listControlPlaneCustomerSummaries: mocks.listControlPlaneCustomerSummaries,
@@ -69,6 +70,7 @@ describe("/api/control-plane/mcp", () => {
     mocks.createSelfServeSupportSession.mockResolvedValue({ id: "support-session-1" });
     mocks.approveReviewGatedProcurementTrial.mockResolvedValue({ statusCode: 201, body: { trialId: "trial-review", status: "ACTIVE" } });
     mocks.rejectReviewGatedProcurementTrial.mockResolvedValue({ id: "trial-review", status: "SUSPENDED" });
+    mocks.getControlPlaneProviderStatus.mockResolvedValue({ deploymentId: "dep-azure", adapter: { kind: "azure_read_model" } });
   });
 
   afterEach(() => {
@@ -110,6 +112,7 @@ describe("/api/control-plane/mcp", () => {
       "finalize_client_migration",
       "rollback_client_migration",
       "get_customer_deployment_status",
+      "get_azure_provider_status",
       "refresh_customer_deployment_snapshot",
       "list_customer_integrations",
       "get_context_health",
@@ -187,6 +190,29 @@ describe("/api/control-plane/mcp", () => {
       limit: 42,
     });
     expect(mocks.listControlPlaneDeployments).not.toHaveBeenCalled();
+  });
+
+  it("returns read-only Azure provider status through the read-scoped MCP tool", async () => {
+    const { POST } = await import("./route");
+
+    const response = await POST(request({
+      jsonrpc: "2.0",
+      id: 12,
+      method: "tools/call",
+      params: {
+        name: "get_azure_provider_status",
+        arguments: { deploymentId: "dep-azure" },
+      },
+    }) as never);
+    const body = await response.json();
+    const parsed = JSON.parse(body.result.content[0].text);
+
+    expect(parsed).toEqual({
+      deploymentId: "dep-azure",
+      adapter: { kind: "azure_read_model" },
+    });
+    expect(mocks.requireControlPlaneScope).toHaveBeenCalledWith(expect.objectContaining({ kind: "agent" }), "control-plane:read");
+    expect(mocks.getControlPlaneProviderStatus).toHaveBeenCalledWith(expect.objectContaining({ kind: "agent" }), "dep-azure");
   });
 
   it("denies mutating tools when the control-plane agent only has read scope", async () => {

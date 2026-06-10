@@ -37,8 +37,13 @@ export function absoluteSiteUrl(path = "/") {
 }
 
 export function demoUrlForLocale(locale?: SiteLocale | string | null) {
-  const { appUrl } = getSiteConfig();
-  return `${appUrl}${normalizeSiteLocale(locale) === "es" ? "/es/demo" : "/demo"}`;
+  const { demoUrl } = getSiteConfig();
+  if (normalizeSiteLocale(locale) !== "es") return demoUrl;
+
+  if (demoUrl.endsWith("/es/demo")) return demoUrl;
+  if (demoUrl.endsWith("/demo")) return `${demoUrl.slice(0, -"/demo".length)}/es/demo`;
+
+  return `${demoUrl}/es/demo`;
 }
 
 export function signupUrlForLocale(locale?: SiteLocale | string | null) {

@@ -31,6 +31,14 @@ beforeEach(() => {
   delete process.env.RAILWAY_BUCKET_SECRET_ACCESS_KEY;
   delete process.env.RAILWAY_BUCKET_ENDPOINT;
   delete process.env.RAILWAY_BUCKET_REGION;
+  delete process.env.STORAGE_PROVIDER;
+  delete process.env.AZURE_STORAGE_AUTH_MODE;
+  delete process.env.AZURE_STORAGE_ACCOUNT_NAME;
+  delete process.env.AZURE_STORAGE_CONTAINER_NAME;
+  delete process.env.AZURE_STORAGE_BLOB_ENDPOINT;
+  delete process.env.AZURE_STORAGE_CLIENT_ID;
+  delete process.env.AZURE_CLIENT_ID;
+  delete process.env.AZURE_STORAGE_CONNECTION_STRING;
 });
 
 afterEach(() => {
@@ -222,6 +230,32 @@ describe("GET /api/health", () => {
       runtime: {
         redis: "configured",
         storage: "missing",
+      },
+    });
+  });
+
+  it("reports Azure Blob storage as configured when managed identity settings are present", async () => {
+    const { GET } = await import("./route");
+    process.env.REDIS_URL = "redis://redis:6379";
+    process.env.STORAGE_PROVIDER = "azure_blob";
+    process.env.AZURE_STORAGE_AUTH_MODE = "managed_identity";
+    process.env.AZURE_STORAGE_ACCOUNT_NAME = "corgtexstorage";
+    process.env.AZURE_STORAGE_CONTAINER_NAME = "selfserve-artifacts";
+    process.env.AZURE_STORAGE_BLOB_ENDPOINT = "https://corgtexstorage.blob.core.windows.net";
+    process.env.AZURE_CLIENT_ID = "managed-identity-client-id";
+    queryRaw
+      .mockResolvedValueOnce([{ ok: 1 }])
+      .mockResolvedValueOnce([{ ready: true }])
+      .mockResolvedValueOnce([{ ready: true }])
+      .mockResolvedValueOnce([{ count: 0 }]);
+
+    const response = await GET();
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      runtime: {
+        redis: "configured",
+        storage: "configured",
       },
     });
   });

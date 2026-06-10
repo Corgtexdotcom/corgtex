@@ -1,7 +1,7 @@
 targetScope = 'resourceGroup'
 
 @description('Azure region for the self-serve app, data, and monitoring resources.')
-param location string = resourceGroup().location
+param location string = 'westus3'
 
 @description('Short lowercase prefix used for Azure resource names.')
 param namePrefix string = 'corgtex-ss-stg'
@@ -80,27 +80,32 @@ param postgresStorageGb int = 32
 @description('PostgreSQL backup retention in days.')
 param postgresBackupRetentionDays int = 7
 
+@description('Comma-separated PostgreSQL extensions allowed on the Flexible Server before migrations run.')
+param postgresAllowedExtensions string = 'vector'
+
 @description('Creates the Azure-services PostgreSQL firewall rule. Keep false until reviewed for the target environment.')
 param allowAzureServicePostgresFirewall bool = false
 
 @description('Additional PostgreSQL firewall rules: [{ "name": "...", "startIpAddress": "...", "endIpAddress": "..." }].')
 param postgresFirewallRules array = []
 
-@allowed([
-  'Basic'
-  'Standard'
-])
-@description('Azure Cache for Redis SKU name.')
-param redisSkuName string = 'Basic'
+@description('Azure Managed Redis SKU name. Balanced_B0 is the smallest staging default.')
+param managedRedisSkuName string = 'Balanced_B0'
 
-@allowed([
-  'C'
-])
-@description('Azure Cache for Redis SKU family.')
-param redisSkuFamily string = 'C'
+@description('Azure Managed Redis database TLS port.')
+param managedRedisPort int = 10000
 
-@description('Azure Cache for Redis capacity. Basic C0 is suitable for staging.')
-param redisSkuCapacity int = 0
+@description('Include Stripe Key Vault secret refs and runtime env vars.')
+param enableStripeSecrets bool = false
+
+@description('Include Resend Key Vault secret refs and runtime env vars.')
+param enableResendSecrets bool = false
+
+@description('Include Google OAuth Key Vault secret refs and runtime env vars.')
+param enableGoogleOauthSecrets bool = false
+
+@description('Include Microsoft OAuth Key Vault secret refs and runtime env vars.')
+param enableMicrosoftOauthSecrets bool = false
 
 @description('Email sender used by self-serve signup and setup flows.')
 param emailFrom string = 'Corgtex <onboarding@corgtex.com>'
@@ -150,8 +155,20 @@ param agentApiKeySecretName string = 'agent-api-key'
 @description('Key Vault secret name containing SMOKE_EMAIL_CAPTURE_SECRET.')
 param smokeEmailCaptureSecretName string = 'smoke-email-capture-secret'
 
+@description('Comma-separated email domains allowed to use smoke-only setup email capture.')
+param smokeEmailCaptureAllowedDomains string = 'selfserve-staging.corgtex.com'
+
+@description('Key Vault secret name containing SELF_SERVE_REGISTRY_SYNC_SECRET.')
+param selfServeRegistrySyncSecretName string = 'self-serve-registry-sync-secret'
+
 @description('Key Vault secret name containing MODEL_PRICE_OVERRIDES_JSON.')
 param modelPriceOverridesSecretName string = 'model-price-overrides-json'
+
+@description('Bootstrap admin email used by the migration/seed job.')
+param bootstrapAdminEmail string = 'admin+selfserve-staging@corgtex.com'
+
+@description('Key Vault secret name containing ADMIN_PASSWORD for the migration/seed job.')
+param bootstrapAdminPasswordSecretName string = 'admin-password'
 
 @description('Key Vault secret name containing AZURE_OPENAI_API_KEY when azureOpenAiAuthMode is api_key.')
 param azureOpenAiApiKeySecretName string = 'azure-openai-api-key'
@@ -167,6 +184,9 @@ param stripePriceAiUsageSecretName string = 'stripe-price-ai-usage-id'
 
 @description('Key Vault secret name containing RESEND_API_KEY.')
 param resendApiKeySecretName string = 'resend-api-key'
+
+@description('Key Vault secret name containing RESEND_WEBHOOK_SECRET.')
+param resendWebhookSecretName string = 'resend-webhook-secret'
 
 @description('Key Vault secret name containing GOOGLE_CLIENT_ID.')
 param googleClientIdSecretName string = 'google-client-id'
@@ -217,22 +237,53 @@ var requiredSecretRefs = [
   { name: 'encryption-key', keyVaultSecretName: encryptionKeySecretName }
   { name: 'agent-api-key', keyVaultSecretName: agentApiKeySecretName }
   { name: 'smoke-email-capture-secret', keyVaultSecretName: smokeEmailCaptureSecretName }
+  { name: 'self-serve-registry-sync-secret', keyVaultSecretName: selfServeRegistrySyncSecretName }
   { name: 'model-price-overrides-json', keyVaultSecretName: modelPriceOverridesSecretName }
-  { name: 'stripe-secret-key', keyVaultSecretName: stripeSecretKeySecretName }
-  { name: 'stripe-webhook-secret', keyVaultSecretName: stripeWebhookSecretName }
-  { name: 'stripe-price-ai-usage-id', keyVaultSecretName: stripePriceAiUsageSecretName }
-  { name: 'resend-api-key', keyVaultSecretName: resendApiKeySecretName }
-  { name: 'google-client-id', keyVaultSecretName: googleClientIdSecretName }
-  { name: 'google-client-secret', keyVaultSecretName: googleClientSecretName }
-  { name: 'microsoft-client-id', keyVaultSecretName: microsoftClientIdSecretName }
-  { name: 'microsoft-client-secret', keyVaultSecretName: microsoftClientSecretName }
 ]
 var azureOpenAiApiKeyRef = azureOpenAiAuthMode == 'api_key' ? [
   { name: 'azure-openai-api-key', keyVaultSecretName: azureOpenAiApiKeySecretName }
 ] : []
+var stripeSecretRefs = enableStripeSecrets ? [
+  { name: 'stripe-secret-key', keyVaultSecretName: stripeSecretKeySecretName }
+  { name: 'stripe-webhook-secret', keyVaultSecretName: stripeWebhookSecretName }
+  { name: 'stripe-price-ai-usage-id', keyVaultSecretName: stripePriceAiUsageSecretName }
+] : []
+var resendSecretRefs = enableResendSecrets ? [
+  { name: 'resend-api-key', keyVaultSecretName: resendApiKeySecretName }
+  { name: 'resend-webhook-secret', keyVaultSecretName: resendWebhookSecretName }
+] : []
+var googleOauthSecretRefs = enableGoogleOauthSecrets ? [
+  { name: 'google-client-id', keyVaultSecretName: googleClientIdSecretName }
+  { name: 'google-client-secret', keyVaultSecretName: googleClientSecretName }
+] : []
+var microsoftOauthSecretRefs = enableMicrosoftOauthSecrets ? [
+  { name: 'microsoft-client-id', keyVaultSecretName: microsoftClientIdSecretName }
+  { name: 'microsoft-client-secret', keyVaultSecretName: microsoftClientSecretName }
+] : []
 var containerSecretRefs = concat([
   { name: 'ghcr-pat', keyVaultSecretName: ghcrPatSecretName }
-], requiredSecretRefs, azureOpenAiApiKeyRef)
+], requiredSecretRefs, azureOpenAiApiKeyRef, stripeSecretRefs, resendSecretRefs, googleOauthSecretRefs, microsoftOauthSecretRefs)
+var migrationSecretRefs = concat(containerSecretRefs, [
+  { name: 'admin-password', keyVaultSecretName: bootstrapAdminPasswordSecretName }
+])
+
+var stripeRuntimeEnv = enableStripeSecrets ? [
+  { name: 'STRIPE_SECRET_KEY', secretRef: 'stripe-secret-key' }
+  { name: 'STRIPE_WEBHOOK_SECRET', secretRef: 'stripe-webhook-secret' }
+  { name: 'STRIPE_PRICE_AI_USAGE_ID', secretRef: 'stripe-price-ai-usage-id' }
+] : []
+var resendRuntimeEnv = enableResendSecrets ? [
+  { name: 'RESEND_API_KEY', secretRef: 'resend-api-key' }
+  { name: 'RESEND_WEBHOOK_SECRET', secretRef: 'resend-webhook-secret' }
+] : []
+var googleOauthRuntimeEnv = enableGoogleOauthSecrets ? [
+  { name: 'GOOGLE_CLIENT_ID', secretRef: 'google-client-id' }
+  { name: 'GOOGLE_CLIENT_SECRET', secretRef: 'google-client-secret' }
+] : []
+var microsoftOauthRuntimeEnv = enableMicrosoftOauthSecrets ? [
+  { name: 'MICROSOFT_CLIENT_ID', secretRef: 'microsoft-client-id' }
+  { name: 'MICROSOFT_CLIENT_SECRET', secretRef: 'microsoft-client-secret' }
+] : []
 
 var commonRuntimeEnv = concat([
   { name: 'NODE_ENV', value: 'production' }
@@ -241,7 +292,8 @@ var commonRuntimeEnv = concat([
   { name: 'NEXT_PUBLIC_APP_URL', value: appUrl }
   { name: 'NEXT_PUBLIC_SITE_URL', value: siteUrl }
   { name: 'CONTROL_PLANE_URL', value: controlPlaneUrl }
-  { name: 'MCP_PUBLIC_URL', value: appUrl }
+  { name: 'MCP_PUBLIC_URL', value: '${appUrl}/mcp' }
+  { name: 'MEETING_RECORDER_PUBLIC_BASE_URL', value: appUrl }
   { name: 'DATABASE_URL', secretRef: 'database-url' }
   { name: 'REDIS_URL', secretRef: 'redis-url' }
   { name: 'REDIS_KEY_PREFIX', value: compactPrefix }
@@ -249,6 +301,8 @@ var commonRuntimeEnv = concat([
   { name: 'ENCRYPTION_KEY', secretRef: 'encryption-key' }
   { name: 'AGENT_API_KEY', secretRef: 'agent-api-key' }
   { name: 'SMOKE_EMAIL_CAPTURE_SECRET', secretRef: 'smoke-email-capture-secret' }
+  { name: 'SMOKE_EMAIL_CAPTURE_ALLOWED_DOMAINS', value: smokeEmailCaptureAllowedDomains }
+  { name: 'SELF_SERVE_REGISTRY_SYNC_SECRET', secretRef: 'self-serve-registry-sync-secret' }
   { name: 'STORAGE_PROVIDER', value: 'azure_blob' }
   { name: 'AZURE_STORAGE_AUTH_MODE', value: 'managed_identity' }
   { name: 'AZURE_STORAGE_ACCOUNT_NAME', value: storage.name }
@@ -268,17 +322,9 @@ var commonRuntimeEnv = concat([
   { name: 'MODEL_CHAT_CONVERSATION', value: azureChatConversationDeploymentName }
   { name: 'MODEL_EMBEDDING_DEFAULT', value: azureEmbeddingDeploymentName }
   { name: 'MODEL_PRICE_OVERRIDES_JSON', secretRef: 'model-price-overrides-json' }
-  { name: 'STRIPE_SECRET_KEY', secretRef: 'stripe-secret-key' }
-  { name: 'STRIPE_WEBHOOK_SECRET', secretRef: 'stripe-webhook-secret' }
-  { name: 'STRIPE_PRICE_AI_USAGE_ID', secretRef: 'stripe-price-ai-usage-id' }
-  { name: 'RESEND_API_KEY', secretRef: 'resend-api-key' }
   { name: 'EMAIL_FROM', value: emailFrom }
   { name: 'EMAIL_REPLY_TO', value: emailReplyTo }
   { name: 'PROCUREMENT_NOTIFY_EMAIL', value: procurementNotifyEmail }
-  { name: 'GOOGLE_CLIENT_ID', secretRef: 'google-client-id' }
-  { name: 'GOOGLE_CLIENT_SECRET', secretRef: 'google-client-secret' }
-  { name: 'MICROSOFT_CLIENT_ID', secretRef: 'microsoft-client-id' }
-  { name: 'MICROSOFT_CLIENT_SECRET', secretRef: 'microsoft-client-secret' }
   { name: 'WORKER_POLL_INTERVAL_MS', value: workerPollIntervalMs }
   { name: 'WORKER_MAX_POLL_INTERVAL_MS', value: workerMaxPollIntervalMs }
   { name: 'WORKER_EVENT_BATCH_SIZE', value: workerEventBatchSize }
@@ -288,7 +334,7 @@ var commonRuntimeEnv = concat([
   { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: applicationInsights.properties.ConnectionString }
 ], azureOpenAiAuthMode == 'api_key' ? [
   { name: 'AZURE_OPENAI_API_KEY', secretRef: 'azure-openai-api-key' }
-] : [])
+] : [], stripeRuntimeEnv, resendRuntimeEnv, googleOauthRuntimeEnv, microsoftOauthRuntimeEnv)
 
 resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
   name: logAnalyticsWorkspaceName
@@ -410,6 +456,15 @@ resource postgresDatabase 'Microsoft.DBforPostgreSQL/flexibleServers/databases@2
   }
 }
 
+resource postgresAllowedExtensionsConfig 'Microsoft.DBforPostgreSQL/flexibleServers/configurations@2023-12-01-preview' = {
+  parent: postgres
+  name: 'azure.extensions'
+  properties: {
+    value: postgresAllowedExtensions
+    source: 'user-override'
+  }
+}
+
 resource postgresAzureServicesFirewall 'Microsoft.DBforPostgreSQL/flexibleServers/firewallRules@2023-12-01-preview' = if (allowAzureServicePostgresFirewall) {
   parent: postgres
   name: 'AllowAzureServices'
@@ -428,18 +483,36 @@ resource postgresFirewallRuleResources 'Microsoft.DBforPostgreSQL/flexibleServer
   }
 }]
 
-resource redis 'Microsoft.Cache/redis@2024-03-01' = {
+resource redis 'Microsoft.Cache/redisEnterprise@2026-02-01-preview' = {
   name: redisName
   location: location
+  sku: {
+    name: managedRedisSkuName
+  }
+  identity: {
+    type: 'None'
+  }
   properties: {
-    sku: {
-      name: redisSkuName
-      family: redisSkuFamily
-      capacity: redisSkuCapacity
-    }
-    enableNonSslPort: false
     minimumTlsVersion: '1.2'
+    highAvailability: 'Disabled'
     publicNetworkAccess: 'Enabled'
+  }
+}
+
+resource redisDatabase 'Microsoft.Cache/redisEnterprise/databases@2026-02-01-preview' = {
+  parent: redis
+  name: 'default'
+  properties: {
+    accessKeysAuthentication: 'Enabled'
+    clientProtocol: 'Encrypted'
+    clusteringPolicy: 'OSSCluster'
+    evictionPolicy: 'VolatileLRU'
+    modules: []
+    persistence: {
+      aofEnabled: false
+      rdbEnabled: false
+    }
+    port: managedRedisPort
   }
 }
 
@@ -657,7 +730,7 @@ resource migrationJob 'Microsoft.App/jobs@2024-03-01' = if (deployContainerApps)
           passwordSecretRef: 'ghcr-pat'
         }
       ]
-      secrets: [for secretRef in containerSecretRefs: {
+      secrets: [for secretRef in migrationSecretRefs: {
         name: secretRef.name
         keyVaultUrl: '${keyVaultSecretUriPrefix}${secretRef.keyVaultSecretName}'
         identity: managedIdentity.id
@@ -670,6 +743,8 @@ resource migrationJob 'Microsoft.App/jobs@2024-03-01' = if (deployContainerApps)
           image: webImage
           env: concat(commonRuntimeEnv, [
             { name: 'CORGTEX_STARTUP_MODE', value: 'migrate-and-seed' }
+            { name: 'ADMIN_EMAIL', value: bootstrapAdminEmail }
+            { name: 'ADMIN_PASSWORD', secretRef: 'admin-password' }
           ])
           resources: {
             cpu: json('0.5')
@@ -681,6 +756,7 @@ resource migrationJob 'Microsoft.App/jobs@2024-03-01' = if (deployContainerApps)
   }
   dependsOn: [
     keyVaultSecretsRole
+    postgresAllowedExtensionsConfig
     storageBlobRole
   ]
 }
@@ -691,6 +767,7 @@ output storageAccount string = storage.name
 output storageContainer string = storageContainer.name
 output postgresServerFqdn string = postgres.properties.fullyQualifiedDomainName
 output redisHostName string = redis.properties.hostName
+output redisPort int = managedRedisPort
 output containerAppsEnvironment string = containerEnvironment.name
 output webAppName string = deployContainerApps ? webApp.name : ''
 output workerAppName string = deployContainerApps ? workerApp.name : ''

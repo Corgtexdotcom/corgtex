@@ -2667,6 +2667,106 @@ function controlPlaneReleaseDrift(row: ControlPlaneDeploymentRow) {
     : latestSnapshotForKind(row, "RELEASE")?.error ?? null;
 }
 
+function jsonRecordOrNull(value: unknown): JsonRecord | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as JsonRecord : null;
+}
+
+function firstJsonRecord(...values: unknown[]) {
+  for (const value of values) {
+    const record = jsonRecordOrNull(value);
+    if (record) return record;
+  }
+  return null;
+}
+
+function compactSnapshot(snapshot: {
+  id?: string;
+  snapshotKind?: FleetSnapshotKind;
+  status: string;
+  summary?: unknown;
+  error?: string | null;
+  observedAt: Date;
+  createdAt?: Date;
+} | null) {
+  if (!snapshot) return null;
+  return {
+    id: snapshot.id ?? null,
+    snapshotKind: snapshot.snapshotKind ?? null,
+    status: snapshot.status,
+    summary: jsonRecordOrNull(snapshot.summary) ? redactObject(snapshot.summary as JsonRecord) : null,
+    error: snapshot.error ?? null,
+    observedAt: snapshot.observedAt,
+    createdAt: snapshot.createdAt ?? null,
+  };
+}
+
+function compactSelfServeSmokeSummary(value: unknown) {
+  const summary = jsonRecordOrNull(value);
+  if (!summary) return null;
+  const steps = Array.isArray(summary.steps)
+    ? summary.steps.map((step) => {
+      const record = jsonRecordOrNull(step) ?? {};
+      return {
+        name: typeof record.name === "string" ? record.name : null,
+        status: typeof record.status === "string" ? record.status : null,
+      };
+    })
+    : [];
+  const warnings = Array.isArray(summary.warnings)
+    ? summary.warnings.map((warning) => {
+      const record = jsonRecordOrNull(warning) ?? {};
+      return {
+        name: typeof record.name === "string" ? record.name : null,
+        status: typeof record.status === "string" ? record.status : null,
+      };
+    })
+    : [];
+  return { steps, warnings };
+}
+
+function providerMetadataCostSummary(metadata: unknown) {
+  const record = jsonRecordOrNull(metadata);
+  const azure = jsonRecordOrNull(record?.azure);
+  const summary = firstJsonRecord(
+    record?.costSummary,
+    record?.cost,
+    record?.monthlyCost,
+    azure?.costSummary,
+    azure?.cost,
+    azure?.monthlyCost,
+  );
+  if (summary) return redactObject(summary);
+  const estimatedMonthlyUsd = record?.estimatedMonthlyUsd ?? azure?.estimatedMonthlyUsd;
+  const currentMonthUsd = record?.currentMonthUsd ?? azure?.currentMonthUsd;
+  if (estimatedMonthlyUsd !== undefined || currentMonthUsd !== undefined) {
+    return redactObject({
+      estimatedMonthlyUsd,
+      currentMonthUsd,
+    });
+  }
+  return null;
+}
+
+function registrySyncSummary(event: {
+  id: string;
+  meta: unknown;
+  createdAt: Date;
+} | null) {
+  if (!event) return null;
+  const meta = jsonRecordOrNull(event.meta) ?? {};
+  const items = Array.isArray(meta.items) ? meta.items : [];
+  return {
+    eventId: event.id,
+    sourceId: typeof meta.sourceId === "string" ? meta.sourceId : null,
+    sourceUrl: typeof meta.sourceUrl === "string" ? meta.sourceUrl : null,
+    sourceDeploymentId: typeof meta.sourceDeploymentId === "string" ? meta.sourceDeploymentId : null,
+    itemCount: typeof meta.itemCount === "number" ? meta.itemCount : items.length,
+    summary: jsonRecordOrNull(meta.summary) ? redactObject(meta.summary as JsonRecord) : null,
+    receivedAt: typeof meta.receivedAt === "string" ? meta.receivedAt : null,
+    createdAt: event.createdAt,
+  };
+}
+
 export type ControlPlaneCustomerSummary = {
   id: string;
   label: string;
@@ -6573,6 +6673,140 @@ export async function getControlPlaneReleaseStatus(actor: AppActor, deploymentId
     },
     rollbackReady: Boolean(deployment.releaseImageTag && deployment.lastHealthStatus === "ok"),
     recentPreparations,
+  };
+}
+
+export async function getControlPlaneProviderStatus(actor: AppActor, deploymentId: string) {
+  const deployment = await getControlPlaneDeploymentWithWorkspace(actor, deploymentId);
+  const adapter = createControlPlaneAdapter(deployment);
+  const provider = buildCustomerDeploymentProviderReadModel(deployment);
+  invariant(provider.cloudProvider === "AZURE", 400, "AZURE_PROVIDER_REQUIRED", "Azure provider status is only available for Azure deployments.");
+  invariant(adapter.canReadProviderStatus, 400, "PROVIDER_STATUS_UNAVAILABLE", "Provider status is not available for this deployment.");
+
+  const [fleetSnapshots, latestSmoke, latestRegistrySync] = await Promise.all([
+    prisma.fleetHealthSnapshot.findMany({
+      where: { deploymentId },
+      orderBy: { createdAt: "desc" },
+      take: 12,
+      select: {
+        id: true,
+        snapshotKind: true,
+        status: true,
+        summary: true,
+        error: true,
+        observedAt: true,
+        createdAt: true,
+      },
+    }),
+    prisma.selfServeSmokeRun.findFirst({
+      where: { deploymentId },
+      orderBy: { createdAt: "desc" },
+      select: {
+        runId: true,
+        runKind: true,
+        status: true,
+        baseUrl: true,
+        siteUrl: true,
+        summary: true,
+        error: true,
+        startedAt: true,
+        completedAt: true,
+        createdAt: true,
+      },
+    }),
+    prisma.customerDeploymentEvent.findFirst({
+      where: {
+        deploymentId,
+        action: "self_serve.registry_synced",
+      },
+      orderBy: { createdAt: "desc" },
+      select: {
+        id: true,
+        meta: true,
+        createdAt: true,
+      },
+    }),
+  ]);
+
+  const healthSnapshot = latestSnapshotForKind({ fleetSnapshots }, "HEALTH");
+  const releaseSnapshot = latestSnapshotForKind({ fleetSnapshots }, "RELEASE");
+  const costSummary = providerMetadataCostSummary(provider.providerMetadata);
+  const costSource = costSummary
+    ? "provider_metadata"
+    : provider.providerCostUrl ? "portal_link" : "not_configured";
+
+  return {
+    deploymentId,
+    adapter: {
+      kind: adapter.kind,
+      readOnly: true,
+      canReadProviderStatus: adapter.canReadProviderStatus,
+      canUseSupportConnector: adapter.canUseSupportConnector,
+      requiresConnectorSetup: adapter.requiresConnectorSetup,
+    },
+    provider: {
+      cloudProvider: provider.cloudProvider,
+      providerLabel: provider.providerLabel,
+      subscriptionId: provider.providerSubscriptionId,
+      resourceGroup: provider.providerResourceGroup,
+      environmentId: provider.providerEnvironmentId,
+      webServiceId: provider.providerWebServiceId,
+      workerServiceId: provider.providerWorkerServiceId,
+      postgresServiceId: provider.providerPostgresServiceId,
+      redisServiceId: provider.providerRedisServiceId,
+      storageResourceId: provider.providerStorageResourceId,
+    },
+    health: {
+      status: deployment.lastHealthStatus ?? healthSnapshot?.status ?? deployment.provisioningStatus ?? "unknown",
+      lastHealthCheck: deployment.lastHealthCheck,
+      lastHealthError: deployment.lastHealthError ?? healthSnapshot?.error ?? null,
+      workerStatus: deployment.lastWorkerHealthStatus,
+      workerCheckedAt: deployment.lastWorkerHealthCheck,
+      latestSnapshot: compactSnapshot(healthSnapshot),
+    },
+    release: {
+      releaseImageTag: deployment.releaseImageTag,
+      releaseVersion: deployment.releaseVersion,
+      lastReleaseCheck: deployment.lastReleaseCheck,
+      releaseDrift: deployment.lastHealthError?.includes("Release drift:") ? deployment.lastHealthError : releaseSnapshot?.error ?? null,
+      latestSnapshot: compactSnapshot(releaseSnapshot),
+    },
+    logs: {
+      url: provider.providerLogsUrl,
+      available: Boolean(provider.providerLogsUrl),
+    },
+    smoke: latestSmoke
+      ? {
+        status: latestSmoke.status,
+        runId: latestSmoke.runId,
+        runKind: latestSmoke.runKind,
+        baseUrl: latestSmoke.baseUrl,
+        siteUrl: latestSmoke.siteUrl,
+        error: latestSmoke.error,
+        summary: compactSelfServeSmokeSummary(latestSmoke.summary),
+        startedAt: latestSmoke.startedAt,
+        completedAt: latestSmoke.completedAt,
+        createdAt: latestSmoke.createdAt,
+      }
+      : {
+        status: "unknown",
+        runId: null,
+        runKind: null,
+        baseUrl: null,
+        siteUrl: null,
+        error: null,
+        summary: null,
+        startedAt: null,
+        completedAt: null,
+        createdAt: null,
+      },
+    cost: {
+      url: provider.providerCostUrl,
+      available: Boolean(provider.providerCostUrl || costSummary),
+      source: costSource,
+      summary: costSummary,
+    },
+    registrySync: registrySyncSummary(latestRegistrySync),
   };
 }
 
