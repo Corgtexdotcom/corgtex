@@ -119,6 +119,7 @@ These provider secrets are optional and are referenced only when their correspon
 - `stripe-webhook-secret`
 - `stripe-price-ai-usage-id`
 - `resend-api-key`
+- `resend-webhook-secret`
 - `google-client-id`
 - `google-client-secret`
 - `microsoft-client-id`
@@ -126,7 +127,7 @@ These provider secrets are optional and are referenced only when their correspon
 
 If `azureOpenAiAuthMode=api_key`, also create `azure-openai-api-key`. Production should prefer `managed_identity`.
 
-Keep `enable_resend_secrets=false` for smoke-only signup testing unless a real Resend staging key is available. With Resend unset, the app records the smoke setup URL through `SMOKE_EMAIL_CAPTURE_SECRET` without attempting external mail delivery.
+Keep `enable_resend_secrets=false` for smoke-only signup testing unless a real Resend staging key and inbound webhook signing secret are available. With Resend unset, the app records the smoke setup URL through `SMOKE_EMAIL_CAPTURE_SECRET` without attempting external mail delivery.
 
 ## Startup contract
 

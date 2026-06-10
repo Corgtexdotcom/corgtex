@@ -185,6 +185,9 @@ param stripePriceAiUsageSecretName string = 'stripe-price-ai-usage-id'
 @description('Key Vault secret name containing RESEND_API_KEY.')
 param resendApiKeySecretName string = 'resend-api-key'
 
+@description('Key Vault secret name containing RESEND_WEBHOOK_SECRET.')
+param resendWebhookSecretName string = 'resend-webhook-secret'
+
 @description('Key Vault secret name containing GOOGLE_CLIENT_ID.')
 param googleClientIdSecretName string = 'google-client-id'
 
@@ -247,6 +250,7 @@ var stripeSecretRefs = enableStripeSecrets ? [
 ] : []
 var resendSecretRefs = enableResendSecrets ? [
   { name: 'resend-api-key', keyVaultSecretName: resendApiKeySecretName }
+  { name: 'resend-webhook-secret', keyVaultSecretName: resendWebhookSecretName }
 ] : []
 var googleOauthSecretRefs = enableGoogleOauthSecrets ? [
   { name: 'google-client-id', keyVaultSecretName: googleClientIdSecretName }
@@ -270,6 +274,7 @@ var stripeRuntimeEnv = enableStripeSecrets ? [
 ] : []
 var resendRuntimeEnv = enableResendSecrets ? [
   { name: 'RESEND_API_KEY', secretRef: 'resend-api-key' }
+  { name: 'RESEND_WEBHOOK_SECRET', secretRef: 'resend-webhook-secret' }
 ] : []
 var googleOauthRuntimeEnv = enableGoogleOauthSecrets ? [
   { name: 'GOOGLE_CLIENT_ID', secretRef: 'google-client-id' }
