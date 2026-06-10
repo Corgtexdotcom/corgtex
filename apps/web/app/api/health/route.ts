@@ -1,6 +1,10 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@corgtex/shared";
-import { resolveStorageRuntimeConfig } from "@corgtex/storage";
+import {
+  resolveAzureBlobStorageRuntimeConfig,
+  resolveStorageProviderName,
+  resolveStorageRuntimeConfig,
+} from "@corgtex/storage";
 
 function handleRouteError(error: unknown) {
   console.error("Healthcheck failed.", error);
@@ -52,9 +56,13 @@ function releaseFingerprint() {
 }
 
 function runtimeFingerprint() {
+  const storageConfigured = resolveStorageProviderName() === "azure_blob"
+    ? resolveAzureBlobStorageRuntimeConfig().configured
+    : resolveStorageRuntimeConfig().configured;
+
   return {
     redis: process.env.REDIS_URL ? "configured" : "missing",
-    storage: resolveStorageRuntimeConfig().configured ? "configured" : "missing",
+    storage: storageConfigured ? "configured" : "missing",
   };
 }
 

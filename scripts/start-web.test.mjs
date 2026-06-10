@@ -1,10 +1,28 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   configuredSeedScripts,
   flagEnabled,
   resolveStartupMode,
   startupPlanForMode,
+  verifyMigrations,
 } from "./start-web.mjs";
+
+const prismaMock = vi.hoisted(() => ({
+  migrationQueryStrings: [],
+  disconnect: vi.fn(),
+}));
+
+vi.mock("@prisma/client", () => ({
+  PrismaClient: vi.fn().mockImplementation(function PrismaClient() {
+    return {
+      $queryRaw(strings) {
+        prismaMock.migrationQueryStrings = [...strings];
+        return Promise.resolve([]);
+      },
+      $disconnect: prismaMock.disconnect,
+    };
+  }),
+}));
 
 describe("start-web startup modes", () => {
   it("keeps combined startup as the default Railway-compatible mode", () => {
@@ -57,5 +75,15 @@ describe("start-web startup modes", () => {
   it("parses common enabled flag values", () => {
     expect(flagEnabled("FEATURE", { FEATURE: "on" })).toBe(true);
     expect(flagEnabled("FEATURE", { FEATURE: "false" })).toBe(false);
+  });
+
+  it("does not treat rolled-back migration rows as requiring attention", async () => {
+    await verifyMigrations();
+
+    const migrationQuery = prismaMock.migrationQueryStrings.join(" ");
+    expect(migrationQuery).toContain("finished_at IS NULL");
+    expect(migrationQuery).toContain("rolled_back_at IS NULL");
+    expect(migrationQuery).not.toContain("rolled_back_at IS NOT NULL");
+    expect(prismaMock.disconnect).toHaveBeenCalled();
   });
 });
