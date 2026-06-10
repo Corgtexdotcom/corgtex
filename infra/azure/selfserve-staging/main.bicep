@@ -80,6 +80,9 @@ param postgresStorageGb int = 32
 @description('PostgreSQL backup retention in days.')
 param postgresBackupRetentionDays int = 7
 
+@description('Comma-separated PostgreSQL extensions allowed on the Flexible Server before migrations run.')
+param postgresAllowedExtensions string = 'vector'
+
 @description('Creates the Azure-services PostgreSQL firewall rule. Keep false until reviewed for the target environment.')
 param allowAzureServicePostgresFirewall bool = false
 
@@ -160,6 +163,12 @@ param selfServeRegistrySyncSecretName string = 'self-serve-registry-sync-secret'
 
 @description('Key Vault secret name containing MODEL_PRICE_OVERRIDES_JSON.')
 param modelPriceOverridesSecretName string = 'model-price-overrides-json'
+
+@description('Bootstrap admin email used by the migration/seed job.')
+param bootstrapAdminEmail string = 'admin+selfserve-staging@corgtex.com'
+
+@description('Key Vault secret name containing ADMIN_PASSWORD for the migration/seed job.')
+param bootstrapAdminPasswordSecretName string = 'admin-password'
 
 @description('Key Vault secret name containing AZURE_OPENAI_API_KEY when azureOpenAiAuthMode is api_key.')
 param azureOpenAiApiKeySecretName string = 'azure-openai-api-key'
@@ -250,6 +259,9 @@ var microsoftOauthSecretRefs = enableMicrosoftOauthSecrets ? [
 var containerSecretRefs = concat([
   { name: 'ghcr-pat', keyVaultSecretName: ghcrPatSecretName }
 ], requiredSecretRefs, azureOpenAiApiKeyRef, stripeSecretRefs, resendSecretRefs, googleOauthSecretRefs, microsoftOauthSecretRefs)
+var migrationSecretRefs = concat(containerSecretRefs, [
+  { name: 'admin-password', keyVaultSecretName: bootstrapAdminPasswordSecretName }
+])
 
 var stripeRuntimeEnv = enableStripeSecrets ? [
   { name: 'STRIPE_SECRET_KEY', secretRef: 'stripe-secret-key' }
@@ -436,6 +448,14 @@ resource postgresDatabase 'Microsoft.DBforPostgreSQL/flexibleServers/databases@2
   properties: {
     charset: 'UTF8'
     collation: 'en_US.utf8'
+  }
+}
+
+resource postgresAllowedExtensionsConfig 'Microsoft.DBforPostgreSQL/flexibleServers/configurations@2023-12-01-preview' = {
+  parent: postgres
+  name: 'azure.extensions'
+  properties: {
+    value: postgresAllowedExtensions
   }
 }
 
@@ -704,7 +724,7 @@ resource migrationJob 'Microsoft.App/jobs@2024-03-01' = if (deployContainerApps)
           passwordSecretRef: 'ghcr-pat'
         }
       ]
-      secrets: [for secretRef in containerSecretRefs: {
+      secrets: [for secretRef in migrationSecretRefs: {
         name: secretRef.name
         keyVaultUrl: '${keyVaultSecretUriPrefix}${secretRef.keyVaultSecretName}'
         identity: managedIdentity.id
@@ -717,6 +737,8 @@ resource migrationJob 'Microsoft.App/jobs@2024-03-01' = if (deployContainerApps)
           image: webImage
           env: concat(commonRuntimeEnv, [
             { name: 'CORGTEX_STARTUP_MODE', value: 'migrate-and-seed' }
+            { name: 'ADMIN_EMAIL', value: bootstrapAdminEmail }
+            { name: 'ADMIN_PASSWORD', secretRef: 'admin-password' }
           ])
           resources: {
             cpu: json('0.5')
@@ -728,6 +750,7 @@ resource migrationJob 'Microsoft.App/jobs@2024-03-01' = if (deployContainerApps)
   }
   dependsOn: [
     keyVaultSecretsRole
+    postgresAllowedExtensionsConfig
     storageBlobRole
   ]
 }

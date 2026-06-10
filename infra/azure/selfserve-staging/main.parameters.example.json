@@ -38,6 +38,12 @@
     "allowAzureServicePostgresFirewall": {
       "value": false
     },
+    "postgresAllowedExtensions": {
+      "value": "vector"
+    },
+    "bootstrapAdminEmail": {
+      "value": "admin+selfserve-staging@corgtex.com"
+    },
     "enableStripeSecrets": {
       "value": false
     },

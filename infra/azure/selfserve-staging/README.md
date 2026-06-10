@@ -90,7 +90,9 @@ Do not remove or replace existing provider callbacks for `app.corgtex.com` durin
 - Populate required Key Vault secrets before setting `deployContainerApps=true`.
 - Grant the managed identity access to the Azure OpenAI or Foundry model resource when using managed identity auth.
 - Confirm GHCR image access. The Key Vault secret named `ghcr-pat` must contain a package-read token for `ghcr.io/corgtexdotcom/corgtex`.
+- If GHCR package-token scopes are not available for staging, use Azure Container Registry as a temporary fallback by setting `registryServer`, `registryUsername`, `webImage`, and `workerImage` to the ACR values and storing the ACR password in the same `ghcr-pat` Key Vault secret.
 - Confirm the PostgreSQL firewall decision. `allowAzureServicePostgresFirewall` defaults to `false`; enable it only after review or replace it with approved explicit firewall rules.
+- Keep `postgresAllowedExtensions` set to include `vector`; the migration set uses pgvector and Azure Flexible Server rejects extension creation unless the server-level `azure.extensions` parameter allows it first.
 - Keep DNS manual until the `selfserve-staging.corgtex.com` or `selfserve.corgtex.com` record is approved and configured through the DNS provider.
 - Confirm the Container Apps custom domain has issued TLS before provider callback tests are run.
 - Confirm `APP_URL`, `NEXT_PUBLIC_APP_URL`, `MCP_PUBLIC_URL`, and `MEETING_RECORDER_PUBLIC_BASE_URL` all describe the Azure runtime, not the Railway production app.
@@ -109,6 +111,7 @@ The template references these Key Vault secret names by default when `deployCont
 - `smoke-email-capture-secret`
 - `self-serve-registry-sync-secret`
 - `model-price-overrides-json`
+- `admin-password`
 
 These provider secrets are optional and are referenced only when their corresponding workflow input or Bicep parameter is enabled:
 
@@ -129,6 +132,7 @@ Keep `enable_resend_secrets=false` for smoke-only signup testing unless a real R
 
 - The web Container App sets `CORGTEX_STARTUP_MODE=web`, so it does not mutate the database at normal startup.
 - The migration job sets `CORGTEX_STARTUP_MODE=migrate-and-seed` and should be run before smoke testing a new image.
+- The migration job also receives `ADMIN_EMAIL` and `ADMIN_PASSWORD` from `bootstrapAdminEmail` and the `admin-password` Key Vault secret so the production bootstrap seed can complete.
 - The worker runs from the existing worker image and exposes `/health` on `WORKER_HEALTH_PORT`.
 
 ## Validation
