@@ -13,6 +13,7 @@ export type NodeRect = Point & {
 
 const EDGE_EXIT_GAP = 26;
 const EDGE_OBSTACLE_GAP = 16;
+const EDGE_CORRIDOR_MARGIN = 96;
 
 export function handleId(type: "source" | "target", side: NodeSide) {
   return `${type}-${side}`;
@@ -60,6 +61,37 @@ function inflateRect(rect: NodeRect, gap: number): NodeRect {
     width: rect.width + gap * 2,
     height: rect.height + gap * 2,
   };
+}
+
+function rectsIntersect(left: NodeRect, right: NodeRect) {
+  return left.x < right.x + right.width
+    && left.x + left.width > right.x
+    && left.y < right.y + right.height
+    && left.y + left.height > right.y;
+}
+
+export function scopeObstaclesForEdge(
+  sourceRect: NodeRect,
+  targetRect: NodeRect,
+  obstacles: NodeRect[],
+  margin = EDGE_CORRIDOR_MARGIN,
+): NodeRect[] {
+  const minX = Math.min(sourceRect.x, targetRect.x) - margin;
+  const minY = Math.min(sourceRect.y, targetRect.y) - margin;
+  const maxX = Math.max(sourceRect.x + sourceRect.width, targetRect.x + targetRect.width) + margin;
+  const maxY = Math.max(sourceRect.y + sourceRect.height, targetRect.y + targetRect.height) + margin;
+  const corridor: NodeRect = {
+    id: "__corridor__",
+    x: minX,
+    y: minY,
+    width: maxX - minX,
+    height: maxY - minY,
+  };
+  return obstacles.filter((obstacle) => (
+    obstacle.id !== sourceRect.id
+    && obstacle.id !== targetRect.id
+    && rectsIntersect(obstacle, corridor)
+  ));
 }
 
 function mergeIntervals(intervals: Array<[number, number]>) {

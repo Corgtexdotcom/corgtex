@@ -50,6 +50,7 @@ import {
   handleId,
   nearestSourceSide,
   oppositeSide,
+  scopeObstaclesForEdge,
   type NodeRect,
   type NodeSide,
 } from "./context-map-routing";
@@ -1148,7 +1149,19 @@ export default function ContextMapClient({
 
   const [nodes, setNodes, onNodesChange] = useNodesState<ContextMapFlowNode>(initialNodes);
   const nodeRectsById = useMemo(() => new Map(nodes.map((node) => [node.id, nodeRectFromFlowNode(node)])), [nodes]);
-  const edgeObstacles = useMemo(() => [...nodeRectsById.values()], [nodeRectsById]);
+
+  // Routing rects are frozen while a node is dragged so the whole edge set is
+  // not re-routed on every drag frame; connected edges follow live endpoints
+  // from React Flow and everything re-routes once on drop.
+  const [isDraggingNodes, setIsDraggingNodes] = useState(false);
+  const [routingRects, setRoutingRects] = useState<Map<string, NodeRect>>(
+    () => new Map(initialNodes.map((node) => [node.id, nodeRectFromFlowNode(node)])),
+  );
+  useEffect(() => {
+    if (isDraggingNodes) return;
+    setRoutingRects(nodeRectsById);
+  }, [isDraggingNodes, nodeRectsById]);
+  const routingObstacles = useMemo(() => [...routingRects.values()], [routingRects]);
 
   const routedEdges = useMemo<ContextMapFlowEdge[]>(() => allRelationships.flatMap((relationship) => {
     const visual = visualRelationshipEndpoints(relationship);
@@ -1159,8 +1172,8 @@ export default function ContextMapClient({
     ) {
       return [];
     }
-    const sourceRect = nodeRectsById.get(visual.sourceObjectId);
-    const targetRect = nodeRectsById.get(visual.targetObjectId);
+    const sourceRect = routingRects.get(visual.sourceObjectId);
+    const targetRect = routingRects.get(visual.targetObjectId);
     if (!sourceRect || !targetRect) return [];
     const sourceSide = nearestSourceSide(sourceRect, targetRect);
     const targetSide = oppositeSide(sourceSide);
@@ -1185,7 +1198,7 @@ export default function ContextMapClient({
         relationshipType: relationship.relationshipType,
         sourceSide,
         targetSide,
-        obstacles: edgeObstacles,
+        obstacles: scopeObstaclesForEdge(sourceRect, targetRect, routingObstacles),
       },
       className: [
         "context-map-flow-edge",
@@ -1198,7 +1211,7 @@ export default function ContextMapClient({
         strokeDasharray: visualStyle.strokeDasharray,
       },
     }];
-  }), [allRelationships, edgeObstacles, nodeRectsById, statusFilter, visibleObjectIds]);
+  }), [allRelationships, routingObstacles, routingRects, statusFilter, visibleObjectIds]);
 
   const [edges, setEdges, onEdgesChange] = useEdgesState<ContextMapFlowEdge>(routedEdges);
 
@@ -2032,7 +2045,16 @@ export default function ContextMapClient({
                   }
                 }
               }}
-              onNodeDragStop={() => setLayoutDirty(true)}
+              onNodeDragStart={() => setIsDraggingNodes(true)}
+              onNodeDragStop={() => {
+                setIsDraggingNodes(false);
+                setLayoutDirty(true);
+              }}
+              onSelectionDragStart={() => setIsDraggingNodes(true)}
+              onSelectionDragStop={() => {
+                setIsDraggingNodes(false);
+                setLayoutDirty(true);
+              }}
               nodesConnectable
               connectionMode={ConnectionMode.Loose}
               connectionRadius={28}
