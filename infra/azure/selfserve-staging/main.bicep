@@ -150,6 +150,9 @@ param agentApiKeySecretName string = 'agent-api-key'
 @description('Key Vault secret name containing SMOKE_EMAIL_CAPTURE_SECRET.')
 param smokeEmailCaptureSecretName string = 'smoke-email-capture-secret'
 
+@description('Key Vault secret name containing SELF_SERVE_REGISTRY_SYNC_SECRET.')
+param selfServeRegistrySyncSecretName string = 'self-serve-registry-sync-secret'
+
 @description('Key Vault secret name containing MODEL_PRICE_OVERRIDES_JSON.')
 param modelPriceOverridesSecretName string = 'model-price-overrides-json'
 
@@ -217,6 +220,7 @@ var requiredSecretRefs = [
   { name: 'encryption-key', keyVaultSecretName: encryptionKeySecretName }
   { name: 'agent-api-key', keyVaultSecretName: agentApiKeySecretName }
   { name: 'smoke-email-capture-secret', keyVaultSecretName: smokeEmailCaptureSecretName }
+  { name: 'self-serve-registry-sync-secret', keyVaultSecretName: selfServeRegistrySyncSecretName }
   { name: 'model-price-overrides-json', keyVaultSecretName: modelPriceOverridesSecretName }
   { name: 'stripe-secret-key', keyVaultSecretName: stripeSecretKeySecretName }
   { name: 'stripe-webhook-secret', keyVaultSecretName: stripeWebhookSecretName }
@@ -249,6 +253,7 @@ var commonRuntimeEnv = concat([
   { name: 'ENCRYPTION_KEY', secretRef: 'encryption-key' }
   { name: 'AGENT_API_KEY', secretRef: 'agent-api-key' }
   { name: 'SMOKE_EMAIL_CAPTURE_SECRET', secretRef: 'smoke-email-capture-secret' }
+  { name: 'SELF_SERVE_REGISTRY_SYNC_SECRET', secretRef: 'self-serve-registry-sync-secret' }
   { name: 'STORAGE_PROVIDER', value: 'azure_blob' }
   { name: 'AZURE_STORAGE_AUTH_MODE', value: 'managed_identity' }
   { name: 'AZURE_STORAGE_ACCOUNT_NAME', value: storage.name }

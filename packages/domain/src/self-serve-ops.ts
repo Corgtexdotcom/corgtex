@@ -1,3 +1,4 @@
+import { createHmac, timingSafeEqual } from "node:crypto";
 import type { CustomerDeploymentAccessRole, MemberRole, Prisma } from "@prisma/client";
 import {
   decryptSecret,
@@ -17,8 +18,19 @@ const SUPPORT_SESSION_TTL_MS = 60 * 60 * 1000;
 const SUPPORT_EMAIL_DOMAIN = "corgtex.local";
 const CONTROL_PLANE_READ_SCOPE = "control-plane:read";
 const CONTROL_PLANE_DEPLOYMENT_WRITE_ROLES = new Set<CustomerDeploymentAccessRole>(["SUPPORT_ADMIN", "CUSTOMER_IT_ADMIN"]);
+const REGISTRY_SYNC_SCHEMA_VERSION = "self-serve-registry-sync-v1";
+const REGISTRY_SYNC_MAX_AGE_MS = 5 * 60 * 1000;
 
 type JsonRecord = Record<string, unknown>;
+export type SelfServeRegistrySyncPayload = {
+  schemaVersion: typeof REGISTRY_SYNC_SCHEMA_VERSION;
+  sourceId: string;
+  sourceUrl: string;
+  sourceDeploymentId?: string | null;
+  generatedAt: string;
+  summary: JsonRecord;
+  items: JsonRecord[];
+};
 
 function normalizeEmail(email: string) {
   return email.trim().toLowerCase();
@@ -114,6 +126,261 @@ function redactObject(value: JsonRecord): JsonRecord {
   return Object.fromEntries(
     Object.entries(value).map(([key, entry]) => [key, redactValue(key, entry)]),
   );
+}
+
+function dateIso(value: unknown) {
+  if (!value) return null;
+  if (value instanceof Date) return value.toISOString();
+  if (typeof value === "string") {
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
+  }
+  return null;
+}
+
+function asRecord(value: unknown): JsonRecord | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as JsonRecord : null;
+}
+
+function compactSmokeSummary(value: unknown): JsonRecord | null {
+  const summary = asRecord(value);
+  if (!summary) return null;
+  const steps = Array.isArray(summary.steps)
+    ? summary.steps.map((step) => {
+      const record = asRecord(step) ?? {};
+      return {
+        name: typeof record.name === "string" ? record.name : null,
+        status: typeof record.status === "string" ? record.status : null,
+      };
+    })
+    : [];
+  const warnings = Array.isArray(summary.warnings)
+    ? summary.warnings.map((warning) => {
+      const record = asRecord(warning) ?? {};
+      return {
+        name: typeof record.name === "string" ? record.name : null,
+      };
+    })
+    : [];
+  return {
+    steps,
+    warnings,
+  };
+}
+
+function compactSmokeRun(value: unknown) {
+  const run = asRecord(value);
+  if (!run) return null;
+  return {
+    runId: run.runId,
+    runKind: run.runKind,
+    status: run.status,
+    baseUrl: run.baseUrl,
+    siteUrl: run.siteUrl,
+    error: typeof run.error === "string" ? run.error.slice(0, 500) : null,
+    startedAt: dateIso(run.startedAt),
+    completedAt: dateIso(run.completedAt),
+    createdAt: dateIso(run.createdAt),
+    summary: compactSmokeSummary(run.summary),
+  };
+}
+
+function compactWorkspace(value: unknown) {
+  const workspace = asRecord(value);
+  if (!workspace) return null;
+  const counts = asRecord(workspace._count);
+  return {
+    id: workspace.id,
+    name: workspace.name,
+    slug: workspace.slug,
+    plan: workspace.plan,
+    trialEndsAt: dateIso(workspace.trialEndsAt),
+    counts: counts
+      ? {
+        members: counts.members,
+        roleOnboardingSessions: counts.roleOnboardingSessions,
+        onboardingStates: counts.onboardingStates,
+      }
+      : null,
+  };
+}
+
+function compactBilling(value: unknown) {
+  const billing = asRecord(value);
+  if (!billing) return null;
+  return {
+    billingStatus: billing.billingStatus,
+    paymentMethodReady: billing.paymentMethodReady,
+    updatedAt: dateIso(billing.updatedAt),
+  };
+}
+
+function compactDeployment(value: unknown) {
+  const deployment = asRecord(value);
+  if (!deployment) return null;
+  return {
+    id: deployment.id,
+    label: deployment.label,
+    deploymentStatus: deployment.deploymentStatus,
+    supportConnectorStatus: deployment.supportConnectorStatus,
+  };
+}
+
+function compactEmailCapture(value: unknown) {
+  const capture = asRecord(value);
+  if (!capture) return null;
+  return {
+    id: capture.id,
+    runId: capture.runId,
+    source: capture.source,
+    expiresAt: dateIso(capture.expiresAt),
+    consumedAt: dateIso(capture.consumedAt),
+    createdAt: dateIso(capture.createdAt),
+  };
+}
+
+function compactSupportSession(value: unknown) {
+  const session = asRecord(value);
+  if (!session) return null;
+  return {
+    id: session.id,
+    operationId: session.operationId,
+    expiresAt: dateIso(session.expiresAt),
+    usedAt: dateIso(session.usedAt),
+    createdAt: dateIso(session.createdAt),
+  };
+}
+
+function sanitizeRegistryItem(item: unknown): JsonRecord {
+  const record = asRecord(item) ?? {};
+  const existingActiveTrial = asRecord(record.existingActiveTrial);
+  return {
+    trialId: record.trialId,
+    status: record.status,
+    riskStatus: record.riskStatus,
+    riskReasons: Array.isArray(record.riskReasons) ? record.riskReasons : [],
+    companyName: record.companyName,
+    emailDomain: record.emailDomain,
+    trialExpiresAt: dateIso(record.trialExpiresAt),
+    createdAt: dateIso(record.createdAt),
+    updatedAt: dateIso(record.updatedAt),
+    suspendedAt: dateIso(record.suspendedAt),
+    suspensionReason: record.suspensionReason,
+    claimEmailCaptured: Boolean(record.claimEmailStatus),
+    workspace: compactWorkspace(record.workspace),
+    billing: compactBilling(record.billing),
+    deployment: compactDeployment(record.deployment),
+    existingActiveTrial: existingActiveTrial
+      ? {
+        trialId: existingActiveTrial.trialId,
+        status: existingActiveTrial.status,
+        companyName: existingActiveTrial.companyName,
+        emailDomain: existingActiveTrial.emailDomain,
+        trialExpiresAt: dateIso(existingActiveTrial.trialExpiresAt),
+        createdAt: dateIso(existingActiveTrial.createdAt),
+        workspace: compactWorkspace(existingActiveTrial.workspace),
+        deployment: compactDeployment(existingActiveTrial.deployment),
+      }
+      : null,
+    latestSmoke: compactSmokeRun(record.latestSmoke),
+    latestEmailCapture: compactEmailCapture(record.latestEmailCapture),
+    latestSupportSession: compactSupportSession(record.latestSupportSession),
+  };
+}
+
+function safeEqualHex(left: string, right: string) {
+  if (!/^[a-f0-9]{64}$/i.test(left) || !/^[a-f0-9]{64}$/i.test(right)) return false;
+  return timingSafeEqual(Buffer.from(left, "hex"), Buffer.from(right, "hex"));
+}
+
+export function signSelfServeRegistrySyncPayload(params: {
+  secret: string;
+  timestamp: string;
+  body: string;
+}) {
+  return createHmac("sha256", params.secret).update(`${params.timestamp}.${params.body}`).digest("hex");
+}
+
+export function verifySelfServeRegistrySyncSignature(params: {
+  secret?: string | null;
+  timestamp?: string | null;
+  body: string;
+  signature?: string | null;
+  now?: Date;
+}) {
+  const secret = params.secret?.trim();
+  const timestampRaw = params.timestamp?.trim();
+  invariant(secret, 503, "REGISTRY_SYNC_NOT_CONFIGURED", "Self-serve registry sync is not configured.");
+  invariant(timestampRaw, 401, "REGISTRY_SYNC_TIMESTAMP_REQUIRED", "Registry sync timestamp is required.");
+  const timestamp = new Date(timestampRaw);
+  invariant(!Number.isNaN(timestamp.getTime()), 401, "REGISTRY_SYNC_TIMESTAMP_INVALID", "Registry sync timestamp is invalid.");
+  const ageMs = Math.abs((params.now ?? new Date()).getTime() - timestamp.getTime());
+  invariant(ageMs <= REGISTRY_SYNC_MAX_AGE_MS, 401, "REGISTRY_SYNC_STALE", "Registry sync signature is stale.");
+
+  const signature = params.signature?.trim().replace(/^sha256=/i, "");
+  invariant(signature, 401, "REGISTRY_SYNC_SIGNATURE_REQUIRED", "Registry sync signature is required.");
+  const expected = signSelfServeRegistrySyncPayload({
+    secret,
+    timestamp: timestampRaw,
+    body: params.body,
+  });
+  invariant(safeEqualHex(signature, expected), 401, "REGISTRY_SYNC_SIGNATURE_INVALID", "Registry sync signature is invalid.");
+}
+
+export async function buildSelfServeRegistrySyncPayload(actor: AppActor, params: {
+  take?: number | null;
+  status?: string | null;
+  sourceId?: string | null;
+  sourceUrl?: string | null;
+  sourceDeploymentId?: string | null;
+} = {}): Promise<SelfServeRegistrySyncPayload> {
+  const registry = await listSelfServeCustomerRegistry(actor, {
+    take: params.take,
+    status: params.status,
+  });
+  return {
+    schemaVersion: REGISTRY_SYNC_SCHEMA_VERSION,
+    sourceId: params.sourceId?.trim() || "self-serve",
+    sourceUrl: params.sourceUrl?.trim() || env.APP_URL,
+    sourceDeploymentId: params.sourceDeploymentId?.trim() || null,
+    generatedAt: new Date().toISOString(),
+    summary: registry.summary as JsonRecord,
+    items: registry.items.map((item) => sanitizeRegistryItem(item)),
+  };
+}
+
+export async function recordSelfServeRegistrySync(payload: SelfServeRegistrySyncPayload) {
+  invariant(payload.schemaVersion === REGISTRY_SYNC_SCHEMA_VERSION, 400, "INVALID_INPUT", "Unsupported self-serve registry sync schema version.");
+  const sourceId = payload.sourceId.trim();
+  invariant(sourceId.length > 0, 400, "INVALID_INPUT", "Registry sync source id is required.");
+  const sourceDeploymentId = payload.sourceDeploymentId?.trim() || null;
+  const deployment = sourceDeploymentId
+    ? await prisma.customerDeployment.findUnique({ where: { id: sourceDeploymentId }, select: { id: true } })
+    : null;
+  const receivedAt = new Date().toISOString();
+  const event = await prisma.customerDeploymentEvent.create({
+    data: {
+      deploymentId: deployment?.id ?? null,
+      actorUserId: null,
+      action: "self_serve.registry_synced",
+      meta: toInputJson({
+        ...payload,
+        receivedAt,
+        sourceDeploymentId,
+      }) as Prisma.InputJsonObject,
+    },
+    select: { id: true, createdAt: true },
+  });
+
+  return {
+    eventId: event.id,
+    sourceId,
+    sourceDeploymentId,
+    itemCount: payload.items.length,
+    summary: payload.summary,
+    receivedAt,
+    createdAt: event.createdAt,
+  };
 }
 
 export async function maybeCaptureSelfServeSetupEmail(params: {
