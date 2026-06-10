@@ -221,8 +221,8 @@ const DEFAULT_CONTEXT_MAP_VIEW_CONFIGS: Array<{
       mode: "agentGovernance",
       defaultMapKey: "agent-governance",
       evidenceBacked: true,
-      objectTypes: ["Agent", "Policy", "Tool", "Meeting", "Document", "Task", "Decision", "Risk", "Evidence"],
-      relationshipTypes: ["input_to", "output_of", "uses", "supports", "needs_approval_from", "created_in", "has_evidence", "blocks"],
+      objectTypes: ["Agent", "Policy", "Tool", "Team", "Role", "Meeting", "Document", "Task", "Decision", "Risk", "Evidence"],
+      relationshipTypes: ["input_to", "output_of", "uses", "supports", "needs_approval_from", "created_in", "has_evidence", "blocks", "member_of", "assigned_to"],
     },
   },
 ];

@@ -50,6 +50,9 @@ vi.mock("@corgtex/shared", () => ({
     auditLog: {
       create: vi.fn(),
     },
+    event: {
+      createMany: vi.fn(),
+    },
     $executeRaw: vi.fn(),
     $transaction: vi.fn(async (cb) => cb(prisma)),
   },
@@ -111,6 +114,17 @@ describe("agent-identity", () => {
         }),
       }),
     );
+    expect(prisma.event.createMany).toHaveBeenCalledWith({
+      data: [
+        expect.objectContaining({
+          workspaceId: wsId,
+          type: "agent-identity.created",
+          aggregateType: "AgentIdentity",
+          aggregateId: "ai-1",
+          payload: expect.objectContaining({ agentIdentityId: "ai-1" }),
+        }),
+      ],
+    });
   });
 
   it("lists agent identities", async () => {
@@ -137,6 +151,35 @@ describe("agent-identity", () => {
     });
 
     expect(result.displayName).toBe("New Name");
+    expect(prisma.event.createMany).toHaveBeenCalledWith({
+      data: [
+        expect.objectContaining({
+          type: "agent-identity.updated",
+          payload: expect.objectContaining({ agentIdentityId: "ai-1" }),
+        }),
+      ],
+    });
+  });
+
+  it("emits a deactivation event when updating an agent identity to inactive", async () => {
+    const existing = { id: "ai-1", workspaceId: wsId, agentKey: "test", displayName: "Agent", isActive: true };
+    vi.mocked(prisma.agentIdentity.findFirst).mockResolvedValue(existing as any);
+    vi.mocked(prisma.agentIdentity.update).mockResolvedValue({ ...existing, isActive: false } as any);
+
+    await updateAgentIdentity(adminActor, {
+      workspaceId: wsId,
+      agentIdentityId: "ai-1",
+      isActive: false,
+    });
+
+    expect(prisma.event.createMany).toHaveBeenCalledWith({
+      data: [
+        expect.objectContaining({
+          type: "agent-identity.deactivated",
+          payload: expect.objectContaining({ agentIdentityId: "ai-1" }),
+        }),
+      ],
+    });
   });
 
   it("deactivates an agent identity", async () => {
@@ -199,6 +242,14 @@ describe("agent-identity", () => {
         roleId: null,
       },
     }));
+    expect(prisma.event.createMany).toHaveBeenCalledWith({
+      data: [
+        expect.objectContaining({
+          type: "agent-identity.circle-assigned",
+          payload: expect.objectContaining({ agentIdentityId: "ai-1", circleId: "c-1" }),
+        }),
+      ],
+    });
   });
 
   it("assigns an agent to a role in the same circle", async () => {
@@ -279,6 +330,14 @@ describe("agent-identity", () => {
         endedAt: null,
       }),
     }));
+    expect(prisma.event.createMany).toHaveBeenCalledWith({
+      data: [
+        expect.objectContaining({
+          type: "agent-identity.circle-unassigned",
+          payload: expect.objectContaining({ agentIdentityId: "ai-1", circleId: "c-1" }),
+        }),
+      ],
+    });
   });
 
   it("updates agent behavior markdown", async () => {

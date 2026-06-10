@@ -118,6 +118,31 @@ describe("deriveJobsForEvent", () => {
     }));
   });
 
+  it("derives agent identity context graph sync jobs for agent lifecycle events", () => {
+    for (const type of [
+      "agent-identity.created",
+      "agent-identity.updated",
+      "agent-identity.deactivated",
+      "agent-identity.circle-assigned",
+      "agent-identity.circle-unassigned",
+    ]) {
+      const jobs = deriveJobsForEvent({
+        id: `event-${type}`,
+        type,
+        workspaceId: "ws-1",
+        payload: { agentIdentityId: "agent-1" },
+      });
+
+      expect(jobs).toEqual([
+        expect.objectContaining({
+          type: "context-graph.sync",
+          payload: { sourceType: "AGENT_IDENTITY", sourceId: "agent-1" },
+          dedupeKey: `event-${type}:context-graph-sync:AGENT_IDENTITY:agent-1`,
+        }),
+      ]);
+    }
+  });
+
   it("derives goal context graph sync jobs for goal events", () => {
     for (const type of ["goal.created", "goal.updated"]) {
       const jobs = deriveJobsForEvent({

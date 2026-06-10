@@ -410,6 +410,17 @@ export function deriveJobsForEvent(event: {
     pushContextGraphSync("GOAL", payload.goalId);
   }
 
+  if (
+    event.type === "agent-identity.created"
+    || event.type === "agent-identity.updated"
+    || event.type === "agent-identity.deactivated"
+    || event.type === "agent-identity.circle-assigned"
+    || event.type === "agent-identity.circle-unassigned"
+  ) {
+    const payload = event.payload as { agentIdentityId?: string };
+    pushContextGraphSync("AGENT_IDENTITY", payload.agentIdentityId);
+  }
+
   if (event.type === "checkin.response_received") {
     const payload = event.payload as { checkInId?: string; memberId?: string };
     if (payload.memberId && event.workspaceId) {
