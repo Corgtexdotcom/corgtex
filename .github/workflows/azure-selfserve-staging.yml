@@ -20,7 +20,7 @@ on:
         description: "Azure region for app/data resources."
         required: true
         type: string
-        default: westus2
+        default: westus3
       name_prefix:
         description: "Short lowercase Azure resource prefix."
         required: true
@@ -79,6 +79,26 @@ on:
         required: true
         type: boolean
         default: false
+      enable_stripe_secrets:
+        description: "Reference Stripe Key Vault secrets in the Container Apps runtime."
+        required: true
+        type: boolean
+        default: false
+      enable_resend_secrets:
+        description: "Reference Resend Key Vault secrets in the Container Apps runtime."
+        required: true
+        type: boolean
+        default: false
+      enable_google_oauth_secrets:
+        description: "Reference Google OAuth Key Vault secrets in the Container Apps runtime."
+        required: true
+        type: boolean
+        default: false
+      enable_microsoft_oauth_secrets:
+        description: "Reference Microsoft OAuth Key Vault secrets in the Container Apps runtime."
+        required: true
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -109,6 +129,10 @@ jobs:
       CONTROL_PLANE_URL: ${{ inputs.control_plane_url }}
       AZURE_OPENAI_AUTH_MODE: ${{ inputs.azure_openai_auth_mode }}
       ALLOW_AZURE_SERVICE_POSTGRES_FIREWALL: ${{ inputs.allow_azure_service_postgres_firewall }}
+      ENABLE_STRIPE_SECRETS: ${{ inputs.enable_stripe_secrets }}
+      ENABLE_RESEND_SECRETS: ${{ inputs.enable_resend_secrets }}
+      ENABLE_GOOGLE_OAUTH_SECRETS: ${{ inputs.enable_google_oauth_secrets }}
+      ENABLE_MICROSOFT_OAUTH_SECRETS: ${{ inputs.enable_microsoft_oauth_secrets }}
       AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
       AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
       AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
@@ -254,6 +278,10 @@ jobs:
             "azureOpenAiAuthMode=$AZURE_OPENAI_AUTH_MODE"
             "allowAzureServicePostgresFirewall=$ALLOW_AZURE_SERVICE_POSTGRES_FIREWALL"
             "smokeEmailCaptureAllowedDomains=$SMOKE_EMAIL_CAPTURE_ALLOWED_DOMAINS"
+            "enableStripeSecrets=$ENABLE_STRIPE_SECRETS"
+            "enableResendSecrets=$ENABLE_RESEND_SECRETS"
+            "enableGoogleOauthSecrets=$ENABLE_GOOGLE_OAUTH_SECRETS"
+            "enableMicrosoftOauthSecrets=$ENABLE_MICROSOFT_OAUTH_SECRETS"
             "postgresAdminPassword=$POSTGRES_ADMIN_PASSWORD"
           )
           az deployment group what-if \
@@ -280,6 +308,10 @@ jobs:
             "azureOpenAiAuthMode=$AZURE_OPENAI_AUTH_MODE"
             "allowAzureServicePostgresFirewall=$ALLOW_AZURE_SERVICE_POSTGRES_FIREWALL"
             "smokeEmailCaptureAllowedDomains=$SMOKE_EMAIL_CAPTURE_ALLOWED_DOMAINS"
+            "enableStripeSecrets=$ENABLE_STRIPE_SECRETS"
+            "enableResendSecrets=$ENABLE_RESEND_SECRETS"
+            "enableGoogleOauthSecrets=$ENABLE_GOOGLE_OAUTH_SECRETS"
+            "enableMicrosoftOauthSecrets=$ENABLE_MICROSOFT_OAUTH_SECRETS"
             "postgresAdminPassword=$POSTGRES_ADMIN_PASSWORD"
           )
           az deployment group create \

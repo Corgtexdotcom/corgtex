@@ -6,7 +6,7 @@ This folder defines the staging Azure resource shape for the future self-serve r
 
 - Container Apps environment with web, worker, and manual migration/seed job definitions.
 - Azure Database for PostgreSQL Flexible Server and application database.
-- Azure Cache for Redis.
+- Azure Managed Redis.
 - Azure Blob Storage account and private container.
 - Key Vault with RBAC enabled.
 - User-assigned managed identity for Container Apps.
@@ -43,13 +43,15 @@ Required GitHub environment variables:
 
 The `smoke_email_capture_allowed_domains` workflow input must include `AZURE_SELFSERVE_STAGING_SMOKE_EMAIL_DOMAIN`. The default is `selfserve-staging.corgtex.com`, which is intended only for smoke-only setup email capture and does not require public mail delivery.
 
+The staging workflow defaults to `westus3` because the Corgtex Azure subscription returned a PostgreSQL Flexible Server offer restriction for `westus2` on June 9, 2026. Keep app, data, storage, and monitoring together in `westus3` unless Azure quota or cost review approves a different region.
+
 The Azure identity used by GitHub OIDC needs enough permission to create the resource group resources and write role assignments for the managed identity. In practice that means `Contributor` plus `User Access Administrator` at the target scope, or `Owner` for the staging resource group/subscription scope. Key Vault uses Azure RBAC, so secret population remains a manual gate before `deployContainerApps=true`.
 
 Suggested run order:
 
 1. Run `operation=deploy` with `deployContainerApps=false` to create backing resources only.
-2. Populate the Key Vault secrets listed below and grant the managed identity access to the Azure OpenAI or Foundry model resource when using managed identity auth.
-3. Run `operation=deploy` with `deployContainerApps=true` to build and push GHCR images tagged `sha-<git-sha>`, then create or update the web app, worker, and migration job.
+2. Populate the required Key Vault secrets listed below and grant the managed identity access to the Azure OpenAI or Foundry model resource when using managed identity auth.
+3. Run `operation=deploy` with `deployContainerApps=true` to build and push GHCR images tagged `sha-<git-sha>`, then create or update the web app, worker, and migration job. Leave the optional provider-secret toggles off until real staging credentials and callback URLs are registered.
 4. Enable `run_migration_job=true` for the first app deploy of a new image.
 5. Enable `run_health_smoke=true` and, after DNS/email/OAuth gates are ready, `run_browser_smoke=true`.
 
@@ -84,8 +86,8 @@ Do not remove or replace existing provider callbacks for `app.corgtex.com` durin
 ## Required manual gates
 
 - Confirm the Azure account is the Corgtex work account and the target subscription has approved credits, budget alert permissions, and enough quota in the selected region.
-- Confirm Azure OpenAI or Foundry model availability. The app/data default is `westus2`; model deployments can be in another approved region if the base URL and deployment names are documented.
-- Populate Key Vault secrets before setting `deployContainerApps=true`.
+- Confirm Azure OpenAI or Foundry model availability. The app/data default is `westus3`; model deployments can be in another approved region if the base URL and deployment names are documented.
+- Populate required Key Vault secrets before setting `deployContainerApps=true`.
 - Grant the managed identity access to the Azure OpenAI or Foundry model resource when using managed identity auth.
 - Confirm GHCR image access. The Key Vault secret named `ghcr-pat` must contain a package-read token for `ghcr.io/corgtexdotcom/corgtex`.
 - Confirm the PostgreSQL firewall decision. `allowAzureServicePostgresFirewall` defaults to `false`; enable it only after review or replace it with approved explicit firewall rules.
@@ -96,7 +98,7 @@ Do not remove or replace existing provider callbacks for `app.corgtex.com` durin
 
 ## Key Vault secrets
 
-The template references these Key Vault secret names by default:
+The template references these Key Vault secret names by default when `deployContainerApps=true`:
 
 - `ghcr-pat`
 - `database-url`
@@ -107,6 +109,9 @@ The template references these Key Vault secret names by default:
 - `smoke-email-capture-secret`
 - `self-serve-registry-sync-secret`
 - `model-price-overrides-json`
+
+These provider secrets are optional and are referenced only when their corresponding workflow input or Bicep parameter is enabled:
+
 - `stripe-secret-key`
 - `stripe-webhook-secret`
 - `stripe-price-ai-usage-id`
@@ -117,6 +122,8 @@ The template references these Key Vault secret names by default:
 - `microsoft-client-secret`
 
 If `azureOpenAiAuthMode=api_key`, also create `azure-openai-api-key`. Production should prefer `managed_identity`.
+
+Keep `enable_resend_secrets=false` for smoke-only signup testing unless a real Resend staging key is available. With Resend unset, the app records the smoke setup URL through `SMOKE_EMAIL_CAPTURE_SECRET` without attempting external mail delivery.
 
 ## Startup contract
 

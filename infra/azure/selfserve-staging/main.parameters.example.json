@@ -3,7 +3,7 @@
   "contentVersion": "1.0.0.0",
   "parameters": {
     "location": {
-      "value": "westus2"
+      "value": "westus3"
     },
     "namePrefix": {
       "value": "corgtex-ss-stg"
@@ -36,6 +36,18 @@
       "value": "managed_identity"
     },
     "allowAzureServicePostgresFirewall": {
+      "value": false
+    },
+    "enableStripeSecrets": {
+      "value": false
+    },
+    "enableResendSecrets": {
+      "value": false
+    },
+    "enableGoogleOauthSecrets": {
+      "value": false
+    },
+    "enableMicrosoftOauthSecrets": {
       "value": false
     }
   }
