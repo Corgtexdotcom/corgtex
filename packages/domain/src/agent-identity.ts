@@ -4,6 +4,7 @@ import type { AppActor } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { invariant } from "./errors";
+import { appendEvents } from "./events";
 import { closeRoleLifecycleForAgent, endRoleHolderHistory, startRoleHolderHistory } from "./role-onboarding";
 import { AGENT_REGISTRY } from "./agent-registry";// ---------------------------------------------------------------------------
 // CRUD — AgentIdentity
@@ -29,21 +30,35 @@ export async function createAgentIdentity(
 
   const createdByUserId = actor.kind === "user" ? actor.user.id : null;
 
-  return prisma.agentIdentity.create({
-    data: {
-      workspaceId: params.workspaceId,
-      agentKey: params.agentKey,
-      memberType: params.memberType ?? "INTERNAL",
-      displayName: params.displayName,
-      avatarUrl: params.avatarUrl ?? null,
-      purposeMd: params.purposeMd ?? null,
-      behaviorMd: params.behaviorMd ?? null,
-      createdByUserId,
-      linkedCredentialId: params.linkedCredentialId ?? null,
-      maxSpendPerRunCents: params.maxSpendPerRunCents ?? null,
-      maxRunsPerDay: params.maxRunsPerDay ?? null,
-      maxRunsPerHour: params.maxRunsPerHour ?? null,
-    },
+  return prisma.$transaction(async (tx) => {
+    const identity = await tx.agentIdentity.create({
+      data: {
+        workspaceId: params.workspaceId,
+        agentKey: params.agentKey,
+        memberType: params.memberType ?? "INTERNAL",
+        displayName: params.displayName,
+        avatarUrl: params.avatarUrl ?? null,
+        purposeMd: params.purposeMd ?? null,
+        behaviorMd: params.behaviorMd ?? null,
+        createdByUserId,
+        linkedCredentialId: params.linkedCredentialId ?? null,
+        maxSpendPerRunCents: params.maxSpendPerRunCents ?? null,
+        maxRunsPerDay: params.maxRunsPerDay ?? null,
+        maxRunsPerHour: params.maxRunsPerHour ?? null,
+      },
+    });
+
+    await appendEvents(tx, [
+      {
+        workspaceId: params.workspaceId,
+        type: "agent-identity.created",
+        aggregateType: "AgentIdentity",
+        aggregateId: identity.id,
+        payload: { agentIdentityId: identity.id, agentKey: identity.agentKey },
+      },
+    ]);
+
+    return identity;
   });
 }
 
@@ -93,6 +108,16 @@ export async function updateAgentIdentity(
         actor,
       });
     }
+
+    await appendEvents(tx, [
+      {
+        workspaceId: params.workspaceId,
+        type: params.isActive === false && existing.isActive ? "agent-identity.deactivated" : "agent-identity.updated",
+        aggregateType: "AgentIdentity",
+        aggregateId: updated.id,
+        payload: { agentIdentityId: updated.id, agentKey: updated.agentKey },
+      },
+    ]);
 
     return updated;
   });
@@ -159,6 +184,16 @@ export async function deactivateAgentIdentity(
       agentIdentityId,
       actor,
     });
+
+    await appendEvents(tx, [
+      {
+        workspaceId,
+        type: "agent-identity.deactivated",
+        aggregateType: "AgentIdentity",
+        aggregateId: agentIdentityId,
+        payload: { agentIdentityId, agentKey: existing.agentKey },
+      },
+    ]);
   });
 
   return archived;
@@ -184,15 +219,29 @@ export async function getOrCreateExternalAgentIdentity(
   // Create a unique key for the external agent using credentialId
   const agentKey = `ext_${credentialId.substring(0, 8)}`;
 
-  return prisma.agentIdentity.create({
-    data: {
-      workspaceId,
-      agentKey,
-      memberType: "EXTERNAL",
-      displayName: label,
-      linkedCredentialId: credentialId,
-      createdByUserId,
-    },
+  return prisma.$transaction(async (tx) => {
+    const identity = await tx.agentIdentity.create({
+      data: {
+        workspaceId,
+        agentKey,
+        memberType: "EXTERNAL",
+        displayName: label,
+        linkedCredentialId: credentialId,
+        createdByUserId,
+      },
+    });
+
+    await appendEvents(tx, [
+      {
+        workspaceId,
+        type: "agent-identity.created",
+        aggregateType: "AgentIdentity",
+        aggregateId: identity.id,
+        payload: { agentIdentityId: identity.id, agentKey: identity.agentKey },
+      },
+    ]);
+
+    return identity;
   });
 }
 
@@ -282,6 +331,20 @@ export async function assignAgentToCircle(
       });
     }
 
+    await appendEvents(tx, [
+      {
+        workspaceId: params.workspaceId,
+        type: "agent-identity.circle-assigned",
+        aggregateType: "CircleAgentAssignment",
+        aggregateId: assignment.id,
+        payload: {
+          agentIdentityId: params.agentIdentityId,
+          circleId: params.circleId,
+          roleId,
+        },
+      },
+    ]);
+
     return assignment;
   });
 }
@@ -322,6 +385,19 @@ export async function removeAgentFromCircle(
         actor,
       });
     }
+
+    await appendEvents(tx, [
+      {
+        workspaceId: params.workspaceId,
+        type: "agent-identity.circle-unassigned",
+        aggregateType: "CircleAgentAssignment",
+        aggregateId: assignment.id,
+        payload: {
+          agentIdentityId: params.agentIdentityId,
+          circleId: params.circleId,
+        },
+      },
+    ]);
 
     return deleted;
   });
@@ -402,14 +478,26 @@ export async function seedAgentIdentities(workspaceId: string) {
       where: { workspaceId_agentKey: { workspaceId, agentKey } },
     });
     if (!existing) {
-      await prisma.agentIdentity.create({
-        data: {
-          workspaceId,
-          agentKey,
-          memberType: "INTERNAL",
-          displayName: definition.label,
-          purposeMd: definition.description,
-        },
+      await prisma.$transaction(async (tx) => {
+        const identity = await tx.agentIdentity.create({
+          data: {
+            workspaceId,
+            agentKey,
+            memberType: "INTERNAL",
+            displayName: definition.label,
+            purposeMd: definition.description,
+          },
+        });
+
+        await appendEvents(tx, [
+          {
+            workspaceId,
+            type: "agent-identity.created",
+            aggregateType: "AgentIdentity",
+            aggregateId: identity.id,
+            payload: { agentIdentityId: identity.id, agentKey: identity.agentKey },
+          },
+        ]);
       });
     }
   }

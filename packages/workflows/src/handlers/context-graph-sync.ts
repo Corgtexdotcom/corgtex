@@ -359,6 +359,101 @@ export async function handleContextGraphSync(
     return;
   }
 
+  if (payload.sourceType === "AGENT_IDENTITY") {
+    const identity = await prisma.agentIdentity.findFirst({
+      where: { id: payload.sourceId, workspaceId },
+      include: {
+        circleAssignments: {
+          include: {
+            circle: { select: { id: true, name: true, purposeMd: true, archivedAt: true } },
+            role: { select: { id: true, name: true, purposeMd: true, archivedAt: true } },
+          },
+        },
+      },
+    });
+    if (!identity) return;
+    const active = identity.isActive && !identity.archivedAt;
+    const agentObject = await upsertContextGraphObject(actor, {
+      workspaceId,
+      objectType: "Agent",
+      title: identity.displayName,
+      summary: identity.purposeMd,
+      status: active ? "approved" : "archived",
+      sourceEntityType: "AgentIdentity",
+      sourceEntityId: identity.id,
+      validFrom: identity.createdAt,
+      lastVerifiedAt: identity.updatedAt,
+      properties: {
+        agentKey: identity.agentKey,
+        memberType: identity.memberType,
+        isActive: identity.isActive,
+      },
+    });
+
+    const desiredEdges = new Map<string, { targetObjectId: string; relationshipType: "member_of" | "assigned_to" }>();
+    if (active) {
+      for (const assignment of identity.circleAssignments) {
+        if (!assignment.circle.archivedAt) {
+          const circleObject = await upsertContextGraphObject(actor, {
+            workspaceId,
+            objectType: "Team",
+            title: assignment.circle.name,
+            summary: assignment.circle.purposeMd,
+            status: "approved",
+            sourceEntityType: "Circle",
+            sourceEntityId: assignment.circle.id,
+          });
+          desiredEdges.set(`member_of:${circleObject.id}`, { targetObjectId: circleObject.id, relationshipType: "member_of" });
+        }
+        if (assignment.role && !assignment.role.archivedAt) {
+          const roleObject = await upsertContextGraphObject(actor, {
+            workspaceId,
+            objectType: "Role",
+            title: assignment.role.name,
+            summary: assignment.role.purposeMd,
+            status: "approved",
+            sourceEntityType: "Role",
+            sourceEntityId: assignment.role.id,
+          });
+          desiredEdges.set(`assigned_to:${roleObject.id}`, { targetObjectId: roleObject.id, relationshipType: "assigned_to" });
+        }
+      }
+    }
+    for (const edge of desiredEdges.values()) {
+      await upsertContextGraphRelationship(actor, {
+        workspaceId,
+        sourceObjectId: agentObject.id,
+        targetObjectId: edge.targetObjectId,
+        relationshipType: edge.relationshipType,
+        status: "approved",
+        sourceEntityType: "AgentIdentity",
+        sourceEntityId: identity.id,
+      });
+    }
+    const existingEdges = await prisma.contextGraphRelationship.findMany({
+      where: {
+        workspaceId,
+        sourceEntityType: "AgentIdentity",
+        sourceEntityId: identity.id,
+        status: { not: "archived" },
+      },
+      select: { sourceObjectId: true, targetObjectId: true, relationshipType: true },
+    });
+    for (const edge of existingEdges) {
+      if (desiredEdges.has(`${edge.relationshipType}:${edge.targetObjectId}`)) continue;
+      await upsertContextGraphRelationship(actor, {
+        workspaceId,
+        sourceObjectId: edge.sourceObjectId,
+        targetObjectId: edge.targetObjectId,
+        relationshipType: edge.relationshipType,
+        status: "archived",
+        sourceEntityType: "AgentIdentity",
+        sourceEntityId: identity.id,
+      });
+    }
+    return;
+  }
+
   if (payload.sourceType === "GOAL") {
     const goal = await prisma.goal.findFirst({
       where: { id: payload.sourceId, workspaceId },

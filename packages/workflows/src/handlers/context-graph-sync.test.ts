@@ -6,6 +6,7 @@ const { prismaMock, syncContextGraphForMeetingMock, upsertContextGraphObjectMock
     brainArticle: { findFirst: vi.fn() },
     member: { findFirst: vi.fn() },
     goal: { findFirst: vi.fn() },
+    agentIdentity: { findFirst: vi.fn() },
     contextGraphRelationship: { findMany: vi.fn() },
   },
   syncContextGraphForMeetingMock: vi.fn(),
@@ -268,6 +269,96 @@ describe("handleContextGraphSync", () => {
       sourceObjectId: "person-1",
       targetObjectId: "goal-object-1",
       relationshipType: "owns",
+    }));
+  });
+
+  it("maps agent identities to agent objects with circle and role relationships", async () => {
+    const { handleContextGraphSync } = await import("./context-graph-sync");
+    prismaMock.agentIdentity.findFirst.mockResolvedValueOnce({
+      id: "agent-1",
+      workspaceId: "ws-1",
+      agentKey: "meeting-summary",
+      memberType: "INTERNAL",
+      displayName: "Meeting summary agent",
+      purposeMd: "Summarize meetings.",
+      isActive: true,
+      archivedAt: null,
+      createdAt: new Date("2026-02-01T10:00:00.000Z"),
+      updatedAt: new Date("2026-06-01T10:00:00.000Z"),
+      circleAssignments: [
+        {
+          circle: { id: "circle-1", name: "Operations", purposeMd: "Run the company", archivedAt: null },
+          role: { id: "role-1", name: "Scribe", purposeMd: "Record decisions", archivedAt: null },
+        },
+      ],
+    });
+    upsertContextGraphObjectMock
+      .mockResolvedValueOnce({ id: "agent-object-1" })
+      .mockResolvedValueOnce({ id: "circle-object-1" })
+      .mockResolvedValueOnce({ id: "role-object-1" });
+    prismaMock.contextGraphRelationship.findMany.mockResolvedValueOnce([]);
+
+    await handleContextGraphSync("job-1", { sourceType: "AGENT_IDENTITY", sourceId: "agent-1" }, "ws-1");
+
+    expect(upsertContextGraphObjectMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      objectType: "Agent",
+      title: "Meeting summary agent",
+      status: "approved",
+      sourceEntityType: "AgentIdentity",
+      sourceEntityId: "agent-1",
+      properties: expect.objectContaining({ agentKey: "meeting-summary", memberType: "INTERNAL" }),
+    }));
+    expect(upsertContextGraphRelationshipMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      sourceObjectId: "agent-object-1",
+      targetObjectId: "circle-object-1",
+      relationshipType: "member_of",
+      status: "approved",
+    }));
+    expect(upsertContextGraphRelationshipMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      sourceObjectId: "agent-object-1",
+      targetObjectId: "role-object-1",
+      relationshipType: "assigned_to",
+      status: "approved",
+    }));
+  });
+
+  it("archives agent objects and stale edges when an agent identity is deactivated", async () => {
+    const { handleContextGraphSync } = await import("./context-graph-sync");
+    prismaMock.agentIdentity.findFirst.mockResolvedValueOnce({
+      id: "agent-2",
+      workspaceId: "ws-1",
+      agentKey: "ext_abc",
+      memberType: "EXTERNAL",
+      displayName: "External research agent",
+      purposeMd: null,
+      isActive: false,
+      archivedAt: new Date("2026-06-05T10:00:00.000Z"),
+      createdAt: new Date("2026-02-01T10:00:00.000Z"),
+      updatedAt: new Date("2026-06-05T10:00:00.000Z"),
+      circleAssignments: [
+        {
+          circle: { id: "circle-1", name: "Operations", purposeMd: null, archivedAt: null },
+          role: null,
+        },
+      ],
+    });
+    upsertContextGraphObjectMock.mockResolvedValueOnce({ id: "agent-object-2" });
+    prismaMock.contextGraphRelationship.findMany.mockResolvedValueOnce([
+      { sourceObjectId: "agent-object-2", targetObjectId: "circle-object-1", relationshipType: "member_of" },
+    ]);
+
+    await handleContextGraphSync("job-1", { sourceType: "AGENT_IDENTITY", sourceId: "agent-2" }, "ws-1");
+
+    expect(upsertContextGraphObjectMock).toHaveBeenCalledTimes(1);
+    expect(upsertContextGraphObjectMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      objectType: "Agent",
+      status: "archived",
+    }));
+    expect(upsertContextGraphRelationshipMock).toHaveBeenCalledTimes(1);
+    expect(upsertContextGraphRelationshipMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      targetObjectId: "circle-object-1",
+      relationshipType: "member_of",
+      status: "archived",
     }));
   });
 
