@@ -1193,6 +1193,43 @@ export async function listContextMapViews(actor: AppActor, workspaceId: string) 
   });
 }
 
+export const DEFAULT_CONTEXT_GRAPH_STALE_AFTER_DAYS = 45;
+
+export async function markStaleContextGraphFacts(actor: AppActor, params: {
+  workspaceId: string;
+  staleAfterDays?: number;
+  now?: Date;
+}) {
+  await requireGraphApprove(actor, params.workspaceId);
+  const staleAfterDays = Math.max(1, Math.floor(params.staleAfterDays ?? DEFAULT_CONTEXT_GRAPH_STALE_AFTER_DAYS));
+  const now = params.now ?? new Date();
+  const cutoff = new Date(now.getTime() - staleAfterDays * 24 * 60 * 60 * 1000);
+  const staleWhere = {
+    workspaceId: params.workspaceId,
+    status: "approved",
+    OR: [
+      { lastVerifiedAt: { lt: cutoff } },
+      { lastVerifiedAt: null, updatedAt: { lt: cutoff } },
+    ],
+  };
+
+  return prisma.$transaction(async (tx) => {
+    const objects = await tx.contextGraphObject.updateMany({
+      where: staleWhere,
+      data: { status: "stale" },
+    });
+    const relationships = await tx.contextGraphRelationship.updateMany({
+      where: staleWhere,
+      data: { status: "stale" },
+    });
+    return {
+      staleObjects: objects.count,
+      staleRelationships: relationships.count,
+      cutoff,
+    };
+  });
+}
+
 export async function getContextMapData(actor: AppActor, params: {
   workspaceId: string;
   mapViewId?: string | null;
