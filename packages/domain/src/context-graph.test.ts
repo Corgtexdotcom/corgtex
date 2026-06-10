@@ -1250,7 +1250,7 @@ describe("context graph domain", () => {
           defaultMapKey: "org-structure",
           evidenceBacked: true,
           objectTypes: ["Team", "Role", "Person"],
-          relationshipTypes: ["part_of", "member_of", "reports_to", "owns"],
+          relationshipTypes: ["part_of", "member_of", "reports_to", "owns", "assigned_to"],
         }),
       }),
     }));
@@ -1270,10 +1270,78 @@ describe("context graph domain", () => {
     }));
   });
 
+  it("refreshes drifted master default view queries to the current built-in config", async () => {
+    prismaMock.contextMapView.findFirst.mockReset();
+    prismaMock.contextMapView.findFirst
+      .mockResolvedValueOnce({
+        id: "process-master",
+        workspaceId: "ws-1",
+        name: "Critical path process map",
+        viewType: "process",
+        query: {
+          mode: "criticalPath",
+          defaultMapKey: "critical-path",
+          evidenceBacked: true,
+          objectTypes: ["Process", "ProcessStep", "Decision", "Task", "Risk", "Metric", "Question", "Hypothesis", "Tool", "Team", "Role", "Meeting"],
+          relationshipTypes: ["part_of", "depends_on", "blocks", "owns", "assigned_to", "supports", "uses", "created_in", "decided_in", "needs_approval_from"],
+        },
+        createdByUserId: null,
+      })
+      .mockResolvedValueOnce({
+        id: "custom-org-master",
+        workspaceId: "ws-1",
+        name: "Imported org map",
+        viewType: "org",
+        query: { objectIds: ["object-1"] },
+        createdByUserId: null,
+      })
+      .mockResolvedValueOnce({
+        id: "agent-master",
+        workspaceId: "ws-1",
+        name: "Agent governance map",
+        viewType: "agent",
+        query: {
+          mode: "agentGovernance",
+          defaultMapKey: "agent-governance",
+          evidenceBacked: true,
+          objectTypes: ["Agent", "Policy", "Tool", "Meeting", "Document", "Task", "Decision", "Risk", "Evidence"],
+          relationshipTypes: ["input_to", "output_of", "uses", "supports", "needs_approval_from", "created_in", "has_evidence", "blocks"],
+        },
+        createdByUserId: null,
+      });
+    prismaMock.contextMapView.update.mockResolvedValueOnce({
+      id: "process-master",
+      workspaceId: "ws-1",
+      name: "Critical path process map",
+      viewType: "process",
+      query: {},
+      createdByUserId: null,
+    });
+    prismaMock.contextMapView.findMany.mockResolvedValueOnce([
+      { id: "process-master", viewType: "process", createdByUserId: null },
+      { id: "custom-org-master", viewType: "org", createdByUserId: null },
+      { id: "agent-master", viewType: "agent", createdByUserId: null },
+    ]);
+
+    await expect(listContextMapViews(actor, "ws-1")).resolves.toHaveLength(3);
+
+    expect(prismaMock.contextMapView.create).not.toHaveBeenCalled();
+    expect(prismaMock.contextMapView.update).toHaveBeenCalledTimes(1);
+    expect(prismaMock.contextMapView.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "process-master" },
+      data: {
+        query: expect.objectContaining({
+          defaultMapKey: "critical-path",
+          objectTypes: expect.arrayContaining(["Goal"]),
+        }),
+      },
+    }));
+  });
+
   it("exposes context map schema and example import payloads for external agents", () => {
     const schema = getContextGraphMapSchema();
 
-    expect(schema.objectTypes).toEqual(expect.arrayContaining(["Team", "Agent", "Evidence"]));
+    expect(schema.objectTypes).toEqual(expect.arrayContaining(["Team", "Agent", "Evidence", "Goal"]));
     expect(schema.relationshipTypes).toEqual(expect.arrayContaining(["owns", "depends_on", "has_evidence"]));
     expect(schema.defaultMaps.map((map) => map.key)).toEqual(["critical-path", "org-structure", "agent-governance"]);
     expect(schema.evidenceRefFormat).toEqual(expect.objectContaining({
@@ -1326,6 +1394,20 @@ describe("context graph domain", () => {
         query: {},
         createdByUserId: null,
       });
+    prismaMock.contextMapView.update.mockResolvedValueOnce({
+      id: "process-master",
+      workspaceId: "ws-1",
+      name: "Critical path process map",
+      viewType: "process",
+      query: {
+        mode: "criticalPath",
+        defaultMapKey: "critical-path",
+        evidenceBacked: true,
+        objectTypes: ["Goal", "Process", "ProcessStep", "Decision", "Task", "Risk", "Metric", "Question", "Hypothesis", "Tool", "Team", "Role", "Meeting"],
+        relationshipTypes: ["part_of", "depends_on", "blocks", "owns", "assigned_to", "supports", "uses", "created_in", "decided_in", "needs_approval_from"],
+      },
+      createdByUserId: null,
+    });
     prismaMock.contextGraphObject.findMany.mockResolvedValueOnce([]);
     prismaMock.contextGraphRelationship.findMany.mockResolvedValueOnce([]);
     prismaMock.contextMapView.findMany.mockResolvedValueOnce([]);

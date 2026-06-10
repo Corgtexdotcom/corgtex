@@ -278,6 +278,48 @@ describe("members domain", () => {
     });
   });
 
+  it("updateMember emits a member lifecycle outbox event", async () => {
+    prismaMock.member.findUnique.mockResolvedValue({
+      id: "member-1",
+      workspaceId: "workspace-1",
+      userId: "user-1",
+      role: "CONTRIBUTOR",
+      isActive: true,
+      user: {
+        id: "user-1",
+        email: "user@example.com",
+        displayName: "User",
+        ssoIdentities: [],
+        _count: { memberships: 1 },
+      },
+    });
+    prismaMock.member.update.mockResolvedValue({
+      id: "member-1",
+      role: "CONTRIBUTOR",
+      isActive: false,
+      user: { id: "user-1", email: "user@example.com", displayName: "User" },
+    });
+
+    const { updateMember } = await import("./members");
+    await updateMember(actor, {
+      workspaceId: "workspace-1",
+      memberId: "member-1",
+      isActive: false,
+    });
+
+    expect(prismaMock.event.createMany).toHaveBeenCalledWith({
+      data: [
+        expect.objectContaining({
+          workspaceId: "workspace-1",
+          type: "member.deactivated",
+          aggregateType: "Member",
+          aggregateId: "member-1",
+          payload: expect.objectContaining({ memberId: "member-1" }),
+        }),
+      ],
+    });
+  });
+
   it("updateMember rejects a missing member", async () => {
     prismaMock.member.findUnique.mockResolvedValue(null);
 
