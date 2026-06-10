@@ -15,6 +15,8 @@ const COMPLETE_ENV = {
   ENCRYPTION_KEY: "encryption-key",
   DATABASE_URL: "postgres://example",
   REDIS_URL: "rediss://example",
+  SMOKE_EMAIL_CAPTURE_SECRET: "capture-secret",
+  SMOKE_EMAIL_CAPTURE_ALLOWED_DOMAINS: "selfserve.corgtex.com",
   SELF_SERVE_REGISTRY_SYNC_SECRET: "registry-secret",
   RESEND_API_KEY: "resend-key",
   EMAIL_FROM: "Corgtex <onboarding@corgtex.com>",

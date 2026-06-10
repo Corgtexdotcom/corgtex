@@ -41,6 +41,8 @@ Required GitHub environment variables:
 - `AZURE_SELFSERVE_STAGING_OPENAI_BASE_URL`
 - `AZURE_SELFSERVE_STAGING_SMOKE_EMAIL_DOMAIN` when browser smoke is enabled
 
+The `smoke_email_capture_allowed_domains` workflow input must include `AZURE_SELFSERVE_STAGING_SMOKE_EMAIL_DOMAIN`. The default is `selfserve-staging.corgtex.com`, which is intended only for smoke-only setup email capture and does not require public mail delivery.
+
 The Azure identity used by GitHub OIDC needs enough permission to create the resource group resources and write role assignments for the managed identity. In practice that means `Contributor` plus `User Access Administrator` at the target scope, or `Owner` for the staging resource group/subscription scope. Key Vault uses Azure RBAC, so secret population remains a manual gate before `deployContainerApps=true`.
 
 Suggested run order:
@@ -90,6 +92,7 @@ Do not remove or replace existing provider callbacks for `app.corgtex.com` durin
 - Keep DNS manual until the `selfserve-staging.corgtex.com` or `selfserve.corgtex.com` record is approved and configured through the DNS provider.
 - Confirm the Container Apps custom domain has issued TLS before provider callback tests are run.
 - Confirm `APP_URL`, `NEXT_PUBLIC_APP_URL`, `MCP_PUBLIC_URL`, and `MEETING_RECORDER_PUBLIC_BASE_URL` all describe the Azure runtime, not the Railway production app.
+- Confirm `SMOKE_EMAIL_CAPTURE_ALLOWED_DOMAINS` contains the staging smoke email domain before enabling browser smoke.
 
 ## Key Vault secrets
 

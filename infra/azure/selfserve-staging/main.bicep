@@ -150,6 +150,9 @@ param agentApiKeySecretName string = 'agent-api-key'
 @description('Key Vault secret name containing SMOKE_EMAIL_CAPTURE_SECRET.')
 param smokeEmailCaptureSecretName string = 'smoke-email-capture-secret'
 
+@description('Comma-separated email domains allowed to use smoke-only setup email capture.')
+param smokeEmailCaptureAllowedDomains string = 'selfserve-staging.corgtex.com'
+
 @description('Key Vault secret name containing SELF_SERVE_REGISTRY_SYNC_SECRET.')
 param selfServeRegistrySyncSecretName string = 'self-serve-registry-sync-secret'
 
@@ -254,6 +257,7 @@ var commonRuntimeEnv = concat([
   { name: 'ENCRYPTION_KEY', secretRef: 'encryption-key' }
   { name: 'AGENT_API_KEY', secretRef: 'agent-api-key' }
   { name: 'SMOKE_EMAIL_CAPTURE_SECRET', secretRef: 'smoke-email-capture-secret' }
+  { name: 'SMOKE_EMAIL_CAPTURE_ALLOWED_DOMAINS', value: smokeEmailCaptureAllowedDomains }
   { name: 'SELF_SERVE_REGISTRY_SYNC_SECRET', secretRef: 'self-serve-registry-sync-secret' }
   { name: 'STORAGE_PROVIDER', value: 'azure_blob' }
   { name: 'AZURE_STORAGE_AUTH_MODE', value: 'managed_identity' }
