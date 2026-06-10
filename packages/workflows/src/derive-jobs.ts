@@ -393,6 +393,23 @@ export function deriveJobsForEvent(event: {
     }
   }
 
+  if (
+    event.type === "member.created"
+    || event.type === "member.updated"
+    || event.type === "member.deactivated"
+    || event.type === "member.reactivated"
+    || event.type === "role.assigned"
+    || event.type === "role.unassigned"
+  ) {
+    const payload = event.payload as { memberId?: string };
+    pushContextGraphSync("MEMBER", payload.memberId);
+  }
+
+  if (event.type === "goal.created" || event.type === "goal.updated") {
+    const payload = event.payload as { goalId?: string };
+    pushContextGraphSync("GOAL", payload.goalId);
+  }
+
   if (event.type === "checkin.response_received") {
     const payload = event.payload as { checkInId?: string; memberId?: string };
     if (payload.memberId && event.workspaceId) {

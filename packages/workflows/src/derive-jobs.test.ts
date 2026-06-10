@@ -71,4 +71,69 @@ describe("deriveJobsForEvent", () => {
       },
     ]);
   });
+
+  it("derives member context graph sync jobs for member lifecycle events", () => {
+    for (const type of ["member.created", "member.updated", "member.deactivated", "member.reactivated"]) {
+      const jobs = deriveJobsForEvent({
+        id: `event-${type}`,
+        type,
+        workspaceId: "ws-1",
+        payload: { memberId: "member-1" },
+      });
+
+      expect(jobs).toEqual([
+        {
+          workspaceId: "ws-1",
+          eventId: `event-${type}`,
+          type: "context-graph.sync",
+          payload: { sourceType: "MEMBER", sourceId: "member-1" },
+          dedupeKey: `event-${type}:context-graph-sync:MEMBER:member-1`,
+          dependsOnDedupeKey: undefined,
+        },
+      ]);
+    }
+  });
+
+  it("derives member context graph sync jobs for role assignment changes", () => {
+    const assigned = deriveJobsForEvent({
+      id: "event-assign-1",
+      type: "role.assigned",
+      workspaceId: "ws-1",
+      payload: { roleId: "role-1", memberId: "member-1" },
+    });
+    expect(assigned).toContainEqual(expect.objectContaining({
+      type: "context-graph.sync",
+      payload: { sourceType: "MEMBER", sourceId: "member-1" },
+    }));
+
+    const unassigned = deriveJobsForEvent({
+      id: "event-unassign-1",
+      type: "role.unassigned",
+      workspaceId: "ws-1",
+      payload: { roleId: "role-1", memberId: "member-1", assignmentId: "assignment-1" },
+    });
+    expect(unassigned).toContainEqual(expect.objectContaining({
+      type: "context-graph.sync",
+      payload: { sourceType: "MEMBER", sourceId: "member-1" },
+    }));
+  });
+
+  it("derives goal context graph sync jobs for goal events", () => {
+    for (const type of ["goal.created", "goal.updated"]) {
+      const jobs = deriveJobsForEvent({
+        id: `event-${type}`,
+        type,
+        workspaceId: "ws-1",
+        payload: { goalId: "goal-1", fields: ["title"] },
+      });
+
+      expect(jobs).toEqual([
+        expect.objectContaining({
+          type: "context-graph.sync",
+          payload: { sourceType: "GOAL", sourceId: "goal-1" },
+          dedupeKey: `event-${type}:context-graph-sync:GOAL:goal-1`,
+        }),
+      ]);
+    }
+  });
 });

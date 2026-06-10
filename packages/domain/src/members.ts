@@ -579,6 +579,19 @@ export async function updateMember(actor: AppActor, params: {
       },
     });
 
+    await appendEvents(tx, [
+      {
+        workspaceId: params.workspaceId,
+        type: action,
+        aggregateType: "Member",
+        aggregateId: updated.id,
+        payload: {
+          memberId: updated.id,
+          fields,
+        },
+      },
+    ]);
+
     return { ...updated, setupToken };
   });
 }

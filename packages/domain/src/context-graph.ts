@@ -15,6 +15,7 @@ export const CONTEXT_GRAPH_OBJECT_TYPES = [
   "Process",
   "ProcessStep",
   "Project",
+  "Goal",
   "Task",
   "Decision",
   "Document",
@@ -192,7 +193,7 @@ const DEFAULT_CONTEXT_MAP_VIEW_CONFIGS: Array<{
       mode: "criticalPath",
       defaultMapKey: "critical-path",
       evidenceBacked: true,
-      objectTypes: ["Process", "ProcessStep", "Decision", "Task", "Risk", "Metric", "Question", "Hypothesis", "Tool", "Team", "Role", "Meeting"],
+      objectTypes: ["Goal", "Process", "ProcessStep", "Decision", "Task", "Risk", "Metric", "Question", "Hypothesis", "Tool", "Team", "Role", "Meeting"],
       relationshipTypes: ["part_of", "depends_on", "blocks", "owns", "assigned_to", "supports", "uses", "created_in", "decided_in", "needs_approval_from"],
     },
   },
@@ -207,7 +208,7 @@ const DEFAULT_CONTEXT_MAP_VIEW_CONFIGS: Array<{
       defaultMapKey: "org-structure",
       evidenceBacked: true,
       objectTypes: ["Team", "Role", "Person"],
-      relationshipTypes: ["part_of", "member_of", "reports_to", "owns"],
+      relationshipTypes: ["part_of", "member_of", "reports_to", "owns", "assigned_to"],
     },
   },
   {
@@ -1134,6 +1135,10 @@ export async function attachContextGraphEvidence(actor: AppActor, params: Contex
   return prisma.$transaction(async (tx) => attachEvidenceWithTx(tx, params.workspaceId, params, new Map(), new Map()));
 }
 
+function sameStringArrays(left: string[], right: string[]) {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
 async function ensureDefaultContextMapViewsForWorkspace(workspaceId: string) {
   const views = [];
   for (const config of DEFAULT_CONTEXT_MAP_VIEW_CONFIGS) {
@@ -1142,6 +1147,18 @@ async function ensureDefaultContextMapViewsForWorkspace(workspaceId: string) {
       orderBy: { createdAt: "asc" },
     });
     if (existing) {
+      const configQuery = config.query as Prisma.JsonValue;
+      const queryDrifted = stringProperty(existing.query, "defaultMapKey") === config.key && (
+        !sameStringArrays(stringArrayFromQuery(existing.query, "objectTypes"), stringArrayFromQuery(configQuery, "objectTypes"))
+        || !sameStringArrays(stringArrayFromQuery(existing.query, "relationshipTypes"), stringArrayFromQuery(configQuery, "relationshipTypes"))
+      );
+      if (queryDrifted) {
+        views.push(await prisma.contextMapView.update({
+          where: { id: existing.id },
+          data: { query: config.query },
+        }));
+        continue;
+      }
       views.push(existing);
       continue;
     }
