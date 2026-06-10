@@ -74,6 +74,7 @@ The template references these Key Vault secret names by default:
 - `encryption-key`
 - `agent-api-key`
 - `smoke-email-capture-secret`
+- `self-serve-registry-sync-secret`
 - `model-price-overrides-json`
 - `stripe-secret-key`
 - `stripe-webhook-secret`
