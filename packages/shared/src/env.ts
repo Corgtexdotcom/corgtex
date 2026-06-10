@@ -112,6 +112,7 @@ type Env = {
   readonly SMOKE_EMAIL_CAPTURE_SECRET: string | undefined;
   readonly SMOKE_EMAIL_CAPTURE_ALLOWED_DOMAINS: string | undefined;
   readonly SMOKE_EMAIL_CAPTURE_TTL_MINUTES: number;
+  readonly SELF_SERVE_REGISTRY_SYNC_SECRET: string | undefined;
   readonly PROCUREMENT_NOTIFY_EMAIL: string | undefined;
   readonly SENTRY_DSN: string | undefined;
   readonly ENCRYPTION_KEY: string | undefined;
@@ -285,6 +286,9 @@ export const env: Env = {
   },
   get SMOKE_EMAIL_CAPTURE_TTL_MINUTES() {
     return numberFromEnv("SMOKE_EMAIL_CAPTURE_TTL_MINUTES", 30);
+  },
+  get SELF_SERVE_REGISTRY_SYNC_SECRET() {
+    return optional("SELF_SERVE_REGISTRY_SYNC_SECRET");
   },
   get PROCUREMENT_NOTIFY_EMAIL() {
     return optional("PROCUREMENT_NOTIFY_EMAIL");

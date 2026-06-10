@@ -7,6 +7,7 @@ const { prismaMock, sharedEnv } = vi.hoisted(() => ({
     SMOKE_EMAIL_CAPTURE_SECRET: "capture-secret",
     SMOKE_EMAIL_CAPTURE_ALLOWED_DOMAINS: "smoke.example",
     SMOKE_EMAIL_CAPTURE_TTL_MINUTES: 15,
+    SELF_SERVE_REGISTRY_SYNC_SECRET: "sync-secret",
     SESSION_LAST_SEEN_WRITE_INTERVAL_MS: 5 * 60 * 1000,
   },
   prismaMock: {
@@ -34,6 +35,9 @@ const { prismaMock, sharedEnv } = vi.hoisted(() => ({
       findFirst: vi.fn(),
       findMany: vi.fn(),
       findUnique: vi.fn(),
+    },
+    customerDeploymentEvent: {
+      create: vi.fn(),
     },
     selfServeSupportSession: {
       create: vi.fn(),
@@ -99,6 +103,7 @@ describe("self-serve ops domain", () => {
     sharedEnv.SMOKE_EMAIL_CAPTURE_SECRET = "capture-secret";
     sharedEnv.SMOKE_EMAIL_CAPTURE_ALLOWED_DOMAINS = "smoke.example";
     sharedEnv.SMOKE_EMAIL_CAPTURE_TTL_MINUTES = 15;
+    sharedEnv.SELF_SERVE_REGISTRY_SYNC_SECRET = "sync-secret";
     prismaMock.selfServeEmailCapture.create.mockResolvedValue({ id: "capture-1" });
     prismaMock.selfServeEmailCapture.update.mockResolvedValue({});
     prismaMock.selfServeSmokeRun.upsert.mockResolvedValue({ id: "run-row-1" });
@@ -106,6 +111,8 @@ describe("self-serve ops domain", () => {
     prismaMock.customerDeploymentAccess.findUnique.mockResolvedValue(null);
     prismaMock.customerDeployment.findFirst.mockResolvedValue(null);
     prismaMock.customerDeployment.findMany.mockResolvedValue([]);
+    prismaMock.customerDeployment.findUnique.mockResolvedValue(null);
+    prismaMock.customerDeploymentEvent.create.mockResolvedValue({ id: "registry-event-1", createdAt: new Date("2026-06-09T12:00:00.000Z") });
     prismaMock.procurementTrial.findFirst.mockResolvedValue(null);
     prismaMock.procurementTrial.findMany.mockResolvedValue([]);
     prismaMock.selfServeEmailCapture.findMany.mockResolvedValue([]);
@@ -325,6 +332,200 @@ describe("self-serve ops domain", () => {
         workspaceId: { not: null },
       }),
     }));
+  });
+
+  it("signs registry sync payloads with timestamp-bound HMAC signatures", async () => {
+    const {
+      signSelfServeRegistrySyncPayload,
+      verifySelfServeRegistrySyncSignature,
+    } = await import("./self-serve-ops");
+    const timestamp = "2026-06-09T12:00:00.000Z";
+    const body = JSON.stringify({ sourceId: "azure-selfserve", items: [] });
+    const signature = signSelfServeRegistrySyncPayload({
+      secret: "sync-secret",
+      timestamp,
+      body,
+    });
+
+    expect(() => verifySelfServeRegistrySyncSignature({
+      secret: "sync-secret",
+      timestamp,
+      body,
+      signature: `sha256=${signature}`,
+      now: new Date("2026-06-09T12:01:00.000Z"),
+    })).not.toThrow();
+    expect(() => verifySelfServeRegistrySyncSignature({
+      secret: "sync-secret",
+      timestamp,
+      body,
+      signature: "sha256=bad",
+      now: new Date("2026-06-09T12:01:00.000Z"),
+    })).toThrow(/signature is invalid/i);
+    expect(() => verifySelfServeRegistrySyncSignature({
+      secret: "sync-secret",
+      timestamp,
+      body,
+      signature: `sha256=${signature}`,
+      now: new Date("2026-06-09T12:10:01.000Z"),
+    })).toThrow(/stale/i);
+  });
+
+  it("builds sanitized registry sync payloads without private admin or billing identifiers", async () => {
+    const createdAt = new Date("2026-06-08T14:16:17.918Z");
+    const trialExpiresAt = new Date("2026-06-24T17:47:59.196Z");
+    prismaMock.procurementTrial.findMany.mockResolvedValueOnce([
+      {
+        id: "trial-1",
+        status: "ACTIVE",
+        riskStatus: "CLEAR",
+        riskReasons: [],
+        companyName: "Acme",
+        adminEmail: "admin@acme.example",
+        adminName: "Private Admin",
+        emailDomain: "acme.example",
+        trialExpiresAt,
+        createdAt,
+        updatedAt: createdAt,
+        suspendedAt: null,
+        suspensionReason: null,
+        claimEmailStatus: { sentTo: "admin@acme.example" },
+        workspaceId: "workspace-1",
+        workspace: {
+          id: "workspace-1",
+          name: "Acme",
+          slug: "acme",
+          plan: "TRIAL",
+          trialEndsAt: trialExpiresAt,
+          billingProfile: {
+            billingStatus: "trialing",
+            paymentMethodReady: false,
+            stripeCustomerId: "cus_private",
+            updatedAt: createdAt,
+          },
+          _count: {
+            members: 1,
+            roleOnboardingSessions: 2,
+            onboardingStates: 3,
+          },
+        },
+      },
+    ]);
+    prismaMock.customerDeployment.findMany.mockResolvedValue([
+      {
+        id: "deployment-1",
+        managedWorkspaceId: "workspace-1",
+        label: "Acme",
+        deploymentStatus: "ACTIVE",
+        supportConnectorStatus: "CONFIGURED",
+      },
+    ]);
+    prismaMock.selfServeSmokeRun.findMany.mockResolvedValue([
+      {
+        runId: "run-1",
+        procurementTrialId: "trial-1",
+        workspaceId: "workspace-1",
+        runKind: "browser",
+        status: "PASSED",
+        baseUrl: "https://selfserve.example",
+        siteUrl: "https://www.example",
+        error: null,
+        summary: {
+          email: "admin@acme.example",
+          steps: [{ name: "signup", status: "PASSED", private: "hidden" }],
+          warnings: [{ name: "billing skipped", response: { stripeCustomerId: "cus_private" } }],
+        },
+        startedAt: createdAt,
+        completedAt: createdAt,
+        createdAt,
+      },
+    ]);
+    prismaMock.selfServeEmailCapture.findMany.mockResolvedValue([
+      {
+        id: "capture-1",
+        procurementTrialId: "trial-1",
+        toEmail: "admin@acme.example",
+        runId: "run-1",
+        source: "member_setup",
+        expiresAt: trialExpiresAt,
+        consumedAt: null,
+        createdAt,
+      },
+    ]);
+    prismaMock.selfServeSupportSession.findMany.mockResolvedValue([
+      {
+        id: "support-session-1",
+        workspaceId: "workspace-1",
+        operationId: "operation-1",
+        targetMemberId: "member-private",
+        expiresAt: trialExpiresAt,
+        usedAt: null,
+        createdAt,
+      },
+    ]);
+    const { buildSelfServeRegistrySyncPayload } = await import("./self-serve-ops");
+
+    const payload = await buildSelfServeRegistrySyncPayload(operatorActor, {
+      sourceId: "azure-selfserve",
+      sourceUrl: "https://selfserve.example",
+      sourceDeploymentId: "deployment-azure",
+    });
+
+    expect(payload).toMatchObject({
+      schemaVersion: "self-serve-registry-sync-v1",
+      sourceId: "azure-selfserve",
+      sourceUrl: "https://selfserve.example",
+      sourceDeploymentId: "deployment-azure",
+      summary: { total: 1, activeTrials: 1 },
+      items: [
+        {
+          trialId: "trial-1",
+          companyName: "Acme",
+          workspace: { id: "workspace-1", counts: { members: 1 } },
+          billing: { billingStatus: "trialing", paymentMethodReady: false },
+          latestEmailCapture: { id: "capture-1", runId: "run-1" },
+          latestSupportSession: { id: "support-session-1", operationId: "operation-1" },
+        },
+      ],
+    });
+    const serialized = JSON.stringify(payload);
+    expect(serialized).not.toContain("admin@acme.example");
+    expect(serialized).not.toContain("Private Admin");
+    expect(serialized).not.toContain("cus_private");
+    expect(serialized).not.toContain("member-private");
+  });
+
+  it("records registry sync payloads as control-plane deployment events", async () => {
+    prismaMock.customerDeployment.findUnique.mockResolvedValue({ id: "deployment-azure" });
+    const { recordSelfServeRegistrySync } = await import("./self-serve-ops");
+
+    await expect(recordSelfServeRegistrySync({
+      schemaVersion: "self-serve-registry-sync-v1",
+      sourceId: "azure-selfserve",
+      sourceUrl: "https://selfserve.example",
+      sourceDeploymentId: "deployment-azure",
+      generatedAt: "2026-06-09T12:00:00.000Z",
+      summary: { total: 1 },
+      items: [{ trialId: "trial-1", status: "ACTIVE" }],
+    })).resolves.toMatchObject({
+      eventId: "registry-event-1",
+      sourceId: "azure-selfserve",
+      sourceDeploymentId: "deployment-azure",
+      itemCount: 1,
+    });
+
+    expect(prismaMock.customerDeploymentEvent.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        deploymentId: "deployment-azure",
+        action: "self_serve.registry_synced",
+        meta: expect.objectContaining({
+          sourceId: "azure-selfserve",
+          sourceDeploymentId: "deployment-azure",
+          items: [{ trialId: "trial-1", status: "ACTIVE" }],
+          receivedAt: expect.any(String),
+        }),
+      }),
+      select: { id: true, createdAt: true },
+    });
   });
 
   it("creates an audited support session and clones the target member role shape", async () => {

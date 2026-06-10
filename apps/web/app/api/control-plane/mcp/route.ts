@@ -18,6 +18,7 @@ import {
   getControlPlaneContextHealth,
   getControlPlaneDeployment,
   getControlPlaneIntegrationStatus,
+  getControlPlaneProviderStatus,
   getControlPlaneReleaseStatus,
   listControlPlaneCustomerSummaries,
   listControlPlaneCustomerMembers,
@@ -241,6 +242,11 @@ const tools = [
   {
     name: "get_customer_deployment_status",
     description: "Get one customer deployment, recent support operations, and customer-deployment events.",
+    inputSchema: { type: "object", properties: { deploymentId: { type: "string" } }, required: ["deploymentId"] },
+  },
+  {
+    name: "get_azure_provider_status",
+    description: "Get the read-only Azure deployment adapter status: health, release, logs link, latest smoke, registry sync, and cost summary.",
     inputSchema: { type: "object", properties: { deploymentId: { type: "string" } }, required: ["deploymentId"] },
   },
   {
@@ -573,6 +579,7 @@ const toolScopes: Record<string, string> = {
   finalize_client_migration: "control-plane:migrations:write",
   rollback_client_migration: "control-plane:migrations:write",
   get_customer_deployment_status: "control-plane:read",
+  get_azure_provider_status: "control-plane:read",
   list_customer_integrations: "control-plane:read",
   get_context_health: "control-plane:read",
   get_ai_governance_status: "control-plane:read",
@@ -856,6 +863,9 @@ export async function POST(request: NextRequest) {
     }
     if (name === "get_customer_deployment_status") {
       return rpcResult(id, textContent(await getControlPlaneDeployment(actor, String(args.deploymentId ?? ""))));
+    }
+    if (name === "get_azure_provider_status") {
+      return rpcResult(id, textContent(await getControlPlaneProviderStatus(actor, String(args.deploymentId ?? ""))));
     }
     if (name === "refresh_customer_deployment_snapshot") {
       return rpcResult(id, textContent(await fetchCustomerSupportSnapshot(actor, String(args.deploymentId ?? ""))));

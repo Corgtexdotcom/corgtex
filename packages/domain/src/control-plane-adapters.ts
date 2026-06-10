@@ -2,10 +2,12 @@ export type ControlPlaneAdapterKind =
   | "managed_workspace"
   | "remote_mcp"
   | "federated_control_plane"
+  | "azure_read_model"
   | "unconfigured";
 
 export type ControlPlaneAdapterInput = {
   id: string;
+  cloudProvider?: string | null;
   deploymentKind?: string | null;
   managedWorkspaceId?: string | null;
   supportMcpUrl?: string | null;
@@ -20,6 +22,7 @@ export type ControlPlaneAdapter = {
   canReadCentralWorkspace: boolean;
   canUseSupportConnector: boolean;
   canFederateControlPlane: boolean;
+  canReadProviderStatus: boolean;
   requiresConnectorSetup: boolean;
 };
 
@@ -28,6 +31,7 @@ export class ManagedWorkspaceAdapter implements ControlPlaneAdapter {
   readonly canReadCentralWorkspace = true;
   readonly canUseSupportConnector = false;
   readonly canFederateControlPlane = false;
+  readonly canReadProviderStatus = false;
   readonly requiresConnectorSetup = false;
 
   constructor(readonly deploymentId: string) {}
@@ -38,6 +42,7 @@ export class RemoteMcpAdapter implements ControlPlaneAdapter {
   readonly canReadCentralWorkspace = false;
   readonly canUseSupportConnector = true;
   readonly canFederateControlPlane = false;
+  readonly canReadProviderStatus = false;
 
   constructor(
     readonly deploymentId: string,
@@ -50,6 +55,7 @@ export class FederatedControlPlaneAdapter implements ControlPlaneAdapter {
   readonly canReadCentralWorkspace = false;
   readonly canUseSupportConnector = true;
   readonly canFederateControlPlane = true;
+  readonly canReadProviderStatus = false;
 
   constructor(
     readonly deploymentId: string,
@@ -57,11 +63,27 @@ export class FederatedControlPlaneAdapter implements ControlPlaneAdapter {
   ) {}
 }
 
+export class AzureReadModelAdapter implements ControlPlaneAdapter {
+  readonly kind = "azure_read_model";
+  readonly canUseSupportConnector: boolean;
+  readonly canFederateControlPlane = false;
+  readonly canReadProviderStatus = true;
+
+  constructor(
+    readonly deploymentId: string,
+    readonly requiresConnectorSetup: boolean,
+    readonly canReadCentralWorkspace: boolean,
+  ) {
+    this.canUseSupportConnector = !requiresConnectorSetup;
+  }
+}
+
 export class UnconfiguredControlPlaneAdapter implements ControlPlaneAdapter {
   readonly kind = "unconfigured";
   readonly canReadCentralWorkspace = false;
   readonly canUseSupportConnector = false;
   readonly canFederateControlPlane = false;
+  readonly canReadProviderStatus = false;
   readonly requiresConnectorSetup = true;
 
   constructor(readonly deploymentId: string) {}
@@ -77,11 +99,15 @@ function hasConnectorSignal(input: ControlPlaneAdapterInput) {
 }
 
 export function createControlPlaneAdapter(input: ControlPlaneAdapterInput): ControlPlaneAdapter {
+  const requiresConnectorSetup = !hasConnectorSignal(input);
+  if (input.cloudProvider === "AZURE") {
+    return new AzureReadModelAdapter(input.id, requiresConnectorSetup, Boolean(input.managedWorkspaceId));
+  }
+
   if (input.managedWorkspaceId) {
     return new ManagedWorkspaceAdapter(input.id);
   }
 
-  const requiresConnectorSetup = !hasConnectorSignal(input);
   if (input.deploymentKind === "CUSTOMER_CONTROL_PLANE") {
     return new FederatedControlPlaneAdapter(input.id, requiresConnectorSetup);
   }
