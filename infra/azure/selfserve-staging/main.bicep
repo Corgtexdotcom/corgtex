@@ -456,6 +456,7 @@ resource postgresAllowedExtensionsConfig 'Microsoft.DBforPostgreSQL/flexibleServ
   name: 'azure.extensions'
   properties: {
     value: postgresAllowedExtensions
+    source: 'user-override'
   }
 }
 
