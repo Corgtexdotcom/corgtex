@@ -46,6 +46,11 @@ on:
         required: true
         type: boolean
         default: false
+      smoke_email_capture_allowed_domains:
+        description: "Comma-separated domains allowed for smoke-only setup email capture."
+        required: true
+        type: string
+        default: selfserve-staging.corgtex.com
       app_url:
         description: "Configured Azure self-serve app origin."
         required: true
@@ -98,6 +103,7 @@ jobs:
       RUN_MIGRATION_JOB: ${{ inputs.run_migration_job }}
       RUN_HEALTH_SMOKE: ${{ inputs.run_health_smoke }}
       RUN_BROWSER_SMOKE: ${{ inputs.run_browser_smoke }}
+      SMOKE_EMAIL_CAPTURE_ALLOWED_DOMAINS: ${{ inputs.smoke_email_capture_allowed_domains }}
       APP_URL: ${{ inputs.app_url }}
       SITE_URL: ${{ inputs.site_url }}
       CONTROL_PLANE_URL: ${{ inputs.control_plane_url }}
@@ -138,6 +144,11 @@ jobs:
           if [[ "$RUN_BROWSER_SMOKE" == "true" ]]; then
             require SMOKE_EMAIL_CAPTURE_SECRET
             require SELF_SERVE_SMOKE_EMAIL_DOMAIN
+            allowed=",${SMOKE_EMAIL_CAPTURE_ALLOWED_DOMAINS//[[:space:]]/},"
+            if [[ -n "$SELF_SERVE_SMOKE_EMAIL_DOMAIN" && "$allowed" != *",$SELF_SERVE_SMOKE_EMAIL_DOMAIN,"* ]]; then
+              echo "::error::SELF_SERVE_SMOKE_EMAIL_DOMAIN must be included in smoke_email_capture_allowed_domains."
+              exit 1
+            fi
           fi
 
           if [[ "$RUN_MIGRATION_JOB" == "true" && "$OPERATION" != "deploy" ]]; then
@@ -242,6 +253,7 @@ jobs:
             "azureOpenAiBaseUrl=$AZURE_OPENAI_BASE_URL"
             "azureOpenAiAuthMode=$AZURE_OPENAI_AUTH_MODE"
             "allowAzureServicePostgresFirewall=$ALLOW_AZURE_SERVICE_POSTGRES_FIREWALL"
+            "smokeEmailCaptureAllowedDomains=$SMOKE_EMAIL_CAPTURE_ALLOWED_DOMAINS"
             "postgresAdminPassword=$POSTGRES_ADMIN_PASSWORD"
           )
           az deployment group what-if \
@@ -267,6 +279,7 @@ jobs:
             "azureOpenAiBaseUrl=$AZURE_OPENAI_BASE_URL"
             "azureOpenAiAuthMode=$AZURE_OPENAI_AUTH_MODE"
             "allowAzureServicePostgresFirewall=$ALLOW_AZURE_SERVICE_POSTGRES_FIREWALL"
+            "smokeEmailCaptureAllowedDomains=$SMOKE_EMAIL_CAPTURE_ALLOWED_DOMAINS"
             "postgresAdminPassword=$POSTGRES_ADMIN_PASSWORD"
           )
           az deployment group create \
