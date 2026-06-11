@@ -93,10 +93,16 @@ function releaseTargetFromPayload(value: unknown): ControlPlaneReleaseTarget | n
     return null;
   }
   return {
+    cloudProvider: target.cloudProvider === "AZURE" ? "AZURE" : "RAILWAY",
     releaseImageTag: target.releaseImageTag,
     releaseVersion: typeof target.releaseVersion === "string" ? target.releaseVersion : null,
+    releaseGitSha: typeof target.releaseGitSha === "string" ? target.releaseGitSha : null,
     webImage: target.webImage,
     workerImage: target.workerImage,
+    webRevision: typeof target.webRevision === "string" ? target.webRevision : null,
+    workerRevision: typeof target.workerRevision === "string" ? target.workerRevision : null,
+    migrationJobStatus: typeof target.migrationJobStatus === "string" ? target.migrationJobStatus : null,
+    healthStatus: typeof target.healthStatus === "string" ? target.healthStatus : null,
   };
 }
 

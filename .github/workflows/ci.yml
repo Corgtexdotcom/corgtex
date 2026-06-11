@@ -304,11 +304,11 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Wait for healthy deployment
+      - name: Wait for healthy self-serve deployment
         if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
         run: |
           for i in $(seq 1 30); do
-            if curl -sf https://app.corgtex.com/api/health > /dev/null 2>&1; then
+            if curl -sf https://selfserve.corgtex.com/api/health > /dev/null 2>&1; then
               echo "Health check passed on attempt $i"
               exit 0
             fi
@@ -317,6 +317,9 @@ jobs:
           done
           echo "Deployment health check timed out after 5 minutes"
           exit 1
+      - name: Confirm backup app health
+        if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
+        run: curl -sf https://app.corgtex.com/api/health > /dev/null
       
       - uses: actions/checkout@v5
         if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
@@ -357,6 +360,8 @@ jobs:
         if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
         env:
           DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
+      - run: node scripts/self-serve-production-readiness.mjs --base-url=https://selfserve.corgtex.com
+        if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
       - run: node scripts/railway-smoke.mjs https://app.corgtex.com ${{ secrets.ADMIN_EMAIL }} ${{ secrets.ADMIN_PASSWORD }}
         if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
         env:

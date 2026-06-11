@@ -1,9 +1,33 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getAgentIdentity, updateAgentIdentity, deactivateAgentIdentity } from "@corgtex/domain";
+import type { AgentMemberType } from "@prisma/client";
+import { AppError, getAgentIdentity, updateAgentIdentity, deactivateAgentIdentity } from "@corgtex/domain";
 import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
 
 type RouteParams = { params: Promise<{ workspaceId: string; agentId: string }> };
+
+function optionalString(value: unknown) {
+  if (value == null) return null;
+  const text = String(value).trim();
+  return text || null;
+}
+
+function optionalNonNegativeInteger(value: unknown, field: string) {
+  if (value == null || value === "") return null;
+  const numberValue = Number(value);
+  if (!Number.isInteger(numberValue) || numberValue < 0) {
+    throw new AppError(400, "VALIDATION_ERROR", `${field} must be a non-negative integer.`);
+  }
+  return numberValue;
+}
+
+function agentMemberType(value: unknown): AgentMemberType | undefined {
+  if (value == null || value === "") return undefined;
+  const normalized = String(value).trim().toUpperCase();
+  if (normalized === "AI_AGENT") return "INTERNAL";
+  if (normalized === "INTERNAL" || normalized === "EXTERNAL") return normalized;
+  throw new AppError(400, "VALIDATION_ERROR", "memberType must be INTERNAL or EXTERNAL.");
+}
 
 export async function GET(request: NextRequest, { params }: RouteParams) {
   try {
@@ -25,13 +49,13 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
       workspaceId,
       agentIdentityId: agentId,
       ...(body.displayName !== undefined && { displayName: String(body.displayName) }),
-      ...(body.avatarUrl !== undefined && { avatarUrl: body.avatarUrl != null ? String(body.avatarUrl) : null }),
-      ...(body.purposeMd !== undefined && { purposeMd: body.purposeMd != null ? String(body.purposeMd) : null }),
-      ...(body.memberType !== undefined && { memberType: body.memberType as any }),
-      ...(body.linkedCredentialId !== undefined && { linkedCredentialId: body.linkedCredentialId != null ? String(body.linkedCredentialId) : null }),
-      ...(body.maxSpendPerRunCents !== undefined && { maxSpendPerRunCents: body.maxSpendPerRunCents != null ? Number(body.maxSpendPerRunCents) : null }),
-      ...(body.maxRunsPerDay !== undefined && { maxRunsPerDay: body.maxRunsPerDay != null ? Number(body.maxRunsPerDay) : null }),
-      ...(body.maxRunsPerHour !== undefined && { maxRunsPerHour: body.maxRunsPerHour != null ? Number(body.maxRunsPerHour) : null }),
+      ...(body.avatarUrl !== undefined && { avatarUrl: optionalString(body.avatarUrl) }),
+      ...(body.purposeMd !== undefined && { purposeMd: optionalString(body.purposeMd) }),
+      ...(body.memberType !== undefined && { memberType: agentMemberType(body.memberType) }),
+      ...(body.linkedCredentialId !== undefined && { linkedCredentialId: optionalString(body.linkedCredentialId) }),
+      ...(body.maxSpendPerRunCents !== undefined && { maxSpendPerRunCents: optionalNonNegativeInteger(body.maxSpendPerRunCents, "maxSpendPerRunCents") }),
+      ...(body.maxRunsPerDay !== undefined && { maxRunsPerDay: optionalNonNegativeInteger(body.maxRunsPerDay, "maxRunsPerDay") }),
+      ...(body.maxRunsPerHour !== undefined && { maxRunsPerHour: optionalNonNegativeInteger(body.maxRunsPerHour, "maxRunsPerHour") }),
       ...(body.isActive !== undefined && { isActive: Boolean(body.isActive) }),
     });
     return NextResponse.json(updated);

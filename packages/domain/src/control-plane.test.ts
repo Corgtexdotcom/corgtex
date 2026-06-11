@@ -1974,6 +1974,65 @@ describe("control plane domain", () => {
     expect(filteredMatrix.items.map((row) => row.id)).toEqual(["remote-1"]);
   });
 
+  it("shows Azure self-serve support sessions as ready without an enterprise connector", async () => {
+    const { listControlPlaneMatrix } = await import("./control-plane");
+    const observedAt = new Date("2026-06-10T10:00:00.000Z");
+    prismaMock.customerAccount.findMany.mockResolvedValue([
+      {
+        id: "cust-selfserve",
+        slug: "selfserve",
+        displayName: "Corgtex Self-Serve",
+        status: "ACTIVE",
+        managementAuthority: "CORGTEX",
+        supportOwnerEmail: "support@corgtex.com",
+        notes: null,
+        primaryDeploymentId: "selfserve-1",
+        createdAt: observedAt,
+        updatedAt: observedAt,
+        fleetSnapshots: [],
+        deployments: [],
+        primaryDeployment: {
+          id: "selfserve-1",
+          label: "Corgtex Self-Serve",
+          url: "https://selfserve.corgtex.com",
+          customerSlug: "selfserve",
+          customerAccountId: "cust-selfserve",
+          cloudProvider: "AZURE",
+          supportOwnerEmail: "support@corgtex.com",
+          provisioningStatus: "active",
+          lastHealthStatus: "ok",
+          lastHealthCheck: observedAt,
+          lastHealthError: null,
+          releaseImageTag: "sha-new",
+          releaseVersion: "2026.06.10",
+          supportConnectorStatus: "not_configured",
+          supportCredentialEnc: null,
+          supportLastSyncError: null,
+          managedWorkspaceId: null,
+          managedWorkspace: null,
+          supportOperations: [],
+          fleetSnapshots: [],
+          _count: { supportOperations: 0, events: 0 },
+          createdAt: observedAt,
+          updatedAt: observedAt,
+        },
+      },
+    ] as any);
+    prismaMock.customerDeployment.findMany.mockResolvedValue([]);
+
+    const matrix = await listControlPlaneMatrix(operatorActor, {});
+    const row = matrix.items.find((item) => item.id === "selfserve-1");
+
+    expect(row).toMatchObject({
+      support: {
+        status: "ready",
+        mode: "remote",
+        detail: "Azure self-serve uses audited support sessions and provider read-model inspection.",
+      },
+    });
+    expect(row?.issues.map((issue) => issue.source)).not.toContain("support");
+  });
+
   it("builds a 100-client local fleet overview without remote connector calls", async () => {
     const { getControlPlaneFleetOverview } = await import("./control-plane");
     const observedAt = new Date("2026-06-01T10:00:00.000Z");
@@ -4102,6 +4161,63 @@ describe("control plane domain", () => {
     }));
   });
 
+  it("preflights Azure self-serve without requiring Railway project or service IDs", async () => {
+    vi.stubEnv("CONTROL_PLANE_AZURE_LATEST_ACR_WEB_IMAGE", "corgtexacr.azurecr.io/corgtex/web:sha-new");
+    vi.stubEnv("CONTROL_PLANE_AZURE_LATEST_ACR_WORKER_IMAGE", "corgtexacr.azurecr.io/corgtex/worker:sha-new");
+    vi.stubEnv("CONTROL_PLANE_AZURE_LATEST_RELEASE_GIT_SHA", "sha-new");
+    vi.stubEnv("CONTROL_PLANE_AZURE_LATEST_RELEASE_VERSION", "2026.06.10");
+    vi.stubEnv("CONTROL_PLANE_AZURE_LATEST_HEALTH_STATUS", "ok");
+    const { getControlPlaneDeployLatestPreflight } = await import("./control-plane");
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce({
+      id: "selfserve-1",
+      label: "Corgtex Self-Serve",
+      url: "https://selfserve.corgtex.com",
+      customerAccountId: "cust-selfserve",
+      customerSlug: "selfserve",
+      cloudProvider: "AZURE",
+      deploymentKind: "HOSTED",
+      deploymentStatus: "ACTIVE",
+      managedWorkspaceId: null,
+      managedWorkspace: null,
+      supportCredentialEnc: null,
+      provisioningStatus: "active",
+      releaseImageTag: "sha-old",
+      releaseVersion: "2026.06.01",
+      lastHealthStatus: "ok",
+      lastHealthCheck: new Date("2026-06-10T00:00:00.000Z"),
+      lastHealthError: null,
+      railwayProjectId: null,
+      railwayEnvironmentId: null,
+      railwayWebServiceId: null,
+      railwayWorkerServiceId: null,
+      providerResourceGroup: "rg-corgtex-selfserve-prod",
+      providerEnvironmentId: "cae-corgtex-selfserve",
+      providerWebServiceId: "ca-corgtex-selfserve-web",
+      providerWorkerServiceId: "ca-corgtex-selfserve-worker",
+    });
+
+    const preflight = await getControlPlaneDeployLatestPreflight(operatorActor, "selfserve-1");
+
+    expect(preflight.target).toMatchObject({
+      cloudProvider: "AZURE",
+      releaseImageTag: "sha-new",
+      releaseGitSha: "sha-new",
+      webImage: "corgtexacr.azurecr.io/corgtex/web:sha-new",
+      workerImage: "corgtexacr.azurecr.io/corgtex/worker:sha-new",
+    });
+    expect(preflight.eligible).toBe(false);
+    expect(preflight.checks).toContainEqual(expect.objectContaining({
+      key: "azure_target",
+      ok: true,
+    }));
+    expect(preflight.checks).toContainEqual(expect.objectContaining({
+      key: "azure_workflow_reconciliation",
+      ok: false,
+    }));
+    expect(preflight.checks.map((check) => check.key)).not.toContain("railway_target");
+    expect(preflight.blockers.join(" ")).not.toContain("Railway");
+  });
+
   it("clears the runtime release version variable when latest release has no version", async () => {
     vi.stubEnv("CONTROL_PLANE_LATEST_WEB_IMAGE", "ghcr.io/corgtex/web:new");
     vi.stubEnv("CONTROL_PLANE_LATEST_WORKER_IMAGE", "ghcr.io/corgtex/worker:new");
@@ -4311,6 +4427,99 @@ describe("control plane domain", () => {
       results: [
         { deploymentId: "inst-1", status: "queued" },
         { deploymentId: "inst-2", status: "skipped" },
+      ],
+    });
+  });
+
+  it("skips Azure self-serve and backup app rows during fleet-wide deploy-latest", async () => {
+    vi.stubEnv("CONTROL_PLANE_RAILWAY_LATEST_WEB_IMAGE", "ghcr.io/corgtex/web:new");
+    vi.stubEnv("CONTROL_PLANE_RAILWAY_LATEST_WORKER_IMAGE", "ghcr.io/corgtex/worker:new");
+    vi.stubEnv("CONTROL_PLANE_RAILWAY_LATEST_RELEASE_IMAGE_TAG", "release-new");
+    vi.stubEnv("CONTROL_PLANE_AZURE_LATEST_ACR_WEB_IMAGE", "corgtexacr.azurecr.io/corgtex/web:sha-new");
+    vi.stubEnv("CONTROL_PLANE_AZURE_LATEST_ACR_WORKER_IMAGE", "corgtexacr.azurecr.io/corgtex/worker:sha-new");
+    vi.stubEnv("CONTROL_PLANE_AZURE_LATEST_RELEASE_GIT_SHA", "sha-new");
+    vi.stubEnv("CONTROL_PLANE_AZURE_LATEST_HEALTH_STATUS", "ok");
+    const { enqueueControlPlaneDeployLatestRollout } = await import("./control-plane");
+    prismaMock.customerDeployment.findMany.mockResolvedValueOnce([
+      {
+        id: "enterprise-1",
+        label: "Enterprise Alpha",
+        url: "https://enterprise-alpha.example.com",
+        customerSlug: "enterprise-alpha",
+        customerAccountId: "cust-1",
+        cloudProvider: "RAILWAY",
+        deploymentStatus: "ACTIVE",
+        provisioningStatus: "active",
+        releaseImageTag: "release-old",
+        releaseVersion: null,
+        lastHealthStatus: "ok",
+        lastHealthCheck: new Date("2026-06-10T00:00:00.000Z"),
+        lastHealthError: null,
+        railwayProjectId: "project-1",
+        railwayEnvironmentId: "env-1",
+        railwayWebServiceId: "web-1",
+        railwayWorkerServiceId: "worker-1",
+      },
+      {
+        id: "selfserve-1",
+        label: "Corgtex Self-Serve",
+        url: "https://selfserve.corgtex.com",
+        customerSlug: "selfserve",
+        customerAccountId: "cust-2",
+        cloudProvider: "AZURE",
+        deploymentStatus: "ACTIVE",
+        provisioningStatus: "active",
+        releaseImageTag: "sha-old",
+        releaseVersion: null,
+        lastHealthStatus: "ok",
+        lastHealthCheck: new Date("2026-06-10T00:00:00.000Z"),
+        lastHealthError: null,
+        providerResourceGroup: "rg-corgtex-selfserve-prod",
+        providerEnvironmentId: "cae-corgtex-selfserve",
+        providerWebServiceId: "ca-corgtex-selfserve-web",
+        providerWorkerServiceId: "ca-corgtex-selfserve-worker",
+      },
+      {
+        id: "backup-1",
+        label: "Corgtex Internal",
+        url: "https://app.corgtex.com",
+        customerSlug: "corgtex-internal",
+        customerAccountId: "cust-3",
+        cloudProvider: "RAILWAY",
+        deploymentStatus: "ACTIVE",
+        provisioningStatus: "active",
+        releaseImageTag: "release-old",
+        releaseVersion: null,
+        lastHealthStatus: "ok",
+        lastHealthCheck: new Date("2026-06-10T00:00:00.000Z"),
+        lastHealthError: null,
+        railwayProjectId: "project-3",
+        railwayEnvironmentId: "env-3",
+        railwayWebServiceId: "web-3",
+        railwayWorkerServiceId: "worker-3",
+      },
+    ]);
+
+    const result = await enqueueControlPlaneDeployLatestRollout(operatorActor, {
+      allEligible: true,
+      reason: "Deploy latest to Railway enterprise customers.",
+    });
+
+    expect(prismaMock.workflowJob.createMany).toHaveBeenCalledTimes(1);
+    expect(prismaMock.workflowJob.createMany).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        payload: expect.objectContaining({
+          deploymentId: "enterprise-1",
+        }),
+      }),
+    }));
+    expect(result).toMatchObject({
+      requested: 3,
+      queuedJobs: 1,
+      results: [
+        { deploymentId: "enterprise-1", status: "queued" },
+        { deploymentId: "selfserve-1", status: "skipped" },
+        { deploymentId: "backup-1", status: "skipped" },
       ],
     });
   });
@@ -4693,7 +4902,7 @@ describe("control plane domain", () => {
         database: "up",
         schema: "ready",
         runtime: { redis: "configured", storage: "configured" },
-        release: { gitSha: "sha-new" },
+        release: { imageTag: "ghcr.io/corgtex/web:stale", gitSha: "sha-new" },
       }),
     })) as any;
 

@@ -220,6 +220,9 @@ jobs:
           echo "worker=${repo}/worker:${sha_tag}" >> "$GITHUB_OUTPUT"
           echo "web_image=${repo}/web:${sha_tag}" >> "$GITHUB_ENV"
           echo "worker_image=${repo}/worker:${sha_tag}" >> "$GITHUB_ENV"
+          echo "release_image_tag=${sha_tag}" >> "$GITHUB_ENV"
+          echo "release_git_sha=${GITHUB_SHA}" >> "$GITHUB_ENV"
+          echo "release_version=${GITHUB_REF_NAME}-${GITHUB_SHA:0:12}" >> "$GITHUB_ENV"
 
       - name: Build and push web image
         if: ${{ inputs.operation == 'deploy' && inputs.deploy_container_apps }}
@@ -273,6 +276,9 @@ jobs:
             "controlPlaneUrl=$CONTROL_PLANE_URL"
             "webImage=$web_image"
             "workerImage=$worker_image"
+            "releaseVersion=$release_version"
+            "releaseImageTag=$release_image_tag"
+            "releaseGitSha=$release_git_sha"
             "registryUsername=$REGISTRY_USERNAME"
             "azureOpenAiBaseUrl=$AZURE_OPENAI_BASE_URL"
             "azureOpenAiAuthMode=$AZURE_OPENAI_AUTH_MODE"
@@ -303,6 +309,9 @@ jobs:
             "controlPlaneUrl=$CONTROL_PLANE_URL"
             "webImage=$web_image"
             "workerImage=$worker_image"
+            "releaseVersion=$release_version"
+            "releaseImageTag=$release_image_tag"
+            "releaseGitSha=$release_git_sha"
             "registryUsername=$REGISTRY_USERNAME"
             "azureOpenAiBaseUrl=$AZURE_OPENAI_BASE_URL"
             "azureOpenAiAuthMode=$AZURE_OPENAI_AUTH_MODE"
