@@ -7,8 +7,16 @@ const { prismaMock } = vi.hoisted(() => ({
     $executeRaw: vi.fn(),
     action: {
       create: vi.fn(),
+      findMany: vi.fn(),
       findUnique: vi.fn(),
       update: vi.fn(),
+      count: vi.fn(),
+    },
+    document: {
+      findMany: vi.fn(),
+    },
+    workItemEvidence: {
+      createMany: vi.fn(),
     },
     proposal: {
       findFirst: vi.fn(),
@@ -108,6 +116,45 @@ describe("action domain lifecycle", () => {
     }));
     expect(recordAudit).not.toHaveBeenCalledWith(expect.anything(), actor, expect.objectContaining({
       action: "action.published",
+    }));
+  });
+
+  it("combines member filters with the existing privacy filter", async () => {
+    prismaMock.action.findMany.mockResolvedValueOnce([]);
+    prismaMock.action.count.mockResolvedValueOnce(0);
+
+    const { listActions } = await import("./actions");
+    await listActions(actor, "workspace-1", { memberId: "member-1", circleId: "circle-1" });
+
+    expect(prismaMock.action.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        workspaceId: "workspace-1",
+        circleId: "circle-1",
+        AND: [
+          {
+            OR: [
+              { isPrivate: false },
+              { isPrivate: true, status: "DRAFT", authorUserId: "user-1" },
+            ],
+          },
+          {
+            OR: [
+              { assigneeMemberId: "member-1" },
+              {
+                author: {
+                  memberships: {
+                    some: {
+                      id: "member-1",
+                      workspaceId: "workspace-1",
+                      isActive: true,
+                    },
+                  },
+                },
+              },
+            ],
+          },
+        ],
+      }),
     }));
   });
 
@@ -287,6 +334,97 @@ describe("action domain lifecycle", () => {
       where: { id: "action-1" },
       data: { title: "Follow up now", version: 2 },
     }));
+  });
+
+  it("requires a completion note when completing an action", async () => {
+    prismaMock.action.findUnique.mockResolvedValue({
+      id: "action-1",
+      workspaceId: "workspace-1",
+      authorUserId: "user-1",
+      title: "Follow up",
+      status: "OPEN",
+      version: 1,
+      isPrivate: false,
+      publishedAt: new Date("2026-06-01T00:00:00.000Z"),
+      archivedAt: null,
+    });
+
+    const { updateAction } = await import("./actions");
+    await expect(updateAction(actor, {
+      workspaceId: "workspace-1",
+      actionId: "action-1",
+      status: "COMPLETED",
+      completedVia: "   ",
+    })).rejects.toMatchObject({
+      status: 400,
+      code: "INVALID_INPUT",
+    });
+
+    expect(prismaMock.action.update).not.toHaveBeenCalled();
+  });
+
+  it("links completion evidence when completing an action", async () => {
+    prismaMock.action.findUnique.mockResolvedValue({
+      id: "action-1",
+      workspaceId: "workspace-1",
+      authorUserId: "user-1",
+      title: "Follow up",
+      status: "IN_PROGRESS",
+      version: 1,
+      completedVia: null,
+      isPrivate: false,
+      publishedAt: new Date("2026-06-01T00:00:00.000Z"),
+      archivedAt: null,
+    });
+    prismaMock.action.update.mockResolvedValue({
+      id: "action-1",
+      workspaceId: "workspace-1",
+      authorUserId: "user-1",
+      title: "Follow up",
+      status: "COMPLETED",
+      version: 1,
+      completedVia: "Delivered and checked.",
+    });
+    prismaMock.document.findMany.mockResolvedValue([{ id: "doc-1" }]);
+    prismaMock.workItemEvidence.createMany.mockResolvedValue({ count: 1 });
+
+    const { updateAction } = await import("./actions");
+    await expect(updateAction(actor, {
+      workspaceId: "workspace-1",
+      actionId: "action-1",
+      status: "COMPLETED",
+      completedVia: " Delivered and checked. ",
+      evidenceDocumentIds: ["doc-1", "doc-1"],
+    })).resolves.toMatchObject({
+      id: "action-1",
+      status: "COMPLETED",
+    });
+
+    expect(prismaMock.action.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "action-1" },
+      data: expect.objectContaining({
+        status: "COMPLETED",
+        completedVia: "Delivered and checked.",
+      }),
+    }));
+    expect(prismaMock.document.findMany).toHaveBeenCalledWith({
+      where: {
+        workspaceId: "workspace-1",
+        archivedAt: null,
+        id: { in: ["doc-1"] },
+      },
+      select: { id: true },
+    });
+    expect(prismaMock.workItemEvidence.createMany).toHaveBeenCalledWith({
+      data: [{
+        workspaceId: "workspace-1",
+        entityType: "Action",
+        entityId: "action-1",
+        documentId: "doc-1",
+        purpose: "completion_evidence",
+      }],
+      skipDuplicates: true,
+    });
   });
 
   it("blocks non-managers from editing another member's draft action", async () => {

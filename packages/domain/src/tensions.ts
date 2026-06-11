@@ -1,12 +1,13 @@
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
-import type { Prisma } from "@prisma/client";
+import type { Prisma, TensionStatus } from "@prisma/client";
 import { appendEvents } from "./events";
 import { actorUserIdForWorkspace, requireWorkspaceMembership } from "./auth";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { invariant } from "./errors";
 import { requireDraftManager } from "./draft-permissions";
 import { resolveWorkspaceProposalLink } from "./proposal-links";
+import { createWorkItemEvidenceLinks } from "./work-item-evidence";
 import {
   changedDataFields,
   pickJsonSnapshot,
@@ -21,6 +22,9 @@ export type ListTensionsOptions = {
   take?: number;
   skip?: number;
   archiveFilter?: ArchiveFilter;
+  status?: TensionStatus;
+  circleId?: string | null;
+  memberId?: string | null;
   openedFrom?: Date;
   openedTo?: Date;
   closedFrom?: Date;
@@ -49,6 +53,16 @@ function dateRangeWhere(from?: Date, to?: Date): Prisma.DateTimeNullableFilter |
   return Object.keys(filter).length > 0 ? filter : undefined;
 }
 
+function appendTensionWhereAnd(where: Prisma.TensionWhereInput, condition: Prisma.TensionWhereInput) {
+  const and = Array.isArray(where.AND) ? [...where.AND] : where.AND ? [where.AND] : [];
+  if (where.OR) {
+    and.push({ OR: where.OR });
+    delete where.OR;
+  }
+  and.push(condition);
+  where.AND = and;
+}
+
 export async function listTensions(actor: AppActor, workspaceId: string, opts?: ListTensionsOptions) {
   const take = opts?.take ?? 20;
   const skip = opts?.skip ?? 0;
@@ -60,8 +74,29 @@ export async function listTensions(actor: AppActor, workspaceId: string, opts?: 
   };
   const openedAt = dateRangeWhere(opts?.openedFrom, opts?.openedTo);
   const closedAt = dateRangeWhere(opts?.closedFrom, opts?.closedTo);
+  if (opts?.status) where.status = opts.status;
+  if (opts?.circleId) where.circleId = opts.circleId;
   if (openedAt) where.publishedAt = openedAt;
   if (closedAt) where.resolvedAt = closedAt;
+  if (opts?.memberId) {
+    appendTensionWhereAnd(where, {
+      OR: [
+        { assigneeMemberId: opts.memberId },
+        { raisedByMemberId: opts.memberId },
+        {
+          author: {
+            memberships: {
+              some: {
+                id: opts.memberId,
+                workspaceId,
+                isActive: true,
+              },
+            },
+          },
+        },
+      ],
+    });
+  }
 
   const [items, total] = await Promise.all([
     prisma.tension.findMany({
@@ -91,6 +126,12 @@ export async function listTensions(actor: AppActor, workspaceId: string, opts?: 
                 email: true,
               },
             },
+          },
+        },
+        circle: {
+          select: {
+            id: true,
+            name: true,
           },
         },
         upvotes: true,
@@ -219,9 +260,10 @@ export async function updateTension(actor: AppActor, params: {
   circleId?: string | null;
   assigneeMemberId?: string | null;
   raisedByMemberId?: string | null;
-  priority?: number;
-  isPrivate?: boolean;
-}) {
+	  priority?: number;
+	  isPrivate?: boolean;
+  evidenceDocumentIds?: string[] | null;
+	}) {
   const membership = await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
@@ -325,21 +367,31 @@ export async function updateTension(actor: AppActor, params: {
     const changedUpdateFields = changedDataFields(tension as unknown as Record<string, unknown>, data);
     if (changedUpdateFields.length === 0) return tension;
 
-    const updated = await tx.tension.update({
-      where: { id: params.tensionId },
-      data,
-    });
+	    const updated = await tx.tension.update({
+	      where: { id: params.tensionId },
+	      data,
+	    });
 
-    await tx.auditLog.create({
+    const evidenceDocumentIds = params.status === "RESOLVED"
+      ? await createWorkItemEvidenceLinks(tx, {
+        workspaceId: params.workspaceId,
+        entityType: "Tension",
+        entityId: updated.id,
+        documentIds: params.evidenceDocumentIds,
+        purpose: "resolution_evidence",
+      })
+      : [];
+
+	    await tx.auditLog.create({
       data: {
         workspaceId: params.workspaceId,
         actorUserId: actor.kind === "user" ? actor.user.id : null,
         action: "tension.updated",
         entityType: "Tension",
         entityId: updated.id,
-        meta: { fields: changedUpdateFields, version: updated.version },
-      },
-    });
+	        meta: { fields: changedUpdateFields, version: updated.version, evidenceDocumentIds },
+	      },
+	    });
 
     await appendEvents(tx, [
       {
@@ -348,10 +400,11 @@ export async function updateTension(actor: AppActor, params: {
         aggregateType: "Tension",
         aggregateId: updated.id,
         payload: {
-          tensionId: updated.id,
-          fields: changedUpdateFields,
-        },
-      },
+	          tensionId: updated.id,
+	          fields: changedUpdateFields,
+          evidenceDocumentIds,
+	        },
+	      },
     ]);
 
     return updated;

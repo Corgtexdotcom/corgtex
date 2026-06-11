@@ -1808,6 +1808,63 @@ details[open] > .settings-disclosure-summary::before {
   /* ── UI Spacing and Alignment (Newsroom) ── */
   .nr-filter-bar { @apply flex flex-nowrap gap-3 mb-6 overflow-x-auto pb-1; }
   .nr-filter-bar-wrap { @apply flex-wrap overflow-visible; }
+
+  .nr-filter-panel {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    align-items: flex-end;
+    margin-bottom: 24px;
+  }
+
+  .nr-filter-panel label {
+    display: grid;
+    gap: 4px;
+    min-width: min(180px, 100%);
+  }
+
+  .nr-view-toggle {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 16px;
+  }
+
+  .nr-kanban {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 16px;
+    align-items: start;
+  }
+
+  .nr-kanban-column {
+    min-width: 0;
+  }
+
+  .nr-kanban-heading {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 10px;
+    color: var(--muted);
+    font-size: 0.82rem;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+
+  .nr-kanban-card {
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 14px;
+    margin-bottom: 12px;
+    background: var(--surface);
+  }
+
+  .nr-evidence-list {
+    display: grid;
+    gap: 8px;
+    margin-top: 12px;
+  }
   .nr-filter-item { @apply bg-surface-strong text-muted no-underline font-semibold text-[0.85rem] tracking-normal px-3 py-[6px] rounded-full border border-line shadow-none transition-all hover:bg-bg-alt hover:text-text hover:border-text; }
   .nr-filter-active { @apply bg-accent !text-accent-fg border-accent; }
   .nr-filter-active:hover { @apply bg-accent !text-accent-fg border-accent; }

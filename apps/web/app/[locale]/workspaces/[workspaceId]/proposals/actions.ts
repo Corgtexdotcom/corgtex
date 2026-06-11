@@ -22,6 +22,7 @@ import {
   postDeliberationEntry,
   resolveDeliberationEntry
 } from "@corgtex/domain";
+import { uploadWorkItemEvidenceDocument } from "../work-item-evidence-upload";
 
 function asStringArray(formData: FormData, key: string) {
   return formData.getAll(key).map((value) => String(value).trim()).filter(Boolean);
@@ -125,11 +126,20 @@ export async function resolveProposalAction(formData: FormData) {
 
   const actor = await requirePageActor();
   const workspaceId = asString(formData, "workspaceId");
+  const proposalId = asString(formData, "proposalId");
+  const evidenceDocumentIds = await uploadWorkItemEvidenceDocument(actor, {
+    workspaceId,
+    formData,
+    entityType: "Proposal",
+    entityId: proposalId,
+    purpose: "resolution_evidence",
+  });
   await resolveProposal(actor, {
     workspaceId,
-    proposalId: asString(formData, "proposalId"),
+    proposalId,
     outcome: asString(formData, "outcome") as "ADOPTED" | "NOT_ADOPTED" | "WITHDRAWN",
     decisionMd: asString(formData, "decisionMd"),
+    evidenceDocumentIds,
   });
   refresh(workspaceId);
 }

@@ -1,5 +1,6 @@
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
+import type { ActionStatus, Prisma } from "@prisma/client";
 import { appendEvents } from "./events";
 import { actorUserIdForWorkspace, requireWorkspaceMembership } from "./auth";
 import { recordAudit } from "./audit-trail";
@@ -7,6 +8,7 @@ import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from
 import { invariant } from "./errors";
 import { requireDraftManager } from "./draft-permissions";
 import { resolveWorkspaceProposalLink } from "./proposal-links";
+import { createWorkItemEvidenceLinks } from "./work-item-evidence";
 import {
   changedDataFields,
   pickJsonSnapshot,
@@ -17,11 +19,76 @@ import {
 
 import { privacyFilter } from "./privacy";
 
-export async function listActions(actor: AppActor, workspaceId: string, opts?: { take?: number; skip?: number; archiveFilter?: ArchiveFilter }) {
+export type ListActionsOptions = {
+  take?: number;
+  skip?: number;
+  archiveFilter?: ArchiveFilter;
+  status?: ActionStatus;
+  circleId?: string | null;
+  memberId?: string | null;
+  createdFrom?: Date;
+  createdTo?: Date;
+  dueFrom?: Date;
+  dueTo?: Date;
+};
+
+function dateRangeWhere(from?: Date, to?: Date): Prisma.DateTimeFilter<"Action"> | undefined {
+  const filter: Prisma.DateTimeFilter<"Action"> = {};
+  if (from) filter.gte = from;
+  if (to) filter.lte = to;
+  return Object.keys(filter).length > 0 ? filter : undefined;
+}
+
+function nullableDateRangeWhere(from?: Date, to?: Date): Prisma.DateTimeNullableFilter<"Action"> | undefined {
+  const filter: Prisma.DateTimeNullableFilter<"Action"> = {};
+  if (from) filter.gte = from;
+  if (to) filter.lte = to;
+  return Object.keys(filter).length > 0 ? filter : undefined;
+}
+
+function appendActionWhereAnd(where: Prisma.ActionWhereInput, condition: Prisma.ActionWhereInput) {
+  const and = Array.isArray(where.AND) ? [...where.AND] : where.AND ? [where.AND] : [];
+  if (where.OR) {
+    and.push({ OR: where.OR });
+    delete where.OR;
+  }
+  and.push(condition);
+  where.AND = and;
+}
+
+export async function listActions(actor: AppActor, workspaceId: string, opts?: ListActionsOptions) {
   const take = opts?.take ?? 20;
   const skip = opts?.skip ?? 0;
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
-  const where = { workspaceId, ...privacyFilter(actor, membership), ...archiveFilterWhere(opts?.archiveFilter) };
+  const where: Prisma.ActionWhereInput = {
+    workspaceId,
+    ...privacyFilter(actor, membership),
+    ...archiveFilterWhere(opts?.archiveFilter),
+  };
+  if (opts?.status) where.status = opts.status;
+  if (opts?.circleId) where.circleId = opts.circleId;
+  const createdAt = dateRangeWhere(opts?.createdFrom, opts?.createdTo);
+  const dueAt = nullableDateRangeWhere(opts?.dueFrom, opts?.dueTo);
+  if (createdAt) where.createdAt = createdAt;
+  if (dueAt) where.dueAt = dueAt;
+  if (opts?.memberId) {
+    appendActionWhereAnd(where, {
+      OR: [
+        { assigneeMemberId: opts.memberId },
+        {
+          author: {
+            memberships: {
+              some: {
+                id: opts.memberId,
+                workspaceId,
+                isActive: true,
+              },
+            },
+          },
+        },
+      ],
+    });
+  }
   
   const [items, total] = await Promise.all([
     prisma.action.findMany({
@@ -41,6 +108,12 @@ export async function listActions(actor: AppActor, workspaceId: string, opts?: {
                 email: true,
               },
             },
+          },
+        },
+        circle: {
+          select: {
+            id: true,
+            name: true,
           },
         },
         proposal: { select: { id: true, title: true } },
@@ -157,6 +230,8 @@ export async function updateAction(actor: AppActor, params: {
   assigneeMemberId?: string | null;
   dueAt?: Date | null;
   isPrivate?: boolean;
+  completedVia?: string | null;
+  evidenceDocumentIds?: string[] | null;
   _membership?: import("@corgtex/shared").MembershipSummary | null;
 }) {
   const membership = await requireWorkspaceMembership({
@@ -205,6 +280,8 @@ export async function updateAction(actor: AppActor, params: {
         data.isPrivate = true;
         data.publishedAt = null;
         data.completedVia = null;
+      } else if (params.status === "COMPLETED") {
+        invariant(action.status === "OPEN" || action.status === "IN_PROGRESS", 400, "INVALID_STATE", "Only open or in-progress actions can be completed.");
       } else if (action.status === "DRAFT") {
         await requireDraftManager({ actor, workspaceId: params.workspaceId, record: action, resolvedMembership: membership });
       }
@@ -212,6 +289,13 @@ export async function updateAction(actor: AppActor, params: {
       if (params.status !== "DRAFT") {
         data.isPrivate = false;
         data.publishedAt = action.publishedAt || new Date();
+      }
+      if (params.status === "COMPLETED") {
+        const completedVia = params.completedVia?.trim() || "";
+        invariant(completedVia.length > 0, 400, "INVALID_INPUT", "Completion note is required.");
+        data.completedVia = completedVia;
+      } else if (params.status === "OPEN" || params.status === "IN_PROGRESS") {
+        data.completedVia = null;
       }
     }
     if (params.circleId !== undefined) data.circleId = params.circleId || null;
@@ -250,12 +334,22 @@ export async function updateAction(actor: AppActor, params: {
       data,
     });
 
+    const evidenceDocumentIds = params.status === "COMPLETED"
+      ? await createWorkItemEvidenceLinks(tx, {
+        workspaceId: params.workspaceId,
+        entityType: "Action",
+        entityId: updated.id,
+        documentIds: params.evidenceDocumentIds,
+        purpose: "completion_evidence",
+      })
+      : [];
+
     await recordAudit(tx, actor, {
       workspaceId: params.workspaceId,
       action: "action.updated",
       entityType: "Action",
       entityId: updated.id,
-      meta: { fields: changedUpdateFields, version: updated.version },
+      meta: { fields: changedUpdateFields, version: updated.version, evidenceDocumentIds },
     });
 
     await appendEvents(tx, [
@@ -267,6 +361,7 @@ export async function updateAction(actor: AppActor, params: {
         payload: {
           actionId: updated.id,
           fields: changedUpdateFields,
+          evidenceDocumentIds,
         },
       },
     ]);

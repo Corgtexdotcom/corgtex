@@ -1,4 +1,4 @@
-import { getMeetingRecorderConfig, listMeetingRecordings, listMeetings } from "@corgtex/domain";
+import { getMeetingRecorderConfig, listMeetingRecordings, listMeetings, listMembers } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import {
   archiveMeetingAction,
@@ -14,6 +14,16 @@ import { getWorkspaceFeatureFlags } from "@/lib/workspace-feature-flags";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownExcerpt } from "@/lib/components/MarkdownRenderer";
 import { ItemActions } from "@/lib/components/ui/ItemActions";
+import { WorkItemFilterControls } from "@/lib/components/WorkItemControls";
+import {
+  buildWorkItemQuery,
+  firstSearchParam,
+  normalizeDateOnly,
+  resolveWorkItemScope,
+  startOfUtcDate,
+  endOfUtcDate,
+} from "@/lib/work-item-view";
+import type { WorkItemScope } from "@/lib/work-item-view";
 
 export const dynamic = "force-dynamic";
 
@@ -23,17 +33,37 @@ function dateTimeLocalValue(value: Date | string) {
 
 export default async function MeetingsPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ workspaceId: string }>;
+  searchParams?: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const { workspaceId } = await params;
   const actor = await requirePageActor();
-  const [completedMeetings, upcomingMeetings, featureFlags, recorderConfig] = await Promise.all([
-    listMeetings(workspaceId, { status: "COMPLETED" }),
-    listMeetings(workspaceId, { status: "SCHEDULED" }),
+  const resolvedSearch = searchParams ? await searchParams : {};
+  const rawStatus = firstSearchParam(resolvedSearch.status);
+  const statusFilter = rawStatus === "COMPLETED" || rawStatus === "SCHEDULED" ? rawStatus : "ALL";
+  const rawScope = resolveWorkItemScope(resolvedSearch);
+  const scope: WorkItemScope = rawScope.scope === "member" ? "member" : "company";
+  const memberId = scope === "member" ? rawScope.memberId : undefined;
+  const dateValues = {
+    recordedFrom: normalizeDateOnly(resolvedSearch.recordedFrom),
+    recordedTo: normalizeDateOnly(resolvedSearch.recordedTo),
+  };
+  const meetingFilters = {
+    memberId,
+    recordedFrom: dateValues.recordedFrom ? startOfUtcDate(dateValues.recordedFrom) : undefined,
+    recordedTo: dateValues.recordedTo ? endOfUtcDate(dateValues.recordedTo) : undefined,
+  };
+  const [filteredCompletedMeetings, filteredUpcomingMeetings, featureFlags, recorderConfig, members] = await Promise.all([
+    listMeetings(workspaceId, { status: "COMPLETED", ...meetingFilters }),
+    listMeetings(workspaceId, { status: "SCHEDULED", ...meetingFilters }),
     getWorkspaceFeatureFlags(workspaceId),
     getMeetingRecorderConfig(actor, workspaceId).catch(() => null),
+    listMembers(workspaceId),
   ]);
+  const completedMeetings = statusFilter === "SCHEDULED" ? [] : filteredCompletedMeetings;
+  const upcomingMeetings = statusFilter === "COMPLETED" ? [] : filteredUpcomingMeetings;
   const recorderEnabled = Boolean(featureFlags.MEETING_RECORDERS && recorderConfig?.featureEnabled && recorderConfig.config.enabled);
   const recordings = recorderEnabled
     ? await listMeetingRecordings(workspaceId, upcomingMeetings.map((meeting) => meeting.id))
@@ -41,6 +71,9 @@ export default async function MeetingsPage({
   const latestRecordingByMeeting = new Map(recordings.map((recording) => [recording.meetingId, recording]));
   const t = await getTranslations("meetings");
   const tCommon = await getTranslations("common");
+  const tWork = await getTranslations("workItems");
+  const filterState = { scope, memberId, dates: dateValues };
+  const memberName = (member: { user: { displayName: string | null; email: string } }) => member.user.displayName || member.user.email;
 
   return (
     <>
@@ -55,6 +88,45 @@ export default async function MeetingsPage({
       {/* ── OUTPUT SECTIONS (primary content) ────────────────────── */}
 
       <section className="ws-section" style={{ marginBottom: 48 }}>
+        <div className="nr-filter-bar nr-filter-bar-wrap">
+          {([
+            { status: "ALL", label: tWork("statusAll"), count: filteredCompletedMeetings.length + filteredUpcomingMeetings.length },
+            { status: "COMPLETED", label: t("completedMeetings"), count: filteredCompletedMeetings.length },
+            { status: "SCHEDULED", label: t("upcomingMeetings"), count: filteredUpcomingMeetings.length },
+          ] as const).map((item) => (
+            <a
+              key={item.status}
+              href={buildWorkItemQuery({ ...filterState, status: item.status })}
+              className={`nr-filter-item ${statusFilter === item.status ? "nr-filter-active" : ""}`}
+            >
+              {item.label} ({item.count})
+            </a>
+          ))}
+        </div>
+        <WorkItemFilterControls
+          action={`/workspaces/${workspaceId}/meetings`}
+          status={statusFilter}
+          scope={scope}
+          memberId={memberId}
+          circles={[]}
+          members={members.map((member) => ({ id: member.id, label: memberName(member) }))}
+          dates={[
+            { name: "recordedFrom", label: tWork("dateFrom"), value: dateValues.recordedFrom },
+            { name: "recordedTo", label: tWork("dateTo"), value: dateValues.recordedTo },
+          ]}
+          showCircle={false}
+          labels={{
+            scope: tWork("scope"),
+            company: tWork("companyScope"),
+            circle: tWork("circle"),
+            person: tWork("person"),
+            allCircles: tWork("allCircles"),
+            allPeople: tWork("allPeople"),
+            apply: tWork("applyFilters"),
+            clear: tWork("clearFilters"),
+          }}
+        />
+
         <h2 className="nr-section-header">{t("completedMeetings")}</h2>
         {completedMeetings.length === 0 && <p className="nr-meta">{t("noMeetings")}</p>}
         {completedMeetings.length > 0 && (

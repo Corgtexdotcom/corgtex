@@ -21,6 +21,12 @@ const { prismaMock } = vi.hoisted(() => {
     proposal: {
       findFirst: vi.fn(),
     },
+    document: {
+      findMany: vi.fn(),
+    },
+    workItemEvidence: {
+      createMany: vi.fn(),
+    },
     auditLog: {
       create: vi.fn(),
     },
@@ -468,6 +474,89 @@ describe("tensions domain", () => {
         resolvedVia: "Process changed",
         resolvedAt: expect.any(Date),
       }),
+    });
+  });
+
+  it("combines member filters with the existing privacy filter", async () => {
+    const { listTensions } = await import("./tensions");
+    await listTensions(actor, "ws-1", { memberId: "mem-1", circleId: "circle-1" });
+
+    expect(prismaMock.tension.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        workspaceId: "ws-1",
+        circleId: "circle-1",
+        AND: [
+          {
+            OR: [
+              { isPrivate: false },
+              { isPrivate: true, status: "DRAFT", authorUserId: "u-1" },
+            ],
+          },
+          {
+            OR: [
+              { assigneeMemberId: "mem-1" },
+              { raisedByMemberId: "mem-1" },
+              {
+                author: {
+                  memberships: {
+                    some: {
+                      id: "mem-1",
+                      workspaceId: "ws-1",
+                      isActive: true,
+                    },
+                  },
+                },
+              },
+            ],
+          },
+        ],
+      }),
+    }));
+  });
+
+  it("links resolution evidence when resolving a tension", async () => {
+    prismaMock.tension.findUnique.mockResolvedValueOnce({
+      id: "t-open",
+      workspaceId: "ws-1",
+      authorUserId: "u-1",
+      title: "Test tension",
+      status: "OPEN",
+      version: 1,
+      isPrivate: false,
+      publishedAt: new Date("2026-06-01T00:00:00.000Z"),
+      resolvedVia: null,
+      resolvedAt: null,
+      archivedAt: null,
+    });
+    prismaMock.tension.update.mockResolvedValueOnce({
+      id: "t-open",
+      workspaceId: "ws-1",
+      title: "Test tension",
+      status: "RESOLVED",
+      resolvedVia: "Process changed",
+      resolvedAt: new Date("2026-06-05T00:00:00.000Z"),
+    });
+    prismaMock.document.findMany.mockResolvedValueOnce([{ id: "doc-1" }]);
+    prismaMock.workItemEvidence.createMany.mockResolvedValueOnce({ count: 1 });
+    const { updateTension } = await import("./tensions");
+
+    await updateTension(actor, {
+      workspaceId: "ws-1",
+      tensionId: "t-open",
+      status: "RESOLVED",
+      resolvedVia: "Process changed",
+      evidenceDocumentIds: ["doc-1", "doc-1"],
+    });
+
+    expect(prismaMock.workItemEvidence.createMany).toHaveBeenCalledWith({
+      data: [{
+        workspaceId: "ws-1",
+        entityType: "Tension",
+        entityId: "t-open",
+        documentId: "doc-1",
+        purpose: "resolution_evidence",
+      }],
+      skipDuplicates: true,
     });
   });
 

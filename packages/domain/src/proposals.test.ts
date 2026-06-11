@@ -4,6 +4,7 @@ import { prisma } from "@corgtex/shared";
 vi.mock("@corgtex/shared", () => ({
   prisma: {
     proposal: {
+      count: vi.fn(),
       create: vi.fn(),
       findMany: vi.fn(),
       findFirst: vi.fn(),
@@ -22,6 +23,12 @@ vi.mock("@corgtex/shared", () => ({
     policyCorpus: {
       deleteMany: vi.fn(),
       upsert: vi.fn(),
+    },
+    document: {
+      findMany: vi.fn(),
+    },
+    workItemEvidence: {
+      createMany: vi.fn(),
     },
     auditLog: {
       create: vi.fn(),
@@ -404,6 +411,53 @@ describe("proposal creation visibility", () => {
   });
 });
 
+describe("listProposals", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(prisma.proposal.findMany).mockResolvedValue([]);
+    vi.mocked((prisma.proposal as any).count).mockResolvedValue(0);
+  });
+
+  it("combines member filters with the existing privacy filter", async () => {
+    const { listProposals } = await import("./proposals");
+    const actor = { kind: "user", user: { id: "u-1", globalRole: "USER" } } as any;
+
+    await listProposals(actor, "ws-1", { memberId: "mem-1", circleId: "circle-1" });
+
+    expect(prisma.proposal.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        workspaceId: "ws-1",
+        circleId: "circle-1",
+        AND: [
+          {
+            OR: [
+              { isPrivate: false },
+              { isPrivate: true, status: "DRAFT", authorUserId: "u-1" },
+            ],
+          },
+          expect.objectContaining({
+            OR: expect.arrayContaining([
+              expect.objectContaining({
+                author: expect.objectContaining({
+                  memberships: {
+                    some: {
+                      id: "mem-1",
+                      workspaceId: "ws-1",
+                      isActive: true,
+                    },
+                  },
+                }),
+              }),
+              expect.objectContaining({ actions: expect.any(Object) }),
+              expect.objectContaining({ tensions: expect.any(Object) }),
+            ]),
+          }),
+        ],
+      }),
+    }));
+  });
+});
+
 describe("resolveProposal", () => {
   beforeEach(() => { vi.clearAllMocks(); });
 
@@ -564,6 +618,47 @@ describe("resolveProposal", () => {
       data: expect.objectContaining({ status: "WITHDRAWN" }),
     }));
     expect(prisma.policyCorpus.upsert).not.toHaveBeenCalled();
+  });
+
+  it("links resolution evidence when resolving a proposal", async () => {
+    const { resolveProposal } = await import("./proposals");
+    const actor = { kind: "user", user: { id: "u-1" } } as any;
+
+    vi.mocked(prisma.proposal.findUnique).mockResolvedValueOnce({
+      id: "p-4",
+      workspaceId: "ws-1",
+      title: "Resolve with evidence",
+      bodyMd: "Body",
+      status: "OPEN",
+      publishedAt: null,
+    } as any);
+    vi.mocked(prisma.approvalFlow.findUnique).mockResolvedValueOnce({ id: "flow-4", status: "ACTIVE" } as any);
+    vi.mocked(prisma.proposal.update).mockResolvedValueOnce({
+      id: "p-4",
+      status: "RESOLVED",
+      resolutionOutcome: "WITHDRAWN",
+    } as any);
+    vi.mocked((prisma as any).document.findMany).mockResolvedValueOnce([{ id: "doc-1" }]);
+    vi.mocked((prisma as any).workItemEvidence.createMany).mockResolvedValueOnce({ count: 1 });
+
+    await resolveProposal(actor, {
+      workspaceId: "ws-1",
+      proposalId: "p-4",
+      outcome: "WITHDRAWN",
+      decisionMd: "Withdrawn after review.",
+      evidenceDocumentIds: ["doc-1", "doc-1"],
+    });
+
+    expect((prisma as any).workItemEvidence.createMany).toHaveBeenCalledWith({
+      data: [{
+        workspaceId: "ws-1",
+        entityType: "Proposal",
+        entityId: "p-4",
+        documentId: "doc-1",
+        purpose: "resolution_evidence",
+      }],
+      skipDuplicates: true,
+    });
   });
 });
 

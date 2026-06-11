@@ -1,6 +1,6 @@
 import type { AppActor, MembershipSummary } from "@corgtex/shared";
 import { prisma } from "@corgtex/shared";
-import { Prisma, type ProposalResolutionOutcome } from "@prisma/client";
+import { Prisma, type ProposalResolutionOutcome, type ProposalStatus } from "@prisma/client";
 import { defaultModelGateway } from "@corgtex/models";
 import { appendEvents } from "./events";
 import { actorUserIdForWorkspace, isGlobalOperator, requireWorkspaceMembership } from "./auth";
@@ -9,6 +9,7 @@ import { invariant } from "./errors";
 import { privacyFilter } from "./privacy";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { requireDraftManager } from "./draft-permissions";
+import { createWorkItemEvidenceLinks } from "./work-item-evidence";
 import {
   changedDataFields,
   pickJsonSnapshot,
@@ -261,13 +262,76 @@ async function validateRelatedActions(
   return actionIds;
 }
 
-export async function listProposals(actor: AppActor, workspaceId: string, opts?: { take?: number; skip?: number; circleId?: string | null; archiveFilter?: ArchiveFilter }) {
+export type ListProposalsOptions = {
+  take?: number;
+  skip?: number;
+  circleId?: string | null;
+  memberId?: string | null;
+  status?: ProposalStatus;
+  archiveFilter?: ArchiveFilter;
+};
+
+function memberRelatedProposalWhere(workspaceId: string, memberId: string): Prisma.ProposalWhereInput[] {
+  const authorMembershipWhere = {
+    memberships: {
+      some: {
+        id: memberId,
+        workspaceId,
+        isActive: true,
+      },
+    },
+  };
+  return [
+    { author: authorMembershipWhere },
+    {
+      actions: {
+        some: {
+          OR: [
+            { assigneeMemberId: memberId },
+            { author: authorMembershipWhere },
+          ],
+        },
+      },
+    },
+    {
+      tensions: {
+        some: {
+          OR: [
+            { assigneeMemberId: memberId },
+            { raisedByMemberId: memberId },
+            { author: authorMembershipWhere },
+          ],
+        },
+      },
+    },
+  ];
+}
+
+function appendProposalWhereAnd(where: Prisma.ProposalWhereInput, condition: Prisma.ProposalWhereInput) {
+  const and = Array.isArray(where.AND) ? [...where.AND] : where.AND ? [where.AND] : [];
+  if (where.OR) {
+    and.push({ OR: where.OR });
+    delete where.OR;
+  }
+  and.push(condition);
+  where.AND = and;
+}
+
+export async function listProposals(actor: AppActor, workspaceId: string, opts?: ListProposalsOptions) {
   const take = opts?.take ?? 20;
   const skip = opts?.skip ?? 0;
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
-  const where: any = { workspaceId, ...privacyFilter(actor, membership), ...archiveFilterWhere(opts?.archiveFilter) };
+  const where: Prisma.ProposalWhereInput = {
+    workspaceId,
+    ...privacyFilter(actor, membership),
+    ...archiveFilterWhere(opts?.archiveFilter),
+  };
   if (opts?.circleId !== undefined) {
     where.circleId = opts.circleId;
+  }
+  if (opts?.status) where.status = opts.status;
+  if (opts?.memberId) {
+    appendProposalWhereAnd(where, { OR: memberRelatedProposalWhere(workspaceId, opts.memberId) });
   }
 
   const [items, total] = await Promise.all([
@@ -280,6 +344,7 @@ export async function listProposals(actor: AppActor, workspaceId: string, opts?:
             email: true,
           },
         },
+        circle: { select: { id: true, name: true } },
         reactions: true,
         tensions: { select: { id: true, title: true, status: true } },
         actions: { select: { id: true, title: true, status: true } },
@@ -1022,6 +1087,7 @@ export async function resolveProposal(actor: AppActor, params: {
   proposalId: string;
   outcome: ProposalResolutionOutcome;
   decisionMd: string;
+  evidenceDocumentIds?: string[] | null;
 }) {
   await requireWorkspaceMembership({
     actor,
@@ -1051,7 +1117,7 @@ export async function resolveProposal(actor: AppActor, params: {
       },
     });
 
-    const updated = await tx.proposal.update({
+	    const updated = await tx.proposal.update({
       where: { id: proposal.id },
       data: {
         status: "RESOLVED",
@@ -1062,9 +1128,17 @@ export async function resolveProposal(actor: AppActor, params: {
         isPrivate: false,
         publishedAt: proposal.publishedAt || now,
       },
+	    });
+
+    const evidenceDocumentIds = await createWorkItemEvidenceLinks(tx, {
+      workspaceId: params.workspaceId,
+      entityType: "Proposal",
+      entityId: proposal.id,
+      documentIds: params.evidenceDocumentIds,
+      purpose: "resolution_evidence",
     });
 
-    if (flow) {
+	    if (flow) {
       await tx.approvalFlow.update({
         where: { id: flow.id },
         data: {
@@ -1106,12 +1180,13 @@ export async function resolveProposal(actor: AppActor, params: {
         action: "proposal.resolved",
         entityType: "Proposal",
         entityId: proposal.id,
-        meta: {
-          outcome: params.outcome,
-          flowId: flow?.id ?? null,
-        },
-      },
-    });
+	        meta: {
+	          outcome: params.outcome,
+	          flowId: flow?.id ?? null,
+          evidenceDocumentIds,
+	        },
+	      },
+	    });
 
     await appendEvents(tx, [
       {
@@ -1122,11 +1197,12 @@ export async function resolveProposal(actor: AppActor, params: {
         payload: {
           proposalId: proposal.id,
           subjectId: proposal.id,
-          outcome: params.outcome,
-          flowId: flow?.id ?? null,
-        },
-      },
-    ]);
+	          outcome: params.outcome,
+	          flowId: flow?.id ?? null,
+          evidenceDocumentIds,
+	        },
+	      },
+	    ]);
 
     return updated;
   });

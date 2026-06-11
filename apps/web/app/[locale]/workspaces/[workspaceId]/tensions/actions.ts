@@ -14,6 +14,7 @@ import {
   postDeliberationEntry,
   resolveDeliberationEntry
 } from "@corgtex/domain";
+import { uploadWorkItemEvidenceDocument } from "../work-item-evidence-upload";
 
 function asStringArray(formData: FormData, key: string) {
   return formData.getAll(key).map((value) => String(value).trim()).filter(Boolean);
@@ -57,13 +58,25 @@ export async function updateTensionAction(formData: FormData) {
 
   const actor = await requirePageActor();
   const workspaceId = asString(formData, "workspaceId");
+  const tensionId = asString(formData, "tensionId");
+  const status = asOptional(formData, "status") as "DRAFT" | "OPEN" | "RESOLVED" | null;
+  const evidenceDocumentIds = status === "RESOLVED"
+    ? await uploadWorkItemEvidenceDocument(actor, {
+      workspaceId,
+      formData,
+      entityType: "Tension",
+      entityId: tensionId,
+      purpose: "resolution_evidence",
+    })
+    : [];
   await updateTension(actor, {
     workspaceId,
-    tensionId: asString(formData, "tensionId"),
+    tensionId,
     title: asOptional(formData, "title") ?? undefined,
     bodyMd: formData.has("bodyMd") ? asOptional(formData, "bodyMd") : undefined,
-    status: asOptional(formData, "status") as "DRAFT" | "OPEN" | "RESOLVED" | null ?? undefined,
+    status: status ?? undefined,
     resolvedVia: asOptional(formData, "resolvedVia") ?? undefined,
+    evidenceDocumentIds,
     raisedByMemberId: formData.has("raisedByMemberId") ? asOptional(formData, "raisedByMemberId") : undefined,
     priority: formData.has("priority") ? Number.parseInt(asString(formData, "priority"), 10) : undefined,
   });
