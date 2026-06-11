@@ -87,3 +87,28 @@ export async function recordSmokeRun({
   }
   return body.run;
 }
+
+export async function resetProcurementTrialRateLimits({
+  baseUrl,
+  secret,
+  adminEmail,
+  companyName,
+}) {
+  if (!secret) return null;
+  const response = await fetch(new URL("/api/internal/smoke/rate-limits/procurement-trials", baseUrl), {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${secret}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      adminEmail,
+      companyName,
+    }),
+  });
+  const body = await readJson(response);
+  if (!response.ok) {
+    throw new Error(`Unable to reset procurement trial rate limits (${response.status}): ${JSON.stringify(body)}`);
+  }
+  return body.reset;
+}

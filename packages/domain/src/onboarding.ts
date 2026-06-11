@@ -4,7 +4,7 @@ import { requireWorkspaceMembership } from "./auth";
 import { invariant } from "./errors";
 
 export const SELF_SERVE_WORKSPACE_TOUR_KEY = "self_serve_workspace";
-export const SELF_SERVE_WORKSPACE_TOUR_VERSION = "v1";
+export const SELF_SERVE_WORKSPACE_TOUR_VERSION = "v2";
 
 function requireUserActor(actor: AppActor) {
   invariant(actor.kind === "user", 403, "FORBIDDEN", "Only signed-in users have onboarding state.");

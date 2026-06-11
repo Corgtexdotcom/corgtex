@@ -1,4 +1,4 @@
-import { isGlobalOperator, listActorWorkspaces, countUnreadNotifications, listConversations, listDailyCompanyUnderstandingQuestions, requireWorkspaceMembership, getMemberInvitePolicy, getMeetingRecorderConfig, getUserWorkspaceOnboardingState, getAiWorkspaceSelectionState } from "@corgtex/domain";
+import { isGlobalOperator, listActorWorkspaces, countUnreadNotifications, listConversations, listDailyCompanyUnderstandingQuestions, requireWorkspaceMembership, getMemberInvitePolicy, getMeetingRecorderConfig, getUserWorkspaceOnboardingState, getAiWorkspaceSelectionState, SELF_SERVE_WORKSPACE_TOUR_KEY, SELF_SERVE_WORKSPACE_TOUR_VERSION } from "@corgtex/domain";
 import { workspaceBranding, prisma } from "@corgtex/shared";
 import type { Metadata } from "next";
 import { logoutAction, requirePageActor } from "@/lib/auth";
@@ -84,7 +84,11 @@ export default async function WorkspaceLayout({
     requireWorkspaceMembership({ actor, workspaceId }),
     getMemberInvitePolicy(workspaceId).catch(() => null),
     prisma.workspace.findUnique({ where: { id: workspaceId }, select: { plan: true } }),
-    actor.kind === "user" ? getUserWorkspaceOnboardingState(actor, { workspaceId, tourVersion: "v2" }).catch(() => null) : Promise.resolve(null),
+    actor.kind === "user" ? getUserWorkspaceOnboardingState(actor, {
+      workspaceId,
+      tourKey: SELF_SERVE_WORKSPACE_TOUR_KEY,
+      tourVersion: SELF_SERVE_WORKSPACE_TOUR_VERSION,
+    }).catch(() => null) : Promise.resolve(null),
     hasWorkspaceInitialKnowledge(workspaceId).catch(() => false),
   ]);
   const current = workspaces.find((w: Workspace) => w.id === workspaceId);
@@ -223,6 +227,8 @@ export default async function WorkspaceLayout({
       {showSelfServeOnboarding && (
         <WorkspaceOnboardingTour
           workspaceId={workspaceId}
+          tourKey={SELF_SERVE_WORKSPACE_TOUR_KEY}
+          tourVersion={SELF_SERVE_WORKSPACE_TOUR_VERSION}
           initialCompletedAt={onboardingState?.completedAt?.toISOString() ?? null}
           hasInitialKnowledge={hasInitialKnowledge}
           featureFlags={featureFlags}

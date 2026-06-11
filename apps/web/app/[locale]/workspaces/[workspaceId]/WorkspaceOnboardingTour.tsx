@@ -10,8 +10,6 @@ import { Dialog } from "@/lib/components/Dialog";
 import { KnowledgeFileUploader } from "./KnowledgeFileUploader";
 import { workspaceRouteMatches, workspaceStepUrl } from "./onboarding-tour-routing";
 
-const TOUR_KEY = "self_serve_workspace";
-const TOUR_VERSION = "v2";
 const RESTART_EVENT = "corgtex:restart-self-serve-tour";
 
 interface TourStep {
@@ -69,12 +67,16 @@ function parseApiError(value: unknown, fallback: string) {
 
 export function WorkspaceOnboardingTour({
   workspaceId,
+  tourKey,
+  tourVersion,
   initialCompletedAt,
   hasInitialKnowledge,
   featureFlags,
   capabilities,
 }: {
   workspaceId: string;
+  tourKey: string;
+  tourVersion: string;
   initialCompletedAt: string | null;
   hasInitialKnowledge: boolean;
   featureFlags?: Record<string, boolean>;
@@ -241,32 +243,37 @@ export function WorkspaceOnboardingTour({
     return steps;
   }, [t, goalsTourEnabled, contextMapsTourEnabled, agentGovernanceTourEnabled, meetingRecorderOnboardingPath]);
 
-  const markCompleted = useCallback(() => {
+  const markCompleted = useCallback(async () => {
     completedRef.current = true;
     setCompleted(true);
-    void fetch(`/api/workspaces/${workspaceId}/onboarding`, {
+    await fetch(`/api/workspaces/${workspaceId}/onboarding`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ tourKey: TOUR_KEY, tourVersion: TOUR_VERSION }),
-    });
-  }, [workspaceId]);
+      body: JSON.stringify({ tourKey, tourVersion }),
+    }).catch(() => undefined);
+  }, [tourKey, tourVersion, workspaceId]);
 
   const startTour = useCallback(() => {
-    setSetupMode(null);
-    setSetupMessage(null);
-    const homePath = workspaceStepUrl(workspaceId, "/");
-    if (!workspaceRouteMatches(currentUrl(), homePath)) {
-      targetStepIndexRef.current = 0;
-      router.push(homePath);
-      return;
-    }
-    driverRef.current?.drive(0);
-  }, [router, workspaceId]);
+    void (async () => {
+      if (setupMode === "setup" && !completedRef.current) {
+        await markCompleted();
+      }
+      setSetupMode(null);
+      setSetupMessage(null);
+      const homePath = workspaceStepUrl(workspaceId, "/");
+      if (!workspaceRouteMatches(currentUrl(), homePath)) {
+        targetStepIndexRef.current = 0;
+        router.push(homePath);
+        return;
+      }
+      driverRef.current?.drive(0);
+    })();
+  }, [markCompleted, router, setupMode, workspaceId]);
 
   const finishTour = useCallback((driverObj: ReturnType<typeof driver>) => {
     driverObj.destroy();
     if (hasContextRef.current) {
-      markCompleted();
+      void markCompleted();
       return;
     }
     setSetupMode("setupReturn");
@@ -314,7 +321,7 @@ export function WorkspaceOnboardingTour({
       })),
       onCloseClick: () => {
         if (hasContextRef.current) {
-          markCompleted();
+          void markCompleted();
         } else {
           setSetupMode("setupReturn");
         }
@@ -437,9 +444,13 @@ export function WorkspaceOnboardingTour({
   }, [t]);
 
   const handleSetupClose = useCallback(() => {
+    if (!setupMode) return;
+
     if (hasContextRef.current) {
-      markCompleted();
-      setSetupMode(null);
+      void markCompleted().finally(() => {
+        setSetupMode(null);
+        router.refresh();
+      });
       return;
     }
 
@@ -448,8 +459,11 @@ export function WorkspaceOnboardingTour({
       return;
     }
 
-    setSetupMode(null);
-  }, [markCompleted, setupMode, startTour]);
+    void markCompleted().finally(() => {
+      setSetupMode(null);
+      router.refresh();
+    });
+  }, [markCompleted, router, setupMode, startTour]);
 
   useEffect(() => {
     completedRef.current = completed;
@@ -640,7 +654,7 @@ export function WorkspaceOnboardingTour({
             </button>
           )}
           {setupMode === "setupReturn" && !hasContext && (
-            <button type="button" className="ghost" onClick={() => setSetupMode(null)}>
+            <button type="button" className="ghost" onClick={handleSetupClose}>
               {t("setupLater")}
             </button>
           )}

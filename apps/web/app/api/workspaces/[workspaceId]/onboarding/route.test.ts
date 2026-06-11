@@ -23,7 +23,7 @@ vi.mock("@corgtex/domain", () => ({
     }
   },
   SELF_SERVE_WORKSPACE_TOUR_KEY: "self_serve_workspace",
-  SELF_SERVE_WORKSPACE_TOUR_VERSION: "v1",
+  SELF_SERVE_WORKSPACE_TOUR_VERSION: "v2",
   getUserWorkspaceOnboardingState,
   completeUserWorkspaceOnboarding,
 }));
@@ -66,7 +66,7 @@ describe("/api/workspaces/[workspaceId]/onboarding", () => {
     const completedAt = new Date("2026-05-25T10:00:00.000Z");
     getUserWorkspaceOnboardingState.mockResolvedValue({
       tourKey: "self_serve_workspace",
-      tourVersion: "v1",
+      tourVersion: "v2",
       completedAt,
       restartedAt: null,
       updatedAt: completedAt,
@@ -80,7 +80,7 @@ describe("/api/workspaces/[workspaceId]/onboarding", () => {
 
     await expect(response.json()).resolves.toEqual({
       tourKey: "self_serve_workspace",
-      tourVersion: "v1",
+      tourVersion: "v2",
       completedAt: "2026-05-25T10:00:00.000Z",
       restartedAt: null,
       updatedAt: "2026-05-25T10:00:00.000Z",
@@ -101,14 +101,14 @@ describe("/api/workspaces/[workspaceId]/onboarding", () => {
     const response = await POST(
       new NextRequest("https://app.corgtex.com/api/workspaces/ws-1/onboarding", {
         method: "POST",
-        body: JSON.stringify({ tourKey: "self_serve_workspace", tourVersion: "v1" }),
+        body: JSON.stringify({ tourKey: "self_serve_workspace", tourVersion: "v2" }),
       }),
       { params: Promise.resolve({ workspaceId: "ws-1" }) },
     );
 
     expect(completeUserWorkspaceOnboarding).toHaveBeenCalledWith(
       { kind: "user", user: { id: "user-1" } },
-      { workspaceId: "ws-1", tourKey: "self_serve_workspace", tourVersion: "v1" },
+      { workspaceId: "ws-1", tourKey: "self_serve_workspace", tourVersion: "v2" },
     );
     expect(response.status).toBe(200);
   });

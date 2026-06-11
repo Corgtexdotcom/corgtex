@@ -14,6 +14,12 @@ export type RateLimitOptions = {
   failClosed?: boolean;
 };
 
+export type RateLimitResetResult = {
+  key: string;
+  memoryCleared: true;
+  redisCleared: boolean;
+};
+
 type Bucket = {
   timestamps: number[];
   windowMs: number;
@@ -126,6 +132,15 @@ async function checkRedisRateLimit(key: string, opts: RateLimitOptions): Promise
   return asRedisResult(result, opts.limit);
 }
 
+async function resetRedisRateLimit(key: string): Promise<boolean> {
+  const client = await getRedisClient();
+  if (!client) {
+    return false;
+  }
+  await client.del(redisKey(`rate-limit:${key}`));
+  return true;
+}
+
 function shouldFailClosed(opts: RateLimitOptions) {
   return Boolean(opts.failClosed && env.NODE_ENV === "production" && isRedisConfigured());
 }
@@ -159,8 +174,23 @@ export async function checkRateLimit(key: string, opts: RateLimitOptions): Promi
   return checkInMemoryRateLimit(key, opts);
 }
 
-export function resetRateLimit(key: string) {
+export async function resetRateLimit(key: string): Promise<RateLimitResetResult> {
   buckets.delete(key);
+  let redisCleared = false;
+  try {
+    redisCleared = await resetRedisRateLimit(key);
+  } catch {
+    redisCleared = false;
+  }
+  return {
+    key,
+    memoryCleared: true,
+    redisCleared,
+  };
+}
+
+export async function resetRateLimits(keys: string[]) {
+  return Promise.all(keys.map((key) => resetRateLimit(key)));
 }
 
 export function resetAllRateLimits() {
