@@ -463,11 +463,58 @@ async function updateMeetingWithTranscriptTx(
   return meeting;
 }
 
-export async function listMeetings(workspaceId: string, opts?: { archiveFilter?: ArchiveFilter; status?: MeetingStatus }) {
+export type ListMeetingsOptions = {
+  archiveFilter?: ArchiveFilter;
+  status?: MeetingStatus;
+  memberId?: string | null;
+  recordedFrom?: Date;
+  recordedTo?: Date;
+};
+
+function meetingDateRangeWhere(from?: Date, to?: Date): Prisma.DateTimeFilter | undefined {
+  const filter: Prisma.DateTimeFilter = {};
+  if (from) filter.gte = from;
+  if (to) filter.lte = to;
+  return Object.keys(filter).length > 0 ? filter : undefined;
+}
+
+export async function listMeetings(workspaceId: string, opts?: ListMeetingsOptions) {
+  const member = opts?.memberId
+    ? await prisma.member.findFirst({
+      where: {
+        id: opts.memberId,
+        workspaceId,
+        isActive: true,
+      },
+      include: {
+        user: {
+          select: {
+            id: true,
+            email: true,
+          },
+        },
+      },
+    })
+    : null;
+  const recordedAt = meetingDateRangeWhere(opts?.recordedFrom, opts?.recordedTo);
   return prisma.meeting.findMany({
     where: {
       workspaceId,
       ...(opts?.status ? { status: opts.status } : {}),
+      ...(recordedAt ? { recordedAt } : {}),
+      ...(opts?.memberId
+        ? {
+          OR: [
+            { participantIds: { has: opts.memberId } },
+            ...(member
+              ? [
+                { participantIds: { has: member.userId } },
+                { participantEmails: { has: member.user.email } },
+              ]
+              : []),
+          ],
+        }
+        : {}),
       ...archiveFilterWhere(opts?.archiveFilter),
     },
     orderBy: { recordedAt: opts?.status === "SCHEDULED" ? "asc" : "desc" },

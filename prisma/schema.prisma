@@ -570,6 +570,7 @@ model Workspace {
   meetings                       Meeting[]
   meetingSeries                  MeetingSeries[]
   documents                      Document[]
+  workItemEvidence               WorkItemEvidence[]
   policyCorpus                   PolicyCorpus[]
   constitutions                  Constitution[]
   governanceScores               GovernanceScore[]
@@ -2248,10 +2249,29 @@ model Document {
   createdAt        DateTime  @default(now())
   updatedAt        DateTime  @updatedAt
 
-  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workspace        Workspace          @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workItemEvidence WorkItemEvidence[]
 
   @@index([workspaceId, source])
   @@index([workspaceId, archivedAt])
+}
+
+model WorkItemEvidence {
+  id          String   @id @default(uuid())
+  workspaceId String
+  entityType  String
+  entityId    String
+  documentId  String
+  purpose     String
+  createdAt   DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  document  Document  @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@unique([entityType, entityId, documentId, purpose])
+  @@index([workspaceId, entityType, entityId])
+  @@index([workspaceId, purpose])
+  @@index([documentId])
 }
 
 model PolicyCorpus {

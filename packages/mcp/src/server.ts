@@ -2077,7 +2077,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
 
   tool(
     "update_action",
-    "Update an action. Draft content edits keep draft-manager permissions; OPEN/IN_PROGRESS content edits require the connected author and create a saved previous version.",
+    "Update an action. Draft content edits keep draft-manager permissions; OPEN/IN_PROGRESS content edits require the connected author and create a saved previous version. Completing an action requires completedVia.",
     {
       actionId: z.string(),
       title: z.string().optional(),
@@ -2086,6 +2086,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       circleId: z.string().optional(),
       assigneeMemberId: z.string().optional(),
       dueAt: z.string().optional().describe("ISO 8601 date string"),
+      completedVia: z.string().optional().describe("Required when setting status to COMPLETED"),
     },
     async (params: {
       actionId: string;
@@ -2095,6 +2096,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       circleId?: string;
       assigneeMemberId?: string;
       dueAt?: string;
+      completedVia?: string;
     }) => {
       requireScope(sessionCtx, "actions:write");
       const updated = await updateAction(actor, {
@@ -2106,6 +2108,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         circleId: params.circleId,
         assigneeMemberId: params.assigneeMemberId,
         dueAt: params.dueAt ? new Date(params.dueAt) : undefined,
+        completedVia: params.completedVia,
       });
       return jsonResult({
         id: updated.id,
@@ -2118,13 +2121,14 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
 
   tool(
     "complete_action",
-    "Mark an action as COMPLETED. Convenience wrapper around update_action.",
+    "Mark an action as COMPLETED with a required completion note. Convenience wrapper around update_action.",
     {
       actionId: z.string(),
+      completedVia: z.string().describe("Required note explaining how the action was completed"),
     },
-    async ({ actionId }: { actionId: string }) => {
+    async ({ actionId, completedVia }: { actionId: string; completedVia: string }) => {
       requireScope(sessionCtx, "actions:write");
-      const updated = await updateAction(actor, { workspaceId, actionId, status: "COMPLETED" });
+      const updated = await updateAction(actor, { workspaceId, actionId, status: "COMPLETED", completedVia });
       return jsonResult({
         id: updated.id,
         status: updated.status,

@@ -1,9 +1,9 @@
 import { notFound } from "next/navigation";
 import Link from "next/link";
-import { getProposal, listDeliberationEntries, listWorkItemVersions, requireWorkspaceMembership } from "@corgtex/domain";
+import { getProposal, listDeliberationEntries, listWorkItemEvidence, listWorkItemVersions, requireWorkspaceMembership } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
-import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
+import { WorkItemResolutionDialog } from "@/lib/components/WorkItemResolutionDialog";
 import { DeliberationThread } from "@/lib/components/DeliberationThread";
 import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
 import { getDeliberationTargets } from "@/lib/deliberation-targets";
@@ -23,18 +23,20 @@ export default async function ProposalDetailPage({
   const actor = await requirePageActor();
   const t = await getTranslations("proposals");
   const tCommon = await getTranslations("common");
+  const tWork = await getTranslations("workItems");
 
   const proposal = await getProposal(actor, { workspaceId, proposalId });
   if (!proposal) notFound();
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
 
-  const [deliberationEntries, versionHistory] = await Promise.all([
+  const [deliberationEntries, versionHistory, evidence] = await Promise.all([
     listDeliberationEntries(actor, {
       workspaceId,
       parentType: "PROPOSAL",
       parentId: proposalId,
     }),
     listWorkItemVersions(actor, { workspaceId, entityType: "PROPOSAL", entityId: proposalId }),
+    listWorkItemEvidence(actor, { workspaceId, entityType: "Proposal", entityId: proposalId }),
   ]);
   const deliberationTargets = await getDeliberationTargets({ actor, workspaceId, parentCircleId: proposal.circleId });
   const targetOptions = deliberationTargets.options.map((option) => ({
@@ -107,6 +109,25 @@ export default async function ProposalDetailPage({
             </section>
           )}
           <MarkdownRenderer markdown={proposal.bodyMd} variant="document" className="nr-markdown" />
+
+          {proposal.status === "RESOLVED" && proposal.decisionMd && (
+            <section className="nr-summary-section" style={{ marginTop: 24 }}>
+              <h2 className="nr-summary-title">
+                {t("formDecisionNote")}
+              </h2>
+              <MarkdownRenderer markdown={proposal.decisionMd} variant="document" className="nr-markdown" />
+              {evidence.length > 0 && (
+                <div className="nr-evidence-list">
+                  <strong>{tWork("resolutionEvidence")}</strong>
+                  {evidence.map((row) => (
+                    <Link key={row.id} href={`/workspaces/${workspaceId}/brain/sources`}>
+                      {row.document.title}
+                    </Link>
+                  ))}
+                </div>
+              )}
+            </section>
+          )}
 
           <hr className="nr-divider nr-divider-lg" />
 
@@ -182,23 +203,26 @@ export default async function ProposalDetailPage({
           {canResolve && proposal.status === "OPEN" && (
             <div className="stack mb-8">
               <h3 className="nr-sidebar-title">{t("resolveProposalTitle")}</h3>
-              <form action={resolveProposalAction} className="stack nr-form-section">
-                <input type="hidden" name="workspaceId" value={workspaceId} />
-                <input type="hidden" name="proposalId" value={proposal.id} />
-                <label>
-                  {t("formResolutionOutcome")}
-                  <select name="outcome" defaultValue="ADOPTED" required>
-                    <option value="ADOPTED">{t("outcomeAdopted")}</option>
-                    <option value="NOT_ADOPTED">{t("outcomeNotAdopted")}</option>
-                    <option value="WITHDRAWN">{t("outcomeWithdrawn")}</option>
-                  </select>
-                </label>
-                <label>
-                  {t("formDecisionNote")}
-                  <MarkdownEditor name="decisionMd" placeholder={t("placeholderDecisionMd")} required rows={4} />
-                </label>
-                <button type="submit" className="secondary small">{t("btnResolve")}</button>
-              </form>
+              <WorkItemResolutionDialog
+                action={resolveProposalAction}
+                buttonLabel={t("btnResolve")}
+                title={tWork("resolveProposalTitle")}
+                noteName="decisionMd"
+                noteLabel={tWork("resolutionNote")}
+                notePlaceholder={t("placeholderDecisionMd")}
+                hiddenFields={{ workspaceId, proposalId: proposal.id }}
+                outcomeName="outcome"
+                outcomeLabel={t("formResolutionOutcome")}
+                outcomeOptions={[
+                  { value: "ADOPTED", label: t("outcomeAdopted") },
+                  { value: "NOT_ADOPTED", label: t("outcomeNotAdopted") },
+                  { value: "WITHDRAWN", label: t("outcomeWithdrawn") },
+                ]}
+                submitLabel={t("btnResolve")}
+                cancelLabel={tCommon("cancel")}
+                fileLabel={tWork("evidence")}
+                className="secondary small"
+              />
             </div>
           )}
           

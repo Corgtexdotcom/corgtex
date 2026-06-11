@@ -67,12 +67,13 @@ export const updateActionTool: ModelTool = {
   type: "function",
   function: {
     name: "update_action",
-    description: "Update an existing action (e.g. mark it as COMPLETED).",
+    description: "Update an existing action. When setting status to COMPLETED, include completedVia with a note explaining how it was completed.",
     parameters: {
       type: "object",
       properties: {
         actionId: { type: "string" },
         status: { type: "string", description: "DRAFT, OPEN, IN_PROGRESS, or COMPLETED" },
+        completedVia: { type: "string", description: "Required when setting status to COMPLETED" },
         title: { type: "string" },
         bodyMd: { type: "string" },
         assigneeMemberId: { type: "string" },
@@ -223,6 +224,7 @@ export async function updateActionItemAction(actor: AppActor, ctx: any, args: an
     title: args.title,
     bodyMd: args.bodyMd,
     assigneeMemberId: args.assigneeMemberId,
+    completedVia: args.completedVia,
   });
 
   await appendAuditMeta("Action", result.id, "action.updated", {

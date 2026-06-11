@@ -1,7 +1,9 @@
-import { getTension, listDeliberationEntries, listWorkItemVersions, requireWorkspaceMembership } from "@corgtex/domain";
+import Link from "next/link";
+import { getTension, listDeliberationEntries, listWorkItemEvidence, listWorkItemVersions, requireWorkspaceMembership } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
+import { WorkItemResolutionDialog } from "@/lib/components/WorkItemResolutionDialog";
 import { DeliberationThread } from "@/lib/components/DeliberationThread";
 import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
 import { getDeliberationTargets } from "@/lib/deliberation-targets";
@@ -20,11 +22,13 @@ export default async function TensionDetailPage({
   const actor = await requirePageActor();
   const t = await getTranslations("tensions");
   const tCommon = await getTranslations("common");
+  const tWork = await getTranslations("workItems");
   const tension = await getTension(actor, { workspaceId, tensionId });
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
-  const [entries, versionHistory] = await Promise.all([
+  const [entries, versionHistory, evidence] = await Promise.all([
     listDeliberationEntries(actor, { workspaceId, parentType: "TENSION", parentId: tensionId }),
     listWorkItemVersions(actor, { workspaceId, entityType: "TENSION", entityId: tensionId }),
+    listWorkItemEvidence(actor, { workspaceId, entityType: "Tension", entityId: tensionId }),
   ]);
   const deliberationTargets = await getDeliberationTargets({ actor, workspaceId, parentCircleId: tension.circleId });
   const targetOptions = deliberationTargets.options.map((option) => ({
@@ -59,6 +63,7 @@ export default async function TensionDetailPage({
   const canSubmittedAuthorEdit = actor.kind === "user" && tension.authorUserId === actor.user.id;
   const canEditContent = tension.status === "DRAFT" ? canManage : tension.status === "OPEN" && canSubmittedAuthorEdit;
   const canDraftProposal = !tension.proposal && (canManage || !tension.isPrivate);
+  const canResolve = !tension.isPrivate && tension.status === "OPEN";
 
   return (
     <>
@@ -95,7 +100,7 @@ export default async function TensionDetailPage({
         </div>
       </header>
 
-      {(canManage || canDraftProposal) && (
+      {(canManage || canDraftProposal || canResolve) && (
         <section className="ws-section" style={{ marginBottom: 24 }}>
           <div className="actions-inline">
             {canManage && canOpenPrivateDraft(tension) && (
@@ -111,6 +116,20 @@ export default async function TensionDetailPage({
                 <input type="hidden" name="tensionId" value={tension.id} />
                 <button type="submit" className="secondary small">{t("btnReturnToDraft")}</button>
               </form>
+            )}
+            {canResolve && (
+              <WorkItemResolutionDialog
+                action={updateTensionAction}
+                buttonLabel={t("btnResolve")}
+                title={tWork("resolveTensionTitle")}
+                noteName="resolvedVia"
+                noteLabel={tWork("resolutionNote")}
+                notePlaceholder={t("placeholderResolvedVia")}
+                hiddenFields={{ workspaceId, tensionId: tension.id, status: "RESOLVED" }}
+                submitLabel={t("btnResolve")}
+                cancelLabel={tCommon("cancel")}
+                fileLabel={tWork("evidence")}
+              />
             )}
             {canDraftProposal && (
               <form action={createProposalFromTensionAction}>
@@ -161,6 +180,16 @@ export default async function TensionDetailPage({
           <h2 className="nr-section-header">{t("sectionResolution")}</h2>
           <div className="nr-item">
             <MarkdownRenderer markdown={tension.resolvedVia} variant="document" />
+            {evidence.length > 0 && (
+              <div className="nr-evidence-list">
+                <strong>{tWork("resolutionEvidence")}</strong>
+                {evidence.map((row) => (
+                  <Link key={row.id} href={`/workspaces/${workspaceId}/brain/sources`}>
+                    {row.document.title}
+                  </Link>
+                ))}
+              </div>
+            )}
           </div>
         </section>
       )}

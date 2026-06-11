@@ -47,6 +47,7 @@ export * from "./runtime";
 export * from "./tensions";
 export * from "./webhooks";
 export * from "./workspaces";
+export * from "./work-item-evidence";
 export * from "./integrations";
 export * from "./billing";
 export * from "./oauth-state";

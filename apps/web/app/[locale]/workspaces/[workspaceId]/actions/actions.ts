@@ -10,6 +10,7 @@ import {
   publishAction,
   returnActionToDraft
 } from "@corgtex/domain";
+import { uploadWorkItemEvidenceDocument } from "../work-item-evidence-upload";
 
 
 export async function createActionAction(formData: FormData) {
@@ -34,12 +35,25 @@ export async function updateActionAction(formData: FormData) {
 
   const actor = await requirePageActor();
   const workspaceId = asString(formData, "workspaceId");
+  const actionId = asString(formData, "actionId");
+  const status = asOptional(formData, "status") as "DRAFT" | "OPEN" | "IN_PROGRESS" | "COMPLETED" | null;
+  const evidenceDocumentIds = status === "COMPLETED"
+    ? await uploadWorkItemEvidenceDocument(actor, {
+      workspaceId,
+      formData,
+      entityType: "Action",
+      entityId: actionId,
+      purpose: "completion_evidence",
+    })
+    : [];
   await updateAction(actor, {
     workspaceId,
-    actionId: asString(formData, "actionId"),
+    actionId,
     title: asOptional(formData, "title") ?? undefined,
     bodyMd: formData.has("bodyMd") ? asOptional(formData, "bodyMd") : undefined,
-    status: asOptional(formData, "status") as "DRAFT" | "OPEN" | "IN_PROGRESS" | "COMPLETED" | null ?? undefined,
+    status: status ?? undefined,
+    completedVia: asOptional(formData, "completedVia") ?? undefined,
+    evidenceDocumentIds,
   });
   refresh(workspaceId);
 }

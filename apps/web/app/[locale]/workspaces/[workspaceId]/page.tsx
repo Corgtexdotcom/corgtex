@@ -64,6 +64,7 @@ export default async function WorkspaceDashboard({
       },
       select: {
         id: true,
+        authorUserId: true,
         title: true,
         summary: true,
         status: true,
@@ -83,6 +84,8 @@ export default async function WorkspaceDashboard({
       },
       select: {
         id: true,
+        authorUserId: true,
+        assigneeMemberId: true,
         title: true,
         bodyMd: true,
         status: true,
@@ -135,13 +138,53 @@ export default async function WorkspaceDashboard({
   const openProposalItems = selectDashboardOpenProposals(openProposalCandidates);
   const teamActionItems = selectDashboardActionItems(teamActionCandidates);
   const openTensionItems = tensions.filter((tension) => tension.status === "OPEN");
+  const currentUserId = actor.kind === "user" ? actor.user.id : null;
+  const ageText = (date: Date) => format.relativeTime(date);
+  const myWorkItems = currentMember && currentUserId ? [
+    ...openProposalItems
+      .filter((proposal) => proposal.authorUserId === currentUserId)
+      .map((proposal) => ({
+        id: `proposal-${proposal.id}`,
+        title: proposal.title,
+        href: `/workspaces/${workspaceId}/proposals/${proposal.id}`,
+        typeLabel: t("proposal"),
+        meta: ageText(proposal.createdAt),
+        createdAt: proposal.createdAt,
+      })),
+    ...teamActionItems
+      .filter((action) => action.assigneeMemberId === currentMember.id || action.authorUserId === currentUserId)
+      .map((action) => ({
+        id: `action-${action.id}`,
+        title: action.title,
+        href: `/workspaces/${workspaceId}/actions?scope=member&memberId=${currentMember.id}`,
+        typeLabel: t("action"),
+        meta: action.dueAt
+          ? t("dueDate", { date: format.dateTime(action.dueAt, { month: "short", day: "numeric" }) })
+          : ageText(action.createdAt),
+        createdAt: action.createdAt,
+      })),
+    ...openTensionItems
+      .filter((tension) => (
+        tension.authorUserId === currentUserId
+        || tension.assigneeMemberId === currentMember.id
+        || tension.raisedByMemberId === currentMember.id
+      ))
+      .map((tension) => ({
+        id: `tension-${tension.id}`,
+        title: tension.title,
+        href: `/workspaces/${workspaceId}/tensions/${tension.id}`,
+        typeLabel: t("tension"),
+        meta: ageText(tension.createdAt),
+        createdAt: tension.createdAt,
+      })),
+  ]
+    .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+    .slice(0, 4) : [];
   
   const attentionCounts = getDashboardAttentionCounts({
     unreadNotificationsCount,
   });
   const totalAttentionItems = attentionCounts.totalAttentionItems;
-
-  const ageText = (date: Date) => format.relativeTime(date);
 
   const d = new Date();
   const freshKnowledgeWindowMs = 14 * 24 * 60 * 60 * 1000;
@@ -226,7 +269,8 @@ export default async function WorkspaceDashboard({
   const hasWorkRail = totalAttentionItems > 0
     || openProposalItems.length > 0
     || teamActionItems.length > 0
-    || openTensionItems.length > 0;
+    || openTensionItems.length > 0
+    || myWorkItems.length > 0;
   const hasDashboardContent = cappedFeedItems.length > 0 || hasWorkRail;
   const hasStrategicDirection = strategicGoals.length > 0 || !!recentRecognition;
   const attentionPanel = totalAttentionItems > 0 ? (
@@ -354,6 +398,24 @@ export default async function WorkspaceDashboard({
         {hasWorkRail && (
           <aside className="nr-work-rail">
             {attentionPanel}
+
+            {myWorkItems.length > 0 && (
+              <section className="nr-rail-section">
+                <h2 className="nr-section-header">{t("myWork")}</h2>
+                <div className="nr-rail-list">
+                  {myWorkItems.map((item) => (
+                    <Link key={item.id} href={item.href} className="nr-rail-item">
+                      <span className="nr-rail-meta">{item.typeLabel}</span>
+                      <span className="nr-rail-title">{item.title}</span>
+                      <span className="nr-rail-meta" suppressHydrationWarning>{item.meta}</span>
+                    </Link>
+                  ))}
+                </div>
+                {currentMemberUrl && (
+                  <Link href={`/workspaces/${workspaceId}/members/${currentMemberUrl}`} className="nr-link">{t("viewFullProfile")}</Link>
+                )}
+              </section>
+            )}
 
             {openProposalItems.length > 0 && (
               <section className="nr-rail-section">
