@@ -38,6 +38,7 @@ const { prismaMock, sharedEnv } = vi.hoisted(() => ({
     },
     customerDeploymentEvent: {
       create: vi.fn(),
+      findMany: vi.fn(),
     },
     selfServeSupportSession: {
       create: vi.fn(),
@@ -113,6 +114,7 @@ describe("self-serve ops domain", () => {
     prismaMock.customerDeployment.findMany.mockResolvedValue([]);
     prismaMock.customerDeployment.findUnique.mockResolvedValue(null);
     prismaMock.customerDeploymentEvent.create.mockResolvedValue({ id: "registry-event-1", createdAt: new Date("2026-06-09T12:00:00.000Z") });
+    prismaMock.customerDeploymentEvent.findMany.mockResolvedValue([]);
     prismaMock.procurementTrial.findFirst.mockResolvedValue(null);
     prismaMock.procurementTrial.findMany.mockResolvedValue([]);
     prismaMock.selfServeEmailCapture.findMany.mockResolvedValue([]);
@@ -525,6 +527,125 @@ describe("self-serve ops domain", () => {
         }),
       }),
       select: { id: true, createdAt: true },
+    });
+  });
+
+  it("lists latest synced registry items when the Ops runtime has no local trial rows", async () => {
+    const createdAt = new Date("2026-06-11T03:24:37.407Z");
+    prismaMock.customerDeploymentEvent.findMany.mockResolvedValue([
+      {
+        id: "sync-event-1",
+        deploymentId: "deployment-azure",
+        createdAt,
+        meta: {
+          schemaVersion: "self-serve-registry-sync-v1",
+          sourceId: "azure-selfserve-production",
+          sourceUrl: "https://selfserve.corgtex.com",
+          sourceDeploymentId: "deployment-azure",
+          generatedAt: "2026-06-11T03:24:37.000Z",
+          receivedAt: "2026-06-11T03:24:37.405Z",
+          summary: { total: 1, activeTrials: 1 },
+          items: [
+            {
+              trialId: "trial-1",
+              status: "ACTIVE",
+              riskStatus: "CLEAR",
+              riskReasons: [],
+              companyName: "Corgtex Smoke",
+              emailDomain: "selfserve.corgtex.com",
+              trialExpiresAt: "2026-06-25T03:24:37.000Z",
+              createdAt: "2026-06-11T03:20:00.000Z",
+              updatedAt: "2026-06-11T03:21:00.000Z",
+              claimEmailCaptured: true,
+              workspace: {
+                id: "workspace-1",
+                name: "Corgtex Smoke",
+                slug: "corgtex-smoke",
+                plan: "TRIAL",
+                trialEndsAt: "2026-06-25T03:24:37.000Z",
+                counts: {
+                  members: 1,
+                  roleOnboardingSessions: 2,
+                  onboardingStates: 3,
+                },
+              },
+              billing: {
+                billingStatus: "trialing",
+                paymentMethodReady: false,
+                updatedAt: "2026-06-11T03:21:00.000Z",
+              },
+              deployment: {
+                id: "deployment-azure",
+                label: "Corgtex Azure Self-Serve Production",
+                deploymentStatus: "ACTIVE",
+                supportConnectorStatus: "not_configured",
+              },
+              latestSmoke: {
+                runId: "launch-run-1",
+                runKind: "browser",
+                status: "PASSED",
+                baseUrl: "https://selfserve.corgtex.com",
+                siteUrl: "https://www.corgtex.com",
+                error: null,
+                summary: { steps: [{ name: "signup", status: "PASSED" }] },
+                startedAt: "2026-06-11T03:20:00.000Z",
+                completedAt: "2026-06-11T03:22:00.000Z",
+                createdAt: "2026-06-11T03:22:00.000Z",
+              },
+              latestEmailCapture: {
+                id: "capture-1",
+                runId: "launch-run-1",
+                source: "member_setup",
+                expiresAt: "2026-06-11T04:20:00.000Z",
+                consumedAt: null,
+                createdAt: "2026-06-11T03:20:30.000Z",
+              },
+            },
+          ],
+        },
+      },
+    ]);
+    const { listSelfServeCustomerRegistry } = await import("./self-serve-ops");
+
+    const registry = await listSelfServeCustomerRegistry(operatorActor, { take: 50 });
+
+    expect(registry.summary).toMatchObject({
+      total: 1,
+      activeTrials: 1,
+      smokeCovered: 1,
+    });
+    expect(registry.items).toHaveLength(1);
+    expect(registry.items[0]).toMatchObject({
+      trialId: "trial-1",
+      status: "ACTIVE",
+      companyName: "Corgtex Smoke",
+      adminEmail: "redacted@selfserve.corgtex.com",
+      claimEmailStatus: { sent: true },
+      workspace: {
+        id: "workspace-1",
+        _count: {
+          members: 1,
+          roleOnboardingSessions: 2,
+          onboardingStates: 3,
+        },
+      },
+      deployment: {
+        id: "deployment-azure",
+        deploymentStatus: "ACTIVE",
+      },
+      latestSmoke: {
+        runId: "launch-run-1",
+        status: "PASSED",
+      },
+      latestEmailCapture: {
+        id: "capture-1",
+        runId: "launch-run-1",
+      },
+      source: {
+        kind: "registry_sync",
+        eventId: "sync-event-1",
+        sourceId: "azure-selfserve-production",
+      },
     });
   });
 

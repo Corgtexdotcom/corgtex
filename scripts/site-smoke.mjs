@@ -31,25 +31,32 @@ async function expectRouteOk(path, expectedText) {
 }
 
 async function expectDemoRedirect(path, expectedWorkspaceSegment) {
-  const response = await fetch(`${normalizedAppUrl}${path}`, {
-    redirect: "manual",
-    headers: {
-      accept: "text/html",
-    },
-  });
+  let currentUrl = new URL(path, normalizedAppUrl);
 
-  expect(response.status >= 300 && response.status < 400, `${path} did not redirect: ${response.status}`);
+  for (let redirectCount = 0; redirectCount < 5; redirectCount += 1) {
+    const response = await fetch(currentUrl, {
+      redirect: "manual",
+      headers: {
+        accept: "text/html",
+      },
+    });
 
-  const location = response.headers.get("location");
-  expect(
-    location && location.includes(expectedWorkspaceSegment),
-    `${path} redirected to an unexpected location: ${location}`,
-  );
+    expect(response.status >= 300 && response.status < 400, `${path} did not redirect: ${response.status}`);
 
-  const setCookie = response.headers.getSetCookie?.() ?? [];
-  expect(setCookie.length > 0, `${path} did not set a session cookie`);
+    const location = response.headers.get("location");
+    expect(location, `${path} redirect ${redirectCount + 1} did not include a Location header`);
 
-  return { location, setCookie };
+    const nextUrl = new URL(location, currentUrl);
+    if (nextUrl.pathname.includes(expectedWorkspaceSegment)) {
+      const setCookie = response.headers.getSetCookie?.() ?? [];
+      expect(setCookie.length > 0, `${path} did not set a session cookie before workspace redirect`);
+      return { location: nextUrl.toString(), setCookie };
+    }
+
+    currentUrl = nextUrl;
+  }
+
+  throw new Error(`${path} did not reach ${expectedWorkspaceSegment} within 5 redirects`);
 }
 
 async function main() {

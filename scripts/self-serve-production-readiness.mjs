@@ -9,7 +9,6 @@ const REQUIRED_ENV = [
   "SESSION_COOKIE_SECRET",
   "ENCRYPTION_KEY",
   "MODEL_PROVIDER",
-  "MODEL_API_KEY",
   "STRIPE_SECRET_KEY",
   "STRIPE_WEBHOOK_SECRET",
   "STRIPE_PRICE_AI_USAGE_ID",
@@ -59,6 +58,16 @@ function looksLikeUuid(value) {
   return UUID_PATTERN.test(value);
 }
 
+function checkConfigured(name, strict, message) {
+  if (configured(name)) {
+    pass(`${name} configured`);
+  } else if (strict) {
+    fail(message ?? `${name} missing`);
+  } else {
+    warn(message ?? `${name} missing`);
+  }
+}
+
 async function checkEndpoint(baseUrl, path, predicate, label) {
   try {
     const response = await fetch(new URL(path, baseUrl));
@@ -73,8 +82,43 @@ async function checkEndpoint(baseUrl, path, predicate, label) {
   }
 }
 
+function checkModelConfiguration(strict) {
+  const provider = envValue("MODEL_PROVIDER") || "openrouter";
+  if (provider === "azure-openai") {
+    checkConfigured("MODEL_BASE_URL", strict, "MODEL_BASE_URL missing for Azure OpenAI.");
+    const authMode = envValue("AZURE_OPENAI_AUTH_MODE") || "api_key";
+    if (authMode === "managed_identity") {
+      pass("AZURE_OPENAI_AUTH_MODE configured for managed identity");
+      if (configured("AZURE_CLIENT_ID")) {
+        pass("AZURE_CLIENT_ID configured");
+      } else {
+        warn("AZURE_CLIENT_ID missing; Azure OpenAI will rely on system-assigned managed identity.");
+      }
+      return;
+    }
+    if (authMode !== "api_key") {
+      fail("AZURE_OPENAI_AUTH_MODE must be api_key or managed_identity.");
+      return;
+    }
+    if (configured("AZURE_OPENAI_API_KEY") || configured("MODEL_API_KEY")) {
+      pass("Azure OpenAI API key configured");
+    } else {
+      checkConfigured("AZURE_OPENAI_API_KEY", strict, "AZURE_OPENAI_API_KEY or MODEL_API_KEY missing for Azure OpenAI API key auth.");
+    }
+    return;
+  }
+
+  if (provider === "fake") {
+    warn("MODEL_PROVIDER is fake; do not use this for production launch.");
+    return;
+  }
+
+  checkConfigured("MODEL_API_KEY", strict, "MODEL_API_KEY missing for OpenAI-compatible model provider.");
+}
+
 async function main() {
   const strict = process.argv.includes("--strict");
+  const skipHttp = process.argv.includes("--skip-http");
   const baseUrl = arg("base-url") || process.env.SELF_SERVE_READINESS_BASE_URL || process.env.APP_URL;
 
   for (const name of REQUIRED_ENV) {
@@ -90,6 +134,13 @@ async function main() {
   const microsoftClientSecret = envValue("MICROSOFT_CLIENT_SECRET");
   if (microsoftClientSecret && looksLikeUuid(microsoftClientSecret)) {
     fail("MICROSOFT_CLIENT_SECRET looks like an Entra Secret ID. Use the client secret Value instead.");
+  }
+
+  checkModelConfiguration(strict);
+
+  if (skipHttp) {
+    pass("HTTP readiness checks skipped by request");
+    return;
   }
 
   if (!baseUrl) {

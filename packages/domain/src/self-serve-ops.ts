@@ -251,6 +251,181 @@ function compactSupportSession(value: unknown) {
   };
 }
 
+function numberField(value: unknown, fallback = 0) {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return fallback;
+}
+
+function stringField(value: unknown, fallback = "") {
+  return typeof value === "string" && value.trim().length > 0 ? value : fallback;
+}
+
+function stringOrNull(value: unknown) {
+  return typeof value === "string" && value.trim().length > 0 ? value : null;
+}
+
+function registryCounts(value: unknown) {
+  const counts = asRecord(value) ?? {};
+  return {
+    members: numberField(counts.members),
+    roleOnboardingSessions: numberField(counts.roleOnboardingSessions),
+    onboardingStates: numberField(counts.onboardingStates),
+  };
+}
+
+function syncedWorkspace(value: unknown) {
+  const workspace = asRecord(value);
+  if (!workspace) return null;
+  return {
+    id: stringField(workspace.id),
+    name: stringField(workspace.name),
+    slug: stringField(workspace.slug),
+    plan: stringField(workspace.plan),
+    trialEndsAt: dateIso(workspace.trialEndsAt),
+    _count: registryCounts(workspace._count ?? workspace.counts),
+  };
+}
+
+function syncedBilling(value: unknown) {
+  const billing = asRecord(value);
+  if (!billing) return null;
+  return {
+    billingStatus: stringOrNull(billing.billingStatus),
+    paymentMethodReady: Boolean(billing.paymentMethodReady),
+    updatedAt: dateIso(billing.updatedAt),
+  };
+}
+
+function syncedDeployment(value: unknown) {
+  const deployment = asRecord(value);
+  if (!deployment) return null;
+  return {
+    id: stringField(deployment.id),
+    managedWorkspaceId: stringOrNull(deployment.managedWorkspaceId),
+    label: stringOrNull(deployment.label),
+    deploymentStatus: stringOrNull(deployment.deploymentStatus),
+    supportConnectorStatus: stringOrNull(deployment.supportConnectorStatus),
+  };
+}
+
+function syncedSmokeRun(value: unknown) {
+  const smoke = compactSmokeRun(value);
+  if (!smoke) return null;
+  return {
+    runId: stringOrNull(smoke.runId),
+    runKind: stringOrNull(smoke.runKind),
+    status: stringOrNull(smoke.status),
+    baseUrl: stringOrNull(smoke.baseUrl),
+    siteUrl: stringOrNull(smoke.siteUrl),
+    error: stringOrNull(smoke.error),
+    summary: smoke.summary,
+    startedAt: smoke.startedAt,
+    completedAt: smoke.completedAt,
+    createdAt: smoke.createdAt,
+  };
+}
+
+function syncedEmailCapture(value: unknown) {
+  const capture = compactEmailCapture(value);
+  if (!capture) return null;
+  return {
+    id: stringField(capture.id),
+    procurementTrialId: null,
+    toEmail: null,
+    runId: stringOrNull(capture.runId),
+    source: stringOrNull(capture.source),
+    expiresAt: capture.expiresAt,
+    consumedAt: capture.consumedAt,
+    createdAt: capture.createdAt,
+  };
+}
+
+function syncedSupportSession(value: unknown) {
+  const session = compactSupportSession(value);
+  if (!session) return null;
+  return {
+    id: stringField(session.id),
+    workspaceId: null,
+    operationId: stringOrNull(session.operationId),
+    targetMemberId: null,
+    expiresAt: session.expiresAt,
+    usedAt: session.usedAt,
+    createdAt: session.createdAt,
+  };
+}
+
+function redactedEmailForDomain(value: unknown) {
+  const domain = stringOrNull(value);
+  return domain ? `redacted@${domain}` : "redacted";
+}
+
+function syncedExistingActiveTrial(value: unknown) {
+  const existing = asRecord(value);
+  if (!existing) return null;
+  return {
+    trialId: stringField(existing.trialId),
+    status: stringField(existing.status),
+    companyName: stringField(existing.companyName),
+    adminEmail: redactedEmailForDomain(existing.emailDomain),
+    emailDomain: stringField(existing.emailDomain),
+    trialExpiresAt: dateIso(existing.trialExpiresAt),
+    createdAt: dateIso(existing.createdAt),
+    workspace: syncedWorkspace(existing.workspace),
+    deployment: syncedDeployment(existing.deployment),
+  };
+}
+
+function syncedRegistryItem(params: {
+  item: unknown;
+  eventId: string;
+  eventCreatedAt: Date;
+  sourceId: string | null;
+  sourceUrl: string | null;
+  sourceDeploymentId: string | null;
+  generatedAt: string | null;
+  receivedAt: string | null;
+}) {
+  const record = asRecord(params.item) ?? {};
+  const emailDomainValue = stringField(record.emailDomain);
+  return {
+    trialId: stringField(record.trialId),
+    status: stringField(record.status),
+    riskStatus: stringField(record.riskStatus, "UNKNOWN"),
+    riskReasons: Array.isArray(record.riskReasons) ? record.riskReasons : [],
+    companyName: stringField(record.companyName, "Unknown self-serve customer"),
+    adminEmail: redactedEmailForDomain(emailDomainValue),
+    adminName: null,
+    emailDomain: emailDomainValue,
+    trialExpiresAt: dateIso(record.trialExpiresAt),
+    createdAt: dateIso(record.createdAt) ?? params.eventCreatedAt,
+    updatedAt: dateIso(record.updatedAt) ?? dateIso(record.createdAt) ?? params.eventCreatedAt,
+    suspendedAt: dateIso(record.suspendedAt),
+    suspensionReason: stringOrNull(record.suspensionReason),
+    claimEmailStatus: { sent: Boolean(record.claimEmailCaptured) },
+    workspace: syncedWorkspace(record.workspace),
+    deployment: syncedDeployment(record.deployment),
+    billing: syncedBilling(record.billing),
+    existingActiveTrial: syncedExistingActiveTrial(record.existingActiveTrial),
+    latestSmoke: syncedSmokeRun(record.latestSmoke),
+    latestEmailCapture: syncedEmailCapture(record.latestEmailCapture),
+    latestSupportSession: syncedSupportSession(record.latestSupportSession),
+    source: {
+      kind: "registry_sync",
+      eventId: params.eventId,
+      sourceId: params.sourceId,
+      sourceUrl: params.sourceUrl,
+      sourceDeploymentId: params.sourceDeploymentId,
+      generatedAt: params.generatedAt,
+      receivedAt: params.receivedAt,
+      syncedAt: params.eventCreatedAt,
+    },
+  };
+}
+
 function sanitizeRegistryItem(item: unknown): JsonRecord {
   const record = asRecord(item) ?? {};
   const existingActiveTrial = asRecord(record.existingActiveTrial);
@@ -570,7 +745,7 @@ export async function listSelfServeCustomerRegistry(actor: AppActor, params: {
   const trialsForLookups = [...trials, ...existingActiveTrials];
   const workspaceIds = [...new Set(trialsForLookups.map((trial) => trial.workspaceId).filter((value): value is string => Boolean(value)))];
   const trialIds = trials.map((trial) => trial.id);
-  const [deployments, smokeRuns, emailCaptures, supportSessions] = await Promise.all([
+  const [deployments, smokeRuns, emailCaptures, supportSessions, registrySyncEvents] = await Promise.all([
     workspaceIds.length
       ? prisma.customerDeployment.findMany({
         where: { managedWorkspaceId: { in: workspaceIds } },
@@ -618,6 +793,17 @@ export async function listSelfServeCustomerRegistry(actor: AppActor, params: {
         },
       })
       : Promise.resolve([]),
+    prisma.customerDeploymentEvent.findMany({
+      where: { action: "self_serve.registry_synced" },
+      orderBy: { createdAt: "desc" },
+      take: 25,
+      select: {
+        id: true,
+        deploymentId: true,
+        meta: true,
+        createdAt: true,
+      },
+    }),
   ]);
 
   const deploymentByWorkspaceId = new Map(deployments.map((deployment) => [deployment.managedWorkspaceId, deployment]));
@@ -652,7 +838,7 @@ export async function listSelfServeCustomerRegistry(actor: AppActor, params: {
     )) ?? null;
   }
 
-  const items = trials.map((trial) => {
+  const localItems = trials.map((trial) => {
     const deployment = trial.workspaceId ? deploymentByWorkspaceId.get(trial.workspaceId) ?? null : null;
     const existingActiveTrial = findExistingActiveTrial(trial);
     const existingActiveDeployment = existingActiveTrial?.workspaceId
@@ -697,6 +883,42 @@ export async function listSelfServeCustomerRegistry(actor: AppActor, params: {
       latestSupportSession: trial.workspaceId ? latestSupportByWorkspaceId.get(trial.workspaceId) ?? null : null,
     };
   });
+  const localTrialIds = new Set(localItems.map((item) => item.trialId).filter(Boolean));
+  const latestSyncedItems = [];
+  const seenSources = new Set<string>();
+  for (const event of registrySyncEvents) {
+    const meta = asRecord(event.meta) ?? {};
+    const sourceId = stringOrNull(meta.sourceId);
+    const sourceDeploymentId = stringOrNull(meta.sourceDeploymentId) ?? event.deploymentId ?? null;
+    const sourceUrl = stringOrNull(meta.sourceUrl);
+    const sourceKey = [sourceId, sourceDeploymentId, sourceUrl].filter(Boolean).join("|") || event.id;
+    if (seenSources.has(sourceKey)) continue;
+    seenSources.add(sourceKey);
+
+    const rawItems = Array.isArray(meta.items) ? meta.items : [];
+    for (const rawItem of rawItems) {
+      const item = syncedRegistryItem({
+        item: rawItem,
+        eventId: event.id,
+        eventCreatedAt: event.createdAt,
+        sourceId,
+        sourceUrl,
+        sourceDeploymentId,
+        generatedAt: stringOrNull(meta.generatedAt),
+        receivedAt: stringOrNull(meta.receivedAt),
+      });
+      if (localTrialIds.has(item.trialId)) continue;
+      if (status && item.status !== status) continue;
+      latestSyncedItems.push(item);
+    }
+  }
+  const items = [...localItems, ...latestSyncedItems]
+    .sort((left, right) => {
+      const leftTime = new Date(left.createdAt ?? 0).getTime();
+      const rightTime = new Date(right.createdAt ?? 0).getTime();
+      return rightTime - leftTime;
+    })
+    .slice(0, take);
 
   return {
     items,

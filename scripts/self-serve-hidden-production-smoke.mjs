@@ -214,7 +214,8 @@ async function main() {
   const runId = arg("run-id") || new Date().toISOString().replace(/[^0-9]/g, "").slice(0, 14);
   const emailDomain = arg("email-domain") || process.env.SELF_SERVE_SMOKE_EMAIL_DOMAIN || `corgtex-smoke-${runId}.example.com`;
   const adminEmail = arg("admin-email") || process.env.SELF_SERVE_SMOKE_ADMIN_EMAIL || `admin+${runId}@${emailDomain}`;
-  const companyName = arg("company") || `Corgtex Hidden Smoke ${runId}`;
+  const recordPrefix = arg("record-prefix") || process.env.SELF_SERVE_SMOKE_RECORD_PREFIX || `[TEST] ${runId}`;
+  const companyName = arg("company") || `${recordPrefix} Corgtex Hidden Smoke`;
   const idempotencyKey = arg("idempotency-key") || `hidden-prod-smoke-${runId}-${randomUUID()}`;
   const smokeSecret = process.env.SMOKE_EMAIL_CAPTURE_SECRET?.trim();
 
@@ -233,7 +234,7 @@ async function main() {
   const trial = await postJson(`${baseUrl}/api/procurement/v1/trials`, {
     companyName,
     adminEmail,
-    adminName: "Hidden Production Smoke",
+    adminName: `${recordPrefix} Hidden Production Smoke`,
     acceptedTermsVersion: "hidden-production-smoke-v1",
     sourceAgent: {
       kind: "hidden-production-smoke",
@@ -305,7 +306,7 @@ async function main() {
     const colleagueEmail = arg("colleague-email") || process.env.SELF_SERVE_SMOKE_COLLEAGUE_EMAIL || `colleague+${runId}@${emailDomain}`;
     const invited = await authedJson(baseUrl, cookie, "POST", `/api/workspaces/${trial.body.workspace.id}/members`, {
       email: colleagueEmail,
-      displayName: "Hidden Production Colleague",
+      displayName: `${recordPrefix} Hidden Production Colleague`,
       role: "CONTRIBUTOR",
     });
     if (invited.response.status !== 201) {
