@@ -1,8 +1,36 @@
 import Link from "next/link";
-import { getCatalogItem, requireWorkspaceMembership } from "@corgtex/domain";
+import type { ReactNode } from "react";
+import { headers } from "next/headers";
+import {
+  getCatalogItem,
+  getMeetingRecorderConfig,
+  listAiWorkspaceToolProviders,
+  listCommunicationInstallations,
+  listDocuments,
+  listInboundWebhooks,
+  listMeetingTranscriptSourceState,
+  listWebhookEndpoints,
+  listWorkspaceEnterpriseServiceStates,
+  requireWorkspaceMembership,
+} from "@corgtex/domain";
+import { env, prisma } from "@corgtex/shared";
 import { requirePageActor } from "@/lib/auth";
 import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
 import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
+import { getFormatter } from "next-intl/server";
+import { getWorkspaceFeatureFlags } from "@/lib/workspace-feature-flags";
+import { normalizeSelectedProvider, normalizeSelectedService } from "../../settings/ai-workspace-ui";
+import {
+  AiWorkspaceConnectorPanel,
+  CorgtexMcpConnectorPanel,
+  DataSourcesConnectorPanel,
+  MeetingRecorderConnectorPanel,
+  OAuthConnectorPanel,
+  SlackConnectorPanel,
+  WebhooksConnectorPanel,
+  integrationStatusMessage,
+} from "../ConnectorSetupPanels";
+import { requestManagedEnterpriseServiceAction } from "../../actions";
 
 export const dynamic = "force-dynamic";
 
@@ -36,15 +64,192 @@ function capabilityKeys(value: unknown) {
 
 export default async function CatalogItemPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ workspaceId: string; catalogItemId: string }>;
+  searchParams?: Promise<{
+    integration?: string;
+    integrationStatus?: string;
+    integrationError?: string;
+    integrationSuccess?: string;
+    provider?: string | string[];
+    service?: string | string[];
+  }>;
 }) {
   const { workspaceId, catalogItemId } = await params;
+  const search = await searchParams;
   const actor = await requirePageActor();
-  await requireWorkspaceMembership({ actor, workspaceId });
+  const membership = await requireWorkspaceMembership({ actor, workspaceId });
   await requireWorkspaceFeature(workspaceId, "TOOL_LINKS");
-  const detail = await getCatalogItem(actor, { workspaceId, catalogItemId });
+  const [detail, featureFlags, format, headersList] = await Promise.all([
+    getCatalogItem(actor, { workspaceId, catalogItemId }),
+    getWorkspaceFeatureFlags(workspaceId),
+    getFormatter(),
+    headers(),
+  ]);
   const { item, usage, requests } = detail;
+  const isWorkspaceAdmin = membership?.role === "ADMIN";
+  const host = headersList.get("host") || "localhost:3000";
+  const protocol = host.includes("localhost") ? "http" : "https";
+  const origin = `${protocol}://${host}`;
+  const connectorUrl = env.MCP_PUBLIC_URL ?? `${origin}/mcp`;
+  const integrationMessage = integrationStatusMessage({
+    provider: search?.integration,
+    status: search?.integrationStatus,
+    error: search?.integrationError,
+    success: search?.integrationSuccess,
+  });
+
+  let setupPanel: ReactNode = null;
+
+  if (item.sourceType === "OAUTH_CONNECTION" && actor.kind === "user") {
+    const provider = item.sourceId === "microsoft" ? "microsoft" : "google";
+    const providerEnum = provider === "microsoft" ? "MICROSOFT" : "GOOGLE";
+    const connection = await prisma.oAuthConnection.findFirst({
+      where: {
+        userId: actor.user.id,
+        provider: providerEnum,
+        status: { not: "DISCONNECTED" },
+        OR: [
+          { workspaceId },
+          { workspaceId: null },
+        ],
+      },
+      orderBy: { updatedAt: "desc" },
+    });
+    setupPanel = (
+      <OAuthConnectorPanel
+        provider={provider}
+        title={provider === "microsoft" ? "Microsoft" : "Google"}
+        configured={provider === "microsoft"
+          ? Boolean(process.env.MICROSOFT_CLIENT_ID && process.env.MICROSOFT_CLIENT_SECRET)
+          : Boolean(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET)}
+        connection={connection ?? undefined}
+        workspaceId={workspaceId}
+        format={format}
+        message={integrationMessage}
+      />
+    );
+  } else if (item.sourceType === "COMMUNICATION_INSTALLATION" && item.sourceId === "slack") {
+    const communicationInstallations = isWorkspaceAdmin
+      ? await listCommunicationInstallations(actor, workspaceId).catch(() => [])
+      : [];
+    const slackInstallation = communicationInstallations.find((installation) => installation.provider === "SLACK" && installation.status === "ACTIVE");
+    setupPanel = <SlackConnectorPanel workspaceId={workspaceId} installation={slackInstallation} canManage={isWorkspaceAdmin} />;
+  } else if (item.sourceType === "MCP_CONNECTOR") {
+    setupPanel = <CorgtexMcpConnectorPanel connectorUrl={connectorUrl} />;
+  } else if (item.sourceType === "MEETING_RECORDER") {
+    const [recorderConfig, transcriptSources] = featureFlags.MEETING_RECORDERS
+      ? await Promise.all([
+        getMeetingRecorderConfig(actor, workspaceId).catch(() => null),
+        listMeetingTranscriptSourceState(actor, workspaceId).catch(() => null),
+      ])
+      : [null, null] as const;
+    setupPanel = (
+      <MeetingRecorderConnectorPanel
+        workspaceId={workspaceId}
+        origin={origin}
+        config={recorderConfig}
+        sources={transcriptSources}
+        format={format}
+      />
+    );
+  } else if (item.sourceType === "DATA_SOURCE") {
+    const [dataSources, documents] = await Promise.all([
+      prisma.externalDataSource.findMany({
+        where: { workspaceId },
+        orderBy: { createdAt: "desc" },
+      }).catch(() => []),
+      listDocuments(workspaceId).catch(() => []),
+    ]);
+    setupPanel = <DataSourcesConnectorPanel workspaceId={workspaceId} dataSources={dataSources} documents={documents} />;
+  } else if (item.sourceType === "MANUAL" && item.sourceId === "webhooks") {
+    const [webhookEndpoints, inboundWebhooks] = await Promise.all([
+      listWebhookEndpoints(actor, workspaceId).catch(() => []),
+      listInboundWebhooks(actor, workspaceId, { take: 20 }).catch(() => []),
+    ]);
+    setupPanel = (
+      <WebhooksConnectorPanel
+        workspaceId={workspaceId}
+        webhookEndpoints={webhookEndpoints}
+        inboundWebhooks={inboundWebhooks}
+        format={format}
+      />
+    );
+  } else if (item.sourceType === "AI_WORKSPACE" && featureFlags.AI_WORKSPACES) {
+    const providers = listAiWorkspaceToolProviders().map((provider) => ({
+      ...provider,
+      capabilities: [...provider.capabilities],
+      supportedOwnershipModes: [...provider.supportedOwnershipModes],
+      setupVariants: provider.setupVariants.map((variant) => ({
+        ...variant,
+        manualSteps: [...variant.manualSteps],
+        limitations: [...variant.limitations],
+      })),
+    }));
+    setupPanel = (
+      <AiWorkspaceConnectorPanel
+        connectorUrl={connectorUrl}
+        origin={origin}
+        providers={providers}
+        enterpriseServices={[]}
+        managedServicesEnabled={false}
+        canRequestManagedServices={false}
+        requestManagedServiceAction={requestManagedEnterpriseServiceAction}
+        workspaceId={workspaceId}
+        selectedProviderKey={normalizeSelectedProvider(item.sourceId ?? search?.provider, providers)}
+        selectedServiceKey={null}
+      />
+    );
+  } else if (item.sourceType === "ENTERPRISE_SERVICE" && featureFlags.AI_WORKSPACES && featureFlags.MANAGED_ENTERPRISE_SERVICES) {
+    const [providers, enterpriseServices] = await Promise.all([
+      Promise.resolve(listAiWorkspaceToolProviders().map((provider) => ({
+        ...provider,
+        capabilities: [...provider.capabilities],
+        supportedOwnershipModes: [...provider.supportedOwnershipModes],
+        setupVariants: provider.setupVariants.map((variant) => ({
+          ...variant,
+          manualSteps: [...variant.manualSteps],
+          limitations: [...variant.limitations],
+        })),
+      }))),
+      listWorkspaceEnterpriseServiceStates(actor, workspaceId).then((services) => services.map((service) => ({
+        key: service.key,
+        label: service.label,
+        outcome: service.outcome,
+        description: service.description,
+        defaultOwnershipMode: service.defaultOwnershipMode,
+        persistedId: service.persistedId,
+        ownershipMode: service.ownershipMode,
+        healthStatus: service.healthStatus,
+        providerKey: service.providerKey,
+        lastHealthCheckAt: service.lastHealthCheckAt?.toISOString() ?? null,
+        lastSuccessfulHealthCheckAt: service.lastSuccessfulHealthCheckAt?.toISOString() ?? null,
+        lastSuccessfulSyncAt: service.lastSuccessfulSyncAt?.toISOString() ?? null,
+        lastError: service.lastError,
+        usageLabel: service.usageLabel,
+        usageDetail: service.usageDetail,
+        supportEscalationStatus: service.supportEscalationStatus,
+        supportEscalatedAt: service.supportEscalatedAt?.toISOString() ?? null,
+        supportNotesMd: service.supportNotesMd,
+        readinessChecks: service.readinessChecks,
+      }))),
+    ]);
+    setupPanel = (
+      <AiWorkspaceConnectorPanel
+        connectorUrl={connectorUrl}
+        origin={origin}
+        providers={providers}
+        enterpriseServices={enterpriseServices}
+        managedServicesEnabled={featureFlags.MANAGED_ENTERPRISE_SERVICES}
+        canRequestManagedServices={isWorkspaceAdmin}
+        requestManagedServiceAction={requestManagedEnterpriseServiceAction}
+        workspaceId={workspaceId}
+        selectedProviderKey={normalizeSelectedProvider(search?.provider, providers)}
+        selectedServiceKey={normalizeSelectedService(item.sourceId ?? search?.service, enterpriseServices)}
+      />
+    );
+  }
 
   return (
     <section className="ws-section stack" style={{ gap: 28 }}>
@@ -99,6 +304,7 @@ export default async function CatalogItemPage({
         gap: 24,
       }}>
         <section className="stack" style={{ gap: 18 }}>
+          {setupPanel}
           {item.descriptionMd && (
             <div className="nr-item" style={{ padding: 18 }}>
               <h2 className="nr-section-header" style={{ marginTop: 0 }}>What it does</h2>
@@ -185,7 +391,7 @@ export default async function CatalogItemPage({
               <p className="nr-item-meta">No API scopes requested.</p>
             ) : (
               <div className="actions-inline" style={{ gap: 6 }}>
-                {item.requestedScopes.map((scope) => (
+                {item.requestedScopes.map((scope: string) => (
                   <span className="tag" key={scope}>{scope}</span>
                 ))}
               </div>
@@ -210,7 +416,7 @@ export default async function CatalogItemPage({
                 </tr>
               </thead>
               <tbody>
-                {requests.map((request) => (
+                {requests.map((request: { id: string; type: string; status: string; reasonMd: string; requester: { displayName: string | null; email: string } | null }) => (
                   <tr key={request.id}>
                     <td>{request.type}</td>
                     <td>{request.status}</td>

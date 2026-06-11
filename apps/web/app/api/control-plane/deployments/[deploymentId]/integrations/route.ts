@@ -3,8 +3,10 @@ import type { NextRequest } from "next/server";
 import {
   AppError,
   configureControlPlaneMeetingRecorderIntegration,
+  disconnectControlPlaneSlackInstallation,
   getControlPlaneIntegrationStatus,
   runControlPlaneMeetingRecorderOperation,
+  updateControlPlaneSlackAgendaSettings,
 } from "@corgtex/domain";
 import { resolveControlPlaneRequestActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
@@ -105,8 +107,21 @@ export async function PATCH(
     const actor = await resolveControlPlaneRequestActor(request);
     const { deploymentId } = await props.params;
     const body = await parseJson(request);
+    if (body?.integrationKey === "slack") {
+      if (body?.operation !== "update_settings") {
+        throw new AppError(400, "INVALID_INPUT", "Unsupported Slack integration operation.");
+      }
+      const result = await updateControlPlaneSlackAgendaSettings(actor, {
+        deploymentId,
+        installationId: requiredString(body.installationId, "installationId"),
+        defaultAgendaChannelId: optionalString(body.defaultAgendaChannelId),
+        agendaTimezone: optionalString(body.agendaTimezone),
+        reason: optionalString(body.reason),
+      });
+      return NextResponse.json({ integration: result });
+    }
     if (body?.integrationKey !== "meeting_recorders") {
-      throw new AppError(400, "INVALID_INPUT", "Only meeting recorder integration configuration is supported.");
+      throw new AppError(400, "INVALID_INPUT", "Only meeting recorder and Slack integration configuration is supported.");
     }
     const result = await configureControlPlaneMeetingRecorderIntegration(actor, {
       deploymentId,
@@ -139,8 +154,19 @@ export async function POST(
     const actor = await resolveControlPlaneRequestActor(request);
     const { deploymentId } = await props.params;
     const body = await parseJson(request);
+    if (body?.integrationKey === "slack") {
+      if (body?.operation !== "disconnect") {
+        throw new AppError(400, "INVALID_INPUT", "Unsupported Slack integration operation.");
+      }
+      const result = await disconnectControlPlaneSlackInstallation(actor, {
+        deploymentId,
+        installationId: requiredString(body.installationId, "installationId"),
+        reason: optionalString(body.reason),
+      });
+      return NextResponse.json({ operation: result });
+    }
     if (body?.integrationKey !== "meeting_recorders") {
-      throw new AppError(400, "INVALID_INPUT", "Only meeting recorder integration operations are supported.");
+      throw new AppError(400, "INVALID_INPUT", "Only meeting recorder and Slack integration operations are supported.");
     }
     const joinAt = optionalString(body.joinAt);
     const result = await runControlPlaneMeetingRecorderOperation(actor, {

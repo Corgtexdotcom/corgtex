@@ -309,12 +309,13 @@ export async function exchangeSlackOAuthCode(code: string, redirectUri: string) 
   return response;
 }
 
-export async function saveSlackInstallation(actor: AppActor, params: {
-  workspaceId: string;
-  oauthResponse: Awaited<ReturnType<typeof exchangeSlackOAuthCode>>;
-}) {
-  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, allowedRoles: ["ADMIN"] });
+export type SlackOAuthResponse = Awaited<ReturnType<typeof exchangeSlackOAuthCode>>;
 
+export async function saveSlackInstallationForWorkspace(params: {
+  workspaceId: string;
+  oauthResponse: SlackOAuthResponse;
+  installedByUserId?: string | null;
+}) {
   const teamId = params.oauthResponse.team?.id;
   invariant(teamId, 400, "INVALID_SLACK_INSTALLATION", "Slack OAuth response did not include a team id.");
 
@@ -337,7 +338,7 @@ export async function saveSlackInstallation(actor: AppActor, params: {
       scopes: grantedScopes,
       optionalScopes,
       status: "ACTIVE",
-      installedByUserId: actor.kind === "user" ? actor.user.id : null,
+      installedByUserId: params.installedByUserId ?? null,
       installedAt: new Date(),
       disconnectedAt: null,
       lastError: null,
@@ -354,9 +355,21 @@ export async function saveSlackInstallation(actor: AppActor, params: {
       botTokenEnc,
       scopes: grantedScopes,
       optionalScopes,
-      installedByUserId: actor.kind === "user" ? actor.user.id : null,
+      installedByUserId: params.installedByUserId ?? null,
       settings: slackArchiveSettings(grantedScopes),
     },
+  });
+}
+
+export async function saveSlackInstallation(actor: AppActor, params: {
+  workspaceId: string;
+  oauthResponse: SlackOAuthResponse;
+}) {
+  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, allowedRoles: ["ADMIN"] });
+  return saveSlackInstallationForWorkspace({
+    workspaceId: params.workspaceId,
+    oauthResponse: params.oauthResponse,
+    installedByUserId: actor.kind === "user" ? actor.user.id : null,
   });
 }
 

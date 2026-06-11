@@ -272,6 +272,47 @@ describe("communication Slack integration", () => {
     }));
   });
 
+  it("stores Slack installations for a target workspace without workspace membership checks", async () => {
+    const { saveSlackInstallationForWorkspace } = await import("./communication");
+    prismaMock.communicationInstallation.upsert.mockResolvedValueOnce({ id: "install-1" });
+
+    await saveSlackInstallationForWorkspace({
+      workspaceId: "workspace-1",
+      installedByUserId: "operator-1",
+      oauthResponse: {
+        ok: true,
+        team: { id: "T1", name: "Team" },
+        enterprise: { id: "E1" },
+        app_id: "A1",
+        bot_user_id: "B1",
+        access_token: "xoxb-token",
+        scope: "commands, chat:write, channels:history",
+      } as any,
+    });
+
+    expect(prismaMock.communicationInstallation.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: { provider_externalWorkspaceId: { provider: "SLACK", externalWorkspaceId: "T1" } },
+      update: expect.objectContaining({
+        workspaceId: "workspace-1",
+        externalOrgId: "E1",
+        externalTeamName: "Team",
+        appId: "A1",
+        botUserId: "B1",
+        botTokenEnc: "enc:xoxb-token",
+        scopes: ["commands", "chat:write", "channels:history"],
+        optionalScopes: ["channels:history"],
+        status: "ACTIVE",
+        installedByUserId: "operator-1",
+      }),
+      create: expect.objectContaining({
+        workspaceId: "workspace-1",
+        provider: "SLACK",
+        externalWorkspaceId: "T1",
+        installedByUserId: "operator-1",
+      }),
+    }));
+  });
+
   it("syncs accessible public Slack channel history without storing bot messages", async () => {
     const { syncSlackPublicArchiveForWorkspace } = await import("./communication");
     prismaMock.communicationInstallation.findFirst.mockResolvedValueOnce({

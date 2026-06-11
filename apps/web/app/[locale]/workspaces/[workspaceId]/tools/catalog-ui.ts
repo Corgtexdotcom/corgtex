@@ -8,6 +8,8 @@ export type AppIntegrationDepth = "CATALOG_ONLY" | "LAUNCHABLE" | "MCP_ACTIONABL
 export type CatalogItemForUi = {
   id: string;
   type: CatalogItemType;
+  sourceType?: string;
+  sourceId?: string | null;
   title: string;
   outcome: string | null;
   descriptionMd: string | null;
@@ -113,6 +115,14 @@ function isEnterpriseServiceItem(item: CatalogItemForUi) {
   return item.category === "ENTERPRISE_SERVICES";
 }
 
+function isToolSetupItem(item: CatalogItemForUi) {
+  return item.sourceType === "MEETING_RECORDER"
+    || item.sourceType === "DATA_SOURCE"
+    || (item.sourceType === "MANUAL" && item.sourceId === "webhooks")
+    || item.sourceType === "AI_WORKSPACE"
+    || item.sourceType === "ENTERPRISE_SERVICE";
+}
+
 export function getCatalogCardActions(
   item: CatalogItemForUi,
   { workspaceId, canManageCatalog }: { workspaceId: string; canManageCatalog: boolean },
@@ -125,18 +135,37 @@ export function getCatalogCardActions(
     variant: "secondary",
   };
 
+  if (!disabled && isToolSetupItem(item) && item.accessMode === "ADMIN_ONLY" && !canManageCatalog) {
+    return [{ kind: "status", label: "Admin setup required" }, details];
+  }
+
   if (item.type === "CONNECTOR") {
     if (disabled) return [{ kind: "status", label: "Disabled" }, details];
     if (item.accessMode === "ADMIN_ONLY" && !canManageCatalog) {
       return [{ kind: "status", label: "Admin setup required" }, details];
     }
-    return item.url
-      ? [{ kind: "link", label: isAiWorkspaceItem(item) ? "Set up" : "Connect", href: item.url, variant: "primary" }, details]
-      : [details];
+    return [{
+      kind: "link",
+      label: isAiWorkspaceItem(item) ? "Set up" : "Connect",
+      href: details.href,
+      variant: "primary",
+    }];
   }
 
   if (item.type === "APP" || item.type === "TOOL") {
     if (disabled) return [details];
+    if (isToolSetupItem(item)) {
+      const actions: CatalogCardAction[] = [{
+        kind: "link",
+        label: item.accessMode === "REQUEST" ? "View setup" : "Manage",
+        href: details.href,
+        variant: "primary",
+      }];
+      if (item.accessMode === "REQUEST") {
+        actions.push({ kind: "request", label: "Request access", requestType: "ACCESS", variant: "secondary" });
+      }
+      return actions;
+    }
     if (item.type === "APP") {
       if (item.installationStatus === "INSTALLED" && item.url) {
         return [{ kind: "link", label: "Open app", href: item.url, variant: "primary" }, details];
@@ -168,6 +197,9 @@ export function getCatalogCardActions(
   }
 
   if (disabled) return [details];
+  if (item.type === "DATA_SOURCE" || isToolSetupItem(item)) {
+    return [{ kind: "link", label: "Manage", href: details.href, variant: "primary" }];
+  }
   if (item.url && (item.accessMode !== "ADMIN_ONLY" || canManageCatalog)) {
     const label = item.type === "AGENT" ? "Manage" : "Open settings";
     return [{ kind: "link", label, href: item.url, variant: "primary" }, details];

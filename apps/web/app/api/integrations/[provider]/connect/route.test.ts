@@ -11,6 +11,12 @@ vi.mock("@/lib/auth", () => ({
   requirePageActor,
 }));
 
+vi.mock("@/lib/http", () => ({
+  handleRouteError: (error: Error & { status?: number; code?: string }) => Response.json({
+    error: { code: error.code ?? "INTERNAL_ERROR", message: error.message },
+  }, { status: error.status ?? 500 }),
+}));
+
 vi.mock("@corgtex/domain", () => ({
   createIntegrationOAuthState,
   requireWorkspaceMembership,
@@ -95,7 +101,7 @@ describe("GET /api/integrations/[provider]/connect", () => {
     expect(response.headers.get("set-cookie")).toContain("corgtex_microsoft_oauth_state=signed-state");
   });
 
-  it("redirects missing provider config back to settings with a safe error", async () => {
+  it("redirects missing provider config back to Tools with a safe error", async () => {
     vi.stubEnv("GOOGLE_CLIENT_ID", "");
     const { GET } = await import("./route");
     const response = await GET(
@@ -103,7 +109,7 @@ describe("GET /api/integrations/[provider]/connect", () => {
       { params: Promise.resolve({ provider: "google" }) },
     );
 
-    expect(response.headers.get("location")).toBe("https://app.corgtex.com/workspaces/ws-1/settings?tab=general&integration=google&integrationStatus=error&integrationError=google_not_configured");
+    expect(response.headers.get("location")).toBe("https://app.corgtex.com/workspaces/ws-1/tools?type=CONNECTOR&q=google&integration=google&integrationStatus=error&integrationError=google_not_configured");
     expect(response.headers.get("set-cookie")).toBeNull();
   });
 });

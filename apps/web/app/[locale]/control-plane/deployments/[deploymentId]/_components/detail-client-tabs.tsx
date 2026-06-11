@@ -14,6 +14,7 @@ import {
 import {
   configureMeetingRecorderIntegrationAction,
   configureSupportConnectorAction,
+  disconnectControlPlaneSlackInstallationAction,
   runSupportOperationAction,
   runMeetingRecorderOperationAction,
   recordBreakGlassAction,
@@ -32,9 +33,10 @@ import {
   setEnterpriseAppSurfaceFromControlPlaneAction,
   probeEnterpriseAppHealthFromControlPlaneAction,
   revokeEnterpriseAppSessionsFromControlPlaneAction,
+  updateControlPlaneSlackAgendaSettingsAction,
 } from "../../../actions";
 
-type DetailTabId = "overview" | "agents" | "config" | "users" | "recorders" | "releases" | "logs";
+type DetailTabId = "overview" | "agents" | "config" | "tools" | "users" | "recorders" | "releases" | "logs";
 
 const detailPanelClass = "rounded-lg border border-line bg-bg-alt p-4";
 const detailInnerPanelClass = "rounded-md border border-line bg-surface p-3";
@@ -86,7 +88,8 @@ export function CustomerDetailClientTabs({
   const tabs = [
     { id: "overview", label: "Overview" },
     { id: "agents", label: "Agents & Governance" },
-    { id: "config", label: "Config & Tools" },
+    { id: "config", label: "Config" },
+    { id: "tools", label: "Tools & Integrations" },
     { id: "users", label: "Users & Access" },
     { id: "recorders", label: "Recorders" },
     { id: "releases", label: "Releases & Matrix" },
@@ -118,6 +121,12 @@ export function CustomerDetailClientTabs({
     : [];
   const canManageEnterpriseApps = Boolean(enterpriseApps.canManage && customer.managedWorkspaceId);
   const integrationRows = Array.isArray(integrations.integrations) ? integrations.integrations : [];
+  const availableConnectors = Array.isArray(integrations.availableConnectors) ? integrations.availableConnectors : [];
+  const slackConnector = availableConnectors.find((connector: any) => connector.key === "slack") ?? null;
+  const slackIntegration = integrationRows.find((integration: any) => integration.label === "SLACK") ?? null;
+  const slackSettings = slackIntegration?.settings && typeof slackIntegration.settings === "object" && !Array.isArray(slackIntegration.settings)
+    ? slackIntegration.settings as Record<string, unknown>
+    : {};
   const recorderIntegration = integrationRows.find((integration: any) => integration.key === "meeting_recorders") ?? null;
   const recorderReadiness = recorderIntegration?.readiness ?? null;
   const recorderFailedChecks = Array.isArray(recorderReadiness?.failedChecks)
@@ -646,6 +655,187 @@ export function CustomerDetailClientTabs({
                   Save settings
                 </button>
               </form>
+            </div>
+          </div>
+        )}
+
+        {/* TOOLS & INTEGRATIONS TAB */}
+        {activeTab === "tools" && (
+          <div className="grid grid-cols-1 gap-5 lg:grid-cols-3">
+            <div className="space-y-6 lg:col-span-2">
+              <div className={`${detailPanelClass} space-y-4`}>
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                  <div>
+                    <h3 className="text-sm font-semibold text-white">Managed Connector Setup</h3>
+                    <p className="mt-0.5 text-[10px] text-muted">Installable customer tools, OAuth accounts, data sources, and managed workspace state.</p>
+                  </div>
+                  <StatusBadge status={customer.managedWorkspaceId ? "ready" : "requires_connector"}>
+                    {customer.managedWorkspaceId ? "Managed workspace" : "Inspect only"}
+                  </StatusBadge>
+                </div>
+
+                {integrations.error && <DisabledActionHint>{integrations.error}</DisabledActionHint>}
+
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  {availableConnectors.map((connector: any) => (
+                    <div key={connector.key} className={detailInnerPanelClass}>
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <strong className="block text-xs font-semibold text-white">{connector.label}</strong>
+                          <span className="mt-0.5 block text-[10px] text-muted">
+                            {connector.kind === "communication"
+                              ? "Public-channel workspace connection"
+                              : connector.kind === "oauth"
+                                ? "Human-owned provider consent"
+                                : "Workspace-scoped data feeds"}
+                          </span>
+                        </div>
+                        <StatusBadge status={connector.configured ? "connected" : "not_configured"}>
+                          {connector.configured ? "Connected" : "Not set"}
+                        </StatusBadge>
+                      </div>
+                      {connector.key === "slack" && (
+                        <div className="mt-3 border-t border-line/60 pt-3">
+                          {connector.canManageFromControlPlane ? (
+                            <a
+                              href={`/api/control-plane/deployments/${customer.id}/integrations/slack/install`}
+                              className={controlPlaneButtonClass}
+                            >
+                              {connector.configured ? "Reconnect Slack" : "Connect Slack"}
+                            </a>
+                          ) : (
+                            <DisabledActionHint>
+                              {customer.managedWorkspaceId ? "Slack OAuth is not configured in this environment." : "A managed workspace is required before Control Plane can connect Slack."}
+                            </DisabledActionHint>
+                          )}
+                        </div>
+                      )}
+                      {connector.requiresHumanConsent && connector.key !== "slack" && (
+                        <p className="mt-3 border-t border-line/60 pt-3 text-[10px] text-muted">
+                          Provider consent must be completed by a human account with the required tenant permissions.
+                        </p>
+                      )}
+                    </div>
+                  ))}
+                  {availableConnectors.length === 0 && (
+                    <p className="text-[11px] text-muted">No connector definitions are available for this deployment.</p>
+                  )}
+                </div>
+              </div>
+
+              <div className={`${detailPanelClass} space-y-4`}>
+                <h3 className="text-sm font-semibold text-white">Current Integration State</h3>
+                <div className="overflow-x-auto">
+                  <table className="w-full border-collapse text-xs">
+                    <thead>
+                      <tr className="border-b border-line text-left font-medium text-muted">
+                        <th className="p-3">Integration</th>
+                        <th className="p-3">Status</th>
+                        <th className="p-3">Account or Team</th>
+                        <th className="p-3">Last Activity</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-line">
+                      {integrationRows.map((integration: any) => (
+                        <tr key={integration.key} className="hover:bg-surface/40">
+                          <td className="p-3">
+                            <strong className="block text-xs text-white">{integration.label}</strong>
+                            <span className="mt-0.5 block text-[10px] text-muted">{integration.key}</span>
+                          </td>
+                          <td className="p-3">
+                            <StatusBadge status={integration.status ?? (integration.configured ? "active" : "not_configured")}>
+                              {controlPlaneLabel(integration.status ?? (integration.configured ? "active" : "not configured"))}
+                            </StatusBadge>
+                          </td>
+                          <td className="p-3 text-muted">
+                            {integration.team ?? integration.account ?? integration.driverType ?? integration.provider ?? "n/a"}
+                          </td>
+                          <td className="p-3 text-muted">
+                            {integration.lastEventAt || integration.lastSyncAt
+                              ? new Date(integration.lastEventAt ?? integration.lastSyncAt).toLocaleString()
+                              : integration.lastError ?? "No activity"}
+                          </td>
+                        </tr>
+                      ))}
+                      {integrationRows.length === 0 && (
+                        <tr>
+                          <td colSpan={4} className="py-6 text-center text-muted">No integrations are configured for this deployment.</td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+
+            <div className={`${detailPanelClass} h-fit space-y-5`}>
+              <div>
+                <h3 className="text-sm font-semibold text-white">Slack Administration</h3>
+                <p className="mt-0.5 text-[10px] text-muted">Audited settings for public-channel Slack ingestion and agenda posting.</p>
+              </div>
+
+              {slackIntegration ? (
+                <div className="space-y-4 text-xs">
+                  <div className={detailInnerPanelClass}>
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <strong className="block text-xs text-white">{slackIntegration.team ?? slackIntegration.externalWorkspaceId ?? "Slack workspace"}</strong>
+                        <span className="mt-0.5 block text-[10px] text-muted">
+                          Public channels only. Private channels and DMs stay out of ingestion.
+                        </span>
+                      </div>
+                      <StatusBadge status={slackIntegration.status}>{controlPlaneLabel(slackIntegration.status)}</StatusBadge>
+                    </div>
+                    <p className="mt-3 text-[10px] text-muted">
+                      Scopes: {Array.isArray(slackIntegration.scopes) && slackIntegration.scopes.length > 0 ? slackIntegration.scopes.join(", ") : "none recorded"}
+                    </p>
+                  </div>
+
+                  <form action={updateControlPlaneSlackAgendaSettingsAction} className="space-y-3">
+                    <input type="hidden" name="deploymentId" value={customer.id} />
+                    <input type="hidden" name="installationId" value={slackIntegration.installationId ?? String(slackIntegration.key).replace("communication_", "")} />
+                    <label className="space-y-1 block">
+                      <span className="block text-[9px] font-bold uppercase tracking-wider text-muted">Default agenda channel ID</span>
+                      <input
+                        name="defaultAgendaChannelId"
+                        defaultValue={typeof slackSettings.defaultAgendaChannelId === "string" ? slackSettings.defaultAgendaChannelId : ""}
+                        placeholder="C0123456789"
+                        className={`${controlPlaneInputClass} w-full`}
+                      />
+                    </label>
+                    <label className="space-y-1 block">
+                      <span className="block text-[9px] font-bold uppercase tracking-wider text-muted">Agenda timezone</span>
+                      <input
+                        name="agendaTimezone"
+                        defaultValue={typeof slackSettings.agendaTimezone === "string" ? slackSettings.agendaTimezone : "UTC"}
+                        placeholder="UTC"
+                        className={`${controlPlaneInputClass} w-full`}
+                      />
+                    </label>
+                    <input name="reason" required placeholder="Audit reason" className={`${controlPlaneInputClass} w-full`} />
+                    <button type="submit" className={`${detailPrimaryButtonClass} w-full`}>
+                      Save Slack settings
+                    </button>
+                  </form>
+
+                  <form action={disconnectControlPlaneSlackInstallationAction} className="space-y-3 border-t border-line pt-4">
+                    <input type="hidden" name="deploymentId" value={customer.id} />
+                    <input type="hidden" name="installationId" value={slackIntegration.installationId ?? String(slackIntegration.key).replace("communication_", "")} />
+                    <input name="reason" required placeholder="Disconnect reason" className={`${controlPlaneInputClass} w-full`} />
+                    <button type="submit" className={`${detailDangerButtonClass} w-full`}>
+                      Disconnect Slack
+                    </button>
+                  </form>
+                </div>
+              ) : slackConnector?.canManageFromControlPlane ? (
+                <a href={`/api/control-plane/deployments/${customer.id}/integrations/slack/install`} className={`${detailPrimaryButtonClass} w-full`}>
+                  Connect Slack
+                </a>
+              ) : (
+                <DisabledActionHint>
+                  {customer.managedWorkspaceId ? "Slack OAuth is not configured in this environment." : "Slack administration requires a managed workspace."}
+                </DisabledActionHint>
+              )}
             </div>
           </div>
         )}

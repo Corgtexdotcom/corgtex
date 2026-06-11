@@ -6,6 +6,7 @@ import {
   configureSupportConnector,
   createControlPlaneCustomerMember,
   deployLatestControlPlaneRelease,
+  disconnectControlPlaneSlackInstallation,
   enqueueControlPlaneDeployLatestRollout,
   assignEnterpriseAppSurface,
   fetchCustomerSupportSnapshot,
@@ -20,6 +21,7 @@ import {
   runControlPlaneReleaseOperation,
   runCustomerSupportOperation,
   setControlPlaneFeatureFlag,
+  updateControlPlaneSlackAgendaSettings,
   updateControlPlaneAgentCredentialScopes,
   updateControlPlaneAgentPolicy,
   updateControlPlaneCustomerMemberStatus,
@@ -236,6 +238,30 @@ export async function runMeetingRecorderOperationAction(formData: FormData) {
     meetingUrl: optionalString(formData, "meetingUrl"),
     joinAt: joinAtRaw ? parseDateTimeLocalWithOffset(joinAtRaw, joinAtTimezoneOffsetMinutes) : null,
     provider: optionalString(formData, "provider"),
+    reason: asString(formData, "reason"),
+  });
+  revalidateControlPlaneDeployment(deploymentId);
+}
+
+export async function updateControlPlaneSlackAgendaSettingsAction(formData: FormData) {
+  const actor = await requirePageActor();
+  const deploymentId = asString(formData, "deploymentId");
+  await updateControlPlaneSlackAgendaSettings(actor, {
+    deploymentId,
+    installationId: asString(formData, "installationId"),
+    defaultAgendaChannelId: optionalString(formData, "defaultAgendaChannelId"),
+    agendaTimezone: optionalString(formData, "agendaTimezone"),
+    reason: asString(formData, "reason"),
+  });
+  revalidateControlPlaneDeployment(deploymentId);
+}
+
+export async function disconnectControlPlaneSlackInstallationAction(formData: FormData) {
+  const actor = await requirePageActor();
+  const deploymentId = asString(formData, "deploymentId");
+  await disconnectControlPlaneSlackInstallation(actor, {
+    deploymentId,
+    installationId: asString(formData, "installationId"),
     reason: asString(formData, "reason"),
   });
   revalidateControlPlaneDeployment(deploymentId);

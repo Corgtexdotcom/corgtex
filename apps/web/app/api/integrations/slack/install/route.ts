@@ -16,7 +16,7 @@ export async function GET(request: Request) {
     }
 
     if (!env.SLACK_CLIENT_ID) {
-      return NextResponse.redirect(appRedirectUrl(request, `/workspaces/${workspaceId}/settings?slack=not-configured`));
+      return NextResponse.redirect(appRedirectUrl(request, `/workspaces/${workspaceId}/tools?type=CONNECTOR&q=slack&slack=not-configured`));
     }
 
     const state = createSlackOAuthState(workspaceId);

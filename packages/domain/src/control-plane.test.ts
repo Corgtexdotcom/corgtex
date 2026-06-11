@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppActor } from "@corgtex/shared";
 
-const { prismaMock, encryptSecretMock, decryptSecretMock, memberMocks } = vi.hoisted(() => ({
+const { prismaMock, encryptSecretMock, decryptSecretMock, memberMocks, communicationMocks } = vi.hoisted(() => ({
   prismaMock: {
     $transaction: vi.fn(async (operations: unknown[] | ((tx: unknown) => unknown)) => (
       typeof operations === "function" ? operations(prismaMock) : Promise.all(operations)
@@ -281,7 +281,9 @@ const { prismaMock, encryptSecretMock, decryptSecretMock, memberMocks } = vi.hoi
       findMany: vi.fn(),
     },
     communicationInstallation: {
+      findFirst: vi.fn(),
       findMany: vi.fn(),
+      update: vi.fn(),
     },
     workspaceToolLink: {
       count: vi.fn(),
@@ -344,6 +346,10 @@ const { prismaMock, encryptSecretMock, decryptSecretMock, memberMocks } = vi.hoi
     updateMember: vi.fn(),
     deactivateMember: vi.fn(),
   },
+  communicationMocks: {
+    saveSlackInstallationForWorkspace: vi.fn(),
+    validateSlackPostTarget: vi.fn(),
+  },
 }));
 
 vi.mock("@corgtex/shared", () => ({
@@ -355,6 +361,8 @@ vi.mock("@corgtex/shared", () => ({
     RECALL_API_KEY: "recall-key",
     RECALL_WEBHOOK_SECRET: "recall-secret",
     RECALL_REGION: "us-east-1",
+    SLACK_CLIENT_ID: "slack-client-id",
+    SLACK_CLIENT_SECRET: "slack-client-secret",
   },
   prisma: prismaMock,
   encryptSecret: encryptSecretMock,
@@ -370,6 +378,11 @@ vi.mock("./members", () => ({
   sendMemberSetupEmail: memberMocks.sendMemberSetupEmail,
   updateMember: memberMocks.updateMember,
   deactivateMember: memberMocks.deactivateMember,
+}));
+
+vi.mock("./communication", () => ({
+  saveSlackInstallationForWorkspace: communicationMocks.saveSlackInstallationForWorkspace,
+  validateSlackPostTarget: communicationMocks.validateSlackPostTarget,
 }));
 
 const operatorActor: AppActor = {
@@ -443,6 +456,22 @@ describe("control plane domain", () => {
     prismaMock.customerDeployment.findMany.mockResolvedValue([]);
     prismaMock.workspaceFeatureFlag.findUnique.mockResolvedValue(null);
     prismaMock.customerDeployment.findUnique.mockResolvedValue(null);
+    prismaMock.communicationInstallation.findFirst.mockResolvedValue(null);
+    prismaMock.communicationInstallation.update.mockResolvedValue({ id: "slack-1" });
+    communicationMocks.saveSlackInstallationForWorkspace.mockResolvedValue({
+      id: "slack-1",
+      workspaceId: "ws-1",
+      provider: "SLACK",
+      externalWorkspaceId: "T1",
+      externalTeamName: "Acme Slack",
+      scopes: ["commands", "chat:write"],
+      status: "ACTIVE",
+    });
+    communicationMocks.validateSlackPostTarget.mockResolvedValue({
+      ok: true,
+      channelId: "C123",
+      channelName: "ops",
+    });
     prismaMock.customerDeployment.upsert.mockResolvedValue({
       id: "dep-1",
       label: "Acme",
@@ -5405,5 +5434,135 @@ describe("control plane domain", () => {
       queuedJobs: 2,
       deploymentIds: ["inst-1", "inst-2"],
     });
+  });
+
+  it("saves Control Plane Slack OAuth into the managed workspace and records audit", async () => {
+    const { saveControlPlaneSlackInstallation } = await import("./control-plane");
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce({
+      id: "inst-1",
+      label: "Acme",
+      managedWorkspaceId: "ws-1",
+      managedWorkspace: { id: "ws-1", slug: "acme", name: "Acme", _count: { members: 1 } },
+      supportCredentialEnc: null,
+    });
+
+    const result = await saveControlPlaneSlackInstallation(operatorActor, {
+      deploymentId: "inst-1",
+      oauthResponse: { ok: true, team: { id: "T1", name: "Acme Slack" }, access_token: "xoxb-token" } as never,
+      reason: "Customer approved Slack connection.",
+    });
+
+    expect(communicationMocks.saveSlackInstallationForWorkspace).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      oauthResponse: { ok: true, team: { id: "T1", name: "Acme Slack" }, access_token: "xoxb-token" },
+      installedByUserId: "operator-1",
+    });
+    expect(prismaMock.customerDeploymentEvent.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        deploymentId: "inst-1",
+        action: "control_plane.integration.slack_connected",
+        meta: expect.objectContaining({
+          reason: "Customer approved Slack connection.",
+          managedWorkspaceId: "ws-1",
+          installationId: "slack-1",
+        }),
+      }),
+    }));
+    expect(result).toMatchObject({ deploymentId: "inst-1", managedWorkspaceId: "ws-1" });
+  });
+
+  it("updates Control Plane Slack agenda settings after channel validation and records audit", async () => {
+    const { updateControlPlaneSlackAgendaSettings } = await import("./control-plane");
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce({
+      id: "inst-1",
+      label: "Acme",
+      managedWorkspaceId: "ws-1",
+      managedWorkspace: { id: "ws-1", slug: "acme", name: "Acme", _count: { members: 1 } },
+      supportCredentialEnc: null,
+    });
+    prismaMock.communicationInstallation.findFirst.mockResolvedValueOnce({
+      id: "slack-1",
+      workspaceId: "ws-1",
+      provider: "SLACK",
+      status: "ACTIVE",
+      settings: { rawRetentionDays: 30 },
+    });
+    prismaMock.communicationInstallation.update.mockResolvedValueOnce({ id: "slack-1", settings: { defaultAgendaChannelId: "C123" } });
+
+    await updateControlPlaneSlackAgendaSettings(operatorActor, {
+      deploymentId: "inst-1",
+      installationId: "slack-1",
+      defaultAgendaChannelId: "C123",
+      agendaTimezone: "America/Los_Angeles",
+      reason: "Customer approved agenda posting.",
+    });
+
+    expect(communicationMocks.validateSlackPostTarget).toHaveBeenCalledWith("slack-1", "C123");
+    expect(prismaMock.communicationInstallation.update).toHaveBeenCalledWith({
+      where: { id: "slack-1" },
+      data: {
+        settings: expect.objectContaining({
+          rawRetentionDays: 30,
+          defaultAgendaChannelId: "C123",
+          defaultAgendaChannelName: "ops",
+          agendaTimezone: "America/Los_Angeles",
+        }),
+      },
+    });
+    expect(prismaMock.customerDeploymentEvent.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        action: "control_plane.integration.slack_settings_updated",
+        meta: expect.objectContaining({
+          reason: "Customer approved agenda posting.",
+          defaultAgendaChannelId: "C123",
+          defaultAgendaChannelName: "ops",
+        }),
+      }),
+    }));
+  });
+
+  it("disconnects managed Slack installations through Control Plane and records audit", async () => {
+    const { disconnectControlPlaneSlackInstallation } = await import("./control-plane");
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce({
+      id: "inst-1",
+      label: "Acme",
+      managedWorkspaceId: "ws-1",
+      managedWorkspace: { id: "ws-1", slug: "acme", name: "Acme", _count: { members: 1 } },
+      supportCredentialEnc: null,
+    });
+    prismaMock.communicationInstallation.findFirst.mockResolvedValueOnce({
+      id: "slack-1",
+      workspaceId: "ws-1",
+      provider: "SLACK",
+      status: "ACTIVE",
+      externalWorkspaceId: "T1",
+      externalTeamName: "Acme Slack",
+    });
+    prismaMock.communicationInstallation.update.mockResolvedValueOnce({ id: "slack-1", status: "DISCONNECTED" });
+
+    await disconnectControlPlaneSlackInstallation(operatorActor, {
+      deploymentId: "inst-1",
+      installationId: "slack-1",
+      reason: "Customer requested disconnect.",
+    });
+
+    expect(prismaMock.communicationInstallation.update).toHaveBeenCalledWith({
+      where: { id: "slack-1" },
+      data: expect.objectContaining({
+        status: "DISCONNECTED",
+        botTokenEnc: null,
+        disconnectedAt: expect.any(Date),
+      }),
+    });
+    expect(prismaMock.customerDeploymentEvent.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        action: "control_plane.integration.slack_disconnected",
+        meta: expect.objectContaining({
+          reason: "Customer requested disconnect.",
+          externalWorkspaceId: "T1",
+          team: "Acme Slack",
+        }),
+      }),
+    }));
   });
 });
