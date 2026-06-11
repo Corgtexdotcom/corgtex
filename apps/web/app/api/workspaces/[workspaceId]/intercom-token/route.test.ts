@@ -47,7 +47,7 @@ vi.mock("@corgtex/domain", () => ({
   AppError: MockAppError,
   requireWorkspaceMembership,
   SELF_SERVE_WORKSPACE_TOUR_KEY: "self_serve_workspace",
-  SELF_SERVE_WORKSPACE_TOUR_VERSION: "v1",
+  SELF_SERVE_WORKSPACE_TOUR_VERSION: "v2",
 }));
 
 vi.mock("@corgtex/shared", () => ({

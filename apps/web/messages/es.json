@@ -627,6 +627,8 @@
     "entitySpendRequest": "solicitud de gasto",
     "entityTension": "tensión",
     "evidence": "Archivo de evidencia",
+    "historyIndexDescription": "Abre el historial de versiones desde una acción, tensión, propuesta, objetivo o solicitud de gasto.",
+    "historyIndexTitle": "Historial de versiones",
     "historyTitle": "Historial de versiones de {item}",
     "kanbanView": "Kanban",
     "listView": "Lista",

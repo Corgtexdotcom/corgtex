@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import process from "node:process";
 import { createHmac, randomUUID } from "node:crypto";
+import { resetProcurementTrialRateLimits } from "./lib/self-serve-smoke-utils.mjs";
 
 function arg(name) {
   const prefix = `--${name}=`;
@@ -215,6 +216,19 @@ async function main() {
   const adminEmail = arg("admin-email") || process.env.SELF_SERVE_SMOKE_ADMIN_EMAIL || `admin+${runId}@${emailDomain}`;
   const companyName = arg("company") || `Corgtex Hidden Smoke ${runId}`;
   const idempotencyKey = arg("idempotency-key") || `hidden-prod-smoke-${runId}-${randomUUID()}`;
+  const smokeSecret = process.env.SMOKE_EMAIL_CAPTURE_SECRET?.trim();
+
+  if (smokeSecret) {
+    await resetProcurementTrialRateLimits({
+      baseUrl,
+      secret: smokeSecret,
+      adminEmail,
+      companyName,
+    });
+    pass("reset trial-create rate limits for hidden smoke identity");
+  } else {
+    skip("SMOKE_EMAIL_CAPTURE_SECRET missing; trial-create rate limits were not reset before hidden smoke");
+  }
 
   const trial = await postJson(`${baseUrl}/api/procurement/v1/trials`, {
     companyName,

@@ -1,11 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { evalMock } = vi.hoisted(() => ({
+const { delMock, evalMock } = vi.hoisted(() => ({
+  delMock: vi.fn(),
   evalMock: vi.fn(),
 }));
 
 vi.mock("./redis", () => ({
-  getRedisClient: vi.fn(async () => ({ eval: evalMock })),
+  getRedisClient: vi.fn(async () => ({ del: delMock, eval: evalMock })),
   isRedisConfigured: vi.fn(() => true),
   redisKey: (key: string) => `test:${key}`,
 }));
@@ -18,6 +19,7 @@ vi.mock("./env", () => ({
 
 describe("redis rate limiter", () => {
   beforeEach(() => {
+    delMock.mockReset();
     evalMock.mockReset();
   });
 
@@ -42,5 +44,19 @@ describe("redis rate limiter", () => {
 
     expect(result.allowed).toBe(false);
     expect(result.remaining).toBe(0);
+  });
+
+  it("clears Redis-backed rate limit buckets", async () => {
+    delMock.mockResolvedValue(1);
+
+    const { resetRateLimit } = await import("./rate-limiter");
+    const result = await resetRateLimit("redis:key");
+
+    expect(result).toEqual({
+      key: "redis:key",
+      memoryCleared: true,
+      redisCleared: true,
+    });
+    expect(delMock).toHaveBeenCalledWith("test:rate-limit:redis:key");
   });
 });

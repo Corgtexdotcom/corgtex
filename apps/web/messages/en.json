@@ -627,6 +627,8 @@
     "entitySpendRequest": "spend request",
     "entityTension": "tension",
     "evidence": "Evidence file",
+    "historyIndexDescription": "Open version history from an action, tension, proposal, goal, or spend request.",
+    "historyIndexTitle": "Version history",
     "historyTitle": "Version history for {item}",
     "kanbanView": "Kanban",
     "listView": "List",

@@ -9,6 +9,7 @@ import {
   firstAllowedSmokeEmailDomain,
   pollCapturedSetupEmail,
   recordSmokeRun,
+  resetProcurementTrialRateLimits,
   trimTrailingSlash,
   writeJsonArtifact,
 } from "./lib/self-serve-smoke-utils.mjs";
@@ -114,6 +115,11 @@ async function record(status) {
 
 async function driveOnboardingTour(page) {
   await page.waitForTimeout(1_500);
+  const skip = page.getByRole("button", { name: /skip to tour/i }).first();
+  if (await skip.isVisible().catch(() => false)) {
+    await skip.click();
+    await page.waitForTimeout(650);
+  }
   for (let index = 0; index < 16; index += 1) {
     const next = page.locator(".driver-popover-next-btn").first();
     if (!(await next.isVisible().catch(() => false))) break;
@@ -123,6 +129,23 @@ async function driveOnboardingTour(page) {
   const done = page.locator(".driver-popover-next-btn").first();
   if (await done.isVisible().catch(() => false)) {
     await done.click().catch(() => undefined);
+  }
+  await page.waitForTimeout(650);
+  const later = page.getByRole("button", { name: /maybe later|mas tarde/i }).first();
+  if (await later.isVisible().catch(() => false)) {
+    await Promise.all([
+      page.waitForResponse((response) => (
+        response.url().includes("/api/workspaces/") &&
+        response.url().includes("/onboarding") &&
+        response.request().method() === "POST"
+      ), { timeout: 15_000 }).catch(() => undefined),
+      later.click(),
+    ]);
+    await page.waitForTimeout(650);
+  }
+  const setupDialog = page.getByRole("dialog", { name: /set up your workspace|add your first workspace context/i }).first();
+  if (await setupDialog.isVisible().catch(() => false)) {
+    throw new Error("Onboarding setup dialog still blocks the workspace after tour acknowledgement.");
   }
 }
 
@@ -246,6 +269,14 @@ async function main() {
   const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
 
   try {
+    await resetProcurementTrialRateLimits({
+      baseUrl,
+      secret,
+      adminEmail,
+      companyName,
+    });
+    pass("trial-create rate limits reset for smoke identity", { email: adminEmail });
+
     if (siteUrl) {
       await page.goto(`${siteUrl}/pricing`, { waitUntil: "networkidle" });
       await screenshot(page, "public-pricing");

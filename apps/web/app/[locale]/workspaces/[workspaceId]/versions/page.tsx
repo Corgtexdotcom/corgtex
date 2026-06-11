@@ -45,10 +45,24 @@ export default async function WorkItemVersionsPage({
   const resolvedSearch = searchParams ? await searchParams : {};
   const entityTypeInput = typeof resolvedSearch.entityType === "string" ? resolvedSearch.entityType : "";
   const entityId = typeof resolvedSearch.entityId === "string" ? resolvedSearch.entityId : "";
-  if (!entityTypeInput || !entityId) notFound();
 
   const actor = await requirePageActor();
   const t = await getTranslations("workItems");
+  if (!entityTypeInput && !entityId) {
+    return (
+      <>
+        <div className="ws-page-header">
+          <h1>{t("historyIndexTitle")}</h1>
+          <p className="muted" style={{ margin: "8px 0 0" }}>
+            {t("historyIndexDescription")}
+          </p>
+        </div>
+      </>
+    );
+  }
+
+  if (!entityTypeInput || !entityId) notFound();
+
   const entityType = normalizeWorkItemEntityType(entityTypeInput);
   const history = await listWorkItemVersions(actor, { workspaceId, entityType, entityId });
   const href = backHref(workspaceId, entityType, entityId);

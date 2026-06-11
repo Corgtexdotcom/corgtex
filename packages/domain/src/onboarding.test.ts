@@ -38,7 +38,7 @@ describe("user workspace onboarding state", () => {
     prismaMock.userWorkspaceOnboardingState.findUnique.mockResolvedValue({
       id: "state-1",
       tourKey: "self_serve_workspace",
-      tourVersion: "v1",
+      tourVersion: "v2",
       completedAt,
       restartedAt: null,
       updatedAt: completedAt,
@@ -47,7 +47,7 @@ describe("user workspace onboarding state", () => {
 
     await expect(getUserWorkspaceOnboardingState(actor, { workspaceId: "workspace-1" })).resolves.toEqual({
       tourKey: "self_serve_workspace",
-      tourVersion: "v1",
+      tourVersion: "v2",
       completedAt,
       restartedAt: null,
       updatedAt: completedAt,
@@ -59,7 +59,7 @@ describe("user workspace onboarding state", () => {
           userId: "user-1",
           workspaceId: "workspace-1",
           tourKey: "self_serve_workspace",
-          tourVersion: "v1",
+          tourVersion: "v2",
         },
       },
     }));
@@ -72,7 +72,7 @@ describe("user workspace onboarding state", () => {
     prismaMock.userWorkspaceOnboardingState.upsert.mockResolvedValue({
       id: "state-1",
       tourKey: "self_serve_workspace",
-      tourVersion: "v1",
+      tourVersion: "v2",
       completedAt,
       restartedAt: null,
       updatedAt: completedAt,

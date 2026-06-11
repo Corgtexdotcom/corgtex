@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { AppError } from "@corgtex/domain";
-import { checkRateLimit, RATE_LIMITS } from "@corgtex/shared";
+import { checkRateLimit, env, isRedisConfigured, RATE_LIMITS, resetRateLimits } from "@corgtex/shared";
 import { z } from "zod";
 
 export const createTrialSchema = z.object({
@@ -44,6 +44,23 @@ function emailDomain(email: string) {
   return normalizeKeyPart(email.split("@")[1] ?? "unknown");
 }
 
+function smokeCaptureDomains() {
+  return new Set((env.SMOKE_EMAIL_CAPTURE_ALLOWED_DOMAINS ?? "")
+    .split(",")
+    .map((value) => normalizeKeyPart(value))
+    .filter(Boolean));
+}
+
+function assertSmokeCaptureDomain(adminEmail: string) {
+  if (!env.SMOKE_EMAIL_CAPTURE_SECRET) {
+    throw new AppError(503, "SMOKE_CAPTURE_NOT_CONFIGURED", "Smoke email capture is not configured.");
+  }
+  const domainKey = emailDomain(adminEmail);
+  if (!smokeCaptureDomains().has(domainKey)) {
+    throw new AppError(400, "SMOKE_DOMAIN_REQUIRED", "Rate-limit reset is restricted to smoke capture domains.");
+  }
+}
+
 function rateLimitResponse(message: string, resetAtMs: number) {
   return NextResponse.json(
     {
@@ -69,7 +86,7 @@ async function enforceRateLimit(key: string, limit: typeof RATE_LIMITS[keyof typ
   return null;
 }
 
-export async function rateLimitProcurementTrialCreateForHeaders(headers: HeaderReader, params: {
+export function procurementTrialCreateRateLimitKeysForHeaders(headers: HeaderReader, params: {
   adminEmail: string;
   companyName: string;
 }) {
@@ -77,12 +94,47 @@ export async function rateLimitProcurementTrialCreateForHeaders(headers: HeaderR
   const companyKey = normalizeKeyPart(params.companyName);
   const domainKey = emailDomain(params.adminEmail);
 
+  return [
+    `ip:${ip}:procurement-trial`,
+    `email:${normalizeKeyPart(params.adminEmail)}:procurement-trial`,
+    `company:${companyKey}:procurement-trial`,
+    `domain:${domainKey}:procurement-trial`,
+  ];
+}
+
+export async function rateLimitProcurementTrialCreateForHeaders(headers: HeaderReader, params: {
+  adminEmail: string;
+  companyName: string;
+}) {
+  const [
+    ipKey,
+    emailKey,
+    companyKey,
+    domainKey,
+  ] = procurementTrialCreateRateLimitKeysForHeaders(headers, params);
+
   return (
-    await enforceRateLimit(`ip:${ip}:procurement-trial`, RATE_LIMITS.PROCUREMENT_TRIAL_PER_IP, "Too many trial requests from this network.") ??
-    await enforceRateLimit(`email:${normalizeKeyPart(params.adminEmail)}:procurement-trial`, RATE_LIMITS.PROCUREMENT_TRIAL_PER_EMAIL, "Too many trial requests for this admin email.") ??
-    await enforceRateLimit(`company:${companyKey}:procurement-trial`, RATE_LIMITS.PROCUREMENT_TRIAL_PER_COMPANY, "Too many trial requests for this company.") ??
-    await enforceRateLimit(`domain:${domainKey}:procurement-trial`, RATE_LIMITS.PROCUREMENT_TRIAL_PER_DOMAIN, "Too many trial requests for this email domain.")
+    await enforceRateLimit(ipKey, RATE_LIMITS.PROCUREMENT_TRIAL_PER_IP, "Too many trial requests from this network.") ??
+    await enforceRateLimit(emailKey, RATE_LIMITS.PROCUREMENT_TRIAL_PER_EMAIL, "Too many trial requests for this admin email.") ??
+    await enforceRateLimit(companyKey, RATE_LIMITS.PROCUREMENT_TRIAL_PER_COMPANY, "Too many trial requests for this company.") ??
+    await enforceRateLimit(domainKey, RATE_LIMITS.PROCUREMENT_TRIAL_PER_DOMAIN, "Too many trial requests for this email domain.")
   );
+}
+
+export async function resetProcurementTrialCreateRateLimitsForHeaders(headers: HeaderReader, params: {
+  adminEmail: string;
+  companyName: string;
+}) {
+  assertSmokeCaptureDomain(params.adminEmail);
+  const keys = procurementTrialCreateRateLimitKeysForHeaders(headers, params);
+  const resets = await resetRateLimits(keys);
+  if (isRedisConfigured() && resets.some((reset) => !reset.redisCleared)) {
+    throw new AppError(503, "RATE_LIMIT_RESET_UNAVAILABLE", "Unable to clear production rate-limit counters.");
+  }
+  return {
+    keys,
+    resets,
+  };
 }
 
 export async function rateLimitProcurementTrialCreate(request: NextRequest, params: {
