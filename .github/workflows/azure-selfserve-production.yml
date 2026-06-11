@@ -1,0 +1,148 @@
+name: Azure Self-Serve Production
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: "what-if prints the planned production release; deploy builds images, updates Container Apps, and smokes health."
+        required: true
+        type: choice
+        default: what-if
+        options:
+          - what-if
+          - deploy
+      release_git_sha:
+        description: "Immutable Git SHA to build and release."
+        required: true
+        type: string
+      release_version:
+        description: "Release version surfaced by /api/health. Defaults to main-<short sha> when empty."
+        required: false
+        type: string
+      resource_group:
+        description: "Azure production resource group."
+        required: true
+        type: string
+        default: rg-corgtex-selfserve-production-wus3
+      acr_name:
+        description: "Azure Container Registry name."
+        required: true
+        type: string
+        default: acrcorgtexssstgwus3
+      app_url:
+        description: "Public production self-serve app origin."
+        required: true
+        type: string
+        default: https://selfserve.corgtex.com
+      web_app_name:
+        description: "Azure Container App name for web."
+        required: true
+        type: string
+        default: ca-corgtex-ss-prod-web
+      worker_app_name:
+        description: "Azure Container App name for worker."
+        required: true
+        type: string
+        default: ca-corgtex-ss-prod-worker
+      build_images:
+        description: "Build and push web/worker images into ACR before updating Container Apps."
+        required: true
+        type: boolean
+        default: true
+      run_health_smoke:
+        description: "Probe selfserve.corgtex.com/api/health and require the release SHA."
+        required: true
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: azure-selfserve-production
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Release Azure self-serve production
+    runs-on: ubuntu-latest
+    environment: azure-selfserve-production
+    env:
+      OPERATION: ${{ inputs.operation }}
+      RELEASE_GIT_SHA: ${{ inputs.release_git_sha }}
+      RELEASE_VERSION: ${{ inputs.release_version }}
+      RESOURCE_GROUP: ${{ inputs.resource_group }}
+      ACR_NAME: ${{ inputs.acr_name }}
+      APP_URL: ${{ inputs.app_url }}
+      WEB_APP_NAME: ${{ inputs.web_app_name }}
+      WORKER_APP_NAME: ${{ inputs.worker_app_name }}
+      BUILD_IMAGES: ${{ inputs.build_images }}
+      RUN_HEALTH_SMOKE: ${{ inputs.run_health_smoke }}
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+    steps:
+      - name: Validate workflow configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=()
+          for name in AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID RELEASE_GIT_SHA; do
+            if [[ -z "${!name:-}" ]]; then
+              missing+=("$name")
+            fi
+          done
+          if (( ${#missing[@]} > 0 )); then
+            printf "::error::Missing GitHub environment settings: %s\\n" "${missing[*]}"
+            exit 1
+          fi
+
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.release_git_sha }}
+
+      - name: Confirm checked out release
+        shell: bash
+        run: |
+          set -euo pipefail
+          checked_out_sha="$(git rev-parse HEAD)"
+          if [[ "$checked_out_sha" != "$RELEASE_GIT_SHA" ]]; then
+            echo "::error::Checked out $checked_out_sha but expected $RELEASE_GIT_SHA."
+            exit 1
+          fi
+
+      - name: Log in to Azure
+        if: ${{ inputs.operation == 'deploy' }}
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Release production Container Apps
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(
+            --sha "$RELEASE_GIT_SHA"
+            --resource-group "$RESOURCE_GROUP"
+            --acr-name "$ACR_NAME"
+            --web-app-name "$WEB_APP_NAME"
+            --worker-app-name "$WORKER_APP_NAME"
+            --app-url "$APP_URL"
+          )
+          if [[ -n "$RELEASE_VERSION" ]]; then
+            args+=(--version "$RELEASE_VERSION")
+          fi
+          if [[ "$OPERATION" == "what-if" ]]; then
+            args+=(--dry-run)
+          fi
+          if [[ "$BUILD_IMAGES" != "true" ]]; then
+            args+=(--skip-build)
+          fi
+          if [[ "$RUN_HEALTH_SMOKE" != "true" ]]; then
+            args+=(--skip-health-smoke)
+          fi
+          node scripts/azure-selfserve-production-release.mjs "${args[@]}"

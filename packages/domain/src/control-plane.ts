@@ -2687,6 +2687,42 @@ function isControlPlaneBackupDeployment(deployment: {
     || (label.includes("corgtex internal") && url.includes("app.corgtex.com"));
 }
 
+function controlPlaneCustomerSupportSummary(deployment: {
+  cloudProvider?: CustomerDeploymentCloudProvider | null;
+  managedWorkspaceId?: string | null;
+  supportCredentialEnc?: string | null;
+  supportConnectorStatus?: string | null;
+  supportLastSyncError?: string | null;
+}) {
+  if (isControlPlaneAzureDeployment(deployment)) {
+    const degraded = deployment.supportConnectorStatus === "degraded";
+    return {
+      supportConnectorStatus: degraded ? "degraded" : "ready",
+      supportConnectorLabel: "Self-serve support sessions",
+      supportConnectorDetail: degraded
+        ? deployment.supportLastSyncError || "Azure self-serve support sessions need attention."
+        : "Audited self-serve support sessions and provider read-model inspection are available.",
+      supportAccessMode: "self_serve_sessions" as const,
+    };
+  }
+  if (deployment.managedWorkspaceId) {
+    return {
+      supportConnectorStatus: deployment.supportConnectorStatus ?? "managed",
+      supportConnectorLabel: "Managed workspace",
+      supportConnectorDetail: "Managed workspace state is available locally.",
+      supportAccessMode: "managed_workspace" as const,
+    };
+  }
+  return {
+    supportConnectorStatus: deployment.supportConnectorStatus ?? "not_configured",
+    supportConnectorLabel: "Support connector",
+    supportConnectorDetail: deployment.supportCredentialEnc
+      ? "Enterprise support connector can inspect the remote workspace."
+      : "Enterprise support connector is required for remote Railway diagnostics.",
+    supportAccessMode: "enterprise_connector" as const,
+  };
+}
+
 function controlPlaneHealthStatus(row: ControlPlaneDeploymentRow) {
   return row.lastHealthStatus || latestSnapshotForKind(row, "HEALTH")?.status || row.provisioningStatus || "unknown";
 }
@@ -2817,6 +2853,9 @@ export type ControlPlaneCustomerSummary = {
   providerCostUrl: string | null;
   hasSupportCredential: boolean;
   supportConnectorStatus: string | null;
+  supportConnectorLabel: string;
+  supportConnectorDetail: string;
+  supportAccessMode: "enterprise_connector" | "managed_workspace" | "self_serve_sessions" | "account_only";
   lastHealthStatus: string | null;
   lastHealthError: string | null;
   lastHealthCheck: Date | null;
@@ -2846,6 +2885,7 @@ const controlPlaneCustomerSummaryDeploymentSelect = {
   lastReleaseCheck: true,
   supportCredentialEnc: true,
   supportConnectorStatus: true,
+  supportLastSyncError: true,
   managedWorkspaceId: true,
   railwayProjectId: true,
   railwayEnvironmentId: true,
@@ -2896,6 +2936,7 @@ function controlPlaneCustomerSummaryFromDeployment(params: {
     ?? deployment.remoteWorkspaceSlug
     ?? null;
   const provider = buildCustomerDeploymentProviderReadModel(deployment);
+  const support = controlPlaneCustomerSupportSummary(deployment);
   const summary: ControlPlaneCustomerSummary = {
     id: deployment.id,
     label: deployment.label || params.account?.displayName || customerSlug || deployment.id,
@@ -2910,7 +2951,10 @@ function controlPlaneCustomerSummaryFromDeployment(params: {
     providerLogsUrl: provider.providerLogsUrl,
     providerCostUrl: provider.providerCostUrl,
     hasSupportCredential: Boolean(deployment.supportCredentialEnc),
-    supportConnectorStatus: deployment.supportConnectorStatus,
+    supportConnectorStatus: support.supportConnectorStatus,
+    supportConnectorLabel: support.supportConnectorLabel,
+    supportConnectorDetail: support.supportConnectorDetail,
+    supportAccessMode: support.supportAccessMode,
     lastHealthStatus: deployment.lastHealthStatus,
     lastHealthError: deployment.lastHealthError,
     lastHealthCheck: deployment.lastHealthCheck,
@@ -2968,6 +3012,9 @@ function controlPlaneCustomerSummaryFromAccount(account: {
     providerCostUrl: null,
     hasSupportCredential: false,
     supportConnectorStatus: "not_configured",
+    supportConnectorLabel: "Deployment required",
+    supportConnectorDetail: "Deployment must be provisioned before support access can be configured.",
+    supportAccessMode: "account_only",
     lastHealthStatus: null,
     lastHealthError: null,
     lastHealthCheck: null,
