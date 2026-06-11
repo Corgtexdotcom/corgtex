@@ -270,7 +270,7 @@ export function renderNewspaperEmailHtml(params: {
                 <table role="presentation" width="100%" cellspacing="0" cellpadding="0">${sectionRows}</table>
                 ${memberNote}
                 <div style="margin-top:24px;padding-top:16px;border-top:1px solid #d9d1bd;font-size:13px;line-height:1.5;color:#5b5448;">
-                  <a href="${escapeAttribute(params.workspaceUrl)}" style="color:#6750a4;text-decoration:underline;">Open Corgtex</a> to review the source work and decisions behind this newspaper.
+                  <a href="${escapeAttribute(params.workspaceUrl)}" style="color:#6750a4;text-decoration:underline;">Open Corgtex</a> to review the source work and decisions behind this newspaper. If something looks off, the workspace is where your team can trace it back to evidence and decide what happens next.
                 </div>
               </td>
             </tr>

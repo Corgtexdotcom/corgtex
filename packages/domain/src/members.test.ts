@@ -214,6 +214,37 @@ describe("members domain", () => {
     });
   });
 
+  it("sends account setup emails with workspace onboarding context", async () => {
+    const { sendMemberSetupEmail } = await import("./members");
+
+    await expect(sendMemberSetupEmail({
+      email: "agent@smoke.example",
+      displayName: "Agent",
+      token: "setup-token",
+      workspaceName: "Smoke Workspace",
+      workspaceId: "workspace-1",
+      procurementTrialId: "trial-1",
+      runId: "run-1",
+    })).resolves.toEqual({
+      email: "agent@smoke.example",
+      sent: true,
+    });
+
+    expect(sendEmailMock).toHaveBeenCalledWith(expect.objectContaining({
+      to: "agent@smoke.example",
+      subject: "You've been invited to Corgtex",
+      html: expect.stringContaining("Smoke Workspace is ready"),
+    }));
+    expect(sendEmailMock).toHaveBeenCalledWith(expect.objectContaining({
+      html: expect.stringContaining("workspace newspaper"),
+    }));
+    expect(selfServeOpsMock.maybeCaptureSelfServeSetupEmail).toHaveBeenCalledWith(expect.objectContaining({
+      email: "agent@smoke.example",
+      setupUrl: "https://app.example/setup-account/setup-token",
+      source: "member_setup",
+    }));
+  });
+
   it("inviteMember uses the contributor role and the existing user/member path", async () => {
     prismaMock.user.upsert.mockResolvedValue({ id: "user-1", email: "user@example.com", displayName: null });
     prismaMock.member.upsert.mockResolvedValue({ id: "member-1", role: "CONTRIBUTOR" });

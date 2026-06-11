@@ -8,6 +8,7 @@ import { assertTrialMemberCapacity } from "./trial-entitlements";
 import { privacyFilter } from "./privacy";
 import { closeRoleLifecycleForMember } from "./role-onboarding";
 import { maybeCaptureSelfServeSetupEmail } from "./self-serve-ops";
+import { renderAccountSetupEmail } from "./email-templates";
 
 export type MemberInvitePolicy = "ADMINS_ONLY" | "MEMBERS_CAN_INVITE" | "MEMBERS_CAN_REQUEST";
 
@@ -28,15 +29,6 @@ function normalizeDisplayName(displayName?: string | null) {
   return displayName?.trim() || null;
 }
 
-function escapeHtml(value: string) {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll("\"", "&quot;")
-    .replaceAll("'", "&#39;");
-}
-
 export async function sendMemberSetupEmail(params: {
   email: string;
   displayName?: string | null;
@@ -49,8 +41,6 @@ export async function sendMemberSetupEmail(params: {
   const email = normalizeEmail(params.email);
   const appUrl = env.APP_URL.replace(/\/$/, "");
   const setupUrl = `${appUrl}/setup-account/${encodeURIComponent(params.token)}`;
-  const displayName = escapeHtml(params.displayName || "there");
-  const workspaceName = escapeHtml(params.workspaceName || "a Corgtex workspace");
   const subject = "You've been invited to Corgtex";
   if (!env.RESEND_API_KEY) {
     const error = "RESEND_API_KEY is not configured on the server.";
@@ -73,16 +63,12 @@ export async function sendMemberSetupEmail(params: {
     const providerStatus = await sendEmail({
       to: email,
       subject,
-      html: `
-        <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto; padding: 40px 20px;">
-          <h2>Join Corgtex</h2>
-          <p>Hi ${displayName},</p>
-          <p>You have been invited to join ${workspaceName} on Corgtex.</p>
-          <div style="margin: 32px 0;">
-            <a href="${setupUrl}" style="background-color: #111; color: #fff; padding: 12px 24px; border-radius: 6px; text-decoration: none; display: inline-block;">Set up your account</a>
-          </div>
-        </div>
-      `,
+      html: renderAccountSetupEmail({
+        setupUrl,
+        displayName: params.displayName,
+        workspaceName: params.workspaceName,
+        kind: params.procurementTrialId ? "trial-claim" : "member-invite",
+      }),
     });
     await maybeCaptureSelfServeSetupEmail({
       email,

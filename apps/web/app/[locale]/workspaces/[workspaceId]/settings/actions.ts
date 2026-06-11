@@ -29,6 +29,7 @@ import {
   disconnectCommunicationInstallation,
   updateSlackAgendaSettings,
   updateMeetingRecorderConfig,
+  renderAccountSetupEmail,
   connectMeetingTranscriptSource,
   importMeetingTranscriptSourceArtifacts,
   normalizeMeetingTranscriptSourceProvider,
@@ -38,14 +39,26 @@ import {
   enqueueOAuthConnectionSync,
   updateOAuthConnectionSyncSettings,
   requestManagedEnterpriseService,
+  type AccountAccessEmailKind,
   type EnterpriseServiceKey,
 } from "@corgtex/domain";
-import { sendEmail } from "@corgtex/shared";
+import { prisma, sendEmail } from "@corgtex/shared";
 import { meetingTranscriptArtifactsFromFormData } from "@/lib/meeting-transcript-source-artifacts";
 
-async function sendInvitationEmail(email: string, displayName: string | null, token: string) {
+async function workspaceNameForEmail(workspaceId: string) {
+  const workspace = await prisma.workspace.findUnique({
+    where: { id: workspaceId },
+    select: { name: true },
+  });
+  return workspace?.name ?? null;
+}
+
+async function sendInvitationEmail(email: string, displayName: string | null, token: string, params: {
+  workspaceId: string;
+  kind?: AccountAccessEmailKind;
+}) {
   const appUrl = process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000";
-  const resetUrl = `${appUrl}/setup-account/${token}`;
+  const resetUrl = `${appUrl}/setup-account/${encodeURIComponent(token)}`;
 
   try {
     if (!process.env.RESEND_API_KEY) {
@@ -53,19 +66,16 @@ async function sendInvitationEmail(email: string, displayName: string | null, to
       return { sent: false, error: "RESEND_API_KEY is not configured on the server." };
     }
 
+    const workspaceName = await workspaceNameForEmail(params.workspaceId);
     await sendEmail({
       to: email,
       subject: `You've been invited to Corgtex`,
-      html: `
-        <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto; padding: 40px 20px;">
-          <h2>Join Corgtex</h2>
-          <p>Hi ${displayName || 'there'},</p>
-          <p>You have been invited to join a workspace on Corgtex.</p>
-          <div style="margin: 32px 0;">
-            <a href="${resetUrl}" style="background-color: #111; color: #fff; padding: 12px 24px; border-radius: 6px; text-decoration: none; display: inline-block;">Set up your account</a>
-          </div>
-        </div>
-      `,
+      html: renderAccountSetupEmail({
+        setupUrl: resetUrl,
+        displayName,
+        workspaceName,
+        kind: params.kind ?? "member-invite",
+      }),
     });
     return { sent: true };
   } catch (error: any) {
@@ -90,7 +100,10 @@ export async function createMemberAction(formData: FormData) {
     
     let emailStatus: { sent: boolean; error?: string } | undefined;
     if ((result as any).token) {
-      emailStatus = await sendInvitationEmail(result.user.email, result.user.displayName, (result as any).token);
+      emailStatus = await sendInvitationEmail(result.user.email, result.user.displayName, (result as any).token, {
+        workspaceId,
+        kind: "admin-added",
+      });
     }
     
     refresh(workspaceId);
@@ -131,7 +144,10 @@ export async function inviteMemberAction(formData: FormData) {
       email: asString(formData, "email"),
       displayName: asOptional(formData, "displayName"),
     });
-    const emailStatus = await sendInvitationEmail(result.user.email, result.user.displayName, result.token);
+    const emailStatus = await sendInvitationEmail(result.user.email, result.user.displayName, result.token, {
+      workspaceId,
+      kind: "member-invite",
+    });
     refresh(workspaceId);
     return { success: true, emailStatus };
   } catch (error: any) {
@@ -164,7 +180,10 @@ export async function bulkInviteAction(formData: FormData) {
 
     let overallEmailStatus: { sent: boolean; error?: string } = { sent: true, error: undefined };
     for (const detail of result.details) {
-      const st = await sendInvitationEmail(detail.email, detail.displayName, detail.token);
+      const st = await sendInvitationEmail(detail.email, detail.displayName, detail.token, {
+        workspaceId,
+        kind: "member-invite",
+      });
       if (!st.sent) {
         overallEmailStatus.sent = false;
         overallEmailStatus.error = st.error || "Failed to send to one or more members.";
@@ -199,7 +218,10 @@ export async function updateMemberAction(formData: FormData) {
     
     let emailStatus: { sent: boolean; error?: string } | undefined;
     if (result.setupToken) {
-      emailStatus = await sendInvitationEmail(result.user.email, result.user.displayName, result.setupToken);
+      emailStatus = await sendInvitationEmail(result.user.email, result.user.displayName, result.setupToken, {
+        workspaceId,
+        kind: "resend-access",
+      });
     }
     
     refresh(workspaceId);
@@ -233,7 +255,10 @@ export async function resendMemberAccessLinkAction(formData: FormData) {
       workspaceId,
       memberId: asString(formData, "memberId"),
     });
-    const emailStatus = await sendInvitationEmail(result.user.email, result.user.displayName, result.token);
+    const emailStatus = await sendInvitationEmail(result.user.email, result.user.displayName, result.token, {
+      workspaceId,
+      kind: "resend-access",
+    });
     refresh(workspaceId);
     return { success: true, emailStatus };
   } catch (error: any) {
@@ -265,7 +290,10 @@ export async function approveMemberInviteRequestAction(formData: FormData) {
       workspaceId,
       requestId: asString(formData, "requestId"),
     });
-    const emailStatus = await sendInvitationEmail(result.user.email, result.user.displayName, result.token);
+    const emailStatus = await sendInvitationEmail(result.user.email, result.user.displayName, result.token, {
+      workspaceId,
+      kind: "member-invite",
+    });
     refresh(workspaceId);
     return { success: true, emailStatus };
   } catch (error: any) {

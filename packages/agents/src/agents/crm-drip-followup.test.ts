@@ -29,6 +29,7 @@ describe("CRM drip follow-up prompt", () => {
     expect(prompt).toContain("human judgment");
     expect(prompt).toContain("employee trust");
     expect(prompt).toContain("organizational control");
+    expect(prompt).toContain("daily operating picture");
     expect(prompt).toContain("Mention employee-owned, self-managed, or mission-driven fit only when the lead context supports it");
     expect(prompt).toContain("do not invent those traits");
   });

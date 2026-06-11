@@ -27,6 +27,7 @@ export * from "./cycles";
 export * from "./documents";
 export * from "./errors";
 export * from "./events";
+export * from "./email-templates";
 export * from "./ingestion-guidance";
 export * from "./crm";
 export * from "./crm-extraction";
