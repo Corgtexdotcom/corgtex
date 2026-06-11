@@ -19,6 +19,8 @@ import {
 
 import { privacyFilter } from "./privacy";
 
+export type WorkItemSort = "priority" | "date" | "alpha";
+
 export type ListActionsOptions = {
   take?: number;
   skip?: number;
@@ -30,6 +32,7 @@ export type ListActionsOptions = {
   createdTo?: Date;
   dueFrom?: Date;
   dueTo?: Date;
+  sort?: WorkItemSort;
 };
 
 function dateRangeWhere(from?: Date, to?: Date): Prisma.DateTimeFilter<"Action"> | undefined {
@@ -54,6 +57,16 @@ function appendActionWhereAnd(where: Prisma.ActionWhereInput, condition: Prisma.
   }
   and.push(condition);
   where.AND = and;
+}
+
+function workItemOrderBy(sort: WorkItemSort | undefined): Prisma.ActionOrderByWithRelationInput[] {
+  if (sort === "alpha") {
+    return [{ title: "asc" }, { createdAt: "desc" }, { id: "desc" }];
+  }
+  if (sort === "date") {
+    return [{ createdAt: "desc" }, { id: "desc" }];
+  }
+  return [{ priority: "desc" }, { createdAt: "desc" }, { id: "desc" }];
 }
 
 export async function listActions(actor: AppActor, workspaceId: string, opts?: ListActionsOptions) {
@@ -118,13 +131,56 @@ export async function listActions(actor: AppActor, workspaceId: string, opts?: L
         },
         proposal: { select: { id: true, title: true } },
       },
-      orderBy: { createdAt: "desc" },
+      orderBy: workItemOrderBy(opts?.sort),
       take,
       skip,
     }),
     prisma.action.count({ where }),
   ]);
   return { items, total, take, skip };
+}
+
+export async function getAction(actor: AppActor, params: {
+  workspaceId: string;
+  actionId: string;
+}) {
+  const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  const action = await prisma.action.findFirst({
+    where: {
+      id: params.actionId,
+      workspaceId: params.workspaceId,
+      ...privacyFilter(actor, membership),
+      archivedAt: null,
+    },
+    include: {
+      author: {
+        select: {
+          id: true,
+          displayName: true,
+          email: true,
+        },
+      },
+      assigneeMember: {
+        include: {
+          user: {
+            select: {
+              displayName: true,
+              email: true,
+            },
+          },
+        },
+      },
+      circle: {
+        select: {
+          id: true,
+          name: true,
+        },
+      },
+      proposal: { select: { id: true, title: true } },
+    },
+  });
+  invariant(action, 404, "NOT_FOUND", "Action not found.");
+  return action;
 }
 
 export async function createAction(actor: AppActor, params: {
@@ -137,6 +193,7 @@ export async function createAction(actor: AppActor, params: {
   dueAt?: Date | null;
   proposalId?: string | null;
   isPrivate?: boolean;
+  priority?: number | null;
   _membership?: import("@corgtex/shared").MembershipSummary | null;
 }) {
   const membership = await requireWorkspaceMembership({
@@ -169,6 +226,7 @@ export async function createAction(actor: AppActor, params: {
         assigneeMemberId: params.assigneeMemberId || null,
         dueAt: params.dueAt ?? null,
         proposalId,
+        priority: params.priority ?? 0,
         status: isPrivate ? "DRAFT" : "OPEN",
         isPrivate,
         publishedAt,
@@ -226,6 +284,7 @@ export async function updateAction(actor: AppActor, params: {
   title?: string;
   bodyMd?: string | null;
   status?: "DRAFT" | "OPEN" | "IN_PROGRESS" | "COMPLETED";
+  priority?: number;
   circleId?: string | null;
   assigneeMemberId?: string | null;
   dueAt?: Date | null;
@@ -252,6 +311,7 @@ export async function updateAction(actor: AppActor, params: {
     const data: Record<string, unknown> = {};
     const editsContent = params.title !== undefined
       || params.bodyMd !== undefined
+      || params.priority !== undefined
       || params.circleId !== undefined
       || params.assigneeMemberId !== undefined
       || params.dueAt !== undefined;
@@ -273,6 +333,7 @@ export async function updateAction(actor: AppActor, params: {
       data.title = title;
     }
     if (params.bodyMd !== undefined) data.bodyMd = params.bodyMd?.trim() || null;
+    if (params.priority !== undefined) data.priority = params.priority;
     if (params.status !== undefined) {
       if (params.status === "DRAFT") {
         invariant(action.status !== "COMPLETED", 400, "INVALID_STATE", "Completed actions cannot be returned to draft.");
@@ -303,7 +364,7 @@ export async function updateAction(actor: AppActor, params: {
     if (params.dueAt !== undefined) data.dueAt = params.dueAt;
     if (params.isPrivate !== undefined) data.isPrivate = params.isPrivate;
 
-    const contentFields = ["title", "bodyMd", "circleId", "assigneeMemberId", "dueAt"];
+    const contentFields = ["title", "bodyMd", "priority", "circleId", "assigneeMemberId", "dueAt"];
     const changedFields = changedDataFields(action as unknown as Record<string, unknown>, data)
       .filter((field) => contentFields.includes(field));
     if (changedFields.length > 0) {
@@ -318,6 +379,7 @@ export async function updateAction(actor: AppActor, params: {
           "workspaceId",
           "title",
           "bodyMd",
+          "priority",
           "circleId",
           "assigneeMemberId",
           "dueAt",

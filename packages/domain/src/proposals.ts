@@ -22,6 +22,7 @@ const PROPOSAL_RESOLUTION_OUTCOMES = new Set<ProposalResolutionOutcome>(["ADOPTE
 const AI_SUMMARY_WORD_THRESHOLD = 120;
 const SUPPORT_REOPEN_PROPOSALS_LIMIT = 25;
 type ProposalApprovalPolicy = Awaited<ReturnType<typeof getApprovalPolicy>>;
+type WorkItemSort = "priority" | "date" | "alpha";
 
 type CreateProposalParams = {
   workspaceId: string;
@@ -29,6 +30,7 @@ type CreateProposalParams = {
   summary?: string | null;
   includeAiSummary?: boolean;
   bodyMd: string;
+  priority?: number | null;
   circleId?: string | null;
   isPrivate?: boolean;
   authorMemberId?: string | null;
@@ -224,6 +226,7 @@ async function loadVisibleSourceTension(
       circleId: true,
       meetingId: true,
       proposalId: true,
+      priority: true,
       status: true,
     },
   });
@@ -269,6 +272,7 @@ export type ListProposalsOptions = {
   memberId?: string | null;
   status?: ProposalStatus;
   archiveFilter?: ArchiveFilter;
+  sort?: WorkItemSort;
 };
 
 function memberRelatedProposalWhere(workspaceId: string, memberId: string): Prisma.ProposalWhereInput[] {
@@ -317,6 +321,16 @@ function appendProposalWhereAnd(where: Prisma.ProposalWhereInput, condition: Pri
   where.AND = and;
 }
 
+function workItemOrderBy(sort: WorkItemSort | undefined): Prisma.ProposalOrderByWithRelationInput[] {
+  if (sort === "alpha") {
+    return [{ title: "asc" }, { createdAt: "desc" }, { id: "desc" }];
+  }
+  if (sort === "date") {
+    return [{ createdAt: "desc" }, { id: "desc" }];
+  }
+  return [{ priority: "desc" }, { createdAt: "desc" }, { id: "desc" }];
+}
+
 export async function listProposals(actor: AppActor, workspaceId: string, opts?: ListProposalsOptions) {
   const take = opts?.take ?? 20;
   const skip = opts?.skip ?? 0;
@@ -354,7 +368,7 @@ export async function listProposals(actor: AppActor, workspaceId: string, opts?:
           }
         },
       },
-      orderBy: { createdAt: "desc" },
+      orderBy: workItemOrderBy(opts?.sort),
       take,
       skip,
     }),
@@ -426,6 +440,7 @@ export async function createProposal(actor: AppActor, params: CreateProposalPara
         title,
         summary,
         bodyMd,
+        priority: params.priority ?? 0,
         circleId: params.circleId || sourceTension?.circleId || null,
         status: isPrivate ? "DRAFT" : "OPEN",
         isPrivate,
@@ -537,6 +552,7 @@ export async function createProposalFromTension(actor: AppActor, params: CreateP
         title: draft.title,
         summary: draft.summary,
         bodyMd: draft.bodyMd,
+        priority: params.priority ?? sourceTension.priority ?? 0,
         circleId: params.circleId || sourceTension.circleId || null,
         status: isPrivate ? "DRAFT" : "OPEN",
         isPrivate,
@@ -624,6 +640,7 @@ export async function updateProposal(actor: AppActor, params: {
   summary?: string | null;
   includeAiSummary?: boolean;
   bodyMd?: string;
+  priority?: number;
   circleId?: string | null;
 }) {
   const membership = await requireWorkspaceMembership({
@@ -667,9 +684,10 @@ export async function updateProposal(actor: AppActor, params: {
     } else if (params.summary !== undefined) {
       data.summary = params.summary?.trim() || null;
     }
+    if (params.priority !== undefined) data.priority = params.priority;
     if (params.circleId !== undefined) data.circleId = params.circleId || null;
 
-    const contentFields = ["title", "summary", "bodyMd", "circleId"];
+    const contentFields = ["title", "summary", "bodyMd", "priority", "circleId"];
     const changedFields = changedDataFields(proposal as unknown as Record<string, unknown>, data)
       .filter((field) => contentFields.includes(field));
     if (changedFields.length > 0) {
@@ -685,6 +703,7 @@ export async function updateProposal(actor: AppActor, params: {
           "title",
           "summary",
           "bodyMd",
+          "priority",
           "circleId",
           "status",
           "version",

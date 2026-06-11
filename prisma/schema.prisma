@@ -1577,6 +1577,7 @@ model Action {
   bodyMd           String?
   status           ActionStatus @default(DRAFT)
   version          Int          @default(1)
+  priority         Int          @default(0)
   dueAt            DateTime?
   completedVia     String?
   proposalId       String?
@@ -1596,6 +1597,7 @@ model Action {
 
   @@index([workspaceId, status])
   @@index([workspaceId, archivedAt])
+  @@index([workspaceId, priority])
 }
 
 model Tension {
@@ -1651,6 +1653,7 @@ model Proposal {
   bodyMd            String
   status            ProposalStatus             @default(DRAFT)
   version           Int                        @default(1)
+  priority          Int                        @default(0)
   resolutionOutcome ProposalResolutionOutcome?
   decisionMd        String?
   isPrivate         Boolean                    @default(false)
@@ -1676,6 +1679,7 @@ model Proposal {
 
   @@index([workspaceId, status])
   @@index([workspaceId, archivedAt])
+  @@index([workspaceId, priority])
 }
 
 model ProposalReaction {

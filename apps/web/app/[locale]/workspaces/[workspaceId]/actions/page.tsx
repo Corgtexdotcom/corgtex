@@ -1,5 +1,6 @@
 import { listActions, listCircles, listMembers, listProposals, requireWorkspaceMembership } from "@corgtex/domain";
 import { prisma } from "@corgtex/shared";
+import type { ReactNode } from "react";
 import { requirePageActor } from "@/lib/auth";
 import {
   createActionAction,
@@ -18,16 +19,14 @@ import {
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownExcerpt } from "@/lib/components/MarkdownRenderer";
 import { ItemActions } from "@/lib/components/ui/ItemActions";
-import { WorkItemFilterControls, WorkItemViewToggle } from "@/lib/components/WorkItemControls";
+import { WorkItemFilterControls, WorkItemToolbar } from "@/lib/components/WorkItemControls";
+import { WorkItemKanbanBoard, type WorkItemKanbanColumn } from "@/lib/components/WorkItemKanbanBoard";
 import { WorkItemResolutionDialog } from "@/lib/components/WorkItemResolutionDialog";
 import { canOpenPrivateDraft } from "@/lib/governance-open-guards";
 import {
   buildWorkItemQuery,
-  normalizeDateOnly,
   normalizeWorkItemView,
-  resolveWorkItemScope,
-  startOfUtcDate,
-  endOfUtcDate,
+  resolveWorkItemFilters,
 } from "@/lib/work-item-view";
 
 export const dynamic = "force-dynamic";
@@ -48,22 +47,13 @@ export default async function ActionsPage({
   const resolvedSearch = searchParams ? await searchParams : {};
   const statusFilter = normalizeActionStatusFilter(resolvedSearch.status);
   const view = normalizeWorkItemView(resolvedSearch.view);
-  const { scope, circleId, memberId } = resolveWorkItemScope(resolvedSearch);
-  const dateValues = {
-    createdFrom: normalizeDateOnly(resolvedSearch.createdFrom),
-    createdTo: normalizeDateOnly(resolvedSearch.createdTo),
-    dueFrom: normalizeDateOnly(resolvedSearch.dueFrom),
-    dueTo: normalizeDateOnly(resolvedSearch.dueTo),
-  };
+  const { circleId, memberId, sort } = resolveWorkItemFilters(resolvedSearch);
   const [{ items: actions }, { items: proposals }, circles, members] = await Promise.all([
     listActions(actor, workspaceId, {
       take: 200,
       circleId,
       memberId,
-      createdFrom: dateValues.createdFrom ? startOfUtcDate(dateValues.createdFrom) : undefined,
-      createdTo: dateValues.createdTo ? endOfUtcDate(dateValues.createdTo) : undefined,
-      dueFrom: dateValues.dueFrom ? startOfUtcDate(dateValues.dueFrom) : undefined,
-      dueTo: dateValues.dueTo ? endOfUtcDate(dateValues.dueTo) : undefined,
+      sort,
     }),
     listProposals(actor, workspaceId, { take: 50 }),
     listCircles(workspaceId),
@@ -100,8 +90,10 @@ export default async function ActionsPage({
   const activeProposals = proposals.filter((p) => p.status === "DRAFT" || p.status === "OPEN");
   const groupedActions = groupActionsByStatus(actions);
   const displayActions = groupedActions[statusFilter];
-  const filterState = { view, scope, circleId, memberId, dates: dateValues };
+  const filterState = { view, sort, circleId, memberId };
+  const columnSettingsPortalId = "work-item-actions-column-settings";
   type ActionListItem = (typeof actions)[number];
+  type ActionColumnStatus = "DRAFT" | "OPEN" | "IN_PROGRESS" | "COMPLETED";
 
   const canManageAction = (action: { authorUserId: string }) => actor.kind === "agent"
     || membership?.role === "ADMIN"
@@ -119,6 +111,7 @@ export default async function ActionsPage({
   const memberName = (member: { user: { displayName: string | null; email: string } }) => member.user.displayName || member.user.email;
 
   function renderActionCard(action: ActionListItem, compact = false) {
+    const detailHref = `/workspaces/${workspaceId}/actions/${action.id}`;
     const statusMeta = ACTION_STATUS_META[action.status as keyof typeof ACTION_STATUS_META] ?? ACTION_STATUS_META.OPEN;
     const authorName = action.author?.displayName || action.author?.email || "Unknown";
     const assigneeName = action.assigneeMember?.user?.displayName || action.assigneeMember?.user?.email;
@@ -147,10 +140,10 @@ export default async function ActionsPage({
       />
     );
 
-    let primary: React.ReactNode = null;
+    let primary: ReactNode = null;
     if (canManage && canOpenPrivateDraft(action)) {
       primary = (
-        <form action={publishActionAction}>
+        <form action={publishActionAction} data-work-item-transition={`${action.id}:OPEN`}>
           <input type="hidden" name="workspaceId" value={workspaceId} />
           <input type="hidden" name="actionId" value={action.id} />
           <button type="submit" className="primary small">{t("btnOpen")}</button>
@@ -158,7 +151,7 @@ export default async function ActionsPage({
       );
     } else if (action.status === "OPEN") {
       primary = (
-        <form action={updateActionAction}>
+        <form action={updateActionAction} data-work-item-transition={`${action.id}:IN_PROGRESS`}>
           <input type="hidden" name="workspaceId" value={workspaceId} />
           <input type="hidden" name="actionId" value={action.id} />
           <input type="hidden" name="status" value="IN_PROGRESS" />
@@ -166,25 +159,30 @@ export default async function ActionsPage({
         </form>
       );
     } else if (action.status === "IN_PROGRESS") {
-      primary = completeDialog;
+      primary = (
+        <span data-work-item-dialog={`${action.id}:COMPLETED`}>
+          {completeDialog}
+        </span>
+      );
     }
 
-    const moreItems: React.ReactNode[] = [];
+    const moreItems: ReactNode[] = [];
     if (action.status === "OPEN") {
       moreItems.push(
-        <WorkItemResolutionDialog
-          key="complete"
-          action={updateActionAction}
-          buttonLabel={t("btnComplete")}
-          title={tWork("completeActionTitle")}
-          noteName="completedVia"
-          noteLabel={tWork("completionNote")}
-          notePlaceholder={tWork("completionPlaceholder")}
-          hiddenFields={{ workspaceId, actionId: action.id, status: "COMPLETED" }}
-          submitLabel={t("btnComplete")}
-          cancelLabel={tCommon("cancel")}
-          fileLabel={tWork("evidence")}
-        />,
+        <span key="complete" data-work-item-dialog={`${action.id}:COMPLETED`}>
+          <WorkItemResolutionDialog
+            action={updateActionAction}
+            buttonLabel={t("btnComplete")}
+            title={tWork("completeActionTitle")}
+            noteName="completedVia"
+            noteLabel={tWork("completionNote")}
+            notePlaceholder={tWork("completionPlaceholder")}
+            hiddenFields={{ workspaceId, actionId: action.id, status: "COMPLETED" }}
+            submitLabel={t("btnComplete")}
+            cancelLabel={tCommon("cancel")}
+            fileLabel={tWork("evidence")}
+          />
+        </span>,
       );
     }
     if (canManage && (action.status === "OPEN" || action.status === "IN_PROGRESS")) {
@@ -193,6 +191,13 @@ export default async function ActionsPage({
           <input type="hidden" name="workspaceId" value={workspaceId} />
           <input type="hidden" name="actionId" value={action.id} />
           <button type="submit">{t("btnReturnToDraft")}</button>
+        </form>,
+      );
+      moreItems.push(
+        <form key="return-to-draft-drag" action={returnActionToDraftAction} data-work-item-transition={`${action.id}:DRAFT`} className="nr-hidden-transition-form">
+          <input type="hidden" name="workspaceId" value={workspaceId} />
+          <input type="hidden" name="actionId" value={action.id} />
+          <button type="submit" aria-hidden="true" tabIndex={-1}>{t("btnReturnToDraft")}</button>
         </form>,
       );
     }
@@ -213,6 +218,10 @@ export default async function ActionsPage({
               {t("formNotes")}
               <MarkdownEditor name="bodyMd" defaultValue={action.bodyMd ?? ""} rows={5} />
             </label>
+            <label>
+              {t("formPriority")}
+              <input name="priority" type="number" min={0} defaultValue={action.priority} />
+            </label>
             <button type="submit" className="secondary small">{action.status === "DRAFT" ? t("btnSaveDraft") : tCommon("save")}</button>
           </form>
         </details>,
@@ -228,45 +237,49 @@ export default async function ActionsPage({
     );
 
     return (
-      <div className={compact ? "nr-kanban-card" : "nr-item"} key={action.id}>
-        <div className="row" style={{ alignItems: "center" }}>
+      <div className={`${compact ? "nr-kanban-card" : "nr-item nr-list-card"} nr-clickable-card`} key={action.id}>
+        <a href={detailHref} className="nr-card-hitbox" aria-label={tWork("openItem", { title: action.title })} />
+        <div className="row nr-card-content" style={{ alignItems: "center" }}>
           <strong className="nr-item-title">
-            {action.status === "DRAFT" && <span title={t("statusDraft")} style={{ marginRight: 6 }}>◆</span>}
+            {!compact && action.status === "DRAFT" && <span title={t("statusDraft")} style={{ marginRight: 6 }}>◆</span>}
             {action.title}
           </strong>
-          <span className={`tag ${statusMeta.tagClass}`}>{t(statusMeta.labelKey)}</span>
+          {!compact && <span className={`tag ${statusMeta.tagClass}`}>{t(statusMeta.labelKey)}</span>}
         </div>
-        {action.bodyMd && <MarkdownExcerpt markdown={action.bodyMd} maxLength={compact ? 120 : 220} as="div" className="nr-excerpt" />}
-        <div className="nr-item-meta" style={{ marginTop: 8 }}>
-          {t("metaCreator", { name: authorName })}
-          {createdAge ? ` · ${createdAge}` : ""}
-          {assigneeName ? ` · ${t("metaAssignee", { name: assigneeName })}` : ""}
-          {action.circle ? ` · ${action.circle.name}` : ""}
-          {dueDate ? ` · ${t("metaDue", { date: dueDate })}` : ""}
-          {action.proposal?.title ? ` · ${t("metaLinkedToProposal", { title: action.proposal.title })}` : ""}
-          {" · "}
-          {action.version > 1 ? (
-            <a href={`/workspaces/${workspaceId}/versions?entityType=ACTION&entityId=${encodeURIComponent(action.id)}`}>v{action.version}</a>
-          ) : (
-            <>v{action.version}</>
+        <div className="nr-card-content">
+          {action.bodyMd && <MarkdownExcerpt markdown={action.bodyMd} maxLength={compact ? 120 : 220} as="div" className="nr-excerpt" />}
+          <div className="nr-item-meta" style={{ marginTop: 8 }}>
+            {t("metaCreator", { name: authorName })}
+            {createdAge ? ` · ${createdAge}` : ""}
+            {assigneeName ? ` · ${t("metaAssignee", { name: assigneeName })}` : ""}
+            {` · ${tWork("priorityN", { priority: action.priority })}`}
+            {action.circle ? ` · ${action.circle.name}` : ""}
+            {dueDate ? ` · ${t("metaDue", { date: dueDate })}` : ""}
+            {action.proposal?.title ? ` · ${t("metaLinkedToProposal", { title: action.proposal.title })}` : ""}
+            {" · "}
+            {action.version > 1 ? (
+              <a href={`/workspaces/${workspaceId}/versions?entityType=ACTION&entityId=${encodeURIComponent(action.id)}`}>v{action.version}</a>
+            ) : (
+              <>v{action.version}</>
+            )}
+          </div>
+          {action.status === "COMPLETED" && action.completedVia && (
+            <div className="nr-item-meta" style={{ marginTop: 10 }}>
+              <strong>{tWork("completionNote")}</strong>
+              <MarkdownExcerpt markdown={action.completedVia} maxLength={compact ? 120 : 220} as="div" className="nr-excerpt" />
+            </div>
+          )}
+          {evidence.length > 0 && (
+            <div className="nr-evidence-list">
+              <strong>{tWork("completionEvidence")}</strong>
+              {evidence.map((row) => (
+                <a key={row.id} href={`/workspaces/${workspaceId}/brain/sources`}>
+                  {row.document.title}
+                </a>
+              ))}
+            </div>
           )}
         </div>
-        {action.status === "COMPLETED" && action.completedVia && (
-          <div className="nr-item-meta" style={{ marginTop: 10 }}>
-            <strong>{tWork("completionNote")}</strong>
-            <MarkdownExcerpt markdown={action.completedVia} maxLength={compact ? 120 : 220} as="div" className="nr-excerpt" />
-          </div>
-        )}
-        {evidence.length > 0 && (
-          <div className="nr-evidence-list">
-            <strong>{tWork("completionEvidence")}</strong>
-            {evidence.map((row) => (
-              <a key={row.id} href={`/workspaces/${workspaceId}/brain/sources`}>
-                {row.document.title}
-              </a>
-            ))}
-          </div>
-        )}
         <ItemActions
           moreLabel={tCommon("moreActions")}
           primary={primary}
@@ -275,6 +288,46 @@ export default async function ActionsPage({
       </div>
     );
   }
+
+  function renderCompactCreateActionForm() {
+    return (
+      <details className="nr-kanban-add-card">
+        <summary className="nr-hide-marker nr-kanban-add-trigger">
+          {tWork("newDraftCard")}
+        </summary>
+        <form action={createActionAction} className="stack nr-form-section nr-inline-draft-form">
+          <input type="hidden" name="workspaceId" value={workspaceId} />
+          <input type="hidden" name="isPrivate" value="on" />
+          <label>
+            {t("formTitle")}
+            <input name="title" required />
+          </label>
+          <label>
+            {t("formNotes")}
+            <MarkdownEditor name="bodyMd" rows={4} />
+          </label>
+          <label>
+            {t("formPriority")}
+            <input name="priority" type="number" min={0} defaultValue={0} />
+          </label>
+          <button type="submit">{t("btnCreateAction")}</button>
+        </form>
+      </details>
+    );
+  }
+
+  const actionColumns: WorkItemKanbanColumn[] = (["DRAFT", "OPEN", "IN_PROGRESS", "COMPLETED"] as const).map((status: ActionColumnStatus) => ({
+    id: status,
+    label: t(ACTION_STATUS_META[status].labelKey),
+    count: groupedActions[status].length,
+    empty: <p className="muted">{t("noActionsFound")}</p>,
+    addCard: status === "DRAFT" ? renderCompactCreateActionForm() : null,
+    items: groupedActions[status].map((action) => ({
+      id: action.id,
+      status,
+      node: renderActionCard(action, true),
+    })),
+  }));
 
   return (
     <>
@@ -286,44 +339,50 @@ export default async function ActionsPage({
       </header>
 
       <section className="ws-section">
-        <WorkItemViewToggle
-          currentView={view}
-          listHref={buildWorkItemQuery({ ...filterState, status: statusFilter, view: "list" })}
-          kanbanHref={buildWorkItemQuery({ ...filterState, status: statusFilter, view: "kanban" })}
-          listLabel={tWork("listView")}
-          kanbanLabel={tWork("kanbanView")}
-          label={tWork("viewMode")}
-        />
-        <div className="nr-filter-bar nr-filter-bar-wrap">
-          {ACTION_STATUS_FILTERS.map((s) => (
-            <a
-              key={s}
-              href={buildWorkItemQuery({ ...filterState, status: s })}
-              className={`nr-filter-item ${statusFilter === s ? "nr-filter-active" : ""}`}
-            >
-              {t(ACTION_STATUS_META[s].labelKey)} ({groupedActions[s].length})
-            </a>
-          ))}
+        <div className="nr-work-board-header">
+          <div className="nr-filter-bar nr-filter-bar-wrap">
+            {ACTION_STATUS_FILTERS.map((s) => (
+              <a
+                key={s}
+                href={buildWorkItemQuery({ ...filterState, status: s })}
+                className={`nr-filter-item ${statusFilter === s ? "nr-filter-active" : ""}`}
+              >
+                {t(ACTION_STATUS_META[s].labelKey)} ({groupedActions[s].length})
+              </a>
+            ))}
+          </div>
+          <WorkItemToolbar
+            currentView={view}
+            currentSort={sort}
+            listHref={buildWorkItemQuery({ ...filterState, status: statusFilter, view: "list" })}
+            kanbanHref={buildWorkItemQuery({ ...filterState, status: statusFilter, view: "kanban" })}
+            sortLinks={{
+              priority: buildWorkItemQuery({ ...filterState, status: statusFilter, sort: "priority" }),
+              date: buildWorkItemQuery({ ...filterState, status: statusFilter, sort: "date" }),
+              alpha: buildWorkItemQuery({ ...filterState, status: statusFilter, sort: "alpha" }),
+            }}
+            listLabel={tWork("listView")}
+            kanbanLabel={tWork("kanbanView")}
+            sortLabel={tWork("sort")}
+            sortPriorityLabel={tWork("sortPriority")}
+            sortDateLabel={tWork("sortDate")}
+            sortAlphaLabel={tWork("sortAlpha")}
+            columnSettingsLabel={tWork("columnSettings")}
+            columnSettingsPortalId={view === "kanban" ? columnSettingsPortalId : undefined}
+            label={tWork("viewMode")}
+          />
         </div>
 
         <WorkItemFilterControls
           action={`/workspaces/${workspaceId}/actions`}
           status={statusFilter}
           view={view}
-          scope={scope}
+          sort={sort}
           circleId={circleId}
           memberId={memberId}
           circles={circles.map((circle) => ({ id: circle.id, label: circle.name }))}
           members={members.map((member) => ({ id: member.id, label: memberName(member) }))}
-          dates={[
-            { name: "createdFrom", label: tWork("createdFrom"), value: dateValues.createdFrom },
-            { name: "createdTo", label: tWork("createdTo"), value: dateValues.createdTo },
-            { name: "dueFrom", label: tWork("dueFrom"), value: dateValues.dueFrom },
-            { name: "dueTo", label: tWork("dueTo"), value: dateValues.dueTo },
-          ]}
           labels={{
-            scope: tWork("scope"),
-            company: tWork("companyScope"),
             circle: tWork("circle"),
             person: tWork("person"),
             allCircles: tWork("allCircles"),
@@ -334,18 +393,22 @@ export default async function ActionsPage({
         />
 
         {view === "kanban" ? (
-          <div className="nr-kanban">
-            {(["DRAFT", "OPEN", "IN_PROGRESS", "COMPLETED"] as const).map((status) => (
-              <section className="nr-kanban-column" key={status}>
-                <div className="nr-kanban-heading">
-                  <span>{t(ACTION_STATUS_META[status].labelKey)}</span>
-                  <span>{groupedActions[status].length}</span>
-                </div>
-                {groupedActions[status].length === 0 && <p className="muted">{t("noActionsFound")}</p>}
-                {groupedActions[status].map((action) => renderActionCard(action, true))}
-              </section>
-            ))}
-          </div>
+          <WorkItemKanbanBoard
+            columns={actionColumns}
+            storageKey={`work-items:${workspaceId}:actions`}
+            settingsPortalId={columnSettingsPortalId}
+            settingsLabel={tWork("columnSettings")}
+            resetLabel={tWork("resetColumns")}
+            hideLabel={tWork("hideColumn")}
+            showLabel={tWork("showColumn")}
+            moveUpLabel={tWork("moveColumnLeft")}
+            moveDownLabel={tWork("moveColumnRight")}
+            hideShortLabel={tWork("hideColumnShort")}
+            showShortLabel={tWork("showColumnShort")}
+            moveUpShortLabel={tWork("moveColumnLeftShort")}
+            moveDownShortLabel={tWork("moveColumnRightShort")}
+            dragUnavailableLabel={tWork("dragUnavailable")}
+          />
         ) : (
           <div>
             {displayActions.length === 0 && <p className="muted">{t("noActionsFound")}</p>}
@@ -354,7 +417,7 @@ export default async function ActionsPage({
         )}
       </section>
 
-      <section className="ws-section">
+      <section className={`ws-section ${view === "kanban" ? "nr-list-only-create" : ""}`}>
         <details open={resolvedSearch.open === "new"}>
           <summary className="nr-hide-marker nr-section-toggle">
             <span className="nr-section-header nr-section-header-inline">{t("newActionTitle")}</span>
@@ -368,6 +431,10 @@ export default async function ActionsPage({
             <label>
               {t("formNotes")}
               <MarkdownEditor name="bodyMd" rows={5} />
+            </label>
+            <label>
+              {t("formPriority")}
+              <input name="priority" type="number" min={0} defaultValue={0} />
             </label>
             <details>
               <summary className="secondary small nr-hide-marker" style={{ cursor: "pointer", display: "inline-block" }}>{t("formOptionalMetadata")}</summary>

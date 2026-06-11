@@ -2,7 +2,7 @@
 
 import { enforceDemoGuard } from "@/lib/demo-guard";
 import { requirePageActor } from "@/lib/auth";
-import { asString, asOptional, refresh } from "../action-utils";
+import { asString, asOptional, asOptionalInt, refresh } from "../action-utils";
 import {
   createTension,
   createProposalFromTension,
@@ -32,6 +32,7 @@ export async function createTensionAction(formData: FormData) {
     bodyMd: asOptional(formData, "bodyMd"),
     proposalId: asOptional(formData, "proposalId"),
     raisedByMemberId: asOptional(formData, "raisedByMemberId"),
+    priority: asOptionalInt(formData, "priority"),
     isPrivate: formData.get("isPrivate") === "on",
   });
   refresh(workspaceId);

@@ -1,0 +1,186 @@
+import Link from "next/link";
+import { getAction, listWorkItemEvidence, listWorkItemVersions, requireWorkspaceMembership } from "@corgtex/domain";
+import { requirePageActor } from "@/lib/auth";
+import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
+import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
+import { WorkItemResolutionDialog } from "@/lib/components/WorkItemResolutionDialog";
+import { canOpenPrivateDraft } from "@/lib/governance-open-guards";
+import { deleteActionAction, publishActionAction, returnActionToDraftAction, updateActionAction } from "../../actions";
+import { getTranslations } from "next-intl/server";
+
+export const dynamic = "force-dynamic";
+
+export default async function ActionDetailPage({
+  params,
+}: {
+  params: Promise<{ workspaceId: string; actionId: string }>;
+}) {
+  const { workspaceId, actionId } = await params;
+  const actor = await requirePageActor();
+  const t = await getTranslations("actions");
+  const tCommon = await getTranslations("common");
+  const tWork = await getTranslations("workItems");
+  const action = await getAction(actor, { workspaceId, actionId });
+  const membership = await requireWorkspaceMembership({ actor, workspaceId });
+  const [versionHistory, evidence] = await Promise.all([
+    listWorkItemVersions(actor, { workspaceId, entityType: "ACTION", entityId: actionId }),
+    listWorkItemEvidence(actor, { workspaceId, entityType: "Action", entityId: actionId }),
+  ]);
+
+  const statusClass = action.status === "DRAFT"
+    ? "info"
+    : action.status === "COMPLETED"
+      ? "success"
+      : action.status === "IN_PROGRESS"
+        ? "info"
+        : "neutral";
+  const statusLabel = {
+    DRAFT: t("statusDraft"),
+    OPEN: t("statusOpen"),
+    IN_PROGRESS: t("statusInProgress"),
+    COMPLETED: t("statusCompleted"),
+  }[action.status];
+  const authorName = action.author.displayName || action.author.email || "Unknown";
+  const assigneeName = action.assigneeMember?.user.displayName || action.assigneeMember?.user.email || null;
+  const canManage = actor.kind === "agent"
+    || membership?.role === "ADMIN"
+    || (actor.kind === "user" && action.authorUserId === actor.user.id);
+  const canSubmittedAuthorEdit = actor.kind === "user" && action.authorUserId === actor.user.id;
+  const canEditContent = action.status === "DRAFT"
+    ? canManage
+    : (action.status === "OPEN" || action.status === "IN_PROGRESS") && canSubmittedAuthorEdit;
+
+  return (
+    <>
+      <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 32 }}>
+        <div style={{ marginBottom: 16 }}>
+          <Link href={`/workspaces/${workspaceId}/actions`} style={{ textDecoration: "none", color: "var(--muted)" }}>
+            {t("backToActions")}
+          </Link>
+        </div>
+        <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2rem" }}>
+          {action.title}
+        </h1>
+        <div className="nr-masthead-meta" style={{ marginTop: 12 }}>
+          <span className={`tag ${statusClass}`}>{statusLabel}</span>
+          <span>{t("metaCreator", { name: authorName })}</span>
+          {assigneeName && <span>{t("metaAssignee", { name: assigneeName })}</span>}
+          <span>{tWork("priorityN", { priority: action.priority })}</span>
+          <span>{new Date(action.createdAt).toLocaleDateString()}</span>
+          <span>
+            {versionHistory.versions.length > 0 ? (
+              <Link href={`/workspaces/${workspaceId}/versions?entityType=ACTION&entityId=${encodeURIComponent(action.id)}`}>v{action.version}</Link>
+            ) : (
+              <>v{action.version}</>
+            )}
+          </span>
+          {action.proposal && (
+            <span>
+              <Link href={`/workspaces/${workspaceId}/proposals/${action.proposal.id}`}>{t("metaLinkedToProposal", { title: action.proposal.title })}</Link>
+            </span>
+          )}
+        </div>
+      </header>
+
+      {(canManage || canEditContent || action.status === "OPEN" || action.status === "IN_PROGRESS") && (
+        <section className="ws-section" style={{ marginBottom: 24 }}>
+          <div className="actions-inline">
+            {canManage && canOpenPrivateDraft(action) && (
+              <form action={publishActionAction}>
+                <input type="hidden" name="workspaceId" value={workspaceId} />
+                <input type="hidden" name="actionId" value={action.id} />
+                <button type="submit" className="primary small">{t("btnOpen")}</button>
+              </form>
+            )}
+            {action.status === "OPEN" && (
+              <form action={updateActionAction}>
+                <input type="hidden" name="workspaceId" value={workspaceId} />
+                <input type="hidden" name="actionId" value={action.id} />
+                <input type="hidden" name="status" value="IN_PROGRESS" />
+                <button type="submit" className="primary small">{t("btnStart")}</button>
+              </form>
+            )}
+            {(action.status === "OPEN" || action.status === "IN_PROGRESS") && (
+              <WorkItemResolutionDialog
+                action={updateActionAction}
+                buttonLabel={t("btnComplete")}
+                title={tWork("completeActionTitle")}
+                noteName="completedVia"
+                noteLabel={tWork("completionNote")}
+                notePlaceholder={tWork("completionPlaceholder")}
+                hiddenFields={{ workspaceId, actionId: action.id, status: "COMPLETED" }}
+                submitLabel={t("btnComplete")}
+                cancelLabel={tCommon("cancel")}
+                fileLabel={tWork("evidence")}
+              />
+            )}
+            {canManage && (action.status === "OPEN" || action.status === "IN_PROGRESS") && (
+              <form action={returnActionToDraftAction}>
+                <input type="hidden" name="workspaceId" value={workspaceId} />
+                <input type="hidden" name="actionId" value={action.id} />
+                <button type="submit" className="secondary small">{t("btnReturnToDraft")}</button>
+              </form>
+            )}
+            <form action={deleteActionAction}>
+              <input type="hidden" name="workspaceId" value={workspaceId} />
+              <input type="hidden" name="actionId" value={action.id} />
+              <button type="submit" className="secondary small danger">{t("btnDelete")}</button>
+            </form>
+          </div>
+          {canEditContent && (
+            <details style={{ marginTop: 12 }}>
+              <summary className="secondary small nr-hide-marker" style={{ cursor: "pointer", display: "inline-block" }}>{t("btnEdit")}</summary>
+              <form action={updateActionAction} className="stack nr-form-section" style={{ marginTop: 12 }}>
+                <input type="hidden" name="workspaceId" value={workspaceId} />
+                <input type="hidden" name="actionId" value={action.id} />
+                <label>
+                  {t("formTitle")}
+                  <input name="title" defaultValue={action.title} required />
+                </label>
+                <label>
+                  {t("formNotes")}
+                  <MarkdownEditor name="bodyMd" defaultValue={action.bodyMd ?? ""} rows={6} />
+                </label>
+                <label>
+                  {t("formPriority")}
+                  <input name="priority" type="number" min={0} defaultValue={action.priority} />
+                </label>
+                <button type="submit" className="secondary small">{action.status === "DRAFT" ? t("btnSaveDraft") : tCommon("save")}</button>
+              </form>
+            </details>
+          )}
+        </section>
+      )}
+
+      <section className="ws-section" style={{ marginBottom: 48 }}>
+        <h2 className="nr-section-header">{t("sectionNotes")}</h2>
+        <div className="nr-item">
+          {action.bodyMd ? (
+            <MarkdownRenderer markdown={action.bodyMd} variant="document" />
+          ) : (
+            <em className="muted">{t("noNotes")}</em>
+          )}
+        </div>
+      </section>
+
+      {action.status === "COMPLETED" && action.completedVia && (
+        <section className="ws-section" style={{ marginBottom: 48 }}>
+          <h2 className="nr-section-header">{t("sectionCompletion")}</h2>
+          <div className="nr-item">
+            <MarkdownRenderer markdown={action.completedVia} variant="document" />
+            {evidence.length > 0 && (
+              <div className="nr-evidence-list">
+                <strong>{tWork("completionEvidence")}</strong>
+                {evidence.map((row) => (
+                  <Link key={row.id} href={`/workspaces/${workspaceId}/brain/sources`}>
+                    {row.document.title}
+                  </Link>
+                ))}
+              </div>
+            )}
+          </div>
+        </section>
+      )}
+    </>
+  );
+}
