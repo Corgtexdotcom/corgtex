@@ -151,7 +151,7 @@ describe("procurement trials", () => {
     prismaMock.workspace.create.mockResolvedValue({ id: "ws-1", name: "Acme", slug: "acme" });
     prismaMock.workspace.update.mockResolvedValue({ id: "ws-1" });
     prismaMock.workspace.updateMany.mockResolvedValue({ count: 0 });
-    prismaMock.workspaceFeatureFlag.createMany.mockResolvedValue({ count: 6 });
+    prismaMock.workspaceFeatureFlag.createMany.mockResolvedValue({ count: 9 });
     prismaMock.workspaceBillingProfile.upsert.mockResolvedValue({});
     prismaMock.customerAccount.upsert.mockResolvedValue({ id: "cust-1", slug: "acme", primaryDeploymentId: null });
     prismaMock.customerAccount.findUnique.mockResolvedValue({ id: "cust-1", primaryDeploymentId: null });
@@ -217,6 +217,9 @@ describe("procurement trials", () => {
       data: expect.arrayContaining([
         expect.objectContaining({ flag: "TOOL_LINKS", enabled: true }),
         expect.objectContaining({ flag: "CONTEXT_MAPS", enabled: true }),
+        expect.objectContaining({ flag: "AI_WORKSPACES", enabled: true }),
+        expect.objectContaining({ flag: "OPENWORK_DEFAULT", enabled: true }),
+        expect.objectContaining({ flag: "EXECUTION_PACKETS", enabled: true }),
         expect.objectContaining({ flag: "MEETING_RECORDERS", enabled: false }),
       ]),
       skipDuplicates: true,
