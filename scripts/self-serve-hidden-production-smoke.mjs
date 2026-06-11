@@ -314,11 +314,19 @@ async function main() {
     }
     pass("trial admin can invite a colleague");
 
-    const recorder = await getJson(`${baseUrl}/api/workspaces/${trial.body.workspace.id}/meeting-recorders/config`, { cookie });
-    if (!recorder.response.ok || recorder.body.featureEnabled !== false) {
-      fail(`meeting recorder was not unavailable for self-serve trial: ${JSON.stringify(recorder.body)}`);
+    const recorder = await authedJson(baseUrl, cookie, "POST", `/api/workspaces/${trial.body.workspace.id}/onboarding/meeting-recorder`, {
+      enabled: true,
+      autoRecordEnabled: false,
+    });
+    if (
+      !recorder.response.ok ||
+      recorder.body.featureEnabled !== true ||
+      recorder.body.enabled !== true ||
+      recorder.body.autoRecordEnabled !== false
+    ) {
+      fail(`meeting recorder onboarding could not be enabled for self-serve trial: ${JSON.stringify(recorder.body)}`);
     }
-    pass("meeting recorder remains unavailable for self-serve trial");
+    pass("meeting recorder onboarding enables self-serve recorder access with auto-recording off");
   } else if (envFlag("SELF_SERVE_SMOKE_REQUIRE_SETUP")) {
     fail("SELF_SERVE_SMOKE_REQUIRE_SETUP=1 requires SELF_SERVE_SMOKE_SETUP_TOKEN or SELF_SERVE_SMOKE_SETUP_URL");
   } else {

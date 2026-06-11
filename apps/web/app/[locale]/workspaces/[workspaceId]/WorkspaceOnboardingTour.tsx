@@ -25,21 +25,6 @@ interface TourStep {
 
 type SetupMode = "setup" | "setupReturn" | null;
 
-type DriveConnection = {
-  id: string;
-  providerEmail: string | null;
-  providerAccountId: string;
-  hasDocumentScope: boolean;
-};
-
-type DriveDocument = {
-  id: string;
-  name: string;
-  mimeType: string | null;
-  webUrl: string | null;
-  modifiedAt: string | null;
-};
-
 type RecorderStatus = {
   featureEnabled: boolean;
   enabled: boolean;
@@ -97,13 +82,6 @@ export function WorkspaceOnboardingTour({
   const [hasContext, setHasContext] = useState(hasInitialKnowledge);
   const [setupMode, setSetupMode] = useState<SetupMode>(null);
   const [setupMessage, setSetupMessage] = useState<string | null>(null);
-  const [driveConnection, setDriveConnection] = useState<DriveConnection | null>(null);
-  const [driveDocuments, setDriveDocuments] = useState<DriveDocument[]>([]);
-  const [driveQuery, setDriveQuery] = useState("");
-  const [driveSelectedIds, setDriveSelectedIds] = useState<string[]>([]);
-  const [driveLoading, setDriveLoading] = useState(false);
-  const [driveSaving, setDriveSaving] = useState(false);
-  const [driveError, setDriveError] = useState<string | null>(null);
   const [recorderStatus, setRecorderStatus] = useState<RecorderStatus | null>(null);
   const [recorderLoading, setRecorderLoading] = useState(false);
   const [recorderSaving, setRecorderSaving] = useState(false);
@@ -254,36 +232,31 @@ export function WorkspaceOnboardingTour({
   }, [tourKey, tourVersion, workspaceId]);
 
   const startTour = useCallback(() => {
-    void (async () => {
-      if (setupMode === "setup" && !completedRef.current) {
-        await markCompleted();
-      }
-      setSetupMode(null);
-      setSetupMessage(null);
-      const homePath = workspaceStepUrl(workspaceId, "/");
-      if (!workspaceRouteMatches(currentUrl(), homePath)) {
-        targetStepIndexRef.current = 0;
-        router.push(homePath);
-        return;
-      }
-      driverRef.current?.drive(0);
-    })();
-  }, [markCompleted, router, setupMode, workspaceId]);
+    setSetupMode(null);
+    setSetupMessage(null);
+    const homePath = workspaceStepUrl(workspaceId, "/");
+    if (!workspaceRouteMatches(currentUrl(), homePath)) {
+      targetStepIndexRef.current = 0;
+      router.push(homePath);
+      return;
+    }
+    driverRef.current?.drive(0);
+  }, [router, workspaceId]);
 
   const finishTour = useCallback((driverObj: ReturnType<typeof driver>) => {
     driverObj.destroy();
-    if (hasContextRef.current) {
-      void markCompleted();
-      return;
-    }
-    setSetupMode("setupReturn");
+    void markCompleted().finally(() => {
+      if (!hasContextRef.current) {
+        setSetupMode("setupReturn");
+      }
+    });
   }, [markCompleted]);
 
   const initDriver = useCallback(() => {
     const driverObj = driver({
       showProgress: true,
       animate: true,
-      allowClose: true,
+      allowClose: false,
       steps: tourSteps.map((step, index) => ({
         element: step.element,
         popover: {
@@ -319,18 +292,10 @@ export function WorkspaceOnboardingTour({
           },
         },
       })),
-      onCloseClick: () => {
-        if (hasContextRef.current) {
-          void markCompleted();
-        } else {
-          setSetupMode("setupReturn");
-        }
-        driverObj.destroy();
-      },
     });
 
     return driverObj;
-  }, [finishTour, markCompleted, router, tourSteps, workspaceId]);
+  }, [finishTour, router, tourSteps, workspaceId]);
 
   const restartTour = useCallback(() => {
     setSetupMode(null);
@@ -343,53 +308,7 @@ export function WorkspaceOnboardingTour({
     driverRef.current?.drive(0);
   }, [router, workspaceId]);
 
-  const loadDriveDocuments = useCallback(async (query = "") => {
-    setDriveLoading(true);
-    setDriveError(null);
-    try {
-      const params = query.trim() ? `?q=${encodeURIComponent(query.trim())}` : "";
-      const response = await fetch(`/api/workspaces/${workspaceId}/onboarding/google-drive${params}`);
-      const data = await response.json().catch(() => null);
-      if (!response.ok) {
-        throw new Error(parseApiError(data, t("driveErrorLoad")));
-      }
-      setDriveConnection(data.connection ?? null);
-      setDriveDocuments(Array.isArray(data.documents) ? data.documents : []);
-    } catch (error) {
-      setDriveError(error instanceof Error ? error.message : t("driveErrorLoad"));
-    } finally {
-      setDriveLoading(false);
-    }
-  }, [t, workspaceId]);
-
-  const saveDriveSelection = useCallback(async () => {
-    if (driveSelectedIds.length === 0) return;
-    setDriveSaving(true);
-    setDriveError(null);
-    try {
-      const response = await fetch(`/api/workspaces/${workspaceId}/onboarding/google-drive`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ documentIds: driveSelectedIds }),
-      });
-      const data = await response.json().catch(() => null);
-      if (!response.ok) {
-        throw new Error(parseApiError(data, t("driveErrorSave")));
-      }
-      hasContextRef.current = true;
-      setHasContext(true);
-      setSetupMessage(t("driveSyncQueued"));
-      setDriveSelectedIds([]);
-      router.refresh();
-    } catch (error) {
-      setDriveError(error instanceof Error ? error.message : t("driveErrorSave"));
-    } finally {
-      setDriveSaving(false);
-    }
-  }, [driveSelectedIds, router, t, workspaceId]);
-
   const loadRecorderStatus = useCallback(async () => {
-    if (!featureFlags?.MEETING_RECORDERS) return;
     setRecorderLoading(true);
     setRecorderError(null);
     try {
@@ -404,7 +323,7 @@ export function WorkspaceOnboardingTour({
     } finally {
       setRecorderLoading(false);
     }
-  }, [featureFlags?.MEETING_RECORDERS, t, workspaceId]);
+  }, [t, workspaceId]);
 
   const enableRecorder = useCallback(async () => {
     setRecorderSaving(true);
@@ -429,14 +348,6 @@ export function WorkspaceOnboardingTour({
     }
   }, [router, t, workspaceId]);
 
-  const toggleDriveSelection = useCallback((documentId: string) => {
-    setDriveSelectedIds((current) => (
-      current.includes(documentId)
-        ? current.filter((id) => id !== documentId)
-        : [...current, documentId]
-    ));
-  }, []);
-
   const handleUploaded = useCallback((count: number) => {
     hasContextRef.current = true;
     setHasContext(true);
@@ -446,24 +357,14 @@ export function WorkspaceOnboardingTour({
   const handleSetupClose = useCallback(() => {
     if (!setupMode) return;
 
-    if (hasContextRef.current) {
-      void markCompleted().finally(() => {
-        setSetupMode(null);
-        router.refresh();
-      });
-      return;
-    }
-
     if (setupMode === "setup") {
       startTour();
       return;
     }
 
-    void markCompleted().finally(() => {
-      setSetupMode(null);
-      router.refresh();
-    });
-  }, [markCompleted, router, setupMode, startTour]);
+    setSetupMode(null);
+    router.refresh();
+  }, [router, setupMode, startTour]);
 
   useEffect(() => {
     completedRef.current = completed;
@@ -505,9 +406,8 @@ export function WorkspaceOnboardingTour({
 
   useEffect(() => {
     if (!setupMode) return;
-    void loadDriveDocuments("");
     void loadRecorderStatus();
-  }, [loadDriveDocuments, loadRecorderStatus, setupMode]);
+  }, [loadRecorderStatus, setupMode]);
 
   useEffect(() => {
     if (targetStepIndexRef.current !== null) {
@@ -553,94 +453,37 @@ export function WorkspaceOnboardingTour({
 
           <section className="onboarding-setup-panel stack">
             <div>
-              <h3>{t("driveTitle")}</h3>
-              <p className="nr-item-meta">{t("driveDescription")}</p>
-            </div>
-            {driveLoading && <p className="nr-item-meta">{t("driveLoading")}</p>}
-            {driveError && <p className="form-message form-message-error">{driveError}</p>}
-            {!driveLoading && (!driveConnection || !driveConnection.hasDocumentScope) && (
-              <div className="stack">
-                <p className="nr-item-meta">
-                  {driveConnection ? t("driveScopeNeeded") : t("driveConnectNeeded")}
-                </p>
-                <a className="button secondary small" href={`/api/integrations/google/connect?workspaceId=${workspaceId}&intent=documents`}>
-                  {t("driveConnectAction")}
-                </a>
-              </div>
-            )}
-            {driveConnection?.hasDocumentScope && (
-              <div className="stack">
-                <div className="actions-inline">
-                  <input
-                    value={driveQuery}
-                    onChange={(event) => setDriveQuery(event.target.value)}
-                    placeholder={t("driveSearchPlaceholder")}
-                  />
-                  <button type="button" className="secondary small" disabled={driveLoading} onClick={() => loadDriveDocuments(driveQuery)}>
-                    {t("driveSearchAction")}
-                  </button>
-                </div>
-                {driveDocuments.length === 0 ? (
-                  <p className="nr-item-meta">{t("driveEmpty")}</p>
-                ) : (
-                  <div className="stack onboarding-drive-list">
-                    {driveDocuments.map((document) => (
-                      <label key={document.id} className="onboarding-drive-row">
-                        <input
-                          type="checkbox"
-                          checked={driveSelectedIds.includes(document.id)}
-                          onChange={() => toggleDriveSelection(document.id)}
-                        />
-                        <span>
-                          <strong>{document.name}</strong>
-                          <small>{document.mimeType ?? t("driveUnknownType")}</small>
-                        </span>
-                      </label>
-                    ))}
-                  </div>
-                )}
-                <button type="button" disabled={driveSelectedIds.length === 0 || driveSaving} onClick={saveDriveSelection}>
-                  {driveSaving ? t("driveSaving") : t("driveSaveAction", { count: driveSelectedIds.length })}
-                </button>
-              </div>
-            )}
-          </section>
-
-          <section className="onboarding-setup-panel stack">
-            <div>
               <h3>{t("connectRecorderTitle")}</h3>
               <p className="nr-item-meta">{t("connectRecorderDescription")}</p>
             </div>
-            {!featureFlags?.MEETING_RECORDERS ? (
-              <p className="nr-item-meta">{t("recorderUnavailable")}</p>
-            ) : (
-              <div className="stack">
-                {recorderLoading && <p className="nr-item-meta">{t("recorderLoading")}</p>}
-                {recorderError && <p className="form-message form-message-error">{recorderError}</p>}
-                {recorderStatus && (
-                  <div className="nr-item">
-                    <div className="row">
-                      <strong className="nr-item-title">{t("recorderStatusTitle")}</strong>
-                      <span className="tag">{recorderStatus.enabled ? t("recorderStatusEnabled") : t("recorderStatusDisabled")}</span>
-                    </div>
-                    <p className="nr-item-meta">
-                      {t("recorderMeta", {
-                        provider: recorderStatus.defaultProvider,
-                        minutes: recorderStatus.monthlyMinuteCap,
-                      })}
-                    </p>
+            <div className="stack">
+              {recorderLoading && <p className="nr-item-meta">{t("recorderLoading")}</p>}
+              {recorderError && <p className="form-message form-message-error">{recorderError}</p>}
+              {recorderStatus ? (
+                <div className="nr-item">
+                  <div className="row">
+                    <strong className="nr-item-title">{t("recorderStatusTitle")}</strong>
+                    <span className="tag">{recorderStatus.enabled ? t("recorderStatusEnabled") : t("recorderStatusDisabled")}</span>
                   </div>
-                )}
-                <div className="actions-inline">
-                  <button type="button" className="secondary small" disabled={recorderSaving || recorderStatus?.enabled === true} onClick={enableRecorder}>
-                    {recorderSaving ? t("recorderSaving") : t("connectRecorderAction")}
-                  </button>
-                  <a className="link-button secondary" href={workspaceStepUrl(workspaceId, meetingRecorderOnboardingPath)}>
-                    {t("recorderDetailsAction")}
-                  </a>
+                  <p className="nr-item-meta">
+                    {t("recorderMeta", {
+                      provider: recorderStatus.defaultProvider,
+                      minutes: recorderStatus.monthlyMinuteCap,
+                    })}
+                  </p>
                 </div>
+              ) : (
+                <p className="nr-item-meta">{t("recorderSetupReady")}</p>
+              )}
+              <div className="actions-inline">
+                <button type="button" className="secondary small" disabled={recorderSaving || recorderStatus?.enabled === true} onClick={enableRecorder}>
+                  {recorderSaving ? t("recorderSaving") : t("connectRecorderAction")}
+                </button>
+                <a className="link-button secondary" href={workspaceStepUrl(workspaceId, meetingRecorderOnboardingPath)}>
+                  {t("recorderDetailsAction")}
+                </a>
               </div>
-            )}
+            </div>
           </section>
         </div>
 
