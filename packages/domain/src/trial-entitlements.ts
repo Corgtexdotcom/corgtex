@@ -31,6 +31,9 @@ const TRIAL_ENABLED_FEATURE_FLAGS = [
   ["TOOL_LINKS", true],
   ["CONTEXT_MAPS", true],
   ["SETTINGS_GENERAL", true],
+  ["AI_WORKSPACES", true],
+  ["OPENWORK_DEFAULT", true],
+  ["EXECUTION_PACKETS", true],
   ["MEETING_RECORDERS", false],
 ] as const;
 
