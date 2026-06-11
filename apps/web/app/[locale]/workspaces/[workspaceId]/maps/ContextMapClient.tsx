@@ -1069,8 +1069,11 @@ export default function ContextMapClient({
   const [showFilters, setShowFilters] = useState(false);
   const [typeFilter, setTypeFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("active");
-  const [inspectorDock, setInspectorDock] = useState<InspectorDock>(storedInspectorDock);
-  const [inspectorWidth, setInspectorWidth] = useState(storedInspectorWidth);
+  // Inspector preferences must start at the SSR defaults and load from localStorage
+  // after mount, otherwise the first client render mismatches the server HTML.
+  const [inspectorDock, setInspectorDock] = useState<InspectorDock>("right");
+  const [inspectorWidth, setInspectorWidth] = useState(INSPECTOR_DEFAULT_WIDTH);
+  const [inspectorPrefsLoaded, setInspectorPrefsLoaded] = useState(false);
   const [layoutDirty, setLayoutDirty] = useState(false);
   const [expandedDiffId, setExpandedDiffId] = useState<string | null>(data.proposedDiffs[0]?.id ?? null);
   const [editingDiffId, setEditingDiffId] = useState<string | null>(null);
@@ -1216,25 +1219,27 @@ export default function ContextMapClient({
   const [edges, setEdges, onEdgesChange] = useEdgesState<ContextMapFlowEdge>(routedEdges);
 
   useEffect(() => {
+    setInspectorWidth(storedInspectorWidth());
     const updateLayout = () => {
       const compact = window.innerWidth < 920;
       setIsCompactLayout(compact);
       setInspectorDock(compact ? "bottom" : storedInspectorDock());
     };
     updateLayout();
+    setInspectorPrefsLoaded(true);
     window.addEventListener("resize", updateLayout);
     return () => window.removeEventListener("resize", updateLayout);
   }, []);
 
   useEffect(() => {
-    if (typeof window === "undefined" || isCompactLayout) return;
+    if (!inspectorPrefsLoaded || isCompactLayout) return;
     window.localStorage.setItem(INSPECTOR_DOCK_STORAGE_KEY, inspectorDock);
-  }, [inspectorDock, isCompactLayout]);
+  }, [inspectorPrefsLoaded, inspectorDock, isCompactLayout]);
 
   useEffect(() => {
-    if (typeof window === "undefined") return;
+    if (!inspectorPrefsLoaded) return;
     window.localStorage.setItem(INSPECTOR_WIDTH_STORAGE_KEY, String(inspectorWidth));
-  }, [inspectorWidth]);
+  }, [inspectorPrefsLoaded, inspectorWidth]);
 
   useEffect(() => {
     if (!isFullscreen) return;
