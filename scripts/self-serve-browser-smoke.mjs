@@ -117,9 +117,9 @@ async function record(status) {
 
 async function driveOnboardingTour(page) {
   await page.waitForTimeout(1_500);
-  const skip = page.getByRole("button", { name: /skip to tour/i }).first();
-  if (await skip.isVisible().catch(() => false)) {
-    await skip.click();
+  const start = page.getByRole("button", { name: /start tour/i }).first();
+  if (await start.isVisible().catch(() => false)) {
+    await start.click();
     await page.waitForTimeout(650);
   }
   for (let index = 0; index < 16; index += 1) {

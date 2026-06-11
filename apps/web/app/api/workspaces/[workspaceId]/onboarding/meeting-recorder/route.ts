@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getMeetingRecorderConfig, updateMeetingRecorderConfig } from "@corgtex/domain";
+import { enableMeetingRecorderForWorkspace, getMeetingRecorderConfig, updateMeetingRecorderConfig } from "@corgtex/domain";
 import { resolveRequestActor } from "@/lib/auth";
 import { checkApiDemoGuard } from "@/lib/demo-guard";
 import { handleRouteError } from "@/lib/http";
@@ -34,15 +34,26 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     const { workspaceId } = await params;
     await checkApiDemoGuard(workspaceId);
     const body = await request.json() as { enabled?: unknown; autoRecordEnabled?: unknown };
-    await updateMeetingRecorderConfig(actor, {
-      workspaceId,
-      enabled: body.enabled === true,
-      autoRecordEnabled: body.autoRecordEnabled === true,
-    });
+    if (body.enabled === true) {
+      await enableMeetingRecorderForWorkspace(actor, {
+        workspaceId,
+        enabled: true,
+      });
+      await updateMeetingRecorderConfig(actor, {
+        workspaceId,
+        enabled: true,
+        autoRecordEnabled: false,
+      });
+    } else {
+      await updateMeetingRecorderConfig(actor, {
+        workspaceId,
+        enabled: false,
+        autoRecordEnabled: false,
+      });
+    }
     const config = await getMeetingRecorderConfig(actor, workspaceId);
     return NextResponse.json(recorderPayload(config));
   } catch (error) {
     return handleRouteError(error);
   }
 }
-

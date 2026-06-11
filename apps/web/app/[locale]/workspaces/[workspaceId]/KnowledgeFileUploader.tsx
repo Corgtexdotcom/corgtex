@@ -4,8 +4,6 @@ import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 
-import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
-
 const MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024;
 const IGNORED_FILE_NAMES = new Set([".ds_store"]);
 
@@ -301,12 +299,12 @@ export function KnowledgeFileUploader({
 
           <label>
             {t("uploadFilesOverallGuidance")}
-            <MarkdownEditor
+            <textarea
               name="overallGuidance"
               value={overallGuidance}
-              onValueChange={updateOverallGuidance}
               rows={3}
               placeholder={t("uploadFilesOverallGuidancePlaceholder")}
+              onChange={(event) => updateOverallGuidance(event.target.value)}
             />
           </label>
 
@@ -350,13 +348,13 @@ export function KnowledgeFileUploader({
                     </label>
                     <label>
                       {t("uploadFilesFileGuidance", { index: index + 1 })}
-                      <MarkdownEditor
+                      <textarea
                         name={`fileGuidance-${item.id}`}
                         value={item.guidance}
                         disabled={item.status === "uploading"}
-                        onValueChange={(value) => updateItem(item.id, { guidance: value })}
                         rows={3}
                         placeholder={t("uploadFilesFileGuidancePlaceholder")}
+                        onChange={(event) => updateItem(item.id, { guidance: event.target.value })}
                       />
                     </label>
                   </div>
