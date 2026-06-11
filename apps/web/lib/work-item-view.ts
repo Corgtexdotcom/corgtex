@@ -2,6 +2,8 @@ export type WorkItemViewMode = "list" | "kanban";
 
 export type WorkItemScope = "company" | "circle" | "member";
 
+export type WorkItemSort = "priority" | "date" | "alpha";
+
 export type WorkItemDateValues = Record<string, string | undefined>;
 
 const DATE_ONLY_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -12,6 +14,11 @@ export function firstSearchParam(value: string | string[] | undefined) {
 
 export function normalizeWorkItemView(value: string | string[] | undefined): WorkItemViewMode {
   return firstSearchParam(value) === "kanban" ? "kanban" : "list";
+}
+
+export function normalizeWorkItemSort(value: string | string[] | undefined): WorkItemSort {
+  const candidate = firstSearchParam(value);
+  return candidate === "date" || candidate === "alpha" ? candidate : "priority";
 }
 
 export function normalizeWorkItemScope(value: string | string[] | undefined): WorkItemScope {
@@ -39,6 +46,7 @@ export function buildWorkItemQuery(params: {
   status?: string;
   view?: WorkItemViewMode;
   scope?: WorkItemScope;
+  sort?: WorkItemSort;
   circleId?: string;
   memberId?: string;
   dates?: WorkItemDateValues;
@@ -47,6 +55,7 @@ export function buildWorkItemQuery(params: {
   if (params.status) query.set("status", params.status);
   if (params.view && params.view !== "list") query.set("view", params.view);
   if (params.scope && params.scope !== "company") query.set("scope", params.scope);
+  if (params.sort && params.sort !== "priority") query.set("sort", params.sort);
   if (params.circleId) query.set("circleId", params.circleId);
   if (params.memberId) query.set("memberId", params.memberId);
   for (const [key, value] of Object.entries(params.dates ?? {})) {
@@ -54,6 +63,13 @@ export function buildWorkItemQuery(params: {
   }
   const value = query.toString();
   return value ? `?${value}` : "?";
+}
+
+export function resolveWorkItemFilters(search: Record<string, string | string[] | undefined>) {
+  const circleId = firstSearchParam(search.circleId)?.trim() || undefined;
+  const memberId = firstSearchParam(search.memberId)?.trim() || undefined;
+  const sort = normalizeWorkItemSort(search.sort);
+  return { circleId, memberId, sort };
 }
 
 export function resolveWorkItemScope(search: Record<string, string | string[] | undefined>) {

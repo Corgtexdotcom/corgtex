@@ -17,7 +17,7 @@ function CreateProposalButton({ label }: { label: string }) {
   );
 }
 
-export function CreateProposalForm({ workspaceId }: { workspaceId: string }) {
+export function CreateProposalForm({ workspaceId, compact = false }: { workspaceId: string; compact?: boolean }) {
   const formRef = useRef<HTMLFormElement | null>(null);
   const [editorKey, setEditorKey] = useState(0);
   const router = useRouter();
@@ -31,7 +31,7 @@ export function CreateProposalForm({ workspaceId }: { workspaceId: string }) {
   }
 
   return (
-    <form ref={formRef} action={handleCreateProposal} className="stack nr-form-section mt-4">
+    <form ref={formRef} action={handleCreateProposal} className={`stack nr-form-section ${compact ? "nr-inline-draft-form" : "mt-4"}`}>
       <input type="hidden" name="workspaceId" value={workspaceId} />
       <ProposalDraftFields key={editorKey} />
       <label className="nr-checkbox-label">

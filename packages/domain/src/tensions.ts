@@ -18,6 +18,8 @@ import {
 
 import { privacyFilter } from "./privacy";
 
+type WorkItemSort = "priority" | "date" | "alpha";
+
 export type ListTensionsOptions = {
   take?: number;
   skip?: number;
@@ -29,6 +31,7 @@ export type ListTensionsOptions = {
   openedTo?: Date;
   closedFrom?: Date;
   closedTo?: Date;
+  sort?: WorkItemSort;
 };
 
 async function resolveRaisedByMemberId(tx: Prisma.TransactionClient, workspaceId: string, raisedByMemberId?: string | null) {
@@ -61,6 +64,21 @@ function appendTensionWhereAnd(where: Prisma.TensionWhereInput, condition: Prism
   }
   and.push(condition);
   where.AND = and;
+}
+
+function workItemOrderBy(sort: WorkItemSort | undefined): Prisma.TensionOrderByWithRelationInput[] {
+  if (sort === "alpha") {
+    return [{ title: "asc" }, { createdAt: "desc" }, { id: "desc" }];
+  }
+  if (sort === "date") {
+    return [{ createdAt: "desc" }, { id: "desc" }];
+  }
+  return [
+    { priority: "desc" },
+    { upvotes: { _count: "desc" } },
+    { createdAt: "desc" },
+    { id: "desc" },
+  ];
 }
 
 export async function listTensions(actor: AppActor, workspaceId: string, opts?: ListTensionsOptions) {
@@ -137,11 +155,7 @@ export async function listTensions(actor: AppActor, workspaceId: string, opts?: 
         upvotes: true,
         proposal: { select: { id: true, title: true } },
       },
-      orderBy: [
-        { upvotes: { _count: "desc" } },
-        { createdAt: "desc" },
-        { id: "desc" },
-      ],
+      orderBy: workItemOrderBy(opts?.sort),
       take,
       skip,
     }),
@@ -160,6 +174,7 @@ export async function createTension(actor: AppActor, params: {
   raisedByMemberId?: string | null;
   proposalId?: string | null;
   isPrivate?: boolean;
+  priority?: number | null;
   meetingId?: string | null;
 }) {
   const membership = await requireWorkspaceMembership({
@@ -192,6 +207,7 @@ export async function createTension(actor: AppActor, params: {
         assigneeMemberId: params.assigneeMemberId || null,
         raisedByMemberId,
         proposalId,
+        priority: params.priority ?? 0,
         status: isPrivate ? "DRAFT" : "OPEN",
         isPrivate,
         meetingId: params.meetingId || null,
@@ -260,10 +276,10 @@ export async function updateTension(actor: AppActor, params: {
   circleId?: string | null;
   assigneeMemberId?: string | null;
   raisedByMemberId?: string | null;
-	  priority?: number;
-	  isPrivate?: boolean;
+  priority?: number;
+  isPrivate?: boolean;
   evidenceDocumentIds?: string[] | null;
-	}) {
+}) {
   const membership = await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
@@ -367,10 +383,10 @@ export async function updateTension(actor: AppActor, params: {
     const changedUpdateFields = changedDataFields(tension as unknown as Record<string, unknown>, data);
     if (changedUpdateFields.length === 0) return tension;
 
-	    const updated = await tx.tension.update({
-	      where: { id: params.tensionId },
-	      data,
-	    });
+    const updated = await tx.tension.update({
+      where: { id: params.tensionId },
+      data,
+    });
 
     const evidenceDocumentIds = params.status === "RESOLVED"
       ? await createWorkItemEvidenceLinks(tx, {

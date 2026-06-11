@@ -312,6 +312,7 @@ describe("proposal creation visibility", () => {
       workspaceId: "ws-1",
       title: "Private proposal",
       bodyMd: "Proposal body",
+      priority: 3,
     })).resolves.toMatchObject({
       id: "p-private",
       status: "DRAFT",
@@ -322,6 +323,7 @@ describe("proposal creation visibility", () => {
     expect(prisma.proposal.create).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
         status: "DRAFT",
+        priority: 3,
         isPrivate: true,
         publishedAt: null,
         autoApproveAt: null,
@@ -422,7 +424,7 @@ describe("listProposals", () => {
     const { listProposals } = await import("./proposals");
     const actor = { kind: "user", user: { id: "u-1", globalRole: "USER" } } as any;
 
-    await listProposals(actor, "ws-1", { memberId: "mem-1", circleId: "circle-1" });
+    await listProposals(actor, "ws-1", { memberId: "mem-1", circleId: "circle-1", sort: "date" });
 
     expect(prisma.proposal.findMany).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({
@@ -454,6 +456,10 @@ describe("listProposals", () => {
           }),
         ],
       }),
+      orderBy: [
+        { createdAt: "desc" },
+        { id: "desc" },
+      ],
     }));
   });
 });
