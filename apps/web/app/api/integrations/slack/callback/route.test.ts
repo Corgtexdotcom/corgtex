@@ -22,8 +22,26 @@ vi.mock("@/lib/auth", () => ({
   requirePageActor: requirePageActorMock,
 }));
 
+vi.mock("@/lib/http", () => ({
+  handleRouteError: (error: Error & { status?: number; code?: string }) => Response.json({
+    error: { code: error.code ?? "INTERNAL_ERROR", message: error.message },
+  }, { status: error.status ?? 500 }),
+}));
+
 vi.mock("next/headers", () => ({
   cookies: cookiesMock,
+}));
+
+vi.mock("@corgtex/shared", () => ({
+  env: {
+    get APP_URL() {
+      return process.env.APP_URL ?? "";
+    },
+    get NODE_ENV() {
+      return process.env.NODE_ENV ?? "test";
+    },
+  },
+  isDatabaseUnavailableError: vi.fn(() => false),
 }));
 
 vi.mock("@corgtex/domain", () => ({
@@ -82,7 +100,7 @@ describe("GET /api/integrations/slack/callback", () => {
     );
     expect(cookieDeleteMock).toHaveBeenCalledWith("slack_oauth_state");
     expect(response.headers.get("location")).toBe(
-      "https://app.corgtex.com/workspaces/workspace-1/settings?tab=general&slack=connected",
+      "https://app.corgtex.com/workspaces/workspace-1/tools?type=CONNECTOR&q=slack&slack=connected",
     );
   });
 

@@ -46,13 +46,14 @@ export function integrationRedirectUrl(origin: string, workspaceId: string | nul
   const path = workspaceId
     ? params.intent === "documents"
       ? `/workspaces/${workspaceId}`
-      : `/workspaces/${workspaceId}/settings`
+      : `/workspaces/${workspaceId}/tools`
     : "/";
   const url = new URL(path, origin);
   if (workspaceId && params.intent === "documents") {
     url.searchParams.set("onboarding", "setup");
   } else if (workspaceId) {
-    url.searchParams.set("tab", "general");
+    url.searchParams.set("type", "CONNECTOR");
+    url.searchParams.set("q", provider);
   }
   url.searchParams.set("integration", provider);
   url.searchParams.set("integrationStatus", params.status);

@@ -34,7 +34,7 @@ export async function GET(request: Request) {
       oauthResponse,
     });
 
-    return NextResponse.redirect(appRedirectUrl(request, `/workspaces/${parsed.workspaceId}/settings?tab=general&slack=connected`));
+    return NextResponse.redirect(appRedirectUrl(request, `/workspaces/${parsed.workspaceId}/tools?type=CONNECTOR&q=slack&slack=connected`));
   } catch (error) {
     rethrowNextRedirectError(error);
     return handleRouteError(error);

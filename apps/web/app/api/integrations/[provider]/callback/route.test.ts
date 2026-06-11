@@ -11,6 +11,12 @@ vi.mock("@/lib/auth", () => ({
   requirePageActor,
 }));
 
+vi.mock("@/lib/http", () => ({
+  handleRouteError: (error: Error & { status?: number; code?: string }) => Response.json({
+    error: { code: error.code ?? "INTERNAL_ERROR", message: error.message },
+  }, { status: error.status ?? 500 }),
+}));
+
 vi.mock("@corgtex/domain", () => ({
   saveOAuthConnectionAndEnqueueCalendarSync,
   verifyIntegrationOAuthState,
@@ -32,7 +38,7 @@ afterEach(() => {
 });
 
 describe("GET /api/integrations/[provider]/callback", () => {
-  it("redirects back to workspace settings and enqueues a calendar sync job after a successful Google connect", async () => {
+  it("redirects back to workspace Tools and enqueues a calendar sync job after a successful Google connect", async () => {
     requirePageActor.mockResolvedValue({
       kind: "user",
       user: { id: "user-1" },
@@ -76,7 +82,7 @@ describe("GET /api/integrations/[provider]/callback", () => {
         scopes: ["calendar", "profile"],
       },
     );
-    expect(response.headers.get("location")).toBe("http://localhost:3000/workspaces/ws-1/settings?tab=general&integration=google&integrationStatus=success&integrationSuccess=google_connected");
+    expect(response.headers.get("location")).toBe("http://localhost:3000/workspaces/ws-1/tools?type=CONNECTOR&q=google&integration=google&integrationStatus=success&integrationSuccess=google_connected");
     expect(response.headers.get("set-cookie")).toContain("corgtex_google_oauth_state=");
   });
 
@@ -120,7 +126,7 @@ describe("GET /api/integrations/[provider]/callback", () => {
     expect(response.headers.get("location")).toBe("http://localhost:3000/workspaces/ws-1?onboarding=setup&integration=google&integrationStatus=success&integrationSuccess=google_connected");
   });
 
-  it("redirects provider access errors back to settings with a safe Google verification message", async () => {
+  it("redirects provider access errors back to Tools with a safe Google verification message", async () => {
     requirePageActor.mockResolvedValue({
       kind: "user",
       user: { id: "user-1" },
@@ -136,10 +142,10 @@ describe("GET /api/integrations/[provider]/callback", () => {
     );
 
     expect(saveOAuthConnectionAndEnqueueCalendarSync).not.toHaveBeenCalled();
-    expect(response.headers.get("location")).toBe("http://localhost:3000/workspaces/ws-1/settings?tab=general&integration=google&integrationStatus=error&integrationError=google_verification_or_tester_required");
+    expect(response.headers.get("location")).toBe("http://localhost:3000/workspaces/ws-1/tools?type=CONNECTOR&q=google&integration=google&integrationStatus=error&integrationError=google_verification_or_tester_required");
   });
 
-  it("redirects Microsoft tenant token failures back to settings instead of returning JSON", async () => {
+  it("redirects Microsoft tenant token failures back to Tools instead of returning JSON", async () => {
     requirePageActor.mockResolvedValue({
       kind: "user",
       user: { id: "user-1" },
@@ -158,7 +164,7 @@ describe("GET /api/integrations/[provider]/callback", () => {
       { params: Promise.resolve({ provider: "microsoft" }) },
     );
 
-    expect(response.headers.get("location")).toBe("http://localhost:3000/workspaces/ws-1/settings?tab=general&integration=microsoft&integrationStatus=error&integrationError=microsoft_tenant_access_denied");
+    expect(response.headers.get("location")).toBe("http://localhost:3000/workspaces/ws-1/tools?type=CONNECTOR&q=microsoft&integration=microsoft&integrationStatus=error&integrationError=microsoft_tenant_access_denied");
     expect(vi.mocked(fetch).mock.calls[0]?.[0]).toBe("https://login.microsoftonline.com/organizations/oauth2/v2.0/token");
   });
 
@@ -181,7 +187,7 @@ describe("GET /api/integrations/[provider]/callback", () => {
       { params: Promise.resolve({ provider: "microsoft" }) },
     );
 
-    expect(response.headers.get("location")).toBe("http://localhost:3000/workspaces/ws-1/settings?tab=general&integration=microsoft&integrationStatus=error&integrationError=microsoft_invalid_client_secret");
+    expect(response.headers.get("location")).toBe("http://localhost:3000/workspaces/ws-1/tools?type=CONNECTOR&q=microsoft&integration=microsoft&integrationStatus=error&integrationError=microsoft_invalid_client_secret");
   });
 
   it("rejects callbacks without the matching short-lived state cookie", async () => {

@@ -18,6 +18,7 @@ import {
   getControlPlaneContextHealth,
   getControlPlaneDeployment,
   getControlPlaneIntegrationStatus,
+  getControlPlaneSlackSetupTarget,
   getControlPlaneProviderStatus,
   getControlPlaneReleaseStatus,
   listControlPlaneCustomerSummaries,
@@ -51,6 +52,7 @@ import type { SupportAction } from "@corgtex/domain";
 import { resolveControlPlaneRequestActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
 import { requireControlPlaneDeploymentMode } from "@/lib/control-plane-guard";
+import { env } from "@corgtex/shared";
 
 export const dynamic = "force-dynamic";
 
@@ -258,6 +260,18 @@ const tools = [
     name: "list_customer_integrations",
     description: "Get customer integration entitlement and readiness status.",
     inputSchema: { type: "object", properties: { deploymentId: { type: "string" } }, required: ["deploymentId"] },
+  },
+  {
+    name: "get_customer_integration_setup_link",
+    description: "Generate a human OAuth setup link for a customer integration. Does not complete browser OAuth. V1 supports slack.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        deploymentId: { type: "string" },
+        integrationKey: { type: "string" },
+      },
+      required: ["deploymentId", "integrationKey"],
+    },
   },
   {
     name: "get_context_health",
@@ -581,6 +595,7 @@ const toolScopes: Record<string, string> = {
   get_customer_deployment_status: "control-plane:read",
   get_azure_provider_status: "control-plane:read",
   list_customer_integrations: "control-plane:read",
+  get_customer_integration_setup_link: "control-plane:integrations:write",
   get_context_health: "control-plane:read",
   get_ai_governance_status: "control-plane:read",
   update_customer_agent_credential_scopes: "control-plane:ai-governance:write",
@@ -872,6 +887,24 @@ export async function POST(request: NextRequest) {
     }
     if (name === "list_customer_integrations") {
       return rpcResult(id, textContent(await getControlPlaneIntegrationStatus(actor, String(args.deploymentId ?? ""))));
+    }
+    if (name === "get_customer_integration_setup_link") {
+      const integrationKey = argString(args, "integrationKey").toLowerCase();
+      if (integrationKey !== "slack") {
+        return rpcError(id, -32602, "Unsupported integration key.");
+      }
+      const deploymentId = argString(args, "deploymentId");
+      const target = await getControlPlaneSlackSetupTarget(actor, deploymentId);
+      const setupPath = `/api/control-plane/deployments/${deploymentId}/integrations/slack/install`;
+      const appOrigin = env.APP_URL?.replace(/\/$/, "");
+      return rpcResult(id, textContent({
+        deploymentId,
+        integrationKey,
+        managedWorkspaceId: target.managedWorkspaceId,
+        setupUrl: appOrigin ? `${appOrigin}${setupPath}` : setupPath,
+        completesOAuth: false,
+        instruction: "Open setupUrl in a browser as a human account with Slack installation permissions.",
+      }));
     }
     if (name === "get_context_health") {
       return rpcResult(id, textContent(await getControlPlaneContextHealth(actor, String(args.deploymentId ?? ""))));

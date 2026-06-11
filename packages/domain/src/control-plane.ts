@@ -14,6 +14,11 @@ import {
   scanRecorderCalendarSource,
   upsertRecorderCalendarSource,
 } from "./meeting-recorders";
+import {
+  saveSlackInstallationForWorkspace,
+  validateSlackPostTarget,
+  type SlackOAuthResponse,
+} from "./communication";
 import { createControlPlaneAdapter } from "./control-plane-adapters";
 import { createRailwayClientFromEnv, upgradeRailwayCustomerRelease, type RailwayClient } from "./railway-client";
 import { buildCustomerDeploymentProviderReadModel, buildCustomerDeploymentReadiness, provisionCustomerDeployment } from "./admin";
@@ -4467,6 +4472,62 @@ async function getControlPlaneDeploymentWithWorkspace(actor: AppActor, deploymen
   };
 }
 
+function controlPlaneInstallableConnectors(params: {
+  hasManagedWorkspace: boolean;
+  communicationInstallations?: Array<{ provider: string; status: string }>;
+  oauthConnections?: Array<{ provider: string; status: string }>;
+  dataSourceCount?: number;
+}) {
+  const slackInstalled = params.communicationInstallations?.some((installation) => (
+    installation.provider === "SLACK" && installation.status !== "DISCONNECTED"
+  )) ?? false;
+  const googleConnected = params.oauthConnections?.some((connection) => (
+    connection.provider === "GOOGLE" && connection.status !== "DISCONNECTED"
+  )) ?? false;
+  const microsoftConnected = params.oauthConnections?.some((connection) => (
+    connection.provider === "MICROSOFT" && connection.status !== "DISCONNECTED"
+  )) ?? false;
+
+  return [
+    {
+      key: "slack",
+      label: "Slack",
+      provider: "SLACK",
+      kind: "communication",
+      configured: slackInstalled,
+      canManageFromControlPlane: params.hasManagedWorkspace && Boolean(env.SLACK_CLIENT_ID && env.SLACK_CLIENT_SECRET),
+      requiresHumanConsent: true,
+    },
+    {
+      key: "google",
+      label: "Google",
+      provider: "GOOGLE",
+      kind: "oauth",
+      configured: googleConnected,
+      canManageFromControlPlane: false,
+      requiresHumanConsent: true,
+    },
+    {
+      key: "microsoft",
+      label: "Microsoft",
+      provider: "MICROSOFT",
+      kind: "oauth",
+      configured: microsoftConnected,
+      canManageFromControlPlane: false,
+      requiresHumanConsent: true,
+    },
+    {
+      key: "external_data_sources",
+      label: "External data sources",
+      provider: null,
+      kind: "data_source",
+      configured: (params.dataSourceCount ?? 0) > 0,
+      canManageFromControlPlane: false,
+      requiresHumanConsent: false,
+    },
+  ];
+}
+
 function requireKnownMemberRole(role: string): MemberRole {
   invariant(CONTROL_PLANE_MEMBER_ROLES.has(role), 400, "INVALID_INPUT", "Unsupported member role.");
   return role as MemberRole;
@@ -5235,6 +5296,7 @@ export async function getControlPlaneIntegrationStatus(actor: AppActor, deployme
       supportConnectorStatus: deployment.supportConnectorStatus,
       supportLastSyncAt: deployment.supportLastSyncAt,
       requiresConnectorSetup: adapter.requiresConnectorSetup,
+      availableConnectors: controlPlaneInstallableConnectors({ hasManagedWorkspace: false }),
       integrations: [],
     };
   }
@@ -5264,9 +5326,11 @@ export async function getControlPlaneIntegrationStatus(actor: AppActor, deployme
         id: true,
         provider: true,
         status: true,
+        externalWorkspaceId: true,
         externalTeamName: true,
         scopes: true,
         optionalScopes: true,
+        settings: true,
         lastEventAt: true,
         lastError: true,
         updatedAt: true,
@@ -5315,6 +5379,12 @@ export async function getControlPlaneIntegrationStatus(actor: AppActor, deployme
         memberCount: deployment.managedWorkspace._count.members,
       }
       : null,
+    availableConnectors: controlPlaneInstallableConnectors({
+      hasManagedWorkspace: true,
+      communicationInstallations,
+      oauthConnections,
+      dataSourceCount: dataSources.length,
+    }),
     integrations: [
       {
         key: "meeting_recorders",
@@ -5337,13 +5407,16 @@ export async function getControlPlaneIntegrationStatus(actor: AppActor, deployme
       },
       ...communicationInstallations.map((installation) => ({
         key: `communication_${installation.id}`,
+        installationId: installation.id,
         label: installation.provider,
         entitlementEnabled: true,
         configured: true,
         status: installation.status,
+        externalWorkspaceId: installation.externalWorkspaceId,
         team: installation.externalTeamName,
         scopes: installation.scopes,
         optionalScopes: installation.optionalScopes,
+        settings: installation.settings,
         lastEventAt: installation.lastEventAt,
         lastError: installation.lastError,
       })),
@@ -5370,6 +5443,169 @@ export async function getControlPlaneIntegrationStatus(actor: AppActor, deployme
         lastError: source.lastSyncError,
       })),
     ],
+  };
+}
+
+async function requireManagedSlackInstallation(actor: AppActor, params: {
+  deploymentId: string;
+  installationId?: string | null;
+}) {
+  await requireControlPlaneDeploymentWriteAccess(actor, params.deploymentId);
+  const deployment = await getControlPlaneDeploymentWithWorkspace(actor, params.deploymentId);
+  const managedWorkspaceId = deployment.managedWorkspaceId;
+  invariant(managedWorkspaceId, 400, "MANAGED_WORKSPACE_REQUIRED", "Slack management requires a managed workspace link.");
+  const installation = params.installationId
+    ? await prisma.communicationInstallation.findFirst({
+      where: {
+        id: params.installationId,
+        workspaceId: managedWorkspaceId,
+        provider: "SLACK",
+      },
+    })
+    : await prisma.communicationInstallation.findFirst({
+      where: {
+        workspaceId: managedWorkspaceId,
+        provider: "SLACK",
+        status: "ACTIVE",
+      },
+      orderBy: { updatedAt: "desc" },
+    });
+  invariant(installation, 404, "NOT_FOUND", "Slack installation not found for this managed workspace.");
+  return { deployment, managedWorkspaceId, installation };
+}
+
+export async function getControlPlaneSlackSetupTarget(actor: AppActor, deploymentId: string) {
+  requireControlPlaneScope(actor, "control-plane:integrations:write");
+  await requireControlPlaneDeploymentWriteAccess(actor, deploymentId);
+  const deployment = await getControlPlaneDeploymentWithWorkspace(actor, deploymentId);
+  const managedWorkspaceId = deployment.managedWorkspaceId;
+  invariant(managedWorkspaceId, 400, "MANAGED_WORKSPACE_REQUIRED", "Slack installation requires a managed workspace link.");
+  return {
+    deploymentId,
+    managedWorkspaceId,
+    deploymentLabel: deployment.label,
+    workspaceName: deployment.managedWorkspace?.name ?? null,
+  };
+}
+
+export async function saveControlPlaneSlackInstallation(actor: AppActor, params: {
+  deploymentId: string;
+  oauthResponse: SlackOAuthResponse;
+  reason?: string | null;
+}) {
+  requireControlPlaneScope(actor, "control-plane:integrations:write");
+  const reason = requireMutationReason(params.reason);
+  await requireControlPlaneDeploymentWriteAccess(actor, params.deploymentId);
+  const deployment = await getControlPlaneDeploymentWithWorkspace(actor, params.deploymentId);
+  const managedWorkspaceId = deployment.managedWorkspaceId;
+  invariant(managedWorkspaceId, 400, "MANAGED_WORKSPACE_REQUIRED", "Slack installation requires a managed workspace link.");
+
+  const installation = await saveSlackInstallationForWorkspace({
+    workspaceId: managedWorkspaceId,
+    oauthResponse: params.oauthResponse,
+    installedByUserId: actorUserId(actor),
+  });
+  await recordCustomerDeploymentEvent(actor, params.deploymentId, "control_plane.integration.slack_connected", {
+    reason,
+    managedWorkspaceId,
+    installationId: installation.id,
+    externalWorkspaceId: installation.externalWorkspaceId,
+    team: installation.externalTeamName,
+    scopes: installation.scopes,
+  });
+
+  return {
+    deploymentId: params.deploymentId,
+    managedWorkspaceId,
+    installation,
+  };
+}
+
+export async function updateControlPlaneSlackAgendaSettings(actor: AppActor, params: {
+  deploymentId: string;
+  installationId: string;
+  defaultAgendaChannelId?: string | null;
+  agendaTimezone?: string | null;
+  reason?: string | null;
+}) {
+  requireControlPlaneScope(actor, "control-plane:integrations:write");
+  const reason = requireMutationReason(params.reason);
+  const { managedWorkspaceId, installation } = await requireManagedSlackInstallation(actor, {
+    deploymentId: params.deploymentId,
+    installationId: params.installationId,
+  });
+  invariant(installation.status === "ACTIVE", 400, "SLACK_NOT_ACTIVE", "Slack installation must be active before settings can be updated.");
+
+  const rawChannelId = params.defaultAgendaChannelId?.trim() ?? "";
+  let defaultAgendaChannelId: string | null = null;
+  let defaultAgendaChannelName: string | null = null;
+  if (rawChannelId) {
+    const validation = await validateSlackPostTarget(installation.id, rawChannelId);
+    if (!validation.ok) {
+      invariant(false, 400, validation.code, validation.message);
+    }
+    defaultAgendaChannelId = validation.channelId;
+    defaultAgendaChannelName = validation.channelName;
+  }
+
+  const current = installation.settings && typeof installation.settings === "object" && !Array.isArray(installation.settings)
+    ? installation.settings as JsonRecord
+    : {};
+  const settings = {
+    ...current,
+    defaultAgendaChannelId,
+    defaultAgendaChannelName,
+    agendaTimezone: params.agendaTimezone?.trim() || "UTC",
+  };
+  const updated = await prisma.communicationInstallation.update({
+    where: { id: installation.id },
+    data: { settings: toInputJson(settings) },
+  });
+  await recordCustomerDeploymentEvent(actor, params.deploymentId, "control_plane.integration.slack_settings_updated", {
+    reason,
+    managedWorkspaceId,
+    installationId: installation.id,
+    defaultAgendaChannelId,
+    defaultAgendaChannelName,
+    agendaTimezone: settings.agendaTimezone,
+  });
+  return {
+    deploymentId: params.deploymentId,
+    managedWorkspaceId,
+    installation: updated,
+  };
+}
+
+export async function disconnectControlPlaneSlackInstallation(actor: AppActor, params: {
+  deploymentId: string;
+  installationId: string;
+  reason?: string | null;
+}) {
+  requireControlPlaneScope(actor, "control-plane:integrations:write");
+  const reason = requireMutationReason(params.reason);
+  const { managedWorkspaceId, installation } = await requireManagedSlackInstallation(actor, {
+    deploymentId: params.deploymentId,
+    installationId: params.installationId,
+  });
+  const updated = await prisma.communicationInstallation.update({
+    where: { id: installation.id },
+    data: {
+      status: "DISCONNECTED",
+      botTokenEnc: null,
+      disconnectedAt: new Date(),
+    },
+  });
+  await recordCustomerDeploymentEvent(actor, params.deploymentId, "control_plane.integration.slack_disconnected", {
+    reason,
+    managedWorkspaceId,
+    installationId: installation.id,
+    externalWorkspaceId: installation.externalWorkspaceId,
+    team: installation.externalTeamName,
+  });
+  return {
+    deploymentId: params.deploymentId,
+    managedWorkspaceId,
+    installation: updated,
   };
 }
 

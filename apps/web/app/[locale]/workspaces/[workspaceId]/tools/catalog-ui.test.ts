@@ -12,6 +12,8 @@ function item(overrides: Partial<CatalogItemForUi>): CatalogItemForUi {
   return {
     id: overrides.id ?? "item-1",
     type: overrides.type ?? "TOOL",
+    sourceType: overrides.sourceType,
+    sourceId: overrides.sourceId ?? null,
     title: overrides.title ?? "Shared tool",
     outcome: overrides.outcome ?? null,
     descriptionMd: overrides.descriptionMd ?? null,
@@ -92,8 +94,7 @@ describe("Tools catalog UI helpers", () => {
     }), { workspaceId: "workspace-1", canManageCatalog: false });
 
     expect(actions).toEqual([
-      { kind: "link", label: "Connect", href: "/api/integrations/google/connect", variant: "primary" },
-      { kind: "link", label: "Details", href: "/workspaces/workspace-1/tools/google", variant: "secondary" },
+      { kind: "link", label: "Connect", href: "/workspaces/workspace-1/tools/google", variant: "primary" },
     ]);
     expect(actions.map((action) => action.label)).not.toContain("API key");
     expect(actions.map((action) => action.label)).not.toContain("Budget");
@@ -118,14 +119,15 @@ describe("Tools catalog UI helpers", () => {
     const actions = getCatalogCardActions(item({
       id: "meeting-recorder",
       type: "TOOL",
+      sourceType: "MEETING_RECORDER",
       title: "Meeting recorder",
       url: null,
       accessMode: "REQUEST",
     }), { workspaceId: "workspace-1", canManageCatalog: false });
 
     expect(actions).toEqual([
-      { kind: "request", label: "Request access", requestType: "ACCESS", variant: "primary" },
-      { kind: "link", label: "Details", href: "/workspaces/workspace-1/tools/meeting-recorder", variant: "secondary" },
+      { kind: "link", label: "View setup", href: "/workspaces/workspace-1/tools/meeting-recorder", variant: "primary" },
+      { kind: "request", label: "Request access", requestType: "ACCESS", variant: "secondary" },
     ]);
   });
 
@@ -133,14 +135,14 @@ describe("Tools catalog UI helpers", () => {
     const actions = getCatalogCardActions(item({
       id: "meeting-recorder",
       type: "TOOL",
+      sourceType: "MEETING_RECORDER",
       title: "Meeting recorder",
-      url: "/workspaces/workspace-1/settings?tab=general",
+      url: null,
       accessMode: "OPEN",
     }), { workspaceId: "workspace-1", canManageCatalog: false });
 
     expect(actions).toEqual([
-      { kind: "link", label: "Open", href: "/workspaces/workspace-1/settings?tab=general", variant: "primary" },
-      { kind: "link", label: "Details", href: "/workspaces/workspace-1/tools/meeting-recorder", variant: "secondary" },
+      { kind: "link", label: "Manage", href: "/workspaces/workspace-1/tools/meeting-recorder", variant: "primary" },
     ]);
   });
 
@@ -148,6 +150,7 @@ describe("Tools catalog UI helpers", () => {
     const actions = getCatalogCardActions(item({
       id: "openwork",
       type: "CONNECTOR",
+      sourceType: "AI_WORKSPACE",
       title: "OpenWork Free",
       url: "/workspaces/workspace-1/settings?tab=ai-workspaces&provider=openwork",
       category: "AI_DEFAULT",
@@ -158,10 +161,9 @@ describe("Tools catalog UI helpers", () => {
       {
         kind: "link",
         label: "Set up",
-        href: "/workspaces/workspace-1/settings?tab=ai-workspaces&provider=openwork",
+        href: "/workspaces/workspace-1/tools/openwork",
         variant: "primary",
       },
-      { kind: "link", label: "Details", href: "/workspaces/workspace-1/tools/openwork", variant: "secondary" },
     ]);
   });
 
@@ -169,6 +171,7 @@ describe("Tools catalog UI helpers", () => {
     const actions = getCatalogCardActions(item({
       id: "managed-ai-workspace",
       type: "TOOL",
+      sourceType: "ENTERPRISE_SERVICE",
       title: "Managed AI workspace",
       url: "/workspaces/workspace-1/settings?tab=ai-workspaces&service=ai_workspace",
       category: "ENTERPRISE_SERVICES",
@@ -178,17 +181,16 @@ describe("Tools catalog UI helpers", () => {
     expect(actions).toEqual([
       {
         kind: "link",
-        label: "Open setup",
-        href: "/workspaces/workspace-1/settings?tab=ai-workspaces&service=ai_workspace",
+        label: "View setup",
+        href: "/workspaces/workspace-1/tools/managed-ai-workspace",
         variant: "primary",
       },
       {
         kind: "request",
-        label: "Request managed service",
+        label: "Request access",
         requestType: "ACCESS",
         variant: "secondary",
       },
-      { kind: "link", label: "Details", href: "/workspaces/workspace-1/tools/managed-ai-workspace", variant: "secondary" },
     ]);
   });
 

@@ -16,13 +16,13 @@ export type McpSessionContext = {
 };
 
 /**
- * Build the workspace settings deep-link the user should visit to fix a
+ * Build the workspace Tools deep-link the user should visit to fix a
  * scope problem. Falls back to a relative path when the public origin
  * env var is missing — clients still get something clickable.
  */
 function settingsUrl(workspaceId: string): string {
   const origin = env.APP_URL.replace(/\/$/, "");
-  return `${origin}/workspaces/${workspaceId}/settings?tab=general`;
+  return `${origin}/workspaces/${workspaceId}/tools?type=CONNECTOR&q=corgtex%20mcp`;
 }
 
 /**

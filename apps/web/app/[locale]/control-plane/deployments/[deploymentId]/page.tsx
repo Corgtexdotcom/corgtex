@@ -46,10 +46,10 @@ import { CustomerDetailClientTabs } from "./_components/detail-client-tabs";
 
 export const dynamic = "force-dynamic";
 
-const CONTROL_PLANE_DETAIL_TABS = new Set(["overview", "agents", "config", "users", "recorders", "releases", "logs"]);
+const CONTROL_PLANE_DETAIL_TABS = new Set(["overview", "agents", "config", "tools", "users", "recorders", "releases", "logs"]);
 
 function normalizeDetailTab(tab?: string) {
-  return tab && CONTROL_PLANE_DETAIL_TABS.has(tab) ? tab as "overview" | "agents" | "config" | "users" | "recorders" | "releases" | "logs" : "overview";
+  return tab && CONTROL_PLANE_DETAIL_TABS.has(tab) ? tab as "overview" | "agents" | "config" | "tools" | "users" | "recorders" | "releases" | "logs" : "overview";
 }
 
 export default async function ControlPlaneCustomerPage({
@@ -119,7 +119,7 @@ export default async function ControlPlaneCustomerPage({
   };
 
   const [integrationsRead, aiGovernanceRead, membersRead, featureFlagsRead, deployPreflightRead, rolloutsRead] = await Promise.all([
-    activeTab === "recorders"
+    activeTab === "recorders" || activeTab === "tools"
       ? readControlPlaneCached(["control-plane", "deployment", "integrations", actorCacheKey, deploymentId], refresh, async () => (
         getControlPlaneIntegrationStatus(actor, deploymentId).catch((err: unknown) => ({
           deploymentId,

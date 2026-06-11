@@ -348,11 +348,11 @@ describe("catalog domain", () => {
       },
       create: expect.objectContaining({
         title: "Corgtex MCP",
-        url: "/workspaces/workspace-1/settings?tab=ai-workspaces",
+        url: null,
       }),
       update: expect.objectContaining({
         title: "Corgtex MCP",
-        url: "/workspaces/workspace-1/settings?tab=ai-workspaces",
+        url: null,
       }),
     }));
     expect(prismaMock.catalogItem.upsert).toHaveBeenCalledWith(expect.objectContaining({
@@ -634,7 +634,7 @@ describe("catalog domain", () => {
     }));
   });
 
-  it("opens meeting recorder settings from Tools when recorder access is enabled", async () => {
+  it("keeps meeting recorder setup canonical inside Tools when recorder access is enabled", async () => {
     const { listCatalogItems } = await import("./catalog");
     prismaMock.workspaceFeatureFlag.findMany.mockResolvedValue([
       { flag: "MEETING_RECORDERS", enabled: true },
@@ -656,13 +656,13 @@ describe("catalog domain", () => {
       },
       create: expect.objectContaining({
         type: "TOOL",
-        url: "/workspaces/workspace-1/settings?tab=general",
+        url: null,
         accessMode: "OPEN",
         featured: true,
       }),
       update: expect.objectContaining({
         type: "TOOL",
-        url: "/workspaces/workspace-1/settings?tab=general",
+        url: null,
         accessMode: "OPEN",
         featured: true,
       }),

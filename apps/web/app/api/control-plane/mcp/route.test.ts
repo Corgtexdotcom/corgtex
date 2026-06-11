@@ -19,6 +19,7 @@ const mocks = vi.hoisted(() => ({
   }),
   resolveControlPlaneRequestActor: vi.fn(),
   getControlPlaneProviderStatus: vi.fn(),
+  getControlPlaneSlackSetupTarget: vi.fn(),
 }));
 vi.mock("@corgtex/domain", () => ({
   approveReviewGatedProcurementTrial: mocks.approveReviewGatedProcurementTrial,
@@ -29,7 +30,7 @@ vi.mock("@corgtex/domain", () => ({
   getControlPlaneClientMigrationStatus: vi.fn(),
   getControlPlaneDeployLatestPreflight: vi.fn(),
   getControlPlaneAiGovernanceStatus: vi.fn(), getControlPlaneContextHealth: vi.fn(),
-  getControlPlaneDeployment: vi.fn(), getControlPlaneIntegrationStatus: vi.fn(), getControlPlaneProviderStatus: mocks.getControlPlaneProviderStatus, getControlPlaneReleaseStatus: vi.fn(),
+  getControlPlaneDeployment: vi.fn(), getControlPlaneIntegrationStatus: vi.fn(), getControlPlaneProviderStatus: mocks.getControlPlaneProviderStatus, getControlPlaneReleaseStatus: vi.fn(), getControlPlaneSlackSetupTarget: mocks.getControlPlaneSlackSetupTarget,
   listControlPlaneCustomerMembers: vi.fn(),
   listControlPlaneDeployments: mocks.listControlPlaneDeployments,
   listControlPlaneCustomerSummaries: mocks.listControlPlaneCustomerSummaries,
@@ -53,6 +54,17 @@ vi.mock("@/lib/auth", () => ({ resolveControlPlaneRequestActor: mocks.resolveCon
 vi.mock("@/lib/http", () => ({
   handleRouteError: (error: Error & { status?: number; code?: string }) => Response.json({ error: { code: error.code ?? "INTERNAL_ERROR", message: error.message } }, { status: error.status ?? 500 }),
 }));
+vi.mock("@corgtex/shared", () => ({
+  env: {
+    get APP_URL() {
+      return process.env.APP_URL ?? "";
+    },
+    get CONTROL_PLANE_MODE() {
+      return process.env.CONTROL_PLANE_MODE === "true" || process.env.CONTROL_PLANE_MODE === "1";
+    },
+  },
+  isDatabaseUnavailableError: vi.fn(() => false),
+}));
 function request(body: unknown) {
   return new Request("http://localhost/api/control-plane/mcp", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
 }
@@ -71,6 +83,7 @@ describe("/api/control-plane/mcp", () => {
     mocks.approveReviewGatedProcurementTrial.mockResolvedValue({ statusCode: 201, body: { trialId: "trial-review", status: "ACTIVE" } });
     mocks.rejectReviewGatedProcurementTrial.mockResolvedValue({ id: "trial-review", status: "SUSPENDED" });
     mocks.getControlPlaneProviderStatus.mockResolvedValue({ deploymentId: "dep-azure", adapter: { kind: "azure_read_model" } });
+    mocks.getControlPlaneSlackSetupTarget.mockResolvedValue({ deploymentId: "dep-slack", managedWorkspaceId: "ws-slack" });
   });
 
   afterEach(() => {
@@ -115,6 +128,7 @@ describe("/api/control-plane/mcp", () => {
       "get_azure_provider_status",
       "refresh_customer_deployment_snapshot",
       "list_customer_integrations",
+      "get_customer_integration_setup_link",
       "get_context_health",
       "get_ai_governance_status",
       "update_customer_agent_credential_scopes",
@@ -213,6 +227,38 @@ describe("/api/control-plane/mcp", () => {
     });
     expect(mocks.requireControlPlaneScope).toHaveBeenCalledWith(expect.objectContaining({ kind: "agent" }), "control-plane:read");
     expect(mocks.getControlPlaneProviderStatus).toHaveBeenCalledWith(expect.objectContaining({ kind: "agent" }), "dep-azure");
+  });
+
+  it("generates a human Slack setup link with the integrations write scope", async () => {
+    mocks.resolveControlPlaneRequestActor.mockResolvedValueOnce({
+      kind: "agent",
+      authProvider: "control-plane",
+      label: "control-plane-agent",
+      scopes: ["control-plane:read", "control-plane:integrations:write"],
+    });
+    const { POST } = await import("./route");
+
+    const response = await POST(request({
+      jsonrpc: "2.0",
+      id: 13,
+      method: "tools/call",
+      params: {
+        name: "get_customer_integration_setup_link",
+        arguments: { deploymentId: "dep-slack", integrationKey: "slack" },
+      },
+    }) as never);
+    const body = await response.json();
+    const parsed = JSON.parse(body.result.content[0].text);
+
+    expect(parsed).toEqual(expect.objectContaining({
+      deploymentId: "dep-slack",
+      integrationKey: "slack",
+      managedWorkspaceId: "ws-slack",
+      completesOAuth: false,
+    }));
+    expect(parsed.setupUrl).toContain("/api/control-plane/deployments/dep-slack/integrations/slack/install");
+    expect(mocks.requireControlPlaneScope).toHaveBeenCalledWith(expect.objectContaining({ kind: "agent" }), "control-plane:integrations:write");
+    expect(mocks.getControlPlaneSlackSetupTarget).toHaveBeenCalledWith(expect.objectContaining({ kind: "agent" }), "dep-slack");
   });
 
   it("denies mutating tools when the control-plane agent only has read scope", async () => {

@@ -18,8 +18,29 @@ vi.mock("@/lib/auth", () => ({
   requirePageActor: requirePageActorMock,
 }));
 
+vi.mock("@/lib/http", () => ({
+  handleRouteError: (error: Error & { status?: number; code?: string }) => Response.json({
+    error: { code: error.code ?? "INTERNAL_ERROR", message: error.message },
+  }, { status: error.status ?? 500 }),
+}));
+
 vi.mock("next/headers", () => ({
   cookies: cookiesMock,
+}));
+
+vi.mock("@corgtex/shared", () => ({
+  env: {
+    get APP_URL() {
+      return process.env.APP_URL ?? "";
+    },
+    get NODE_ENV() {
+      return process.env.NODE_ENV ?? "test";
+    },
+    get SLACK_CLIENT_ID() {
+      return process.env.SLACK_CLIENT_ID ?? "";
+    },
+  },
+  isDatabaseUnavailableError: vi.fn(() => false),
 }));
 
 vi.mock("@corgtex/domain", () => ({

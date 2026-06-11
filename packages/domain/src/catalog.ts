@@ -294,9 +294,7 @@ function connectorSources(workspaceId: string, flags: CatalogFeatureFlags): Cata
       title: "Corgtex MCP",
       outcome: "Use Corgtex from ChatGPT, Claude, Cursor, Claude Code, and other MCP clients.",
       descriptionMd: "Connect external AI clients to Corgtex with workspace-scoped OAuth access.",
-      url: flags.AI_WORKSPACES
-        ? `/workspaces/${workspaceId}/settings?tab=ai-workspaces`
-        : `/workspaces/${workspaceId}/settings?tab=general`,
+      url: null,
       category: "AI",
       accessMode: "OPEN",
       requestedScopes: ["workspace:read", "brain:read", "conversations:write"],
@@ -304,6 +302,34 @@ function connectorSources(workspaceId: string, flags: CatalogFeatureFlags): Cata
     });
   }
   if (flags.SETTINGS_GENERAL) {
+    sources.push({
+      type: "DATA_SOURCE",
+      sourceType: "DATA_SOURCE",
+      sourceId: "external-databases",
+      title: "External databases",
+      outcome: "Connect external PostgreSQL data for Corgtex search and automation.",
+      descriptionMd: "Add and manage workspace-scoped external database feeds from the Tools catalog.",
+      url: null,
+      category: "DATA",
+      accessMode: "ADMIN_ONLY",
+      requestedScopes: ["data-sources:read"],
+      featured: false,
+    });
+
+    sources.push({
+      type: "TOOL",
+      sourceType: "MANUAL",
+      sourceId: "webhooks",
+      title: "Webhooks",
+      outcome: "Send and inspect workspace integration events for external systems.",
+      descriptionMd: "Create signed outbound webhooks and inspect recent inbound webhook deliveries from the Tools catalog.",
+      url: null,
+      category: "OPERATIONS",
+      accessMode: "ADMIN_ONLY",
+      requestedScopes: ["integrations:read"],
+      featured: false,
+    });
+
     const meetingRecordersEnabled = flags.MEETING_RECORDERS;
     sources.push({
       type: "TOOL",
@@ -314,7 +340,7 @@ function connectorSources(workspaceId: string, flags: CatalogFeatureFlags): Cata
       descriptionMd: meetingRecordersEnabled
         ? "Connect a meeting recorder or upload transcript exports so Corgtex can process meeting evidence from the start."
         : "Request meeting recorder access, then connect a recorder or upload transcript exports as the first onboarding context source.",
-      url: meetingRecordersEnabled ? `/workspaces/${workspaceId}/settings?tab=general` : null,
+      url: null,
       category: "MEETINGS",
       accessMode: meetingRecordersEnabled ? "OPEN" : "REQUEST",
       requestedScopes: ["meetings:read", "meetings:write", "brain:read"],
