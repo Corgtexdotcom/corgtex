@@ -1,4 +1,5 @@
 import { listCircles, listMembers, listProposals, listTensions, requireWorkspaceMembership } from "@corgtex/domain";
+import type { ReactNode } from "react";
 import { requirePageActor } from "@/lib/auth";
 import {
   createTensionAction,
@@ -12,10 +13,11 @@ import {
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownExcerpt } from "@/lib/components/MarkdownRenderer";
 import { ItemActions } from "@/lib/components/ui/ItemActions";
-import { WorkItemFilterControls, WorkItemViewToggle } from "@/lib/components/WorkItemControls";
+import { WorkItemFilterControls, WorkItemToolbar } from "@/lib/components/WorkItemControls";
+import { WorkItemKanbanBoard, type WorkItemKanbanColumn } from "@/lib/components/WorkItemKanbanBoard";
 import { WorkItemResolutionDialog } from "@/lib/components/WorkItemResolutionDialog";
 import { canOpenPrivateDraft } from "@/lib/governance-open-guards";
-import { buildWorkItemQuery, normalizeWorkItemView, resolveWorkItemScope } from "@/lib/work-item-view";
+import { buildWorkItemQuery, normalizeWorkItemView, resolveWorkItemFilters } from "@/lib/work-item-view";
 import { getTranslations } from "next-intl/server";
 import {
   TENSION_STATUS_FILTERS,
@@ -39,11 +41,11 @@ export default async function TensionsPage({
   const tWork = await getTranslations("workItems");
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
   const resolvedSearch = searchParams ? await searchParams : {};
-  const { statusFilter, dateValues, dateFilters } = resolveTensionSearch(resolvedSearch);
+  const { statusFilter } = resolveTensionSearch(resolvedSearch);
   const view = normalizeWorkItemView(resolvedSearch.view);
-  const { scope, circleId, memberId } = resolveWorkItemScope(resolvedSearch);
+  const { circleId, memberId, sort } = resolveWorkItemFilters(resolvedSearch);
   const [{ items: tensions }, { items: proposals }, circles, members] = await Promise.all([
-    listTensions(actor, workspaceId, { take: 200, ...dateFilters, circleId, memberId }),
+    listTensions(actor, workspaceId, { take: 200, circleId, memberId, sort }),
     listProposals(actor, workspaceId, { take: 50 }),
     listCircles(workspaceId),
     listMembers(workspaceId),
@@ -54,8 +56,10 @@ export default async function TensionsPage({
   const displayTensions = statusFilter === "ALL"
     ? groupedTensions.ALL
     : groupedTensions[statusFilter as keyof typeof groupedTensions] || groupedTensions.OPEN;
-  const filterState = { view, scope, circleId, memberId, dates: dateValues };
+  const filterState = { view, sort, circleId, memberId };
+  const columnSettingsPortalId = "work-item-tensions-column-settings";
   type TensionListItem = (typeof tensions)[number];
+  type TensionColumnStatus = "DRAFT" | "OPEN" | "RESOLVED";
 
   const ageText = (date: Date) => {
     const days = Math.floor((Date.now() - new Date(date).getTime()) / (1000 * 60 * 60 * 24));
@@ -78,6 +82,7 @@ export default async function TensionsPage({
     || (actor.kind === "user" && tension.authorUserId === actor.user.id);
 
   function renderTensionCard(tension: TensionListItem, compact = false) {
+    const detailHref = `/workspaces/${workspaceId}/tensions/${tension.id}`;
     const authorName = tension.author.displayName || tension.author.email || t("authorUnknown");
     const raisedByName = tension.raisedByMember ? memberName(tension.raisedByMember) : null;
     const canManage = canManageTension(tension);
@@ -87,7 +92,7 @@ export default async function TensionsPage({
     const openedDate = tension.publishedAt ? new Date(tension.publishedAt).toLocaleDateString() : null;
     const closedDate = tension.resolvedAt ? new Date(tension.resolvedAt).toLocaleDateString() : null;
     const primary = canManage && canOpenPrivateDraft(tension) ? (
-      <form action={publishTensionAction}>
+      <form action={publishTensionAction} data-work-item-transition={`${tension.id}:OPEN`}>
         <input type="hidden" name="workspaceId" value={workspaceId} />
         <input type="hidden" name="tensionId" value={tension.id} />
         <button type="submit" className="primary small">{t("btnOpen")}</button>
@@ -99,23 +104,24 @@ export default async function TensionsPage({
         <button type="submit" className="primary small">{t("btnUpvote")}</button>
       </form>
     ) : null;
-    const moreItems: React.ReactNode[] = [];
+    const moreItems: ReactNode[] = [];
 
     if (!tension.isPrivate && tension.status === "OPEN") {
       moreItems.push(
-        <WorkItemResolutionDialog
-          key="resolve"
-          action={updateTensionAction}
-          buttonLabel={t("btnResolve")}
-          title={tWork("resolveTensionTitle")}
-          noteName="resolvedVia"
-          noteLabel={tWork("resolutionNote")}
-          notePlaceholder={t("placeholderResolvedVia")}
-          hiddenFields={{ workspaceId, tensionId: tension.id, status: "RESOLVED" }}
-          submitLabel={t("btnResolve")}
-          cancelLabel={tCommon("cancel")}
-          fileLabel={tWork("evidence")}
-        />,
+        <span key="resolve" data-work-item-dialog={`${tension.id}:RESOLVED`}>
+          <WorkItemResolutionDialog
+            action={updateTensionAction}
+            buttonLabel={t("btnResolve")}
+            title={tWork("resolveTensionTitle")}
+            noteName="resolvedVia"
+            noteLabel={tWork("resolutionNote")}
+            notePlaceholder={t("placeholderResolvedVia")}
+            hiddenFields={{ workspaceId, tensionId: tension.id, status: "RESOLVED" }}
+            submitLabel={t("btnResolve")}
+            cancelLabel={tCommon("cancel")}
+            fileLabel={tWork("evidence")}
+          />
+        </span>,
       );
     }
     if (canDraftProposal) {
@@ -133,6 +139,13 @@ export default async function TensionsPage({
           <input type="hidden" name="workspaceId" value={workspaceId} />
           <input type="hidden" name="tensionId" value={tension.id} />
           <button type="submit">{t("btnReturnToDraft")}</button>
+        </form>,
+      );
+      moreItems.push(
+        <form key="return-to-draft-drag" action={returnTensionToDraftAction} data-work-item-transition={`${tension.id}:DRAFT`} className="nr-hidden-transition-form">
+          <input type="hidden" name="workspaceId" value={workspaceId} />
+          <input type="hidden" name="tensionId" value={tension.id} />
+          <button type="submit" aria-hidden="true" tabIndex={-1}>{t("btnReturnToDraft")}</button>
         </form>,
       );
     }
@@ -186,38 +199,41 @@ export default async function TensionsPage({
     );
 
     return (
-      <div className={compact ? "nr-kanban-card" : "nr-item"} key={tension.id}>
-        <div className="row" style={{ alignItems: "center" }}>
+      <div className={`${compact ? "nr-kanban-card" : "nr-item nr-list-card"} nr-clickable-card`} key={tension.id}>
+        <a href={detailHref} className="nr-card-hitbox" aria-label={tWork("openItem", { title: tension.title })} />
+        <div className="row nr-card-content" style={{ alignItems: "center" }}>
           <strong className="nr-item-title">
             {tension.isPrivate && <span title={t("privateInboxTooltip")} style={{ marginRight: 6 }}>◆</span>}
-            <a href={`/workspaces/${workspaceId}/tensions/${tension.id}`} style={{ color: "inherit" }}>
-              {tension.title}
-            </a>
+            {tension.title}
           </strong>
-          <span className={`tag ${tension.status === "DRAFT" ? "info" : tension.status === "OPEN" ? "neutral" : "success"}`}>
-            {statusLabel(tension.status)}
-          </span>
+          {!compact && (
+            <span className={`tag ${tension.status === "DRAFT" ? "info" : tension.status === "OPEN" ? "neutral" : "success"}`}>
+              {statusLabel(tension.status)}
+            </span>
+          )}
         </div>
-        {tension.bodyMd && <MarkdownExcerpt markdown={tension.bodyMd} maxLength={compact ? 120 : 220} as="div" className="nr-excerpt" />}
-        <div className="nr-item-meta" style={{ marginTop: 8 }}>
-          {t("createdByMeta", { name: authorName })}
-          {raisedByName ? ` · ${t("raisedByMeta", { name: raisedByName })}` : ""}
-          {` · ${ageText(tension.createdAt)} · ${t("upvotes", { count: tension.upvotes.length })} · ${t("priorityN", { priority: tension.priority })}`}
-          {tension.circle ? ` · ${tension.circle.name}` : ""}
-          {openedDate ? ` · ${t("openedOnMeta", { date: openedDate })}` : ""}
-          {closedDate ? ` · ${t("closedOnMeta", { date: closedDate })}` : ""}
-          {" · "}
-          {tension.version > 1 ? (
-            <a href={`/workspaces/${workspaceId}/versions?entityType=TENSION&entityId=${encodeURIComponent(tension.id)}`}>v{tension.version}</a>
-          ) : (
-            <>v{tension.version}</>
-          )}
-          {tension.proposal && (
-            <>
-              {" · "}
-              <a href={`/workspaces/${workspaceId}/proposals/${tension.proposal.id}`}>{t("linkedProposalMeta", { title: tension.proposal.title })}</a>
-            </>
-          )}
+        <div className="nr-card-content">
+          {tension.bodyMd && <MarkdownExcerpt markdown={tension.bodyMd} maxLength={compact ? 120 : 220} as="div" className="nr-excerpt" />}
+          <div className="nr-item-meta" style={{ marginTop: 8 }}>
+            {t("createdByMeta", { name: authorName })}
+            {raisedByName ? ` · ${t("raisedByMeta", { name: raisedByName })}` : ""}
+            {` · ${ageText(tension.createdAt)} · ${t("upvotes", { count: tension.upvotes.length })} · ${t("priorityN", { priority: tension.priority })}`}
+            {tension.circle ? ` · ${tension.circle.name}` : ""}
+            {openedDate ? ` · ${t("openedOnMeta", { date: openedDate })}` : ""}
+            {closedDate ? ` · ${t("closedOnMeta", { date: closedDate })}` : ""}
+            {" · "}
+            {tension.version > 1 ? (
+              <a href={`/workspaces/${workspaceId}/versions?entityType=TENSION&entityId=${encodeURIComponent(tension.id)}`}>v{tension.version}</a>
+            ) : (
+              <>v{tension.version}</>
+            )}
+            {tension.proposal && (
+              <>
+                {" · "}
+                <a href={`/workspaces/${workspaceId}/proposals/${tension.proposal.id}`}>{t("linkedProposalMeta", { title: tension.proposal.title })}</a>
+              </>
+            )}
+          </div>
         </div>
         <ItemActions
           moreLabel={tCommon("moreActions")}
@@ -227,6 +243,46 @@ export default async function TensionsPage({
       </div>
     );
   }
+
+  function renderCompactCreateTensionForm() {
+    return (
+      <details className="nr-kanban-add-card">
+        <summary className="nr-hide-marker nr-kanban-add-trigger">
+          {tWork("newDraftCard")}
+        </summary>
+        <form action={createTensionAction} className="stack nr-form-section nr-inline-draft-form">
+          <input type="hidden" name="workspaceId" value={workspaceId} />
+          <input type="hidden" name="isPrivate" value="on" />
+          <label>
+            {t("formTitle")}
+            <input name="title" required />
+          </label>
+          <label>
+            {t("formDescription")}
+            <MarkdownEditor name="bodyMd" rows={4} />
+          </label>
+          <label>
+            {t("formPriority")}
+            <input name="priority" type="number" min={0} defaultValue={0} />
+          </label>
+          <button type="submit">{t("btnCreateTension")}</button>
+        </form>
+      </details>
+    );
+  }
+
+  const tensionColumns: WorkItemKanbanColumn[] = (["DRAFT", "OPEN", "RESOLVED"] as const).map((status: TensionColumnStatus) => ({
+    id: status,
+    label: statusLabel(status),
+    count: groupedTensions[status].length,
+    empty: <p className="muted">{t("noTensions")}</p>,
+    addCard: status === "DRAFT" ? renderCompactCreateTensionForm() : null,
+    items: groupedTensions[status].map((tension) => ({
+      id: tension.id,
+      status,
+      node: renderTensionCard(tension, true),
+    })),
+  }));
 
   return (
     <>
@@ -238,44 +294,50 @@ export default async function TensionsPage({
       </header>
 
       <section className="ws-section">
-        <WorkItemViewToggle
-          currentView={view}
-          listHref={buildWorkItemQuery({ ...filterState, status: statusFilter, view: "list" })}
-          kanbanHref={buildWorkItemQuery({ ...filterState, status: statusFilter, view: "kanban" })}
-          listLabel={tWork("listView")}
-          kanbanLabel={tWork("kanbanView")}
-          label={tWork("viewMode")}
-        />
-        <div className="nr-filter-bar nr-filter-bar-wrap">
-          {TENSION_STATUS_FILTERS.map((status) => (
-            <a
-              key={status}
-              href={buildWorkItemQuery({ ...filterState, status })}
-              className={`nr-filter-item ${statusFilter === status ? "nr-filter-active" : ""}`}
-            >
-              {t("filterWithCount", { label: statusLabel(status), count: groupedTensions[status].length })}
-            </a>
-          ))}
+        <div className="nr-work-board-header">
+          <div className="nr-filter-bar nr-filter-bar-wrap">
+            {TENSION_STATUS_FILTERS.map((status) => (
+              <a
+                key={status}
+                href={buildWorkItemQuery({ ...filterState, status })}
+                className={`nr-filter-item ${statusFilter === status ? "nr-filter-active" : ""}`}
+              >
+                {t("filterWithCount", { label: statusLabel(status), count: groupedTensions[status].length })}
+              </a>
+            ))}
+          </div>
+          <WorkItemToolbar
+            currentView={view}
+            currentSort={sort}
+            listHref={buildWorkItemQuery({ ...filterState, status: statusFilter, view: "list" })}
+            kanbanHref={buildWorkItemQuery({ ...filterState, status: statusFilter, view: "kanban" })}
+            sortLinks={{
+              priority: buildWorkItemQuery({ ...filterState, status: statusFilter, sort: "priority" }),
+              date: buildWorkItemQuery({ ...filterState, status: statusFilter, sort: "date" }),
+              alpha: buildWorkItemQuery({ ...filterState, status: statusFilter, sort: "alpha" }),
+            }}
+            listLabel={tWork("listView")}
+            kanbanLabel={tWork("kanbanView")}
+            sortLabel={tWork("sort")}
+            sortPriorityLabel={tWork("sortPriority")}
+            sortDateLabel={tWork("sortDate")}
+            sortAlphaLabel={tWork("sortAlpha")}
+            columnSettingsLabel={tWork("columnSettings")}
+            columnSettingsPortalId={view === "kanban" ? columnSettingsPortalId : undefined}
+            label={tWork("viewMode")}
+          />
         </div>
 
         <WorkItemFilterControls
           action={`/workspaces/${workspaceId}/tensions`}
           status={statusFilter}
           view={view}
-          scope={scope}
+          sort={sort}
           circleId={circleId}
           memberId={memberId}
           circles={circles.map((circle) => ({ id: circle.id, label: circle.name }))}
           members={members.map((member) => ({ id: member.id, label: memberName(member) }))}
-          dates={[
-            { name: "openedFrom", label: t("filterOpenedFrom"), value: dateValues.openedFrom },
-            { name: "openedTo", label: t("filterOpenedTo"), value: dateValues.openedTo },
-            { name: "closedFrom", label: t("filterClosedFrom"), value: dateValues.closedFrom },
-            { name: "closedTo", label: t("filterClosedTo"), value: dateValues.closedTo },
-          ]}
           labels={{
-            scope: tWork("scope"),
-            company: tWork("companyScope"),
             circle: tWork("circle"),
             person: tWork("person"),
             allCircles: tWork("allCircles"),
@@ -286,18 +348,22 @@ export default async function TensionsPage({
         />
 
         {view === "kanban" ? (
-          <div className="nr-kanban">
-            {(["DRAFT", "OPEN", "RESOLVED"] as const).map((status) => (
-              <section className="nr-kanban-column" key={status}>
-                <div className="nr-kanban-heading">
-                  <span>{statusLabel(status)}</span>
-                  <span>{groupedTensions[status].length}</span>
-                </div>
-                {groupedTensions[status].length === 0 && <p className="muted">{t("noTensions")}</p>}
-                {groupedTensions[status].map((tension) => renderTensionCard(tension, true))}
-              </section>
-            ))}
-          </div>
+          <WorkItemKanbanBoard
+            columns={tensionColumns}
+            storageKey={`work-items:${workspaceId}:tensions`}
+            settingsPortalId={columnSettingsPortalId}
+            settingsLabel={tWork("columnSettings")}
+            resetLabel={tWork("resetColumns")}
+            hideLabel={tWork("hideColumn")}
+            showLabel={tWork("showColumn")}
+            moveUpLabel={tWork("moveColumnLeft")}
+            moveDownLabel={tWork("moveColumnRight")}
+            hideShortLabel={tWork("hideColumnShort")}
+            showShortLabel={tWork("showColumnShort")}
+            moveUpShortLabel={tWork("moveColumnLeftShort")}
+            moveDownShortLabel={tWork("moveColumnRightShort")}
+            dragUnavailableLabel={tWork("dragUnavailable")}
+          />
         ) : (
           <div>
             {(!displayTensions || displayTensions.length === 0) && (
@@ -313,7 +379,7 @@ export default async function TensionsPage({
         )}
       </section>
 
-      <section className="ws-section">
+      <section className={`ws-section ${view === "kanban" ? "nr-list-only-create" : ""}`}>
         <details open={resolvedSearch.open === "new"}>
           <summary className="nr-hide-marker nr-section-toggle">
             <span className="nr-section-header nr-section-header-inline">{t("newTensionTitle")}</span>
@@ -336,6 +402,10 @@ export default async function TensionsPage({
                   <option value={member.id} key={member.id}>{memberName(member)}</option>
                 ))}
               </select>
+            </label>
+            <label>
+              {t("formPriority")}
+              <input name="priority" type="number" min={0} defaultValue={0} />
             </label>
             <details>
               <summary className="secondary small nr-hide-marker" style={{ cursor: "pointer", display: "inline-block" }}>{t("formOptionalMetadata")}</summary>

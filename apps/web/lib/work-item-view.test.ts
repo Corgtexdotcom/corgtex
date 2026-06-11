@@ -2,18 +2,18 @@ import { describe, expect, it } from "vitest";
 import {
   buildWorkItemQuery,
   normalizeDateOnly,
-  normalizeWorkItemScope,
+  normalizeWorkItemSort,
   normalizeWorkItemView,
-  resolveWorkItemScope,
+  resolveWorkItemFilters,
 } from "./work-item-view";
 
 describe("work item view helpers", () => {
-  it("normalizes view, scope, and date query values", () => {
+  it("normalizes view, sort, and date query values", () => {
     expect(normalizeWorkItemView("kanban")).toBe("kanban");
     expect(normalizeWorkItemView("table")).toBe("list");
-    expect(normalizeWorkItemScope("circle")).toBe("circle");
-    expect(normalizeWorkItemScope("member")).toBe("member");
-    expect(normalizeWorkItemScope("invalid")).toBe("company");
+    expect(normalizeWorkItemSort("date")).toBe("date");
+    expect(normalizeWorkItemSort("alpha")).toBe("alpha");
+    expect(normalizeWorkItemSort("invalid")).toBe("priority");
     expect(normalizeDateOnly("2026-06-10")).toBe("2026-06-10");
     expect(normalizeDateOnly("2026-06-31")).toBeUndefined();
   });
@@ -22,33 +22,21 @@ describe("work item view helpers", () => {
     expect(buildWorkItemQuery({
       status: "OPEN",
       view: "kanban",
-      scope: "member",
+      sort: "alpha",
+      circleId: "circle-1",
       memberId: "mem-1",
-      dates: {
-        openedFrom: "2026-06-01",
-      },
-    })).toBe("?status=OPEN&view=kanban&scope=member&memberId=mem-1&openedFrom=2026-06-01");
+    })).toBe("?status=OPEN&view=kanban&sort=alpha&circleId=circle-1&memberId=mem-1");
   });
 
-  it("only applies circle or member ids for the selected scope", () => {
-    expect(resolveWorkItemScope({
-      scope: "circle",
+  it("applies circle and member ids independently", () => {
+    expect(resolveWorkItemFilters({
       circleId: "circle-1",
       memberId: "mem-1",
+      sort: "date",
     })).toEqual({
-      scope: "circle",
-      circleId: "circle-1",
-      memberId: undefined,
-    });
-
-    expect(resolveWorkItemScope({
-      scope: "member",
       circleId: "circle-1",
       memberId: "mem-1",
-    })).toEqual({
-      scope: "member",
-      circleId: undefined,
-      memberId: "mem-1",
+      sort: "date",
     });
   });
 });

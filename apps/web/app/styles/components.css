@@ -1823,21 +1823,232 @@ details[open] > .settings-disclosure-summary::before {
     min-width: min(180px, 100%);
   }
 
+  .nr-work-board-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 16px;
+  }
+
+  .nr-work-board-header .nr-filter-bar {
+    margin-bottom: 0;
+  }
+
+  .nr-work-toolbar,
   .nr-view-toggle {
     display: flex;
+    align-items: center;
     gap: 8px;
-    margin-bottom: 16px;
+  }
+
+  .nr-work-toolbar {
+    flex: 0 0 auto;
+    justify-content: flex-end;
+  }
+
+  .nr-icon-link,
+  .nr-icon-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: var(--surface-strong);
+    color: var(--muted);
+    text-decoration: none;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+  }
+
+  .nr-icon-link svg,
+  .nr-icon-button svg {
+    display: block;
+    color: currentColor;
+    stroke: currentColor;
+  }
+
+  .nr-icon-link:hover,
+  .nr-icon-button:hover {
+    background: var(--bg-alt);
+    color: var(--text);
+    border-color: var(--text);
+  }
+
+  .nr-icon-link-active {
+    background: var(--accent);
+    color: var(--accent-fg);
+    border-color: var(--accent);
+  }
+
+  .nr-icon-link-muted {
+    opacity: 0.55;
+  }
+
+  .nr-icon-menu {
+    position: relative;
+  }
+
+  .nr-icon-menu > summary {
+    list-style: none;
+  }
+
+  .nr-icon-menu > summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .nr-icon-menu-popover {
+    position: absolute;
+    right: 0;
+    top: calc(100% + 8px);
+    z-index: 30;
+    min-width: 180px;
+    padding: 6px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--surface-strong);
+    box-shadow: var(--shadow-lg);
+  }
+
+  .nr-icon-menu-item {
+    display: flex;
+    width: 100%;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text);
+    text-align: left;
+    text-decoration: none;
+    font: inherit;
+    cursor: pointer;
+  }
+
+  .nr-icon-menu-item:hover,
+  .nr-icon-menu-item-active {
+    background: var(--bg-alt);
+    color: var(--accent);
+  }
+
+  .nr-kanban-shell {
+    position: relative;
+  }
+
+  .nr-kanban-tools {
+    display: flex;
+    justify-content: flex-end;
+    margin: -8px 0 12px;
+  }
+
+  .nr-kanban-settings-slot {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+  }
+
+  .nr-kanban-message {
+    margin: 0 0 12px;
+    color: var(--muted);
+    font-size: 0.85rem;
+  }
+
+  .nr-column-menu {
+    min-width: 300px;
+  }
+
+  .nr-column-menu-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+    padding: 8px;
+    border-radius: 6px;
+  }
+
+  .nr-column-menu-row + .nr-column-menu-row {
+    border-top: 1px solid var(--line);
+  }
+
+  .nr-column-menu-label {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: 6px;
+    overflow: hidden;
+    color: var(--text);
+    font-size: 0.86rem;
+    font-weight: 600;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .nr-column-menu-actions {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 6px;
+  }
+
+  .nr-column-menu-action {
+    display: inline-flex;
+    min-width: 0;
+    min-height: 30px;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    padding: 0 8px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: var(--surface);
+    color: var(--text);
+    font: inherit;
+    font-size: 0.74rem;
+    font-weight: 700;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+  }
+
+  .nr-column-menu-action svg {
+    flex: 0 0 auto;
+    color: currentColor;
+    stroke: currentColor;
+  }
+
+  .nr-column-menu-action span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .nr-column-menu-action:hover {
+    background: var(--bg-alt);
+    border-color: var(--text);
+  }
+
+  .nr-column-menu-action:disabled {
+    opacity: 0.35;
+    color: var(--muted);
+    cursor: not-allowed;
   }
 
   .nr-kanban {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-    gap: 16px;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 20px;
     align-items: start;
   }
 
   .nr-kanban-column {
     min-width: 0;
+    min-height: 220px;
+    padding: 10px;
+    border: 1px solid transparent;
+    border-radius: 8px;
   }
 
   .nr-kanban-heading {
@@ -1853,11 +2064,97 @@ details[open] > .settings-disclosure-summary::before {
   }
 
   .nr-kanban-card {
+    position: relative;
     border: 1px solid var(--line);
     border-radius: 8px;
     padding: 14px;
     margin-bottom: 12px;
     background: var(--surface);
+  }
+
+  .nr-kanban-draggable {
+    cursor: grab;
+  }
+
+  .nr-kanban-draggable:active {
+    cursor: grabbing;
+  }
+
+  .nr-kanban-column-drop {
+    border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 6%, transparent);
+  }
+
+  .nr-kanban-add-card {
+    margin-top: 8px;
+  }
+
+  .nr-kanban-add-trigger {
+    display: grid;
+    min-height: 56px;
+    place-items: center;
+    border: 1px dashed var(--line);
+    border-radius: 8px;
+    background: var(--surface-strong);
+    color: var(--muted);
+    font-size: 1.25rem;
+    font-weight: 700;
+    cursor: pointer;
+  }
+
+  .nr-kanban-add-trigger:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+
+  .nr-inline-draft-form {
+    margin-top: 10px;
+  }
+
+  .nr-hidden-transition-form,
+  .nr-list-only-create {
+    display: none;
+  }
+
+  .nr-clickable-card {
+    position: relative;
+  }
+
+  .nr-card-hitbox {
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    border-radius: inherit;
+  }
+
+  .nr-card-content {
+    position: relative;
+    z-index: 2;
+    pointer-events: none;
+  }
+
+  .nr-clickable-card .nr-card-content a,
+  .nr-clickable-card .nr-card-content button,
+  .nr-clickable-card .nr-card-content input,
+  .nr-clickable-card .nr-card-content select,
+  .nr-clickable-card .nr-card-content textarea,
+  .nr-clickable-card .nr-card-content details,
+  .nr-clickable-card .item-actions,
+  .nr-clickable-card .action-menu,
+  .nr-clickable-card form {
+    position: relative;
+    z-index: 3;
+    pointer-events: auto;
+  }
+
+  @supports selector(:has(*)) {
+    .ws-layout:has(.nr-kanban-shell) .ws-main-content {
+      max-width: min(1760px, calc(100vw - 112px));
+    }
+
+    .ws-main-content:has(.nr-kanban-shell) {
+      max-width: min(1760px, calc(100vw - 112px));
+    }
   }
 
   .nr-evidence-list {
@@ -2000,6 +2297,23 @@ details[open] > .settings-disclosure-summary::before {
 
   .ws-main-content {
     padding: 24px 16px 48px;
+  }
+
+  .nr-work-board-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .nr-work-toolbar {
+    justify-content: flex-start;
+  }
+
+  .nr-kanban {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .nr-kanban-tools {
+    justify-content: flex-start;
   }
 
   .workspace-add-menu {

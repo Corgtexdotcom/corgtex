@@ -78,6 +78,8 @@ export default async function ProposalDetailPage({
             {proposal.status === "RESOLVED" && proposal.resolutionOutcome ? `${proposal.status} · ${proposal.resolutionOutcome.replace("_", " ")}` : proposal.status}
           </span>
           <span>·</span>
+          <span>{tWork("priorityN", { priority: proposal.priority })}</span>
+          <span>·</span>
           <span>
             {versionHistory.versions.length > 0 ? (
               <Link href={`/workspaces/${workspaceId}/versions?entityType=PROPOSAL&entityId=${encodeURIComponent(proposal.id)}`} className="nr-link-inherit">v{proposal.version}</Link>
@@ -194,7 +196,7 @@ export default async function ProposalDetailPage({
               <form action={updateProposalAction} className="stack nr-form-section mt-3">
                 <input type="hidden" name="workspaceId" value={workspaceId} />
                 <input type="hidden" name="proposalId" value={proposal.id} />
-                <ProposalDraftFields defaultTitle={proposal.title} defaultBodyMd={proposal.bodyMd} />
+                <ProposalDraftFields defaultTitle={proposal.title} defaultBodyMd={proposal.bodyMd} defaultPriority={proposal.priority} />
                 <button type="submit" className="secondary small">{proposal.status === "DRAFT" ? t("btnSaveDraft") : tCommon("save")}</button>
               </form>
             </details>
@@ -240,9 +242,9 @@ export default async function ProposalDetailPage({
                   </Link>
                 ))}
                 {proposal.actions.map((action) => (
-                  <span key={action.id} className="tag info">
+                  <Link key={action.id} href={`/workspaces/${workspaceId}/actions/${action.id}`} className="tag info no-underline">
                     {t("actionTag", { title: action.title })}
-                  </span>
+                  </Link>
                 ))}
               </div>
             </div>

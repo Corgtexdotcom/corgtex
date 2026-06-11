@@ -93,6 +93,7 @@ describe("action domain lifecycle", () => {
       workspaceId: "workspace-1",
       title: " Follow up ",
       bodyMd: " Notes ",
+      priority: 4,
     })).resolves.toMatchObject({
       id: "action-private",
       status: "DRAFT",
@@ -105,6 +106,7 @@ describe("action domain lifecycle", () => {
         workspaceId: "workspace-1",
         title: "Follow up",
         bodyMd: "Notes",
+        priority: 4,
         status: "DRAFT",
         isPrivate: true,
         publishedAt: null,
@@ -124,7 +126,7 @@ describe("action domain lifecycle", () => {
     prismaMock.action.count.mockResolvedValueOnce(0);
 
     const { listActions } = await import("./actions");
-    await listActions(actor, "workspace-1", { memberId: "member-1", circleId: "circle-1" });
+    await listActions(actor, "workspace-1", { memberId: "member-1", circleId: "circle-1", sort: "alpha" });
 
     expect(prismaMock.action.findMany).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({
@@ -155,6 +157,11 @@ describe("action domain lifecycle", () => {
           },
         ],
       }),
+      orderBy: [
+        { title: "asc" },
+        { createdAt: "desc" },
+        { id: "desc" },
+      ],
     }));
   });
 
@@ -293,6 +300,7 @@ describe("action domain lifecycle", () => {
       authorUserId: "user-1",
       title: "Follow up",
       bodyMd: "Old notes",
+      priority: 1,
       status: "OPEN",
       version: 1,
       isPrivate: false,
@@ -313,6 +321,7 @@ describe("action domain lifecycle", () => {
       workspaceId: "workspace-1",
       actionId: "action-1",
       title: "Follow up now",
+      priority: 5,
     })).resolves.toMatchObject({
       id: "action-1",
       version: 2,
@@ -323,16 +332,17 @@ describe("action domain lifecycle", () => {
         entityType: "Action",
         entityId: "action-1",
         version: 1,
-        changedFields: ["title"],
+        changedFields: ["title", "priority"],
         previousState: expect.objectContaining({
           title: "Follow up",
+          priority: 1,
           version: 1,
         }),
       }),
     }));
     expect(prismaMock.action.update).toHaveBeenCalledWith(expect.objectContaining({
       where: { id: "action-1" },
-      data: { title: "Follow up now", version: 2 },
+      data: { title: "Follow up now", priority: 5, version: 2 },
     }));
   });
 

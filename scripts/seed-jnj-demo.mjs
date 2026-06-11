@@ -2095,7 +2095,7 @@ async function main() {
   console.log(`✅ ${MEETING_INSIGHTS.length} Meeting insights created`);
 
   // 7. Create Tensions
-  for (const t of TENSIONS) {
+  for (const [index, t] of TENSIONS.entries()) {
     const assignee = t.assignee && memberMappings[t.assignee] ? memberMappings[t.assignee].memberId : null;
     const tensionId = `${wsId}-tension-${slugify(t.title)}`;
     const exists = await prisma.tension.findFirst({
@@ -2109,6 +2109,7 @@ async function main() {
       title: t.title,
       bodyMd: t.body,
       status: t.status,
+      priority: t.priority ?? Math.max(0, TENSIONS.length - index),
       isPrivate: false,
       publishedAt: t.publishedAt ?? nDaysAgo(2),
       resolvedAt: t.resolvedAt ?? (t.status === "RESOLVED" ? nDaysAgo(1) : null),
@@ -2129,7 +2130,7 @@ async function main() {
   }
 
   // 8. Create Actions
-  for (const a of ACTIONS) {
+  for (const [index, a] of ACTIONS.entries()) {
     const assignee = a.assignee && memberMappings[a.assignee] ? memberMappings[a.assignee].memberId : null;
     const actionId = `${wsId}-action-${slugify(a.title)}`;
     const exists = await prisma.action.findFirst({
@@ -2142,6 +2143,7 @@ async function main() {
       assigneeMemberId: assignee,
       title: a.title,
       status: a.status,
+      priority: a.priority ?? Math.max(0, ACTIONS.length - index),
       isPrivate: false,
       publishedAt: nDaysAgo(1),
       archivedAt: null,
@@ -2173,6 +2175,7 @@ async function main() {
       summary: p.summary,
       bodyMd: p.body,
       status: p.status,
+      priority: p.priority ?? Math.max(0, PROPOSALS.length - index),
       resolutionOutcome: p.resolutionOutcome ?? null,
       isPrivate: false,
       publishedAt: p.publishedAt,

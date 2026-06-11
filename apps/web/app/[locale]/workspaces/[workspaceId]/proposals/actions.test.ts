@@ -71,6 +71,7 @@ describe("proposal server actions", () => {
     formData.set("workspaceId", "workspace-1");
     formData.set("title", "Clarify approval policy");
     formData.set("bodyMd", "Proposal body");
+    formData.set("priority", "6");
     formData.set("sourceTensionId", "tension-1");
     formData.append("relatedActionIds", "action-1");
     formData.append("relatedActionIds", "action-2");
@@ -83,6 +84,7 @@ describe("proposal server actions", () => {
       workspaceId: "workspace-1",
       title: "Clarify approval policy",
       bodyMd: "Proposal body",
+      priority: 6,
       includeAiSummary: false,
       isPrivate: false,
       sourceTensionId: "tension-1",

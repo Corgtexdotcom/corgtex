@@ -31,9 +31,11 @@ function proposalWordCount(title: string, bodyMd: string) {
 export function ProposalDraftFields({
   defaultTitle = "",
   defaultBodyMd = "",
+  defaultPriority = 0,
 }: {
   defaultTitle?: string;
   defaultBodyMd?: string;
+  defaultPriority?: number;
 }) {
   const t = useTranslations("proposals");
   const [title, setTitle] = useState(defaultTitle);
@@ -59,6 +61,10 @@ export function ProposalDraftFields({
           required
           placeholder={t("formBodyPlaceholder")}
         />
+      </label>
+      <label>
+        {t("formPriority")}
+        <input name="priority" type="number" min={0} defaultValue={defaultPriority} />
       </label>
       {showAiSummaryToggle && (
         <label style={{ display: "flex", alignItems: "center", gap: "8px", fontWeight: "normal", cursor: "pointer" }}>

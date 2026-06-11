@@ -39,6 +39,7 @@ export async function createProposalAction(formData: FormData) {
     title: asString(formData, "title"),
     bodyMd: asString(formData, "bodyMd"),
     includeAiSummary: formData.get("includeAiSummary") === "on",
+    priority: asOptionalInt(formData, "priority"),
     isPrivate: formData.get("isPrivate") === "on",
     sourceTensionId: asOptional(formData, "sourceTensionId"),
     relatedActionIds: asStringArray(formData, "relatedActionIds"),
@@ -75,6 +76,7 @@ export async function updateProposalAction(formData: FormData) {
     proposalId: asString(formData, "proposalId"),
     title: asOptional(formData, "title") ?? undefined,
     bodyMd: asOptional(formData, "bodyMd") ?? undefined,
+    priority: formData.has("priority") ? (asOptionalInt(formData, "priority") ?? 0) : undefined,
     includeAiSummary: formData.has("includeAiSummaryRendered") ? formData.get("includeAiSummary") === "on" : undefined,
   });
   refresh(workspaceId);

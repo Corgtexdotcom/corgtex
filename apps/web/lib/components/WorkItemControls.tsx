@@ -1,4 +1,6 @@
-import type { WorkItemScope, WorkItemViewMode } from "@/lib/work-item-view";
+import type { ReactNode } from "react";
+import { ArrowDownAZ, ArrowDownWideNarrow, ArrowUpDown, Columns3, List, Settings2 } from "lucide-react";
+import type { WorkItemScope, WorkItemSort, WorkItemViewMode } from "@/lib/work-item-view";
 
 type Option = {
   id: string;
@@ -28,12 +30,99 @@ export function WorkItemViewToggle({
 }) {
   return (
     <div className="nr-view-toggle" aria-label={label}>
-      <a href={listHref} className={`nr-filter-item ${currentView === "list" ? "nr-filter-active" : ""}`}>
-        {listLabel}
+      <a
+        href={listHref}
+        className={`nr-icon-link ${currentView === "list" ? "nr-icon-link-active" : ""}`}
+        aria-label={listLabel}
+        title={listLabel}
+      >
+        <List size={17} aria-hidden="true" />
       </a>
-      <a href={kanbanHref} className={`nr-filter-item ${currentView === "kanban" ? "nr-filter-active" : ""}`}>
-        {kanbanLabel}
+      <a
+        href={kanbanHref}
+        className={`nr-icon-link ${currentView === "kanban" ? "nr-icon-link-active" : ""}`}
+        aria-label={kanbanLabel}
+        title={kanbanLabel}
+      >
+        <Columns3 size={17} aria-hidden="true" />
       </a>
+    </div>
+  );
+}
+
+export function WorkItemToolbar({
+  currentView,
+  currentSort,
+  listHref,
+  kanbanHref,
+  sortLinks,
+  listLabel,
+  kanbanLabel,
+  sortLabel,
+  sortPriorityLabel,
+  sortDateLabel,
+  sortAlphaLabel,
+  columnSettingsLabel,
+  columnSettingsPortalId,
+  showColumnSettings = false,
+  label,
+}: {
+  currentView: WorkItemViewMode;
+  currentSort: WorkItemSort;
+  listHref: string;
+  kanbanHref: string;
+  sortLinks: Record<WorkItemSort, string>;
+  listLabel: string;
+  kanbanLabel: string;
+  sortLabel: string;
+  sortPriorityLabel: string;
+  sortDateLabel: string;
+  sortAlphaLabel: string;
+  columnSettingsLabel: string;
+  columnSettingsPortalId?: string;
+  showColumnSettings?: boolean;
+  label: string;
+}) {
+  const sortOptions: Array<{ value: WorkItemSort; label: string; icon: ReactNode }> = [
+    { value: "priority", label: sortPriorityLabel, icon: <ArrowDownWideNarrow size={15} aria-hidden="true" /> },
+    { value: "date", label: sortDateLabel, icon: <ArrowUpDown size={15} aria-hidden="true" /> },
+    { value: "alpha", label: sortAlphaLabel, icon: <ArrowDownAZ size={15} aria-hidden="true" /> },
+  ];
+
+  return (
+    <div className="nr-work-toolbar" aria-label={label}>
+      <WorkItemViewToggle
+        currentView={currentView}
+        listHref={listHref}
+        kanbanHref={kanbanHref}
+        listLabel={listLabel}
+        kanbanLabel={kanbanLabel}
+        label={label}
+      />
+      <details className="nr-icon-menu">
+        <summary className="nr-icon-link" aria-label={sortLabel} title={sortLabel}>
+          <ArrowUpDown size={17} aria-hidden="true" />
+        </summary>
+        <div className="nr-icon-menu-popover">
+          {sortOptions.map((option) => (
+            <a
+              key={option.value}
+              href={sortLinks[option.value]}
+              className={`nr-icon-menu-item ${currentSort === option.value ? "nr-icon-menu-item-active" : ""}`}
+            >
+              {option.icon}
+              <span>{option.label}</span>
+            </a>
+          ))}
+        </div>
+      </details>
+      {columnSettingsPortalId ? (
+        <span id={columnSettingsPortalId} className="nr-kanban-settings-slot" />
+      ) : showColumnSettings && (
+        <span className="nr-icon-link nr-icon-link-muted" aria-label={columnSettingsLabel} title={columnSettingsLabel}>
+          <Settings2 size={17} aria-hidden="true" />
+        </span>
+      )}
     </div>
   );
 }
@@ -43,6 +132,7 @@ export function WorkItemFilterControls({
   status,
   view,
   scope,
+  sort,
   circleId,
   memberId,
   circles,
@@ -56,7 +146,8 @@ export function WorkItemFilterControls({
   action: string;
   status?: string;
   view?: WorkItemViewMode;
-  scope: WorkItemScope;
+  scope?: WorkItemScope;
+  sort?: WorkItemSort;
   circleId?: string;
   memberId?: string;
   circles: Option[];
@@ -66,8 +157,8 @@ export function WorkItemFilterControls({
   showCircle?: boolean;
   showMember?: boolean;
   labels: {
-    scope: string;
-    company: string;
+    scope?: string;
+    company?: string;
     circle: string;
     person: string;
     allCircles: string;
@@ -80,14 +171,17 @@ export function WorkItemFilterControls({
     <form className="nr-filter-panel" action={action}>
       {status && <input type="hidden" name="status" value={status} />}
       {view && view !== "list" && <input type="hidden" name="view" value={view} />}
-      <label>
-        <span className="nr-item-meta">{labels.scope}</span>
-        <select name="scope" defaultValue={scope}>
-          <option value="company">{labels.company}</option>
-          {showCircle && <option value="circle">{labels.circle}</option>}
-          {showMember && <option value="member">{labels.person}</option>}
-        </select>
-      </label>
+      {sort && sort !== "priority" && <input type="hidden" name="sort" value={sort} />}
+      {scope && (
+        <label>
+          <span className="nr-item-meta">{labels.scope}</span>
+          <select name="scope" defaultValue={scope}>
+            <option value="company">{labels.company}</option>
+            {showCircle && <option value="circle">{labels.circle}</option>}
+            {showMember && <option value="member">{labels.person}</option>}
+          </select>
+        </label>
+      )}
       {showCircle && (
         <label>
           <span className="nr-item-meta">{labels.circle}</span>

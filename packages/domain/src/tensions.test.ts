@@ -107,6 +107,7 @@ describe("tensions domain", () => {
       title: " Test tension ",
       bodyMd: " Details ",
       raisedByMemberId: "raised-member-1",
+      priority: 5,
     });
 
     expect(result.raisedByMemberId).toBe("raised-member-1");
@@ -125,6 +126,7 @@ describe("tensions domain", () => {
         title: "Test tension",
         bodyMd: "Details",
         raisedByMemberId: "raised-member-1",
+        priority: 5,
         status: "DRAFT",
         isPrivate: true,
         publishedAt: null,
@@ -400,7 +402,22 @@ describe("tensions domain", () => {
         },
       }),
       orderBy: [
+        { priority: "desc" },
         { upvotes: { _count: "desc" } },
+        { createdAt: "desc" },
+        { id: "desc" },
+      ],
+    }));
+  });
+
+  it("sorts tensions by title when requested", async () => {
+    const { listTensions } = await import("./tensions");
+
+    await listTensions(actor, "ws-1", { sort: "alpha" });
+
+    expect(prismaMock.tension.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      orderBy: [
+        { title: "asc" },
         { createdAt: "desc" },
         { id: "desc" },
       ],

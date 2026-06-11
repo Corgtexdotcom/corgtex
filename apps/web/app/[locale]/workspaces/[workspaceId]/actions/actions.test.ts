@@ -41,6 +41,7 @@ function buildCreateFormData() {
   formData.set("workspaceId", "workspace-1");
   formData.set("title", "Follow up");
   formData.set("bodyMd", "Notes");
+  formData.set("priority", "4");
   return formData;
 }
 
@@ -60,6 +61,7 @@ describe("action item server actions", () => {
       workspaceId: "workspace-1",
       title: "Follow up",
       bodyMd: "Notes",
+      priority: 4,
       proposalId: null,
       isPrivate: true,
     }));
