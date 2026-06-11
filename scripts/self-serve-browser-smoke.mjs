@@ -23,7 +23,9 @@ const secret = process.env.SMOKE_EMAIL_CAPTURE_SECRET?.trim();
 const emailDomain = arg("email-domain") || process.env.SELF_SERVE_SMOKE_EMAIL_DOMAIN || firstAllowedSmokeEmailDomain();
 const artifactsDir = path.resolve(arg("artifacts-dir") || `.artifacts/self-serve-smoke/${runId}`);
 const password = process.env.SELF_SERVE_SMOKE_PASSWORD || `Corgtex-${runId.slice(-8)}!`;
-const companyName = `Corgtex Smoke ${runId.slice(-8)}`;
+const recordPrefix = arg("record-prefix") || process.env.SELF_SERVE_SMOKE_RECORD_PREFIX || `[TEST] ${runId}`;
+const companyName = `${recordPrefix} Corgtex Browser Smoke`;
+const adminName = `${recordPrefix} Browser Smoke Agent`;
 const adminEmail = `smoke+${runId.replace(/[^a-z0-9-]/gi, "").toLowerCase()}@${emailDomain}`;
 const headless = !envFlag("SELF_SERVE_BROWSER_HEADFUL");
 const allowBillingSkip = envFlag("SELF_SERVE_BROWSER_ALLOW_BILLING_SKIP");
@@ -150,7 +152,7 @@ async function driveOnboardingTour(page) {
 }
 
 async function verifyRoleSurface(page, workspaceId) {
-  const roleSetup = await page.evaluate(async (id) => {
+  const roleSetup = await page.evaluate(async ({ id, prefix }) => {
     async function request(path, options = {}) {
       const response = await fetch(path, {
         ...options,
@@ -182,7 +184,7 @@ async function verifyRoleSurface(page, workspaceId) {
         const createdCircle = await request(`/api/workspaces/${id}/circles`, {
           method: "POST",
           body: JSON.stringify({
-            name: "Smoke Operations",
+            name: `${prefix} Smoke Operations`,
             purposeMd: "Coordinate self-serve smoke verification.",
             domainMd: "Trial setup, onboarding, billing, and support reproducibility.",
           }),
@@ -193,7 +195,7 @@ async function verifyRoleSurface(page, workspaceId) {
         method: "POST",
         body: JSON.stringify({
           circleId: circle.id,
-          name: "Smoke Role Owner",
+          name: `${prefix} Smoke Role Owner`,
           purposeMd: "Owns the launch smoke role description and customer support reproducibility.",
           accountabilities: [
             "Verify onboarding state is understandable.",
@@ -214,7 +216,7 @@ async function verifyRoleSurface(page, workspaceId) {
       });
     }
     return { roleId: role.id, memberId: member?.id ?? null, createdRole };
-  }, workspaceId);
+  }, { id: workspaceId, prefix: recordPrefix });
 
   await page.goto(`${baseUrl}/workspaces/${workspaceId}/roles/${roleSetup.roleId}`, { waitUntil: "networkidle" });
   await screenshot(page, "role-detail");
@@ -297,7 +299,7 @@ async function main() {
     }
     await screenshot(page, "signup-form");
     await page.fill('input[name="companyName"]', companyName);
-    await page.fill('input[name="adminName"]', "Corgtex Smoke Agent");
+    await page.fill('input[name="adminName"]', adminName);
     await page.fill('input[name="adminEmail"]', adminEmail);
     await page.check('input[name="acceptedTerms"]');
     await page.click('button[type="submit"]');

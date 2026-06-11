@@ -5,9 +5,32 @@ import { describe, expect, it } from "vitest";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const scriptPath = resolve(__dirname, "self-serve-production-readiness.mjs");
+const STRICT_BASE_ENV = {
+  APP_URL: "https://selfserve.corgtex.com",
+  NEXT_PUBLIC_APP_URL: "https://selfserve.corgtex.com",
+  NEXT_PUBLIC_SITE_URL: "https://www.corgtex.com",
+  DATABASE_URL: "postgresql://postgres:postgres@localhost:5432/corgtex",
+  SESSION_COOKIE_SECRET: "test-session-secret",
+  ENCRYPTION_KEY: "test-encryption-key",
+  STRIPE_SECRET_KEY: "stripe-secret-placeholder",
+  STRIPE_WEBHOOK_SECRET: "stripe-webhook-placeholder",
+  STRIPE_PRICE_AI_USAGE_ID: "price_test",
+  GOOGLE_CLIENT_ID: "google-client-id",
+  GOOGLE_CLIENT_SECRET: "google-client-secret",
+  MICROSOFT_CLIENT_ID: "microsoft-client-id",
+  MICROSOFT_CLIENT_SECRET: "microsoft-client-secret-value",
+  RESEND_API_KEY: "resend-api-placeholder",
+  EMAIL_FROM: "Corgtex <test@example.com>",
+  WORKER_POLL_INTERVAL_MS: "1000",
+  WORKER_MAX_POLL_INTERVAL_MS: "5000",
+  WORKER_EVENT_BATCH_SIZE: "10",
+  WORKER_JOB_BATCH_SIZE: "10",
+  WORKER_HEALTH_PORT: "3001",
+  WORKER_SHUTDOWN_TIMEOUT_MS: "1000",
+};
 
-function runReadiness(env) {
-  return spawnSync(process.execPath, [scriptPath], {
+function runReadiness(env, args = []) {
+  return spawnSync(process.execPath, [scriptPath, ...args], {
     env: {
       PATH: process.env.PATH,
       ...env,
@@ -35,5 +58,31 @@ describe("self-serve production readiness", () => {
 
     expect(result.status).toBe(0);
     expect(result.stderr).toBe("");
+  });
+
+  it("accepts Azure OpenAI managed identity without MODEL_API_KEY in strict mode", () => {
+    const result = runReadiness({
+      ...STRICT_BASE_ENV,
+      MODEL_PROVIDER: "azure-openai",
+      MODEL_BASE_URL: "https://example.openai.azure.com/openai/v1",
+      AZURE_OPENAI_AUTH_MODE: "managed_identity",
+      AZURE_CLIENT_ID: "00000000-0000-4000-8000-000000000000",
+    }, ["--strict", "--skip-http"]);
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("OK   MODEL_PROVIDER configured");
+    expect(result.stdout).toContain("OK   MODEL_BASE_URL configured");
+    expect(result.stdout).toContain("OK   AZURE_OPENAI_AUTH_MODE configured for managed identity");
+    expect(result.stderr).toBe("");
+  });
+
+  it("requires MODEL_API_KEY for OpenAI-compatible providers in strict mode", () => {
+    const result = runReadiness({
+      ...STRICT_BASE_ENV,
+      MODEL_PROVIDER: "openrouter",
+    }, ["--strict", "--skip-http"]);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("MODEL_API_KEY missing for OpenAI-compatible model provider");
   });
 });
