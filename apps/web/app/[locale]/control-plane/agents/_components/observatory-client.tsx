@@ -57,6 +57,9 @@ interface CustomerSummary {
   slug: string;
   healthStatus: string;
   supportConnectorStatus: string;
+  supportConnectorLabel: string;
+  supportConnectorDetail?: string | null;
+  supportAccessMode: string;
   supportMcpUrl?: string | null;
   accessMode: string;
   hasManagedWorkspace: boolean;
@@ -127,10 +130,10 @@ export function AgentObservatoryClient({ agents, runs, customers, initialCustome
     {
       id: `${customer.id}:support`,
       customerName: customer.name,
-      label: customer.supportMcpUrl ? "Customer MCP endpoint" : "Support connector",
-      kind: customer.accessMode,
+      label: customer.supportConnectorLabel || (customer.supportMcpUrl ? "Customer MCP endpoint" : "Support connector"),
+      kind: customer.supportAccessMode || customer.accessMode,
       status: customer.supportConnectorStatus,
-      detail: customer.supportMcpUrl ?? "No MCP endpoint recorded",
+      detail: customer.supportConnectorDetail || customer.supportMcpUrl || "No MCP endpoint recorded",
     },
     ...customer.credentials.map((credential) => ({
       id: `${customer.id}:credential:${credential.id}`,
