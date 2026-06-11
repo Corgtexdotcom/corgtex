@@ -26,6 +26,7 @@ vi.mock("next/headers", () => ({
 vi.mock("@corgtex/domain", () => ({
   AppError: MockAppError,
   createProcurementTrial: createProcurementTrialMock,
+  renderPasswordResetEmail: (params: { resetUrl: string; kind?: string }) => `reset email ${params.kind ?? ""} ${params.resetUrl}`,
   requestPasswordResetForActiveMember: requestPasswordResetForActiveMemberMock,
 }));
 
@@ -170,11 +171,11 @@ describe("signupAction", () => {
     });
     expect(createProcurementTrialMock).not.toHaveBeenCalled();
     expect(sendEmailMock).toHaveBeenCalledWith(expect.objectContaining({
-      to: "admin@acme.test",
-      subject: "Reset your Corgtex password",
-      html: expect.stringContaining("https://app.test/reset-password/reset-token"),
-    }));
-  });
+	      to: "admin@acme.test",
+	      subject: "Reset your Corgtex password",
+	      html: expect.stringContaining("existing-account https://app.test/reset-password/reset-token"),
+	    }));
+	  });
 
   it("normalizes proxy-chain forwarded headers before creating a trial origin", async () => {
     headersMock.mockResolvedValue(new Headers({

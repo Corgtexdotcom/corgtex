@@ -14,6 +14,8 @@ import {
   adminResendAccessLink,
   adminCreateWorkspace,
   getWorkspaceAdminDetail,
+  renderAccountSetupEmail,
+  renderPasswordResetEmail,
 } from "@corgtex/domain";
 import { sendEmail, prisma } from "@corgtex/shared";
 import { notFound } from "next/navigation";
@@ -31,6 +33,14 @@ async function verifyGlobalAdmin(workspaceId: string) {
   return actor;
 }
 
+async function workspaceNameForEmail(workspaceId: string) {
+  const workspace = await prisma.workspace.findUnique({
+    where: { id: workspaceId },
+    select: { name: true },
+  });
+  return workspace?.name ?? null;
+}
+
 export async function adminResetPasswordAction(formData: FormData) {
   const workspaceId = asString(formData, "workspaceId");
   const actor = await verifyGlobalAdmin(workspaceId);
@@ -44,15 +54,10 @@ export async function adminResetPasswordAction(formData: FormData) {
   await sendEmail({
     to: email,
     subject: `Password Reset Request (Admin Triggered)`,
-    html: `
-      <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto; padding: 40px 20px;">
-        <h2>Reset Your Password</h2>
-        <p>An administrator has triggered a password reset for your account.</p>
-        <div style="margin: 32px 0;">
-          <a href="${resetUrl}" style="background-color: #111; color: #fff; padding: 12px 24px; border-radius: 6px; text-decoration: none;">Reset Password</a>
-        </div>
-      </div>
-    `,
+    html: renderPasswordResetEmail({
+      resetUrl,
+      kind: "admin-triggered",
+    }),
   });
 
   refresh(workspaceId);
@@ -74,21 +79,19 @@ export async function adminCreateMemberAction(formData: FormData) {
   });
 
   const appUrl = process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000";
-  const setupUrl = res.token ? `${appUrl}/setup-account/${res.token}` : null;
 
   if (res.token) {
+    const setupUrl = `${appUrl}/setup-account/${encodeURIComponent(res.token)}`;
+    const workspaceName = await workspaceNameForEmail(targetWorkspaceId);
     await sendEmail({
       to: email,
       subject: `You have been added to a Corgtex workspace`,
-      html: `
-        <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto; padding: 40px 20px;">
-          <h2>Welcome to Corgtex</h2>
-          <p>An administrator has added you to a workspace. Please set up your account.</p>
-          <div style="margin: 32px 0;">
-            <a href="${setupUrl}" style="background-color: #111; color: #fff; padding: 12px 24px; border-radius: 6px; text-decoration: none;">Set up account</a>
-          </div>
-        </div>
-      `,
+      html: renderAccountSetupEmail({
+        setupUrl,
+        displayName,
+        workspaceName,
+        kind: "admin-added",
+      }),
     });
   }
 
@@ -149,19 +152,18 @@ export async function adminResendAccessLinkAction(formData: FormData) {
 
   const appUrl = process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000";
   const setupUrl = `${appUrl}/setup-account/${res.token}`;
+  const targetWorkspaceId = asString(formData, "targetWorkspaceId");
+  const workspaceName = await workspaceNameForEmail(targetWorkspaceId);
 
   await sendEmail({
     to: res.user.email,
     subject: `Your Corgtex setup link`,
-    html: `
-      <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto; padding: 40px 20px;">
-        <h2>Set up your Corgtex account</h2>
-        <p>An administrator requested a new setup link for your account.</p>
-        <div style="margin: 32px 0;">
-          <a href="${setupUrl}" style="background-color: #111; color: #fff; padding: 12px 24px; border-radius: 6px; text-decoration: none;">Set up account</a>
-        </div>
-      </div>
-    `,
+    html: renderAccountSetupEmail({
+      setupUrl,
+      displayName: res.user.displayName,
+      workspaceName,
+      kind: "resend-access",
+    }),
   });
 
   refresh(workspaceId);

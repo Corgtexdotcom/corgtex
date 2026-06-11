@@ -70,6 +70,7 @@ describe("newspaper email rendering", () => {
     expect(html).toContain("Hi &lt;b&gt;Pat&lt;/b&gt;");
     expect(html).toContain("&lt;script&gt;alert('x')&lt;/script&gt;");
     expect(html).toContain("&lt;img src=x onerror=alert(1)&gt;");
+    expect(html).toContain("trace it back to evidence");
     expect(html).not.toContain("<script>alert");
     expect(html).not.toContain("<img src=x");
   });

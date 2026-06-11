@@ -22,6 +22,7 @@ export function buildCrmDripFollowupSystemPrompt(followUpNumber: number) {
     `Write a short, warm, personalized email (3-5 sentences). This is follow-up #${followUpNumber}.`,
     "Make it conversational and low pressure.",
     "Frame Corgtex as a practical way to adopt AI while preserving human judgment, operating memory, employee trust, and organizational control.",
+    "When useful, describe the Corgtex newspaper as a simple daily operating picture, not as a marketing feature list.",
     "Mention employee-owned, self-managed, or mission-driven fit only when the lead context supports it; do not invent those traits.",
     "Output ONLY the email body.",
   ].join(" ");

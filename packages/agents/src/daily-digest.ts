@@ -65,13 +65,13 @@ export function buildDemoWelcomeNewspaperHtml(params?: { workspaceName?: string 
               <td style="padding:24px 28px 12px;border-bottom:3px double #2d2a24;text-align:center;">
                 <div style="font-size:12px;letter-spacing:1.6px;text-transform:uppercase;">The ${workspaceName} Edition</div>
                 <h1 style="font-size:34px;line-height:1.05;margin:8px 0 6px;font-weight:700;">Welcome to Corgtex</h1>
-                <div style="font-size:13px;text-transform:uppercase;letter-spacing:1px;">A working newspaper for how your organization runs</div>
+                <div style="font-size:13px;text-transform:uppercase;letter-spacing:1px;">A first look at your operating picture</div>
               </td>
             </tr>
             <tr>
               <td style="padding:24px 28px;">
                 <h2 style="font-size:22px;line-height:1.2;margin:0 0 12px;">What Corgtex helps your team do</h2>
-                <p style="font-size:16px;line-height:1.6;margin:0 0 18px;">Corgtex gives an organization one shared place to see what is happening, what has been decided, what needs attention, and where work is moving. It helps teams adopt AI without losing ownership of their context, decisions, handoffs, and human review. Instead of asking people to leave their daily tools, Corgtex turns the important signals into a clear briefing that can arrive directly in email.</p>
+                <p style="font-size:16px;line-height:1.6;margin:0 0 18px;">Welcome. This first newspaper is meant to make Corgtex concrete: one calm place to see what is happening, what has been decided, what needs attention, and where work is moving. The goal is not to add another inbox. It is to help your team adopt AI while keeping ownership of context, decisions, handoffs, and human review.</p>
                 <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-top:1px solid #2d2a24;border-bottom:1px solid #2d2a24;margin:20px 0;">
                   <tr>
                     <td style="padding:16px 0;">
@@ -104,8 +104,8 @@ export function buildDemoWelcomeNewspaperHtml(params?: { workspaceName?: string 
                     </td>
                   </tr>
                 </table>
-                <h2 style="font-size:22px;line-height:1.2;margin:0 0 12px;">Already built</h2>
-                <p style="font-size:16px;line-height:1.6;margin:0;">Corgtex already brings together the Organization Brain, governance workflows, member and role visibility, meeting intelligence, action tracking, finance controls, CRM follow-up, Slack-aware briefings, and AI agents that can help teams turn scattered activity into operating clarity while keeping people in control.</p>
+                <h2 style="font-size:22px;line-height:1.2;margin:0 0 12px;">What to try first</h2>
+                <p style="font-size:16px;line-height:1.6;margin:0;">Open the workspace, read the newspaper, then look at the source items behind it. You can add company context to the Organization Brain, invite the people who should share the picture, capture meetings, track actions, and use governance workflows when decisions need a visible path.</p>
                 <p style="font-size:15px;line-height:1.6;margin:20px 0 0;"><a href="${env.APP_URL.replace(/\/$/, "")}" style="color:#2d2a24;text-decoration:underline;">Open Corgtex</a> when you are ready to see the operating picture behind the newspaper.</p>
               </td>
             </tr>
@@ -767,7 +767,7 @@ export async function sendDemoWelcomeNewspaper(params: {
         bodyMd: [
           "Sent the Corgtex welcome newspaper.",
           "",
-          "The email described how Corgtex helps organizations keep shared memory, decision visibility, work follow-through, business visibility, and ownership and control in one operating picture.",
+          "The email introduced the Corgtex newspaper as a first operating picture for shared memory, decisions, actions, meetings, company context, ownership and control, and human-reviewed AI work.",
         ].join("\n"),
       },
     });
