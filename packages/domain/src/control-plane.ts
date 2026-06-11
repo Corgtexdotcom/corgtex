@@ -316,10 +316,16 @@ export type ControlPlaneReleasePreflightCheck = {
 };
 
 export type ControlPlaneReleaseTarget = {
+  cloudProvider: CustomerDeploymentCloudProvider;
   releaseImageTag: string;
   releaseVersion: string | null;
+  releaseGitSha: string | null;
   webImage: string;
   workerImage: string;
+  webRevision: string | null;
+  workerRevision: string | null;
+  migrationJobStatus: string | null;
+  healthStatus: string | null;
 };
 
 const managedWorkspaceSelect = {
@@ -906,7 +912,7 @@ function actorLabel(actor: AppActor) {
 }
 
 function customerWorkspaceUrl(workspaceId: string) {
-  const baseUrl = env.APP_URL?.replace(/\/$/, "") || "https://app.corgtex.com";
+  const baseUrl = env.APP_URL?.replace(/\/$/, "") || "https://selfserve.corgtex.com";
   return `${baseUrl}/workspaces/${workspaceId}`;
 }
 
@@ -2597,7 +2603,7 @@ export async function listControlPlaneFleetPage(actor: AppActor, params: {
 
   const filtered = rows.filter((row) => {
     const healthValue = normalizedStatus(row.lastHealthStatus || latestSnapshotForKind(row, "HEALTH")?.status || row.provisioningStatus);
-    const supportValue = normalizedStatus(row.supportConnectorStatus || latestSnapshotForKind(row, "SUPPORT_READY")?.status);
+    const supportValue = normalizedStatus(controlPlaneSupportSummary(row).status);
     return fleetRowMatchesQuery(row, query)
       && (!health || healthValue === health)
       && (!support || supportValue === support)
@@ -2637,8 +2643,8 @@ export async function listControlPlaneFleetPage(actor: AppActor, params: {
       totalCustomers: rows.length,
       active: rows.filter((row) => row.provisioningStatus === "active").length,
       attention: rows.filter((row) => normalizedStatus(row.lastHealthStatus) && normalizedStatus(row.lastHealthStatus) !== "ok").length,
-      supportReady: rows.filter((row) => Boolean(row.hasSupportCredential) && row.supportConnectorStatus !== "degraded").length,
-      releaseDrift: rows.filter((row) => row.lastHealthError?.includes("Release drift:")).length,
+      supportReady: rows.filter((row) => controlPlaneMatrixTone(controlPlaneSupportSummary(row).status) === "ok").length,
+      releaseDrift: rows.filter((row) => Boolean(controlPlaneReleaseDrift(row))).length,
     },
   };
 }
@@ -2653,6 +2659,34 @@ function controlPlaneRowSlug(row: ControlPlaneDeploymentRow) {
     ?? null;
 }
 
+function controlPlaneDeploymentCloudProvider(deployment: {
+  cloudProvider?: CustomerDeploymentCloudProvider | null;
+}) {
+  return deployment.cloudProvider ?? "RAILWAY";
+}
+
+function isControlPlaneAzureDeployment(deployment: {
+  cloudProvider?: CustomerDeploymentCloudProvider | null;
+}) {
+  return controlPlaneDeploymentCloudProvider(deployment) === "AZURE";
+}
+
+function isControlPlaneBackupDeployment(deployment: {
+  label?: string | null;
+  url?: string | null;
+  customerSlug?: string | null;
+}) {
+  const url = deployment.url?.trim().toLowerCase() ?? "";
+  const slug = deployment.customerSlug?.trim().toLowerCase() ?? "";
+  const label = deployment.label?.trim().toLowerCase() ?? "";
+  return url === "https://app.corgtex.com"
+    || url === "http://app.corgtex.com"
+    || url.startsWith("https://app.corgtex.com/")
+    || url.startsWith("http://app.corgtex.com/")
+    || slug === "corgtex-internal"
+    || (label.includes("corgtex internal") && url.includes("app.corgtex.com"));
+}
+
 function controlPlaneHealthStatus(row: ControlPlaneDeploymentRow) {
   return row.lastHealthStatus || latestSnapshotForKind(row, "HEALTH")?.status || row.provisioningStatus || "unknown";
 }
@@ -2662,6 +2696,7 @@ function controlPlaneReleaseLabel(row: ControlPlaneDeploymentRow) {
 }
 
 function controlPlaneReleaseDrift(row: ControlPlaneDeploymentRow) {
+  if (isControlPlaneBackupDeployment(row)) return null;
   return row.lastHealthError?.includes("Release drift:")
     ? row.lastHealthError
     : latestSnapshotForKind(row, "RELEASE")?.error ?? null;
@@ -3059,6 +3094,15 @@ function controlPlaneSupportSummary(row: ControlPlaneDeploymentRow): ControlPlan
       status: "managed",
       detail: "Managed workspace is available locally.",
       mode: "managed",
+    };
+  }
+  if (isControlPlaneAzureDeployment(row)) {
+    return {
+      status: row.supportConnectorStatus === "degraded" ? "degraded" : "ready",
+      detail: row.supportConnectorStatus === "degraded"
+        ? row.supportLastSyncError || "Azure self-serve support sessions need attention."
+        : "Azure self-serve uses audited support sessions and provider read-model inspection.",
+      mode: "remote",
     };
   }
   const cachedSnapshot = latestSnapshotForKind(row, "SUPPORT_READY");
@@ -6899,22 +6943,46 @@ export async function runControlPlaneReleaseOperation(actor: AppActor, params: {
   throw new AppError(400, "INVALID_INPUT", "Unsupported release operation.");
 }
 
-export function getControlPlaneLatestReleaseTarget(): ControlPlaneReleaseTarget | null {
-  const sharedImage = process.env.CONTROL_PLANE_LATEST_IMAGE?.trim()
-    || process.env.CONTROL_PLANE_LATEST_RELEASE_IMAGE_TAG?.trim()
-    || "";
-  const webImage = process.env.CONTROL_PLANE_LATEST_WEB_IMAGE?.trim() || sharedImage;
-  const workerImage = process.env.CONTROL_PLANE_LATEST_WORKER_IMAGE?.trim() || sharedImage;
-  const releaseImageTag = process.env.CONTROL_PLANE_LATEST_RELEASE_IMAGE_TAG?.trim() || webImage;
-  const releaseVersion = process.env.CONTROL_PLANE_LATEST_RELEASE_VERSION?.trim() || null;
+function controlPlaneEnv(...names: string[]) {
+  for (const name of names) {
+    const value = process.env[name]?.trim();
+    if (value) return value;
+  }
+  return "";
+}
+
+export function getControlPlaneLatestReleaseTarget(options: {
+  cloudProvider?: CustomerDeploymentCloudProvider | null;
+} = {}): ControlPlaneReleaseTarget | null {
+  const cloudProvider = options.cloudProvider ?? "RAILWAY";
+  if (cloudProvider !== "RAILWAY" && cloudProvider !== "AZURE") {
+    return null;
+  }
+  const prefix = cloudProvider === "AZURE" ? "CONTROL_PLANE_AZURE_LATEST" : "CONTROL_PLANE_RAILWAY_LATEST";
+  const legacyPrefix = cloudProvider === "RAILWAY" ? "CONTROL_PLANE_LATEST" : null;
+  const envNames = (suffix: string) => (
+    legacyPrefix ? [`${prefix}_${suffix}`, `${legacyPrefix}_${suffix}`] : [`${prefix}_${suffix}`]
+  );
+  const sharedImage = controlPlaneEnv(...envNames("IMAGE"), ...envNames("ACR_IMAGE"), ...envNames("RELEASE_IMAGE_TAG"));
+  const webImage = controlPlaneEnv(...envNames("WEB_IMAGE"), ...envNames("ACR_WEB_IMAGE")) || sharedImage;
+  const workerImage = controlPlaneEnv(...envNames("WORKER_IMAGE"), ...envNames("ACR_WORKER_IMAGE")) || sharedImage;
+  const releaseGitSha = controlPlaneEnv(...envNames("RELEASE_GIT_SHA")) || null;
+  const releaseImageTag = controlPlaneEnv(...envNames("RELEASE_IMAGE_TAG")) || releaseGitSha || webImage;
+  const releaseVersion = controlPlaneEnv(...envNames("RELEASE_VERSION")) || null;
   if (!webImage || !workerImage || !releaseImageTag) {
     return null;
   }
   return {
+    cloudProvider,
     releaseImageTag,
     releaseVersion,
+    releaseGitSha,
     webImage,
     workerImage,
+    webRevision: controlPlaneEnv(...envNames("WEB_REVISION")) || null,
+    workerRevision: controlPlaneEnv(...envNames("WORKER_REVISION")) || null,
+    migrationJobStatus: controlPlaneEnv(...envNames("MIGRATION_JOB_STATUS")) || null,
+    healthStatus: controlPlaneEnv(...envNames("HEALTH_STATUS")) || null,
   };
 }
 
@@ -6923,7 +6991,10 @@ export function isControlPlaneRailwayDeployConfigured() {
 }
 
 function releasePreflightForDeployment(deployment: {
+  label?: string | null;
+  url?: string | null;
   customerSlug?: string | null;
+  cloudProvider?: CustomerDeploymentCloudProvider | null;
   deploymentStatus?: string | null;
   provisioningStatus?: string | null;
   releaseImageTag?: string | null;
@@ -6935,14 +7006,22 @@ function releasePreflightForDeployment(deployment: {
   railwayEnvironmentId?: string | null;
   railwayWebServiceId?: string | null;
   railwayWorkerServiceId?: string | null;
+  providerResourceGroup?: string | null;
+  providerEnvironmentId?: string | null;
+  providerWebServiceId?: string | null;
+  providerWorkerServiceId?: string | null;
 }, target: ControlPlaneReleaseTarget | null, options: { railwayDeployConfigured?: boolean } = {}) {
+  const cloudProvider = controlPlaneDeploymentCloudProvider(deployment);
   const railwayDeployConfigured = options.railwayDeployConfigured ?? isControlPlaneRailwayDeployConfigured();
-  const checks: ControlPlaneReleasePreflightCheck[] = [
+  const targetConfigDetail = cloudProvider === "AZURE"
+    ? "Set CONTROL_PLANE_AZURE_LATEST_WEB_IMAGE, CONTROL_PLANE_AZURE_LATEST_WORKER_IMAGE, and CONTROL_PLANE_AZURE_LATEST_RELEASE_GIT_SHA."
+    : "Set CONTROL_PLANE_RAILWAY_LATEST_WEB_IMAGE and CONTROL_PLANE_RAILWAY_LATEST_WORKER_IMAGE, or the legacy CONTROL_PLANE_LATEST_* Railway target.";
+  const baseChecks: ControlPlaneReleasePreflightCheck[] = [
     {
       key: "target_configured",
       label: "Latest release configured",
       ok: Boolean(target),
-      detail: target?.releaseImageTag ?? "Set CONTROL_PLANE_LATEST_WEB_IMAGE and CONTROL_PLANE_LATEST_WORKER_IMAGE.",
+      detail: target?.releaseImageTag ?? targetConfigDetail,
     },
     {
       key: "not_suspended",
@@ -6951,19 +7030,63 @@ function releasePreflightForDeployment(deployment: {
       detail: deployment.provisioningStatus || deployment.deploymentStatus || "Unknown deployment status.",
     },
     {
-      key: "railway_target",
-      label: "Railway target is complete",
-      ok: Boolean(deployment.railwayProjectId && deployment.railwayEnvironmentId && deployment.railwayWebServiceId && deployment.railwayWorkerServiceId),
-      detail: deployment.railwayProjectId ? "Project, environment, web, and worker services are recorded." : "Railway project and service IDs are required.",
+      key: "not_backup",
+      label: "Deployment is primary production",
+      ok: !isControlPlaneBackupDeployment(deployment),
+      detail: isControlPlaneBackupDeployment(deployment)
+        ? "Backup app is health-checked only and is not a deploy-latest target."
+        : "Deployment participates in production release management.",
     },
-    {
-      key: "railway_api_token_configured",
-      label: "Railway release executor is configured",
-      ok: railwayDeployConfigured,
-      detail: railwayDeployConfigured
-        ? "Railway API token is configured for release execution."
-        : "Railway API token is not configured for control-plane release execution.",
-    },
+  ];
+  const providerChecks: ControlPlaneReleasePreflightCheck[] = cloudProvider === "AZURE"
+    ? [
+      {
+        key: "azure_target",
+        label: "Azure target is complete",
+        ok: Boolean(deployment.providerResourceGroup && deployment.providerEnvironmentId && deployment.providerWebServiceId && deployment.providerWorkerServiceId),
+        detail: deployment.providerResourceGroup
+          ? "Resource group, Container Apps environment, web app, and worker app are recorded."
+          : "Azure resource group and Container App identifiers are required.",
+      },
+      {
+        key: "azure_release_metadata",
+        label: "Azure release metadata is complete",
+        ok: Boolean(target?.releaseGitSha && target.healthStatus),
+        detail: target?.releaseGitSha && target.healthStatus
+          ? `Release ${target.releaseGitSha} reported ${target.healthStatus}.`
+          : "Azure release target must include release git SHA and health metadata from the approved Azure workflow.",
+      },
+      {
+        key: "azure_workflow_reconciliation",
+        label: "Azure workflow reconciliation required",
+        ok: false,
+        detail: "Azure self-serve releases are reconciled from Azure workflow/provider evidence; deploy-latest is disabled for this provider.",
+      },
+    ]
+    : cloudProvider === "RAILWAY" ? [
+      {
+        key: "railway_target",
+        label: "Railway target is complete",
+        ok: Boolean(deployment.railwayProjectId && deployment.railwayEnvironmentId && deployment.railwayWebServiceId && deployment.railwayWorkerServiceId),
+        detail: deployment.railwayProjectId ? "Project, environment, web, and worker services are recorded." : "Railway project and service IDs are required.",
+      },
+      {
+        key: "railway_api_token_configured",
+        label: "Railway release executor is configured",
+        ok: railwayDeployConfigured,
+        detail: railwayDeployConfigured
+          ? "Railway API token is configured for release execution."
+          : "Railway API token is not configured for control-plane release execution.",
+      },
+    ] : [
+      {
+        key: "provider_supported",
+        label: "Release provider is supported",
+        ok: false,
+        detail: `Deploy latest is not available for ${cloudProvider} deployments.`,
+      },
+    ];
+  const healthChecks: ControlPlaneReleasePreflightCheck[] = [
     {
       key: "health_known",
       label: "Health was checked",
@@ -6981,16 +7104,21 @@ function releasePreflightForDeployment(deployment: {
     {
       key: "target_differs",
       label: "Target differs from current",
-      ok: Boolean(target && (target.releaseImageTag !== deployment.releaseImageTag || target.releaseVersion !== (deployment.releaseVersion ?? null))),
+      ok: Boolean(target && (
+        target.releaseImageTag !== deployment.releaseImageTag
+        || target.releaseVersion !== (deployment.releaseVersion ?? null)
+        || (target.releaseGitSha && target.releaseGitSha !== deployment.releaseImageTag)
+      )),
       detail: target ? `Target ${target.releaseImageTag}; current ${deployment.releaseImageTag ?? "unknown"}.` : "No target release configured.",
     },
     {
       key: "no_release_drift",
       label: "No release drift is open",
-      ok: !deployment.lastHealthError?.includes("Release drift:"),
-      detail: deployment.lastHealthError?.includes("Release drift:") ? deployment.lastHealthError : "No release drift recorded.",
+      ok: isControlPlaneBackupDeployment(deployment) || !deployment.lastHealthError?.includes("Release drift:"),
+      detail: deployment.lastHealthError?.includes("Release drift:") && !isControlPlaneBackupDeployment(deployment) ? deployment.lastHealthError : "No release drift recorded.",
     },
   ];
+  const checks = [...baseChecks, ...providerChecks, ...healthChecks];
   return {
     eligible: checks.every((check) => check.ok),
     blockers: checks.filter((check) => !check.ok).map((check) => check.detail),
@@ -7011,7 +7139,9 @@ function canBypassDeployLatestPreflight(preflight: { checks: ControlPlaneRelease
 
 export async function getControlPlaneDeployLatestPreflight(actor: AppActor, deploymentId: string) {
   const deployment = await getControlPlaneDeploymentWithWorkspace(actor, deploymentId);
-  const target = getControlPlaneLatestReleaseTarget();
+  const target = getControlPlaneLatestReleaseTarget({
+    cloudProvider: controlPlaneDeploymentCloudProvider(deployment),
+  });
   return {
     deploymentId,
     target,
@@ -7029,13 +7159,20 @@ export async function deployLatestControlPlaneRelease(actor: AppActor, params: {
   const reason = requireMutationReason(params.reason);
   await requireControlPlaneDeploymentWriteAccess(actor, params.deploymentId);
   const deployment = await getControlPlaneDeploymentWithWorkspace(actor, params.deploymentId);
-  const target = params.target ?? getControlPlaneLatestReleaseTarget();
+  const cloudProvider = controlPlaneDeploymentCloudProvider(deployment);
+  const target = params.target ?? getControlPlaneLatestReleaseTarget({ cloudProvider });
   const preflight = releasePreflightForDeployment(deployment, target, { railwayDeployConfigured: Boolean(railwayClient) || isControlPlaneRailwayDeployConfigured() });
   const canForceDeploy = Boolean(params.force && canBypassDeployLatestPreflight(preflight));
   if (!preflight.eligible && !canForceDeploy) {
     throw new AppError(400, "RELEASE_PREFLIGHT_FAILED", preflight.blockers.join(" "));
   }
   invariant(target, 400, "LATEST_RELEASE_NOT_CONFIGURED", "Latest release target is not configured.");
+  invariant(
+    cloudProvider === "RAILWAY",
+    400,
+    "PROVIDER_DEPLOY_UNSUPPORTED",
+    "Deploy latest is currently available only for Railway enterprise deployments. Use the Azure self-serve workflow and record verified release evidence for Azure deployments.",
+  );
   invariant(deployment.customerSlug, 400, "INVALID_INPUT", "Customer deployment is missing a customer slug.");
   invariant(deployment.railwayProjectId, 400, "INVALID_INPUT", "Customer deployment is missing a Railway project ID.");
   invariant(deployment.railwayEnvironmentId, 400, "INVALID_INPUT", "Customer deployment is missing a Railway environment ID.");
@@ -7098,6 +7235,7 @@ export async function deployLatestControlPlaneRelease(actor: AppActor, params: {
       variables: {
         CORGTEX_RELEASE_IMAGE_TAG: target.releaseImageTag,
         CORGTEX_RELEASE_VERSION: target.releaseVersion ?? "",
+        CORGTEX_RELEASE_GIT_SHA: target.releaseGitSha ?? "",
       },
     });
 
@@ -7208,8 +7346,7 @@ export async function enqueueControlPlaneDeployLatestRollout(actor: AppActor, pa
 }) {
   requireControlPlaneScope(actor, "control-plane:releases:write");
   const reason = requireMutationReason(params.reason);
-  const target = getControlPlaneLatestReleaseTarget();
-  invariant(target, 400, "LATEST_RELEASE_NOT_CONFIGURED", "Latest release target is not configured.");
+  const railwayTarget = getControlPlaneLatestReleaseTarget({ cloudProvider: "RAILWAY" });
 
   const requestedIds = Array.from(new Set((params.deploymentIds ?? []).map((id) => id.trim()).filter(Boolean)));
   const allEligible = params.allEligible === true;
@@ -7248,6 +7385,9 @@ export async function enqueueControlPlaneDeployLatestRollout(actor: AppActor, pa
       if (requestedIds.length) {
         await requireControlPlaneDeploymentWriteAccess(actor, deployment.id);
       }
+      const target = getControlPlaneLatestReleaseTarget({
+        cloudProvider: controlPlaneDeploymentCloudProvider(deployment),
+      });
       const preflight = releasePreflightForDeployment(deployment, target);
       const bypassPreflight = Boolean(requestedIds.length && params.includeUnhealthy && canBypassDeployLatestPreflight(preflight));
       const allowQueue = preflight.eligible || bypassPreflight;
@@ -7268,6 +7408,7 @@ export async function enqueueControlPlaneDeployLatestRollout(actor: AppActor, pa
         });
         continue;
       }
+      invariant(target, 400, "LATEST_RELEASE_NOT_CONFIGURED", "Latest release target is not configured.");
 
       const dedupeKey = `control-plane:deploy-latest:${deployment.id}:${target.releaseImageTag}:${target.releaseVersion ?? "no-version"}:${bucket}`;
       const createResult = await tx.workflowJob.createMany({
@@ -7326,7 +7467,7 @@ export async function enqueueControlPlaneDeployLatestRollout(actor: AppActor, pa
   });
 
   return {
-    target,
+    target: railwayTarget,
     requested: deployments.length,
     queuedJobs: results.filter((result) => result.status === "queued").length,
     results,
@@ -7416,9 +7557,8 @@ async function probeControlPlaneDeploymentHealthCore(actor: AppActor, params: {
       if (health?.schema && health.schema !== "ready") runtimeErrors.push(`Schema ${health.schema}`);
       if (health?.runtime?.redis && health.runtime.redis !== "configured") runtimeErrors.push(`Redis ${health.runtime.redis}`);
       if (health?.runtime?.storage && health.runtime.storage !== "configured") runtimeErrors.push(`Storage ${health.runtime.storage}`);
-      const actualRelease = health?.release?.imageTag || health?.release?.gitSha || null;
-      if (deployment.releaseImageTag && actualRelease && actualRelease !== deployment.releaseImageTag) {
-        runtimeErrors.push(`Release drift: expected ${deployment.releaseImageTag}, got ${actualRelease}`);
+      if (deployment.releaseImageTag && health?.release && !observedReleaseMatches(health, deployment.releaseImageTag)) {
+        runtimeErrors.push(`Release drift: expected ${deployment.releaseImageTag}, got ${observedReleaseLabel(health)}`);
       }
       if (runtimeErrors.length > 0) {
         status = "degraded";
@@ -7510,6 +7650,14 @@ function runtimeHealthErrors(health: CustomerDeploymentHealthPayload | null) {
 function observedReleaseMatches(health: CustomerDeploymentHealthPayload | null, releaseImageTag: string) {
   const release = health?.release;
   return Boolean(release && (release.imageTag === releaseImageTag || release.gitSha === releaseImageTag));
+}
+
+function observedReleaseLabel(health: CustomerDeploymentHealthPayload | null) {
+  const values = [
+    health?.release?.imageTag,
+    health?.release?.gitSha,
+  ].filter((value): value is string => Boolean(value));
+  return values.length ? values.join(" / ") : "unknown";
 }
 
 export async function recordVerifiedControlPlaneRelease(actor: AppActor, params: {

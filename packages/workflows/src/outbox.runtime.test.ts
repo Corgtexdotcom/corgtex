@@ -371,10 +371,16 @@ describe("runPendingJobs", () => {
       reason: "Queued rollout.",
       force: true,
       target: {
+        cloudProvider: "RAILWAY",
         releaseImageTag: "release-new",
         releaseVersion: "0.2.0",
+        releaseGitSha: null,
         webImage: "ghcr.io/corgtex/web:new",
         workerImage: "ghcr.io/corgtex/worker:new",
+        webRevision: null,
+        workerRevision: null,
+        migrationJobStatus: null,
+        healthStatus: null,
       },
     });
     expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({

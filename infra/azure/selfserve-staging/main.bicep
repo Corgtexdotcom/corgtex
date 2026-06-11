@@ -24,6 +24,15 @@ param webImage string
 @description('GHCR worker image tagged by immutable Git SHA.')
 param workerImage string
 
+@description('Release version surfaced by /api/health.')
+param releaseVersion string = 'development'
+
+@description('Release image tag surfaced by /api/health.')
+param releaseImageTag string = ''
+
+@description('Release git SHA surfaced by /api/health.')
+param releaseGitSha string = ''
+
 @description('GitHub Container Registry server.')
 param registryServer string = 'ghcr.io'
 
@@ -294,6 +303,9 @@ var commonRuntimeEnv = concat([
   { name: 'CONTROL_PLANE_URL', value: controlPlaneUrl }
   { name: 'MCP_PUBLIC_URL', value: '${appUrl}/mcp' }
   { name: 'MEETING_RECORDER_PUBLIC_BASE_URL', value: appUrl }
+  { name: 'CORGTEX_RELEASE_VERSION', value: releaseVersion }
+  { name: 'CORGTEX_RELEASE_IMAGE_TAG', value: releaseImageTag }
+  { name: 'CORGTEX_RELEASE_GIT_SHA', value: releaseGitSha }
   { name: 'DATABASE_URL', secretRef: 'database-url' }
   { name: 'REDIS_URL', secretRef: 'redis-url' }
   { name: 'REDIS_KEY_PREFIX', value: compactPrefix }

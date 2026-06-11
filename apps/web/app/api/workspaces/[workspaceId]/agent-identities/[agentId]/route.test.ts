@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest, NextResponse } from "next/server";
 
-const { resolveRequestActor, createAgentIdentity, listAgentIdentities } = vi.hoisted(() => ({
+const { resolveRequestActor, getAgentIdentity, updateAgentIdentity, deactivateAgentIdentity } = vi.hoisted(() => ({
   resolveRequestActor: vi.fn(),
-  createAgentIdentity: vi.fn(),
-  listAgentIdentities: vi.fn(),
+  getAgentIdentity: vi.fn(),
+  updateAgentIdentity: vi.fn(),
+  deactivateAgentIdentity: vi.fn(),
 }));
 
 vi.mock("@/lib/auth", () => ({
@@ -34,8 +35,9 @@ vi.mock("@corgtex/domain", () => ({
       this.code = code;
     }
   },
-  createAgentIdentity,
-  listAgentIdentities,
+  getAgentIdentity,
+  updateAgentIdentity,
+  deactivateAgentIdentity,
 }));
 
 beforeEach(() => {
@@ -44,66 +46,58 @@ beforeEach(() => {
     kind: "user",
     user: { id: "user-1" },
   });
-  createAgentIdentity.mockResolvedValue({
+  getAgentIdentity.mockResolvedValue({ id: "agent-1" });
+  updateAgentIdentity.mockResolvedValue({
     id: "agent-1",
-    agentKey: "agent-key",
-    displayName: "Agent",
     memberType: "INTERNAL",
   });
-  listAgentIdentities.mockResolvedValue([]);
+  deactivateAgentIdentity.mockResolvedValue(undefined);
 });
 
 afterEach(() => {
   vi.clearAllMocks();
 });
 
-describe("/api/workspaces/[workspaceId]/agent-identities", () => {
-  it("normalizes the legacy AI_AGENT member type for smoke clients", async () => {
-    const { POST } = await import("./route");
+describe("/api/workspaces/[workspaceId]/agent-identities/[agentId]", () => {
+  it("normalizes the legacy AI_AGENT member type on updates", async () => {
+    const { PATCH } = await import("./route");
 
-    const response = await POST(
-      new NextRequest("https://app.corgtex.com/api/workspaces/ws-1/agent-identities", {
-        method: "POST",
+    const response = await PATCH(
+      new NextRequest("https://app.corgtex.com/api/workspaces/ws-1/agent-identities/agent-1", {
+        method: "PATCH",
         body: JSON.stringify({
-          agentKey: "agent-key",
           displayName: "Agent",
           memberType: "AI_AGENT",
-          maxSpendPerRunCents: 100,
-          maxRunsPerDay: 2,
-          maxRunsPerHour: 1,
+          maxSpendPerRunCents: 250,
         }),
       }),
-      { params: Promise.resolve({ workspaceId: "ws-1" }) },
+      { params: Promise.resolve({ workspaceId: "ws-1", agentId: "agent-1" }) },
     );
 
-    expect(response.status).toBe(201);
-    expect(createAgentIdentity).toHaveBeenCalledWith(
+    expect(response.status).toBe(200);
+    expect(updateAgentIdentity).toHaveBeenCalledWith(
       { kind: "user", user: { id: "user-1" } },
       expect.objectContaining({
         workspaceId: "ws-1",
-        agentKey: "agent-key",
+        agentIdentityId: "agent-1",
         displayName: "Agent",
         memberType: "INTERNAL",
-        maxSpendPerRunCents: 100,
-        maxRunsPerDay: 2,
-        maxRunsPerHour: 1,
+        maxSpendPerRunCents: 250,
       }),
     );
   });
 
   it("returns validation errors instead of passing invalid enum values to Prisma", async () => {
-    const { POST } = await import("./route");
+    const { PATCH } = await import("./route");
 
-    const response = await POST(
-      new NextRequest("https://app.corgtex.com/api/workspaces/ws-1/agent-identities", {
-        method: "POST",
+    const response = await PATCH(
+      new NextRequest("https://app.corgtex.com/api/workspaces/ws-1/agent-identities/agent-1", {
+        method: "PATCH",
         body: JSON.stringify({
-          agentKey: "agent-key",
-          displayName: "Agent",
           memberType: "BOT",
         }),
       }),
-      { params: Promise.resolve({ workspaceId: "ws-1" }) },
+      { params: Promise.resolve({ workspaceId: "ws-1", agentId: "agent-1" }) },
     );
 
     await expect(response.json()).resolves.toEqual({
@@ -113,6 +107,6 @@ describe("/api/workspaces/[workspaceId]/agent-identities", () => {
       },
     });
     expect(response.status).toBe(400);
-    expect(createAgentIdentity).not.toHaveBeenCalled();
+    expect(updateAgentIdentity).not.toHaveBeenCalled();
   });
 });
