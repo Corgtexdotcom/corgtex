@@ -328,6 +328,8 @@ jobs:
           set -euo pipefail
           echo "skip_release_match=false" >> "$GITHUB_OUTPUT"
           echo "Internal dogfood Railway services watch the full repo; release match remains required for every main commit."
+      - uses: actions/checkout@v5
+        if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
       - uses: actions/setup-node@v5
         if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
         with:
