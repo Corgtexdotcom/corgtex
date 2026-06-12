@@ -4,6 +4,7 @@ export type SiteConfig = {
   appUrl: string;
   bookDemoUrl: string;
   demoUrl: string;
+  enterpriseAppUrl: string;
   siteUrl: string;
 };
 
@@ -20,6 +21,10 @@ export function getSiteConfig(): SiteConfig {
     process.env.NEXT_PUBLIC_APP_URL?.trim() ||
       (process.env.NODE_ENV === "production" ? "https://app.corgtex.com" : "http://localhost:3000"),
   );
+  const enterpriseAppUrl = trimTrailingSlash(
+    process.env.NEXT_PUBLIC_ENTERPRISE_APP_URL?.trim() ||
+      (process.env.NODE_ENV === "production" ? "https://app.corgtex.com" : appUrl),
+  );
   const demoUrl = trimTrailingSlash(process.env.NEXT_PUBLIC_DEMO_URL?.trim() || `${appUrl}/demo`);
   const bookDemoUrl = process.env.NEXT_PUBLIC_BOOK_DEMO_URL?.trim() || "https://calendar.app.google/jJd5yeSuDStVZm896";
 
@@ -27,6 +32,7 @@ export function getSiteConfig(): SiteConfig {
     siteUrl,
     appUrl,
     demoUrl,
+    enterpriseAppUrl,
     bookDemoUrl,
   };
 }
@@ -52,8 +58,8 @@ export function signupUrlForLocale(locale?: SiteLocale | string | null) {
 }
 
 export function enterpriseLoginUrlForLocale(locale?: SiteLocale | string | null) {
-  const { appUrl } = getSiteConfig();
-  return `${appUrl}${normalizeSiteLocale(locale) === "es" ? "/es/find-account" : "/find-account"}`;
+  const { enterpriseAppUrl } = getSiteConfig();
+  return `${enterpriseAppUrl}${normalizeSiteLocale(locale) === "es" ? "/es/find-account" : "/find-account"}`;
 }
 
 export function demoGatePathForLocale(locale?: SiteLocale | string | null) {
