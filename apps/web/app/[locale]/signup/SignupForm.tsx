@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useTranslations } from "next-intl";
+import { useLocale, useTranslations } from "next-intl";
 import { useActionState } from "react";
 import { useFormStatus } from "react-dom";
 import { signupAction } from "./actions";
@@ -18,6 +18,24 @@ function SubmitButton() {
   );
 }
 
+function AccountLinks() {
+  const locale = useLocale();
+  const t = useTranslations("auth");
+  const loginHref = locale === "es" ? "/es/login" : "/login";
+  const findAccountHref = locale === "es" ? "/es/find-account" : "/find-account";
+
+  return (
+    <div style={{ display: "flex", flexWrap: "wrap", gap: 12, marginTop: 8, fontSize: 14 }}>
+      <Link href={loginHref} className="muted">
+        {t("backToLogin")}
+      </Link>
+      <Link href={findAccountHref} className="muted">
+        {t("findEnterpriseAccount")}
+      </Link>
+    </div>
+  );
+}
+
 export function SignupForm({ initialState }: { initialState: SignupState }) {
   const [state, formAction] = useActionState(signupAction, initialState);
   const t = useTranslations("auth");
@@ -31,9 +49,7 @@ export function SignupForm({ initialState }: { initialState: SignupState }) {
             {t("signupSuccessDescription")}
           </p>
         </div>
-        <Link href="/login" style={{ marginTop: 12, display: "inline-block" }}>
-          {t("backToLogin")}
-        </Link>
+        <AccountLinks />
       </div>
     );
   }
@@ -47,9 +63,7 @@ export function SignupForm({ initialState }: { initialState: SignupState }) {
             {t("signupReviewDescription")}
           </p>
         </div>
-        <Link href="/login" style={{ marginTop: 12, display: "inline-block" }}>
-          {t("backToLogin")}
-        </Link>
+        <AccountLinks />
       </div>
     );
   }
@@ -63,9 +77,7 @@ export function SignupForm({ initialState }: { initialState: SignupState }) {
             {t("signupExistingAccountDescription")}
           </p>
         </div>
-        <Link href="/login" style={{ marginTop: 12, display: "inline-block" }}>
-          {t("backToLogin")}
-        </Link>
+        <AccountLinks />
       </div>
     );
   }
@@ -118,9 +130,7 @@ export function SignupForm({ initialState }: { initialState: SignupState }) {
         </p>
       ) : null}
       <SubmitButton />
-      <Link href="/login" className="muted" style={{ fontSize: 14, marginTop: 8, display: "inline-block" }}>
-        {t("backToLogin")}
-      </Link>
+      <AccountLinks />
     </form>
   );
 }

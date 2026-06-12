@@ -68,12 +68,15 @@ export async function upsertSsoConfig(actor: AppActor, params: {
   });
 }
 
-export async function lookupSsoConfigForDomain(email: string) {
+export async function lookupSsoConfigForDomain(email: string, workspaceId?: string | null) {
   const domain = email.split("@")[1]?.toLowerCase();
   if (!domain) return null;
 
   const activeConfigs = await prisma.workspaceSsoConfig.findMany({
-    where: { isEnabled: true },
+    where: {
+      isEnabled: true,
+      ...(workspaceId?.trim() ? { workspaceId: workspaceId.trim() } : {}),
+    },
     include: { workspace: { select: { id: true, slug: true, name: true } } }
   });
 

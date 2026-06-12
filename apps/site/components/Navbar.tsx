@@ -4,7 +4,7 @@ import { useState, useEffect } from "react";
 import { usePathname } from "next/navigation";
 import { useLocale, useTranslations } from "next-intl";
 import { localizedPath } from "../i18n/routing";
-import { getSiteConfig, signupUrlForLocale } from "../lib/site";
+import { enterpriseLoginUrlForLocale, getSiteConfig, signupUrlForLocale } from "../lib/site";
 
 const NAV_LINKS: { href: string; labelKey: string }[] = [
   { href: "/about", labelKey: "about" },
@@ -24,10 +24,10 @@ export function Navbar() {
   const locale = useLocale();
   const pathname = usePathname() ?? "/";
   const t = useTranslations("nav");
-  const { appUrl, bookDemoUrl } = getSiteConfig();
+  const { bookDemoUrl } = getSiteConfig();
 
   const signupUrl = signupUrlForLocale(locale);
-  const loginUrl = `${appUrl}/login`;
+  const loginUrl = enterpriseLoginUrlForLocale(locale);
   const localePath = (path: string) => localizedPath(path, locale);
   const switchLocaleHref = localizedPath(unprefixedPath(pathname), locale === "es" ? "en" : "es");
 

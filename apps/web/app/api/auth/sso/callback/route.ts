@@ -130,7 +130,7 @@ export async function GET(request: Request) {
     });
     await setSessionCookie(session.token, session.expiresAt);
 
-    return NextResponse.redirect(new URL(`/workspaces/${config.workspace.slug}`, request.url));
+    return NextResponse.redirect(new URL(`/workspaces/${config.workspace.id}`, request.url));
   } catch (error) {
     return handleRouteError(error);
   }

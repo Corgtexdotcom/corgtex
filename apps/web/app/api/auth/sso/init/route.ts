@@ -24,12 +24,13 @@ export async function GET(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
     const email = searchParams.get("email");
+    const workspaceId = searchParams.get("workspaceId");
 
     if (!email) {
       return NextResponse.redirect(new URL("/login?error=email-required", request.url));
     }
 
-    const ssoConfig = await lookupSsoConfigForDomain(email);
+    const ssoConfig = await lookupSsoConfigForDomain(email, workspaceId);
 
     if (!ssoConfig || !ssoConfig.isEnabled) {
       return NextResponse.redirect(new URL("/login?error=sso-not-configured", request.url));

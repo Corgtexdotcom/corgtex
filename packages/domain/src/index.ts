@@ -64,6 +64,7 @@ export * from "./work-item-versions";
 export * from "./catalog";
 export * from "./enterprise-apps";
 export * from "./enterprise-services";
+export * from "./enterprise-account-discovery";
 export * from "./execution-plumbing";
 export * from "./tool-links";
 export * from "./build-artifacts";
