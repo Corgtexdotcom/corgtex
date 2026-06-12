@@ -25,7 +25,9 @@ import { prisma } from "@corgtex/shared";
 import { requirePageActor } from "@/lib/auth";
 import { enforceDemoGuard } from "@/lib/demo-guard";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
+import { TimeZoneSelect } from "@/lib/components/TimeZoneSelect";
 import { getWorkspaceFeatureFlags } from "@/lib/workspace-feature-flags";
+import { parseOptionalMeetingDateTimeInput } from "@/lib/meeting-timezone";
 import { KnowledgeFileUploader } from "../KnowledgeFileUploader";
 import {
   getWorkspaceAddActions,
@@ -78,27 +80,6 @@ const GOAL_LEVELS: GoalLevel[] = ["COMPANY", "CIRCLE", "PERSONAL"];
 const GOAL_STATUSES: GoalStatus[] = ["ACTIVE", "ON_TRACK", "AT_RISK", "BEHIND", "COMPLETED", "DRAFT", "ABANDONED"];
 const ARTICLE_TYPES: BrainArticleType[] = ["PRODUCT", "ARCHITECTURE", "PROCESS", "RUNBOOK", "DECISION", "TEAM", "PERSON", "CUSTOMER", "INCIDENT", "PROJECT", "INTEGRATION", "PATTERN", "STRATEGY", "CULTURE", "GLOSSARY"];
 const SOURCE_TYPES: BrainSourceType[] = ["MEETING", "TICKET", "PR", "RFC", "INCIDENT", "SLACK", "CUSTOMER_FEEDBACK", "COMPETITOR", "RESEARCH", "ARTICLE", "DOC", "RUNBOOK", "EMAIL", "FILE_UPLOAD"];
-const LOCAL_DATETIME_OFFSET_SCRIPT = `
-(() => {
-  const script = document.currentScript;
-  const form = script?.closest("form");
-  const pairs = [
-    [form?.querySelector('input[name="joinAt"]'), form?.querySelector('input[name="joinAtTimezoneOffsetMinutes"]')],
-    [form?.querySelector('input[name="scheduledEndAt"]'), form?.querySelector('input[name="scheduledEndAtTimezoneOffsetMinutes"]')],
-  ];
-  const sync = (input, offset) => {
-    if (!(input instanceof HTMLInputElement) || !(offset instanceof HTMLInputElement)) return;
-    offset.value = input.value ? String(new Date(input.value).getTimezoneOffset()) : String(new Date().getTimezoneOffset());
-  };
-  for (const [input, offset] of pairs) {
-    if (!(input instanceof HTMLInputElement) || !(offset instanceof HTMLInputElement)) continue;
-    const update = () => sync(input, offset);
-    input.addEventListener("input", update);
-    input.addEventListener("change", update);
-    update();
-  }
-})();
-`;
 
 function splitList(value: string | null) {
   return (value ?? "")
@@ -445,7 +426,11 @@ export default async function WorkspaceAddPage({
         transcript: content,
         title: asOptional(formData, "title"),
         source: asOptional(formData, "channel") ?? "text-paste",
-        recordedAt: asOptional(formData, "recordedAt"),
+        recordedAt: parseOptionalMeetingDateTimeInput(
+          asOptional(formData, "recordedAt"),
+          asOptional(formData, "timeZone"),
+          "Meeting recorded at",
+        ),
         ingestionGuidanceMd: asOptional(formData, "ingestionGuidanceMd"),
       });
       if (result.status === "needs_clarification") {
@@ -510,6 +495,7 @@ export default async function WorkspaceAddPage({
               <label style={{ flex: 1 }}>Starts at<input name="startsAt" type="datetime-local" required /></label>
               <label style={{ flex: 1 }}>Scheduled end<input name="scheduledEndAt" type="datetime-local" /></label>
             </div>
+            <TimeZoneSelect />
             <label>
               Recurrence
               <select name="recurrenceRule" defaultValue="">
@@ -541,6 +527,7 @@ export default async function WorkspaceAddPage({
               <label style={{ flex: 1 }}>Source<input name="source" defaultValue="transcript-upload" required /></label>
               <label style={{ flex: 1 }}>Recorded at<input name="recordedAt" type="datetime-local" required /></label>
             </div>
+            <TimeZoneSelect />
             <label>Participant emails<input name="participantEmails" placeholder="one@example.com, two@example.com" /></label>
             <label>Ingestion guidance<MarkdownEditor name="ingestionGuidanceMd" rows={3} /></label>
             <label>Transcript file<input name="file" type="file" accept=".txt,.md,.csv,.json,.pdf,.docx" /></label>
@@ -558,9 +545,7 @@ export default async function WorkspaceAddPage({
               <label style={{ flex: 1 }}>Meeting time<input name="joinAt" type="datetime-local" required /></label>
               <label style={{ flex: 1 }}>Ends at<input name="scheduledEndAt" type="datetime-local" /></label>
             </div>
-            <input name="joinAtTimezoneOffsetMinutes" type="hidden" value="0" />
-            <input name="scheduledEndAtTimezoneOffsetMinutes" type="hidden" value="0" />
-            <script dangerouslySetInnerHTML={{ __html: LOCAL_DATETIME_OFFSET_SCRIPT }} />
+            <TimeZoneSelect />
             <label>Participant emails<input name="participantEmails" placeholder="one@example.com, two@example.com" /></label>
             <div className="actions-inline"><button type="submit">Record meeting</button>{cancelLink(returnTo)}</div>
           </form>
@@ -944,6 +929,7 @@ export default async function WorkspaceAddPage({
               <label style={{ flex: 1 }}>Channel or source<input name="channel" placeholder="text-paste" /></label>
             </div>
             <label>Meeting recorded at<input name="recordedAt" type="datetime-local" /></label>
+            <TimeZoneSelect />
             <label>Content<textarea name="content" rows={10} required /></label>
             <label>Ingestion guidance<MarkdownEditor name="ingestionGuidanceMd" rows={3} /></label>
             <div className="actions-inline"><button type="submit">Ingest text</button>{cancelLink(returnTo)}</div>

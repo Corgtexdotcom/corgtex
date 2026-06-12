@@ -74,6 +74,7 @@ describe("POST /api/workspaces/[workspaceId]/meetings/transcript", () => {
       expect.objectContaining({
         workspaceId: "ws-1",
         title: "Weekly Tactical",
+        recordedAt: new Date("2026-04-30T17:10:00.000Z"),
         transcript: "Transcript text",
         ingestionGuidanceMd: "Highlight decisions.",
         participantEmails: ["jan@example.com"],
@@ -100,7 +101,8 @@ describe("POST /api/workspaces/[workspaceId]/meetings/transcript", () => {
     const { POST } = await import("./route");
     const formData = new FormData();
     formData.set("file", new File(["ignored"], "weekly.txt", { type: "text/plain" }));
-    formData.set("recordedAt", "2026-04-30T17:10:00.000Z");
+    formData.set("recordedAt", "2026-06-11T14:07");
+    formData.set("timeZone", "America/Los_Angeles");
     formData.set("title", "Weekly Tactical");
     formData.set("ingestionGuidanceMd", "Track onboarding follow-ups.");
 
@@ -120,6 +122,7 @@ describe("POST /api/workspaces/[workspaceId]/meetings/transcript", () => {
         transcript: "Jan: We agreed Milan will own onboarding.",
         fileName: "weekly.txt",
         title: "Weekly Tactical",
+        recordedAt: new Date("2026-06-11T21:07:00.000Z"),
         ingestionGuidanceMd: "Track onboarding follow-ups.",
       }),
     );

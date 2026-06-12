@@ -2,6 +2,7 @@ import type { getFormatter } from "next-intl/server";
 import { CorgtexConnectorManager } from "../settings/CorgtexConnectorManager";
 import { DataSourcesManager } from "../settings/DataSourcesManager";
 import { AiWorkspaceManager } from "../settings/AiWorkspaceManager";
+import { TimeZoneSelect } from "@/lib/components/TimeZoneSelect";
 import {
   connectMeetingTranscriptSourceAction,
   createWebhookEndpointAction,
@@ -449,6 +450,7 @@ export function MeetingRecorderConnectorPanel({ workspaceId, origin, config, sou
                             <input name="recordedAt" type="datetime-local" />
                           </label>
                         </div>
+                        <TimeZoneSelect />
                         <label style={{ fontSize: "0.85rem" }}>
                           Participant emails
                           <input name="participantEmails" placeholder="name@example.com, name2@example.com" />

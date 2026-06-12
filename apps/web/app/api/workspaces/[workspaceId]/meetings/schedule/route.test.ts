@@ -52,6 +52,8 @@ describe("POST /api/workspaces/[workspaceId]/meetings/schedule", () => {
       expect.objectContaining({
         workspaceId: "ws-1",
         title: "Weekly Tactical",
+        startsAt: new Date("2026-04-30T17:00:00.000Z"),
+        scheduledEndAt: new Date("2026-04-30T18:00:00.000Z"),
         recurrenceRule: "FREQ=WEEKLY",
         participantEmails: ["jan@example.com"],
       }),
@@ -61,5 +63,34 @@ describe("POST /api/workspaces/[workspaceId]/meetings/schedule", () => {
       { workspaceId: "ws-1" },
     );
     expect(handleRouteError).not.toHaveBeenCalled();
+  });
+
+  it("converts timezone-local meeting series times before creating meetings", async () => {
+    resolveRequestActor.mockResolvedValue({ kind: "user", user: { id: "user-1" } });
+    createMeetingSeries.mockResolvedValue({ series: { id: "series-1" }, meetings: [] });
+    enqueueMeetingAgendaPreparation.mockResolvedValue({ id: "job-1" });
+
+    const { POST } = await import("./route");
+    await POST(
+      new Request("http://localhost/api/workspaces/ws-1/meetings/schedule", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          title: "Weekly Tactical",
+          startsAt: "2026-06-11T14:07",
+          scheduledEndAt: "2026-06-11T15:07",
+          timeZone: "America/Los_Angeles",
+        }),
+      }) as never,
+      { params: Promise.resolve({ workspaceId: "ws-1" }) },
+    );
+
+    expect(createMeetingSeries).toHaveBeenCalledWith(
+      { kind: "user", user: { id: "user-1" } },
+      expect.objectContaining({
+        startsAt: new Date("2026-06-11T21:07:00.000Z"),
+        scheduledEndAt: new Date("2026-06-11T22:07:00.000Z"),
+      }),
+    );
   });
 });

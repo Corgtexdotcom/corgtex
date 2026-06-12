@@ -3,6 +3,7 @@ import { createMeeting, listMeetings, requireWorkspaceMembership } from "@corgte
 import type { ArchiveFilter } from "@corgtex/domain";
 import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
+import { parseMeetingDateTimeInput } from "@/lib/meeting-timezone";
 
 export async function GET(request: NextRequest, { params }: { params: Promise<{ workspaceId: string }> }) {
   try {
@@ -29,13 +30,18 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       summaryMd?: unknown;
       participantIds?: unknown;
       participantEmails?: unknown;
+      timeZone?: unknown;
     };
 
     const meeting = await createMeeting(actor, {
       workspaceId,
       title: typeof body.title === "string" ? body.title : null,
       source: String(body.source ?? ""),
-      recordedAt: new Date(String(body.recordedAt ?? "")),
+      recordedAt: parseMeetingDateTimeInput(
+        String(body.recordedAt ?? ""),
+        typeof body.timeZone === "string" ? body.timeZone : null,
+        "Recorded at",
+      ),
       transcript: typeof body.transcript === "string" ? body.transcript : null,
       summaryMd: typeof body.summaryMd === "string" ? body.summaryMd : null,
       participantIds: Array.isArray(body.participantIds)

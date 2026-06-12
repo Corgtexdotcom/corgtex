@@ -58,7 +58,8 @@ describe("POST /api/workspaces/[workspaceId]/data-sources/text-ingest", () => {
         title: "Weekly Tactical",
         sourceType: "MEETING",
         content: "Jan: Milan owns onboarding.",
-        recordedAt: "2026-04-30T17:10:00.000Z",
+        recordedAt: "2026-06-11T14:07",
+        timeZone: "America/Los_Angeles",
         ingestionGuidanceMd: "Highlight onboarding owner.",
       }),
       { params: Promise.resolve({ workspaceId: "ws-1" }) },
@@ -72,7 +73,7 @@ describe("POST /api/workspaces/[workspaceId]/data-sources/text-ingest", () => {
       transcript: "Jan: Milan owns onboarding.",
       title: "Weekly Tactical",
       source: "text-paste",
-      recordedAt: "2026-04-30T17:10:00.000Z",
+      recordedAt: new Date("2026-06-11T21:07:00.000Z"),
       ingestionGuidanceMd: "Highlight onboarding owner.",
     });
     expect(ingestSource).not.toHaveBeenCalled();

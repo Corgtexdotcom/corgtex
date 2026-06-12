@@ -1,6 +1,7 @@
 import JSZip from "jszip";
 import type { MeetingTranscriptSourceArtifact } from "@corgtex/domain";
 import { extractTextFromFileBuffer } from "@corgtex/knowledge";
+import { normalizeOptionalMeetingDateTimeInput } from "@/lib/meeting-timezone";
 
 function formString(formData: FormData, key: string) {
   const value = formData.get(key);
@@ -87,7 +88,11 @@ export async function meetingTranscriptArtifactsFromFormData(formData: FormData)
   const defaults: Omit<MeetingTranscriptSourceArtifact, "fileName" | "mimeType" | "text" | "json"> = {
     externalId: formString(formData, "externalId"),
     title: formString(formData, "title"),
-    recordedAt: formString(formData, "recordedAt"),
+    recordedAt: normalizeOptionalMeetingDateTimeInput(
+      formString(formData, "recordedAt"),
+      formString(formData, "timeZone"),
+      "Recorded at",
+    ),
     sourceUpdatedAt: formString(formData, "sourceUpdatedAt"),
     sourceUrl: formString(formData, "sourceUrl"),
     meetingUrl: formString(formData, "meetingUrl"),
