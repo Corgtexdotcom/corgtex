@@ -480,6 +480,59 @@ describe("resolveProposal", () => {
     expect(prisma.proposal.update).not.toHaveBeenCalled();
   });
 
+  it("resolves a draft proposal directly and publishes it", async () => {
+    const { resolveProposal } = await import("./proposals");
+    const actor = { kind: "user", user: { id: "u-1" } } as any;
+
+    vi.mocked(prisma.proposal.findUnique).mockResolvedValueOnce({
+      id: "p-1",
+      workspaceId: "ws-1",
+      authorUserId: "u-1",
+      title: "Async standup policy",
+      bodyMd: "Body",
+      circleId: "circle-1",
+      status: "DRAFT",
+      isPrivate: true,
+      publishedAt: null,
+      archivedAt: null,
+    } as any);
+    vi.mocked(prisma.approvalFlow.findUnique).mockResolvedValueOnce(null);
+    vi.mocked(prisma.proposal.update).mockResolvedValueOnce({
+      id: "p-1",
+      workspaceId: "ws-1",
+      title: "Async standup policy",
+      bodyMd: "Body",
+      circleId: "circle-1",
+      status: "RESOLVED",
+      resolutionOutcome: "NOT_ADOPTED",
+      decisionMd: "Closed from draft.",
+      isPrivate: false,
+      decidedAt: new Date("2026-05-02T12:00:00.000Z"),
+    } as any);
+
+    await expect(resolveProposal(actor, {
+      workspaceId: "ws-1",
+      proposalId: "p-1",
+      outcome: "NOT_ADOPTED",
+      decisionMd: "Closed from draft.",
+    })).resolves.toMatchObject({
+      id: "p-1",
+      status: "RESOLVED",
+      resolutionOutcome: "NOT_ADOPTED",
+    });
+
+    expect(prisma.proposal.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "p-1" },
+      data: expect.objectContaining({
+        status: "RESOLVED",
+        resolutionOutcome: "NOT_ADOPTED",
+        decisionMd: "Closed from draft.",
+        isPrivate: false,
+        publishedAt: expect.any(Date),
+      }),
+    }));
+  });
+
   it("adopts an open proposal, closes the approval flow, and syncs policy corpus", async () => {
     const { appendEvents } = await import("./events");
     const { resolveProposal } = await import("./proposals");
@@ -1104,6 +1157,127 @@ describe("submitProposal event payload", () => {
       expect.anything(),
       expect.arrayContaining([
         expect.objectContaining({ type: "proposal.returned_to_draft" }),
+      ]),
+    );
+  });
+
+  it("returns a resolved proposal to draft and clears resolution and policy state", async () => {
+    const { returnProposalToDraft } = await import("./proposals");
+
+    vi.mocked((prisma.proposal as any).findUnique).mockResolvedValue({
+      id: "p-1",
+      workspaceId: "ws-1",
+      title: "Adopt async standup policy",
+      authorUserId: "u-1",
+      status: "RESOLVED",
+      resolutionOutcome: "ADOPTED",
+      decisionMd: "Approved.",
+      decidedAt: new Date("2026-05-01T12:00:00.000Z"),
+      archivedAt: null,
+    });
+    vi.mocked((prisma as any).approvalFlow.findUnique).mockResolvedValue({ id: "flow-1" });
+    vi.mocked((prisma as any).approvalDecision.deleteMany).mockResolvedValue({ count: 2 });
+    vi.mocked((prisma as any).objection.deleteMany).mockResolvedValue({ count: 1 });
+    vi.mocked((prisma as any).approvalFlow.update).mockResolvedValue({});
+    vi.mocked((prisma as any).policyCorpus.deleteMany).mockResolvedValue({ count: 1 });
+    vi.mocked((prisma as any).deliberationEntry.updateMany).mockResolvedValue({ count: 1 });
+    vi.mocked((prisma as any).proposalReaction.updateMany).mockResolvedValue({ count: 1 });
+    vi.mocked((prisma.proposal as any).update).mockResolvedValue({
+      id: "p-1",
+      status: "DRAFT",
+      isPrivate: true,
+      resolutionOutcome: null,
+      decisionMd: null,
+      decidedAt: null,
+    });
+
+    const actor = { kind: "user", user: { id: "u-1" } } as any;
+    await expect(returnProposalToDraft(actor, {
+      workspaceId: "ws-1",
+      proposalId: "p-1",
+    })).resolves.toMatchObject({
+      id: "p-1",
+      status: "DRAFT",
+      isPrivate: true,
+    });
+
+    expect((prisma as any).policyCorpus.deleteMany).toHaveBeenCalledWith({ where: { proposalId: "p-1" } });
+    expect((prisma.proposal as any).update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "p-1" },
+      data: expect.objectContaining({
+        status: "DRAFT",
+        resolutionOutcome: null,
+        decisionMd: null,
+        decidedAt: null,
+        isPrivate: true,
+      }),
+    }));
+  });
+
+  it("reopens a resolved proposal and clears stale approval and policy state", async () => {
+    const { appendEvents } = await import("./events");
+    const { reopenProposal } = await import("./proposals");
+
+    vi.mocked((prisma.proposal as any).findUnique).mockResolvedValue({
+      id: "p-1",
+      workspaceId: "ws-1",
+      title: "Adopt async standup policy",
+      authorUserId: "u-1",
+      status: "RESOLVED",
+      resolutionOutcome: "ADOPTED",
+      decisionMd: "Approved.",
+      decidedAt: new Date("2026-05-01T12:00:00.000Z"),
+      publishedAt: new Date("2026-04-30T12:00:00.000Z"),
+      archivedAt: null,
+    });
+    vi.mocked((prisma as any).approvalFlow.findUnique).mockResolvedValue({
+      id: "flow-1",
+      openedAt: new Date("2026-04-30T12:00:00.000Z"),
+    });
+    vi.mocked((prisma as any).approvalDecision.deleteMany).mockResolvedValue({ count: 2 });
+    vi.mocked((prisma as any).objection.deleteMany).mockResolvedValue({ count: 1 });
+    vi.mocked((prisma as any).policyCorpus.deleteMany).mockResolvedValue({ count: 1 });
+    vi.mocked((prisma as any).approvalFlow.update).mockResolvedValue({});
+    vi.mocked((prisma.proposal as any).update).mockResolvedValue({
+      id: "p-1",
+      status: "OPEN",
+      resolutionOutcome: null,
+      decisionMd: null,
+      decidedAt: null,
+    });
+
+    const actor = { kind: "user", user: { id: "u-1" } } as any;
+    await expect(reopenProposal(actor, {
+      workspaceId: "ws-1",
+      proposalId: "p-1",
+    })).resolves.toMatchObject({
+      id: "p-1",
+      status: "OPEN",
+    });
+
+    expect((prisma as any).approvalFlow.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "flow-1" },
+      data: expect.objectContaining({
+        status: "ACTIVE",
+        closesAt: null,
+        closedAt: null,
+      }),
+    }));
+    expect((prisma as any).policyCorpus.deleteMany).toHaveBeenCalledWith({ where: { proposalId: "p-1" } });
+    expect((prisma.proposal as any).update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "p-1" },
+      data: expect.objectContaining({
+        status: "OPEN",
+        resolutionOutcome: null,
+        decisionMd: null,
+        decidedAt: null,
+        isPrivate: false,
+      }),
+    }));
+    expect(appendEvents).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.arrayContaining([
+        expect.objectContaining({ type: "proposal.reopened" }),
       ]),
     );
   });

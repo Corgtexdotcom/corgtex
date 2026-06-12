@@ -336,13 +336,14 @@ export async function updateAction(actor: AppActor, params: {
     if (params.priority !== undefined) data.priority = params.priority;
     if (params.status !== undefined) {
       if (params.status === "DRAFT") {
-        invariant(action.status !== "COMPLETED", 400, "INVALID_STATE", "Completed actions cannot be returned to draft.");
         await requireDraftManager({ actor, workspaceId: params.workspaceId, record: action, resolvedMembership: membership });
         data.isPrivate = true;
         data.publishedAt = null;
         data.completedVia = null;
       } else if (params.status === "COMPLETED") {
-        invariant(action.status === "OPEN" || action.status === "IN_PROGRESS", 400, "INVALID_STATE", "Only open or in-progress actions can be completed.");
+        if (action.status === "DRAFT") {
+          await requireDraftManager({ actor, workspaceId: params.workspaceId, record: action, resolvedMembership: membership });
+        }
       } else if (action.status === "DRAFT") {
         await requireDraftManager({ actor, workspaceId: params.workspaceId, record: action, resolvedMembership: membership });
       }
@@ -517,7 +518,7 @@ export async function returnActionToDraft(actor: AppActor, params: {
     });
 
     invariant(action && action.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Action not found.");
-    invariant(action.status === "OPEN" || action.status === "IN_PROGRESS", 400, "INVALID_STATE", "Only open or in-progress actions can be returned to draft.");
+    invariant(action.status === "OPEN" || action.status === "IN_PROGRESS" || action.status === "COMPLETED", 400, "INVALID_STATE", "Only open, in-progress, or completed actions can be returned to draft.");
     await requireDraftManager({ actor, workspaceId: params.workspaceId, record: action, resolvedMembership: membership });
 
     const updated = await tx.action.update({

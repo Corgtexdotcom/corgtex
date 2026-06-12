@@ -15,6 +15,7 @@ const deleteAction = vi.fn();
 const enforceDemoGuard = vi.fn();
 const publishAction = vi.fn();
 const requirePageActor = vi.fn(async () => actor);
+const returnActionToDraft = vi.fn();
 const updateAction = vi.fn();
 
 vi.mock("@/lib/demo-guard", () => ({
@@ -29,6 +30,7 @@ vi.mock("@corgtex/domain", () => ({
   createAction,
   deleteAction,
   publishAction,
+  returnActionToDraft,
   updateAction,
 }));
 

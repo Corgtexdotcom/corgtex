@@ -293,6 +293,48 @@ describe("action domain lifecycle", () => {
     }));
   });
 
+  it("returns a completed action to draft and clears completion state", async () => {
+    prismaMock.action.findUnique.mockResolvedValue({
+      id: "action-1",
+      workspaceId: "workspace-1",
+      authorUserId: "user-1",
+      title: "Follow up",
+      status: "COMPLETED",
+      completedVia: "Done",
+      isPrivate: false,
+      publishedAt: new Date("2026-04-26T12:00:00.000Z"),
+      archivedAt: null,
+    });
+    prismaMock.action.update.mockResolvedValue({
+      id: "action-1",
+      workspaceId: "workspace-1",
+      status: "DRAFT",
+      isPrivate: true,
+      completedVia: null,
+      publishedAt: null,
+    });
+
+    const { returnActionToDraft } = await import("./actions");
+    await expect(returnActionToDraft(actor, {
+      workspaceId: "workspace-1",
+      actionId: "action-1",
+    })).resolves.toMatchObject({
+      id: "action-1",
+      status: "DRAFT",
+      isPrivate: true,
+    });
+
+    expect(prismaMock.action.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "action-1" },
+      data: expect.objectContaining({
+        status: "DRAFT",
+        isPrivate: true,
+        publishedAt: null,
+        completedVia: null,
+      }),
+    }));
+  });
+
   it("allows an author to edit an open action and snapshots the previous version", async () => {
     prismaMock.action.findUnique.mockResolvedValue({
       id: "action-1",
@@ -435,6 +477,49 @@ describe("action domain lifecycle", () => {
       }],
       skipDuplicates: true,
     });
+  });
+
+  it("allows a draft action to move directly to completed with a completion note", async () => {
+    prismaMock.action.findUnique.mockResolvedValue({
+      id: "action-1",
+      workspaceId: "workspace-1",
+      authorUserId: "user-1",
+      title: "Follow up",
+      status: "DRAFT",
+      version: 1,
+      completedVia: null,
+      isPrivate: true,
+      publishedAt: null,
+      archivedAt: null,
+    });
+    prismaMock.action.update.mockResolvedValue({
+      id: "action-1",
+      workspaceId: "workspace-1",
+      status: "COMPLETED",
+      completedVia: "Done from draft.",
+      isPrivate: false,
+    });
+
+    const { updateAction } = await import("./actions");
+    await expect(updateAction(actor, {
+      workspaceId: "workspace-1",
+      actionId: "action-1",
+      status: "COMPLETED",
+      completedVia: " Done from draft. ",
+    })).resolves.toMatchObject({
+      id: "action-1",
+      status: "COMPLETED",
+    });
+
+    expect(prismaMock.action.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "action-1" },
+      data: expect.objectContaining({
+        status: "COMPLETED",
+        isPrivate: false,
+        publishedAt: expect.any(Date),
+        completedVia: "Done from draft.",
+      }),
+    }));
   });
 
   it("blocks non-managers from editing another member's draft action", async () => {

@@ -321,7 +321,6 @@ export async function updateTension(actor: AppActor, params: {
     if (params.bodyMd !== undefined) data.bodyMd = params.bodyMd?.trim() || null;
     if (params.status !== undefined) {
       if (params.status === "DRAFT") {
-        invariant(tension.status === "OPEN", 400, "INVALID_STATE", "Only open tensions can be returned to draft.");
         await requireDraftManager({ actor, workspaceId: params.workspaceId, record: tension, resolvedMembership: membership });
         data.isPrivate = true;
         data.publishedAt = null;
@@ -548,7 +547,7 @@ export async function returnTensionToDraft(actor: AppActor, params: {
     });
 
     invariant(tension && tension.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Tension not found.");
-    invariant(tension.status === "OPEN", 400, "INVALID_STATE", "Only open tensions can be returned to draft.");
+    invariant(tension.status === "OPEN" || tension.status === "RESOLVED", 400, "INVALID_STATE", "Only open or resolved tensions can be returned to draft.");
     await requireDraftManager({ actor, workspaceId: params.workspaceId, record: tension, resolvedMembership: membership });
 
     const updated = await tx.tension.update({

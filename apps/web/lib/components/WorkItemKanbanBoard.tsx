@@ -3,11 +3,14 @@
 import type { ReactNode } from "react";
 import { useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
-import { Eye, EyeOff, GripVertical, MoveDown, MoveUp, RotateCcw, Settings2 } from "lucide-react";
+import { ArrowDownAZ, ArrowDownWideNarrow, ArrowUpDown, Eye, EyeOff, GripVertical, MoveDown, MoveUp, RotateCcw, Settings2 } from "lucide-react";
+import type { WorkItemSort, WorkItemSortable } from "@/lib/work-item-view";
+import { compareWorkItemSortValues, normalizeWorkItemSort } from "@/lib/work-item-view";
 
 export type WorkItemKanbanItem = {
   id: string;
   status: string;
+  sort: WorkItemSortable;
   node: ReactNode;
 };
 
@@ -23,7 +26,10 @@ export type WorkItemKanbanColumn = {
 type StoredColumnPrefs = {
   order?: string[];
   hidden?: string[];
+  sorts?: Record<string, WorkItemSort>;
 };
+
+const DEFAULT_COLUMN_SORT: WorkItemSort = "priority";
 
 function normalizeOrder(columns: WorkItemKanbanColumn[], stored?: string[]) {
   const ids = columns.map((column) => column.id);
@@ -33,6 +39,20 @@ function normalizeOrder(columns: WorkItemKanbanColumn[], stored?: string[]) {
 
 function transitionKey(itemId: string, targetStatus: string) {
   return `${itemId}:${targetStatus}`;
+}
+
+function normalizeColumnSorts(columns: WorkItemKanbanColumn[], stored?: Record<string, WorkItemSort>) {
+  const sorts: Record<string, WorkItemSort> = {};
+  for (const column of columns) {
+    sorts[column.id] = normalizeWorkItemSort(stored?.[column.id]);
+  }
+  return sorts;
+}
+
+function sortIcon(sort: WorkItemSort, size = 15) {
+  if (sort === "alpha") return <ArrowDownAZ size={size} aria-hidden="true" />;
+  if (sort === "date") return <ArrowUpDown size={size} aria-hidden="true" />;
+  return <ArrowDownWideNarrow size={size} aria-hidden="true" />;
 }
 
 export function WorkItemKanbanBoard({
@@ -49,6 +69,10 @@ export function WorkItemKanbanBoard({
   showShortLabel,
   moveUpShortLabel,
   moveDownShortLabel,
+  sortLabel,
+  sortPriorityLabel,
+  sortDateLabel,
+  sortAlphaLabel,
   dragUnavailableLabel,
 }: {
   columns: WorkItemKanbanColumn[];
@@ -64,11 +88,16 @@ export function WorkItemKanbanBoard({
   showShortLabel: string;
   moveUpShortLabel: string;
   moveDownShortLabel: string;
+  sortLabel: string;
+  sortPriorityLabel: string;
+  sortDateLabel: string;
+  sortAlphaLabel: string;
   dragUnavailableLabel: string;
 }) {
   const defaultOrder = useMemo(() => columns.map((column) => column.id), [columns]);
   const [columnOrder, setColumnOrder] = useState(defaultOrder);
   const [hiddenColumns, setHiddenColumns] = useState<string[]>([]);
+  const [columnSorts, setColumnSorts] = useState<Record<string, WorkItemSort>>({});
   const [draggedItem, setDraggedItem] = useState<{ id: string; status: string } | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [hydrated, setHydrated] = useState(false);
@@ -78,6 +107,7 @@ export function WorkItemKanbanBoard({
 
   useEffect(() => {
     setColumnOrder((current) => normalizeOrder(columns, current.length > 0 ? current : defaultOrder));
+    setColumnSorts((current) => normalizeColumnSorts(columns, current));
   }, [columns, defaultOrder]);
 
   useEffect(() => {
@@ -87,13 +117,16 @@ export function WorkItemKanbanBoard({
         const parsed = JSON.parse(raw) as StoredColumnPrefs;
         setColumnOrder(normalizeOrder(columns, parsed.order));
         setHiddenColumns((parsed.hidden ?? []).filter((id) => columnsById.has(id)));
+        setColumnSorts(normalizeColumnSorts(columns, parsed.sorts));
       } else {
         setColumnOrder(defaultOrder);
         setHiddenColumns([]);
+        setColumnSorts(normalizeColumnSorts(columns));
       }
     } catch {
       setColumnOrder(defaultOrder);
       setHiddenColumns([]);
+      setColumnSorts(normalizeColumnSorts(columns));
     } finally {
       setHydrated(true);
     }
@@ -101,8 +134,8 @@ export function WorkItemKanbanBoard({
 
   useEffect(() => {
     if (!hydrated) return;
-    window.localStorage.setItem(storageKey, JSON.stringify({ order: columnOrder, hidden: hiddenColumns }));
-  }, [columnOrder, hiddenColumns, hydrated, storageKey]);
+    window.localStorage.setItem(storageKey, JSON.stringify({ order: columnOrder, hidden: hiddenColumns, sorts: columnSorts }));
+  }, [columnOrder, columnSorts, hiddenColumns, hydrated, storageKey]);
 
   useEffect(() => {
     if (!settingsPortalId) {
@@ -139,7 +172,17 @@ export function WorkItemKanbanBoard({
   function resetColumns() {
     setColumnOrder(defaultOrder);
     setHiddenColumns([]);
+    setColumnSorts(normalizeColumnSorts(columns));
     setMessage(null);
+  }
+
+  function setColumnSort(columnId: string, sort: WorkItemSort) {
+    setColumnSorts((current) => ({ ...current, [columnId]: sort }));
+  }
+
+  function sortedItems(column: WorkItemKanbanColumn) {
+    const sort = columnSorts[column.id] ?? DEFAULT_COLUMN_SORT;
+    return [...column.items].sort((left, right) => compareWorkItemSortValues(left.sort, right.sort, sort));
   }
 
   function handleDrop(targetStatus: string) {
@@ -219,49 +262,84 @@ export function WorkItemKanbanBoard({
       )}
       {message && <p className="nr-kanban-message">{message}</p>}
       <div className="nr-kanban">
-        {visibleColumns.map((column) => (
-          <section
-            className={`nr-kanban-column ${draggedItem && draggedItem.status !== column.id ? "nr-kanban-column-drop" : ""}`}
-            key={column.id}
-            onDragOver={(event) => {
-              event.preventDefault();
-            }}
-            onDrop={(event) => {
-              event.preventDefault();
-              handleDrop(column.id);
-            }}
-          >
-            <div className="nr-kanban-heading">
-              <span>{column.label}</span>
-              <span>{column.count}</span>
-            </div>
-            {column.items.length === 0 && column.empty && (
-              <div key={`${column.id}-empty`}>
-                {column.empty}
+        {visibleColumns.map((column) => {
+          const currentSort = columnSorts[column.id] ?? DEFAULT_COLUMN_SORT;
+          const sortOptions: Array<{ value: WorkItemSort; label: string }> = [
+            { value: "priority", label: sortPriorityLabel },
+            { value: "date", label: sortDateLabel },
+            { value: "alpha", label: sortAlphaLabel },
+          ];
+          return (
+            <section
+              className={`nr-kanban-column ${draggedItem && draggedItem.status !== column.id ? "nr-kanban-column-drop" : ""}`}
+              key={column.id}
+              onDragOver={(event) => {
+                event.preventDefault();
+              }}
+              onDrop={(event) => {
+                event.preventDefault();
+                handleDrop(column.id);
+              }}
+            >
+              <div className="nr-kanban-heading">
+                <span className="nr-kanban-heading-label">
+                  <span>{column.label}</span>
+                  <span>{column.count}</span>
+                </span>
+                <details className="nr-icon-menu nr-kanban-sort-menu">
+                  <summary
+                    className="nr-kanban-sort-trigger"
+                    aria-label={`${sortLabel}: ${sortOptions.find((option) => option.value === currentSort)?.label ?? sortPriorityLabel}`}
+                    title={sortLabel}
+                  >
+                    {sortIcon(currentSort)}
+                  </summary>
+                  <div className="nr-icon-menu-popover">
+                    {sortOptions.map((option) => (
+                      <button
+                        type="button"
+                        key={option.value}
+                        className={`nr-icon-menu-item ${currentSort === option.value ? "nr-icon-menu-item-active" : ""}`}
+                        onClick={() => setColumnSort(column.id, option.value)}
+                      >
+                        {sortIcon(option.value)}
+                        <span>{option.label}</span>
+                      </button>
+                    ))}
+                  </div>
+                </details>
               </div>
-            )}
-            {column.items.map((item) => (
-              <div
-                className="nr-kanban-draggable"
-                draggable
-                key={item.id}
-                onDragStart={(event) => {
-                  event.dataTransfer.effectAllowed = "move";
-                  setDraggedItem({ id: item.id, status: item.status });
-                  setMessage(null);
-                }}
-                onDragEnd={() => setDraggedItem(null)}
-              >
-                {item.node}
-              </div>
-            ))}
-            {column.addCard && (
-              <div key={`${column.id}-add`}>
-                {column.addCard}
-              </div>
-            )}
-          </section>
-        ))}
+              {column.items.length === 0 && column.empty && (
+                <div key={`${column.id}-empty`}>
+                  {column.empty}
+                </div>
+              )}
+              {sortedItems(column).map((item) => (
+                <div
+                  className="nr-kanban-draggable"
+                  draggable
+                  key={item.id}
+                  onDragStart={(event) => {
+                    event.dataTransfer.effectAllowed = "move";
+                    event.dataTransfer.setData("text/plain", item.id);
+                    const rect = event.currentTarget.getBoundingClientRect();
+                    event.dataTransfer.setDragImage(event.currentTarget, Math.min(rect.width / 2, 180), Math.min(rect.height / 2, 80));
+                    setDraggedItem({ id: item.id, status: item.status });
+                    setMessage(null);
+                  }}
+                  onDragEnd={() => setDraggedItem(null)}
+                >
+                  {item.node}
+                </div>
+              ))}
+              {column.addCard && (
+                <div key={`${column.id}-add`}>
+                  {column.addCard}
+                </div>
+              )}
+            </section>
+          );
+        })}
       </div>
     </div>
   );

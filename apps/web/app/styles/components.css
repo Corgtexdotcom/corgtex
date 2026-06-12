@@ -2063,6 +2063,52 @@ details[open] > .settings-disclosure-summary::before {
     text-transform: uppercase;
   }
 
+  .nr-kanban-heading-label {
+    display: inline-flex;
+    min-width: 0;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .nr-kanban-heading-label span:first-child {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .nr-kanban-sort-menu {
+    flex: 0 0 auto;
+  }
+
+  .nr-kanban-sort-menu > summary {
+    list-style: none;
+  }
+
+  .nr-kanban-sort-menu > summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .nr-kanban-sort-trigger {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: var(--surface-strong);
+    color: var(--muted);
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+  }
+
+  .nr-kanban-sort-trigger:hover {
+    background: var(--bg-alt);
+    color: var(--text);
+    border-color: var(--text);
+  }
+
   .nr-kanban-card {
     position: relative;
     border: 1px solid var(--line);
@@ -2113,6 +2159,14 @@ details[open] > .settings-disclosure-summary::before {
 
   .nr-hidden-transition-form,
   .nr-list-only-create {
+    display: none;
+  }
+
+  .nr-transition-controls {
+    display: contents;
+  }
+
+  .nr-hidden-transition-trigger > button {
     display: none;
   }
 

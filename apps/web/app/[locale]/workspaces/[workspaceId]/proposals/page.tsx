@@ -11,12 +11,12 @@ import { ProposalDraftFields } from "./ProposalDraftFields";
 import {
   archiveProposalAction,
   resolveProposalAction,
+  reopenProposalAction,
   submitProposalAction,
   returnProposalToDraftAction,
   updateProposalAction,
 } from "../actions";
 import { ItemActions } from "@/lib/components/ui/ItemActions";
-import { canOpenPrivateDraft } from "@/lib/governance-open-guards";
 import { getTranslations } from "next-intl/server";
 import { prisma } from "@corgtex/shared";
 
@@ -61,10 +61,11 @@ export default async function ProposalsPage({
   };
 
   const displayProposals = groupedProposals[statusFilter as keyof typeof groupedProposals] || groupedProposals.OPEN;
-  const filterState = { view, sort, circleId, memberId };
   const columnSettingsPortalId = "work-item-proposals-column-settings";
   type ProposalListItem = (typeof proposals)[number];
   type ProposalColumnStatus = "DRAFT" | "OPEN" | "RESOLVED" | "ARCHIVED";
+  type ProposalMoveStatus = "DRAFT" | "OPEN" | "RESOLVED";
+  const proposalMoveStatuses: ProposalMoveStatus[] = ["DRAFT", "OPEN", "RESOLVED"];
 
   function proposalStatusLabel(status: "DRAFT" | "OPEN" | "RESOLVED" | "ARCHIVED") {
     if (status === "DRAFT") return t("statusDraft");
@@ -73,27 +74,102 @@ export default async function ProposalsPage({
     return t("statusArchived");
   }
 
+  function proposalMoveLabel(status: ProposalMoveStatus) {
+    if (status === "DRAFT") return t("btnReturnToDraft");
+    if (status === "OPEN") return t("btnOpen");
+    return t("btnResolve");
+  }
+
+  function renderProposalMove(proposal: ProposalListItem, targetStatus: ProposalMoveStatus, options: { hidden?: boolean; primary?: boolean } = {}) {
+    const key = `${options.hidden ? "hidden-" : ""}move-${targetStatus.toLowerCase()}`;
+    const transition = `${proposal.id}:${targetStatus}`;
+    const buttonClass = options.primary ? "primary small" : undefined;
+    const buttonProps = options.hidden ? { "aria-hidden": true, tabIndex: -1 } : {};
+
+    if (targetStatus === "RESOLVED") {
+      return (
+        <span
+          key={key}
+          data-work-item-dialog={transition}
+          className={options.hidden ? "nr-hidden-transition-trigger" : undefined}
+        >
+          <WorkItemResolutionDialog
+            action={resolveProposalAction}
+            buttonLabel={t("btnResolve")}
+            title={tWork("resolveProposalTitle")}
+            noteName="decisionMd"
+            noteLabel={tWork("resolutionNote")}
+            notePlaceholder={t("placeholderDecisionMd")}
+            hiddenFields={{ workspaceId, proposalId: proposal.id }}
+            outcomeName="outcome"
+            outcomeLabel={t("formResolutionOutcome")}
+            outcomeOptions={[
+              { value: "ADOPTED", label: t("outcomeAdopted") },
+              { value: "NOT_ADOPTED", label: t("outcomeNotAdopted") },
+              { value: "WITHDRAWN", label: t("outcomeWithdrawn") },
+            ]}
+            submitLabel={t("btnResolve")}
+            cancelLabel={tCommon("cancel")}
+            fileLabel={tWork("evidence")}
+            className={options.primary ? "primary small" : undefined}
+          />
+        </span>
+      );
+    }
+
+    if (targetStatus === "DRAFT") {
+      return (
+        <form
+          key={key}
+          action={returnProposalToDraftAction}
+          data-work-item-transition={transition}
+          className={options.hidden ? "nr-hidden-transition-form" : undefined}
+        >
+          <input type="hidden" name="workspaceId" value={workspaceId} />
+          <input type="hidden" name="proposalId" value={proposal.id} />
+          <button type="submit" className={buttonClass} {...buttonProps}>{proposalMoveLabel(targetStatus)}</button>
+        </form>
+      );
+    }
+
+    const actionHandler = proposal.status === "DRAFT" ? submitProposalAction : reopenProposalAction;
+    return (
+      <form
+        key={key}
+        action={actionHandler}
+        data-work-item-transition={transition}
+        className={options.hidden ? "nr-hidden-transition-form" : undefined}
+      >
+        <input type="hidden" name="workspaceId" value={workspaceId} />
+        <input type="hidden" name="proposalId" value={proposal.id} />
+        <button type="submit" className={buttonClass} {...buttonProps}>{proposalMoveLabel(targetStatus)}</button>
+      </form>
+    );
+  }
+
   function renderProposalCard(proposal: ProposalListItem, compact = false) {
     const detailHref = `/workspaces/${workspaceId}/proposals/${proposal.id}`;
     const isAuthor = actor.kind === "user" && proposal.authorUserId === actor.user.id;
     const canManage = canManageProposal(proposal);
     const canEditContent = proposal.status === "DRAFT" ? canManage : proposal.status === "OPEN" && isAuthor;
     const moreItems: ReactNode[] = [];
-    if (canManage && proposal.status === "OPEN") {
-      moreItems.push(
-        <form key="return-to-draft" action={returnProposalToDraftAction}>
-          <input type="hidden" name="workspaceId" value={workspaceId} />
-          <input type="hidden" name="proposalId" value={proposal.id} />
-          <button type="submit">{t("btnReturnToDraft")}</button>
-        </form>,
-      );
-      moreItems.push(
-        <form key="return-to-draft-drag" action={returnProposalToDraftAction} data-work-item-transition={`${proposal.id}:DRAFT`} className="nr-hidden-transition-form">
-          <input type="hidden" name="workspaceId" value={workspaceId} />
-          <input type="hidden" name="proposalId" value={proposal.id} />
-          <button type="submit" aria-hidden="true" tabIndex={-1}>{t("btnReturnToDraft")}</button>
-        </form>,
-      );
+    const primaryMoveTarget: ProposalMoveStatus | null = canManage && proposal.status === "DRAFT"
+      ? "OPEN"
+      : canResolveProposal && proposal.status === "OPEN"
+        ? "RESOLVED"
+        : null;
+    const canMoveToStatus = (targetStatus: ProposalMoveStatus) => {
+      if (proposal.archivedAt || targetStatus === proposal.status) return false;
+      if (proposal.status === "DRAFT" || targetStatus === "DRAFT") return canManage;
+      if (targetStatus === "RESOLVED" || targetStatus === "OPEN") return canResolveProposal;
+      return true;
+    };
+    const hiddenTransitions = proposalMoveStatuses
+      .filter((targetStatus) => canMoveToStatus(targetStatus) && targetStatus !== primaryMoveTarget)
+      .map((targetStatus) => renderProposalMove(proposal, targetStatus, { hidden: true }));
+    for (const targetStatus of proposalMoveStatuses) {
+      if (!canMoveToStatus(targetStatus) || targetStatus === primaryMoveTarget) continue;
+      moreItems.push(renderProposalMove(proposal, targetStatus));
     }
     if (canEditContent) {
       moreItems.push(
@@ -110,7 +186,7 @@ export default async function ProposalsPage({
         </details>,
       );
     }
-    if (canManage && (proposal.status === "DRAFT" || proposal.status === "RESOLVED")) {
+    if (canManage && !proposal.archivedAt && (proposal.status === "DRAFT" || proposal.status === "RESOLVED")) {
       moreItems.push(<div key="divider" className="action-menu-divider" />);
       moreItems.push(
         <form key="archive" action={archiveProposalAction}>
@@ -121,40 +197,11 @@ export default async function ProposalsPage({
       );
     }
 
-    const primaryAction = canManage && canOpenPrivateDraft(proposal) ? (
-      <form action={submitProposalAction} data-work-item-transition={`${proposal.id}:OPEN`}>
-        <input type="hidden" name="workspaceId" value={workspaceId} />
-        <input type="hidden" name="proposalId" value={proposal.id} />
-        <button type="submit" className="primary small">{t("btnOpen")}</button>
-      </form>
-    ) : canResolveProposal && proposal.status === "OPEN" ? (
-      <span data-work-item-dialog={`${proposal.id}:RESOLVED`}>
-        <WorkItemResolutionDialog
-          action={resolveProposalAction}
-          buttonLabel={t("btnResolve")}
-          title={tWork("resolveProposalTitle")}
-          noteName="decisionMd"
-          noteLabel={tWork("resolutionNote")}
-          notePlaceholder={t("placeholderDecisionMd")}
-          hiddenFields={{ workspaceId, proposalId: proposal.id }}
-          outcomeName="outcome"
-          outcomeLabel={t("formResolutionOutcome")}
-          outcomeOptions={[
-            { value: "ADOPTED", label: t("outcomeAdopted") },
-            { value: "NOT_ADOPTED", label: t("outcomeNotAdopted") },
-            { value: "WITHDRAWN", label: t("outcomeWithdrawn") },
-          ]}
-          submitLabel={t("btnResolve")}
-          cancelLabel={tCommon("cancel")}
-          fileLabel={tWork("evidence")}
-          className="primary small"
-        />
-      </span>
-    ) : null;
+    const primaryAction = primaryMoveTarget ? renderProposalMove(proposal, primaryMoveTarget, { primary: true }) : null;
 
     return (
       <div className={`${compact ? "nr-kanban-card" : "nr-item nr-list-card"} nr-clickable-card`} key={proposal.id}>
-        <a href={detailHref} className="nr-card-hitbox" aria-label={tWork("openItem", { title: proposal.title })} />
+        <a href={detailHref} className="nr-card-hitbox" aria-label={tWork("openItem", { title: proposal.title })} draggable={false} />
         <div className="nr-list-link nr-card-content">
           <div className="row items-center">
             <strong className="nr-item-title">
@@ -173,7 +220,7 @@ export default async function ProposalsPage({
             {proposal.circle ? ` · ${proposal.circle.name}` : ""}
             {" · "}
             {proposal.version > 1 ? (
-              <a href={`/workspaces/${workspaceId}/versions?entityType=PROPOSAL&entityId=${encodeURIComponent(proposal.id)}`}>v{proposal.version}</a>
+              <a href={`/workspaces/${workspaceId}/versions?entityType=PROPOSAL&entityId=${encodeURIComponent(proposal.id)}`} draggable={false}>v{proposal.version}</a>
             ) : (
               <>v{proposal.version}</>
             )}
@@ -181,12 +228,12 @@ export default async function ProposalsPage({
           {(proposal.tensions?.length > 0 || proposal.actions?.length > 0) && (
             <div className="nr-tag-group">
               {proposal.tensions?.map((linkedTension) => (
-                <a key={linkedTension.id} href={`/workspaces/${workspaceId}/tensions/${linkedTension.id}`} className="tag info tag-sm no-underline">
+                <a key={linkedTension.id} href={`/workspaces/${workspaceId}/tensions/${linkedTension.id}`} className="tag info tag-sm no-underline" draggable={false}>
                   {t("tensionTag", { title: linkedTension.title })}
                 </a>
               ))}
               {proposal.actions?.map((action) => (
-                <a key={action.id} href={`/workspaces/${workspaceId}/actions/${action.id}`} className="tag info tag-sm no-underline">
+                <a key={action.id} href={`/workspaces/${workspaceId}/actions/${action.id}`} className="tag info tag-sm no-underline" draggable={false}>
                   {t("actionTag", { title: action.title })}
                 </a>
               ))}
@@ -199,6 +246,11 @@ export default async function ProposalsPage({
             primary={primaryAction}
             more={moreItems.length > 0 ? moreItems : null}
           />
+        )}
+        {!isDemo && hiddenTransitions.length > 0 && (
+          <div className="nr-transition-controls">
+            {hiddenTransitions}
+          </div>
         )}
       </div>
     );
@@ -225,6 +277,11 @@ export default async function ProposalsPage({
     items: groupedProposals[status].map((proposal) => ({
       id: proposal.id,
       status,
+      sort: {
+        priority: proposal.priority,
+        date: proposal.createdAt,
+        alpha: proposal.title,
+      },
       node: renderProposalCard(proposal, true),
     })),
   }));
@@ -244,7 +301,7 @@ export default async function ProposalsPage({
             {(["DRAFT", "OPEN", "RESOLVED", "ARCHIVED"] as const).map((status) => (
               <a
                 key={status}
-                href={buildWorkItemQuery({ ...filterState, status })}
+                href={buildWorkItemQuery({ view, sort: view === "list" ? sort : undefined, circleId, memberId, status })}
                 className={`nr-filter-item ${statusFilter === status ? "nr-filter-active" : ""}`}
               >
                 {proposalStatusLabel(status)} ({groupedProposals[status].length})
@@ -254,12 +311,12 @@ export default async function ProposalsPage({
           <WorkItemToolbar
             currentView={view}
             currentSort={sort}
-            listHref={buildWorkItemQuery({ ...filterState, status: statusFilter, view: "list" })}
-            kanbanHref={buildWorkItemQuery({ ...filterState, status: statusFilter, view: "kanban" })}
+            listHref={buildWorkItemQuery({ sort, circleId, memberId, status: statusFilter, view: "list" })}
+            kanbanHref={buildWorkItemQuery({ circleId, memberId, status: statusFilter, view: "kanban" })}
             sortLinks={{
-              priority: buildWorkItemQuery({ ...filterState, status: statusFilter, sort: "priority" }),
-              date: buildWorkItemQuery({ ...filterState, status: statusFilter, sort: "date" }),
-              alpha: buildWorkItemQuery({ ...filterState, status: statusFilter, sort: "alpha" }),
+              priority: buildWorkItemQuery({ view: "list", circleId, memberId, status: statusFilter, sort: "priority" }),
+              date: buildWorkItemQuery({ view: "list", circleId, memberId, status: statusFilter, sort: "date" }),
+              alpha: buildWorkItemQuery({ view: "list", circleId, memberId, status: statusFilter, sort: "alpha" }),
             }}
             listLabel={tWork("listView")}
             kanbanLabel={tWork("kanbanView")}
@@ -276,7 +333,7 @@ export default async function ProposalsPage({
           action={`/workspaces/${workspaceId}/proposals`}
           status={statusFilter}
           view={view}
-          sort={sort}
+          sort={view === "list" ? sort : undefined}
           circleId={circleId}
           memberId={memberId}
           circles={circles.map((circle) => ({ id: circle.id, label: circle.name }))}
@@ -306,6 +363,10 @@ export default async function ProposalsPage({
             showShortLabel={tWork("showColumnShort")}
             moveUpShortLabel={tWork("moveColumnLeftShort")}
             moveDownShortLabel={tWork("moveColumnRightShort")}
+            sortLabel={tWork("sort")}
+            sortPriorityLabel={tWork("sortPriority")}
+            sortDateLabel={tWork("sortDate")}
+            sortAlphaLabel={tWork("sortAlpha")}
             dragUnavailableLabel={tWork("dragUnavailable")}
           />
         ) : (

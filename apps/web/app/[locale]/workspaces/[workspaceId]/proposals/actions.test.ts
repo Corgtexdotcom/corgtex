@@ -20,6 +20,7 @@ const postDeliberationEntry = vi.fn();
 const postReaction = vi.fn();
 const publishProposal = vi.fn();
 const recordAdvice = vi.fn();
+const reopenProposal = vi.fn();
 const requirePageActor = vi.fn(async () => actor);
 const resolveDeliberationEntry = vi.fn();
 const resolveProposal = vi.fn();
@@ -47,6 +48,7 @@ vi.mock("@corgtex/domain", () => ({
   postReaction,
   publishProposal,
   recordAdvice,
+  reopenProposal,
   resolveDeliberationEntry,
   resolveProposal,
   resolveReaction,

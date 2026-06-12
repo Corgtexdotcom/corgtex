@@ -9,6 +9,7 @@ import {
   createProposal,
   createProposalFromTension,
   postReaction,
+  reopenProposal,
   resolveReaction,
   resolveProposal,
   returnProposalToDraft,
@@ -103,6 +104,19 @@ export async function returnProposalToDraftAction(formData: FormData) {
   const actor = await requirePageActor();
   const workspaceId = asString(formData, "workspaceId");
   await returnProposalToDraft(actor, {
+    workspaceId,
+    proposalId: asString(formData, "proposalId"),
+  });
+  refresh(workspaceId);
+}
+
+export async function reopenProposalAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  await reopenProposal(actor, {
     workspaceId,
     proposalId: asString(formData, "proposalId"),
   });
