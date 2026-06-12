@@ -2116,7 +2116,7 @@
     "descAlertThreshold": "Envía una notificación cuando el uso alcance este porcentaje.",
     "descBillingCycle": "Día del mes en que se reinicia el presupuesto.",
     "descChatGpt": "Configura un Custom GPT personalizado para este espacio de trabajo. Requiere ChatGPT Plus.",
-    "descChatGptSetup": "Ve a Configuración -> Desarrollador -> Trabajar con apps. Al agregar un servidor MCP, copia y pega este comando:",
+    "descChatGptSetup": "Ve a Configuración -> Conectores -> Configuración avanzada, activa Developer Mode y crea una app de Corgtex con esta URL MCP:",
     "descCursorSetup": "Ve a Configuración -> Funciones -> MCP. Haz clic en + Agregar nuevo servidor MCP. Selecciona el tipo SSE, pega la URL del endpoint y agrega abajo el encabezado de autorización:",
     "descCustomGpts": "Configura un Custom GPT dedicado para tu organización dentro de ChatGPT.",
     "descFromOrangeBox": "(desde el recuadro naranja de arriba)",

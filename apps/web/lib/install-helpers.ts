@@ -134,7 +134,9 @@ export function buildGeminiMcpCommand(connectorUrl: string): string {
 
 export const CLAUDE_CONNECTORS_URL = "https://claude.ai/customize/connectors";
 export const CLAUDE_CHAT_URL = "https://claude.ai/new";
-export const CHATGPT_APPS_URL = "https://chatgpt.com/apps";
+export const CHATGPT_CHAT_URL = "https://chatgpt.com/";
+export const CHATGPT_CONNECTORS_URL = "https://chatgpt.com/#settings/Connectors";
+export const CHATGPT_CONNECTORS_ADVANCED_URL = "https://chatgpt.com/#settings/Connectors/Advanced";
 export const COPILOT_DOCS_URL = "https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-command-reference";
 export const COPILOT_VSCODE_MCP_DOCS_URL = "https://code.visualstudio.com/docs/copilot/chat/mcp-servers";
 export const CURSOR_MCP_DOCS_URL = "https://docs.cursor.com/context/model-context-protocol";
