@@ -13,6 +13,8 @@ Corgtex uses three distinct runtime concepts in production:
 - `ops.corgtex.com` is the dedicated Ops control plane for customer deployment management and support.
 - Customer domains, such as `customer.corgtex.com`, are customer runtimes.
 
+The internal dogfood app is intentionally a mutable Railway branch deployment for `main`. Its web and worker services watch the full repository and redeploy on every main-branch commit, including docs-only or workflow-only commits. The production smoke gate must then wait for `/api/health` on `app.corgtex.com` to report the merge commit SHA before considering the deployment current.
+
 ## Hosted Customer Deployments
 
 The public Apache-licensed Corgtex repository remains the complete core product. Customer data, customer-specific seed content, private deployment metadata, and operational credentials never live in this public repository.
@@ -21,7 +23,7 @@ Corgtex operators manage customer deployments through the dedicated Ops control-
 
 ### Release images
 
-Hosted customer deployments use immutable release images for the web and worker services. These images are published from tagged releases and pinned by release tag or git SHA. Mutable branch deployments are for internal staging only.
+Hosted customer deployments use immutable release images for the web and worker services. These images are published from tagged releases and pinned by release tag or git SHA. Mutable branch deployments are for internal dogfood and staging only.
 
 The control plane records the target release and checks it against `/api/health`. Operators upgrade customers by selecting the next pinned web and worker image tags, letting Railway redeploy both services, probing health, and auditing the result.
 

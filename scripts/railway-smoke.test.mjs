@@ -23,7 +23,7 @@ describe("railway smoke release validation", () => {
     })).toBe("github-sha");
   });
 
-  it("allows CI to explicitly skip release matching for Railway-skipped commits", () => {
+  it("allows CI to explicitly skip release matching when a deploy is intentionally skipped", () => {
     expect(releaseMatchDisabled({
       CORGTEX_SKIP_RELEASE_MATCH: "true",
     })).toBe(true);

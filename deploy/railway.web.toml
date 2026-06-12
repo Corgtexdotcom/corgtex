@@ -4,24 +4,7 @@
 builder = "DOCKERFILE"
 dockerfilePath = "/deploy/Dockerfile.web"
 watchPatterns = [
-  "apps/web/**",
-  "apps/site/package.json",
-  "apps/worker/package.json",
-  "packages/shared/**",
-  "packages/domain/**",
-  "packages/**/package.json",
-  "prisma/**",
-  "scripts/**",
-  "scripts/start-web.mjs",
-  "package.json",
-  "package-lock.json",
-  "tsconfig.json",
-  "tsconfig.base.json",
-  "eslint.config.mjs",
-  "postcss.config.cjs",
-  "tailwind.config.ts",
-  "deploy/Dockerfile.web",
-  "deploy/railway.web.toml",
+  "**",
 ]
 
 [deploy]
