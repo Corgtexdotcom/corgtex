@@ -1,17 +1,29 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("@corgtex/shared", async (importOriginal) => {
-  const actual = await importOriginal<any>();
-  return {
-    ...actual,
-    prisma: {
-      ...actual.prisma,
-      workspaceAgentConfig: { upsert: vi.fn(), findUnique: vi.fn(), findMany: vi.fn() },
+const { prismaMock } = vi.hoisted(() => ({
+  prismaMock: {
+    workspaceAgentConfig: {
+      upsert: vi.fn(),
+      findUnique: vi.fn(),
+      findMany: vi.fn(),
     },
-  };
-});
+  },
+}));
+
+vi.mock("@corgtex/shared", () => ({
+  prisma: prismaMock,
+  toInputJson: (value: unknown) => JSON.parse(JSON.stringify(value ?? null)),
+}));
+
+vi.mock("./auth", () => ({
+  requireWorkspaceMembership: vi.fn().mockResolvedValue(true),
+}));
 
 describe("agent-config", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
   describe("updateAgentConfig", () => {
     it("updates agent config with governance policy", async () => {
       const { prisma } = await import("@corgtex/shared");
@@ -30,10 +42,6 @@ describe("agent-config", () => {
 
       const actor = { kind: "user", user: { id: "u-1" } } as any;
 
-      vi.mock("./auth", () => ({
-        requireWorkspaceMembership: vi.fn().mockResolvedValue(true),
-      }));
-
       await updateAgentConfig(actor, {
         workspaceId: "ws-1",
         agentKey: "inbox-triage",
@@ -47,6 +55,94 @@ describe("agent-config", () => {
           update: expect.objectContaining({ governancePolicy: "always be polite" }),
         })
       );
+    });
+
+    it("normalizes Slack proactive timing config", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { updateAgentConfig } = await import("./agent-config");
+
+      vi.mocked(prisma.workspaceAgentConfig.upsert).mockResolvedValue({} as any);
+
+      await updateAgentConfig(
+        { kind: "user", user: { id: "u-1" } } as any,
+        {
+          workspaceId: "ws-1",
+          agentKey: "slack-agent",
+          configJson: {
+            unansweredFollowupDelayMinutes: 7,
+            unansweredActionCreationDelayMinutes: 8,
+            staleActionFollowupDelayMinutes: 9,
+            proactiveConfidenceThreshold: 2,
+          },
+        },
+      );
+
+      const call = vi.mocked(prisma.workspaceAgentConfig.upsert).mock.calls[0][0] as any;
+      expect(call.create.configJson).toMatchObject({
+        unansweredFollowupDelayMinutes: 15,
+        unansweredActionCreationDelayMinutes: 15,
+        staleActionFollowupDelayMinutes: 15,
+        proactiveConfidenceThreshold: 1,
+      });
+      expect(call.update.configJson).toMatchObject({
+        unansweredFollowupDelayMinutes: 15,
+        unansweredActionCreationDelayMinutes: 15,
+        staleActionFollowupDelayMinutes: 15,
+        proactiveConfidenceThreshold: 1,
+      });
+    });
+  });
+
+  describe("listAgentConfigs", () => {
+    it("defaults Slack proactive timing to 24 hour ask, 24 hour action, and 72 hour follow-up", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { listAgentConfigs } = await import("./agent-config");
+
+      vi.mocked(prisma.workspaceAgentConfig.findMany).mockResolvedValue([]);
+
+      const configs = await listAgentConfigs(
+        { kind: "user", user: { id: "u-1" } } as any,
+        "ws-1",
+      );
+      const slackConfig = configs.find((config) => config.agentKey === "slack-agent");
+
+      expect(slackConfig?.configJson).toMatchObject({
+        unansweredFollowupDelayMinutes: 1440,
+        unansweredActionCreationDelayMinutes: 1440,
+        staleActionFollowupDelayMinutes: 4320,
+      });
+    });
+
+    it("fills omitted Slack timing fields for existing custom config", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { listAgentConfigs } = await import("./agent-config");
+
+      vi.mocked(prisma.workspaceAgentConfig.findMany).mockResolvedValue([{
+        workspaceId: "ws-1",
+        agentKey: "slack-agent",
+        enabled: true,
+        modelOverride: null,
+        governancePolicy: null,
+        configJson: {
+          mutedChannelIds: ["C-muted"],
+          unansweredFollowupDelayMinutes: 60,
+        },
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      } as any]);
+
+      const configs = await listAgentConfigs(
+        { kind: "user", user: { id: "u-1" } } as any,
+        "ws-1",
+      );
+      const slackConfig = configs.find((config) => config.agentKey === "slack-agent");
+
+      expect(slackConfig?.configJson).toMatchObject({
+        mutedChannelIds: ["C-muted"],
+        unansweredFollowupDelayMinutes: 60,
+        unansweredActionCreationDelayMinutes: 1440,
+        staleActionFollowupDelayMinutes: 4320,
+      });
     });
   });
 

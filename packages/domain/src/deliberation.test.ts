@@ -9,6 +9,7 @@ describe("deliberation", () => {
   let memberActor: AppActor;
   let memberId: string;
   let proposalId: string;
+  let actionId: string;
 
   beforeEach(async () => {
     const ws = await prisma.workspace.create({
@@ -42,6 +43,19 @@ describe("deliberation", () => {
       }
     });
     proposalId = proposal.id;
+
+    const action = await prisma.action.create({
+      data: {
+        workspaceId,
+        authorUserId: adminUser.id,
+        title: "Test Action",
+        bodyMd: "body",
+        status: "OPEN",
+        isPrivate: false,
+        publishedAt: new Date(),
+      },
+    });
+    actionId = action.id;
   });
 
   it("posts an entry and lists it", async () => {
@@ -115,6 +129,20 @@ describe("deliberation", () => {
       targetMemberId: memberId
     });
     expect(entry.targetMemberId).toBe(memberId);
+  });
+
+  it("posts an action deliberation entry with the action version", async () => {
+    const entry = await postDeliberationEntry(memberActor, {
+      workspaceId,
+      parentType: "ACTION",
+      parentId: actionId,
+      entryType: "REACTION",
+      bodyMd: "Daniel said no more action is needed yet; the team is waiting on owner confirmation.",
+    });
+
+    expect(entry.parentType).toBe("ACTION");
+    expect(entry.parentId).toBe(actionId);
+    expect(entry.parentVersion).toBe(1);
   });
 
   it("resolves an entry", async () => {

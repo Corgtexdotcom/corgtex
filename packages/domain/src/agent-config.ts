@@ -28,7 +28,9 @@ const DEFAULT_SLACK_AGENT_CONFIG = {
   rawMessageRetentionDays: 3650,
   proactiveEnabled: true,
   proactiveConfidenceThreshold: 0.9,
-  unansweredFollowupDelayMinutes: 240,
+  unansweredFollowupDelayMinutes: 1440,
+  unansweredActionCreationDelayMinutes: 1440,
+  staleActionFollowupDelayMinutes: 4320,
   mutedChannelIds: [],
 };
 
@@ -61,6 +63,12 @@ function normalizeAgentConfigJson(agentKey: string, configJson: unknown): Prisma
       unansweredFollowupDelayMinutes: typeof config.unansweredFollowupDelayMinutes === "number"
         ? Math.max(15, Math.floor(config.unansweredFollowupDelayMinutes))
         : DEFAULT_SLACK_AGENT_CONFIG.unansweredFollowupDelayMinutes,
+      unansweredActionCreationDelayMinutes: typeof config.unansweredActionCreationDelayMinutes === "number"
+        ? Math.max(15, Math.floor(config.unansweredActionCreationDelayMinutes))
+        : DEFAULT_SLACK_AGENT_CONFIG.unansweredActionCreationDelayMinutes,
+      staleActionFollowupDelayMinutes: typeof config.staleActionFollowupDelayMinutes === "number"
+        ? Math.max(15, Math.floor(config.staleActionFollowupDelayMinutes))
+        : DEFAULT_SLACK_AGENT_CONFIG.staleActionFollowupDelayMinutes,
       mutedChannelIds,
     }) as Prisma.InputJsonObject;
   }
@@ -86,6 +94,9 @@ export async function listAgentConfigs(actor: AppActor, workspaceId: string): Pr
 
   for (const [key, meta] of Object.entries(AGENT_REGISTRY)) {
     const override = overrideMap.get(key);
+    const configJson = override
+      ? normalizeAgentConfigJson(key, override.configJson)
+      : defaultConfigJson(key);
     summaries.push({
       agentKey: key as RegisteredAgentKey,
       label: meta.label,
@@ -99,7 +110,7 @@ export async function listAgentConfigs(actor: AppActor, workspaceId: string): Pr
       enabled: override ? override.enabled : true,
       modelOverride: override?.modelOverride ?? null,
       governancePolicy: override?.governancePolicy ?? null,
-      configJson: override?.configJson ?? defaultConfigJson(key),
+      configJson,
     });
   }
 

@@ -138,7 +138,9 @@ function slackArchiveSettings(grantedScopes: string[]) {
     publicIngestionEnabled: true,
     proactiveEnabled: true,
     proactiveConfidenceThreshold: 0.9,
-    unansweredFollowupDelayMinutes: 240,
+    unansweredFollowupDelayMinutes: 1440,
+    unansweredActionCreationDelayMinutes: 1440,
+    staleActionFollowupDelayMinutes: 4320,
     mutedChannelIds: [],
     label: broadPublicIngestion ? "Public Channel Archive" : "Enhanced Org Briefing",
   };

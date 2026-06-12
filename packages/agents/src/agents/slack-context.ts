@@ -7,12 +7,30 @@ import {
   createWorkItemFromCommunicationSource,
   getAgentModelOverride,
   isAgentEnabled,
+  postDeliberationEntry,
   sendSlackMessage,
 } from "@corgtex/domain";
 
 const DEFAULT_PROACTIVE_CONFIDENCE = 0.9;
-const DEFAULT_UNANSWERED_DELAY_MINUTES = 240;
-const MAX_PROACTIVE_WORK_ITEMS = 3;
+const DEFAULT_UNANSWERED_DELAY_MINUTES = 24 * 60;
+const DEFAULT_UNANSWERED_ACTION_DELAY_MINUTES = 24 * 60;
+const DEFAULT_STALE_ACTION_FOLLOWUP_DELAY_MINUTES = 72 * 60;
+const PROACTIVE_LOOKBACK_MINUTES = 7 * 24 * 60;
+const MAX_PROACTIVE_NUDGES = 3;
+const MAX_PROACTIVE_ACTIONS = 3;
+const MAX_PROACTIVE_ACTION_FOLLOWUPS = 3;
+const PROACTIVE_EXISTING_ACTION_UPDATE = "proactive_existing_action_update";
+const PROACTIVE_ACTION_WAITING_UPDATE = "proactive_action_waiting_update";
+
+type SlackCandidateMessage = {
+  id: string;
+  externalChannelId: string;
+  externalMessageId: string;
+  externalUserId: string | null;
+  threadExternalId: string | null;
+  text: string | null;
+  messageTs: Date | null;
+};
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -39,6 +57,12 @@ function summaryKey(channelId: string, threadTs: string | null, dayISO: string) 
   return `channel:${channelId}:thread:${threadTs || "channel"}:day:${dayISO}`;
 }
 
+function delayMinutes(value: unknown, fallback: number) {
+  return typeof value === "number"
+    ? Math.max(15, Math.floor(value))
+    : fallback;
+}
+
 function slackAgentConfig(value: unknown) {
   const config = isRecord(value) ? value : {};
   const mutedChannelIds = Array.isArray(config.mutedChannelIds)
@@ -47,15 +71,14 @@ function slackAgentConfig(value: unknown) {
   const proactiveConfidenceThreshold = typeof config.proactiveConfidenceThreshold === "number"
     ? config.proactiveConfidenceThreshold
     : DEFAULT_PROACTIVE_CONFIDENCE;
-  const unansweredFollowupDelayMinutes = typeof config.unansweredFollowupDelayMinutes === "number"
-    ? config.unansweredFollowupDelayMinutes
-    : DEFAULT_UNANSWERED_DELAY_MINUTES;
 
   return {
     publicIngestionEnabled: config.publicIngestionEnabled !== false,
     proactiveEnabled: config.proactiveEnabled !== false,
     proactiveConfidenceThreshold: Math.max(0, Math.min(1, proactiveConfidenceThreshold)),
-    unansweredFollowupDelayMinutes: Math.max(15, Math.floor(unansweredFollowupDelayMinutes)),
+    unansweredFollowupDelayMinutes: delayMinutes(config.unansweredFollowupDelayMinutes, DEFAULT_UNANSWERED_DELAY_MINUTES),
+    unansweredActionCreationDelayMinutes: delayMinutes(config.unansweredActionCreationDelayMinutes, DEFAULT_UNANSWERED_ACTION_DELAY_MINUTES),
+    staleActionFollowupDelayMinutes: delayMinutes(config.staleActionFollowupDelayMinutes, DEFAULT_STALE_ACTION_FOLLOWUP_DELAY_MINUTES),
     mutedChannelIds,
   };
 }
@@ -221,8 +244,115 @@ function normalizeProactiveExtraction(output: Record<string, unknown>) {
     confidence: Number.isFinite(confidence) ? Math.max(0, Math.min(1, confidence)) : 0,
     title: asString(output.title),
     bodyMd: asString(output.bodyMd) || asString(output.body),
+    updateMd: asString(output.updateMd),
     couldNot: Array.isArray(output.couldNot) ? output.couldNot.map((entry) => asString(entry)).filter(Boolean) : [],
+    followupDelayMultiplier: typeof output.followupDelayMultiplier === "number"
+      ? Math.max(1, Math.min(4, Math.floor(output.followupDelayMultiplier)))
+      : 1,
   };
+}
+
+function threadTsForMessage(message: SlackCandidateMessage) {
+  return message.threadExternalId || message.externalMessageId;
+}
+
+function transcriptForMessages(messages: SlackCandidateMessage[]) {
+  return messages.map((message) => {
+    const speaker = message.externalUserId ?? "unknown";
+    const time = message.messageTs?.toISOString() ?? message.externalMessageId;
+    return `[${time}] ${speaker}: ${message.text}`;
+  }).join("\n");
+}
+
+async function fetchHumanThreadMessages(params: {
+  workspaceId: string;
+  installationId: string;
+  source: SlackCandidateMessage;
+}) {
+  const threadTs = threadTsForMessage(params.source);
+  const messages = await prisma.communicationMessage.findMany({
+    where: {
+      workspaceId: params.workspaceId,
+      installationId: params.installationId,
+      provider: "SLACK",
+      externalChannelId: params.source.externalChannelId,
+      messageTs: params.source.messageTs ? { gte: params.source.messageTs } : undefined,
+      text: { not: null },
+      textRedactedAt: null,
+      isBot: false,
+      isHidden: false,
+      isDeleted: false,
+      OR: [{ externalMessageId: threadTs }, { threadExternalId: threadTs }],
+    },
+    orderBy: { messageTs: "asc" },
+    take: 40,
+  });
+
+  return messages.length > 0 ? messages as SlackCandidateMessage[] : [params.source];
+}
+
+async function reviewThreadForAction(params: {
+  workspaceId: string;
+  workflowJobId?: string;
+  model: string;
+  source: SlackCandidateMessage;
+  nudgeCreatedAt: Date;
+  threadMessages: SlackCandidateMessage[];
+  linkedActionId?: string | null;
+}) {
+  const extraction = await defaultModelGateway.extract({
+    model: params.model,
+    workspaceId: params.workspaceId,
+    workflowJobId: params.workflowJobId,
+    instruction: [
+      "Review this public Slack thread after Corgtex already asked whether someone should take it.",
+      "Return JSON only with intent, confidence, title, bodyMd, updateMd, followupDelayMultiplier, and couldNot.",
+      "Allowed intents: create_action, update_existing_action, wait_existing_action, ignore.",
+      "Use create_action only when there is no linked action and the thread still looks unresolved enough to need a concrete Corgtex action.",
+      "Use update_existing_action when a linked action exists and a human reply gives a meaningful status, ownership, timing, or decision update for that action.",
+      "Use wait_existing_action when a linked action exists and a human reply says no more action is needed yet, someone is waiting on another party, or action was taken but more time is needed.",
+      "Use ignore when someone answered and no Corgtex record update is useful, the request is unsafe, or the next step is unclear.",
+      "For update_existing_action or wait_existing_action, write updateMd as a concise deliberation note grounded only in the thread.",
+      "For wait_existing_action, set followupDelayMultiplier to 2 unless the thread gives a shorter or longer explicit follow-up window.",
+    ].join(" "),
+    schemaHint: "{ intent: string, confidence: number, title: string, bodyMd: string, updateMd: string, followupDelayMultiplier: number, couldNot: string[] }",
+    input: JSON.stringify({
+      sourceMessage: {
+        text: params.source.text,
+        externalUserId: params.source.externalUserId,
+        channelId: params.source.externalChannelId,
+        messageTs: params.source.externalMessageId,
+      },
+      linkedActionId: params.linkedActionId ?? null,
+      corgtexAskedAt: params.nudgeCreatedAt.toISOString(),
+      threadTranscript: transcriptForMessages(params.threadMessages),
+    }),
+  });
+  return normalizeProactiveExtraction(extraction.output);
+}
+
+async function recordProactiveMarker(params: {
+  workspaceId: string;
+  installationId: string;
+  provider?: "SLACK";
+  messageId: string | null;
+  externalUserId?: string | null;
+  entityType: string;
+  entityId: string;
+  action: string;
+}) {
+  await prisma.communicationEntityLink.create({
+    data: {
+      installationId: params.installationId,
+      workspaceId: params.workspaceId,
+      provider: params.provider ?? "SLACK",
+      messageId: params.messageId,
+      externalUserId: params.externalUserId ?? null,
+      entityType: params.entityType,
+      entityId: params.entityId,
+      action: params.action,
+    },
+  });
 }
 
 function isSlackInvalidAuthError(error: unknown) {
@@ -314,7 +444,7 @@ export async function runSlackProactiveScan(params: {
   }
 
   const unansweredCutoff = new Date(now.getTime() - config.unansweredFollowupDelayMinutes * 60 * 1000);
-  const recentCutoff = new Date(now.getTime() - 48 * 60 * 60 * 1000);
+  const recentCutoff = new Date(now.getTime() - PROACTIVE_LOOKBACK_MINUTES * 60 * 1000);
   const candidates = await prisma.communicationMessage.findMany({
     where: {
       workspaceId: params.workspaceId,
@@ -334,14 +464,13 @@ export async function runSlackProactiveScan(params: {
 
   let nudges = 0;
   for (const candidate of candidates.filter((message) => looksUnanswered(message.text ?? "")).slice(0, 10)) {
-    const threadTs = candidate.threadExternalId || candidate.externalMessageId;
+    const threadTs = threadTsForMessage(candidate);
     const alreadyNudged = await prisma.communicationEntityLink.findFirst({
       where: {
         workspaceId: params.workspaceId,
         installationId: params.installationId,
         messageId: candidate.id,
         action: "proactive_unanswered_nudge",
-        createdAt: { gte: dayBounds(dateKey(now)).start },
       },
       select: { id: true },
     });
@@ -370,7 +499,7 @@ export async function runSlackProactiveScan(params: {
         threadTs,
       }, [{
         type: "section",
-        text: { type: "mrkdwn", text: "This looks unanswered. Should someone take it, or should I turn it into a Corgtex action?" },
+        text: { type: "mrkdwn", text: "This looks unanswered. Should someone take it? I'll wait 24 hours before creating a Corgtex action if it still looks unresolved." },
       }], "This looks unanswered.");
     } catch (error) {
       if (await markSlackInstallationReauthRequired({ ...params, error })) {
@@ -379,103 +508,298 @@ export async function runSlackProactiveScan(params: {
       throw error;
     }
 
-    await prisma.communicationEntityLink.create({
-      data: {
-        installationId: params.installationId,
-        workspaceId: params.workspaceId,
-        provider: "SLACK",
-        messageId: candidate.id,
-        externalUserId: candidate.externalUserId,
-        entityType: "CommunicationMessage",
-        entityId: candidate.id,
-        action: "proactive_unanswered_nudge",
-      },
+    await recordProactiveMarker({
+      installationId: params.installationId,
+      workspaceId: params.workspaceId,
+      messageId: candidate.id,
+      externalUserId: candidate.externalUserId,
+      entityType: "CommunicationMessage",
+      entityId: candidate.id,
+      action: "proactive_unanswered_nudge",
     });
     nudges += 1;
-    if (nudges >= 3) break;
+    if (nudges >= MAX_PROACTIVE_NUDGES) break;
   }
 
   const model = await getAgentModelOverride(params.workspaceId, "slack-agent")
     ?? resolveModel(AGENT_REGISTRY["slack-agent"].defaultModelTier);
   const agentActor: AppActor = { kind: "agent", authProvider: "bootstrap", label: "slack-agent" };
-  let drafts = 0;
-  const workCandidates = candidates.filter((message) => looksWorkLike(message.text ?? "")).slice(0, 10);
+  let actions = 0;
+  const actionCreationCutoff = new Date(now.getTime() - config.unansweredActionCreationDelayMinutes * 60 * 1000);
+  const pendingNudges = await prisma.communicationEntityLink.findMany({
+    where: {
+      workspaceId: params.workspaceId,
+      installationId: params.installationId,
+      provider: "SLACK",
+      action: "proactive_unanswered_nudge",
+      messageId: { not: null },
+      createdAt: { lte: actionCreationCutoff },
+    },
+    orderBy: { createdAt: "asc" },
+    take: 50,
+    select: {
+      id: true,
+      createdAt: true,
+      externalUserId: true,
+      messageId: true,
+      message: {
+        select: {
+          id: true,
+          externalChannelId: true,
+          externalMessageId: true,
+          externalUserId: true,
+          threadExternalId: true,
+          text: true,
+          messageTs: true,
+        },
+      },
+    },
+  });
 
-  for (const candidate of workCandidates) {
-    if (drafts >= MAX_PROACTIVE_WORK_ITEMS) break;
-    const existing = await prisma.communicationEntityLink.findFirst({
+  for (const nudge of pendingNudges) {
+    if (actions >= MAX_PROACTIVE_ACTIONS) break;
+    const candidate = nudge.message as SlackCandidateMessage | null;
+    if (!candidate || !candidate.text || !channelIds.includes(candidate.externalChannelId) || !looksWorkLike(candidate.text)) continue;
+    const linkedAction = await prisma.communicationEntityLink.findFirst({
       where: {
         workspaceId: params.workspaceId,
         installationId: params.installationId,
         messageId: candidate.id,
-        action: { in: ["create_action", "create_tension", "create_proposal", "create_brain_note"] },
+        entityType: "Action",
+        action: { in: ["proactive_unanswered_action_created", "create_action"] },
+      },
+      select: { id: true, entityId: true },
+    });
+    const terminalMarker = linkedAction ? null : await prisma.communicationEntityLink.findFirst({
+      where: {
+        workspaceId: params.workspaceId,
+        installationId: params.installationId,
+        messageId: candidate.id,
+        action: "proactive_unanswered_resolved",
       },
       select: { id: true },
     });
-    if (existing) continue;
+    if (terminalMarker) continue;
 
-    const extraction = await defaultModelGateway.extract({
-      model,
+    const threadMessages = await fetchHumanThreadMessages({
+      workspaceId: params.workspaceId,
+      installationId: params.installationId,
+      source: candidate,
+    });
+    const latestThreadMessage = threadMessages[threadMessages.length - 1] ?? candidate;
+    if (linkedAction) {
+      const existingUpdate = await prisma.communicationEntityLink.findFirst({
+        where: {
+          workspaceId: params.workspaceId,
+          installationId: params.installationId,
+          provider: "SLACK",
+          messageId: latestThreadMessage.id,
+          entityType: "Action",
+          entityId: linkedAction.entityId,
+          action: { in: [PROACTIVE_EXISTING_ACTION_UPDATE, PROACTIVE_ACTION_WAITING_UPDATE] },
+        },
+        select: { id: true },
+      });
+      if (existingUpdate) continue;
+    }
+
+    const parsed = await reviewThreadForAction({
       workspaceId: params.workspaceId,
       workflowJobId: params.workflowJobId,
-      instruction: [
-        "Classify whether this public Slack message should become a private Corgtex draft.",
-        "Return JSON only with intent, confidence, title, bodyMd, and couldNot.",
-        "Allowed intents: create_action, create_tension, create_proposal, capture_note, ignore.",
-        "Use ignore for destructive, admin, finance, permission, invite, role, delete, archive, payment, broad-notification, or unclear requests.",
-      ].join(" "),
-      schemaHint: "{ intent: string, confidence: number, title: string, bodyMd: string, couldNot: string[] }",
-      input: JSON.stringify({
-        text: candidate.text,
-        externalUserId: candidate.externalUserId,
-        channelId: candidate.externalChannelId,
-        messageTs: candidate.externalMessageId,
-      }),
+      model,
+      source: candidate,
+      nudgeCreatedAt: nudge.createdAt,
+      threadMessages,
+      linkedActionId: linkedAction?.entityId ?? null,
     });
-    const parsed = normalizeProactiveExtraction(extraction.output);
-    if (parsed.confidence < config.proactiveConfidenceThreshold || parsed.intent === "ignore" || parsed.couldNot.length > 0) {
+
+    if (linkedAction) {
+      const updateMd = parsed.updateMd || parsed.bodyMd;
+      const shouldPostUpdate = parsed.intent === "update_existing_action" || parsed.intent === "wait_existing_action";
+      if (shouldPostUpdate && parsed.confidence >= config.proactiveConfidenceThreshold && updateMd) {
+        await postDeliberationEntry(agentActor, {
+          workspaceId: params.workspaceId,
+          parentType: "ACTION",
+          parentId: linkedAction.entityId,
+          entryType: "REACTION",
+          bodyMd: updateMd,
+        });
+
+        await recordProactiveMarker({
+          installationId: params.installationId,
+          workspaceId: params.workspaceId,
+          messageId: latestThreadMessage.id,
+          externalUserId: latestThreadMessage.externalUserId,
+          entityType: "Action",
+          entityId: linkedAction.entityId,
+          action: parsed.intent === "wait_existing_action" || parsed.followupDelayMultiplier > 1
+            ? PROACTIVE_ACTION_WAITING_UPDATE
+            : PROACTIVE_EXISTING_ACTION_UPDATE,
+        });
+      }
       continue;
     }
 
-    const kind = parsed.intent === "create_action"
-      ? "ACTION"
-      : parsed.intent === "create_tension"
-        ? "TENSION"
-        : parsed.intent === "create_proposal"
-          ? "PROPOSAL"
-          : parsed.intent === "capture_note"
-            ? "BRAIN_NOTE"
-            : null;
-    if (!kind || !parsed.title) continue;
+    if (parsed.intent === "ignore" || parsed.couldNot.length > 0) {
+      await recordProactiveMarker({
+        installationId: params.installationId,
+        workspaceId: params.workspaceId,
+        messageId: candidate.id,
+        externalUserId: candidate.externalUserId,
+        entityType: "CommunicationMessage",
+        entityId: candidate.id,
+        action: "proactive_unanswered_resolved",
+      });
+      continue;
+    }
+    if (parsed.intent !== "create_action" || parsed.confidence < config.proactiveConfidenceThreshold || !parsed.title) continue;
 
     const item = await createWorkItemFromCommunicationSource(agentActor, {
       workspaceId: params.workspaceId,
       provider: "SLACK",
       installationId: params.installationId,
-      kind,
+      kind: "ACTION",
       title: parsed.title,
       bodyMd: parsed.bodyMd || candidate.text,
       sourceMessageId: candidate.id,
       externalUserId: candidate.externalUserId,
-      open: false,
+      open: true,
+    });
+
+    await recordProactiveMarker({
+      installationId: params.installationId,
+      workspaceId: params.workspaceId,
+      messageId: candidate.id,
+      externalUserId: candidate.externalUserId,
+      entityType: item.entityType,
+      entityId: item.entityId,
+      action: "proactive_unanswered_action_created",
     });
 
     try {
       await sendSlackMessage(params.installationId, {
         channel: candidate.externalChannelId,
-        threadTs: candidate.threadExternalId || candidate.externalMessageId,
+        threadTs: threadTsForMessage(candidate),
       }, [{
         type: "section",
-        text: { type: "mrkdwn", text: `I created a private Corgtex draft from this: <${item.webUrl}|${parsed.title}>.` },
-      }], `Created a private Corgtex draft: ${parsed.title}`);
+        text: { type: "mrkdwn", text: `I created a Corgtex action because this still looked unresolved after 24 hours: <${item.webUrl}|${parsed.title}>.` },
+      }], `Created Corgtex action: ${parsed.title}`);
     } catch (error) {
       if (await markSlackInstallationReauthRequired({ ...params, error })) {
         return { skipped: true, reason: "slack_reauth_required" };
       }
       throw error;
     }
-    drafts += 1;
+    actions += 1;
   }
 
-  return { agendaJobs, nudges, drafts };
+  let followups = 0;
+  const actionFollowupCutoff = new Date(now.getTime() - config.staleActionFollowupDelayMinutes * 60 * 1000);
+  const waitingUpdateCutoff = new Date(now.getTime() - config.staleActionFollowupDelayMinutes * 2 * 60 * 1000);
+  const actionLinks = await prisma.communicationEntityLink.findMany({
+    where: {
+      workspaceId: params.workspaceId,
+      installationId: params.installationId,
+      provider: "SLACK",
+      action: "proactive_unanswered_action_created",
+      entityType: "Action",
+      createdAt: { lte: actionFollowupCutoff },
+    },
+    orderBy: { createdAt: "asc" },
+    take: 50,
+    select: {
+      id: true,
+      entityId: true,
+      createdAt: true,
+      messageId: true,
+      externalUserId: true,
+      message: {
+        select: {
+          id: true,
+          externalChannelId: true,
+          externalMessageId: true,
+          externalUserId: true,
+          threadExternalId: true,
+          text: true,
+          messageTs: true,
+        },
+      },
+    },
+  });
+  const actionIds = [...new Set(actionLinks.map((link) => link.entityId).filter(Boolean))];
+  const openActions = actionIds.length > 0
+    ? await prisma.action.findMany({
+        where: {
+          workspaceId: params.workspaceId,
+          id: { in: actionIds },
+          archivedAt: null,
+          status: { not: "COMPLETED" },
+        },
+        select: { id: true, title: true },
+      })
+    : [];
+  const openActionById = new Map(openActions.map((action) => [action.id, action]));
+
+  for (const link of actionLinks) {
+    if (followups >= MAX_PROACTIVE_ACTION_FOLLOWUPS) break;
+    const action = openActionById.get(link.entityId);
+    const source = link.message as SlackCandidateMessage | null;
+    if (!action || !source || !channelIds.includes(source.externalChannelId)) continue;
+
+    const waitingUpdate = await prisma.communicationEntityLink.findFirst({
+      where: {
+        workspaceId: params.workspaceId,
+        installationId: params.installationId,
+        provider: "SLACK",
+        entityType: "Action",
+        entityId: action.id,
+        action: PROACTIVE_ACTION_WAITING_UPDATE,
+        createdAt: { gte: waitingUpdateCutoff },
+      },
+      select: { id: true },
+    });
+    if (waitingUpdate) continue;
+
+    const recentFollowup = await prisma.communicationEntityLink.findFirst({
+      where: {
+        workspaceId: params.workspaceId,
+        installationId: params.installationId,
+        provider: "SLACK",
+        entityType: "Action",
+        entityId: action.id,
+        action: "proactive_action_followup",
+        createdAt: { gte: actionFollowupCutoff },
+      },
+      select: { id: true },
+    });
+    if (recentFollowup) continue;
+
+    try {
+      await sendSlackMessage(params.installationId, {
+        channel: source.externalChannelId,
+        threadTs: threadTsForMessage(source),
+      }, [{
+        type: "section",
+        text: { type: "mrkdwn", text: `This Corgtex action still is not completed after 72 hours: *${action.title}*.` },
+      }], `Corgtex action still not completed: ${action.title}`);
+    } catch (error) {
+      if (await markSlackInstallationReauthRequired({ ...params, error })) {
+        return { skipped: true, reason: "slack_reauth_required" };
+      }
+      throw error;
+    }
+
+    await recordProactiveMarker({
+      installationId: params.installationId,
+      workspaceId: params.workspaceId,
+      messageId: source.id,
+      externalUserId: source.externalUserId,
+      entityType: "Action",
+      entityId: action.id,
+      action: "proactive_action_followup",
+    });
+    followups += 1;
+  }
+
+  return { agendaJobs, nudges, actions, followups, drafts: actions };
 }
