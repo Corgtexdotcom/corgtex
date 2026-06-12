@@ -6,6 +6,12 @@ export type WorkItemSort = "priority" | "date" | "alpha";
 
 export type WorkItemDateValues = Record<string, string | undefined>;
 
+export type WorkItemSortable = {
+  priority: number;
+  date: Date | string | number | null;
+  alpha: string;
+};
+
 const DATE_ONLY_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 export function firstSearchParam(value: string | string[] | undefined) {
@@ -19,6 +25,28 @@ export function normalizeWorkItemView(value: string | string[] | undefined): Wor
 export function normalizeWorkItemSort(value: string | string[] | undefined): WorkItemSort {
   const candidate = firstSearchParam(value);
   return candidate === "date" || candidate === "alpha" ? candidate : "priority";
+}
+
+function sortableTime(value: WorkItemSortable["date"]) {
+  if (value === null) return 0;
+  const time = value instanceof Date ? value.getTime() : new Date(value).getTime();
+  return Number.isFinite(time) ? time : 0;
+}
+
+export function compareWorkItemSortValues(left: WorkItemSortable, right: WorkItemSortable, sort: WorkItemSort) {
+  if (sort === "alpha") {
+    const alpha = left.alpha.localeCompare(right.alpha, undefined, { sensitivity: "base" });
+    if (alpha !== 0) return alpha;
+    return sortableTime(right.date) - sortableTime(left.date);
+  }
+  if (sort === "date") {
+    const date = sortableTime(right.date) - sortableTime(left.date);
+    if (date !== 0) return date;
+    return right.priority - left.priority;
+  }
+  const priority = right.priority - left.priority;
+  if (priority !== 0) return priority;
+  return sortableTime(right.date) - sortableTime(left.date);
 }
 
 export function normalizeWorkItemScope(value: string | string[] | undefined): WorkItemScope {

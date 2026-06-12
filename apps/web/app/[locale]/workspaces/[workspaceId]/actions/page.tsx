@@ -22,7 +22,6 @@ import { ItemActions } from "@/lib/components/ui/ItemActions";
 import { WorkItemFilterControls, WorkItemToolbar } from "@/lib/components/WorkItemControls";
 import { WorkItemKanbanBoard, type WorkItemKanbanColumn } from "@/lib/components/WorkItemKanbanBoard";
 import { WorkItemResolutionDialog } from "@/lib/components/WorkItemResolutionDialog";
-import { canOpenPrivateDraft } from "@/lib/governance-open-guards";
 import {
   buildWorkItemQuery,
   normalizeWorkItemView,
@@ -90,10 +89,10 @@ export default async function ActionsPage({
   const activeProposals = proposals.filter((p) => p.status === "DRAFT" || p.status === "OPEN");
   const groupedActions = groupActionsByStatus(actions);
   const displayActions = groupedActions[statusFilter];
-  const filterState = { view, sort, circleId, memberId };
   const columnSettingsPortalId = "work-item-actions-column-settings";
   type ActionListItem = (typeof actions)[number];
   type ActionColumnStatus = "DRAFT" | "OPEN" | "IN_PROGRESS" | "COMPLETED";
+  const actionColumnStatuses: ActionColumnStatus[] = ["DRAFT", "OPEN", "IN_PROGRESS", "COMPLETED"];
 
   const canManageAction = (action: { authorUserId: string }) => actor.kind === "agent"
     || membership?.role === "ADMIN"
@@ -110,6 +109,74 @@ export default async function ActionsPage({
 
   const memberName = (member: { user: { displayName: string | null; email: string } }) => member.user.displayName || member.user.email;
 
+  function actionMoveLabel(status: ActionColumnStatus) {
+    if (status === "DRAFT") return t("btnReturnToDraft");
+    if (status === "OPEN") return t("btnOpen");
+    if (status === "IN_PROGRESS") return t("btnStart");
+    return t("btnComplete");
+  }
+
+  function renderActionMove(action: ActionListItem, targetStatus: ActionColumnStatus, options: { hidden?: boolean; primary?: boolean } = {}) {
+    const key = `${options.hidden ? "hidden-" : ""}move-${targetStatus.toLowerCase()}`;
+    const transition = `${action.id}:${targetStatus}`;
+    const buttonClass = options.primary ? "primary small" : undefined;
+    const buttonProps = options.hidden ? { "aria-hidden": true, tabIndex: -1 } : {};
+
+    if (targetStatus === "COMPLETED") {
+      return (
+        <span
+          key={key}
+          data-work-item-dialog={transition}
+          className={options.hidden ? "nr-hidden-transition-trigger" : undefined}
+        >
+          <WorkItemResolutionDialog
+            action={updateActionAction}
+            buttonLabel={t("btnComplete")}
+            title={tWork("completeActionTitle")}
+            noteName="completedVia"
+            noteLabel={tWork("completionNote")}
+            notePlaceholder={tWork("completionPlaceholder")}
+            hiddenFields={{ workspaceId, actionId: action.id, status: "COMPLETED" }}
+            submitLabel={t("btnComplete")}
+            cancelLabel={tCommon("cancel")}
+            fileLabel={tWork("evidence")}
+            className={options.primary ? "primary small" : undefined}
+          />
+        </span>
+      );
+    }
+
+    if (targetStatus === "DRAFT") {
+      return (
+        <form
+          key={key}
+          action={returnActionToDraftAction}
+          data-work-item-transition={transition}
+          className={options.hidden ? "nr-hidden-transition-form" : undefined}
+        >
+          <input type="hidden" name="workspaceId" value={workspaceId} />
+          <input type="hidden" name="actionId" value={action.id} />
+          <button type="submit" className={buttonClass} {...buttonProps}>{actionMoveLabel(targetStatus)}</button>
+        </form>
+      );
+    }
+
+    const actionHandler = action.status === "DRAFT" && targetStatus === "OPEN" ? publishActionAction : updateActionAction;
+    return (
+      <form
+        key={key}
+        action={actionHandler}
+        data-work-item-transition={transition}
+        className={options.hidden ? "nr-hidden-transition-form" : undefined}
+      >
+        <input type="hidden" name="workspaceId" value={workspaceId} />
+        <input type="hidden" name="actionId" value={action.id} />
+        {actionHandler === updateActionAction && <input type="hidden" name="status" value={targetStatus} />}
+        <button type="submit" className={buttonClass} {...buttonProps}>{actionMoveLabel(targetStatus)}</button>
+      </form>
+    );
+  }
+
   function renderActionCard(action: ActionListItem, compact = false) {
     const detailHref = `/workspaces/${workspaceId}/actions/${action.id}`;
     const statusMeta = ACTION_STATUS_META[action.status as keyof typeof ACTION_STATUS_META] ?? ACTION_STATUS_META.OPEN;
@@ -123,83 +190,28 @@ export default async function ActionsPage({
       ? canManage
       : (action.status === "OPEN" || action.status === "IN_PROGRESS") && canSubmittedAuthorEdit;
     const evidence = evidenceByActionId.get(action.id) ?? [];
+    const primaryTarget: ActionColumnStatus | null = action.status === "DRAFT" && canManage
+      ? "OPEN"
+      : action.status === "OPEN"
+        ? "IN_PROGRESS"
+        : action.status === "IN_PROGRESS"
+          ? "COMPLETED"
+          : null;
+    const canMoveToStatus = (targetStatus: ActionColumnStatus) => {
+      if (targetStatus === action.status) return false;
+      if (action.status === "DRAFT" || targetStatus === "DRAFT") return canManage;
+      return true;
+    };
 
-    const completeDialog = (
-      <WorkItemResolutionDialog
-        action={updateActionAction}
-        buttonLabel={t("btnComplete")}
-        title={tWork("completeActionTitle")}
-        noteName="completedVia"
-        noteLabel={tWork("completionNote")}
-        notePlaceholder={tWork("completionPlaceholder")}
-        hiddenFields={{ workspaceId, actionId: action.id, status: "COMPLETED" }}
-        submitLabel={t("btnComplete")}
-        cancelLabel={tCommon("cancel")}
-        fileLabel={tWork("evidence")}
-        className="primary small"
-      />
-    );
-
-    let primary: ReactNode = null;
-    if (canManage && canOpenPrivateDraft(action)) {
-      primary = (
-        <form action={publishActionAction} data-work-item-transition={`${action.id}:OPEN`}>
-          <input type="hidden" name="workspaceId" value={workspaceId} />
-          <input type="hidden" name="actionId" value={action.id} />
-          <button type="submit" className="primary small">{t("btnOpen")}</button>
-        </form>
-      );
-    } else if (action.status === "OPEN") {
-      primary = (
-        <form action={updateActionAction} data-work-item-transition={`${action.id}:IN_PROGRESS`}>
-          <input type="hidden" name="workspaceId" value={workspaceId} />
-          <input type="hidden" name="actionId" value={action.id} />
-          <input type="hidden" name="status" value="IN_PROGRESS" />
-          <button type="submit" className="primary small">{t("btnStart")}</button>
-        </form>
-      );
-    } else if (action.status === "IN_PROGRESS") {
-      primary = (
-        <span data-work-item-dialog={`${action.id}:COMPLETED`}>
-          {completeDialog}
-        </span>
-      );
-    }
+    const primary = primaryTarget ? renderActionMove(action, primaryTarget, { primary: true }) : null;
 
     const moreItems: ReactNode[] = [];
-    if (action.status === "OPEN") {
-      moreItems.push(
-        <span key="complete" data-work-item-dialog={`${action.id}:COMPLETED`}>
-          <WorkItemResolutionDialog
-            action={updateActionAction}
-            buttonLabel={t("btnComplete")}
-            title={tWork("completeActionTitle")}
-            noteName="completedVia"
-            noteLabel={tWork("completionNote")}
-            notePlaceholder={tWork("completionPlaceholder")}
-            hiddenFields={{ workspaceId, actionId: action.id, status: "COMPLETED" }}
-            submitLabel={t("btnComplete")}
-            cancelLabel={tCommon("cancel")}
-            fileLabel={tWork("evidence")}
-          />
-        </span>,
-      );
-    }
-    if (canManage && (action.status === "OPEN" || action.status === "IN_PROGRESS")) {
-      moreItems.push(
-        <form key="return-to-draft" action={returnActionToDraftAction}>
-          <input type="hidden" name="workspaceId" value={workspaceId} />
-          <input type="hidden" name="actionId" value={action.id} />
-          <button type="submit">{t("btnReturnToDraft")}</button>
-        </form>,
-      );
-      moreItems.push(
-        <form key="return-to-draft-drag" action={returnActionToDraftAction} data-work-item-transition={`${action.id}:DRAFT`} className="nr-hidden-transition-form">
-          <input type="hidden" name="workspaceId" value={workspaceId} />
-          <input type="hidden" name="actionId" value={action.id} />
-          <button type="submit" aria-hidden="true" tabIndex={-1}>{t("btnReturnToDraft")}</button>
-        </form>,
-      );
+    const hiddenTransitions = actionColumnStatuses
+      .filter((targetStatus) => canMoveToStatus(targetStatus) && targetStatus !== primaryTarget)
+      .map((targetStatus) => renderActionMove(action, targetStatus, { hidden: true }));
+    for (const targetStatus of actionColumnStatuses) {
+      if (!canMoveToStatus(targetStatus) || targetStatus === primaryTarget) continue;
+      moreItems.push(renderActionMove(action, targetStatus));
     }
     if (canEditContent) {
       moreItems.push(
@@ -238,7 +250,7 @@ export default async function ActionsPage({
 
     return (
       <div className={`${compact ? "nr-kanban-card" : "nr-item nr-list-card"} nr-clickable-card`} key={action.id}>
-        <a href={detailHref} className="nr-card-hitbox" aria-label={tWork("openItem", { title: action.title })} />
+        <a href={detailHref} className="nr-card-hitbox" aria-label={tWork("openItem", { title: action.title })} draggable={false} />
         <div className="row nr-card-content" style={{ alignItems: "center" }}>
           <strong className="nr-item-title">
             {!compact && action.status === "DRAFT" && <span title={t("statusDraft")} style={{ marginRight: 6 }}>◆</span>}
@@ -258,7 +270,7 @@ export default async function ActionsPage({
             {action.proposal?.title ? ` · ${t("metaLinkedToProposal", { title: action.proposal.title })}` : ""}
             {" · "}
             {action.version > 1 ? (
-              <a href={`/workspaces/${workspaceId}/versions?entityType=ACTION&entityId=${encodeURIComponent(action.id)}`}>v{action.version}</a>
+              <a href={`/workspaces/${workspaceId}/versions?entityType=ACTION&entityId=${encodeURIComponent(action.id)}`} draggable={false}>v{action.version}</a>
             ) : (
               <>v{action.version}</>
             )}
@@ -273,7 +285,7 @@ export default async function ActionsPage({
             <div className="nr-evidence-list">
               <strong>{tWork("completionEvidence")}</strong>
               {evidence.map((row) => (
-                <a key={row.id} href={`/workspaces/${workspaceId}/brain/sources`}>
+                <a key={row.id} href={`/workspaces/${workspaceId}/brain/sources`} draggable={false}>
                   {row.document.title}
                 </a>
               ))}
@@ -285,6 +297,11 @@ export default async function ActionsPage({
           primary={primary}
           more={moreItems.length > 0 ? moreItems : null}
         />
+        {hiddenTransitions.length > 0 && (
+          <div className="nr-transition-controls">
+            {hiddenTransitions}
+          </div>
+        )}
       </div>
     );
   }
@@ -325,6 +342,11 @@ export default async function ActionsPage({
     items: groupedActions[status].map((action) => ({
       id: action.id,
       status,
+      sort: {
+        priority: action.priority,
+        date: action.createdAt,
+        alpha: action.title,
+      },
       node: renderActionCard(action, true),
     })),
   }));
@@ -344,7 +366,7 @@ export default async function ActionsPage({
             {ACTION_STATUS_FILTERS.map((s) => (
               <a
                 key={s}
-                href={buildWorkItemQuery({ ...filterState, status: s })}
+                href={buildWorkItemQuery({ view, sort: view === "list" ? sort : undefined, circleId, memberId, status: s })}
                 className={`nr-filter-item ${statusFilter === s ? "nr-filter-active" : ""}`}
               >
                 {t(ACTION_STATUS_META[s].labelKey)} ({groupedActions[s].length})
@@ -354,12 +376,12 @@ export default async function ActionsPage({
           <WorkItemToolbar
             currentView={view}
             currentSort={sort}
-            listHref={buildWorkItemQuery({ ...filterState, status: statusFilter, view: "list" })}
-            kanbanHref={buildWorkItemQuery({ ...filterState, status: statusFilter, view: "kanban" })}
+            listHref={buildWorkItemQuery({ sort, circleId, memberId, status: statusFilter, view: "list" })}
+            kanbanHref={buildWorkItemQuery({ circleId, memberId, status: statusFilter, view: "kanban" })}
             sortLinks={{
-              priority: buildWorkItemQuery({ ...filterState, status: statusFilter, sort: "priority" }),
-              date: buildWorkItemQuery({ ...filterState, status: statusFilter, sort: "date" }),
-              alpha: buildWorkItemQuery({ ...filterState, status: statusFilter, sort: "alpha" }),
+              priority: buildWorkItemQuery({ view: "list", circleId, memberId, status: statusFilter, sort: "priority" }),
+              date: buildWorkItemQuery({ view: "list", circleId, memberId, status: statusFilter, sort: "date" }),
+              alpha: buildWorkItemQuery({ view: "list", circleId, memberId, status: statusFilter, sort: "alpha" }),
             }}
             listLabel={tWork("listView")}
             kanbanLabel={tWork("kanbanView")}
@@ -377,7 +399,7 @@ export default async function ActionsPage({
           action={`/workspaces/${workspaceId}/actions`}
           status={statusFilter}
           view={view}
-          sort={sort}
+          sort={view === "list" ? sort : undefined}
           circleId={circleId}
           memberId={memberId}
           circles={circles.map((circle) => ({ id: circle.id, label: circle.name }))}
@@ -407,6 +429,10 @@ export default async function ActionsPage({
             showShortLabel={tWork("showColumnShort")}
             moveUpShortLabel={tWork("moveColumnLeftShort")}
             moveDownShortLabel={tWork("moveColumnRightShort")}
+            sortLabel={tWork("sort")}
+            sortPriorityLabel={tWork("sortPriority")}
+            sortDateLabel={tWork("sortDate")}
+            sortAlphaLabel={tWork("sortAlpha")}
             dragUnavailableLabel={tWork("dragUnavailable")}
           />
         ) : (

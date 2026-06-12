@@ -757,4 +757,97 @@ describe("tensions domain", () => {
       },
     });
   });
+
+  it("returns a resolved tension to draft and clears resolution state", async () => {
+    prismaMock.tension.findUnique.mockResolvedValueOnce({
+      id: "t-1",
+      workspaceId: "ws-1",
+      authorUserId: "u-1",
+      title: "Test tension",
+      status: "RESOLVED",
+      isPrivate: false,
+      publishedAt: new Date("2026-04-26T12:00:00.000Z"),
+      resolvedAt: new Date("2026-04-27T12:00:00.000Z"),
+      resolvedVia: "Done",
+      archivedAt: null,
+    });
+    prismaMock.tension.update.mockResolvedValueOnce({
+      id: "t-1",
+      workspaceId: "ws-1",
+      title: "Test tension",
+      status: "DRAFT",
+      isPrivate: true,
+      publishedAt: null,
+      resolvedAt: null,
+      resolvedVia: null,
+    });
+
+    const { returnTensionToDraft } = await import("./tensions");
+
+    await expect(returnTensionToDraft(actor, {
+      workspaceId: "ws-1",
+      tensionId: "t-1",
+    })).resolves.toMatchObject({
+      id: "t-1",
+      status: "DRAFT",
+      isPrivate: true,
+    });
+
+    expect(prismaMock.tension.update).toHaveBeenCalledWith({
+      where: { id: "t-1" },
+      data: {
+        status: "DRAFT",
+        isPrivate: true,
+        publishedAt: null,
+        resolvedVia: null,
+        resolvedAt: null,
+      },
+    });
+  });
+
+  it("reopens a resolved tension and clears resolution state", async () => {
+    prismaMock.tension.findUnique.mockResolvedValueOnce({
+      id: "t-1",
+      workspaceId: "ws-1",
+      authorUserId: "u-1",
+      title: "Test tension",
+      status: "RESOLVED",
+      version: 1,
+      isPrivate: false,
+      publishedAt: new Date("2026-04-26T12:00:00.000Z"),
+      resolvedAt: new Date("2026-04-27T12:00:00.000Z"),
+      resolvedVia: "Done",
+      archivedAt: null,
+    });
+    prismaMock.tension.update.mockResolvedValueOnce({
+      id: "t-1",
+      workspaceId: "ws-1",
+      title: "Test tension",
+      status: "OPEN",
+      isPrivate: false,
+      resolvedAt: null,
+      resolvedVia: null,
+    });
+
+    const { updateTension } = await import("./tensions");
+
+    await expect(updateTension(actor, {
+      workspaceId: "ws-1",
+      tensionId: "t-1",
+      status: "OPEN",
+    })).resolves.toMatchObject({
+      id: "t-1",
+      status: "OPEN",
+    });
+
+    expect(prismaMock.tension.update).toHaveBeenCalledWith({
+      where: { id: "t-1" },
+      data: expect.objectContaining({
+        status: "OPEN",
+        isPrivate: false,
+        resolvedVia: null,
+        resolvedAt: null,
+      }),
+    });
+  });
 });

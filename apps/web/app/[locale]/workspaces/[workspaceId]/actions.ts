@@ -13,6 +13,7 @@ export {
   postReactionAction,
   publishProposalAction,
   recordAdviceAction,
+  reopenProposalAction,
   resolveDeliberationEntryAction,
   resolveProposalAction,
   resolveReactionAction,

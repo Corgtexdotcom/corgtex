@@ -737,7 +737,7 @@ export async function archiveProposal(actor: AppActor, params: {
   workspaceId: string;
   proposalId: string;
 }) {
-  await requireWorkspaceMembership({
+  const membership = await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
   });
@@ -815,7 +815,7 @@ export async function returnProposalToDraft(actor: AppActor, params: {
     });
 
     invariant(proposal && proposal.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Proposal not found.");
-    invariant(proposal.status === "OPEN", 400, "INVALID_STATE", "Only open proposals can be returned to draft.");
+    invariant(proposal.status === "OPEN" || proposal.status === "RESOLVED", 400, "INVALID_STATE", "Only open or resolved proposals can be returned to draft.");
     await requireDraftManager({ actor, workspaceId: params.workspaceId, record: proposal, resolvedMembership: membership });
 
     const flow = await tx.approvalFlow.findUnique({
@@ -841,6 +841,9 @@ export async function returnProposalToDraft(actor: AppActor, params: {
         },
       });
     }
+    await tx.policyCorpus.deleteMany({
+      where: { proposalId: proposal.id },
+    });
 
     const now = new Date();
     await tx.deliberationEntry.updateMany({
@@ -870,6 +873,9 @@ export async function returnProposalToDraft(actor: AppActor, params: {
       where: { id: proposal.id },
       data: {
         status: "DRAFT",
+        resolutionOutcome: null,
+        decisionMd: null,
+        decidedAt: null,
         isPrivate: true,
         publishedAt: null,
         autoApproveAt: null,
@@ -893,6 +899,109 @@ export async function returnProposalToDraft(actor: AppActor, params: {
         aggregateType: "Proposal",
         aggregateId: proposal.id,
         payload: { proposalId: proposal.id },
+      },
+    ]);
+
+    return updated;
+  });
+}
+
+export async function reopenProposal(actor: AppActor, params: {
+  workspaceId: string;
+  proposalId: string;
+}) {
+  const membership = await requireWorkspaceMembership({
+    actor,
+    workspaceId: params.workspaceId,
+  });
+
+  const policy = await getApprovalPolicy(params.workspaceId, "PROPOSAL");
+  const now = new Date();
+
+  return prisma.$transaction(async (tx) => {
+    const proposal = await tx.proposal.findUnique({
+      where: { id: params.proposalId },
+    });
+
+    invariant(proposal && proposal.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Proposal not found.");
+    invariant(!proposal.archivedAt, 400, "INVALID_STATE", "Archived proposals cannot be reopened.");
+    invariant(proposal.status === "RESOLVED", 400, "INVALID_STATE", "Only resolved proposals can be reopened.");
+
+    const existingFlow = await tx.approvalFlow.findUnique({
+      where: {
+        subjectType_subjectId: {
+          subjectType: "PROPOSAL",
+          subjectId: proposal.id,
+        },
+      },
+    });
+    const flow = existingFlow ?? await ensureApprovalFlow(tx, {
+      workspaceId: params.workspaceId,
+      subjectType: "PROPOSAL",
+      subjectId: proposal.id,
+      policy,
+      createdByUserId: actor.kind === "user" ? actor.user.id : null,
+    });
+
+    const deletedDecisions = await tx.approvalDecision.deleteMany({ where: { flowId: flow.id } });
+    const deletedObjections = await tx.objection.deleteMany({ where: { flowId: flow.id } });
+    const deletedPolicyCorpus = await tx.policyCorpus.deleteMany({
+      where: { proposalId: proposal.id },
+    });
+
+    await tx.approvalFlow.update({
+      where: { id: flow.id },
+      data: {
+        status: "ACTIVE",
+        openedAt: flow.openedAt ?? now,
+        closesAt: null,
+        closedAt: null,
+        resultJson: Prisma.JsonNull,
+      },
+    });
+
+    const updated = await tx.proposal.update({
+      where: { id: proposal.id },
+      data: {
+        status: "OPEN",
+        resolutionOutcome: null,
+        decisionMd: null,
+        decidedAt: null,
+        autoApproveAt: null,
+        isPrivate: false,
+        publishedAt: proposal.publishedAt ?? now,
+      },
+    });
+
+    await tx.auditLog.create({
+      data: {
+        workspaceId: params.workspaceId,
+        actorUserId: actor.kind === "user" ? actor.user.id : null,
+        action: "proposal.reopened",
+        entityType: "Proposal",
+        entityId: proposal.id,
+        meta: {
+          flowId: flow.id,
+          approvalDecisionsDeleted: deletedDecisions.count,
+          objectionsDeleted: deletedObjections.count,
+          policyCorpusRowsDeleted: deletedPolicyCorpus.count,
+        },
+      },
+    });
+
+    await appendEvents(tx, [
+      {
+        workspaceId: params.workspaceId,
+        type: "proposal.reopened",
+        aggregateType: "Proposal",
+        aggregateId: proposal.id,
+        payload: {
+          proposalId: proposal.id,
+          flowId: flow.id,
+          approvalDecisionsDeleted: deletedDecisions.count,
+          objectionsDeleted: deletedObjections.count,
+          policyCorpusRowsDeleted: deletedPolicyCorpus.count,
+        },
       },
     ]);
 
@@ -1108,7 +1217,7 @@ export async function resolveProposal(actor: AppActor, params: {
   decisionMd: string;
   evidenceDocumentIds?: string[] | null;
 }) {
-  await requireWorkspaceMembership({
+  const membership = await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
   });
@@ -1125,7 +1234,10 @@ export async function resolveProposal(actor: AppActor, params: {
     });
 
     invariant(proposal && proposal.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Proposal not found.");
-    invariant(proposal.status === "OPEN", 400, "INVALID_STATE", "Only open proposals can be resolved.");
+    invariant(proposal.status === "DRAFT" || proposal.status === "OPEN", 400, "INVALID_STATE", "Only draft or open proposals can be resolved.");
+    if (proposal.status === "DRAFT") {
+      await requireDraftManager({ actor, workspaceId: params.workspaceId, record: proposal, resolvedMembership: membership });
+    }
 
     const flow = await tx.approvalFlow.findUnique({
       where: {
@@ -1136,7 +1248,7 @@ export async function resolveProposal(actor: AppActor, params: {
       },
     });
 
-	    const updated = await tx.proposal.update({
+    const updated = await tx.proposal.update({
       where: { id: proposal.id },
       data: {
         status: "RESOLVED",
@@ -1147,7 +1259,7 @@ export async function resolveProposal(actor: AppActor, params: {
         isPrivate: false,
         publishedAt: proposal.publishedAt || now,
       },
-	    });
+    });
 
     const evidenceDocumentIds = await createWorkItemEvidenceLinks(tx, {
       workspaceId: params.workspaceId,
@@ -1157,7 +1269,7 @@ export async function resolveProposal(actor: AppActor, params: {
       purpose: "resolution_evidence",
     });
 
-	    if (flow) {
+    if (flow) {
       await tx.approvalFlow.update({
         where: { id: flow.id },
         data: {
@@ -1199,13 +1311,13 @@ export async function resolveProposal(actor: AppActor, params: {
         action: "proposal.resolved",
         entityType: "Proposal",
         entityId: proposal.id,
-	        meta: {
-	          outcome: params.outcome,
-	          flowId: flow?.id ?? null,
+        meta: {
+          outcome: params.outcome,
+          flowId: flow?.id ?? null,
           evidenceDocumentIds,
-	        },
-	      },
-	    });
+        },
+      },
+    });
 
     await appendEvents(tx, [
       {
@@ -1216,12 +1328,12 @@ export async function resolveProposal(actor: AppActor, params: {
         payload: {
           proposalId: proposal.id,
           subjectId: proposal.id,
-	          outcome: params.outcome,
-	          flowId: flow?.id ?? null,
+          outcome: params.outcome,
+          flowId: flow?.id ?? null,
           evidenceDocumentIds,
-	        },
-	      },
-	    ]);
+        },
+      },
+    ]);
 
     return updated;
   });

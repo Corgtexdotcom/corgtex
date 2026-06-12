@@ -99,23 +99,25 @@ export function WorkItemToolbar({
         kanbanLabel={kanbanLabel}
         label={label}
       />
-      <details className="nr-icon-menu">
-        <summary className="nr-icon-link" aria-label={sortLabel} title={sortLabel}>
-          <ArrowUpDown size={17} aria-hidden="true" />
-        </summary>
-        <div className="nr-icon-menu-popover">
-          {sortOptions.map((option) => (
-            <a
-              key={option.value}
-              href={sortLinks[option.value]}
-              className={`nr-icon-menu-item ${currentSort === option.value ? "nr-icon-menu-item-active" : ""}`}
-            >
-              {option.icon}
-              <span>{option.label}</span>
-            </a>
-          ))}
-        </div>
-      </details>
+      {currentView === "list" && (
+        <details className="nr-icon-menu">
+          <summary className="nr-icon-link" aria-label={sortLabel} title={sortLabel}>
+            <ArrowUpDown size={17} aria-hidden="true" />
+          </summary>
+          <div className="nr-icon-menu-popover">
+            {sortOptions.map((option) => (
+              <a
+                key={option.value}
+                href={sortLinks[option.value]}
+                className={`nr-icon-menu-item ${currentSort === option.value ? "nr-icon-menu-item-active" : ""}`}
+              >
+                {option.icon}
+                <span>{option.label}</span>
+              </a>
+            ))}
+          </div>
+        </details>
+      )}
       {columnSettingsPortalId ? (
         <span id={columnSettingsPortalId} className="nr-kanban-settings-slot" />
       ) : showColumnSettings && (
