@@ -5,6 +5,7 @@ builder = "DOCKERFILE"
 dockerfilePath = "/deploy/Dockerfile.web"
 watchPatterns = [
   "**",
+  ".github/**",
 ]
 
 [deploy]

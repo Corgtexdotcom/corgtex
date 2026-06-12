@@ -5,6 +5,7 @@ builder = "DOCKERFILE"
 dockerfilePath = "/deploy/Dockerfile.worker"
 watchPatterns = [
   "**",
+  ".github/**",
 ]
 
 [deploy]
