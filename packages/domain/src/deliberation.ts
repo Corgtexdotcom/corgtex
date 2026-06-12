@@ -6,7 +6,7 @@ import { appendEvents } from "./events";
 import { getParentWorkItemVersion } from "./work-item-versions";
 
 const VALID_ENTRY_TYPES = ["REACTION", "OBJECTION"];
-const VALID_PARENT_TYPES = ["PROPOSAL", "SPEND", "TENSION", "MEETING", "BRAIN_ARTICLE"];
+const VALID_PARENT_TYPES = ["PROPOSAL", "SPEND", "TENSION", "MEETING", "BRAIN_ARTICLE", "ACTION"];
 
 export async function postDeliberationEntry(actor: AppActor, params: {
   workspaceId: string;
@@ -124,6 +124,9 @@ export async function resolveDeliberationEntry(actor: AppActor, params: {
       isParentAuthor = parent?.requesterUserId === actorUserId;
     } else if (entry.parentType === "TENSION") {
       const parent = await tx.tension.findUnique({ where: { id: entry.parentId }, select: { authorUserId: true } });
+      isParentAuthor = parent?.authorUserId === actorUserId;
+    } else if (entry.parentType === "ACTION") {
+      const parent = await tx.action.findUnique({ where: { id: entry.parentId }, select: { authorUserId: true } });
       isParentAuthor = parent?.authorUserId === actorUserId;
     } else if (entry.parentType === "MEETING") {
       const parent = await tx.meeting.findUnique({ where: { id: entry.parentId }, select: { participantIds: true } });

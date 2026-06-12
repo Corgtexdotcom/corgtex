@@ -308,6 +308,14 @@ export async function getParentWorkItemVersion(
     invariant(item, 404, "NOT_FOUND", "Proposal not found.");
     return item.version;
   }
+  if (params.parentType === "ACTION") {
+    const item = await tx.action.findFirst({
+      where: { id: params.parentId, workspaceId: params.workspaceId },
+      select: { version: true },
+    });
+    invariant(item, 404, "NOT_FOUND", "Action not found.");
+    return item.version;
+  }
   if (params.parentType === "SPEND") {
     const item = await tx.spendRequest.findFirst({
       where: { id: params.parentId, workspaceId: params.workspaceId },
