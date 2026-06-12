@@ -27,7 +27,7 @@ const TILES = [
 ];
 
 const OTHER = [
-  { name: "ChatGPT", body: "Add Corgtex as a custom app in ChatGPT Settings → Apps." },
+  { name: "ChatGPT", body: "Add Corgtex as a developer-mode app in ChatGPT Settings -> Connectors." },
   { name: "Cursor", body: "Use the cursor:// install link from your workspace settings." },
   { name: "Other MCP clients", body: "Paste the connector URL into any client that supports remote MCP / Streamable HTTP." },
 ];

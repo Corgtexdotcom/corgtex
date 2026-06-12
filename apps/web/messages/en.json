@@ -2117,7 +2117,7 @@
     "descAlertThreshold": "Send a notification when usage hits this percentage.",
     "descBillingCycle": "Day of the month the budget resets.",
     "descChatGpt": "Setup a personalized Custom GPT for this workspace. Requires ChatGPT Plus.",
-    "descChatGptSetup": "Go to Settings -> Developer -> Work with Apps. When adding an MCP server, copy and paste this command:",
+    "descChatGptSetup": "Go to Settings -> Connectors -> Advanced settings, turn on Developer Mode, then create a Corgtex app with this MCP URL:",
     "descCorgtexConnector": "Connect this workspace to ChatGPT, Claude, Cursor, or any MCP client with browser sign-in.",
     "descCursorSetup": "Go to Settings -> Features -> MCP. Click + Add New MCP Server. Select type SSE, paste the Endpoint URL, and add the Authorization header below:",
     "descCustomGpts": "Set up a dedicated Custom GPT for your organization inside ChatGPT.",

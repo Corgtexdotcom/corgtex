@@ -1,5 +1,5 @@
 import {
-  CHATGPT_APPS_URL,
+  CHATGPT_CHAT_URL,
   CLAUDE_CHAT_URL,
   COPILOT_VSCODE_MCP_DOCS_URL,
   CURSOR_MCP_DOCS_URL,
@@ -57,7 +57,7 @@ export type BuildHandoffPromptParams = {
 
 const AI_WORKSPACE_LAUNCH_URLS: Record<string, string> = {
   openwork: OPENWORK_DOWNLOAD_URL,
-  chatgpt: CHATGPT_APPS_URL,
+  chatgpt: CHATGPT_CHAT_URL,
   claude: CLAUDE_CHAT_URL,
   copilot: COPILOT_VSCODE_MCP_DOCS_URL,
   cursor: CURSOR_MCP_DOCS_URL,

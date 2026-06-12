@@ -1,11 +1,11 @@
 import {
-  CHATGPT_APPS_URL,
+  CHATGPT_CONNECTORS_ADVANCED_URL,
+  CHATGPT_CONNECTORS_URL,
   COPILOT_DOCS_URL,
   COPILOT_VSCODE_MCP_DOCS_URL,
   buildClaudeCodeCommand,
   buildClaudeInstallerShareUrl,
   buildCopilotCliCommand,
-  buildCopilotCliMcpConfig,
   buildCursorInstallLinks,
   buildCursorMcpJsonConfig,
   buildGeminiMcpCommand,
@@ -74,6 +74,8 @@ export type EnterpriseServiceReadinessCheckView = {
 
 export type AiWorkspaceProviderGroup = "default" | "byo" | "advanced";
 
+export type AiWorkspaceActionVariant = "primary" | "secondary";
+
 export type AiWorkspaceSetupAction =
   | {
       kind: "copy";
@@ -81,6 +83,7 @@ export type AiWorkspaceSetupAction =
       value: string;
       copiedMessage: string;
       fallbackMessage: string;
+      variant?: AiWorkspaceActionVariant;
     }
   | {
       kind: "copyAndOpen";
@@ -88,170 +91,44 @@ export type AiWorkspaceSetupAction =
       value: string;
       href: string;
       productName: string;
+      variant?: AiWorkspaceActionVariant;
     }
   | {
       kind: "open";
       label: string;
       href: string;
-      variant: "primary" | "secondary";
+      variant?: AiWorkspaceActionVariant;
     }
   | {
       kind: "cursorInstall";
       label: string;
       appHref: string;
       browserHref: string;
+      variant?: AiWorkspaceActionVariant;
     };
+
+export type AiWorkspaceAdvancedSection = {
+  title: string;
+  description: string;
+  actions: AiWorkspaceSetupAction[];
+  steps: string[];
+  notes: string[];
+};
 
 export type AiWorkspaceSetupCard = {
   provider: AiWorkspaceProviderView;
   group: AiWorkspaceProviderGroup;
   statusLabel: string;
   ownershipLabel: string;
-  setupLabel: string;
   connectorUrl: string;
-  command?: string;
-  setupVariants: AiWorkspaceSetupVariantView[];
+  summary: string;
   actions: AiWorkspaceSetupAction[];
-  resources: AiWorkspaceSetupResource[];
   steps: string[];
   notes: string[];
-  verificationChecks: string[];
+  advancedSection?: AiWorkspaceAdvancedSection;
 };
 
-export type AiWorkspaceSetupResource = {
-  title: string;
-  label: string;
-  value: string;
-  copiedMessage: string;
-  fallbackMessage: string;
-};
-
-const OPENWORK_REPO_URL = "https://github.com/different-ai/openwork";
-
-type ProviderRecipeDefinition = {
-  title: string;
-  surface: string;
-  setupTarget: string;
-  executionBoundary: string;
-  extraRules: string[];
-  verificationChecks: string[];
-};
-
-const PROVIDER_RECIPE_DEFINITIONS: Record<string, ProviderRecipeDefinition> = {
-  chatgpt: {
-    title: "ChatGPT connector instructions",
-    surface: "ChatGPT",
-    setupTarget: "Create or update the Corgtex app or connector and use the MCP URL as the remote server.",
-    executionBoundary: "Use ChatGPT for conversation, analysis, and drafting; use Corgtex tools for company context, policy constraints, scopes, execution packets, and write-back.",
-    extraRules: [
-      "Do not paste secrets or private setup credentials into ChatGPT chat; complete connector auth through the browser flow.",
-      "For Business, Enterprise, or Edu workspaces, confirm an admin has published or approved the connector before asking normal users to rely on it.",
-    ],
-    verificationChecks: [
-      "ChatGPT can start the Corgtex connector auth flow.",
-      "Company context and allowed scopes are available through Corgtex tools.",
-      "Write-back targets can be listed before any result is submitted.",
-      "The test prompt returns a readiness report without creating external changes.",
-    ],
-  },
-  claude: {
-    title: "Claude connector instructions",
-    surface: "Claude",
-    setupTarget: "Use the guided installer or Claude connector settings to add Corgtex as a custom remote connector.",
-    executionBoundary: "Use Claude for planning and writing; use Corgtex as the durable source for context, policies, scope boundaries, approval rules, and output write-back.",
-    extraRules: [
-      "Claude Team or Enterprise owners may need to approve the connector at organization level.",
-      "Keep final outputs tied to Corgtex execution requests when the work needs audit or write-back.",
-    ],
-    verificationChecks: [
-      "Claude can open the Corgtex connector and complete browser sign-in.",
-      "Claude can read company context through Corgtex without asking the user to paste private context.",
-      "Claude can list write-back targets before proposing where output should go.",
-      "Claude keeps governed output in Corgtex rather than only in the chat transcript.",
-    ],
-  },
-  gemini: {
-    title: "Gemini CLI MCP instructions",
-    surface: "Gemini CLI",
-    setupTarget: "Use Gemini CLI MCP settings to add Corgtex as a remote MCP or HTTP server.",
-    executionBoundary: "Use Gemini CLI for technical execution; use Corgtex for context, scopes, policies, approval rules, and write-back state.",
-    extraRules: [
-      "Consumer Gemini web support is not assumed; this recipe is for technical CLI users.",
-      "Treat local terminal access as a powerful execution surface and follow the approval rule in every execution packet.",
-    ],
-    verificationChecks: [
-      "Gemini CLI can reach the Corgtex MCP URL.",
-      "Browser sign-in or OAuth completes without exposing tokens in terminal history.",
-      "Gemini CLI can list available Corgtex tools and write-back targets.",
-      "The test prompt confirms no external change was made during setup verification.",
-    ],
-  },
-  cursor: {
-    title: "Cursor MCP instructions",
-    surface: "Cursor",
-    setupTarget: "Approve the Corgtex MCP install prompt and complete browser sign-in when Cursor asks to authenticate.",
-    executionBoundary: "Use Cursor for code and product execution; use Corgtex execution packets for authority, context, policy, write-back targets, and audit.",
-    extraRules: [
-      "Do not create branches, commits, deployments, or external writes unless the execution packet allows that action.",
-      "Keep implementation notes and artifacts mapped back to Corgtex when the work is governed.",
-    ],
-    verificationChecks: [
-      "Cursor shows a Corgtex MCP server after install.",
-      "Cursor can read scoped company context without copying private context into editor rules.",
-      "Cursor can see execution packet and result submission tools for governed code work.",
-      "Cursor can report a safe next action before modifying files.",
-    ],
-  },
-  claude_code: {
-    title: "Claude Code MCP instructions",
-    surface: "Claude Code",
-    setupTarget: "Run the generated Claude Code MCP command, then authenticate Corgtex through browser sign-in.",
-    executionBoundary: "Use Claude Code for code execution; use Corgtex to determine authority, scope, approval rules, write-back targets, and durable result records.",
-    extraRules: [
-      "User scope keeps Corgtex available across projects; add local project scope only when a project needs a different boundary.",
-      "Do not commit, push, deploy, or submit results unless the execution packet permits the action.",
-    ],
-    verificationChecks: [
-      "Claude Code lists the Corgtex MCP server after the install command.",
-      "Claude Code can authenticate without exposing tokens in shell history.",
-      "Claude Code can retrieve context and allowed write-back targets through Corgtex.",
-      "Claude Code can explain the approval rule before changing files.",
-    ],
-  },
-  copilot: {
-    title: "GitHub Copilot MCP instructions",
-    surface: "GitHub Copilot",
-    setupTarget: "Use VS Code MCP settings, Copilot CLI MCP configuration, or repository Copilot MCP settings depending on the Copilot surface.",
-    executionBoundary: "Use Copilot for code and repository execution; use Corgtex for company context, scopes, policy, approval rules, and durable write-back.",
-    extraRules: [
-      "For VS Code, confirm organization Copilot policy allows custom MCP servers.",
-      "For Copilot CLI, review remote MCP tool calls because remote servers are treated as lower trust.",
-      "For Copilot coding agent or code review, do not assume OAuth remote MCP works; use repository settings only when compatible with the agent environment.",
-    ],
-    verificationChecks: [
-      "Copilot can list the Corgtex MCP server and tools.",
-      "Copilot can read scoped company context without private copy-paste.",
-      "Copilot can list write-back targets before proposing output destinations.",
-      "The test prompt returns a readiness report without changing files or repository state.",
-    ],
-  },
-  generic_mcp: {
-    title: "Generic MCP client instructions",
-    surface: "Generic MCP client",
-    setupTarget: "Choose remote MCP, Streamable HTTP, or HTTP MCP server in the client and paste the Corgtex MCP URL.",
-    executionBoundary: "Use the external client for execution; use Corgtex as the enterprise plumbing layer for context, scopes, policies, audit, and write-back.",
-    extraRules: [
-      "Do not use unscoped local credentials or shared tokens when the client supports browser OAuth.",
-      "If the client cannot show available Corgtex tools or scopes, treat it as not ready for governed work.",
-    ],
-    verificationChecks: [
-      "The client can reach the Corgtex MCP URL.",
-      "The client completes browser OAuth or an approved auth flow.",
-      "The client can list Corgtex tools and write-back targets.",
-      "The client returns a no-change readiness report before production work starts.",
-    ],
-  },
-};
+const PRIMARY_PROVIDER_KEYS = ["openwork", "claude", "chatgpt", "cursor"];
 
 const GROUP_RANK: Record<AiWorkspaceProviderGroup, number> = {
   default: 0,
@@ -261,11 +138,11 @@ const GROUP_RANK: Record<AiWorkspaceProviderGroup, number> = {
 
 const PROVIDER_RANK: Record<string, number> = {
   openwork: 0,
-  chatgpt: 1,
-  claude: 2,
-  copilot: 3,
-  gemini: 4,
-  cursor: 5,
+  claude: 1,
+  chatgpt: 2,
+  cursor: 3,
+  copilot: 4,
+  gemini: 5,
   claude_code: 6,
   generic_mcp: 7,
 };
@@ -384,6 +261,18 @@ export function normalizeSelectedService(
   return null;
 }
 
+export function isPrimaryAiWorkspaceProvider(provider: AiWorkspaceProviderView) {
+  return PRIMARY_PROVIDER_KEYS.includes(provider.key);
+}
+
+export function splitAiWorkspaceProviders(providers: AiWorkspaceProviderView[]) {
+  const sorted = [...providers].sort(providerDisplayComparator);
+  return {
+    primary: sorted.filter(isPrimaryAiWorkspaceProvider),
+    advanced: sorted.filter((provider) => !isPrimaryAiWorkspaceProvider(provider)),
+  };
+}
+
 export function buildAiWorkspaceSetupCards(
   providers: AiWorkspaceProviderView[],
   connectorUrl: string,
@@ -393,119 +282,80 @@ export function buildAiWorkspaceSetupCards(
   const claudeCodeCommand = buildClaudeCodeCommand(connectorUrl);
   const claudeInstallerShareUrl = buildClaudeInstallerShareUrl(origin);
 
-  return [...providers].sort(providerComparator).map((provider) => {
+  return [...providers].sort(providerDisplayComparator).map((provider) => {
     const group = providerGroup(provider);
     const base = {
       provider,
       group,
-      statusLabel: provider.recommendedDefault ? "Recommended default" : "Needs setup",
+      statusLabel: provider.recommendedDefault ? "Recommended" : "Needs setup",
       ownershipLabel: ownershipLabel(provider.supportedOwnershipModes),
-      setupLabel: setupLabel(provider.setupPath),
       connectorUrl,
-      setupVariants: provider.setupVariants,
+      summary: connectionSummary(provider),
     };
 
     if (provider.key === "openwork") {
-      const instructionsPackage = buildOpenWorkInstructionsPackage(connectorUrl);
-      const testPrompt = buildOpenWorkTestPrompt();
       return {
         ...base,
         actions: [
           {
-            kind: "copy",
-            label: "Copy MCP URL",
+            kind: "copyAndOpen",
+            label: "Connect OpenWork",
             value: connectorUrl,
-            copiedMessage: "Copied the Corgtex MCP URL for OpenWork.",
-            fallbackMessage: "Clipboard access was blocked. Select and copy the MCP URL.",
+            href: OPENWORK_DOWNLOAD_URL,
+            productName: "OpenWork",
+            variant: "primary",
           },
-          {
-            kind: "copy",
-            label: "Copy instructions",
-            value: instructionsPackage.value,
-            copiedMessage: instructionsPackage.copiedMessage,
-            fallbackMessage: instructionsPackage.fallbackMessage,
-          },
-          {
-            kind: "copy",
-            label: "Copy test prompt",
-            value: testPrompt.value,
-            copiedMessage: testPrompt.copiedMessage,
-            fallbackMessage: testPrompt.fallbackMessage,
-          },
-          { kind: "open", label: "Open OpenWork", href: OPENWORK_DOWNLOAD_URL, variant: "primary" },
-          { kind: "open", label: "View source", href: OPENWORK_REPO_URL, variant: "secondary" },
+          copyMcpUrlAction(connectorUrl, "OpenWork"),
         ],
-        resources: [instructionsPackage, testPrompt],
         steps: [
-          "Open OpenWork desktop, cloud, or self-hosted workspace.",
-          "Add Corgtex as a remote MCP or HTTP connector using the MCP URL.",
-          "Install the Corgtex instructions as the OpenWork workspace or skill guidance.",
-          "Complete browser sign-in and keep the recommended workspace scopes.",
-          "Run the test prompt before sending production work from Corgtex.",
+          "Open your OpenWork workspace.",
+          "Go to Extensions, then Advanced Settings, then Add MCP server.",
+          "Paste the Corgtex MCP URL, enable OAuth, and finish browser sign-in.",
         ],
         notes: [
-          "Free self-managed pilots should start here.",
-          "Corgtex remains the context, policy, scope, audit, and write-back system; OpenWork remains the execution workspace.",
-          "Managed OpenWork rollout still needs license, security, and commercial review.",
-        ],
-        verificationChecks: [
-          "OpenWork can reach the Corgtex MCP URL and complete browser sign-in.",
-          "The test prompt can read company context through Corgtex.",
-          "The test prompt can list allowed write-back targets without exposing private targets outside its scopes.",
-          "Execution packet tools are visible for governed work requests.",
-          "OpenWork is instructed to submit results back to Corgtex instead of writing directly to unsupported destinations.",
+          "OpenWork must support dynamic client registration for the OAuth connection.",
+          "After it is connected, users work in OpenWork and Corgtex supplies the governed company context.",
         ],
       };
     }
 
     if (provider.key === "chatgpt") {
-      const recipe = buildProviderRecipe(provider, connectorUrl);
       return {
         ...base,
         actions: [
-          ...buildResourceCopyActions(recipe.resources),
           {
             kind: "copyAndOpen",
-            label: "Copy URL and open ChatGPT Apps",
+            label: "Connect ChatGPT",
             value: connectorUrl,
-            href: CHATGPT_APPS_URL,
-            productName: "ChatGPT Apps",
+            href: CHATGPT_CONNECTORS_URL,
+            productName: "ChatGPT connector settings",
+            variant: "primary",
           },
+          { kind: "open", label: "Open advanced settings", href: CHATGPT_CONNECTORS_ADVANCED_URL, variant: "secondary" },
+          copyMcpUrlAction(connectorUrl, "ChatGPT"),
         ],
         steps: [
-          "Create a Corgtex app or connector in ChatGPT.",
-          "Paste the Corgtex MCP URL as the remote server.",
-          "Complete browser sign-in when ChatGPT starts the connector flow.",
-          "Copy the Corgtex instructions into the connector or workspace guidance.",
-          "Run the safe test prompt before using ChatGPT for governed work.",
+          "In ChatGPT settings, open Connectors, then Advanced settings.",
+          "Turn on Developer Mode if it is not already enabled.",
+          "Create an app, paste the HTTPS Corgtex MCP URL, scan tools, and authenticate.",
+          "In a chat, use Developer Mode and choose Corgtex when you want ChatGPT to work with Corgtex.",
         ],
-        resources: recipe.resources,
-        notes: ["Workspace admins may need to publish the connector for Business, Enterprise, or Edu users."],
-        verificationChecks: recipe.verificationChecks,
+        notes: ["Business, Enterprise, or Edu workspaces may require an admin to approve or publish the app before normal users can use it."],
       };
     }
 
     if (provider.key === "claude") {
-      const recipe = buildProviderRecipe(provider, connectorUrl);
-      const claudeCodeCommand = buildClaudeCodeCommand(connectorUrl);
-      const claudeCodeResource = buildCommandResource({
-        title: "Claude Code MCP command",
-        label: "Claude Code command",
-        value: claudeCodeCommand,
-        copiedMessage: "Copied the Claude Code command.",
-      });
       return {
         ...base,
-        command: claudeCodeCommand,
         actions: [
-          { kind: "open", label: "Open guided installer", href: CLAUDE_INSTALLER_PATH, variant: "primary" },
-          ...buildResourceCopyActions(recipe.resources),
+          { kind: "open", label: "Connect Claude", href: CLAUDE_INSTALLER_PATH, variant: "primary" },
           {
             kind: "copyAndOpen",
-            label: "Copy URL and open Claude Connectors",
+            label: "Open Claude settings",
             value: connectorUrl,
             href: CLAUDE_CONNECTORS_URL,
             productName: "Claude Connectors",
+            variant: "secondary",
           },
           {
             kind: "copy",
@@ -513,397 +363,190 @@ export function buildAiWorkspaceSetupCards(
             value: claudeInstallerShareUrl,
             copiedMessage: "Copied the Claude installer share link.",
             fallbackMessage: "Clipboard access was blocked. Select and copy the share link.",
-          },
-          {
-            kind: "copy",
-            label: "Copy Claude Code command",
-            value: claudeCodeCommand,
-            copiedMessage: "Copied the Claude Code command.",
-            fallbackMessage: "Clipboard access was blocked. Select and copy the command.",
+            variant: "secondary",
           },
         ],
         steps: [
-          "Use the Claude web/Desktop/Cowork guided installer for non-technical teammates.",
-          "Use the Claude Code command for terminal-based technical work.",
-          "Complete browser sign-in and select this Corgtex workspace.",
-          "Copy the Corgtex instructions into Claude project or connector guidance when supported.",
-          "Run the safe test prompt before sending governed work.",
+          "Open the guided installer.",
+          "Approve Corgtex as a custom remote connector.",
+          "Finish browser sign-in and choose this workspace.",
         ],
-        resources: [...recipe.resources, claudeCodeResource],
-        notes: ["Claude Team or Enterprise owners may need to add the connector at organization level first."],
-        verificationChecks: recipe.verificationChecks,
+        notes: [
+          "Pro and Max users can add a custom connector directly.",
+          "Team and Enterprise owners may need to add Corgtex at organization level before members can connect it.",
+        ],
+        advancedSection: {
+          title: "Claude Code",
+          description: "For technical teammates who use Claude Code from Terminal.",
+          actions: [
+            { kind: "open", label: "Open Claude Code installer", href: CLAUDE_CODE_INSTALLER_PATH, variant: "secondary" },
+            {
+              kind: "copy",
+              label: "Copy Claude Code command",
+              value: claudeCodeCommand,
+              copiedMessage: "Copied the Claude Code command.",
+              fallbackMessage: "Clipboard access was blocked. Select and copy the command.",
+              variant: "secondary",
+            },
+          ],
+          steps: [
+            "Paste the command in Terminal.",
+            "Open Claude Code and run /mcp.",
+            "Authenticate Corgtex in the browser when prompted.",
+          ],
+          notes: ["User scope keeps Corgtex available across projects."],
+        },
       };
     }
 
     if (provider.key === "copilot") {
-      const recipe = buildProviderRecipe(provider, connectorUrl);
-      const vscodeConfig = buildJsonResource({
-        title: "VS Code mcp.json",
-        label: "VS Code mcp.json",
-        value: buildVsCodeMcpConfig(connectorUrl),
-        copiedMessage: "Copied the VS Code MCP configuration.",
-      });
-      const copilotCliCommand = buildCommandResource({
-        title: "Copilot CLI MCP command",
-        label: "Copilot CLI command",
-        value: buildCopilotCliCommand(connectorUrl),
-        copiedMessage: "Copied the Copilot CLI command.",
-      });
-      const copilotCliConfig = buildJsonResource({
-        title: "Copilot CLI mcp-config.json",
-        label: "Copilot CLI config",
-        value: buildCopilotCliMcpConfig(connectorUrl),
-        copiedMessage: "Copied the Copilot CLI MCP configuration.",
-      });
       return {
         ...base,
         actions: [
           {
             kind: "copy",
             label: "Copy VS Code config",
-            value: vscodeConfig.value,
-            copiedMessage: vscodeConfig.copiedMessage,
-            fallbackMessage: vscodeConfig.fallbackMessage,
+            value: JSON.stringify(buildVsCodeMcpConfig(connectorUrl), null, 2),
+            copiedMessage: "Copied the VS Code MCP configuration.",
+            fallbackMessage: "Clipboard access was blocked. Select and copy the configuration.",
+            variant: "primary",
           },
           {
             kind: "copy",
             label: "Copy Copilot CLI command",
-            value: copilotCliCommand.value,
-            copiedMessage: copilotCliCommand.copiedMessage,
-            fallbackMessage: copilotCliCommand.fallbackMessage,
+            value: buildCopilotCliCommand(connectorUrl),
+            copiedMessage: "Copied the Copilot CLI command.",
+            fallbackMessage: "Clipboard access was blocked. Select and copy the command.",
+            variant: "secondary",
           },
-          ...buildResourceCopyActions(recipe.resources),
           { kind: "open", label: "VS Code MCP docs", href: COPILOT_VSCODE_MCP_DOCS_URL, variant: "secondary" },
           { kind: "open", label: "Copilot CLI docs", href: COPILOT_DOCS_URL, variant: "secondary" },
         ],
         steps: [
-          "For VS Code, add Corgtex to user or workspace mcp.json and trust the server when prompted.",
-          "For Copilot CLI, use the generated command or edit ~/.copilot/mcp-config.json.",
-          "For Copilot cloud agent or code review, configure repository MCP settings only when the auth mode is compatible.",
-          "Confirm Corgtex tools are visible before asking Copilot to execute governed work.",
-          "Run the safe test prompt before modifying files or repository state.",
+          "In VS Code, run MCP: Add Server or paste the copied user/workspace mcp.json entry.",
+          "For Copilot CLI, use /mcp add or paste the copied command.",
+          "Authenticate in the browser if the selected Copilot surface supports OAuth remote MCP.",
         ],
-        resources: [vscodeConfig, copilotCliCommand, copilotCliConfig, ...recipe.resources],
         notes: [
-          "Copilot coding agent does not currently support OAuth-backed remote MCP servers, so the cloud variant may need a non-OAuth setup.",
-          "Remote MCP tools in Copilot should be treated as reviewed, explicit-approval tools.",
+          "Repository and cloud-agent Copilot MCP setup is not offered here because OAuth-backed remote MCP is not supported for that path.",
         ],
-        verificationChecks: recipe.verificationChecks,
       };
     }
 
     if (provider.key === "cursor") {
-      const recipe = buildProviderRecipe(provider, connectorUrl);
-      const cursorConfig = buildJsonResource({
-        title: "Cursor MCP JSON",
-        label: "Cursor MCP config",
-        value: buildCursorMcpJsonConfig(connectorUrl),
-        copiedMessage: "Copied the Cursor MCP configuration.",
-      });
       return {
         ...base,
         actions: [
           {
             kind: "cursorInstall",
-            label: "Add to Cursor",
+            label: "Connect Cursor",
             appHref: cursorLinks.app,
             browserHref: cursorLinks.browser,
+            variant: "primary",
           },
           {
             kind: "copy",
-            label: "Copy Cursor config",
-            value: cursorConfig.value,
-            copiedMessage: cursorConfig.copiedMessage,
-            fallbackMessage: cursorConfig.fallbackMessage,
+            label: "Copy manual mcp.json",
+            value: JSON.stringify(buildCursorMcpJsonConfig(connectorUrl), null, 2),
+            copiedMessage: "Copied the Cursor MCP configuration.",
+            fallbackMessage: "Clipboard access was blocked. Select and copy the configuration.",
+            variant: "secondary",
           },
-          ...buildResourceCopyActions(recipe.resources),
         ],
         steps: [
-          "Open the Cursor install prompt.",
-          "Approve the MCP server named Corgtex, or copy the manual JSON fallback into Cursor MCP settings.",
-          "Complete browser sign-in when Cursor asks to authenticate.",
-          "Add the Corgtex instructions to workspace rules when the team wants governed code work.",
-          "Run the safe test prompt before modifying files.",
+          "Click Add to Cursor.",
+          "Approve the Corgtex MCP install prompt.",
+          "Finish browser sign-in when Cursor asks to authenticate.",
         ],
-        resources: [cursorConfig, ...recipe.resources],
-        notes: ["Use this for technical teams that want Corgtex context inside code and product work."],
-        verificationChecks: recipe.verificationChecks,
-      };
-    }
-
-    if (provider.key === "claude_code") {
-      const recipe = buildProviderRecipe(provider, connectorUrl, claudeCodeCommand);
-      return {
-        ...base,
-        command: claudeCodeCommand,
-        actions: [
-          { kind: "open", label: "Open guided installer", href: CLAUDE_CODE_INSTALLER_PATH, variant: "primary" },
-          {
-            kind: "copy",
-            label: "Copy Claude Code command",
-            value: claudeCodeCommand,
-            copiedMessage: "Copied the Claude Code command.",
-            fallbackMessage: "Clipboard access was blocked. Select and copy the command.",
-          },
-          ...buildResourceCopyActions(recipe.resources),
-        ],
-        steps: [
-          "Paste the command into Terminal.",
-          "Open Claude Code and inspect MCP connections.",
-          "Authenticate Corgtex through browser sign-in when prompted.",
-          "Copy the Corgtex instructions into project guidance for governed work.",
-          "Run the safe test prompt before changing files.",
-        ],
-        resources: recipe.resources,
-        notes: ["User scope keeps Corgtex available across projects; local scope can be added later per project."],
-        verificationChecks: recipe.verificationChecks,
+        notes: ["If the install prompt does not open, use the copied mcp.json fallback in Cursor MCP settings."],
       };
     }
 
     if (provider.key === "gemini") {
-      const recipe = buildProviderRecipe(provider, connectorUrl);
-      const geminiCommand = buildCommandResource({
-        title: "Gemini CLI MCP command",
-        label: "Gemini CLI command",
-        value: buildGeminiMcpCommand(connectorUrl),
-        copiedMessage: "Copied the Gemini CLI MCP command.",
-      });
-      const geminiConfig = buildJsonResource({
-        title: "Gemini CLI settings.json",
-        label: "Gemini settings",
-        value: buildGeminiMcpConfig(connectorUrl),
-        copiedMessage: "Copied the Gemini CLI MCP settings.",
-      });
       return {
         ...base,
-        command: geminiCommand.value,
         actions: [
           {
             kind: "copy",
             label: "Copy Gemini command",
-            value: geminiCommand.value,
-            copiedMessage: geminiCommand.copiedMessage,
-            fallbackMessage: geminiCommand.fallbackMessage,
+            value: buildGeminiMcpCommand(connectorUrl),
+            copiedMessage: "Copied the Gemini CLI MCP command.",
+            fallbackMessage: "Clipboard access was blocked. Select and copy the command.",
+            variant: "primary",
           },
           {
             kind: "copy",
-            label: "Copy Gemini settings",
-            value: geminiConfig.value,
-            copiedMessage: geminiConfig.copiedMessage,
-            fallbackMessage: geminiConfig.fallbackMessage,
+            label: "Copy settings JSON",
+            value: JSON.stringify(buildGeminiMcpConfig(connectorUrl), null, 2),
+            copiedMessage: "Copied the Gemini CLI MCP settings.",
+            fallbackMessage: "Clipboard access was blocked. Select and copy the configuration.",
+            variant: "secondary",
           },
-          ...buildResourceCopyActions(recipe.resources),
           { kind: "open", label: "Gemini MCP docs", href: GEMINI_MCP_DOCS_URL, variant: "secondary" },
         ],
         steps: [
-          "Run the generated Gemini CLI command to add Corgtex as a user-scoped HTTP MCP server.",
-          "Use the settings JSON fallback when manual configuration is easier.",
-          "Complete browser sign-in if the client prompts for OAuth.",
-          "Copy the Corgtex instructions into the CLI session or project guidance.",
-          "Run the safe test prompt before using Gemini CLI for governed work.",
+          "Paste the command in Terminal, or use the settings JSON fallback with httpUrl.",
+          "Open Gemini CLI and run /mcp.",
+          "Run /mcp auth corgtex if Gemini asks for authentication.",
         ],
-        resources: [geminiCommand, geminiConfig, ...recipe.resources],
         notes: ["Consumer Gemini web support is not assumed; this path is for technical CLI users."],
-        verificationChecks: recipe.verificationChecks,
       };
     }
 
-    const recipe = buildProviderRecipe(provider, connectorUrl);
     return {
       ...base,
-      actions: [
-        {
-          kind: "copy",
-          label: "Copy MCP URL",
-          value: connectorUrl,
-          copiedMessage: "Copied the Corgtex MCP URL.",
-          fallbackMessage: "Clipboard access was blocked. Select and copy the MCP URL.",
-        },
-        ...buildResourceCopyActions(recipe.resources),
-      ],
+      actions: [copyMcpUrlAction(connectorUrl, provider.shortLabel, "primary")],
       steps: [
         "Choose remote MCP, Streamable HTTP, or HTTP MCP server in the client.",
         "Paste the Corgtex MCP URL.",
-        "Complete browser OAuth and use the workspace-scoped Corgtex tools.",
-        "Copy the Corgtex instructions into the client guidance if supported.",
-        "Run the safe test prompt before production work.",
+        "Complete browser OAuth and confirm Corgtex tools are visible.",
       ],
-      resources: recipe.resources,
       notes: ["Use this for internal tools or AI workspaces that already support remote MCP."],
-      verificationChecks: recipe.verificationChecks,
     };
   });
 }
 
-function buildProviderRecipe(
-  provider: AiWorkspaceProviderView,
-  connectorUrl: string,
-  command?: string,
-) {
-  const definition = PROVIDER_RECIPE_DEFINITIONS[provider.key] ?? PROVIDER_RECIPE_DEFINITIONS.generic_mcp;
-  const instructions = buildProviderInstructionsResource(definition, connectorUrl, command);
-  const testPrompt = buildProviderTestPromptResource(definition);
-
-  return {
-    resources: [instructions, testPrompt],
-    verificationChecks: definition.verificationChecks,
-  };
+function providerDisplayComparator(a: AiWorkspaceProviderView, b: AiWorkspaceProviderView) {
+  return (PROVIDER_RANK[a.key] ?? 100) - (PROVIDER_RANK[b.key] ?? 100)
+    || GROUP_RANK[providerGroup(a)] - GROUP_RANK[providerGroup(b)]
+    || a.label.localeCompare(b.label);
 }
 
-function buildResourceCopyActions(resources: AiWorkspaceSetupResource[]): AiWorkspaceSetupAction[] {
-  return resources.map((resource) => ({
+function connectionSummary(provider: AiWorkspaceProviderView) {
+  if (provider.key === "chatgpt") {
+    return "Connect Corgtex as a ChatGPT developer-mode app. After that, users work in ChatGPT and call Corgtex from the chat.";
+  }
+  if (provider.key === "claude") {
+    return "Connect Corgtex as a Claude remote connector. After that, users work in Claude and Corgtex supplies company context.";
+  }
+  if (provider.key === "openwork") {
+    return "Use OpenWork as the default free AI workspace connected to Corgtex through MCP.";
+  }
+  if (provider.key === "cursor") {
+    return "Install Corgtex in Cursor with Cursor's one-click MCP install link.";
+  }
+  if (provider.key === "copilot") {
+    return "Advanced setup for VS Code or Copilot CLI. Repository and cloud-agent OAuth paths are intentionally not offered.";
+  }
+  if (provider.key === "gemini") {
+    return "Advanced setup for Gemini CLI using an HTTP MCP server and browser authentication.";
+  }
+  return provider.outcome;
+}
+
+function copyMcpUrlAction(
+  connectorUrl: string,
+  productName: string,
+  variant: AiWorkspaceActionVariant = "secondary",
+): Extract<AiWorkspaceSetupAction, { kind: "copy" }> {
+  return {
     kind: "copy",
-    label: resource.label === "Test prompt" ? "Copy test prompt" : "Copy instructions",
-    value: resource.value,
-    copiedMessage: resource.copiedMessage,
-    fallbackMessage: resource.fallbackMessage,
-  }));
-}
-
-function buildCommandResource(params: {
-  title: string;
-  label: string;
-  value: string;
-  copiedMessage: string;
-}): AiWorkspaceSetupResource {
-  return {
-    title: params.title,
-    label: params.label,
-    value: params.value,
-    copiedMessage: params.copiedMessage,
-    fallbackMessage: "Clipboard access was blocked. Select and copy the command.",
+    label: "Copy MCP URL",
+    value: connectorUrl,
+    copiedMessage: `Copied the Corgtex MCP URL for ${productName}.`,
+    fallbackMessage: "Clipboard access was blocked. Select and copy the MCP URL.",
+    variant,
   };
-}
-
-function buildJsonResource(params: {
-  title: string;
-  label: string;
-  value: unknown;
-  copiedMessage: string;
-}): AiWorkspaceSetupResource {
-  return {
-    title: params.title,
-    label: params.label,
-    value: JSON.stringify(params.value, null, 2),
-    copiedMessage: params.copiedMessage,
-    fallbackMessage: "Clipboard access was blocked. Select and copy the configuration.",
-  };
-}
-
-function buildProviderInstructionsResource(
-  definition: ProviderRecipeDefinition,
-  connectorUrl: string,
-  command?: string,
-): AiWorkspaceSetupResource {
-  return {
-    title: definition.title,
-    label: "Instructions package",
-    copiedMessage: `Copied the ${definition.surface} Corgtex instructions.`,
-    fallbackMessage: "Clipboard access was blocked. Select and copy the instructions package.",
-    value: [
-      `# Corgtex Instructions for ${definition.surface}`,
-      "",
-      definition.setupTarget,
-      "",
-      `Corgtex MCP server: ${connectorUrl}`,
-      command ? `Install command: ${command}` : null,
-      "",
-      "Operating boundary:",
-      definition.executionBoundary,
-      "",
-      "Required behavior:",
-      "- Pull company context, policies, allowed scopes, and write-back targets from Corgtex before executing governed work.",
-      "- Use Corgtex execution packets as the source of goal, actor, approval rule, and output destination.",
-      "- Do not invent authority, bypass scopes, or write to unsupported destinations.",
-      "- Submit governed results back to Corgtex with status, artifacts, idempotency, and target mapping.",
-      ...definition.extraRules.map((rule) => `- ${rule}`),
-      "",
-      "Useful Corgtex tools:",
-      "- get_company_context",
-      "- list_writeback_targets",
-      "- create_execution_request",
-      "- get_execution_packet",
-      "- submit_execution_result",
-    ].filter((line): line is string => line !== null).join("\n"),
-  };
-}
-
-function buildProviderTestPromptResource(definition: ProviderRecipeDefinition): AiWorkspaceSetupResource {
-  return {
-    title: `${definition.surface} connection test prompt`,
-    label: "Test prompt",
-    copiedMessage: `Copied the ${definition.surface} Corgtex test prompt.`,
-    fallbackMessage: "Clipboard access was blocked. Select and copy the test prompt.",
-    value: [
-      `Test the Corgtex connection in ${definition.surface} without making external changes.`,
-      "",
-      "1. Use Corgtex tools to read the current company context and summarize only what the granted scopes allow.",
-      "2. List available write-back target types and explain which ones are safe to use.",
-      "3. Confirm whether execution request creation, packet retrieval, and result submission tools are visible.",
-      "4. Do not create records, submit results, change files, deploy, or write to external systems.",
-      "5. Return a short readiness report with connected, missing setup, scope limitations, and next safe action.",
-    ].join("\n"),
-  };
-}
-
-function buildOpenWorkInstructionsPackage(connectorUrl: string): AiWorkspaceSetupResource {
-  return {
-    title: "Corgtex OpenWork instructions package",
-    label: "Instructions package",
-    copiedMessage: "Copied the Corgtex OpenWork instructions package.",
-    fallbackMessage: "Clipboard access was blocked. Select and copy the instructions package.",
-    value: [
-      "# Corgtex OpenWork Instructions",
-      "",
-      "Use OpenWork as the execution workspace and Corgtex as the enterprise plumbing layer.",
-      "",
-      `Corgtex MCP server: ${connectorUrl}`,
-      "",
-      "Operating rules:",
-      "- Pull company context, policies, and allowed scopes from Corgtex before planning work.",
-      "- Use Corgtex execution packets as the source of task goal, actor, policy constraints, expected output, approval rule, and write-back target.",
-      "- Do not invent authority, bypass scopes, or write to destinations that are not listed by Corgtex.",
-      "- Ask for approval when the packet approval rule requires review before write-back.",
-      "- Submit execution results back to Corgtex with artifacts, status, and idempotency instead of leaving work only in chat.",
-      "- Treat Corgtex audit, model usage, and write-back state as the durable record.",
-      "",
-      "Useful Corgtex tools:",
-      "- get_company_context: read company context within granted scopes.",
-      "- list_writeback_targets: inspect allowed output destinations.",
-      "- create_execution_request: create governed work from Corgtex when the user asks from OpenWork.",
-      "- get_execution_packet: claim a governed request before executing.",
-      "- submit_execution_result: return output, artifacts, status, and write-back mapping to Corgtex.",
-      "",
-      "Default behavior:",
-      "- Prefer concise status updates and concrete outputs.",
-      "- Show assumptions and blockers before executing risky work.",
-      "- Keep private or scoped context inside the Corgtex-authorized workflow.",
-    ].join("\n"),
-  };
-}
-
-function buildOpenWorkTestPrompt(): AiWorkspaceSetupResource {
-  return {
-    title: "OpenWork connection test prompt",
-    label: "Test prompt",
-    copiedMessage: "Copied the OpenWork test prompt.",
-    fallbackMessage: "Clipboard access was blocked. Select and copy the test prompt.",
-    value: [
-      "Test the Corgtex connection without making any external changes.",
-      "",
-      "1. Use Corgtex to read the current company context.",
-      "2. List available write-back targets and summarize which target types are available.",
-      "3. Confirm whether execution request, packet retrieval, and result submission tools are visible.",
-      "4. Do not submit a result or create a write-back unless I explicitly approve it.",
-      "5. Return a short readiness report with connected, missing setup, scope limitations, and the next safe action.",
-    ].join("\n"),
-  };
-}
-
-function setupLabel(setupPath: AiWorkspaceProviderView["setupPath"]) {
-  if (setupPath === "guided") return "Guided setup";
-  if (setupPath === "request") return "Request setup";
-  return "Setup recipe";
 }
 
 function ownershipLabel(modes: string[]) {

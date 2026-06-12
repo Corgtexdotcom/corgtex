@@ -7,13 +7,12 @@ import {
   buildCursorInstallLinks,
   buildCursorMcpConfig,
   encodeBase64Utf8,
+  CHATGPT_CONNECTORS_URL,
   CLAUDE_CONNECTORS_URL,
   CLAUDE_INSTALLER_PATH,
   CLAUDE_CODE_INSTALLER_PATH,
   type CursorMcpConfig,
 } from "@/lib/install-helpers";
-
-const CHATGPT_APPS_URL = "https://chatgpt.com/apps";
 
 // Re-export so the existing test in CorgtexConnectorManager.test.ts keeps working.
 export {
@@ -53,16 +52,16 @@ const SETUP_CARDS: SetupCard[] = [
   {
     id: "chatgpt",
     title: "ChatGPT",
-    actionLabel: "Copy URL and open ChatGPT Apps",
-    automation: "Copies the connector URL and opens ChatGPT Apps.",
+    actionLabel: "Connect ChatGPT",
+    automation: "Copies the connector URL and opens ChatGPT connector settings.",
     userWork: "Create the custom Corgtex app in ChatGPT before OAuth can start.",
     steps: [
-      "In ChatGPT, open Settings -> Apps -> Advanced settings and turn on Developer mode if asked.",
+      "In ChatGPT, open Settings -> Connectors -> Advanced settings and turn on Developer Mode if asked.",
       "Click Create app, name it Corgtex, paste the Corgtex connector URL as the MCP server URL, choose OAuth or dynamic client registration if ChatGPT asks, then click Create.",
       "Start a new chat, open the + menu, choose Apps or Developer Mode, select Corgtex, and complete the browser sign-in. The agent receives your current Corgtex role in the selected workspace.",
     ],
     note:
-      "For Business, Enterprise, or Edu workspaces, an admin may need to create or publish the app from Workspace settings -> Apps -> Create or Drafts before members can use it.",
+      "For Business, Enterprise, or Edu workspaces, an admin may need to approve or publish the app before members can use it.",
   },
   {
     id: "claude",
@@ -244,10 +243,10 @@ export function CorgtexConnectorManager({ connectorUrl, workspaceName }: Props) 
     if (card.id === "chatgpt") {
       return (
         <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-          <button className="button secondary" type="button" onClick={() => handleCopyAndOpen(card.id, connectorUrl, CHATGPT_APPS_URL, "ChatGPT Apps")}>
+          <button className="button secondary" type="button" onClick={() => handleCopyAndOpen(card.id, connectorUrl, CHATGPT_CONNECTORS_URL, "ChatGPT connector settings")}>
             {card.actionLabel}
           </button>
-          <a className="button secondary" href={CHATGPT_APPS_URL} target="_blank" rel="noreferrer">
+          <a className="button secondary" href={CHATGPT_CONNECTORS_URL} target="_blank" rel="noreferrer">
             Open only
           </a>
         </div>

@@ -12,6 +12,7 @@ import {
 describe("ai workspace launch helpers", () => {
   it("resolves OpenWork launch and settings links without modeling provider state in UI", () => {
     expect(aiWorkspaceLaunchUrl("openwork")).toBe("https://openworklabs.com/download");
+    expect(aiWorkspaceLaunchUrl("chatgpt")).toBe("https://chatgpt.com/");
     expect(aiWorkspaceLaunchUrl("copilot")).toBe("https://code.visualstudio.com/docs/copilot/chat/mcp-servers");
     expect(aiWorkspaceLaunchUrl("generic_mcp")).toBeNull();
     expect(aiWorkspaceSettingsHref("workspace-1", "openwork")).toBe(

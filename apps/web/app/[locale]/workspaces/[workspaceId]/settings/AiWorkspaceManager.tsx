@@ -4,13 +4,12 @@ import { useMemo, useState } from "react";
 
 import {
   buildAiWorkspaceSetupCards,
-  capabilityLabel,
   enterpriseServiceHealthLabel,
   enterpriseServiceHealthTone,
   enterpriseServiceOwnershipLabel,
   enterpriseServiceProviderLabel,
   formatServiceTimestamp,
-  groupAiWorkspaceProviders,
+  splitAiWorkspaceProviders,
   type AiWorkspaceProviderView,
   type AiWorkspaceSetupAction,
   type EnterpriseServiceHealthTone,
@@ -55,18 +54,22 @@ function openExternalUrl(url: string): boolean {
   return window.open(url, "_blank", "noopener,noreferrer") !== null;
 }
 
-function groupTitle(group: "default" | "byo" | "advanced") {
-  if (group === "default") return "Recommended default";
-  if (group === "byo") return "Bring your own";
-  return "Advanced clients";
-}
-
 function healthTagStyle(tone: EnterpriseServiceHealthTone) {
   if (tone === "success") return { background: "var(--accent-soft)" };
   if (tone === "warning") return { background: "rgba(255, 165, 0, 0.12)", border: "1px solid rgba(255, 165, 0, 0.35)" };
   if (tone === "danger") return { background: "rgba(180, 35, 24, 0.1)", border: "1px solid rgba(180, 35, 24, 0.28)" };
   if (tone === "info") return { background: "var(--surface-strong)" };
   return { background: "transparent" };
+}
+
+function parseRouteError(value: unknown) {
+  if (!value || typeof value !== "object") return null;
+  const error = (value as { error?: unknown }).error;
+  if (typeof error === "string") return error;
+  if (error && typeof error === "object" && typeof (error as { message?: unknown }).message === "string") {
+    return (error as { message: string }).message;
+  }
+  return null;
 }
 
 export function AiWorkspaceManager({
@@ -82,8 +85,9 @@ export function AiWorkspaceManager({
   selectedServiceKey,
 }: Props) {
   const cards = useMemo(() => buildAiWorkspaceSetupCards(providers, connectorUrl, origin), [connectorUrl, origin, providers]);
-  const groups = useMemo(() => groupAiWorkspaceProviders(providers), [providers]);
+  const providerGroups = useMemo(() => splitAiWorkspaceProviders(providers), [providers]);
   const [activeProviderKey, setActiveProviderKey] = useState(selectedProviderKey ?? cards[0]?.provider.key ?? null);
+  const [isSelecting, setIsSelecting] = useState(false);
   const [status, setStatus] = useState<ActionStatus | null>(null);
   const activeCard = cards.find((card) => card.provider.key === activeProviderKey) ?? cards[0] ?? null;
 
@@ -139,14 +143,50 @@ export function AiWorkspaceManager({
     });
   };
 
+  const chooseProvider = async (providerKey: string) => {
+    const nextCard = cards.find((card) => card.provider.key === providerKey);
+    if (!nextCard) return;
+
+    setActiveProviderKey(providerKey);
+    setStatus(null);
+    setIsSelecting(true);
+
+    try {
+      const response = await fetch(`/api/workspaces/${workspaceId}/ai-workspace-selection`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ providerKey }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(parseRouteError(data) ?? "Could not save the selected AI app.");
+      }
+      setStatus({
+        key: `${providerKey}:selection`,
+        message: `${nextCard.provider.shortLabel} is selected. Use Connect to finish setup in that app.`,
+        tone: "success",
+      });
+    } catch (selectionError) {
+      setStatus({
+        key: `${providerKey}:selection`,
+        message: selectionError instanceof Error ? selectionError.message : "Could not save the selected AI app.",
+        tone: "warning",
+      });
+    } finally {
+      setIsSelecting(false);
+    }
+  };
+
   const renderAction = (action: AiWorkspaceSetupAction, providerKey: string) => {
     const key = `${providerKey}:${action.kind}:${action.label}`;
+    const actionClassName = action.variant === "primary" ? "button small" : "button secondary small";
+    const linkClassName = action.variant === "primary" ? "link-button small" : "link-button secondary small";
 
     if (action.kind === "open") {
       return (
         <a
           key={key}
-          className={action.variant === "primary" ? "link-button small" : "link-button secondary small"}
+          className={linkClassName}
           href={action.href}
           target={action.href.startsWith("/") ? undefined : "_blank"}
           rel="noreferrer"
@@ -158,7 +198,7 @@ export function AiWorkspaceManager({
 
     if (action.kind === "copyAndOpen") {
       return (
-        <button key={key} type="button" className="button secondary small" onClick={() => copyAndOpen(key, action)}>
+        <button key={key} type="button" className={actionClassName} onClick={() => copyAndOpen(key, action)}>
           {action.label}
         </button>
       );
@@ -169,7 +209,7 @@ export function AiWorkspaceManager({
         <span key={key} className="actions-inline" style={{ gap: 8 }}>
           <button
             type="button"
-            className="button secondary small"
+            className={actionClassName}
             onClick={() => {
               if (typeof window === "undefined") return;
               window.location.href = action.appHref;
@@ -193,7 +233,7 @@ export function AiWorkspaceManager({
       <button
         key={key}
         type="button"
-        className="button secondary small"
+        className={actionClassName}
         onClick={() => copyValue(key, action.value, action.copiedMessage, action.fallbackMessage)}
       >
         {action.label}
@@ -232,277 +272,130 @@ export function AiWorkspaceManager({
   };
 
   return (
-    <section className="stack" style={{ gap: 28 }}>
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 210px), 1fr))",
-          gap: 12,
-        }}
-      >
-        <div className="ws-stat-card">
-          <strong style={{ color: "var(--text)" }}>{providers.filter((provider) => provider.recommendedDefault).length}</strong>
-          <span>recommended default</span>
+    <section className="stack" style={{ gap: 22 }}>
+      <div className="panel stack" style={{ border: "1px solid var(--line)", borderRadius: 8, gap: 14, padding: 18 }}>
+        <div className="stack" style={{ gap: 6 }}>
+          <h2 className="nr-section-header" style={{ margin: 0 }}>Connect an AI app</h2>
+          <p className="nr-item-meta" style={{ fontSize: "0.9rem", lineHeight: 1.45, margin: 0 }}>
+            Choose where your team wants to work. Corgtex connects to that app and supplies company context, policies, and write-back.
+          </p>
         </div>
-        <div className="ws-stat-card">
-          <strong style={{ color: "var(--text)" }}>{groups.byo.length}</strong>
-          <span>BYO workspaces</span>
-        </div>
-        <div className="ws-stat-card">
-          <strong style={{ color: "var(--text)" }}>{groups.advanced.length}</strong>
-          <span>advanced clients</span>
-        </div>
-        <div className="ws-stat-card">
-          <strong style={{ color: "var(--text)" }}>{managedServicesEnabled ? enterpriseServices.length : 0}</strong>
-          <span>managed services</span>
-        </div>
-      </div>
 
-      <div className="nr-filter-bar">
-        {(["default", "byo", "advanced"] as const).map((group) => (
-          groups[group].length > 0 ? (
-            <span key={group} className="nr-filter-item" style={{ cursor: "default" }}>
-              {groupTitle(group)} ({groups[group].length})
-            </span>
-          ) : null
-        ))}
-      </div>
-
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 360px), 1fr))",
-          gap: 24,
-        }}
-      >
-        <aside className="stack" style={{ gap: 12 }}>
-          {cards.map((card) => (
-            <button
-              key={card.provider.key}
-              type="button"
-              onClick={() => setActiveProviderKey(card.provider.key)}
-              style={{
-                background: card.provider.key === activeCard?.provider.key ? "var(--surface-strong)" : "var(--surface)",
-                border: `1px solid ${card.provider.key === activeCard?.provider.key ? "var(--accent)" : "var(--line)"}`,
-                borderRadius: 8,
-                color: "var(--text)",
-                display: "grid",
-                gap: 8,
-                alignItems: "stretch",
-                justifyContent: "stretch",
-                justifyItems: "stretch",
-                padding: 12,
-                textAlign: "left",
-                width: "100%",
-              }}
-            >
-              <span
-                style={{
-                  alignItems: "center",
-                  display: "grid",
-                  gap: 8,
-                  gridTemplateColumns: "minmax(0, 1fr) auto",
-                  textAlign: "left",
-                  width: "100%",
-                }}
-              >
-                <strong style={{ justifySelf: "start" }}>{card.provider.shortLabel}</strong>
-                <span className="tag" style={{ background: card.provider.recommendedDefault ? "var(--accent-soft)" : "transparent" }}>
-                  {card.statusLabel}
-                </span>
-              </span>
-              <span className="nr-item-meta" style={{ fontSize: "0.82rem", justifySelf: "start", lineHeight: 1.35, textAlign: "left" }}>
-                {card.provider.outcome}
-              </span>
-            </button>
-          ))}
-        </aside>
-
-        {activeCard ? (
-          <article
-            className="panel stack"
-            id={`ai-workspace-${activeCard.provider.key}`}
-            style={{
-              border: "1px solid var(--line)",
-              borderRadius: 8,
-              gap: 18,
-              padding: 20,
-            }}
+        <label className="stack" style={{ gap: 6, maxWidth: 420 }}>
+          <span className="nr-item-meta" style={{ fontSize: "0.78rem", fontWeight: 700, textTransform: "uppercase" }}>
+            Favorite AI app
+          </span>
+          <select
+            value={activeCard?.provider.key ?? ""}
+            onChange={(event) => void chooseProvider(event.target.value)}
+            disabled={isSelecting}
+            style={{ minHeight: 42 }}
           >
-            <div style={{ display: "flex", justifyContent: "space-between", gap: 16, alignItems: "flex-start", flexWrap: "wrap" }}>
-              <div style={{ minWidth: 0 }}>
-                <div className="actions-inline" style={{ gap: 6, marginBottom: 8 }}>
-                  <span className="tag">{groupTitle(activeCard.group)}</span>
-                  <span className="tag info">{activeCard.setupLabel}</span>
-                  {activeCard.provider.freeDefault ? <span className="tag success">Free default</span> : null}
-                </div>
-                <h2 style={{ fontSize: "1.25rem", margin: 0 }}>{activeCard.provider.label}</h2>
-                <p className="nr-item-meta" style={{ fontSize: "0.9rem", lineHeight: 1.45, margin: "8px 0 0" }}>
-                  {activeCard.provider.description}
-                </p>
-              </div>
-              <span className="tag" style={{ background: activeCard.provider.recommendedDefault ? "var(--accent-soft)" : "transparent" }}>
-                {activeCard.ownershipLabel}
-              </span>
-            </div>
-
-            <div style={{ display: "grid", gap: 6 }}>
-              <span className="nr-item-meta" style={{ fontSize: "0.78rem", fontWeight: 700, textTransform: "uppercase" }}>
-                Corgtex MCP URL
-              </span>
-              <code
-                style={{
-                  border: "1px solid var(--line)",
-                  borderRadius: 6,
-                  display: "block",
-                  fontFamily: "monospace",
-                  fontSize: "0.82rem",
-                  overflowWrap: "anywhere",
-                  padding: "8px 10px",
-                }}
-              >
-                {activeCard.connectorUrl}
-              </code>
-            </div>
-
-            {activeCard.command ? (
-              <div style={{ display: "grid", gap: 6 }}>
-                <span className="nr-item-meta" style={{ fontSize: "0.78rem", fontWeight: 700, textTransform: "uppercase" }}>
-                  Command
-                </span>
-                <code
-                  style={{
-                    border: "1px solid var(--line)",
-                    borderRadius: 6,
-                    display: "block",
-                    fontFamily: "monospace",
-                    fontSize: "0.82rem",
-                    overflowWrap: "anywhere",
-                    padding: "8px 10px",
-                  }}
-                >
-                  {activeCard.command}
-                </code>
-              </div>
-            ) : null}
-
-            <div className="actions-inline" style={{ gap: 8 }}>
-              {activeCard.actions.map((action) => renderAction(action, activeCard.provider.key))}
-            </div>
-            {renderStatus(activeCard.provider.key)}
-
-            {activeCard.setupVariants.length > 0 ? (
-              <div className="stack" style={{ gap: 10 }}>
-                <h3 style={{ fontSize: "0.95rem", margin: 0 }}>Setup paths</h3>
-                {activeCard.setupVariants.map((variant) => (
-                  <div
-                    key={variant.variantKey}
-                    style={{
-                      border: "1px solid var(--line)",
-                      borderRadius: 8,
-                      display: "grid",
-                      gap: 8,
-                      padding: 12,
-                    }}
-                  >
-                    <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "flex-start", flexWrap: "wrap" }}>
-                      <strong style={{ fontSize: "0.9rem" }}>{variant.label}</strong>
-                      <span className="tag info">{variant.primaryAction}</span>
-                    </div>
-                    <p className="nr-item-meta" style={{ fontSize: "0.82rem", lineHeight: 1.4, margin: 0 }}>
-                      {variant.audience}
-                    </p>
-                    <ol className="stack" style={{ gap: 5, margin: 0, paddingLeft: 18 }}>
-                      {variant.manualSteps.map((step) => (
-                        <li key={step} className="nr-item-meta" style={{ fontSize: "0.8rem" }}>
-                          {step}
-                        </li>
-                      ))}
-                    </ol>
-                    {variant.limitations.length > 0 ? (
-                      <div className="stack" style={{ gap: 4 }}>
-                        {variant.limitations.map((limitation) => (
-                          <p key={limitation} className="nr-item-meta" style={{ fontSize: "0.78rem", margin: 0 }}>
-                            {limitation}
-                          </p>
-                        ))}
-                      </div>
-                    ) : null}
-                  </div>
+            <optgroup label="Recommended apps">
+              {providerGroups.primary.map((provider) => (
+                <option key={provider.key} value={provider.key}>
+                  {provider.shortLabel}
+                </option>
+              ))}
+            </optgroup>
+            {providerGroups.advanced.length > 0 ? (
+              <optgroup label="Advanced tools">
+                {providerGroups.advanced.map((provider) => (
+                  <option key={provider.key} value={provider.key}>
+                    {provider.shortLabel}
+                  </option>
                 ))}
-              </div>
+              </optgroup>
             ) : null}
+          </select>
+        </label>
+      </div>
 
-            {activeCard.resources.length > 0 ? (
-              <div className="stack" style={{ gap: 12 }}>
-                <h3 style={{ fontSize: "0.95rem", margin: 0 }}>Setup resources</h3>
-                {activeCard.resources.map((resource) => (
-                  <div key={resource.title} style={{ display: "grid", gap: 6 }}>
-                    <span className="nr-item-meta" style={{ fontSize: "0.78rem", fontWeight: 700, textTransform: "uppercase" }}>
-                      {resource.label}
-                    </span>
-                    <pre
-                      aria-label={resource.title}
-                      style={{
-                        border: "1px solid var(--line)",
-                        borderRadius: 6,
-                        fontFamily: "monospace",
-                        fontSize: "0.78rem",
-                        lineHeight: 1.45,
-                        margin: 0,
-                        maxHeight: 180,
-                        overflow: "auto",
-                        padding: "10px 12px",
-                        whiteSpace: "pre-wrap",
-                        wordBreak: "break-word",
-                      }}
-                    >
-                      {resource.value}
-                    </pre>
-                  </div>
-                ))}
+      {activeCard ? (
+        <article
+          className="panel stack"
+          id={`ai-workspace-${activeCard.provider.key}`}
+          style={{
+            border: "1px solid var(--line)",
+            borderRadius: 8,
+            gap: 18,
+            padding: 20,
+          }}
+        >
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 16, alignItems: "flex-start", flexWrap: "wrap" }}>
+            <div className="stack" style={{ gap: 8, minWidth: 0 }}>
+              <div className="actions-inline" style={{ gap: 6 }}>
+                {activeCard.provider.recommendedDefault ? <span className="tag success">Recommended</span> : null}
+                <span className="tag">{activeCard.group === "advanced" ? "Advanced tool" : activeCard.ownershipLabel}</span>
               </div>
-            ) : null}
+              <h2 style={{ fontSize: "1.25rem", margin: 0 }}>Connect Corgtex to {activeCard.provider.shortLabel}</h2>
+              <p className="nr-item-meta" style={{ fontSize: "0.92rem", lineHeight: 1.45, margin: 0 }}>
+                {activeCard.summary}
+              </p>
+            </div>
+            <span className="tag" style={{ background: activeCard.provider.recommendedDefault ? "var(--accent-soft)" : "transparent" }}>
+              {activeCard.statusLabel}
+            </span>
+          </div>
 
+          <div className="actions-inline" style={{ gap: 8 }}>
+            {activeCard.actions.map((action) => renderAction(action, activeCard.provider.key))}
+          </div>
+          {renderStatus(activeCard.provider.key)}
+
+          <div className="stack" style={{ gap: 10 }}>
+            <h3 style={{ fontSize: "0.95rem", margin: 0 }}>What to do</h3>
             <ol className="stack" style={{ gap: 8, margin: 0, paddingLeft: 18 }}>
               {activeCard.steps.map((step) => (
-                <li key={step} className="nr-item-meta" style={{ fontSize: "0.86rem" }}>
+                <li key={step} className="nr-item-meta" style={{ fontSize: "0.88rem", lineHeight: 1.45 }}>
                   {step}
                 </li>
               ))}
             </ol>
+          </div>
 
-            {activeCard.verificationChecks.length > 0 ? (
-              <div className="stack" style={{ gap: 8 }}>
-                <h3 style={{ fontSize: "0.95rem", margin: 0 }}>Verification checklist</h3>
-                <ul className="stack" style={{ gap: 6, margin: 0, paddingLeft: 18 }}>
-                  {activeCard.verificationChecks.map((check) => (
-                    <li key={check} className="nr-item-meta" style={{ fontSize: "0.84rem" }}>
-                      {check}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            ) : null}
-
-            <div className="actions-inline" style={{ gap: 6 }}>
-              {activeCard.provider.capabilities.map((capability) => (
-                <span key={capability} className="tag">{capabilityLabel(capability)}</span>
+          {activeCard.notes.length > 0 ? (
+            <div className="stack" style={{ borderTop: "1px solid var(--line)", gap: 6, paddingTop: 12 }}>
+              {activeCard.notes.map((note) => (
+                <p key={note} className="nr-item-meta" style={{ fontSize: "0.82rem", lineHeight: 1.4, margin: 0 }}>
+                  {note}
+                </p>
               ))}
             </div>
+          ) : null}
 
-            {activeCard.notes.length > 0 ? (
-              <div className="stack" style={{ borderTop: "1px solid var(--line)", gap: 6, paddingTop: 12 }}>
-                {activeCard.notes.map((note) => (
-                  <p key={note} className="nr-item-meta" style={{ fontSize: "0.82rem", margin: 0 }}>
+          {activeCard.advancedSection ? (
+            <details className="stack" style={{ borderTop: "1px solid var(--line)", gap: 10, paddingTop: 12 }}>
+              <summary style={{ cursor: "pointer", fontSize: "0.9rem", fontWeight: 700 }}>
+                Advanced tools
+              </summary>
+              <div className="stack" style={{ gap: 10, paddingTop: 10 }}>
+                <div>
+                  <h3 style={{ fontSize: "0.95rem", margin: 0 }}>{activeCard.advancedSection.title}</h3>
+                  <p className="nr-item-meta" style={{ fontSize: "0.82rem", lineHeight: 1.4, margin: "4px 0 0" }}>
+                    {activeCard.advancedSection.description}
+                  </p>
+                </div>
+                <div className="actions-inline" style={{ gap: 8 }}>
+                  {activeCard.advancedSection.actions.map((action) => renderAction(action, activeCard.provider.key))}
+                </div>
+                <ol className="stack" style={{ gap: 6, margin: 0, paddingLeft: 18 }}>
+                  {activeCard.advancedSection.steps.map((step) => (
+                    <li key={step} className="nr-item-meta" style={{ fontSize: "0.82rem", lineHeight: 1.4 }}>
+                      {step}
+                    </li>
+                  ))}
+                </ol>
+                {activeCard.advancedSection.notes.map((note) => (
+                  <p key={note} className="nr-item-meta" style={{ fontSize: "0.8rem", lineHeight: 1.4, margin: 0 }}>
                     {note}
                   </p>
                 ))}
               </div>
-            ) : null}
-          </article>
-        ) : null}
-      </div>
+            </details>
+          ) : null}
+        </article>
+      ) : null}
 
       {managedServicesEnabled ? (
         <section className="stack" style={{ gap: 14 }} id="managed-enterprise-services">
@@ -510,7 +403,13 @@ export function AiWorkspaceManager({
             <h2 className="nr-section-header" style={{ margin: 0 }}>Enterprise services</h2>
             <span className="nr-item-meta">{enterpriseServices.length} services</span>
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 14 }}>
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))",
+              gap: 14,
+            }}
+          >
             {enterpriseServices.map((service) => (
               (() => {
                 const healthTone = enterpriseServiceHealthTone(service.healthStatus);
