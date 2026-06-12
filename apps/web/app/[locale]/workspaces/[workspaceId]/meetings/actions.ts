@@ -26,62 +26,11 @@ import {
   cancelMeetingRecording,
 } from "@corgtex/domain";
 import { extractTextFromFileBuffer } from "@corgtex/knowledge";
-
-const LOCAL_DATETIME_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/;
-
-function parseDateTimeLocalWithOffset(value: string, offsetMinutesRaw: string | null) {
-  const match = value.match(LOCAL_DATETIME_PATTERN);
-  const offsetMinutes = offsetMinutesRaw === null || offsetMinutesRaw.trim() === "" ? 0 : Number(offsetMinutesRaw);
-  if (!match || !Number.isInteger(offsetMinutes)) {
-    throw new Error("Meeting time must be a valid local datetime.");
-  }
-  const [, year, month, day, hour, minute, second = "0"] = match;
-  const parts = {
-    year: Number(year),
-    month: Number(month),
-    day: Number(day),
-    hour: Number(hour),
-    minute: Number(minute),
-    second: Number(second),
-  };
-  const local = new Date(Date.UTC(
-    parts.year,
-    parts.month - 1,
-    parts.day,
-    parts.hour,
-    parts.minute,
-    parts.second,
-  ));
-  const validLocalParts = parts.month >= 1
-    && parts.month <= 12
-    && parts.hour >= 0
-    && parts.hour <= 23
-    && parts.minute >= 0
-    && parts.minute <= 59
-    && parts.second >= 0
-    && parts.second <= 59
-    && local.getUTCFullYear() === parts.year
-    && local.getUTCMonth() === parts.month - 1
-    && local.getUTCDate() === parts.day
-    && local.getUTCHours() === parts.hour
-    && local.getUTCMinutes() === parts.minute
-    && local.getUTCSeconds() === parts.second;
-  if (!validLocalParts) {
-    throw new Error("Meeting time must be a valid local datetime.");
-  }
-  const parsed = new Date(Date.UTC(
-    parts.year,
-    parts.month - 1,
-    parts.day,
-    parts.hour,
-    parts.minute,
-    parts.second,
-  ) + offsetMinutes * 60_000);
-  if (Number.isNaN(parsed.valueOf())) {
-    throw new Error("Meeting time must be a valid local datetime.");
-  }
-  return parsed;
-}
+import {
+  assertMeetingEndAfterStart,
+  parseMeetingDateTimeInput,
+  parseOptionalMeetingDateTimeInput,
+} from "@/lib/meeting-timezone";
 
 export async function createMeetingAction(formData: FormData) {
   const _demoGuardWsId = formData.get("workspaceId") as string;
@@ -89,11 +38,12 @@ export async function createMeetingAction(formData: FormData) {
 
   const actor = await requirePageActor();
   const workspaceId = asString(formData, "workspaceId");
+  const timeZone = asOptional(formData, "timeZone");
   await createMeeting(actor, {
     workspaceId,
     title: asOptional(formData, "title"),
     source: asString(formData, "source"),
-    recordedAt: new Date(asString(formData, "recordedAt")),
+    recordedAt: parseMeetingDateTimeInput(asString(formData, "recordedAt"), timeZone, "Recorded at"),
     transcript: asOptional(formData, "transcript"),
     summaryMd: asOptional(formData, "summaryMd"),
     ingestionGuidanceMd: asOptional(formData, "ingestionGuidanceMd"),
@@ -111,14 +61,16 @@ export async function createMeetingSeriesAction(formData: FormData) {
 
   const actor = await requirePageActor();
   const workspaceId = asString(formData, "workspaceId");
+  const timeZone = asOptional(formData, "timeZone");
+  const startsAt = parseMeetingDateTimeInput(asString(formData, "startsAt"), timeZone, "Starts at");
+  const scheduledEndAt = parseOptionalMeetingDateTimeInput(asOptional(formData, "scheduledEndAt"), timeZone, "Scheduled end");
+  assertMeetingEndAfterStart(startsAt, scheduledEndAt, "Scheduled end");
   await createMeetingSeries(actor, {
     workspaceId,
     title: asString(formData, "title"),
     description: asOptional(formData, "description"),
-    startsAt: new Date(asString(formData, "startsAt")),
-    scheduledEndAt: asOptional(formData, "scheduledEndAt")
-      ? new Date(asString(formData, "scheduledEndAt"))
-      : null,
+    startsAt,
+    scheduledEndAt,
     recurrenceRule: asOptional(formData, "recurrenceRule"),
     participantIds: asOptional(formData, "participantIds")?.split(",").map((value) => value.trim()).filter(Boolean) ?? [],
     participantEmails: asOptional(formData, "participantEmails")?.split(",").map((value) => value.trim()).filter(Boolean) ?? [],
@@ -138,14 +90,10 @@ export async function scheduleManualMeetingRecordingAction(formData: FormData) {
     workspaceId,
     allowedRoles: ["ADMIN", "FACILITATOR"],
   });
-  const joinAt = parseDateTimeLocalWithOffset(
-    asString(formData, "joinAt"),
-    asOptional(formData, "joinAtTimezoneOffsetMinutes"),
-  );
-  const scheduledEndAtRaw = asOptional(formData, "scheduledEndAt");
-  const scheduledEndAt = scheduledEndAtRaw
-    ? parseDateTimeLocalWithOffset(scheduledEndAtRaw, asOptional(formData, "scheduledEndAtTimezoneOffsetMinutes"))
-    : null;
+  const timeZone = asOptional(formData, "timeZone");
+  const joinAt = parseMeetingDateTimeInput(asString(formData, "joinAt"), timeZone, "Meeting time");
+  const scheduledEndAt = parseOptionalMeetingDateTimeInput(asOptional(formData, "scheduledEndAt"), timeZone, "Ends at");
+  assertMeetingEndAfterStart(joinAt, scheduledEndAt, "Ends at");
   const meeting = await createScheduledMeeting(actor, {
     workspaceId,
     title: asString(formData, "title"),
@@ -209,7 +157,7 @@ export async function uploadMeetingTranscriptAction(formData: FormData) {
     meetingId: asOptional(formData, "meetingId"),
     title: asOptional(formData, "title"),
     source: asOptional(formData, "source") || "transcript-upload",
-    recordedAt: asOptional(formData, "recordedAt"),
+    recordedAt: parseOptionalMeetingDateTimeInput(asOptional(formData, "recordedAt"), asOptional(formData, "timeZone"), "Recorded at"),
     transcript,
     summaryMd: asOptional(formData, "summaryMd"),
     ingestionGuidanceMd: asOptional(formData, "ingestionGuidanceMd"),

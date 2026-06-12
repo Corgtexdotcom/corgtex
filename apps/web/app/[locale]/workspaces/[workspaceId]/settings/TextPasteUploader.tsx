@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
+import { TimeZoneSelect } from "@/lib/components/TimeZoneSelect";
 
 const SOURCE_TYPES = ["MEETING","TICKET","PR","RFC","INCIDENT","SLACK","CUSTOMER_FEEDBACK","COMPETITOR","RESEARCH","ARTICLE","DOC","RUNBOOK","EMAIL","FILE_UPLOAD"];
 
@@ -16,6 +17,7 @@ export function TextPasteUploader({ workspaceId }: { workspaceId: string }) {
   const [content, setContent] = useState("");
   const [ingestionGuidanceMd, setIngestionGuidanceMd] = useState("");
   const [recordedAt, setRecordedAt] = useState("");
+  const [timeZone, setTimeZone] = useState("UTC");
   const [error, setError] = useState("");
   const [clarification, setClarification] = useState("");
   const t = useTranslations("settings");
@@ -51,6 +53,7 @@ export function TextPasteUploader({ workspaceId }: { workspaceId: string }) {
           content,
           ingestionGuidanceMd,
           recordedAt: isMeeting && recordedAt ? recordedAt : undefined,
+          timeZone: isMeeting && recordedAt ? timeZone : undefined,
         }),
       });
       
@@ -102,10 +105,13 @@ export function TextPasteUploader({ workspaceId }: { workspaceId: string }) {
           </select>
         </label>
         {isMeeting ? (
-          <label>
-            {t("labelMeetingRecordedAt")}
-            <input type="datetime-local" value={recordedAt} onChange={e => setRecordedAt(e.target.value)} />
-          </label>
+          <>
+            <label>
+              {t("labelMeetingRecordedAt")}
+              <input type="datetime-local" value={recordedAt} onChange={e => setRecordedAt(e.target.value)} />
+            </label>
+            <TimeZoneSelect onValueChange={setTimeZone} />
+          </>
         ) : (
           <label>
             {t("labelChannel")}

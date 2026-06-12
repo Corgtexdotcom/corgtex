@@ -2,6 +2,11 @@ import { NextRequest, NextResponse } from "next/server";
 import { createMeetingSeries, enqueueMeetingAgendaPreparation } from "@corgtex/domain";
 import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
+import {
+  assertMeetingEndAfterStart,
+  parseMeetingDateTimeInput,
+  parseOptionalMeetingDateTimeInput,
+} from "@/lib/meeting-timezone";
 
 export async function POST(request: NextRequest, { params }: { params: Promise<{ workspaceId: string }> }) {
   try {
@@ -15,14 +20,23 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       recurrenceRule?: unknown;
       participantIds?: unknown;
       participantEmails?: unknown;
+      timeZone?: unknown;
     };
+    const timeZone = typeof body.timeZone === "string" ? body.timeZone : null;
+    const startsAt = parseMeetingDateTimeInput(String(body.startsAt ?? ""), timeZone, "Starts at");
+    const scheduledEndAt = parseOptionalMeetingDateTimeInput(
+      typeof body.scheduledEndAt === "string" ? body.scheduledEndAt : null,
+      timeZone,
+      "Scheduled end",
+    );
+    assertMeetingEndAfterStart(startsAt, scheduledEndAt, "Scheduled end");
 
     const result = await createMeetingSeries(actor, {
       workspaceId,
       title: String(body.title ?? ""),
       description: typeof body.description === "string" ? body.description : null,
-      startsAt: new Date(String(body.startsAt ?? "")),
-      scheduledEndAt: body.scheduledEndAt ? new Date(String(body.scheduledEndAt)) : null,
+      startsAt,
+      scheduledEndAt,
       recurrenceRule: typeof body.recurrenceRule === "string" ? body.recurrenceRule : null,
       participantIds: Array.isArray(body.participantIds) ? body.participantIds.map((value) => String(value)) : [],
       participantEmails: Array.isArray(body.participantEmails) ? body.participantEmails.map((value) => String(value)) : [],

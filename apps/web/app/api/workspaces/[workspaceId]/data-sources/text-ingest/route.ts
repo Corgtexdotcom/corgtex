@@ -3,6 +3,7 @@ import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
 import { ingestSource, intakeMeetingTranscript, requireWorkspaceMembership } from "@corgtex/domain";
 import type { BrainSourceType } from "@prisma/client";
+import { parseOptionalMeetingDateTimeInput } from "@/lib/meeting-timezone";
 
 export async function POST(request: NextRequest, { params }: { params: Promise<{ workspaceId: string }> }) {
   try {
@@ -11,7 +12,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     const membership = await requireWorkspaceMembership({ actor, workspaceId });
     
     const body = await request.json();
-    const { title, sourceType, channel, content, recordedAt, ingestionGuidanceMd } = body;
+    const { title, sourceType, channel, content, recordedAt, ingestionGuidanceMd, timeZone } = body;
     
     if (!content || typeof content !== "string") {
       return NextResponse.json({ error: { message: "Content is required" } }, { status: 400 });
@@ -26,7 +27,11 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         transcript: content,
         title: title ? String(title) : null,
         source: channel ? String(channel) : "text-paste",
-        recordedAt: recordedAt ? String(recordedAt) : null,
+        recordedAt: parseOptionalMeetingDateTimeInput(
+          recordedAt ? String(recordedAt) : null,
+          typeof timeZone === "string" ? timeZone : null,
+          "Recorded at",
+        ),
         ingestionGuidanceMd: typeof ingestionGuidanceMd === "string" ? ingestionGuidanceMd : null,
       });
 

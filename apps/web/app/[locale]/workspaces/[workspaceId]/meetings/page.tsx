@@ -13,6 +13,7 @@ import Link from "next/link";
 import { getWorkspaceFeatureFlags } from "@/lib/workspace-feature-flags";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownExcerpt } from "@/lib/components/MarkdownRenderer";
+import { TimeZoneSelect } from "@/lib/components/TimeZoneSelect";
 import { ItemActions } from "@/lib/components/ui/ItemActions";
 import { WorkItemFilterControls } from "@/lib/components/WorkItemControls";
 import {
@@ -26,10 +27,6 @@ import {
 import type { WorkItemScope } from "@/lib/work-item-view";
 
 export const dynamic = "force-dynamic";
-
-function dateTimeLocalValue(value: Date | string) {
-  return new Date(value).toISOString().slice(0, 16);
-}
 
 export default async function MeetingsPage({
   params,
@@ -251,7 +248,7 @@ export default async function MeetingsPage({
                         <input type="hidden" name="workspaceId" value={workspaceId} />
                         <input type="hidden" name="meetingId" value={meeting.id} />
                         <input type="hidden" name="title" value={meeting.title ?? ""} />
-                        <input type="hidden" name="recordedAt" value={dateTimeLocalValue(meeting.recordedAt)} />
+                        <input type="hidden" name="recordedAt" value={new Date(meeting.recordedAt).toISOString()} />
                         <label>
                           {t("formTranscriptFile")}
                           <input name="file" type="file" accept=".txt,.md,.csv,.json,.pdf,.docx" />
@@ -304,6 +301,7 @@ export default async function MeetingsPage({
                   <input name="scheduledEndAt" type="datetime-local" />
                 </label>
               </div>
+              <TimeZoneSelect />
               <label>
                 {t("formRecurrenceRule")}
                 <select name="recurrenceRule" defaultValue="">
@@ -367,6 +365,7 @@ export default async function MeetingsPage({
                   <input name="recordedAt" type="datetime-local" required />
                 </label>
               </div>
+              <TimeZoneSelect />
               <label>
                 {t("formParticipantEmails")}
                 <input name="participantEmails" placeholder={t("formParticipantEmailsPlaceholder")} />

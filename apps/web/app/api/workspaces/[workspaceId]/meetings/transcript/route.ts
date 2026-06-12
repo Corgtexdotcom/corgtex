@@ -3,6 +3,7 @@ import { AppError, intakeMeetingTranscript } from "@corgtex/domain";
 import { extractTextFromFileBuffer } from "@corgtex/knowledge";
 import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
+import { parseOptionalMeetingDateTimeInput } from "@/lib/meeting-timezone";
 
 function formString(formData: FormData, key: string) {
   const value = formData.get(key);
@@ -57,7 +58,11 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         sourceUrl: formString(formData, "sourceUrl"),
         meetingUrl: formString(formData, "meetingUrl"),
         calendarExternalId: formString(formData, "calendarExternalId"),
-        recordedAt: formString(formData, "recordedAt"),
+        recordedAt: parseOptionalMeetingDateTimeInput(
+          formString(formData, "recordedAt"),
+          formString(formData, "timeZone"),
+          "Recorded at",
+        ),
         summaryMd: formString(formData, "summaryMd"),
         ingestionGuidanceMd: formString(formData, "ingestionGuidanceMd"),
         participantIds: formList(formData, "participantIds"),
@@ -83,6 +88,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       ingestionGuidanceMd?: unknown;
       participantIds?: unknown;
       participantEmails?: unknown;
+      timeZone?: unknown;
     };
 
     const result = await intakeMeetingTranscript(actor, {
@@ -96,7 +102,11 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       sourceUrl: typeof body.sourceUrl === "string" ? body.sourceUrl : null,
       meetingUrl: typeof body.meetingUrl === "string" ? body.meetingUrl : null,
       calendarExternalId: typeof body.calendarExternalId === "string" ? body.calendarExternalId : null,
-      recordedAt: typeof body.recordedAt === "string" ? body.recordedAt : null,
+      recordedAt: parseOptionalMeetingDateTimeInput(
+        typeof body.recordedAt === "string" ? body.recordedAt : null,
+        typeof body.timeZone === "string" ? body.timeZone : null,
+        "Recorded at",
+      ),
       transcript: String(body.transcript ?? ""),
       summaryMd: typeof body.summaryMd === "string" ? body.summaryMd : null,
       ingestionGuidanceMd: typeof body.ingestionGuidanceMd === "string" ? body.ingestionGuidanceMd : null,

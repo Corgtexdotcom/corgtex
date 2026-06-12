@@ -3,6 +3,7 @@ import { AppError, classifyUploadedTextForMeeting, intakeMeetingTranscript } fro
 import { extractTextFromFileBuffer, ingestFile } from "@corgtex/knowledge";
 import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
+import { parseOptionalMeetingDateTimeInput } from "@/lib/meeting-timezone";
 
 function formString(formData: FormData, key: string) {
   const value = formData.get(key);
@@ -51,7 +52,11 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         meetingId: formString(formData, "meetingId"),
         title: formString(formData, "title"),
         source: formString(formData, "source") ?? "chat-transcript-upload",
-        recordedAt: formString(formData, "recordedAt"),
+        recordedAt: parseOptionalMeetingDateTimeInput(
+          formString(formData, "recordedAt"),
+          formString(formData, "timeZone"),
+          "Recorded at",
+        ),
         participantEmails: formList(formData, "participantEmails"),
       });
 
