@@ -1,11 +1,22 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getClaudeMcpConnectionStatus, requireWorkspaceMembership } from "@corgtex/domain";
+import { z } from "zod";
+import {
+  getClaudeMcpConnectionStatus,
+  markAiWorkspaceProviderConnected,
+  requireWorkspaceMembership,
+  verifyAiWorkspaceProviderConnection,
+} from "@corgtex/domain";
 import { resolveRequestActor } from "@/lib/auth";
-import { handleRouteError } from "@/lib/http";
+import { handleRouteError, validateBody } from "@/lib/http";
 
 type Params = {
   params: Promise<{ workspaceId: string }>;
 };
+
+const connectionActionSchema = z.object({
+  action: z.enum(["verify", "mark_connected"]),
+  providerKey: z.string().min(1),
+});
 
 export async function GET(request: NextRequest, { params }: Params) {
   try {
@@ -23,6 +34,13 @@ export async function GET(request: NextRequest, { params }: Params) {
           connected: claude.connected,
           connectedAt: claude.connectedAt?.toISOString() ?? null,
         },
+        signals: {
+          claude: {
+            connected: claude.connected,
+            connectedAt: claude.connectedAt?.toISOString() ?? null,
+            source: claude.connected ? "claude_oauth" : null,
+          },
+        },
       },
       {
         headers: {
@@ -30,6 +48,39 @@ export async function GET(request: NextRequest, { params }: Params) {
         },
       },
     );
+  } catch (error) {
+    return handleRouteError(error);
+  }
+}
+
+export async function POST(request: NextRequest, { params }: Params) {
+  try {
+    const { workspaceId } = await params;
+    const actor = await resolveRequestActor(request);
+    await requireWorkspaceMembership({ actor, workspaceId });
+    const parsed = await validateBody(request, connectionActionSchema);
+
+    if (parsed.action === "mark_connected") {
+      const state = await markAiWorkspaceProviderConnected(actor, {
+        workspaceId,
+        providerKey: parsed.providerKey,
+        source: "manual",
+      });
+      return NextResponse.json({
+        providerKey: parsed.providerKey,
+        verified: true,
+        connectedAt: new Date().toISOString(),
+        message: "Connection marked as complete.",
+        state,
+      });
+    }
+
+    const result = await verifyAiWorkspaceProviderConnection(actor, {
+      workspaceId,
+      providerKey: parsed.providerKey,
+    });
+
+    return NextResponse.json(result);
   } catch (error) {
     return handleRouteError(error);
   }

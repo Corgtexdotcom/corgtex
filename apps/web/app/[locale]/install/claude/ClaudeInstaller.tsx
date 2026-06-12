@@ -24,14 +24,30 @@ async function writeClipboard(value: string): Promise<boolean> {
   }
 }
 
+function parseRouteError(value: unknown) {
+  if (!value || typeof value !== "object") return null;
+  const error = (value as { error?: unknown }).error;
+  if (typeof error === "string") return error;
+  if (error && typeof error === "object" && typeof (error as { message?: unknown }).message === "string") {
+    return (error as { message: string }).message;
+  }
+  return null;
+}
+
 type Props = {
   connectorUrl: string;
+  workspaceId?: string | null;
+  returnTo?: string | null;
 };
 
-export function ClaudeInstaller({ connectorUrl }: Props) {
+export function ClaudeInstaller({ connectorUrl, workspaceId, returnTo }: Props) {
   const [copied, setCopied] = useState(false);
   const [opened, setOpened] = useState(false);
   const [copyFailed, setCopyFailed] = useState(false);
+  const [connected, setConnected] = useState(false);
+  const [completionMessage, setCompletionMessage] = useState<string | null>(null);
+  const [completionTone, setCompletionTone] = useState<"success" | "warning">("success");
+  const [completionPending, setCompletionPending] = useState<"verify" | "mark_connected" | null>(null);
 
   const handleCopy = () => {
     void writeClipboard(connectorUrl).then((ok) => {
@@ -54,7 +70,48 @@ export function ClaudeInstaller({ connectorUrl }: Props) {
   const stepDone = (n: number) => {
     if (n === 1) return copied;
     if (n === 2) return opened;
-    return false;
+    if (n === 4) return connected;
+    return connected;
+  };
+
+  const updateConnection = async (action: "verify" | "mark_connected") => {
+    if (!workspaceId) {
+      setConnected(true);
+      setCompletionTone("success");
+      setCompletionMessage("Done. Open Claude and start using Corgtex.");
+      return;
+    }
+
+    setCompletionPending(action);
+    setCompletionMessage(null);
+
+    try {
+      const response = await fetch(`/api/workspaces/${workspaceId}/mcp-connections`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, providerKey: "claude" }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(parseRouteError(data) ?? "Could not check the Claude connection.");
+      }
+      const verified = Boolean((data as { verified?: unknown }).verified);
+      const message = typeof (data as { message?: unknown }).message === "string"
+        ? (data as { message: string }).message
+        : verified
+          ? "Claude is connected."
+          : "Corgtex has not seen Claude finish sign-in yet.";
+
+      setConnected(verified);
+      setCompletionTone(verified ? "success" : "warning");
+      setCompletionMessage(message);
+    } catch (error) {
+      setConnected(false);
+      setCompletionTone("warning");
+      setCompletionMessage(error instanceof Error ? error.message : "Could not check the Claude connection.");
+    } finally {
+      setCompletionPending(null);
+    }
   };
 
   return (
@@ -129,7 +186,7 @@ export function ClaudeInstaller({ connectorUrl }: Props) {
 
         <Step
           n={3}
-          done={false}
+          done={connected}
           title="Add Corgtex as a custom connector"
           body={
             <ul className="list-disc space-y-1 pl-4 text-sm text-[var(--text-muted)]">
@@ -140,12 +197,58 @@ export function ClaudeInstaller({ connectorUrl }: Props) {
             </ul>
           }
         />
+
+        <Step
+          n={4}
+          done={stepDone(4)}
+          title="Finish in Corgtex"
+          body={
+            <>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  className="button secondary text-sm"
+                  disabled={completionPending !== null}
+                  onClick={() => void updateConnection("verify")}
+                >
+                  {completionPending === "verify" ? "Checking" : "Verify connection"}
+                </button>
+                <button
+                  type="button"
+                  className="button secondary text-sm"
+                  disabled={completionPending !== null}
+                  onClick={() => void updateConnection("mark_connected")}
+                >
+                  {completionPending === "mark_connected" ? "Saving" : "I connected it"}
+                </button>
+                {returnTo ? (
+                  <a href={returnTo} className="button secondary text-sm">
+                    Back to Corgtex
+                  </a>
+                ) : null}
+              </div>
+              {completionMessage ? (
+                <p
+                  role="status"
+                  className="mt-3 rounded border px-3 py-2 text-xs"
+                  style={{
+                    background: completionTone === "success" ? "var(--accent-soft)" : "rgba(255, 165, 0, 0.12)",
+                    borderColor: completionTone === "success" ? "var(--line)" : "rgba(255, 165, 0, 0.35)",
+                    color: "var(--text-strong)",
+                  }}
+                >
+                  {completionMessage}
+                </p>
+              ) : null}
+            </>
+          }
+        />
       </ol>
 
       <section className="rounded-[var(--radius-lg)] border border-[var(--line-subtle)] bg-[var(--surface-sunken)] p-5">
-        <h2 className="text-sm font-medium text-[var(--text-strong)]">Try it once you&apos;re connected</h2>
+        <h2 className="text-sm font-medium text-[var(--text-strong)]">Test in Claude</h2>
         <p className="mt-1 text-xs text-[var(--text-muted)]">
-          Open Claude and try one of these. Claude will use Corgtex automatically.
+          Open Claude and try one of these after you connect Corgtex.
         </p>
         <ul className="mt-3 space-y-2">
           {STARTER_PROMPTS.map((prompt) => (

@@ -4,13 +4,17 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const {
   getClaudeMcpConnectionStatus,
   handleRouteError,
+  markAiWorkspaceProviderConnected,
   requireWorkspaceMembership,
   resolveRequestActor,
+  verifyAiWorkspaceProviderConnection,
 } = vi.hoisted(() => ({
   getClaudeMcpConnectionStatus: vi.fn(),
   handleRouteError: vi.fn((error: unknown) => NextResponse.json({ error: String(error) }, { status: 500 })),
+  markAiWorkspaceProviderConnected: vi.fn(),
   requireWorkspaceMembership: vi.fn(),
   resolveRequestActor: vi.fn(),
+  verifyAiWorkspaceProviderConnection: vi.fn(),
 }));
 
 class MockAppError extends Error {
@@ -27,7 +31,9 @@ class MockAppError extends Error {
 vi.mock("@corgtex/domain", () => ({
   AppError: MockAppError,
   getClaudeMcpConnectionStatus,
+  markAiWorkspaceProviderConnected,
   requireWorkspaceMembership,
+  verifyAiWorkspaceProviderConnection,
 }));
 
 vi.mock("@/lib/auth", () => ({
@@ -37,6 +43,14 @@ vi.mock("@/lib/auth", () => ({
 vi.mock("@/lib/http", () => {
   return {
     handleRouteError,
+    validateBody: async (request: NextRequest, schema: any) => {
+      const body = await request.json();
+      const parsed = schema.safeParse(body);
+      if (!parsed.success) {
+        throw new MockAppError(400, "VALIDATION_ERROR", "Request body failed validation.");
+      }
+      return parsed.data;
+    },
   };
 });
 
@@ -44,8 +58,8 @@ function context(workspaceId = "workspace-1") {
   return { params: Promise.resolve({ workspaceId }) };
 }
 
-function request(workspaceId = "workspace-1") {
-  return new NextRequest(`http://localhost/api/workspaces/${workspaceId}/mcp-connections`);
+function request(workspaceId = "workspace-1", init?: ConstructorParameters<typeof NextRequest>[1]) {
+  return new NextRequest(`http://localhost/api/workspaces/${workspaceId}/mcp-connections`, init);
 }
 
 describe("GET /api/workspaces/[workspaceId]/mcp-connections", () => {
@@ -64,6 +78,22 @@ describe("GET /api/workspaces/[workspaceId]/mcp-connections", () => {
     getClaudeMcpConnectionStatus.mockResolvedValue({
       connected: true,
       connectedAt: new Date("2026-05-20T16:00:00.000Z"),
+    });
+    verifyAiWorkspaceProviderConnection.mockResolvedValue({
+      providerKey: "claude",
+      verified: true,
+      connectedAt: new Date("2026-05-20T16:00:00.000Z"),
+      message: "Claude is connected.",
+      state: {
+        activeProviderKey: "claude",
+        connections: [{ providerKey: "claude", healthStatus: "CONNECTED" }],
+        providers: [],
+      },
+    });
+    markAiWorkspaceProviderConnected.mockResolvedValue({
+      activeProviderKey: "chatgpt",
+      connections: [{ providerKey: "chatgpt", healthStatus: "CONNECTED" }],
+      providers: [],
     });
   });
 
@@ -87,6 +117,13 @@ describe("GET /api/workspaces/[workspaceId]/mcp-connections", () => {
         connected: true,
         connectedAt: "2026-05-20T16:00:00.000Z",
       },
+      signals: {
+        claude: {
+          connected: true,
+          connectedAt: "2026-05-20T16:00:00.000Z",
+          source: "claude_oauth",
+        },
+      },
     });
   });
 
@@ -103,6 +140,13 @@ describe("GET /api/workspaces/[workspaceId]/mcp-connections", () => {
       claude: {
         connected: false,
         connectedAt: null,
+      },
+      signals: {
+        claude: {
+          connected: false,
+          connectedAt: null,
+          source: null,
+        },
       },
     });
   });
@@ -127,6 +171,13 @@ describe("GET /api/workspaces/[workspaceId]/mcp-connections", () => {
         connected: false,
         connectedAt: null,
       },
+      signals: {
+        claude: {
+          connected: false,
+          connectedAt: null,
+          source: null,
+        },
+      },
     });
   });
 
@@ -139,5 +190,72 @@ describe("GET /api/workspaces/[workspaceId]/mcp-connections", () => {
     expect(response.status).toBe(500);
     expect(handleRouteError).toHaveBeenCalledWith(expect.any(MockAppError));
     expect(getClaudeMcpConnectionStatus).not.toHaveBeenCalled();
+  });
+
+  it("verifies a provider connection through the domain", async () => {
+    const { POST } = await import("./route");
+    const response = await POST(
+      request("workspace-1", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "verify", providerKey: "claude" }),
+      }),
+      context(),
+    );
+
+    expect(response.status).toBe(200);
+    expect(verifyAiWorkspaceProviderConnection).toHaveBeenCalledWith(expect.objectContaining({ kind: "user" }), {
+      workspaceId: "workspace-1",
+      providerKey: "claude",
+    });
+    await expect(response.json()).resolves.toMatchObject({
+      providerKey: "claude",
+      verified: true,
+      message: "Claude is connected.",
+    });
+  });
+
+  it("marks a manually completed provider connected", async () => {
+    const { POST } = await import("./route");
+    const response = await POST(
+      request("workspace-1", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "mark_connected", providerKey: "chatgpt" }),
+      }),
+      context(),
+    );
+
+    expect(response.status).toBe(200);
+    expect(markAiWorkspaceProviderConnected).toHaveBeenCalledWith(expect.objectContaining({ kind: "user" }), {
+      workspaceId: "workspace-1",
+      providerKey: "chatgpt",
+      source: "manual",
+    });
+    await expect(response.json()).resolves.toMatchObject({
+      providerKey: "chatgpt",
+      verified: true,
+      message: "Connection marked as complete.",
+      state: {
+        activeProviderKey: "chatgpt",
+      },
+    });
+  });
+
+  it("rejects invalid connection actions before calling the domain", async () => {
+    const { POST } = await import("./route");
+    const response = await POST(
+      request("workspace-1", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "connect", providerKey: "claude" }),
+      }),
+      context(),
+    );
+
+    expect(response.status).toBe(500);
+    expect(verifyAiWorkspaceProviderConnection).not.toHaveBeenCalled();
+    expect(markAiWorkspaceProviderConnected).not.toHaveBeenCalled();
+    expect(handleRouteError).toHaveBeenCalled();
   });
 });

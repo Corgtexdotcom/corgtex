@@ -1,8 +1,13 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  activeAiWorkspaceConnection,
   activeAiWorkspaceProvider,
+  aiWorkspaceConnectionForProvider,
+  connectedAiWorkspaceConnections,
   aiWorkspaceLaunchUrl,
+  isAiWorkspaceConnected,
+  pendingAiWorkspaceConnections,
   aiWorkspaceSettingsHref,
   buildExecutionRequestHandoffPrompt,
   buildExecutionRequestPayload,
@@ -44,9 +49,41 @@ describe("ai workspace launch helpers", () => {
       },
     ];
 
-    expect(activeAiWorkspaceProvider({ activeProviderKey: null, providers })).toBeNull();
-    expect(activeAiWorkspaceProvider({ activeProviderKey: "copilot", providers })?.shortLabel).toBe("Copilot");
-    expect(activeAiWorkspaceProvider({ activeProviderKey: "missing", providers })).toBeNull();
+    expect(activeAiWorkspaceProvider({ activeProviderKey: null, providers, connections: [] })).toBeNull();
+    expect(activeAiWorkspaceProvider({ activeProviderKey: "copilot", providers, connections: [] })?.shortLabel).toBe("Copilot");
+    expect(activeAiWorkspaceProvider({ activeProviderKey: "missing", providers, connections: [] })).toBeNull();
+  });
+
+  it("separates connected and pending app rows", () => {
+    const state = {
+      activeProviderKey: "claude",
+      providers: [],
+      connections: [
+        {
+          providerKey: "claude",
+          healthStatus: "CONNECTED",
+          isDefault: true,
+          connectedAt: "2026-06-12T12:00:00.000Z",
+          lastCheckedAt: "2026-06-12T12:00:00.000Z",
+          verificationSource: "claude_oauth",
+        },
+        {
+          providerKey: "chatgpt",
+          healthStatus: "NEEDS_SETUP",
+          isDefault: false,
+          connectedAt: null,
+          lastCheckedAt: null,
+          verificationSource: null,
+        },
+      ],
+    };
+
+    expect(activeAiWorkspaceConnection(state)?.providerKey).toBe("claude");
+    expect(aiWorkspaceConnectionForProvider(state, "chatgpt")?.healthStatus).toBe("NEEDS_SETUP");
+    expect(connectedAiWorkspaceConnections(state).map((connection) => connection.providerKey)).toEqual(["claude"]);
+    expect(pendingAiWorkspaceConnections(state).map((connection) => connection.providerKey)).toEqual(["chatgpt"]);
+    expect(isAiWorkspaceConnected(state.connections[0])).toBe(true);
+    expect(isAiWorkspaceConnected(state.connections[1])).toBe(false);
   });
 
   it("builds governed execution request payloads for the existing API", () => {

@@ -1,11 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppActor } from "@corgtex/shared";
 
-const { prismaMock, requireWorkspaceMembershipMock } = vi.hoisted(() => ({
+const { getClaudeMcpConnectionStatusMock, prismaMock, requireWorkspaceMembershipMock } = vi.hoisted(() => ({
+  getClaudeMcpConnectionStatusMock: vi.fn(),
   prismaMock: {
     $transaction: vi.fn(),
     aiWorkspaceConnection: {
       findFirst: vi.fn(),
+      findMany: vi.fn(),
       updateMany: vi.fn(),
       update: vi.fn(),
       create: vi.fn(),
@@ -16,6 +18,7 @@ const { prismaMock, requireWorkspaceMembershipMock } = vi.hoisted(() => ({
 
 vi.mock("@corgtex/shared", () => ({ prisma: prismaMock }));
 vi.mock("./auth", () => ({ requireWorkspaceMembership: requireWorkspaceMembershipMock }));
+vi.mock("./mcp-connector", () => ({ getClaudeMcpConnectionStatus: getClaudeMcpConnectionStatusMock }));
 
 const userActor: AppActor = {
   kind: "user",
@@ -41,9 +44,11 @@ describe("AI workspace selection", () => {
     vi.clearAllMocks();
     prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof prismaMock) => Promise<unknown>) => callback(prismaMock));
     prismaMock.aiWorkspaceConnection.findFirst.mockResolvedValue(null);
+    prismaMock.aiWorkspaceConnection.findMany.mockResolvedValue([]);
     prismaMock.aiWorkspaceConnection.updateMany.mockResolvedValue({ count: 1 });
     prismaMock.aiWorkspaceConnection.update.mockResolvedValue({ id: "connection-1" });
     prismaMock.aiWorkspaceConnection.create.mockResolvedValue({ id: "connection-1" });
+    getClaudeMcpConnectionStatusMock.mockResolvedValue({ connected: false, connectedAt: null });
     requireWorkspaceMembershipMock.mockResolvedValue({ id: "member-1", workspaceId: "workspace-1", userId: "user-1", role: "ADMIN", isActive: true });
   });
 
@@ -54,6 +59,7 @@ describe("AI workspace selection", () => {
 
     expect(requireWorkspaceMembershipMock).toHaveBeenCalledWith({ actor: userActor, workspaceId: "workspace-1" });
     expect(state.activeProviderKey).toBeNull();
+    expect(state.connections).toEqual([]);
     expect(state.providers.map((provider) => provider.key)).toEqual([
       "openwork",
       "chatgpt",
@@ -68,14 +74,32 @@ describe("AI workspace selection", () => {
 
   it("maps legacy Claude Code active rows to the Claude top-level provider", async () => {
     const { getAiWorkspaceSelectionState } = await import("./ai-workspace-selection");
-    prismaMock.aiWorkspaceConnection.findFirst.mockResolvedValueOnce({ provider: "CLAUDE_CODE" });
+    prismaMock.aiWorkspaceConnection.findMany.mockResolvedValueOnce([
+      {
+        provider: "CLAUDE_CODE",
+        healthStatus: "CONNECTED",
+        isDefault: true,
+        lastHealthCheckAt: new Date("2026-06-01T10:00:00.000Z"),
+        lastSuccessfulHealthCheckAt: new Date("2026-06-01T10:00:00.000Z"),
+        setupState: { verificationSource: "manual" },
+        updatedAt: new Date("2026-06-01T10:00:00.000Z"),
+      },
+    ]);
 
     const state = await getAiWorkspaceSelectionState(userActor, "workspace-1");
 
     expect(state.activeProviderKey).toBe("claude");
+    expect(state.connections).toEqual([
+      expect.objectContaining({
+        providerKey: "claude",
+        healthStatus: "CONNECTED",
+        isDefault: true,
+        verificationSource: "manual",
+      }),
+    ]);
   });
 
-  it("creates a user-scoped active provider row and clears prior active rows", async () => {
+  it("creates a user-scoped default provider row for legacy selection", async () => {
     const { setActiveAiWorkspaceProvider } = await import("./ai-workspace-selection");
 
     await setActiveAiWorkspaceProvider(userActor, {
@@ -106,7 +130,7 @@ describe("AI workspace selection", () => {
 
   it("updates an existing provider row when switching back to it", async () => {
     const { setActiveAiWorkspaceProvider } = await import("./ai-workspace-selection");
-    prismaMock.aiWorkspaceConnection.findFirst.mockResolvedValueOnce({ id: "connection-1" });
+    prismaMock.aiWorkspaceConnection.findFirst.mockResolvedValueOnce({ id: "connection-1", healthStatus: "CONNECTED" });
 
     await setActiveAiWorkspaceProvider(userActor, {
       workspaceId: "workspace-1",
@@ -118,10 +142,100 @@ describe("AI workspace selection", () => {
       data: {
         displayName: "OpenWork Free",
         isDefault: true,
-        healthStatus: "NEEDS_SETUP",
       },
     });
     expect(prismaMock.aiWorkspaceConnection.create).not.toHaveBeenCalled();
+  });
+
+  it("starts setup without clearing defaults or downgrading connected rows", async () => {
+    const { startAiWorkspaceProviderSetup } = await import("./ai-workspace-selection");
+    prismaMock.aiWorkspaceConnection.findFirst.mockResolvedValueOnce({ id: "connection-1", healthStatus: "CONNECTED" });
+
+    await startAiWorkspaceProviderSetup(userActor, {
+      workspaceId: "workspace-1",
+      providerKey: "claude",
+    });
+
+    expect(prismaMock.aiWorkspaceConnection.updateMany).not.toHaveBeenCalled();
+    expect(prismaMock.aiWorkspaceConnection.update).toHaveBeenCalledWith({
+      where: { id: "connection-1" },
+      data: {
+        displayName: "Claude",
+        healthStatus: "CONNECTED",
+      },
+    });
+  });
+
+  it("marks a provider connected and keeps it as default", async () => {
+    const { markAiWorkspaceProviderConnected } = await import("./ai-workspace-selection");
+    prismaMock.aiWorkspaceConnection.findFirst.mockResolvedValueOnce({
+      id: "connection-1",
+      setupState: { existing: true },
+    });
+    const connectedAt = new Date("2026-06-12T12:00:00.000Z");
+
+    await markAiWorkspaceProviderConnected(userActor, {
+      workspaceId: "workspace-1",
+      providerKey: "chatgpt",
+      source: "manual",
+      connectedAt,
+    });
+
+    expect(prismaMock.aiWorkspaceConnection.updateMany).toHaveBeenCalledWith({
+      where: {
+        workspaceId: "workspace-1",
+        ownerUserId: "user-1",
+      },
+      data: { isDefault: false },
+    });
+    expect(prismaMock.aiWorkspaceConnection.update).toHaveBeenCalledWith({
+      where: { id: "connection-1" },
+      data: expect.objectContaining({
+        displayName: "ChatGPT",
+        healthStatus: "CONNECTED",
+        isDefault: true,
+        lastSuccessfulHealthCheckAt: connectedAt,
+        lastError: null,
+        setupState: expect.objectContaining({
+          existing: true,
+          verificationSource: "manual",
+          verifiedAt: connectedAt.toISOString(),
+        }),
+      }),
+    });
+  });
+
+  it("verifies Claude from an observed MCP OAuth connection", async () => {
+    const { verifyAiWorkspaceProviderConnection } = await import("./ai-workspace-selection");
+    const connectedAt = new Date("2026-06-12T12:00:00.000Z");
+    getClaudeMcpConnectionStatusMock.mockResolvedValueOnce({ connected: true, connectedAt });
+    prismaMock.aiWorkspaceConnection.findFirst.mockResolvedValueOnce({
+      id: "connection-1",
+      setupState: {},
+    });
+
+    const result = await verifyAiWorkspaceProviderConnection(userActor, {
+      workspaceId: "workspace-1",
+      providerKey: "claude",
+    });
+
+    expect(getClaudeMcpConnectionStatusMock).toHaveBeenCalledWith({
+      userId: "user-1",
+      workspaceId: "workspace-1",
+    });
+    expect(result).toMatchObject({
+      providerKey: "claude",
+      verified: true,
+      connectedAt,
+      message: "Claude is connected.",
+    });
+    expect(prismaMock.aiWorkspaceConnection.update).toHaveBeenCalledWith({
+      where: { id: "connection-1" },
+      data: expect.objectContaining({
+        healthStatus: "CONNECTED",
+        setupState: expect.objectContaining({ verificationSource: "claude_oauth" }),
+      }),
+    });
   });
 
   it("rejects hidden, unknown, and non-user selections", async () => {

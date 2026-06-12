@@ -2,7 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const getAiWorkspaceSelectionState = vi.fn();
+const makeDefaultAiWorkspaceProvider = vi.fn();
 const setActiveAiWorkspaceProvider = vi.fn();
+const startAiWorkspaceProviderSetup = vi.fn();
 
 const userActor = {
   kind: "user",
@@ -28,8 +30,23 @@ vi.mock("@corgtex/domain", () => ({
     }
   },
   getAiWorkspaceSelectionState,
+  makeDefaultAiWorkspaceProvider,
   setActiveAiWorkspaceProvider,
+  startAiWorkspaceProviderSetup,
 }));
+
+vi.mock("@/lib/http", async () => {
+  return {
+    validateBody: async (request: NextRequest, schema: any) => {
+      const body = await request.json();
+      const parsed = schema.safeParse(body);
+      if (!parsed.success) {
+        throw { status: 400, code: "VALIDATION_ERROR", message: "Request body failed validation." };
+      }
+      return parsed.data;
+    },
+  };
+});
 
 vi.mock("@/lib/route-handler", () => ({
   withWorkspaceRoute: (handler: any) => async (request: NextRequest, context: { params: Promise<Record<string, string>> }) => {
@@ -65,10 +82,22 @@ describe("AI workspace selection route", () => {
     routeActor = userActor;
     getAiWorkspaceSelectionState.mockResolvedValue({
       activeProviderKey: null,
+      connections: [],
       providers: [{ key: "openwork", label: "OpenWork Free" }],
     });
     setActiveAiWorkspaceProvider.mockResolvedValue({
       activeProviderKey: "copilot",
+      connections: [{ providerKey: "copilot", healthStatus: "NEEDS_SETUP" }],
+      providers: [{ key: "copilot", label: "GitHub Copilot" }],
+    });
+    startAiWorkspaceProviderSetup.mockResolvedValue({
+      activeProviderKey: null,
+      connections: [{ providerKey: "claude", healthStatus: "NEEDS_SETUP" }],
+      providers: [{ key: "claude", label: "Claude" }],
+    });
+    makeDefaultAiWorkspaceProvider.mockResolvedValue({
+      activeProviderKey: "chatgpt",
+      connections: [{ providerKey: "chatgpt", healthStatus: "CONNECTED", isDefault: true }],
       providers: [{ key: "copilot", label: "GitHub Copilot" }],
     });
   });
@@ -82,11 +111,12 @@ describe("AI workspace selection route", () => {
     expect(getAiWorkspaceSelectionState).toHaveBeenCalledWith(userActor, "workspace-1");
     await expect(response.json()).resolves.toEqual({
       activeProviderKey: null,
+      connections: [],
       providers: [{ key: "openwork", label: "OpenWork Free" }],
     });
   });
 
-  it("persists a selected Copilot provider", async () => {
+  it("keeps legacy selected-provider POST behavior", async () => {
     const { POST } = await import("./route");
     const response = await POST(
       request("http://localhost/api/workspaces/workspace-1/ai-workspace-selection", {
@@ -104,7 +134,50 @@ describe("AI workspace selection route", () => {
     });
     await expect(response.json()).resolves.toEqual({
       activeProviderKey: "copilot",
+      connections: [{ providerKey: "copilot", healthStatus: "NEEDS_SETUP" }],
       providers: [{ key: "copilot", label: "GitHub Copilot" }],
+    });
+  });
+
+  it("starts setup without making the provider default", async () => {
+    const { POST } = await import("./route");
+    const response = await POST(
+      request("http://localhost/api/workspaces/workspace-1/ai-workspace-selection", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "start_setup", providerKey: "claude" }),
+      }),
+      context(),
+    );
+
+    expect(response.status).toBe(200);
+    expect(startAiWorkspaceProviderSetup).toHaveBeenCalledWith(userActor, {
+      workspaceId: "workspace-1",
+      providerKey: "claude",
+    });
+    expect(setActiveAiWorkspaceProvider).not.toHaveBeenCalled();
+    await expect(response.json()).resolves.toEqual({
+      activeProviderKey: null,
+      connections: [{ providerKey: "claude", healthStatus: "NEEDS_SETUP" }],
+      providers: [{ key: "claude", label: "Claude" }],
+    });
+  });
+
+  it("makes a connected provider the default explicitly", async () => {
+    const { POST } = await import("./route");
+    const response = await POST(
+      request("http://localhost/api/workspaces/workspace-1/ai-workspace-selection", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "make_default", providerKey: "chatgpt" }),
+      }),
+      context(),
+    );
+
+    expect(response.status).toBe(200);
+    expect(makeDefaultAiWorkspaceProvider).toHaveBeenCalledWith(userActor, {
+      workspaceId: "workspace-1",
+      providerKey: "chatgpt",
     });
   });
 
@@ -121,6 +194,7 @@ describe("AI workspace selection route", () => {
 
     expect(response.status).toBe(400);
     expect(setActiveAiWorkspaceProvider).not.toHaveBeenCalled();
+    expect(startAiWorkspaceProviderSetup).not.toHaveBeenCalled();
   });
 
   it("passes non-user actors through so domain selection can reject mutation", async () => {
