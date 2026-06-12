@@ -4,23 +4,7 @@
 builder = "DOCKERFILE"
 dockerfilePath = "/deploy/Dockerfile.worker"
 watchPatterns = [
-  "apps/worker/**",
-  "apps/web/package.json",
-  "apps/site/package.json",
-  "packages/shared/**",
-  "packages/workflows/**",
-  "packages/agents/**",
-  "packages/knowledge/**",
-  "packages/models/**",
-  "packages/**/package.json",
-  "prisma/**",
-  "package.json",
-  "package-lock.json",
-  "tsconfig.json",
-  "tsconfig.base.json",
-  "eslint.config.mjs",
-  "deploy/Dockerfile.worker",
-  "deploy/railway.worker.toml",
+  "**",
 ]
 
 [deploy]
