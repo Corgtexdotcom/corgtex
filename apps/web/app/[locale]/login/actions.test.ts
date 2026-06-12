@@ -159,6 +159,74 @@ describe("loginAction", () => {
     expect(setSessionCookie).toHaveBeenCalledWith("session-token", expiresAt);
   });
 
+  it("sends users with multiple workspaces to account selection", async () => {
+    const { loginAction } = await import("./actions");
+    const { initialLoginActionState } = await import("./state");
+    const expiresAt = new Date("2026-04-03T00:00:00.000Z");
+    loginUserWithPassword.mockResolvedValue({
+      token: "session-token",
+      expiresAt,
+      user: {
+        id: "user-1",
+        email: "admin@example.com",
+        displayName: "Admin",
+        globalRole: null,
+      },
+    });
+    listActorWorkspaces.mockResolvedValue([
+      {
+        id: "workspace-1",
+      },
+      {
+        id: "workspace-2",
+      },
+    ]);
+
+    await expect(
+      loginAction(initialLoginActionState, buildFormData("admin@example.com", "password123")),
+    ).resolves.toEqual({
+      email: "admin@example.com",
+      error: null,
+      redirectTo: "/find-account",
+    });
+
+    expect(setSessionCookie).toHaveBeenCalledWith("session-token", expiresAt);
+  });
+
+  it("localizes the account selection redirect for Spanish users with multiple workspaces", async () => {
+    const { loginAction } = await import("./actions");
+    const { initialLoginActionState } = await import("./state");
+    const expiresAt = new Date("2026-04-03T00:00:00.000Z");
+    loginUserWithPassword.mockResolvedValue({
+      token: "session-token",
+      expiresAt,
+      user: {
+        id: "user-1",
+        email: "admin@example.com",
+        displayName: "Admin",
+        globalRole: null,
+      },
+    });
+    listActorWorkspaces.mockResolvedValue([
+      {
+        id: "workspace-1",
+      },
+      {
+        id: "workspace-2",
+      },
+    ]);
+
+    await expect(
+      loginAction(initialLoginActionState, buildFormData("admin@example.com", "password123", "es")),
+    ).resolves.toEqual({
+      email: "admin@example.com",
+      error: null,
+      redirectTo: "/es/find-account",
+    });
+
+    expect(setSessionCookie).toHaveBeenCalledWith("session-token", expiresAt);
+  });
+
   it("sends operators to their workspace on the normal app deployment", async () => {
     const { loginAction } = await import("./actions");
     const { initialLoginActionState } = await import("./state");

@@ -1,5 +1,6 @@
 import { LoginForm } from "./LoginForm";
 import { DemoButton } from "./DemoButton";
+import Link from "next/link";
 import { getTranslations } from "next-intl/server";
 
 function singleSearchParam(value: string | string[] | undefined) {
@@ -7,12 +8,16 @@ function singleSearchParam(value: string | string[] | undefined) {
 }
 
 export default async function LoginPage({
+  params,
   searchParams,
 }: {
+  params: Promise<{ locale: string }>;
   searchParams?: Promise<Record<string, string | string[] | undefined>>;
 }) {
+  const { locale } = await params;
   const resolvedSearchParams = searchParams ? await searchParams : {};
   const t = await getTranslations("auth");
+  const findAccountHref = locale === "es" ? "/es/find-account" : "/find-account";
 
   function pageErrorMessage(rawError: string | string[] | undefined) {
     const error = singleSearchParam(rawError);
@@ -35,6 +40,7 @@ export default async function LoginPage({
 
   const pageError = pageErrorMessage(resolvedSearchParams.error);
   const pageSuccess = pageSuccessMessage(resolvedSearchParams.message);
+  const initialEmail = singleSearchParam(resolvedSearchParams.email);
 
   return (
     <main className="login-shell">
@@ -57,7 +63,10 @@ export default async function LoginPage({
           </p>
         ) : null}
 
-        <LoginForm />
+        <LoginForm initialEmail={initialEmail} />
+        <Link href={findAccountHref} className="muted" style={{ display: "inline-block", fontSize: 14, marginTop: 12 }}>
+          {t("findEnterpriseAccount")}
+        </Link>
         <DemoButton />
       </section>
     </main>

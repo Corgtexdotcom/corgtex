@@ -92,6 +92,13 @@ export async function loginAction(
   return {
     email,
     error: null,
-    redirectTo: localizedRedirect(workspaces[0] ? `/workspaces/${workspaces[0].id}` : "/workspaces/create", locale),
+    redirectTo: localizedRedirect(
+      workspaces.length > 1
+        ? "/find-account"
+        : workspaces[0]
+          ? `/workspaces/${workspaces[0].id}`
+          : "/workspaces/create",
+      locale,
+    ),
   };
 }

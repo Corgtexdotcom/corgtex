@@ -51,6 +51,11 @@ export function signupUrlForLocale(locale?: SiteLocale | string | null) {
   return `${appUrl}${normalizeSiteLocale(locale) === "es" ? "/es/signup" : "/signup"}`;
 }
 
+export function enterpriseLoginUrlForLocale(locale?: SiteLocale | string | null) {
+  const { appUrl } = getSiteConfig();
+  return `${appUrl}${normalizeSiteLocale(locale) === "es" ? "/es/find-account" : "/find-account"}`;
+}
+
 export function demoGatePathForLocale(locale?: SiteLocale | string | null) {
   return normalizeSiteLocale(locale) === "es" ? "/es/demo" : "/demo";
 }

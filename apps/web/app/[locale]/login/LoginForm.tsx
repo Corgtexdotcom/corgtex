@@ -17,7 +17,7 @@ function SubmitButton({ label, loadingLabel }: { label: string, loadingLabel: st
   );
 }
 
-export function LoginForm() {
+export function LoginForm({ initialEmail = "" }: { initialEmail?: string }) {
   const [state, formAction] = useActionState(loginAction, initialLoginActionState);
   const locale = useLocale();
   const forgotPasswordHref = locale === "es" ? "/es/forgot-password" : "/forgot-password";
@@ -40,7 +40,7 @@ export function LoginForm() {
           type="email"
           required
           autoComplete="email"
-          defaultValue={state.email}
+          defaultValue={state.email || initialEmail}
           suppressHydrationWarning
         />
       </label>
