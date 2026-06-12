@@ -108,10 +108,18 @@ export default async function WorkspaceLayout({
     featureFlags.MEETING_RECORDERS && meetingRecorderConfig?.featureEnabled && meetingRecorderConfig.config.enabled,
   );
   const aiWorkspaceSelection = featureFlags.AI_WORKSPACES
-    ? await getAiWorkspaceSelectionState(actor, workspaceId).catch(() => ({ activeProviderKey: null, providers: [] }))
-    : { activeProviderKey: null, providers: [] };
+    ? await getAiWorkspaceSelectionState(actor, workspaceId).catch(() => ({ activeProviderKey: null, providers: [], connections: [] }))
+    : { activeProviderKey: null, providers: [], connections: [] };
   const aiWorkspaceState: AiWorkspaceLaunchState = {
     activeProviderKey: aiWorkspaceSelection.activeProviderKey,
+    connections: aiWorkspaceSelection.connections.map((connection) => ({
+      providerKey: connection.providerKey,
+      healthStatus: connection.healthStatus,
+      isDefault: connection.isDefault,
+      connectedAt: connection.connectedAt?.toISOString() ?? null,
+      lastCheckedAt: connection.lastCheckedAt?.toISOString() ?? null,
+      verificationSource: connection.verificationSource,
+    })),
     providers: aiWorkspaceSelection.providers.map((provider) => ({
       key: provider.key,
       label: provider.label,

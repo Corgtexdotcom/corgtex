@@ -13,7 +13,6 @@ import {
   buildVsCodeMcpConfig,
   CLAUDE_CODE_INSTALLER_PATH,
   CLAUDE_CONNECTORS_URL,
-  CLAUDE_INSTALLER_PATH,
   GEMINI_MCP_DOCS_URL,
   OPENWORK_DOWNLOAD_URL,
 } from "@/lib/install-helpers";
@@ -277,10 +276,19 @@ export function buildAiWorkspaceSetupCards(
   providers: AiWorkspaceProviderView[],
   connectorUrl: string,
   origin?: string | null,
+  workspaceId?: string | null,
 ): AiWorkspaceSetupCard[] {
   const cursorLinks = buildCursorInstallLinks(connectorUrl);
   const claudeCodeCommand = buildClaudeCodeCommand(connectorUrl);
-  const claudeInstallerShareUrl = buildClaudeInstallerShareUrl(origin);
+  const claudeReturnTo = workspaceId ? `/workspaces/${workspaceId}/settings?tab=ai-workspaces&provider=claude` : null;
+  const claudeInstallerPath = buildClaudeInstallerShareUrl(null, {
+    workspaceId,
+    returnTo: claudeReturnTo,
+  });
+  const claudeInstallerShareUrl = buildClaudeInstallerShareUrl(origin, {
+    workspaceId,
+    returnTo: claudeReturnTo,
+  });
 
   return [...providers].sort(providerDisplayComparator).map((provider) => {
     const group = providerGroup(provider);
@@ -348,7 +356,7 @@ export function buildAiWorkspaceSetupCards(
       return {
         ...base,
         actions: [
-          { kind: "open", label: "Connect Claude", href: CLAUDE_INSTALLER_PATH, variant: "primary" },
+          { kind: "open", label: "Connect Claude", href: claudeInstallerPath, variant: "primary" },
           {
             kind: "copyAndOpen",
             label: "Open Claude settings",

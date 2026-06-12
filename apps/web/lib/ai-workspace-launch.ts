@@ -28,9 +28,19 @@ export type AiWorkspaceLaunchProvider = {
   setupVariants: AiWorkspaceSetupVariant[];
 };
 
+export type AiWorkspaceLaunchConnection = {
+  providerKey: string;
+  healthStatus: string;
+  isDefault: boolean;
+  connectedAt: string | null;
+  lastCheckedAt: string | null;
+  verificationSource: string | null;
+};
+
 export type AiWorkspaceLaunchState = {
   activeProviderKey: string | null;
   providers: AiWorkspaceLaunchProvider[];
+  connections: AiWorkspaceLaunchConnection[];
 };
 
 export type ExecutionWritebackOption = {
@@ -87,6 +97,40 @@ export function aiWorkspaceSettingsHref(workspaceId: string, providerKey: string
 export function activeAiWorkspaceProvider(state: AiWorkspaceLaunchState | null | undefined) {
   if (!state?.activeProviderKey) return null;
   return state.providers.find((provider) => provider.key === state.activeProviderKey) ?? null;
+}
+
+export function aiWorkspaceProviderByKey(state: AiWorkspaceLaunchState | null | undefined, providerKey: string | null | undefined) {
+  if (!state || !providerKey) return null;
+  return state.providers.find((provider) => provider.key === providerKey) ?? null;
+}
+
+export function aiWorkspaceConnectionForProvider(
+  state: AiWorkspaceLaunchState | null | undefined,
+  providerKey: string | null | undefined,
+) {
+  if (!state || !providerKey) return null;
+  return state.connections.find((connection) => connection.providerKey === providerKey) ?? null;
+}
+
+export function connectedAiWorkspaceConnections(state: AiWorkspaceLaunchState | null | undefined) {
+  return state?.connections.filter((connection) => connection.healthStatus === "CONNECTED") ?? [];
+}
+
+export function pendingAiWorkspaceConnections(state: AiWorkspaceLaunchState | null | undefined) {
+  return state?.connections.filter((connection) => connection.healthStatus !== "CONNECTED") ?? [];
+}
+
+export function activeAiWorkspaceConnection(state: AiWorkspaceLaunchState | null | undefined) {
+  if (!state) return null;
+  return state.connections.find((connection) => connection.providerKey === state.activeProviderKey)
+    ?? state.connections.find((connection) => connection.isDefault)
+    ?? state.connections.find((connection) => connection.healthStatus === "CONNECTED")
+    ?? state.connections[0]
+    ?? null;
+}
+
+export function isAiWorkspaceConnected(connection: AiWorkspaceLaunchConnection | null | undefined) {
+  return connection?.healthStatus === "CONNECTED";
 }
 
 export function writebackOptionLabel(value: string | null | undefined) {

@@ -6,6 +6,7 @@ import {
   getUserNotificationPreferences,
   getUserProfile,
   getWorkspacePlanState,
+  getAiWorkspaceSelectionState,
   listAgentConfigs,
   listAiWorkspaceToolProviders,
   listMemberInviteRequests,
@@ -193,6 +194,9 @@ export default async function SettingsPage({
       readinessChecks: service.readinessChecks,
     }))
     : [];
+  const aiWorkspaceSelection = tab === "ai-workspaces" && featureFlags.AI_WORKSPACES
+    ? await getAiWorkspaceSelectionState(actor, workspaceId).catch(() => ({ activeProviderKey: null, providers: [], connections: [] }))
+    : { activeProviderKey: null, providers: [], connections: [] };
   const selectedProviderKey = normalizeSelectedProvider(search.provider, aiWorkspaceProviders);
   const selectedServiceKey = normalizeSelectedService(search.service, enterpriseServices);
   const agentBudget = budget
@@ -321,6 +325,14 @@ export default async function SettingsPage({
           canRequestManagedServices={isAdmin}
           requestManagedServiceAction={requestManagedEnterpriseServiceAction}
           workspaceId={workspaceId}
+          connections={aiWorkspaceSelection.connections.map((connection) => ({
+            providerKey: connection.providerKey,
+            healthStatus: connection.healthStatus,
+            isDefault: connection.isDefault,
+            connectedAt: connection.connectedAt?.toISOString() ?? null,
+            lastCheckedAt: connection.lastCheckedAt?.toISOString() ?? null,
+            verificationSource: connection.verificationSource,
+          }))}
           selectedProviderKey={selectedProviderKey}
           selectedServiceKey={selectedServiceKey}
         />

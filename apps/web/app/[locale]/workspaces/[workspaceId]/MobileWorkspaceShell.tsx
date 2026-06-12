@@ -61,7 +61,7 @@ export function MobileWorkspaceShell({
   const tNav = useTranslations("nav");
   const tMobile = useTranslations("mobile");
   const [mode, setModeState] = useState<MobileMode>("workspace");
-  const [aiTab, setAiTab] = useState<MobileAiTab>("ask");
+  const [aiTab, setAiTab] = useState<MobileAiTab>("work");
   const [hasLoadedStoredMode, setHasLoadedStoredMode] = useState(false);
   const lastViewedKeyRef = useRef<string | null>(null);
 

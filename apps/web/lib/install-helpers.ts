@@ -154,7 +154,15 @@ export const CLAUDE_INSTALLER_PATH = "/install/claude";
 export const CLAUDE_CODE_INSTALLER_PATH = "/install/claude-code";
 export const INSTALL_INDEX_PATH = "/install";
 
-export function buildClaudeInstallerShareUrl(origin?: string | null): string {
+export function buildClaudeInstallerShareUrl(
+  origin?: string | null,
+  params: { workspaceId?: string | null; returnTo?: string | null } = {},
+): string {
   const trimmedOrigin = origin?.trim().replace(/\/$/, "");
-  return trimmedOrigin ? `${trimmedOrigin}${CLAUDE_INSTALLER_PATH}` : CLAUDE_INSTALLER_PATH;
+  const search = new URLSearchParams();
+  if (params.workspaceId) search.set("workspaceId", params.workspaceId);
+  if (params.returnTo) search.set("returnTo", params.returnTo);
+  const suffix = search.size > 0 ? `?${search.toString()}` : "";
+  const path = `${CLAUDE_INSTALLER_PATH}${suffix}`;
+  return trimmedOrigin ? `${trimmedOrigin}${path}` : path;
 }

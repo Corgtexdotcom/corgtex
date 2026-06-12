@@ -190,6 +190,24 @@ describe("AI workspace UI helpers", () => {
     });
   });
 
+  it("adds workspace context to the Claude installer link when available", () => {
+    const cards = buildAiWorkspaceSetupCards(
+      [provider({ key: "claude", label: "Claude", category: "BYO" })],
+      "https://app.corgtex.com/mcp",
+      "https://app.corgtex.com",
+      "workspace-1",
+    );
+    const claudeCard = cards[0];
+
+    expect(claudeCard.actions[0]).toMatchObject({
+      kind: "open",
+      href: "/install/claude?workspaceId=workspace-1&returnTo=%2Fworkspaces%2Fworkspace-1%2Fsettings%3Ftab%3Dai-workspaces%26provider%3Dclaude",
+    });
+    expect(claudeCard.actions.find((action) => action.label === "Copy share link")).toMatchObject({
+      value: "https://app.corgtex.com/install/claude?workspaceId=workspace-1&returnTo=%2Fworkspaces%2Fworkspace-1%2Fsettings%3Ftab%3Dai-workspaces%26provider%3Dclaude",
+    });
+  });
+
   it("keeps provider guidance compact and avoids offering Copilot cloud-agent OAuth setup", () => {
     const providers = [
       provider({ key: "chatgpt", label: "ChatGPT", category: "BYO" }),

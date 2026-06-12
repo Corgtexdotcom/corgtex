@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import { headers } from "next/headers";
 import {
   getCatalogItem,
+  getAiWorkspaceSelectionState,
   getMeetingRecorderConfig,
   listAiWorkspaceToolProviders,
   listCommunicationInstallations,
@@ -187,6 +188,7 @@ export default async function CatalogItemPage({
         limitations: [...variant.limitations],
       })),
     }));
+    const aiWorkspaceSelection = await getAiWorkspaceSelectionState(actor, workspaceId).catch(() => ({ activeProviderKey: null, providers: [], connections: [] }));
     setupPanel = (
       <AiWorkspaceConnectorPanel
         connectorUrl={connectorUrl}
@@ -197,12 +199,20 @@ export default async function CatalogItemPage({
         canRequestManagedServices={false}
         requestManagedServiceAction={requestManagedEnterpriseServiceAction}
         workspaceId={workspaceId}
+        connections={aiWorkspaceSelection.connections.map((connection) => ({
+          providerKey: connection.providerKey,
+          healthStatus: connection.healthStatus,
+          isDefault: connection.isDefault,
+          connectedAt: connection.connectedAt?.toISOString() ?? null,
+          lastCheckedAt: connection.lastCheckedAt?.toISOString() ?? null,
+          verificationSource: connection.verificationSource,
+        }))}
         selectedProviderKey={normalizeSelectedProvider(item.sourceId ?? search?.provider, providers)}
         selectedServiceKey={null}
       />
     );
   } else if (item.sourceType === "ENTERPRISE_SERVICE" && featureFlags.AI_WORKSPACES && featureFlags.MANAGED_ENTERPRISE_SERVICES) {
-    const [providers, enterpriseServices] = await Promise.all([
+    const [providers, enterpriseServices, aiWorkspaceSelection] = await Promise.all([
       Promise.resolve(listAiWorkspaceToolProviders().map((provider) => ({
         ...provider,
         capabilities: [...provider.capabilities],
@@ -234,6 +244,7 @@ export default async function CatalogItemPage({
         supportNotesMd: service.supportNotesMd,
         readinessChecks: service.readinessChecks,
       }))),
+      getAiWorkspaceSelectionState(actor, workspaceId).catch(() => ({ activeProviderKey: null, providers: [], connections: [] })),
     ]);
     setupPanel = (
       <AiWorkspaceConnectorPanel
@@ -245,6 +256,14 @@ export default async function CatalogItemPage({
         canRequestManagedServices={isWorkspaceAdmin}
         requestManagedServiceAction={requestManagedEnterpriseServiceAction}
         workspaceId={workspaceId}
+        connections={aiWorkspaceSelection.connections.map((connection) => ({
+          providerKey: connection.providerKey,
+          healthStatus: connection.healthStatus,
+          isDefault: connection.isDefault,
+          connectedAt: connection.connectedAt?.toISOString() ?? null,
+          lastCheckedAt: connection.lastCheckedAt?.toISOString() ?? null,
+          verificationSource: connection.verificationSource,
+        }))}
         selectedProviderKey={normalizeSelectedProvider(search?.provider, providers)}
         selectedServiceKey={normalizeSelectedService(item.sourceId ?? search?.service, enterpriseServices)}
       />
