@@ -6,7 +6,10 @@ import { recordAudit } from "./audit-trail";
 import { requireWorkspaceMembership } from "./auth";
 import { AppError, invariant } from "./errors";
 
-export type ExternalMcpProviderKey = "notion";
+export const EXTERNAL_MCP_PROVIDER_KEYS = ["box", "notion", "atlassian", "miro"] as const;
+export const CONNECTABLE_EXTERNAL_MCP_PROVIDER_KEYS = ["notion"] as const;
+
+export type ExternalMcpProviderKey = typeof EXTERNAL_MCP_PROVIDER_KEYS[number];
 export type ExternalMcpOperation = "read" | "write";
 
 type ExternalMcpProvider = {
@@ -14,8 +17,11 @@ type ExternalMcpProvider = {
   displayName: string;
   serverUrl: string;
   authMode: "oauth";
-  searchToolName: string;
-  fetchToolName: string;
+  connectionEnabled: boolean;
+  searchToolName: string | null;
+  fetchToolName: string | null;
+  sourceUrl: string;
+  adminNotes: string;
 };
 
 export type ExternalMcpConnectionSummary = {
@@ -23,6 +29,7 @@ export type ExternalMcpConnectionSummary = {
   displayName: string;
   serverUrl: string;
   authMode: "oauth";
+  connectionEnabled: boolean;
   status: "connected" | "needs_connection" | "error" | "disconnected";
   connectionId: string | null;
   connectionOwnerUserId: string | null;
@@ -32,6 +39,8 @@ export type ExternalMcpConnectionSummary = {
   supportsFetch: boolean;
   searchToolName: string | null;
   fetchToolName: string | null;
+  sourceUrl: string;
+  adminNotes: string;
   lastError: string | null;
 };
 
@@ -51,13 +60,49 @@ type ExternalMcpConnectionRecord = {
 };
 
 const EXTERNAL_MCP_PROVIDERS: Record<ExternalMcpProviderKey, ExternalMcpProvider> = {
+  box: {
+    providerKey: "box",
+    displayName: "Box",
+    serverUrl: "https://mcp.box.com",
+    authMode: "oauth",
+    connectionEnabled: false,
+    searchToolName: null,
+    fetchToolName: null,
+    sourceUrl: "https://developer.box.com/guides/box-mcp/",
+    adminNotes: "Official hosted MCP exists, but Corgtex needs Box admin/OAuth product setup before enabling user connection.",
+  },
   notion: {
     providerKey: "notion",
     displayName: "Notion",
     serverUrl: "https://mcp.notion.com/mcp",
     authMode: "oauth",
+    connectionEnabled: true,
     searchToolName: "notion-search",
     fetchToolName: "notion-fetch",
+    sourceUrl: "https://developers.notion.com/guides/mcp/overview",
+    adminNotes: "Token-backed pilot provider. Replace token-post setup with user-facing OAuth before broad release.",
+  },
+  atlassian: {
+    providerKey: "atlassian",
+    displayName: "Atlassian",
+    serverUrl: "https://mcp.atlassian.com/v1/mcp/authv2",
+    authMode: "oauth",
+    connectionEnabled: false,
+    searchToolName: null,
+    fetchToolName: null,
+    sourceUrl: "https://support.atlassian.com/atlassian-rovo-mcp-server/docs/getting-started-with-the-atlassian-remote-mcp-server/",
+    adminNotes: "Rovo MCP requires Atlassian site/admin authorization before Corgtex can safely expose connection.",
+  },
+  miro: {
+    providerKey: "miro",
+    displayName: "Miro",
+    serverUrl: "https://mcp.miro.com/mcp",
+    authMode: "oauth",
+    connectionEnabled: false,
+    searchToolName: null,
+    fetchToolName: null,
+    sourceUrl: "https://developers.miro.com/changelog/its-here-the-miro-mcp-server-is-now-in-public-beta",
+    adminNotes: "Miro MCP is beta and Enterprise-admin gated; keep request-only until a workspace is explicitly enabled.",
   },
 };
 
@@ -79,13 +124,18 @@ function providerForKey(providerKey: string) {
   return provider;
 }
 
+function requireConnectableProvider(provider: ExternalMcpProvider) {
+  invariant(provider.connectionEnabled, 400, "NOT_READY", `${provider.displayName} MCP setup is not enabled in Corgtex yet.`);
+  invariant(provider.searchToolName && provider.fetchToolName, 400, "NOT_READY", `${provider.displayName} MCP tools are not allowlisted in Corgtex yet.`);
+}
+
 function classifyExternalMcpOperation(
   provider: ExternalMcpProvider,
   toolName: string,
   operation?: ExternalMcpOperation | null,
 ): ExternalMcpOperation {
   if (operation === "read" || operation === "write") return operation;
-  if (toolName === provider.searchToolName || toolName === provider.fetchToolName) return "read";
+  if ((provider.searchToolName && toolName === provider.searchToolName) || (provider.fetchToolName && toolName === provider.fetchToolName)) return "read";
   return "write";
 }
 
@@ -203,6 +253,7 @@ async function requireActiveConnection(actor: AppActor, params: {
 }) {
   invariant(actor.kind === "user", 403, "FORBIDDEN", "External MCP connections use same-user delegated OAuth. Sign in as a user to connect external tools.");
   const provider = providerForKey(params.providerKey);
+  requireConnectableProvider(provider);
   const connection = await prisma.externalMcpConnection.findFirst({
     where: {
       workspaceId: params.workspaceId,
@@ -258,8 +309,8 @@ async function callExternalMcpTool(connection: ExternalMcpConnectionRecord, tool
 
 function externalCapabilitySummary(provider: ExternalMcpProvider, connection: ExternalMcpConnectionRecord | null) {
   const capabilities = asRecord(connection?.capabilities);
-  const searchToolName = asString(capabilities.searchToolName) || provider.searchToolName;
-  const fetchToolName = asString(capabilities.fetchToolName) || provider.fetchToolName;
+  const searchToolName = asString(capabilities.searchToolName) || provider.searchToolName || "";
+  const fetchToolName = asString(capabilities.fetchToolName) || provider.fetchToolName || "";
   return {
     capabilities: {
       searchToolName,
@@ -274,10 +325,13 @@ function externalCapabilitySummary(provider: ExternalMcpProvider, connection: Ex
 }
 
 function externalToolName(provider: ExternalMcpProvider, connection: ExternalMcpConnectionRecord, feature: "search" | "fetch") {
+  requireConnectableProvider(provider);
   const summary = externalCapabilitySummary(provider, connection);
-  return feature === "search"
+  const toolName = feature === "search"
     ? summary.searchToolName ?? provider.searchToolName
     : summary.fetchToolName ?? provider.fetchToolName;
+  invariant(toolName, 400, "NOT_READY", `${provider.displayName} ${feature} tool is not configured.`);
+  return toolName;
 }
 
 async function auditExternalMcpCall(actor: AppActor, params: {
@@ -332,6 +386,7 @@ export async function listExternalMcpConnections(actor: AppActor, workspaceId: s
       displayName: connection?.displayName ?? provider.displayName,
       serverUrl: connection?.serverUrl ?? provider.serverUrl,
       authMode: provider.authMode,
+      connectionEnabled: provider.connectionEnabled,
       status: connectionStatus(connection),
       connectionId: connection?.id ?? null,
       connectionOwnerUserId: connection?.userId ?? null,
@@ -341,6 +396,8 @@ export async function listExternalMcpConnections(actor: AppActor, workspaceId: s
       supportsFetch: capabilities.supportsFetch,
       searchToolName: capabilities.searchToolName,
       fetchToolName: capabilities.fetchToolName,
+      sourceUrl: provider.sourceUrl,
+      adminNotes: provider.adminNotes,
       lastError: connection?.lastError ?? null,
     };
   });
@@ -357,6 +414,7 @@ export async function upsertExternalMcpConnection(actor: AppActor, params: {
   invariant(actor.kind === "user", 403, "FORBIDDEN", "Only users can connect external MCP providers.");
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
   const provider = providerForKey(params.providerKey);
+  requireConnectableProvider(provider);
   const refreshTokenUpdate = params.refreshToken !== undefined
     ? { refreshTokenEnc: params.refreshToken ? encryptSecret(params.refreshToken) : null }
     : {};

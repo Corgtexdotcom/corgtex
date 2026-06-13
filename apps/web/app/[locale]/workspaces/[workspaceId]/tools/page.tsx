@@ -37,7 +37,7 @@ export default async function ToolsPage({
           <div>
             <h1 style={{ border: "none", padding: 0, margin: 0, fontSize: "2rem" }}>{t("pageTitle")}</h1>
             <div className="nr-masthead-meta">
-              <span>Find, favorite, request, publish, and govern the apps, agents, connectors, automations, data, and shared tools that power this workspace.</span>
+              <span>Connect what is live, request realistic pilots, and keep apps, agents, data sources, and protected shared links governed in one place.</span>
             </div>
           </div>
           <div className="actions-inline">

@@ -18,6 +18,7 @@ import { AGENT_REGISTRY } from "./agent-registry";
 import { ALL_SCOPES } from "./agent-auth";
 import { listAiWorkspaceToolProviders, listEnterpriseServices } from "./ai-workspaces";
 import { actorUserIdForWorkspace, requireWorkspaceMembership } from "./auth";
+import { connectorReadinessManifest, listConnectorReadinessProfiles } from "./connector-readiness";
 import { recordAudit } from "./audit-trail";
 import { AppError, invariant } from "./errors";
 
@@ -202,6 +203,16 @@ function practiceLedgerCapabilities() {
   ];
 }
 
+function mergeManifest(
+  base: Record<string, unknown> | null | undefined,
+  connectorKey: string,
+) {
+  return {
+    ...(base ?? {}),
+    ...connectorReadinessManifest(connectorKey),
+  };
+}
+
 function marketplaceAppSources(_workspaceId: string, flags: CatalogFeatureFlags): CatalogSourceInput[] {
   if (!flags.APP_MARKETPLACE || !flags.FINANCE) return [];
 
@@ -229,12 +240,12 @@ function marketplaceAppSources(_workspaceId: string, flags: CatalogFeatureFlags)
     dataClassification: "CLIENT_PRIVATE",
     proofUrl: "https://github.com/Corgtexdotcom/practice-ledger",
     reviewUrl: "https://github.com/Corgtexdotcom/practice-ledger",
-    manifestJson: {
+    manifestJson: mergeManifest({
       appKey: "practice-ledger",
       repository: "github.com/Corgtexdotcom/practice-ledger",
       structuredRecordOwner: "Practice Ledger",
       corgtexRole: "governed context, Brain sync, app discovery, routing guidance, and audit context",
-    },
+    }, "practice-ledger"),
     capabilitiesJson: practiceLedgerCapabilities(),
   }];
 }
@@ -249,11 +260,13 @@ function connectorSources(workspaceId: string, flags: CatalogFeatureFlags): Cata
       title: "Slack",
       outcome: "Bring public-channel work into Corgtex briefings, actions, and knowledge.",
       descriptionMd: "Connect a Slack workspace so Corgtex can capture public-channel context and power workspace automation.",
+      accessNotesMd: "Workspace-admin installation only. Slack private channels and DMs are not ingested; public-channel context can be archived, summarized, and indexed.",
       url: `/api/integrations/slack/install?workspaceId=${workspaceId}`,
       category: "COMMUNICATION",
       accessMode: "ADMIN_ONLY",
       requestedScopes: ["integrations:read"],
       featured: true,
+      manifestJson: connectorReadinessManifest("slack"),
     });
   }
   if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
@@ -261,14 +274,16 @@ function connectorSources(workspaceId: string, flags: CatalogFeatureFlags): Cata
       type: "CONNECTOR",
       sourceType: "OAUTH_CONNECTION",
       sourceId: "google",
-      title: "Google",
-      outcome: "Connect calendar and document context for meetings, docs, and follow-up work.",
-      descriptionMd: "Connect a Google account so Corgtex can use supported Google integrations for this workspace.",
+      title: "Google Workspace",
+      outcome: "Connect Google Calendar and selected Drive documents for meetings, docs, and follow-up work.",
+      descriptionMd: "Connect a Google account for supported workspace integrations. Calendar sync is live; Drive document access should stay selected-file and least-privilege.",
+      accessNotesMd: "User OAuth. Use selected Drive file access where possible instead of broad Drive scopes.",
       url: `/api/integrations/google/connect?workspaceId=${workspaceId}`,
       category: "CONNECTOR",
       accessMode: "OPEN",
       requestedScopes: ["meetings:read", "documents:write"],
       featured: true,
+      manifestJson: connectorReadinessManifest("google"),
     });
   }
   if (process.env.MICROSOFT_CLIENT_ID && process.env.MICROSOFT_CLIENT_SECRET) {
@@ -276,14 +291,16 @@ function connectorSources(workspaceId: string, flags: CatalogFeatureFlags): Cata
       type: "CONNECTOR",
       sourceType: "OAUTH_CONNECTION",
       sourceId: "microsoft",
-      title: "Microsoft",
-      outcome: "Connect Microsoft calendar and document context where supported.",
-      descriptionMd: "Connect a Microsoft account so Corgtex can use supported Microsoft integrations for this workspace.",
+      title: "Microsoft 365",
+      outcome: "Connect Outlook calendar and selected OneDrive or SharePoint files where supported.",
+      descriptionMd: "Connect a Microsoft account for supported workspace integrations. Outlook calendar sync is live; OneDrive and SharePoint document access should stay selected-source.",
+      accessNotesMd: "User OAuth. Some tenants require publisher verification or admin consent before connection.",
       url: `/api/integrations/microsoft/connect?workspaceId=${workspaceId}`,
       category: "CONNECTOR",
       accessMode: "OPEN",
       requestedScopes: ["meetings:read", "documents:write"],
       featured: true,
+      manifestJson: connectorReadinessManifest("microsoft"),
     });
   }
   if (flags.SETTINGS_GENERAL) {
@@ -299,6 +316,7 @@ function connectorSources(workspaceId: string, flags: CatalogFeatureFlags): Cata
       accessMode: "OPEN",
       requestedScopes: ["workspace:read", "brain:read", "conversations:write"],
       featured: true,
+      manifestJson: connectorReadinessManifest("corgtex-mcp"),
     });
   }
   if (flags.SETTINGS_GENERAL) {
@@ -345,9 +363,45 @@ function connectorSources(workspaceId: string, flags: CatalogFeatureFlags): Cata
       accessMode: meetingRecordersEnabled ? "OPEN" : "REQUEST",
       requestedScopes: ["meetings:read", "meetings:write", "brain:read"],
       featured: true,
+      manifestJson: connectorReadinessManifest("meeting-recorder"),
     });
   }
   return sources;
+}
+
+function externalConnectorSources(): CatalogSourceInput[] {
+  return listConnectorReadinessProfiles()
+    .filter((profile) => ["box", "notion", "atlassian", "miro", "dropbox", "linear", "hubspot", "figma", "salesforce"].includes(profile.key))
+    .map((profile) => {
+      const featured = profile.recommended && profile.availability !== "ON_REQUEST" && profile.availability !== "RESEARCH";
+      return {
+        type: "CONNECTOR" as const,
+        sourceType: "MCP_CONNECTOR" as const,
+        sourceId: profile.key,
+        title: profile.title,
+        outcome: profile.key === "box"
+          ? "Pilot Box as the priority client-file connector for read, search, and fetch workflows."
+          : profile.key === "miro"
+            ? "Request Miro board context and diagram workflows when a customer has Enterprise MCP enabled."
+            : `Request ${profile.title} setup when this workspace already depends on it.`,
+        descriptionMd: `${profile.title} has an official MCP or API path, but Corgtex has not enabled one-click connection for this workspace yet. ${profile.adminNotes}`,
+        accessNotesMd: `${profile.connectedBy}. ${profile.storagePolicy}`,
+        url: null,
+        category: profile.connectorRole === "documents"
+          ? "FILES"
+          : profile.connectorRole === "whiteboard"
+            ? "WHITEBOARD"
+            : profile.connectorRole === "crm"
+              ? "CRM"
+              : profile.connectorRole === "design"
+                ? "DESIGN"
+                : "CONNECTOR",
+        accessMode: "REQUEST" as const,
+        requestedScopes: ["integrations:read"],
+        featured,
+        manifestJson: connectorReadinessManifest(profile.key),
+      };
+    });
 }
 
 function aiWorkspaceSources(workspaceId: string, flags: CatalogFeatureFlags): CatalogSourceInput[] {
@@ -563,6 +617,7 @@ async function ensureDerivedCatalogItems(workspaceId: string) {
     })) : []),
     ...marketplaceAppSources(workspaceId, featureFlags),
     ...connectorSources(workspaceId, featureFlags),
+    ...externalConnectorSources(),
     ...aiWorkspaceSources(workspaceId, featureFlags),
     ...managedEnterpriseServiceSources(workspaceId, featureFlags),
   ];

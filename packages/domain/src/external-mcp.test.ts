@@ -74,17 +74,26 @@ describe("external MCP gateway", () => {
     vi.unstubAllGlobals();
   });
 
-  it("lists Notion as connectable when the user has no connection", async () => {
+  it("lists provider metadata while keeping only implemented providers connectable", async () => {
     externalMcpConnectionMock.findMany.mockResolvedValueOnce([]);
     const { listExternalMcpConnections } = await import("./external-mcp");
 
     const connections = await listExternalMcpConnections(actor, "ws-1");
 
     expect(requireWorkspaceMembershipMock).toHaveBeenCalledWith({ actor, workspaceId: "ws-1" });
-    expect(connections).toEqual([
+    expect(connections).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        providerKey: "box",
+        displayName: "Box",
+        connectionEnabled: false,
+        status: "needs_connection",
+        supportsSearch: false,
+        supportsFetch: false,
+      }),
       expect.objectContaining({
         providerKey: "notion",
         displayName: "Notion",
+        connectionEnabled: true,
         status: "needs_connection",
         connectionId: null,
         supportsSearch: true,
@@ -92,7 +101,15 @@ describe("external MCP gateway", () => {
         searchToolName: "notion-search",
         fetchToolName: "notion-fetch",
       }),
-    ]);
+      expect.objectContaining({
+        providerKey: "atlassian",
+        connectionEnabled: false,
+      }),
+      expect.objectContaining({
+        providerKey: "miro",
+        connectionEnabled: false,
+      }),
+    ]));
   });
 
   it("encrypts tokens when upserting a same-user Notion connection", async () => {
@@ -139,6 +156,18 @@ describe("external MCP gateway", () => {
     const upsertArgs = externalMcpConnectionMock.upsert.mock.calls.at(-1)?.[0];
     expect(upsertArgs.update).not.toHaveProperty("refreshTokenEnc");
     expect(upsertArgs.create).toHaveProperty("refreshTokenEnc", null);
+  });
+
+  it("rejects token upserts for external MCP providers that are not enabled yet", async () => {
+    const { upsertExternalMcpConnection } = await import("./external-mcp");
+
+    await expect(upsertExternalMcpConnection(actor, {
+      workspaceId: "ws-1",
+      providerKey: "box",
+      accessToken: "box-access-token",
+    })).rejects.toThrow("Box MCP setup is not enabled in Corgtex yet.");
+
+    expect(externalMcpConnectionMock.upsert).not.toHaveBeenCalled();
   });
 
   it("searches live Notion context with provenance and audits without storing raw tokens", async () => {
