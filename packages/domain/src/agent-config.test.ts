@@ -256,4 +256,43 @@ describe("agent-config", () => {
       }));
     });
   });
+
+  describe("getWorkspaceDigestSettings", () => {
+    it("returns an empty map and issues no query for an empty workspace list", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { getWorkspaceDigestSettings } = await import("./agent-config");
+
+      vi.mocked(prisma.workspaceAgentConfig.findMany).mockClear();
+
+      const settings = await getWorkspaceDigestSettings([]);
+
+      expect(settings.size).toBe(0);
+      expect(prisma.workspaceAgentConfig.findMany).not.toHaveBeenCalled();
+    });
+
+    it("resolves enabled flag and cadence per workspace in a single batched query", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { getWorkspaceDigestSettings } = await import("./agent-config");
+
+      vi.mocked(prisma.workspaceAgentConfig.findMany).mockResolvedValue([
+        { workspaceId: "ws-1", enabled: true, configJson: { newspaperCadence: "WEEKLY" } },
+        { workspaceId: "ws-2", enabled: false, configJson: { newspaperCadence: "OFF" } },
+        { workspaceId: "ws-3", enabled: true, configJson: { newspaperCadence: "MONTHLY" } },
+      ] as any);
+
+      const settings = await getWorkspaceDigestSettings(["ws-1", "ws-2", "ws-3", "ws-4"]);
+
+      expect(prisma.workspaceAgentConfig.findMany).toHaveBeenCalledTimes(1);
+      expect(prisma.workspaceAgentConfig.findMany).toHaveBeenCalledWith({
+        where: { agentKey: "daily-digest", workspaceId: { in: ["ws-1", "ws-2", "ws-3", "ws-4"] } },
+        select: { workspaceId: true, enabled: true, configJson: true },
+      });
+      expect(settings.get("ws-1")).toEqual({ enabled: true, cadence: "WEEKLY" });
+      expect(settings.get("ws-2")).toEqual({ enabled: false, cadence: "OFF" });
+      // Invalid configured cadence falls back to the daily default.
+      expect(settings.get("ws-3")).toEqual({ enabled: true, cadence: "DAILY" });
+      // A workspace with no config row defaults to enabled + the daily default.
+      expect(settings.get("ws-4")).toEqual({ enabled: true, cadence: "DAILY" });
+    });
+  });
 });

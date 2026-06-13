@@ -19,8 +19,7 @@ const {
   runControlPlaneReleaseDeployJobMock,
   runEnterpriseAppHealthCheckJobMock,
   syncRecorderCalendarSourceMock,
-  isAgentEnabledMock,
-  getWorkspaceNewspaperCadenceMock,
+  getWorkspaceDigestSettingsMock,
 } = vi.hoisted(() => ({
   prismaMock: {
     $transaction: vi.fn(),
@@ -73,8 +72,7 @@ const {
   runControlPlaneReleaseDeployJobMock: vi.fn(),
   runEnterpriseAppHealthCheckJobMock: vi.fn(),
   syncRecorderCalendarSourceMock: vi.fn(),
-  isAgentEnabledMock: vi.fn(),
-  getWorkspaceNewspaperCadenceMock: vi.fn(),
+  getWorkspaceDigestSettingsMock: vi.fn(),
 }));
 
 vi.mock("@corgtex/shared", () => ({
@@ -119,8 +117,7 @@ vi.mock("@corgtex/domain", () => ({
   ENTERPRISE_APP_HEALTH_CHECK_JOB_TYPE: "enterprise-app.health.check",
   runEnterpriseAppHealthCheckJob: runEnterpriseAppHealthCheckJobMock,
   syncRecorderCalendarSource: syncRecorderCalendarSourceMock,
-  isAgentEnabled: isAgentEnabledMock,
-  getWorkspaceNewspaperCadence: getWorkspaceNewspaperCadenceMock,
+  getWorkspaceDigestSettings: getWorkspaceDigestSettingsMock,
 }));
 
 import { runPendingJobs, scheduleDailyJobs, schedulePeriodicJobs } from "./outbox";
@@ -159,8 +156,7 @@ describe("runPendingJobs", () => {
     runControlPlaneReleaseDeployJobMock.mockReset().mockResolvedValue({ status: "deployed" });
     runEnterpriseAppHealthCheckJobMock.mockReset().mockResolvedValue({ status: "ok" });
     syncRecorderCalendarSourceMock.mockReset().mockResolvedValue({ action: "synced" });
-    isAgentEnabledMock.mockReset().mockResolvedValue(false);
-    getWorkspaceNewspaperCadenceMock.mockReset().mockResolvedValue("DAILY");
+    getWorkspaceDigestSettingsMock.mockReset().mockResolvedValue(new Map());
   });
 
   it("requeues agent jobs when execution is skipped by the concurrency gate", async () => {
@@ -811,17 +807,17 @@ describe("scheduleDailyJobs", () => {
       { id: "ws-1" },
       { id: "ws-2" },
     ]);
-    prismaMock.member.findMany.mockReset().mockImplementation(async ({ where }: { where: { workspaceId: string } }) => (
-      where.workspaceId === "ws-1"
-        ? [{ newspaperCadence: null }]
-        : []
-    ));
+    prismaMock.member.findMany.mockReset().mockResolvedValue([
+      { workspaceId: "ws-1", newspaperCadence: null },
+    ]);
     prismaMock.communicationInstallation.findMany.mockReset().mockResolvedValue([
       { workspaceId: "ws-1" },
     ]);
     txMock.workflowJob.upsert.mockReset().mockResolvedValue({ id: "job-1" });
-    isAgentEnabledMock.mockReset().mockImplementation(async (workspaceId: string) => workspaceId === "ws-1");
-    getWorkspaceNewspaperCadenceMock.mockReset().mockResolvedValue("DAILY");
+    getWorkspaceDigestSettingsMock.mockReset().mockResolvedValue(new Map([
+      ["ws-1", { enabled: true, cadence: "DAILY" }],
+      ["ws-2", { enabled: false, cadence: "DAILY" }],
+    ]));
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-04-29T20:15:00Z"));
   });
@@ -874,7 +870,10 @@ describe("scheduleDailyJobs", () => {
 
   it("schedules weekly newspaper jobs on Monday UTC for weekly recipients", async () => {
     vi.setSystemTime(new Date("2026-05-04T20:15:00Z"));
-    getWorkspaceNewspaperCadenceMock.mockResolvedValue("WEEKLY");
+    getWorkspaceDigestSettingsMock.mockResolvedValue(new Map([
+      ["ws-1", { enabled: true, cadence: "WEEKLY" }],
+      ["ws-2", { enabled: false, cadence: "WEEKLY" }],
+    ]));
 
     await expect(scheduleDailyJobs()).resolves.toBe(4);
 
@@ -896,10 +895,13 @@ describe("scheduleDailyJobs", () => {
   });
 
   it("does not schedule newspapers when all effective cadences are off", async () => {
-    getWorkspaceNewspaperCadenceMock.mockResolvedValue("OFF");
+    getWorkspaceDigestSettingsMock.mockResolvedValue(new Map([
+      ["ws-1", { enabled: true, cadence: "OFF" }],
+      ["ws-2", { enabled: false, cadence: "OFF" }],
+    ]));
     prismaMock.member.findMany.mockResolvedValue([
-      { newspaperCadence: null },
-      { newspaperCadence: "OFF" },
+      { workspaceId: "ws-1", newspaperCadence: null },
+      { workspaceId: "ws-1", newspaperCadence: "OFF" },
     ]);
 
     await expect(scheduleDailyJobs()).resolves.toBe(3);
@@ -914,5 +916,17 @@ describe("scheduleDailyJobs", () => {
       cadence: "DAILY",
       reason: "no_daily_recipients",
     }));
+  });
+
+  it("reads digest settings and members in batched queries, not per workspace", async () => {
+    await scheduleDailyJobs();
+
+    expect(getWorkspaceDigestSettingsMock).toHaveBeenCalledTimes(1);
+    expect(getWorkspaceDigestSettingsMock).toHaveBeenCalledWith(["ws-1", "ws-2"]);
+    expect(prismaMock.member.findMany).toHaveBeenCalledTimes(1);
+    expect(prismaMock.member.findMany).toHaveBeenCalledWith({
+      where: { workspaceId: { in: ["ws-1", "ws-2"] }, isActive: true },
+      select: { workspaceId: true, newspaperCadence: true },
+    });
   });
 });
