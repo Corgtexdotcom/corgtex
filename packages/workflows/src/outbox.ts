@@ -1066,7 +1066,7 @@ export async function scheduleDailyJobs() {
     distinct: ["workspaceId"],
     select: { workspaceId: true },
   });
-  const { getWorkspaceNewspaperCadence, isAgentEnabled } = await import("@corgtex/domain");
+  const { getWorkspaceDigestSettings } = await import("@corgtex/domain");
   const newspaperSchedules: Array<{
     workspaceId: string;
     cadence: NewspaperCadence;
@@ -1074,9 +1074,31 @@ export async function scheduleDailyJobs() {
   }> = [];
   const isWeeklyWindow = now.getUTCDay() === 1;
 
+  // Batched reads: one digest-settings lookup and one member lookup for all
+  // workspaces, rather than three sequential queries per workspace. This scan
+  // runs on every worker tick once the daily window opens, so its cost must not
+  // grow with workspace count.
+  const workspaceIds = workspaces.map((workspace) => workspace.id);
+  const [digestSettings, activeMembers] = await Promise.all([
+    getWorkspaceDigestSettings(workspaceIds),
+    prisma.member.findMany({
+      where: { workspaceId: { in: workspaceIds }, isActive: true },
+      select: { workspaceId: true, newspaperCadence: true },
+    }),
+  ]);
+  const membersByWorkspace = new Map<string, typeof activeMembers>();
+  for (const member of activeMembers) {
+    const existing = membersByWorkspace.get(member.workspaceId);
+    if (existing) {
+      existing.push(member);
+    } else {
+      membersByWorkspace.set(member.workspaceId, [member]);
+    }
+  }
+
   for (const workspace of workspaces) {
-    const enabled = await isAgentEnabled(workspace.id, "daily-digest");
-    if (!enabled) {
+    const setting = digestSettings.get(workspace.id);
+    if (!setting?.enabled) {
       logger.info("newspaper_schedule_skipped", {
         workspaceId: workspace.id,
         reason: "agent_disabled",
@@ -1084,18 +1106,13 @@ export async function scheduleDailyJobs() {
       continue;
     }
 
-    const [workspaceCadence, activeMembers] = await Promise.all([
-      getWorkspaceNewspaperCadence(workspace.id),
-      prisma.member.findMany({
-        where: { workspaceId: workspace.id, isActive: true },
-        select: { newspaperCadence: true },
-      }),
-    ]);
+    const workspaceCadence = setting.cadence;
+    const workspaceMembers = membersByWorkspace.get(workspace.id) ?? [];
 
-    const hasDailyRecipients = activeMembers.some((member) => (
+    const hasDailyRecipients = workspaceMembers.some((member) => (
       (member.newspaperCadence ?? workspaceCadence) === "DAILY"
     ));
-    const hasWeeklyRecipients = activeMembers.some((member) => (
+    const hasWeeklyRecipients = workspaceMembers.some((member) => (
       (member.newspaperCadence ?? workspaceCadence) === "WEEKLY"
     ));
 

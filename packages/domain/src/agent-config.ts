@@ -178,6 +178,48 @@ export async function getWorkspaceNewspaperCadence(workspaceId: string): Promise
   return normalizeNewspaperCadence(isRecord(config?.configJson) ? config.configJson.newspaperCadence : undefined);
 }
 
+export type WorkspaceDigestSetting = {
+  enabled: boolean;
+  cadence: NewspaperCadence;
+};
+
+/**
+ * Batched equivalent of calling `isAgentEnabled(id, "daily-digest")` and
+ * `getWorkspaceNewspaperCadence(id)` for many workspaces at once. Issues a
+ * single `workspaceAgentConfig.findMany` rather than two `findUnique`
+ * round-trips per workspace, while preserving identical semantics: the
+ * registry `canDisable` handling from `isAgentEnabled` and the
+ * `normalizeNewspaperCadence` fallback from `getWorkspaceNewspaperCadence`.
+ * Workspaces with no config row default to enabled + DEFAULT_NEWSPAPER_CADENCE.
+ */
+export async function getWorkspaceDigestSettings(
+  workspaceIds: string[],
+): Promise<Map<string, WorkspaceDigestSetting>> {
+  const settings = new Map<string, WorkspaceDigestSetting>();
+  if (workspaceIds.length === 0) {
+    return settings;
+  }
+
+  const meta = AGENT_REGISTRY["daily-digest" as RegisteredAgentKey];
+  const canDisable = meta?.canDisable ?? true;
+
+  const configs = await prisma.workspaceAgentConfig.findMany({
+    where: { agentKey: "daily-digest", workspaceId: { in: workspaceIds } },
+    select: { workspaceId: true, enabled: true, configJson: true },
+  });
+  const configByWorkspace = new Map(configs.map((config) => [config.workspaceId, config]));
+
+  for (const workspaceId of workspaceIds) {
+    const config = configByWorkspace.get(workspaceId);
+    settings.set(workspaceId, {
+      enabled: canDisable ? (config?.enabled ?? true) : true,
+      cadence: normalizeNewspaperCadence(isRecord(config?.configJson) ? config.configJson.newspaperCadence : undefined),
+    });
+  }
+
+  return settings;
+}
+
 export async function updateWorkspaceNewspaperCadence(
   actor: AppActor,
   params: {
