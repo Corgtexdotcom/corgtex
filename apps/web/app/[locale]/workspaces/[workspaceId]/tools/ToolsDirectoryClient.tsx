@@ -8,6 +8,7 @@ import { MarkdownExcerpt, MarkdownRenderer } from "@/lib/components/MarkdownRend
 import {
   TYPE_ORDER,
   catalogItemComparator,
+  connectorReadinessForItem,
   filterCatalogItems,
   getCatalogCardActions,
   hasCatalogFilter,
@@ -77,6 +78,7 @@ type CatalogItem = CatalogItemForUi & {
   dataClassification: string | null;
   proofUrl: string | null;
   reviewUrl: string | null;
+  manifestJson: unknown;
   capabilitiesJson: unknown;
 };
 
@@ -299,14 +301,17 @@ export function ToolsDirectoryClient({
   const defaultCatalogSections = useMemo(() => splitDefaultCatalogSections(visibleItems), [visibleItems]);
 
   const recommendedItems = useMemo(() => (
-    [...items]
-      .filter((item) => item.type !== "CONNECTOR" && item.status === "PUBLISHED" && (item.featured || item.isFavorite))
+    [...defaultCatalogSections.recommendedSetup, ...items.filter((item) => (
+      item.type !== "CONNECTOR"
+      && item.status === "PUBLISHED"
+      && (item.featured || item.isFavorite)
+      && !defaultCatalogSections.liveSetup.some((entry) => entry.id === item.id)
+      && !defaultCatalogSections.recommendedSetup.some((entry) => entry.id === item.id)
+    ))]
       .sort(catalogItemComparator)
       .slice(0, 6)
-  ), [items]);
+  ), [defaultCatalogSections.liveSetup, defaultCatalogSections.recommendedSetup, items]);
 
-  const favoriteItems = useMemo(() => items.filter((item) => item.isFavorite).sort(catalogItemComparator), [items]);
-  const uploadedItems = useMemo(() => items.filter((item) => item.isUploaded).sort(catalogItemComparator), [items]);
   const pendingRequests = requests.filter((request) => request.status === "PENDING");
   const summary = useMemo(() => {
     const activeConnectors = items.filter((item) => item.type === "CONNECTOR" && item.status !== "DISABLED").length;
@@ -618,6 +623,8 @@ export function ToolsDirectoryClient({
 
   function renderCatalogCard(item: CatalogItem, compact = false) {
     const actions = getCatalogCardActions(item, { workspaceId, canManageCatalog });
+    const readiness = connectorReadinessForItem(item);
+    const availabilityLabel = readiness?.availability.replace(/_/g, " ").toLowerCase().replace(/\b\w/g, (letter) => letter.toUpperCase());
     return (
       <article
         key={item.id}
@@ -638,6 +645,7 @@ export function ToolsDirectoryClient({
               <span className={`tag ${item.accessMode === "OPEN" ? "success" : "info"}`}>
                 {item.accessMode === "OPEN" ? "Open" : item.accessMode === "ADMIN_ONLY" ? "Admin" : item.accessMode === "REQUEST" ? "Request" : "Disabled"}
               </span>
+              {availabilityLabel && <span className={`tag ${readiness?.availability === "LIVE" ? "success" : "info"}`}>{availabilityLabel}</span>}
               {item.type === "APP" && <span className="tag">{displayEnum(item.appCategory)}</span>}
               {item.type === "APP" && <span className={`tag ${item.installationStatus === "INSTALLED" || item.installationStatus === "APPROVED" ? "success" : "info"}`}>
                 {displayEnum(item.installationStatus)}
@@ -667,6 +675,29 @@ export function ToolsDirectoryClient({
           <MarkdownRenderer markdown={item.descriptionMd} variant="compact" className="muted" />
         )}
 
+        {readiness && (
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))",
+              gap: 8,
+            }}
+          >
+            <div className="nr-item-meta" style={{ margin: 0 }}>
+              <strong style={{ color: "var(--text)" }}>Who connects</strong><br />
+              {readiness.connectedBy}
+            </div>
+            <div className="nr-item-meta" style={{ margin: 0 }}>
+              <strong style={{ color: "var(--text)" }}>Access</strong><br />
+              {readiness.supportedOperations.slice(0, 2).join(", ") || displayEnum(readiness.connectorRole)}
+            </div>
+            <div className="nr-item-meta" style={{ margin: 0 }}>
+              <strong style={{ color: "var(--text)" }}>Storage</strong><br />
+              {readiness.storagePolicy}
+            </div>
+          </div>
+        )}
+
         <div className="nr-item-meta" style={{ margin: 0 }}>
           Owner: {personName(item.owner ?? item.createdBy)} · Budget: {formatCents(item.monthlyBudgetCents)}
           {item.dailyCallLimit != null ? ` · ${item.dailyCallLimit} calls/day` : ""}
@@ -680,13 +711,14 @@ export function ToolsDirectoryClient({
     );
   }
 
-  function renderSection(title: string, sectionItems: CatalogItem[], empty: string, compact = false) {
+  function renderSection(title: string, sectionItems: CatalogItem[], empty: string, compact = false, description?: string) {
     return (
       <section className="stack" style={{ gap: 12 }}>
         <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "baseline" }}>
           <h2 className="nr-section-header" style={{ margin: 0 }}>{title}</h2>
           <span className="nr-item-meta">{sectionItems.length}</span>
         </div>
+        {description && <p className="nr-item-meta" style={{ margin: 0 }}>{description}</p>}
         {sectionItems.length === 0 ? (
           <p className="muted" style={{ margin: 0, fontSize: "0.9rem" }}>{empty}</p>
         ) : (
@@ -1312,36 +1344,60 @@ export function ToolsDirectoryClient({
         </section>
       )}
 
-      {!hasActiveCatalogFilter && renderSection("Connectors", defaultCatalogSections.connectors, "No connectors are available yet.")}
-
       {!hasActiveCatalogFilter && (
         <>
-          {renderSection("Recommended", recommendedItems, "No recommendations yet.", true)}
-          {renderSection("My favorites", favoriteItems, "Favorite apps, agents, connectors, or tools to keep them here.", true)}
-          {renderSection("My uploads", uploadedItems, "Your published links and vibe-coded apps will appear here.", true)}
+          {renderSection(
+            "Connected now",
+            defaultCatalogSections.liveSetup,
+            "No live connector setup is available yet.",
+            true,
+            "Implemented Corgtex paths only. Some entries still require an admin or user to complete setup on the detail page.",
+          )}
+          {renderSection(
+            "Recommended setup",
+            recommendedItems,
+            "No recommendations yet.",
+            true,
+            "Highest-priority setup paths, capped so the page stays realistic.",
+          )}
+          {renderSection(
+            "Available on request",
+            defaultCatalogSections.availableOnRequest,
+            "No request-only connectors are listed yet.",
+            true,
+            "Providers with a real MCP/API path but no one-click Corgtex connection in this workspace.",
+          )}
+          {renderSection(
+            "Apps and shared links",
+            defaultCatalogSections.appsAndLinks,
+            "Apps, agents, protected links, and data tools will appear here.",
+            true,
+          )}
         </>
       )}
 
-      <section className="stack" style={{ gap: 16 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "baseline" }}>
-          <h2 className="nr-section-header" style={{ margin: 0 }}>
-            {activeType === "ALL" ? (hasActiveCatalogFilter ? "Search results" : "Catalog") : TYPE_LABELS[activeType]}
-          </h2>
-          <span className="nr-item-meta">
-            {(hasActiveCatalogFilter ? visibleItems : defaultCatalogSections.catalog).length} items
-          </span>
-        </div>
-        {(hasActiveCatalogFilter ? visibleItems : defaultCatalogSections.catalog).length === 0 ? (
-          <div className="nr-item" style={{ textAlign: "center", padding: "48px 24px" }}>
-            <h2 style={{ margin: "0 0 8px", fontSize: "1.1rem" }}>No catalog items found.</h2>
-            <p className="muted" style={{ margin: 0 }}>Try another search, add a protected tool link, or put reference material in Brain.</p>
+      {hasActiveCatalogFilter && (
+        <section className="stack" style={{ gap: 16 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "baseline" }}>
+            <h2 className="nr-section-header" style={{ margin: 0 }}>
+              {activeType === "ALL" ? "Search results" : TYPE_LABELS[activeType]}
+            </h2>
+            <span className="nr-item-meta">
+              {visibleItems.length} items
+            </span>
           </div>
-        ) : (
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: 16 }}>
-            {(hasActiveCatalogFilter ? visibleItems : defaultCatalogSections.catalog).map((item) => renderCatalogCard(item))}
-          </div>
-        )}
-      </section>
+          {visibleItems.length === 0 ? (
+            <div className="nr-item" style={{ textAlign: "center", padding: "48px 24px" }}>
+              <h2 style={{ margin: "0 0 8px", fontSize: "1.1rem" }}>No catalog items found.</h2>
+              <p className="muted" style={{ margin: 0 }}>Try another search, add a protected tool link, or put reference material in Brain.</p>
+            </div>
+          ) : (
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: 16 }}>
+              {visibleItems.map((item) => renderCatalogCard(item))}
+            </div>
+          )}
+        </section>
+      )}
 
       <details>
         <summary className="nr-section-header" style={{ cursor: "pointer", margin: 0 }}>

@@ -21,6 +21,7 @@ import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
 import { getFormatter } from "next-intl/server";
 import { getWorkspaceFeatureFlags } from "@/lib/workspace-feature-flags";
 import { normalizeSelectedProvider, normalizeSelectedService } from "../../settings/ai-workspace-ui";
+import { connectorReadinessForItem } from "../catalog-ui";
 import {
   AiWorkspaceConnectorPanel,
   CorgtexMcpConnectorPanel,
@@ -61,6 +62,49 @@ function capabilityKeys(value: unknown) {
         return typeof record?.key === "string" ? record.key : null;
       }).filter((key): key is string => Boolean(key))
     : [];
+}
+
+function ExternalConnectorReadinessPanel({ item }: { item: any }) {
+  const readiness = connectorReadinessForItem(item);
+  if (!readiness) return null;
+
+  return (
+    <section className="nr-item stack" style={{ gap: 12, padding: 18 }}>
+      <div className="row">
+        <strong className="nr-item-title">{readiness.title} readiness</strong>
+        <span className={`tag ${readiness.availability === "LIVE" ? "success" : "info"}`}>
+          {displayEnum(readiness.availability)}
+        </span>
+      </div>
+      <p className="nr-item-meta" style={{ margin: 0 }}>
+        {readiness.adminNotes}
+      </p>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 10 }}>
+        <p className="nr-item-meta" style={{ margin: 0 }}>
+          <strong style={{ color: "var(--text)" }}>Who connects</strong><br />
+          {readiness.connectedBy}
+        </p>
+        <p className="nr-item-meta" style={{ margin: 0 }}>
+          <strong style={{ color: "var(--text)" }}>Access</strong><br />
+          {readiness.supportedOperations.join(", ") || displayEnum(readiness.connectorRole)}
+        </p>
+        <p className="nr-item-meta" style={{ margin: 0 }}>
+          <strong style={{ color: "var(--text)" }}>Storage</strong><br />
+          {readiness.storagePolicy}
+        </p>
+      </div>
+      {readiness.sourceUrl && (
+        <a href={readiness.sourceUrl} target="_blank" rel="noreferrer">
+          Provider documentation
+        </a>
+      )}
+      {readiness.availability !== "LIVE" && (
+        <p className="nr-item-meta" style={{ margin: 0 }}>
+          This provider is request-only in Corgtex. The catalog can track demand, but it should not present a one-click connection until admin enablement and OAuth setup are complete.
+        </p>
+      )}
+    </section>
+  );
 }
 
 export default async function CatalogItemPage({
@@ -137,8 +181,10 @@ export default async function CatalogItemPage({
       : [];
     const slackInstallation = communicationInstallations.find((installation) => installation.provider === "SLACK" && installation.status === "ACTIVE");
     setupPanel = <SlackConnectorPanel workspaceId={workspaceId} installation={slackInstallation} canManage={isWorkspaceAdmin} />;
-  } else if (item.sourceType === "MCP_CONNECTOR") {
+  } else if (item.sourceType === "MCP_CONNECTOR" && item.sourceId === "corgtex-mcp") {
     setupPanel = <CorgtexMcpConnectorPanel connectorUrl={connectorUrl} />;
+  } else if (item.sourceType === "MCP_CONNECTOR") {
+    setupPanel = <ExternalConnectorReadinessPanel item={item} />;
   } else if (item.sourceType === "MEETING_RECORDER") {
     const [recorderConfig, transcriptSources] = featureFlags.MEETING_RECORDERS
       ? await Promise.all([

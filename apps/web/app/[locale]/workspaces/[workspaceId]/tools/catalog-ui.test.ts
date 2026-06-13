@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  connectorReadinessForItem,
   filterCatalogItems,
   getCatalogCardActions,
   normalizeCatalogQuery,
@@ -27,19 +28,42 @@ function item(overrides: Partial<CatalogItemForUi>): CatalogItemForUi {
     installationStatus: overrides.installationStatus ?? "INSTALLED",
     integrationDepth: overrides.integrationDepth ?? "CATALOG_ONLY",
     appMcpUrl: overrides.appMcpUrl ?? null,
+    manifestJson: overrides.manifestJson,
+    capabilitiesJson: overrides.capabilitiesJson,
     pendingRequestCount: overrides.pendingRequestCount ?? 0,
   };
 }
 
+function readiness(overrides: Record<string, unknown> = {}) {
+  return {
+    connectorReadiness: {
+      key: "box",
+      title: "Box",
+      availability: "PILOT_READY",
+      connectMethod: "external_mcp",
+      connectorRole: "documents",
+      connectedBy: "Admin enables, users connect",
+      supportedOperations: ["Search", "Fetch file context"],
+      storagePolicy: "Read/search/fetch first.",
+      sourceUrl: "https://developer.box.com/guides/box-mcp/",
+      adminNotes: "Official hosted MCP exists; Corgtex setup is request-only.",
+      recommended: true,
+      recommendationRank: 70,
+      ...overrides,
+    },
+  };
+}
+
 describe("Tools catalog UI helpers", () => {
-  it("sorts connectors before the rest of the catalog", () => {
+  it("sorts apps before connectors in the raw catalog order", () => {
     const result = filterCatalogItems([
       item({ id: "tool", type: "TOOL", title: "Tool" }),
       item({ id: "agent", type: "AGENT", title: "Agent" }),
       item({ id: "connector", type: "CONNECTOR", title: "Google" }),
+      item({ id: "app", type: "APP", title: "App" }),
     ], { activeType: "ALL", query: "" });
 
-    expect(result.map((entry) => entry.id)).toEqual(["connector", "agent", "tool"]);
+    expect(result.map((entry) => entry.id)).toEqual(["app", "connector", "agent", "tool"]);
   });
 
   it("filters by selected item type", () => {
@@ -74,14 +98,44 @@ describe("Tools catalog UI helpers", () => {
     expect(filterCatalogItems(items, { activeType: "ALL", query: "connector" }).map((entry) => entry.id)).toEqual(["type"]);
   });
 
-  it("keeps connectors in a dedicated default section", () => {
+  it("splits the default directory into realistic readiness sections", () => {
     const sections = splitDefaultCatalogSections([
-      item({ id: "tool", type: "TOOL" }),
-      item({ id: "connector", type: "CONNECTOR" }),
+      item({ id: "tool", type: "TOOL", sourceType: "TOOL_LINK" }),
+      item({
+        id: "slack",
+        type: "CONNECTOR",
+        manifestJson: readiness({ key: "slack", title: "Slack", availability: "LIVE", recommended: true, recommendationRank: 10 }),
+      }),
+      item({
+        id: "box",
+        type: "CONNECTOR",
+        accessMode: "REQUEST",
+        manifestJson: readiness(),
+      }),
+      item({
+        id: "miro",
+        type: "CONNECTOR",
+        accessMode: "REQUEST",
+        manifestJson: readiness({ key: "miro", title: "Miro", availability: "ON_REQUEST", recommended: false, recommendationRank: 110 }),
+      }),
     ]);
 
-    expect(sections.connectors.map((entry) => entry.id)).toEqual(["connector"]);
-    expect(sections.catalog.map((entry) => entry.id)).toEqual(["tool"]);
+    expect(sections.liveSetup.map((entry) => entry.id)).toEqual(["slack"]);
+    expect(sections.recommendedSetup.map((entry) => entry.id)).toEqual(["box"]);
+    expect(sections.availableOnRequest.map((entry) => entry.id)).toEqual(["miro"]);
+    expect(sections.appsAndLinks.map((entry) => entry.id)).toEqual(["tool"]);
+  });
+
+  it("parses connector readiness metadata from catalog manifests", () => {
+    expect(connectorReadinessForItem(item({
+      type: "CONNECTOR",
+      manifestJson: readiness({ key: "box", availability: "PILOT_READY" }),
+    }))).toEqual(expect.objectContaining({
+      key: "box",
+      availability: "PILOT_READY",
+      connectedBy: "Admin enables, users connect",
+      supportedOperations: ["Search", "Fetch file context"],
+    }));
   });
 
   it("does not offer API key or budget actions on connector cards", () => {
@@ -98,6 +152,22 @@ describe("Tools catalog UI helpers", () => {
     ]);
     expect(actions.map((action) => action.label)).not.toContain("API key");
     expect(actions.map((action) => action.label)).not.toContain("Budget");
+  });
+
+  it("does not offer Connect on pilot-ready external MCP connectors", () => {
+    const actions = getCatalogCardActions(item({
+      id: "box",
+      type: "CONNECTOR",
+      title: "Box",
+      url: null,
+      accessMode: "REQUEST",
+      manifestJson: readiness({ key: "box", availability: "PILOT_READY" }),
+    }), { workspaceId: "workspace-1", canManageCatalog: true });
+
+    expect(actions).toEqual([
+      { kind: "request", label: "Request setup", requestType: "ACCESS", variant: "primary" },
+      { kind: "link", label: "Details", href: "/workspaces/workspace-1/tools/box", variant: "secondary" },
+    ]);
   });
 
   it("shows admin setup state for admin-only connectors when the user cannot manage catalog", () => {

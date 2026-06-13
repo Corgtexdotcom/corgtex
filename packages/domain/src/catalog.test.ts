@@ -596,6 +596,28 @@ describe("catalog domain", () => {
         },
       },
     }));
+    expect(prismaMock.catalogItem.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        workspaceId_sourceType_sourceId: {
+          workspaceId: "workspace-1",
+          sourceType: "MCP_CONNECTOR",
+          sourceId: "box",
+        },
+      },
+      create: expect.objectContaining({
+        type: "CONNECTOR",
+        title: "Box",
+        url: null,
+        accessMode: "REQUEST",
+        featured: true,
+        manifestJson: expect.objectContaining({
+          connectorReadiness: expect.objectContaining({
+            availability: "PILOT_READY",
+            connectMethod: "external_mcp",
+          }),
+        }),
+      }),
+    }));
   });
 
   it("derives meeting recorder as a requestable Tools option before recorder access is enabled", async () => {

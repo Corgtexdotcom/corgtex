@@ -4,6 +4,22 @@ export type CatalogRequestType = "ACCESS" | "API_KEY" | "BUDGET_INCREASE" | "PUB
 export type AppCategory = "FINANCE" | "KNOWLEDGE" | "COMMUNICATION" | "AI" | "OPERATIONS" | "GOVERNANCE" | "DATA" | "OTHER";
 export type AppInstallationStatus = "REQUESTED" | "APPROVED" | "INSTALLED" | "NEEDS_SETUP" | "UNHEALTHY" | "DISABLED";
 export type AppIntegrationDepth = "CATALOG_ONLY" | "LAUNCHABLE" | "MCP_ACTIONABLE" | "KNOWLEDGE_SYNCED" | "WORKFLOW_NATIVE";
+export type CatalogConnectorAvailability = "LIVE" | "PILOT_READY" | "ON_REQUEST" | "MANUAL_ONLY" | "RESEARCH";
+
+export type CatalogConnectorReadiness = {
+  key: string;
+  title: string;
+  availability: CatalogConnectorAvailability;
+  connectMethod: string;
+  connectorRole: string;
+  connectedBy: string;
+  supportedOperations: string[];
+  storagePolicy: string;
+  sourceUrl: string;
+  adminNotes: string;
+  recommended: boolean;
+  recommendationRank: number;
+};
 
 export type CatalogItemForUi = {
   id: string;
@@ -23,6 +39,8 @@ export type CatalogItemForUi = {
   installationStatus: AppInstallationStatus;
   integrationDepth: AppIntegrationDepth;
   appMcpUrl: string | null;
+  manifestJson?: unknown;
+  capabilitiesJson?: unknown;
   pendingRequestCount?: number;
 };
 
@@ -51,7 +69,7 @@ export type CatalogCardAction =
       label: string;
     };
 
-export const TYPE_ORDER: CatalogItemType[] = ["CONNECTOR", "APP", "AGENT", "TOOL", "AUTOMATION", "DATA_SOURCE"];
+export const TYPE_ORDER: CatalogItemType[] = ["APP", "CONNECTOR", "AGENT", "TOOL", "AUTOMATION", "DATA_SOURCE"];
 
 const TYPE_RANK = new Map(TYPE_ORDER.map((type, index) => [type, index]));
 
@@ -93,17 +111,97 @@ export function filterCatalogItems<T extends CatalogItemForUi>(items: T[], { act
         item.appCategory,
         item.integrationDepth,
         item.installationStatus,
+        connectorReadinessForItem(item)?.availability,
+        connectorReadinessForItem(item)?.connectorRole,
+        connectorReadinessForItem(item)?.connectedBy,
         item.type,
       ].some((value) => value?.toLowerCase().includes(normalizedQuery));
     })
     .sort(catalogItemComparator);
 }
 
-export function splitDefaultCatalogSections<T extends CatalogItemForUi>(items: T[]) {
-  const sorted = [...items].sort(catalogItemComparator);
+function recordValue(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function stringListValue(value: unknown) {
+  return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
+}
+
+function stringValue(value: unknown) {
+  return typeof value === "string" ? value : "";
+}
+
+function booleanValue(value: unknown) {
+  return value === true;
+}
+
+function numberValue(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) ? value : 999;
+}
+
+export function connectorReadinessForItem(item: CatalogItemForUi): CatalogConnectorReadiness | null {
+  const manifest = recordValue(item.manifestJson);
+  const readiness = recordValue(manifest?.connectorReadiness);
+  const availability = stringValue(readiness?.availability);
+  if (!readiness || !["LIVE", "PILOT_READY", "ON_REQUEST", "MANUAL_ONLY", "RESEARCH"].includes(availability)) return null;
+
   return {
-    connectors: sorted.filter((item) => item.type === "CONNECTOR"),
-    catalog: sorted.filter((item) => item.type !== "CONNECTOR"),
+    key: stringValue(readiness.key) || item.sourceId || item.id,
+    title: stringValue(readiness.title) || item.title,
+    availability: availability as CatalogConnectorAvailability,
+    connectMethod: stringValue(readiness.connectMethod),
+    connectorRole: stringValue(readiness.connectorRole),
+    connectedBy: stringValue(readiness.connectedBy),
+    supportedOperations: stringListValue(readiness.supportedOperations),
+    storagePolicy: stringValue(readiness.storagePolicy),
+    sourceUrl: stringValue(readiness.sourceUrl),
+    adminNotes: stringValue(readiness.adminNotes),
+    recommended: booleanValue(readiness.recommended),
+    recommendationRank: numberValue(readiness.recommendationRank),
+  };
+}
+
+function readinessSort<T extends CatalogItemForUi>(a: T, b: T) {
+  const left = connectorReadinessForItem(a);
+  const right = connectorReadinessForItem(b);
+  return (left?.recommendationRank ?? 999) - (right?.recommendationRank ?? 999)
+    || catalogItemComparator(a, b);
+}
+
+function isLiveSetupItem(item: CatalogItemForUi) {
+  const readiness = connectorReadinessForItem(item);
+  return readiness?.availability === "LIVE";
+}
+
+function isRecommendedSetupItem(item: CatalogItemForUi) {
+  const readiness = connectorReadinessForItem(item);
+  return Boolean(readiness?.recommended && readiness.availability !== "LIVE");
+}
+
+function isAvailableOnRequestItem(item: CatalogItemForUi) {
+  const readiness = connectorReadinessForItem(item);
+  return Boolean(readiness && readiness.availability !== "LIVE" && !readiness.recommended);
+}
+
+function isAppsAndSharedLinksItem(item: CatalogItemForUi) {
+  return item.type !== "CONNECTOR" && !isLiveSetupItem(item) && !isRecommendedSetupItem(item) && !isAvailableOnRequestItem(item);
+}
+
+export function splitDefaultCatalogSections<T extends CatalogItemForUi>(items: T[]) {
+  const sorted = [...items].sort(readinessSort);
+  const liveSetup = sorted.filter(isLiveSetupItem);
+  const recommendedSetup = sorted.filter(isRecommendedSetupItem).slice(0, 6);
+  const used = new Set([...liveSetup, ...recommendedSetup].map((item) => item.id));
+  const availableOnRequest = sorted.filter((item) => isAvailableOnRequestItem(item) && !used.has(item.id));
+  const appsAndLinks = sorted.filter((item) => isAppsAndSharedLinksItem(item) && !used.has(item.id));
+  return {
+    liveSetup,
+    recommendedSetup,
+    availableOnRequest,
+    appsAndLinks,
+    connectors: liveSetup,
+    catalog: sorted.filter((item) => !used.has(item.id) && !availableOnRequest.some((entry) => entry.id === item.id)),
   };
 }
 
@@ -140,9 +238,16 @@ export function getCatalogCardActions(
   }
 
   if (item.type === "CONNECTOR") {
+    const readiness = connectorReadinessForItem(item);
     if (disabled) return [{ kind: "status", label: "Disabled" }, details];
     if (item.accessMode === "ADMIN_ONLY" && !canManageCatalog) {
       return [{ kind: "status", label: "Admin setup required" }, details];
+    }
+    if (item.accessMode === "REQUEST" || (readiness && readiness.availability !== "LIVE")) {
+      return [
+        { kind: "request", label: readiness?.availability === "RESEARCH" ? "Request review" : "Request setup", requestType: "ACCESS", variant: "primary" },
+        details,
+      ];
     }
     return [{
       kind: "link",
