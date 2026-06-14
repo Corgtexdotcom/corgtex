@@ -831,11 +831,36 @@ export async function runPendingJobs(workerId: string, batchSize = DEFAULT_BATCH
   const jobs = await claimPendingJobs(workerId, batchSize);
 
   for (const job of jobs) {
+    const startedAt = Date.now();
+    let failed = false;
+    let failure: unknown = null;
     try {
       await handleJob(job);
       await completeJob(job.id);
     } catch (error) {
+      failed = true;
+      failure = error;
       await failJob(job, error);
+    }
+
+    // Emit per-job timing outside the try/catch so a logging error can never be
+    // mistaken for a job failure (and a completed job re-marked as failed).
+    const fields = {
+      workerId,
+      jobId: job.id,
+      type: job.type,
+      workspaceId: job.workspaceId,
+      attempts: job.attempts,
+      durationMs: Date.now() - startedAt,
+    };
+    if (failed) {
+      logger.warn("workflow_job_processed", {
+        ...fields,
+        outcome: "failed",
+        error: failure instanceof Error ? failure.message : "Unknown worker error.",
+      });
+    } else {
+      logger.info("workflow_job_processed", { ...fields, outcome: "completed" });
     }
   }
 

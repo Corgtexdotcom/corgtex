@@ -55,6 +55,7 @@ const {
   },
   loggerMock: {
     info: vi.fn(),
+    warn: vi.fn(),
     error: vi.fn(),
   },
   runAgentWorkflowJobMock: vi.fn(),
@@ -157,6 +158,8 @@ describe("runPendingJobs", () => {
     runEnterpriseAppHealthCheckJobMock.mockReset().mockResolvedValue({ status: "ok" });
     syncRecorderCalendarSourceMock.mockReset().mockResolvedValue({ action: "synced" });
     getWorkspaceDigestSettingsMock.mockReset().mockResolvedValue(new Map());
+    loggerMock.info.mockReset();
+    loggerMock.warn.mockReset();
   });
 
   it("requeues agent jobs when execution is skipped by the concurrency gate", async () => {
@@ -214,6 +217,56 @@ describe("runPendingJobs", () => {
         status: "COMPLETED",
       }),
     });
+  });
+
+  it("logs per-job timing and a completed outcome for successful jobs", async () => {
+    txMock.$queryRaw.mockResolvedValue([
+      {
+        id: "job-1",
+        workspaceId: "ws-1",
+        type: "communication.slack.event",
+        payload: { inboundEventId: "inbound-1" },
+        attempts: 2,
+      },
+    ]);
+
+    await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
+
+    expect(loggerMock.info).toHaveBeenCalledWith("workflow_job_processed", expect.objectContaining({
+      workerId: "worker-1",
+      jobId: "job-1",
+      type: "communication.slack.event",
+      workspaceId: "ws-1",
+      attempts: 2,
+      outcome: "completed",
+      durationMs: expect.any(Number),
+    }));
+    expect(loggerMock.warn).not.toHaveBeenCalled();
+  });
+
+  it("logs per-job timing and a failed outcome when a job throws", async () => {
+    txMock.$queryRaw.mockResolvedValue([
+      {
+        id: "job-1",
+        workspaceId: "ws-1",
+        type: "communication.slack.event",
+        payload: { inboundEventId: "inbound-1" },
+        attempts: 1,
+      },
+    ]);
+    processSlackInboundEventMock.mockRejectedValueOnce(new Error("boom"));
+
+    await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
+
+    expect(loggerMock.warn).toHaveBeenCalledWith("workflow_job_processed", expect.objectContaining({
+      workerId: "worker-1",
+      jobId: "job-1",
+      type: "communication.slack.event",
+      outcome: "failed",
+      error: "boom",
+      durationMs: expect.any(Number),
+    }));
+    expect(loggerMock.info).not.toHaveBeenCalledWith("workflow_job_processed", expect.anything());
   });
 
   it("dispatches recorder calendar sync jobs and schedules the recurring follow-up", async () => {
