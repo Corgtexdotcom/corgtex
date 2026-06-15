@@ -115,18 +115,44 @@ export async function calculateImpactFootprint(workspaceId: string, memberId: st
   return footprintData;
 }
 
+// Maximum number of per-member footprint computations in flight at once. Each
+// member's computation is independent; the cap bounds DB load while still
+// avoiding the fully-serialized round-trip latency of the previous loop.
+const MEMBER_FOOTPRINT_CONCURRENCY = 5;
+
+// Maps over `items` running at most `limit` async tasks concurrently, returning
+// results in the original input order.
+async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  limit: number,
+  task: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+
+  async function worker() {
+    while (true) {
+      const current = nextIndex++;
+      if (current >= items.length) return;
+      results[current] = await task(items[current], current);
+    }
+  }
+
+  const workerCount = Math.max(1, Math.min(limit, items.length));
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  return results;
+}
+
 export async function refreshImpactFootprints(workspaceId: string, periodStart: Date, periodEnd: Date) {
   const activeMembers = await prisma.member.findMany({
     where: { workspaceId, isActive: true },
     select: { id: true },
   });
 
-  const footprints = [];
-  
-  // Calculate sequentially to avoid overloading DB
-  for (const m of activeMembers) {
+  // Compute members with bounded concurrency; results stay in member order.
+  return mapWithConcurrency(activeMembers, MEMBER_FOOTPRINT_CONCURRENCY, async (m) => {
     const data = await calculateImpactFootprint(workspaceId, m.id, periodStart, periodEnd);
-    const footprint = await prisma.impactFootprint.upsert({
+    return prisma.impactFootprint.upsert({
       where: {
         workspaceId_memberId_periodStart_periodEnd: {
           workspaceId,
@@ -144,10 +170,7 @@ export async function refreshImpactFootprints(workspaceId: string, periodStart: 
         ...data,
       },
     });
-    footprints.push(footprint);
-  }
-
-  return footprints;
+  });
 }
 
 export async function getLatestImpactFootprint(actor: AppActor, workspaceId: string, memberId: string) {
