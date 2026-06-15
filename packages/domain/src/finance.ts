@@ -1,7 +1,8 @@
-import type { Prisma, SpendReconciliationStatus } from "@prisma/client";
+import type { MemberRole, Prisma, SpendReconciliationStatus } from "@prisma/client";
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { actorUserIdForWorkspace, requireWorkspaceMembership } from "./auth";
+import { getModuleByKey, rolesWithDefaultAccess } from "./modules";
 import { appendEvents } from "./events";
 import { getApprovalPolicy } from "./approvals";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
@@ -17,11 +18,19 @@ import {
 
 const LEGACY_SPEND_COMMENT_ENTRY_ID_PREFIX = "legacy-spend-comment-";
 
+// Roles allowed to manage finance, derived from the finance module's manifest
+// default policy (single source of truth) rather than a hardcoded list.
+const FINANCE_MANAGE_ROLES: MemberRole[] = (() => {
+  const financeModule = getModuleByKey("finance");
+  const roles = financeModule ? rolesWithDefaultAccess(financeModule, "write") : ["FINANCE_STEWARD", "ADMIN"];
+  return roles as MemberRole[];
+})();
+
 function requireFinanceAccess(actor: AppActor, workspaceId: string) {
   return requireWorkspaceMembership({
     actor,
     workspaceId,
-    allowedRoles: ["FINANCE_STEWARD", "ADMIN"],
+    allowedRoles: FINANCE_MANAGE_ROLES,
   });
 }
 
