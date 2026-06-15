@@ -1,3 +1,9 @@
+import {
+  listNavModules,
+  NAV_GROUP_ORDER,
+  type WorkspaceFeatureFlagKey,
+} from "@corgtex/domain/modules";
+
 export type NavItem = {
   href: string;
   labelKey: string;
@@ -11,16 +17,9 @@ export type NavGroup = {
   items: NavItem[];
 };
 
-export type WorkspaceNavFeatureFlag =
-  | "GOALS"
-  | "TOOL_LINKS"
-  | "FINANCE"
-  | "BUILD_ARTIFACTS"
-  | "RELATIONSHIPS"
-  | "CONTEXT_MAPS"
-  | "CYCLES"
-  | "AGENT_GOVERNANCE"
-  | "OS_METRICS";
+// Any workspace feature flag may gate a nav item. Aliased to the registry's
+// single-source-of-truth union so the nav vocabulary cannot drift.
+export type WorkspaceNavFeatureFlag = WorkspaceFeatureFlagKey;
 
 export type WorkspaceNavCapability =
   | "canManageAgentGovernance"
@@ -49,61 +48,27 @@ export type WorkspaceNavIconName =
   | "notifications"
   | "settings";
 
-export const WORKSPACE_NAV_GROUPS: NavGroup[] = [
-  {
-    labelKey: "workspace",
-    items: [
-      { href: "", labelKey: "home", icon: "home" },
-      { href: "/goals", labelKey: "goals", icon: "goals", featureFlag: "GOALS" },
-      { href: "/brain", labelKey: "brain", icon: "brain" },
-      { href: "/tools", labelKey: "tools", icon: "tools", featureFlag: "TOOL_LINKS" },
-      { href: "/built", labelKey: "built", icon: "built", featureFlag: "BUILD_ARTIFACTS" },
-      { href: "/members", labelKey: "members", icon: "members" },
-    ],
-  },
-  {
-    labelKey: "operations",
-    items: [
-      { href: "/tensions", labelKey: "tensions", icon: "tensions" },
-      { href: "/actions", labelKey: "actions", icon: "actions" },
-      { href: "/meetings", labelKey: "meetings", icon: "meetings" },
-      { href: "/leads", labelKey: "relationships", icon: "relationships", featureFlag: "RELATIONSHIPS" },
-      { href: "/maps", labelKey: "contextMaps", icon: "contextMaps", featureFlag: "CONTEXT_MAPS" },
-    ],
-  },
-  {
-    labelKey: "governance",
-    items: [
-      { href: "/proposals", labelKey: "proposals", icon: "proposals" },
-      { href: "/circles", labelKey: "circles", icon: "circles" },
-      { href: "/cycles", labelKey: "cycles", icon: "cycles", featureFlag: "CYCLES" },
-    ],
-  },
-  {
-    labelKey: "finance",
-    items: [
-      { href: "/finance", labelKey: "finance", icon: "finance", featureFlag: "FINANCE" },
-    ],
-  },
-  {
-    labelKey: "aiGovernance",
-    items: [
-      {
-        href: "/agents",
-        labelKey: "agentGovernance",
-        icon: "agents",
-        featureFlag: "AGENT_GOVERNANCE",
-        requiredCapability: "canManageAgentGovernance",
-      },
-    ],
-  },
-  {
-    labelKey: "system",
-    items: [
-      { href: "/governance", labelKey: "osMetrics", icon: "governance", featureFlag: "OS_METRICS" },
-      { href: "/audit", labelKey: "auditTrail", icon: "audit" },
-      { href: "/notifications", labelKey: "notifications", icon: "notifications" },
-      { href: "/settings", labelKey: "settings", icon: "settings" },
-    ],
-  },
-];
+// Derived from the Module Manifest registry. A parity test
+// (nav-config.test.ts) asserts this equals the prior hand-written groups.
+export const WORKSPACE_NAV_GROUPS: NavGroup[] = NAV_GROUP_ORDER
+  .map((group) => ({
+    labelKey: group,
+    items: listNavModules()
+      .filter((mod) => mod.nav?.group === group)
+      .map((mod) => {
+        const nav = mod.nav!;
+        const item: NavItem = {
+          href: nav.href,
+          labelKey: nav.labelKey,
+          icon: nav.icon as WorkspaceNavIconName,
+        };
+        if (mod.featureFlag) {
+          item.featureFlag = mod.featureFlag.flag as WorkspaceNavFeatureFlag;
+        }
+        if (nav.requiredCapability) {
+          item.requiredCapability = nav.requiredCapability as WorkspaceNavCapability;
+        }
+        return item;
+      }),
+  }))
+  .filter((group) => group.items.length > 0);

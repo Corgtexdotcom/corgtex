@@ -9,6 +9,7 @@ export default defineConfig({
   resolve: {
     alias: {
       "@": fileURLToPath(new URL("./apps/web", import.meta.url)),
+      "@corgtex/domain/modules": fileURLToPath(new URL("./packages/domain/src/modules/index.ts", import.meta.url)),
       "@corgtex/domain": fileURLToPath(new URL("./packages/domain/src/index.ts", import.meta.url)),
       "@corgtex/shared": fileURLToPath(new URL("./packages/shared/src/index.ts", import.meta.url)),
       "@corgtex/agents": fileURLToPath(new URL("./packages/agents/src/index.ts", import.meta.url)),
