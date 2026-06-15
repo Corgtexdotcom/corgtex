@@ -12,42 +12,43 @@ const EXPECTED_NAV_GROUPS: NavGroup[] = [
   {
     labelKey: "workspace",
     items: [
-      { href: "", labelKey: "home", icon: "home" },
-      { href: "/goals", labelKey: "goals", icon: "goals", featureFlag: "GOALS" },
-      { href: "/brain", labelKey: "brain", icon: "brain" },
-      { href: "/tools", labelKey: "tools", icon: "tools", featureFlag: "TOOL_LINKS" },
-      { href: "/built", labelKey: "built", icon: "built", featureFlag: "BUILD_ARTIFACTS" },
-      { href: "/members", labelKey: "members", icon: "members" },
+      { moduleKey: "home", href: "", labelKey: "home", icon: "home" },
+      { moduleKey: "goals", href: "/goals", labelKey: "goals", icon: "goals", featureFlag: "GOALS" },
+      { moduleKey: "brain", href: "/brain", labelKey: "brain", icon: "brain" },
+      { moduleKey: "tools", href: "/tools", labelKey: "tools", icon: "tools", featureFlag: "TOOL_LINKS" },
+      { moduleKey: "built", href: "/built", labelKey: "built", icon: "built", featureFlag: "BUILD_ARTIFACTS" },
+      { moduleKey: "members", href: "/members", labelKey: "members", icon: "members" },
     ],
   },
   {
     labelKey: "operations",
     items: [
-      { href: "/tensions", labelKey: "tensions", icon: "tensions" },
-      { href: "/actions", labelKey: "actions", icon: "actions" },
-      { href: "/meetings", labelKey: "meetings", icon: "meetings" },
-      { href: "/leads", labelKey: "relationships", icon: "relationships", featureFlag: "RELATIONSHIPS" },
-      { href: "/maps", labelKey: "contextMaps", icon: "contextMaps", featureFlag: "CONTEXT_MAPS" },
+      { moduleKey: "tensions", href: "/tensions", labelKey: "tensions", icon: "tensions" },
+      { moduleKey: "actions", href: "/actions", labelKey: "actions", icon: "actions" },
+      { moduleKey: "meetings", href: "/meetings", labelKey: "meetings", icon: "meetings" },
+      { moduleKey: "relationships", href: "/leads", labelKey: "relationships", icon: "relationships", featureFlag: "RELATIONSHIPS" },
+      { moduleKey: "context-maps", href: "/maps", labelKey: "contextMaps", icon: "contextMaps", featureFlag: "CONTEXT_MAPS" },
     ],
   },
   {
     labelKey: "governance",
     items: [
-      { href: "/proposals", labelKey: "proposals", icon: "proposals" },
-      { href: "/circles", labelKey: "circles", icon: "circles" },
-      { href: "/cycles", labelKey: "cycles", icon: "cycles", featureFlag: "CYCLES" },
+      { moduleKey: "proposals", href: "/proposals", labelKey: "proposals", icon: "proposals" },
+      { moduleKey: "circles", href: "/circles", labelKey: "circles", icon: "circles" },
+      { moduleKey: "cycles", href: "/cycles", labelKey: "cycles", icon: "cycles", featureFlag: "CYCLES" },
     ],
   },
   {
     labelKey: "finance",
     items: [
-      { href: "/finance", labelKey: "finance", icon: "finance", featureFlag: "FINANCE" },
+      { moduleKey: "finance", href: "/finance", labelKey: "finance", icon: "finance", featureFlag: "FINANCE" },
     ],
   },
   {
     labelKey: "aiGovernance",
     items: [
       {
+        moduleKey: "agent-governance",
         href: "/agents",
         labelKey: "agentGovernance",
         icon: "agents",
@@ -59,10 +60,10 @@ const EXPECTED_NAV_GROUPS: NavGroup[] = [
   {
     labelKey: "system",
     items: [
-      { href: "/governance", labelKey: "osMetrics", icon: "governance", featureFlag: "OS_METRICS" },
-      { href: "/audit", labelKey: "auditTrail", icon: "audit" },
-      { href: "/notifications", labelKey: "notifications", icon: "notifications" },
-      { href: "/settings", labelKey: "settings", icon: "settings" },
+      { moduleKey: "os-metrics", href: "/governance", labelKey: "osMetrics", icon: "governance", featureFlag: "OS_METRICS" },
+      { moduleKey: "audit", href: "/audit", labelKey: "auditTrail", icon: "audit" },
+      { moduleKey: "notifications", href: "/notifications", labelKey: "notifications", icon: "notifications" },
+      { moduleKey: "settings", href: "/settings", labelKey: "settings", icon: "settings" },
     ],
   },
 ];
