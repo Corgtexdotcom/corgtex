@@ -770,6 +770,40 @@ describe("meeting-intelligence", () => {
       }));
     });
 
+    it("uses an injected member directory loader and does not query members directly", async () => {
+      (prisma.meetingInsight.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue({
+        id: "insight-injected",
+        workspaceId: "ws-1",
+        meetingId: "meeting-1",
+        type: "TENSION",
+        status: "CONFIRMED",
+        title: "Ownership unclear",
+        bodyMd: "The handoff owner was unclear.",
+        assigneeHint: "Milan",
+        meeting: { id: "meeting-1", title: "Weekly sync" },
+      });
+      (prisma.meetingInsight.update as ReturnType<typeof vi.fn>).mockResolvedValue({
+        id: "insight-injected",
+        status: "APPLIED",
+      });
+
+      const loadMemberDirectory = vi.fn().mockResolvedValue([
+        { id: "injected-member", user: { displayName: "Milan", email: "milan@example.com" } },
+      ]);
+
+      await applyInsight(mockActor, {
+        workspaceId: "ws-1",
+        insightId: "insight-injected",
+        loadMemberDirectory,
+      });
+
+      expect(loadMemberDirectory).toHaveBeenCalledTimes(1);
+      expect(prisma.member.findMany).not.toHaveBeenCalled();
+      expect(createTensionMock).toHaveBeenCalledWith(mockActor, expect.objectContaining({
+        raisedByMemberId: "injected-member",
+      }));
+    });
+
     it("applies adopted proposal resolutions through the proposal resolution domain path", async () => {
       (prisma.meetingInsight.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue({
         id: "insight-proposal",
@@ -1238,6 +1272,67 @@ describe("meeting-intelligence", () => {
           autoAppliedAt: expect.any(Date),
         }),
       }));
+    });
+
+    it("reads the workspace member directory once when applying multiple hinted insights", async () => {
+      (prisma.meetingInsight.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([
+        {
+          id: "insight-a",
+          type: "ACTION_ITEM",
+          operation: "CREATE",
+          targetEntityType: null,
+          targetEntityId: null,
+          confidence: 0.95,
+          sourceQuote: "Milan will follow up on A.",
+        },
+        {
+          id: "insight-b",
+          type: "ACTION_ITEM",
+          operation: "CREATE",
+          targetEntityType: null,
+          targetEntityId: null,
+          confidence: 0.95,
+          sourceQuote: "Milan will follow up on B.",
+        },
+      ]);
+      const insightsById: Record<string, unknown> = {
+        "insight-a": {
+          id: "insight-a",
+          workspaceId: "ws-1",
+          meetingId: "meeting-1",
+          type: "ACTION_ITEM",
+          operation: "CREATE",
+          status: "SUGGESTED",
+          title: "Follow up A",
+          bodyMd: "Milan will follow up on A.",
+          assigneeHint: "Milan",
+          meeting: { id: "meeting-1", title: "Weekly sync" },
+        },
+        "insight-b": {
+          id: "insight-b",
+          workspaceId: "ws-1",
+          meetingId: "meeting-1",
+          type: "ACTION_ITEM",
+          operation: "CREATE",
+          status: "SUGGESTED",
+          title: "Follow up B",
+          bodyMd: "Milan will follow up on B.",
+          assigneeHint: "Milan",
+          meeting: { id: "meeting-1", title: "Weekly sync" },
+        },
+      };
+      (prisma.meetingInsight.findUnique as ReturnType<typeof vi.fn>).mockImplementation(
+        ({ where }: { where: { id: string } }) => Promise.resolve(insightsById[where.id] ?? null),
+      );
+
+      await expect(autoApplyMeetingInsights(mockActor, {
+        workspaceId: "ws-1",
+        meetingId: "meeting-1",
+      })).resolves.toMatchObject({ applied: 2, failed: 0 });
+
+      expect(createActionMock).toHaveBeenCalledTimes(2);
+      // The full member table must be read at most once for the whole batch.
+      expect(prisma.member.findMany).toHaveBeenCalledTimes(1);
     });
 
     it("skips collective team-scoped actions during auto-apply", async () => {

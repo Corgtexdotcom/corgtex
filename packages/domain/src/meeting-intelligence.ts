@@ -129,6 +129,25 @@ function isCollectiveAssigneeHint(value: string | null | undefined) {
   ].includes(normalized) || /\b(team|members|everyone|everybody)\b/.test(normalized);
 }
 
+type AssigneeMemberCandidate = { id: string; user: { displayName: string | null; email: string } };
+type MemberDirectoryLoader = () => Promise<AssigneeMemberCandidate[]>;
+
+// Returns a memoized loader for the workspace member directory. Used to avoid
+// re-reading the full member table for every assignee-hint insight applied in a
+// single auto-apply run; the member set is invariant across that loop.
+function createWorkspaceMemberDirectoryLoader(workspaceId: string): MemberDirectoryLoader {
+  let cached: AssigneeMemberCandidate[] | null = null;
+  return async () => {
+    if (cached === null) {
+      cached = await prisma.member.findMany({
+        where: { workspaceId },
+        include: { user: true },
+      });
+    }
+    return cached;
+  };
+}
+
 function normalizeInsightType(value: unknown, targetEntityType: string | null): MeetingInsightType | null {
   if (typeof value !== "string") return null;
 
@@ -823,7 +842,7 @@ export async function dismissInsight(
 
 export async function applyInsight(
   actor: AppActor,
-  params: { workspaceId: string; insightId: string; autoApplied?: boolean }
+  params: { workspaceId: string; insightId: string; autoApplied?: boolean; loadMemberDirectory?: MemberDirectoryLoader }
 ) {
   await requireWorkspaceMembership({
     actor,
@@ -931,10 +950,8 @@ export async function applyInsight(
     // Attempt fuzzy match for a member reference if a hint exists.
     let hintedMemberId: string | null = null;
     if (insight.assigneeHint && !isCollectiveAssigneeHint(insight.assigneeHint)) {
-      const mems = await prisma.member.findMany({
-        where: { workspaceId: params.workspaceId },
-        include: { user: true }
-      });
+      const loadMemberDirectory = params.loadMemberDirectory ?? createWorkspaceMemberDirectoryLoader(params.workspaceId);
+      const mems = await loadMemberDirectory();
       const lowHint = insight.assigneeHint.toLowerCase();
       const match = mems.find((m: { id: string; user: { displayName?: string | null; email: string } }) =>
         m.user.displayName?.toLowerCase().includes(lowHint) ||
@@ -1044,6 +1061,10 @@ export async function autoApplyMeetingInsights(
     meetingId: params.meetingId,
   });
 
+  // Read the workspace member directory at most once for the whole batch instead
+  // of once per assignee-hint insight.
+  const loadMemberDirectory = createWorkspaceMemberDirectoryLoader(params.workspaceId);
+
   for (const insight of insights) {
     const requiredThreshold = Math.max(confidenceThreshold, autoApplyThresholdForInsight(insight));
     if ((insight.confidence ?? 0) < requiredThreshold) {
@@ -1080,6 +1101,7 @@ export async function autoApplyMeetingInsights(
         workspaceId: params.workspaceId,
         insightId: insight.id,
         autoApplied: true,
+        loadMemberDirectory,
       });
       applied++;
     } catch (error) {
