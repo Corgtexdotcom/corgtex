@@ -287,9 +287,9 @@ export async function listModuleAccessRequests(actor: AppActor, params: {
 
 /**
  * Approve or reject a module access request (admin only). Approval grants ONLY
- * the requester the requested access; if the module's org opt-in flag was off,
- * it is flipped on (module becomes available) without broadcasting the default
- * policy to the whole workspace.
+ * the requester the requested access via a MEMBER grant. Grants apply
+ * regardless of the module's org opt-in flag, so the requester gets access
+ * without flipping the flag and without broadcasting access to other members.
  */
 export async function decideModuleAccessRequest(actor: AppActor, params: {
   workspaceId: string;
@@ -333,21 +333,9 @@ export async function decideModuleAccessRequest(actor: AppActor, params: {
         },
         update: { accessLevel: request.requestedAccess },
       });
-
-      const featureFlag = getModuleByKey(request.moduleKey)?.featureFlag?.flag;
-      if (featureFlag) {
-        const existing = await tx.workspaceFeatureFlag.findUnique({
-          where: { workspaceId_flag: { workspaceId: params.workspaceId, flag: featureFlag } },
-          select: { enabled: true },
-        });
-        if (!existing?.enabled) {
-          await tx.workspaceFeatureFlag.upsert({
-            where: { workspaceId_flag: { workspaceId: params.workspaceId, flag: featureFlag } },
-            create: { workspaceId: params.workspaceId, flag: featureFlag, enabled: true },
-            update: { enabled: true },
-          });
-        }
-      }
+      // No feature-flag flip: the grant above gives the requester effective
+      // access on its own (grants apply regardless of the org opt-in flag), so
+      // approving one request never broadcasts access to other members.
     }
 
     return tx.workspaceModuleAccessRequest.update({

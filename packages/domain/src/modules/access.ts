@@ -86,9 +86,13 @@ export function resolveModuleAccess(
   context: ModuleAccessContext,
   mod: ModuleManifest,
 ): ModuleAccessLevel {
-  if (!isModuleEnabled(mod, context.flags)) return "none";
-
-  let level = moduleDefaultAccess(mod, context.role);
+  // The manifest default policy only applies when the module is enabled at the
+  // org level. Explicit per-principal grants, however, apply regardless of the
+  // org opt-in flag - they are deliberate, scoped access (e.g. an approved
+  // individual request) and must NOT broadcast access to everyone else.
+  let level: ModuleAccessLevel = isModuleEnabled(mod, context.flags)
+    ? moduleDefaultAccess(mod, context.role)
+    : "none";
   for (const grant of context.grants) {
     if (grant.moduleKey !== mod.key) continue;
     if (grantMatchesContext(grant, context)) {
