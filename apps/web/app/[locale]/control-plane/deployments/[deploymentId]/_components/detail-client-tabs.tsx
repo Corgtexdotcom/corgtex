@@ -22,6 +22,8 @@ import {
   resendControlPlaneAccessLinkAction,
   updateControlPlaneMemberStatusAction,
   setControlPlaneFeatureFlagAction,
+  setControlPlaneModuleGrantAction,
+  deleteControlPlaneModuleGrantAction,
   updateControlPlaneModelBudgetAction,
   updateControlPlaneAgentPolicyAction,
   revokeControlPlaneAgentCredentialAction,
@@ -53,6 +55,13 @@ interface TabProps {
   members: { members: any[] };
   featureFlags: { flags: any[] };
   enterpriseApps: { canManage?: boolean; installations: any[]; error?: string | null };
+  moduleGrants: {
+    modules?: { key: string; title: string; tier: string }[];
+    principalTypes?: string[];
+    accessLevels?: readonly string[] | string[];
+    grants: any[];
+    error?: string | null;
+  };
   deployPreflight: any;
   rollouts: any[];
   locale: string;
@@ -68,6 +77,7 @@ export function CustomerDetailClientTabs({
   members,
   featureFlags,
   enterpriseApps,
+  moduleGrants,
   deployPreflight,
   rollouts,
   locale,
@@ -602,6 +612,85 @@ export function CustomerDetailClientTabs({
                     </form>
                   ))}
                 </div>
+              </div>
+
+              <div className={`${detailPanelClass} space-y-4`}>
+                <div>
+                  <h3 className="text-sm font-semibold text-white">Module Access Grants</h3>
+                  <p className="text-[10px] text-muted mt-0.5">Grant read/write access to a member, member role, governance role, or circle for a module. Audited; manifest defaults apply when no grant exists.</p>
+                </div>
+
+                {moduleGrants.error && (
+                  <p className="text-[10px] text-amber-400">{moduleGrants.error}</p>
+                )}
+
+                {!moduleGrants.error && (
+                  <>
+                    <div className="space-y-2">
+                      {moduleGrants.grants.map((grant: any) => (
+                        <form
+                          key={grant.id}
+                          action={deleteControlPlaneModuleGrantAction}
+                          className={`${detailInnerPanelClass} flex flex-wrap items-center justify-between gap-2`}
+                        >
+                          <input type="hidden" name="deploymentId" value={customer.id} />
+                          <input type="hidden" name="grantId" value={grant.id} />
+                          <div className="space-y-0.5">
+                            <strong className="text-xs text-white">{grant.moduleKey}</strong>
+                            <p className="text-[10px] text-muted">
+                              {grant.principalType}: <span className="text-white">{grant.principalId}</span> {"\u2192"} {String(grant.accessLevel).toLowerCase()}
+                            </p>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <input name="reason" required placeholder="Reason" className={controlPlaneInputClass} />
+                            <button type="submit" className={cn(detailDangerButtonClass, "shrink-0")}>Remove</button>
+                          </div>
+                        </form>
+                      ))}
+                      {moduleGrants.grants.length === 0 && (
+                        <p className="text-[10px] text-muted">No grants yet. Module manifest defaults apply.</p>
+                      )}
+                    </div>
+
+                    <form action={setControlPlaneModuleGrantAction} className={`${detailInnerPanelClass} space-y-3`}>
+                      <input type="hidden" name="deploymentId" value={customer.id} />
+                      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                        <div>
+                          <label className="mb-1.5 block text-[10px] font-bold uppercase tracking-wider text-muted">Module</label>
+                          <select name="moduleKey" required className={`${controlPlaneInputClass} w-full`}>
+                            {(moduleGrants.modules ?? []).map((mod) => (
+                              <option key={mod.key} value={mod.key}>{mod.title} ({mod.key})</option>
+                            ))}
+                          </select>
+                        </div>
+                        <div>
+                          <label className="mb-1.5 block text-[10px] font-bold uppercase tracking-wider text-muted">Principal type</label>
+                          <select name="principalType" required className={`${controlPlaneInputClass} w-full`}>
+                            {(moduleGrants.principalTypes ?? []).map((pt) => (
+                              <option key={pt} value={pt}>{pt}</option>
+                            ))}
+                          </select>
+                        </div>
+                        <div>
+                          <label className="mb-1.5 block text-[10px] font-bold uppercase tracking-wider text-muted">Principal id</label>
+                          <input name="principalId" required placeholder="member id / role / circle id" className={`${controlPlaneInputClass} w-full`} />
+                        </div>
+                        <div>
+                          <label className="mb-1.5 block text-[10px] font-bold uppercase tracking-wider text-muted">Access level</label>
+                          <select name="accessLevel" required className={`${controlPlaneInputClass} w-full`}>
+                            {(moduleGrants.accessLevels ?? ["none", "read", "write"]).map((lvl) => (
+                              <option key={lvl} value={lvl}>{lvl}</option>
+                            ))}
+                          </select>
+                        </div>
+                      </div>
+                      <div className="flex gap-2">
+                        <input name="reason" required placeholder="Audit reason" className={`${controlPlaneInputClass} w-full`} />
+                        <button type="submit" className={cn(controlPlaneButtonClass, "shrink-0")}>Grant</button>
+                      </div>
+                    </form>
+                  </>
+                )}
               </div>
             </div>
 

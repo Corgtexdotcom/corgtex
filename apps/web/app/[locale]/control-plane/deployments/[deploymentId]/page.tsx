@@ -9,6 +9,7 @@ import {
   listControlPlaneCustomerMembers,
   getControlPlaneIntegrationStatus,
   listControlPlaneFeatureFlags,
+  listControlPlaneModuleGrants,
   listControlPlaneReleaseRolloutJobs,
   listWorkspaceEnterpriseApps,
   requireControlPlaneAccess,
@@ -185,6 +186,24 @@ export default async function ControlPlaneCustomerPage({
         error: activeTab === "config" ? "Enterprise app inspection requires a managed workspace." : null,
       };
 
+  const moduleGrants = activeTab === "config" && customer.managedWorkspaceId
+    ? (await readControlPlaneCached(["control-plane", "deployment", "module-grants", actorCacheKey, customer.managedWorkspaceId], refresh, async () => (
+      listControlPlaneModuleGrants(actor, deploymentId).catch((err: unknown) => ({
+        modules: [],
+        principalTypes: [],
+        accessLevels: ["none", "read", "write"] as const,
+        grants: [],
+        error: err instanceof Error ? err.message : "Unable to load module access grants.",
+      }))
+    ))).data
+    : {
+        modules: [],
+        principalTypes: [],
+        accessLevels: ["none", "read", "write"] as const,
+        grants: [],
+        error: activeTab === "config" ? "Module access requires a managed workspace." : null,
+      };
+
   return (
     <div className="space-y-5 pb-10">
       <ControlPlanePageHeader
@@ -235,6 +254,7 @@ export default async function ControlPlaneCustomerPage({
         members={members}
         featureFlags={featureFlags}
         enterpriseApps={enterpriseApps}
+        moduleGrants={moduleGrants}
         deployPreflight={deployPreflightRead.data}
         rollouts={rolloutsRead.data}
         locale={locale}
