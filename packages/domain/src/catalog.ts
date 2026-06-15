@@ -16,6 +16,7 @@ import { prisma, randomOpaqueToken, sha256, toInputJson } from "@corgtex/shared"
 import type { AppActor, MembershipSummary } from "@corgtex/shared";
 import { AGENT_REGISTRY } from "./agent-registry";
 import { ALL_SCOPES } from "./agent-auth";
+import { getSatelliteModuleByAppKey } from "./modules";
 import { listAiWorkspaceToolProviders, listEnterpriseServices } from "./ai-workspaces";
 import { actorUserIdForWorkspace, requireWorkspaceMembership } from "./auth";
 import { connectorReadinessManifest, listConnectorReadinessProfiles } from "./connector-readiness";
@@ -179,28 +180,14 @@ function requireUser(actor: AppActor) {
 }
 
 function practiceLedgerCapabilities() {
-  return [
-    {
-      key: "expenses.create_draft",
-      description: "Create expense drafts from receipts, account statements, invoices, or user notes.",
-      requiredScopes: ["finance:write", "brain:read", "brain:write"],
-    },
-    {
-      key: "time_entries.create_draft",
-      description: "Create consultant time-entry drafts with source provenance.",
-      requiredScopes: ["finance:write", "brain:read", "brain:write"],
-    },
-    {
-      key: "budgets.read_status",
-      description: "Read budget, burn, remaining budget, and margin status.",
-      requiredScopes: ["finance:read", "brain:read"],
-    },
-    {
-      key: "knowledge.sync_summary",
-      description: "Sync finance summaries and source provenance into Corgtex Brain.",
-      requiredScopes: ["brain:write"],
-    },
-  ];
+  // Derived from the satellite module's graduation-stable capability contract
+  // in the Module Manifest registry (single source of truth).
+  const satellite = getSatelliteModuleByAppKey("practice-ledger");
+  return (satellite?.contract ?? []).map((capability) => ({
+    key: capability.key,
+    description: capability.description,
+    requiredScopes: capability.requiredScopes ?? [],
+  }));
 }
 
 function mergeManifest(
@@ -213,36 +200,45 @@ function mergeManifest(
   };
 }
 
+// Derive marketplace app sources from satellite-tier module manifests. The
+// satellite's structured identity (app key, repository, env-sourced URLs,
+// category, classification, capability contract) comes from the registry;
+// only marketing copy lives here.
 function marketplaceAppSources(_workspaceId: string, flags: CatalogFeatureFlags): CatalogSourceInput[] {
   if (!flags.APP_MARKETPLACE || !flags.FINANCE) return [];
 
-  const practiceLedgerUrl = normalizeString(process.env.PRACTICE_LEDGER_APP_URL);
-  const practiceLedgerMcpUrl = normalizeString(process.env.PRACTICE_LEDGER_MCP_URL);
+  const ledger = getSatelliteModuleByAppKey("practice-ledger");
+  const spec = ledger?.satellite;
+  if (!ledger || !spec) return [];
+
+  const practiceLedgerUrl = normalizeString(process.env[spec.appUrlEnv]);
+  const practiceLedgerMcpUrl = normalizeString(process.env[spec.mcpUrlEnv]);
+  const repositoryUrl = `https://${spec.repository}`;
   return [{
     type: "APP",
     sourceType: "MARKETPLACE_APP",
-    sourceId: "practice-ledger",
-    title: "Practice Ledger",
+    sourceId: spec.appKey,
+    title: ledger.title,
     outcome: "Track consulting budgets, billing codes, time, expenses, margin, burn rate, and finance intake.",
     descriptionMd: "Official Corgtex-built finance app for consulting practices. Practice Ledger owns structured finance records while syncing useful summaries, source provenance, and audit-readable context back into Corgtex Brain.",
     accessNotesMd: "Install this app for workspaces that need consulting-finance operations. Connect the Practice Ledger MCP in the user's agent environment for expense, time, budget, and statement writes; Corgtex MCP provides app discovery, company context, Brain, governance, and routing guidance.",
     url: practiceLedgerUrl,
-    category: "FINANCE",
+    category: spec.routingCategory,
     accessMode: "REQUEST",
     requestedScopes: ["workspace:read", "brain:read", "brain:write", "finance:read", "finance:write"],
     featured: true,
-    appCategory: "FINANCE",
+    appCategory: spec.appCategory as AppCategory,
     appVisibility: "CORGTEX_MANAGED",
     hostingMode: practiceLedgerMcpUrl && !practiceLedgerUrl ? "MCP_SERVER" : "CORGTEX_MANAGED_EXTERNAL",
     integrationDepth: "KNOWLEDGE_SYNCED",
     installationStatus: "NEEDS_SETUP",
     appMcpUrl: practiceLedgerMcpUrl,
-    dataClassification: "CLIENT_PRIVATE",
-    proofUrl: "https://github.com/Corgtexdotcom/practice-ledger",
-    reviewUrl: "https://github.com/Corgtexdotcom/practice-ledger",
+    dataClassification: spec.dataClassification,
+    proofUrl: repositoryUrl,
+    reviewUrl: repositoryUrl,
     manifestJson: mergeManifest({
-      appKey: "practice-ledger",
-      repository: "github.com/Corgtexdotcom/practice-ledger",
+      appKey: spec.appKey,
+      repository: spec.repository,
       structuredRecordOwner: "Practice Ledger",
       corgtexRole: "governed context, Brain sync, app discovery, routing guidance, and audit context",
     }, "practice-ledger"),
