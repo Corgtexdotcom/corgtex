@@ -44,14 +44,10 @@ export function integrationRedirectUrl(origin: string, workspaceId: string | nul
   intent?: IntegrationOAuthIntent;
 }) {
   const path = workspaceId
-    ? params.intent === "documents"
-      ? `/workspaces/${workspaceId}`
-      : `/workspaces/${workspaceId}/tools`
+    ? `/workspaces/${workspaceId}/tools`
     : "/";
   const url = new URL(path, origin);
-  if (workspaceId && params.intent === "documents") {
-    url.searchParams.set("onboarding", "setup");
-  } else if (workspaceId) {
+  if (workspaceId) {
     url.searchParams.set("type", "CONNECTOR");
     url.searchParams.set("q", provider);
   }

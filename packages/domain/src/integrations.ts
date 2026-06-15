@@ -71,6 +71,8 @@ export async function saveOAuthConnectionAndEnqueueCalendarSync(actor: AppActor,
   scopes?: string[];
   providerEmail?: string | null;
   syncSettings?: Prisma.InputJsonValue;
+  createSyncSettings?: Prisma.InputJsonValue;
+  enqueueCalendarSync?: boolean;
 }) {
   invariant(actor.kind === "user", 403, "FORBIDDEN", "Only users can connect OAuth providers.");
 
@@ -96,11 +98,7 @@ export async function saveOAuthConnectionAndEnqueueCalendarSync(actor: AppActor,
         status: "ACTIVE",
         disconnectedAt: null,
         lastSyncError: null,
-        syncSettings: params.syncSettings ?? {
-          calendar: { enabled: true, includeAllEvents: false },
-          documents: { enabled: false, selectedDriveIds: [] },
-          email: { enabled: false, filters: [] },
-        },
+        ...(params.syncSettings === undefined ? {} : { syncSettings: params.syncSettings }),
       },
       create: {
         userId: actor.user.id,
@@ -114,7 +112,7 @@ export async function saveOAuthConnectionAndEnqueueCalendarSync(actor: AppActor,
         providerEmail: params.providerEmail ?? null,
         scopes: params.scopes ?? [],
         status: "ACTIVE",
-        syncSettings: params.syncSettings ?? {
+        syncSettings: params.createSyncSettings ?? params.syncSettings ?? {
           calendar: { enabled: true, includeAllEvents: false },
           documents: { enabled: false, selectedDriveIds: [] },
           email: { enabled: false, filters: [] },
@@ -122,7 +120,7 @@ export async function saveOAuthConnectionAndEnqueueCalendarSync(actor: AppActor,
       },
     });
 
-    if (params.workspaceId) {
+    if (params.workspaceId && params.enqueueCalendarSync !== false) {
       await tx.workflowJob.create({
         data: {
           workspaceId: params.workspaceId,
@@ -628,7 +626,11 @@ const GOOGLE_DRIVE_DOCUMENT_MIME_TYPES = [
 ];
 
 function hasGoogleDriveDocumentScope(scopes: string[]) {
-  return scopes.some((scope) => scope.toLowerCase() === "https://www.googleapis.com/auth/drive.readonly");
+  return scopes.some((scope) => {
+    const normalized = scope.toLowerCase();
+    return normalized === "https://www.googleapis.com/auth/drive.file"
+      || normalized === "https://www.googleapis.com/auth/drive.readonly";
+  });
 }
 
 function escapeGoogleDriveQuery(value: string) {

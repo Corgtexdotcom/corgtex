@@ -3,6 +3,7 @@ import { CorgtexConnectorManager } from "../settings/CorgtexConnectorManager";
 import { DataSourcesManager } from "../settings/DataSourcesManager";
 import { AiWorkspaceManager } from "../settings/AiWorkspaceManager";
 import { TimeZoneSelect } from "@/lib/components/TimeZoneSelect";
+import { GoogleDrivePicker } from "./GoogleDrivePicker";
 import {
   connectMeetingTranscriptSourceAction,
   createWebhookEndpointAction,
@@ -31,6 +32,12 @@ type OAuthConnection = {
   syncSettings: unknown;
   lastSyncAt: Date | null;
   lastSyncError: string | null;
+};
+
+type GooglePickerConfig = {
+  clientId: string | null;
+  developerKey: string | null;
+  appId: string | null;
 };
 
 function settingsRecord(value: unknown) {
@@ -78,10 +85,12 @@ function integrationStatusMessage(params: {
   return messages[params.error ?? ""] ?? "The integration could not be connected. Retry from this tool page.";
 }
 
-function OAuthConnectionControls({ connection, workspaceId, format }: {
+function OAuthConnectionControls({ connection, provider, workspaceId, format, googlePickerConfig }: {
   connection: OAuthConnection;
+  provider: "google" | "microsoft";
   workspaceId: string;
   format: Formatter;
+  googlePickerConfig?: GooglePickerConfig;
 }) {
   const calendar = settingsSection(connection.syncSettings, "calendar");
   const documents = settingsSection(connection.syncSettings, "documents");
@@ -89,7 +98,7 @@ function OAuthConnectionControls({ connection, workspaceId, format }: {
   const documentIds = settingsStringList(documents.selectedDriveIds ?? documents.selectedDocumentIds).join("\n");
   const emailFilters = settingsStringList(email.filters ?? email.queries).join("\n");
   const scopes = connection.scopes.join(" ").toLowerCase();
-  const hasDocumentScope = scopes.includes("drive.readonly") || scopes.includes("files.read") || scopes.includes("sites.read");
+  const hasDocumentScope = scopes.includes("drive.file") || scopes.includes("drive.readonly") || scopes.includes("files.read") || scopes.includes("sites.read");
   const hasEmailScope = scopes.includes("gmail.readonly") || scopes.includes("mail.read");
 
   return (
@@ -105,6 +114,25 @@ function OAuthConnectionControls({ connection, workspaceId, format }: {
       {connection.lastSyncError && (
         <p className="form-message form-message-error" style={{ marginTop: 8 }}>{connection.lastSyncError}</p>
       )}
+      {provider === "google" && !hasDocumentScope && (
+        <div className="actions-inline" style={{ marginTop: 10 }}>
+          <a href={`/api/integrations/google/connect?workspaceId=${workspaceId}&intent=documents`} className="button secondary small">
+            Connect Drive files
+          </a>
+          <p className="nr-item-meta" style={{ fontSize: "0.78rem", margin: 0 }}>
+            Grants selected-file Drive access only. Corgtex will not request all-Drive read access.
+          </p>
+        </div>
+      )}
+      {provider === "google" && hasDocumentScope && googlePickerConfig ? (
+        <GoogleDrivePicker
+          workspaceId={workspaceId}
+          clientId={googlePickerConfig.clientId}
+          developerKey={googlePickerConfig.developerKey}
+          appId={googlePickerConfig.appId}
+          initialSelectedIds={settingsStringList(documents.selectedDriveIds ?? documents.selectedDocumentIds)}
+        />
+      ) : null}
       <form action={updateOAuthConnectionSettingsAction} className="stack" style={{ gap: 8, marginTop: 10 }}>
         <input type="hidden" name="workspaceId" value={workspaceId} />
         <input type="hidden" name="connectionId" value={connection.id} />
@@ -191,6 +219,13 @@ export function OAuthConnectorPanel({ provider, title, configured, connection, w
   format: Formatter;
   message?: string | null;
 }) {
+  const googlePickerConfig = provider === "google"
+    ? {
+      clientId: process.env.GOOGLE_CLIENT_ID ?? null,
+      developerKey: process.env.NEXT_PUBLIC_GOOGLE_PICKER_API_KEY ?? null,
+      appId: process.env.NEXT_PUBLIC_GOOGLE_CLOUD_PROJECT_NUMBER ?? null,
+    }
+    : undefined;
   const setupNote = provider === "google"
     ? "Hidden beta requires the signed-in email to be added as a Google test user until Google verification is complete."
     : "External client tenants may need publisher verification or admin consent before Microsoft will allow access.";
@@ -202,6 +237,15 @@ export function OAuthConnectorPanel({ provider, title, configured, connection, w
           <span className="tag" style={{ background: connection.status === "ACTIVE" ? "var(--accent-soft)" : "transparent" }}>
             {connection.status === "ACTIVE" ? "Connected" : connection.status}
           </span>
+        ) : configured && provider === "google" ? (
+          <div className="actions-inline">
+            <a href={`/api/integrations/google/connect?workspaceId=${workspaceId}`} className="button secondary small">
+              Connect Calendar
+            </a>
+            <a href={`/api/integrations/google/connect?workspaceId=${workspaceId}&intent=documents`} className="button secondary small">
+              Connect Drive files
+            </a>
+          </div>
         ) : configured ? (
           <a href={`/api/integrations/${provider}/connect?workspaceId=${workspaceId}`} className="button secondary small">
             Connect {provider === "google" ? "Google" : "Microsoft"}
@@ -221,7 +265,15 @@ export function OAuthConnectorPanel({ provider, title, configured, connection, w
       <p className="nr-item-meta" style={{ fontSize: "0.82rem", margin: 0 }}>
         {configured ? setupNote : "Corgtex OAuth credentials are missing in this environment."}
       </p>
-      {connection ? <OAuthConnectionControls connection={connection} workspaceId={workspaceId} format={format} /> : null}
+      {connection ? (
+        <OAuthConnectionControls
+          connection={connection}
+          provider={provider}
+          workspaceId={workspaceId}
+          format={format}
+          googlePickerConfig={googlePickerConfig}
+        />
+      ) : null}
     </section>
   );
 }
