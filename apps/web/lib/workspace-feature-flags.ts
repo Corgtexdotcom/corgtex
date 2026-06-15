@@ -4,10 +4,14 @@ import { prisma } from "@corgtex/shared";
 import {
   defaultWorkspaceFeatureFlags,
   listWorkspaceFeatureFlagKeys,
+  type ModuleAccessLevel,
   type WorkspaceFeatureFlagKey,
 } from "@corgtex/domain/modules";
 
 import type { NavGroup, WorkspaceNavCapability } from "@/lib/nav-config";
+
+/** Effective module access by module key, used to hide `none`-access nav items. */
+export type WorkspaceModuleAccessMap = Record<string, ModuleAccessLevel>;
 
 // Derived from the Module Manifest registry (single source of truth).
 export type WorkspaceFeatureFlag = WorkspaceFeatureFlagKey;
@@ -66,6 +70,7 @@ export function filterNavGroupsByWorkspaceAccess(
   navGroups: NavGroup[],
   flags: WorkspaceFeatureFlagMap,
   capabilities: WorkspaceNavCapabilityMap = {},
+  moduleAccess?: WorkspaceModuleAccessMap,
 ): NavGroup[] {
   return navGroups
     .map((group) => ({
@@ -73,6 +78,9 @@ export function filterNavGroupsByWorkspaceAccess(
       items: group.items.filter((item) => (
         (!item.featureFlag || flags[item.featureFlag])
         && (!item.requiredCapability || Boolean(capabilities[item.requiredCapability]))
+        // Hide modules whose resolved access is `none`. When no access map is
+        // provided (callers that only know flags), this check is skipped.
+        && (!moduleAccess || moduleAccess[item.moduleKey] !== "none")
       )),
     }))
     .filter((group) => group.items.length > 0);
