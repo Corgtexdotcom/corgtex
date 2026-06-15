@@ -1,5 +1,6 @@
 import { prisma, toInputJson } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
+import type { Prisma } from "@prisma/client";
 import { requireWorkspaceMembership } from "./auth";
 import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
 import { invariant } from "./errors";
@@ -124,13 +125,16 @@ export function signWebhookPayload(payload: string, secret: string): string {
   return createHmac("sha256", secret).update(payload).digest("hex");
 }
 
-export async function createWebhookDeliveries(params: {
-  workspaceId: string;
-  eventId: string;
-  eventType: string;
-  payload: Record<string, unknown>;
-}) {
-  const endpoints = await prisma.webhookEndpoint.findMany({
+export async function createWebhookDeliveries(
+  client: Prisma.TransactionClient,
+  params: {
+    workspaceId: string;
+    eventId: string;
+    eventType: string;
+    payload: Record<string, unknown>;
+  },
+) {
+  const endpoints = await client.webhookEndpoint.findMany({
     where: {
       workspaceId: params.workspaceId,
       status: "ACTIVE",
@@ -148,7 +152,7 @@ export async function createWebhookDeliveries(params: {
 
   if (matchingEndpoints.length === 0) return [];
 
-  const deliveries = await prisma.webhookDelivery.createManyAndReturn({
+  const deliveries = await client.webhookDelivery.createManyAndReturn({
     data: matchingEndpoints.map((ep) => ({
       endpointId: ep.id,
       eventId: params.eventId,

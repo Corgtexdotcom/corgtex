@@ -782,7 +782,7 @@ export async function dispatchPendingEvents(workerId: string, batchSize = DEFAUL
 
         // Fan out webhook deliveries for active endpoints
         if (event.workspaceId) {
-          const deliveries = await createWebhookDeliveries({
+          const deliveries = await createWebhookDeliveries(tx, {
             workspaceId: event.workspaceId,
             eventId: event.id,
             eventType: event.type,
