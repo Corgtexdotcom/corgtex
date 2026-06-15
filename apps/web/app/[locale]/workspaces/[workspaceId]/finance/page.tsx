@@ -15,6 +15,7 @@ import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
 import { DeliberationThread } from "@/lib/components/DeliberationThread";
 import { getDeliberationTargets } from "@/lib/deliberation-targets";
 import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
+import { PracticeLedgerEmbed } from "./PracticeLedgerEmbed";
 import { getTranslations } from "next-intl/server";
 import {
   archiveLedgerAccountAction,
@@ -270,6 +271,8 @@ export default async function FinancePage({
           <span>{t("pageDescription")}</span>
         </div>
       </header>
+
+      <PracticeLedgerEmbed />
 
       <div className="nr-stat-bar">
         <span className="nr-stat">{t("statTotal", { amount: fmt(totalAll) })}</span>
