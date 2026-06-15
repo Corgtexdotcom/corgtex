@@ -34,6 +34,7 @@ export * from "./crm-extraction";
 export * from "./crm-drip";
 export * from "./crm-enrichment";
 export * from "./finance";
+export * from "./module-access";
 export * from "./governance-scoring";
 export * from "./meetings";
 export * from "./meeting-facilitation";
