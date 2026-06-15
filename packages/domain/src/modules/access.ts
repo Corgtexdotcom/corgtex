@@ -98,6 +98,17 @@ export function resolveModuleAccess(
   return level;
 }
 
+const MEMBER_ROLE_KEYS: MemberRoleKey[] = ["CONTRIBUTOR", "FACILITATOR", "FINANCE_STEWARD", "ADMIN"];
+
+/**
+ * The coarse member roles that receive at least `atLeast` access to a module by
+ * its default policy. This is the single source of truth domain guards read
+ * instead of hardcoding `allowedRoles`.
+ */
+export function rolesWithDefaultAccess(mod: ModuleManifest, atLeast: ModuleAccessLevel): MemberRoleKey[] {
+  return MEMBER_ROLE_KEYS.filter((role) => isAtLeast(moduleDefaultAccess(mod, role), atLeast));
+}
+
 /** Effective access level for every provided module, keyed by module key. */
 export function resolveAllModuleAccess(
   context: ModuleAccessContext,
