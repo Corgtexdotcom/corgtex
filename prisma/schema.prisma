@@ -616,6 +616,7 @@ model Workspace {
   externalDataSources            ExternalDataSource[]
   featureFlags                   WorkspaceFeatureFlag[]
   moduleGrants                   WorkspaceModuleGrant[]
+  moduleAccessRequests           WorkspaceModuleAccessRequest[]
   meetingRecorderConfig          WorkspaceMeetingRecorderConfig?
   recorderCalendarSources        WorkspaceRecorderCalendarSource[]
   meetingRecordings              MeetingRecording[]
@@ -713,6 +714,34 @@ model WorkspaceModuleGrant {
 
   @@unique([workspaceId, moduleKey, principalType, principalId])
   @@index([workspaceId, moduleKey])
+}
+
+enum ModuleAccessRequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+// An individual's request for read/write access to a module. Admin approval
+// creates a MEMBER grant for the requester (and flips the module's org opt-in
+// flag on if it was off, without broadcasting the default policy to everyone).
+model WorkspaceModuleAccessRequest {
+  id              String                    @id @default(uuid())
+  workspaceId     String
+  moduleKey       String
+  requestedAccess ModuleAccessLevel
+  requesterUserId String
+  reasonMd        String
+  status          ModuleAccessRequestStatus @default(PENDING)
+  decisionNoteMd  String?
+  decidedByUserId String?
+  decidedAt       DateTime?
+  createdAt       DateTime                  @default(now())
+  updatedAt       DateTime                  @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, status])
 }
 
 model CommunicationInstallation {

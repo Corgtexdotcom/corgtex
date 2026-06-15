@@ -8,11 +8,12 @@
  * resolution logic or call sites.
  */
 
-import type { ModuleAccessLevel as PrismaModuleAccessLevel, ModuleGrantPrincipalType as PrismaModuleGrantPrincipalType } from "@prisma/client";
+import type { ModuleAccessLevel as PrismaModuleAccessLevel, ModuleAccessRequestStatus, ModuleGrantPrincipalType as PrismaModuleGrantPrincipalType } from "@prisma/client";
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import {
   defaultWorkspaceFeatureFlags,
+  getModuleByKey,
   getModuleManifests,
   resolveAllModuleAccess,
   resolveModuleAccess,
@@ -235,4 +236,128 @@ export async function deleteWorkspaceModuleGrant(actor: AppActor, params: {
   invariant(existing, 404, "NOT_FOUND", "Module grant not found.");
   await prisma.workspaceModuleGrant.delete({ where: { id: existing.id } });
   return { id: existing.id };
+}
+
+const REQUESTABLE_ACCESS_LEVELS = new Set<ModuleAccessLevel>(["read", "write"]);
+
+/** A member requests `read`/`write` access to a module. */
+export async function createModuleAccessRequest(actor: AppActor, params: {
+  workspaceId: string;
+  moduleKey: string;
+  accessLevel: ModuleAccessLevel;
+  reasonMd: string;
+}) {
+  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  invariant(actor.kind === "user", 403, "FORBIDDEN", "Only signed-in members can request module access.");
+  const moduleKey = params.moduleKey?.trim();
+  invariant(moduleKey && getModuleByKey(moduleKey), 404, "NOT_FOUND", "Unknown module.");
+  invariant(REQUESTABLE_ACCESS_LEVELS.has(params.accessLevel), 400, "INVALID_INPUT", "Requested access must be read or write.");
+  const reasonMd = params.reasonMd?.trim();
+  invariant(reasonMd, 400, "INVALID_INPUT", "A reason is required.");
+
+  return prisma.workspaceModuleAccessRequest.create({
+    data: {
+      workspaceId: params.workspaceId,
+      moduleKey,
+      requestedAccess: toPrismaAccessLevel(params.accessLevel),
+      requesterUserId: actor.user.id,
+      reasonMd,
+    },
+  });
+}
+
+/** List module access requests. Admins see all; members see only their own. */
+export async function listModuleAccessRequests(actor: AppActor, params: {
+  workspaceId: string;
+  status?: ModuleAccessRequestStatus;
+}) {
+  const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  const isAdmin = membership?.role === "ADMIN";
+  const userId = actor.kind === "user" ? actor.user.id : null;
+  return prisma.workspaceModuleAccessRequest.findMany({
+    where: {
+      workspaceId: params.workspaceId,
+      ...(params.status ? { status: params.status } : {}),
+      ...(isAdmin ? {} : { requesterUserId: userId ?? "" }),
+    },
+    orderBy: { createdAt: "desc" },
+    take: 100,
+  });
+}
+
+/**
+ * Approve or reject a module access request (admin only). Approval grants ONLY
+ * the requester the requested access; if the module's org opt-in flag was off,
+ * it is flipped on (module becomes available) without broadcasting the default
+ * policy to the whole workspace.
+ */
+export async function decideModuleAccessRequest(actor: AppActor, params: {
+  workspaceId: string;
+  requestId: string;
+  status: "APPROVED" | "REJECTED";
+  decisionNoteMd?: string | null;
+}) {
+  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, allowedRoles: ["ADMIN"] });
+  const decidedByUserId = actor.kind === "user" ? actor.user.id : null;
+
+  return prisma.$transaction(async (tx) => {
+    const request = await tx.workspaceModuleAccessRequest.findFirst({
+      where: { id: params.requestId, workspaceId: params.workspaceId },
+    });
+    invariant(request, 404, "NOT_FOUND", "Module access request not found.");
+    invariant(request.status === "PENDING", 400, "INVALID_STATE", "Request has already been decided.");
+
+    if (params.status === "APPROVED") {
+      const member = await tx.member.findFirst({
+        where: { workspaceId: params.workspaceId, userId: request.requesterUserId, isActive: true },
+        select: { id: true },
+      });
+      invariant(member, 404, "NOT_FOUND", "Requester is no longer an active member.");
+
+      await tx.workspaceModuleGrant.upsert({
+        where: {
+          workspaceId_moduleKey_principalType_principalId: {
+            workspaceId: params.workspaceId,
+            moduleKey: request.moduleKey,
+            principalType: "MEMBER",
+            principalId: member.id,
+          },
+        },
+        create: {
+          workspaceId: params.workspaceId,
+          moduleKey: request.moduleKey,
+          principalType: "MEMBER",
+          principalId: member.id,
+          accessLevel: request.requestedAccess,
+          createdByUserId: decidedByUserId,
+        },
+        update: { accessLevel: request.requestedAccess },
+      });
+
+      const featureFlag = getModuleByKey(request.moduleKey)?.featureFlag?.flag;
+      if (featureFlag) {
+        const existing = await tx.workspaceFeatureFlag.findUnique({
+          where: { workspaceId_flag: { workspaceId: params.workspaceId, flag: featureFlag } },
+          select: { enabled: true },
+        });
+        if (!existing?.enabled) {
+          await tx.workspaceFeatureFlag.upsert({
+            where: { workspaceId_flag: { workspaceId: params.workspaceId, flag: featureFlag } },
+            create: { workspaceId: params.workspaceId, flag: featureFlag, enabled: true },
+            update: { enabled: true },
+          });
+        }
+      }
+    }
+
+    return tx.workspaceModuleAccessRequest.update({
+      where: { id: request.id },
+      data: {
+        status: params.status,
+        decidedByUserId,
+        decidedAt: new Date(),
+        decisionNoteMd: params.decisionNoteMd?.trim() || null,
+      },
+    });
+  });
 }
