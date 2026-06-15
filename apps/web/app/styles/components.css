@@ -1934,6 +1934,23 @@ details[open] > .settings-disclosure-summary::before {
     color: var(--accent);
   }
 
+  .nr-icon-menu-item:disabled {
+    opacity: 0.35;
+    color: var(--muted);
+    cursor: not-allowed;
+  }
+
+  .nr-icon-menu-item:disabled:hover {
+    background: transparent;
+    color: var(--muted);
+  }
+
+  .nr-icon-menu-separator {
+    height: 1px;
+    margin: 6px 0;
+    background: var(--line);
+  }
+
   .nr-kanban-shell {
     position: relative;
   }
@@ -1959,7 +1976,7 @@ details[open] > .settings-disclosure-summary::before {
   }
 
   .nr-column-menu {
-    min-width: 300px;
+    min-width: 220px;
   }
 
   .nr-column-menu-row {

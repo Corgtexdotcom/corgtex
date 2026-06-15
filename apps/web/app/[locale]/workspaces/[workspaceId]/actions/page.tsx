@@ -13,6 +13,7 @@ import { getTranslations } from "next-intl/server";
 import {
   ACTION_STATUS_FILTERS,
   ACTION_STATUS_META,
+  type ActionStatusFilter,
   groupActionsByStatus,
   normalizeActionStatusFilter,
 } from "./view-model";
@@ -24,8 +25,10 @@ import { WorkItemKanbanBoard, type WorkItemKanbanColumn } from "@/lib/components
 import { WorkItemResolutionDialog } from "@/lib/components/WorkItemResolutionDialog";
 import {
   buildWorkItemQuery,
+  normalizeVisibleWorkItemColumns,
   normalizeWorkItemView,
   resolveWorkItemFilters,
+  toggleWorkItemColumnVisibility,
 } from "@/lib/work-item-view";
 
 export const dynamic = "force-dynamic";
@@ -89,10 +92,35 @@ export default async function ActionsPage({
   const activeProposals = proposals.filter((p) => p.status === "DRAFT" || p.status === "OPEN");
   const groupedActions = groupActionsByStatus(actions);
   const displayActions = groupedActions[statusFilter];
-  const columnSettingsPortalId = "work-item-actions-column-settings";
   type ActionListItem = (typeof actions)[number];
   type ActionColumnStatus = "DRAFT" | "OPEN" | "IN_PROGRESS" | "COMPLETED";
   const actionColumnStatuses: ActionColumnStatus[] = ["DRAFT", "OPEN", "IN_PROGRESS", "COMPLETED"];
+  const visibleActionColumnIds = normalizeVisibleWorkItemColumns(resolvedSearch.columns, actionColumnStatuses);
+  const allActionColumnsVisible = visibleActionColumnIds.length === actionColumnStatuses.length;
+  const buildActionColumnHref = (status: ActionColumnStatus) => buildWorkItemQuery({
+    view: "kanban",
+    status: statusFilter,
+    circleId,
+    memberId,
+    columns: toggleWorkItemColumnVisibility(visibleActionColumnIds, status, actionColumnStatuses),
+  });
+  const actionColumnHideHrefs = Object.fromEntries(
+    actionColumnStatuses.map((status) => [status, buildActionColumnHref(status)]),
+  );
+  const actionFilterHref = (filter: ActionStatusFilter) => view === "kanban"
+    ? buildWorkItemQuery({
+      view: "kanban",
+      status: statusFilter,
+      circleId,
+      memberId,
+      columns: filter === "ALL" ? undefined : toggleWorkItemColumnVisibility(visibleActionColumnIds, filter, actionColumnStatuses),
+    })
+    : buildWorkItemQuery({ view, sort: view === "list" ? sort : undefined, circleId, memberId, status: filter });
+  const actionFilterActive = (filter: ActionStatusFilter) => view === "kanban"
+    ? filter === "ALL"
+      ? allActionColumnsVisible
+      : visibleActionColumnIds.includes(filter)
+    : statusFilter === filter;
 
   const canManageAction = (action: { authorUserId: string }) => actor.kind === "agent"
     || membership?.role === "ADMIN"
@@ -366,8 +394,8 @@ export default async function ActionsPage({
             {ACTION_STATUS_FILTERS.map((s) => (
               <a
                 key={s}
-                href={buildWorkItemQuery({ view, sort: view === "list" ? sort : undefined, circleId, memberId, status: s })}
-                className={`nr-filter-item ${statusFilter === s ? "nr-filter-active" : ""}`}
+                href={actionFilterHref(s)}
+                className={`nr-filter-item ${actionFilterActive(s) ? "nr-filter-active" : ""}`}
               >
                 {t(ACTION_STATUS_META[s].labelKey)} ({groupedActions[s].length})
               </a>
@@ -389,8 +417,6 @@ export default async function ActionsPage({
             sortPriorityLabel={tWork("sortPriority")}
             sortDateLabel={tWork("sortDate")}
             sortAlphaLabel={tWork("sortAlpha")}
-            columnSettingsLabel={tWork("columnSettings")}
-            columnSettingsPortalId={view === "kanban" ? columnSettingsPortalId : undefined}
             label={tWork("viewMode")}
           />
         </div>
@@ -400,6 +426,7 @@ export default async function ActionsPage({
           status={statusFilter}
           view={view}
           sort={view === "list" ? sort : undefined}
+          columns={view === "kanban" && !allActionColumnsVisible ? visibleActionColumnIds : undefined}
           circleId={circleId}
           memberId={memberId}
           circles={circles.map((circle) => ({ id: circle.id, label: circle.name }))}
@@ -418,15 +445,14 @@ export default async function ActionsPage({
           <WorkItemKanbanBoard
             columns={actionColumns}
             storageKey={`work-items:${workspaceId}:actions`}
-            settingsPortalId={columnSettingsPortalId}
+            visibleColumnIds={visibleActionColumnIds}
+            hideColumnHrefs={actionColumnHideHrefs}
             settingsLabel={tWork("columnSettings")}
             resetLabel={tWork("resetColumns")}
             hideLabel={tWork("hideColumn")}
-            showLabel={tWork("showColumn")}
             moveUpLabel={tWork("moveColumnLeft")}
             moveDownLabel={tWork("moveColumnRight")}
             hideShortLabel={tWork("hideColumnShort")}
-            showShortLabel={tWork("showColumnShort")}
             moveUpShortLabel={tWork("moveColumnLeftShort")}
             moveDownShortLabel={tWork("moveColumnRightShort")}
             sortLabel={tWork("sort")}

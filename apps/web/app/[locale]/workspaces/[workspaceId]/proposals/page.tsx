@@ -5,7 +5,13 @@ import { MarkdownExcerpt } from "@/lib/components/MarkdownRenderer";
 import { WorkItemFilterControls, WorkItemToolbar } from "@/lib/components/WorkItemControls";
 import { WorkItemKanbanBoard, type WorkItemKanbanColumn } from "@/lib/components/WorkItemKanbanBoard";
 import { WorkItemResolutionDialog } from "@/lib/components/WorkItemResolutionDialog";
-import { buildWorkItemQuery, normalizeWorkItemView, resolveWorkItemFilters } from "@/lib/work-item-view";
+import {
+  buildWorkItemQuery,
+  normalizeVisibleWorkItemColumns,
+  normalizeWorkItemView,
+  resolveWorkItemFilters,
+  toggleWorkItemColumnVisibility,
+} from "@/lib/work-item-view";
 import { CreateProposalForm } from "./CreateProposalForm";
 import { ProposalDraftFields } from "./ProposalDraftFields";
 import {
@@ -61,11 +67,29 @@ export default async function ProposalsPage({
   };
 
   const displayProposals = groupedProposals[statusFilter as keyof typeof groupedProposals] || groupedProposals.OPEN;
-  const columnSettingsPortalId = "work-item-proposals-column-settings";
   type ProposalListItem = (typeof proposals)[number];
   type ProposalColumnStatus = "DRAFT" | "OPEN" | "RESOLVED" | "ARCHIVED";
   type ProposalMoveStatus = "DRAFT" | "OPEN" | "RESOLVED";
+  const proposalColumnStatuses: ProposalColumnStatus[] = ["DRAFT", "OPEN", "RESOLVED", "ARCHIVED"];
   const proposalMoveStatuses: ProposalMoveStatus[] = ["DRAFT", "OPEN", "RESOLVED"];
+  const visibleProposalColumnIds = normalizeVisibleWorkItemColumns(resolvedSearch.columns, proposalColumnStatuses);
+  const allProposalColumnsVisible = visibleProposalColumnIds.length === proposalColumnStatuses.length;
+  const buildProposalColumnHref = (status: ProposalColumnStatus) => buildWorkItemQuery({
+    view: "kanban",
+    status: statusFilter,
+    circleId,
+    memberId,
+    columns: toggleWorkItemColumnVisibility(visibleProposalColumnIds, status, proposalColumnStatuses),
+  });
+  const proposalColumnHideHrefs = Object.fromEntries(
+    proposalColumnStatuses.map((status) => [status, buildProposalColumnHref(status)]),
+  );
+  const proposalFilterHref = (status: ProposalColumnStatus) => view === "kanban"
+    ? buildProposalColumnHref(status)
+    : buildWorkItemQuery({ view, sort: view === "list" ? sort : undefined, circleId, memberId, status });
+  const proposalFilterActive = (status: ProposalColumnStatus) => view === "kanban"
+    ? visibleProposalColumnIds.includes(status)
+    : statusFilter === status;
 
   function proposalStatusLabel(status: "DRAFT" | "OPEN" | "RESOLVED" | "ARCHIVED") {
     if (status === "DRAFT") return t("statusDraft");
@@ -268,7 +292,7 @@ export default async function ProposalsPage({
     );
   }
 
-  const proposalColumns: WorkItemKanbanColumn[] = (["DRAFT", "OPEN", "RESOLVED", "ARCHIVED"] as const).map((status: ProposalColumnStatus) => ({
+  const proposalColumns: WorkItemKanbanColumn[] = proposalColumnStatuses.map((status) => ({
     id: status,
     label: proposalStatusLabel(status),
     count: groupedProposals[status].length,
@@ -301,8 +325,8 @@ export default async function ProposalsPage({
             {(["DRAFT", "OPEN", "RESOLVED", "ARCHIVED"] as const).map((status) => (
               <a
                 key={status}
-                href={buildWorkItemQuery({ view, sort: view === "list" ? sort : undefined, circleId, memberId, status })}
-                className={`nr-filter-item ${statusFilter === status ? "nr-filter-active" : ""}`}
+                href={proposalFilterHref(status)}
+                className={`nr-filter-item ${proposalFilterActive(status) ? "nr-filter-active" : ""}`}
               >
                 {proposalStatusLabel(status)} ({groupedProposals[status].length})
               </a>
@@ -324,8 +348,6 @@ export default async function ProposalsPage({
             sortPriorityLabel={tWork("sortPriority")}
             sortDateLabel={tWork("sortDate")}
             sortAlphaLabel={tWork("sortAlpha")}
-            columnSettingsLabel={tWork("columnSettings")}
-            columnSettingsPortalId={view === "kanban" ? columnSettingsPortalId : undefined}
             label={tWork("viewMode")}
           />
         </div>
@@ -334,6 +356,7 @@ export default async function ProposalsPage({
           status={statusFilter}
           view={view}
           sort={view === "list" ? sort : undefined}
+          columns={view === "kanban" && !allProposalColumnsVisible ? visibleProposalColumnIds : undefined}
           circleId={circleId}
           memberId={memberId}
           circles={circles.map((circle) => ({ id: circle.id, label: circle.name }))}
@@ -352,15 +375,14 @@ export default async function ProposalsPage({
           <WorkItemKanbanBoard
             columns={proposalColumns}
             storageKey={`work-items:${workspaceId}:proposals`}
-            settingsPortalId={columnSettingsPortalId}
+            visibleColumnIds={visibleProposalColumnIds}
+            hideColumnHrefs={proposalColumnHideHrefs}
             settingsLabel={tWork("columnSettings")}
             resetLabel={tWork("resetColumns")}
             hideLabel={tWork("hideColumn")}
-            showLabel={tWork("showColumn")}
             moveUpLabel={tWork("moveColumnLeft")}
             moveDownLabel={tWork("moveColumnRight")}
             hideShortLabel={tWork("hideColumnShort")}
-            showShortLabel={tWork("showColumnShort")}
             moveUpShortLabel={tWork("moveColumnLeftShort")}
             moveDownShortLabel={tWork("moveColumnRightShort")}
             sortLabel={tWork("sort")}
