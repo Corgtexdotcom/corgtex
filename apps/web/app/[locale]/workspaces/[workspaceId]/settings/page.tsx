@@ -11,10 +11,12 @@ import {
   listAiWorkspaceToolProviders,
   listMemberInviteRequests,
   listMembersEnriched,
+  listModuleAccessRequests,
   listUserSessions,
   listWorkspaceEnterpriseServiceStates,
   requireWorkspaceMembership,
 } from "@corgtex/domain";
+import { getModuleManifests } from "@corgtex/domain/modules";
 import { env } from "@corgtex/shared";
 import { requirePageActor } from "@/lib/auth";
 import { headers } from "next/headers";
@@ -22,6 +24,7 @@ import { getFormatter, getTranslations } from "next-intl/server";
 import { notFound } from "next/navigation";
 import { getWorkspaceFeatureFlags } from "@/lib/workspace-feature-flags";
 import { requestManagedEnterpriseServiceAction } from "../actions";
+import { requestModuleAccessAction, decideModuleAccessRequestAction } from "./actions";
 import { MembersTable } from "./MembersTable";
 import { AgentSettingsClient } from "./agents/AgentSettingsClient";
 import { SsoConfigManager } from "./SsoConfigManager";
@@ -207,6 +210,24 @@ export default async function SettingsPage({
     }
     : null;
 
+  let moduleAccessRequests: Awaited<ReturnType<typeof listModuleAccessRequests>> = [];
+  let moduleAccessIsAdmin = false;
+  const moduleAccessModules = getModuleManifests()
+    .filter((moduleManifest) => moduleManifest.nav)
+    .map((moduleManifest) => ({ key: moduleManifest.key, title: moduleManifest.title }));
+  if (tab === "module-access") {
+    try {
+      const membership = await requireWorkspaceMembership({ actor, workspaceId });
+      moduleAccessIsAdmin = membership?.role === "ADMIN";
+      moduleAccessRequests = await listModuleAccessRequests(actor, { workspaceId });
+    } catch (error) {
+      if (error instanceof AppError && error.status === 403) {
+        notFound();
+      }
+      throw error;
+    }
+  }
+
   return (
     <>
       <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 32 }}>
@@ -241,7 +262,78 @@ export default async function SettingsPage({
         <a href={`/workspaces/${workspaceId}/settings?tab=user`} className={`nr-tab ${tab === "user" ? "nr-tab-active" : ""}`}>
           {t("tabUser")}
         </a>
+        <a href={`/workspaces/${workspaceId}/settings?tab=module-access`} className={`nr-tab ${tab === "module-access" ? "nr-tab-active" : ""}`}>
+          Module access
+        </a>
       </div>
+
+      {tab === "module-access" && (
+        <div className="stack" style={{ gap: 32 }}>
+          <section>
+            <h2 className="nr-section-header">Request module access</h2>
+            <p className="nr-item-meta" style={{ fontSize: "0.82rem", marginBottom: 16 }}>
+              Request read or write access to a module. An admin approves; approval grants you access (and turns the module on if it was off).
+            </p>
+            <form action={requestModuleAccessAction} className="stack" style={{ gap: 12, maxWidth: 520 }}>
+              <input type="hidden" name="workspaceId" value={workspaceId} />
+              <label className="stack" style={{ gap: 4 }}>
+                <span className="nr-item-meta">Module</span>
+                <select name="moduleKey" required className="nr-input">
+                  {moduleAccessModules.map((moduleOption) => (
+                    <option key={moduleOption.key} value={moduleOption.key}>{moduleOption.title}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="stack" style={{ gap: 4 }}>
+                <span className="nr-item-meta">Access level</span>
+                <select name="accessLevel" required className="nr-input">
+                  <option value="read">read</option>
+                  <option value="write">write</option>
+                </select>
+              </label>
+              <label className="stack" style={{ gap: 4 }}>
+                <span className="nr-item-meta">Reason</span>
+                <input name="reasonMd" required placeholder="Why you need access" className="nr-input" />
+              </label>
+              <button type="submit" className="nr-button" style={{ alignSelf: "flex-start" }}>Submit request</button>
+            </form>
+          </section>
+
+          <section>
+            <h2 className="nr-section-header">{moduleAccessIsAdmin ? "Access requests" : "My requests"}</h2>
+            {moduleAccessRequests.length === 0 && (
+              <p className="nr-item-meta" style={{ fontSize: "0.82rem" }}>No requests yet.</p>
+            )}
+            <div className="stack" style={{ gap: 12 }}>
+              {moduleAccessRequests.map((request) => (
+                <div key={request.id} className="nr-item" style={{ padding: "12px 0" }}>
+                  <div className="row">
+                    <strong className="nr-item-title">{request.moduleKey} · {String(request.requestedAccess).toLowerCase()}</strong>
+                    <span className="tag">{request.status}</span>
+                  </div>
+                  <p className="nr-item-meta" style={{ fontSize: "0.82rem", marginTop: 6 }}>{request.reasonMd}</p>
+                  {moduleAccessIsAdmin && request.status === "PENDING" && (
+                    <div className="row" style={{ gap: 8, marginTop: 8 }}>
+                      <form action={decideModuleAccessRequestAction}>
+                        <input type="hidden" name="workspaceId" value={workspaceId} />
+                        <input type="hidden" name="requestId" value={request.id} />
+                        <input type="hidden" name="status" value="APPROVED" />
+                        <button type="submit" className="nr-button">Approve</button>
+                      </form>
+                      <form action={decideModuleAccessRequestAction}>
+                        <input type="hidden" name="workspaceId" value={workspaceId} />
+                        <input type="hidden" name="requestId" value={request.id} />
+                        <input type="hidden" name="status" value="REJECTED" />
+                        <button type="submit" className="nr-button">Reject</button>
+                      </form>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </section>
+        </div>
+      )}
 
       {tab === "user" && userProfile && (
         <UserSettingsPanel

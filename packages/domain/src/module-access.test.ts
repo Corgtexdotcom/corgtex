@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 
-import { expandCircleAncestors, toAccessLevel, toPrismaAccessLevel } from "./module-access";
+import {
+  createModuleAccessRequest,
+  decideModuleAccessRequest,
+  expandCircleAncestors,
+  listModuleAccessRequests,
+  toAccessLevel,
+  toPrismaAccessLevel,
+} from "./module-access";
 
 describe("expandCircleAncestors", () => {
   it("includes the base circles and all ancestors up the tree", () => {
@@ -46,5 +53,20 @@ describe("access level enum mapping", () => {
     expect(toPrismaAccessLevel("none")).toBe("NONE");
     expect(toPrismaAccessLevel("read")).toBe("READ");
     expect(toPrismaAccessLevel("write")).toBe("WRITE");
+  });
+
+  it("maps the requestable access levels (read/write) to Prisma enums", () => {
+    // The request flow only permits read/write (not none); confirm the mapping
+    // used when persisting a request's requestedAccess.
+    expect(toPrismaAccessLevel("read")).toBe("READ");
+    expect(toPrismaAccessLevel("write")).toBe("WRITE");
+  });
+});
+
+describe("module access request API surface", () => {
+  it("exposes the request, list, and decide functions", () => {
+    expect(typeof createModuleAccessRequest).toBe("function");
+    expect(typeof listModuleAccessRequests).toBe("function");
+    expect(typeof decideModuleAccessRequest).toBe("function");
   });
 });

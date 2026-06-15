@@ -46,6 +46,19 @@ const coreNavModule: ModuleManifest = {
   nav: { href: "/brain", labelKey: "brain", icon: "brain", group: "workspace" },
 };
 
+// A flagged nav module with NO defaultAccessByRole: when its flag is on it
+// broadcasts read to all roles, so it is the case where a flag-flip on approval
+// would over-share. Used to prove grants stay requester-only with the flag off.
+const flaggedNavModule: ModuleManifest = {
+  key: "tools",
+  tier: "first_party",
+  title: "Tools",
+  description: "Flagged nav module without explicit policy.",
+  dataOwnership: "corgtex_postgres",
+  featureFlag: { flag: "TOOL_LINKS", label: "Tools", description: "", defaultEnabled: false },
+  nav: { href: "/tools", labelKey: "tools", icon: "tools", group: "workspace" },
+};
+
 function context(overrides: Partial<ModuleAccessContext> = {}): ModuleAccessContext {
   return {
     role: "CONTRIBUTOR",
@@ -151,10 +164,21 @@ describe("resolveModuleAccess - grant layering", () => {
     expect(resolveModuleAccess(context({ role: "FINANCE_STEWARD", grants }), financeModule)).toBe("write");
   });
 
-  it("does not apply grants when the module flag is off", () => {
+  it("applies an explicit grant even when the module flag is off (no flag flip needed)", () => {
     const grants: ModuleGrant[] = [
       { moduleKey: "finance", principalType: "MEMBER", principalId: "member-1", accessLevel: "write" },
     ];
-    expect(resolveModuleAccess(context({ flags: { FINANCE: false }, grants }), financeModule)).toBe("none");
+    expect(resolveModuleAccess(context({ flags: { FINANCE: false }, grants }), financeModule)).toBe("write");
+  });
+
+  it("keeps non-granted members at none when the flag is off (requester-only, no broadcast)", () => {
+    // `tools` is a flagged nav module with no defaultAccessByRole - flipping its
+    // flag on would broadcast read to everyone. With the flag off, a grant for
+    // one member must NOT give other members access.
+    const grants: ModuleGrant[] = [
+      { moduleKey: "tools", principalType: "MEMBER", principalId: "member-1", accessLevel: "read" },
+    ];
+    expect(resolveModuleAccess(context({ memberId: "member-1", flags: { TOOL_LINKS: false }, grants }), flaggedNavModule)).toBe("read");
+    expect(resolveModuleAccess(context({ memberId: "member-2", flags: { TOOL_LINKS: false }, grants }), flaggedNavModule)).toBe("none");
   });
 });
