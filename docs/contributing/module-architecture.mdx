@@ -1,0 +1,101 @@
+---
+title: "Module Architecture: Tiers, Manifest, and Graduation"
+description: "How Corgtex composes modules across the core, first-party, and satellite tiers, and how a satellite app graduates into a first-party module."
+---
+
+Corgtex is an opinionated platform with switchable modules. This document is the
+decision record for how modules are declared, gated, and promoted so the core
+stays strong while per-client and per-role customization scales.
+
+## The three tiers
+
+A module's `tier` is a field on its manifest, not a repo boundary.
+
+- **Core.** The always-on platform: identity, workspace, Brain, governance,
+  audit, the nav shell, the feature-flag and access engines, the catalog, and
+  the MCP gateway. Lives in the monorepo and ships to every workspace.
+- **First-party.** Features we build and own that share the Corgtex Postgres
+  schema (finance, goals, meetings, relationships, cycles, agent governance).
+  Live in the monorepo and are toggled per workspace by a feature flag and
+  gated per principal by the access model.
+- **Satellite.** An app that owns its own datastore or release cadence, or is
+  client-specific / third-party (for example, the Practice Ledger app at
+  `github.com/Corgtexdotcom/practice-ledger`). Lives in its own repo and
+  integrates through a stable contract: a catalog manifest, an MCP surface, a
+  Brain-sync provenance stream, and a launch/embed URL.
+
+### The decision rule
+
+> Does the thing share the Corgtex Prisma schema and need atomic cross-cutting
+> refactors with the core? It is a **first-party module**. Does it own its own
+> data, its own deploy cadence, or might it be forked per client / authored by
+> someone else? It is a **satellite**.
+
+Keep the core and all first-party modules in the monorepo. Spin out a separate
+repo only when a module owns its own data or lifecycle. Never fork the core per
+client: customization lands as a flag, a module, or a satellite app.
+
+## The Module Manifest is the single source of truth
+
+The registry in `packages/domain/src/modules` declares each module once. The
+control-plane feature flags, the web flag superset, the nav union and groups,
+posture bundles, the marketplace catalog, MCP scope ownership, and module-by-role
+access all derive from it. The registry is intentionally pure and
+dependency-free (types and plain data only) so it is safe to import from the web
+client bundle via `@corgtex/domain/modules`.
+
+A manifest declares: `key`, `tier`, `title`/`description`, an optional primary
+`featureFlag` and `subFlags`, an optional `nav` entry, owned MCP `scopes`,
+`dataOwnership` (`corgtex_postgres` or `satellite`), a graduation-stable
+capability `contract`, and (for satellites) a `satellite` integration spec.
+
+Derivations are introduced behind byte-for-byte parity tests: each consumer is
+flipped from its hand-written literal to the derived value only after a test
+proves the derived output is identical. A standing invariant test asserts the
+registry remains the single source of truth (no feature flag exists outside it,
+and no nav item references an unknown flag).
+
+## Access model (per principal, layered)
+
+Access for `(principal, module)` resolves to one of `none`, `read`, or `write`.
+`none` hides the nav tab, `read` shows it, `write` allows actions. We do not
+collapse the coarse `MemberRole` enum and the governance circle/role tables;
+instead a single resolver decides access across four principal kinds:
+
+- `MEMBER` - a specific person.
+- `MEMBER_ROLE` - the coarse `MemberRole` enum; the baseline, with `ADMIN` as
+  the non-derivable bootstrap superuser.
+- `GOVERNANCE_ROLE` - anyone holding a governance `Role`.
+- `CIRCLE` - anyone holding a role in a `Circle`; circle grants cascade down the
+  `parentCircleId` tree to descendant circles.
+
+The module manifest declares the default access level per `MemberRole`, and that
+default is the single source of truth domain guards read from. Per-client
+deviations (admin assigns access to any role or circle) live in a
+`WorkspaceModuleGrant` table managed beside feature flags in the control plane.
+Effective access is the highest level granted by any matching principal, gated by
+the module's org opt-in flag.
+
+Individuals can request access through the catalog request/approval pattern.
+Approving an individual's request flips the org opt-in on if needed but grants
+only the requester; broadcasting the default policy to the whole org is a
+separate, deliberate admin action.
+
+## Graduation: satellite to first-party
+
+Promotion is a deliberate lifecycle, not a workaround. A satellite earns
+graduation when demand is proven (multiple clients want it) and its schema has
+stabilized. The expensive, semi-irreversible part is data ownership, so the UI
+and the data move independently through three stages:
+
+1. **Embed.** The module's nav graduates to a first-class tab via embed/launch
+   while its data still lives in the satellite. Fully reversible.
+2. **Dual-write.** Stand up native tables, write to both, backfill history;
+   reads still come from the satellite. Reversible.
+3. **Cutover.** Flip reads to native, migrate remaining clients, retire the
+   satellite MCP, and re-point routing guidance. The point of no easy return.
+
+Satellites are built **portable from day one** to keep graduation bounded:
+stable UUIDs, an exportable Corgtex-shaped record schema, mandatory Brain
+provenance (a standing shadow trail), and a capability-keyed interface so
+promotion swaps the implementation behind the same contract.
