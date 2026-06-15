@@ -1,67 +1,23 @@
 import { notFound } from "next/navigation";
 
 import { prisma } from "@corgtex/shared";
+import {
+  defaultWorkspaceFeatureFlags,
+  listWorkspaceFeatureFlagKeys,
+  type WorkspaceFeatureFlagKey,
+} from "@corgtex/domain/modules";
 
-import type { NavGroup, WorkspaceNavCapability, WorkspaceNavFeatureFlag } from "@/lib/nav-config";
+import type { NavGroup, WorkspaceNavCapability } from "@/lib/nav-config";
 
-export type WorkspaceFeatureFlag =
-  | WorkspaceNavFeatureFlag
-  | "SETTINGS_GENERAL"
-  | "MULTILINGUAL"
-  | "MEETING_RECORDERS"
-  | "MEETING_CONTEXTUAL_INTELLIGENCE"
-  | "CONTEXT_MAP_AI"
-  | "SLACK_MEETING_ACTION_REVIEW"
-  | "AI_WORKSPACES"
-  | "OPENWORK_DEFAULT"
-  | "EXECUTION_PACKETS"
-  | "MANAGED_ENTERPRISE_SERVICES";
+// Derived from the Module Manifest registry (single source of truth).
+export type WorkspaceFeatureFlag = WorkspaceFeatureFlagKey;
 
 export type WorkspaceFeatureFlagMap = Record<WorkspaceFeatureFlag, boolean>;
 
-export const DEFAULT_WORKSPACE_FEATURE_FLAGS: WorkspaceFeatureFlagMap = {
-  GOALS: true,
-  TOOL_LINKS: false,
-  FINANCE: true,
-  BUILD_ARTIFACTS: false,
-  RELATIONSHIPS: true,
-  CONTEXT_MAPS: false,
-  CYCLES: true,
-  AGENT_GOVERNANCE: true,
-  OS_METRICS: true,
-  SETTINGS_GENERAL: true,
-  MULTILINGUAL: false,
-  MEETING_RECORDERS: false,
-  MEETING_CONTEXTUAL_INTELLIGENCE: false,
-  CONTEXT_MAP_AI: false,
-  SLACK_MEETING_ACTION_REVIEW: false,
-  AI_WORKSPACES: false,
-  OPENWORK_DEFAULT: false,
-  EXECUTION_PACKETS: false,
-  MANAGED_ENTERPRISE_SERVICES: false,
-};
+export const DEFAULT_WORKSPACE_FEATURE_FLAGS: WorkspaceFeatureFlagMap =
+  defaultWorkspaceFeatureFlags();
 
-const WORKSPACE_FEATURE_FLAG_VALUES: WorkspaceFeatureFlag[] = [
-  "GOALS",
-  "TOOL_LINKS",
-  "FINANCE",
-  "BUILD_ARTIFACTS",
-  "RELATIONSHIPS",
-  "CONTEXT_MAPS",
-  "CYCLES",
-  "AGENT_GOVERNANCE",
-  "OS_METRICS",
-  "SETTINGS_GENERAL",
-  "MULTILINGUAL",
-  "MEETING_RECORDERS",
-  "MEETING_CONTEXTUAL_INTELLIGENCE",
-  "CONTEXT_MAP_AI",
-  "SLACK_MEETING_ACTION_REVIEW",
-  "AI_WORKSPACES",
-  "OPENWORK_DEFAULT",
-  "EXECUTION_PACKETS",
-  "MANAGED_ENTERPRISE_SERVICES",
-];
+const WORKSPACE_FEATURE_FLAG_VALUES: WorkspaceFeatureFlag[] = listWorkspaceFeatureFlagKeys();
 
 function isKnownWorkspaceFeatureFlag(flag: string): flag is WorkspaceFeatureFlag {
   return WORKSPACE_FEATURE_FLAG_VALUES.includes(flag as WorkspaceFeatureFlag);

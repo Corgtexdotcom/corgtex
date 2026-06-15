@@ -1,0 +1,100 @@
+import { describe, expect, it } from "vitest";
+
+import { WORKSPACE_NAV_GROUPS, type NavGroup } from "./nav-config";
+import { DEFAULT_WORKSPACE_FEATURE_FLAGS } from "./workspace-feature-flags";
+
+/**
+ * Byte-for-byte parity anchor: the exact `WORKSPACE_NAV_GROUPS` and default
+ * flag map that existed before they were derived from the Module Manifest
+ * registry. These tests prove the derivation is behavior-preserving.
+ */
+const EXPECTED_NAV_GROUPS: NavGroup[] = [
+  {
+    labelKey: "workspace",
+    items: [
+      { href: "", labelKey: "home", icon: "home" },
+      { href: "/goals", labelKey: "goals", icon: "goals", featureFlag: "GOALS" },
+      { href: "/brain", labelKey: "brain", icon: "brain" },
+      { href: "/tools", labelKey: "tools", icon: "tools", featureFlag: "TOOL_LINKS" },
+      { href: "/built", labelKey: "built", icon: "built", featureFlag: "BUILD_ARTIFACTS" },
+      { href: "/members", labelKey: "members", icon: "members" },
+    ],
+  },
+  {
+    labelKey: "operations",
+    items: [
+      { href: "/tensions", labelKey: "tensions", icon: "tensions" },
+      { href: "/actions", labelKey: "actions", icon: "actions" },
+      { href: "/meetings", labelKey: "meetings", icon: "meetings" },
+      { href: "/leads", labelKey: "relationships", icon: "relationships", featureFlag: "RELATIONSHIPS" },
+      { href: "/maps", labelKey: "contextMaps", icon: "contextMaps", featureFlag: "CONTEXT_MAPS" },
+    ],
+  },
+  {
+    labelKey: "governance",
+    items: [
+      { href: "/proposals", labelKey: "proposals", icon: "proposals" },
+      { href: "/circles", labelKey: "circles", icon: "circles" },
+      { href: "/cycles", labelKey: "cycles", icon: "cycles", featureFlag: "CYCLES" },
+    ],
+  },
+  {
+    labelKey: "finance",
+    items: [
+      { href: "/finance", labelKey: "finance", icon: "finance", featureFlag: "FINANCE" },
+    ],
+  },
+  {
+    labelKey: "aiGovernance",
+    items: [
+      {
+        href: "/agents",
+        labelKey: "agentGovernance",
+        icon: "agents",
+        featureFlag: "AGENT_GOVERNANCE",
+        requiredCapability: "canManageAgentGovernance",
+      },
+    ],
+  },
+  {
+    labelKey: "system",
+    items: [
+      { href: "/governance", labelKey: "osMetrics", icon: "governance", featureFlag: "OS_METRICS" },
+      { href: "/audit", labelKey: "auditTrail", icon: "audit" },
+      { href: "/notifications", labelKey: "notifications", icon: "notifications" },
+      { href: "/settings", labelKey: "settings", icon: "settings" },
+    ],
+  },
+];
+
+const EXPECTED_DEFAULT_FLAGS = {
+  GOALS: true,
+  TOOL_LINKS: false,
+  FINANCE: true,
+  BUILD_ARTIFACTS: false,
+  RELATIONSHIPS: true,
+  CONTEXT_MAPS: false,
+  CYCLES: true,
+  AGENT_GOVERNANCE: true,
+  OS_METRICS: true,
+  SETTINGS_GENERAL: true,
+  MULTILINGUAL: false,
+  MEETING_RECORDERS: false,
+  MEETING_CONTEXTUAL_INTELLIGENCE: false,
+  CONTEXT_MAP_AI: false,
+  SLACK_MEETING_ACTION_REVIEW: false,
+  AI_WORKSPACES: false,
+  OPENWORK_DEFAULT: false,
+  EXECUTION_PACKETS: false,
+  MANAGED_ENTERPRISE_SERVICES: false,
+};
+
+describe("registry-derived nav and flags parity", () => {
+  it("derives the same WORKSPACE_NAV_GROUPS as before", () => {
+    expect(WORKSPACE_NAV_GROUPS).toEqual(EXPECTED_NAV_GROUPS);
+  });
+
+  it("derives the same default feature flag map as before", () => {
+    expect(DEFAULT_WORKSPACE_FEATURE_FLAGS).toEqual(EXPECTED_DEFAULT_FLAGS);
+  });
+});

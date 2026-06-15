@@ -9,6 +9,7 @@
     "ical.js": "^2.2.1"
   },
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./modules": "./src/modules/index.ts"
   }
 }
