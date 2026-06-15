@@ -615,6 +615,7 @@ model Workspace {
   oauthConnections               OAuthConnection[]
   externalDataSources            ExternalDataSource[]
   featureFlags                   WorkspaceFeatureFlag[]
+  moduleGrants                   WorkspaceModuleGrant[]
   meetingRecorderConfig          WorkspaceMeetingRecorderConfig?
   recorderCalendarSources        WorkspaceRecorderCalendarSource[]
   meetingRecordings              MeetingRecording[]
@@ -679,6 +680,39 @@ model WorkspaceFeatureFlag {
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 
   @@unique([workspaceId, flag])
+}
+
+enum ModuleGrantPrincipalType {
+  MEMBER
+  MEMBER_ROLE
+  GOVERNANCE_ROLE
+  CIRCLE
+}
+
+enum ModuleAccessLevel {
+  NONE
+  READ
+  WRITE
+}
+
+// Per-workspace deviations from a module's default access policy. The module
+// manifest provides defaults; rows here grant access to a specific member,
+// member role, governance role, or circle. Resolution takes the highest level.
+model WorkspaceModuleGrant {
+  id              String                   @id @default(uuid())
+  workspaceId     String
+  moduleKey       String
+  principalType   ModuleGrantPrincipalType
+  principalId     String
+  accessLevel     ModuleAccessLevel
+  createdByUserId String?
+  createdAt       DateTime                 @default(now())
+  updatedAt       DateTime                 @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, moduleKey, principalType, principalId])
+  @@index([workspaceId, moduleKey])
 }
 
 model CommunicationInstallation {
