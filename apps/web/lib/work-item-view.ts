@@ -27,6 +27,45 @@ export function normalizeWorkItemSort(value: string | string[] | undefined): Wor
   return candidate === "date" || candidate === "alpha" ? candidate : "priority";
 }
 
+export function normalizeVisibleWorkItemColumns<T extends string>(
+  value: string | string[] | undefined,
+  columnIds: readonly T[],
+): T[] {
+  const defaultColumns = [...columnIds];
+  const columns = firstSearchParam(value);
+  if (!columns) return defaultColumns;
+
+  const visibleColumns: T[] = [];
+  for (const column of columns.split(",")) {
+    const normalizedColumn = column.trim() as T;
+    if (columnIds.includes(normalizedColumn) && !visibleColumns.includes(normalizedColumn)) {
+      visibleColumns.push(normalizedColumn);
+    }
+  }
+
+  return visibleColumns.length > 0 ? visibleColumns : defaultColumns;
+}
+
+export function toggleWorkItemColumnVisibility<T extends string>(
+  visibleColumns: readonly T[],
+  columnId: T,
+  columnIds: readonly T[],
+): T[] | undefined {
+  const normalizedVisibleColumns = new Set(
+    visibleColumns.filter((visibleColumn) => columnIds.includes(visibleColumn)),
+  );
+
+  if (normalizedVisibleColumns.has(columnId)) {
+    if (normalizedVisibleColumns.size <= 1) return undefined;
+    normalizedVisibleColumns.delete(columnId);
+  } else {
+    normalizedVisibleColumns.add(columnId);
+  }
+
+  const nextColumns = columnIds.filter((visibleColumn) => normalizedVisibleColumns.has(visibleColumn));
+  return nextColumns.length === columnIds.length ? undefined : nextColumns;
+}
+
 function sortableTime(value: WorkItemSortable["date"]) {
   if (value === null) return 0;
   const time = value instanceof Date ? value.getTime() : new Date(value).getTime();
@@ -77,6 +116,7 @@ export function buildWorkItemQuery(params: {
   sort?: WorkItemSort;
   circleId?: string;
   memberId?: string;
+  columns?: readonly string[];
   dates?: WorkItemDateValues;
 }) {
   const query = new URLSearchParams();
@@ -86,6 +126,7 @@ export function buildWorkItemQuery(params: {
   if (params.sort && params.sort !== "priority") query.set("sort", params.sort);
   if (params.circleId) query.set("circleId", params.circleId);
   if (params.memberId) query.set("memberId", params.memberId);
+  if (params.columns && params.columns.length > 0) query.set("columns", params.columns.join(","));
   for (const [key, value] of Object.entries(params.dates ?? {})) {
     if (value) query.set(key, value);
   }

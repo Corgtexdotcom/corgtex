@@ -16,10 +16,17 @@ import { ItemActions } from "@/lib/components/ui/ItemActions";
 import { WorkItemFilterControls, WorkItemToolbar } from "@/lib/components/WorkItemControls";
 import { WorkItemKanbanBoard, type WorkItemKanbanColumn } from "@/lib/components/WorkItemKanbanBoard";
 import { WorkItemResolutionDialog } from "@/lib/components/WorkItemResolutionDialog";
-import { buildWorkItemQuery, normalizeWorkItemView, resolveWorkItemFilters } from "@/lib/work-item-view";
+import {
+  buildWorkItemQuery,
+  normalizeVisibleWorkItemColumns,
+  normalizeWorkItemView,
+  resolveWorkItemFilters,
+  toggleWorkItemColumnVisibility,
+} from "@/lib/work-item-view";
 import { getTranslations } from "next-intl/server";
 import {
   TENSION_STATUS_FILTERS,
+  type TensionStatusFilter,
   groupTensionsByStatus,
   resolveTensionSearch,
 } from "./view-model";
@@ -55,10 +62,35 @@ export default async function TensionsPage({
   const displayTensions = statusFilter === "ALL"
     ? groupedTensions.ALL
     : groupedTensions[statusFilter as keyof typeof groupedTensions] || groupedTensions.OPEN;
-  const columnSettingsPortalId = "work-item-tensions-column-settings";
   type TensionListItem = (typeof tensions)[number];
   type TensionColumnStatus = "DRAFT" | "OPEN" | "RESOLVED";
   const tensionColumnStatuses: TensionColumnStatus[] = ["DRAFT", "OPEN", "RESOLVED"];
+  const visibleTensionColumnIds = normalizeVisibleWorkItemColumns(resolvedSearch.columns, tensionColumnStatuses);
+  const allTensionColumnsVisible = visibleTensionColumnIds.length === tensionColumnStatuses.length;
+  const buildTensionColumnHref = (status: TensionColumnStatus) => buildWorkItemQuery({
+    view: "kanban",
+    status: statusFilter,
+    circleId,
+    memberId,
+    columns: toggleWorkItemColumnVisibility(visibleTensionColumnIds, status, tensionColumnStatuses),
+  });
+  const tensionColumnHideHrefs = Object.fromEntries(
+    tensionColumnStatuses.map((status) => [status, buildTensionColumnHref(status)]),
+  );
+  const tensionFilterHref = (filter: TensionStatusFilter) => view === "kanban"
+    ? buildWorkItemQuery({
+      view: "kanban",
+      status: statusFilter,
+      circleId,
+      memberId,
+      columns: filter === "ALL" ? undefined : toggleWorkItemColumnVisibility(visibleTensionColumnIds, filter, tensionColumnStatuses),
+    })
+    : buildWorkItemQuery({ view, sort: view === "list" ? sort : undefined, circleId, memberId, status: filter });
+  const tensionFilterActive = (filter: TensionStatusFilter) => view === "kanban"
+    ? filter === "ALL"
+      ? allTensionColumnsVisible
+      : visibleTensionColumnIds.includes(filter)
+    : statusFilter === filter;
 
   const ageText = (date: Date) => {
     const days = Math.floor((Date.now() - new Date(date).getTime()) / (1000 * 60 * 60 * 24));
@@ -348,8 +380,8 @@ export default async function TensionsPage({
             {TENSION_STATUS_FILTERS.map((status) => (
               <a
                 key={status}
-                href={buildWorkItemQuery({ view, sort: view === "list" ? sort : undefined, circleId, memberId, status })}
-                className={`nr-filter-item ${statusFilter === status ? "nr-filter-active" : ""}`}
+                href={tensionFilterHref(status)}
+                className={`nr-filter-item ${tensionFilterActive(status) ? "nr-filter-active" : ""}`}
               >
                 {t("filterWithCount", { label: statusLabel(status), count: groupedTensions[status].length })}
               </a>
@@ -371,8 +403,6 @@ export default async function TensionsPage({
             sortPriorityLabel={tWork("sortPriority")}
             sortDateLabel={tWork("sortDate")}
             sortAlphaLabel={tWork("sortAlpha")}
-            columnSettingsLabel={tWork("columnSettings")}
-            columnSettingsPortalId={view === "kanban" ? columnSettingsPortalId : undefined}
             label={tWork("viewMode")}
           />
         </div>
@@ -382,6 +412,7 @@ export default async function TensionsPage({
           status={statusFilter}
           view={view}
           sort={view === "list" ? sort : undefined}
+          columns={view === "kanban" && !allTensionColumnsVisible ? visibleTensionColumnIds : undefined}
           circleId={circleId}
           memberId={memberId}
           circles={circles.map((circle) => ({ id: circle.id, label: circle.name }))}
@@ -400,15 +431,14 @@ export default async function TensionsPage({
           <WorkItemKanbanBoard
             columns={tensionColumns}
             storageKey={`work-items:${workspaceId}:tensions`}
-            settingsPortalId={columnSettingsPortalId}
+            visibleColumnIds={visibleTensionColumnIds}
+            hideColumnHrefs={tensionColumnHideHrefs}
             settingsLabel={tWork("columnSettings")}
             resetLabel={tWork("resetColumns")}
             hideLabel={tWork("hideColumn")}
-            showLabel={tWork("showColumn")}
             moveUpLabel={tWork("moveColumnLeft")}
             moveDownLabel={tWork("moveColumnRight")}
             hideShortLabel={tWork("hideColumnShort")}
-            showShortLabel={tWork("showColumnShort")}
             moveUpShortLabel={tWork("moveColumnLeftShort")}
             moveDownShortLabel={tWork("moveColumnRightShort")}
             sortLabel={tWork("sort")}

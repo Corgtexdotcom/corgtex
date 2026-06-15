@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { ArrowDownAZ, ArrowDownWideNarrow, ArrowUpDown, Columns3, List, Settings2 } from "lucide-react";
+import { ArrowDownAZ, ArrowDownWideNarrow, ArrowUpDown, Columns3, List } from "lucide-react";
 import type { WorkItemScope, WorkItemSort, WorkItemViewMode } from "@/lib/work-item-view";
 
 type Option = {
@@ -62,9 +62,6 @@ export function WorkItemToolbar({
   sortPriorityLabel,
   sortDateLabel,
   sortAlphaLabel,
-  columnSettingsLabel,
-  columnSettingsPortalId,
-  showColumnSettings = false,
   label,
 }: {
   currentView: WorkItemViewMode;
@@ -78,9 +75,6 @@ export function WorkItemToolbar({
   sortPriorityLabel: string;
   sortDateLabel: string;
   sortAlphaLabel: string;
-  columnSettingsLabel: string;
-  columnSettingsPortalId?: string;
-  showColumnSettings?: boolean;
   label: string;
 }) {
   const sortOptions: Array<{ value: WorkItemSort; label: string; icon: ReactNode }> = [
@@ -118,13 +112,6 @@ export function WorkItemToolbar({
           </div>
         </details>
       )}
-      {columnSettingsPortalId ? (
-        <span id={columnSettingsPortalId} className="nr-kanban-settings-slot" />
-      ) : showColumnSettings && (
-        <span className="nr-icon-link nr-icon-link-muted" aria-label={columnSettingsLabel} title={columnSettingsLabel}>
-          <Settings2 size={17} aria-hidden="true" />
-        </span>
-      )}
     </div>
   );
 }
@@ -135,6 +122,7 @@ export function WorkItemFilterControls({
   view,
   scope,
   sort,
+  columns,
   circleId,
   memberId,
   circles,
@@ -150,6 +138,7 @@ export function WorkItemFilterControls({
   view?: WorkItemViewMode;
   scope?: WorkItemScope;
   sort?: WorkItemSort;
+  columns?: readonly string[];
   circleId?: string;
   memberId?: string;
   circles: Option[];
@@ -174,6 +163,7 @@ export function WorkItemFilterControls({
       {status && <input type="hidden" name="status" value={status} />}
       {view && view !== "list" && <input type="hidden" name="view" value={view} />}
       {sort && sort !== "priority" && <input type="hidden" name="sort" value={sort} />}
+      {columns && columns.length > 0 && <input type="hidden" name="columns" value={columns.join(",")} />}
       {scope && (
         <label>
           <span className="nr-item-meta">{labels.scope}</span>
