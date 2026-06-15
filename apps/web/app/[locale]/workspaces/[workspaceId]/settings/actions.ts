@@ -39,6 +39,8 @@ import {
   enqueueOAuthConnectionSync,
   updateOAuthConnectionSyncSettings,
   requestManagedEnterpriseService,
+  createModuleAccessRequest,
+  decideModuleAccessRequest,
   type AccountAccessEmailKind,
   type EnterpriseServiceKey,
 } from "@corgtex/domain";
@@ -707,6 +709,32 @@ export async function updateNotificationPrefAction(
   await updateNotificationPreference(actor, data);
   refresh(workspaceId);
   return { success: true };
+}
+
+export async function requestModuleAccessAction(formData: FormData) {
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  await enforceDemoGuard(workspaceId);
+  await createModuleAccessRequest(actor, {
+    workspaceId,
+    moduleKey: asString(formData, "moduleKey"),
+    accessLevel: asString(formData, "accessLevel") === "write" ? "write" : "read",
+    reasonMd: asString(formData, "reasonMd"),
+  });
+  refresh(workspaceId);
+}
+
+export async function decideModuleAccessRequestAction(formData: FormData) {
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  await enforceDemoGuard(workspaceId);
+  await decideModuleAccessRequest(actor, {
+    workspaceId,
+    requestId: asString(formData, "requestId"),
+    status: asString(formData, "status") === "APPROVED" ? "APPROVED" : "REJECTED",
+    decisionNoteMd: asOptional(formData, "decisionNoteMd"),
+  });
+  refresh(workspaceId);
 }
 
 export async function updateMemberNewspaperCadenceAction(
