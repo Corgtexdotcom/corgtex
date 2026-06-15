@@ -1,4 +1,4 @@
-import type { CustomerDeploymentAccessRole, CustomerDeploymentCloudProvider, FleetSnapshotKind, MeetingRecorderProvider, MemberRole, Prisma } from "@prisma/client";
+import type { CustomerDeploymentAccessRole, CustomerDeploymentCloudProvider, FleetSnapshotKind, MeetingRecorderProvider, MemberRole, ModuleAccessLevel as PrismaModuleAccessLevel, ModuleGrantPrincipalType as PrismaModuleGrantPrincipalType, Prisma } from "@prisma/client";
 import { decryptSecret, encryptSecret, env, prisma, toInputJson } from "@corgtex/shared";
 import type { AgentActor, AppActor } from "@corgtex/shared";
 import { AppError, invariant } from "./errors";
@@ -25,7 +25,7 @@ import { buildCustomerDeploymentProviderReadModel, buildCustomerDeploymentReadin
 import { registerCustomerDeployment } from "./customer-lifecycle";
 import { AGENT_REGISTRY } from "./agent-registry";
 import { isKnownScope } from "./agent-auth";
-import { listWorkspaceFeatureFlagDefinitions } from "./modules";
+import { getModuleManifests, listWorkspaceFeatureFlagDefinitions } from "./modules";
 import type { FeatureFlagDefinition, WorkspaceFeatureFlagKey } from "./modules";
 
 const SUPPORT_ACTOR_LABEL = "Corgtex Support";
@@ -4976,6 +4976,157 @@ export async function setControlPlaneFeatureFlag(actor: AppActor, params: {
     enabled: params.enabled,
     operation,
   };
+}
+
+const MODULE_GRANT_PRINCIPAL_TYPES: readonly PrismaModuleGrantPrincipalType[] = ["MEMBER", "MEMBER_ROLE", "GOVERNANCE_ROLE", "CIRCLE"];
+
+function normalizeModuleGrantPrincipalType(value: string): PrismaModuleGrantPrincipalType {
+  const normalized = value?.trim().toUpperCase();
+  invariant(
+    MODULE_GRANT_PRINCIPAL_TYPES.includes(normalized as PrismaModuleGrantPrincipalType),
+    400,
+    "INVALID_INPUT",
+    "Invalid module grant principal type.",
+  );
+  return normalized as PrismaModuleGrantPrincipalType;
+}
+
+function normalizeModuleAccessLevel(value: string): PrismaModuleAccessLevel {
+  const normalized = value?.trim().toLowerCase();
+  invariant(
+    normalized === "none" || normalized === "read" || normalized === "write",
+    400,
+    "INVALID_INPUT",
+    "Invalid module access level.",
+  );
+  return normalized === "write" ? "WRITE" : normalized === "read" ? "READ" : "NONE";
+}
+
+function requireKnownModuleKey(moduleKey: string | null | undefined): string {
+  const trimmed = moduleKey?.trim();
+  invariant(trimmed, 400, "INVALID_INPUT", "Module key is required.");
+  invariant(getModuleManifests().some((mod) => mod.key === trimmed), 404, "NOT_FOUND", "Unknown module.");
+  return trimmed;
+}
+
+export async function listControlPlaneModuleGrants(actor: AppActor, deploymentId: string) {
+  const deployment = await getControlPlaneDeploymentWithWorkspace(actor, deploymentId);
+  const adapter = createControlPlaneAdapter(deployment);
+  invariant(deployment.managedWorkspaceId, 400, "MANAGED_WORKSPACE_REQUIRED", "A managed workspace is required to manage module access grants.");
+
+  const grants = await prisma.workspaceModuleGrant.findMany({
+    where: { workspaceId: deployment.managedWorkspaceId },
+    orderBy: [{ moduleKey: "asc" }, { principalType: "asc" }, { principalId: "asc" }],
+  });
+
+  return {
+    deploymentId,
+    accessMode: adapter.kind,
+    source: "managed_workspace" as const,
+    modules: getModuleManifests().map((mod) => ({ key: mod.key, title: mod.title, tier: mod.tier })),
+    principalTypes: [...MODULE_GRANT_PRINCIPAL_TYPES],
+    accessLevels: ["none", "read", "write"] as const,
+    grants: grants.map((grant) => ({
+      id: grant.id,
+      moduleKey: grant.moduleKey,
+      principalType: grant.principalType,
+      principalId: grant.principalId,
+      accessLevel: grant.accessLevel,
+      createdAt: grant.createdAt,
+    })),
+  };
+}
+
+export async function setControlPlaneModuleGrant(actor: AppActor, params: {
+  deploymentId: string;
+  moduleKey: string;
+  principalType: string;
+  principalId: string;
+  accessLevel: string;
+  reason?: string | null;
+}) {
+  requireControlPlaneScope(actor, "control-plane:modules:write");
+  const reason = requireMutationReason(params.reason);
+  await requireControlPlaneDeploymentWriteAccess(actor, params.deploymentId);
+  const deployment = await getControlPlaneDeploymentWithWorkspace(actor, params.deploymentId);
+  invariant(deployment.managedWorkspaceId, 400, "MANAGED_WORKSPACE_REQUIRED", "A managed workspace is required to manage module access grants.");
+
+  const moduleKey = requireKnownModuleKey(params.moduleKey);
+  const principalType = normalizeModuleGrantPrincipalType(params.principalType);
+  const principalId = params.principalId?.trim();
+  invariant(principalId, 400, "INVALID_INPUT", "Principal id is required.");
+  const accessLevel = normalizeModuleAccessLevel(params.accessLevel);
+  const createdByUserId = actor.kind === "user" ? actor.user.id : null;
+
+  const record = await prisma.workspaceModuleGrant.upsert({
+    where: {
+      workspaceId_moduleKey_principalType_principalId: {
+        workspaceId: deployment.managedWorkspaceId,
+        moduleKey,
+        principalType,
+        principalId,
+      },
+    },
+    update: { accessLevel },
+    create: {
+      workspaceId: deployment.managedWorkspaceId,
+      moduleKey,
+      principalType,
+      principalId,
+      accessLevel,
+      createdByUserId,
+    },
+  });
+
+  await recordCustomerDeploymentEvent(actor, params.deploymentId, "control_plane.module_grant.updated", {
+    reason,
+    source: "managed_workspace",
+    moduleKey,
+    principalType,
+    principalId,
+    accessLevel,
+  });
+
+  return {
+    deploymentId: params.deploymentId,
+    source: "managed_workspace" as const,
+    grant: {
+      id: record.id,
+      moduleKey: record.moduleKey,
+      principalType: record.principalType,
+      principalId: record.principalId,
+      accessLevel: record.accessLevel,
+    },
+  };
+}
+
+export async function deleteControlPlaneModuleGrant(actor: AppActor, params: {
+  deploymentId: string;
+  grantId: string;
+  reason?: string | null;
+}) {
+  requireControlPlaneScope(actor, "control-plane:modules:write");
+  const reason = requireMutationReason(params.reason);
+  await requireControlPlaneDeploymentWriteAccess(actor, params.deploymentId);
+  const deployment = await getControlPlaneDeploymentWithWorkspace(actor, params.deploymentId);
+  invariant(deployment.managedWorkspaceId, 400, "MANAGED_WORKSPACE_REQUIRED", "A managed workspace is required to manage module access grants.");
+
+  const existing = await prisma.workspaceModuleGrant.findFirst({
+    where: { id: params.grantId, workspaceId: deployment.managedWorkspaceId },
+    select: { id: true, moduleKey: true, principalType: true, principalId: true },
+  });
+  invariant(existing, 404, "NOT_FOUND", "Module access grant not found.");
+
+  await prisma.workspaceModuleGrant.delete({ where: { id: existing.id } });
+  await recordCustomerDeploymentEvent(actor, params.deploymentId, "control_plane.module_grant.deleted", {
+    reason,
+    source: "managed_workspace",
+    moduleKey: existing.moduleKey,
+    principalType: existing.principalType,
+    principalId: existing.principalId,
+  });
+
+  return { deploymentId: params.deploymentId, grantId: existing.id };
 }
 
 export async function getControlPlaneContextHealth(actor: AppActor, deploymentId: string) {

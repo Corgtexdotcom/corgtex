@@ -21,6 +21,8 @@ import {
   runControlPlaneReleaseOperation,
   runCustomerSupportOperation,
   setControlPlaneFeatureFlag,
+  setControlPlaneModuleGrant,
+  deleteControlPlaneModuleGrant,
   updateControlPlaneSlackAgendaSettings,
   updateControlPlaneAgentCredentialScopes,
   updateControlPlaneAgentPolicy,
@@ -339,6 +341,31 @@ export async function setControlPlaneFeatureFlagAction(formData: FormData) {
     deploymentId,
     flag: asString(formData, "flag"),
     enabled: asRequiredBoolean(formData, "enabled"),
+    reason: asString(formData, "reason"),
+  });
+  revalidateControlPlaneDeployment(deploymentId);
+}
+
+export async function setControlPlaneModuleGrantAction(formData: FormData) {
+  const actor = await requirePageActor();
+  const deploymentId = asString(formData, "deploymentId");
+  await setControlPlaneModuleGrant(actor, {
+    deploymentId,
+    moduleKey: asString(formData, "moduleKey"),
+    principalType: asString(formData, "principalType"),
+    principalId: asString(formData, "principalId"),
+    accessLevel: asString(formData, "accessLevel"),
+    reason: asString(formData, "reason"),
+  });
+  revalidateControlPlaneDeployment(deploymentId);
+}
+
+export async function deleteControlPlaneModuleGrantAction(formData: FormData) {
+  const actor = await requirePageActor();
+  const deploymentId = asString(formData, "deploymentId");
+  await deleteControlPlaneModuleGrant(actor, {
+    deploymentId,
+    grantId: asString(formData, "grantId"),
     reason: asString(formData, "reason"),
   });
   revalidateControlPlaneDeployment(deploymentId);
