@@ -1,4 +1,4 @@
-import { isGlobalOperator, listActorWorkspaces, countUnreadNotifications, listConversations, listDailyCompanyUnderstandingQuestions, requireWorkspaceMembership, getMemberInvitePolicy, getMeetingRecorderConfig, getUserWorkspaceOnboardingState, getAiWorkspaceSelectionState, SELF_SERVE_WORKSPACE_TOUR_KEY, SELF_SERVE_WORKSPACE_TOUR_VERSION } from "@corgtex/domain";
+import { isGlobalOperator, listActorWorkspaces, countUnreadNotifications, listConversations, listDailyCompanyUnderstandingQuestions, requireWorkspaceMembership, getMemberInvitePolicy, getMeetingRecorderConfig, getUserWorkspaceOnboardingState, getAiWorkspaceSelectionState, resolveWorkspaceModuleAccess, SELF_SERVE_WORKSPACE_TOUR_KEY, SELF_SERVE_WORKSPACE_TOUR_VERSION } from "@corgtex/domain";
 import { workspaceBranding, prisma } from "@corgtex/shared";
 import type { Metadata } from "next";
 import { logoutAction, requirePageActor } from "@/lib/auth";
@@ -94,7 +94,12 @@ export default async function WorkspaceLayout({
   const current = workspaces.find((w: Workspace) => w.id === workspaceId);
   const conversations = conversationsResult.items;
   const capabilities = buildWorkspaceCapabilities({ featureFlags, role: membership?.role ?? null });
-  const visibleNavGroups = filterNavGroupsByWorkspaceAccess(navGroups, featureFlags, capabilities);
+  const moduleAccess = await resolveWorkspaceModuleAccess({
+    workspaceId,
+    memberId: membership?.id ?? null,
+    role: membership?.role ?? null,
+  }).catch(() => undefined);
+  const visibleNavGroups = filterNavGroupsByWorkspaceAccess(navGroups, featureFlags, capabilities, moduleAccess);
   const tNav = await getTranslations("nav");
   const tCommon = await getTranslations("common");
   const currentBranding = current ? workspaceBranding(current) : { primaryName: "Corgtex", secondaryLabel: "Workspace" };

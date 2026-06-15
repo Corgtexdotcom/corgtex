@@ -5,6 +5,7 @@ import {
 } from "@corgtex/domain/modules";
 
 export type NavItem = {
+  moduleKey: string;
   href: string;
   labelKey: string;
   icon: WorkspaceNavIconName;
@@ -58,6 +59,7 @@ export const WORKSPACE_NAV_GROUPS: NavGroup[] = NAV_GROUP_ORDER
       .map((mod) => {
         const nav = mod.nav!;
         const item: NavItem = {
+          moduleKey: mod.key,
           href: nav.href,
           labelKey: nav.labelKey,
           icon: nav.icon as WorkspaceNavIconName,

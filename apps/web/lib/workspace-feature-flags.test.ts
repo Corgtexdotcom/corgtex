@@ -64,3 +64,34 @@ describe("filterNavGroupsByWorkspaceAccess", () => {
     expect(labels).toContain("built");
   });
 });
+
+describe("filterNavGroupsByWorkspaceAccess module access gating", () => {
+  it("hides a module whose resolved access is none", () => {
+    const visible = filterNavGroupsByWorkspaceAccess(
+      WORKSPACE_NAV_GROUPS,
+      DEFAULT_WORKSPACE_FEATURE_FLAGS,
+      { canManageAgentGovernance: true },
+      { finance: "none" },
+    ).flatMap((group) => group.items.map((item) => item.labelKey));
+    expect(visible).not.toContain("finance");
+  });
+
+  it("keeps a module visible at read or write access", () => {
+    const readVisible = filterNavGroupsByWorkspaceAccess(
+      WORKSPACE_NAV_GROUPS,
+      DEFAULT_WORKSPACE_FEATURE_FLAGS,
+      { canManageAgentGovernance: true },
+      { finance: "read" },
+    ).flatMap((group) => group.items.map((item) => item.labelKey));
+    expect(readVisible).toContain("finance");
+  });
+
+  it("is a no-op when no access map is provided (behavior preserved)", () => {
+    const withMap = filterNavGroupsByWorkspaceAccess(
+      WORKSPACE_NAV_GROUPS,
+      DEFAULT_WORKSPACE_FEATURE_FLAGS,
+      { canManageAgentGovernance: true },
+    ).flatMap((group) => group.items.map((item) => item.labelKey));
+    expect(withMap).toContain("finance");
+  });
+});
