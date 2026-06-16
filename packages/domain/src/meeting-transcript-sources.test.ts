@@ -12,6 +12,7 @@ const { prismaMock, intakeMeetingTranscriptMock } = vi.hoisted(() => ({
     meetingTranscriptSourceRecord: {
       findUnique: vi.fn(),
       findFirst: vi.fn(),
+      findMany: vi.fn(),
       create: vi.fn(),
       upsert: vi.fn(),
       update: vi.fn(),
@@ -80,6 +81,7 @@ describe("meeting transcript sources", () => {
     }));
     prismaMock.meetingTranscriptSourceRecord.findUnique.mockResolvedValue(null);
     prismaMock.meetingTranscriptSourceRecord.findFirst.mockResolvedValue(null);
+    prismaMock.meetingTranscriptSourceRecord.findMany.mockResolvedValue([]);
     prismaMock.meetingTranscriptSourceRecord.create.mockImplementation(({ data }) => Promise.resolve({
       id: `record-${prismaMock.meetingTranscriptSourceRecord.create.mock.calls.length}`,
       ...data,
@@ -483,6 +485,157 @@ describe("meeting transcript sources", () => {
       secret: "wrong",
       headers: { "x-fireflies-signature": signature },
     })).toBe(false);
+  });
+
+  it("verifies Read.ai signatures with the base64 signing key", async () => {
+    const { verifyMeetingTranscriptWebhookSignature } = await import("./meeting-transcript-sources");
+    const rawBody = JSON.stringify({ trigger: "meeting_end", session_id: "read-session-1" });
+    const secret = Buffer.from("read-webhook-secret").toString("base64");
+    const signature = createHmac("sha256", Buffer.from(secret, "base64")).update(rawBody).digest("hex");
+
+    expect(verifyMeetingTranscriptWebhookSignature({
+      provider: "read-ai",
+      rawBody,
+      secret,
+      headers: { "x-read-signature": signature },
+    })).toBe(true);
+    expect(verifyMeetingTranscriptWebhookSignature({
+      provider: "read-ai",
+      rawBody,
+      secret: Buffer.from("wrong").toString("base64"),
+      headers: { "x-read-signature": signature },
+    })).toBe(false);
+  });
+
+  it("imports Read.ai meeting_end webhooks for Corgtex processing and action cross-checking", async () => {
+    const { processMeetingTranscriptSourceWebhook } = await import("./meeting-transcript-sources");
+    const secret = Buffer.from("read-webhook-secret").toString("base64");
+    prismaMock.meetingTranscriptSourceConnection.findUnique.mockResolvedValueOnce({
+      id: "connection-read",
+      workspaceId: "ws-1",
+      provider: "READ_AI",
+      webhookSecretEnc: `enc:${secret}`,
+    });
+    const rawBody = JSON.stringify({
+      session_id: "read-session-1",
+      trigger: "meeting_end",
+      title: "Product Weekly",
+      start_time: "2026-05-01T10:00:00Z",
+      end_time: "2026-05-01T11:00:00Z",
+      participants: [{ name: "Jan", email: "jan@example.com" }],
+      owner: { name: "Milan", email: "milan@example.com" },
+      summary: "The team discussed recorder imports.",
+      action_items: [{ text: "Jan will enable the Read.ai webhook." }],
+      report_url: "https://app.read.ai/analytics/meetings/read-session-1",
+      platform: "meet",
+      platform_meeting_id: "abc-defg-hij",
+      request_id: "request-1",
+      transcript: {
+        speaker_blocks: [{
+          start_time: "1777639200000",
+          end_time: "1777639203000",
+          speaker: { name: "Jan" },
+          words: "I will enable the Read.ai webhook.",
+        }],
+      },
+    });
+    const signature = createHmac("sha256", Buffer.from(secret, "base64")).update(rawBody).digest("hex");
+
+    await processMeetingTranscriptSourceWebhook({
+      workspaceId: "ws-1",
+      provider: "READ_AI",
+      rawBody,
+      headers: { "x-read-signature": signature },
+    });
+
+    expect(prismaMock.meetingTranscriptSourceRecord.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        provider: "READ_AI",
+        externalId: "read-session-1",
+        sourceUrl: "https://app.read.ai/analytics/meetings/read-session-1",
+        summaryMd: expect.stringContaining("Jan will enable the Read.ai webhook."),
+        rawMetadataJson: expect.objectContaining({
+          platformMeetingId: "abc-defg-hij",
+          readAiActionItems: ["Jan will enable the Read.ai webhook."],
+        }),
+      }),
+    }));
+    expect(intakeMeetingTranscriptMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      provider: "READ_AI",
+      externalId: "meeting-transcript:READ_AI:read-session-1",
+      meetingUrl: "https://meet.google.com/abc-defg-hij",
+      summaryMd: null,
+      ingestionGuidanceMd: expect.stringContaining("cross-check these provider-supplied items"),
+      transcript: "Jan: I will enable the Read.ai webhook.",
+      participantEmails: ["jan@example.com", "milan@example.com"],
+    }));
+  });
+
+  it("acknowledges Read.ai meeting_start webhooks without importing a transcript", async () => {
+    const { processMeetingTranscriptSourceWebhook } = await import("./meeting-transcript-sources");
+    const secret = Buffer.from("read-webhook-secret").toString("base64");
+    prismaMock.meetingTranscriptSourceConnection.findUnique.mockResolvedValueOnce({
+      id: "connection-read",
+      workspaceId: "ws-1",
+      provider: "READ_AI",
+      webhookSecretEnc: `enc:${secret}`,
+    });
+    const rawBody = JSON.stringify({
+      session_id: "read-session-1",
+      trigger: "meeting_start",
+      title: "Product Weekly",
+      start_time: "2026-05-01T10:00:00Z",
+      platform: "meet",
+      platform_meeting_id: "abc-defg-hij",
+      request_id: "request-start-1",
+    });
+    const signature = createHmac("sha256", Buffer.from(secret, "base64")).update(rawBody).digest("hex");
+
+    const result = await processMeetingTranscriptSourceWebhook({
+      workspaceId: "ws-1",
+      provider: "READ_AI",
+      rawBody,
+      headers: { "x-read-signature": signature },
+    });
+
+    expect(result).toMatchObject({ ignored: true, reason: "meeting_start", provider: "READ_AI" });
+    expect(intakeMeetingTranscriptMock).not.toHaveBeenCalled();
+    expect(prismaMock.meetingTranscriptImportBatch.create).not.toHaveBeenCalled();
+  });
+
+  it("links likely duplicate cross-provider transcript sources to the existing meeting", async () => {
+    prismaMock.meetingTranscriptSourceRecord.findMany.mockResolvedValueOnce([{
+      id: "record-existing",
+      meetingId: "meeting-existing",
+      title: "Product Weekly",
+      recordedAt: new Date("2026-05-01T10:00:00.000Z"),
+      contentHash: "other-content",
+      participantsJson: { participantEmails: ["jan@example.com"] },
+      rawMetadataJson: { platformMeetingId: "abc-defg-hij" },
+    }]);
+    const { importMeetingTranscriptSourceArtifacts } = await import("./meeting-transcript-sources");
+
+    await importMeetingTranscriptSourceArtifacts(agentActor, {
+      workspaceId: "ws-1",
+      provider: "READ_AI",
+      artifacts: [{
+        externalId: "read-session-1",
+        title: "Product Weekly",
+        recordedAt: "2026-05-01T10:00:00.000Z",
+        text: "Jan: This is the same call.",
+        participantEmails: ["jan@example.com"],
+        metadata: { platformMeetingId: "abc-defg-hij" },
+      }],
+    });
+
+    expect(prismaMock.meetingTranscriptSourceRecord.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        meetingId: "meeting-existing",
+      }),
+    }));
+    expect(intakeMeetingTranscriptMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      meetingId: "meeting-existing",
+    }));
   });
 
   it("imports nested transcript bodies from signed webhooks without fetching provider APIs", async () => {
