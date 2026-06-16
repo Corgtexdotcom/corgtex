@@ -15,7 +15,8 @@ import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
 import { DeliberationThread } from "@/lib/components/DeliberationThread";
 import { getDeliberationTargets } from "@/lib/deliberation-targets";
 import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
-import { PracticeLedgerEmbed } from "./PracticeLedgerEmbed";
+import { getSatelliteEmbedForModule } from "@corgtex/domain/modules";
+import { FinanceSatelliteAppFrame } from "./FinanceSatelliteAppFrame";
 import { getTranslations } from "next-intl/server";
 import {
   archiveLedgerAccountAction,
@@ -173,6 +174,16 @@ export default async function FinancePage({
   if (enterpriseSurface.mode === "unavailable") {
     return <EnterpriseFinanceAppUnavailable workspaceId={workspaceId} surface={enterpriseSurface} />;
   }
+  // A satellite that has graduated (embed stage) into finance replaces the
+  // native finance tab entirely - it is the first-class finance app. Driven by
+  // the Module Manifest registry; only active when the app URL is configured.
+  const satelliteEmbed = getSatelliteEmbedForModule("finance");
+  const satelliteEmbedUrl = satelliteEmbed?.satellite
+    ? process.env[satelliteEmbed.satellite.appUrlEnv]?.trim()
+    : undefined;
+  if (satelliteEmbed?.satellite && satelliteEmbedUrl) {
+    return <FinanceSatelliteAppFrame embed={satelliteEmbed} launchUrl={satelliteEmbedUrl} />;
+  }
   const t = await getTranslations("finance");
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
   const resolvedSearch = searchParams ? await searchParams : {};
@@ -271,8 +282,6 @@ export default async function FinancePage({
           <span>{t("pageDescription")}</span>
         </div>
       </header>
-
-      <PracticeLedgerEmbed />
 
       <div className="nr-stat-bar">
         <span className="nr-stat">{t("statTotal", { amount: fmt(totalAll) })}</span>
