@@ -25,7 +25,7 @@ import { buildCustomerDeploymentProviderReadModel, buildCustomerDeploymentReadin
 import { registerCustomerDeployment } from "./customer-lifecycle";
 import { AGENT_REGISTRY } from "./agent-registry";
 import { isKnownScope } from "./agent-auth";
-import { getModuleManifests, listWorkspaceFeatureFlagDefinitions } from "./modules";
+import { getModuleManifests, listModuleFlagKeys, listWorkspaceFeatureFlagDefinitions } from "./modules";
 import type { FeatureFlagDefinition, WorkspaceFeatureFlagKey } from "./modules";
 
 const SUPPORT_ACTOR_LABEL = "Corgtex Support";
@@ -837,31 +837,40 @@ function assertControlPlaneCapabilityEnabled(envName: string, code: string, mess
   invariant(controlPlaneCapabilityEnabled(envName, options), 403, code, message);
 }
 
+/**
+ * A client feature posture, expressed as **module-key bundles** rather than raw
+ * flag overrides. Each entry targets a module by key:
+ *   - a `boolean` toggles every flag the module owns (primary + sub-flags),
+ *     resolved from the Module Manifest registry (`listModuleFlagKeys`);
+ *   - an object sets only specific flags the module owns (escape hatch for
+ *     postures that want a subset of a module's sub-flags).
+ * Flags not mentioned fall back to the manifest default. This keeps postures
+ * expressed in product terms (modules) while staying byte-for-byte equivalent
+ * to the previous flag-level overrides (proven by the posture parity test).
+ */
+type ModulePostureBundle = Record<
+  string,
+  boolean | Partial<Record<ControlPlaneWorkspaceFeatureFlag, boolean>>
+>;
+
 const CLIENT_FEATURE_POSTURES = {
   standard: {},
   minimal: {
-    TOOL_LINKS: false,
-    BUILD_ARTIFACTS: false,
-    CONTEXT_MAPS: false,
-    MEETING_RECORDERS: false,
-    MEETING_CONTEXTUAL_INTELLIGENCE: false,
-    CONTEXT_MAP_AI: false,
-    SLACK_MEETING_ACTION_REVIEW: false,
-    AI_WORKSPACES: false,
-    OPENWORK_DEFAULT: false,
-    EXECUTION_PACKETS: false,
-    MANAGED_ENTERPRISE_SERVICES: false,
+    tools: false,
+    built: false,
+    "context-maps": false,
+    meetings: false,
+    "ai-workspaces": false,
+    "execution-packets": false,
   },
   enterprise: {
-    AGENT_GOVERNANCE: true,
-    SETTINGS_GENERAL: true,
-    MEETING_RECORDERS: true,
-    MEETING_CONTEXTUAL_INTELLIGENCE: true,
-    AI_WORKSPACES: true,
-    EXECUTION_PACKETS: true,
-    MANAGED_ENTERPRISE_SERVICES: true,
+    "agent-governance": true,
+    settings: true,
+    meetings: { MEETING_RECORDERS: true, MEETING_CONTEXTUAL_INTELLIGENCE: true },
+    "ai-workspaces": { AI_WORKSPACES: true, MANAGED_ENTERPRISE_SERVICES: true },
+    "execution-packets": true,
   },
-} satisfies Record<string, Partial<Record<ControlPlaneWorkspaceFeatureFlag, boolean>>>;
+} satisfies Record<string, ModulePostureBundle>;
 
 const migrationRunModel = () => (prisma as typeof prisma & {
   clientMigrationRun: {
@@ -938,13 +947,35 @@ function featurePostureName(value: string | null | undefined) {
   return normalized as keyof typeof CLIENT_FEATURE_POSTURES;
 }
 
-function featurePostureFlags(posture: keyof typeof CLIENT_FEATURE_POSTURES) {
-  const overrides = CLIENT_FEATURE_POSTURES[posture] as Partial<Record<ControlPlaneWorkspaceFeatureFlag, boolean>>;
+/** Expand a module-key posture bundle into concrete flag overrides. */
+function expandPostureBundle(bundle: ModulePostureBundle): Partial<Record<ControlPlaneWorkspaceFeatureFlag, boolean>> {
+  const overrides: Partial<Record<ControlPlaneWorkspaceFeatureFlag, boolean>> = {};
+  for (const [moduleKey, value] of Object.entries(bundle)) {
+    if (typeof value === "boolean") {
+      const flagKeys = listModuleFlagKeys(moduleKey);
+      invariant(flagKeys.length > 0, 500, "INVALID_POSTURE", `Posture references module "${moduleKey}" which owns no feature flags.`);
+      for (const flagKey of flagKeys) {
+        overrides[flagKey as ControlPlaneWorkspaceFeatureFlag] = value;
+      }
+    } else {
+      for (const [flagKey, enabled] of Object.entries(value)) {
+        overrides[flagKey as ControlPlaneWorkspaceFeatureFlag] = enabled as boolean;
+      }
+    }
+  }
+  return overrides;
+}
+
+export function featurePostureFlags(posture: keyof typeof CLIENT_FEATURE_POSTURES) {
+  const overrides = expandPostureBundle(CLIENT_FEATURE_POSTURES[posture]);
   return CONTROL_PLANE_WORKSPACE_FEATURE_FLAGS.map((definition) => ({
     flag: definition.flag,
     enabled: overrides[definition.flag as ControlPlaneWorkspaceFeatureFlag] ?? definition.defaultEnabled,
   }));
 }
+
+/** Posture names supported by `featurePostureFlags`, for validation and tests. */
+export const CLIENT_FEATURE_POSTURE_NAMES = Object.keys(CLIENT_FEATURE_POSTURES) as Array<keyof typeof CLIENT_FEATURE_POSTURES>;
 
 function hasCompleteBootstrapBundle(params: {
   bootstrapBundleUri?: string | null;

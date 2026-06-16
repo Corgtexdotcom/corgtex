@@ -469,6 +469,20 @@ export function getModuleByKey(key: string): ModuleManifest | undefined {
 }
 
 /**
+ * Every workspace feature flag a module owns: its primary flag (if any) first,
+ * then its sub-flags, in declaration order. Used to expand module-keyed client
+ * posture bundles into the concrete flag overrides the control plane applies.
+ */
+export function listModuleFlagKeys(moduleKey: string): string[] {
+  const mod = getModuleByKey(moduleKey);
+  if (!mod) return [];
+  const keys: string[] = [];
+  if (mod.featureFlag) keys.push(mod.featureFlag.flag);
+  for (const sub of mod.subFlags ?? []) keys.push(sub.flag);
+  return keys;
+}
+
+/**
  * The satellite module (if any) that should render embedded inside the given
  * first-party module's tab at its current graduation stage. Used by the host
  * tab (e.g. finance) to render the satellite while data stays satellite-owned.
