@@ -15,7 +15,8 @@ import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
 import { DeliberationThread } from "@/lib/components/DeliberationThread";
 import { getDeliberationTargets } from "@/lib/deliberation-targets";
 import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
-import { PracticeLedgerEmbed } from "./PracticeLedgerEmbed";
+import { getPracticeFinanceDashboard } from "@corgtex/domain";
+import { PracticeFinanceDashboard } from "./PracticeFinanceDashboard";
 import { getTranslations } from "next-intl/server";
 import {
   archiveLedgerAccountAction,
@@ -176,7 +177,8 @@ export default async function FinancePage({
   const t = await getTranslations("finance");
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
   const resolvedSearch = searchParams ? await searchParams : {};
-  const activeTab = typeof resolvedSearch.tab === "string" ? resolvedSearch.tab : "spends";
+  const activeTab = typeof resolvedSearch.tab === "string" ? resolvedSearch.tab : "dashboard";
+  const practiceDashboard = await getPracticeFinanceDashboard(actor, workspaceId);
   const statusFilter = normalizeFilter(resolvedSearch.status);
   const activeDiscussionId = typeof resolvedSearch.discuss === "string" ? resolvedSearch.discuss : null;
 
@@ -259,34 +261,43 @@ export default async function FinancePage({
   };
 
   const tabs = [
+    { key: "dashboard", label: "Dashboard" },
     { key: "spends", label: t("tabSpends") },
     { key: "accounts", label: t("tabAccounts") },
   ];
 
   return (
     <>
-      <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 24 }}>
-        <h1>{t("pageTitle")}</h1>
-        <div className="nr-masthead-meta">
-          <span>{t("pageDescription")}</span>
-        </div>
-      </header>
+      {activeTab === "dashboard" ? (
+        <PracticeFinanceDashboard
+          summary={practiceDashboard.summary}
+          attention={practiceDashboard.attention}
+          projects={practiceDashboard.projects}
+        />
+      ) : (
+        <>
+          <header className="nr-masthead" style={{ textAlign: "left", marginBottom: 24 }}>
+            <h1>{t("pageTitle")}</h1>
+            <div className="nr-masthead-meta">
+              <span>{t("pageDescription")}</span>
+            </div>
+          </header>
 
-      <PracticeLedgerEmbed />
+          <div className="nr-stat-bar">
+            <span className="nr-stat">{t("statTotal", { amount: fmt(totalAll) })}</span>
+            <span className="nr-stat-sep">·</span>
+            <span className="nr-stat">{t("statOpen", { amount: fmt(totalOpen) })}</span>
+            <span className="nr-stat-sep">·</span>
+            <span className="nr-stat">{t("statApproved", { amount: fmt(totalApproved) })}</span>
+            <span className="nr-stat-sep">·</span>
+            <span className="nr-stat" style={{ color: "var(--success)" }}>{t("statPaid", { amount: fmt(totalPaid) })}</span>
+            <span className="nr-stat-sep">·</span>
+            <span className="nr-stat">{t("statAccounts", { count: ledgerAccounts.length })}</span>
+          </div>
+        </>
+      )}
 
-      <div className="nr-stat-bar">
-        <span className="nr-stat">{t("statTotal", { amount: fmt(totalAll) })}</span>
-        <span className="nr-stat-sep">·</span>
-        <span className="nr-stat">{t("statOpen", { amount: fmt(totalOpen) })}</span>
-        <span className="nr-stat-sep">·</span>
-        <span className="nr-stat">{t("statApproved", { amount: fmt(totalApproved) })}</span>
-        <span className="nr-stat-sep">·</span>
-        <span className="nr-stat" style={{ color: "var(--success)" }}>{t("statPaid", { amount: fmt(totalPaid) })}</span>
-        <span className="nr-stat-sep">·</span>
-        <span className="nr-stat">{t("statAccounts", { count: ledgerAccounts.length })}</span>
-      </div>
-
-      <div className="nr-tab-bar">
+      <div className="nr-tab-bar" style={{ marginTop: activeTab === "dashboard" ? 20 : 0 }}>
         {tabs.map((tab) => (
           <Link
             key={tab.key}
@@ -298,7 +309,7 @@ export default async function FinancePage({
         ))}
       </div>
 
-      {practiceLedgerApp && (
+      {activeTab !== "dashboard" && practiceLedgerApp && (
         <section className="nr-item" style={{ padding: 16, marginBottom: 20 }}>
           <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
             <div>
