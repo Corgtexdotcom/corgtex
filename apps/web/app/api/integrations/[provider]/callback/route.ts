@@ -154,6 +154,14 @@ export async function GET(request: NextRequest, props: { params: Promise<{ provi
         providerAccountId: String(profileData.id),
         providerEmail: typeof profileData.email === "string" ? profileData.email : null,
         scopes: typeof tokenData.scope === "string" ? tokenData.scope.split(" ") : [],
+        createSyncSettings: intent === "documents"
+          ? {
+            calendar: { enabled: false, includeAllEvents: false },
+            documents: { enabled: false, selectedDriveIds: [] },
+            email: { enabled: false, filters: [] },
+          }
+          : undefined,
+        enqueueCalendarSync: intent !== "documents",
       });
 
       return redirectWithStateCleared(appUrl, workspaceId, provider, {

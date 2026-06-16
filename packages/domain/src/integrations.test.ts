@@ -189,7 +189,7 @@ describe("OAuth integration sync helpers", () => {
       workspaceId: "ws-1",
       providerEmail: "user@example.test",
       providerAccountId: "google-user-1",
-      scopes: ["https://www.googleapis.com/auth/drive.readonly"],
+      scopes: ["https://www.googleapis.com/auth/drive.file"],
       syncSettings: null,
       status: "ACTIVE",
     });
@@ -252,7 +252,7 @@ describe("OAuth integration sync helpers", () => {
       workspaceId: "ws-1",
       providerEmail: "user@example.test",
       providerAccountId: "google-user-1",
-      scopes: ["https://www.googleapis.com/auth/drive.readonly"],
+      scopes: ["https://www.googleapis.com/auth/drive.file"],
       syncSettings: { calendar: { enabled: true }, documents: { enabled: false, selectedDriveIds: [] } },
       status: "ACTIVE",
     }).mockResolvedValueOnce({
@@ -287,6 +287,38 @@ describe("OAuth integration sync helpers", () => {
           }),
         }),
       }),
+    });
+  });
+
+  it("continues to accept legacy Google Drive readonly connections for selected document sync", async () => {
+    prismaMock.oAuthConnection.findFirst.mockResolvedValueOnce({
+      id: "conn-1",
+      workspaceId: "ws-1",
+      providerEmail: "user@example.test",
+      providerAccountId: "google-user-1",
+      scopes: ["https://www.googleapis.com/auth/drive.readonly"],
+      syncSettings: { documents: { enabled: false, selectedDriveIds: [] } },
+      status: "ACTIVE",
+    }).mockResolvedValueOnce({
+      id: "conn-1",
+      status: "ACTIVE",
+      syncSettings: { documents: { enabled: true, selectedDriveIds: ["doc-1"] } },
+    });
+    prismaMock.oAuthConnection.update.mockResolvedValue({
+      id: "conn-1",
+      status: "ACTIVE",
+    });
+    prismaMock.workflowJob.upsert.mockImplementation(async (input: any) => ({ id: input.create.type, type: input.create.type }));
+    const { selectGoogleDriveDocumentsForSync } = await import("./integrations");
+
+    await expect(selectGoogleDriveDocumentsForSync({
+      kind: "user",
+      user: { id: "user-1", email: "user@example.test" },
+    } as any, {
+      workspaceId: "ws-1",
+      documentIds: ["doc-1"],
+    })).resolves.toEqual({
+      scheduled: ["oauth.documents.sync"],
     });
   });
 

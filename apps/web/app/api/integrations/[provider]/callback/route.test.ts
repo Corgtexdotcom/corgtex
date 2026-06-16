@@ -80,6 +80,8 @@ describe("GET /api/integrations/[provider]/callback", () => {
         providerAccountId: "google-user-1",
         providerEmail: null,
         scopes: ["calendar", "profile"],
+        createSyncSettings: undefined,
+        enqueueCalendarSync: true,
       },
     );
     expect(response.headers.get("location")).toBe("http://localhost:3000/workspaces/ws-1/tools?type=CONNECTOR&q=google&integration=google&integrationStatus=success&integrationSuccess=google_connected");
@@ -100,7 +102,7 @@ describe("GET /api/integrations/[provider]/callback", () => {
         access_token: "access-token",
         refresh_token: "refresh-token",
         expires_in: 3600,
-        scope: "openid profile https://www.googleapis.com/auth/drive.readonly",
+        scope: "openid profile https://www.googleapis.com/auth/drive.file",
       }), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({
         id: "google-user-1",
@@ -120,10 +122,16 @@ describe("GET /api/integrations/[provider]/callback", () => {
       expect.objectContaining({
         workspaceId: "ws-1",
         provider: "GOOGLE",
-        scopes: ["openid", "profile", "https://www.googleapis.com/auth/drive.readonly"],
+        scopes: ["openid", "profile", "https://www.googleapis.com/auth/drive.file"],
+        createSyncSettings: {
+          calendar: { enabled: false, includeAllEvents: false },
+          documents: { enabled: false, selectedDriveIds: [] },
+          email: { enabled: false, filters: [] },
+        },
+        enqueueCalendarSync: false,
       }),
     );
-    expect(response.headers.get("location")).toBe("http://localhost:3000/workspaces/ws-1?onboarding=setup&integration=google&integrationStatus=success&integrationSuccess=google_connected");
+    expect(response.headers.get("location")).toBe("http://localhost:3000/workspaces/ws-1/tools?type=CONNECTOR&q=google&integration=google&integrationStatus=success&integrationSuccess=google_connected");
   });
 
   it("redirects provider access errors back to Tools with a safe Google verification message", async () => {

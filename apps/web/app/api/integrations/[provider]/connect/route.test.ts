@@ -58,6 +58,8 @@ describe("GET /api/integrations/[provider]/connect", () => {
     expect(location.searchParams.get("scope")).toBe("openid email profile https://www.googleapis.com/auth/calendar.readonly");
     expect(location.searchParams.get("scope")).not.toContain("gmail.readonly");
     expect(location.searchParams.get("scope")).not.toContain("drive.readonly");
+    expect(location.searchParams.get("scope")).not.toContain("drive.file");
+    expect(location.searchParams.get("include_granted_scopes")).toBeNull();
     expect(createIntegrationOAuthState).toHaveBeenCalledWith({
       userId: "user-1",
       workspaceId: "ws-1",
@@ -74,9 +76,11 @@ describe("GET /api/integrations/[provider]/connect", () => {
     );
 
     const location = new URL(response.headers.get("location") ?? "");
-    expect(location.searchParams.get("scope")).toContain("https://www.googleapis.com/auth/calendar.readonly");
-    expect(location.searchParams.get("scope")).toContain("https://www.googleapis.com/auth/drive.readonly");
+    expect(location.searchParams.get("scope")).toBe("openid email profile https://www.googleapis.com/auth/drive.file");
+    expect(location.searchParams.get("scope")).not.toContain("https://www.googleapis.com/auth/calendar.readonly");
+    expect(location.searchParams.get("scope")).not.toContain("https://www.googleapis.com/auth/drive.readonly");
     expect(location.searchParams.get("scope")).not.toContain("gmail.readonly");
+    expect(location.searchParams.get("include_granted_scopes")).toBe("true");
     expect(createIntegrationOAuthState).toHaveBeenCalledWith({
       userId: "user-1",
       workspaceId: "ws-1",

@@ -35,13 +35,9 @@ export async function GET(request: NextRequest, props: { params: Promise<{ provi
       }
 
       const redirectUri = `${appUrl}/api/integrations/google/callback`;
-      const scopes = [
-        "openid",
-        "email",
-        "profile",
-        "https://www.googleapis.com/auth/calendar.readonly",
-        ...(intent === "documents" ? ["https://www.googleapis.com/auth/drive.readonly"] : []),
-      ].join(" ");
+      const scopes = intent === "documents"
+        ? ["openid", "email", "profile", "https://www.googleapis.com/auth/drive.file"].join(" ")
+        : ["openid", "email", "profile", "https://www.googleapis.com/auth/calendar.readonly"].join(" ");
       const state = createIntegrationOAuthState({ userId: actor.user.id, workspaceId, intent });
 
       const authUrl = new URL("https://accounts.google.com/o/oauth2/v2/auth");
@@ -51,6 +47,9 @@ export async function GET(request: NextRequest, props: { params: Promise<{ provi
       authUrl.searchParams.set("scope", scopes);
       authUrl.searchParams.set("access_type", "offline");
       authUrl.searchParams.set("prompt", "consent");
+      if (intent === "documents") {
+        authUrl.searchParams.set("include_granted_scopes", "true");
+      }
       authUrl.searchParams.set("state", state);
 
       const response = NextResponse.redirect(authUrl.toString());

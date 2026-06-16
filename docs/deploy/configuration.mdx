@@ -83,6 +83,19 @@ These variables configure the remote MCP connector used by ChatGPT, Claude, Curs
 | `MCP_DEFAULT_INSTANCE_SLUG` | Optional instance slug for this deployment. If omitted, Corgtex uses `WORKSPACE_SLUG` or infers `crina` from a Crina host name. |
 | `MCP_INSTANCE_REGISTRY` | Optional JSON array of registered connector instances. Each entry supports `slug`, `displayName`, `baseUrl`, `workspaceIds`, `workspaceSlugs`, and `status`. Unknown workspaces are rejected when a registry is configured. |
 
+## Google Workspace Integration
+
+These variables enable Google Calendar sync and selected-file Google Drive ingestion.
+
+| Variable | Description |
+|---|---|
+| `GOOGLE_CLIENT_ID` | OAuth web client ID from Google Auth Platform. Register `${APP_URL}/api/integrations/google/callback` as an authorized redirect URI and `${APP_URL}` as an authorized JavaScript origin. |
+| `GOOGLE_CLIENT_SECRET` | OAuth web client secret. Store only as a server-side deployment secret. |
+| `NEXT_PUBLIC_GOOGLE_PICKER_API_KEY` | Browser-safe Google Picker API key, restricted in Google Cloud to the production app origin such as `https://app.corgtex.com`. |
+| `NEXT_PUBLIC_GOOGLE_CLOUD_PROJECT_NUMBER` | Google Cloud project number used as the Picker app ID. This is not a secret. |
+
+Corgtex requests `https://www.googleapis.com/auth/calendar.readonly` for calendar sync and `https://www.googleapis.com/auth/drive.file` for selected Drive files. Do not add broad Drive scopes unless a separate product requirement and Google verification justification are approved.
+
 ## Object Storage
 
 File uploads and Brain source downloads use an S3-compatible storage backend. Client instances that allow uploads must configure this for every runtime service that touches uploads, normally web and worker.
@@ -162,6 +175,12 @@ MODEL_EMBEDDING_DEFAULT="openai/text-embedding-3-small"
 # Redis (Production / Client Instances)
 REDIS_URL="redis://redis:6379"
 REDIS_KEY_PREFIX="corgtex-local"
+
+# Google Workspace OAuth and Picker
+GOOGLE_CLIENT_ID="..."
+GOOGLE_CLIENT_SECRET="..."
+NEXT_PUBLIC_GOOGLE_PICKER_API_KEY="..."
+NEXT_PUBLIC_GOOGLE_CLOUD_PROJECT_NUMBER="..."
 
 # S3-Compatible Storage
 S3_ENDPOINT="https://storage.example.com"
