@@ -866,6 +866,7 @@
     "formType": "Tipo",
     "formVendor": "Proveedor",
     "discussionTitle": "Discusión",
+    "ledgerAccounts": "Cuentas contables",
     "noAccounts": "Todavía no hay cuentas contables definidas.",
     "noSpends": "Ninguna solicitud de gasto coincide con este filtro.",
     "pageDescription": "Seguimiento de gastos, cuentas contables y conciliación.",
