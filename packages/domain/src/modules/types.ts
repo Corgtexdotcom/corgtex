@@ -89,7 +89,11 @@ export type ModuleNav = {
   requiredCapability?: string | null;
 };
 
-/** Satellite-app integration spec. Present only when `tier === "satellite"`. */
+/**
+ * Satellite-app integration spec. Present for modules with a satellite
+ * integration; retained after a cutover graduation as integration metadata /
+ * provenance even once the module is reclassified first-party.
+ */
 export type SatelliteSpec = {
   appKey: string;
   repository: string;

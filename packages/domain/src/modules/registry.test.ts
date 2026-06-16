@@ -156,14 +156,14 @@ describe("practice ledger satellite contract", () => {
     ]);
   });
 
-  it("graduates into the finance tab via embed (config-change promotion)", () => {
+  it("has graduated to a first-party native module (cutover complete)", () => {
     const ledger = getSatelliteModuleByAppKey("practice-ledger");
-    expect(ledger?.graduation).toEqual({ stage: "embed", embedInModuleKey: "finance" });
+    expect(ledger?.tier).toBe("first_party");
+    expect(ledger?.dataOwnership).toBe("corgtex_postgres");
+    expect(ledger?.graduation).toEqual({ stage: "cutover" });
 
-    const embedded = getSatelliteEmbedForModule("finance");
-    expect(embedded?.key).toBe("practice-ledger");
-
-    // No satellite is embedded in modules it has not graduated into.
+    // After cutover the finance tab is native (no satellite embed).
+    expect(getSatelliteEmbedForModule("finance")).toBeUndefined();
     expect(getSatelliteEmbedForModule("goals")).toBeUndefined();
   });
 });

@@ -360,14 +360,17 @@ export const MODULE_MANIFESTS: readonly ModuleManifest[] = [
     scopes: ["execution:read", "execution:write"],
   },
 
-  // --- Satellite modules ---
+  // --- Graduated satellite (cutover): now a first-party module. ---
   {
     key: "practice-ledger",
-    tier: "satellite",
+    // Cutover complete: promoted from satellite (tier 3) to first-party (tier 2).
+    // Data now lives in Corgtex Postgres (PracticeProject); the `satellite` spec
+    // and `contract` are retained as integration metadata / provenance.
+    tier: "first_party",
     title: "Practice Ledger",
     description:
       "Official Corgtex-built finance app for consulting practices. Owns structured finance records while syncing summaries, provenance, and audit context back into Corgtex Brain.",
-    dataOwnership: "satellite",
+    dataOwnership: "corgtex_postgres",
     contract: [
       {
         key: "expenses.create_draft",
@@ -399,11 +402,9 @@ export const MODULE_MANIFESTS: readonly ModuleManifest[] = [
       routingCategory: "FINANCE",
       dataClassification: "CLIENT_PRIVATE",
     },
-    // Pilot: graduate to a first-class finance deep-tab via embed, while
-    // structured data still lives in the satellite. Promotion is a config
-    // change - advancing to "dual_write"/"cutover" is a manifest edit plus a
-    // data migration, not a rewrite.
-    graduation: { stage: "embed", embedInModuleKey: "finance" },
+    // Graduation complete. The finance tab renders the native first-party
+    // practice-finance dashboard (PracticeProject); no embed.
+    graduation: { stage: "cutover" },
   },
 ];
 
@@ -453,14 +454,18 @@ export function listNavModules(): ModuleManifest[] {
   return MODULE_MANIFESTS.filter((mod) => Boolean(mod.nav));
 }
 
-/** Satellite-tier modules. */
+/** Satellite-tier modules (excludes graduated modules now classified first-party). */
 export function listSatelliteModules(): ModuleManifest[] {
   return MODULE_MANIFESTS.filter((mod) => mod.tier === "satellite");
 }
 
-/** Find a satellite-tier module by its satellite app key. */
+/**
+ * Find a module by its satellite app key. Keys off the `satellite` integration
+ * spec rather than the tier, so a graduated module (now first-party) is still
+ * resolvable by the catalog/MCP/enterprise-app surfaces that reference it.
+ */
 export function getSatelliteModuleByAppKey(appKey: string): ModuleManifest | undefined {
-  return MODULE_MANIFESTS.find((mod) => mod.tier === "satellite" && mod.satellite?.appKey === appKey);
+  return MODULE_MANIFESTS.find((mod) => mod.satellite?.appKey === appKey);
 }
 
 /** Find any module by its key. */
@@ -489,7 +494,6 @@ export function listModuleFlagKeys(moduleKey: string): string[] {
  */
 export function getSatelliteEmbedForModule(moduleKey: string): ModuleManifest | undefined {
   return MODULE_MANIFESTS.find((mod) =>
-    mod.tier === "satellite" &&
     (mod.graduation?.stage === "embed" || mod.graduation?.stage === "dual_write") &&
     mod.graduation?.embedInModuleKey === moduleKey,
   );
