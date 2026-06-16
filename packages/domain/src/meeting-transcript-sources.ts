@@ -9,6 +9,8 @@ export type TranscriptAuthMode = "API_KEY" | "OAUTH_ADMIN" | "MCP" | "MANUAL_EXP
 export type TranscriptSourceDataShape = "TRANSCRIPT_TEXT" | "SPEAKER_SEGMENTS" | "SUMMARY" | "ACTION_ITEMS" | "RECORDING_METADATA";
 export type TranscriptFormat = "json" | "vtt" | "srt" | "txt" | "docx" | "pdf" | "zip" | "csv";
 const MEETING_RECORDERS_FEATURE_FLAG = "MEETING_RECORDERS";
+const TRANSCRIPT_SOURCE_DUPLICATE_MATCH_WINDOW_MS = 2 * 60 * 60 * 1000;
+const TRANSCRIPT_SOURCE_DUPLICATE_SCORE_THRESHOLD = 0.7;
 
 export type MeetingTranscriptProviderCatalogEntry = {
   provider: MeetingTranscriptSourceProvider;
@@ -41,6 +43,7 @@ export type MeetingTranscriptSourceArtifact = {
   meetingUrl?: string | null;
   calendarExternalId?: string | null;
   summaryMd?: string | null;
+  ingestionGuidanceMd?: string | null;
   participantEmails?: string[] | null;
   participants?: unknown[] | null;
   segments?: MeetingTranscriptSegment[] | null;
@@ -58,6 +61,7 @@ export type NormalizedMeetingTranscriptSourceArtifact = {
   calendarExternalId: string | null;
   transcript: string;
   summaryMd: string | null;
+  ingestionGuidanceMd: string | null;
   participantEmails: string[];
   participants: unknown[];
   segments: MeetingTranscriptSegment[];
@@ -255,14 +259,14 @@ const CATALOG: MeetingTranscriptProviderCatalogEntry[] = [
     transcriptFormats: ["json", "txt", "zip"],
     supportsHistoricalImport: true,
     supportsFutureSync: true,
-    firstPath: "Catalog now; REST API and MCP connector after beta access is approved.",
-    connectionStatus: "scaffolded",
+    firstPath: "Workspace webhook for post-call transcripts; Corgtex analyzes transcript and cross-checks Read.ai action items.",
+    connectionStatus: "ready",
     manualExportInstructions: [
-      "Use Read.ai export or API/MCP beta access to collect transcript files.",
-      "Upload JSON/TXT/ZIP exports here for first-batch processing.",
+      "Create a Read.ai workspace webhook with the meeting_end trigger and paste this Corgtex webhook URL.",
+      "Store the Read.ai signing key as the webhook secret. Historical backfill can still use JSON/TXT/ZIP exports.",
     ],
     expectedFields: ["meeting id", "title", "start time", "transcript", "summary", "action items"],
-    notes: "REST API and MCP are in open beta; keep the catalog and manual path ready.",
+    notes: "Read.ai handles meeting attendance. Corgtex ingests completed reports, runs its own extraction, and uses provider action items as a cross-check.",
   },
   ...[
     ["TLDV", "tldv", "tl;dv", 9],
@@ -334,6 +338,15 @@ function asArray(value: unknown): unknown[] {
 
 function asString(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function asNumber(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value.trim());
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
 }
 
 function asDate(value: unknown): Date | null {
@@ -531,6 +544,130 @@ function titleFromFileName(fileName?: string | null) {
   return title ? title.replace(/\b(transcript|meeting|notes|minutes)\b/gi, "").replace(/\s+/g, " ").trim() || title : null;
 }
 
+function readAiTimestampMs(value: unknown) {
+  const parsed = asNumber(value);
+  if (parsed == null) return null;
+  return parsed > 10_000_000_000 ? parsed : parsed * 1000;
+}
+
+function readAiTextItem(value: unknown) {
+  const record = asRecord(value);
+  return asString(record.text) ?? asString(record.title) ?? (typeof value === "string" ? value.trim() : null);
+}
+
+function readAiTextItems(value: unknown) {
+  return asArray(value)
+    .map(readAiTextItem)
+    .filter((item): item is string => Boolean(item));
+}
+
+function markdownList(title: string, items: string[]) {
+  return items.length > 0 ? [`## ${title}`, ...items.map((item) => `- ${item}`)].join("\n") : null;
+}
+
+function readAiSummaryMdFromPayload(payload: Record<string, unknown>) {
+  const summary = asString(payload.summary);
+  const actionItems = readAiTextItems(payload.action_items);
+  const keyQuestions = readAiTextItems(payload.key_questions);
+  const topics = readAiTextItems(payload.topics);
+  const chapterSummaries = asArray(payload.chapter_summaries)
+    .map((value) => {
+      const record = asRecord(value);
+      const title = asString(record.title);
+      const description = asString(record.description);
+      if (!title && !description) return null;
+      return [title ? `### ${title}` : null, description].filter(Boolean).join("\n");
+    })
+    .filter((item): item is string => Boolean(item));
+  const sections = [
+    summary ? `## Read.ai summary\n${summary}` : null,
+    markdownList("Read.ai action items", actionItems),
+    markdownList("Read.ai key questions", keyQuestions),
+    markdownList("Read.ai topics", topics),
+    chapterSummaries.length > 0 ? ["## Read.ai chapter summaries", ...chapterSummaries].join("\n") : null,
+  ].filter(Boolean);
+  return sections.length > 0 ? sections.join("\n\n") : null;
+}
+
+function readAiIngestionGuidanceFromPayload(payload: Record<string, unknown>) {
+  const actionItems = readAiTextItems(payload.action_items);
+  if (actionItems.length === 0) return null;
+  return [
+    "Read.ai supplied action items for this meeting. Run Corgtex extraction from the transcript as the source of truth, then cross-check these provider-supplied items so concrete owner-backed commitments are not missed. Do not create vague awareness-only actions.",
+    "",
+    ...actionItems.map((item) => `- ${item}`),
+  ].join("\n");
+}
+
+function readAiSegmentsFromPayload(payload: Record<string, unknown>): MeetingTranscriptSegment[] {
+  const transcript = asRecord(payload.transcript);
+  return asArray(transcript.speaker_blocks)
+    .map((block): MeetingTranscriptSegment | null => {
+      const record = asRecord(block);
+      const text = asString(record.words) ?? asString(record.text);
+      if (!text) return null;
+      const speaker = asString(asRecord(record.speaker).name) ?? asString(record.speaker);
+      return {
+        speaker,
+        startMs: readAiTimestampMs(record.start_time),
+        endMs: readAiTimestampMs(record.end_time),
+        text,
+      };
+    })
+    .filter((segment): segment is MeetingTranscriptSegment => Boolean(segment));
+}
+
+function readAiPlatformMeetingUrl(platform: string | null, platformMeetingId: string | null) {
+  if (!platformMeetingId) return null;
+  const normalizedPlatform = platform?.trim().toLowerCase() ?? "";
+  if (normalizedPlatform === "meet" || normalizedPlatform === "google_meet" || normalizedPlatform === "google meet") {
+    return `https://meet.google.com/${platformMeetingId.trim()}`;
+  }
+  if (normalizedPlatform === "zoom") {
+    return `https://zoom.us/j/${platformMeetingId.trim()}`;
+  }
+  return null;
+}
+
+function readAiWebhookArtifactFromPayload(payload: Record<string, unknown>): MeetingTranscriptSourceArtifact | null {
+  const trigger = asString(payload.trigger);
+  if (trigger === "meeting_start") return null;
+  const segments = readAiSegmentsFromPayload(payload);
+  const transcriptText = transcriptTextFromSegments(segments);
+  const platform = asString(payload.platform);
+  const platformMeetingId = asString(payload.platform_meeting_id);
+  const summaryMd = readAiSummaryMdFromPayload(payload);
+  const participants = asArray(payload.participants);
+  const owner = asRecord(payload.owner);
+  const participantEmails = uniqueEmails([participants, owner]);
+  return {
+    json: payload,
+    externalId: asString(payload.session_id) ?? asString(payload.id),
+    title: asString(payload.title),
+    recordedAt: asDate(payload.start_time),
+    sourceUpdatedAt: asDate(payload.end_time) ?? new Date(),
+    sourceUrl: asString(payload.report_url),
+    meetingUrl: readAiPlatformMeetingUrl(platform, platformMeetingId),
+    summaryMd,
+    ingestionGuidanceMd: readAiIngestionGuidanceFromPayload(payload),
+    text: transcriptText || null,
+    participantEmails,
+    participants,
+    segments,
+    metadata: {
+      provider: "READ_AI",
+      webhookPayload: payload,
+      requestId: asString(payload.request_id),
+      platform,
+      platformMeetingId,
+      trigger,
+      owner,
+      readAiSummaryMd: summaryMd,
+      readAiActionItems: readAiTextItems(payload.action_items),
+    },
+  };
+}
+
 export function normalizeMeetingTranscriptSourceArtifact(
   provider: MeetingTranscriptSourceProvider,
   artifact: MeetingTranscriptSourceArtifact,
@@ -637,6 +774,7 @@ export function normalizeMeetingTranscriptSourceArtifact(
     calendarExternalId: artifact.calendarExternalId?.trim() || asString(jsonRecord.calendarExternalId) || asString(jsonRecord.calendar_id),
     transcript,
     summaryMd,
+    ingestionGuidanceMd: artifact.ingestionGuidanceMd?.trim() || null,
     participantEmails: [...new Set(participantEmails)],
     participants,
     segments,
@@ -716,6 +854,111 @@ function actorUserId(actor: AppActor) {
   return actor.kind === "user" ? actor.user.id : null;
 }
 
+function normalizeMatchText(value?: string | null) {
+  return (value ?? "").trim().toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function normalizeMatchKey(value: unknown) {
+  const text = asString(value);
+  return text ? text.toLowerCase().replace(/\/+$/, "") : null;
+}
+
+function meetingKeysFromMetadata(metadataValue: unknown) {
+  const metadata = asRecord(metadataValue);
+  return [
+    normalizeMatchKey(metadata.meetingUrl),
+    normalizeMatchKey(metadata.meeting_url),
+    normalizeMatchKey(metadata.calendarExternalId),
+    normalizeMatchKey(metadata.calendar_id),
+    normalizeMatchKey(metadata.platformMeetingId),
+    normalizeMatchKey(metadata.platform_meeting_id),
+  ].filter((value): value is string => Boolean(value));
+}
+
+function participantEmailsFromJson(value: unknown) {
+  const record = asRecord(value);
+  return uniqueEmails([record.participantEmails, record.participants]);
+}
+
+function scoreTranscriptSourceDuplicate(params: {
+  artifact: NormalizedMeetingTranscriptSourceArtifact;
+  record: {
+    title: string | null;
+    recordedAt: Date;
+    contentHash: string;
+    participantsJson: Prisma.JsonValue | null;
+    rawMetadataJson: Prisma.JsonValue | null;
+  };
+}) {
+  const artifactKeys = new Set([
+    normalizeMatchKey(params.artifact.meetingUrl),
+    normalizeMatchKey(params.artifact.calendarExternalId),
+    ...meetingKeysFromMetadata(params.artifact.rawMetadata),
+  ].filter((value): value is string => Boolean(value)));
+  const recordKeys = meetingKeysFromMetadata(params.record.rawMetadataJson);
+  if (recordKeys.some((key) => artifactKeys.has(key))) return 1;
+  if (params.record.contentHash === params.artifact.contentHash) return 1;
+
+  const artifactTitle = normalizeMatchText(params.artifact.title);
+  const recordTitle = normalizeMatchText(params.record.title);
+  let titleScore = 0;
+  if (artifactTitle && recordTitle) {
+    titleScore = artifactTitle === recordTitle
+      ? 0.3
+      : artifactTitle.includes(recordTitle) || recordTitle.includes(artifactTitle)
+        ? 0.18
+        : 0;
+  }
+  const diff = Math.abs(params.record.recordedAt.getTime() - params.artifact.recordedAt.getTime());
+  const timeScore = Math.max(0, 0.4 * (1 - diff / TRANSCRIPT_SOURCE_DUPLICATE_MATCH_WINDOW_MS));
+  const artifactEmails = params.artifact.participantEmails;
+  const recordEmails = new Set(participantEmailsFromJson(params.record.participantsJson));
+  const overlap = artifactEmails.filter((email) => recordEmails.has(email)).length;
+  const attendeeScore = artifactEmails.length > 0
+    ? 0.25 * (overlap / artifactEmails.length)
+    : 0.05;
+  return Number(Math.min(1, titleScore + timeScore + attendeeScore).toFixed(3));
+}
+
+async function findLikelyExistingMeetingIdForArtifact(params: {
+  workspaceId: string;
+  artifact: NormalizedMeetingTranscriptSourceArtifact;
+}) {
+  const start = new Date(params.artifact.recordedAt.getTime() - TRANSCRIPT_SOURCE_DUPLICATE_MATCH_WINDOW_MS);
+  const end = new Date(params.artifact.recordedAt.getTime() + TRANSCRIPT_SOURCE_DUPLICATE_MATCH_WINDOW_MS);
+  const candidates = await prisma.meetingTranscriptSourceRecord.findMany({
+    where: {
+      workspaceId: params.workspaceId,
+      status: "ACTIVE",
+      meetingId: { not: null },
+      recordedAt: { gte: start, lte: end },
+    },
+    orderBy: [{ recordedAt: "asc" }, { createdAt: "asc" }],
+    take: 30,
+    select: {
+      id: true,
+      meetingId: true,
+      title: true,
+      recordedAt: true,
+      contentHash: true,
+      participantsJson: true,
+      rawMetadataJson: true,
+    },
+  });
+
+  const [best] = candidates
+    .map((record) => ({
+      meetingId: record.meetingId,
+      score: scoreTranscriptSourceDuplicate({
+        artifact: params.artifact,
+        record,
+      }),
+    }))
+    .filter((candidate): candidate is { meetingId: string; score: number } => Boolean(candidate.meetingId))
+    .sort((left, right) => right.score - left.score);
+  return best && best.score >= TRANSCRIPT_SOURCE_DUPLICATE_SCORE_THRESHOLD ? best.meetingId : null;
+}
+
 async function importOneNormalizedTranscript(actor: AppActor, params: {
   workspaceId: string;
   connectionId?: string | null;
@@ -747,6 +990,10 @@ async function importOneNormalizedTranscript(actor: AppActor, params: {
     },
     orderBy: [{ sourceUpdatedAt: "desc" }, { createdAt: "desc" }],
   });
+  const likelyExistingMeetingId = activeRecord?.meetingId ?? await findLikelyExistingMeetingIdForArtifact({
+    workspaceId: params.workspaceId,
+    artifact,
+  });
   const incomingUpdatedAt = artifact.sourceUpdatedAt ?? artifact.recordedAt;
   const activeUpdatedAt = activeRecord ? activeRecord.sourceUpdatedAt ?? activeRecord.recordedAt : null;
   const hasChangedContent = Boolean(activeRecord && activeRecord.contentHash !== artifact.contentHash);
@@ -755,7 +1002,7 @@ async function importOneNormalizedTranscript(actor: AppActor, params: {
     workspaceId: params.workspaceId,
     connectionId: params.connectionId ?? null,
     batchId: params.batchId ?? null,
-    meetingId: activeRecord?.meetingId ?? null,
+    meetingId: likelyExistingMeetingId,
     provider: artifact.provider,
     externalId: artifact.externalId,
     externalRevisionId: artifact.sourceUpdatedAt?.toISOString() ?? artifact.contentHash.slice(0, 16),
@@ -810,7 +1057,7 @@ async function importOneNormalizedTranscript(actor: AppActor, params: {
   try {
     result = await intakeMeetingTranscript(actor, {
       workspaceId: params.workspaceId,
-      meetingId: activeRecord?.meetingId ?? null,
+      meetingId: likelyExistingMeetingId,
       transcript: artifact.transcript,
       fileName: artifact.rawMetadata.fileName as string | null,
       title: artifact.title,
@@ -822,7 +1069,8 @@ async function importOneNormalizedTranscript(actor: AppActor, params: {
       meetingUrl: artifact.meetingUrl,
       calendarExternalId: artifact.calendarExternalId,
       recordedAt: artifact.recordedAt,
-      summaryMd: artifact.summaryMd,
+      summaryMd: artifact.provider === "READ_AI" ? null : artifact.summaryMd,
+      ingestionGuidanceMd: artifact.ingestionGuidanceMd,
       participantEmails: artifact.participantEmails,
       segments: artifact.segments,
       batchId: params.batchId,
@@ -1256,6 +1504,14 @@ export function verifyMeetingTranscriptWebhookSignature(params: {
     const value = params.headers[name] ?? params.headers[name.toLowerCase()];
     return Array.isArray(value) ? value[0] : value ?? null;
   };
+  if (provider === "READ_AI") {
+    const actual = header("x-read-signature")?.trim().toLowerCase().replace(/^sha256=/, "");
+    if (!actual || !params.secret.trim()) return false;
+    const keyBytes = Buffer.from(params.secret.trim(), "base64");
+    if (keyBytes.length === 0) return false;
+    const expected = createHmac("sha256", keyBytes).update(params.rawBody).digest("hex");
+    return safeEqual(expected, actual);
+  }
   const headerNames = provider === "FIREFLIES"
     ? ["x-fireflies-signature", "x-hub-signature-256", "x-webhook-signature"]
     : provider === "FATHOM"
@@ -1267,6 +1523,11 @@ export function verifyMeetingTranscriptWebhookSignature(params: {
 }
 
 function webhookArtifactFromPayload(provider: MeetingTranscriptSourceProvider, payload: Record<string, unknown>): MeetingTranscriptSourceArtifact {
+  if (provider === "READ_AI") {
+    const artifact = readAiWebhookArtifactFromPayload(payload);
+    invariant(artifact, 202, "WEBHOOK_IGNORED", "Read.ai meeting_start webhook does not include a transcript.");
+    return artifact;
+  }
   const data = asRecord(payload.data);
   const source = Object.keys(data).length > 0 ? data : payload;
   const transcript = Object.keys(asRecord(payload.transcript)).length > 0
@@ -1357,7 +1618,7 @@ export async function processMeetingTranscriptSourceWebhook(params: {
   headers: Headers | Record<string, string | string[] | undefined>;
 }) {
   const provider = typeof params.provider === "string" ? normalizeMeetingTranscriptSourceProvider(params.provider) : params.provider;
-  if (provider !== "FIREFLIES" && provider !== "FATHOM") {
+  if (provider !== "FIREFLIES" && provider !== "FATHOM" && provider !== "READ_AI") {
     throw new AppError(400, "UNSUPPORTED_PROVIDER_WEBHOOK", "This provider webhook is not enabled yet.");
   }
   const connection = await prisma.meetingTranscriptSourceConnection.findUnique({
@@ -1367,6 +1628,20 @@ export async function processMeetingTranscriptSourceWebhook(params: {
   const secret = decryptSecret(connection.webhookSecretEnc);
   invariant(verifyMeetingTranscriptWebhookSignature({ provider, rawBody: params.rawBody, headers: params.headers, secret }), 401, "INVALID_SIGNATURE", "Invalid meeting transcript webhook signature.");
   const payload = JSON.parse(params.rawBody) as Record<string, unknown>;
+  if (provider === "READ_AI" && asString(payload.trigger) === "meeting_start") {
+    await prisma.meetingTranscriptSourceConnection.update({
+      where: { id: connection.id },
+      data: {
+        lastSyncAt: new Date(),
+        lastError: null,
+      },
+    });
+    return {
+      ignored: true,
+      reason: "meeting_start",
+      provider,
+    };
+  }
   const artifact = await fetchProviderTranscriptArtifact(connection, webhookArtifactFromPayload(provider, payload));
   const actor: AppActor = {
     kind: "agent",
