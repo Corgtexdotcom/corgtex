@@ -1,12 +1,9 @@
 /**
  * Module Manifest registry - the single source of truth for Corgtex's
  * 3-tier module strategy. Everything (control-plane feature flags, the web
- * flag superset, the nav union + groups, posture bundles, the marketplace
- * catalog, and module-by-role access) is intended to derive from this list.
- *
- * PR1 scope: this registry mirrors today's hand-written values exactly and is
- * NOT yet wired into any consumer. Subsequent PRs flip the existing literals
- * to derive from here, each behind a byte-for-byte parity test.
+ * flag superset, the nav union + groups, posture bundles, catalog app
+ * metadata, and module-by-role access) derives from this list behind parity
+ * tests that pin the previous hand-written behavior.
  *
  * MUST stay pure and dependency-free (types only) so it is safe to import
  * from the web client bundle.
@@ -52,6 +49,7 @@ export const WORKSPACE_FEATURE_FLAG_ORDER = [
   "OPENWORK_DEFAULT",
   "EXECUTION_PACKETS",
   "MANAGED_ENTERPRISE_SERVICES",
+  "PRACTICE_PROJECTS",
 ] as const;
 
 /**
@@ -369,8 +367,18 @@ export const MODULE_MANIFESTS: readonly ModuleManifest[] = [
     tier: "first_party",
     title: "Practice Ledger",
     description:
-      "Official Corgtex-built finance app for consulting practices. Owns structured finance records while syncing summaries, provenance, and audit context back into Corgtex Brain.",
+      "Official Corgtex-built finance app for consulting practices. Native records live in Corgtex Postgres while retained app metadata supports summaries, provenance, and audit context.",
     dataOwnership: "corgtex_postgres",
+    // Practice Ledger is modular: every workspace gets the finance tab (expenses
+    // / spend + ledger baseline), and each capability below is opt-in per client.
+    subFlags: [
+      flag(
+        "PRACTICE_PROJECTS",
+        "Practice projects",
+        "Consulting project portfolio: budgets, burn, remaining, and margin tracking with an attention queue.",
+        false,
+      ),
+    ],
     contract: [
       {
         key: "expenses.create_draft",

@@ -870,6 +870,11 @@ const CLIENT_FEATURE_POSTURES = {
     "ai-workspaces": { AI_WORKSPACES: true, MANAGED_ENTERPRISE_SERVICES: true },
     "execution-packets": true,
   },
+  // Consulting practices (e.g. Chirone) opt into the Practice Ledger project
+  // portfolio capability on top of the always-on expenses/ledger baseline.
+  consulting: {
+    "practice-ledger": true,
+  },
 } satisfies Record<string, ModulePostureBundle>;
 
 const migrationRunModel = () => (prisma as typeof prisma & {
